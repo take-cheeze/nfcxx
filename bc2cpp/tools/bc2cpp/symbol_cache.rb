@@ -22,7 +22,7 @@ module SymbolCache
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
                        'bc2cpp_native_singleton_named' => 2, 'bc2cpp_native_owner_named' => 1 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
-  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_owner_call_named|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
+  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_owner_call_argv_named|bc2cpp_owner_call_named|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
   FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
   NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/
   SEND_INDEX = /\G,\s*(\d+)\s*[,)]/
@@ -116,7 +116,7 @@ module SymbolCache
         table.hint_violation_used = true if kind == 'bc2cpp_hint_violation_named'
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
         table.native_singleton_used = true if %w[bc2cpp_native_singleton_named bc2cpp_native_owner_named].include?(kind)
-        table.owner_call_used = true if kind == 'bc2cpp_owner_call_named'
+        table.owner_call_used = true if %w[bc2cpp_owner_call_named bc2cpp_owner_call_argv_named].include?(kind)
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
                       when 'bc2cpp_nomethod_raise_named' then "bc2cpp_nomethod_raise(M, #{receiver}, #{index}"
@@ -124,6 +124,7 @@ module SymbolCache
                       when 'bc2cpp_hint_violation_named' then "bc2cpp_hint_violation(M, #{receiver}, #{index}"
                       when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       when 'bc2cpp_owner_call_named' then "bc2cpp_owner_call(M, #{receiver}, #{index}"
+                      when 'bc2cpp_owner_call_argv_named' then "bc2cpp_owner_call_argv(M, #{receiver}, #{index}"
                       when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       when 'bc2cpp_native_owner_named' then "bc2cpp_native_owner(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
@@ -146,7 +147,7 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call_argv|owner_call)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       match = recv_end && SEND_INDEX.match(code, recv_end)
@@ -412,12 +413,9 @@ module SymbolCache
       }
       return false;
     }
-    static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
-      mrb_value argv[16];
-      va_list ap;
-      va_start(ap, argc);
-      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
-      va_end(ap);
+    // The argv form: a splat site passes the Array's own items, as mrb_funcall_with_block would (both reach vm.c's
+    // funcall_with_block_m, whose funcall_args_capture copies them and packs a long list as OP_SEND does).
+    static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, const mrb_value* argv) {
       mrb_sym mid = bc2cpp_sym(M, i);
       // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
       if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
@@ -463,6 +461,14 @@ module SymbolCache
         }
       }
       return mrb_funcall_with_method(M, recv, mid, &m, c, argc, argv, blk);
+    }
+    static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, blk, argc, argv);
     }
   CPP
   private_constant :OWNER_CALL
