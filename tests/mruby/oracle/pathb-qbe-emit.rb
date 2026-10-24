@@ -2122,6 +2122,21 @@ end
 # Borrow facts (NFCXX_PATHB_BORROW=1, docs/notes/borrowck-plan.md 1.3): where a local is declared (decl OP ref|val|param),
 # where it ends (scope-end OP), and the rvalue-reference argument of the call that follows (rref-arg OP). They describe
 # the code and do not change it, so they are accepted as no-ops; only the shape is checked.
+# Drop-state records describe checking policy only. Cleanup code must already
+# exist in the producer's IR; these forms do not call or synthesize a destructor.
+def s_drop_obligation(fn, x)
+  place = x[3]
+  place = place[1] while head_of(place) == "offset" && place.length == 3
+  unless x.length == 4 && x[1].is_a?(IRStr) && !x[1].to_s.empty? && place.is_a?(IRSym) && place.sig == "$"
+    raise BadIR, "drop-obligation form"
+  end
+  parse_type(x[2])
+end
+
+def s_drop_event(fn, x)
+  raise BadIR, "drop event form" unless x.length == 2 && x[1].is_a?(IRStr) && !x[1].to_s.empty?
+end
+
 def s_loan_end(fn, x)
   raise BadIR, "loan-end form" unless x.length == 2 && x[1].is_a?(IRStr)
 end
@@ -2370,6 +2385,10 @@ STMT = {
   "decl" => ->(fn, x) { s_decl(fn, x) }, "scope-end" => ->(fn, x) { s_scope_end(fn, x) },
   "rref-arg" => ->(fn, x) { s_rref_arg(fn, x) },
   "loan-end" => ->(fn, x) { s_loan_end(fn, x) },
+  "drop-obligation" => ->(fn, x) { s_drop_obligation(fn, x) },
+  "drop-live" => ->(fn, x) { s_drop_event(fn, x) },
+  "drop-state" => ->(fn, x) { s_drop_event(fn, x) },
+  "drop-state-if-live" => ->(fn, x) { s_drop_event(fn, x) },
 }
 
 # ------------------------------------------------------------------ module and functions

@@ -271,6 +271,71 @@ internal consistency, not correspondence with Rust or C++ source or completeness
 type. Neither frontend emits these records or ownership loan/transfer forms yet. Source-language
 drop, active-member, and trait rules remain separate work.
 
+## Explicit drop-state contracts
+
+Drop-state forms describe an ownership protocol for declared local values. They are **checking
+facts**, not destructor instructions: the producer must supply any real cleanup and runtime guard
+code separately. Neither frontend emits these facts yet, and calls still require unsupported
+lifetime/effect contracts. This stage cannot certify actual destructor, deallocation, or unwind
+behavior.
+
+```text
+(drop-obligation "x" int $"x")
+(decl $"x" val)
+(store int $"x" (const int 7))
+(drop-live "x")
+(drop-state "x")
+(scope-end $"x")
+```
+
+`drop-obligation` is function-level metadata with a unique nonempty ID, value type, and direct
+local or constant-offset field place. Scalar/pointer values and aggregates with known semantic
+layouts are supported. Obligations cannot overlap; nested destructor/field cleanup requires a
+future hierarchical contract. These annotations assert a non-bitwise-copyable owner policy;
+integer examples model consuming handles rather than Rust integer types implementing `Drop`.
+
+The protocol tracks five states:
+
+| State | Meaning |
+| --- | --- |
+| dead | Target storage has not started or has ended. |
+| vacant | Live storage has no registered value, including after a move. |
+| building | Writes started constructing/reconstructing a value, but it has not been registered. |
+| live | Construction completed and cleanup is owed. |
+| dropped | The registered value was consumed by a cleanup fact. |
+
+Writes to vacant or dropped storage mark construction in progress. `drop-live` registers completed
+construction and requires every semantic field byte initialized; padding is excluded. Empty structs
+can be registered without field writes, while still requiring live storage. Repeatedly registering
+a live value is an error. Reinitialization after a move or cleanup requires a new registration.
+
+A whole-value overwrite of a live owner is an error until its prior value is consumed. Field
+mutation preserves the enclosing live obligation. Exact typed moves clear the source obligation;
+partial or reinterpreted moves of that owner are refused. Explicit bitwise copies of a live owner
+require a copy contract and are refused. A non-owning aggregate can instead declare separate,
+disjoint field obligations, allowing one field to move while siblings still require cleanup.
+Tracking the destination or result of a move is the producer's responsibility; this is not a proof
+of leak freedom or a replacement for source-language move/copy policy.
+
+`drop-state` requires the value live on every incoming path. `drop-state-if-live` consumes only live
+paths and skips vacant or already-dropped paths, allowing cleanup after conditional construction or
+moves. Construction-in-progress is never silently skipped: missing registration remains an error
+after guarded cleanup. Guarded facts still require live storage; they cannot extend declaration
+lifetimes. Flags preserve the correlation between a live value and its initialized field bytes.
+Loan conflicts remain conservative at joins rather than using full relational path reasoning.
+
+Both forms check overlapping live loans as a consuming access. Last-use inference can release a
+loan before cleanup. Known pointer-field loan identities are conservatively kept needed through
+consumption; no pointee access or free is proved. Cleanup marks bytes logically dropped without
+clearing physical memory. Later reads, borrows, and moves fail until reinitialization. A second
+unconditional consumption is an error; repeated guarded cleanup can legitimately do nothing.
+
+Normal returns, fallthrough, storage end, and redeclaration reject live obligations or unfinished
+construction. Explicit `unreachable`/abort paths do not require cleanup; exception cleanup edges
+remain unsupported. The marker asserts that the matching real cleanup or runtime guard exists;
+the checker does not generate or verify that code. The QBE emitter and oracle accept these facts
+as validated no-ops, and a native integer test verifies marker erasure preserves generated code.
+
 ## Refusals and limits
 
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
@@ -296,7 +361,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next steps are frontend layout/ownership emission, drop flags, call
+The next steps are frontend layout/ownership emission, actual cleanup/effect contracts, call
 effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -313,6 +378,8 @@ consuming pointer carriers, and conflicts with live loans. Field-range fixtures 
 moves, byte repairs, overlapping loans, projected reborrows, pointer-field provenance, storage
 reuse, and conservative padding checks. Semantic-layout fixtures verify field-only initialization,
 nested layouts, moved fields, raw padding reads, storage lifetimes, and malformed descriptor graphs.
+Drop-state fixtures check conditional flags, double consumption, missing cleanup, construction
+registration, field ownership, typed transfers, reconstruction, and live-loan conflicts.
 A native test checks both the unchanged QBE and the stricter conservative result when metadata is
 removed. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,

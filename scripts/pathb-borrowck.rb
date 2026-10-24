@@ -252,6 +252,7 @@ class LocalLifetime
     @report = false
     @declared = {}
     @loans = {}
+    @drops = {}
     scan = lambda do |x|
       return unless x.is_a?(Array)
       if bh(x) == 'decl' && x[1].is_a?(IRSym) && x[1].sig == '$'
@@ -306,8 +307,32 @@ class LocalLifetime
     @loans.each_value do |loan|
       raise BadIR, "loan refers to unknown slot #{loan[0]}" unless @slots[loan[0]]
     end
-    body = f.drop(4).reject { |x| ['slot', 'static', 'weak'].include?(bh(x)) }
-    @entry = sequence(body, node(['join'], []), nil, nil)
+    f.drop(4).each do |part|
+      next unless bh(part) == 'drop-obligation'
+      unless part.length == 4 && part[1].is_a?(IRStr) && !part[1].to_s.empty?
+        raise BadIR, 'drop-obligation form'
+      end
+      id = part[1].to_s
+      raise BadIR, "duplicate drop obligation #{id}" if @drops.key?(id)
+      place = direct_place(part[3])
+      raise BorrowRefused, 'drop obligations require direct local slots or constant field offsets' unless place
+      root, off = place
+      raise BadIR, "drop obligation refers to unknown slot #{root}" unless @slots[root]
+      ty = part[2]
+      desc = @layouts.lookup(ty)
+      if %w[struct union array].include?(bh(ty)) && !desc
+        raise BorrowRefused, 'aggregate drop obligations require semantic layouts'
+      end
+      width = type_width(ty, root, off)
+      check_range(root, off, width)
+      required = semantic_bytes(root, off, ty) || (0...width).to_a
+      if @drops.values.any? { |d| d[:root] == root && overlaps(off, width, d[:off], d[:width]) }
+        raise BorrowRefused, 'overlapping drop obligations require hierarchical cleanup contracts'
+      end
+      @drops[id] = {root: root, off: off, width: width, type: ty, required: required}
+    end
+    body = f.drop(4).reject { |x| ['slot', 'static', 'weak', 'drop-obligation'].include?(bh(x)) }
+    @entry = sequence(body, node(['function-exit'], []), nil, nil)
     @nodes.each do |n|
       n[1].map! do |edge|
         if edge.is_a?(String)
@@ -459,6 +484,110 @@ class LocalLifetime
     state.keys.each { |key| state[key] = ['unknown'] if key.start_with?(prefix) } if clear_pointers
   end
 
+  def same_type?(a, b)
+    return a.is_a?(IRStr) && b.is_a?(IRStr) && a.to_s == b.to_s if a.is_a?(IRStr) || b.is_a?(IRStr)
+    if a.is_a?(Array) || b.is_a?(Array)
+      return false unless a.is_a?(Array) && b.is_a?(Array) && a.length == b.length
+      return a.each_with_index.all? { |v, i| same_type?(v, b[i]) }
+    end
+    a == b
+  end
+
+  def drop_key(id)
+    'drop:' + id
+  end
+
+  def reset_drop_flags(root, state, status)
+    @drops.each { |id, d| state[drop_key(id)] = [status] if d[:root] == root }
+  end
+
+  def check_pending_drops(state, root = nil)
+    @drops.each do |id, d|
+      next if root && d[:root] != root
+      flags = state[drop_key(id)]
+      diagnostic('missing-drop', id) if flags.include?('live')
+      diagnostic('unarmed-drop-value', id) if flags.include?('building')
+    end
+  end
+
+  def track_drop_write(root, off, width, state)
+    @drops.each do |id, d|
+      next unless d[:root] == root && overlaps(off, width, d[:off], d[:width])
+      flags = state[drop_key(id)]
+      full = off <= d[:off] && off + width >= d[:off] + d[:width]
+      diagnostic('overwrite-live-drop', id) if full && flags.include?('live')
+      state[drop_key(id)] = flags.map { |f| ['dead', 'live'].include?(f) ? f : 'building' }.uniq.sort
+    end
+  end
+
+  def track_drop_transfer(root, off, width, ty, moving, state)
+    @drops.each do |id, d|
+      next unless d[:root] == root && overlaps(off, width, d[:off], d[:width])
+      exact = off == d[:off] && width == d[:width] && same_type?(ty, d[:type])
+      if moving && !exact
+        raise BorrowRefused, 'partial or reinterpreted moves of drop-obligated values require cleanup contracts'
+      end
+      flags = state[drop_key(id)]
+      if !moving && exact && flags.include?('live')
+        raise BorrowRefused, 'copy of a drop-obligated value requires a copy contract'
+      end
+      next unless moving
+      diagnostic('move-unarmed-drop', id) if flags.include?('building')
+      state[drop_key(id)] = flags.map { |f| f == 'live' ? 'vacant' : f }.uniq.sort
+    end
+  end
+
+  def drop_event(x, state)
+    unless x.length == 2 && x[1].is_a?(IRStr) && @drops.key?(x[1].to_s)
+      raise BadIR, 'drop event requires a declared obligation ID'
+    end
+    id = x[1].to_s
+    d = @drops[id]
+    flags = state[drop_key(id)]
+    root, off, width = d[:root], d[:off], d[:width]
+    place = project('local:' + root, off)
+    if bh(x) == 'drop-live'
+      diagnostic('drop-already-live', id) if flags.include?('live')
+      access(place, state, true, nil, width, d[:type])
+      live_storage = (0...width).all? { |i| !(state[byte_key(root, off + i)] || ['dead']).include?('dead') }
+      complete = d[:required].all? { |i| state[byte_key(root, off + i)] == ['initialized'] }
+      state[drop_key(id)] = ['live'] if live_storage && complete
+      return state
+    end
+    diagnostic('drop-outside-storage', id) if flags.include?('dead')
+    diagnostic('unarmed-drop-value', id) if flags.include?('building')
+    if bh(x) == 'drop-state'
+      diagnostic('drop-not-live', id) if flags.include?('vacant')
+      diagnostic('double-drop', id) if flags.include?('dropped')
+    end
+    return state unless flags.include?('live')
+    # Whole-value arming and moves maintain correlation between a live flag
+    # and initialized required bytes. Guarded cleanup reads only live paths.
+    guarded = state.dup
+    d[:required].each do |i|
+      key = byte_key(root, off + i)
+      raise BorrowRefused, 'drop flag initialization invariant is not established' unless state[key].include?('initialized')
+      guarded[key] = ['initialized']
+    end
+    access(place, guarded, true, 'exclusive', width, d[:type])
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.each do |key, values|
+      next unless key.start_with?(prefix)
+      parts = key.split(':')
+      record_loan_values(values) if overlaps(off, width, parts[2].to_i, parts[3].to_i)
+    end
+    width.times do |i|
+      key = byte_key(root, off + i)
+      state[key] = if flags == ['live']
+                     ['dropped']
+                   else
+                     (state[key].map { |s| s == 'initialized' ? 'dropped' : s } + ['dropped']).uniq.sort
+                   end
+    end
+    state[drop_key(id)] = flags.map { |f| f == 'live' ? 'dropped' : f }.uniq.sort
+    state
+  end
+
   def node(x, edges)
     id = @nodes.length
     @nodes << [x, edges.compact]
@@ -556,6 +685,7 @@ class LocalLifetime
     end
     diagnostic('uninitialized', label) if read && status.include?('uninitialized')
     diagnostic('use-after-move', label) if read && status.include?('moved')
+    diagnostic('use-after-drop', label) if read && status.include?('dropped')
     @loans.each do |id, loan|
       next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
       next unless overlaps(off, width, loan[3], loan[4])
@@ -617,6 +747,7 @@ class LocalLifetime
       raise BadIR, "value transfer refers to unknown slot #{name}" unless @slots[name]
       width = type_width(x[1])
       moving = bh(x) == 'move-value'
+      track_drop_transfer(name, off, width, x[1], moving, state)
       access(project('local:' + name, off), state, true, moving ? 'exclusive' : nil, width)
       result = bh(x[1]) == 'ptr' ? record_loan_values(state[pointer_key(name, off, width)] || ['unknown']) : []
       if moving
@@ -686,12 +817,16 @@ class LocalLifetime
   end
 
   def transfer(x, state)
-    arities = {'join'=>[1], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
+    arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[4], 'store'=>[4], 'return'=>[1,2],
                'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
+    when 'function-exit'
+      check_pending_drops(state)
+    when 'drop-live', 'drop-state', 'drop-state-if-live'
+      return drop_event(x, state)
     when 'join', 'unreachable', 'loc'
       # Locations are preserved in input; diagnostics currently identify functions and slots.
     when 'decl'
@@ -700,14 +835,18 @@ class LocalLifetime
       if k && k.start_with?('slot:')
         name = k[5..-1]
         raise BadIR, "undeclared slot #{name}" unless @slots[name]
+        check_pending_drops(state, name)
         reset_storage(name, state, 'uninitialized')
+        reset_drop_flags(name, state, 'vacant')
       end
     when 'scope-end'
       k = key(x[1])
       raise BadIR, 'scope-end requires a local slot' unless k && k.start_with?('slot:')
       name = k[5..-1]
       raise BadIR, "unknown local slot #{name}" unless @slots[name]
+      check_pending_drops(state, name)
       reset_storage(name, state, 'dead', false)
+      reset_drop_flags(name, state, 'dead')
       # A new lifetime in this slot cannot revive pointers from the old one.
       origins = ['local:' + name]
       @loans.each do |id, loan|
@@ -752,6 +891,7 @@ class LocalLifetime
       raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
       a = address(dest[0])
       return state unless a
+      track_drop_write(a[0], a[1], width, state)
       write_memory(a[0], a[1], width, state, !zero && bh(x[1]) == 'ptr' ? v : nil)
     when 'return'
       refs = x[1] ? value(x[1], state) : []
@@ -764,6 +904,7 @@ class LocalLifetime
           diagnostic('return-local-address', base_origin(p).start_with?('ended:') ? base_origin(p)[6..-1] : storage(p))
         end
       end
+      check_pending_drops(state)
     when 'condition', 'eval', 'nonnull'
       value(x[1], state)
     when 'rref-arg'
@@ -777,9 +918,13 @@ class LocalLifetime
   def initial_state
     initial = {}
     @slots.each_key { |s| reset_storage(s, initial, 'dead') }
+    @drops.each_key { |id| initial[drop_key(id)] = ['dead'] }
     @params.each do |p, name, pointer|
       initial['value:' + p] = pointer ? ['external'] : []
-      reset_storage(name, initial, 'uninitialized') if @slots[name]
+      if @slots[name]
+        reset_storage(name, initial, 'uninitialized')
+        reset_drop_flags(name, initial, 'vacant')
+      end
     end
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
     initial
