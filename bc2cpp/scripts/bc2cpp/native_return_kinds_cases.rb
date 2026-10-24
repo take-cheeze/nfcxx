@@ -26,17 +26,33 @@ module NativeReturnKindsCases
     ) == 'singleton(Foo)')
 
     puts '== mixed and unknown returns'
-    check.call('a body returning nil and an Integer is untyped',
-               ret('{ if (a) return mrb_nil_value(); return mrb_fixnum_value(1); }') == 'untyped')
+    check.call('a body returning nil and an Integer is Integer?',
+               ret('{ if (a) return mrb_nil_value(); return mrb_fixnum_value(1); }') == 'Integer?')
+    check.call('a body returning nil, an Integer and a String is untyped',
+               ret('{ if (a) return mrb_nil_value(); if (b) return mrb_str_new_cstr(M, s); return mrb_fixnum_value(1); }') ==
+                 'untyped')
+    check.call('a body returning nil and self on a class method is the optional class object', NativeReturnKinds.rbs_of(
+      NativeReturnKinds.kind_of_body('{ if (a) return mrb_nil_value(); return self; }'), owner: 'Foo', singleton: true
+    ) == 'singleton(Foo)?')
+    check.call('a body returning nil and an unknown call is untyped',
+               ret('{ if (a) return mrb_nil_value(); return other_fn(M, self); }') == 'untyped')
     check.call('a body returning a call the table does not name is untyped',
                ret('{ return other_fn(M, self); }') == 'untyped')
     check.call('a body with no return is untyped', ret('{ mrb_nil_value(); }') == 'untyped')
 
+    puts '== only the outermost call counts'
+    check.call('an assoc_new of a Float and an Integer is Array',
+               ret('{ return mrb_assoc_new(M, mrb_float_value(M, x), mrb_fixnum_value(e)); }') == 'Array')
+    check.call('a constructor passed to an unknown call is untyped',
+               ret('{ return wrap(M, mrb_fixnum_value(1)); }') == 'untyped')
+
     puts '== returned locals'
     check.call('a local assigned one kind is that kind',
                ret('{ mrb_value r = mrb_nil_value(); if (a) { return r; } return r; }') == 'nil')
+    check.call('a local assigned nil and an Integer is Integer?',
+               ret('{ mrb_value r = mrb_nil_value(); r = mrb_fixnum_value(1); return r; }') == 'Integer?')
     check.call('a local assigned two kinds is untyped',
-               ret('{ mrb_value r = mrb_nil_value(); r = mrb_fixnum_value(1); return r; }') == 'untyped')
+               ret('{ mrb_value r = mrb_str_new_cstr(M, s); r = mrb_fixnum_value(1); return r; }') == 'untyped')
     check.call('a local assigned an unknown value is untyped',
                ret('{ mrb_value r = helper(M); return r; }') == 'untyped')
   end

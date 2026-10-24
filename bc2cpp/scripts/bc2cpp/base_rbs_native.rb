@@ -209,8 +209,21 @@ module BaseRbsNative
     kind = ast_kinds&.call&.[](function)
     kind = NativeReturnKinds.kind_of_body(body) if kind.nil?
     ret = NativeReturnKinds.rbs_of(kind, owner: owner, singleton: singleton)
-    params = if body.match?(/\bmrb_get_args\s*\(/) then param_shape(body) else aspec_shape(aspec) || '*untyped' end
+    params = if body.match?(/\bmrb_get_args\s*\(/) then param_shape(body)
+             else arg1_shape(body) || aspec_shape(aspec) || '*untyped'
+             end
     "(#{params}) -> #{ret}"
+  end
+
+  # mruby-math's get_float_arg, `mrb_as_float(mrb, mrb_get_arg1(mrb))` once expanded: mrb_get_arg1 takes exactly one
+  # argument, and mrb_ensure_float_type is the conversion the `f` format makes (a TypeError for a non-Numeric), so the
+  # parameter is the `f` format's type. Any other use of the argument is not read here (nil).
+  FLOAT_ARG1 = /\bmrb_ensure_float_type\s*\(\s*\(?\s*\w+\s*\)?\s*,\s*mrb_get_arg1\s*\(/.freeze
+
+  def arg1_shape(body)
+    return nil unless body.scan(/\bmrb_get_arg1\s*\(/).size == 1 && body.match?(FLOAT_ARG1)
+
+    NativeFormatTypes.rbs_of('f')
   end
 
   # The value of a registration's aspec expression, as the preprocessed text spells it (`((mrb_aspec)((1)&0x1f) << 18)`),
@@ -354,7 +367,8 @@ module BaseRbsNative
 
   # Return kinds the clang AST gives the functions of one source (NativeAstReturns). A file clang cannot parse keeps
   # the regex kinds, and says so.
-  def ast_function_kinds(path, flags, external = {}, self_index = nil, external_refs = nil)
+  # +optional+ lets a function returning K or nil be `K?` (the base declarations ask for it; native_fn_kinds.rb does not).
+  def ast_function_kinds(path, flags, external = {}, self_index = nil, external_refs = nil, optional: false)
     lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
     out, err, status = Open3.capture3('clang', *lang, '-fsyntax-only', '-Xclang', '-ast-dump=json', *flags, path)
     unless status.success?
@@ -363,7 +377,7 @@ module BaseRbsNative
     end
 
     NativeAstReturns.analyze(JSON.parse(out.force_encoding(Encoding::UTF_8)), path, external: external, self_index: self_index,
-                                                                                 external_refs: external_refs)
+                                                                                 external_refs: external_refs, optional: optional)
   end
 
   def preprocess(path, flags)
@@ -383,7 +397,7 @@ module BaseRbsNative
     scans = BaseRbsWorkers.map(paths, jobs: jobs) do |path|
       ast_kinds = nil
       # Only registered functions with readable bodies consume AST return kinds.
-      scan(preprocess(path, flags)) { ast_kinds ||= ast_function_kinds(path, flags) }
+      scan(preprocess(path, flags)) { ast_kinds ||= ast_function_kinds(path, flags, optional: true) }
     end
     scans.each do |k, s, m, sk|
       kinds.merge!(k)

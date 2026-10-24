@@ -39,8 +39,7 @@ module NativeAstReturns
 
   # The kind of a constructor call by its callee name, or nil.
   def constructor_kind(name)
-    entry = NativeReturnKinds::ENTRIES.find { |e| "#{name}(".match?(e.pattern) }
-    entry&.kind
+    NativeReturnKinds.kind_of_call(name)
   end
 
   # Every node under +node+, the node first.
@@ -79,6 +78,11 @@ module NativeAstReturns
     return nil if kinds.empty? || kinds.any?(&:nil?)
 
     kinds.uniq.size == 1 ? kinds.first : nil
+  end
+
+  # join, with K and nil joining to `K?`.
+  def join_optional(kinds)
+    NativeReturnKinds.join_optional(kinds.reject { |k| k == UNKNOWN })
   end
 
   # One translation unit: the function definitions and the complete record definitions in the file the source names.
@@ -221,8 +225,11 @@ module NativeAstReturns
 
   # The value of a ReturnStmt-like expression, followed through the TU.
   class Analyzer
-    def initialize(fns, external = {}, fields = nil)
+    # +optional+: a function returning K or nil is `K?` (NativeReturnKinds.join_optional) instead of unknown. Only the
+    # base declarations ask for it; the compile-time kinds (native_fn_kinds.rb) keep single kinds.
+    def initialize(fns, external = {}, fields = nil, optional: false)
       @fns = fns
+      @optional = optional
       # Kinds of functions defined in other translation units (a previous pass over the sources). A call to one of
       # them takes its kind; `self` is the receiver of the other function, so it is not a kind here.
       @external = external
@@ -240,6 +247,10 @@ module NativeAstReturns
     end
 
     attr_reader :external_refs
+
+    def join(kinds)
+      @optional ? NativeAstReturns.join_optional(kinds) : NativeAstReturns.join(kinds)
+    end
 
     def function_kind(name)
       return @memo[name] if @memo.key?(name)
@@ -260,7 +271,7 @@ module NativeAstReturns
           value_kind(expr, fn[:body])
         end
       end
-      kind = NativeAstReturns.join(kinds)
+      kind = join(kinds)
       @narrowed = outer_narrowed
       @nonnil = outer_nonnil
       @in_progress.delete(name)
@@ -535,7 +546,7 @@ module NativeAstReturns
         'bool'
       when 'ConditionalOperator'
         _cond, yes, no = expr['inner']
-        NativeAstReturns.join([value_kind(yes, body, seen), value_kind(no, body, seen)])
+        join([value_kind(yes, body, seen), value_kind(no, body, seen)])
       when 'CallExpr'
         callee = callee_name(expr) or return nil
         return CONTRACT_KINDS[callee] if CONTRACT_KINDS.key?(callee)
@@ -583,7 +594,7 @@ module NativeAstReturns
       @narrowed, @nonnil = saved
       kinds = kinds.reject { |kind| kind == 'nil' } if nonnil
       @field_in_progress.delete(field)
-      @field_memo[memo] = NativeAstReturns.join(kinds)
+      @field_memo[memo] = join(kinds)
     end
 
     # The join of a local's initializer and of every `local = value` in the body. A local seen twice in one chain
@@ -605,7 +616,7 @@ module NativeAstReturns
       end
       return nil if values.empty?
 
-      NativeAstReturns.join(values.map { |v| value_kind(v, body, seen) })
+      join(values.map { |v| value_kind(v, body, seen) })
     end
 
     def walk(node, &block)
@@ -632,10 +643,11 @@ module NativeAstReturns
   # { 'function name' => kind-or-nil } for every function defined in +source+.
   # self_index (optional, a Hash) receives the self-parameter position of each function that returns its self.
   # external_refs (optional, a Set) receives the names the analysis looked up in +external+.
-  def analyze(root, source, external: {}, self_index: nil, external_refs: nil)
+  # optional: see Analyzer#initialize.
+  def analyze(root, source, external: {}, self_index: nil, external_refs: nil, optional: false)
     unit = translation_unit(root, source)
     fns = unit[:fns]
-    analyzer = Analyzer.new(fns, external, FieldIndex.new(unit[:records], fns, root))
+    analyzer = Analyzer.new(fns, external, FieldIndex.new(unit[:records], fns, root), optional: optional)
     kinds = fns.keys.sort.to_h { |name| [name, analyzer.function_kind(name)] }
     self_index&.merge!(analyzer.self_index)
     external_refs&.merge(analyzer.external_refs)
