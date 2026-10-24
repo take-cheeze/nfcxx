@@ -262,6 +262,14 @@ int main(void) { return toplevel_answer + toplevel_two(); }
 EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" ktop.c -o ktop 2>/dev/null && { ./ktop; [ $? = 42 ]; }; then ok "kernel mode: file-scope asm"
     else bad "kernel mode: file-scope asm" "wrong result or the compile failed"; fi
+    # a packed struct whose bit-fields packing would move, or whose units would reach past the struct: refused
+    printf 'struct m { char c; unsigned x: 4; int y; } __attribute__((packed));\nstruct m v;\n' > kpk1.c
+    printf 'struct s { unsigned char a; unsigned b: 4; } __attribute__((packed));\nstruct s v;\n' > kpk2.c
+    for f in kpk1 kpk2; do
+      if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c $f.c -o $f.o 2>&1); then bad "kernel mode: packed bit-fields refused ($f)" "was accepted"
+      elif grep -q "bit-fields in a packed struct are not supported" <<<"$out"; then ok "kernel mode: packed bit-fields refused ($f)"
+      else bad "kernel mode: packed bit-fields refused ($f)" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    done
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended

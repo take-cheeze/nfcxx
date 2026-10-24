@@ -9,7 +9,17 @@
  enum attrprefix {
  	PREFIXNONE = 1,  /* standard attribute */
  	PREFIXGNU,
-@@ -84,17 +86,26 @@
+@@ -34,7 +36,8 @@
+ 	enum attrkind kind;
+ 	int paren;
+ 
+-	if (tok.kind < TIDENT)
++	/* an attribute name is an identifier or a keyword (GNU const, the kernel's __attribute_const__) */
++	if (tok.kind < TALIGNAS)
+ 		return false;
+ 	name = strip(tokenstr(tok.kind), namebuf, sizeof namebuf);
+ 	next();
+@@ -84,17 +87,26 @@
  				a->cleanup = cleanup;
  			expect(TRPAREN, "after cleanup function");
  		} else if (strcmp(name, "section") == 0) {
@@ -203,14 +213,20 @@
  void emitfunc(struct func *, bool);
 --- a/decl.c
 +++ b/decl.c
-@@ -62,8 +62,15 @@
+@@ -62,8 +62,21 @@
  	struct member **last;
  	unsigned bits;  /* number of bits remaining in the last byte */
  	bool pack;
 +	bool hasbits;   /* a bit-field was added (a trailing packed attribute cannot re-lay those out) */
++	/* where gcc's packed layout would put the next member, in bits, and whether some member so far is elsewhere in the
++	 * natural layout: a trailing packed attribute is taken with bit-fields only when packing moves nothing */
++	unsigned long long packbits;
++	bool packmoves;
  };
  
 +struct func *curfunc;
++
++static void structpackbits(struct type *, struct structbuilder *);
 +
 +/* GNU packed on a member declarator (declaratortypes): structdecl lays that member out with alignment 1 */
 +static bool declpacked;
@@ -219,7 +235,7 @@
  struct decl *
  mkdecl(char *name, enum declkind k, struct type *t, enum typequal tq, enum linkage linkage)
  {
-@@ -177,7 +184,7 @@
+@@ -177,7 +190,7 @@
  	switch (tok.kind) {
  	case TSTRUCT: kind = TYPESTRUCT, allowedattr |= ATTRPACKED; break;
  	case TUNION:  kind = TYPEUNION, allowedattr |= ATTRPACKED; break;
@@ -228,7 +244,7 @@
  	default: fatal("internal error: unknown tag kind");
  	}
  	next();
-@@ -187,7 +194,7 @@
+@@ -187,7 +200,7 @@
  	tag = 0;
  	t = NULL;
  	et = NULL;
@@ -237,15 +253,17 @@
  		tag = tokenstr(tok.kind);
  		next();
  	}
-@@ -228,6 +235,7 @@
+@@ -228,6 +241,9 @@
  		b.last = &t->u.structunion.members;
  		b.bits = 0;
  		b.pack = a.kind & ATTRPACKED;
 +		b.hasbits = false;
++		b.packbits = 0;
++		b.packmoves = false;
  		/* GNU extension, accepted by gcc in C: an empty body is size 0 with alignment 1.
  		 * EDG emits `struct X {}` for empty C++ classes. */
  		while (tok.kind != TRBRACE)
-@@ -242,12 +250,18 @@
+@@ -242,12 +258,19 @@
  			trail.kind = 0;
  			trail.align = 0;
  			trail.section = NULL;
@@ -253,8 +271,9 @@
 +			gnuattr(&trail, ATTRALIGNED | ATTRPACKED);
 +			if (trail.kind & ATTRPACKED && !b.pack) {
 +				if (b.hasbits)
-+					error(&tok.loc, "bit-fields in a packed struct are not supported");
-+				structpack(t);
++					structpackbits(t, &b);
++				else
++					structpack(t);
 +				b.pack = true;
 +			}
  			if (trail.kind & ATTRALIGNED && trail.align > t->align)
@@ -267,7 +286,7 @@
  		break;
  	case TYPEENUM:
  		enumconsts = NULL;
-@@ -263,7 +277,7 @@
+@@ -263,7 +286,7 @@
  		}
  		max = 0;
  		min = 0;
@@ -276,7 +295,7 @@
  			name = tokenstr(tok.kind);
  			next();
  			attr(NULL, 0);
-@@ -308,6 +322,30 @@
+@@ -308,6 +331,30 @@
  				break;
  		}
  		expect(TRBRACE, "to close enum specifier");
@@ -307,7 +326,7 @@
  		if (!t->base) {
  			if (min <= 0x80000000 && max <= 0x7fffffff) {
  				t->base = min ? &typeint : &typeuint;
-@@ -487,12 +525,18 @@
+@@ -487,12 +534,18 @@
  			expect(TRPAREN, "to close 'alignas' specifier");
  			break;
  
@@ -329,7 +348,7 @@
  				goto done;
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d || d->kind != DECLTYPE)
-@@ -614,6 +658,12 @@
+@@ -614,6 +667,12 @@
  	if (name)
  		*name = NULL;
  	a.kind = 0;
@@ -342,7 +361,7 @@
  	ptr = result->next;
  	switch (tok.kind) {
  	case TLPAREN:
-@@ -624,7 +674,7 @@
+@@ -624,7 +683,7 @@
  			case TLPAREN:
  				break;
  			default:
@@ -351,7 +370,7 @@
  					break;
  				goto func;
  			}
-@@ -634,7 +684,7 @@
+@@ -634,7 +693,7 @@
  		allowedattr = -1;
  		break;
  	default:
@@ -360,7 +379,7 @@
  			if (!name)
  				error(&tok.loc, "identifier not allowed in abstract declarator");
  			*name = tokenstr(tok.kind);
-@@ -711,20 +761,21 @@
+@@ -711,20 +770,21 @@
  				expect(TRBRACK, "after array length");
  			}
  			listinsert(ptr->prev, &t->link);
@@ -391,7 +410,7 @@
  			break;
  		default:
  			return;
-@@ -861,11 +912,14 @@
+@@ -861,11 +921,14 @@
  	if (mt.type->prop & PROPVM)
  		error(&tok.loc, "struct member '%s' has variably modified type", name);
  	assert(mt.type->align > 0);
@@ -406,7 +425,7 @@
  		m->next = NULL;
  		*b->last = m;
  		b->last = &m->next;
-@@ -876,9 +930,11 @@
+@@ -876,13 +939,19 @@
  		m->bits.before = 0;
  		m->bits.after = 0;
  		if (align < mt.type->align) {
@@ -420,7 +439,26 @@
  		}
  		if (t->kind == TYPESTRUCT) {
  			m->offset = ALIGNUP(t->size, align);
-@@ -928,6 +984,31 @@
+ 			t->size = m->offset + mt.type->size;
++			b->packbits = ALIGNUP(b->packbits, 8 * (m->align ? m->align : 1));
++			if (b->packbits != m->offset * 8ull)
++				b->packmoves = true;
++			b->packbits = t->size * 8ull;
+ 		} else {
+ 			m->offset = 0;
+ 			if (t->size < mt.type->size)
+@@ -909,6 +978,10 @@
+ 				t->size = end;
+ 				b->bits = 0;
+ 			}
++			/* packed, gcc puts a bit-field at the next bit; a zero-width one is not modelled */
++			if (!width || b->packbits != t->size * 8ull - b->bits)
++				b->packmoves = true;
++			b->packbits = t->size * 8ull - b->bits + width;
+ 			if (m) {
+ 				m->offset = ALIGNDOWN(t->size - !!b->bits, mt.type->size);
+ 				m->bits.before = (t->size - m->offset) * 8 - b->bits;
+@@ -928,6 +1001,66 @@
  		t->align = align;
  }
  
@@ -449,10 +487,45 @@
 +	}
 +}
 +
++/*
++struct S { ... } __attribute__((packed)) with bit-fields (the kernel's desc_struct: u16 base1: 8, type: 4, ...). gcc packs
++bit-fields bit by bit, accessing only the bytes a field spans; cproc accesses a bit-field through a unit of its type's
++size. So this is taken only when the packed layout is the natural one (packing moves no member, b->packmoves) and every
++bit-field's unit lies inside the packed struct and overlaps no other member than bit-fields: then only the alignment and
++the tail padding change. Anything else is refused.
++*/
++static void
++structpackbits(struct type *t, struct structbuilder *b)
++{
++	struct member *m, *n;
++	unsigned long long size;
++	int align = 1;
++
++	if (t->kind != TYPESTRUCT || b->packmoves)
++		error(&tok.loc, "bit-fields in a packed struct are not supported (packing would move a member)");
++	size = (b->packbits + 7) / 8;
++	for (m = t->u.structunion.members; m; m = m->next) {
++		if (m->align > align)
++			align = m->align;
++		if (!m->bits.before && !m->bits.after)
++			continue;
++		if (m->offset + m->type->size > ALIGNUP(size, align))
++			error(&tok.loc, "bit-fields in a packed struct are not supported (bit-field '%s' would be accessed past the end)", m->name);
++		for (n = t->u.structunion.members; n; n = n->next) {
++			if (n->bits.before || n->bits.after)
++				continue;
++			if (n->offset < m->offset + m->type->size && m->offset < n->offset + n->type->size && n->type->size)
++				error(&tok.loc, "bit-fields in a packed struct are not supported (bit-field '%s' shares bytes with '%s')", m->name, n->name);
++		}
++	}
++	t->size = size;
++	t->align = align;
++}
++
  static bool
  staticassert(struct scope *s)
  {
-@@ -957,12 +1038,13 @@
+@@ -957,12 +1090,15 @@
  	struct qualtype base, mt;
  	char *name;
  	unsigned long long width;
@@ -461,13 +534,15 @@
  
  	if (staticassert(s))
  		return;
++	if (consume(TSEMICOLON))   /* GNU: an empty member declaration (the kernel's cleanup.h guards, "T *lock; ;") */
++		return;
  	attr(NULL, 0);
  	base = declspecs(s, NULL, NULL, &align);
 +	specalign = align;
  	if (!base.type)
  		error(&tok.loc, "no type in struct member declaration");
  	if (tok.kind == TSEMICOLON) {
-@@ -977,9 +1059,15 @@
+@@ -977,9 +1113,15 @@
  			width = intconstexpr(s, false);
  			addmember(b, base, NULL, 0, width);
  		} else {
@@ -483,7 +558,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1150,16 @@
+@@ -1062,6 +1204,16 @@
  	return d;
  }
  
@@ -500,7 +575,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1168,7 @@
+@@ -1070,7 +1222,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -509,7 +584,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,6 +1186,9 @@
+@@ -1088,6 +1240,9 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -519,10 +594,12 @@
  	int allowfunc = !f;
  	struct decl *d, *prior;
  	enum declkind kind;
-@@ -1096,10 +1197,28 @@
+@@ -1096,10 +1251,30 @@
  
  	if (staticassert(s))
  		return true;
++	if (!f && consume(TSEMICOLON))   /* GNU: an empty declaration at file scope (a ';' after a function body) */
++		return true;
 +	if (!f && tok.kind == T__ASM__) {
 +		/* GNU basic asm at file scope (the kernel's EXPORT_SYMBOL): __asm__ ( string ) ; its text goes to the
 +		 * assembly as it is, no operands and no '%' substitution */
@@ -548,7 +625,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1228,18 @@
+@@ -1109,16 +1284,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -570,7 +647,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1256,34 @@
+@@ -1135,6 +1312,34 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -605,7 +682,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1293,15 @@
+@@ -1144,10 +1349,15 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -623,7 +700,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,6 +1311,8 @@
+@@ -1157,6 +1367,8 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -632,7 +709,7 @@
  			if (d->u.obj.align < align)
  				d->u.obj.align = align;
  			d->u.obj.cleanup = declcleanup;
-@@ -1201,6 +1357,7 @@
+@@ -1201,6 +1413,7 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -640,7 +717,7 @@
  			d->value = mkglobal(d);
  			d->u.func.inlinedefn = d->linkage == LINKEXTERN && fs & FUNCINLINE && !(sc & SCEXTERN) && (!prior || prior->u.func.inlinedefn);
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
-@@ -1213,7 +1370,9 @@
+@@ -1213,7 +1426,9 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -2575,6 +2652,30 @@
  		{.name = "__builtin_constant_p",  .kind = DECLBUILTIN, .u.builtin = BUILTINCONSTANTP},
  		{.name = "__builtin_expect",      .kind = DECLBUILTIN, .u.builtin = BUILTINEXPECT},
  		{.name = "__builtin_fabsf",      .kind = DECLBUILTIN, .u.builtin = BUILTINFABSF},
+@@ -127,6 +149,23 @@
+ 		(struct type *[]){mkpointertype(&typevoid, QUALNONE), mkpointertype(&typevoid, QUALCONST), &typeulong});
+ 	scopeputalias("__builtin_char_memchr", "memchr", mkpointertype(&typevoid, QUALNONE), 3,
+ 		(struct type *[]){mkpointertype(&typevoid, QUALCONST), &typeint, &typeulong});
++	/* the rest of the GCC builtins the Linux kernel's headers call (zstd's bitstream.h: __builtin_memset; fortify) */
++	scopeputalias("__builtin_memset", "memset", mkpointertype(&typevoid, QUALNONE), 3,
++		(struct type *[]){mkpointertype(&typevoid, QUALNONE), &typeint, &typeulong});
++	scopeputalias("__builtin_memcpy", "memcpy", mkpointertype(&typevoid, QUALNONE), 3,
++		(struct type *[]){mkpointertype(&typevoid, QUALNONE), mkpointertype(&typevoid, QUALCONST), &typeulong});
++	scopeputalias("__builtin_strcpy", "strcpy", mkpointertype(&typechar, QUALNONE), 2,
++		(struct type *[]){mkpointertype(&typechar, QUALNONE), mkpointertype(&typechar, QUALCONST)});
++	scopeputalias("__builtin_strncpy", "strncpy", mkpointertype(&typechar, QUALNONE), 3,
++		(struct type *[]){mkpointertype(&typechar, QUALNONE), mkpointertype(&typechar, QUALCONST), &typeulong});
++	scopeputalias("__builtin_strcat", "strcat", mkpointertype(&typechar, QUALNONE), 2,
++		(struct type *[]){mkpointertype(&typechar, QUALNONE), mkpointertype(&typechar, QUALCONST)});
++	scopeputalias("__builtin_strncat", "strncat", mkpointertype(&typechar, QUALNONE), 3,
++		(struct type *[]){mkpointertype(&typechar, QUALNONE), mkpointertype(&typechar, QUALCONST), &typeulong});
++	scopeputalias("__builtin_strcmp", "strcmp", &typeint, 2,
++		(struct type *[]){mkpointertype(&typechar, QUALCONST), mkpointertype(&typechar, QUALCONST)});
++	scopeputalias("__builtin_strncmp", "strncmp", &typeint, 3,
++		(struct type *[]){mkpointertype(&typechar, QUALCONST), mkpointertype(&typechar, QUALCONST), &typeulong});
+ }
+ 
+ struct scope *
 --- a/stmt.c
 +++ b/stmt.c
 @@ -6,6 +6,22 @@
@@ -2679,7 +2780,21 @@
  /* 6.8 Statements and blocks */
  void
  stmt(struct func *f, struct scope *s)
-@@ -319,7 +389,70 @@
+@@ -313,13 +383,84 @@
+ 			v = funcexpr(f, e);
+ 			delexpr(e);
+ 		} else {
++			/* GNU: a void function may return a void expression (return put_unaligned_le16(...);) */
++			if (tok.kind != TSEMICOLON) {
++				e = expr(s);
++				if (e->type->kind != TYPEVOID)
++					error(&tok.loc, "return with a value in a function returning void");
++				funcexpr(f, e);
++				delexpr(e);
++			}
+ 			v = NULL;
+ 		}
+ 		funcret(f, v);
  		expect(TSEMICOLON, "after 'return' statement");
  		break;
  

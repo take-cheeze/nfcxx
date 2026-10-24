@@ -80,6 +80,16 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 
 - **Inline asm `p` operands and `%a`** (docs/notes/inline-asm.md), and symbol immediates with an offset (`&s.member`).
 
+- **`packed` after a struct body with bit-fields**, when packing moves nothing (the kernel's `desc_struct`): every
+  member is where gcc's packed layout puts it, and each bit-field's unit (cproc reads and writes a bit-field through a
+  unit of its type's size; gcc only the bytes it spans) lies inside the packed struct and shares no byte with a member
+  that is not a bit-field. Only the alignment and tail padding change. Other packed bit-fields are still refused.
+
+- **GNU leniencies the kernel relies on**: a keyword as an attribute name (`__attribute__((const))`), an empty member
+  declaration (`T *lock; ;` in cleanup.h's guards), a `;` at file scope, `return f();` with `f` void in a void function
+  (a non-void value is still an error), and `__builtin_memset`, `__builtin_memcpy`, `__builtin_str{cpy,ncpy,cat,ncat,
+  cmp,ncmp}` as calls of the library functions.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
@@ -89,6 +99,7 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 ## Known gaps (still refused)
 
 - `asm goto`, SSE operands.
+- Bit-fields in a packed struct where packing would move a member, and under a leading `packed`.
 - Volatile bit-fields and volatile aggregate copies (`-V` covers scalars of 1, 2, 4 and 8 bytes).
 - Global register variables other than `%rsp`.
 - The C23 `nullptr` constant miscompiles under `-c` (a pre-existing cproc codegen gap); harmless before C23, where

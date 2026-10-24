@@ -73,9 +73,12 @@ The qbe backend still refuses every option it cannot honour. In this mode it acc
   as with gcc. QBE's variadic prologue saves `%xmm0`-`%xmm7`, so a file that defines a variadic function stays on gcc.
 
 The translation unit is preprocessed exactly as gcc preprocesses it (gcc's predefined macros and all of the kernel's
-options), so cproc sees the same code as the reference object, and cproc runs with `-p`: unreferenced internal
+options, linemarkers kept so errors name the header), so cproc sees the same code as the reference object, and cproc
+runs with `-p`: unreferenced internal
 functions and data are dropped, as gcc does. The kernel's headers define hundreds of static inline functions per file,
-and keeping the unused ones would leave references to symbols this configuration does not have.
+and keeping the unused ones would leave references to symbols this configuration does not have. A construct cproc can
+only refuse inside a dropped function (an asm operand only inlining could satisfy, bitops.h's `"i"(1 << (nr & 7))`)
+is not an error, and that function's asm thunks are dropped with it (docs/notes/inline-asm.md).
 
 ### Status (tinyconfig, Linux 6.8)
 
