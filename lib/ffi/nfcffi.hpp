@@ -10,7 +10,9 @@
 #pragma once
 #include <cstddef>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -69,6 +71,12 @@ class Module {
 
   bool valid() const { return handle_ != nullptr; }
 
+  // The address of the global variable NAME (a function pointer or data). Throws Error when the module has no such symbol.
+  template <class T>
+  T* variable(const std::string& name) const {
+    return static_cast<T*>(symbol(name));
+  }
+
   // NAME as a function of type Sig = R(A...). Throws Error when the module has no such symbol.
   template <class Sig>
   Function<Sig> function(const std::string& name) const {
@@ -95,16 +103,30 @@ struct Declaration {
   bool overloaded = false;               // C++ overloads share the name (C has one function per name)
   char return_kind = 'x';                // how the return value crosses a call: i u f p v, or x (see Library)
   std::string param_kinds;               // one letter per parameter, same alphabet
+  // A parameter that is a pointer to a function a host callable can implement (kind 'c'): its signature.
+  struct Callback {
+    std::size_t index = 0;                     // the parameter
+    std::string return_type;                   // abstract C type
+    char return_kind = 'x';
+    std::string param_kinds;
+    std::vector<std::string> params;           // "@" marks the name
+  };
+  std::vector<Callback> callbacks;
 
   // The declaration of parameter I with NAME ("int (*cmp)(const void *, const void *)"); an empty NAME gives the abstract type.
   std::string param_decl(std::size_t i, const std::string& name) const;
 };
 
-// A value passed to or returned from Library::call: a signed or unsigned integer, a float or double, a pointer, void, or
-// a struct or union passed by value, as its bytes (the C layout of the type, see Library::call).
+// A host function a C function can call through a callback parameter (see Library::call). It receives the arguments as
+// Values and returns the result as a Value.
+class Value;
+using CallableFn = std::function<Value(const std::vector<Value>&)>;
+
+// A value passed to or returned from Library::call: a signed or unsigned integer, a float or double, a pointer, void, a
+// struct or union passed by value, as its bytes (the C layout of the type, see Library::call), or a host callable.
 class Value {
  public:
-  enum class Kind { Void, Signed, Unsigned, Float, Pointer, Bytes };
+  enum class Kind { Void, Signed, Unsigned, Float, Pointer, Bytes, Callable };
 
   Value() = default;
   static Value of_signed(long long v);
@@ -112,6 +134,7 @@ class Value {
   static Value of_float(double v);
   static Value of_pointer(const void* p);
   static Value of_bytes(const void* p, std::size_t n);
+  static Value of_callable(CallableFn fn);
 
   Kind kind() const { return kind_; }
   // Each accessor throws Error when the value has another kind.
@@ -120,6 +143,7 @@ class Value {
   double as_float() const;
   const void* as_pointer() const;
   const std::vector<unsigned char>& as_bytes() const;
+  const CallableFn& as_callable() const;
 
  private:
   Kind kind_ = Kind::Void;
@@ -128,6 +152,7 @@ class Value {
   double f_ = 0;
   const void* p_ = nullptr;
   std::vector<unsigned char> b_;
+  std::shared_ptr<CallableFn> fn_;
 };
 
 class Library;
