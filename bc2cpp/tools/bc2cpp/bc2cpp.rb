@@ -1703,6 +1703,32 @@ if $PROGRAM_NAME == __FILE__
       mrb_get_args(M, "*", &argv, &argc);
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
     }
+    // STACK_BLOCK (docs/bc2cpp-stack-blocks.md): the RProc and REnv of a direct-entry block passed only to a
+    // callee that just calls it, laid out as mrb_proc_new_cfunc_with_env builds them but in the caller's frame,
+    // over the caller's own env array. Red, so the GC never marks, gray-lists or sweeps them.
+    struct Bc2cppStackBlock {
+      struct RProc proc;
+      struct REnv env;
+      Bc2cppStackBlock(mrb_state* M, mrb_int len, mrb_value* stack) {
+        memset(static_cast<void*>(this), 0, sizeof(*this));
+        env.tt = MRB_TT_ENV;
+        env.gc_color = MRB_GC_RED;
+        env.c = mrb_vm_ci_target_class(M->c->ci);
+        env.mid = M->c->ci->mid;
+        env.stack = stack;
+        MRB_ENV_SET_LEN(&env, len);
+        MRB_ENV_CLOSE(&env);
+        proc.tt = MRB_TT_PROC;
+        proc.gc_color = MRB_GC_RED;
+        proc.c = M->proc_class;
+        proc.flags = MRB_PROC_CFUNC_FL | MRB_PROC_ENVSET;
+        proc.body.func = bc2cpp_block_thunk;
+        proc.e.env = &env;
+      }
+      Bc2cppStackBlock(const Bc2cppStackBlock&) = delete;
+      Bc2cppStackBlock& operator=(const Bc2cppStackBlock&) = delete;
+      mrb_value value() { return mrb_obj_value(&proc); }
+    };
     // YIELD_REACH (ADR 0283): the last env slot of a direct-entry block says its body, and everything
     // it can call, provably never suspends a Fiber. A compiled core iterator running such a block
     // may then stay compiled under a Fiber (its frame cannot be crossed by a yield).
