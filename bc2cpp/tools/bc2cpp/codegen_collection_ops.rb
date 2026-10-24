@@ -49,7 +49,7 @@ class CodeGen
     NUMERIC_SLOW_RUBY_ARM_OPS.each do |name|
       next unless numeric_slow_closed?(name)
 
-      numeric_slow_ruby_arms(name).each { |arm| owner_class_fn_name(arm[:owner]) }
+      (numeric_slow_ruby_arms(name) || []).each { |arm| owner_class_fn_name(arm[:owner]) }
     end
   end
 
