@@ -1,0 +1,3 @@
+(ir-module "bad_semantic_layout" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Bad") 8 4 (field "a" 0 char) (field "b" 0 int))
+(function "main" (ret int) (params) (return (const int 0)))

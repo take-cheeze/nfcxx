@@ -1,0 +1,6 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "inner" (returns (ptr int) (from-arg 0 0 shared)) (nothrow) (noescape) (closed) (args (read int)))
+(call-effects "outer" (returns (ptr int) (from-arg 0 0 shared)) (nothrow) (noescape) (closed) (args (read int)))
+(function "outer" (ret (ptr int)) (params (param %0 "p" (ptr int)))
+(decl %0 param) (let %1 (ptr int) (call-borrow (ptr int) "R" (parent "*%0") &"inner" %0)) (return %1)
+)

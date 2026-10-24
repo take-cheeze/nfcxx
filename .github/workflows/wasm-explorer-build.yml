@@ -1,0 +1,96 @@
+name: wasm explorer (build)
+
+# Builds the wasm explorer's static site (tools/wasm-explorer/build-static.cjs) and uploads it as the artifact
+# github-pages. A reusable workflow: wasm-explorer-pages.yml deploys the site to GitHub Pages, and
+# wasm-explorer-preview.yml to a Cloudflare Pages preview. The compiler runs here, in CI: the Path B harness and the
+# mruby tool are built as in pathb.yml, and each example is compiled ahead of time in every mode of its language and
+# checked against its expected result, so a broken example fails this job. The Rust and Go examples also need rustc
+# (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh).
+#
+# This job runs the code it checks out (the compiler, the examples), so it has no secrets and reads the repository only.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit to build (empty: the commit of the caller's event)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in pathb.yml
+      PATHB_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # the commit to build: the caller's (empty), or a pull request's head (wasm-explorer-preview.yml)
+          ref: ${{ inputs.ref }}
+          submodules: true
+
+      - name: Install the build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ruby rake
+
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      - name: Restore the mruby tool
+        id: mruby
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+
+      - name: Build the mruby interpreter
+        if: steps.mruby.outputs.cache-hit != 'true'
+        run: scripts/setup-mruby.sh
+
+      # The Rust examples: rustc's LLVM IR, which llvm-to-pathb.rb reads, changes between releases, so the version is
+      # pinned (the runner's rustup installs it), with llvm-tools for the llvm-dis of the module after LTO.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component llvm-tools
+          echo "RUSTC=$(rustup which --toolchain 1.97.0 rustc)" >> "$GITHUB_ENV"
+
+      # The Go examples: TinyGo (scripts/setup-tinygo.sh, pinned) runs the Go toolchain.
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Restore TinyGo
+        id: tinygo
+        uses: actions/cache@v6
+        with:
+          path: build/tinygo
+          key: tinygo-${{ runner.os }}-${{ hashFiles('scripts/setup-tinygo.sh') }}
+
+      - name: Install TinyGo
+        if: steps.tinygo.outputs.cache-hit != 'true'
+        run: scripts/setup-tinygo.sh
+
+      - name: Build the static site (compiles and checks every example in every mode)
+        run: node tools/wasm-explorer/build-static.cjs --out _site
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site

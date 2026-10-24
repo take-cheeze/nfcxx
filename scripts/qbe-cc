@@ -83,8 +83,7 @@ if [ $macos = 1 ]; then
   # struct of the same size stands in for it (only the layout of those ucontext members is affected).
   # __int128_t is a 64-bit integer here: libc++'s filesystem clock uses it for nanosecond counts that fit in 64 bits, and
   # cproc can compare and compute with a long long where it cannot with a struct.
-  # __int128_t and __uint128_t are clang builtins (no header typedef): name cproc's 128-bit integer types
-  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= '-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
+  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar=)
   # Native macOS only: the SDK's TargetConditionals.h stops with "unknown compiler" under -undef, because -undef removes the
   # compiler and target macros it reads. Predefine its include guard so the header is skipped, as mruby's common.h expects
   # on macOS. TARGET_OS_IPHONE is then undefined, which mruby-io reads as 0 (macOS), so its branches are unchanged.
@@ -93,6 +92,8 @@ if [ $macos = 1 ]; then
     darwin+=(-D__TARGETCONDITIONALS__)
   fi
 fi
+# __int128_t and __uint128_t are gcc and clang builtin typedefs (no header declares them): name cproc's 128-bit integer types.
+darwin+=('-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
 if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
   # glibc picks its ABI from __x86_64__ (gnu/stubs-32.h otherwise), gcc's stddef.h needs
@@ -161,6 +162,15 @@ t=$(trace_start)
 symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
 "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
+# Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
+# __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
+# that text (weak-symbols.rb gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
+if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
+  if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
+     grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
+    "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" --c-input "$tmp/pp.weak.c" "$tmp/out.s"
+  fi
+fi
 cat "$tmp/tail.s" >> "$tmp/out.s"
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)

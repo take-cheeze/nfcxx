@@ -1,0 +1,5 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "link" (returns void) (nothrow) (noescape) (closed) (args (read int) (init (ptr int))))
+(function "link" (ret void) (params (param %0 "p" (ptr int)) (param %1 "out" (ptr (ptr int))))
+(decl %0 param) (store (ptr int) %1 %0) (return)
+)

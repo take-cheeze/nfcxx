@@ -1,0 +1,3 @@
+1
+identity: contract-return-mismatch: *%0
+identity: return-local-address: x

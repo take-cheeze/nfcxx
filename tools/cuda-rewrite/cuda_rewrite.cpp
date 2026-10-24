@@ -1608,10 +1608,11 @@ std::vector<LaunchMacro> launch_macros(const std::string &text) {
     std::string body = strip(sl(after, close + 1, (long)after.size()));
     bool keep = body.find("<<<") != std::string::npos || body.compare(0, 9, "template ") == 0 ||
                 body.compare(0, 16, "extern template ") == 0 || names_template_instance(body);
-    // A macro that expands a kept macro (FATTN_VEC_CASES_ALL_D) is kept as well. One that declares explicit instances
-    // (extern DECL_...) is not: its declarations are not calls, and the ones of the explicit lists stay as they were.
+    // A macro that expands a kept macro (FATTN_VEC_CASES_ALL_D) is kept as well, and so is one that declares explicit
+    // instances (fattn-mma-f16.cuh's DECL_FATTN_MMA_F16_CASE_ALL_NCOLS2: extern DECL_...): template_instances reads its
+    // declarations as instances other units define, not as calls.
     for (const auto &x : out)
-      if (!keep && body.compare(0, 7, "extern ") != 0 && body.find(x.name + "(") != std::string::npos) keep = true;
+      if (!keep && body.find(x.name + "(") != std::string::npos) keep = true;
     if (!keep) continue;
     LaunchMacro m;
     m.name = name;
@@ -2623,6 +2624,38 @@ long key_min(const std::string &key) {  // M: the fewest arguments a call of thi
   return last == std::string::npos || key.find('#') == std::string::npos ? -1 : std::stol(key.substr(last + 1));
 }
 
+// What the call site at pos is: 1 in an explicit instantiation declaration (`extern template void f<T>(...);`, mmq.cuh's
+// `extern DECL_MMQ_CASE(...)`), 2 in an explicit instantiation definition (`template void f<T>(...);`), 0 otherwise.
+// The statement is read back to the previous `;` or brace of the code, the directives blanked (a #define's body has its
+// own semicolons). The blanked text is kept for the text it was made from.
+IdentKey g_stmt_code_key;
+std::string g_stmt_code;
+int explicit_instantiation(const std::string &text, long pos) {
+  if (!g_stmt_code_key.is(text)) {
+    g_stmt_code = code_without_directives(text);
+    g_stmt_code_key.set(text);
+  }
+  const std::string &code = g_stmt_code;
+  long b = pos - 1;
+  while (b >= 0 && ch(code, b) != ';' && ch(code, b) != '{' && ch(code, b) != '}') b -= 1;
+  std::vector<std::string> toks = tokens_of(sl(code, b + 1, pos));
+  if (toks.size() >= 2 && toks[0] == "extern" && toks[1] == "template") return 1;
+  if (toks.size() >= 2 && toks[0] == "template" && toks[1] != "<") return 2;
+  return 0;
+}
+
+// An instance's arguments compared by value (constant_key: `(8)/ 2` and `4` are one argument), the others without their
+// blanks, to tell two spellings of one instance.
+std::string instance_key(const std::string &text, long pos, const std::vector<std::string> &args) {
+  std::string k;
+  for (const auto &a : args) {
+    for (char c : constant_key(text, pos, strip(a)))
+      if (!white_c((unsigned char)c)) k += c;
+    k += ',';
+  }
+  return k;
+}
+
 std::vector<std::vector<std::string>> template_instances(const std::string &name, const std::string &text,
                                                        const std::vector<std::string> &stack,
                                                        const std::string &key_arg = std::string()) {
@@ -2645,7 +2678,18 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   // deduced from the call's own arguments, and the explicit ones are kept.
   TemplateHead head;
   bool have_head = template_head_of(text, name, head);
+  // An instance declared `extern template` is defined by another unit: this unit does not instantiate it, even where it
+  // calls it (mmq.cu calls mul_mat_q_case<T> for every T; each mmq-instance-*.cu defines one). An explicit instantiation
+  // definition in the unit still makes it one of the unit's (mmq-instance-q4_0.cu's DECL_MMQ_CASE after the header's
+  // extern one).
+  std::set<std::string> extern_insts, defined_insts;
   for (const auto &cs : call_sites(text, name)) {
+    const int ex = explicit_instantiation(text, cs.second);
+    if (ex == 1) {
+      extern_insts.insert(instance_key(text, cs.second, split_top(cs.first)));
+      continue;
+    }
+    if (ex == 2) defined_insts.insert(instance_key(text, cs.second, split_top(cs.first)));
     std::vector<std::string> targs = split_top(cs.first);
     // A block-local constant of the call's body (cols_per_block in `launch_fattn<DV, cols_per_block/ncols2, ncols2>`) is
     // its value at this call, so the instance argument does not name it.
@@ -2839,8 +2883,13 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   }
   // Ruby: out.uniq (first occurrences kept, in order).
   std::vector<std::vector<std::string>> uniq;
-  for (const auto &x : out)
+  for (const auto &x : out) {
+    if (!extern_insts.empty()) {
+      const std::string k = instance_key(text, 0, x);
+      if (extern_insts.count(k) && !defined_insts.count(k)) continue;
+    }
     if (std::find(uniq.begin(), uniq.end(), x) == uniq.end()) uniq.push_back(x);
+  }
   g_instances[key] = uniq;
   return uniq;
 }
@@ -3013,6 +3062,9 @@ std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<lon
   }
   for (auto &kv : dl) {
     DependentLaunch &d = kv.second;
+    // A launch that is never instantiated in the unit keeps the kernel's template-id (rewrite), so it has no dispatch
+    // struct; its outer.line is not set, and a declaration at line 1 would name types not declared yet (mmq.cu's ggml_type).
+    if (d.uninstantiated) continue;
     long at = line_start(orig, d.outer.line);
     // Ruby: d[:wrapper].values.uniq (first occurrences kept)
     std::vector<std::string> uniq_w;
@@ -5109,7 +5161,10 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
           std::vector<std::vector<std::string>> insts;
           if (outer.has_qual) insts = member_instances(outer, code_text);
           else insts = template_instances(outer.fname, code_text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts));
-          if (insts.empty())
+          // A free template that the unit never instantiates (its instances are extern, defined by other units, as
+          // fattn-tile.cuh's are for fattn.cu) takes no address here, as dependent_launches leaves its launches.
+          const bool uninstantiated = insts.empty() && !outer.has_qual && plain_call_sites(code_text, outer.fname).empty();
+          if (insts.empty() && !uninstantiated)
             refuse("address of template kernel " + name + "<" + raw + "> depends on the template parameter " + dep +
                    " of " + outer.fname + ": the unit has no explicit call of it with all its template arguments");
           for (const auto &inst : insts) {

@@ -116,4 +116,10 @@ bytes each. The rest are the samples' own usage errors and deliberate bugs. The 
   OpenCL, through `ze_api.h` and `libze_loader.so.1`: the first Intel GPU, a module per local size (`ze_module_constants_t`
   for ids 0, 1, 2), the heap in one `zeMemAllocShared` allocation (atomic access checked), one immediate command list.
   `tests/gpu/level-zero/run.sh` runs the vecAdd kernel standalone on the B60 (50000 elements, a mutant is caught).
+- **Several TUs with kernels, OpenCL and Level Zero: done** (`rt_image.hpp`). `scripts/sycl-build.sh -c [-fPIC]` writes an
+  object and its image (`obj.o.cl.spv`, `obj.o.man`); the object registers the image from a TU-local static, and the runtime
+  loads every registered image (again on a kernel miss, for a library opened later). Each image keeps its own statics and
+  is built per local size on its own; a closure type found in two images runs from the first. `tests/sycl/multi_tu/run.sh`
+  links three TUs into one program and two of them into a `-shared` library, on both runtimes. Vulkan and WebGPU still
+  load one image per program.
 - Work-group sizes above 256 are fine here (lavapipe allows 1024); the WebGPU path keeps its 256 limit.

@@ -57,11 +57,12 @@ The follow-up loan layer introduces two forms:
 ```
 
 `exclusive` is the other borrow kind. Borrowing requires an initialized, live direct local
-place and creates a loan whose ID is unique within the function. Pointer copies, stores, loads,
+place or constant-offset field range and creates a loan whose ID is unique within the function.
+Pointer copies, stores, loads,
 and pointer casts preserve that identity. The QBE emitter evaluates `borrow` as its address
 operand and emits no code for `loan-end`; both the emitter and its oracle validate their shape.
 
-A shared loan permits reads and prevents writes to its referent. An exclusive loan prevents
+A shared loan permits reads and prevents writes to overlapping storage. An exclusive loan prevents
 other accesses, while reads and writes through its own pointer remain permitted. Creating a
 conflicting loan, writing through a shared loan, or ending storage with an active loan is an
 error. Access through an ended loan is an error even through an older pointer copy. Possible
@@ -152,7 +153,7 @@ use-after-scope. Source locations and language-level region contracts remain fut
 
 `copy-value` reads the value and preserves initialization. `move-value` reads the value and marks
 its source as moved. Later reads, copies, borrows, or moves of that source are errors until a store
-reinitializes it. A move conflicts with every live loan of the source, including shared loans.
+reinitializes it. A move conflicts with every overlapping live loan of the source, including shared loans.
 Copying has normal read permissions. These rules apply in both loan modes; inferred expiry can
 permit a move after the loan's last use.
 
@@ -169,13 +170,312 @@ lower to ordinary typed loads, with initialization policy enforced by the separa
 This is an **explicit IR ownership contract**, not trait inference. The frontend must select copy
 versus move from the source language's rules, including Rust's `Copy` trait; the checker does not
 prove that a type is copyable. Scalar representations in tests can model consuming handles and
-are not claims that moving a Rust integer makes it unusable. Transfers currently require whole,
-direct local scalar/pointer slots. Aggregates, partial moves, indirect moves, drops, and
-ownership effects of calls remain unsupported. Neither frontend emits these forms yet.
+are not claims that moving a Rust integer makes it unusable. Transfers currently require
+scalar/pointer values in direct locals or constant-offset fields.
+Whole-aggregate value transfers, moves through arbitrary aliases, drops, and ownership effects
+of calls remain unsupported. Neither frontend emits these forms yet.
 
 C++ `rref-arg` is still refused: an rvalue-reference argument alone does not authorize treating the
 source as dead. Ordinary C++ moved-from objects can remain usable; their contracts need separate
 modeling before a frontend can emit a consuming transfer.
+
+## Field ranges and partial moves
+
+The checker now accepts bounded aggregate slots and the IR's existing constant byte offsets:
+
+```text
+(slot "s" (struct "Pair") 8 4)
+(decl $"s" val)
+(store int (offset $"s" 0) (const int 1))
+(store int (offset $"s" 4) (const int 2))
+(let %0 int (move-value int (offset $"s" 0)))
+(let %1 int (load int (offset $"s" 4)))
+```
+
+Moving the first four bytes leaves the second field usable. Reading the moved field fails until
+all its bytes are reinitialized. Partial writes restore only the bytes they cover; repairing half
+an integer does not restore that integer. Per-byte state joins preserve these distinctions across
+branches and loops. Diagnostics show half-open byte ranges, for example `s[4..8]`.
+
+Typed loads, stores, and value transfers determine access widths. Slot size and constant offsets
+bound every access. Disjoint field loans can coexist, while overlapping ranges conflict, including
+cross-width accesses and overlapping union storage. This does not check union active-member rules,
+type punning legality, or source-language rules prohibiting partial moves from destructor types.
+
+A reborrow may narrow its parent's range:
+
+```text
+(let %0 (ptr (struct "Pair")) (borrow (ptr (struct "Pair")) "parent" exclusive $"s"))
+(let %1 (ptr int) (reborrow (ptr int) "child" exclusive "parent" (offset %0 4)))
+```
+
+The child must fit entirely inside its parent. Its explicit source offset must match the actual
+pointer provenance. Offsets hidden in earlier register assignments are refused if they cannot be
+matched to the declared range. Ancestor authorization and sibling conflicts apply only where ranges
+overlap; using a parent on a disjoint field can remain valid while another child is live.
+
+Projected pointers preserve their original loan identity for last-use inference, and expire with
+their enclosing storage or loan. Redeclaring a slot cannot revive an old projected pointer. Pointer
+fields retain provenance for an exact byte range; a write overlapping that range makes the pointer
+value unknown. Writes to disjoint fields preserve it. `zero-fill` initializes the specified bytes,
+but does not establish usable pointer provenance.
+
+This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
+layouts, dynamic offsets/indices, out-of-bounds accesses, external pointer projections, and accesses
+outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
+whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
+widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
+three-address IR, and explicit projected moves/copies lower to the same typed loads.
+
+The underlying model tracks **physical byte initialization**. Without semantic metadata,
+whole-object loans conservatively require all bytes initialized, including padding. Ordinary field
+accesses do not require padding initialization. The C++ integration tests cover field initialization,
+references to padded structs, uninitialized fields, and dangling field pointers.
+
+## Semantic struct layouts
+
+Optional module-level metadata separates value fields from physical padding:
+
+```text
+(borrow-layout (struct "Pad") 8 4
+  (field "a" 0 char)
+  (field "b" 4 int))
+```
+
+The size and alignment are 8 and 4 bytes. Field names are unique, offsets are absolute within the
+struct, and field types determine widths and alignment. Scalars, pointers, and other declared struct
+layouts are supported. Pointers do not recursively embed their pointee, so self-referential pointer
+types are valid. By-value cycles, missing nested layouts, duplicate fields/layouts, and out-of-bounds
+fields are errors. Overlapping or unaligned fields, arrays, and union descriptors are refused.
+This excludes packed layouts and overlapping empty subobjects for now.
+
+A slot using a known layout must match its size and provide sufficient alignment. Known aggregate
+borrows must identify the root object or a declared nested subobject of the requested type at the
+correct offset. An arbitrary same-size byte range cannot claim a different struct's initialization
+mask. Layout validation runs before analysis and before code-generation pruning, including for
+unused descriptors.
+
+Whole-aggregate borrow and reborrow creation checks only declared field bytes, recursively ignoring
+padding. Every field must still be initialized and unmoved. Empty structs with positive physical
+size have no field initialization requirements, but their storage must still be alive. Slot storage
+size zero remains unsupported. Loan conflicts and bounds continue to cover physical ranges;
+semantic padding does not authorize an overlapping write through a live loan.
+
+These facts **do not initialize padding**. Ordinary typed loads, copies, moves, and zero-fill retain
+physical-byte behavior. A raw integer read spanning uninitialized padding still fails after a valid
+semantic aggregate borrow. Missing metadata retains the conservative physical-byte fallback.
+
+Both QBE emitters validate the descriptor graph and emit no code for it. Removing metadata produces
+identical QBE and native behavior. Layout records are trusted frontend contracts: validation checks
+internal consistency, not correspondence with Rust or C++ source or completeness against a source
+type. Neither frontend emits these records or ownership loan/transfer forms yet. Source-language
+drop, active-member, and trait rules remain separate work.
+
+## Explicit drop-state contracts
+
+Drop-state forms describe an ownership protocol for declared local values. They are **checking
+facts**, not destructor instructions: the producer must supply any real cleanup and runtime guard
+code separately. Neither frontend emits these facts yet. The bounded call contracts below can
+connect actual calls to checking effects; they do not prove general destructor, deallocation, or
+unwind behavior.
+
+```text
+(drop-obligation "x" int $"x")
+(decl $"x" val)
+(store int $"x" (const int 7))
+(drop-live "x")
+(drop-state "x")
+(scope-end $"x")
+```
+
+`drop-obligation` is function-level metadata with a unique nonempty ID, value type, and direct
+local or constant-offset field place. Scalar/pointer values and aggregates with known semantic
+layouts are supported. Obligations cannot overlap; nested destructor/field cleanup requires a
+future hierarchical contract. These annotations assert a non-bitwise-copyable owner policy;
+integer examples model consuming handles rather than Rust integer types implementing `Drop`.
+
+The protocol tracks five states:
+
+| State | Meaning |
+| --- | --- |
+| dead | Target storage has not started or has ended. |
+| vacant | Live storage has no registered value, including after a move. |
+| building | Writes started constructing/reconstructing a value, but it has not been registered. |
+| live | Construction completed and cleanup is owed. |
+| dropped | The registered value was consumed by a cleanup fact. |
+
+Writes to vacant or dropped storage mark construction in progress. `drop-live` registers completed
+construction and requires every semantic field byte initialized; padding is excluded. Empty structs
+can be registered without field writes, while still requiring live storage. Repeatedly registering
+a live value is an error. Reinitialization after a move or cleanup requires a new registration.
+
+A whole-value overwrite of a live owner is an error until its prior value is consumed. Field
+mutation preserves the enclosing live obligation. Exact typed moves clear the source obligation;
+partial or reinterpreted moves of that owner are refused. Explicit bitwise copies of a live owner
+require a copy contract and are refused. A non-owning aggregate can instead declare separate,
+disjoint field obligations, allowing one field to move while siblings still require cleanup.
+Tracking the destination or result of a move is the producer's responsibility; this is not a proof
+of leak freedom or a replacement for source-language move/copy policy.
+
+`drop-state` requires the value live on every incoming path. `drop-state-if-live` consumes only live
+paths and skips vacant or already-dropped paths, allowing cleanup after conditional construction or
+moves. Construction-in-progress is never silently skipped: missing registration remains an error
+after guarded cleanup. Guarded facts still require live storage; they cannot extend declaration
+lifetimes. Flags preserve the correlation between a live value and its initialized field bytes.
+Loan conflicts remain conservative at joins rather than using full relational path reasoning.
+
+Both forms check overlapping live loans as a consuming access. Last-use inference can release a
+loan before cleanup. Known pointer-field loan identities are conservatively kept needed through
+consumption; no pointee access or free is proved. Cleanup marks bytes logically dropped without
+clearing physical memory. Later reads, borrows, and moves fail until reinitialization. A second
+unconditional consumption is an error; repeated guarded cleanup can legitimately do nothing.
+
+Normal returns, fallthrough, storage end, and redeclaration reject live obligations or unfinished
+construction. Explicit `unreachable`/abort paths do not require cleanup; exception cleanup edges
+remain unsupported. The marker asserts that the matching real cleanup or runtime guard exists;
+the checker does not generate or verify that code. The QBE emitter and oracle accept these facts
+as validated no-ops, and a native integer test verifies marker erasure preserves generated code.
+
+## Closed call-effect contracts
+
+Actual direct calls can now use an explicitly trusted module-level summary:
+
+```text
+(call-effects "finish" (returns void)
+  (nothrow) (noescape) (closed)
+  (args (consume int)))
+```
+
+The argument list is complete and ordered. Every call must match its contract's arity and return
+type. Known scalar argument ABI classes must match; memory arguments must use pointer-width
+representations with known local provenance. This is not full C/C++ prototype verification.
+Contracts are validated before pruning, including unused declarations.
+
+| Argument effect | Required behavior and analysis |
+| --- | --- |
+| `value TYPE` | A nonpointer scalar value; carries no tracked address provenance. |
+| `read TYPE` | Reads an initialized value through the argument without changing it. |
+| `write TYPE` | Reads/mutates an existing initialized value, preserving its ownership identity. |
+| `init TYPE` | Definitely initializes the value's required bytes without reading the old value. |
+| `consume TYPE` | Consumes a matching live drop obligation on normal return. |
+
+`nothrow` excludes exceptional continuations. `noescape` promises that argument addresses are not
+retained beyond the call, except for an explicitly declared returned alias. `closed` promises no access to globals, hidden pointees, or other externally
+visible memory outside the declared argument regions; private callee-local storage is permitted.
+These are trusted imports at call sites, not facts inferred from names. For an external callee the
+producer must ensure the real implementation satisfies the summary. A function defined in the same
+module is checked against its own summary (see below).
+
+Read effects may have several possible known local targets, all of which are checked. Mutation,
+initialization, and consumption require one known place. Read/read aliases are allowed; arguments
+whose ranges overlap and include mutation are refused before applying postconditions. Summaries do
+not prescribe ordering inside a callee, so an initializer cannot silently make a same-call reader
+safe. More permissive alias/ordering contracts remain future work.
+
+Effects respect loan permissions and ranges. Shared loans cannot authorize mutation or
+initialization. Stored pointer identities are counted as possible uses when a call reads them,
+so last-use inference cannot end those loans before the call. Mutation and initialization forget
+resulting pointer provenance. Unknown returned/outgoing pointer relationships are never guessed.
+
+Typed aggregate initialization establishes only declared field bytes. Mutation preserves existing
+field initialization. Both forget padding initialization, even if the caller previously zeroed the
+object: the summary does not promise defined padding on return. Read effects do not erase padding.
+`init` starts construction for intersecting drop obligations; a following `drop-live` registers the
+completed owner. Reinitializing an already-live owner without consuming it remains an error.
+
+A consuming call must target an unborrowed owned place with an exact matching obligation and live
+flag. Its normal-return postcondition performs the same logical consumption as `drop-state`, so a
+separate marker is unnecessary. Unlike a marker, the **call itself remains executable code**. A
+consume call does not implicitly drop a possibly absent value; guard correlation and unwind cleanup
+remain unsupported. Passing an exclusive loan alone does not establish ownership for consumption.
+
+This stage supports direct symbols, void/scalar results or the returned aliases below, and bounded local argument effects.
+Indirect/variadic calls, uncontracted pointer/reference or aggregate returns, unknown external targets, retained
+borrows, heap/deallocation effects, hidden globals/pointees, and potentially throwing calls remain
+refused. A native test links small C helpers and observes actual initialization/read/mutation/
+consumption results. It demonstrates call execution and state propagation, not general destructor
+or resource-release verification. Removing the summaries leaves identical QBE while the checker
+correctly returns to refusing those calls.
+
+
+## Returned alias loans
+
+A trusted summary may return a pointer into one argument's declared memory region:
+
+```text
+(call-effects "identity"
+  (returns (ptr int) (from-arg 0 0 shared))
+  (nothrow) (noescape) (closed) (args (read int)))
+(let %r (ptr int)
+  (call-borrow (ptr int) "R" root &"identity" $"x"))
+```
+
+`from-arg` takes a zero-based argument index, a nonnegative byte offset, and `shared` or
+`exclusive`. The returned pointee must fit wholly inside that argument's region. Shared results
+require a `read` or `write` source; exclusive results require `write`. `value`, `init`, and `consume`
+sources are refused. An ordinary `call` cannot discard the required returned-loan identity.
+
+`root` requires a direct local place or constant offset. For a result derived from an existing
+loan, use `(parent "P")` instead; the actual source must preserve that parent's identity and
+constant offset. The result cannot upgrade shared permission, outlive the parent or referent,
+or escape the checked function as a local address. Existing `loan-end` and opt-in last-use inference
+apply to the returned loan and its ancestors. Field-range results protect only their returned range
+after the call, while call preconditions still cover the complete argument effect region.
+
+These contracts remain trusted: the checker does not inspect the callee to prove where its pointer
+actually points. Heap-owned returns, aliases selected from several arguments, retained borrows,
+generic lifetime signatures, and Rust frontend emission remain unsupported. The emitter erases
+`call-borrow` to an ordinary call. A native C identity helper verifies the actual pointer return,
+write through the result, byte-identical metadata erasure, and emitter/oracle agreement.
+
+## Verified callee summaries
+
+When a module defines a function and also declares `call-effects` for its name, the checker
+checks the body against the summary while analyzing that function. Callers keep using the summary
+as before, so a module whose definitions all verify no longer depends on trusting them.
+
+The signature must agree: the return type is the summary's result, the parameter count is the
+argument count, `value` parameters are nonpointer scalars of the same ABI class, and memory effects
+take pointer parameters. Disagreement is malformed IR.
+
+Each memory argument `%N` points to a synthetic region named `*%N`, sized by the effect type.
+
+| Effect | Region at entry | Access inside the body | Required on every normal return |
+| --- | --- | --- | --- |
+| `read` | declared fields initialized | through a shared loan `*%N` | nothing |
+| `write` | declared fields initialized | through an exclusive loan `*%N` | declared fields initialized |
+| `init` | uninitialized | through an exclusive loan `*%N` | declared fields initialized |
+| `consume` | live drop obligation `*%N` | owned place | obligation consumed or moved |
+
+The argument loans last for the whole call. They cannot be ended with `loan-end`, and last-use
+inference never expires them. The body can reborrow them (`(reborrow ... "c" shared "*%0" %0)`) or
+use them as a `call-borrow` parent. A consumed argument is released by `(drop-state "*%N")` or by
+passing it to another consuming call. Padding never counts as initialized at entry. A `write`
+argument does not track the drop obligations of its caller.
+
+The other promises are checked as follows:
+
+- `closed`: any load or store through external storage, such as a global, is `contract-not-closed`.
+  Pointer values loaded from argument memory have unknown provenance and are refused when used.
+- `noescape`: storing a local, argument, or loan-derived pointer into argument memory is
+  `contract-escape`. Storing a pointer of unknown provenance there is refused. Returning an
+  argument pointer is allowed only through the declared returned alias.
+- Returned alias: every returned pointer must lie in the declared argument region at the
+  declared offset. An `exclusive` alias also needs an all-exclusive loan chain. A returned
+  pointer that fails this is `contract-return-mismatch`.
+- `nothrow`: every call in the body already needs a contract, and every contract is `nothrow`.
+
+A verified function needs no local declaration facts beyond `(decl %N param)`. Region names
+cannot collide with local slots, symbols, or loan IDs. A body that calls an uncontracted function
+is still refused. Recursive and mutually recursive definitions are checked against the same
+summaries they use, so the summaries work as an inductive hypothesis. That is sound only for
+partial correctness: a non-terminating call satisfies any summary. External definitions,
+summaries that this module does not define, and C/C++ prototype correspondence remain trusted.
+
+The fixtures are in `tests/pathb-borrow/verify`. The runner also lowers
+`tests/pathb-borrow/contracts/callees.cpp` through the real frontend, prepends correct and incorrect
+summaries, and checks both results. `tests/mruby/pathb-edge/verified_callee_facts.ir` links verified
+callees with their caller and runs natively.
 
 ## Refusals and limits
 
@@ -183,8 +483,8 @@ Exit status is 0 for supported local checks passing, 1 for a detected lifetime/i
 error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics currently identify
 functions and slots; source spans remain future work.
 
-Calls require effect/lifetime contracts and are refused. So are rvalue-reference arguments,
-aggregate values, field/index projections, pointer arithmetic, unknown pointer provenance,
+Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
+aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
 external stores, and stores through multiple possible destinations. Unknown instructions are
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
@@ -202,8 +502,8 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next shared-IR extensions are field-sensitive places, partial moves, drops, call
-effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
+The next steps are frontend layout/ownership emission, summary emission or inference for defined functions, general returned and
+retained reference relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
 
@@ -215,7 +515,21 @@ Paired fixtures in `tests/pathb-borrow/inferred` check both explicit and inferre
 last-use release, future-use conflicts, branch-specific release, backedges, stored pointers, and
 parent/child demands. Refusal cases are also run with inference enabled. Value-transfer fixtures
 run in both loan modes and cover moved-state joins, reinitialization,
-consuming pointer carriers, and conflicts with live loans. The explicit-loan and
+consuming pointer carriers, and conflicts with live loans. Field-range fixtures cover partial
+moves, byte repairs, overlapping loans, projected reborrows, pointer-field provenance, storage
+reuse, and conservative padding checks. Semantic-layout fixtures verify field-only initialization,
+nested layouts, moved fields, raw padding reads, storage lifetimes, and malformed descriptor graphs.
+Drop-state fixtures check conditional flags, double consumption, missing cleanup, construction
+registration, field ownership, typed transfers, reconstruction, and live-loan conflicts.
+Call fixtures cover preconditions, aliasing, scalar signatures, initialization, ownership
+consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
+cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
+contracts, and inferred last-use release.
+Verified-summary fixtures cover each argument effect, nested and recursive contracted calls,
+argument reborrows, returned alias offsets and permissions, closed and noescape violations,
+missing outputs or consumption, and malformed signatures.
+A native test checks both the unchanged QBE and the stricter conservative result when metadata is
+removed. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,
 loop iterations, parent restoration, nested children, shared siblings, and invalid parent graphs. A native execution check verifies that loan metadata erasure leaves the QBE output
 unchanged and that the emitter agrees with its oracle. The Path B CI workflow runs this suite

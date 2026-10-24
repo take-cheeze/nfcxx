@@ -10,10 +10,11 @@
 # atomic-builtins), which this script applied before, the __builtin_strstr, __builtin_char_memchr and libc++ string builtins (strchr, strrchr, strpbrk, strlen, memcmp, memmove), and the aarch64-apple va_arg of aggregates. Earlier nfcxx patches (empty-struct, vaarg-aggregate, empty-copy,
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
-# this comment together when rebasing those patches onto a new upstream. The pin itself is on branch nfcxx/blit:
-# those commits, later fixes (static address minus a constant, char pointers differing in signedness), the
-# alignment, padding and size of over-aligned structs in QBE types (Rust #[repr(align(128))] through mrustc), and
-# struct copies above 16 bytes as one blit.
+# this comment together when rebasing those patches onto a new upstream. The pin itself is on branch
+# nfcxx/blit-stmt-expr, a merge of two branches over those commits and later fixes (static address minus a constant,
+# char pointers differing in signedness): nfcxx-stmt-expr, GNU statement expressions ({ ... }), which ASTro's
+# baruby_precise needs (docs/notes/astro.md); and nfcxx/blit, the alignment, padding and size of over-aligned structs
+# in QBE types (Rust #[repr(align(128))] through mrustc) and struct copies above 16 bytes as one blit.
 # The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe): no patch files are applied.
 # The pin is on branch nfcxx/align-large: nfcxx-patched plus data alignments above 127 (Rust #[repr(align(128))]) and a
 # parallel move table in rega.c that grows (it held 64 copies, which regex-automata 0.4.18 and mold 3 exceed), and

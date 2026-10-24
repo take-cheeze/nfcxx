@@ -21,6 +21,7 @@
 # tests must give the same results. A test with "// MEMORY64-TRAP" traps only under the mode (its address is outside the
 # 32-bit memory, which the default module wraps), so it runs under the mode and is skipped otherwise. The ASan and the
 # Emscripten modes are not combined with it.
+# checked_arith.ir (hand-written IR) is emitted in the LP64 modes and checked by checked_arith.cjs.
 # Skipped, not failed, without node (set NODE to a binary) or without the Path B harness (scripts/setup-pathb.sh).
 cd "$(dirname "$0")/../.."
 root=$PWD; dir=$root/tests/wasm
@@ -70,13 +71,19 @@ for f in "$dir"/*.cpp; do
     trap_want=$((trap_want + 1))
   fi
   refuse=$(sed -n 's|^// REFUSE: *||p' "$f" | head -1)
-  if ! "$root/scripts/pathb-dump" "${ir_args[@]}" "$f" > "$tmp/$n.ir" 2> "$tmp/$n.front"; then
+  # a refusal names the function and the source line (NFCXX_IR_LOC: the IR's (loc ...) statements); the test's
+  # directory is left out of the line, so that a REFUSE text can name it as FILE:LINE
+  loc=0; [ -n "$refuse" ] && loc=1
+  if ! NFCXX_IR_LOC=$loc "$root/scripts/pathb-dump" "${ir_args[@]}" "$f" > "$tmp/$n.ir" 2> "$tmp/$n.front"; then
     echo "FAIL $n: front end: $(head -1 "$tmp/$n.front")"; fail=$((fail + 1)); continue
   fi
   if [ -n "$refuse" ]; then
     if "$root/scripts/mrb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$tmp/$n.ir" > "$tmp/$n.wasm" 2> "$tmp/$n.err"; then
       echo "FAIL $n: emitted a module, expected a refusal"; fail=$((fail + 1))
-    elif grep -qF "refused: $refuse" "$tmp/$n.err" || grep -qF "$refuse" "$tmp/$n.err"; then
+      continue
+    fi
+    sed -i "s|$(dirname "$f")/||g" "$tmp/$n.err"
+    if grep -qF "refused: $refuse" "$tmp/$n.err" || grep -qF "$refuse" "$tmp/$n.err"; then
       echo "ok   $n (refused: $(head -1 "$tmp/$n.err"))"; pass=$((pass + 1))
     else
       echo "FAIL $n: refusal text was: $(head -1 "$tmp/$n.err")"; fail=$((fail + 1))
@@ -104,5 +111,15 @@ for f in "$dir"/*.cpp; do
   elif [ "$got" = "$want" ]; then echo "ok   $n ($got)"; pass=$((pass + 1))
   else echo "FAIL $n: want $want, got $got"; fail=$((fail + 1)); fi
 done
+# checked_arith.ir: hand-written LP64 IR, so not under the emscripten modes (ILP32); checked_arith.cjs calls its functions
+if [ $emscripten = 0 ]; then
+  if "$root/scripts/mrb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$dir/checked_arith.ir" \
+      > "$tmp/checked_arith.wasm" 2> "$tmp/checked_arith.err" &&
+    got=$("$node" "$dir/checked_arith.cjs" "$tmp/checked_arith.wasm" 2>&1); then
+    echo "ok   checked_arith ($got)"; pass=$((pass + 1))
+  else
+    echo "FAIL checked_arith: $(cat "$tmp/checked_arith.err") $got"; fail=$((fail + 1))
+  fi
+fi
 echo "tests/wasm ($mode): $pass passed, $fail failed, $skip skipped"
 [ $fail -eq 0 ]

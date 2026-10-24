@@ -29,6 +29,7 @@ Anything not lowered prints an (unsupported KIND NAME) marker, counted by NFCXX_
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 USING_NAMESPACE_EDG
 
@@ -66,13 +67,28 @@ static void ir_buf_open(ir_buf *b)
   b->in_file = 0;
 }
 
+static char *ir_fmt(const char *fmt, ...);
+
 /* A buffer for text too large to keep in memory (the module's functions: hundreds of MB for a large CUDA unit, on top
-   of the front end's own memory). */
+   of the front end's own memory). The file is in $TMPDIR (else /tmp), unlinked once open. Not tmpfile(): glibc's always
+   uses /tmp, which is often a tmpfs, so the text would still take memory, and outside the process's own limit. */
 static void ir_buf_open_file(ir_buf *b)
 {
-  b->f = tmpfile();
+  const char *dir = getenv("TMPDIR");
+  char *path;
+  int fd;
+  if (dir == NULL || dir[0] == 0) dir = "/tmp";
+  path = ir_fmt("%s/nfcxx_ir.XXXXXX", dir);
+  fd = mkstemp(path);
+  if (fd < 0) {
+    fprintf(stderr, "nfcxx_ir: cannot create a temporary file in %s\n", dir);
+    exit(EXIT_FAILURE);
+  }
+  unlink(path);
+  free(path);
+  b->f = fdopen(fd, "w+");
   if (b->f == NULL) {
-    fprintf(stderr, "nfcxx_ir: tmpfile failed\n");
+    fprintf(stderr, "nfcxx_ir: fdopen failed\n");
     abort();
   }
   b->data = NULL;
@@ -352,6 +368,9 @@ static int ir_trap_overflow;
    emitter can name the place of a failing check, and (unreachable missing-return) for a function that is left without a
    value. Without it the output is as before. ir_loc_file/ir_loc_line: the last location printed in this function. */
 static int ir_ubsan;
+/* 1 when only the (loc "FILE" LINE) statements are wanted, with no change to the checks: NFCXX_IR_LOC=1 (the wasm
+   explorer, so that a refusal of the emitter names a source line). NFCXX_IR_SANITIZE implies it. */
+static int ir_loc;
 static char *ir_loc_file;
 static unsigned long ir_loc_line;
 
@@ -5411,7 +5430,7 @@ static void ir_loc_stmt(a_statement_ptr s, int d)
   a_boolean at_end = FALSE;
   char *q, *o;
   const char *c;
-  if (!ir_ubsan || s == NULL || s->position.seq == 0) return;
+  if (!ir_loc || s == NULL || s->position.seq == 0) return;
   if (conv_seq_to_file_and_line(s->position.seq, &fname, &full, &line, &at_end) == NULL || fname == NULL) return;
   if (ir_loc_file != NULL && strcmp(ir_loc_file, fname) == 0 && ir_loc_line == (unsigned long)line) return;
   free(ir_loc_file);
@@ -6028,6 +6047,10 @@ void nfcxx_ir_back_end(void)
     const char *sz = getenv("NFCXX_IR_SANITIZE");
     ir_ubsan = sz != NULL && sz[0] != 0;
     if (ir_ubsan && (strstr(sz, "undefined") != NULL || strstr(sz, "signed-integer-overflow") != NULL)) ir_trap_overflow = 1;
+  }
+  {
+    const char *lc = getenv("NFCXX_IR_LOC");
+    ir_loc = ir_ubsan || (lc != NULL && strcmp(lc, "1") == 0);
   }
   {
     const char *bf = getenv("NFCXX_PATHB_BORROW");

@@ -10,6 +10,9 @@ scripts/mrb scripts/pathb-wasm-emit.rb prog.ir > prog.wasm
 node tests/wasm/host.cjs prog.wasm          # runs main, prints its result (or "trap")
 ```
 
+`--names` adds the custom `name` section (function names: the imports, the IR's functions, and the `--asan` runtime's),
+so that an engine's stack trace names the functions (`at _Z4deepi (wasm://...)`); the wasm explorer uses it.
+
 `tests/wasm/run.sh` does this for each `tests/wasm/*.cpp`. Each test has its expected result in `// EXPECT: N`
 (the `g++ -O0` result, except `calls.cpp`, whose import is a stub), or `// TRAP` (main traps), or `// REFUSE: TEXT`
 (the emitter refuses with TEXT). The suite skips, rather than fails, without node. `NFCXX_WASM_ASAN=1` runs every
@@ -49,6 +52,11 @@ the same front end with EDG's `linux_riscv32` target; see "Emscripten" below.
 Division by zero, `INT_MIN / -1`, a float-to-integer conversion out of range or from NaN, `unreachable` and `trap` trap
 through wasm's own traps. A shift count not below the width of the left operand, a null `nonnull` pointer and an index
 outside `bounds` trap through an explicit `unreachable`.
+
+The checked arithmetic `cadd csub cmul cneg` (`NFCXX_IR_OVERFLOW=trap`, and `nsw` in `llvm-to-pathb.rb`) traps when the
+exact result does not fit the type, signed or unsigned. Below 64 bits the exact result is computed in i64 and its range
+is checked. At 64 bits the wrapped result is checked: `cadd` and `csub` by the signs of the operands and the result (or
+the carry, unsigned), `cmul` by dividing the result by the left operand (`INT64_MIN * -1` traps in that division).
 
 ## AddressSanitizer (`--asan`)
 
@@ -160,7 +168,9 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
 - Use after scope: the emitter has no scope markers (`scope-end`), so a block's locals are not poisoned at its end.
 - Use after return once another call has reused the frame. There is no quarantine for frames.
 - Stack exhaustion: the stack growing into the heap or the static data is not detected.
-- The null page, addresses below 16. Accesses into the shadow itself (the top 1/8 of the memory) are not checked.
+- The null page, addresses below 16. Accesses into the shadow itself (the top 1/8 of the memory) are not checked, and
+  neither are the pages a host adds after it with `memory.grow` (the wasm explorer's `mmap` binding, TinyGo's heap): the
+  check returns at once for an address at or above the shadow's base.
 - The allocator's own code is not instrumented, and the header of a block is written without a check.
 - Uninitialized reads, leaks and the other checks of libasan.
 
@@ -193,11 +203,11 @@ from the ILP32 IR, and `NFCXX_WASM_EMSCRIPTEN=import` with `--emscripten-import-
 With `--emscripten-import-memory` the module imports `env.memory` (no maximum, initial size the module's pages) and has
 no memory section or `memory` export. Growing it is the host's `memory.grow`; the module does not grow it.
 
-- **The table.** The emitter refuses indirect calls (`Fn#call`) and function addresses (`op_type`, and a static
-  initializer of `&"f"`), and it emits no `call_indirect`. So no module code calls through the table, and no function is
-  stored in it: the table has no element segment, and no call through it can trap. It is exported empty, with no
-  maximum, so the JS side can grow it (`tests/wasm/emscripten.cjs` grows it by one). Whether the Emscripten glue uses
-  the table at all is not checked (point 3 below).
+- **The table.** It is the module's function table ("What is handled", function pointers): empty when the module takes
+  no function's address, else slot 0 null and the functions from slot 1, which the module's `call_indirect` uses. It
+  is exported with no maximum, so the JS side can grow it (`tests/wasm/emscripten.cjs` checks the slots and grows it by
+  one). A function the glue adds (`addFunction`) goes to a slot the module's pointers never name. Whether the
+  Emscripten glue uses the table at all is not checked (point 3 below).
 - **Constructors.** The IR has no list of static constructors: a dynamically initialized global is refused (`(unsupported
   init ...)`, see "What is refused"), so there is nothing for `__wasm_call_ctors` to run. It is exported as an empty
   function that returns and leaves the stack pointer alone.
@@ -305,11 +315,30 @@ skipped); `tests/wasm/run.sh` (24 passed) and the ASan and Emscripten modes are 
 
 Scalars, pointers and their arithmetic (`offset`, `index`, `pdiff`), the integer and float operators, comparisons,
 conversions (`iconv`, `i2f`, `u2f`, `fconv`, `cf2i`, `p2i`, `i2p`, `bitcast`), `load`, `store`, `copy` (`memory.copy`),
-slots, direct calls, `if`, `loop` with `break` and `continue`, `return`, and the checks above.
+slots, `alloca` (dynamic stack, released at the return; refused under `--asan`), direct calls, calls through a function
+pointer, `if`, `loop` with `break` and `continue`, `return`, and the checks above. `copy` and `zero-fill` take a constant
+length or a run-time one (an `unsigned_long` register: `memory.copy` and `memory.fill` take it as it is; under `--asan`
+the range is checked with the run-time size). `bitcast` also reinterprets a float as an integer of its size and back
+(`i32.reinterpret_f32` and the like).
+
+Function pointers. The functions whose address the IR takes (`&"f"` anywhere but as a call's callee, also in a static
+initializer) get the slots of a function table from 1, in order of first use; the table and its element segment are in
+the module only when there is one (and under `--emscripten`, which exports the table, always). A function pointer's
+value is its slot, an i64 under LP64. Slot 0 stays empty, so a call through a null pointer traps. A call through a
+pointer is `call_indirect` with the type of the call's arguments and result, which the engine checks against the
+function in the slot (a mismatch traps). Taking the address of a function the module neither defines nor calls is
+refused (its signature is not known). `function_pointers.cpp` checks a call through a pointer, a table of pointers in a
+static initializer and a pointer passed as an argument. A `let` may take a bare operand (`llvm-to-pathb.rb` copies phi values so),
+and a parameter's register may be any `%N` (EDG numbers them from `%0`, `llvm-to-pathb.rb` from `%1`).
 
 Two forms of `goto` are handled because the front end produces them for `break` and `continue`: a jump to the label at
-the end of a loop body, and a jump to the label just after a loop or a switch. Any other `goto`, and any other label, is
-refused.
+the end of a loop body, and a jump to the label just after a loop or a switch.
+
+A body of labels and gotos with no `loop` or `switch` (the control flow graph `llvm-to-pathb.rb` writes, or a C or C++
+`goto`, see `goto_dispatch.cpp`) is lowered as a dispatch, when every label is at the top level of the body. The labels
+split the body into segments; a loop runs the segment that a local names, through a `br_table` into nested blocks
+(segment j starts at the end of block j), and control falls from one segment into the next as it falls past a label. A
+`goto` sets the local and branches to the loop. Any other `goto` and label is refused.
 
 `switch` (`docs/notes/pathb-stage2.md`, section 2). The markers `(case (const T V))` and `(default)` may sit in blocks of
 the body; the body's statements are split into arms at them. The selector is compared with each case value in order by
@@ -321,15 +350,20 @@ leaves it (its label stack entry is the switch's), and `continue` goes to the en
 
 ## What is refused (the next steps)
 
-Each refusal names the node on stderr and exits with status 3. None is dropped silently.
+Each refusal names the node on stderr and exits with status 3. None is dropped silently. A refusal inside a function
+names the function, and the source line of the statement when the IR has `(loc ...)` statements (`NFCXX_IR_LOC=1` of
+`pathb-dump`): `refused: variadic call (in _Z4showi, at prog.cpp:6)`. A global or a `data` form that is refused is
+refused only when the module uses it (an unused `std::float16_t` constant of a header does not stop the module). The
+top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped.
 
-- General `goto` and labels: the jumps other than the ones above, and a switch whose arm falls into the next non-empty one.
-  The structurizer that `pathb-stage2.md` section 2 asks for is needed for these.
+- General `goto` and labels in a body that also has a `loop` or a `switch`, or a label inside a nested statement, and a
+  switch whose arm falls into the next non-empty one. The structurizer that `pathb-stage2.md` section 2 asks for is
+  needed for these.
 - A use of an extern global (`(extern)`, declared here and defined elsewhere), of a dynamically initialized one
   (`(unsupported init ...)`), of a thread-local one, or of a function's address in a static initializer (`addr` to `&"f"`).
   A declaration that nothing uses is not refused: it has no storage, and the QBE path drops it the same way.
 - Aggregate parameters, results and arguments (`byval`, `sret`), and aggregate values in registers.
-- Variadic calls, indirect calls and function addresses (a table would be needed).
+- Variadic calls.
 - Bit-fields (`bfload`, `bfstore`), inline assembly, VLAs and exceptions, and the 16-byte types.
 - `cf2i` to a type narrower than 32 bits: the range check for the narrow target is not lowered yet.
 - A jump to the label after a loop from outside that loop (only the jumps from inside it are handled).
@@ -350,13 +384,17 @@ initializer, a struct with a pointer to another global, a string read through a 
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
 (`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested
 switches on a long selector, and a return in each arm. `refuse_switch_fallthrough.cpp` and `refuse_global.cpp` check the
-two refusals. Node instantiates a module only after validating it, so a malformed
+two refusals, and `refuse_located.cpp` the function and line a refusal names (the suite dumps a `REFUSE` test with
+`NFCXX_IR_LOC=1`). `goto_dispatch.cpp` checks the dispatch lowering, `function_pointers.cpp` the function table, and `checked_arith.ir` (hand-written IR, emitted in the
+LP64 modes) checks the checked arithmetic at the edges of each width through `checked_arith.cjs`. Node instantiates a
+module only after validating it, so a malformed
 module fails the test. `tests/wasm/frames.cpp` makes 1000 calls with 256 bytes of locals each: the frames must be released
 for it to pass in 128 KB.
 
-Sweep over the 262 IR files in the repo (`tests/pathb-ir`, its borrow goldens, `tests/mruby/pathb-edge`): 46 emit, and
-every module validates; 168 are refused for the gaps above; 48 are malformed IR (the edge cases that test the parser,
-which exit with status 1 as the QBE emitter does). Before the statics and the switch were lowered, the sweep had 34 emit,
+Sweep over the 306 IR files in the repo (`tests/pathb-ir`, the borrow goldens of `tests/pathb-borrow`,
+`tests/mruby/pathb-edge`): 62 emit, and every module validates; 196 are refused for the gaps above; 48 are malformed IR
+(the edge cases that test the parser, which exit with status 1 as the QBE emitter does). Before the checked arithmetic,
+`alloca` and the goto dispatch the same files gave 54, 204 and 48, and before the function table 59, 199 and 48. Before the statics and the switch were lowered, the sweep had 34 emit,
 197 refused and 31 malformed: 17 of the malformed files are `e_*` edge cases that the refusal of `global` hid until now.
 
 Not done: a C library for the modules (a program that prints goes through an import), and an oracle in Python. The

@@ -1,0 +1,22 @@
+; The nfcxx mid-level IR (docs/notes/pathb-stage2.md), written by hand: the input of the wasm emitter, with no front end.
+; gcd is Euclid's algorithm as a structured loop; main() returns gcd(1071, 462) + gcd(48, 180) = 21 + 12 = 33.
+(ir-module "gcd" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "gcd"
+  (ret int)
+  (params (param %1 "a" int) (param %2 "b" int))
+  (loop
+    (body
+      (let %3 bool (ne int %2 (const int 0)))
+      (if %3 (then) (else (break)))
+      (let %4 int (crem int %1 %2))
+      (set %1 %2)
+      (set %2 %4))
+    (step))
+  (return %1))
+(function "main"
+  (ret int)
+  (params )
+  (let %1 int (call int &"gcd" (const int 1071) (const int 462)))
+  (let %2 int (call int &"gcd" (const int 48) (const int 180)))
+  (let %3 int (cadd int %1 %2))
+  (return %3))
