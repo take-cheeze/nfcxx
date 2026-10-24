@@ -15,7 +15,7 @@ covers say so.
 | [builtins.md](notes/builtins.md) | Table of compiler builtins: what EDG accepts per dialect and what runs on the gcc and qbe backends. |
 | [cxx-driver.md](notes/cxx-driver.md) | `nfcxx` as `CXX` for CMake and mruby: the driver options accepted, and the rpg-maker-clone desktop build's remaining blockers. |
 | [sqlite.md](notes/sqlite.md) | SQLite 3.54.1 built with nfcc (`scripts/setup-sqlite.sh`) and `lib/sqlcache`, a TTL key-value cache on it. `tests/sqlite/run.sh`. |
-| [astro.md](notes/astro.md) | ASTro (ko1/astro: ASTroGen, partial evaluation into C, a Code Store that compiles with `$(CC)`) built with nfcc: calc and luastro on both backends, two patches for Ruby 3.3 and cproc. `tests/realworld/run_astro.sh`. |
+| [astro.md](notes/astro.md) | ASTro (ko1/astro: ASTroGen, partial evaluation into C, a Code Store that compiles with `$(CC)`) built with nfcc: calc, luastro and baruby_precise (with Prism) on both backends (baruby_precise on gcc only: cproc has no statement expressions), two patches for Ruby 3.3 and cproc. `tests/realworld/run_astro.sh`. |
 | [libclang-edg.md](notes/libclang-edg.md) | libclang's C API on the EDG front end: `build/libclang-edg/libclang-edg.so`, with a back end that lists the declarations (`be/nfcxx_decl.c`), the `clang.cindex` binding walking them, generated stubs for the rest, and the known differences from libclang 18. `tests/libclang-edg/run.sh`. |
 | [eval.md](notes/eval.md) | `nfceval` (`lib/eval`): evaluating C++ snippets at run time with bound host objects, and `nfcxx -shared`. |
 | [eh-shim.md](notes/eh-shim.md) | Exceptions thrown by libstdc++.so (`std::__throw_*`) and `std::exception_ptr` on EDG's exception runtime: the shim library, the runtime hooks, link order, limits. |
