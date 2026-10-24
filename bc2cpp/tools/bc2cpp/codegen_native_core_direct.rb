@@ -191,6 +191,7 @@ module NativeCoreDirectFallback
     case entry.arg
     when :none then true
     when :nil_or_string then %w[NilClass String].include?(site[:arg_class].call(0))
+    when :array then site[:arg_class].call(0) == 'Array'
     when :integer then false
     end
   end
