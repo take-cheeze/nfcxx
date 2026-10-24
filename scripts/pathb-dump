@@ -63,6 +63,8 @@ if [ "$hosted" != 0 ]; then
 fi
 
 export NFCXX_PATHB_MODE=$mode   # read by back_end() in be/nfcxx_be.c: "ir" selects be/nfcxx_ir.c
+# The IR back end keeps the module's functions in a file in TMPDIR; the front end runs in the base dir, so make it absolute.
+[ -z "${TMPDIR:-}" ] || export TMPDIR="$(abs_path "$TMPDIR")"
 status=0
 for file in "${files[@]}"; do
   f=$(realpath "$file")
