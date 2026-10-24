@@ -488,6 +488,22 @@ def store_place(expr, val, vty, types, locals, params, param_reg, stmts, regi)
   if pt.start_with?("(") && !pt.start_with?("(ptr") && !pt.start_with?("(fn")
     stmts << "(copy #{sz} #{addr} #{val})"
   else
+    vpt = vty ? rust_type_to_pathb(vty, types) : nil
+    if vpt.nil? && val.to_s.match?(/^%/)
+      vpt = nil
+    end
+    if !vpt.nil? && vpt != pt && !vpt.start_with?("(") && !pt.start_with?("(")
+      r = regi; regi += 1
+      stmts << "(let %#{r} #{pt} (iconv #{pt} #{val}))"
+      val = "%#{r}"
+    elsif vpt.nil? && val.to_s.start_with?("%")
+      vint = {"signed_char"=>8, "unsigned_char"=>8, "short"=>16, "unsigned_short"=>16, "int"=>32, "unsigned_int"=>32, "long"=>64, "unsigned_long"=>64, "float"=>32, "double"=>64, "bool"=>1}[pt]
+      if vint && vint < 64
+        r = regi; regi += 1
+        stmts << "(let %#{r} #{pt} (iconv #{pt} #{val}))"
+        val = "%#{r}"
+      end
+    end
     stmts << "(store #{pt} #{addr} #{val})"
   end
   regi
@@ -949,9 +965,7 @@ def coerce_to(ty, v, vpt, stmts, regi)
       op = (vpt || "").include?("unsigned") ? "u2f" : "i2f"
       stmts << "(let %#{r} #{ty} (#{op} #{ty} #{v}))"
     else
-      op = (vpt || "") == "float" ? "f2i" : "d2i"
-      op = op + ".s" unless ty.include?("unsigned")
-      stmts << "(let %#{r} #{ty} (#{op} #{ty} #{v}))"
+      stmts << "(let %#{r} #{ty} (cf2i #{ty} #{v}))"
     end
   else
     stmts << "(let %#{r} #{ty} (iconv #{ty} #{v}))"
@@ -1122,11 +1136,12 @@ def eval_binop(op, l, r, types, locals, params, param_reg, stmts, regi, hint_ty 
   lt, regi = coerce_to(ty, lt, lpt, stmts, regi)
   rt, regi = coerce_to(ty, rt, rpt, stmts, regi)
   unsigned = ty.include?("unsigned")
+  is_float = ty == "float" || ty == "double"
   code = case op
-  when "+" then "(wadd #{ty} #{lt} #{rt})"
-  when "-" then "(wsub #{ty} #{lt} #{rt})"
-  when "*" then "(wmul #{ty} #{lt} #{rt})"
-  when "/" then "(cdiv #{ty} #{lt} #{rt})"
+  when "+" then is_float ? "(fadd #{ty} #{lt} #{rt})" : "(wadd #{ty} #{lt} #{rt})"
+  when "-" then is_float ? "(fsub #{ty} #{lt} #{rt})" : "(wsub #{ty} #{lt} #{rt})"
+  when "*" then is_float ? "(fmul #{ty} #{lt} #{rt})" : "(wmul #{ty} #{lt} #{rt})"
+  when "/" then is_float ? "(fdiv #{ty} #{lt} #{rt})" : "(cdiv #{ty} #{lt} #{rt})"
   when "%" then "(crem #{ty} #{lt} #{rt})"
   when "&" then "(and #{ty} #{lt} #{rt})"
   when "|" then "(or #{ty} #{lt} #{rt})"
@@ -1178,7 +1193,11 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
     if op == "!"
       return ["(not #{ty} #{vt})", regi]
     else
-      return ["(wneg #{ty} #{vt})", regi]
+      if ty == "float" || ty == "double"
+        return ["(fneg #{ty} #{vt})", regi]
+      else
+        return ["(wneg #{ty} #{vt})", regi]
+      end
     end
   end
   m = expr.match(/^BINOP\s+(.+?)\s+(<=?|>=?|==|!=|<<|>>|[+\-*\/%&|^])\s+(.+)$/)
@@ -1373,7 +1392,29 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
     return regi
   end
   if rhs.start_with?("MAKEDST")
-    parts = rhs.sub(/^MAKEDST\s+/, "").split(",", 2).map(&:strip)
+    rest = rhs.sub(/^MAKEDST\s+/, "")
+    parts = nil
+    if rest.start_with?('b"') || rest.start_with?('"')
+      q = rest[0] == 'b' ? 'b"' : '"'
+      qi = rest.index('"', q.length)
+      while qi
+        bs = 0
+        k = qi - 1
+        while k >= 0 && rest[k] == "\\"
+          bs += 1
+          k -= 1
+        end
+        break if bs.even?
+        qi = rest.index('"', qi + 1)
+      end
+      if qi
+        after = rest[qi+1..].strip
+        if after.start_with?(",")
+          parts = [rest[0..qi].strip, after[1..].strip]
+        end
+      end
+    end
+    parts ||= rest.split(",", 2).map(&:strip)
     ptr_expr = parts[0]
     meta_expr = parts[1]
     pv, regi = eval_rvalue_operand(ptr_expr, types, locals, params, param_reg, stmts, regi, lines)
@@ -1521,6 +1562,14 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
           if fpt2.start_with?("(") && !fpt2.start_with?("(ptr") && !fpt2.start_with?("(fn")
             stmts << "(copy #{fsz2} #{faddr} #{fvv})"
           else
+            if fvv.to_s.start_with?("%") && fpt2 != "unsigned_long"
+              vint = {"signed_char"=>8, "unsigned_char"=>8, "short"=>16, "unsigned_short"=>16, "int"=>32, "unsigned_int"=>32, "long"=>64, "unsigned_long"=>64, "float"=>32, "double"=>64, "bool"=>1}[fpt2]
+              if vint && vint < 64
+                r = regi; regi += 1
+                stmts << "(let %#{r} #{fpt2} (iconv #{fpt2} #{fvv}))"
+                fvv = "%#{r}"
+              end
+            end
             stmts << "(store #{fpt2} #{faddr} #{fvv})"
           end
         end
@@ -1608,15 +1657,12 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
       if dpt != spt && !dpt.start_with?("(") && !(spt || "").start_with?("(")
         if (dpt == "float" || dpt == "double") && !((spt || "").include?("float") || (spt || "") == "double")
           r = regi; regi += 1
-          op = dpt == "float" ? "i2f" : "i2d"
-          op = op + ".s" unless (spt || "").include?("unsigned")
+          op = (spt || "").include?("unsigned") ? "u2f" : "i2f"
           stmts << "(let %#{r} #{dpt} (#{op} #{dpt} #{svv}))"
           val = "%#{r}"
         elsif ((spt || "") == "float" || (spt || "") == "double") && !(dpt.include?("float") || dpt == "double")
           r = regi; regi += 1
-          op = (spt || "") == "float" ? "f2i" : "d2i"
-          op = op + ".s" unless dpt.include?("unsigned")
-          stmts << "(let %#{r} #{dpt} (#{op} #{dpt} #{svv}))"
+          stmts << "(let %#{r} #{dpt} (cf2i #{dpt} #{svv}))"
           val = "%#{r}"
         else
           r = regi; regi += 1
@@ -1744,6 +1790,14 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
       if fpt.start_with?("(") && !fpt.start_with?("(ptr") && !fpt.start_with?("(fn")
         stmts << "(copy #{fsz} #{fa} #{fvv})"
       else
+        if fvv.to_s.start_with?("%") && fpt != "unsigned_long"
+          vint = {"signed_char"=>8, "unsigned_char"=>8, "short"=>16, "unsigned_short"=>16, "int"=>32, "unsigned_int"=>32, "long"=>64, "unsigned_long"=>64, "float"=>32, "double"=>64, "bool"=>1}[fpt]
+          if vint && vint < 64
+            r = regi; regi += 1
+            stmts << "(let %#{r} #{fpt} (iconv #{fpt} #{fvv}))"
+            fvv = "%#{r}"
+          end
+        end
         stmts << "(store #{fpt} #{fa} #{fvv})"
       end
     end
@@ -1785,6 +1839,37 @@ functions.each do |fn|
   next if fn[:body].nil?
   next if name == "panic_impl" || name.start_with?("panic_impl")
   next if name == "main"
+  if name.include?("sync6atomic11atomic_load1g") || name.include?("sync6atomic11atomic_store1g")
+    params = parse_params_str(params_str)
+    pathb_ret = rust_type_to_pathb(ret, types)
+    ety = params[0] ? params[0].sub(/^\*(const|mut)\s+/, "").strip : "u8"
+    ept = rust_type_to_pathb(ety, types)
+    ept = "unsigned_long" if ept.start_with?("(")
+    is_load = name.include?("atomic_load1g")
+    func_text = []
+    func_text << "(function #{name.inspect}"
+    if is_load
+      func_text << "  (ret #{ept})"
+    else
+      func_text << "  (ret void)"
+    end
+    if is_load
+      func_text << "  (params (param %0 \"arg0\" (ptr #{ept})) (param %1 \"arg1\" unsigned_char))"
+    else
+      func_text << "  (params (param %0 \"arg0\" (ptr #{ept})) (param %1 \"arg1\" #{ept}) (param %2 \"arg2\" unsigned_char))"
+    end
+    func_text << "  (weak)"
+    if is_load
+      func_text << "  (let %10 #{ept} (load #{ept} %0))"
+      func_text << "  (return %10)"
+    else
+      func_text << "  (store #{ept} %0 %1)"
+      func_text << "  (return)"
+    end
+    func_text << ")"
+    lines << func_text.join("\n")
+    next
+  end
   params = parse_params_str(params_str)
   pathb_ret = rust_type_to_pathb(ret, types)
   agg_ret = pathb_ret.start_with?("(") && !pathb_ret.start_with?("(ptr") && !pathb_ret.start_with?("(fn")
@@ -2220,7 +2305,31 @@ functions.each do |fn|
                 spt = "unsigned_long" if spt.start_with?("(") && !spt.start_with?("(ptr")
                 stmts << "(store #{spt} #{dest_addr} #{v})"
               else
-                store_dest.call(v)
+                dpt = dest_ty ? rust_type_to_pathb(dest_ty, types) : nil
+                spt = at ? rust_type_to_pathb(at, types) : nil
+                if dpt && spt && dpt != spt && !dpt.start_with?("(") && !spt.start_with?("(")
+                  dq = {"signed_char"=>"w", "unsigned_char"=>"w", "short"=>"w", "unsigned_short"=>"w", "int"=>"w", "unsigned_int"=>"w", "long"=>"l", "unsigned_long"=>"l", "float"=>"s", "double"=>"d", "bool"=>"w"}[dpt]
+                  sq = {"signed_char"=>"w", "unsigned_char"=>"w", "short"=>"w", "unsigned_short"=>"w", "int"=>"w", "unsigned_int"=>"w", "long"=>"l", "unsigned_long"=>"l", "float"=>"s", "double"=>"d", "bool"=>"w"}[spt]
+                  if dq && sq && dq != sq
+                    if (dq == "s" || dq == "d") != (sq == "s" || sq == "d")
+                      $lit_slots ||= []
+                      bslot = "bctmp#{$lit_slots.size}"
+                      $lit_slots << "(slot #{bslot.inspect} unsigned_long 8 8)"
+                      stmts << "(store #{spt} $\"#{bslot}\" #{v})"
+                      r = regi; regi += 1
+                      stmts << "(let %#{r} #{dpt} (load #{dpt} $\"#{bslot}\"))"
+                      store_dest.call("%#{r}")
+                    else
+                      r = regi; regi += 1
+                      stmts << "(let %#{r} #{dpt} (bitcast #{dpt} #{v}))"
+                      store_dest.call("%#{r}")
+                    end
+                  else
+                    store_dest.call(v)
+                  end
+                else
+                  store_dest.call(v)
+                end
               end
             end
           when "unchecked_add", "unchecked_sub", "unchecked_mul"
@@ -2916,6 +3025,27 @@ functions.each do |fn|
             stmts << "(if #{cv} (then (goto #{tb.inspect})) (else (goto #{fb.inspect})))"
           end
         end
+      elsif ln.start_with?("SWITCHVALUE")
+        m = ln.match(/^SWITCHVALUE (.+) \{ (.*) \}$/)
+        abort "invalid SWITCHVALUE: #{ln}" unless m
+        sval = m[1].strip
+        sty = place_type(sval, types, locals, params)
+        spt = rust_type_to_pathb(sty, types)
+        sv, regi = eval_rvalue_operand(sval, types, locals, params, param_reg, stmts, regi, lines)
+        cases = split_top(m[2]).map do |entry|
+          arm = entry.match(/^([+-]?\d+|_)\s*=\s*(\d+)$/)
+          abort "unsupported SWITCHVALUE arm: #{entry}" unless arm
+          [arm[1], arm[2]]
+        end
+        fallback = cases.find { |value, _| value == "_" }
+        branch = fallback ? "(goto #{fallback[1].inspect})" : "(unreachable)"
+        cases.reverse_each do |value, target|
+          next if value == "_"
+          cr = regi; regi += 1
+          stmts << "(let %#{cr} bool (eq #{spt} #{sv} (const #{spt} #{value.to_i})))"
+          branch = "(if %#{cr} (then (goto #{target.inspect})) (else #{branch}))"
+        end
+        stmts << branch
       elsif ln.start_with?("SWITCH")
         m = ln.match(/^SWITCH (.+) \{ ([^}]*) \}$/)
         if m

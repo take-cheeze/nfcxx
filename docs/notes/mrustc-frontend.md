@@ -7,8 +7,8 @@ print the expected output, `std::env::args` sees its arguments, and a panic prin
 own build does. What is still gcc's is the system (glibc, libgcc, libm, the linker driver and the assembler).
 
 The C backend is the fastest route to a running program: it already compiles the full Rust 1.90.0 standard library.
-The other output, mrustc's monomorphised MIR (`-C codegen-type=monomir`), would need a new translator to nfcxx's IR
-and is not started.
+The other output, mrustc's monomorphised MIR (`-C codegen-type=monomir`), now has a native QBE route
+through Path B IR; see [mrustc-monomir.md](mrustc-monomir.md) for coverage and remaining limitations.
 
 ## 1. Pipeline
 

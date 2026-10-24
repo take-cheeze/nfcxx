@@ -21,6 +21,7 @@ check() {
 }
 
 check hello tests/mrustc/hello.rs "Hello, world!"
+check switch_value tests/mrustc/switch_value.rs $'10\n20\n30\n30\n1 2 3 4\n1 2 3 4'
 check vec_sum tests/mrustc/vec_sum.rs "55 10"
 
 # Runtime checks: threads and atomics, file I/O, a child process, a hash map, float formatting,
