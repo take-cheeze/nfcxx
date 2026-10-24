@@ -193,6 +193,52 @@ void check_declarations(const nfcffi::Ffi& ffi, const std::string& dir) {
   CHECK(no_tool);
 }
 
+int twice_fn(int x) { return 2 * x; }
+
+// Calls by name through a Library (Ffi::load): the header and the source are compiled together, one wrapper per callable
+// function; values are converted by the declared kinds (docs/notes/ffi.md, "Calls by name").
+void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
+  using nfcffi::Value;
+  nfcffi::Library lib = ffi.load(dir + "/dyn.h", read_text(dir + "/dyn_impl.c"));
+
+  CHECK(lib.callable("add_int") && lib.callable("scale") && lib.callable("halve") && lib.callable("mixed"));
+  CHECK(lib.callable("count_bytes") && lib.callable("call_back"));
+  CHECK(!lib.callable("vec_add") && !lib.callable("big_make"));  // structs by value
+  CHECK(!lib.callable("sum_all"));                                // variadic
+  CHECK(lib.declarations().size() == 9);                          // every function is listed
+
+  Value sum = lib.call("add_int", {Value::of_signed(4), Value::of_signed(5)});
+  CHECK(sum.kind() == Value::Kind::Signed && sum.as_signed() == 9);
+  CHECK(lib.call("add_int", {Value::of_unsigned(7), Value::of_signed(-2)}).as_signed() == 5);  // integers convert
+  CHECK(lib.call("scale", {Value::of_float(1.5), Value::of_signed(4)}).as_float() == 6.0);     // to floating point
+  CHECK(lib.call("halve", {Value::of_float(3.0)}).as_float() == 1.5);
+  CHECK(lib.call("mixed", {Value::of_float(0.5), Value::of_signed(2), Value::of_float(0.25), Value::of_signed(1)})
+            .as_float() == 3.75);
+  CHECK(lib.call("count_bytes", {Value::of_pointer("hello")}).as_unsigned() == 5);
+  CHECK(lib.call("call_back", {Value::of_pointer(reinterpret_cast<const void*>(&twice_fn)), Value::of_signed(21)})
+            .as_signed() == 42);  // the C code calls a host function through a pointer
+
+  // Errors: an uncallable name, a wrong count, a wrong kind, and an accessor for another kind.
+  auto throws = [](auto&& f) {
+    try {
+      f();
+    } catch (const nfcffi::Error&) {
+      return true;
+    }
+    return false;
+  };
+  CHECK(throws([&] { lib.call("vec_add", {}); }));
+  CHECK(throws([&] { lib.call("add_int", {Value::of_signed(1)}); }));
+  CHECK(throws([&] { lib.call("add_int", {Value::of_pointer(nullptr), Value::of_signed(1)}); }));
+  CHECK(throws([&] { lib.call("halve", {Value::of_pointer("x")}); }));
+  CHECK(throws([&] { sum.as_float(); }));
+
+  // A function of the C library by name, from a header that includes <string.h>; only strlen is wrapped.
+  nfcffi::Library libc = ffi.load(dir + "/str.h", "", {"strlen"});
+  CHECK(libc.callable("strlen") && !libc.callable("strcmp"));
+  CHECK(libc.call("strlen", {Value::of_pointer("abc")}).as_unsigned() == 3);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -219,6 +265,7 @@ int main(int argc, char** argv) {
   check_process();
   check_errors(ffi);
   check_declarations(ffi, argv[1]);
+  check_library(ffi, argv[1]);
 
   std::printf("%s: %d of %d checks passed\n", failures ? "FAILED" : "ok", checks - failures, checks);
   return failures ? 1 : 0;
