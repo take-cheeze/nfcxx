@@ -24,21 +24,19 @@ using its real, unmodified upstream source, and produces the exact same
 checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
-Latest local 180-frame wall times from the comparative runner: CRuby ~4.9s,
-interpreted mruby ~59-60s, and bc2cpp ~63-67s (varies by machine); CI
+Latest local 180-frame wall times from the comparative runner: CRuby ~5.7s,
+interpreted mruby ~18.7s, and bc2cpp ~12.9s (varies by machine); CI
 publishes each run's numbers and relative slowdown in the job summary. All
-three produce checksum `59662`. `compiled_run.rb` compiles and installs
-`Optcarrot::Config`, `Optcarrot::Opt`, `Optcarrot::CPU`, `Optcarrot::NES`, the
-`Optcarrot::ROM` setup methods, and the post-Fiber `Optcarrot::Video#tick`/
-`Optcarrot::APU#flush_sound`/`#vsync` hooks, and `Optcarrot::PPU` -- whose
-`main_loop` is a resumable step function driven from the interpreted Fiber
-block (see "Resumable `PPU#main_loop`" at the end; the older "Compiled runtime
-check" section below is the history of how the Fiber was first kept safe).
-The other four were excluded too for a while, for a
-real, CI-reproducible SIGSEGV in bc2cpp's own generated code for
-`Array#last` -- see that section's own "Update (ARY_PTR/ARY_LEN root cause)"
-for the actual bc2cpp code-generation bug this was root-caused and fixed to,
-and why they are back.
+three produce checksum `59662`. `compiled_run.rb` installs every compiled
+entry point (398 methods): bc2cpp itself refuses the methods a `Fiber.yield`
+can cross ([yield analysis](../../docs/bc2cpp-yield-c-boundary.md)), and
+`PPU#main_loop` is a resumable step function driven from the interpreted
+Fiber block (see "Resumable `PPU#main_loop`" at the end). The runner used to
+install only a hand-kept list of Fiber-safe owners, which left most of
+`Optcarrot::PPU` and `Optcarrot::APU` compiled but uninstalled: every by-name
+call into them ran the interpreted method, and the compiled build was no
+faster than the interpreter. The older "Compiled runtime check" section
+below is the history of how the Fiber was first kept safe.
 
 Getting there took:
 
