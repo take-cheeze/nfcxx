@@ -21,9 +21,29 @@ The initial fact vocabulary is already accepted by the QBE emitter as metadata:
 (decl $"x" val)          local storage starts, initially uninitialized
 (decl $"r" ref)          reference storage starts; pointers retain the same provenance tracking
 (decl %0 ref)           reference parameter; caller-owned storage
+(decl $"tmp" temp)       a compiler temporary's storage starts, initially uninitialized
 (scope-end $"x")         local storage lifetime ends
 (rref-arg $"x")          C++ rvalue-reference argument; requires future move contracts
 ```
+
+The C++ frontend also prints facts for storage that no declaration names:
+
+- Temporaries made by EDG's lowering, plus the printer's own aggregate temporaries. A temporary
+  used in exactly one full expression gets `(decl $"tmp" temp)` before that expression and
+  `(scope-end $"tmp")` after its value is used. A pointer to it therefore cannot outlive the
+  full expression unnoticed.
+- Temporaries that carry a value across statements, such as a returned aggregate or a range-based
+  for's range and iterators. These get one `decl` at function entry and a `scope-end` at each
+  exit. This is decided at the end of each function, because the printer cannot know earlier
+  how many full expressions use a temporary.
+- A named local that no declaration statement introduces, such as a range-based for's variable,
+  which the lowering initializes by assignment. It is declared at its first use and ends with
+  that block.
+
+Exception-handling bookkeeping temporaries get the same treatment, which is conservative: a value
+or address carried to a later statement reads as uninitialized or out of scope, never as valid.
+Label depths for jumps count only declaration statements, so a jump can end a first-use local
+early. That is also conservative. With the flag unset, output is byte-identical.
 
 Slot names identify storage, `%N` values hold scalar values or address provenance, and
 `$"x"` produces the address of local storage. The checker tracks provenance through pointer
@@ -512,8 +532,7 @@ so a callee that only stores gets `init`. A returned alias from a read-only body
 lets a caller read the result but not write through it.
 
 The C++ frontend emits plain `call` for pointer results, while a returned alias requires
-`call-borrow`. Call-argument temporaries such as `tmp` also have no declaration facts yet. Both
-limit this mode on lowered C++ today.
+`call-borrow`, which limits this mode on lowered C++ today.
 
 ## Refusals and limits
 
