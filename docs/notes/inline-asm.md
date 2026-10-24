@@ -61,20 +61,32 @@ operand has its own register and the values round-trip through the slot.
 - Symbolic operands `%[name]`; operand modifiers `%b %w %k %q` (byte/word/long/quad register names), `%c`/`%n`
   (bare / negated immediate), and `%=` (a unique number per expansion).
 - Clobbers: `"memory"` and `"cc"` (no-ops — the call is already a full barrier), and named general registers.
-- Scalar operands up to 8 bytes.
+- Scalar operands up to 8 bytes in registers.
+- Memory operands `m`, `o`, `V`: the slot carries the object's address, the thunk loads it into a register, and `%N`
+  is `(reg)`, so the asm reads and writes the object itself (an array is the array, not its decayed pointer; a large
+  struct is fine: only the address moves). Nothing is copied back.
+- Multiple alternatives in one operand (`rm`, `ir`, `qm`, `g`, `Ir`, `er`, ...): the first `,` alternative, and within
+  it the choice gcc makes -- an immediate when the operand is a constant that one of the immediate letters accepts
+  (the ranges of `I J K L M N e Z` are checked), otherwise a register when a register letter is present, otherwise
+  memory.
+- Symbol addresses as immediates: `"i"(&x)`, `"i"(func)` expand to `$sym` (`%c`/`%P`: `sym`). Under `cproc -p` a
+  static symbol named only by an asm operand is kept alive by a top-level `# nfcxx:ref $sym` line in the IL.
+- Register variables (`register long x asm("r11")`) as operands take their register; `%rsp` (the kernel's
+  `ASM_CALL_CONSTRAINT "+r"(current_stack_pointer)`) is named in the template but never moved.
 
 ## Not yet supported (refused, never miscompiled)
 
 Each of these raises a compile error rather than quietly producing wrong code:
 
 - Any target other than x86_64; the CIL backend and Mach-O (`qbe-cc` withholds `-a` there).
-- Memory operands (`m`, `o`, `V`, `g`), and multiple-alternative constraints (`rm`, `ri`).
 - SSE/floating operands (`x`, `v`, `Yz`, …).
 - `asm goto`, flag outputs (`=@cc…`), and file-scope (top-level) `asm`.
 - More register operands than the caller-saved pool holds.
 
 ## Testing
 
-`tests/c/inline_asm_*.c` (run by `tests/c/run.sh`) cover the basic forms, fixed registers, and clobber preservation.
+`tests/c/inline_asm_*.c` (run by `tests/c/run.sh`) cover the basic forms, fixed registers, clobber preservation, and
+(`inline_asm_mem.c`) the kernel's memory-operand shapes: `"+m"` atomics, `"Ir"` bit numbers, `xchg`, `cmpxchg` with
+`"+a"` and `"=qm"`, `"rm"`/`"g"` alternatives, `"i"(&symbol)`, and `"m"` on arrays and large structs.
 They run on both backends: the gcc backend compiles the asm with the host GCC (a reference), the qbe backend exercises
 `funcasm`. They are marked `// X86-ONLY` since the instructions are x86.

@@ -43,7 +43,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   esac
 done
 # the kernel's headers define far more static inline functions than a file uses: drop the unreferenced ones (cproc -p)
-[ -z "${NFCXX_QBE_KERNEL:-}" ] || kcproc+=(-p)
+[ -z "${NFCXX_QBE_KERNEL:-}" ] || kcproc+=(-p -g -V)   # -g: the GNU keyword asm (the kernel is gnu11); -V: volatile accesses kept
 
 if [ $compile = 0 ] && [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend (scripts/cil-cc): the link is cil-link.rb over the translation units' fragments (docs/notes/cil.md).
@@ -151,8 +151,12 @@ arm64=(); case "$(uname -m)" in arm64|aarch64) arm64=(--arm64) ;; esac
 # none present (and no CR, which it would normalize), its output is its input and the tail is empty, so the
 # file goes through unchanged. Under mruby the scan costs minutes on a multi-MB file (unicode_name_fsm: 11 MB).
 # NFCXX_PREP_ALWAYS=1 runs qbe-prep.rb on every input (tests/mruby/qbe-prep.sh counts them through the tap).
-if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|__sync_|volatile|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
-   ! grep -q "$(printf '\r')" "$tmp/pp.c"; then
+# NFCXX_QBE_KERNEL: no rewriting. The kernel's translation unit is exactly gcc's preprocessed source, so cproc either
+# compiles a construct itself or refuses it (and qbe-try keeps the gcc object); in particular volatile stays volatile
+# (cproc -V), where qbe-prep.rb would drop it.
+if [ -n "${NFCXX_QBE_KERNEL:-}" ] ||
+   { [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|__sync_|volatile|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
+     ! grep -q "$(printf '\r')" "$tmp/pp.c"; }; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
   "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${macho[@]+"${macho[@]}"} ${arm64[@]+"${arm64[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"

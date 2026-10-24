@@ -11,7 +11,8 @@
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
-# The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe): no patch files are applied.
+# The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe), except the few in
+# scripts/qbe-nfcxx.patch, applied below.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
@@ -35,6 +36,9 @@ patch -s -p1 -d "$root/build/cproc" --batch < "$root/scripts/cproc-nfcxx.patch" 
 # "no more pm slots". The array is static, so 1024 costs nothing. A fork commit would be the proper home for this.
 sed -i.bak 's/NPm = 64,/NPm = 1024,/' "$root/build/qbe/rega.c" && rm -f "$root/build/qbe/rega.c.bak"
 grep -q 'NPm = 1024,' "$root/build/qbe/rega.c" || { echo "setup-qbe: NPm not found in rega.c" >&2; exit 1; }
+# scripts/qbe-nfcxx.patch: QBE changes not yet commits of the fork: ELF .type/.size for data objects, as gcc writes
+# them (docs/notes/linux-kernel.md: the kernel build compares the qbe backend's objects with gcc's).
+patch -s -p1 -d "$root/build/qbe" --batch < "$root/scripts/qbe-nfcxx.patch" || { echo "setup-qbe: qbe-nfcxx.patch failed" >&2; exit 1; }
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.

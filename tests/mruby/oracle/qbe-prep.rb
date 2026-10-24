@@ -3,6 +3,7 @@
 # can compare the production script against it. The interface is the original's, with the environment variable
 # NFCXX_C_INPUT given as the --c-input flag (mruby has no ENV). Known differences of scripts/qbe-prep.rb from the
 # original (this file matches the original): input that is not UTF-8 (the original stops with status 1).
+# Both scripts have since stopped rewriting __builtin_bswap16/32/64, which cproc now compiles itself (constant-folded).
 #
 # Rewrite EDG's preprocessed C so cproc accepts it, and emit the assembly the C cannot express.
 #
@@ -714,14 +715,6 @@ HELPER_BUILTINS = {
   '__builtin_huge_valf' => ['__builtin_inff', ''],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
   # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
-  '__builtin_bswap16' => ['__nfcxx_bswap16',
-                          'static unsigned short __nfcxx_bswap16(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }'],
-  '__builtin_bswap32' => ['__nfcxx_bswap32',
-                          'static unsigned int __nfcxx_bswap32(unsigned int x) {' \
-                          ' return (x << 24) | ((x & 0xff00u) << 8) | ((x >> 8) & 0xff00u) | (x >> 24); }'],
-  '__builtin_bswap64' => ['__nfcxx_bswap64',
-                          'static unsigned long __nfcxx_bswap64(unsigned long x) {' \
-                          ' unsigned long r = 0; int i; for (i = 0; i < 8; i++) { r = (r << 8) | (x & 0xff); x >>= 8; } return r; }'],
   '__builtin_signbit' => ['__nfcxx_signbit',
                           'static int __nfcxx_signbit(double x) {' \
                           ' union { double d; unsigned long u; } v; v.d = x; return (int)(v.u >> 63); }'],

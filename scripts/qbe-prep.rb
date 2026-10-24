@@ -719,14 +719,7 @@ HELPER_BUILTINS = {
   '__builtin_huge_valf' => ['__builtin_inff', ''],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
   # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
-  '__builtin_bswap16' => ['__nfcxx_bswap16',
-                          'static unsigned short __nfcxx_bswap16(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }'],
-  '__builtin_bswap32' => ['__nfcxx_bswap32',
-                          'static unsigned int __nfcxx_bswap32(unsigned int x) {' \
-                          ' return (x << 24) | ((x & 0xff00u) << 8) | ((x >> 8) & 0xff00u) | (x >> 24); }'],
-  '__builtin_bswap64' => ['__nfcxx_bswap64',
-                          'static unsigned long __nfcxx_bswap64(unsigned long x) {' \
-                          ' unsigned long r = 0; int i; for (i = 0; i < 8; i++) { r = (r << 8) | (x & 0xff); x >>= 8; } return r; }'],
+  # __builtin_bswap16/32/64 are not rewritten: cproc has them, constant-folded (expr.c)
   '__builtin_signbit' => ['__nfcxx_signbit',
                           'static int __nfcxx_signbit(double x) {' \
                           ' union { double d; unsigned long u; } v; v.d = x; return (int)(v.u >> 63); }'],

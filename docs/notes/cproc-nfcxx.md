@@ -41,10 +41,44 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   and prunes it at the end: an item is live when it is exported, has a section, is `used` (`# nfcxx:keep`), or is
   referenced (`$name`) by a live item. Type definitions and other top-level lines are kept.
 
+- **GNU statement expressions** `({ ... })`. cproc emits statements as it parses them but evaluates expressions later,
+  from trees, so the statements are parsed into a chain of blocks that is not part of the function yet (`funcdetach`),
+  and `funcexpr` links the chain in where the expression is evaluated (`EXPRSTMT`). The statements therefore run only
+  where and when the expression does: in the operand of `&&`, `||` or `?:` that is taken, and not at all under `sizeof`
+  or `typeof`. The value is the last expression statement's tree, evaluated at the end of the chain.
+
+- **GNU case ranges** `case LO ... HI:`. Each case node of the dispatch tree has a high end; a range test is
+  `v - lo <= hi - lo` (unsigned), and a signed range across zero is split in two. Overlapping labels are an error.
+
+- **`__builtin_choose_expr`**: the chosen operand itself (its type, an lvalue if it is one); the other is parsed and not
+  evaluated.
+
+- **`packed` and `aligned` wherever gcc takes them**: `packed` after a struct or union body re-lays the members out with
+  alignment 1, keeping each member's own `aligned` (struct `member.align`); `packed` on a member gives that member
+  alignment 1; a packed enum takes the smallest integer type that holds its values; `aligned` after an array declarator
+  or among the declaration specifiers raises the declared object's or typedef's alignment. A packed struct's size is
+  still rounded up to its alignment, which a member's `aligned` can raise. `tests/c/attr_layout.c` checks the layouts
+  against gcc's.
+
+- **GNU register variables**: `register T x asm("REG")`. At file scope a global register variable; only `%rsp` is
+  supported (the kernel's `current_stack_pointer`): a read is a call to a local helper that returns the caller's stack
+  pointer. In a block an ordinary object that inline asm operands take in REG. As an asm operand `%rsp` is named in the
+  template but never moved (the kernel's `ASM_CALL_CONSTRAINT`).
+
+- **Inline asm** (docs/notes/inline-asm.md): memory operands (`m`, `o`, `V`; the slot carries the object's address and
+  `%N` is `(reg)`), multiple alternatives in one operand (the first `,` alternative, choosing immediate, register or
+  memory as gcc does, with the ranges of `I J K L M N e Z` checked), and symbol addresses as immediates (`"i"(&x)`).
+
+- **`-g`**: the GNU keyword `asm`. **`-V`**: volatile scalar accesses go through opaque helpers in the inline-asm side
+  file (`nfcxx_vload4`: `movl (%rdi), %eax`), one call per access. QBE has no volatile, and its load optimization
+  forwards and merges plain loads (a polling loop's load can leave the loop); a call is something it never forwards,
+  merges or removes. Without `-V` volatile loads stay plain loads and volatile stores are refused, as before.
+
 ## Known gaps (still refused)
 
-- Global and local register variables (`register long x asm("rsp")`): a C variable bound to a physical register, which
-  QBE cannot express. The kernel's `current_stack_pointer` and several `uaccess`/`irq_stack` macros use them.
+- `asm goto`, flag outputs (`=@cc...`), SSE operands.
+- Volatile bit-fields and volatile aggregate copies (`-V` covers scalars of 1, 2, 4 and 8 bytes).
+- Global register variables other than `%rsp`.
 - The C23 `nullptr` constant miscompiles under `-c` (a pre-existing cproc codegen gap); harmless before C23, where
   `nullptr` is an identifier.
 

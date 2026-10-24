@@ -237,9 +237,27 @@ EOC
       ok "kernel mode: unreferenced static inline functions dropped"
     else bad "kernel mode: unreferenced static inline functions dropped" "$(nm kinl.o 2>&1 | head -3 | tr '\n' ' ')"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
+    # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
+    # two, and a polling loop loads on every iteration; signed char loads are sign-extended
+    cat > kvol.c <<'EOC'
+int twice(volatile int *p) { return *p + *p; }
+void two_stores(volatile long *p) { *p = 1; *p = 2; }
+signed char sc(volatile signed char *p) { return *p; }
+int main(void) { volatile int x = 20; volatile long y; volatile signed char c = -5; two_stores(&y); return twice(&x) + (int)y + sc(&c) + 5; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -S kvol.c -o kvol.s 2>/dev/null &&
+       [ "$(awk '/^twice:/,/^\.size twice/' kvol.s | grep -c 'call.*nfcxx_vload4')" = 2 ] &&
+       [ "$(awk '/^two_stores:/,/^\.size two_stores/' kvol.s | grep -c 'call.*nfcxx_vstore8')" = 2 ] &&
+       NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvol.c -o kvol 2>/dev/null && { ./kvol; [ $? = 42 ]; }; then
+      ok "kernel mode: volatile accesses kept"
+    else bad "kernel mode: volatile accesses kept" "$(grep -c nfcxx_v kvol.s 2>/dev/null) helper calls"; fi
+    # __builtin_*_overflow lowered by cproc itself (no qbe-prep.rb in kernel mode): every type mix, against gcc's hash
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtins_overflow_matrix.c" -o kov 2>/dev/null && { ./kov; [ $? = 42 ]; }; then
+      ok "kernel mode: overflow built-ins match gcc for every type mix"
+    else bad "kernel mode: overflow built-ins match gcc for every type mix" "wrong results or the compile failed"; fi
     # qbe-try: an integer file moves to qbe; a file cproc cannot compile keeps the gcc object
     printf 'int sq(int a) { return a * a; }\n' > kmove.c
-    printf 'int inc(int a) { return ({ a + 1; }); }\n' > kstay.c
+    printf 'int jumps(void) { __asm__ goto("jmp %%l0" : : : : out); return 1; out: return 0; }\n' > kstay.c   # asm goto: not yet
     rm -f qbe.log
     for f in kmove kstay; do
       NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -fno-PIE -mno-sse -c $f.c -o $f.o

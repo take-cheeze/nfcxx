@@ -135,7 +135,7 @@ qbekernel() {
     -fno-stack-protector|-fno-jump-tables|-fno-delete-null-pointer-checks|-fno-strict-overflow|-fno-strict-aliasing|-fwrapv|\
     -fcf-protection=none|-fno-asynchronous-unwind-tables|-fconserve-stack|-fno-common|-falign-functions=*|-falign-jumps=*|\
     -falign-loops=*|-falign-labels=*|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
-    -fno-optimize-sibling-calls|-fstrict-flex-arrays=*|-fomit-frame-pointer|-fno-omit-frame-pointer|-fmacro-prefix-map=*|\
+    -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|-fomit-frame-pointer|-fno-omit-frame-pointer|-fmacro-prefix-map=*|\
     -m64|-mcmodel=kernel|-mno-red-zone|-mtune=*|-mpreferred-stack-boundary=3|-mskip-rax-setup|-mno-sse|-mno-sse2|-mno-mmx|\
     -mno-3dnow|-mno-avx|-mno-80387|-mno-fp-ret-in-387|-msoft-float) kqf+=("$1") ;;
     *) return 1 ;;

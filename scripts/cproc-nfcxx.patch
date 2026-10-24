@@ -40,16 +40,60 @@
  			a->kind |= kind;
 --- a/cc.h
 +++ b/cc.h
-@@ -198,6 +198,8 @@
+@@ -88,6 +88,7 @@
+ 	enum typequal qual;
+ 	unsigned long long offset;
+ 	struct bitfield bits;
++	int align;   /* the alignment the member asked for (an aligned attribute), or 0: kept for a packed re-layout */
+ 	struct member *next;
+ };
+ 
+@@ -146,7 +147,14 @@
+ };
+ 
+ enum builtinkind {
++	BUILTINADDOVERFLOW,
++	BUILTINSUBOVERFLOW,
++	BUILTINMULOVERFLOW,
+ 	BUILTINALLOCA,
++	BUILTINBSWAP16,
++	BUILTINBSWAP32,
++	BUILTINBSWAP64,
++	BUILTINCHOOSEEXPR,
+ 	BUILTINCONSTANTP,
+ 	BUILTINEXPECT,
+ 	BUILTINFABSF,
+@@ -198,6 +206,9 @@
  	enum typequal qual;
  	struct value *value;
  	char *asmname;
 +	char *section;   /* GNU section("...") on a function or a static-storage object, or null */
++	char *regvar;    /* GNU register variable: register T x asm("REG") binds x to REG (without '%'), or null */
 +	bool used;       /* GNU used: kept even when nothing references it (cproc -p) */
  	bool defined;
  	bool tentative;
  	struct decl *next;
-@@ -338,6 +340,8 @@
+@@ -257,6 +268,7 @@
+ 	EXPRBUILTIN,
+ 	EXPRTEMP,
+ 	EXPRSIZEOF,
++	EXPRSTMT,   /* GNU statement expression ({ ... }): see stmtexpr in stmt.c */
+ };
+ 
+ struct stringlit {
+@@ -291,6 +303,11 @@
+ 			/* a 16-byte floating constant (PROPSOFT type): the object image, low and high eightbyte */
+ 			unsigned long long soft[2];
+ 		} constant;
++		/* EXPRSTMT: the statements, a chain of blocks not yet part of the function; base is the value (or null) */
++		struct {
++			struct block *first, *last;
++			bool done;
++		} stmt;
+ 		struct stringlit string;
+ 		struct {
+ 			struct expr *args;
+@@ -338,6 +355,8 @@
  
  void tokeninit(void);
  int tokenget(const void *, size_t);
@@ -58,7 +102,7 @@
  void tokenprint(const struct token *, FILE *);
  char *tokenstr(enum tokenkind);
  char *tokencheck(const struct token *, enum tokenkind, const char *);
-@@ -421,6 +425,10 @@
+@@ -421,6 +440,12 @@
  extern const struct target *targ;
  
  void targinit(const char *);
@@ -66,10 +110,12 @@
 +extern bool shortwchar;   /* -W (gcc's -fshort-wchar): wide literals are unsigned short */
 +extern bool autozero;     /* -z (gcc's -ftrivial-auto-var-init=zero): automatic objects without initializer are zeroed */
 +extern bool prune;        /* -p: drop the internal functions and data nothing live references, as gcc does */
++extern bool gnukeywords;  /* -g: the GNU C keyword asm (gnu* dialects); __asm__ is a keyword always */
++extern bool volatilecalls; /* -V: volatile scalar accesses through opaque helpers (qbe.c funcvolatile) */
  
  /* attr */
  
-@@ -434,6 +442,7 @@
+@@ -434,6 +459,7 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
@@ -77,7 +123,7 @@
  };
  
  struct attr {
-@@ -446,6 +455,14 @@
+@@ -446,6 +472,14 @@
  bool attr(struct attr *, enum attrkind);
  bool gnuattr(struct attr *, enum attrkind);
  
@@ -92,21 +138,41 @@
  /* decl */
  
  struct decl *mkdecl(char *name, enum declkind, struct type *, enum typequal, enum linkage);
-@@ -504,6 +521,13 @@
+@@ -503,6 +537,15 @@
+ /* stmt */
  
  void stmt(struct func *, struct scope *);
- 
++struct expr *stmtexpr(struct func *, struct scope *);
++extern struct func *curfunc;   /* the function whose body is being parsed, for statement expressions */
++
 +/* GNU extended inline assembly (nfcxx: lowered to an out-of-line thunk, see funcasm in the backend) */
 +struct asmoperand {
 +	char *constraint;   /* the constraint string, e.g. "=r", "r", "0", "i" */
 +	char *symname;      /* the [name] of a symbolic operand reference, or null */
 +	struct expr *expr;  /* an output's lvalue, or an input's value */
 +};
-+
+ 
  /* backend */
  
- struct gotolabel {
-@@ -546,6 +570,8 @@
+@@ -522,7 +565,7 @@
+ 	struct array *asanopen;
+ };
+ 
+-void switchcase(struct switchcases *, unsigned long long, struct block *);
++void switchcase(struct switchcases *, unsigned long long, unsigned long long, struct block *);
+ 
+ struct block *mkblock(char *);
+ 
+@@ -537,6 +580,8 @@
+ struct value *funcbranch(struct func *, struct expr *, struct block *, struct block *);
+ struct value *funcexpr(struct func *, struct expr *);
+ void funcjmp(struct func *, struct block *);
++struct block *funcdetach(struct func *, struct block **);
++struct block *funcreattach(struct func *, struct block *);
+ void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
+ void funcret(struct func *, struct value *);
+ void funchlt(struct func *);
+@@ -546,6 +591,8 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -117,7 +183,32 @@
  void emitfunc(struct func *, bool);
 --- a/decl.c
 +++ b/decl.c
-@@ -187,7 +187,7 @@
+@@ -62,8 +62,15 @@
+ 	struct member **last;
+ 	unsigned bits;  /* number of bits remaining in the last byte */
+ 	bool pack;
++	bool hasbits;   /* a bit-field was added (a trailing packed attribute cannot re-lay those out) */
+ };
+ 
++struct func *curfunc;
++
++/* GNU packed on a member declarator (declaratortypes): structdecl lays that member out with alignment 1 */
++static bool declpacked;
++static void structpack(struct type *);
++
+ struct decl *
+ mkdecl(char *name, enum declkind k, struct type *t, enum typequal tq, enum linkage linkage)
+ {
+@@ -177,7 +184,7 @@
+ 	switch (tok.kind) {
+ 	case TSTRUCT: kind = TYPESTRUCT, allowedattr |= ATTRPACKED; break;
+ 	case TUNION:  kind = TYPEUNION, allowedattr |= ATTRPACKED; break;
+-	case TENUM:   kind = TYPEENUM; break;
++	case TENUM:   kind = TYPEENUM, allowedattr |= ATTRPACKED; break;
+ 	default: fatal("internal error: unknown tag kind");
+ 	}
+ 	next();
+@@ -187,7 +194,7 @@
  	tag = 0;
  	t = NULL;
  	et = NULL;
@@ -126,7 +217,37 @@
  		tag = tokenstr(tok.kind);
  		next();
  	}
-@@ -263,7 +263,7 @@
+@@ -228,6 +235,7 @@
+ 		b.last = &t->u.structunion.members;
+ 		b.bits = 0;
+ 		b.pack = a.kind & ATTRPACKED;
++		b.hasbits = false;
+ 		/* GNU extension, accepted by gcc in C: an empty body is size 0 with alignment 1.
+ 		 * EDG emits `struct X {}` for empty C++ classes. */
+ 		while (tok.kind != TRBRACE)
+@@ -242,12 +250,18 @@
+ 			trail.kind = 0;
+ 			trail.align = 0;
+ 			trail.section = NULL;
+-			gnuattr(&trail, ATTRALIGNED);
++			gnuattr(&trail, ATTRALIGNED | ATTRPACKED);
++			if (trail.kind & ATTRPACKED && !b.pack) {
++				if (b.hasbits)
++					error(&tok.loc, "bit-fields in a packed struct are not supported");
++				structpack(t);
++				b.pack = true;
++			}
+ 			if (trail.kind & ATTRALIGNED && trail.align > t->align)
+ 				t->align = trail.align;
+ 		}
+-		if (!b.pack)
+-			t->size = ALIGNUP(t->size, t->align);
++		/* also when packed: the alignment is then 1, unless a member asked for more (gcc rounds the size up to it) */
++		t->size = ALIGNUP(t->size, t->align);
+ 		break;
+ 	case TYPEENUM:
+ 		enumconsts = NULL;
+@@ -263,7 +277,7 @@
  		}
  		max = 0;
  		min = 0;
@@ -135,8 +256,52 @@
  			name = tokenstr(tok.kind);
  			next();
  			attr(NULL, 0);
-@@ -492,7 +492,7 @@
+@@ -308,6 +322,30 @@
+ 				break;
+ 		}
+ 		expect(TRBRACE, "to close enum specifier");
++		{
++			struct attr trail = {0};
++
++			gnuattr(&trail, ATTRPACKED);
++			a.kind |= trail.kind & ATTRPACKED;
++		}
++		if (!t->base && a.kind & ATTRPACKED) {
++			/* GNU packed enum: the smallest integer type that holds the values, unsigned when none is negative */
++			static struct type *const small[][2] = {
++				{&typeuchar, &typeschar}, {&typeushort, &typeshort}, {&typeuint, &typeint},
++			};
++			sign = min > 0;
++			for (i = 0; i < countof(small); ++i) {
++				if (typehasint(small[i][sign], max, false) && (!sign || typehasint(small[i][sign], -min, true)))
++					break;
++			}
++			if (i < countof(small)) {
++				t->base = small[i][sign];
++				t->size = t->base->size;
++				t->align = t->base->align;
++				t->u.arith.issigned = t->base->u.arith.issigned;
++				t->u.arith.width = t->base->u.arith.width;
++			}
++		}
+ 		if (!t->base) {
+ 			if (min <= 0x80000000 && max <= 0x7fffffff) {
+ 				t->base = min ? &typeint : &typeuint;
+@@ -487,12 +525,18 @@
+ 			expect(TRPAREN, "to close 'alignas' specifier");
  			break;
+ 
+-		case T__ATTRIBUTE__:
+-			gnuattr(NULL, 0);
++		case T__ATTRIBUTE__: {
++			/* static int __attribute__((aligned(64))) x; typedef int __attribute__((aligned(8))) aint; */
++			struct attr da = {0};
++
++			gnuattr(&da, align ? ATTRALIGNED : 0);
++			if (align && da.kind & ATTRALIGNED && da.align > *align)
++				*align = da.align;
+ 			break;
++		}
  
  		default:
 -			if (op < TIDENT || t || ts)
@@ -144,7 +309,7 @@
  				goto done;
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d || d->kind != DECLTYPE)
-@@ -614,6 +614,12 @@
+@@ -614,6 +658,12 @@
  	if (name)
  		*name = NULL;
  	a.kind = 0;
@@ -157,7 +322,7 @@
  	ptr = result->next;
  	switch (tok.kind) {
  	case TLPAREN:
-@@ -624,7 +630,7 @@
+@@ -624,7 +674,7 @@
  			case TLPAREN:
  				break;
  			default:
@@ -166,7 +331,7 @@
  					break;
  				goto func;
  			}
-@@ -634,7 +640,7 @@
+@@ -634,7 +684,7 @@
  		allowedattr = -1;
  		break;
  	default:
@@ -175,7 +340,130 @@
  			if (!name)
  				error(&tok.loc, "identifier not allowed in abstract declarator");
  			*name = tokenstr(tok.kind);
-@@ -1062,6 +1068,16 @@
+@@ -711,20 +761,21 @@
+ 				expect(TRBRACK, "after array length");
+ 			}
+ 			listinsert(ptr->prev, &t->link);
+-			allowedattr = 0;
++			allowedattr = align ? ATTRALIGNED : 0;   /* T a[N] __attribute__((aligned(M))) aligns a */
+ 			break;
+ 		case T__ATTRIBUTE__:
+ 			if (allowedattr == -1)
+ 				error(&tok.loc, "attribute not allowed after parenthesized declarator");
+-			gnuattr(&a, allowedattr | ATTRCLEANUP);
++			/* packed is meaningful on a member (structdecl reads declpacked); gcc ignores it on other declarators */
++			gnuattr(&a, allowedattr | ATTRCLEANUP | (align && allowedattr != -1 ? ATTRPACKED : 0));
++			if (a.kind & ATTRPACKED)
++				declpacked = true;
+ 		attr:
+-			/* attribute applies to identifier if ptr->prev == result, otherwise type ptr->prev */
+-			if (ptr->prev == result) {
+-				if (a.kind & ATTRALIGNED && a.align > *align)
+-					*align = a.align;
+-				if (a.kind & ATTRCLEANUP)
+-					declcleanup = a.cleanup;
+-			}
++			/* aligned applies to the declared entity, after an array declarator too; cleanup to the identifier */
++			if (align && a.kind & ATTRALIGNED && a.align > *align)
++				*align = a.align;
++			if (ptr->prev == result && a.kind & ATTRCLEANUP)
++				declcleanup = a.cleanup;
+ 			break;
+ 		default:
+ 			return;
+@@ -861,11 +912,14 @@
+ 	if (mt.type->prop & PROPVM)
+ 		error(&tok.loc, "struct member '%s' has variably modified type", name);
+ 	assert(mt.type->align > 0);
++	if (width != -1)
++		b->hasbits = true;
+ 	if (name || width == -1) {
+ 		m = xmalloc(sizeof(*m));
+ 		m->type = mt.type;
+ 		m->qual = mt.qual;
+ 		m->name = name;
++		m->align = width == -1 ? align : 0;
+ 		m->next = NULL;
+ 		*b->last = m;
+ 		b->last = &m->next;
+@@ -876,9 +930,11 @@
+ 		m->bits.before = 0;
+ 		m->bits.after = 0;
+ 		if (align < mt.type->align) {
+-			if (align)
++			/* in a packed struct (or a packed member) an explicit alignment below the type's is what was asked for */
++			if (align && !b->pack)
+ 				error(&tok.loc, "specified alignment of struct member '%s' is less strict than is required by type", name);
+-			align = b->pack ? 1 : mt.type->align;
++			if (!align)
++				align = b->pack ? 1 : mt.type->align;
+ 		}
+ 		if (t->kind == TYPESTRUCT) {
+ 			m->offset = ALIGNUP(t->size, align);
+@@ -928,6 +984,31 @@
+ 		t->align = align;
+ }
+ 
++/* struct S { ... } __attribute__((packed)): the members were laid out as they were parsed, so lay them out again with
++ * alignment 1, except where a member asked for an alignment (aligned attribute), as gcc does */
++static void
++structpack(struct type *t)
++{
++	struct member *m;
++	int align;
++
++	t->size = 0;
++	t->align = 1;
++	for (m = t->u.structunion.members; m; m = m->next) {
++		align = m->align ? m->align : 1;
++		if (t->kind == TYPESTRUCT) {
++			m->offset = ALIGNUP(t->size, align);
++			t->size = m->offset + m->type->size;
++		} else {
++			m->offset = 0;
++			if (t->size < m->type->size)
++				t->size = m->type->size;
++		}
++		if (t->align < align)
++			t->align = align;
++	}
++}
++
+ static bool
+ staticassert(struct scope *s)
+ {
+@@ -957,12 +1038,13 @@
+ 	struct qualtype base, mt;
+ 	char *name;
+ 	unsigned long long width;
+-	int align;
++	int align, specalign;
+ 
+ 	if (staticassert(s))
+ 		return;
+ 	attr(NULL, 0);
+ 	base = declspecs(s, NULL, NULL, &align);
++	specalign = align;
+ 	if (!base.type)
+ 		error(&tok.loc, "no type in struct member declaration");
+ 	if (tok.kind == TSEMICOLON) {
+@@ -977,9 +1059,15 @@
+ 			width = intconstexpr(s, false);
+ 			addmember(b, base, NULL, 0, width);
+ 		} else {
++			bool pack = b->pack;
++
++			align = specalign;   /* a member's aligned attribute does not carry to the next declarator */
++			declpacked = false;
+ 			mt = declarator(s, base, &name, &align, NULL, false);
+ 			width = consume(TCOLON) ? intconstexpr(s, false) : -1;
++			b->pack = pack || declpacked;   /* int x __attribute__((packed)): this member alone has alignment 1 */
+ 			addmember(b, mt, name, align, width);
++			b->pack = pack;
+ 		}
+ 		if (tok.kind == TSEMICOLON)
+ 			break;
+@@ -1062,6 +1150,16 @@
  	return d;
  }
  
@@ -192,7 +480,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1086,7 @@
+@@ -1070,7 +1168,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -201,16 +489,17 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,6 +1104,8 @@
+@@ -1088,6 +1186,9 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
 +	int specalign;
++	char *regname;
 +	struct declattr specattr;
  	int allowfunc = !f;
  	struct decl *d, *prior;
  	enum declkind kind;
-@@ -1097,9 +1115,11 @@
+@@ -1097,9 +1198,11 @@
  	if (staticassert(s))
  		return true;
  	a.kind = 0;
@@ -222,7 +511,15 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1116,9 +1136,12 @@
+@@ -1109,16 +1212,18 @@
+ 		/* 6.9p2 */
+ 		if (sc & SCAUTO)
+ 			error(&tok.loc, "external declaration must not contain 'auto'");
+-		if (sc & SCREGISTER)
+-			error(&tok.loc, "external declaration must not contain 'register'");
++		/* 'register' at file scope only with asm("REG"), a GNU global register variable: checked per declarator */
+ 	}
+ 	if (consume(TSEMICOLON)) {
  		/* XXX 6.7p2 error unless in function parameter/struct/union, or tag/enum members are declared */
  		return true;
  	}
@@ -236,7 +533,42 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1144,10 +1167,15 @@
+@@ -1135,6 +1240,34 @@
+ 		}
+ 		gnuattr(&a, 0);  /* appertains to identifier */
+ 		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
++		/* GNU register variable: register T x asm("REG"). The asm name is the register, not a symbol. At file scope it
++		 * is a global register variable (the kernel's current_stack_pointer is %rsp); in a block it is an ordinary
++		 * automatic object that inline asm operands take in REG. */
++		regname = NULL;
++		if (kind == DECLOBJECT && sc & SCREGISTER && asmname) {
++			regname = asmname[0] == '%' ? asmname + 1 : asmname;
++			asmname = NULL;
++		} else if (!f && sc & SCREGISTER) {
++			error(&tok.loc, "external declaration must not contain 'register'");
++		}
++		if (regname && !f) {
++			prior = scopegetdecl(s, name, false);
++			if (prior && (prior->kind != DECLOBJECT || !prior->regvar || strcmp(prior->regvar, regname)))
++				error(&tok.loc, "'%s' redeclared as a different register variable", name);
++			if (!prior) {
++				d = mkdecl(name, DECLOBJECT, t, tq, LINKNONE);
++				d->u.obj.storage = SDSTATIC;
++				d->regvar = regname;
++				d->defined = true;
++				scopeputdecl(s, d);
++			}
++			if (tok.kind == TASSIGN)
++				error(&tok.loc, "global register variable '%s' cannot have an initializer", name);
++			if (consume(TSEMICOLON))
++				return true;
++			expect(TCOMMA, "or ';' after declarator");
++			continue;
++		}
+ 		prior = scopegetdecl(s, name, false);
+ 		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
+ 		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
+@@ -1144,10 +1277,15 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -254,15 +586,16 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,6 +1185,7 @@
+@@ -1157,6 +1295,8 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
 +			declapplyattr(d);
++			d->regvar = regname;   /* a block-scope register variable: asm operands take it in this register */
  			if (d->u.obj.align < align)
  				d->u.obj.align = align;
  			d->u.obj.cleanup = declcleanup;
-@@ -1201,6 +1230,7 @@
+@@ -1201,6 +1341,7 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -270,9 +603,78 @@
  			d->value = mkglobal(d);
  			d->u.func.inlinedefn = d->linkage == LINKEXTERN && fs & FUNCINLINE && !(sc & SCEXTERN) && (!prior || prior->u.func.inlinedefn);
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
+@@ -1213,7 +1354,9 @@
+ 				assert(funcscope);
+ 				s = funcscope;
+ 				f = mkfunc(d, name, t, s);
++				curfunc = f;
+ 				stmt(f, s);
++				curfunc = NULL;
+ 				if (d->u.func.isnoreturn)
+ 					funchlt(f);
+ 				/* XXX: need to keep track of function in case a later declaration specifies extern */
 --- a/expr.c
 +++ b/expr.c
-@@ -653,7 +653,7 @@
+@@ -8,6 +8,8 @@
+ #include "utf.h"
+ #include "cc.h"
+ 
++static struct expr *parenexpr(struct scope *);
++
+ static struct expr *
+ mkexpr(enum exprkind k, struct type *t, struct expr *b)
+ {
+@@ -303,6 +305,17 @@
+ 	return e;
+ }
+ 
++/* the element size of pointer arithmetic: GNU C counts void and function types as size 1 */
++static struct expr *
++ptrscale(struct location *loc, struct type *base, const char *op)
++{
++	if (base->kind == TYPEVOID || base->kind == TYPEFUNC)
++		return mkconstexpr(&typeulong, 1);
++	if (base->incomplete)
++		error(loc, "pointer operand to '%s' must be to complete object type", op);
++	return mksizeofexpr(base);
++}
++
+ static struct expr *
+ mkbinaryexpr(struct location *loc, enum tokenkind op, struct expr *l, struct expr *r)
+ {
+@@ -378,9 +391,7 @@
+ 		if (l->type->kind != TYPEPOINTER || !(rp & PROPINT))
+ 			error(loc, "invalid operands to '+' operator");
+ 		t = l->type;
+-		if (t->base->incomplete || t->base->kind == TYPEFUNC)
+-			error(loc, "pointer operand to '+' must be to complete object type");
+-		r = mkbinaryexpr(loc, TMUL, exprconvert(r, &typeulong), mksizeofexpr(t->base));
++		r = mkbinaryexpr(loc, TMUL, exprconvert(r, &typeulong), ptrscale(loc, t->base, "+"));
+ 		break;
+ 	case TSUB:
+ 		if (lp & PROPARITH && rp & PROPARITH) {
+@@ -389,18 +400,16 @@
+ 		}
+ 		if (l->type->kind != TYPEPOINTER || !(rp & PROPINT) && r->type->kind != TYPEPOINTER)
+ 			error(loc, "invalid operands to '-' operator");
+-		if (l->type->base->incomplete || l->type->base->kind == TYPEFUNC)
+-			error(loc, "pointer operand to '-' must be to complete object type");
+ 		if (rp & PROPINT) {
+ 			t = l->type;
+-			r = mkbinaryexpr(loc, TMUL, exprconvert(r, &typeulong), mksizeofexpr(t->base));
++			r = mkbinaryexpr(loc, TMUL, exprconvert(r, &typeulong), ptrscale(loc, t->base, "-"));
+ 		} else {
+ 			if (!typecompatible(l->type->base, r->type->base))
+ 				error(&tok.loc, "pointer operands to '-' are to incompatible types");
+ 			op = TDIV;
+ 			t = &typelong;
+ 			e = mkbinaryexpr(loc, TSUB, exprconvert(l, &typelong), exprconvert(r, &typelong));
+-			r = mksizeofexpr(l->type->base);
++			r = ptrscale(loc, l->type->base, "-");
+ 			l = e;
+ 		}
+ 		break;
+@@ -653,7 +662,7 @@
  	case '8': t = &typeuchar; break;
  	case 'u': t = &typeushort; break;
  	case 'U': t = &typeuint; break;
@@ -281,7 +683,7 @@
  	default: assert(0);
  	}
  	switch (t->size) {
-@@ -764,7 +764,7 @@
+@@ -764,7 +773,7 @@
  		src = tok.lit;
  		ordinary = false;
  		switch (*src) {
@@ -290,7 +692,7 @@
  		case 'u': ++src; t = *src == '8' ? ++src, &typeuchar : &typeushort; break;
  		case 'U': ++src; t = &typeuint; break;
  		default: t = &typeuchar, ordinary = true;
-@@ -831,11 +831,15 @@
+@@ -831,25 +840,30 @@
  		break;
  	case TTRUE:
  	case TFALSE:
@@ -306,7 +708,14 @@
  		e = mkexpr(EXPRCONST, &typenullptr, NULL);
  		e->u.constant.u = 0;
  		next();
-@@ -849,7 +853,8 @@
+ 		break;
+ 	case TLPAREN:
+ 		next();
+-		e = expr(s);
++		e = parenexpr(s);
+ 		expect(TRPAREN, "after expression");
+ 		break;
+ 	case T_GENERIC:
  		e = generic(s);
  		break;
  	default:
@@ -316,7 +725,95 @@
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d)
  				error(&tok.loc, "undeclared identifier: %s", tokenstr(tok.kind));
-@@ -1398,7 +1403,7 @@
+@@ -1188,6 +1202,76 @@
+ 		e = mkexpr(EXPRBUILTIN, &typeint, e);
+ 		e->u.builtin.kind = BUILTINSIGNBIT;
+ 		break;
++	case BUILTINADDOVERFLOW:
++	case BUILTINSUBOVERFLOW:
++	case BUILTINMULOVERFLOW: {
++		/* GNU __builtin_{add,sub,mul}_overflow(a, b, r): the exact a OP b wrapped into *r, and whether *r could not
++		 * hold it (qbe.c funcoverflow). Integer operands and result up to 64 bits; the result not bool or enum. */
++		struct expr *a, *b, *r;
++		struct type *rt;
++
++		a = assignexpr(s);
++		expect(TCOMMA, "after first operand");
++		b = assignexpr(s);
++		expect(TCOMMA, "after second operand");
++		r = assignexpr(s);
++		if (!(a->type->prop & PROPINT) || !(b->type->prop & PROPINT) || a->type->size > 8 || b->type->size > 8)
++			error(&tok.loc, "operands of an overflow built-in must have integer type of at most 64 bits");
++		rt = r->type->kind == TYPEPOINTER ? r->type->base : NULL;
++		if (!rt || !(rt->prop & PROPINT) || rt->kind == TYPEBOOL || rt->kind == TYPEENUM || rt->size > 8)
++			error(&tok.loc, "the third argument of an overflow built-in must point to an integer type other than bool or an enum");
++		if (r->type->qual & QUALCONST)
++			error(&tok.loc, "the third argument of an overflow built-in points to a const object");
++		e = mkexpr(EXPRBUILTIN, &typebool, a);
++		a->next = b;
++		b->next = r;
++		r->next = NULL;
++		e->u.builtin.kind = kind;
++		break;
++	}
++	case BUILTINBSWAP16:
++	case BUILTINBSWAP32:
++	case BUILTINBSWAP64: {
++		/* the bytes of an unsigned 16-, 32- or 64-bit value reversed; folded when the operand is constant */
++		int bytes = kind == BUILTINBSWAP16 ? 2 : kind == BUILTINBSWAP32 ? 4 : 8;
++		struct type *bt = bytes == 2 ? &typeushort : bytes == 4 ? &typeuint : &typeulong;
++		struct expr *c;
++
++		e = exprconvert(assignexpr(s), bt);
++		c = eval(e);
++		if (c->kind == EXPRCONST) {
++			unsigned long long u = c->u.constant.u, r = 0;
++			int k;
++
++			for (k = 0; k < bytes; ++k)
++				r |= (u >> 8 * k & 0xff) << 8 * (bytes - 1 - k);
++			e = mkconstexpr(bt, r);
++		} else {
++			e = mkexpr(EXPRBUILTIN, bt, e);
++			e->u.builtin.kind = kind;
++		}
++		break;
++	}
++	case BUILTINCHOOSEEXPR: {
++		/* GNU: the result is the second or third operand itself (its type, and an lvalue if it is one), chosen by an
++		 * integer constant; the other is parsed but not evaluated */
++		struct expr *c, *other;
++
++		c = eval(condexpr(s));
++		if (c->kind != EXPRCONST || !(c->type->prop & PROPINT))
++			error(&tok.loc, "first argument to __builtin_choose_expr must be an integer constant expression");
++		expect(TCOMMA, "after condition");
++		e = assignexpr(s);
++		expect(TCOMMA, "after expression");
++		other = assignexpr(s);
++		if (!c->u.constant.u) {
++			struct expr *x = e;
++			e = other;
++			other = x;
++		}
++		(void)other;   /* trees are freed with the translation unit's arena; nothing of it is emitted */
++		break;
++	}
+ 	case BUILTINCONSTANTP:
+ 		e = mkconstexpr(&typeint, eval(condexpr(s))->kind == EXPRCONST);
+ 		break;
+@@ -1311,6 +1395,10 @@
+ 		error(&tok.loc, "operand of '%s' operator must be an lvalue", tokenstr(op));
+ 	if (base->qual & QUALCONST)
+ 		error(&tok.loc, "operand of '%s' operator is const qualified", tokenstr(op));
++	/* a pointer steps by its element size: 1 for void and function types (GNU), none for another incomplete type */
++	if (base->type->kind == TYPEPOINTER && base->type->base->incomplete && base->type->base->kind != TYPEVOID &&
++	    !(base->type->base->kind == TYPEARRAY && base->type->base->prop & PROPVM))
++		error(&tok.loc, "operand of '%s' operator is a pointer to an incomplete type", tokenstr(op));
+ 	e = mkexpr(EXPRINCDEC, base->type, base);
+ 	e->op = op;
+ 	e->u.incdec.post = post;
+@@ -1398,7 +1486,7 @@
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "'%s' operator must be applied to pointer to struct/union", tokenstr(op));
  			next();
@@ -325,6 +822,67 @@
  				error(&tok.loc, "expected identifier after '%s' operator", tokenstr(op));
  			lvalue = op == TARROW || r->base->lvalue;
  			offset = 0;
+@@ -1497,7 +1585,7 @@
+ 					parseinit(s, t);
+ 				e = NULL;
+ 			} else {
+-				e = expr(s);
++				e = parenexpr(s);
+ 				expect(TRPAREN, "after expression");
+ 				if (op == TSIZEOF)
+ 					e = postfixexpr(s, e);
+@@ -1515,10 +1603,13 @@
+ 				error(&tok.loc, "%s operator applied to bitfield expression", tokenstr(op));
+ 			t = e->type;
+ 		}
++		if (t->kind == TYPEVOID || t->kind == TYPEFUNC) {
++			/* GNU C: sizeof and __alignof__ of void and of a function type are 1 */
++			e = mkconstexpr(&typeulong, 1);
++			break;
++		}
+ 		if (t->incomplete)
+ 			error(&tok.loc, "%s operator applied to incomplete type", tokenstr(op));
+-		if (t->kind == TYPEFUNC)
+-			error(&tok.loc, "%s operator applied to function type", tokenstr(op));
+ 		if (t->kind == TYPEARRAY && t->size == 0 && op == TSIZEOF) {
+ 			e = mkexpr(EXPRSIZEOF, &typeulong, e);
+ 			e->u.szof.type = t;
+@@ -1537,6 +1628,26 @@
+ 	return e;
+ }
+ 
++/* the expression after a '(' already consumed: a GNU statement expression when a '{' follows */
++static struct expr *
++parenexpr(struct scope *s)
++{
++	struct block *saved, *first;
++	struct expr *e, *v;
++
++	if (tok.kind != TLBRACE)
++		return expr(s);
++	if (!curfunc)
++		error(&tok.loc, "statement expression outside a function");
++	saved = funcdetach(curfunc, &first);
++	v = stmtexpr(curfunc, s);
++	e = mkexpr(EXPRSTMT, v ? v->type : &typevoid, v);
++	e->u.stmt.first = first;
++	e->u.stmt.last = funcreattach(curfunc, saved);
++	e->u.stmt.done = false;
++	return e;
++}
++
+ static struct expr *
+ castexpr(struct scope *s)
+ {
+@@ -1551,7 +1662,7 @@
+ 		tq = QUALNONE;
+ 		t = typename(s, &tq, &toeval);
+ 		if (!t) {
+-			e = expr(s);
++			e = parenexpr(s);
+ 			expect(TRPAREN, "after expression to match '('");
+ 			e = postfixexpr(s, e);
+ 			goto done;
 --- a/main.c
 +++ b/main.c
 @@ -1,6 +1,10 @@
@@ -531,7 +1089,7 @@
  
  	argv0 = progname(argv[0], "cproc-qbe");
  	asanon = getenv("NFCXX_ASAN") != NULL;
-@@ -29,6 +213,24 @@
+@@ -29,6 +213,30 @@
  	case 't':
  		target = EARGF(usage());
  		break;
@@ -550,13 +1108,19 @@
 +	case 'p':
 +		prune = true;
 +		break;
++	case 'g':
++		gnukeywords = true;
++		break;
++	case 'V':
++		volatilecalls = true;
++		break;
 +	case 'c':
 +		stdc23 = true;   /* treat true/false/nullptr/bool as C23 keywords, not identifiers */
 +		break;
  	case 'o':
  		output = EARGF(usage());
  		break;
-@@ -38,9 +240,21 @@
+@@ -38,9 +246,21 @@
  
  	targinit(target);
  
@@ -578,7 +1142,7 @@
  	if (argc) {
  		while (argc--)
  			scanfrom(argv[argc], NULL);
-@@ -74,5 +288,28 @@
+@@ -74,5 +294,28 @@
  	fflush(stdout);
  	if (ferror(stdout))
  		fatal("write failed");
@@ -626,9 +1190,420 @@
  	case ALIAS__INLINE:
  	case ALIAS__INLINE__:     tok.kind = TINLINE;        break;
  	case ALIAS__SIGNED:
+@@ -582,6 +582,7 @@
+ 	case ALIAS__TYPEOF__:     tok.kind = TTYPEOF;        break;
+ 	case ALIAS__VOLATILE__:   tok.kind = TVOLATILE;      break;
+ 	case ALIAS__ASM:          tok.kind = T__ASM__;       break;
++	case ALIAS_ASM:           if (gnukeywords) tok.kind = T__ASM__;  break;
+ 	}
+ }
+ 
 --- a/qbe.c
 +++ b/qbe.c
-@@ -2653,6 +2653,397 @@
+@@ -85,7 +85,8 @@
+ };
+ 
+ struct switchcase {
+-	struct treenode node;
++	struct treenode node;   /* the key is the low end of the values */
++	unsigned long long hi;  /* the high end: hi == key for a single value, more for a GNU case range */
+ 	struct block *body;
+ };
+ 
+@@ -142,13 +143,21 @@
+ static const int ptrclass = 'l';
+ 
+ void
+-switchcase(struct switchcases *cases, unsigned long long i, struct block *b)
++switchcase(struct switchcases *cases, unsigned long long lo, unsigned long long hi, struct block *b)
+ {
+ 	struct switchcase *c;
+ 
+-	c = treeinsert(&cases->root, i, sizeof(*c));
+-	if (!c->node.new)
+-		error(&tok.loc, "multiple 'case' labels with same value");
++	/* the values in the tree are disjoint intervals ordered by their low end, so an overlap is found on one path */
++	for (c = cases->root; c;) {
++		if (c->hi < lo)
++			c = c->node.child[1];
++		else if (c->node.key > hi)
++			c = c->node.child[0];
++		else
++			error(&tok.loc, "multiple 'case' labels with same value");
++	}
++	c = treeinsert(&cases->root, lo, sizeof(*c));
++	c->hi = hi;
+ 	c->body = b;
+ }
+ 
+@@ -1631,6 +1640,61 @@
+ 	}
+ }
+ 
++/*
++cproc -V: volatile accesses go through opaque helpers in the inline-asm side file (nfcxx_vload4: movl (%rdi), %eax),
++one call per access. QBE has no volatile; its load optimization forwards and merges plain loads (a polling loop's
++load could be hoisted out of it), and a call is something it never forwards, merges or removes. Scalars of 1, 2, 4
++and 8 bytes; a volatile bit-field or aggregate is still refused for stores. Returns null when the access is not one
++of these (the caller does an ordinary access).
++*/
++bool volatilecalls;
++
++static struct value *
++funcvolatile(struct func *f, struct type *t, struct lvalue lval, struct value *v)
++{
++	static bool done[2][9];
++	static const char *const ld[9] = {[1] = "movzbl (%rdi), %eax", [2] = "movzwl (%rdi), %eax",
++		[4] = "movl (%rdi), %eax", [8] = "movq (%rdi), %rax"};
++	static const char *const st[9] = {[1] = "movb %sil, (%rdi)", [2] = "movw %si, (%rdi)",
++		[4] = "movl %esi, (%rdi)", [8] = "movq %rsi, (%rdi)"};
++	struct value *fn, *r;
++	size_t size;
++	bool store = v != NULL;
++	int class;
++
++	if (!volatilecalls || !asmout || lval.bits.before || lval.bits.after)
++		return NULL;
++	if (t->kind == TYPEPOINTER)
++		t = &typeulong;
++	if (!(t->prop & PROPINT) || t->prop & PROPSOFT)
++		return NULL;
++	size = t->size;
++	if (size != 1 && size != 2 && size != 4 && size != 8)
++		return NULL;
++	if (!done[store][size]) {
++		fprintf(asmout, "\t.text\n\t.p2align 4\nnfcxx_v%s%zu:\n\t%s\n\tret\n", store ? "store" : "load", size,
++			store ? st[size] : ld[size]);
++		done[store][size] = true;
++	}
++	fn = xmalloc(sizeof(*fn));
++	*fn = (struct value){.kind = VALUE_GLOBAL};
++	fn->u.name = xmalloc(24);
++	snprintf(fn->u.name, 24, "nfcxx_v%s%zu", store ? "store" : "load", size);
++	class = size == 8 ? 'l' : 'w';
++	if (store) {
++		funcinst(f, ICALL, 0, fn, NULL);
++		funcinst(f, IARG, ptrclass, lval.addr, NULL);
++		funcinst(f, IARG, class, v, NULL);
++		return v;
++	}
++	r = funcinst(f, ICALL, class, fn, NULL);
++	funcinst(f, IARG, ptrclass, lval.addr, NULL);
++	/* the helper zero-extends; a signed char or short is sign-extended as loadsb/loadsh would */
++	if (size < 4 && t->u.arith.issigned)
++		r = funcinst(f, size == 1 ? IEXTSB : IEXTSH, 'w', r, NULL);
++	return r;
++}
++
+ static struct value *
+ funcstore(struct func *f, struct type *t, enum typequal tq, struct lvalue lval, struct value *v)
+ {
+@@ -1640,8 +1704,11 @@
+ 	struct qbetype qt;
+ 	int bits;
+ 
+-	if (tq & QUALVOLATILE)
++	if (tq & QUALVOLATILE) {
++		if (funcvolatile(f, t, lval, v))
++			return v;
+ 		error(&tok.loc, "volatile store is not yet supported");
++	}
+ 	if (tq & QUALCONST)
+ 		error(&tok.loc, "cannot store to 'const' object");
+ 	tp = t->prop;
+@@ -1682,6 +1749,19 @@
+ 	return r;
+ }
+ 
++static struct value *funcload(struct func *, struct type *, struct lvalue);
++
++/* a load from an lvalue with qualifiers tq: a volatile scalar goes through funcvolatile under cproc -V */
++static struct value *
++funcloadq(struct func *f, struct type *t, enum typequal tq, struct lvalue lval)
++{
++	struct value *v;
++
++	if (tq & QUALVOLATILE && (v = funcvolatile(f, t, lval, NULL)))
++		return funcbits(f, t, v, lval.bits);
++	return funcload(f, t, lval);
++}
++
+ static struct value *
+ funcload(struct func *f, struct type *t, struct lvalue lval)
+ {
+@@ -1785,6 +1865,31 @@
+ 	f->end = b;
+ }
+ 
++/*
++GNU statement expressions. The statements are parsed into a chain of blocks that is not part of the function yet
++(funcdetach makes a fresh current block and returns the one to come back to; funcreattach ends the chain and returns
++its last block). funcexpr links the chain in where the expression is evaluated, so the statements run only where and
++when the expression does: in the operand of &&, || or ?: that is taken, and not at all under sizeof or typeof, or in the
++operand __builtin_choose_expr does not choose.
++*/
++struct block *
++funcdetach(struct func *f, struct block **first)
++{
++	struct block *saved = f->end;
++
++	*first = f->end = mkblock("stmtexpr");
++	return saved;
++}
++
++struct block *
++funcreattach(struct func *f, struct block *saved)
++{
++	struct block *last = f->end;
++
++	f->end = saved;
++	return last;
++}
++
+ void
+ funcjmp(struct func *f, struct block *l)
+ {
+@@ -1881,6 +1986,28 @@
+ 	return f->gotos.vals[idx].p;
+ }
+ 
++/*
++A read of a GNU global register variable. Only %rsp is supported (the kernel's current_stack_pointer): a local helper in
++the inline-asm side file returns the caller's stack pointer as it was at the call, which is the value of %rsp at that
++point of the caller.
++*/
++static struct value *
++funcregvar(struct func *f, struct decl *d)
++{
++	static bool emitted;
++	static struct value fn = {.kind = VALUE_GLOBAL, .u.name = "nfcxx_read_rsp"};
++
++	if (strcmp(d->regvar, "rsp") != 0)
++		error(&tok.loc, "global register variable '%s' in %%%s: only %%rsp is supported", d->name, d->regvar);
++	if (!asmout)
++		error(&tok.loc, "global register variable '%s' needs the inline-asm side file (-a)", d->name);
++	if (!emitted) {
++		fputs("\t.text\n\t.p2align 4\nnfcxx_read_rsp:\n\tleaq 8(%rsp), %rax\n\tret\n", asmout);
++		emitted = true;
++	}
++	return funcinst(f, ICALL, 'l', &fn, NULL);
++}
++
+ static struct lvalue
+ funclval(struct func *f, struct expr *e)
+ {
+@@ -1896,6 +2023,8 @@
+ 		d = e->u.ident.decl;
+ 		if (d->kind != DECLOBJECT && d->kind != DECLFUNC)
+ 			error(&tok.loc, "identifier '%s' is not an object or function", d->name);
++		if (d->kind == DECLOBJECT && d->regvar && d->u.obj.storage != SDAUTO)
++			error(&tok.loc, "global register variable '%s' cannot be assigned or have its address taken", d->name);
+ 		if (d == f->namedecl) {
+ 			fputs("data ", stdout);
+ 			emitname(d->value);
+@@ -2136,6 +2265,88 @@
+ 	return funcexpr(f, e);
+ }
+ 
++/*
++GNU __builtin_{add,sub,mul}_overflow(a, b, r) for any mix of integer types up to 64 bits: the exact result is computed
++as a sign and a 128-bit magnitude (as GCC defines it, infinite precision), wrapped into *r, and the flag says whether
++*r cannot hold it. The algorithm is __nfcxx_ovx of scripts/qbe-prep.rb, with its branches as masks; the operands'
++signedness is known here, so it is straight-line code.
++*/
++static struct value *
++ovl(struct func *f, int op, struct value *x, struct value *y)
++{
++	return funcinst(f, op, 'l', x, y);
++}
++
++static struct value *
++ovcmp(struct func *f, int op, struct value *x, struct value *y)   /* 0 or 1, as a long */
++{
++	return funcinst(f, IEXTUW, 'l', funcinst(f, op, 'w', x, y), NULL);
++}
++
++static struct value *
++funcoverflow(struct func *f, struct expr *e)
++{
++	struct expr *ae = e->base, *be = ae->next, *re = be->next;
++	struct type *rt = re->type->base;
++	bool as = ae->type->u.arith.issigned, bs = be->type->u.arith.issigned, rs = rt->u.arith.issigned;
++	struct value *ua, *ub, *rp, *ma, *mb, *an, *bn, *am, *bm, *lo, *hi, *neg, *out, *zero = mkintconst(0), *v;
++	struct value *flag, *rest;
++	unsigned w = rt->size * 8;
++
++	ua = convert(f, as ? &typelong : &typeulong, ae->type, funcexpr(f, ae));
++	ub = convert(f, bs ? &typelong : &typeulong, be->type, funcexpr(f, be));
++	rp = funcexpr(f, re);
++	/* sign masks (all ones for a negative operand) and magnitudes */
++	ma = as ? ovl(f, ISAR, ua, mkintconst(63)) : zero;
++	mb = bs ? ovl(f, ISAR, ub, mkintconst(63)) : zero;
++	an = ovl(f, IAND, ma, mkintconst(1));
++	bn = ovl(f, IAND, mb, mkintconst(1));
++	am = ovl(f, ISUB, ovl(f, IXOR, ua, ma), ma);
++	bm = ovl(f, ISUB, ovl(f, IXOR, ub, mb), mb);
++	if (e->u.builtin.kind == BUILTINMULOVERFLOW) {
++		struct value *m32 = mkintconst(0xffffffff), *s32 = mkintconst(32);
++		struct value *a0 = ovl(f, IAND, am, m32), *a1 = ovl(f, ISHR, am, s32);
++		struct value *b0 = ovl(f, IAND, bm, m32), *b1 = ovl(f, ISHR, bm, s32);
++		struct value *p00 = ovl(f, IMUL, a0, b0), *p01 = ovl(f, IMUL, a0, b1);
++		struct value *p10 = ovl(f, IMUL, a1, b0), *p11 = ovl(f, IMUL, a1, b1), *mid;
++
++		mid = ovl(f, IADD, ovl(f, IADD, ovl(f, ISHR, p00, s32), ovl(f, IAND, p01, m32)), ovl(f, IAND, p10, m32));
++		lo = ovl(f, IOR, ovl(f, IAND, p00, m32), ovl(f, ISHL, mid, s32));
++		hi = ovl(f, IADD, ovl(f, IADD, p11, ovl(f, ISHR, p01, s32)), ovl(f, IADD, ovl(f, ISHR, p10, s32), ovl(f, ISHR, mid, s32)));
++		neg = ovl(f, IXOR, an, bn);
++	} else {
++		struct value *s, *sum, *carry, *d, *borrow, *mk, *absd, *ms;
++
++		if (e->u.builtin.kind == BUILTINSUBOVERFLOW)
++			bn = ovl(f, IXOR, bn, mkintconst(1));   /* a - b is a + (-b) */
++		s = ovl(f, IXOR, an, bn);                    /* the signs differ: a magnitude difference */
++		sum = ovl(f, IADD, am, bm);
++		carry = ovcmp(f, ICULTL, sum, am);
++		d = ovl(f, ISUB, am, bm);
++		borrow = ovcmp(f, ICULTL, am, bm);
++		mk = ovl(f, ISUB, zero, borrow);
++		absd = ovl(f, ISUB, ovl(f, IXOR, d, mk), mk);
++		ms = ovl(f, ISUB, zero, s);
++		lo = ovl(f, IOR, ovl(f, IAND, absd, ms), ovl(f, IAND, sum, ovl(f, IXOR, ms, mkintconst(-1))));
++		hi = ovl(f, IAND, carry, ovl(f, IXOR, s, mkintconst(1)));
++		neg = ovl(f, IXOR, an, ovl(f, IAND, s, borrow));   /* the larger magnitude's sign when they differ */
++	}
++	neg = ovl(f, IAND, neg, ovcmp(f, ICNEL, ovl(f, IOR, hi, lo), zero));   /* zero is not negative */
++	v = ovl(f, ISUB, zero, neg);
++	out = ovl(f, ISUB, ovl(f, IXOR, lo, v), v);
++	funcstore(f, rt, re->type->qual, (struct lvalue){.addr = rp}, convert(f, rt, &typeulong, out));
++	/* overflow: a high half, or a magnitude out of the result type's range */
++	if (rs) {
++		rest = ovcmp(f, ICUGTL, lo, ovl(f, IADD, mkintconst((1ull << (w - 1)) - 1), neg));
++	} else {
++		rest = neg;
++		if (w < 64)
++			rest = ovl(f, IOR, rest, ovcmp(f, ICNEL, ovl(f, ISHR, lo, mkintconst(w)), zero));
++	}
++	flag = ovl(f, IOR, ovcmp(f, ICNEL, hi, zero), rest);
++	return funcinst(f, ICNEL, 'w', flag, zero);
++}
++
+ struct value *
+ funcexpr(struct func *f, struct expr *e)
+ {
+@@ -2154,10 +2365,20 @@
+ 
+ 	calcvla(f, e->type);
+ 	switch (e->kind) {
++	case EXPRSTMT:
++		if (e->u.stmt.done)
++			fatal("internal error: statement expression evaluated twice");
++		e->u.stmt.done = true;
++		funcjmp(f, e->u.stmt.first);
++		f->end->next = e->u.stmt.first;
++		f->end = e->u.stmt.last;
++		return e->base ? funcexpr(f, e->base) : NULL;
+ 	case EXPRIDENT:
+ 		d = e->u.ident.decl;
++		if (d->kind == DECLOBJECT && d->regvar && d->u.obj.storage != SDAUTO)
++			return funcregvar(f, d);
+ 		switch (d->kind) {
+-		case DECLOBJECT: return funcload(f, e->type, (struct lvalue){d->value});
++		case DECLOBJECT: return funcloadq(f, e->type, e->qual | d->qual, (struct lvalue){d->value});
+ 		case DECLCONST:  return d->value;
+ 		default:
+ 			fatal("unimplemented declaration kind %d", d->kind);
+@@ -2182,10 +2403,10 @@
+ 	case EXPRBITFIELD:
+ 	case EXPRCOMPOUND:
+ 		lval = funclval(f, e);
+-		return funcload(f, e->type, lval);
++		return funcloadq(f, e->type, e->qual, lval);
+ 	case EXPRINCDEC:
+ 		lval = funclval(f, e->base);
+-		l = funcload(f, e->base->type, lval);
++		l = funcloadq(f, e->base->type, e->base->qual, lval);
+ 		t = e->type;
+ 		if (t->prop & PROPSOFT) {
+ 			/* the old value is copied out first: the store overwrites the object that l addresses */
+@@ -2209,7 +2430,8 @@
+ 			if (t->base->kind == TYPEARRAY && t->base->size == 0) {
+ 				r = t->base->u.array.size;
+ 			} else {
+-				r = mkintconst(t->base->size);
++				/* GNU C: a void or function pointer steps by 1 */
++				r = mkintconst(t->base->kind == TYPEVOID || t->base->kind == TYPEFUNC ? 1 : t->base->size);
+ 			}
+ 		} else if (t->prop & PROPINT) {
+ 			r = mkintconst(1);
+@@ -2277,7 +2499,7 @@
+ 			return lval.addr;
+ 		case TMUL:
+ 			r = funcexpr(f, e->base);
+-			return funcload(f, e->type, (struct lvalue){r});
++			return funcloadq(f, e->type, e->qual, (struct lvalue){r});
+ 		case TSUB:
+ 			r = funcexpr(f, e->base);
+ 			if (e->type->prop & PROPSOFT)
+@@ -2439,6 +2661,26 @@
+ 		return funcexpr(f, e);
+ 	case EXPRBUILTIN:
+ 		switch (e->u.builtin.kind) {
++		case BUILTINADDOVERFLOW:
++		case BUILTINSUBOVERFLOW:
++		case BUILTINMULOVERFLOW:
++			return funcoverflow(f, e);
++		case BUILTINBSWAP16:
++		case BUILTINBSWAP32:
++		case BUILTINBSWAP64: {
++			/* QBE has no byte swap: the bytes moved one by one with shifts and masks */
++			int bytes = e->type->size, k, class = bytes == 8 ? 'l' : 'w';
++			struct value *x = funcexpr(f, e->base), *acc = NULL, *b;
++
++			for (k = 0; k < bytes; ++k) {
++				b = k ? funcinst(f, ISHR, class, x, mkintconst(8 * k)) : x;
++				b = funcinst(f, IAND, class, b, mkintconst(0xff));
++				if (bytes - 1 - k)
++					b = funcinst(f, ISHL, class, b, mkintconst(8 * (bytes - 1 - k)));
++				acc = acc ? funcinst(f, IOR, class, acc, b) : b;
++			}
++			return acc;
++		}
+ 		case BUILTINVASTART:
+ 			l = funcvalistaddr(f, e->base);
+ 			funcinst(f, IVASTART, 0, l, NULL);
+@@ -2627,7 +2869,7 @@
+ 		funcjmp(f, defaultlabel);
+ 		return;
+ 	}
+-	if (min == max) {
++	if (c->node.key <= min && c->hi >= max) {   /* every value still possible is this case's */
+ 		funcjmp(f, c->body);
+ 		return;
+ 	}
+@@ -2636,7 +2878,12 @@
+ 	label[2] = mkblock("switch_gt");
+ 
+ 	key = mkintconst(c->node.key);
+-	res = funcinst(f, class == 'w' ? ICEQW : ICEQL, 'w', v, key);
++	if (c->hi == c->node.key) {
++		res = funcinst(f, class == 'w' ? ICEQW : ICEQL, 'w', v, key);
++	} else {   /* lo <= v <= hi, as v - lo <= hi - lo unsigned */
++		res = funcinst(f, ISUB, class, v, key);
++		res = funcinst(f, class == 'w' ? ICULEW : ICULEL, 'w', res, mkintconst(c->hi - c->node.key));
++	}
+ 	funcjnz(f, res, NULL, c->body, label[0]);
+ 	funclabel(f, label[0]);
+ 	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
+@@ -2644,7 +2891,7 @@
+ 	funclabel(f, label[1]);
+ 	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
+ 	funclabel(f, label[2]);
+-	casesearch(f, class, v, c->node.child[1], defaultlabel, c->node.key + 1, max);
++	casesearch(f, class, v, c->node.child[1], defaultlabel, c->hi + 1, max);
+ }
+ 
+ void
+@@ -2653,6 +2900,605 @@
  	casesearch(f, qbetype(c->type).base, v, c->root, defaultlabel, 0, -1);
  }
  
@@ -641,6 +1616,7 @@
 +*/
 +FILE *asmout;
 +static unsigned asmthunkid;
++static void emitname(struct value *);
 +
 +/* x86_64 general registers, by size: [reg][0]=8, [1]=4, [2]=2, [3]=1 byte */
 +enum { RAX, RCX, RDX, RBX, RSI, RDI, RBP, RSP, R8, R9, R10, R11, R12, R13, R14, R15 };
@@ -697,11 +1673,24 @@
 +	bool feed;    /* the thunk loads this operand from its slot on entry */
 +	bool prestore;/* the caller stores a value into this operand's slot before the call ("+" outputs and inputs) */
 +	bool back;    /* the thunk stores this operand to its slot on exit, and the caller reads it back */
++	bool pseudo;  /* the %rsp register variable (ASM_CALL_CONSTRAINT): named in the template, never moved */
++	bool mem;     /* a memory operand: the slot and the register carry the object's address; %N is (reg) */
++	const char *flag;  /* a flag output "=@ccCOND": the condition, set from the flags right after the template */
++	char *immsym; /* an immediate that is a symbol's address (plus imm): "i"(&x), "i"(f) */
 +	long imm;     /* immediate value, when reg == -1 */
 +	struct expr *expr;
 +	struct lvalue lval;   /* an output's destination (outputs only) */
 +	char *symname;
 +};
++
++/* the register variable an asm operand names (register T x asm("REG")), or null */
++static struct decl *
++asmregvar(struct expr *e)
++{
++	if (e->kind == EXPRIDENT && e->u.ident.decl->kind == DECLOBJECT && e->u.ident.decl->regvar)
++		return e->u.ident.decl;
++	return NULL;
++}
 +
 +/* operand size from a type: scalars up to 8 bytes; anything else is refused */
 +static int
@@ -728,6 +1717,79 @@
 +	return c;
 +}
 +
++/* the assembler name of a global value, as emitname spells it in the IL (without the sigil or the quotes) */
++static char *
++asmglobalname(struct value *v)
++{
++	size_t n = strlen(v->u.name) + 32;
++	char *s = xmalloc(n);
++
++	if (v->id)
++		snprintf(s, n, ".L%s.%u", v->u.name, v->id);
++	else
++		snprintf(s, n, "%s", v->u.name);
++	return s;
++}
++
++static bool
++asmimmfits(const char *alt, long long v)
++{
++	const char *c;
++
++	for (c = alt; *c; ++c) {
++		switch (*c) {
++		case 'i': case 'n': case 'g': return true;
++		case 'I': if (v >= 0 && v <= 31) return true; break;
++		case 'J': if (v >= 0 && v <= 63) return true; break;
++		case 'K': if (v >= -128 && v <= 127) return true; break;
++		case 'L': if (v == 0xff || v == 0xffff || v == 0xffffffffLL) return true; break;
++		case 'M': if (v >= 0 && v <= 3) return true; break;
++		case 'N': if (v >= 0 && v <= 255) return true; break;
++		case 'e': if (v >= -0x80000000LL && v <= 0x7fffffffLL) return true; break;
++		case 'Z': if (v >= 0 && v <= 0xffffffffLL) return true; break;
++		}
++	}
++	return false;
++}
++
++/*
++Whether an asm input is an immediate the constraint letters accept, filling in rec: an integer constant within the
++letters' ranges, or the address of a function or static object ("i" and "s": the kernel's "i"(&symbol), "i"(func)).
++A symbol named only here is kept alive under cproc -p by a top-level IL comment that references it.
++*/
++static bool
++asmimm(struct expr *e, const char *alt, struct asmrec *rec)
++{
++	struct expr *c = eval(e);
++	struct decl *d;
++
++	if (c->kind == EXPRCONST && c->type->prop & PROPINT) {
++		if (!asmimmfits(alt, c->u.constant.i))
++			return false;
++		rec->imm = c->u.constant.i;
++		return true;
++	}
++	if (!strpbrk(alt, "isg"))
++		return false;
++	while (c->kind == EXPRCAST)
++		c = c->base;
++	if (c->kind == EXPRUNARY && c->op == TBAND)
++		c = c->base;
++	if (c->decayed)
++		c = c->base;
++	if (c->kind != EXPRIDENT)
++		return false;
++	d = c->u.ident.decl;
++	if (!(d->kind == DECLFUNC || d->kind == DECLOBJECT && d->u.obj.storage != SDAUTO && !d->regvar) || !d->value)
++		return false;
++	rec->immsym = asmglobalname(d->value);
++	rec->imm = 0;
++	fputs("# nfcxx:ref ", stdout);
++	emitname(d->value);
++	putchar('\n');
++	return true;
++}
++
 +/* substitute one operand reference into the thunk, given its already-parsed modifier and index */
 +static void
 +asmsubst(struct asmrec *rec, unsigned total, int mod, unsigned idx)
@@ -737,6 +1799,24 @@
 +	if (idx >= total)
 +		error(&tok.loc, "asm operand index out of range");
 +	r = &rec[idx];
++	if (r->immsym) {   /* a symbol's address */
++		switch (mod) {
++		case 'c': case 'P': case 'p': fprintf(asmout, "%s", r->immsym); break;
++		case 0:   fprintf(asmout, "$%s", r->immsym); break;
++		default:  error(&tok.loc, "unsupported asm operand modifier '%%%c' on a symbol", mod);
++		}
++		if (r->imm)
++			fprintf(asmout, "%+ld", r->imm);
++		return;
++	}
++	if (r->mem) {   /* memory: the object's address is in the register */
++		switch (mod) {
++		case 0: case 'a': case 'b': case 'w': case 'k': case 'q':
++			fprintf(asmout, "(%%%s)", regname[r->reg][0]);
++			return;
++		}
++		error(&tok.loc, "unsupported asm operand modifier '%%%c' on a memory operand", mod);
++	}
 +	if (r->reg < 0) {   /* immediate */
 +		switch (mod) {
 +		case 'c': fprintf(asmout, "%ld", r->imm); break;
@@ -830,8 +1910,11 @@
 +		struct asmoperand *op = i < nout ? &out[i] : &in[i - nout];
 +		bool isout, inout;
 +		int fr = fixedreg((unsigned char)*asmconstraintbody(op->constraint, &isout, &inout));
++		struct decl *rv = asmregvar(op->expr);
 +		if (fr >= 0)
 +			used[fr] = true;
++		if (rv && (fr = clobberreg(rv->regvar)) >= 0 && fr != RSP)
++			used[fr] = true;   /* a register variable's register is not offered to other operands */
 +	}
 +	for (i = 0; i < nclob; ++i) {
 +		int r;
@@ -858,6 +1941,9 @@
 +		rec[i].reg = -1;
 +		rec[i].slot = -1;
 +		rec[i].feed = rec[i].prestore = rec[i].back = false;
++		rec[i].pseudo = rec[i].mem = false;
++		rec[i].flag = NULL;
++		rec[i].immsym = NULL;
 +		rec[i].imm = 0;
 +		if (i < nout) {
 +			if (!isout)
@@ -868,6 +1954,31 @@
 +			error(&tok.loc, "asm input operand has an output constraint");
 +		}
 +
++		if (strncmp(body, "@cc", 3) == 0) {
++			/* x86 flag output (__GCC_ASM_FLAG_OUTPUTS__): a register the thunk fills with set<cond> */
++			static const char *const conds[] = {"a", "ae", "b", "be", "c", "e", "g", "ge", "l", "le", "na", "nae",
++				"nb", "nbe", "nc", "ne", "ng", "nge", "nl", "nle", "no", "np", "ns", "nz", "o", "p", "pe", "po", "s", "z"};
++			size_t k;
++
++			for (k = 0; k < countof(conds) && strcmp(body + 3, conds[k]); ++k)
++				;
++			if (i >= nout || k == countof(conds))
++				error(&tok.loc, "bad asm flag output constraint '%s'", op->constraint);
++			if (!(op->expr->type->prop & PROPINT))
++				error(&tok.loc, "asm flag output must have integer type");
++			rec[i].flag = body + 3;
++			rec[i].feed = rec[i].prestore = false;
++			while (pool < countof(rpool) && used[rpool[pool]])
++				++pool;
++			if (pool == countof(rpool))
++				error(&tok.loc, "too many register asm operands");
++			rec[i].reg = rpool[pool++];
++			used[rec[i].reg] = true;
++			rec[i].size = asmopsize(op->expr->type);
++			rec[i].slot = slotsize;
++			slotsize += 8;
++			continue;
++		}
 +		if (isdigit((unsigned char)*body)) {   /* a tied operand: shares a matching output */
 +			unsigned m = 0;
 +			while (isdigit((unsigned char)*body))
@@ -879,35 +1990,80 @@
 +			rec[m].feed = true;   /* the thunk loads the tied value the input writes into the output's slot */
 +			continue;
 +		}
-+		if (*body == 'i' || *body == 'n' || *body == 'N') {   /* immediate */
-+			struct expr *e;
-+			if (i < nout)
-+				error(&tok.loc, "immediate constraint on an asm output");
-+			e = eval(op->expr);
-+			if (e->kind != EXPRCONST || e->type->prop & PROPFLOAT)
-+				error(&tok.loc, "asm immediate operand is not an integer constant");
-+			rec[i].imm = e->u.constant.i;
-+			rec[i].size = 8;
-+			continue;   /* no register, no slot */
++		{
++			/* GNU constraint letters, first alternative only (operands' alternatives are separated by ','): a constant
++			 * goes to an immediate when an immediate letter allows it, as gcc chooses; then a register when any
++			 * register letter is present; then memory */
++			char alt[32];
++			size_t n = 0;
++			bool hasreg = false, hasmem = false, hasimm = false, anyreg = false;
++			const char *c;
++
++			for (c = body; *c && *c != ',' && n < sizeof alt - 1; ++c)
++				alt[n++] = *c;
++			alt[n] = 0;
++			fr = -1;
++			for (c = alt; *c; ++c) {
++				switch (*c) {
++				case 'r': case 'q': case 'Q': case 'R': case 'l': anyreg = hasreg = true; break;
++				case 'g': anyreg = hasreg = hasmem = hasimm = true; break;
++				case 'a': case 'b': case 'c': case 'd': case 'S': case 'D':
++					hasreg = true;
++					if (fr < 0)
++						fr = fixedreg((unsigned char)*c);
++					break;
++				case 'm': case 'o': case 'V': hasmem = true; break;
++				case 'i': case 'n': case 's': case 'I': case 'J': case 'K': case 'L': case 'M': case 'N': case 'e':
++				case 'Z': case 'E': case 'F': hasimm = true; break;
++				case '*': case '#': case '!': case '?': case '^': break;   /* register preference hints */
++				default:
++					error(&tok.loc, "unsupported asm constraint '%s'", op->constraint);
++				}
++			}
++			if (hasimm && i >= nout && asmimm(op->expr, alt, &rec[i])) {
++				rec[i].size = 8;
++				continue;   /* no register, no slot */
++			}
++			if (asmregvar(op->expr) && hasreg) {
++				/* a register variable takes its own register (GNU: "an operand in a register variable is in that register") */
++				fr = clobberreg(asmregvar(op->expr)->regvar);
++				if (fr < 0)
++					error(&tok.loc, "unknown register '%s' for register variable", asmregvar(op->expr)->regvar);
++				if (fr == RSP) {
++					/* the stack pointer (the kernel's ASM_CALL_CONSTRAINT "+r"(current_stack_pointer)): the template may
++					 * name it, but the thunk neither loads nor stores it -- the asm runs on the thunk's own stack */
++					rec[i].reg = RSP;
++					rec[i].size = 8;
++					rec[i].pseudo = true;
++					rec[i].feed = rec[i].prestore = rec[i].back = false;
++					continue;
++				}
++			} else if (hasreg) {
++				if (anyreg)
++					fr = -1;   /* a generic register class wins over a fixed letter in the same alternative */
++			} else if (hasmem) {
++				/* memory: the slot carries the object's address, which the thunk loads into a register; %N is (reg),
++				 * so the asm reads and writes the object itself and nothing is copied back */
++				rec[i].mem = true;
++				rec[i].back = false;
++				rec[i].feed = rec[i].prestore = true;
++			} else if (hasimm) {
++				error(&tok.loc, "asm immediate operand is not an integer constant or a symbol address");
++			} else {
++				error(&tok.loc, "unsupported asm constraint '%s'", op->constraint);
++			}
 +		}
-+		if (*body == 'm' || *body == 'o' || *body == 'V' || *body == 'g')
-+			error(&tok.loc, "asm memory operands are not yet supported");
-+		fr = fixedreg((unsigned char)*body);
 +		if (fr >= 0) {
 +			rec[i].reg = fr;
-+		} else if (*body == 'r' || *body == 'q') {
++		} else {
 +			while (pool < countof(rpool) && used[rpool[pool]])
 +				++pool;
 +			if (pool == countof(rpool))
 +				error(&tok.loc, "too many register asm operands");
 +			rec[i].reg = rpool[pool++];
 +			used[rec[i].reg] = true;
-+		} else {
-+			error(&tok.loc, "unsupported asm constraint '%s'", op->constraint);
 +		}
-+		if (body[1] && !isdigit((unsigned char)body[1]))
-+			error(&tok.loc, "multiple-alternative asm constraints are not supported");
-+		rec[i].size = asmopsize(op->expr->type);
++		rec[i].size = rec[i].mem ? 8 : asmopsize(op->expr->type);
 +		rec[i].slot = slotsize;
 +		slotsize += 8;
 +		if (isin)
@@ -951,12 +2107,17 @@
 +		f->end = end;
 +	}
 +	for (i = 0; i < nout; ++i)   /* evaluate output destinations now; "+" feeds its current value in */
-+		rec[i].lval = funclval(f, rec[i].expr);
++		if (!rec[i].pseudo)
++			rec[i].lval = funclval(f, rec[i].expr);
 +	for (i = 0; i < nout; ++i) {
 +		if (!rec[i].prestore)
 +			continue;
 +		t = rec[i].expr->type;
 +		addr = rec[i].slot ? funcinst(f, IADD, ptrclass, base, mkintconst(rec[i].slot)) : base;
++		if (rec[i].mem) {   /* "=m"/"+m": the slot carries the destination's address */
++			funcinst(f, ISTOREL, 0, rec[i].lval.addr, addr);
++			continue;
++		}
 +		v = funcload(f, t, rec[i].lval);
 +		funcstore(f, t, 0, (struct lvalue){.addr = addr}, v);
 +	}
@@ -964,8 +2125,8 @@
 +		long slot;
 +		bool o, io;
 +		const char *b;
-+		if (rec[i].reg < 0)
-+			continue;   /* immediate: substituted into the thunk, no slot */
++		if (rec[i].reg < 0 || rec[i].pseudo)
++			continue;   /* immediate (substituted into the thunk) or %rsp: no slot */
 +		if (rec[i].slot >= 0) {
 +			slot = rec[i].slot;   /* a plain register input */
 +		} else {   /* a tied input: store into the matching output's slot */
@@ -976,13 +2137,31 @@
 +			slot = rec[m].slot;
 +		}
 +		t = rec[i].expr->type;
-+		v = funcexpr(f, rec[i].expr);
 +		addr = slot ? funcinst(f, IADD, ptrclass, base, mkintconst(slot)) : base;
++		if (rec[i].mem) {
++			/* "m": the object's address; an array is the array (not its decayed pointer); a value that is not an
++			 * object is put in a temporary first, as gcc does */
++			struct expr *me = rec[i].expr->decayed ? rec[i].expr->base : rec[i].expr;
++			if (me->lvalue || me->kind == EXPRUNARY && me->op == TMUL) {
++				v = funclval(f, me).addr;
++			} else {
++				struct decl *tmpd = mkdecl(NULL, DECLOBJECT, me->type, QUALNONE, LINKNONE);
++				tmpd->u.obj.storage = SDAUTO;
++				funcalloc(f, tmpd);
++				funcstore(f, me->type, 0, (struct lvalue){.addr = tmpd->value}, funcexpr(f, me));
++				v = tmpd->value;
++			}
++			funcinst(f, ISTOREL, 0, v, addr);
++			continue;
++		}
++		v = funcexpr(f, rec[i].expr);
 +		funcstore(f, t, 0, (struct lvalue){.addr = addr}, v);
 +	}
 +	funcinst(f, ICALL, 0, fn, NULL);
 +	funcinst(f, IARG, ptrclass, slotsize ? base : mkintconst(0), NULL);
 +	for (i = 0; i < nout; ++i) {
++		if (rec[i].pseudo || rec[i].mem)
++			continue;
 +		t = rec[i].expr->type;
 +		addr = rec[i].slot ? funcinst(f, IADD, ptrclass, base, mkintconst(rec[i].slot)) : base;
 +		v = funcload(f, t, (struct lvalue){.addr = addr});
@@ -1010,6 +2189,10 @@
 +	fputs("\t", asmout);
 +	asmtemplate(template, rec, total, names, expid);
 +	fputc('\n', asmout);
++	for (i = 0; i < total; ++i)   /* flag outputs, before anything can change the flags (set and movzbl do not) */
++		if (rec[i].flag)
++			fprintf(asmout, "\tset%s %%%s\n\tmovzbl %%%s, %%%s\n", rec[i].flag, regname[rec[i].reg][3],
++				regname[rec[i].reg][3], regname[rec[i].reg][1]);
 +	for (i = 0; i < total; ++i)   /* store written-back operands to the slot */
 +		if (rec[i].slot >= 0 && rec[i].back) {
 +			int col = regsizecol(rec[i].size);
@@ -1026,7 +2209,7 @@
  /* emit */
  
  static void
-@@ -2922,6 +3313,11 @@
+@@ -2922,6 +3768,11 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -1038,7 +2221,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -3075,6 +3471,17 @@
+@@ -3075,6 +3926,17 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
@@ -1056,6 +2239,22 @@
  	if (d->u.obj.storage == SDTHREAD)
  		fputs("thread ", stdout);
  	if (d->linkage == LINKEXTERN)
+--- a/scope.c
++++ b/scope.c
+@@ -43,6 +43,13 @@
+ {
+ 	static struct decl builtins[] = {
+ 		{.name = "__builtin_alloca",      .kind = DECLBUILTIN, .u.builtin = BUILTINALLOCA},
++		{.name = "__builtin_add_overflow", .kind = DECLBUILTIN, .u.builtin = BUILTINADDOVERFLOW},
++		{.name = "__builtin_sub_overflow", .kind = DECLBUILTIN, .u.builtin = BUILTINSUBOVERFLOW},
++		{.name = "__builtin_mul_overflow", .kind = DECLBUILTIN, .u.builtin = BUILTINMULOVERFLOW},
++		{.name = "__builtin_bswap16",     .kind = DECLBUILTIN, .u.builtin = BUILTINBSWAP16},
++		{.name = "__builtin_bswap32",     .kind = DECLBUILTIN, .u.builtin = BUILTINBSWAP32},
++		{.name = "__builtin_bswap64",     .kind = DECLBUILTIN, .u.builtin = BUILTINBSWAP64},
++		{.name = "__builtin_choose_expr", .kind = DECLBUILTIN, .u.builtin = BUILTINCHOOSEEXPR},
+ 		{.name = "__builtin_constant_p",  .kind = DECLBUILTIN, .u.builtin = BUILTINCONSTANTP},
+ 		{.name = "__builtin_expect",      .kind = DECLBUILTIN, .u.builtin = BUILTINEXPECT},
+ 		{.name = "__builtin_fabsf",      .kind = DECLBUILTIN, .u.builtin = BUILTINFABSF},
 --- a/stmt.c
 +++ b/stmt.c
 @@ -6,6 +6,22 @@
@@ -1081,7 +2280,31 @@
  /* 6.8.1 Labeled statements */
  static bool
  label(struct func *f, struct scope *s)
-@@ -40,7 +56,7 @@
+@@ -25,7 +41,22 @@
+ 		funclabel(f, b);
+ 		asancase(f, s->switchcases);
+ 		i = intconstexpr(s, true);
+-		switchcase(s->switchcases, i, b);
++		if (consume(TELLIPSIS)) {
++			/* GNU case range: case LO ... HI. The dispatch compares unsigned, so a signed range across zero is two */
++			unsigned long long j = intconstexpr(s, true);
++			bool sign = s->switchcases->type->u.arith.issigned;
++
++			if (sign ? (long long)i <= (long long)j : i <= j) {
++				if (i <= j) {
++					switchcase(s->switchcases, i, j, b);
++				} else {
++					switchcase(s->switchcases, i, -1, b);
++					switchcase(s->switchcases, 0, j, b);
++				}
++			}
++		} else {
++			switchcase(s->switchcases, i, i, b);
++		}
+ 		expect(TCOLON, "after case expression");
+ 		break;
+ 	case TDEFAULT:
+@@ -40,7 +71,7 @@
  		asancase(f, s->switchcases);
  		break;
  	default:
@@ -1090,7 +2313,53 @@
  			return false;
  		name = tokenstr(tok.kind);
  		if (!peek(TCOLON))
-@@ -319,7 +335,70 @@
+@@ -62,6 +93,45 @@
+ 	stmt(f, s);
+ }
+ 
++/*
++The body of a GNU statement expression ({ ... }), parsed into the current (detached) blocks: declarations and
++statements as in a compound statement, except that the last expression statement is not evaluated here -- its tree
++is the expression's value, evaluated where the statement expression is (funcexpr). Returns null when the body does not
++end in an expression statement (the value is void).
++*/
++struct expr *
++stmtexpr(struct func *f, struct scope *s)
++{
++	struct expr *e, *v = NULL;
++
++	expect(TLBRACE, "to begin statement expression");
++	s = mkscope(s);
++	while (tok.kind != TRBRACE) {
++		v = NULL;
++		if (label(f, s) || decl(s, f))
++			continue;
++		switch (tok.kind) {
++		case TLBRACE: case TSEMICOLON: case TIF: case TSWITCH: case TWHILE: case TDO: case TFOR:
++		case TGOTO: case TCONTINUE: case TBREAK: case TRETURN: case T__ASM__: case TLBRACK:
++			stmt(f, s);
++			continue;
++		default:
++			break;
++		}
++		e = expr(s);
++		expect(TSEMICOLON, "after expression statement");
++		if (tok.kind == TRBRACE) {
++			v = e;
++			break;
++		}
++		funcexpr(f, e);
++		delexpr(e);
++	}
++	s = delscope(s);
++	expect(TRBRACE, "to end statement expression");
++	return v;
++}
++
+ /* 6.8 Statements and blocks */
+ void
+ stmt(struct func *f, struct scope *s)
+@@ -319,7 +389,70 @@
  		expect(TSEMICOLON, "after 'return' statement");
  		break;
  
@@ -1171,7 +2440,7 @@
  
 +/* -u (gcc's -funsigned-char): plain char is unsigned whatever the target's default; the Linux kernel builds with it */
 +bool unsignedchar;
-+bool shortwchar, autozero, prune;
++bool shortwchar, autozero, prune, gnukeywords;
 +
  void
  targinit(const char *name)
@@ -1246,8 +2515,9 @@
  TOKEN(ALIAS_STATIC_ASSERT, "_Static_assert")
  TOKEN(ALIAS_THREAD_LOCAL,  "_Thread_local")
  
-@@ -152,3 +152,4 @@
+@@ -152,3 +152,5 @@
  TOKEN(ALIAS__TYPEOF__,     "__typeof__")
  TOKEN(ALIAS__VOLATILE__,   "__volatile__")  /* XXX: what needs this? */
  TOKEN(ALIAS__ASM,          "__asm")
 +TOKEN(ALIAS__EXTENSION__,  "__extension__")  /* a pedantry marker: dropped by the scanner */
++TOKEN(ALIAS_ASM,           "asm")    /* GNU C keyword under -g, else an identifier */
