@@ -53,7 +53,7 @@ module NativeCoreResultSigsCases
   end
 
   def self.run(check)
-    audited = { 'Array' => { 'to_a' => 'Array', 'compact' => 'Array', 'join' => 'String' }, 'String' => { 'bytes' => 'Array', 'size' => :fixnum, 'length' => :fixnum }, 'Integer' => { 'to_s' => 'String', 'to_i' => :fixnum, 'inspect' => 'String' } }.freeze
+    audited = { 'Array' => { 'to_a' => 'Array', 'compact' => 'Array', 'join' => 'String', '+' => 'Array', '-' => 'Array' }, 'String' => { 'bytes' => 'Array', 'size' => :fixnum, 'length' => :fixnum }, 'Integer' => { 'to_s' => 'String', 'to_i' => :fixnum, 'inspect' => 'String' } }.freeze
 
     check.call('loaded table equals the audited entries', NativeCoreResultSigs.kinds == audited)
     check.call('table is frozen', NativeCoreResultSigs.kinds.frozen? && NativeCoreResultSigs.kinds['Array'].frozen?)

@@ -2,7 +2,8 @@
 # frozen_string_literal: true
 
 # CONSTRUCTOR_OPTIONALS: an optional `initialize` position whose defaults are all literal loads pools the values the
-# `new` sites that pass it give, so the ivar it is stored in gets a class pool. Generated end to end by bc2cpp.rb
+# `new` sites that pass it give, so the ivar it is stored in gets a class pool. PACKED_NEW reads a `new` whose more
+# than 14 positionals mrbc packs into one Array as the plain call it is. Generated end to end by bc2cpp.rb
 # (no mruby build needed); BC2CPP_CTOR_OPTIONALS=0 is the output before it.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/constructor_optionals_check.rb
@@ -68,8 +69,22 @@ SOURCE = <<~RUBY
     end
   end
 
+  # More than 14 positionals: mrbc packs them into one Array (PACKED_NEW).
+  class Wide
+    def initialize(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, items = nil, tag = nil)
+      @items = items
+      nil
+    end
+
+    def count
+      (@items || []).size
+    end
+  end
+
   class Maker
     def make(source)
+      Wide.new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, [1], nil)
+      Wide.new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
       Box.new([1, 2])
       Box.new
       Box.new([3], "named")
@@ -87,7 +102,7 @@ RUBY
 bodies = lambda do |flag|
   ENV['BC2CPP_CTOR_OPTIONALS'] = flag
   Dir.mktmpdir('constructor_optionals') do |dir|
-    code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: %w[Box Pair Bag Crate Maker])
+    code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: %w[Box Pair Bag Crate Wide Maker])
     code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }
   end
 ensure
@@ -102,5 +117,9 @@ check.call('without CONSTRUCTOR_OPTIONALS it does not', !exact_size.call(off['Bo
 check.call('a default that reads another parameter refuses the positions', !exact_size.call(on['Pair#count']))
 check.call('a keyword call whose Hash lands in the position refuses it', !exact_size.call(on['Bag#count']))
 check.call('a passed value the flow cannot name leaves the pool unknown', !exact_size.call(on['Crate#count']))
+check.call('a packed 16-argument new pools its positions', exact_size.call(on['Wide#count']))
+ENV['BC2CPP_CTOR_PACKED'] = '0'
+check.call('BC2CPP_CTOR_PACKED=0 leaves a packed new a splat', !exact_size.call(bodies.call('1')['Wide#count']))
+ENV.delete('BC2CPP_CTOR_PACKED')
 
 suite.finish!

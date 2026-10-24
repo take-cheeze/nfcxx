@@ -128,8 +128,15 @@ check.call('a frozen Array literal is Array', rows['FROZEN_ARR']&.first(2) == ['
 check.call('a frozen Hash literal is Hash', rows['FROZEN_HASH']&.first(2) == ['Hash', 'inferred:constructed'])
 check.call('a Hash literal merge is Hash', rows['LIT_MERGE']&.first(2) == ['Hash', 'inferred:hash-merge'])
 check.call('a Hash merge of a constant Hash is Hash', rows['CONST_MERGE']&.first(2) == ['Hash', 'inferred:hash-merge'])
-check.call('an Array sum that is frozen is Array', rows['SUM']&.first(2) == ['Array', 'inferred:array-sum'])
-check.call('the sum over a frozen sum is Array', rows['KANA']&.first(2) == ['Array', 'inferred:array-sum'])
+# OPERATOR_SENDS types `Array + Array` in the class pools, which answer before the sum fact.
+check.call('an Array sum that is frozen is Array', rows['SUM']&.first(2) == ['Array', 'inferred:class-pool'])
+check.call('the sum over a frozen sum is Array', rows['KANA']&.first(2) == ['Array', 'inferred:class-pool'])
+ENV['BC2CPP_OPERATOR_SENDS'] = '0'
+sum_rows = container_rows.call(typed_rows.call(BASE + positive + frozen + unknown_merge, cli: true))
+ENV.delete('BC2CPP_OPERATOR_SENDS')
+check.call('without OPERATOR_SENDS the sum fact types a frozen Array sum',
+           sum_rows['SUM']&.first(2) == ['Array', 'inferred:array-sum'] &&
+           sum_rows['KANA']&.first(2) == ['Array', 'inferred:array-sum'])
 
 negatives = {
   'Array#freeze defined in Ruby' => [

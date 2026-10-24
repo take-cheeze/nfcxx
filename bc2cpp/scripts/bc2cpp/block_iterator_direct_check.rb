@@ -53,6 +53,9 @@ SRC = <<~'RUBY'
     def any_all(a); [a.any? { |x| x > 2 }, a.all? { |x| x > 0 }]; end
     def red(a); a.reduce(0) { |m, x| m + x }; end
     def red_break(a); a.reduce(0) { |m, x| break [:stop, m] if x > 2; m + x }; end
+    def red_sym(a); a.reduce(:+) { |m, x| m * x }; end
+    def red_var(a, i); a.reduce(i) { |m, x| m * x }; end
+    def red_lit_sym; [1, 2, 3].reduce(:+) { |m, x| m * x }; end
     def ewi(a); r = []; a.each_with_index { |x, i| r << [x, i] }; r; end
     def eidx(a); r = []; a.each_index { |i| r << i }; r; end
     def tm(n); r = 0; n.times { |i| r += i }; r; end
@@ -150,6 +153,12 @@ check.call('tm: an unproven receiver runs the inlined loop behind a Fixnum test,
 check.call('tm_literal: an Integer literal receiver is the plain loop of ADR 0147',
            code_of(code, 'tm_literal').include?('bc2cpp_times_i_') && !code_of(code, 'tm_literal').include?('GUARDED_BLOCK_INLINE') &&
            !code_of(code, 'tm_literal').include?(DYNAMIC))
+red = code_of(code, 'red')
+check.call('red: an unproven receiver runs the inlined fold behind an Array test, the send as the else',
+           red.match?(/GUARDED_BLOCK_INLINE :reduce .*\n\s+if \(M->c == M->root_c && mrb_array_p\(r\d+\)/) &&
+             red.include?(DYNAMIC))
+check.call('red_sym, red_var: a Symbol or unproven initial value (Enumerable#inject takes a Symbol as the operator) ' \
+           'keeps the send', %w[red_sym red_var red_lit_sym].none? { |m| code_of(code, m).include?('bc2cpp_accum_') })
 user = code_of(code, 'user_each')
 check.call('user_each: an unproven receiver keeps the exact-class arms and the dynamic send as the else',
            user.include?('Array_each_impl(M, ') && user.include?(DYNAMIC))
@@ -186,6 +195,8 @@ DRIVER = <<~'RUBY'
     %i[each_sum each_break each_next each_return map_sq sel rej rej_bang any_all red red_break ewi eidx].each do |m|
       show.call("#{m}/#{i}") { fx.send(m, a.frozen? ? a : a.dup) }
     end
+    [:+, 1, 2.5].each { |init| show.call("red_var/#{i}/#{init.inspect}") { fx.red_var(a.dup, init) } }
+    show.call("red_sym/#{i}") { fx.red_sym(a.dup) }
   end
   [[1, 2], [1, 2, 3], []].each_with_index do |a, i|
     show.call("grow/#{i}") { fx.grow(a.dup) }
@@ -198,6 +209,7 @@ DRIVER = <<~'RUBY'
     show.call("tm_nested_break/#{n}") { fx.tm_nested_break(n) }
   end
   show.call('tm_literal') { fx.tm_literal(5) }
+  show.call('red_lit_sym') { fx.red_lit_sym }
   # Not a Fixnum: a bignum runs Integer#times, anything without `times` raises NoMethodError, a user `times` runs.
   # A positive bignum would count for ever, so it only runs to the first iteration's break.
   show.call('tm_first/big') { fx.tm_first(2**70) }

@@ -65,6 +65,8 @@ class CodeGen
       @cg.return_class_send_mask(irep, index, insn, state)
     end
 
+    def operator_mask(irep, index, insn, sym, state) = @cg.return_class_operator_mask(irep, index, insn, sym, state)
+
     def preserves_ivar_slots?(irep, _index, insn, state)
       @cg.readonly_class_call?(irep, insn, state)
     end
@@ -492,6 +494,27 @@ class CodeGen
 
       joined | BytecodeIR::NumericClasses.block_return_mask(child, states)
     end
+  end
+
+  # OPERATOR_SENDS: an ADD/SUB/MUL whose receiver can be no number runs no native arithmetic; it is the one-argument
+  # send codegen compiles it as (compile_operator_fallback), R[a] the receiver and R[a+1] the argument, so its class
+  # is that send's. BC2CPP_OPERATOR_SENDS=0 leaves it OTHER.
+  def return_class_operator_mask(irep, index, insn, sym, state)
+    recv = state[insn.reg.to_i]
+    # 0 is a receiver no path has reached yet; answering OTHER would drop a pool the fixpoint is still growing.
+    return 0 if recv == 0 && operator_sends?
+    return NumericFlow::OTHER unless operator_sends? && recv.is_a?(Integer) && recv.positive? &&
+                                     (recv & (NumericFlow::NUM | NumericFlow::OTHER | NumericFlow::EXC)).zero?
+
+    @operator_send_insns ||= {}
+    send = @operator_send_insns[[sym, insn.reg]] ||= Insn.synthetic('SEND', "R#{insn.reg} :#{sym} n=1")
+    return_class_send_mask(irep, index, send, state)
+  end
+
+  def operator_sends?
+    return @operator_sends if defined?(@operator_sends)
+
+    @operator_sends = ENV['BC2CPP_OPERATOR_SENDS'] != '0'
   end
 
   # Class set of a SEND-family result: a tracked name's set, the receiver's own set for `freeze`, a native
