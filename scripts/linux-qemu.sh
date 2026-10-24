@@ -55,6 +55,11 @@ if [ -n "${QBE_TRY:-}" ]; then
       syms && $1 ~ /^[0-9]+:$/ && NF >= 8 && sec[$7] ~ /^\.(init|exit|meminit|memexit)(\.|$)/ { print $8 }' |
       sort -u > "$dir/init-syms.txt"
     export NFCXX_QBE_INITSYMS=$dir/init-syms.txt
+    # and the symbols it defines for other objects (global or weak): a qbe object may call one where gcc's inlined it
+    # away (memset, memcpy, __kmalloc) -- the link has it
+    readelf -sW "$ref" | awk '$1 ~ /^[0-9]+:$/ && NF >= 8 && $7 != "UND" && ($5 == "GLOBAL" || $5 == "WEAK") { print $8 }' |
+      sort -u > "$dir/kernel-syms.txt"
+    export NFCXX_QBE_KSYMS=$dir/kernel-syms.txt
     break
   done
   rm -rf "$out"   # every object must go through qbe-try, so nothing is reused from an earlier build

@@ -8,9 +8,10 @@
 # 2. For a "-c SRC.c -o OBJ" compile matching a pattern, the same compile runs on the qbe backend with
 #    NFCXX_QBE_KERNEL=1 (only the options that path honours are accepted; -mno-sse is checked).
 # 3. The qbe object replaces the gcc one only if it matches it: the same global and weak definitions (name, binding,
-#    type, kind of section, visibility), no undefined symbol the gcc object does not also need, no reference from
-#    lasting code to init code (or an undefined symbol) that gcc's object makes only from init code, and the same
-#    special (non-text, non-data) allocated sections. Anything else keeps the gcc object.
+#    type, kind of section, visibility), no undefined symbol the gcc object does not also need (with NFCXX_QBE_KSYMS,
+#    unless the gcc-built kernel defines it), no reference from lasting code to init code (or an undefined symbol)
+#    that gcc's object makes only from init code, and the same special (non-text, non-data) allocated sections.
+#    Anything else keeps the gcc object.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 nfcc=$root/nfcc
@@ -85,11 +86,12 @@ specials() {
 # gcc's always_inline helpers leave none, cproc's out-of-line copies can (memblock_alloc in .text calling the __init
 # memblock_alloc_try_nid).
 refs() {
-  { [ -z "${NFCXX_QBE_INITSYMS:-}" ] || sed 's/^/@@INIT /' "$NFCXX_QBE_INITSYMS"
+  { [ -z "${NFCXX_QBE_INITSYMS:-}" ] || { echo "@@INITLIST"; sed 's/^/@@INIT /' "$NFCXX_QBE_INITSYMS"; }
     readelf -SW "$1"; echo "@@SYMS"; readelf -sW "$1"; echo "@@RELS"; readelf -rW "$1"; } | awk '
     function initlike(n) { return n ~ /^\.(init|exit|meminit|memexit)(\.|$)/ }
     function lasting(n) { return !(initlike(n) || n ~ /^\.(ref|head|discard|debug|eh_frame|note|comment)(\.|$)/ || n ~ /^\.rela?\./) }
-    /^@@INIT / { initsym[$2] = 1; haveinit = 1; next }
+    /^@@INITLIST/ { haveinit = 1; next }
+    /^@@INIT / { initsym[$2] = 1; next }
     /^@@SYMS/ { mode = 1; next }
     /^@@RELS/ { mode = 2; next }
     mode == 0 && /^ *\[ *[0-9]+\]/ { line = $0; sub(/^ *\[ */, "", line); split(line, f, /[] ]+/); secname[f[1]] = f[2]; next }
@@ -113,8 +115,13 @@ if ! cmp -s "$tmp/g.def" "$tmp/q.def"; then
 fi
 # _GLOBAL_OFFSET_TABLE_ comes with QBE's @GOTPCREL loads; the linker relaxes them (the kernel's linker script
 # checks that no GOT is left)
-extra=$(comm -13 <(grep '^U ' "$tmp/g.syms") <(grep '^U ' "$tmp/q.syms") | grep -vx 'U _GLOBAL_OFFSET_TABLE_' |
-  head -3 | tr '\n' ' ')
+# With NFCXX_QBE_KSYMS (the symbols a gcc-built kernel defines, scripts/linux-qemu.sh), a symbol the kernel defines is
+# not missing: the qbe object calls memset where gcc's object inlined it.
+comm -13 <(grep '^U ' "$tmp/g.syms") <(grep '^U ' "$tmp/q.syms") | grep -vx 'U _GLOBAL_OFFSET_TABLE_' > "$tmp/extra"
+if [ -n "${NFCXX_QBE_KSYMS:-}" ]; then
+  awk 'NR == FNR { have[$1] = 1; next } !($2 in have)' "$NFCXX_QBE_KSYMS" "$tmp/extra" > "$tmp/extra.k" && mv "$tmp/extra.k" "$tmp/extra"
+fi
+extra=$(head -3 "$tmp/extra" | tr '\n' ' ')
 if [ -n "$extra" ]; then note "gcc $src: qbe object needs more symbols: $extra"; exit 0; fi
 # a reference from lasting code to init (or unknown) code that gcc's object makes only from init code, or not at all
 refs "$obj" | awk '{print $2}' | sort -u > "$tmp/g.refs"; refs "$tmp/q.o" | awk '$1 == "init" {print $2}' | sort -u > "$tmp/q.init"

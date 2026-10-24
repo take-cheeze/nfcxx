@@ -161,6 +161,16 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   unreachable, so neither its asm thunks nor (QBE drops unreachable blocks) its calls remain -- the kernel's
   `udelay(10)` expands to `if ((10) / 20000 >= 1) __bad_udelay();`, a call gcc never emits and no object defines.
 
+- **`-G`: GNU C's `cleanup` attribute** (qbe-cc passes it for hand-written C and kernel mode; the kernel's
+  `guard()`/`scoped_guard()`). `f(&object)` runs when the object leaves its scope -- at the end of the block, and at
+  a `return` (after its value), `break`, `continue`, `goto` or `asm goto` that leaves it -- the last declared first,
+  as gcc runs them without `-fexceptions` (no unwind tables or landing pads). A goto jumps to a block of its own
+  whose cleanups are made after the body, once the label's live objects are known. A jump into the scope of such an
+  object, and such an object directly in a statement expression (whose value cproc evaluates after its
+  statements), are refused. Without `-G` the attribute keeps nfcxx's meaning for EDG-made C: the cleanups run only
+  when a throw unwinds the function. Before `-G`, hand-written C got that meaning too, and a cleanup never ran at
+  the end of its scope.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is

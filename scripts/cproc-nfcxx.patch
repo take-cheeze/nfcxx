@@ -126,7 +126,13 @@
  	bool defined;
  	bool tentative;
  	struct decl *next;
-@@ -216,6 +240,16 @@
+@@ -211,11 +235,22 @@
+ 			enum storageduration storage;
+ 			/* GNU cleanup(f) on a block-scope object: f(&object) runs when a throw unwinds its function (nfcxx, qbe.c) */
+ 			const char *cleanup;
++			struct decl *cleanupfn;   /* cproc -G: the cleanup function's declaration */
+ 		} obj;
+ 		struct {
  			/* the function might have an "inline definition" (C11 6.7.4p7) */
  			bool inlinedefn;
  			bool isnoreturn;
@@ -143,10 +149,14 @@
  		} func;
  		unsigned long long enumconst;
  		enum builtinkind builtin;
-@@ -229,6 +263,11 @@
+@@ -229,6 +264,15 @@
  	struct block *continuelabel;
  	struct switchcases *switchcases;
  	struct scope *parent;
++	/* cproc -G: the depth of the function's cleanup stack when the scope began, and when the loop or switch body that
++	 * break and continue leave began (qbe.c funccleanmark) */
++	size_t cleanmark, cleanbreak, cleancontinue;
++	bool stmtexpr;   /* the scope of a statement expression's own declarations */
 +	/* GNU local labels (__label__ a, b;): the block's own names for them, a unique name per declaration */
 +	struct locallabel {
 +		char *name, *unique;
@@ -155,7 +165,7 @@
  	/* -fsanitize=address: the stack objects registered when the loop or switch body whose breaklabel or continuelabel this is began (asanmark) */
  	size_t asanbreak, asancontinue;
  };
-@@ -257,6 +296,7 @@
+@@ -257,6 +301,7 @@
  	EXPRBUILTIN,
  	EXPRTEMP,
  	EXPRSIZEOF,
@@ -163,7 +173,7 @@
  };
  
  struct stringlit {
-@@ -291,6 +331,11 @@
+@@ -291,6 +336,11 @@
  			/* a 16-byte floating constant (PROPSOFT type): the object image, low and high eightbyte */
  			unsigned long long soft[2];
  		} constant;
@@ -175,7 +185,7 @@
  		struct stringlit string;
  		struct {
  			struct expr *args;
-@@ -338,11 +383,17 @@
+@@ -338,11 +388,17 @@
  
  void tokeninit(void);
  int tokenget(const void *, size_t);
@@ -193,7 +203,7 @@
  
  /* scan */
  
-@@ -364,6 +415,16 @@
+@@ -364,6 +420,16 @@
  
  void next(void);
  bool peek(enum tokenkind);
@@ -210,7 +220,7 @@
  char *expect(enum tokenkind, const char *);
  bool consume(enum tokenkind);
  
-@@ -421,6 +482,12 @@
+@@ -421,6 +487,12 @@
  extern const struct target *targ;
  
  void targinit(const char *);
@@ -223,7 +233,7 @@
  
  /* attr */
  
-@@ -434,6 +501,8 @@
+@@ -434,6 +506,8 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
@@ -232,7 +242,7 @@
  };
  
  struct attr {
-@@ -445,6 +514,20 @@
+@@ -445,6 +519,20 @@
  
  bool attr(struct attr *, enum attrkind);
  bool gnuattr(struct attr *, enum attrkind);
@@ -253,7 +263,7 @@
  
  /* decl */
  
-@@ -503,6 +586,15 @@
+@@ -503,6 +591,15 @@
  /* stmt */
  
  void stmt(struct func *, struct scope *);
@@ -269,7 +279,16 @@
  
  /* backend */
  
-@@ -522,21 +614,26 @@
+@@ -512,6 +609,8 @@
+ 	/* -fsanitize=address (qbe.c asangoto, asanlabel): sets of block numbers, null when empty. The blocks open at the label
+ 	 * (asanopen, once defined); for the gotos before it: the blocks open at any of them (asanfrom) and at all of them (asanall) */
+ 	struct array *asanopen, *asanfrom, *asanall;
++	/* cproc -G: the cleanup objects live at the label (struct ehobj, once defined) */
++	struct array cleanat;
+ };
+ 
+ struct switchcases {
+@@ -522,21 +621,34 @@
  	struct array *asanopen;
  };
  
@@ -285,6 +304,14 @@
  
  struct func *mkfunc(struct decl *, char *, struct type *, struct scope *);
 +struct decl *funcclone(struct decl *, struct expr *);
++/* cproc -G, GNU cleanup semantics (qbe.c): the cleanup of a block-scope object runs when it leaves its scope */
++extern bool gnucleanup;
++size_t funccleanmark(struct func *);
++void funccleanleave(struct func *, size_t);   /* the cleanups of the objects above the mark, innermost first */
++void funccleanpop(struct func *, size_t);     /* and they are no longer live */
++struct block *funcgototarget(struct func *, struct gotolabel *);   /* where a goto to the label jumps */
++void funclabeldefined(struct func *, struct gotolabel *);
++void funcgotoflush(struct func *);   /* after the body: the cleanups of the gotos (funcgototarget) */
 +struct decl *funcdecl(struct func *);
  void delfunc(struct func *);
  struct type *functype(struct func *);
@@ -297,7 +324,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +643,10 @@
+@@ -546,6 +658,10 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -924,7 +951,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,6 +1449,8 @@
+@@ -1157,9 +1449,20 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -933,7 +960,19 @@
  			if (d->u.obj.align < align)
  				d->u.obj.align = align;
  			d->u.obj.cleanup = declcleanup;
-@@ -1201,8 +1495,14 @@
++			if (declcleanup && gnucleanup) {
++				struct decl *cf = scopegetdecl(s, declcleanup, true);
++
++				if (!cf || cf->kind != DECLFUNC)
++					error(&tok.loc, "cleanup function '%s' is not a declared function", declcleanup);
++				if (s->stmtexpr)
++					error(&tok.loc, "an object with a cleanup attribute directly in a statement expression is not supported");
++				d->u.obj.cleanupfn = cf;
++			}
+ 			declcleanup = NULL;
+ 			if (d->u.obj.cleanup && s == &filescope)
+ 				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
+@@ -1201,8 +1504,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -949,7 +988,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1513,42 @@
+@@ -1213,12 +1522,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -963,6 +1002,7 @@
 +					tokrecord(d->u.func.body);
 +				}
  				stmt(f, s);
++				funcgotoflush(f);
 +				if (d->u.func.body) {
 +					struct token *k;
 +
@@ -993,7 +1033,7 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1268,3 +1598,126 @@
+@@ -1268,3 +1608,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }
@@ -1109,6 +1149,7 @@
 +	f = mkfunc(c, name, t2, s);
 +	curfunc = f;
 +	stmt(f, s);
++	funcgotoflush(f);
 +	if (c->u.func.isnoreturn)
 +		funchlt(f);
 +	errorjmp = savedjmp;
@@ -2197,7 +2238,7 @@
  
  	argv0 = progname(argv[0], "cproc-qbe");
  	asanon = getenv("NFCXX_ASAN") != NULL;
-@@ -29,6 +347,30 @@
+@@ -29,6 +347,33 @@
  	case 't':
  		target = EARGF(usage());
  		break;
@@ -2222,13 +2263,16 @@
 +	case 'V':
 +		volatilecalls = true;
 +		break;
++	case 'G':
++		gnucleanup = true;   /* GNU C's cleanup attribute: the cleanup runs when the object leaves its scope */
++		break;
 +	case 'c':
 +		stdc23 = true;   /* treat true/false/nullptr/bool as C23 keywords, not identifiers */
 +		break;
  	case 'o':
  		output = EARGF(usage());
  		break;
-@@ -38,9 +380,21 @@
+@@ -38,9 +383,21 @@
  
  	targinit(target);
  
@@ -2250,7 +2294,7 @@
  	if (argc) {
  		while (argc--)
  			scanfrom(argv[argc], NULL);
-@@ -74,5 +428,30 @@
+@@ -74,5 +431,30 @@
  	fflush(stdout);
  	if (ferror(stdout))
  		fatal("write failed");
@@ -2403,7 +2447,22 @@
  	struct block *body;
  };
  
-@@ -142,13 +151,21 @@
+@@ -105,11 +114,14 @@
+ 	unsigned asanblocks;   /* -fsanitize=address: the blocks begun so far, for numbering them */
+ 	struct array asanjmps;   /* -fsanitize=address: the calls of setjmp (struct asanjmp), poisoned in asanfinish */
+ 	struct array ehobjs;     /* nfcxx's cleanup attribute: the objects (struct ehobj, in declaration order; ehcleanupobj) */
++	struct array cleanups;   /* cproc -G: the cleanup objects live now (struct ehobj), innermost last */
++	struct array cleangotos; /* cproc -G: the gotos (struct cleangoto), their cleanups made after the body */
+ };
+ 
+ /* a block-scope object with a cleanup attribute: the cleanup function and the object's address */
+ struct ehobj {
+ 	const char *cleanup;
++	struct value *fn;   /* cproc -G: the cleanup function */
+ 	struct value *addr;
+ };
+ 
+@@ -142,13 +154,21 @@
  static const int ptrclass = 'l';
  
  void
@@ -2429,7 +2488,7 @@
  	c->body = b;
  }
  
-@@ -165,6 +182,9 @@
+@@ -165,6 +185,9 @@
  	b->label.u.name = name;
  	b->label.id = ++id;
  	b->insts = (struct array){0};
@@ -2439,7 +2498,7 @@
  	b->jump.kind = JUMP_NONE;
  	b->phi.res.kind = VALUE_NONE;
  	b->next = NULL;
-@@ -196,6 +216,27 @@
+@@ -196,6 +219,27 @@
  	return v;
  }
  
@@ -2467,7 +2526,7 @@
  struct value *
  mkintconst(unsigned long long n)
  {
-@@ -251,6 +292,7 @@
+@@ -251,6 +295,7 @@
  
  static void emittype(struct type *);
  static void emitname(struct value *);
@@ -2475,7 +2534,7 @@
  static void emitvalue(struct value *);
  
  static void
-@@ -1631,6 +1673,76 @@
+@@ -1631,6 +1676,76 @@
  	}
  }
  
@@ -2552,7 +2611,7 @@
  static struct value *
  funcstore(struct func *f, struct type *t, enum typequal tq, struct lvalue lval, struct value *v)
  {
-@@ -1640,8 +1752,11 @@
+@@ -1640,8 +1755,11 @@
  	struct qbetype qt;
  	int bits;
  
@@ -2565,7 +2624,7 @@
  	if (tq & QUALCONST)
  		error(&tok.loc, "cannot store to 'const' object");
  	tp = t->prop;
-@@ -1682,6 +1797,22 @@
+@@ -1682,6 +1800,22 @@
  	return r;
  }
  
@@ -2588,7 +2647,15 @@
  static struct value *
  funcload(struct func *f, struct type *t, struct lvalue lval)
  {
-@@ -1723,6 +1854,8 @@
+@@ -1715,6 +1849,7 @@
+ 	f->start = f->end = mkblock("start");
+ 	f->lastid = 0;
+ 	f->ehobjs = (struct array){0};
++	f->cleanups = f->cleangotos = (struct array){0};
+ 	f->asan = (struct array){0};
+ 	f->asanfile = NULL;
+ 	f->asanrets = (struct array){0};
+@@ -1723,6 +1858,8 @@
  	f->asanblocks = 0;
  	f->asanjmps = (struct array){0};
  	mapinit(&f->gotos, 8);
@@ -2597,7 +2664,7 @@
  	emittype(t->base);
  
  	/* allocate space for parameters */
-@@ -1732,7 +1865,11 @@
+@@ -1732,7 +1869,11 @@
  		functemp(f, v);
  		if(!d->name)
  			continue;
@@ -2610,7 +2677,7 @@
  			d->value = v;
  		} else {
  			funcalloc(f, d);
-@@ -1785,6 +1922,31 @@
+@@ -1785,6 +1926,31 @@
  	f->end = b;
  }
  
@@ -2642,7 +2709,7 @@
  void
  funcjmp(struct func *f, struct block *l)
  {
-@@ -1803,6 +1965,15 @@
+@@ -1803,6 +1969,15 @@
  
  	if (b->jump.kind)
  		return;
@@ -2658,7 +2725,7 @@
  	if (t) {
  		assert(t->prop & PROPSCALAR);
  		/*
-@@ -1881,6 +2052,84 @@
+@@ -1881,6 +2056,84 @@
  	return f->gotos.vals[idx].p;
  }
  
@@ -2743,7 +2810,7 @@
  static struct lvalue
  funclval(struct func *f, struct expr *e)
  {
-@@ -1896,6 +2145,8 @@
+@@ -1896,6 +2149,8 @@
  		d = e->u.ident.decl;
  		if (d->kind != DECLOBJECT && d->kind != DECLFUNC)
  			error(&tok.loc, "identifier '%s' is not an object or function", d->name);
@@ -2752,7 +2819,7 @@
  		if (d == f->namedecl) {
  			fputs("data ", stdout);
  			emitname(d->value);
-@@ -1937,6 +2188,18 @@
+@@ -1937,6 +2192,18 @@
  	struct value *v;
  	struct block *b;
  
@@ -2771,7 +2838,7 @@
  	/* Maybe we we could do something for EXPRCOND as well. */
  	switch (e->kind) {
  	case EXPRBINARY:
-@@ -2136,6 +2399,141 @@
+@@ -2136,6 +2403,141 @@
  	return funcexpr(f, e);
  }
  
@@ -2913,7 +2980,7 @@
  struct value *
  funcexpr(struct func *f, struct expr *e)
  {
-@@ -2154,10 +2552,20 @@
+@@ -2154,10 +2556,20 @@
  
  	calcvla(f, e->type);
  	switch (e->kind) {
@@ -2935,7 +3002,7 @@
  		case DECLCONST:  return d->value;
  		default:
  			fatal("unimplemented declaration kind %d", d->kind);
-@@ -2182,10 +2590,10 @@
+@@ -2182,10 +2594,10 @@
  	case EXPRBITFIELD:
  	case EXPRCOMPOUND:
  		lval = funclval(f, e);
@@ -2948,7 +3015,7 @@
  		t = e->type;
  		if (t->prop & PROPSOFT) {
  			/* the old value is copied out first: the store overwrites the object that l addresses */
-@@ -2206,10 +2614,11 @@
+@@ -2206,10 +2618,11 @@
  			return e->u.incdec.post ? l : v;
  		}
  		if (t->kind == TYPEPOINTER) {
@@ -2962,7 +3029,7 @@
  			}
  		} else if (t->prop & PROPINT) {
  			r = mkintconst(1);
-@@ -2230,6 +2639,8 @@
+@@ -2230,6 +2643,8 @@
  			callee = callee->base;  /* a function designator, decayed to a pointer */
  		if (callee->kind == EXPRIDENT && callee->u.ident.decl->kind == DECLFUNC && (e->type->kind == TYPEFLOAT128 || anyf128arg(e)))
  			addf128call(callee->u.ident.decl);
@@ -2971,7 +3038,7 @@
  		argvals = xreallocarray(NULL, e->u.call.nargs, sizeof(argvals[0]));
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
  			emittype(arg->type);
-@@ -2244,7 +2655,10 @@
+@@ -2244,7 +2659,10 @@
  			v = softtemp(f);
  			funcinst(f, ICALL, 0, funcexpr(f, e->base), NULL);
  		} else {
@@ -2983,7 +3050,7 @@
  		}
  		functype = e->base->type->base;
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
-@@ -2277,7 +2691,7 @@
+@@ -2277,7 +2695,7 @@
  			return lval.addr;
  		case TMUL:
  			r = funcexpr(f, e->base);
@@ -2992,7 +3059,7 @@
  		case TSUB:
  			r = funcexpr(f, e->base);
  			if (e->type->prop & PROPSOFT)
-@@ -2439,6 +2853,35 @@
+@@ -2439,6 +2857,35 @@
  		return funcexpr(f, e);
  	case EXPRBUILTIN:
  		switch (e->u.builtin.kind) {
@@ -3028,7 +3095,132 @@
  		case BUILTINVASTART:
  			l = funcvalistaddr(f, e->base);
  			funcinst(f, IVASTART, 0, l, NULL);
-@@ -2627,7 +3070,7 @@
+@@ -2568,6 +3015,107 @@
+ 	o->addr = d->value;
+ }
+ 
++/*
++cproc -G: GNU C's cleanup attribute (the Linux kernel's guard() and scoped_guard()): f(&object) runs when the object
++leaves its scope -- at the end of the block, and at a return, break, continue or goto that leaves it -- the last
++declared first, as gcc does without -fexceptions (no unwind tables, no landing pads). The function keeps the
++objects live at each point (cleanups); a goto jumps to a block of its own whose cleanups are made after the body,
++when the label's live objects are known (funcgotoflush). Without -G, nfcxx's EDG-made C keeps its own meaning:
++the cleanups run only when a throw unwinds the function (ehcleanupobj).
++*/
++bool gnucleanup;
++
++struct cleangoto {
++	struct block *trampoline;
++	struct gotolabel *label;
++	struct array live;   /* struct ehobj: the cleanup objects live at the goto */
++};
++
++size_t
++funccleanmark(struct func *f)
++{
++	return f->cleanups.len / sizeof(struct ehobj);
++}
++
++static void
++cleancalls(struct func *f, struct ehobj *o, size_t from, size_t to)
++{
++	while (to-- > from) {
++		funcinst(f, ICALL, 0, o[to].fn, NULL);
++		funcinst(f, IARG, ptrclass, o[to].addr, NULL);
++	}
++}
++
++void
++funccleanleave(struct func *f, size_t mark)
++{
++	if (!f->end->jump.kind)
++		cleancalls(f, f->cleanups.val, mark, funccleanmark(f));
++}
++
++void
++funccleanpop(struct func *f, size_t mark)
++{
++	funccleanleave(f, mark);
++	f->cleanups.len = mark * sizeof(struct ehobj);
++}
++
++struct block *
++funcgototarget(struct func *f, struct gotolabel *g)
++{
++	struct cleangoto *c;
++
++	if (!gnucleanup)
++		return g->label;
++	c = arrayadd(&f->cleangotos, sizeof(*c));
++	c->trampoline = mkblock("goto_cleanup");
++	c->label = g;
++	c->live = (struct array){0};
++	if (f->cleanups.len)
++		arrayaddbuf(&c->live, f->cleanups.val, f->cleanups.len);
++	return c->trampoline;
++}
++
++void
++funclabeldefined(struct func *f, struct gotolabel *g)
++{
++	if (!gnucleanup)
++		return;
++	g->cleanat.len = 0;
++	if (f->cleanups.len)
++		arrayaddbuf(&g->cleanat, f->cleanups.val, f->cleanups.len);
++}
++
++void
++funcgotoflush(struct func *f)
++{
++	struct cleangoto *c;
++	struct block *cont;
++	size_t n, k, nl;
++
++	if (!f->cleangotos.len)
++		return;
++	/* the body's last block keeps falling through to the end of the function, past the gotos' blocks */
++	cont = mkblock("goto_end");
++	funcjmp(f, cont);
++	arrayforeach(&f->cleangotos, c) {
++		struct ehobj *live = c->live.val, *at = c->label->cleanat.val;
++
++		if (!c->label->defined)
++			continue;
++		n = c->live.len / sizeof(struct ehobj);
++		nl = c->label->cleanat.len / sizeof(struct ehobj);
++		for (k = 0; k < n && k < nl && live[k].addr == at[k].addr; ++k)
++			;
++		if (k < nl)
++			error(&tok.loc, "a jump into the scope of an object with a cleanup attribute is not supported");
++		funclabel(f, c->trampoline);
++		cleancalls(f, live, k, n);
++		funcjmp(f, c->label->label);
++	}
++	funclabel(f, cont);
++}
++
+ void
+ funcinit(struct func *func, struct decl *d, struct init *init, bool hasinit)
+ {
+@@ -2577,8 +3125,15 @@
+ 	size_t i, w;
+ 
+ 	funcalloc(func, d);
+-	if (d->u.obj.cleanup)
++	if (d->u.obj.cleanup && gnucleanup) {
++		struct ehobj *o = arrayadd(&func->cleanups, sizeof(*o));
++
++		o->cleanup = d->u.obj.cleanup;
++		o->fn = d->u.obj.cleanupfn->value;
++		o->addr = d->value;
++	} else if (d->u.obj.cleanup) {
+ 		ehcleanupobj(func, d);
++	}
+ 	if (!hasinit)
+ 		return;
+ 	for (; init; init = init->next) {
+@@ -2627,7 +3182,7 @@
  		funcjmp(f, defaultlabel);
  		return;
  	}
@@ -3037,7 +3229,7 @@
  		funcjmp(f, c->body);
  		return;
  	}
-@@ -2636,7 +3079,12 @@
+@@ -2636,7 +3191,12 @@
  	label[2] = mkblock("switch_gt");
  
  	key = mkintconst(c->node.key);
@@ -3051,7 +3243,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3092,829 @@
+@@ -2644,17 +3204,829 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -3699,7 +3891,7 @@
 +		for (j = 0; j < nlab; ++j) {
 +			struct block *next = mkblock("asm_goto_next");
 +
-+			funcjnz(f, funcinst(f, ICEQW, 'w', taken, mkintconst(j + 1)), NULL, labels[j]->label, next);
++			funcjnz(f, funcinst(f, ICEQW, 'w', taken, mkintconst(j + 1)), NULL, funcgototarget(f, labels[j]), next);
 +			funclabel(f, next);
 +		}
 +	}
@@ -3883,7 +4075,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4182,12 @@
+@@ -2922,6 +4294,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -3896,7 +4088,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4200,7 @@
+@@ -2934,7 +4312,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -3905,7 +4097,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4210,7 @@
+@@ -2944,6 +4322,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -3913,7 +4105,7 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4342,18 @@
+@@ -3075,6 +4454,18 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
@@ -4004,11 +4196,15 @@
  }
  
  struct scope *
-@@ -143,6 +187,7 @@
+@@ -143,6 +187,11 @@
  	s->asanbreak = parent->asanbreak;
  	s->asancontinue = parent->asancontinue;
  	s->parent = parent;
 +	s->labels = NULL;
++	s->cleanmark = 0;
++	s->cleanbreak = parent->cleanbreak;
++	s->cleancontinue = parent->cleancontinue;
++	s->stmtexpr = false;
  
  	return s;
  }
@@ -4074,7 +4270,7 @@
  		expect(TCOLON, "after case expression");
  		break;
  	case TDEFAULT:
-@@ -40,12 +84,29 @@
+@@ -40,15 +84,33 @@
  		asancase(f, s->switchcases);
  		break;
  	default:
@@ -4106,7 +4302,11 @@
  		g->defined = true;
  		funclabel(f, g->label);
  		asanlabel(f, g);
-@@ -62,6 +123,45 @@
++		funclabeldefined(f, g);
+ 		break;
+ 	}
+ 	return true;
+@@ -62,6 +124,64 @@
  	stmt(f, s);
  }
  
@@ -4123,6 +4323,8 @@
 +
 +	expect(TLBRACE, "to begin statement expression");
 +	s = mkscope(s);
++	s->stmtexpr = true;
++	s->cleanmark = funccleanmark(f);
 +	while (tok.kind != TRBRACE) {
 +		v = NULL;
 +		if (label(f, s) || decl(s, f))
@@ -4149,19 +4351,227 @@
 +	return v;
 +}
 +
++/* a block scope; under cproc -G its cleanup objects leave with it (qbe.c funccleanpop) */
++static struct scope *
++enterscope(struct func *f, struct scope *s)
++{
++	s = mkscope(s);
++	s->cleanmark = funccleanmark(f);
++	return s;
++}
++
++static struct scope *
++leavescope(struct func *f, struct scope *s)
++{
++	if (gnucleanup)
++		funccleanpop(f, s->cleanmark);
++	return delscope(s);
++}
++
  /* 6.8 Statements and blocks */
  void
  stmt(struct func *f, struct scope *s)
-@@ -284,7 +384,7 @@
+@@ -79,14 +199,14 @@
+ 	/* 6.8.2 Compound statement */
+ 	case TLBRACE:
+ 		next();
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		asanbegin(f);
+ 		while (tok.kind != TRBRACE) {
+ 			if (!label(f, s) && !decl(s, f))
+ 				stmt(f, s);
+ 		}
+ 		asanend(f);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 		next();
+ 		break;
+ 
+@@ -104,7 +224,7 @@
+ 	/* 6.8.4 Selection statement */
+ 	case TIF:
+ 		next();
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		expect(TLPAREN, "after 'if'");
+ 		e = expr(s);
+ 		t = e->type;
+@@ -117,27 +237,27 @@
+ 		expect(TRPAREN, "after expression");
+ 
+ 		funclabel(f, b[0]);
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		labelstmt(f, s);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 
+ 		if (consume(TELSE)) {
+ 			b[2] = mkblock("if_join");
+ 			funcjmp(f, b[2]);
+ 			funclabel(f, b[1]);
+-			s = mkscope(s);
++			s = enterscope(f, s);
+ 			labelstmt(f, s);
+-			s = delscope(s);
++			s = leavescope(f, s);
+ 			funclabel(f, b[2]);
+ 		} else {
+ 			funclabel(f, b[1]);
+ 		}
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 		break;
+ 	case TSWITCH:
+ 		next();
+ 
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		expect(TLPAREN, "after 'switch'");
+ 		e = expr(s);
+ 		expect(TRPAREN, "after expression");
+@@ -156,25 +276,26 @@
+ 
+ 		v = funcexpr(f, e);
+ 		funcjmp(f, b[0]);
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		s->breaklabel = b[1];
+ 		s->switchcases = &swtch;
+ 		s->asanbreak = asanmark(f);
++		s->cleanbreak = funccleanmark(f);
+ 		labelstmt(f, s);
+ 		funcjmp(f, b[1]);
+ 
+ 		funclabel(f, b[0]);
+ 		funcswitch(f, v, &swtch, swtch.defaultlabel ? swtch.defaultlabel : b[1]);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 
+ 		funclabel(f, b[1]);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 		break;
+ 
+ 	/* 6.8.5 Iteration statements */
+ 	case TWHILE:
+ 		next();
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		expect(TLPAREN, "after 'while'");
+ 		e = expr(s);
+ 		t = e->type;
+@@ -189,15 +310,16 @@
+ 		funclabel(f, b[0]);
+ 		funcbranch(f, e, b[1], b[2]);
+ 		funclabel(f, b[1]);
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		s->continuelabel = b[0];
+ 		s->breaklabel = b[2];
+ 		s->asanbreak = s->asancontinue = asanmark(f);
++		s->cleanbreak = s->cleancontinue = funccleanmark(f);
+ 		labelstmt(f, s);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 		funcjmp(f, b[0]);
+ 		funclabel(f, b[2]);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 		break;
+ 	case TDO:
+ 		next();
+@@ -206,14 +328,15 @@
+ 		b[1] = mkblock("do_cond");
+ 		b[2] = mkblock("do_join");
+ 
+-		s = mkscope(s);
+-		s = mkscope(s);
++		s = enterscope(f, s);
++		s = enterscope(f, s);
+ 		s->continuelabel = b[1];
+ 		s->breaklabel = b[2];
+ 		s->asanbreak = s->asancontinue = asanmark(f);
++		s->cleanbreak = s->cleancontinue = funccleanmark(f);
+ 		funclabel(f, b[0]);
+ 		labelstmt(f, s);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 
+ 		expect(TWHILE, "after 'do' statement");
+ 		expect(TLPAREN, "after 'while'");
+@@ -226,13 +349,13 @@
+ 
+ 		funcbranch(f, e, b[0], b[2]);
+ 		funclabel(f, b[2]);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 		expect(TSEMICOLON, "after 'do' statement");
+ 		break;
+ 	case TFOR:
+ 		next();
+ 		expect(TLPAREN, "after 'for'");
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		asanbegin(f);
+ 		if (!decl(s, f)) {
+ 			if (tok.kind != TSEMICOLON) {
+@@ -262,12 +385,13 @@
+ 		expect(TRPAREN, NULL);
+ 
+ 		funclabel(f, b[1]);
+-		s = mkscope(s);
++		s = enterscope(f, s);
+ 		s->breaklabel = b[3];
+ 		s->continuelabel = b[2];
+ 		s->asanbreak = s->asancontinue = asanmark(f);
++		s->cleanbreak = s->cleancontinue = funccleanmark(f);
+ 		labelstmt(f, s);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 
+ 		funclabel(f, b[2]);
+ 		if (e) {
+@@ -277,16 +401,16 @@
+ 		funcjmp(f, b[0]);
+ 		funclabel(f, b[3]);
+ 		asanend(f);
+-		s = delscope(s);
++		s = leavescope(f, s);
+ 		break;
+ 
+ 	/* 6.8.6 Jump statements */
  	case TGOTO:
  		next();
  		name = expect(TIDENT, "after 'goto'");
 -		g = funcgoto(f, name);
 +		g = funcgoto(f, labelname(s, name));
  		asangoto(f, g);
- 		funcjmp(f, g->label);
+-		funcjmp(f, g->label);
++		funcjmp(f, funcgototarget(f, g));   /* -G: through the cleanups of the scopes it leaves */
  		expect(TSEMICOLON, "after 'goto' statement");
-@@ -313,13 +413,136 @@
+ 		break;
+ 	case TCONTINUE:
+@@ -294,6 +418,8 @@
+ 		if (!s->continuelabel)
+ 			error(&tok.loc, "'continue' statement must be in loop");
+ 		asanleave(f, s->asancontinue);
++		if (gnucleanup)
++			funccleanleave(f, s->cleancontinue);
+ 		funcjmp(f, s->continuelabel);
+ 		expect(TSEMICOLON, "after 'continue' statement");
+ 		break;
+@@ -302,6 +428,8 @@
+ 		if (!s->breaklabel)
+ 			error(&tok.loc, "'break' statement must be in loop or switch");
+ 		asanleave(f, s->asanbreak);
++		if (gnucleanup)
++			funccleanleave(f, s->cleanbreak);
+ 		funcjmp(f, s->breaklabel);
+ 		expect(TSEMICOLON, "after 'break' statement");
+ 		break;
+@@ -313,13 +441,138 @@
  			v = funcexpr(f, e);
  			delexpr(e);
  		} else {
@@ -4175,6 +4585,8 @@
 +			}
  			v = NULL;
  		}
++		if (gnucleanup)   /* the value first, then the cleanups of every scope the return leaves */
++			funccleanleave(f, 0);
  		funcret(f, v);
  		expect(TSEMICOLON, "after 'return' statement");
  		break;

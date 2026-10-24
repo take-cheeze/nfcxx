@@ -385,6 +385,42 @@ EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kfold.c -o kfold.o 2>/dev/null && ! nm kfold.o | grep -q ' U bad' && nm kfold.o | grep -q ' U cu' &&
        objdump -d kfold.o | grep -q 'mov *\$0x8,'; then ok "kernel mode: constant conditions fold, %P of an immediate is bare"
     else bad "kernel mode: constant conditions fold, %P of an immediate is bare" "$(nm kfold.o 2>&1 | tr '\n' ' ')"; fi
+    # GNU cleanup (cproc -G, the kernel's guard()): at the end of the scope and at every return, break, continue and
+    # goto that leaves it, innermost first, in gcc's order; a jump into the scope of such an object is refused
+    cat > kguard.c <<'EOC'
+static int log[64], n;
+static void rec(int *p) { log[n++] = *p; }
+#define guard(v) int v __attribute__((cleanup(rec)))
+static int early(int x) { guard(a) = 1; { guard(b) = 2; if (x) return 10; } guard(c) = 3; return 20; }
+static void loops(void) {
+	for (int i = 0; i < 3; i++) { guard(l) = 100 + i; if (i == 1) continue; if (i == 2) break; }
+	for (int s __attribute__((cleanup(rec))) = 7, done = 0; !done; done = 1) { guard(t) = 8; }
+	switch (n) { default: { guard(w) = 9; break; } }
+}
+static int jumps(int x) {
+	guard(k) = 32;
+	{ guard(g) = 30; if (x) goto out; guard(h) = 31; }
+out:
+	return 0;
+}
+int main(void) {
+	int want[] = { 2, 1, 2, 3, 1, 100, 101, 102, 8, 7, 9, 31, 30, 32, 30, 32 };
+	if (early(1) != 10) return 1;
+	if (early(0) != 20) return 2;
+	loops();
+	jumps(0); jumps(1);
+	if (n != (int)(sizeof want / sizeof want[0])) return 3;
+	for (int i = 0; i < n; i++) if (log[i] != want[i]) return 10 + i;
+	return 42;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kguard.c -o kguard 2>/dev/null && { ./kguard; [ $? = 42 ]; } &&
+       ! nm kguard | grep -q __gcc_personality_v0; then ok "kernel mode: GNU cleanup at scope exits, no unwind tables"
+    else bad "kernel mode: GNU cleanup at scope exits, no unwind tables" "wrong order or the compile failed"; fi
+    printf 'static void rec(int *p) { (void)p; }\nint f(int x) { if (x) goto in; { int v __attribute__((cleanup(rec))) = 1; in: return v; } }\n' > kguard2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kguard2.c -o kguard2.o 2>&1); then bad "kernel mode: a jump into a cleanup scope refused" "was accepted"
+    elif grep -q "jump into the scope" <<<"$out"; then ok "kernel mode: a jump into a cleanup scope refused"
+    else bad "kernel mode: a jump into a cleanup scope refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -447,6 +483,12 @@ EOC
     NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kneed.c -o kneed.o
     if grep -q '^gcc kneed.c: qbe object needs more symbols: U bad' qbe.log; then ok "qbe-try: an extra undefined symbol keeps the gcc object"
     else bad "qbe-try: an extra undefined symbol keeps the gcc object" "$(tr '\n' '|' < qbe.log)"; fi
+    # unless the gcc-built kernel defines it (NFCXX_QBE_KSYMS) and has it in no init section (NFCXX_QBE_INITSYMS)
+    rm -f qbe.log; printf 'bad\n' > ksyms.txt; : > noinit.txt
+    NFCXX_QBE_KSYMS=$PWD/ksyms.txt NFCXX_QBE_INITSYMS=$PWD/noinit.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' \
+      NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kneed.c -o kneed.o
+    if grep -q '^qbe kneed.c$' qbe.log; then ok "qbe-try: a symbol the kernel defines is not missing"
+    else bad "qbe-try: a symbol the kernel defines is not missing" "$(tr '\n' '|' < qbe.log)"; fi
     # with the init symbols of a gcc-built kernel (NFCXX_QBE_INITSYMS), an undefined symbol not among them is not init
     rm -f qbe.log; printf 'memblock_alloc_try_nid\n' > initsyms.txt
     NFCXX_QBE_INITSYMS=$PWD/initsyms.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log \

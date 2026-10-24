@@ -44,6 +44,9 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 # the kernel's headers define far more static inline functions than a file uses: drop the unreferenced ones (cproc -p)
 [ -z "${NFCXX_QBE_KERNEL:-}" ] || kcproc+=(-p -g -V)   # -g: the GNU keyword asm (the kernel is gnu11); -V: volatile accesses kept
+# -G: GNU C's cleanup attribute, which runs at the end of the object's scope (the kernel's guard()); nfcxx's EDG-made C
+# uses the attribute for its throw-only cleanups instead (docs/notes/cproc-nfcxx.md)
+[ -z "${NFCXX_QBE_KERNEL:-}${NFCXX_C_INPUT:-}" ] || kcproc+=(-G)
 
 if [ $compile = 0 ] && [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend (scripts/cil-cc): the link is cil-link.rb over the translation units' fragments (docs/notes/cil.md).
