@@ -15,7 +15,7 @@ each backend, builds some of its samples with nfcc:
 | `sample/luastro` | a Lua subset (74 nodes) | `hello.lua`, `fib(30)` = 832040, and its 8 `test/test_*.lua` scripts exit 0; the qbe and gcc builds print the same for every script (the upstream runner compares with a system `lua5.4`, which CI does not have) |
 
 | `sample/baruby_precise` | a Ruby subset on a precise copying GC, parsed by Prism | `--plain` prints the right array; `--aot-compile --run` compiles the `SD_*.c` through nfcc, writes `code_store/all.so` and runs `fib(30)` = 832040 |
-| `sample/koruby_precise` | ASTro's flagship: a CRuby-compatible Ruby (26,000-line runtime, 119 node types, Prism, zlib, libyaml, a regex engine from `sample/astrogre`) | built with `BIGNUM=wrap` (no GMP); `tests/realworld/koruby_test.rb` (21 lines of output: recursion, blocks, classes, `Comparable`, exceptions, regexps, `format`, `Struct`) prints what CRuby prints, on both backends |
+| `sample/koruby_precise` | ASTro's flagship: a CRuby-compatible Ruby (26,000-line runtime, 119 node types, Prism, zlib, libyaml, a regex engine from `sample/astrogre`) | built with `BIGNUM=gmp` (real bignums, `-DKORB_BIGNUM=1 -lgmp`) when `<gmp.h>` is installed, else `BIGNUM=wrap`; `tests/realworld/koruby_test.rb` (21 lines of output: recursion, blocks, classes, `Comparable`, exceptions, regexps, `format`, `Struct`) and, with gmp, `koruby_big_test.rb` (`2**100`, 30!, big division and modulo, `to_s(16)`, `digits`, `gcd`, comparisons, negative bignums, `Integer.sqrt`, big times float) print what CRuby prints, on both backends |
 | Prism (`ruby/prism`, the Ruby parser; C) | the library baruby_precise links | `libprism.so` built by nfcc on both backends and loaded by a small program calling `pm_version()` |
 
 ```
@@ -120,6 +120,14 @@ nfcc and cproc changes it led to: `qbe-cc` defines `__uint128_t` and `__int128_t
 for a 53-bit random-float product; cproc's `unsigned __int128` multiply and shift match gcc's, `tests/c/int128_typedefs.c`), and
 `nfcc` accepts `-fno-jump-tables` and `-fno-crossjumping`, which the code store passes (gcc gets them, qbe ignores them).
 
+## koruby_precise with GMP
+
+`run_astro.sh` asks the compiler whether `<gmp.h>` is there (`cc -E`; Debian puts it in `/usr/include/x86_64-linux-gnu`, so
+testing for `/usr/include/gmp.h` would miss it). If so it builds with `-DKORB_BIGNUM=1` and `-lgmp`, the Makefile's default, and also runs
+`koruby_big_test.rb` against `koruby_big_test.expected` (made with CRuby 3.3; only forms that print the same on 3.4). Without
+gmp.h it builds `BIGNUM=wrap` and only the fixnum test runs. CI installs `libgmp-dev` in the ASTro shard. No patch was needed
+for qbe: cproc compiles `gmp.h` and `builtins/bignum_backend.h` as they are, and both backends print CRuby's output.
+
 ## What the two backends do with the specialized code
 
 For `1 + 2 * 3`, `calc --disasm` shows the whole tree turned into one function, `SD_dfb75fdabb0d5ef6`:
@@ -166,7 +174,7 @@ Found while building the samples above. Not reported yet; each has a short fix. 
 ## Not done
 
 - The other 25 samples.
-- `koruby_precise` with GMP (`BIGNUM=gmp`, the default; `libgmp-dev` is not installed here), its AOT bake on qbe (above), the
+- `koruby_precise`'s AOT bake on qbe (above), the
   `--build` standalone executable, and the rubyspec suite.
 - Compiling `sample/astrogre`'s AVX2 code on qbe: cproc cannot compile the intrinsics, so the regex engine is a gcc-backend
   shared object in both runs.
