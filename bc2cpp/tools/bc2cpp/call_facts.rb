@@ -101,6 +101,15 @@ module CallFacts
       @memo[key] = compute_definers(name, instance)
     end
 
+    # definers, also for a name Object, Kernel or BasicObject defines (which `definers` calls unbounded): every
+    # definer is still named, so the first one on a class's lookup path can be read. nil as `definers` otherwise.
+    def all_definers(name, instance: false)
+      key = [name, instance, :everything]
+      return @memo[key] if @memo.key?(key)
+
+      @memo[key] = compute_definers(name, instance, everything: true)
+    end
+
     # The names' foreign Ruby definers (mruby's own Ruby the build links) that CodeGen compiled in this run
     # A view next to `definers`, never merged into it: the foreign set still says who may
     # answer, this says whose body a helper may call directly.
@@ -276,7 +285,7 @@ module CallFacts
       Array(@w.included[mod]).reverse.each { |m| mixin_chain(m, out, seen) }
     end
 
-    def compute_definers(name, instance)
+    def compute_definers(name, instance, everything: false)
       installed = instance ? @w.instance_installed : @w.installed
       unknown = instance ? @cw.instance_unknown_def?(name) : @cw.unknown_def?(name)
       return nil if @cw.global_refusal || installed.nil? || installed.include?(name) || unknown
@@ -297,7 +306,7 @@ module CallFacts
       return nil unless native
       foreign = foreign_owners(name)
       return nil unless foreign
-      return nil if (ruby | native | foreign).intersect?(EVERYTHING)
+      return nil if !everything && (ruby | native | foreign).intersect?(EVERYTHING)
 
       # A native singleton method is only seen by a class or module object, never by an instance.
       class_native = class_registrations.fetch(name, []).to_set { |e| e[:owner] || '?' }

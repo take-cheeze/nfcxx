@@ -49,11 +49,87 @@ module CoreSelfNative
     return nil unless owner_def&.core && irep && irep.equal?(@ireps[owner_def.irep])
 
     owner = owner_def.owner
-    return nil if owner.end_with?('.singleton') || !core_self_native_proven?(name, owner)
+    return nil if owner.end_with?('.singleton')
+    return core_self_native_arms(d, name, argv, owner_def) unless core_self_native_proven?(name, owner)
 
     args = argv.map { |arg| ", #{arg}" }.join
     "r#{d} = bc2cpp_native_owner_named(M, self, \"#{name}\", #{owner_class_ptr_expr(owner)}, #{argv.size}#{args}); " \
       "/* CORE_SELF_NATIVE: #{owner}##{name}, the program's one definition of the name */\n"
+  end
+
+  # CORE_SELF_NATIVE_ARMS bound the exact-class arms of one site.
+  CORE_SELF_NATIVE_ARMS_MAX = 8
+
+  # CORE_SELF_NATIVE_ARMS: the name has several definers (or one on Object/Kernel, as `<=>`), so no single owner
+  # answers every self. `self` in the method's own body is still an instance of a class whose lookup of the method
+  # reaches its owner first (Comparable#< runs for a String, a Symbol, a Time: Integer and Float define `<`
+  # themselves). For each such core class whose lookup of `name` reaches a native registration first, an exact-class
+  # arm calls that registration through the per-site cache; any other class takes the line the arms replace (the
+  # owner call, or the by-name send). An arm tests the receiver's class itself, so it needs only that class's lookup
+  # path: no singleton class or mixin can be added to an instance (ClosedWorld#exact_instances_singleton_free?).
+  def core_self_native_arms(d, name, argv, owner_def)
+    arms = core_self_native_arm_targets(name, owner_def)
+    return nil if arms.nil? || arms.empty?
+
+    args = argv.map { |arg| ", #{arg}" }.join
+    fallback = dynamic_dispatch_line_without_core_self(d, name, argv)
+    branches = arms.map do |klass, definer|
+      "if (mrb_obj_class(M, self) == #{owner_class_ptr_expr(klass)}) {\n" \
+        "    r#{d} = bc2cpp_native_owner_named(M, self, \"#{name}\", #{owner_class_ptr_expr(definer)}, #{argv.size}#{args}); " \
+        "/* CORE_SELF_NATIVE: #{klass}##{name} is #{definer}'s registration */\n  } else "
+    end
+    "// CORE_SELF_NATIVE_ARMS :#{name} -- self of #{owner_def.owner}##{owner_def.name} is one of #{arms.keys.join(', ')} " \
+      "or another class\n  #{branches.join}{\n    #{fallback.chomp}\n  }\n"
+  end
+
+  # The line the arms fall back to: what this site would emit without CORE_SELF_NATIVE.
+  def dynamic_dispatch_line_without_core_self(d, name, argv)
+    saved = @core_self_native_site
+    @core_self_native_site = nil
+    dynamic_dispatch_line(d, 'self', name, argv)
+  ensure
+    @core_self_native_site = saved
+  end
+
+  # { core class => the class whose native registration of `name` its lookup reaches first }, for the core classes
+  # whose lookup of the enclosing method reaches its owner first; nil when the world cannot say.
+  def core_self_native_arm_targets(name, owner_def)
+    @core_self_native_arm_targets ||= {}
+    key = [name, owner_def.owner, owner_def.name]
+    return @core_self_native_arm_targets[key] if @core_self_native_arm_targets.key?(key)
+
+    targets = core_self_native_arm_decide(name, owner_def)
+    warn "[CORE_SELF_NATIVE_ARMS] #{owner_def.owner}##{owner_def.name} -> #{name}: #{targets.inspect}" if ENV['BC2CPP_CORE_SELF_NATIVE_DEBUG']
+    @core_self_native_arm_targets[key] = targets
+  end
+
+  def core_self_native_arm_decide(name, owner_def)
+    world = @core_program_world
+    return nil if devirt_blocked_name?(name) || world.global_refusal || !world.exact_instances_singleton_free?
+    return nil if !@native_name_sources.key?(name) || core_self_native_undef?(name)
+
+    answers = core_self_call_facts
+    method_defs = answers.all_definers(owner_def.name, instance: true)
+    name_defs = answers.all_definers(name, instance: true)
+    return nil if method_defs.nil? || name_defs.nil? || method_defs[:singleton] || name_defs[:singleton]
+
+    own = answers.simple(owner_def.owner)
+    method_all = method_defs[:ruby] | method_defs[:native] | method_defs[:foreign]
+    name_all = name_defs[:ruby] | name_defs[:native] | name_defs[:foreign]
+    targets = {}
+    CallFacts::CORE_SUPER.each_key do |klass|
+      next if klass == 'BasicObject'
+
+      ancestors, unknown = answers.ancestors(klass)
+      next if unknown || ancestors.find { |a| method_all.include?(a) } != own
+
+      definer = ancestors.find { |a| name_all.include?(a) }
+      next unless definer && name_defs[:native].include?(definer) && !name_defs[:ruby].include?(definer) &&
+                  !name_defs[:foreign].include?(definer) && CallFacts::CORE_SUPER.key?(definer)
+
+      targets[klass] = definer
+    end
+    targets.size > CORE_SELF_NATIVE_ARMS_MAX ? nil : targets
   end
 
   def core_self_native_proven?(name, owner)
