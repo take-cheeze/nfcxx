@@ -27,6 +27,7 @@ module BaseRbsAll
   CORE_GEM = /conf\.gem core: ['"]([^'"]+)['"]/.freeze
   PATH_GEM = /conf\.gem ['"]([^'"]+)['"]/.freeze
   MRUBY_PATH = /\A#{Regexp.escape(MRUBY_TOKEN)}/.freeze
+  DEPENDENCY = /^\s*(?:spec\.)?add_dependency\s*\(?\s*['"]([^'"]+)['"]/.freeze
 
   module_function
 
@@ -61,6 +62,20 @@ module BaseRbsAll
 
       path = literal.sub('#{dir}', gem_dir)
       File.expand_path(path) if File.directory?(path)
+    end
+  end
+
+  # The `include/` directories of the gems a rake file's `add_dependency` names, transitively: mruby puts a dependency's
+  # exported headers on the dependent's include path (hal-wio-io's io_hal.h is mruby-io's).
+  def dependency_includes(gem_dir, seen = Set[gem_dir])
+    rake = File.read(File.join(gem_dir, 'mrbgem.rake'), encoding: 'UTF-8')
+    rake.scan(DEPENDENCY).flatten.flat_map do |name|
+      dep = [File.join(ROOT, name), File.join(MRUBY_ROOT, 'mrbgems', name)]
+            .find { |d| File.file?(File.join(d, 'mrbgem.rake')) }
+      next [] if dep.nil? || !seen.add?(dep)
+
+      include_dir = File.join(dep, 'include')
+      (File.directory?(include_dir) ? [include_dir] : []) + dependency_includes(dep, seen)
     end
   end
 
@@ -107,7 +122,8 @@ module BaseRbsAll
       base << "-I#{closed_build}/include"
       base << "-I#{closed_build}/mrbgems/#{name}"
     end
-    base
+    # Last, so a header the flags above already find resolves as before.
+    base + dependency_includes(gem_dir).map { |dir| "-I#{dir}" }
   end
 
   # The native sources the closed world reads (the list coverage_report.rb hands bc2cpp as NATIVE_SRCS), without test
