@@ -17,6 +17,7 @@
 #              gcc backend: -O0 -O1 -O2 -O3 -Os -Og (-O2 when none is given) and -g, -g0..-g3, -ggdb, -gdwarf-N
 #              gcc backend: -march=* and the ISA options -msse*, -mavx*, -mfma, -mbmi*, -mpopcnt, -mlzcnt, -mf16c,
 #              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (qbe: ignored)
+#              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (qbe: ignored)
 #   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
 #              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
@@ -175,6 +176,10 @@ for ((i = 0; i < n; i++)); do
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
     -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) isa+=("$a") ;;
+    # --param name=value: gcc's inlining and optimisation tuning knobs (ASTro's code store passes early-inlining-insns). They
+    # change no meaning, only how hard gcc optimises, so the gcc backend gets them and QBE, which has no such knobs, ignores them.
+    --param=*) isa+=("$a") ;;
+    --param) need; isa+=("$a" "${args[++i]}") ;;
     -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) ;;
     -m*) die "$a is not supported" ;;
     -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) ;;

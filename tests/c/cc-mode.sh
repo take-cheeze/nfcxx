@@ -229,6 +229,15 @@ EOF
     if out=$("$nfcc" -mavx2 avx2.c -o avx2 2>&1) && [ "$(./avx2)" = 6 ]; then ok "-mavx2 intrinsics inline"
     else bad "-mavx2 intrinsics inline" "$(head -3 <<<"$out" | tr '\n' ' ')"; fi
   fi
+  # --param is an optimiser knob: gcc gets it, QBE ignores it; neither stops the compile.
+  echo 'int main(void) { return 0; }' > param.c
+  check "--param=name=value is accepted" "$nfcc" --param=early-inlining-insns=100 -c param.c -o param.o
+  check "--param name=value is accepted" "$nfcc" --param early-inlining-insns=100 -c param.c -o param.o
+  # Only with GNU gcc: Apple's gcc is clang, which ignores a knob it does not know instead of failing on it.
+  if [ $b = gcc ] && gcc --version 2>&1 | grep -q 'Free Software Foundation'; then
+    if out=$("$nfcc" --param=no-such-knob=1 -c param.c -o param.o 2>&1); then bad "gcc backend passes --param on" "an unknown knob was accepted"
+    else ok "gcc backend passes --param on (an unknown knob is gcc's error)"; fi
+  fi
   cd "$root" || exit 1
 done
 echo "tests/c/cc-mode: $pass passed, $fail failed"
