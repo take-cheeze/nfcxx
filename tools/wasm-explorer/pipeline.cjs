@@ -3,7 +3,8 @@
 // the emitter. The front end depends on the source language (LANGUAGES):
 //   C++, C      scripts/pathb-dump --ir [-std=...] [mode] prog.cpp|prog.c   (EDG, in C++ or C mode)
 //   LLVM IR     scripts/mrb scripts/llvm-to-pathb.rb prog.ll                (docs/notes/pathb-llvm.md)
-//   Rust        rustc --emit=llvm-ir -C opt-level=1 ... prog.rs, then llvm-to-pathb.rb --wasm
+//   Rust        rustc -C opt-level=1 -C lto=fat -C save-temps ... prog.rs (the module after LTO, with the parts of core
+//               the program uses), llvm-dis of it, then llvm-to-pathb.rb --wasm
 //   Go          tinygo build -o prog.ll -gc=leaking -scheduler=none ... prog.go, a main() wrapper, then the same
 //   nfcxx IR    none: the source is the IR
 //   then        scripts/mrb scripts/pathb-wasm-emit.rb [mode] prog.ir        the wasm module, in the binary format
@@ -24,6 +25,20 @@ const llvmToPathb = path.join(root, "scripts", "llvm-to-pathb.rb");
 // looked up on the PATH.
 const tool = (value) => (value.includes(path.sep) ? path.resolve(value) : value);
 const rustc = tool(process.env.RUSTC || "rustc");
+// llvm-dis of rustc's own LLVM (rustup component llvm-tools): LLVM_DIS, else the one in rustc's sysroot, found once.
+let llvmDis = process.env.LLVM_DIS ? tool(process.env.LLVM_DIS) : null;
+async function findLlvmDis(dir) {
+  if (llvmDis) return llvmDis;
+  const sysroot = (await runStep("front-end", rustc, ["--print", "sysroot"], dir)).stdout.toString().trim();
+  const host = /host: (\S+)/.exec((await runStep("front-end", rustc, ["-vV"], dir)).stdout.toString());
+  const candidate = path.join(sysroot, "lib", "rustlib", host ? host[1] : "", "bin", "llvm-dis");
+  if (!fs.existsSync(candidate)) {
+    throw { stage: "front-end", stderr: "", code: null,
+      message: "llvm-dis is not installed for rustc (rustup component add llvm-tools, or set LLVM_DIS)" };
+  }
+  llvmDis = candidate;
+  return llvmDis;
+}
 const bundledTinygo = path.join(root, "build", "tinygo", "bin", "tinygo");
 const tinygo = tool(process.env.TINYGO || (fs.existsSync(bundledTinygo) ? bundledTinygo : "tinygo"));
 
@@ -176,12 +191,24 @@ async function compile(source, options = {}) {
         if (language === "rust" || language === "go") {
           // the compiler writes LLVM IR, which llvm-to-pathb.rb translates (for a wasm module: --wasm)
           const ll = path.join(dir, "prog.ll");
-          const compiled = language === "rust"
-            ? await runStep("front-end", rustc, ["--crate-type=cdylib", "--emit=llvm-ir", `--edition=${std || "2021"}`,
+          let compiled;
+          if (language === "rust") {
+            // Fat LTO links in the parts of core the program uses (core's non-generic functions, such as memchr, are
+            // not in the crate's own IR); --emit=llvm-ir would give the module before LTO, so the optimized module
+            // after it is taken from the saved temporaries (out/<crate>.<crate>.<hash>-cgu.0.rcgu.bc) and
+            // disassembled with rustc's own llvm-dis.
+            const out = path.join(dir, "out");
+            fs.mkdirSync(out);
+            compiled = await runStep("front-end", rustc, ["--crate-type=cdylib", `--edition=${std || "2021"}`,
               "-C", "opt-level=1", "-C", "panic=abort", "-C", "overflow-checks=on", "-C", "codegen-units=1",
-              "-o", ll, src], dir)
-            : await runStep("front-end", tinygo, ["build", "-o", ll, "-gc=leaking", "-scheduler=none", "-panic=trap",
-              "-opt=1", "-no-debug", "./prog.go"], dir, dir);
+              "-C", "lto=fat", "-C", "save-temps", "--out-dir", out, src], dir);
+            const bc = fs.readdirSync(out).find((f) => /-cgu\.0\.rcgu\.bc$/.test(f));
+            if (!bc) throw { stage: "front-end", message: "rustc left no module after LTO", stderr: "", code: null };
+            await runStep("front-end", await findLlvmDis(dir), [path.join(out, bc), "-o", ll], dir);
+          } else {
+            compiled = await runStep("front-end", tinygo, ["build", "-o", ll, "-gc=leaking", "-scheduler=none",
+              "-panic=trap", "-opt=1", "-no-debug", "./prog.go"], dir, dir);
+          }
           frontStderr = compiled.stderr;
           if (language === "go") fs.writeFileSync(ll, wrapGoMain(fs.readFileSync(ll, "utf8")));
           step = [mrb, [llvmToPathb, "--wasm", ll]];

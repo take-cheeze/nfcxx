@@ -37,11 +37,13 @@
   .note[hidden] { display: none; }
   main {
     display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);   /* the panes are the height of main, and scroll inside */
     height: calc(100vh - 88px); min-height: 560px;
   }
   @media (max-width: 800px) {
-    main { grid-template-columns: 1fr; height: auto; }
+    main { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
     .pane { min-height: 70vh; }
+    .pane:first-child { height: 85vh; }
   }
   .pane { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
   .pane:last-child { border-right: 0; }
@@ -53,14 +55,37 @@
     font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
     border-radius: 6px; padding: 5px 10px;
   }
+  /* the examples' titles are long: the select shares its row and shrinks rather than overflowing */
+  #examples { flex: 1 1 200px; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
   label.check { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
   button { cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   button:disabled, select:disabled { opacity: .55; cursor: default; }
   .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
-  #editor { flex: 1; min-height: 320px; border-bottom: 1px solid var(--line); }
+  /* the editor takes the space the console leaves (a basis of 0: Monaco's own height must not size the pane) */
+  #editor { flex: 1 1 0; min-height: 160px; overflow: hidden; }
+  .pane:first-child { overflow: hidden; }
+  /* the console, under the editor: a bar (Run, the result, Clear) and the output of the last run */
+  .console {
+    flex: 0 0 34%; min-height: 140px; display: flex; flex-direction: column; background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  .console-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .console-bar h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; font-weight: 600;
+  }
+  .console-bar .result { font-size: 15px; }
+  .console-bar #clear-console { margin-left: auto; padding: 3px 9px; font-size: 13px; }
+  .console-bar #run { padding: 3px 12px; }
+  #console {
+    flex: 1; margin: 0; border: 0; border-radius: 0; max-height: none; overflow: auto; padding: 8px 12px;
+    background: var(--code-bg);
+  }
   textarea.src {
-    flex: 1; width: 100%; resize: none; border: 0; outline: none; padding: 14px 16px;
+    flex: 1 1 0; min-height: 160px; width: 100%; resize: none; border: 0; outline: none; padding: 14px 16px;
     font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     background: var(--panel); color: var(--ink); tab-size: 2; white-space: pre;
   }
@@ -115,13 +140,22 @@
       <select id="examples" aria-label="Example"></select>
       <select id="std" aria-label="Language standard" title="Language standard"></select>
       <select id="mode" aria-label="Emitter mode" title="Data model and emitter mode"></select>
-      <button class="primary" id="compile" title="Ctrl+Enter">Compile</button>
+      <button class="primary" id="compile">Compile</button>
       <label class="check"><input type="checkbox" id="auto" checked> auto</label>
       <button id="share" title="Copy a link that holds this source and these options">Copy link</button>
-      <span class="hint" id="hint">Ctrl+Enter compiles</span>
+      <span class="hint" id="hint">Ctrl+Enter compiles and runs</span>
     </div>
     <div id="editor" aria-label="Source"></div>
     <textarea class="src" id="fallback" spellcheck="false" aria-label="Source" hidden></textarea>
+    <section class="console" aria-label="Console">
+      <div class="console-bar">
+        <h2>Console</h2>
+        <button id="run" disabled title="Run main() of the last module compiled">Run</button>
+        <span id="result" class="result" aria-live="polite"></span>
+        <button id="clear-console" title="Clear the console">Clear</button>
+      </div>
+      <pre id="console" aria-label="Console output"></pre>
+    </section>
   </section>
 
   <section class="pane" aria-label="Output">
@@ -130,19 +164,14 @@
       <button role="tab" id="tab-wat" aria-selected="false" aria-controls="view-wat" data-tab="wat">WAT</button>
       <button role="tab" id="tab-ir" aria-selected="false" aria-controls="view-ir" data-tab="ir">IR</button>
       <button role="tab" id="tab-hex" aria-selected="false" aria-controls="view-hex" data-tab="hex">Bytes</button>
-      <button role="tab" id="tab-console" aria-selected="false" aria-controls="view-console" data-tab="console">Console</button>
     </div>
     <div class="view" id="view-module" role="tabpanel" aria-labelledby="tab-module">
       <div id="error" class="error" hidden></div>
       <div class="card">
-        <h2>Run</h2>
-        <button id="run" disabled>Run main()</button>
-        <p class="muted" style="margin:8px 0 0">An import named like one of the browser bindings below is connected to it.
-          Any other import is stubbed the way <code>tests/wasm/host.cjs</code> stubs them: it returns its first argument plus one.</p>
-        <div id="result" class="result" style="margin-top:10px"></div>
-      </div>
-      <div class="card">
         <h2>Browser bindings</h2>
+        <p class="muted" style="margin:0 0 8px">Run (in the Console, under the editor) calls <code>main</code>. An import
+          named like one of the bindings below is connected to it; any other import is stubbed the way
+          <code>tests/wasm/host.cjs</code> stubs them: it returns its first argument plus one.</p>
         <table><thead><tr><th>import (module env)</th><th>C declaration</th><th>browser feature</th></tr></thead>
           <tbody id="bindings"></tbody></table>
         <p class="muted" style="margin:8px 0 0;font-size:12px">A string is read from the module's exported memory at the
@@ -181,10 +210,6 @@
     </div>
     <div class="view" id="view-hex" role="tabpanel" aria-labelledby="tab-hex" hidden>
       <pre id="hex" aria-label="Module bytes"></pre>
-    </div>
-    <div class="view" id="view-console" role="tabpanel" aria-labelledby="tab-console" hidden>
-      <p class="muted" style="margin:0 0 8px;font-size:12px">Output of the browser bindings the module calls during Run.</p>
-      <pre id="console" aria-label="Console output"></pre>
     </div>
   </section>
 </main>
@@ -225,7 +250,7 @@
   const state = {
     live: false,         // the local server answers the compile API; false on a static host
     examples: [],        // [{id, title, file, language, expect}] from examples/index.json
-    builds: {},          // static only: id -> prebuilt example (builds/<id>.json)
+    builds: {},          // static only: id -> a promise of the prebuilt example (builds/<id>.json), fetched when needed
     current: null,       // the last successful compile: { bytes, module, wat? }
     seq: 0,              // compile requests in flight; a response for an older one is dropped
     autoTimer: null,
@@ -337,7 +362,7 @@
     $("result").textContent = hasMain ? "" : "the module has no main export";
   }
 
-  function run() {
+  function runMain() {
     if (!state.current) return;
     clearRun();
     $("console").textContent = "";
@@ -423,8 +448,19 @@
   const languageOf = (ex) => ex.language || "c++";
 
   // A static host has no compiler: an example's source gets its prebuilt result, any other source gets a message.
-  function staticResult(src, opts) {
-    const example = Object.values(state.builds).find((b) => b.source === src && languageOf(b) === opts.language);
+  // The prebuilt example (builds/<id>.json), fetched the first time it is needed: go-fmt's alone is about 2 MB.
+  function exampleBuild(id) {
+    if (!state.builds[id]) {
+      state.builds[id] = fetch(`builds/${id}.json`).then((r) => {
+        if (!r.ok) throw new Error(`builds/${id}.json: ${r.status}`);
+        return r.json();
+      });
+    }
+    return state.builds[id];
+  }
+  async function staticResult(src, opts) {
+    const entry = state.examples.find((ex) => exampleTexts[ex.id] === src && languageOf(ex) === opts.language);
+    const example = entry ? await exampleBuild(entry.id) : null;
     if (!example) {
       return { ok: false, stage: "static", diagnostics: [],
         message: "this is the static build, so only the examples compile here. Other code needs the local server." };
@@ -438,10 +474,15 @@
       return { ok: false, stage: "static", diagnostics: [],
         message: `${opts.mode} is not a mode of ${LANGUAGES[opts.language].title}.` };
     }
-    return Object.assign({ ok: true }, build);
+    // a mode whose IR is another mode's stores it there (build-static.cjs, irFrom)
+    return Object.assign({ ok: true }, build, { ir: build.irFrom ? example.builds[build.irFrom].ir : build.ir });
   }
 
-  async function compile() {
+  // Compiles the editor's source; with run (Ctrl+Enter, or Cmd+Enter on a Mac), runs main() when the compile
+  // succeeds and is still the latest one.
+  async function compile(run = false) {
+    run = run === true;   // an event handler passes its event
+    clearTimeout(state.autoTimer);   // this compile covers a pending automatic one (an example's text sets one off)
     const seq = ++state.seq;
     const src = source();
     const opts = options();
@@ -457,7 +498,7 @@
         });
         data = await r.json();
       } else {
-        data = staticResult(src, opts);
+        data = await staticResult(src, opts);
       }
     } catch (e) {
       if (seq !== state.seq) return;
@@ -492,7 +533,9 @@
     setStatus(state.live ? `compiled in ${(ms / 1000).toFixed(1)} s` : "static build", "ok");
     if (state.live) writeHash();
     if ($("tab-wat").getAttribute("aria-selected") === "true") renderWat();
+    if (run && !$("run").disabled) runMain();
   }
+  const compileAndRun = () => compile(true);
 
   function scheduleAuto() {
     if (!state.live || !$("auto").checked) return;
@@ -532,7 +575,7 @@
     for (const b of document.querySelectorAll(".tabs button")) {
       b.setAttribute("aria-selected", String(b.dataset.tab === name));
     }
-    for (const v of ["module", "wat", "ir", "hex", "console"]) {
+    for (const v of ["module", "wat", "ir", "hex"]) {
       $("view-" + v).hidden = v !== name;
     }
     if (name === "wat") renderWat();
@@ -591,7 +634,9 @@
       tabSize: 2,
       scrollBeyondLastLine: false,
     });
-    editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.Enter, () => compile());
+    // Ctrl+Enter, and Cmd+Enter on a Mac (CtrlCmd is Cmd there, WinCtrl is Ctrl), compile and run
+    editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.Enter, compileAndRun);
+    editor.addCommand(m.KeyMod.WinCtrl | m.KeyCode.Enter, compileAndRun);
     editor.onDidChangeModelContent(scheduleAuto);
     $("fallback").hidden = true;
   }
@@ -620,11 +665,9 @@
       if (group.children.length) sel.appendChild(group);
     }
   }
-  async function loadStaticBuilds() {
-    await Promise.all(state.examples.map(async (ex) => {
-      const r = await fetch(`builds/${ex.id}.json`);
-      state.builds[ex.id] = await r.json();
-    }));
+  // The examples' sources (small): a static host matches the editor's text against them to find a prebuilt example.
+  function loadExampleSources() {
+    return Promise.all(state.examples.map(exampleSource));
   }
   function fillLanguages() {
     const sel = $("language");
@@ -662,11 +705,16 @@
     }
     mode.value = lang.modes.includes(keepMode) ? keepMode : lang.modes[0];
   }
-  const exampleTexts = {};   // id -> the example's source, fetched once
+  const exampleFetches = {};   // id -> a promise of the example's source, fetched once
+  const exampleTexts = {};     // id -> the example's source, once fetched
   function exampleSource(ex) {
-    if (!state.live) return Promise.resolve(state.builds[ex.id].source);
-    if (!exampleTexts[ex.id]) exampleTexts[ex.id] = fetch("examples/" + ex.file).then((r) => r.text());
-    return exampleTexts[ex.id];
+    if (!exampleFetches[ex.id]) {
+      exampleFetches[ex.id] = fetch("examples/" + ex.file).then((r) => r.text()).then((text) => {
+        exampleTexts[ex.id] = text;
+        return text;
+      });
+    }
+    return exampleFetches[ex.id];
   }
 
   async function detectServer() {
@@ -695,6 +743,11 @@
   }
 
   async function init() {
+    // the shortcut, as this platform writes it: Cmd on a Mac (Ctrl+Enter works there too)
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+    const keys = mac ? "\u2318+Enter" : "Ctrl+Enter";
+    $("hint").textContent = `${keys} compiles and runs`;
+    $("compile").title = `Compile (${keys} compiles and runs)`;
     fillBindings();
     const server = await detectServer();
     state.live = !!server.live;
@@ -705,7 +758,7 @@
     }
     fillLanguages();
     await loadExamples();
-    if (!state.live) await loadStaticBuilds();
+    if (!state.live) await loadExampleSources();
 
     // The options: the link's (a link without lang is C++, as links were before the languages), else the defaults.
     const h = readHash();
@@ -771,7 +824,10 @@
   $("std").addEventListener("change", compile);
   $("mode").addEventListener("change", compile);
   $("compile").addEventListener("click", compile);
-  $("run").addEventListener("click", run);
+  $("run").addEventListener("click", runMain);
+  $("clear-console").addEventListener("click", () => {
+    $("console").textContent = "";
+  });
   $("share").addEventListener("click", async () => {
     const url = location.origin + location.pathname + "#" + linkHash();
     try {
@@ -785,7 +841,7 @@
   for (const b of document.querySelectorAll(".tabs button")) {
     b.addEventListener("click", () => showTab(b.dataset.tab));
   }
-  // The textarea (no Monaco): Tab indents, Ctrl+Enter compiles, and typing auto-compiles as it does in the editor.
+  // The textarea (no Monaco): Tab indents, Ctrl+Enter compiles and runs, and typing auto-compiles as in the editor.
   $("fallback").addEventListener("keydown", (e) => {
     if (e.key === "Tab") {
       e.preventDefault();
@@ -796,7 +852,8 @@
   });
   $("fallback").addEventListener("input", scheduleAuto);
   document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); compile(); }
+    // outside Monaco (the textarea, the toolbar); Monaco's own command above stops the event before it gets here
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.defaultPrevented) { e.preventDefault(); compileAndRun(); }
   });
 
   init().catch((e) => {
