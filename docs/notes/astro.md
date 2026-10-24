@@ -111,9 +111,19 @@ copy by `run_astro.sh`:
 - **A null `entry` read by `ASTRO_LAZY_ARGS`** (bug 5): the first `def` of the prelude crashed in `DISPATCH_node_def`.
 - **`static const` in a constant initializer** (bug 6).
 
-The AOT bake (`--aot-compile --run` of `def fib(n) = n < 2 ? n : fib(n-1) + fib(n-2); puts fib(30)`) is where the qbe path runs out of
-patience, and it is not in the test: the program is right (832040, from the interpreter), but the store compiles thousands of
-generated files (233 in `code_store`, 2793 in the pool mode's `preload_store`) and it did not finish in 25 minutes (82 CPU-minutes).
+The AOT bake (`--aot-compile --run`, below) is where the qbe path runs out of patience, and it is not in the test: the store
+compiles thousands of generated files (2793 in the pool mode's `preload_store`, the prelude's methods, plus the program's own).
+Measured (`--aot-compile --run` of `fib(32)` and a 5,000,000-iteration `while` loop, store removed first; 4 cores, the code
+store's `make -j8`; one run each; after the run `koruby_test.rb` still prints CRuby's output):
+
+| backend | bake wall time | `preload_store/all.so` | loop script, `--plain` / baked |
+| --- | --- | --- | --- |
+| gcc | 6 min 6 s (17 CPU-min user) | 1.6 MB | 0.50 s / 0.16 s |
+| qbe, default | 19 min 11 s (54 CPU-min user) | 609 MB | 1.77 s / 1.58 s |
+| qbe, `NFCXX_QBE_DCE=1` | 9 min 54 s (33 CPU-min user) | 33 MB | 1.75 s / 1.59 s |
+
+(The gcc store had its `preload_store/all.so` after about a minute; the rest of its 6 minutes was the `code_store`.) On qbe the
+baked code is barely faster than the interpreter, as with `ackermann` above. The earlier 25-minute cut was this bake.
 The next section says where the time goes.
 
 ## Why the bake is slow on qbe
@@ -162,8 +172,9 @@ What was changed:
   Prototypes of static functions mention nothing. The result is the same program with a smaller object (the SD file above: 1.25 MB
   of assembly becomes 0.22 MB, the object 306 KB becomes 52 KB), so it is not the same assembly and stays off by default; ASTro's bake, which compiles the same
   header thousands of times, is what it is for. 79 pool files (every 35th) compiled with four jobs: 35.1 s before, 23.9 s with
-  the changes above, 15.2 s with `NFCXX_QBE_DCE=1` (gcc: 6.6 s). For the 2793 files that is about 21 minutes, 14 and 9 of wall
-  time at `-j4` on this machine.
+  the changes above, 15.2 s with `NFCXX_QBE_DCE=1` (gcc: 6.6 s). For the 2793 files that was estimated at 21 minutes, 14 and 9 of wall
+  time at `-j4`; the whole bake, measured (above), took 19 and 10 minutes with the changes and with `NFCXX_QBE_DCE=1`
+  (`-j8` on 4 cores; the 21-minute figure for "before" was not measured).
 
 What did not help: reading the source as an array of bytes in the tokenizer (`String#bytes`, then `bs[i]` instead of `getbyte`)
 did not change the time. The second `cc -E` that `qbe-cc` runs to find hand-written `__attribute__((weak))` costs 0.07 s and
@@ -261,8 +272,7 @@ end to end (calc and luastro need none; Prism's templates and the node.def patch
 ## Not done
 
 - The other 25 samples.
-- `koruby_precise`'s AOT bake on qbe (above), the
-  `--build` standalone executable, and the rubyspec suite.
+- `--build` standalone executable, and the rubyspec suite.
 - Compiling `sample/astrogre`'s AVX2 code on qbe: cproc cannot compile the intrinsics, so the regex engine is a gcc-backend
   shared object in both runs.
 - `astro_build.c`'s `--build` (standalone executables) and the tiered JIT daemon.
