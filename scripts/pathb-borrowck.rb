@@ -144,6 +144,9 @@ class LocalLifetime
     raise BadIR, 'function header' unless f.length >= 4 && bh(f[2]) == 'ret' && bh(f[3]) == 'params'
     @name = bname(f[1])
     @slots = {}
+    @slot_info = {}
+    @views = []
+    @view_ids = {}
     @params = []
     @nodes = []
     @labels = {}
@@ -160,15 +163,15 @@ class LocalLifetime
         raise BadIR, 'borrow form' unless x.length == 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
         id = bname(x[2])
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
-        place = x[4]
-        raise BorrowRefused, 'borrow requires a direct local place; use reborrow with an explicit parent' unless place.is_a?(IRSym) && place.sig == '$'
-        @loans[id] = [place.name, x[3]]
+        place = direct_place(x[4])
+        raise BorrowRefused, 'borrow requires a direct local place or constant field offset; use reborrow with an explicit parent' unless place
+        @loans[id] = [place[0], x[3], nil, place[1], x[1][1]]
       end
       if bh(x) == 'reborrow'
         raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
         id = bname(x[2])
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
-        @loans[id] = [nil, x[3], bname(x[4])]
+        @loans[id] = [nil, x[3], bname(x[4]), expression_offset(x[5]), x[1][1]]
       end
       x.each { |y| scan.call(y) }
     end
@@ -177,8 +180,13 @@ class LocalLifetime
     f.drop(4).each do |x|
       if bh(x) == 'slot'
         raise BadIR, 'slot form' unless x.length == 5
-        borrow_scalar_type!(x[2])
-        @slots[bname(x[1])] = true
+        borrow_scalar_type!(x[2]) unless %w[struct union array].include?(bh(x[2]))
+        size = constant_offset(x[3])
+        raise BorrowRefused, 'local byte-range analysis requires slot sizes from 1 to 4096' unless size > 0 && size <= 4096
+        name = bname(x[1])
+        raise BadIR, "duplicate local slot #{name}" if @slots[name]
+        @slot_info[name] = [@slots.length, size, x[2]]
+        @slots[name] = true
       end
     end
     f[3].drop(1).each do |p|
@@ -218,10 +226,121 @@ class LocalLifetime
     if parent
       resolve_loan(parent, visiting + [id])
       loan[0] = @loans[parent][0]
+      loan[3] += @loans[parent][3]
       @ancestors[id] = [parent] + @ancestors[parent]
     else
       @ancestors[id] = []
     end
+    raise BadIR, "loan refers to unknown slot #{loan[0]}" unless @slots[loan[0]]
+    loan[4] = type_width(loan[4], loan[0], loan[3])
+    check_range(loan[0], loan[3], loan[4])
+    if parent
+      p = @loans[parent]
+      raise BorrowRefused, 'reborrow range escapes its parent' unless loan[3] >= p[3] && loan[3] + loan[4] <= p[3] + p[4]
+    end
+  end
+
+  def constant_offset(x)
+    raise BadIR, 'constant byte offset required' unless x.is_a?(String)
+    chars = x.start_with?('-') ? x[1..-1] : x
+    raise BadIR, 'constant byte offset required' if chars.empty? || chars.bytes.any? { |c| c < 48 || c > 57 }
+    x.to_i
+  end
+
+  def expression_offset(x)
+    return 0 unless bh(x) == 'offset'
+    raise BadIR, 'offset form' unless x.length == 3
+    expression_offset(x[1]) + constant_offset(x[2])
+  end
+
+  def direct_place(x)
+    return [x.name, 0] if x.is_a?(IRSym) && x.sig == '$'
+    return nil unless bh(x) == 'offset' && x.length == 3
+    base = direct_place(x[1])
+    base ? [base[0], base[1] + constant_offset(x[2])] : nil
+  end
+
+  def type_width(ty, root = nil, off = 0)
+    return 8 if bh(ty) == 'ptr'
+    widths = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
+              'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
+              'long'=>8, 'unsigned_long'=>8, 'long_long'=>8, 'unsigned_long_long'=>8,
+              'float'=>4, 'double'=>8}
+    return widths[ty] if widths.key?(ty)
+    if root && off == 0 && @slot_info[root] && bh(ty) == bh(@slot_info[root][2]) &&
+       bname(ty[1]) == bname(@slot_info[root][2][1])
+      return @slot_info[root][1]
+    end
+    raise BorrowRefused, 'unknown aggregate access width'
+  end
+
+  def check_range(root, off, width)
+    raise BadIR, "unknown local slot #{root}" unless @slot_info[root]
+    raise BorrowRefused, 'local access is outside its storage range' unless off >= 0 && width >= 0 && off + width <= @slot_info[root][1]
+  end
+
+  def byte_key(root, off)
+    'byte:' + @slot_info[root][0].to_s + ':' + off.to_s
+  end
+
+  def pointer_key(root, off, width)
+    'pointer:' + @slot_info[root][0].to_s + ':' + off.to_s + ':' + width.to_s
+  end
+
+  def overlaps(a, n, b, m)
+    n > 0 && m > 0 && a < b + m && b < a + n
+  end
+
+  def base_origin(origin)
+    origin.start_with?('view:') ? @views[origin[5..-1].to_i][0] : origin
+  end
+
+  def address(origin)
+    delta = 0
+    if origin.start_with?('view:')
+      origin, delta = @views[origin[5..-1].to_i]
+    end
+    return [origin[6..-1], delta, nil] if origin.start_with?('local:')
+    if origin.start_with?('loan:')
+      id = origin[5..-1]
+      return [@loans[id][0], @loans[id][3] + delta, id]
+    end
+    nil
+  end
+
+  def project(origin, offset)
+    base = base_origin(origin)
+    return base if base.start_with?('expired:') || base.start_with?('ended:')
+    old = origin.start_with?('view:') ? @views[origin[5..-1].to_i][1] : 0
+    raise BorrowRefused, 'projection requires known local pointer provenance' unless address(origin)
+    a = address(origin)
+    check_range(a[0], a[1] + offset, 0)
+    pair = [base, old + offset]
+    unless @view_ids.key?(pair)
+      @view_ids[pair] = 'view:' + @views.length.to_s
+      @views << pair
+    end
+    @view_ids[pair]
+  end
+
+  def write_memory(root, off, width, state, provenance = nil)
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.keys.each do |key|
+      next unless key.start_with?(prefix)
+      parts = key.split(':')
+      state[key] = ['unknown'] if overlaps(off, width, parts[2].to_i, parts[3].to_i)
+    end
+    width.times do |i|
+      key = byte_key(root, off + i)
+      state[key] = (state[key] || ['dead']).map { |s| s == 'dead' ? s : 'initialized' }.uniq.sort
+    end
+    state[pointer_key(root, off, width)] = provenance if provenance
+  end
+
+  def reset_storage(root, state, status, clear_pointers = true)
+    @slot_info[root][1].times { |i| state[byte_key(root, i)] = [status] }
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.keys.each { |key| state[key] = ['unknown'] if key.start_with?(prefix) } if clear_pointers
   end
 
   def node(x, edges)
@@ -288,58 +407,60 @@ class LocalLifetime
 
   # Each storage state is a set: dead, uninitialized, initialized, moved. Pointer
   # provenance is a set of local storage identities, or external/unknown.
-  def access(place, state, read, borrowing = nil)
-    return if place == 'external'
-    if place.start_with?('ended:')
-      diagnostic('use-after-scope', place[6..-1])
+  def access(place, state, read, borrowing = nil, width = nil)
+    base = base_origin(place)
+    return if base == 'external'
+    if base.start_with?('ended:')
+      diagnostic('use-after-scope', base[6..-1])
       return
     end
-    if place.start_with?('expired:')
-      diagnostic('inactive-loan', place[8..-1])
+    if base.start_with?('expired:')
+      diagnostic('inactive-loan', base[8..-1])
       return
     end
-    raise BorrowRefused, 'unknown pointer provenance' if place == 'unknown'
-    own = nil
-    if place.start_with?('loan:')
-      own = place[5..-1]
+    a = address(place)
+    raise BorrowRefused, 'unknown pointer provenance' unless a
+    name, off, own = a
+    width ||= @slot_info[name][1]
+    check_range(name, off, width)
+    if own
       loan = @loans[own]
+      raise BorrowRefused, 'access escapes its loan range' unless off >= loan[3] && off + width <= loan[3] + loan[4]
       ([own] + @ancestors[own]).each do |id|
         diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
       end
       diagnostic('write-through-shared-loan', own) if !read && loan[1] == 'shared'
-      place = 'local:' + loan[0]
     end
-    raise BorrowRefused, 'unknown pointer provenance' unless place.start_with?('local:')
-    name = place[6..-1]
-    status = state['life:' + name] || ['dead']
-    diagnostic('use-after-scope', name) if status.include?('dead')
-    diagnostic('uninitialized', name) if read && status.include?('uninitialized')
-    diagnostic('use-after-move', name) if read && status.include?('moved')
+    label = off == 0 && width == @slot_info[name][1] ? name : name + '[' + off.to_s + '..' + (off + width).to_s + ']'
+    status = (0...width).flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
+    diagnostic('use-after-scope', label) if status.include?('dead')
+    diagnostic('uninitialized', label) if read && status.include?('uninitialized')
+    diagnostic('use-after-move', label) if read && status.include?('moved')
     @loans.each do |id, loan|
       next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
-      if loan[1] == 'exclusive' || !read || borrowing == 'exclusive'
-        diagnostic('loan-conflict', name + ' (' + id + ')')
-      end
+      next unless overlaps(off, width, loan[3], loan[4])
+      diagnostic('loan-conflict', label + ' (' + id + ')') if loan[1] == 'exclusive' || !read || borrowing == 'exclusive'
     end
+    [name, off, width]
   end
 
   def invalidate_pointers(state, from, to)
     state.keys.each do |entry|
       if entry.start_with?('value:') || entry.start_with?('pointer:')
-        state[entry] = state[entry].map { |p| from.include?(p) ? to : p }.uniq
+        state[entry] = state[entry].map { |p| from.include?(base_origin(p)) ? to : p }.uniq
       end
     end
   end
 
   def storage(place)
-    return place[6..-1] if place.start_with?('local:')
-    return @loans[place[5..-1]][0] if place.start_with?('loan:')
-    nil
+    a = address(place)
+    a ? a[0] : nil
   end
 
   def record_loan_values(values)
     if @record_uses
       values.each do |v|
+        v = base_origin(v)
         id = nil
         id = v[5..-1] if v.start_with?('loan:')
         id = v[8..-1] if v.start_with?('expired:')
@@ -370,17 +491,19 @@ class LocalLifetime
     when 'move-value', 'copy-value'
       raise BadIR, "#{bh(x)} form" unless x.length == 3
       borrow_scalar_type!(x[1])
-      place = x[2]
-      raise BorrowRefused, 'value transfers currently require direct local slots' unless place.is_a?(IRSym) && place.sig == '$'
-      name = place.name
+      place = direct_place(x[2])
+      raise BorrowRefused, 'value transfers require direct local slots or constant field offsets' unless place
+      name, off = place
       raise BadIR, "value transfer refers to unknown slot #{name}" unless @slots[name]
+      width = type_width(x[1])
       moving = bh(x) == 'move-value'
-      # Consuming a value needs read access and conflicts with every live loan.
-      # Reinitialization is a store, so it can restore moved storage later.
-      access('local:' + name, state, true, moving ? 'exclusive' : nil)
-      result = bh(x[1]) == 'ptr' ? record_loan_values(state['pointer:' + name] || ['unknown']) : []
+      access(project('local:' + name, off), state, true, moving ? 'exclusive' : nil, width)
+      result = bh(x[1]) == 'ptr' ? record_loan_values(state[pointer_key(name, off, width)] || ['unknown']) : []
       if moving
-        state['life:' + name] = (state['life:' + name] || ['dead']).map { |s| s == 'initialized' ? 'moved' : s }.uniq.sort
+        width.times do |i|
+          key = byte_key(name, off + i)
+          state[key] = (state[key] || ['dead']).map { |s| s == 'initialized' ? 'moved' : s }.uniq.sort
+        end
       end
       result
     when 'borrow'
@@ -388,7 +511,7 @@ class LocalLifetime
       loan = @loans[id]
       record_loan_definition(id)
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
-      access('local:' + loan[0], state, true, loan[1])
+      access(project('local:' + loan[0], loan[3]), state, true, loan[1], loan[4])
       state['loan:' + id] = ['active']
       ['loan:' + id]
     when 'reborrow'
@@ -398,18 +521,28 @@ class LocalLifetime
       record_loan_definition(id)
       sources = value(x[5], state)
       allowed = ['loan:' + parent, 'expired:' + parent]
-      raise BorrowRefused, 'reborrow source must preserve declared parent identity' if sources.empty? || sources.any? { |p| !allowed.include?(p) }
+      raise BorrowRefused, 'reborrow source must preserve declared parent identity' if sources.empty? || sources.any? { |p| !allowed.include?(base_origin(p)) }
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
       diagnostic('exclusive-reborrow-of-shared', id) if loan[1] == 'exclusive' && @loans[parent][1] == 'shared'
-      sources.each { |p| access(p, state, true, loan[1]) }
+      sources.each do |p|
+        a = address(p)
+        raise BorrowRefused, 'reborrow source offset does not match its declared range' if a && a[1] != loan[3]
+        access(p, state, true, loan[1], loan[4])
+      end
       state['loan:' + id] = ['active']
       ['loan:' + id]
+    when 'offset'
+      raise BadIR, 'offset form' unless x.length == 3
+      delta = constant_offset(x[2])
+      value(x[1], state).map { |p| project(p, delta) }.uniq
     when 'load'
       borrow_scalar_type!(x[1])
       places = value(x[2], state)
-      places.each { |p| access(p, state, true) }
+      raise BorrowRefused, 'unknown pointer provenance' if places.empty?
+      width = type_width(x[1])
+      places.each { |p| access(p, state, true, nil, width) }
       if bh(x[1]) == 'ptr'
-        record_loan_values(places.flat_map { |p| state['pointer:' + storage(p).to_s] || ['unknown'] }.uniq)
+        record_loan_values(places.flat_map { |p| a = address(p); a ? (state[pointer_key(a[0], a[1], width)] || ['unknown']) : ['unknown'] }.uniq)
       else
         []
       end
@@ -435,7 +568,7 @@ class LocalLifetime
   def transfer(x, state)
     arities = {'join'=>[1], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[4], 'store'=>[4], 'return'=>[1,2],
-               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'rref-arg'=>[2], 'loan-end'=>[2]}
+               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
@@ -447,14 +580,14 @@ class LocalLifetime
       if k && k.start_with?('slot:')
         name = k[5..-1]
         raise BadIR, "undeclared slot #{name}" unless @slots[name]
-        state['life:' + name] = ['uninitialized']
-        state['pointer:' + name] = ['unknown']
+        reset_storage(name, state, 'uninitialized')
       end
     when 'scope-end'
       k = key(x[1])
       raise BadIR, 'scope-end requires a local slot' unless k && k.start_with?('slot:')
       name = k[5..-1]
-      state['life:' + name] = ['dead']
+      raise BadIR, "unknown local slot #{name}" unless @slots[name]
+      reset_storage(name, state, 'dead', false)
       # A new lifetime in this slot cannot revive pointers from the old one.
       origins = ['local:' + name]
       @loans.each do |id, loan|
@@ -487,19 +620,19 @@ class LocalLifetime
       v = value(x[3], state)
       raise BadIR, 'register destination' unless x[1].is_a?(String) && x[1].start_with?('%')
       state['value:' + x[1]] = v
-    when 'store'
-      borrow_scalar_type!(x[1])
-      v = value(x[3], state)
+    when 'store', 'zero-fill'
+      zero = bh(x) == 'zero-fill'
+      borrow_scalar_type!(x[1]) unless zero
+      width = zero ? constant_offset(x[1]) : type_width(x[1])
+      raise BadIR, 'negative zero-fill length' if width < 0
+      v = zero ? nil : value(x[3], state)
       dest = value(x[2], state)
-      dest.each { |p| access(p, state, false) }
-      raise BorrowRefused, 'store through external storage may escape a local address' if dest.include?('external')
+      dest.each { |p| access(p, state, false, nil, width) }
+      raise BorrowRefused, 'store through external storage may escape a local address' if dest.any? { |p| base_origin(p) == 'external' }
       raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
-      p = storage(dest[0])
-      return state if p.nil?
-      # A store cannot resurrect storage after scope-end.
-      old = state['life:' + p] || ['dead']
-      state['life:' + p] = old.map { |s| s == 'dead' ? s : 'initialized' }.uniq
-      state['pointer:' + p] = v
+      a = address(dest[0])
+      return state unless a
+      write_memory(a[0], a[1], width, state, !zero && bh(x[1]) == 'ptr' ? v : nil)
     when 'return'
       refs = x[1] ? value(x[1], state) : []
       raise BorrowRefused, 'return with unknown pointer provenance' if refs.include?('unknown')
@@ -508,7 +641,7 @@ class LocalLifetime
         if p.start_with?('expired:')
           diagnostic('inactive-loan', p[8..-1])
         else
-          diagnostic('return-local-address', p.start_with?('ended:') ? p[6..-1] : storage(p))
+          diagnostic('return-local-address', base_origin(p).start_with?('ended:') ? base_origin(p)[6..-1] : storage(p))
         end
       end
     when 'condition', 'eval', 'nonnull'
@@ -523,10 +656,10 @@ class LocalLifetime
 
   def initial_state
     initial = {}
-    @slots.each_key { |s| initial['life:' + s] = ['dead']; initial['pointer:' + s] = ['unknown'] }
+    @slots.each_key { |s| reset_storage(s, initial, 'dead') }
     @params.each do |p, name, pointer|
       initial['value:' + p] = pointer ? ['external'] : []
-      initial['life:' + name] = ['uninitialized'] if @slots[name]
+      reset_storage(name, initial, 'uninitialized') if @slots[name]
     end
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
     initial
@@ -621,6 +754,15 @@ begin
   raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] FILE.ir' unless args.length == 1
   forms = parse_forms(tokenize(File.read(args[0])))
   raise BadIR, 'missing ir-module' unless bh(forms[0]) == 'ir-module'
+  layout = forms[0].find { |part| bh(part) == 'layout' }
+  expected_widths = {'pointer'=>'8', 'short'=>'2', 'int'=>'4', 'long'=>'8', 'long_long'=>'8', 'float'=>'4', 'double'=>'8'}
+  if layout
+    layout.drop(1).each do |part|
+      if part.is_a?(Array) && expected_widths.key?(part[0]) && part[1] != expected_widths[part[0]]
+        raise BorrowRefused, 'byte-range analysis currently requires LP64 layout'
+      end
+    end
+  end
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
   errors = []

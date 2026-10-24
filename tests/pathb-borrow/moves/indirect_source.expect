@@ -1,2 +1,2 @@
 3
-refused: value transfers currently require direct local slots
+refused: value transfers require direct local slots or constant field offsets

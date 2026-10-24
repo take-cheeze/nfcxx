@@ -1023,6 +1023,7 @@ class Fn
       end
     end
     return const(op) if head_of(op) == "const"
+    return r_offset(self, op) if head_of(op) == "offset"
     if head_of(op) == "null"
       ty = parse_type(op[1])
       return Val.new("0", "l", ty)
@@ -1383,7 +1384,9 @@ end
 # Explicit loans affect checking only; their runtime value is the original address.
 # Move/copy policy is checked before codegen; both transfer the stored value.
 def r_value_transfer(fn, x)
-  raise BadIR, "#{x[0]} form" unless x.length == 3 && x[2].is_a?(IRSym) && x[2].sig == "$"
+  place = x[2]
+  place = place[1] while head_of(place) == "offset" && place.length == 3
+  raise BadIR, "#{x[0]} form" unless x.length == 3 && place.is_a?(IRSym) && place.sig == "$"
   r_load(fn, ["load", x[1], x[2]])
 end
 
@@ -1486,6 +1489,7 @@ def cf2i_bounds(ty)
 end
 
 def r_offset(fn, x)
+  raise BadIR, "offset form" unless x.length == 3
   a = fn.opnd(x[1], "l")
   n = as_int(x[2])
   t = fn.tmp
