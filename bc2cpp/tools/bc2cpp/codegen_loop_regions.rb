@@ -400,6 +400,7 @@ class CodeGen
       is_fold = accum_kind.call(insn) == :fold
       want_arity = is_fold ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+      next if is_fold && !fold_init_not_symbol?(irep, idx, dest_reg.to_i + 1)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
@@ -409,6 +410,14 @@ class CodeGen
                                                    owner_name) }
     end
     regions
+  end
+
+  # Enumerable#inject takes a Symbol last argument as the operator and drops the block (`reduce(:+) { }` sums), so
+  # a fold is a loop only for an initial value proven not to be a Symbol.
+  def fold_init_not_symbol?(irep, idx, reg)
+    @exact_literal_types ||= {}.compare_by_identity
+    classes = (@exact_literal_types[irep] ||= BytecodeIR::Types.new(irep)).at(idx, reg)
+    !classes.nil? && !classes.empty? && !classes.include?(:Symbol)
   end
 
   def recognize_collect_regions(irep, owner_name, mand, ivar_classes, arg_classes)
