@@ -57,11 +57,12 @@ The follow-up loan layer introduces two forms:
 ```
 
 `exclusive` is the other borrow kind. Borrowing requires an initialized, live direct local
-place and creates a loan whose ID is unique within the function. Pointer copies, stores, loads,
+place or constant-offset field range and creates a loan whose ID is unique within the function.
+Pointer copies, stores, loads,
 and pointer casts preserve that identity. The QBE emitter evaluates `borrow` as its address
 operand and emits no code for `loan-end`; both the emitter and its oracle validate their shape.
 
-A shared loan permits reads and prevents writes to its referent. An exclusive loan prevents
+A shared loan permits reads and prevents writes to overlapping storage. An exclusive loan prevents
 other accesses, while reads and writes through its own pointer remain permitted. Creating a
 conflicting loan, writing through a shared loan, or ending storage with an active loan is an
 error. Access through an ended loan is an error even through an older pointer copy. Possible
@@ -152,7 +153,7 @@ use-after-scope. Source locations and language-level region contracts remain fut
 
 `copy-value` reads the value and preserves initialization. `move-value` reads the value and marks
 its source as moved. Later reads, copies, borrows, or moves of that source are errors until a store
-reinitializes it. A move conflicts with every live loan of the source, including shared loans.
+reinitializes it. A move conflicts with every overlapping live loan of the source, including shared loans.
 Copying has normal read permissions. These rules apply in both loan modes; inferred expiry can
 permit a move after the loan's last use.
 
@@ -169,13 +170,69 @@ lower to ordinary typed loads, with initialization policy enforced by the separa
 This is an **explicit IR ownership contract**, not trait inference. The frontend must select copy
 versus move from the source language's rules, including Rust's `Copy` trait; the checker does not
 prove that a type is copyable. Scalar representations in tests can model consuming handles and
-are not claims that moving a Rust integer makes it unusable. Transfers currently require whole,
-direct local scalar/pointer slots. Aggregates, partial moves, indirect moves, drops, and
-ownership effects of calls remain unsupported. Neither frontend emits these forms yet.
+are not claims that moving a Rust integer makes it unusable. Transfers currently require
+scalar/pointer values in direct locals or constant-offset fields.
+Whole-aggregate value transfers, moves through arbitrary aliases, drops, and ownership effects
+of calls remain unsupported. Neither frontend emits these forms yet.
 
 C++ `rref-arg` is still refused: an rvalue-reference argument alone does not authorize treating the
 source as dead. Ordinary C++ moved-from objects can remain usable; their contracts need separate
 modeling before a frontend can emit a consuming transfer.
+
+## Field ranges and partial moves
+
+The checker now accepts bounded aggregate slots and the IR's existing constant byte offsets:
+
+```text
+(slot "s" (struct "Pair") 8 4)
+(decl $"s" val)
+(store int (offset $"s" 0) (const int 1))
+(store int (offset $"s" 4) (const int 2))
+(let %0 int (move-value int (offset $"s" 0)))
+(let %1 int (load int (offset $"s" 4)))
+```
+
+Moving the first four bytes leaves the second field usable. Reading the moved field fails until
+all its bytes are reinitialized. Partial writes restore only the bytes they cover; repairing half
+an integer does not restore that integer. Per-byte state joins preserve these distinctions across
+branches and loops. Diagnostics show half-open byte ranges, for example `s[4..8]`.
+
+Typed loads, stores, and value transfers determine access widths. Slot size and constant offsets
+bound every access. Disjoint field loans can coexist, while overlapping ranges conflict, including
+cross-width accesses and overlapping union storage. This does not check union active-member rules,
+type punning legality, or source-language rules prohibiting partial moves from destructor types.
+
+A reborrow may narrow its parent's range:
+
+```text
+(let %0 (ptr (struct "Pair")) (borrow (ptr (struct "Pair")) "parent" exclusive $"s"))
+(let %1 (ptr int) (reborrow (ptr int) "child" exclusive "parent" (offset %0 4)))
+```
+
+The child must fit entirely inside its parent. Its explicit source offset must match the actual
+pointer provenance. Offsets hidden in earlier register assignments are refused if they cannot be
+matched to the declared range. Ancestor authorization and sibling conflicts apply only where ranges
+overlap; using a parent on a disjoint field can remain valid while another child is live.
+
+Projected pointers preserve their original loan identity for last-use inference, and expire with
+their enclosing storage or loan. Redeclaring a slot cannot revive an old projected pointer. Pointer
+fields retain provenance for an exact byte range; a write overlapping that range makes the pointer
+value unknown. Writes to disjoint fields preserve it. `zero-fill` initializes the specified bytes,
+but does not establish usable pointer provenance.
+
+This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
+layouts, dynamic offsets/indices, out-of-bounds accesses, external pointer projections, and accesses
+outside a loan's range. Aggregate value loads/transfers remain refused. Whole-object loan widths
+come from the matching root slot; nested aggregate widths that cannot be established are refused.
+Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
+three-address IR, and explicit projected moves/copies lower to the same typed loads.
+
+The model tracks **physical byte initialization**, not a semantic field-layout tree. Whole-object
+loans conservatively require all bytes initialized, including padding. Ordinary field accesses do
+not require padding initialization. Layout facts that distinguish fields, padding, and drop behavior
+are needed before general ownership-aware frontend emission can use whole-object loans reliably.
+The C++ integration tests cover field initialization, references to padded structs, uninitialized
+fields, and dangling field pointers. Frontends still do not emit loan or value-transfer annotations.
 
 ## Refusals and limits
 
@@ -184,7 +241,7 @@ error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics curre
 functions and slots; source spans remain future work.
 
 Calls require effect/lifetime contracts and are refused. So are rvalue-reference arguments,
-aggregate values, field/index projections, pointer arithmetic, unknown pointer provenance,
+aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
 external stores, and stores through multiple possible destinations. Unknown instructions are
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
@@ -202,7 +259,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next shared-IR extensions are field-sensitive places, partial moves, drops, call
+The next shared-IR extensions are semantic field layouts, drop flags, call
 effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -215,7 +272,9 @@ Paired fixtures in `tests/pathb-borrow/inferred` check both explicit and inferre
 last-use release, future-use conflicts, branch-specific release, backedges, stored pointers, and
 parent/child demands. Refusal cases are also run with inference enabled. Value-transfer fixtures
 run in both loan modes and cover moved-state joins, reinitialization,
-consuming pointer carriers, and conflicts with live loans. The explicit-loan and
+consuming pointer carriers, and conflicts with live loans. Field-range fixtures cover partial
+moves, byte repairs, overlapping loans, projected reborrows, pointer-field provenance, storage
+reuse, and conservative padding checks. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,
 loop iterations, parent restoration, nested children, shared siblings, and invalid parent graphs. A native execution check verifies that loan metadata erasure leaves the QBE output
 unchanged and that the emitter agrees with its oracle. The Path B CI workflow runs this suite
