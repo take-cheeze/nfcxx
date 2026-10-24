@@ -477,6 +477,44 @@ The fixtures are in `tests/pathb-borrow/verify`. The runner also lowers
 summaries, and checks both results. `tests/mruby/pathb-edge/verified_callee_facts.ir` links verified
 callees with their caller and runs natively.
 
+## Inferred summaries (opt-in)
+
+```sh
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries example.ir
+```
+
+This mode gives each defined function other than `main` that has no `call-effects` form a summary
+inferred from its body. Each inferred summary is printed as an `inferred: (call-effects ...)` line
+before the result, in a form the checker and both emitters accept. Callers are then checked
+against it, exactly as for a hand-written summary. Explicit summaries are never replaced; they are
+verified as before. The option combines with `--infer-loan-ends`, which applies both to the search
+and to the final check.
+
+The search is a verification loop, not a separate analysis:
+
+1. Functions are visited callees first. A self-recursive call uses the candidate under test.
+2. Scalar parameters become `value`. Each pointer parameter starts at `read` and moves to `init`,
+   then `write`, only when a diagnostic names its region `*%N`. A diagnostic that names no argument
+   region, or a refusal, ends the search with no summary.
+3. A pointer result tries each argument region and each aligned offset in turn. Its source
+   argument tries `read`/`shared`, then `write`/`exclusive`, then `write`/`shared`.
+4. The first candidate whose body has no diagnostics is kept.
+
+A function with no surviving candidate keeps the plain analysis, and calls to it are still refused.
+So inference cannot accept anything the verifier would reject. It can only fail to find a
+summary. Pointee types come from the parameter types with `const` removed; `void` pointees,
+aggregates without semantic layouts, `const` pointer results, and by-value aggregates are not
+inferred. `consume` is never inferred, because it would assert an ownership policy that the body
+alone does not establish. Mutually recursive functions get no summary and need explicit ones.
+
+The order chooses one summary when several verify. `read` is preferred, and `init` over `write`,
+so a callee that only stores gets `init`. A returned alias from a read-only body is `shared`, which
+lets a caller read the result but not write through it.
+
+The C++ frontend emits plain `call` for pointer results, while a returned alias requires
+`call-borrow`. Call-argument temporaries such as `tmp` also have no declaration facts yet. Both
+limit this mode on lowered C++ today.
+
 ## Refusals and limits
 
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
@@ -525,6 +563,10 @@ Call fixtures cover preconditions, aliasing, scalar signatures, initialization, 
 consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
 cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
 contracts, and inferred last-use release.
+Summary-inference fixtures in `tests/pathb-borrow/summaries` cover each inferred effect,
+alias offsets and permissions, recursion, caller misuse, and functions left without a summary. A
+lowered C++ program is checked with inferred summaries, and fails once its initializing call is
+removed.
 Verified-summary fixtures cover each argument effect, nested and recursive contracted calls,
 argument reborrows, returned alias offsets and permissions, closed and noescape violations,
 missing outputs or consumption, and malformed signatures.

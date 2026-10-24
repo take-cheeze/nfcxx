@@ -237,66 +237,92 @@ end
 # checked against its summary (LocalLifetime#contract_regions).
 # Keep this validator synchronized across the three standalone IR tools.
 class BorrowCallEffects
+  attr_accessor :entries
+
   def initialize(forms, layouts, bad, refused)
     @entries = {}
+    @layouts = layouts
+    @bad = bad
+    @refused = refused
     forms.each do |f|
       next unless f.is_a?(Array) && f[0] == 'call-effects'
-      unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
-             f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
-             f[6].is_a?(Array) && f[6][0] == 'args'
-        raise bad, 'call-effects form'
-      end
-      name = f[1].to_s
+      name, entry = parse(f)
       raise bad, "duplicate call effects #{name}" if @entries.key?(name)
-      unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
-        raise refused, 'call contracts require nothrow, noescape, and closed effects'
-      end
-      result = f[2][1]
-      alias_result = f[2][2]
-      unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
-        raise refused, 'call effects support only void or scalar results'
-      end
-      args = f[6].drop(1)
-      args.each do |arg|
-        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
-          raise bad, 'call argument effect form'
-        end
-        ty = arg[1]
-        if arg[0] == 'value'
-          unless ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
-            raise refused, 'value effects require nonpointer scalar arguments'
-          end
-        elsif ty.is_a?(Array) && ty[0] == 'struct' && !layouts.lookup(ty)
-          raise refused, 'call aggregate effects require semantic layouts'
-        else
-          layouts.field_type(ty, [])
-        end
-      end
-      if alias_result
-        unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
-               alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
-               %w[shared exclusive].include?(alias_result[3])
-          raise bad, 'returned alias contract form'
-        end
-        index = layouts.number(alias_result[1])
-        offset = layouts.number(alias_result[2])
-        source = args[index]
-        unless source && %w[read write].include?(source[0])
-          raise refused, 'returned aliases require a read or write source argument'
-        end
-        if alias_result[3] == 'exclusive' && source[0] != 'write'
-          raise refused, 'exclusive returned aliases require a write source argument'
-        end
-        width = layouts.field_type(result[1], [])[:size]
-        if offset + width > layouts.field_type(source[1], [])[:size]
-          raise refused, 'returned alias range escapes its source argument'
-        end
-        alias_result = {arg: index, offset: offset, kind: alias_result[3]}
-      elsif result.is_a?(Array)
-        raise refused, 'call effects support only void or scalar results'
-      end
-      @entries[name] = {result: result, args: args, alias: alias_result}
+      @entries[name] = entry
     end
+  end
+
+  # A copy whose entry for NAME is replaced by FORM, or removed when FORM is nil.
+  def with(name, form)
+    copy = dup
+    entries = @entries.dup
+    copy.entries = entries
+    if form
+      entries[name] = parse(form)[1]
+    else
+      entries.delete(name)
+    end
+    copy
+  end
+
+  def parse(f)
+    layouts = @layouts
+    bad = @bad
+    refused = @refused
+    unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
+           f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
+           f[6].is_a?(Array) && f[6][0] == 'args'
+      raise bad, 'call-effects form'
+    end
+    name = f[1].to_s
+    unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
+      raise refused, 'call contracts require nothrow, noescape, and closed effects'
+    end
+    result = f[2][1]
+    alias_result = f[2][2]
+    unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
+      raise refused, 'call effects support only void or scalar results'
+    end
+    args = f[6].drop(1)
+    args.each do |arg|
+      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
+        raise bad, 'call argument effect form'
+      end
+      ty = arg[1]
+      if arg[0] == 'value'
+        unless ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
+          raise refused, 'value effects require nonpointer scalar arguments'
+        end
+      elsif ty.is_a?(Array) && ty[0] == 'struct' && !layouts.lookup(ty)
+        raise refused, 'call aggregate effects require semantic layouts'
+      else
+        layouts.field_type(ty, [])
+      end
+    end
+    if alias_result
+      unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+             alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
+             %w[shared exclusive].include?(alias_result[3])
+        raise bad, 'returned alias contract form'
+      end
+      index = layouts.number(alias_result[1])
+      offset = layouts.number(alias_result[2])
+      source = args[index]
+      unless source && %w[read write].include?(source[0])
+        raise refused, 'returned aliases require a read or write source argument'
+      end
+      if alias_result[3] == 'exclusive' && source[0] != 'write'
+        raise refused, 'exclusive returned aliases require a write source argument'
+      end
+      width = layouts.field_type(result[1], [])[:size]
+      if offset + width > layouts.field_type(source[1], [])[:size]
+        raise refused, 'returned alias range escapes its source argument'
+      end
+      alias_result = {arg: index, offset: offset, kind: alias_result[3]}
+    elsif result.is_a?(Array)
+      raise refused, 'call effects support only void or scalar results'
+    end
+    [name, {result: result, args: args, alias: alias_result}]
   end
 
   def lookup(name)
@@ -1368,11 +1394,182 @@ class LocalLifetime
   end
 end
 
+def form_text(x)
+  return '(' + x.map { |y| form_text(y) }.join(' ') + ')' if x.is_a?(Array)
+  return x.sig + form_text(IRStr.new(x.name.bytes)) if x.is_a?(IRSym)
+  return x unless x.is_a?(IRStr)
+  out = '"'
+  x.codes.each do |c|
+    out << if c == 34 || c == 92
+             92.chr + c.chr
+           elsif c >= 32 && c < 127
+             c.chr
+           else
+             format('\\%03o', c)
+           end
+  end
+  out + '"'
+end
+
+# Opt-in summary inference. Each defined function other than main without a
+# summary gets the first candidate summary its body verifies against, so its
+# callers can be checked without hand-written contracts. Callees are searched first, and a
+# self-recursive call uses the candidate itself as its hypothesis. Mutually
+# recursive functions get no summary. Every inferred summary is re-verified when
+# its function is checked, so inference cannot make a body pass that fails.
+class SummaryInference
+  attr_reader :effects, :inferred
+
+  def initialize(functions, layouts, effects, infer_loan_ends)
+    @functions = {}
+    functions.each { |f| @functions[bname(f[1])] = f }
+    @layouts = layouts
+    @effects = effects
+    @infer_loan_ends = infer_loan_ends
+    @inferred = []
+    @callees = {}
+    @functions.each do |name, f|
+      @callees[name] = []
+      collect = lambda do |x|
+        if x.is_a?(IRSym) && x.sig == '&' && @functions.key?(x.name)
+          @callees[name] << x.name unless @callees[name].include?(x.name)
+        elsif x.is_a?(Array)
+          x.each { |y| collect.call(y) }
+        end
+      end
+      collect.call(f.drop(4))
+    end
+    order = []
+    seen = {}
+    visit = lambda do |name|
+      next if seen[name]
+      seen[name] = true
+      @callees[name].each { |c| visit.call(c) }
+      order << name
+    end
+    @functions.each_key { |name| visit.call(name) }
+    order.each do |name|
+      next if @effects.lookup(name) || name == 'main'
+      form = search(@functions[name])
+      next unless form
+      @effects = @effects.with(name, form)
+      @inferred << form
+    end
+  end
+
+  def strip_const(ty)
+    ty = ty[1] while bh(ty) == 'const' && ty.length == 2
+    ty
+  end
+
+  # Width and alignment of a memory argument type, or nil if no contract can name it.
+  def memory_type(ty)
+    return nil if ty == 'void'
+    return nil if bh(ty) == 'struct' && !@layouts.lookup(ty)
+    return nil unless BorrowLayouts::PRIMITIVES.key?(ty) || bh(ty) == 'ptr' || bh(ty) == 'struct'
+    @layouts.field_type(ty, [])
+  rescue BorrowRefused, BadIR
+    nil
+  end
+
+  def search(f)
+    name = bname(f[1])
+    ret = f[2][1]
+    params = f[3].drop(1)
+    slots = []
+    params.each do |p|
+      ty = p[3]
+      if bh(ty) == 'ptr'
+        pointee = strip_const(ty[1])
+        desc = memory_type(pointee)
+        return nil unless desc
+        slots << [p[1], pointee, desc]
+      elsif ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
+        slots << [p[1], ty, nil]
+      else
+        return nil
+      end
+    end
+    aliases = [nil]
+    if bh(ret) == 'ptr'
+      result = memory_type(ret[1])
+      return nil unless result && bh(ret[1]) != 'const'
+      aliases = []
+      slots.each_with_index do |(_reg, _ty, desc), i|
+        next unless desc
+        0.step(desc[:size] - result[:size], result[:align]) { |off| aliases << [i, off] }
+      end
+    elsif !(ret == 'void' || BorrowLayouts::PRIMITIVES.key?(ret))
+      return nil
+    end
+    aliases.each do |a|
+      form = search_modes(f, name, ret, slots, a)
+      return form if form
+    end
+    nil
+  end
+
+  # Start every memory argument at the weakest effect and advance only the
+  # arguments that diagnostics blame, until the body verifies or a choice runs out.
+  def search_modes(f, name, ret, slots, a)
+    choices = slots.each_with_index.map do |(_reg, _ty, desc), i|
+      if desc.nil?
+        [['value']]
+      elsif a && a[0] == i
+        [%w[read shared], %w[write exclusive], %w[write shared]]
+      else
+        [['read'], ['init'], ['write']]
+      end
+    end
+    index = Array.new(slots.length, 0)
+    while true
+      returns = ['returns', ret]
+      args = slots.each_with_index.map { |(_reg, ty, _desc), i| [choices[i][index[i]][0], ty] }
+      if a
+        returns << ['from-arg', a[0].to_s, a[1].to_s, choices[a[0]][index[a[0]]][1]]
+      end
+      form = ['call-effects', IRStr.new(name.bytes), returns, ['nothrow'], ['noescape'], ['closed'], ['args'] + args]
+      begin
+        candidate = @effects.with(name, form)
+        checker = LocalLifetime.new(f, @infer_loan_ends, @layouts, candidate)
+        checker.run
+      rescue BorrowRefused, BadIR
+        return nil
+      end
+      return form if checker.errors.empty?
+      blamed = []
+      checker.errors.each do |e|
+        place = e.split(': ', 3)[2]
+        reg = place && place.start_with?('*%') ? place[1..-1].split(/[\[ ]/)[0] : nil
+        i = reg ? slots.index { |slot| slot[0] == reg } : nil
+        return nil unless i
+        blamed << i unless blamed.include?(i)
+      end
+      blamed.each do |i|
+        index[i] += 1
+        return nil if index[i] >= choices[i].length
+      end
+    end
+  end
+end
+
 begin
   args = ARGV.dup
-  infer = args[0] == '--infer-loan-ends'
-  args.shift if infer
-  raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] FILE.ir' unless args.length == 1
+  infer = false
+  summaries = false
+  while args[0] && args[0].start_with?('--')
+    option = args.shift
+    if option == '--infer-loan-ends'
+      infer = true
+    elsif option == '--infer-summaries'
+      summaries = true
+    else
+      raise BadIR, "unknown option #{option}"
+    end
+  end
+  unless args.length == 1
+    raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] [--infer-summaries] FILE.ir'
+  end
   forms = parse_forms(tokenize(File.read(args[0])))
   raise BadIR, 'missing ir-module' unless bh(forms[0]) == 'ir-module'
   layout = forms[0].find { |part| bh(part) == 'layout' }
@@ -1388,6 +1585,11 @@ begin
   call_effects = BorrowCallEffects.new(forms, semantic_layouts, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
+  if summaries
+    inference = SummaryInference.new(functions, semantic_layouts, call_effects, infer)
+    call_effects = inference.effects
+    inference.inferred.each { |form| puts 'inferred: ' + form_text(form) }
+  end
   errors = []
   functions.each do |f|
     checker = LocalLifetime.new(f, infer, semantic_layouts, call_effects)
