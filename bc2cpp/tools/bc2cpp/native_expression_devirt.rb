@@ -449,7 +449,11 @@ module NativeExpressionDevirt
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     CLASS_METHOD_CACHE.fetch(key) do
       CLASS_METHOD_CACHE.clear
-      CLASS_METHOD_CACHE[key] = scan_class_method_registrations(files)
+      # A Hash with a default proc cannot be stored, so the pairs are cached and the default is restored here.
+      pairs = ScanCache.fetch('native_expression_devirt.class_method_registrations', files) do
+        scan_class_method_registrations(files).to_a
+      end
+      CLASS_METHOD_CACHE[key] = Hash.new { |hash, name| hash[name] = [] }.merge(pairs.to_h)
     end
   end
 

@@ -104,7 +104,7 @@ module NativeDirect
     siblings = sibling_sources(path)
     key = [File.dirname(path), *siblings.map { |file| file_identity(file) }]
     @sibling_owners ||= {}
-    @sibling_owners[key] ||= begin
+    @sibling_owners[key] ||= ScanCache.fetch('native_direct.sibling_param_owners', siblings) do
       texts = siblings.to_h { |file| [file, strip_comments(File.binread(file).force_encoding('UTF-8'))] }
       cross_file_param_owners(texts)
     end
