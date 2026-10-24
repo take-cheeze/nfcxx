@@ -265,13 +265,17 @@ class CodeGen
     # A native def outside mruby's core (which only touches core classes) could
     # sit on a subclass; without the source map any native def declines.
     natives = @native_name_sources ? @native_name_sources.fetch(name, []) : nil
+    native_owners = []
     if natives.nil?
       return [] if @registry.fetch(name, []).any? { |md| md.owner == '<native>' }
     elsif natives.any? { |path| !path.match?(%r{/3rd/mruby/(?:src|mrbgems)/}) }
-      return []
+      # The closed world names every class an outside definition of `name` lands on (OutsideOwnerCall: the native
+      # owner map, outside and core Ruby); the walk stops at each, so none can sit between a subclass and `owner`.
+      native_owners = @closed_world && outside_owner_call_owners(name)
+      return [] unless native_owners
     end
 
-    def_owners = @registry.fetch(name, []).map(&:owner).to_set
+    def_owners = @registry.fetch(name, []).map(&:owner).to_set | native_owners
     mixed = lambda do |klass|
       !Array(@included_modules[klass]).empty? || !Array(@prepended_modules[klass]).empty? ||
         @unknown_mixins.include?(klass)

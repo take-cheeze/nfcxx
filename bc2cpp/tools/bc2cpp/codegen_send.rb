@@ -557,6 +557,14 @@ class CodeGen
     # guard. Static tracing may narrow the common cases, but is not required for
     # these wrappers because every other receiver retains ordinary dispatch.
     if n.zero? && (helpers = NATIVE_WRAPPER_ZERO_ARG_DIRECT[name])
+      # `Graphics.update` / `Input.update` (or a bare `update` in Graphics' own `def self.x`): a stable
+      # class/module constant receiver is no instance of the native classes below, so the module's own singleton
+      # method is called directly instead.
+      constant_code = call_receiver.nil? &&
+                      constant_receiver_send_code(name, n, d, recv, argv, irep, drawing_proof_idx, drawing_proof_reg,
+                                                  owner_def, self_implicit: self_implicit)
+      return constant_code if constant_code
+
       owners = helpers.keys.select do |owner|
         native_wrapper_owner_safe?(name, owner)
       end
@@ -1504,8 +1512,8 @@ class CodeGen
         return singleton_code if singleton_code
       end
 
-      if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
-        kernel_code = kernel_direct_code(name, d, recv, argv)
+      if %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+        kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit)
         return kernel_code if kernel_code
       end
 

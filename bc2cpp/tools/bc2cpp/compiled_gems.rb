@@ -97,6 +97,7 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # would claim them. A class also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
 require 'prism'
+require_relative 'scan_cache'
 BC2CPP_OWNER_SOURCE_ROOT = File.expand_path('../../3rd', __dir__).freeze
 # mrb->X_class fields that core binds to a named class.
 BC2CPP_STATE_CLASS_FIELDS = {
@@ -147,11 +148,16 @@ def bc2cpp_ruby_definition_owners
 end
 
 # Owners of C definitions: the class each mrb_define_method* / mrb_define_class_method* / ROM table
-# (MRB_MT_INIT_ROM) is bound to, resolved through the variable that holds the class.
+# (MRB_MT_INIT_ROM) is bound to, resolved through the variable that holds the class. Every generator process
+# loads this file, so the scan is cached on its inputs (the C sources).
 def bc2cpp_c_definition_owners
-  owners = Set.new
   c_files = Dir[File.join(BC2CPP_OWNER_SOURCE_ROOT, 'mruby/src/*.c')] +
             BC2CPP_CORE_MRBLIB_GEMS.flat_map { |gem| Dir[File.join(BC2CPP_OWNER_SOURCE_ROOT, 'mruby/mrbgems', gem, '**/*.c')] }
+  Set.new(ScanCache.fetch('compiled_gems.c_definition_owners', c_files) { scan_c_definition_owners(c_files).to_a })
+end
+
+def scan_c_definition_owners(c_files)
+  owners = Set.new
   c_files.reject { |path| path =~ %r{test|\.orig} }.sort.each do |path|
     src = File.read(path, encoding: 'BINARY')
     bound = {}
@@ -446,6 +452,12 @@ def foreign_mrblib_srcs(gems_root)
     Dir["#{gems_root}/3rd/mruby-marshal/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-onig-regexp/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-stringio/mrblib/**/*.rb"]
+end
+
+# CORE_COMPARE: every core mrbgem's mrblib, program core included. foreign_mrblib_srcs leaves out
+# mruby-hash-ext, but its Hash subset tests are the other Ruby definers of `< <= > >=` the operator model expects.
+def core_mrbgem_mrblib_srcs(gems_root)
+  Dir["#{gems_root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"]
 end
 
 # CLOSED_WORLD: the builds that ship RPG2000/2003 only

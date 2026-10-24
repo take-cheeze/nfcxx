@@ -65,6 +65,19 @@ pool = BytecodeIR::Types.new(Irep.new(label: 't', instructions: [insn(0, 'LOADL'
                                       catch_handlers: [], nlocals: 4, pool: [{ type: :int64, value: 1 << 40 }]))
 check.call('LOADL of a pool integer has no exact class', pool.exact_at(1, '1').nil?)
 
+# The refusal names the first definition the proof cannot use; a cached answer reports the same cause.
+cause = lambda do |analysis, index, reg, **options|
+  refusal = {}
+  analysis.exact_at(index, reg, refusal: refusal, **options)
+  refusal[:cause]
+end
+check.call('a join of two classes refuses as class_join', cause.call(join, 6, '2') == :class_join)
+check.call('a pool integer refuses on its producer', cause.call(pool, 1, '1') == 'producer:LOADL')
+check.call('a cached refusal reports its cause again', cause.call(pool, 1, '1') == 'producer:LOADL')
+check.call('R0 without the caller\'s proof refuses as self_unknown', cause.call(entry, 2, '0') == :self_unknown)
+check.call('LOADSELF without the caller\'s proof refuses as self_unknown', cause.call(entry, 2, '4') == :self_unknown)
+check.call('an answered proof records no cause', cause.call(straight, 5, '1').nil?)
+
 # The step-loop consumer requires one literal value, not merely Integer class agreement.
 generator = CodeGen.allocate
 step_body = lambda do |rows, handlers = []|

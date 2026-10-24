@@ -168,7 +168,8 @@ class ClosedWorld
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
-    return :core_or_native if @native_singleton_names.include?(name)
+    # A native singleton function is one more outside owner, which the owner call names (`Graphics.singleton`).
+    return :core_or_native if @native_singleton_names.include?(name) && @outside_owner_name != name
     return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) &&
                               @outside_owner_name != name && !(scoped && native_free)
 
@@ -913,6 +914,15 @@ class ClosedWorld
   # without a class declaration (kernel_native_dispatch_safe? covers the declared subclasses).
   def basic_object_unreferenced?
     !@global_refusal && !@basic_object_referenced
+  end
+
+  # BASIC_OBJECT_SEALED: no object of the world is a bare BasicObject, so every receiver includes Kernel. Subclasses
+  # are ruled out by basic_object_subclass_free?, the world's own bytecode never reads the constant, and no outside
+  # Ruby source spells it. The native side is CodeGen#kernel_receiver_sealed?'s.
+  def basic_object_instance_free?
+    return false unless basic_object_subclass_free? && basic_object_unreferenced?
+
+    Array(@ruby_paths).none? { |path| File.read(path, encoding: 'BINARY').include?('BasicObject') }
   end
 
   private

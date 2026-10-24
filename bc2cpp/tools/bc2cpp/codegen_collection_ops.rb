@@ -9,31 +9,49 @@ class CodeGen
   # Every native registration of the operator the closed form accounts for: [class, function, source path]. A
   # registration outside the list (another gem's `Array#-`, a second `Array#<<`) keeps the helper open.
   NUMERIC_SLOW_NATIVES = {
+    '+' => [%w[Integer int_add src/numeric.c], %w[Float flo_add src/numeric.c], %w[Array mrb_ary_plus src/array.c],
+            %w[String mrb_str_plus_m src/string.c], %w[Time time_plus mrbgems/mruby-time/src/time.c]],
     '-' => [%w[Integer int_sub src/numeric.c], %w[Float flo_sub src/numeric.c],
-            %w[Array ary_sub mrbgems/mruby-array-ext/src/array.c]],
+            %w[Array ary_sub mrbgems/mruby-array-ext/src/array.c], %w[Time time_minus mrbgems/mruby-time/src/time.c]],
     '&' => [%w[Integer int_and src/numeric.c], %w[NilClass false_and src/object.c], %w[TrueClass true_and src/object.c],
             %w[FalseClass false_and src/object.c], %w[Array ary_intersection mrbgems/mruby-array-ext/src/array.c]],
     '|' => [%w[Integer int_or src/numeric.c], %w[NilClass false_or src/object.c], %w[TrueClass true_or src/object.c],
             %w[FalseClass false_or src/object.c], %w[Array ary_union mrbgems/mruby-array-ext/src/array.c]],
+    '%' => [%w[Integer int_mod src/numeric.c], %w[Float flo_mod src/numeric.c],
+            %w[String str_mod mrbgems/mruby-sprintf/src/sprintf.c]],
+    '-@' => [%w[String str_uminus mrbgems/mruby-string-ext/src/string.c]],
     '<<' => [%w[Integer int_lshift src/numeric.c], %w[Array mrb_ary_push_m src/array.c],
              %w[String str_concat_m mrbgems/mruby-string-ext/src/string.c], %w[IO io_lshift mrbgems/mruby-io/src/io.c]]
   }.freeze
-  # Time#- (mruby-time) is the one more definer a build may link; numeric_slow_members removes it with the gem.
-  NUMERIC_SLOW_TIME_MINUS = %w[Time time_minus mrbgems/mruby-time/src/time.c].freeze
-
   # The gems whose natives the closed form calls: a build without one cannot have the exported body to link.
-  NUMERIC_SLOW_COLLECTION_GEMS = { '-' => %w[mruby-array-ext], '&' => %w[mruby-array-ext], '|' => %w[mruby-array-ext],
+  NUMERIC_SLOW_COLLECTION_GEMS = { '%' => %w[mruby-sprintf], '-@' => %w[mruby-string-ext], '+' => %w[mruby-time], '-' => %w[mruby-array-ext mruby-time],
+                                   '&' => %w[mruby-array-ext], '|' => %w[mruby-array-ext],
                                    '<<' => %w[mruby-string-ext mruby-io] }.freeze
 
   # [wrapper function, exported body, the call the wrapper must make]: the wrapper stays the method, so the export
   # is the method's body only while the wrapper calls it.
   NUMERIC_SLOW_EXPORTS = {
-    '-' => [['ary_sub', 'mrb_ary_ext_sub_impl', 'mrb_ary_ext_sub_impl(mrb, self, other)']],
+    '%' => [['int_mod', 'mrb_int_mod_impl', 'mrb_int_mod_impl(mrb, x, mrb_get_arg1(mrb))'],
+            ['flo_mod', 'mrb_flo_mod_impl', 'mrb_flo_mod_impl(mrb, x, mrb_get_arg1(mrb))'],
+            ['str_mod', 'mrb_str_mod_impl', 'mrb_str_mod_impl(mrb, self, mrb_get_arg1(mrb))']],
+    '-@' => [['str_uminus', 'mrb_str_uminus_impl', 'mrb_str_uminus_impl(mrb, str)']],
+    '+' => [['time_plus', 'mrb_time_plus_impl', 'mrb_time_plus_impl(mrb, self, mrb_get_arg1(mrb))']],
+    '-' => [['ary_sub', 'mrb_ary_ext_sub_impl', 'mrb_ary_ext_sub_impl(mrb, self, other)'],
+            ['time_minus', 'mrb_time_minus_impl', 'mrb_time_minus_impl(mrb, self, mrb_get_arg1(mrb))']],
     '&' => [['ary_intersection', 'mrb_ary_ext_and_impl', 'mrb_ary_ext_and_impl(mrb, self, other)']],
     '|' => [['ary_union', 'mrb_ary_ext_or_impl', 'mrb_ary_ext_or_impl(mrb, self, other)']],
     '<<' => [['str_concat_m', 'mrb_str_ext_concat_impl', 'mrb_str_ext_concat_impl(mrb, self, mrb_get_arg1(mrb))'],
              ['io_lshift', 'mrb_io_lshift_impl', 'mrb_io_lshift_impl(mrb, io, mrb_get_arg1(mrb))']]
   }.freeze
+
+  # The owner-class cache is printed before the helpers are generated, so the arms' slots are numbered first.
+  def reserve_numeric_slow_ruby_arm_slots
+    NUMERIC_SLOW_RUBY_ARM_OPS.each do |name|
+      next unless numeric_slow_closed?(name)
+
+      (numeric_slow_ruby_arms(name) || []).each { |arm| owner_class_fn_name(arm[:owner]) }
+    end
+  end
 
   # True for an operator without exported bodies; else the proof above, memoized per operator.
   def numeric_slow_collection_ready?(name)
@@ -59,7 +77,6 @@ class CodeGen
       [entry[:owner]&.fetch(:class_name, nil), entry[:function], entry[:path].to_s]
     end
     expected = NUMERIC_SLOW_NATIVES.fetch(name)
-    found = found.reject { |owner, function, path| name == '-' && [owner, function] == NUMERIC_SLOW_TIME_MINUS.first(2) && path.end_with?(NUMERIC_SLOW_TIME_MINUS.last) }
     return false unless found.size == expected.size
 
     paths = expected.to_h do |owner, function, suffix|
@@ -75,13 +92,17 @@ class CodeGen
   def numeric_slow_export?(path, function, impl, call)
     text = File.read(path, encoding: 'BINARY')
     wrapper = text[/^static mrb_value\n#{Regexp.escape(function)}\(mrb_state \*mrb, mrb_value \w+\)\n\{.*?^\}\n/m].to_s
-    text.match?(/^mrb_value\n#{Regexp.escape(impl)}\(mrb_state \*mrb, mrb_value \w+, mrb_value \w+\)\n\{/) && wrapper.include?(call)
+    text.match?(/^mrb_value\n#{Regexp.escape(impl)}\(mrb_state \*mrb(?:, mrb_value \w+)+\)\n\{/) && wrapper.include?(call)
   end
 
   private
 
   def numeric_slow_extern(impl)
     "extern \"C\" mrb_value #{impl}(mrb_state*, mrb_value, mrb_value);\n"
+  end
+
+  def numeric_slow_extern_unary(impl)
+    "extern \"C\" mrb_value #{impl}(mrb_state*, mrb_value);\n"
   end
 
   # `-` has no String arm; Array#- is mruby-array-ext's body for an Array operand (mrb_get_args "A").
@@ -125,6 +146,24 @@ class CodeGen
     CPP
   end
 
+  # NUMERIC_SLOW_RUBY_ARM: the compiled body of each Ruby definer, ahead of the native type tests so a Ruby
+  # subclass of a native owner reaches its own override. The class is the cached owner pointer (nullptr when the
+  # constant is not defined, which skips the arm); a kind test, so a subclass without an override is covered too.
+  def numeric_slow_ruby_arm_source(name)
+    (numeric_slow_ruby_arms(name) || []).map do |arm|
+      <<~CPP
+        // NUMERIC_SLOW_RUBY_ARM :#{name} -- the compiled #{arm[:owner]}##{name}, no by-name call
+          if (struct RClass* bc2cpp_owner = #{owner_class_ptr_expr(arm[:owner])}) {
+            if (mrb_obj_is_kind_of(M, a, bc2cpp_owner)) {
+              int ai = mrb_gc_arena_save(M);
+              mrb_value r = #{arm[:impl]}(M, #{(['a'] + arm[:args]).join(', ')});
+              #{NUMERIC_SLOW_DONE}
+            }
+          }
+      CPP
+    end.join
+  end
+
   # int_lshift (any count the method accepts: mrb_as_int coerces it), Array#<< with one operand (mrb_ary_push_m is
   # mrb_ary_push), String#<< and IO#<< (the exported bodies). IO is the class and its subclasses (File), not an
   # exact class test.
@@ -157,7 +196,7 @@ class CodeGen
           }
           #{NUMERIC_SLOW_DONE}
         }
-        if (mrb_array_p(a)) {
+      #{numeric_slow_ruby_arm_source('<<')}  if (mrb_array_p(a)) {
           mrb_ary_push(M, a, b);
           return a;
         }

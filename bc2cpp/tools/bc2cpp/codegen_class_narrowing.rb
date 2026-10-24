@@ -4,6 +4,7 @@ require_relative 'bytecode_ir_containers'
 
 require_relative 'numeric_flow'
 require_relative 'core_fact_sigs'
+require_relative 'scan_cache'
 require_relative 'native_owner_map'
 
 # CLASS_NARROWING: occurrence typing for the exact-class flow. A branch on the boolean of a class test
@@ -413,11 +414,13 @@ class CodeGen
     field = CLASS_TEST_SUPER_FIELDS.fetch(name)
     token = /\b#{field}\b|MRB_SYM\(#{name}\)|"#{name}"/
     paths = @native_name_sources.values.flatten.uniq
-    paths.any? do |path|
-      text = SourceText.read(path, 'native_subclass_defined?') or next false
-      text.scan(/\bmrb_(?:define_class\w*|class_new\w*)\s*\(([^;]*);/m).any? do |(call)|
-        last = call.rpartition(',').last
-        last.match?(token) || call.match?(/mrb_class_get\w*\s*\([^()]*#{token}/)
+    ScanCache.fetch("codegen_class_narrowing.native_subclass_defined.#{name}", paths) do
+      paths.any? do |path|
+        text = SourceText.read(path, 'native_subclass_defined?') or next false
+        text.scan(/\bmrb_(?:define_class\w*|class_new\w*)\s*\(([^;]*);/m).any? do |(call)|
+          last = call.rpartition(',').last
+          last.match?(token) || call.match?(/mrb_class_get\w*\s*\([^()]*#{token}/)
+        end
       end
     end
   end

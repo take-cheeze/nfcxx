@@ -1,10 +1,39 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_containers'
+require_relative 'numeric_flow'
 
 # CodeGen: RECORD_HASH_PROOF consumer.
 
 class CodeGen
+  # RECORD_NILABLE_READ: the classes a heap fact may carry into the exact-class flow (NumericFlow::OPAQUE keeps
+  # class bits and OTHER out; numeric bits stay out so no fixnum proof rests on a record).
+  RECORD_READ_BITS = { 'Array' => NumericFlow::ARR, 'Hash' => NumericFlow::HSH, 'String' => NumericFlow::STR,
+                       'NilClass' => NumericFlow::NIL }.freeze
+
+  # RECORD_NILABLE_READ: the exact-class flow's mask for the record read `@slot[:key]` at +index+: the classes stored
+  # under the key, nil included when the key can be absent. The flow's truthiness narrowing then drops nil where a
+  # branch rules it out (`@slot[:key] || []`, `return unless x`). The proof is record_hash_exact_class's; nil when
+  # +insn+ is not a record read or a stored value has no bit here.
+  def record_index_mask(irep, index, insn)
+    return nil unless insn.op == 'GETIDX' && RecordHash.table && @closed_world && record_nilable_reads?
+
+    slots = RecordHash.read_slots(irep, index) or return nil
+    mask = slots.reduce(0) do |acc, (name, key)|
+      classes = RecordHash.table.dig(name, key, RecordHash.consumer_tier) or return nil
+      classes.reduce(acc) { |m, klass| m | (RECORD_READ_BITS[klass] or return nil) }
+    end
+    # 0 is the flow's "not reached yet", never a value.
+    mask.zero? ? nil : mask
+  end
+
+  # BC2CPP_RECORD_NILABLE_READS=0 leaves record reads OTHER in the exact-class flow (the output before it).
+  def record_nilable_reads?
+    return @record_nilable_reads if defined?(@record_nilable_reads)
+
+    @record_nilable_reads = ENV['BC2CPP_RECORD_NILABLE_READS'] != '0'
+  end
+
   # The single exact class every value stored under the record key(s) read by the GETIDX feeding
   # +reg+ at +idx+ has, or nil. Unguarded: RecordHash proved the Hash is created by the listed literals
   # and mutated only by the listed stores, and each store is a fresh instance of that class.

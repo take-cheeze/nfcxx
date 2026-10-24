@@ -183,8 +183,9 @@ module NativeCallbacks
     macros = bodies.select(&:macro).group_by(&:name)
     regs, aliases = registrations(paths)
     entries = {}
+    memo = {}.compare_by_identity
     regs.each do |ruby_name, fn|
-      closure = closure_of(functions.fetch(fn, []), functions, macros, fn)
+      closure = closure_of(functions.fetch(fn, []), functions, macros, fn, memo)
       entry = (entries[ruby_name] ||= Entry.new(Set.new, Set.new, true))
       entry.callbacks.merge(closure[:callbacks])
       entry.unresolved.merge(closure[:unresolved])
@@ -207,17 +208,15 @@ module NativeCallbacks
     entries
   end
 
-  # The callbacks and unresolved calls of the C function +start+ (its bodies, by name +fn+) and everything it reaches.
-  def closure_of(start, functions, macros, fn)
-    seen = Set.new
-    queue = start.dup
-    callbacks = Set.new
-    unresolved = Set.new
-    unresolved << fn if start.empty? && !LIBC.include?(fn)
-    until queue.empty?
-      body = queue.shift
-      next unless seen.add?(body.object_id)
+  # What one body adds to a closure, in scan order: its callbacks, its unresolved calls and the bodies it reaches. It
+  # depends on the body alone, so it is computed once and shared by every registration that reaches the body.
+  BodyFacts = Struct.new(:callbacks, :unresolved, :reached)
 
+  def body_facts(body, functions, macros, memo)
+    memo[body] ||= begin
+      callbacks = []
+      unresolved = []
+      reached = []
       body.code.scan(/"(?:[^"\\\n]|\\.)*"/) { |s| callbacks << s[1...-1] }
       body.code.scan(MRB_SYM_TOKEN_RE) { |m, n| callbacks << resolve_mrb_sym_token(m, n) }
       # A dispatch call names its method at run time unless the argument list spells the name. Such a call can reach
@@ -240,12 +239,32 @@ module NativeCallbacks
           if targets.empty?
             unresolved << id unless LIBC.include?(id) || id.match?(/\A[A-Z0-9_]+\z/) || id.match?(INTRINSIC)
           else
-            queue.concat(targets)
+            reached.concat(targets)
           end
         else
-          queue.concat(functions.fetch(id, []))
+          reached.concat(functions.fetch(id, []))
         end
       end
+      BodyFacts.new(callbacks, unresolved, reached)
+    end
+  end
+
+  # The callbacks and unresolved calls of the C function +start+ (its bodies, by name +fn+) and everything it reaches.
+  # +memo+ is the body_facts cache for one analyze call.
+  def closure_of(start, functions, macros, fn, memo)
+    seen = Set.new
+    queue = start.dup
+    callbacks = Set.new
+    unresolved = Set.new
+    unresolved << fn if start.empty? && !LIBC.include?(fn)
+    until queue.empty?
+      body = queue.shift
+      next unless seen.add?(body.object_id)
+
+      facts = body_facts(body, functions, macros, memo)
+      callbacks.merge(facts.callbacks)
+      unresolved.merge(facts.unresolved)
+      queue.concat(facts.reached)
     end
     { callbacks: callbacks, unresolved: unresolved, complete: unresolved.empty? }
   end

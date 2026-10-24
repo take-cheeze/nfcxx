@@ -18,6 +18,11 @@ require_relative 'numeric_flow'
 # or one class K by such a pool is compiled as an exact-K call behind a class test whose else is
 # bc2cpp_guard_violation, so a writer the scan missed is a loud error and never an
 # unchecked call. BC2CPP_SETTER_POOLS=0 restores the earlier output byte for byte.
+#
+# SETTER_NAME_CLOSURE: the computed-name clause is the one rule the unchecked call-site proofs add. When
+# DynamicNames.universe leaves a setter out (no literal spells it and no value naming a setter can be composed,
+# DynamicNames.setter_composition), its sends are all its callers, so its pools are proofs and carry no CHECKED.
+# A pool that also joins audited native stores keeps CHECKED.
 class CodeGen
   SETTER_POOL_NAME = /\A[A-Za-z_]\w*=\z/
 
@@ -144,6 +149,7 @@ class CodeGen
   def setter_arg_candidates
     @setter_arg_candidates ||= begin
       found = {}
+      @setter_arg_names = {}
       if setter_pools_enabled?
         @registry.each do |name, definitions|
           next unless name.match?(SETTER_POOL_NAME) && (reads = setter_pool_reads(name))
@@ -152,11 +158,27 @@ class CodeGen
             next unless d.irep && !(@entry_cand || {}).key?([d.irep, 1])
 
             found[[d.irep, 1]] = reads
+            @setter_arg_names[[d.irep, 1]] = name
           end
         end
       end
       found
     end
+  end
+
+  # setter_arg_candidates' key => the setter name it pools the argument of.
+  def setter_arg_names
+    setter_arg_candidates
+    @setter_arg_names
+  end
+
+  # SETTER_NAME_CLOSURE (see the header): an admitted setter no computed send can reach.
+  def setter_unguarded?(setter)
+    !setter_pool_reads(setter).nil? && !numeric_dynamically_named?(setter)
+  end
+
+  def setter_stores_unguarded?(stores)
+    stores[:classes].empty? && stores[:setters].all? { |setter| setter_unguarded?(setter) }
   end
 
   # -- CHECKED_POOL_EXACT -------------------------------------------------------------------------------------------

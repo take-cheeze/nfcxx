@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'block_self'
 require_relative 'core_defs'
 require_relative 'foreign_definers'
 require_relative 'native_expression_devirt'
@@ -74,6 +75,7 @@ module BlockCoreDirectFallback
     sole_call = nil
     branches = arms.map do |arm|
       args, = direct_call_args(arm[:target], argv, arm[:impl])
+      args = stack_block_args(args, arm[:target])
       # YIELD_REACH: with a yield-free block and a body that cannot suspend a Fiber on its
       # own, no yield can cross the callee's frame, so the root-context test is not needed.
       unguarded = block_core_arm_unguarded?(arm)
@@ -130,6 +132,7 @@ module BlockCoreDirectFallback
     return nil unless arm
 
     args, = direct_call_args(arm[:target], argv, arm[:impl])
+    args = stack_block_args(args, arm[:target])
     call = "r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});"
     note = "// BLOCK_CORE_DIRECT :#{name} -- implicit-self Kernel##{name} is the program's only definition"
     if block_core_arm_unguarded?(arm) && block_arm_reach?
@@ -176,8 +179,9 @@ module BlockCoreDirectFallback
     region = @call_block_region
     block_free = !!(region && region[:direct_entry] && region[:yield_free])
     unguarded = block_free && core_body_relaxable?(arm[:target].irep)
-    site = (@yf_arm_sites ||= {})[[region && region[:parent_irep]&.label, region && region[:block_addr]]] ||=
-             { block_free: false, arms: Set.new, unguarded: Set.new }
+    # An `&expr` site (EXPLICIT_BLOCK_ARG_DIRECT) has no BLOCK instruction: its SENDB names it.
+    key = [region && region[:parent_irep]&.label, region && (region[:block_addr] || region[:sendb_addr])]
+    site = (@yf_arm_sites ||= {})[key] ||= { block_free: false, arms: Set.new, unguarded: Set.new }
     site[:block_free] = block_free
     site[:arms] << arm[:class]
     site[:unguarded] << arm[:class] if unguarded
@@ -188,6 +192,21 @@ module BlockCoreDirectFallback
   def block_core_refuse(klass, name, arity, reason)
     (@block_core_reasons ||= Hash.new { |hash, key| hash[key] = [] })[[name, arity]] << "#{klass}: #{reason}" if @block_core_why_on
     nil
+  end
+
+  # STACK_BLOCK: an arm whose compiled callee only calls its block (BlockSelf.plain_yielder_why) takes the
+  # frame-local RProc. Such a callee can only hand the Proc to bc2cpp_yield_argv, so the VM never sees it and
+  # nothing keeps it past the call.
+  def stack_block_args(args, target)
+    return args unless @call_block_stack_expr && stack_block_callee?(target.irep)
+
+    args.map { |arg| arg == @call_block_expr ? @call_block_stack_expr : arg }
+  end
+
+  def stack_block_callee?(label)
+    (@stack_block_callees ||= {}).fetch(label) do
+      @stack_block_callees[label] = BlockSelf.plain_yielder_why(@ireps[label], @ireps).nil?
+    end
   end
 
   # BC2CPP_BLOCK_CORE_DIRECT=0 turns the arms off, to measure them against the plain send.

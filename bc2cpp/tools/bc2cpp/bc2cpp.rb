@@ -674,6 +674,9 @@ if $PROGRAM_NAME == __FILE__
       range_safe: DeclaredConstants.range_to_a_safe?(registry, included_modules, prepended_modules, unknown_mixins)
     )
     integer_constants |= declared_constants.integer_names
+    # The registry and LEXICAL_CONST qualify scopes separately; a key is used only where both name the same SETCONST.
+    lexical_sites = LexicalConsts.analyze(ireps, static: true).site_keys
+    integer_constant_keys = declared_constants.integer_keys.select { |key, insn| lexical_sites[insn] == key }.keys.to_set
     declared_constants.containers.each { |name, klass| container_constants[name] ||= klass }
     sig_applied.ir_const_elements = declared_constants.elements if sig_applied
     DeclaredConstants.report(declared_constants, sig_applied,
@@ -830,7 +833,8 @@ if $PROGRAM_NAME == __FILE__
   # sets this to skip the allowlist; drop_unsafe_embeddings' other checks still
   # run.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs, native_name_sources)
+  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(File.expand_path('../..', __dir__)),
+                                              native_name_sources)
   warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},
@@ -1156,6 +1160,8 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
+  CodeGen.integer_constant_keys = integer_constant_keys || Set.new
+  warn "== declared Integer constants proven per definition (LEXICAL_CONST): #{CodeGen.integer_constant_keys.size} =="
   # Constants whose every writer is one frozen-or-literal container class: a read is that class.
   CodeGen.constant_value_classes = constant_facts.groups.filter_map do |name, fact|
     next unless fact.classes && fact.classes.size == 1 && %i[Array Hash String].include?(fact.classes.first)
@@ -1697,6 +1703,32 @@ if $PROGRAM_NAME == __FILE__
       mrb_get_args(M, "*", &argv, &argc);
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
     }
+    // STACK_BLOCK (docs/bc2cpp-stack-blocks.md): the RProc and REnv of a direct-entry block passed only to a
+    // callee that just calls it, laid out as mrb_proc_new_cfunc_with_env builds them but in the caller's frame,
+    // over the caller's own env array. Red, so the GC never marks, gray-lists or sweeps them.
+    struct Bc2cppStackBlock {
+      struct RProc proc;
+      struct REnv env;
+      Bc2cppStackBlock(mrb_state* M, mrb_int len, mrb_value* stack) {
+        memset(static_cast<void*>(this), 0, sizeof(*this));
+        env.tt = MRB_TT_ENV;
+        env.gc_color = MRB_GC_RED;
+        env.c = mrb_vm_ci_target_class(M->c->ci);
+        env.mid = M->c->ci->mid;
+        env.stack = stack;
+        MRB_ENV_SET_LEN(&env, len);
+        MRB_ENV_CLOSE(&env);
+        proc.tt = MRB_TT_PROC;
+        proc.gc_color = MRB_GC_RED;
+        proc.c = M->proc_class;
+        proc.flags = MRB_PROC_CFUNC_FL | MRB_PROC_ENVSET;
+        proc.body.func = bc2cpp_block_thunk;
+        proc.e.env = &env;
+      }
+      Bc2cppStackBlock(const Bc2cppStackBlock&) = delete;
+      Bc2cppStackBlock& operator=(const Bc2cppStackBlock&) = delete;
+      mrb_value value() { return mrb_obj_value(&proc); }
+    };
     // YIELD_REACH (ADR 0283): the last env slot of a direct-entry block says its body, and everything
     // it can call, provably never suspends a Fiber. A compiled core iterator running such a block
     // may then stay compiled under a Fiber (its frame cannot be crossed by a yield).
@@ -1914,6 +1946,7 @@ if $PROGRAM_NAME == __FILE__
   # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed.
   gen.prepare_index_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
+  gen.reserve_numeric_slow_ruby_arm_slots
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
   # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method
