@@ -13,6 +13,12 @@ inline int next_id() {
   return ++counter;
 }
 
+// an over-aligned local static of an inline function (libstdc++'s _Sp_make_shared_tag::_S_ti has one): also one object
+inline const void* aligned_tag() {
+  alignas(16) static constexpr char tag[16] = {};
+  return tag;
+}
+
 // inline variable: one object for the whole program
 inline int shared_total = 0;
 inline const std::string greeting = "hello";
@@ -76,5 +82,6 @@ int bump_per_tu_b();
 
 // the TUs report through these (defined in main.cpp)
 std::string unit_a(std::vector<std::string>& v);
+const void* aligned_tag_of_a();
 std::string unit_b(std::map<std::string, int>& m);
 std::string unit_c();

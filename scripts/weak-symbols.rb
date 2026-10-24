@@ -18,18 +18,35 @@ def ident_start?(c)
   c == "_" || (c >= "a" && c <= "z") || (c >= "A" && c <= "Z")
 end
 
-# Remove __attribute__((...)) groups, which may contain nested parentheses.
+# The first whole-word occurrence of kw in s at or after i, or nil.
+def keyword_at(s, kw, i)
+  while true
+    j = s.index(kw, i)
+    return nil if j.nil?
+    return j unless (j > 0 && word_char?(s[j - 1])) || (j + kw.size < s.size && word_char?(s[j + kw.size]))
+    i = j + 1
+  end
+end
+
+# Remove __attribute__((...)) groups, which may contain nested parentheses, and _Alignas(...): qbe-prep.rb turns
+# `T x[N] __attribute__((__aligned__(A)))` into `T _Alignas(A) x[N]`, and its "(" is not a function's.
 def strip_attributes(s)
   out = []
   i = 0
   while true
-    j = s.index("__attribute__", i)
+    j = keyword_at(s, "__attribute__", i)
+    a = keyword_at(s, "_Alignas", i)
+    kw = "__attribute__"
+    if a && (j.nil? || a < j)
+      j = a
+      kw = "_Alignas"
+    end
     if j.nil?
       out << s[i, s.size - i]
       return out.join
     end
     out << s[i, j - i]
-    k = j + "__attribute__".size
+    k = j + kw.size
     k += 1 while k < s.size && SPACE.include?(s[k])
     depth = 0
     while k < s.size
