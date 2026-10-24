@@ -14,9 +14,11 @@ suite = FixtureCheck.new('record_hash_update_check')
 check = suite.method(:check)
 suite.require_mrbc!
 
-World = Struct.new(:redefined) do
+# +redefined+: names a foreign Ruby source defines on Hash; +installed+: names a computed installer can define.
+World = Struct.new(:redefined, :installed) do
+  def global_refusal = nil
   def core_ruby_arm_safe?(name, _owner) = !redefined.include?(name)
-  def invisibly_definable?(name) = redefined.include?(name)
+  def instance_unknown_def?(name) = installed.include?(name)
 end
 
 long_pairs = (1..40).map { |i| "k#{i}: #{i}" }.join(', ')
@@ -56,8 +58,8 @@ suite.compile(source) do |ireps, _root, _directory|
       sites[insn.ivar][insn.op == 'SETIV' ? :sets : :gets] << [irep, i] if insn.ivar
     end
   end
-  scan = lambda do |name, registry: {}, redefined: Set.new|
-    RecordHash::Scanner.new(name, sites[name], nil, World.new(redefined), registry).run
+  scan = lambda do |name, registry: {}, redefined: Set.new, installed: Set.new|
+    RecordHash::Scanner.new(name, sites[name], nil, World.new(redefined, installed), registry).run
   end
   strict = ->(slot, key) { slot.is_a?(RecordHash::Slot) ? slot.keys.fetch(key, {})[:strict] : slot }
 
@@ -80,7 +82,11 @@ suite.compile(source) do |ireps, _root, _directory|
   check.call('a Ruby Hash#update refuses', scan.call('ui', registry: { 'update' => [ruby_update] }).to_s.include?('may be redefined'))
   core_update = MethodDef.new(name: 'update', owner: 'Hash', core: true)
   check.call('the core Hash#update is admitted', scan.call('ui', registry: { 'update' => [core_update] }).is_a?(RecordHash::Slot))
-  check.call('an outside __merge refuses', scan.call('ui', redefined: Set['__merge']).to_s.include?('may be redefined'))
+  check.call('a foreign Ruby Hash#merge! refuses', scan.call('ui', redefined: Set['merge!']).to_s.include?('may be redefined'))
+  check.call('a computed installer of __merge refuses', scan.call('ui', installed: Set['__merge']).to_s.include?('may be redefined'))
+  other_update = MethodDef.new(name: 'update', owner: 'RPG2k::Window', core: false)
+  check.call('an update on an unrelated class is admitted',
+             scan.call('ui', registry: { 'update' => [other_update] }).is_a?(RecordHash::Slot))
 end
 
 suite.finish!

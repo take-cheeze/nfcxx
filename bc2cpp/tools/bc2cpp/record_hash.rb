@@ -663,12 +663,15 @@ module RecordHash
       lead <= reg && reg <= read_span(insn, lead)
     end
 
+    # The rule native_hash_delete? and the RBS record scanner's native_hash? apply: no Ruby definition on an owner
+    # a Hash reaches but core's, no foreign Ruby definer of Hash#name, no computed installer. Natives are matched
+    # by owner nowhere here (outside_names is by name: RGSS `update` and core `__merge` would refuse every slot).
     def core_hash_update?
       return @core_hash_update if defined?(@core_hash_update)
 
-      @core_hash_update = %w[update merge! __merge].all? do |name|
+      @core_hash_update = !@closed_world.global_refusal && %w[update merge! __merge].all? do |name|
         (@registry[name] || []).all? { |d| d.core || !HASH_LOOKUP_OWNERS.include?(d.owner) } &&
-          @closed_world.core_ruby_arm_safe?(name, 'Hash') && !@closed_world.invisibly_definable?(name)
+          @closed_world.core_ruby_arm_safe?(name, 'Hash') && !@closed_world.instance_unknown_def?(name)
       end
     end
 
