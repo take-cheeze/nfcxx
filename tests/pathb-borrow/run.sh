@@ -34,4 +34,21 @@ for src in tests/pathb-borrow/cpp/*.cpp; do
   echo "ok   $src"
   pass=$((pass + 1))
 done
+# Loans carry checking facts only. Erasing those facts must yield exactly the
+# same QBE, and the generated native program must still return its written value.
+loan_ir=tests/mruby/pathb-edge/loan_facts.ir
+scripts/mrb scripts/pathb-borrowck.rb "$loan_ir" > "$tmp/loan-check"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/loans.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/oracle.qbe"
+cmp "$tmp/loans.qbe" "$tmp/oracle.qbe"
+sed -E 's/\(borrow \(ptr int\) "[^"]+" (shared|exclusive) (\$"x")\)/\2/g; /\(loan-end /d' "$loan_ir" > "$tmp/plain.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/plain.ir" > "$tmp/plain.qbe"
+cmp "$tmp/loans.qbe" "$tmp/plain.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/loans.qbe" -o "$tmp/loans.s"
+cc "$tmp/loans.s" -o "$tmp/loans"
+rc=0
+"$tmp/loans" || rc=$?
+[ "$rc" = 7 ] || { echo "FAIL loan runtime: expected 7, got $rc"; exit 1; }
+echo "ok   loan metadata erasure, emitter oracle, and native execution"
+pass=$((pass + 1))
 echo "pass $pass fail 0"

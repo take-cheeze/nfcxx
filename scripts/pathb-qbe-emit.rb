@@ -1338,6 +1338,16 @@ def r_i2p(fn, x)
   fn.int_conv(v, src, ["ptr", nil])
 end
 
+# Explicit loans affect checking only; their runtime value is the original address.
+def r_borrow(fn, x)
+  raise BadIR, "borrow form" unless x.length == 5 && x[2].is_a?(IRStr) && ["shared", "exclusive"].include?(x[3])
+  pt = parse_type(x[1])
+  raise BadIR, "borrow requires pointer type" unless pt[0] == "ptr"
+  v = fn.opnd(x[4], "l")
+  raise BadIR, "borrow requires pointer operand" unless v.ty && v.ty[0] == "ptr"
+  Val.new(v.t, "l", pt)
+end
+
 def r_bitcast(fn, x)
   pt = parse_type(x[1])
   v = fn.opnd(x[2], "l")
@@ -1655,6 +1665,7 @@ RVAL = {
   "lt.f" => r_cmp("lt.f"), "le.f" => r_cmp("le.f"),
   "iconv" => ->(fn, x) { r_iconv(fn, x) }, "p2i" => ->(fn, x) { r_p2i(fn, x) },
   "i2p" => ->(fn, x) { r_i2p(fn, x) }, "bitcast" => ->(fn, x) { r_bitcast(fn, x) },
+  "borrow" => ->(fn, x) { r_borrow(fn, x) },
   "i2f" => ->(fn, x) { r_i2f(fn, x) }, "u2f" => ->(fn, x) { r_i2f(fn, x) },
   "fconv" => ->(fn, x) { r_fconv(fn, x) }, "cf2i" => ->(fn, x) { r_cf2i(fn, x) },
   "offset" => ->(fn, x) { r_offset(fn, x) }, "index" => ->(fn, x) { r_index(fn, x) },
@@ -1950,6 +1961,10 @@ end
 # Borrow facts (NFCXX_PATHB_BORROW=1, docs/notes/borrowck-plan.md 1.3): where a local is declared (decl OP ref|val|param),
 # where it ends (scope-end OP), and the rvalue-reference argument of the call that follows (rref-arg OP). They describe
 # the code and do not change it, so they are accepted as no-ops; only the shape is checked.
+def s_loan_end(fn, x)
+  raise BadIR, "loan-end form" unless x.length == 2 && x[1].is_a?(IRStr)
+end
+
 def s_decl(fn, x)
   raise BadIR, "decl form" if x.length != 3
 end
@@ -2193,6 +2208,7 @@ STMT = {
   "barrier" => ->(fn, x) { s_barrier(fn, x) }, "trap" => ->(fn, x) { s_trap(fn, x) }, "fence" => ->(fn, x) { s_fence(fn, x) },
   "decl" => ->(fn, x) { s_decl(fn, x) }, "scope-end" => ->(fn, x) { s_scope_end(fn, x) },
   "rref-arg" => ->(fn, x) { s_rref_arg(fn, x) },
+  "loan-end" => ->(fn, x) { s_loan_end(fn, x) },
 }
 
 # ------------------------------------------------------------------ module and functions
