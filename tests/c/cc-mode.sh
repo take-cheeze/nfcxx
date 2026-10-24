@@ -247,6 +247,7 @@ EOC
   echo 'int main(void) { return 0; }' > param.c
   check "--param=name=value is accepted" "$nfcc" --param=early-inlining-insns=100 -c param.c -o param.o
   check "--param name=value is accepted" "$nfcc" --param early-inlining-insns=100 -c param.c -o param.o
+  check "-fno-jump-tables -fno-crossjumping are accepted" "$nfcc" -fno-jump-tables -fno-crossjumping -c param.c -o param.o
   # Only with GNU gcc: Apple's gcc is clang, which ignores a knob it does not know instead of failing on it.
   if [ $b = gcc ] && gcc --version 2>&1 | grep -q 'Free Software Foundation'; then
     if out=$("$nfcc" --param=no-such-knob=1 -c param.c -o param.o 2>&1); then bad "gcc backend passes --param on" "an unknown knob was accepted"

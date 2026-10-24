@@ -19,6 +19,7 @@
 #              gcc backend: -march=* and the ISA options -msse*, -mavx*, -mfma, -mbmi*, -mpopcnt, -mlzcnt, -mf16c,
 #              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (qbe: ignored)
 #              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (qbe: ignored)
+#              gcc backend: -fno-jump-tables and -fno-crossjumping, given to the C compile (qbe: ignored)
 #   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
 #              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
@@ -181,6 +182,9 @@ for ((i = 0; i < n; i++)); do
     # --param name=value: gcc's inlining and optimisation tuning knobs (ASTro's code store passes early-inlining-insns). They
     # change no meaning, only how hard gcc optimises, so the gcc backend gets them and QBE, which has no such knobs, ignores them.
     --param=*) isa+=("$a") ;;
+    # -fno-jump-tables and -fno-crossjumping (ASTro's code store passes both) only steer gcc's code generation: gcc gets them;
+    # QBE makes no jump tables and does no cross jumping.
+    -fno-jump-tables|-fno-crossjumping) isa+=("$a") ;;
     --param) need; isa+=("$a" "${args[++i]}") ;;
     -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) ;;
     -m*) die "$a is not supported" ;;

@@ -145,4 +145,98 @@ for b in $backends; do
   fi
   echo "ok   $b astro baruby_precise: built; --plain right, --aot-compile compiled SD_*.c through nfcc and ran fib(30)=832040 from all.so"
 done
+
+# ---- koruby_precise: ASTro's CRuby-compatible Ruby (26,000-line runtime, Prism, zlib, libyaml, a regex engine in astrogre). ----
+# BIGNUM=wrap (no GMP); its Prism is the commit sample/koruby_precise pins (not sample/naruby's). The regex engine is
+# sample/astrogre as two shared objects (libastrogre.so, koruby_regex.so) that koruby loads at run time: AVX2, built with the
+# gcc backend for both (x86-64 only). Both backends build the interpreter and run tests/realworld/koruby_test.rb, whose
+# output must equal CRuby's (koruby_test.expected). The AOT bake is not run here: it compiles hundreds of SD_*.c files
+# (about 8 minutes on qbe).
+patch_once() {  # patch_once FILE OLD NEW: replace the one occurrence of OLD in FILE, or stop
+  ruby -e 'f, o, n = ARGV; s = File.read(f); unless s.scan(o).size == 1 then warn "patch: #{o.inspect} not found once in #{f}"; exit 1 end; File.write(f, s.sub(o) { n })' -- "$@"
+}
+if [ "$(uname -m)" != x86_64 ]; then echo "SKIP astro koruby_precise: astrogre is AVX2 (x86-64 only)"; exit $fail; fi
+kpin=13325f5c3995017bd2594ff7d76053d9c7ac08d5   # ruby/prism, what ko1/astro pins for sample/koruby_precise
+ksrc=$work/prism-13325f5
+if [ ! -d "$ksrc/.git" ]; then
+  mkdir -p "$ksrc" && git -C "$ksrc" init -q && git -C "$ksrc" remote add origin https://github.com/ruby/prism || exit 1
+fi
+if [ "$(git -C "$ksrc" rev-parse -q --verify "$kpin^{commit}" 2>/dev/null)" != "$kpin" ]; then
+  git -C "$ksrc" fetch -q --depth 1 origin "$kpin" || { echo "SKIP astro koruby_precise: prism fetch failed"; exit $fail; }
+fi
+git -C "$ksrc" checkout -q "$kpin" || { echo "FAIL astro koruby_precise: checkout $kpin failed"; exit 1; }
+if ! out=$(cd "$ksrc" && ruby -e 'require "./templates/template.rb"; Prism::Template::TEMPLATES.each { |f| Prism::Template.render(f) }' 2>&1); then
+  echo "FAIL astro koruby_precise: prism templates: $(head -1 <<<"$out")"; exit 1
+fi
+mkdir -p "$tmp/ag"; cp -r "$src/lib" "$src/runtime" "$tmp/ag/"; mkdir -p "$tmp/ag/sample"; cp -r "$src/sample/astrogre" "$src/sample/koruby_precise" "$tmp/ag/sample/"
+sed -i -E 's/\bit\./_1./g; s/#\{it\}/#{_1}/g' "$tmp/ag/lib/astrogen.rb"
+sed -i 's/build_allocator_decl}\.join(";\\n")/build_allocator_decl}.join("\\n")/' "$tmp/ag/lib/astrogen.rb"
+export NFCXX_BACKEND=gcc
+ag=$tmp/ag/sample/astrogre; kd=$tmp/ag/sample/koruby_precise
+(cd "$ag" && ruby -I ../../lib -r astrogen -e 'ASTroGen.start []' 2>&1 | grep -v 'warning:')
+if ! out=$(cd "$ag" && "$root/nfcc" -I. -I../../runtime -O2 -mavx2 -fPIC -shared -Wl,--version-script=libastrogre.map -o libastrogre.so \
+      node.c parse.c match.c backend_astrogre.c aho_corasick.c unicode_prop.c unicode_tables.c libastrogre_option.c -ldl 2>&1) ||
+   ! out=$(cd "$kd" && "$root/nfcc" -shared -fPIC -O2 -mavx2 -I../astrogre -I../../runtime regex_bridge.c -L../astrogre -lastrogre \
+      -Wl,-rpath,"$ag" -o koruby_regex.so 2>&1); then
+  echo "FAIL astro koruby_precise: the regex engine (astrogre) build blocked: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; exit 1
+fi
+for b in $backends; do
+  export NFCXX_BACKEND=$b
+  t=$tmp/kp-$b; mkdir -p "$t/sample"; cp -r "$tmp/ag/lib" "$tmp/ag/runtime" "$t/"; cp -r "$tmp/ag/sample/astrogre" "$tmp/ag/sample/koruby_precise" "$t/sample/"
+  d=$t/sample/koruby_precise; r=$t/runtime
+  rm -rf "$d/prism"; mkdir -p "$d/prism/build/obj"; ln -s "$ksrc/include" "$d/prism/include"
+  sed -i -E 's/\bit\./_1./g; s/#\{it\}/#{_1}/g' "$d/koruby_gen.rb"
+  # ASTRO_LAZY_ARGS(x) reads x->head.dispatcher even when x is NULL (a def without an entry). gcc drops the dead load after inlining,
+  # QBE keeps it and the program crashes in DISPATCH_node_def.
+  patch_once "$t/lib/astrogen.rb" '#define ASTRO_LAZY_ARGS(x) (x)->head.dispatcher' '#define ASTRO_LAZY_ARGS(x) ((x) ? (x)->head.dispatcher : NULL)' || { fail=1; continue; }
+  cflags=(-I. -I./prism/include -I"$r" -DBARUBY_GC=5 -DASTRO_DEBUG=0 -DKORUBY_SRC_DIR="\"$d\"" -DASTRO_RUNTIME_DIR="\"$r\""
+          -DASTRO_PRISM_INC_DIR="\"$d/prism/include\"" -DKORB_BIGNUM=2 -DKORUBY_GC_SRC="\"$r/precise_gc/gc_copy.c\"" -DPATH_MAX=4096)
+  [ -e /usr/include/zlib.h ] && cflags+=(-DKORB_HAVE_ZLIB) && libz=-lz || libz=
+  [ -e /usr/include/yaml.h ] && cflags+=(-DKORB_HAVE_YAML) && liby=-lyaml || liby=
+  if [ $b = qbe ]; then
+    # cproc has no inline assembly: node.def's korb_sdi_klass has a portable form under KORB_SD_SHARE_KL (the asm after its
+    # early return is still parsed), so the asm goes into the #else. parse.c's static array is initialised from Prism's
+    # `static const uint8_t` constants, which gcc accepts as a constant and ISO C does not. __builtin_return_address is only
+    # used to bind call sites in AOT code (astro_ld_patch_call); null leaves them unbound.
+    patch_once "$d/node.def" $'    return korb_sdi_klass_slow(vm, r);\n#endif\n' $'    return korb_sdi_klass_slow(vm, r);\n#else\n' || { fail=1; continue; }
+    patch_once "$d/node.def" $'    return k;\n}\n/* NFN = how many builtins' $'    return k;\n#endif\n}\n/* NFN = how many builtins' || { fail=1; continue; }
+    patch_once "$d/parse.c" 'static const uint8_t flag[5] = { PM_OPTIONS_SCOPE_FORWARDING_POSITIONALS' 'const uint8_t flag[5] = { PM_OPTIONS_SCOPE_FORWARDING_POSITIONALS' || { fail=1; continue; }
+    sed -i 's/__builtin_return_address(0)/((const void *)0)/' "$d/korb_runtime.c"
+    # In context.h, not on the command line: the code store compiles the generated SD_*.c with its own flags, and they include it.
+    sed -i '1i #define KORB_SD_SHARE_KL 1' "$d/context.h"
+    # The code store's loader path ("patch" objects) is built on inline assembly (loader/arch_x86_64.h: the holes are
+    # relocations), which cproc cannot compile. ASTRO_ARCH_FORCE_NONE is ASTro's switch for a machine without a loader backend:
+    # the store then builds the pool-mode objects, plain C. korb_runtime.c calls astro_ld_patch_call and astro_ld_call_reset
+    # without a guard, which that mode does not define, so they get stubs.
+    cflags+=(-DASTRO_ARCH_FORCE_NONE)
+    patch_once "$r/astro_code_store.c" $'unsigned astro_ld_patch_imm(uintptr_t key, uintptr_t value) { (void)key; (void)value; return 0; }' \
+      $'unsigned astro_ld_patch_imm(uintptr_t key, uintptr_t value) { (void)key; (void)value; return 0; }\nbool astro_ld_patch_call(const void *ret, uintptr_t target, uintptr_t expect) { (void)ret; (void)target; (void)expect; return false; }\nbool astro_ld_call_reset(const void *ret, uintptr_t host) { (void)ret; (void)host; return false; }' || { fail=1; continue; }
+  fi
+  (cd "$d" && ruby -I ../../lib -r ./koruby_gen -e 'ASTroGen.start([], node_def_class: KorubyNodeDef)' 2>&1 | grep -v 'warning:')
+  [ -f "$d/node_head.h" ] || { echo "FAIL $b astro koruby_precise: ASTroGen"; fail=1; continue; }
+  pfail=0
+  for f in "$ksrc"/src/*.c "$ksrc"/src/util/*.c; do
+    [ -f "$f" ] || continue
+    (cd "$ksrc" && "$root/nfcc" -Iinclude -DPRISM_EXPORT_SYMBOLS -c "$f" -o "$d/prism/build/obj/$(basename "$f" .c).o" >"$tmp/prism-$b.log" 2>&1) || { pfail=1; break; }
+  done
+  [ $pfail = 0 ] || { echo "FAIL $b astro koruby_precise: libprism build: $(grep -m1 error "$tmp/prism-$b.log")"; fail=1; continue; }
+  ar rcs "$d/prism/build/libprism.a" "$d/prism/build/obj"/*.o
+  # the translation units in parallel: the runtime alone is 26,000 lines
+  units=(main node parse korb_runtime); pids=()
+  for u in "${units[@]}"; do (cd "$d" && "$root/nfcc" "${cflags[@]}" -c "$u.c" -o "$u.o" >"$tmp/kp-$b-$u.log" 2>&1) & pids+=($!); done
+  for u in gc_common gc_copy; do (cd "$d" && "$root/nfcc" "${cflags[@]}" -c "$r/precise_gc/$u.c" -o "$u.o" >"$tmp/kp-$b-$u.log" 2>&1) & pids+=($!); done
+  cfail=0; for p in "${pids[@]}"; do wait "$p" || cfail=1; done
+  if [ $cfail = 1 ]; then
+    echo "FAIL $b astro koruby_precise: compile: $(cat "$tmp"/kp-$b-*.log | grep -m1 -E 'error')"; fail=1; continue
+  fi
+  if ! out=$(cd "$d" && "$root/nfcc" -rdynamic -o koruby_precise main.o node.o korb_runtime.o parse.o gc_common.o gc_copy.o prism/build/libprism.a -ldl -lm -lcrypt $libz $liby 2>&1); then
+    echo "FAIL $b astro koruby_precise: link: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue
+  fi
+  cp "$kd/koruby_regex.so" "$d/"
+  got=$(cd "$d" && timeout 300 ./koruby_precise "$root/tests/realworld/koruby_test.rb" 2>&1); rc=$?
+  if [ $rc -ne 0 ] || [ "$got" != "$(cat "$root/tests/realworld/koruby_test.expected")" ]; then
+    echo "FAIL $b astro koruby_precise: built, but koruby_test.rb gave rc=$rc and differs from CRuby's output:"; diff <(echo "$got") "$root/tests/realworld/koruby_test.expected" | head -6; fail=1; continue
+  fi
+  echo "ok   $b astro koruby_precise: built (BIGNUM=wrap); koruby_test.rb prints what CRuby prints"
+done
 exit $fail

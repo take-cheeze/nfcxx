@@ -7,7 +7,7 @@ Store (`runtime/astro_code_store.c`) compiles them with `$(CC)` into `all.so` an
 dispatcher. So ASTro's compiler back end is whatever C compiler it is given, and `nfcc` can be that compiler.
 
 `tests/realworld/run_astro.sh` (a step of `realworld.yml`) clones a pinned commit into `build/realworld/astro` and, on
-each backend, builds two of its samples with nfcc:
+each backend, builds some of its samples with nfcc:
 
 | Sample | What it is | Checked |
 | --- | --- | --- |
@@ -15,6 +15,7 @@ each backend, builds two of its samples with nfcc:
 | `sample/luastro` | a Lua subset (74 nodes) | `hello.lua`, `fib(30)` = 832040, and its 8 `test/test_*.lua` scripts exit 0; the qbe and gcc builds print the same for every script (the upstream runner compares with a system `lua5.4`, which CI does not have) |
 
 | `sample/baruby_precise` | a Ruby subset on a precise copying GC, parsed by Prism | `--plain` prints the right array; `--aot-compile --run` compiles the `SD_*.c` through nfcc, writes `code_store/all.so` and runs `fib(30)` = 832040 |
+| `sample/koruby_precise` | ASTro's flagship: a CRuby-compatible Ruby (26,000-line runtime, 119 node types, Prism, zlib, libyaml, a regex engine from `sample/astrogre`) | built with `BIGNUM=wrap` (no GMP); `tests/realworld/koruby_test.rb` (21 lines of output: recursion, blocks, classes, `Comparable`, exceptions, regexps, `format`, `Struct`) prints what CRuby prints, on both backends |
 | Prism (`ruby/prism`, the Ruby parser; C) | the library baruby_precise links | `libprism.so` built by nfcc on both backends and loaded by a small program calling `pm_version()` |
 
 ```
@@ -27,7 +28,7 @@ the clone cannot be fetched or ruby is missing.
 
 ## Two patches, applied to a copy
 
-The clone stays at the pin; each run copies `lib`, `runtime` and the two samples and patches the copy.
+The clone stays at the pin; each run copies `lib`, `runtime` and the samples and patches the copy.
 
 1. **Ruby 3.4's `it`.** `lib/astrogen.rb` and `sample/luastro/lua_gen.rb` use the implicit block parameter `it`, which
    exists from Ruby 3.4. On 3.3 (the host here, and the Ruby of many distributions) the generator stops with
@@ -83,6 +84,42 @@ no meaning, so `nfcc` now gives them to gcc on the gcc backend and ignores them 
 With that, `ackermann.ba.rb` (`bench/`) goes from 9.8 s with `--plain` to 2.2 s after `--aot-compile --run` through nfcc on
 the gcc backend (one run each, this machine).
 
+## koruby_precise
+
+ASTro's largest sample (`sample/koruby_precise`: a 26,000-line runtime, `parse.c`, 119 node types) is built with `BIGNUM=wrap`,
+so no GMP, and zlib and libyaml when their headers are there. Its Prism is the commit it pins (`13325f5`), not `sample/naruby`'s;
+libprism is built as a static archive. The regex engine is `sample/astrogre`, loaded at run time as `libastrogre.so` and
+`koruby_regex.so` (without them even the prelude fails on its first `=~`). It uses AVX2 intrinsics, so those two are built with the
+gcc backend for both runs, and the whole check is x86-64 only. Compile time of the runtime unit: 1 min 50 s on the gcc backend,
+28 s on qbe.
+
+On the gcc backend it needs one flag: `-DPATH_MAX=4096` (bug 7 below). The qbe backend needed these changes, each applied to the
+copy by `run_astro.sh`:
+
+- **Inline assembly in `node.def`.** `korb_sdi_klass` selects a class with three `cmov` sequences (`__asm__`). Under
+  `#ifdef KORB_SD_SHARE_KL` it has a plain-C form that returns early; the asm after it is still parsed, so cproc stops. The patch
+  moves the asm into the `#else` and defines `KORB_SD_SHARE_KL` at the top of `context.h`. (It must be in `context.h`: the code
+  store compiles the generated `SD_*.c` with its own flags, and they include it.) That form has a branch per receiver kind where
+  the asm has none, so the generated code is slower; it is the form ASTro itself offers.
+- **The code store's loader path.** The store builds two kinds of object: the "patch" objects, whose holes are relocations written
+  with inline asm (`loader/arch_x86_64.h`), and the pool objects, plain C. On qbe the patch objects cannot be built and, with
+  them failing, the store ends up with no compiled code at all (the program falls back to the interpreter without a message). `-DASTRO_ARCH_FORCE_NONE` is ASTro's switch
+  for a machine with no loader backend; the store then builds the pool objects. That mode is missing two stubs (bug 8), which the
+  patch adds.
+- **`__builtin_return_address(0)`** in `korb_entry_call`, which binds call sites in loader-patched code. It becomes a null
+  pointer, which `astro_ld_call_site` already rejects, so the sites stay unbound (this is the pool mode's behaviour anyway).
+- **A null `entry` read by `ASTRO_LAZY_ARGS`** (bug 5): the first `def` of the prelude crashed in `DISPATCH_node_def`.
+- **`static const` in a constant initializer** (bug 6).
+
+The AOT bake (`--aot-compile --run` of `def fib(n) = n < 2 ? n : fib(n-1) + fib(n-2); puts fib(30)`) is where the qbe path runs out of
+patience, and it is not in the test: the program is right (832040, from the interpreter) but the store compiles about 230
+generated files, each of which `#include`s the whole evaluator (a multi-megabyte translation unit), and on qbe every one goes
+through the mruby `qbe-prep.rb` rewrite before cproc. That took more than 25 minutes (82 CPU-minutes) without finishing.
+
+nfcc and cproc changes it led to: `qbe-cc` defines `__uint128_t` and `__int128_t` on every target (the code needed `__uint128_t`
+for a 53-bit random-float product; cproc's `unsigned __int128` multiply and shift match gcc's, `tests/c/int128_typedefs.c`), and
+`nfcc` accepts `-fno-jump-tables` and `-fno-crossjumping`, which the code store passes (gcc gets them, qbe ignores them).
+
 ## What the two backends do with the specialized code
 
 For `1 + 2 * 3`, `calc --disasm` shows the whole tree turned into one function, `SD_dfb75fdabb0d5ef6`:
@@ -95,10 +132,44 @@ For `1 + 2 * 3`, `calc --disasm` shows the whole tree turned into one function, 
 A rough timing of `luastro examples/fib.lua` (`fib(30)`, one run, interpreter as built): 0.075 s on the gcc backend and
 0.27 s on the qbe backend.
 
+## Bugs in ASTro, for upstream
+
+Found while building the samples above. Not reported yet; each has a short fix. `run_astro.sh` works around 1, 2, 3 (it sets
+`LC_ALL=C.UTF-8`), 5, 6, 7 (`-DPATH_MAX=4096`) and 8 on the copy; 4 is not hit by any build here.
+
+1. **`node_head.h` has `;;` at file scope** (`lib/astrogen.rb`, `build_head`). `build_allocator_decl` returns
+   `"NODE *ALLOC_x(...);"` and the caller joins the results with `";\n"`, so the header holds `NODE *ALLOC_node_num(int32_t num);;`.
+   An empty declaration at file scope is not ISO C (gcc accepts it as an extension, `-Wpedantic` warns); cproc stops with
+   `unexpected ';' at top-level`. Fix: join with `"\n"`.
+2. **The generators need Ruby 3.4.** `lib/astrogen.rb`, `sample/luastro/lua_gen.rb`, `sample/baruby_precise/baruby_gen.rb` and
+   `sample/koruby_precise/koruby_gen.rb` use the implicit block parameter `it`; on Ruby 3.3 they stop with `undefined local
+   variable or method 'it'`. `_1` is the same parameter and works from Ruby 2.7.
+3. **`node.def` is read in the locale's encoding.** Under `LANG=C`, `astrogen.rb:1175` raises `invalid byte sequence in
+   US-ASCII` on `sample/luastro/node.def`. Read it as UTF-8.
+4. **`--output-dir` raises `NameError`.** `parse_opt` (`astrogen.rb`, the `--output-dir` handler) assigns `output_file`, which is not
+   a variable there; it means `output_dir`.
+5. **`ASTRO_LAZY_ARGS(x)` dereferences a child that can be NULL** (the macro is emitted into `node_eval.c`: `#define
+   ASTRO_LAZY_ARGS(x) (x)->head.dispatcher`). `node_def` has `NODE *entry`, which is NULL for some definitions, and
+   `DISPATCH_node_def` passes `ASTRO_LAZY_ARGS(n->u.node_def.entry)` unconditionally. gcc deletes the load once the evaluator is
+   inlined and the value is unused, so nothing happens; a compiler that keeps the load (QBE) crashes at the first `def` of the
+   prelude. Fix: `((x) ? (x)->head.dispatcher : NULL)`.
+6. **A `static const` object is used as a constant initializer** (`sample/koruby_precise/parse.c`: `static const uint8_t flag[5] = {
+   PM_OPTIONS_SCOPE_FORWARDING_POSITIONALS, ... }`, where Prism declares `static const uint8_t PM_OPTIONS_SCOPE_FORWARDING_* = 0x2;`).
+   A const object is not a constant expression in C before C23, so cproc rejects it. Drop the `static` on the array.
+7. **`korb_runtime.c` uses `PATH_MAX` without `<limits.h>`.** It gets it from some other header on the author's system; with glibc
+   2.39 and gcc 13 it is undeclared. Include `<limits.h>`.
+8. **`koruby_precise` does not link where the loader is unsupported.** `korb_runtime.c` calls `astro_ld_patch_call` and
+   `astro_ld_call_reset` unconditionally, while `astro_code_store.c` defines stubs only for `astro_ld_patch_imm` when
+   `ASTRO_LOADER_SUPPORTED` is 0 (no `__linux__`, no architecture backend, or `-DASTRO_ARCH_FORCE_NONE`). Add the two stubs
+   (return `false`) to that branch.
+
 ## Not done
 
-- The other 26 samples. `koruby_precise` (Prism at a different commit, GMP, zlib, libyaml, the sibling `astrogre`) is the
-  largest C workload; it uses the same statement-expression macros, so cproc has what it needs there.
+- The other 25 samples.
+- `koruby_precise` with GMP (`BIGNUM=gmp`, the default; `libgmp-dev` is not installed here), its AOT bake on qbe (above), the
+  `--build` standalone executable, and the rubyspec suite.
+- Compiling `sample/astrogre`'s AVX2 code on qbe: cproc cannot compile the intrinsics, so the regex engine is a gcc-backend
+  shared object in both runs.
 - `astro_build.c`'s `--build` (standalone executables) and the tiered JIT daemon.
 - Running ASTroGen under the repo's mruby instead of CRuby (`lib/astrogen.rb` needs only `optparse`).
 - Feeding ASTro's hashing and specialization into `lib/ast` (`ast.md`), the idea this note started from.
