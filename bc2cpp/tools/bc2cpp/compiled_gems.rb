@@ -762,14 +762,17 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
            Dir["#{repo_root}/include/**/#{BC2CPP_NATIVE_GLOB}"] +
            bc2cpp_host_native_srcs(build_name, repo_root)
   ruby = Dir["#{repo_root}/3rd/mruby/mrblib/**/*.rb"]
+  # The probe's program is its bundle alone (OptcarrotSealedBuild.bc2cpp_world): the core gems' mrblib, which a game
+  # build compiles into its program (closed_world_mrblib_srcs), stays outside Ruby there.
+  probe = build_name == 'optcarrot-probe'
   gems.each do |name, dir|
     next if BC2CPP_COMPILED_GEMS.key?(name)
 
     native += Dir["#{dir}/{src,core}/**/#{BC2CPP_NATIVE_GLOB}"]
     native.reject! { |path| path.end_with?("/#{RgssTtsConfig::RGSS_TTS_CXX}") } unless RgssTtsConfig.backend_possible?(build_name)
     ruby += Dir["#{dir}/mrblib/**/*.rb"] unless BC2CPP_CLOSED_WORLD_GEMS.include?(name) ||
-                                               BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.include?(name) ||
-                                               (build_name == 'optcarrot-probe' && name == 'optcarrot-benchmark')
+                                               (!probe && BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.include?(name)) ||
+                                               (probe && name == 'optcarrot-benchmark')
   end
   [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
 end
