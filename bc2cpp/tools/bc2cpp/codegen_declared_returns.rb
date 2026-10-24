@@ -113,7 +113,10 @@ class CodeGen
     if entries.map { |e| [e.kind, e.cls, e.nilable] }.uniq.size > 1
       return ['info', "POLY `#{name}`: the definitions declare different types (checked per definition)"]
     end
-    if defs.size > 1 && !(@closed_world&.name_fully_visible?(name))
+    # The refusal is memoized program-wide, and the first call can come from a core body's compile, which hides
+    # @closed_world (compile_method); name visibility is a whole-program fact, so read that body's program world.
+    world = @closed_world || @core_program_world
+    if defs.size > 1 && !world&.name_fully_visible?(name)
       return ['info', "POLY `#{name}` is not fully visible to the closed world (checked per definition)"]
     end
 
