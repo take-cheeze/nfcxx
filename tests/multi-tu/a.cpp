@@ -28,3 +28,5 @@ std::string unit_a(std::vector<std::string>& v) {
   return out + names + std::to_string(area) + ":" + std::to_string(s.sum) + ":" + std::to_string(id1) + ":" +
          std::to_string(pi_like<int> + (int)pi_like<long>) + ":" + std::to_string(bump_per_tu_a());
 }
+
+const void* aligned_tag_of_a() { return aligned_tag(); }
