@@ -1504,8 +1504,8 @@ class CodeGen
         return singleton_code if singleton_code
       end
 
-      if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
-        kernel_code = kernel_direct_code(name, d, recv, argv)
+      if %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+        kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit)
         return kernel_code if kernel_code
       end
 
