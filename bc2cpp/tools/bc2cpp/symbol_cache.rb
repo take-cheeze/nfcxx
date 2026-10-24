@@ -364,7 +364,7 @@ module SymbolCache
   # OP_SEND makes at `level` (2 explicit receiver: visibility; 1 and 2: argument count, aspec); no method raises what
   # dispatch raises (the receiver is proven method_missing-free, so a dispatch that returns is a violated proof); any
   # other owner is a definer the closed world did not see, and raises. Owners already matched are kept per site and
-  # VM (up to 16), so the name test runs once per owner.
+  # VM (up to 32), so the name test runs once per owner.
   OWNER_CALL = <<~CPP
     #include <string.h>
     #ifdef BC2CPP_NOMETHOD_VERIFY
@@ -377,7 +377,7 @@ module SymbolCache
       unsigned epoch;
       mrb_state* state;
       int seen_count;
-      struct RClass* seen[16];
+      struct RClass* seen[32];
     };
     #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, 0, nullptr, 0, {} }; return s; }())
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
@@ -438,7 +438,7 @@ module SymbolCache
       for (int k = 0; k < s.seen_count; ++k) seen = seen || s.seen[k] == owner;
       if (!seen) {
         if (!bc2cpp_owner_listed(M, owner, s.names)) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
-        if (s.seen_count < 16) s.seen[s.seen_count++] = owner;
+        if (s.seen_count < 32) s.seen[s.seen_count++] = owner;
       }
       if (level >= 2) {
         // vm.c OP_SEND: an explicit receiver may not call a private method, nor a protected one from outside.

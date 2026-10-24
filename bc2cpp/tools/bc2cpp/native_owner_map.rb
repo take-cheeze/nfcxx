@@ -201,7 +201,8 @@ module NativeOwnerMap
   # (`mrb_class_name_class(mrb, NULL, bob, MRB_SYM(BasicObject))`).
   def block_owners(body, signature, vars)
     params = signature.scan(/RClass\s*\*\s*(\w+)\s*[,)]/).flatten
-    declared = body.scan(/RClass\s*\*\s*(\w+)/).flatten.to_set
+    # `RClass *numeric, *integer;` declares both.
+    declared = body.scan(/RClass\s*\*\s*\w+(?:\s*,\s*\*\s*\w+)*/).flat_map { |decl| decl.scan(/\*\s*(\w+)/).flatten }.to_set
     rhs = Hash.new { |h, k| h[k] = [] }
     # Matched on the body with its string and char literals blanked (a `"color="` registration is not an
     # assignment to `color`); the right-hand side is read back from the body itself.
@@ -234,6 +235,56 @@ module NativeOwnerMap
       out.merge!(settled)
     end
     out
+  end
+
+  # STATIC_PARAM_OWNER: a `static` function's `RClass *` parameter the scopes leave UNKNOWN holds the class its
+  # callers pass when every use of the function's name in the file is a direct call whose argument names one and the
+  # same class (`init_class_new(mrb, cls)` in mrb_init_class, where `cls` is Class). A static function is visible
+  # only in its file, and a use that is not a call (its address taken) refuses, so no other caller can exist. The
+  # block is then re-read with that owner for the parameter.
+  def static_param_scopes(text, scopes)
+    vars_at = ->(pos) { scopes.find { |from, to, _| pos.between?(from, to) }&.last }
+    scopes.map do |from, to, scope|
+      head = text[0...from][/\bstatic\b[^;{}]*?\b(\w+)\s*\(([^(){};]*)\)\s*\z/m]
+      next [from, to, scope] unless head
+
+      fn = Regexp.last_match(1)
+      params = Regexp.last_match(2).split(',').map(&:strip)
+      unknown = params.each_index.select do |k|
+        (var = params[k][/\ARClass\s*\*\s*(\w+)\z/, 1]) && scope[var] == UNKNOWN
+      end
+      next [from, to, scope] if unknown.empty?
+
+      bound = static_param_bindings(text, fn, from, to, unknown, vars_at)
+      next [from, to, scope] if bound.empty?
+
+      vars = scope.merge(bound.to_h { |k, owner| [params[k][/(\w+)\z/, 1], owner] })
+      signature = text[0...from][/[^;{}]*\z/]
+      [from, to, vars.merge(block_owners(text[from..to], signature, vars))]
+    end
+  end
+
+  # { parameter index => owner } for the parameters every call of `fn` outside its own body passes one known class.
+  def static_param_bindings(text, fn, from, to, indexes, vars_at)
+    passed = Hash.new { |h, k| h[k] = [] }
+    calls = 0
+    text.to_enum(:scan, /\b#{Regexp.escape(fn)}\b/).each do
+      at = Regexp.last_match.begin(0)
+      after = Regexp.last_match.end(0)
+      # The definition's own name.
+      next if at < from && text[after...from].match?(/\A\s*\([^(){};]*\)\s*\z/m)
+      return {} unless text[after..].match?(/\A\s*\(/)
+
+      args, = call_args(text, text.index('(', after))
+      scope = vars_at.call(at)
+      return {} if args.nil? || scope.nil? || at.between?(from, to)
+
+      calls += 1
+      indexes.each { |k| passed[k] << (args[k] ? owner_of(args[k], scope) : UNKNOWN) }
+    end
+    return {} if calls.zero?
+
+    passed.select { |_, owners| owners.uniq.size == 1 && owners.first != UNKNOWN }.transform_values(&:first)
   end
 
   # The body of the brace block whose '{' is at index `open`, or nil when unbalanced.
@@ -302,7 +353,7 @@ module NativeOwnerMap
     # `struct RClass *x` is the same variable as `RClass *x` for the owner table.
     typed = text.gsub(/struct\s+RClass\s*\*/, 'RClass *')
     file_vars = NativeDirect.class_variables(typed, NativeDirect.sibling_param_owners(path))
-    scopes = block_scopes(typed, file_vars)
+    scopes = static_param_scopes(typed, block_scopes(typed, file_vars))
     vars_at = ->(pos) { scopes.find { |from, to, _| pos.between?(from, to) }&.last || file_vars }
     # Calls are read from `typed`, the text the scopes were built on, so a position names the same block
     # in both.
