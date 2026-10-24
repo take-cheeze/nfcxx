@@ -39,7 +39,7 @@ module OutsideOwnerCall
   # one cannot be named, a definer is unknown or dynamic, a method_missing hook could answer instead, an object may
   # carry a singleton class, or the set is larger than NAME_OWNER_SET_MAX.
   def name_owner_set(name)
-    return nil unless @closed_world
+    return nil unless owner_call_world
 
     @name_owner_sets ||= {}
     return @name_owner_sets[name] if @name_owner_sets.key?(name)
@@ -49,8 +49,8 @@ module OutsideOwnerCall
 
   def name_owner_set_decide(name)
     return nil if %w[method_missing respond_to_missing? initialize].include?(name)
-    return nil unless @closed_world.method_missing_classes.empty?
-    return nil if @closed_world.exact_arm_refusal(name, symbol_installed_names).then { |r| r && r != :outside_ruby }
+    return nil unless owner_call_world.method_missing_classes.empty?
+    return nil if owner_call_world.exact_arm_refusal(name, symbol_installed_names).then { |r| r && r != :outside_ruby }
 
     outside = outside_owner_call_owners(name, allow_empty: true)
     return nil unless outside
@@ -61,6 +61,13 @@ module OutsideOwnerCall
 
     owners = (outside | ruby).uniq.sort
     owners.empty? || owners.size > NAME_OWNER_SET_MAX ? nil : owners
+  end
+
+  # The world whose definers the owner set names. A core body (`@closed_world` withheld, CodeGen#compile_method) runs
+  # in the same program, so the program's world names every class its receivers can have; the owner call binds no
+  # body statically, it checks the one lookup finds against that list.
+  def owner_call_world
+    @closed_world || @core_program_world
   end
 
   OWNER_PATH = /\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/
@@ -113,14 +120,14 @@ module OutsideOwnerCall
     return nil unless allow_empty
 
     # No outside owner at all is a known (empty) outside set only when nothing outside spells the name.
-    @closed_world.outside_names.include?(name) ? nil : []
+    owner_call_world.outside_names.include?(name) ? nil : []
   end
 
   def outside_owner_call_decide(name)
     # The proof is the owner map's: off with it (BC2CPP_NATIVE_OWNER_MAP=0), and in strict mode it trusts no core
     # forwarder that installs a computed name.
     mode = native_owner_map_mode
-    paths = @closed_world.native_paths
+    paths = owner_call_world.native_paths
     return nil unless mode && paths
 
     map = CodeGen::NATIVE_OWNER_MAP_CACHE[paths] ||= NativeOwnerMap.build(paths)
@@ -131,7 +138,7 @@ module OutsideOwnerCall
     native = map.by_name.fetch(name, Set.new)
     return nil if native.include?(NativeOwnerMap::UNKNOWN)
 
-    ruby = OutsideRubyOwners.scan(Array(@closed_world.ruby_paths))
+    ruby = OutsideRubyOwners.scan(Array(owner_call_world.ruby_paths))
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
 
     # The program's own core Ruby also defines names the registry never lists: an alias of a native-named method
