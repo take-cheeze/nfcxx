@@ -294,6 +294,41 @@ int main(void) {
 EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kdead.c -o kdead 2>/dev/null && { ./kdead; [ $? = 42 ]; }; then ok "kernel mode: unreachable asm dropped"
     else bad "kernel mode: unreachable asm dropped" "wrong result or the compile failed"; fi
+    # __builtin_object_size: the answer for a size cproc cannot tell, the pointer not evaluated
+    cat > kobj.c <<'EOC'
+char buf[8];
+int n;
+unsigned long a(void) { return __builtin_object_size(buf + n++, 0); }
+unsigned long b(char *p) { return __builtin_object_size(p, 2); }
+int main(void) { return a() == (unsigned long)-1 && b(buf) == 0 && n == 0 ? 42 : 1; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kobj.c -o kobj 2>/dev/null && { ./kobj; [ $? = 42 ]; }; then ok "kernel mode: __builtin_object_size"
+    else bad "kernel mode: __builtin_object_size" "wrong result or the compile failed"; fi
+    # volatile aggregates of 1, 2, 4 and 8 bytes (WRITE_ONCE/READ_ONCE of the kernel's pte_t): one call each
+    cat > kvagg.c <<'EOC'
+typedef struct { unsigned long pte; } pte_t;
+typedef struct { unsigned short a; unsigned char b, c; } small_t;
+#define WRITE_ONCE(x, val) (*(volatile __typeof__(x) *)&(x) = (val))
+#define READ_ONCE(x) (*(const volatile __typeof__(x) *)&(x))
+pte_t table[4];
+small_t sm;
+int main(void) {
+	pte_t p = { 0x1234 };
+	WRITE_ONCE(table[1], p);
+	pte_t q = READ_ONCE(table[1]);
+	small_t s = { 7, 8, 9 };
+	WRITE_ONCE(sm, s);
+	small_t t = READ_ONCE(sm);
+	return q.pte == 0x1234 && table[0].pte == 0 && table[2].pte == 0 && t.a == 7 && t.c == 9 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvagg.c -S -o kvagg.s 2>/dev/null && [ "$(grep -c 'call.*nfcxx_v' kvagg.s)" = 4 ] &&
+       NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvagg.c -o kvagg 2>/dev/null && { ./kvagg; [ $? = 42 ]; }; then ok "kernel mode: volatile aggregates"
+    else bad "kernel mode: volatile aggregates" "$(grep -c 'call.*nfcxx_v' kvagg.s 2>/dev/null) helper calls, or a wrong result"; fi
+    printf 'struct big { long a[3]; };\nlong f(volatile struct big *p) { struct big b = *p; return b.a[0]; }\n' > kvbig.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kvbig.c -o kvbig.o 2>&1); then bad "kernel mode: a 24-byte volatile load refused" "was accepted"
+    elif grep -q "volatile load of this type" <<<"$out"; then ok "kernel mode: a 24-byte volatile load refused"
+    else bad "kernel mode: a 24-byte volatile load refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -330,7 +365,7 @@ EOC
     else bad "kernel mode: bit-counting built-ins" "wrong results or the compile failed"; fi
     # qbe-try: an integer file moves to qbe; a file cproc cannot compile keeps the gcc object
     printf 'int sq(int a) { return a * a; }\n' > kmove.c
-    printf 'int jumps(void) { __asm__ goto("jmp %%l0" : : : : out); return 1; out: return 0; }\n' > kstay.c   # asm goto: not yet
+    printf 'void *up(void) { return __builtin_return_address(1); }\n' > kstay.c   # a level other than 0: refused
     rm -f qbe.log
     for f in kmove kstay; do
       NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -fno-PIE -mno-sse -c $f.c -o $f.o

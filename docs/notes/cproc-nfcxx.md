@@ -95,6 +95,23 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 - **Unreachable asm**: thunks are written only for blocks reachable from the function's start, and a constant
   `switch`/`if` condition is a plain jump (docs/notes/inline-asm.md).
 
+- **`__builtin_object_size(p, type)`**: the answer for a size the compiler cannot tell, `(size_t)-1` for types 0 and
+  1 and 0 for types 2 and 3 (gcc's at `-O0` for most pointers), `p` not evaluated. The kernel's fortify and
+  copy-size checks then check nothing at compile time, as with an unknown size under gcc.
+
+- **`asm goto`** (docs/notes/inline-asm.md), and `__restrict`/`__restrict__`.
+
+- **`__builtin_return_address(0)`, `__builtin_frame_address(0)`** (the kernel's `_RET_IP_`): a call of a helper in the
+  inline-asm side file that reads its caller's `8(%rbp)` or `%rbp`; QBE gives every function that calls something a
+  frame pointer. Other levels are refused.
+
+- **`__builtin_offsetof` with an index that is not constant** (`container_of(node, T, node[idx])`): the constant
+  offset plus the scaled index.
+
+- **Volatile aggregates of 1, 2, 4 and 8 bytes** under `-V` (the kernel's `pte_t` through `WRITE_ONCE`/`READ_ONCE`):
+  one helper call of that size each; a load copies the bytes into a temporary. Under `-V` any other volatile load
+  (a bit-field, a larger aggregate) is refused rather than left a plain load.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
@@ -103,9 +120,9 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 
 ## Known gaps (still refused)
 
-- `asm goto`, SSE operands.
+- SSE operands; an `"i"` operand only inlining makes constant (cproc does not inline `always_inline` functions).
 - Bit-fields in a packed struct where packing would move a member, and under a leading `packed`.
-- Volatile bit-fields and volatile aggregate copies (`-V` covers scalars of 1, 2, 4 and 8 bytes).
+- Volatile bit-fields and volatile aggregates other than of 1, 2, 4 and 8 bytes.
 - Global register variables other than `%rsp`.
 - The C23 `nullptr` constant miscompiles under `-c` (a pre-existing cproc codegen gap); harmless before C23, where
   `nullptr` is an identifier.

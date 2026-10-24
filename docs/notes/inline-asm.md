@@ -78,6 +78,15 @@ operand has its own register and the values round-trip through the slot.
 - Register variables (`register long x asm("r11")`) as operands take their register; `%rsp` (the kernel's
   `ASM_CALL_CONSTRAINT "+r"(current_stack_pointer)`) is named in the template but never moved.
 
+## asm goto
+
+`asm goto("..." : outputs : inputs : clobbers : labels)` keeps the thunk model. `%l[name]` and `%lN` (labels numbered
+after the operands) name a stub inside the thunk; the stub writes the label's number (from 1) into a cell of the slot
+and leaves through the thunk's normal exit, which stores the outputs; falling through writes 0. At the call site the
+outputs are stored, then the cell is compared with each label's number and control goes to that C label. The
+kernel's static branches put a 5-byte nop in the template and record it and the label in `__jump_table`; when the
+kernel patches the nop into a `jmp`, the jump lands on the stub, so the patched branch goes where gcc's would.
+
 ## File-scope asm
 
 A basic `__asm__("text");` at file scope (the kernel's `EXPORT_SYMBOL`, which writes a `.export_symbol` entry) goes to
@@ -109,7 +118,7 @@ Each of these raises a compile error rather than quietly producing wrong code:
 
 - Any target other than x86_64; the CIL backend and Mach-O (`qbe-cc` withholds `-a` there).
 - SSE/floating operands (`x`, `v`, `Yz`, …).
-- `asm goto`, and operands in a file-scope `asm`.
+- Operands in a file-scope `asm`.
 - More register operands than the caller-saved pool holds.
 
 ## Testing
