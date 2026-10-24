@@ -210,7 +210,7 @@ module IrSymbolFlow
                    'SSEND0', 'SSENDB', 'SEND', 'SEND0', 'SENDB', 'SUPER', 'BLKCALL', 'ADD', 'ADDI', 'SUB', 'SUBI',
                    'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'ARRAY', 'ARRAY2', 'AREF', 'INTERN', 'SYMBOL',
                    'STRING', 'HASH', 'LAMBDA', 'BLOCK', 'METHOD', 'RANGE_INC', 'RANGE_EXC', 'OCLASS', 'CLASS',
-                   'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'SCLASS', 'TCLASS'].freeze
+                   'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'SCLASS', 'TCLASS', 'EXCEPT'].freeze
 
   # Instructions that may read the value instruction idx leaves in reg: a forward walk over normal and handler
   # edges that stops at a write of reg (except along that write's own handler edges, raised before it). The
@@ -265,7 +265,7 @@ module IrSymbolFlow
     a = regs.first
     case insn.op
     when *BytecodeIR::Ops::LOAD_PREFIX_OPS, 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETUPVAR', 'STRING', 'SYMBOL', 'LAMBDA',
-         'BLOCK', 'METHOD', 'OCLASS', 'TCLASS', 'TDEF', 'ENTER', 'NOP', 'STOP', 'JMP', 'JMPUW' then []
+         'BLOCK', 'METHOD', 'OCLASS', 'TCLASS', 'TDEF', 'ENTER', 'NOP', 'STOP', 'JMP', 'JMPUW', 'EXCEPT' then []
     when 'MOVE', 'AREF', 'GETIDX0' then regs.drop(1)
     when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'SETGV', 'SETSV', 'SETIV', 'SETCV',
          'SETCONST', 'SETUPVAR', 'INTERN', 'ARYSPLAT', 'SCLASS', 'MODULE', 'EXEC', 'ADDI', 'SUBI', 'ADDILV', 'SUBILV'
