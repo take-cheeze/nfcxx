@@ -51,6 +51,13 @@ placeholders, and each device module is registered with the runtime.
 - **Template launch depending on an enclosing template parameter** (reduction, MC_EstimatePiP, and most ggml-cuda
   templated launches): refused with exit 3 (`dependent_on_template`). The device image would need that instance, and the
   rewriter does not know which instances a program uses. Needs the instantiation set from the front end.
+- **Instances declared `extern template`** (mmq.cuh's `extern DECL_MMQ_CASE(...)`, fattn-mma-f16.cuh's, and the
+  fattn-vec and fattn-tile ones): another unit defines them, so the rewriter does not count them as this unit's
+  instances, even where the unit calls them (`template_instances`), and their kernels are not in its device image.
+  An explicit instantiation definition (`DECL_MMQ_CASE(GGML_TYPE_Q4_0);` in its instance file) still is.
+  Before this change, each of the 22 mmq instance files built the kernels of all 24 types (1536 kernels, about 6.8
+  million lines of PTX, about 10 minutes of ptxas each). Now each builds its own 64, in about 30 s. `fattn.cu` drops
+  from 1623 kernels to 45, and `mmq.cu` to none. `tests/cuda/extern_inst` links three units and runs both instances.
 - **Plain launches in the front end** (on by default for `.cu` inputs; `NFCXX_CUDA_EDG_LAUNCH=0` turns it off): the driver passes `--cuda` to EDG
   (3rd/edg), which parses `kernel<<<grid, block[, shmem[, stream]]>>>(args)` itself, and the rewriter leaves those
   launches (`--edg-launches`). The launch lowers to the same `__nfcxx_cuda_launch` call. Launches with template
