@@ -833,7 +833,8 @@ if $PROGRAM_NAME == __FILE__
   # sets this to skip the allowlist; drop_unsafe_embeddings' other checks still
   # run.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs, native_name_sources)
+  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(File.expand_path('../..', __dir__)),
+                                              native_name_sources)
   warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},
