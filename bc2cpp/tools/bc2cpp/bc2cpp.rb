@@ -19,6 +19,7 @@
 
 require 'shellwords'
 require 'set'
+require 'fileutils'
 require_relative 'type_check_variants'
 type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
 TypeCheckVariants.arm_guard if type_check_variants
@@ -159,6 +160,7 @@ require_relative 'codegen_block_core_direct'
 require_relative 'codegen_guarded_block_inline'
 require_relative 'codegen_core_exact_direct'
 require_relative 'codegen_core_self_native'
+require_relative 'codegen_entry_header'
 require_relative 'codegen_core_compiled_cmp'
 require_relative 'codegen_interface_tables'
 require_relative 'codegen_subtree_dispatch'
@@ -2067,6 +2069,14 @@ if $PROGRAM_NAME == __FILE__
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.
   File.write(File.join(out_dir, "#{symbol}_decls.h"), gen.emit_decls_header(compiled))
+  # BC2CPP_ENTRY: the host-callable entry header (codegen_entry_header.rb), beside the declarations and, when
+  # BC2CPP_ENTRY_INCLUDE_DIR names it, in the build's include directory, where every host's `__has_include` finds it.
+  entry_header = gen.emit_entry_header(compiled, symbol)
+  File.write(File.join(out_dir, "#{symbol}_entry.h"), entry_header)
+  if (entry_dir = ENV['BC2CPP_ENTRY_INCLUDE_DIR'])
+    FileUtils.mkdir_p(entry_dir)
+    File.write(File.join(entry_dir, "#{symbol}_entry.h"), entry_header)
+  end
   profile_phase.call('C++ emission + symbol rewrite')
 
   warn ''

@@ -816,7 +816,10 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(gems_root)),
     # A `#error` the toolchain compiles halts the build: a method bc2cpp cannot compile is not emitted and keeps
     # running interpreted.
-    'SKIP_UNSUPPORTED' => '1'
+    'SKIP_UNSUPPORTED' => '1',
+    # BC2CPP_ENTRY: <symbol>_entry.h also goes to the build's include directory (the include path every host of this
+    # libmruby already has), so `#include <bc2cpp_entry.hxx>` finds it with `__has_include`.
+    'BC2CPP_ENTRY_INCLUDE_DIR' => "#{spec.build.build_dir}/include"
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
 end
