@@ -256,8 +256,8 @@ static int nf_spell(a_type_ptr t, const char *inner, char *out, size_t cap)
 }
 
 /* How a value of type T crosses a call made by lib/ffi (kinds records): 'i' signed integer, 'u' unsigned integer
-   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 's' struct or union (by value),
-   'x' anything else. */
+   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 's' struct, union, long double or
+   128-bit integer (by value, as bytes), 'x' anything else. */
 static char nf_kind(a_type_ptr t)
 {
   t = skip_typerefs(t);
@@ -265,10 +265,13 @@ static char nf_kind(a_type_ptr t)
     case tk_void:
       return 'v';
     case tk_integer:
-      if (size_of_non_typeref_type(t) > 8) return 'x';
+      /* 128-bit integers travel as bytes, like a struct */
+      if (size_of_non_typeref_type(t) > 8) return 's';
       return is_signed_integral_type(t) ? 'i' : 'u';
     case tk_float:
-      return t->variant.float_kind == fk_float || t->variant.float_kind == fk_double ? 'f' : 'x';
+      if (t->variant.float_kind == fk_float || t->variant.float_kind == fk_double) return 'f';
+      /* long double travels as bytes (its x87 representation, sizeof bytes) */
+      return t->variant.float_kind == fk_long_double ? 's' : 'x';
     case tk_pointer:
       return t->variant.pointer.is_reference || t->variant.pointer.is_rvalue_reference ? 'x' : 'p';
     case tk_array:

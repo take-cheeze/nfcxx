@@ -1,6 +1,6 @@
 # nfcffi: calling C compiled at run time (`lib/ffi`)
 
-Status: **Milestones 1 to 6 (Python through nfcpoly), experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
+Status: **Milestones 1 to 6, plus long double and 128-bit integers, experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
 loaded; its functions, and the C library's, are called through C++ function types written at the call site. The
 design is DragonFFI's idea (a C library called from a host at run time, without writing bindings by hand), without
 its header parser and without libffi.
@@ -94,7 +94,7 @@ lib.callable("vec_add");   // false: a struct by value
 
 - **Kinds.** The front end writes a `kinds` record per function (`be/nfcxx_decl.c`, `nf_kind`): one letter for the
   return type and one per parameter. `i` signed integer, `u` unsigned integer (`bool` too), `f` float or double, `p`
-  pointer or array, `v` void, `s` struct or union, `x` anything else. `Declaration::return_kind` and `param_kinds` carry
+  pointer or array, `v` void, `s` struct, union, `long double` or 128-bit integer (as bytes), `x` anything else. `Declaration::return_kind` and `param_kinds` carry
   them.
 - **Wrappers.** `void nfcffi_call_NAME(void **a, void *r)` converts each argument from `a[i]` (a `long long`, an
   `unsigned long long`, a `double` or a `void *`, by kind) to the declared parameter type in the cast, calls `NAME` and
@@ -111,8 +111,10 @@ lib.callable("vec_add");   // false: a struct by value
   The callee's format must match them, as in C. The fixed arguments must be scalars. The first call with a new sequence
   of extra kinds compiles a wrapper for it (the header and source again, cached like any other build), so later calls
   with the same sequence are direct.
-- **Not callable** (listed by `declarations`, `callable` is false): `long double`, 128-bit integers, and overload sets.
-  Calling them throws `Error`.
+- **Long double and 128-bit integers** travel as bytes, like a struct: `Value::of_bytes` of `sizeof` bytes (the x87
+  80-bit format in the first ten bytes of a `long double`). Tested in `tests/ffi/wide.h`.
+- **Not callable** (listed by `declarations`, `callable` is false): overload sets, and any other kind the table lists as
+  `x` (for example other float kinds). Calling them throws `Error`.
 - **Value.** `Value::of_signed`, `of_unsigned`, `of_float`, `of_pointer`, `of_bytes(p, n)`; the accessors throw `Error`
   on another kind.
 - **Tests.** `tests/ffi/host.cpp` `check_library` (variadic: `snprintf` with integer, string and double extras, and a
