@@ -83,13 +83,10 @@ build to exit 0 and print its `cuda available` line before it compares it with t
 way and the comparison had passed), and its normal nfcxx build keeps libtorch_cuda and libc10_cuda with
 `-Wl,--push-state,--no-as-needed`, as the bundle does with `--bundle-add`.
 
-A `find_package(Torch)` project needs two things nfcxx does not give today:
-- torch's CMake config links libtorch_cpu, libtorch_cuda and libtorch as `-Wl,--no-as-needed,<lib> -Wl,--as-needed`,
-  which nfcxx refuses with C++ inputs (`cxx-driver.md`);
-- CMake 4's linker dependency file (`-Wl,--dependency-file=CMakeFiles/<target>.dir/link.d`, a relative path) is not
-  found by the link nfcxx runs ("cannot open dependency file"); `-DCMAKE_LINK_DEPENDS_USE_LINKER=OFF` avoids it.
-With both worked around (a wrapper that turns the libraries into plain arguments under one
-`-Wl,--push-state,--no-as-needed`), the link replaces `CUDA::cuda_driver` as `cuda-driver.md` describes: the program
+A `find_package(Torch)` project builds with nfcxx as its C++ compiler, both backends (by hand: libtorch 2.14.1+cu130,
+CMake 4.1). torch's CMake config links libtorch_cpu, libtorch_cuda and libtorch as `-Wl,--no-as-needed,<lib>
+-Wl,--as-needed`, which nfcxx turns into one `--no-as-needed` for the whole link (`cxx-driver.md`), and CMake 4 passes a
+relative `-Wl,--dependency-file=`, which nfcxx makes absolute. The link replaces `CUDA::cuda_driver` as `cuda-driver.md` describes: the program
 does not need libcuda.so.1, its own driver calls reach the GPU (`cuInit CUDA_SUCCESS`, the device name, `cuMemGetInfo`),
 and with the driver hidden it starts and reports `CUDA_ERROR_NO_DEVICE` and `cuda available 0`; the g++ build of the
 same project cannot start without the driver. Its tensor work runs on the GPU (a 512x512 matmul that matches the CPU,
@@ -105,8 +102,10 @@ Two things only this case needed:
 
 The nfcxx build cannot catch an exception thrown with a plain `throw` inside libtorch (`c10::Error` from gcc's
 `__cxa_throw`; `eh-shim.md`), so `torch.cpp` makes the CUDA tensor only when a GPU is present when `__EDG__` is
-defined. With `NFCXX_BACKEND=qbe` the program does not link yet: the `thread_local` wrapper of
-`c10::impl::raw_local_dispatch_key_set` references its init function `_ZTH...` as a strong symbol (gcc makes it weak).
+defined. With `NFCXX_BACKEND=qbe` the program links and runs as with the gcc backend (`cuda available 1 devices 1`, the
+CUDA tensor, normal and bundled). It did not link before: the `thread_local` wrapper of
+`c10::impl::raw_local_dispatch_key_set` refers to its init function `_ZTH...`, which libc10 does not define (the variable
+needs no dynamic initialization), and the reference was strong on QBE. It is weak now, as gcc makes it (`multi-tu.md`).
 
 ## Plugins and stubs
 
