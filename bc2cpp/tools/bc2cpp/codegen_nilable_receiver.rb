@@ -26,8 +26,11 @@ module NilableReceiverSend
     return plain if plain.include?('#error') || inner.include?('#error')
 
     nil_arm = nilable_nil_arm(insn, recv, plan[:name], plan[:argv])
-    # Only worth a nil test when the non-nil path sheds dispatches the plain code keeps.
-    return plain unless dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain) ||
+    # Only worth a nil test when the non-nil path sheds dispatches the plain code keeps, or when the
+    # receiver is nil-or-Array and the nil arm does not dispatch by name (nil answers `inspect`, so its arm
+    # would add a send): the non-nil path is then the Array push itself, with no class guard.
+    return plain unless (plan[:klass] == 'Array' && dispatch_count(nil_arm).zero?) ||
+                        dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain) ||
                         (EXACT_MARK.match?(inner) && !EXACT_MARK.match?(plain))
 
     body = inner.lines.map { |line| line.strip.empty? ? line : "  #{line}" }.join
@@ -50,24 +53,28 @@ module NilableReceiverSend
   def nilable_receiver_plan(insn, kwargs)
     return nil unless @class_pools_on && @closed_world && NILABLE_OPS.include?(insn.op)
     return nil if kwargs[:self_implicit] || kwargs[:call_receiver] || kwargs[:call_arguments]
-    return nil unless kwargs[:trace_reg_offset].to_i.zero?
     return nil if insn.n_spec == '*' || insn.nk_spec
 
     irep = kwargs[:irep]
-    idx = kwargs[:idx]
+    # An inlined send has no instruction index of its own: its source index and register are the
+    # ones compile_send's proof uses (trace_idx, and the register unshifted by trace_reg_offset).
+    idx = kwargs[:idx] || kwargs[:trace_idx]
     return nil unless irep && idx && insn.sym
+
+    proof_reg = unshift_proof_reg(insn.reg.to_s, kwargs[:trace_reg_offset].to_i)&.to_i
+    return nil unless proof_reg
 
     n = insn.n_spec.to_i
     return nil if n > CodeGen::FUNCALL_ARGC_MAX
 
     reg = insn.reg.to_i
-    mask = exact_flow_mask(irep, idx, reg)
+    mask = exact_flow_mask(irep, idx, proof_reg)
     return nil unless mask.is_a?(Integer) && mask.anybits?(NumericFlow::NIL)
 
     klass = return_class_of_mask(mask & ~NumericFlow::NIL)
     return nil unless klass
 
-    { key: [irep.label, idx, reg], klass: klass, name: insn.sym, argv: (1..n).map { |k| "r#{reg + k}" } }
+    { key: [irep.label, idx, proof_reg], klass: klass, name: insn.sym, argv: (1..n).map { |k| "r#{reg + k}" } }
   end
 
   # GETIDX / SETIDX: an index on a receiver the flow leaves nilable, with no nil check dominating it (a
