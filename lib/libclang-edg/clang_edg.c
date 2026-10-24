@@ -218,6 +218,7 @@ static CXTranslationUnit nfc_read(FILE *in, const char *file)
       s = tab + 1;
     }
     if (fi < 5) continue;
+    if (nfc_kind_of_word(f[0]) == 0) continue;  /* records for other consumers (sig: be/nfcxx_decl.c) */
     f[5] = s;
     id = atoi(f[1]);
     parent = atoi(f[2]);
