@@ -241,11 +241,34 @@ value unknown. Writes to disjoint fields preserve it. `zero-fill` initializes th
 but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
-layouts, dynamic offsets/indices, out-of-bounds accesses, external pointer projections, and accesses
-outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
+layouts, dynamic offsets outside local arrays (see [Array indexing](#array-indexing)), out-of-bounds
+constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
 whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
 widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
+
+## Array indexing
+
+`(index P I SIZE)` with a constant `I` is the constant offset `I * SIZE`. With a dynamic `I`, the
+result is a *ranged* pointer: it points somewhere inside the array that `P` names. That is the
+whole slot when `P` is derived from a local slot of `(array N T)` type, or the loan's range when `P`
+is derived from a loan of such a slot. Ranged pointers have these rules:
+
+- A read through one requires every byte of that range to be initialized, unmoved, and alive.
+- A write is a *weak update*. It must be allowed on every byte, and live loans over any part of the
+  range conflict with it, but it initializes nothing. So `for (int &x : a) x = 0;` does not make
+  `a` initialized. Initializing an array element by element needs constant indices.
+- A pointer store through one, a borrow or reborrow from one, and a store into drop-obligated
+  storage are refused. A non-pointer store through one makes pointer values held in the range unknown.
+- At a CFG join, different offsets from one array base widen to that base's ranged pointer. A
+  pointer advanced in a loop, such as the iterators of a range-based `for`, therefore converges.
+
+Comparing pointers (`eq`, `ne`, `lt.u`, `le.u`, `gt.u`, `ge.u`) is allowed and yields no provenance.
+`(bounds IDX N)` evaluates its operands. The checker assumes a dynamic index stays inside its
+array: it proves temporal safety, not bounds. Path B's runtime `bounds` checks cover subscripts of
+arrays of known length, but not pointers advanced by other arithmetic. Pointer arithmetic on
+anything other than a local array is refused. That includes arguments, so a callee that indexes its
+pointer argument gets no inferred summary.
 
 The underlying model tracks **physical byte initialization**. Without semantic metadata,
 whole-object loans conservatively require all bytes initialized, including padding. Ordinary field
@@ -623,6 +646,9 @@ removed.
 `tests/pathb-borrow/contracts/layouts.cpp` checks a reader of a padded nested struct through the
 frontend's layout records and is refused once they are removed, with identical QBE either way.
 `nolayouts.cpp` lists struct shapes that must get no record.
+Array-indexing fixtures in `tests/pathb-borrow/index` cover dynamic reads, weak writes, loans and
+shared loans of arrays, use after scope, and refusals. The C++ cases `cpp/array_*.cpp` check a
+range-based `for`, an indexed loop, an uninitialized element, and a dangling array pointer.
 Verified-summary fixtures cover each argument effect, nested and recursive contracted calls,
 argument reborrows, returned alias offsets and permissions, closed and noescape violations,
 missing outputs or consumption, and malformed signatures.
