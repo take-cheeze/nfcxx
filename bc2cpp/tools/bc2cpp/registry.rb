@@ -206,6 +206,9 @@ def build_registry(ireps, root_label)
     # already-defined methods without changing the mode. Getting visibility wrong
     # would let a register.cxx registration expose a private method.
     default_visibility = :public
+    # A bare `module_function` (this mruby's MODFUNC scope bit, src/class.c): every later def in the body also gets a
+    # public singleton copy, and no later bare private/public clears it.
+    module_function_scope = false
 
     # Resolve a singleton receiver's name by walking back from `before_idx` to
     # `reg`'s last write. Only LOADSELF (the innermost namespace) and a GETCONST are
@@ -227,6 +230,18 @@ def build_registry(ireps, root_label)
     resolve_def_visibility = lambda do |method_name|
       %w[initialize initialize_copy
          respond_to_missing?].include?(method_name) ? :private : default_visibility
+    end
+
+    # A plain instance `def` (TDEF, or the unfused TCLASS+METHOD+DEF), with its module_function copy.
+    register_instance_def = lambda do |method_name, child_label|
+      owner = namespace || 'Object' # a top-level `def` lands on Object.
+      registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
+                                              visibility: resolve_def_visibility.call(method_name))
+      next unless module_function_scope
+
+      registry[method_name] << MethodDef.new(name: method_name, owner: "#{owner}.singleton", irep: nil,
+                                              visibility: :public, kind: :module_function, copy_irep: child_label,
+                                              copy_owner: owner, core: CoreDefs.core_source?(irep.file))
     end
 
     irep.each_with_op('CLASS', 'MODULE', 'SCLASS', 'SETCONST', 'ALIAS', 'TDEF', 'SDEF', 'DEF',
@@ -292,16 +307,11 @@ def build_registry(ireps, root_label)
         register_alias.call(label, irep, idx, namespace)
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
-        child_label = irep.reps[insn.block_index]
-        method_name = insn.sym
-        owner = namespace || 'Object' # a top-level `def` lands on Object.
         # #initialize, #initialize_copy and #respond_to_missing? are always private,
         # whatever mode is in effect: src/class.c's define_method path sets
         # MRB_METHOD_PRIVATE_FL for them unconditionally. default_visibility cannot
         # see that rule, and reporting them public would let register.cxx expose them.
-        visibility = resolve_def_visibility.call(method_name)
-        registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
-                                                visibility: visibility)
+        register_instance_def.call(insn.sym, irep.reps[insn.block_index])
       when 'SDEF'
         # "SDEF R1 :clamp I[5]": `def self.foo` / `def SomeConst.foo`. codegen_sdef
         # (mruby-compiler codegen.c) fuses SCLASS+METHOD+DEF into SDEF whenever the
@@ -361,10 +371,7 @@ def build_registry(ireps, root_label)
 
         if opener_insn.op == 'TCLASS'
           # Unfused `def foo`: registered exactly like a TDEF, with a real irep.
-          owner = namespace || 'Object' # a top-level `def` lands on Object.
-          visibility = resolve_def_visibility.call(def_name)
-          registry[def_name] << MethodDef.new(name: def_name, owner: owner, irep: child_label,
-                                               visibility: visibility)
+          register_instance_def.call(def_name, child_label)
         else
           # Unfused `def self.foo`: same "X.singleton" pseudo-owner and real irep as
           # SDEF, receiver resolved by resolve_singleton_receiver (unrecognized: not
@@ -437,6 +444,9 @@ def build_registry(ireps, root_label)
               def_.visibility = name.to_sym if def_
             end
           end
+        elsif name == 'module_function' && n.zero?
+          module_function_scope = true
+          default_visibility = :private
         elsif name == 'module_function'
           # `module_function :a, :b` installs a public copy of each instance method on
           # the module's singleton class. In mruby (src/class.c
