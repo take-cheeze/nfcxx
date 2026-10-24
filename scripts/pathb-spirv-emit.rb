@@ -1782,6 +1782,8 @@ class SFn
     when "const"
       ty = parse_type(x[1])
       operand(x)
+    when "null"   # a null pointer as a value (the temporary of a conditional whose value is a struct lvalue)
+      operand(x)
     else
       raise Refused, "expression #{h || form_text(x)}"
     end
@@ -2560,8 +2562,16 @@ def emit_module(src, kernel_cl = false)
   # static-using kernel reaches is not compiled, its clone is)
   orig_needed = {}
   entries.each { |e| reach.call(e).each { |n| orig_needed[n] = true } unless static_entries.include?(e) }
-  order.each { |n| fns[n].compile if orig_needed[n] }
-  clone_order.each { |n| smod.fns_wgs[n].compile }
+  # a refusal names the function it is in (the IR name: a kernel entry or a function it reaches)
+  compile_in = lambda do |n, fn|
+    begin
+      fn.compile
+    rescue Refused => e
+      raise Refused, "#{e.message} (in #{n})"
+    end
+  end
+  order.each { |n| compile_in.call(n, fns[n]) if orig_needed[n] }
+  clone_order.each { |n| compile_in.call(n, smod.fns_wgs[n]) }
   order.each do |n|
     next unless orig_needed[n]
     fn = fns[n]
