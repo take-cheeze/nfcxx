@@ -13,7 +13,8 @@
 // build; a program is built once per local size (the same cache as the Vulkan pipelines). Each dispatch is waited for before
 // the next, and the flag is read after it.
 //
-// Environment: NFCXX_SYCL_IMAGE (the prefix; defaults to the NFCXX_SYCL_IMAGE_PREFIX macro of the build).
+// Images. Every TU built by scripts/sycl-build.sh registers its image; the runtime loads them all (rt_image.hpp), and each
+// keeps its own statics. Environment: NFCXX_SYCL_IMAGE (a colon-separated list of prefixes in place of the registered ones).
 #ifndef NFCXX_SYCL_RT_OPENCL_HPP
 #define NFCXX_SYCL_RT_OPENCL_HPP
 
@@ -30,6 +31,8 @@
 #include <map>
 #include <string>
 #include <vector>
+
+#include "rt_image.hpp"
 
 namespace sycl {
 namespace detail {
@@ -114,18 +117,23 @@ class cl_rt {
   // ---- dispatch
   void dispatch(const std::string &key, const void *closure, unsigned closure_bytes, const unsigned *g, const unsigned *l,
                 unsigned lmem, buffer_state **bufs, int nbufs, const int *modes) {
-    auto it = kernels_.find(key);
-    if (it == kernels_.end()) {
-      std::fprintf(stderr, "sycl: no kernel for the closure type %s (the image has %d)\n", key.c_str(), (int)kernels_.size());
+    const image_kernel *it = images_.find(key);
+    if (!it && load_images()) it = images_.find(key);
+    if (!it) {
+      std::fprintf(stderr, "sycl: no kernel for the closure type %s (the %d images have %d)\n", key.c_str(),
+                   (int)images_.modules.size(), (int)images_.kernel_count());
       std::exit(3);
     }
-    if (closure_bytes != it->second.closure_size && it->second.closure_size) {
+    if (closure_bytes != it->closure_size && it->closure_size) {
       std::fprintf(stderr, "sycl: the closure of %s is %u bytes on the host but %u in the device pass (build with the same "
-                   "compiler on both sides)\n", key.c_str(), closure_bytes, it->second.closure_size);
+                   "compiler on both sides)\n", key.c_str(), closure_bytes, it->closure_size);
       std::exit(5);
     }
     if (closure_bytes > 4096) fail("the kernel's captured state is larger than 4096 bytes");
-    check_limits(l, lmem);
+    const image_module &mod = images_.modules[it->module];
+    const uint32_t stack_bytes = mod.stack_bytes;
+    const uint64_t static_local = mod.static_local;
+    check_limits(l, lmem, mod);
     for (int i = 0; i < nbufs; i++) sync_up(bufs[i], modes[i]);
     uint32_t ng[3], gs[3];
     uint64_t invocations = 1, groups = 1;
@@ -137,13 +145,13 @@ class cl_rt {
       groups *= n;
     }
     // the group's local region: the user's local memory, the 1024-byte scratch tail, then the work-group statics (manifest L)
-    uint64_t stride = (uint64_t(lmem) + 1024 + static_local_ + 15) & ~uint64_t(15);
+    uint64_t stride = (uint64_t(lmem) + 1024 + static_local + 15) & ~uint64_t(15);
     // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
     // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd); the
     // dimensions above sd must be a single invocation, so the slab's invocations are contiguous in the emitter's linear
     // index. The emitter numbers stacks and local memory over the whole grid (the slab offset ox/oy/oz is in that
     // index), so each slab's bases are biased by the slab's first index and the region holds just the slab.
-    uint64_t stack_total = invocations * stack_bytes_;
+    uint64_t stack_total = invocations * stack_bytes;
     uint64_t room = largest_free();
     int sd = 0;
     for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
@@ -152,7 +160,7 @@ class cl_rt {
     uint64_t inner = 1;   // the groups in the dimensions below sd
     for (int e = 0; e < sd; e++) inner *= ng[e];
     uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
-    uint64_t per_group = inv_group * stack_bytes_ + stride;
+    uint64_t per_group = inv_group * stack_bytes + stride;
     uint32_t per_launch = ng[sd];   // groups along sd in one launch
     if (stack_total + groups * stride > room && sliceable) {
       uint64_t fit = room / (inner * per_group);
@@ -160,17 +168,17 @@ class cl_rt {
     }
     std::memset(at(dev_base_), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    cl_kernel k = kernel(it->second.entry, l);
+    cl_kernel k = kernel(it->entry, l, it->module);
     for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_launch) {
       uint32_t cnt = std::min(per_launch, ng[sd] - s0);
       uint64_t first_group = (uint64_t)s0 * inner;
       uint64_t slab_groups = (uint64_t)cnt * inner;
-      uint64_t slab_stack = slab_groups * inv_group * stack_bytes_;
+      uint64_t slab_stack = slab_groups * inv_group * stack_bytes;
       uint64_t region = alloc(slab_stack + slab_groups * stride);
       cl_push p{};
       p.closure = closure_addr();
-      p.statics = statics_;
-      p.stack = region - first_group * inv_group * stack_bytes_;   // biased: the slab's first invocation is at region
+      p.statics = mod.statics;
+      p.stack = region - first_group * inv_group * stack_bytes;   // biased: the slab's first invocation is at region
       p.local = region + slab_stack - first_group * stride;
       p.flag = dev_base_;
       p.hlo = (uint64_t)(uintptr_t)host_;
@@ -178,7 +186,7 @@ class cl_rt {
       p.dbase = dev_base_;
       p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
       p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
-      p.stack_bytes = stack_bytes_;
+      p.stack_bytes = stack_bytes;
       p.local_stride = (uint32_t)stride;
       p.local_user = lmem;
       p.ox = 0; p.oy = 0; p.oz = 0;
@@ -217,19 +225,9 @@ class cl_rt {
   }
 
  private:
-  struct kernel_info {
-    std::string entry;
-    uint32_t closure_size;
-  };
-
   cl_rt() {
-    const char *prefix = std::getenv("NFCXX_SYCL_IMAGE");
-#ifdef NFCXX_SYCL_IMAGE_PREFIX
-    if (!prefix) prefix = NFCXX_SYCL_IMAGE_PREFIX;
-#endif
-    if (!prefix) fail("set NFCXX_SYCL_IMAGE (see scripts/sycl-build.sh)");
-    read_manifest(std::string(prefix) + ".man");
-    init_device(std::string(prefix) + ".cl.spv");
+    init_device();
+    load_images();
   }
 
   [[noreturn]] void fail(const std::string &why) const {
@@ -241,38 +239,14 @@ class cl_rt {
     if (r != CL_SUCCESS) fail(std::string(what) + " failed (OpenCL error " + std::to_string((int)r) + ")");
   }
 
-  void read_manifest(const std::string &path) {
-    FILE *f = std::fopen(path.c_str(), "rb");
-    if (!f) fail("cannot read " + path);
-    char line[4096];
-    std::string hex;
-    while (std::fgets(line, sizeof line, f)) {
-      std::string s(line);
-      while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-      if (s.size() >= 2 && s[0] == 'k' && s.find('\t') != std::string::npos) {
-        size_t a = s.find('\t'), b = s.find('\t', a + 1);
-        std::string key = s.substr(a + 1, b - a - 1);
-        kernels_[key] = kernel_info{s.substr(0, a), (uint32_t)std::strtoul(s.c_str() + b + 1, nullptr, 10)};
-      } else if (s.size() > 2 && s[0] == 'T' && s[1] == '\t') {
-        stack_bytes_ = (uint32_t)std::strtoul(s.c_str() + 2, nullptr, 10);
-      } else if (s.size() > 2 && s[0] == 'G' && s[1] == '\t') {
-        subgroup_size_ = (uint32_t)std::strtoul(s.c_str() + 2, nullptr, 10);
-      } else if (s.size() > 2 && s[0] == 'S' && s[1] == '\t') {
-        size_t a = s.find('\t', 2);
-        static_size_ = std::strtoull(s.c_str() + 2, nullptr, 10);
-        hex = s.substr(a + 1);
-      } else if (s.size() > 2 && s[0] == 'L' && s[1] == '\t') {
-        static_local_ = std::strtoull(s.c_str() + 2, nullptr, 10);   // the work-group statics per group (absent: 0)
-      } else if (s.size() > 2 && s[0] == 'R' && s[1] == '\t') {
-        size_t a = s.find('\t', 2);
-        relocs_.push_back({std::strtoull(s.c_str() + 2, nullptr, 10), std::strtoull(s.c_str() + a + 1, nullptr, 10)});
-      }
-    }
-    std::fclose(f);
-    static_hex_ = hex;
+  // the registered images not loaded yet: their statics go in the heap
+  bool load_images() {
+    return images_.load_pending([this](uint64_t n) { return alloc(n); },
+                                [this](uint64_t a, const void *src, uint64_t n) { write(a, src, n); },
+                                [this](const std::string &why) { fail(why); });
   }
 
-  void init_device(const std::string &il_path) {
+  void init_device() {
     // the device: the first Intel GPU, else the first GPU of any vendor
     cl_platform_id pl[8];
     cl_uint np = 0;
@@ -330,32 +304,9 @@ class cl_rt {
     dev_base_ = (uint64_t)(uintptr_t)host_;   // shared USM: the device sees the host address
     free_[8192] = heap_size_ - 8192;
     std::memset(host_, 0, 8192);
-
-    // the module and its kernels (built per local size, see pipeline)
-    std::FILE *f = std::fopen(il_path.c_str(), "rb");
-    if (!f) fail("cannot read " + il_path);
-    std::fseek(f, 0, SEEK_END);
-    il_size_ = (size_t)std::ftell(f);
-    std::rewind(f);
-    il_.resize(il_size_);
-    if (std::fread(il_.data(), 1, il_size_, f) != il_size_) fail("short read of " + il_path);
-    std::fclose(f);
-
-    // the statics: the constant tables and globals, relocated to device addresses
-    if (static_size_) {
-      statics_ = alloc(static_size_);
-      std::vector<uint8_t> img(static_size_, 0);
-      for (size_t i = 0; i + 1 < static_hex_.size() && i / 2 < img.size(); i += 2)
-        img[i / 2] = (uint8_t)std::strtoul(static_hex_.substr(i, 2).c_str(), nullptr, 16);
-      for (auto &r : relocs_) {
-        uint64_t v = statics_ + r.second;
-        std::memcpy(&img[r.first], &v, 8);
-      }
-      write(statics_, img.data(), img.size());
-    }
   }
 
-  void check_limits(const unsigned *l, unsigned lmem) const {
+  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod) const {
     uint64_t total = 1;
     for (int d = 0; d < 3; d++) {
       if (l[d] > max_wi_[d]) fail("a work-group of " + std::to_string(l[d]) + " work-items in one dimension; the device allows " + std::to_string(max_wi_[d]));
@@ -363,23 +314,25 @@ class cl_rt {
     }
     if (total > max_wg_)
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
-    if (lmem + 1024 + static_local_ > local_mem_ && lmem > 0)
+    if (lmem + 1024 + mod.static_local > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
     // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
-    if (subgroup_size_ && total % subgroup_size_ != 0)
-      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(subgroup_size_) +
-           " lanes, so the work-group size must be a multiple of " + std::to_string(subgroup_size_));
+    if (mod.subgroup_size && total % mod.subgroup_size != 0)
+      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(mod.subgroup_size) +
+           " lanes, so the work-group size must be a multiple of " + std::to_string(mod.subgroup_size));
   }
 
   uint64_t closure_addr() const { return dev_base_ + cl_closure_at; }
 
-  // The kernel of an entry point for a local size: a program per local size (the specialization constants set the size).
-  cl_kernel kernel(const std::string &entry, const unsigned *l) {
-    std::string k = entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
+  // The kernel of an entry point of an image for a local size: a program per image and local size (the specialization
+  // constants set the size).
+  cl_kernel kernel(const std::string &entry, const unsigned *l, size_t m) {
+    const image_module &mod = images_.modules[m];
+    std::string k = std::to_string(m) + "/" + entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
     auto it = kernels_obj_.find(k);
     if (it != kernels_obj_.end()) return it->second;
     cl_int e = CL_SUCCESS;
-    cl_program prog = clCreateProgramWithIL(ctx_, il_.data(), il_size_, &e);
+    cl_program prog = clCreateProgramWithIL(ctx_, mod.il.data(), mod.il.size(), &e);
     check(e, "clCreateProgramWithIL");
     cl_uint sz[3] = {l[0], l[1], l[2]};
     for (cl_uint i = 0; i < 3; i++) check(clSetProgramSpecializationConstant(prog, i, sizeof(cl_uint), &sz[i]), "clSetProgramSpecializationConstant");
@@ -393,13 +346,13 @@ class cl_rt {
     }
     cl_kernel kern = clCreateKernel(prog, entry.c_str(), &e);
     check(e, "clCreateKernel");
-    if (subgroup_size_) {
+    if (mod.subgroup_size) {
       // the driver must run this local size with the sub-group size the module asks for (16 lanes)
       size_t lsz[3] = {l[0], l[1], l[2]}, sg = 0;
       check(clGetKernelSubGroupInfo(kern, dev_, CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE, sizeof lsz, lsz, sizeof sg, &sg, nullptr),
             "clGetKernelSubGroupInfo");
-      if (sg != subgroup_size_)
-        fail("the device runs sub-groups of " + std::to_string(sg) + " lanes for this kernel; the module needs " + std::to_string(subgroup_size_));
+      if (sg != mod.subgroup_size)
+        fail("the device runs sub-groups of " + std::to_string(sg) + " lanes for this kernel; the module needs " + std::to_string(mod.subgroup_size));
     }
     clReleaseProgram(prog);
     kernels_obj_[k] = kern;
@@ -427,20 +380,12 @@ class cl_rt {
   size_t max_wi_[3] = {0, 0, 0};
   cl_ulong local_mem_ = 0;
   bool has_fp16_ = false;
-  std::vector<uint8_t> il_;
-  size_t il_size_ = 0;
   uint8_t *host_ = nullptr;
   uint64_t dev_base_ = 0;
   uint64_t heap_size_ = 0;
   std::map<uint64_t, uint64_t> free_, used_;
-  std::map<std::string, kernel_info> kernels_;
+  image_set images_;
   std::map<std::string, cl_kernel> kernels_obj_;
-  uint32_t stack_bytes_ = 0;
-  uint32_t subgroup_size_ = 0;   // the sub-group size of the module's kernels (manifest line G), 0 when none uses sub-groups
-  uint64_t static_size_ = 0, statics_ = 0;
-  uint64_t static_local_ = 0;   // the work-group static bytes per group (manifest L)
-  std::string static_hex_;
-  std::vector<std::pair<uint64_t, uint64_t>> relocs_;
 };
 
 // ---- the backend functions declared in sycl.hpp (the same as rt_vulkan.hpp over the OpenCL runtime)
