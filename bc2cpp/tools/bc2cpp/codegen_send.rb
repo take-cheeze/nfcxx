@@ -1487,8 +1487,10 @@ class CodeGen
         end
       end
 
+      # A literal-block send (compile_direct_block_send) is a SENDB at the site.
+      constant_ops = @call_block_expr ? %w[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %w[SEND0 SEND SSEND0 SSEND]
       if !self_implicit && irep && constant_site_idx && @closed_world &&
-         %w[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
+         constant_ops.include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         constant_owner = constant_object_owner(irep, constant_site_idx,
                                                unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                owner_def&.owner)
