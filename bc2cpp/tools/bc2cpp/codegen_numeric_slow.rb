@@ -31,6 +31,7 @@ class CodeGen
     #endif
     // Whole bodies of Integer#% and Float#% (the pinned fork commit (mruby-expose-misc-bodies, docs/patch-fork-tracking.md), ADR 0367).
     extern "C" mrb_value mrb_int_mod_impl(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_str_mod_impl(mrb_state*, mrb_value, mrb_value);
     #ifndef MRB_NO_FLOAT
     extern "C" mrb_value mrb_flo_mod_impl(mrb_state*, mrb_value, mrb_value);
     #endif
@@ -545,7 +546,7 @@ class CodeGen
     definers = call_facts_answers.definers('%')
     return false if definers.nil? || definers[:singleton] || !definers[:class_native].empty?
     return false unless definers[:ruby].empty? && definers[:modules].empty?
-    return false unless definers[:native].to_a.sort == %w[Float Integer]
+    return false unless definers[:native].to_a.sort == %w[Float Integer String]
 
     definers[:foreign].subset?(Set['String'])
   end
@@ -559,6 +560,7 @@ class CodeGen
       #ifndef MRB_NO_FLOAT
         else if (mrb_float_p(a)) r = mrb_flo_mod_impl(M, a, b);
       #endif
+        else if (mrb_string_p(a)) r = mrb_str_mod_impl(M, a, b);
         else return mrb_funcall(M, a, "%", 1, b);
         #{NUMERIC_SLOW_DONE}
       }
