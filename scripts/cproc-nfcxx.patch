@@ -19,7 +19,7 @@
  		return false;
  	name = strip(tokenstr(tok.kind), namebuf, sizeof namebuf);
  	next();
-@@ -84,17 +87,26 @@
+@@ -84,17 +87,29 @@
  				a->cleanup = cleanup;
  			expect(TRPAREN, "after cleanup function");
  		} else if (strcmp(name, "section") == 0) {
@@ -35,6 +35,9 @@
  				a->section = section;
 +			declattr.section = section;
  			expect(TRPAREN, "after section name");
++		} else if (strcmp(name, "transparent_union") == 0) {
++			kind = ATTRTRANSPARENT;
++			declattr.transparent = true;
 +		} else if (strcmp(name, "used") == 0) {
 +			kind = ATTRUSED;
 +			declattr.used = true;
@@ -43,8 +46,8 @@
  	}
  	if (kind) {
 -		if (!(kind & allowed))
-+		/* section and used are recorded for the declaration (declattr) wherever they appear */
-+		if (kind & ~(ATTRSECTION | ATTRUSED) & ~allowed)
++		/* section, used and transparent_union are recorded for the declaration (declattr) wherever they appear */
++		if (kind & ~(ATTRSECTION | ATTRUSED | ATTRTRANSPARENT) & ~allowed)
  			error(&tok.loc, "%sattribute '%s' is not supported here", prefixname, name);
  		if (a)
  			a->kind |= kind;
@@ -63,7 +66,15 @@
  	struct member *next;
  };
  
-@@ -146,8 +148,23 @@
+@@ -121,6 +123,7 @@
+ 		struct {
+ 			char *tag;
+ 			struct member *members;
++			bool transparent;   /* GNU transparent_union: an argument of any member's type, passed as the first */
+ 		} structunion;
+ 	} u;
+ };
+@@ -146,8 +149,23 @@
  };
  
  enum builtinkind {
@@ -87,7 +98,7 @@
  	BUILTINEXPECT,
  	BUILTINFABSF,
  	BUILTINFPCLASSIFY,
-@@ -198,6 +215,9 @@
+@@ -198,6 +216,9 @@
  	enum typequal qual;
  	struct value *value;
  	char *asmname;
@@ -97,7 +108,7 @@
  	bool defined;
  	bool tentative;
  	struct decl *next;
-@@ -257,6 +277,7 @@
+@@ -257,6 +278,7 @@
  	EXPRBUILTIN,
  	EXPRTEMP,
  	EXPRSIZEOF,
@@ -105,7 +116,7 @@
  };
  
  struct stringlit {
-@@ -291,6 +312,11 @@
+@@ -291,6 +313,11 @@
  			/* a 16-byte floating constant (PROPSOFT type): the object image, low and high eightbyte */
  			unsigned long long soft[2];
  		} constant;
@@ -117,7 +128,7 @@
  		struct stringlit string;
  		struct {
  			struct expr *args;
-@@ -338,11 +364,17 @@
+@@ -338,11 +365,17 @@
  
  void tokeninit(void);
  int tokenget(const void *, size_t);
@@ -135,7 +146,7 @@
  
  /* scan */
  
-@@ -421,6 +453,12 @@
+@@ -421,6 +454,12 @@
  extern const struct target *targ;
  
  void targinit(const char *);
@@ -148,15 +159,16 @@
  
  /* attr */
  
-@@ -434,6 +472,7 @@
+@@ -434,6 +473,8 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
 +	ATTRUSED        = 1<<8,
++	ATTRTRANSPARENT = 1<<9,   /* GNU transparent_union, on a typedef of a union */
  };
  
  struct attr {
-@@ -446,6 +485,14 @@
+@@ -446,6 +487,15 @@
  bool attr(struct attr *, enum attrkind);
  bool gnuattr(struct attr *, enum attrkind);
  
@@ -165,13 +177,14 @@
 +struct declattr {
 +	char *section;
 +	bool used;
++	bool transparent;   /* GNU transparent_union, taken on a typedef of a union (decl) */
 +};
 +extern struct declattr declattr;
 +
  /* decl */
  
  struct decl *mkdecl(char *name, enum declkind, struct type *, enum typequal, enum linkage);
-@@ -503,6 +550,15 @@
+@@ -503,6 +553,15 @@
  /* stmt */
  
  void stmt(struct func *, struct scope *);
@@ -187,7 +200,7 @@
  
  /* backend */
  
-@@ -522,7 +578,7 @@
+@@ -522,7 +581,7 @@
  	struct array *asanopen;
  };
  
@@ -196,7 +209,7 @@
  
  struct block *mkblock(char *);
  
-@@ -537,6 +593,8 @@
+@@ -537,6 +596,8 @@
  struct value *funcbranch(struct func *, struct expr *, struct block *, struct block *);
  struct value *funcexpr(struct func *, struct expr *);
  void funcjmp(struct func *, struct block *);
@@ -205,7 +218,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +604,10 @@
+@@ -546,6 +607,10 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -218,7 +231,7 @@
  void emitfunc(struct func *, bool);
 --- a/decl.c
 +++ b/decl.c
-@@ -62,8 +62,21 @@
+@@ -62,8 +62,22 @@
  	struct member **last;
  	unsigned bits;  /* number of bits remaining in the last byte */
  	bool pack;
@@ -227,6 +240,7 @@
 +	 * natural layout: a trailing packed attribute is taken with bit-fields only when packing moves nothing */
 +	unsigned long long packbits;
 +	bool packmoves;
++	bool fam;   /* a flexible array member was added: no member may follow it */
  };
  
 +struct func *curfunc;
@@ -240,7 +254,7 @@
  struct decl *
  mkdecl(char *name, enum declkind k, struct type *t, enum typequal tq, enum linkage linkage)
  {
-@@ -177,7 +190,7 @@
+@@ -177,7 +191,7 @@
  	switch (tok.kind) {
  	case TSTRUCT: kind = TYPESTRUCT, allowedattr |= ATTRPACKED; break;
  	case TUNION:  kind = TYPEUNION, allowedattr |= ATTRPACKED; break;
@@ -249,7 +263,7 @@
  	default: fatal("internal error: unknown tag kind");
  	}
  	next();
-@@ -187,7 +200,7 @@
+@@ -187,7 +201,7 @@
  	tag = 0;
  	t = NULL;
  	et = NULL;
@@ -258,17 +272,18 @@
  		tag = tokenstr(tok.kind);
  		next();
  	}
-@@ -228,6 +241,9 @@
+@@ -228,6 +242,10 @@
  		b.last = &t->u.structunion.members;
  		b.bits = 0;
  		b.pack = a.kind & ATTRPACKED;
 +		b.hasbits = false;
 +		b.packbits = 0;
 +		b.packmoves = false;
++		b.fam = false;
  		/* GNU extension, accepted by gcc in C: an empty body is size 0 with alignment 1.
  		 * EDG emits `struct X {}` for empty C++ classes. */
  		while (tok.kind != TRBRACE)
-@@ -242,12 +258,19 @@
+@@ -242,12 +260,19 @@
  			trail.kind = 0;
  			trail.align = 0;
  			trail.section = NULL;
@@ -291,7 +306,7 @@
  		break;
  	case TYPEENUM:
  		enumconsts = NULL;
-@@ -263,7 +286,7 @@
+@@ -263,7 +288,7 @@
  		}
  		max = 0;
  		min = 0;
@@ -300,7 +315,7 @@
  			name = tokenstr(tok.kind);
  			next();
  			attr(NULL, 0);
-@@ -308,6 +331,30 @@
+@@ -308,6 +333,30 @@
  				break;
  		}
  		expect(TRBRACE, "to close enum specifier");
@@ -331,7 +346,7 @@
  		if (!t->base) {
  			if (min <= 0x80000000 && max <= 0x7fffffff) {
  				t->base = min ? &typeint : &typeuint;
-@@ -487,12 +534,18 @@
+@@ -487,12 +536,18 @@
  			expect(TRPAREN, "to close 'alignas' specifier");
  			break;
  
@@ -353,7 +368,7 @@
  				goto done;
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d || d->kind != DECLTYPE)
-@@ -614,6 +667,12 @@
+@@ -614,6 +669,12 @@
  	if (name)
  		*name = NULL;
  	a.kind = 0;
@@ -366,7 +381,7 @@
  	ptr = result->next;
  	switch (tok.kind) {
  	case TLPAREN:
-@@ -624,7 +683,7 @@
+@@ -624,7 +685,7 @@
  			case TLPAREN:
  				break;
  			default:
@@ -375,7 +390,7 @@
  					break;
  				goto func;
  			}
-@@ -634,7 +693,7 @@
+@@ -634,7 +695,7 @@
  		allowedattr = -1;
  		break;
  	default:
@@ -384,7 +399,7 @@
  			if (!name)
  				error(&tok.loc, "identifier not allowed in abstract declarator");
  			*name = tokenstr(tok.kind);
-@@ -711,20 +770,21 @@
+@@ -711,20 +772,21 @@
  				expect(TRBRACK, "after array length");
  			}
  			listinsert(ptr->prev, &t->link);
@@ -415,7 +430,23 @@
  			break;
  		default:
  			return;
-@@ -861,11 +921,14 @@
+@@ -842,12 +904,14 @@
+ 	struct member *m;
+ 	size_t end;
+ 
+-	if (t->kind == TYPESTRUCT && t->prop & PROPFLEX)
++	/* a member after a struct that ends in a flexible array member is a GNU extension (the kernel's tty_bufhead) */
++	if (t->kind == TYPESTRUCT && b->fam)
+ 		error(&tok.loc, "struct has member '%s' after flexible array member", name);
+ 	if (mt.type->incomplete) {
+ 		if (mt.type->kind != TYPEARRAY)
+ 			error(&tok.loc, "struct member '%s' has incomplete type", name);
+ 		t->prop |= PROPFLEX;
++		b->fam = true;
+ 	}
+ 	if (mt.type->prop & PROPFLEX) {
+ 		/*
+@@ -861,11 +925,14 @@
  	if (mt.type->prop & PROPVM)
  		error(&tok.loc, "struct member '%s' has variably modified type", name);
  	assert(mt.type->align > 0);
@@ -430,7 +461,7 @@
  		m->next = NULL;
  		*b->last = m;
  		b->last = &m->next;
-@@ -876,13 +939,19 @@
+@@ -876,13 +943,19 @@
  		m->bits.before = 0;
  		m->bits.after = 0;
  		if (align < mt.type->align) {
@@ -452,7 +483,7 @@
  		} else {
  			m->offset = 0;
  			if (t->size < mt.type->size)
-@@ -909,6 +978,10 @@
+@@ -909,6 +982,10 @@
  				t->size = end;
  				b->bits = 0;
  			}
@@ -463,7 +494,7 @@
  			if (m) {
  				m->offset = ALIGNDOWN(t->size - !!b->bits, mt.type->size);
  				m->bits.before = (t->size - m->offset) * 8 - b->bits;
-@@ -928,6 +1001,108 @@
+@@ -928,6 +1005,108 @@
  		t->align = align;
  }
  
@@ -572,7 +603,7 @@
  static bool
  staticassert(struct scope *s)
  {
-@@ -957,12 +1132,15 @@
+@@ -957,12 +1136,15 @@
  	struct qualtype base, mt;
  	char *name;
  	unsigned long long width;
@@ -589,7 +620,7 @@
  	if (!base.type)
  		error(&tok.loc, "no type in struct member declaration");
  	if (tok.kind == TSEMICOLON) {
-@@ -977,9 +1155,15 @@
+@@ -977,9 +1159,15 @@
  			width = intconstexpr(s, false);
  			addmember(b, base, NULL, 0, width);
  		} else {
@@ -605,7 +636,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1246,16 @@
+@@ -1062,6 +1250,16 @@
  	return d;
  }
  
@@ -622,7 +653,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1264,7 @@
+@@ -1070,7 +1268,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -631,7 +662,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,6 +1282,9 @@
+@@ -1088,6 +1286,9 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -641,7 +672,7 @@
  	int allowfunc = !f;
  	struct decl *d, *prior;
  	enum declkind kind;
-@@ -1096,10 +1293,30 @@
+@@ -1096,10 +1297,30 @@
  
  	if (staticassert(s))
  		return true;
@@ -672,7 +703,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1326,18 @@
+@@ -1109,16 +1330,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -694,10 +725,12 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1354,34 @@
+@@ -1135,6 +1358,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
++		if (declattr.transparent && kind != DECLTYPE)
++			error(&tok.loc, "transparent_union is only supported on a typedef of a union");
 +		/* GNU register variable: register T x asm("REG"). The asm name is the register, not a symbol. At file scope it
 +		 * is a global register variable (the kernel's current_stack_pointer is %rsp); in a block it is an ordinary
 +		 * automatic object that inline asm operands take in REG. */
@@ -729,7 +762,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1391,15 @@
+@@ -1144,10 +1397,32 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -744,10 +777,27 @@
 +				nt->align = align;
 +				t = nt;
 +			}
++			if (declattr.transparent) {
++				/* GNU transparent_union (the kernel's release_pages_arg): a copy of the union. Every member must be
++				 * passed as the first one is, so only pointers and integers of the first one's size are taken. */
++				struct type *nt;
++				struct member *m;
++
++				if (t->kind != TYPEUNION || !t->u.structunion.members)
++					error(&tok.loc, "transparent_union is only valid on a union with members");
++				for (m = t->u.structunion.members; m; m = m->next)
++					if (!(m->type->kind == TYPEPOINTER || m->type->prop & PROPINT && !(m->type->prop & PROPSOFT)) ||
++					    m->type->size != t->u.structunion.members->type->size || m->bits.before || m->bits.after)
++						error(&tok.loc, "transparent_union member '%s' is not a pointer or an integer of the first member's size", m->name);
++				nt = xmalloc(sizeof *nt);
++				*nt = *t;
++				nt->u.structunion.transparent = true;
++				t = nt;
++			}
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,6 +1409,8 @@
+@@ -1157,6 +1432,8 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -756,7 +806,7 @@
  			if (d->u.obj.align < align)
  				d->u.obj.align = align;
  			d->u.obj.cleanup = declcleanup;
-@@ -1201,6 +1455,7 @@
+@@ -1201,6 +1478,7 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -764,7 +814,7 @@
  			d->value = mkglobal(d);
  			d->u.func.inlinedefn = d->linkage == LINKEXTERN && fs & FUNCINLINE && !(sc & SCEXTERN) && (!prior || prior->u.func.inlinedefn);
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
-@@ -1213,7 +1468,9 @@
+@@ -1213,7 +1491,9 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -785,7 +835,59 @@
  static struct expr *
  mkexpr(enum exprkind k, struct type *t, struct expr *b)
  {
-@@ -303,6 +305,17 @@
+@@ -214,11 +216,12 @@
+ 	struct type a, b;
+ 
+ 	/*
+-	char pointees that differ only in signedness (unsigned char * and const char *) are accepted, as gcc
+-	accepts them with -Wpointer-sign, a warning in C that is on by default in gcc's C modes. The
+-	qualifiers are checked by the caller.
++	integer pointees that differ only in signedness (unsigned char * and const char *, the kernel's unsigned int *
++	for int *) are accepted, as gcc accepts them with -Wpointer-sign, a warning in C that is on by default in gcc's
++	C modes (the kernel turns it off). The qualifiers are checked by the caller.
+ 	*/
+-	if (t->kind == TYPECHAR && et->kind == TYPECHAR)
++	if (t->kind == et->kind && t->prop & PROPINT && et->prop & PROPINT && t->kind != TYPEENUM && t->kind != TYPEBOOL &&
++	    t->size == et->size)
+ 		return true;
+ 	if (t->kind != TYPEARRAY || et->kind != TYPEARRAY)
+ 		return typecompatible(t, et);
+@@ -268,6 +271,34 @@
+ 	return exprconvert(e, t);
+ }
+ 
++/*
++An argument for a parameter of a GNU transparent_union type: an argument of a member's type converts to that member and
++is passed as the first member is (gcc's convention for such a parameter, qbe.c abiparam); the union itself passes its
++first member.
++*/
++static struct expr *
++transparentarg(struct expr *e, struct type *t)
++{
++	struct member *m, *first = t->u.structunion.members;
++	struct type *et = e->type;
++
++	if (typecompatible(t, et)) {
++		if (!e->lvalue)
++			error(&tok.loc, "a transparent union argument that is not an lvalue is not supported");
++		return mkunaryexpr(TMUL, exprconvert(mkunaryexpr(TBAND, e), mkpointertype(first->type, QUALNONE)));
++	}
++	for (m = t->u.structunion.members; m; m = m->next) {
++		struct type *mt = m->type;
++
++		if (mt->kind == TYPEPOINTER ? nullpointer(e) || et->kind == TYPEPOINTER &&
++		    (mt->base == &typevoid || et->base == &typevoid || pointeecompatible(mt->base, et->base)) &&
++		    !(pointeequal(et) & ~pointeequal(mt)) : typecompatible(mt, et))
++			return exprconvert(exprassign(e, mt), first->type);
++	}
++	error(&tok.loc, "argument type matches no member of the transparent union");
++	return NULL;
++}
++
+ struct expr *
+ exprpromote(struct expr *e)
+ {
+@@ -303,6 +334,17 @@
  	return e;
  }
  
@@ -803,7 +905,7 @@
  static struct expr *
  mkbinaryexpr(struct location *loc, enum tokenkind op, struct expr *l, struct expr *r)
  {
-@@ -378,9 +391,7 @@
+@@ -378,9 +420,7 @@
  		if (l->type->kind != TYPEPOINTER || !(rp & PROPINT))
  			error(loc, "invalid operands to '+' operator");
  		t = l->type;
@@ -814,7 +916,7 @@
  		break;
  	case TSUB:
  		if (lp & PROPARITH && rp & PROPARITH) {
-@@ -389,18 +400,16 @@
+@@ -389,18 +429,16 @@
  		}
  		if (l->type->kind != TYPEPOINTER || !(rp & PROPINT) && r->type->kind != TYPEPOINTER)
  			error(loc, "invalid operands to '-' operator");
@@ -835,7 +937,7 @@
  			l = e;
  		}
  		break;
-@@ -653,7 +662,7 @@
+@@ -653,7 +691,7 @@
  	case '8': t = &typeuchar; break;
  	case 'u': t = &typeushort; break;
  	case 'U': t = &typeuint; break;
@@ -844,7 +946,7 @@
  	default: assert(0);
  	}
  	switch (t->size) {
-@@ -764,7 +773,7 @@
+@@ -764,7 +802,7 @@
  		src = tok.lit;
  		ordinary = false;
  		switch (*src) {
@@ -853,7 +955,7 @@
  		case 'u': ++src; t = *src == '8' ? ++src, &typeuchar : &typeushort; break;
  		case 'U': ++src; t = &typeuint; break;
  		default: t = &typeuchar, ordinary = true;
-@@ -831,25 +840,30 @@
+@@ -831,25 +869,30 @@
  		break;
  	case TTRUE:
  	case TFALSE:
@@ -886,7 +988,7 @@
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d)
  				error(&tok.loc, "undeclared identifier: %s", tokenstr(tok.kind));
-@@ -869,12 +883,14 @@
+@@ -869,12 +912,14 @@
  }
  
  /* TODO: merge with init.c:designator() */
@@ -903,7 +1005,7 @@
  
  	for (;;) {
  		switch (tok.kind) {
-@@ -882,10 +898,18 @@
+@@ -882,10 +927,18 @@
  			if (t->kind != TYPEARRAY)
  				error(&tok.loc, "index designator is only valid for array types");
  			next();
@@ -924,7 +1026,7 @@
  			break;
  		case TPERIOD:
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
-@@ -1188,9 +1212,152 @@
+@@ -1188,9 +1241,152 @@
  		e = mkexpr(EXPRBUILTIN, &typeint, e);
  		e->u.builtin.kind = BUILTINSIGNBIT;
  		break;
@@ -1077,7 +1179,7 @@
  	case BUILTINEXPECT:
  		/* just a no-op for now */
  		/* TODO: check that the expression and the expected value have type 'long' */
-@@ -1221,8 +1388,11 @@
+@@ -1221,8 +1417,11 @@
  		m = typemember(t, name, &offset);
  		if (!m)
  			error(&tok.loc, "struct/union has no member named '%s'", name);
@@ -1090,7 +1192,7 @@
  		break;
  	case BUILTINTYPESCOMPATIBLEP:
  		t = typename(s, NULL, NULL);
-@@ -1311,6 +1481,10 @@
+@@ -1311,6 +1510,10 @@
  		error(&tok.loc, "operand of '%s' operator must be an lvalue", tokenstr(op));
  	if (base->qual & QUALCONST)
  		error(&tok.loc, "operand of '%s' operator is const qualified", tokenstr(op));
@@ -1101,7 +1203,16 @@
  	e = mkexpr(EXPRINCDEC, base->type, base);
  	e->op = op;
  	e->u.incdec.post = post;
-@@ -1398,7 +1572,7 @@
+@@ -1374,6 +1577,8 @@
+ 				*end = assignexpr(s);
+ 				if ((t->u.func.isvararg || t->u.func.unprototyped) && !p)
+ 					*end = exprpromote(*end);
++				else if (p->type->kind == TYPEUNION && p->type->u.structunion.transparent)
++					*end = transparentarg(*end, p->type);
+ 				else
+ 					*end = exprassign(*end, p->type);
+ 				end = &(*end)->next;
+@@ -1398,7 +1603,7 @@
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "'%s' operator must be applied to pointer to struct/union", tokenstr(op));
  			next();
@@ -1110,7 +1221,7 @@
  				error(&tok.loc, "expected identifier after '%s' operator", tokenstr(op));
  			lvalue = op == TARROW || r->base->lvalue;
  			offset = 0;
-@@ -1497,7 +1671,7 @@
+@@ -1497,7 +1702,7 @@
  					parseinit(s, t);
  				e = NULL;
  			} else {
@@ -1119,7 +1230,7 @@
  				expect(TRPAREN, "after expression");
  				if (op == TSIZEOF)
  					e = postfixexpr(s, e);
-@@ -1515,10 +1689,13 @@
+@@ -1515,10 +1720,13 @@
  				error(&tok.loc, "%s operator applied to bitfield expression", tokenstr(op));
  			t = e->type;
  		}
@@ -1135,7 +1246,7 @@
  		if (t->kind == TYPEARRAY && t->size == 0 && op == TSIZEOF) {
  			e = mkexpr(EXPRSIZEOF, &typeulong, e);
  			e->u.szof.type = t;
-@@ -1537,6 +1714,26 @@
+@@ -1537,6 +1745,26 @@
  	return e;
  }
  
@@ -1162,7 +1273,7 @@
  static struct expr *
  castexpr(struct scope *s)
  {
-@@ -1551,7 +1748,7 @@
+@@ -1551,7 +1779,7 @@
  		tq = QUALNONE;
  		t = typename(s, &tq, &toeval);
  		if (!t) {
@@ -1171,6 +1282,36 @@
  			expect(TRPAREN, "after expression to match '('");
  			e = postfixexpr(s, e);
  			goto done;
+--- a/init.c
++++ b/init.c
+@@ -252,8 +252,18 @@
+ 				goto add;
+ 			case TYPESTRUCT:
+ 			case TYPEUNION:
+-				if (typecompatible(expr->type, t))
++				if (typecompatible(expr->type, t)) {
++					/* GNU: a compound literal of the type initializes the object as its braced list would, so a
++					 * static object takes it (the kernel's DEFINE_RAW_SPINLOCK: x = (raw_spinlock_t){ ... }) */
++					if (expr->kind == EXPRCOMPOUND && !expr->toeval) {
++						struct init *i;
++
++						for (i = expr->u.compound.init; i; i = i->next)
++							initadd(&p, mkinit(p.sub->offset + i->start, p.sub->offset + i->end, i->bits, i->expr));
++						goto added;
++					}
+ 					goto add;
++				}
+ 				break;
+ 			default:  /* scalar type */
+ 				assert(t->prop & PROPSCALAR);
+@@ -268,6 +278,7 @@
+ 		else
+ 			bits = (struct bitfield){0};
+ 		initadd(&p, mkinit(p.sub->offset, p.sub->offset + p.sub->type->size, bits, expr));
++	added:
+ 		for (;;) {
+ 			if (p.sub->type->incomplete)
+ 				p.sub->type->incomplete = false;
 --- a/main.c
 +++ b/main.c
 @@ -1,6 +1,10 @@
@@ -1715,7 +1856,20 @@
  static struct value *
  funcload(struct func *f, struct type *t, struct lvalue lval)
  {
-@@ -1785,6 +1894,31 @@
+@@ -1732,7 +1841,11 @@
+ 		functemp(f, v);
+ 		if(!d->name)
+ 			continue;
+-		if (d->type->value) {
++		if (d->type->kind == TYPEUNION && d->type->u.structunion.transparent) {
++			/* passed as its first member (abiparam): stored into the union */
++			funcalloc(f, d);
++			funcstore(f, d->type->u.structunion.members->type, QUALNONE, (struct lvalue){d->value}, v);
++		} else if (d->type->value) {
+ 			d->value = v;
+ 		} else {
+ 			funcalloc(f, d);
+@@ -1785,6 +1898,31 @@
  	f->end = b;
  }
  
@@ -1747,7 +1901,7 @@
  void
  funcjmp(struct func *f, struct block *l)
  {
-@@ -1803,6 +1937,15 @@
+@@ -1803,6 +1941,15 @@
  
  	if (b->jump.kind)
  		return;
@@ -1763,7 +1917,7 @@
  	if (t) {
  		assert(t->prop & PROPSCALAR);
  		/*
-@@ -1881,6 +2024,52 @@
+@@ -1881,6 +2028,61 @@
  	return f->gotos.vals[idx].p;
  }
  
@@ -1794,6 +1948,15 @@
 +caller is then no leaf, and QBE gives every function that is not a leaf a frame pointer (push %rbp; mov %rsp, %rbp), so
 +the helper finds the caller's frame in %rbp and its return address at 8(%rbp).
 +*/
++/* the type a parameter is passed as: a GNU transparent union as its first member */
++static struct type *
++abiparam(struct type *t)
++{
++	if (t->kind == TYPEUNION && t->u.structunion.transparent)
++		return t->u.structunion.members->type;
++	return t;
++}
++
 +static struct value *
 +funcframeinfo(struct func *f, bool ret)
 +{
@@ -1816,7 +1979,7 @@
  static struct lvalue
  funclval(struct func *f, struct expr *e)
  {
-@@ -1896,6 +2085,8 @@
+@@ -1896,6 +2098,8 @@
  		d = e->u.ident.decl;
  		if (d->kind != DECLOBJECT && d->kind != DECLFUNC)
  			error(&tok.loc, "identifier '%s' is not an object or function", d->name);
@@ -1825,7 +1988,7 @@
  		if (d == f->namedecl) {
  			fputs("data ", stdout);
  			emitname(d->value);
-@@ -2136,6 +2327,141 @@
+@@ -2136,6 +2340,141 @@
  	return funcexpr(f, e);
  }
  
@@ -1967,7 +2130,7 @@
  struct value *
  funcexpr(struct func *f, struct expr *e)
  {
-@@ -2154,10 +2480,20 @@
+@@ -2154,10 +2493,20 @@
  
  	calcvla(f, e->type);
  	switch (e->kind) {
@@ -1989,7 +2152,7 @@
  		case DECLCONST:  return d->value;
  		default:
  			fatal("unimplemented declaration kind %d", d->kind);
-@@ -2182,10 +2518,10 @@
+@@ -2182,10 +2531,10 @@
  	case EXPRBITFIELD:
  	case EXPRCOMPOUND:
  		lval = funclval(f, e);
@@ -2002,7 +2165,7 @@
  		t = e->type;
  		if (t->prop & PROPSOFT) {
  			/* the old value is copied out first: the store overwrites the object that l addresses */
-@@ -2209,7 +2545,8 @@
+@@ -2209,7 +2558,8 @@
  			if (t->base->kind == TYPEARRAY && t->base->size == 0) {
  				r = t->base->u.array.size;
  			} else {
@@ -2012,7 +2175,7 @@
  			}
  		} else if (t->prop & PROPINT) {
  			r = mkintconst(1);
-@@ -2277,7 +2614,7 @@
+@@ -2277,7 +2627,7 @@
  			return lval.addr;
  		case TMUL:
  			r = funcexpr(f, e->base);
@@ -2021,7 +2184,7 @@
  		case TSUB:
  			r = funcexpr(f, e->base);
  			if (e->type->prop & PROPSOFT)
-@@ -2439,6 +2776,35 @@
+@@ -2439,6 +2789,35 @@
  		return funcexpr(f, e);
  	case EXPRBUILTIN:
  		switch (e->u.builtin.kind) {
@@ -2057,7 +2220,7 @@
  		case BUILTINVASTART:
  			l = funcvalistaddr(f, e->base);
  			funcinst(f, IVASTART, 0, l, NULL);
-@@ -2627,7 +2993,7 @@
+@@ -2627,7 +3006,7 @@
  		funcjmp(f, defaultlabel);
  		return;
  	}
@@ -2066,7 +2229,7 @@
  		funcjmp(f, c->body);
  		return;
  	}
-@@ -2636,7 +3002,12 @@
+@@ -2636,7 +3015,12 @@
  	label[2] = mkblock("switch_gt");
  
  	key = mkintconst(c->node.key);
@@ -2080,7 +2243,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3015,828 @@
+@@ -2644,17 +3028,828 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -2911,7 +3074,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4104,11 @@
+@@ -2922,6 +4117,11 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -2923,7 +3086,16 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2944,6 +4131,7 @@
+@@ -2934,7 +4134,7 @@
+ 	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
+ 		if (p != f->type->u.func.params)
+ 			fputs(", ", stdout);
+-		emitclass(abiclass(p->type), p->type->value);
++		emitclass(abiclass(abiparam(p->type)), abiparam(p->type)->value);
+ 		putchar(' ');
+ 		emitname(v);
+ 	}
+@@ -2944,6 +4144,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -2931,7 +3103,7 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4263,17 @@
+@@ -3075,6 +4276,17 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
@@ -3112,7 +3284,7 @@
  /* 6.8 Statements and blocks */
  void
  stmt(struct func *f, struct scope *s)
-@@ -313,13 +383,97 @@
+@@ -313,13 +383,136 @@
  			v = funcexpr(f, e);
  			delexpr(e);
  		} else {
@@ -3138,7 +3310,7 @@
 +		struct gotolabel *labels[16];
 +		char *clob[16], *labnames[16], *template;
 +		unsigned nout = 0, nin = 0, nclob = 0, nlab = 0;
-+		bool isvol = false, isgoto = false;
++		bool isvol = false, isgoto = false, basic;
 +		struct stringlit lit;
 +
 +		next();
@@ -3153,6 +3325,7 @@
 +		tokencheck(&tok, TSTRINGLIT, "for asm template");
 +		stringconcat(&lit, true);
 +		template = lit.data;
++		basic = tok.kind != TCOLON && tok.kind != TCOLONCOLON;
 +		/* outputs, then inputs: each is [ [symbol] ] "constraint" ( operand ) */
 +		for (unsigned sect = 0; sect < 2 && asmsep(); ++sect) {
 +			struct asmoperand *ops = sect == 0 ? out : in;
@@ -3202,6 +3375,44 @@
 +		}
 +		if (tok.kind == TCOLON || tok.kind == TCOLONCOLON)
 +			error(&tok.loc, isgoto ? "expected ')' after the asm goto labels" : "asm labels need 'asm goto'");
++		if (basic) {
++			/* basic asm (no operands): the text is the template as it is, with no '%' substitution
++			 * (the kernel's io_delay: asm volatile("outb %al, $0x80")) */
++			size_t n = 0;
++			char *q, *e;
++
++			for (q = template; *q; ++q)
++				n += *q == '%';
++			e = xmalloc(strlen(template) + n + 1);
++			for (q = template, n = 0; *q; ++q) {
++				e[n++] = *q;
++				if (*q == '%')
++					e[n++] = '%';
++			}
++			e[n] = 0;
++			template = e;
++		}
++		/* an input tied to an output by name ("[sum]"(rest)) is tied by number, as "0" */
++		for (unsigned k = 0; k < nin; ++k) {
++			const char *c = in[k].constraint;
++			bool found = false;
++
++			if (*c != '[')
++				continue;
++			for (unsigned o = 0; o < nout && !found; ++o) {
++				size_t len = out[o].symname ? strlen(out[o].symname) : 0;
++
++				if (len && strncmp(c + 1, out[o].symname, len) == 0 && c[1 + len] == ']' && !c[2 + len]) {
++					char *num = xmalloc(12);
++
++					snprintf(num, 12, "%u", o);
++					in[k].constraint = num;
++					found = true;
++				}
++			}
++			if (!found)
++				error(&tok.loc, "asm input constraint '%s' names no output", c);
++		}
 +		expect(TRPAREN, "after asm");
 +		expect(TSEMICOLON, "after asm statement");
 +		if (f)

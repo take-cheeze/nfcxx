@@ -112,6 +112,16 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   one helper call of that size each; a load copies the bytes into a temporary. Under `-V` any other volatile load
   (a bit-field, a larger aggregate) is refused rather than left a plain load.
 
+- **`transparent_union`** on a typedef of a union (the kernel's `release_pages_arg`): an argument of any member's type
+  converts to that member and is passed as the first member is, and the function defined with such a parameter
+  receives it so -- gcc's convention, checked against gcc-compiled callers and callees. The members must be pointers
+  or integers of the first one's size.
+
+- **More GNU leniencies**: a struct or union object initialized from a compound literal of its type (the kernel's
+  `DEFINE_RAW_SPINLOCK`, a static object), a member after a struct that ends in a flexible array member, pointers
+  to integer types that differ only in signedness (`unsigned int *` for `int *`, gcc's `-Wpointer-sign`), basic asm
+  (no operands) taken as literal text, and an input tied to an output by name (`"[sum]"`).
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
