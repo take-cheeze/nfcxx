@@ -112,9 +112,65 @@ copy by `run_astro.sh`:
 - **`static const` in a constant initializer** (bug 6).
 
 The AOT bake (`--aot-compile --run` of `def fib(n) = n < 2 ? n : fib(n-1) + fib(n-2); puts fib(30)`) is where the qbe path runs out of
-patience, and it is not in the test: the program is right (832040, from the interpreter) but the store compiles about 230
-generated files, each of which `#include`s the whole evaluator (a multi-megabyte translation unit), and on qbe every one goes
-through the mruby `qbe-prep.rb` rewrite before cproc. That took more than 25 minutes (82 CPU-minutes) without finishing.
+patience, and it is not in the test: the program is right (832040, from the interpreter), but the store compiles thousands of
+generated files (233 in `code_store`, 2793 in the pool mode's `preload_store`) and it did not finish in 25 minutes (82 CPU-minutes).
+The next section says where the time goes.
+
+## Why the bake is slow on qbe
+
+One `SD_*.c` is a few lines (the specialized function) after `#include`s of `node_eval.c` and `node_dispatch.c`. After
+`cc -E -P` that is a 0.8 MB translation unit (11,800 lines, 233,000 tokens) in which only the
+last function is new; every file repeats the same 0.8 MB. Nothing in the pipeline is slow per byte: a file takes about two
+seconds, and the time is the number of files times the same prefix. The 82 CPU-minutes are 2793 files at about 1.8 s.
+
+One small SD file (`nfcc -c`, `NFCXX_BACKEND=qbe`, `-O3 -fPIC ...` as the store's makefile passes them; `NFCXX_TRACE`; seconds, a
+shared 4-core machine, ranges of 3 to 4 runs). The gcc backend on the same file is 0.77 s for everything.
+
+| stage | before | after (default) | after, `NFCXX_QBE_DCE=1` |
+| --- | --- | --- | --- |
+| `cc -E` | 0.10-0.14 | 0.09-0.13 | 0.09-0.10 |
+| `qbe-prep.rb` (mruby) | 1.0-1.45 | 0.49-0.59 | 0.53-0.71 |
+| cproc | 0.10-0.12 | 0.09-0.10 | 0.04-0.05 |
+| qbe | 0.30-0.35 | 0.30-0.37 | 0.05 |
+| `weak-symbols.rb` (mruby, with its second `cc -E`) | 0.19-0.25 | 0.14-0.23 | 0.09-0.10 |
+| assemble | 0.02-0.14 | 0.02-0.14 | 0.01-0.04 |
+| total | 1.8-2.3 | 1.2-1.4 | 0.9-1.1 |
+
+Lua's `lvm.c` (59 KB, `-O2`): `cc -E` 0.07-0.10, `qbe-prep.rb` 0.26-0.29 (now 0.17-0.18), cproc 0.03-0.04, qbe 0.21-0.23,
+`weak-symbols.rb` 0.09-0.13 (now 0.07-0.11), total 0.74-0.82 s (now 0.64-0.74). The biggest file of the pool store (1.5 MB
+of `SD_*.c`, 3.4 MB after `cc -E`) takes 7.0 s (`qbe-prep.rb` 4.8-5.1) before and 4.0-4.1 s after.
+
+So the suspects come out as: (1) the two mruby scripts were half of the time (`qbe-prep.rb` alone 50 to 60 %), not minutes: the
+mruby start is 7 ms and its bytecode compile is nothing; the scan is linear (0.3 s per MB to tokenize) and was paying for a
+walk over every token by three passes that could only matter in a few places. (2) cproc and qbe were a quarter of the time,
+and most of what they emit is dead: an SD object is 306 KB with 752 local functions for a function of a few instructions (52 KB and
+184 with `NFCXX_QBE_DCE=1`), since neither compiler drops an unused `static` function. (3) the interpreter's bytecode compile did not show.
+
+What was changed:
+
+- `qbe-prep.rb`: `bare_return_edits` looks for the tokens `return ;` first and, for each, finds its enclosing file-scope function
+  backwards, instead of walking every function body and calling `match_fwd` for each (it was 0.37 s of 1.1); `volatile_locals`
+  returns at once when no `volatile` token is inside braces (0.30 s); `void_typedefs` and `weak_function_names` only look at the
+  tokens they can start from; the main loop skips the tokens that start no rewrite with direct array reads; the tokenizer keeps
+  the brace and parenthesis depth as one running value. The fast paths need balanced braces (the tokenizer says so); otherwise the
+  old walks run. `qbe-prep.rb` is 2 times faster on SD files and 1.5 times on `lvm.c`, with the same output.
+- `weak-symbols.rb`: attribute groups are scanned by bytes and looked at only when they contain `weak`; the assembly's labels are
+  read without a string per line. 2 times faster.
+- `NFCXX_QBE_DCE=1` (opt-in; `qbe-prep.rb --dce`): the definitions of `static` functions that no live code mentions are removed
+  before cproc, as gcc does by not emitting them. Roots are everything that is not such a definition, and anything with an
+  attribute, inline asm or a `used`/`constructor`/`alias`/`weak`/`section` word; the strings of inline asm count as mentions.
+  Prototypes of static functions mention nothing. The result is the same program with a smaller object (the SD file above: 1.25 MB
+  of assembly becomes 0.22 MB, the object 306 KB becomes 52 KB), so it is not the same assembly and stays off by default; ASTro's bake, which compiles the same
+  header thousands of times, is what it is for. 79 pool files (every 35th) compiled with four jobs: 35.1 s before, 23.9 s with
+  the changes above, 15.2 s with `NFCXX_QBE_DCE=1` (gcc: 6.6 s). For the 2793 files that is about 21 minutes, 14 and 9 of wall
+  time at `-j4` on this machine.
+
+What did not help: reading the source as an array of bytes in the tokenizer (`String#bytes`, then `bs[i]` instead of `getbyte`)
+did not change the time. The second `cc -E` that `qbe-cc` runs to find hand-written `__attribute__((weak))` costs 0.07 s and
+was left. The part that remains is the shared prefix itself, read, tokenized and (without DCE) compiled in every file; avoiding
+it needs the evaluator compiled once, which is a change in ASTro's code store, not in nfcc. Equivalence: `tests/mruby/qbe-asm.sh`
+compares `nfcc -S` with the oracle ports of the two scripts on `tests/c`, Lua and (with `QBE_ASM_EXTRA`) SD files, and
+`tests/mruby/qbe-prep.sh` compares the script with its oracle on its edge cases, including the new fast-path ones.
 
 nfcc and cproc changes it led to: `qbe-cc` defines `__uint128_t` and `__int128_t` on every target (the code needed `__uint128_t`
 for a 53-bit random-float product; cproc's `unsigned __int128` multiply and shift match gcc's, `tests/c/int128_typedefs.c`), and
