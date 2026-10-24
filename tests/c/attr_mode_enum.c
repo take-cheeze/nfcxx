@@ -1,4 +1,5 @@
 // EXPECT: 42
+// ELF-ONLY: mode on an enum is gcc's; Apple clang ignores it there
 // GNU mode on an enum (the kernel's trace enums: enum afs_call_trace { ... } __mode(byte)): the integer type of that size,
 // signed when a value is negative, as gcc lays it out. cproc ignored the attribute before, and the enums were 4 bytes.
 enum small { A, B, C = 200 } __attribute__((__mode__(byte)));

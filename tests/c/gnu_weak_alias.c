@@ -1,4 +1,5 @@
 // EXPECT: 42
+// ELF-ONLY: alias is not supported on Darwin
 // GNU weak (a definition, and a declaration whose symbol may be absent), alias (the kernel's SYSCALL_DEFINE stubs: a
 // global alias of a static function; and of an object), and visibility("hidden"); tests/c/cc-mode.sh compares the
 // symbol table with gcc's

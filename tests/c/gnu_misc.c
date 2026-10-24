@@ -1,4 +1,5 @@
 // EXPECT: 42
+// ELF-ONLY: __builtin_isdigit is gcc's (Apple clang has no such builtin)
 // GNU C the kernel uses: local labels (__label__) in a macro used twice, packed before a struct body with bit-fields,
 // __builtin_isdigit and __builtin_prefetch, the \e escape, void * against a function pointer, the __attribute spelling
 #define TRY(x) ({ __label__ out; int r_ = 0; if (x) goto out; r_ = 1; out: r_; })
