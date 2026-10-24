@@ -19,7 +19,7 @@ class CodeGen
             %w[FalseClass false_or src/object.c], %w[Array ary_union mrbgems/mruby-array-ext/src/array.c]],
     '%' => [%w[Integer int_mod src/numeric.c], %w[Float flo_mod src/numeric.c],
             %w[String str_mod mrbgems/mruby-sprintf/src/sprintf.c]],
-    '-@' => [%w[Numeric num_uminus src/numeric.c], %w[String str_uminus mrbgems/mruby-string-ext/src/string.c]],
+    '-@' => [%w[String str_uminus mrbgems/mruby-string-ext/src/string.c]],
     '<<' => [%w[Integer int_lshift src/numeric.c], %w[Array mrb_ary_push_m src/array.c],
              %w[String str_concat_m mrbgems/mruby-string-ext/src/string.c], %w[IO io_lshift mrbgems/mruby-io/src/io.c]]
   }.freeze
@@ -34,8 +34,7 @@ class CodeGen
     '%' => [['int_mod', 'mrb_int_mod_impl', 'mrb_int_mod_impl(mrb, x, mrb_get_arg1(mrb))'],
             ['flo_mod', 'mrb_flo_mod_impl', 'mrb_flo_mod_impl(mrb, x, mrb_get_arg1(mrb))'],
             ['str_mod', 'mrb_str_mod_impl', 'mrb_str_mod_impl(mrb, self, mrb_get_arg1(mrb))']],
-    '-@' => [['num_uminus', 'mrb_num_uminus_impl', 'mrb_num_uminus_impl(mrb, self)'],
-             ['str_uminus', 'mrb_str_uminus_impl', 'mrb_str_uminus_impl(mrb, str)']],
+    '-@' => [['str_uminus', 'mrb_str_uminus_impl', 'mrb_str_uminus_impl(mrb, str)']],
     '+' => [['time_plus', 'mrb_time_plus_impl', 'mrb_time_plus_impl(mrb, self, mrb_get_arg1(mrb))']],
     '-' => [['ary_sub', 'mrb_ary_ext_sub_impl', 'mrb_ary_ext_sub_impl(mrb, self, other)'],
             ['time_minus', 'mrb_time_minus_impl', 'mrb_time_minus_impl(mrb, self, mrb_get_arg1(mrb))']],

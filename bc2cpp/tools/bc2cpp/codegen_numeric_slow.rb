@@ -81,7 +81,7 @@ class CodeGen
                           '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array Time],
                           '&' => %w[Integer NilClass TrueClass FalseClass Array],
                           '|' => %w[Integer NilClass TrueClass FalseClass Array],
-                          '<<' => %w[Integer Array String IO], '-@' => %w[Integer Float Numeric String] }.freeze
+                          '<<' => %w[Integer Array String IO] }.freeze
 
   # `members` is CallFacts::Answers' set of every class that may answer `name`; it is nil for a name
   # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners). `owners` are the
@@ -228,7 +228,8 @@ class CodeGen
     elsif key == 'mod'
       numeric_slow_mod_direct? ? numeric_slow_closed_mod_source(head) : nil
     elsif key == 'neg'
-      numeric_slow_closed?(op) ? numeric_slow_closed_neg_source(head) : nil
+      target = numeric_slow_neg_target
+      target ? numeric_slow_closed_neg_source(head, target) : nil
     elsif numeric_slow_closed?(op)
       case key
       when 'div' then numeric_slow_closed_div_source(head)
@@ -723,17 +724,56 @@ class CodeGen
     CPP
   end
 
-  # Closed `-@`: an Integer or Float takes the inline arms above; a String takes String#-@'s exported body and any
-  # other Numeric takes Numeric#-@'s, both reached only after numeric_slow_closed? proves the owners cover every
-  # definer. Anything else is a proven NoMethodError.
-  def numeric_slow_closed_neg_source(head)
+  # Closed `-@`: an Integer or Float takes the inline arms above, a String String#-@'s exported body, and any other
+  # Numeric the compiled Numeric#-@ (see numeric_slow_neg_proof). Anything else is a proven NoMethodError.
+  def numeric_slow_closed_neg_source(head, target)
+    impl = "#{cpp_name(target.owner, target.name)}_impl"
     fallback = <<~CPP.gsub(/^(?=.)/, '  ')
       if (mrb_string_p(a)) return mrb_str_uminus_impl(M, a);
-      if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) return mrb_num_uminus_impl(M, a);
+      // CORE_COMPILED_NEG -- every other Numeric runs the compiled Numeric#-@ body, no by-name call
+      if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) {
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r = #{impl}(M, a);
+        mrb_gc_arena_restore(M, ai);
+        mrb_gc_protect(M, r);
+        return r;
+      }
       return bc2cpp_nomethod_named(M, a, "-@", 0);
     CPP
-    numeric_slow_extern_unary('mrb_num_uminus_impl') + numeric_slow_extern_unary('mrb_str_uminus_impl') +
-      numeric_slow_neg_source(head, true, fallback)
+    numeric_slow_extern_unary('mrb_str_uminus_impl') + numeric_slow_neg_source(head, true, fallback)
+  end
+
+  # CORE_COMPILED_NEG: the compiled Numeric#-@ (`0 - self`) the closed helper calls, or nil.
+  def numeric_slow_neg_target
+    return @numeric_slow_neg_target if defined?(@numeric_slow_neg_target)
+
+    @numeric_slow_neg_target = numeric_slow_neg_proof
+  end
+
+  # As numeric_slow_zero_target: the one foreign definer is the compiled core body every Numeric's lookup reaches,
+  # and it is yield-free (a direct call skips the entry's Fiber guard). The only native definer is String#-@, whose
+  # export the collection proof checks, so the owners cover every member.
+  def numeric_slow_neg_proof
+    return nil unless numeric_slow_closed_world? && numeric_slow_collection_ready?('-@')
+    return nil unless @yield_reach && block_core_world && @native_name_sources
+
+    answers = call_facts_answers
+    definers = answers.definers('-@')
+    return nil if definers.nil? || definers[:singleton] || !definers[:class_native].empty?
+    return nil unless definers[:ruby].empty? && definers[:modules].empty? && definers[:foreign] == Set['Numeric']
+    return nil unless definers[:native].to_a == %w[String]
+
+    defs = core_compiled_definers('-@')
+    return nil unless defs.keys == ['Numeric'] && defs['Numeric'].one? && answers.foreign_definer?('-@', 'Numeric')
+
+    target = block_core_target('Integer', NUMERIC_SLOW_ZERO_CHAIN, '-@', 0, blockless: true)
+    return nil unless target && target.owner == 'Numeric' && @yield_reach.yield_free?(target.irep)
+
+    members = numeric_slow_members(answers, '-@')
+    return nil unless members&.all? { |klass| numeric_slow_inherits_owner?(answers, klass, %w[Numeric String]) }
+    return nil unless @closed_world.core_constant_plain?('Numeric', global_only: true)
+
+    target
   end
 
   # int_lshift / int_rshift for an Integer count; MRB_INT_MIN, a Float or bigint count keep the method.
