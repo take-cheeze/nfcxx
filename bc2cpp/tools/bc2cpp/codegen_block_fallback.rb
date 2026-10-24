@@ -1228,8 +1228,15 @@ class CodeGen
     if region[:n] == '*'
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: R(dest+1) is a real Array, so
       # RARRAY_LEN/RARRAY_PTR go straight into mrb_funcall_with_block.
-      out << "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-             "ary_size(r#{region[:argv_reg]}), ary_items(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
+      ary = "r#{region[:argv_reg]}"
+      owner_call = block_owner_call_argv_line("r#{dest_reg}", recv, region[:name], "ary_size(#{ary})", "ary_items(#{ary})",
+                                              "r#{region[:blk_reg]}")
+      out << if owner_call
+               "  #{owner_call}\n"
+             else
+               "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
+                 "ary_size(#{ary}), ary_items(#{ary}), r#{region[:blk_reg]});\n"
+             end
     else
       argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
       owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "r#{region[:blk_reg]}")

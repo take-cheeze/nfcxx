@@ -246,13 +246,13 @@ module SendRootReport
     return 'method:foreign_spelling' if @foreign_method_names.include?(d.name)
     return 'method:outside_token' if @outside_tokens.include?(d.name)
     return 'method:weird_name' unless d.name =~ /\A[A-Za-z_]/
-    return 'method:optional_or_rest' unless pure_mandatory_arity?(irep)
+    return 'method:optional_or_rest' unless entry_arg_shape?(irep)
 
     sites, poisoned = entry_arg_call_index
     return 'method:poisoned_name' if poisoned.include?(d.name)
     return 'method:dynamic_name' if numeric_dynamically_named?(d.name)
     return 'method:no_sites' if sites[d.name].empty?
-    return 'method:arity_mismatch' unless sites[d.name].all? { |s| s[3] == mand }
+    return 'method:arity_mismatch' unless sites[d.name].all? { |s| (mand..mand + optional_arity(irep)).cover?(s[3]) }
 
     'method:pool_dropped'
   end
