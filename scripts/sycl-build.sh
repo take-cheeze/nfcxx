@@ -12,6 +12,10 @@
 # --cpu: the host path only, no WGSL (the kernels are C++ loops).
 # Link flags (-L, -l, -Wl,..., -rpath dir; -rpath becomes -Wl,-rpath,dir) go to the host compile only, after the source and
 # -o; the device pass never sees them.
+# -c, -fPIC: a host object instead of a program (OpenCL and Level Zero). The TU's image is written next to the object
+# (obj.o.cl.spv, obj.o.man) and the object registers it, so objects linked into one program or one -shared library each
+# bring their kernels (lib/sycl/include/sycl/rt_image.hpp). Link the objects with the host compiler (nfcxx a.o b.o).
+# -shared and -rdynamic go to the host link like the other link flags.
 # --ndebug: -DNDEBUG on the device pass only (the host pass keeps its asserts). For a TU that reaches ggml.h's assert() from a
 # device-side function: the device pass refuses the call to the host __assert_fail, and the device has no assert to lower it to.
 # --cxx=CMD: the host compiler (default: $CXX; else nfcxx for WebGPU when built, else g++). The closure types' mangling and
@@ -21,7 +25,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/scripts/oneapi-env.sh"   # the oneAPI runtime libraries and OPENCL_INCLUDE, for the tools and compilers run below
-cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; ndebug=; opts=(); link=(); std=c++17
+cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; ndebug=; opts=(); link=(); hostopts=(); std=c++17
 while [ $# -gt 0 ]; do
   case $1 in
     --cpu) mode=cpu ;;
@@ -34,7 +38,8 @@ while [ $# -gt 0 ]; do
     -I|-D) opts+=("$1$2"); shift ;;
     -L|-l) [ $# -ge 2 ] || { echo "sycl-build: $1 needs an argument" >&2; exit 2; }; link+=("$1" "$2"); shift ;;
     -rpath) [ $# -ge 2 ] || { echo "sycl-build: -rpath needs an argument" >&2; exit 2; }; link+=("-Wl,-rpath,$2"); shift ;;
-    -L*|-l*|-Wl,*) link+=("$1") ;;
+    -L*|-l*|-Wl,*|-shared|-rdynamic) link+=("$1") ;;
+    -c|-fPIC|-fpic) hostopts+=("$1") ;;
     --diag_*) diag+=("$1") ;;                              # front-end (EDG) diagnostic options: the device pass only
     -I*|-D*|-U*|-O*|-g|-W*) opts+=("$1") ;;
     -*) echo "sycl-build: unknown option $1" >&2; exit 2 ;;
@@ -43,6 +48,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$src" ] || { echo "usage: sycl-build.sh [--cpu] prog.cpp -o prog" >&2; exit 2; }
+if [ ${#hostopts[@]} -gt 0 ] && { [ "$mode" = cpu ] || { [ $backend != opencl ] && [ $backend != level-zero ]; }; }; then
+  echo "sycl-build: -c and -fPIC need --backend=opencl or level-zero (the other runtimes load one image per program)" >&2; exit 2
+fi
 [ -n "$out" ] || out=${src%.cpp}
 # the host compiler: for a device backend, nfcxx when its EDG build is found (EDG_BUILD, default build/edg; EDG_BASE, default
 # build/edg-base; the closure layouts then match the device pass by construction), else $CXX or g++. The device pass names a
@@ -90,13 +98,23 @@ if [ $backend = opencl ] || [ $backend = level-zero ]; then
 fi
 if [ $backend = level-zero ]; then
   # the Level Zero headers (/usr/include/level_zero) and loader (libze_loader.so.1; no dev symlink, so it is named by its file)
+  [ ${#hostopts[@]} = 0 ] || exec $cxx -std=$std $optflag -DNFCXX_SYCL_LEVEL_ZERO -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" \
+    "${opts[@]}" "${hostopts[@]}" "$src" -o "$out"
   exec $cxx -std=$std $optflag -DNFCXX_SYCL_LEVEL_ZERO -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" \
     -l:libze_loader.so.1 "${link[@]}"
+fi
+if [ $backend = opencl ] && [ -n "${OPENCL_INCLUDE:-}" ] && [ -d "$OPENCL_INCLUDE/sycl" ]; then
+  # the oneAPI include directory: only its CL/ is wanted. Its sycl/ would shadow lib/sycl's headers, and its
+  # sycl/detail/kernel_desc.hpp makes nfcxx take a -c compile for a oneAPI SYCL source (the integration-header pre-pass).
+  clinc=$root/build/opencl-include
+  mkdir -p "$clinc" && ln -sfn "$OPENCL_INCLUDE/CL" "$clinc/CL" && OPENCL_INCLUDE=$clinc
 fi
 if [ $backend = opencl ]; then
   # the OpenCL headers: OPENCL_INCLUDE (the oneAPI compiler's, from scripts/oneapi-env.sh); libOpenCL.so.1 is the ICD loader
   # the search order: the user's -I/-D first, then the runtime's own headers, OPENCL_INCLUDE last (set by scripts/oneapi-env.sh). The oneAPI OpenCL
   # include directory also holds a sycl/ directory, so it must not shadow a user header of the same name.
+  [ ${#hostopts[@]} = 0 ] || exec $cxx -std=$std $optflag -DNFCXX_SYCL_OPENCL -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" "${opts[@]}" \
+    -I"$inc" ${OPENCL_INCLUDE:+"-I$OPENCL_INCLUDE"} "${hostopts[@]}" "$src" -o "$out"
   exec $cxx -std=$std $optflag -DNFCXX_SYCL_OPENCL -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" "${opts[@]}" -I"$inc" \
     ${OPENCL_INCLUDE:+"-I$OPENCL_INCLUDE"} "$src" -o "$out" -l:libOpenCL.so.1 "${link[@]}"
 fi

@@ -677,6 +677,14 @@ inline void backend_wait() {}
 }  // namespace sycl
 #endif
 
+// The image of this TU (OpenCL and Level Zero): registered once per TU, from a TU-local static, so that every TU of a
+// program or a shared library brings its kernels (rt_image.hpp).
+#if (defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)) && defined(NFCXX_SYCL_IMAGE_PREFIX) && !defined(__NFCXX_SYCL_DEVICE__)
+namespace {
+[[maybe_unused]] const int nfcxx_sycl_image_registered = ::sycl::detail::register_image(NFCXX_SYCL_IMAGE_PREFIX);
+}
+#endif
+
 namespace sycl {
 
 // ------------------------------------------------------------------------------------------------ atomics
