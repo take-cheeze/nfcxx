@@ -3025,6 +3025,27 @@ functions.each do |fn|
             stmts << "(if #{cv} (then (goto #{tb.inspect})) (else (goto #{fb.inspect})))"
           end
         end
+      elsif ln.start_with?("SWITCHVALUE")
+        m = ln.match(/^SWITCHVALUE (.+) \{ (.*) \}$/)
+        abort "invalid SWITCHVALUE: #{ln}" unless m
+        sval = m[1].strip
+        sty = place_type(sval, types, locals, params)
+        spt = rust_type_to_pathb(sty, types)
+        sv, regi = eval_rvalue_operand(sval, types, locals, params, param_reg, stmts, regi, lines)
+        cases = split_top(m[2]).map do |entry|
+          arm = entry.match(/^([+-]?\d+|_)\s*=\s*(\d+)$/)
+          abort "unsupported SWITCHVALUE arm: #{entry}" unless arm
+          [arm[1], arm[2]]
+        end
+        fallback = cases.find { |value, _| value == "_" }
+        branch = fallback ? "(goto #{fallback[1].inspect})" : "(unreachable)"
+        cases.reverse_each do |value, target|
+          next if value == "_"
+          cr = regi; regi += 1
+          stmts << "(let %#{cr} bool (eq #{spt} #{sv} (const #{spt} #{value.to_i})))"
+          branch = "(if %#{cr} (then (goto #{target.inspect})) (else #{branch}))"
+        end
+        stmts << branch
       elsif ln.start_with?("SWITCH")
         m = ln.match(/^SWITCH (.+) \{ ([^}]*) \}$/)
         if m

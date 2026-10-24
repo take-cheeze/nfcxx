@@ -1,8 +1,21 @@
 # mrustc's monomorphised MIR as a Rust frontend (design)
 
-Status: **design and probe.** The C route (`scripts/mrustc-nfcc.sh`, see `mrustc-frontend.md`) runs real programs today.
-This note is the other route: mrustc's `-C codegen-type=monomir` output, lowered to Path B IR, then to the existing
-Path B back ends. Nothing is implemented yet.
+Status: **native QBE route implemented.** `scripts/mrustc-monomir.sh` lowers mrustc's
+`-C codegen-type=monomir` output through `scripts/monomir-to-pathb.rb`, Path B IR and QBE.
+The program and its reachable generic functions use this route; the remaining crate functions
+link against mrustc's gcc-built objects. The C route (`scripts/mrustc-nfcc.sh`, see
+`mrustc-frontend.md`) remains available.
+
+Run `tests/mrustc/run-monomir.sh` for the runtime suite, including integer match regressions
+(`SWITCHVALUE`, signed values and 64-bit constants). Run real crates with
+`tests/realworld/run_mrustc.sh --monomir [case...]`; the driver reads the dump's `crate` records
+to find dependency objects, including crates supplied through `--extern`. The regex and batch cases pass.
+Serde JSON currently prints the first three expected lines and then aborts during serialization:
+its `State::eq` receives an invalid state byte. Integer match lowering is covered, but this
+remaining state-byte corruption is unresolved. Clap still fails to link because type-ID
+symbols such as `String::type_id` are missing.
+
+The design below describes the original plan; CIL and unwinding remain future work.
 
 ## 1. What mrustc emits (probe, `tests/mrustc/hello.rs`)
 
@@ -34,7 +47,7 @@ closure vtables, and nothing else. Size is not a problem at this scale.
 
 ```
 prog.rs --mrustc -C codegen-type=monomir--> prog.mir (types, statics, fn bodies)
-prog.mir --monomir-to-pathb (new)--> prog.pathb IR
+prog.mir --monomir-to-pathb--> prog.pathb IR
 prog.pathb --pathb-qbe--> QBE --> as --> object
 prog.pathb --pathb-cil--> CIL (later)
 ```

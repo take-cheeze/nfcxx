@@ -4,13 +4,19 @@
 # under [dependencies] is a crate it uses), and expected.txt: what rustc prints for the program. The dependency
 # tree is built by mrustc's minicargo from a `cargo vendor` of the lock, and the program and every crate of its link are
 # compiled by scripts/mrustc-nfcc.sh with MRUSTC_NFCC_CRATES=all. Needs scripts/setup-mrustc.sh, cargo (cargo vendor
-# downloads the crates) and network access.
-#   tests/realworld/run_mrustc.sh [case...]     (default: every case)
+# downloads the crates) and network access. With --monomir, the program and reachable generics
+# use Path B and QBE; remaining dependency functions link against mrustc's gcc-built objects.
+#   tests/realworld/run_mrustc.sh [--monomir] [case...]     (default: every case)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
 std=$root/build/mrustc/src/output-1.90.0
 mrustc_bin=$root/build/mrustc/src/bin
+driver=mrustc-nfcc
+if [ "${1:-}" = --monomir ]; then
+  driver=mrustc-monomir
+  shift
+fi
 cases=("$@")
 [ ${#cases[@]} -gt 0 ] || cases=($(ls tests/realworld/mrustc))
 pass=0; fail=0
@@ -36,14 +42,14 @@ for case in "${cases[@]}"; do
     ext=${dep//-/_}
     externs+=(--extern "$ext=$(ls "$out/lib$ext"-*.rlib | head -1)")
   done
-  if ! MRUSTC_NFCC_CRATES=all MRUSTC_STD="$out" "$root/scripts/mrustc-nfcc.sh" "$src/src/main.rs" -o "$work/$pkg" \
+  if ! MRUSTC_NFCC_CRATES=all MRUSTC_STD="$out" "$root/scripts/$driver.sh" "$src/src/main.rs" -o "$work/$pkg" \
       --crate-name "${pkg//-/_}" --crate-type bin --crate-tag "$tag" "${externs[@]}" --cfg debug_assertions -O \
       > "$work/nfcc.log" 2>&1; then
     tail -20 "$work/nfcc.log" >&2
-    echo "FAIL $case: mrustc-nfcc" ; fail=$((fail + 1)); continue
+    echo "FAIL $case: $driver" ; fail=$((fail + 1)); continue
   fi
   if got=$("$work/$pkg" 2>&1) && [ "$got" = "$(cat "$src/expected.txt")" ]; then
-    echo "ok   $case ($(echo $deps | tr " " ",") through mrustc and nfcxx)"; pass=$((pass + 1))
+    echo "ok   $case ($(echo $deps | tr " " ",") through $driver)"; pass=$((pass + 1))
   else
     echo "FAIL $case: output differs from expected.txt"; fail=$((fail + 1))
   fi

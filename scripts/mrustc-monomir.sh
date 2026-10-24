@@ -49,15 +49,13 @@ sed -i 's/__DOLLAR__/$/g' "$tmp/prog.qbe"
 "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/prog.qbe" "$tmp/prog.s"
 as "$tmp/prog.s" -o "$tmp/prog.o" || { echo "mrustc-monomir: as failed" >&2; exit 1; }
 
-# The link: the program object, then mrustc's objects for the standard library and the libraries
-# it names. mrustc writes no link command in monomir mode, so the rlib objects are listed here.
-rlibs=(libcore libcompiler_builtins-0_1_160_Ha2 liballoc librustc_std_workspace_core-1_99_0
-  libcfg_if-1_0_1_H3 librustc_std_workspace_alloc-1_99_0 libhashbrown-0_15_4_H1880d libpanic_abort
-  libstd_detect-0_1_5 liblibc-0_2_174_H19 librustc_demangle-0_1_25_H6 libunwind libstd)
-std_objs=()
-for r in "${rlibs[@]}"; do
-  [ -f "$std/$r.rlib.o" ] || { echo "mrustc-monomir: no $r.rlib.o in $std" >&2; exit 1; }
-  std_objs+=("$std/$r.rlib.o")
-done
-"$root/scripts/qbe-cc" -o "$out" "$tmp/prog.o" ${std_objs[@]+"${std_objs[@]}"} \
+# mrustc records the exact crate dependencies in the dump, including non-std crates
+# supplied with --extern. Their objects use the same symbols as the monomir output.
+crate_objs=()
+while IFS= read -r crate; do
+  [ -f "$crate" ] || { echo "mrustc-monomir: no crate object $crate" >&2; exit 1; }
+  crate_objs+=("$crate")
+done < <(ruby -ne 'puts $1 + ".o" if /^crate "(.*)\.mir";$/ =~ $_' "$tmp/prog.mir")
+[ ${#crate_objs[@]} -gt 0 ] || { echo "mrustc-monomir: no crate dependencies in mir" >&2; exit 1; }
+"$root/scripts/qbe-cc" -o "$out" "$tmp/prog.o" "${crate_objs[@]}" \
   -lutil -lrt -lpthread -lm -ldl -lc -lgcc_s -latomic
