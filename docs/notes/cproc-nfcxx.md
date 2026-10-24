@@ -122,6 +122,23 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   to integer types that differ only in signedness (`unsigned int *` for `int *`, gcc's `-Wpointer-sign`), basic asm
   (no operands) taken as literal text, and an input tied to an output by name (`"[sum]"`).
 
+- **`gnu_inline`** (the kernel defines `inline` with it): `extern inline` defines no symbol, and its body, emitted
+  under a local name, serves the direct calls that follow (C leaves it unspecified whether a call uses the inline
+  or the external definition; gcc's `always_inline` ones are always inlined, so its objects name no external
+  symbol either); taking the address names the external symbol. A plain `inline` defines the external symbol, the
+  reverse of C99.
+
+- **Other calling conventions** (`ms_abi`, `sysv_abi`, `regparm`, ...; the kernel's `__efiapi`, also before a
+  pointer in a parenthesized declarator): the function type is marked, and a call or definition of it is refused
+  (under `-p` only when a kept function makes it); declarations pass.
+
+- **GNU initializers and casts**: range designators `[lo ... hi] = value` (the element's initializers repeated, a
+  constant value only, since gcc evaluates it once), an empty `{}` for an array of unknown size (no elements), and a
+  cast to a union type (`(union u)x`, the member of `x`'s type). `sizeof` of a zero-length array (`int a[0]`) is the
+  constant 0; cproc took any array of size 0 for a variable-length one.
+
+- **`aligned` below a member's alignment** is ignored unless the struct is packed, as gcc does.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is

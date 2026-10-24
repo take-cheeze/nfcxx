@@ -329,6 +329,25 @@ EOC
     if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kvbig.c -o kvbig.o 2>&1); then bad "kernel mode: a 24-byte volatile load refused" "was accepted"
     elif grep -q "volatile load of this type" <<<"$out"; then ok "kernel mode: a 24-byte volatile load refused"
     else bad "kernel mode: a 24-byte volatile load refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # gnu_inline (the kernel's inline): extern inline defines no symbol and its direct calls use the body; inline
+    # defines the external symbol
+    cat > kgnui.c <<'EOC'
+extern inline __attribute__((gnu_inline, always_inline)) unsigned long save_fl(void) { return 40; }
+inline __attribute__((gnu_inline)) int two(void) { return 2; }
+int main(void) { return save_fl() + two(); }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kgnui.c -o kgnui.o 2>/dev/null && ! nm kgnui.o | grep -qE ' [TU] save_fl$' &&
+       nm kgnui.o | grep -q ' T two$' && "$nfcc" kgnui.o -o kgnui 2>/dev/null && { ./kgnui; [ $? = 42 ]; }; then ok "kernel mode: gnu_inline"
+    else bad "kernel mode: gnu_inline" "$(nm kgnui.o 2>&1 | tr '\n' ' ')"; fi
+    # another calling convention (the kernel's __efiapi, ms_abi): declarations pass; a call is refused, unless only a
+    # function pruning drops makes it
+    printf 'long call(long (__attribute__((ms_abi)) *h)(long)) { return h(1); }\n' > kabi1.c
+    printf 'long decl(long (__attribute__((ms_abi)) *h)(long));\nstatic long dead(long (__attribute__((ms_abi)) *h)(long)) { return h(1); }\nint used(void) { return 1; }\n' > kabi2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kabi1.c -o kabi1.o 2>&1); then bad "kernel mode: an ms_abi call refused" "was accepted"
+    elif grep -q "ms_abi calling convention is not supported" <<<"$out"; then ok "kernel mode: an ms_abi call refused"
+    else bad "kernel mode: an ms_abi call refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kabi2.c -o kabi2.o 2>/dev/null; then ok "kernel mode: ms_abi declarations and dead calls pass"
+    else bad "kernel mode: ms_abi declarations and dead calls pass" "the compile failed"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
