@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Run ASTroGen under the repo's mruby, with the command line of the `ruby` invocation it replaces:
+#   scripts/astrogen-mruby [-I dir]... [-r lib]... -e 'ASTroGen.start []'
+# -r NAME is found as NAME.rb or NAME under the -I directories (and the current one); `require` lines are dropped
+# (mruby has none) and the files are concatenated after scripts/mruby-astrogen.rb into one script for scripts/mrb.
+# The `__FILE__ == $0` self-test tail of astrogen.rb is cut. docs/notes/astro.md.
+root=$(cd "$(dirname "$0")/.." && pwd)
+inc=(.); libs=(); code=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -I) inc+=("$2"); shift 2;;
+    -I?*) inc+=("${1#-I}"); shift;;
+    -r) libs+=("$2"); shift 2;;
+    -r?*) libs+=("${1#-r}"); shift;;
+    -e) code=$2; shift 2;;
+    *) echo "astrogen-mruby: unknown argument $1" >&2; exit 2;;
+  esac
+done
+tmp=$(mktemp "${TMPDIR:-/tmp}/astrogen-mruby.XXXXXX") || exit 1
+trap 'rm -f "$tmp"' EXIT
+cat "$root/scripts/mruby-astrogen.rb" > "$tmp"
+seen=" "
+add() {  # add NAME: the file for NAME (after the files it requires from the -I directories), once
+  local l=$1 f= d c r
+  case $seen in *" $l "*) return;; esac
+  seen="$seen$l "
+  for d in "${inc[@]}"; do
+    for c in "$d/$l.rb" "$d/$l"; do [ -f "$c" ] && { f=$c; break 2; }; done
+  done
+  [ -n "$f" ] || { echo "astrogen-mruby: cannot find $l" >&2; exit 1; }
+  for r in $(sed -nE "s/^require ['\"]([^'\"]+)['\"].*/\1/p" "$f"); do
+    for d in "${inc[@]}"; do [ -f "$d/$r.rb" ] && { add "$r"; break; }; done
+  done
+  # keep line numbers: blank the require lines; turn `def m = ... super` (mruby: super in an endless def raises TypeError)
+  # into `def m; ...; end`; cut the trailing `if __FILE__ == $0` block
+  sed -E -e "s/^require .*$//" \
+      -e 's/^(\s*def\s+[^ =(]+(\([^)]*\))?) = (.*\<super\>.*)$/\1; \3; end/' "$f" | sed -E '/^if __FILE__ == \$0$/,/^end$/d' >> "$tmp"
+  echo >> "$tmp"
+}
+for l in "${libs[@]}"; do add "$l"; done
+printf '%s\n' "$code" >> "$tmp"
+exec "$root/scripts/mrb" "$tmp"
