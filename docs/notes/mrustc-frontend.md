@@ -26,7 +26,7 @@ the program, and each crate of MRUSTC_NFCC_CRATES (cached as build/mrustc/nfcxx/
 `scripts/mrustc-nfcc.sh prog.rs -o prog` builds the program. `MRUSTC_NFCC_CRATES` names the crates to compile through
 nfcxx (`core alloc std`, or `all`); `MRUSTC_NFCC_CORE=1` is `core` alone. A crate is rebuilt when its C file or the
 rewrite scripts are newer than its object. `scripts/setup-mrustc.sh` builds mrustc and the 1.90 standard library into
-`build/mrustc/src` (pinned commit `417733f9` on take-cheeze/mrustc branch `nfcxx/lifted-private`: upstream `d85e86b` plus the
+`build/mrustc/src` (pinned commit `2945c54b` on take-cheeze/mrustc branch `nfcxx/mold3-followups`: upstream `d85e86b` plus the
 fixes in that branch's `NFCXX-FIXES.md`, rows 22 to 41 being the ones mold 3 needed, section 7; from the mrustc
 `build-1.90.0.sh` steps, with `MRUSTC_REPO` to override the repository). The census and the rewrites were re-run on this
 pin: `tests/mrustc/run.sh` (16 of 16) and `tests/realworld/run_mrustc.sh regex` pass. The driver takes `MRUSTC` and
@@ -136,10 +136,9 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 - **Not exercised:** panics that unwind through more than one frame of user code, `std::fs` beyond the `fsio` case,
   the `libtest` and `proc_macro` crates (section 4 below), and the 16-byte atomics (no program reaches them). `time`,
   networking, signals, `dlopen` and checked arithmetic are now covered (section 3).
-- **mrustc's bugs found by the checked-arithmetic and time cases.** Both reproduce in mrustc's own gcc build, so they
-  are not the pipeline's, and both are left out of `checked.rs`:
-  - The 128-bit multiply helper in mrustc's prelude (`mul128_o`) does not flag the bits of the multiplicand it shifts
-    out, so `(1u128 << 100).checked_mul(1 << 28)` gives `Some(0)`, not `None`.
+- **mrustc's bug found by the checked-arithmetic case.** It reproduces in mrustc's own gcc build, so it is not the
+  pipeline's, and it is left out of `checked.rs` (the other one, a 128-bit multiply that dropped bits, went with the
+  multiply's rewrite, section 7):
   - mrustc's constant evaluator folds `(-30000i16).checked_mul(2)` to `Some(5536)` (the wrapped value, not overflowing).
     At run time the same operation gives `None`. `checked.rs` passes its operands through a non-`const` function so
     they are not folded.
@@ -231,7 +230,7 @@ mold 3.0.0 (rui314/mold, the Rust rewrite; `cargo vendor` of its lock file, x86-
 and with `--pipeline` the second too.
 
 - **mrustc's minicargo, gcc codegen.** mrustc needed the 20 fixes of rows 22 to 41 of `NFCXX-FIXES.md` on branch
-  `nfcxx/mold3` (and its follow-up `nfcxx/lifted-private`):
+  `nfcxx/mold3` (and its follow-ups `nfcxx/lifted-private` and `nfcxx/mold3-followups`):
   - minicargo: git dependencies from the vendor directory, workspace `default-members` and `version.workspace`, the
     `cargo::` build-script syntax;
   - `asm!` template pieces built by macros, and the operand modifiers `x l h y z` (portable-atomic);
@@ -242,9 +241,11 @@ and with `--pipeline` the second too.
   - generic statics evaluated per instantiation, lifted statics always emitted (mold's `Target` constants; a first version made them global, and glob re-exports then imported core's into alloc);
   - an impl parameter fixed by a later bound (rayon's `flat_map_iter`);
   - a cap on the paths of `MIR_Validate_ValState` (mold's lib crate reached 13.8 GB without it, about 1.2 GB with it).
+  - minicargo's `OUT_DIR` laid out as cargo's (`<output>/build/<package>/out`): mold's build script puts
+    `mold-wrapper.so` (for `mold -run`) beside `mold` by that layout, and wrote it at the root of the checkout before.
 
-  The binary links a C program, a C++ program with threads and exceptions, and mrustc itself (231 MB, 3.3 s on 4
-  cores).
+  The binary links a C program, a C++ program with threads and exceptions, and mrustc itself (231 MB), to an output
+  byte-identical to that of mold built by rustc (`scripts/setup-mold.sh`): 2.0 to 2.6 s against 1.1 s on 4 cores.
 - **nfcxx's pipeline.** Every crate of the link goes through `mrustc-prep.rb`, cproc and QBE, portable-atomic's
   inline asm outlined (section 2). The build takes about 7 minutes once mrustc's C exists (20 before cproc copied
   structs with `blit`, below). The binary is 77 MB. What it needed:
@@ -271,16 +272,21 @@ and with `--pipeline` the second too.
     - libraries are linked `--no-as-needed`, since libz was referenced only weakly and was dropped.
 
   The binary links the C program, with uncompressed, zlib and zstd debug sections, and the C++ program (same output).
-  It also links mrustc, with the default thread stacks, to an output byte-identical to the gcc-built mold's, in 8.9 s
-  (3.6 s for the gcc-built mold on the same 4 cores).
+  It also links mrustc, with the default thread stacks, to the same bytes, in 5.3 s.
+- **The 128-bit multiply.** mrustc's C prelude emulates `u128` on x86-64 Linux (`emulated_i128`), and its multiply
+  shifted and added bit by bit: up to 128 iterations, each a call. xxhash's 64x64 to 128-bit multiply, which mold's
+  string hashing runs on every input section, was a fifth of a link's samples through the pipeline and a third (inlined
+  into `xxh3::mix16_b`) in the gcc build. The multiply is now schoolbook on 64-bit halves (`nfcxx/mold3-followups`): the
+  link of mrustc went from 8.9 to 5.3 s (pipeline) and from 3.6 to about 2.3 s (gcc), and a loop of 20M `u128` products
+  from 12.7 to 0.1 s.
 - **Gaps.**
   - **Stack size.** QBE's frames are still larger than gcc's (18.6 KB against 14.5 KB in the test function above):
     QBE's slot coalescing skips slots whose address escapes, and mrustc's C takes the address of nearly every
     aggregate local. Lifetimes for escaping slots in QBE, or mrustc's C scoping its locals, would close the rest.
-  - **Speed.** The link of mrustc takes 2.5 times as long as with the gcc-built mold.
+  - **Speed.** The pipeline's link of mrustc takes about 2.3 times as long as the gcc build's. What is left in the
+    profile is small functions gcc inlines (`TryFrom::try_from`, `Result::unwrap`, `checked_sub`, `make_sliceptr`):
+    QBE has no inliner. The sized atomics are calls into libatomic (`__atomic_load_8`, 2.5%).
   - **Outlined asm** costs a call per statement, and needs operands that are variables (an expression operand is
     left for cproc, which refuses it).
-  - **mold-wrapper.so.** mold's build script writes `mold-wrapper.so` (for `mold -run`) beside the first ancestor
-    directory named `build`, which is the repository root here. The test removes it.
   - **Time.** The mrustc build of mold's two crates is most of the hour of a cold run; `MIR_Validate_ValState` is
     about 20 minutes of each.
