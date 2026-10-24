@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
@@ -102,4 +102,32 @@ rc=0
 echo "ok   $loan_ir metadata erasure, emitter oracle, and native execution"
 pass=$((pass + 1))
 done
+# Semantic layouts change initialization proof, never generated code. Without
+# the contract, the same whole-object borrow must retain conservative padding checks.
+semantic_ir=tests/mruby/pathb-edge/semantic_layout_facts.ir
+for mode in explicit inferred; do
+  options=()
+  [ "$mode" = explicit ] || options=(--infer-loan-ends)
+  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$semantic_ir" > "$tmp/semantic-check"
+done
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$semantic_ir" > "$tmp/semantic.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$semantic_ir" > "$tmp/semantic-oracle.qbe"
+cmp "$tmp/semantic.qbe" "$tmp/semantic-oracle.qbe"
+sed '/^(borrow-layout /d' "$semantic_ir" > "$tmp/unannotated.ir"
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/unannotated.ir" > "$tmp/unannotated-check" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -Fq 'uninitialized: s' "$tmp/unannotated-check"; then
+  echo "FAIL semantic layout fallback: expected conservative padding error, got $rc"
+  cat "$tmp/unannotated-check"
+  exit 1
+fi
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/unannotated.ir" > "$tmp/unannotated.qbe"
+cmp "$tmp/semantic.qbe" "$tmp/unannotated.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/semantic.qbe" -o "$tmp/semantic.s"
+cc "$tmp/semantic.s" -o "$tmp/semantic"
+rc=0
+"$tmp/semantic" || rc=$?
+[ "$rc" = 7 ] || { echo "FAIL semantic layout runtime: expected 7, got $rc"; exit 1; }
+echo "ok   semantic layout padding proof, metadata erasure, oracle, and native execution"
+pass=$((pass + 1))
 echo "pass $pass fail 0"

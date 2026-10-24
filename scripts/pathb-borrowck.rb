@@ -136,11 +136,109 @@ def bname(x)
   x.is_a?(IRStr) ? x.to_s : x
 end
 
+# Semantic layouts are checker contracts, not ABI classification. Keep this
+# validator in sync in the standalone checker, QBE emitter, and emitter oracle.
+class BorrowLayouts
+  PRIMITIVES = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
+                'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
+                'long'=>8, 'unsigned_long'=>8, 'long_long'=>8, 'unsigned_long_long'=>8,
+                'float'=>4, 'double'=>8}
+
+  def initialize(forms, bad, refused)
+    @bad = bad
+    @refused = refused
+    @raw = {}
+    @resolved = {}
+    forms.each do |f|
+      next unless head(f) == 'borrow-layout'
+      raise @bad, 'borrow-layout form' unless f.length >= 4
+      raise @refused, 'semantic layouts currently require struct types' unless head(f[1]) == 'struct'
+      k = key(f[1])
+      raise @bad, "duplicate semantic layout #{k[1]}" if @raw.key?(k)
+      @raw[k] = f
+    end
+    @raw.each_key { |k| resolve(k, []) }
+  end
+
+  def head(x)
+    x.is_a?(Array) ? x[0] : nil
+  end
+
+  def key(ty)
+    return nil unless head(ty) == 'struct'
+    raise @bad, 'semantic layout type form' unless ty.length == 2 && ty[1].is_a?(IRStr) && !ty[1].to_s.empty?
+    ['struct', ty[1].to_s]
+  end
+
+  def number(x)
+    unless x.is_a?(String) && !x.empty? && x.bytes.all? { |c| c >= 48 && c <= 57 }
+      raise @bad, 'semantic layout requires nonnegative integer constants'
+    end
+    x.to_i
+  end
+
+  def lookup(ty)
+    k = key(ty)
+    k ? @resolved[k] : nil
+  end
+
+  def field_type(ty, visiting)
+    if ty.is_a?(String) && PRIMITIVES.key?(ty)
+      n = PRIMITIVES[ty]
+      return {size: n, align: n, used: (0...n).to_a, objects: []}
+    end
+    if head(ty) == 'ptr'
+      raise @bad, 'semantic pointer field type' unless ty.length == 2
+      return {size: 8, align: 8, used: (0...8).to_a, objects: []}
+    end
+    k = key(ty)
+    raise @refused, 'unsupported semantic field type' unless k
+    resolve(k, visiting)
+  end
+
+  def resolve(k, visiting)
+    raise @bad, "cyclic semantic layout #{k[1]}" if visiting.include?(k)
+    return @resolved[k] if @resolved.key?(k)
+    raise @bad, "unknown semantic layout #{k[1]}" unless @raw.key?(k)
+    f = @raw[k]
+    size = number(f[2])
+    align = number(f[3])
+    unless size > 0 && size <= 4096 && align > 0 && align <= 4096 && (align & (align - 1)) == 0 && size % align == 0
+      raise @bad, "invalid semantic size/alignment for #{k[1]}"
+    end
+    names = {}
+    ranges = []
+    used = []
+    objects = [[0, k]]
+    f.drop(4).each do |field|
+      unless head(field) == 'field' && field.length == 4 && field[1].is_a?(IRStr) && !field[1].to_s.empty?
+        raise @bad, 'semantic field form'
+      end
+      name = field[1].to_s
+      raise @bad, "duplicate semantic field #{name}" if names[name]
+      names[name] = true
+      off = number(field[2])
+      desc = field_type(field[3], visiting + [k])
+      n = desc[:size]
+      raise @bad, "semantic field #{name} exceeds its object" if off + n > size
+      raise @refused, 'unaligned semantic fields are unsupported' if off % desc[:align] != 0 || align < desc[:align]
+      if ranges.any? { |o, len| off < o + len && o < off + n }
+        raise @refused, 'overlapping semantic fields are unsupported'
+      end
+      ranges << [off, n]
+      used.concat(desc[:used].map { |i| off + i })
+      objects.concat(desc[:objects].map { |o, ty| [off + o, ty] })
+    end
+    @resolved[k] = {size: size, align: align, used: used.sort, objects: objects}
+  end
+end
+
 class LocalLifetime
   attr_reader :errors
 
-  def initialize(f, infer_loan_ends = false)
+  def initialize(f, infer_loan_ends = false, semantic_layouts = nil)
     @infer_loan_ends = infer_loan_ends
+    @layouts = semantic_layouts || BorrowLayouts.new([], BadIR, BorrowRefused)
     raise BadIR, 'function header' unless f.length >= 4 && bh(f[2]) == 'ret' && bh(f[3]) == 'params'
     @name = bname(f[1])
     @slots = {}
@@ -165,13 +263,13 @@ class LocalLifetime
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
         place = direct_place(x[4])
         raise BorrowRefused, 'borrow requires a direct local place or constant field offset; use reborrow with an explicit parent' unless place
-        @loans[id] = [place[0], x[3], nil, place[1], x[1][1]]
+        @loans[id] = [place[0], x[3], nil, place[1], x[1][1], x[1][1]]
       end
       if bh(x) == 'reborrow'
         raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
         id = bname(x[2])
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
-        @loans[id] = [nil, x[3], bname(x[4]), expression_offset(x[5]), x[1][1]]
+        @loans[id] = [nil, x[3], bname(x[4]), expression_offset(x[5]), x[1][1], x[1][1]]
       end
       x.each { |y| scan.call(y) }
     end
@@ -185,7 +283,12 @@ class LocalLifetime
         raise BorrowRefused, 'local byte-range analysis requires slot sizes from 1 to 4096' unless size > 0 && size <= 4096
         name = bname(x[1])
         raise BadIR, "duplicate local slot #{name}" if @slots[name]
-        @slot_info[name] = [@slots.length, size, x[2]]
+        align = constant_offset(x[4])
+        desc = @layouts.lookup(x[2])
+        if desc && (size != desc[:size] || align < desc[:align] || align % desc[:align] != 0)
+          raise BadIR, "slot #{name} disagrees with semantic layout"
+        end
+        @slot_info[name] = [@slots.length, size, x[2], align]
         @slots[name] = true
       end
     end
@@ -234,6 +337,7 @@ class LocalLifetime
     raise BadIR, "loan refers to unknown slot #{loan[0]}" unless @slots[loan[0]]
     loan[4] = type_width(loan[4], loan[0], loan[3])
     check_range(loan[0], loan[3], loan[4])
+    semantic_bytes(loan[0], loan[3], loan[5])
     if parent
       p = @loans[parent]
       raise BorrowRefused, 'reborrow range escapes its parent' unless loan[3] >= p[3] && loan[3] + loan[4] <= p[3] + p[4]
@@ -261,6 +365,8 @@ class LocalLifetime
   end
 
   def type_width(ty, root = nil, off = 0)
+    desc = @layouts.lookup(ty)
+    return desc[:size] if desc
     return 8 if bh(ty) == 'ptr'
     widths = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
               'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
@@ -272,6 +378,16 @@ class LocalLifetime
       return @slot_info[root][1]
     end
     raise BorrowRefused, 'unknown aggregate access width'
+  end
+
+  def semantic_bytes(root, off, ty)
+    desc = @layouts.lookup(ty)
+    return nil unless desc
+    root_desc = @layouts.lookup(@slot_info[root][2])
+    unless root_desc && root_desc[:objects].include?([off, @layouts.key(ty)])
+      raise BorrowRefused, 'semantic aggregate borrow does not match a declared subobject'
+    end
+    desc[:used]
   end
 
   def check_range(root, off, width)
@@ -407,7 +523,7 @@ class LocalLifetime
 
   # Each storage state is a set: dead, uninitialized, initialized, moved. Pointer
   # provenance is a set of local storage identities, or external/unknown.
-  def access(place, state, read, borrowing = nil, width = nil)
+  def access(place, state, read, borrowing = nil, width = nil, semantic_type = nil)
     base = base_origin(place)
     return if base == 'external'
     if base.start_with?('ended:')
@@ -434,6 +550,10 @@ class LocalLifetime
     label = off == 0 && width == @slot_info[name][1] ? name : name + '[' + off.to_s + '..' + (off + width).to_s + ']'
     status = (0...width).flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
     diagnostic('use-after-scope', label) if status.include?('dead')
+    required = semantic_type ? semantic_bytes(name, off, semantic_type) : nil
+    if required
+      status = required.flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
+    end
     diagnostic('uninitialized', label) if read && status.include?('uninitialized')
     diagnostic('use-after-move', label) if read && status.include?('moved')
     @loans.each do |id, loan|
@@ -511,7 +631,7 @@ class LocalLifetime
       loan = @loans[id]
       record_loan_definition(id)
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
-      access(project('local:' + loan[0], loan[3]), state, true, loan[1], loan[4])
+      access(project('local:' + loan[0], loan[3]), state, true, loan[1], loan[4], loan[5])
       state['loan:' + id] = ['active']
       ['loan:' + id]
     when 'reborrow'
@@ -527,7 +647,7 @@ class LocalLifetime
       sources.each do |p|
         a = address(p)
         raise BorrowRefused, 'reborrow source offset does not match its declared range' if a && a[1] != loan[3]
-        access(p, state, true, loan[1], loan[4])
+        access(p, state, true, loan[1], loan[4], loan[5])
       end
       state['loan:' + id] = ['active']
       ['loan:' + id]
@@ -763,11 +883,12 @@ begin
       end
     end
   end
+  semantic_layouts = BorrowLayouts.new(forms, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
   errors = []
   functions.each do |f|
-    checker = LocalLifetime.new(f, infer)
+    checker = LocalLifetime.new(f, infer, semantic_layouts)
     checker.run
     errors.concat(checker.errors)
   end

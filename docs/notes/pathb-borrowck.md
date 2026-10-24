@@ -222,17 +222,54 @@ but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
 layouts, dynamic offsets/indices, out-of-bounds accesses, external pointer projections, and accesses
-outside a loan's range. Aggregate value loads/transfers remain refused. Whole-object loan widths
-come from the matching root slot; nested aggregate widths that cannot be established are refused.
-Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
+outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
+whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
+widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
 
-The model tracks **physical byte initialization**, not a semantic field-layout tree. Whole-object
-loans conservatively require all bytes initialized, including padding. Ordinary field accesses do
-not require padding initialization. Layout facts that distinguish fields, padding, and drop behavior
-are needed before general ownership-aware frontend emission can use whole-object loans reliably.
-The C++ integration tests cover field initialization, references to padded structs, uninitialized
-fields, and dangling field pointers. Frontends still do not emit loan or value-transfer annotations.
+The underlying model tracks **physical byte initialization**. Without semantic metadata,
+whole-object loans conservatively require all bytes initialized, including padding. Ordinary field
+accesses do not require padding initialization. The C++ integration tests cover field initialization,
+references to padded structs, uninitialized fields, and dangling field pointers.
+
+## Semantic struct layouts
+
+Optional module-level metadata separates value fields from physical padding:
+
+```text
+(borrow-layout (struct "Pad") 8 4
+  (field "a" 0 char)
+  (field "b" 4 int))
+```
+
+The size and alignment are 8 and 4 bytes. Field names are unique, offsets are absolute within the
+struct, and field types determine widths and alignment. Scalars, pointers, and other declared struct
+layouts are supported. Pointers do not recursively embed their pointee, so self-referential pointer
+types are valid. By-value cycles, missing nested layouts, duplicate fields/layouts, and out-of-bounds
+fields are errors. Overlapping or unaligned fields, arrays, and union descriptors are refused.
+This excludes packed layouts and overlapping empty subobjects for now.
+
+A slot using a known layout must match its size and provide sufficient alignment. Known aggregate
+borrows must identify the root object or a declared nested subobject of the requested type at the
+correct offset. An arbitrary same-size byte range cannot claim a different struct's initialization
+mask. Layout validation runs before analysis and before code-generation pruning, including for
+unused descriptors.
+
+Whole-aggregate borrow and reborrow creation checks only declared field bytes, recursively ignoring
+padding. Every field must still be initialized and unmoved. Empty structs with positive physical
+size have no field initialization requirements, but their storage must still be alive. Slot storage
+size zero remains unsupported. Loan conflicts and bounds continue to cover physical ranges;
+semantic padding does not authorize an overlapping write through a live loan.
+
+These facts **do not initialize padding**. Ordinary typed loads, copies, moves, and zero-fill retain
+physical-byte behavior. A raw integer read spanning uninitialized padding still fails after a valid
+semantic aggregate borrow. Missing metadata retains the conservative physical-byte fallback.
+
+Both QBE emitters validate the descriptor graph and emit no code for it. Removing metadata produces
+identical QBE and native behavior. Layout records are trusted frontend contracts: validation checks
+internal consistency, not correspondence with Rust or C++ source or completeness against a source
+type. Neither frontend emits these records or ownership loan/transfer forms yet. Source-language
+drop, active-member, and trait rules remain separate work.
 
 ## Refusals and limits
 
@@ -259,7 +296,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next shared-IR extensions are semantic field layouts, drop flags, call
+The next steps are frontend layout/ownership emission, drop flags, call
 effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -274,7 +311,10 @@ parent/child demands. Refusal cases are also run with inference enabled. Value-t
 run in both loan modes and cover moved-state joins, reinitialization,
 consuming pointer carriers, and conflicts with live loans. Field-range fixtures cover partial
 moves, byte repairs, overlapping loans, projected reborrows, pointer-field provenance, storage
-reuse, and conservative padding checks. The explicit-loan and
+reuse, and conservative padding checks. Semantic-layout fixtures verify field-only initialization,
+nested layouts, moved fields, raw padding reads, storage lifetimes, and malformed descriptor graphs.
+A native test checks both the unchanged QBE and the stricter conservative result when metadata is
+removed. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,
 loop iterations, parent restoration, nested children, shared siblings, and invalid parent graphs. A native execution check verifies that loan metadata erasure leaves the QBE output
 unchanged and that the emitter agrees with its oracle. The Path B CI workflow runs this suite
