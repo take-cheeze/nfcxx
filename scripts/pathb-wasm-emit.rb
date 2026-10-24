@@ -42,15 +42,17 @@
 #
 # Checked operations. Division by zero, INT_MIN / -1 and float-to-integer conversions out of range or from NaN trap
 # through wasm's own traps, which match the IR's checked forms. A shift whose count is not below the width of its left
-# operand traps through an explicit `unreachable`. `unreachable` and `trap` trap.
+# operand traps through an explicit `unreachable`. `unreachable` and `trap` trap. The checked arithmetic (cadd csub cmul
+# cneg) traps through an explicit `unreachable` when the result does not fit the type (checked_arith).
 #
 # Calls of functions that the module does not define become imports from the module "env" (the host supplies them).
 # An import's signature is the one of its first call.
 #
-# This milestone handles scalars, pointers, arithmetic, comparisons, conversions, loads and stores, slots, direct calls,
-# if, loop with break and continue, switch (arms that end in a jump, no fallthrough), return, copy, trap and unreachable,
-# and static data: the defined globals and string data, at fixed addresses in the memory, with their initializers.
-# Everything else is refused with the reason on stderr: general goto and labels, extern and dynamically initialized
+# This milestone handles scalars, pointers, arithmetic, comparisons, conversions, loads and stores, slots, alloca,
+# direct calls, if, loop with break and continue, switch (arms that end in a jump, no fallthrough), return, copy, trap
+# and unreachable, a body of labels and gotos without loops (dispatch_body), and static data: the defined globals and
+# string data, at fixed addresses in the memory, with their initializers.
+# Everything else is refused with the reason on stderr: other goto and labels, extern and dynamically initialized
 # globals (when used), bit-field access, aggregate parameters, results and arguments, variadic calls, function pointers,
 # indirect calls, inline assembly, VLAs, exceptions and the 16-byte types. Those refusals are the next steps, not silent
 # drops.
@@ -746,10 +748,14 @@ class Fn
           raise Refused, "variadic function" if head_of(p) == "ellipsis"
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param"
           raise BadIR, "bad parameter #{form_text(p)}" unless p.length == 4
-          raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
+          # the register is any %N (EDG numbers the parameters from %0, llvm-to-pathb.rb from %1); it is the
+          # parameter's wasm local, k
+          reg = p[1].to_s
+          raise BadIR, "bad parameter register #{reg}" unless reg.start_with?("%")
+          raise BadIR, "parameter register #{reg} twice" if params.any? { |q| q[2] == reg }
           ty = parse_type(p[3])
           raise Refused, "aggregate parameter #{form_text(p)}" if wtype(ty).nil? || !(ty[0] == "int" || ty[0] == "ptr" || ty[0] == "float")
-          params << [wtype(ty), ty]
+          params << [wtype(ty), ty, reg]
         end
       elsif h == "static"
         nil
@@ -781,7 +787,7 @@ class Fn
     @result = wtype(ret)
     @frame = (@frame + 15) / 16 * 16
     @param_types = params.map { |p| p[0] }
-    params.each_with_index { |p, k| @regs["%#{k}"] = [k, p[0], p[1]] }
+    params.each_with_index { |p, k| @regs[p[2]] = [k, p[0], p[1]] }
     # locals after the parameters: the stack pointer on entry, this frame's base and a 64-bit scratch, then one local per
     # register declared by a let
     @old_local = params.length
@@ -1061,6 +1067,8 @@ class Fn
   # ---- rvalues: each leaves one value on the wasm stack and returns its wasm type
 
   def rval(x)
+    # a bare operand: a register, or the address of a static object, a slot or a function
+    return push_op(x) if (x.is_a?(String) && x[0] == "%") || x.is_a?(IRSym)
     h = head_of(x)
     case h
     when "load", "load.v"
@@ -1087,6 +1095,22 @@ class Fn
       e(w == :i32 ? 0x6b : 0x7d)           # sub
       normalize(ty)
       w
+    when "cadd", "csub", "cmul", "cneg"
+      checked_arith(h, x)
+    when "alloca"
+      # (alloca SIZE): SIZE bytes below the stack pointer, aligned to 16, live until the function returns (its return
+      # puts back the stack pointer of the entry, restore_sp)
+      raise Refused, "alloca under --asan (the shadow of a dynamic frame)" if @asan
+      e(0x23); leb_u(0)                    # global.get 0
+      push_i64(x[1], false)
+      e(0xa7)                              # i32.wrap_i64
+      e(0x41); leb_s(15); e(0x6a)          # + 15
+      e(0x41); leb_s(-16); e(0x71)         # & -16
+      e(0x6b)                              # i32.sub
+      e(0x24); leb_u(0)                    # global.set 0
+      e(0x23); leb_u(0)
+      e(0xad) if $ptr_bytes == 8           # i64.extend_i32_u
+      $ptr_bytes == 8 ? :i64 : :i32
     when "cdiv", "crem"
       ty = parse_type(x[1])
       raise Refused, "#{h} of a non-integer" unless ty[0] == "int"
@@ -1472,9 +1496,13 @@ class Fn
     when "continue"
       e(0x0c); leb_u(label_depth(:cont, nil))
     when "goto"
-      # the labels that end a loop body or follow a loop are the loop's continue and break; any other goto is refused
+      # the labels that end a loop body or follow a loop are the loop's continue and break; in a body of labels
+      # (dispatch_body) a goto sets the segment to run and goes back to the dispatch; any other goto is refused
       name = s[1].to_s
-      if @cont.key?(name)
+      if @dispatch && @dispatch.key?(name)
+        e(0x41); leb_s(@dispatch[name]); e(0x21); leb_u(@pc_local)
+        e(0x0c); leb_u(label_depth(:dispatch, nil))
+      elsif @cont.key?(name)
         e(0x0c); leb_u(label_depth(:cont, @cont[name]))
       elsif @brk.key?(name)
         e(0x0c); leb_u(label_depth(:brk, @brk[name]))
@@ -1643,6 +1671,140 @@ class Fn
   end
 
   # The number of wasm blocks between here and the innermost entry of the kind (of the loop id, when given).
+  # A body of labels and gotos (the control flow graph that llvm-to-pathb.rb writes, or a C goto) has no structured
+  # form. It is lowered as a dispatch: the labels at the top level of the body split it into segments, and a loop runs
+  # the segment that a local (pc) names, through a br_table into nested blocks:
+  #   loop $D  block_{n-1} ... block_0  (br_table pc: 0 .. n-1)  end segment_0  end segment_1 ... end segment_{n-1}  end
+  # Control falls from one segment into the next, as it falls past a label. goto L sets pc to L's segment and branches
+  # to $D. The form applies when every label is at the top level and the body has no loop or switch, whose labels are
+  # the structured jumps (stmt, "goto").
+  def dispatch_body?(body)
+    return false unless body.any? { |st| head_of(st) == "label" }
+    body.all? { |st| head_of(st) == "label" || !nested_control?(st) }
+  end
+
+  def nested_control?(form)
+    return false unless form.is_a?(Array)
+    h = head_of(form)
+    return true if h == "loop" || h == "switch" || h == "label"
+    form.drop(1).any? { |c| nested_control?(c) }
+  end
+
+  def dispatch_body(body)
+    segs = [[]]
+    @dispatch = {}
+    body.each do |st|
+      if head_of(st) == "label"
+        name = st[1].to_s
+        raise BadIR, "label \"#{name}\" twice" if @dispatch.key?(name)
+        @dispatch[name] = segs.length
+        segs << []
+      else
+        segs.last << st
+      end
+    end
+    @pc_local = @next_local                # wasm locals start at zero: segment 0 runs first
+    @local_types << :i32
+    @next_local += 1
+    n = segs.length
+    @labels << [:dispatch]
+    e(0x03, 0x40)                          # loop $D
+    n.times do
+      @labels << [:seg]
+      e(0x02, 0x40)
+    end
+    get_local(@pc_local)
+    e(0x0e); leb_u(n)                      # br_table: segment j is depth j, the default is the last
+    n.times { |j| leb_u(j) }
+    leb_u(n - 1)
+    segs.each do |seg|
+      e(0x0b)
+      @labels.pop
+      stmt_list(seg)
+    end
+    e(0x0b)
+    @labels.pop
+  end
+
+  def get_local(l)
+    e(0x20); leb_u(l)
+  end
+
+  # A scratch i64 local of this function, the n-th (0, 1, ...), declared when first used.
+  def scratch64(n)
+    @scratch64 ||= []
+    while @scratch64.length <= n
+      @scratch64 << @next_local
+      @local_types << :i64
+      @next_local += 1
+    end
+    @scratch64[n]
+  end
+
+  # cadd csub cmul cneg: the operation, which traps when the exact result does not fit the type (signed or unsigned).
+  # Narrower than 64 bits, the exact result is computed in i64 and its range is checked. At 64 bits, the wrapped
+  # result is checked: add and sub by the signs (or, unsigned, by the carry), mul by dividing back (a division of
+  # INT64_MIN by -1 traps by itself, and that product overflows).
+  def checked_arith(h, x)
+    ty = parse_type(x[1])
+    raise Refused, "#{h} of a non-integer" unless ty[0] == "int" && !ty[3]
+    w = wtype(ty)
+    signed = ty[2]
+    a, b = h == "cneg" ? [["const", x[1], "0"], x[2]] : [x[2], x[3]]
+    op = { "cadd" => 0x7c, "csub" => 0x7d, "cmul" => 0x7e, "cneg" => 0x7d }[h]   # i64.add, sub, mul
+    if w == :i32
+      push_i64(a, signed); push_i64(b, signed)
+      e(op)
+      e(0x22); leb_u(@tmp64)               # local.tee
+      bits = ty[1] * 8
+      lo = signed ? -(1 << (bits - 1)) : 0
+      hi = signed ? (1 << (bits - 1)) - 1 : (1 << bits) - 1
+      e(0x42); leb_s(lo); e(0x53)          # i64.lt_s
+      e(0x20); leb_u(@tmp64)
+      e(0x42); leb_s(hi); e(0x55)          # i64.gt_s
+      e(0x72)                              # i32.or
+      e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
+      e(0x20); leb_u(@tmp64)
+      e(0xa7)                              # i32.wrap_i64: in range, so already in canonical form
+      return w
+    end
+    ra = scratch64(0)
+    rb = scratch64(1)
+    push_op(a, :i64); e(0x21); leb_u(ra)
+    push_op(b, :i64); e(0x21); leb_u(rb)
+    e(0x20); leb_u(ra); e(0x20); leb_u(rb); e(op)
+    e(0x21); leb_u(@tmp64)
+    if h == "cmul"
+      # a != 0 && r / a != b
+      get_local(ra); e(0x50); e(0x45)       # i64.eqz, i32.eqz
+      e(0x04, 0x40)
+      get_local(@tmp64); get_local(ra); e(signed ? 0x7f : 0x80)   # i64.div_s / div_u
+      get_local(rb); e(0x52)                # i64.ne
+      e(0x04, 0x40); e(0x00); e(0x0b)
+      e(0x0b)
+    elsif signed
+      if h == "cadd"
+        get_local(ra); get_local(@tmp64); e(0x85)   # a ^ r
+        get_local(rb); get_local(@tmp64); e(0x85)   # b ^ r
+      else
+        get_local(ra); get_local(rb); e(0x85)       # a ^ b
+        get_local(ra); get_local(@tmp64); e(0x85)   # a ^ r
+      end
+      e(0x83)                              # i64.and
+      e(0x42); leb_s(0); e(0x53)           # < 0: the sign changed the wrong way
+      e(0x04, 0x40); e(0x00); e(0x0b)
+    else
+      if h == "cadd"
+        get_local(@tmp64); get_local(ra); e(0x54)   # r <u a: a carry
+      else
+        get_local(ra); get_local(rb); e(0x54)       # a <u b: a borrow
+      end
+      e(0x04, 0x40); e(0x00); e(0x0b)
+    end
+    get_local(@tmp64)
+    w
+  end
+
   def label_depth(kind, id)
     depth = 0
     @labels.reverse_each do |l|
@@ -1676,7 +1838,11 @@ class Fn
     e(0x20); leb_u(@fp_local)
     e(0x24); leb_u(0)                      # global.set 0
     asan_poison_frame if @asan && @frame > 0
-    stmt_list(@body)
+    if dispatch_body?(@body)
+      dispatch_body(@body)
+    else
+      stmt_list(@body)
+    end
     if @result.nil?
       restore_sp
     else

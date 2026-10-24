@@ -1,7 +1,7 @@
 # The wasm explorer: an online compiler page for the wasm emitter
 
-`tools/wasm-explorer/` is a page for trying the Path B WebAssembly emitter (`pathb-wasm.md`): C++ in, the IR, the
-WebAssembly text and the binary out, and the module runs in the page with the browser's WebAssembly. It is an explorer
+`tools/wasm-explorer/` is a page for trying the Path B WebAssembly emitter (`pathb-wasm.md`): C++, C, LLVM IR or the
+mid-level IR itself in (see "Languages"), the IR, the WebAssembly text and the binary out, and the module runs in the page with the browser's WebAssembly. It is an explorer
 in the sense of Compiler Explorer, for one backend.
 
 It runs in two ways:
@@ -24,23 +24,23 @@ has no dependency beyond node (22 was used).
 
 | File | What it is |
 | --- | --- |
-| `pipeline.cjs` | The compile: `pathb-dump --ir`, then `pathb-wasm-emit.rb`, in a temporary directory. Options: the standard and the mode. Diagnostics with line numbers. |
+| `pipeline.cjs` | The compile: the language's front end (`pathb-dump --ir`, or `llvm-to-pathb.rb`), then `pathb-wasm-emit.rb`, in a temporary directory. Options: the language, the standard and the mode. Diagnostics with line numbers. |
 | `server.cjs` | The live server: the page, `examples/`, `GET /api/health`, `POST /api/compile`. |
-| `build-static.cjs` | The static site: each example in every mode, run and checked, then the page and `builds/<id>.json`. |
+| `build-static.cjs` | The static site: each example in every mode of its language, run and checked, then the page and `builds/<id>.json`. |
 | `index.html` | The page (one file, no build step). |
 | `bindings.js` | The browser bindings (see "Browser bindings"), shared by the page and the static build. |
-| `examples/` | The sources and `index.json` (id, title, file, expected `main()` result). |
+| `examples/` | The sources and `index.json` (id, title, file, language (default `c++`), expected `main()` result). |
 
 ## The compile
 
-`POST /api/compile` with `{"source": "...", "options": {"std": "c++20", "mode": "asan"}}` answers with
-`{ok, ir, wasm (base64), diagnostics, mode, std}`, or `{ok: false, stage, message, diagnostics}`. The stages are
-`request` (bad input), `front-end` (a diagnostic from the harness), `emit` (a refusal of the emitter, exit status 3, the
-message names the node refused), and `server`. `diagnostics` is `[{line, severity, message}]`, parsed from EDG's
+`POST /api/compile` with `{"source": "...", "options": {"language": "c++", "std": "c++20", "mode": "asan"}}` answers with
+`{ok, ir, wasm (base64), diagnostics, language, mode, std}`, or `{ok: false, stage, message, diagnostics, code}`. The
+stages are `request` (bad input), `front-end` (a diagnostic from the harness, or a refusal of `llvm-to-pathb.rb`, exit
+status 3), `emit` (a refusal of the emitter, exit status 3, the message names the node refused), and `server`. `diagnostics` is `[{line, severity, message}]`, parsed from EDG's
 messages; the page puts them on the editor's lines as markers.
 
-The options are checked against a list: `std` is `c++17`, `c++20`, `c++23` or empty (the front end's default); `mode` is
-one of:
+The options are checked against a list: `language` (default `c++`) is one of the table in "Languages", `std` is one of
+its standards or empty (the front end's default), and `mode` is one of its modes:
 
 | Mode | Front end | Emitter | Data model |
 | --- | --- | --- | --- |
@@ -48,30 +48,58 @@ one of:
 | `asan` | as is | `--asan` | LP64, with the ASan shadow |
 | `emscripten` | `--freestanding --target=linux_riscv32` | `--emscripten` | ILP32, Emscripten's exports |
 
+### Languages
+
+| `language` | Front end | Standards (`std`) | Modes |
+| --- | --- | --- | --- |
+| `c++` | `pathb-dump --ir` (EDG, C++23 by default) | `c++17`, `c++20`, `c++23` | all |
+| `c` | `pathb-dump --ir -std=cNN` (EDG in C mode, `--gcc`, C17 by default) | `c89`, `c99`, `c11`, `c17`, `c23` | all |
+| `llvm` | `llvm-to-pathb.rb` (`pathb-llvm.md`: the subset of `clang -S -emit-llvm` it reads) | none | `lp64`, `asan` |
+| `ir` | none: the source is the IR (`pathb-stage2.md`, section 6); lines that start with `;` are blanked first | none | `lp64`, `asan` |
+
+C goes through the same EDG front end and the same IR as C++: `pathb-dump` takes a C standard (`-std=c11`), or a `.c`
+file without one, and runs `cpfe --cNN --gcc` (no `-tused`); hosted, its system include directories are the host C
+compiler's (`host_sys_includes c`, `gcc -x c`), not the C++ library's. LLVM IR and the IR text carry the LP64 layout
+(`llvm-to-pathb.rb` writes the x86-64 one), so the `emscripten` mode, whose IR is ILP32 from EDG's `linux_riscv32`
+target, is not theirs.
+
+LLVM IR needed three things of the emitter that EDG's IR did not: the checked arithmetic (`nsw` becomes `cadd`, `csub`,
+`cmul`), `alloca` (each local of `clang -O0`), and the flat control flow graph of labels and gotos, which the emitter now
+lowers as a dispatch loop (`pathb-wasm.md`, "What is handled"). So `clang-18 -O0 -S -emit-llvm` output runs when it stays
+in the translator's subset (no structs, no `udiv`, ...). Not added: Rust (`mrustc-monomir.md`), whose front end is a
+build of mrustc and its standard library that the static build cannot carry, and Cpp2 (`cpp2.md`), whose runtime
+header EDG rejects in most programs.
+
 Limits: 64 KB of source (413 past it), 60 s per compiler step, two compiles at a time (503 past that). The server listens
 on 127.0.0.1 by default, because it runs the compiler on whatever source it is sent. Exposing it needs a process sandbox
 and a rate limit, which are not in this change.
 
 ## The page
 
-- **Editor**: Monaco 0.52.2 from `cdn.jsdelivr.net/npm/monaco-editor@0.52.2`, with C++ highlighting, diagnostics as
+- **Editor**: Monaco 0.52.2 from `cdn.jsdelivr.net/npm/monaco-editor@0.52.2`, with highlighting for the language (C++
+  and C are Monaco's, the IR uses its Scheme mode, LLVM IR a small Monarch tokenizer in the page), diagnostics as
   markers, and Ctrl+Enter. If the CDN cannot be reached, the page uses a plain textarea.
-- **Options**: the standard, the mode, and "auto" (compile 0.7 s after an edit; live only).
+- **Options**: the language, the standard and the mode (both filled for the language: a choice the new language also
+  has is kept), and "auto" (compile 0.7 s after an edit; live only). The examples are grouped by language, and picking
+  one sets its language. Changing the language loads its first example unless the source was edited, so an edited
+  source can be compiled as C and as C++.
 - **Module** tab: size, exports, imports, the bytes, the `.wasm` download, and Run, which calls `main` the way
   `tests/wasm/host.cjs` does (imports return their first argument plus one; a trap prints its message).
 - **WAT** tab: the module as WebAssembly text, converted with `wabt` 1.0.37 (`cdn.jsdelivr.net/npm/wabt@1.0.37`), loaded
   when the tab is first opened, with a `.wat` download.
 - **IR** and **Bytes** tabs: the mid-level IR text, and a hex dump of the first KB.
-- **Link**: the source, mode and standard are in the URL hash (`#src=<base64url>&mode=asan&std=c++20`).
+- **Link**: the source, language, mode and standard are in the URL hash (`#src=<base64url>&lang=c&mode=asan&std=c11`).
+  A link without `lang` is C++, as the links before the languages were.
 
 ## Static build
 
-`build-static.cjs` compiles each example in each mode, runs `main` in node, and fails the build if a result differs
+`build-static.cjs` compiles each example in each mode of its language, runs `main` in node, and fails the build if a result differs
 from `expect` in `examples/index.json` or if a compile fails. It writes `_site/`: `index.html`, `examples/` (the sources
 and the manifest), `builds/<id>.json` (the sources, IR, wasm and diagnostics per mode), and `.nojekyll`.
 
 On a static host the page reads the manifest and the builds. An example's source gets its prebuilt result (and the
-default standard only). Any other source gets a message that it needs the local server. A permalink to an example works.
+default standard only), matched by the source and the language. Any other source gets a message that it needs the
+local server. A permalink to an example works.
 
 The workflow builds the harness and the mruby tool as `pathb.yml` does, runs the static build (on pull requests too,
 without deploying), and deploys from `main`. The one-time repository setting is Settings > Pages > Source: GitHub
@@ -79,8 +107,13 @@ Actions.
 
 ## Checks
 
-- `build-static.cjs` is the check for the examples: 4 examples x 3 modes, each run and compared with its expected
-  result. The three expected results were also checked against `g++ -O0` (modulo 256, the process status).
+- `build-static.cjs` is the check for the examples: 7 examples (C++ and C) x 3 modes and 2 (LLVM IR and IR) x 2 modes,
+  each run and compared with its expected result. The C++ results were also checked against `g++ -O0` (modulo 256, the
+  process status), the C one against `gcc -std=c11`, and the LLVM IR one against `gcc` of the C it was written from (`clang-18 -O0`
+  of that C, translated and emitted, gives the same 88).
+- The languages, by hand in a headless Chromium (live and static, with Monaco routed to the npm package): switching
+  each language loads its example, fills its standards and modes, sets the editor's language and runs; an example of
+  another language switches the language; the link carries `lang`; a refusal of `llvm-to-pathb.rb` shows as refused.
 - Checked by hand in a headless Chromium with the CDN routed to the npm packages, since this sandbox cannot reach the
   CDN: live (the examples, the modes, the standard, markers on a syntax error, auto-compile, WAT, the permalink, no
   console errors); static (the examples, the emscripten mode, WAT, the refusal for other code, no console errors); CDN
@@ -128,7 +161,8 @@ and input events.
 | --- | --- | --- |
 | Editor with highlighting and diagnostics | done | Monaco, from the CDN. |
 | Compile on edit, and on demand | done | Auto on the live server only. |
-| Examples | done (4) | Each checked in every mode at build time. |
+| Examples | done (9) | Each checked in every mode of its language at build time. |
+| Several languages | done (4) | C++, C, LLVM IR, the IR. See "Languages". |
 | Options: standard, emitter mode | done | `pipeline.cjs` takes them. |
 | Run the output | done | `main`; imports bound to browser features (see "Browser bindings"), others stubbed. |
 | Compiler errors | done | Text, and markers on the lines. |
@@ -141,7 +175,7 @@ and input events.
 | Compiler flags beyond the standard (`-D`, `-I`, `--target`) | not done | Include directories must be limited to the repo, not free paths. |
 | Source-to-output mapping | not done | Needs a line table. The emitter writes none; function names (a `name` section) are cheap. |
 | Program output (stdout) | partly done | `puts`, `putchar`, `write` and `fflush` go to the Console tab. `printf` and `std::cout` do not: the emitter refuses variadic calls and most of the hosted C++ library. |
-| Libraries (`<vector>`, `<string>`) | limited by the emitter | The emitter refuses exceptions, variadic calls, indirect calls, general `goto`, bit-fields, VLAs and 16-byte types. In the IR sweep, 168 of 262 files are refused. The page shows these refusals. |
+| Libraries (`<vector>`, `<string>`) | limited by the emitter | The emitter refuses exceptions, variadic calls, indirect calls, `goto` mixed with loops, bit-fields, VLAs and 16-byte types. In the IR sweep, 199 of 306 files are refused. The page shows these refusals. |
 | Several compilers | not applicable | One backend. |
 | Accounts, saved snippets | not planned | |
 

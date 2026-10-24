@@ -50,6 +50,11 @@ Division by zero, `INT_MIN / -1`, a float-to-integer conversion out of range or 
 through wasm's own traps. A shift count not below the width of the left operand, a null `nonnull` pointer and an index
 outside `bounds` trap through an explicit `unreachable`.
 
+The checked arithmetic `cadd csub cmul cneg` (`NFCXX_IR_OVERFLOW=trap`, and `nsw` in `llvm-to-pathb.rb`) traps when the
+exact result does not fit the type, signed or unsigned. Below 64 bits the exact result is computed in i64 and its range
+is checked. At 64 bits the wrapped result is checked: `cadd` and `csub` by the signs of the operands and the result (or
+the carry, unsigned), `cmul` by dividing the result by the left operand (`INT64_MIN * -1` traps in that division).
+
 ## AddressSanitizer (`--asan`)
 
 `scripts/mrb scripts/pathb-wasm-emit.rb --asan prog.ir > prog.wasm` emits the module in an AddressSanitizer-style mode.
@@ -305,11 +310,18 @@ skipped); `tests/wasm/run.sh` (24 passed) and the ASan and Emscripten modes are 
 
 Scalars, pointers and their arithmetic (`offset`, `index`, `pdiff`), the integer and float operators, comparisons,
 conversions (`iconv`, `i2f`, `u2f`, `fconv`, `cf2i`, `p2i`, `i2p`, `bitcast`), `load`, `store`, `copy` (`memory.copy`),
-slots, direct calls, `if`, `loop` with `break` and `continue`, `return`, and the checks above.
+slots, `alloca` (dynamic stack, released at the return; refused under `--asan`), direct calls, `if`, `loop` with `break`
+and `continue`, `return`, and the checks above. A `let` may take a bare operand (`llvm-to-pathb.rb` copies phi values so),
+and a parameter's register may be any `%N` (EDG numbers them from `%0`, `llvm-to-pathb.rb` from `%1`).
 
 Two forms of `goto` are handled because the front end produces them for `break` and `continue`: a jump to the label at
-the end of a loop body, and a jump to the label just after a loop or a switch. Any other `goto`, and any other label, is
-refused.
+the end of a loop body, and a jump to the label just after a loop or a switch.
+
+A body of labels and gotos with no `loop` or `switch` (the control flow graph `llvm-to-pathb.rb` writes, or a C or C++
+`goto`, see `goto_dispatch.cpp`) is lowered as a dispatch, when every label is at the top level of the body. The labels
+split the body into segments; a loop runs the segment that a local names, through a `br_table` into nested blocks
+(segment j starts at the end of block j), and control falls from one segment into the next as it falls past a label. A
+`goto` sets the local and branches to the loop. Any other `goto` and label is refused.
 
 `switch` (`docs/notes/pathb-stage2.md`, section 2). The markers `(case (const T V))` and `(default)` may sit in blocks of
 the body; the body's statements are split into arms at them. The selector is compared with each case value in order by
@@ -323,8 +335,9 @@ leaves it (its label stack entry is the switch's), and `continue` goes to the en
 
 Each refusal names the node on stderr and exits with status 3. None is dropped silently.
 
-- General `goto` and labels: the jumps other than the ones above, and a switch whose arm falls into the next non-empty one.
-  The structurizer that `pathb-stage2.md` section 2 asks for is needed for these.
+- General `goto` and labels in a body that also has a `loop` or a `switch`, or a label inside a nested statement, and a
+  switch whose arm falls into the next non-empty one. The structurizer that `pathb-stage2.md` section 2 asks for is
+  needed for these.
 - A use of an extern global (`(extern)`, declared here and defined elsewhere), of a dynamically initialized one
   (`(unsupported init ...)`), of a thread-local one, or of a function's address in a static initializer (`addr` to `&"f"`).
   A declaration that nothing uses is not refused: it has no storage, and the QBE path drops it the same way.
@@ -350,13 +363,16 @@ initializer, a struct with a pointer to another global, a string read through a 
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
 (`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested
 switches on a long selector, and a return in each arm. `refuse_switch_fallthrough.cpp` and `refuse_global.cpp` check the
-two refusals. Node instantiates a module only after validating it, so a malformed
+two refusals. `goto_dispatch.cpp` checks the dispatch lowering, and `checked_arith.ir` (hand-written IR, emitted in the
+LP64 modes) checks the checked arithmetic at the edges of each width through `checked_arith.cjs`. Node instantiates a
+module only after validating it, so a malformed
 module fails the test. `tests/wasm/frames.cpp` makes 1000 calls with 256 bytes of locals each: the frames must be released
 for it to pass in 128 KB.
 
-Sweep over the 262 IR files in the repo (`tests/pathb-ir`, its borrow goldens, `tests/mruby/pathb-edge`): 46 emit, and
-every module validates; 168 are refused for the gaps above; 48 are malformed IR (the edge cases that test the parser,
-which exit with status 1 as the QBE emitter does). Before the statics and the switch were lowered, the sweep had 34 emit,
+Sweep over the 306 IR files in the repo (`tests/pathb-ir`, the borrow goldens of `tests/pathb-borrow`,
+`tests/mruby/pathb-edge`): 59 emit, and every module validates; 199 are refused for the gaps above; 48 are malformed IR
+(the edge cases that test the parser, which exit with status 1 as the QBE emitter does). Before the checked arithmetic,
+`alloca` and the goto dispatch the same files gave 54, 204 and 48. Before the statics and the switch were lowered, the sweep had 34 emit,
 197 refused and 31 malformed: 17 of the malformed files are `e_*` edge cases that the refusal of `global` hid until now.
 
 Not done: a C library for the modules (a program that prints goes through an import), and an oracle in Python. The

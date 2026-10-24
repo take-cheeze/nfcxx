@@ -1,8 +1,9 @@
 # Path B from LLVM IR: `scripts/llvm-to-pathb.rb`
 
 Status: **first slice, tested.** An LLVM IR text reader that writes nfcxx IR (`docs/notes/pathb-stage2.md`, section 6),
-so LLVM IR from `clang -S -emit-llvm` goes through Path B's existing back ends: `scripts/pathb-qbe-emit.rb` (QBE) and
-`scripts/pathb-cil-emit.rb` (CIL). It is a second front end beside EDG. It does not use LLVM as a library, and it has no
+so LLVM IR from `clang -S -emit-llvm` goes through Path B's existing back ends: `scripts/pathb-qbe-emit.rb` (QBE),
+`scripts/pathb-cil-emit.rb` (CIL), and `scripts/pathb-wasm-emit.rb` (WebAssembly: the wasm explorer's LLVM IR language,
+`wasm-explorer.md`). It is a second front end beside EDG. It does not use LLVM as a library, and it has no
 LLVM build dependency. `clang-18` is only the source of the test inputs and the reference results.
 
 ```

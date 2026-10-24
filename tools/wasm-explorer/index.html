@@ -100,7 +100,7 @@
 <body>
 <header>
   <h1>nfcxx wasm explorer</h1>
-  <span class="sub">C++ &rarr; mid-level IR &rarr; WebAssembly, run in this page</span>
+  <span class="sub">C++, C, LLVM IR &rarr; mid-level IR &rarr; WebAssembly, run in this page</span>
   <span class="status" id="status">checking server&hellip;</span>
 </header>
 <p class="note" id="static-note" hidden>
@@ -111,21 +111,17 @@
 <main>
   <section class="pane" aria-label="Source">
     <div class="toolbar">
+      <select id="language" aria-label="Language" title="Source language"></select>
       <select id="examples" aria-label="Example"></select>
-      <select id="std" aria-label="C++ standard" title="C++ standard">
-        <option value="">default std</option>
-        <option value="c++17">-std=c++17</option>
-        <option value="c++20">-std=c++20</option>
-        <option value="c++23">-std=c++23</option>
-      </select>
+      <select id="std" aria-label="Language standard" title="Language standard"></select>
       <select id="mode" aria-label="Emitter mode" title="Data model and emitter mode"></select>
       <button class="primary" id="compile" title="Ctrl+Enter">Compile</button>
       <label class="check"><input type="checkbox" id="auto" checked> auto</label>
       <button id="share" title="Copy a link that holds this source and these options">Copy link</button>
       <span class="hint" id="hint">Ctrl+Enter compiles</span>
     </div>
-    <div id="editor" aria-label="C++ source"></div>
-    <textarea class="src" id="fallback" spellcheck="false" aria-label="C++ source" hidden></textarea>
+    <div id="editor" aria-label="Source"></div>
+    <textarea class="src" id="fallback" spellcheck="false" aria-label="Source" hidden></textarea>
   </section>
 
   <section class="pane" aria-label="Output">
@@ -147,7 +143,7 @@
       </div>
       <div class="card">
         <h2>Browser bindings</h2>
-        <table><thead><tr><th>import (module env)</th><th>C++ declaration</th><th>browser feature</th></tr></thead>
+        <table><thead><tr><th>import (module env)</th><th>C / C++ declaration</th><th>browser feature</th></tr></thead>
           <tbody id="bindings"></tbody></table>
         <p class="muted" style="margin:8px 0 0;font-size:12px">A string is read from the module's exported memory at the
           pointer given (LP64 pointers are 64-bit, so the page reads them as BigInt).</p>
@@ -204,10 +200,28 @@
   const WABT_URL = "https://cdn.jsdelivr.net/npm/wabt@1.0.37/index.js";
   const AUTO_DELAY = 700;   // ms after the last edit before an automatic compile (live server only)
 
+  // The source languages, as pipeline.cjs LANGUAGES names them: the standards the front end takes, the modes (LLVM IR
+  // and the IR text are LP64), and the editor's language. Monaco has C, C++ and Scheme (the IR is s-expressions);
+  // LLVM IR gets the small tokenizer in registerLlvm.
+  const LANGUAGES = {
+    "c++": { title: "C++", editor: "cpp", standards: ["c++17", "c++20", "c++23"],
+      modes: ["lp64", "asan", "emscripten"] },
+    c: { title: "C", editor: "c", standards: ["c89", "c99", "c11", "c17", "c23"],
+      modes: ["lp64", "asan", "emscripten"] },
+    llvm: { title: "LLVM IR", editor: "llvm", standards: [], modes: ["lp64", "asan"] },
+    ir: { title: "nfcxx IR", editor: "scheme", standards: [], modes: ["lp64", "asan"] },
+  };
+  // The modes' titles (pipeline.cjs MODES).
+  const MODE_TITLES = {
+    lp64: "LP64 (x86-64 data model)",
+    asan: "LP64 + AddressSanitizer shadow",
+    emscripten: "ILP32 (wasm32, Emscripten exports)",
+  };
+
   const $ = (id) => document.getElementById(id);
   const state = {
     live: false,         // the local server answers the compile API; false on a static host
-    examples: [],        // [{id, title, file, expect}] from examples/index.json
+    examples: [],        // [{id, title, file, language, expect}] from examples/index.json
     builds: {},          // static only: id -> prebuilt example (builds/<id>.json)
     current: null,       // the last successful compile: { bytes, module, wat? }
     seq: 0,              // compile requests in flight; a response for an older one is dropped
@@ -396,12 +410,13 @@
   // ---- options, compile, the link -----------------------------------------------------------------------------------
 
   function options() {
-    return { mode: $("mode").value, std: $("std").value };
+    return { language: $("language").value, mode: $("mode").value, std: $("std").value };
   }
+  const languageOf = (ex) => ex.language || "c++";
 
   // A static host has no compiler: an example's source gets its prebuilt result, any other source gets a message.
   function staticResult(src, opts) {
-    const example = Object.values(state.builds).find((b) => b.source === src);
+    const example = Object.values(state.builds).find((b) => b.source === src && languageOf(b) === opts.language);
     if (!example) {
       return { ok: false, stage: "static", diagnostics: [],
         message: "this is the static build, so only the examples compile here. Other code needs the local server." };
@@ -411,6 +426,10 @@
         message: `the examples are built ahead of time in the default standard only; ${opts.std} needs the local server.` };
     }
     const build = example.builds[opts.mode];
+    if (!build) {
+      return { ok: false, stage: "static", diagnostics: [],
+        message: `${opts.mode} is not a mode of ${LANGUAGES[opts.language].title}.` };
+    }
     return Object.assign({ ok: true }, build);
   }
 
@@ -445,7 +464,9 @@
       clearModule();
       $("ir").textContent = "";
       showError(data.stage, data.message);
-      setStatus(data.stage === "emit" ? "refused" : data.stage === "static" ? "static build" : "error", "bad");
+      // exit status 3 is a refusal: of the emitter, or of llvm-to-pathb.rb (a construct outside its subset)
+      const refused = data.stage === "emit" || data.code === 3;
+      setStatus(refused ? "refused" : data.stage === "static" ? "static build" : "error", "bad");
       if (data.stage === "front-end") showTab("module");
       return;
     }
@@ -471,13 +492,14 @@
     state.autoTimer = setTimeout(compile, AUTO_DELAY);
   }
 
-  // The link: #src=<base64url of the source>&mode=...&std=...
+  // The link: #src=<base64url of the source>&lang=...&mode=...&std=...
   function encodeSource(text) {
     return btoa(unescape(encodeURIComponent(text))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
   function linkHash() {
     const o = options();
-    return "src=" + encodeSource(source()) + "&mode=" + o.mode + (o.std ? "&std=" + o.std : "");
+    return "src=" + encodeSource(source()) + "&lang=" + encodeURIComponent(o.language) + "&mode=" + o.mode
+      + (o.std ? "&std=" + o.std : "");
   }
   function writeHash() {
     history.replaceState(null, "", "#" + linkHash());
@@ -493,7 +515,7 @@
         src = null;
       }
     }
-    return { src, mode: p.get("mode"), std: p.get("std") };
+    return { src, lang: p.get("lang"), mode: p.get("mode"), std: p.get("std") };
   }
 
   // ---- tabs --------------------------------------------------------------------------------------------------------
@@ -522,12 +544,38 @@
       document.head.appendChild(s);
     });
   }
+  // LLVM IR: comments, globals and locals, types, numbers, strings, and the instruction and keyword words.
+  function registerLlvm(m) {
+    m.languages.register({ id: "llvm" });
+    m.languages.setLanguageConfiguration("llvm", {
+      comments: { lineComment: ";" },
+      brackets: [["{", "}"], ["[", "]"], ["(", ")"]],
+    });
+    m.languages.setMonarchTokensProvider("llvm", {
+      types: ["void", "ptr", "half", "float", "double", "x86_fp80", "fp128", "label", "metadata", "token"],
+      tokenizer: {
+        root: [
+          [/;.*$/, "comment"],
+          [/[-a-zA-Z$._][-a-zA-Z$._0-9]*:/, "tag"],                 // a block label
+          [/[@%](?:[-a-zA-Z$._][-a-zA-Z$._0-9]*|\d+|"[^"]*")/, "variable"],
+          [/\bi\d+\b/, "type"],
+          [/c?"[^"]*"/, "string"],
+          [/-?\d+(?:\.\d+(?:e[-+]?\d+)?)?\b|0x[0-9a-fA-F]+/, "number"],
+          [/[a-z_][a-z_0-9.]*/, { cases: { "@types": "type", "@default": "keyword" } }],
+        ],
+      },
+    });
+  }
+  function setEditorLanguage() {
+    if (monaco && editor) monaco.editor.setModelLanguage(editor.getModel(), LANGUAGES[$("language").value].editor);
+  }
   function createEditor(m) {
     monaco = m;
+    registerLlvm(m);
     const dark = matchMedia("(prefers-color-scheme: dark)").matches;
     editor = m.editor.create($("editor"), {
       value: source(),
-      language: "cpp",
+      language: LANGUAGES[$("language").value].editor,
       theme: dark ? "vs-dark" : "vs",
       automaticLayout: true,
       minimap: { enabled: false },
@@ -551,12 +599,18 @@
     state.examples = await r.json();
     const sel = $("examples");
     sel.textContent = "";
-    state.examples.forEach((ex) => {
-      const o = document.createElement("option");
-      o.value = ex.id;
-      o.textContent = ex.title;
-      sel.appendChild(o);
-    });
+    // one group per language, in the order of LANGUAGES
+    for (const [lang, info] of Object.entries(LANGUAGES)) {
+      const group = document.createElement("optgroup");
+      group.label = info.title;
+      for (const ex of state.examples.filter((e) => languageOf(e) === lang)) {
+        const o = document.createElement("option");
+        o.value = ex.id;
+        o.textContent = ex.title;
+        group.appendChild(o);
+      }
+      if (group.children.length) sel.appendChild(group);
+    }
   }
   async function loadStaticBuilds() {
     await Promise.all(state.examples.map(async (ex) => {
@@ -564,22 +618,48 @@
       state.builds[ex.id] = await r.json();
     }));
   }
-  function fillModes() {
-    const sel = $("mode");
+  function fillLanguages() {
+    const sel = $("language");
     sel.textContent = "";
-    // The mode names are the pipeline's (pipeline.cjs MODES); their titles are shown here.
-    const titles = {
-      lp64: "LP64 (x86-64 data model)",
-      asan: "LP64 + AddressSanitizer shadow",
-      emscripten: "ILP32 (wasm32, Emscripten exports)",
-    };
-    for (const [value, title] of Object.entries(titles)) {
+    for (const [value, info] of Object.entries(LANGUAGES)) {
       const o = document.createElement("option");
       o.value = value;
-      o.textContent = title;
+      o.textContent = info.title;
       sel.appendChild(o);
     }
   }
+  // The standards and modes of the selected language. A choice that the new language also has is kept.
+  function fillLanguageOptions() {
+    const lang = LANGUAGES[$("language").value];
+    const keepStd = $("std").value;
+    const keepMode = $("mode").value;
+    const std = $("std");
+    std.textContent = "";
+    for (const value of ["", ...lang.standards]) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = value ? "-std=" + value : lang.standards.length ? "default std" : "no standard";
+      std.appendChild(o);
+    }
+    std.value = lang.standards.includes(keepStd) ? keepStd : "";
+    std.disabled = !lang.standards.length;
+    const mode = $("mode");
+    mode.textContent = "";
+    for (const value of lang.modes) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = MODE_TITLES[value];
+      mode.appendChild(o);
+    }
+    mode.value = lang.modes.includes(keepMode) ? keepMode : lang.modes[0];
+  }
+  const exampleTexts = {};   // id -> the example's source, fetched once
+  function exampleSource(ex) {
+    if (!state.live) return Promise.resolve(state.builds[ex.id].source);
+    if (!exampleTexts[ex.id]) exampleTexts[ex.id] = fetch("examples/" + ex.file).then((r) => r.text());
+    return exampleTexts[ex.id];
+  }
+
   async function detectServer() {
     try {
       const r = await fetch("api/health");
@@ -614,22 +694,25 @@
       $("auto").checked = false;
       $("auto").disabled = true;
     }
-    fillModes();
+    fillLanguages();
     await loadExamples();
     if (!state.live) await loadStaticBuilds();
 
+    // The options: the link's (a link without lang is C++, as links were before the languages), else the defaults.
     const h = readHash();
+    if (h.src !== null || h.lang) $("language").value = LANGUAGES[h.lang] ? h.lang : "c++";
+    fillLanguageOptions();
     if (h.mode && [...$("mode").options].some((o) => o.value === h.mode)) $("mode").value = h.mode;
     if (h.std && [...$("std").options].some((o) => o.value === h.std)) $("std").value = h.std;
 
-    // The source: the link's, else the first example's.
-    const first = state.examples[0];
+    // The source: the link's, else the first example's (of the link's language, if it names one).
+    const first = state.examples.find((e) => languageOf(e) === $("language").value) || state.examples[0];
     let initial = h.src;
     if (initial === null && first) {
-      initial = state.live
-        ? await (await fetch("examples/" + first.file)).text()
-        : state.builds[first.id].source;
+      initial = await exampleSource(first);
       $("examples").value = first.id;
+      $("language").value = languageOf(first);
+      fillLanguageOptions();
     }
     // Until Monaco is up, the textarea holds the source; createEditor starts from it.
     $("fallback").value = initial || "";
@@ -652,10 +735,28 @@
   $("examples").addEventListener("change", async () => {
     const ex = state.examples.find((e) => e.id === $("examples").value);
     if (!ex) return;
-    const text = state.live
-      ? await (await fetch("examples/" + ex.file)).text()
-      : state.builds[ex.id].source;
+    const text = await exampleSource(ex);
+    if ($("language").value !== languageOf(ex)) {
+      $("language").value = languageOf(ex);
+      fillLanguageOptions();
+      setEditorLanguage();
+    }
     setSource(text);
+    compile();
+  });
+  // A new language: its options and highlighting. A source that is an example (not edited) gives way to the language's
+  // first example; an edited source is kept, so switching between C and C++ compiles the same text.
+  $("language").addEventListener("change", async () => {
+    const lang = $("language").value;
+    fillLanguageOptions();
+    setEditorLanguage();
+    const src = source();
+    const unedited = !src.trim() || (await Promise.all(state.examples.map(exampleSource))).includes(src);
+    const ex = state.examples.find((e) => languageOf(e) === lang);
+    if (unedited && ex) {
+      setSource(await exampleSource(ex));
+      $("examples").value = ex.id;
+    }
     compile();
   });
   $("std").addEventListener("change", compile);
