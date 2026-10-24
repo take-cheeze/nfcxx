@@ -70,17 +70,22 @@ class CodeGen
   # block_core_arms to name, but the loop does not call that body: it replaces the send with the same iteration. What
   # it still needs is the rest of the arm's proof: no project definition, native, prepend, mixin or dynamic installer
   # answers `name` on the class, and the core source defines `name` on the class itself. Array and Hash receivers,
-  # zero-argument sends: the shape the recognizers model.
+  # zero-argument sends: the shape the recognizers model. GUARDED_FOLD_ARM: an Array fold (`reduce(init) { }`),
+  # whose loop reproduces Enumerable#inject, the first core definer on Array's chain (Enumerable#inject is not
+  # compiled, so block_core_arms names nothing for it).
   GUARDED_PLAIN_CLASSES = %w[Array Hash].freeze
 
   def guarded_plain_chain_arm?(name, argc, klass)
     world = block_core_world
     installed = symbol_installed_names
-    return false unless GUARDED_PLAIN_CLASSES.include?(klass) && argc&.zero? && world && installed && !installed.include?(name)
+    fold = klass == 'Array' && argc == 1 && ACCUM_FOLD_METHODS.include?(name)
+    return false unless GUARDED_PLAIN_CLASSES.include?(klass) && (argc&.zero? || fold) && world && installed &&
+                        !installed.include?(name)
 
     chain = BlockCoreDirectFallback::BLOCK_RECEIVERS.fetch(klass)[:chain]
     return false if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) }
     return false unless chain.all? { |owner| block_core_owner_plain?(owner, name) }
+    return chain.find { |owner| world.core_ruby_defines?(name, owner) } == 'Enumerable' if fold
 
     world.core_ruby_defines?(name, chain.first)
   end
