@@ -362,9 +362,9 @@ Contracts are validated before pruning, including unused declarations.
 `nothrow` excludes exceptional continuations. `noescape` promises that argument addresses are not
 retained beyond the call, except for an explicitly declared returned alias. `closed` promises no access to globals, hidden pointees, or other externally
 visible memory outside the declared argument regions; private callee-local storage is permitted.
-These are trusted imports, not facts inferred from names or checked against callee implementations.
-The producer must ensure the real callee satisfies the summary. Functions defined in the IR are
-still analyzed individually; checking their agreement with a summary is not implemented.
+These are trusted imports at call sites, not facts inferred from names. For an external callee the
+producer must ensure the real implementation satisfies the summary. A function defined in the same
+module is checked against its own summary (see below).
 
 Read effects may have several possible known local targets, all of which are checked. Mutation,
 initialization, and consumption require one known place. Read/read aliases are allowed; arguments
@@ -428,6 +428,55 @@ generic lifetime signatures, and Rust frontend emission remain unsupported. The 
 `call-borrow` to an ordinary call. A native C identity helper verifies the actual pointer return,
 write through the result, byte-identical metadata erasure, and emitter/oracle agreement.
 
+## Verified callee summaries
+
+When a module defines a function and also declares `call-effects` for its name, the checker
+checks the body against the summary while analyzing that function. Callers keep using the summary
+as before, so a module whose definitions all verify no longer depends on trusting them.
+
+The signature must agree: the return type is the summary's result, the parameter count is the
+argument count, `value` parameters are nonpointer scalars of the same ABI class, and memory effects
+take pointer parameters. Disagreement is malformed IR.
+
+Each memory argument `%N` points to a synthetic region named `*%N`, sized by the effect type.
+
+| Effect | Region at entry | Access inside the body | Required on every normal return |
+| --- | --- | --- | --- |
+| `read` | declared fields initialized | through a shared loan `*%N` | nothing |
+| `write` | declared fields initialized | through an exclusive loan `*%N` | declared fields initialized |
+| `init` | uninitialized | through an exclusive loan `*%N` | declared fields initialized |
+| `consume` | live drop obligation `*%N` | owned place | obligation consumed or moved |
+
+The argument loans last for the whole call. They cannot be ended with `loan-end`, and last-use
+inference never expires them. The body can reborrow them (`(reborrow ... "c" shared "*%0" %0)`) or
+use them as a `call-borrow` parent. A consumed argument is released by `(drop-state "*%N")` or by
+passing it to another consuming call. Padding never counts as initialized at entry. A `write`
+argument does not track the drop obligations of its caller.
+
+The other promises are checked as follows:
+
+- `closed`: any load or store through external storage, such as a global, is `contract-not-closed`.
+  Pointer values loaded from argument memory have unknown provenance and are refused when used.
+- `noescape`: storing a local, argument, or loan-derived pointer into argument memory is
+  `contract-escape`. Storing a pointer of unknown provenance there is refused. Returning an
+  argument pointer is allowed only through the declared returned alias.
+- Returned alias: every returned pointer must lie in the declared argument region at the
+  declared offset. An `exclusive` alias also needs an all-exclusive loan chain. A returned
+  pointer that fails this is `contract-return-mismatch`.
+- `nothrow`: every call in the body already needs a contract, and every contract is `nothrow`.
+
+A verified function needs no local declaration facts beyond `(decl %N param)`. Region names
+cannot collide with local slots, symbols, or loan IDs. A body that calls an uncontracted function
+is still refused. Recursive and mutually recursive definitions are checked against the same
+summaries they use, so the summaries work as an inductive hypothesis. That is sound only for
+partial correctness: a non-terminating call satisfies any summary. External definitions,
+summaries that this module does not define, and C/C++ prototype correspondence remain trusted.
+
+The fixtures are in `tests/pathb-borrow/verify`. The runner also lowers
+`tests/pathb-borrow/contracts/callees.cpp` through the real frontend, prepends correct and incorrect
+summaries, and checks both results. `tests/mruby/pathb-edge/verified_callee_facts.ir` links verified
+callees with their caller and runs natively.
+
 ## Refusals and limits
 
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
@@ -453,7 +502,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next steps are frontend layout/ownership emission, callee-summary verification, general returned and
+The next steps are frontend layout/ownership emission, summary emission or inference for defined functions, general returned and
 retained reference relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -476,6 +525,9 @@ Call fixtures cover preconditions, aliasing, scalar signatures, initialization, 
 consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
 cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
 contracts, and inferred last-use release.
+Verified-summary fixtures cover each argument effect, nested and recursive contracted calls,
+argument reborrows, returned alias offsets and permissions, closed and noescape violations,
+missing outputs or consumption, and malformed signatures.
 A native test checks both the unchanged QBE and the stricter conservative result when metadata is
 removed. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,
