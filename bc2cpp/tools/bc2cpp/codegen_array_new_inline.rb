@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'core_hierarchy_sigs'
+require_relative 'native_owner_map'
 
 # ARRAY_NEW_BLOCK: `Array.new(n) { |i| BODY }` as an inlined loop.
 #
@@ -22,7 +23,8 @@ require_relative 'core_hierarchy_sigs'
 #   initialize     Array#initialize is mruby's own native: nothing in the registry, in mruby's hidden core
 #                  definitions or in an outside Ruby source defines `initialize` on Array (core_native_arm_safe?),
 #                  Array has no prepended or unresolved module, no runtime installer names `initialize`, and no
-#                  native source other than array.c that spells `initialize` mentions the Array class.
+#                  native registration other than mruby's src/array.c defines or undefines `initialize` on Array
+#                  (array_new_natives_untouched?).
 #   shape          one argument (the size; `Array.new(n, obj) { }` ignores obj and stays a call), a block of 0 or
 #                  1 mandatory parameters and no optional/rest shape, a block that does not forward the method's
 #                  own block.
@@ -130,9 +132,29 @@ class CodeGen
     'initialize_native_spelled' unless array_new_natives_untouched?
   end
 
-  # Native sources that spell `initialize` and name the Array class (other than array.c, which defines the one
-  # being relied on) could replace it with C code no Ruby analysis sees.
+  # A native registration of `initialize` on Array other than mruby's own (src/array.c, the one relied on) would
+  # replace it with C code no Ruby analysis sees. NATIVE_OWNER_MAP reads the registrations; with it off, any
+  # other native source that spells `initialize` and names the Array class refuses.
   def array_new_natives_untouched?
+    paths = self.class.native_source_paths
+    mode = native_owner_map_mode
+    return array_new_natives_unspelled? unless paths && mode
+
+    others = paths.reject { |path| mruby_core_array_source?(path) }
+    return false if others.size == paths.size
+
+    map = (ARRAY_NEW_OWNER_MAP_CACHE[others] ||= NativeOwnerMap.build(others))
+    NativeOwnerMap.verdict(map, 'initialize', ['Array'], core_dynamic_trusted: mode == :trusted) == [:proven]
+  end
+
+  ARRAY_NEW_OWNER_MAP_CACHE = {}
+
+  # mruby's own src/array.c, not a gem's (mruby-array-ext has a src/array.c too).
+  def mruby_core_array_source?(path)
+    File.basename(path) == 'array.c' && File.exist?(File.join(File.dirname(path), '../include/mruby.h'))
+  end
+
+  def array_new_natives_unspelled?
     @closed_world.native_paths_spelling("initialize").all? do |path|
       path.end_with?('/src/array.c') || !File.read(path, encoding: 'BINARY').match?(/array_class|"Array"|MRB_SYM\(Array\)/)
     end
