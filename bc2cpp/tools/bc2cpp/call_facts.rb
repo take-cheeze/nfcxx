@@ -6,6 +6,7 @@ require_relative 'numeric_flow'
 require_relative 'bytecode_ir'
 require_relative 'foreign_definers'
 require_relative 'core_hierarchy_sigs'
+require_relative 'native_owner_map'
 
 # CALL_FACTS: what a call that returned normally says about its receiver.
 #
@@ -317,10 +318,36 @@ module CallFacts
     def native_owners(name, defs)
       return Set.new unless defs.any? { |d| d.owner == '<native>' } || !@cw.native_paths_spelling(name).empty?
 
-      owners = registrations.fetch(name, []).map { |e| e[:owner]&.fetch(:class_name, nil) } + opaque_owners.fetch(name, [])
+      entries = registrations.fetch(name, [])
+      owners = entries.map { |e| e[:owner]&.fetch(:class_name, nil) } + opaque_owners.fetch(name, [])
       return Set.new if owners.empty? && class_registered_only?(name)
+      return owners.to_set unless owners.empty? || owners.include?(nil)
 
-      owners.empty? || owners.include?(nil) ? nil : owners.to_set
+      mapped_native_owners(name, entries.filter_map { |e| e[:path] })
+    end
+
+    # NATIVE_OWNER_MAP fallback: a registration whose class is a C local the expression scan cannot resolve
+    # (mruby-rpg2k-compiled's `RClass* map_viewer = mrb_class_get_under(M, scene, "MapViewer")`) is attributed by
+    # NativeOwnerMap, the proof OUTSIDE_OWNER_CALL rests on, over every file that spells or registers the name. nil
+    # when the map is off, cannot attribute a registration (UNKNOWN), or its sources compute or prepend names. The
+    # class-object (`.singleton`) registrations are not instance definers; class_registrations answers for those.
+    NATIVE_OWNER_MAPS = {}
+
+    def mapped_native_owners(name, registering_paths)
+      return nil if ENV['BC2CPP_NATIVE_OWNER_MAP'] == '0'
+
+      paths = (@cw.native_paths_spelling(name) | registering_paths).sort
+      return nil if paths.empty?
+
+      map = NATIVE_OWNER_MAPS[paths] ||= NativeOwnerMap.build(paths)
+      refusals = map.refusals.to_h
+      return nil if map.computed_unknown || refusals.fetch(:native_prepend, 0).positive? ||
+                    refusals.fetch(:native_unparsed_form, 0).positive? || !map.computed.to_a.empty?
+
+      found = map.by_name.fetch(name, Set.new).to_a
+      return nil if found.empty? || found.include?(NativeOwnerMap::UNKNOWN)
+
+      found.reject { |owner| owner.to_s.end_with?('.singleton') }.to_set { |owner| simple(owner) }
     end
 
     # Every native source that spells +name+ registers it on a class or module object (`definers[:class_native]`),
