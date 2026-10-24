@@ -14,7 +14,7 @@ int main() {
   auto y = lin(a).sum();
   y.backward();
   std::cout << "grad " << lin->weight.grad().sizes() << "\n";
-  std::cout << "cuda available " << torch::cuda::is_available() << " devices " << torch::cuda::device_count() << "\n";
+  std::cout << "cuda available " << torch::cuda::is_available() << " devices " << int(torch::cuda::device_count()) << "\n";  // an int8_t
 #ifdef __EDG__
   // nfcxx: a plain throw inside libc10 (gcc's __cxa_throw) cannot be caught by EDG's handlers (docs/notes/eh-shim.md),
   // so the CUDA tensor is only made when there is a GPU.
