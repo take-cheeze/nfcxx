@@ -225,6 +225,7 @@ DRIVER = <<~'RUBY'
   # A File's each_line is IO's core-Ruby alias; an Enumerator's each_with_index is its own core-Ruby method.
   File.open('bc2cpp_bi_lines.txt', 'w') { |f| f.write("p\nqq\n") }
   show.call('str_lines/io') { File.open('bc2cpp_bi_lines.txt', 'r') { |f| fx.str_lines(f) } }
+  File.unlink('bc2cpp_bi_lines.txt')
   show.call('ewi/enum') { fx.ewi([4, 5].each) }
   show.call('nil_each') { fx.nil_each(nil) }
   show.call('each_char on nil') { fx.chars(nil) }
