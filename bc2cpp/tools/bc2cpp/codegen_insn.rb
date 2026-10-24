@@ -766,7 +766,7 @@ class CodeGen
             if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
               r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
             } else {
-              r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+              #{index0_else_statement(d, s)}
             }
           CPP
         end
@@ -778,7 +778,7 @@ class CodeGen
             if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
               r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
             } else {
-              r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+              #{index0_else_statement(d, s)}
             }
           CPP
         end

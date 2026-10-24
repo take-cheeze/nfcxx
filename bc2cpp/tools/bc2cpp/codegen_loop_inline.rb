@@ -963,7 +963,7 @@ class CodeGen
   # lose); MONO needs no guard (one def); each POLY branch guards exact class.
   def sym_call_value(sym, elem_expr, result_var)
     kind, target = sym_call_target(sym) || [nil, nil]
-    fallback = "mrb_funcall(M, #{elem_expr}, \"#{sym}\", 0)"
+    fallback = sym_call_fallback(sym, elem_expr)
     return "mrb_value #{result_var} = #{fallback};" unless kind
 
     if kind == :mono
@@ -986,9 +986,20 @@ class CodeGen
     out
   end
 
+  # The per-element call for an element no arm takes: Symbol#to_proc's own send (no visibility check), or, when the
+  # closed world names every class answering `sym` (NAME_OWNER_SET), the owner call over them at check level 0.
+  def sym_call_fallback(sym, elem_expr)
+    owners = !@call_block_expr && name_owner_set(sym)
+    return "mrb_funcall(M, #{elem_expr}, \"#{sym}\", 0)" unless owners
+
+    list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
+    "bc2cpp_owner_call_named(M, #{elem_expr}, \"#{sym}\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), 0) " \
+      "/* CLOSED_WORLD owner-call: #{sym} */"
+  end
+
   def sym_call_line(sym, elem_expr)
     kind, target = sym_call_target(sym) || [nil, nil]
-    fallback = "mrb_funcall(M, #{elem_expr}, \"#{sym}\", 0);"
+    fallback = "#{sym_call_fallback(sym, elem_expr)};"
     return fallback unless kind
 
     if kind == :mono
