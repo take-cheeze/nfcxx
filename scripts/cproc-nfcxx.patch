@@ -20,6 +20,15 @@
  		return false;
  	name = strip(tokenstr(tok.kind), namebuf, sizeof namebuf);
  	next();
+@@ -60,7 +64,7 @@
+ 			if (consume(TLPAREN)) {
+ 				unsigned long long i;
+ 
+-				i = intconstexpr(&filescope, false);
++				i = intconstexpr(attrscope, false);
+ 				if (!i || i & i - 1 || i > INT_MAX)
+ 					error(&tok.loc, "invalid alignment %llu", i);
+ 				if (a)
 @@ -84,17 +88,94 @@
  				a->cleanup = cleanup;
  			expect(TRPAREN, "after cleanup function");
@@ -147,7 +156,7 @@
  		} structunion;
  	} u;
  };
-@@ -146,8 +150,25 @@
+@@ -146,8 +150,26 @@
  };
  
  enum builtinkind {
@@ -167,13 +176,14 @@
  	BUILTINCONSTANTP,
 +	BUILTINOBJECTSIZE,
 +	BUILTINRETURNADDRESS,
++	BUILTINEXTRACTRETURNADDR,
 +	BUILTINISDIGIT,
 +	BUILTINPREFETCH,
 +	BUILTINFRAMEADDRESS,
  	BUILTINEXPECT,
  	BUILTINFABSF,
  	BUILTINFPCLASSIFY,
-@@ -198,6 +219,15 @@
+@@ -198,6 +220,15 @@
  	enum typequal qual;
  	struct value *value;
  	char *asmname;
@@ -189,11 +199,14 @@
  	bool defined;
  	bool tentative;
  	struct decl *next;
-@@ -211,11 +241,28 @@
+@@ -211,11 +242,31 @@
  			enum storageduration storage;
  			/* GNU cleanup(f) on a block-scope object: f(&object) runs when a throw unwinds its function (nfcxx, qbe.c) */
  			const char *cleanup;
 +			struct decl *cleanupfn;   /* cproc -G: the cleanup function's declaration */
++			/* GNU: the bytes its initialized flexible array member adds to a static object (init.c), as gcc's
++			 * object is sizeof the struct plus those */
++			unsigned long long famsize;
  		} obj;
  		struct {
  			/* the function might have an "inline definition" (C11 6.7.4p7) */
@@ -218,7 +231,7 @@
  		} func;
  		unsigned long long enumconst;
  		enum builtinkind builtin;
-@@ -229,6 +276,15 @@
+@@ -229,6 +280,15 @@
  	struct block *continuelabel;
  	struct switchcases *switchcases;
  	struct scope *parent;
@@ -234,7 +247,7 @@
  	/* -fsanitize=address: the stack objects registered when the loop or switch body whose breaklabel or continuelabel this is began (asanmark) */
  	size_t asanbreak, asancontinue;
  };
-@@ -257,6 +313,7 @@
+@@ -257,6 +317,7 @@
  	EXPRBUILTIN,
  	EXPRTEMP,
  	EXPRSIZEOF,
@@ -242,7 +255,7 @@
  };
  
  struct stringlit {
-@@ -291,6 +348,11 @@
+@@ -291,6 +352,11 @@
  			/* a 16-byte floating constant (PROPSOFT type): the object image, low and high eightbyte */
  			unsigned long long soft[2];
  		} constant;
@@ -254,7 +267,7 @@
  		struct stringlit string;
  		struct {
  			struct expr *args;
-@@ -338,11 +400,17 @@
+@@ -338,11 +404,17 @@
  
  void tokeninit(void);
  int tokenget(const void *, size_t);
@@ -272,7 +285,7 @@
  
  /* scan */
  
-@@ -364,6 +432,16 @@
+@@ -364,6 +436,16 @@
  
  void next(void);
  bool peek(enum tokenkind);
@@ -289,7 +302,7 @@
  char *expect(enum tokenkind, const char *);
  bool consume(enum tokenkind);
  
-@@ -421,6 +499,12 @@
+@@ -421,6 +503,12 @@
  extern const struct target *targ;
  
  void targinit(const char *);
@@ -302,7 +315,7 @@
  
  /* attr */
  
-@@ -434,17 +518,39 @@
+@@ -434,17 +522,39 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
@@ -342,7 +355,20 @@
  
  /* decl */
  
-@@ -503,6 +609,15 @@
+@@ -477,6 +587,7 @@
+ struct type *scopegettag(struct scope *, const char *, bool);
+ 
+ extern struct scope filescope;
++extern struct scope *attrscope;   /* where an attribute's constant arguments are looked up (decl) */
+ 
+ /* expr */
+ 
+@@ -499,10 +610,20 @@
+ 
+ struct init *mkinit(unsigned long long, unsigned long long, struct bitfield, struct expr *);
+ struct init *parseinit(struct scope *, struct type *);
++extern unsigned long long initfamsize;   /* the bytes the last parseinit's flexible array member takes (GNU) */
+ 
  /* stmt */
  
  void stmt(struct func *, struct scope *);
@@ -358,7 +384,7 @@
  
  /* backend */
  
-@@ -512,6 +627,8 @@
+@@ -512,6 +633,8 @@
  	/* -fsanitize=address (qbe.c asangoto, asanlabel): sets of block numbers, null when empty. The blocks open at the label
  	 * (asanopen, once defined); for the gotos before it: the blocks open at any of them (asanfrom) and at all of them (asanall) */
  	struct array *asanopen, *asanfrom, *asanall;
@@ -367,7 +393,7 @@
  };
  
  struct switchcases {
-@@ -522,21 +639,44 @@
+@@ -522,21 +645,44 @@
  	struct array *asanopen;
  };
  
@@ -413,7 +439,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +686,13 @@
+@@ -546,6 +692,13 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -429,7 +455,7 @@
  void emitfunc(struct func *, bool);
 --- a/decl.c
 +++ b/decl.c
-@@ -62,8 +62,24 @@
+@@ -62,8 +62,25 @@
  	struct member **last;
  	unsigned bits;  /* number of bits remaining in the last byte */
  	bool pack;
@@ -444,6 +470,7 @@
  
 +struct func *curfunc;
 +static bool curclone;   /* a clone's body is being parsed (funcclone): nothing is recorded */
++static bool alignasseen;   /* the declaration being parsed has an _Alignas (not only GNU aligned) */
 +
 +static void structpackbits(struct type *, struct structbuilder *);
 +
@@ -454,7 +481,7 @@
  struct decl *
  mkdecl(char *name, enum declkind k, struct type *t, enum typequal tq, enum linkage linkage)
  {
-@@ -169,6 +185,7 @@
+@@ -169,6 +186,7 @@
  	struct attr a;
  	enum attrkind allowedattr;
  	struct structbuilder b;
@@ -462,7 +489,7 @@
  	unsigned long long value, max, min;
  	bool sign;
  	int i;
-@@ -177,7 +194,7 @@
+@@ -177,7 +195,7 @@
  	switch (tok.kind) {
  	case TSTRUCT: kind = TYPESTRUCT, allowedattr |= ATTRPACKED; break;
  	case TUNION:  kind = TYPEUNION, allowedattr |= ATTRPACKED; break;
@@ -471,7 +498,7 @@
  	default: fatal("internal error: unknown tag kind");
  	}
  	next();
-@@ -187,7 +204,7 @@
+@@ -187,7 +205,7 @@
  	tag = 0;
  	t = NULL;
  	et = NULL;
@@ -480,7 +507,7 @@
  		tag = tokenstr(tok.kind);
  		next();
  	}
-@@ -227,7 +244,15 @@
+@@ -227,7 +245,15 @@
  		b.type = t;
  		b.last = &t->u.structunion.members;
  		b.bits = 0;
@@ -497,7 +524,7 @@
  		/* GNU extension, accepted by gcc in C: an empty body is size 0 with alignment 1.
  		 * EDG emits `struct X {}` for empty C++ classes. */
  		while (tok.kind != TRBRACE)
-@@ -242,12 +267,19 @@
+@@ -242,12 +268,19 @@
  			trail.kind = 0;
  			trail.align = 0;
  			trail.section = NULL;
@@ -520,7 +547,7 @@
  		break;
  	case TYPEENUM:
  		enumconsts = NULL;
-@@ -263,7 +295,7 @@
+@@ -263,7 +296,7 @@
  		}
  		max = 0;
  		min = 0;
@@ -529,7 +556,7 @@
  			name = tokenstr(tok.kind);
  			next();
  			attr(NULL, 0);
-@@ -308,6 +340,48 @@
+@@ -308,6 +341,48 @@
  				break;
  		}
  		expect(TRBRACE, "to close enum specifier");
@@ -578,7 +605,15 @@
  		if (!t->base) {
  			if (min <= 0x80000000 && max <= 0x7fffffff) {
  				t->base = min ? &typeint : &typeuint;
-@@ -487,12 +561,18 @@
+@@ -476,6 +551,7 @@
+ 		case TALIGNAS:
+ 			if (!align)
+ 				error(&tok.loc, "alignment specifier not allowed in this declaration");
++			alignasseen = true;
+ 			next();
+ 			expect(TLPAREN, "after 'alignas'");
+ 			other = typename(s, NULL, NULL);
+@@ -487,12 +563,18 @@
  			expect(TRPAREN, "to close 'alignas' specifier");
  			break;
  
@@ -600,7 +635,7 @@
  				goto done;
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d || d->kind != DECLTYPE)
-@@ -603,7 +683,15 @@
+@@ -603,7 +685,15 @@
  	enum typequal tq;
  	int allowedattr;
  
@@ -617,7 +652,7 @@
  		attr(NULL, 0);
  		tq = QUALNONE;
  		while (typequal(&tq))
-@@ -613,7 +701,12 @@
+@@ -613,7 +703,12 @@
  	}
  	if (name)
  		*name = NULL;
@@ -631,7 +666,7 @@
  	ptr = result->next;
  	switch (tok.kind) {
  	case TLPAREN:
-@@ -622,9 +715,10 @@
+@@ -622,9 +717,10 @@
  			switch (tok.kind) {
  			case TMUL:
  			case TLPAREN:
@@ -643,7 +678,7 @@
  					break;
  				goto func;
  			}
-@@ -634,7 +728,7 @@
+@@ -634,7 +730,7 @@
  		allowedattr = -1;
  		break;
  	default:
@@ -652,7 +687,7 @@
  			if (!name)
  				error(&tok.loc, "identifier not allowed in abstract declarator");
  			*name = tokenstr(tok.kind);
-@@ -656,6 +750,8 @@
+@@ -656,6 +752,8 @@
  		func:
  			t = mktype(TYPEFUNC, 0);
  			t->qual = QUALNONE;
@@ -661,7 +696,7 @@
  			t->u.func.isvararg = false;
  			t->u.func.params = NULL;
  			t->u.func.nparam = 0;
-@@ -711,20 +807,21 @@
+@@ -711,20 +809,21 @@
  				expect(TRBRACK, "after array length");
  			}
  			listinsert(ptr->prev, &t->link);
@@ -692,7 +727,7 @@
  			break;
  		default:
  			return;
-@@ -842,12 +939,14 @@
+@@ -842,12 +941,14 @@
  	struct member *m;
  	size_t end;
  
@@ -708,7 +743,7 @@
  	}
  	if (mt.type->prop & PROPFLEX) {
  		/*
-@@ -861,11 +960,14 @@
+@@ -861,11 +962,14 @@
  	if (mt.type->prop & PROPVM)
  		error(&tok.loc, "struct member '%s' has variably modified type", name);
  	assert(mt.type->align > 0);
@@ -723,7 +758,7 @@
  		m->next = NULL;
  		*b->last = m;
  		b->last = &m->next;
-@@ -875,14 +977,29 @@
+@@ -875,14 +979,29 @@
  	if (width == -1) {
  		m->bits.before = 0;
  		m->bits.after = 0;
@@ -756,7 +791,7 @@
  		} else {
  			m->offset = 0;
  			if (t->size < mt.type->size)
-@@ -896,6 +1013,8 @@
+@@ -896,6 +1015,8 @@
  			error(&tok.loc, "alignment specified for bit-field '%s'", name);
  		if (b->pack)
  			error(&tok.loc, "bit-field '%s' in packed struct is not supported", name);
@@ -765,7 +800,7 @@
  		if (!width && name)
  			error(&tok.loc, "bit-field '%s' with zero width must not have declarator", name);
  		if (width > mt.type->u.arith.width)
-@@ -909,6 +1028,10 @@
+@@ -909,6 +1030,10 @@
  				t->size = end;
  				b->bits = 0;
  			}
@@ -776,7 +811,7 @@
  			if (m) {
  				m->offset = ALIGNDOWN(t->size - !!b->bits, mt.type->size);
  				m->bits.before = (t->size - m->offset) * 8 - b->bits;
-@@ -928,6 +1051,108 @@
+@@ -928,6 +1053,108 @@
  		t->align = align;
  }
  
@@ -885,7 +920,7 @@
  static bool
  staticassert(struct scope *s)
  {
-@@ -957,12 +1182,15 @@
+@@ -957,12 +1184,15 @@
  	struct qualtype base, mt;
  	char *name;
  	unsigned long long width;
@@ -902,7 +937,7 @@
  	if (!base.type)
  		error(&tok.loc, "no type in struct member declaration");
  	if (tok.kind == TSEMICOLON) {
-@@ -977,9 +1205,15 @@
+@@ -977,9 +1207,15 @@
  			width = intconstexpr(s, false);
  			addmember(b, base, NULL, 0, width);
  		} else {
@@ -918,7 +953,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1296,43 @@
+@@ -1062,6 +1298,43 @@
  	return d;
  }
  
@@ -962,7 +997,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1341,7 @@
+@@ -1070,15 +1343,31 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -971,7 +1006,31 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,7 +1359,11 @@
+ }
+ 
++static bool decl1(struct scope *, struct func *);
++
++/* the attributes of a declaration name its scope's constants (the kernel's block-scope enum { TEST_ALIGNMENT = 16 } in
++ * __aligned(TEST_ALIGNMENT)) */
+ bool
+ decl(struct scope *s, struct func *f)
+ {
++	struct scope *old = attrscope;
++	bool r;
++
++	attrscope = s;
++	r = decl1(s, f);
++	attrscope = old;
++	return r;
++}
++
++static bool
++decl1(struct scope *s, struct func *f)
++{
+ 	struct qualtype base, qt;
+ 	struct type *t;
+ 	enum typequal tq;
+@@ -1088,7 +1377,11 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -983,7 +1042,7 @@
  	struct decl *d, *prior;
  	enum declkind kind;
  	struct scope *funcscope;
-@@ -1096,10 +1371,31 @@
+@@ -1096,10 +1389,32 @@
  
  	if (staticassert(s))
  		return true;
@@ -1008,6 +1067,7 @@
 +	}
  	a.kind = 0;
 +	declattr = (struct declattr){0};
++	alignasseen = false;
  	if (attr(&a, ATTRNORETURN) && consume(TSEMICOLON))
  		return true;
  	base = declspecs(s, &sc, &fs, &align);
@@ -1015,7 +1075,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1405,18 @@
+@@ -1109,16 +1424,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -1037,7 +1097,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1433,36 @@
+@@ -1135,6 +1452,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -1074,7 +1134,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1472,32 @@
+@@ -1144,22 +1491,58 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -1109,13 +1169,20 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,9 +1507,20 @@
- 			if (align && align < t->align)
+ 				error(&tok.loc, "typedef '%s' redefined with different type", name);
+ 			break;
+ 		case DECLOBJECT:
+-			if (align && align < t->align)
++			/* _Alignas cannot weaken the type's alignment (6.7.5p4); GNU aligned on an object is its alignment
++			 * even below the type's, as gcc lays it out (the kernel's DEFINE_PER_CPU_PAGE_ALIGNED, 4096, of the
++			 * 16 KiB-aligned struct irq_stack) */
++			if (align && align < t->align && alignasseen)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
+-			if (d->u.obj.align < align)
 +			declapplyattr(d);
 +			d->regvar = regname;   /* a block-scope register variable: asm operands take it in this register */
- 			if (d->u.obj.align < align)
++			if (d->u.obj.align < align || align && align < t->align)
  				d->u.obj.align = align;
  			d->u.obj.cleanup = declcleanup;
 +			if (declcleanup && gnucleanup) {
@@ -1130,7 +1197,7 @@
  			declcleanup = NULL;
  			if (d->u.obj.cleanup && s == &filescope)
  				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
-@@ -1176,11 +1537,23 @@
+@@ -1176,12 +1559,29 @@
  				funcexpr(f, base.expr);
  			init = NULL;
  			hasinit = false;
@@ -1152,9 +1219,23 @@
 +				if (f && d->u.obj.storage == SDAUTO && !d->type->incomplete && !(d->type->prop & PROPVM))
 +					funcalloc(f, d);
  				init = parseinit(s, d->type);
++				if (initfamsize) {
++					if (d->u.obj.storage != SDSTATIC)
++						error(&tok.loc, "non-static initialization of a flexible array member");
++					d->u.obj.famsize = initfamsize;
++				}
  				hasinit = true;
  			} else if (sc & SCEXTERN) {
-@@ -1201,8 +1574,14 @@
+ 				break;
+@@ -1196,13 +1596,21 @@
+ 			defineobj(d, init, hasinit, f);
+ 			break;
+ 		case DECLFUNC:
+-			if (align)
++			/* GNU aligned on a function (the kernel's __function_aligned, CONFIG_FUNCTION_ALIGNMENT=16): QBE starts
++			 * every x86-64 function on a 16-byte boundary, so up to 16 it already holds; above, it would not */
++			if (align && (align > 16 || strcmp(targ->name, "x86_64-sysv") != 0))
+ 				error(&tok.loc, "function '%s' declared with alignment specifier", name);
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1170,7 +1251,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1592,43 @@
+@@ -1213,12 +1621,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1215,7 +1296,7 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1226,6 +1636,10 @@
+@@ -1226,6 +1665,10 @@
  			} else if (funcscope) {
  				delscope(funcscope);
  			}
@@ -1226,7 +1307,7 @@
  			break;
  		}
  		if (consume(TSEMICOLON))
-@@ -1268,3 +1682,127 @@
+@@ -1268,3 +1711,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }
@@ -1354,6 +1435,21 @@
 +	delfunc(f);
 +	return c;
 +}
+--- a/eval.c
++++ b/eval.c
+@@ -585,8 +585,10 @@
+ 				break;
+ 			if (l->kind == EXPRCONST) {
+ 				binary(expr, expr->op, l, r);
+-			} else if (l->kind == EXPRBINARY && l->type->kind == TYPEPOINTER && l->op == TADD && l->u.binary.r->kind == EXPRCONST) {
+-				/* (P + C1) ± C2  ->  P + (C1 ± C2) */
++			} else if (l->kind == EXPRBINARY && l->op == TADD && l->u.binary.r->kind == EXPRCONST &&
++			           (l->type->kind == TYPEPOINTER || l->type->prop & PROPINT && l->type->size == typelong.size)) {
++				/* (P + C1) ± C2  ->  P + (C1 ± C2), also for P an address cast to a 64-bit integer, which wraps as
++				 * the pointer does (the kernel's TOP_OF_INIT_STACK, (unsigned long)&init_stack + C1 - C2) */
+ 				binary(expr->u.binary.r, expr->op, l->u.binary.r, r);
+ 				expr->op = TADD;
+ 				expr->u.binary.l = l->u.binary.l;
 --- a/expr.c
 +++ b/expr.c
 @@ -8,6 +8,8 @@
@@ -1649,7 +1745,7 @@
  			break;
  		case TPERIOD:
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
-@@ -1188,9 +1290,167 @@
+@@ -1188,9 +1290,174 @@
  		e = mkexpr(EXPRBUILTIN, &typeint, e);
  		e->u.builtin.kind = BUILTINSIGNBIT;
  		break;
@@ -1814,10 +1910,17 @@
 +		e = mkexpr(EXPRBUILTIN, mkpointertype(&typevoid, QUALNONE), NULL);
 +		e->u.builtin.kind = kind;
 +		break;
++	case BUILTINEXTRACTRETURNADDR:
++		/* GNU: the address a return address stands for, which on x86-64 is the return address itself (on
++		 * aarch64 pointer authentication can make it differ) */
++		if (strcmp(targ->name, "x86_64-sysv") != 0)
++			error(&tok.loc, "__builtin_extract_return_addr is only supported on x86-64");
++		e = exprconvert(assignexpr(s), mkpointertype(&typevoid, QUALNONE));
++		break;
  	case BUILTINEXPECT:
  		/* just a no-op for now */
  		/* TODO: check that the expression and the expected value have type 'long' */
-@@ -1221,8 +1481,11 @@
+@@ -1221,8 +1488,11 @@
  		m = typemember(t, name, &offset);
  		if (!m)
  			error(&tok.loc, "struct/union has no member named '%s'", name);
@@ -1830,7 +1933,7 @@
  		break;
  	case BUILTINTYPESCOMPATIBLEP:
  		t = typename(s, NULL, NULL);
-@@ -1311,6 +1574,10 @@
+@@ -1311,6 +1581,10 @@
  		error(&tok.loc, "operand of '%s' operator must be an lvalue", tokenstr(op));
  	if (base->qual & QUALCONST)
  		error(&tok.loc, "operand of '%s' operator is const qualified", tokenstr(op));
@@ -1841,7 +1944,7 @@
  	e = mkexpr(EXPRINCDEC, base->type, base);
  	e->op = op;
  	e->u.incdec.post = post;
-@@ -1374,6 +1641,8 @@
+@@ -1374,6 +1648,8 @@
  				*end = assignexpr(s);
  				if ((t->u.func.isvararg || t->u.func.unprototyped) && !p)
  					*end = exprpromote(*end);
@@ -1850,7 +1953,7 @@
  				else
  					*end = exprassign(*end, p->type);
  				end = &(*end)->next;
-@@ -1383,6 +1652,41 @@
+@@ -1383,6 +1659,41 @@
  			}
  			if (p && !t->u.func.isvararg && !t->u.func.unprototyped)
  				error(&tok.loc, "not enough arguments for function call");
@@ -1892,7 +1995,7 @@
  			e = decay(e);
  			next();
  			break;
-@@ -1398,7 +1702,7 @@
+@@ -1398,7 +1709,7 @@
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "'%s' operator must be applied to pointer to struct/union", tokenstr(op));
  			next();
@@ -1901,7 +2004,7 @@
  				error(&tok.loc, "expected identifier after '%s' operator", tokenstr(op));
  			lvalue = op == TARROW || r->base->lvalue;
  			offset = 0;
-@@ -1497,7 +1801,7 @@
+@@ -1497,7 +1808,7 @@
  					parseinit(s, t);
  				e = NULL;
  			} else {
@@ -1910,7 +2013,7 @@
  				expect(TRPAREN, "after expression");
  				if (op == TSIZEOF)
  					e = postfixexpr(s, e);
-@@ -1515,11 +1819,14 @@
+@@ -1515,11 +1826,14 @@
  				error(&tok.loc, "%s operator applied to bitfield expression", tokenstr(op));
  			t = e->type;
  		}
@@ -1928,7 +2031,21 @@
  			e = mkexpr(EXPRSIZEOF, &typeulong, e);
  			e->u.szof.type = t;
  		} else {
-@@ -1537,6 +1844,26 @@
+@@ -1527,7 +1841,12 @@
+ 			XXX: __alignof__ is not the same as alignof on 32-bit archs
+ 			this needs to be considered if we gain support for those archs
+ 			*/
+-			e = mkconstexpr(&typeulong, op == TSIZEOF ? t->size : t->align);
++			unsigned long long a = t->align;
++
++			/* GNU: the alignment of an object is the object's (aligned on its declaration), as gcc's DECL_ALIGN */
++			if (e && e->kind == EXPRIDENT && e->u.ident.decl->kind == DECLOBJECT)
++				a = e->u.ident.decl->u.obj.align;
++			e = mkconstexpr(&typeulong, op == TSIZEOF ? t->size : a);
+ 		}
+ 		break;
+ 	default:
+@@ -1537,6 +1856,26 @@
  	return e;
  }
  
@@ -1955,7 +2072,7 @@
  static struct expr *
  castexpr(struct scope *s)
  {
-@@ -1551,7 +1878,7 @@
+@@ -1551,7 +1890,7 @@
  		tq = QUALNONE;
  		t = typename(s, &tq, &toeval);
  		if (!t) {
@@ -1964,7 +2081,12 @@
  			expect(TRPAREN, "after expression to match '('");
  			e = postfixexpr(s, e);
  			goto done;
-@@ -1569,6 +1896,38 @@
+@@ -1566,9 +1905,43 @@
+ 			d->u.obj.storage = s == &filescope ? SDSTATIC : SDAUTO;
+ 			e->u.compound.decl = d;
+ 			e->u.compound.init = parseinit(s, t);
++			if (initfamsize)
++				error(&tok.loc, "a compound literal that initializes a flexible array member is not supported");
  			e = postfixexpr(s, decay(e));
  			goto done;
  		}
@@ -2005,7 +2127,7 @@
  		e = mkexpr(EXPRCAST, t, NULL);
 --- a/init.c
 +++ b/init.c
-@@ -20,6 +20,10 @@
+@@ -20,8 +20,16 @@
  	   number of nested objects in initializer */
  	struct object obj[32], *cur, *sub;
  	struct init *init, **last;
@@ -2013,10 +2135,51 @@
 +	 * level, the element's initializers are repeated for lo + 1 ... hi (rangedone) */
 +	struct object *rangearr;
 +	unsigned long long rangelo, rangehi;   /* byte offsets of the first and the last element in the array */
++	struct type *fam;   /* GNU: the initialized flexible array member of the object (a copy of its type), or null */
  };
  
++/* the bytes the last parseinit's flexible array member takes (GNU; 0 without one) */
++unsigned long long initfamsize;
++
  struct init *
-@@ -109,19 +113,33 @@
+ mkinit(unsigned long long start, unsigned long long end, struct bitfield bits, struct expr *expr)
+ {
+@@ -62,12 +70,32 @@
+ 	p->last = &new->next;
+ }
+ 
++/* whether t, the type of the member p->sub is at, is the flexible array member of the outermost struct */
++static bool
++famslot(struct initparser *p, struct type *t)
++{
++	return p->sub == p->obj && p->sub->type->kind == TYPESTRUCT && p->sub->u.mem && !p->sub->u.mem->next &&
++		t == p->sub->u.mem->type && t->kind == TYPEARRAY && t->incomplete;
++}
++
+ static void
+ subobj(struct initparser *p, struct type *t, unsigned long long off)
+ {
+-	/* the subobject could be incomplete if it's a flexible array member */
+-	if (t->incomplete)
++	/*
++	The subobject could be incomplete if it's a flexible array member. GNU C initializes one of the outermost
++	struct (the kernel's init_mm.cpu_bitmap): the array grows with its initializers as an array of unknown size
++	does, in a copy of its type (the member's own type is the struct's), and the object is that much larger.
++	*/
++	if (famslot(p, t)) {
++		if (!p->fam) {   /* else a designator names the member again */
++			p->fam = xmalloc(sizeof(*p->fam));
++			*p->fam = *t;
++			p->fam->size = 0;
++		}
++		t = p->fam;
++	} else if (t->incomplete) {
+ 		error(&tok.loc, "initializer specified for incomplete type");
++	}
+ 	off += p->sub->offset;
+ 	if (++p->sub == p->obj + countof(p->obj))
+ 		fatal("internal error: too many designators");
+@@ -109,19 +137,33 @@
  	for (;;) {
  		t = p->sub->type;
  		switch (tok.kind) {
@@ -2053,7 +2216,7 @@
  		case TPERIOD:
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "member designator only valid for struct/union types");
-@@ -137,6 +155,62 @@
+@@ -137,6 +179,64 @@
  	}
  }
  
@@ -2061,6 +2224,8 @@
 +static bool
 +repeatable(struct expr *e)
 +{
++	if (eval(e)->kind == EXPRCONST)   /* an arithmetic constant (the kernel's [0 ... N - 1] = -1, converted) */
++		return true;
 +	while (e->kind == EXPRCAST)
 +		e = e->base;
 +	switch (e->kind) {
@@ -2116,11 +2281,13 @@
  static void
  focus(struct initparser *p)
  {
-@@ -207,11 +281,13 @@
+@@ -207,11 +307,15 @@
  	p.sub->iscur = false;
  	p.init = NULL;
  	p.last = &p.init;
 +	p.rangearr = NULL;
++	p.fam = NULL;
++	initfamsize = 0;
  	if (t->incomplete && t->kind != TYPEARRAY)
  		error(&tok.loc, "initializer specified for incomplete type");
  	if (t->kind == TYPEARRAY && t->base->size == 0)
@@ -2130,7 +2297,7 @@
  		if (p.cur) {
  			if (tok.kind == TLBRACK || tok.kind == TPERIOD)
  				designator(s, &p);
-@@ -222,8 +298,12 @@
+@@ -222,8 +326,12 @@
  		}
  		if (consume(TLBRACE)) {
  			if (consume(TRBRACE)){
@@ -2145,7 +2312,7 @@
  				goto next;
  			}
  			if (p.cur == p.sub) {
-@@ -252,8 +332,18 @@
+@@ -252,8 +360,18 @@
  				goto add;
  			case TYPESTRUCT:
  			case TYPEUNION:
@@ -2165,7 +2332,7 @@
  				break;
  			default:  /* scalar type */
  				assert(t->prop & PROPSCALAR);
-@@ -268,10 +358,12 @@
+@@ -268,12 +386,17 @@
  		else
  			bits = (struct bitfield){0};
  		initadd(&p, mkinit(p.sub->offset, p.sub->offset + p.sub->type->size, bits, expr));
@@ -2174,10 +2341,16 @@
  			if (p.sub->type->incomplete)
  				p.sub->type->incomplete = false;
  		next:
+-			if (!p.cur)
 +			rangedone(&p);
- 			if (!p.cur)
++			if (!p.cur) {
++				if (p.fam)
++					initfamsize = p.fam->size;
  				return p.init;
++			}
  			if (tok.kind == TCOMMA) {
+ 				next();
+ 				if (tok.kind != TRBRACE)
 --- a/main.c
 +++ b/main.c
 @@ -1,6 +1,10 @@
@@ -4656,8 +4829,12 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4557,18 @@
- 	size = d->type->size;
+@@ -3072,9 +4554,21 @@
+ 	int align;
+ 
+ 	align = d->u.obj.align;
+-	size = d->type->size;
++	size = d->type->size + d->u.obj.famsize;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
 +	/* GNU section: read-only ("a") when the object is const, as gcc chooses; used keeps it under cproc -p (a section
@@ -4675,6 +4852,15 @@
  	if (d->u.obj.storage == SDTHREAD)
  		fputs("thread ", stdout);
  	if (d->linkage == LINKEXTERN)
+@@ -3143,7 +4637,7 @@
+ 		printf("b %u, ", (unsigned)bits);
+ 		++offset;
+ 	}
+-	assert(offset <= d->type->size);
++	assert(offset <= size);
+ 	if (asanon && size && d->u.obj.storage != SDTHREAD) {
+ 		pad = ((size + 7) & ~7ULL) - size + ASANRZ;
+ 		g = arrayadd(&asanglobals, sizeof(*g));
 --- a/scan.c
 +++ b/scan.c
 @@ -193,7 +193,7 @@
@@ -4688,7 +4874,15 @@
  		error(&s->loc, "invalid escape sequence");
 --- a/scope.c
 +++ b/scope.c
-@@ -43,7 +43,34 @@
+@@ -5,6 +5,7 @@
+ #include "cc.h"
+ 
+ struct scope filescope;
++struct scope *attrscope = &filescope;
+ 
+ /* a builtin that calls the library function symbol: a function of type ret(ptypes...), filed under the builtin's name */
+ static void
+@@ -43,7 +44,35 @@
  {
  	static struct decl builtins[] = {
  		{.name = "__builtin_alloca",      .kind = DECLBUILTIN, .u.builtin = BUILTINALLOCA},
@@ -4717,13 +4911,14 @@
  		{.name = "__builtin_constant_p",  .kind = DECLBUILTIN, .u.builtin = BUILTINCONSTANTP},
 +		{.name = "__builtin_object_size", .kind = DECLBUILTIN, .u.builtin = BUILTINOBJECTSIZE},
 +		{.name = "__builtin_return_address", .kind = DECLBUILTIN, .u.builtin = BUILTINRETURNADDRESS},
++		{.name = "__builtin_extract_return_addr", .kind = DECLBUILTIN, .u.builtin = BUILTINEXTRACTRETURNADDR},
 +		{.name = "__builtin_isdigit", .kind = DECLBUILTIN, .u.builtin = BUILTINISDIGIT},
 +		{.name = "__builtin_prefetch", .kind = DECLBUILTIN, .u.builtin = BUILTINPREFETCH},
 +		{.name = "__builtin_frame_address", .kind = DECLBUILTIN, .u.builtin = BUILTINFRAMEADDRESS},
  		{.name = "__builtin_expect",      .kind = DECLBUILTIN, .u.builtin = BUILTINEXPECT},
  		{.name = "__builtin_fabsf",      .kind = DECLBUILTIN, .u.builtin = BUILTINFABSF},
  		{.name = "__builtin_inff",        .kind = DECLBUILTIN, .u.builtin = BUILTININFF},
-@@ -127,6 +154,23 @@
+@@ -127,6 +156,23 @@
  		(struct type *[]){mkpointertype(&typevoid, QUALNONE), mkpointertype(&typevoid, QUALCONST), &typeulong});
  	scopeputalias("__builtin_char_memchr", "memchr", mkpointertype(&typevoid, QUALNONE), 3,
  		(struct type *[]){mkpointertype(&typevoid, QUALCONST), &typeint, &typeulong});
@@ -4747,7 +4942,7 @@
  }
  
  struct scope *
-@@ -143,6 +187,11 @@
+@@ -143,6 +189,11 @@
  	s->asanbreak = parent->asanbreak;
  	s->asancontinue = parent->asancontinue;
  	s->parent = parent;
