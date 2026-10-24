@@ -157,6 +157,7 @@ jobs:
             run: |
               tests/pathb/run.sh
               tests/pathb-ir/run.sh
+              tests/pathb-borrow/run.sh
               tests/wasm/run.sh
           - name: Path B stage 3 (IR to QBE translation validation)
             run: tests/pathb-qbe/run.sh
