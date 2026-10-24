@@ -801,7 +801,7 @@ end
 
 VOLATILE_QUALS = ['volatile', '__volatile__', '__volatile']
 KEEP_NAME = '__nfcxx_keep'
-KEEP_DEF = "static void #{KEEP_NAME}(void *p) { }"
+KEEP_DEF = "static __attribute__((noinline)) void #{KEEP_NAME}(void *p) { }"
 
 def opener?(t)
   t == '(' || t == '[' || t == '{'

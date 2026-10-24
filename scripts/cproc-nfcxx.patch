@@ -20,7 +20,7 @@
  		return false;
  	name = strip(tokenstr(tok.kind), namebuf, sizeof namebuf);
  	next();
-@@ -84,17 +88,92 @@
+@@ -84,17 +88,94 @@
  				a->cleanup = cleanup;
  			expect(TRPAREN, "after cleanup function");
  		} else if (strcmp(name, "section") == 0) {
@@ -83,6 +83,8 @@
 +			expect(TRPAREN, isalias ? "after alias target" : "after visibility");
 +		} else if (strcmp(name, "always_inline") == 0) {
 +			declattr.alwaysinline = true;
++		} else if (strcmp(name, "noinline") == 0 || strcmp(name, "noipa") == 0) {
++			declattr.noinline = true;
 +		} else if (strcmp(name, "gnu_inline") == 0) {
 +			declattr.gnuinline = true;
 +		} else if (strcmp(name, "transparent_union") == 0) {
@@ -171,7 +173,7 @@
  	BUILTINEXPECT,
  	BUILTINFABSF,
  	BUILTINFPCLASSIFY,
-@@ -198,6 +219,14 @@
+@@ -198,6 +219,15 @@
  	enum typequal qual;
  	struct value *value;
  	char *asmname;
@@ -179,6 +181,7 @@
 +	char *regvar;    /* GNU register variable: register T x asm("REG") binds x to REG (without '%'), or null */
 +	bool used;       /* GNU used: kept even when nothing references it (cproc -p) */
 +	bool weak;       /* GNU weak */
++	bool noinline;   /* GNU noinline or noipa */
 +	char *alias;     /* GNU alias("target"): the declaration defines the name as the target */
 +	const char *visibility;   /* GNU visibility("hidden"), ... or null */
 +	bool symattr;    /* in the list of decls whose weak or visibility goes to the assembly (emitsymattrs) */
@@ -186,7 +189,7 @@
  	bool defined;
  	bool tentative;
  	struct decl *next;
-@@ -211,11 +240,26 @@
+@@ -211,11 +241,28 @@
  			enum storageduration storage;
  			/* GNU cleanup(f) on a block-scope object: f(&object) runs when a throw unwinds its function (nfcxx, qbe.c) */
  			const char *cleanup;
@@ -209,11 +212,13 @@
 +			 * side effects is C (expr.c), as gcc's inlined and folded call is */
 +			bool constret;
 +			unsigned long long retval;
++			/* the body is {} and the function returns void: such a call is nothing, as gcc's inlined one */
++			bool emptybody;
 +			struct funcclone *clones;
  		} func;
  		unsigned long long enumconst;
  		enum builtinkind builtin;
-@@ -229,6 +273,15 @@
+@@ -229,6 +276,15 @@
  	struct block *continuelabel;
  	struct switchcases *switchcases;
  	struct scope *parent;
@@ -229,7 +234,7 @@
  	/* -fsanitize=address: the stack objects registered when the loop or switch body whose breaklabel or continuelabel this is began (asanmark) */
  	size_t asanbreak, asancontinue;
  };
-@@ -257,6 +310,7 @@
+@@ -257,6 +313,7 @@
  	EXPRBUILTIN,
  	EXPRTEMP,
  	EXPRSIZEOF,
@@ -237,7 +242,7 @@
  };
  
  struct stringlit {
-@@ -291,6 +345,11 @@
+@@ -291,6 +348,11 @@
  			/* a 16-byte floating constant (PROPSOFT type): the object image, low and high eightbyte */
  			unsigned long long soft[2];
  		} constant;
@@ -249,7 +254,7 @@
  		struct stringlit string;
  		struct {
  			struct expr *args;
-@@ -338,11 +397,17 @@
+@@ -338,11 +400,17 @@
  
  void tokeninit(void);
  int tokenget(const void *, size_t);
@@ -267,7 +272,7 @@
  
  /* scan */
  
-@@ -364,6 +429,16 @@
+@@ -364,6 +432,16 @@
  
  void next(void);
  bool peek(enum tokenkind);
@@ -284,7 +289,7 @@
  char *expect(enum tokenkind, const char *);
  bool consume(enum tokenkind);
  
-@@ -421,6 +496,12 @@
+@@ -421,6 +499,12 @@
  extern const struct target *targ;
  
  void targinit(const char *);
@@ -297,7 +302,7 @@
  
  /* attr */
  
-@@ -434,17 +515,38 @@
+@@ -434,17 +518,39 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
@@ -328,6 +333,7 @@
 +	bool transparent;   /* GNU transparent_union, taken on a typedef of a union (decl) */
 +	bool gnuinline;     /* GNU gnu_inline */
 +	bool alwaysinline;  /* GNU always_inline */
++	bool noinline;      /* GNU noinline or noipa: a call of the function is never folded into its body (expr.c) */
 +	bool weak;          /* GNU weak */
 +	char *alias;        /* GNU alias("target") */
 +	const char *visibility;   /* GNU visibility("...") */
@@ -336,7 +342,7 @@
  
  /* decl */
  
-@@ -503,6 +605,15 @@
+@@ -503,6 +609,15 @@
  /* stmt */
  
  void stmt(struct func *, struct scope *);
@@ -352,7 +358,7 @@
  
  /* backend */
  
-@@ -512,6 +623,8 @@
+@@ -512,6 +627,8 @@
  	/* -fsanitize=address (qbe.c asangoto, asanlabel): sets of block numbers, null when empty. The blocks open at the label
  	 * (asanopen, once defined); for the gotos before it: the blocks open at any of them (asanfrom) and at all of them (asanall) */
  	struct array *asanopen, *asanfrom, *asanall;
@@ -361,7 +367,7 @@
  };
  
  struct switchcases {
-@@ -522,21 +635,44 @@
+@@ -522,21 +639,44 @@
  	struct array *asanopen;
  };
  
@@ -407,7 +413,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +682,13 @@
+@@ -546,6 +686,13 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -912,7 +918,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1296,41 @@
+@@ -1062,6 +1296,43 @@
  	return d;
  }
  
@@ -928,6 +934,8 @@
 +		d->used = true;
 +	if (declattr.weak)
 +		d->weak = true;
++	if (declattr.noinline)
++		d->noinline = true;
 +	if (declattr.visibility)
 +		d->visibility = declattr.visibility;
 +	else if (pragmavisibility && !d->visibility)
@@ -954,7 +962,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1339,7 @@
+@@ -1070,7 +1341,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -963,7 +971,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,7 +1357,11 @@
+@@ -1088,7 +1359,11 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -975,7 +983,7 @@
  	struct decl *d, *prior;
  	enum declkind kind;
  	struct scope *funcscope;
-@@ -1096,10 +1369,31 @@
+@@ -1096,10 +1371,31 @@
  
  	if (staticassert(s))
  		return true;
@@ -1007,7 +1015,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1403,18 @@
+@@ -1109,16 +1405,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -1029,7 +1037,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1431,36 @@
+@@ -1135,6 +1433,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -1066,7 +1074,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1470,32 @@
+@@ -1144,10 +1472,32 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -1101,7 +1109,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,9 +1505,20 @@
+@@ -1157,9 +1507,20 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1122,7 +1130,7 @@
  			declcleanup = NULL;
  			if (d->u.obj.cleanup && s == &filescope)
  				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
-@@ -1176,11 +1535,23 @@
+@@ -1176,11 +1537,23 @@
  				funcexpr(f, base.expr);
  			init = NULL;
  			hasinit = false;
@@ -1146,7 +1154,7 @@
  				init = parseinit(s, d->type);
  				hasinit = true;
  			} else if (sc & SCEXTERN) {
-@@ -1201,8 +1572,14 @@
+@@ -1201,8 +1574,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1162,7 +1170,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1590,43 @@
+@@ -1213,12 +1592,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1207,7 +1215,7 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1226,6 +1634,10 @@
+@@ -1226,6 +1636,10 @@
  			} else if (funcscope) {
  				delscope(funcscope);
  			}
@@ -1218,7 +1226,7 @@
  			break;
  		}
  		if (consume(TSEMICOLON))
-@@ -1268,3 +1680,127 @@
+@@ -1268,3 +1682,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }
@@ -1492,7 +1500,27 @@
  		break;
  	case TLESS:
  	case TGREATER:
-@@ -378,9 +455,7 @@
+@@ -367,6 +444,19 @@
+ 	case TXOR:
+ 	case TBAND:
+ 		t = commonreal(&l, &r);
++		/*
++		x & 0 is 0 when evaluating x has no effect, as gcc folds it: the kernel's configuration masks (S_DAX,
++		ARCH_PAGE_TABLE_SYNC_MASK) are 0 when a feature is off, and the code they guard calls functions that
++		configuration does not define.
++		*/
++		if (op == TBAND && t->prop & PROPINT) {
++			e = eval(r);
++			if (e->kind == EXPRCONST && e->u.constant.u == 0 && nosideeffects(l))
++				return mkconstexpr(t, 0);
++			e = eval(l);
++			if (e->kind == EXPRCONST && e->u.constant.u == 0 && nosideeffects(r))
++				return mkconstexpr(t, 0);
++		}
+ 		break;
+ 	case TADD:
+ 		if (lp & PROPARITH && rp & PROPARITH) {
+@@ -378,9 +468,7 @@
  		if (l->type->kind != TYPEPOINTER || !(rp & PROPINT))
  			error(loc, "invalid operands to '+' operator");
  		t = l->type;
@@ -1503,7 +1531,7 @@
  		break;
  	case TSUB:
  		if (lp & PROPARITH && rp & PROPARITH) {
-@@ -389,18 +464,16 @@
+@@ -389,18 +477,16 @@
  		}
  		if (l->type->kind != TYPEPOINTER || !(rp & PROPINT) && r->type->kind != TYPEPOINTER)
  			error(loc, "invalid operands to '-' operator");
@@ -1524,7 +1552,7 @@
  			l = e;
  		}
  		break;
-@@ -544,6 +617,7 @@
+@@ -544,6 +630,7 @@
  		case 'r':  c = '\r'; ++s; break;
  		case 't':  c = '\t'; ++s; break;
  		case 'v':  c = '\v'; ++s; break;
@@ -1532,7 +1560,7 @@
  		case 'x':
  			++s;
  			c = 0;
-@@ -653,7 +727,7 @@
+@@ -653,7 +740,7 @@
  	case '8': t = &typeuchar; break;
  	case 'u': t = &typeushort; break;
  	case 'U': t = &typeuint; break;
@@ -1541,7 +1569,7 @@
  	default: assert(0);
  	}
  	switch (t->size) {
-@@ -764,7 +838,7 @@
+@@ -764,7 +851,7 @@
  		src = tok.lit;
  		ordinary = false;
  		switch (*src) {
@@ -1550,7 +1578,7 @@
  		case 'u': ++src; t = *src == '8' ? ++src, &typeuchar : &typeushort; break;
  		case 'U': ++src; t = &typeuint; break;
  		default: t = &typeuchar, ordinary = true;
-@@ -831,25 +905,30 @@
+@@ -831,25 +918,30 @@
  		break;
  	case TTRUE:
  	case TFALSE:
@@ -1583,7 +1611,7 @@
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d)
  				error(&tok.loc, "undeclared identifier: %s", tokenstr(tok.kind));
-@@ -869,12 +948,14 @@
+@@ -869,12 +961,14 @@
  }
  
  /* TODO: merge with init.c:designator() */
@@ -1600,7 +1628,7 @@
  
  	for (;;) {
  		switch (tok.kind) {
-@@ -882,10 +963,18 @@
+@@ -882,10 +976,18 @@
  			if (t->kind != TYPEARRAY)
  				error(&tok.loc, "index designator is only valid for array types");
  			next();
@@ -1621,7 +1649,7 @@
  			break;
  		case TPERIOD:
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
-@@ -1188,9 +1277,167 @@
+@@ -1188,9 +1290,167 @@
  		e = mkexpr(EXPRBUILTIN, &typeint, e);
  		e->u.builtin.kind = BUILTINSIGNBIT;
  		break;
@@ -1789,7 +1817,7 @@
  	case BUILTINEXPECT:
  		/* just a no-op for now */
  		/* TODO: check that the expression and the expected value have type 'long' */
-@@ -1221,8 +1468,11 @@
+@@ -1221,8 +1481,11 @@
  		m = typemember(t, name, &offset);
  		if (!m)
  			error(&tok.loc, "struct/union has no member named '%s'", name);
@@ -1802,7 +1830,7 @@
  		break;
  	case BUILTINTYPESCOMPATIBLEP:
  		t = typename(s, NULL, NULL);
-@@ -1311,6 +1561,10 @@
+@@ -1311,6 +1574,10 @@
  		error(&tok.loc, "operand of '%s' operator must be an lvalue", tokenstr(op));
  	if (base->qual & QUALCONST)
  		error(&tok.loc, "operand of '%s' operator is const qualified", tokenstr(op));
@@ -1813,7 +1841,7 @@
  	e = mkexpr(EXPRINCDEC, base->type, base);
  	e->op = op;
  	e->u.incdec.post = post;
-@@ -1374,6 +1628,8 @@
+@@ -1374,6 +1641,8 @@
  				*end = assignexpr(s);
  				if ((t->u.func.isvararg || t->u.func.unprototyped) && !p)
  					*end = exprpromote(*end);
@@ -1822,23 +1850,31 @@
  				else
  					*end = exprassign(*end, p->type);
  				end = &(*end)->next;
-@@ -1383,6 +1639,33 @@
+@@ -1383,6 +1652,41 @@
  			}
  			if (p && !t->u.func.isvararg && !t->u.func.unprototyped)
  				error(&tok.loc, "not enough arguments for function call");
 +			/* a call of a function whose body is { return C; } is C when its arguments have no side effects: gcc
 +			 * inlines it and folds what depends on it (the kernel's pmd_trans_huge() is 0 without transparent huge
 +			 * pages, and the call it guards names a function this configuration does not have) */
++			/* likewise a call of a function whose body is {} is nothing (the kernel's __apply_fineibt() without CFI,
++			 * whose arguments name sections this configuration does not have). Not folded: a weak function (the link
++			 * may take another unit's definition) and a noinline one (qbe-prep.rb's __nfcxx_keep(&x), whose call
++			 * is what keeps a volatile local in memory). */
 +			if (r->kind == EXPRUNARY && r->op == TBAND && r->base->kind == EXPRIDENT &&
-+			    r->base->u.ident.decl->kind == DECLFUNC && r->base->u.ident.decl->u.func.constret &&
-+			    r->base->u.ident.decl->defined) {
++			    r->base->u.ident.decl->kind == DECLFUNC && r->base->u.ident.decl->defined &&
++			    !r->base->u.ident.decl->weak && !r->base->u.ident.decl->noinline &&
++			    (r->base->u.ident.decl->u.func.constret || r->base->u.ident.decl->u.func.emptybody)) {
 +				struct expr *a;
 +				bool pure = true;
 +
 +				for (a = e->u.call.args; a; a = a->next)
 +					pure &= nosideeffects(a);
 +				if (pure) {
-+					e = mkconstexpr(t->base, r->base->u.ident.decl->u.func.retval);
++					if (r->base->u.ident.decl->u.func.constret)
++						e = mkconstexpr(t->base, r->base->u.ident.decl->u.func.retval);
++					else
++						e = mkexpr(EXPRCAST, &typevoid, mkconstexpr(&typeint, 0));
 +					next();
 +					break;
 +				}
@@ -1856,7 +1892,7 @@
  			e = decay(e);
  			next();
  			break;
-@@ -1398,7 +1681,7 @@
+@@ -1398,7 +1702,7 @@
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "'%s' operator must be applied to pointer to struct/union", tokenstr(op));
  			next();
@@ -1865,7 +1901,7 @@
  				error(&tok.loc, "expected identifier after '%s' operator", tokenstr(op));
  			lvalue = op == TARROW || r->base->lvalue;
  			offset = 0;
-@@ -1497,7 +1780,7 @@
+@@ -1497,7 +1801,7 @@
  					parseinit(s, t);
  				e = NULL;
  			} else {
@@ -1874,7 +1910,7 @@
  				expect(TRPAREN, "after expression");
  				if (op == TSIZEOF)
  					e = postfixexpr(s, e);
-@@ -1515,11 +1798,14 @@
+@@ -1515,11 +1819,14 @@
  				error(&tok.loc, "%s operator applied to bitfield expression", tokenstr(op));
  			t = e->type;
  		}
@@ -1892,7 +1928,7 @@
  			e = mkexpr(EXPRSIZEOF, &typeulong, e);
  			e->u.szof.type = t;
  		} else {
-@@ -1537,6 +1823,26 @@
+@@ -1537,6 +1844,26 @@
  	return e;
  }
  
@@ -1919,7 +1955,7 @@
  static struct expr *
  castexpr(struct scope *s)
  {
-@@ -1551,7 +1857,7 @@
+@@ -1551,7 +1878,7 @@
  		tq = QUALNONE;
  		t = typename(s, &tq, &toeval);
  		if (!t) {
@@ -1928,7 +1964,7 @@
  			expect(TRPAREN, "after expression to match '('");
  			e = postfixexpr(s, e);
  			goto done;
-@@ -1569,6 +1875,38 @@
+@@ -1569,6 +1896,38 @@
  			e = postfixexpr(s, decay(e));
  			goto done;
  		}
@@ -3665,7 +3701,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3214,906 @@
+@@ -2644,17 +3214,922 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -4455,23 +4491,39 @@
 +GNU weak and visibility on a global: directives in the inline-asm side file, after the code that defines or uses the
 +symbol. Under cproc -p the chunk ("#nfcxx:symattr NAME", main.c asmprune) stays only when a live item defines or
 +names the symbol: an unused weak declaration would otherwise be a weak undefined symbol gcc's object does not have.
++A symbol the unit only declares can still be named by a live item only from code QBE drops (the block of an
++if (0 && ...)), and the directive alone would make it an undefined symbol: its directives are marked
++"#nfcxx:ifused NAME", and qbe-cc keeps them only when the final assembly names the symbol elsewhere.
 +*/
 +void
 +emitsymattr(struct decl *d)
 +{
++	bool undef;
++
 +	if (!asmout)
 +		error(&tok.loc, "the weak and visibility attributes need the inline-asm side file (x86_64 ELF, -a)");
 +	if (!d->value)
 +		return;
++	undef = !d->defined && !d->tentative && !d->alias;
 +	fputs("#nfcxx:symattr ", asmout);
 +	asmsymname(d->value, asmout);
 +	fputs("\n", asmout);
 +	if (d->weak) {
++		if (undef) {
++			fputs("#nfcxx:ifused ", asmout);
++			asmsymname(d->value, asmout);
++			fputc('\n', asmout);
++		}
 +		fputs("\t.weak ", asmout);
 +		asmsymname(d->value, asmout);
 +		fputc('\n', asmout);
 +	}
 +	if (d->visibility && strcmp(d->visibility, "default")) {
++		if (undef) {
++			fputs("#nfcxx:ifused ", asmout);
++			asmsymname(d->value, asmout);
++			fputc('\n', asmout);
++		}
 +		fprintf(asmout, "\t.%s ", d->visibility);
 +		asmsymname(d->value, asmout);
 +		fputc('\n', asmout);
@@ -4574,7 +4626,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4381,12 @@
+@@ -2922,6 +4397,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -4587,7 +4639,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4399,7 @@
+@@ -2934,7 +4415,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -4596,7 +4648,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4409,7 @@
+@@ -2944,6 +4425,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -4604,7 +4656,7 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4541,18 @@
+@@ -3075,6 +4557,18 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
@@ -4870,7 +4922,7 @@
  /* 6.8 Statements and blocks */
  void
  stmt(struct func *f, struct scope *s)
-@@ -77,18 +197,31 @@
+@@ -77,18 +197,33 @@
  	attr(NULL, 0);
  	switch (tok.kind) {
  	/* 6.8.2 Compound statement */
@@ -4899,13 +4951,15 @@
 +			funcdecl(f)->u.func.constret = true;
 +			funcdecl(f)->u.func.retval = sh->retval;
 +		}
++		if (top && sh->items == 0 && functype(f)->base == &typevoid)
++			funcdecl(f)->u.func.emptybody = true;
 +		--sh->depth;
  		break;
 +	}
  
  	/* 6.8.3 Expression statement */
  	case TSEMICOLON:
-@@ -104,7 +237,7 @@
+@@ -104,7 +239,7 @@
  	/* 6.8.4 Selection statement */
  	case TIF:
  		next();
@@ -4914,7 +4968,7 @@
  		expect(TLPAREN, "after 'if'");
  		e = expr(s);
  		t = e->type;
-@@ -117,27 +250,27 @@
+@@ -117,27 +252,27 @@
  		expect(TRPAREN, "after expression");
  
  		funclabel(f, b[0]);
@@ -4948,7 +5002,7 @@
  		expect(TLPAREN, "after 'switch'");
  		e = expr(s);
  		expect(TRPAREN, "after expression");
-@@ -156,25 +289,26 @@
+@@ -156,25 +291,26 @@
  
  		v = funcexpr(f, e);
  		funcjmp(f, b[0]);
@@ -4979,7 +5033,7 @@
  		expect(TLPAREN, "after 'while'");
  		e = expr(s);
  		t = e->type;
-@@ -189,15 +323,16 @@
+@@ -189,15 +325,16 @@
  		funclabel(f, b[0]);
  		funcbranch(f, e, b[1], b[2]);
  		funclabel(f, b[1]);
@@ -4999,7 +5053,7 @@
  		break;
  	case TDO:
  		next();
-@@ -206,14 +341,15 @@
+@@ -206,14 +343,15 @@
  		b[1] = mkblock("do_cond");
  		b[2] = mkblock("do_join");
  
@@ -5018,7 +5072,7 @@
  
  		expect(TWHILE, "after 'do' statement");
  		expect(TLPAREN, "after 'while'");
-@@ -226,13 +362,13 @@
+@@ -226,13 +364,13 @@
  
  		funcbranch(f, e, b[0], b[2]);
  		funclabel(f, b[2]);
@@ -5034,7 +5088,7 @@
  		asanbegin(f);
  		if (!decl(s, f)) {
  			if (tok.kind != TSEMICOLON) {
-@@ -262,12 +398,13 @@
+@@ -262,12 +400,13 @@
  		expect(TRPAREN, NULL);
  
  		funclabel(f, b[1]);
@@ -5050,7 +5104,7 @@
  
  		funclabel(f, b[2]);
  		if (e) {
-@@ -277,16 +414,16 @@
+@@ -277,16 +416,16 @@
  		funcjmp(f, b[0]);
  		funclabel(f, b[3]);
  		asanend(f);
@@ -5070,7 +5124,7 @@
  		expect(TSEMICOLON, "after 'goto' statement");
  		break;
  	case TCONTINUE:
-@@ -294,6 +431,8 @@
+@@ -294,6 +433,8 @@
  		if (!s->continuelabel)
  			error(&tok.loc, "'continue' statement must be in loop");
  		asanleave(f, s->asancontinue);
@@ -5079,7 +5133,7 @@
  		funcjmp(f, s->continuelabel);
  		expect(TSEMICOLON, "after 'continue' statement");
  		break;
-@@ -302,6 +441,8 @@
+@@ -302,6 +443,8 @@
  		if (!s->breaklabel)
  			error(&tok.loc, "'break' statement must be in loop or switch");
  		asanleave(f, s->asanbreak);
@@ -5088,7 +5142,7 @@
  		funcjmp(f, s->breaklabel);
  		expect(TSEMICOLON, "after 'break' statement");
  		break;
-@@ -310,16 +451,150 @@
+@@ -310,16 +453,150 @@
  		t = functype(f);
  		if (t->base != &typevoid) {
  			e = exprassign(expr(s), t->base);

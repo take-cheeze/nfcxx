@@ -466,6 +466,39 @@ int main(void) {
 EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kconst.c -o kconst 2>/dev/null && { ./kconst; [ $? = 42 ]; }; then ok "kernel mode: calls of constant functions fold"
     else bad "kernel mode: calls of constant functions fold" "wrong result or the link failed"; fi
+    # x & 0, a call of an empty function and a hidden declaration used only in dead code leave no reference to symbols
+    # this program does not define (the link fails otherwise); the effects of the operands and arguments still happen
+    cat > kfold.c <<'EOC'
+#pragma GCC visibility push(hidden)
+extern unsigned int pgdir_shift;
+#pragma GCC visibility pop
+extern int no_dax(void), sites[], sites_end[];
+#define S_DAX 0
+static int calls;
+static int counted(void) { return ++calls; }
+static void apply(int *start, int *end) {}
+void seal(int *start, int *end) {}
+struct inode { unsigned int i_flags; };
+int dedupe(struct inode *in) {
+	if (!(in->i_flags & S_DAX))
+		return 1;
+	return no_dax();
+}
+int main(void) {
+	struct inode in = { 7 };
+	int r = dedupe(&in);
+	apply(sites, sites_end);
+	seal(sites, sites_end);
+	if (0 && r)
+		pgdir_shift = 48;
+	if (counted() & 0)   /* not folded, as the call has an effect: it runs */
+		return 1;
+	apply((int *)(long)counted(), 0);   /* an argument with an effect: the call stays */
+	return r == 1 && calls == 2 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kfold.c -o kfold 2>/dev/null && { ./kfold; [ $? = 42 ]; }; then ok "kernel mode: x & 0, empty calls and dead hidden declarations fold"
+    else bad "kernel mode: x & 0, empty calls and dead hidden declarations fold" "wrong result or the link failed"; fi
     # a GNU attribute that changes what a declaration means and that cproc does not take is refused, not ignored
     for at in 'vector_size(16)' 'naked' 'mode(TI)'; do
       printf 'typedef int t __attribute__((%s));\n' "$at" > kattr.c

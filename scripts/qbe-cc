@@ -211,6 +211,15 @@ if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
 "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
 cat "$tmp/tail.s" >> "$tmp/out.s"
 [ ${#asmarg[@]} -eq 0 ] || cat "$tmp/asm.s" >> "$tmp/out.s"   # inline-asm thunks, appended as local functions
+# The weak or visibility directive of a symbol the unit only declares ("#nfcxx:ifused NAME", cproc's emitsymattr) stays
+# only when the assembly names the symbol elsewhere: QBE drops dead code, and with it the last use of the declaration.
+if grep -q '^#nfcxx:ifused ' "$tmp/out.s"; then
+  awk 'NR == FNR { if ($0 ~ /^#nfcxx:/) { skip = $0 ~ /^#nfcxx:ifused /; next } if (skip) { skip = 0; next }
+                   n = split($0, w, /[^A-Za-z0-9_.$]+/); for (i = 1; i <= n; i++) used[w[i]] = 1; next }
+       /^#nfcxx:ifused / { drop = !($2 in used); next }
+       drop { drop = 0; next }
+       { print }' "$tmp/out.s" "$tmp/out.s" > "$tmp/out.used.s" && mv "$tmp/out.used.s" "$tmp/out.s"
+fi
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)
 if [ $asm = 1 ]; then

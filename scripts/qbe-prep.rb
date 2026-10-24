@@ -805,7 +805,7 @@ end
 
 VOLATILE_QUALS = ['volatile', '__volatile__', '__volatile']
 KEEP_NAME = '__nfcxx_keep'
-KEEP_DEF = "static void #{KEEP_NAME}(void *p) { }"
+KEEP_DEF = "static __attribute__((noinline)) void #{KEEP_NAME}(void *p) { }"
 
 def opener?(t)
   t == '(' || t == '[' || t == '{'
@@ -819,7 +819,8 @@ end
 #
 # QBE promotes a stack slot to a register unless its address escapes, so a volatile local that is written
 # after setjmp and read after longjmp would be stale. After each declaration of such a local this adds
-# `__nfcxx_keep(&x);` (a call to an empty function in the prelude), which makes the address escape.
+# `__nfcxx_keep(&x);` (a call to an empty function in the prelude, noinline so that cproc does not fold the call
+# away), which makes the address escape.
 # Skipped: arrays, function pointers and function declarations, typedef/static/extern/register
 # declarations, `for` declarations and function parameters (none of which need it or can take it).
 def volatile_locals(tk)
