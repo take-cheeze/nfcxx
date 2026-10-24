@@ -16,7 +16,12 @@ build/nfcbundle [-v] [--list] [-L DIR]... [--exclude NAME]... [--only NAME]... [
 ```
 
 `--bundle-exclude=NAME,...` keeps libraries external and `--bundle-only=NAME,...` bundles only the named ones; a NAME is a
-soname (`libfoo.so.1`), a file name, or a soname stem (`libfoo`). With `-c`, `-E`, `-S`, `-M`, `-MM`, `-fsyntax-only` or
+soname (`libfoo.so.1`), a file name, or a soname stem (`libfoo`). `--bundle-add=NAME,...` bundles libraries the output
+does not name in DT_NEEDED, as if it did (an `--as-needed` link drops `libtorch_cuda.so`, whose constructors register
+the CUDA backend). `--bundle-stubs=DIR` writes a stand-in for each bundled library (see "Plugins and stubs");
+`--bundle-runpath=LIST` / `--bundle-rpath=LIST` set the output's `DT_RUNPATH` / `DT_RPATH` instead of the computed
+one. The tool's options are the same without the `bundle-` prefix (`--exclude`, `--only`, `--add`, `--stubs`,
+`--runpath`, `--rpath`). With `-c`, `-E`, `-S`, `-M`, `-MM`, `-fsyntax-only` or
 `--emit-c` there is no link and the options do nothing. `nfcbundle --list IN` prints what would be bundled.
 
 Test: `tests/bundle/run.sh` (CI: ci.yml). Each case builds a program the usual way, runs it, bundles it, renames the
@@ -30,12 +35,70 @@ directory of the bundled libraries, runs the bundle, and requires the same outpu
 | C++ shared object (`cxxlib.cpp`) dlopen'ed from C (`cxxdl.c`) | exceptions inside the library, `thread_local`, libstdc++ inside a shared object |
 | `nfcxx --bundle-libs`, both back ends | `cxx.cpp`; `--bundle-exclude=libgcc_s`; `-shared --bundle-libs` with `cxxlib.cpp`; `-c` |
 | `nfcc --bundle-libs` | `main.c` built by nfcc against gcc-built libA and libB found through `-L` only (QBE writes local-exec TLS code only, which a shared object cannot use, so the libraries are gcc's) |
+| `--stubs` (`plugin.c`, `pl.c`) | a plugin that names the bundled libA and libB in DT_NEEDED, with a DT_RUNPATH to the real ones, dlopen'ed by the bundled program: it shares the program's libA (one counter) and loads with the real libraries out of reach |
+| `nfcxx --bundle-stubs` | the stub directory written and found through `$ORIGIN` |
 | refusals | a program that needs only glibc is copied unchanged; a static executable is refused |
+
+`tests/bundle/torch.sh` (by hand, not in CI; `LIBTORCH=<dir>` or `TORCH_FETCH=1`) is the libtorch case below.
 
 Checked by hand once (not in CI): the Ubuntu 24.04 binaries of curl (33 libraries; an HTTPS request), git, gdb (52;
 runs a program), clang 18 (libLLVM and libclang-cpp, 242 MB; compiles C++ and reports a syntax error), python3 (imports
-`ssl`, `sqlite3`, `ctypes`, `decimal`), vim and openssl bundle and run. Bundling clang takes about 2 s. ruby 3.3 does not
-work (see "Limitations").
+`ssl`, `sqlite3`, `ctypes`, `decimal`), vim and openssl bundle and run. Bundling clang takes about 2 s. ruby 3.3 runs with
+`--stubs` (its extension modules name `libruby.so.3.3`; without the stubs they load a second libruby, which ruby
+refuses).
+
+## libtorch with CUDA
+
+`tests/bundle/torch.sh` builds `tests/bundle/torch.cpp` (tensors, a matmul, an `nn::Linear` with backward, the CUDA
+device count, a CUDA tensor) against libtorch 2.5.1+cu124 (the `shared-with-deps` zip: libtorch_cuda.so is 1.6 GB, with
+cuBLAS, cuBLASLt, cuDNN, cudart, nvrtc and libgomp beside it, 4.2 GB in all), once with g++ and once with nfcxx (gcc
+backend: EDG compiles the libtorch headers), and bundles each:
+
+```
+nfcbundle t --runpath '$ORIGIN/lib' --stubs dist/lib -o dist/t          # g++ build, linked with --no-as-needed
+nfcxx --bundle-libs --bundle-add=libtorch_cuda.so,libc10_cuda.so \
+      --bundle-stubs=dist/lib --bundle-runpath='$ORIGIN/lib' t.o -L$LIBTORCH/lib -ltorch -ltorch_cpu -lc10 -o dist/t
+cp $LIBTORCH/lib/{libtorch_cuda_linalg.so,libcudnn_*.so.9,libnvrtc*,libnvToolsExt*} dist/lib/   # the dlopen'ed ones
+```
+
+`dist/t` is 2.4 GB with 12 libraries in it (libtorch, libtorch_cpu, libtorch_cuda, libc10, libc10_cuda, cudart, cuBLAS,
+cuBLASLt, libcudnn, libgomp, libstdc++, libgcc_s; 691,000 relocations, 144,000 exported symbols) and takes about 25 s
+to write here (2.6 GB of output; the inputs are mmap'ed). It needs only glibc, its stubs, and the libraries that libtorch
+and cuDNN `dlopen` by name: `libtorch_cuda_linalg.so`, cuDNN's engine and op libraries, nvrtc and nvToolsExt, which
+stay files in `dist/lib` and bind to the bundle through the stubs. `libcuda.so.1` is the GPU driver's and is never
+bundled. The run prints what the normal build prints (no GPU in the session that wrote this: "cuda available 0", and the
+CUDA tensor raises the `c10::Error` "driver version is insufficient", thrown in the bundled libc10_cuda and caught by
+the program), every dlopen'ed library loads, and `LD_DEBUG=files` shows nothing opened from the libtorch directory.
+Nothing ran on a GPU.
+
+Two things only this case needed:
+- **A `.eh_frame_hdr` in the middle.** The unwinder binary-searches the table only in its `datarel|sdata4` form, so the
+  header must be within 2 GiB of every FDE. The units span 2.4 GB here, so the header gets a PT_LOAD of its own in a gap
+  at the unit boundary nearest the middle of the span (before libtorch_cpu.so); this works up to 4 GiB, and more is
+  refused. Smaller outputs keep it in the new segment.
+- **Stubs**, for `libtorch_cuda_linalg.so` and cuDNN's libraries, which name libtorch_cpu, libtorch_cuda, libc10 and
+  libstdc++ in DT_NEEDED.
+
+The nfcxx build cannot catch an exception thrown with a plain `throw` inside libtorch (`c10::Error` from gcc's
+`__cxa_throw`; `eh-shim.md`), so `torch.cpp` makes the CUDA tensor only when a GPU is present when `__EDG__` is
+defined. With `NFCXX_BACKEND=qbe` the program does not link yet: the `thread_local` wrapper of
+`c10::impl::raw_local_dispatch_key_set` references its init function `_ZTH...` as a strong symbol (gcc makes it weak).
+
+## Plugins and stubs
+
+A plugin that names a bundled library in its own DT_NEEDED would load a second copy of it (a ruby extension and
+`libruby.so`, `libtorch_cuda_linalg.so` and `libtorch_cpu.so`). `--stubs DIR` writes, for each bundled library, a stub:
+an empty shared object with the library's soname and version definitions and no symbols, named as the other libraries
+ask for it (`libcublas-4cc45526.so.12`, whose soname is `libcublas.so.12`). The output needs its stubs (DT_NEEDED, with
+`$ORIGIN/<DIR>` in its run path), so they are loaded at start; ld.so then satisfies a plugin's DT_NEEDED with the
+loaded stub by name before it searches any directory, the plugin's own DT_RUNPATH included. The plugin's symbols bind
+to the output's exports: through the global scope when the output is the program, and through the stub's DT_NEEDED on
+the output's soname when it is a shared object. The stubs are a few hundred bytes each.
+
+`dlsym` on the handle of a stub finds nothing, since it searches only the stub and its dependencies. glibc does exactly
+that with libgcc_s.so.1 (`_Unwind_Backtrace` for `backtrace`, `_Unwind_ForcedUnwind` for `pthread_cancel`), so libgcc_s
+gets no stub: glibc loads the system copy when it needs it, as it does for any program that does not need libgcc_s,
+and everything else keeps binding to the bundled one.
 
 ## What the output is
 
@@ -90,17 +153,21 @@ because ld.so and the unwinder see a single object:
 Which libraries are bundled: every library reachable through `DT_NEEDED` (found as ld.so finds it: `DT_RPATH` when
 there is no `DT_RUNPATH`, `LD_LIBRARY_PATH`, `DT_RUNPATH`, `-L`, `/etc/ld.so.conf`, the default directories), except
 the glibc libraries (libc, libm, libpthread, libdl, librt, libutil, libresolv, libmvec, ld.so, libnss_*, ...), which
-depend on ld.so's internals and must be the one copy in the process, and except `--bundle-exclude`d ones. A library that
-an excluded one needs stays external too, so it is not loaded twice. A non-glibc library that cannot be found is an
-error.
+depend on ld.so's internals and must be the one copy in the process, the GPU driver's libraries (libcuda,
+libnvidia-*, the GL/EGL/Vulkan/OpenCL dispatchers), which must match the machine's kernel driver, and
+`--bundle-exclude`d ones. A missing glibc or driver library is a warning (it stays DT_NEEDED). A library that
+an excluded one needs stays external too, so it is not loaded twice. Any other library that cannot be found is an error.
 
 ## Limitations
 
 - x86-64 only (ELF64, little endian). Not aarch64, which sold has.
-- A plugin that names a bundled library in its own `DT_NEEDED` loads a second copy of it next to the bundled one. ruby
-  3.3 is the case found: its extension modules need `libruby.so.3.3`, and ruby refuses the second copy ("linked to
-  incompatible libruby"). Plugins that rely on the executable's exports (python3's extension modules) work.
-- A library that `dlopen`s itself or another bundled library by name gets a second copy, for the same reason.
+- Without `--stubs`, a plugin that names a bundled library in its own `DT_NEEDED` loads a second copy of it next to the
+  bundled one (ruby 3.3 refuses that: "linked to incompatible libruby"). With `--stubs` it binds to the bundle, but
+  `dlsym` on a handle returned by `dlopen` of a bundled library's name finds nothing (no stub for libgcc_s.so.1, see
+  "Plugins and stubs"). Plugins that rely on the executable's exports alone (python3's extension modules) need nothing.
+- Libraries loaded only by `dlopen` (cuDNN's engine libraries, `libtorch_cuda_linalg.so`) are not bundled: they are
+  found and loaded by name at run time, so they stay files (next to the stubs).
+- The units must span at most 4 GiB (one `.eh_frame_hdr` has to reach them all).
 - `LD_PRELOAD` no longer interposes calls between bundled units in an executable output, because they are bound when
   bundling. In a shared object output they stay preemptible.
 - Bundled code is bound before the excluded libraries in symbol lookup: a symbol defined by both a bundled library and

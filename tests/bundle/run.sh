@@ -78,6 +78,23 @@ else
   bad "C shared object (build or bundle)" "$out"
 fi
 
+# --stubs: a plugin that names the bundled libA and libB in DT_NEEDED (and has a DT_RUNPATH to the real ones, like a
+# ruby extension) is dlopen'ed by the bundled program. With the stubs it shares the program's libA; the real libraries
+# are out of reach while the bundle runs, so without the stubs the dlopen fails.
+w=$tmp/stubs; mkdir -p "$w/lib" "$w/dist"
+if out=$(gcc -shared -fPIC -O1 $d/liba.c -Wl,--version-script=$d/liba.map -Wl,-soname,liba.so -o "$w/lib/liba.so" 2>&1 &&
+         gcc -shared -fPIC -O1 $d/libb.c -L"$w/lib" -la -Wl,-soname,libb.so -o "$w/lib/libb.so" 2>&1 &&
+         gcc -shared -fPIC -O1 $d/plugin.c -L"$w/lib" -lb -la -Wl,-rpath,"$w/lib" -o "$w/plugin.so" 2>&1 &&
+         gcc -O1 $d/pl.c -L"$w/lib" -lb -la -Wl,-rpath,"$w/lib" -o "$w/pl" -ldl 2>&1 &&
+         "$B" "$w/pl" --stubs "$w/dist/stubs" -o "$w/dist/pl" 2>&1); then
+  n=" $(needs "$w/dist/pl") "
+  case $n in *" liba.so "*) case $n in *" libb.so "*) n="" ;; esac ;; esac
+  [ -z "$n" ] || bad "C --stubs: the bundle does not need its stubs:$n"
+  check "C --stubs: a plugin needing bundled libraries" "$w" "'$w/pl' '$w/plugin.so'" "'$w/dist/pl' '$w/plugin.so'"
+  out=$("$w/dist/pl" "$w/plugin.so" 2>&1)
+  case $out in *"one libA"*) ok "C --stubs: the plugin uses the bundled libA" ;; *) bad "C --stubs: one libA" "$out" ;; esac
+else bad "C --stubs (build or bundle)" "$out"; fi
+
 # --- C++ with the host compiler: libstdc++ and libgcc_s ----------------------------------------------------------
 w=$tmp/cxx; mkdir -p "$w/lib"
 if out=$(g++ -O1 $d/cxx.cpp -o "$w/cxx" 2>&1 && "$B" "$w/cxx" -o "$w/cxx.b" 2>&1); then
@@ -120,6 +137,11 @@ if [ -x "${EDG_BUILD:-build/edg}/bin/eccp" ]; then
              gcc -O1 $d/cxxdl.c -o "$w/cxxdl" -ldl 2>&1); then
       check "nfcxx $be -shared --bundle-libs" "$w" "'$w/cxxdl' '$w/lib/libcxxlib.so'" "'$w/cxxdl' '$w/libcxxlib.b.so'"
     else bad "nfcxx $be -shared --bundle-libs (build)" "$out"; fi
+    # --bundle-stubs: the stubs directory, found through $ORIGIN.
+    if out=$(./nfcxx --bundle-libs --bundle-stubs="$w/st" $d/cxx.cpp -o "$w/cxx.s" 2>&1) && [ -f "$w/st/libstdc++.so.6" ] &&
+       readelf -dW "$w/cxx.s" | grep -q 'RUNPATH.*\$ORIGIN/st' && [ "$("$w/cxx.s" 2>&1)" = "$("$w/cxx" 2>&1)" ]; then
+      ok "nfcxx $be --bundle-stubs"
+    else bad "nfcxx $be --bundle-stubs" "$out$(readelf -dW "$w/cxx.s" 2>&1 | grep -E 'NEEDED|PATH')"; fi
     # -c ignores the option (no link), as gcc ignores link options with -c.
     if out=$(./nfcxx --bundle-libs -c $d/cxx.cpp -o "$w/cxx.o" 2>&1) && [ -f "$w/cxx.o" ]; then ok "nfcxx $be --bundle-libs -c"
     else bad "nfcxx $be --bundle-libs -c" "$out"; fi
