@@ -70,7 +70,29 @@ bundled (a link through nfcxx or nfcc that names it, such as `find_package(Torch
 through libcudart instead: `cuda-driver.md`). The run prints what the normal build prints (no GPU in the session that wrote this: "cuda available 0", and the
 CUDA tensor raises the `c10::Error` "driver version is insufficient", thrown in the bundled libc10_cuda and caught by
 the program), every dlopen'ed library loads, and `LD_DEBUG=files` shows nothing opened from the libtorch directory.
-Nothing ran on a GPU.
+Nothing ran on a GPU in that session.
+
+On a GPU (RTX 5050, sm_120; by hand) with libtorch 2.14.1+cu130 (`libtorch-shared-with-deps-2.14.1%2Bcu130.zip`, 2.0
+GB; 2.5.1+cu124 has no sm_120 kernels), which needs C++20 (`torch.sh` picks `-std=c++20` when `ATen.h` asks for it):
+the g++ build and its bundle (2.6 GB, 23 files in `lib/`) print `cuda available 1 devices 1` and match. The nfcxx build
+does not run: `torch::manual_seed` calls `at::getAccelerator()` (in libc10, built by gcc), which returns a
+`std::optional<c10::DeviceType>` (a one-byte enum), and nfcxx reads that return value as empty on both backends. The
+inline `getAcceleratorHooksInterface` then finds no accelerator and throws a `c10::Error` that the nfcxx frames cannot
+catch, so the program terminates. A gcc-built `std::optional<E> f()` with `enum class E : int8_t` called from nfcxx
+code gives `has_value() == false` where g++ gives true. `torch.sh` requires the normal build to exit 0 and print its
+`cuda available` line before it compares it with the bundle, so it reports this case as a failure (before this change
+both aborted the same way and the comparison passed).
+
+A `find_package(Torch)` project needs more than nfcxx gives today, apart from that bug:
+- torch's CMake config links libtorch_cpu, libtorch_cuda and libtorch as `-Wl,--no-as-needed,<lib> -Wl,--as-needed`,
+  which nfcxx refuses with C++ inputs (`cxx-driver.md`);
+- CMake 4's linker dependency file (`-Wl,--dependency-file=CMakeFiles/<target>.dir/link.d`, a relative path) is not
+  found by the link nfcxx runs ("cannot open dependency file"); `-DCMAKE_LINK_DEPENDS_USE_LINKER=OFF` avoids it.
+With both worked around (a wrapper that turns the libraries into plain arguments under one
+`-Wl,--push-state,--no-as-needed`), the link replaces `CUDA::cuda_driver` as `cuda-driver.md` describes: the program
+does not need libcuda.so.1, its own driver calls reach the GPU (`cuInit CUDA_SUCCESS`, the device name, `cuMemGetInfo`),
+and with the driver hidden it starts and reports `CUDA_ERROR_NO_DEVICE` and `cuda available 0`; the g++ build of the
+same project cannot start without the driver. Its tensor work on the GPU stops at the `std::optional` bug above.
 
 Two things only this case needed:
 - **A `.eh_frame_hdr` in the middle.** The unwinder binary-searches the table only in its `datarel|sdata4` form, so the
@@ -96,7 +118,12 @@ loaded stub by name before it searches any directory, the plugin's own DT_RUNPAT
 to the output's exports: through the global scope when the output is the program, and through the stub's DT_NEEDED on
 the output's soname when it is a shared object. The stubs are a few hundred bytes each.
 
-`dlsym` on the handle of a stub finds nothing, since it searches only the stub and its dependencies. glibc does exactly
+`dlsym` on the handle of a stub finds nothing, since it searches only the stub and its dependencies. cuDNN does this
+with libcublasLt (`dlopen("libcublasLt.so.13")`, then `cublasLtGetVersion` from that handle: "Could not load symbol
+cublasLtGetVersion"), so a program that uses cuDNN keeps libcublasLt out of the bundle (`--bundle-exclude`) and ships it
+as a file beside the stubs (`tests/cuda/gpu/run.sh`, `cuda-driver.md`). cuDNN also dlopens its own libraries by their
+full version first (`libcudnn_graph.so.9.27.0`, then `libcudnn_graph.so.9`), so those files go beside the stubs under
+every name they have. Otherwise a system cuDNN of that version is found first. glibc does exactly
 that with libgcc_s.so.1 (`_Unwind_Backtrace` for `backtrace`, `_Unwind_ForcedUnwind` for `pthread_cancel`), so libgcc_s
 gets no stub: glibc loads the system copy when it needs it, as it does for any program that does not need libgcc_s,
 and everything else keeps binding to the bundled one.
