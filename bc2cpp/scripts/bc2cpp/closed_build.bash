@@ -24,14 +24,27 @@ build_dir="${1:-$root/build-closed-bc2cpp}"
 # The compiled gems need C++ exceptions; build_config.rb's `closed` stanza
 # enables them, and this escape hatch would turn them off in the host half.
 unset MRUBY_FORCE_NO_CXX_EXCEPTION
+# The `closed` stanza compiles at -O0 (enable_debug), where glibc warns on every
+# file that _FORTIFY_SOURCE needs optimization. Nix's cc-wrapper appends its
+# -D_FORTIFY_SOURCE after the command's own flags, so the build drops the
+# hardening flag instead of passing -U.
+no_fortify=()
+for flag in ${NIX_HARDENING_ENABLE:-}; do
+  case "$flag" in fortify | fortify3) ;; *) no_fortify+=("$flag") ;; esac
+done
 # The rake build, with the arguments given (a task name, or none for the whole build).
 rake_closed() {
-  (cd "$root/3rd/mruby" && MRUBY_CONFIG="$root/build_config.rb" \
-    MRUBY_BUILD_DIR="$build_dir" \
-    PROJECT_BUILD_DIR="$build_dir" \
-    MRUBY_TARGET=closed \
-    RPGMAKER_BC2CPP=1 \
-    rake "$@")
+  (
+    if [ -n "${NIX_HARDENING_ENABLE+set}" ]; then
+      export NIX_HARDENING_ENABLE="${no_fortify[*]}"
+    fi
+    cd "$root/3rd/mruby" && MRUBY_CONFIG="$root/build_config.rb" \
+      MRUBY_BUILD_DIR="$build_dir" \
+      PROJECT_BUILD_DIR="$build_dir" \
+      MRUBY_TARGET=closed \
+      RPGMAKER_BC2CPP=1 \
+      rake "$@"
+  )
 }
 
 # Phase 1 generates the closed world's code without the native return-kind table: the table needs the presym list
