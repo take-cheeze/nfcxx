@@ -140,7 +140,11 @@ trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
 # macOS arm64: the aarch64-apple target (Apple's va_list, see scripts/cproc-apple-valist.patch); elsewhere the default.
 cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t aarch64-apple) ;; esac
-"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
+# GNU extended inline asm is lowered to out-of-line thunks cproc writes here (x86_64 ELF only; the Mach-O label prefix
+# and the CIL backend have no path, so -a is withheld there and cproc then refuses any asm instead of miscompiling it).
+asmarg=()
+if [ $macos = 0 ] && [ -z "${NFCXX_CIL:-}" ]; then asmarg=(-a "$tmp/asm.s"); : > "$tmp/asm.s"; fi
+"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} ${asmarg[@]+"${asmarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 if [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend: the QBE IL becomes a fragment for the link (scripts/qbe2cil.rb); no assembler, no weak symbols.
@@ -162,6 +166,7 @@ symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
 "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
 cat "$tmp/tail.s" >> "$tmp/out.s"
+[ ${#asmarg[@]} -eq 0 ] || cat "$tmp/asm.s" >> "$tmp/out.s"   # inline-asm thunks, appended as local functions
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)
 if [ $asm = 1 ]; then
