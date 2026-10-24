@@ -1,0 +1,8 @@
+(ir-module "reborrows" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params (param %9 "flag" bool))
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 1))
+(let %0 (ptr int) (borrow (ptr int) "parent" exclusive $"x"))
+(loop (body (let %1 (ptr int) (reborrow (ptr int) "child" exclusive "parent" %0))
+(store int %1 (const int 7)) (loan-end "child") (if %9 (then (continue)) (else (break))))) (loan-end "parent") (return (const int 0))
+)

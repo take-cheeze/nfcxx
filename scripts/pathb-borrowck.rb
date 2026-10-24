@@ -159,8 +159,14 @@ class LocalLifetime
         id = bname(x[2])
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
         place = x[4]
-        raise BorrowRefused, 'loans currently require direct local places; reborrows need parent-loan tracking' unless place.is_a?(IRSym) && place.sig == '$'
+        raise BorrowRefused, 'borrow requires a direct local place; use reborrow with an explicit parent' unless place.is_a?(IRSym) && place.sig == '$'
         @loans[id] = [place.name, x[3]]
+      end
+      if bh(x) == 'reborrow'
+        raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
+        id = bname(x[2])
+        raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
+        @loans[id] = [nil, x[3], bname(x[4])]
       end
       x.each { |y| scan.call(y) }
     end
@@ -182,6 +188,8 @@ class LocalLifetime
         raise BorrowRefused, "missing declaration facts for slot #{name}"
       end
     end
+    @ancestors = {}
+    @loans.each_key { |id| resolve_loan(id, []) }
     @loans.each_value do |loan|
       raise BadIR, "loan refers to unknown slot #{loan[0]}" unless @slots[loan[0]]
     end
@@ -196,6 +204,21 @@ class LocalLifetime
           edge
         end
       end
+    end
+  end
+
+  def resolve_loan(id, visiting)
+    raise BadIR, "unknown parent loan #{id}" unless @loans.key?(id)
+    raise BadIR, "cyclic parent loan #{id}" if visiting.include?(id)
+    return if @ancestors.key?(id)
+    loan = @loans[id]
+    parent = loan[2]
+    if parent
+      resolve_loan(parent, visiting + [id])
+      loan[0] = @loans[parent][0]
+      @ancestors[id] = [parent] + @ancestors[parent]
+    else
+      @ancestors[id] = []
     end
   end
 
@@ -278,7 +301,9 @@ class LocalLifetime
     if place.start_with?('loan:')
       own = place[5..-1]
       loan = @loans[own]
-      diagnostic('inactive-loan', own) unless state['loan:' + own] == ['active']
+      ([own] + @ancestors[own]).each do |id|
+        diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
+      end
       diagnostic('write-through-shared-loan', own) if !read && loan[1] == 'shared'
       place = 'local:' + loan[0]
     end
@@ -288,7 +313,7 @@ class LocalLifetime
     diagnostic('use-after-scope', name) if status.include?('dead')
     diagnostic('uninitialized', name) if read && status.include?('uninitialized')
     @loans.each do |id, loan|
-      next if id == own || loan[0] != name || !(state['loan:' + id] || []).include?('active')
+      next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
       if loan[1] == 'exclusive' || !read || borrowing == 'exclusive'
         diagnostic('loan-conflict', name + ' (' + id + ')')
       end
@@ -328,6 +353,18 @@ class LocalLifetime
       loan = @loans[id]
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
       access('local:' + loan[0], state, true, loan[1])
+      state['loan:' + id] = ['active']
+      ['loan:' + id]
+    when 'reborrow'
+      id = bname(x[2])
+      loan = @loans[id]
+      parent = loan[2]
+      sources = value(x[5], state)
+      allowed = ['loan:' + parent, 'expired:' + parent]
+      raise BorrowRefused, 'reborrow source must preserve declared parent identity' if sources.empty? || sources.any? { |p| !allowed.include?(p) }
+      diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
+      diagnostic('exclusive-reborrow-of-shared', id) if loan[1] == 'exclusive' && @loans[parent][1] == 'shared'
+      sources.each { |p| access(p, state, true, loan[1]) }
       state['loan:' + id] = ['active']
       ['loan:' + id]
     when 'load'
@@ -395,6 +432,12 @@ class LocalLifetime
       id = bname(x[1])
       raise BadIR, "unknown loan #{id}" unless @loans.key?(id)
       diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
+      @loans.each_key do |child|
+        next unless @ancestors[child].include?(id)
+        diagnostic('loan-end-with-child', id) if state['loan:' + child].include?('active')
+        state['loan:' + child] = ['ended']
+        invalidate_pointers(state, ['loan:' + child], 'expired:' + child)
+      end
       state['loan:' + id] = ['ended']
       invalidate_pointers(state, ['loan:' + id], 'expired:' + id)
     when 'let', 'set'

@@ -1390,6 +1390,15 @@ def r_borrow(fn, x)
   Val.new(v.t, "l", pt)
 end
 
+def r_reborrow(fn, x)
+  raise BadIR, "reborrow form" unless x.length == 6 && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && ["shared", "exclusive"].include?(x[3])
+  pt = parse_type(x[1])
+  raise BadIR, "reborrow requires pointer type" unless pt[0] == "ptr"
+  v = fn.opnd(x[5], "l")
+  raise BadIR, "reborrow requires pointer operand" unless v.ty && v.ty[0] == "ptr"
+  Val.new(v.t, "l", pt)
+end
+
 def r_bitcast(fn, x)
   pt = parse_type(x[1])
   v = fn.opnd(x[2], "l")
@@ -1708,6 +1717,7 @@ RVAL = {
   "iconv" => ->(fn, x) { r_iconv(fn, x) }, "p2i" => ->(fn, x) { r_p2i(fn, x) },
   "i2p" => ->(fn, x) { r_i2p(fn, x) }, "bitcast" => ->(fn, x) { r_bitcast(fn, x) },
   "borrow" => ->(fn, x) { r_borrow(fn, x) },
+  "reborrow" => ->(fn, x) { r_reborrow(fn, x) },
   "i2f" => ->(fn, x) { r_i2f(fn, x) }, "u2f" => ->(fn, x) { r_i2f(fn, x) },
   "fconv" => ->(fn, x) { r_fconv(fn, x) }, "cf2i" => ->(fn, x) { r_cf2i(fn, x) },
   "offset" => ->(fn, x) { r_offset(fn, x) }, "index" => ->(fn, x) { r_index(fn, x) },

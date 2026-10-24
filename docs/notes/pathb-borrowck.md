@@ -70,9 +70,39 @@ accesses at the join. Local names and internal provenance tokens occupy distinct
 
 Loan ends are **explicit**, not inferred from last use. IDs may execute repeatedly in a loop
 if each iteration ends the loan before the next creation; old pointer copies remain expired.
-Parent/child reborrows, field-sensitive overlap, and loans on external storage are refused until
-their relationships can be represented. Ordinary C++ references do not automatically acquire
-shared or exclusive loan semantics. Neither frontend emits these new forms yet.
+Field-sensitive overlap and loans on external storage are still refused. Ordinary C++ references
+do not automatically acquire shared or exclusive loan semantics. Neither frontend emits these
+new forms yet.
+
+## Parent/child reborrows
+
+A reborrow names both its own loan and the parent loan whose pointer it uses:
+
+```text
+(let %0 (ptr int) (borrow (ptr int) "parent" exclusive $"x"))
+(let %1 (ptr int) (reborrow (ptr int) "child" shared "parent" %0))
+(let %2 int (load int %1))
+(loan-end "child")
+(store int %0 (const int 7))
+(loan-end "parent")
+```
+
+The child inherits its parent's local referent. The source pointer must preserve exactly the
+declared parent identity, including through copies and pointer slots; a raw address cannot forge
+that relationship. Unknown parents, cycles, and duplicate IDs are malformed IR. Ambiguous or
+mismatched source provenance is refused.
+
+An exclusive parent permits shared or exclusive children; a shared parent permits only shared
+children. Access through a child requires its entire ancestor chain to be active. Ancestor loans
+authorize child access instead of conflicting with it; siblings still undergo ordinary conflict
+checks. An exclusive child blocks parent reads and writes. Shared children permit parent reads
+but prevent parent writes. Ending a child restores access through the parent, subject to any other
+active children.
+
+Ending a parent with a possibly active descendant is an error. It also expires descendant pointer
+copies so neither reactivating the parent nor reusing a static loan ID in a loop revives them.
+Loan ends remain explicit; this is not non-lexical lifetime inference. The QBE emitter and its
+oracle erase `reborrow` to the source pointer, preserving runtime code generation.
 
 ## Refusals and limits
 
@@ -99,7 +129,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next shared-IR extensions are explicit move/copy, reborrows, field-sensitive places, call
+The next shared-IR extensions are explicit move/copy, field-sensitive places, call
 effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -108,7 +138,7 @@ Run `tests/pathb-borrow/run.sh`. The suite checks exact diagnostics and exit sta
 IR, and checks real C++ lowering for accepted code, partial initialization, and dangling pointers.
 The C++ IR must also remain accepted by the QBE emitter. Tests include branch joins, pointer aliases,
 backedges, zero-iteration loops, redeclarations, local-address returns, and explicit refusals.
-The explicit-loan cases cover permissions, overlapping loans, copies, branch joins, and loop
-iterations. A native execution check verifies that loan metadata erasure leaves the QBE output
+The explicit-loan and reborrow cases cover permissions, overlapping loans, copies, branch joins,
+loop iterations, parent restoration, nested children, shared siblings, and invalid parent graphs. A native execution check verifies that loan metadata erasure leaves the QBE output
 unchanged and that the emitter agrees with its oracle. The Path B CI workflow runs this suite
 alongside the stage 1/2 tests.
