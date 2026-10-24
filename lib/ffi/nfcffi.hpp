@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -129,30 +130,7 @@ class Value {
   std::vector<unsigned char> b_;
 };
 
-// A set of header declarations compiled into one shared object, with a wrapper per function that can be called by name
-// (Library::callable). A wrapper converts its arguments from the kinds of the declaration: integers, floats, pointers,
-// and structs or unions by value. Variadic functions, overload sets and 128-bit or long double values are not callable
-// (the declaration is still listed). Move-only.
-class Library {
- public:
-  const std::vector<Declaration>& declarations() const { return decls_; }
-  bool callable(const std::string& name) const { return wrappers_.count(name) != 0; }
-
-  // Calls NAME with ARGS, converted to the declared parameter kinds: signed and unsigned integers convert to each other,
-  // integers convert to float, and a pointer parameter takes a pointer or the integer 0. A struct or union parameter takes
-  // Value::of_bytes of the object's bytes, of the size the C compiler gives the type (the same layout as a C++ struct
-  // with the same members); a struct result comes back the same way. Throws Error for an uncallable name, a wrong argument
-  // count or kind, or a wrong size.
-  Value call(const std::string& name, const std::vector<Value>& args) const;
-
- private:
-  friend class Ffi;
-  std::vector<Declaration> decls_;
-  std::map<std::string, Function<void(void**, void*)>> wrappers_;
-  std::map<std::string, Function<void(unsigned long*)>> layouts_;
-  std::map<std::string, std::vector<std::size_t>> sizes_;  // [0] the result's size, [i + 1] parameter i's (0 unless a struct)
-  Module module_;
-};
+class Library;
 
 // The compiler and its options. Compiling the same source with the same options reuses the shared object in the cache.
 class Ffi {
@@ -188,6 +166,41 @@ class Ffi {
   std::vector<std::string> flags_;
   std::string decl_tool_;
   unsigned timeout_ = 300;
+};
+
+// A set of header declarations compiled into one shared object, with a wrapper per function that can be called by name
+// (Library::callable). A wrapper converts its arguments from the kinds of the declaration: integers, floats, pointers,
+// and structs or unions by value. Variadic functions take their extra arguments by their promoted types (see call);
+// overload sets and 128-bit or long double values are not callable (the declaration is still listed). Move-only.
+class Library {
+ public:
+  const std::vector<Declaration>& declarations() const { return decls_; }
+  bool callable(const std::string& name) const { return wrappers_.count(name) != 0 || variadic_.count(name) != 0; }
+
+  // Calls NAME with ARGS, converted to the declared parameter kinds. The extra arguments of a variadic function are
+  // passed as the C default promotions of their Values: an integer as long long, a float as double, a pointer as a
+  // pointer (so the callee's format must match them, as in C): signed and unsigned integers convert to each other,
+  // integers convert to float, and a pointer parameter takes a pointer or the integer 0. A struct or union parameter takes
+  // Value::of_bytes of the object's bytes, of the size the C compiler gives the type (the same layout as a C++ struct
+  // with the same members); a struct result comes back the same way. Throws Error for an uncallable name, a wrong argument
+  // count or kind, or a wrong size.
+  Value call(const std::string& name, const std::vector<Value>& args) const;
+
+ private:
+  friend class Ffi;
+  const Function<void(void**, void*)>& vwrapper(const Declaration& d, const std::string& seq) const;
+
+  Ffi ffi_;                  // the compiler and options, for the variadic wrappers compiled on demand
+  std::string header_;      // absolute path
+  std::string source_;
+  std::vector<Declaration> decls_;
+  std::map<std::string, Function<void(void**, void*)>> wrappers_;
+  std::map<std::string, Function<void(unsigned long*)>> layouts_;
+  std::map<std::string, std::vector<std::size_t>> sizes_;  // [0] the result's size, [i + 1] parameter i's (0 unless a struct)
+  std::set<std::string> variadic_;                       // callable with extra arguments
+  mutable std::map<std::string, Module> vmodules_;       // one per (function, sequence of extra kinds)
+  mutable std::map<std::string, Function<void(void**, void*)>> vwrappers_;
+  Module module_;
 };
 
 }  // namespace nfcffi

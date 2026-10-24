@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 
 #include "../eval/nfceval_build.hpp"
 
@@ -311,38 +312,87 @@ std::string layout_text(const Declaration& d) {
   return "void nfcffi_layout_" + d.name + "(unsigned long *s) {\n" + body + "}\n";
 }
 
-// The wrapper for D: void nfcffi_call_NAME(void **a, void *r). Each argument is read from a[i] as its kind says
-// (long long, unsigned long long, double or void *); the result is stored in r the same way.
-std::string wrapper_text(const Declaration& d) {
-  std::string args;
+// The argument expressions of D's fixed parameters, reading a[i] as each kind says (struct: a pointer to the bytes).
+std::vector<std::string> fixed_args(const Declaration& d) {
+  std::vector<std::string> out;
   for (std::size_t i = 0; i < d.params.size(); ++i) {
     char k = d.param_kinds[i];
     std::string slot = "a[" + std::to_string(i) + "]";
     std::string type = abstract_type(d.params[i]);
-    std::string arg;
     if (k == 's') {
-      arg = "*(" + type + " *)" + slot;
+      out.push_back("*(" + type + " *)" + slot);
     } else {
       std::string src = k == 'i' ? "*(long long *)" + slot
                       : k == 'u' ? "*(unsigned long long *)" + slot
                       : k == 'f' ? "*(double *)" + slot
                                  : "*(void **)" + slot;
-      arg = "(" + type + ")" + src;
+      out.push_back("(" + type + ")" + src);
     }
-    args += (i ? ", " : "") + arg;
   }
-  std::string call = d.name + "(" + args + ")";
-  std::string body;
-  switch (d.return_kind) {
-    case 'i': body = "*(long long *)r = (long long)" + call; break;
-    case 'u': body = "*(unsigned long long *)r = (unsigned long long)" + call; break;
-    case 'f': body = "*(double *)r = (double)" + call; break;
-    case 'p': body = "*(void **)r = (void *)" + call; break;
-    case 's': body = "*(" + abstract_type(d.return_type) + " *)r = " + call; break;
-    default: body = call; break;
-  }
-  return "void nfcffi_call_" + d.name + "(void **a, void *r) {\n  " + body + ";\n}\n";
+  return out;
 }
+
+std::string join(const std::vector<std::string>& parts) {
+  std::string out;
+  for (std::size_t i = 0; i < parts.size(); ++i) out += (i ? ", " : "") + parts[i];
+  return out;
+}
+
+// The statement that stores CALL's value in r by D's return kind.
+std::string store_result(const Declaration& d, const std::string& call) {
+  switch (d.return_kind) {
+    case 'i': return "*(long long *)r = (long long)" + call;
+    case 'u': return "*(unsigned long long *)r = (unsigned long long)" + call;
+    case 'f': return "*(double *)r = (double)" + call;
+    case 'p': return "*(void **)r = (void *)" + call;
+    case 's': return "*(" + abstract_type(d.return_type) + " *)r = " + call;
+    default: return call;
+  }
+}
+
+// The wrapper for D: void nfcffi_call_NAME(void **a, void *r).
+std::string wrapper_text(const Declaration& d) {
+  return "void nfcffi_call_" + d.name + "(void **a, void *r) {\n  " +
+         store_result(d, d.name + "(" + join(fixed_args(d)) + ")") + ";\n}\n";
+}
+
+// The wrapper of a variadic D for the extra arguments of kinds SEQ ("n" integer, "f" double, "p" pointer), read from
+// a[fixed + k]: void nfcffi_vcall_NAME_SEQ(void **a, void *r).
+std::string vcall_text(const Declaration& d, const std::string& seq) {
+  std::vector<std::string> args = fixed_args(d);
+  for (std::size_t k = 0; k < seq.size(); ++k) {
+    std::string slot = "a[" + std::to_string(d.params.size() + k) + "]";
+    args.push_back(seq[k] == 'n' ? "*(long long *)" + slot
+                 : seq[k] == 'f' ? "*(double *)" + slot
+                                 : "*(void **)" + slot);
+  }
+  return "void nfcffi_vcall_" + d.name + "_" + seq + "(void **a, void *r) {\n  " +
+         store_result(d, d.name + "(" + join(args) + ")") + ";\n}\n";
+}
+
+// A variadic function with only scalar fixed arguments and result: callable with extra arguments.
+bool variadic_ok(const Declaration& d) {
+  if (!d.variadic || d.overloaded) return false;
+  if (d.return_kind == 'x' || d.return_kind == 's' || std::strchr("iufpv", d.return_kind) == nullptr) return false;
+  if (d.param_kinds.size() != d.params.size()) return false;
+  for (char k : d.param_kinds) {
+    if (k == 'v' || k == 's' || k == 'x' || std::strchr("iufp", k) == nullptr) return false;
+  }
+  return true;
+}
+
+// The promoted kind of a variadic argument.
+char vararg_kind(const Value& v, std::size_t i) {
+  switch (v.kind()) {
+    case Value::Kind::Signed:
+    case Value::Kind::Unsigned: return 'n';
+    case Value::Kind::Float: return 'f';
+    case Value::Kind::Pointer: return 'p';
+    default:
+      throw Error("nfcffi: variadic argument " + std::to_string(i) + " must be an integer, a float or a pointer");
+  }
+}
+
 
 const Declaration* find_declaration(const std::vector<Declaration>& decls, const std::string& name) {
   for (const Declaration& d : decls) {
@@ -362,13 +412,21 @@ std::string absolute_path(const std::string& p) {
 Library Ffi::load(const std::string& header, const std::string& source, const std::vector<std::string>& only) const {
   Library lib;
   const std::string path = absolute_path(header);
+  lib.ffi_ = *this;
+  lib.header_ = path;
+  lib.source_ = source;
   lib.decls_ = declarations(path);
 
   // One translation unit: the header, the source, then a wrapper and a layout function for each passable function.
+  // Variadic functions get their wrappers when they are called (Library::vwrapper).
   std::string text = "#include \"" + path + "\"\n" + source + "\n";
   std::vector<std::string> wrapped;
   for (const Declaration& d : lib.decls_) {
     if (!only.empty() && std::find(only.begin(), only.end(), d.name) == only.end()) continue;
+    if (variadic_ok(d)) {
+      lib.variadic_.insert(d.name);
+      continue;
+    }
     if (!passable(d)) continue;
     text += wrapper_text(d) + layout_text(d);
     wrapped.push_back(d.name);
@@ -386,19 +444,37 @@ Library Ffi::load(const std::string& header, const std::string& source, const st
   return lib;
 }
 
+// The wrapper of variadic D for the extra kinds SEQ, compiled with the header and source on first use.
+const Function<void(void**, void*)>& Library::vwrapper(const Declaration& d, const std::string& seq) const {
+  std::string key = d.name + "#" + seq;
+  auto found = vwrappers_.find(key);
+  if (found != vwrappers_.end()) return found->second;
+  std::string text = "#include \"" + header_ + "\"\n" + source_ + "\n" + vcall_text(d, seq);
+  Module m = ffi_.compile(text);
+  Function<void(void**, void*)> fn = m.function<void(void**, void*)>("nfcffi_vcall_" + d.name + "_" + seq);
+  vmodules_.emplace(key, std::move(m));
+  return vwrappers_.emplace(key, fn).first->second;
+}
+
 Value Library::call(const std::string& name, const std::vector<Value>& args) const {
-  auto w = wrappers_.find(name);
   const Declaration* d = find_declaration(decls_, name);
-  if (w == wrappers_.end() || d == nullptr) {
-    throw Error("nfcffi: '" + name + "' is not callable: it is not a function of the header, or it has a struct, variadic, "
+  const bool fixed = wrappers_.count(name) != 0;
+  const bool variadic = variadic_.count(name) != 0;
+  if (d == nullptr || !(fixed || variadic)) {
+    throw Error("nfcffi: '" + name + "' is not callable: it is not a function of the header, or it has a struct, "
                 "overloaded or long double part");
   }
-  if (args.size() != d->params.size()) {
-    throw Error("nfcffi: " + name + " takes " + std::to_string(d->params.size()) + " arguments, got " +
-                std::to_string(args.size()));
+  const std::size_t nfixed = d->params.size();
+  if (fixed ? args.size() != nfixed : args.size() < nfixed) {
+    throw Error("nfcffi: " + name + " takes " + std::string(variadic ? "at least " : "") + std::to_string(nfixed) +
+                " arguments, got " + std::to_string(args.size()));
   }
 
-  const std::vector<std::size_t>& sz = sizes_.at(name);
+  // The kinds of all arguments: the declared ones, then the promoted kinds of the extra ones.
+  std::string seq;
+  for (std::size_t i = nfixed; i < args.size(); ++i) seq += vararg_kind(args[i], i);
+  const std::vector<std::size_t>* sz = fixed ? &sizes_.at(name) : nullptr;
+
   std::size_t n = args.size();
   std::vector<long long> sv(n);
   std::vector<unsigned long long> uv(n);
@@ -407,17 +483,19 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
   std::vector<void*> slots(n);
   for (std::size_t i = 0; i < n; ++i) {
     const Value& v = args[i];
+    const char k = i < nfixed ? d->param_kinds[i] : seq[i - nfixed];
     const std::string where = "nfcffi: argument " + std::to_string(i) + " of " + name;
-    switch (d->param_kinds[i]) {
+    switch (k) {
       case 's':
         if (v.kind() != Value::Kind::Bytes) throw Error(where + " must be a struct or union (Value::of_bytes)");
-        if (v.as_bytes().size() != sz[i + 1]) {
-          throw Error(where + " must be " + std::to_string(sz[i + 1]) + " bytes, got " +
+        if (v.as_bytes().size() != (*sz)[i + 1]) {
+          throw Error(where + " must be " + std::to_string((*sz)[i + 1]) + " bytes, got " +
                       std::to_string(v.as_bytes().size()));
         }
         slots[i] = const_cast<unsigned char*>(v.as_bytes().data());
         break;
       case 'i':
+      case 'n':
         if (v.kind() == Value::Kind::Signed) sv[i] = v.as_signed();
         else if (v.kind() == Value::Kind::Unsigned) sv[i] = (long long)v.as_unsigned();
         else throw Error(where + " must be an integer");
@@ -449,7 +527,7 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
   unsigned long long ru = 0;
   double rf = 0;
   void* rp = nullptr;
-  std::vector<unsigned char> rb(sz[0]);
+  std::vector<unsigned char> rb(sz ? (*sz)[0] : 0);
   void* out = nullptr;
   switch (d->return_kind) {
     case 'i': out = &rs; break;
@@ -459,7 +537,8 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
     case 's': out = rb.data(); break;
     default: break;
   }
-  w->second(slots.data(), out);
+  const Function<void(void**, void*)>& w = fixed ? wrappers_.at(name) : vwrapper(*d, seq);
+  w(slots.data(), out);
 
   switch (d->return_kind) {
     case 'i': return Value::of_signed(rs);
