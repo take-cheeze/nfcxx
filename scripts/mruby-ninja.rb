@@ -15,7 +15,7 @@
 # Supported: the gcc toolchain; one host build with libmruby; the mrbc sub-build. Gems: src/*.c, mrblib/**/*.rb,
 # tools/<bin>/*.c, and the compiler gem's core/*.c (its build_settings). Not supported: cross builds, C++/ObjC,
 # tests, install, and mruby-io's HAL auto-selection (the config must name a HAL gem, as the tool config does).
-# mruby-onig-regexp's bundled Onigmo is built by an explicit step (emit_onigmo) rather than by its rake file.
+# mruby-onig-regexp's bundled Onigmo is built by its own file tasks (emit_file_tasks), like any other gem's build step.
 
 require 'fileutils'
 require 'pathname'
@@ -32,9 +32,10 @@ module MrubyNinja
   SUB_BUILD_GEMS = %w[mruby-bin-mrbc].freeze
   # mruby-bin-mrbc's bin links the core archive, not libmruby.
   CORE_LINKED_BINS = %w[mrbc].freeze
-  # A gem's build directory, as its mrbgem.rake sees it; the generator substitutes the real one afterwards.
-  BUILD_DIR_PLACEHOLDER = '@BUILD_DIR@'
-  ONIGMO_VERSION_RE = /\Aonigmo-(\d[\d.]*)\.tar\.gz\z/
+  # The build directories as an mrbgem.rake sees them while planning: the target's and the gem's. The generator
+  # substitutes the real paths afterwards; a gemtask run has the real paths from the start.
+  TARGET_DIR_PLACEHOLDER = '@TARGET_DIR@'
+  GEM_DIR_PLACEHOLDER = '@GEM_DIR@'
 
   # What a build config may set on a tool (cc, linker, archiver). Anything else raises.
   class Tool
@@ -90,7 +91,7 @@ module MrubyNinja
 
   # `build` in an mrbgem.rake (and `spec.build`): the build-wide settings a gem can add to.
   class BuildRef
-    # libmruby_core_objs: object paths (under BUILD_DIR_PLACEHOLDER) that a gem adds to the core archive.
+    # libmruby_core_objs: object paths (under GEM_DIR_PLACEHOLDER) that a gem adds to the core archive.
     attr_reader :defines, :bins, :libmruby_core_objs, :project
 
     def initialize(project)
@@ -110,13 +111,26 @@ module MrubyNinja
       ToolQuery.new(project.conf.cc.command || 'cc', C_FLAGS)
     end
 
+    # gcc.rake: the C++ compiler is CXX, else the C compiler with its last `cc` changed to `++`.
+    def cxx
+      ToolQuery.new(ENV['CXX'] || (project.conf.cc.command || 'cc').sub(/g\Kcc|$/, '++'), C_FLAGS)
+    end
+
+    def linker
+      ToolQuery.new(project.conf.linker.command || project.conf.cc.command || 'cc', [])
+    end
+
+    def archiver
+      ToolQuery.new(project.conf.archiver.command || 'ar', [])
+    end
+
     def build_dir
-      BUILD_DIR_PLACEHOLDER
+      project.target_build_dir
     end
 
     # Named only as the link input of the mrbc tool, whose archive the generator places itself.
     def libmruby_core_static
-      "#{BUILD_DIR_PLACEHOLDER}/lib/libmruby_core.a"
+      "#{project.target_build_dir}/lib/libmruby_core.a"
     end
 
     def name
@@ -136,7 +150,7 @@ module MrubyNinja
   class GemSpec
     IGNORED_SETTERS = %i[license= summary= author= authors= add_test_dependency].freeze
 
-    attr_reader :dir, :dependencies, :build, :cc, :linker, :version, :core_sources
+    attr_reader :dir, :dependencies, :build, :cc, :linker, :version, :core_sources, :file_tasks
     attr_accessor :name
 
     def initialize(dir, project)
@@ -150,6 +164,7 @@ module MrubyNinja
       @version = '0.0.0'
       @core_sources = false
       @bins = []
+      @file_tasks = []
     end
 
     def bins
@@ -180,7 +195,7 @@ module MrubyNinja
     end
 
     def build_dir
-      BUILD_DIR_PLACEHOLDER
+      @project.gem_build_dir
     end
 
     def objfile(path)
@@ -210,15 +225,46 @@ module MrubyNinja
 
   # Loads mrbgem.rake files and computes the closure. The DSL the files use is defined below the class.
   class Project
-    attr_reader :src, :config_names
-    attr_accessor :conf
+    # A `file` task as a gem declared it: the target, its prerequisites, and the block rake would run for it.
+    FileTask = Struct.new(:target, :prereqs, :block)
+    TaskObj = Struct.new(:name, :prerequisites, :timestamp)
 
-    def initialize(src)
+    attr_reader :src, :config_names
+    attr_accessor :conf, :config_path
+
+    # run_gem_build_dir and target_dir are the real build directories of a gemtask run; planning leaves them out and
+    # uses the placeholders.
+    def initialize(src, run_gem_build_dir: nil, target_dir: nil)
       @src = File.expand_path(src)
       @specs = {}
       @loading = nil
       @config_names = []
+      @run_gem_build_dir = run_gem_build_dir
+      @target_dir = target_dir
       $mruby_ninja_project = self
+    end
+
+    def gem_build_dir
+      @run_gem_build_dir || GEM_DIR_PLACEHOLDER
+    end
+
+    def target_build_dir
+      @target_dir || TARGET_DIR_PLACEHOLDER
+    end
+
+    # `file target => prereqs do |t| ... end` in a mrbgem.rake. Called while the gem loads; a call from a block that
+    # runs later (a gemtask run) finds no gem loading and is ignored, as the block's own tasks are not planned.
+    def record_file(target_spec, &block)
+      return nil unless @loading
+
+      target, prereqs = target_spec.is_a?(Hash) ? target_spec.first : [target_spec, []]
+      raise "mrbgem.rake of #{@loading.dir}: file target #{target.inspect} is not a path" unless target.is_a?(String)
+
+      prereqs = Array(prereqs).flatten
+      raise "mrbgem.rake of #{@loading.dir}: a file prerequisite is not a path" unless prereqs.all?(String)
+
+      @loading.file_tasks << FileTask.new(target, prereqs, block)
+      nil
     end
 
     # Loads the config's gems (core names or paths) and returns their names, in config order.
@@ -311,12 +357,14 @@ class String
   end
 end
 
-# The DSL a config and mrbgem.rake files see at top level. Rake's DSL does nothing here: the generator writes the
-# products those tasks would build.
-def file(*_args, **_opts, &_block) = nil
+# The DSL a config and mrbgem.rake files see at top level. `file` tasks are recorded on the gem being loaded: each one
+# that builds a file in a build directory becomes a ninja edge, and ninja runs its block (MrubyNinja.gemtask), as rake
+# would. Other rake calls: a phony task (task :clean) builds nothing here; rule and directory are refused, since a
+# build without them would be wrong.
+def file(*args, &block) = $mruby_ninja_project.record_file(*args, &block)
 def task(*_args, **_opts, &_block) = nil
-def rule(*_args, **_opts, &_block) = nil
-def directory(*_args, **_opts, &_block) = nil
+def rule(*_args, **_opts, &_block) = raise('mrbgem.rake: rule is not supported by mruby-ninja')
+def directory(*_args, **_opts, &_block) = raise('mrbgem.rake: directory is not supported by mruby-ninja')
 def desc(*_args) = nil
 def sh(*_args) = nil
 
@@ -393,6 +441,7 @@ module MrubyNinja
         ruby = #{ninja_value(RbConfig.ruby)}
         gen = #{ninja_value(File.expand_path(__FILE__))}
         mruby_src = #{ninja_value(@mruby_src)}
+        config = #{ninja_value(@project.config_path)}
 
         rule cc
           command = $cc -MMD -MF $out.d $flags -c $in -o $out
@@ -423,9 +472,10 @@ module MrubyNinja
           command = $cc $ldflags -o $out $in $libs
           description = LINK $out
 
-        rule onigmo
-          command = $ruby $gen onigmo $in $builddir $onigenv
-          description = ONIGMO $builddir
+        # A file task's block (a gem's build step): ninja runs the gem's mrbgem.rake again to get the block.
+        rule gemtask
+          command = $ruby $gen gemtask $mruby_src $config $builddir $gembuild $gemdir $gemtarget
+          description = GEM $gemtarget
       NINJA
     end
 
@@ -452,17 +502,15 @@ module MrubyNinja
       gem_objs = []
       @extra_inputs = []
       @extra_libs = []
+      # What the generator writes itself: a file task naming one of these is not run (ninja builds it).
+      own_outputs = [File.join(bd, 'lib', 'libmruby.a'), File.join(bd, 'lib', 'libmruby_core.a')] +
+                    gems.flat_map { |g| g.bins.map { |b| File.join(bd, 'bin', b) } }
       gems.each do |g|
         gbd = File.join(bd, 'mrbgems', g.name)
-        gdefs = ["MRBGEM_#{g.name.tr('-', '_').upcase}_VERSION=#{g.version}"] + subst_build_dir(g.cc.defines, gbd)
-        gincs = gem_include_dirs(g) + subst_build_dir(g.cc.include_paths, gbd)
+        gdefs = ["MRBGEM_#{g.name.tr('-', '_').upcase}_VERSION=#{g.version}"] + subst_build_dir(g.cc.defines, gbd, bd)
+        gincs = gem_include_dirs(g) + subst_build_dir(g.cc.include_paths, gbd, bd)
         gflags = cflags(defines + gdefs, base_includes + gincs)
         implicit = []
-        if g.singleton_methods.include?(:bundle_onigmo)
-          lib = emit_onigmo(g, gbd)
-          implicit << lib
-          @extra_inputs << lib
-        end
         @extra_libs += g.linker.libraries.map { |l| "-l#{l}" }
         sources = Dir.glob(File.join(g.dir, 'src', '*.c')).sort
         sources = Dir.glob(File.join(g.dir, 'core', '*.c')).sort + sources if g.core_sources
@@ -473,7 +521,7 @@ module MrubyNinja
         end
         # A gem's build_settings may add objects to the core archive (mruby-bigint's core/**/*.c).
         g.build.libmruby_core_objs.flatten.each do |placeholder_obj|
-          rel = placeholder_obj.delete_prefix("#{BUILD_DIR_PLACEHOLDER}/")
+          rel = placeholder_obj.delete_prefix("#{GEM_DIR_PLACEHOLDER}/")
           src = File.join(g.dir, "#{rel}.c")
           obj = File.join(gbd, "#{rel}.o")
           units << { src: src, obj: obj, flags: gflags, implicit: implicit }
@@ -488,6 +536,7 @@ module MrubyNinja
           end
         end
         emit_gem_init(g, gbd, gflags, units, gem_objs) if generates_functions?(g)
+        emit_file_tasks(g, gbd, bd, units, own_outputs)
       end
 
       mrblib_objs = []
@@ -552,27 +601,54 @@ module MrubyNinja
       end
     end
 
-    def subst_build_dir(list, gbd)
-      list.map { |s| s.gsub(BUILD_DIR_PLACEHOLDER, gbd) }
+    def subst(text, gbd, bd)
+      text.gsub(GEM_DIR_PLACEHOLDER, gbd).gsub(TARGET_DIR_PLACEHOLDER, bd)
     end
 
-    # mruby-onig-regexp bundles Onigmo when no system header is found (its mrbgem.rake, bundle_onigmo): the tarball is
-    # unpacked, configured and built with make, in the gem's build directory, with the build's CC, LD and AR.
-    # Returns the library the gem's sources and the bins need.
-    def emit_onigmo(g, gbd)
-      tarball = Dir.glob(File.join(g.dir, 'onigmo-*.tar.gz')).sort.first or
-        raise "#{g.name}: no bundled Onigmo tarball in #{g.dir}"
-      match = ONIGMO_VERSION_RE.match(File.basename(tarball))
-      raise "#{g.name}: cannot read the Onigmo version from #{File.basename(tarball)}" unless match
+    def subst_build_dir(list, gbd, bd)
+      list.map { |s| subst(s, gbd, bd) }
+    end
 
-      version = match[1]
-      dir = File.join(gbd, "onigmo-#{version}")
-      lib = File.join(dir, '.libs', 'libonigmo.a')
-      cc = @conf.cc.command || 'cc'
-      env = ["CC=#{[cc, *C_FLAGS].join(' ')}", "LD=#{@conf.linker.command || cc}", "AR=#{@conf.archiver.command || 'ar'}"]
-      @statements << "build #{ninja_path(lib)}: onigmo #{ninja_path(tarball)}\n" \
-                     "  builddir = #{ninja_value(dir)}\n  onigenv = #{ninja_value(Shellwords.join(env))}"
-      lib
+    # The file tasks of a gem (mrbgem.rake's `file`), as rake would run them. A target that is a file of this build
+    # (under the gem's or the target's build directory) becomes a gemtask edge: ninja runs its block when it is out of
+    # date. A static library the gem builds is linked after libmruby.a, as bundled libraries (mruby-onig-regexp's
+    # Onigmo) must be. A target in the source tree (a gem's src/*.c that needs a generated header) only adds its
+    # prerequisites to that compile unit; its block is not run, and the generator says so. Anything else is an error.
+    def emit_file_tasks(g, gbd, bd, units, own_outputs)
+      g.file_tasks.each do |ft|
+        target = subst(ft.target, gbd, bd)
+        prereqs = ft.prereqs.map { |p| subst(p, gbd, bd) }
+        if own_outputs.include?(target)
+          next
+        elsif target.start_with?("#{gbd}/") || target.start_with?("#{bd}/")
+          emit_gemtask(g, gbd, bd, target, prereqs)
+          @extra_inputs << target if target.start_with?("#{gbd}/") && target.end_with?('.a')
+        elsif (unit = units.find { |u| u[:src] == target })
+          unit[:implicit] += prereqs
+          note_unrun_block(g, target) if ft.block
+        elsif File.exist?(target)
+          note_unrun_block(g, target) if ft.block
+        else
+          raise "mrbgem.rake of #{g.name}: file #{target} is neither built in #{bd} or #{gbd} nor in the source tree"
+        end
+      end
+    end
+
+    # Said once per gem and file, though a gem is planned for each target that uses it.
+    def note_unrun_block(g, target)
+      @noted ||= {}
+      return if @noted[[g.name, target]]
+
+      @noted[[g.name, target]] = true
+      warn "mruby-ninja: #{g.name}: #{target} is in the source tree; its file task's block is not run"
+    end
+
+    def emit_gemtask(g, gbd, bd, target, prereqs)
+      @statements << "build #{ninja_path(target)}: gemtask #{prereqs.map { |p| ninja_path(p) }.join(' ')}\n" \
+                     "  builddir = #{ninja_value(Shellwords.escape(bd))}\n" \
+                     "  gembuild = #{ninja_value(Shellwords.escape(gbd))}\n" \
+                     "  gemdir = #{ninja_value(Shellwords.escape(g.dir))}\n" \
+                     "  gemtarget = #{ninja_value(Shellwords.escape(target))}"
     end
 
     def emit_mrblib(bd, base_flags, units, mrblib_objs)
@@ -742,35 +818,47 @@ module MrubyNinja
     presym.write_list(presyms)
   end
 
-  # The bundled Onigmo build (run by ninja): unpack, configure and make, as mruby-onig-regexp's bundle_onigmo does.
-  def self.onigmo(tarball, builddir, *env_pairs)
-    require 'etc'
-    env = env_pairs.to_h { |pair| pair.split('=', 2) }
-    run = lambda do |cmd|
-      system(env, cmd) or raise "#{cmd} failed in #{Dir.pwd}"
-    end
-    FileUtils.mkdir_p(File.dirname(builddir))
-    Dir.chdir(File.dirname(builddir)) { run.("gzip -dc #{Shellwords.escape(File.expand_path(tarball))} | tar xf -") }
-    Dir.chdir(builddir) do
-      run.('./autogen.sh') if File.exist?('autogen.sh')
-      run.('./configure --disable-shared --enable-static')
-      run.("make -j#{Etc.nprocessors} libonigmo.la onigmo.pc")
-    end
+  # Loads the build config: its MRuby::Build block sets the conf and the gem list of the project.
+  def self.load_config(project, config)
+    load File.expand_path(config)
+    conf = $mruby_ninja_conf or raise 'the config did not declare MRuby::Build'
+    project.conf = conf
+    project.config_path = File.expand_path(config)
+    project.register_config(conf.gem_entries)
+    conf
+  end
+
+  def self.prepare_env(mruby_src)
+    ENV['NFCXX_ROOT'] ||= File.expand_path('..', __dir__)
+    Object.const_set(:MRUBY_ROOT, mruby_src) unless Object.const_defined?(:MRUBY_ROOT) # the Rakefile sets it too
   end
 
   def self.generate(mruby_src, config, out)
-    ENV['NFCXX_ROOT'] ||= File.expand_path('..', __dir__)
     mruby_src = File.expand_path(mruby_src)
     out = File.expand_path(out)
-    Object.const_set(:MRUBY_ROOT, mruby_src) unless Object.const_defined?(:MRUBY_ROOT) # the Rakefile sets it too
+    prepare_env(mruby_src)
     project = Project.new(mruby_src)
-    load File.expand_path(config)
-    conf = $mruby_ninja_conf or raise 'the config did not declare MRuby::Build'
-
-    project.conf = conf
-    project.register_config(conf.gem_entries)
+    conf = load_config(project, config)
     FileUtils.mkdir_p(out)
     File.write(File.join(out, 'build.ninja'), Emitter.new(project, conf, mruby_src, out).emit)
+  end
+
+  # A file task's block, run by ninja (a gemtask edge): the gem's mrbgem.rake is loaded again with the real build
+  # directories, and the block for the target runs. Its commands (sh, backticks, system) run as they do under rake.
+  def self.gemtask(mruby_src, config, target_dir, gem_build_dir, gem_dir, target)
+    mruby_src = File.expand_path(mruby_src)
+    prepare_env(mruby_src)
+    project = Project.new(mruby_src, run_gem_build_dir: File.expand_path(gem_build_dir),
+                                     target_dir: File.expand_path(target_dir))
+    load_config(project, config)
+    spec = project.spec_for_dir(File.expand_path(gem_dir))
+    task = spec.file_tasks.find { |t| t.target == target } or
+      raise "#{gem_dir}: mrbgem.rake declares no file task for #{target}"
+    raise "#{gem_dir}: the file task for #{target} has no block" unless task.block
+
+    FileUtils.mkdir_p(File.dirname(target))
+    task.block.call(Project::TaskObj.new(target, task.prereqs, nil))
+    raise "#{gem_dir}: the block for #{target} did not build it" unless File.exist?(target)
   end
 end
 
@@ -783,10 +871,10 @@ if __FILE__ == $PROGRAM_NAME
   when 'presym'
     abort 'usage: mruby-ninja.rb presym MRUBY_SRC BUILD_DIR PPP...' if args.size < 2
     MrubyNinja.presym(args[0], args[1], args[2..])
-  when 'onigmo'
-    abort 'usage: mruby-ninja.rb onigmo TARBALL BUILDDIR [VAR=VALUE...]' if args.size < 2
-    MrubyNinja.onigmo(args[0], args[1], *args[2..])
+  when 'gemtask'
+    abort 'usage: mruby-ninja.rb gemtask MRUBY_SRC CONFIG BUILDDIR GEMBUILD GEMNAME TARGET' unless args.size == 6
+    MrubyNinja.gemtask(*args)
   else
-    abort 'usage: mruby-ninja.rb generate MRUBY_SRC CONFIG OUT | presym MRUBY_SRC BUILD_DIR PPP... | onigmo ...'
+    abort 'usage: mruby-ninja.rb generate MRUBY_SRC CONFIG OUT | presym MRUBY_SRC BUILD_DIR PPP... | gemtask ...'
   end
 end
