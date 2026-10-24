@@ -8,7 +8,7 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 
 | Piece | What it is |
 | --- | --- |
-| `scripts/setup-mruby.sh` | Clones mruby 4.0.0 (`831da26b`, the pin `tests/realworld/run_mruby.sh` uses) into `build/mruby-tool/src`, builds with rake and installs `build/mruby-tool/bin/mruby`. Host `cc` by default. `MRUBY_CC=<repo>/nfcc` also builds `bin/mruby-nfcc` with nfcc (the host one is always built first, because `scripts/qbe-cc` runs mruby). |
+| `scripts/setup-mruby.sh` | Clones mruby 4.0.0 (`831da26b`, the pin `tests/realworld/run_mruby.sh` uses) into `build/mruby-tool/src`, generates a ninja build file with `scripts/mruby-ninja.rb` (no rake) and builds it with ninja, then installs `build/mruby-tool/bin/mruby`. Host `cc` by default. `MRUBY_CC=<repo>/nfcc` also builds `bin/mruby-nfcc` with nfcc (the host one is always built first, because `scripts/qbe-cc` runs mruby). |
 | `scripts/mruby-tool-config.rb` | The build config: core, `mruby-io`, `mruby-pack`, `mruby-sprintf`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-set`, `mruby-enum-ext`, `mruby-numeric-ext`, `mruby-kernel-ext`, `mruby-object-ext`, `mruby-symbol-ext`, `mruby-range-ext`, `mruby-error`, `mruby-exit`, `mruby-bigint` (stage 3), `mruby-bin-mruby`; and the define `MRB_ARY_LENGTH_MAX=0`, because mruby caps an `Array` at 131072 entries by default (`array size too big`) and the token list of a big translation unit is longer (stage 3). Reuses the HAL workaround of `tests/realworld/mruby_build_config.rb`: naming the `hal-posix-*` gems stops mruby's `for_windows?` guess (any `/a/../z/` directory means "Windows") from picking the wrong HAL. |
 | `scripts/mrb` | `scripts/mrb script.rb args...`; builds the interpreter first when it is missing. `MRB=<exe>` picks another interpreter. |
 | `scripts/weak-symbols.rb` | Port of `weak-symbols.py`; used by `scripts/qbe-cc`. |
@@ -266,12 +266,12 @@ original does, and the `x_*` inputs of the test compare only the status for them
 
 ## Bootstrap caveat
 
-Building mruby needs a CRuby with the `rake` gem; mruby is not self-hosting in its build. Checked on the
-pinned 4.0.0: `minirake`, which older mruby shipped as a standalone rake replacement, is now a two-line
-script, `#!/usr/bin/env ruby` / `exec "rake", *ARGV`, so **minirake alone does not suffice**: it needs
-the same `rake` gem plus `ruby`. `setup-mruby.sh` finds `rake` on `PATH`, then in the gem bindir (the
-case on this machine, where the gem is installed but not linked into `PATH`), then falls back to
-`ruby -rrake`. On Ubuntu 24.04, `apt-get install ruby rake` is enough.
+Building mruby needs a CRuby (stdlib only) and ninja; the rake gem is not needed. `setup-mruby.sh` runs
+`scripts/mruby-ninja.rb generate`, which evaluates the build config (`scripts/mruby-tool-config.rb`) and each gem's
+`mrbgem.rake` against a small stub of the rake DSL, then writes `build.ninja`; ninja builds it. The generator
+refuses any mrbgem.rake call it does not model, so a gem it cannot handle fails the setup rather than building
+wrongly. mruby's own rake build (`tests/realworld/run_mruby.sh`) still needs rake: it is the upstream build that
+the generator is checked against. On Ubuntu 24.04, `apt-get install ruby ninja-build` is enough.
 
 Consequences: `ruby` replaces `python3` in the host-tool list rather than removing the need for a
 scripting language at bootstrap. It is only needed once, to build `build/mruby-tool/bin/mruby`; every
