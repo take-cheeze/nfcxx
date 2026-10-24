@@ -60,13 +60,15 @@ if out=$(g++ -O1 -std=$std $d/torch.cpp "${inc[@]}" -L"$L" -Wl,--no-as-needed -l
   run_case "g++ libtorch (CUDA) bundled" "$w/t" "$w/dist"
 else echo "FAIL g++ libtorch (build or bundle)"; echo "$out" | grep -v warning | head -20; fail=1; fi
 
-# nfcxx: the link drops what the program does not reference (it keeps no --no-as-needed), so libtorch_cuda and
-# libc10_cuda are added to the bundle with --bundle-add.
+# nfcxx: the link drops what the program does not reference (it refuses -Wl,--no-as-needed, which eccp would put
+# before every input), so libtorch_cuda and libc10_cuda are added to the bundle with --bundle-add. The normal build
+# keeps them with -Wl,--push-state,--no-as-needed, which then applies to every library of the link.
 be=${NFCXX_BACKEND:-gcc}
 w=$tmp/nfcxx; mkdir -p "$w/dist/lib"
 if [ -x "${EDG_BUILD:-build/edg}/bin/eccp" ]; then
   if out=$(NFCXX_BACKEND=$be ./nfcxx -std=$std -c $d/torch.cpp "${inc[@]}" -o "$w/t.o" 2>&1) &&
-     out=$(NFCXX_BACKEND=$be ./nfcxx "$w/t.o" -L"$L" -ltorch -ltorch_cpu -lc10 -Wl,-rpath,"$L" -o "$w/t" 2>&1) &&
+     out=$(NFCXX_BACKEND=$be ./nfcxx "$w/t.o" -Wl,--push-state,--no-as-needed -L"$L" -ltorch -ltorch_cuda -ltorch_cpu -lc10_cuda \
+             -lc10 -Wl,-rpath,"$L" -o "$w/t" 2>&1) &&
      out=$(NFCXX_BACKEND=$be ./nfcxx --bundle-libs --bundle-add=libtorch_cuda.so,libc10_cuda.so --bundle-stubs="$w/dist/lib" \
              --bundle-runpath='$ORIGIN/lib' "$w/t.o" -L"$L" -ltorch -ltorch_cpu -lc10 -o "$w/dist/t" 2>&1); then
     run_case "nfcxx $be libtorch (CUDA) bundled" "$w/t" "$w/dist"

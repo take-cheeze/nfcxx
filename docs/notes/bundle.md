@@ -74,16 +74,16 @@ Nothing ran on a GPU in that session.
 
 On a GPU (RTX 5050, sm_120; by hand) with libtorch 2.14.1+cu130 (`libtorch-shared-with-deps-2.14.1%2Bcu130.zip`, 2.0
 GB; 2.5.1+cu124 has no sm_120 kernels), which needs C++20 (`torch.sh` picks `-std=c++20` when `ATen.h` asks for it):
-the g++ build and its bundle (2.6 GB, 23 files in `lib/`) print `cuda available 1 devices 1` and match. The nfcxx build
-does not run: `torch::manual_seed` calls `at::getAccelerator()` (in libc10, built by gcc), which returns a
-`std::optional<c10::DeviceType>` (a one-byte enum), and nfcxx reads that return value as empty on both backends. The
-inline `getAcceleratorHooksInterface` then finds no accelerator and throws a `c10::Error` that the nfcxx frames cannot
-catch, so the program terminates. A gcc-built `std::optional<E> f()` with `enum class E : int8_t` called from nfcxx
-code gives `has_value() == false` where g++ gives true. `torch.sh` requires the normal build to exit 0 and print its
-`cuda available` line before it compares it with the bundle, so it reports this case as a failure (before this change
-both aborted the same way and the comparison passed).
+the g++ build and its bundle (2.6 GB, 23 files in `lib/`), and the nfcxx build and its bundle (2.6 GB, 22 files), print
+`cuda available 1 devices 1` and a CUDA tensor, and each bundle matches its build. The nfcxx build did not run until
+EDG chose the call ABI of `std::optional<T>` as g++ does (`call-abi.md`): `torch::manual_seed` calls
+`at::getAccelerator()` (in libc10, built by gcc), which returns a `std::optional<c10::DeviceType>`; nfcxx read it as
+empty, found no accelerator, and the `c10::Error` thrown for that terminated the program. `torch.sh` requires the normal
+build to exit 0 and print its `cuda available` line before it compares it with the bundle (both had aborted the same
+way and the comparison had passed), and its normal nfcxx build keeps libtorch_cuda and libc10_cuda with
+`-Wl,--push-state,--no-as-needed`, as the bundle does with `--bundle-add`.
 
-A `find_package(Torch)` project needs more than nfcxx gives today, apart from that bug:
+A `find_package(Torch)` project needs two things nfcxx does not give today:
 - torch's CMake config links libtorch_cpu, libtorch_cuda and libtorch as `-Wl,--no-as-needed,<lib> -Wl,--as-needed`,
   which nfcxx refuses with C++ inputs (`cxx-driver.md`);
 - CMake 4's linker dependency file (`-Wl,--dependency-file=CMakeFiles/<target>.dir/link.d`, a relative path) is not
@@ -92,7 +92,8 @@ With both worked around (a wrapper that turns the libraries into plain arguments
 `-Wl,--push-state,--no-as-needed`), the link replaces `CUDA::cuda_driver` as `cuda-driver.md` describes: the program
 does not need libcuda.so.1, its own driver calls reach the GPU (`cuInit CUDA_SUCCESS`, the device name, `cuMemGetInfo`),
 and with the driver hidden it starts and reports `CUDA_ERROR_NO_DEVICE` and `cuda available 0`; the g++ build of the
-same project cannot start without the driver. Its tensor work on the GPU stops at the `std::optional` bug above.
+same project cannot start without the driver. Its tensor work runs on the GPU (a 512x512 matmul that matches the CPU,
+a convolution with backward on `cuda:0`), as the g++ build's does.
 
 Two things only this case needed:
 - **A `.eh_frame_hdr` in the middle.** The unwinder binary-searches the table only in its `datarel|sdata4` form, so the
