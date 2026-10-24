@@ -134,13 +134,23 @@ module OutsideOwnerCall
     ruby = OutsideRubyOwners.scan(Array(@closed_world.ruby_paths))
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
 
+    # The program's own core Ruby also defines names the registry never lists: an alias of a native-named method
+    # (IO#each_line of IO#each) and a definition the core compile refuses (Enumerator#each_with_index).
+    core = OutsideRubyOwners.scan(program_core_ruby_paths)
+    return nil if core.unknown.include?(name) || core.unknown.include?(:all)
+
     # Core Ruby definitions whose name a native also registers (mruby-io's IO.open, beside StringIO's native open) are
     # moved out of the registry into core_hidden_defs, so the registry alone cannot name them.
     hidden = (self.class.core_hidden_defs || []).select { |definition| definition.name == name }.map(&:owner)
-    owners = native | (map.computed - [NativeOwnerMap::UNKNOWN]) | ruby.names.fetch(name, Set.new) | ruby.wild | hidden
+    owners = native | (map.computed - [NativeOwnerMap::UNKNOWN]) | ruby.names.fetch(name, Set.new) | ruby.wild | hidden |
+             core.names.fetch(name, Set.new) | core.wild
     return nil if owners.empty? || owners.any? { |owner| !owner.match?(OWNER_PATH) }
 
     owners.to_a.sort
+  end
+
+  def program_core_ruby_paths
+    @program_core_ruby_paths ||= @ireps.values.map(&:file).uniq.select { |file| CoreDefs.core_source?(file) }.sort
   end
 end
 
