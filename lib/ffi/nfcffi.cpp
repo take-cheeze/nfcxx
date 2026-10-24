@@ -272,18 +272,43 @@ const void* Value::as_pointer() const {
   return p_;
 }
 
+Value Value::of_bytes(const void* p, std::size_t n) {
+  Value r;
+  r.kind_ = Kind::Bytes;
+  const unsigned char* b = static_cast<const unsigned char*>(p);
+  r.b_.assign(b, b + n);
+  return r;
+}
+
+const std::vector<unsigned char>& Value::as_bytes() const {
+  if (kind_ != Kind::Bytes) wrong_kind("a struct or union (bytes)");
+  return b_;
+}
+
 namespace {
 
 // A function can be called by name when its declaration has no variadic part, is not overloaded, and passes only
-// integers, floats and pointers (void as the result).
+// integers, floats, pointers, structs and unions (void as the result).
 bool passable(const Declaration& d) {
   if (d.variadic || d.overloaded) return false;
-  if (d.return_kind == 'x' || std::strchr("iufpv", d.return_kind) == nullptr) return false;
+  if (d.return_kind == 'x' || std::strchr("iufpvs", d.return_kind) == nullptr) return false;
   if (d.param_kinds.size() != d.params.size()) return false;
   for (char k : d.param_kinds) {
-    if (k == 'v' || k == 'x' || std::strchr("iufp", k) == nullptr) return false;
+    if (k == 'v' || k == 'x' || std::strchr("iufps", k) == nullptr) return false;
   }
   return true;
+}
+
+// The layout function for D: void nfcffi_layout_NAME(unsigned long *s) stores the size of the result type at s[0] and of
+// parameter i at s[i + 1]; 0 for the types that are not structs or unions.
+std::string layout_text(const Declaration& d) {
+  std::string body = d.return_kind == 's' ? "  s[0] = sizeof(" + abstract_type(d.return_type) + ");\n" : "  s[0] = 0;\n";
+  for (std::size_t i = 0; i < d.params.size(); ++i) {
+    std::string n = std::to_string(i + 1);
+    body += d.param_kinds[i] == 's' ? "  s[" + n + "] = sizeof(" + abstract_type(d.params[i]) + ");\n"
+                                    : "  s[" + n + "] = 0;\n";
+  }
+  return "void nfcffi_layout_" + d.name + "(unsigned long *s) {\n" + body + "}\n";
 }
 
 // The wrapper for D: void nfcffi_call_NAME(void **a, void *r). Each argument is read from a[i] as its kind says
@@ -293,11 +318,18 @@ std::string wrapper_text(const Declaration& d) {
   for (std::size_t i = 0; i < d.params.size(); ++i) {
     char k = d.param_kinds[i];
     std::string slot = "a[" + std::to_string(i) + "]";
-    std::string src = k == 'i' ? "*(long long *)" + slot
-                    : k == 'u' ? "*(unsigned long long *)" + slot
-                    : k == 'f' ? "*(double *)" + slot
-                               : "*(void **)" + slot;
-    args += (i ? ", (" : "(") + abstract_type(d.params[i]) + ")" + src;
+    std::string type = abstract_type(d.params[i]);
+    std::string arg;
+    if (k == 's') {
+      arg = "*(" + type + " *)" + slot;
+    } else {
+      std::string src = k == 'i' ? "*(long long *)" + slot
+                      : k == 'u' ? "*(unsigned long long *)" + slot
+                      : k == 'f' ? "*(double *)" + slot
+                                 : "*(void **)" + slot;
+      arg = "(" + type + ")" + src;
+    }
+    args += (i ? ", " : "") + arg;
   }
   std::string call = d.name + "(" + args + ")";
   std::string body;
@@ -306,9 +338,17 @@ std::string wrapper_text(const Declaration& d) {
     case 'u': body = "*(unsigned long long *)r = (unsigned long long)" + call; break;
     case 'f': body = "*(double *)r = (double)" + call; break;
     case 'p': body = "*(void **)r = (void *)" + call; break;
+    case 's': body = "*(" + abstract_type(d.return_type) + " *)r = " + call; break;
     default: body = call; break;
   }
   return "void nfcffi_call_" + d.name + "(void **a, void *r) {\n  " + body + ";\n}\n";
+}
+
+const Declaration* find_declaration(const std::vector<Declaration>& decls, const std::string& name) {
+  for (const Declaration& d : decls) {
+    if (d.name == name) return &d;
+  }
+  return nullptr;
 }
 
 std::string absolute_path(const std::string& p) {
@@ -324,29 +364,31 @@ Library Ffi::load(const std::string& header, const std::string& source, const st
   const std::string path = absolute_path(header);
   lib.decls_ = declarations(path);
 
-  // One translation unit: the header, the source, then a wrapper for each passable function.
+  // One translation unit: the header, the source, then a wrapper and a layout function for each passable function.
   std::string text = "#include \"" + path + "\"\n" + source + "\n";
   std::vector<std::string> wrapped;
   for (const Declaration& d : lib.decls_) {
     if (!only.empty() && std::find(only.begin(), only.end(), d.name) == only.end()) continue;
     if (!passable(d)) continue;
-    text += wrapper_text(d);
+    text += wrapper_text(d) + layout_text(d);
     wrapped.push_back(d.name);
   }
 
   lib.module_ = compile(text);
   for (const std::string& name : wrapped) {
     lib.wrappers_.emplace(name, lib.module_.function<void(void**, void*)>("nfcffi_call_" + name));
+    auto layout = lib.module_.function<void(unsigned long*)>("nfcffi_layout_" + name);
+    std::vector<unsigned long> sz(find_declaration(lib.decls_, name)->params.size() + 1, 0);
+    layout(sz.data());
+    lib.layouts_.emplace(name, layout);
+    lib.sizes_[name] = std::vector<std::size_t>(sz.begin(), sz.end());
   }
   return lib;
 }
 
 Value Library::call(const std::string& name, const std::vector<Value>& args) const {
   auto w = wrappers_.find(name);
-  const Declaration* d = nullptr;
-  for (const Declaration& x : decls_) {
-    if (x.name == name) d = &x;
-  }
+  const Declaration* d = find_declaration(decls_, name);
   if (w == wrappers_.end() || d == nullptr) {
     throw Error("nfcffi: '" + name + "' is not callable: it is not a function of the header, or it has a struct, variadic, "
                 "overloaded or long double part");
@@ -356,6 +398,7 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
                 std::to_string(args.size()));
   }
 
+  const std::vector<std::size_t>& sz = sizes_.at(name);
   std::size_t n = args.size();
   std::vector<long long> sv(n);
   std::vector<unsigned long long> uv(n);
@@ -366,6 +409,14 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
     const Value& v = args[i];
     const std::string where = "nfcffi: argument " + std::to_string(i) + " of " + name;
     switch (d->param_kinds[i]) {
+      case 's':
+        if (v.kind() != Value::Kind::Bytes) throw Error(where + " must be a struct or union (Value::of_bytes)");
+        if (v.as_bytes().size() != sz[i + 1]) {
+          throw Error(where + " must be " + std::to_string(sz[i + 1]) + " bytes, got " +
+                      std::to_string(v.as_bytes().size()));
+        }
+        slots[i] = const_cast<unsigned char*>(v.as_bytes().data());
+        break;
       case 'i':
         if (v.kind() == Value::Kind::Signed) sv[i] = v.as_signed();
         else if (v.kind() == Value::Kind::Unsigned) sv[i] = (long long)v.as_unsigned();
@@ -398,12 +449,14 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
   unsigned long long ru = 0;
   double rf = 0;
   void* rp = nullptr;
+  std::vector<unsigned char> rb(sz[0]);
   void* out = nullptr;
   switch (d->return_kind) {
     case 'i': out = &rs; break;
     case 'u': out = &ru; break;
     case 'f': out = &rf; break;
     case 'p': out = &rp; break;
+    case 's': out = rb.data(); break;
     default: break;
   }
   w->second(slots.data(), out);
@@ -413,6 +466,7 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
     case 'u': return Value::of_unsigned(ru);
     case 'f': return Value::of_float(rf);
     case 'p': return Value::of_pointer(rp);
+    case 's': return Value::of_bytes(rb.data(), rb.size());
     default: return Value();
   }
 }

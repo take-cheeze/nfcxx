@@ -99,16 +99,18 @@ struct Declaration {
   std::string param_decl(std::size_t i, const std::string& name) const;
 };
 
-// A value passed to or returned from Library::call: a signed or unsigned integer, a float or double, a pointer, or void.
+// A value passed to or returned from Library::call: a signed or unsigned integer, a float or double, a pointer, void, or
+// a struct or union passed by value, as its bytes (the C layout of the type, see Library::call).
 class Value {
  public:
-  enum class Kind { Void, Signed, Unsigned, Float, Pointer };
+  enum class Kind { Void, Signed, Unsigned, Float, Pointer, Bytes };
 
   Value() = default;
   static Value of_signed(long long v);
   static Value of_unsigned(unsigned long long v);
   static Value of_float(double v);
   static Value of_pointer(const void* p);
+  static Value of_bytes(const void* p, std::size_t n);
 
   Kind kind() const { return kind_; }
   // Each accessor throws Error when the value has another kind.
@@ -116,6 +118,7 @@ class Value {
   unsigned long long as_unsigned() const;
   double as_float() const;
   const void* as_pointer() const;
+  const std::vector<unsigned char>& as_bytes() const;
 
  private:
   Kind kind_ = Kind::Void;
@@ -123,26 +126,31 @@ class Value {
   unsigned long long u_ = 0;
   double f_ = 0;
   const void* p_ = nullptr;
+  std::vector<unsigned char> b_;
 };
 
 // A set of header declarations compiled into one shared object, with a wrapper per function that can be called by name
-// (Library::callable). A wrapper converts its arguments from the kinds of the declaration: integers, floats and pointers.
-// Structs, variadic functions, overload sets and 128-bit or long double values are not callable (the declaration is still
-// listed). Move-only.
+// (Library::callable). A wrapper converts its arguments from the kinds of the declaration: integers, floats, pointers,
+// and structs or unions by value. Variadic functions, overload sets and 128-bit or long double values are not callable
+// (the declaration is still listed). Move-only.
 class Library {
  public:
   const std::vector<Declaration>& declarations() const { return decls_; }
   bool callable(const std::string& name) const { return wrappers_.count(name) != 0; }
 
   // Calls NAME with ARGS, converted to the declared parameter kinds: signed and unsigned integers convert to each other,
-  // integers convert to float, and a pointer parameter takes a pointer or the integer 0. Throws Error for an uncallable
-  // name, a wrong argument count or kind.
+  // integers convert to float, and a pointer parameter takes a pointer or the integer 0. A struct or union parameter takes
+  // Value::of_bytes of the object's bytes, of the size the C compiler gives the type (the same layout as a C++ struct
+  // with the same members); a struct result comes back the same way. Throws Error for an uncallable name, a wrong argument
+  // count or kind, or a wrong size.
   Value call(const std::string& name, const std::vector<Value>& args) const;
 
  private:
   friend class Ffi;
   std::vector<Declaration> decls_;
   std::map<std::string, Function<void(void**, void*)>> wrappers_;
+  std::map<std::string, Function<void(unsigned long*)>> layouts_;
+  std::map<std::string, std::vector<std::size_t>> sizes_;  // [0] the result's size, [i + 1] parameter i's (0 unless a struct)
   Module module_;
 };
 
