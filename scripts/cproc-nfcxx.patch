@@ -20,7 +20,7 @@
  		return false;
  	name = strip(tokenstr(tok.kind), namebuf, sizeof namebuf);
  	next();
-@@ -84,17 +88,56 @@
+@@ -84,17 +88,92 @@
  				a->cleanup = cleanup;
  			expect(TRPAREN, "after cleanup function");
  		} else if (strcmp(name, "section") == 0) {
@@ -40,6 +40,28 @@
 +		           strcmp(name, "stdcall") == 0 || strcmp(name, "fastcall") == 0 || strcmp(name, "thiscall") == 0) {
 +			/* another calling convention (the kernel's __efiapi): the function type is marked, its arguments skipped */
 +			attrabi = strcmp(name, "ms_abi") == 0 ? "ms_abi" : strcmp(name, "sysv_abi") == 0 ? "sysv_abi" : "regparm";
++		} else if (strcmp(name, "mode") == 0) {
++			/* an integer mode: QI (byte) 1, HI 2, SI 4, DI (word, pointer) 8 bytes; others are refused */
++			char mbuf[32];
++			const char *m;
++			int size = 0;
++
++			kind = ATTRMODE;
++			expect(TLPAREN, "after 'mode'");
++			m = strip(expect(TIDENT, "for mode"), mbuf, sizeof mbuf);
++			if (strcmp(m, "QI") == 0 || strcmp(m, "byte") == 0)
++				size = 1;
++			else if (strcmp(m, "HI") == 0)
++				size = 2;
++			else if (strcmp(m, "SI") == 0)
++				size = 4;
++			else if (strcmp(m, "DI") == 0 || strcmp(m, "word") == 0 || strcmp(m, "pointer") == 0)
++				size = 8;
++			else
++				error(&tok.loc, "GNU attribute mode(%s) is not supported", m);
++			if (a)
++				a->modesize = size;
++			expect(TRPAREN, "after mode");
 +		} else if (strcmp(name, "weak") == 0) {
 +			declattr.weak = true;
 +		} else if (strcmp(name, "alias") == 0 || strcmp(name, "visibility") == 0) {
@@ -72,6 +94,20 @@
  		}
  		break;
  	}
++	/* a GNU attribute that changes what a declaration means -- its type (vector_size), its code (naked,
++	 * interrupt, no_caller_saved_registers, target), its binding (weakref, ifunc) -- is refused, never ignored as
++	 * the hints and diagnostics (noinline, cold, format, nonnull, ...) are */
++	if (prefix == PREFIXGNU && !kind) {
++		static const char *const meaning[] = {
++			"vector_size", "naked", "interrupt", "no_caller_saved_registers", "weakref", "ifunc",
++			"target_clones", "symver", "tls_model", "scalar_storage_order", "nocf_check", "fentry_name",
++		};
++		size_t i;
++
++		for (i = 0; i < sizeof meaning / sizeof meaning[0]; ++i)
++			if (strcmp(name, meaning[i]) == 0)
++				error(&tok.loc, "GNU attribute '%s' is not supported (it changes what the declaration means)", name);
++	}
  	if (kind) {
 -		if (!(kind & allowed))
 +		/* section, used and transparent_union are recorded for the declaration (declattr) wherever they appear */
@@ -261,16 +297,22 @@
  
  /* attr */
  
-@@ -434,6 +515,8 @@
+@@ -434,17 +515,38 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
 +	ATTRUSED        = 1<<8,
 +	ATTRTRANSPARENT = 1<<9,   /* GNU transparent_union, on a typedef of a union */
++	ATTRMODE        = 1<<10,  /* GNU mode(byte), ... after an enum body (the kernel's 1-byte trace enums) */
  };
  
  struct attr {
-@@ -445,6 +528,23 @@
+ 	enum attrkind kind;
+ 	int align;
++	int modesize;   /* mode: the size in bytes of the integer mode */
+ 	char *section;
+ 	const char *cleanup;
+ };
  
  bool attr(struct attr *, enum attrkind);
  bool gnuattr(struct attr *, enum attrkind);
@@ -294,7 +336,7 @@
  
  /* decl */
  
-@@ -503,6 +603,15 @@
+@@ -503,6 +605,15 @@
  /* stmt */
  
  void stmt(struct func *, struct scope *);
@@ -310,7 +352,7 @@
  
  /* backend */
  
-@@ -512,6 +621,8 @@
+@@ -512,6 +623,8 @@
  	/* -fsanitize=address (qbe.c asangoto, asanlabel): sets of block numbers, null when empty. The blocks open at the label
  	 * (asanopen, once defined); for the gotos before it: the blocks open at any of them (asanfrom) and at all of them (asanall) */
  	struct array *asanopen, *asanfrom, *asanall;
@@ -319,7 +361,7 @@
  };
  
  struct switchcases {
-@@ -522,21 +633,44 @@
+@@ -522,21 +635,44 @@
  	struct array *asanopen;
  };
  
@@ -365,7 +407,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +680,13 @@
+@@ -546,6 +682,13 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -481,15 +523,33 @@
  			name = tokenstr(tok.kind);
  			next();
  			attr(NULL, 0);
-@@ -308,6 +340,30 @@
+@@ -308,6 +340,48 @@
  				break;
  		}
  		expect(TRBRACE, "to close enum specifier");
 +		{
 +			struct attr trail = {0};
 +
-+			gnuattr(&trail, ATTRPACKED);
++			gnuattr(&trail, ATTRPACKED | ATTRMODE);
 +			a.kind |= trail.kind & ATTRPACKED;
++			if (trail.kind & ATTRMODE) {
++				/* GNU mode on an enum: the integer type of that size, unsigned when no value is negative, as gcc
++				 * gives it (the kernel's trace enums: enum afs_call_trace { ... } __mode(byte)) */
++				static struct type *const bysize[9][2] = {
++					[1] = {&typeuchar, &typeschar}, [2] = {&typeushort, &typeshort},
++					[4] = {&typeuint, &typeint}, [8] = {&typeulong, &typelong},
++				};
++
++				sign = min > 0;
++				et = bysize[trail.modesize][sign];
++				if (!typehasint(et, max, false) || sign && !typehasint(et, -min, true))
++					error(&tok.loc, "an enumerator value does not fit the enum's mode");
++				t->base = et;
++				t->size = et->size;
++				t->align = et->align;
++				t->u.arith.issigned = et->u.arith.issigned;
++				t->u.arith.width = et->u.arith.width;
++			}
 +		}
 +		if (!t->base && a.kind & ATTRPACKED) {
 +			/* GNU packed enum: the smallest integer type that holds the values, unsigned when none is negative */
@@ -512,7 +572,7 @@
  		if (!t->base) {
  			if (min <= 0x80000000 && max <= 0x7fffffff) {
  				t->base = min ? &typeint : &typeuint;
-@@ -487,12 +543,18 @@
+@@ -487,12 +561,18 @@
  			expect(TRPAREN, "to close 'alignas' specifier");
  			break;
  
@@ -534,7 +594,7 @@
  				goto done;
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d || d->kind != DECLTYPE)
-@@ -603,7 +665,15 @@
+@@ -603,7 +683,15 @@
  	enum typequal tq;
  	int allowedattr;
  
@@ -551,7 +611,7 @@
  		attr(NULL, 0);
  		tq = QUALNONE;
  		while (typequal(&tq))
-@@ -613,7 +683,12 @@
+@@ -613,7 +701,12 @@
  	}
  	if (name)
  		*name = NULL;
@@ -565,7 +625,7 @@
  	ptr = result->next;
  	switch (tok.kind) {
  	case TLPAREN:
-@@ -622,9 +697,10 @@
+@@ -622,9 +715,10 @@
  			switch (tok.kind) {
  			case TMUL:
  			case TLPAREN:
@@ -577,7 +637,7 @@
  					break;
  				goto func;
  			}
-@@ -634,7 +710,7 @@
+@@ -634,7 +728,7 @@
  		allowedattr = -1;
  		break;
  	default:
@@ -586,7 +646,7 @@
  			if (!name)
  				error(&tok.loc, "identifier not allowed in abstract declarator");
  			*name = tokenstr(tok.kind);
-@@ -656,6 +732,8 @@
+@@ -656,6 +750,8 @@
  		func:
  			t = mktype(TYPEFUNC, 0);
  			t->qual = QUALNONE;
@@ -595,7 +655,7 @@
  			t->u.func.isvararg = false;
  			t->u.func.params = NULL;
  			t->u.func.nparam = 0;
-@@ -711,20 +789,21 @@
+@@ -711,20 +807,21 @@
  				expect(TRBRACK, "after array length");
  			}
  			listinsert(ptr->prev, &t->link);
@@ -626,7 +686,7 @@
  			break;
  		default:
  			return;
-@@ -842,12 +921,14 @@
+@@ -842,12 +939,14 @@
  	struct member *m;
  	size_t end;
  
@@ -642,7 +702,7 @@
  	}
  	if (mt.type->prop & PROPFLEX) {
  		/*
-@@ -861,11 +942,14 @@
+@@ -861,11 +960,14 @@
  	if (mt.type->prop & PROPVM)
  		error(&tok.loc, "struct member '%s' has variably modified type", name);
  	assert(mt.type->align > 0);
@@ -657,7 +717,7 @@
  		m->next = NULL;
  		*b->last = m;
  		b->last = &m->next;
-@@ -875,14 +959,29 @@
+@@ -875,14 +977,29 @@
  	if (width == -1) {
  		m->bits.before = 0;
  		m->bits.after = 0;
@@ -690,7 +750,7 @@
  		} else {
  			m->offset = 0;
  			if (t->size < mt.type->size)
-@@ -896,6 +995,8 @@
+@@ -896,6 +1013,8 @@
  			error(&tok.loc, "alignment specified for bit-field '%s'", name);
  		if (b->pack)
  			error(&tok.loc, "bit-field '%s' in packed struct is not supported", name);
@@ -699,7 +759,7 @@
  		if (!width && name)
  			error(&tok.loc, "bit-field '%s' with zero width must not have declarator", name);
  		if (width > mt.type->u.arith.width)
-@@ -909,6 +1010,10 @@
+@@ -909,6 +1028,10 @@
  				t->size = end;
  				b->bits = 0;
  			}
@@ -710,7 +770,7 @@
  			if (m) {
  				m->offset = ALIGNDOWN(t->size - !!b->bits, mt.type->size);
  				m->bits.before = (t->size - m->offset) * 8 - b->bits;
-@@ -928,6 +1033,108 @@
+@@ -928,6 +1051,108 @@
  		t->align = align;
  }
  
@@ -819,7 +879,7 @@
  static bool
  staticassert(struct scope *s)
  {
-@@ -957,12 +1164,15 @@
+@@ -957,12 +1182,15 @@
  	struct qualtype base, mt;
  	char *name;
  	unsigned long long width;
@@ -836,7 +896,7 @@
  	if (!base.type)
  		error(&tok.loc, "no type in struct member declaration");
  	if (tok.kind == TSEMICOLON) {
-@@ -977,9 +1187,15 @@
+@@ -977,9 +1205,15 @@
  			width = intconstexpr(s, false);
  			addmember(b, base, NULL, 0, width);
  		} else {
@@ -852,7 +912,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1278,41 @@
+@@ -1062,6 +1296,41 @@
  	return d;
  }
  
@@ -894,7 +954,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1321,7 @@
+@@ -1070,7 +1339,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -903,7 +963,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,7 +1339,11 @@
+@@ -1088,7 +1357,11 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -915,7 +975,7 @@
  	struct decl *d, *prior;
  	enum declkind kind;
  	struct scope *funcscope;
-@@ -1096,10 +1351,31 @@
+@@ -1096,10 +1369,31 @@
  
  	if (staticassert(s))
  		return true;
@@ -947,7 +1007,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1385,18 @@
+@@ -1109,16 +1403,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -969,7 +1029,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1413,36 @@
+@@ -1135,6 +1431,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -1006,7 +1066,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1452,32 @@
+@@ -1144,10 +1470,32 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -1041,7 +1101,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,9 +1487,20 @@
+@@ -1157,9 +1505,20 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1062,7 +1122,7 @@
  			declcleanup = NULL;
  			if (d->u.obj.cleanup && s == &filescope)
  				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
-@@ -1176,11 +1517,23 @@
+@@ -1176,11 +1535,23 @@
  				funcexpr(f, base.expr);
  			init = NULL;
  			hasinit = false;
@@ -1086,7 +1146,7 @@
  				init = parseinit(s, d->type);
  				hasinit = true;
  			} else if (sc & SCEXTERN) {
-@@ -1201,8 +1554,14 @@
+@@ -1201,8 +1572,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1102,7 +1162,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1572,43 @@
+@@ -1213,12 +1590,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1147,7 +1207,7 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1226,6 +1616,10 @@
+@@ -1226,6 +1634,10 @@
  			} else if (funcscope) {
  				delscope(funcscope);
  			}
@@ -1158,7 +1218,7 @@
  			break;
  		}
  		if (consume(TSEMICOLON))
-@@ -1268,3 +1662,127 @@
+@@ -1268,3 +1680,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }

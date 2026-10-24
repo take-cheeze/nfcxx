@@ -466,6 +466,13 @@ int main(void) {
 EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kconst.c -o kconst 2>/dev/null && { ./kconst; [ $? = 42 ]; }; then ok "kernel mode: calls of constant functions fold"
     else bad "kernel mode: calls of constant functions fold" "wrong result or the link failed"; fi
+    # a GNU attribute that changes what a declaration means and that cproc does not take is refused, not ignored
+    for at in 'vector_size(16)' 'naked' 'mode(TI)'; do
+      printf 'typedef int t __attribute__((%s));\n' "$at" > kattr.c
+      if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kattr.c -o kattr.o 2>&1); then bad "kernel mode: attribute $at refused" "was accepted"
+      elif grep -q "not supported" <<<"$out"; then ok "kernel mode: attribute $at refused"
+      else bad "kernel mode: attribute $at refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    done
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended

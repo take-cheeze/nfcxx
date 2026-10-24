@@ -191,6 +191,13 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   without transparent huge pages, and the call it guards names a function this configuration does not have. The
   call has no effect to keep (the body only returns C); an argument with a side effect keeps the call.
 
+- **GNU attributes that change what a declaration means** are taken or refused, never ignored as the hints and
+  diagnostics are: `mode` on an enum (QI/byte, HI, SI, DI/word/pointer: the integer type of that size, as gcc
+  gives the kernel's 1-byte trace enums) is taken; `vector_size`, `naked`, `interrupt`,
+  `no_caller_saved_registers`, `weakref`, `ifunc`, `target_clones`, `symver`, `tls_model`,
+  `scalar_storage_order`, other modes, and `mode` on anything but an enum are refused. Before, the trace enums
+  were 4 bytes.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
