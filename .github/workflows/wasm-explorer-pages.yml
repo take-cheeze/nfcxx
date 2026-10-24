@@ -1,10 +1,9 @@
 name: wasm explorer (GitHub Pages)
 
-# Builds the wasm explorer's static site (tools/wasm-explorer/build-static.cjs) and deploys it to GitHub Pages. The
-# compiler runs here, in CI: the Path B harness and the mruby tool are built as in pathb.yml, and each example is
-# compiled ahead of time in every mode and checked against its expected result, so a broken example fails this job.
-# The Rust and Go examples also need rustc (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh).
-# The page on Pages cannot compile other code (it has no server); it shows the example builds.
+# Builds the wasm explorer's static site (wasm-explorer-build.yml, which compiles and checks every example) on pushes
+# and pull requests, and deploys it to GitHub Pages from main. The page on Pages cannot compile other code (it has no
+# server); it shows the example builds. A pull request's preview on Cloudflare Pages is wasm-explorer-preview.yml,
+# started by a /preview comment.
 #
 # One-time repository setting: Settings > Pages > Build and deployment > Source: "GitHub Actions".
 on:
@@ -24,6 +23,7 @@ on:
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
       - ".github/workflows/wasm-explorer-pages.yml"
+      - ".github/workflows/wasm-explorer-build.yml"
   pull_request:
     paths:
       - "tools/wasm-explorer/**"
@@ -39,6 +39,7 @@ on:
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
       - ".github/workflows/wasm-explorer-pages.yml"
+      - ".github/workflows/wasm-explorer-build.yml"
   workflow_dispatch:
 
 permissions:
@@ -51,77 +52,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in pathb.yml
-      PATHB_JOBS: "4"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - name: Install the build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ruby rake
-
-      - name: Path B harness cache key
-        id: key
-        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the Path B harness
-        id: harness
-        uses: actions/cache@v6
-        with:
-          path: build/pathb
-          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
-
-      - name: Build the Path B harness
-        if: steps.harness.outputs.cache-hit != 'true'
-        run: scripts/setup-pathb.sh
-
-      - name: Restore the mruby tool
-        id: mruby
-        uses: actions/cache@v6
-        with:
-          path: build/mruby-tool
-          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
-
-      - name: Build the mruby interpreter
-        if: steps.mruby.outputs.cache-hit != 'true'
-        run: scripts/setup-mruby.sh
-
-      # The Rust examples: rustc's LLVM IR, which llvm-to-pathb.rb reads, changes between releases, so the version is
-      # pinned (the runner's rustup installs it).
-      - name: Install the pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.97.0 --profile minimal
-          echo "RUSTC=$(rustup which --toolchain 1.97.0 rustc)" >> "$GITHUB_ENV"
-
-      # The Go examples: TinyGo (scripts/setup-tinygo.sh, pinned) runs the Go toolchain.
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version: "1.24"
-          cache: false
-
-      - name: Restore TinyGo
-        id: tinygo
-        uses: actions/cache@v6
-        with:
-          path: build/tinygo
-          key: tinygo-${{ runner.os }}-${{ hashFiles('scripts/setup-tinygo.sh') }}
-
-      - name: Install TinyGo
-        if: steps.tinygo.outputs.cache-hit != 'true'
-        run: scripts/setup-tinygo.sh
-
-      - name: Build the static site (compiles and checks every example in every mode)
-        run: node tools/wasm-explorer/build-static.cjs --out _site
-
-      - name: Upload the site
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: _site
+    uses: ./.github/workflows/wasm-explorer-build.yml
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -139,81 +70,3 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v5
 
-  # A preview of the site on Cloudflare Pages, for each pull request (and each push): the site the build job made and
-  # checked, deployed to the branch's preview URL, which a comment on the pull request gives (one comment, updated by
-  # every run). It needs, in the repository settings:
-  #   secrets   CLOUDFLARE_API_TOKEN   (an API token with the permission Account > Cloudflare Pages > Edit)
-  #             CLOUDFLARE_ACCOUNT_ID
-  #   variable  CLOUDFLARE_PAGES_PROJECT (optional; default nfcxx-wasm-explorer; created on the first run if missing)
-  # Without the secrets (a fork's pull request has none) the job does nothing.
-  preview:
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: write
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'nfcxx-wasm-explorer' }}
-      BRANCH: ${{ github.head_ref || github.ref_name }}
-      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      WRANGLER: wrangler@4.148.0
-    steps:
-      - name: Check for the Cloudflare secrets
-        id: secrets
-        run: |
-          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID: no preview."
-          fi
-
-      - name: Download the site
-        if: steps.secrets.outputs.ok == 'true'
-        uses: actions/download-artifact@v7
-        with:
-          name: github-pages
-          path: artifact
-
-      - name: Deploy the preview
-        if: steps.secrets.outputs.ok == 'true'
-        id: deploy
-        run: |
-          mkdir site && tar -xf artifact/artifact.tar -C site
-          # the project, on the first run (an existing one makes this fail, which is fine)
-          npx --yes "$WRANGLER" pages project create "$PROJECT" --production-branch main > /dev/null 2>&1 || true
-          export WRANGLER_OUTPUT_FILE_PATH="$RUNNER_TEMP/wrangler.json"
-          npx --yes "$WRANGLER" pages deploy site --project-name "$PROJECT" --branch "$BRANCH" \
-            --commit-hash "$SHA" --commit-dirty=true
-          # the URLs, from wrangler's machine-readable output (one JSON object per line)
-          node -e '
-            const lines = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
-            const d = lines.map((l) => JSON.parse(l)).find((o) => o.type === "pages-deploy-detailed");
-            if (!d) { console.error("wrangler wrote no deployment"); process.exit(1); }
-            const out = [`url=${d.url}`, `alias=${d.alias || d.url}`].join("\n") + "\n";
-            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, out);
-            console.log(out);
-          ' "$WRANGLER_OUTPUT_FILE_PATH"
-
-      - name: Comment the preview URL on the pull request
-        if: steps.secrets.outputs.ok == 'true' && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          URL: ${{ steps.deploy.outputs.url }}
-          ALIAS: ${{ steps.deploy.outputs.alias }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          marker="<!-- wasm-explorer-preview -->"
-          body="$marker
-          **wasm explorer preview** (Cloudflare Pages): $ALIAS
-
-          This commit (\`${SHA:0:7}\`): $URL"
-          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null
-          else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null
-          fi

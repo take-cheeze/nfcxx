@@ -27,7 +27,7 @@ has no dependency beyond node (22 was used).
 | --- | --- |
 | `pipeline.cjs` | The compile: the language's front end (`pathb-dump --ir`; or rustc or TinyGo, then `llvm-to-pathb.rb`), then `pathb-wasm-emit.rb`, in a temporary directory. Options: the language, the standard and the mode. Diagnostics with line numbers. |
 | `server.cjs` | The live server: the page, `examples/`, `GET /api/health`, `POST /api/compile`. |
-| `build-static.cjs` | The static site: each example in every mode of its language, run and checked, then the page and `builds/<id>.json`. |
+| `build-static.cjs` | The static site (run by `.github/workflows/wasm-explorer-build.yml`): each example in every mode of its language, run and checked, then the page and `builds/<id>.json`. |
 | `index.html` | The page (one file, no build step). |
 | `bindings.js` | The browser bindings (see "Browser bindings"), shared by the page and the static build. |
 | `examples/` | The sources and `index.json` (id, title, file, language (default `c++`), expected `main()` result). |
@@ -128,20 +128,24 @@ The workflow builds the harness and the mruby tool as `pathb.yml` does, runs the
 without deploying), and deploys from `main`. The one-time repository setting is Settings > Pages > Source: GitHub
 Actions.
 
-**Previews on Cloudflare Pages.** The workflow's `preview` job deploys the same site, the one the build job checked, to
-Cloudflare Pages for every pull request (and every push), with `wrangler pages deploy --branch <branch>` (wrangler
-pinned, from npm). The branch's preview URL (`https://<branch>.<project>.pages.dev`) and the commit's own URL go into one
-comment on the pull request, which each run updates. The URLs are read from wrangler's machine-readable output
-(`WRANGLER_OUTPUT_FILE_PATH`), not from its log. One-time setup, in the repository's settings:
+**Previews on Cloudflare Pages.** A comment `/preview` on a pull request (alone on its first line, by someone with write
+access: the author association OWNER, MEMBER or COLLABORATOR) starts `wasm-explorer-preview.yml`. It builds the pull
+request's head with `wasm-explorer-build.yml`, the same reusable workflow that the GitHub Pages workflow uses, and
+deploys the site to Cloudflare Pages with `wrangler pages deploy --branch pr-<number>` (wrangler pinned, from npm). The
+preview is at `https://pr-<number>.<project>.pages.dev`; one comment on the pull request gives it and the commit's own
+URL, and each `/preview` updates it. The comment that asked gets reactions: eyes when the request is taken, a rocket
+when the preview is up, confused when the build or the deploy failed.
+
+The build runs the pull request's code (the compiler and the examples), so it has no secrets and only reads the
+repository; the deploy job, which sees the Cloudflare token, runs none of it: it uploads the built static files. An
+`issue_comment` workflow runs from the default branch, so `/preview` works once the workflow is on `main`. One-time
+setup, in the repository's settings (Secrets and variables > Actions):
 
 | Setting | Kind | Value |
 | --- | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | secret | a Cloudflare API token with Account > Cloudflare Pages > Edit |
 | `CLOUDFLARE_ACCOUNT_ID` | secret | the Cloudflare account's ID |
-| `CLOUDFLARE_PAGES_PROJECT` | variable (optional) | the Pages project; default `nfcxx-wasm-explorer`, created by the first run |
-
-Without the secrets the job does nothing, so a pull request from a fork (which gets no secrets) builds and checks the site
-without a preview. A push to `main` deploys the project's production branch, beside GitHub Pages.
+| `CLOUDFLARE_PAGES_PROJECT` | variable (optional) | the Pages project; default `nfcxx-wasm-explorer`, created by the first preview |
 
 ## Checks
 
