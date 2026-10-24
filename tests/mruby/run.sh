@@ -79,13 +79,17 @@ void (**retfn(int a))(void *) { return 0; }
 __attribute__((__weak__)) void (**retfn_weak(int a))(void *) { return 0; }
 extern __inline__ __attribute__((__always_inline__)) char *ext_inline(int n) { return 0; }
 static __inline__ int static_inline(int n) { return n; }
+extern __attribute__((__weak__)) void _ZTH6ref_tl(void);
+extern __inline__ char *inline_ref(int n);
 EOF
-  printf 'cmp_id:\nlits:\nretfn:\nretfn_weak:\next_inline:\nstatic_inline:\nalpha:\n\tret\nbeta:\n\tret\ngamma_decl:\nobj:\ndelta:\n\tret\n.Lx:\nnot_weak:\n  bad:\n' >"$tmp/edge.s"
+  printf 'cmp_id:\nlits:\nretfn:\nretfn_weak:\next_inline:\nstatic_inline:\nalpha:\n\tret\nbeta:\n\tret\ngamma_decl:\nobj:\ndelta:\n\tret\n.Lx:\nnot_weak:\n  bad:\n\tmovq _ZTH6ref_tl@GOTPCREL(%%rip), %%rax\n\tcall inline_ref\n' >"$tmp/edge.s"
   cp "$tmp/edge.s" "$tmp/edge.orc.s"; cp "$tmp/edge.s" "$tmp/edge.rb.s"
   "$mrb" "$oracle/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.orc.s"
   "$mrb" "$root/scripts/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.rb.s"
-  if cmp -s "$tmp/edge.orc.s" "$tmp/edge.rb.s" && [ "$(grep -c '^\.weak ' "$tmp/edge.orc.s")" -ge 3 ]; then
-    report ok "weak-symbols edge cases (nested attributes, declarations)"
+  # _ZTH6ref_tl is only referenced: a weak undefined reference. inline_ref (extern __inline__, only referenced) stays strong.
+  if cmp -s "$tmp/edge.orc.s" "$tmp/edge.rb.s" && [ "$(grep -c '^\.weak ' "$tmp/edge.orc.s")" -ge 3 ] &&
+     grep -q '^\.weak _ZTH6ref_tl$' "$tmp/edge.rb.s" && ! grep -q '^\.weak inline_ref$' "$tmp/edge.rb.s"; then
+    report ok "weak-symbols edge cases (nested attributes, declarations, a weak reference)"
   else report fail "weak-symbols edge cases differ"; diff "$tmp/edge.orc.s" "$tmp/edge.rb.s" | head -5; fi
   # Mach-O labels carry the target's "_" prefix (--sym-prefix=_, passed by qbe-cc on Darwin): .weak_definition lines name them.
   printf '_alpha:\n\tret\n_beta:\n\tret\n_delta:\n\tret\n' > "$tmp/macho.orc.s"; cp "$tmp/macho.orc.s" "$tmp/macho.rb.s"
