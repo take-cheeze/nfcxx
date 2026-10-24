@@ -513,6 +513,26 @@ class CodeGen
     return_class_send_mask(irep, index, send, state)
   end
 
+  # EXACT_ARITH: a send whose receiver is only Integer or Float gets the numeric flow's answer (`%`, `abs`, `to_i`,
+  # the bit operators; numeric_send_on_class and its gates), or nil when that answer is not a class.
+  def exact_numeric_send_mask(insn, state)
+    return nil unless exact_arith? && %w[SEND SEND0].include?(insn.op)
+
+    recv = state[insn.reg.to_i]
+    argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    # A receiver no path has reached yet (0) gives no value either, so a pool still growing is not dropped.
+    if recv == 0
+      answered = !numeric_send_on_class(NumericFlow::INT, insn.sym, argc, insn, state).anybits?(NumericFlow::OTHER)
+      return answered ? 0 : nil
+    end
+    return nil unless recv.is_a?(Integer) && recv.positive? && (recv & ~NumericFlow::NUM).zero?
+
+    mask = [NumericFlow::INT, NumericFlow::FLT].reduce(0) do |acc, bit|
+      recv.anybits?(bit) ? acc | numeric_send_on_class(bit, insn.sym, argc, insn, state) : acc
+    end
+    mask.anybits?(NumericFlow::OTHER) ? nil : mask
+  end
+
   def exact_arith?
     return @exact_arith if defined?(@exact_arith)
 
@@ -532,6 +552,9 @@ class CodeGen
     return NumericFlow::OTHER unless name
     # A removed name's body may not be the one that runs: the same refusal as bytecode_ir_call_result_classes.
     return NumericFlow::OTHER if @closed_world && bytecode_ir_name_removed?(name)
+
+    numeric = state && exact_numeric_send_mask(insn, state)
+    return numeric if numeric
 
     ruby_result = state && core_ruby_class_result(irep, index, insn, state)
     return ruby_result if ruby_result

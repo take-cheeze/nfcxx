@@ -22,12 +22,14 @@ SOURCE = <<~RUBY
     def initialize
       @count = 0
       @steps = nil
+      @slot = 0
       nil
     end
 
     def bump
       @count = @count + 1
       @steps = (@steps || 0) + 1
+      @slot = (@slot + 1) % 4
       nil
     end
 
@@ -69,6 +71,7 @@ off = pools.call(SOURCE, '0')
 
 check.call('`@count + 1`, `- 3` and `/ 2` keep an Integer pool', on.include?('CLASSIVAR Counter#@count (INT)'))
 check.call('`(@steps || 0) + 1` is Integer after nil', on.include?('CLASSIVAR Counter#@steps (INT|NIL)'))
+check.call('`(@slot + 1) % 4` keeps an Integer pool', on.include?('CLASSIVAR Counter#@slot (INT)'))
 check.call('without EXACT_ARITH the pool is dropped', off.none? { |line| line.start_with?('CLASSIVAR Counter#@count') })
 check.call('a program redefining Integer#+ keeps it dropped',
            pools.call(SOURCE + REDEFINED, '1').none? { |line| line.start_with?('CLASSIVAR Counter#@count') })
