@@ -198,7 +198,9 @@ Dir.mktmpdir('type-check-run') do |dir|
   File.write(source, <<~SOURCE)
     class TypeCheckPipeline
       def value; 1; end
-      def receiver(value); value.unknown_pipeline_method; end
+      # A block send keeps its by-name call, so the report has a row (without the block, a name nothing defines is the
+      # proven NoMethodError and holds no by-name line).
+      def receiver(value); value.unknown_pipeline_method { 1 }; end
       def element(values); values[0]; end
     end
     class TypeRbsBase
