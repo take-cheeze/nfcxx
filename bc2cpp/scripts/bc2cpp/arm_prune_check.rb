@@ -83,9 +83,14 @@ surplus = lambda do |from, minus|
 end
 removed = surplus.call(plain, pruned)
 added = surplus.call(pruned, plain)
+# The pruned jump's label, now named by nothing, goes too (drop_dead_statements).
+pruned_targets = removed.keys.filter_map { |l| l[/goto (L\d+);/, 1] }
 suite.check('stage B only removes the pruned lines and adds none',
-            added.empty? && removed.values.sum == 3 &&
-            removed.keys.all? { |l| l.include?('mrb_fixnum(r6), 1, &bc2cpp_z') || l.include?('// operands proven Fixnum') || l.match?(/goto L\d+;/) })
+            added.empty? && removed.values.sum == 3 + pruned_targets.size &&
+            removed.keys.all? do |l|
+              l.include?('mrb_fixnum(r6), 1, &bc2cpp_z') || l.include?('// operands proven Fixnum') ||
+                l.match?(/goto L\d+;/) || pruned_targets.include?(l[/\A *(L\d+):;\n\z/, 1])
+            end)
 suite.check('without the decided folds nothing is unreachable, so stage B drops nothing',
             undecided_pruned == undecided)
 

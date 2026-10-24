@@ -46,7 +46,7 @@ module ParamTrace
   BARG_RE = /\Abc2cpp_barg(\d+)\z/
   KWARG_RE = /\Abc2cpp_kwarg_([\w$]+)\z/
   KW_GIVEN_RE = /\Abc2cpp_kw_given_([\w$]+)\z/
-  REG0_RE = /\A\s*mrb_value r0 = self;/
+  REG0_RE = /\A\s*(?:\[\[maybe_unused\]\] )?mrb_value r0 = self;/
   # Left by codegen after a GETIV (codegen_insn.rb ivar_trace_marker): the owner class, the ivar and its register.
   IVAR_MARKER_RE = %r{\A\s*/\*BC2CPP_IVAR_HIT (\S+) (@\S+) r(\d+)\*/\s*\z}
   # Left after a GETCONST/GETMCNST (codegen_insn.rb const_trace_marker): the resolved owner key (`-` when unproven),

@@ -846,10 +846,12 @@ class CodeGen
     end.join
   end
 
+  # R0 stays, unused or not: it is the line ParamTrace instruments (param_trace.rb REG0_RE).
   def emit_register_initializers(nregs, arguments)
     (0...nregs).map do |reg|
-      value = reg.zero? ? 'self' : arguments[reg - 1] || 'mrb_nil_value()'
-      "  mrb_value r#{reg} = #{value};\n"
+      next "  [[maybe_unused]] mrb_value r0 = self;\n" if reg.zero?
+
+      "  mrb_value r#{reg} = #{arguments[reg - 1] || 'mrb_nil_value()'};\n"
     end.join
   end
 
