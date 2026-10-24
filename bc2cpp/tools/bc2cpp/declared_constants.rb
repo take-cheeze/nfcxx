@@ -557,13 +557,26 @@ module DeclaredConstants
       return @memo[name] if @memo.key?(name)
       return nil if visiting.include?(name) || @blocked.include?(name)
 
-      sites = @bindings[name]
+      # SELF_COPY: `X = Holder::X` stores a value some other binding of bare X already stored, so it adds nothing to
+      # the union; skipping it is what lets an alias of a same-named constant prove.
+      sites = @bindings[name].reject { |irep, idx, insn,| self_copy?(irep, idx, insn, name) }
       return nil if sites.empty?
 
       ranges = sites.map { |irep, idx, insn,| binding_value(irep, idx, insn, visiting | [name]) }
       return nil if ranges.any?(&:nil?)
 
       @memo[name] = [ranges.map(&:first).min, ranges.map(&:last).max]
+    end
+
+    # The binding stores a GETCONST/GETMCNST read of its own bare +name+ (through moves), with no jump onto either.
+    def self_copy?(irep, idx, insn, name)
+      return false if entry_site?(irep, insn) || !(src = insn.regs.last)
+
+      entries = @entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)
+      irep.walk_writers(idx - 1, src.to_s, barrier: ->(w, _cur) { entries.include?(w.addr) }, barrier_result: false,
+                                           follow_moves: true) do |w, _j, _cur|
+        (w.op == 'GETCONST' && w.const_name == name) || (w.op == 'GETMCNST' && w.mcnst_name == name)
+      end == true
     end
 
     # Linear by design: the barrier stops the walk at every jump target, and each arm of a `c ? a : b` join starts at one

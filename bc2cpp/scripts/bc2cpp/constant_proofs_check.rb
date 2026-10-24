@@ -36,6 +36,7 @@ declared = lambda do |source, sig|
       errors: result.diagnostics.select { |d| d[:severity] == 'error' }.map { |d| d[:message] },
       report: result.report.join("\n"),
       containers: result.containers,
+      integer_names: result.integer_names,
       rows_sum: rows.key?('X'),
       ireps: ireps,
       sites: sites
@@ -158,6 +159,19 @@ puts '== Fixnum evaluation on a join (kept refused)'
 big = declared.call("c = Time.now.year > 0\nn = Time.now.year\nBIG = (c ? 10000000000 : 1) + n\n", "BIG: Integer\n")
 check.call('BIG: Integer is refused for a ternary whose arm is outside the Fixnum margin',
            big[:errors].any? { |m| m.include?('the assigned value is not a proven Fixnum expression') })
+
+puts '== an alias of a same-named constant (SELF_COPY)'
+# `X = A::X` copies a value another binding of bare X stored, so the union over the other bindings still bounds X.
+alias_ok = declared.call("module A; X = 16; end\nmodule B; X = A::X; end\n", "module A\n  X: Integer\nend\n")
+check.call('A::X: Integer proves through B::X = A::X', alias_ok[:errors].empty? &&
+           alias_ok[:integer_names].include?('X'))
+alias_bad = declared.call("module A; X = 16; end\nmodule B; X = A::X; end\nmodule C; X = 'a'; end\n",
+                          "module A\n  X: Integer\nend\n")
+check.call('a non-Integer X elsewhere still withholds the fact', alias_bad[:errors].empty? &&
+           !alias_bad[:integer_names].include?('X'))
+only_copy = declared.call("module A; X = 16; end\nmodule B; X = A::X; end\n", "module B\n  X: Integer\nend\n")
+check.call('B::X: Integer (the copy itself) proves too', only_copy[:errors].empty? &&
+           only_copy[:integer_names].include?('X'))
 
 
 # [op, name, key] of every GETCONST/GETMCNST read of the fixture, in instruction order of each irep.
