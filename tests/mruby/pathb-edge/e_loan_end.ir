@@ -1,0 +1,4 @@
+(ir-module "bad_loan_end" (layout (pointer 8) (int 4)))
+(function "main" (ret int) (params)
+  (loan-end a)
+  (return (const int 0)))

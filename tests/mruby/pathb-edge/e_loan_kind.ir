@@ -1,0 +1,5 @@
+(ir-module "bad_loan" (layout (pointer 8) (int 4)))
+(function "main" (ret int) (params)
+  (slot "x" int 4 4)
+  (let %0 (ptr int) (borrow (ptr int) "a" invalid $"x"))
+  (return (const int 0)))

@@ -1,0 +1,7 @@
+(ir-module "loans" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4)
+(decl $"x" val)(let %0 (ptr int) (borrow (ptr int) "a" shared $"x"))
+(loan-end "a")
+(return (const int 0))
+)
