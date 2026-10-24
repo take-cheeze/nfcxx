@@ -218,8 +218,9 @@ particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cp
   aarch64).
 
 - **GNU attributes that change what a declaration means** are taken or refused, never ignored as the hints and
-  diagnostics are: `mode` on an enum (QI/byte, HI, SI, DI/word/pointer: the integer type of that size, as gcc
-  gives the kernel's 1-byte trace enums) is taken; `vector_size`, `naked`, `interrupt`,
+  diagnostics are: `mode` (QI/byte, HI, SI, DI/word/pointer) on an enum (the integer type of that size, as gcc
+  gives the kernel's 1-byte trace enums) and on a declaration of an integer type (glibc's `register_t`, mode(word):
+  the integer type of that size and signedness) is taken; `vector_size`, `naked`, `interrupt`,
   `no_caller_saved_registers`, `weakref`, `ifunc`, `target_clones`, `symver`, `tls_model`,
   `scalar_storage_order`, other modes, and `mode` on anything but an enum are refused. Before, the trace enums
   were 4 bytes.
@@ -231,6 +232,10 @@ particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cp
   (docs/notes/inline-asm.md). `error()` jumps to `errorjmp` when it is set (token.c).
 
 ## Known gaps (still refused)
+
+- Not refused, a pipeline gap: in qbe-cc's C-input mode (hand-written C, `-undef` preprocessing without `__GNUC__`),
+  glibc's `cdefs.h` defines `__attribute__` away, so every attribute in a file that includes glibc headers is
+  dropped before cproc sees it (the kernel mode and the mrustc pipeline keep `__GNUC__` and are not affected).
 
 - SSE operands; an `"i"` operand only inlining makes constant from a variable argument.
 - Bit-fields in a packed struct where packing would move a member, and under a leading `packed`.
