@@ -40,7 +40,7 @@ struct image_module {
   std::string prefix;
   std::vector<uint8_t> il;
   uint32_t stack_bytes = 0;
-  uint32_t subgroup_size = 0;    // the sub-group size of the module's kernels (manifest line G), 0 when none uses sub-groups
+  uint32_t subgroup_size = 0;    // manifest line G, of an older emitter: the sub-group size of all the module's kernels
   uint64_t static_size = 0, statics = 0;
   uint64_t static_local = 0;     // the work-group static bytes per group (manifest L)
   std::string static_hex;
@@ -51,6 +51,7 @@ struct image_kernel {
   std::string entry;
   uint32_t closure_size;
   size_t module;                 // the index of its image in image_set::modules
+  uint32_t subgroup_size;        // the kernel's sub-group size (the k line's fourth field), 0 when it uses no sub-group shuffle
 };
 
 class image_set {
@@ -110,8 +111,9 @@ class image_set {
       std::string s(line);
       while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
       if (s.size() >= 2 && s[0] == 'k' && s.find('\t') != std::string::npos) {
-        size_t a = s.find('\t'), b = s.find('\t', a + 1);
-        ks.push_back({s.substr(a + 1, b - a - 1), image_kernel{s.substr(0, a), (uint32_t)std::strtoul(s.c_str() + b + 1, nullptr, 10), index}});
+        size_t a = s.find('\t'), b = s.find('\t', a + 1), c = s.find('\t', b + 1);
+        uint32_t sg = c == std::string::npos ? 0 : (uint32_t)std::strtoul(s.c_str() + c + 1, nullptr, 10);
+        ks.push_back({s.substr(a + 1, b - a - 1), image_kernel{s.substr(0, a), (uint32_t)std::strtoul(s.c_str() + b + 1, nullptr, 10), index, sg}});
       } else if (s.size() > 2 && s[0] == 'T' && s[1] == '\t') {
         m.stack_bytes = (uint32_t)std::strtoul(s.c_str() + 2, nullptr, 10);
       } else if (s.size() > 2 && s[0] == 'G' && s[1] == '\t') {
@@ -128,6 +130,9 @@ class image_set {
       }
     }
     std::fclose(f);
+    // an older manifest gives the sub-group size once (G) for every kernel of the module
+    if (m.subgroup_size)
+      for (auto &k : ks) if (!k.second.subgroup_size) k.second.subgroup_size = m.subgroup_size;
     // a TU without kernels has an empty module: nothing to read or place
     if (!ks.empty()) {
       std::string il_path = prefix + ".cl.spv";
