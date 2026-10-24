@@ -76,4 +76,3 @@ int main() {
   printf("%d failures\n", bad);
   return bad;
 }
-// MACOS-XFAIL-qbe: the QBE path rejects GCC's packed attribute in EDG's C output (macOS SDK header)
