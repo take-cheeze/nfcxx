@@ -122,19 +122,25 @@ module BytecodeIR
     # from literal writers only, or nil. No argument, signature, inferred or resolver fact enters: those bound a
     # class nominally, and these callers drop their class test. Integers come from LOADI* alone (a pool integer
     # can overflow a 32-bit mrb_int). +self_class+ is the caller's own proof of R0 and LOADSELF.
-    def exact_at(index, reg, self_class: nil, max_states: DATAFLOW_MAX_STATES)
+    # +refusal+, when a Hash, receives `:cause`, the first reason the proof failed; the answer does not depend on it.
+    def exact_at(index, reg, self_class: nil, max_states: DATAFLOW_MAX_STATES, refusal: nil)
       @exact_cache ||= {}
       key = [index, reg.to_s.dup.freeze, self_class, max_states]
-      return @exact_cache[key] if @exact_cache.key?(key)
+      if (cached = @exact_cache[key])
+        unknown(refusal, cached[1]) if cached[1]
+        return cached[0]
+      end
 
-      result = compute_exact(index, reg.to_s, self_class, max_states)
-      @exact_cache[key] = result if @exact_cache.size < QUERY_CACHE_CAP
+      cause = {}
+      result = compute_exact(index, reg.to_s, self_class, max_states, cause)
+      @exact_cache[key] = [result, cause[:cause]].freeze if @exact_cache.size < QUERY_CACHE_CAP
+      unknown(refusal, cause[:cause]) if cause[:cause]
       result
     end
 
     private
 
-    def compute_exact(index, reg, self_class, max_states)
+    def compute_exact(index, reg, self_class, max_states, refusal)
       classes = Set.new
       values = Set.new
       required = Set.new
@@ -145,11 +151,13 @@ module BytecodeIR
         next unless seen.add?([at, register])
 
         # Inside a protected range the handler edges are followed instead of refused (RECORD_HASH_PROOF's mode).
+        first_refusal = {}
         definitions = [false, true].lazy.filter_map do |through|
           BytecodeIR.reaching_definitions(@irep, at, register, shared: true, origin_transfers: true, through_handlers: through,
-                                                                max_states: max_states)
+                                                                max_states: max_states, refusal: through ? nil : first_refusal)
         end.first
-        return nil unless definitions && !definitions.empty?
+        return unknown(refusal, first_refusal[:cause] || :unresolved) unless definitions
+        return unknown(refusal, :no_definition) if definitions.empty?
 
         definitions.each do |definition|
           insn = definition.entry? ? nil : ir_program.source_at(definition.index)
@@ -159,13 +167,14 @@ module BytecodeIR
             next
           end
           klass, value = exact_definition(definition, insn, self_class)
-          return nil unless klass
+          return unknown(refusal, exact_refusal(definition, insn, self_class)) unless klass
 
           classes << klass
           values << value
         end
       end
-      return nil unless classes.size == 1 && required.subset?(classes)
+      return unknown(refusal, :class_join) unless classes.size == 1
+      return unknown(refusal, :container_mismatch) unless required.subset?(classes)
 
       klass = classes.first
       Exact.new(klass, klass == :Integer && values.size == 1 ? values.first : nil).freeze
@@ -186,6 +195,16 @@ module BytecodeIR
 
       klass = EXACT_LITERAL_CLASSES[insn.op]
       klass && [klass]
+    end
+
+    # Why exact_definition gave no class for +definition+, for exact_at's refusal.
+    def exact_refusal(definition, insn, self_class)
+      return definition.reg == '0' && !self_class ? :self_unknown : :entry_value unless insn
+      return "entry:#{definition.built}" if definition.built
+      return :side_write unless insn.reg == definition.reg
+      return :self_unknown if insn.op == 'LOADSELF'
+
+      "producer:#{insn.op}"
     end
 
     def integer_literal(insn)
