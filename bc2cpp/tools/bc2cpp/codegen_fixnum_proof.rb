@@ -410,7 +410,10 @@ class CodeGen
   #   4. N starts with a letter or underscore (operator names cannot be
   #      tokenized for rule 3).
   #   5. N is not `initialize` (CONSTRUCTOR_POOLS enumerates its sites by class instead).
-  #   6. pure_mandatory_arity? on M, and 1 <= k <= mand.
+  #   6. pure_mandatory_arity? on M, and 1 <= k <= mand. OPTIONAL_ARG_POOLS: an M whose other parameters are all
+  #      optional positionals is admitted too, for its mandatory k only, with sites passing mand..mand+opt; with no
+  #      post parameter OP_ENTER binds R[1..mand] from the first mand arguments whatever the count. The fixnum proof
+  #      keeps the pure shape (compute_entry_arg_fixnum).
   #   7. N is not poisoned: no LOADSYM :N, no other DEF/SDEF/TDEF :N, no
   #      SEND0/SSEND0 :N (a zero-argument call to a mand >= 1 method means this
   #      model is wrong), no `:N` in any other opcode, and N is not a name a
@@ -550,6 +553,13 @@ class CodeGen
     !@entry_arg_probe_hooks && DynamicNames.probe_only?(irep, idx, insn)
   end
 
+  # Rule 6's parameter shape: mandatory positionals, plus optional ones unless BC2CPP_OPTIONAL_ARG_POOLS=0.
+  def entry_arg_shape?(irep)
+    return pure_mandatory_arity?(irep) if ENV['BC2CPP_OPTIONAL_ARG_POOLS'] == '0'
+
+    optional_positionals_only?(irep)
+  end
+
   # ENTRY_ARG_CALLSITE_PROOF admission rules 1-8 (see the header): (irep label,
   # argument register) -> [sites, k] for every argument that could be proven from
   # its call sites. Shared with NUMERIC_ENTRY_ARG_PROOF, which asks a weaker
@@ -573,14 +583,15 @@ class CodeGen
       next unless d.irep
 
       irep = @ireps[d.irep]
-      next unless irep && pure_mandatory_arity?(irep)  # rule 6
+      next unless irep && entry_arg_shape?(irep)       # rule 6
 
       mand = mandatory_arity(irep)
       next if mand.zero?
 
       here = sites[name]
       next if here.empty?                              # rule 8
-      next unless here.all? { |(_ir, _i, _a, argc, _own)| argc == mand }
+      accepted = mand..(mand + optional_arity(irep))
+      next unless here.all? { |(_ir, _i, _a, argc, _own)| accepted.cover?(argc) }
 
       (1..mand).each { |k| cand[[d.irep, k]] = [here, k] }
     end
@@ -595,7 +606,7 @@ class CodeGen
     # A missing scan is a missing poison source: prove nothing.
     return @entry_arg_fixnum unless @foreign_method_names && @outside_tokens
 
-    cand = entry_arg_candidates
+    cand = entry_arg_candidates.select { |(label, _k), _| pure_mandatory_arity?(@ireps[label]) }
     @entry_arg_fixnum = Set.new(cand.keys)
     loop do
       dropped = cand.keys.select do |key|

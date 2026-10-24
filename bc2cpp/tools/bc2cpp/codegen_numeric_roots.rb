@@ -149,7 +149,7 @@ class CodeGen
     return 'poisoned' if poisoned.include?(name)
     return 'dynamic_name' if numeric_dynamically_named?(name)
     return 'no_irep' unless d.irep
-    return 'arity' unless pure_mandatory_arity?(@ireps[d.irep])
+    return 'arity' unless entry_arg_shape?(@ireps[d.irep])
     return 'nosites' if sites[name].empty?
 
     'site_argc_mismatch'
