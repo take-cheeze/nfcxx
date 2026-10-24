@@ -165,7 +165,7 @@ class CodeGen
 
   # File-scope definition when a compiled entry calls the helper; '' otherwise.
   def emit_eqq_helper(codes)
-    eqq_helper_site_count(codes).zero? ? '' : eqq_helper_code
+    eqq_helper_site_count(codes).zero? ? '' : helper_owner_calls(eqq_helper_code)
   end
 
   def eqq_helper_site_count(codes)
