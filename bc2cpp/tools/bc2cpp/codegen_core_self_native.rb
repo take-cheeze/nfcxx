@@ -261,4 +261,3 @@ module CoreSelfNative
 end
 
 CodeGen.prepend(CoreSelfNative)
-
