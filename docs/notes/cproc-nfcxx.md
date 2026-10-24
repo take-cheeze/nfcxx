@@ -179,8 +179,12 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 
 - **`#pragma` under `-G`**: GNU C written by hand must not lose a pragma that changes what the program means, as
   cproc's reading for EDG-made C (every pragma ignored) would. `GCC visibility push/pop` is honoured (the
-  visibility of the external declarations that follow, `visibility` attributes aside), diagnostics and hints
-  (`GCC diagnostic`, `once`, `STDC`, `GCC unroll`, ...) are ignored, and any other (`pack`, `weak`, ...) is refused.
+  visibility of the external declarations that follow, `visibility` attributes aside), and so is `pack` --
+  `pack(N)`, `pack()`, `pack(push[, N])`, `pack(pop)`: a struct member defined under it gets at most N's
+  alignment (the kernel's ACPI tables are laid out under `pack(1)`; a bit-field or an `aligned` member it would
+  limit is refused). Diagnostics and hints (`GCC diagnostic`, `once`, `STDC`, `GCC unroll`, ...) are ignored, and
+  any other pragma (`weak`, `redefine_extname`, ...) is refused. Before, 31 kernel files that include the ACPI
+  headers were compiled with those tables laid out as if there were no pragma.
 
 - **Calls of a function whose body is `{ return C; }`** (C an integer constant) are C when the arguments have no
   side effects: gcc inlines such a function and folds what depends on it -- the kernel's `pmd_trans_huge()` is 0

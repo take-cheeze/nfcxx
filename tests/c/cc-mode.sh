@@ -432,15 +432,15 @@ EOC
     then ok "kernel mode: -fno-asynchronous-unwind-tables honoured"
     else bad "kernel mode: -fno-asynchronous-unwind-tables honoured" "$(readelf -SW kunw.o 2>&1 | grep -c eh_frame) .eh_frame"; fi
     # #pragma GCC visibility push(hidden) (the kernel's compressed boot code, -include hidden.h) as gcc; a pragma that
-    # could change what the program means (#pragma pack) is refused
+    # could change what the program means and that cproc does not take (#pragma weak) is refused
     printf '#pragma GCC diagnostic push\n#pragma GCC visibility push(hidden)\nint cpu;\nint error(void) { return cpu; }\n#pragma GCC visibility pop\nint visible(void) { return 1; }\n' > kvis.c
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kvis.c -o kvis.o 2>/dev/null && objdump -t kvis.o | grep -q '.hidden error' &&
        objdump -t kvis.o | grep -q '.hidden cpu' && ! objdump -t kvis.o | grep -q '.hidden visible'; then ok "kernel mode: #pragma GCC visibility"
     else bad "kernel mode: #pragma GCC visibility" "$(objdump -t kvis.o 2>&1 | tail -4 | tr '\n' ' ')"; fi
-    printf '#pragma pack(1)\nstruct s { char c; int i; } v;\n' > kpack.c
-    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kpack.c -o kpack.o 2>&1); then bad "kernel mode: #pragma pack refused" "was accepted"
-    elif grep -q "unsupported #pragma pack" <<<"$out"; then ok "kernel mode: #pragma pack refused"
-    else bad "kernel mode: #pragma pack refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    printf 'int f(void);\n#pragma weak f\nint g(void) { return f ? f() : 0; }\n' > kpack.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kpack.c -o kpack.o 2>&1); then bad "kernel mode: #pragma weak refused" "was accepted"
+    elif grep -q "unsupported #pragma weak" <<<"$out"; then ok "kernel mode: #pragma weak refused"
+    else bad "kernel mode: #pragma weak refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     # a call of a function whose body is { return C; } is C when its arguments have no side effects, as gcc's
     # inlined and folded call (it links without copy_huge_pmd, which nothing defines); with a side effect it runs
     cat > kconst.c <<'EOC'

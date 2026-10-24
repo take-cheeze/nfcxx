@@ -319,7 +319,7 @@
  };
  
  struct switchcases {
-@@ -522,21 +633,43 @@
+@@ -522,21 +633,44 @@
  	struct array *asanopen;
  };
  
@@ -339,6 +339,7 @@
 +/* cproc -G, GNU cleanup semantics (qbe.c): the cleanup of a block-scope object runs when it leaves its scope */
 +extern bool gnucleanup;
 +extern const char *pragmavisibility;   /* #pragma GCC visibility push (pp.c) */
++extern int pragmapack;   /* #pragma pack(N) (pp.c): the most alignment of a struct member, 0 for none */
 +size_t funccleanmark(struct func *);
 +void funccleanleave(struct func *, size_t);   /* the cleanups of the objects above the mark, innermost first */
 +void funccleanpop(struct func *, size_t);     /* and they are no longer live */
@@ -364,7 +365,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +679,13 @@
+@@ -546,6 +680,13 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -380,7 +381,7 @@
  void emitfunc(struct func *, bool);
 --- a/decl.c
 +++ b/decl.c
-@@ -62,8 +62,23 @@
+@@ -62,8 +62,24 @@
  	struct member **last;
  	unsigned bits;  /* number of bits remaining in the last byte */
  	bool pack;
@@ -390,6 +391,7 @@
 +	unsigned long long packbits;
 +	bool packmoves;
 +	bool fam;   /* a flexible array member was added: no member may follow it */
++	int pragmapack;   /* #pragma pack(N) when the struct was defined: the most alignment of a member (0: none) */
  };
  
 +struct func *curfunc;
@@ -404,7 +406,7 @@
  struct decl *
  mkdecl(char *name, enum declkind k, struct type *t, enum typequal tq, enum linkage linkage)
  {
-@@ -169,6 +184,7 @@
+@@ -169,6 +185,7 @@
  	struct attr a;
  	enum attrkind allowedattr;
  	struct structbuilder b;
@@ -412,7 +414,7 @@
  	unsigned long long value, max, min;
  	bool sign;
  	int i;
-@@ -177,7 +193,7 @@
+@@ -177,7 +194,7 @@
  	switch (tok.kind) {
  	case TSTRUCT: kind = TYPESTRUCT, allowedattr |= ATTRPACKED; break;
  	case TUNION:  kind = TYPEUNION, allowedattr |= ATTRPACKED; break;
@@ -421,7 +423,7 @@
  	default: fatal("internal error: unknown tag kind");
  	}
  	next();
-@@ -187,7 +203,7 @@
+@@ -187,7 +204,7 @@
  	tag = 0;
  	t = NULL;
  	et = NULL;
@@ -430,7 +432,7 @@
  		tag = tokenstr(tok.kind);
  		next();
  	}
-@@ -227,7 +243,14 @@
+@@ -227,7 +244,15 @@
  		b.type = t;
  		b.last = &t->u.structunion.members;
  		b.bits = 0;
@@ -443,10 +445,11 @@
 +		b.packbits = 0;
 +		b.packmoves = false;
 +		b.fam = false;
++		b.pragmapack = pragmapack;
  		/* GNU extension, accepted by gcc in C: an empty body is size 0 with alignment 1.
  		 * EDG emits `struct X {}` for empty C++ classes. */
  		while (tok.kind != TRBRACE)
-@@ -242,12 +265,19 @@
+@@ -242,12 +267,19 @@
  			trail.kind = 0;
  			trail.align = 0;
  			trail.section = NULL;
@@ -469,7 +472,7 @@
  		break;
  	case TYPEENUM:
  		enumconsts = NULL;
-@@ -263,7 +293,7 @@
+@@ -263,7 +295,7 @@
  		}
  		max = 0;
  		min = 0;
@@ -478,7 +481,7 @@
  			name = tokenstr(tok.kind);
  			next();
  			attr(NULL, 0);
-@@ -308,6 +338,30 @@
+@@ -308,6 +340,30 @@
  				break;
  		}
  		expect(TRBRACE, "to close enum specifier");
@@ -509,7 +512,7 @@
  		if (!t->base) {
  			if (min <= 0x80000000 && max <= 0x7fffffff) {
  				t->base = min ? &typeint : &typeuint;
-@@ -487,12 +541,18 @@
+@@ -487,12 +543,18 @@
  			expect(TRPAREN, "to close 'alignas' specifier");
  			break;
  
@@ -531,7 +534,7 @@
  				goto done;
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d || d->kind != DECLTYPE)
-@@ -603,7 +663,15 @@
+@@ -603,7 +665,15 @@
  	enum typequal tq;
  	int allowedattr;
  
@@ -548,7 +551,7 @@
  		attr(NULL, 0);
  		tq = QUALNONE;
  		while (typequal(&tq))
-@@ -613,7 +681,12 @@
+@@ -613,7 +683,12 @@
  	}
  	if (name)
  		*name = NULL;
@@ -562,7 +565,7 @@
  	ptr = result->next;
  	switch (tok.kind) {
  	case TLPAREN:
-@@ -622,9 +695,10 @@
+@@ -622,9 +697,10 @@
  			switch (tok.kind) {
  			case TMUL:
  			case TLPAREN:
@@ -574,7 +577,7 @@
  					break;
  				goto func;
  			}
-@@ -634,7 +708,7 @@
+@@ -634,7 +710,7 @@
  		allowedattr = -1;
  		break;
  	default:
@@ -583,7 +586,7 @@
  			if (!name)
  				error(&tok.loc, "identifier not allowed in abstract declarator");
  			*name = tokenstr(tok.kind);
-@@ -656,6 +730,8 @@
+@@ -656,6 +732,8 @@
  		func:
  			t = mktype(TYPEFUNC, 0);
  			t->qual = QUALNONE;
@@ -592,7 +595,7 @@
  			t->u.func.isvararg = false;
  			t->u.func.params = NULL;
  			t->u.func.nparam = 0;
-@@ -711,20 +787,21 @@
+@@ -711,20 +789,21 @@
  				expect(TRBRACK, "after array length");
  			}
  			listinsert(ptr->prev, &t->link);
@@ -623,7 +626,7 @@
  			break;
  		default:
  			return;
-@@ -842,12 +919,14 @@
+@@ -842,12 +921,14 @@
  	struct member *m;
  	size_t end;
  
@@ -639,7 +642,7 @@
  	}
  	if (mt.type->prop & PROPFLEX) {
  		/*
-@@ -861,11 +940,14 @@
+@@ -861,11 +942,14 @@
  	if (mt.type->prop & PROPVM)
  		error(&tok.loc, "struct member '%s' has variably modified type", name);
  	assert(mt.type->align > 0);
@@ -654,13 +657,23 @@
  		m->next = NULL;
  		*b->last = m;
  		b->last = &m->next;
-@@ -876,13 +958,19 @@
+@@ -875,14 +959,29 @@
+ 	if (width == -1) {
  		m->bits.before = 0;
  		m->bits.after = 0;
- 		if (align < mt.type->align) {
--			if (align)
+-		if (align < mt.type->align) {
++		bool packlimited = false;
++
++		if (b->pragmapack && (align ? align : mt.type->align) > b->pragmapack) {
++			/* #pragma pack(N): the member's alignment is at most N, its type's or an aligned attribute's */
+ 			if (align)
 -				error(&tok.loc, "specified alignment of struct member '%s' is less strict than is required by type", name);
 -			align = b->pack ? 1 : mt.type->align;
++				error(&tok.loc, "an aligned attribute on member '%s' under #pragma pack is not supported", name);
++			align = b->pragmapack;
++			packlimited = true;
++		}
++		if (align < mt.type->align && !packlimited) {
 +			/* in a packed struct (or a packed member) an explicit alignment below the type's is what was asked for;
 +			 * otherwise gcc ignores it (aligned on a member only raises the alignment: the kernel's
 +			 * compat_group_req has struct __kernel_sockaddr_storage gr_group __aligned(4)) */
@@ -677,7 +690,16 @@
  		} else {
  			m->offset = 0;
  			if (t->size < mt.type->size)
-@@ -909,6 +997,10 @@
+@@ -896,6 +995,8 @@
+ 			error(&tok.loc, "alignment specified for bit-field '%s'", name);
+ 		if (b->pack)
+ 			error(&tok.loc, "bit-field '%s' in packed struct is not supported", name);
++		if (b->pragmapack && mt.type->align > b->pragmapack)
++			error(&tok.loc, "bit-field '%s' under #pragma pack(%d) is not supported", name, b->pragmapack);
+ 		if (!width && name)
+ 			error(&tok.loc, "bit-field '%s' with zero width must not have declarator", name);
+ 		if (width > mt.type->u.arith.width)
+@@ -909,6 +1010,10 @@
  				t->size = end;
  				b->bits = 0;
  			}
@@ -688,7 +710,7 @@
  			if (m) {
  				m->offset = ALIGNDOWN(t->size - !!b->bits, mt.type->size);
  				m->bits.before = (t->size - m->offset) * 8 - b->bits;
-@@ -928,6 +1020,108 @@
+@@ -928,6 +1033,108 @@
  		t->align = align;
  }
  
@@ -797,7 +819,7 @@
  static bool
  staticassert(struct scope *s)
  {
-@@ -957,12 +1151,15 @@
+@@ -957,12 +1164,15 @@
  	struct qualtype base, mt;
  	char *name;
  	unsigned long long width;
@@ -814,7 +836,7 @@
  	if (!base.type)
  		error(&tok.loc, "no type in struct member declaration");
  	if (tok.kind == TSEMICOLON) {
-@@ -977,9 +1174,15 @@
+@@ -977,9 +1187,15 @@
  			width = intconstexpr(s, false);
  			addmember(b, base, NULL, 0, width);
  		} else {
@@ -830,7 +852,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1265,41 @@
+@@ -1062,6 +1278,41 @@
  	return d;
  }
  
@@ -872,7 +894,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1308,7 @@
+@@ -1070,7 +1321,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -881,7 +903,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,7 +1326,11 @@
+@@ -1088,7 +1339,11 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -893,7 +915,7 @@
  	struct decl *d, *prior;
  	enum declkind kind;
  	struct scope *funcscope;
-@@ -1096,10 +1338,31 @@
+@@ -1096,10 +1351,31 @@
  
  	if (staticassert(s))
  		return true;
@@ -925,7 +947,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1372,18 @@
+@@ -1109,16 +1385,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -947,7 +969,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1400,36 @@
+@@ -1135,6 +1413,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -984,7 +1006,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1439,32 @@
+@@ -1144,10 +1452,32 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -1019,7 +1041,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,9 +1474,20 @@
+@@ -1157,9 +1487,20 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1040,7 +1062,7 @@
  			declcleanup = NULL;
  			if (d->u.obj.cleanup && s == &filescope)
  				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
-@@ -1176,11 +1504,23 @@
+@@ -1176,11 +1517,23 @@
  				funcexpr(f, base.expr);
  			init = NULL;
  			hasinit = false;
@@ -1064,7 +1086,7 @@
  				init = parseinit(s, d->type);
  				hasinit = true;
  			} else if (sc & SCEXTERN) {
-@@ -1201,8 +1541,14 @@
+@@ -1201,8 +1554,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1080,7 +1102,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1559,43 @@
+@@ -1213,12 +1572,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1125,7 +1147,7 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1226,6 +1603,10 @@
+@@ -1226,6 +1616,10 @@
  			} else if (funcscope) {
  				delscope(funcscope);
  			}
@@ -1136,7 +1158,7 @@
  			break;
  		}
  		if (consume(TSEMICOLON))
-@@ -1268,3 +1649,127 @@
+@@ -1268,3 +1662,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }
@@ -2532,7 +2554,7 @@
  }
 --- a/pp.c
 +++ b/pp.c
-@@ -300,6 +300,68 @@
+@@ -300,6 +300,97 @@
  	scan(&tok);
  }
  
@@ -2541,6 +2563,9 @@
 +const char *pragmavisibility;
 +static const char *visstack[16];
 +static int visdepth;
++/* #pragma pack: the most alignment of the members of the structs defined while it holds (0: no limit) */
++int pragmapack;
++static int packstack[16], packdepth;
 +
 +/*
 +A #pragma. EDG-made C keeps cproc's reading (every pragma ignored). Under -G, GNU C written by hand, an ignored pragma
@@ -2550,17 +2575,17 @@
 +static void
 +pragma(void)
 +{
-+	char words[4][32] = {{0}};
++	char words[16][32] = {{0}};
 +	int n = 0;
 +
 +	next();   /* past "pragma" */
 +	for (; tok.kind != TNEWLINE && tok.kind != TEOF; next()) {
 +		const char *w = tok.lit ? tok.lit : tokenstr(tok.kind);
 +
-+		if (n < 4 && w && (n == 0 || tok.kind != TLPAREN)) {
-+			snprintf(words[n], sizeof words[n], "%s", w);
-+			++n;
-+		}
++		if (tok.kind == TLPAREN || tok.kind == TRPAREN || tok.kind == TCOMMA || !w)
++			continue;
++		if (n < 16)
++			snprintf(words[n++], sizeof words[0], "%s", w);
 +	}
 +	if (!gnucleanup)
 +		return;
@@ -2588,6 +2613,32 @@
 +		}
 +		return;
 +	}
++	if (strcmp(words[0], "pack") == 0) {
++		/* pack(N), pack(), pack(push[, N]), pack(pop): the most alignment a struct member defined after it gets
++		 * (decl.c addmember); the kernel's ACPI tables are laid out under pack(1) */
++		int i = 1;
++
++		if (strcmp(words[i], "push") == 0) {
++			if (packdepth == 16)
++				error(&tok.loc, "#pragma pack nested too deeply");
++			packstack[packdepth++] = pragmapack;
++			++i;
++		} else if (strcmp(words[i], "pop") == 0) {
++			if (!packdepth)
++				error(&tok.loc, "#pragma pack(pop) without a push");
++			pragmapack = packstack[--packdepth];
++			return;
++		}
++		if (!*words[i]) {
++			if (i == 1)
++				pragmapack = 0;   /* pack(): the default */
++			return;
++		}
++		pragmapack = atoi(words[i]);
++		if (pragmapack != 1 && pragmapack != 2 && pragmapack != 4 && pragmapack != 8 && pragmapack != 16)
++			error(&tok.loc, "#pragma pack(%s): the alignment must be 1, 2, 4, 8 or 16", words[i]);
++		return;
++	}
 +	if (strcmp(words[0], "once") == 0 || strcmp(words[0], "STDC") == 0 ||
 +	    strcmp(words[0], "GCC") == 0 && (strcmp(words[1], "diagnostic") == 0 || strcmp(words[1], "system_header") == 0 ||
 +	     strcmp(words[1], "poison") == 0 || strcmp(words[1], "unroll") == 0 || strcmp(words[1], "ivdep") == 0 ||
@@ -2601,7 +2652,7 @@
  static void
  directive(void)
  {
-@@ -380,8 +442,7 @@
+@@ -380,8 +471,7 @@
  			exit(1);
  		break;
  	case TPRAGMA:
@@ -2611,7 +2662,7 @@
  		break;
  	default:
  		error(&tok.loc, "invalid preprocessor directive #%s", tokenstr(tok.kind));
-@@ -407,6 +468,14 @@
+@@ -407,6 +497,14 @@
  	}
  }
  
@@ -2626,7 +2677,7 @@
  static struct token *
  rawnext(void)
  {
-@@ -562,15 +631,22 @@
+@@ -562,15 +660,22 @@
  {
  	struct token *t;
  
@@ -2651,7 +2702,7 @@
  	case ALIAS__INLINE:
  	case ALIAS__INLINE__:     tok.kind = TINLINE;        break;
  	case ALIAS__SIGNED:
-@@ -581,8 +657,34 @@
+@@ -581,8 +686,34 @@
  	case ALIAS__TYPEOF:
  	case ALIAS__TYPEOF__:     tok.kind = TTYPEOF;        break;
  	case ALIAS__VOLATILE__:   tok.kind = TVOLATILE;      break;
@@ -2686,7 +2737,7 @@
  }
  
  bool
-@@ -597,6 +699,13 @@
+@@ -597,6 +728,13 @@
  		next();
  		return true;
  	}
