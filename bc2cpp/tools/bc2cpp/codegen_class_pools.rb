@@ -147,7 +147,7 @@ class CodeGen
     key = const_group_key(insn)
     pooled = key && @class_const_pools[key]
     return pooled if pooled
-    return NumericFlow::INT if @integer_constants&.include?(name)
+    return NumericFlow::INT if integer_constant_read?(insn)
 
     # The IR's whole-program class of a constant with one container class (CodeGen.constant_value_classes).
     value_class = self.class.constant_value_classes&.[](name)

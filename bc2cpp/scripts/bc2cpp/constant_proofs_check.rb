@@ -36,6 +36,8 @@ declared = lambda do |source, sig|
       errors: result.diagnostics.select { |d| d[:severity] == 'error' }.map { |d| d[:message] },
       report: result.report.join("\n"),
       containers: result.containers,
+      integer_names: result.integer_names,
+      integer_keys: result.integer_keys,
       rows_sum: rows.key?('X'),
       ireps: ireps,
       sites: sites
@@ -159,6 +161,19 @@ big = declared.call("c = Time.now.year > 0\nn = Time.now.year\nBIG = (c ? 100000
 check.call('BIG: Integer is refused for a ternary whose arm is outside the Fixnum margin',
            big[:errors].any? { |m| m.include?('the assigned value is not a proven Fixnum expression') })
 
+puts '== an alias of a same-named constant (SELF_COPY)'
+# `X = A::X` copies a value another binding of bare X stored, so the union over the other bindings still bounds X.
+alias_ok = declared.call("module A; X = 16; end\nmodule B; X = A::X; end\n", "module A\n  X: Integer\nend\n")
+check.call('A::X: Integer proves through B::X = A::X', alias_ok[:errors].empty? &&
+           alias_ok[:integer_names].include?('X'))
+alias_bad = declared.call("module A; X = 16; end\nmodule B; X = A::X; end\nmodule C; X = 'a'; end\n",
+                          "module A\n  X: Integer\nend\n")
+check.call('a non-Integer X elsewhere still withholds the fact', alias_bad[:errors].empty? &&
+           !alias_bad[:integer_names].include?('X'))
+only_copy = declared.call("module A; X = 16; end\nmodule B; X = A::X; end\n", "module B\n  X: Integer\nend\n")
+check.call('B::X: Integer (the copy itself) proves too', only_copy[:errors].empty? &&
+           only_copy[:integer_names].include?('X'))
+
 
 # [op, name, key] of every GETCONST/GETMCNST read of the fixture, in instruction order of each irep.
 reads_of = lambda do |source|
@@ -173,6 +188,19 @@ reads_of = lambda do |source|
     reads
   end
 end
+
+puts '== a same-named constant in another scope (lexical, like the runtime)'
+# A::X proves on its own assignment; C::X = 'a' only withholds the bare-name fact, as reads resolve per scope.
+scoped_src = "module A; X = 16; def self.f; X; end; end\nmodule C; X = 'a'; def self.f; X; end; end\n"
+scoped = declared.call(scoped_src, "module A\n  X: Integer\nend\n")
+check.call('A::X: Integer proves beside a String C::X (no TC1011 error)', scoped[:errors].empty?)
+check.call('the fact is keyed by the definition A::X, not the bare name X',
+           scoped[:integer_keys].include?('A::X') && !scoped[:integer_names].include?('X'))
+site_keys = LexicalConsts.analyze(scoped[:ireps], static: true).site_keys
+check.call('LEXICAL_CONST qualifies the fact\'s own SETCONST as A::X too (bc2cpp.rb keeps the key)',
+           site_keys[scoped[:integer_keys]['A::X']] == 'A::X')
+scoped_reads = reads_of.call(scoped_src).select { |op, name,| op == 'GETCONST' && name == 'X' }.map(&:last)
+check.call('the X read in A resolves to A::X and the one in C to C::X', scoped_reads.sort == %w[A::X C::X])
 
 puts '== a scoped read through a ternary holder'
 holder = reads_of.call(<<~RUBY)

@@ -9,9 +9,11 @@ require_relative 'rbs_parse_memo'
 
 # DECLARED_CONSTANT_CHECK: RBS constant declarations, checked at every assignment.
 #
-#   FOO: Integer        every SETCONST/SETMCNST binding the bare name FOO evaluates to one Fixnum: an integer literal,
-#                       a proven or declared Integer constant, or ADD/SUB/MUL/DIV/ADDI/SUBI of those whose exact value
-#                       fits the narrowest Fixnum. Feeds INTEGER_CONSTANT_PROOF (bare-name keyed, as that proof is).
+#   FOO: Integer        the declared constant's one assignment evaluates to one Fixnum: an integer literal, a proven
+#                       or declared Integer constant, or ADD/SUB/MUL/DIV/ADDI/SUBI of those whose exact value fits the
+#                       narrowest Fixnum. Feeds INTEGER_CONSTANT_PROOF for the reads that resolve to this definition
+#                       (integer_keys, LEXICAL_CONST), and for every read of the bare name when every binding of it
+#                       proves too (integer_names).
 #   TABLE: Array[...]   the declared constant's one assignment is an Array (an ARRAY literal, or a source the array
 #                       proofs accept, `.freeze` included). Feeds CONST_CONTAINER.
 #   TABLE: Array[T]     as above, and the assignment is a frozen `[...]` literal whose every element proves T (Integer,
@@ -26,9 +28,10 @@ require_relative 'rbs_parse_memo'
 module DeclaredConstants
   Entry = Struct.new(:name, :bare, :kind, :cls, :text, :loc, :elem, keyword_init: true)
   ELEMENT_CLASSES = %w[Integer Float String Symbol].freeze
+  # integer_keys: {qualified name => its one SETCONST} of the Integer facts read through LEXICAL_CONST.
   # first_errors: {entry name => the first error message of that entry} (see verdicts).
-  Result = Struct.new(:integer_names, :containers, :elements, :diagnostics, :report, :locs, :first_errors,
-                      keyword_init: true)
+  Result = Struct.new(:integer_names, :integer_keys, :containers, :elements, :diagnostics, :report, :locs,
+                      :first_errors, keyword_init: true)
   CODE = 'TC1011'
   KILL_ENV = 'BC2CPP_DECLARED_CONSTANTS'
 
@@ -104,8 +107,8 @@ module DeclaredConstants
   # proven integer constants are not needed: the evaluator re-derives every binding it reads.
   def check(entries, ireps, registry, sites, _integer_constants, poisoned, container_constants, display_root,
             plus_safe:, range_safe:)
-    result = Result.new(integer_names: Set.new, containers: {}, elements: {}, diagnostics: [], report: [],
-                        locs: entries.map(&:loc), first_errors: {})
+    result = Result.new(integer_names: Set.new, integer_keys: {}, containers: {}, elements: {}, diagnostics: [],
+                        report: [], locs: entries.map(&:loc), first_errors: {})
     return result if entries.empty?
 
     qualified_at = sites.to_h { |s| [[s[:irep], s[:idx]], s[:name]] }
@@ -147,7 +150,7 @@ module DeclaredConstants
         diag.call('error', [rel.call(irep.file), insn.lineno, 1], why) if why
       end
       failed = result.diagnostics.size > errors
-      fact = !failed && feed(entry, bindings, poisoned, class_named, evaluator, result, diag)
+      fact = !failed && feed(entry, own.first[2], bindings, poisoned, class_named, evaluator, result, diag)
       status = if failed then 'FAILED'
                elsif fact then 'checked, fact'
                else 'checked, no fact'
@@ -166,7 +169,7 @@ module DeclaredConstants
   end
 
   # Records the fact for a checked entry; true when it was fed.
-  def feed(entry, bindings, poisoned, class_named, evaluator, result, diag)
+  def feed(entry, own_insn, bindings, poisoned, class_named, evaluator, result, diag)
     case entry.kind
     when :int
       if poisoned.nil? || poisoned.include?(entry.bare) || class_named.include?(entry.bare)
@@ -174,13 +177,11 @@ module DeclaredConstants
                   "`#{entry.bare}` is also bound outside the program's bytecode; no INTEGER_CONSTANT_PROOF fact")
         return false
       end
+      # The own assignment proved (site_failure), so a read that resolves to this definition holds a Fixnum. Another
+      # binding of the bare name only withholds the bare-name fact.
+      result.integer_keys[entry.name] = own_insn
       other = bindings[entry.bare].find { |irep, idx, insn,| evaluator.binding_value(irep, idx, insn).nil? }
-      if other
-        diag.call('info', nil, "another `#{entry.bare}` (#{other[3] || 'unresolved scope'}, line #{other[2].lineno}) " \
-                               'does not prove Integer; no INTEGER_CONSTANT_PROOF fact')
-        return false
-      end
-      result.integer_names << entry.bare
+      result.integer_names << entry.bare unless other
     else
       result.containers[entry.name] = entry.kind == :array ? 'Array' : entry.cls
       element_fact(entry, bindings, poisoned, class_named, result, diag) if entry.elem
@@ -557,13 +558,26 @@ module DeclaredConstants
       return @memo[name] if @memo.key?(name)
       return nil if visiting.include?(name) || @blocked.include?(name)
 
-      sites = @bindings[name]
+      # SELF_COPY: `X = Holder::X` stores a value some other binding of bare X already stored, so it adds nothing to
+      # the union; skipping it is what lets an alias of a same-named constant prove.
+      sites = @bindings[name].reject { |irep, idx, insn,| self_copy?(irep, idx, insn, name) }
       return nil if sites.empty?
 
       ranges = sites.map { |irep, idx, insn,| binding_value(irep, idx, insn, visiting | [name]) }
       return nil if ranges.any?(&:nil?)
 
       @memo[name] = [ranges.map(&:first).min, ranges.map(&:last).max]
+    end
+
+    # The binding stores a GETCONST/GETMCNST read of its own bare +name+ (through moves), with no jump onto either.
+    def self_copy?(irep, idx, insn, name)
+      return false if entry_site?(irep, insn) || !(src = insn.regs.last)
+
+      entries = @entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)
+      irep.walk_writers(idx - 1, src.to_s, barrier: ->(w, _cur) { entries.include?(w.addr) }, barrier_result: false,
+                                           follow_moves: true) do |w, _j, _cur|
+        (w.op == 'GETCONST' && w.const_name == name) || (w.op == 'GETMCNST' && w.mcnst_name == name)
+      end == true
     end
 
     # Linear by design: the barrier stops the walk at every jump target, and each arm of a `c ? a : b` join starts at one

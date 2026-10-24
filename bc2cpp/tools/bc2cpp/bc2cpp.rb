@@ -674,6 +674,9 @@ if $PROGRAM_NAME == __FILE__
       range_safe: DeclaredConstants.range_to_a_safe?(registry, included_modules, prepended_modules, unknown_mixins)
     )
     integer_constants |= declared_constants.integer_names
+    # The registry and LEXICAL_CONST qualify scopes separately; a key is used only where both name the same SETCONST.
+    lexical_sites = LexicalConsts.analyze(ireps, static: true).site_keys
+    integer_constant_keys = declared_constants.integer_keys.select { |key, insn| lexical_sites[insn] == key }.keys.to_set
     declared_constants.containers.each { |name, klass| container_constants[name] ||= klass }
     sig_applied.ir_const_elements = declared_constants.elements if sig_applied
     DeclaredConstants.report(declared_constants, sig_applied,
@@ -1156,6 +1159,8 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
+  CodeGen.integer_constant_keys = integer_constant_keys || Set.new
+  warn "== declared Integer constants proven per definition (LEXICAL_CONST): #{CodeGen.integer_constant_keys.size} =="
   # Constants whose every writer is one frozen-or-literal container class: a read is that class.
   CodeGen.constant_value_classes = constant_facts.groups.filter_map do |name, fact|
     next unless fact.classes && fact.classes.size == 1 && %i[Array Hash String].include?(fact.classes.first)
