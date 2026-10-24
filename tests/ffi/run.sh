@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# nfcffi: build tests/ffi/host.cpp with lib/ffi/nfcffi.cpp (a second translation unit) and run it. The host compiles tests/ffi/lib.c
+# at run time with nfcxx (NFCXX is left unset, so the driver is ./nfcxx) and calls it through C++ signatures; it also calls
+# C-library functions compiled by gcc (div, ldiv, qsort, strlen) and checks the error paths. See docs/notes/ffi.md.
+#   NFCXX_BACKEND=gcc|qbe   (default: both)
+cd "$(dirname "$0")/../.."
+root=$PWD
+backends=${NFCXX_BACKEND:-"qbe gcc"}
+fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+unset NFCXX
+for be in $backends; do
+  if ! out=$(NFCXX_BACKEND=$be ./nfcxx -I lib/ffi -rdynamic tests/ffi/host.cpp lib/ffi/nfcffi.cpp -o "$tmp/host-$be" 2>&1); then
+    echo "FAIL $be ffi (host build)"; head -20 <<<"$out"; fail=1; continue
+  fi
+  if out=$(NFCXX_BACKEND=$be NFCFFI_CACHE="$tmp/cache-$be" "$tmp/host-$be" "$root/tests/ffi" 2>&1); then
+    echo "ok   $be ffi: $(tail -1 <<<"$out")"
+  else
+    echo "FAIL $be ffi"; head -30 <<<"$out"; fail=1
+  fi
+done
+exit $fail
