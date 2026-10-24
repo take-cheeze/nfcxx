@@ -19,10 +19,13 @@
 
   // The output of one Run. sink.write(text) takes the text in order; bytes from putchar wait for a newline (or for the
   // end of the run, ctx.flush), so a multi-byte character is not split. sink.memory() is the module's exported memory.
+  // sink.title(text), when given, sets the page's title (a worker has no document of its own).
   function makeContext(sink) {
     const pending = [];
     const ctx = {
       mem: sink.memory,
+      title: sink.title || null,
+      asan: null,   // the last AddressSanitizer report: { kind, addr, size }
       text(s) {
         ctx.flush();
         sink.write(s);
@@ -59,7 +62,9 @@
       fn: () => Math.random() },
     set_title: { decl: "void set_title(const char* s, long length);", feature: "document.title (restored after Run)",
       fn: (ctx, ptr, len) => {
-        if (typeof document !== "undefined") document.title = decode(readBytes(ctx.mem, ptr, len));
+        const text = decode(readBytes(ctx.mem, ptr, len));
+        if (ctx.title) ctx.title(text);
+        else if (typeof document !== "undefined") document.title = text;
       } },
     putchar: { decl: "int putchar(int c);", feature: "stdout: one byte, shown at the end of its line",
       fn: (ctx, c) => {
@@ -127,6 +132,20 @@
           default: return -38n;
         }
       } },
+    abort: { decl: "void abort(void);", feature: "ends the run as aborted (a Rust example's panic handler calls it)",
+      fn: () => {
+        throw new Abort();
+      } },
+    __asan_report: { decl: "void __asan_report(void* addr, long size, int code);",
+      feature: "the ASan mode's report of a bad access, printed with its kind, before the module traps",
+      fn: (ctx, addr, size, code) => {
+        const kind = ASAN_KINDS[Number(code)] || `unknown-0x${Number(code).toString(16)}`;
+        const at = "0x" + (Number(addr) >>> 0).toString(16);
+        ctx.asan = { kind, addr: at, size: Number(size) };
+        const what = Number(code) === 0x102 ? `malloc of ${Number(addr) >>> 0} byte(s)`
+          : Number(code) >= 0x100 ? `free of ${at}` : `access of ${Number(size)} byte(s) at ${at}`;
+        ctx.log(`AddressSanitizer: ${kind}: ${what}`);
+      } },
     exit: { decl: "void exit(int status);", feature: "ends the run; the result is the status (Go's os.Exit)",
       fn: (ctx, status) => {
         throw new Exit(Number(status) | 0);
@@ -139,6 +158,85 @@
     const y = readBytes(ctx.mem, b, n);
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
     return 0;
+  }
+
+  // The kinds of the ASan mode's reports: the poison codes of the shadow (scripts/pathb-wasm-emit.rb, ASAN_*) and the
+  // allocator's own codes (0x100 and up), as tests/wasm/host.cjs prints them.
+  const ASAN_KINDS = {
+    0xf1: "stack-buffer-overflow", 0xf9: "global-buffer-overflow", 0xf5: "stack-use-after-return",
+    0xfa: "heap-buffer-overflow", 0xfd: "heap-use-after-free",
+    0x100: "attempting-double-free", 0x101: "attempting-free-on-address-which-was-not-malloc",
+    0x102: "allocator-out-of-memory",
+  };
+
+  // Thrown by the abort binding.
+  class Abort extends Error {
+    constructor() {
+      super("abort() called");
+    }
+  }
+
+  // What a trap's message (V8's or Firefox's wording) means for the source program.
+  const TRAPS = [
+    [/unreachable/i, "a check failed (a checked overflow, a shift or an index out of range, a null pointer), a panic "
+      + "(Go's, or a Rust panic handler that traps), or code the compiler knows is never reached"],
+    [/divi(de|sion) by zero|divide by zero/i, "an integer division or remainder by zero"],
+    [/integer overflow/i, "INT_MIN / -1, or a float converted to an integer type that cannot hold it"],
+    [/float unrepresentable|unrepresentable/i, "a float converted to an integer type that cannot hold it (or NaN)"],
+    [/memory access out of bounds|out of bounds memory/i, "a load or store outside the module's memory: a wild or "
+      + "dangling pointer (the ASan mode reports most bad accesses where they happen)"],
+    [/null function|signature mismatch|indirect call/i, "a call through a null function pointer, or one whose type does "
+      + "not match the function's"],
+    [/table index is out of bounds|index out of bounds/i, "a call through a function pointer that is not a function of "
+      + "the module"],
+    [/call stack|stack size|too much recursion/i, "the call stack ran out: very deep or infinite recursion"],
+  ];
+  function explainTrap(message) {
+    const t = TRAPS.find(([re]) => re.test(message));
+    return t ? t[1] : null;
+  }
+
+  // The wasm functions of an error's stack, innermost first (the module's "name" section names them).
+  function wasmFrames(stack) {
+    const out = [];
+    for (const line of String(stack || "").split("\n")) {
+      const v8 = /at (\S+) \(wasm:\/\//.exec(line);            // V8: at main (wasm://wasm/1234:wasm-function[2]:0x40)
+      const ff = /^(\S+)@.*wasm-function\[/.exec(line);         // Firefox: main@... wasm-function[2]:0x40
+      const name = v8 ? v8[1] : ff ? ff[1] : null;
+      if (name) out.push(name);
+    }
+    return out;
+  }
+
+  // Runs main() of a module: instantiates it with the bindings, calls main, and says how the run ended.
+  //   { kind: "value", result }              main returned (result is its value, as text)
+  //   { kind: "exit", result: "exit N" }     the exit binding
+  //   { kind: "asan", result: "asan: KIND" } an ASan report, then the trap
+  //   { kind: "abort", result: "abort" }     the abort binding
+  //   { kind: "trap", result: "trap: MSG", explain, frames }   a trap of the engine (frames: the wasm stack)
+  //   { kind: "error", result: MSG }         anything else (an import the page does not provide)
+  // sink: { write(text), title(text)? }.
+  function runMain(module, bytes, sink) {
+    let memory = null;
+    const ctx = makeContext({ write: sink.write, memory: () => memory, title: sink.title });
+    let out;
+    try {
+      const instance = new WebAssembly.Instance(module, importsFor(module, ctx, bytes));
+      memory = instance.exports.memory || null;
+      if (typeof instance.exports.main !== "function") throw new Error("the module has no main export");
+      out = { kind: "value", result: String(instance.exports.main()) };
+    } catch (e) {
+      const message = String((e && e.message) || e);
+      if (e instanceof Exit) out = { kind: "exit", result: `exit ${e.status}` };
+      else if (ctx.asan) out = { kind: "asan", result: `asan: ${ctx.asan.kind}`, frames: wasmFrames(e && e.stack) };
+      else if (e instanceof Abort) out = { kind: "abort", result: "abort", frames: wasmFrames(e && e.stack) };
+      else if (e instanceof WebAssembly.RuntimeError || e instanceof RangeError) {
+        out = { kind: "trap", result: `trap: ${message}`, explain: explainTrap(message), frames: wasmFrames(e.stack) };
+      } else out = { kind: "error", result: message };
+    } finally {
+      ctx.flush();
+    }
+    return out;
   }
 
   // Thrown by the exit binding through the module's frames; a run that catches it reports the status as its result.
@@ -226,7 +324,7 @@
     return imports;
   }
 
-  const api = { BINDINGS, Exit, makeContext, bindingFor, importsFor, importResults };
+  const api = { BINDINGS, Exit, Abort, makeContext, bindingFor, importsFor, importResults, runMain, explainTrap, wasmFrames };
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.nfcxxBindings = api;
 })(typeof self !== "undefined" ? self : this);

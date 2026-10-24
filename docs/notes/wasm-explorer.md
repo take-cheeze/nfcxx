@@ -73,8 +73,10 @@ uses into one module; rustc keeps it with `-C save-temps` (`<crate>.<crate>.<has
 rustc's own LLVM (`rustup component add llvm-tools`; `LLVM_DIS` names another) turns it into text. What is left
 external is the program's bindings and libc's `memcmp`/`bcmp`, which are bindings too. The crate is `#![no_std]`
 `#![no_main]`: `main` is an `extern "C"` function that the page calls, the browser
-bindings are `extern "C"` declarations, and a panic (an overflow, an index out of range) calls a function of `core` that
-the module does not have, a stub, after which the code traps (`unreachable`). Enums, slices, iterators, closures, trait
+bindings are `extern "C"` declarations, and a panic (an overflow, an index out of range) calls the crate's
+`#[panic_handler]`: the examples' handler prints the file and line (`PanicInfo::location`, through `log_str` and
+`log_i32`) and calls `abort`, a binding that ends the run. A handler that loops (`loop {}`, the usual `no_std` one) is
+stopped by the page's timeout. Enums, slices, iterators, closures, trait
 objects (`dyn`) and function pointers work. `-O0` is not used: its code keeps unwinding edges (`invoke`, `resume`),
 which the translator refuses. `std` is not available (it needs an operating system the module does not have).
 
@@ -111,8 +113,9 @@ and a rate limit, which are not in this change.
   the textarea. Compile (the button), a change of the options and "auto" only compile. Any compile cancels a pending
   automatic one, so the text an example puts in the editor is compiled once.
 - **Console**, under the editor: Run (calls `main` the way `tests/wasm/host.cjs` does: an import without a binding
-  returns its first argument plus one), the result (`main`'s value, `exit N`, or the trap's message), Clear, and the
-  output of the last run (the bindings' output: `log_*`, `puts`, `putchar`, `write`, Go's `println` and `fmt`).
+  returns its first argument plus one), the result (`main`'s value, `exit N`, `abort`, `asan: KIND`, the trap's
+  message, `timed out` or `stopped`), Clear, and the output of the last run (the bindings' output: `log_*`, `puts`,
+  `putchar`, `write`, Go's `println` and `fmt`; the first MB of it). See "Errors".
 - **Options**: the language, the standard and the mode (both filled for the language: a choice the new language also
   has is kept), and "auto" (compile 0.7 s after an edit; live only). The examples are grouped by language, and picking
   one sets its language. Changing the language loads its first example unless the source was edited, so an edited
@@ -182,10 +185,28 @@ setup, in the repository's settings (Secrets and variables > Actions), and on th
 - Error paths on the server: a front-end syntax error, a refusal (`variadic call`), 413, 400, 404.
 - No automated test runs the page. The CDN, and the browser, are not in CI.
 
+## Errors
+
+- **Compile errors** of the front end are shown as text and as markers on their lines (`parseDiagnostics` in
+  `pipeline.cjs`: EDG's `"prog.cpp", line N: error: ...`, rustc's `--> prog.rs:N:M`, Go's `prog.go:N:M:`).
+- **Refusals** of the emitter name the function and the line (`pathb-dump` runs with `NFCXX_IR_LOC=1`, see
+  `docs/notes/pathb-wasm.md`): `refused: variadic call (in main, at prog.c:2)` is a marker on line 2, and C++ names in
+  the message are demangled with `c++filt` when it is installed. The page adds a hint for the refusals met most
+  (`REFUSAL_HINTS` in `index.html`): `printf` (variadic: use `puts` or `log_*`), exceptions and the hosted C++ library,
+  structs by value, VLAs, `goto` across loops, switch fallthrough, the C library's globals, wide types.
+- **Run-time errors**: `main` runs in a Web Worker (`bindings.js`, `runMain`), so a program that does not return does
+  not freeze the page: Run becomes Stop while it runs, and a run is stopped after 10 s. A trap is shown with what it
+  means for the source (`explainTrap`: `unreachable` is a failed check or a panic, `divide by zero`, `integer
+  overflow`, `memory access out of bounds`, a bad indirect call, stack exhaustion) and the wasm stack, innermost first:
+  the module has a `name` section (`--names`), and the compile result's `names` (`c++filt` over the IR's mangled
+  names, without Rust's hashes) turns `_Z4deepi` into `deep(int)`. An `--asan` report prints the kind of the bad access
+  (`AddressSanitizer: heap-buffer-overflow: access of 4 byte(s) at 0x...`) before the trap.
+- The static build runs each example with the same `runMain` and fails on any end other than a value or `exit N`.
+
 ## Browser bindings
 
 A module's imports (functions of module `env` that the program declares and does not define) are connected to browser
-features by name. The table is `BINDINGS` in `index.html`; the page lists it in the Module tab, and each import of the
+features by name. The table is `BINDINGS` in `bindings.js`; the page lists it in the Module tab, and each import of the
 module is marked "browser binding" or "stub" in the imports table. A stub returns its first argument plus one, as before.
 
 | Declaration (C) | Browser feature |
@@ -201,6 +222,8 @@ module is marked "browser binding" or "stub" in the imports table. A stub return
 | `int write(int fd, const void* buf, unsigned long n)` | fd 1 is stdout; fd 2 is shown as `[stderr]` |
 | `int fflush(void*)` | shows what `putchar` has left waiting |
 | `void exit(int status)` | ends the run, whose result is `exit N` (C's `exit`, Go's `os.Exit`) |
+| `void abort(void)` | ends the run, whose result is `abort` (the Rust examples' panic handler) |
+| `void __asan_report(void*, long, int)` | the `--asan` mode's report of a bad access, printed before the trap |
 | `void* mmap(...)` | `memory.grow` by the pages of the size asked: TinyGo's heap, after everything the module laid out |
 | `int clock_gettime(int, struct timespec*)` | `performance.timeOrigin + performance.now()` (Go's `time.Now`) |
 | `ssize_t getrandom(void*, size_t, unsigned)` | `crypto.getRandomValues` |
@@ -244,7 +267,8 @@ and input events.
 | Other stages (the C from `--emit-c`, the QBE asm) | not done | Needs the Path A build (`setup-edg.sh`), a second pipeline. |
 | Side-by-side comparison, diff | not done | Two modes or two backends in two panels. |
 | Compiler flags beyond the standard (`-D`, `-I`, `--target`) | not done | Include directories must be limited to the repo, not free paths. |
-| Source-to-output mapping | not done | Needs a line table. The emitter writes none; function names (a `name` section) are cheap. |
+| Source-to-output mapping | partly done | A `name` section (stack traces name the functions), and refusals name the line. No line table. |
+| Run-time errors | done | A worker with a timeout and Stop; traps explained, with the demangled wasm stack. See "Errors". |
 | Program output (stdout) | partly done | `puts`, `putchar`, `write` and `fflush` go to the Console tab. `printf` and `std::cout` do not: the emitter refuses variadic calls and most of the hosted C++ library. |
 | Libraries (`<vector>`, `<string>`) | limited by the emitter | The emitter refuses exceptions, variadic calls, indirect calls, `goto` mixed with loops, bit-fields, VLAs and 16-byte types. In the IR sweep, 199 of 306 files are refused. The page shows these refusals. |
 | Several compilers | not applicable | One backend. |

@@ -3,9 +3,23 @@
 #![no_std]
 #![no_main]
 
+// A panic (an overflow, an index out of range) prints where it happened and ends the run: abort is a browser binding.
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    extern "C" {
+        fn log_str(s: *const u8, len: i64);
+        fn log_i32(value: i32);
+        fn abort() -> !;
+    }
+    unsafe {
+        let what = b"panicked at (file, line):";
+        log_str(what.as_ptr(), what.len() as i64);
+        if let Some(loc) = info.location() {
+            log_str(loc.file().as_ptr(), loc.file().len() as i64);
+            log_i32(loc.line() as i32);
+        }
+        abort()
+    }
 }
 
 extern "C" {
