@@ -56,6 +56,10 @@ SRC = <<~'RUBY'
     def red_sym(a); a.reduce(:+) { |m, x| m * x }; end
     def red_var(a, i); a.reduce(i) { |m, x| m * x }; end
     def red_lit_sym; [1, 2, 3].reduce(:+) { |m, x| m * x }; end
+    def idx(a); a.index { |x| x > 2 }; end
+    def idx_break(a); a.index { |x| break [:stop, x] if x == 5; x > 30 }; end
+    def idx_grow(a); a.index { |x| a << x + 100 if a.size < 8; x > 100 }; end
+    def idx_lit(k); [5, 6, 7].index { |x| x == k }; end
     def ewi(a); r = []; a.each_with_index { |x, i| r << [x, i] }; r; end
     def eidx(a); r = []; a.each_index { |i| r << i }; r; end
     def tm(n); r = 0; n.times { |i| r += i }; r; end
@@ -159,6 +163,13 @@ check.call('red: an unproven receiver runs the inlined fold behind an Array test
              red.include?(DYNAMIC))
 check.call('red_sym, red_var: a Symbol or unproven initial value (Enumerable#inject takes a Symbol as the operator) ' \
            'keeps the send', %w[red_sym red_var red_lit_sym].none? { |m| code_of(code, m).include?('bc2cpp_accum_') })
+ix = code_of(code, 'idx')
+check.call('idx: an unproven receiver runs the inlined index loop behind an Array test, the send as the else ' \
+           '(Array#index is array.c\'s own native)',
+           ix.match?(/GUARDED_BLOCK_INLINE :index .*\n\s+if \(M->c == M->root_c && mrb_array_p\(r\d+\)/) &&
+             ix.include?(DYNAMIC))
+check.call('idx_lit: a literal Array receiver is the plain index loop, no send',
+           code_of(code, 'idx_lit').include?('bc2cpp_accum_') && !code_of(code, 'idx_lit').include?(DYNAMIC))
 user = code_of(code, 'user_each')
 check.call('user_each: an unproven receiver keeps the exact-class arms and the dynamic send as the else',
            user.include?('Array_each_impl(M, ') && user.include?(DYNAMIC))
@@ -174,6 +185,9 @@ check.call('a dynamic installer withdraws the Kernel and String arms',
            !code_of(c, 'lp').include?(KERNEL_LOOP) && !code_of(c, 'chars').include?('String_each_char_impl'))
 c, = generate_world(SRC + "class String\n  def each_char; yield 'z'; end\nend\n")
 check.call('a program String#each_char withdraws the String arm', !code_of(c, 'chars').include?('String_each_char_impl'))
+c, = generate_world(SRC + "class Array\n  def index(*a); :mine; end\nend\n")
+check.call('a program Array#index withdraws the index loops, proven and guarded',
+           %w[idx idx_lit].none? { |m| code_of(c, m).include?('bc2cpp_accum_') })
 c, = generate_world(SRC, { 'BC2CPP_BLOCK_CORE_DIRECT' => '0' })
 check.call('BC2CPP_BLOCK_CORE_DIRECT=0: no Kernel, String or literal arm',
            !code_of(c, 'lp').include?(KERNEL_LOOP) && !code_of(c, 'chars').include?('String_each_char_impl(M,') &&
@@ -192,7 +206,8 @@ DRIVER = <<~'RUBY'
   coll = BiColl.new(1, 2, 3)
   arrays = [[1, 2, 3, 4], [], [5], [0, 1], (1..40).to_a, [1, 2, 3].freeze]
   arrays.each_with_index do |a, i|
-    %i[each_sum each_break each_next each_return map_sq sel rej rej_bang any_all red red_break ewi eidx].each do |m|
+    %i[each_sum each_break each_next each_return map_sq sel rej rej_bang any_all red red_break idx idx_break idx_grow ewi
+       eidx].each do |m|
       show.call("#{m}/#{i}") { fx.send(m, a.frozen? ? a : a.dup) }
     end
     [:+, 1, 2.5].each { |init| show.call("red_var/#{i}/#{init.inspect}") { fx.red_var(a.dup, init) } }
@@ -210,6 +225,7 @@ DRIVER = <<~'RUBY'
   end
   show.call('tm_literal') { fx.tm_literal(5) }
   show.call('red_lit_sym') { fx.red_lit_sym }
+  [6, 9].each { |k| show.call("idx_lit/#{k}") { fx.idx_lit(k) } }
   # Not a Fixnum: a bignum runs Integer#times, anything without `times` raises NoMethodError, a user `times` runs.
   # A positive bignum would count for ever, so it only runs to the first iteration's break.
   show.call('tm_first/big') { fx.tm_first(2**70) }
@@ -236,7 +252,7 @@ DRIVER = <<~'RUBY'
   show.call('lp_drain empty') { fx.lp_drain([]) }
   # Unproven receivers: a user Enumerable, a Range, a Hash where an Array was meant, nil, a String.
   [coll, 1..4, { k: 1 }, [9, 8]].each_with_index do |o, i|
-    %i[map_sq sel rej rej_bang any_all red user_each ewi].each { |m| show.call("#{m}/u#{i}") { fx.send(m, o) } }
+    %i[map_sq sel rej rej_bang any_all red idx user_each ewi].each { |m| show.call("#{m}/u#{i}") { fx.send(m, o) } }
   end
   # A File's each_line is IO's core-Ruby alias; an Enumerator's each_with_index is its own core-Ruby method.
   File.open('bc2cpp_bi_lines.txt', 'w') { |f| f.write("p\nqq\n") }
