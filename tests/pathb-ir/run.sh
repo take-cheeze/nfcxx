@@ -93,6 +93,14 @@ for f in tests/pathb-ir/borrow/*.cpp; do
     echo "ok   $f (without the fact forms: the default output)"
   else echo "FAIL $f: the flag changes more than the fact forms"; fail=1; fi
 done
+# A failed write of the IR (a buffer that cannot grow under a memory cap, a full disk) is an error: the IR would be cut
+# short, and an exit status of 0 with a short IR only fails later, in its reader (llama.cpp's ggml-cuda.cu at 8 GB).
+if [ $update = 0 ] && [ -w /dev/full ]; then
+  if scripts/pathb-dump --ir tests/cases/constexpr_static.cpp > /dev/full 2> "$tmp/full.err"; then
+    echo "FAIL the IR written to /dev/full: exit status 0"; fail=1
+  elif grep -q 'writing the IR failed' "$tmp/full.err"; then echo "ok   the IR written to /dev/full is an error"
+  else echo "FAIL the IR written to /dev/full: not the write error"; head -3 "$tmp/full.err"; fail=1; fi
+fi
 # Coverage: sum the per-kind counts of tests/cases (the gap probe is reported above, not here). A kind with a nonzero unsupported count is a gap.
 for f in tests/cases/*.cpp; do case $(basename "$f") in qbe_*) continue ;; esac; cat "$tmp/$(basename "$f" .cpp).err"; done 2>/dev/null | awk '
   $1 == "ir-stat" && $2 != "total" {

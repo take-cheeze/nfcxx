@@ -5061,7 +5061,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   }
   // Address-taken template kernel instances: a kernel instance named as a value (not called, not launched with <<<>>>),
   // for example selected by a ternary and handed to a helper. Each gets its wrapper (template_site), and the host table
-  // maps the host instance's address to that wrapper (the addr file, read by scripts/cuda-embed.rb).
+  // maps the host instance's address to that wrapper (the addr file, read by pathb-ptx-emit --embed).
   g_addr_table.clear();
   // a directive (a #define body too) is not code: its uses are seen where the macro is expanded
   const std::map<long, long> addr_dirs = directive_ends(text);

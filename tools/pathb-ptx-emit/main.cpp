@@ -1,7 +1,8 @@
 // pathb-ptx-emit (C++): the port of scripts/pathb-ptx-emit.rb, phase by phase. --emit writes the module's PTX
 // (emit_module.cpp), the same text as the Ruby script (NFCXX_PTX_EMITTER=cxx selects this one in the driver). --dump-forms
 // prints the parsed forms in the canonical text (diff-forms.sh); --plan prints the module without its function bodies
-// (diff-plan.sh); --decls prints the declarations (diff-module-decls.sh).
+// (diff-plan.sh); --decls prints the declarations (diff-module-decls.sh); --embed writes the registration tail of a .cu
+// file's host copy (embed.cpp).
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -53,8 +54,11 @@ void write_err(const char *prefix, const std::string &msg) {
 
 int run_eval_cases(const std::string &src);
 int run_eval_arith(const std::string &src);
+int run_embed(int argc, char **argv);
 
 int main(int argc, char **argv) {
+  // --embed (embed.cpp): the registration tail of a .cu file's host copy, from the emitter's groups; its own arguments.
+  if (argc > 1 && std::string(argv[1]) == "--embed") return run_embed(argc - 2, argv + 2);
   bool dump = false;
   bool decls = false;
   bool eval = false;
