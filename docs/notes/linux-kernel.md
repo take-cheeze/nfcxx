@@ -95,28 +95,31 @@ is not an error, and that function's asm thunks are dropped with it (docs/notes/
 
 ### Status (tinyconfig, Linux 6.8)
 
-615 C files are tried; 541 of them are in the kernel from the qbe backend, and it boots and runs the init script's
-checks (processes, pipes, files, signals). The migration went 3, 8, 19, 42, 47, 87, 252, 403, 541 over the runs that
-took the blockers below away, largest first; the ones that mattered beyond compiling were:
+615 C files are tried; 571 of them are in the kernel from the qbe backend, and it boots and runs the init script's
+checks (processes, pipes, files, signals). The migration went 3, 8, 19, 42, 47, 87, 252, 403, 541, 571 over the runs
+that took the blockers below away, largest first; the ones that mattered beyond compiling were:
 
 - `asm goto`, constant-argument clones of `always_inline` functions (`_static_cpu_has`'s `"i"(1 << (bit & 7))`),
   and `gnu_inline` (an `extern inline` defines no symbol), which together moved about 400 files;
 - GNU `cleanup` at scope exit (`guard()`): cproc ran it only on a throw, and files using guards stayed on gcc
   only by the accident of their unwind tables;
+- `#pragma pack` (ACPI's tables, 31 files) and `mode(byte)` on an enum, which cproc ignored: layouts that differed
+  from gcc's without an error -- now honoured, and the attributes that change meaning in ways cproc does not
+  implement (`vector_size`, `naked`, `interrupt`, other modes, ...) are refused;
 - qbe-try's own checks: undefined symbols (objdump gives them no binding flag, so none was seen), lasting code
   that calls init code (modpost), and the symbol indexes of a gcc-built kernel;
 - two kernels that linked and did not run, found by `scripts/linux-qemu-bisect.sh`: `put_user`'s pointer
-  truncated by an `asm` input tied to a narrower output (`/init` failed with EFAULT).
+  truncated by an `asm` input tied to a narrower output (`/init` failed with EFAULT), and `head64.c`'s
+  `.head.text`, which runs before the kernel's mapping and now always stays on gcc.
 
-What keeps the other 74 on gcc, by the number of files whose first error or difference it is:
+What keeps the other 44 on gcc, by the number of files whose first error or difference it is:
 
 | files | reason |
 | ----: | ------ |
 |  20 | `-m16`: the real-mode boot code, which stays on gcc |
-|  17 | the qbe object calls a function this configuration does not have, where gcc inlined a `static inline` that returns a constant and folded the call away (`pmd_trans_huge()` is 0 without transparent huge pages) |
-|  16 | an extra special section after code gcc folded away (now taken when harmless: `.discard.*`, alternatives, init data) |
-|   8 | `#pragma GCC visibility push(hidden)` in the compressed boot code (now honoured) |
+|  10 | the qbe object calls a function this configuration does not have, where gcc inlined a `static inline` that returns a constant and folded the call away (`pmd_trans_huge()` is 0 without transparent huge pages) |
 |   3 | more register operands in one `asm` than the thunk's register pool |
 |   2 | a static initializer of a flexible array member (`init_mm.cpu_bitmap`) |
 |   2 | lasting code calling init code where gcc's inlined copy is in init code |
-|   6 | one each: `__builtin_extract_return_addr`, a range designator with a value that is not constant, an alignment above 4096 (`irq_stack_backing_store`), `aligned` on a function declaration, and two more |
+|   1 | `.head.text` |
+|   6 | one each: `__builtin_extract_return_addr`, a range designator with a value that is not constant, an alignment above 4096 (`irq_stack_backing_store`), `aligned` on a function declaration, an initializer gcc folds to a constant (`cpu/common.c`), and a selftest macro (`TEST_ALIGNMENT`) |
