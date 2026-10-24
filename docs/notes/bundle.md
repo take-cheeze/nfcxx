@@ -66,7 +66,8 @@ cuBLASLt, libcudnn, libgomp, libstdc++, libgcc_s; 691,000 relocations, 144,000 e
 to write here (2.6 GB of output; the inputs are mmap'ed). It needs only glibc, its stubs, and the libraries that libtorch
 and cuDNN `dlopen` by name: `libtorch_cuda_linalg.so`, cuDNN's engine and op libraries, nvrtc and nvToolsExt, which
 stay files in `dist/lib` and bind to the bundle through the stubs. `libcuda.so.1` is the GPU driver's and is never
-bundled. The run prints what the normal build prints (no GPU in the session that wrote this: "cuda available 0", and the
+bundled (a link through nfcxx or nfcc that names it, such as `find_package(Torch)`'s `CUDA::cuda_driver`, reaches it
+through libcudart instead: `cuda-driver.md`). The run prints what the normal build prints (no GPU in the session that wrote this: "cuda available 0", and the
 CUDA tensor raises the `c10::Error` "driver version is insufficient", thrown in the bundled libc10_cuda and caught by
 the program), every dlopen'ed library loads, and `LD_DEBUG=files` shows nothing opened from the libtorch directory.
 Nothing ran on a GPU.

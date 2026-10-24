@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# The CUDA driver API through the CUDA runtime (docs/notes/cuda-driver.md): builds libnfcxx_cudrv.a, whose cu* functions
+# (cuInit, cuModuleLoadData, cuLaunchKernel, ...) look the driver's own function up through libcudart's
+# cudaGetDriverEntryPointByVersion on their first call and jump to it. nfcxx and nfcc link it in place of libcuda
+# (scripts/cuda-driver-wrap.sh). A program linked with it and libcudart does not need libcuda.so.1 to link or to start (cudart loads the driver when it is first used), and a bundle
+# (docs/notes/bundle.md) does not name the driver in DT_NEEDED. x86-64 Linux.
+#   usage: scripts/cuda-driver-shim [INCLUDE_DIR]   prints the archive's path
+#   INCLUDE_DIR holds cuda.h and cudaTypedefs.h (default: $CUDA_HOME/include, else /usr/local/cuda/include).
+# Each linked name has its own ABI version: cuCtxCreate is cuCtxCreate_v2, the 3.2 ABI, while the base name cuCtxCreate
+# at CUDA 12.9 is the 12.5 one (_v4, other arguments). So the version asked for is the one whose typedef in
+# cudaTypedefs.h (PFN_cuCtxCreate_v3020, ...) has the function's own type, which gcc decides
+# (__builtin_types_compatible_p) in a probe compiled once per header, with and without the per-thread default stream.
+# The archive is cached under build/cuda-driver/<hash of the headers and the sources>.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+inc=${1:-${CUDA_HOME:-/usr/local/cuda}/include}
+cc=${NFCXX_GCC:-gcc}
+for f in cuda.h cudaTypedefs.h; do
+  [ -f "$inc/$f" ] || { echo "cuda-driver-shim: $inc/$f not found (give the CUDA include directory)" >&2; exit 1; }
+done
+[ "$(uname -m)" = x86_64 ] || { echo "cuda-driver-shim: x86-64 only" >&2; exit 1; }
+src=$root/lib/cuda/driver/nfcxx_cudrv.c
+key=$(cat "$inc/cuda.h" "$inc/cudaTypedefs.h" "$src" "$0" | sha256sum | cut -c1-16)
+out=$root/build/cuda-driver/$key
+if [ -f "$out/libnfcxx_cudrv.a" ]; then echo "$out/libnfcxx_cudrv.a"; exit 0; fi
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+
+# The probe, per mode: for each driver function declared, every typedef of its base (base, version, per-thread suffix:
+# the ones the preprocessed cudaTypedefs.h declares; the old ABIs are behind __CUDA_API_VERSION_INTERNAL) with the same
+# type.
+probe() {  # probe MODE-DEFINE
+  local m=$1
+  printf '#include <cuda.h>\n#include <cudaTypedefs.h>\n' | "$cc" -E -P $m -I"$inc" -x c - > "$tmp/pp"
+  sed -nE 's/^(extern )?CUresult (cu[A-Za-z0-9_]+) *\(.*/\2/p' "$tmp/pp" | sort -u > "$tmp/names"
+  grep -oE 'typedef CUresult \( *\*PFN_cu[A-Za-z0-9_]+_v[0-9]+(_ptds|_ptsz)?\)' "$tmp/pp" |
+    sed -E 's/.*\*PFN_(cu[A-Za-z0-9_]+)_v([0-9]+)(_ptds|_ptsz)?\)/\1 \2 \3/' | sort -u > "$tmp/pfn"
+  {
+    echo '#include <stdio.h>'
+    echo '#include <cuda.h>'
+    echo '#include <cudaTypedefs.h>'
+    echo 'int main(void) {'
+    while read -r f; do
+      local base=$f pt=""
+      case $base in *_ptds|*_ptsz) pt=${base##*_}; base=${base%_*} ;; esac
+      base=$(sed -E 's/_v[0-9]+$//' <<<"$base")
+      local any=0
+      while read -r b v s; do
+        [ "$b" = "$base" ] || continue
+        [ "${s#_}" = "$pt" ] || continue
+        any=1
+        echo "  if (__builtin_types_compatible_p(__typeof__(&$f), PFN_${b}_v${v}${s})) printf(\"$f $b $v ${pt:-legacy}\\n\");"
+      done < <(grep -E "^$base " "$tmp/pfn")
+      [ $any = 1 ] || echo "  printf(\"$f $base 0 ${pt:-legacy}\\n\");"
+    done < "$tmp/names"
+    echo '  return 0;'
+    echo '}'
+  } > "$tmp/probe.c"
+  "$cc" -w $m -I"$inc" "$tmp/probe.c" -o "$tmp/probe" && "$tmp/probe"
+}
+{ probe ""; probe -DCUDA_API_PER_THREAD_DEFAULT_STREAM; } | sort -u > "$tmp/matches"
+mkdir -p "$tmp/o"; cp "$tmp/matches" "$tmp/o/matches.txt"   # every compatible typedef, for review
+# One entry per name. One compatible typedef: its version. Several (the same type, another behavior:
+# cuDeviceGetUuid is 9.2, cuDeviceGetUuid_v2 11.4; cuEventElapsedTime 2.0, _v2 12.8): in ascending order, the name's own
+# suffix picks (plain the first, _v2 the second, ...; the highest when there are fewer). A name with no typedef asks for
+# the header's CUDA_VERSION.
+ver=$(sed -nE 's/^#define CUDA_VERSION ([0-9]+).*/\1/p' "$inc/cuda.h")
+sort -k1,1 -k3,3n "$tmp/matches" | awk -v cv="$ver" '
+  { n = $1; c[n]++; v[n, c[n]] = $3; base[n] = $2; pt[n] = $4 }
+  END {
+    for (n in c) {
+      k = 1
+      if (match(n, /_v[0-9]+(_ptds|_ptsz)?$/)) { s = substr(n, RSTART + 2); sub(/_.*/, "", s); k = s + 0 }
+      if (c[n] == 1) k = 1
+      if (k > c[n]) k = c[n]
+      x = v[n, k] == 0 ? cv : v[n, k]
+      printf "X(%s, \"%s\", %s, %s)\n", n, base[n], x, pt[n] == "legacy" ? 1 : 2
+    }
+  }' |
+  sort > "$tmp/o/nfcxx_cudrv_table.inc"
+n=$(wc -l < "$tmp/o/nfcxx_cudrv_table.inc")
+[ "$n" -gt 100 ] || { echo "cuda-driver-shim: only $n driver functions found in $inc/cuda.h" >&2; exit 1; }
+"$cc" -c -O2 -fPIC -I"$tmp/o" "$src" -o "$tmp/o/nfcxx_cudrv.o"
+ar rcs "$tmp/o/libnfcxx_cudrv.a" "$tmp/o/nfcxx_cudrv.o"
+mkdir -p "$(dirname "$out")"
+rm -rf "$out.tmp.$$"; cp -r "$tmp/o" "$out.tmp.$$"
+mv "$out.tmp.$$" "$out" 2>/dev/null || rm -rf "$out.tmp.$$"   # a concurrent build may have made it first
+echo "$out/libnfcxx_cudrv.a"
