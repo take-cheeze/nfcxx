@@ -72,6 +72,18 @@ check.call('`{ (B) -> void } -> self` is a :self declaration', shapes['me']&.kin
 end
 check.call('a block with an unrelated return type, and `-> self` without a block, are not block returns',
            !shapes.key?('plain') && !shapes.key?('noblock'))
+merged = Dir.mktmpdir do |dir|
+  sig = File.join(dir, 'sig', 'bc2cpp')
+  FileUtils.mkdir_p(sig)
+  File.write(File.join(sig, 'a.rbs'), "class C\n  def each: () { (Integer) -> void } -> untyped\n  def me: () { (Integer) -> void } -> self\nend\n")
+  File.write(File.join(sig, 'b.rbs'), "class C\n  def each: () -> Integer\n  def me: () { (String) -> void } -> self\nend\n")
+  RbsSignatures.load([dir], display_root: dir).methods
+end
+check.call('a later declaration without a block keeps the earlier block type and takes its own return',
+           merged[%w[C each]]&.block_type&.type&.required_positionals&.first&.type.to_s == 'Integer' &&
+             merged[%w[C each]].return_type.to_s == 'Integer')
+check.call('a later declaration with a block replaces the earlier block type',
+           merged[%w[C me]]&.block_type&.type&.required_positionals&.first&.type.to_s == 'String')
 check.call('a declaration in a native-marked file is a native one', entries_of.call(<<~RBS).first&.native)
   #{NativeSigs::MARKER} fixture
   module M
