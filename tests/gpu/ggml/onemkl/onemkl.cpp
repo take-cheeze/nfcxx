@@ -1,13 +1,18 @@
 // The oneMKL subset of lib/sycl-ggml/oneapi/mkl.hpp on the device, against a double-precision host reference:
 // column-major gemm for the four transpose pairs (f32, and f16 inputs with an f32 result), strided gemm_batch, the group
 // form of gemm_batch over pointer arrays, and trsm_batch (side right, upper and lower). Prints one line per check and
-// "checks: N, failed: K".
+// "checks: N, failed: K". The header defines __INTEL_MKL__ and oneapi::mkl::bfloat16, as oneMKL's do (the dpct helper's f16
+// and bfloat16 gemm forms need both); a bf16 gemm through that name checks the second.
 #include <sycl/sycl.hpp>
 #include <sycl/half_type.hpp>
 #include <oneapi/mkl.hpp>
 #include <cmath>
 #include <cstdio>
 #include <vector>
+
+#ifndef __INTEL_MKL__
+#error "oneapi/mkl.hpp must define __INTEL_MKL__ (the dpct helper's f16 and bfloat16 gemm forms are under it)"
+#endif
 
 using oneapi::mkl::transpose;
 namespace blas = oneapi::mkl::blas::column_major;
@@ -66,6 +71,16 @@ int main() {
     snprintf(name, sizeof name, "gemm f16->f32 %c%c beta 0", at ? 't' : 'n', bt ? 't' : 'n');
     report(name, rel_err(c, want.data(), ld * ld), 1e-5);
   }
+
+  // bfloat16 inputs (oneapi::mkl::bfloat16, the name the dpct helper uses), an f32 result; the values are exact in bf16
+  oneapi::mkl::bfloat16 *ab = sycl::malloc_shared<oneapi::mkl::bfloat16>(ld * ld, q), *bb = sycl::malloc_shared<oneapi::mkl::bfloat16>(ld * ld, q);
+  for (int i = 0; i < ld * ld; i++) { ab[i] = oneapi::mkl::bfloat16(a[i]); bb[i] = oneapi::mkl::bfloat16(b[i]); }
+  for (int i = 0; i < ld * ld; i++) { c[i] = val(i + 9); want[i] = c[i]; }
+  blas::gemm(q, transpose::trans, transpose::nontrans, m, n, k, 0.5f, ab, ld, bb, ld, 2.0f, c, ld).wait();
+  ref_gemm(true, false, m, n, k, 0.5, ar.data(), ld, br.data(), ld, 2.0, want.data(), ld);
+  report("gemm bf16->f32 tn", rel_err(c, want.data(), ld * ld), 1e-5);
+  sycl::free(ab, q);
+  sycl::free(bb, q);
 
   // strided batch
   const long long st = ld * ld;

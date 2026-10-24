@@ -40,6 +40,6 @@ for b in opencl level-zero; do
   rc=0; run $b "$out/mut" $b.mut > /dev/null || rc=$?
   # caught: the run completes and every gemm check (not the trsm ones) fails
   ngemm=$(grep -c '^gemm.*: FAIL$' "$out/$b.mut.res" 2>/dev/null)
-  if [ $rc = 1 ] && [ "$ngemm" = 10 ]; then echo "mutant onemkl $b: caught (10 of 10 gemm checks)"; else echo "mutant onemkl $b: FAIL (rc $rc, $ngemm of 10 gemm checks failed)"; fail=1; fi
+  if [ $rc = 1 ] && [ "$ngemm" = 11 ]; then echo "mutant onemkl $b: caught (11 of 11 gemm checks)"; else echo "mutant onemkl $b: FAIL (rc $rc, $ngemm of 11 gemm checks failed)"; fail=1; fi
 done
 exit $fail
