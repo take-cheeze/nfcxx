@@ -226,6 +226,7 @@ class ze_rt {
 
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
+  unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
 
  private:
   ze_rt() {
@@ -282,6 +283,7 @@ class ze_rt {
     props.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
     check(zeDeviceGetProperties(dev_, &props), "zeDeviceGetProperties");
     device_name_ = props.name;
+    compute_units_ = props.numSlices * props.numSubslicesPerSlice * props.numEUsPerSubslice;   // the EUs, as DPC++ counts them
 
     ze_device_compute_properties_t cp = {};
     cp.stype = ZE_STRUCTURE_TYPE_DEVICE_COMPUTE_PROPERTIES;
@@ -437,6 +439,7 @@ class ze_rt {
   ze_context_handle_t ctx_ = nullptr;
   ze_command_list_handle_t imm_ = nullptr;
   std::string device_name_;
+  uint32_t compute_units_ = 0;
   uint32_t max_wg_ = 0;
   uint32_t max_wi_[3] = {0, 0, 0};
   uint32_t local_mem_ = 0;
