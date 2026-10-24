@@ -541,16 +541,20 @@ class CodeGen
     end
   end
 
-  # A probe-only Symbol literal while no Ruby hook can route a probe's name (DynamicNames.probe_hooks_touched?).
-  # BC2CPP_PROBE_CALL_INDEX=0 keeps every literal a poison.
+  # A probe-only or visibility-only Symbol literal while no Ruby hook can route its name
+  # (DynamicNames.probe_hooks_touched?). BC2CPP_PROBE_CALL_INDEX=0 keeps every literal a poison.
   def entry_arg_probe_literal?(irep, idx, insn)
     return false if ENV['BC2CPP_PROBE_CALL_INDEX'] == '0'
 
     if @entry_arg_probe_hooks.nil?
       stems, = DynamicNames.analyze(@ireps)
       @entry_arg_probe_hooks = DynamicNames.probe_hooks_touched?(@ireps, stems)
+      @entry_arg_visibility_hooks = DynamicNames.probe_hooks_touched?(@ireps, stems, DynamicNames::VISIBILITY_ONLY_SENDS)
+      @entry_arg_exec_parents = DynamicNames.exec_parents(@ireps)
     end
-    !@entry_arg_probe_hooks && DynamicNames.probe_only?(irep, idx, insn)
+    return true if !@entry_arg_probe_hooks && DynamicNames.probe_only?(irep, idx, insn)
+
+    !@entry_arg_visibility_hooks && DynamicNames.visibility_only?(irep, idx, insn, @entry_arg_exec_parents)
   end
 
   # Rule 6's parameter shape: mandatory positionals, plus optional ones unless BC2CPP_OPTIONAL_ARG_POOLS=0.
