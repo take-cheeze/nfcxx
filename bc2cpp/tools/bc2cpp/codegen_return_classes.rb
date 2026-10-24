@@ -54,8 +54,10 @@ class CodeGen
       @cg.numeric_class_bit(klass)
     end
     def false_class_bit = @cg.numeric_false_class_bit
-    def op_native?(_sym) = false
-    def nil_raises?(_sym) = false
+    # EXACT_ARITH: `+ - * /` on numbers are the core Integer/Float bodies under the numeric flow's own gates, so an
+    # Integer or Float result keeps its class here too. BC2CPP_EXACT_ARITH=0 leaves every result OTHER.
+    def op_native?(sym) = @cg.exact_arith? && @cg.numeric_op_native?(sym)
+    def nil_raises?(sym) = @cg.exact_arith? && @cg.numeric_nil_raises?(sym)
 
     def ivar_slots(irep)
       BytecodeIR.for(irep).instructions_with_op('GETIV', 'SETIV').filter_map(&:ivar).uniq.sort
@@ -509,6 +511,12 @@ class CodeGen
     @operator_send_insns ||= {}
     send = @operator_send_insns[[sym, insn.reg]] ||= Insn.synthetic('SEND', "R#{insn.reg} :#{sym} n=1")
     return_class_send_mask(irep, index, send, state)
+  end
+
+  def exact_arith?
+    return @exact_arith if defined?(@exact_arith)
+
+    @exact_arith = ENV['BC2CPP_EXACT_ARITH'] != '0'
   end
 
   def operator_sends?
