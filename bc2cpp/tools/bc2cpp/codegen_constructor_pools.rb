@@ -433,6 +433,11 @@ class CodeGen
     return stats[:no_args] += 1 if argc&.zero?
 
     site = [irep, idx, insn.reg.to_i, argc, owner]
+    if argc.nil? && (packed = constructor_packed_argc(irep, idx, insn))
+      stats[:packed] += 1
+      argc = packed
+      site = [irep, idx - 1, insn.reg.to_i, argc, owner]
+    end
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
     classes = constructor_named_classes(irep, idx, insn) unless insn.op.start_with?('SS')
     if classes.nil? && !insn.op.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
@@ -471,6 +476,31 @@ class CodeGen
   end
 
   # The class X whose method the `new` is in when its receiver is X's own class object: the implicit-self
+  # PACKED_NEW: mrbc passes more than 14 positionals as one Array (`ARRAY R(a+1) n`, then `SEND Ra :new n=*`) and the
+  # callee's OP_ENTER unpacks it, so the call passes n positionals. ARRAY writes only R(a+1), so argument k is R(a+k)
+  # at the ARRAY, which is where the site reads it: the positional count, or nil unless the ARRAY is the send's only
+  # predecessor. BC2CPP_CTOR_PACKED=0 leaves such a `new` a splat.
+  def constructor_packed_argc(irep, idx, insn)
+    return nil if ENV['BC2CPP_CTOR_PACKED'] == '0' || idx.zero?
+    return nil unless insn.n_spec == '*' && insn.nk_spec.nil?
+
+    program = BytecodeIR.for(irep)
+    array = program.source_at(idx - 1)
+    return nil unless array.op == 'ARRAY' && array.typed.size == 2 && array.reg.to_i == insn.reg.to_i + 1
+
+    preds = program.instruction_predecessors(include_handlers: true)
+    return nil unless preds && preds[idx] == Set[idx - 1]
+
+    count = array.typed[1].value.to_i
+    count.positive? ? count : nil
+  end
+
+  # The `new` send a constructor site reads its arguments for: the site's own instruction, or the send after a
+  # PACKED_NEW ARRAY (constructor_packed_argc).
+  def constructor_site_send_index(irep, idx)
+    BytecodeIR.for(irep).source_at(idx).op == 'ARRAY' ? idx + 1 : idx
+  end
+
   # `new` of `def self.m` in X, or `self.class.new` in an instance method of X.
   def constructor_new_root(irep, idx, insn, owner)
     return nil unless owner && !@closed_world.module_declared?(owner.owner.delete_suffix('.singleton'))

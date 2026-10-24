@@ -167,7 +167,7 @@ class CodeGen
     @class_ivar_pools.keys.each do |key|
       group = @numeric_ivar_groups.fetch(key)
       sites = group.sites.map { |irep, idx, reg| [irep, idx, reg] }
-      sites += checked_group_reads(group) if group.structural
+      sites += checked_group_reads(group, key[0]) if group.structural
       next unless grow_class_pool(@class_ivar_pools, key, sites) { group.readers.each { |l| return_class_invalidate(l) } }
 
       changed = true
