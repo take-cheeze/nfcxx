@@ -560,7 +560,7 @@ class BorrowCallEffects
     forms.each do |f|
       next unless f.is_a?(Array) && f[0] == 'call-effects'
       unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
-             f[2].is_a?(Array) && f[2][0] == 'returns' && f[2].length == 2 &&
+             f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
              f[6].is_a?(Array) && f[6][0] == 'args'
         raise bad, 'call-effects form'
       end
@@ -570,7 +570,8 @@ class BorrowCallEffects
         raise refused, 'call contracts require nothrow, noescape, and closed effects'
       end
       result = f[2][1]
-      unless result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
+      alias_result = f[2][2]
+      unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
         raise refused, 'call effects support only void or scalar results'
       end
       args = f[6].drop(1)
@@ -589,7 +590,30 @@ class BorrowCallEffects
           layouts.field_type(ty, [])
         end
       end
-      @entries[name] = {result: result, args: args}
+      if alias_result
+        unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+               alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
+               %w[shared exclusive].include?(alias_result[3])
+          raise bad, 'returned alias contract form'
+        end
+        index = layouts.number(alias_result[1])
+        offset = layouts.number(alias_result[2])
+        source = args[index]
+        unless source && %w[read write].include?(source[0])
+          raise refused, 'returned aliases require a read or write source argument'
+        end
+        if alias_result[3] == 'exclusive' && source[0] != 'write'
+          raise refused, 'exclusive returned aliases require a write source argument'
+        end
+        width = layouts.field_type(result[1], [])[:size]
+        if offset + width > layouts.field_type(source[1], [])[:size]
+          raise refused, 'returned alias range escapes its source argument'
+        end
+        alias_result = {arg: index, offset: offset, kind: alias_result[3]}
+      elsif result.is_a?(Array)
+        raise refused, 'call effects support only void or scalar results'
+      end
+      @entries[name] = {result: result, args: args, alias: alias_result}
     end
   end
 
@@ -1878,6 +1902,14 @@ RVAL = {
   "offset" => ->(fn, x) { r_offset(fn, x) }, "index" => ->(fn, x) { r_index(fn, x) },
   "pdiff" => ->(fn, x) { r_pdiff(fn, x) },
   "bfload" => ->(fn, x) { r_bfload(fn, x) }, "bfload.v" => ->(fn, x) { r_bfload(fn, x) },
+  "call-borrow" => ->(fn, x) {
+    unless x.length >= 5 && head_of(x[1]) == 'ptr' && x[2].is_a?(IRStr) &&
+           (x[3] == 'root' || (head_of(x[3]) == 'parent' && x[3].length == 2 && x[3][1].is_a?(IRStr))) &&
+           x[4].is_a?(IRSym) && x[4].sig == '&'
+      raise BadIR, 'call-borrow form'
+    end
+    r_call(fn, ['call', x[1], x[4]] + x.drop(5))
+  },
   "call" => ->(fn, x) { r_call(fn, x) }, "rdtsc" => ->(fn, x) { r_rdtsc(fn, x) },
 }
 

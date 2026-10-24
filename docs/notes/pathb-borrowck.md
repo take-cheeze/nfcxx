@@ -360,7 +360,7 @@ Contracts are validated before pruning, including unused declarations.
 | `consume TYPE` | Consumes a matching live drop obligation on normal return. |
 
 `nothrow` excludes exceptional continuations. `noescape` promises that argument addresses are not
-retained or returned. `closed` promises no access to globals, hidden pointees, or other externally
+retained beyond the call, except for an explicitly declared returned alias. `closed` promises no access to globals, hidden pointees, or other externally
 visible memory outside the declared argument regions; private callee-local storage is permitted.
 These are trusted imports, not facts inferred from names or checked against callee implementations.
 The producer must ensure the real callee satisfies the summary. Functions defined in the IR are
@@ -389,13 +389,44 @@ separate marker is unnecessary. Unlike a marker, the **call itself remains execu
 consume call does not implicitly drop a possibly absent value; guard correlation and unwind cleanup
 remain unsupported. Passing an exclusive loan alone does not establish ownership for consumption.
 
-This stage supports only direct symbols, void/scalar results, and bounded local argument effects.
-Indirect/variadic calls, pointer/reference or aggregate returns, unknown external targets, retained
+This stage supports direct symbols, void/scalar results or the returned aliases below, and bounded local argument effects.
+Indirect/variadic calls, uncontracted pointer/reference or aggregate returns, unknown external targets, retained
 borrows, heap/deallocation effects, hidden globals/pointees, and potentially throwing calls remain
 refused. A native test links small C helpers and observes actual initialization/read/mutation/
 consumption results. It demonstrates call execution and state propagation, not general destructor
 or resource-release verification. Removing the summaries leaves identical QBE while the checker
 correctly returns to refusing those calls.
+
+
+## Returned alias loans
+
+A trusted summary may return a pointer into one argument's declared memory region:
+
+```text
+(call-effects "identity"
+  (returns (ptr int) (from-arg 0 0 shared))
+  (nothrow) (noescape) (closed) (args (read int)))
+(let %r (ptr int)
+  (call-borrow (ptr int) "R" root &"identity" $"x"))
+```
+
+`from-arg` takes a zero-based argument index, a nonnegative byte offset, and `shared` or
+`exclusive`. The returned pointee must fit wholly inside that argument's region. Shared results
+require a `read` or `write` source; exclusive results require `write`. `value`, `init`, and `consume`
+sources are refused. An ordinary `call` cannot discard the required returned-loan identity.
+
+`root` requires a direct local place or constant offset. For a result derived from an existing
+loan, use `(parent "P")` instead; the actual source must preserve that parent's identity and
+constant offset. The result cannot upgrade shared permission, outlive the parent or referent,
+or escape the checked function as a local address. Existing `loan-end` and opt-in last-use inference
+apply to the returned loan and its ancestors. Field-range results protect only their returned range
+after the call, while call preconditions still cover the complete argument effect region.
+
+These contracts remain trusted: the checker does not inspect the callee to prove where its pointer
+actually points. Heap-owned returns, aliases selected from several arguments, retained borrows,
+generic lifetime signatures, and Rust frontend emission remain unsupported. The emitter erases
+`call-borrow` to an ordinary call. A native C identity helper verifies the actual pointer return,
+write through the result, byte-identical metadata erasure, and emitter/oracle agreement.
 
 ## Refusals and limits
 
@@ -422,7 +453,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next steps are frontend layout/ownership emission, callee-summary verification, returned and
+The next steps are frontend layout/ownership emission, callee-summary verification, general returned and
 retained reference relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -442,7 +473,9 @@ nested layouts, moved fields, raw padding reads, storage lifetimes, and malforme
 Drop-state fixtures check conditional flags, double consumption, missing cleanup, construction
 registration, field ownership, typed transfers, reconstruction, and live-loan conflicts.
 Call fixtures cover preconditions, aliasing, scalar signatures, initialization, ownership
-consumption, stored-pointer lifetimes, and padding/provenance invalidation.
+consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
+cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
+contracts, and inferred last-use release.
 A native test checks both the unchanged QBE and the stricter conservative result when metadata is
 removed. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,

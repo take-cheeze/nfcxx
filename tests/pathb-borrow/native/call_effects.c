@@ -4,3 +4,5 @@ void nfcb_init(int *p, int value) { *p = value; }
 int nfcb_read(const int *p) { return *p; }
 void nfcb_write(int *p, int value) { *p = value; }
 int nfcb_consume(int *p) { int value = *p; *p = 0; return value; }
+
+int *nfcb_identity(int *p) { return p; }

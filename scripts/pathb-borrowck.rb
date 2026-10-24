@@ -241,7 +241,7 @@ class BorrowCallEffects
     forms.each do |f|
       next unless f.is_a?(Array) && f[0] == 'call-effects'
       unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
-             f[2].is_a?(Array) && f[2][0] == 'returns' && f[2].length == 2 &&
+             f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
              f[6].is_a?(Array) && f[6][0] == 'args'
         raise bad, 'call-effects form'
       end
@@ -251,7 +251,8 @@ class BorrowCallEffects
         raise refused, 'call contracts require nothrow, noescape, and closed effects'
       end
       result = f[2][1]
-      unless result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
+      alias_result = f[2][2]
+      unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
         raise refused, 'call effects support only void or scalar results'
       end
       args = f[6].drop(1)
@@ -270,7 +271,30 @@ class BorrowCallEffects
           layouts.field_type(ty, [])
         end
       end
-      @entries[name] = {result: result, args: args}
+      if alias_result
+        unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+               alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
+               %w[shared exclusive].include?(alias_result[3])
+          raise bad, 'returned alias contract form'
+        end
+        index = layouts.number(alias_result[1])
+        offset = layouts.number(alias_result[2])
+        source = args[index]
+        unless source && %w[read write].include?(source[0])
+          raise refused, 'returned aliases require a read or write source argument'
+        end
+        if alias_result[3] == 'exclusive' && source[0] != 'write'
+          raise refused, 'exclusive returned aliases require a write source argument'
+        end
+        width = layouts.field_type(result[1], [])[:size]
+        if offset + width > layouts.field_type(source[1], [])[:size]
+          raise refused, 'returned alias range escapes its source argument'
+        end
+        alias_result = {arg: index, offset: offset, kind: alias_result[3]}
+      elsif result.is_a?(Array)
+        raise refused, 'call effects support only void or scalar results'
+      end
+      @entries[name] = {result: result, args: args, alias: alias_result}
     end
   end
 
@@ -318,6 +342,29 @@ class LocalLifetime
         place = direct_place(x[4])
         raise BorrowRefused, 'borrow requires a direct local place or constant field offset; use reborrow with an explicit parent' unless place
         @loans[id] = [place[0], x[3], nil, place[1], x[1][1], x[1][1]]
+      end
+      if bh(x) == 'call-borrow'
+        unless x.length >= 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) &&
+               x[4].is_a?(IRSym) && x[4].sig == '&'
+          raise BadIR, 'call-borrow form'
+        end
+        summary = @call_effects.lookup(x[4].name)
+        raise BorrowRefused, 'call-borrow requires a returned alias contract' unless summary && summary[:alias]
+        raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
+        a = summary[:alias]
+        source = x[5 + a[:arg]]
+        raise BadIR, 'call arity disagrees with its effect contract' unless x.length - 5 == summary[:args].length
+        id = bname(x[2])
+        raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
+        if x[3] == 'root'
+          place = direct_place(source)
+          raise BorrowRefused, 'root returned aliases require a direct local place' unless place
+          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], x[1][1], x[1][1]]
+        elsif bh(x[3]) == 'parent' && x[3].length == 2 && x[3][1].is_a?(IRStr)
+          @loans[id] = [nil, a[:kind], bname(x[3][1]), expression_offset(source) + a[:offset], x[1][1], x[1][1]]
+        else
+          raise BadIR, 'call-borrow parent form'
+        end
       end
       if bh(x) == 'reborrow'
         raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
@@ -825,13 +872,14 @@ class LocalLifetime
     end
   end
 
-  def apply_call(x, state)
+  def apply_call(x, state, returned_id = nil)
     unless x.length >= 3 && x[2].is_a?(IRSym) && x[2].sig == '&'
       raise BorrowRefused, 'contracted calls require direct function symbols'
     end
     summary = @call_effects.lookup(x[2].name)
     raise BorrowRefused, 'calls require lifetime/effect contracts' unless summary
     raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
+    raise BorrowRefused, 'returned aliases require call-borrow' if summary[:alias] && !returned_id
     args = x.drop(3)
     raise BadIR, 'call arity disagrees with its effect contract' unless args.length == summary[:args].length
     resolved = []
@@ -903,7 +951,27 @@ class LocalLifetime
         end
       end
     end
-    [] # Pointer and aggregate results need a separate region/ownership contract.
+    return [] unless returned_id
+    loan = @loans[returned_id]
+    a = summary[:alias]
+    sources = resolved[a[:arg]][2]
+    raise BorrowRefused, 'returned alias requires one known source place' unless sources.length == 1
+    origin = sources[0][0]
+    parent = loan[2]
+    if parent && base_origin(origin) != 'loan:' + parent
+      raise BorrowRefused, 'returned alias source must preserve declared parent identity'
+    end
+    projected = project(origin, a[:offset])
+    actual = address(projected)
+    unless actual && actual[0] == loan[0] && actual[1] == loan[3] && (parent || actual[2].nil?)
+      raise BorrowRefused, 'returned alias source does not match its declared range'
+    end
+    record_loan_definition(returned_id)
+    diagnostic('loan-already-active', returned_id) if state['loan:' + returned_id].include?('active')
+    diagnostic('exclusive-reborrow-of-shared', returned_id) if parent && loan[1] == 'exclusive' && @loans[parent][1] == 'shared'
+    access(projected, state, true, loan[1], loan[4], loan[5])
+    state['loan:' + returned_id] = ['active']
+    ['loan:' + returned_id]
   end
 
   def value(x, state)
@@ -984,6 +1052,8 @@ class LocalLifetime
       raise BorrowRefused, 'pointer cast without provenance' if bh(x[1]) == 'ptr' && v.empty?
       raise BorrowRefused, 'pointer-to-integer cast' if bh(x[1]) != 'ptr' && !v.empty?
       v
+    when 'call-borrow'
+      apply_call(['call', x[1], x[4]] + x.drop(5), state, bname(x[2]))
     when 'call'
       apply_call(x, state)
     else

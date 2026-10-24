@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
@@ -157,5 +157,26 @@ rc=0
 "$tmp/calls" || rc=$?
 [ "$rc" = 7 ] || { echo "FAIL contracted native calls: expected 7, got $rc"; exit 1; }
 echo "ok   actual contracted calls, metadata erasure, oracle, and native execution"
+pass=$((pass + 1))
+# A returned alias is an actual pointer result; loan metadata erases to an
+# ordinary call with byte-identical QBE and an observable write through it.
+returned_ir=tests/mruby/pathb-edge/returned_loan_facts.ir
+for mode in explicit inferred; do
+  options=()
+  [ "$mode" = explicit ] || options=(--infer-loan-ends)
+  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$returned_ir" > "$tmp/returned-check"
+done
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$returned_ir" > "$tmp/returned.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$returned_ir" > "$tmp/returned-oracle.qbe"
+cmp "$tmp/returned.qbe" "$tmp/returned-oracle.qbe"
+sed -e '/^(call-effects /d' -e 's/(call-borrow (ptr int) "R" root /(call (ptr int) /' "$returned_ir" > "$tmp/returned-plain.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/returned-plain.ir" > "$tmp/returned-plain.qbe"
+cmp "$tmp/returned.qbe" "$tmp/returned-plain.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/returned.qbe" -o "$tmp/returned.s"
+cc "$tmp/returned.s" tests/pathb-borrow/native/call_effects.c -o "$tmp/returned"
+rc=0
+"$tmp/returned" || rc=$?
+[ "$rc" = 7 ] || { echo "FAIL returned alias runtime: expected 7, got $rc"; exit 1; }
+echo "ok   returned alias calls, metadata erasure, oracle, and native execution"
 pass=$((pass + 1))
 echo "pass $pass fail 0"
