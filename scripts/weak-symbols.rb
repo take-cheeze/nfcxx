@@ -1,10 +1,12 @@
-# Emit `.weak` directives for functions and data objects that EDG marks __attribute__((__weak__)).
+# Emit `.weak` directives for functions and data objects that EDG marks __attribute__((__weak__)), defined in the
+# assembly or only referenced by it (a weak reference).
 #
 # EDG puts COMDAT functions (inline and template instantiations) in every translation unit that
 # uses them (and COMDAT data: variable templates, static data members of templates, local statics of inline
 # functions), marked __weak__. GCC honours the attribute so the link merges the copies; cproc drops
 # attributes, so QBE emits them as strong symbols and the link fails with "multiple definition".
-# Usage: scripts/mrb scripts/weak-symbols.rb [--c-input] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
+# Usage: scripts/mrb scripts/weak-symbols.rb [--c-input] [--tail=TAIL] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
+# TAIL: the assembly qbe-prep.rb writes to append after ASSEMBLY; a name it defines (.set) is not a weak reference.
 #
 # mruby has no Regexp, so the scanning is by hand. It mirrors the Python original (tests/mruby/oracle/weak-symbols.py, deleted; the oracle port is tests/mruby/oracle/weak-symbols.rb).
 
@@ -164,11 +166,12 @@ end
 # (COMDAT data: variable templates, static data members of templates, local statics of inline functions,
 # helper constants such as __cmp_cat_id) has no such name, so every identifier before its "=" is a
 # candidate; the caller keeps only the ones the assembly defines.
+# With functions_only, an object's chunk names nothing (its identifiers include its type's words).
 # With extern_inline, a function declared "extern" and "__inline__" is weak too: EDG emits the inline members of
 # an "extern template" class that way (GNU89 meaning: the out-of-line copy lives in another translation unit,
 # for libstdc++'s std::allocator<char> that is libstdc++ itself), while a C99 compiler such as cproc makes it a
 # strong definition in every object that uses it.
-def weak_names(text, extern_inline)
+def weak_names(text, extern_inline, functions_only = false)
   names = {}
   pos = 0
   nw = text.index("__weak__", 0)       # the next EDG spelling
@@ -187,7 +190,7 @@ def weak_names(text, extern_inline)
     n = first_call_name(s)
     if n
       names[n] = true
-    else
+    elsif !functions_only
       identifiers(s).each { |x| names[x] = true }
     end
     pos = e + 1
@@ -229,17 +232,57 @@ extern_inline = true
 # --sym-prefix=P: the target's prefix on every label (QBE's Apple targets prefix "_", so a Mach-O label is __Z5f for the C name
 # _Z5f). The directive line names the label the assembly defines, so the names are looked up with the prefix. Empty elsewhere.
 SYM_PREFIX_OPT = "--sym-prefix="
+TAIL_OPT = "--tail="
+tail_path = nil
 prefix = ""
+# The symbols the assembly names anywhere (operands included): the words of [A-Za-z_.$][\w.$]*.
+def asm_words(asm)
+  words = {}
+  i = 0
+  n = asm.size
+  while i < n
+    c = asm[i]
+    if ident_start?(c) || c == "." || c == "$"
+      j = i + 1
+      j += 1 while j < n && (word_char?(asm[j]) || asm[j] == "." || asm[j] == "$")
+      words[asm[i, j - i]] = true
+      i = j
+    elsif word_char?(c)
+      i += 1 while i < n && word_char?(asm[i])   # a number: its letters are not a name
+    else
+      i += 1
+    end
+  end
+  words
+end
+
+# The names a `.set NAME, VALUE` line defines (qbe-prep.rb's aliases, such as _ZTHx = __tls_init).
+def set_names(asm)
+  names = {}
+  asm.each_line do |line|
+    i = 0
+    i += 1 while i < line.size && (line[i] == " " || line[i] == "\t")
+    next unless line[i, 5] == ".set "
+    j = line.index(",", i)
+    names[line[i + 5, j - i - 5].strip] = true if j
+  end
+  names
+end
+
 # Mach-O (the prefixed mode): the Apple assembler rejects ".weak", and a weak definition is ".weak_definition".
 weak_directive = ".weak "
+weak_ref_directive = ".weak "
 args = ARGV.dup
 while args.first && args.first[0, 2] == "--"
   opt = args.shift
   if opt == "--c-input"
     extern_inline = false
+  elsif opt[0, TAIL_OPT.size] == TAIL_OPT
+    tail_path = opt[TAIL_OPT.size, opt.size - TAIL_OPT.size]
   elsif opt[0, SYM_PREFIX_OPT.size] == SYM_PREFIX_OPT
     prefix = opt[SYM_PREFIX_OPT.size, opt.size - SYM_PREFIX_OPT.size]
     weak_directive = ".weak_definition "
+    weak_ref_directive = ".weak_reference "
   end
 end
 c_path, asm_path = args
@@ -247,8 +290,15 @@ text = File.open(c_path, "rb") { |f| f.read }
 asm = File.open(asm_path, "rb") { |f| f.read }
 defs = defined_labels(asm)
 weak = weak_names(text, extern_inline).map { |n| prefix + n }.select { |n| defs[n] }.sort
-unless weak.empty?
+# A name declared __weak__ that the assembly uses but does not define is a weak reference, as gcc makes it: the link
+# leaves it 0 when no object defines it. EDG's thread_local wrapper calls its _ZTHx initializer only when the address is
+# not 0, and a variable without dynamic initialization has none. Only functions, and only the attribute counts: the extern inline functions
+# that weak_names adds are defined in another object (libstdc++), and a weak reference would not pull one from an archive.
+words = asm_words(asm)
+aliases = tail_path ? set_names(File.open(tail_path, "rb") { |f| f.read }) : {}
+refs = weak_names(text, false, true).map { |n| prefix + n }.select { |n| !defs[n] && !aliases[n] && words[n] }.sort
+unless weak.empty? && refs.empty?
   File.open(asm_path, "ab") do |f|
-    f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join)
+    f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join + refs.map { |n| "#{weak_ref_directive}#{n}\n" }.join)
   end
 end

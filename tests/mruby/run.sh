@@ -57,7 +57,7 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
     fi
     cp "$tmp/$n.s" "$tmp/$n.orc.s"; cp "$tmp/$n.s" "$tmp/$n.rb.s"
     "$mrb" "$oracle/weak-symbols.rb" "$tmp/$n.prep.c" "$tmp/$n.orc.s"
-    "$mrb" "$root/scripts/weak-symbols.rb" "$tmp/$n.prep.c" "$tmp/$n.rb.s"
+    "$mrb" "$root/scripts/weak-symbols.rb" --tail="$tmp/$n.tail.s" "$tmp/$n.prep.c" "$tmp/$n.rb.s"
     k=$(grep -c '^\.weak ' "$tmp/$n.orc.s")
     if cmp -s "$tmp/$n.orc.s" "$tmp/$n.rb.s"; then report ok "weak-symbols $n ($k .weak lines identical)"; weak_total=$((weak_total + k))
     else report fail "weak-symbols $n: output differs"; diff "$tmp/$n.orc.s" "$tmp/$n.rb.s" | head -5; fi
@@ -93,6 +93,15 @@ EOF
   if cmp -s "$tmp/macho.orc.s" "$tmp/macho.rb.s" && grep -q '^\.weak_definition _alpha$' "$tmp/macho.rb.s" && ! grep -q '^\.weak ' "$tmp/macho.rb.s"; then
     report ok "weak-symbols --sym-prefix=_ (Mach-O labels, .weak_definition) matches the oracle"
   else report fail "weak-symbols --sym-prefix=_ differs or misses _alpha"; diff "$tmp/macho.orc.s" "$tmp/macho.rb.s" | head -5; fi
+  # Weak references (the oracle has none): a __weak__ function the assembly uses but does not define gets .weak, as gcc
+  # gives it (EDG's _ZTHx of a thread_local wrapper); a weak object, a name the tail defines (.set) and an unused one do not.
+  printf '%s\n' 'extern __attribute__((__weak__)) void _ZTH1x(void);' 'extern __attribute__((__weak__)) void _ZTH1y(void);' \
+    'extern __attribute__((__weak__)) void unused_ref(void);' 'extern __attribute__((__weak__)) char weak_obj[4];' > "$tmp/ref.c"
+  printf 'f:\n\tcall _ZTH1x\n\tcall _ZTH1y\n\tleaq weak_obj(%%rip), %%rax\n\tmovb $1, char\n' > "$tmp/ref.s"
+  printf '\t.set _ZTH1y, __tls_init\n' > "$tmp/ref.tail.s"
+  "$mrb" "$root/scripts/weak-symbols.rb" --tail="$tmp/ref.tail.s" "$tmp/ref.c" "$tmp/ref.s"
+  if [ "$(grep '^\.weak' "$tmp/ref.s")" = ".weak _ZTH1x" ]; then report ok "weak-symbols weak reference (_ZTHx called, not defined)"
+  else report fail "weak-symbols weak references: $(grep '^\.weak' "$tmp/ref.s" | tr '\n' ' ')"; fi
   # No-op case: the assembly is left untouched when nothing is weak.
   cp "$tmp/edge.s" "$tmp/none.s"; "$mrb" "$root/scripts/weak-symbols.rb" /dev/null "$tmp/none.s"
   if cmp -s "$tmp/edge.s" "$tmp/none.s"; then report ok "weak-symbols no-op leaves the assembly untouched"
