@@ -344,6 +344,13 @@ end
 
 def asm_rewrite(code)
   return ';' if code == '__asm__ __volatile__ ("pause");'
+  # An empty template that only takes a value in and out of a register (`hint::black_box`, constant_time_eq's and
+  # blake3's optimisation barrier): it stops the C compiler from reasoning about the value, which QBE does not do.
+  ['"+r" (', '"+q" ('].each do |cls|
+    return ';' unless take_seq(code, '__asm__ __volatile__(".intel_syntax noprefix; /* %0 */;\n .att_syntax; " : ' + cls, [], ') ::);').nil?
+  end
+  # A prefetch is a cache hint with no effect on data (mold's `prefetch`).
+  return ';' unless take_seq(code, '__asm__ __volatile__(".intel_syntax noprefix; prefetcht0 [%0];\n .att_syntax; " : : "r" (', [], '): "memory");').nil?
   x = take_seq(code, '__asm__ __volatile__ ("xgetbv" : "=a" (', ['), "=d" (', ') : "c" ('], ') );')
   unless x.nil?
     lo, hi, arg = x
