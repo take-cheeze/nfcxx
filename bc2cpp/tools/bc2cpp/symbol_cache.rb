@@ -144,15 +144,21 @@ module SymbolCache
   # `bc2cpp_nomethod(M, RECV, i...)`) in `code`, found with the same receiver
   # scan the rewrite uses (RECV may nest sends).
   def send_indices(code)
+    send_index_kinds(code).map(&:last)
+  end
+
+  # [helper, index] for each of those calls: helper is the name after `bc2cpp_` (`send`, `nomethod`, ...).
+  def send_index_kinds(code)
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call_argv|owner_call)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call_argv|owner_call)\(M,\s*/, pos))
+      kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       match = recv_end && SEND_INDEX.match(code, recv_end)
       idx = match && match[1]
-      found << idx.to_i if idx
+      found << [kind, idx.to_i] if idx
       pos = head_end
     end
     found

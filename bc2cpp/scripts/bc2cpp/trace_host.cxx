@@ -127,7 +127,16 @@ int main(int argc, char** argv) {
   set_const(M, "RPG2K_NEW_GAME", mrb_true_value());
   set_const(M, "RPG2K_CONTINUE", mrb_false_value());
   set_const(M, "RPG2K_PREVIEW_MAP", mrb_fixnum_value(0));
-  set_const(M, "RPG2K_BATTLE_TROOP", mrb_fixnum_value(0));
+  // BC2CPP_HOST_BATTLE_TROOP opens a headless battle against that troop right
+  // after New Game; BC2CPP_HOST_BATTLE_PLAY=1 also drives it with confirm taps
+  // (mruby-rpg2k/mrblib/main.rb, #headless_battle_troop and
+  // #battle_play_requested?). Both off by default.
+  const char* const troop = getenv("BC2CPP_HOST_BATTLE_TROOP");
+  const char* const play = getenv("BC2CPP_HOST_BATTLE_PLAY");
+  set_const(M, "RPG2K_BATTLE_TROOP",
+            mrb_fixnum_value(troop ? strtol(troop, nullptr, 10) : 0));
+  set_const(M, "RPG2K_BATTLE_PLAY",
+            mrb_bool_value(play && strcmp(play, "1") == 0));
 
   mrb_value args = mrb_ary_new(M);
   mrb_value game = mrb_obj_new(M, mrb_class_get(M, "RPG2k"), 1, &args);
