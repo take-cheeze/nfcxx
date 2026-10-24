@@ -1595,7 +1595,7 @@ if $PROGRAM_NAME == __FILE__
       }
       throw bc2cpp_block_break{ value, mrb_integer(token) };
     }
-    [[noreturn]] static void bc2cpp_return_from_block(mrb_state* M, mrb_value value, mrb_value token) {
+    [[noreturn, maybe_unused]] static void bc2cpp_return_from_block(mrb_state* M, mrb_value value, mrb_value token) {
       if (!bc2cpp_frame_live(bc2cpp_return_frames, token)) {
         mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "unexpected return");
       }
@@ -1992,8 +1992,6 @@ if $PROGRAM_NAME == __FILE__
     outside = [nomethod_sites, hint_sites, miss_sites].sum { |l| l.size - ReviewScope.select(review_scope, l).size }
     warn "== review scope: engine owners; #{outside} listed site(s) outside the reviewed program ==" if outside.positive?
   end
-  const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
-  const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers, symbol_table)
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
   # bc2cpp_send too), ahead of every function that calls them.
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
@@ -2017,13 +2015,19 @@ if $PROGRAM_NAME == __FILE__
   poly_table_sites = gen.poly_table_site_counts(compiled)
   warn "== poly table dispatch: #{poly_table_sites.map { |t, n| "#{t} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
+  poly_tables_code = gen.emit_poly_tables(compiled)
+  # A constant helper is emitted only when the printed text calls it: a body compiled and then discarded
+  # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first.
+  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, poly_tables_code, *compiled.map { |m| m[:code] }].join
+  const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
+  const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print SymbolCache.emit(symbol_table)
   print const_scope_code
   print const_site_cache_code
   print index_helpers_code
   print eqq_helper_code
   print numeric_slow_code
-  print gen.emit_poly_tables(compiled)
+  print poly_tables_code
   compiled.each { |m| print m[:code] }
 
   # This run's cross-TU declarations header, for other gems'

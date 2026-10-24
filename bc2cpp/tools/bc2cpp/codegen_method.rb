@@ -297,10 +297,8 @@ class CodeGen
         type ? "#{TYPE_OPS.fetch(type)[:box]}(#{arg})" : arg
       end
       initial[total_args] = 'bc2cpp_blk' if has_blk
-      registers_start = out.length
       out << emit_register_initializers(irep.nregs, initial)
       out << sealed_int16_declarations(irep)
-      registers_end = out.length
       out << stack_tuple_declarations(irep)
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
@@ -595,7 +593,7 @@ class CodeGen
     end
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
-    out = drop_unused_nil_registers(out, registers_start...registers_end) unless @resumable || (@report_only_text && !@runtime_installed_names)
+    out = drop_dead_statements(drop_unused_registers(out)) unless @resumable || (@report_only_text && !@runtime_installed_names)
     out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
@@ -780,7 +778,12 @@ class CodeGen
 
   # Generated register references are literal r<N> identifiers. Counting comments
   # and strings too only retains extra declarations; address-taken locals count.
-  def drop_unused_nil_registers(code, declarations)
+  # A declaration is dropped when it is the register's only mention in +code+ and its
+  # initializer has no effect (nil, or a plain identifier: self, an argument); an
+  # inlined loop's per-iteration frame (inline_block_frame) is covered as well.
+  UNUSED_REGISTER_DECLARATION = /^ +mrb_value r(\d+) = (?:mrb_nil_value\(\)|[A-Za-z_]\w*);\n/
+
+  def drop_unused_registers(code)
     uses = Hash.new(0)
     # Integer keys avoid allocating each matched token; leading zeros keep their distinct spelling.
     scanner = StringScanner.new(code)
@@ -797,12 +800,31 @@ class CodeGen
       end
       uses[key] += 1
     end
-    code[declarations] = code[declarations].gsub(/^  mrb_value r(\d+) = mrb_nil_value\(\);\n/) do |declaration|
+    code.gsub(UNUSED_REGISTER_DECLARATION) do |declaration|
       digits = Regexp.last_match(1)
       key = digits.size > 1 && digits.start_with?('0') ? digits : digits.to_i
       uses.fetch(key) == 1 ? '' : declaration
     end
-    code
+  end
+
+  # Null statements the emitters leave behind: a label nothing names again (a loop's
+  # break target with no break, a jump target the register flow removed) and a
+  # register copied onto itself. A line goes only after one that ends a statement or
+  # opens or closes a block: never the body of an unbraced if, else or loop, nor the
+  # only statement after a case label.
+  DEAD_LABEL = /\A *(L\w+):;\n\z/
+  SELF_COPY = /\A *(r\d+) = \1;\n\z/
+  STATEMENT_END = /[;{}]\s*\z/
+
+  def drop_dead_statements(code)
+    labels = code.scan(/\bL\w+\b/).tally
+    previous = "{\n"
+    code.each_line.reject do |line|
+      dead = previous.match?(STATEMENT_END) &&
+             ((label = line[DEAD_LABEL, 1]) ? labels[label] == 1 : line.match?(SELF_COPY))
+      previous = line unless dead || line.strip.empty?
+      dead
+    end.join
   end
 
   def emit_register_initializers(nregs, arguments)

@@ -57,26 +57,53 @@ end
 
 puts '-- unused-register declarations'
 generator = CodeGen.allocate
-prune_before = lambda do |code, declarations|
+prune_before = lambda do |code|
   uses = code.scan(/\br\d+\b/).tally
-  code[declarations] = code[declarations].gsub(/^  mrb_value (r\d+) = mrb_nil_value\(\);\n/) do |declaration|
+  code.gsub(/^ +mrb_value (r\d+) = (?:mrb_nil_value\(\)|[A-Za-z_]\w*);\n/) do |declaration|
     uses.fetch(Regexp.last_match(1)) == 1 ? '' : declaration
   end
-  code
 end
 prune_random = Random.new(20261019)
 register_names = %w[r0 r1 r01 r00 r3 r7 r63 r255 r10000000000000000000000000000001]
 mention_tokens = register_names + %w[ar1 r1x _r1 r1_ r3.r7 &r63] + ['日本語r1', 'r1日本語', '"r1"', '// r3']
+# A nil or plain-identifier initializer has no effect, so its unused declaration may go; a call or a
+# reference stays whatever its uses.
+initializers = %w[mrb_nil_value() self bc2cpp_blk _keys mrb_fixnum_value(1) *ctx->ref]
 prune_cases = Array.new(1000) do
-  declarations = register_names.sample(prune_random.rand(1..register_names.size), random: prune_random)
-                               .map { |name| "  mrb_value #{name} = mrb_nil_value();\n" }.join
-  text = declarations + Array.new(prune_random.rand(0..50)) { mention_tokens.sample(random: prune_random) }.join(' ')
-  [text, 0...declarations.size]
+  declarations = register_names.sample(prune_random.rand(1..register_names.size), random: prune_random).map do |name|
+    indent = ' ' * [2, 6].sample(random: prune_random)
+    init = initializers.sample(random: prune_random)
+    init.start_with?('*') ? "#{indent}mrb_value& #{name} = #{init};\n" : "#{indent}mrb_value #{name} = #{init};\n"
+  end.join
+  declarations + Array.new(prune_random.rand(0..50)) { mention_tokens.sample(random: prune_random) }.join(' ')
 end
 check.call('streamed counts preserve pruning, word boundaries, leading zeros and unbounded indices',
-           prune_cases.all? do |text, declarations|
-             generator.drop_unused_nil_registers(text.dup, declarations) == prune_before.call(text.dup, declarations)
-           end)
+           prune_cases.all? { |text| generator.drop_unused_registers(text.dup) == prune_before.call(text.dup) })
+check.call('a used declaration, a call initializer and a reference are kept; an unused copy of self goes',
+           generator.drop_unused_registers("  mrb_value r0 = self;\n  mrb_value r1 = x;\n  " \
+                                           "mrb_value r2 = mrb_fixnum_value(1);\n      mrb_value& r3 = *p;\n  " \
+                                           "return r1;\n") ==
+             "  mrb_value r1 = x;\n  mrb_value r2 = mrb_fixnum_value(1);\n      mrb_value& r3 = *p;\n  return r1;\n")
+
+puts '-- dead null statements'
+dead_before = <<~C
+  r3 = r3;
+  if (a)
+    r3 = r3;
+  L1:;
+  goto L2;
+  L2:;
+  switch (k) {
+  case 1:
+  L9:;
+  }
+  #endif
+  L7:;
+  return r3;
+C
+dead_after = dead_before.sub("r3 = r3;\nif", 'if').sub("L1:;\n", '')
+check.call('an unnamed label and a self copy go; a jump target, a guarded line and one after a case or #endif stay',
+           generator.drop_dead_statements("{\n#{dead_before}}\n") == "{\n#{dead_after}}\n")
 
 puts '-- register mention masks'
 scanner = RegisterFlow.allocate

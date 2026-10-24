@@ -202,7 +202,7 @@ class CodeGen
       extern "C" mrb_value mrb_exec_irep(mrb_state*, mrb_value, const struct RProc*);
       extern "C" mrb_int mrb_ci_bidx(mrb_callinfo*);
       // The block of the cfunc frame being entered (nil when none was given).
-      static mrb_value bc2cpp_entry_block(mrb_state* M) {
+      [[maybe_unused]] static mrb_value bc2cpp_entry_block(mrb_state* M) {
         mrb_callinfo* ci = M->c->ci;
         return ci->stack[mrb_ci_bidx(ci)];
       }
@@ -210,7 +210,7 @@ class CodeGen
         mrb_value table = mrb_iv_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "__bc2cpp_core_interpreted__"));
         return mrb_exec_irep(M, self, mrb_proc_ptr(mrb_ary_ref(M, table, index)));
       }
-      static bool bc2cpp_core_each_is_builtin(mrb_state* M, mrb_value self) {
+      [[maybe_unused]] static bool bc2cpp_core_each_is_builtin(mrb_state* M, mrb_value self) {
         struct RClass* found = mrb_class(M, self);
         mrb_method_search_vm(M, &found, mrb_intern_lit(M, "each"));
         return found == M->array_class || found == M->hash_class || found == M->range_class;
@@ -839,8 +839,10 @@ class CodeGen
     out = String.new
     compiled.each do |m|
       out << "#{decl_line(m)};\n"
-      # The entry wrapper stays static: only this gem's registration calls it.
-      out << "static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"
+      # The entry wrapper stays static: only this gem's registration calls it. A hand-written registration
+      # (mruby-rpg2k-compiled/src/register.cxx) may leave a method on its direct `_impl` calls alone, so the
+      # entry can go unused.
+      out << "[[maybe_unused]] static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"
     end
     out << "\n"
     out
