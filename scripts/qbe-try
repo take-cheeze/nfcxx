@@ -132,14 +132,17 @@ if [ -n "$extra" ]; then note "gcc $src: qbe object needs more symbols: $extra";
 refs "$obj" | awk '{print $2}' | sort -u > "$tmp/g.refs"; refs "$tmp/q.o" | awk '$1 == "init" {print $2}' | sort -u > "$tmp/q.init"
 mismatch=$(comm -23 "$tmp/q.init" "$tmp/g.refs" | head -3 | tr '\n' ' ')
 if [ -n "$mismatch" ]; then note "gcc $src: lasting code references init code where gcc's object does not: $mismatch"; exit 0; fi
-# A special section gcc's object has must be there. One only the qbe object has is taken when having it is harmless:
+# A special section gcc's object has must be there, but for the alternatives and .discard.*: without them the qbe
+# object's code just has no instruction to patch (gcc inlined bitmap_weight() and its popcnt alternative where the
+# qbe object calls it). One only the qbe object has is taken when having it is harmless:
 # .discard.* (the link drops it), the alternatives of code that is there (.altinstructions and the code they patch
 # in), and init data (.init.rodata, .init.data: freed after boot; the check above refuses lasting code that refers to
 # init code) -- code gcc's object dropped after inlining can leave them. Any other (an initcall, a kernel parameter,
 # an exported symbol) would change what the kernel does.
 harmless='^\.(discard\..*|altinstructions|altinstr_replacement|altinstr_aux|init\.rodata|init\.data)$'
+optional='^\.(discard\..*|altinstructions|altinstr_replacement|altinstr_aux)$'
 if ! cmp -s "$tmp/g.sec" "$tmp/q.sec" &&
-   { [ -n "$(comm -23 "$tmp/g.sec" "$tmp/q.sec")" ] || comm -13 "$tmp/g.sec" "$tmp/q.sec" | grep -qvE "$harmless"; }; then
+   { comm -23 "$tmp/g.sec" "$tmp/q.sec" | grep -qvE "$optional" || comm -13 "$tmp/g.sec" "$tmp/q.sec" | grep -qvE "$harmless"; }; then
   note "gcc $src: sections differ: $(diff "$tmp/g.sec" "$tmp/q.sec" | grep '^[<>]' | head -3 | tr '\n' ' ')"
   exit 0
 fi

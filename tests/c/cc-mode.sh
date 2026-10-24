@@ -593,6 +593,17 @@ EOC
     if grep -q '^qbe ksec.c$' qbe-.discard.addressable.log && grep -q '^gcc ksec.c: sections differ: > .initcall6.init' qbe-.initcall6.init.log
     then ok "qbe-try: an extra harmless section is taken, an extra initcall is not"
     else bad "qbe-try: an extra harmless section is taken, an extra initcall is not" "$(cat qbe-*.log | tr '\n' '|')"; fi
+    # a special section only gcc's object has (gcc inlined code the qbe object calls): alternatives may be missing,
+    # nothing else may
+    for sec in .altinstructions .initcall6.init; do
+      printf 'static inline int f(int x) { if (__builtin_constant_p(x)) __asm__ volatile(".pushsection %s,\\"a\\"; .long 0; .popsection"); return x; }\nint g(void) { return f(3); }\n' "$sec" > kmiss.c
+      rm -f qbe.log
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kmiss.c -o kmiss.o
+      cp qbe.log "qbem-$sec.log"
+    done
+    if grep -q '^qbe kmiss.c$' qbem-.altinstructions.log && grep -q '^gcc kmiss.c: sections differ: < .initcall6.init' qbem-.initcall6.init.log
+    then ok "qbe-try: missing alternatives are taken, a missing initcall is not"
+    else bad "qbe-try: missing alternatives are taken, a missing initcall is not" "$(cat qbem-*.log | tr '\n' '|')"; fi
     # code in .head.text (the kernel's __head, identity-mapped early boot code) stays on gcc
     printf 'int __attribute__((section(".head.text"))) early(int x) { return x + 1; }\n' > khead.c
     rm -f qbe.log
