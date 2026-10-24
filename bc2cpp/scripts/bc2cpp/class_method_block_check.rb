@@ -9,8 +9,8 @@
 #     - a program class method, own and inherited, is a direct `_impl` call with the block (frame-local when the
 #       callee only yields it);
 #     - StringIO.open { } calls the compiled core StringIO.open behind the root-context test, the send as the else;
-#     - File.open { } keeps the send: it would reach IO.open (mruby-io io.rb), which does not compile (a rescue inside
-#       its ensure), and File is not in declarations.rbs#core_hierarchy;
+#     - File.open { } calls mruby-io's compiled IO.open (File < IO, declarations.rbs#core_hierarchy) the same way,
+#       also inside a rescue body and written `::File`;
 #     - a program `def StringIO.open` takes the program definition, and BC2CPP_BLOCK_CORE_DIRECT=0 keeps the
 #       core send.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
@@ -57,6 +57,8 @@ SRC = <<~'RUBY'
     def sio(s); r = nil; StringIO.open(s) { |io| r = io.read }; r; end
     def sio_boom(s); keep = nil; StringIO.open(s) { |io| keep = io; raise ArgumentError, 'in' }; rescue ArgumentError; keep.closed?; end
     def fopen(p); File.open(p, 'w') { |f| f.write('x') }; end
+    def fread(p); File.open(p, 'r') { |f| f.read }; rescue IOError => e; "io: #{e.message}"; end
+    def ftop(p); ::File.open(p, 'a') { |f| f.write('y') }; end
   end
 RUBY
 
@@ -92,8 +94,11 @@ check.call('keep: a class method that stores its block gets the heap block',
 sio = code_of(code, 'sio')
 check.call('sio: StringIO.open calls the compiled core class method at the root context, the send as the else',
            sio.match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = StringIO_singleton_open_impl\(M, /) && sio.include?(DYNAMIC))
-check.call('fopen: File.open keeps the send (IO.open does not compile, File has no declared superclass)',
-           !code_of(code, 'fopen').include?('IO_singleton_open_impl(M, ') && code_of(code, 'fopen').include?(DYNAMIC))
+%w[fopen fread ftop].each do |m|
+  check.call("#{m}: File.open calls the compiled IO.open at the root context, the send as the else",
+             code_of(code, m).match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = IO_singleton_open_impl\(M, /) &&
+               code_of(code, m).include?(DYNAMIC))
+end
 c, = generate_world(SRC + "class StringIO\n  def self.open(*a); yield :mine; end\nend\n")
 check.call('a program StringIO.open withdraws the core call', !code_of(c, 'sio').include?('StringIO_singleton_open_impl(M, '))
 c, = generate_world(SRC, { 'BC2CPP_BLOCK_CORE_DIRECT' => '0' })
@@ -114,7 +119,8 @@ DRIVER = <<~'RUBY'
   end
   show.call('sio') { fx.sio('abc') }
   show.call('sio_boom') { fx.sio_boom('abc') }
-  show.call('fopen') { fx.fopen('bc2cpp_cm_fopen.txt'); File.read('bc2cpp_cm_fopen.txt') }
+  show.call('fopen') { fx.fopen('bc2cpp_cm_fopen.txt'); fx.ftop('bc2cpp_cm_fopen.txt'); fx.fread('bc2cpp_cm_fopen.txt') }
+  show.call('fread missing') { fx.fread('bc2cpp_cm_missing/none.txt') }
   File.delete('bc2cpp_cm_fopen.txt') if File.exist?('bc2cpp_cm_fopen.txt')
   show.call('gc stress') do
     GC.stress = true if GC.respond_to?(:stress=)

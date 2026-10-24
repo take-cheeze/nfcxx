@@ -246,12 +246,30 @@ class CodeGen
 
     written = straight_line_constant_name(irep, idx, dest_reg) ||
               irep.agreed_constant_name(idx, dest_reg.to_s, through_handlers: through_handlers)
-    return nil unless written
-
-    owner = resolve_class_constant_name(written, lexical_owner)
+    owner = if written
+              resolve_class_constant_name(written, lexical_owner)
+            else
+              top_level_constant_name(irep, idx, dest_reg, through_handlers)
+            end
     stable = owner && (@closed_world.stable_constant_identity?(owner) ||
                        CodeGen.stable_class_constants&.include?(owner.split('::').last))
     stable ? owner : nil
+  end
+
+  # `::Name` (OCLASS, then GETMCNST on it): the top-level constant, which lexical scope never shadows. nil unless
+  # that is the register's one definition and the name is a class the program knows.
+  def top_level_constant_name(irep, idx, reg, through_handlers)
+    program = BytecodeIR.for(irep)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: through_handlers)
+    return nil unless defs&.size == 1 && !defs.first.entry?
+
+    insn = program.source_at(defs.first.index)
+    return nil unless insn.op == 'GETMCNST' && insn.paren_reg == insn.reg && insn.mcnst_name
+
+    scope = BytecodeIR.reaching_definitions(irep, defs.first.index, insn.reg, through_handlers: through_handlers)
+    return nil unless scope&.size == 1 && !scope.first.entry? && program.source_at(scope.first.index).op == 'OCLASS'
+
+    ConstructClassNames.table.key?(insn.mcnst_name) ? insn.mcnst_name : nil
   end
 
   # GUARD_VIOLATION: the bare name of the stable class/module constant that
