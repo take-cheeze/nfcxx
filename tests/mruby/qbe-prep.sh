@@ -329,7 +329,7 @@ expect volatile+c out '__nfcxx_keep(&inner);'
 expect volatile+c out '__nfcxx_keep(&blk2);'
 expect volatile+c out '__nfcxx_keep(&nested);'
 expect volatile+c out '__nfcxx_keep(&one);'
-expect volatile+c out 'static __attribute__((noinline)) void __nfcxx_keep(void *p) { }'
+expect volatile+c out 'static __attribute__((noipa)) void __nfcxx_keep(void *p) { }'
 cat >"$tmp/edge/alloca.c" <<'EOF'
 extern void *alloca (unsigned long);
 void *alloca(unsigned long);

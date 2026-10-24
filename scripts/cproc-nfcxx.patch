@@ -92,8 +92,8 @@
 +			expect(TRPAREN, isalias ? "after alias target" : "after visibility");
 +		} else if (strcmp(name, "always_inline") == 0) {
 +			declattr.alwaysinline = true;
-+		} else if (strcmp(name, "noinline") == 0 || strcmp(name, "noipa") == 0) {
-+			declattr.noinline = true;
++		} else if (strcmp(name, "noipa") == 0) {
++			declattr.noipa = true;
 +		} else if (strcmp(name, "gnu_inline") == 0) {
 +			declattr.gnuinline = true;
 +		} else if (strcmp(name, "transparent_union") == 0) {
@@ -191,7 +191,7 @@
 +	char *regvar;    /* GNU register variable: register T x asm("REG") binds x to REG (without '%'), or null */
 +	bool used;       /* GNU used: kept even when nothing references it (cproc -p) */
 +	bool weak;       /* GNU weak */
-+	bool noinline;   /* GNU noinline or noipa */
++	bool noipa;      /* GNU noipa */
 +	char *alias;     /* GNU alias("target"): the declaration defines the name as the target */
 +	const char *visibility;   /* GNU visibility("hidden"), ... or null */
 +	bool symattr;    /* in the list of decls whose weak or visibility goes to the assembly (emitsymattrs) */
@@ -346,7 +346,7 @@
 +	bool transparent;   /* GNU transparent_union, taken on a typedef of a union (decl) */
 +	bool gnuinline;     /* GNU gnu_inline */
 +	bool alwaysinline;  /* GNU always_inline */
-+	bool noinline;      /* GNU noinline or noipa: a call of the function is never folded into its body (expr.c) */
++	bool noipa;         /* GNU noipa: a call of the function is never folded by what its body is (expr.c) */
 +	bool weak;          /* GNU weak */
 +	char *alias;        /* GNU alias("target") */
 +	const char *visibility;   /* GNU visibility("...") */
@@ -969,8 +969,8 @@
 +		d->used = true;
 +	if (declattr.weak)
 +		d->weak = true;
-+	if (declattr.noinline)
-+		d->noinline = true;
++	if (declattr.noipa)
++		d->noipa = true;
 +	if (declattr.visibility)
 +		d->visibility = declattr.visibility;
 +	else if (pragmavisibility && !d->visibility)
@@ -1953,7 +1953,7 @@
  				else
  					*end = exprassign(*end, p->type);
  				end = &(*end)->next;
-@@ -1383,6 +1659,41 @@
+@@ -1383,6 +1659,42 @@
  			}
  			if (p && !t->u.func.isvararg && !t->u.func.unprototyped)
  				error(&tok.loc, "not enough arguments for function call");
@@ -1961,12 +1961,13 @@
 +			 * inlines it and folds what depends on it (the kernel's pmd_trans_huge() is 0 without transparent huge
 +			 * pages, and the call it guards names a function this configuration does not have) */
 +			/* likewise a call of a function whose body is {} is nothing (the kernel's __apply_fineibt() without CFI,
-+			 * whose arguments name sections this configuration does not have). Not folded: a weak function (the link
-+			 * may take another unit's definition) and a noinline one (qbe-prep.rb's __nfcxx_keep(&x), whose call
-+			 * is what keeps a volatile local in memory). */
++			 * whose arguments name sections this configuration does not have; noinline does not stop gcc, which
++			 * finds the function const and drops the call, as for apply_retpolines()). Not folded: a weak function
++			 * (the link may take another unit's definition) and a noipa one (qbe-prep.rb's __nfcxx_keep(&x), whose
++			 * call is what keeps a volatile local in memory). */
 +			if (r->kind == EXPRUNARY && r->op == TBAND && r->base->kind == EXPRIDENT &&
 +			    r->base->u.ident.decl->kind == DECLFUNC && r->base->u.ident.decl->defined &&
-+			    !r->base->u.ident.decl->weak && !r->base->u.ident.decl->noinline &&
++			    !r->base->u.ident.decl->weak && !r->base->u.ident.decl->noipa &&
 +			    (r->base->u.ident.decl->u.func.constret || r->base->u.ident.decl->u.func.emptybody)) {
 +				struct expr *a;
 +				bool pure = true;
@@ -1995,7 +1996,7 @@
  			e = decay(e);
  			next();
  			break;
-@@ -1398,7 +1709,7 @@
+@@ -1398,7 +1710,7 @@
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "'%s' operator must be applied to pointer to struct/union", tokenstr(op));
  			next();
@@ -2004,7 +2005,7 @@
  				error(&tok.loc, "expected identifier after '%s' operator", tokenstr(op));
  			lvalue = op == TARROW || r->base->lvalue;
  			offset = 0;
-@@ -1497,7 +1808,7 @@
+@@ -1497,7 +1809,7 @@
  					parseinit(s, t);
  				e = NULL;
  			} else {
@@ -2013,7 +2014,7 @@
  				expect(TRPAREN, "after expression");
  				if (op == TSIZEOF)
  					e = postfixexpr(s, e);
-@@ -1515,11 +1826,14 @@
+@@ -1515,11 +1827,14 @@
  				error(&tok.loc, "%s operator applied to bitfield expression", tokenstr(op));
  			t = e->type;
  		}
@@ -2031,7 +2032,7 @@
  			e = mkexpr(EXPRSIZEOF, &typeulong, e);
  			e->u.szof.type = t;
  		} else {
-@@ -1527,7 +1841,12 @@
+@@ -1527,7 +1842,12 @@
  			XXX: __alignof__ is not the same as alignof on 32-bit archs
  			this needs to be considered if we gain support for those archs
  			*/
@@ -2045,7 +2046,7 @@
  		}
  		break;
  	default:
-@@ -1537,6 +1856,26 @@
+@@ -1537,6 +1857,26 @@
  	return e;
  }
  
@@ -2072,7 +2073,7 @@
  static struct expr *
  castexpr(struct scope *s)
  {
-@@ -1551,7 +1890,7 @@
+@@ -1551,7 +1891,7 @@
  		tq = QUALNONE;
  		t = typename(s, &tq, &toeval);
  		if (!t) {
@@ -2081,7 +2082,7 @@
  			expect(TRPAREN, "after expression to match '('");
  			e = postfixexpr(s, e);
  			goto done;
-@@ -1566,9 +1905,43 @@
+@@ -1566,9 +1906,43 @@
  			d->u.obj.storage = s == &filescope ? SDSTATIC : SDAUTO;
  			e->u.compound.decl = d;
  			e->u.compound.init = parseinit(s, t);
@@ -2152,8 +2153,8 @@
 +static bool
 +famslot(struct initparser *p, struct type *t)
 +{
-+	return p->sub == p->obj && p->sub->type->kind == TYPESTRUCT && p->sub->u.mem && !p->sub->u.mem->next &&
-+		t == p->sub->u.mem->type && t->kind == TYPEARRAY && t->incomplete;
++	return t->kind == TYPEARRAY && t->incomplete && p->sub == p->obj && p->sub->type->kind == TYPESTRUCT &&
++		p->sub->u.mem && !p->sub->u.mem->next && t == p->sub->u.mem->type;
 +}
 +
  static void
@@ -2179,7 +2180,15 @@
  	off += p->sub->offset;
  	if (++p->sub == p->obj + countof(p->obj))
  		fatal("internal error: too many designators");
-@@ -109,19 +137,33 @@
+@@ -89,6 +117,7 @@
+ 				return true;
+ 			}
+ 		} else {
++			p->sub->u.mem = m;   /* the anonymous member is the cursor: initialization goes on after it */
+ 			subobj(p, m->type, m->offset);
+ 			if (findmember(p, name))
+ 				return true;
+@@ -109,19 +138,33 @@
  	for (;;) {
  		t = p->sub->type;
  		switch (tok.kind) {
@@ -2216,7 +2225,7 @@
  		case TPERIOD:
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "member designator only valid for struct/union types");
-@@ -137,6 +179,64 @@
+@@ -137,6 +180,64 @@
  	}
  }
  
@@ -2281,7 +2290,7 @@
  static void
  focus(struct initparser *p)
  {
-@@ -207,11 +307,15 @@
+@@ -207,11 +308,15 @@
  	p.sub->iscur = false;
  	p.init = NULL;
  	p.last = &p.init;
@@ -2297,7 +2306,7 @@
  		if (p.cur) {
  			if (tok.kind == TLBRACK || tok.kind == TPERIOD)
  				designator(s, &p);
-@@ -222,8 +326,12 @@
+@@ -222,8 +327,12 @@
  		}
  		if (consume(TLBRACE)) {
  			if (consume(TRBRACE)){
@@ -2312,7 +2321,7 @@
  				goto next;
  			}
  			if (p.cur == p.sub) {
-@@ -252,8 +360,18 @@
+@@ -252,8 +361,18 @@
  				goto add;
  			case TYPESTRUCT:
  			case TYPEUNION:
@@ -2332,7 +2341,7 @@
  				break;
  			default:  /* scalar type */
  				assert(t->prop & PROPSCALAR);
-@@ -268,12 +386,17 @@
+@@ -268,12 +387,17 @@
  		else
  			bits = (struct bitfield){0};
  		initadd(&p, mkinit(p.sub->offset, p.sub->offset + p.sub->type->size, bits, expr));
@@ -2364,7 +2373,7 @@
  #include "util.h"
  #include "arg.h"
  #include "cc.h"
-@@ -14,11 +18,359 @@
+@@ -14,11 +18,387 @@
  
  extern bool asanon;
  
@@ -2403,6 +2412,34 @@
 +	}
 +	ilitems[nilitems] = (struct ilitem){.off = off};
 +	return &ilitems[nilitems++];
++}
++
++/*
++The next global name ('$') at or after s and before e, outside the blocks cproc marked unreachable ("# nfcxx:dead" after
++a block's label, qbe.c emitfunc): QBE drops those blocks, and a name only they use is not used (the kernel's
++create_huge_pmd(), called where __transparent_hugepage_enabled() is false). s is never inside such a block.
++*/
++static const char *
++ilref(const char *s, const char *e)
++{
++	static const char mark[] = "\n# nfcxx:dead\n";
++	const char *c, *m;
++
++	for (;;) {
++		if (!(c = memchr(s, '$', e - s)))
++			return NULL;
++		for (m = s; (m = memchr(m, '\n', c - m)) && (size_t)(e - m) >= sizeof mark - 1; ++m)
++			if (memcmp(m, mark, sizeof mark - 1) == 0)
++				break;
++		if (!m || m >= c || (size_t)(e - m) < sizeof mark - 1)
++			return c;
++		/* skip the dead block: to the next label or the function's end */
++		for (m += sizeof mark - 2; (m = memchr(m, '\n', e - m)) && m + 1 < e && m[1] != '@' && m[1] != '}'; ++m)
++			;
++		if (!m || m + 1 >= e)
++			return NULL;
++		s = m + 1;
++	}
 +}
 +
 +/* the length of the global name at s (after the '$'): a quoted name keeps its quotes */
@@ -2455,7 +2492,7 @@
 +
 +		if (!ilitems[i].live)
 +			continue;
-+		for (; (s = memchr(s, '$', e - s)); s += 1 + n) {
++		for (; (s = ilref(s, e)); s += 1 + n) {
 +			n = ilnamelen(s + 1, e);
 +			j = ilfind(s + 1, n);
 +			if (j < 0 || (size_t)j == i && !ilitems[i].func)
@@ -2475,7 +2512,7 @@
 +
 +			if (!ilitems[i].live || !ilitems[i].func)
 +				continue;
-+			for (; (s = memchr(s, '$', e - s)); s += 1 + n) {
++			for (; (s = ilref(s, e)); s += 1 + n) {
 +				n = ilnamelen(s + 1, e);
 +				j = ilfind(s + 1, n);
 +				if (j < 0 || (size_t)j == i || !(s - buf >= 5 && memcmp(s - 5, "call ", 5) == 0))
@@ -2610,7 +2647,7 @@
 +		const char *s = buf + l->off, *e = s + l->len;
 +		int j;
 +
-+		for (; (s = memchr(s, '$', e - s)); s += 1 + n) {
++		for (; (s = ilref(s, e)); s += 1 + n) {
 +			n = ilnamelen(s + 1, e);
 +			j = ilfind(s + 1, n);
 +			if (j >= 0 && !ilitems[j].live) {
@@ -2662,7 +2699,7 @@
 +
 +		if (!ilitems[i].live)
 +			continue;
-+		for (; (s = memchr(s, '$', e - s)); s += 1 + n) {
++		for (; (s = ilref(s, e)); s += 1 + n) {
 +			n = ilnamelen(s + 1, e);
 +			if (n == len && memcmp(s + 1, name, len) == 0)
 +				return true;
@@ -2725,7 +2762,7 @@
  
  	argv0 = progname(argv[0], "cproc-qbe");
  	asanon = getenv("NFCXX_ASAN") != NULL;
-@@ -29,6 +381,33 @@
+@@ -29,6 +409,33 @@
  	case 't':
  		target = EARGF(usage());
  		break;
@@ -2759,7 +2796,7 @@
  	case 'o':
  		output = EARGF(usage());
  		break;
-@@ -38,9 +417,21 @@
+@@ -38,9 +445,21 @@
  
  	targinit(target);
  
@@ -2781,7 +2818,7 @@
  	if (argc) {
  		while (argc--)
  			scanfrom(argv[argc], NULL);
-@@ -67,6 +458,7 @@
+@@ -67,6 +486,7 @@
  			}
  		}
  		emittentativedefns();
@@ -2789,7 +2826,7 @@
  		emitasanctor();
  		checkf128calls();
  	}
-@@ -74,5 +466,31 @@
+@@ -74,5 +494,31 @@
  	fflush(stdout);
  	if (ferror(stdout))
  		fatal("write failed");
@@ -3874,7 +3911,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3214,922 @@
+@@ -2644,17 +3214,943 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -3935,6 +3972,30 @@
 +};
 +/* caller-saved GP registers offered to a plain "r" operand (rdi is used only transiently for the slot pointer) */
 +static const int rpool[] = {RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11};
++
++/*
++The register of an operand the constraint leaves to the compiler: a caller-saved one from the pool, else -- every one
++is taken, as by the kernel's call_on_stack(), whose asm clobbers them all for the call it makes -- a callee-saved one,
++which the thunk preserves; one is left for the thunk's slot pointer.
++*/
++static int
++asmpoolreg(const bool *used, unsigned *pool)
++{
++	static const int callee[] = {R12, R13, R14, R15, RBX};
++	unsigned k, nfree = 0;
++
++	while (*pool < countof(rpool) && used[rpool[*pool]])
++		++*pool;
++	if (*pool < countof(rpool))
++		return rpool[(*pool)++];
++	for (k = 0; k < countof(callee); ++k)
++		nfree += !used[callee[k]];
++	if (nfree < 2)
++		error(&tok.loc, "too many register asm operands");
++	for (k = 0; used[callee[k]]; ++k)
++		;
++	return callee[k];
++}
 +static int
 +regsizecol(int sz)
 +{
@@ -4308,11 +4369,7 @@
 +				error(&tok.loc, "asm flag output must have integer type");
 +			rec[i].flag = body + 3;
 +			rec[i].feed = rec[i].prestore = false;
-+			while (pool < countof(rpool) && used[rpool[pool]])
-+				++pool;
-+			if (pool == countof(rpool))
-+				error(&tok.loc, "too many register asm operands");
-+			rec[i].reg = rpool[pool++];
++			rec[i].reg = asmpoolreg(used, &pool);
 +			used[rec[i].reg] = true;
 +			rec[i].size = asmopsize(op->expr->type);
 +			rec[i].slot = slotsize;
@@ -4401,11 +4458,7 @@
 +		if (fr >= 0) {
 +			rec[i].reg = fr;
 +		} else {
-+			while (pool < countof(rpool) && used[rpool[pool]])
-+				++pool;
-+			if (pool == countof(rpool))
-+				error(&tok.loc, "too many register asm operands");
-+			rec[i].reg = rpool[pool++];
++			rec[i].reg = asmpoolreg(used, &pool);
 +			used[rec[i].reg] = true;
 +		}
 +		rec[i].size = rec[i].mem ? 8 : asmopsize(op->expr->type);
@@ -4438,9 +4491,12 @@
 +		if (r >= 0 && (r == RBX || r == R12 || r == R13 || r == R14 || r == R15))
 +			save[r] = true;
 +	}
-+	for (i = 0; i < total; ++i)   /* a fixed callee-saved operand register (only "b"=rbx) is written, so preserve it */
-+		if (rec[i].reg == RBX)
-+			save[RBX] = true;
++	for (i = 0; i < total; ++i) {   /* a callee-saved operand register ("b", or asmpoolreg's) is written: preserve it */
++		int r = rec[i].reg;
++
++		if (r == RBX || r == R12 || r == R13 || r == R14 || r == R15)
++			save[r] = true;
++	}
 +	save[holder] = false;   /* the holder is pushed and popped separately */
 +
 +	expid = asmthunkid++;
@@ -4536,7 +4592,9 @@
 +	nsave = 0;
 +	for (i = 0; i < 16; ++i)
 +		nsave += save[i];
-+	pad = (1 + nsave) % 2 ? 8 : 0;   /* keep %rsp 16-aligned for any call inside the template */
++	/* keep %rsp 16-aligned for a call inside the template: 8 mod 16 on entry, so an even number of pushes (the holder
++	 * and the saves) needs 8 more */
++	pad = (1 + nsave) % 2 ? 0 : 8;
 +	fprintf(asmout, "\t.text\n\t.p2align 4\nnfcxx_asm_thunk.%u:\n", expid);
 +	fprintf(asmout, "\tpushq %%%s\n", regname[holder][0]);
 +	for (i = 0; i < 16; ++i)
@@ -4799,7 +4857,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4397,12 @@
+@@ -2922,6 +4418,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -4812,7 +4870,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4415,7 @@
+@@ -2934,7 +4436,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -4821,7 +4879,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4425,7 @@
+@@ -2944,9 +4446,13 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -4829,7 +4887,13 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3072,9 +4554,21 @@
++		/* cproc -p: what only an unreachable block names is not referenced (main.c ilref) */
++		if (prune && !b->reach)
++			puts("# nfcxx:dead");
+ 		if (b->phi.res.kind) {
+ 			putchar('\t');
+ 			emitvalue(&b->phi.res);
+@@ -3072,9 +4578,21 @@
  	int align;
  
  	align = d->u.obj.align;
@@ -4852,7 +4916,7 @@
  	if (d->u.obj.storage == SDTHREAD)
  		fputs("thread ", stdout);
  	if (d->linkage == LINKEXTERN)
-@@ -3143,7 +4637,7 @@
+@@ -3143,7 +4661,7 @@
  		printf("b %u, ", (unsigned)bits);
  		++offset;
  	}

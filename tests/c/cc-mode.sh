@@ -466,7 +466,8 @@ int main(void) {
 EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kconst.c -o kconst 2>/dev/null && { ./kconst; [ $? = 42 ]; }; then ok "kernel mode: calls of constant functions fold"
     else bad "kernel mode: calls of constant functions fold" "wrong result or the link failed"; fi
-    # x & 0, a call of an empty function and a hidden declaration used only in dead code leave no reference to symbols
+    # x & 0, a call of an empty function (noinline too), a function called only from dead code and a hidden declaration
+    # used only in dead code leave no reference to symbols
     # this program does not define (the link fails otherwise); the effects of the operands and arguments still happen
     cat > kfold.c <<'EOC'
 #pragma GCC visibility push(hidden)
@@ -478,6 +479,10 @@ static int calls;
 static int counted(void) { return ++calls; }
 static void apply(int *start, int *end) {}
 void seal(int *start, int *end) {}
+__attribute__((noinline)) void retpolines(int *start, int *end) {}   /* gcc drops the call too */
+static inline int thp_enabled(unsigned int *v) { return 0; }
+static inline int none(unsigned int *p) { return *p == 7; }
+static int create_huge(int *v) { return no_dax(); }   /* called only where thp_enabled() is false: not emitted */
 struct inode { unsigned int i_flags; };
 int dedupe(struct inode *in) {
 	if (!(in->i_flags & S_DAX))
@@ -489,6 +494,9 @@ int main(void) {
 	int r = dedupe(&in);
 	apply(sites, sites_end);
 	seal(sites, sites_end);
+	retpolines(sites, sites_end);
+	if (none(&in.i_flags) && thp_enabled(&in.i_flags))
+		return create_huge(&r);
 	if (0 && r)
 		pgdir_shift = 48;
 	if (counted() & 0)   /* not folded, as the call has an effect: it runs */
@@ -497,8 +505,8 @@ int main(void) {
 	return r == 1 && calls == 2 ? 42 : 1;
 }
 EOC
-    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kfold.c -o kfold 2>/dev/null && { ./kfold; [ $? = 42 ]; }; then ok "kernel mode: x & 0, empty calls and dead hidden declarations fold"
-    else bad "kernel mode: x & 0, empty calls and dead hidden declarations fold" "wrong result or the link failed"; fi
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kfold.c -o kfold 2>/dev/null && { ./kfold; [ $? = 42 ]; }; then ok "kernel mode: x & 0, empty calls and dead code fold"
+    else bad "kernel mode: x & 0, empty calls and dead code fold" "wrong result or the link failed"; fi
     # a GNU attribute that changes what a declaration means and that cproc does not take is refused, not ignored
     for at in 'vector_size(16)' 'naked' 'mode(TI)'; do
       printf 'typedef int t __attribute__((%s));\n' "$at" > kattr.c
@@ -622,6 +630,18 @@ EOC
     if out=$("$nfcc" mixd.c -o mixd 2>&1); then bad "floating operand to __builtin_add_overflow" "linked"
     elif grep -q overflow_unsupported_operand_types <<<"$out"; then ok "floating operand to __builtin_add_overflow fails at link, naming the symbol"
     else bad "floating operand to __builtin_add_overflow" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+  fi
+  if [ $b = qbe ] && [ "$(uname -m)" = x86_64 ]; then
+    # a call inside an asm template is made with %rsp 16-byte aligned, whatever the thunk pushes (gcc promises nothing
+    # here; the thunk is a function of its own, so it can)
+    cat > asmcall.c <<'EOC'
+static int misaligned;
+__attribute__((noinline)) long twice(long v) { misaligned |= (unsigned long)__builtin_frame_address(0) % 16 != 0; return 2 * v; }
+static long one(long a) { long r; __asm__ volatile("movq %[a], %%rdi\n\tcall twice\n\tmovq %%rax, %[r]" : [r] "=r"(r) : [a] "r"(a) : "rdi", "rax", "memory"); return r; }
+static long two(long a) { long r; __asm__ volatile("movq %[a], %%rdi\n\tcall twice\n\tmovq %%rax, %[r]" : [r] "=r"(r) : [a] "r"(a) : "rbx", "rdi", "rax", "memory"); return r; }
+int main(void) { return one(3) + two(4) == 14 && !misaligned ? 0 : 1; }
+EOC
+    check "a call in an asm template has an aligned stack" bash -c "'$nfcc' asmcall.c -o asmcall && ./asmcall"
   fi
   if [ "$b" = gcc ] && [ "$(uname -m)" != x86_64 ]; then echo "skip $b -mavx2 intrinsics (x86-64 only)"; fi
   if [ "$b" = gcc ] && [ "$(uname -m)" = x86_64 ]; then
