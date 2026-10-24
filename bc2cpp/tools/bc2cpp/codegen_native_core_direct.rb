@@ -136,11 +136,13 @@ module NativeCoreDirectFallback
   # define it (mruby's class.c) or to register methods on it.
   NATIVE_BASIC_OBJECT_USE = /MRB_MT_INIT_ROM|mrb_define_(?:class|const|method|module_function)\w*\(/
 
-  def kernel_receiver_sealed?
+  # `world` is the closed world the site is compiled under (a core body passes the program's, @core_program_world).
+  # Only an answer from a world is kept: a core body compiled first must not fix it to false.
+  def kernel_receiver_sealed?(world = @closed_world || @core_program_world)
+    return false unless world && @native_name_sources
     return @kernel_receiver_sealed if defined?(@kernel_receiver_sealed)
 
-    @kernel_receiver_sealed = !!(@closed_world&.basic_object_instance_free? && @native_name_sources &&
-                                 native_basic_object_registration_only?)
+    @kernel_receiver_sealed = !!(world.basic_object_instance_free? && native_basic_object_registration_only?)
   end
 
   def native_basic_object_registration_only?
