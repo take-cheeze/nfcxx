@@ -119,8 +119,11 @@ class CodeGen
   # skipped: static_dispatch_registrations.rb proved no runtime lookup reaches
   # them, so the wrapper is dead, and with no dynamic lookup there is no
   # interpreted fallback to read iv_tbl.
+  # BC2CPP_UNREGISTERED_EXTRA ("Owner#name,..."): more entries to leave unregistered, for a check fixture that has
+  # no place in the committed lists (scripts/bc2cpp/unregistered_verify_check.rb).
   def emit_owner_registrations(compiled, owners,
-                               unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']))
+                               unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']) |
+                                             ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set)
     by_owner = compiled.group_by { |m| m[:owner] }
     targets = owners.select { |o| by_owner.key?(o) }
 
@@ -149,6 +152,21 @@ class CodeGen
         }
       CPP
     end
+    if targets.any? { |o| by_owner[o].any? { |m| unregistered.include?("#{o}##{m[:name]}") } }
+      out << <<~CPP
+        #ifdef BC2CPP_UNREGISTERED_VERIFY
+        #include <stdio.h>
+        #include <stdlib.h>
+        // UNREGISTERED_VERIFY: what a by-name lookup of an unregistered (statically dispatched only) entry finds.
+        static mrb_value bc2cpp_unregistered_stub(mrb_state* M, mrb_value self) {
+          fprintf(stderr, "bc2cpp: UNREGISTERED_VERIFY: unregistered method looked up by name: %s#%s\\n",
+                  mrb_obj_classname(M, self), mrb_sym_name(M, M->c->ci->mid));
+          fflush(stderr);
+          abort();
+        }
+        #endif
+      CPP
+    end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
     targets.each do |owner|
       singleton = owner.end_with?('.singleton')
@@ -168,6 +186,11 @@ class CodeGen
         end
         if unregistered.include?("#{owner}##{m[:name]}")
           out << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
+          # UNREGISTERED_VERIFY: a verify build registers a stub under the name, so a lookup the proof missed
+          # aborts naming the method instead of raising a NoMethodError far from its cause.
+          out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n" \
+                 "  #{singleton ? 'mrb_define_class_method' : 'mrb_define_method'}(M, #{var}, " \
+                 "#{c_string_literal(m[:name])}, bc2cpp_unregistered_stub, MRB_ARGS_ANY());\n#endif\n"
           next
         end
         names = [m[:name]]

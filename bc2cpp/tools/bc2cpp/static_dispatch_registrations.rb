@@ -510,7 +510,11 @@ if $PROGRAM_NAME == __FILE__
   mrbc = ENV['MRBC'] || 'mrbc'
   # --closed-only: the list only the closed build uses (see static_dispatch_unregistered_closed.rb).
   closed_only = ARGV.include?('--closed-only')
-  analysis = StaticDispatchRegistrations.analyze(repo_root, mrbc, closed_only: closed_only)
+  # The probe generates with BC2CPP_BUILD_NAME=closed (bc2cpp_closed_world_probe_env), so the closed list's entries
+  # are already missing from its registrations. They must count as already unregistered, or a re-run drops every
+  # one of them from the candidates and "proves" a smaller list than the committed one.
+  unregistered = closed_only ? STATIC_DISPATCH_UNREGISTERED | STATIC_DISPATCH_UNREGISTERED_CLOSED : STATIC_DISPATCH_UNREGISTERED
+  analysis = StaticDispatchRegistrations.analyze(repo_root, mrbc, unregistered: unregistered, closed_only: closed_only)
   list = StaticDispatchRegistrations.eligible(analysis)
   warn "registered compiled entries: #{analysis[:registered].size}, statically-dispatched-only: #{list.size}"
   list.sort_by { |m| [m[:owner], m[:name]] }.each { |m| puts "#{m[:owner]}##{m[:name]}\t#{m[:entry]}\t#{m[:gem]}" }
