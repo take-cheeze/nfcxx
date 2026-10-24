@@ -70,7 +70,7 @@ jobs:
               tests/realworld/run_optcarrot.sh
 
           - name: Lua, TinyCC, CoreCLR GC, ASTro
-            packages: make ruby rake
+            packages: make ruby rake libgmp-dev
             run: |
               tests/realworld/run_lua.sh
               tests/realworld/run_lua_make.sh
@@ -87,7 +87,8 @@ jobs:
           submodules: true
 
       # Per shard: ruby and rake (the mruby bootstrap and build, ASTroGen), make (Lua's and TinyCC's makefiles, SDCC),
-      # bison, flex and libboost-graph-dev (SDCC's build).
+      # bison, flex and libboost-graph-dev (SDCC's build), libgmp-dev (koruby_precise's real bignums; without it run_astro.sh
+      # builds BIGNUM=wrap).
       - uses: ./.github/actions/toolchain
         with:
           packages: ${{ matrix.packages }}

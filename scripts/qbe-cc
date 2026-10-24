@@ -12,6 +12,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cproc=${CPROC_QBE:-$root/build/cproc/cproc-qbe}
 qbe=${QBE:-$root/build/qbe/qbe}
 source "$(dirname "$0")/trace.sh"
+# NFCXX_QBE_PREP_RB, NFCXX_WEAK_SYMBOLS_RB: other copies of the two mruby scripts (tests/mruby/qbe-asm.sh runs the oracle ports).
 
 compile=0 asm=0 out="" src="" cppflags=() asflags=()
 kcproc=() nofp=0 nounwind=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
@@ -148,6 +149,10 @@ trace_end "$t" "cc -E (preprocess)" qbe-backend
 # The C-input mode (hand-written C) is an argument: the mruby interpreter has no ENV.
 t=$(trace_start)
 prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
+# NFCXX_QBE_DCE=1: qbe-prep.rb drops the definitions of static functions nothing uses (what gcc does by not emitting them).
+# cproc and QBE compile every one, so a file that includes a big header of static inline functions pays for all of them.
+# The assembly is smaller, not identical, so it is opt-in; weak-symbols.rb gets only --c-input.
+prepdce=(); [ -z "${NFCXX_QBE_DCE:-}" ] || prepdce=(--dce)
 # Mach-O targets: qbe-prep.rb lists constructors in __mod_init_func with the "_" label prefix
 macho=(); [ $macos = 1 ] && macho=(--macho)
 # The fence stub is mfence on x86-64 and dmb ish on arm64. The target is arm64 on an arm64 host and in the macOS cross
@@ -166,7 +171,7 @@ if [ -n "${NFCXX_QBE_KERNEL:-}" ] ||
      ! grep -q "$(printf '\r')" "$tmp/pp.c"; }; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
-  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${macho[@]+"${macho[@]}"} ${arm64[@]+"${arm64[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+  "$(dirname "$0")/mrb" "${NFCXX_QBE_PREP_RB:-$(dirname "$0")/qbe-prep.rb}" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${prepdce[@]+"${prepdce[@]}"} ${macho[@]+"${macho[@]}"} ${arm64[@]+"${arm64[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
 fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
@@ -212,14 +217,14 @@ t=$(trace_start)
 # Mach-O: QBE's Apple targets prefix every label with "_" (T.assym), so the names are looked up with it.
 symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
-"$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
+"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
 # Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
 # __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
 # that text (weak-symbols.rb gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
 if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
   if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
      grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
-    "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" --c-input "$tmp/pp.weak.c" "$tmp/out.s"
+    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input "$tmp/pp.weak.c" "$tmp/out.s"
   fi
 fi
 cat "$tmp/tail.s" >> "$tmp/out.s"

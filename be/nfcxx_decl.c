@@ -16,6 +16,9 @@ A function declaration is followed by one signature record for it (nfcxx-ffi, li
 
 ID is the function's record id, RETURN the spelling of its return type, VARIADIC 1 for a trailing "...", and each
 PARAM the spelling of a parameter type with "@" where its name goes ("int @", "int (*@)(const void *, const void *)").
+A kinds record follows it (lib/ffi calls functions by kind): kinds <TAB> ID <TAB> RETURN-KIND <TAB> PARAM-KINDS, one
+letter per parameter ("ifp"): i signed, u unsigned, f float or double, p pointer or array, v void, s struct or union,
+x other.
 Spellings are C declarations. A function with a type that has no spelling (an anonymous struct, a C++ reference)
 gets no sig record. PARENT is 0 for a declaration at file scope. KIND is one of: namespace, struct, class, union, enum,
 enumerator, typedef, function, method, constructor, destructor, var, field, param, function_template,
@@ -252,6 +255,33 @@ static int nf_spell(a_type_ptr t, const char *inner, char *out, size_t cap)
   return 1;
 }
 
+/* How a value of type T crosses a call made by lib/ffi (kinds records): 'i' signed integer, 'u' unsigned integer
+   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 's' struct or union (by value),
+   'x' anything else. */
+static char nf_kind(a_type_ptr t)
+{
+  t = skip_typerefs(t);
+  switch (t->kind) {
+    case tk_void:
+      return 'v';
+    case tk_integer:
+      if (size_of_non_typeref_type(t) > 8) return 'x';
+      return is_signed_integral_type(t) ? 'i' : 'u';
+    case tk_float:
+      return t->variant.float_kind == fk_float || t->variant.float_kind == fk_double ? 'f' : 'x';
+    case tk_pointer:
+      return t->variant.pointer.is_reference || t->variant.pointer.is_rvalue_reference ? 'x' : 'p';
+    case tk_array:
+      return 'p';
+    case tk_class:
+    case tk_struct:
+    case tk_union:
+      return 's';
+    default:
+      return 'x';
+  }
+}
+
 /* The sig record of a function: its return type and its parameter types, each spelled with "@" for the name. */
 static void nf_emit_sig(a_routine_ptr rout, int id)
 {
@@ -273,6 +303,17 @@ static void nf_emit_sig(a_routine_ptr rout, int id)
     }
   }
   fprintf(NF_OUT, "%s\n", line);
+
+  /* The kinds record: one letter for the return type and one per parameter (see nf_kind). */
+  {
+    char pk[NF_SIG_MAX];
+    size_t n = 0;
+    if (x != NULL) {
+      for (p = x->param_type_list; p != NULL && n + 1 < sizeof pk; p = p->next) pk[n++] = nf_kind(p->type);
+    }
+    pk[n] = '\0';
+    fprintf(NF_OUT, "kinds\t%d\t%c\t%s\n", id, nf_kind(fn_type->variant.routine.return_type), pk);
+  }
 }
 
 /* A routine declared in a class (owner is the class type) or outside one. A routine defined outside its class

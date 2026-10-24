@@ -1,0 +1,8 @@
+(ir-module "summaries" (layout (pointer 8) (int 4)))
+(function "put" (ret void) (params (param %0 "p" (ptr int)))
+(decl %0 param) (store int %0 (const int 1)) (return))
+(function "main" (ret int) (params)
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 0))
+(let %0 (ptr int) (borrow (ptr int) "L" shared $"x")) (eval (call void &"put" %0)) (loan-end "L")
+(scope-end $"x") (return (const int 0)))

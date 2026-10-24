@@ -15,7 +15,7 @@ each backend, builds some of its samples with nfcc:
 | `sample/luastro` | a Lua subset (74 nodes) | `hello.lua`, `fib(30)` = 832040, and its 8 `test/test_*.lua` scripts exit 0; the qbe and gcc builds print the same for every script (the upstream runner compares with a system `lua5.4`, which CI does not have) |
 
 | `sample/baruby_precise` | a Ruby subset on a precise copying GC, parsed by Prism | `--plain` prints the right array; `--aot-compile --run` compiles the `SD_*.c` through nfcc, writes `code_store/all.so` and runs `fib(30)` = 832040 |
-| `sample/koruby_precise` | ASTro's flagship: a CRuby-compatible Ruby (26,000-line runtime, 119 node types, Prism, zlib, libyaml, a regex engine from `sample/astrogre`) | built with `BIGNUM=wrap` (no GMP); `tests/realworld/koruby_test.rb` (21 lines of output: recursion, blocks, classes, `Comparable`, exceptions, regexps, `format`, `Struct`) prints what CRuby prints, on both backends |
+| `sample/koruby_precise` | ASTro's flagship: a CRuby-compatible Ruby (26,000-line runtime, 119 node types, Prism, zlib, libyaml, a regex engine from `sample/astrogre`) | built with `BIGNUM=gmp` (real bignums, `-DKORB_BIGNUM=1 -lgmp`) when `<gmp.h>` is installed, else `BIGNUM=wrap`; `tests/realworld/koruby_test.rb` (21 lines of output: recursion, blocks, classes, `Comparable`, exceptions, regexps, `format`, `Struct`) and, with gmp, `koruby_big_test.rb` (`2**100`, 30!, big division and modulo, `to_s(16)`, `digits`, `gcd`, comparisons, negative bignums, `Integer.sqrt`, big times float) print what CRuby prints, on both backends |
 | Prism (`ruby/prism`, the Ruby parser; C) | the library baruby_precise links | `libprism.so` built by nfcc on both backends and loaded by a small program calling `pm_version()` |
 
 ```
@@ -112,13 +112,77 @@ copy by `run_astro.sh`:
 - **`static const` in a constant initializer** (bug 6).
 
 The AOT bake (`--aot-compile --run` of `def fib(n) = n < 2 ? n : fib(n-1) + fib(n-2); puts fib(30)`) is where the qbe path runs out of
-patience, and it is not in the test: the program is right (832040, from the interpreter) but the store compiles about 230
-generated files, each of which `#include`s the whole evaluator (a multi-megabyte translation unit), and on qbe every one goes
-through the mruby `qbe-prep.rb` rewrite before cproc. That took more than 25 minutes (82 CPU-minutes) without finishing.
+patience, and it is not in the test: the program is right (832040, from the interpreter), but the store compiles thousands of
+generated files (233 in `code_store`, 2793 in the pool mode's `preload_store`) and it did not finish in 25 minutes (82 CPU-minutes).
+The next section says where the time goes.
+
+## Why the bake is slow on qbe
+
+One `SD_*.c` is a few lines (the specialized function) after `#include`s of `node_eval.c` and `node_dispatch.c`. After
+`cc -E -P` that is a 0.8 MB translation unit (11,800 lines, 233,000 tokens) in which only the
+last function is new; every file repeats the same 0.8 MB. Nothing in the pipeline is slow per byte: a file takes about two
+seconds, and the time is the number of files times the same prefix. The 82 CPU-minutes are 2793 files at about 1.8 s.
+
+One small SD file (`nfcc -c`, `NFCXX_BACKEND=qbe`, `-O3 -fPIC ...` as the store's makefile passes them; `NFCXX_TRACE`; seconds, a
+shared 4-core machine, ranges of 3 to 4 runs). The gcc backend on the same file is 0.77 s for everything.
+
+| stage | before | after (default) | after, `NFCXX_QBE_DCE=1` |
+| --- | --- | --- | --- |
+| `cc -E` | 0.10-0.14 | 0.09-0.13 | 0.09-0.10 |
+| `qbe-prep.rb` (mruby) | 1.0-1.45 | 0.49-0.59 | 0.53-0.71 |
+| cproc | 0.10-0.12 | 0.09-0.10 | 0.04-0.05 |
+| qbe | 0.30-0.35 | 0.30-0.37 | 0.05 |
+| `weak-symbols.rb` (mruby, with its second `cc -E`) | 0.19-0.25 | 0.14-0.23 | 0.09-0.10 |
+| assemble | 0.02-0.14 | 0.02-0.14 | 0.01-0.04 |
+| total | 1.8-2.3 | 1.2-1.4 | 0.9-1.1 |
+
+Lua's `lvm.c` (59 KB, `-O2`): `cc -E` 0.07-0.10, `qbe-prep.rb` 0.26-0.29 (now 0.17-0.18), cproc 0.03-0.04, qbe 0.21-0.23,
+`weak-symbols.rb` 0.09-0.13 (now 0.07-0.11), total 0.74-0.82 s (now 0.64-0.74). The biggest file of the pool store (1.5 MB
+of `SD_*.c`, 3.4 MB after `cc -E`) takes 7.0 s (`qbe-prep.rb` 4.8-5.1) before and 4.0-4.1 s after.
+
+So the suspects come out as: (1) the two mruby scripts were half of the time (`qbe-prep.rb` alone 50 to 60 %), not minutes: the
+mruby start is 7 ms and its bytecode compile is nothing; the scan is linear (0.3 s per MB to tokenize) and was paying for a
+walk over every token by three passes that could only matter in a few places. (2) cproc and qbe were a quarter of the time,
+and most of what they emit is dead: an SD object is 306 KB with 752 local functions for a function of a few instructions (52 KB and
+184 with `NFCXX_QBE_DCE=1`), since neither compiler drops an unused `static` function. (3) the interpreter's bytecode compile did not show.
+
+What was changed:
+
+- `qbe-prep.rb`: `bare_return_edits` looks for the tokens `return ;` first and, for each, finds its enclosing file-scope function
+  backwards, instead of walking every function body and calling `match_fwd` for each (it was 0.37 s of 1.1); `volatile_locals`
+  returns at once when no `volatile` token is inside braces (0.30 s); `void_typedefs` and `weak_function_names` only look at the
+  tokens they can start from; the main loop skips the tokens that start no rewrite with direct array reads; the tokenizer keeps
+  the brace and parenthesis depth as one running value. The fast paths need balanced braces (the tokenizer says so); otherwise the
+  old walks run. `qbe-prep.rb` is 2 times faster on SD files and 1.5 times on `lvm.c`, with the same output.
+- `weak-symbols.rb`: attribute groups are scanned by bytes and looked at only when they contain `weak`; the assembly's labels are
+  read without a string per line. 2 times faster.
+- `NFCXX_QBE_DCE=1` (opt-in; `qbe-prep.rb --dce`): the definitions of `static` functions that no live code mentions are removed
+  before cproc, as gcc does by not emitting them. Roots are everything that is not such a definition, and anything with an
+  attribute, inline asm or a `used`/`constructor`/`alias`/`weak`/`section` word; the strings of inline asm count as mentions.
+  Prototypes of static functions mention nothing. The result is the same program with a smaller object (the SD file above: 1.25 MB
+  of assembly becomes 0.22 MB, the object 306 KB becomes 52 KB), so it is not the same assembly and stays off by default; ASTro's bake, which compiles the same
+  header thousands of times, is what it is for. 79 pool files (every 35th) compiled with four jobs: 35.1 s before, 23.9 s with
+  the changes above, 15.2 s with `NFCXX_QBE_DCE=1` (gcc: 6.6 s). For the 2793 files that is about 21 minutes, 14 and 9 of wall
+  time at `-j4` on this machine.
+
+What did not help: reading the source as an array of bytes in the tokenizer (`String#bytes`, then `bs[i]` instead of `getbyte`)
+did not change the time. The second `cc -E` that `qbe-cc` runs to find hand-written `__attribute__((weak))` costs 0.07 s and
+was left. The part that remains is the shared prefix itself, read, tokenized and (without DCE) compiled in every file; avoiding
+it needs the evaluator compiled once, which is a change in ASTro's code store, not in nfcc. Equivalence: `tests/mruby/qbe-asm.sh`
+compares `nfcc -S` with the oracle ports of the two scripts on `tests/c`, Lua and (with `QBE_ASM_EXTRA`) SD files, and
+`tests/mruby/qbe-prep.sh` compares the script with its oracle on its edge cases, including the new fast-path ones.
 
 nfcc and cproc changes it led to: `qbe-cc` defines `__uint128_t` and `__int128_t` on every target (the code needed `__uint128_t`
 for a 53-bit random-float product; cproc's `unsigned __int128` multiply and shift match gcc's, `tests/c/int128_typedefs.c`), and
 `nfcc` accepts `-fno-jump-tables` and `-fno-crossjumping`, which the code store passes (gcc gets them, qbe ignores them).
+
+## koruby_precise with GMP
+
+`run_astro.sh` asks the compiler whether `<gmp.h>` is there (`cc -E`; Debian puts it in `/usr/include/x86_64-linux-gnu`, so
+testing for `/usr/include/gmp.h` would miss it). If so it builds with `-DKORB_BIGNUM=1` and `-lgmp`, the Makefile's default, and also runs
+`koruby_big_test.rb` against `koruby_big_test.expected` (made with CRuby 3.3; only forms that print the same on 3.4). Without
+gmp.h it builds `BIGNUM=wrap` and only the fixnum test runs. CI installs `libgmp-dev` in the ASTro shard. No patch was needed
+for qbe: cproc compiles `gmp.h` and `builtins/bignum_backend.h` as they are, and both backends print CRuby's output.
 
 ## What the two backends do with the specialized code
 
@@ -163,13 +227,43 @@ Found while building the samples above. Not reported yet; each has a short fix. 
    `ASTRO_LOADER_SUPPORTED` is 0 (no `__linux__`, no architecture backend, or `-DASTRO_ARCH_FORCE_NONE`). Add the two stubs
    (return `false`) to that branch.
 
+## ASTroGen under mruby
+
+`ASTRO_GEN=mruby tests/realworld/run_astro.sh` runs the generator on the repo's mruby (`scripts/mrb`) instead of CRuby, so
+generating `node_*.c` / `node_head.h` needs no CRuby. `scripts/astrogen-mruby` takes the arguments of the `ruby` command it
+replaces (`-I dir -r lib -e code`); mruby has no `require`, so it concatenates `scripts/mruby-astrogen.rb` (the shim), the
+generator sources (with their `require` lines blanked, the `if __FILE__ == $0` self-test cut) and the code into one script.
+The upstream sources are not edited. When CRuby is present the script also runs it and `cmp`s every generated file: calc (9
+files), luastro (10), baruby_precise (11), astrogre (9) and koruby_precise (12) are byte-identical, on both backends.
+
+What the tool mruby (core plus `mruby-onig-regexp`, no `mruby-struct`/`-metaprog`) lacked, found by running it:
+
+| Missing | Used for | Shim |
+| --- | --- | --- |
+| `optparse` | `ASTroGen.parse_opt` | a 15-line `OptionParser` with `on('--x=[A]')` / `parse!` |
+| `Struct` | `GenTask` | `Class.new` + `attr_accessor` (no `instance_variable_set`, no `eval`) |
+| `send` (only `__send__`) | `send("build_#{task.name}")` | `Object#send` |
+| `File.readlines`, `File.write` | reading node.def, writing the output | on `File.open`; lines keep their `"\n"` |
+| `Array#to_set` | `compute_slot_count` | `Set.new(self)` (`mruby-set` is there) |
+| `instance_variable_get` | `sample.instance_variable_get(:@prefix_args)`, twice | one name answered, any other raises |
+| `ENV` | `koruby_gen.rb` (`KORUBY_POOL`, `KORUBY_FLINK`) | an empty Hash: those switches cannot be set under mruby |
+| `require` | `astrogen`, `lua_gen`, ... | the wrapper concatenates; `-r` follows `require 'x'` found under `-I` |
+
+One mruby bug, worked around by a `sed` in the wrapper: `super` inside an endless method (`def node? = children? ? false : super`,
+four in `koruby_gen.rb`) raises `TypeError: can't convert false into "Proc"`, so `def m = ... super` becomes `def m; ...; end`.
+Heredocs (`<<~`), `Regexp`, `String#%`, `format`, endless `def`, `&.`, `_1` and the rest of what the generator uses worked as is.
+
+Speed: ASTroGen is fast either way. calc: 0.09 s CRuby 3.3 vs 0.04 s mruby; koruby_precise (the biggest, 12 files):
+0.16 s CRuby vs 0.29 s mruby (start-up included; one run each, not a benchmark). Not verified: other samples, and generating on a host without CRuby
+end to end (calc and luastro need none; Prism's templates and the node.def patches of baruby_precise / koruby_precise in
+`run_astro.sh` still use CRuby, and the script stops there when it is missing).
+
 ## Not done
 
 - The other 25 samples.
-- `koruby_precise` with GMP (`BIGNUM=gmp`, the default; `libgmp-dev` is not installed here), its AOT bake on qbe (above), the
+- `koruby_precise`'s AOT bake on qbe (above), the
   `--build` standalone executable, and the rubyspec suite.
 - Compiling `sample/astrogre`'s AVX2 code on qbe: cproc cannot compile the intrinsics, so the regex engine is a gcc-backend
   shared object in both runs.
 - `astro_build.c`'s `--build` (standalone executables) and the tiered JIT daemon.
-- Running ASTroGen under the repo's mruby instead of CRuby (`lib/astrogen.rb` needs only `optparse`).
 - Feeding ASTro's hashing and specialization into `lib/ast` (`ast.md`), the idea this note started from.

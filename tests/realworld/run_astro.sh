@@ -25,7 +25,32 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
   git -C "$src" fetch -q --depth 1 origin "$pin" || { echo "SKIP astro: fetch failed"; exit 0; }
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL astro: checkout $pin failed"; exit 1; }
-command -v ruby >/dev/null || { echo "SKIP astro: no ruby (ASTroGen is a Ruby program)"; exit 0; }
+# ASTRO_GEN=mruby runs ASTroGen under the repo's mruby (scripts/astrogen-mruby, scripts/mruby-astrogen.rb) instead of CRuby; if
+# CRuby is also present every generated file is compared with CRuby's, byte for byte. CRuby is still used below for Prism's
+# templates and the node.def patches (baruby_precise, koruby_precise); without it only calc and luastro run.
+exec 3>&2
+have_ruby=1; command -v ruby >/dev/null || have_ruby=0
+if [ "${ASTRO_GEN:-ruby}" = mruby ]; then
+  gen_mruby=1
+  [ -x "$root/build/mruby-tool/bin/mruby" ] || "$root/scripts/setup-mruby.sh" >/dev/null || { echo "SKIP astro: no mruby"; exit 0; }
+else
+  gen_mruby=0
+  [ $have_ruby = 1 ] || { echo "SKIP astro: no ruby (ASTroGen is a Ruby program; ASTRO_GEN=mruby uses the repo's mruby)"; exit 0; }
+fi
+# astrogen ARGS: ASTroGen as `ruby ARGS` (-I dir, -r lib, -e code) in the current directory, with CRuby or mruby.
+astrogen() {
+  if [ $gen_mruby = 0 ]; then ruby "$@"; return; fi
+  "$root/scripts/astrogen-mruby" "$@" || return
+  [ $have_ruby = 1 ] || return 0
+  local keep f; keep=$(mktemp -d)
+  for f in node_*.c node_head.h; do cp "$f" "$keep/"; done
+  ruby "$@" || { rm -rf "$keep"; return 1; }
+  for f in node_*.c node_head.h; do
+    cmp -s "$f" "$keep/$f" || { echo "astro: mruby and CRuby generated different $f in $PWD"; rm -f node_head.h; rm -rf "$keep"; return 1; }
+  done
+  [ "$(ls node_*.c node_head.h | wc -l)" = "$(ls "$keep" | wc -l)" ] || { echo "astro: mruby and CRuby generated different file sets in $PWD"; rm -f node_head.h; rm -rf "$keep"; return 1; }
+  rm -rf "$keep"; echo "ok   astro ASTroGen under mruby: $(basename "$PWD") output identical to CRuby's ($(ls node_*.c node_head.h | wc -l) files)" >&3
+}
 
 export LC_ALL=C.UTF-8   # node.def holds non-ASCII text; the generator reads it as UTF-8
 backends=${NFCXX_BACKEND:-"gcc qbe"}
@@ -46,7 +71,7 @@ for b in $backends; do
 
   # calc
   d=$t/sample/calc
-  if ! out=$(cd "$d" && ruby -I ../../lib -r astrogen -e 'ASTroGen.start []' 2>&1 | grep -v 'warning:' ); then :; fi
+  if ! out=$(cd "$d" && astrogen -I ../../lib -r astrogen -e 'ASTroGen.start []' 2>&1 | grep -v 'warning:' ); then :; fi
   [ -f "$d/node_head.h" ] || { echo "FAIL $b astro calc: ASTroGen: $(head -1 <<<"$out")"; fail=1; continue; }
   if ! out=$(cd "$d" && $cc -DCALC_SRC_DIR="\"$d\"" -DASTRO_RUNTIME_DIR="\"$t/runtime\"" -o calc main.c parse.c node.c -ldl 2>&1); then
     echo "FAIL $b astro calc: build blocked: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue
@@ -62,7 +87,7 @@ for b in $backends; do
 
   # luastro
   d=$t/sample/luastro
-  if ! out=$(cd "$d" && ruby -I ../../lib -I . -r astrogen -r lua_gen -e 'ASTroGen.start([], node_def_class: LuaNodeDef)' 2>&1 | grep -v 'warning:'); then :; fi
+  if ! out=$(cd "$d" && astrogen -I ../../lib -I . -r astrogen -r lua_gen -e 'ASTroGen.start([], node_def_class: LuaNodeDef)' 2>&1 | grep -v 'warning:'); then :; fi
   [ -f "$d/node_head.h" ] || { echo "FAIL $b astro luastro: ASTroGen: $(head -1 <<<"$out")"; fail=1; continue; }
   if ! out=$(cd "$d" && $cc -rdynamic -o luastro main.c node.c -ldl -lm -lpthread 2>&1); then
     echo "FAIL $b astro luastro: build blocked: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue
@@ -86,6 +111,7 @@ if [ -s "$tmp/lua-gcc.out" ] && [ -s "$tmp/lua-qbe.out" ]; then
   else echo "FAIL astro luastro: gcc and qbe builds differ:"; diff "$tmp/lua-gcc.out" "$tmp/lua-qbe.out" | head -10; fail=1; fi
 fi
 
+[ $have_ruby = 1 ] || { echo "SKIP astro baruby_precise, koruby_precise: CRuby is needed for Prism's templates and the patches"; exit $fail; }
 # ---- baruby_precise: Ruby subset on a precise GC, needs Prism (the Ruby parser, C). ----
 # libprism at the commit sample/naruby pins (baruby_precise's prism is a symlink to naruby's), built by nfcc on both
 # backends, then baruby_precise on both. Its UNWRAP and WITH_CHILD_CHAIN macros are GNU statement expressions ({ ... }), which
@@ -125,7 +151,7 @@ for b in $backends; do
   fi
   sed -i -E 's/\bit\./_1./g; s/#\{it\}/#{_1}/g' "$t/lib/astrogen.rb" "$d/baruby_gen.rb"
   sed -i 's/build_allocator_decl}\.join(";\\n")/build_allocator_decl}.join("\\n")/' "$t/lib/astrogen.rb"
-  out=$(cd "$d" && ruby -I ../../lib -r ./baruby_gen -e 'ASTroGen.start([], node_def_class: BaRubyNodeDef)' 2>&1 | grep -v 'warning:')
+  out=$(cd "$d" && astrogen -I ../../lib -r ./baruby_gen -e 'ASTroGen.start([], node_def_class: BaRubyNodeDef)' 2>&1 | grep -v 'warning:')
   [ -f "$d/node_head.h" ] || { echo "FAIL $b astro baruby_precise: ASTroGen: $(head -1 <<<"$out")"; fail=1; continue; }
   r=$t/runtime
   if ! out=$(cd "$d" && "$root/nfcc" -I./prism/include -I. -I"$r" -rdynamic -DBARUBY_GC=5 -DBARUBY_PRECISE_DIR="\"$d\"" \
@@ -147,10 +173,10 @@ for b in $backends; do
 done
 
 # ---- koruby_precise: ASTro's CRuby-compatible Ruby (26,000-line runtime, Prism, zlib, libyaml, a regex engine in astrogre). ----
-# BIGNUM=wrap (no GMP); its Prism is the commit sample/koruby_precise pins (not sample/naruby's). The regex engine is
+# BIGNUM=gmp (the Makefile default, real bignums) when <gmp.h> is installed, else BIGNUM=wrap (fixnums only); its Prism is the commit sample/koruby_precise pins (not sample/naruby's). The regex engine is
 # sample/astrogre as two shared objects (libastrogre.so, koruby_regex.so) that koruby loads at run time: AVX2, built with the
 # gcc backend for both (x86-64 only). Both backends build the interpreter and run tests/realworld/koruby_test.rb, whose
-# output must equal CRuby's (koruby_test.expected). The AOT bake is not run here: it compiles hundreds of SD_*.c files
+# output must equal CRuby's (koruby_test.expected); with gmp, koruby_big_test.rb (bignums) too (koruby_big_test.expected). The AOT bake is not run here: it compiles hundreds of SD_*.c files
 # (about 8 minutes on qbe).
 patch_once() {  # patch_once FILE OLD NEW: replace the one occurrence of OLD in FILE, or stop
   ruby -e 'f, o, n = ARGV; s = File.read(f); unless s.scan(o).size == 1 then warn "patch: #{o.inspect} not found once in #{f}"; exit 1 end; File.write(f, s.sub(o) { n })' -- "$@"
@@ -173,13 +199,16 @@ sed -i -E 's/\bit\./_1./g; s/#\{it\}/#{_1}/g' "$tmp/ag/lib/astrogen.rb"
 sed -i 's/build_allocator_decl}\.join(";\\n")/build_allocator_decl}.join("\\n")/' "$tmp/ag/lib/astrogen.rb"
 export NFCXX_BACKEND=gcc
 ag=$tmp/ag/sample/astrogre; kd=$tmp/ag/sample/koruby_precise
-(cd "$ag" && ruby -I ../../lib -r astrogen -e 'ASTroGen.start []' 2>&1 | grep -v 'warning:')
+(cd "$ag" && astrogen -I ../../lib -r astrogen -e 'ASTroGen.start []' 2>&1 | grep -v 'warning:')
 if ! out=$(cd "$ag" && "$root/nfcc" -I. -I../../runtime -O2 -mavx2 -fPIC -shared -Wl,--version-script=libastrogre.map -o libastrogre.so \
       node.c parse.c match.c backend_astrogre.c aho_corasick.c unicode_prop.c unicode_tables.c libastrogre_option.c -ldl 2>&1) ||
    ! out=$(cd "$kd" && "$root/nfcc" -shared -fPIC -O2 -mavx2 -I../astrogre -I../../runtime regex_bridge.c -L../astrogre -lastrogre \
       -Wl,-rpath,"$ag" -o koruby_regex.so 2>&1); then
   echo "FAIL astro koruby_precise: the regex engine (astrogre) build blocked: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; exit 1
 fi
+# gmp.h may live in a multiarch directory (Debian: /usr/include/x86_64-linux-gnu), so ask the compiler.
+if echo '#include <gmp.h>' | cc -E -x c - >/dev/null 2>&1; then bignum=1; libgmp=-lgmp; bname=gmp
+else bignum=2; libgmp=; bname=wrap; fi
 for b in $backends; do
   export NFCXX_BACKEND=$b
   t=$tmp/kp-$b; mkdir -p "$t/sample"; cp -r "$tmp/ag/lib" "$tmp/ag/runtime" "$t/"; cp -r "$tmp/ag/sample/astrogre" "$tmp/ag/sample/koruby_precise" "$t/sample/"
@@ -190,7 +219,7 @@ for b in $backends; do
   # QBE keeps it and the program crashes in DISPATCH_node_def.
   patch_once "$t/lib/astrogen.rb" '#define ASTRO_LAZY_ARGS(x) (x)->head.dispatcher' '#define ASTRO_LAZY_ARGS(x) ((x) ? (x)->head.dispatcher : NULL)' || { fail=1; continue; }
   cflags=(-I. -I./prism/include -I"$r" -DBARUBY_GC=5 -DASTRO_DEBUG=0 -DKORUBY_SRC_DIR="\"$d\"" -DASTRO_RUNTIME_DIR="\"$r\""
-          -DASTRO_PRISM_INC_DIR="\"$d/prism/include\"" -DKORB_BIGNUM=2 -DKORUBY_GC_SRC="\"$r/precise_gc/gc_copy.c\"" -DPATH_MAX=4096)
+          -DASTRO_PRISM_INC_DIR="\"$d/prism/include\"" -DKORB_BIGNUM=$bignum -DKORUBY_GC_SRC="\"$r/precise_gc/gc_copy.c\"" -DPATH_MAX=4096)
   [ -e /usr/include/zlib.h ] && cflags+=(-DKORB_HAVE_ZLIB) && libz=-lz || libz=
   [ -e /usr/include/yaml.h ] && cflags+=(-DKORB_HAVE_YAML) && liby=-lyaml || liby=
   if [ $b = qbe ]; then
@@ -212,7 +241,7 @@ for b in $backends; do
     patch_once "$r/astro_code_store.c" $'unsigned astro_ld_patch_imm(uintptr_t key, uintptr_t value) { (void)key; (void)value; return 0; }' \
       $'unsigned astro_ld_patch_imm(uintptr_t key, uintptr_t value) { (void)key; (void)value; return 0; }\nbool astro_ld_patch_call(const void *ret, uintptr_t target, uintptr_t expect) { (void)ret; (void)target; (void)expect; return false; }\nbool astro_ld_call_reset(const void *ret, uintptr_t host) { (void)ret; (void)host; return false; }' || { fail=1; continue; }
   fi
-  (cd "$d" && ruby -I ../../lib -r ./koruby_gen -e 'ASTroGen.start([], node_def_class: KorubyNodeDef)' 2>&1 | grep -v 'warning:')
+  (cd "$d" && astrogen -I ../../lib -r ./koruby_gen -e 'ASTroGen.start([], node_def_class: KorubyNodeDef)' 2>&1 | grep -v 'warning:')
   [ -f "$d/node_head.h" ] || { echo "FAIL $b astro koruby_precise: ASTroGen"; fail=1; continue; }
   pfail=0
   for f in "$ksrc"/src/*.c "$ksrc"/src/util/*.c; do
@@ -229,7 +258,7 @@ for b in $backends; do
   if [ $cfail = 1 ]; then
     echo "FAIL $b astro koruby_precise: compile: $(cat "$tmp"/kp-$b-*.log | grep -m1 -E 'error')"; fail=1; continue
   fi
-  if ! out=$(cd "$d" && "$root/nfcc" -rdynamic -o koruby_precise main.o node.o korb_runtime.o parse.o gc_common.o gc_copy.o prism/build/libprism.a -ldl -lm -lcrypt $libz $liby 2>&1); then
+  if ! out=$(cd "$d" && "$root/nfcc" -rdynamic -o koruby_precise main.o node.o korb_runtime.o parse.o gc_common.o gc_copy.o prism/build/libprism.a -ldl -lm -lcrypt $libz $liby $libgmp 2>&1); then
     echo "FAIL $b astro koruby_precise: link: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue
   fi
   cp "$kd/koruby_regex.so" "$d/"
@@ -237,6 +266,12 @@ for b in $backends; do
   if [ $rc -ne 0 ] || [ "$got" != "$(cat "$root/tests/realworld/koruby_test.expected")" ]; then
     echo "FAIL $b astro koruby_precise: built, but koruby_test.rb gave rc=$rc and differs from CRuby's output:"; diff <(echo "$got") "$root/tests/realworld/koruby_test.expected" | head -6; fail=1; continue
   fi
-  echo "ok   $b astro koruby_precise: built (BIGNUM=wrap); koruby_test.rb prints what CRuby prints"
+  if [ $bname = gmp ]; then
+    got=$(cd "$d" && timeout 300 ./koruby_precise "$root/tests/realworld/koruby_big_test.rb" 2>&1); rc=$?
+    if [ $rc -ne 0 ] || [ "$got" != "$(cat "$root/tests/realworld/koruby_big_test.expected")" ]; then
+      echo "FAIL $b astro koruby_precise: built with gmp, but koruby_big_test.rb gave rc=$rc and differs from CRuby's output:"; diff <(echo "$got") "$root/tests/realworld/koruby_big_test.expected" | head -10; fail=1; continue
+    fi
+  fi
+  echo "ok   $b astro koruby_precise: built (BIGNUM=$bname); koruby_test.rb$([ $bname = gmp ] && echo ' and koruby_big_test.rb') print what CRuby prints"
 done
 exit $fail
