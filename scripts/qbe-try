@@ -8,8 +8,8 @@
 # 2. For a "-c SRC.c -o OBJ" compile matching a pattern, the same compile runs on the qbe backend with
 #    NFCXX_QBE_KERNEL=1 (only the options that path honours are accepted; -mno-sse is checked).
 # 3. The qbe object replaces the gcc one only if it matches it: the same global and weak definitions (name, binding,
-#    type, kind of section), no undefined symbol the gcc object does not also need, and the same special (non-text,
-#    non-data) allocated sections. Anything else keeps the gcc object.
+#    type, kind of section, visibility), no undefined symbol the gcc object does not also need, and the same special
+#    (non-text, non-data) allocated sections. Anything else keeps the gcc object.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 nfcc=$root/nfcc
@@ -48,14 +48,16 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 note() { printf '%s\n' "$1" >> "$log"; }
 if ! NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 NFCXX_GCC_PASSTHROUGH= NFCXX_QBE_TRY= \
      "$nfcc" "${qargs[@]}" -o "$tmp/q.o" 2> "$tmp/err"; then
-  note "gcc $src: $(grep -m1 -E 'error|refuse|forbid|not supported' "$tmp/err" | cut -c1-200)"
+  why=$(grep -m1 -E 'error|refuse|forbid|not supported' "$tmp/err" || head -n1 "$tmp/err")
+  note "gcc $src: $(cut -c1-200 <<<"${why:-the qbe compile failed without a message}")"
   exit 0
 fi
 
-# symbols: "name binding type section-kind" for globals and weak symbols; undefined ones separately
+# symbols: "name binding type section-kind visibility" for globals and weak symbols; undefined ones separately. The
+# tail of an objdump -t line is "SIZE [.hidden|.protected|.internal] NAME".
 syms() {
   objdump -t "$1" | awk -F'\t' 'NF >= 2 {
-      head = $1; split($2, tail, " "); name = tail[2]
+      head = $1; nt = split($2, tail, " "); name = tail[nt]; vis = nt > 2 ? tail[2] : "default"
       bind = substr(head, 18, 1); weak = substr(head, 19, 1); kind = substr(head, 24, 1)
       n = split(head, f, " "); sec = f[n]
       if (bind != "g" && bind != "u" && weak != "w") next
@@ -63,7 +65,7 @@ syms() {
       if (sec ~ /^\.text(\.(unlikely|hot|startup))?$/) sec = "text"
       else if (sec ~ /^\.(data|bss|rodata)(\.rel(\.ro)?(\.local)?)?$|^\.rodata\.(str|cst)/) sec = "data"
       else if (sec == "*COM*") sec = "common"
-      print "D " name " " (weak == "w" ? "weak" : "global") " " kind " " sec
+      print "D " name " " (weak == "w" ? "weak" : "global") " " kind " " sec " " vis
     }' | sort -u
 }
 # allocated sections other than the ordinary text and data ones (.init.text, .initcall6.init, __param, ...)

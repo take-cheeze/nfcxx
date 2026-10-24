@@ -69,10 +69,31 @@ operand has its own register and the values round-trip through the slot.
   it the choice gcc makes -- an immediate when the operand is a constant that one of the immediate letters accepts
   (the ranges of `I J K L M N e Z` are checked), otherwise a register when a register letter is present, otherwise
   memory.
-- Symbol addresses as immediates: `"i"(&x)`, `"i"(func)` expand to `$sym` (`%c`/`%P`: `sym`). Under `cproc -p` a
-  static symbol named only by an asm operand is kept alive by a top-level `# nfcxx:ref $sym` line in the IL.
+- Symbol addresses as immediates: `"i"(&x)`, `"i"(func)`, `"i"(&s.member)`, `"i"(&a[2])` expand to `$sym+off`
+  (`%c`/`%P`: `sym+off`; `%a`: `sym+off(%rip)`, as gcc writes it). Under `cproc -p` a static symbol named only by an
+  asm operand is kept alive by a `# nfcxx:ref $sym` comment in the IL of the function holding the asm.
+- Address operands `p` (the kernel's `this_cpu_read_stable`: `"p"(&pcpu_hot.current_task)` with `%a`): a constant
+  address is a symbol immediate as above, any other address goes in a register, and `%a` of a register is `(%reg)`.
+- Flag outputs `=@cc<cond>` (`=@ccz`, `=@ccnz`, ...): `set<cond>` and `movzbl` in the thunk, after the template.
 - Register variables (`register long x asm("r11")`) as operands take their register; `%rsp` (the kernel's
   `ASM_CALL_CONSTRAINT "+r"(current_stack_pointer)`) is named in the template but never moved.
+
+## File-scope asm
+
+A basic `__asm__("text");` at file scope (the kernel's `EXPORT_SYMBOL`, which writes a `.export_symbol` entry) goes to
+the side file as it is, after `.text` (the section an assembly file starts in) and marked to survive pruning. The
+kernel's uses switch sections themselves and switch back. Ordinary nfcc C still runs qbe-prep.rb, which refuses
+file-scope asm other than its `.globl`/`.set` forms; kernel mode does not run it.
+
+## Refusals in dropped functions (`cproc -p`)
+
+The kernel's headers define `always_inline` helpers whose asm is satisfiable only after inlining: `bitops.h` asks for
+`"i"(1 << (nr & 7))` with `nr` a parameter. A file that never calls the helper is still valid C to gcc, which drops the
+function unseen. Under `-p` (pruning, which kernel mode uses) a refusal inside a function body is therefore deferred:
+`error()` jumps back to `funcasm`, the message is written into the function's IL as `# nfcxx:error MSG`, and it is
+reported only if pruning keeps the function. Each thunk is written to the side file after a `#nfcxx:owner NAME` line
+naming its function, and the thunks of dropped functions are removed with them -- their text can name symbols the
+program does not have (`call __put_user_4`).
 
 ## Not yet supported (refused, never miscompiled)
 
@@ -80,7 +101,7 @@ Each of these raises a compile error rather than quietly producing wrong code:
 
 - Any target other than x86_64; the CIL backend and Mach-O (`qbe-cc` withholds `-a` there).
 - SSE/floating operands (`x`, `v`, `Yz`, …).
-- `asm goto`, flag outputs (`=@cc…`), and file-scope (top-level) `asm`.
+- `asm goto`, and operands in a file-scope `asm`.
 - More register operands than the caller-saved pool holds.
 
 ## Testing

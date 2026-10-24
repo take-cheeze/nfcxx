@@ -236,6 +236,32 @@ EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kinl.c -o kinl.o 2>/dev/null && ! nm kinl.o | grep -q not_in_this_program; then
       ok "kernel mode: unreferenced static inline functions dropped"
     else bad "kernel mode: unreferenced static inline functions dropped" "$(nm kinl.o 2>&1 | head -3 | tr '\n' ' ')"; fi
+    # a dropped function's asm: its refusal is not reported and its thunk (naming a symbol the program lacks) is gone;
+    # the same asm in a kept function is still refused
+    cat > kasm.c <<'EOC'
+extern int not_in_this_program(void);
+static inline int bit(long nr) { int r; __asm__("movl %1, %0; call not_in_this_program" : "=r"(r) : "i"(1 << (nr & 7))); return r; }
+static inline int named(void) { int r; __asm__("call %c1" : "=a"(r) : "i"(not_in_this_program)); return r; }
+int used(int x) { __asm__("addl $1, %0" : "+r"(x)); return x; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kasm.c -o kasm.o 2>/dev/null && ! nm kasm.o | grep -q not_in_this_program; then
+      ok "kernel mode: a dropped function's asm is neither refused nor emitted"
+    else bad "kernel mode: a dropped function's asm is neither refused nor emitted" "$(nm kasm.o 2>&1 | head -3 | tr '\n' ' ')"; fi
+    printf 'int keep(long n) { int r; __asm__("movl %%1, %%0" : "=r"(r) : "i"(1 << (n & 7))); return r; }\n' > kasm2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kasm2.c -o kasm2.o 2>&1); then bad "kernel mode: a kept function's unsatisfiable asm refused" "was accepted"
+    elif grep -q "kasm2.c:1:.*immediate operand" <<<"$out"; then ok "kernel mode: a kept function's unsatisfiable asm refused"
+    else bad "kernel mode: a kept function's unsatisfiable asm refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # file-scope asm (the kernel's EXPORT_SYMBOL): the text reaches the assembly, a section switched to and back, code
+    # defined in the section a file starts in
+    cat > ktop.c <<'EOC'
+__asm__(".pushsection .rodata\n.globl toplevel_answer\n.balign 4\ntoplevel_answer: .long 40\n.popsection");
+__asm__(".globl toplevel_two\n" "toplevel_two: movl $2, %eax\n\tret");
+extern const int toplevel_answer;
+int toplevel_two(void);
+int main(void) { return toplevel_answer + toplevel_two(); }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" ktop.c -o ktop 2>/dev/null && { ./ktop; [ $? = 42 ]; }; then ok "kernel mode: file-scope asm"
+    else bad "kernel mode: file-scope asm" "wrong result or the compile failed"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -255,6 +281,9 @@ EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtins_overflow_matrix.c" -o kov 2>/dev/null && { ./kov; [ $? = 42 ]; }; then
       ok "kernel mode: overflow built-ins match gcc for every type mix"
     else bad "kernel mode: overflow built-ins match gcc for every type mix" "wrong results or the compile failed"; fi
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtin_bitcount.c" -o kbits 2>/dev/null && { ./kbits; [ $? = 42 ]; }; then
+      ok "kernel mode: bit-counting built-ins"
+    else bad "kernel mode: bit-counting built-ins" "wrong results or the compile failed"; fi
     # qbe-try: an integer file moves to qbe; a file cproc cannot compile keeps the gcc object
     printf 'int sq(int a) { return a * a; }\n' > kmove.c
     printf 'int jumps(void) { __asm__ goto("jmp %%l0" : : : : out); return 1; out: return 0; }\n' > kstay.c   # asm goto: not yet

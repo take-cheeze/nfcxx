@@ -112,8 +112,9 @@ fi
 if [ -n "${NFCXX_QBE_KERNEL:-}" ]; then
   # The Linux kernel (nfcc's NFCXX_QBE_KERNEL): preprocessed exactly as gcc preprocesses it, with gcc's predefined
   # macros and the kernel's options, so cproc sees the same translation unit as the gcc backend's reference object.
-  # The kernel needs gcc's identity (compiler_types.h stops on "Unknown compiler" without __GNUC__).
-  ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
+  # The kernel needs gcc's identity (compiler_types.h stops on "Unknown compiler" without __GNUC__). The linemarkers
+  # stay, so cproc's errors name the header and line (the migration log, NFCXX_QBE_LOG, is read by them).
+  ${CCBIN[@]+"${CCBIN[@]}"} -E ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
 elif [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
   # glibc picks its ABI from __x86_64__ (gnu/stubs-32.h otherwise), gcc's stddef.h needs

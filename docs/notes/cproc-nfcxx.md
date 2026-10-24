@@ -74,9 +74,21 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   forwards and merges plain loads (a polling loop's load can leave the loop); a call is something it never forwards,
   merges or removes. Without `-V` volatile loads stay plain loads and volatile stores are refused, as before.
 
+- **Bit-counting built-ins** `__builtin_clz`, `ctz`, `popcount`, `parity`, `ffs` and their `l`/`ll` forms:
+  constant-folded (the kernel's headers use them in constant expressions and `_Static_assert`s), otherwise lowered
+  branch-free to a population count by halves; clz and ctz of zero give the width. qbe-prep.rb no longer rewrites them.
+
+- **Inline asm `p` operands and `%a`** (docs/notes/inline-asm.md), and symbol immediates with an offset (`&s.member`).
+
+- **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
+
+- **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
+  reported only if pruning keeps the function, and the dropped functions' asm thunks leave the side file with them
+  (docs/notes/inline-asm.md). `error()` jumps to `errorjmp` when it is set (token.c).
+
 ## Known gaps (still refused)
 
-- `asm goto`, flag outputs (`=@cc...`), SSE operands.
+- `asm goto`, SSE operands.
 - Volatile bit-fields and volatile aggregate copies (`-V` covers scalars of 1, 2, 4 and 8 bytes).
 - Global register variables other than `%rsp`.
 - The C23 `nullptr` constant miscompiles under `-c` (a pre-existing cproc codegen gap); harmless before C23, where
