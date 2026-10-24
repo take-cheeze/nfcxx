@@ -6,11 +6,14 @@ walk.c -- list the declarations of the main file through the libclang C API, one
 Uses only the subset in lib/libclang-edg/include/clang-c/Index.h, so it runs against libclang-edg.so and against
 the system libclang with the same output. tests/libclang-edg/run.sh compares the two.
 Usage: walk FILE [-std=... | -I... | -D... | -U...]...
+For the front end inside libclang-edg.so, which one process calls again and again: WALK_REPEAT=N parses and walks the
+file N times, and WALK_FIRST=FILE2 parses FILE2 first (its result, a failure included, is dropped).
 */
 
 #include "clang-c/Index.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *kind_name(enum CXCursorKind k)
@@ -84,20 +87,28 @@ int main(int argc, char **argv)
 {
   CXIndex index;
   CXTranslationUnit tu;
+  const char *first = getenv("WALK_FIRST"), *repeat = getenv("WALK_REPEAT");
+  int i, n = repeat != NULL ? atoi(repeat) : 1;
 
   if (argc < 2) {
     fprintf(stderr, "usage: walk FILE [options]\n");
     return 2;
   }
   index = clang_createIndex(0, 0);
-  tu = clang_parseTranslationUnit(index, argv[1], (const char *const *)(argv + 2), argc - 2, NULL, 0, 0);
-  if (tu == NULL) {
-    fprintf(stderr, "walk: parse failed\n");
-    clang_disposeIndex(index);
-    return 1;
+  if (first != NULL && first[0] != '\0') {
+    tu = clang_parseTranslationUnit(index, first, NULL, 0, NULL, 0, 0);
+    if (tu != NULL) clang_disposeTranslationUnit(tu);
   }
-  walk(clang_getTranslationUnitCursor(tu));
-  clang_disposeTranslationUnit(tu);
+  for (i = 0; i < n; i++) {
+    tu = clang_parseTranslationUnit(index, argv[1], (const char *const *)(argv + 2), argc - 2, NULL, 0, 0);
+    if (tu == NULL) {
+      fprintf(stderr, "walk: parse failed\n");
+      clang_disposeIndex(index);
+      return 1;
+    }
+    walk(clang_getTranslationUnitCursor(tu));
+    clang_disposeTranslationUnit(tu);
+  }
   clang_disposeIndex(index);
   return 0;
 }

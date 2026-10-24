@@ -37,6 +37,11 @@ declarations; past that a declaration is printed again if a list names it twice.
 
 USING_NAMESPACE_EDG
 
+/* Where the records go: stdout in cpfe, a memory stream when the front end runs inside libclang-edg.so
+   (be/nfcxx_edg_entry.c sets it for the call). */
+FILE *nfcxx_decl_out = NULL;
+#define NF_OUT (nfcxx_decl_out != NULL ? nfcxx_decl_out : stdout)
+
 #define NF_MAX_ENTITIES 65536
 
 static int nf_next_id;
@@ -95,7 +100,7 @@ static int nf_emit(const char *kind, int parent, a_source_correspondence *corr)
     nf_corr_id[nf_count] = id;
     nf_count++;
   }
-  printf("%s\t%d\t%d\t%d\t%d\t%s\n", kind, id, parent, (int)line, (int)corr->decl_position.column, name);
+  fprintf(NF_OUT, "%s\t%d\t%d\t%d\t%d\t%s\n", kind, id, parent, (int)line, (int)corr->decl_position.column, name);
   return id;
 }
 
@@ -257,7 +262,7 @@ void back_end(void)
   nf_next_id = 0;
   nf_count = 0;
   nf_emit_scope(il_header.primary_scope, 0);
-  fflush(stdout);
+  fflush(NF_OUT);
 }
 
 }  /* namespace edg */
