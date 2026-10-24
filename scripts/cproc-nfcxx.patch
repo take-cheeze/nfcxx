@@ -20,7 +20,7 @@
  		return false;
  	name = strip(tokenstr(tok.kind), namebuf, sizeof namebuf);
  	next();
-@@ -84,17 +88,35 @@
+@@ -84,17 +88,37 @@
  				a->cleanup = cleanup;
  			expect(TRPAREN, "after cleanup function");
  		} else if (strcmp(name, "section") == 0) {
@@ -40,6 +40,8 @@
 +		           strcmp(name, "stdcall") == 0 || strcmp(name, "fastcall") == 0 || strcmp(name, "thiscall") == 0) {
 +			/* another calling convention (the kernel's __efiapi): the function type is marked, its arguments skipped */
 +			attrabi = strcmp(name, "ms_abi") == 0 ? "ms_abi" : strcmp(name, "sysv_abi") == 0 ? "sysv_abi" : "regparm";
++		} else if (strcmp(name, "always_inline") == 0) {
++			declattr.alwaysinline = true;
 +		} else if (strcmp(name, "gnu_inline") == 0) {
 +			declattr.gnuinline = true;
 +		} else if (strcmp(name, "transparent_union") == 0) {
@@ -124,7 +126,7 @@
  	bool defined;
  	bool tentative;
  	struct decl *next;
-@@ -216,6 +240,10 @@
+@@ -216,6 +240,16 @@
  			/* the function might have an "inline definition" (C11 6.7.4p7) */
  			bool inlinedefn;
  			bool isnoreturn;
@@ -132,10 +134,16 @@
 +			/* the body of an extern gnu_inline function, emitted under a local name (qbe.c mkinlinealias) for the
 +			 * direct calls to use; the address and earlier calls name the external symbol */
 +			struct value *inlinealias;
++			/* always_inline under cproc -p: the tokens of the body (decl.c), whether it has a static local, whether
++			 * cproc refused something in it that a constant argument may make possible (an asm "i" operand), and
++			 * the clones made for constant arguments (funcclone) */
++			struct array *body;
++			bool hasstatic, refused;
++			struct funcclone *clones;
  		} func;
  		unsigned long long enumconst;
  		enum builtinkind builtin;
-@@ -229,6 +257,11 @@
+@@ -229,6 +263,11 @@
  	struct block *continuelabel;
  	struct switchcases *switchcases;
  	struct scope *parent;
@@ -147,7 +155,7 @@
  	/* -fsanitize=address: the stack objects registered when the loop or switch body whose breaklabel or continuelabel this is began (asanmark) */
  	size_t asanbreak, asancontinue;
  };
-@@ -257,6 +290,7 @@
+@@ -257,6 +296,7 @@
  	EXPRBUILTIN,
  	EXPRTEMP,
  	EXPRSIZEOF,
@@ -155,7 +163,7 @@
  };
  
  struct stringlit {
-@@ -291,6 +325,11 @@
+@@ -291,6 +331,11 @@
  			/* a 16-byte floating constant (PROPSOFT type): the object image, low and high eightbyte */
  			unsigned long long soft[2];
  		} constant;
@@ -167,7 +175,7 @@
  		struct stringlit string;
  		struct {
  			struct expr *args;
-@@ -338,11 +377,17 @@
+@@ -338,11 +383,17 @@
  
  void tokeninit(void);
  int tokenget(const void *, size_t);
@@ -185,7 +193,24 @@
  
  /* scan */
  
-@@ -421,6 +466,12 @@
+@@ -364,6 +415,16 @@
+ 
+ void next(void);
+ bool peek(enum tokenkind);
++/* the tokens next() returns, recorded into an array (null stops), and replayed from one instead of the input (the
++ * constant-argument clones of always_inline functions, decl.c funcclone) */
++void tokrecord(struct array *);
++struct tokreplay {
++	struct token *tok;
++	size_t n, pos;
++	bool on;
++};
++void tokreplay(struct tokreplay *old, struct token *, size_t);   /* old gets the replay it replaces */
++void tokreplayend(const struct tokreplay *old);   /* back to that replay (or to the input) */
+ char *expect(enum tokenkind, const char *);
+ bool consume(enum tokenkind);
+ 
+@@ -421,6 +482,12 @@
  extern const struct target *targ;
  
  void targinit(const char *);
@@ -198,7 +223,7 @@
  
  /* attr */
  
-@@ -434,6 +485,8 @@
+@@ -434,6 +501,8 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
@@ -207,7 +232,7 @@
  };
  
  struct attr {
-@@ -445,6 +498,19 @@
+@@ -445,6 +514,20 @@
  
  bool attr(struct attr *, enum attrkind);
  bool gnuattr(struct attr *, enum attrkind);
@@ -222,12 +247,13 @@
 +	bool used;
 +	bool transparent;   /* GNU transparent_union, taken on a typedef of a union (decl) */
 +	bool gnuinline;     /* GNU gnu_inline */
++	bool alwaysinline;  /* GNU always_inline */
 +};
 +extern struct declattr declattr;
  
  /* decl */
  
-@@ -503,6 +569,15 @@
+@@ -503,6 +586,15 @@
  /* stmt */
  
  void stmt(struct func *, struct scope *);
@@ -243,7 +269,7 @@
  
  /* backend */
  
-@@ -522,11 +597,12 @@
+@@ -522,21 +614,26 @@
  	struct array *asanopen;
  };
  
@@ -257,7 +283,12 @@
  
  struct value *mkintconst(unsigned long long);
  
-@@ -537,6 +613,8 @@
+ struct func *mkfunc(struct decl *, char *, struct type *, struct scope *);
++struct decl *funcclone(struct decl *, struct expr *);
++struct decl *funcdecl(struct func *);
+ void delfunc(struct func *);
+ struct type *functype(struct func *);
+ void funclabel(struct func *, struct block *);
  struct value *funcbranch(struct func *, struct expr *, struct block *, struct block *);
  struct value *funcexpr(struct func *, struct expr *);
  void funcjmp(struct func *, struct block *);
@@ -266,7 +297,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +624,10 @@
+@@ -546,6 +643,10 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -279,7 +310,7 @@
  void emitfunc(struct func *, bool);
 --- a/decl.c
 +++ b/decl.c
-@@ -62,8 +62,22 @@
+@@ -62,8 +62,23 @@
  	struct member **last;
  	unsigned bits;  /* number of bits remaining in the last byte */
  	bool pack;
@@ -292,6 +323,7 @@
  };
  
 +struct func *curfunc;
++static bool curclone;   /* a clone's body is being parsed (funcclone): nothing is recorded */
 +
 +static void structpackbits(struct type *, struct structbuilder *);
 +
@@ -302,7 +334,7 @@
  struct decl *
  mkdecl(char *name, enum declkind k, struct type *t, enum typequal tq, enum linkage linkage)
  {
-@@ -169,6 +183,7 @@
+@@ -169,6 +184,7 @@
  	struct attr a;
  	enum attrkind allowedattr;
  	struct structbuilder b;
@@ -310,7 +342,7 @@
  	unsigned long long value, max, min;
  	bool sign;
  	int i;
-@@ -177,7 +192,7 @@
+@@ -177,7 +193,7 @@
  	switch (tok.kind) {
  	case TSTRUCT: kind = TYPESTRUCT, allowedattr |= ATTRPACKED; break;
  	case TUNION:  kind = TYPEUNION, allowedattr |= ATTRPACKED; break;
@@ -319,7 +351,7 @@
  	default: fatal("internal error: unknown tag kind");
  	}
  	next();
-@@ -187,7 +202,7 @@
+@@ -187,7 +203,7 @@
  	tag = 0;
  	t = NULL;
  	et = NULL;
@@ -328,7 +360,7 @@
  		tag = tokenstr(tok.kind);
  		next();
  	}
-@@ -227,7 +242,14 @@
+@@ -227,7 +243,14 @@
  		b.type = t;
  		b.last = &t->u.structunion.members;
  		b.bits = 0;
@@ -344,7 +376,7 @@
  		/* GNU extension, accepted by gcc in C: an empty body is size 0 with alignment 1.
  		 * EDG emits `struct X {}` for empty C++ classes. */
  		while (tok.kind != TRBRACE)
-@@ -242,12 +264,19 @@
+@@ -242,12 +265,19 @@
  			trail.kind = 0;
  			trail.align = 0;
  			trail.section = NULL;
@@ -367,7 +399,7 @@
  		break;
  	case TYPEENUM:
  		enumconsts = NULL;
-@@ -263,7 +292,7 @@
+@@ -263,7 +293,7 @@
  		}
  		max = 0;
  		min = 0;
@@ -376,7 +408,7 @@
  			name = tokenstr(tok.kind);
  			next();
  			attr(NULL, 0);
-@@ -308,6 +337,30 @@
+@@ -308,6 +338,30 @@
  				break;
  		}
  		expect(TRBRACE, "to close enum specifier");
@@ -407,7 +439,7 @@
  		if (!t->base) {
  			if (min <= 0x80000000 && max <= 0x7fffffff) {
  				t->base = min ? &typeint : &typeuint;
-@@ -487,12 +540,18 @@
+@@ -487,12 +541,18 @@
  			expect(TRPAREN, "to close 'alignas' specifier");
  			break;
  
@@ -429,7 +461,7 @@
  				goto done;
  			d = scopegetdecl(s, tokenstr(tok.kind), 1);
  			if (!d || d->kind != DECLTYPE)
-@@ -603,7 +662,15 @@
+@@ -603,7 +663,15 @@
  	enum typequal tq;
  	int allowedattr;
  
@@ -446,7 +478,7 @@
  		attr(NULL, 0);
  		tq = QUALNONE;
  		while (typequal(&tq))
-@@ -613,7 +680,12 @@
+@@ -613,7 +681,12 @@
  	}
  	if (name)
  		*name = NULL;
@@ -460,7 +492,7 @@
  	ptr = result->next;
  	switch (tok.kind) {
  	case TLPAREN:
-@@ -622,9 +694,10 @@
+@@ -622,9 +695,10 @@
  			switch (tok.kind) {
  			case TMUL:
  			case TLPAREN:
@@ -472,7 +504,7 @@
  					break;
  				goto func;
  			}
-@@ -634,7 +707,7 @@
+@@ -634,7 +708,7 @@
  		allowedattr = -1;
  		break;
  	default:
@@ -481,7 +513,7 @@
  			if (!name)
  				error(&tok.loc, "identifier not allowed in abstract declarator");
  			*name = tokenstr(tok.kind);
-@@ -656,6 +729,8 @@
+@@ -656,6 +730,8 @@
  		func:
  			t = mktype(TYPEFUNC, 0);
  			t->qual = QUALNONE;
@@ -490,7 +522,7 @@
  			t->u.func.isvararg = false;
  			t->u.func.params = NULL;
  			t->u.func.nparam = 0;
-@@ -711,20 +786,21 @@
+@@ -711,20 +787,21 @@
  				expect(TRBRACK, "after array length");
  			}
  			listinsert(ptr->prev, &t->link);
@@ -521,7 +553,7 @@
  			break;
  		default:
  			return;
-@@ -842,12 +918,14 @@
+@@ -842,12 +919,14 @@
  	struct member *m;
  	size_t end;
  
@@ -537,7 +569,7 @@
  	}
  	if (mt.type->prop & PROPFLEX) {
  		/*
-@@ -861,11 +939,14 @@
+@@ -861,11 +940,14 @@
  	if (mt.type->prop & PROPVM)
  		error(&tok.loc, "struct member '%s' has variably modified type", name);
  	assert(mt.type->align > 0);
@@ -552,7 +584,7 @@
  		m->next = NULL;
  		*b->last = m;
  		b->last = &m->next;
-@@ -876,13 +957,19 @@
+@@ -876,13 +958,19 @@
  		m->bits.before = 0;
  		m->bits.after = 0;
  		if (align < mt.type->align) {
@@ -575,7 +607,7 @@
  		} else {
  			m->offset = 0;
  			if (t->size < mt.type->size)
-@@ -909,6 +996,10 @@
+@@ -909,6 +997,10 @@
  				t->size = end;
  				b->bits = 0;
  			}
@@ -586,7 +618,7 @@
  			if (m) {
  				m->offset = ALIGNDOWN(t->size - !!b->bits, mt.type->size);
  				m->bits.before = (t->size - m->offset) * 8 - b->bits;
-@@ -928,6 +1019,108 @@
+@@ -928,6 +1020,108 @@
  		t->align = align;
  }
  
@@ -695,7 +727,7 @@
  static bool
  staticassert(struct scope *s)
  {
-@@ -957,12 +1150,15 @@
+@@ -957,12 +1151,15 @@
  	struct qualtype base, mt;
  	char *name;
  	unsigned long long width;
@@ -712,7 +744,7 @@
  	if (!base.type)
  		error(&tok.loc, "no type in struct member declaration");
  	if (tok.kind == TSEMICOLON) {
-@@ -977,9 +1173,15 @@
+@@ -977,9 +1174,15 @@
  			width = intconstexpr(s, false);
  			addmember(b, base, NULL, 0, width);
  		} else {
@@ -728,7 +760,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1264,16 @@
+@@ -1062,6 +1265,16 @@
  	return d;
  }
  
@@ -745,7 +777,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1282,7 @@
+@@ -1070,7 +1283,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -754,7 +786,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,7 +1300,11 @@
+@@ -1088,7 +1301,11 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -766,7 +798,7 @@
  	struct decl *d, *prior;
  	enum declkind kind;
  	struct scope *funcscope;
-@@ -1096,10 +1312,31 @@
+@@ -1096,10 +1313,31 @@
  
  	if (staticassert(s))
  		return true;
@@ -798,7 +830,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1346,18 @@
+@@ -1109,16 +1347,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -820,7 +852,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1374,36 @@
+@@ -1135,6 +1375,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -857,7 +889,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1413,32 @@
+@@ -1144,10 +1414,32 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -892,7 +924,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,6 +1448,8 @@
+@@ -1157,6 +1449,8 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -901,7 +933,7 @@
  			if (d->u.obj.align < align)
  				d->u.obj.align = align;
  			d->u.obj.cleanup = declcleanup;
-@@ -1201,8 +1494,14 @@
+@@ -1201,8 +1495,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -917,12 +949,29 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1512,25 @@
+@@ -1213,12 +1513,42 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
 +				curfunc = f;
++				/* an always_inline function's body is recorded for the clones of calls with constant arguments
++				 * (funcclone), under cproc -p, where its refusals are deferred */
++				if (prune && declattr.alwaysinline && (d->linkage == LINKINTERN || gnuinlineonly) && !curclone) {
++					d->u.func.body = xmalloc(sizeof(*d->u.func.body));
++					*d->u.func.body = (struct array){0};
++					arrayaddbuf(d->u.func.body, &tok, sizeof(tok));
++					tokrecord(d->u.func.body);
++				}
  				stmt(f, s);
++				if (d->u.func.body) {
++					struct token *k;
++
++					tokrecord(NULL);
++					d->u.func.body->len -= sizeof(tok);   /* the token after the body */
++					arrayforeach(d->u.func.body, k)
++						if (k->kind == TSTATIC)
++							d->u.func.hasstatic = true;
++				}
 +				curfunc = NULL;
  				if (d->u.func.isnoreturn)
  					funchlt(f);
@@ -944,6 +993,133 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
+@@ -1268,3 +1598,126 @@
+ 			defineobj(d, NULL, false, NULL);
+ 	}
+ }
++
++/*
++A clone of an always_inline function for a call with integer constant arguments: gcc inlines such a function, and an
++asm operand in it that must be an immediate ("i"(1 << (bit & 7)) in the kernel's _static_cpu_has) is constant only in
++the inlined copy. cproc does not inline, so for a function in which it refused something (decl->u.func.refused, a
++refusal deferred under -p) its recorded body is parsed again as a local function NAME.constN in which each parameter
++given a constant is that constant (an enumeration-like constant of the parameter's type), with the semantics of the
++inlined copy. The call goes to the clone. A body that does not compile so (the parameter assigned or its address
++taken) keeps the call on the function; a body with a static local is not cloned (gcc's inlined copies share it).
++*/
++struct funcclone {
++	unsigned n;
++	bool isconst[16];
++	unsigned long long val[16];
++	struct decl *decl;
++	struct funcclone *next;
++};
++
++struct decl *
++funcclone(struct decl *d, struct expr *args)
++{
++	static unsigned id;
++	struct type *t = d->type, *t2;
++	struct decl *p, *q, **pend, *k, *c;
++	struct expr *a;
++	struct funcclone key = {0}, *cl;
++	struct scope *s;
++	struct func *f;
++	struct token savedtok;
++	struct func *savedfunc;
++	bool savedclone;
++	struct tokreplay savedreplay;
++	jmp_buf jb, *savedjmp;
++	char *name;
++	unsigned i, nconst = 0;
++
++	if (!d->u.func.body || d->u.func.hasstatic || !d->u.func.refused || t->u.func.isvararg || !asmout)
++		return NULL;
++	for (p = t->u.func.params, a = args; p && a; p = p->next, a = a->next, ++key.n) {
++		struct expr *e;
++
++		if (key.n == 16)
++			return NULL;
++		e = eval(a);
++		if (e->kind == EXPRCONST && e->type->prop & PROPINT && !(e->type->prop & PROPSOFT) && p->type->prop & PROPINT &&
++		    p->type->kind != TYPEBOOL && !(p->type->prop & PROPSOFT)) {
++			key.isconst[key.n] = true;
++			key.val[key.n] = e->u.constant.u;
++			++nconst;
++		}
++	}
++	if (!nconst)
++		return NULL;
++	for (cl = d->u.func.clones; cl; cl = cl->next)
++		if (cl->n == key.n && memcmp(cl->isconst, key.isconst, sizeof key.isconst) == 0 &&
++		    memcmp(cl->val, key.val, sizeof key.val) == 0)
++			return cl->decl;
++
++	/* the clone's type: the function's, with parameters of its own */
++	t2 = mktype(TYPEFUNC, 0);
++	*t2 = *t;
++	t2->u.func.params = NULL;
++	pend = &t2->u.func.params;
++	s = mkscope(&filescope);
++	for (p = t->u.func.params, i = 0; p; p = p->next, ++i) {
++		q = mkdecl(p->name, DECLOBJECT, p->type, p->qual, LINKNONE);
++		q->u.obj.storage = SDAUTO;
++		*pend = q;
++		pend = &q->next;
++		if (!p->name)
++			continue;
++		if (i < key.n && key.isconst[i]) {
++			k = mkdecl(p->name, DECLCONST, p->type, QUALNONE, LINKNONE);
++			k->u.enumconst = key.val[i];
++			k->value = mkintconst(key.val[i]);
++			scopeputdecl(s, k);
++		} else {
++			scopeputdecl(s, q);
++		}
++	}
++	name = xmalloc(strlen(d->name) + 24);
++	sprintf(name, "%s.const%u", d->name, ++id);
++	c = mkdecl(name, DECLFUNC, t2, QUALNONE, LINKINTERN);
++	c->value = mkglobal(c);
++	c->section = d->section;
++	c->u.func.isnoreturn = d->u.func.isnoreturn;
++	cl = xmalloc(sizeof(*cl));
++	*cl = key;
++	cl->decl = c;
++	cl->next = d->u.func.clones;
++	d->u.func.clones = cl;   /* before the body, for a call in it with the same constants */
++
++	savedtok = tok;
++	savedfunc = curfunc;
++	savedclone = curclone;
++	savedjmp = errorjmp;
++	tokreplay(&savedreplay, d->u.func.body->val, d->u.func.body->len / sizeof(struct token));
++	next();
++	if (setjmp(jb)) {   /* it does not compile with constants: the call stays on the function */
++		errorjmp = savedjmp;
++		curfunc = savedfunc;
++		curclone = savedclone;
++		tokreplayend(&savedreplay);
++		tok = savedtok;
++		d->u.func.clones = cl->next;
++		return NULL;
++	}
++	errorjmp = &jb;
++	curclone = true;
++	f = mkfunc(c, name, t2, s);
++	curfunc = f;
++	stmt(f, s);
++	if (c->u.func.isnoreturn)
++		funchlt(f);
++	errorjmp = savedjmp;
++	curfunc = savedfunc;
++	curclone = savedclone;
++	tokreplayend(&savedreplay);
++	tok = savedtok;
++	emitfunc(f, false);
++	delfunc(f);
++	return c;
++}
 --- a/expr.c
 +++ b/expr.c
 @@ -8,6 +8,8 @@
@@ -1378,7 +1554,24 @@
  				else
  					*end = exprassign(*end, p->type);
  				end = &(*end)->next;
-@@ -1398,7 +1619,7 @@
+@@ -1383,6 +1604,16 @@
+ 			}
+ 			if (p && !t->u.func.isvararg && !t->u.func.unprototyped)
+ 				error(&tok.loc, "not enough arguments for function call");
++			/* a call of an always_inline function with constant arguments may go to a clone (decl.c funcclone) */
++			if (r->kind == EXPRUNARY && r->op == TBAND && r->base->kind == EXPRIDENT &&
++			    r->base->u.ident.decl->kind == DECLFUNC && r->base->u.ident.decl->u.func.body) {
++				struct decl *c = funcclone(r->base->u.ident.decl, e->u.call.args);
++
++				if (c)
++					r->base->u.ident.decl = c;
++				else if (r->base->u.ident.decl->u.func.refused && curfunc)
++					funcdecl(curfunc)->u.func.refused = true;   /* the caller's constant calls may get clones then */
++			}
+ 			e = decay(e);
+ 			next();
+ 			break;
+@@ -1398,7 +1629,7 @@
  			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
  				error(&tok.loc, "'%s' operator must be applied to pointer to struct/union", tokenstr(op));
  			next();
@@ -1387,7 +1580,7 @@
  				error(&tok.loc, "expected identifier after '%s' operator", tokenstr(op));
  			lvalue = op == TARROW || r->base->lvalue;
  			offset = 0;
-@@ -1497,7 +1718,7 @@
+@@ -1497,7 +1728,7 @@
  					parseinit(s, t);
  				e = NULL;
  			} else {
@@ -1396,7 +1589,7 @@
  				expect(TRPAREN, "after expression");
  				if (op == TSIZEOF)
  					e = postfixexpr(s, e);
-@@ -1515,11 +1736,14 @@
+@@ -1515,11 +1746,14 @@
  				error(&tok.loc, "%s operator applied to bitfield expression", tokenstr(op));
  			t = e->type;
  		}
@@ -1414,7 +1607,7 @@
  			e = mkexpr(EXPRSIZEOF, &typeulong, e);
  			e->u.szof.type = t;
  		} else {
-@@ -1537,6 +1761,26 @@
+@@ -1537,6 +1771,26 @@
  	return e;
  }
  
@@ -1441,7 +1634,7 @@
  static struct expr *
  castexpr(struct scope *s)
  {
-@@ -1551,7 +1795,7 @@
+@@ -1551,7 +1805,7 @@
  		tq = QUALNONE;
  		t = typename(s, &tq, &toeval);
  		if (!t) {
@@ -1450,16 +1643,27 @@
  			expect(TRPAREN, "after expression to match '('");
  			e = postfixexpr(s, e);
  			goto done;
-@@ -1569,6 +1813,27 @@
+@@ -1569,6 +1823,38 @@
  			e = postfixexpr(s, decay(e));
  			goto done;
  		}
-+		if (t->kind == TYPEUNION && !t->incomplete && !toeval) {
++		if ((t->kind == TYPEUNION || t->kind == TYPESTRUCT) && !t->incomplete && !toeval) {
 +			/* GNU cast to a union (the kernel's (union ibs_fetch_ctl)config): a union value holding the operand in
-+			 * the member of its type, as the compound literal (union u){.member = operand} would */
++			 * the member of its type, as the compound literal (union u){.member = operand} would; a cast of a
++			 * struct or union to its own type is its value (the kernel's (sockptr_t)dst) */
 +			struct member *m;
 +			struct expr *op = castexpr(s);
 +
++			if (typecompatible(t, op->type)) {
++				e = op;
++				if (e->lvalue) {   /* a cast is not an lvalue: the value of a copy */
++					e = mkexpr(EXPRCOMMA, op->type, op);
++					e->base->next = NULL;
++				}
++				goto done;
++			}
++			if (t->kind == TYPESTRUCT)
++				error(&tok.loc, "cast type must be scalar");
 +			for (m = t->u.structunion.members; m; m = m->next)
 +				if (m->name && typecompatible(m->type, op->type))
 +					break;
@@ -2079,9 +2283,32 @@
  }
 --- a/pp.c
 +++ b/pp.c
-@@ -563,14 +563,14 @@
+@@ -407,6 +407,14 @@
+ 	}
+ }
+ 
++/* recording and replay of tokens (tokrecord, tokreplay) */
++static struct array *tokrec;
++static struct tokreplay replay;
++#define replaying replay.on
++#define replaytok replay.tok
++#define replayn replay.n
++#define replaypos replay.pos
++
+ static struct token *
+ rawnext(void)
+ {
+@@ -562,15 +570,22 @@
+ {
  	struct token *t;
  
++	if (replaying) {
++		if (replaypos < replayn)
++			tok = replaytok[replaypos++];
++		else
++			tok.kind = TEOF;
++		return;
++	}
  	do t = rawnext();
 -	while (expand(t) || t->kind == TNEWLINE && !(ppflags & PPNEWLINE));
 +	while (expand(t) || t->kind == TNEWLINE && !(ppflags & PPNEWLINE) || t->kind == ALIAS__EXTENSION__);
@@ -2096,7 +2323,7 @@
  	case ALIAS__INLINE:
  	case ALIAS__INLINE__:     tok.kind = TINLINE;        break;
  	case ALIAS__SIGNED:
-@@ -581,7 +581,12 @@
+@@ -581,8 +596,34 @@
  	case ALIAS__TYPEOF:
  	case ALIAS__TYPEOF__:     tok.kind = TTYPEOF;        break;
  	case ALIAS__VOLATILE__:   tok.kind = TVOLATILE;      break;
@@ -2107,8 +2334,44 @@
  	case ALIAS__ASM:          tok.kind = T__ASM__;       break;
 +	case ALIAS_ASM:           if (gnukeywords) tok.kind = T__ASM__;  break;
  	}
++	if (tokrec)
++		arrayaddbuf(tokrec, &tok, sizeof(tok));
++}
++
++void
++tokrecord(struct array *a)
++{
++	tokrec = a;
++}
++
++void
++tokreplay(struct tokreplay *old, struct token *t, size_t n)
++{
++	*old = replay;
++	replay = (struct tokreplay){.tok = t, .n = n, .pos = 0, .on = true};
++}
++
++void
++tokreplayend(const struct tokreplay *old)
++{
++	replay = *old;
  }
  
+ bool
+@@ -597,6 +638,13 @@
+ 		next();
+ 		return true;
+ 	}
++	if (replaying) {   /* put it back in the replay */
++		--replaypos;
++		tok = old;
++		return false;
++	}
++	if (tokrec)   /* it is returned again, and recorded then */
++		tokrec->len -= sizeof(tok);
+ 	pending = tok;
+ 	tok = old;
+ 	ctxpush(&pending, 1, NULL, pending.space);
 --- a/qbe.c
 +++ b/qbe.c
 @@ -1,6 +1,7 @@
@@ -2176,10 +2439,16 @@
  	b->jump.kind = JUMP_NONE;
  	b->phi.res.kind = VALUE_NONE;
  	b->next = NULL;
-@@ -196,6 +216,21 @@
+@@ -196,6 +216,27 @@
  	return v;
  }
  
++struct decl *
++funcdecl(struct func *f)
++{
++	return f->decl;
++}
++
 +/* a local name for the body of an extern gnu_inline function: "$.LNAME.N", a symbol of this object only */
 +struct value *
 +mkinlinealias(struct decl *d)
@@ -2198,7 +2467,7 @@
  struct value *
  mkintconst(unsigned long long n)
  {
-@@ -251,6 +286,7 @@
+@@ -251,6 +292,7 @@
  
  static void emittype(struct type *);
  static void emitname(struct value *);
@@ -2206,7 +2475,7 @@
  static void emitvalue(struct value *);
  
  static void
-@@ -1631,6 +1667,76 @@
+@@ -1631,6 +1673,76 @@
  	}
  }
  
@@ -2283,7 +2552,7 @@
  static struct value *
  funcstore(struct func *f, struct type *t, enum typequal tq, struct lvalue lval, struct value *v)
  {
-@@ -1640,8 +1746,11 @@
+@@ -1640,8 +1752,11 @@
  	struct qbetype qt;
  	int bits;
  
@@ -2296,7 +2565,7 @@
  	if (tq & QUALCONST)
  		error(&tok.loc, "cannot store to 'const' object");
  	tp = t->prop;
-@@ -1682,6 +1791,22 @@
+@@ -1682,6 +1797,22 @@
  	return r;
  }
  
@@ -2319,7 +2588,7 @@
  static struct value *
  funcload(struct func *f, struct type *t, struct lvalue lval)
  {
-@@ -1723,6 +1848,8 @@
+@@ -1723,6 +1854,8 @@
  	f->asanblocks = 0;
  	f->asanjmps = (struct array){0};
  	mapinit(&f->gotos, 8);
@@ -2328,7 +2597,7 @@
  	emittype(t->base);
  
  	/* allocate space for parameters */
-@@ -1732,7 +1859,11 @@
+@@ -1732,7 +1865,11 @@
  		functemp(f, v);
  		if(!d->name)
  			continue;
@@ -2341,7 +2610,7 @@
  			d->value = v;
  		} else {
  			funcalloc(f, d);
-@@ -1785,6 +1916,31 @@
+@@ -1785,6 +1922,31 @@
  	f->end = b;
  }
  
@@ -2373,7 +2642,7 @@
  void
  funcjmp(struct func *f, struct block *l)
  {
-@@ -1803,6 +1959,15 @@
+@@ -1803,6 +1965,15 @@
  
  	if (b->jump.kind)
  		return;
@@ -2389,7 +2658,7 @@
  	if (t) {
  		assert(t->prop & PROPSCALAR);
  		/*
-@@ -1881,6 +2046,84 @@
+@@ -1881,6 +2052,84 @@
  	return f->gotos.vals[idx].p;
  }
  
@@ -2474,7 +2743,7 @@
  static struct lvalue
  funclval(struct func *f, struct expr *e)
  {
-@@ -1896,6 +2139,8 @@
+@@ -1896,6 +2145,8 @@
  		d = e->u.ident.decl;
  		if (d->kind != DECLOBJECT && d->kind != DECLFUNC)
  			error(&tok.loc, "identifier '%s' is not an object or function", d->name);
@@ -2483,7 +2752,7 @@
  		if (d == f->namedecl) {
  			fputs("data ", stdout);
  			emitname(d->value);
-@@ -2136,6 +2381,141 @@
+@@ -2136,6 +2387,141 @@
  	return funcexpr(f, e);
  }
  
@@ -2625,7 +2894,7 @@
  struct value *
  funcexpr(struct func *f, struct expr *e)
  {
-@@ -2154,10 +2534,20 @@
+@@ -2154,10 +2540,20 @@
  
  	calcvla(f, e->type);
  	switch (e->kind) {
@@ -2647,7 +2916,7 @@
  		case DECLCONST:  return d->value;
  		default:
  			fatal("unimplemented declaration kind %d", d->kind);
-@@ -2182,10 +2572,10 @@
+@@ -2182,10 +2578,10 @@
  	case EXPRBITFIELD:
  	case EXPRCOMPOUND:
  		lval = funclval(f, e);
@@ -2660,7 +2929,7 @@
  		t = e->type;
  		if (t->prop & PROPSOFT) {
  			/* the old value is copied out first: the store overwrites the object that l addresses */
-@@ -2206,10 +2596,11 @@
+@@ -2206,10 +2602,11 @@
  			return e->u.incdec.post ? l : v;
  		}
  		if (t->kind == TYPEPOINTER) {
@@ -2674,7 +2943,7 @@
  			}
  		} else if (t->prop & PROPINT) {
  			r = mkintconst(1);
-@@ -2230,6 +2621,8 @@
+@@ -2230,6 +2627,8 @@
  			callee = callee->base;  /* a function designator, decayed to a pointer */
  		if (callee->kind == EXPRIDENT && callee->u.ident.decl->kind == DECLFUNC && (e->type->kind == TYPEFLOAT128 || anyf128arg(e)))
  			addf128call(callee->u.ident.decl);
@@ -2683,7 +2952,7 @@
  		argvals = xreallocarray(NULL, e->u.call.nargs, sizeof(argvals[0]));
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
  			emittype(arg->type);
-@@ -2244,7 +2637,10 @@
+@@ -2244,7 +2643,10 @@
  			v = softtemp(f);
  			funcinst(f, ICALL, 0, funcexpr(f, e->base), NULL);
  		} else {
@@ -2695,7 +2964,7 @@
  		}
  		functype = e->base->type->base;
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
-@@ -2277,7 +2673,7 @@
+@@ -2277,7 +2679,7 @@
  			return lval.addr;
  		case TMUL:
  			r = funcexpr(f, e->base);
@@ -2704,7 +2973,7 @@
  		case TSUB:
  			r = funcexpr(f, e->base);
  			if (e->type->prop & PROPSOFT)
-@@ -2439,6 +2835,35 @@
+@@ -2439,6 +2841,35 @@
  		return funcexpr(f, e);
  	case EXPRBUILTIN:
  		switch (e->u.builtin.kind) {
@@ -2740,7 +3009,7 @@
  		case BUILTINVASTART:
  			l = funcvalistaddr(f, e->base);
  			funcinst(f, IVASTART, 0, l, NULL);
-@@ -2627,7 +3052,7 @@
+@@ -2627,7 +3058,7 @@
  		funcjmp(f, defaultlabel);
  		return;
  	}
@@ -2749,7 +3018,7 @@
  		funcjmp(f, c->body);
  		return;
  	}
-@@ -2636,7 +3061,12 @@
+@@ -2636,7 +3067,12 @@
  	label[2] = mkblock("switch_gt");
  
  	key = mkintconst(c->node.key);
@@ -2763,7 +3032,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3074,828 @@
+@@ -2644,17 +3080,829 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -3578,6 +3847,7 @@
 +		if (b->lazyerror && !erred) {
 +			printf("# nfcxx:error %s\n", b->lazyerror);
 +			erred = true;
++			f->decl->u.func.refused = true;   /* a call with constant arguments may get a clone (decl.c funcclone) */
 +		}
 +		arrayforeach(&b->asmrefs, r) {
 +			fputs("# nfcxx:ref ", stdout);
@@ -3594,19 +3864,20 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4163,11 @@
+@@ -2922,6 +4170,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
-+	/* GNU section and used (cproc -p keeps a "# nfcxx:keep" item even when nothing references it) */
++	/* GNU used and section (cproc -p keeps a "# nfcxx:keep" item even when nothing references it; a section alone
++	 * does not keep it) */
++	if (f->decl->used && prune)
++		puts("# nfcxx:keep");
 +	if (f->decl->section)
 +		printf("section \"%s\" \"ax\"\n", f->decl->section);
-+	else if (f->decl->used && prune)
-+		puts("# nfcxx:keep");
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4180,7 @@
+@@ -2934,7 +4188,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -3615,7 +3886,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4190,7 @@
+@@ -2944,6 +4198,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -3623,11 +3894,14 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4322,17 @@
+@@ -3075,6 +4330,18 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
-+	/* GNU section: read-only ("a") when the object is const, as gcc chooses; used keeps it under cproc -p */
++	/* GNU section: read-only ("a") when the object is const, as gcc chooses; used keeps it under cproc -p (a section
++	 * alone does not: gcc drops an unreferenced static object in .init.data too) */
++	if (d->used && prune)
++		puts("# nfcxx:keep");
 +	if (d->section) {
 +		struct type *et = d->type;
 +		bool ro = d->qual & QUALCONST;
@@ -3635,8 +3909,6 @@
 +		for (; et->kind == TYPEARRAY; et = et->base)
 +			ro |= et->qual & QUALCONST;
 +		printf("section \"%s\" \"%s\"\n", d->section, ro ? "a" : "aw");
-+	} else if (d->used && prune) {
-+		puts("# nfcxx:keep");
 +	}
  	if (d->u.obj.storage == SDTHREAD)
  		fputs("thread ", stdout);

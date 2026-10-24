@@ -147,6 +147,16 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   `\e` escape, the `__attribute` and `__alignof` spellings, `%P` on a memory operand, and pointer `==`/`!=` between
   distinct pointer types or `void *` and a function pointer (compared as addresses; gcc warns).
 
+- **Constant-argument clones of `always_inline` functions** (under `-p`). gcc inlines them, and an asm operand that
+  must be an immediate is constant only in the inlined copy (the kernel's `_static_cpu_has(u16 bit)` asks for
+  `"i"(1 << (bit & 7))`; `static_cpu_has(X86_FEATURE_...)` calls it with a constant). cproc records the tokens of an
+  `always_inline` body (pp.c `tokrecord`); when a body has a refusal (deferred under `-p`), a call with integer
+  constant arguments gets a local clone `NAME.constN`, the recorded body parsed again (`tokreplay`) with each such
+  parameter an enumeration-like constant of its type -- the inlined copy's semantics -- and the call goes to it. A
+  caller whose own call could not be cloned is marked the same way, so chains of such functions are cloned too. A
+  body that does not compile so keeps the call on the function, and a body with a static local is not cloned
+  (gcc's inlined copies share it). Calls with other arguments stay refused.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
@@ -155,7 +165,7 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 
 ## Known gaps (still refused)
 
-- SSE operands; an `"i"` operand only inlining makes constant (cproc does not inline `always_inline` functions).
+- SSE operands; an `"i"` operand only inlining makes constant from a variable argument.
 - Bit-fields in a packed struct where packing would move a member, and under a leading `packed`.
 - Volatile bit-fields and volatile aggregates other than of 1, 2, 4 and 8 bytes.
 - Global register variables other than `%rsp`.

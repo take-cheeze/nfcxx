@@ -236,6 +236,11 @@ EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kinl.c -o kinl.o 2>/dev/null && ! nm kinl.o | grep -q not_in_this_program; then
       ok "kernel mode: unreferenced static inline functions dropped"
     else bad "kernel mode: unreferenced static inline functions dropped" "$(nm kinl.o 2>&1 | head -3 | tr '\n' ' ')"; fi
+    # used keeps an object in a section (the kernel's __ADDRESSABLE in .discard.addressable); a section alone does not
+    printf 'int x;\nstatic void * __attribute__((__used__)) __attribute__((__section__(".discard.addressable"))) keep_me = (void *)&x;\nstatic int __attribute__((section(".init.data"))) drop_me = 1;\n' > kused.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kused.c -o kused.o 2>/dev/null && readelf -SW kused.o | grep -q discard.addressable &&
+       ! nm kused.o | grep -q drop_me; then ok "kernel mode: used keeps an object, a section alone does not"
+    else bad "kernel mode: used keeps an object, a section alone does not" "$(nm kused.o 2>&1 | tr '\n' ' ')"; fi
     # a dropped function's asm: its refusal is not reported and its thunk (naming a symbol the program lacks) is gone;
     # the same asm in a kept function is still refused
     cat > kasm.c <<'EOC'
@@ -348,6 +353,32 @@ EOC
     else bad "kernel mode: an ms_abi call refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kabi2.c -o kabi2.o 2>/dev/null; then ok "kernel mode: ms_abi declarations and dead calls pass"
     else bad "kernel mode: ms_abi declarations and dead calls pass" "the compile failed"; fi
+    # an always_inline function whose asm needs "i"(1 << (bit & 7)) (the kernel's _static_cpu_has): a call with a
+    # constant bit gets a clone in which bit is that constant, as gcc's inlined copy; through a second always_inline
+    # function too; a call with a variable bit is still refused
+    cat > kclone.c <<'EOC'
+struct cpuinfo { unsigned int caps[4]; } boot_cpu = { { 0x5, 0x80, 0, 0 } };
+static inline __attribute__((always_inline)) int static_has(unsigned short bit)
+{
+	asm goto("testb %[bitnum], %P[cap_byte](%%rip)\n\tjnz %l[t_yes]"
+		 : : [bitnum] "i"(1 << (bit & 7)), [cap_byte] "i"(&((const char *)boot_cpu.caps)[bit >> 3])
+		 : "cc" : t_yes);
+	return 0;
+t_yes:
+	return 1;
+}
+#define has(bit) static_has(bit)
+static inline __attribute__((always_inline)) int twice_has(unsigned short bit) { return has(bit) + has(bit); }
+int a(void) { return has(0) + has(2) * 10 + has(1) * 100; }       /* bits 0 and 2 set, 1 clear: 11 */
+int b(void) { return has(39) + twice_has(39) + twice_has(40); }    /* bit 39 set (0x80 in byte 4): 3 */
+int main(void) { return a() == 11 && b() == 3 ? 42 : 1; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kclone.c -o kclone 2>/dev/null && { ./kclone; [ $? = 42 ]; }; then ok "kernel mode: constant-argument clones of always_inline functions"
+    else bad "kernel mode: constant-argument clones of always_inline functions" "wrong result or the compile failed"; fi
+    { sed -n 1,10p kclone.c; echo 'int c(unsigned short x) { return static_has(x); }'; } > kclone2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kclone2.c -o kclone2.o 2>&1); then bad "kernel mode: a variable argument is still refused" "was accepted"
+    elif grep -q "immediate operand" <<<"$out"; then ok "kernel mode: a variable argument is still refused"
+    else bad "kernel mode: a variable argument is still refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -403,6 +434,12 @@ EOC
     if grep -q '^qbe kinit.c$' qbe.log && grep -q '^gcc kinit2.c: lasting code references init code' qbe.log &&
        ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc"
     else bad "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc" "$(tr '\n' '|' < qbe.log)"; fi
+    # with the init symbols of a gcc-built kernel (NFCXX_QBE_INITSYMS), an undefined symbol not among them is not init
+    rm -f qbe.log; printf 'memblock_alloc_try_nid\n' > initsyms.txt
+    NFCXX_QBE_INITSYMS=$PWD/initsyms.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log \
+      "$nfcc" -O2 -fno-PIE -mno-sse -c kinit2.c -o kinit2.o
+    if grep -q '^qbe kinit2.c$' qbe.log; then ok "qbe-try: NFCXX_QBE_INITSYMS names the init symbols"
+    else bad "qbe-try: NFCXX_QBE_INITSYMS names the init symbols" "$(tr '\n' '|' < qbe.log)"; fi
   fi
   # an assembly source with another suffix keeps its -x language (the kernel's "-x assembler-with-cpp /dev/null" probe)
   if out=$("$nfcc" -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null 2>&1) && grep -q "GNU assembler" <<<"$out"; then

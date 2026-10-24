@@ -80,12 +80,16 @@ specials() {
 }
 # references from code and data that stays after boot (not .init.*, .exit.*, .meminit.*, .ref.*, .head.text) to a
 # symbol: "init NAME" when NAME is in such a section or undefined here (it may be elsewhere's init code), else
-# "other NAME". The kernel's modpost refuses a reference from lasting code to init code; gcc's always_inline helpers
-# leave none, cproc's out-of-line copies can (memblock_alloc in .text calling the __init memblock_alloc_try_nid).
+# "other NAME". With NFCXX_QBE_INITSYMS (the init symbols of a gcc-built kernel, scripts/linux-qemu.sh) an undefined
+# symbol is init code only when it is listed. The kernel's modpost refuses a reference from lasting code to init code;
+# gcc's always_inline helpers leave none, cproc's out-of-line copies can (memblock_alloc in .text calling the __init
+# memblock_alloc_try_nid).
 refs() {
-  { readelf -SW "$1"; echo "@@SYMS"; readelf -sW "$1"; echo "@@RELS"; readelf -rW "$1"; } | awk '
+  { [ -z "${NFCXX_QBE_INITSYMS:-}" ] || sed 's/^/@@INIT /' "$NFCXX_QBE_INITSYMS"
+    readelf -SW "$1"; echo "@@SYMS"; readelf -sW "$1"; echo "@@RELS"; readelf -rW "$1"; } | awk '
     function initlike(n) { return n ~ /^\.(init|exit|meminit|memexit)(\.|$)/ }
     function lasting(n) { return !(initlike(n) || n ~ /^\.(ref|head|discard|debug|eh_frame|note|comment)(\.|$)/ || n ~ /^\.rela?\./) }
+    /^@@INIT / { initsym[$2] = 1; haveinit = 1; next }
     /^@@SYMS/ { mode = 1; next }
     /^@@RELS/ { mode = 2; next }
     mode == 0 && /^ *\[ *[0-9]+\]/ { line = $0; sub(/^ *\[ */, "", line); split(line, f, /[] ]+/); secname[f[1]] = f[2]; next }
@@ -95,7 +99,9 @@ refs() {
       n = $5
       if (initlike(n)) { print "init " n; next }
       if (!(n in ndx)) { print "other " n; next }
-      if (ndx[n] == "UND" || initlike(secname[ndx[n]])) print "init " n; else print "other " n
+      # an undefined symbol: init code if the gcc-built kernel has it in an init section (NFCXX_QBE_INITSYMS), or if
+      # there is no such list
+      if (ndx[n] == "UND" ? !haveinit || (n in initsym) : initlike(secname[ndx[n]])) print "init " n; else print "other " n
     }' | sort -u
 }
 syms "$obj" > "$tmp/g.syms"; syms "$tmp/q.o" > "$tmp/q.syms"

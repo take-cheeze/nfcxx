@@ -44,6 +44,19 @@ if [ -n "${QBE_TRY:-}" ]; then
   tag=nfcc-qbe out=$dir/out-nfcc-qbe
   export NFCXX_QBE_TRY=$QBE_TRY NFCXX_QBE_LOG=$dir/qbe-try.log
   rm -f "$NFCXX_QBE_LOG"
+  # the symbols a gcc-built kernel defines in init sections (.init.*, .exit.*, .meminit.*): qbe-try refuses a qbe
+  # object whose lasting code references one of them where gcc's object does not (the kernel's modpost would refuse
+  # the link); without a gcc-built vmlinux.o it takes every undefined symbol for one
+  for ref in "$dir/out-nfcc/vmlinux.o" "$dir/out-gcc/vmlinux.o"; do
+    [ -f "$ref" ] || continue
+    { readelf -SW "$ref"; echo "@@SYMS"; readelf -sW "$ref"; } | awk '
+      /^@@SYMS/ { syms = 1; next }
+      !syms && /^ *\[ *[0-9]+\]/ { line = $0; sub(/^ *\[ */, "", line); split(line, f, /[] ]+/); sec[f[1]] = f[2]; next }
+      syms && $1 ~ /^[0-9]+:$/ && NF >= 8 && sec[$7] ~ /^\.(init|exit|meminit|memexit)(\.|$)/ { print $8 }' |
+      sort -u > "$dir/init-syms.txt"
+    export NFCXX_QBE_INITSYMS=$dir/init-syms.txt
+    break
+  done
   rm -rf "$out"   # every object must go through qbe-try, so nothing is reused from an earlier build
 fi
 kmake() { make -C "$src" O="$out" ARCH=x86_64 CC="$cc" "$@"; }
