@@ -915,6 +915,15 @@ class ClosedWorld
     !@global_refusal && !@basic_object_referenced
   end
 
+  # BASIC_OBJECT_SEALED: no object of the world is a bare BasicObject, so every receiver includes Kernel. Subclasses
+  # are ruled out by basic_object_subclass_free?, the world's own bytecode never reads the constant, and no outside
+  # Ruby source spells it. The native side is CodeGen#kernel_receiver_sealed?'s.
+  def basic_object_instance_free?
+    return false unless basic_object_subclass_free? && basic_object_unreferenced?
+
+    Array(@ruby_paths).none? { |path| File.read(path, encoding: 'BINARY').include?('BasicObject') }
+  end
+
   private
 
   # is_a_guard_constant?'s root rule: +name+ is bound once, by the closed world's own top-level declaration.

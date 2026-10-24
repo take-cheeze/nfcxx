@@ -120,13 +120,37 @@ module NativeCoreDirectFallback
     guards = []
     # An explicit receiver may be a bare BasicObject (basic_object_subclass_free? rules out subclasses only), which
     # lacks Kernel.
-    guards << "mrb_obj_is_kind_of(M, #{recv}, M->kernel_module)" if !self_implicit && entry.owner != 'BasicObject'
+    if !self_implicit && entry.owner != 'BasicObject' && !kernel_receiver_sealed?
+      guards << "mrb_obj_is_kind_of(M, #{recv}, M->kernel_module)"
+    end
     arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
     guards << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard
     return "#{note}  #{call}" if guards.empty?
 
     # A receiver or argument the guards reject keeps the send, so the method's own error is unchanged.
     "#{note}  if (#{guards.join(' && ')}) {\n    #{call}  } else {\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+  end
+
+  # BASIC_OBJECT_SEALED: the Kernel guard of an explicit-receiver row is dead when no bare BasicObject can exist
+  # (ClosedWorld#basic_object_instance_free?) and no native can make one: a native source may name the class only to
+  # define it (mruby's class.c) or to register methods on it.
+  NATIVE_BASIC_OBJECT_USE = /MRB_MT_INIT_ROM|mrb_define_(?:class|const|method|module_function)\w*\(/
+
+  def kernel_receiver_sealed?
+    return @kernel_receiver_sealed if defined?(@kernel_receiver_sealed)
+
+    @kernel_receiver_sealed = !!(@closed_world&.basic_object_instance_free? && @native_name_sources &&
+                                 native_basic_object_registration_only?)
+  end
+
+  def native_basic_object_registration_only?
+    @native_name_sources.values.flatten.uniq.all? do |path|
+      next true if path.end_with?('/src/class.c')
+
+      File.foreach(path, encoding: 'BINARY').all? do |line|
+        !line.include?('BasicObject') || line.match?(NATIVE_BASIC_OBJECT_USE) || line.lstrip.start_with?('//', '/*', '*')
+      end
+    end
   end
 
   # An explicit receiver needs a row marked explicit_receiver, and a public one: a private native is a NoMethodError there.
