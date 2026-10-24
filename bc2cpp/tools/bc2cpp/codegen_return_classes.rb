@@ -1184,6 +1184,16 @@ class CodeGen
     klass unless RETURN_CORE_CLASS.value?(klass)
   end
 
+  # RUBY_EXACT_PAST_NATIVE_ARMS: the flow proves the receiver exactly one class the program defines and no RGSS native
+  # wrapper serves. BC2CPP_RUBY_EXACT_PAST_NATIVE=0 keeps the native arms first.
+  def ruby_exact_receiver?(irep, idx, reg)
+    return false if ENV['BC2CPP_RUBY_EXACT_PAST_NATIVE'] == '0'
+
+    klass = exact_flow_user_class(irep, idx, reg)
+    @ruby_exact_owners ||= @registry.each_value.flat_map { |defs| defs.map(&:owner) }.to_set
+    !klass.nil? && !CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.key?(klass) && @ruby_exact_owners.include?(klass)
+  end
+
   # Names with an exact class: for the diagnostic and the coverage report.
   def return_class_report
     (@rc_return || {}).filter_map do |name, mask|

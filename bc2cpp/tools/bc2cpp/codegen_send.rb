@@ -553,10 +553,15 @@ class CodeGen
       return exact_code if exact_code
     end
 
+    # RUBY_EXACT_PAST_NATIVE_ARMS: a receiver the exact-class flow proves is one Ruby class is no instance of the
+    # native classes the arms below test, so it skips them for the exact-class path further down.
+    ruby_exact = n.zero? && !self_implicit && irep && drawing_proof_idx && NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name) &&
+                 ruby_exact_receiver?(irep, drawing_proof_idx, drawing_proof_reg)
+
     # Frame-independent RGSS entry points need only a native class identity
     # guard. Static tracing may narrow the common cases, but is not required for
     # these wrappers because every other receiver retains ordinary dispatch.
-    if n.zero? && (helpers = NATIVE_WRAPPER_ZERO_ARG_DIRECT[name])
+    if n.zero? && !ruby_exact && (helpers = NATIVE_WRAPPER_ZERO_ARG_DIRECT[name])
       # `Graphics.update` / `Input.update` (or a bare `update` in Graphics' own `def self.x`): a stable
       # class/module constant receiver is no instance of the native classes below, so the module's own singleton
       # method is called directly instead.
