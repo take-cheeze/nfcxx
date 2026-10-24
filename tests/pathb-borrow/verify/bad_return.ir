@@ -1,0 +1,5 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "get" (returns void) (nothrow) (noescape) (closed) (args (read int)))
+(function "get" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param) (return (const int 0))
+)

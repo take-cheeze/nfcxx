@@ -1,0 +1,7 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "drain" (returns int) (nothrow) (noescape) (closed) (args (write int)))
+(function "drain" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param) (let %1 int (load int %0))
+(if %1 (then (let %2 int (wsub int %1 (const int 1))) (store int %0 %2) (let %3 int (call int &"drain" %0)) (return %3)))
+(return (const int 0))
+)
