@@ -31,7 +31,8 @@ module NilableReceiverSend
     # would add a send): the non-nil path is then the Array push itself, with no class guard.
     return plain unless (plan[:klass] == 'Array' && dispatch_count(nil_arm).zero?) ||
                         dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain) ||
-                        (EXACT_MARK.match?(inner) && !EXACT_MARK.match?(plain))
+                        (EXACT_MARK.match?(inner) && !EXACT_MARK.match?(plain)) ||
+                        fewer_class_tests?(plain, inner, nil_arm)
 
     body = inner.lines.map { |line| line.strip.empty? ? line : "  #{line}" }.join
     "  // NILABLE_RECEIVER :#{plan[:name]} -- receiver is nil or exactly #{plan[:klass]} (class pools, ADR 0296)\n" \
@@ -40,6 +41,21 @@ module NilableReceiverSend
       "  } else {\n" \
       "#{body}" \
       "  }\n"
+  end
+
+  # NILABLE_CLASS_TESTS: the nil test replaces a class-test chain (POLY_SMALL_N on a nil-or-K receiver whose
+  # fallback raises, so it has no dispatch to shed) when the non-nil path tests fewer classes and neither arm adds a
+  # dispatch. BC2CPP_NILABLE_CLASS_TESTS=0 keeps the dispatch-only rule.
+  def fewer_class_tests?(plain, inner, nil_arm)
+    return false if ENV['BC2CPP_NILABLE_CLASS_TESTS'] == '0'
+    return false if dispatch_count(inner) + dispatch_count(nil_arm) > dispatch_count(plain)
+
+    class_test_count(inner) + class_test_count(nil_arm) < class_test_count(plain)
+  end
+
+  # Runtime class tests in a piece of generated C++: a class read, or a compare against the hoisted one.
+  def class_test_count(code)
+    code.scan(/\bmrb_obj_class\(M,|== bc2cpp_recv_class\b/).size
   end
 
   # By-name dispatches in a piece of generated C++.
