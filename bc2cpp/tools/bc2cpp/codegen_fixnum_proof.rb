@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_containers'
+require_relative 'dynamic_names'
 
 # CodeGen: FIXNUM_OPERAND_PROOF and entry-argument facts.
 
@@ -508,6 +509,9 @@ class CodeGen
 
           # A def naming itself is neither a site nor poison (ENTRY_ARG_DEF_OPS).
           next if ENTRY_ARG_DEF_OPS.include?(insn.op)
+          # PROBE_ONLY (DynamicNames.probe_only?): a literal that only reaches respond_to?'s name argument is looked
+          # up, never called, so it names no call either.
+          next if insn.op == 'LOADSYM' && entry_arg_probe_literal?(irep, i, insn)
 
           # `alias new old` reaches old's body through a call to `new`, a site of no
           # registry name; its second token is the body's own name.
@@ -532,6 +536,18 @@ class CodeGen
       end
       [sites, poisoned]
     end
+  end
+
+  # A probe-only Symbol literal while no Ruby hook can route a probe's name (DynamicNames.probe_hooks_touched?).
+  # BC2CPP_PROBE_CALL_INDEX=0 keeps every literal a poison.
+  def entry_arg_probe_literal?(irep, idx, insn)
+    return false if ENV['BC2CPP_PROBE_CALL_INDEX'] == '0'
+
+    if @entry_arg_probe_hooks.nil?
+      stems, = DynamicNames.analyze(@ireps)
+      @entry_arg_probe_hooks = DynamicNames.probe_hooks_touched?(@ireps, stems)
+    end
+    !@entry_arg_probe_hooks && DynamicNames.probe_only?(irep, idx, insn)
   end
 
   # ENTRY_ARG_CALLSITE_PROOF admission rules 1-8 (see the header): (irep label,

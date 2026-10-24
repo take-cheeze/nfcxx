@@ -176,8 +176,7 @@ module DynamicNames
       user = program.source_at(use)
       # vm.c OP_TDEF never reads R[a]; OP_DEF/OP_SDEF read it as the definition's target, which routes no name.
       next false if %w[DEF TDEF SDEF].include?(user.op)
-      # A self send's R[a] is only its result slot (the receiver is self), so the value is overwritten, not read.
-      next false if user.op.start_with?('SSEND') && used_reg.to_s == user.reg.to_s
+      next false if self_send_slot?(user, used_reg)
       next false if VISIBILITY_SENDS.include?(user.sym) && BytecodeIR::Ops::SEND_FAMILY.include?(user.op) &&
                     user.plain_fixed_argc? && used_reg.to_i > user.reg.to_i
       next true unless user.op == 'RETURN'
@@ -243,12 +242,20 @@ module DynamicNames
   # Every use of the LOADSYM's value (MOVE aliases and handler edges followed) is the first argument of a plain
   # `respond_to?(name)` / `respond_to?(name, include_all)` send.
   def self.probe_only?(irep, idx, insn)
-    uses = FactoryFlow.uses(irep, idx, insn.reg.to_s)
-    uses && !uses.empty? && uses.all? do |use, reg|
-      send = BytecodeIR.for(irep).source_at(use)
+    program = BytecodeIR.for(irep)
+    uses = FactoryFlow.uses(irep, idx, insn.reg.to_s) or return false
+    uses = uses.reject { |use, reg| self_send_slot?(program.source_at(use), reg) }
+    !uses.empty? && uses.all? do |use, reg|
+      send = program.source_at(use)
       BytecodeIR::Ops::SEND_FAMILY.include?(send.op) && PROBE_SENDS.include?(send.sym) && send.plain_fixed_argc? &&
         (1..2).cover?(send.argc.to_i) && reg.to_s == (send.reg.to_i + 1).to_s
     end
+  end
+
+  # vm.c OP_SSEND/SSEND0/SSENDB set R[a] = self before dispatching, so a value in a self send's R[a] is
+  # overwritten there, never read: FactoryFlow's register-level reads count it, and it is no use.
+  def self.self_send_slot?(insn, reg)
+    insn.op.start_with?('SSEND') && reg.to_s == insn.reg.to_s
   end
 
   # Whether the program could route a probe's name into Ruby: it defines or aliases respond_to? or
