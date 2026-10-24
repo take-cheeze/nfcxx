@@ -29,6 +29,7 @@ Anything not lowered prints an (unsupported KIND NAME) marker, counted by NFCXX_
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 USING_NAMESPACE_EDG
 
@@ -66,13 +67,28 @@ static void ir_buf_open(ir_buf *b)
   b->in_file = 0;
 }
 
+static char *ir_fmt(const char *fmt, ...);
+
 /* A buffer for text too large to keep in memory (the module's functions: hundreds of MB for a large CUDA unit, on top
-   of the front end's own memory). */
+   of the front end's own memory). The file is in $TMPDIR (else /tmp), unlinked once open. Not tmpfile(): glibc's always
+   uses /tmp, which is often a tmpfs, so the text would still take memory, and outside the process's own limit. */
 static void ir_buf_open_file(ir_buf *b)
 {
-  b->f = tmpfile();
+  const char *dir = getenv("TMPDIR");
+  char *path;
+  int fd;
+  if (dir == NULL || dir[0] == 0) dir = "/tmp";
+  path = ir_fmt("%s/nfcxx_ir.XXXXXX", dir);
+  fd = mkstemp(path);
+  if (fd < 0) {
+    fprintf(stderr, "nfcxx_ir: cannot create a temporary file in %s\n", dir);
+    exit(EXIT_FAILURE);
+  }
+  unlink(path);
+  free(path);
+  b->f = fdopen(fd, "w+");
   if (b->f == NULL) {
-    fprintf(stderr, "nfcxx_ir: tmpfile failed\n");
+    fprintf(stderr, "nfcxx_ir: fdopen failed\n");
     abort();
   }
   b->data = NULL;

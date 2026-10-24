@@ -36,5 +36,106 @@
     "file": "stdout.cpp",
     "expect": 0,
     "output": "hello from puts\nputchar: abc\nwrite to fd 1\n[stderr] to stderr\n"
+  },
+  {
+    "id": "c-designated",
+    "title": "C: designated initializers, compound literal, sort",
+    "file": "c-designated.c",
+    "language": "c",
+    "expect": 111
+  },
+  {
+    "id": "c-function-pointers",
+    "title": "C: function pointers, a table of operations, a sort with a comparator",
+    "file": "c-function-pointers.c",
+    "language": "c",
+    "expect": 1140,
+    "output": "add 15\nmul 120\nmax 5\nsorted descending\n"
+  },
+  {
+    "id": "c-goto",
+    "title": "C: a goto state machine that counts words, puts and putchar",
+    "file": "c-goto-stdout.c",
+    "language": "c",
+    "expect": 933,
+    "output": "counts of the text:\nwords: 9\nlines: 3\ndigits: 3\n"
+  },
+  {
+    "id": "rust-shapes",
+    "title": "Rust: enums, slices, iterators, extern \"C\" bindings",
+    "file": "rust-shapes.rs",
+    "language": "rust",
+    "expect": 119,
+    "output": "hello from rust\n24\n"
+  },
+  {
+    "id": "rust-traits",
+    "title": "Rust: traits, trait objects, generics, closures, Option",
+    "file": "rust-traits.rs",
+    "language": "rust",
+    "expect": 168,
+    "output": "square\n16\nrect\n21\nrect\n"
+  },
+  {
+    "id": "rust-text",
+    "title": "Rust: text processing on &str without allocation",
+    "file": "rust-text.rs",
+    "language": "rust",
+    "expect": 926,
+    "output": "quick\nTQBFJOTLD\n"
+  },
+  {
+    "id": "go-shapes",
+    "title": "Go: interfaces, slices, println, os.Exit",
+    "file": "go-shapes.go",
+    "language": "go",
+    "expect": "exit 132",
+    "output": "hello from go: 95 37\n"
+  },
+  {
+    "id": "go-wordcount",
+    "title": "Go: maps, sort.Slice, strings.Fields",
+    "file": "go-wordcount.go",
+    "language": "go",
+    "expect": "exit 115",
+    "output": "the 5\nwasm 3\nand 2\nir 2\ndistinct words: 11\n"
+  },
+  {
+    "id": "go-fmt",
+    "title": "Go: fmt.Println, Printf, Errorf (a large module, slow to compile)",
+    "file": "go-fmt.go",
+    "language": "go",
+    "expect": 0,
+    "output": "hello from fmt 42 2.5 true\n(1, 2) [3 4 5] map[a:1]\npi    |  3.14|ff\nparsed 12\nerror: empty input true\nerror: parse \"x\": strconv.Atoi: parsing \"x\": invalid syntax false\n"
+  },
+  {
+    "id": "llvm-fib",
+    "title": "LLVM IR: phi loop and recursion",
+    "file": "llvm-fib.ll",
+    "language": "llvm",
+    "expect": 88
+  },
+  {
+    "id": "llvm-struct",
+    "title": "LLVM IR: a struct type, getelementptr fields, puts",
+    "file": "llvm-struct.ll",
+    "language": "llvm",
+    "expect": 44,
+    "output": "hello from llvm\n"
+  },
+  {
+    "id": "ir-gcd",
+    "title": "nfcxx IR: a structured loop, by hand",
+    "file": "ir-gcd.ir",
+    "language": "ir",
+    "expect": 33
+  },
+  {
+    "id": "ir-bindings",
+    "title": "nfcxx IR: a loop calling log_i32 and log_str",
+    "file": "ir-bindings.ir",
+    "language": "ir",
+    "expect": 55,
+    "output": "hello from IR\n1\n4\n9\n16\n25\n"
   }
 ]

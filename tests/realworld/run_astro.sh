@@ -85,4 +85,64 @@ if [ -s "$tmp/lua-gcc.out" ] && [ -s "$tmp/lua-qbe.out" ]; then
   if cmp -s "$tmp/lua-gcc.out" "$tmp/lua-qbe.out"; then echo "ok   astro luastro: gcc and qbe builds print the same for every test script"
   else echo "FAIL astro luastro: gcc and qbe builds differ:"; diff "$tmp/lua-gcc.out" "$tmp/lua-qbe.out" | head -10; fail=1; fi
 fi
+
+# ---- baruby_precise: Ruby subset on a precise GC, needs Prism (the Ruby parser, C). ----
+# libprism at the commit sample/naruby pins (baruby_precise's prism is a symlink to naruby's), built by nfcc on both
+# backends, then baruby_precise on both. Its UNWRAP and WITH_CHILD_CHAIN macros are GNU statement expressions ({ ... }), which
+# cproc has since the pin 9f706f5; the one _Atomic(int) of astro_jit.c is patched out on qbe (docs/notes/astro.md).
+ppin=09d9ac3d6cc93a049144ad057b0feb3013081690   # ruby/prism, what ko1/astro pins for sample/naruby
+psrc=$work/prism-09d9ac3
+if [ ! -d "$psrc/.git" ]; then
+  mkdir -p "$psrc" && git -C "$psrc" init -q && git -C "$psrc" remote add origin https://github.com/ruby/prism || exit 1
+fi
+if [ "$(git -C "$psrc" rev-parse -q --verify "$ppin^{commit}" 2>/dev/null)" != "$ppin" ]; then
+  git -C "$psrc" fetch -q --depth 1 origin "$ppin" || { echo "SKIP astro prism: fetch failed"; exit $fail; }
+fi
+git -C "$psrc" checkout -q "$ppin" || { echo "FAIL astro prism: checkout $ppin failed"; exit 1; }
+# The templates (include/prism/ast.h, src/node.c, ...) are generated from templates/*.erb; rake only calls this.
+if ! out=$(cd "$psrc" && ruby -e 'require "./templates/template.rb"; Prism::Template::TEMPLATES.each { |f| Prism::Template.render(f) }' 2>&1); then
+  echo "FAIL astro prism: template generation: $(head -1 <<<"$out")"; exit 1
+fi
+for b in $backends; do
+  export NFCXX_BACKEND=$b   # the first loop left the last backend exported
+  pl=$tmp/prism-$b; mkdir -p "$pl/build"
+  if ! out=$(cd "$psrc" && NFCXX_BACKEND=$b "$root/nfcc" -shared -fPIC -Iinclude -DPRISM_EXPORT_SYMBOLS \
+        -o "$pl/build/libprism.so" src/*.c src/util/*.c 2>&1); then
+    echo "FAIL $b astro prism: libprism build blocked: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue
+  fi
+  printf '#include <prism.h>\n#include <stdio.h>\nint main(void){puts(pm_version());return 0;}\n' > "$pl/v.c"
+  got=$(NFCXX_BACKEND=$b "$root/nfcc" -I"$psrc/include" "$pl/v.c" -L"$pl/build" -Wl,-rpath="$pl/build" -lprism -o "$pl/v" 2>&1 && "$pl/v" 2>&1)
+  if ! [[ $got =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then echo "FAIL $b astro prism: libprism built, pm_version() gave '$got'"; fail=1; continue; fi
+  echo "ok   $b astro prism: libprism $got built by nfcc and loaded"
+  t=$tmp/bp-$b; mkdir -p "$t/sample"; cp -r "$src/lib" "$src/runtime" "$t/"; cp -r "$src/sample/baruby_precise" "$t/sample/"
+  d=$t/sample/baruby_precise; rm -f "$d/prism"; mkdir -p "$d/prism"; ln -s "$psrc/include" "$d/prism/include"; ln -s "$pl/build" "$d/prism/build"
+  if [ $b = qbe ]; then
+    # cproc has no _Atomic (cproc's own error). astro_jit.c has one _Atomic(int) field and reads and writes it only through
+    # atomic_load_explicit / atomic_store_explicit, so those become the sized builtins of cproc's atomic support.
+    sed -i -e 's|#include <stdatomic.h>|#define memory_order_acquire __ATOMIC_ACQUIRE\n#define memory_order_release __ATOMIC_RELEASE\n#define atomic_load_explicit(p, mo) __atomic_load_n((p), (mo))\n#define atomic_store_explicit(p, v, mo) __atomic_store_n((p), (v), (mo))|' \
+           -e 's|_Atomic(int) stop_flag;|int stop_flag;|' "$d/astro_jit.c"
+    grep -q '_Atomic' "$d/astro_jit.c" && { echo "FAIL $b astro baruby_precise: the _Atomic patch no longer applies (astro_jit.c changed)"; fail=1; continue; }
+  fi
+  sed -i -E 's/\bit\./_1./g; s/#\{it\}/#{_1}/g' "$t/lib/astrogen.rb" "$d/baruby_gen.rb"
+  sed -i 's/build_allocator_decl}\.join(";\\n")/build_allocator_decl}.join("\\n")/' "$t/lib/astrogen.rb"
+  out=$(cd "$d" && ruby -I ../../lib -r ./baruby_gen -e 'ASTroGen.start([], node_def_class: BaRubyNodeDef)' 2>&1 | grep -v 'warning:')
+  [ -f "$d/node_head.h" ] || { echo "FAIL $b astro baruby_precise: ASTroGen: $(head -1 <<<"$out")"; fail=1; continue; }
+  r=$t/runtime
+  if ! out=$(cd "$d" && "$root/nfcc" -I./prism/include -I. -I"$r" -rdynamic -DBARUBY_GC=5 -DBARUBY_PRECISE_DIR="\"$d\"" \
+        -DASTRO_RUNTIME_DIR="\"$r\"" -DASTRO_PRISM_INC_DIR="\"$d/prism/include\"" -L./prism/build -Wl,-rpath="$pl/build" \
+        -o baruby_precise main.c node.c node_slowpath.c baruby_parse.c astro_jit.c "$r/precise_gc/gc_common.c" "$r/precise_gc/gc_copy.c" \
+        -lprism -ldl 2>&1); then
+    echo "FAIL $b astro baruby_precise: build blocked: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue
+  fi
+  got=$(cd "$d" && ./baruby_precise --plain test_ary.ba.rb 2>&1 | head -2 | tr '\n' ' ')
+  [ "$got" = "[1, 2, 3] 3 " ] || { echo "FAIL $b astro baruby_precise: --plain test_ary gave '$got'"; fail=1; continue; }
+  # The bake: --aot-compile specializes, the code store's makefile compiles the SD_*.c with $(CC) = nfcc (which must take
+  # the store's --param=early-inlining-insns=100), and the run loads all.so.
+  echo 'def fib(n); if n < 2 then n else fib(n-1) + fib(n-2) end; end; p fib(30)' > "$d/fib.ba.rb"
+  got=$(cd "$d" && CC="$root/nfcc" timeout 600 ./baruby_precise --aot-compile --run fib.ba.rb 2>&1 | head -3 | tr '\n' ' ')
+  if [[ $got != 832040* ]] || [ ! -f "$d/code_store/all.so" ]; then
+    echo "FAIL $b astro baruby_precise: AOT through nfcc: '$got' all.so=$([ -f "$d/code_store/all.so" ] && echo yes || echo no)"; fail=1; continue
+  fi
+  echo "ok   $b astro baruby_precise: built; --plain right, --aot-compile compiled SD_*.c through nfcc and ran fib(30)=832040 from all.so"
+done
 exit $fail
