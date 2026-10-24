@@ -229,9 +229,11 @@ EOF
     if out=$("$nfcc" -mavx2 avx2.c -o avx2 2>&1) && [ "$(./avx2)" = 6 ]; then ok "-mavx2 intrinsics inline"
     else bad "-mavx2 intrinsics inline" "$(head -3 <<<"$out" | tr '\n' ' ')"; fi
   fi
-  # A weak definition in hand-written C: the qbe preprocess has no __GNUC__, so glibc's <sys/cdefs.h> defines __attribute__
+  # A weak definition in hand-written C (glibc only: the problem is its <sys/cdefs.h>, and cproc does not parse the Apple SDK's
+  # <stdlib.h> here): the qbe preprocess has no __GNUC__, so glibc's <sys/cdefs.h> defines __attribute__
   # away and qbe-cc reads a second, plain preprocess for the weak names. A strong definition in another object wins,
   # whichever comes first on the link line.
+  if [ "$(uname -s)" = Linux ]; then
   cat > weak1.c <<'EOC'
 #include <stdlib.h>   // a libc header: <sys/cdefs.h> is what defines __attribute__ away
 __attribute__((weak)) int pick(void) { return 1; }
@@ -240,6 +242,7 @@ EOC
   echo 'int pick(void) { return 2; }' > weak2.c
   check "a weak definition is overridden by a strong one (weak object first)" bash -c "'$nfcc' weak1.c weak2.c -o weak12 && ./weak12"
   check "a weak definition is overridden by a strong one (strong object first)" bash -c "'$nfcc' weak2.c weak1.c -o weak21 && ./weak21"
+  fi
   # --param is an optimiser knob: gcc gets it, QBE ignores it; neither stops the compile.
   echo 'int main(void) { return 0; }' > param.c
   check "--param=name=value is accepted" "$nfcc" --param=early-inlining-insns=100 -c param.c -o param.o

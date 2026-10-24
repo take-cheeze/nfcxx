@@ -2,8 +2,6 @@
 // GNU statement expressions ({ ... }): the value of the last expression statement, evaluated where the expression is
 // (the branch of ?:, && and ||, a loop condition), with return, goto and break leaving the body as jumps. The exit code
 // names the first check that fails. cproc (the qbe backend) gained them with scripts/setup-qbe.sh's pin 9f706f5.
-#include <string.h>
-
 typedef struct { int state; long value; } RESULT;
 static int calls;
 static RESULT mk(int st, long v) { RESULT r = { st, v }; calls++; return r; }
@@ -42,7 +40,8 @@ int main(void) {
   int z = 0;
   if (voidexpr(&z) != 10) return 10;
   if (sw(1) != 10 || sw(5) != 20) return 11;
-  if (strcmp(str(), "hi") != 0) return 12;
+  const char *h = str();
+  if (h[0] != 'h' || h[1] != 'i' || h[2] != 0) return 12;
   if (gt(2) != 1 || gt(9) != 6) return 13;
   if (brk() != 3) return 14;
   if (sizeof(({ 1L; })) != 8 || sizeof(({ char c = 1; c; })) != 1) return 15;
