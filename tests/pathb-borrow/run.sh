@@ -155,6 +155,34 @@ cc "$tmp/inferred.s" -o "$tmp/inferred"
 "$tmp/inferred" || { echo "FAIL inferred.cpp runtime: expected 0"; exit 1; }
 echo "ok   inferred summaries for lowered C++ callees, mutant, and native execution"
 pass=$((pass + 1))
+# Plain calls to inferred returned-alias callees get implicit loans. Holding the
+# returned alias across a direct write to its source must be a loan conflict.
+aliases=tests/pathb-borrow/contracts/aliases.cpp
+sed 's/^  bump(second(&s));$/  int *b = second(\&s); s.b = 9; bump(b);/' "$aliases" > "$tmp/aliases_held.cpp"
+for name in aliases aliases_held; do
+  src=$aliases
+  [ "$name" = aliases ] || src=$tmp/$name.cpp
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/$name.0.ir"
+  { head -1 "$tmp/$name.0.ir"; cat "$layouts"; tail -n +2 "$tmp/$name.0.ir"; } > "$tmp/$name.ir"
+done
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $aliases"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases_held.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -q 'main: loan-conflict: s\[4\.\.8\] (&.*second.*#1)' "$tmp/out"; then
+  echo "FAIL $aliases holding the alias across a write: expected exit 1, got $rc"
+  cat "$tmp/out"
+  exit 1
+fi
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/aliases.ir" > "$tmp/out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || { echo "FAIL $aliases: implicit loans need inference, got $rc"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/aliases.ir" > "$tmp/aliases.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/aliases.qbe" -o "$tmp/aliases.s"
+cc "$tmp/aliases.s" -o "$tmp/aliases"
+"$tmp/aliases" || { echo "FAIL $aliases runtime: expected 0"; exit 1; }
+echo "ok   implicit returned loans for lowered C++ calls, held-alias mutant, and native execution"
+pass=$((pass + 1))
 # Call-argument temporaries get (decl ... temp) facts around their full expression,
 # so a recursive callee gets a summary. An uninitialized argument is still found.
 temps=tests/pathb-borrow/contracts/temporaries.cpp
