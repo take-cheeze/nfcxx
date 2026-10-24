@@ -68,6 +68,8 @@ The qbe backend still refuses every option it cannot honour. In this mode it acc
 
 - honoured by cproc: `-funsigned-char` (cproc `-u`), `-fshort-wchar` (`-W`: wide literals are `unsigned short`),
   `-ftrivial-auto-var-init=zero` (`-z`: automatic objects without an initializer are zeroed);
+- honoured by QBE (scripts/qbe-nfcxx.patch): `-fno-asynchronous-unwind-tables` (`qbe -U`: no `.cfi` directives,
+  so no `.eh_frame`, which the kernel's link would otherwise take as an orphan section);
 - true of QBE's code by construction: `-mno-red-zone` (QBE reserves its frame with `subq` and never addresses below
   `%rsp`), `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`,
   `-fno-strict-aliasing`, `-fno-common`, `-fno-PIE` (QBE writes PIC code, which a non-PIE link takes; the linker relaxes

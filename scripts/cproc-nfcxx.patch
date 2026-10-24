@@ -20,7 +20,7 @@
  		return false;
  	name = strip(tokenstr(tok.kind), namebuf, sizeof namebuf);
  	next();
-@@ -84,17 +88,37 @@
+@@ -84,17 +88,56 @@
  				a->cleanup = cleanup;
  			expect(TRPAREN, "after cleanup function");
  		} else if (strcmp(name, "section") == 0) {
@@ -40,6 +40,25 @@
 +		           strcmp(name, "stdcall") == 0 || strcmp(name, "fastcall") == 0 || strcmp(name, "thiscall") == 0) {
 +			/* another calling convention (the kernel's __efiapi): the function type is marked, its arguments skipped */
 +			attrabi = strcmp(name, "ms_abi") == 0 ? "ms_abi" : strcmp(name, "sysv_abi") == 0 ? "sysv_abi" : "regparm";
++		} else if (strcmp(name, "weak") == 0) {
++			declattr.weak = true;
++		} else if (strcmp(name, "alias") == 0 || strcmp(name, "visibility") == 0) {
++			/* GNU alias("target") and visibility("hidden"): kept for the declaration (declattr) */
++			struct stringlit lit;
++			bool isalias = name[0] == 'a';
++
++			expect(TLPAREN, isalias ? "after 'alias'" : "after 'visibility'");
++			tokencheck(&tok, TSTRINGLIT, isalias ? "for alias target" : "for visibility");
++			stringconcat(&lit, true);
++			if (isalias) {
++				declattr.alias = lit.data;
++			} else {
++				if (strcmp(lit.data, "default") && strcmp(lit.data, "hidden") && strcmp(lit.data, "protected") &&
++				    strcmp(lit.data, "internal"))
++					error(&tok.loc, "unknown visibility '%s'", (char *)lit.data);
++				declattr.visibility = lit.data;
++			}
++			expect(TRPAREN, isalias ? "after alias target" : "after visibility");
 +		} else if (strcmp(name, "always_inline") == 0) {
 +			declattr.alwaysinline = true;
 +		} else if (strcmp(name, "gnu_inline") == 0) {
@@ -116,17 +135,22 @@
  	BUILTINEXPECT,
  	BUILTINFABSF,
  	BUILTINFPCLASSIFY,
-@@ -198,6 +219,9 @@
+@@ -198,6 +219,14 @@
  	enum typequal qual;
  	struct value *value;
  	char *asmname;
 +	char *section;   /* GNU section("...") on a function or a static-storage object, or null */
 +	char *regvar;    /* GNU register variable: register T x asm("REG") binds x to REG (without '%'), or null */
 +	bool used;       /* GNU used: kept even when nothing references it (cproc -p) */
++	bool weak;       /* GNU weak */
++	char *alias;     /* GNU alias("target"): the declaration defines the name as the target */
++	const char *visibility;   /* GNU visibility("hidden"), ... or null */
++	bool symattr;    /* in the list of decls whose weak or visibility goes to the assembly (emitsymattrs) */
++	struct decl *symattrnext;
  	bool defined;
  	bool tentative;
  	struct decl *next;
-@@ -211,11 +235,22 @@
+@@ -211,11 +240,22 @@
  			enum storageduration storage;
  			/* GNU cleanup(f) on a block-scope object: f(&object) runs when a throw unwinds its function (nfcxx, qbe.c) */
  			const char *cleanup;
@@ -149,7 +173,7 @@
  		} func;
  		unsigned long long enumconst;
  		enum builtinkind builtin;
-@@ -229,6 +264,15 @@
+@@ -229,6 +269,15 @@
  	struct block *continuelabel;
  	struct switchcases *switchcases;
  	struct scope *parent;
@@ -165,7 +189,7 @@
  	/* -fsanitize=address: the stack objects registered when the loop or switch body whose breaklabel or continuelabel this is began (asanmark) */
  	size_t asanbreak, asancontinue;
  };
-@@ -257,6 +301,7 @@
+@@ -257,6 +306,7 @@
  	EXPRBUILTIN,
  	EXPRTEMP,
  	EXPRSIZEOF,
@@ -173,7 +197,7 @@
  };
  
  struct stringlit {
-@@ -291,6 +336,11 @@
+@@ -291,6 +341,11 @@
  			/* a 16-byte floating constant (PROPSOFT type): the object image, low and high eightbyte */
  			unsigned long long soft[2];
  		} constant;
@@ -185,7 +209,7 @@
  		struct stringlit string;
  		struct {
  			struct expr *args;
-@@ -338,11 +388,17 @@
+@@ -338,11 +393,17 @@
  
  void tokeninit(void);
  int tokenget(const void *, size_t);
@@ -203,7 +227,7 @@
  
  /* scan */
  
-@@ -364,6 +420,16 @@
+@@ -364,6 +425,16 @@
  
  void next(void);
  bool peek(enum tokenkind);
@@ -220,7 +244,7 @@
  char *expect(enum tokenkind, const char *);
  bool consume(enum tokenkind);
  
-@@ -421,6 +487,12 @@
+@@ -421,6 +492,12 @@
  extern const struct target *targ;
  
  void targinit(const char *);
@@ -233,7 +257,7 @@
  
  /* attr */
  
-@@ -434,6 +506,8 @@
+@@ -434,6 +511,8 @@
  	ATTRPACKED      = 1<<5,
  	ATTRSECTION     = 1<<6,
  	ATTRCLEANUP     = 1<<7,
@@ -242,7 +266,7 @@
  };
  
  struct attr {
-@@ -445,6 +519,20 @@
+@@ -445,6 +524,23 @@
  
  bool attr(struct attr *, enum attrkind);
  bool gnuattr(struct attr *, enum attrkind);
@@ -258,12 +282,15 @@
 +	bool transparent;   /* GNU transparent_union, taken on a typedef of a union (decl) */
 +	bool gnuinline;     /* GNU gnu_inline */
 +	bool alwaysinline;  /* GNU always_inline */
++	bool weak;          /* GNU weak */
++	char *alias;        /* GNU alias("target") */
++	const char *visibility;   /* GNU visibility("...") */
 +};
 +extern struct declattr declattr;
  
  /* decl */
  
-@@ -503,6 +591,15 @@
+@@ -503,6 +599,15 @@
  /* stmt */
  
  void stmt(struct func *, struct scope *);
@@ -279,7 +306,7 @@
  
  /* backend */
  
-@@ -512,6 +609,8 @@
+@@ -512,6 +617,8 @@
  	/* -fsanitize=address (qbe.c asangoto, asanlabel): sets of block numbers, null when empty. The blocks open at the label
  	 * (asanopen, once defined); for the gotos before it: the blocks open at any of them (asanfrom) and at all of them (asanall) */
  	struct array *asanopen, *asanfrom, *asanall;
@@ -288,7 +315,7 @@
  };
  
  struct switchcases {
-@@ -522,21 +621,35 @@
+@@ -522,21 +629,35 @@
  	struct array *asanopen;
  };
  
@@ -325,14 +352,17 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +659,10 @@
+@@ -546,6 +667,13 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
 +/* asm goto: the C labels (struct gotolabel) and their names, nlab of them */
 +void funcasm(struct func *, char *template, struct asmoperand *out, unsigned nout, struct asmoperand *in, unsigned nin, char **clob, unsigned nclob, bool isvolatile, struct gotolabel **labels, char **labnames, unsigned nlab);
 +extern FILE *asmout;   /* the side file for inline-asm thunks (-a); null means inline asm is unavailable */
-+void emitasm(const char *);   /* a file-scope asm's text, to the side file */
++void emitasm(const char *);
++void emitalias(struct decl *);   /* a GNU alias: the name set to its target, in the side file */
++void emitsymattrs(void);         /* GNU weak and visibility, at the end */
++void emitsymattr(struct decl *);   /* a file-scope asm's text, to the side file */
  void funcinit(struct func *, struct decl *, struct init *, bool);
  
  void emitfunc(struct func *, bool);
@@ -788,11 +818,13 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1265,16 @@
+@@ -1062,6 +1265,39 @@
  	return d;
  }
  
 +/* the section/used attributes gathered for this declarator (declattr); a redeclaration keeps an earlier section */
++static struct decl *symattrs, **symattrsend = &symattrs;
++
 +static void
 +declapplyattr(struct decl *d)
 +{
@@ -800,12 +832,33 @@
 +		d->section = declattr.section;
 +	if (declattr.used)
 +		d->used = true;
++	if (declattr.weak)
++		d->weak = true;
++	if (declattr.visibility)
++		d->visibility = declattr.visibility;
++	if (declattr.alias)
++		d->alias = declattr.alias;
++	/* weak and visibility are directives for the symbol, written at the end (emitsymattrs) */
++	if ((d->weak || d->visibility && strcmp(d->visibility, "default")) && d->linkage == LINKEXTERN && !d->symattr) {
++		d->symattr = true;
++		*symattrsend = d;
++		symattrsend = &d->symattrnext;
++	}
++}
++
++void
++emitsymattrs(void)
++{
++	struct decl *d;
++
++	for (d = symattrs; d; d = d->symattrnext)
++		emitsymattr(d);
 +}
 +
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1283,7 @@
+@@ -1070,7 +1306,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -814,7 +867,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,7 +1301,11 @@
+@@ -1088,7 +1324,11 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -826,7 +879,7 @@
  	struct decl *d, *prior;
  	enum declkind kind;
  	struct scope *funcscope;
-@@ -1096,10 +1313,31 @@
+@@ -1096,10 +1336,31 @@
  
  	if (staticassert(s))
  		return true;
@@ -858,7 +911,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1347,18 @@
+@@ -1109,16 +1370,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -880,7 +933,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1375,36 @@
+@@ -1135,6 +1398,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -917,7 +970,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1414,32 @@
+@@ -1144,10 +1437,32 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -952,7 +1005,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,9 +1449,20 @@
+@@ -1157,9 +1472,20 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -973,7 +1026,19 @@
  			declcleanup = NULL;
  			if (d->u.obj.cleanup && s == &filescope)
  				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
-@@ -1181,6 +1484,11 @@
+@@ -1176,11 +1502,23 @@
+ 				funcexpr(f, base.expr);
+ 			init = NULL;
+ 			hasinit = false;
++			if (d->alias && !d->defined) {   /* GNU alias on an object: this declaration defines the name */
++				if (tok.kind == TASSIGN)
++					error(&tok.loc, "an alias '%s' cannot have an initializer", name);
++				emitalias(d);
++				d->defined = true;
++				break;
++			}
+ 			if (consume(TASSIGN)) {
+ 				if (f && d->linkage != LINKNONE)
  					error(&tok.loc, "object '%s' with block scope and %s linkage cannot have initializer", name, d->linkage == LINKEXTERN ? "external" : "internal");
  				if (d->defined)
  					error(&tok.loc, "object '%s' redefined", name);
@@ -985,7 +1050,7 @@
  				init = parseinit(s, d->type);
  				hasinit = true;
  			} else if (sc & SCEXTERN) {
-@@ -1201,8 +1509,14 @@
+@@ -1201,8 +1539,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1001,7 +1066,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1527,43 @@
+@@ -1213,12 +1557,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1046,7 +1111,18 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1268,3 +1613,127 @@
+@@ -1226,6 +1601,10 @@
+ 			} else if (funcscope) {
+ 				delscope(funcscope);
+ 			}
++			if (d->alias && !d->defined) {   /* GNU alias: this declaration defines the name */
++				emitalias(d);
++				d->defined = true;
++			}
+ 			break;
+ 		}
+ 		if (consume(TSEMICOLON))
+@@ -1268,3 +1647,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }
@@ -1924,7 +2000,7 @@
  #include "util.h"
  #include "arg.h"
  #include "cc.h"
-@@ -14,11 +18,325 @@
+@@ -14,11 +18,359 @@
  
  extern bool asanon;
  
@@ -2203,6 +2279,34 @@
 +(qbe.c funcasm), and a dropped function's thunks are dropped with it -- their text can name symbols the program does
 +not have. A "#nfcxx:keep" chunk (the volatile and register-variable helpers) always stays.
 +*/
++static const char *ilbufp;   /* the IL, for asmprune */
++
++/* whether a live item defines or names the global NAME */
++static bool
++ilnamed(const char *buf, const char *name, size_t len)
++{
++	size_t i, n;
++	int j;
++
++	if (!buf)
++		return true;
++	j = ilfind(name, len);
++	if (j >= 0)
++		return ilitems[j].live;
++	for (i = 0; i < nilitems; ++i) {
++		const char *s = buf + ilitems[i].off, *e = s + ilitems[i].len;
++
++		if (!ilitems[i].live)
++			continue;
++		for (; (s = memchr(s, '$', e - s)); s += 1 + n) {
++			n = ilnamelen(s + 1, e);
++			if (n == len && memcmp(s + 1, name, len) == 0)
++				return true;
++		}
++	}
++	return false;
++}
++
 +static void
 +asmprune(const char *path)
 +{
@@ -2234,6 +2338,12 @@
 +		}
 +		if (strncmp(line, "#nfcxx:keep", 11) == 0)
 +			keep = true;
++		if (strncmp(line, "#nfcxx:symattr ", 15) == 0) {
++			/* weak and visibility (qbe.c emitsymattr): for a symbol a live item defines or names */
++			name = line + 15;
++			keep = ilnamed(ilbufp, name, eol - name - (eol[-1] == '\n'));
++			continue;
++		}
 +		if (keep)
 +			fwrite(line, 1, eol - line, f);
 +	}
@@ -2251,7 +2361,7 @@
  
  	argv0 = progname(argv[0], "cproc-qbe");
  	asanon = getenv("NFCXX_ASAN") != NULL;
-@@ -29,6 +347,33 @@
+@@ -29,6 +381,33 @@
  	case 't':
  		target = EARGF(usage());
  		break;
@@ -2285,7 +2395,7 @@
  	case 'o':
  		output = EARGF(usage());
  		break;
-@@ -38,9 +383,21 @@
+@@ -38,9 +417,21 @@
  
  	targinit(target);
  
@@ -2307,7 +2417,15 @@
  	if (argc) {
  		while (argc--)
  			scanfrom(argv[argc], NULL);
-@@ -74,5 +431,30 @@
+@@ -67,6 +458,7 @@
+ 			}
+ 		}
+ 		emittentativedefns();
++		emitsymattrs();
+ 		emitasanctor();
+ 		checkf128calls();
+ 	}
+@@ -74,5 +466,31 @@
  	fflush(stdout);
  	if (ferror(stdout))
  		fatal("write failed");
@@ -2326,6 +2444,7 @@
 +		if (!(out = fdopen(realout, "w")))
 +			fatal("fdopen:");
 +		ilprune(ilbuf, ilsize, out);
++		ilbufp = ilbuf;
 +		if (fflush(out) || ferror(out))
 +			fatal("write failed");
 +	}
@@ -2747,7 +2866,14 @@
  	if (t) {
  		assert(t->prop & PROPSCALAR);
  		/*
-@@ -1881,6 +2056,84 @@
+@@ -1875,12 +2050,91 @@
+ 		g->label = mkblock(name);
+ 		g->defined = false;
+ 		g->asanopen = g->asanfrom = g->asanall = NULL;
++		g->cleanat = (struct array){0};
+ 		f->gotos.vals[idx].p = g;
+ 	}
+ 
  	return f->gotos.vals[idx].p;
  }
  
@@ -2832,7 +2958,7 @@
  static struct lvalue
  funclval(struct func *f, struct expr *e)
  {
-@@ -1896,6 +2149,8 @@
+@@ -1896,6 +2150,8 @@
  		d = e->u.ident.decl;
  		if (d->kind != DECLOBJECT && d->kind != DECLFUNC)
  			error(&tok.loc, "identifier '%s' is not an object or function", d->name);
@@ -2841,7 +2967,7 @@
  		if (d == f->namedecl) {
  			fputs("data ", stdout);
  			emitname(d->value);
-@@ -1937,6 +2192,18 @@
+@@ -1937,6 +2193,18 @@
  	struct value *v;
  	struct block *b;
  
@@ -2860,7 +2986,7 @@
  	/* Maybe we we could do something for EXPRCOND as well. */
  	switch (e->kind) {
  	case EXPRBINARY:
-@@ -2136,6 +2403,141 @@
+@@ -2136,6 +2404,141 @@
  	return funcexpr(f, e);
  }
  
@@ -3002,7 +3128,7 @@
  struct value *
  funcexpr(struct func *f, struct expr *e)
  {
-@@ -2154,10 +2556,20 @@
+@@ -2154,10 +2557,20 @@
  
  	calcvla(f, e->type);
  	switch (e->kind) {
@@ -3024,7 +3150,7 @@
  		case DECLCONST:  return d->value;
  		default:
  			fatal("unimplemented declaration kind %d", d->kind);
-@@ -2182,10 +2594,10 @@
+@@ -2182,10 +2595,10 @@
  	case EXPRBITFIELD:
  	case EXPRCOMPOUND:
  		lval = funclval(f, e);
@@ -3037,7 +3163,7 @@
  		t = e->type;
  		if (t->prop & PROPSOFT) {
  			/* the old value is copied out first: the store overwrites the object that l addresses */
-@@ -2206,10 +2618,11 @@
+@@ -2206,10 +2619,11 @@
  			return e->u.incdec.post ? l : v;
  		}
  		if (t->kind == TYPEPOINTER) {
@@ -3051,7 +3177,7 @@
  			}
  		} else if (t->prop & PROPINT) {
  			r = mkintconst(1);
-@@ -2230,6 +2643,8 @@
+@@ -2230,6 +2644,8 @@
  			callee = callee->base;  /* a function designator, decayed to a pointer */
  		if (callee->kind == EXPRIDENT && callee->u.ident.decl->kind == DECLFUNC && (e->type->kind == TYPEFLOAT128 || anyf128arg(e)))
  			addf128call(callee->u.ident.decl);
@@ -3060,7 +3186,7 @@
  		argvals = xreallocarray(NULL, e->u.call.nargs, sizeof(argvals[0]));
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
  			emittype(arg->type);
-@@ -2244,7 +2659,10 @@
+@@ -2244,7 +2660,10 @@
  			v = softtemp(f);
  			funcinst(f, ICALL, 0, funcexpr(f, e->base), NULL);
  		} else {
@@ -3072,7 +3198,7 @@
  		}
  		functype = e->base->type->base;
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
-@@ -2277,7 +2695,7 @@
+@@ -2277,7 +2696,7 @@
  			return lval.addr;
  		case TMUL:
  			r = funcexpr(f, e->base);
@@ -3081,7 +3207,7 @@
  		case TSUB:
  			r = funcexpr(f, e->base);
  			if (e->type->prop & PROPSOFT)
-@@ -2439,6 +2857,35 @@
+@@ -2439,6 +2858,35 @@
  		return funcexpr(f, e);
  	case EXPRBUILTIN:
  		switch (e->u.builtin.kind) {
@@ -3117,7 +3243,7 @@
  		case BUILTINVASTART:
  			l = funcvalistaddr(f, e->base);
  			funcinst(f, IVASTART, 0, l, NULL);
-@@ -2568,6 +3015,107 @@
+@@ -2568,6 +3016,107 @@
  	o->addr = d->value;
  }
  
@@ -3225,7 +3351,7 @@
  void
  funcinit(struct func *func, struct decl *d, struct init *init, bool hasinit)
  {
-@@ -2576,9 +3124,17 @@
+@@ -2576,9 +3125,17 @@
  	unsigned long long offset = 0, max = 0;
  	size_t i, w;
  
@@ -3245,7 +3371,7 @@
  	if (!hasinit)
  		return;
  	for (; init; init = init->next) {
-@@ -2627,7 +3183,7 @@
+@@ -2627,7 +3184,7 @@
  		funcjmp(f, defaultlabel);
  		return;
  	}
@@ -3254,7 +3380,7 @@
  		funcjmp(f, c->body);
  		return;
  	}
-@@ -2636,7 +3192,12 @@
+@@ -2636,7 +3193,12 @@
  	label[2] = mkblock("switch_gt");
  
  	key = mkintconst(c->node.key);
@@ -3268,7 +3394,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3205,829 @@
+@@ -2644,17 +3206,901 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -4035,6 +4161,78 @@
 +	if (!asmout)
 +		error(&tok.loc, "inline assembly is only supported on x86_64 ELF (cproc -a)");
 +	fprintf(asmout, "#nfcxx:keep\n\t.text\n%s\n", text);
++}
++
++/* the assembler's name of a global value, as QBE writes it on ELF */
++static void
++asmsymname(struct value *v, FILE *f)
++{
++	if (v->kind & VALUE_QUOTE)
++		fprintf(f, "\"%s\"", v->u.name);
++	else if (v->id)
++		fprintf(f, ".L%s.%u", v->u.name, v->id);
++	else
++		fputs(v->u.name, f);
++}
++
++/*
++GNU weak and visibility on a global: directives in the inline-asm side file, after the code that defines or uses the
++symbol. Under cproc -p the chunk ("#nfcxx:symattr NAME", main.c asmprune) stays only when a live item defines or
++names the symbol: an unused weak declaration would otherwise be a weak undefined symbol gcc's object does not have.
++*/
++void
++emitsymattr(struct decl *d)
++{
++	if (!asmout)
++		error(&tok.loc, "the weak and visibility attributes need the inline-asm side file (x86_64 ELF, -a)");
++	if (!d->value)
++		return;
++	fputs("#nfcxx:symattr ", asmout);
++	asmsymname(d->value, asmout);
++	fputs("\n", asmout);
++	if (d->weak) {
++		fputs("\t.weak ", asmout);
++		asmsymname(d->value, asmout);
++		fputc('\n', asmout);
++	}
++	if (d->visibility && strcmp(d->visibility, "default")) {
++		fprintf(asmout, "\t.%s ", d->visibility);
++		asmsymname(d->value, asmout);
++		fputc('\n', asmout);
++	}
++}
++
++/*
++A GNU alias, T name(...) __attribute__((alias("target"))): the declaration defines name as target, a symbol of this
++unit. The side file gets .set with the binding and type gcc gives it, and a top-level "# nfcxx:ref $target" line in
++the IL keeps the target under cproc -p.
++*/
++void
++emitalias(struct decl *d)
++{
++	struct decl *t = scopegetdecl(&filescope, d->alias, false);
++	struct value tv = {.kind = VALUE_GLOBAL, .u.name = d->alias};
++
++	if (!asmout)
++		error(&tok.loc, "the alias attribute needs the inline-asm side file (x86_64 ELF, -a)");
++	if (!d->value)
++		d->value = mkglobal(d);
++	fputs("#nfcxx:keep\n", asmout);
++	if (d->linkage == LINKEXTERN) {
++		fputs(d->weak ? "\t.weak " : "\t.globl ", asmout);
++		asmsymname(d->value, asmout);
++		fputc('\n', asmout);
++	}
++	fputs("\t.set ", asmout);
++	asmsymname(d->value, asmout);
++	fputs(", ", asmout);
++	asmsymname(t && t->value ? t->value : &tv, asmout);
++	fputs("\n\t.type ", asmout);
++	asmsymname(d->value, asmout);
++	fprintf(asmout, ", @%s\n", d->kind == DECLFUNC ? "function" : "object");
++	fputs("# nfcxx:ref ", stdout);
++	emitname(t && t->value ? t->value : &tv);
++	putchar('\n');
  }
  
  /* emit */
@@ -4100,7 +4298,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4295,12 @@
+@@ -2922,6 +4368,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -4113,7 +4311,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4313,7 @@
+@@ -2934,7 +4386,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -4122,7 +4320,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4323,7 @@
+@@ -2944,6 +4396,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -4130,7 +4328,7 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4455,18 @@
+@@ -3075,6 +4528,18 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);

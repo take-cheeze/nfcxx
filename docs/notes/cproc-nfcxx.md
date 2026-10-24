@@ -171,6 +171,12 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   when a throw unwinds the function. Before `-G`, hand-written C got that meaning too, and a cleanup never ran at
   the end of its scope.
 
+- **`weak`, `alias("target")`, `visibility("...")`** on globals (the kernel's `__weak`, the `SYSCALL_DEFINE` stubs
+  that alias a static `__do_sys_*`): directives in the inline-asm side file -- `.weak`/`.hidden` for a symbol a live
+  item defines or names (under `-p`, an unused weak declaration leaves no weak undefined symbol), and `.set` with the
+  binding and `.type` gcc gives an alias, its target kept by a `# nfcxx:ref` line. tests/c/cc-mode.sh compares the
+  symbol table with gcc's.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is

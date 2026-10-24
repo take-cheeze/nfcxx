@@ -421,6 +421,16 @@ EOC
     if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kguard2.c -o kguard2.o 2>&1); then bad "kernel mode: a jump into a cleanup scope refused" "was accepted"
     elif grep -q "jump into the scope" <<<"$out"; then ok "kernel mode: a jump into a cleanup scope refused"
     else bad "kernel mode: a jump into a cleanup scope refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # weak, alias and visibility: the same symbol table as gcc's (binding, type, section kind, visibility)
+    symtab() { objdump -t "$1" | awk -F'\t' 'NF >= 2 { n = split($2, t, " "); h = $1; s = h; sub(/.* /, "", s); print t[n], substr(h, 18, 2), substr(h, 25, 1), (s ~ /^\.text/ ? "text" : s ~ /^\.data|^\.bss/ ? "data" : s), (n > 2 ? t[2] : "") }' | grep -E '^(maybe|never|unused|sys_entry|hidden_one|tab)' | sort; }
+    if gcc -O2 -c "$root/tests/c/gnu_weak_alias.c" -o kwg.o && NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c "$root/tests/c/gnu_weak_alias.c" -o kwq.o 2>/dev/null &&
+       [ "$(symtab kwg.o)" = "$(symtab kwq.o)" ]; then ok "kernel mode: weak, alias and visibility as gcc writes them"
+    else bad "kernel mode: weak, alias and visibility as gcc writes them" "$(diff <(symtab kwg.o) <(symtab kwq.o) | tr '\n' ' ')"; fi
+    # -fno-asynchronous-unwind-tables (qbe -U): no .eh_frame, as gcc's kernel objects have none
+    printf 'int g(int);\nint f(int x) { return g(x) + 1; }\n' > kunw.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -fno-asynchronous-unwind-tables -c kunw.c -o kunw.o 2>/dev/null && ! readelf -SW kunw.o | grep -q eh_frame
+    then ok "kernel mode: -fno-asynchronous-unwind-tables honoured"
+    else bad "kernel mode: -fno-asynchronous-unwind-tables honoured" "$(readelf -SW kunw.o 2>&1 | grep -c eh_frame) .eh_frame"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended

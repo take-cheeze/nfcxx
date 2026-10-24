@@ -14,7 +14,7 @@ qbe=${QBE:-$root/build/qbe/qbe}
 source "$(dirname "$0")/trace.sh"
 
 compile=0 asm=0 out="" src="" cppflags=() asflags=()
-kcproc=() nofp=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
+kcproc=() nofp=0 nounwind=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   a=${args[i]}
@@ -37,6 +37,8 @@ for ((i = 0; i < ${#args[@]}; i++)); do
           -fshort-wchar) kcproc+=(-W) ;;
           -ftrivial-auto-var-init=zero) kcproc+=(-z) ;;
           -mno-sse|-mno-sse2|-mno-80387|-msoft-float) nofp=1 ;;
+          -fno-asynchronous-unwind-tables) nounwind=1 ;;   # qbe -U: no .cfi directives, so no .eh_frame
+          -fasynchronous-unwind-tables) nounwind=0 ;;
         esac
       fi ;;
     *.c) src=$a ;;
@@ -190,6 +192,7 @@ t=$(trace_start)
 qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_apple); fi
 # -mno-sse: qbe -n moves integers between stack slots through %rax, not %xmm15 (scripts/qbe-nfcxx.patch)
 qbenofp=(); [ $nofp = 0 ] || qbenofp=(-n)
+[ $nounwind = 0 ] || qbenofp+=(-U)
 "$qbe" ${qbetarget[@]+"${qbetarget[@]}"} ${qbenofp[@]+"${qbenofp[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
 trace_end "$t" "qbe (IL to assembly)" qbe-backend
 # -mno-sse (NFCXX_QBE_KERNEL): QBE has no switch to avoid SSE and x87, so the code it wrote is checked instead (the
