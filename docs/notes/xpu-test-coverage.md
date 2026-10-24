@@ -14,9 +14,9 @@ Counts use the static `new test_*(` sites in `make_test_cases_eval()` (lines 958
 
 | Class | Ops (rows) | Eval sites of their structs |
 | --- | ---: | ---: |
-| covered-real | 36 | 348 |
+| covered-real | 37 | 370 |
 | covered-copy | 2 | 17 |
-| not-started | 66 | 694 |
+| not-started | 65 | 672 |
 | no-sycl-kernel | 2 | 4 |
 
 Caveats on the covered rows: `mul_mat`, `rope`, `cpy`, `soft_max` and `get_rows` are partial (see the notes column). `rms_norm` has a real test on main, but commit #414 says it is blocked at the front end, so it is counted as not-started.
@@ -37,7 +37,6 @@ Blocked cases = eval sites of the structs attributed to the op. Fused structs co
 | 7 | SSM_SCAN | 25 | test_ssm_scan, test_ssm_scan_rollback, test_ssm_scan_cache_fusion |
 | 8 | SOLVE_TRI | 24 | test_solve_tri |
 | 9 | UNARY x MUL (fused) | 23 | test_unary_mul, test_add_unary_mul |
-| 10 | PAD | 22 | test_pad, test_pad_ext |
 
 ## Inventory
 
@@ -118,7 +117,7 @@ Blocked cases = eval sites of the structs attributed to the op. Fused structs co
 | 73 | CONV_1D_DW | no | no-sycl-kernel | none | test_conv_1d_dw | 3 | 0 | not in supports_op switch, default false |
 | 74 | POOL_1D | yes | not-started | none | test_pool1d | 3 | 0 |  |
 | 75 | POOL_2D | yes | not-started | none | test_pool2d | 2 | 1 |  |
-| 76 | PAD | yes (conditional) | not-started | none | test_pad, test_pad_ext | 22 | 0 |  |
+| 76 | PAD | yes (conditional) | covered-real | pad_real (real pad.cpp; test_pad and test_pad_ext shapes, strided source rows) | test_pad, test_pad_ext | 22 | 0 | circular padding (op_params[8]) is refused by supports_op |
 | 77 | PAD_REFLECT_1D | yes (contiguous F32) | not-started | none | test_pad_reflect_1d | 2 | 5 |  |
 | 78 | UPSCALE | yes | not-started | none | test_upscale, test_interpolate | 7 | 0 |  |
 | 79 | ACC | yes | not-started | none | test_acc | 6 | 6 |  |

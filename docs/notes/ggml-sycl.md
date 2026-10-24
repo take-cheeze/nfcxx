@@ -129,6 +129,8 @@ bash tests/gpu/ggml/run.sh                 # fill oracle
 bash tests/gpu/ggml/fill_real/run.sh       # real fill.cpp, F32
 bash tests/gpu/ggml/fill_real_f16/run.sh   # real fill.cpp, F16
 bash tests/gpu/ggml/diag_real/run.sh       # real diag.cpp, three shapes
+bash tests/gpu/ggml/pad_real/run.sh        # real pad.cpp, five shapes
+bash tests/gpu/ggml/sweep.sh               # the device pass of every ggml-sycl .cpp (no run): which TUs compile
 bash tests/gpu/ggml/unary_real/run.sh      # real element_wise.cpp: fails at build until #381 lands
 bash tests/gpu/ggml/rms_norm/run.sh        # only on the #394 branch, not main
 ```

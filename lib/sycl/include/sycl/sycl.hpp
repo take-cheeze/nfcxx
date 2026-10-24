@@ -84,6 +84,7 @@ float __nfcxx_sycl_atomic_fmax(void *p, float v);
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1381,8 +1382,35 @@ inline sub_group get_sub_group() {
 enum class aspect {
   cpu, gpu, accelerator, custom, emulated, host_debuggable, fp16, fp64, atomic64, image, online_compiler, online_linker,
   queue_profiling, usm_device_allocations, usm_host_allocations, usm_atomic_host_allocations, usm_shared_allocations,
-  usm_atomic_shared_allocations, usm_system_allocations
+  usm_atomic_shared_allocations, usm_system_allocations,
+  // extension aspects ggml-sycl queries: none is supported here (no joint_matrix, no command graphs)
+  ext_intel_matrix, ext_oneapi_graph, ext_oneapi_limited_graph
 };
+
+// The extension names a device query needs before class device. architecture is completed (its values) in the ext block
+// at the end of this header; arch_category and peer_access are the sycl_ext_oneapi_device_architecture and
+// sycl_ext_oneapi_peer_access enums.
+namespace ext {
+namespace oneapi {
+enum class peer_access { access_supported, atomics_supported };
+namespace experimental {
+enum class architecture : uint64_t;
+enum class arch_category { intel_gpu, nvidia_gpu, amd_gpu };
+namespace info {
+namespace device {
+struct architecture {};
+}  // namespace device
+}  // namespace info
+}  // namespace experimental
+}  // namespace oneapi
+namespace intel {
+namespace info {
+namespace device {
+struct device_id {};
+}  // namespace device
+}  // namespace info
+}  // namespace intel
+}  // namespace ext
 
 namespace info {
 enum class device_type { cpu, gpu, accelerator, custom, automatic, host, all };
@@ -1491,6 +1519,17 @@ class device {
     }
   }
   platform get_platform() const;
+  // ext_oneapi_architecture_is: an Intel GPU, as the oneAPI runtime reports for the XPU (ggml-sycl then enables its reorder
+  // layouts, as in the icpx build). The exact architecture is not queried: get_info<architecture> reports unknown.
+  bool ext_oneapi_architecture_is(ext::oneapi::experimental::arch_category c) const {
+    return is_gpu() && c == ext::oneapi::experimental::arch_category::intel_gpu;
+  }
+  // one device in this subset: no peer to access
+  bool ext_oneapi_can_access_peer(const device &, ext::oneapi::peer_access = ext::oneapi::peer_access::access_supported) const {
+    return false;
+  }
+  void ext_oneapi_enable_peer_access(const device &) const {}
+  void ext_oneapi_disable_peer_access(const device &) const {}
   template <class P> std::vector<device> create_sub_devices(P) const { throw exception(errc::feature_not_supported, "sycl: devices cannot be partitioned"); }
   static std::vector<device> get_devices(info::device_type = info::device_type::all) { return std::vector<device>(1); }
   template <class P> auto get_info() const { return info_of(static_cast<P *>(nullptr)); }
@@ -1543,6 +1582,9 @@ class device {
   bool info_of(info::device::usm_host_allocations *) const { return true; }
   bool info_of(info::device::usm_shared_allocations *) const { return true; }
   bool info_of(info::device::usm_system_allocations *) const { return false; }
+  ext::oneapi::experimental::architecture info_of(ext::oneapi::experimental::info::device::architecture *) const {
+    return static_cast<ext::oneapi::experimental::architecture>(0x9900000000000000ull);   // unknown
+  }
   // the other descriptors: a number, 0 where the question has no meaning here
   template <class P> unsigned long info_of(P *) const { return 0; }
 };
@@ -1554,6 +1596,7 @@ class platform {
   static std::vector<platform> get_platforms() { return std::vector<platform>(1); }
   std::vector<device> get_devices(info::device_type = info::device_type::all) const { return std::vector<device>(1); }
   template <class P> std::string get_info() const { return "nfcxx"; }
+  backend get_backend() const { return device().get_backend(); }
 };
 inline platform device::get_platform() const { return platform(); }
 
@@ -2048,9 +2091,14 @@ class queue {
   event prefetch(const void *, size_t) { return event(); }
   event mem_advise(const void *, size_t, int) { return event(); }
 
+  // the queue is in order: a barrier orders nothing more than submission already does
+  event ext_oneapi_submit_barrier() { return event(); }
+  event ext_oneapi_submit_barrier(const std::vector<event> &) { return event(); }
+
   void wait() { detail::backend_wait(); }
   void wait_and_throw() { detail::backend_wait(); }
   void throw_asynchronous() {}
+  backend get_backend() const { return device().get_backend(); }
   device get_device() const { return device(); }
   context get_context() const { return context(); }
   bool is_in_order() const { return true; }
@@ -2086,6 +2134,7 @@ inline void *malloc_device(size_t bytes, const queue &) { return detail::usm_mal
 inline void *malloc_shared(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 1); }
 inline void *malloc_shared(size_t bytes, const device &, const context &) { return detail::usm_malloc(bytes, 16, 1); }
 inline void *malloc_host(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 2); }
+inline void *malloc_host(size_t bytes, const queue &, const property_list &) { return detail::usm_malloc(bytes, 16, 2); }
 inline void *malloc(size_t bytes, const queue &, usm::alloc k) { return detail::usm_malloc(bytes, 16, detail::kind_of(k)); }
 inline void free(void *p, const queue &) { if (p) detail::backend_usm_free(p); }
 inline void free(void *p, const context &) { if (p) detail::backend_usm_free(p); }
@@ -2349,6 +2398,13 @@ inline int abs(int x) { return x < 0 ? -x : x; }
 // x and NaN for an infinity. isnan is in lib/sycl-ggml/sycl/half_type.hpp.
 inline bool isinf(float x) { return x == x && (x - x) != 0.0f; }
 inline bool isfinite(float x) { return (x - x) == 0.0f; }
+// nan(n): a quiet binary32 NaN carrying the low 22 bits of n as its payload (ggml's pool.cpp fills empty windows with it).
+inline float nan(uint32_t n) {
+  uint32_t u = 0x7fc00000u | (n & 0x3fffffu);
+  float f;
+  std::memcpy(&f, &u, 4);
+  return f;
+}
 
 // add_sat and sub_sat (SYCL 2020 integer saturating arithmetic): the result clamped to the range of T. dpct's sub_sat functor
 // (dpct/helper.hpp) calls sycl::sub_sat on the lanes of a vectorized binary op, so every integer type reaches here.
@@ -2455,6 +2511,7 @@ namespace experimental {
 // (device_architecture.def), so an architecture read from the runtime compares equal to these. Only the Intel GPUs that the
 // backend mentions are listed.
 enum class architecture : uint64_t {
+  unknown = 0x9900000000000000,
   intel_gpu_bdw = 0x0000000200000000, intel_gpu_skl = 0x0000000240000900, intel_gpu_kbl = 0x0000000240400900,
   intel_gpu_cfl = 0x0000000240800900, intel_gpu_apl = 0x0000000240c00000, intel_gpu_glk = 0x0000000241000000,
   intel_gpu_whl = 0x0000000241400000, intel_gpu_aml = 0x0000000241800000, intel_gpu_cml = 0x0000000241c00000,
