@@ -1,5 +1,6 @@
-// The wasm explorer's server: serves index.html, the examples, and POST /api/compile, which compiles the posted C++
-// with the pipeline in pipeline.cjs. The page also runs without this server, on a static host (build-static.cjs).
+// The wasm explorer's server: serves index.html, the examples, and POST /api/compile, which compiles the posted source
+// (C++, C, Rust, Go, LLVM IR or the nfcxx IR) with the pipeline in pipeline.cjs. The page also runs without this server, on a
+// static host (build-static.cjs).
 //
 // Usage: node tools/wasm-explorer/server.cjs [--port 8080] [--host 127.0.0.1]
 // It listens on localhost by default: the endpoint runs the compiler on whatever source it is sent, so do not expose it
@@ -12,7 +13,11 @@ const { compile, MAX_SOURCE, root } = require("./pipeline.cjs");
 const here = __dirname;
 const examplesDir = path.join(here, "examples");
 const MAX_JOBS = 2;   // compiles in flight; more get 503 rather than queueing without bound
-const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".cpp": "text/plain; charset=utf-8", ".json": "application/json" };
+const TEXT = "text/plain; charset=utf-8";
+const TYPES = {
+  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json",
+  ".cpp": TEXT, ".c": TEXT, ".rs": TEXT, ".go": TEXT, ".ll": TEXT, ".ir": TEXT,   // the example sources
+};
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -50,7 +55,7 @@ function readBody(req, limit) {
   });
 }
 
-// Serves a file under examples/ (only .cpp and .json there). The resolved path must stay inside examples/.
+// Serves a file under examples/ (only the sources and .json there). The resolved path must stay inside examples/.
 function serveExample(res, name) {
   const file = path.resolve(examplesDir, name);
   if (!file.startsWith(examplesDir + path.sep) || !TYPES[path.extname(file)]) {

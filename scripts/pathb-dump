@@ -3,7 +3,9 @@
 # with --ir the mid-level IR (stage 2, see docs/notes/pathb-stage2.md). Runs the harness front end
 # (build/pathb, from scripts/setup-pathb.sh) from the EDG base dir, with the same flags as the nfcxx --emit-c
 # branch. Front-end errors go to stderr and give a non-zero exit status.
-# Usage: scripts/pathb-dump [--ir] [-std=c++NN] [-Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp...
+# Usage: scripts/pathb-dump [--ir] [-std=c++NN | -std=cNN] [-Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp...
+# -std=c89, c99, c11, c17 (c18) or c23 reads the files as C (cpfe --cNN --gcc), and so does a file ending in .c when
+# no -std is given (C17 then). Hosted C takes the host C compiler's include directories (gcc -x c, NFCXX_CC).
 # Hosted by default, like the driver: the host g++'s C++ library include directories and GNU version
 # (scripts/host-sys.sh; NFCXX_CXX, NFCXX_SYS_INCLUDES). --freestanding or PATHB_HOSTED=0 gives the old harness
 # (only EDG's include_c++, no C library headers).
@@ -19,7 +21,7 @@ base=${PATHB_BASE:-$root/build/pathb/edg-base}
 [ -x "$cpfe" ] || { echo "pathb-dump: harness not built; run scripts/setup-pathb.sh" >&2; exit 2; }
 
 source "$root/scripts/host-sys.sh"
-std=--c++23; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""
+std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
   arg=${args[$i]}
@@ -29,6 +31,8 @@ while [ $i -lt ${#args[@]} ]; do
     --target=*) target=${arg#--target=} ;;
     --target) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: --target needs a name" >&2; exit 2; }; target=${args[$i]} ;;
     -std=c++*) std=--c++${arg#-std=c++} ;;
+    -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=--${arg#-std=} ;;
+    -std=*) echo "pathb-dump: unknown standard ${arg#-std=}" >&2; exit 2 ;;
     -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
@@ -39,6 +43,11 @@ while [ $i -lt ${#args[@]} ]; do
   i=$((i + 1))
 done
 [ ${#files[@]} -gt 0 ] || { echo "pathb-dump: no input files" >&2; exit 2; }
+# The language: C for a C standard, or for .c files without -std; else C++ (C++23 by default).
+if [ -z "$std" ]; then
+  case ${files[0]} in *.c) std=--c17 ;; *) std=--c++23 ;; esac
+fi
+case $std in --c++*) lang=c++; dialect=--g++ ;; *) lang=c; dialect=--gcc ;; esac
 target_opts=()
 if [ -n "$target" ]; then
   [ "$hosted" = 0 ] || { echo "pathb-dump: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
@@ -49,7 +58,7 @@ fi
 
 sys_inc=(); gnu_opts=()
 if [ "$hosted" != 0 ]; then
-  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
+  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes "$lang")
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
 fi
 
@@ -57,14 +66,15 @@ export NFCXX_PATHB_MODE=$mode   # read by back_end() in be/nfcxx_be.c: "ir" sele
 status=0
 for file in "${files[@]}"; do
   f=$(realpath "$file")
-  stem=$(basename "$f" .cpp)
+  stem=$(basename "$f"); stem=${stem%.*}
   # cpfe writes <stem>.ti (template instantiation requests) into its working directory. Remove it afterwards
   # unless it existed before, so the base dir stays as it was.
   ti=$base/$stem.ti; had_ti=0; [ -e "$ti" ] && had_ti=1
   # -tused: instantiate the templates this file uses, as eccp does for a single file that is compiled and linked
-  # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR.
+  # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR. C has no templates.
+  tused=(); [ $lang = c ] || tused=(-tused)
   # NFCXX_PATHB_CUDA=1 (the driver's device pass): the front end reads the unit as CUDA (cpfe --cuda)
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} -tused ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${NFCXX_PATHB_CUDA:+--cuda --no_exceptions} --sys_include="$base/include" "$f") || status=$?
+  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" $dialect --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${NFCXX_PATHB_CUDA:+--cuda --no_exceptions} --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status

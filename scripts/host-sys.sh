@@ -1,7 +1,8 @@
 # Sourced by nfcxx and scripts/pathb-dump: discovery of the host C++ library headers and GNU version, so that
 # Path A (eccp / cpfe --gen_c_file_name) and Path B (the harness cpfe) lower hosted programs the same way.
 #   host_sys_includes   prints the include directories of the host g++ (NFCXX_CXX), one per line;
-#                       NFCXX_SYS_INCLUDES (colon-separated) overrides the discovery.
+#                       NFCXX_SYS_INCLUDES (colon-separated) overrides the discovery. host_sys_includes c prints the
+#                       host C compiler's (NFCXX_CC, default gcc) instead, without the C++ library.
 #   host_gnu_version    prints the --gnu_version value (130300 for g++ 13.3.0) or nothing
 #   host_dialect        prints clang when the host C++ compiler is clang (Apple's g++ is clang), else g++
 #   host_clang_version  prints the --clang_version value (210000 for clang 21.0.0) or nothing
@@ -30,12 +31,13 @@ host_clang_version() {
   return 0
 }
 host_sys_includes() {
-  local cxx=${NFCXX_CXX:-g++}
+  local cxx=${NFCXX_CXX:-g++} lang=${1:-c++}
   if [ -n "${NFCXX_SYS_INCLUDES:-}" ]; then
     printf '%s\n' "${NFCXX_SYS_INCLUDES//:/$'\n'}"; return
   fi
+  [ "$lang" != c ] || cxx=${NFCXX_CC:-gcc}
   # awk, not sed: BSD sed (macOS) rejects the one-line form of this script.
-  printf '' | "$cxx" -E -x c++ -v - 2>&1 >/dev/null |
+  printf '' | "$cxx" -E -x "$lang" -v - 2>&1 >/dev/null |
     awk '/search starts here:/ { on = 1; next } /End of search list/ { on = 0 } on && /^ / { sub(/^ +/, "") }
       on && /framework directory/ { next } on && /^[^ ]/ { print }'
 }

@@ -311,6 +311,7 @@ PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval 
 SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
 STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VALUE) | (copy BYTES DST SRC)
             | (zero-fill BYTES DST)                                         clear an aggregate
+                                     BYTES: N, or a register %N of type unsigned_long (llvm-to-pathb.rb's memcpy of a run-time length)
             | (bfstore[.v] TYPE UNIT ADDR BOFF WIDTH VALUE)                  bit-field store (5a)
             | (vlaalloc $"SLOT" OPERAND)                                    VLA storage (5b)
             | (eval RVALUE) | (bounds OPERAND N) | (nonnull OPERAND)

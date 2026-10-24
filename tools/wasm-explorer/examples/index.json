@@ -36,5 +36,42 @@
     "file": "stdout.cpp",
     "expect": 0,
     "output": "hello from puts\nputchar: abc\nwrite to fd 1\n[stderr] to stderr\n"
+  },
+  {
+    "id": "c-designated",
+    "title": "C: designated initializers, compound literal, sort",
+    "file": "c-designated.c",
+    "language": "c",
+    "expect": 111
+  },
+  {
+    "id": "rust-shapes",
+    "title": "Rust: enums, slices, iterators, extern \"C\" bindings",
+    "file": "rust-shapes.rs",
+    "language": "rust",
+    "expect": 119,
+    "output": "hello from rust\n24\n"
+  },
+  {
+    "id": "go-shapes",
+    "title": "Go: interfaces, slices, println, os.Exit",
+    "file": "go-shapes.go",
+    "language": "go",
+    "expect": "exit 132",
+    "output": "hello from go: 95 37\n"
+  },
+  {
+    "id": "llvm-fib",
+    "title": "LLVM IR: phi loop and recursion",
+    "file": "llvm-fib.ll",
+    "language": "llvm",
+    "expect": 88
+  },
+  {
+    "id": "ir-gcd",
+    "title": "nfcxx IR: a structured loop, by hand",
+    "file": "ir-gcd.ir",
+    "language": "ir",
+    "expect": 33
   }
 ]

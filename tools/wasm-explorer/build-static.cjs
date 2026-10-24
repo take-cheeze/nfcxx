@@ -1,12 +1,12 @@
 // Builds the static site for GitHub Pages (or any static host): the page, the example sources, and each example
-// compiled ahead of time in every mode (pipeline.cjs MODES). A static host cannot run the compiler, so the page
-// shows these builds for the examples. Each build is run here in node and checked against the example's expected
-// result, so a broken build fails the job rather than the page.
+// compiled ahead of time in every mode of its language (pipeline.cjs LANGUAGES). A static host cannot run the
+// compiler, so the page shows these builds for the examples. Each build is run here in node and checked against the
+// example's expected result, so a broken build fails the job rather than the page.
 //
 // Usage: node tools/wasm-explorer/build-static.cjs [--out DIR]     (default: _site at the repository root)
 const fs = require("fs");
 const path = require("path");
-const { compile, MODES, root } = require("./pipeline.cjs");
+const { compile, LANGUAGES, root } = require("./pipeline.cjs");
 const bindings = require("./bindings.js");
 
 const here = __dirname;
@@ -15,24 +15,33 @@ const outIndex = args.indexOf("--out");
 const out = outIndex >= 0 ? path.resolve(args[outIndex + 1]) : path.join(root, "_site");
 
 // The module's main, run the way the page runs it, with the same browser bindings (bindings.js). Returns main's
-// result and the output the module wrote (the Console tab's text).
+// result, or the status of the exit binding (C's exit, Go's os.Exit) as "exit N", and the output the module wrote
+// (the Console tab's text).
 function runMain(bytes) {
   const module = new WebAssembly.Module(bytes);
   let output = "";
   let memory = null;
   const ctx = bindings.makeContext({ write: (text) => { output += text; }, memory: () => memory });
-  const instance = new WebAssembly.Instance(module, bindings.importsFor(module, ctx));
-  memory = instance.exports.memory || null;
-  const result = String(instance.exports.main());
+  let result;
+  try {
+    const instance = new WebAssembly.Instance(module, bindings.importsFor(module, ctx, bytes));
+    memory = instance.exports.memory || null;
+    result = String(instance.exports.main());
+  } catch (e) {
+    if (!(e instanceof bindings.Exit)) throw e;
+    result = `exit ${e.status}`;
+  }
   ctx.flush();
   return { result, output };
 }
 
 async function buildExample(entry, examplesDir) {
   const source = fs.readFileSync(path.join(examplesDir, entry.file), "utf8");
+  const language = entry.language || "c++";
+  if (!LANGUAGES[language]) throw new Error(`${entry.id}: unknown language ${language}`);
   const builds = {};
-  for (const mode of Object.keys(MODES)) {
-    const result = await compile(source, { mode });
+  for (const mode of LANGUAGES[language].modes) {
+    const result = await compile(source, { language, mode });
     if (!result.ok) {
       throw new Error(`${entry.id} [${mode}]: ${result.stage}: ${result.message}`);
     }
@@ -46,7 +55,7 @@ async function buildExample(entry, examplesDir) {
     }
     builds[mode] = { ir: result.ir, wasm: result.wasm, diagnostics: result.diagnostics, result: got, output };
   }
-  return { id: entry.id, title: entry.title, file: entry.file, expect: entry.expect, source, builds };
+  return { id: entry.id, title: entry.title, file: entry.file, language, expect: entry.expect, source, builds };
 }
 
 async function main() {
