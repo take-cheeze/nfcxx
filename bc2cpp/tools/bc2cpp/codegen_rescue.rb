@@ -93,11 +93,11 @@ class CodeGen
   # Everything below rejects unproven shapes.
   def recognize_ensure_region(irep)
     return nil if irep.catch_handlers.nil?
-    # Exactly one handler, the ensure; nesting or a rescue in the same irep is not
-    # modelled.
-    return nil unless irep.catch_handlers.size == 1
-    ch = irep.catch_handlers.first
-    return nil unless ch.type == :ensure
+    # One ensure handler. ENSURE_NESTED_RESCUE: at most one rescue besides it, nested in the ensure body
+    # (recognize_ensure_nested_rescue); any other mix is not modelled.
+    ensures, rescues = irep.catch_handlers.partition { |handler| handler.type == :ensure }
+    return nil unless ensures.size == 1 && rescues.size <= 1 && rescues.all? { |handler| handler.type == :rescue }
+    ch = ensures.first
     # `end == target` is the only shape reasoned about.
     return nil unless ch.end_addr == ch.target
 
@@ -116,13 +116,15 @@ class CodeGen
     return nil unless raiseif
 
     body = insns_in_addr_range(irep, (t + 1)...raiseif.addr)
+    nested = rescues.empty? ? nil : recognize_ensure_nested_rescue(irep, program, rescues.first, (t + 1)...raiseif.addr)
+    return nil if !rescues.empty? && nested.nil?
+
     # The ensure body must only fall off its end: a RETURN would have to return
     # from the method, not the destructor's lambda, and BREAK/BLOCK/SENDB/LAMBDA
     # could throw a C++ exception out of a destructor that may already be running
-    # during unwinding (std::terminate).
-    return nil if body.any? do |i|
-      %w[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].include?(i.op)
-    end
+    # during unwinding (std::terminate). The nested rescue's own EXCEPT and RAISEIF are its handler.
+    handler_addrs = nested ? [nested[:except_addr], nested[:raise_addr]] : []
+    return nil if body.any? { |i| ENSURE_BODY_REFUSED_OPS.include?(i.op) && !handler_addrs.include?(i.addr) }
     # Branches inside the ensure body must stay inside it; its RAISEIF address is
     # allowed (mrbc's "skip the rest" target for a conditional ensure body) and
     # becomes a label at the end of the lambda.
@@ -156,13 +158,75 @@ class CodeGen
     return nil unless onto_t.all? { |edge| protected_range.cover?(edge.src) }
 
     crossings = program.region_crossings(protected_range, except_from: body_range)
-    return nil unless crossings.all? { |edge| edge.target == t }
+    # ENSURE_ENTRY_LABEL: a jump from before the range onto its first instruction (`return io unless block` right
+    # before IO.open's `begin`) enters it the way falling in does; compile_method puts that label ahead of the
+    # guard's scope.
+    entries = crossings.select { |edge| edge.target == b && edge.src < b }
+    return nil unless (crossings - entries).all? { |edge| edge.target == t }
 
     except_jump_srcs = onto_t.map(&:src)
     # An optional-argument jump table is ordinary JMPs in this irep, so the
     # crossing test already covered it.
     { begin_addr: b, except_addr: t, raiseif_addr: raiseif.addr, body_insns: body,
-      except_jump_srcs: except_jump_srcs }
+      except_jump_srcs: except_jump_srcs, nested_rescue: nested, entry_label: !entries.empty? }
+  end
+
+  ENSURE_BODY_REFUSED_OPS = %w[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].freeze
+
+  # ENSURE_NESTED_RESCUE: `begin X rescue C ... end` inside an ensure body (mruby-io's IO.open closes its io that way).
+  # The rescue has the shape recognize_rescue_regions reads: [begin, end) protected, `JMP S` at end, `EXCEPT Rexc` at
+  # the target, a class-clause chain ending in `RAISEIF Rexc`. All of it lies inside the ensure body, no jump enters
+  # or leaves the protected range, and the protected range holds none of the ops the ensure body refuses.
+  def recognize_ensure_nested_rescue(irep, program, handler, body_range)
+    b, e, t = handler.begin_addr, handler.end_addr, handler.target
+    return nil unless [b, e, t].all? { |addr| body_range.cover?(addr) } && b < e && e < t
+
+    except_i = program.insn_at_addr(t)
+    return nil unless except_i&.op == 'EXCEPT' && except_i.reg
+
+    exc_reg = except_i.reg
+    clauses = recognize_rescue_class_handler(irep, program, except_i, exc_reg)
+    return nil unless clauses
+
+    raise_i = program.insn_at_addr(clauses[:raise_addr])
+    return nil unless raise_i&.op == 'RAISEIF' && raise_i.reg == exc_reg && body_range.cover?(raise_i.addr)
+    return nil unless program.insn_at_addr(e)&.op == 'JMP' && program.region_boundary_breaches(b...e, e).empty?
+
+    protected_insns = insns_in_addr_range(irep, b...e)
+    return nil if protected_insns.any? { |i| ENSURE_BODY_REFUSED_OPS.include?(i.op) }
+
+    { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, raise_addr: raise_i.addr,
+      protected_insns: protected_insns }
+  end
+
+  # The nested rescue inside the ensure lambda: the protected range as its own lambda under mrb_protect_error (the
+  # guard's own protection is outside it), then on an error `$!` and Rexc as EXCEPT leaves them and a jump to the
+  # handler, whose RESCUE/JMPIF/RAISEIF compile as anywhere. An unmatched exception is raised again into the guard's
+  # mrb_protect_error, which makes it supersede the one in flight. Returns [text, ok].
+  def emit_ensure_nested_rescue(nested, irep, d)
+    tag = nested[:except_addr]
+    targets = nested[:protected_insns].filter_map(&:branch_target).to_set
+    inner = String.new
+    ok = true
+    nested[:protected_insns].each do |insn|
+      inner << "      L#{insn.addr}:;\n" if targets.include?(insn.addr)
+      code = compile_insn(insn, irep, d, irep.index_of_addr(insn.addr))
+      ok = false if code.include?('#error')
+      inner << code
+    end
+    inner << "      L#{nested[:end_addr]}:;\n" if targets.include?(nested[:end_addr])
+    fn = "bc2cpp_nested_try_#{tag}"
+    err = "bc2cpp_nested_err_#{tag}"
+    exc = "bc2cpp_nested_exc_#{tag}"
+    text = String.new
+    text << "    { // ENSURE_NESTED_RESCUE [#{nested[:begin_addr]}, #{nested[:end_addr]})\n"
+    text << "    auto #{fn} = [&]() {\n#{inner}    };\n"
+    text << "    mrb_bool #{err} = FALSE;\n"
+    text << "    mrb_value #{exc} = mrb_protect_error(M, [](mrb_state*, void* ud) -> mrb_value { " \
+            "(*(decltype(#{fn})*)ud)(); return mrb_nil_value(); }, (void*)&#{fn}, &#{err});\n"
+    text << "    if (#{err}) { bc2cpp_set_errinfo(M, #{exc}); r#{nested[:exc_reg]} = #{exc}; goto L#{tag}; }\n"
+    text << "    }\n"
+    [text, ok]
   end
 
   # ENSURE_RAII_SUPPORT: the opening half of an ensure region: `{`, the ensure
@@ -178,8 +242,23 @@ class CodeGen
     # The ensure body's branches target the body or the RAISEIF; both become
     # labels inside the lambda, so compile_insn's gotos need no rewriting.
     body_targets = region[:body_insns].filter_map { |i| i.branch_target }.to_set
+    nested = region[:nested_rescue]
     region[:body_insns].each do |insn|
+      if nested && insn.addr >= nested[:begin_addr] && insn.addr < nested[:end_addr]
+        next unless insn.addr == nested[:begin_addr]
+
+        body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+        text, nested_ok = emit_ensure_nested_rescue(nested, irep, d)
+        ok &&= nested_ok
+        body << text
+        next
+      end
       idx = irep.index_of_addr(insn.addr)
+      # The nested rescue's EXCEPT is its glue's jump target; the glue already did what EXCEPT does.
+      if nested && insn.addr == nested[:except_addr]
+        body << "    L#{insn.addr}:;\n"
+        next
+      end
       body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       code = compile_insn(insn, irep, d, idx)
       ok = false if code.include?('#error')

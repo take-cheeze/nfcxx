@@ -134,6 +134,7 @@ class ClosedWorld
     @outside_constant_writes = Set.new
     @outside_constant_write_counts = Hash.new(0)
     @dynamic_subclassed = Set.new
+    @struct_factory_used = false
     @probed_names = Set.new
     # Set when a probe send's name is not one proven Symbol: any miss could then be the probed one.
     @dynamic_probe = false
@@ -598,6 +599,15 @@ class ClosedWorld
       @dynamic_subclassed.include?(name) || @outside_ruby_supers.include?(name) ||
         supers.any? { |sup| sup.is_a?(String) && simple(sup) == name }
     end
+  end
+
+  # FACTORY_CLASS_FREE: no class mruby-struct's make_struct or mruby-data's Data.define makes can exist, so their
+  # registrations on that computed class never run. The program's bytecode makes no Struct.new call (scan_factory;
+  # any Data factory use, or a Struct constant that escapes, is already a global refusal), outside Ruby makes none
+  # (:outside_class_factory), and neither class has a declared, factory-made or outside subclass whose `new` would
+  # reach Struct.new.
+  def factory_class_free?
+    !@global_refusal && !@struct_factory_used && native_subclass_free?(%w[Struct Data])
   end
 
   # LCF_ROW_FLOW: no outside file can reopen, subclass or rebind `owner`, so a method
@@ -1843,6 +1853,7 @@ class ClosedWorld
       argc = BytecodeIR::Ops::ZERO_ARG_SEND.include?(call.op) ? 0 : (call.argc if call.plain_fixed_argc?)
       case const
       when 'Struct'
+        @struct_factory_used = true
         return global!(:class_factory_escape) unless argc
 
         argc.times do |argument|

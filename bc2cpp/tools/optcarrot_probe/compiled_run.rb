@@ -25,99 +25,10 @@ unless (1024..262_144).cover?(GRAY_STACK_SIZE)
   abort 'OPTCARROT_GRAY_STACK_SIZE must be between 1024 and 262144 pointers'
 end
 
-# Optcarrot::PPU used to be entirely excluded here (a real, 100%-
-# reproducible FiberError -- `PPU#run`'s `@fiber ||= Fiber.new { ... }`
-# compiled its block through the same BLOCK_FALLBACK path every other block
-# literal uses, wrapping it as a cfunc-backed RProc mruby's own `init_fiber`
-# (3rd/mruby/mrbgems/mruby-fiber/src/fiber.c) explicitly rejects). Fixed in
-# `tools/bc2cpp/bc2cpp.rb` two ways, both required: FIBER_NEW_BLOCK_UNSAFE_
-# SUPPORT refuses to compile the `Fiber.new { block }` call site itself
-# (falls back to interpreted, exactly like any other unsupported
-# construct), and FIBER_REACHABILITY_UNSAFE_SUPPORT refuses to compile
-# every method transitively reachable (via same-owner self-sends) from
-# that block's own body, down to and including every `Fiber.yield` call
-# site -- verified necessary, not just sufficient-looking on paper: the
-# narrower fix alone (only the `Fiber.new` site) still crashed the real
-# 180-frame benchmark with a second FiberError (`resuming dead fiber`),
-# traced to mruby's own `vmexec`-reentrant fiber-resume path getting
-# confused by ANY native, VM-invisible compiled frame between the fiber's
-# entry point and wherever it actually yields, not only the frame that
-# happens to call `Fiber.yield` directly. See both SUPPORT comments in
-# `bc2cpp.rb` and `tools/optcarrot_probe/README.md` for the full mechanism.
-# `Optcarrot::PPU` is back in `ONLY_OWNERS` below now that both fixes are
-# landed. Further, `main_loop`, the one method the
-# `Fiber.new` block calls, compiles as a resumable step function (the
-# yielding `wait_*` helpers are expanded into it and its `step` loops are
-# inlined), and the methods it calls that cannot reach `Fiber.yield` compile
-# too. Only `run` (it builds the Fiber) and the four `wait_*` helpers (they
-# call `Fiber.yield`; `main_loop` inlines them) stay interpreted.
-#
-# CPU/NES/Video/APU used to be excluded here too, for a real,
-# CI-reproducible SIGSEGV that took several rounds to root-cause: every
-# `Optcarrot::Video#tick` call after the third (`@times`, a plain
-# non-embedded Array ivar, grows by one element per call; mruby's embedded-
-# array storage -- `MRB_ARY_EMBED_LEN_MAX == 3` on this word-boxed 64-bit
-# build -- holds the first three elements inline, and the fourth `push` is
-# what forces `mrb_ary_push`/`ary_expand_capa` to de-embed the array onto the
-# heap) crashed inside bc2cpp's generated code for `@times.last`. The actual
-# defect was in bc2cpp itself, not in anything Fiber- or devirtualization-
-# related: `tools/bc2cpp/native_expression_devirt.rb`'s
-# `exact_array_no_argument_element_expression` (the code that turns real
-# mruby C bodies like `mrb_ary_last` -- `struct RArray *a = mrb_ary_ptr(self);
-# ... return ARY_PTR(a)[ARY_LEN(a) - 1];` -- into a single call-site C++
-# expression) independently re-substituted that local `a` everywhere it was
-# used instead of materializing it once, the way the real C body does. For
-# `#last` that assembled a single expression calling `mrb_ary_ptr(recv)`
-# three times (once for the `> 0` length guard, once for the `- 1` index,
-# once more hardcoded for the `ARY_PTR` base), each expansion re-nesting the
-# `ARY_EMBED_P`/`ARY_LEN`/`ARY_PTR` macros' own embed-vs-heap ternary. `gdb`,
-# reading a real `-O0` build of the generated `.cpp` at the crash, found the
-# array's own `RArray` struct (`flags`/`len`/`capa`/`ptr`) completely intact
-# at every checkpoint, including inside the crashing statement's own
-# `mrb_val_union` calls -- but GCC's code generation for that specific
-# triply-nested ternary tree left one code path (the one skipping the
-# now-redundant middle computation) reading an uninitialized callee-saved
-# register instead of a freshly computed pointer, a genuine compiler-facing
-# code-generation defect triggered by the redundant, repeated call shape
-# (reproduced identically at `-O0`, with and without `-fno-strict-aliasing`,
-# and under AddressSanitizer, ruling out an optimization-level-dependent
-# stale-register-cache theory an earlier revision of this comment guessed).
-# `Optcarrot::Array#first` has the same latent two-call shape (no second
-# `ARY_LEN` -- its index is the literal `0`) and never reproduced a crash in
-# this same probe, but nothing guarantees the C++ standard merges repeated
-# calls to an equivalent expression, so the fix hoists both: the generated
-# expression now materializes `mrb_ary_ptr(recv)` into a single local via a
-# GNU statement expression and reuses it, exactly like the real C body does,
-# instead of re-deriving it per use. With that landed, CPU/NES/Video/APU
-# compile and run the full 180-frame `nes.run` loop clean (matching CRuby's
-# and the plain mruby interpreter's checksum) and are back in this list.
-# `Optcarrot::PPU` is not added here even now that its own FiberError above
-# is fixed: `emit_register`'s own `rows` filter below already installs every
-# compiled method of any class `embeds` names (see that function's own
-# comment), and `Optcarrot::PPU` is such a class (its own ivars prove
-# embeddable under BC2CPP_SELF_REGISTERING) -- adding it to this
-# hand-maintained list too would be a redundant no-op, not a behavior
-# change.
-FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt Optcarrot::CPU Optcarrot::NES].freeze
-# ROM loading and initialization run while NES is assembled, before emulator
-# Fibers start; these methods exercise the generated loader fast paths.
-FIBER_SAFE_SETUP_METHODS = {
-  'Optcarrot::ROM' => %w[initialize],
-  'Optcarrot::ROM.singleton' => %w[load]
-}.freeze
-# These methods run synchronously outside the PPU Fiber's execution path.
-# 'Optcarrot::PPU' => %w[setup_frame] used to live here (PPU#setup_frame runs
-# outside the Fiber, so it was always fine on its own) but is redundant now
-# that Optcarrot::PPU is entirely excluded from ONLY_OWNERS above -- it never
-# gets a compiled entry point to match against, so keeping the row here would
-# be a silent no-op.
-FIBER_SAFE_FRAME_BOUNDARY_METHODS = {
-  # NES#step calls Video#tick after CPU#run and all PPU Fiber resumes return.
-  'Optcarrot::Video' => %w[tick],
-  # NES#step calls APU#vsync after PPU#vsync returns; its audio clock update
-  # and sample bookkeeping stay outside the PPU Fiber execution path.
-  'Optcarrot::APU' => %w[flush_sound vsync]
-}.freeze
+# Every compiled entry point is installed over its interpreted method (emit_register). bc2cpp itself refuses the
+# methods a Fiber.yield can cross (the yield analysis, docs/bc2cpp-yield-c-boundary.md) and compiles PPU#main_loop
+# as a resumable step function, so no hand-kept list of Fiber-safe owners is needed; one left a compiled method
+# uninstalled, and every by-name call into it (PPU's memory-mapped I/O through Method objects) ran interpreted.
 abort "#{PROBE_MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(PROBE_MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
@@ -188,59 +99,14 @@ def owner_class_expr(owner)
 end
 
 def emit_register(diagnostics, out_dir)
-  # A class in `embeds` gets its whole instance type switched to
-  # MRB_TT_DATA (an opaque embedded ivar struct in place of the ordinary
-  # ivar table) for EVERY instance, program-wide -- MRB_SET_INSTANCE_TT is
-  # a class-level flag, not a per-call-site choice. Once that flag is set,
-  # ANY method of that class that still runs interpreted is unsound: the
-  # interpreter's OP_SETIV/OP_GETIV only ever reads/writes the ordinary
-  # `obj->iv` table (src/variable.c), which has no idea the real ivars now
-  # live in the struct bc2cpp's own compiled methods read via DATA_PTR(self)
-  # -- and a compiled method reached from Fiber-safe code (e.g. NES#reset's
-  # devirtualized call into APU#reset) reads that struct through DATA_PTR
-  # unconditionally, with no fallback. If that class's own #initialize
-  # never ran compiled (never called mrb_data_init on this instance),
-  # DATA_PTR(self) is still the zeroed pointer mrb_obj_alloc leaves behind,
-  # so the very first such read is a null-pointer dereference -- confirmed
-  # by reproducing it here: `Optcarrot::APU` is embeddable (ivars proven
-  # embeddable program-wide) but was never in FIBER_SAFE_OWNERS, so
-  # `APU.new`'s dynamic-dispatch `#initialize` (SPLAT `n=*`, not eligible
-  # for DIRECT_CONSTRUCT devirtualization) ran the ordinary interpreted
-  # bytecode, leaving DATA_PTR null; `NES#reset`'s devirtualized, direct
-  # C++ call into `Optcarrot__APU_reset_impl` then dereferenced it and
-  # segfaulted (`gdb bt`: Optcarrot__APU_reset_impl, called directly from
-  # Optcarrot__NES_reset_impl, no mrb_funcall/mrb_vm_exec frame in between
-  # -- SIGSEGV on `DATA_PTR(self)->cycles_ratecounter = ...`). This
-  # reproduced in the plain (non-GPROF) 180-frame run too, so it is not a
-  # profiling-build artifact: the "no longer reproducible" claim in
-  # README.md's "Compiled runtime check" section no longer holds against
-  # this bc2cpp.rb, presumably because the ivar-embedding proof (a
-  # separate, actively-developed piece of bc2cpp) newly covers
-  # Optcarrot::APU/APU::DMC/Pad, which it evidently didn't when that claim
-  # was last verified.
-  #
-  # The fix: whenever a class needs MRB_TT_DATA, install ALL of its own
-  # compiled methods too (matching how FIBER_SAFE_OWNERS already installs
-  # every one of CPU/PPU/NES/Config/Opt's methods), not just whichever
-  # ones happen to be Fiber-safety-listed -- so every instance of an
-  # embedded class is always constructed AND always operated on through
-  # the same compiled, struct-aware code, and the ordinary interpreter
-  # never touches its ivars at all. This is computed from `embeds` itself
-  # (the same diagnostics section MRB_SET_INSTANCE_TT is emitted from), so
-  # it tracks whichever classes bc2cpp's ivar-embedding analysis decides
-  # to embed automatically, rather than a hand-maintained list that can
-  # silently fall out of sync with that analysis the way FIBER_SAFE_OWNERS
-  # just did.
+  # A class in `embeds` keeps its ivars in a DATA struct (MRB_SET_INSTANCE_TT) that only compiled methods read, so
+  # every one of its compiled methods must be installed; installing every entry point covers that too.
   embeds = section_lines(diagnostics, 'classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA)')
   rows = section_lines(diagnostics, 'compiled entry points').filter_map do |line|
     match = line.match(/^\s*(\w+) \/ \w+\s+\(([^#]+)#([^,]+), arity \d+\)(.*)$/)
     next unless match
 
     entry, owner, name, extra = match.captures
-    safe_setup = FIBER_SAFE_SETUP_METHODS.fetch(owner, []).include?(name)
-    safe_frame_boundary = FIBER_SAFE_FRAME_BOUNDARY_METHODS.fetch(owner, []).include?(name)
-    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup || safe_frame_boundary || embeds.include?(owner)
-
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
     [entry, owner, name, extra.include?('[private')]
@@ -352,19 +218,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   world_header = lines.index { |line| line.start_with?('== closed world (') }
   puts lines[world_header, 2] if world_header
   puts lines.grep(/\A== closed world (fallbacks|guard violations|nil receivers|nomethod sites|proven-class miss sites)/)
-  # Optcarrot::PPU used to be excluded here entirely -- a devirtualized call
-  # (a direct C++ call from one compiled method's body into another's)
-  # reaches a compiled `_impl` function regardless of whether that method is
-  # ever registered via FIBER_SAFE_OWNERS/emit_register below, so leaving
-  # PPU in ONLY_OWNERS while any of its own methods still hit the FiberError
-  # documented above (and in bc2cpp.rb's own FIBER_NEW_BLOCK_UNSAFE_SUPPORT/
-  # FIBER_REACHABILITY_UNSAFE_SUPPORT) would compile straight into it. Now
-  # that bc2cpp.rb itself refuses to compile the fiber-unsafe subset of
-  # PPU's own methods (an honest `#error`, same mechanism SKIP_UNSUPPORTED
-  # already relies on for every other unmodeled construct), PPU no longer
-  # needs a whole-class exclusion here -- the per-method one bc2cpp.rb now
-  # enforces is exact where this blunter, whole-class one was only
-  # conservative.
+  # Every class with a compiled entry point; bc2cpp refuses the Fiber-unsafe methods itself.
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
   end.uniq
