@@ -1,20 +1,22 @@
 // nfcbundle: copy the shared libraries an x86-64 ELF executable or shared object needs into it, so the result loads
 // without them (the idea of pfnet/sold, written anew; sold handles shared objects only, this also takes executables).
 //
-//   nfcbundle [-v] [--list] [-L DIR]... [--exclude NAME]... [--only NAME]... [--export=all|main] IN -o OUT
+//   nfcbundle [-v] [--list] [-L DIR]... [--exclude NAME]... [--only NAME]... [--add NAME]... [--export=all|main]
+//             [--runpath LIST | --rpath LIST] [--stubs DIR] IN -o OUT
 //
 // The libraries reachable through DT_NEEDED are found as ld.so finds them (DT_RPATH, LD_LIBRARY_PATH, DT_RUNPATH, -L,
 // /etc/ld.so.conf, the default directories). Each one that is not excluded is copied, segment by segment, above the
 // input's own address range ("units": the input first, then the libraries in load order). The glibc libraries (libc,
-// libm, libpthread, libdl, librt, ld.so, ...) are always left out: they stay DT_NEEDED of the output. A library that an
-// excluded library needs is left out too, so a process never holds two copies of it.
+// libm, libpthread, libdl, librt, ld.so, ...) and the GPU driver's (libcuda, libnvidia-*) are always left out: they stay
+// DT_NEEDED of the output. A library that an excluded library needs is left out too, so a process never holds two
+// copies of it. --stubs writes an empty stand-in for each bundled library, for plugins that name one in DT_NEEDED.
 //
 // What the output carries, in one new read-write PT_LOAD after the units (docs/notes/bundle.md):
 //   - one TLS block: the units' blocks side by side, the input's last so its local-exec offsets from %fs stay right;
 //     the module-relative offsets of the other units are rewritten (DTPOFF64 values, the offset word of each
 //     local-dynamic GOT pair, TPOFF64 addends);
 //   - one .eh_frame_hdr whose search table covers every unit's FDEs (the unwinder looks at a single PT_GNU_EH_FRAME
-//     per object);
+//     per object; when the units span more than 2 GiB it has a PT_LOAD of its own in their middle);
 //   - one DT_INIT_ARRAY / DT_FINI_ARRAY: each unit's DT_INIT and init array, dependencies first, the input last (and
 //     the reverse for the fini side);
 //   - a new dynamic section, symbol table (DT_HASH), versions and one RELA table. A reference whose definition is in a
@@ -29,6 +31,8 @@
 // tables), which is what ld needs to link against an output shared object; the static symbol tables are not kept.
 #include <elf.h>
 #include <glob.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -83,14 +87,27 @@ std::vector<std::string> split(const std::string &s, char c) {
     b = e + 1;
   }
 }
-bool read_file(const std::string &p, std::vector<uint8_t> &d) {
-  FILE *f = fopen(p.c_str(), "rb");
-  if (!f) return false;
-  d.clear();
-  uint8_t buf[65536];
-  size_t n;
-  while ((n = fread(buf, 1, sizeof buf, f)) > 0) d.insert(d.end(), buf, buf + n);
-  fclose(f);
+// A file's contents, mapped read-only (the inputs can be gigabytes: libtorch_cuda.so is 1.6 GB).
+struct Bytes {
+  const uint8_t *p = nullptr;
+  size_t n = 0;
+  const uint8_t *data() const { return p; }
+  size_t size() const { return n; }
+};
+bool read_file(const std::string &path, Bytes &d) {
+  int fd = open(path.c_str(), O_RDONLY);
+  if (fd < 0) return false;
+  struct stat st;
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    close(fd);
+    errno = EINVAL;
+    return false;
+  }
+  d.n = st.st_size;
+  void *m = d.n ? mmap(nullptr, d.n, PROT_READ, MAP_PRIVATE, fd, 0) : nullptr;
+  close(fd);
+  if (m == MAP_FAILED) return false;
+  d.p = (const uint8_t *)m;
   return true;
 }
 
@@ -108,9 +125,24 @@ bool is_glibc(const std::string &soname) {
   return false;
 }
 
+// The libraries of a GPU driver (and the GL/Vulkan/OpenCL dispatchers that load them): they have to match the kernel
+// driver of the machine the program runs on, so they are never bundled either. libcuda.so.1 is usually not a
+// DT_NEEDED at all (the CUDA runtime dlopens it); when it is, it may also be missing on the build machine.
+bool is_driver(const std::string &soname) {
+  static const char *const names[] = {"libcuda", "libnvcuvid", "libnvoptix", "libGL", "libGLX", "libEGL", "libGLdispatch",
+                                      "libGLESv1_CM", "libGLESv2", "libOpenGL", "libvulkan", "libOpenCL"};
+  std::string stem = soname.substr(0, soname.find(".so"));
+  if (stem.rfind("libnvidia-", 0) == 0 || stem.rfind("libGLX_", 0) == 0 || stem.rfind("libEGL_", 0) == 0) return true;
+  for (const char *n : names)
+    if (stem == n) return true;
+  return false;
+}
+bool is_system(const std::string &soname) { return is_glibc(soname) || is_driver(soname); }
+
 struct Obj {
   std::string path, soname;
-  std::vector<uint8_t> d;
+  std::string needed_as;  // the DT_NEEDED name it was first loaded by (libcublas-4cc45526.so.12 for libcublas.so.12)
+  Bytes d;
   Elf64_Ehdr eh{};
   std::vector<Elf64_Phdr> ph;
   bool bundled = false, is_main = false, excluded = false;
@@ -169,7 +201,9 @@ struct Obj {
 };
 
 std::vector<std::unique_ptr<Obj>> objs;  // everything loaded, in breadth-first load order (the input first)
-std::vector<std::string> opt_libdirs, opt_exclude, opt_only;
+std::vector<std::string> opt_libdirs, opt_exclude, opt_only, opt_add;
+std::string opt_runpath, opt_stubs;  // --runpath / --rpath LIST (replaces the computed search path), --stubs DIR
+bool runpath_set = false, rpath_kind = false;  // rpath_kind: --rpath (DT_RPATH, which also covers the plugins' loads)
 bool export_all = true;
 
 Obj *load(const std::string &path, bool must) {
@@ -179,7 +213,7 @@ Obj *load(const std::string &path, bool must) {
     if (must) die("cannot read " + path + ": " + strerror(errno));
     return nullptr;
   }
-  const std::vector<uint8_t> &d = o->d;
+  const Bytes &d = o->d;
   if (d.size() < sizeof(Elf64_Ehdr) || memcmp(d.data(), ELFMAG, SELFMAG) != 0) {
     if (must) die(path + ": not an ELF file");
     return nullptr;
@@ -878,14 +912,123 @@ bool read_enc(const Obj *u, uint64_t va, int enc, uint64_t datarel, uint64_t &va
   return true;
 }
 
+// --stubs: a library that the output now contains, as an empty shared object with the same DT_SONAME and version
+// definitions and no symbols. A plugin that names the library in DT_NEEDED (libtorch_cuda_linalg.so naming
+// libtorch_cpu.so, a ruby extension naming libruby.so) loads the stub instead of a second copy, and its symbols bind
+// to the output's exports: through the global scope when the output is the program, through the stub's DT_NEEDED
+// (the output's own soname, `owner`) when it is a shared object.
+// How the output finds the stub directory: $ORIGIN-relative when it is the output's directory or below it, else
+// absolute.
+std::string stubs_path(const std::string &dir, const std::string &out) {
+  char a[PATH_MAX], b[PATH_MAX];
+  mkdir(dir.c_str(), 0755);
+  std::string od = dirname_of(out);
+  if (!realpath(dir.c_str(), a) || !realpath(od.c_str(), b)) return dir;
+  std::string s = a, o = b;
+  if (s == o) return "$ORIGIN";
+  if (s.compare(0, o.size() + 1, o + "/") == 0) return "$ORIGIN/" + s.substr(o.size() + 1);
+  return s;
+}
+
+// No stub for a library whose handle is used with dlsym: dlsym searches only the handle's object and its
+// dependencies, so it would find the stub's nothing. glibc dlopens libgcc_s.so.1 and looks up _Unwind_Backtrace and
+// _Unwind_ForcedUnwind in it (backtrace, pthread_cancel); without a stub it loads its own copy, as it would for a
+// program that does not need libgcc_s.
+bool stubbable(const Obj *u) { return u->soname.rfind("libgcc_s.so", 0) != 0; }
+
+void write_stub(const Obj *u, const std::string &dir, const std::string &owner) {
+  StrTab st;
+  uint32_t soname = st.add(u->soname), need = owner.empty() ? 0 : st.add(owner);
+  std::vector<std::pair<int, std::string>> vers(u->verdef.begin(), u->verdef.end());
+  std::vector<uint32_t> vnames;
+  for (auto &v : vers) vnames.push_back(st.add(v.second));
+  const uint64_t ph_off = sizeof(Elf64_Ehdr), str_off = ph_off + 2 * sizeof(Elf64_Phdr);
+  uint64_t sym_off = align_up(str_off + st.data.size(), 8), hash_off = sym_off + sizeof(Elf64_Sym);
+  uint64_t versym_off = hash_off + 16, verdef_off = align_up(versym_off + 2, 8);
+  uint64_t dyn_off = align_up(verdef_off + vers.size() * (sizeof(Elf64_Verdef) + sizeof(Elf64_Verdaux)), 8);
+  std::vector<Elf64_Dyn> dyn;
+  if (!owner.empty()) dyn.push_back({DT_NEEDED, {need}});
+  dyn.push_back({DT_SONAME, {soname}});
+  dyn.push_back({DT_STRTAB, {str_off}});
+  dyn.push_back({DT_STRSZ, {st.data.size()}});
+  dyn.push_back({DT_SYMTAB, {sym_off}});
+  dyn.push_back({DT_SYMENT, {sizeof(Elf64_Sym)}});
+  dyn.push_back({DT_HASH, {hash_off}});
+  if (!vers.empty()) {
+    dyn.push_back({DT_VERSYM, {versym_off}});
+    dyn.push_back({DT_VERDEF, {verdef_off}});
+    dyn.push_back({DT_VERDEFNUM, {vers.size()}});
+  }
+  dyn.push_back({DT_NULL, {0}});
+  uint64_t end = dyn_off + dyn.size() * sizeof(Elf64_Dyn);
+  std::vector<uint8_t> b(end, 0);
+  Elf64_Ehdr eh{};
+  memcpy(eh.e_ident, ELFMAG, SELFMAG);
+  eh.e_ident[EI_CLASS] = ELFCLASS64;
+  eh.e_ident[EI_DATA] = ELFDATA2LSB;
+  eh.e_ident[EI_VERSION] = EV_CURRENT;
+  eh.e_type = ET_DYN;
+  eh.e_machine = EM_X86_64;
+  eh.e_version = EV_CURRENT;
+  eh.e_phoff = ph_off;
+  eh.e_ehsize = sizeof eh;
+  eh.e_phentsize = sizeof(Elf64_Phdr);
+  eh.e_phnum = 2;
+  eh.e_shentsize = sizeof(Elf64_Shdr);
+  put(b, 0, eh);
+  Elf64_Phdr load{}, dynp{};
+  load.p_type = PT_LOAD;
+  load.p_flags = PF_R | PF_W;  // ld.so may adjust a writable dynamic section in place
+  load.p_filesz = load.p_memsz = end;
+  load.p_align = PAGE;
+  dynp.p_type = PT_DYNAMIC;
+  dynp.p_flags = PF_R | PF_W;
+  dynp.p_offset = dynp.p_vaddr = dynp.p_paddr = dyn_off;
+  dynp.p_filesz = dynp.p_memsz = end - dyn_off;
+  dynp.p_align = 8;
+  put(b, ph_off, load);
+  put(b, ph_off + sizeof load, dynp);
+  put(b, str_off, st.data.data(), st.data.size());
+  uint32_t hash[4] = {1, 1, 0, 0};  // one bucket, the null symbol only
+  put(b, hash_off, hash, sizeof hash);
+  for (size_t i = 0; i < vers.size(); i++) {
+    Elf64_Verdef vd{};
+    vd.vd_version = VER_DEF_CURRENT;
+    vd.vd_flags = vers[i].first == 1 ? VER_FLG_BASE : 0;
+    vd.vd_ndx = vers[i].first;
+    vd.vd_cnt = 1;
+    vd.vd_hash = elf_hash(vers[i].second.c_str());
+    vd.vd_aux = sizeof(Elf64_Verdef);
+    vd.vd_next = i + 1 < vers.size() ? sizeof(Elf64_Verdef) + sizeof(Elf64_Verdaux) : 0;
+    Elf64_Verdaux va{vnames[i], 0};
+    uint64_t at = verdef_off + i * (sizeof(Elf64_Verdef) + sizeof(Elf64_Verdaux));
+    put(b, at, vd);
+    put(b, at + sizeof vd, va);
+  }
+  put(b, dyn_off, dyn.data(), dyn.size() * sizeof(Elf64_Dyn));
+  // Named as the libraries ask for it; ld.so also matches a later request for the soname against the loaded stub.
+  std::string path = dir + "/" + u->needed_as, tmp = path + ".tmp";
+  FILE *f = fopen(tmp.c_str(), "wb");
+  if (!f || fwrite(b.data(), 1, b.size(), f) != b.size() || fclose(f) != 0) die("cannot write " + tmp);
+  chmod(tmp.c_str(), 0755);
+  if (rename(tmp.c_str(), path.c_str()) != 0) die("cannot rename " + tmp + " to " + path + ": " + strerror(errno));
+  note("stub " + path);
+}
+
 void usage() {
   fprintf(stderr,
-          "usage: nfcbundle [-v] [--list] [-L DIR]... [--exclude NAME]... [--only NAME]... [--export=all|main] IN -o OUT\n"
+          "usage: nfcbundle [-v] [--list] [-L DIR]... [--exclude NAME]... [--only NAME]... [--add NAME]... [--export=all|main]\n"
+          "                 [--runpath LIST | --rpath LIST] [--stubs DIR] IN -o OUT\n"
           "  copies the shared libraries IN needs (DT_NEEDED, recursively) into OUT; the glibc libraries stay external\n"
           "  --exclude NAME  keep NAME (a soname, a file name, or a soname stem such as libfoo) external\n"
           "  --only NAME     bundle only the named libraries (repeatable)\n"
+          "  --add NAME      bundle NAME (a soname or a path) as if IN needed it\n"
           "  --list          print each library and whether it would be bundled, write nothing\n"
-          "  --export=main   export only IN's own dynamic symbols (default all: the bundled libraries' too)\n");
+          "  --export=main   export only IN's own dynamic symbols (default all: the bundled libraries' too)\n"
+          "  --runpath LIST  the output's DT_RUNPATH (default: IN's, then the bundled libraries' with $ORIGIN resolved)\n"
+          "  --rpath LIST    the same as DT_RPATH, which ld.so also searches for what the output's plugins need\n"
+          "  --stubs DIR     also write an empty stand-in (same soname and versions) for each bundled library into DIR, for\n"
+          "                  plugins that name one in DT_NEEDED\n");
   exit(2);
 }
 
@@ -908,8 +1051,12 @@ int main(int argc, char **argv) {
     else if (a.rfind("-L", 0) == 0) opt_libdirs.push_back(a.substr(2));
     else if (a == "--exclude" || a.rfind("--exclude=", 0) == 0) opt_exclude.push_back(val("--exclude"));
     else if (a == "--only" || a.rfind("--only=", 0) == 0) opt_only.push_back(val("--only"));
+    else if (a == "--add" || a.rfind("--add=", 0) == 0) opt_add.push_back(val("--add"));
     else if (a == "--export=all") export_all = true;
     else if (a == "--export=main") export_all = false;
+    else if (a == "--runpath" || a.rfind("--runpath=", 0) == 0) opt_runpath = val("--runpath"), runpath_set = true, rpath_kind = false;
+    else if (a == "--rpath" || a.rfind("--rpath=", 0) == 0) opt_runpath = val("--rpath"), runpath_set = true, rpath_kind = true;
+    else if (a == "--stubs" || a.rfind("--stubs=", 0) == 0) opt_stubs = val("--stubs");
     else if (a == "-h" || a == "--help") usage();
     else if (a[0] == '-') { fprintf(stderr, "nfcbundle: unknown option %s\n", a.c_str()); usage(); }
     else if (in.empty()) in = a;
@@ -921,6 +1068,9 @@ int main(int argc, char **argv) {
   // Load the input and everything it needs, breadth first (ld.so's load order).
   Obj *mainobj = load(in, true);
   mainobj->is_main = true;
+  // --add: libraries the input does not name in DT_NEEDED but should carry, as if it did (libtorch_cuda.so, whose
+  // static constructors register the CUDA backend, is dropped by a link with --as-needed). Searched like the input's own.
+  for (const std::string &n : opt_add) mainobj->needed.push_back(n);
   mainobj->bundled = true;
   std::map<std::string, Obj *> by_name;
   by_name[mainobj->soname] = mainobj;
@@ -943,18 +1093,19 @@ int main(int argc, char **argv) {
       }
       o = objs[qi].get();  // load() may have moved the vector
       by_name[key] = d;
+      d->needed_as = key;
       if (d->soname != key) by_name[d->soname] = d;
       o->deps.push_back(d);
     }
   }
   for (const std::string &n : missing) {
-    if (is_glibc(n)) fprintf(stderr, "nfcbundle: warning: %s not found; it stays a DT_NEEDED of the output\n", n.c_str());
+    if (is_system(n)) fprintf(stderr, "nfcbundle: warning: %s not found; it stays a DT_NEEDED of the output\n", n.c_str());
     else die(n + ": not found (needed by the input or one of its libraries); give its directory with -L");
   }
-  // Which libraries are bundled: not glibc, not excluded, in --only when given, and not needed by an excluded one.
+  // Which libraries are bundled: not glibc or a GPU driver, not excluded, in --only when given, and not needed by an excluded one.
   for (size_t i = 1; i < objs.size(); i++) {
     Obj *o = objs[i].get();
-    o->excluded = is_glibc(o->soname) || matches(opt_exclude, o) || (!opt_only.empty() && !matches(opt_only, o));
+    o->excluded = is_system(o->soname) || matches(opt_exclude, o) || (!opt_only.empty() && !matches(opt_only, o));
   }
   for (bool changed = true; changed;) {
     changed = false;
@@ -1027,16 +1178,86 @@ int main(int argc, char **argv) {
   }
   for (const Elf64_Phdr &p : mph)
     if (p.p_type == PT_LOAD) main_end = std::max(main_end, p.p_offset + p.p_filesz);
-  uint64_t va = align_up(mainobj->hi, PAGE);
+  // .eh_frame_hdr: the search tables of all units, in one table (placed below, once the size is known).
+  struct FdeEnt {
+    Obj *u;
+    uint64_t loc, fde;  // unit addresses until the layout is known, output addresses after
+  };
+  std::vector<FdeEnt> fdes;
+  uint64_t eh_frame_va = 0;
+  Obj *eh_frame_unit = nullptr;
   for (Obj *u : units) {
-    if (u->is_main) continue;
-    uint64_t al = PAGE;
-    for (const Elf64_Phdr &p : u->ph)
-      if (p.p_type == PT_LOAD) al = std::max<uint64_t>(al, p.p_align);
-    u->base = align_up(va, al) - u->lo;
-    va = align_up(u->base + u->hi, PAGE);
-    note(u->soname + " at " + hex(u->base));
+    if (!u->ehframe) {
+      bool code = false;  // a data-only library (libicudata) has nothing to unwind
+      for (const Elf64_Phdr &p : u->ph)
+        if (p.p_type == PT_LOAD && (p.p_flags & PF_X) && p.p_filesz) code = true;
+      if (!u->is_main && code) fprintf(stderr, "nfcbundle: warning: %s has no PT_GNU_EH_FRAME; its code cannot be unwound\n", u->path.c_str());
+      continue;
+    }
+    uint64_t h = u->ehframe->p_vaddr;
+    const uint8_t *p = u->at(h, 4);
+    if (!p || p[0] != 1) die(u->path + ": unexpected .eh_frame_hdr");
+    uint64_t pos = h + 4, len, ehf, n;
+    if (read_enc(u, pos, p[1], h, ehf, len)) {
+      pos += len;
+      if (!eh_frame_unit) eh_frame_va = ehf, eh_frame_unit = u;
+    }
+    if (!read_enc(u, pos, p[2], h, n, len) || p[3] == 0xff) {
+      fprintf(stderr, "nfcbundle: warning: %s: .eh_frame_hdr has no search table; its code cannot be unwound\n", u->path.c_str());
+      continue;
+    }
+    pos += len;
+    for (uint64_t k = 0; k < n; k++) {
+      uint64_t loc, fde;
+      read_enc(u, pos, p[3], h, loc, len);
+      pos += len;
+      read_enc(u, pos, p[3], h, fde, len);
+      pos += len;
+      fdes.push_back({u, loc, fde});
+    }
   }
+  uint64_t ehhdr_size = fdes.empty() ? 0 : 16 + fdes.size() * 8;  // room for an 8-byte eh_frame_ptr
+  // The unwinder's binary search takes only 32-bit offsets from the .eh_frame_hdr (DW_EH_PE_datarel|sdata4), so the
+  // header has to be within 2 GiB of every FDE and function. At the end of the output (the new segment) it is,
+  // unless the units span more than that (libtorch_cuda alone is 1.6 GB); then it gets a segment of its own in a gap
+  // at the unit boundary nearest the middle, which works for up to 4 GiB.
+  size_t ehgap = 0;  // the unit the header's own segment goes before (0: in the new segment)
+  uint64_t ehgap_va = 0, va = 0;
+  auto layout = [&](size_t gap) {
+    va = align_up(mainobj->hi, PAGE);
+    for (size_t k = 1; k < units.size(); k++) {
+      Obj *u = units[k];
+      if (k == gap) {
+        ehgap_va = va;
+        va = align_up(va + ehhdr_size, PAGE);
+      }
+      uint64_t al = PAGE;
+      for (const Elf64_Phdr &p : u->ph)
+        if (p.p_type == PT_LOAD) al = std::max<uint64_t>(al, p.p_align);
+      u->base = align_up(va, al) - u->lo;
+      va = align_up(u->base + u->hi, PAGE);
+    }
+  };
+  layout(0);
+  const int64_t reach = INT32_MAX - (int64_t)ehhdr_size - 2 * (int64_t)PAGE;
+  auto lowest = (int64_t)mainobj->lo;
+  if (ehhdr_size && (int64_t)va + (int64_t)PAGE * 2 + (1 << 20) - lowest > reach) {
+    size_t best = 0;
+    uint64_t best_far = UINT64_MAX;
+    for (size_t k = 1; k < units.size(); k++) {
+      layout(k);
+      uint64_t far = std::max<uint64_t>(ehgap_va - lowest, va - ehgap_va);
+      if (far < best_far) best_far = far, best = k;
+    }
+    if (best_far > (uint64_t)reach) die("the bundled libraries span more than 4 GiB: one .eh_frame_hdr cannot reach them all");
+    ehgap = best;
+    layout(ehgap);
+    note(".eh_frame_hdr in its own segment at " + hex(ehgap_va) + ", before " + units[ehgap]->soname);
+  }
+  for (Obj *u : units)
+    if (!u->is_main) note(u->soname + " at " + hex(u->base));
+  for (FdeEnt &f : fdes) f.loc += f.u->base, f.fde += f.u->base;
+  if (eh_frame_unit) eh_frame_va += eh_frame_unit->base;
 
   // TLS: one block, the libraries' first and the input's last (see the header comment).
   for (Obj *u : units)
@@ -1075,48 +1296,14 @@ int main(int argc, char **argv) {
     tls_image_va = cur;
     cur += tls_filesz;
   }
-  // .eh_frame_hdr: the search tables of all units, in one table.
-  struct FdeEnt {
-    uint64_t loc, fde;
-  };
-  std::vector<FdeEnt> fdes;
-  uint64_t eh_frame_va = 0;
-  for (Obj *u : units) {
-    if (!u->ehframe) {
-      bool code = false;  // a data-only library (libicudata) has nothing to unwind
-      for (const Elf64_Phdr &p : u->ph)
-        if (p.p_type == PT_LOAD && (p.p_flags & PF_X) && p.p_filesz) code = true;
-      if (!u->is_main && code) fprintf(stderr, "nfcbundle: warning: %s has no PT_GNU_EH_FRAME; its code cannot be unwound\n", u->path.c_str());
-      continue;
-    }
-    uint64_t h = u->ehframe->p_vaddr;
-    const uint8_t *p = u->at(h, 4);
-    if (!p || p[0] != 1) die(u->path + ": unexpected .eh_frame_hdr");
-    uint64_t pos = h + 4, len, ehf, n;
-    if (read_enc(u, pos, p[1], h, ehf, len)) {
-      pos += len;
-      if (!eh_frame_va) eh_frame_va = ehf + u->base;
-    }
-    if (!read_enc(u, pos, p[2], h, n, len) || p[3] == 0xff) {
-      fprintf(stderr, "nfcbundle: warning: %s: .eh_frame_hdr has no search table; its code cannot be unwound\n", u->path.c_str());
-      continue;
-    }
-    pos += len;
-    for (uint64_t k = 0; k < n; k++) {
-      uint64_t loc, fde;
-      read_enc(u, pos, p[3], h, loc, len);
-      pos += len;
-      read_enc(u, pos, p[3], h, fde, len);
-      pos += len;
-      fdes.push_back({loc + u->base, fde + u->base});
-    }
-  }
   std::sort(fdes.begin(), fdes.end(), [](const FdeEnt &a, const FdeEnt &b) { return a.loc < b.loc; });
-  uint64_t ehhdr_va = 0;
-  if (!fdes.empty()) {
+  uint64_t ehhdr_va = 0, ehhdr_off = 0;
+  if (!fdes.empty() && ehgap) {
+    ehhdr_va = ehgap_va;
+  } else if (!fdes.empty()) {
     cur = align_up(cur, 4);
     ehhdr_va = cur;
-    cur += 12 + fdes.size() * 8;
+    cur += ehhdr_size;
   }
   // Init and fini entries: (unit, slot address) for an array entry, (unit, function) for DT_INIT / DT_FINI.
   struct ArrEnt {
@@ -1180,6 +1367,18 @@ int main(int argc, char **argv) {
   std::vector<LibSeg> libsegs;
   for (Obj *u : units) {
     if (u->is_main) continue;
+    if (ehgap && u == units[ehgap]) {
+      Elf64_Phdr q{};
+      q.p_type = PT_LOAD;
+      q.p_flags = PF_R;
+      q.p_vaddr = q.p_paddr = ehhdr_va;
+      q.p_offset = ehhdr_off = file_cur + ((ehhdr_va - file_cur) & (PAGE - 1));
+      q.p_filesz = q.p_memsz = ehhdr_size;
+      q.p_align = PAGE;
+      file_cur = q.p_offset + q.p_filesz;
+      load_owner[oph.size()] = "eh_frame_hdr";
+      oph.push_back(q);
+    }
     for (const Elf64_Phdr &p : u->ph) {
       if (p.p_type != PT_LOAD) continue;
       Elf64_Phdr q = p;
@@ -1231,7 +1430,7 @@ int main(int argc, char **argv) {
     e.p_type = PT_GNU_EH_FRAME;
     e.p_flags = PF_R;
     e.p_vaddr = e.p_paddr = ehhdr_va;
-    e.p_filesz = e.p_memsz = 12 + fdes.size() * 8;
+    e.p_filesz = e.p_memsz = ehhdr_size;
     e.p_align = 4;
     oph.push_back(e);
   }
@@ -1311,6 +1510,11 @@ int main(int argc, char **argv) {
   // A version needed from a file that is not loaded directly is still needed: that file must be a DT_NEEDED.
   for (NeedOut &n : oneed)
     if (std::find(needed_out.begin(), needed_out.end(), n.file) == needed_out.end()) needed_out.push_back(n.file);
+  // --stubs: the output needs its own stubs, so they are loaded from the start; ld.so then finds a plugin's DT_NEEDED
+  // among the loaded objects by soname before it searches any path (the plugin's own DT_RUNPATH included).
+  if (!opt_stubs.empty())
+    for (Obj *u : units)
+      if (!u->is_main && stubbable(u)) needed_out.push_back(u->needed_as);
   std::vector<uint32_t> needed_str;
   for (const std::string &n : needed_out) needed_str.push_back(dynstr.add(n));
   int64_t soname_str = mainobj->has_soname ? (int64_t)dynstr.add(mainobj->soname) : -1;
@@ -1323,8 +1527,15 @@ int main(int argc, char **argv) {
       if (std::find(paths.begin(), paths.end(), e) == paths.end()) paths.push_back(e);
     }
   }
+  if (!opt_stubs.empty()) paths.insert(paths.begin(), stubs_path(opt_stubs, out));
   std::string pathlist;
   for (const std::string &p : paths) pathlist += (pathlist.empty() ? "" : ":") + p;
+  if (runpath_set) {
+    pathlist = opt_runpath;
+    std::string sp = opt_stubs.empty() ? "" : stubs_path(opt_stubs, out);
+    std::vector<std::string> given = split(opt_runpath, ':');
+    if (!sp.empty() && std::find(given.begin(), given.end(), sp) == given.end()) pathlist = sp + (pathlist.empty() ? "" : ":" + pathlist);
+  }
   int64_t path_str = pathlist.empty() ? -1 : (int64_t)dynstr.add(pathlist);
   // Version definitions of the input, re-encoded with names in the new string table.
   std::vector<uint8_t> verdef_bytes;
@@ -1451,7 +1662,7 @@ int main(int argc, char **argv) {
   };
   for (size_t i = 0; i < oph.size(); i++) {
     const Elf64_Phdr &p = oph[i];
-    if (p.p_type != PT_LOAD || i == meta_load_index) continue;
+    if (p.p_type != PT_LOAD || i == meta_load_index || load_owner[i] == "eh_frame_hdr") continue;
     std::string n = load_owner[i] + (p.p_flags & PF_X ? ".rx" : p.p_flags & PF_W ? ".rw" : ".r");
     uint64_t fl = SHF_ALLOC | (p.p_flags & PF_X ? SHF_EXECINSTR : 0) | (p.p_flags & PF_W ? SHF_WRITE : 0);
     if (p.p_filesz) sec(n, SHT_PROGBITS, fl, p.p_vaddr, p.p_offset, p.p_filesz, 0, 0, 16);
@@ -1494,7 +1705,7 @@ int main(int argc, char **argv) {
   if (!finis.empty())
     sec(".fini_array", SHT_FINI_ARRAY, SHF_ALLOC | SHF_WRITE, fini_va, meta_off + meta(fini_va), finis.size() * 8, 0, 0, 8, 8);
   if (ehhdr_va)
-    sec(".eh_frame_hdr", SHT_PROGBITS, SHF_ALLOC, ehhdr_va, meta_off + meta(ehhdr_va), 12 + fdes.size() * 8, 0, 0, 4);
+    sec(".eh_frame_hdr", SHT_PROGBITS, SHF_ALLOC, ehhdr_va, ehgap ? ehhdr_off : meta_off + meta(ehhdr_va), ehhdr_size, 0, 0, 4);
   sec(".dynamic", SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, dyn_va, meta_off + meta(dyn_va), ndyn * sizeof(Elf64_Dyn), dynstr_sec, 0, 8, sizeof(Elf64_Dyn));
   uint32_t shstr_sec = sec(".shstrtab", SHT_STRTAB, 0, 0, 0, 0);
   sh[shstr_sec].sh_name = shstr.add(".shstrtab");
@@ -1522,7 +1733,7 @@ int main(int argc, char **argv) {
   auto dt = [&](int64_t tag, uint64_t v) { dyn.push_back({tag, {v}}); };
   for (uint32_t s : needed_str) dt(DT_NEEDED, s);
   if (soname_str >= 0) dt(DT_SONAME, soname_str);
-  if (path_str >= 0) dt(mainobj->has_rpath && !mainobj->has_runpath ? DT_RPATH : DT_RUNPATH, path_str);
+  if (path_str >= 0) dt((runpath_set ? rpath_kind : mainobj->has_rpath && !mainobj->has_runpath) ? DT_RPATH : DT_RUNPATH, path_str);
   dt(DT_HASH, hash_va);
   dt(DT_STRTAB, str_va);
   dt(DT_SYMTAB, sym_va);
@@ -1590,20 +1801,28 @@ int main(int argc, char **argv) {
         put(mb, meta(tls_image_va) + u->tls_off, u->d.data() + u->tls->p_offset, u->tls->p_filesz);
       }
   // .eh_frame_hdr.
+  // .eh_frame_hdr: version 1, eh_frame_ptr pcrel|sdata4 (sdata8 when .eh_frame is farther), udata4 count, and the
+  // datarel|sdata4 table the unwinder can binary search.
+  std::vector<uint8_t> hb;
   if (ehhdr_va) {
-    uint8_t h4[4] = {1, 0x1b, 0x03, 0x3b};  // pcrel|sdata4 eh_frame_ptr, udata4 count, datarel|sdata4 table
-    put(mb, meta(ehhdr_va), h4, 4);
     int64_t ptr = eh_frame_va ? (int64_t)eh_frame_va - (int64_t)(ehhdr_va + 4) : 0;
-    if (ptr != (int32_t)ptr) die("the merged .eh_frame_hdr is too far from .eh_frame");
-    put(mb, meta(ehhdr_va) + 4, (int32_t)ptr);
-    put(mb, meta(ehhdr_va) + 8, (uint32_t)fdes.size());
+    bool near = ptr == (int32_t)ptr;
+    uint8_t h4[4] = {1, (uint8_t)(near ? 0x1b : 0x1c), 0x03, 0x3b};
+    put(hb, 0, h4, 4);
+    if (near) put(hb, 4, (int32_t)ptr);
+    else put(hb, 4, ptr);
+    size_t t = near ? 8 : 12;
+    put(hb, t, (uint32_t)fdes.size());
     for (size_t i = 0; i < fdes.size(); i++) {
       int64_t l = (int64_t)fdes[i].loc - (int64_t)ehhdr_va, f = (int64_t)fdes[i].fde - (int64_t)ehhdr_va;
       if (l != (int32_t)l || f != (int32_t)f) die("the merged .eh_frame_hdr does not reach every FDE");
-      put(mb, meta(ehhdr_va) + 12 + i * 8, (int32_t)l);
-      put(mb, meta(ehhdr_va) + 16 + i * 8, (int32_t)f);
+      put(hb, t + 4 + i * 8, (int32_t)l);
+      put(hb, t + 8 + i * 8, (int32_t)f);
     }
+    if (hb.size() > ehhdr_size) die("internal error: .eh_frame_hdr size");
+    if (!ehgap) put(mb, meta(ehhdr_va), hb.data(), hb.size());
   }
+
   // Program headers, now that the new segment's size is known.
   oph[0].p_offset = meta_off + meta(phdr_va);
   oph[0].p_vaddr = oph[0].p_paddr = phdr_va;
@@ -1616,7 +1835,7 @@ int main(int argc, char **argv) {
   oph[dynamic_index].p_filesz = oph[dynamic_index].p_memsz = ndyn * sizeof(Elf64_Dyn);
   for (Elf64_Phdr &p : oph) {
     if (p.p_type == PT_TLS && merge_tls) p.p_offset = meta_off + meta(tls_image_va);
-    if (p.p_type == PT_GNU_EH_FRAME && ehhdr_va) p.p_offset = meta_off + meta(ehhdr_va);
+    if (p.p_type == PT_GNU_EH_FRAME && ehhdr_va) p.p_offset = ehgap ? ehhdr_off : meta_off + meta(ehhdr_va);
   }
   put(mb, meta(phdr_va), oph.data(), oph.size() * sizeof(Elf64_Phdr));
 
@@ -1628,6 +1847,7 @@ int main(int argc, char **argv) {
       if (p.p_type == PT_LOAD && p.p_offset == last_load->p_offset)
         memset(img.data() + p.p_offset + p.p_filesz, 0, p.p_memsz - p.p_filesz);
   for (const LibSeg &s : libsegs) memcpy(img.data() + s.off, s.u->d.data() + s.p->p_offset, s.p->p_filesz);
+  if (ehgap) memcpy(img.data() + ehhdr_off, hb.data(), hb.size());
   // Output address -> place in img or mb (file-backed bytes only).
   auto file_ptr = [&](uint64_t a, size_t n) -> uint8_t * {
     if (a >= meta_va && a + n <= meta_va + mb.size()) return mb.data() + (a - meta_va);
@@ -1675,6 +1895,10 @@ int main(int argc, char **argv) {
   if (!ok) die("cannot write " + tmp);
   chmod(tmp.c_str(), 0755);
   if (rename(tmp.c_str(), out.c_str()) != 0) die("cannot rename " + tmp + " to " + out + ": " + strerror(errno));
+  if (!opt_stubs.empty()) {
+    for (Obj *u : units)
+      if (!u->is_main && stubbable(u)) write_stub(u, opt_stubs, mainobj->exe() ? "" : (mainobj->has_soname ? mainobj->soname : ""));
+  }
   note("wrote " + out + ": " + std::to_string(units.size() - 1) + " libraries, " + std::to_string(allrel.size()) +
        " relocations, " + std::to_string(osyms.size() - 1) + " dynamic symbols");
   return 0;
