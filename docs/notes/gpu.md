@@ -62,6 +62,36 @@ placeholders, and each device module is registered with the runtime.
   (3rd/edg), which parses `kernel<<<grid, block[, shmem[, stream]]>>>(args)` itself, and the rewriter leaves those
   launches (`--edg-launches`). The launch lowers to the same `__nfcxx_cuda_launch` call. Launches with template
   arguments are still rewritten here, and EDG refuses them if one reaches it.
+- **A launch of a kernel with no device code** (a host function the kernel table does not have: an instance the
+  rewriter left out) returns `cudaErrorInvalidDeviceFunction`, and `cudaGetLastError` / `cudaPeekAtLastError` report it
+  (macros in `lib/cuda/nfcxx_cuda.h`; the runtime never saw the launch, so its own last error was success and the
+  caller's check passed on garbage). The first failure of each address is printed with its offset in the program, for
+  `addr2line -f -C -e`. `tests/cuda/launch/stub_addr.cu` checks it.
+- **A dependent launch whose instance's address is taken too** (softmax.cu: `cudaFuncSetAttribute(soft_max_f32<true, 0,
+  0, T>, ...)`, then the launch): the launch passes the host stub of the instance's wrapper, the attribute call the
+  instance. The address table maps both to the one device entry (`stub_addr.cu`).
+- **`half` is a struct** (`__nfcxx_half` in the device prelude, `tools/cuda-rewrite/tables.inc`), as in cuda_fp16.h:
+  a cast, an initialization or a return between half and float converts the value. It was an `unsigned short`, so
+  `(float)h` gave the integer value of the bits (48128 for -1), and every f16 path of ggml-cuda was wrong. The lanes of
+  `half2` are halves. The default constructors of half and bf16 are `= default`, so both stay trivial (in unions, in
+  arrays, in `__shared__` memory). `tests/cuda/launch/half_convert.cu`.
+- **The toolkit's version macros in the device pass**: the driver reads `CUDART_VERSION` (cuda_runtime_api.h) and
+  `CUDA_VERSION` (cuda.h) from the headers the host compile finds and passes them to the device rewrite and the device
+  front end (a `-D` on the command line wins). The host had them and the device unit did not, so a `#if CUDART_VERSION`
+  decided differently in the two copies (ggml-cuda's `GGML_CUDA_USE_CUB`: the host launched CUB-path kernels whose
+  device bodies were the other branch). The CUDA 11.8+ device code ggml-cuda then compiles needs `movmatrix` asm (a
+  PTX template the IR passes through, `be/nfcxx_ir.c`), and the prelude has `__nv_fp8_e4m3`, `__nv_cvt_e8m0_to_bf16raw`
+  and `__nv_fp4x4_e2m1` (software conversions; they match cuda_fp8.hpp and cuda_fp4.hpp bit for bit on all 256 e4m3
+  values and 2 million random floats).
+- **Device-wide CUB** (`cub::DeviceReduce::Sum`, `DeviceScan::InclusiveSum` for float and bf16, and the float/int
+  `SortPairs` and `SortPairsDescending` of `DeviceRadixSort`, `DeviceSegmentedRadixSort` and `DeviceSegmentedSort`):
+  the host shim `lib/cuda/host/cub/cub.cuh` forwards to `lib/cuda/cub/device.cu`, which `scripts/cuda-cub` builds with
+  the driver into `build/cuda-cub/<backend>/libnfcxx_cub.a`; a link that names `-lcudart` takes the archive. The sum and
+  the scan are one block; the sorts are a stable bottom-up merge sort on CUB's radix order of the keys. The other
+  device-wide algorithms are declared only (a call fails at link time). `tests/cuda/launch/cub_device.cu`.
+- **Arrays of class objects** (`tile a[2];` when the tile's default constructor converts floats to half2): the front
+  end lowers them to `__cxa_vec_ctor` and the constructor zeroes with `memset`. The emitter lowers both: one direct call
+  of the constructor per element (count and size constants, no destructor) and byte stores (`vec_ctor.cu`).
 
 ## CUDA source (`.cu`)
 

@@ -92,4 +92,8 @@ class Fn : public FnCtx {
   // [continue label (empty for a switch), break label] of the enclosing loops and switches, innermost last
   std::vector<std::pair<std::string, std::string>> loops_;
   std::map<std::string, std::string> named_labels_;  // the IR labels => their PTX labels
+  // The registers whose value is the address of a function of the module ((let %N T (bitcast T &"f"))): the
+  // constructor argument of __cxa_vec_ctor, which is called directly (the emitter has no indirect calls).
+  std::map<std::string, std::string> fn_values_;
+  void vec_ctor(const Node &x);
 };
