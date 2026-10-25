@@ -61,8 +61,21 @@ its standards or empty (the front end's default), and `mode` is one of its modes
 | `c` | `pathb-dump --ir -std=cNN` (EDG in C mode, `--gcc`, C17 by default) | `c89`, `c99`, `c11`, `c17`, `c23` | all |
 | `rust` | `rustc --crate-type=cdylib -C opt-level=1 -C panic=abort -C overflow-checks=on -C lto=fat -C save-temps`, `llvm-dis` of the module after LTO, then `llvm-to-pathb.rb --wasm` | editions `2015`, `2018`, `2021` (default), `2024` | `lp64`, `asan` |
 | `go` | `tinygo build -o prog.ll -gc=leaking -scheduler=none -panic=trap -opt=1`, a `main()` wrapper, then `llvm-to-pathb.rb --wasm` | none | `lp64`, `asan` |
+| `swift` | `swiftfe emit-c --bindings prog.swift` (tools/swiftfe: LLVM-free, Swift to C), then `pathb-dump --ir` of that C and the emitter | none | `lp64`, `asan` |
 | `llvm` | `llvm-to-pathb.rb` (`pathb-llvm.md`: the subset of `clang -S -emit-llvm` it reads) | none | `lp64`, `asan` |
 | `ir` | none: the source is the IR (`pathb-stage2.md`, section 6); lines that start with `;` are blanked first | none | `lp64`, `asan` |
+
+Swift (`tools/swiftfe`, its README) is a subset: functions, `Int`, `Bool`, `while`, `if`, classes with
+stored properties and methods, and `print`. A class, or an array, needs a heap, which only the `asan` mode has (`lp64`
+calls `malloc` as a stub, see the note on it below). Printing a `Double` traps at run time in the browser: its format is
+Swift's, which the browser's bindings cannot reproduce. The emitted C is `swiftfe emit-c --bindings`: its runtime
+prints through the browser's `putchar` and traps through `abort`. Swift runs on the server only (the static build
+compiles its examples ahead of time, with `swiftc`'s expected output checked in `examples/index.json`).
+
+**Known gap, not Swift's:** in the `lp64` mode `malloc` and `free` are imports that the page stubs (`first argument + 1`),
+so a C or Swift program that allocates in `lp64` writes through a fake pointer. The result can look right, as a class's
+does here by chance, and corrupt data in other cases. Only `asan` provides an allocator. Giving `lp64` one is the fix.
+
 
 C goes through the same EDG front end and the same IR as C++: `pathb-dump` takes a C standard (`-std=c11`), or a `.c`
 file without one, and runs `cpfe --cNN --gcc` (no `-tused`); hosted, its system include directories are the host C

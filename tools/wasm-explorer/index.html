@@ -247,6 +247,7 @@
     rust: { title: "Rust", editor: "rust", standards: ["2015", "2018", "2021", "2024"], modes: ["lp64", "asan"],
       prefix: "edition " },
     go: { title: "Go", editor: "go", standards: [], modes: ["lp64", "asan"] },
+    swift: { title: "Swift", editor: "swift", standards: [], modes: ["lp64", "asan"] },
     llvm: { title: "LLVM IR", editor: "llvm", standards: [], modes: ["lp64", "asan"] },
     ir: { title: "nfcxx IR", editor: "scheme", standards: [], modes: ["lp64", "asan"] },
   };
@@ -691,7 +692,8 @@
     const build = example.builds[opts.mode];
     if (!build) {
       return { ok: false, stage: "static", diagnostics: [],
-        message: `${opts.mode} is not a mode of ${LANGUAGES[opts.language].title}.` };
+        message: `${opts.mode} is not built for this example (the static build has ${Object.keys(example.builds).join(", ")}; ` +
+          "the other modes need the local server)." };
     }
     // a mode whose IR is another mode's stores it there (build-static.cjs, irFrom)
     return Object.assign({ ok: true, prebuilt: true }, build,
