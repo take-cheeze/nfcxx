@@ -20,8 +20,22 @@ class CodeGen
 
     slots = RecordHash.read_slots(irep, index) or return nil
     mask = slots.reduce(0) do |acc, (name, key)|
-      classes = RecordHash.table.dig(name, key, RecordHash.consumer_tier) or return nil
-      classes.reduce(acc) { |m, klass| m | (RECORD_READ_BITS[klass] or return nil) }
+      info = RecordHash.table.dig(name, key) or return nil
+      classes = info[RecordHash.consumer_tier]
+      # Reuse the per-writer constructor proof; missing/deleted keys still contribute nil.
+      if classes&.include?(:unknown) && ENV['BC2CPP_RECORD_OBJECT_READS'] != '0'
+        classes = info[:writers].map { |writer| record_writer_exact_class(*writer) }
+        return nil if classes.empty? || classes.any?(&:nil?)
+
+        classes << 'NilClass' if info[:nilable]
+      end
+      return nil unless classes
+
+      classes.reduce(acc) do |m, klass|
+        bit = RECORD_READ_BITS[klass]
+        bit ||= numeric_class_bit(klass) if klass.is_a?(String) && !RETURN_BITLESS_CLASSES.include?(klass)
+        m | (bit or return nil)
+      end
     end
     # 0 is the flow's "not reached yet", never a value.
     mask.zero? ? nil : mask
@@ -83,6 +97,7 @@ class CodeGen
       when 'ARRAY' then 'Array'
       when 'HASH' then 'Hash'
       when 'STRING' then 'String'
+      when 'LOADNIL' then 'NilClass'
       when 'SEND', 'SEND0', 'SENDB' then record_new_class(irep, d.index, writer)
       end
     end
