@@ -1,6 +1,7 @@
 // nfcffi host: compiles tests/ffi/lib.c at run time and calls it through C++ signatures, then calls functions of the C library
 // that gcc compiled (div, ldiv, qsort, strlen). Usage: host <dir holding lib.c>. Exits 0 when every check passes.
 #include <cstdio>
+#include <stdexcept>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -245,6 +246,51 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   std::memcpy(&wide128out, wide128r.as_bytes().data(), sizeof wide128out);
   CHECK(wide128out == wide128 * 2);
 
+  // Callbacks: a host callable stands in for a C function pointer; the C side calls it through a trampoline.
+  nfcffi::Library cbs = ffi.load(dir + "/cb.h", read_text(dir + "/cb_impl.c"));
+  CHECK(cbs.callable("apply_twice") && cbs.callable("each_pair") && cbs.callable("sum_with"));
+  CHECK(cbs.declarations().size() == 3);
+  Value twice = cbs.call("apply_twice", {Value::of_callable([](const std::vector<Value>& a) {
+                                          return Value::of_signed(a[0].as_signed() * 3);
+                                        }),
+                                        Value::of_signed(2)});
+  CHECK(twice.as_signed() == 18);  // 2 -> 6 -> 18: the C code calls the host twice
+  std::vector<long long> seen;
+  double seen_last = 0;
+  cbs.call("each_pair", {Value::of_callable([&](const std::vector<Value>& a) {
+                           seen.push_back(a[0].as_signed());
+                           seen_last = a[1].as_float();
+                           return Value();
+                         }),
+                         Value::of_signed(4)});
+  CHECK(seen.size() == 4 && seen[3] == 3 && seen_last == 1.5);
+  Value total = cbs.call("sum_with", {Value::of_callable([](const std::vector<Value>& a) {
+                                        return Value::of_signed(a[0].as_signed() + (long long)(a[1].as_float() * 4));
+                                      }),
+                                      Value::of_signed(4)});
+  CHECK(total.as_signed() == 10);  // f(i, 0.25) = i + 1 for i = 0..3
+  CHECK(cbs.call("each_pair", {Value::of_pointer(nullptr), Value::of_signed(0)}).kind() == Value::Kind::Void);  // nil, unused
+
+  bool kind_error = false;
+  try {
+    cbs.call("apply_twice", {Value::of_signed(5), Value::of_signed(2)});
+  } catch (const nfcffi::Error&) {
+    kind_error = true;
+  }
+  CHECK(kind_error);
+
+  // A callable's exception crosses the C frames as a rethrow after the call.
+  bool rethrown = false;
+  try {
+    cbs.call("apply_twice", {Value::of_callable([](const std::vector<Value>&) -> Value {
+                              throw std::runtime_error("boom");
+                            }),
+                            Value::of_signed(2)});
+  } catch (const std::runtime_error& e) {
+    rethrown = std::strcmp(e.what(), "boom") == 0;
+  }
+  CHECK(rethrown);
+
   // Variadic functions: the extra arguments are passed by their promoted kinds (integer, double, pointer).
   nfcffi::Library vlib = ffi.load(dir + "/var.h", "", {"snprintf"});
   CHECK(vlib.callable("snprintf"));
@@ -285,7 +331,18 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
 
 }  // namespace
 
+static int run_checks(int argc, char** argv);
+
 int main(int argc, char** argv) {
+  try {
+    return run_checks(argc, argv);
+  } catch (const std::exception& e) {
+    std::printf("FAILED: %s\n", e.what());
+    return 1;
+  }
+}
+
+static int run_checks(int argc, char** argv) {
   if (argc != 2) {
     std::fprintf(stderr, "usage: %s <dir with lib.c>\n", argv[0]);
     return 2;

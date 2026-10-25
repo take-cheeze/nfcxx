@@ -134,7 +134,7 @@ class ze_rt {
     const image_module &mod = images_.modules[it->module];
     const uint32_t stack_bytes = mod.stack_bytes;
     const uint64_t static_local = mod.static_local;
-    check_limits(l, lmem, mod);
+    check_limits(l, lmem, mod, it->subgroup_size);
     for (int i = 0; i < nbufs; i++) sync_up(bufs[i], modes[i]);
     uint32_t ng[3], gs[3];
     uint64_t invocations = 1, groups = 1;
@@ -169,7 +169,7 @@ class ze_rt {
     }
     std::memset(at(dev_base_), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    ze_kernel_handle_t k = kernel(it->entry, l, it->module);
+    ze_kernel_handle_t k = kernel(it->entry, l, it->module, it->subgroup_size);
     for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_launch) {
       uint32_t cnt = std::min(per_launch, ng[sd] - s0);
       uint64_t first_group = (uint64_t)s0 * inner;
@@ -351,7 +351,7 @@ class ze_rt {
     std::memset(host_, 0, 8192);
   }
 
-  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod) const {
+  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod, uint32_t subgroup_size) const {
     uint64_t total = 1;
     for (int d = 0; d < 3; d++) {
       if (l[d] > max_wi_[d]) fail("a work-group of " + std::to_string(l[d]) + " work-items in one dimension; the device allows " + std::to_string(max_wi_[d]));
@@ -359,10 +359,11 @@ class ze_rt {
     }
     if (total > max_wg_)
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
-    // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
-    if (mod.subgroup_size && total % mod.subgroup_size != 0)
-      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(mod.subgroup_size) +
-           " lanes, so the work-group size must be a multiple of " + std::to_string(mod.subgroup_size));
+    // a kernel that uses sub-group shuffles runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only,
+    // since a shuffle or a reduction over a partial sub-group would read lanes that are not there
+    if (subgroup_size && total % subgroup_size != 0)
+      fail("a work-group of " + std::to_string(total) + " work-items; the kernel's sub-groups have " + std::to_string(subgroup_size) +
+           " lanes, so the work-group size must be a multiple of " + std::to_string(subgroup_size));
     if (lmem + 1024 + mod.static_local > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
   }
@@ -410,8 +411,7 @@ class ze_rt {
   }
 
   // The kernel of an entry point of an image for a local size.
-  ze_kernel_handle_t kernel(const std::string &entry, const unsigned *l, size_t m) {
-    const image_module &img = images_.modules[m];
+  ze_kernel_handle_t kernel(const std::string &entry, const unsigned *l, size_t m, uint32_t subgroup_size) {
     std::string k = std::to_string(m) + "/" + entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
     auto it = kernels_obj_.find(k);
     if (it != kernels_obj_.end()) return it->second;
@@ -421,14 +421,14 @@ class ze_rt {
     ze_kernel_handle_t kern = nullptr;
     check(zeKernelCreate(module(l, m), &kd, &kern), "zeKernelCreate");
     check(zeKernelSetGroupSize(kern, l[0], l[1], l[2]), "zeKernelSetGroupSize");
-    if (img.subgroup_size) {
-      // the kernel must be compiled for the sub-group size the module asks for (its SubgroupSize execution mode)
+    if (subgroup_size) {
+      // the kernel must be compiled for the sub-group size it asks for (its SubgroupSize execution mode)
       ze_kernel_properties_t kp = {};
       kp.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
       check(zeKernelGetProperties(kern, &kp), "zeKernelGetProperties");
-      if (kp.requiredSubgroupSize != img.subgroup_size)
-        fail("the kernel requires sub-groups of " + std::to_string(kp.requiredSubgroupSize) + " lanes; the module needs " +
-             std::to_string(img.subgroup_size));
+      if (kp.requiredSubgroupSize != subgroup_size)
+        fail("the kernel requires sub-groups of " + std::to_string(kp.requiredSubgroupSize) + " lanes; it needs " +
+             std::to_string(subgroup_size));
     }
     kernels_obj_[k] = kern;
     return kern;

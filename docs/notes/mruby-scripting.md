@@ -270,7 +270,10 @@ Building mruby needs a CRuby (stdlib only) and ninja; the rake gem is not needed
 `scripts/mruby-ninja.rb generate`, which evaluates the build config (`scripts/mruby-tool-config.rb`) and each gem's
 `mrbgem.rake` against a small stub of the rake DSL, then writes `build.ninja`; ninja builds it. The generator
 refuses any mrbgem.rake call it does not model, so a gem it cannot handle fails the setup rather than building
-wrongly. mruby's own rake build (`tests/realworld/run_mruby.sh`) still needs rake: it is the upstream build that
+wrongly. A gem's `file` tasks run as ninja edges: a task that builds a file in a build directory runs its block
+through the same mrbgem.rake (`gemtask`), as rake would; a task on a source file only adds its prerequisites to the
+compile unit (its block is not run, and the generator says so). `rule` and `directory` are refused.
+`tests/mruby-ninja/run.sh` checks a generated header and the refusal. mruby's own rake build (`tests/realworld/run_mruby.sh`) still needs rake: it is the upstream build that
 the generator is checked against. On Ubuntu 24.04, `apt-get install ruby ninja-build` is enough.
 
 Consequences: `ruby` replaces `python3` in the host-tool list rather than removing the need for a
