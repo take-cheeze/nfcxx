@@ -94,18 +94,24 @@ class CodeGen
                end }
     end
 
-    checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def)
+    checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def, reg_offset)
   end
 
   # CORE_BODY_EXACT: the receiver proof of a compiled core body. Only the receiver is
-  # proven and with_exact_core_site tests it; no argument or Fixnum proof rides on it.
-  def checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def = nil)
+  # proven and with_exact_core_site tests it; arguments admit only independent literal proofs.
+  def checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def = nil, reg_offset = 0)
     return nil unless recv.to_s.match?(/\A(?:r\d+|self)\z/) && name && dest
 
     klass = core_body_exact_class(irep, idx, receiver_reg, owner_def: owner_def)
     return nil unless klass
 
     { klass: klass, recv: recv, name: name, int_site: nil, arg_class: ->(_position) {},
+      literal_int_arg: lambda do |position|
+        reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
+        literal = reg && exact_literal(irep, idx, reg.to_i - reg_offset)
+        literal && literal.klass == :Integer && literal.value &&
+          literal.value.between?(IntegerConstantRanges::FIXNUM_MIN, IntegerConstantRanges::FIXNUM_MAX)
+      end,
       checked: true, dest: dest, argv: argv, used: false }
   end
 

@@ -308,13 +308,28 @@ module NativeCoreDirectFallback
     when :none then true
     when :nil_or_string then %w[NilClass String].include?(site[:arg_class].call(0))
     when :array then site[:arg_class].call(0) == 'Array'
-    when :integer, :two_integers then false
+    when :integer then native_core_integer_arg_proven?(argv, site, 0)
+    when :two_integers then [0, 1].all? { |position| native_core_integer_arg_proven?(argv, site, position) }
     end
+  end
+
+  # The Fixnum proof is narrower than the native Integer guard and excludes conversion failures.
+  def native_core_integer_arg_proven?(argv, site, position)
+    return false if ENV['BC2CPP_CORE_INT_ARG_PROOF'] == '0'
+    return site[:literal_int_arg]&.call(position) unless site[:int_site]
+
+    native_int_arg_proven?(*site[:int_site], argv, position)
   end
 
   # The class test is a fact at an exact site; the argument guard stays unless proven.
   def native_core_guard(entry, recv, argv, site)
     return entry.guard(recv, argv) unless site && entry.owner == site[:klass]
+
+    if %i[integer two_integers].include?(entry.arg)
+      positions = entry.arg == :integer ? [0] : [0, 1]
+      checks = positions.reject { |position| native_core_integer_arg_proven?(argv, site, position) }
+      return checks.empty? ? 'true' : checks.map { |position| "mrb_integer_p(#{argv[position]})" }.join(' && ')
+    end
 
     arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
     arg_guard ? format(arg_guard, a: argv.first, b: argv[1]) : 'true'
