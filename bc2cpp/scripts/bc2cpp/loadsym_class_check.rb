@@ -27,6 +27,7 @@ require_relative '../../tools/bc2cpp/numeric_flow'
 require_relative '../../tools/bc2cpp/codegen_frozen_tables'
 require_relative '../../tools/bc2cpp/codegen_class_narrowing'
 require_relative '../../tools/bc2cpp/codegen_numeric_proof'
+require_relative '../../tools/bc2cpp/codegen_return_classes'
 
 failures = []
 check = lambda do |what, condition|
@@ -60,7 +61,7 @@ class LiteralOracle
     @bit = bit
   end
 
-  def literal_class_mask(insn) = insn.op == 'LOADSYM' ? @bit : nil
+  def literal_class_mask(insn) = %w[LOADSYM SYMBOL].include?(insn.op) ? @bit : nil
   def entry_mask(_irep, _reg) = OTHER
   def const_mask(_insn) = OTHER
   def ivar_slots(_irep) = []
@@ -73,17 +74,17 @@ class LiteralOracle
   def send_mask(_irep, _index, _insn, _state) = OTHER
 end
 
-def symbol_program
+def symbol_program(op = 'LOADSYM')
   irep = Irep.new(label: 'sym', nregs: 4, nlocals: 1)
-  rows = [['LOADSYM', 'R1 :a'], ['RETURN', 'R1']]
+  rows = [[op, op == 'SYMBOL' ? 'R1 L[0]' : 'R1 :a'], ['RETURN', 'R1']]
   irep.instructions = rows.each_with_index.map do |(op, args), address|
     Insn.new(lineno: 1, addr: address, op: op, args: args, raw: "#{op} #{args}")
   end
   irep
 end
 
-def loadsym_mask(bit)
-  irep = symbol_program
+def loadsym_mask(bit, op = 'LOADSYM')
+  irep = symbol_program(op)
   states = NumericFlow.states(irep, LiteralOracle.new(bit), [])
   states && states[1] && states[1][1]
 end
@@ -98,6 +99,12 @@ oracle = CodeGen::NumericOracle.new(cg)
 loadsym = symbol_program.instructions[0]
 loadtrue = Insn.new(lineno: 1, addr: 0, op: 'LOADTRUE', args: 'R1', raw: 'LOADTRUE R1')
 check.call('CodeGen::NumericOracle gives LOADSYM the Symbol bit', oracle.literal_class_mask(loadsym) == SYM)
+pooled_symbol = symbol_program('SYMBOL').instructions[0]
+check.call('a pooled SYMBOL register holds the Symbol bit', loadsym_mask(SYM, 'SYMBOL') == SYM)
+check.call('a pooled SYMBOL register without a class bit stays OTHER', loadsym_mask(nil, 'SYMBOL') == OTHER)
+check.call('NumericOracle recognizes pooled SYMBOL', oracle.literal_class_mask(pooled_symbol) == SYM)
+check.call('ExactOracle recognizes pooled SYMBOL', CodeGen::ExactOracle.new(cg).literal_class_mask(pooled_symbol) == SYM)
+check.call('INTERN remains outside the pure literal transfer', NumericFlow::STEP_KINDS['INTERN'] != NumericFlow::K_LITERAL)
 check.call('CodeGen::NumericOracle gives TrueClass and FalseClass literals no bit here', oracle.literal_class_mask(loadtrue).nil?)
 check.call('no Symbol bit allocated: LOADSYM is OTHER', CodeGen::NumericOracle.new(codegen(symbol_bit: nil)).literal_class_mask(loadsym).nil?)
 
@@ -110,6 +117,7 @@ ensure
 end
 
 with_loadsym_switch('0') do
+  check.call('BC2CPP_LOADSYM_CLASS=0 also disables pooled SYMBOL bits', oracle.literal_class_mask(pooled_symbol).nil?)
   check.call('BC2CPP_LOADSYM_CLASS=0: the numeric oracle gives LOADSYM no bit', oracle.literal_class_mask(loadsym).nil?)
   check.call('BC2CPP_LOADSYM_CLASS=0: a Symbol class test keeps the bit on both edges (no chain)',
              CodeGen::ClassTest.new(cg, :kind_of, 'Symbol').narrow(SYM, false) == SYM &&
@@ -143,6 +151,7 @@ if ENV['MRBC']
 
     class LsUse
       def pick_sym; :a; end
+      def pooled_symbols; %i[a b]; end
       def pick_or_int(c); c ? :a : 1; end
       def narrow_int(c); x = pick_or_int(c); if x.is_a?(Integer) then x + 1 else 0 end; end
       def arith_sym; x = pick_sym; x + 1; end

@@ -46,7 +46,7 @@ class CodeGen
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
     # The class bit of a true, false or Symbol literal (exactly TrueClass, FalseClass or Symbol: each has one instance
     # or is a Symbol, and its mrb_class is that class, see the mrb_class immediate cases in mruby's class.h).
-    LITERAL_CLASSES = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol' }.freeze
+    LITERAL_CLASSES = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol', 'SYMBOL' => 'Symbol' }.freeze
     def literal_class_mask(insn)
       klass = LITERAL_CLASSES[insn.op]
       return nil unless klass && @cg.immediate_class_bits_enabled?
