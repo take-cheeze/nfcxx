@@ -5,7 +5,8 @@ name: wasm explorer (build)
 # wasm-explorer-preview.yml to a Cloudflare Pages preview. The compiler runs here, in CI: the Path B harness and the
 # mruby tool are built as in pathb.yml, and each example is compiled ahead of time in every mode of its language and
 # checked against its expected result, so a broken example fails this job. The Rust and Go examples also need rustc
-# (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh). The in-browser compiler (docs/notes/pathb-wasm-frontend.md:
+# (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh), and the Swift examples need the Swift front end
+# (tools/swiftfe, built below). The in-browser compiler (docs/notes/pathb-wasm-frontend.md:
 # the same front end and emitter, built with Emscripten) is built and checked against the native one here too, and the
 # site carries it (inbrowser/), so the page compiles C, C++, LLVM IR and the IR without a server.
 #
@@ -129,6 +130,17 @@ jobs:
 
       - name: Check the in-browser compile against the server's (every example in every mode)
         run: node tools/wasm-explorer/test-inbrowser.cjs
+
+      # The Swift examples: the Swift front end (tools/swiftfe, the swiftfe workflow's toolchain) emits the C that the
+      # explorer compiles, so it is built here; the build checks the examples against the stored output of swiftc.
+      - name: Install Swift
+        uses: swift-actions/setup-swift@v3
+        with:
+          swift-version: "6.0"
+
+      - name: Build the Swift front end
+        run: swift build -c release
+        working-directory: tools/swiftfe
 
       - name: Build the static site (compiles and checks every example in every mode)
         run: node tools/wasm-explorer/build-static.cjs --out _site --require-inbrowser

@@ -381,6 +381,7 @@ class Module_
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
   attr_accessor :alloc_index, :alloc_type   # asan: the function index and the type of malloc and free (name => ...)
   attr_accessor :table   # the functions whose address is taken: name => slot of the function table (from 1)
+  attr_accessor :indirect_calls   # a call_indirect is in the module (the table is then declared, empty if no address is taken)
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
@@ -1429,6 +1430,7 @@ class Fn
       # call_indirect checks (a mismatch, or the null slot 0, traps)
       w = push_op(callee)
       e(0xa7) if w == :i64                 # i32.wrap_i64: the table index
+      @mod.indirect_calls = true
       e(0x11); leb_u(@mod.type_of(arg_types, wtype(ret))); e(0x00)
       return wtype(ret)
     end
@@ -2354,7 +2356,7 @@ def encode_module(mod, bodies)
   section(3, fsec, out)
   # the function table: slot 0 empty, then the functions whose address is taken (Module_#table). emscripten: it is
   # exported under the name the glue looks for, empty when no address is taken.
-  if mod.emscripten || !mod.table.empty?
+  if mod.emscripten || !mod.table.empty? || mod.indirect_calls
     tb = []
     uleb(1, tb)
     tb << 0x70 << 0x00                   # funcref, limits without a maximum

@@ -6,7 +6,9 @@
 // is fully parenthesized, so the emitter never has to reason about C precedence.
 
 enum CEmit {
-  static let prelude = """
+  /// The parts of the prelude: the includes and sw_trap, the arithmetic, the printing, and the reference counting.
+  /// The browser build (`emit-c --bindings`) has its own includes, trap and printing, and shares the rest.
+  static let preludeHostHead = """
     #include <math.h>
     #include <stdbool.h>
     #include <stdint.h>
@@ -14,59 +16,18 @@ enum CEmit {
     #include <stdlib.h>
     #include <string.h>
 
-    static void sw_trap(const char *msg) {
+    static __attribute__((unused)) void sw_trap(const char *msg) {
       fflush(stdout);
       fprintf(stderr, "Fatal error: %s\\n", msg);
       abort();
     }
-    static int64_t sw_add(int64_t a, int64_t b) {
-      int64_t r;
-      if (__builtin_add_overflow(a, b, &r)) sw_trap("arithmetic overflow");
-      return r;
-    }
-    static int64_t sw_sub(int64_t a, int64_t b) {
-      int64_t r;
-      if (__builtin_sub_overflow(a, b, &r)) sw_trap("arithmetic overflow");
-      return r;
-    }
-    static int64_t sw_mul(int64_t a, int64_t b) {
-      int64_t r;
-      if (__builtin_mul_overflow(a, b, &r)) sw_trap("arithmetic overflow");
-      return r;
-    }
-    static int64_t sw_div(int64_t a, int64_t b) {
-      if (b == 0) sw_trap("division by zero");
-      if (a == INT64_MIN && b == -1) sw_trap("arithmetic overflow");
-      return a / b;
-    }
-    static int64_t sw_rem(int64_t a, int64_t b) {
-      if (b == 0) sw_trap("division by zero");
-      if (a == INT64_MIN && b == -1) sw_trap("arithmetic overflow");
-      return a % b;
-    }
-    /// Shifts by a magnitude m. Counts of 64 or more shift every bit out, as Swift's
-    /// smart shifts do: `<<` gives 0, and `>>` gives 0 or -1 by the sign.
-    static int64_t sw_shift_left(int64_t a, uint64_t m) {
-      return m >= 64 ? 0 : (int64_t)((uint64_t)a << m);
-    }
-    static int64_t sw_shift_right(int64_t a, uint64_t m) {
-      if (m >= 64) return a < 0 ? -1 : 0;
-      if (a >= 0) return (int64_t)((uint64_t)a >> m);
-      return ~(int64_t)((uint64_t)~a >> m);
-    }
-    /// Swift's `a << n` and `a >> n` on Int: a negative count shifts the other way.
-    static int64_t sw_shl(int64_t a, int64_t n) {
-      uint64_t m = n < 0 ? (uint64_t)0 - (uint64_t)n : (uint64_t)n;
-      return n < 0 ? sw_shift_right(a, m) : sw_shift_left(a, m);
-    }
-    static int64_t sw_shr(int64_t a, int64_t n) {
-      uint64_t m = n < 0 ? (uint64_t)0 - (uint64_t)n : (uint64_t)n;
-      return n < 0 ? sw_shift_left(a, m) : sw_shift_right(a, m);
-    }
-    static void sw_print_int(int64_t v) {
+    """
+
+  static let preludePrinting = """
+    static __attribute__((unused)) void sw_print_int(int64_t v) {
       printf("%lld\\n", (long long)v);
     }
-    static void sw_fmt_double(double v, char *out, size_t n) {
+    static __attribute__((unused)) void sw_fmt_double(double v, char *out, size_t n) {
       // Swift prints the shortest digits that read back to the same value.
       if (isnan(v)) { snprintf(out, n, "nan"); return; }
       if (isinf(v)) { snprintf(out, n, v < 0 ? "-inf" : "inf"); return; }
@@ -85,24 +46,74 @@ enum CEmit {
       if (frac < 1) frac = 1;
       snprintf(out, n, "%.*f", frac, v);
     }
-    static void sw_print_double(double v) {
+    static __attribute__((unused)) void sw_print_double(double v) {
       char buf[64];
       sw_fmt_double(v, buf, sizeof buf);
       printf("%s\\n", buf);
     }
-    static void sw_print_bool(bool v) {
+    static __attribute__((unused)) void sw_print_bool(bool v) {
       printf("%s\\n", v ? "true" : "false");
     }
 
+    """
+
+  static let preludeArithmetic = """
+    static __attribute__((unused)) int64_t sw_add(int64_t a, int64_t b) {
+      int64_t r;
+      if (__builtin_add_overflow(a, b, &r)) sw_trap("arithmetic overflow");
+      return r;
+    }
+    static __attribute__((unused)) int64_t sw_sub(int64_t a, int64_t b) {
+      int64_t r;
+      if (__builtin_sub_overflow(a, b, &r)) sw_trap("arithmetic overflow");
+      return r;
+    }
+    static __attribute__((unused)) int64_t sw_mul(int64_t a, int64_t b) {
+      int64_t r;
+      if (__builtin_mul_overflow(a, b, &r)) sw_trap("arithmetic overflow");
+      return r;
+    }
+    static __attribute__((unused)) int64_t sw_div(int64_t a, int64_t b) {
+      if (b == 0) sw_trap("division by zero");
+      if (a == INT64_MIN && b == -1) sw_trap("arithmetic overflow");
+      return a / b;
+    }
+    static __attribute__((unused)) int64_t sw_rem(int64_t a, int64_t b) {
+      if (b == 0) sw_trap("division by zero");
+      if (a == INT64_MIN && b == -1) sw_trap("arithmetic overflow");
+      return a % b;
+    }
+    /// Shifts by a magnitude m. Counts of 64 or more shift every bit out, as Swift's
+    /// smart shifts do: `<<` gives 0, and `>>` gives 0 or -1 by the sign.
+    static __attribute__((unused)) int64_t sw_shift_left(int64_t a, uint64_t m) {
+      return m >= 64 ? 0 : (int64_t)((uint64_t)a << m);
+    }
+    static __attribute__((unused)) int64_t sw_shift_right(int64_t a, uint64_t m) {
+      if (m >= 64) return a < 0 ? -1 : 0;
+      if (a >= 0) return (int64_t)((uint64_t)a >> m);
+      return ~(int64_t)((uint64_t)~a >> m);
+    }
+    /// Swift's `a << n` and `a >> n` on Int: a negative count shifts the other way.
+    static __attribute__((unused)) int64_t sw_shl(int64_t a, int64_t n) {
+      uint64_t m = n < 0 ? (uint64_t)0 - (uint64_t)n : (uint64_t)n;
+      return n < 0 ? sw_shift_right(a, m) : sw_shift_left(a, m);
+    }
+    static __attribute__((unused)) int64_t sw_shr(int64_t a, int64_t n) {
+      uint64_t m = n < 0 ? (uint64_t)0 - (uint64_t)n : (uint64_t)n;
+      return n < 0 ? sw_shift_left(a, m) : sw_shift_right(a, m);
+    }
+    """
+
+  static let preludeARC = """
     typedef struct sw_obj {
       int64_t rc;
       void (*destroy)(void *);
     } sw_obj;
-    static void *sw_retain(void *p) {
+    static __attribute__((unused)) void *sw_retain(void *p) {
       if (p) ((sw_obj *)p)->rc++;
       return p;
     }
-    static void sw_release(void *p) {
+    static __attribute__((unused)) void sw_release(void *p) {
       if (!p) return;
       sw_obj *o = p;
       if (--o->rc == 0) {
@@ -112,8 +123,67 @@ enum CEmit {
     }
     """
 
-  static func emit(_ program: Program) -> String {
-    var out = prelude + "\n\n"
+  static let prelude = preludeHostHead + preludePrinting + preludeArithmetic + preludeARC
+
+  /// The prelude for the browser (`emit-c --bindings`, the wasm explorer): no libc output. Ints and Bools are written
+  /// one byte at a time through the browser's putchar; a Double cannot be formatted as Swift formats it there, so
+  /// printing one traps with a message. The module's imports are the browser bindings (bindings.js): putchar, abort.
+  static let preludeBrowserHead = """
+    #include <stdbool.h>
+    #include <stdint.h>
+    #include <stdlib.h>
+    #include <string.h>
+
+    int putchar(int c);
+
+    static __attribute__((unused)) void sw_out_char(int c) {
+      putchar(c);
+    }
+    static __attribute__((unused)) void sw_out_str(const char *s) {
+      for (; *s; s++) sw_out_char((unsigned char)*s);
+    }
+    static __attribute__((unused)) void sw_trap(const char *msg) {
+      sw_out_str("Fatal error: ");
+      sw_out_str(msg);
+      sw_out_char('\\n');
+      abort();
+    }
+    static __attribute__((unused)) void sw_out_i64(int64_t v) {
+      uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+      char buf[24];
+      int n = 0;
+      do {
+        buf[n++] = (char)('0' + u % 10);
+        u /= 10;
+      } while (u);
+      if (v < 0) sw_out_char('-');
+      while (n) sw_out_char(buf[--n]);
+    }
+    static __attribute__((unused)) void sw_out_bool(bool v) {
+      sw_out_str(v ? "true" : "false");
+    }
+    static __attribute__((unused)) void sw_print_int(int64_t v) {
+      sw_out_i64(v);
+      sw_out_char('\\n');
+    }
+    static __attribute__((unused)) void sw_print_bool(bool v) {
+      sw_out_bool(v);
+      sw_out_char('\\n');
+    }
+    static __attribute__((unused)) void sw_print_double(double v) {
+      (void)v;
+      sw_trap("printing a Double needs the local server: the browser cannot format it as Swift does");
+    }
+    """
+
+  static let preludeBindings = preludeBrowserHead + preludeArithmetic + preludeARC
+
+  /// Whether the emitted C is the browser's (preludeBindings). Set by emit; the helpers below read it.
+  private static var bindings = false
+
+  static func emit(_ program: Program, bindings browser: Bool = false) -> String {
+    bindings = browser
+    var out = (browser ? preludeBindings : prelude) + "\n\n"
 
     // Forward declarations first, so that any type can name any other. Function
     // typedefs may use incomplete types; complete definitions come after them.
@@ -245,7 +315,7 @@ enum CEmit {
       }
       helpers += "  free(p);\n}\n"
       helpers += "static struct \(tag) * bxn_\(inner.mangled)(\(inner.cName) v) {\n"
-      helpers += "  struct \(tag) *b = calloc(1, sizeof *b);\n  if (!b) sw_trap(\"out of memory\");\n"
+      helpers += "  struct \(tag) *b = malloc(sizeof *b);\n  if (!b) sw_trap(\"out of memory\");\n  *b = (struct \(tag)){0};\n"
       helpers += "  b->hdr.rc = 1;\n  b->hdr.destroy = d_\(tag);\n  b->v = v;\n  return b;\n}\n\n"
     }
     out += bodies + protos + helpers
@@ -317,7 +387,7 @@ enum CEmit {
       let fnTy = Ty.function(f.params.map { $0.ty }, f.ret)
       let params = ctx.fields.enumerated().map { "\($0.element.ty.cName) v\($0.offset)" }.joined(separator: ", ")
       out += "static \(fnTy.cName) mk_\(ctx.id)(\(params)) {\n"
-      out += "  struct \(name) *c = calloc(1, sizeof *c);\n  if (!c) sw_trap(\"out of memory\");\n"
+      out += "  struct \(name) *c = malloc(sizeof *c);\n  if (!c) sw_trap(\"out of memory\");\n  *c = (struct \(name)){0};\n"
       out += "  c->hdr.rc = 1;\n  c->hdr.destroy = d_\(name);\n"
       for (index, field) in ctx.fields.enumerated() {
         out += "  c->\(field.cName) = v\(index);\n"
@@ -340,12 +410,12 @@ enum CEmit {
 
       let params = c.fields.isEmpty ? "void" : c.fields.map { "\($0.ty.cName) \($0.cName)" }.joined(separator: ", ")
       out += "static s_\(name) * a_\(name)(void) {\n"
-      out += "  s_\(name) *o = calloc(1, sizeof *o);\n"
-      out += "  if (!o) sw_trap(\"out of memory\");\n"
+      out += "  s_\(name) *o = malloc(sizeof *o);\n"
+      out += "  if (!o) sw_trap(\"out of memory\");\n  *o = (s_\(name)){0};\n"
       out += "  o->hdr.rc = 1;\n  o->hdr.destroy = d_\(name);\n  return o;\n}\n\n"
       out += "static s_\(name) * n_\(name)(\(params)) {\n"
-      out += "  s_\(name) *o = calloc(1, sizeof *o);\n"
-      out += "  if (!o) sw_trap(\"out of memory\");\n"
+      out += "  s_\(name) *o = malloc(sizeof *o);\n"
+      out += "  if (!o) sw_trap(\"out of memory\");\n  *o = (s_\(name)){0};\n"
       out += "  o->hdr.rc = 1;\n  o->hdr.destroy = d_\(name);\n"
       for f in c.fields {
         out += "  o->\(f.cName) = \(f.cName);\n"
@@ -444,17 +514,26 @@ enum CEmit {
     // print() of an array of Int, Bool or Double. Other elements are not printed.
     switch elem {
     case .int, .bool, .double:
-      var element = ""
-      switch elem {
-      case .int: element = "printf(\"%lld\", (long long)a.data[i]);"
-      case .bool: element = "printf(\"%s\", a.data[i] ? \"true\" : \"false\");"
-      default: element = "char buf[64]; sw_fmt_double(a.data[i], buf, sizeof buf); printf(\"%s\", buf);"
+      if bindings && elem == .double {
+        // the browser cannot format a Double as Swift does (see preludeBrowserHead): printing one traps
+        text += "static void pr_arr_\(m)(\(arr) a) {\n  (void)a;\n"
+        text += "  sw_trap(\"printing an array of Double needs the local server: the browser cannot format it as Swift does\");\n}\n"
+      } else {
+        var element = ""
+        switch elem {
+        case .int: element = bindings ? "sw_out_i64(a.data[i]);" : "printf(\"%lld\", (long long)a.data[i]);"
+        case .bool: element = bindings ? "sw_out_bool(a.data[i]);" : "printf(\"%s\", a.data[i] ? \"true\" : \"false\");"
+        default: element = "char buf[64]; sw_fmt_double(a.data[i], buf, sizeof buf); printf(\"%s\", buf);"
+        }
+        let open = bindings ? "sw_out_char('[');" : "printf(\"[\");"
+        let sep = bindings ? "sw_out_str(\", \");" : "printf(\", \");"
+        let close = bindings ? "sw_out_char(']'); sw_out_char('\\n');" : "printf(\"]\\n\");"
+        text += "static void pr_arr_\(m)(\(arr) a) {\n"
+        text += "  \(open)\n"
+        text += "  for (int64_t i = 0; i < a.count; i++) {\n"
+        text += "    if (i) \(sep)\n    \(element)\n  }\n"
+        text += "  \(close)\n}\n"
       }
-      text += "static void pr_arr_\(m)(\(arr) a) {\n"
-      text += "  printf(\"[\");\n"
-      text += "  for (int64_t i = 0; i < a.count; i++) {\n"
-      text += "    if (i) printf(\", \");\n    \(element)\n  }\n"
-      text += "  printf(\"]\\n\");\n}\n"
       // An owned temporary is freed after printing, since print does not keep it.
       text += "static void prf_arr_\(m)(\(arr) a) { pr_arr_\(m)(a); arr_free_\(m)(a); }\n\n"
     default:

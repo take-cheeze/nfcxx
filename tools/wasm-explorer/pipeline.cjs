@@ -6,6 +6,7 @@
 //   Rust        rustc -C opt-level=1 -C lto=fat -C save-temps ... prog.rs (the module after LTO, with the parts of core
 //               the program uses), llvm-dis of it, then llvm-to-pathb.rb --wasm
 //   Go          tinygo build -o prog.ll -gc=leaking -scheduler=none ... prog.go, a main() wrapper, then the same
+//   Swift       swiftfe emit-c --bindings prog.swift (tools/swiftfe: LLVM-free, its C), then the C route below
 //   nfcxx IR    none: the source is the IR
 //   then        scripts/mrb scripts/pathb-wasm-emit.rb [mode] prog.ir        the wasm module, in the binary format
 // They need the Path B harness and the mruby tool (scripts/setup-pathb.sh, scripts/setup-mruby.sh). The compiler is a
@@ -24,6 +25,9 @@ const llvmToPathb = path.join(root, "scripts", "llvm-to-pathb.rb");
 // A path in RUSTC or TINYGO is taken from the caller's directory (tinygo runs in the temporary one); a bare name is
 // looked up on the PATH.
 const tool = (value) => (value.includes(path.sep) ? path.resolve(value) : value);
+// the Swift front end (tools/swiftfe, swift build -c release); SWIFTFE names another build
+const swiftfe = process.env.SWIFTFE ? tool(process.env.SWIFTFE)
+  : path.join(root, "tools", "swiftfe", ".build", "release", "swiftfe");
 const rustc = tool(process.env.RUSTC || "rustc");
 // llvm-dis of rustc's own LLVM (rustup component llvm-tools): LLVM_DIS, else the one in rustc's sysroot, found once.
 let llvmDis = process.env.LLVM_DIS ? tool(process.env.LLVM_DIS) : null;
@@ -146,13 +150,16 @@ async function compile(source, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nfcxx-explorer-"));
   const failed = async (e) => {
     const message = await demangle(e.message);
-    return { ok: false, stage: e.stage, message, diagnostics: parseDiagnostics(message), code: e.code };
+    // a Swift program's C lines are not the program's: only swiftfe's diagnostics (which name prog.swift) get markers
+    const diagnostics = e.noLines ? [] : parseDiagnostics(message);
+    return { ok: false, stage: e.stage, message, diagnostics, code: e.code };
   };
   try {
     const src = path.join(dir, LANGUAGES[language].file);
     const ir = path.join(dir, "prog.ir");
     let irText;
     let frontStderr = "";
+    let fromSwiftC = false;   // the steps after swiftfe run on the C it wrote (see failed)
     if (language === "ir") {
       irText = Buffer.from(stripIrComments(source));
     } else {
@@ -186,16 +193,25 @@ async function compile(source, options = {}) {
           step = [mrb, [llvmToPathb, "--wasm", ll]];
         } else if (language === "llvm") {
           step = [mrb, [llvmToPathb, src]];
+        } else if (language === "swift") {
+          // swiftfe's C for the browser's bindings (ints, bools and the putchar/abort imports), then the C route
+          const emitted = await runStep("front-end", swiftfe, ["emit-c", "--bindings", src], dir);
+          const c = path.join(dir, "prog.c");
+          fs.writeFileSync(c, emitted.stdout);
+          step = [pathbDump, ["--ir", ...MODES[mode].dump, c]];
+          fromSwiftC = true;
         } else {
           step = [pathbDump, ["--ir", ...(std ? [`-std=${std}`] : []), ...MODES[mode].dump, src]];
         }
         // NFCXX_IR_LOC: EDG's IR names the source line of each statement, so that a refusal of the emitter does too
+        // (not for Swift: the IR's lines are the generated C's, which the program's diagnostics would name)
         const dumped = await runStep("front-end", step[0], step[1], dir, root,
-          step[0] === pathbDump ? { NFCXX_IR_LOC: "1" } : null);
+          step[0] === pathbDump && language !== "swift" ? { NFCXX_IR_LOC: "1" } : null);
         // the (loc ...) statements name the source file without the temporary directory, as the diagnostics do
         irText = Buffer.from(dumped.stdout.toString("utf8").split(dir + path.sep).join(""));
         frontStderr += dumped.stderr;
       } catch (e) {
+        if (fromSwiftC) e.noLines = true;
         return await failed(e);
       }
     }
@@ -204,6 +220,7 @@ async function compile(source, options = {}) {
     try {
       wasm = await runStep("emit", mrb, [emitter, "--names", ...MODES[mode].emit, ir], dir);
     } catch (e) {
+      if (fromSwiftC) e.noLines = true;
       return await failed(e);
     }
     return {

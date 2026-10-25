@@ -137,5 +137,24 @@
     "language": "ir",
     "expect": 55,
     "output": "hello from IR\n1\n4\n9\n16\n25\n"
+  },
+  {
+    "id": "swift-fib",
+    "title": "Swift: functions and a loop (both modes)",
+    "file": "swift-fib.swift",
+    "language": "swift",
+    "expect": 0,
+    "output": "88\n6765\ntrue\n"
+  },
+  {
+    "id": "swift-class",
+    "title": "Swift: a class with a method (AddressSanitizer mode)",
+    "file": "swift-class.swift",
+    "language": "swift",
+    "expect": 0,
+    "output": "42\n",
+    "modes": [
+      "asan"
+    ]
   }
 ]

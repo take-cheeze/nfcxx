@@ -8,6 +8,7 @@ typed IR, and prints C11 that the system `cc` compiles.
 swift build -c release
 .build/release/swiftfe check [--stats] <file.swift | dir>...   # parse only (M0)
 .build/release/swiftfe emit-c <file.swift>                     # print C (M1)
+.build/release/swiftfe emit-c --bindings <file.swift>          # the C for the wasm explorer (browser bindings, no libc output)
 .build/release/swiftfe build <file.swift> -o <exe>             # compile with cc (M1)
 tests/run.sh                                                   # end-to-end tests (M1 to M3)
 ```
