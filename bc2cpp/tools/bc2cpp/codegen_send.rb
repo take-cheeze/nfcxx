@@ -555,7 +555,10 @@ class CodeGen
 
     # RUBY_EXACT_PAST_NATIVE_ARMS: a receiver the exact-class flow proves is one Ruby class is no instance of the
     # native classes the arms below test, so it skips them for the exact-class path further down.
-    ruby_exact = n.zero? && !self_implicit && irep && drawing_proof_idx && NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name) &&
+    wrapper_name = NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name) ||
+                   (ENV['BC2CPP_RUBY_EXACT_PAST_NATIVE_ARGS'] != '0' &&
+                    (ExactNativeWrappers::CALLS.key?(name) || name == 'draw_text'))
+    ruby_exact = wrapper_name && !self_implicit && irep && drawing_proof_idx &&
                  ruby_exact_receiver?(irep, drawing_proof_idx, drawing_proof_reg)
 
     # Frame-independent RGSS entry points need only a native class identity
@@ -593,7 +596,7 @@ class CodeGen
       end
     end
 
-    if name == 'fill_rect' && n == 5 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    if name == 'fill_rect' && !ruby_exact && n == 5 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#fill_rect -- exact runtime class proves the native wrapper target
@@ -604,7 +607,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'blt' && [4, 5].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'blt' && !ruby_exact && [4, 5].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       opacity = n == 4 ? 'mrb_fixnum_value(255)' : argv[4]
       opacity_given = n == 5 ? 'TRUE' : 'FALSE'
@@ -617,7 +620,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'stretch_blt' && [3, 4].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'stretch_blt' && !ruby_exact && [3, 4].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       opacity = n == 3 ? 'mrb_fixnum_value(255)' : argv[3]
       opacity_given = n == 4 ? 'TRUE' : 'FALSE'
@@ -630,7 +633,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'draw_text' && [2, 3, 5, 6].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'draw_text' && !ruby_exact && [2, 3, 5, 6].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#draw_text -- exact runtime class proves the native wrapper target
@@ -641,7 +644,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'copy_blt' && n == 4 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'copy_blt' && !ruby_exact && n == 4 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#copy_blt -- exact runtime class proves the native wrapper target
@@ -652,7 +655,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'text_size' && n == 1 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'text_size' && !ruby_exact && n == 1 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#text_size -- exact runtime class proves the native wrapper target
@@ -664,7 +667,7 @@ class CodeGen
       CPP
     end
 
-    if %w[openness= tone= opacity=].include?(name) && n == 1 && !self_implicit && irep && drawing_proof_idx
+    if !ruby_exact && %w[openness= tone= opacity=].include?(name) && n == 1 && !self_implicit && irep && drawing_proof_idx
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -720,7 +723,7 @@ class CodeGen
       end
     end
 
-    if name == 'opacity=' && n == 1 && !self_implicit &&
+    if !ruby_exact && name == 'opacity=' && n == 1 && !self_implicit &&
        native_wrapper_owner_safe?(name, 'RGSS::Sprite')
       @native_construct_used << 'RGSS::Sprite'
       return <<~CPP
@@ -733,7 +736,7 @@ class CodeGen
       CPP
     end
 
-    if name == 'tone=' && n == 1 && !self_implicit
+    if !ruby_exact && name == 'tone=' && n == 1 && !self_implicit
       tone_targets = [
         ['RGSS::Sprite', 'native_sprite_class', 'sprite_tone_set_direct'],
         ['RGSS::Window', 'native_window_class', 'window_tone_set_direct'],
