@@ -258,6 +258,75 @@ else
 fi
 echo "ok   exception-stack frames around a destructor, after-scope mutant, and native execution"
 pass=$((pass + 1))
+# Runtime helpers for long double and __int128 are described by the trusted
+# scripts/pathb-runtime.effects; without it their calls are refused. An
+# uninitialized operand is found at the helper call. Every summary in the file
+# validates in the emitter and oracle too.
+ldsrc=tests/pathb-borrow/contracts/longdouble.cpp
+effects=scripts/pathb-runtime.effects
+sed 's/^  long double a = 2.0L, b = 3.0L;$/  long double a, b = 3.0L;/' "$ldsrc" > "$tmp/ld_uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$ldsrc" > "$tmp/ld.ir"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/ld_uninit.cpp" > "$tmp/ld_uninit.ir" 2>/dev/null
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/ld.ir" > "$tmp/out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || { echo "FAIL $ldsrc without --effects: expected exit 3, got $rc"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $ldsrc"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -q '^main: uninitialized: ' "$tmp/out"; then
+  echo "FAIL $ldsrc with an uninitialized operand: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+# The module's own summary of a name wins over the file's.
+{ head -1 "$tmp/ld.ir"
+  echo '(call-effects "__nfcxx_ld_mul" (returns void) (nothrow) (noescape) (closed) (args (write (array 16 unsigned_char)) (read (array 16 unsigned_char)) (read (array 16 unsigned_char))))'
+  tail -n +2 "$tmp/ld.ir"; } > "$tmp/ld_own.ir"
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld_own.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -q '^main: uninitialized: ' "$tmp/out"; then
+  echo "FAIL $ldsrc: a module summary must override --effects (write needs its output initialized), got $rc"; cat "$tmp/out"; exit 1
+fi
+echo '(borrow-layout (struct "X") 4 4)' > "$tmp/bad.effects"
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --effects "$tmp/bad.effects" "$tmp/ld.ir" > "$tmp/out" 2>&1 || rc=$?
+[ "$rc" = 2 ] || { echo "FAIL --effects with a non-call-effects form: expected exit 2, got $rc"; exit 1; }
+{ head -1 "$tmp/ld.ir"; grep -v '^;' "$effects"; tail -n +2 "$tmp/ld.ir"; } > "$tmp/ld_effects.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld-oracle.qbe"
+cmp "$tmp/ld.qbe" "$tmp/ld-oracle.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld.ir" | cmp - "$tmp/ld.qbe"
+ldrt=$(scripts/pathb-ldrt)
+"${QBE:-build/qbe/qbe}" "$tmp/ld.qbe" -o "$tmp/ld.s"
+cc "$tmp/ld.s" "$ldrt" -lstdc++ -lm -o "$tmp/ld"
+"$tmp/ld" || { echo "FAIL $ldsrc runtime: expected 0"; exit 1; }
+echo "ok   runtime helper effects, uninitialized operand, module precedence, emitter validation, and native execution"
+pass=$((pass + 1))
+# A struct passed by value gets a (byval T) summary: the caller's copy must be
+# initialized, and the callee checks its own copy. The pasted summary validates
+# in the emitter and oracle.
+bvsrc=tests/pathb-borrow/contracts/byval.cpp
+sed 's/ v.d = 3;//' "$bvsrc" > "$tmp/byval_uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$bvsrc" > "$tmp/byval.ir"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/byval_uninit.cpp" > "$tmp/byval_uninit.ir" 2>/dev/null
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval.ir" > "$tmp/out"
+grep -Fq '(args (byval (struct "V"))))' "$tmp/out" && grep -Fq 'ok: local lifetime checks passed' "$tmp/out" ||
+  { echo "FAIL $bvsrc"; cat "$tmp/out"; exit 1; }
+{ head -1 "$tmp/byval.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/byval.ir"; } > "$tmp/byval_pasted.ir"
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/byval_pasted.ir" | grep -Fq 'ok: local lifetime checks passed' ||
+  { echo "FAIL $bvsrc with the pasted summary"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: tmp' "$tmp/out"; then
+  echo "FAIL $bvsrc passing an uninitialized field: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval-oracle.qbe"
+cmp "$tmp/byval.qbe" "$tmp/byval-oracle.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/byval.qbe" -o "$tmp/byval.s"
+cc "$tmp/byval.s" -o "$tmp/byval"
+"$tmp/byval" || { echo "FAIL $bvsrc runtime: expected 0"; exit 1; }
+echo "ok   by-value aggregate arguments: inferred byval summary, uninitialized field, emitter validation, and native execution"
+pass=$((pass + 1))
 # A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
 # registration around it is still refused, for its own reason.)
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/vla.cpp > "$tmp/vla.ir"

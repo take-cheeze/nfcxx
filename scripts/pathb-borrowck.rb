@@ -1,5 +1,6 @@
 # Local lifetime analysis for annotated Path B IR. Run with scripts/mrb.
 # --infer-loan-ends enables conservative last-use inference; default uses explicit ends.
+# --effects FILE adds trusted call-effects forms for functions the module does not describe.
 # Exit 0: supported local checks passed; 1: lifetime error; 2: malformed IR;
 # 3: unsupported analysis. This is not full Rust or C++ borrow checking.
 class BadIR < StandardError; end
@@ -198,6 +199,16 @@ class BorrowLayouts
       raise @bad, 'semantic pointer field type' unless ty.length == 2
       return {size: 8, align: 8, used: (0...8).to_a, objects: []}
     end
+    if head(ty) == 'array'
+      raise @bad, 'semantic array field type' unless ty.length == 3
+      count = number(ty[1])
+      elem = field_type(ty[2], visiting)
+      n = elem[:size]
+      raise @refused, 'semantic arrays need 1 to 4096 bytes' unless count > 0 && count * n <= 4096
+      return {size: count * n, align: elem[:align],
+              used: (0...count).flat_map { |i| elem[:used].map { |b| i * n + b } },
+              objects: (0...count).flat_map { |i| elem[:objects].map { |o, t| [i * n + o, t] } }}
+    end
     k = key(ty)
     raise @refused, 'unsupported semantic field type' unless k
     resolve(k, visiting)
@@ -292,7 +303,7 @@ class BorrowCallEffects
     end
     args = f[6].drop(1)
     args.each do |arg|
-      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
+      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval].include?(arg[0])
         raise bad, 'call argument effect form'
       end
       ty = arg[1]
@@ -557,6 +568,13 @@ class LocalLifetime
     end
     @params.each_with_index do |(reg, _name, pointer, pty), i|
       mode, ty = @summary[:args][i]
+      if mode == 'byval'
+        # The parameter is the callee's own copy (the synthetic slot *%N).
+        unless bh(pty) == 'byval' && same_type?(pty[1], ty)
+          raise BadIR, 'function parameter disagrees with its effect contract'
+        end
+        next
+      end
       if mode == 'value'
         unless !pointer && scalar_abi_class(pty) == scalar_abi_class(ty)
           raise BadIR, 'function parameter disagrees with its effect contract'
@@ -662,6 +680,7 @@ class LocalLifetime
     desc = @layouts.lookup(ty)
     return desc[:size] if desc
     return 8 if bh(ty) == 'ptr'
+    return @layouts.field_type(ty, [])[:size] if bh(ty) == 'array'
     widths = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
               'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
               'long'=>8, 'unsigned_long'=>8, 'long_long'=>8, 'unsigned_long_long'=>8,
@@ -1209,6 +1228,17 @@ class LocalLifetime
     resolved = []
     args.each_with_index do |arg, i|
       mode, ty = summary[:args][i]
+      if bh(arg) == 'byval'
+        # (byval T PLACE): the callee gets its own copy, a read of the caller's object.
+        raise BadIR, 'byval argument form' unless arg.length == 3
+        unless mode == 'byval' && same_type?(arg[1], ty)
+          raise BadIR, 'by-value call argument disagrees with its effect contract'
+        end
+        arg = arg[2]
+        mode = 'read'
+      elsif mode == 'byval'
+        raise BadIR, 'by-value contract argument passed by address'
+      end
       origins = value(arg, state)
       if mode == 'value'
         raise BorrowRefused, 'value call argument carries pointer provenance' unless origins.empty?
@@ -1768,7 +1798,10 @@ class SummaryInference
     slots = []
     params.each do |p|
       ty = unconst(p[3]) # a const pointer parameter, such as a destructor's this
-      if bh(ty) == 'ptr'
+      if bh(ty) == 'byval'
+        return nil unless bh(ty[1]) == 'struct' && @layouts.lookup(ty[1])
+        slots << [p[1], ty[1], nil, true]
+      elsif bh(ty) == 'ptr'
         pointee = unconst(ty[1])
         desc = memory_type(pointee)
         return nil unless desc
@@ -1802,8 +1835,10 @@ class SummaryInference
   # Start every memory argument at the weakest effect and advance only the
   # arguments that diagnostics blame, until the body verifies or a choice runs out.
   def search_modes(f, name, ret, slots, a)
-    choices = slots.each_with_index.map do |(_reg, _ty, desc), i|
-      if desc.nil?
+    choices = slots.each_with_index.map do |(_reg, _ty, desc, byval), i|
+      if byval
+        [['byval']]
+      elsif desc.nil?
         [['value']]
       elsif a && a[0] == i && a[2]
         # A pointer to const grants no writes through the result.
@@ -1851,10 +1886,14 @@ begin
   args = ARGV.dup
   infer = false
   summaries = false
+  effect_files = []
   while args[0] && args[0].start_with?('--')
     option = args.shift
     if option == '--infer-loan-ends'
       infer = true
+    elsif option == '--effects'
+      raise BadIR, '--effects requires a file' unless args[0]
+      effect_files << args.shift
     elsif option == '--infer-summaries'
       summaries = true
     else
@@ -1862,7 +1901,7 @@ begin
     end
   end
   unless args.length == 1
-    raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] [--infer-summaries] FILE.ir'
+    raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] [--infer-summaries] [--effects FILE]... FILE.ir'
   end
   forms = parse_forms(tokenize(File.read(args[0])))
   raise BadIR, 'missing ir-module' unless bh(forms[0]) == 'ir-module'
@@ -1875,8 +1914,22 @@ begin
       end
     end
   end
+  # --effects FILE: trusted (call-effects ...) forms for functions the module
+  # does not describe itself, such as runtime helpers (scripts/pathb-runtime.effects).
+  own = {}
+  forms.each { |f| own[f[1].to_s] = true if bh(f) == 'call-effects' && f[1].is_a?(IRStr) }
+  extra = []
+  effect_files.each do |path|
+    text = File.read(path).split("\n").reject { |l| l.lstrip.start_with?(';') }.join("\n")
+    parse_forms(tokenize(text)).each do |f|
+      raise BadIR, "#{path}: only call-effects forms are allowed" unless bh(f) == 'call-effects' && f[1].is_a?(IRStr)
+      next if own[f[1].to_s]
+      own[f[1].to_s] = true
+      extra << f
+    end
+  end
   semantic_layouts = BorrowLayouts.new(forms, BadIR, BorrowRefused)
-  call_effects = BorrowCallEffects.new(forms, semantic_layouts, BadIR, BorrowRefused)
+  call_effects = BorrowCallEffects.new(forms + extra, semantic_layouts, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
   # (abi-type "N" SIZE ALIGN ...) gives the size of a by-value aggregate parameter.

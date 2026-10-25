@@ -292,8 +292,14 @@ A `byval` parameter's register is the address of the callee's own copy of the ar
 checker models that copy as a synthetic local slot `*%N`: initialized, alive until
 `(scope-end %N)`, and holding pointers of unknown provenance. Returning its address is
 `return-local-address`. Its size comes from the slot's semantic layout or from the module's
-`(abi-type "N" SIZE ...)` record. Callers still cannot pass aggregates by value, because call
-summaries have no by-value aggregate effect.
+`(abi-type "N" SIZE ...)` record.
+
+The argument effect `(byval T)` describes such a parameter in a call summary, and the call passes
+`(byval T PLACE)`. The caller's object is read: its fields must be initialized (padding is exempt
+when `T` has a layout), and nothing is retained. Verifying the callee checks its own copy, the
+synthetic slot. Summary inference gives a `byval` parameter `(byval T)` when `T` has a semantic
+layout, so `long double` and `__int128` by-value parameters, which have none, get no summary yet.
+All three validators accept the effect.
 
 ## Array indexing
 
@@ -334,10 +340,11 @@ Optional module-level metadata separates value fields from physical padding:
 ```
 
 The size and alignment are 8 and 4 bytes. Field names are unique, offsets are absolute within the
-struct, and field types determine widths and alignment. Scalars, pointers, and other declared struct
-layouts are supported. Pointers do not recursively embed their pointee, so self-referential pointer
+struct, and field types determine widths and alignment. Scalars, pointers, other declared struct
+layouts, and arrays `(array N T)` of these (1 to 4096 bytes, aligned like `T`) are supported. The
+same types describe call-effect arguments, such as `(read (array 16 unsigned_char))`. Pointers do not recursively embed their pointee, so self-referential pointer
 types are valid. By-value cycles, missing nested layouts, duplicate fields/layouts, and out-of-bounds
-fields are errors. Overlapping or unaligned fields, arrays, and union descriptors are refused.
+fields are errors. Overlapping or unaligned fields, empty arrays, and union descriptors are refused.
 This excludes packed layouts and overlapping empty subobjects for now.
 
 A slot using a known layout must match its size and provide sufficient alignment. Known aggregate
@@ -501,6 +508,20 @@ consumption results. It demonstrates call execution and state propagation, not g
 or resource-release verification. Removing the summaries leaves identical QBE while the checker
 correctly returns to refusing those calls.
 
+
+### Runtime helper summaries (`--effects`)
+
+`--effects FILE` loads trusted `call-effects` forms for functions the module does not describe.
+The option can be repeated. Lines starting with `;` are comments, and any other form is
+malformed. A summary in the module itself takes precedence over a file's summary of the same
+name.
+
+`scripts/pathb-runtime.effects` describes the Path B runtime helpers of `be/nfcxx_ldrt.c` that
+implement `long double`, `__int128`, and `_Float128` operations, 106 in all. Each value is a
+16-byte object. A helper writes all 16 bytes of its first pointer argument (`init`), reads its
+`const` pointer arguments (`read`), and touches no other memory. Helpers for bit-fields, `va_list`,
+and the UBSan report are not described. Like every summary, these are trusted, not verified. The
+file is generated from the helper signatures, and each writer was checked to store all 16 bytes.
 
 ## Returned alias loans
 
@@ -710,6 +731,13 @@ Copy fixtures in `tests/pathb-borrow/copy` cover loans over either side, externa
 escaping copies, and copies from ended storage. The C++ cases `cpp/copy_*.cpp` carry an
 uninitialized field and a dangling pointer field through struct copies, and `cpp/byval_*.cpp`
 check a by-value parameter's copy and a returned address of it.
+`contracts/byval.cpp` passes a struct by value through an inferred `(byval T)` summary, finds an
+uninitialized field in the caller's copy, and runs natively. The fixtures `calls/byval_*.ir` cover
+an uninitialized argument and a by-value contract passed by address.
+`contracts/longdouble.cpp` checks `long double` and `__int128` arithmetic through the runtime
+summaries. It is refused without them and finds an uninitialized operand at the helper call. A
+module's own summary overrides the file's. The emitter and oracle accept every summary in the
+file, and the program runs natively.
 `contracts/raii.cpp` checks a local with a destructor, its exception-stack frames, and the
 destructor's inferred summary, and runs natively. A variant that uses the object through a pointer
 after its scope reports `use-after-scope`. The fixtures in `tests/pathb-borrow/eh` cover push and

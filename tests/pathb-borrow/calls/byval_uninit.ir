@@ -1,0 +1,8 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "P") 8 4 (field "a" 0 int) (field "b" 4 int))
+(call-effects "take" (returns int) (nothrow) (noescape) (closed) (args (byval (struct "P"))))
+(function "test" (ret int) (params)
+(slot "s" (struct "P") 8 4)
+(decl $"s" val) (store int $"s" (const int 1))
+(let %0 int (call int &"take" (byval (struct "P") $"s")))
+(scope-end $"s") (return %0))
