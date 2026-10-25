@@ -35,6 +35,25 @@ check = lambda do |what, condition|
   failures << what unless condition
 end
 
+# Exercise the original-register proof independently of compile_send's site proof.
+class CodeGen; end
+require_relative '../../tools/bc2cpp/codegen_block_core_direct'
+literal_probe = Object.new.extend(BlockCoreDirectFallback)
+probe_irep = Object.new
+probe_irep.define_singleton_method(:index_of_addr) { |_addr| 1 }
+literal_probe.instance_variable_set(:@call_block_region, { parent_irep: probe_irep, dest_reg: 2, sendb_addr: 4 })
+probe_world = Struct.new(:safe) do
+  def exact_instances_singleton_free?; safe; end
+end.new(true)
+literal_probe.define_singleton_method(:block_core_world) { probe_world }
+%w[Integer String Array Hash Range].each do |klass|
+  literal_probe.define_singleton_method(:exact_literal) { |_irep, _idx, _reg| Struct.new(:klass).new(klass.to_sym) }
+  check.call("original-register literal proof: #{klass}", literal_probe.block_core_literal_class == klass)
+  probe_world.safe = false
+  check.call("singleton gate: #{klass}", literal_probe.block_core_literal_class == (klass == 'Integer' ? klass : nil))
+  probe_world.safe = true
+end
+
 unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
   puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
   exit 0
@@ -83,6 +102,8 @@ SRC = <<~'RUBY'
     def lp_stop(n); i = 0; v = loop { i += 1; raise StopIteration if i == n }; [v, i]; end
     def lp_drain(a); r = []; loop { raise StopIteration if a.empty?; r << a.shift }; r; end
     def lp_raise(n); i = 0; loop { i += 1; raise ArgumentError, "at #{i}" if i == n }; rescue ArgumentError => e; e.message; end
+    def chars_nested(n); r = []; n.times { "ab".each_char { |c| r << c } }; r; end
+    def chars_nested_break(n); r = []; n.times { r << "ab".each_char { |c| break c } }; r; end
     def rng_map(n); (1..n).map { |i| i * 2 }; end
     def rng_any(n); (1..n).any? { |i| i > 2 }; end
     def user_each(o); r = []; o.each { |x| r << x }; r; end
@@ -157,6 +178,11 @@ nested = code_with_blocks(code, 'tm_nested')
 check.call('tm_nested: the Integer literal receiver of the inner times keeps no dynamic else',
            nested.include?('literal Integer receiver') && nested.include?('Integer_times_impl(M, ') &&
            nested.scan(DYNAMIC).size == 1 && code_of(code, 'tm_nested').scan(DYNAMIC).size == 1)
+nested_chars = code_with_blocks(code, 'chars_nested')
+check.call('chars_nested: a String literal in a nested block keeps no class test or dynamic else',
+           nested_chars.match?(/-- (?:literal|proven) String receiver, yield-free block/) && nested_chars.scan(DYNAMIC).size == 1)
+check.call('chars_nested_break: a nonlocal break keeps the root-context guard',
+           code_with_blocks(code, 'chars_nested_break').match?(/(?:literal|proven) String receiver at the root context/))
 tm = code_of(code, 'tm')
 check.call('tm: an unproven receiver runs the inlined loop behind a Fixnum test, the send with its Integer arm as the else',
            tm.match?(/GUARDED_BLOCK_INLINE :times .*\n\s+if \(M->c == M->root_c && mrb_integer_p\(r\d+\)\) \{\n/) &&
@@ -195,6 +221,9 @@ check.call('a BasicObject subclass withdraws the Kernel arm', !code_of(c, 'lp').
 c, = generate_world(SRC + "class BiMeta\n  def install(n); Object.send(:define_method, n) { 1 }; end\nend\n")
 check.call('a dynamic installer withdraws the Kernel and String arms',
            !code_of(c, 'lp').include?(KERNEL_LOOP) && !code_of(c, 'chars').include?('String_each_char_impl'))
+c, = generate_world(SRC + "class BiSingleton\n  def touch(o); o.singleton_class; end\nend\n")
+check.call('singleton makers withdraw the heap literal proof',
+           !code_with_blocks(c, 'chars_nested').match?(/-- (?:literal|proven) String receiver/))
 c, = generate_world(SRC + "class String\n  def each_char; yield 'z'; end\nend\n")
 # The core arm (an exact-String test in front of the core body) goes. A STATIC_OWNER_ARMS arm may stay: it calls the
 # program's own String#each_char, which is what an exact String receiver's lookup finds.
@@ -234,6 +263,8 @@ DRIVER = <<~'RUBY'
   end
   show.call('frozen grow') { fx.grow([1].freeze) }
   [0, 1, 4].each do |n|
+    show.call("chars_nested/#{n}") { fx.chars_nested(n) }
+    show.call("chars_nested_break/#{n}") { fx.chars_nested_break(n) }
     show.call("tm/#{n}") { fx.tm(n) }
     show.call("tm_nested/#{n}") { fx.tm_nested(n) }
     show.call("tm_nested_break/#{n}") { fx.tm_nested_break(n) }
