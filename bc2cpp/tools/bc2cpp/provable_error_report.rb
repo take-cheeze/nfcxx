@@ -226,7 +226,7 @@ module ProvableErrorReport
     if left && right && !left.empty? && !right.empty? && left.product(right).all? { |l, r| OPERATOR_REJECTS.fetch(sym).call(l, r) }
       emit.call('operator', "#{left.sort.join('|')} #{sym} #{right.sort.join('|')}")
     end
-    if insn.op == 'DIV' && left && left == ['Integer'] && error_zero_literal?(irep, idx, b)
+    if insn.op == :DIV && left && left == ['Integer'] && error_zero_literal?(irep, idx, b)
       emit.call('zero_divide', 'Integer / 0')
     end
     rows

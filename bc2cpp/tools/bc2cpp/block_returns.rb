@@ -126,7 +126,7 @@ module BlockReturns
     proc_def = lambda do |df|
       next df.reg.to_s == blk if df.entry?
 
-      BytecodeIR.for(irep).source_at(df.index).op == 'BLKPUSH'
+      BytecodeIR.for(irep).source_at(df.index).op == :BLKPUSH
     end
     holds_proc = lambda do |idx, reg|
       defs = definitions(irep, program, idx, reg)
@@ -136,20 +136,20 @@ module BlockReturns
       insn = BytecodeIR.for(irep).source_at(idx)
       line = "line #{insn.lineno}"
       case insn.op
-      when 'BLKCALL'
+      when :BLKCALL
         n = insn.typed.find { |operand| operand.kind == :int }&.value
         return "yields #{n} argument(s) at #{line}, the block declares #{entry.arity}" unless n == entry.arity
-      when 'SEND', 'SENDB'
+      when :SEND, :SENDB
         next unless insn.sym == 'call' && holds_proc.call(idx, insn.reg)
-        return "calls its block with #{insn.argc_text} at #{line}, the block declares #{entry.arity}" unless insn.plain_fixed_argc? && insn.argc.to_i == entry.arity && insn.op == 'SEND'
-      when 'RETURN'
+        return "calls its block with #{insn.argc_text} at #{line}, the block declares #{entry.arity}" unless insn.plain_fixed_argc? && insn.argc.to_i == entry.arity && insn.op == :SEND
+      when :RETURN
         why = return_value_why(irep, program, idx, insn.reg, entry, holds_proc)
         return "#{why} (#{line})" if why
-      when 'RETSELF'
+      when :RETSELF
         return "returns self at #{line}" unless entry.kind == :self
-      when 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
+      when :RETNIL, :RETTRUE, :RETFALSE, :STOP
         return "ends with #{insn.op} at #{line}"
-      when 'RETURN_BLK', 'BREAK'
+      when :RETURN_BLK, :BREAK
         return "#{insn.op} at #{line}"
       end
     end
@@ -193,7 +193,7 @@ module BlockReturns
       succ = program.successor_lists[idx]
       target = insn.branch_target && program.address_to_index[insn.branch_target]
       if BytecodeIR::CONDITIONAL_BRANCHES.include?(insn.op) && target && holds_proc.call(idx, insn.reg)
-        succ = insn.op == 'JMPIF' ? [target] : succ - [target]
+        succ = insn.op == :JMPIF ? [target] : succ - [target]
       end
       stack.concat(succ)
       handlers.each { |edge| stack << edge.target if edge.src == idx }
@@ -219,12 +219,12 @@ module BlockReturns
       writer = BytecodeIR.for(irep).source_at(df.index)
       case entry.kind
       when :self
-        next if writer.op == 'LOADSELF'
+        next if writer.op == :LOADSELF
       when :block_value
-        if writer.op == 'BLKCALL' && holds_proc.call(df.index, writer.reg)
+        if writer.op == :BLKCALL && holds_proc.call(df.index, writer.reg)
           next
         end
-        next if writer.op == 'SEND' && writer.sym == 'call' && writer.reg.to_s == df.reg.to_s &&
+        next if writer.op == :SEND && writer.sym == 'call' && writer.reg.to_s == df.reg.to_s &&
                 holds_proc.call(df.index, writer.reg)
       end
       what = entry.kind == :self ? 'self' : 'a value its block returned'

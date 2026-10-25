@@ -37,14 +37,14 @@ module DefineMethodSites
   def site(irep, idx, ireps)
     program = BytecodeIR.for(irep)
     insn = program.source_at(idx)
-    return nil unless insn.op == 'SSENDB' && insn.sym == 'define_method' && insn.plain_fixed_argc? && insn.argc == 1
+    return nil unless insn.op == :SSENDB && insn.sym == 'define_method' && insn.plain_fixed_argc? && insn.argc == 1
     return nil if idx < 2
 
     name_insn = program.source_at(idx - 2)
     block_insn = program.source_at(idx - 1)
     base = insn.reg.to_i
-    return nil unless name_insn.op == 'LOADSYM' && name_insn.reg.to_i == base + 1 && name_insn.sym_token
-    return nil unless block_insn.op == 'BLOCK' && block_insn.reg.to_i == base + 2 && block_insn.block_index
+    return nil unless name_insn.op == :LOADSYM && name_insn.reg.to_i == base + 1 && name_insn.sym_token
+    return nil unless block_insn.op == :BLOCK && block_insn.reg.to_i == base + 2 && block_insn.block_index
 
     child = irep.reps[block_insn.block_index]
     return nil unless child && ireps[child] && method_shaped?(ireps[child], ireps) && straight_line?(irep, insn)
@@ -64,7 +64,7 @@ module DefineMethodSites
   # 0, in the body itself) and collects the register it reads; without it every upvar past the body refuses.
   def method_shaped?(body, ireps, captures: nil)
     first = BytecodeIR.for(body).source_at(0)
-    return false unless first&.op == 'ENTER'
+    return false unless first&.op == :ENTER
     return false unless first.enter_fields[1..].all?(&:zero?)
 
     self_contained?(body, ireps, 0, captures)
@@ -74,15 +74,15 @@ module DefineMethodSites
   # c names the frame c + 1 levels up, so c < depth stays inside +body+.
   def self_contained?(irep, ireps, depth, captures = nil)
     BytecodeIR.for(irep).each_source do |insn, _index|
-      next if insn.op == 'RETURN_BLK' && depth.zero?
+      next if insn.op == :RETURN_BLK && depth.zero?
       return false if FRAME_ESCAPES.include?(insn.op) || DEFINITION_OPS.include?(insn.op)
       return false if BytecodeIR::Ops::SEND.include?(insn.op) && FRAME_SENDS.include?(insn.sym)
-      return false if insn.op == 'LOADSYM' && FRAME_SENDS.include?(insn.sym_token)
+      return false if insn.op == :LOADSYM && FRAME_SENDS.include?(insn.sym_token)
       next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
 
       level = insn.typed.last.value
       next if level < depth
-      return false unless captures && depth.zero? && level.zero? && insn.op == 'GETUPVAR'
+      return false unless captures && depth.zero? && level.zero? && insn.op == :GETUPVAR
 
       captures << insn.upvar_ref.first
     end
@@ -107,7 +107,7 @@ module DefineMethodSites
     body = ireps.fetch(label)
     clone_label = "#{label}~dm#{seq}"
     insns = BytecodeIR.for(body).each_source.map do |insn, _index|
-      next insn unless insn.op == 'GETUPVAR'
+      next insn unless insn.op == :GETUPVAR
 
       index, level = insn.upvar_ref
       unless level.zero? && captures.key?(index)

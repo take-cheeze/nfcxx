@@ -64,10 +64,10 @@ suite.compile(source) do |baseline, _, directory|
     body.instructions.each { |instruction| instruction.extend(DisassemblyForbidden) }
   end
   suite.check('binary fixture includes branches, a back edge, handlers and a closure',
-              baseline.values.any? { |b| b.instructions.any? { |i| i.op == 'JMPNOT' || i.op == 'JMPIF' } } &&
-              baseline.values.any? { |b| b.instructions.any? { |i| i.op == 'JMP' && i.branch_target < i.addr } } &&
+              baseline.values.any? { |b| b.instructions.any? { |i| i.op == :JMPNOT || i.op == :JMPIF } } &&
+              baseline.values.any? { |b| b.instructions.any? { |i| i.op == :JMP && i.branch_target < i.addr } } &&
               baseline.values.any? { |b| !b.catch_handlers.empty? } &&
-              baseline.values.any? { |b| b.instructions.any? { |i| i.op == 'BLOCK' } })
+              baseline.values.any? { |b| b.instructions.any? { |i| i.op == :BLOCK } })
   facts = baseline.values.flat_map { |body| snapshot(body).fetch(:values).flatten(1) }
   suite.check('fixture proves Integer and Array values and also refuses unknown values',
               %i[Integer Array].all? { |klass| facts.any? { |_, exact| exact&.first == klass } } &&

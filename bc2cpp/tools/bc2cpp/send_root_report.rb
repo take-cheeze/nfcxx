@@ -50,12 +50,12 @@ module SendRootReport
     result = irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                    exhausted: ->(last) { [last == '0' ? 'self' : 'incoming_arg', '-', '-'] }) do |ins, index|
       case ins.op
-      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+      when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
         ['send', send_root_name(irep, ins, index), "#{send_root_status(ins.sym)} recv=#{send_root_recv(irep, ins, index)}"]
-      when 'GETIV' then ['ivar', ins.ivar.to_s, send_root_ivar_status(irep, ins.ivar.to_s)]
-      when 'GETIDX', 'GETIDX0' then ['index', '-', '-']
-      when 'GETUPVAR' then ['upvar', '-', '-']
-      when 'ARRAY', 'ARRAY2' then ['array', send_root_array_name(irep, ins, index), '-']
+      when :GETIV then ['ivar', ins.ivar.to_s, send_root_ivar_status(irep, ins.ivar.to_s)]
+      when :GETIDX, :GETIDX0 then ['index', '-', '-']
+      when :GETUPVAR then ['upvar', '-', '-']
+      when :ARRAY, :ARRAY2 then ['array', send_root_array_name(irep, ins, index), '-']
       else [ins.op.downcase, '-', '-']
       end
     end
@@ -210,7 +210,7 @@ module SendRootReport
         # The state after a literal is its own class set; a blocked `after` here is the join at a following branch target.
         next [] if insn.op.start_with?('LOADI') || %w[LOADNIL ARRAY ARRAY2 HASH STRING LOADTRUE LOADFALSE LOADSYM RANGE_INC RANGE_EXC].include?(insn.op)
 
-        if insn.op == 'MOVE' && insn.regs[1] && depth < 6
+        if insn.op == :MOVE && insn.regs[1] && depth < 6
           send_root_culprits(irep, d.index, insn.regs[1], depth + 1)
         else
           kind, pname, status = send_root_producer(irep, d.index + 1, d.reg)

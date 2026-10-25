@@ -52,7 +52,7 @@ module IrYieldTypes
         return nil unless instruction.first_of(:int)&.value == count
         definitions = BytecodeIR.reaching_definitions(body, position, instruction.reg, origin_transfers: true, shared: true)
         producer = definitions&.size == 1 && !definitions.first.entry? && BytecodeIR.for(body).source_at(definitions.first.index)
-        return nil unless producer && producer.op == 'BLKPUSH' && producer.argary_spec == [argc, 0, 0, 0] && producer.first_of(:plit)&.value.to_s == '0'
+        return nil unless producer && producer.op == :BLKPUSH && producer.argary_spec == [argc, 0, 0, 0] && producer.first_of(:plit)&.value.to_s == '0'
 
         count.times do |slot|
           fact = callee.fact_at(position, (instruction.reg.to_i + slot + 1).to_s)
@@ -77,7 +77,7 @@ module IrYieldTypes
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)
-    producer.op == 'BLOCK' ? ireps[Array(parent.reps)[producer.block_index.to_i]] : nil
+    producer.op == :BLOCK ? ireps[Array(parent.reps)[producer.block_index.to_i]] : nil
   end
 
   def protocol_body?(body, argc)

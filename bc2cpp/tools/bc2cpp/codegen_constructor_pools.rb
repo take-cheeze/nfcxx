@@ -215,10 +215,10 @@ class CodeGen
       program.each_source do |insn, idx|
         return 'explicit initialize call' if insn.sym == 'initialize' && BytecodeIR::Ops::SEND.include?(insn.op)
 
-        string_spelled ||= insn.op == 'STRING' && %w[new initialize].include?(irep.pool[insn.pool_index.to_i])
+        string_spelled ||= insn.op == :STRING && %w[new initialize].include?(irep.pool[insn.pool_index.to_i])
         next unless CONSTRUCTOR_NAMING_OPS.include?(insn.op)
 
-        names = [insn.sym, (insn.first_of(:name)&.value if insn.op == 'ALIAS')].compact
+        names = [insn.sym, (insn.first_of(:name)&.value if insn.op == :ALIAS)].compact
         next unless names.any? { |name| %w[new initialize].include?(name) }
 
         klass = constructor_alias_class(label, insn, program, idx)
@@ -238,14 +238,14 @@ class CodeGen
     return nil unless klass
 
     other = ->(name) { name && !%w[initialize new].include?(name) }
-    return (insn.first_of(:name)&.value == 'initialize' && other.call(insn.sym) ? klass : nil) if insn.op == 'ALIAS'
-    return nil unless insn.op == 'LOADSYM' && insn.sym == 'initialize'
+    return (insn.first_of(:name)&.value == 'initialize' && other.call(insn.sym) ? klass : nil) if insn.op == :ALIAS
+    return nil unless insn.op == :LOADSYM && insn.sym == 'initialize'
 
     # The neighbours keep the raw index window (idx +/- 1, nil past either end), so they stay source_at reads.
     call = program.source_at(idx + 1)
     prior = idx.positive? ? program.source_at(idx - 1) : nil
-    alias_call = call&.op == 'SSEND' && call.sym == 'alias_method' && call.plain_fixed_argc? && call.argc == 2 &&
-                 call.reg.to_i + 2 == insn.reg.to_i && prior&.op == 'LOADSYM' && prior.reg.to_i == call.reg.to_i + 1 &&
+    alias_call = call&.op == :SSEND && call.sym == 'alias_method' && call.plain_fixed_argc? && call.argc == 2 &&
+                 call.reg.to_i + 2 == insn.reg.to_i && prior&.op == :LOADSYM && prior.reg.to_i == call.reg.to_i + 1 &&
                  other.call(prior.sym)
     alias_call ? klass : nil
   end
@@ -312,7 +312,7 @@ class CodeGen
     @ireps.each_value do |irep|
       owner = entry_arg_body_owner[irep.label]
       BytecodeIR.for(irep).each_source do |insn, idx|
-        if insn.op == 'SUPER'
+        if insn.op == :SUPER
           constructor_super_site(irep, idx, insn, owner, found)
         elsif BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym == 'new'
           constructor_new_site(irep, idx, insn, owner, found)
@@ -486,7 +486,7 @@ class CodeGen
 
     program = BytecodeIR.for(irep)
     array = program.source_at(idx - 1)
-    return nil unless array.op == 'ARRAY' && array.typed.size == 2 && array.reg.to_i == insn.reg.to_i + 1
+    return nil unless array.op == :ARRAY && array.typed.size == 2 && array.reg.to_i == insn.reg.to_i + 1
 
     preds = program.instruction_predecessors(include_handlers: true)
     return nil unless preds && preds[idx] == Set[idx - 1]
@@ -498,7 +498,7 @@ class CodeGen
   # The `new` send a constructor site reads its arguments for: the site's own instruction, or the send after a
   # PACKED_NEW ARRAY (constructor_packed_argc).
   def constructor_site_send_index(irep, idx)
-    BytecodeIR.for(irep).source_at(idx).op == 'ARRAY' ? idx + 1 : idx
+    BytecodeIR.for(irep).source_at(idx).op == :ARRAY ? idx + 1 : idx
   end
 
   # `new` of `def self.m` in X, or `self.class.new` in an instance method of X.
@@ -521,8 +521,8 @@ class CodeGen
 
     send = BytecodeIR.for(irep).source_at(defs.first.index)
     return nil unless irep.label == owner.irep && send.sym == 'class'
-    return owner.owner if send.op == 'SSEND0'
-    return nil unless send.op == 'SEND0'
+    return owner.owner if send.op == :SSEND0
+    return nil unless send.op == :SEND0
 
     selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg.to_s, through_handlers: true, shared: true)
     selves&.size == 1 && selves.first.entry? && selves.first.reg == '0' ? owner.owner : nil
@@ -539,8 +539,8 @@ class CodeGen
 
       writer = BytecodeIR.for(irep).source_at(definition.index)
       case writer.op
-      when 'GETCONST' then writer.const_name
-      when 'GETMCNST' then writer.mcnst_name
+      when :GETCONST then writer.const_name
+      when :GETMCNST then writer.mcnst_name
       end
     end
     return nil unless names.all? && names.all? { |name| @closed_world.class_valued_constant?(name) }

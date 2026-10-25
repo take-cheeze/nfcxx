@@ -126,11 +126,11 @@ module EscapeAnalysis
 
       out = Set.new(s)
       case insn.op
-      when 'MOVE'
+      when :MOVE
         move = BytecodeIR::OperandModel.move(insn)
         out.delete(move.dest.to_s)
         out << move.dest.to_s if s.include?(move.src.to_s)
-      when 'LOADSELF'
+      when :LOADSELF
         out.delete(lead)
         out << lead if self_frame
       else
@@ -198,13 +198,13 @@ module EscapeAnalysis
       from = lead.to_i
       count = 2
       case op
-      when 'ARRAY'
+      when :ARRAY
         three = BytecodeIR::OperandModel.src_and_literal(insn)
         from, count = three ? [three[0].to_i, three[1].to_i] : [from, BytecodeIR::OperandModel.uint_operand(insn).to_i]
       when 'HASH' then count = 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i
       when 'HASHADD' then from += 1; count = 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i
       when 'ARYPUSH', 'BLKCALL' then from += 1; count = BytecodeIR::OperandModel.uint_operand(insn).to_i
-      when 'STRCAT' then from += 1; count = 1
+      when :STRCAT then from += 1; count = 1
       end
       (from...(from + count)).map(&:to_s)
     end
@@ -267,7 +267,7 @@ module EscapeAnalysis
         lead = insn.reg&.to_s or next
         writers[lead] << if IMMEDIATE_LOADS.include?(insn.op)
                            [:imm]
-                         elsif insn.op == 'MOVE'
+                         elsif insn.op == :MOVE
                            [:move, BytecodeIR::OperandModel.move(insn).src.to_s]
                          else
                            [:other]

@@ -131,16 +131,16 @@ module EnumeratorModel
       BytecodeIR.for(irep).instructions_with_op('CLASS', 'MODULE', 'SETCONST', 'SETMCNST', 'LOADSYM',
                                                 *BytecodeIR::Ops::SEND).each do |insn|
         case insn.op
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           # The compiled sources run as one script, whose own irep holds the top-level statements. A statement there
           # reopens or creates Object::Enumerator; one in a class body, a block or a method (`module Kernel; class
           # Enumerator`) defines a second constant that Kernel#to_enum's lexical lookup would find first.
           if insn.sym_token == 'Enumerator' && irep.label != root_label
             return "a nested class/module Enumerator statement (#{irep.label})"
           end
-        when 'SETCONST' then return "assigned in #{irep.file}" if insn.const_name == 'Enumerator'
-        when 'SETMCNST' then return "assigned in #{irep.file}" if insn.mcnst_name == 'Enumerator'
-        when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
+        when :SETCONST then return "assigned in #{irep.file}" if insn.const_name == 'Enumerator'
+        when :SETMCNST then return "assigned in #{irep.file}" if insn.mcnst_name == 'Enumerator'
+        when :SEND, :SEND0, :SSEND, :SSEND0, :SENDB, :SSENDB, :LOADSYM
           return "dynamic constant mutation (#{insn.sym}) in #{irep.file}" if insn.sym.to_s.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
       end

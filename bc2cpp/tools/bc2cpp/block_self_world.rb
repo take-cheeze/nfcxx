@@ -158,16 +158,16 @@ module BlockSelfWorld
     def scan_irep(irep, ireps, parents, compiled)
       irep.each_with_op('LOADSYM', 'STRING', 'ALIAS', 'DEF', 'TDEF', 'SDEF', *SENDS) do |insn, idx|
         case insn.op
-        when 'LOADSYM'
+        when :LOADSYM
           fail!(irep, insn, "spells the rebinder :#{insn.sym}") if REBIND_NAMES.include?(insn.sym)
-        when 'STRING'
+        when :STRING
           entry = irep.pool[insn.pool_index.to_i]
           fail!(irep, insn, "spells the rebinder \"#{entry}\"") if entry.is_a?(String) && REBIND_NAMES.include?(entry)
-        when 'ALIAS'
+        when :ALIAS
           names = insn.typed.map { |operand| operand.value.to_s }
           fail!(irep, insn, "aliases the rebinder #{names.join(' ')}") if names.any? { |n| REBIND_NAMES.include?(n) }
-        when 'DEF', 'TDEF', 'SDEF'
-          name = insn.op == 'DEF' ? insn.sym_token : insn.sym
+        when :DEF, :TDEF, :SDEF
+          name = insn.op == :DEF ? insn.sym_token : insn.sym
           fail!(irep, insn, "defines the rebinder #{name} in Ruby") if REBIND_NAMES.include?(name)
         when *SENDS
           scan_send(irep, idx, insn, ireps, parents, compiled)
@@ -224,7 +224,7 @@ module BlockSelfWorld
     def nil_block?(irep, idx, insn)
       reg = BlockSelfWorld.block_register(insn)
       defs = reg && BlockSelfWorld.definitions(irep, idx, reg)
-      defs && !defs.empty? && defs.all? { |df| !df.entry? && BytecodeIR.for(irep).source_at(df.index).op == 'LOADNIL' }
+      defs && !defs.empty? && defs.all? { |df| !df.entry? && BytecodeIR.for(irep).source_at(df.index).op == :LOADNIL }
     end
 
     def mark_rebound(label, ireps)
@@ -313,7 +313,7 @@ module BlockSelfWorld
 
         writer = BytecodeIR.for(irep).source_at(df.index)
         case writer.op
-        when 'LOADNIL' then 'Object'
+        when :LOADNIL then 'Object'
         when 'GETCONST', 'GETMCNST' then writer.const_name.to_s.split('::').last
         else :unknown
         end
@@ -357,8 +357,8 @@ module BlockSelfWorld
         count = w.typed.find { |operand| operand.kind == :int }&.value.to_i
         source = w.regs.size >= 2 ? w.regs[1] : reg
         found = case w.op
-                when 'ARYCAT', 'ARYPUSH' then packed_first_names(irep, df.index, reg, ireps, parents)
-                when 'ARRAY' then count.positive? ? names_at(irep, df.index, source, ireps, parents) : :unknown
+                when :ARYCAT, :ARYPUSH then packed_first_names(irep, df.index, reg, ireps, parents)
+                when :ARRAY then count.positive? ? names_at(irep, df.index, source, ireps, parents) : :unknown
                 else :unknown
                 end
         return :unknown if found == :unknown
@@ -382,10 +382,10 @@ module BlockSelfWorld
     def writer_names(irep, index, ireps, parents)
       insn = BytecodeIR.for(irep).source_at(index)
       case insn.op
-      when 'LOADSYM' then Set[insn.sym]
-      when 'LOADSELF' then entry_names(irep, '0', ireps)
-      when 'LOADNIL', 'LOADTRUE', 'LOADFALSE' then Set.new
-      when 'GETUPVAR' then upvar_names(irep, insn, ireps, parents)
+      when :LOADSYM then Set[insn.sym]
+      when :LOADSELF then entry_names(irep, '0', ireps)
+      when :LOADNIL, :LOADTRUE, :LOADFALSE then Set.new
+      when :GETUPVAR then upvar_names(irep, insn, ireps, parents)
       else :unknown
       end
     end
@@ -411,7 +411,7 @@ module BlockSelfWorld
       BytecodeIR.for(frame).each_source do |w, j|
         next unless w.reg == index.to_s && writes_leading?(w)
 
-        found = w.op == 'MOVE' ? names_at(frame, j, w.regs[1], ireps, parents) : writer_names(frame, j, ireps, parents)
+        found = w.op == :MOVE ? names_at(frame, j, w.regs[1], ireps, parents) : writer_names(frame, j, ireps, parents)
         return :unknown if found == :unknown
 
         out.merge(found)
@@ -471,8 +471,8 @@ module BlockSelfWorld
         w = BytecodeIR.for(irep).source_at(df.index)
         case w.op
         when 'LOADSYM' then out << w.sym
-        when 'LOADNIL', 'BLOCK', 'LAMBDA' then next
-        when 'GETUPVAR' then return :unknown unless captured_block_param?(irep, w, ireps, parents)
+        when :LOADNIL, :BLOCK, :LAMBDA then next
+        when :GETUPVAR then return :unknown unless captured_block_param?(irep, w, ireps, parents)
         else return :unknown
         end
       end
@@ -499,8 +499,8 @@ module BlockSelfWorld
       writers = BytecodeIR.for(frame).each_source.select { |w, _| w.reg == index.to_s && writes_leading?(w) }
       !writers.empty? && writers.all? do |w, j|
         case w.op
-        when 'LOADNIL', 'BLOCK', 'LAMBDA' then true
-        when 'MOVE'
+        when :LOADNIL, :BLOCK, :LAMBDA then true
+        when :MOVE
           defs = BlockSelfWorld.definitions(frame, j, w.regs[1])
           defs && !defs.empty? && defs.all? { |df| df.entry? && df.reg.to_s == block_param_register(frame) }
         else false

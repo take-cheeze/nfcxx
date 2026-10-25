@@ -45,7 +45,7 @@ module BlockYieldTypes
     yields = []
     program.each_source do |insn, idx|
       case insn.op
-      when 'BLKCALL'
+      when :BLKCALL
         argc = insn.typed.find { |operand| operand.kind == :int }&.value
         return { reason: 'yields an unknown number of arguments' } unless argc && insn.reg
 

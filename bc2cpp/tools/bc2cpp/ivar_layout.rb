@@ -333,7 +333,7 @@ class IvarLayout
     # RESCUE is `R[b] = R[a].isa?(R[b])` (ops.h), printed `RESCUE\tR%d\tR%d`: the
     # write lands on the SECOND register. `a` is a read (skipped); `b` is a real
     # write and must stop the trace like the generic `else`.
-    rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+    rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
     at_entry = lambda do |last|
       # Never written in this block: an incoming argument. Register N is argument N
       # for N <= mand (as in CodeGen#compile_method). Use ArgTypes' whole-program
@@ -363,25 +363,25 @@ class IvarLayout
 
       use = i
       case insn.op
-      when 'MOVE'
+      when :MOVE
         next IrepScans.follow(insn.regs[1])
       when BytecodeIR::Ops::LOADI_OPS
         next :fixnum
-      when 'LOADSYM'
+      when :LOADSYM
         # A Symbol is as safe to embed as a Fixnum: an mrb_sym is an interned id, not a
         # GC object (symbol.c frees the table only at mrb_close). See CodeGen::TYPE_OPS.
         next :symbol
-      when 'LOADNIL'
+      when :LOADNIL
         # NILABLE_EMBED_SUPPORT: nil is a concrete value, so it is a contribution
         # the join can widen (NIL + :fixnum -> FIXNUM_NIL) instead of the UNKNOWN
         # this used to return, which poisoned every nilable ivar.
         next NIL
-      when 'LOADTRUE', 'LOADFALSE'
+      when :LOADTRUE, :LOADFALSE
         # BOOL_EMBED_SUPPORT: LOADT/LOADF. true/false are immediates in every boxing
         # this project targets (word, no-float, nan), so an mrb_bool field needs no GC
         # keep-alive. See CodeGen::TYPE_OPS :bool.
         next :bool
-      when 'GETCONST', 'GETMCNST'
+      when :GETCONST, :GETMCNST
         # INTEGER_CONST_EMBED_SUPPORT: `@x = SOME_CONST` is Fixnum when
         # IntegerConstants.analyze admitted the bare name (the proof GETCONST's fast
         # path trusts). `integer_constants` is nil for callers that never ran the scan
@@ -391,12 +391,12 @@ class IvarLayout
         next :fixnum if name && integer_constants&.include?(name)
 
         next UNKNOWN
-      when 'ADD', 'SUB', 'MUL', 'ADDI', 'SUBI'
+      when :ADD, :SUB, :MUL, :ADDI, :SUBI
         # The result can leave the Fixnum range, where Integer#+ (and the
         # compiled arm) builds a bigint that a mrb_int field cannot hold. An
         # arithmetic write therefore keeps the ivar an ordinary :value slot.
         next UNKNOWN
-      when 'GETIV'
+      when :GETIV
         other_ivar = insn.ivar
         known = known_ivar_types[other_ivar]
         # EMBED_TYPE_SAFETY: a nilable (or unknown) source is not a concrete
@@ -404,7 +404,7 @@ class IvarLayout
         next known if EMBEDDABLE.include?(known)
 
         next UNKNOWN
-      when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
+      when :SEND, :SEND0, :SSEND, :SSEND0
         # FIXNUM_BINOP_EMBED_SUPPORT: %, &, |, ^ never promote to Bignum (like
         # compile_send's FIXNUM_BINARY fast path; +/-/* and << can overflow). Sound only
         # when both operands are proven Fixnum AND the operator has no override

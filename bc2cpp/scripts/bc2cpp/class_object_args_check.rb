@@ -102,7 +102,7 @@ def coa_const(name) = [insn(4, 'GETCONST', "R3\t#{name}"), insn(8, 'LOADSYM', "R
 
 # classes the `new` receiver of the table body resolves to.
 def coa_resolve(cg, irep)
-  index = irep.instructions.index { |i| i.op == 'SEND' && i.sym == 'new' }
+  index = irep.instructions.index { |i| i.op == :SEND && i.sym == 'new' }
   cg.class_object_receiver_classes(irep, index, irep.instructions[index])
 end
 

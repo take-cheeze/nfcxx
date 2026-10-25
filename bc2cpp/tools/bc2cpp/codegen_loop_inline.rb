@@ -182,7 +182,7 @@ class CodeGen
     body = String.new
     compile_all = lambda do
       BytecodeIR.for(block_irep).each_source do |insn, i|
-        next if insn.op == 'ENTER'
+        next if insn.op == :ENTER
 
         body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
         code = if elem_reg
@@ -814,20 +814,20 @@ class CodeGen
     body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
     BytecodeIR.for(block_irep).each_source do |insn, i|
-      next if insn.op == 'ENTER'
+      next if insn.op == :ENTER
 
       # `L<addr>:;` -- the colon makes it a label and the trailing semicolon the
       # null statement mrbc's disassembly implies, the same spelling every other
       # emitter in this compiler uses.
       body << "  #{body_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       code = case insn.op
-             when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
-               r = insn.op == 'RETURN' ? (insn.no_operands? ? '0' : insn.reg) : nil
+             when :RETURN, :RETNIL, :RETFALSE, :RETTRUE
+               r = insn.op == :RETURN ? (insn.no_operands? ? '0' : insn.reg) : nil
                store = case insn.op
-                       when 'RETURN' then "r#{r.to_i + offset}"
-                       when 'RETNIL' then 'mrb_nil_value()'
-                       when 'RETFALSE' then 'mrb_false_value()'
-                       when 'RETTRUE' then 'mrb_true_value()'
+                       when :RETURN then "r#{r.to_i + offset}"
+                       when :RETNIL then 'mrb_nil_value()'
+                       when :RETFALSE then 'mrb_false_value()'
+                       when :RETTRUE then 'mrb_true_value()'
                        end
                "  #{result_var} = #{store};\n  goto #{tail_label};\n"
              else
@@ -855,16 +855,16 @@ class CodeGen
   def compile_collect_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
                                 result_var:, break_dest:, break_label:, broke_flag:, idx: nil)
     case insn.op
-    when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
-      r = insn.op == 'RETURN' ? (insn.no_operands? ? '0' : insn.reg) : nil
+    when :RETURN, :RETNIL, :RETFALSE, :RETTRUE
+      r = insn.op == :RETURN ? (insn.no_operands? ? '0' : insn.reg) : nil
       store = case insn.op
-              when 'RETURN' then "r#{r.to_i + offset}"
-              when 'RETNIL' then 'mrb_nil_value()'
-              when 'RETFALSE' then 'mrb_false_value()'
-              when 'RETTRUE' then 'mrb_true_value()'
+              when :RETURN then "r#{r.to_i + offset}"
+              when :RETNIL then 'mrb_nil_value()'
+              when :RETFALSE then 'mrb_false_value()'
+              when :RETTRUE then 'mrb_true_value()'
               end
       "  #{result_var} = #{store};\n  goto #{iter_end_label};\n"
-    when 'BREAK'
+    when :BREAK
       # Same value semantics as compile_block_body_insn's BREAK, plus the broke
       # flag so the post-loop accumulator assignment is skipped.
       r = insn.no_operands? ? '0' : insn.reg

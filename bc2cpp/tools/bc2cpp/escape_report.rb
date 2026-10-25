@@ -149,19 +149,19 @@ module EscapeReport
   # The classes the class flow gives the receiver of the send a BLOCK is passed to ("-" when none).
   def self.receiver_classes(analyzer, irep, index, insn)
     call = BytecodeIR.for(irep).source_at(index + 1)
-    return '-' unless insn.op == 'BLOCK' && call && %w[SENDB SSENDB].include?(call.op) && call.op == 'SENDB'
+    return '-' unless insn.op == :BLOCK && call && %w[SENDB SSENDB].include?(call.op) && call.op == :SENDB
 
     Array(analyzer.receiver_classes.call(irep, index + 1, call.reg)).join(',').then { |s| s.empty? ? '-' : s }
   end
 
   def self.site_kind(irep, index, insn)
     case insn.op
-    when 'LAMBDA' then 'lambda'
-    when 'ARRAY' then 'array'
-    when 'HASH' then 'hash'
-    when 'STRING' then 'string'
-    when 'SEND0', 'SEND', 'SENDB' then 'object' if insn.sym == 'new' && insn.n_spec != '*'
-    when 'BLOCK'
+    when :LAMBDA then 'lambda'
+    when :ARRAY then 'array'
+    when :HASH then 'hash'
+    when :STRING then 'string'
+    when :SEND0, :SEND, :SENDB then 'object' if insn.sym == 'new' && insn.n_spec != '*'
+    when :BLOCK
       call = BytecodeIR.for(irep).source_at(index + 1)
       call && %w[SENDB SSENDB].include?(call.op) ? "block:#{call.sym}" : 'block:?'
     end

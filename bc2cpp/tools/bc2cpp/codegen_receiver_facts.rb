@@ -18,10 +18,10 @@ class CodeGen
 
     # RESCUE reads its first register and writes its second; the caught
     # exception remains live in the input register for the handler.
-    rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+    rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
     irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %w[RESCUE], barrier: rescue_write, barrier_result: false,
                                               follow_moves: true) do |insn, _index, exc_reg|
-      next false unless insn.op == 'EXCEPT'
+      next false unless insn.op == :EXCEPT
 
       recognize_rescue_regions(irep).any? do |region|
         region[:kind] == :rescue_class && region[:exc_reg] == exc_reg &&
@@ -221,19 +221,19 @@ class CodeGen
   def receiver_origin_by_walk(irep, idx, dest_reg)
     at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
     irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
-      insn.op == 'MOVE' ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
+      insn.op == :MOVE ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
     end
   end
 
   # The label of a non-copy writer; a MOVE is followed by the caller, never labelled here.
   def receiver_producer_origin(insn)
     case insn.op
-    when 'GETIV' then 'get_ivar'
-    when 'GETIDX', 'GETIDX0' then 'indexed_result'
-    when 'GETUPVAR' then 'captured_upvar'
-    when 'GETCONST', 'GETMCNST' then 'constant_lookup'
+    when :GETIV then 'get_ivar'
+    when :GETIDX, :GETIDX0 then 'indexed_result'
+    when :GETUPVAR then 'captured_upvar'
+    when :GETCONST, :GETMCNST then 'constant_lookup'
     when *BytecodeIR::Ops::SEND then 'send_result'
-    when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
+    when :ARRAY, :ARRAY2, :HASH, :STRING, 'STR' then 'literal_container'
     else "write_#{insn.op.downcase}"
     end
   end
@@ -264,10 +264,10 @@ class CodeGen
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     insn = program.source_at(defs.first.index)
-    return nil unless insn.op == 'GETMCNST' && insn.paren_reg == insn.reg && insn.mcnst_name
+    return nil unless insn.op == :GETMCNST && insn.paren_reg == insn.reg && insn.mcnst_name
 
     scope = BytecodeIR.reaching_definitions(irep, defs.first.index, insn.reg, through_handlers: through_handlers, shared: true)
-    return nil unless scope&.size == 1 && !scope.first.entry? && program.source_at(scope.first.index).op == 'OCLASS'
+    return nil unless scope&.size == 1 && !scope.first.entry? && program.source_at(scope.first.index).op == :OCLASS
 
     ConstructClassNames.table.key?(insn.mcnst_name) ? insn.mcnst_name : nil
   end
@@ -876,13 +876,13 @@ class CodeGen
 
     # (1) The adjacent ARGARY + SUPER pair (`SUPER R(a)` + `ARGARY R(a+1)`). An
     # interposed EXT declines.
-    argary_idx = program.source_at(idx)&.op == 'ARGARY' ? idx : idx - 1
+    argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
     return nil if argary_idx.negative?
 
     argary = program.source_at(argary_idx)
     super_insn = program.source_at(argary_idx + 1)
     return nil unless argary && super_insn
-    return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
+    return nil unless argary.op == :ARGARY && super_insn.op == :SUPER
 
     # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
     # keyword `nk=` variant.
@@ -1076,14 +1076,14 @@ class CodeGen
     # (2) The adjacent pair codegen_zsuper emits (`SUPER R(a)` + `ARGARY R(a+1)`;
     # OP_SUPER reads the packed argument from regs[a+1]). `idx - 1` must not go
     # negative: Ruby would index from the end of the list.
-    argary_idx = BytecodeIR.for(irep).source_at(idx)&.op == 'ARGARY' ? idx : idx - 1
+    argary_idx = BytecodeIR.for(irep).source_at(idx)&.op == :ARGARY ? idx : idx - 1
     return nil if argary_idx.negative?
 
     argary = BytecodeIR.for(irep).source_at(argary_idx)
     super_insn = BytecodeIR.for(irep).source_at(argary_idx + 1)
     return nil unless argary && super_insn
     # Strict adjacency: an interposed EXT declines.
-    return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
+    return nil unless argary.op == :ARGARY && super_insn.op == :SUPER
 
     argary_dest = argary.reg
     super_dest = super_insn.reg

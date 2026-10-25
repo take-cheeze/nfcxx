@@ -514,7 +514,7 @@ class CodeGen
                                      (recv & (NumericFlow::NUM | NumericFlow::OTHER | NumericFlow::EXC)).zero?
 
     @operator_send_insns ||= {}
-    send = @operator_send_insns[[sym, insn.reg]] ||= Insn.synthetic('SEND', "R#{insn.reg} :#{sym} n=1")
+    send = @operator_send_insns[[sym, insn.reg]] ||= Insn.synthetic(:SEND, "R#{insn.reg} :#{sym} n=1")
     return_class_send_mask(irep, index, send, state)
   end
 
@@ -524,7 +524,7 @@ class CodeGen
     return nil unless exact_arith? && %w[SEND SEND0].include?(insn.op)
 
     recv = state[insn.reg.to_i]
-    argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     # A receiver no path has reached yet (0) gives no value either, so a pool still growing is not dropped.
     if recv == 0
       answered = !numeric_send_on_class(NumericFlow::INT, insn.sym, argc, insn, state).anybits?(NumericFlow::OTHER)
@@ -567,7 +567,7 @@ class CodeGen
     core_result = state && native_core_class_result(insn, state)
     return core_result if core_result
 
-    if name == 'dup' && insn.op == 'SEND0' && state && native_dup_result_safe?
+    if name == 'dup' && insn.op == :SEND0 && state && native_dup_result_safe?
       mask = state[insn.reg.to_i]
       allowed = RETURN_CORE_CLASS.keys.reduce(NumericFlow::NIL, :|) | (@numeric_class_bits || {}).values.reduce(0, :|)
       return mask if mask.is_a?(Integer) && (mask & ~allowed).zero?
@@ -578,7 +578,7 @@ class CodeGen
     scoped = state && @rc_scoped_ready && return_class_scoped_send_mask(name, insn, state)
     return scoped if scoped
     return tracked if tracked
-    return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == 'SEND0'
+    return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == :SEND0
 
     native = state && %w[SEND SEND0].include?(insn.op) && native_result_flow_mask(name, state[insn.reg.to_i])
     return native if native
@@ -639,7 +639,7 @@ class CodeGen
       receiver = state[insn.reg.to_i]
       known = NUMERIC_SEND_OWNERS.keys.sum
       if receiver.is_a?(Integer) && receiver.positive? && (receiver & ~known).zero?
-        argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+        argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
         mask = NUMERIC_SEND_OWNERS.keys.reduce(0) do |joined, bit|
           receiver.anybits?(bit) ? joined | numeric_send_on_class(bit, insn.sym, argc, insn, state) : joined
         end
@@ -647,7 +647,7 @@ class CodeGen
     end
     classes = bytecode_ir_mask_classes(mask)
     return classes if classes
-    return nil unless %w[SEND SEND0].include?(insn.op) && (argc = insn.op == 'SEND0' ? 0 : insn.plain_fixed_argc? && insn.argc)
+    return nil unless %w[SEND SEND0].include?(insn.op) && (argc = insn.op == :SEND0 ? 0 : insn.plain_fixed_argc? && insn.argc)
 
     receivers = bytecode_ir_mask_classes(state[insn.reg.to_i])
     return nil unless receivers
@@ -779,7 +779,7 @@ class CodeGen
     return nil unless sites
 
     program = BytecodeIR.for(irep)
-    karg = program.each_source.find { |insn, _index| insn.op == 'KARG' && insn.sym.to_s == name }&.last
+    karg = program.each_source.find { |insn, _index| insn.op == :KARG && insn.sym.to_s == name }&.last
     optional = program.instructions_with_op('KEY_P').any? { |insn| insn.sym.to_s == name }
     default = optional ? BytecodeIR::Types.optional_keyword_default_class(irep, karg, program.source_at(karg).reg) : nil
     return nil if optional && !default
@@ -889,7 +889,7 @@ class CodeGen
     return return_class_union_send_mask(name, insn, state, receiver) unless receiver_class
     return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)
 
-    argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     arguments = argc && (1..argc).map { |arg| state[insn.reg.to_i + arg] || NumericFlow::OTHER }
     contextual = arguments && ENV['BC2CPP_CALL_CONTEXT_RESULTS'] != '0'
     key = [receiver_class, name, contextual ? arguments : nil]
@@ -931,7 +931,7 @@ class CodeGen
   # either; the loop re-runs it when the name grows. Answering OTHER there dropped `x.keys.select { }` and
   # `@slot = @slot.select { }` for good, since a dropped name never returns to the table.
   def bottom_block_receiver_mask(insn, state)
-    return nil unless bottom_block_receivers_enabled? && insn.op == 'SENDB' && !@rc_scoped_ready
+    return nil unless bottom_block_receivers_enabled? && insn.op == :SENDB && !@rc_scoped_ready
 
     state[insn.reg.to_i] == 0 ? 0 : nil
   end
@@ -1036,7 +1036,7 @@ class CodeGen
     BytecodeIR::NumericClasses.exit_mask(body, states, block_returns) do |exit, state|
       case exit.op
       when 'RETURN' then state[exit.reg] || NumericFlow::OTHER
-      when 'RETSELF' then receiver
+      when :RETSELF then receiver
       when 'RETNIL' then NumericFlow::NIL
       else NumericFlow::OTHER
       end

@@ -319,7 +319,7 @@ module ArgShapeCalls
     return nil unless idx
 
     offset = inline_offset || 0
-    insn = Insn.synthetic(region[:self_implicit] ? 'SSEND' : 'SEND',
+    insn = Insn.synthetic(region[:self_implicit] ? :SSEND : :SEND,
                           "R#{region[:dest_reg].to_i + offset} :#{region[:name]} n=#{region[:n]}")
     saved = [@call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls,
              @call_block_stack_expr]
@@ -428,7 +428,7 @@ module ArgShapeCalls
   # The compile_send code for `name` with `argv` as its arguments, when it
   # reaches compiled code; nil when it would only dispatch.
   def splat_send_with(name, d, self_implicit, irep, idx, owner_def, argv, note)
-    insn = Insn.synthetic(self_implicit ? 'SSEND' : 'SEND', "R#{d} :#{name} n=#{argv.size}")
+    insn = Insn.synthetic(self_implicit ? :SSEND : :SEND, "R#{d} :#{name} n=#{argv.size}")
     code = with_private_poly_diag_cache do
       compile_send(insn, self_implicit: self_implicit, irep: irep, idx: nil, owner_def: owner_def,
                          call_arguments: argv, trace_idx: idx, trace_reg_offset: 0)

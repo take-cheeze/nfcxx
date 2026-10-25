@@ -84,7 +84,7 @@ class CodeGen
 
     @ireps.each_value.none? do |irep|
       BytecodeIR.for(irep).each_source.any? do |insn, _index|
-        (insn.op == 'GETCONST' && insn.const_name == 'Marshal') || (insn.op == 'GETMCNST' && insn.mcnst_name == 'Marshal') ||
+        (insn.op == :GETCONST && insn.const_name == 'Marshal') || (insn.op == :GETMCNST && insn.mcnst_name == 'Marshal') ||
           insn.sym == 'Marshal'
       end
     end

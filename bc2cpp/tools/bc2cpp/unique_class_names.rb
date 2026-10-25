@@ -130,7 +130,7 @@ module UniqueClassNames
         case insn.op
         when 'SETCONST' then assigned << insn.const_name
         when 'SETMCNST' then assigned << insn.mcnst_name
-        when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
+        when :SEND, :SEND0, :SSEND, :SSEND0, :SENDB, :SSENDB, :LOADSYM
           return {} if insn.sym.to_s.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
         return {} if insn.sym == 'const_missing'
@@ -231,7 +231,7 @@ module UniqueClassNames
     [ireps, ruby_ireps].each do |set|
       set.each_value do |irep|
         BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST') do |insn, _index|
-          written << (insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name)
+          written << (insn.op == :SETCONST ? insn.const_name : insn.mcnst_name)
         end
       end
     end
@@ -302,7 +302,7 @@ module UniqueClassNames
 
   def constant_rebinding_insn?(insn)
     name = case insn.op
-           when 'LOADSYM' then insn.sym_token.to_s
+           when :LOADSYM then insn.sym_token.to_s
            when *BytecodeIR::Ops::SEND then insn.sym.to_s
            end
     return false unless name
@@ -393,7 +393,7 @@ module UniqueClassNames
       irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
         full = BytecodeIR.class_body_path(irep, idx, namespace) || :unknown
         paths[insn.sym] << full
-        modules << full if modules && insn.op == 'MODULE' && full.is_a?(String)
+        modules << full if modules && insn.op == :MODULE && full.is_a?(String)
         seen << [label, idx]
         # Walked at the opener: its body EXEC is the next instruction, so no
         # other instruction of this irep runs between the two.

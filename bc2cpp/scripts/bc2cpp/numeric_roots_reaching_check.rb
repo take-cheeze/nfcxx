@@ -135,7 +135,7 @@ if ENV['MRBC'] && !ENV['MRBC'].empty?
   def addi_read(ireps, registry, name)
     md = registry.fetch(name).find { |d| d.owner == 'NumRootsJoin' }
     irep = ireps.fetch(md.irep)
-    idx = irep.instructions.rindex { |i| i.op == 'ADDI' }
+    idx = irep.instructions.rindex { |i| i.op == :ADDI }
     [irep, idx, irep.instructions[idx].reg]
   end
 

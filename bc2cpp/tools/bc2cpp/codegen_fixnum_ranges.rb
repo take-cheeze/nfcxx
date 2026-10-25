@@ -62,7 +62,7 @@ class CodeGen
       next fixnum_interval_fail(why, 'join') unless BytecodeIR.write_dominates?(irep, j, read, wreg)
 
       read = j
-      if insn.op == 'MOVE'
+      if insn.op == :MOVE
         src = insn.regs[1]
         next fixnum_interval_fail(why, 'move') if src.nil? || ctx[:upvars].include?(src)
 
@@ -79,11 +79,11 @@ class CodeGen
       return value ? [value, value] : fixnum_interval_fail(why, 'literal')
     end
     case op
-    when 'GETCONST', 'GETMCNST'
+    when :GETCONST, :GETMCNST
       name = op == 'GETCONST' ? insn.const_name : insn.mcnst_name
       range = name && self.class.integer_constant_ranges[name]
       range || fixnum_interval_fail(why, "const:#{name}")
-    when 'GETIDX', 'GETIDX0'
+    when :GETIDX, :GETIDX0
       # SEALED_INT16 (sealed_int16_locals.rb): an in-range read of a proven int16 array has the array's interval.
       sealed_element_range(irep, j) || fixnum_interval_fail(why, op)
     when *FIXNUM_INTERVAL_OPS

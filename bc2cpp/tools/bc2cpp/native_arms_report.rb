@@ -199,14 +199,14 @@ module NativeArmsReport
 
       BytecodeIR.for(irep).each_source do |insn, idx|
         case insn.op
-        when 'ALIAS', 'UNDEF'
+        when :ALIAS, :UNDEF
           sites[insn.sym] << "#{irep.file}:#{insn.lineno}"
-        when 'DEF'
+        when :DEF
           method = nil
           BytecodeIR.for(irep).each_with_op('METHOD') { |m, mi| method = m if mi < idx }
           child = method && irep.reps[method.block_index.to_i]
           sites[insn.sym_token] << "#{irep.file}:#{insn.lineno}" unless child && registered.include?(child)
-        when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+        when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
           next unless CodeGen::NAME_INSTALLER_SENDS.include?(insn.sym)
 
           syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)

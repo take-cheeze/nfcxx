@@ -29,7 +29,7 @@ if mrbc
   # The SCLASS of +ireps+ as [irep, index, insn] (each snippet below has one).
   sclasses = lambda do |ireps|
     ireps.values.flat_map do |irep|
-      irep.instructions.each_with_index.filter_map { |insn, idx| [irep, idx, insn] if insn.op == 'SCLASS' }
+      irep.instructions.each_with_index.filter_map { |insn, idx| [irep, idx, insn] if insn.op == :SCLASS }
     end
   end
   # A ClosedWorld over +ireps+ with nothing else known (no SETCONST, no native sources).

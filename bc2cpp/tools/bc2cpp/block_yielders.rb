@@ -46,7 +46,7 @@ module BlockYielders
     body = region[:block_irep]
     name = region[:name].to_s
     block = EscapeAnalysis.insn_at(parent, region[:block_index])
-    return undecided(:not_block_site) unless block.op == 'BLOCK' && block.addr == region[:block_addr]
+    return undecided(:not_block_site) unless block.op == :BLOCK && block.addr == region[:block_addr]
 
     # 1. The block value: created here, handed to `name` and nothing else.
     created = analyzer.creation(parent, region[:block_index])

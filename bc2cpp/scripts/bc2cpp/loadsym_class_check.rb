@@ -61,7 +61,7 @@ class LiteralOracle
     @bit = bit
   end
 
-  def literal_class_mask(insn) = %w[LOADSYM SYMBOL INTERN].include?(insn.op) ? @bit : nil
+  def literal_class_mask(insn) = %i[LOADSYM SYMBOL INTERN].include?(insn.op) ? @bit : nil
   def entry_mask(_irep, _reg) = OTHER
   def const_mask(_insn) = OTHER
   def ivar_slots(_irep) = []

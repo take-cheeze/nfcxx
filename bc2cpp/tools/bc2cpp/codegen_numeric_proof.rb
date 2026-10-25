@@ -82,7 +82,7 @@ class CodeGen
     # A Symbol literal in a register carries the Symbol bit, as it does in the exact-class run; the
     # consumers of the numeric masks are audited in docs/bc2cpp-symbol-class.md. TrueClass and FalseClass stay OTHER.
     def literal_class_mask(insn)
-      %w[LOADSYM SYMBOL INTERN].include?(insn.op) ? @cg.numeric_loadsym_bit : nil
+      %i[LOADSYM SYMBOL INTERN].include?(insn.op) ? @cg.numeric_loadsym_bit : nil
     end
 
     def pool_mask(irep, insn)

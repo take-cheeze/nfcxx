@@ -97,7 +97,7 @@ compiled(<<~'RUBY') do |ireps|
   end
 RUBY
   splats = ireps.values.flat_map do |irep|
-    irep.instructions.each_index.filter_map { |idx| [irep, idx] if irep.instructions[idx].op == 'SSEND' && irep.instructions[idx].n_spec == '*' }
+    irep.instructions.each_index.filter_map { |idx| [irep, idx] if irep.instructions[idx].op == :SSEND && irep.instructions[idx].n_spec == '*' }
   end
   check.call('mrbc splat of a join: both sends are n=* splats (fixture sanity)', splats.size == 2)
   check.call('mrbc splat of a join: refused, so the splat stays dynamic',

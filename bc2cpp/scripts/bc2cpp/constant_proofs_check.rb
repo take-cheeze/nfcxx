@@ -103,7 +103,7 @@ check.call('the rows do not type it as an array sum either', !redefined[:rows_su
 setconst_of = lambda do |ireps, name|
   ireps.each_value.flat_map do |irep|
     irep.instructions.each_with_index.filter_map do |insn, idx|
-      [irep, idx, insn.regs.last] if insn.op == 'SETCONST' && insn.const_name == name
+      [irep, idx, insn.regs.last] if insn.op == :SETCONST && insn.const_name == name
     end
   end.first
 end

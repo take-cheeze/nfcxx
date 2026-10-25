@@ -16,7 +16,7 @@ class CodeGen
   # branch rules it out (`@slot[:key] || []`, `return unless x`). The proof is record_hash_exact_class's; nil when
   # +insn+ is not a record read or a stored value has no bit here.
   def record_index_mask(irep, index, insn)
-    return nil unless insn.op == 'GETIDX' && RecordHash.table && @closed_world && record_nilable_reads?
+    return nil unless insn.op == :GETIDX && RecordHash.table && @closed_world && record_nilable_reads?
 
     slots = RecordHash.read_slots(irep, index) or return nil
     mask = slots.reduce(0) do |acc, (name, key)|
@@ -58,7 +58,7 @@ class CodeGen
     return nil if defs.nil? || defs.empty?
 
     slots = defs.flat_map do |d|
-      return nil if d.entry? || BytecodeIR.for(irep).source_at(d.index).op != 'GETIDX'
+      return nil if d.entry? || BytecodeIR.for(irep).source_at(d.index).op != :GETIDX
 
       RecordHash.read_slots(irep, d.index) or return nil
     end
@@ -94,11 +94,11 @@ class CodeGen
 
       writer = BytecodeIR.for(irep).source_at(d.index)
       case writer.op
-      when 'ARRAY' then 'Array'
-      when 'HASH' then 'Hash'
-      when 'STRING' then 'String'
-      when 'LOADNIL' then 'NilClass'
-      when 'SEND', 'SEND0', 'SENDB' then record_new_class(irep, d.index, writer)
+      when :ARRAY then 'Array'
+      when :HASH then 'Hash'
+      when :STRING then 'String'
+      when :LOADNIL then 'NilClass'
+      when :SEND, :SEND0, :SENDB then record_new_class(irep, d.index, writer)
       end
     end
     classes.first if classes.all? && classes.uniq.size == 1

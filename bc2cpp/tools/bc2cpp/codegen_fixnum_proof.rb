@@ -161,7 +161,7 @@ class CodeGen
   def loadi_proven_fixnum?(insn)
     # LOADI8/LOADI16/LOADINEG/LOADI_n stay within +-2^15, FIXABLE everywhere. Only
     # LOADI32 needs the bound check.
-    return true unless insn.op == 'LOADI32'
+    return true unless insn.op == :LOADI32
 
     lit = loadi_literal(insn)
     !lit.nil? && lit >= LOADI_FIXNUM_MIN && lit <= LOADI_FIXNUM_MAX
@@ -172,15 +172,15 @@ class CodeGen
     return loadi_proven_fixnum?(insn) if insn.op.start_with?('LOADI')
 
     case insn.op
-    when 'GETIV'
+    when :GETIV
       ivar = insn.ivar
       !ivar.nil? && embed_type(owner_def.owner, ivar) == :fixnum
-    when 'GETCONST'
+    when :GETCONST
       # "GETCONST R4 WEAPON_SLOT": register first, bare name second
       # (`"GETCONST\tR%d\t%s"`); a trailing print_lv_a comment follows the name.
       !@fixnum_proof_skip_constants &&
         (integer_constant_read?(insn) || fixnum_interval_const?(insn.const_name))
-    when 'GETMCNST'
+    when :GETMCNST
       # "GETMCNST R4 (R4)::DEPTH": only the bare name after `::`, as IntegerConstants
       # keys on (the scope register is not modelled).
       !@fixnum_proof_skip_constants &&
@@ -189,11 +189,11 @@ class CodeGen
       # NUMERIC_INTERVAL_OPERANDS: `HEADER_H * 3 + 2` is a Fixnum when its interval fits.
       !@fixnum_proof_skip_constants && numeric_intervals_on? &&
         !fixnum_interval_source(irep, j, insn, reg, owner_def, 0, nil).nil?
-    when 'GETIDX', 'GETIDX0'
+    when :GETIDX, :GETIDX0
       # SEALED_INT16 (sealed_int16_locals.rb): an in-range read of a proven int16 array is a Fixnum (its interval
       # is the int16 hull of the array's stored values).
       numeric_intervals_on? && !sealed_element_range(irep, j).nil?
-    when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
+    when :SEND, :SEND0, :SSEND, :SSEND0
       # FIXNUM_RETURN_PROOF (source 6): see compute_fixnum_return_names. SENDB/SSENDB
       # are excluded: a `break` in the caller's block becomes the send's result.
       nm = insn.sym
@@ -227,10 +227,10 @@ class CodeGen
         next [value, value] if value && value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
 
         next nil
-      when 'GETIDX', 'GETIDX0', 'SEND', 'SEND0'
+      when :GETIDX, :GETIDX0, :SEND, :SEND0
         name = insn.sym
         next nil if %w[SEND SEND0].include?(insn.op) && name != '[]'
-        recv = if insn.op == 'GETIDX'
+        recv = if insn.op == :GETIDX
                  cur
                else
                  insn.regs[1]
@@ -238,7 +238,7 @@ class CodeGen
         next nil unless recv && game_variables_index_receiver?(irep, j, recv, owner_def)
 
         next [GAME_VARIABLE_RANGE_MIN, GAME_VARIABLE_RANGE_MAX]
-      when 'ADD', 'SUB', 'MUL'
+      when :ADD, :SUB, :MUL
         regs = insn.regs
         next nil unless regs.size >= 2
         left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
@@ -246,14 +246,14 @@ class CodeGen
         next nil unless left && right
 
         next guarded_integer_binary_range(insn.op, left, right) ||
-          (insn.op == 'MUL' ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
-      when 'ADDI', 'SUBI'
+          (insn.op == :MUL ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
+      when :ADDI, :SUBI
         literal = BytecodeIR::OperandModel.imm_operand(insn).to_i
         left = guarded_game_integer_range(irep, j, cur, owner_def, depth + 1)
         next nil unless left
 
-        next guarded_integer_binary_range(insn.op == 'ADDI' ? 'ADD' : 'SUB', left, [literal, literal])
-      when 'DIV'
+        next guarded_integer_binary_range(insn.op == :ADDI ? 'ADD' : 'SUB', left, [literal, literal])
+      when :DIV
         regs = insn.regs
         next nil unless regs.size >= 2
         left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
@@ -279,14 +279,14 @@ class CodeGen
     return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     program = BytecodeIR.for(irep)
-    defs.all? { |d| program.source_at(d.index).op == 'LOADSELF' }
+    defs.all? { |d| program.source_at(d.index).op == :LOADSELF }
   end
 
   def guarded_integer_binary_range(op, left, right)
     values = case op
-             when 'ADD' then [left[0] + right[0], left[1] + right[1]]
-             when 'SUB' then [left[0] - right[1], left[1] - right[0]]
-             when 'MUL'
+             when :ADD then [left[0] + right[0], left[1] + right[1]]
+             when :SUB then [left[0] - right[1], left[1] - right[0]]
+             when :MUL
                products = [left[0] * right[0], left[0] * right[1], left[1] * right[0], left[1] * right[1]]
                [products.min, products.max]
              end
@@ -514,11 +514,11 @@ class CodeGen
           next if ENTRY_ARG_DEF_OPS.include?(insn.op)
           # PROBE_ONLY (DynamicNames.probe_only?): a literal that only reaches respond_to?'s name argument is looked
           # up, never called, so it names no call either.
-          next if insn.op == 'LOADSYM' && entry_arg_probe_literal?(irep, i, insn)
+          next if insn.op == :LOADSYM && entry_arg_probe_literal?(irep, i, insn)
 
           # `alias new old` reaches old's body through a call to `new`, a site of no
           # registry name; its second token is the body's own name.
-          old_name = insn.first_of(:name)&.value if insn.op == 'ALIAS'
+          old_name = insn.first_of(:name)&.value if insn.op == :ALIAS
           poisoned << old_name if old_name
 
           unless ENTRY_ARG_CALL_OPS.include?(insn.op) && owner

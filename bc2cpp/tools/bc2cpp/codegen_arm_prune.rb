@@ -94,7 +94,7 @@ class CodeGen
       insn = prog.source_at(i)
       goto = prog.decoded[i].goto
       case insn.op
-      when 'ENTER'
+      when :ENTER
         # ENTER may land on any branch target, not only on the IR's optional-argument JMP table (not used here).
         [i + 1, *entry_targets].select { |j| j < size }
       when *BytecodeIR::CONDITIONAL_BRANCHES

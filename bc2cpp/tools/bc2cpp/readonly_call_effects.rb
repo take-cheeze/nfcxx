@@ -24,7 +24,7 @@ class CodeGen
   def readonly_class_call?(irep, insn, state)
     return false if ENV['BC2CPP_READONLY_CALL_EFFECTS'] == '0'
     return false unless @rc_scoped_ready && @closed_world&.exact_instances_singleton_free?
-    return false unless insn.op == 'SEND0' || (insn.op == 'SEND' && insn.plain_fixed_argc? && insn.argc.zero?)
+    return false unless insn.op == :SEND0 || (insn.op == :SEND && insn.plain_fixed_argc? && insn.argc.zero?)
 
     receiver = state[insn.reg.to_i]
     return false unless receiver.is_a?(Integer) && receiver.positive?

@@ -46,7 +46,7 @@ def struct_new_receiver?(irep, idx, insn)
   definitions = BytecodeIR.reaching_definitions(irep, idx, insn.reg, origin_transfers: true, through_handlers: true, shared: true)
   definitions && !definitions.empty? && definitions.all? do |definition|
     source = !definition.entry? && BytecodeIR.for(irep).source_at(definition.index)
-    source && source.op == 'GETCONST' && source.const_name == 'Struct'
+    source && source.op == :GETCONST && source.const_name == 'Struct'
   end
 end
 
@@ -81,7 +81,7 @@ def struct_new_member_sets(irep, idx, insn)
 
     names = definitions.map do |definition|
       source = !definition.entry? && program.source_at(definition.index)
-      return nil unless source && source.op == 'LOADSYM' && source.sym
+      return nil unless source && source.op == :LOADSYM && source.sym
 
       source.sym
     end
@@ -93,7 +93,7 @@ end
 def struct_new_owner(irep, idx, insn, namespace)
   program = BytecodeIR.for(irep)
   assignment = program.source_at(idx + 1)
-  return nil unless assignment&.op == 'SETCONST' && assignment.reg_operand == insn.reg.to_s &&
+  return nil unless assignment&.op == :SETCONST && assignment.reg_operand == insn.reg.to_s &&
                     program.linear_corridor?(idx, idx + 1, include_handlers: true)
 
   name = assignment.const_name
@@ -217,9 +217,9 @@ def build_registry(ireps, root_label)
     resolve_singleton_receiver = lambda do |reg, before_idx|
       prev = receiver_source(irep, before_idx, reg.delete_prefix('R'))
       case prev&.op
-      when 'LOADSELF'
+      when :LOADSELF
         namespace || 'Object'
-      when 'GETCONST'
+      when :GETCONST
         const_name = prev.const_name
         namespace ? "#{namespace}::#{const_name}" : const_name
       end
@@ -247,7 +247,7 @@ def build_registry(ireps, root_label)
     irep.each_with_op('CLASS', 'MODULE', 'SCLASS', 'SETCONST', 'ALIAS', 'TDEF', 'SDEF', 'DEF',
                       *BytecodeIR::Ops::SEND) do |insn, idx|
       case insn.op
-      when 'CLASS', 'MODULE'
+      when :CLASS, :MODULE
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
         reg = insn.reg_token
         name = insn.sym
@@ -260,12 +260,12 @@ def build_registry(ireps, root_label)
                       else
                         namespace ? "#{namespace}::#{name}" : name
                       end
-        module_names << opener_name if insn.op == 'MODULE'
-        opener_ivar_owner = insn.op == 'MODULE' ? "#{opener_name}.singleton" : nil
+        module_names << opener_name if insn.op == :MODULE
+        opener_ivar_owner = insn.op == :MODULE ? "#{opener_name}.singleton" : nil
         # SUPER_SUPPORT: OP_CLASS is `R[a] = newclass(R[a], Syms[b], R[a+1])`
         # (mruby/ops.h, vm.c), and the superclass expression is evaluated right before
         # it, so resolve_superclass_ref walks back from this CLASS.
-        if insn.op == 'CLASS'
+        if insn.op == :CLASS
           superclass_reg = (reg[/\d+/].to_i + 1).to_s
           resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
           superclass_of[opener_name] = resolved if resolved
@@ -274,7 +274,7 @@ def build_registry(ireps, root_label)
                                         outer_qualified: !outer_qualified.nil? }
         end
         enter_body.call(idx, opener_name, opener_ivar_owner)
-      when 'SCLASS'
+      when :SCLASS
         # "SCLASS R1": R[a] = R[a].singleton_class. A `class << self` / `class <<
         # SomeConst` body holds ordinary TDEFs, so it is walked like a CLASS/MODULE body.
         # Without this, defs inside it (e.g. RGSS::Bitmap.extensions) were unregistered.
@@ -285,7 +285,7 @@ def build_registry(ireps, root_label)
         # "X.singleton" is a pseudo-owner, never a real constant path, so ONLY_OWNERS
         # can never select it. nil (unrecognized receiver) leaves the body unwalked.
         enter_body.call(idx, recv ? "#{recv}.singleton" : nil, nil)
-      when 'SETCONST'
+      when :SETCONST
         # CONST_CONTAINER_SUPPORT: "SETCONST NAME Rsrc" in a class/module body;
         # `namespace` is this body's lexical nesting. Only the literal (optionally
         # frozen) shape is recognized; anything else is a safe miss (nil).
@@ -301,18 +301,18 @@ def build_registry(ireps, root_label)
         else
           container_constants[qualified] = klass
         end
-      when 'ALIAS'
+      when :ALIAS
         old_name = insn.first_of(:name)&.value
         alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label } if insn.sym && old_name
         register_alias.call(label, irep, idx, namespace)
-      when 'TDEF'
+      when :TDEF
         # "TDEF R1 :speak I[1]"
         # #initialize, #initialize_copy and #respond_to_missing? are always private,
         # whatever mode is in effect: src/class.c's define_method path sets
         # MRB_METHOD_PRIVATE_FL for them unconditionally. default_visibility cannot
         # see that rule, and reporting them public would let register.cxx expose them.
         register_instance_def.call(insn.sym, irep.reps[insn.block_index])
-      when 'SDEF'
+      when :SDEF
         # "SDEF R1 :clamp I[5]": `def self.foo` / `def SomeConst.foo`. codegen_sdef
         # (mruby-compiler codegen.c) fuses SCLASS+METHOD+DEF into SDEF whenever the
         # child irep index fits a byte, installing Irep[c] on R[a]'s singleton class.
@@ -339,7 +339,7 @@ def build_registry(ireps, root_label)
           registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{recv}.singleton",
                                                 irep: sdef_child_label, visibility: :public)
         end
-      when 'DEF'
+      when :DEF
         # "DEF R1 :toned? (R2)": codegen_def/codegen_sdef fuse into TDEF/SDEF only
         # when the child irep index fits a byte; past 255 children (RPG2k::Scene::Map)
         # they emit the unfused sequence instead:
@@ -352,7 +352,7 @@ def build_registry(ireps, root_label)
         reg = insn.reg_token
         method_idx = irep.previous_real_index(idx - 1)
         method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
-        next unless method_insn && method_insn.op == 'METHOD'
+        next unless method_insn && method_insn.op == :METHOD
 
         method_reg = method_insn.reg
         # Registers must line up as codegen emits them (opener at R<n>, METHOD at
@@ -369,7 +369,7 @@ def build_registry(ireps, root_label)
         child_label = irep.reps[method_insn.block_index]
         def_name = insn.sym
 
-        if opener_insn.op == 'TCLASS'
+        if opener_insn.op == :TCLASS
           # Unfused `def foo`: registered exactly like a TDEF, with a real irep.
           register_instance_def.call(def_name, child_label)
         else
@@ -384,7 +384,7 @@ def build_registry(ireps, root_label)
                                                  visibility: :public)
           end
         end
-      when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
+      when :SEND0, :SEND, :SSEND0, :SSEND
         # Same charset as compile_send's name extraction; keep the two in sync.
         name = insn.sym
         if name == 'new'
@@ -397,7 +397,7 @@ def build_registry(ireps, root_label)
             register_struct_member_defs(registry, owner, struct_new_member_sets(irep, idx, insn))
           end
         end
-        register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == 'SSEND'
+        register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == :SSEND
         if %w[include prepend].include?(name)
           # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M` in this
           # body (walk only recurses into CLASS/MODULE/SCLASS bodies, so `namespace` is
@@ -424,7 +424,7 @@ def build_registry(ireps, root_label)
         packed = insn.n_spec == '*'
         if packed
           arr = idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
-          n = arr && arr.op == 'ARRAY' ? arr.uint_operand.to_i : -1
+          n = arr && arr.op == :ARRAY ? arr.uint_operand.to_i : -1
           raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0
         end
         # `private :a, :b` / `attr_reader :a, :b`: the Symbol arguments are LOADSYM'd
@@ -487,7 +487,7 @@ def build_registry(ireps, root_label)
             end
           end
         end
-      when 'SSENDB'
+      when :SSENDB
         # DEFINE_METHOD_SITES. Whether the program may trust the site is
         # decided after the closed world exists (demote_define_method_defs); until then
         # it is only a candidate that symbol_installed_names still counts as an installer.
@@ -497,7 +497,7 @@ def build_registry(ireps, root_label)
           registry[site.name] << MethodDef.new(name: site.name, owner: namespace, irep: site.child,
                                                 visibility: :public, installer: :define_method)
         end
-      when 'SENDB'
+      when :SENDB
         loop_sites << [label, idx, namespace, default_visibility] if LoopInstallers.candidate?(irep, idx, ireps)
         # STRUCT_MEMBERS_ANALYSIS for the block-taking form; additive only.
         found = detect_struct_new_members(irep, idx, insn, namespace)
@@ -520,7 +520,7 @@ def build_registry(ireps, root_label)
         # The block operand is the BLOCK right before the SENDB (codegen emits it
         # there).
         block_insn = BytecodeIR.for(irep).source_at(idx - 1)
-        next unless block_insn && block_insn.op == 'BLOCK'
+        next unless block_insn && block_insn.op == :BLOCK
 
         block_idx = block_insn.block_index
         next unless block_idx

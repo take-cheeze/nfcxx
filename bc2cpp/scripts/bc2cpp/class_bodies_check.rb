@@ -85,7 +85,7 @@ scope_path = lambda do |ops, namespace = 'Outer', handlers = []|
   body = scope_irep(ops, handlers: handlers)
   # A proximity scan would silently pick one side of a join.
   def body.last_writer(*) = raise('class scope must use reaching definitions')
-  index = body.instructions.index { |instruction| instruction.op == 'CLASS' }
+  index = body.instructions.index { |instruction| instruction.op == :CLASS }
   BytecodeIR.class_body_path(body, index, namespace)
 end
 

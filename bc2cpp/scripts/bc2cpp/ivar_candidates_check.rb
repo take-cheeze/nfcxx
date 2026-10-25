@@ -62,7 +62,7 @@ def scene(methods)
 end
 
 # The stub for nil_literal_write?: a SETIV fed directly by LOADNIL is a nil store.
-NIL_WRITE = ->(irep, idx, _reg) { idx.positive? && irep.insns[idx - 1].op == 'LOADNIL' }
+NIL_WRITE = ->(irep, idx, _reg) { idx.positive? && irep.insns[idx - 1].op == :LOADNIL }
 
 # The stubbed ireps carry no BytecodeIR, so the store-first oracle answers nil (every read counts) here. The cases
 # that exercise the real per-path dataflow are in real_candidate below.
@@ -91,7 +91,7 @@ def real_index(methods, gen)
   end
   ctx = Struct.new(:ireps, :store_log).new(ireps, store_log)
   gen.owner_of.merge!(owners)
-  real_nil_write = ->(irep, idx, _reg) { idx.positive? && irep.instructions[idx - 1].op == 'LOADNIL' }
+  real_nil_write = ->(irep, idx, _reg) { idx.positive? && irep.instructions[idx - 1].op == :LOADNIL }
   IvarCandidates.index(ctx, gen, nil_write: real_nil_write)
 end
 

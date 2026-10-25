@@ -58,9 +58,9 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       # reaches arguments from SETIV traces); it documents intent.
       BytecodeIR.for(irep).each_source do |insn, idx|
         regs = case insn.op
-               when 'ADD', 'SUB', 'MUL', 'EQ', 'LT', 'LE', 'GT', 'GE'
+               when :ADD, :SUB, :MUL, :EQ, :LT, :LE, :GT, :GE
                  [insn.reg, insn.paren_reg]
-               when 'ADDI', 'SUBI'
+               when :ADDI, :SUBI
                  [insn.reg]
                else
                  []
@@ -107,7 +107,7 @@ def collect_static_call_target_names(ireps)
       case insn.op
       # SENDB/SSENDB count too: a method only called with a block
       # is still called.
-      when 'SEND0', 'SEND', 'SSEND0', 'SSEND', 'SENDB', 'SSENDB', 'LOADSYM'
+      when :SEND0, :SEND, :SSEND0, :SSEND, :SENDB, :SSENDB, :LOADSYM
         name = insn.sym
         names << name if name
       else

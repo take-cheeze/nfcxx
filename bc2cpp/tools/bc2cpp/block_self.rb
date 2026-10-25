@@ -74,8 +74,8 @@ module BlockSelf
       next unless insn.reg
 
       slots << insn.reg if case insn.op
-                           when 'MOVE' then proc_at.call(idx, insn.regs[1]) == true
-                           when 'BLKPUSH' then true
+                           when :MOVE then proc_at.call(idx, insn.regs[1]) == true
+                           when :BLKPUSH then true
                            when 'GETUPVAR' then proc_def?(irep, BytecodeIR::Definition.new(idx, insn.reg), frames, blk)
                            else false
                            end
@@ -93,8 +93,8 @@ module BlockSelf
 
     insn = BytecodeIR.for(irep).source_at(df.index)
     case insn.op
-    when 'BLKPUSH' then true
-    when 'GETUPVAR'
+    when :BLKPUSH then true
+    when :GETUPVAR
       index, level = insn.upvar_ref
       pos = index && frames.length - 2 - level
       frame = pos && pos >= 0 ? frames[pos] : nil
@@ -125,17 +125,17 @@ module BlockSelf
     a = insn.reg&.to_i or return nil
     count = insn.typed.find { |operand| operand.kind == :int }&.value
     case insn.op
-    when 'ARRAY'
+    when :ARRAY
       regs = insn.regs
       return nil unless count
 
       # ARRAY2 prints as ARRAY with its source register in front of the count.
       from = regs.size > 1 ? regs[1].to_i : a
       (from...(from + count)).to_a
-    when 'ARYPUSH' then count && (a..(a + count)).to_a
-    when 'HASH' then count && (a...(a + (2 * count))).to_a
-    when 'HASHADD' then count && (a..(a + (2 * count))).to_a
-    when 'ARYSPLAT' then [a]
+    when :ARYPUSH then count && (a..(a + count)).to_a
+    when :HASH then count && (a...(a + (2 * count))).to_a
+    when :HASHADD then count && (a..(a + (2 * count))).to_a
+    when :ARYSPLAT then [a]
     else [a, a + 1]
     end
   end
@@ -161,7 +161,7 @@ module BlockSelf
       return [[d.to_s, :called]] + (1..n).map { |k| [(d + k).to_s, :argument] }
     end
     case op
-    when 'RETURN', 'RETURN_BLK', 'BREAK', 'SETIV', 'SETGV', 'SETSV', 'SETCV', 'SETCONST', 'SETUPVAR', 'GETMCNST'
+    when :RETURN, :RETURN_BLK, :BREAK, :SETIV, :SETGV, :SETSV, :SETCV, :SETCONST, :SETUPVAR, :GETMCNST
       regs.map { |r| [r, :argument] }
     when *FIXED_WINDOW_OPS.keys
       # vm.c: these read R(a) and the next width-1 registers only, also when they fall back to a send.

@@ -67,7 +67,7 @@ class CodeGen
 
     # Reaching definitions and the exception edges need a resolved CFG and handler table.
     prog = BytecodeIR.for(irep)
-    creations = prog.instructions.select { |ins| ins.op == 'ARRAY' }
+    creations = prog.instructions.select { |ins| ins.op == :ARRAY }
     return {} if creations.empty?
 
     unless prog.resolved? && prog.handlers_resolved?
@@ -231,7 +231,7 @@ class CodeGen
     prog.instructions.each do |ins|
       j = ins.index
       insn = ins.source
-      next if j == site.idx || insn.op == 'MOVE'
+      next if j == site.idx || insn.op == :MOVE
 
       reads = stack_tuple_reads(insn, params)
       candidates = reads == :all ? tracked : reads.select { |reg| tracked.include?(reg) }
@@ -257,22 +257,22 @@ class CodeGen
   def stack_tuple_use(irep, _prog, j, insn, reg, site)
     own = reg_int(insn.reg)
     # GETIDX0 reads its receiver from R(b) and writes R(a) = R(b)[0] (vm.c OP_GETIDX0).
-    if insn.op == 'GETIDX0' && reg == reg_int(insn.regs[1])
+    if insn.op == :GETIDX0 && reg == reg_int(insn.regs[1])
       return StackTupleUse.new(site: site, kind: :get, index: 0, dest: own)
     end
     return refuse(:"read_by_#{insn.op}") unless own && reg == own
 
     case insn.op
-    when 'GETIDX'
+    when :GETIDX
       k = stack_tuple_literal_index(irep, j, own + 1)
       k && StackTupleUse.new(site: site, kind: :get, index: k, dest: own)
-    when 'SETIDX'
+    when :SETIDX
       k = stack_tuple_literal_index(irep, j, own + 1)
       in_bounds = k&.between?(0, site.elems.size - 1)
       return refuse(:store_index_or_value) unless in_bounds && stack_tuple_immediate_at?(irep, j, own + 2)
 
       StackTupleUse.new(site: site, kind: :set, index: k, value: own + 2, dest: own)
-    when 'SEND', 'SEND0'
+    when :SEND, :SEND0
       return refuse(:send_not_size) unless STACK_TUPLE_SIZE_NAMES.include?(insn.sym) && stack_tuple_no_arguments?(insn)
 
       StackTupleUse.new(site: site, kind: :size, dest: own)
@@ -294,7 +294,7 @@ class CodeGen
       next true if STACK_TUPLE_IMMEDIATE_OPS.include?(p.op)
       next false unless p.op.match?(BytecodeIR::LOADI_OP)
 
-      p.op != 'LOADI32' || loadi_proven_fixnum?(p.insn)
+      p.op != :LOADI32 || loadi_proven_fixnum?(p.insn)
     end
   end
 
@@ -305,9 +305,9 @@ class CodeGen
 
     insn = prods.first.insn
     case insn.op
-    when 'LOADI__1' then -1
+    when :LOADI__1 then -1
     when /\ALOADI_([0-7])\z/ then Regexp.last_match(1).to_i
-    when 'LOADI8', 'LOADI16', 'LOADI32' then insn.imm_operand&.to_i
+    when :LOADI8, :LOADI16, :LOADI32 then insn.imm_operand&.to_i
     end
   end
 

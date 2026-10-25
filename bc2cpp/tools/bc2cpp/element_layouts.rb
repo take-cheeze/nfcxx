@@ -51,7 +51,7 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       literal_element_class(irep, literal, ctx, depth)
     else
       case producer.op
-      when 'GETIV'
+      when :GETIV
         ivar = producer.insn.ivar
         ivar && ivar_element_hint(ctx[:owner], ivar, ctx)
       when *BytecodeIR::Ops::SEND
@@ -74,7 +74,7 @@ def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       next nil unless literal.kind == :hash && program.quiet_span?(producer.index, idx)
 
       literal_element_class(irep, literal, ctx, depth)
-    elsif producer.op == 'GETIV'
+    elsif producer.op == :GETIV
       ivar = producer.insn.ivar
       ivar && ivar_hash_element_hint(ctx[:owner], ivar, ctx)
     end
@@ -239,7 +239,7 @@ def irep_return_class(irep, ctx, depth)
   found = nil
   BytecodeIR.for(irep).each_with_op('RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE', 'BREAK', 'RETURN_BLK') do |insn, i|
     # nil/false/true is not an object class, and a non-local return leaves by a path not read here.
-    return nil unless insn.op == 'RETURN'
+    return nil unless insn.op == :RETURN
 
     cls = element_value_class(irep, i, insn.no_operands? ? '0' : insn.reg, ctx, depth)
     return nil unless cls
@@ -487,7 +487,7 @@ class ArrayElementLayout
             BytecodeIR.for(irep).each_with_op('SETIV', 'SETIDX') do |insn, idx|
               found = nil
               targets = nil
-              if insn.op == 'SETIV'
+              if insn.op == :SETIV
                 ivar = insn.ivar
                 next unless array_ivars.include?(ivar)
 
@@ -498,7 +498,7 @@ class ArrayElementLayout
                 # NIL_TOLERANT_JOIN (element dimension): `@x = nil` says nothing about the
                 # elements; see ClassLayout.analyze.
                 next if found.nil? && nil_literal_write?(irep, idx, src_reg)
-              elsif insn.op == 'SETIDX'
+              elsif insn.op == :SETIDX
                 # ELEMENT_CLASS_SUPPORT: `@a[0] = x` is OP_SETIDX, not SEND :[]=.
                 # "SETIDX R4 (R5) (R6)" is `R[a][R[a+1]] = R[a+2]`: receiver R4, element R6.
                 recv, _i_reg, val = insn.regs
@@ -559,7 +559,7 @@ def mutated_ivar_targets(irep, idx, reg)
   return [] unless reg
 
   sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true) || []
-  sources.filter_map { |p| p.insn.ivar if p.op == 'GETIV' }.uniq
+  sources.filter_map { |p| p.insn.ivar if p.op == :GETIV }.uniq
 end
 
 # HASH_ELEMENT_SUPPORT: "every VALUE of this Hash ivar is class X"
@@ -625,7 +625,7 @@ class HashElementLayout
             BytecodeIR.for(irep).each_with_op('SETIV', 'SETIDX') do |insn, idx|
               found = nil
               targets = nil
-              if insn.op == 'SETIV'
+              if insn.op == :SETIV
                 ivar = insn.ivar
                 next unless hash_ivars.include?(ivar)
 
@@ -635,7 +635,7 @@ class HashElementLayout
                 found = hash_element_source_scan(irep, idx, src_reg, ctx)
                 # NIL_TOLERANT_JOIN (hash-value dimension); see ArrayElementLayout.analyze.
                 next if found.nil? && nil_literal_write?(irep, idx, src_reg)
-              elsif insn.op == 'SETIDX'
+              elsif insn.op == :SETIDX
                 # `h[k] = v` is OP_SETIDX: "SETIDX R4 (R5) (R6)", receiver R4, value R6 (the
                 # key is not read).
                 recv, _i_reg, val = insn.regs
@@ -737,14 +737,14 @@ def element_producer_class(irep, producer, ctx, depth)
   return PRIMITIVE_ELEMENT_CLASSES.include?(literal) ? literal : nil if literal
 
   # `a[i]` is an index opcode, not SEND :[]. GETIDX reads R[a][R[a+1]], GETIDX0 R[b][0], AREF R[b][c].
-  if BytecodeIR::Ops::INDEX_READ.include?(insn.op) || insn.op == 'AREF'
-    recv = insn.op == 'GETIDX' ? producer.reg : insn.regs[1]
+  if BytecodeIR::Ops::INDEX_READ.include?(insn.op) || insn.op == :AREF
+    recv = insn.op == :GETIDX ? producer.reg : insn.regs[1]
     return nil unless recv
 
     hit = array_element_source_scan(irep, i, recv, ctx, depth + 1)
     return hit if hit && hit != ArrayElementLayout::VACUOUS
     # AREF on a non-Array is destructuring (index 0 yields the receiver), not a `:[]` dispatch.
-    return nil if insn.op == 'AREF'
+    return nil if insn.op == :AREF
 
     return receiver_scoped_return_class(irep, i, recv, '[]', ctx, depth)
   end

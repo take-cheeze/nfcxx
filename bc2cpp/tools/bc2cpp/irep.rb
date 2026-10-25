@@ -88,6 +88,17 @@ end
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_init: true) do
   include InsnOperands
 
+  # Hand-built test insns pass String ops; normalize to Symbol so every
+  # consumer sees one type. Decoded insns already carry Symbols.
+  def op=(name)
+    super(name.is_a?(String) ? name.intern : name)
+  end
+
+  def initialize(lineno: nil, addr: nil, op: nil, args: nil, raw: nil, frozen_literal: nil, **rest)
+    super(lineno: lineno, addr: addr, op: op.is_a?(String) ? op.intern : op, args: args, raw: raw,
+          frozen_literal: frozen_literal, **rest)
+  end
+
   # An Insn for code the compiler synthesizes (no disassembly line behind it).
   def self.synthetic(op, args)
     new(lineno: 0, addr: 0, op: op, args: args, raw: "#{op} #{args}")

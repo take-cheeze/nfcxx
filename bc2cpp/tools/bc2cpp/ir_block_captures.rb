@@ -29,7 +29,7 @@ class IrBlockCaptures
       return nil if definition.entry?
 
       instruction = BytecodeIR.for(@child).source_at(definition.index)
-      return nil unless instruction.op == 'GETUPVAR'
+      return nil unless instruction.op == :GETUPVAR
 
       slot, level = instruction.upvar_ref
       return nil unless level == 0 && slot.to_i.positive? && slot.to_i < @parent.nlocals.to_i
@@ -57,7 +57,7 @@ class IrBlockCaptures
     call = parent.source_at(@call_index)
     producer = parent.source_at(producer_index)
     return false unless call && BytecodeIR::Ops::BLOCK_SEND.include?(call.op) && call.plain_fixed_argc?
-    return false unless producer&.op == 'BLOCK' && ireps[Array(@parent.reps)[producer.block_index.to_i]].equal?(@child)
+    return false unless producer&.op == :BLOCK && ireps[Array(@parent.reps)[producer.block_index.to_i]].equal?(@child)
 
     block_reg = (call.reg.to_i + call.argc + 1).to_s
     definitions = BytecodeIR.reaching_definitions(@parent, @call_index, block_reg, origin_transfers: true, shared: true)

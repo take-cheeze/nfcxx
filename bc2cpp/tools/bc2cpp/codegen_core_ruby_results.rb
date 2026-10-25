@@ -8,7 +8,7 @@ require_relative 'core_defs'
 module CoreRubyResults
   EMPTY_SEEN = Set.new.freeze
   EMPTY_ARGUMENTS = [].freeze
-  INSTALLERS = %w[alias_method define_method define_singleton_method undef_method remove_method].freeze
+  INSTALLERS = %i[alias_method define_method define_singleton_method undef_method remove_method].freeze
 
   def self.installed_names(ireps)
     names = Set.new
@@ -16,13 +16,13 @@ module CoreRubyResults
       next unless CoreDefs.core_source?(body.file)
 
       BytecodeIR.for(body).each_source do |insn, index|
-        next unless insn.op.include?('SEND') && INSTALLERS.include?(insn.sym)
+        next unless BytecodeIR::Ops::SEND_PREFIX_OPS.include?(insn.op) && INSTALLERS.include?(insn.sym)
         return nil unless insn.plain_fixed_argc? && insn.argc.positive?
 
-        argc = %w[alias_method define_method define_singleton_method].include?(insn.sym) ? 1 : insn.argc
+        argc = %i[alias_method define_method define_singleton_method].include?(insn.sym) ? 1 : insn.argc
         (1..argc).each do |arg|
           name = body.walk_dominating_writers(index - 1, (insn.reg.to_i + arg).to_s, follow_moves: true) do |writer|
-            writer.sym if writer.op == 'LOADSYM'
+            writer.sym if writer.op == :LOADSYM
           end
           return nil unless name
 
@@ -55,7 +55,7 @@ module CoreRubyResults
   def self.skippable_alias?(body, name)
     program = BytecodeIR.for(body)
     program.instructions.any? do |alias_insn|
-      next false unless alias_insn.op == 'ALIAS' && alias_insn.source.sym == name
+      next false unless alias_insn.op == :ALIAS && alias_insn.source.sym == name
 
       reached = program.reachable_from(0, include_handlers: true, avoiding: alias_insn.index)
       program.exits.any? { |frame_exit| reached.include?(frame_exit.index) }
@@ -217,10 +217,10 @@ class CodeGen
 
     mask = BytecodeIR::NumericClasses.exit_mask(body, states) do |exit, state|
       case exit.op
-      when 'RETURN' then state[exit.reg]
-      when 'RETSELF' then receiver
+      when :RETURN then state[exit.reg]
+      when :RETSELF then receiver
       when 'RETNIL' then NumericFlow::NIL
-      when 'RETURN_BLK', 'BREAK' then 0
+      when :RETURN_BLK, :BREAK then 0
       else NumericFlow::OTHER
       end
     end
@@ -266,9 +266,9 @@ class CodeGen
   # same fact a literal block without BREAK states. BC2CPP_CORE_RUBY_SYMBOL_BLOCKS=0 withdraws it.
   def core_ruby_literal_block_safe?(irep, index, insn)
     irep.walk_dominating_writers(index - 1, (insn.reg.to_i + insn.argc + 1).to_s, follow_moves: true) do |writer|
-      next true if writer.op == 'LOADSYM' && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'
+      next true if writer.op == :LOADSYM && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'
 
-      body = writer.op == 'BLOCK' && @ireps[irep.reps[writer.block_index]]
+      body = writer.op == :BLOCK && @ireps[irep.reps[writer.block_index]]
       body && core_ruby_result_exits_safe?(body, caller: true)
     end || false
   end
@@ -288,7 +288,7 @@ class CodeGen
     opaque = self.class.core_result_opaque_defs
     return NumericFlow::OTHER unless installed && !installed.include?(insn.sym) && opaque && opaque.none? { |_owner, name| name == insn.sym }
 
-    if insn.sym == 'dup' && insn.op == 'SEND0' && native_dup_result_safe?
+    if insn.sym == 'dup' && insn.op == :SEND0 && native_dup_result_safe?
       return state[insn.reg.to_i]
     end
     core = native_core_class_result(insn, state)

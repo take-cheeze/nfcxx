@@ -116,7 +116,7 @@ module DeclaredConstants
     class_named = Set.new
     ireps.each_value do |irep|
       irep.each_with_op('SETCONST', 'SETMCNST') do |insn, idx|
-        bare = insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name
+        bare = insn.op == :SETCONST ? insn.const_name : insn.mcnst_name
         bindings[bare] << [irep, idx, insn, qualified_at[[irep.label, idx]]] if bare
       end
       irep.each_with_op('CLASS', 'MODULE') { |insn, _idx| class_named << insn.sym_token }
@@ -135,7 +135,7 @@ module DeclaredConstants
         result.first_errors[entry.name] ||= text if severity == 'error'
       end
       own, unresolved = bindings[entry.bare].partition { |_i, _x, _n, q| q == entry.name }
-      unresolved = unresolved.select { |_i, _x, insn, q| q.nil? || insn.op == 'SETMCNST' }
+      unresolved = unresolved.select { |_i, _x, insn, q| q.nil? || insn.op == :SETMCNST }
       errors = result.diagnostics.size
       diag.call('error', nil, 'no assignment of this constant in the program') if own.empty?
       own.drop(1).each do |irep, idx, insn,|
@@ -243,7 +243,7 @@ module DeclaredConstants
     types = BytecodeIR::Types.new(irep)
     freezes.each do |freeze_idx, freeze|
       literal_index, literal = literal_writer(irep, freeze_idx, freeze.reg)
-      return 'the frozen array is not an array literal' unless literal&.op == 'ARRAY' && literal.uint_operand
+      return 'the frozen array is not an array literal' unless literal&.op == :ARRAY && literal.uint_operand
 
       bad = (0...literal.uint_operand).find do |offset|
         fact = types.fact_at(literal_index, (literal.reg.to_i + offset).to_s)
@@ -265,7 +265,7 @@ module DeclaredConstants
       return nil unless writers&.length == 1
 
       writer_index, insn = writers.first
-      return [writer_index, insn] unless insn.op == 'SEND0' && insn.sym == 'freeze'
+      return [writer_index, insn] unless insn.op == :SEND0 && insn.sym == 'freeze'
       return nil unless seen.add?(writer_index)
 
       index = writer_index
@@ -286,7 +286,7 @@ module DeclaredConstants
     freezes = []
     defs.each do |d|
       insn = program.source_at(d.index)
-      return nil unless insn.op == 'SEND0' && insn.sym == 'freeze'
+      return nil unless insn.op == :SEND0 && insn.sym == 'freeze'
 
       proven = trace_new_target(irep, d.index, insn.reg, nil, 0, nil, registry: registry,
                                                                       container_constants: container_constants) == 'Array' ||
@@ -358,7 +358,7 @@ module DeclaredConstants
     return false unless plus_safe && depth < SUM_MAX_DEPTH
 
     j, insn = sum_writer(irep, idx, reg)
-    return false unless insn&.op == 'ADD' && insn.reg && insn.paren_reg
+    return false unless insn&.op == :ADD && insn.reg && insn.paren_reg
 
     operand = lambda do |r|
       proven_array_value?(irep, j, r, registry, containers, plus_safe, owner, depth + 1, range_safe: range_safe)
@@ -382,7 +382,7 @@ module DeclaredConstants
   # register before that range instruction.
   def range_to_a_source?(irep, idx, reg)
     j, call, recv = dominating_writer(irep, idx, reg)
-    return false unless call&.op == 'SEND0' && call.sym == 'to_a'
+    return false unless call&.op == :SEND0 && call.sym == 'to_a'
 
     k, range = dominating_writer(irep, j, recv)
     return false unless range && BytecodeIR::Ops::RANGE_BUILD.include?(range.op) && range.reg
@@ -396,7 +396,7 @@ module DeclaredConstants
   # [index, instruction, register holding the value at that index], or nil.
   def dominating_writer(irep, idx, reg)
     irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, cur|
-      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+      next IrepScans::KEEP if insn.op == :SEND0 && insn.sym == 'freeze'
 
       [j, insn, cur]
     end
@@ -405,7 +405,7 @@ module DeclaredConstants
   def literal_kind(irep, idx, reg)
     _j, insn = dominating_writer(irep, idx, reg)
     return nil unless insn
-    return :String if insn.op == 'STRING'
+    return :String if insn.op == :STRING
     return :Integer if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
 
     nil
@@ -415,7 +415,7 @@ module DeclaredConstants
   # the writer and the read may hold another value, and then there is no single writer to prove.
   def sum_writer(irep, idx, reg)
     irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, _cur|
-      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+      next IrepScans::KEEP if insn.op == :SEND0 && insn.sym == 'freeze'
 
       [j, insn]
     end
@@ -484,7 +484,7 @@ module DeclaredConstants
     writers = BytecodeIR.writers_reaching(irep, idx, reg)
     return true if writers.nil?
 
-    writers.any? { |_j, insn| insn.op == 'SEND0' && insn.sym == 'freeze' }
+    writers.any? { |_j, insn| insn.op == :SEND0 && insn.sym == 'freeze' }
   end
 
   # `R.merge(H)` at +idx+: the one-argument SEND `merge` whose receiver proves exactly Hash (a Hash literal, or a constant
@@ -494,7 +494,7 @@ module DeclaredConstants
     return false unless merge_safe && singleton_free
 
     j, insn = merge_writer(irep, idx, reg)
-    return false unless insn&.op == 'SEND' && insn.sym == 'merge' && insn.argc.to_i == 1 && insn.reg
+    return false unless insn&.op == :SEND && insn.sym == 'merge' && insn.argc.to_i == 1 && insn.reg
 
     # `owner` is the lexical scope of the assignment: a bare constant receiver (`SAVE_MOVABLE.merge`) resolves in it.
     trace_new_target(irep, j, insn.reg, registry: registry, container_constants: containers, owner: owner) == 'Hash'
@@ -576,7 +576,7 @@ module DeclaredConstants
       entries = @entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)
       irep.walk_writers(idx - 1, src.to_s, barrier: ->(w, _cur) { entries.include?(w.addr) }, barrier_result: false,
                                            follow_moves: true) do |w, _j, _cur|
-        (w.op == 'GETCONST' && w.const_name == name) || (w.op == 'GETMCNST' && w.mcnst_name == name)
+        (w.op == :GETCONST && w.const_name == name) || (w.op == :GETMCNST && w.mcnst_name == name)
       end == true
     end
 
@@ -594,8 +594,8 @@ module DeclaredConstants
         end
 
         case insn.op
-        when 'GETCONST' then name_value(insn.const_name, visiting)
-        when 'GETMCNST' then name_value(insn.mcnst_name, visiting)
+        when :GETCONST then name_value(insn.const_name, visiting)
+        when :GETMCNST then name_value(insn.mcnst_name, visiting)
         when *BytecodeIR::Ops::INT_ARITH then arithmetic(irep, j, insn, cur, visiting, depth)
         end
       end
@@ -614,10 +614,10 @@ module DeclaredConstants
 
       corners = ->(&f) { left.product(right).map { |a, b| f.call(a, b) } }
       result = case insn.op
-               when 'ADD', 'ADDI' then [left[0] + right[0], left[1] + right[1]]
-               when 'SUB', 'SUBI' then [left[0] - right[1], left[1] - right[0]]
-               when 'MUL' then corners.call { |a, b| a * b }.minmax
-               when 'DIV'
+               when :ADD, :ADDI then [left[0] + right[0], left[1] + right[1]]
+               when :SUB, :SUBI then [left[0] - right[1], left[1] - right[0]]
+               when :MUL then corners.call { |a, b| a * b }.minmax
+               when :DIV
                  return nil if right[0] <= 0 && right[1] >= 0
 
                  corners.call { |a, b| a / b }.minmax
@@ -628,7 +628,7 @@ module DeclaredConstants
     # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode; the others print it as an operand.
     def loadi(insn)
       case insn.op
-      when 'LOADI__1' then -1
+      when :LOADI__1 then -1
       when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
       else IntegerConstants.loadi_value(insn)
       end
@@ -647,14 +647,14 @@ module DeclaredConstants
     return false unless string_length_safe && integer_ops_safe
 
     BytecodeIR.all_writers_reaching?(irep, idx, reg) do |j, insn|
-      insn.op == 'EQ' && string_length_value?(irep, j, insn.reg) && integer_literal_source?(irep, j, insn.regs[1])
+      insn.op == :EQ && string_length_value?(irep, j, insn.reg) && integer_literal_source?(irep, j, insn.regs[1])
     end
   end
 
   # The value of +reg+ before +idx+ is `'literal'.length` (SEND0 length on a STRING literal), on every path.
   def string_length_value?(irep, idx, reg)
     BytecodeIR.all_writers_reaching?(irep, idx, reg) do |j, insn|
-      insn.op == 'SEND0' && insn.sym == 'length' && string_literal_source?(irep, j, insn.reg)
+      insn.op == :SEND0 && insn.sym == 'length' && string_literal_source?(irep, j, insn.reg)
     end
   end
 
@@ -692,7 +692,7 @@ module DeclaredConstants
 
   # The value of +reg+ before +idx+ is the constant IO (GETCONST), on every path.
   def io_constant_receiver?(irep, idx, reg)
-    BytecodeIR.all_writers_reaching?(irep, idx, reg) { |_j, insn| insn.op == 'GETCONST' && insn.const_name == 'IO' }
+    BytecodeIR.all_writers_reaching?(irep, idx, reg) { |_j, insn| insn.op == :GETCONST && insn.const_name == 'IO' }
   end
 
   # Prints the outcome, adds the diagnostics to the signature diagnostics and aborts a build on an error.

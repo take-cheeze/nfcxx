@@ -58,7 +58,7 @@ module BlockParamCall
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return false if defs.nil? || defs.empty?
 
-    defs.none?(&:entry?) && defs.all? { |definition| BytecodeIR.for(irep).source_at(definition.index).op == 'BLKPUSH' }
+    defs.none?(&:entry?) && defs.all? { |definition| BytecodeIR.for(irep).source_at(definition.index).op == :BLKPUSH }
   end
 
   # Every definition of the register at `idx` is the block a method was entered with,
@@ -74,7 +74,7 @@ module BlockParamCall
       block_param_incoming_slot?(irep, definition.reg)
     else
       insn = BytecodeIR.for(irep).source_at(definition.index)
-      return false unless insn.op == 'GETUPVAR' && insn.upvar_ref
+      return false unless insn.op == :GETUPVAR && insn.upvar_ref
 
       slot, level = insn.upvar_ref
       owner = irep
@@ -123,9 +123,9 @@ module BlockParamCall
     return false unless copies.size == 1
 
     move = BytecodeIR.for(irep).source_at(copies.first)
-    return false unless move.op == 'MOVE' && move.regs[1] == incoming
+    return false unless move.op == :MOVE && move.regs[1] == incoming
 
-    return true if copies.first == 1 && BytecodeIR.for(irep).source_at(0).op == 'ENTER'
+    return true if copies.first == 1 && BytecodeIR.for(irep).source_at(0).op == :ENTER
 
     irep.each_with_op('BLOCK', 'LAMBDA') do |_insn, i|
       return false unless BytecodeIR.write_dominates?(irep, copies.first, i, copy)

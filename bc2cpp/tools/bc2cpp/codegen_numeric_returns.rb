@@ -96,7 +96,7 @@ class CodeGen
       @ireps.each_value do |irep|
         program = BytecodeIR.for(irep)
         aliasing = program.each_source.any? do |i, _index|
-          i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
+          i.op == :ALIAS || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
         end
         next unless aliasing
 
@@ -114,7 +114,7 @@ class CodeGen
   # its pool has grown that provenance.
   def aliased_operand_name_set
     @aliased_operand_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
-      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
+      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == :ALIAS || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
 
       names.merge(aliased_operand_names(irep) || BytecodeIR.for(irep).instructions_with_op('ALIAS', 'LOADSYM').filter_map { |i| i.sym if i.sym })
     end
@@ -134,7 +134,7 @@ class CodeGen
     names = Set.new
     program = BytecodeIR.for(irep)
     program.each_source do |insn, idx|
-      if insn.op == 'ALIAS'
+      if insn.op == :ALIAS
         names << insn.sym
         old = insn.first_of(:name)&.value
         names << old if old
@@ -144,7 +144,7 @@ class CodeGen
         # Every name that can reach each argument, not only the textually last arm of a join.
         literal = (1..count).all? do |k|
           sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + k).to_s)&.map { |i| program.source_at(i) }
-          next false unless sources&.all? { |w| w.op == 'LOADSYM' && w.sym }
+          next false unless sources&.all? { |w| w.op == :LOADSYM && w.sym }
 
           sources.each { |w| names << w.sym }
         end
@@ -248,7 +248,7 @@ class CodeGen
     return lcf if lcf
 
     # A literal frozen in place: the kind of its slots.
-    table = name == 'freeze' && insn.op == 'SEND0' && frozen_table_freeze_site(irep, index)
+    table = name == 'freeze' && insn.op == :SEND0 && frozen_table_freeze_site(irep, index)
     return (state[insn.reg.to_i] || 0).zero? ? 0 : table if table
 
     tracked = @numeric_return && @numeric_return[name]

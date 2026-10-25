@@ -68,7 +68,7 @@ class CodeGen
 
       defs.each do |df|
         array = program.source_at(df.index)
-        n = array.op == 'ARRAY' ? array.uint_operand : nil
+        n = array.op == :ARRAY ? array.uint_operand : nil
         return nil unless n && array.reg == reg && tuple_walk_to_return(program, df.index, reg) == r
 
         arrays[df.index] = n
@@ -97,8 +97,8 @@ class CodeGen
       cur = succ.first
       insn = program.instruction_at(cur).source
       case insn.op
-      when 'JMP', 'NOP' then next
-      when 'RETURN' then return insn.reg == reg ? cur : nil
+      when :JMP, :NOP then next
+      when :RETURN then return insn.reg == reg ? cur : nil
       else return nil
       end
     end
@@ -118,7 +118,7 @@ class CodeGen
     # Only AREFs of src may sit between the call and the destructure: any other op could mutate the array.
     return nil unless ((j + 1)...index).all? do |k|
       insn = program.source_at(k)
-      insn.op == 'AREF' && insn.reg != src && insn.src_and_literal&.first == src
+      insn.op == :AREF && insn.reg != src && insn.src_and_literal&.first == src
     end
 
     preds = program.instruction_predecessors(include_handlers: true)

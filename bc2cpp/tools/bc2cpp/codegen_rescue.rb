@@ -106,13 +106,13 @@ class CodeGen
     return nil unless program.insn_at_addr(b)
 
     exc = program.insn_at_addr(t)
-    return nil unless exc && exc.op == 'EXCEPT'
+    return nil unless exc && exc.op == :EXCEPT
     exc_reg = exc.regs.first
     return nil unless exc_reg
 
     # Find this handler's own terminating `RAISEIF Rx` (same register).
     after = insns_in_addr_range(irep, (t + 1)..)
-    raiseif = after.find { |i| i.op == 'RAISEIF' && i.regs.first == exc_reg }
+    raiseif = after.find { |i| i.op == :RAISEIF && i.regs.first == exc_reg }
     return nil unless raiseif
 
     body = insns_in_addr_range(irep, (t + 1)...raiseif.addr)
@@ -182,15 +182,15 @@ class CodeGen
     return nil unless [b, e, t].all? { |addr| body_range.cover?(addr) } && b < e && e < t
 
     except_i = program.insn_at_addr(t)
-    return nil unless except_i&.op == 'EXCEPT' && except_i.reg
+    return nil unless except_i&.op == :EXCEPT && except_i.reg
 
     exc_reg = except_i.reg
     clauses = recognize_rescue_class_handler(irep, program, except_i, exc_reg)
     return nil unless clauses
 
     raise_i = program.insn_at_addr(clauses[:raise_addr])
-    return nil unless raise_i&.op == 'RAISEIF' && raise_i.reg == exc_reg && body_range.cover?(raise_i.addr)
-    return nil unless program.insn_at_addr(e)&.op == 'JMP' && program.region_boundary_breaches(b...e, e).empty?
+    return nil unless raise_i&.op == :RAISEIF && raise_i.reg == exc_reg && body_range.cover?(raise_i.addr)
+    return nil unless program.insn_at_addr(e)&.op == :JMP && program.region_boundary_breaches(b...e, e).empty?
 
     protected_insns = insns_in_addr_range(irep, b...e)
     return nil if protected_insns.any? { |i| ENSURE_BODY_REFUSED_OPS.include?(i.op) }
@@ -340,7 +340,7 @@ class CodeGen
       next if program.handler_partially_overlaps?(ch)
 
       except_i = program.insn_at_addr(t)
-      next unless except_i && except_i.op == 'EXCEPT'
+      next unless except_i && except_i.op == :EXCEPT
       exc_reg = except_i.reg
       next unless exc_reg
 
@@ -356,7 +356,7 @@ class CodeGen
       raise_addr = handler[:raise_addr]
 
       exit_i = program.insn_at_addr(e)
-      next unless exit_i && exit_i.op == 'JMP'
+      next unless exit_i && exit_i.op == :JMP
       shared_target = exit_i.jmp_addr
       # shared_target can never be this region's except_addr in mrbc output
       # (OP_EXCEPT is emitted before the success JMP is patched); rejected anyway,
@@ -369,7 +369,7 @@ class CodeGen
       # the pinned fork commit (mruby-defined-keyword, docs/patch-fork-tracking.md)), which overwrites r<exc_reg>. That makes
       # the try body's result dead on success; anything else is unverified.
       if handler[:kind] == :defined_const
-        next unless shared_i.op == 'STRING' && shared_i.reg == exc_reg
+        next unless shared_i.op == :STRING && shared_i.reg == exc_reg
         next unless handler[:join_addr] > shared_target
       end
       # connector_reg is always exc_reg (see the header). tail_return stays a
@@ -444,7 +444,7 @@ class CodeGen
       next unless ref && ref.last == depth
 
       all << ref.first.to_s
-      written << ref.first.to_s if insn.op == 'SETUPVAR'
+      written << ref.first.to_s if insn.op == :SETUPVAR
     end
     [all, written]
   end
@@ -541,7 +541,7 @@ class CodeGen
       # The class name: a GETCONST root then GETMCNST segments, all reading and
       # writing the root's register; anything else is rejected.
       getconst_i = BytecodeIR.for(irep).source_at(clause_idx)
-      return nil unless getconst_i && getconst_i.op == 'GETCONST'
+      return nil unless getconst_i && getconst_i.op == :GETCONST
       cls_reg = getconst_i.reg
       cls_name = getconst_i.const_name
       return nil unless cls_reg && cls_name
@@ -558,12 +558,12 @@ class CodeGen
 
       rescue_i, jmpif_i, jmp_i = Array.new(3) { |k| BytecodeIR.for(irep).source_at(seg_idx + k) }
       return nil unless rescue_i && jmpif_i && jmp_i
-      return nil unless rescue_i.op == 'RESCUE' && rescue_i.regs == [exc_reg, cls_reg]
-      return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.reg == cls_reg
+      return nil unless rescue_i.op == :RESCUE && rescue_i.regs == [exc_reg, cls_reg]
+      return nil unless jmpif_i.op == :JMPIF && jmpif_i.reg == cls_reg
 
       match_addr = jmpif_i.uint_operand.to_i
       return nil unless match_addr && match_addr > jmpif_i.addr
-      return nil unless jmp_i.op == 'JMP'
+      return nil unless jmp_i.op == :JMP
       next_addr = jmp_i.jmp_addr
       # Strictly forward: bounds the walk and excludes a backward `retry`.
       return nil unless next_addr > jmp_i.addr
@@ -575,7 +575,7 @@ class CodeGen
       return nil unless next_i
 
       # Last clause: the no-match path re-raises.
-      if next_i.op == 'RAISEIF'
+      if next_i.op == :RAISEIF
         return nil unless next_i.reg == exc_reg
 
         return { kind: :rescue_class, cls_name: cls_names.join(', '),
@@ -584,7 +584,7 @@ class CodeGen
 
       # Otherwise it must be the next clause's class-test head, never a handler
       # body (the soundness property above).
-      return nil unless next_i.op == 'GETCONST'
+      return nil unless next_i.op == :GETCONST
 
       clause_idx = irep.index_of_addr(next_i.addr)
       return nil unless clause_idx
@@ -633,8 +633,8 @@ class CodeGen
     return nil unless seq.all?
 
     loadnil_i, jmp_i = seq
-    return nil unless loadnil_i.op == 'LOADNIL' && loadnil_i.reg == exc_reg
-    return nil unless jmp_i.op == 'JMP'
+    return nil unless loadnil_i.op == :LOADNIL && loadnil_i.reg == exc_reg
+    return nil unless jmp_i.op == :JMP
 
     join_addr = jmp_i.jmp_addr
     # The handler only runs forward into the join.
@@ -644,9 +644,9 @@ class CodeGen
     head, *rest = body
     return nil unless head
     case head.op
-    when 'GETCONST'
+    when :GETCONST
       return nil unless head.reg == exc_reg && head.const_name
-    when 'OCLASS'
+    when :OCLASS
       # `::Name` always has a GETMCNST after OCLASS; a lone OCLASS cannot raise and
       # is never emitted by codegen_defined_const.
       return nil unless head.reg == exc_reg && !rest.empty?
@@ -654,7 +654,7 @@ class CodeGen
       return nil
     end
     rest.each do |i|
-      return nil unless i.op == 'GETMCNST'
+      return nil unless i.op == :GETMCNST
       return nil unless i.reg == exc_reg && i.paren_reg == exc_reg && i.mcnst_name&.match?(/\A\w+\z/)
     end
 
@@ -732,7 +732,7 @@ class CodeGen
   # file is captured by value, as for NESTED_RESCUE_SUPPORT.
   def rescue_entry_saved_fields(irep, region)
     refs = rescue_ref_regs(irep, region)
-    saved = if insns_in_addr_range(irep, 0...region[:begin_addr]).all? { |insn| insn.op == 'ENTER' }
+    saved = if insns_in_addr_range(irep, 0...region[:begin_addr]).all? { |insn| insn.op == :ENTER }
               []
             else
               (1...irep.nregs).reject { |i| refs.include?(i) }.map do |i|

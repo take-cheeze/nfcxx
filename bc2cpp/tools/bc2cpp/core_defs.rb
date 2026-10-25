@@ -124,10 +124,10 @@ module CoreDefs
   # The child irep a TDEF/SDEF names, or, for the unfused DEF, the METHOD before it.
   # +idx+ is the index of +insn+ in +irep+.
   def def_body_label(irep, insn, idx)
-    return irep.reps[insn.block_index] unless insn.op == 'DEF'
+    return irep.reps[insn.block_index] unless insn.op == :DEF
 
     method_idx = irep.previous_real_index(idx - 1)
     method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
-    method_insn && method_insn.op == 'METHOD' ? irep.reps[method_insn.block_index] : nil
+    method_insn && method_insn.op == :METHOD ? irep.reps[method_insn.block_index] : nil
   end
 end

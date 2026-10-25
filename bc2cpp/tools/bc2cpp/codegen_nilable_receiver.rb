@@ -163,7 +163,7 @@ module NilableIndexOps
 
     regs = insn.regs
     dest = regs[0]
-    recv_reg = insn.op == 'GETIDX0' ? regs[1] : regs[0]
+    recv_reg = insn.op == :GETIDX0 ? regs[1] : regs[0]
     proof_reg = unshift_proof_reg(recv_reg, reg_offset)
     return nil unless proof_reg
 
@@ -174,8 +174,8 @@ module NilableIndexOps
     return nil unless %w[Array Hash].include?(klass)
 
     argv = case insn.op
-           when 'GETIDX' then ["r#{regs[1]}"]
-           when 'GETIDX0' then ['mrb_fixnum_value(0)']
+           when :GETIDX then ["r#{regs[1]}"]
+           when :GETIDX0 then ['mrb_fixnum_value(0)']
            else ["r#{regs[1]}", "r#{regs[2]}"]
            end
     { key: [irep.label, idx, proof_reg.to_i], klass: klass, name: name, recv: "r#{recv_reg}", dest: dest, argv: argv }

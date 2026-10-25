@@ -109,15 +109,15 @@ module DynamicNames
 
       writer = program.source_at(writers.first)
       case writer.op
-      when 'ARYCAT', 'ARYPUSH'
+      when :ARYCAT, :ARYPUSH
         return false unless writer.reg.to_s == reg
 
         at = writers.first
-      when 'ARRAY'
+      when :ARRAY
         return false unless writer.regs.size == 1 && writer.reg.to_s == reg && writer.uint_operand.to_i.positive?
 
         heads = BytecodeIR.reaching_writer_indices(irep, writers.first, reg)
-        return heads && !heads.empty? && heads.all? { |i| program.source_at(i).op == 'LOADSYM' }
+        return heads && !heads.empty? && heads.all? { |i| program.source_at(i).op == :LOADSYM }
       else
         return false
       end
@@ -127,8 +127,8 @@ module DynamicNames
 
   def self.setter_composition_at(irep, program, idx, insn, parents)
     case insn.op
-    when 'INTERN' then interned_setter?(irep, program, idx, insn) ? 'interpolated Symbol may end in =' : nil
-    when 'DEF', 'TDEF', 'SDEF' then name_value_used?(irep, idx, insn.reg, parents) ? "#{insn.op} name value used" : nil
+    when :INTERN then interned_setter?(irep, program, idx, insn) ? 'interpolated Symbol may end in =' : nil
+    when :DEF, :TDEF, :SDEF then name_value_used?(irep, idx, insn.reg, parents) ? "#{insn.op} name value used" : nil
     else
       return nil unless BytecodeIR::Ops::SEND_FAMILY.include?(insn.op)
       return "#{insn.sym} lists method names" if METHOD_NAME_LISTERS.include?(insn.sym)
@@ -151,10 +151,10 @@ module DynamicNames
     writers.empty? || writers.any? do |w|
       writer = program.source_at(w)
       case writer.op
-      when 'STRING' then string_may_end_setter?(irep, writer)
-      when 'STRCAT'
+      when :STRING then string_may_end_setter?(irep, writer)
+      when :STRCAT
         piece = BytecodeIR.reaching_writer_indices(irep, w, writer.paren_reg.to_s) or next true
-        piece.empty? || piece.any? { |p| (s = program.source_at(p)).op != 'STRING' || string_may_end_setter?(irep, s) }
+        piece.empty? || piece.any? { |p| (s = program.source_at(p)).op != :STRING || string_may_end_setter?(irep, s) }
       else true
       end
     end
@@ -179,7 +179,7 @@ module DynamicNames
       next false if self_send_slot?(user, used_reg)
       next false if VISIBILITY_SENDS.include?(user.sym) && BytecodeIR::Ops::SEND_FAMILY.include?(user.op) &&
                     user.plain_fixed_argc? && used_reg.to_i > user.reg.to_i
-      next true unless user.op == 'RETURN'
+      next true unless user.op == :RETURN
 
       parent = parents[irep.label]
       next false if parent == :root
@@ -213,8 +213,8 @@ module DynamicNames
     ireps.each_value do |irep|
       program = BytecodeIR.for(irep)
       program.each_with_op('LOADSYM', 'STRING', *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
-        (probe_only?(irep, idx, insn) ? probes : stems) << insn.sym if insn.op == 'LOADSYM' && insn.sym
-        if insn.op == 'STRING'
+        (probe_only?(irep, idx, insn) ? probes : stems) << insn.sym if insn.op == :LOADSYM && insn.sym
+        if insn.op == :STRING
           entry = irep.pool[insn.pool_index.to_i]
           stems << entry if entry.is_a?(String) && entry.match?(/\A[A-Za-z_]\w*[?!=]?\z/)
           next
@@ -236,7 +236,7 @@ module DynamicNames
   def self.literal_name_argument?(irep, program, idx, insn)
     writers = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
               BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
-    writers && writers.all? { |i| program.instruction_at(i).op == 'LOADSYM' } || false
+    writers && writers.all? { |i| program.instruction_at(i).op == :LOADSYM } || false
   end
 
   # Every use of the LOADSYM's value (MOVE aliases and handler edges followed) is the first argument of a plain
@@ -267,8 +267,8 @@ module DynamicNames
       found = false
       irep.each_with_op('DEF', 'TDEF', 'SDEF', 'ALIAS') do |insn, _idx|
         names = case insn.op
-                when 'ALIAS' then insn.typed.map { |operand| operand.value.to_s }
-                when 'DEF' then [insn.sym_token]
+                when :ALIAS then insn.typed.map { |operand| operand.value.to_s }
+                when :DEF then [insn.sym_token]
                 else [insn.sym]
                 end
         found ||= names.any? { |n| PROBE_HOOKS.include?(n.to_s) }

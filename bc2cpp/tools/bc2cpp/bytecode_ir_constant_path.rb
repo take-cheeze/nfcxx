@@ -45,10 +45,10 @@ module BytecodeIR
 
     def constant_path_of_writer(index, insn, active)
       case insn.op
-      when 'GETCONST' then ConstantPath.new(:const, insn.const_name, index, [], false)
-      when 'OCLASS' then ConstantPath.new(:object, nil, nil, [], false)
-      when 'LOADNIL' then ConstantPath.new(:nil, nil, nil, [], false)
-      when 'GETMCNST'
+      when :GETCONST then ConstantPath.new(:const, insn.const_name, index, [], false)
+      when :OCLASS then ConstantPath.new(:object, nil, nil, [], false)
+      when :LOADNIL then ConstantPath.new(:nil, nil, nil, [], false)
+      when :GETMCNST
         segment = insn.mcnst_name
         return nil unless segment && active.add?(index)
 
@@ -75,18 +75,18 @@ module BytecodeIR
       qualified = false
       walk_writers(from, reg, skip_ops: skip_ops, barrier: barrier, follow_moves: true) do |insn, index|
         case insn.op
-        when 'GETMCNST'
+        when :GETMCNST
           segment = insn.mcnst_name
           next nil unless segment
 
           qualified = true
           segments.unshift(segment)
           KEEP
-        when 'GETCONST'
+        when :GETCONST
           ConstantPath.new(:const, insn.const_name, index, segments, qualified)
-        when 'OCLASS'
+        when :OCLASS
           ConstantPath.new(:object, nil, nil, segments, qualified)
-        when 'LOADNIL'
+        when :LOADNIL
           ConstantPath.new(:nil, nil, nil, segments, qualified)
         end
       end

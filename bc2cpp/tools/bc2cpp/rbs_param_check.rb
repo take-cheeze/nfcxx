@@ -377,7 +377,7 @@ module RbsParamCheck
   def writer_why(ctx, irep, definition, cls, depth)
     insn = BytecodeIR.for(irep).source_at(definition.index)
     case insn.op
-    when 'LOADSELF'
+    when :LOADSELF
       owner = ctx[:self_of][irep.label]
       unless owner
         # BLOCK_SELF (codegen_block_self.rb): a block only ever called keeps its method's self.
@@ -390,9 +390,9 @@ module RbsParamCheck
       return nil if owner == cls && !ctx[:subclassed].include?(cls)
 
       "self (#{owner})"
-    when 'GETIV'
+    when :GETIV
       ivar_why(ctx, irep, insn.ivar, cls, depth)
-    when 'GETUPVAR'
+    when :GETUPVAR
       upvar_why(ctx, irep, insn, cls)
     when *BytecodeIR::Ops::SEND
       name = insn.sym
@@ -475,7 +475,7 @@ module RbsParamCheck
     BytecodeIR.for(body).exits.each do |ex|
       idx = ex.index
       insn = BytecodeIR.for(body).source_at(idx)
-      return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless ex.op == 'RETURN'
+      return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless ex.op == :RETURN
 
       why = trace(ctx, body, idx, insn.reg, cls, depth + 1)
       return "the block of #{name} returns (#{why})" if why

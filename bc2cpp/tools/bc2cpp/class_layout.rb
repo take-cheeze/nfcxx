@@ -84,7 +84,7 @@ def lcf_file_array_read?(irep, pin_idx, pin, receiver_class)
   return false unless receiver_class
 
   keys = BytecodeIR.producers(irep, pin_idx, (pin.reg.to_i + 1).to_s)
-  return false unless keys&.size == 1 && !keys.first.entry? && keys.first.insn&.op == 'LOADSYM'
+  return false unless keys&.size == 1 && !keys.first.entry? && keys.first.insn&.op == :LOADSYM
 
   file_class = receiver_class.call(pin_idx, pin)
   return false unless file_class.is_a?(String)
@@ -105,7 +105,7 @@ def array_join_source?(irep, idx, reg, receiver_class)
     insn = BytecodeIR.for(irep).source_at(defn.index)
     next true if BytecodeIR::Ops::ARRAY_ALLOC.include?(insn.op)
 
-    insn.op == 'GETIDX' && lcf_file_array_read?(irep, defn.index, insn, receiver_class)
+    insn.op == :GETIDX && lcf_file_array_read?(irep, defn.index, insn, receiver_class)
   end
 end
 
@@ -124,9 +124,9 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
   # JOIN_DOMINANCE: the source must be the only value the register can hold.
   irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |pin, pin_idx|
     # RECORD_HASH_PROOF: `@slot[:key]` on a record Hash whose key only ever holds an Array.
-    next 'Array' if pin.op == 'GETIDX' && RecordHash.array_read?(irep, pin_idx, tier: RecordHash.consumer_tier)
+    next 'Array' if pin.op == :GETIDX && RecordHash.array_read?(irep, pin_idx, tier: RecordHash.consumer_tier)
     # LCF_FILE_FIELDS (lcf_file_fields.rb): `unit[:key]` on an exact LCF file whose schema field is an Array.
-    next 'Array' if pin.op == 'GETIDX' && lcf_file_array_read?(irep, pin_idx, pin, receiver_class)
+    next 'Array' if pin.op == :GETIDX && lcf_file_array_read?(irep, pin_idx, pin, receiver_class)
 
     next nil unless BytecodeIR::Ops::SEND.include?(pin.op)
 

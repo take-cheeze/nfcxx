@@ -62,7 +62,7 @@ module ComputedSend
   def computed_send_plan(insn, kwargs)
     irep, idx = kwargs.values_at(:irep, :idx)
     return nil unless irep && idx && %w[SEND SSEND].include?(insn.op) &&
-                      computed_send_name?(insn.sym, insn.op == 'SSEND' ? kwargs[:owner_def]&.owner : nil)
+                      computed_send_name?(insn.sym, insn.op == :SSEND ? kwargs[:owner_def]&.owner : nil)
     return nil unless kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil? && @call_block_expr.nil?
     return nil unless ENV[KILL_SWITCH] != '0' && NomethodReviewed.guard_violation_enabled? && insn.plain_fixed_argc?
 
@@ -113,7 +113,7 @@ module ComputedSend
   # COMPUTED_SEND_GUARDED: the expansion of an unproven name on self, or nil.
   def computed_send_guarded(insn, kwargs, &)
     irep, idx, owner_def = kwargs.values_at(:irep, :idx, :owner_def)
-    return nil unless ENV[KILL_SWITCH] != '0' && ENV[GUARDED_SWITCH] != '0' && irep && idx && insn.op == 'SSEND'
+    return nil unless ENV[KILL_SWITCH] != '0' && ENV[GUARDED_SWITCH] != '0' && irep && idx && insn.op == :SSEND
     return nil unless owner_def && computed_send_name?(insn.sym, owner_def.owner)
     return nil unless kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil? && @call_block_expr.nil?
     return nil unless computed_send_kernel?(insn.sym) && computed_send_world_static?

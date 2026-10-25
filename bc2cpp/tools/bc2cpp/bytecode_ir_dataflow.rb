@@ -58,10 +58,10 @@ module BytecodeIR
     return nil unless lead
 
     case insn.op
-    when 'ARGARY'
+    when :ARGARY
       spec = insn.typed[1].value # [m1, r, m2, kd]
       lead.to_i..(lead.to_i + (spec[3] == 1 ? 2 : 1))
-    when 'APOST'
+    when :APOST
       lead.to_i..(lead.to_i + insn.typed[2].value)
     end
   end
@@ -219,15 +219,15 @@ module BytecodeIR
           # An origin-only EXCEPT defines its own register on every entry (origin_effect), so its handler
           # edges need not be known for that register.
           return refused(refusal, :query_guarded) if guarded && guarded[p] &&
-                                                     !(origin_transfers && insn.op == 'EXCEPT' && insn.reg == r)
+                                                     !(origin_transfers && insn.op == :EXCEPT && insn.reg == r)
           # A protected JMPUW on a normal edge unwinds through its ensure (vm.c OP_JMPUW): the ensure body runs,
           # then RAISEIF jumps to the target, so that body's writes reach the target by no normal edge. The guard
           # above is off under through_handlers, so refuse here. The JMPUW's handler edge into the ensure stays
           # exact: the JMPUW writes nothing, so the ensure is entered with the values the JMPUW saw.
-          return refused(refusal, :unwinding_jump) if insn.op == 'JMPUW' && preds[i].include?(p) &&
+          return refused(refusal, :unwinding_jump) if insn.op == :JMPUW && preds[i].include?(p) &&
                                                      dataflow_guarded_at[p]
 
-          if raiseif_nil && insn.op == 'RAISEIF' && insn.reg == r && preds[i].include?(p) &&
+          if raiseif_nil && insn.op == :RAISEIF && insn.reg == r && preds[i].include?(p) &&
              !raise_targets.fetch(p, EMPTY_TARGETS).include?(i)
             defs << Definition.new(p, r)
             next
@@ -242,13 +242,13 @@ module BytecodeIR
           when :callee_clobber then return refused(refusal, :callee_frame_clobber)
           when :pass then work.push(p, r)
           when :define
-            if follow_moves && insn.op == 'MOVE'
+            if follow_moves && insn.op == :MOVE
               source = insn.regs[1]
               return refused(refusal, :move_without_source) unless source
 
               work.push(p, source)
             else
-              built = insn.op == 'ENTER' ? enter_built_kind(insn, r) : nil
+              built = insn.op == :ENTER ? enter_built_kind(insn, r) : nil
               defs << Definition.new(p, r, built)
             end
           end
@@ -328,7 +328,7 @@ module BytecodeIR
           i = instruction.index
           reached = preds[i].map { |p| p == ENTRY ? false : out[p] }
           assigned = reached.empty? ? true : reached.all?
-          assigned ||= instruction.source.op == 'SETIV' && instruction.source.ivar == ivar
+          assigned ||= instruction.source.op == :SETIV && instruction.source.ivar == ivar
           next if out[i] == assigned
 
           out[i] = assigned
@@ -341,7 +341,7 @@ module BytecodeIR
         reached = preds[i].map { |p| p == ENTRY ? false : out[p] }
         assigned = reached.empty? || reached.all?
         observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || SELF_EXPOSING_OPS.include?(insn.op) ||
-                   (insn.op == 'GETIV' && insn.ivar == ivar) ||
+                   (insn.op == :GETIV && insn.ivar == ivar) ||
                    (!%w[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
         assigned || !observes
       end
@@ -373,7 +373,7 @@ module BytecodeIR
           incoming = normal[i].map { |p| p == ENTRY ? false : stored_out[p] }
           incoming.concat(raised_from[i].map { |src| stored_in[src] })
           in_i = incoming.empty? || incoming.all?
-          out_i = in_i || (instruction.source.op == 'SETIV' && instruction.source.ivar.to_s == name)
+          out_i = in_i || (instruction.source.op == :SETIV && instruction.source.ivar.to_s == name)
           next if stored_in[i] == in_i && stored_out[i] == out_i
 
           stored_in[i] = in_i
@@ -383,7 +383,7 @@ module BytecodeIR
       end
       @instructions.filter_map do |instruction|
         i = instruction.index
-        i if instruction.source.op == 'GETIV' && instruction.source.ivar.to_s == name && !stored_in[i]
+        i if instruction.source.op == :GETIV && instruction.source.ivar.to_s == name && !stored_in[i]
       end.to_set.freeze
     end
 
@@ -429,11 +429,11 @@ module BytecodeIR
     # argument pass to the entry value, every other slot (and the packed R(1)) refuses.
     def origin_effect(insn, reg, typed_enter: true)
       case insn.op
-      when 'RESCUE'
+      when :RESCUE
         second = insn.typed[1]
         second&.kind == :reg && second.value.to_s == reg ? :define : :pass
-      when 'EXCEPT' then insn.reg == reg ? :define : :pass
-      when 'ENTER'
+      when :EXCEPT then insn.reg == reg ? :define : :pass
+      when :ENTER
         if typed_enter then enter_origin_effect(insn, reg)
         else enter_passes?(insn, reg) ? :pass : :refuse
         end
@@ -680,7 +680,7 @@ module BytecodeIR
     lookup = ->(label) { tree[label] or raise ArgumentError, "bc2cpp: irep #{label} missing from the tree" }
     Array(irep.reps).each do |label|
       each_nested_insn(lookup.call(label), lookup) do |insn, depth|
-        next unless insn.op == 'SETUPVAR'
+        next unless insn.op == :SETUPVAR
 
         index, level = insn.upvar_ref
         written << index.to_s if level == depth

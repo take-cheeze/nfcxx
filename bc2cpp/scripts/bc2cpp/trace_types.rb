@@ -327,7 +327,7 @@ module TraceTypes
       File.foreach(path) do |raw|
         kind, owner, value = raw.chomp.split("\t", 3)
         case kind
-        when 'SUPER' then supers[owner] = value
+        when :SUPER then supers[owner] = value
         when 'DEF' then defs[owner] << value
         when 'INCLUDE' then includes[owner] << value
         when 'PREPEND' then prepends[owner] << value
@@ -335,12 +335,12 @@ module TraceTypes
           # A `*` module is one the sources cannot name, so the lookup is unknown past it. A `*` owner (see
           # class_hierarchy.rb) is an extend of an unknown class, which makes every class's singleton lookup unknown.
           value == '*' ? dynamic << owner : extends[owner] << value
-        when 'SDEF'
+        when :SDEF
           # A `*` owner is a `def obj.x` on a receiver the sources cannot name: any class may answer x.
           dynamic << owner if owner == '*'
           sdefs[owner] << value
         when 'CLASS' then names << owner
-        when 'MODULE'
+        when :MODULE
           names << owner
           modules << owner
         end

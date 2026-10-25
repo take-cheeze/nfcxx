@@ -34,14 +34,14 @@ module ElementSiteReport
 
       insn = BytecodeIR.for(irep).source_at(d.index)
       case insn.op
-      when 'GETIDX', 'GETIDX0'
+      when :GETIDX, :GETIDX0
         depth < 2 ? element_origin(irep, d.index, insn.reg, depth + 1).map { |o| "idx<#{o}>" } : ['idx<deep>']
-      when 'SEND', 'SEND0' then ["call:#{insn.sym}"]
-      when 'SSEND', 'SSEND0' then ["scall:#{insn.sym}"]
-      when 'GETIV' then ["ivar:#{insn.ivar}"]
-      when 'GETCONST' then ['const']
-      when 'ARRAY', 'ARRAY2', 'HASH' then ['fresh_lit']
-      when 'GETUPVAR' then ['upvar']
+      when :SEND, :SEND0 then ["call:#{insn.sym}"]
+      when :SSEND, :SSEND0 then ["scall:#{insn.sym}"]
+      when :GETIV then ["ivar:#{insn.ivar}"]
+      when :GETCONST then ['const']
+      when :ARRAY, :ARRAY2, :HASH then ['fresh_lit']
+      when :GETUPVAR then ['upvar']
       else ["op:#{insn.op}"]
       end
     end.uniq.sort
@@ -56,7 +56,7 @@ module ElementSiteReport
     record_literal_extreme(insn, irep, owner_def, idx, owner)
     if code.match?(DYNAMIC)
       operands = case insn.op
-                 when 'SEND', 'SEND0', 'GETIDX', 'GETIDX0', 'SETIDX' then [insn.reg]
+                 when :SEND, :SEND0, :GETIDX, :GETIDX0, :SETIDX then [insn.reg]
                  when *ARITHMETIC then [insn.reg, insn.paren_reg]
                  else []
                  end
@@ -71,8 +71,8 @@ module ElementSiteReport
   # The value register of an element write: SETIDX Ra stores R[a+2]; `<<`/push/[]= name their last argument.
   def element_store_value_reg(insn)
     case insn.op
-    when 'SETIDX' then insn.reg.to_i + 2
-    when 'SEND', 'SEND0'
+    when :SETIDX then insn.reg.to_i + 2
+    when :SEND, :SEND0
       n = insn.n_spec.to_i
       insn.reg.to_i + n if ELEMENT_STORES.include?(insn.sym) && n.positive?
     end
@@ -82,7 +82,7 @@ module ElementSiteReport
   # that is not a literal, since then the contents come from elsewhere). nil stores hold nothing.
   def record_ivar_creation(insn, irep, owner_def, idx, owner)
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.regs.first, shared: true)
-    return if defs&.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADNIL' }
+    return if defs&.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == :LOADNIL }
 
     masks = defs ? defs.map { |d| literal_contents_mask(irep, d, owner_def) } : [NumericFlow::OTHER]
     mask = masks.include?(nil) ? nil : masks.reduce(0, :|)
@@ -98,13 +98,13 @@ module ElementSiteReport
 
     lit = BytecodeIR.for(irep).source_at(definition.index)
     case lit.op
-    when 'LOADNIL' then 0
-    when 'ARRAY', 'ARRAY2'
+    when :LOADNIL then 0
+    when :ARRAY, :ARRAY2
       three = lit.src_and_literal
       first = three ? three[0].to_i : lit.reg.to_i
       count = three ? three[1].to_i : lit.uint_operand.to_i
       join_masks(irep, definition.index, (first...(first + count)).to_a, owner_def)
-    when 'HASH'
+    when :HASH
       pairs = lit.uint_operand.to_i
       join_masks(irep, definition.index, (0...pairs).map { |i| lit.reg.to_i + (2 * i) + 1 }, owner_def)
     else NumericFlow::OTHER
@@ -151,7 +151,7 @@ module ElementSiteReport
   end
 
   def record_element_store(insn, irep, owner_def, idx, owner)
-    return record_ivar_creation(insn, irep, owner_def, idx, owner) if insn.op == 'SETIV'
+    return record_ivar_creation(insn, irep, owner_def, idx, owner) if insn.op == :SETIV
 
     value_reg = element_store_value_reg(insn)
     return unless value_reg

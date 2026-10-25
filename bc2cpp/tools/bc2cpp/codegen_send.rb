@@ -2152,7 +2152,7 @@ class CodeGen
     return false unless reg && irep && idx
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
-    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADSELF' }
+    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == :LOADSELF }
   end
 
   # LOOP_FLOW_POSITION: the flow position of a send compiled from an inlined loop body (compile_insn
@@ -2193,13 +2193,13 @@ class CodeGen
     # The receiver holds the loop element (the block's parameter R1, possibly copied: its definition is the entry
     # value, index ENTRY, or the ENTER that binds it) and the body writes R1 again.
     element = defs.any? do |d|
-      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == 'ENTER')
+      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == :ENTER)
     end
     if element && loop_element_reassigned?(irep)
       return loop_flow_refuse(irep, trace_idx, :element_reassigned)
     end
 
-    upvars = writers.map { |w| w&.op == 'GETUPVAR' && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
+    upvars = writers.map { |w| w&.op == :GETUPVAR && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
     return loop_flow_accept(irep, trace_idx, :local, { irep: irep, idx: trace_idx, insn: original }) if upvars.none?
 
     loop_upvar_position(original, upvars, irep, trace_idx)
@@ -2216,7 +2216,7 @@ class CodeGen
     k = upvars.first
     return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k.to_s)
 
-    flow_insn = Insn.synthetic('SEND', "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
+    flow_insn = Insn.synthetic(:SEND, "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
     loop_flow_accept(irep, trace_idx, :upvar, { irep: host, idx: parent[:idx], insn: flow_insn })
   end
 
@@ -2254,7 +2254,7 @@ class CodeGen
     @loop_element_reassigned.fetch(irep) do
       @loop_element_reassigned[irep] = BytecodeIR.own_upvar_written_regs(irep).include?(LOOP_ELEMENT_REG) ||
                                        BytecodeIR.for(irep).each_source.any? do |i, _|
-                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != 'ENTER' &&
+                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != :ENTER &&
                                            !NumericFlow::NO_WRITE_OPS.include?(i.op)
                                        end
     end

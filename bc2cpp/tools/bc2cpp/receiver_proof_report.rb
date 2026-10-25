@@ -299,10 +299,10 @@ module ReceiverProofReport
   def rp_writer(irep, site, reg, ins, index, hypothesis)
     case ins.op
     when *BytecodeIR::Ops::SEND then ['call', ins.sym.to_s, hypothesis ? rp_call_hypothesis(irep, index, ins) : nil]
-    when 'GETIV' then ['ivar', ins.ivar.to_s, hypothesis ? rp_ivar_hypothesis(irep, ins) : nil]
-    when 'GETIDX', 'GETIDX0' then ['element', '-', nil]
-    when 'GETUPVAR' then ['upvar', '-', nil]
-    when 'GETCONST', 'GETMCNST' then ['const', ins.sym.to_s, nil]
+    when :GETIV then ['ivar', ins.ivar.to_s, hypothesis ? rp_ivar_hypothesis(irep, ins) : nil]
+    when :GETIDX, :GETIDX0 then ['element', '-', nil]
+    when :GETUPVAR then ['upvar', '-', nil]
+    when :GETCONST, :GETMCNST then ['const', ins.sym.to_s, nil]
     when *LITERAL_CLASS.keys then rp_literal_writer(irep, site, reg, ins, index)
     else ['other', ins.op.downcase, nil]
     end
@@ -318,9 +318,9 @@ module ReceiverProofReport
                                                        exhausted: ->(last) { last == '0' ? 'self' : 'argument' }) do |w, _wi|
       case w.op
       when *BytecodeIR::Ops::SEND then "call:#{w.sym}"
-      when 'GETIV' then "ivar:#{w.ivar}"
-      when 'GETIDX', 'GETIDX0' then 'element'
-      when 'GETCONST' then "const:#{w.sym}"
+      when :GETIV then "ivar:#{w.ivar}"
+      when :GETIDX, :GETIDX0 then 'element'
+      when :GETCONST then "const:#{w.sym}"
       else w.op.downcase
       end
     end

@@ -109,7 +109,7 @@ check.call('the first run derives the table once, on the Program', plan.is_a?(NF
 check.call('no second irep-level cache',
            irep.instance_variables.sort == (Irep.new.instance_variables + [:@bytecode_ir]).sort)
 check.call('steps take op, branch kind and target from the BytecodeIR decode',
-           plan.steps[1].op == 'JMPNOT' && plan.steps[1].branch == BytecodeIR::COND_NOT && plan.steps[1].goto == 6 &&
+           plan.steps[1].op == :JMPNOT && plan.steps[1].branch == BytecodeIR::COND_NOT && plan.steps[1].goto == 6 &&
            program.decoded[1].goto == 6 && program.decoded[1].reg == 1 && program.decoded[5].goto == 1 &&
            program.decoded[2].cond.nil? && program.decoded[2].goto.nil?)
 check.call('the flow answers as before: an Integer counter at the loop head', states[1][2] == INT && states[6][2] == INT)

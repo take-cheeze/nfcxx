@@ -658,7 +658,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # GETIDX keeps its Hash and subclass dispatch guards at codegen.
       captured_reg = nil
       alias_probe = proc do |prior|
-        captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
+        captured_reg = prior.reg.to_i if prior.op == :GETUPVAR && prior.upvar_ref&.last&.zero?
         nil
       end
       # An unguarded alias must dominate this GETIDX: a join the alias skips would name the argument on one path
@@ -1147,15 +1147,15 @@ def container_phi_merge(irep, at, reg)
   # join cover both arms and every other predecessor of it; the definitions before the branch do not.
   return nil unless BytecodeIR.for(irep).decoded[at]&.goto == at + 2
 
-  lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
+  lit_class = lit.op == :HASH ? 'Hash' : 'Array'
   defs = BytecodeIR.reaching_definitions(irep, at + 2, reg, shared: true)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
   agree = defs.all? do |d|
     case BytecodeIR.for(irep).source_at(d.index).op
-    when 'LOADNIL' then true
-    when 'ARRAY', 'ARRAY2' then lit_class == 'Array'
-    when 'HASH' then lit_class == 'Hash'
+    when :LOADNIL then true
+    when :ARRAY, :ARRAY2 then lit_class == 'Array'
+    when :HASH then lit_class == 'Hash'
     else false
     end
   end
@@ -1179,7 +1179,7 @@ end
 # LOADNIL (following MOVEs). A false negative only falls back to the ordinary
 # join; a false positive would drop real evidence.
 def nil_literal_write?(irep, idx, reg)
-  irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) { |insn| insn.op == 'LOADNIL' } == true
+  irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) { |insn| insn.op == :LOADNIL } == true
 end
 
 # CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` holds a fresh Array/Hash/Range
@@ -1205,7 +1205,7 @@ def literal_container_definition_class(irep, definition, path)
   return nil unless insn.reg == definition.reg
 
   case insn.op
-  when 'SEND0'
+  when :SEND0
     return nil unless insn.sym == 'freeze'
 
     # A loop-carried `x = x.freeze` names its own definition again: no class.
@@ -1216,9 +1216,9 @@ def literal_container_definition_class(irep, definition, path)
     classes = frozen&.map { |inner| literal_container_definition_class(irep, inner, path) }
     path.delete(key)
     classes.first if classes&.first && classes.uniq.size == 1
-  when 'ARRAY', 'ARRAY2' then 'Array'
-  when 'HASH' then 'Hash'
-  when 'RANGE_INC', 'RANGE_EXC' then 'Range'
+  when :ARRAY, :ARRAY2 then 'Array'
+  when :HASH then 'Hash'
+  when :RANGE_INC, :RANGE_EXC then 'Range'
   end
 end
 
@@ -1253,7 +1253,7 @@ def eqq_literal_of(irep, definition)
   return nil unless insn.reg == definition.reg
 
   case insn.op
-  when 'LOADSYM'
+  when :LOADSYM
     # Same extraction as LOADSYM's codegen (stops before a local-name comment).
     name = insn.sym_token
     name ? { type: :symbol, name: name } : nil

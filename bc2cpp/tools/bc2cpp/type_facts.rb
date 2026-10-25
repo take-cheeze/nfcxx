@@ -414,7 +414,7 @@ module TypeFacts
       idx = ex.index
       insn = BytecodeIR.for(irep).source_at(idx)
       case insn.op
-      when 'RETURN'
+      when :RETURN
         srcs = gen.respond_to?(:return_value_sources, true) ? gen.send(:return_value_sources, irep, idx, insn.reg) : nil
         if srcs.nil?
           causes << textual_producer(ctx, irep, idx, insn.reg)
@@ -467,7 +467,7 @@ module TypeFacts
 
     if BytecodeIR::Ops::CALL.include?(w.op)
       "send_result:#{w.sym}#{definer_kind(ctx, w.sym)}"
-    elsif w.op == 'GETIV'
+    elsif w.op == :GETIV
       "ivar:@#{w.ivar}"
     elsif BytecodeIR::Ops::LOADI_OPS.include?(w.op)
       'literal:Integer'
@@ -622,7 +622,7 @@ module TypeFacts
     program = BytecodeIR.for(irep)
     klasses = defs.map do |d|
       freeze = program.source_at(d.index)
-      next nil unless freeze.op == 'SEND0' && freeze.sym == 'freeze'
+      next nil unless freeze.op == :SEND0 && freeze.sym == 'freeze'
 
       FREEZE_SELF_LITERALS[textual_producer(ctx, irep, d.index, freeze.reg)]
     end

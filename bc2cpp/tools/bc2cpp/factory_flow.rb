@@ -19,7 +19,7 @@ module FactoryFlow
       reads = IrSymbolFlow.value_reads(irep, origin, register) or return nil
       reads.each do |use|
         instruction = program.source_at(use)
-        if instruction.op == 'MOVE'
+        if instruction.op == :MOVE
           work << [use, instruction.reg]
         else
           uses << [use, register]

@@ -557,7 +557,7 @@ class CodeGen
     return false unless irep
 
     first =BytecodeIR.for(irep).each_source.find { |insn, _| !%w[ENTER LINE NOP MOVE].include?(insn.op) }&.first
-    first&.op == 'SUPER' && super_reaches_superclass?(definition) &&
+    first&.op == :SUPER && super_reaches_superclass?(definition) &&
       Array(@prepended_modules[definition.owner]).empty?
   end
 

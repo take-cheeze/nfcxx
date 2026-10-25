@@ -92,10 +92,10 @@ module BytecodeIR
       ireps.each_value do |irep|
         BytecodeIR.for(irep).each_source do |insn, idx|
           case insn.op
-          when 'CLASS', 'MODULE'
+          when :CLASS, :MODULE
             poison << insn.sym_token if insn.sym_token
-          when 'SETCONST', 'SETMCNST'
-            bare = insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name
+          when :SETCONST, :SETMCNST
+            bare = insn.op == :SETCONST ? insn.const_name : insn.mcnst_name
             next unless bare
 
             src = insn.regs.last
@@ -184,12 +184,12 @@ module BytecodeIR
       return [:cls, LITERAL_CLASSES[op]].freeze if LITERAL_CLASSES.key?(op)
 
       case op
-      when 'LOADL' then pool_node(irep, insn)
-      when 'GETCONST' then (name = insn.const_name) && [:alias, name].freeze
-      when 'GETMCNST' then (name = insn.mcnst_name) && [:alias, name].freeze
+      when :LOADL then pool_node(irep, insn)
+      when :GETCONST then (name = insn.const_name) && [:alias, name].freeze
+      when :GETMCNST then (name = insn.mcnst_name) && [:alias, name].freeze
       when *ARITH_OPS then policy.operators_safe ? arith_node(irep, index, insn, policy, depth) : nil
-      when 'GETIDX' then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
-      when 'SEND0'
+      when :GETIDX then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
+      when :SEND0
         # Object#freeze answers its receiver, for the classes whose freeze is stock (freeze_classes; freeze_safe is
         # the Integer case). The node carries the classes it may answer for, and node_classes checks the receiver.
         return nil unless insn.sym == 'freeze'
@@ -201,7 +201,7 @@ module BytecodeIR
         return nil if receiver.nil? || (policy.hash_lookup_safe && !hash_frozen_in_place?(irep, index, receiver))
 
         receiver && [:freeze, receiver, allowed].freeze
-      when 'SEND'
+      when :SEND
         name = BIT_OPS[insn.sym]
         return nil unless name && insn.argc == 1 && policy.operators_safe
 
@@ -336,7 +336,7 @@ module BytecodeIR
 
     def loadi_value(insn)
       return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
-      return -1 if insn.op == 'LOADI__1'
+      return -1 if insn.op == :LOADI__1
 
       insn.imm_operand&.to_i
     end
@@ -416,10 +416,10 @@ module BytecodeIR
     # mruby's fixnum DIV floors (-7 / 2 == -4); a zero divisor raises at run time, so it has no value.
     def arith_value(op, left, right)
       case op
-      when 'ADD', 'ADDI' then left + right
-      when 'SUB', 'SUBI' then left - right
-      when 'MUL' then left * right
-      when 'DIV' then right.zero? ? nil : left.div(right)
+      when :ADD, :ADDI then left + right
+      when :SUB, :SUBI then left - right
+      when :MUL then left * right
+      when :DIV then right.zero? ? nil : left.div(right)
       when 'BIT_OR' then left | right
       when 'BIT_AND' then left & right
       when 'BIT_XOR' then left ^ right
@@ -450,10 +450,10 @@ module BytecodeIR
 
     def combine(op, left, right)
       case op
-      when 'ADD', 'ADDI' then fit([left[0] + right[0], left[1] + right[1]])
-      when 'SUB', 'SUBI' then fit([left[0] - right[1], left[1] - right[0]])
-      when 'MUL' then corners(left, right) { |a, b| a * b }
-      when 'DIV'
+      when :ADD, :ADDI then fit([left[0] + right[0], left[1] + right[1]])
+      when :SUB, :SUBI then fit([left[0] - right[1], left[1] - right[0]])
+      when :MUL then corners(left, right) { |a, b| a * b }
+      when :DIV
         # A divisor interval holding 0 raises or is unknown: no interval.
         return nil if right[0] <= 0 && right[1] >= 0
 

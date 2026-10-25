@@ -47,7 +47,7 @@ class CodeGen
     # definition names the parameter's own register: a MOVE copy is followed back to it.
     return nil unless defs.select(&:entry?).all? { |d| param_fold_proves_entry?(irep, d.reg, owner_def) }
 
-    if insn.op == 'JMPNIL'
+    if insn.op == :JMPNIL
       return :taken if mask == NumericFlow::NIL
       # OTHER is an unknown value that may be nil, so only a mask with neither NIL nor OTHER is never nil.
       return :not_taken if (mask & (NumericFlow::NIL | NumericFlow::OTHER)).zero?
@@ -58,7 +58,7 @@ class CodeGen
     truthy = (mask & NumericFlow::FALSY).zero?
     return nil unless truthy || mask == NumericFlow::NIL
 
-    jumps = truthy == (insn.op == 'JMPIF')
+    jumps = truthy == (insn.op == :JMPIF)
     jumps ? :taken : :not_taken
   end
 
@@ -82,9 +82,9 @@ class CodeGen
     return nil if truth.nil?
 
     case insn.op
-    when 'JMPNIL' then :not_taken # a boolean is never nil
-    when 'JMPIF' then truth ? :taken : :not_taken
-    when 'JMPNOT' then truth ? :not_taken : :taken
+    when :JMPNIL then :not_taken # a boolean is never nil
+    when :JMPIF then truth ? :taken : :not_taken
+    when :JMPNOT then truth ? :not_taken : :taken
     end
   end
 
@@ -97,10 +97,10 @@ class CodeGen
     lo1, hi1 = left
     lo2, hi2 = right
     case cmp.op
-    when 'LT' then hi1 < lo2 ? true : (lo1 >= hi2 ? false : nil)
-    when 'LE' then hi1 <= lo2 ? true : (lo1 > hi2 ? false : nil)
-    when 'GT' then lo1 > hi2 ? true : (hi1 <= lo2 ? false : nil)
-    when 'GE' then lo1 >= hi2 ? true : (hi1 < lo2 ? false : nil)
+    when :LT then hi1 < lo2 ? true : (lo1 >= hi2 ? false : nil)
+    when :LE then hi1 <= lo2 ? true : (lo1 > hi2 ? false : nil)
+    when :GT then lo1 > hi2 ? true : (hi1 <= lo2 ? false : nil)
+    when :GE then lo1 >= hi2 ? true : (hi1 < lo2 ? false : nil)
     end
   end
 

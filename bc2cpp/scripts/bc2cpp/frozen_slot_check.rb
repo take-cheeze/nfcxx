@@ -47,7 +47,7 @@ end
 
 # Container and slot classes of the outer table of +irep+ (its last `freeze`), or nil.
 def outer_table(cg, irep)
-  site = irep.instructions.each_index.select { |idx| irep.instructions[idx].op == 'SEND0' && irep.instructions[idx].sym == 'freeze' }.last
+  site = irep.instructions.each_index.select { |idx| irep.instructions[idx].op == :SEND0 && irep.instructions[idx].sym == 'freeze' }.last
   return nil unless site
 
   shape = cg.send(:frozen_table_literal_shape, irep, site, irep.instructions[site], FrozenTables::Registry.new)

@@ -275,7 +275,7 @@ end
 
 suite.compile('factory = Class; copy = factory; copy.new(Object); nil') do |ireps, root|
   body = ireps.fetch(root)
-  index = body.instructions.index { |i| i.op == 'GETCONST' && i.const_name == 'Class' }
+  index = body.instructions.index { |i| i.op == :GETCONST && i.const_name == 'Class' }
   check.call('an exhausted alias budget refuses instead of returning partial uses',
              FactoryFlow.uses(body, index, body.instructions[index].reg, max_aliases: 0).nil?)
 end

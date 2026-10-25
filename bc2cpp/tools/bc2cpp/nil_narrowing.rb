@@ -187,7 +187,7 @@ module NilNarrowing
 
     prog = env[:prog]
     send = prog.instruction_at(p - 1).source
-    return [] unless send.op == 'SEND'
+    return [] unless send.op == :SEND
 
     call = BytecodeIR::OperandModel.send_call(send)
     return [] unless IS_A_NAMES.include?(call.name) && call.receiver == tested

@@ -328,7 +328,7 @@ module StaticDispatchRegistrations
     tokens.merge(irep.syms.map(&:to_s)) if insns.any? { |insn, _| %w[ALIAS UNDEF].include?(insn.op) }
     kinds = receiver_kinds(irep)
     insns.each_with_index do |(insn, _), i|
-      if insn.op == 'LOADSYM'
+      if insn.op == :LOADSYM
         tokens << insn.sym.to_s
       elsif SEND_OPS.include?(insn.op)
         kind = kinds[i]
@@ -339,7 +339,7 @@ module StaticDispatchRegistrations
               else true
               end
         tokens << insn.sym.to_s if may
-      elsif insn.op == 'SUPER'
+      elsif insn.op == :SUPER
         tokens << method_name if self_may && method_name
       elsif (op_name = IMPLICIT_DISPATCH_NAMES[insn.op])
         tokens << op_name
@@ -599,7 +599,7 @@ module StaticDispatchRegistrations
     apost = BytecodeIR.for(irep).op?('APOST')
     opaque = BytecodeIR.own_upvar_written_regs(irep)
     BytecodeIR.for(irep).each_source.map do |insn, index|
-      next nil unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
+      next nil unless SEND_OPS.include?(insn.op) && insn.op != :LOADSYM
       next :self if BytecodeIR::Ops::SELF_SEND.include?(insn.op)
       next :unknown if apost
 
@@ -622,8 +622,8 @@ module StaticDispatchRegistrations
 
     insn = BytecodeIR.for(irep).source_at(definition.index)
     case insn.op
-    when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
-    when 'LOADSELF' then :self
+    when :GETCONST, :GETMCNST then [:const, insn.const_name.to_s]
+    when :LOADSELF then :self
     else BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || LITERAL_OPS.include?(insn.op) ? :core : :unknown
     end
   end

@@ -554,7 +554,7 @@ module NumericFlow
   # tested register (and whatever it was loaded or copied from) by truthiness; nil
   # and false are the only falsy values. nil when the edge is infeasible.
   def step_refine_edge(step, index, target, state, c)
-    return refine_raiseif(step.a, state) if step.op == 'RAISEIF'
+    return refine_raiseif(step.a, state) if step.op == :RAISEIF
 
     branch = step.branch
     return state unless branch
@@ -869,7 +869,7 @@ module NumericFlow
                oracle.super_mask(irep, index, insn, state)
              else OTHER
              end
-      test = c.tb && (step.op == 'SEND' || step.op == 'SEND0') ? oracle.class_test(irep, index, insn, state) : nil
+      test = c.tb && (step.op == :SEND || step.op == :SEND0) ? oracle.class_test(irep, index, insn, state) : nil
       out.fill(OTHER, a + 1, nregs - a - 1) if a + 1 < nregs
       out.fill(ELEM_UNKNOWN, c.elem_base + a + 1, nregs - a - 1) if c.elem_base && a + 1 < nregs
       preserve = c.preserves && oracle.preserves_ivar_slots?(irep, index, insn, state)

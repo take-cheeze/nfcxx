@@ -573,7 +573,7 @@ module EscapeAnalysis
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
       loads = defs.map { |d| EscapeAnalysis.insn_at(irep, d.index) }
-      loads.first.sym if loads.all? { |l| l.op == 'LOADSYM' } && loads.map(&:sym).uniq.size == 1
+      loads.first.sym if loads.all? { |l| l.op == :LOADSYM } && loads.map(&:sym).uniq.size == 1
     end
   end
 
@@ -916,7 +916,7 @@ module EscapeAnalysis
                                                              shared: true)
       return nil unless defs&.any? && defs.all? { |d| block_slot_entry?(run, prog, d) }
 
-      if insn.op == 'JMPIF'
+      if insn.op == :JMPIF
         target = prog.address_to_index[insn.branch_target]
         target && [target]
       else
@@ -928,7 +928,7 @@ module EscapeAnalysis
     def block_slot_entry?(run, prog, defn)
       return false unless defn.reg.to_s == run.block_slot
 
-      defn.entry? || (defn.built == :block && prog.source_at(defn.index).op == 'ENTER')
+      defn.entry? || (defn.built == :block && prog.source_at(defn.index).op == :ENTER)
     end
 
     # The block of this SENDB/SSENDB is the BLOCK made in this frame, so the callee gets a Proc and its `unless block`
@@ -939,7 +939,7 @@ module EscapeAnalysis
 
       prog = BytecodeIR.for(irep)
       defs = prog.reaching_definitions(index, block.to_s, shared: true)
-      defs&.size == 1 && !defs.first.entry? && prog.source_at(defs.first.index).op == 'BLOCK'
+      defs&.size == 1 && !defs.first.entry? && prog.source_at(defs.first.index).op == :BLOCK
     end
 
     # Registers R1..R<n> are the parameters; the block slot follows. ARGARY (zsuper) and BLKPUSH read them
@@ -973,65 +973,65 @@ module EscapeAnalysis
 
       case op
       when 'MOVE' then s - [lead] | (held.call(BytecodeIR::OperandModel.move(insn).src) ? [lead] : [])
-      when 'LOADSELF' then s - [lead] | (s.include?('0') ? [lead] : [])
-      when 'RETSELF'
+      when :LOADSELF then s - [lead] | (s.include?('0') ? [lead] : [])
+      when :RETSELF
         if s.include?('0') && run.returns
           run.returned = true
         elsif s.include?('0')
           escape.call(:returned)
         end
         s
-      when 'RESCUE'
+      when :RESCUE
         operands = BytecodeIR::OperandModel.regs(insn)
         escape.call(:rescue_operand) if held.call(operands[0]) || held.call(operands[1])
         s - [operands[1]]
-      when 'ARGARY'
+      when :ARGARY
         escape.call(:stored_array) if s.any? { |r| r.to_i.between?(1, run.params) }
         s - [lead]
-      when 'BLKPUSH'
+      when :BLKPUSH
         s - [lead] | (BytecodeIR::OperandModel.paren_value(insn).to_i.zero? && held.call(run.block_slot) ? [lead] : [])
       when *BINARY_NAMES.keys
         send_site(run, i, insn, s, BINARY_NAMES[op], recv: lead, args: [lead.to_i + 1], dest: lead)
-      when 'ADDI', 'SUBI'
+      when :ADDI, :SUBI
         send_site(run, i, insn, s, op == 'ADDI' ? '+' : '-', recv: lead, args: [], dest: lead)
-      when 'ADDILV', 'SUBILV'
+      when :ADDILV, :SUBILV
         # R[b], R[b+1] are the scratch window of the method-call fallback: written, never read.
         second = BytecodeIR::OperandModel.regs(insn)[1]
         scratch = [second, (second.to_i + 1).to_s]
         send_site(run, i, insn, s, op == 'ADDILV' ? '+' : '-', recv: lead, args: [], dest: lead) - scratch
-      when 'GETIDX' then send_site(run, i, insn, s, '[]', recv: lead, args: [lead.to_i + 1], dest: lead)
+      when :GETIDX then send_site(run, i, insn, s, '[]', recv: lead, args: [lead.to_i + 1], dest: lead)
       when 'GETIDX0' then send_site(run, i, insn, s, '[]', recv: BytecodeIR::OperandModel.regs(insn)[1], args: [], dest: lead)
-      when 'SETIDX'
+      when :SETIDX
         send_site(run, i, insn, s, '[]=', recv: lead, args: [lead.to_i + 1, lead.to_i + 2], dest: lead)
       when *BytecodeIR::Ops::SEND then send_op(run, i, insn, s)
-      when 'BLKCALL'
+      when :BLKCALL
         escape.call(:block_call_argument) if window.call(lead.to_i + 1, BytecodeIR::OperandModel.uint_operand(insn).to_i)
         run.uses << Use.new(index: i, kind: :call, name: 'call', reg: lead) if held.call(lead)
         s - [lead]
-      when 'SUPER'
+      when :SUPER
         positional, kw = argument_slots(insn)
         escape.call(:super_window) if window.call(lead, positional + kw + 2) || s.include?('0')
         s - [lead]
-      when 'ARRAY'
+      when :ARRAY
         three = BytecodeIR::OperandModel.src_and_literal(insn)
         escape.call(:stored_array) if window.call(three ? three[0] : lead,
                                                   three ? three[1].to_i : BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s - [lead]
-      when 'ARYCAT', 'HASHCAT', 'ARYSPLAT'
+      when :ARYCAT, :HASHCAT, :ARYSPLAT
         escape.call(:spread_operand) if window.call(lead, 2)
         s - [lead]
-      when 'ARYPUSH'
+      when :ARYPUSH
         escape.call(:stored_array) if window.call(lead.to_i + 1, BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s
-      when 'HASH'
+      when :HASH
         escape.call(:stored_hash) if window.call(lead, 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s - [lead]
-      when 'HASHADD'
+      when :HASHADD
         escape.call(:stored_hash) if window.call(lead.to_i + 1, 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s
-      when 'APOST'
+      when :APOST
         s - (0..BytecodeIR::OperandModel.post_count(insn)).map { |k| (lead.to_i + k).to_s }
-      when 'STRCAT'
+      when :STRCAT
         # A String operand is copied; anything else is converted by its own to_s.
         escape.call(:string_operand) if held.call(lead.to_i + 1) && run.value_class != 'String'
         s
@@ -1302,7 +1302,7 @@ module EscapeAnalysis
       refs = []
       BytecodeIR::Tree.each_subtree(irep, @world.ireps, CLOSURE_OPS, depth, chain) do |node, d, c|
         BytecodeIR.for(node).each_with_op(*REF_OPS) do |insn, j|
-          if insn.op == 'GETUPVAR'
+          if insn.op == :GETUPVAR
             idx, level = insn.upvar_ref
             refs << { kind: :up, idx: idx, irep: node, index: j, dest: insn.reg, chain: c } if level == d
           elsif insn.paren_value.to_i == d + 1

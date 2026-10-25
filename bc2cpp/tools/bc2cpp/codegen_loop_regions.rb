@@ -54,7 +54,7 @@ class CodeGen
   # CHAINED_ACCESSOR_SUPPORT: passing @class_layout/@registry can only turn nil
   # into 'Array'.
   def region_receiver?(irep, idx, insn, dest_reg, klass, owner_name, mand, ivar_classes, arg_classes)
-    return owner_name == klass if insn.op == 'SSENDB'
+    return owner_name == klass if insn.op == :SSENDB
 
     # A complete flow set takes precedence over the older chained-return hints.
     # In particular, reject can return Hash as well as Array.
@@ -146,7 +146,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB', spread: arity > 1 ? arity : nil,
+                   ssendb: insn.op == :SSENDB, spread: arity > 1 ? arity : nil,
                    elem_class: arity == 1 ? region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                                  owner_name) : nil }
     end
@@ -167,7 +167,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB',
+                   ssendb: insn.op == :SSENDB,
                    elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                         owner_name) }
     end
@@ -181,7 +181,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB',
+                   ssendb: insn.op == :SSENDB,
                    elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                         owner_name) }
     end
@@ -212,7 +212,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB' }
+                   ssendb: insn.op == :SSENDB }
     end
     regions
   end
@@ -236,7 +236,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB' }
+                   ssendb: insn.op == :SSENDB }
     end
     regions
   end
@@ -245,14 +245,14 @@ class CodeGen
   # answers nil: its receiver is self (only admitted when the owner is Array),
   # with no register to scan.
   def region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
-    return nil if insn.op == 'SSENDB'
+    return nil if insn.op == :SSENDB
 
     proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
   end
 
   # HASH_ELEMENT_SUPPORT: region_element_class for Hash values.
   def region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
-    return nil if insn.op == 'SSENDB'
+    return nil if insn.op == :SSENDB
 
     proven_hash_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
   end
@@ -318,7 +318,7 @@ class CodeGen
                       @lcf_rows&.file_bit(receiver_class)
 
     saved_hint = @elem_class_hint
-    code = compile_send(Insn.synthetic('SEND', "R#{dest_reg} :[] n=1"), self_implicit: false, irep: irep,
+    code = compile_send(Insn.synthetic(:SEND, "R#{dest_reg} :[] n=1"), self_implicit: false, irep: irep,
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{receiver_reg}", call_arguments: [index_expr],
                         trace_idx: idx, trace_reg_offset: reg_offset,
@@ -335,7 +335,7 @@ class CodeGen
     return nil unless @registry['[]=']&.any? { |md| md.owner == receiver_class && md.irep }
 
     saved_hint = @elem_class_hint
-    code = compile_send(Insn.synthetic('SEND', "R#{receiver_reg} :[]= n=2"), self_implicit: false, irep: irep,
+    code = compile_send(Insn.synthetic(:SEND, "R#{receiver_reg} :[]= n=2"), self_implicit: false, irep: irep,
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{receiver_reg}", call_arguments: ["r#{index_reg}", "r#{value_reg}"],
                         trace_idx: idx, trace_reg_offset: reg_offset,
@@ -408,7 +408,7 @@ class CodeGen
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
                    method_name: insn.sym, init_reg: is_fold ? (dest_reg.to_i + 1).to_s : nil,
-                   ssendb: insn.op == 'SSENDB',
+                   ssendb: insn.op == :SSENDB,
                    elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                    owner_name) }
     end
@@ -438,7 +438,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: meth, ssendb: insn.op == 'SSENDB',
+                   method_name: meth, ssendb: insn.op == :SSENDB,
                    elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                    owner_name) }
     end
@@ -467,7 +467,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { sym_addr: loadsym_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
-                   method_name: insn.sym, sym_name: sym_name, ssendb: insn.op == 'SSENDB' }
+                   method_name: insn.sym, sym_name: sym_name, ssendb: insn.op == :SSENDB }
     end
     regions
   end
@@ -616,11 +616,11 @@ class CodeGen
   # occupying the two slots immediately before index `block_idx` (the BLOCK).
   def receiver_pair_before?(irep, block_idx, reg)
     mcnst = BytecodeIR.for(irep).source_at(block_idx - 1)
-    return false unless mcnst && mcnst.op == 'GETMCNST'
+    return false unless mcnst && mcnst.op == :GETMCNST
     return false unless mcnst.reg == reg.to_s && mcnst.paren_reg == reg.to_s && mcnst.mcnst_name == 'Profiler'
 
     const = BytecodeIR.for(irep).source_at(block_idx - 2)
-    const && const.op == 'GETCONST' && const.reg == reg.to_s && const.const_name == 'RGSS'
+    const && const.op == :GETCONST && const.reg == reg.to_s && const.const_name == 'RGSS'
   end
 
   # The String pool literal for :section's name argument, or nil. The VM wrote
@@ -630,7 +630,7 @@ class CodeGen
   # the method can never be mistaken for this call's name.
   def profiler_section_literal(irep, idx, reg)
     insn = BytecodeIR.for(irep).source_at(idx - 2)
-    return nil unless insn && insn.op == 'STRING' && insn.reg == reg
+    return nil unless insn && insn.op == :STRING && insn.reg == reg
 
     pool_idx = insn.pool_index
     return nil unless pool_idx
@@ -662,7 +662,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: meth, ssendb: insn.op == 'SSENDB',
+                   method_name: meth, ssendb: insn.op == :SSENDB,
                    elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                    owner_name) }
     end
@@ -785,7 +785,7 @@ class CodeGen
     # An unclaimed one falls through to compile_insn, which emits `#error`, so the
     # driving emitter gives up and the loop falls back to BLOCK_FALLBACK as
     # before.
-    when 'BLOCK', 'SENDB', 'SSENDB'
+    when :BLOCK, :SENDB, :SSENDB
       glue = @inline_nested&.glue&.[](insn.addr)
       if glue
         glue
@@ -797,12 +797,12 @@ class CodeGen
         # the driving emitter abandon the region.
         compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
       end
-    when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
+    when :RETURN, :RETNIL, :RETFALSE, :RETTRUE
       "  goto #{iter_end_label};\n"
-    when 'RETURN_BLK'
+    when :RETURN_BLK
       r = insn.no_operands? ? '0' : insn.reg
       "  return r#{r.to_i + offset};\n"
-    when 'BREAK'
+    when :BREAK
       # EACH_BLOCK_SUPPORT: `break` (bare breaks carry a LOADNIL'd register) makes
       # the value the whole SEND's result (vm.c OP_BREAK L_UNWINDING). Inlined:
       # assign the SENDB destination and jump past the loop. Only the each/sym
@@ -813,14 +813,14 @@ class CodeGen
       else
         "  #error unhandled opcode BREAK -- not in this prototype's supported subset\n"
       end
-    when 'GETUPVAR'
+    when :GETUPVAR
       upvar_idx, level = insn.upvar_ref
       if level.zero?
         "  r#{insn.reg.to_i + offset} = r#{upvar_idx};\n"
       else
         "  #error unhandled opcode GETUPVAR -- not in this prototype's supported subset\n"
       end
-    when 'SETUPVAR'
+    when :SETUPVAR
       upvar_idx, level = insn.upvar_ref
       if level.zero?
         "  r#{upvar_idx} = r#{insn.reg.to_i + offset};\n"
@@ -832,9 +832,9 @@ class CodeGen
     # collide with a same-numbered label of the enclosing method (goto labels have
     # function scope). `.to_i`: disassembly zero-pads addresses ("016") but labels
     # use the integer value.
-    when 'JMP'
+    when :JMP
       "  goto #{label_prefix}#{insn.jmp_addr};\n"
-    when 'JMPUW'
+    when :JMPUW
       # JMPUW_SUPPORT: as compile_insn's JMPUW case, but against `block_irep`'s own
       # catch handlers and jump targets, and with prefixed labels (see JMP above).
       if jmpuw_is_plain_jump?(block_irep)
@@ -842,7 +842,7 @@ class CodeGen
       else
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end
-    when 'JMPNOT'
+    when :JMPNOT
       # The insn is unshifted and idx is its position in block_irep, so the decision reads block_irep's own state with
       # block_irep's own register numbers. Only the emitted name needs the offset (compile_shifted_body_insn, which does
       # shift the insn, keeps the offset guard).
@@ -850,12 +850,12 @@ class CodeGen
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
       decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
         "  if (!mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
-    when 'JMPIF'
+    when :JMPIF
       reg = insn.reg
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
       decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
         "  if (mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
-    when 'JMPNIL'
+    when :JMPNIL
       reg = insn.reg
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
       decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||

@@ -16,7 +16,7 @@ class BlockCaptureIndex
     @upvars.fetch(irep) do
       needs = []
       walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: @max_depth) do |insn, depth|
-        next unless insn.op == 'GETUPVAR' || insn.op == 'SETUPVAR'
+        next unless insn.op == :GETUPVAR || insn.op == :SETUPVAR
 
         index, level = insn.upvar_ref
         needs << [level - depth, index].freeze if level >= depth

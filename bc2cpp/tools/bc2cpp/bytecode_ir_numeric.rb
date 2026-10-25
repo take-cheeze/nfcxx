@@ -74,12 +74,12 @@ module BytecodeIR
 
     # What the reached RETURN_BLK exits of the block +irep+ return from its method.
     def block_return_mask(irep, states)
-      exit_mask(irep, states) { |exit, state| exit.op == 'RETURN_BLK' ? state[exit.reg] || NumericFlow::OTHER : 0 }
+      exit_mask(irep, states) { |exit, state| exit.op == :RETURN_BLK ? state[exit.reg] || NumericFlow::OTHER : 0 }
     end
 
     # True when the block +irep+ has a RETURN_BLK (a `return` from its method).
     def block_returns?(irep)
-      BytecodeIR.for(irep).exits.any? { |exit| exit.op == 'RETURN_BLK' }
+      BytecodeIR.for(irep).exits.any? { |exit| exit.op == :RETURN_BLK }
     end
 
     # Ops that run no Ruby, raise nothing and write one register: between an Array literal and its read they leave
@@ -108,7 +108,7 @@ module BytecodeIR
         return nil unless literal_index
       end
       origin, array = single_writer(program, index, receiver, opaque, follow_moves: false)
-      return nil unless array && (array.op == 'ARRAY' || array.op == 'ARRAY2') && fresh_since?(program, origin, index)
+      return nil unless array && (array.op == :ARRAY || array.op == :ARRAY2) && fresh_since?(program, origin, index)
 
       source, count = array.src_and_literal || [array.reg.to_i, array.uint_operand]
       count = count.to_i if count

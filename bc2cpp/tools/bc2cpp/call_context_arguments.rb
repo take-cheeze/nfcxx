@@ -34,7 +34,7 @@ module CallContextArguments
       target = index + supplied + 1
       # A run cut short by the end of the irep leaves a missing slot, which fails the JMP check like a non-JMP does.
       program = BytecodeIR.for(body)
-      return nil unless (index + 1...(index + optional + 2)).all? { |k| program.source_at(k)&.op == 'JMP' }
+      return nil unless (index + 1...(index + optional + 2)).all? { |k| program.source_at(k)&.op == :JMP }
 
       edges[index] = [target]
     end

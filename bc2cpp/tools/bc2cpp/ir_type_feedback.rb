@@ -23,7 +23,7 @@ module IrTypeFeedback
     return nil if ENV['BC2CPP_IR_RBS_BLOCK_TYPES'] == '0' || !ctx.signature_contracts
 
     insn = BytecodeIR.for(parent).source_at(index)
-    receiver = insn.op == 'SSENDB' ? Set[definition.owner.to_sym] : analysis.fact_at(index, insn.reg)&.classes
+    receiver = insn.op == :SSENDB ? Set[definition.owner.to_sym] : analysis.fact_at(index, insn.reg)&.classes
     return nil unless receiver&.size == 1
 
     applied = ctx.signature_contracts
@@ -50,11 +50,11 @@ module IrTypeFeedback
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)
-    child = ctx.ireps[Array(parent.reps)[producer.block_index.to_i]] if producer.op == 'BLOCK'
+    child = ctx.ireps[Array(parent.reps)[producer.block_index.to_i]] if producer.op == :BLOCK
     fields = child&.enter&.enter_fields
     return [] unless child&.file && fields && fields.drop(1).all?(&:zero?) && fields.first.between?(0, 8)
 
-    iterator = insn.op == 'SENDB' && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
+    iterator = insn.op == :SENDB && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
     elements = analysis.element_fact_at(index, insn.reg) if iterator
     binding = callback_binding(ctx, definition, parent, index, analysis, prepared: prepared)
     summary = IrYieldTypes.summarize(ctx, parent, index, analysis)
@@ -107,7 +107,7 @@ module IrTypeFeedback
     exits = []
     BytecodeIR.for(child).each_source do |instruction, position|
       kind = if RETURN_OPS.include?(instruction.op) then 'block_return'
-             elsif instruction.op == 'SETIV' then 'block_ivar_store'
+             elsif instruction.op == :SETIV then 'block_ivar_store'
              elsif EXPLICIT_RECEIVER_SENDS.include?(instruction.op) then 'block_receiver'
              end
       next unless kind
@@ -281,7 +281,7 @@ module IrTypeFeedback
       exits = []
       BytecodeIR.for(irep).each_source do |insn, index|
         kind = if RETURN_OPS.include?(insn.op) then 'return'
-               elsif insn.op == 'SETIV' then 'ivar_store'
+               elsif insn.op == :SETIV then 'ivar_store'
                elsif EXPLICIT_RECEIVER_SENDS.include?(insn.op) then 'receiver'
                end
         rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis, prepared: prepared)) if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)

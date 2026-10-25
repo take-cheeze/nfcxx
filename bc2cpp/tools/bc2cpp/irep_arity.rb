@@ -314,7 +314,7 @@ def optional_arg_table(irep)
 
   enter_idx = irep.enter_index
   jmps = instruction_run(irep, enter_idx + 1, opt + 1)
-  return [opt, nil, nil] unless jmps && jmps.all? { |i| i.op == 'JMP' }
+  return [opt, nil, nil] unless jmps && jmps.all? { |i| i.op == :JMP }
 
   [opt, jmps.map(&:addr), jmps.map { |i| i.jmp_addr }]
 end
@@ -330,7 +330,7 @@ def optional_block_arg_table(irep)
   return nil unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.positive?
 
   jmps = instruction_run(irep, irep.enter_index + 1, opt + 1)
-  return nil unless jmps && jmps.all? { |i| i.op == 'JMP' }
+  return nil unless jmps && jmps.all? { |i| i.op == :JMP }
 
   [opt, jmps.map(&:addr), jmps.map(&:jmp_addr)]
 end
@@ -372,7 +372,7 @@ def keyword_arg_table(irep)
       order << sym
       required[sym] = true
     end
-    required[sym] = false if insn.op == 'KEY_P'
+    required[sym] = false if insn.op == :KEY_P
   end
   return nil unless order.size == kw
 

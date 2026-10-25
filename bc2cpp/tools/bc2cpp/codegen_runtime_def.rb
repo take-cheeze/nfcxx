@@ -108,7 +108,7 @@ class CodeGen
       next unless insn.mentions_reg?(d)
 
       # (3) the only permitted consumer: `MOVE R<t> R<d>` into a temporary.
-      return nil unless insn.op == 'MOVE' && insn.regs[1] == d.to_s
+      return nil unless insn.op == :MOVE && insn.regs[1] == d.to_s
 
       t = insn.reg.to_i
       return nil unless t >= nlocals
@@ -256,7 +256,7 @@ class CodeGen
     # Anything else is nil ("unknown").
     (1..n).map do |k|
       insn = BytecodeIR.for(irep).source_at(idx - n + k - 1)
-      return nil unless insn && insn.op == 'LOADSYM'
+      return nil unless insn && insn.op == :LOADSYM
 
       return nil unless insn.operand_kinds == %i[reg sym] && insn.reg.to_i == dest + k
 
@@ -281,11 +281,11 @@ class CodeGen
     names = Set.new
     BytecodeIR.for(body).each_source do |insn, idx|
       case insn.op
-      when 'TDEF'
+      when :TDEF
         return nil unless insn.def_child_index
 
         names << insn.sym_token
-      when 'SSEND', 'SSEND0'
+      when :SSEND, :SSEND0
         return nil unless insn.reg && insn.sym_token && insn.nk_spec.nil? && insn.n_spec != '*'
 
         kind = CLASS_BODY_INSTALLER_SENDS[insn.sym_token]
@@ -484,7 +484,7 @@ class CodeGen
     regions = []
     irep.each_with_op('SCLASS') do |insn, idx|
       nxt = BytecodeIR.for(irep).instruction_at(idx + 1)&.source
-      next unless nxt && nxt.op == 'EXEC'
+      next unless nxt && nxt.op == :EXEC
 
       reg = insn.reg if insn.operand_kinds == %i[reg]
       next unless reg && nxt.operand_kinds == %i[reg irep] && nxt.reg == reg && nxt.block_index

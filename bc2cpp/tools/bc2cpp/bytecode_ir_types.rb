@@ -188,7 +188,7 @@ module BytecodeIR
       end
       return { rest: [:Array], local: [:NilClass] }[definition.built] if definition.built
       return nil unless insn.reg == definition.reg
-      return [self_class] if insn.op == 'LOADSELF'
+      return [self_class] if insn.op == :LOADSELF
 
       value = integer_literal(insn)
       return [:Integer, value] unless value.nil?
@@ -202,18 +202,18 @@ module BytecodeIR
       return definition.reg == '0' && !self_class ? :self_unknown : :entry_value unless insn
       return "entry:#{definition.built}" if definition.built
       return :side_write unless insn.reg == definition.reg
-      return :self_unknown if insn.op == 'LOADSELF'
+      return :self_unknown if insn.op == :LOADSELF
 
       "producer:#{insn.op}"
     end
 
     def integer_literal(insn)
       case insn.op
-      when 'LOADI__1' then -1
+      when :LOADI__1 then -1
       when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
-      when 'LOADI', 'LOADI8', 'LOADI16', 'LOADI32', 'LOADINEG'
+      when 'LOADI', :LOADI8, :LOADI16, :LOADI32, :LOADINEG
         value = insn.imm_operand&.to_i
-        value && insn.op == 'LOADINEG' ? -value.abs : value
+        value && insn.op == :LOADINEG ? -value.abs : value
       end
     end
 
@@ -309,9 +309,9 @@ module BytecodeIR
       return [nil, nil] unless insn.reg == definition.reg
 
       case insn.op
-      when 'KARG' then [@declared_keywords[insn.sym.to_s], "keyword:#{insn.sym}"]
-      when 'GETIV' then [@declared_ivars[insn.ivar], "ivar:@#{insn.ivar}"]
-      when 'SSEND', 'SSEND0', 'SSENDB' then [@declared_calls[definition.index], "self-call:#{insn.sym}"]
+      when :KARG then [@declared_keywords[insn.sym.to_s], "keyword:#{insn.sym}"]
+      when :GETIV then [@declared_ivars[insn.ivar], "ivar:@#{insn.ivar}"]
+      when :SSEND, :SSEND0, :SSENDB then [@declared_calls[definition.index], "self-call:#{insn.sym}"]
       else [nil, nil]
       end
     end
@@ -321,12 +321,12 @@ module BytecodeIR
     # spelling the name can give (LcfSchemaOracle.by_name, receiver-independent). A key that is not a literal Symbol
     # has no such bound: it is reported as a non-literal key and stays untyped.
     def lcf_row_field(definition, insn, register, max_states:, refusal:)
-      key_register = insn.op == 'GETIDX0' ? nil : (insn.reg.to_i + 1)
+      key_register = insn.op == :GETIDX0 ? nil : (insn.reg.to_i + 1)
       return nil unless key_register
       key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, shared: true, origin_transfers: true,
                                                  max_states: max_states, refusal: refusal)
       syms = key_defs&.map { |source| source.entry? ? nil : ir_program.source_at(source.index) }
-      unless syms && !syms.empty? && syms.all? { |producer| producer&.op == 'LOADSYM' }
+      unless syms && !syms.empty? && syms.all? { |producer| producer&.op == :LOADSYM }
         return unknown(refusal, :lcf_non_literal_key)
       end
 
@@ -344,14 +344,14 @@ module BytecodeIR
       insn = ir_program.source_at(definition.index)
       return nil unless %w[GETIDX GETIDX0].include?(insn.op) && insn.reg == definition.reg
 
-      register = insn.op == 'GETIDX0' ? insn.regs[1] : insn.reg
+      register = insn.op == :GETIDX0 ? insn.regs[1] : insn.reg
       receiver = query(definition.index, register, use_declarations: true, max_states: max_states, refusal: refusal)
       return lcf_row_field(definition, insn, register, max_states: max_states, refusal: refusal) if
         receiver && receiver.classes == Set[:'LCF::Array1D']
       return nil unless receiver && receiver.classes.size == 1 && [:Array, :Hash].include?(receiver.classes.first)
 
       contracts = receiver.contracts.to_set
-      if receiver.classes == Set[:Array] && insn.op != 'GETIDX0'
+      if receiver.classes == Set[:Array] && insn.op != :GETIDX0
         key = query(definition.index, (insn.reg.to_i + 1).to_s, use_declarations: true, max_states: max_states, refusal: refusal)
         return nil unless key && key.classes == Set[:Integer]
 
@@ -386,8 +386,8 @@ module BytecodeIR
     # The declared element bound of a receiver written by an ivar or constant read, with its provenance.
     def element_bound_of(producer)
       case producer.op
-      when 'GETIV' then [@declared_ivar_elements[producer.ivar], "element:ivar:@#{producer.ivar}"]
-      when 'GETCONST' then [@declared_const_elements[producer.const_name], "element:constant:#{producer.const_name}"]
+      when :GETIV then [@declared_ivar_elements[producer.ivar], "element:ivar:@#{producer.ivar}"]
+      when :GETCONST then [@declared_const_elements[producer.const_name], "element:constant:#{producer.const_name}"]
       else [nil, nil]
       end
     end
@@ -418,7 +418,7 @@ module BytecodeIR
       aliases = Set[reg.to_i]
       loop do
         grew = ir_program.each_source.any? do |insn, _index|
-          insn.op == 'MOVE' && aliases.include?(insn.regs[1].to_i) && aliases.add?(insn.regs[0].to_i)
+          insn.op == :MOVE && aliases.include?(insn.regs[1].to_i) && aliases.add?(insn.regs[0].to_i)
         end
         break unless grew
       end
@@ -433,9 +433,9 @@ module BytecodeIR
       return false if reads.empty?
 
       case insn.op
-      when 'MOVE' then false
-      when 'GETIDX0' then reads != [insn.regs[1].to_i]
-      when 'GETIDX' then reads != [insn.reg.to_i]
+      when :MOVE then false
+      when :GETIDX0 then reads != [insn.regs[1].to_i]
+      when :GETIDX then reads != [insn.reg.to_i]
       else true
       end
     end
@@ -448,8 +448,8 @@ module BytecodeIR
 
       insn = ir_program.source_at(definition.index)
       return nil unless insn.reg == definition.reg
-      return keyword_definition_types(insn) if insn.op == 'KARG'
-      return [:TrueClass, :FalseClass] if insn.op == 'KEY_P'
+      return keyword_definition_types(insn) if insn.op == :KARG
+      return [:TrueClass, :FalseClass] if insn.op == :KEY_P
       return @inferred_calls[definition.index] if BytecodeIR::Ops::SEND.include?(insn.op)
 
       type = Types.literal_class(insn, @irep.pool)

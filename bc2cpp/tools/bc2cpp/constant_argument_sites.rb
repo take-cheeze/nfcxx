@@ -259,11 +259,11 @@ module ConstantArgumentSites
   # The value of a LOADI* literal, decoded as the numeric pass does (bytecode_ir_types.rb#integer_literal).
   def integer_literal(insn)
     case insn.op
-    when 'LOADI__1' then -1
+    when :LOADI__1 then -1
     when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
-    when 'LOADI8', 'LOADI16', 'LOADI32', 'LOADINEG'
+    when :LOADI8, :LOADI16, :LOADI32, :LOADINEG
       value = insn.imm_operand&.to_i
-      value && insn.op == 'LOADINEG' ? -value.abs : value
+      value && insn.op == :LOADINEG ? -value.abs : value
     end
   end
 
@@ -276,11 +276,11 @@ module ConstantArgumentSites
       return value.nil? ? UNKNOWN : [:int, value]
     end
     case op
-    when 'LOADNIL' then nil
-    when 'LOADTRUE' then true
-    when 'LOADFALSE' then false
-    when 'LOADSYM' then insn.sym_token ? [:sym, insn.sym_token.to_s] : UNKNOWN
-    when 'GETCONST' then constants.fetch(insn.const_name.to_s, UNKNOWN)
+    when :LOADNIL then nil
+    when :LOADTRUE then true
+    when :LOADFALSE then false
+    when :LOADSYM then insn.sym_token ? [:sym, insn.sym_token.to_s] : UNKNOWN
+    when :GETCONST then constants.fetch(insn.const_name.to_s, UNKNOWN)
     else UNKNOWN
     end
   end

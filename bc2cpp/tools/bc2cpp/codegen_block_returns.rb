@@ -195,20 +195,20 @@ class CodeGen
 
     reg = (insn.reg.to_i + insn.argc + 1).to_s
     body = irep.walk_dominating_writers(index - 1, reg, follow_moves: true) do |writer|
-      @ireps[irep.reps[writer.block_index]] if writer.op == 'BLOCK'
+      @ireps[irep.reps[writer.block_index]] if writer.op == :BLOCK
     end
     return nil unless body && core_ruby_result_exits_safe?(body)
 
     entry = block_return_native_site_entry(irep, index, insn) || block_return_name_entry(insn.sym)
     return nil unless entry && entry.args == insn.argc
-    return nil if entry.kind == :self && insn.op != 'SENDB'
+    return nil if entry.kind == :self && insn.op != :SENDB
 
     [entry, body]
   end
 
   # The native singleton declaration the call reaches through its constant receiver, or nil.
   def block_return_native_site_entry(irep, index, insn)
-    return nil unless insn.op == 'SENDB'
+    return nil unless insn.op == :SENDB
 
     block_return_entries_by_name.fetch(insn.sym, []).find do |entry|
       next false unless entry.native && entry.owner.end_with?('.singleton')
@@ -334,9 +334,9 @@ class CodeGen
     # RETURN_BLK and BREAK leave the block for its method or call, not for the yield this answers.
     mask = BytecodeIR::NumericClasses.exit_mask(body, states) do |exit, state|
       case exit.op
-      when 'RETURN' then state[exit.reg]
+      when :RETURN then state[exit.reg]
       when 'RETNIL' then NumericFlow::NIL
-      when 'RETURN_BLK', 'BREAK' then 0
+      when :RETURN_BLK, :BREAK then 0
       else NumericFlow::OTHER
       end
     end

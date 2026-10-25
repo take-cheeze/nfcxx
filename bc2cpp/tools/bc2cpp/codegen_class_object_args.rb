@@ -52,12 +52,12 @@ class CodeGen
 
   def class_object_writer_values(irep, writer, depth, active)
     case writer.op
-    when 'GETCONST', 'GETMCNST'
+    when :GETCONST, :GETMCNST
       name = writer.const_name
       return nil unless name && @closed_world.class_valued_constant?(name)
 
       @closed_world.classes_named(name)
-    when 'GETUPVAR'
+    when :GETUPVAR
       index, level = writer.upvar_ref
       return nil unless index
 
@@ -169,7 +169,7 @@ class CodeGen
         next if CLASS_OBJECT_DEFINING_OPS.include?(insn.op)
 
         # `alias new old` reaches old's body through `new`; both names are poisoned.
-        if insn.op == 'ALIAS'
+        if insn.op == :ALIAS
           old = insn.first_of(:name)&.value
           poisoned << old if old
           poisoned << name

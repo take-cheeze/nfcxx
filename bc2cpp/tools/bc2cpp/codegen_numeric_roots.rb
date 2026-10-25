@@ -229,7 +229,7 @@ class CodeGen
       return []
     end
     case op
-    when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+    when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
       recv = numeric_raw_mask(irep, i, insn.reg.to_i, owner_def)
       kind = if op.start_with?('SS') then 'self'
              else recv.nil? ? 'unmodelled' : numeric_mask_name(recv)
@@ -238,7 +238,7 @@ class CodeGen
       tracked = @numeric_return && @numeric_return[sname]
       defs = (@registry[sname] || []).map { |d| d.owner == '<native>' ? 'native' : 'ruby' }.tally
       ["send:#{sname}@#{kind}[#{tracked ? "ret=#{numeric_mask_name(tracked)}" : 'untracked'} defs=#{defs.map { |k, v| "#{k}#{v}" }.join(',')}]"]
-    when 'GETIDX', 'GETIDX0'
+    when :GETIDX, :GETIDX0
       src = op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i
       recv = numeric_raw_mask(irep, i, src, owner_def)
       key = if op == 'GETIDX0' then '0'
@@ -246,11 +246,11 @@ class CodeGen
               # Label only: the shared writer of the key register (not a feed set).
               kins = numeric_label_source(irep, i, insn.reg.to_i + 1)
               kins = nil unless kins.is_a?(Insn)
-              kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
+              kins&.op == :LOADSYM ? ":#{kins.sym}" : (kins&.op || '?')
             end
       inner = numeric_root_nest('') { numeric_root_leaves(irep, i, src, owner_def).first(2).join('+') }
       ["idx[#{key}]@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}<#{inner}>"]
-    when 'AREF'
+    when :AREF
       src = insn.regs[1].to_i
       # Label only, as the GETIDX key above.
       wi = numeric_label_source(irep, i, src)
@@ -260,15 +260,15 @@ class CodeGen
              else wi.op
              end
       ["aref<#{what}>"]
-    when 'GETIV' then ["iv:#{insn.ivar && "@#{insn.ivar}"}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
-    when 'GETCONST', 'GETMCNST'
+    when :GETIV then ["iv:#{insn.ivar && "@#{insn.ivar}"}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
+    when :GETCONST, :GETMCNST
       cname = insn.const_name || insn.mcnst_name
       key = const_group_key(insn)
       group = key && @numeric_const_groups && @numeric_const_groups[key]
       state = group ? (group.failed ? (group.structural ? 'structural' : 'flowfail') : numeric_mask_name(group.mask)) : 'nogroup'
       ["const:#{cname}[#{state}#{@integer_constants&.include?(cname) ? ',intconst' : ''}]"]
-    when 'GETUPVAR' then ['upvar']
-    when 'LOADI_0', 'LOADI_1', 'LOADI8', 'LOADI16', 'LOADI32', 'LOADL' then []
+    when :GETUPVAR then ['upvar']
+    when :LOADI_0, :LOADI_1, :LOADI8, :LOADI16, :LOADI32, :LOADL then []
     else ["op:#{op}"]
     end
   end

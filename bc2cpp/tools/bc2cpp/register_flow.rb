@@ -91,7 +91,7 @@ class RegisterFlow
     lookup = ->(label) { tree[label] or raise ArgumentError, "bc2cpp: irep #{label} missing from the tree" }
     Array(irep.reps).all? do |label|
       BytecodeIR.each_nested_insn(lookup.call(label), lookup) do |insn, depth|
-        return false if insn.op == 'ARGARY'
+        return false if insn.op == :ARGARY
 
         index, level = insn.upvar_ref
         found << index.to_i if index && level == depth

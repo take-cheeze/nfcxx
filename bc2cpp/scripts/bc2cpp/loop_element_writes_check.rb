@@ -129,9 +129,9 @@ if ENV['MRBC']
     File.write(path, source)
     ireps = load_ireps(run_mrbc([path], 'loop_element', directory)).first
     body_of = lambda do |name|
-      ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'SEND0' && i.sym == name } }
+      ireps.values.find { |irep| irep.instructions.any? { |i| i.op == :SEND0 && i.sym == name } }
     end
-    send_index = ->(irep, name) { irep.instructions.index { |i| i.op == 'SEND0' && i.sym == name } }
+    send_index = ->(irep, name) { irep.instructions.index { |i| i.op == :SEND0 && i.sym == name } }
     compiled = { plain: 'succ', nested: 'pred', direct: 'next', rescued: 'ord' }.to_h do |key, name|
       body = body_of.call(name)
       [key, [body, send_index.call(body, name)]]
@@ -149,9 +149,9 @@ if ENV['MRBC']
       path = File.join(directory, 'fixture.rb')
       File.write(path, source)
       ireps = load_ireps(run_mrbc([path], 'hash_capture', directory)).first
-      host = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'SENDB' && i.sym == 'each' } }
-      sendb = host.instructions.find { |i| i.op == 'SENDB' && i.sym == 'each' }
-      block = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'GETUPVAR' } }
+      host = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == :SENDB && i.sym == 'each' } }
+      sendb = host.instructions.find { |i| i.op == :SENDB && i.sym == 'each' }
+      block = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == :GETUPVAR } }
       gen = CodeGen.allocate
       gen.instance_variable_set(:@element_annotations, { host.label => annotation.new(['Hash', nil], ['Symbol', nil]) })
       gen.send(:inline_hash_capture_hints, host, { block_irep: block, sendb_addr: sendb.addr })

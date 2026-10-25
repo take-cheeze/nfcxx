@@ -125,20 +125,20 @@ module StaticDispatchFragmentUses
       reads = IrSymbolFlow.value_reads(irep, origin, register) or return true
       reads.each do |use|
         insn = program.source_at(use)
-        if insn.op == 'MOVE'
+        if insn.op == :MOVE
           work << [use, insn.reg]
         elsif PURE_OPS.include?(insn.op)
           next
         elsif BytecodeIR::Ops::SEND.include?(insn.op)
           return true if send_escapes?(irep, use, insn, register.to_i, ctx, depth)
-        elsif insn.op == 'GETIDX'
+        elsif insn.op == :GETIDX
           # `x[value]`: the `[]` send GETIDX stands for, with the value as its argument (or receiver).
           return true if call_escapes?(irep, use, '[]', insn.reg.to_i, 1, register.to_i, false, ctx, depth)
         elsif %w[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
           return true if container_escapes?(irep, use, insn.reg, ctx, depth + 1)
-        elsif insn.op == 'STRCAT'
+        elsif insn.op == :STRCAT
           return true unless concat_poisoned?(irep, use, insn.reg)
-        elsif insn.op == 'RETURN'
+        elsif insn.op == :RETURN
           return true if result_escapes?(irep, ctx, depth + 1)
         else
           return true
@@ -197,9 +197,9 @@ module StaticDispatchFragmentUses
       reads = IrSymbolFlow.value_reads(irep, origin, register) or return true
       reads.each do |use|
         insn = program.source_at(use)
-        if insn.op == 'MOVE' then work << [use, insn.reg]
+        if insn.op == :MOVE then work << [use, insn.reg]
         elsif PURE_OPS.include?(insn.op) then next
-        elsif insn.op == 'SETCONST'
+        elsif insn.op == :SETCONST
           return true if ctx[:outside].include?(insn.const_name.to_s) # native code may read it
 
           ctx[:constants][insn.const_name.to_s].each do |reader, at, value_reg|
@@ -257,7 +257,7 @@ module StaticDispatchFragmentUses
 
     defs = BytecodeIR.reaching_definitions(irep, index, reg) || []
     !defs.empty? && defs.all? do |d|
-      !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'STRCAT' && backward_poison?(irep, d.index, reg, depth + 1)
+      !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == :STRCAT && backward_poison?(irep, d.index, reg, depth + 1)
     end
   end
 
@@ -269,7 +269,7 @@ module StaticDispatchFragmentUses
     return false unless reads&.size == 1
 
     insn = BytecodeIR.for(irep).source_at(reads.first)
-    return false unless insn.op == 'STRCAT' && insn.reg == reg
+    return false unless insn.op == :STRCAT && insn.reg == reg
 
     non_name_literal?(irep, reads.first, (reg.to_i + 1).to_s) || forward_poison?(irep, reads.first, reg, depth + 1)
   end

@@ -41,7 +41,7 @@ class CodeGen
   def const_trace_marker(insn)
     return '' unless ENV['BC2CPP_TRACE_TYPES'] == '1'
 
-    written = insn.op == 'GETMCNST' ? insn.mcnst_name : insn.const_name
+    written = insn.op == :GETMCNST ? insn.mcnst_name : insn.const_name
     "  /*BC2CPP_CONST_HIT #{const_read_owner(insn) || '-'} #{written} r#{insn.reg}*/\n"
   end
 
@@ -73,9 +73,9 @@ class CodeGen
     end
 
     case insn.op
-    when 'ENTER'
+    when :ENTER
       "  // #{insn.raw.strip} (args already bound above)\n"
-    when 'GETUPVAR', 'SETUPVAR'
+    when :GETUPVAR, :SETUPVAR
       # UPVAR_CAPTURE_SUPPORT: only reached inside a BLOCK_FALLBACK body
       # (@block_fallback_upvars set for that loop); method ireps have no
       # GETUPVAR/SETUPVAR, and inlined block bodies use compile_block_body_insn.
@@ -89,7 +89,7 @@ class CodeGen
       key = [level, upvar_idx]
       if @block_fallback_upvars&.include?(key)
         vname = upvar_var_name(*key)
-        if insn.op == 'GETUPVAR'
+        if insn.op == :GETUPVAR
           "  r#{insn.reg} = *#{vname};\n"
         else
           "  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
@@ -97,41 +97,41 @@ class CodeGen
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
       end
-    when 'KEY_P'
+    when :KEY_P
       # KEYWORD_ARG_SUPPORT: presence of an optional keyword: a bool parameter the
       # entry wrapper computed, named from `:sym` (kwarg_param_name).
       d = insn.reg
       sym = insn.sym_token
       "  r#{d} = mrb_bool_value(#{kw_given_param_name(sym)});\n"
-    when 'KARG'
+    when :KARG
       # KEYWORD_ARG_SUPPORT: the keyword's value, already an unpacked parameter. An
       # omitted optional one's default code overwrites the register after KEY_P's
       # JMPIF.
       d = insn.reg
       sym = insn.sym_token
       "  r#{d} = #{kwarg_param_name(sym)};\n"
-    when 'KEYEND'
+    when :KEYEND
       # KEYWORD_ARG_SUPPORT: unknown keywords already raised ArgumentError in the
       # entry wrapper's mrb_kwargs (`rest: NULL`).
       "  // KEYEND: already enforced by the entry wrapper's own mrb_kwargs (rest: NULL)\n"
-    when 'MOVE'
+    when :MOVE
       d, s = insn.regs.first(2)
       "  r#{d} = r#{s};\n"
-    when 'LOADNIL'
+    when :LOADNIL
       d = insn.reg
       "  r#{d} = mrb_nil_value();\n"
-    when 'LOADFALSE'
+    when :LOADFALSE
       d = insn.reg
       "  r#{d} = mrb_false_value();\n"
-    when 'LOADTRUE'
+    when :LOADTRUE
       d = insn.reg
       "  r#{d} = mrb_true_value();\n"
-    when 'LOADSELF'
+    when :LOADSELF
       # "LOADSELF R2 (R0)": R[a] = self (vm.c). Emitted for `self.foo = ...`; r0 is
       # already `self`.
       d = insn.reg
       "  r#{d} = self;\n"
-    when 'LOADSYM'
+    when :LOADSYM
       d = insn.reg
       name = insn.sym_token
       "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, \"#{name}\"));\n"
@@ -141,7 +141,7 @@ class CodeGen
       # ("R1\t128").
       lit = insn.paren_value || BytecodeIR::OperandModel.imm_operand(insn)
       "  r#{d} = mrb_fixnum_value(#{lit});\n"
-    when 'LOADL'
+    when :LOADL
       # "LOADL R5 L[0]": a pool literal (vm.c OP_LOADL). Only FLOAT is modelled:
       # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002")
       # and BIGINT (LOADL_BIGINT); INT32/INT64 never occur (the parser
@@ -162,7 +162,7 @@ class CodeGen
         kind = entry.is_a?(Hash) ? entry[:type] : :string
         "  #error LOADL references a non-float pool entry (#{kind}) -- not in this prototype's supported subset\n"
       end
-    when 'STRING'
+    when :STRING
       d = insn.reg
       idx = insn.pool_index.to_i
       entry = irep.pool.fetch(idx)
@@ -175,7 +175,7 @@ class CodeGen
       else
         "  #error STRING references a non-string pool entry (#{entry[:type]}) -- not in this prototype's supported subset\n"
       end
-    when 'SYMBOL'
+    when :SYMBOL
       # "SYMBOL R2 L[0] ; atk_mod": ops.h `R[a] = intern(Pool[b])`, unlike LOADSYM,
       # which carries an interned symbol. Same `L[idx]` pool read as STRING
       # (codedump.c), interned with mrb_intern_cstr. mrbc emits it for `%i[...]`
@@ -190,19 +190,19 @@ class CodeGen
       else
         "  #error SYMBOL references a non-string pool entry (#{sentry[:type]}) -- not in this prototype's supported subset\n"
       end
-    when 'INTERN'
+    when :INTERN
       # "INTERN R<a>": vm.c `mrb_ensure_string_type(mrb, regs[a]); mrb_sym sym =
       # mrb_intern_str(mrb, regs[a]); regs[a] = mrb_symbol_value(sym);`, an in-place
       # String -> Symbol conversion (`:"#{expr}"`). Unconditional, like STRCAT.
       d = insn.reg
       "  r#{d} = mrb_ensure_string_type(M, r#{d});\n  r#{d} = mrb_symbol_value(mrb_intern_str(M, r#{d}));\n"
-    when 'STRCAT'
+    when :STRCAT
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).
       d = insn.reg
       s = insn.paren_reg
       "  r#{d} = mrb_ensure_string_type(M, r#{d});\n  mrb_str_concat(M, r#{d}, r#{s});\n"
-    when 'GETIV'
+    when :GETIV
       d = insn.reg
       ivar = insn.ivar
       klass = self_class(owner_def)
@@ -215,7 +215,7 @@ class CodeGen
       else
         "  #{code}\n#{ivar_trace_marker(klass, ivar, d)}"
       end
-    when 'SETIV'
+    when :SETIV
       ivar = insn.ivar
       # Not `$`-anchored: a trailing "; R1:name" comment (see IvarLayout.analyze).
       s = insn.regs.first
@@ -229,7 +229,7 @@ class CodeGen
       else
         "  #{code}\n"
       end
-    when 'ADDI'
+    when :ADDI
       d = insn.reg
       lit = BytecodeIR::OperandModel.imm_operand(insn)
       # FIXNUM_OPERAND_PROOF: the immediate is a Fixnum, so only the destination
@@ -256,7 +256,7 @@ class CodeGen
           #{guarded ? '  }' : ''}
         CPP
       end
-    when 'ADD'
+    when :ADD
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
@@ -289,7 +289,7 @@ class CodeGen
           #{guarded ? '  }' : ''}
         CPP
       end
-    when 'SUBI'
+    when :SUBI
       d = insn.reg
       lit = BytecodeIR::OperandModel.imm_operand(insn)
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
@@ -314,7 +314,7 @@ class CodeGen
           #{guarded ? '  }' : ''}
         CPP
       end
-    when 'SUB'
+    when :SUB
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
@@ -347,7 +347,7 @@ class CodeGen
           #{guarded ? '  }' : ''}
         CPP
       end
-    when 'MUL'
+    when :MUL
       # Same shape as ADD/SUB: vm.c OP_ADD/OP_SUB/OP_MUL all expand OP_MATH, so MUL
       # differs only in operator and fallback name.
       d = insn.reg
@@ -382,7 +382,7 @@ class CodeGen
           #{guarded ? '  }' : ''}
         CPP
       end
-    when 'DIV'
+    when :DIV
       # DIV_FASTPATH_SUPPORT: Integer#/ floors (not C's truncation). int_div
       # (src/numeric.c) calls mrb_div_int_value(mrb, mrb_integer(x), mrb_integer(y))
       # for Integer/Integer, so calling it here reproduces the rounding and the
@@ -421,7 +421,7 @@ class CodeGen
           #{guarded ? '  }' : ''}
         CPP
       end
-    when 'EQ', 'LT', 'LE', 'GT', 'GE'
+    when :EQ, :LT, :LE, :GT, :GE
       compile_cmp(insn, irep, idx, owner_def, reg_offset)
     # BLOCK_BODY_INDEX_SUPPORT: compile_send keeps `idx` nil inside shifted block
     # bodies: its other scans derive r<d>..r<d+n> windows from `args`, and two of
@@ -429,17 +429,17 @@ class CodeGen
     # into the output, which would need re-shifting. trace_new_target needs only
     # the receiver register and index, both safely unshiftable, so it alone gets
     # the separate `trace_idx`/offset context.
-    when 'SEND0', 'SEND'
+    when :SEND0, :SEND
       compile_send(insn, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                    trace_idx: idx, trace_reg_offset: reg_offset)
-    when 'SSEND0', 'SSEND'
-      if insn.op == 'SSEND0' && BLOCK_GIVEN_NAMES.include?(insn.sym) && block_given_modelled?
+    when :SSEND0, :SSEND
+      if insn.op == :SSEND0 && BLOCK_GIVEN_NAMES.include?(insn.sym) && block_given_modelled?
         compile_block_given(insn)
       else
         compile_send(insn, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                      trace_idx: idx, trace_reg_offset: reg_offset)
       end
-    when 'BLKPUSH'
+    when :BLKPUSH
       # BLKPUSH_YIELD_SUPPORT: `BLKPUSH R4 2:0:0:0 (0)`: vm.c OP_BLKPUSH with lv == 0
       # reads regs[1 + offset], this frame's block (lv > 0 walks uvenv). Compiled
       # only with @blk_param_name set, i.e. when compile_method's prescan arranged
@@ -461,7 +461,7 @@ class CodeGen
       else
         "#error unhandled opcode BLKPUSH #{insn.args}\n"
       end
-    when 'BLKCALL'
+    when :BLKCALL
       # "BLKCALL R4 2": ops.h `R[a] = R[a].call(R[a+1],...,R[a+b])`. codegen_yield's
       # fast path for a plain `yield` (no keywords, < 15 args, no splat; otherwise
       # SEND :call), always right after a BLKPUSH into the same register. So this is
@@ -494,26 +494,26 @@ class CodeGen
         out << "  }\n"
       end
       out
-    when 'RETURN'
+    when :RETURN
       r = insn.no_operands? ? '0' : insn.reg
       "  return r#{r};\n"
-    when 'RETNIL'
+    when :RETNIL
       "  return mrb_nil_value();\n"
-    when 'RETFALSE'
+    when :RETFALSE
       "  return mrb_false_value();\n"
-    when 'RETTRUE'
+    when :RETTRUE
       "  return mrb_true_value();\n"
-    when 'RETSELF'
+    when :RETSELF
       # "RETSELF": vm.c `a = 0; goto NORMAL_RETURN;`. mrbc's gen_return only emits
       # it as a LOADSELF+RETURN peephole, and every leaf irep compiled here is a def
       # body, so it is `return self`.
       "  return self;\n"
-    when 'JMP'
+    when :JMP
       # `.to_i`: the disassembly zero-pads ("018") while labels use the integer
       # ("L18:").
       target = ensure_remapped_jump_target(irep, insn.jmp_addr)
       "  goto L#{target};\n"
-    when 'JMPUW'
+    when :JMPUW
       # JMPUW_SUPPORT: break/next/redo/retry; a plain JMP when no ensure handler
       # can intercept it (see jmpuw_plain_jump_at?). `.to_i` as for JMP.
       if jmpuw_plain_jump_at?(irep, insn)
@@ -521,24 +521,24 @@ class CodeGen
       else
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end
-    when 'JMPNOT'
+    when :JMPNOT
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
         "  if (!mrb_test(r#{reg})) goto L#{target};\n"
-    when 'JMPIF'
+    when :JMPIF
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
         "  if (mrb_test(r#{reg})) goto L#{target};\n"
-    when 'JMPNIL'
+    when :JMPNIL
       # "JMPNIL R3 024": jump if exactly nil (vm.c), for nil-specific tests like
       # `x.nil? ? a : b`.
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
         "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
-    when 'GETCONST'
+    when :GETCONST
       # "GETCONST R4 Integer": the VM resolves against the lexical scope chain
       # (mrb_vm_const_get), which compiled code does not have. A single lookup from
       # Object misses class-body and enclosing-module constants (`KIND_SKILL` in
@@ -578,12 +578,12 @@ class CodeGen
       end
 
       const_lookup_block(d, name, owner_path)
-    when 'OCLASS'
+    when :OCLASS
       # OCLASS_SUPPORT: "OCLASS R3" for `::Foo` (followed by GETMCNST); vm.c
       # `regs[a] = mrb_obj_value(mrb->object_class)`.
       d = insn.reg
       "  r#{d} = mrb_obj_value(M->object_class);\n"
-    when 'GETMCNST'
+    when :GETMCNST
       # "GETMCNST R6 (R6)::Sections": r<d> holds the owning module (from the chain,
       # e.g. GETCONST R2 LCF; GETMCNST R2 (R2)::Schema; GETMCNST R2 (R2)::DATABASE);
       # read the constant from it into the same register.
@@ -597,7 +597,7 @@ class CodeGen
       end
 
       "  r#{d} = mrb_const_get(M, r#{d}, mrb_intern_cstr(M, \"#{name}\"));\n"
-    when 'HASH'
+    when :HASH
       # "HASH R2 22": N key/value pairs from Rd, result into Rd (vm.c OP_HASH). All
       # pair registers are read before Rd is written.
       d = insn.reg.to_i
@@ -609,7 +609,7 @@ class CodeGen
       out << "    r#{d} = h;\n"
       out << "  }\n"
       out
-    when 'ARRAY'
+    when :ARRAY
       # "ARRAY R3 2": N registers from Rd into a new Array in Rd (vm.c
       # `mrb_ary_new_from_values(mrb, b, &regs[a])`). The registers are separate C++
       # locals, not contiguous, so they are copied into a C array first; all are
@@ -634,7 +634,7 @@ class CodeGen
         out << "  }\n"
         out
       end
-    when 'ARYPUSH'
+    when :ARYPUSH
       # "ARYPUSH R3 2": push Ra+1..Ra+N onto the Array in Ra (vm.c
       # `mrb_ensure_array_type(mrb, regs[a]); for (...) mrb_ary_push(...)`). Ra is
       # always an Array here: codegen.c emits OP_ARYPUSH only in gen_values and
@@ -645,7 +645,7 @@ class CodeGen
       out = String.new
       n.times { |i| out << "  mrb_ary_push(M, r#{d}, r#{d + i + 1});\n" }
       out
-    when 'ARYCAT'
+    when :ARYCAT
       # "ARYCAT R3 (R4)" (codedump.c `"ARYCAT\tR%d\t(R%d)"`). vm.c OP_ARYCAT:
       #   mrb_value splat = mrb_ary_splat(mrb, regs[a+1]);
       #   if (mrb_nil_p(regs[a])) regs[a] = splat;
@@ -666,14 +666,14 @@ class CodeGen
           }
         }
       CPP
-    when 'AREF'
+    when :AREF
       # "AREF R2 R6 0 ; R2:x": R[a] = R[b][c] with an immediate c (vm.c): for a
       # non-Array, index 0 yields R[b] itself and others nil; for an Array,
       # mrb_ary_ref. This is `x, y, w, h = some_call(...)` destructuring.
       d, s = insn.regs.first(2)
       c = insn.src_and_literal&.last
       "  r#{d} = mrb_array_p(r#{s}) ? bc2cpp_ary_entry(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
-    when 'GETIDX'
+    when :GETIDX
       # "GETIDX R2 (R3)": R[a] = R[a][R[a+1]] with a register index (vm.c).
       # Mirrors vm.c's fast paths: Array with an Integer index (mrb_ary_ref), Hash
       # (mrb_hash_get), String with an Integer/String/Range index; anything else
@@ -749,7 +749,7 @@ class CodeGen
         typed = compile_typed_index_send(irep, idx, owner_def, d, d, "r#{s}", reg_offset, index_class, fallback)
         typed || fallback
       end
-    when 'GETIDX0'
+    when :GETIDX0
       # "GETIDX0 R7 R4[0]": R[a] = R[b][0] (vm.c), separate dest/source registers
       # and no index register. Same exact-class Array/Hash fast paths as GETIDX,
       # else a real `[]` send with 0, as vm.c's getidx0_fallback.
@@ -789,7 +789,7 @@ class CodeGen
                                          index_class, fallback)
         typed || fallback
       end
-    when 'SETIDX'
+    when :SETIDX
       # "SETIDX R4 (R5) (R6)": R[a][R[a+1]] = R[a+2], then R[a] = R[a+2] on the fast
       # Array/Hash paths (vm.c; `arr[i] = v` evaluates to v). Otherwise (including
       # container subclasses) a real `[]=` send, whose return value is kept, as in
@@ -835,25 +835,25 @@ class CodeGen
         typed = compile_typed_index_write(irep, idx, owner_def, d, idx_reg, val, reg_offset, index_class, fallback)
         typed || fallback
       end
-    when 'GETGV'
+    when :GETGV
       # "GETGV R4 $stderr": R[a] = mrb_gv_get (vm.c); the symbol already includes the
       # `$`.
       d = insn.reg
       name = insn.global_name
       "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
-    when 'SETGV'
+    when :SETGV
       # "SETGV $stderr R4": operands are reversed relative to GETGV (codedump.c
       # `"SETGV\t\t%s\tR%d"`), so both are matched unanchored (one `$` token, one
       # register). vm.c: `mrb_gv_set(mrb, irep->syms[b], regs[a])`.
       s = insn.regs.first
       name = insn.global_name
       "  mrb_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
-    when 'STOP'
+    when :STOP
       ''
-    when 'NOP'
+    when :NOP
       # "NOP": vm.c does nothing. mrbc places it after a while loop's entry JMPNOT.
       ''
-    when 'ADDILV'
+    when :ADDILV
       # "ADDILV Rd Rb N ; Rd:name": vm.c OP_MATHILV(add) updates regs[a] in place
       # (`b` is never touched), falling back to `+` for non-Integers, like ADDI.
       # The immediate is the third operand (`^R\d+\s+R\d+\s+(-?\d+)`): `a`
@@ -874,7 +874,7 @@ class CodeGen
           }
         CPP
       end
-    when 'SUBILV'
+    when :SUBILV
       # OP_SUBILV: ADDILV's sibling (same shape, same extraction), e.g. `new_level -=
       # 1 while ...`.
       d = insn.reg
@@ -890,16 +890,16 @@ class CodeGen
           }
         CPP
       end
-    when 'RANGE_INC'
+    when :RANGE_INC
       # "RANGE_INC Ra": R[a] = mrb_range_new(mrb, regs[a], regs[a+1], FALSE) (vm.c);
       # both operands are read before r<a> is written.
       d = insn.reg.to_i
       "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, FALSE);\n"
-    when 'RANGE_EXC'
+    when :RANGE_EXC
       # OP_RANGE_EXC: RANGE_INC with exclude_end TRUE (`a...b`).
       d = insn.reg.to_i
       "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, TRUE);\n"
-    when 'RETURN_BLK'
+    when :RETURN_BLK
       # "RETURN_BLK Ra": vm.c starts with `if (!MRB_PROC_ENV_P(ci->proc) ||
       # MRB_PROC_STRICT_P(ci->proc)) goto NORMAL_RETURN;`. Reached from:
       # (1) a def body (always strict, @block_fallback_active false): e.g. an early
@@ -921,7 +921,7 @@ class CodeGen
       else
         "  return r#{r};\n"
       end
-    when 'BREAK'
+    when :BREAK
       # "BREAK Ra": vm.c starts with `if (MRB_PROC_STRICT_P(ci->proc)) goto
       # NORMAL_RETURN;`. Reached from:
       # (1) a LAMBDA_FALLBACK body (strict): a plain `return`.
@@ -939,21 +939,21 @@ class CodeGen
       else
         "  return r#{r};\n"
       end
-    when 'RESCUE'
+    when :RESCUE
       # "RESCUE Ra Rb": vm.c `R[b] = R[a].isa?(R[b])`. Ra holds the exception (only
       # RESCUE_SUPPORT's glue produces one) and Rb the class from the preceding
       # GETCONST/GETMCNST chain, so this is correct wherever it appears; not gated on
       # the recognizer (unlike EXCEPT).
       d, s = insn.regs
       "  r#{s} = mrb_bool_value(mrb_obj_is_kind_of(M, r#{d}, mrb_class_ptr(r#{s})));\n"
-    when 'RAISEIF'
+    when :RAISEIF
       # "RAISEIF Ra": re-raise Ra unless nil. In a recognized rescue it is reached
       # only on the non-matching path with the exception in Ra. vm.c's mrb_break_p
       # branch (a break unwinding through a block) does not apply: the leaf ireps
       # compiled here are def bodies, so Ra is nil or an exception.
       ra = insn.reg
       "  if (!mrb_nil_p(r#{ra})) { mrb_exc_raise(M, r#{ra}); }\n"
-    when 'SUPER'
+    when :SUPER
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
       # self as receiver and N args in R(a+1)..R(a+N), plus one register forwarding
       # the current block. super_target applies the allowlist and calls the target
@@ -977,7 +977,7 @@ class CodeGen
        else
          "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
        end
-     when 'ARGARY'
+     when :ARGARY
       # ZSUPER_NATIVE_SUPPORT: the array this ARGARY builds is only read by the next
       # `SUPER ... n=*` (zsuper_native_kind checks the adjacency and registers), and
       # both translations use the original registers instead, so it is not built.
@@ -1150,7 +1150,7 @@ class CodeGen
 
     numeric_root_probe(name, dest_reg, arg_reg, irep, idx, owner_def, reg_offset) if ENV['BC2CPP_NUMERIC_ROOTS']
     argument = arg_reg ? "r#{arg_reg}" : arg_expr
-    send_insn = Insn.synthetic('SEND', "R#{dest_reg} :#{name} n=1")
+    send_insn = Insn.synthetic(:SEND, "R#{dest_reg} :#{name} n=1")
     send = compile_send(send_insn, self_implicit: false, irep: irep,
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{dest_reg}", call_arguments: [argument])

@@ -49,10 +49,10 @@ class CodeGen
   # +prove+ is called as (irep, index, register) for each stored value and answers nil or why it is not +cls+.
   def sealed_hash_read_failure(irep, w, cls, prove)
     insn = BytecodeIR.for(irep).source_at(w)
-    return 'not a GETIDX' unless insn&.op == 'GETIDX' && insn.reg
+    return 'not a GETIDX' unless insn&.op == :GETIDX && insn.reg
 
     sources = BytecodeIR.producers(irep, w, insn.reg, through_handlers: true)
-    return 'its receiver is not one ivar read' unless sources&.size == 1 && sources.first.op == 'GETIV'
+    return 'its receiver is not one ivar read' unless sources&.size == 1 && sources.first.op == :GETIV
 
     name = sources.first.insn.ivar
     owner = ivar_reader_owner(irep.label)
@@ -141,14 +141,14 @@ class CodeGen
       next false if fixnum_proof_ctx(irep)[:upvars].include?(r.to_s)
 
       case insn.op
-      when 'GETIDX' then insn.reg == r.to_s
-      when 'SETIDX'
+      when :GETIDX then insn.reg == r.to_s
+      when :SETIDX
         recv, key, value = insn.regs
         next false unless recv == r.to_s && value && ![key, value].include?(r.to_s)
 
         found << [irep, use, value]
-      when 'SEND', 'SEND0'
-        argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+      when :SEND, :SEND0
+        argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
         insn.reg == r.to_s && SEALED_HASH_READ_SENDS.include?([insn.sym, argc])
       else false
       end
@@ -187,8 +187,8 @@ class CodeGen
     return false unless x
 
     sealed_hash_straight_line(irep, g + 1) do |insn|
-      next :done if insn.op == 'GETIDX' && insn.reg == x
-      next :fail if insn.op == 'MOVE' && insn.regs[1] == x
+      next :done if insn.op == :GETIDX && insn.reg == x
+      next :fail if insn.op == :MOVE && insn.regs[1] == x
       next :done if insn.reg == x # overwritten unread
 
       :next
@@ -205,7 +205,7 @@ class CodeGen
     preds = program.instruction_predecessors(include_handlers: true)
     sources.each do |producer|
       return 'an argument' if producer.entry?
-      next if producer.op == 'LOADNIL'
+      next if producer.op == :LOADNIL
 
       literal = program.container_literal(producer.index)
       return "#{producer.op}, not a Hash literal" unless literal&.kind == :hash
@@ -227,7 +227,7 @@ class CodeGen
     sealed_hash_straight_line(irep, s + 1) do |insn|
       next :done if SEALED_HASH_EXITS.include?(insn.op) || (sealed_hash_empty_literal?(insn) && insn.reg == reg)
       next :fail unless sealed_hash_load_op?(insn.op)
-      next :fail if insn.op == 'MOVE' && insn.regs[1] == reg
+      next :fail if insn.op == :MOVE && insn.regs[1] == reg
       next :done if insn.reg == reg
 
       :next
@@ -240,7 +240,7 @@ class CodeGen
   def sealed_hash_straight_line(irep, start)
     BytecodeIR.for(irep).straight_line(start, SEALED_HASH_WINDOW) do |insn, _k|
       verdict = yield insn
-      return true if verdict == :done && (insn.op == 'GETIDX' || sealed_hash_load_op?(insn.op) ||
+      return true if verdict == :done && (insn.op == :GETIDX || sealed_hash_load_op?(insn.op) ||
                                           SEALED_HASH_EXITS.include?(insn.op) || sealed_hash_empty_literal?(insn))
       return false if verdict == :fail || !sealed_hash_load_op?(insn.op)
     end

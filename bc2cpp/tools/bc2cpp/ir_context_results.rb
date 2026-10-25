@@ -11,8 +11,8 @@ class IrContextResults
   MAX_ROUNDS = 48
   MAX_CLASSES = 16
   MAX_SHAPE_PATH_STATES = 4096
-  SHAPE_PRESERVING_OPS = Set['MOVE', 'NOP', 'LOADNIL', 'LOADSYM', 'LOADTRUE', 'LOADFALSE',
-                             'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  SHAPE_PRESERVING_OPS = Set[:MOVE, :NOP, :LOADNIL, :LOADSYM, :LOADTRUE, :LOADFALSE,
+                             :JMP, :JMPIF, :JMPNOT, :JMPNIL].freeze
   CLASS_CACHE_LIMIT = 2048
   EMPTY_FRAME_ARGUMENTS = [].freeze
   EMPTY_FRAME_KEYWORDS = {}.freeze
@@ -266,7 +266,7 @@ class IrContextResults
     return nil unless index
     if optional.positive?
       program = BytecodeIR.for(body)
-      return nil unless (index + 1..index + optional + 1).all? { |table| program.source_at(table)&.op == 'JMP' }
+      return nil unless (index + 1..index + optional + 1).all? { |table| program.source_at(table)&.op == :JMP }
     end
     names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
     optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
@@ -375,11 +375,11 @@ class IrContextResults
 
     BytecodeIR::NumericClasses.exit_mask(body, node.states) do |exit, state|
       case exit.op
-      when 'RETURN' then state[exit.reg]
-      when 'RETSELF' then node.receiver
+      when :RETURN then state[exit.reg]
+      when :RETSELF then node.receiver
       when 'RETNIL' then NumericFlow::NIL
-      when 'RETTRUE' then @gen.numeric_class_bit('TrueClass')
-      when 'RETFALSE' then @gen.numeric_class_bit('FalseClass')
+      when :RETTRUE then @gen.numeric_class_bit('TrueClass')
+      when :RETFALSE then @gen.numeric_class_bit('FalseClass')
       else NumericFlow::OTHER
       end
     end
@@ -428,7 +428,7 @@ class IrContextResults
       return nil unless definitions&.size == 1 && !definitions.first.entry?
 
       producer = BytecodeIR.for(body).source_at(definitions.first.index)
-      return nil unless producer.op == 'LOADSYM'
+      return nil unless producer.op == :LOADSYM
 
       keyword_registers << [producer.sym.to_s.dup.freeze, key_register + 1].freeze
     end
@@ -559,7 +559,7 @@ class IrContextResults
   end
 
   def index_mask(body, index, insn, state)
-    register = insn.op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i
+    register = insn.op == :GETIDX0 ? insn.regs[1].to_i : insn.reg.to_i
     receiver = state[register]
     private_bits = receiver & @shape_mask
     rest = receiver & ~private_bits
@@ -572,8 +572,8 @@ class IrContextResults
       if shape.container == :Hash
         result |= shape.elements.reduce(NumericFlow::NIL, :|)
       else
-        key = insn.op == 'GETIDX0' ? 0 : @gen.send(:frozen_table_literal_key, body, index, register + 1)
-        integer = insn.op == 'GETIDX0' || state[register + 1] == NumericFlow::INT
+        key = insn.op == :GETIDX0 ? 0 : @gen.send(:frozen_table_literal_key, body, index, register + 1)
+        integer = insn.op == :GETIDX0 || state[register + 1] == NumericFlow::INT
         return NumericFlow::OTHER unless integer
 
         result |= if key.is_a?(Integer)

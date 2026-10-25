@@ -84,8 +84,8 @@ class CallSiteIndex
     names = writers.map do |index|
       writer = program.source_at(index)
       case writer.op
-      when 'LOADSYM' then writer.sym
-      when 'SYMBOL'
+      when :LOADSYM then writer.sym
+      when :SYMBOL
         value = irep.pool[writer.pool_index]
         value if value.is_a?(String)
       end
@@ -105,7 +105,7 @@ class CallSiteIndex
 
       writer = writers.first.index
       source = program.source_at(writer)
-      if source.op == 'ARRAY'
+      if source.op == :ARRAY
         origin = writer
         break
       end
@@ -122,7 +122,7 @@ class CallSiteIndex
       source = program.source_at(index)
       if %w[ARYCAT ARYPUSH].include?(source.op)
         source.reg == reg
-      elsif source.op == 'NOP'
+      elsif source.op == :NOP
         true
       else
         quiet = %w[MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE STRING SYMBOL GETUPVAR].include?(source.op) ||
@@ -162,13 +162,13 @@ class CallSiteIndex
       (irep.reps || []).each { |child| parent[child] = irep.label }
       irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, idx|
         case insn.op
-        when 'TDEF', 'SDEF'
+        when :TDEF, :SDEF
           child = irep.reps[insn.block_index]
           body_name[child] = insn.sym if child && insn.sym
-        when 'DEF'
+        when :DEF
           mi = irep.previous_real_index(idx - 1)
           meth = mi >= 0 ? BytecodeIR.for(irep).source_at(mi) : nil
-          next unless meth && meth.op == 'METHOD' && insn.paren_reg == meth.reg
+          next unless meth && meth.op == :METHOD && insn.paren_reg == meth.reg
 
           child = irep.reps[meth.block_index]
           body_name[child] = insn.sym if child && insn.sym

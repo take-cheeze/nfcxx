@@ -42,10 +42,10 @@ module AliasSites
     insn = BytecodeIR.for(irep).source_at(idx)
     found =
       case insn.op
-      when 'ALIAS'
+      when :ALIAS
         old = insn.first_of(:name)&.value
         Site.new(new_name: insn.sym, old_name: old) if insn.sym && old
-      when 'SSEND'
+      when :SSEND
         method_site(irep, idx, insn)
       end
     found if found && DefineMethodSites.straight_line?(irep, insn)
@@ -57,8 +57,8 @@ module AliasSites
     base = insn.reg.to_i
     new_insn = BytecodeIR.for(irep).source_at(idx - 2)
     old_insn = BytecodeIR.for(irep).source_at(idx - 1)
-    return nil unless new_insn.op == 'LOADSYM' && new_insn.reg.to_i == base + 1 && new_insn.sym_token
-    return nil unless old_insn.op == 'LOADSYM' && old_insn.reg.to_i == base + 2 && old_insn.sym_token
+    return nil unless new_insn.op == :LOADSYM && new_insn.reg.to_i == base + 1 && new_insn.sym_token
+    return nil unless old_insn.op == :LOADSYM && old_insn.reg.to_i == base + 2 && old_insn.sym_token
 
     following = BytecodeIR.for(irep).source_at(idx + 1)
     return nil if following && BytecodeIR::Ops::SEND.include?(following.op) && VISIBILITY_SENDS.include?(following.sym)
@@ -92,7 +92,7 @@ module AliasSites
   def name_free?(irep, ireps)
     BytecodeIR.for(irep).each_source.none? do |insn, _|
       NAME_OPS.include?(insn.op) || (BytecodeIR::Ops::SEND.include?(insn.op) && NAME_SENDS.include?(insn.sym)) ||
-        (insn.op == 'LOADSYM' && NAME_SENDS.include?(insn.sym_token))
+        (insn.op == :LOADSYM && NAME_SENDS.include?(insn.sym_token))
     end && irep.reps.compact.all? { |child| ireps[child] && name_free?(ireps[child], ireps) }
   end
 
@@ -123,7 +123,7 @@ module AliasSites
         next false unless d.installer == :alias
 
         label, idx = d.site.first
-        keyword = BytecodeIR.for(ireps.fetch(label)).source_at(idx).op == 'ALIAS'
+        keyword = BytecodeIR.for(ireps.fetch(label)).source_at(idx).op == :ALIAS
         !(closed && (keyword || method_trusted)) || defs.any? { |o| !o.equal?(d) && o.owner == d.owner }
       end
       kept += defs.count { |d| d.installer == :alias } - doomed.size

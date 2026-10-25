@@ -28,57 +28,57 @@ module OperandSchema
   JC = %i[reg addr].freeze
 
   SCHEMAS = {
-    'NOP' => Z, 'CALL' => Z, 'KEYEND' => Z, 'RETSELF' => Z, 'RETNIL' => Z, 'RETTRUE' => Z,
-    'RETFALSE' => Z, 'STOP' => Z, 'EXT1' => Z, 'EXT2' => Z, 'EXT3' => Z,
-    'MOVE' => %i[reg reg].freeze, 'RESCUE' => %i[reg reg].freeze,
-    'LOADL' => %i[reg pool].freeze,
-    'LOADI8' => RI, 'LOADINEG' => RI, 'LOADI16' => RI, 'LOADI32' => RI,
-    'LOADI__1' => RL, 'LOADI_0' => RL, 'LOADI_1' => RL, 'LOADI_2' => RL, 'LOADI_3' => RL,
-    'LOADI_4' => RL, 'LOADI_5' => RL, 'LOADI_6' => RL, 'LOADI_7' => RL,
-    'LOADSYM' => RS,
-    'LOADNIL' => RL, 'LOADTRUE' => RL, 'LOADFALSE' => RL,
-    'LOADSELF' => RP,
-    'GETGV' => RN, 'GETSV' => RN, 'GETCONST' => RN, 'GETIV' => RN, 'GETCV' => RN,
-    'SETGV' => NR, 'SETSV' => NR, 'SETCONST' => NR, 'SETIV' => NR, 'SETCV' => NR,
-    'GETMCNST' => %i[reg mcnst].freeze,
-    'SETMCNST' => %i[mcnst reg].freeze,
-    'GETUPVAR' => %i[reg int int].freeze, 'SETUPVAR' => %i[reg int int].freeze,
-    'GETIDX' => RP, 'GETIDX0' => %i[reg idx0].freeze, 'SETIDX' => %i[reg preg preg].freeze,
-    'JMP' => %i[addr].freeze, 'JMPUW' => %i[addr].freeze,
-    'JMPIF' => JC, 'JMPNOT' => JC, 'JMPNIL' => JC,
-    'SSEND' => RSA, 'SSENDB' => RSA, 'SEND' => RSA, 'SENDB' => RSA,
-    'SSEND0' => RS, 'SEND0' => RS,
-    'BLKCALL' => RI,
-    'SUPER' => %i[reg argc].freeze,
-    'ARGARY' => %i[reg spec plit].freeze, 'BLKPUSH' => %i[reg spec plit].freeze,
-    'ENTER' => %i[enter plit].freeze,
-    'KEY_P' => RS, 'KARG' => RS,
-    'RETURN' => R, 'RETURN_BLK' => R, 'BREAK' => R,
-    'LAMBDA' => RIR, 'BLOCK' => RIR, 'METHOD' => RIR, 'EXEC' => RIR,
-    'RANGE_INC' => R, 'RANGE_EXC' => R, 'SCLASS' => R, 'TCLASS' => R, 'OCLASS' => R,
-    'INTERN' => R, 'ARYSPLAT' => R, 'EXCEPT' => R, 'RAISEIF' => R, 'MATCHERR' => R,
-    'DEF' => %i[reg sym preg].freeze,
-    'TDEF' => %i[reg sym irep].freeze, 'SDEF' => %i[reg sym irep].freeze,
-    'UNDEF' => %i[sym].freeze, 'ALIAS' => %i[sym name].freeze,
-    'ADD' => RP, 'SUB' => RP, 'MUL' => RP, 'DIV' => RP, 'LT' => RP, 'LE' => RP, 'GT' => RP,
-    'GE' => RP, 'EQ' => RP,
-    'ADDI' => RI, 'SUBI' => RI,
-    'ADDILV' => %i[reg reg int].freeze, 'SUBILV' => %i[reg reg int].freeze,
-    'ARRAY' => RI, 'ARYPUSH' => RI, 'HASH' => RI, 'HASHADD' => RI,
-    'ARYCAT' => RP, 'STRCAT' => RP, 'HASHCAT' => RP,
-    'AREF' => %i[reg reg int].freeze, 'ASET' => %i[reg reg int].freeze,
-    'APOST' => %i[reg int int].freeze,
-    'SYMBOL' => %i[reg pool].freeze, 'STRING' => %i[reg pool].freeze, 'FSTRING' => %i[reg pool].freeze,
-    'CLASS' => RS, 'MODULE' => RS,
-    'ERR' => %i[rest].freeze,
-    'DEBUG' => %i[int int int].freeze
+    :NOP => Z, :CALL => Z, :KEYEND => Z, :RETSELF => Z, :RETNIL => Z, :RETTRUE => Z,
+    :RETFALSE => Z, :STOP => Z, :EXT1 => Z, :EXT2 => Z, :EXT3 => Z,
+    :MOVE => %i[reg reg].freeze, :RESCUE => %i[reg reg].freeze,
+    :LOADL => %i[reg pool].freeze,
+    :LOADI8 => RI, :LOADINEG => RI, :LOADI16 => RI, :LOADI32 => RI,
+    :LOADI__1 => RL, :LOADI_0 => RL, :LOADI_1 => RL, :LOADI_2 => RL, :LOADI_3 => RL,
+    :LOADI_4 => RL, :LOADI_5 => RL, :LOADI_6 => RL, :LOADI_7 => RL,
+    :LOADSYM => RS,
+    :LOADNIL => RL, :LOADTRUE => RL, :LOADFALSE => RL,
+    :LOADSELF => RP,
+    :GETGV => RN, :GETSV => RN, :GETCONST => RN, :GETIV => RN, :GETCV => RN,
+    :SETGV => NR, :SETSV => NR, :SETCONST => NR, :SETIV => NR, :SETCV => NR,
+    :GETMCNST => %i[reg mcnst].freeze,
+    :SETMCNST => %i[mcnst reg].freeze,
+    :GETUPVAR => %i[reg int int].freeze, :SETUPVAR => %i[reg int int].freeze,
+    :GETIDX => RP, :GETIDX0 => %i[reg idx0].freeze, :SETIDX => %i[reg preg preg].freeze,
+    :JMP => %i[addr].freeze, :JMPUW => %i[addr].freeze,
+    :JMPIF => JC, :JMPNOT => JC, :JMPNIL => JC,
+    :SSEND => RSA, :SSENDB => RSA, :SEND => RSA, :SENDB => RSA,
+    :SSEND0 => RS, :SEND0 => RS,
+    :BLKCALL => RI,
+    :SUPER => %i[reg argc].freeze,
+    :ARGARY => %i[reg spec plit].freeze, :BLKPUSH => %i[reg spec plit].freeze,
+    :ENTER => %i[enter plit].freeze,
+    :KEY_P => RS, :KARG => RS,
+    :RETURN => R, :RETURN_BLK => R, :BREAK => R,
+    :LAMBDA => RIR, :BLOCK => RIR, :METHOD => RIR, :EXEC => RIR,
+    :RANGE_INC => R, :RANGE_EXC => R, :SCLASS => R, :TCLASS => R, :OCLASS => R,
+    :INTERN => R, :ARYSPLAT => R, :EXCEPT => R, :RAISEIF => R, :MATCHERR => R,
+    :DEF => %i[reg sym preg].freeze,
+    :TDEF => %i[reg sym irep].freeze, :SDEF => %i[reg sym irep].freeze,
+    :UNDEF => %i[sym].freeze, :ALIAS => %i[sym name].freeze,
+    :ADD => RP, :SUB => RP, :MUL => RP, :DIV => RP, :LT => RP, :LE => RP, :GT => RP,
+    :GE => RP, :EQ => RP,
+    :ADDI => RI, :SUBI => RI,
+    :ADDILV => %i[reg reg int].freeze, :SUBILV => %i[reg reg int].freeze,
+    :ARRAY => RI, :ARYPUSH => RI, :HASH => RI, :HASHADD => RI,
+    :ARYCAT => RP, :STRCAT => RP, :HASHCAT => RP,
+    :AREF => %i[reg reg int].freeze, :ASET => %i[reg reg int].freeze,
+    :APOST => %i[reg int int].freeze,
+    :SYMBOL => %i[reg pool].freeze, :STRING => %i[reg pool].freeze, :FSTRING => %i[reg pool].freeze,
+    :CLASS => RS, :MODULE => RS,
+    :ERR => %i[rest].freeze,
+    :DEBUG => %i[int int int].freeze
   }.freeze
 
   # `ARRAY2` is printed as `ARRAY` with a source register in front of the count.
   ARRAY2_SCHEMA = %i[reg reg int].freeze
 
   def self.schema_for(op, token_count)
-    return ARRAY2_SCHEMA if op == 'ARRAY' && token_count == 3
+    return ARRAY2_SCHEMA if op == :ARRAY && token_count == 3
 
     SCHEMAS[op]
   end
@@ -118,10 +118,10 @@ module OperandSchema
     when :reg then (m = token.match(/\AR(\d+)\z/)) && Operand.new(:reg, m[1].to_i)
     when :preg then (m = token.match(/\A\(R(\d+)\)\z/)) && Operand.new(:preg, m[1].to_i)
     when :idx0 then (m = token.match(/\AR(\d+)\[0\]\z/)) && Operand.new(:idx0, m[1].to_i)
-    when :sym then token.start_with?(':') && token.length > 1 && Operand.new(:sym, token[1..])
-    when :name then Operand.new(:name, token)
+    when :sym then token.start_with?(':') && token.length > 1 && Operand.new(:sym, token[1..].intern)
+    when :name then Operand.new(:name, token.intern)
     when :mcnst
-      (m = token.match(/\A\(R(\d+)\)::(.+)\z/)) && Operand.new(:mcnst, [m[1].to_i, m[2]])
+      (m = token.match(/\A\(R(\d+)\)::(.+)\z/)) && Operand.new(:mcnst, [m[1].to_i, m[2].intern])
     when :pool then (m = token.match(/\AL\[(\d+)\]\z/)) && Operand.new(:pool, m[1].to_i)
     when :irep then (m = token.match(/\AI\[(\d+)\]\z/)) && Operand.new(:irep, m[1].to_i)
     when :int then token.match?(/\A-?\d+\z/) && Operand.new(:int, token.to_i)

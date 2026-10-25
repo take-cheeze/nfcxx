@@ -148,7 +148,7 @@ class CodeGen
 
   def const_receiver?(irep, call_idx, dest_reg, const_name)
     writer = irep.source_writer(call_idx - 1, dest_reg)
-    writer&.op == 'GETCONST' && writer.const_name == const_name
+    writer&.op == :GETCONST && writer.const_name == const_name
   end
 
   # FIBER_YIELD_UNSAFE_SUPPORT: `Fiber.yield` is a plain SEND (`GETCONST R2
@@ -335,7 +335,7 @@ class CodeGen
       next unless name
 
       # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: never admit `Fiber.new { ... }`.
-      next if paired.op == 'SENDB' && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
+      next if paired.op == :SENDB && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
 
       block_irep_idx = insn.block_index
       next unless block_irep_idx
@@ -398,7 +398,7 @@ class CodeGen
 
       region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
                  block_irep: block_irep, name: name, n: n,
-                 self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk,
+                 self_implicit: paired.op == :SSENDB, upvars: upvars, needs_blk: needs_blk,
                  parent_irep: irep }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
       # forwarded by every enclosing block, so it is needed for a `return` at any depth.
@@ -438,7 +438,7 @@ class CodeGen
 
     idx = irep.index_of_addr(region[:sendb_addr])
     insn = idx && BytecodeIR.for(irep).source_at(idx)
-    return {} unless insn&.op == 'SENDB'
+    return {} unless insn&.op == :SENDB
 
     shapes = CoreBlockParamSigs.shapes.select do |(klass, name), shape|
       name == region[:name] && shape.argc.cover?(region[:n]) && shape.arity == fields.first && !shape.elements.empty? &&
@@ -814,7 +814,7 @@ class CodeGen
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     arm_prune_block_analysis(block_irep, d, 0)
     BytecodeIR.for(block_irep).each_source do |insn, idx|
-      next if insn.op == 'ENTER'
+      next if insn.op == :ENTER
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
 
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
@@ -1185,7 +1185,7 @@ class CodeGen
     regions = []
     irep.each_with_op('SENDB', 'SSENDB') do |insn, idx|
       prev = BytecodeIR.for(irep).previous(idx)
-      next if prev && prev.op == 'BLOCK'
+      next if prev && prev.op == :BLOCK
 
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.
       # The args Array is already built in R(dest+1) (see compile_dynamic_splat_send)
@@ -1202,12 +1202,12 @@ class CodeGen
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
                      argv_reg: (dest_reg.to_i + 1).to_s,
                      blk_reg: (dest_reg.to_i + 2).to_s, name: name,
-                     self_implicit: insn.op == 'SSENDB' }
+                     self_implicit: insn.op == :SSENDB }
       else
         n = insn.n_spec.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
                      blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
-                     self_implicit: insn.op == 'SSENDB', parent_irep: irep }
+                     self_implicit: insn.op == :SSENDB, parent_irep: irep }
       end
     end
     regions
