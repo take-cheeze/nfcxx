@@ -203,13 +203,13 @@ module StaticDispatchRegistrations
       # The engine's own Ruby. Core mrblib stays an outside source here (its sends
       # and names are dynamic references: outside_world_tokens), as before it was compiled.
       ireps, root = compile_ireps(closed_world_mrblib_srcs(repo_root, core_gems: nil), 'static_dispatch_probe', tmp)
-      registry, superclass_of = build_registry(ireps, root)
-      [ireps, registry, superclass_of]
+      registry, superclass_of, _, _, _, _, struct_members = build_registry(ireps, root)
+      [ireps, registry, superclass_of, struct_members.keys]
     end
   end
 
-  # closed_only: the closed world's own program. Ruby test files, scripts/ and
-  # tools/ are not linked into the shipped closed binary, so they add no
+  # closed_only: the closed world's own program. Ruby test files, scripts/, tools/ and
+  # the workflows are not linked into the shipped closed binary, so they add no
   # lookups to it. Native test sources stay: they are compiled into it.
   def outside_world_files(repo_root, closed_only: false)
     closed = closed_world_mrblib_srcs(repo_root, core_gems: nil).map { |p| File.expand_path(p) }.to_set
@@ -221,7 +221,9 @@ module StaticDispatchRegistrations
            (closed_only ? [] : Dir["#{repo_root}/mruby-*/test/**/*.rb"] +
                                Dir["#{repo_root}/scripts/**/*"].select { |p| File.file?(p) } +
                                Dir["#{repo_root}/tools/**/*.rb"].reject { |p| p.include?('/tools/bc2cpp/') }) +
-           Dir["#{repo_root}/.github/**/*"].select { |p| File.file?(p) }
+           # The workflows' inline Ruby runs in the desktop binary (`--script`); the closed library is linked only
+           # into trace_host.cxx, which runs no script.
+           (closed_only ? [] : Dir["#{repo_root}/.github/**/*"].select { |p| File.file?(p) })
     native_glob = '*.{c,cc,cpp,cxx,h,hh,hpp,hxx,inc}'
     native = Dir["#{repo_root}/{src,app,include}/**/#{native_glob}"] +
              Dir["#{repo_root}/mruby-*/{src,include}/**/#{native_glob}"] +
@@ -236,10 +238,19 @@ module StaticDispatchRegistrations
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
   end
 
-  def outside_world_tokens(repo_root, closed_only: false)
+  # `core`: with closed_only, the closed world's {mrbc:, superclass_of:, struct_owners:} turns on CORE_BYTECODE_TOKENS
+  # for the Ruby under 3rd/ (and adds the program-core gems' mrblib, which no other scan reads).
+  def outside_world_tokens(repo_root, closed_only: false, core: nil)
     ruby, native = outside_world_files(repo_root, closed_only: closed_only)
     tokens = Set.new
     naming = closed_only ? naming_macros(native) : []
+    if closed_only && core
+      third = "#{File.expand_path(repo_root)}/3rd/"
+      precise, ruby = ruby.partition { |p| p.end_with?('.rb') && p.start_with?(third) }
+      precise |= core_compiled_mrblib_srcs(repo_root, BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
+                 .map { |p| File.expand_path(p) }
+      ruby += core_bytecode_tokens(precise.sort, tokens, **core)
+    end
     (ruby + native).each do |path|
       text = File.read(path, encoding: 'BINARY')
       if closed_only && native.include?(path)
@@ -255,6 +266,140 @@ module StaticDispatchRegistrations
       end
     end
     tokens
+  end
+
+  # CORE_BYTECODE_TOKENS (closed only): core and external-gem Ruby, read as bytecode instead of text. A send there
+  # names a method only if its receiver may be an RPG2000/2003 object:
+  #   - a literal (`[]`, `""`, `1`) is a core object, and a constant receiver is a core class unless it names an
+  #     engine one (ENGINE_RE);
+  #   - self is one only in a method of a module (any module may be mixed into an engine class), of Object,
+  #     BasicObject, Kernel, Class or Module, of a class on an engine class's superclass chain, or the singleton of
+  #     such a class; self in a class body or at top level is that class or main;
+  #   - any other receiver may be.
+  # `super` follows self's rule. Every LOADSYM symbol, implicit-dispatch operator, identifier-shaped pool string
+  # and name an ALIAS / UNDEF irep mentions counts whatever its receiver. A file that sends a reflective name
+  # (CORE_REFLECTIVE_SENDS: computed sends, eval, instance_exec, define_method, ...) or defines method_missing /
+  # respond_to_missing? keeps the text rule; those are returned for it.
+  CORE_REFLECTIVE_SENDS = %w[
+    send __send__ public_send method public_method instance_method singleton_method eval instance_eval
+    instance_exec class_eval module_eval class_exec module_exec define_method define_singleton_method
+    alias_method remove_method undef_method method_missing respond_to_missing? const_missing
+  ].to_set.freeze
+  CORE_SELF_CONTEXTS = %w[Object BasicObject Kernel Class Module].freeze
+
+  def core_bytecode_tokens(paths, tokens, mrbc:, superclass_of:, struct_owners: [])
+    ireps = registry = modules = nil
+    Dir.mktmpdir('bc2cpp_core_tokens') do |tmp|
+      ireps, root = compile_ireps(paths, 'static_dispatch_core', tmp, mrbc: mrbc)
+      result = build_registry(ireps, root)
+      registry = result[0]
+      modules = result[11]
+    end
+    body_of = {}
+    registry.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
+    parent = {}
+    ireps.each_value { |irep| irep.reps.each { |c| parent[c] = irep.label } }
+    reflective = ireps.each_value.select { |irep| core_reflective?(irep) }.to_set { |irep| File.expand_path(irep.file.to_s) }
+    reflective.merge(paths.reject { |p| ireps.each_value.any? { |irep| File.expand_path(irep.file.to_s) == p } })
+    ancestry = engine_ancestry(superclass_of, struct_owners)
+    ireps.each_value do |irep|
+      next if reflective.include?(File.expand_path(irep.file.to_s))
+
+      up = irep.label
+      up = parent[up] until up.nil? || body_of.key?(up)
+      owner, name = up && body_of[up]
+      self_may = owner ? core_self_may_be_engine?(owner, modules, ancestry) : false
+      core_irep_tokens(irep, tokens, self_may, name)
+    end
+    reflective.to_a.sort
+  end
+
+  def core_reflective?(irep)
+    BytecodeIR.for(irep).each_source.any? do |insn, _|
+      (SEND_OPS.include?(insn.op) || %w[TDEF SDEF].include?(insn.op)) && CORE_REFLECTIVE_SENDS.include?(insn.sym.to_s)
+    end
+  end
+
+  # The names one core irep can look up on an engine object (CORE_BYTECODE_TOKENS).
+  def core_irep_tokens(irep, tokens, self_may, method_name)
+    irep.pool.each { |v| tokens << v if v.is_a?(String) && v.match?(IDENT) }
+    insns = BytecodeIR.for(irep).each_source.to_a
+    tokens.merge(irep.syms.map(&:to_s)) if insns.any? { |insn, _| %w[ALIAS UNDEF].include?(insn.op) }
+    kinds = receiver_kinds(irep)
+    insns.each_with_index do |(insn, _), i|
+      if insn.op == 'LOADSYM'
+        tokens << insn.sym.to_s
+      elsif SEND_OPS.include?(insn.op)
+        kind = kinds[i]
+        may = case kind
+              when :core then false
+              when :self then self_may
+              when Array then kind[1].match?(ENGINE_RE)
+              else true
+              end
+        tokens << insn.sym.to_s if may
+      elsif insn.op == 'SUPER'
+        tokens << method_name if self_may && method_name
+      elsif (op_name = IMPLICIT_DISPATCH_NAMES[insn.op])
+        tokens << op_name
+      end
+    end
+  end
+
+  # Whether self in a method of `owner` may be an engine object (CORE_BYTECODE_TOKENS).
+  def core_self_may_be_engine?(owner, modules, ancestry)
+    return true if owner.start_with?('<') || ancestry == :all
+    return ancestry.include?(owner.delete_suffix('.singleton')) if owner.end_with?('.singleton')
+
+    modules.include?(owner) || CORE_SELF_CONTEXTS.include?(owner) || ancestry.include?(owner)
+  end
+
+  # Every class an engine class (SAFE_UNREGISTER_OWNER_RE) inherits from, outside the engine itself; :all when a
+  # superclass is unrecognized or defined only natively (no superclass_of entry), so no class can be ruled out.
+  def engine_ancestry(superclass_of, struct_owners)
+    re = NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE
+    found = Set['Object', 'BasicObject']
+    found << 'Struct' if struct_owners.any? { |o| o.match?(re) }
+    superclass_of.each do |klass, sup|
+      next unless klass.match?(re)
+
+      seen = Set.new
+      while seen.add?(klass)
+        sup = superclass_of.fetch(klass) { return :all }
+        break if sup == :none
+
+        unless superclass_of.key?(sup)
+          # A native class: only mruby's own exception chain (src/error.c) is known; `class E < StandardError`
+          # inside a module reads back as "Mod::StandardError". Any other has ancestors this cannot see.
+          chain = native_superclass_chain(sup.split('::').last) or return :all
+          found.merge(chain)
+          break
+        end
+        found << sup << sup.split('::').last unless sup.match?(re)
+        klass = sup
+      end
+    end
+    found
+  end
+
+  # mruby's native exception classes (src/error.c) and their superclasses.
+  NATIVE_EXCEPTION_SUPERCLASS = {
+    'Exception' => 'Object', 'StandardError' => 'Exception', 'ScriptError' => 'Exception',
+    'ArgumentError' => 'StandardError', 'RangeError' => 'StandardError', 'RuntimeError' => 'StandardError',
+    'TypeError' => 'StandardError', 'IndexError' => 'StandardError', 'KeyError' => 'IndexError',
+    'FrozenError' => 'RuntimeError', 'NotImplementedError' => 'ScriptError', 'ZeroDivisionError' => 'StandardError'
+  }.freeze
+
+  # `name` and its native superclasses up to Object, or nil for a class outside NATIVE_EXCEPTION_SUPERCLASS.
+  def native_superclass_chain(name)
+    chain = []
+    while name != 'Object'
+      return nil unless NATIVE_EXCEPTION_SUPERCLASS.key?(name)
+
+      chain << name
+      name = NATIVE_EXCEPTION_SUPERCLASS[name]
+    end
+    chain
   end
 
   # The gems of the other makers. The closed build is single-format (build_config.rb's
@@ -322,7 +467,7 @@ module StaticDispatchRegistrations
       [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err),
               hand: File.read(File.join(repo_root, gem, 'src', 'register.cxx'), encoding: 'UTF-8') }]
     end
-    ireps, registry, superclass_of = closed_world(repo_root, mrbc)
+    ireps, registry, superclass_of, struct_owners = closed_world(repo_root, mrbc)
     subclassed = subclassed_paths(repo_root, superclass_of)
 
     # Candidates: compiled entries still registered, plus ones already
@@ -373,7 +518,8 @@ module StaticDispatchRegistrations
       dynamic.merge(c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed)))
              .merge(c_literals(r[:hand]))
     end
-    dynamic.merge(outside_world_tokens(repo_root, closed_only: closed_only))
+    core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
+    dynamic.merge(outside_world_tokens(repo_root, closed_only: closed_only, core: core))
 
     # Which bytecode can run. No method body -- compiled or not -- runs as
     # bytecode except after a dynamic lookup of its own name: a direct C++ call

@@ -187,7 +187,10 @@ c, = generate_world(SRC + "class BiMeta\n  def install(n); Object.send(:define_m
 check.call('a dynamic installer withdraws the Kernel and String arms',
            !code_of(c, 'lp').include?(KERNEL_LOOP) && !code_of(c, 'chars').include?('String_each_char_impl'))
 c, = generate_world(SRC + "class String\n  def each_char; yield 'z'; end\nend\n")
-check.call('a program String#each_char withdraws the String arm', !code_of(c, 'chars').include?('String_each_char_impl'))
+# The core arm (an exact-String test in front of the core body) goes. A STATIC_OWNER_ARMS arm may stay: it calls the
+# program's own String#each_char, which is what an exact String receiver's lookup finds.
+check.call('a program String#each_char withdraws the core String arm',
+           !code_of(c, 'chars').match?(/M->string_class\) \{\n\s+r\d+ = String_each_char_impl/))
 c, = generate_world(SRC + "class Array\n  def index(*a); :mine; end\nend\n")
 check.call('a program Array#index withdraws the index loops, proven and guarded',
            %w[idx idx_lit].none? { |m| code_of(c, m).include?('bc2cpp_accum_') })

@@ -9,9 +9,14 @@
 #      Bag#push, but none for OddBag's own push (two Ruby definitions take the POLY chain, not this) and none in
 #      front of a private definition (`o.first`) or an arity that does not fit (`o.push` with no argument); the arm
 #      tests mrb_class (a singleton class never matches) and the owner call is still the else;
+#      BLOCK_OWNER_ARMS: `o.each { ... }` (Bag#each yields) gets an arm passing the call's own block -- the heap RProc,
+#      or the block parameter for a block that breaks or returns -- and a block given to Bag#tag, which takes none,
+#      gets no block arm;
 #   2. run on a full-core mruby, compiled against interpreted: Bag, SubBag, a subclass made at run time (no arm, owner
 #      call), a Bag with a singleton class (no arm, owner call), Array (native owner), nil (NoMethodError), the
-#      private Bag#first (NoMethodError) and Bag#push with no argument (ArgumentError) give the same value or error.
+#      private Bag#first (NoMethodError) and Bag#push with no argument (ArgumentError) give the same value or error;
+#      so do the block calls on Bag, SubBag (the block arm), a singleton SubBag and Array, a `break` and a non-local
+#      `return` through the arm, and the ignored block.
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/static_owner_dispatch_check.rb
 # The run needs a full-core libmruby built from this tree's patched 3rd/mruby (BC2CPP_MRUBY_FULL, or one built here).
@@ -32,6 +37,8 @@ SOURCE = <<~RUBY
   class Bag
     def initialize; @items = [1, 2]; end
     def push(x); [:bag_push, x]; end
+    def each; yield 1; yield 2; :bag_each; end
+    def tag(x); [:bag_tag, x]; end
 
     private
 
@@ -43,6 +50,11 @@ SOURCE = <<~RUBY
     def ps(o, x); o.push(x); end
     def ps0(o); o.push; end
     def fs(o); o.first; end
+    def es(o); acc = []; o.each { |x| acc << x }; acc; end
+    def eb(o); o.each { |x| break x * 10 if x == 2 }; end
+    def er(o); o.each { |x| return :early if x == 2 }; :late; end
+    def sp(o, a); o.push(*a); end
+    def tg(o); o.tag(1) { :ignored }; end
   end
 RUBY
 OWNERS = %w[Bag SubBag Probe].freeze
@@ -66,6 +78,17 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
   fs = body.call(code, 'fs')
   check.call('private first: no arm, owner call only', !fs.include?('STATIC_OWNER_ARMS') && fs.include?('bc2cpp_owner_call(M, '))
   check.call('no by-name send left', ![ps, ps0, fs].any? { |b| b.include?('bc2cpp_send(') })
+  es = body.call(code, 'es')
+  eb = body.call(code, 'eb')
+  check.call('block each: STATIC_OWNER_ARMS marker', es.include?('STATIC_OWNER_ARMS :each') && eb.include?('STATIC_OWNER_ARMS :each'))
+  check.call('block each: the arm passes the call\'s own block to Bag_each_impl',
+             es.match?(/Bag_each_impl\(M, r\d+, bc2cpp_blk_heap_\d+\(\)\);/) &&
+             eb.match?(/Bag_each_impl\(M, r\d+, mrb_obj_value\(bc2cpp_blk_proc_\d+\)\);/))
+  check.call('block each: the block owner call stays as the else',
+             es.match?(/bc2cpp_owner_call\(M, r\d+, \d+, 0, BC2CPP_OWNERS\([^)]*\), bc2cpp_blk_heap_\d+\(\), 0\)/))
+  tg = body.call(code, 'tg')
+  check.call('a block to a definition that takes none: no block arm',
+             !tg.include?('STATIC_OWNER_ARMS') && !tg.match?(/Bag_tag_impl\(M, [^;]*blk/))
 
   unless ENV['CC_GENERATED_ONLY'] == '1'
     harness = <<~'CPP'
@@ -103,6 +126,14 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
         row(M, "bag.push no argument", "ps0", eval(M, "Bag.new"), 0, mrb_nil_value());
         row(M, "bag.first (private)", "fs", eval(M, "Bag.new"), 0, mrb_nil_value());
         row(M, "array.first", "fs", eval(M, "[7]"), 0, mrb_nil_value());
+        row(M, "bag.each block", "es", eval(M, "Bag.new"), 0, mrb_nil_value());
+        row(M, "subbag.each block (block arm)", "es", eval(M, "SubBag.new"), 0, mrb_nil_value());
+        row(M, "singleton subbag.each block (no arm)", "es", eval(M, "b = SubBag.new; b.singleton_class; b"), 0, mrb_nil_value());
+        row(M, "array.each block", "es", eval(M, "[5, 6]"), 0, mrb_nil_value());
+        row(M, "subbag.each break", "eb", eval(M, "SubBag.new"), 0, mrb_nil_value());
+        row(M, "subbag.each return", "er", eval(M, "SubBag.new"), 0, mrb_nil_value());
+        row(M, "array.each return", "er", eval(M, "[1, 2]"), 0, mrb_nil_value());
+        row(M, "subbag.tag block ignored", "tg", eval(M, "SubBag.new"), 0, mrb_nil_value());
         return 0;
       }
     CPP
@@ -116,6 +147,9 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
       check.call('runtime parity (every row)', !compiled.empty? && compiled == interpreted)
       check.call('the inherited arm answers Bag#push', compiled.any? { |l| l.start_with?('subbag.push') && l.include?(':bag_push') })
       check.call('a private definition still raises', compiled.any? { |l| l.start_with?('bag.first') && l.include?('NoMethodError') })
+      check.call('the block arm runs the block (SubBag#each)', compiled.any? { |l| l.start_with?('subbag.each block (block arm)') && l.include?('[1, 2]') })
+      check.call('break through the block arm', compiled.any? { |l| l.start_with?('subbag.each break') && l.end_with?('=> 20') })
+      check.call('non-local return through the block arm', compiled.any? { |l| l.start_with?('subbag.each return') && l.end_with?('=> :early') })
       check.call('a wrong argument count still raises', compiled.any? { |l| l.start_with?('bag.push no argument') && l.include?('ArgumentError') })
       warn output unless failures.empty?
     else
