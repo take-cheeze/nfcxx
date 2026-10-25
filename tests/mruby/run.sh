@@ -91,6 +91,12 @@ EOF
      grep -q '^\.weak _ZTH6ref_tl$' "$tmp/edge.rb.s" && ! grep -q '^\.weak inline_ref$' "$tmp/edge.rb.s"; then
     report ok "weak-symbols edge cases (nested attributes, declarations, a weak reference)"
   else report fail "weak-symbols edge cases differ"; diff "$tmp/edge.orc.s" "$tmp/edge.rb.s" | head -5; fi
+  # clang's assembly for an Apple target (the gcc back end on macOS, no --sym-prefix): no ".weak" for the reference, which
+  # the Apple assembler rejects.
+  { cat "$tmp/edge.s"; printf '.subsections_via_symbols\n'; } > "$tmp/edge.macho.s"
+  "$mrb" "$root/scripts/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.macho.s"
+  if ! grep -q '^\.weak _ZTH6ref_tl$' "$tmp/edge.macho.s"; then report ok "weak-symbols: no weak reference in Mach-O assembly"
+  else report fail "weak-symbols: a weak reference in Mach-O assembly"; fi
   # Mach-O labels carry the target's "_" prefix (--sym-prefix=_, passed by qbe-cc on Darwin): .weak_definition lines name them.
   printf '_alpha:\n\tret\n_beta:\n\tret\n_delta:\n\tret\n' > "$tmp/macho.orc.s"; cp "$tmp/macho.orc.s" "$tmp/macho.rb.s"
   "$mrb" "$oracle/weak-symbols.rb" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.orc.s"

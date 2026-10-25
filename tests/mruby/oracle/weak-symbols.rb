@@ -284,7 +284,10 @@ weak = weak_names(text, extern_inline).map { |n| prefix + n }.select { |n| defs[
 # .weak_reference), and only the attribute's names: an extern __inline__ function that lives in another unit must stay
 # a strong reference (a weak one would not make the link pull it from an archive or keep its library --as-needed).
 weak_refs = []
-if prefix.empty?
+# Mach-O: the prefixed mode, or clang's assembly for an Apple target, which ends with .subsections_via_symbols (the gcc
+# back end on macOS calls this without --sym-prefix).
+macho = !prefix.empty? || asm.include?(".subsections_via_symbols")
+unless macho
   refs = referenced_names(asm)
   weak_refs = weak_names(text, false).select { |n| !defs[n] && refs[n] }.sort
 end
