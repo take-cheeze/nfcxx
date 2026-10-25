@@ -661,7 +661,7 @@ module EscapeAnalysis
         if irep.nil?
           true
         else
-          verdict = flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true, value_class: klass,
+          verdict = flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true, value_class: klass,
                                                          block_given: true)
           verdict.escapes? || verdict.returned == true
         end
@@ -702,7 +702,7 @@ module EscapeAnalysis
       if fields[6].to_i.positive?
         return failed(:block_param_kept) if fields[4].to_i.positive? || fields[5].to_i.positive?
 
-        local = (1 + fields[0].to_i + fields[1].to_i + fields[2].to_i + fields[3].to_i).to_s
+        local = 1 + fields[0].to_i + fields[1].to_i + fields[2].to_i + fields[3].to_i
         starts[0] = { local => true }
       end
       if starts.empty? && sources.empty? && !nested_block_reads?(irep)
@@ -743,10 +743,10 @@ module EscapeAnalysis
 
       irep = body_irep(mdef) or return true
       case position[0]
-      when :self then flow(irep, { 0 => { '0' => true } }, self_tracked: true).escapes?
-      when :self_keep then flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true).escapes?
+      when :self then flow(irep, { 0 => { 0 => true } }, self_tracked: true).escapes?
+      when :self_keep then flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true).escapes?
       when :self_returns
-        verdict = flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true)
+        verdict = flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true)
         verdict.escapes? || verdict.returned == true
       when :arg then arg_captured?(irep, position[1])
       when :block then block_captured?(irep)
@@ -764,7 +764,7 @@ module EscapeAnalysis
       cyclic([:self_as, mdef.object_id, klass, block_given]) do
         irep = body_irep(mdef)
         irep.nil? ||
-          flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true, value_class: klass,
+          flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true, value_class: klass,
                                                block_given: block_given).escapes?
       end
     end
@@ -1286,7 +1286,7 @@ module EscapeAnalysis
       end
       return nil unless run.self_tracked
 
-      verdict = flow(child, { 0 => { '0' => true } }, self_tracked: true)
+      verdict = flow(child, { 0 => { 0 => true } }, self_tracked: true)
       verdict.escapes? ? verdict.reason : nil
     end
 
