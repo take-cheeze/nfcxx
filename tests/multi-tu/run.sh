@@ -25,6 +25,17 @@ for be in $backends; do
   export NFCXX_BACKEND=$be
   build "$be one command" "$tmp/one-$be" "${srcs[@]}"
   build "$be string pair" "$tmp/pair-$be" $d/pair_a.cpp $d/pair_b.cpp
+  # extern thread_local without an init function in the defining unit: its _ZTH is a weak reference (QBE as gcc), with
+  # the definitions from nfcxx and from g++, and the uses from g++ against nfcxx's definitions.
+  build "$be thread_local across units" "$tmp/tls-$be" $d/tls_use.cpp $d/tls_def.cpp
+  if g++ -std=c++17 -c $d/tls_def.cpp -o "$tmp/tls_def-gxx.o"; then
+    build "$be thread_local defined by g++" "$tmp/tlsg-$be" $d/tls_use.cpp "$tmp/tls_def-gxx.o"
+  fi
+  # libC.a: EDG's runtime (exceptions), which an nfcxx object needs when another driver links it.
+  if out=$(./nfcxx -c $d/tls_def.cpp -o "$tmp/tls_def-$be.o" 2>&1) &&
+     out=$(g++ -std=c++17 $d/tls_use.cpp "$tmp/tls_def-$be.o" -L"${EDG_BUILD:-build/edg}/lib" -lC -o "$tmp/tlsu-$be" 2>&1); then
+    run "$be thread_local used by g++" "$tmp/tlsu-$be"
+  else echo "FAIL $be thread_local used by g++ (build)"; head -5 <<<"$out"; fail=1; fi
   objs=(); ok=1
   for s in "${srcs[@]}" $d/pair_a.cpp $d/pair_b.cpp; do
     o=$tmp/$(basename "$s" .cpp)-$be.o
