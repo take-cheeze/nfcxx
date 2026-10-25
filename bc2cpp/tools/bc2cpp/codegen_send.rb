@@ -483,7 +483,7 @@ class CodeGen
             if stable_constructor
               return "#{note}" \
                      "  r#{d} = bc2cpp_direct_alloc(M, #{accessor});\n" \
-                     "  #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n"
+                     "  #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n"
             end
 
             else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
@@ -494,7 +494,7 @@ class CodeGen
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-                   "    #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n" \
+                   "    #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n" \
                    "  } else {\n" \
                    "    #{else_arm}" \
                    "  }\n"
