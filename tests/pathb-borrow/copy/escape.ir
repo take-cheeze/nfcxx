@@ -1,0 +1,7 @@
+(ir-module "copy" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params)
+(slot "x" int 4 4) (slot "q" (struct "Q") 8 8)
+(decl $"x" val) (decl $"q" val) (store int $"x" (const int 1))
+(store (ptr int) $"q" $"x")
+(copy 8 @"g" $"q")
+(scope-end $"q") (scope-end $"x") (return (const int 0)))

@@ -6352,6 +6352,11 @@ static void ir_function(a_routine_ptr rout)
       ir_val slot;
       ir_depth = 1;
       slot = ir_var_addr(pending[i].var, pending[i].var->type, 0);
+      /* The checker finds a parameter's slot by the parameter's name. Unnamed parameters all print as "tmp", and
+         their slots are tmp, tmp.1, ...: a slot of another name is declared here. */
+      if (ir_borrow && strcmp(slot.s, ir_fmt("$\"%s\"", ir_name_or(pending[i].var->source_corresp.name, "tmp"))) != 0) {
+        ir_line(1, ir_fmt("(decl %s val)", slot.s));
+      }
       ir_store(pending[i].var->type, slot.s, pending[i].reg, 0);
     }
   }

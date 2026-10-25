@@ -40,14 +40,37 @@ The C++ frontend also prints facts for storage that no declaration names:
   which the lowering initializes by assignment. It is declared at its first use and ends with
   that block.
 - A variable-length array. EDG's lowering makes it an ordinary local pointer to storage from
-  `__vla_alloc`, so it gets the facts of any local. The checker still refuses the function: the
-  lowering registers the array on EDG's exception-handling stack by storing a local address in a
-  global.
+  `__vla_alloc`, so it gets the facts of any local. Calls to `__vla_alloc` have no summary, so the
+  function is still refused.
+- An unnamed parameter. Unnamed parameters all print as `"tmp"` while their slots are `tmp`,
+  `tmp.1`, and so on. The checker pairs a parameter with the slot of its name, so a slot of another
+  name gets `(decl $"tmp.1" val)` before the parameter is stored into it.
 
 Exception-handling bookkeeping temporaries get the same treatment, which is conservative: a value
 or address carried to a later statement reads as uninitialized or out of scope, never as valid.
 Label depths for jumps count only declaration statements, so a jump can end a first-use local
 early. That is also conservative. With the flag unset, output is byte-identical.
+
+### EDG's exception-handling stack
+
+EDG lowers C++ exception handling to a linked stack of frames. Each frame is a local temporary.
+A function pushes a frame by saving the global `@"__curr_eh_stack_entry"` in it and storing the
+frame's address in the global. It pops the frame by storing the saved value back. The scalar
+global `@"__eh_curr_region"` is saved and restored the same way.
+
+The runtime reads frames only while unwinding. Every call the checker accepts is `nothrow`, so no
+unwinding can start while a frame is pushed. The checker therefore tracks the stack top as a value:
+
+- A load of `@"__curr_eh_stack_entry"` yields what was last stored there, initially the caller's
+  frames.
+- A store of a frame address replaces it. A store of unknown provenance is refused.
+- At every `return` and function exit the top must be the caller's frames again. A frame still
+  pushed, or one whose scope ended while pushed, reports `eh-frame-not-popped`.
+
+Stores into other external memory, such as globals, are allowed when the stored value is a
+scalar or an external pointer. Only a local address can escape that way, and that is still
+refused. A verified summary still reports any such access as `contract-not-closed`. Unwind
+cleanup edges are not modeled, because no accepted call can throw.
 
 Slot names identify storage, `%N` values hold scalar values or address provenance, and
 `$"x"` produces the address of local storage. The checker tracks provenance through pointer
@@ -246,10 +269,37 @@ but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
 layouts, dynamic offsets outside local arrays (see [Array indexing](#array-indexing)), out-of-bounds
-constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
+constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads and moves remain refused; aggregate copies are described below. Without semantic metadata,
 whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
 widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
+
+## Aggregate copies
+
+`(copy N DST SRC)` copies byte states. Each destination byte takes the state of its source
+byte, so copying a struct with uninitialized padding or fields is not an error. A later read of
+the uninitialized part still is. Pointer values that lie wholly inside the copied range keep their
+provenance at the new offset; other pointer values in the destination range become unknown.
+
+- The source must be alive and unmoved, and an exclusive loan over it conflicts.
+- The destination is checked as a write: alive, and no live loan overlaps it.
+- External memory reads as initialized bytes holding no known pointers. Copying a local address
+  into external memory is refused. Copying one into argument memory under a verified summary is
+  `contract-escape`.
+- Unknown or aliased places, dynamic indices, and drop-obligated storage are refused.
+
+A `byval` parameter's register is the address of the callee's own copy of the argument. The
+checker models that copy as a synthetic local slot `*%N`: initialized, alive until
+`(scope-end %N)`, and holding pointers of unknown provenance. Returning its address is
+`return-local-address`. Its size comes from the slot's semantic layout or from the module's
+`(abi-type "N" SIZE ...)` record.
+
+The argument effect `(byval T)` describes such a parameter in a call summary, and the call passes
+`(byval T PLACE)`. The caller's object is read: its fields must be initialized (padding is exempt
+when `T` has a layout), and nothing is retained. Verifying the callee checks its own copy, the
+synthetic slot. Summary inference gives a `byval` parameter `(byval T)` when `T` has a semantic
+layout, so `long double` and `__int128` by-value parameters, which have none, get no summary yet.
+All three validators accept the effect.
 
 ## Array indexing
 
@@ -290,10 +340,11 @@ Optional module-level metadata separates value fields from physical padding:
 ```
 
 The size and alignment are 8 and 4 bytes. Field names are unique, offsets are absolute within the
-struct, and field types determine widths and alignment. Scalars, pointers, and other declared struct
-layouts are supported. Pointers do not recursively embed their pointee, so self-referential pointer
+struct, and field types determine widths and alignment. Scalars, pointers, other declared struct
+layouts, and arrays `(array N T)` of these (1 to 4096 bytes, aligned like `T`) are supported. The
+same types describe call-effect arguments, such as `(read (array 16 unsigned_char))`. Pointers do not recursively embed their pointee, so self-referential pointer
 types are valid. By-value cycles, missing nested layouts, duplicate fields/layouts, and out-of-bounds
-fields are errors. Overlapping or unaligned fields, arrays, and union descriptors are refused.
+fields are errors. Overlapping or unaligned fields, empty arrays, and union descriptors are refused.
 This excludes packed layouts and overlapping empty subobjects for now.
 
 A slot using a known layout must match its size and provide sufficient alignment. Known aggregate
@@ -457,6 +508,20 @@ consumption results. It demonstrates call execution and state propagation, not g
 or resource-release verification. Removing the summaries leaves identical QBE while the checker
 correctly returns to refusing those calls.
 
+
+### Runtime helper summaries (`--effects`)
+
+`--effects FILE` loads trusted `call-effects` forms for functions the module does not describe.
+The option can be repeated. Lines starting with `;` are comments, and any other form is
+malformed. A summary in the module itself takes precedence over a file's summary of the same
+name.
+
+`scripts/pathb-runtime.effects` describes the Path B runtime helpers of `be/nfcxx_ldrt.c` that
+implement `long double`, `__int128`, and `_Float128` operations, 106 in all. Each value is a
+16-byte object. A helper writes all 16 bytes of its first pointer argument (`init`), reads its
+`const` pointer arguments (`read`), and touches no other memory. Helpers for bit-fields, `va_list`,
+and the UBSan report are not described. Like every summary, these are trusted, not verified. The
+file is generated from the helper signatures, and each writer was checked to store all 16 bytes.
 
 ## Returned alias loans
 
@@ -662,6 +727,22 @@ removed.
 `tests/pathb-borrow/contracts/layouts.cpp` checks a reader of a padded nested struct through the
 frontend's layout records and is refused once they are removed, with identical QBE either way.
 `nolayouts.cpp` lists struct shapes that must get no record.
+Copy fixtures in `tests/pathb-borrow/copy` cover loans over either side, external sources,
+escaping copies, and copies from ended storage. The C++ cases `cpp/copy_*.cpp` carry an
+uninitialized field and a dangling pointer field through struct copies, and `cpp/byval_*.cpp`
+check a by-value parameter's copy and a returned address of it.
+`contracts/byval.cpp` passes a struct by value through an inferred `(byval T)` summary, finds an
+uninitialized field in the caller's copy, and runs natively. The fixtures `calls/byval_*.ir` cover
+an uninitialized argument and a by-value contract passed by address.
+`contracts/longdouble.cpp` checks `long double` and `__int128` arithmetic through the runtime
+summaries. It is refused without them and finds an uninitialized operand at the helper call. A
+module's own summary overrides the file's. The emitter and oracle accept every summary in the
+file, and the program runs natively.
+`contracts/raii.cpp` checks a local with a destructor, its exception-stack frames, and the
+destructor's inferred summary, and runs natively. A variant that uses the object through a pointer
+after its scope reports `use-after-scope`. The fixtures in `tests/pathb-borrow/eh` cover push and
+pop, frames left pushed on some path, a pop after the frame's scope, unknown entries, and
+scalar and escaping stores to globals.
 `contracts/const_alias.cpp` infers a shared summary for a `const int *` result. A variant that
 writes the source while holding the result reports `loan-conflict`. The fixtures
 `returned/const_*.ir` cover the shared, conflicting, and refused exclusive forms.
