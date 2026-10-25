@@ -365,8 +365,8 @@ class CodeGen
 
     positional = insn.n_spec.nil? ? 0 : (insn.n_spec == '*' ? 1 : insn.n_spec.to_i)
     kw = insn.nk_spec.nil? ? 0 : 2 * insn.nk_spec.to_i
-    top = lead + positional + kw + BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?((insn.op) ? 1 : 0)
-    BytecodeIR::Ops::SELF_SEND_FAMILY.include?((insn.op) ? [] : [lead]) + (lead + 1..top).to_a
+    top = lead + positional + kw + (BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? 1 : 0)
+    BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? [] : [lead] + (lead + 1..top).to_a
   end
 
   def array_reads(insn, lead)

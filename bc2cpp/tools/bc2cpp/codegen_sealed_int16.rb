@@ -31,7 +31,7 @@ class CodeGen
   end
 
   def sealed_int16_table(irep)
-    table = {}
+    table = Array.new(BytecodeIR.for(irep).size)
     sealed_int16_plans_for(irep).each_with_index do |array, k|
       table[array.index] = { kind: :create, dst: array.dst, array: k, values: array.values, size: array.size }
       array.actions.each { |j, action| table[j] = action.merge(array: k, size: array.size, range: array.range) }

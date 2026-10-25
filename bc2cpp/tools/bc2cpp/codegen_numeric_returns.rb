@@ -96,7 +96,7 @@ class CodeGen
       @ireps.each_value do |irep|
         program = BytecodeIR.for(irep)
         aliasing = program.each_source.any? do |i, _index|
-          i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?((i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym))
+          i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?(i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym)
         end
         next unless aliasing
 
@@ -114,7 +114,7 @@ class CodeGen
   # its pool has grown that provenance.
   def aliased_operand_name_set
     @aliased_operand_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
-      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?((i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
+      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?(i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym) }
 
       names.merge(aliased_operand_names(irep) || BytecodeIR.for(irep).instructions_with_op(:ALIAS, :LOADSYM).filter_map { |i| i.sym if i.sym })
     end
