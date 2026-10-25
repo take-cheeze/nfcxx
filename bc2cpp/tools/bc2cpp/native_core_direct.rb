@@ -759,6 +759,39 @@ module NativeCoreDirect
     end
   end.freeze
 
+  # OWNER_SET_DIRECT (codegen_owner_set_direct.rb): the registrations an owner call may resolve to when every owner
+  # of its name is one of these mruby natives. Each row is one owner's registration, audited like the rows above;
+  # the codegen table says which rows a name's owner set must be covered by and what the call computes.
+  OWNER_SET_ENTRIES = [
+    Entry.new(name: 'nil?', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_false_value()', apis: [],
+              checks: [['mrb_false', 'return mrb_false_value();', :exact]]),
+    Entry.new(name: 'nil?', owner: 'NilClass', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_true_value()', apis: [],
+              checks: [['mrb_true', 'return mrb_true_value();', :exact]]),
+    Entry.new(name: 'respond_to?', owner: 'Kernel', arity: 1, arg: :none, aspec: 'MRB_ARGS_ARG(1,1)',
+              expression: 'mrb_bool_value(mrb_respond_to(M, recv, mrb_symbol(ARG0)))',
+              apis: [%w[mruby.h mrb_respond_to]],
+              checks: [['obj_respond_to', <<~C, :exact]]),
+                mrb_sym id;
+                mrb_bool priv = FALSE, respond_to_p;
+                mrb_get_args(mrb, "n|b", &id, &priv);
+                respond_to_p = mrb_respond_to(mrb, self, id);
+                if (!respond_to_p) {
+                  mrb_sym rtm_id = MRB_SYM_Q(respond_to_missing);
+                  if (!mrb_func_basic_p(mrb, self, rtm_id, mrb_false)) {
+                    mrb_value v = mrb_funcall_id(mrb, self, rtm_id, 2, mrb_symbol_value(id), mrb_bool_value(priv));
+                    return mrb_bool_value(mrb_bool(v));
+                  }
+                }
+                return mrb_bool_value(respond_to_p);
+              C
+    # respond_to? consults respond_to_missing? only when it is not this default.
+    Entry.new(name: 'respond_to_missing?', owner: 'Kernel', arity: 2, arg: :none,
+              aspec: 'MRB_ARGS_ARG(1,1) | MRB_MT_PRIVATE', expression: 'mrb_false_value()', apis: [],
+              checks: [['mrb_false', 'return mrb_false_value();', :exact]])
+  ].freeze
+
   # The C text of each helper, emitted once per output that calls it.
   HAND_HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
@@ -957,7 +990,7 @@ module NativeCoreDirect
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
     headers = (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
-     KERNEL_ANY_RECEIVER_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
+     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
     key += headers.map(&:first).uniq.map do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
@@ -973,7 +1006,7 @@ module NativeCoreDirect
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
     (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
-     KERNEL_ANY_RECEIVER_ENTRIES).to_h do |entry|
+     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES).to_h do |entry|
       [entry, audit_entry(entry, registrations, opaque_owners, include_dir)]
     end
   end

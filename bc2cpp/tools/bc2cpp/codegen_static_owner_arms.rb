@@ -13,13 +13,25 @@
 #
 # The arms are added after compile_method finishes, so every pass that matches the owner-call line text (STRICT_HINT
 # wraps, CheckedSend's level) has already run on the single line, and the line itself stays the else unchanged for
-# SymbolCache. Only engine bodies get arms (mruby's own methods bind statically to core definitions only), only an
-# owner call with no block, and BC2CPP_STATIC_OWNER_ARMS=0 turns them off.
+# SymbolCache. Only engine bodies get arms (mruby's own methods bind statically to core definitions only), and
+# BC2CPP_STATIC_OWNER_ARMS=0 turns them off.
+#
+# BLOCK_OWNER_ARMS: a block owner call (BLOCK_OWNER_CALL, `bc2cpp_owner_call_named(..., BLK, argc, ...)`) gets the
+# same arms. Each passes the call's own block expression (the heap RProc, or the forwarded block parameter) to the
+# `_impl` the way a compiled direct call does (direct_call_block), and only a definition that takes the block
+# (takes_block_param?: a block parameter, a yield or block_given?) gets an arm. A `break` or non-local `return`
+# from the block crosses the `_impl` exactly as from the BLOCK_CORE_DIRECT arms in front of the same call. The
+# arguments may be any C identifier (a splat's unpacked `bc2cpp_splat_*` locals), each evaluated once in the one arm
+# that runs.
 module StaticOwnerArms
   STATIC_OWNER_ARMS_MAX = 6
   OWNER_CALL_LINE = %r{^(?<indent>[ \t]*)(?<dest>r\d+)\ =\ (?<call>bc2cpp_owner_call_named\(M,\ (?<recv>r\d+|self),
-    \ "(?<name>[^"]+)",\ \d,\ BC2CPP_OWNERS\([^)]*\),\ mrb_nil_value\(\),\ (?<argc>\d+)(?<args>(?:,\ r\d+)*)\);
+    \ "(?<name>[^"]+)",\ \d,\ BC2CPP_OWNERS\([^)]*\),
+    \ (?<blk>mrb_nil_value\(\)|bc2cpp_blk_heap_\d+\(\)|mrb_obj_value\([A-Za-z_][A-Za-z0-9_]*\)),
+    \ (?<argc>\d+)(?<args>(?:,\ [A-Za-z_][A-Za-z0-9_]*)*)\);
     \ /\*\ CLOSED_WORLD\ owner-call:\ \S+\ \*/)$}x
+  NO_BLOCK = 'mrb_nil_value()'
+
 
   def compile_method(label)
     @static_owner_arms_stack ||= []
@@ -40,12 +52,15 @@ module StaticOwnerArms
     return result if ENV['BC2CPP_STATIC_OWNER_ARMS'] == '0' || @clean_probe || !@closed_world
     return result if @owner_of.fetch(label).core || !result[:code].include?('CLOSED_WORLD owner-call')
 
-    # The matched calls take no block: no send's block may leak into direct_call_args.
-    saved = [@call_block_expr, @call_block_stack_expr]
+    # Each matched call sets its own block (static_owner_arms_code): no send's block may leak into direct_call_args,
+    # and the arms' direct calls must not count toward the finished method's BLOCK_ARM_REACH tallies.
+    saved = [@call_block_expr, @call_block_stack_expr, @call_block_direct_calls, @call_block_direct_impls&.dup]
     @call_block_expr = @call_block_stack_expr = nil
+    @call_block_direct_calls ||= 0
+    @call_block_direct_impls ||= Hash.new(0)
     static_owner_arms_rewrite(result)
   ensure
-    @call_block_expr, @call_block_stack_expr = saved if saved
+    @call_block_expr, @call_block_stack_expr, @call_block_direct_calls, @call_block_direct_impls = saved if saved
   end
 
   def static_owner_arms_rewrite(result)
@@ -54,10 +69,10 @@ module StaticOwnerArms
     pos = 0
     code.to_enum(:scan, OWNER_CALL_LINE).each do
       m = Regexp.last_match
-      argv = m[:args].scan(/r\d+/)
+      argv = m[:args].split(', ').drop(1)
       next unless argv.size == m[:argc].to_i
 
-      arms = static_owner_arm_targets(m[:name], argv.size)
+      arms = static_owner_arm_targets(m[:name], argv.size, m[:blk] != NO_BLOCK)
       seen = code[[m.begin(0) - 4000, 0].max...m.begin(0)]
       arms = arms.reject { |klass, _| static_owner_already_guarded?(seen, klass, m[:recv]) }
       next if arms.empty?
@@ -74,6 +89,7 @@ module StaticOwnerArms
   def static_owner_arms_code(m, arms, argv)
     ind = m[:indent]
     note = arms.map(&:first).join(', ')
+    @call_block_expr = m[:blk] == NO_BLOCK ? nil : m[:blk]
     branches = arms.map do |klass, t|
       impl = "#{cpp_name(t.owner, t.name)}_impl"
       call_argv, = direct_call_args(t, argv, impl)
@@ -96,16 +112,17 @@ module StaticOwnerArms
     seen.match?(/#{expr} == (?:#{cls})|(?:#{cls}) == #{expr}/)
   end
 
-  # [[class, definition]] for the arms of `name` called with `argc` arguments, at most STATIC_OWNER_ARMS_MAX.
-  def static_owner_arm_targets(name, argc)
+  # [[class, definition]] for the arms of `name` called with `argc` arguments (and a block when `block`), at most
+  # STATIC_OWNER_ARMS_MAX.
+  def static_owner_arm_targets(name, argc, block)
     @static_owner_arm_targets ||= {}
-    key = [name, argc, @only_owners]
+    key = [name, argc, block, @only_owners]
     return @static_owner_arm_targets[key] if @static_owner_arm_targets.key?(key)
 
-    @static_owner_arm_targets[key] = static_owner_arm_targets_decide(name, argc)
+    @static_owner_arm_targets[key] = static_owner_arm_targets_decide(name, argc, block)
   end
 
-  def static_owner_arm_targets_decide(name, argc)
+  def static_owner_arm_targets_decide(name, argc, block)
     return [] if devirt_blocked_name?(name)
 
     defs = core_targets(@registry[name]) || []
@@ -117,6 +134,7 @@ module StaticOwnerArms
       next if CodeGen.module_names&.include?(t.owner)
       next unless Array(@prepended_modules[t.owner]).empty? && !@unknown_mixins.include?(t.owner)
       next unless compiles_clean?(t.irep)
+      next if block && !takes_block_param?(@ireps.fetch(t.irep))
       next unless poly_arity_fits?(@ireps.fetch(t.irep), argc, true)
       next unless native_arg_types(t, mandatory_arity(@ireps.fetch(t.irep))).compact.empty?
       next if @only_owners && !@only_owners.include?(t.owner) && !@other_owners&.include?(t.owner)
