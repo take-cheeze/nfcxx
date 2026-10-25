@@ -18,6 +18,10 @@
 #     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
 #     file with a reflective send keeps the text rule. engine_ancestry follows superclasses, mruby's native
 #     exception chain included, and gives up (:all) on any other native superclass.
+#   FRAGMENT_USES (needs MRBC; skipped without it): a pool literal stays a fragment only when a load of it may reach
+#     a built string -- a concatenation without a non-name character, a store, a return a caller passes on, an
+#     argument of a method the trace does not know. Comparing it, a native hash key, a constant list only tested
+#     for membership and a part of a message with a space or a colon do not.
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
@@ -149,9 +153,50 @@ if ENV['MRBC']
     check('core: symbols and identifier strings count',
           tokens.include?('symbol_literal') && tokens.include?('string_literal_name'))
     check('core: a reflective file keeps the text rule', text == [reflective] && !tokens.include?('reflective_local_word'))
+
+    # --- FRAGMENT_USES ---
+    fragments = File.join(tmp, 'fragments.rb')
+    File.write(fragments, <<~'RUBY')
+      class FixFrag
+        LIST = %w[list_member other_member].freeze
+        def compared(x) = x == 'compared_word'
+        def looked_up(h) = h['hash_key_word'] == 1
+        def member(x) = LIST.include?(x)
+        def message(x)
+          kind = 'message_word'
+          "#{x}: #{kind}"
+        end
+        def built(x) = respond_to?("#{x}_built_suffix")
+        def stored = @word = 'stored_word'
+        def handed(o) = o.anything('handed_word')
+        def label = 'returned_word'
+        def use_label(x) = "#{x}#{label}"
+      end
+    RUBY
+    ireps, root_label = compile_ireps([fragments], 'static_dispatch_scan_check', tmp, mrbc: ENV['MRBC'])
+    registry, = build_registry(ireps, root_label)
+    body_of = {}
+    registry.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
+    parent = {}
+    ireps.each_value { |irep| irep.reps.each { |c| parent[c] = irep.label } }
+    method_of = ireps.keys.to_h do |label|
+      up = label
+      up = parent[up] until up.nil? || body_of.key?(up)
+      [label, up]
+    end
+    escaping = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, Set.new, S::FRAGMENT)
+    check('fragment uses: a compared literal is no fragment', !escaping.include?('compared_word'))
+    check('fragment uses: a native hash key is no fragment', !escaping.include?('hash_key_word'))
+    check('fragment uses: a constant list only tested for membership is no fragment',
+          !escaping.include?('list_member') && !escaping.include?('other_member'))
+    check('fragment uses: a part of a message with a non-name character is no fragment', !escaping.include?('message_word'))
+    check('fragment uses: a part of a name reaching respond_to? is one', escaping.include?('_built_suffix'))
+    check('fragment uses: a stored literal is one', escaping.include?('stored_word'))
+    check('fragment uses: an argument of an unknown method is one', escaping.include?('handed_word'))
+    check('fragment uses: a returned literal concatenated by a caller is one', escaping.include?('returned_word'))
   end
 else
-  puts 'skip CORE_BYTECODE_TOKENS fixtures (no MRBC)'
+  puts 'skip CORE_BYTECODE_TOKENS / FRAGMENT_USES fixtures (no MRBC)'
 end
 
 if $failures.zero?
