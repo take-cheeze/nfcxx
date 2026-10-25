@@ -464,7 +464,9 @@ class LocalLifetime
       end
     end
     f[3].drop(1).each do |p|
-      raise BadIR, 'param form' unless bh(p) == 'param'
+      raise BorrowRefused, 'aggregate results (sret) are unsupported' if bh(p) == 'sret'
+      raise BorrowRefused, 'variadic functions are unsupported' if bh(p) == 'ellipsis'
+      raise BadIR, 'param form' unless bh(p) == 'param' && p.length == 4
       @params << [p[1], bname(p[2]), bh(p[3]) == 'ptr', p[3]]
     end
     @slots.each_key do |name|
@@ -1220,6 +1222,11 @@ class LocalLifetime
     when 'const'
       borrow_scalar_type!(x[1])
       bh(x[1]) == 'ptr' ? ['unknown'] : []
+    when 'null'
+      # A null pointer names no place: dereferencing a value that can only be
+      # null is refused for lack of provenance, and a join adds nothing for it.
+      raise BadIR, 'null form' unless x.length == 2 && bh(x[1]) == 'ptr'
+      []
     when 'move-value', 'copy-value'
       raise BadIR, "#{bh(x)} form" unless x.length == 3
       borrow_scalar_type!(x[1])
@@ -1322,7 +1329,7 @@ class LocalLifetime
 
   def transfer(x, state)
     arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
-               'let'=>[4], 'set'=>[4], 'store'=>[4], 'return'=>[1,2],
+               'let'=>[4], 'set'=>[3, 4], 'store'=>[4], 'return'=>[1,2],
                'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
@@ -1381,8 +1388,9 @@ class LocalLifetime
       state['loan:' + id] = ['ended']
       invalidate_pointers(state, ['loan:' + id], 'expired:' + id)
     when 'let', 'set'
-      borrow_scalar_type!(x[2])
-      v = value(x[3], state)
+      # (set %N OPERAND) reassigns a register its (let ...) typed.
+      borrow_scalar_type!(x[2]) if x.length == 4
+      v = value(x[-1], state)
       raise BadIR, 'register destination' unless x[1].is_a?(String) && x[1].start_with?('%')
       state['value:' + x[1]] = v
     when 'store', 'zero-fill'

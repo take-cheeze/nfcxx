@@ -604,6 +604,13 @@ Exit status is 0 for supported local checks passing, 1 for a detected lifetime/i
 error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics currently identify
 functions and slots; source spans remain future work.
 
+`(set %N OPERAND)`, which lowers `?:`, `&&` and `||`, reassigns a register. A pointer register
+assigned on each branch carries the union of their provenance. `(null PTR)` has no provenance, so
+it adds nothing at a join, and a value that can only be null cannot be dereferenced. Functions
+with an `sret` result or an `(ellipsis)` parameter are refused. A `byval` parameter has no
+provenance, so using it as an address is refused. The C++ cases `cpp/conditional_*.cpp` cover a
+pointer `?:`, an uninitialized branch value, and a branch pointer to an ended scope.
+
 Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
 aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
 external stores, and stores through multiple possible destinations. Unknown instructions are
