@@ -110,7 +110,7 @@ module NativeCoreDirectFallback
   # receiver can lack Kernel (ClosedWorld#kernel_native_dispatch_safe?). Core bodies
   # get it too: these are program-wide facts, not the static-binding proofs a core
   # body is denied (block_core_world).
-  def kernel_direct_code(name, d, recv, argv, self_implicit = true)
+  def kernel_direct_code(name, d, recv, argv, self_implicit = true, class_arg_proven: false)
     entry = !devirt_blocked_name?(name) && kernel_direct_entry(name, argv.size, self_implicit)
     return nil unless entry
 
@@ -124,11 +124,19 @@ module NativeCoreDirectFallback
       guards << "mrb_obj_is_kind_of(M, #{recv}, M->kernel_module)"
     end
     arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
-    guards << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard
+    guards << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard && !(entry.arg == :class_or_module && class_arg_proven)
     return "#{note}  #{call}" if guards.empty?
 
     # A receiver or argument the guards reject keeps the send, so the method's own error is unchanged.
     "#{note}  if (#{guards.join(' && ')}) {\n    #{call}  } else {\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+  end
+
+  # A stable class/module binding already satisfies the native type check; a hint does not.
+  def kernel_class_argument_proven?(name, argv, irep, idx, offset, owner_def)
+    return false unless ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF'] != '0' && %w[is_a? kind_of?].include?(name) && argv.size == 1
+
+    reg = argv.first[/\Ar(\d+)\z/, 1]
+    reg && stable_constant_register(irep, idx, reg.to_i - offset, owner_def&.owner)
   end
 
   # BASIC_OBJECT_SEALED: the Kernel guard of an explicit-receiver row is dead when no bare BasicObject can exist

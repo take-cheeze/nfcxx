@@ -1527,7 +1527,9 @@ class CodeGen
       end
 
       if %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
-        kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit)
+        class_arg_proven = call_arguments.nil? &&
+                           kernel_class_argument_proven?(name, argv, irep, constant_site_idx, trace_reg_offset, owner_def)
+        kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit, class_arg_proven: class_arg_proven)
         return kernel_code if kernel_code
 
         to_enum_code = to_enum_any_receiver_line(d, recv, name, argv)
