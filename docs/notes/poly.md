@@ -37,10 +37,13 @@ linked in), plus that language's library:
 | JavaScript (`"js"`, `"javascript"`, `"quickjs"`) | `nfcpoly_js.cpp` | `build/poly-js/<backend>/lib/libquickjs.a` | `scripts/setup-poly-js.sh` |
 | ast (`"ast"`, `"nfcast"`) | `nfcpoly_ast.cpp` | the six `lib/ast/nfcast_*.cpp` files (`-I lib/ast`) | nothing to build |
 | Go (`"go"`, `"golang"`) | `nfcpoly_go.cpp` | `build/poly-go/libnfcgo.so`: yaegi and the bridge of `lib/poly/go`, a cgo shared library | `scripts/setup-poly-go.sh` (Go >= 1.24 and the Go module proxy) |
+| astro (`"astro"`, `"luastro"`) | `nfcpoly_astro.cpp` | `build/poly-astro/<backend>/lib/libluastro.a`: `nfcpoly_astro_shim.c` and the evaluator ASTroGen generates for ASTro's `sample/luastro`, with `-ldl -lm -lpthread` | `scripts/setup-poly-astro.sh` (`ruby` and GitHub) |
 
-`tests/poly/run.sh` builds all six for `qbe` and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
-with a `SKIP` line when `python3-config` or `Python.h` is missing, and Go when Go (>= 1.24, from `$GO`, `PATH` or
-`/usr/local/go/bin`), a C compiler for cgo or the Go module proxy is missing. `POLY_LANGS="lua js ast go"` selects languages.
+`tests/poly/run.sh` builds all seven for `qbe` and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
+with a `SKIP` line when `python3-config` or `Python.h` is missing, Go when Go (>= 1.24, from `$GO`, `PATH` or
+`/usr/local/go/bin`), a C compiler for cgo or the Go module proxy is missing, and astro when `ruby` or GitHub is missing.
+`POLY_LANGS="lua js ast go astro"` selects languages. astro is the one language that is not in the shared checks (it has no
+registered classes, see "astro: ASTro's luastro" below); its own part of `host.cpp` is `astro_tests()`.
 
 Each backend has a header for raw access to its interpreter next to nfcpoly (`nfcpoly_mruby.hpp`, `nfcpoly_lua.hpp`,
 `nfcpoly_python.hpp`, `nfcpoly_js.hpp`, `nfcpoly_go.hpp`): the interpreter's state, and a way to get the script value behind a `Value`. For
@@ -91,6 +94,44 @@ other file by nfcc as C. Checked with `nm`: only `ldo.o` references `__throw`. `
 volatile members that `ldo.c` writes (`lua_longjmp.status`, and `CallInfo.u.l.trap`, which only a signal handler could race
 with). The libraries a script gets are base (without `dofile` and `loadfile`), coroutine, table, string, math and utf8: no
 `io`, `os`, `package` or `debug`.
+
+**astro: ASTro's luastro behind a C shim.** [ASTro](https://github.com/ko1/astro) is a framework that generates an AST
+interpreter from a `node.def` (`astro.md`); its `sample/luastro` is a Lua 5.4 subset (74 node types, tables with metatables,
+closures, `pcall`, a small standard library). It has a command line and no embedding API: `main.c` `#include`s the tokenizer,
+parser, runtime and standard library (they share `static` state) and drives them from `argv`. `scripts/setup-poly-astro.sh`
+fetches ko1/astro at the pin of `tests/realworld/run_astro.sh`, applies that script's two patches to a copy (Ruby 3.4's `it`
+becomes `_1`; the `;;` ASTroGen writes between allocator declarations becomes a newline, which cproc needs), runs ASTroGen
+(Ruby) on `node.def`, and compiles with nfcc, per back end, two files into `libluastro.a`: the generated `node.c` and
+`lib/poly/nfcpoly_astro_shim.c`, which is `main.c` without the command line (the same declarations and `#include`s) plus the
+entry points of `nfcpoly_astro_shim.h`: eval, call, a method call, the value constructors and accessors, the globals and a table
+of roots. Nothing of luastro is edited; the Code Store (SD specialization, `dlopen`) is off (`OPTION.no_compiled_code`), so a
+snippet runs in the interpreter and nothing is written to the current directory. Two things the shim does beyond forwarding: a
+syntax error is caught with luastro's own hook (`lua_tok_error_jmp_set`), and `pcall` / `xpcall` are replaced by wrappers of the
+originals that restore `LUASTRO_CUR_UPVALS`, the varargs and the branch state after a caught error (luastro's own crash on
+`local n = 0; local function f() pcall(g); n = n + 1 end`: the caller then reads its upvalue from the failed callee's closure).
+`io` and `os` are removed from the globals (no files, no `os.exit`, no clock).
+
+What luastro's value model gives, and so what the backend supports: nil, booleans, **63-bit** integers (a `long long` that does not
+fit is a `ConversionError`), doubles, strings (with NUL), tables (a table with the keys 1..n is an `Arr`), Lua and C functions,
+coroutines. No userdata and no light userdata, no finalizers, no metatable hook on the global table. So:
+
+- **There are no registered classes.** `def_class` is accepted and does nothing; its name is not defined in the script; a
+  C++ object that would cross (a bound class object, a result of a class type) is a `ConversionError`, which a script sees as a
+  `TypeError`, and which refuses to start astro when it is declared with `bind` / `set` before the first eval. Faking classes
+  with tables would give no way to free the C++ object (no finalizers) and no identity.
+- **Bound functions** work, through one shared C function `__nfc_call(id, args...)` (luastro's C functions carry no data) and a
+  Lua closure per function that passes its numbered parameters. luastro does not expand `...` in a call, a table constructor
+  or an assignment (`f(...)` passes the first one; `select('#', ...)` is 1), so a bound function takes exactly `arity()` parameters
+  plus one that must stay nil: more arguments are an `ArgumentError`, fewer are nil, and the conversion of the nil is the
+  error (a `TypeError`; optional parameters get nil). `Value::execute(args...)` and `call(name, args...)` pass any number.
+- **Bound variables** (`bind(name, int&)` ...) are copied across the boundaries, as in Go: into the globals when a script starts
+  or a host function returns, back through the setter when it ends or a host function is called. A write to a `const` one is a
+  `NameError` where the script hands control back, not at the write.
+- **One interpreter per process.** luastro's interned names and object list are process globals, so a second `Context` using astro
+  while the first lives is an `Error`; after the first is destroyed the next starts from fresh globals (the string pool stays).
+- Nodes are never freed (each eval adds its AST to luastro's node list), strings are interned and kept, there is no depth limit
+  (a runaway recursion overflows the C stack: luastro runs on a 4 GB thread for that, the shim does not), and `collectgarbage()` is
+  the only collection: handles are roots, so it is safe, but nothing runs a collection by itself.
 
 **JavaScript: QuickJS-NG in plain C.** `scripts/setup-poly-js.sh` builds QuickJS-NG v0.17.0 (the commit of tag `v0.17.0` is
 the pin) into `libquickjs.a` from `quickjs.c`, `dtoa.c`, `libregexp.c` and `libunicode.c`, all as C by `nfcc`. QuickJS reports
@@ -197,6 +238,7 @@ deferred functions) run on the way. In JavaScript the identity covers whatever w
 | Lua | any value; the backend raises tables `{class, message}` with a `__tostring` | such a table, with a hidden `host` userdata | `LuaError` for `error("text")` |
 | Python | a Python exception | `HostError(RuntimeError)`, capsule in `_host` | the Python class (`ValueError`) |
 | ast | any value, as in Lua; the backend raises the same `{class, message}` tables | such a table, with a hidden `host` object | `LuaError` for `error("text")` |
+| astro | any value, as in Lua; the same `{class, message}` tables (no metatable: `tostring` of one is `table: 0x...`) | such a table, with the number of the saved `std::exception_ptr` in `host` | `LuaError` for `error("text")` and for the runtime's own errors |
 | JavaScript | any value; an `Error` carries `name`, `message`, `stack` | `NfcPoly::HostError extends Error`, the `std::exception_ptr` in a property that only C code can name (a private symbol) | its `name` (`TypeError`), or the constructor's name for an `Error` subclass that keeps the name `"Error"`; a thrown value that is not an error (`throw "x"`) is `Error` with `String(value)` as the message |
 | Go | a panic with any value | a panic with `*nfc.HostError` (an `error`; `recover()` gives it back as such) | `panic` for a value that is not an error, the Go type of an `error` (`errors.errorString`, `fmt.wrapError`), `runtime.Error`, the `Class` of an `*nfc.Error` (`TypeError`, `ArgumentError`, `GoroutineError`, `ReadOnlyError`) |
 
@@ -230,6 +272,7 @@ lower-case identifiers.
 | Ruby | the last expression | top-level locals, methods, globals | `Vec3.new(1, 2, 3)`, `v.len2`, `v.x = 4` | `counter`, and `self.counter = 5` |
 | Lua | the chunk's `return` value; a single expression is returned as is (tried as `return <code>` first) | globals (not `local`s) | `Vec3.new(1, 2, 3)` or `Vec3(1, 2, 3)`, `v:len2()`, `v.x = 4` | `counter`, and `counter = 5` (the globals' metatable) |
 | ast | as Lua | globals (not `local`s) | as Lua: `Vec3.new(1, 2, 3)` or `Vec3(1, 2, 3)`, `v:len2()`, `v.x = 4` | as Lua (the globals' metatable) |
+| astro | as Lua (tried as `return <code>` first) | globals (not `local`s) | none: no registered classes | `counter`, and `counter = 5`, copied at the boundaries |
 | Python | the last expression statement (the source is split with `ast`) | the globals | `Vec3(1, 2, 3)`, `v.len2()`, `v.x = 4` | `counter`, and `counter = 5` at the top level (a `dict` subclass; reads work in functions too; a write through `global counter` does not reach the host and shadows the live variable from then on, so assign at the top level or with `set`) |
 | JavaScript | the completion value of the script (a single expression gives its value; an object literal needs parentheses, `({a: 1})`, since `{` starts a block) | globals, `var`, functions; `let`, `const` and `class` of the global lexical scope persist too (declaring one again is a `SyntaxError` the script throws) | `new Vec3(1, 2, 3)` (without `new`: `TypeError`), `v.len2()`, `v.x = 4`; `class P extends Vec3` works | `counter`, and `counter = 5` (an accessor property of the global object; a `let counter` shadows it, and a variable without a setter throws a `TypeError` when assigned) |
 | Go | the value of the last top-level statement when it is an expression (the source is cut into its top-level statements; that one is evaluated as `nfc.Ret(expr)`); a statement, a declaration or a call without a result gives nil, several results give the first | package-level declarations, and `var` / `:=` at the top level | `NewVec3(1, 2, 3)`, `v.Len2()`, `v.X()`, `v.SetX(4)` (exported Go names) | `counter`, and `counter = 5`: a Go variable that is synchronized with the host at the boundaries (see "What is live") |
@@ -576,7 +619,12 @@ None of these is covered by a test unless stated.
   images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep.rb` handles it for C inputs only, which is
   why mruby and Lua are patched).
 - `setup-poly.sh`, `setup-poly-lua.sh` and `setup-poly-js.sh` fetch mruby, Lua and QuickJS-NG from GitHub at their pins (mruby also
-  needs `ruby` + `rake` once), like `setup-mruby.sh` and `run_lua.sh`.
+  needs `ruby` + `rake` once), like `setup-mruby.sh` and `run_lua.sh`; `setup-poly-astro.sh` fetches ko1/astro and needs `ruby` for
+  ASTroGen on every build.
+- astro: no registered classes, 63-bit integers, no `...` expansion, one `Context` at a time, no bound-function arity count; see
+  "astro: ASTro's luastro". luastro is a young sample: besides the `pcall` crash above, `f(x) ~= nil` on a multiple-result call
+  returned the call's count instead of a boolean until the shim stopped reading `ret_info` after a call (the shim now takes the
+  first result from `lua_call`'s return value).
 
 ## Checks run
 
