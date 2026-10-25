@@ -18,6 +18,8 @@
 # Environment:
 #   BC2CPP_HOST_FRAMES  RPG2k#main_loop frames to run (default 600).
 #   BC2CPP_TRACE_TYPES_OUT  dump file (default BUILD_DIR/trace-host/param_trace.tsv).
+#   BC2CPP_HOST_BATTLE_TROOP  open a battle against this troop id after New Game.
+#   BC2CPP_HOST_BATTLE_PLAY  1: drive that battle with confirm taps.
 #
 # Needs on PATH: c++ (g++), cc, ar, nproc, clock_gettime-capable libc (Linux).
 set -euo pipefail

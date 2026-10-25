@@ -115,29 +115,43 @@ module StaticDispatchRegistrations
     \s*r\d+\ =\ bc2cpp_send\(M,\ [^,]+,\ (\d+),
   }x
 
-  # EMBED_GUARD_FALLBACK: the names in `src`'s symbol table
-  # whose every use is the by-name fallback of a MONO_EMBED_GUARD for that
-  # same method, on an owner nothing subclasses. The fallback runs only when
-  # the receiver's class is not exactly the owner; with no subclass anywhere,
-  # such a receiver's method lookup never reaches the owner's method table, so
-  # it cannot need the owner's registration -- it finds the name on its own
-  # class or raises NoMethodError, registered or not. Such a use is therefore
-  # not a dynamic lookup of the owner's method.
-  def embed_guard_fallback_only(src, subclassed)
+  # A proc over a bytecode irep (mrb_proc_new, mrb_closure_new), as opposed to mrb_proc_new_cfunc*.
+  BYTECODE_PROC = /\bmrb_(?:proc_new|closure_new)\s*\(/
+
+  # NON_LOOKUP_HELPERS: the generated helpers whose use of a name finds no compiled method. Each is the else arm of
+  # a proof (symbol_cache.rb): bc2cpp_guard_violation and bc2cpp_hint_violation raise without dispatching;
+  # bc2cpp_nomethod(_raise) dispatches only to report a violated proof, for a receiver the closed world proved
+  # answers the name with no method at all, so its lookup finds nothing, registered or not; bc2cpp_nil_receiver
+  # looks the name up on nil, whose ancestors hold no SAFE_UNREGISTER_OWNER_RE owner. (The debug-only
+  # -DBC2CPP_*_DISPATCH / -DBC2CPP_HINT_VIOLATION_LOG builds dispatch there; with the registration gone that finds
+  # the interpreted method instead, or the BC2CPP_UNREGISTERED_VERIFY stub.)
+  NON_LOOKUP_HELPERS = %w[nomethod nomethod_raise guard_violation hint_violation nil_receiver].to_set.freeze
+
+  # The names in `src`'s symbol table none of whose uses is a dynamic lookup of a compiled owner's method: each use
+  # is a NON_LOOKUP_HELPERS call or an EMBED_GUARD_FALLBACK one.
+  #
+  # EMBED_GUARD_FALLBACK: the by-name fallback of a MONO_EMBED_GUARD for that same method, on an owner nothing
+  # subclasses. The fallback runs only when the receiver's class is not exactly the owner; with no subclass
+  # anywhere, such a receiver's method lookup never reaches the owner's method table, so it cannot need the owner's
+  # registration -- it finds the name on its own class or raises NoMethodError, registered or not.
+  def lookup_free_names(src, subclassed)
     table = src[SYM_TABLE, 1] or return Set.new
     names = table.scan(STRING_LITERAL).map { |(s)| unescape(s) }
     uses = Hash.new(0)
+    quiet = Hash.new(0)
     src.scan(/bc2cpp_sym\(M, (\d+)\)/) { |(i)| uses[i.to_i] += 1 }
-    SymbolCache.send_indices(src).each { |i| uses[i] += 1 }
-    guarded = Hash.new(0)
+    SymbolCache.send_index_kinds(src).each do |kind, i|
+      uses[i] += 1
+      quiet[i] += 1 if NON_LOOKUP_HELPERS.include?(kind)
+    end
     src.scan(EMBED_GUARD_FALLBACK) do |name, owner, idx|
       i = idx.to_i
       next unless names[i] == name
       next if owner.end_with?('.singleton') || subclassed?(owner, subclassed)
 
-      guarded[i] += 1
+      quiet[i] += 1
     end
-    guarded.select { |i, n| n == uses[i] }.keys.to_set { |i| names[i] }
+    quiet.select { |i, n| n == uses[i] }.keys.to_set { |i| names[i] }
   end
 
   # Every class path something could subclass, conservatively: each
@@ -215,14 +229,23 @@ module StaticDispatchRegistrations
              Dir["#{repo_root}/3rd/mruby/mrbgems/*/{src,core,include}/**/#{native_glob}"] +
              external_gem_native_srcs(repo_root)
     native = native.reject { |p| p =~ %r{/mruby-[a-z0-9]+-compiled/src/register\.cxx\z} }
+    if closed_only
+      ruby = ruby.reject { |p| p.start_with?(*OTHER_MAKER_GEMS.map { |g| "#{repo_root}/#{g}/" }) }
+      native = native.reject { |p| p.start_with?(*OTHER_MAKER_GEMS.map { |g| "#{repo_root}/#{g}/" }) }
+    end
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
   end
 
   def outside_world_tokens(repo_root, closed_only: false)
     ruby, native = outside_world_files(repo_root, closed_only: closed_only)
     tokens = Set.new
+    naming = closed_only ? naming_macros(native) : []
     (ruby + native).each do |path|
       text = File.read(path, encoding: 'BINARY')
+      if closed_only && native.include?(path)
+        native_name_tokens(text, tokens, naming)
+        next
+      end
       text.scan(/[A-Za-z_][A-Za-z0-9_]*[?!=]?/) do |t|
         tokens << t
         tokens << t.chomp('=').chomp('?').chomp('!')
@@ -232,6 +255,61 @@ module StaticDispatchRegistrations
       end
     end
     tokens
+  end
+
+  # The gems of the other makers. The closed build is single-format (build_config.rb's
+  # single_format_only loads mruby-rpg2k as its only maker gem), so their Ruby and C never run in it.
+  OTHER_MAKER_GEMS = %w[mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs].freeze
+
+  # NATIVE_NAME_TOKENS (closed only): C reaches a method by name only through a string ("name" for
+  # mrb_funcall, mrb_intern_lit, a name table), a presym macro (MRB_SYM(name), MRB_SYM_Q(name), ...) or a macro
+  # that makes a name of its argument (naming_macros). A bare C identifier spelled like a method name (a local
+  # `size`, a field `preview_map_id`) looks nothing up, so native files contribute only those.
+  # Comments are scanned too: a literal there only adds names, which is the safe direction.
+  def native_name_tokens(text, tokens, macros)
+    text.scan(STRING_LITERAL) { |(s)| tokens << unescape(s) }
+    unless macros.empty?
+      text.scan(/\b(?:#{macros.map { |m| Regexp.escape(m) }.join('|')})\s*\(([^()]*)\)/) do |(args)|
+        args.scan(/[A-Za-z_][A-Za-z0-9_]*/) { |t| tokens << t }
+      end
+    end
+    text.scan(/MRB_(?:Q?SYM|OPSYM)(?:_([QBE]))?\(\s*(\w+)\s*\)/) do |kind, name|
+      tokens << name
+      tokens << name + { 'Q' => '?', 'B' => '!', 'E' => '=' }.fetch(kind) if kind
+    end
+  end
+
+  # A function-like macro that turns a parameter into a name -- `#param` stringification, a presym macro applied to
+  # the parameter, or a call passing it on to another such macro -- lets a bare identifier at its call site become a
+  # method name, so native_name_tokens counts every identifier in those macros' arguments. The presym family itself
+  # (MRB_SYM(name), ...) is read directly there, and presym/scanning.h's redefinitions only exist for mruby's presym
+  # scan, not the build.
+  def naming_macros(paths)
+    naming_macros_in(paths.reject { |p| p.end_with?('/presym/scanning.h') }.map { |p| File.read(p, encoding: 'BINARY') })
+  end
+
+  # naming_macros on source texts.
+  def naming_macros_in(texts)
+    defs = texts.flat_map do |text|
+      text.gsub(/\\\n/, ' ').scan(/^[ \t]*#[ \t]*define[ \t]+(\w+)\(([^)]*)\)([^\n]*)/)
+    end
+    naming = Set.new
+    loop do
+      callee = naming.empty? ? nil : /\b(?:#{naming.map { |m| Regexp.escape(m) }.join('|')})\s*\(/
+      grew = false
+      defs.each do |macro, params, body|
+        next if naming.include?(macro) || macro.match?(/\AMRB_\w*SYM/)
+
+        named = params.split(',').map(&:strip).reject(&:empty?).any? do |param|
+          name = Regexp.escape(param.end_with?('...') ? '__VA_ARGS__' : param)
+          body.match?(/(?<!#)#\s*#{name}\b/) || body.match?(/MRB_\w*SYM\w*\([^)]*\b#{name}\b/) ||
+            (callee && body.match?(/#{callee}[^)]*\b#{name}\b/))
+        end
+        grew = true if named && naming.add?(macro)
+      end
+      break unless grew
+    end
+    naming.to_a.sort
   end
 
   # Runs bc2cpp.rb for each compiled gem and the closed-world parse; returns
@@ -292,7 +370,7 @@ module StaticDispatchRegistrations
       end
     end
     runs.each_value do |r|
-      dynamic.merge(c_literals(r[:gen], exempt: embed_guard_fallback_only(r[:gen], subclassed)))
+      dynamic.merge(c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed)))
              .merge(c_literals(r[:hand]))
     end
     dynamic.merge(outside_world_tokens(repo_root, closed_only: closed_only))
@@ -306,9 +384,12 @@ module StaticDispatchRegistrations
     # the root and class bodies (and blocks made in them) plus by the bodies
     # those names reach. Everything else -- an uncompiled method, a compiled
     # one left unregistered -- runs whenever its name is looked up at all.
-    # Blocks run whenever their method might: always inside a registered
-    # compiled method (bc2cpp may keep a block as a bytecode proc), otherwise
-    # with the method. Names are only ever added, so both fixpoints converge.
+    # Blocks run whenever their method might. Inside a registered compiled
+    # method that is the LOAD phase too, unless the generated C++ builds a
+    # bytecode proc somewhere (BYTECODE_PROC): every block the compiled code
+    # makes is otherwise a C proc (mrb_proc_new_cfunc_with_env), so the block's
+    # irep runs only from the method's own bytecode. Names are only ever added,
+    # so both fixpoints converge.
     sends = lambda do |irep, into|
       grew = false
       BytecodeIR.for(irep).each_source do |insn, _index|
@@ -335,13 +416,14 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden)
     dynamic.merge(load_names)
+    bytecode_blocks = runs.each_value.any? { |r| r[:gen].match?(BYTECODE_PROC) || r[:hand].match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
       m = method_of[label]
       next true if m.nil?
 
       owner, name = body_of[m]
       if overridden.include?("#{owner}##{name}")
-        label == m ? load_bodies.include?(m) : true
+        bytecode_blocks && label != m ? true : load_bodies.include?(m)
       else
         dynamic.include?(name)
       end
