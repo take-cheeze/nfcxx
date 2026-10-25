@@ -163,7 +163,7 @@ module RbsParamCheck
     sites.filter_map do |irep, idx, dest, argc|
       next if argc < req || (rest.zero? && argc > req + opt)
 
-      why = trace(ctx, irep, idx, (dest + pos + 1).to_s, cls, 0)
+      why = trace(ctx, irep, idx, dest + pos + 1, cls, 0)
       [irep, idx, why] if why
     end
   end
