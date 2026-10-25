@@ -57,7 +57,7 @@ def struct_new_member_sets(irep, idx, insn)
   use = idx
   if insn.n_spec == '*'
     definitions = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + 1).to_s,
-                                                 origin_transfers: true, through_handlers: true)
+                                                 origin_transfers: true, through_handlers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     use = definitions.first.index

@@ -44,7 +44,7 @@ module BytecodeIR
       return nil unless reg
 
       definitions = reaching_definitions(index, reg.to_s, opaque_regs: opaque_regs, max_states: max_states,
-                                                          through_handlers: true, raiseif_nil: true)
+                                                          through_handlers: true, raiseif_nil: true, shared: true)
       return nil unless definitions
 
       definitions.map do |definition|

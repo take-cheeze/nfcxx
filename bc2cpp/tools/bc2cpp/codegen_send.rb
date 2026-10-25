@@ -2186,7 +2186,7 @@ class CodeGen
     return loop_flow_refuse(irep, trace_idx, :opaque_reg) if fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     defs = BytecodeIR.for(irep).reaching_definitions(trace_idx, reg, follow_moves: true,
-                                                                    opaque_regs: fixnum_proof_ctx(irep)[:upvars])
+                                                                    opaque_regs: fixnum_proof_ctx(irep)[:upvars], shared: true)
     return loop_flow_refuse(irep, trace_idx, :unproven_definition) if defs.nil? || defs.empty?
 
     writers = defs.map { |d| d.index.negative? ? nil : BytecodeIR.for(irep).source_at(d.index) }
