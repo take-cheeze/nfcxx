@@ -1339,12 +1339,30 @@ class YieldReach
       queue.concat(@yielder_methods.map(&:label)) if @sealed && !n.yielder_calls.empty?
       next unless @sound
 
-      queue.concat(all_methods) if n.unknown_call
+      queue.concat(crossable_dynamic_targets(n, all_methods)) if n.unknown_call
       queue.concat(callable_defs) if n.callable_send
-      queue.concat(escaping + callable_defs) if n.proc_call || n.unknown_block || n.stored_read
-      queue.concat(opaque) if n.native
+      # A native's callback (and a stored block a native runs) sits above that C frame: a Fiber.yield there raises
+      # before it suspends anything (see nb_cause), so no frame it reaches can be under a suspended Fiber.
+      queue.concat(escaping + callable_defs) if n.proc_call || n.unknown_block || (n.stored_read && !C_BOUNDARY)
+      queue.concat(opaque) if n.native && !C_BOUNDARY
     end
     seen
+  end
+
+  # What a computed send can call, by the rules nb_cause applies to it: a spelled name (dynamic_target?), and on self
+  # only within self's class chain (self_dispatch_may_yield?), plus any method_missing.
+  def crossable_dynamic_targets(n, all_methods)
+    return all_methods unless SPELLED_SENDS
+
+    @crossable_spelled ||= @nodes.values.select { |m| m.kind == :method && dynamic_target?(m.name) }
+    targets = @crossable_spelled
+    chain = !n.dyn_other && n.klass && ancestors_of(n.klass)
+    if chain
+      targets = targets.select do |m|
+        m.klass.nil? || m.klass == n.klass || chain.include?(m.klass) || @module_names.include?(m.klass)
+      end
+    end
+    targets.map(&:label) + @defs_by_name.fetch('method_missing', [])
   end
 
   public
