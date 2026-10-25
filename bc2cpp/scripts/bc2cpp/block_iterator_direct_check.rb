@@ -224,12 +224,16 @@ check.call('a dynamic installer withdraws the Kernel and String arms',
 c, = generate_world(SRC + "class BiSingleton\n  def touch(o); o.singleton_class; end\nend\n")
 check.call('singleton makers withdraw the heap literal proof',
            !code_with_blocks(c, 'chars_nested').match?(/-- (?:literal|proven) String receiver/))
-c, = generate_world(SRC + "class String\n  def each_char; yield 'z'; end\nend\n")
-# The core arm (an exact-String test in front of the core body) goes. A STATIC_OWNER_ARMS arm may stay: it calls the
-# program's own String#each_char, which is what an exact String receiver's lookup finds.
+c, = generate_world(SRC + "class String\n  def each_char; yield 'z'; end\nend\n" \
+                    "class Array\n  def index(*a); :mine; end\nend\n")
+# A program String#each_char withdraws the core String arm, and a program
+# Array#index the index loops, and neither disturbs the other: the checks are
+# per name over disjoint lookup chains (String/Comparable vs
+# Array/Enumerable), so one world proves both. A STATIC_OWNER_ARMS arm may
+# stay for each_char: it calls the program's own String#each_char, which is
+# what an exact String receiver's lookup finds.
 check.call('a program String#each_char withdraws the core String arm',
            !code_of(c, 'chars').match?(/M->string_class\) \{\n\s+r\d+ = String_each_char_impl/))
-c, = generate_world(SRC + "class Array\n  def index(*a); :mine; end\nend\n")
 check.call('a program Array#index withdraws the index loops, proven and guarded',
            %w[idx idx_lit].none? { |m| code_of(c, m).include?('bc2cpp_accum_') })
 c, = generate_world(SRC, { 'BC2CPP_BLOCK_CORE_DIRECT' => '0' })
