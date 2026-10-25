@@ -3,6 +3,8 @@
 # can compare the production script against it. The interface is the original's, with the environment variable
 # NFCXX_C_INPUT given as the --c-input flag (mruby has no ENV). Known differences of scripts/qbe-prep.rb from the
 # original (this file matches the original): input that is not UTF-8 (the original stops with status 1).
+# Both scripts have since stopped rewriting __builtin_bswap16/32/64 and the bit-counting built-ins (clz, ctz, popcount,
+# parity, ffs), which cproc now compiles itself (constant-folded).
 #
 # Rewrite EDG's preprocessed C so cproc accepts it, and emit the assembly the C cannot express.
 #
@@ -14,8 +16,7 @@
 #     `int3; ret` stub, so the trap is the same and the program resumes after it. Any other inline asm
 #     is left in place, and cproc rejects it.
 #   * Builtins cproc does not know, which doctest uses. `__builtin_memcpy`, `memmove`, `memset`, `memcmp` and
-#     `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_clzl` becomes a small
-#     helper (`__nfcxx_clzl`), defined in the prelude.
+#     `strlen` are renamed to the libc functions, with prototypes in the prelude.
 #     `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
 #     uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
 #     Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
@@ -36,8 +37,8 @@
 #   * `__builtin_fabs`, `__builtin_fabsf` (libcu++ and the CUDA headers) and the other libm builtins that libstdc++ <cmath>
 #     wrappers call (`__builtin_sqrtf`, `__builtin_powf`, ... see LIBC_BUILTINS) become the libm functions, with
 #     prototypes. `fabsl` is not mapped: cproc has no `long double`.
-#   * `__builtin_popcount{,l,ll}`, `__builtin_ctz{,l,ll}`, `__builtin_clz{,ll}` become helper functions
-#     (like `__builtin_clzl` above). For a zero argument ctz and clz return the width; GCC leaves that undefined.
+#   * `__builtin_{popcount,ctz,clz,parity,ffs}{,l,ll}` are left alone: cproc lowers and constant-folds them. For a zero
+#     argument ctz and clz return the width; GCC leaves that undefined.
 #   * GCC 14's type-generic `__builtin_{clz,ctz,popcount,parity}g(x[, d])` become `__nfcxx_*g` calls with x zero-extended,
 #     the width of x (sizeof) and d, so one helper serves every unsigned type. With one argument a zero input gives the
 #     width (as above); with two it gives d. Only the call shape is rewritten (see G_OPS).
@@ -79,7 +80,7 @@
 #   * GCC's `__sync_{add,sub,and,or,xor}_and_fetch_{4,8}` and `__sync_val_compare_and_swap_{4,8}` (the Interlocked
 #     operations of CoreCLR's gcenv.interlocked.inl) become helpers over cproc's `__atomic_fetch_OP` and
 #     `__atomic_compare_exchange_n`, seq_cst, with GCC's results. `__builtin_prefetch` and `__builtin_ia32_pause`
-#     are hints and become empty helpers; `__builtin_ffs` a small helper.
+#     are hints and become empty helpers.
 #
 # Usage: scripts/mrb scripts/qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL
 # ASM_TAIL is appended to the QBE assembly by qbe-cc.
@@ -717,40 +718,11 @@ HELPER_BUILTINS = {
   '__builtin_huge_valf' => ['__builtin_inff', ''],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
   # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
-  '__builtin_bswap16' => ['__nfcxx_bswap16',
-                          'static unsigned short __nfcxx_bswap16(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }'],
-  '__builtin_bswap32' => ['__nfcxx_bswap32',
-                          'static unsigned int __nfcxx_bswap32(unsigned int x) {' \
-                          ' return (x << 24) | ((x & 0xff00u) << 8) | ((x >> 8) & 0xff00u) | (x >> 24); }'],
-  '__builtin_bswap64' => ['__nfcxx_bswap64',
-                          'static unsigned long __nfcxx_bswap64(unsigned long x) {' \
-                          ' unsigned long r = 0; int i; for (i = 0; i < 8; i++) { r = (r << 8) | (x & 0xff); x >>= 8; } return r; }'],
   '__builtin_signbit' => ['__nfcxx_signbit',
                           'static int __nfcxx_signbit(double x) {' \
                           ' union { double d; unsigned long u; } v; v.d = x; return (int)(v.u >> 63); }'],
-  '__builtin_clzl' => ['__nfcxx_clzl',
-                       'static int __nfcxx_clzl(unsigned long x) {' \
-                       ' if (x == 0) return 64; int n = 0; while (!(x >> 63)) { x <<= 1; ++n; } return n; }'],
+  # __builtin_clz/ctz/popcount/parity/ffs (and their l, ll forms) are not rewritten: cproc has them, constant-folded
 }
-
-def add_bit_helpers
-  [['', 'unsigned int', 32], ['l', 'unsigned long', 64], ['ll', 'unsigned long long', 64]].each do |suffix, t, bits|
-    HELPER_BUILTINS['__builtin_popcount' + suffix] = [
-      '__nfcxx_popcount' + suffix,
-      "static int __nfcxx_popcount#{suffix}(#{t} x) { int n = 0; while (x) { x &= x - 1; ++n; } return n; }"]
-    HELPER_BUILTINS['__builtin_ctz' + suffix] = [
-      '__nfcxx_ctz' + suffix,
-      "static int __nfcxx_ctz#{suffix}(#{t} x) { int n = 0; if (x == 0) return #{bits};" \
-      ' while (!(x & 1)) { x >>= 1; ++n; } return n; }']
-    if suffix != 'l'  # clzl is defined above
-      HELPER_BUILTINS['__builtin_clz' + suffix] = [
-        '__nfcxx_clz' + suffix,
-        "static int __nfcxx_clz#{suffix}(#{t} x) { if (x == 0) return #{bits}; int n = 0;" \
-        " while (!(x >> #{bits - 1})) { x <<= 1; ++n; } return n; }"]
-    end
-  end
-end
-add_bit_helpers
 
 # GCC's __sync read-modify-write builtins over cproc's __atomic_fetch_OP (which returns the old value, so the new one
 # is old OP v) and __atomic_compare_exchange_n (on failure it writes the current value into the expected one, so the
@@ -768,9 +740,6 @@ add_bit_helpers
 end
 HELPER_BUILTINS['__builtin_ia32_pause'] = ['__nfcxx_pause', 'static void __nfcxx_pause(void) { }']
 HELPER_BUILTINS['__builtin_prefetch'] = ['__nfcxx_prefetch', 'static void __nfcxx_prefetch(const void *p, ...) { (void)p; }']
-HELPER_BUILTINS['__builtin_ffs'] = ['__nfcxx_ffs',
-  'static int __nfcxx_ffs(int x) { unsigned int u = (unsigned int)x; int n = 0; if (u == 0) return 0;' \
-  ' while (!(u & 1)) { u >>= 1; ++n; } return n + 1; }']
 
 # Type-generic overflow builtins: [C type, helper suffix, unsigned counterpart of a signed type].
 OV_TYPES = [['int', 'i', 'unsigned int'], ['unsigned int', 'u', nil], ['long', 'l', 'unsigned long'],
@@ -835,7 +804,7 @@ end
 
 VOLATILE_QUALS = ['volatile', '__volatile__', '__volatile']
 KEEP_NAME = '__nfcxx_keep'
-KEEP_DEF = "static void #{KEEP_NAME}(void *p) { }"
+KEEP_DEF = "static __attribute__((noipa)) void #{KEEP_NAME}(void *p) { }"
 
 def opener?(t)
   t == '(' || t == '[' || t == '{'
