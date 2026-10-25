@@ -56,9 +56,9 @@ or_literal = irep_of([
 ])
 check.call('the literal of `x = h[k] || []` does not dominate the read after the join',
            !BytecodeIR.write_dominates?(or_literal, 3, 4, 3))
-check.call('the GETIDX before the branch does dominate the branch', BytecodeIR.write_dominates?(or_literal, 1, 2, '3'))
+check.call('the GETIDX before the branch does dominate the branch', BytecodeIR.write_dominates?(or_literal, 1, 2, 3))
 check.call('a write directly before its read dominates it', BytecodeIR.write_dominates?(or_literal, 3, 4, 3) == false &&
-                                                             BytecodeIR.write_dominates?(or_literal, 0, 1, '3'))
+                                                             BytecodeIR.write_dominates?(or_literal, 0, 1, 3))
 
 # A multi-write op between the write and the read can overwrite the register on its fallback or callee frame
 # (vm.c L_SEND_SYM writes nil above R(a); a SEND's frame starts at R(a)): the write then does not supply the
@@ -66,7 +66,7 @@ check.call('a write directly before its read dominates it', BytecodeIR.write_dom
 clobber = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :ADD, "R0\t(R1)"), insn(2, :MOVE, "R3\tR2"),
                    insn(3, :RETURN, 'R3')])
 check.call('ADD R0 falls back to a send that writes R2: the LOADI before it does not dominate the read of R2',
-           !BytecodeIR.write_dominates?(clobber, 0, 2, '2'))
+           !BytecodeIR.write_dominates?(clobber, 0, 2, 2))
 check.call('ADD R5 writes only R5..R7 on its fallback: the LOADI of R2 still dominates (negative)',
            BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :ADD, "R5\t(R6)"),
                                                  insn(2, :MOVE, "R3\tR2"), insn(3, :RETURN, 'R3')]), 0, 2, '2'))
@@ -93,18 +93,18 @@ straight = irep_of([
   insn(8, :NOP, ''), insn(9, :MOVE, "R4\tR2"), insn(12, :RETURN, 'R4')
 ])
 check.call('a jump over an unrelated write leaves the earlier write dominating',
-           BytecodeIR.write_dominates?(straight, 0, 4, '2'))
+           BytecodeIR.write_dominates?(straight, 0, 4, 2))
 
 # The entry value survives a branch that never writes the register, but not a
 # branch that does.
 entry_plain = irep_of([insn(0, :JMPNOT, "R1\t7"), insn(4, :LOADI_1, "R3\t(1)"), insn(6, :NOP, ''),
                        insn(7, :MOVE, "R4\tR2"), insn(10, :RETURN, 'R4')])
 check.call('the entry value of an untouched register reaches a read behind a branch',
-           BytecodeIR.write_dominates?(entry_plain, BytecodeIR::ENTRY, 3, '2'))
+           BytecodeIR.write_dominates?(entry_plain, BytecodeIR::ENTRY, 3, 2))
 loop_back = irep_of([insn(0, :MOVE, "R4\tR2"), insn(3, :LOADI_1, "R2\t(1)"), insn(5, :JMPNOT, "R1\t0"),
                      insn(9, :RETURN, 'R4')])
 check.call('a back edge from after the read refuses the entry value',
-           !BytecodeIR.write_dominates?(loop_back, BytecodeIR::ENTRY, 0, '2'))
+           !BytecodeIR.write_dominates?(loop_back, BytecodeIR::ENTRY, 0, 2))
 
 nested = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :RETURN, 'R3')])
 check.call('a register a nested block writes is never dominated',
@@ -116,7 +116,7 @@ handler = irep_of([insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SEND0, "R3\t:f"), insn
                    insn(6, :MOVE, "R5\tR2"), insn(9, :RETURN, 'R5')],
                   [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 6, target: 6)])
 check.call('an exception edge from before the write into the read refuses',
-           !BytecodeIR.write_dominates?(handler, 2, 3, '2'))
+           !BytecodeIR.write_dominates?(handler, 2, 3, 2))
 
 puts '-- walk_dominating_writers (host)'
 moves = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :MOVE, "R4\tR3"), insn(8, :RETURN, 'R4')])

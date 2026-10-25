@@ -55,22 +55,22 @@ check.call('X = c ? [] : {} has no single container class (the last literal is n
 hash_or_array = program(
   [:JMPNOT, "R1\t3"], [:HASH, "R2\t0"], [:JMP, '4'], [:ARRAY, "R2\t0"], [:SETCONST, "X\tR2"]
 )
-check.call('X = c ? {} : [] has no single container class', literal_container_class(hash_or_array, 4, '2').nil?)
+check.call('X = c ? {} : [] has no single container class', literal_container_class(hash_or_array, 4, 2).nil?)
 
 # X = c ? [] : []  -- every path agrees.
 array_both = program(
   [:JMPNOT, "R1\t3"], [:ARRAY, "R2\t0"], [:JMP, '4'], [:ARRAY, "R2\t1"], [:SETCONST, "X\tR2"]
 )
-check.call('X = c ? [] : [] is an Array on every path', literal_container_class(array_both, 4, '2') == 'Array')
+check.call('X = c ? [] : [] is an Array on every path', literal_container_class(array_both, 4, 2) == 'Array')
 
 straight = program([:ARRAY, "R2\t2"], [:SETCONST, "X\tR2"])
-check.call('X = [1, 2] is an Array', literal_container_class(straight, 1, '2') == 'Array')
+check.call('X = [1, 2] is an Array', literal_container_class(straight, 1, 2) == 'Array')
 
 frozen = program([:ARRAY, "R2\t2"], [:SEND0, "R2\t:freeze"], [:SETCONST, "X\tR2"])
-check.call('X = [1, 2].freeze is an Array', literal_container_class(frozen, 2, '2') == 'Array')
+check.call('X = [1, 2].freeze is an Array', literal_container_class(frozen, 2, 2) == 'Array')
 
 nil_path = program([:JMPNOT, "R1\t3"], [:ARRAY, "R2\t0"], [:JMP, '4'], [:LOADNIL, "R2\t(0)"], [:SETCONST, "X\tR2"])
-check.call('X = c ? [] : nil is not a container', literal_container_class(nil_path, 4, '2').nil?)
+check.call('X = c ? [] : nil is not a container', literal_container_class(nil_path, 4, 2).nil?)
 
 puts '-- trace_eqq_literal_receiver (host, item 2)'
 # case x; when (c ? foo : 5) -- the receiver of === is the call's result on one path.

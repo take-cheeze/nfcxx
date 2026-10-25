@@ -33,7 +33,7 @@ puts '-- join of an ivar and self (host)'
 joined = irep_of([insn(0, :GETIV, "R2\t@data"), insn(1, :JMPNOT, "R1\t3"), insn(2, :LOADSELF, "R2\t(R2)"),
                   insn(3, :GETIDX, "R3\t(R2)")])
 check.call('a receiver that is @data on one path is not a game-variables receiver',
-           gen.game_variables_index_receiver(joined, 3, 2, owner) == false)
+           gen.game_variables_index_receiver?(joined, 3, 2, owner) == false)
 
 puts '-- straight-line self (host)'
 straight = irep_of([insn(0, :LOADSELF, "R2\t(R2)"), insn(1, :GETIDX, "R3\t(R2)")])
