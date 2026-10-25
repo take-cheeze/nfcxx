@@ -1,2 +1,2 @@
 3
-refused: call contracts require nothrow, noescape, and closed effects
+refused: call contracts require nothrow or may-throw, noescape, and closed effects

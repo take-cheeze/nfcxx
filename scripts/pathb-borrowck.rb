@@ -293,8 +293,8 @@ class BorrowCallEffects
       raise bad, 'call-effects form'
     end
     name = f[1].to_s
-    unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
-      raise refused, 'call contracts require nothrow, noescape, and closed effects'
+    unless %w[nothrow may-throw].include?(bh(f[3])) && f[3].length == 1 && f[4] == ['noescape'] && f[5] == ['closed']
+      raise refused, 'call contracts require nothrow or may-throw, noescape, and closed effects'
     end
     result = f[2][1]
     alias_result = f[2][2]
@@ -346,7 +346,7 @@ class BorrowCallEffects
     elsif result.is_a?(Array)
       raise refused, 'call effects support only void or scalar results'
     end
-    [name, {result: result, args: args, alias: alias_result}]
+    [name, {result: result, args: args, alias: alias_result, throws: bh(f[3]) == 'may-throw'}]
   end
 
   def lookup(name)
@@ -356,6 +356,9 @@ end
 
 class LocalLifetime
   attr_reader :errors
+
+  # true when the body calls a callee that may throw (other than the function itself)
+  attr_reader :throws
 
   def initialize(f, infer_loan_ends = false, semantic_layouts = nil, call_effects = nil, abi_sizes = {})
     @infer_loan_ends = infer_loan_ends
@@ -455,6 +458,19 @@ class LocalLifetime
       x.each { |y| scan.call(y) }
     end
     scan.call(f)
+    # (loc "FILE" LINE) statements (NFCXX_IR_LOC=1) give the place of the statements after them, in text order.
+    # Diagnostics name that place; without loc forms the messages are unchanged.
+    @locs = {}
+    cur = nil
+    where = lambda do |x|
+      next unless x.is_a?(Array)
+      if bh(x) == 'loc' && x.length == 3 && x[1].is_a?(IRStr)
+        cur = [x[1].to_s, x[2].to_s]
+      end
+      @locs[x.object_id] = cur if cur
+      x.each { |y| where.call(y) }
+    end
+    where.call(f)
     # IR printed without the flag has no facts. A function with no slot and no
     # parameter has nothing to declare either way.
     needs_facts = f.drop(4).any? { |part| bh(part) == 'slot' } || f[3].length > 1
@@ -696,7 +712,15 @@ class LocalLifetime
   def semantic_bytes(root, off, ty)
     desc = @layouts.lookup(ty)
     return nil unless desc
-    root_desc = @layouts.lookup(@slot_info[root][2])
+    root_type = @slot_info[root][2]
+    root_desc = @layouts.lookup(root_type)
+    # A byte array of the struct's exact size holds the same value (the frontend types a long double or __int128
+    # value as a byte array, and passes it to a struct parameter). Its whole object is the struct's, so the struct's
+    # significant bytes are the ones required.
+    if root_desc.nil? && off == 0 && bh(root_type) == 'array' && root_type.length == 3 && root_type[2] == 'unsigned_char' &&
+       root_type[1].is_a?(String) && root_type[1].to_i == desc[:size] && desc[:size] == @slot_info[root][1]
+      return desc[:used]
+    end
     unless root_desc && root_desc[:objects].include?([off, @layouts.key(ty)])
       raise BorrowRefused, 'semantic aggregate borrow does not match a declared subobject'
     end
@@ -976,6 +1000,7 @@ class LocalLifetime
 
   def diagnostic(code, place)
     msg = "#{@name}: #{code}: #{place}"
+    msg += " at #{@cur_loc[0]}:#{@cur_loc[1]}" if @cur_loc
     @errors << msg if @report && !@errors.include?(msg)
   end
 
@@ -1070,6 +1095,12 @@ class LocalLifetime
   # value: a function must leave it as it found it (the caller's frames).
   def eh_top?(x)
     x.is_a?(IRSym) && x.sig == '@' && x.name == '__curr_eh_stack_entry'
+  end
+
+  # The region counter (EDG's __eh_curr_region) says which frame objects are alive, for the runtime's unwinding. It is
+  # scalar bookkeeping that the normal path updates around each object, not program memory.
+  def eh_region?(x)
+    x.is_a?(IRSym) && x.sig == '@' && x.name == '__eh_curr_region'
   end
 
   def check_eh_stack(state)
@@ -1220,6 +1251,14 @@ class LocalLifetime
     end
     summary = @call_effects.lookup(x[2].name)
     raise BorrowRefused, 'calls require lifetime/effect contracts' unless summary
+    if summary[:throws] && x[2].name != @name
+      # Unwinding is not modeled as a path: the runtime leaves this function's frames and runs their destructors (the
+      # same destructors the normal path checks at scope end), and every local of this function dies with it, so the
+      # exceptional edge needs no state. Obligations that only a destructor frame would discharge are refused.
+      live = @drops.keys.select { |id| (state[drop_key(id)] || []).include?('live') }
+      raise BorrowRefused, 'throwing calls with live drop obligations require cleanup contracts' unless live.empty?
+      @throws = true
+    end
     raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
     returned_id ||= @implicit_loans[x.object_id] if summary[:alias]
     raise BorrowRefused, 'returned aliases require call-borrow' if summary[:alias] && !returned_id
@@ -1420,6 +1459,7 @@ class LocalLifetime
     when 'load'
       borrow_scalar_type!(x[1])
       return record_loan_values(state['value:@eh'] || ['external']) if eh_top?(x[2]) && bh(x[1]) == 'ptr'
+      return [] if eh_region?(x[2])
       places = value(x[2], state)
       raise BorrowRefused, 'unknown pointer provenance' if places.empty?
       width = type_width(x[1])
@@ -1441,7 +1481,10 @@ class LocalLifetime
     else
       # Arithmetic on addresses would erase provenance. Restrict this first
       # increment to scalar arithmetic and conversions on non-pointer values.
-      allowed = %w[wadd wsub wmul cadd csub cmul cdiv crem cshl cshr and or xor eq ne lt.s lt.u le.s le.u gt.s gt.u ge.s ge.u iconv]
+      # Scalar operations, integer and floating, and the conversions between them. The checked conversions (cf2i)
+      # trap on NaN or an out-of-range value; a trap is not a memory access, so it is not modeled here.
+      allowed = %w[wadd wsub wmul wneg cadd csub cmul cdiv crem cshl cshr cneg and or xor not eq ne lt.s lt.u le.s le.u gt.s gt.u ge.s ge.u
+                   fadd fsub fmul fdiv fneg lt.f le.f gt.f ge.f iconv cf2i i2f u2f fconv]
       raise BorrowRefused, "expression #{bh(x)}" unless allowed.include?(bh(x))
       # Comparing addresses reads no memory and its result has no provenance.
       if bh(x[1]) == 'ptr' && %w[eq ne lt.u le.u gt.u ge.u].include?(bh(x))
@@ -1457,6 +1500,7 @@ class LocalLifetime
   end
 
   def transfer(x, state)
+    @cur_loc = @locs[x.object_id]
     arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[3, 4], 'store'=>[4], 'return'=>[1,2],
                'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3], 'copy'=>[4]}
@@ -1530,6 +1574,7 @@ class LocalLifetime
       width = zero ? constant_offset(x[1]) : type_width(x[1])
       raise BadIR, 'negative zero-fill length' if width < 0
       v = zero ? nil : value(x[3], state)
+      return state if eh_region?(x[2]) && !zero
       if !zero && eh_top?(x[2]) && bh(x[1]) == 'ptr'
         # Pushing or popping a frame of EDG's exception-handling stack.
         raise BorrowRefused, 'exception-stack entry of unknown provenance' if v.empty? || v.include?('unknown')
@@ -1714,6 +1759,8 @@ class LocalLifetime
     end
     @report = true
     incoming.each { |id, s| transfer(@nodes[id][0], s.dup) }
+    # A summary that says nothrow must not describe a body that calls a throwing callee.
+    diagnostic('contract-may-throw', @name) if @summary && @throws && !@summary[:throws]
   end
 end
 
@@ -1785,7 +1832,7 @@ class SummaryInference
   def memory_type(ty)
     return nil if ty == 'void'
     return nil if bh(ty) == 'struct' && !@layouts.lookup(ty)
-    return nil unless BorrowLayouts::PRIMITIVES.key?(ty) || bh(ty) == 'ptr' || bh(ty) == 'struct'
+    return nil unless BorrowLayouts::PRIMITIVES.key?(ty) || bh(ty) == 'ptr' || bh(ty) == 'struct' || bh(ty) == 'array'
     @layouts.field_type(ty, [])
   rescue BorrowRefused, BadIR
     nil
@@ -1857,7 +1904,9 @@ class SummaryInference
       if a
         returns << ['from-arg', a[0].to_s, a[1].to_s, choices[a[0]][index[a[0]]][1]]
       end
-      form = ['call-effects', IRStr.new(name.bytes), returns, ['nothrow'], ['noescape'], ['closed'], ['args'] + args]
+      # Verified as may-throw, so a throwing body is not a contract violation. The final form says what the
+      # body does: may-throw when it calls a throwing callee (other than itself), else nothrow.
+      form = ['call-effects', IRStr.new(name.bytes), returns, ['may-throw'], ['noescape'], ['closed'], ['args'] + args]
       begin
         candidate = @effects.with(name, form)
         checker = LocalLifetime.new(f, @infer_loan_ends, @layouts, candidate, @abi_sizes)
@@ -1865,7 +1914,10 @@ class SummaryInference
       rescue BorrowRefused, BadIR
         return nil
       end
-      return form if checker.errors.empty?
+      if checker.errors.empty?
+        form[3] = [checker.throws ? 'may-throw' : 'nothrow']
+        return form
+      end
       blamed = []
       checker.errors.each do |e|
         place = e.split(': ', 3)[2]
