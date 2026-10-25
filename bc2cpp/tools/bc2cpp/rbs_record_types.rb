@@ -206,7 +206,7 @@ module RbsRecordTypes
     wanted = names.to_set
     sites = Hash.new { |h, k| h[k] = { sets: [], gets: [], calls: [] } }
     ireps.each_value do |irep|
-      irep.each_with_op('SETIV', 'GETIV') do |insn, i|
+      irep.each_with_op(:SETIV, :GETIV) do |insn, i|
         name = insn.ivar
         next unless wanted.include?(name)
 

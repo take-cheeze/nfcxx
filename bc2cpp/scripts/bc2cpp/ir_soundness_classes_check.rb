@@ -71,8 +71,8 @@ puts '-- 2. to_enum name: a handler entry between the LOADSYM and the send (hand
 # without the LOADSYM, so R2 holds no name there.
 enum_irep = lambda do |handlers|
   Irep.new(label: 'enum', instructions: [
-             bc.call(0, 'NOP', ''), bc.call(4, 'LOADSYM', "R2\t:set"), bc.call(8, 'NOP', ''),
-             bc.call(12, 'SSEND', "R1\t:to_enum\tn=1")
+             bc.call(0, :NOP, ''), bc.call(4, :LOADSYM, "R2\t:set"), bc.call(8, :NOP, ''),
+             bc.call(12, :SSEND, "R1\t:to_enum\tn=1")
            ], catch_handlers: handlers)
 end
 plain_sites = CallSiteIndex.build({ 'enum' => enum_irep.call([]) })
@@ -91,8 +91,8 @@ puts '-- 3. confined lambda call: a handler entry between the MOVE and the :call
 # idx0 may raise before the MOVE at idx1 and reach the handler (addr 8) inside the stretch; R5 is then not the lambda.
 confined_irep = lambda do |handlers|
   Irep.new(label: 'lam', nlocals: 3, nregs: 8, reps: [], catch_handlers: handlers, instructions: [
-             bc.call(0, 'NOP', ''), bc.call(4, 'MOVE', "R5\tR1"), bc.call(8, 'LOADI_1', "R6\t(1)"),
-             bc.call(12, 'SEND', "R5\t:call\tn=0")
+             bc.call(0, :NOP, ''), bc.call(4, :MOVE, "R5\tR1"), bc.call(8, :LOADI_1, "R6\t(1)"),
+             bc.call(12, :SEND, "R5\t:call\tn=0")
            ])
 end
 confiner = CodeGen.new({}, {}, {})
@@ -111,8 +111,8 @@ puts '-- 4. core alias: an exit reached without passing the ALIAS (a handler pat
 core_file = '/x/3rd/mruby/mrblib/core.rb'
 alias_body = lambda do |handlers|
   Irep.new(label: 'core', file: core_file, reps: [], catch_handlers: handlers, instructions: [
-             bc.call(0, 'SEND0', "R1\t:foo"), bc.call(4, 'JMP', '12'), bc.call(8, 'RETURN', 'R1'),
-             bc.call(12, 'ALIAS', ":new\told"), bc.call(16, 'RETURN', 'R1')
+             bc.call(0, :SEND0, "R1\t:foo"), bc.call(4, :JMP, '12'), bc.call(8, :RETURN, 'R1'),
+             bc.call(12, :ALIAS, ":new\told"), bc.call(16, :RETURN, 'R1')
            ])
 end
 core_alias_names = lambda do |handlers|

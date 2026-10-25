@@ -55,24 +55,24 @@ class YieldReach
   YIELDER_MESSAGES = %w[<< yield call].freeze
   # Names bytecode operators dispatch to.
   OP_NAMES = {
-    'ADD' => '+', 'ADDI' => '+', 'ADDILV' => '+', 'SUB' => '-', 'SUBI' => '-', 'SUBILV' => '-', 'MUL' => '*',
-    'DIV' => '/', 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=', 'AREF' => '[]',
-    'ASET' => '[]=', 'GETIDX' => '[]', 'GETIDX0' => '[]', 'SETIDX' => '[]=', 'STRCAT' => 'to_s', 'ARYCAT' => 'to_a', 'ARYSPLAT' => 'to_a', 'APOST' => 'to_a',
-    'HASHCAT' => 'to_hash', 'RANGE_INC' => '<=>', 'RANGE_EXC' => '<=>', 'GETCONST' => 'const_missing',
-    'GETMCNST' => 'const_missing', 'CLASS' => 'inherited', 'TDEF' => 'singleton_method_added',
-    'DEF' => 'method_added', 'SDEF' => 'singleton_method_added', 'EXCEPT' => 'exception'
+    :ADD => '+', :ADDI => '+', :ADDILV => '+', :SUB => '-', :SUBI => '-', :SUBILV => '-', :MUL => '*',
+    :DIV => '/', :EQ => '==', :LT => '<', :LE => '<=', :GT => '>', :GE => '>=', :AREF => '[]',
+    :ASET => '[]=', :GETIDX => '[]', :GETIDX0 => '[]', :SETIDX => '[]=', :STRCAT => 'to_s', :ARYCAT => 'to_a', :ARYSPLAT => 'to_a', :APOST => 'to_a',
+    :HASHCAT => 'to_hash', :RANGE_INC => '<=>', :RANGE_EXC => '<=>', :GETCONST => 'const_missing',
+    :GETMCNST => 'const_missing', :CLASS => 'inherited', :TDEF => 'singleton_method_added',
+    :DEF => 'method_added', :SDEF => 'singleton_method_added', :EXCEPT => 'exception'
   }.freeze
   # Punctuation names have no identifier for the outside-source scan to find.
   OPERATOR_NAMES = %w[+ - * / % ** == != < <= > >= <=> === =~ !~ [] []= << >> ! & | ^ ~ +@ -@].freeze
   # Ops that copy a value without keeping or running it, or read it only as a condition.
-  NEUTRAL_OPS = %w[MOVE GETUPVAR BLKPUSH BLKCALL JMPIF JMPNOT JMPNIL ENTER NOP STOP].freeze
+  NEUTRAL_OPS = %i[MOVE GETUPVAR BLKPUSH BLKCALL JMPIF JMPNOT JMPNIL ENTER NOP STOP].freeze
   # Ops that read their leading register and never define it. It is BytecodeIR::Ops::LEAD_READ_ONLY with two
   # deliberate differences: MATCHERR is left out (writers_of counts it as a writer, the conservative answer),
   # and the stores and in-place appends are added (they read R(a) and define nothing in it; LEAD_READ_ONLY
   # is audited against the walk-over semantics, so it does not list them).
-  LEAD_READERS = (BytecodeIR::Ops::LEAD_READ_ONLY - ['MATCHERR'] +
-                  %w[SETIV SETGV SETCV SETCONST SETMCNST SETSV SETIDX ASET ARYPUSH HASHADD]).freeze
-  NON_WRITERS = %w[JMP JMPUW STOP RETSELF].freeze
+  LEAD_READERS = (BytecodeIR::Ops::LEAD_READ_ONLY - [:MATCHERR] +
+                  %i[SETIV SETGV SETCV SETCONST SETMCNST SETSV SETIDX ASET ARYPUSH HASHADD]).freeze
+  NON_WRITERS = %i[JMP JMPUW STOP RETSELF].freeze
 
   Node = Struct.new(:label, :irep, :kind, :name, :parent, :owner, :calls, :lit, :bodies, :seed, :native,
                     :unknown_call, :proc_call, :unknown_block, :invokes, :stored_read, :fiber_body,
@@ -146,7 +146,7 @@ class YieldReach
     irep = @ireps[label]
     return false unless irep
 
-    BytecodeIR.for(irep).each_with_op('SENDB') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SENDB) do |insn, idx|
       next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
 
       return true unless literal_block_child(irep, idx).nil?
@@ -316,7 +316,7 @@ class YieldReach
         node.calls << OP_NAMES[op] if OP_NAMES[op] && !insn.block_index
         case op
         when :GETCONST, :GETMCNST
-          fiber_sites += 1 if op == 'GETCONST' && insn.const_name == 'Fiber'
+          fiber_sites += 1 if op == :GETCONST && insn.const_name == 'Fiber'
           @yielder_named_outside = true if %w[Yielder Generator].include?(insn.const_name) && !internal_file?(node)
         when :BLKPUSH, :BLKCALL then node.invokes = true
         when :SUPER
@@ -332,7 +332,7 @@ class YieldReach
         when :BLOCK, :LAMBDA, :METHOD
           child = irep.reps[insn.block_index]
           node.lit << child if child
-          @storing_blocks << child if child && op == 'LAMBDA'
+          @storing_blocks << child if child && op == :LAMBDA
         when :EXEC
           child = irep.reps[insn.block_index]
           node.bodies << child if child
@@ -352,7 +352,7 @@ class YieldReach
   def mark_generators
     @nodes.each_value do |node|
       irep = node.irep
-      BytecodeIR.for(irep).each_with_op('SENDB') do |insn, idx|
+      BytecodeIR.for(irep).each_with_op(:SENDB) do |insn, idx|
         next unless insn.sym == 'new'
         next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
 
@@ -363,7 +363,7 @@ class YieldReach
   end
 
   # Values that are never a Proc, so `x[i]` on them does not run one.
-  NON_PROC_WRITERS = %w[ARRAY ARRAY2 STRING HASH LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
+  NON_PROC_WRITERS = %i[ARRAY ARRAY2 STRING HASH LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
                         LOADI_7 LOADI8 LOADINEG LOADI16 LOADI32 LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE INTERN
                         SYMBOL RANGE_INC RANGE_EXC STRCAT].freeze
 
@@ -825,7 +825,7 @@ class YieldReach
   # Does the node, or a block below it, assign register +index+ (by write or SETUPVAR)?
   def writes_reg?(node, index)
     return true unless writers_of(node.irep)[index].empty?
-    return true if BytecodeIR.for(node.irep).instructions_with_op('SETUPVAR').any? { |i| i.upvar_ref&.first == index }
+    return true if BytecodeIR.for(node.irep).instructions_with_op(:SETUPVAR).any? { |i| i.upvar_ref&.first == index }
 
     BytecodeIR.own_upvar_written_regs(node.irep).include?(index.to_s)
   end
@@ -945,7 +945,7 @@ class YieldReach
       child = @nodes[label]
       next unless child
 
-      BytecodeIR.for(child.irep).each_with_op('SETUPVAR') do |insn, i|
+      BytecodeIR.for(child.irep).each_with_op(:SETUPVAR) do |insn, i|
         out << [child, i, insn.reg] if insn.upvar_ref == [reg, depth]
       end
       upvar_stores(child, reg, depth + 1, out)

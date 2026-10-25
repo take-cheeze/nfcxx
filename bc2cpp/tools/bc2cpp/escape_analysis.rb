@@ -196,30 +196,30 @@ module EscapeAnalysis
   # -- the op model ---------------------------------------------------------------------------------
   # Write only their leading register and read no register that can hold a tracked value.
   KILLS_LEAD = Set[
-    'LOADL', 'LOADI8', 'LOADINEG', 'LOADI__1', 'LOADI_0', 'LOADI_1', 'LOADI_2', 'LOADI_3', 'LOADI_4',
-    'LOADI_5', 'LOADI_6', 'LOADI_7', 'LOADI16', 'LOADI32', 'LOADSYM', 'LOADNIL', 'LOADTRUE', 'LOADFALSE',
-    'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETUPVAR', 'GETMCNST', 'OCLASS', 'TCLASS', 'EXCEPT',
-    'KARG', 'KEY_P', 'STRING', 'SYMBOL', 'INTERN', 'METHOD', 'AREF'
+    :LOADL, :LOADI8, :LOADINEG, :LOADI__1, :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4,
+    :LOADI_5, :LOADI_6, :LOADI_7, :LOADI16, :LOADI32, :LOADSYM, :LOADNIL, :LOADTRUE, :LOADFALSE,
+    :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST, :GETUPVAR, :GETMCNST, :OCLASS, :TCLASS, :EXCEPT,
+    :KARG, :KEY_P, :STRING, :SYMBOL, :INTERN, :METHOD, :AREF
   ].freeze
   PASSES = Set[
-    'NOP', 'EXT1', 'EXT2', 'EXT3', 'DEBUG', 'JMP', 'JMPUW', 'KEYEND', 'ALIAS', 'UNDEF', 'ENTER', 'JMPIF',
-    'JMPNOT', 'JMPNIL', 'MATCHERR', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP', 'ERR'
+    :NOP, :EXT1, :EXT2, :EXT3, :DEBUG, :JMP, :JMPUW, :KEYEND, :ALIAS, :UNDEF, :ENTER, :JMPIF,
+    :JMPNOT, :JMPNIL, :MATCHERR, :RETNIL, :RETTRUE, :RETFALSE, :STOP, :ERR
   ].freeze
   # Read their leading register and keep it somewhere that outlives the instruction.
   STORES_LEAD = {
-    'SETGV' => :stored_global, 'SETSV' => :stored_global, 'SETIV' => :stored_ivar, 'SETCV' => :stored_classvar,
-    'SETCONST' => :stored_constant, 'SETMCNST' => :stored_constant, 'SETUPVAR' => :stored_upvar,
-    'RAISEIF' => :raised, 'RETURN' => :returned, 'RETURN_BLK' => :returned, 'BREAK' => :returned,
-    'ASET' => :stored_container
+    :SETGV => :stored_global, :SETSV => :stored_global, :SETIV => :stored_ivar, :SETCV => :stored_classvar,
+    :SETCONST => :stored_constant, :SETMCNST => :stored_constant, :SETUPVAR => :stored_upvar,
+    :RAISEIF => :raised, :RETURN => :returned, :RETURN_BLK => :returned, :BREAK => :returned,
+    :ASET => :stored_container
   }.freeze
   # Write the leading register from a window of registers starting there; a tracked value in the window
   # would be kept by the result (array, hash, range) or by the class machinery.
-  WINDOW_OPS = %w[RANGE_INC RANGE_EXC CLASS MODULE SCLASS EXEC DEF TDEF SDEF].freeze
+  WINDOW_OPS = %i[RANGE_INC RANGE_EXC CLASS MODULE SCLASS EXEC DEF TDEF SDEF].freeze
   BINARY_NAMES = {
-    'ADD' => '+', 'SUB' => '-', 'MUL' => '*', 'DIV' => '/', 'EQ' => '==', 'LT' => '<', 'LE' => '<=',
-    'GT' => '>', 'GE' => '>='
+    :ADD => '+', :SUB => '-', :MUL => '*', :DIV => '/', :EQ => '==', :LT => '<', :LE => '<=',
+    :GT => '>', :GE => '>='
   }.freeze
-  CLOSURE_OPS = Set['BLOCK', 'LAMBDA'].freeze
+  CLOSURE_OPS = Set[:BLOCK, :LAMBDA].freeze
 
   # The callee side: ireps, every definition of a name and the native method names. +defs+ is
   # name => [MethodDef] as build_registry leaves it BEFORE core filtering (a core method the build keeps
@@ -230,12 +230,12 @@ module EscapeAnalysis
   # that only plain class-body defs outside the ireps make be relevant to defs_for on the classes that
   # can reach it; defs_named (no receiver class) still refuses such a name.
   class World
-    DEF_OPS = Set['TDEF', 'SDEF', 'DEF'].freeze
+    DEF_OPS = Set[:TDEF, :SDEF, :DEF].freeze
     # The hidden-owner token that makes every receiver a possible callee (see mixin_defines?).
     UNCONDITIONAL = '*'
     # The repository root: NATIVE_ARG_OK's file lists are repo-relative.
     NATIVE_ROOT = File.expand_path('../..', __dir__)
-    CONST_READS = Set['GETCONST', 'GETMCNST'].freeze
+    CONST_READS = Set[:GETCONST, :GETMCNST].freeze
     # Sends that make a method from a name computed at run time. A literal name is modelled below; any
     # other makes every callee set unknowable (`dynamic`).
     NAMING_SENDS = %w[define_method define_singleton_method alias_method].freeze
@@ -264,7 +264,7 @@ module EscapeAnalysis
                           local_variable_defined?].freeze
     REFLECTIVE_CONSTS = %w[ObjectSpace].freeze
     # Every op scan_definitions reads.
-    SCANNED_OPS = (BytecodeIR::Ops::SEND | DEF_OPS | %w[GETCONST GETMCNST]).freeze
+    SCANNED_OPS = (BytecodeIR::Ops::SEND | DEF_OPS | %i[GETCONST GETMCNST]).freeze
 
     attr_reader :ireps, :aliases, :dynamic_sites, :reflective_sites
 
@@ -577,8 +577,8 @@ module EscapeAnalysis
     end
   end
 
-  BLKPUSH = %w[BLKPUSH].freeze
-  REF_OPS = %w[GETUPVAR BLKPUSH].freeze
+  BLKPUSH = %i[BLKPUSH].freeze
+  REF_OPS = %i[GETUPVAR BLKPUSH].freeze
 
   class Analyzer
     MAX_DEPTH = 24
@@ -600,10 +600,10 @@ module EscapeAnalysis
       @native_arg_busy = Set.new
     end
 
-    CREATED_CLASS = { 'LAMBDA' => 'Proc', 'BLOCK' => 'Proc', 'ARRAY' => 'Array', 'HASH' => 'Hash',
-                      'STRING' => 'String', 'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range' }.freeze
+    CREATED_CLASS = { :LAMBDA => 'Proc', :BLOCK => 'Proc', :ARRAY => 'Array', :HASH => 'Hash',
+                      :STRING => 'String', :RANGE_INC => 'Range', :RANGE_EXC => 'Range' }.freeze
     # The `new` check covers the argument-less form too (SEND0, `Keeper.new`), which the IR files apart from SEND.
-    NEW_SENDS = Set['SEND0', 'SEND', 'SENDB'].freeze
+    NEW_SENDS = Set[:SEND0, :SEND, :SENDB].freeze
 
     # The value written to the leading register of the instruction at +index+: a LAMBDA, BLOCK, ARRAY, HASH,
     # STRING or the result of a `new` send (then +value_class+ is the constructed class when known).
@@ -910,7 +910,7 @@ module EscapeAnalysis
       return nil if prog.raise_targets[index]
 
       insn = prog.source_at(index)
-      return nil unless %w[JMPIF JMPNOT JMPNIL].include?(insn.op)
+      return nil unless %i[JMPIF JMPNOT JMPNIL].include?(insn.op)
 
       defs = prog.reaching_definitions(index, insn.reg.to_s, opaque_regs: BytecodeIR.own_upvar_written_regs(run.irep),
                                                              shared: true)
@@ -935,7 +935,7 @@ module EscapeAnalysis
     # arm (Array#each's to_enum) is not taken: the callee is judged with the block given (block_test_successors). A
     # variable, `&blk` or several writers may hold nil, and keep the by-name verdict.
     def literal_block_send?(irep, index, insn, block)
-      return false unless block && %w[SENDB SSENDB].include?(insn.op)
+      return false unless block && %i[SENDB SSENDB].include?(insn.op)
 
       prog = BytecodeIR.for(irep)
       defs = prog.reaching_definitions(index, block.to_s, shared: true)
@@ -963,7 +963,7 @@ module EscapeAnalysis
 
       if STORES_LEAD.key?(op)
         # Only a `returns` flow may hand the receiver back (the caller tracks the result); elsewhere it escapes.
-        if op == 'RETURN' && run.returns
+        if op == :RETURN && run.returns
           run.returned = true if held.call(BytecodeIR::OperandModel.reg_operand(insn))
         elsif held.call(BytecodeIR::OperandModel.reg_operand(insn))
           escape.call(STORES_LEAD[op])
@@ -972,7 +972,7 @@ module EscapeAnalysis
       end
 
       case op
-      when 'MOVE' then s - [lead] | (held.call(BytecodeIR::OperandModel.move(insn).src) ? [lead] : [])
+      when :MOVE then s - [lead] | (held.call(BytecodeIR::OperandModel.move(insn).src) ? [lead] : [])
       when :LOADSELF then s - [lead] | (s.include?('0') ? [lead] : [])
       when :RETSELF
         if s.include?('0') && run.returns
@@ -993,14 +993,14 @@ module EscapeAnalysis
       when *BINARY_NAMES.keys
         send_site(run, i, insn, s, BINARY_NAMES[op], recv: lead, args: [lead.to_i + 1], dest: lead)
       when :ADDI, :SUBI
-        send_site(run, i, insn, s, op == 'ADDI' ? '+' : '-', recv: lead, args: [], dest: lead)
+        send_site(run, i, insn, s, op == :ADDI ? '+' : '-', recv: lead, args: [], dest: lead)
       when :ADDILV, :SUBILV
         # R[b], R[b+1] are the scratch window of the method-call fallback: written, never read.
         second = BytecodeIR::OperandModel.regs(insn)[1]
         scratch = [second, (second.to_i + 1).to_s]
-        send_site(run, i, insn, s, op == 'ADDILV' ? '+' : '-', recv: lead, args: [], dest: lead) - scratch
+        send_site(run, i, insn, s, op == :ADDILV ? '+' : '-', recv: lead, args: [], dest: lead) - scratch
       when :GETIDX then send_site(run, i, insn, s, '[]', recv: lead, args: [lead.to_i + 1], dest: lead)
-      when 'GETIDX0' then send_site(run, i, insn, s, '[]', recv: BytecodeIR::OperandModel.regs(insn)[1], args: [], dest: lead)
+      when :GETIDX0 then send_site(run, i, insn, s, '[]', recv: BytecodeIR::OperandModel.regs(insn)[1], args: [], dest: lead)
       when :SETIDX
         send_site(run, i, insn, s, '[]=', recv: lead, args: [lead.to_i + 1, lead.to_i + 2], dest: lead)
       when *BytecodeIR::Ops::SEND then send_op(run, i, insn, s)
@@ -1063,9 +1063,9 @@ module EscapeAnalysis
       unpacked += ((a + positional + 1)..(a + positional + kw)).to_a
       return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r.to_s) }
 
-      send_site(run, i, insn, s, call.name, recv: insn.op.start_with?('SS') ? nil : a,
+      send_site(run, i, insn, s, call.name, recv: insn.op.to_s.start_with?('SS') ? nil : a,
                 args: spread ? [] : (1..positional).map { |k| a + k }, dest: a,
-                block: insn.op.end_with?('B') ? a + positional + kw + 1 : nil)
+                block: insn.op.to_s.end_with?('B') ? a + positional + kw + 1 : nil)
     end
 
     # The shared send rule; returns the registers holding the value after the call.

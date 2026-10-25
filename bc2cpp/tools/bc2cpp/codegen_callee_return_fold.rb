@@ -20,8 +20,8 @@ class CodeGen
     ENV['BC2CPP_RETURN_FOLD'] == '1'
   end
 
-  RETURN_FOLD_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
-  RETURN_FOLD_LITERALS = { 'LOADTRUE' => :true, 'LOADFALSE' => :false, 'LOADNIL' => :nil }.freeze
+  RETURN_FOLD_CALL_OPS = %i[SEND SEND0 SSEND SSEND0].freeze
+  RETURN_FOLD_LITERALS = { :LOADTRUE => :true, :LOADFALSE => :false, :LOADNIL => :nil }.freeze
 
   # :taken or :not_taken for the jump +insn+ at +idx+ of +irep+ decided by its call result's literal kinds, else nil.
   def callee_return_outcome(insn, irep, idx)

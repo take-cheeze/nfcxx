@@ -265,7 +265,7 @@ class CodeGen
   # code generator's CLASS_NARROWING.
   def raise_never_returns?(irep, index)
     insn = irep && BytecodeIR.for(irep).source_at(index)
-    return false unless insn && %w[SSEND SSEND0].include?(insn.op) && insn.sym == 'raise'
+    return false unless insn && %i[SSEND SSEND0].include?(insn.op) && insn.sym == 'raise'
 
     !@closed_world.nil? && @closed_world.global_refusal.nil? && class_test_name_safe?('raise')
   end

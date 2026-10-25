@@ -128,8 +128,8 @@ module UniqueClassNames
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn|
         case insn.op
-        when 'SETCONST' then assigned << insn.const_name
-        when 'SETMCNST' then assigned << insn.mcnst_name
+        when :SETCONST then assigned << insn.const_name
+        when :SETMCNST then assigned << insn.mcnst_name
         when :SEND, :SEND0, :SSEND, :SSEND0, :SENDB, :SSENDB, :LOADSYM
           return {} if insn.sym.to_s.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
@@ -230,7 +230,7 @@ module UniqueClassNames
     written = Set.new
     [ireps, ruby_ireps].each do |set|
       set.each_value do |irep|
-        BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST') do |insn, _index|
+        BytecodeIR.for(irep).each_with_op(:SETCONST, :SETMCNST) do |insn, _index|
           written << (insn.op == :SETCONST ? insn.const_name : insn.mcnst_name)
         end
       end
@@ -389,8 +389,8 @@ module UniqueClassNames
     seen = Set.new
     walk = lambda do |label, namespace|
       irep = ireps.fetch(label)
-      bodies = BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE')
-      irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
+      bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE)
+      irep.each_with_op(:CLASS, :MODULE) do |insn, idx|
         full = BytecodeIR.class_body_path(irep, idx, namespace) || :unknown
         paths[insn.sym] << full
         modules << full if modules && insn.op == :MODULE && full.is_a?(String)
@@ -402,7 +402,7 @@ module UniqueClassNames
     end
     walk.call(root_label, nil)
     ireps.each do |label, irep|
-      irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
+      irep.each_with_op(:CLASS, :MODULE) do |insn, idx|
         next if seen.include?([label, idx])
 
         paths[insn.sym_token] << :unknown

@@ -10,8 +10,8 @@ require_relative 'bytecode_ir_containers'
 # blocks' SETUPVAR writes, crosses handler edges and uses the origin walk's RESCUE/EXCEPT/ENTER model (a slot ENTER
 # stores is defined by the ENTER), and a refused query is nil: each caller states what nil means.
 module IrBlockOperands
-  LITERAL_BLOCK_OPS = Set['BLOCK', 'LAMBDA'].freeze
-  CONST_LOADS = Set['GETCONST', 'GETMCNST'].freeze
+  LITERAL_BLOCK_OPS = Set[:BLOCK, :LAMBDA].freeze
+  CONST_LOADS = Set[:GETCONST, :GETMCNST].freeze
 
   module_function
 

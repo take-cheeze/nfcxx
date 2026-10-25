@@ -16,7 +16,7 @@ module IrepScans
   ConstantPath = BytecodeIR::ConstantPath
 
   # origin_ivar's walk steps over BLOCK's proc register and every lead-read-only op.
-  ORIGIN_IVAR_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | ['BLOCK']).freeze
+  ORIGIN_IVAR_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | [:BLOCK]).freeze
 
   def self.follow(reg)
     Follow.new(reg)

@@ -237,7 +237,7 @@ def irep_return_class(irep, ctx, depth)
   return nil if depth > 8
 
   found = nil
-  BytecodeIR.for(irep).each_with_op('RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE', 'BREAK', 'RETURN_BLK') do |insn, i|
+  BytecodeIR.for(irep).each_with_op(:RETURN, :RETNIL, :RETFALSE, :RETTRUE, :BREAK, :RETURN_BLK) do |insn, i|
     # nil/false/true is not an object class, and a non-local return leaves by a path not read here.
     return nil unless insn.op == :RETURN
 
@@ -484,7 +484,7 @@ class ArrayElementLayout
                     annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
 
             # Library writers (`@x.push(v)`) are not modelled: see the header's residual note.
-            BytecodeIR.for(irep).each_with_op('SETIV', 'SETIDX') do |insn, idx|
+            BytecodeIR.for(irep).each_with_op(:SETIV, :SETIDX) do |insn, idx|
               found = nil
               targets = nil
               if insn.op == :SETIV
@@ -622,7 +622,7 @@ class HashElementLayout
                     annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
 
             # Library writers (`@h.store(k, v)`) are not modelled: see the header's residual note.
-            BytecodeIR.for(irep).each_with_op('SETIV', 'SETIDX') do |insn, idx|
+            BytecodeIR.for(irep).each_with_op(:SETIV, :SETIDX) do |insn, idx|
               found = nil
               targets = nil
               if insn.op == :SETIV

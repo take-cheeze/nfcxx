@@ -33,7 +33,7 @@ module BytecodeIR
 
     paths = definitions.map do |definition|
       case program.source_at(definition.index).op
-      when 'LOADNIL' then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
+      when :LOADNIL then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
       when :OCLASS then insn.sym
       end
     end

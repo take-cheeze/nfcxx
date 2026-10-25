@@ -72,22 +72,22 @@ end
 
 # `T = [[1, 2].freeze, 3].freeze` as mrbc emits it.
 NESTED = [
-  ['LOADI_1', 'R1 (1)'], ['LOADI_2', 'R2 (2)'], ['ARRAY', 'R1 2'], ['SEND0', 'R1 :freeze'],
-  ['LOADI_3', 'R2 (3)'], ['ARRAY', 'R1 2'], ['SEND0', 'R1 :freeze'], ['RETURN', 'R1']
+  [:LOADI_1, 'R1 (1)'], [:LOADI_2, 'R2 (2)'], [:ARRAY, 'R1 2'], [:SEND0, 'R1 :freeze'],
+  [:LOADI_3, 'R2 (3)'], [:ARRAY, 'R1 2'], [:SEND0, 'R1 :freeze'], [:RETURN, 'R1']
 ].freeze
 # `T = [[1, 2].dup, 3].freeze`: dup, not freeze.
-DUP = NESTED.dup.tap { |rows| rows[3] = ['SEND0', 'R1 :dup'] }.freeze
+DUP = NESTED.dup.tap { |rows| rows[3] = [:SEND0, 'R1 :dup'] }.freeze
 # `T = [[1, 2].freeze.freeze, 3].freeze`: the second freeze's receiver is a call, not the literal.
-DOUBLE = [*NESTED.take(4), ['SEND0', 'R1 :freeze'], *NESTED.drop(4)].freeze
+DOUBLE = [*NESTED.take(4), [:SEND0, 'R1 :freeze'], *NESTED.drop(4)].freeze
 # `T = { 8 => [1, 2].freeze }.freeze` (a Hash whose value is a frozen Array literal).
 HASH_OF_ARRAY = [
-  ['LOADI8', 'R1 8'], ['LOADI_1', 'R2 (1)'], ['LOADI_2', 'R3 (2)'], ['ARRAY', 'R2 2'], ['SEND0', 'R2 :freeze'],
-  ['HASH', 'R1 1'], ['SEND0', 'R1 :freeze'], ['RETURN', 'R1']
+  [:LOADI8, 'R1 8'], [:LOADI_1, 'R2 (1)'], [:LOADI_2, 'R3 (2)'], [:ARRAY, 'R2 2'], [:SEND0, 'R2 :freeze'],
+  [:HASH, 'R1 1'], [:SEND0, 'R1 :freeze'], [:RETURN, 'R1']
 ].freeze
 # `T = [[1, 2].freeze, 3].freeze` with the literal not adjacent to its freeze: a statement between them.
 GAP = [
-  ['LOADI_1', 'R1 (1)'], ['LOADI_2', 'R2 (2)'], ['ARRAY', 'R1 2'], ['MOVE', 'R3 R1'], ['SEND0', 'R1 :freeze'],
-  ['LOADI_3', 'R2 (3)'], ['ARRAY', 'R1 2'], ['SEND0', 'R1 :freeze'], ['RETURN', 'R1']
+  [:LOADI_1, 'R1 (1)'], [:LOADI_2, 'R2 (2)'], [:ARRAY, 'R1 2'], [:MOVE, 'R3 R1'], [:SEND0, 'R1 :freeze'],
+  [:LOADI_3, 'R2 (3)'], [:ARRAY, 'R1 2'], [:SEND0, 'R1 :freeze'], [:RETURN, 'R1']
 ].freeze
 
 puts '-- host: the slot of a frozen literal table that is itself `LITERAL.freeze` (FREEZE_SLOT)'

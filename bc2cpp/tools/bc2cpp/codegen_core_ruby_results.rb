@@ -117,9 +117,9 @@ class CodeGen
     scratch = ENV['BC2CPP_CORE_RUBY_QUERY_SCRATCH'] != '0'
     seen ||= scratch ? CoreRubyResults::EMPTY_SEEN : Set.new
     return nil if ENV['BC2CPP_CORE_RUBY_RESULTS'] == '0'
-    return nil unless %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB].include?(insn.op)
-    return nil unless insn.sym && (%w[SEND0 SSEND0].include?(insn.op) || insn.plain_fixed_argc?)
-    argc = %w[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
+    return nil unless %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB].include?(insn.op)
+    return nil unless insn.sym && (%i[SEND0 SSEND0].include?(insn.op) || insn.plain_fixed_argc?)
+    argc = %i[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
     return nil if argc.positive? && ENV['BC2CPP_CORE_RUBY_POSITIONAL_RESULTS'] == '0'
 
     arguments = if scratch
@@ -143,7 +143,7 @@ class CodeGen
     return nil if !seen.empty? && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
 
-    block_given = insn.op.end_with?('B')
+    block_given = insn.op.to_s.end_with?('B')
     return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
 
     # Every member must resolve and return a modelled class; a missing member
@@ -163,7 +163,7 @@ class CodeGen
   def core_ruby_name_result(irep, index, insn, arguments = [])
     return nil if ENV['BC2CPP_CORE_RUBY_NAME_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
-    block_given = insn.op.end_with?('B')
+    block_given = insn.op.to_s.end_with?('B')
     return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
 
     @core_ruby_name_results ||= {}
@@ -219,7 +219,7 @@ class CodeGen
       case exit.op
       when :RETURN then state[exit.reg]
       when :RETSELF then receiver
-      when 'RETNIL' then NumericFlow::NIL
+      when :RETNIL then NumericFlow::NIL
       when :RETURN_BLK, :BREAK then 0
       else NumericFlow::OTHER
       end
@@ -276,14 +276,14 @@ class CodeGen
   # A nested break can replace a block-taking send's value. Callee nonlocal
   # returns also need a context-sensitive child flow, which is not modelled here.
   def core_ruby_result_exits_safe?(irep, caller: false)
-    forbidden = caller ? %w[BREAK] : %w[BREAK RETURN_BLK]
+    forbidden = caller ? %i[BREAK] : %i[BREAK RETURN_BLK]
     return false if BytecodeIR.for(irep).op?(*forbidden)
 
     irep.reps.all? { |label| core_ruby_result_exits_safe?(@ireps.fetch(label), caller: caller) }
   end
 
   def core_ruby_static_send_mask(insn, state)
-    return NumericFlow::OTHER unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op)
+    return NumericFlow::OTHER unless %i[SEND SEND0 SSEND SSEND0].include?(insn.op)
     installed = self.class.core_result_installed_names
     opaque = self.class.core_result_opaque_defs
     return NumericFlow::OTHER unless installed && !installed.include?(insn.sym) && opaque && opaque.none? { |_owner, name| name == insn.sym }

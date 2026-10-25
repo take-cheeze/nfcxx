@@ -40,7 +40,7 @@ module NilNarrowing
   module_function
 
   # The truthy edge of these is where an `is_a?` result held true (JMPNIL tests nil, not truth).
-  TRUTH_TESTS = %w[JMPIF JMPNOT].freeze
+  TRUTH_TESTS = %i[JMPIF JMPNOT].freeze
   IS_A_NAMES = %w[is_a? kind_of?].freeze
   # Sends with an explicit receiver: the SEND family minus the self-receiver forms (SSEND*), which nil can answer too.
   RECEIVER_CALLS = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::SELF_SEND).freeze
@@ -150,8 +150,8 @@ module NilNarrowing
     return out unless normal
 
     op = env[:decoded][p].op
-    return Set.new if op == 'JMPUW'
-    return move(env, state, out, p) if op == 'MOVE'
+    return Set.new if op == :JMPUW
+    return move(env, state, out, p) if op == :MOVE
 
     tested = narrowed_register(env, p, i)
     return out unless tested

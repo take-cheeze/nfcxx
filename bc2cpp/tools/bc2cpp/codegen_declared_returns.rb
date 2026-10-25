@@ -258,7 +258,7 @@ class CodeGen
       end
       w, r = src
       writer = BytecodeIR.for(ir).source_at(w)
-      if breaks && %w[SENDB SSENDB].include?(writer.op)
+      if breaks && %i[SENDB SSENDB].include?(writer.op)
         return "a block passed to `#{writer.sym}` (line #{writer.lineno}) may `break`, replacing the call's value"
       end
 

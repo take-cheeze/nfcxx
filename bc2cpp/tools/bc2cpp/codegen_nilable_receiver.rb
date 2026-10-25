@@ -12,7 +12,7 @@ require_relative 'nomethod_reviewed'
 # withdrawal conditions are theirs: see codegen_class_pools.rb.
 module NilableReceiverSend
   # Plain SEND/SEND0 only: SENDB carries a block register and SSEND has no receiver.
-  NILABLE_OPS = %w[SEND SEND0].freeze
+  NILABLE_OPS = %i[SEND SEND0].freeze
   # An unguarded exact-receiver path: no class test, so a nil test is the cheaper guard.
   EXACT_MARK = %r{^\s*// (?:EXACT_TYPED|CLOSED_WORLD_EXACT_CLASS|NATIVE_EXACT_DIRECT|EXACT_NATIVE_WRAPPER|NATIVE_DIRECT_EXACT|NATIVE_CORE_EXACT|CLOSED_WORLD_NATIVE_EXACT|INDEX_EXACT)\b}
 
@@ -130,7 +130,7 @@ CodeGen.prepend(NilableReceiverSend)
 # SETIDX are not sends, so the module above never sees them. An exact Array/Hash receiver takes the
 # fast path with no class test (INDEX_EXACT in compile_insn).
 module NilableIndexOps
-  INDEX_OPS = { 'GETIDX' => '[]', 'GETIDX0' => '[]', 'SETIDX' => '[]=' }.freeze
+  INDEX_OPS = { :GETIDX => '[]', :GETIDX0 => '[]', :SETIDX => '[]=' }.freeze
 
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
     plan = nilable_index_plan(insn, irep, idx, reg_offset)

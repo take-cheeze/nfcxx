@@ -12,7 +12,7 @@ class CodeGen
   # recognize_block_fallback_regions (empty at method level).
   def recognize_lambda_fallback_regions(irep, available_upvars: [])
     regions = []
-    irep.each_with_op('LAMBDA') do |insn, _index|
+    irep.each_with_op(:LAMBDA) do |insn, _index|
       dest_reg = insn.reg
       next unless dest_reg
 
@@ -74,7 +74,7 @@ class CodeGen
   #     an intervening implicit window could cover it (`SSEND R9
   #     :draw_system_text n=7` reads R9..R16); hence only whitelisted opcodes
   #     that touch just the registers they print may sit between.
-  LAMBDA_CONFINED_CALL_SETUP_OPS = %w[
+  LAMBDA_CONFINED_CALL_SETUP_OPS = %i[
     LOADI LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7
     LOADI__1 LOADI8 LOADI16 LOADI32 LOADINEG LOADL LOADL16
     LOADSYM LOADSYM16 LOADNIL LOADSELF LOADTRUE LOADFALSE
@@ -90,7 +90,7 @@ class CodeGen
     # (1) a named local, so no implicit register window can alias it.
     return nil unless d >= 1 && d < nlocals
     # (2) the two opcodes that read a named local without printing it.
-    return nil if BytecodeIR.for(irep).op?('ARGARY', 'BLKPUSH')
+    return nil if BytecodeIR.for(irep).op?(:ARGARY, :BLKPUSH)
 
     # A child irep capturing R<d> as an upvar would point at it from a scope this
     # proof does not cover; block_upvar_needs propagates deeper needs as
@@ -135,7 +135,7 @@ class CodeGen
     targets = jump_targets(irep)
     ((i + 1)...program.size).each do |j|
       nxt = program.source_at(j)
-      if %w[SEND SEND0].include?(nxt.op) &&
+      if %i[SEND SEND0].include?(nxt.op) &&
          nxt.reg == t.to_s && nxt.sym == 'call' && nxt.nk_spec.nil? && nxt.n_spec != '*'
         # A catch handler entering the run reaches the call without the MOVE (BytecodeIR's handler edges).
         return nil unless BytecodeIR.for(irep).linear_corridor?(i, j, include_handlers: true)
@@ -235,7 +235,7 @@ class CodeGen
 
   # RUNTIME_DEF_DEVIRT_GUARD: opcodes that touch no method table. An allowlist, so
   # an unconsidered opcode lands on "unknown", the safe side.
-  CLASS_BODY_INERT_OPS = %w[LOADSYM MOVE LOADNIL LOADSELF ENTER JMP RETURN].freeze
+  CLASS_BODY_INERT_OPS = %i[LOADSYM MOVE LOADNIL LOADSELF ENTER JMP RETURN].freeze
 
   # RUNTIME_DEF_DEVIRT_GUARD: the `n` literal Symbol arguments of a class-body
   # send, from the `LOADSYM R(dest+k) :name` instructions right before it
@@ -313,7 +313,7 @@ class CodeGen
   # (SDEF names plus EXEC class bodies), or nil if any body is unbounded.
   def runtime_installed_names_for(irep, exec_regions)
     names = Set.new
-    irep.each_with_op('SDEF') do |insn, _index|
+    irep.each_with_op(:SDEF) do |insn, _index|
       return nil unless insn.def_child_index
 
       names << insn.sym_token
@@ -482,7 +482,7 @@ class CodeGen
   # a block body; `def` is added by its TDEF pass.
   def recognize_exec_fallback_regions(irep)
     regions = []
-    irep.each_with_op('SCLASS') do |insn, idx|
+    irep.each_with_op(:SCLASS) do |insn, idx|
       nxt = BytecodeIR.for(irep).instruction_at(idx + 1)&.source
       next unless nxt && nxt.op == :EXEC
 

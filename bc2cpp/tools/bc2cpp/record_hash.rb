@@ -54,14 +54,14 @@ module RecordHash
                         instance_variable_defined? each_object].freeze
   # Ops whose leading register is only written (no implicit reads).
   WRITE_LEAD_ONLY = (BytecodeIR::Ops::PURE_LOAD | Set[
-    'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETMCNST', 'GETUPVAR', 'STRING', 'SYMBOL', 'LAMBDA', 'BLOCK',
-    'METHOD', 'OCLASS', 'TCLASS', 'EXCEPT', 'AREF', 'KEY_P', 'KARG'
+    :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST, :GETMCNST, :GETUPVAR, :STRING, :SYMBOL, :LAMBDA, :BLOCK,
+    :METHOD, :OCLASS, :TCLASS, :EXCEPT, :AREF, :KEY_P, :KARG
   ]).freeze
   # Ops that read their leading register and leave it unchanged (LEAD_READ_ONLY plus ASET).
-  READ_LEAD_KEEP = (BytecodeIR::Ops::LEAD_READ_ONLY | Set['ASET']).freeze
+  READ_LEAD_KEEP = (BytecodeIR::Ops::LEAD_READ_ONLY | Set[:ASET]).freeze
   # Producers of a value that is provably not a Symbol; a key from one of them
   # can never alias a Symbol key.
-  NON_SYMBOL_OPS = Set['LOADNIL', 'LOADTRUE', 'LOADFALSE', 'STRING', 'ARRAY', 'HASH', 'LOADL'].freeze
+  NON_SYMBOL_OPS = Set[:LOADNIL, :LOADTRUE, :LOADFALSE, :STRING, :ARRAY, :HASH, :LOADL].freeze
   # Owners whose method a plain Hash receiver reaches.
   HASH_LOOKUP_OWNERS = %w[Hash Object Kernel BasicObject Enumerable].freeze
   UPDATE_SENDS = %w[update merge!].freeze
@@ -89,7 +89,7 @@ module RecordHash
     candidates = Hash.new { |h, k| h[k] = { sets: [], gets: [], calls: [] } }
     calls = {}
     ireps.each_value do |irep|
-      irep.each_with_op('SETIV', 'GETIV') do |insn, i|
+      irep.each_with_op(:SETIV, :GETIV) do |insn, i|
         name = insn.ivar or next
 
         (insn.op == :SETIV ? candidates[name][:sets] : candidates[name][:gets]) << [irep, i]
@@ -268,7 +268,7 @@ module RecordHash
 
     # [positional count, keyword pair count] of a call site; nil where a splat hides them.
     def site_counts(site)
-      return [0, 0] if %w[SEND0 SSEND0].include?(site.op)
+      return [0, 0] if %i[SEND0 SSEND0].include?(site.op)
 
       site.argc_operand&.first(2) || [nil, nil]
     end
@@ -349,7 +349,7 @@ module RecordHash
     def installer_symbol_positions(irep)
       positions = Set.new
       program = BytecodeIR.for(irep)
-      program.each_with_op('SSEND', 'SSEND0') do |insn, i|
+      program.each_with_op(:SSEND, :SSEND0) do |insn, i|
         next unless insn.sym.to_s.start_with?('attr')
 
         n = insn.argc or next
@@ -525,7 +525,7 @@ module RecordHash
       walk = lambda do |node, depth|
         (node.reps || []).each do |label|
           child = irep.tree[label] or next
-          BytecodeIR.for(child).each_with_op('GETUPVAR') do |insn, i|
+          BytecodeIR.for(child).each_with_op(:GETUPVAR) do |insn, i|
             index, level = insn.upvar_ref
             found << [child, i] if index == reg && level == depth
           end
@@ -688,7 +688,7 @@ module RecordHash
       return state unless lead
 
       op = insn.op
-      if op == 'ARRAY' && insn.regs.size == 2 # ARRAY2: reads Rb..Rb+c-1
+      if op == :ARRAY && insn.regs.size == 2 # ARRAY2: reads Rb..Rb+c-1
         count = insn.typed.last.value
         return escape('array element') if state.any? { |x| x >= others.first && x < others.first + count }
       elsif !WRITE_LEAD_ONLY.include?(op) && !BytecodeIR::Ops::LOADI_OPS.include?(op)
@@ -714,9 +714,9 @@ module RecordHash
       when :HASHADD then lead + 2 * (insn.uint_operand || 0)
       when :ARYPUSH then lead + (insn.uint_operand || 0)
       when :ADD, :SUB, :MUL, :DIV, :LT, :LE, :GT, :GE, :EQ, :ARYCAT, :STRCAT, :HASHCAT,
-           'RANGE_INC', 'RANGE_EXC' then lead + 1
+           :RANGE_INC, :RANGE_EXC then lead + 1
       when :ADDI, :SUBI, :RESCUE, :RETURN, :RETURN_BLK, :BREAK, :RAISEIF, :MATCHERR, :SETUPVAR, :ASET,
-           'JMPIF', 'JMPNOT', 'JMPNIL' then lead
+           :JMPIF, :JMPNOT, :JMPNIL then lead
       else INF
       end
     end
@@ -765,7 +765,7 @@ module RecordHash
     # `Array.new(...)`/`Hash.new(...)`/`String.new(...)` on the untouched core constant.
     def strict_new_class(irep, d)
       insn = BytecodeIR.for(irep).source_at(d)
-      return nil unless %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
+      return nil unless %i[SEND SENDB].include?(insn.op) && insn.sym == 'new'
 
       path = BytecodeIR.for(irep).constant_path(d - 1, insn.reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY)
       return nil unless path&.root == :const && path.segments.empty? && %w[Array Hash String].include?(path.name)

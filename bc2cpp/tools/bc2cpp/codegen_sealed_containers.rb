@@ -29,11 +29,11 @@ require_relative 'dynamic_names'
 # The answer is "C or nil" (a missing key), so only a nilable consumer (`-> C?`) may take it.
 class CodeGen
   # Loads that write only their leading register and read no register but MOVE's source.
-  SEALED_HASH_LOAD_OPS = %w[NOP MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE GETIV GETCONST GETUPVAR
+  SEALED_HASH_LOAD_OPS = %i[NOP MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE GETIV GETCONST GETUPVAR
                             STRING].freeze
   SEALED_HASH_WINDOW = 16
   # Frame exits that read no register: the stored Hash's register dies there unread.
-  SEALED_HASH_EXITS = %w[RETNIL RETTRUE RETFALSE RETSELF].freeze
+  SEALED_HASH_EXITS = %i[RETNIL RETTRUE RETFALSE RETSELF].freeze
   # Ruby methods that reach an object without a reference, and the one native source allowed to spell each (its
   # registration).
   SEALED_HASH_REFLECTION = { 'instance_variable_get' => 'mruby-metaprog/src/metaprog.c',
@@ -94,7 +94,7 @@ class CodeGen
 
     stores = []
     @ireps.each_value do |ir|
-      BytecodeIR.for(ir).each_with_op('GETIV') do |insn, g|
+      BytecodeIR.for(ir).each_with_op(:GETIV) do |insn, g|
         next unless insn.ivar == name
         next if sealed_hash_getiv_consumed?(ir, g)
         next if sealed_hash_stores? && sealed_hash_getiv_stores(ir, g, stores)
@@ -175,7 +175,7 @@ class CodeGen
   def sealed_hash_sends_visible?(name)
     @ireps.each_value.none? do |ir|
       BytecodeIR.for(ir).each_source.any? do |insn, idx|
-        insn.sym == name && insn.op.include?('SEND') &&
+        insn.sym == name && insn.op.to_s.include?('SEND') &&
           !(name == 'instance_variable_get' && literal_ivar_argument?(ir, idx, insn))
       end
     end
@@ -249,10 +249,10 @@ class CodeGen
 
   # `HASH Ra 0` / `ARRAY Ra 0`: writes R[a], reads no register.
   def sealed_hash_empty_literal?(insn)
-    %w[HASH ARRAY].include?(insn.op) && insn.typed.size == 2 && insn.typed[1].value.to_i.zero?
+    %i[HASH ARRAY].include?(insn.op) && insn.typed.size == 2 && insn.typed[1].value.to_i.zero?
   end
 
   def sealed_hash_load_op?(op)
-    SEALED_HASH_LOAD_OPS.include?(op) || op.start_with?('LOADI')
+    SEALED_HASH_LOAD_OPS.include?(op) || op.to_s.start_with?('LOADI')
   end
 end

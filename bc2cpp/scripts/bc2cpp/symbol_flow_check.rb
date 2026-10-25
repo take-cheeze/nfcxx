@@ -22,7 +22,7 @@ def compiled(suite, source)
     names = {}
     ireps.each_value do |irep|
       irep.instructions.each do |insn|
-        next unless %w[SDEF TDEF METHOD DEF].include?(insn.op)
+        next unless %i[SDEF TDEF METHOD DEF].include?(insn.op)
 
         target = insn.typed.find { |o| o.kind == :irep }
         names[irep.reps[target.value]] = insn.sym if target && insn.sym && irep.reps[target.value]

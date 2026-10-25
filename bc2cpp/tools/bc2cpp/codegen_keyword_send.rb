@@ -622,7 +622,7 @@ class CodeGen
     return nil unless write_index
 
     insn = BytecodeIR.for(irep).source_at(write_index)
-    return nil unless %w[ARRAY ARRAY2].include?(insn.op)
+    return nil unless %i[ARRAY ARRAY2].include?(insn.op)
 
     n = insn.uint_operand
     return nil if n.nil?

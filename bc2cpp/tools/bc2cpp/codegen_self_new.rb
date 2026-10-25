@@ -117,9 +117,9 @@ module SelfNewConstruct
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     source = BytecodeIR.for(irep).source_at(defs.first.index)
-    return nil unless source && source.sym == 'class' && %w[SEND0 SEND SSEND0 SSEND].include?(source.op) &&
+    return nil unless source && source.sym == 'class' && %i[SEND0 SEND SSEND0 SSEND].include?(source.op) &&
                       source.n_spec.to_i.zero? && !source.nk_spec
-    return nil unless source.op.start_with?('SSEND') || self_register?(irep, defs.first.index, source.reg)
+    return nil unless source.op.to_s.start_with?('SSEND') || self_register?(irep, defs.first.index, source.reg)
 
     [owner, 'self.class in an instance method']
   end

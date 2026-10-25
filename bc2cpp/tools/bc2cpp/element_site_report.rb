@@ -19,7 +19,7 @@ require_relative 'bytecode_ir_containers'
 module ElementSiteReport
   DYNAMIC = /bc2cpp_send\(|bc2cpp_getidx0?\(|bc2cpp_setidx\(|mrb_funcall|bc2cpp_slow_|bc2cpp_eqq\(/
   ELEMENT_STORES = %w[<< push []= unshift insert append].freeze
-  ARITHMETIC = %w[ADD SUB MUL DIV LT LE GT GE EQ].freeze
+  ARITHMETIC = %i[ADD SUB MUL DIV LT LE GT GE EQ].freeze
   ROWS = {}
 
   # Join of the defining instructions of +reg+ at +idx+ as short tags: entry, ivar:name, const, call:name,
@@ -89,7 +89,7 @@ module ElementSiteReport
     classes = mask ? class_mask_name(mask) : 'unmodelled'
     classes = 'EMPTY' if mask&.zero?
     ROWS[['store', irep.label, idx]] =
-      ['store', "#{irep.label}:#{idx}", owner, 'SETIV', insn.ivar, "ivar:#{insn.ivar}", classes].join("\t")
+      ['store', "#{irep.label}:#{idx}", owner, :SETIV, insn.ivar, "ivar:#{insn.ivar}", classes].join("\t")
   end
 
   # Class set of the elements of the literal a definition builds; OTHER when the definition is not a literal.
@@ -132,10 +132,10 @@ module ElementSiteReport
   # `[a, b].max` / `.min`: the literal is built by the instruction right before the send, so nothing else
   # can hold it and its elements are the registers' values there. One row per element: its class set.
   def record_literal_extreme(insn, irep, owner_def, idx, owner)
-    return unless %w[SEND SEND0].include?(insn.op) && %w[min max].include?(insn.sym) && insn.n_spec.to_i.zero?
+    return unless %i[SEND SEND0].include?(insn.op) && %w[min max].include?(insn.sym) && insn.n_spec.to_i.zero?
 
     prev = BytecodeIR.for(irep).previous(idx)
-    unless prev && %w[ARRAY ARRAY2].include?(prev.op) && prev.reg == insn.reg
+    unless prev && %i[ARRAY ARRAY2].include?(prev.op) && prev.reg == insn.reg
       ROWS[['extreme', irep.label, idx]] = ['extreme', "#{irep.label}:#{idx}", owner, insn.op, insn.sym, 'not-adjacent', ''].join("\t")
       return
     end

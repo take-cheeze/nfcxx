@@ -45,7 +45,7 @@ module SealedInt16Locals
     prog = BytecodeIR.for(irep)
     claimed = Set.new
     proven = []
-    prog.each_with_op('ARRAY') do |insn, i|
+    prog.each_with_op(:ARRAY) do |insn, i|
       array = prove(irep, prog, i, insn)
       next unless array
       next if array.actions.keys.any? { |j| claimed.include?(j) }
@@ -107,7 +107,7 @@ module SealedInt16Locals
     changed = true
     while changed
       changed = false
-      prog.each_with_op('MOVE') do |insn, j|
+      prog.each_with_op(:MOVE) do |insn, j|
         dst, src = insn.regs.first(2).map(&:to_i)
         next unless aliases.include?(src) && !aliases.include?(dst)
 
@@ -159,7 +159,7 @@ module SealedInt16Locals
 
   # The value a LOADI-family instruction loads (the same decode as BytecodeIR::ConstantFacts#loadi_value).
   def loadi_value(insn)
-    return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+    return insn.op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == :LOADI__1
 
     BytecodeIR::OperandModel.imm_operand(insn)&.to_i

@@ -325,7 +325,7 @@ class CodeGen
   # it (mask 0), nil when a class is not nameable (OTHER, EXC, NIL, a non-exact class).
   def site_receiver_classes(irep, idx, recv)
     insn = BytecodeIR.for(irep).source_at(idx)
-    mask = if %w[SSEND SSEND0 SSENDB].include?(insn.op)
+    mask = if %i[SSEND SSEND0 SSENDB].include?(insn.op)
              return_class_self_receiver(irep)
            else
              return_class_raw_mask(irep, idx, recv.to_s)

@@ -103,7 +103,7 @@ module ComputedSendNames
       defs = Hash.new { |h, k| h[k] = [] }
       poisoned = Set.new
       ireps.each_value do |irep|
-        BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST', 'CLASS', 'MODULE') do |insn, idx|
+        BytecodeIR.for(irep).each_with_op(:SETCONST, :SETMCNST, :CLASS, :MODULE) do |insn, idx|
           case insn.op
           when :SETCONST, :SETMCNST
             name = insn.const_name or next
@@ -141,7 +141,7 @@ end
       return nil unless frozen&.size == 1
 
       call = BytecodeIR.for(irep).source_at(frozen.first.index)
-      return nil unless %w[SEND SEND0].include?(call.op) && call.sym == 'freeze' && call.n_spec.to_i.zero? && !call.nk_spec
+      return nil unless %i[SEND SEND0].include?(call.op) && call.sym == 'freeze' && call.n_spec.to_i.zero? && !call.nk_spec
 
       literal = ComputedSendNames.reaching(irep, frozen.first.index, call.reg)
       return nil unless literal&.size == 1
@@ -163,7 +163,7 @@ end
         defs = ComputedSendNames.reaching(irep, at, (first + k).to_s) or return nil
         defs.each do |definition|
           insn = BytecodeIR.for(irep).source_at(definition.index)
-          return nil unless %w[LOADSYM SYMBOL].include?(insn.op)
+          return nil unless %i[LOADSYM SYMBOL].include?(insn.op)
 
           literal = ComputedSendNames.symbol_literal(irep, insn) or return nil
           names << literal

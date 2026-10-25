@@ -180,7 +180,7 @@ class CodeGen
 
   # [entry, literal block irep] when the block send at +index+ runs only checked declarations of one shape.
   def block_return_site(irep, index, insn)
-    return nil unless %w[SENDB SSENDB].include?(insn.op) && insn.plain_fixed_argc?
+    return nil unless %i[SENDB SSENDB].include?(insn.op) && insn.plain_fixed_argc?
     return nil if block_return_entries.empty? || !block_return_entries_by_name.key?(insn.sym)
 
     @block_return_sites ||= {}
@@ -335,7 +335,7 @@ class CodeGen
     mask = BytecodeIR::NumericClasses.exit_mask(body, states) do |exit, state|
       case exit.op
       when :RETURN then state[exit.reg]
-      when 'RETNIL' then NumericFlow::NIL
+      when :RETNIL then NumericFlow::NIL
       when :RETURN_BLK, :BREAK then 0
       else NumericFlow::OTHER
       end

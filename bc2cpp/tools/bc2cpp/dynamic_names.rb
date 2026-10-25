@@ -94,7 +94,7 @@ module DynamicNames
 
   # `to_enum`/`enum_for` with no name (:each) or a LOADSYM name, and `Enumerator.new(obj, :name, ...)` likewise.
   def self.literal_enumerator_name?(irep, program, idx, insn)
-    return true if insn.op.end_with?('0')
+    return true if insn.op.to_s.end_with?('0')
     return insn.argc.to_i.zero? || literal_name_argument?(irep, program, idx, insn) if insn.plain_fixed_argc?
 
     insn.n_spec == '*' && literal_splat_head?(irep, program, idx, (insn.reg.to_i + 1).to_s)
@@ -175,7 +175,7 @@ module DynamicNames
     uses.any? do |use, used_reg|
       user = program.source_at(use)
       # vm.c OP_TDEF never reads R[a]; OP_DEF/OP_SDEF read it as the definition's target, which routes no name.
-      next false if %w[DEF TDEF SDEF].include?(user.op)
+      next false if %i[DEF TDEF SDEF].include?(user.op)
       next false if self_send_slot?(user, used_reg)
       next false if VISIBILITY_SENDS.include?(user.sym) && BytecodeIR::Ops::SEND_FAMILY.include?(user.op) &&
                     user.plain_fixed_argc? && used_reg.to_i > user.reg.to_i
@@ -196,7 +196,7 @@ module DynamicNames
     children = ireps.values.flat_map { |irep| Array(irep.reps) }.to_set
     ireps.each_value do |irep|
       map[irep.label] = :root unless children.include?(irep.label)
-      BytecodeIR.for(irep).each_with_op('EXEC') do |insn, idx|
+      BytecodeIR.for(irep).each_with_op(:EXEC) do |insn, idx|
         child = insn.block_index && Array(irep.reps)[insn.block_index]
         map[child] = [irep, idx, insn.reg] if child
       end
@@ -212,7 +212,7 @@ module DynamicNames
     computed = false
     ireps.each_value do |irep|
       program = BytecodeIR.for(irep)
-      program.each_with_op('LOADSYM', 'STRING', *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
+      program.each_with_op(:LOADSYM, :STRING, *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
         (probe_only?(irep, idx, insn) ? probes : stems) << insn.sym if insn.op == :LOADSYM && insn.sym
         if insn.op == :STRING
           entry = irep.pool[insn.pool_index.to_i]
@@ -255,7 +255,7 @@ module DynamicNames
   # vm.c OP_SSEND/SSEND0/SSENDB set R[a] = self before dispatching, so a value in a self send's R[a] is
   # overwritten there, never read: FactoryFlow's register-level reads count it, and it is no use.
   def self.self_send_slot?(insn, reg)
-    insn.op.start_with?('SSEND') && reg.to_s == insn.reg.to_s
+    insn.op.to_s.start_with?('SSEND') && reg.to_s == insn.reg.to_s
   end
 
   # Whether the program could route a probe's name into Ruby: it defines or aliases respond_to? or
@@ -265,7 +265,7 @@ module DynamicNames
 
     ireps.each_value.any? do |irep|
       found = false
-      irep.each_with_op('DEF', 'TDEF', 'SDEF', 'ALIAS') do |insn, _idx|
+      irep.each_with_op(:DEF, :TDEF, :SDEF, :ALIAS) do |insn, _idx|
         names = case insn.op
                 when :ALIAS then insn.typed.map { |operand| operand.value.to_s }
                 when :DEF then [insn.sym_token]

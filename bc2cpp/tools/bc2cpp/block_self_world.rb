@@ -52,8 +52,8 @@ module BlockSelfWorld
   INDIRECT_NAMES = (NAME_SENDS | METHOD_MAKERS | Set['to_proc']).freeze
   SENDS = BytecodeIR::Ops::SEND
   # Ops that WRITES_LEADING_REG_OPS lists but that do not write R(a): stores, branches, returns and no-ops.
-  LEAD_NOT_WRITTEN = Set['SETGV', 'SETSV', 'SETIV', 'SETCV', 'SETCONST', 'SETMCNST', 'SETIDX', 'JMP', 'JMPIF',
-                         'JMPNOT', 'JMPNIL', 'RETURN', 'RETURN_BLK', 'BREAK', 'STOP', 'DEBUG', 'NOP'].freeze
+  LEAD_NOT_WRITTEN = Set[:SETGV, :SETSV, :SETIV, :SETCV, :SETCONST, :SETMCNST, :SETIDX, :JMP, :JMPIF,
+                         :JMPNOT, :JMPNIL, :RETURN, :RETURN_BLK, :BREAK, :STOP, :DEBUG, :NOP].freeze
   # The rebinders' own implementations and the VM that runs them: the only natives allowed to run a Proc under a self
   # they choose. vm.c: yield, instance_eval/module_eval (eval_under), send, Proc#call and the top-level run; class.c:
   # Class.new/Module.new and define_method; load.c: runs a loaded irep under the top self (not a block); proc.c: Proc.new;
@@ -156,7 +156,7 @@ module BlockSelfWorld
     end
 
     def scan_irep(irep, ireps, parents, compiled)
-      irep.each_with_op('LOADSYM', 'STRING', 'ALIAS', 'DEF', 'TDEF', 'SDEF', *SENDS) do |insn, idx|
+      irep.each_with_op(:LOADSYM, :STRING, :ALIAS, :DEF, :TDEF, :SDEF, *SENDS) do |insn, idx|
         case insn.op
         when :LOADSYM
           fail!(irep, insn, "spells the rebinder :#{insn.sym}") if REBIND_NAMES.include?(insn.sym)
@@ -254,7 +254,7 @@ module BlockSelfWorld
     # Simple names a SETCONST assigns anywhere (`K = Class` is not a class declaration).
     def assigned_constants
       @assigned_constants ||= (@ireps.values + @outside.values).each_with_object(Set.new) do |irep, out|
-        irep.each_with_op('SETCONST', 'SETMCNST') do |insn, _|
+        irep.each_with_op(:SETCONST, :SETMCNST) do |insn, _|
           out << insn.const_name.to_s.split('::').last if insn.const_name
         end
       end
@@ -294,7 +294,7 @@ module BlockSelfWorld
           links[name.split('::').last] << (sup == :none ? 'Object' : sup.to_s.split('::').last)
         end
         (@ireps.values + @outside.values).each do |irep|
-          irep.each_with_op('CLASS') do |insn, idx|
+          irep.each_with_op(:CLASS) do |insn, idx|
             next unless insn.reg && insn.sym
 
             links[insn.sym.split('::').last] << class_statement_super(irep, idx, insn)
@@ -314,7 +314,7 @@ module BlockSelfWorld
         writer = BytecodeIR.for(irep).source_at(df.index)
         case writer.op
         when :LOADNIL then 'Object'
-        when 'GETCONST', 'GETMCNST' then writer.const_name.to_s.split('::').last
+        when :GETCONST, :GETMCNST then writer.const_name.to_s.split('::').last
         else :unknown
         end
       end.uniq
@@ -470,7 +470,7 @@ module BlockSelfWorld
         end
         w = BytecodeIR.for(irep).source_at(df.index)
         case w.op
-        when 'LOADSYM' then out << w.sym
+        when :LOADSYM then out << w.sym
         when :LOADNIL, :BLOCK, :LAMBDA then next
         when :GETUPVAR then return :unknown unless captured_block_param?(irep, w, ireps, parents)
         else return :unknown

@@ -19,7 +19,7 @@ class CodeGen
     # RESCUE reads its first register and writes its second; the caught
     # exception remains live in the input register for the handler.
     rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
-    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %w[RESCUE], barrier: rescue_write, barrier_result: false,
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false,
                                               follow_moves: true) do |insn, _index, exc_reg|
       next false unless insn.op == :EXCEPT
 
@@ -111,7 +111,7 @@ class CodeGen
     irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, follow_moves: true) do |insn|
       # The known-class trace already resolved this SEND's constant path;
       # stability above proves that path still denotes the same class.
-      expected_class if %w[SEND SEND0].include?(insn.op) && insn.sym == 'new'
+      expected_class if %i[SEND SEND0].include?(insn.op) && insn.sym == 'new'
     end
   end
 
@@ -128,7 +128,7 @@ class CodeGen
     return nil if self_implicit
 
     literal = irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |insn|
-      { 'ARRAY' => 'Array', 'ARRAY2' => 'Array', 'HASH' => 'Hash', 'STRING' => 'String' }[insn.op]
+      { :ARRAY => 'Array', :ARRAY2 => 'Array', :HASH => 'Hash', :STRING => 'String' }[insn.op]
     end
     [:literal, literal] if literal
   end
@@ -175,7 +175,7 @@ class CodeGen
     reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     exact_class ||= exact_new_class_at(irep, site_idx, reg, owner_def) unless self_implicit
     constant_owner = nil
-    if !self_implicit && idx && %w[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(idx).op)
+    if !self_implicit && idx && %i[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(idx).op)
       constant_owner = constant_object_owner(irep, idx, reg, owner_def&.owner)
     end
     kind, klass = proven_receiver_class(irep, site_idx, reg, closed_world_site(recv, irep, idx, owner_def),
@@ -220,7 +220,7 @@ class CodeGen
 
   def receiver_origin_by_walk(irep, idx, dest_reg)
     at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
-    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
       insn.op == :MOVE ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
     end
   end
@@ -234,7 +234,7 @@ class CodeGen
     when :GETCONST, :GETMCNST then 'constant_lookup'
     when *BytecodeIR::Ops::SEND then 'send_result'
     when :ARRAY, :ARRAY2, :HASH, :STRING, 'STR' then 'literal_container'
-    else "write_#{insn.op.downcase}"
+    else "write_#{insn.op.to_s.downcase}"
     end
   end
 
@@ -292,7 +292,7 @@ class CodeGen
   # so its own receiver/argument registers can be asked about.
   def proof_send_insn(irep, idx, name)
     insn = irep && idx && BytecodeIR.for(irep).source_at(idx)
-    insn if insn && %w[SEND SEND0].include?(insn.op) && insn.sym == name
+    insn if insn && %i[SEND SEND0].include?(insn.op) && insn.sym == name
   end
 
   # GUARD_VIOLATION: `Klass.new`'s receiver is the stable constant naming `klass`, so the
@@ -319,10 +319,10 @@ class CodeGen
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
   def straight_line_constant_name(irep, idx, dest_reg, skip_blocks: false)
-    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT JMPNIL JMPUW])
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %i[JMP JMPIF JMPNOT JMPNIL JMPUW])
     return nil unless branch_edges
 
-    barriers = skip_blocks ? %w[JMPUW ONERR RESCUE EXCEPT] : %w[JMPUW ONERR RESCUE EXCEPT BLOCK]
+    barriers = skip_blocks ? %i[JMPUW ONERR RESCUE EXCEPT] : %i[JMPUW ONERR RESCUE EXCEPT BLOCK]
     ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
     return nil unless ref&.root == :const
 
@@ -371,7 +371,7 @@ class CodeGen
   # calls), so the instance-owner proof is reusable only when the body neither
   # observes self nor ties itself to instance state: ivars, class variables,
   # `super` or ARGARY, anywhere in its blocks too.
-  MODULE_FUNCTION_INSTANCE_OPS = %w[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
+  MODULE_FUNCTION_INSTANCE_OPS = %i[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
 
   def module_function_copy_self_safe?(irep, owner)
     return false unless irep
@@ -1014,7 +1014,7 @@ class CodeGen
   # { name => [[irep, index, receiver register]] } for every block-carrying send in the build.
   def block_send_sites
     @block_send_sites ||= @ireps.each_value.with_object(Hash.new { |h, k| h[k] = [] }) do |irep, sites|
-      BytecodeIR.for(irep).each_with_op('SENDB', 'SSENDB') { |insn, idx| sites[insn.sym] << [irep, idx, insn.reg.to_i] }
+      BytecodeIR.for(irep).each_with_op(:SENDB, :SSENDB) { |insn, idx| sites[insn.sym] << [irep, idx, insn.reg.to_i] }
     end
   end
 

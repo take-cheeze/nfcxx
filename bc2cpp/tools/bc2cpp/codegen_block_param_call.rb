@@ -127,7 +127,7 @@ module BlockParamCall
 
     return true if copies.first == 1 && BytecodeIR.for(irep).source_at(0).op == :ENTER
 
-    irep.each_with_op('BLOCK', 'LAMBDA') do |_insn, i|
+    irep.each_with_op(:BLOCK, :LAMBDA) do |_insn, i|
       return false unless BytecodeIR.write_dominates?(irep, copies.first, i, copy)
     end
     true

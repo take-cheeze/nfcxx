@@ -30,8 +30,8 @@ Tempfile.create(['hierarchy', '.rb']) do |src|
   src.write(SOURCE)
   src.flush
   rows = ClassHierarchy.rows([src.path])
-  supers = rows.select { |k, *| k == 'SUPER' }.to_h { |_, c, s| [c, s] }
-  defs = rows.select { |k, *| k == 'DEF' }.group_by { |_, c, _| c }.transform_values { |v| v.map(&:last) }
+  supers = rows.select { |k, *| k == :SUPER }.to_h { |_, c, s| [c, s] }
+  defs = rows.select { |k, *| k == :DEF }.group_by { |_, c, _| c }.transform_values { |v| v.map(&:last) }
 
   check.call('a superclass in the enclosing namespace wins over the top level', supers['Game::Base'] == 'Base')
   check.call('an explicit top-level path names the top-level class', supers['Game::Base'] == 'Base' && supers.key?('Game::Base'))
@@ -66,10 +66,10 @@ Tempfile.create(['mixins', '.rb']) do |src|
   src.flush
   rows = ClassHierarchy.rows([src.path])
   mixins = rows.select { |k, *| %w[INCLUDE PREPEND].include?(k) }.map { |k, o, m| [k, o, m] }
-  kinds = rows.select { |k, *| %w[CLASS MODULE].include?(k) }.to_h { |k, n| [n, k] }
-  defs = rows.select { |k, *| k == 'DEF' }.group_by { |_, c, _| c }.transform_values { |v| v.map(&:last) }
+  kinds = rows.select { |k, *| %i[CLASS MODULE].include?(k) }.to_h { |k, n| [n, k] }
+  defs = rows.select { |k, *| k == :DEF }.group_by { |_, c, _| c }.transform_values { |v| v.map(&:last) }
 
-  check.call('a module is a MODULE row and a class a CLASS row', kinds['Walk'] == 'MODULE' && kinds['Game::Actor'] == 'CLASS')
+  check.call('a module is a MODULE row and a class a CLASS row', kinds['Walk'] == :MODULE && kinds['Game::Actor'] == :CLASS)
   other_at = mixins.index(['INCLUDE', 'Game::Actor', 'Other'])
   walk_at = mixins.index(['INCLUDE', 'Game::Actor', 'Walk'])
   check.call('include A, B is recorded in application order (B then A)', other_at && walk_at && other_at < walk_at)
@@ -110,7 +110,7 @@ Tempfile.create(['extend', '.rb']) do |src|
   src.flush
   rows = ClassHierarchy.rows([src.path])
   extends = rows.select { |k, o, _| k == 'EXTEND' && o == 'Game::Hero' }.map(&:last)
-  sdefs = rows.select { |k, *| k == 'SDEF' }.map { |_, o, m| [o, m] }
+  sdefs = rows.select { |k, *| k == :SDEF }.map { |_, o, m| [o, m] }
 
   check.call('extend A, B is recorded in application order (B then A)', extends.index('Extra') < extends.index('Helpers'))
   check.call('extend self records the extending class itself', extends.include?('Game::Hero'))
@@ -126,7 +126,7 @@ Tempfile.create(['extend', '.rb']) do |src|
   check.call('a def self.x and a class << self def are singleton rows',
              sdefs.include?(['Game::Hero', 'hook']) && sdefs.include?(['Game::Hero', 'build']) &&
              sdefs.include?(['Game::Hero', 'made']))
-  check.call('a singleton def is not an instance method row', rows.none? { |k, o, m| k == 'DEF' && o == 'Game::Hero' && %w[hook build].include?(m) })
+  check.call('a singleton def is not an instance method row', rows.none? { |k, o, m| k == :DEF && o == 'Game::Hero' && %w[hook build].include?(m) })
   check.call('the instance method of the same class is still a DEF row', rows.include?(['DEF', 'Game::Hero', 'setup']))
 end
 

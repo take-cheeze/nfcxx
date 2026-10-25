@@ -24,9 +24,9 @@ module DefineMethodSites
 
   # Ops that reach the frame that created the block (its locals, its block, its `return`).
   # Nested blocks may still use the upvars of the blocks below `child`, see #self_contained?.
-  FRAME_ESCAPES = %w[RETURN_BLK BREAK BLKPUSH SUPER ARGARY].freeze
+  FRAME_ESCAPES = %i[RETURN_BLK BREAK BLKPUSH SUPER ARGARY].freeze
   # Ops that depend on the lexical class the body is compiled under rather than on `self`.
-  DEFINITION_OPS = %w[TCLASS TDEF SDEF DEF METHOD CLASS MODULE SCLASS EXEC ALIAS UNDEF].freeze
+  DEFINITION_OPS = %i[TCLASS TDEF SDEF DEF METHOD CLASS MODULE SCLASS EXEC ALIAS UNDEF].freeze
   # Sends that read the frame of the method they run in; a proc method has its own.
   FRAME_SENDS = %w[block_given? iterator? binding local_variables __method__ caller].freeze
 
@@ -78,7 +78,7 @@ module DefineMethodSites
       return false if FRAME_ESCAPES.include?(insn.op) || DEFINITION_OPS.include?(insn.op)
       return false if BytecodeIR::Ops::SEND.include?(insn.op) && FRAME_SENDS.include?(insn.sym)
       return false if insn.op == :LOADSYM && FRAME_SENDS.include?(insn.sym_token)
-      next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
+      next unless %i[GETUPVAR SETUPVAR].include?(insn.op)
 
       level = insn.typed.last.value
       next if level < depth
@@ -115,7 +115,7 @@ module DefineMethodSites
       end
 
       text = "R#{insn.reg} :#{captures.fetch(index)}"
-      Insn.new(lineno: insn.lineno, addr: insn.addr, op: 'LOADSYM', args: text, raw: "LOADSYM #{text}")
+      Insn.new(lineno: insn.lineno, addr: insn.addr, op: :LOADSYM, args: text, raw: "LOADSYM #{text}")
     end
     clone = Irep.new(label: clone_label, nlocals: body.nlocals, nregs: body.nregs, pool: body.pool,
                      syms: body.syms, reps: body.reps, lv: body.lv, instructions: insns, file: body.file,

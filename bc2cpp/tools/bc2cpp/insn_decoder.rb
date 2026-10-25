@@ -26,7 +26,7 @@ module InsnDecoder
   ].map { |entry| name, fmt = entry.split(':'); [name.to_sym, fmt] }.freeze
 
   # Op names are Symbols so every dispatch (`case`, Hash lookups, `==`) compares
-  # identity; Insn#op and the printed text still get the String the name spells.
+  # identity; diagnostic and disassembly text use the name's String spelling.
   EXT_WIDTH = { EXT1: 1, EXT2: 2, EXT3: 3 }.freeze
   OPERAND_BYTES = { 'B' => 1, 'S' => 2, 'W' => 3 }.freeze
   Operand = OperandSchema::Operand
@@ -398,7 +398,7 @@ module InsnDecoder
     # ERR's operand is a free-form message, the one text-typed operand.
     def err_body(index)
       text = @rite.pool.fetch(index).kind == :str ? pool_str(index) : "L[#{index}]"
-      [text, OperandSchema.parse('ERR', text.split("\n", 2).first.to_s) || [Operand.new(:rest, '')]]
+      [text, OperandSchema.parse(:ERR, text.split("\n", 2).first.to_s) || [Operand.new(:rest, '')]]
     end
 
     # `ERR\tL[n]` (a non-string pool slot) is padded with one tab, not two.

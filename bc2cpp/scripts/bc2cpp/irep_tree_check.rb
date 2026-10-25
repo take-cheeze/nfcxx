@@ -25,14 +25,14 @@ def irep(label, instructions, reps = [])
   Irep.new(label: label, instructions: instructions, reps: reps, nlocals: 2, nregs: 4, catch_handlers: [])
 end
 
-CLOSURES = Set['BLOCK', 'LAMBDA'].freeze
+CLOSURES = Set[:BLOCK, :LAMBDA].freeze
 
 # root --BLOCK 0--> a --LAMBDA 0--> b ; root --LAMBDA 1--> "missing" (no Irep) ; a --BLOCK 1--> nothing (dangling)
-leaf = irep('b', [insn(0, 'GETUPVAR', "R1\t0\t1"), insn(4, 'RETURN', 'R1')])
-mid = irep('a', [insn(0, 'LAMBDA', "R2\tI[0]"), insn(4, 'BLKPUSH', "R3\t1\t0"), insn(8, 'BLOCK', "R2\tI[1]"),
-                 insn(12, 'RETURN', 'R2')], ['b', 'nowhere'])
-root = irep('root', [insn(0, 'BLOCK', "R2\tI[0]"), insn(4, 'LAMBDA', "R3\tI[1]"), insn(8, 'SEND', "R2\t0\t0"),
-                     insn(12, 'RETURN', 'R2')], ['a', 'missing'])
+leaf = irep('b', [insn(0, :GETUPVAR, "R1\t0\t1"), insn(4, :RETURN, 'R1')])
+mid = irep('a', [insn(0, :LAMBDA, "R2\tI[0]"), insn(4, :BLKPUSH, "R3\t1\t0"), insn(8, :BLOCK, "R2\tI[1]"),
+                 insn(12, :RETURN, 'R2')], ['b', 'nowhere'])
+root = irep('root', [insn(0, :BLOCK, "R2\tI[0]"), insn(4, :LAMBDA, "R3\tI[1]"), insn(8, :SEND, "R2\t0\t0"),
+                     insn(12, :RETURN, 'R2')], ['a', 'missing'])
 ireps = { 'root' => root, 'a' => mid, 'b' => leaf }
 
 puts '-- child resolution'
@@ -41,7 +41,7 @@ check.call('child_labels keeps every closure site, in program order, and labels 
 check.call('children drops the labels that are not in the ireps table',
            BytecodeIR::Tree.children(root, ireps, CLOSURES).map { |i, c| [i, c.label] } == [[0, 'a']])
 check.call('the ops asked for are the only sites (BLOCK alone skips the LAMBDA site)',
-           BytecodeIR::Tree.child_labels(root, Set['BLOCK']) == [[0, 'a']])
+           BytecodeIR::Tree.child_labels(root, Set[:BLOCK]) == [[0, 'a']])
 check.call('an irep without closure ops has no children',
            BytecodeIR::Tree.children(leaf, ireps, CLOSURES) == [])
 

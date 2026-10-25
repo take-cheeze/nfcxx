@@ -37,7 +37,7 @@ module BytecodeIR
   COND_IF = 1 # JMPIF: R(a) truthy
   COND_NOT = 2 # JMPNOT: R(a) falsy
   COND_NIL = 3 # JMPNIL: R(a) nil
-  COND_KINDS = { 'JMPIF' => COND_IF, 'JMPNOT' => COND_NOT, 'JMPNIL' => COND_NIL }.freeze
+  COND_KINDS = { :JMPIF => COND_IF, :JMPNOT => COND_NOT, :JMPNIL => COND_NIL }.freeze
 
   # One instruction's analysis-independent operands (Program#decoded): +op+, +cond+ (a COND_* kind, nil unless a
   # conditional branch), +reg+ (the leading register as an Integer, nil when the leading operand is not a register)

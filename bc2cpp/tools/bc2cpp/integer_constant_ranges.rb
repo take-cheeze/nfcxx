@@ -14,8 +14,8 @@ module IntegerConstantRanges
   # CodeGen::LOADI_FIXNUM_MIN/MAX, the narrowest target Fixnum range (CodeGen loads after this file).
   FIXNUM_MIN = -1_073_741_824
   FIXNUM_MAX = 1_073_741_823
-  OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
-  LOADS = %w[GETCONST GETMCNST].freeze
+  OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
+  LOADS = %i[GETCONST GETMCNST].freeze
 
   # BC2CPP_NUMERIC_CONSTANTS=0 turns the analysis and every use of it off (the output is master's).
   def self.enabled?
@@ -149,7 +149,7 @@ module IntegerConstantRanges
   # LOADI__1 carry no operand, so IntegerConstants.loadi_value cannot read them.
   def self.literal(insn)
     value = case insn.op
-            when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
+            when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
             when :LOADI__1 then -1
             else BytecodeIR::OperandModel.imm_operand(insn)&.to_i
             end
@@ -160,7 +160,7 @@ module IntegerConstantRanges
     return nil if entries.include?(insn.addr)
 
     left = source_kind(irep, idx, cur, entries, freeze_safe: freeze_safe)
-    right = if %w[ADDI SUBI].include?(insn.op)
+    right = if %i[ADDI SUBI].include?(insn.op)
               imm = BytecodeIR::OperandModel.imm_operand(insn)
               imm && [:literal, imm.to_i]
             else

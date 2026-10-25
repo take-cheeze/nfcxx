@@ -29,6 +29,13 @@ def snapshot(body)
 end
 
 suite = FixtureCheck.new('ir_binary_operands_check')
+synthetic = Insn.new(op: 'SEND', args: 'R1 :work n=0')
+suite.check('synthetic opcode names normalize to Symbols', synthetic.op == :SEND)
+suite.check('method-name operands remain Strings', synthetic.sym == 'work')
+synthetic.op = 'SEND0'
+suite.check('opcode assignment normalizes without calling a missing Struct setter', synthetic.op == :SEND0)
+constant = Insn.new(op: 'GETMCNST', args: 'R1 (R1)::Target')
+suite.check('constant-name operands remain Strings', constant.mcnst_name == 'Target')
 suite.require_mrbc!
 source = <<~RUBY_SOURCE
   def ir_binary_join(flag)
@@ -60,6 +67,8 @@ RUBY_SOURCE
 suite.compile(source) do |baseline, _, directory|
   # Decode the same bytes again, bypassing disk caches and keeping query caches separate.
   guarded, = load_ireps(RiteImage.new(File.binread(File.join(directory, 'ir_binary_operands.mrb'))), cache: nil)
+  suite.check('binary opcode names normalize to Symbols', baseline.values.all? { |body| body.instructions.all? { |i| i.op.is_a?(Symbol) } })
+  suite.check('binary method names agree with synthetic name operands', baseline.values.flat_map(&:instructions).select { |i| BytecodeIR::Ops::SEND.include?(i.op) }.all? { |i| i.sym.is_a?(String) })
   guarded.each_value do |body|
     body.instructions.each { |instruction| instruction.extend(DisassemblyForbidden) }
   end

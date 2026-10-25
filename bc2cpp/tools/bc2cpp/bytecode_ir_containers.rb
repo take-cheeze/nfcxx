@@ -123,8 +123,8 @@ module BytecodeIR
     # Nothing between +from+ and +to+ can change a container built at +from+: every instruction strictly between them
     # is a QUIET_OPS load or a jump into (from, to], so each path from +from+ stays in that span until it reaches +to+
     # and runs no method. A literal mutated before its use (`a = []; a << x; @v = a`) fails this.
-    QUIET_OPS = Set['NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE', 'GETIV',
-                    'GETCONST', 'GETUPVAR', 'STRING', 'BLOCK', 'LAMBDA', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+    QUIET_OPS = Set[:NOP, :MOVE, :LOADL, :LOADSYM, :LOADNIL, :LOADSELF, :LOADTRUE, :LOADFALSE, :GETIV,
+                    :GETCONST, :GETUPVAR, :STRING, :BLOCK, :LAMBDA, :JMP, :JMPIF, :JMPNOT, :JMPNIL].freeze
 
     def quiet_span?(from, to)
       return false unless from < to && resolved?

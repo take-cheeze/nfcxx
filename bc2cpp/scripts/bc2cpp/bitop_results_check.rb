@@ -82,14 +82,14 @@ oracle = BitopOracle.new(codegen)
 
 # The table answer for `bit OP arg` (argc 1) or `bit OP` (argc 0). The argument is state[reg + 1], i.e. state[3].
 def on_number(codegen, op, bit, arg, argc: 1)
-  send_insn = argc == 1 ? insn(0, 'SEND', "R2\t:#{op}\tn=1") : insn(0, 'SEND0', "R2\t:#{op}")
+  send_insn = argc == 1 ? insn(0, :SEND, "R2\t:#{op}\tn=1") : insn(0, :SEND0, "R2\t:#{op}")
   codegen.send(:numeric_send_on_number, bit, op, argc, send_insn, [0, 0, 0, arg])
 end
 
 # The dataflow answer for `recv OP arg`: R2 and R3 hold the masks on entry, the result is read at RETURN.
 def send_result(oracle, op, recv_mask, arg_mask)
   oracle.entry = { 2 => recv_mask, 3 => arg_mask }
-  irep = irep_of([insn(0, 'SEND', "R2\t:#{op}\tn=1"), insn(4, 'RETURN', 'R2')])
+  irep = irep_of([insn(0, :SEND, "R2\t:#{op}\tn=1"), insn(4, :RETURN, 'R2')])
   states = NumericFlow.states(irep, oracle, Set.new)
   states && states[1][2]
 end

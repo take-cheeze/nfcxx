@@ -28,21 +28,21 @@ module BytecodeIR
   # entry point (ops.h, vm.c). CodeGen::FIXNUM_PROOF_STEP_OVER_OPS is this
   # Set. LOADI* is matched by prefix. Anything else refuses.
   WRITES_LEADING_REG_OPS = Set[
-    'NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE',
-    'GETGV', 'SETGV', 'GETSV', 'SETSV', 'GETIV', 'SETIV', 'GETCV', 'SETCV',
-    'GETCONST', 'SETCONST', 'GETMCNST', 'SETMCNST', 'GETUPVAR',
-    'GETIDX', 'GETIDX0', 'SETIDX',
-    'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL',
-    'SSEND', 'SSEND0', 'SSENDB', 'SEND', 'SEND0', 'SENDB', 'SUPER', 'BLKCALL', 'BLKPUSH',
-    'ENTER', 'KEY_P', 'KEYEND', 'KARG',
-    'RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK',
-    'ADD', 'ADDI', 'SUB', 'SUBI', 'ADDILV', 'SUBILV', 'MUL', 'DIV',
-    'EQ', 'LT', 'LE', 'GT', 'GE',
-    'ARRAY', 'ARRAY2', 'ARYCAT', 'ARYPUSH', 'ARYSPLAT', 'AREF',
-    'INTERN', 'SYMBOL', 'STRING', 'STRCAT', 'HASH', 'HASHADD', 'HASHCAT',
-    'LAMBDA', 'BLOCK', 'METHOD', 'RANGE_INC', 'RANGE_EXC',
-    'OCLASS', 'CLASS', 'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'ALIAS', 'UNDEF',
-    'SCLASS', 'TCLASS', 'DEBUG', 'STOP'
+    :NOP, :MOVE, :LOADL, :LOADSYM, :LOADNIL, :LOADSELF, :LOADTRUE, :LOADFALSE,
+    :GETGV, :SETGV, :GETSV, :SETSV, :GETIV, :SETIV, :GETCV, :SETCV,
+    :GETCONST, :SETCONST, :GETMCNST, :SETMCNST, :GETUPVAR,
+    :GETIDX, :GETIDX0, :SETIDX,
+    :JMP, :JMPIF, :JMPNOT, :JMPNIL,
+    :SSEND, :SSEND0, :SSENDB, :SEND, :SEND0, :SENDB, :SUPER, :BLKCALL, :BLKPUSH,
+    :ENTER, :KEY_P, :KEYEND, :KARG,
+    :RETURN, :RETURN_BLK, :RETSELF, :RETNIL, :RETTRUE, :RETFALSE, :BREAK,
+    :ADD, :ADDI, :SUB, :SUBI, :ADDILV, :SUBILV, :MUL, :DIV,
+    :EQ, :LT, :LE, :GT, :GE,
+    :ARRAY, :ARRAY2, :ARYCAT, :ARYPUSH, :ARYSPLAT, :AREF,
+    :INTERN, :SYMBOL, :STRING, :STRCAT, :HASH, :HASHADD, :HASHCAT,
+    :LAMBDA, :BLOCK, :METHOD, :RANGE_INC, :RANGE_EXC,
+    :OCLASS, :CLASS, :MODULE, :EXEC, :DEF, :TDEF, :SDEF, :ALIAS, :UNDEF,
+    :SCLASS, :TCLASS, :DEBUG, :STOP
   ].freeze
 
   # Ops that write a run of registers from their leading operand (vm.c), not just that operand. The run's extent
@@ -70,8 +70,8 @@ module BytecodeIR
   # starts a frame at R(a) and writes R(a+2) (nil); GETIDX0 and ADDI/SUBI also write R(a+1), SETIDX R(a+3). Every
   # such write is above a. ADDILV/SUBILV are not listed: their fallback is mrb_funcall, whose frame sits above the
   # caller's nregs.
-  ORIGIN_FRAME_OPS = Set['GETIDX', 'GETIDX0', 'SETIDX', 'ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI',
-                         'EQ', 'LT', 'LE', 'GT', 'GE', 'BLKCALL'].freeze
+  ORIGIN_FRAME_OPS = Set[:GETIDX, :GETIDX0, :SETIDX, :ADD, :SUB, :MUL, :DIV, :ADDI, :SUBI,
+                         :EQ, :LT, :LE, :GT, :GE, :BLKCALL].freeze
 
   # Expanded (instruction, register) states before a query gives up.
   DATAFLOW_MAX_STATES = 400
@@ -310,7 +310,7 @@ module BytecodeIR
     private :compute_write_dominates?
 
     # Ops that can hand `self` to code that reads its ivars.
-    SELF_EXPOSING_OPS = Set['LOADSELF', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLOCK', 'LAMBDA', 'METHOD', 'EXEC', 'SCLASS'].freeze
+    SELF_EXPOSING_OPS = Set[:LOADSELF, :SSEND, :SSEND0, :SSENDB, :SUPER, :BLOCK, :LAMBDA, :METHOD, :EXEC, :SCLASS].freeze
 
     # INIT_ASSIGNED: on every path, is `@ivar` assigned before it is
     # read, before the frame exits and before `self` can reach other code? A
@@ -342,7 +342,7 @@ module BytecodeIR
         assigned = reached.empty? || reached.all?
         observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || SELF_EXPOSING_OPS.include?(insn.op) ||
                    (insn.op == :GETIV && insn.ivar == ivar) ||
-                   (!%w[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
+                   (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
         assigned || !observes
       end
     end
@@ -515,7 +515,7 @@ module BytecodeIR
     # Instruction indices a closure-creating op can reach (origin only): a block or lambda of this frame, or a
     # body run in place (EXEC, CLASS, MODULE, SCLASS), can write an outer register only once one of those ops
     # has run. Nil when handler edges do not resolve, as origin_reachable.
-    ORIGIN_CLOSURE_OPS = Set['BLOCK', 'LAMBDA', 'EXEC', 'CLASS', 'MODULE', 'SCLASS'].freeze
+    ORIGIN_CLOSURE_OPS = Set[:BLOCK, :LAMBDA, :EXEC, :CLASS, :MODULE, :SCLASS].freeze
 
     def origin_closure_reach
       return @origin_closure_reach if defined?(@origin_closure_reach)
@@ -580,7 +580,7 @@ module BytecodeIR
       def self.for(insn)
         op = insn.op
         lead = insn.reg
-        new(BytecodeIR::Ops::READS_LEAD.include?(op) || op == 'JMPUW', BytecodeIR.written_run(insn),
+        new(BytecodeIR::Ops::READS_LEAD.include?(op) || op == :JMPUW, BytecodeIR.written_run(insn),
             ORIGIN_FRAME_OPS.include?(op), WRITES_LEADING_REG_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op),
             BytecodeIR::Ops::CALLEE_FRAME.include?(op), lead, lead&.to_i).freeze
       end

@@ -5,7 +5,7 @@ require_relative 'bytecode_ir_containers'
 
 # Capture facts apply only during a proven synchronous, nonescaping invocation.
 class IrBlockCaptures
-  PURE_OPS = %w[ENTER MOVE LOADSELF LOADNIL LOADTRUE LOADFALSE LOADSYM SYMBOL STRING
+  PURE_OPS = %i[ENTER MOVE LOADSELF LOADNIL LOADTRUE LOADFALSE LOADSYM SYMBOL STRING
                 LOADI LOADI16 LOADI32 LOADINEG LOADL GETUPVAR JMP JMPIF JMPNOT JMPNIL
                 RETURN RETSELF RETNIL RETTRUE RETFALSE NOP].freeze
 
@@ -66,7 +66,7 @@ class IrBlockCaptures
     # Straight-line transport prevents another invocation or escape before this call.
     (producer_index + 1...@call_index).all? do |index|
       instruction = parent.source_at(index)
-      %w[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op)
+      %i[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op)
     end
   end
 end

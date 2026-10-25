@@ -10,10 +10,10 @@ require_relative 'core_hierarchy_sigs'
 
 module IrTypeFeedback
   # FRAME_EXIT without STOP: a STOP is not a return kind for these block and method rows.
-  RETURN_OPS = (BytecodeIR::Ops::FRAME_EXIT - ['STOP']).freeze
+  RETURN_OPS = (BytecodeIR::Ops::FRAME_EXIT - [:STOP]).freeze
   # Sends with an explicit receiver in R(a): the SSEND forms take self implicitly.
-  EXPLICIT_RECEIVER_SENDS = (BytecodeIR::Ops::SEND - %w[SSEND SSEND0 SSENDB]).freeze
-  LITERAL_RETURNS = { 'RETNIL' => :NilClass, 'RETTRUE' => :TrueClass, 'RETFALSE' => :FalseClass }.freeze
+  EXPLICIT_RECEIVER_SENDS = (BytecodeIR::Ops::SEND - %i[SSEND SSEND0 SSENDB]).freeze
+  LITERAL_RETURNS = { :RETNIL => :NilClass, :RETTRUE => :TrueClass, :RETFALSE => :FalseClass }.freeze
   # Core superclasses and mixins, read from sig/bc2cpp/declarations.rbs#core_hierarchy (fails if that section is empty).
   CORE_PARENTS, CORE_MIXINS = CoreHierarchySigs.symbol_hierarchy
 
@@ -115,7 +115,7 @@ module IrTypeFeedback
       refusal = {}
       fact = if LITERAL_RETURNS.key?(instruction.op)
                BytecodeIR::Types::Fact.new(classes: Set[LITERAL_RETURNS[instruction.op]], declared: false, contracts: [])
-             elsif %w[RETURN_BLK BREAK RETSELF].include?(instruction.op) || !Array(child.catch_handlers).empty?
+             elsif %i[RETURN_BLK BREAK RETSELF].include?(instruction.op) || !Array(child.catch_handlers).empty?
                refusal[:cause] = "unsupported:block-exit-or-handler"
                nil
              else
@@ -128,7 +128,7 @@ module IrTypeFeedback
       exits << fact if kind == 'block_return'
     end
     if !exits.empty? && exits.none?(&:nil?) && Array(child.catch_handlers).empty? &&
-       !BytecodeIR.for(child).op?('RETURN_BLK', 'BREAK')
+       !BytecodeIR.for(child).op?(:RETURN_BLK, :BREAK)
       returned = BytecodeIR::Types::Fact.new(classes: exits.reduce(Set.new) { |set, fact| set | fact.classes },
                                           declared: exits.any?(&:declared?), contracts: exits.flat_map(&:contracts).uniq.sort)
       if binding && callback_inputs_fit
@@ -255,7 +255,7 @@ module IrTypeFeedback
           inferred_rest_elements[(mandatory + optional + 1).to_s] = classes if classes
         end
         if ctx.gen.respond_to?(:bytecode_ir_keyword_argument_classes)
-          irep.each_with_op('KARG') do |insn, _index|
+          irep.each_with_op(:KARG) do |insn, _index|
             name = insn.sym.to_s
             classes = ctx.gen.bytecode_ir_keyword_argument_classes(definition, name)
             inferred_keywords[name] = classes if classes
@@ -290,7 +290,7 @@ module IrTypeFeedback
         refusal = {}
         fact = if LITERAL_RETURNS.key?(insn.op)
                  BytecodeIR::Types::Fact.new(classes: Set[LITERAL_RETURNS[insn.op]].freeze, declared: false, contracts: [].freeze).freeze
-               elsif %w[RETURN_BLK BREAK RETSELF].include?(insn.op)
+               elsif %i[RETURN_BLK BREAK RETSELF].include?(insn.op)
                  refusal[:cause] = "unsupported:#{insn.op}"
                  nil
                else

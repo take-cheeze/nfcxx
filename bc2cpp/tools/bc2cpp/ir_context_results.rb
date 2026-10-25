@@ -17,8 +17,8 @@ class IrContextResults
   EMPTY_FRAME_ARGUMENTS = [].freeze
   EMPTY_FRAME_KEYWORDS = {}.freeze
   FIXED_BINDING_EDGES = {}.freeze
-  PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
-                 'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  PURE_OPS = Set[:ENTER, :NOP, :MOVE, :LOADSELF, :LOADNIL, :LOADTRUE, :LOADFALSE, :LOADSYM,
+                 :GETIV, :RETURN, :RETSELF, :RETNIL, :RETTRUE, :RETFALSE, :JMP, :JMPIF, :JMPNOT, :JMPNIL].freeze
   # SEND and SSEND forms without a block argument (Ops::BLOCK_SEND removed).
   NO_BLOCK_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
@@ -268,8 +268,8 @@ class IrContextResults
       program = BytecodeIR.for(body)
       return nil unless (index + 1..index + optional + 1).all? { |table| program.source_at(table)&.op == :JMP }
     end
-    names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
-    optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
+    names = BytecodeIR.for(body).instructions_with_op(:KARG).map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
+    optional_names = BytecodeIR.for(body).instructions_with_op(:KEY_P).map { |insn| insn.sym.to_s }.uniq
     fixed = optional.zero? && rest.zero? && post.zero? && key_count.zero? && keydict.zero? && names.empty?
     [fields.dup.freeze, names, (names - optional_names).freeze, index, fixed].freeze
   end
@@ -377,7 +377,7 @@ class IrContextResults
       case exit.op
       when :RETURN then state[exit.reg]
       when :RETSELF then node.receiver
-      when 'RETNIL' then NumericFlow::NIL
+      when :RETNIL then NumericFlow::NIL
       when :RETTRUE then @gen.numeric_class_bit('TrueClass')
       when :RETFALSE then @gen.numeric_class_bit('FalseClass')
       else NumericFlow::OTHER
@@ -432,7 +432,7 @@ class IrContextResults
 
       keyword_registers << [producer.sym.to_s.dup.freeze, key_register + 1].freeze
     end
-    [%w[SSEND SSEND0].include?(insn.op), register, argc, keyword_registers.freeze].freeze
+    [%i[SSEND SSEND0].include?(insn.op), register, argc, keyword_registers.freeze].freeze
   end
 
   def dispatch(node, body, index, insn, state)
@@ -491,7 +491,7 @@ class IrContextResults
       return @gen.frozen_table_send_mask(tables, insn.sym, argc) if other.zero?
     end
     explicit = insn.dup
-    explicit.op = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 'SEND0' : 'SEND'
+    explicit.op = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? :SEND0 : :SEND
     inputs = state.dup
     inputs[insn.reg.to_i] = mask(Set[klass])
     result = @gen.send(:return_class_send_mask, body, index, explicit, inputs) || NumericFlow::OTHER

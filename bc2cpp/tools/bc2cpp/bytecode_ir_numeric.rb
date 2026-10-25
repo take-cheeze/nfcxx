@@ -14,14 +14,14 @@ module BytecodeIR
   # +ivar+, the instance variable of GETIV/SETIV. nil where the op has none.
   Operands = Struct.new(:b, :ivar)
   NO_OPERANDS = Operands.new(nil, nil).freeze
-  OPERATOR_OPS = Set['ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE'].freeze
-  SECOND_REG_OPS = Set['MOVE', 'RESCUE', 'ADDILV', 'SUBILV', 'GETIDX0'].freeze
+  OPERATOR_OPS = Set[:ADD, :SUB, :MUL, :DIV, :EQ, :LT, :LE, :GT, :GE].freeze
+  SECOND_REG_OPS = Set[:MOVE, :RESCUE, :ADDILV, :SUBILV, :GETIDX0].freeze
 
   # Decode +insn+'s Operands. Reads only the operands the op has.
   def self.operands(insn)
     op = insn.op
-    if op == 'SETIV' then Operands.new(insn.regs.first.to_i, insn.ivar)
-    elsif op == 'GETIV' then Operands.new(nil, insn.ivar)
+    if op == :SETIV then Operands.new(insn.regs.first.to_i, insn.ivar)
+    elsif op == :GETIV then Operands.new(nil, insn.ivar)
     elsif SECOND_REG_OPS.include?(op) then Operands.new(insn.regs[1].to_i, nil)
     elsif OPERATOR_OPS.include?(op) then Operands.new(insn.paren_reg.to_i, nil)
     else NO_OPERANDS
@@ -65,8 +65,8 @@ module BytecodeIR
     def returned_mask(irep, states, init = 0)
       exit_mask(irep, states, init) do |exit, state|
         case exit.op
-        when 'RETURN', 'RETURN_BLK' then state[exit.reg] || NumericFlow::OTHER
-        when 'RETNIL' then NumericFlow::NIL
+        when :RETURN, :RETURN_BLK then state[exit.reg] || NumericFlow::OTHER
+        when :RETNIL then NumericFlow::NIL
         else NumericFlow::OTHER
         end
       end
@@ -84,7 +84,7 @@ module BytecodeIR
 
     # Ops that run no Ruby, raise nothing and write one register: between an Array literal and its read they leave
     # the fresh Array as it was built.
-    QUIET_OPS = Set['NOP', 'MOVE', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM', 'LOADL', 'STRING'].freeze
+    QUIET_OPS = Set[:NOP, :MOVE, :LOADNIL, :LOADTRUE, :LOADFALSE, :LOADSYM, :LOADL, :STRING].freeze
 
     # ELEMENT_LITERAL: the class mask of `GETIDX`/`GETIDX0` at +index+ when it reads a literal
     # position of an Array literal no Ruby could touch since it was built, from the definitions reaching that
@@ -97,12 +97,12 @@ module BytecodeIR
 
       read = program.instructions[index].source
       op = read.op
-      return nil unless op == 'GETIDX' || op == 'GETIDX0'
+      return nil unless op == :GETIDX || op == :GETIDX0
 
       opaque = opaque.frozen? ? opaque : opaque.dup.freeze
-      receiver = op == 'GETIDX' ? read.reg.to_i : program.operands[index].b
+      receiver = op == :GETIDX ? read.reg.to_i : program.operands[index].b
       literal_index = 0
-      if op == 'GETIDX'
+      if op == :GETIDX
         key = single_writer(program, index, receiver + 1, opaque, follow_moves: true)
         literal_index = key && integer_literal(key.last)
         return nil unless literal_index
@@ -154,10 +154,10 @@ module BytecodeIR
 
     def integer_literal(insn)
       op = insn.op
-      return -1 if op == 'LOADI__1'
-      return -insn.uint_operand if op == 'LOADINEG' && insn.uint_operand
-      return op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(op)
-      return insn.imm_operand.to_i if %w[LOADI8 LOADI16 LOADI32].include?(op) && insn.imm_operand
+      return -1 if op == :LOADI__1
+      return -insn.uint_operand if op == :LOADINEG && insn.uint_operand
+      return op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(op)
+      return insn.imm_operand.to_i if %i[LOADI8 LOADI16 LOADI32].include?(op) && insn.imm_operand
 
       nil
     end

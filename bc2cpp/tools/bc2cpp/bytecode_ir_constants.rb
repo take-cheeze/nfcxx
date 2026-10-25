@@ -27,15 +27,15 @@ module BytecodeIR
     FIXNUM_MIN = -1_073_741_824
     FIXNUM_MAX = 1_073_741_823
     # The operators an interval may combine. The bit operators are exact-value only (as IntegerConstantRanges).
-    INTERVAL_OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
-    ARITH_OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
+    INTERVAL_OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
+    ARITH_OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
     # `a | b` is `SEND R(a) :| n=1` (mruby 4 has no opcode for it).
     BIT_OPS = { '|' => 'BIT_OR', '&' => 'BIT_AND', '^' => 'BIT_XOR' }.freeze
     LITERAL_CLASSES = {
-      'LOADNIL' => :NilClass, 'LOADTRUE' => :TrueClass, 'LOADFALSE' => :FalseClass,
-      'LOADSYM' => :Symbol, 'SYMBOL' => :Symbol, 'STRING' => :String,
-      'ARRAY' => :Array, 'ARRAY2' => :Array, 'HASH' => :Hash,
-      'RANGE_INC' => :Range, 'RANGE_EXC' => :Range
+      :LOADNIL => :NilClass, :LOADTRUE => :TrueClass, :LOADFALSE => :FalseClass,
+      :LOADSYM => :Symbol, :SYMBOL => :Symbol, :STRING => :String,
+      :ARRAY => :Array, :ARRAY2 => :Array, :HASH => :Hash,
+      :RANGE_INC => :Range, :RANGE_EXC => :Range
     }.freeze
     LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
     POOL_INT = /\A\.i(?:32|64)=(-?\d+)\z/
@@ -180,7 +180,7 @@ module BytecodeIR
 
       op = insn.op
       return int_node(loadi_value(insn)) if BytecodeIR::Ops::LOADI_OPS.include?(op)
-      return hash_node(irep, index, insn, policy, depth) if op == 'HASH' && policy.hash_lookup_safe
+      return hash_node(irep, index, insn, policy, depth) if op == :HASH && policy.hash_lookup_safe
       return [:cls, LITERAL_CLASSES[op]].freeze if LITERAL_CLASSES.key?(op)
 
       case op
@@ -301,7 +301,7 @@ module BytecodeIR
     def arith_node(irep, index, insn, policy, depth)
       op = insn.op
       left = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
-      right = if %w[ADDI SUBI].include?(op)
+      right = if %i[ADDI SUBI].include?(op)
                 imm = insn.imm_operand
                 imm && [int_node(imm.to_i)].freeze
               else
@@ -335,7 +335,7 @@ module BytecodeIR
     end
 
     def loadi_value(insn)
-      return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+      return insn.op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
       return -1 if insn.op == :LOADI__1
 
       insn.imm_operand&.to_i
@@ -384,7 +384,7 @@ module BytecodeIR
         case node[0]
         when :freeze then zero_divisor?(node[1], known)
         when :arith
-          (node[1] == 'DIV' && exact_of(node[3], known) == 0) || zero_divisor?(node[2], known) || zero_divisor?(node[3], known)
+          (node[1] == :DIV && exact_of(node[3], known) == 0) || zero_divisor?(node[2], known) || zero_divisor?(node[3], known)
         else false
         end
       end

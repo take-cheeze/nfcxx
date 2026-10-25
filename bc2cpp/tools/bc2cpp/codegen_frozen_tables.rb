@@ -44,7 +44,7 @@ class CodeGen
     @frozen_symbol_bit = symbol_class_enabled? ? numeric_class_bit('Symbol') : nil
     registry = FrozenTables::Registry.new(symbol_bit: @frozen_symbol_bit)
     @ireps.each do |label, irep|
-      irep.each_with_op('SEND0') do |insn, idx|
+      irep.each_with_op(:SEND0) do |insn, idx|
         next unless insn.sym == 'freeze'
 
         shape = frozen_table_literal_shape(irep, idx, insn, registry)
@@ -210,7 +210,7 @@ end
 
     at = defs.first.index
     lit = BytecodeIR.for(irep).source_at(at)
-    return nil unless %w[ARRAY HASH].include?(lit.op) && lit.regs.size == 1
+    return nil unless %i[ARRAY HASH].include?(lit.op) && lit.regs.size == 1
     # The literal's own `.freeze`, back to back: any other instruction in between could hand the
     # still-mutable array to code that changes its slots.
     return nil unless at + 1 == idx && lit.reg == insn.reg
@@ -246,7 +246,7 @@ end
     writer = BytecodeIR.for(irep).source_at(defs.first.index)
     return writer.sym&.to_sym if writer.op == :LOADSYM
 
-    writer.op.start_with?('LOADI') ? frozen_table_loadi(writer) : nil
+    writer.op.to_s.start_with?('LOADI') ? frozen_table_loadi(writer) : nil
   end
 
   # The Integer a LOADI* op loads: `LOADI_n` / `LOADI__1` print it in parentheses, the others as an operand.
@@ -267,16 +267,16 @@ end
     case writer.op
     when /\ALOADI/ then NumericFlow::INT
     when :LOADL then frozen_table_pool_mask(irep, writer)
-    when 'STRING' then NumericFlow::STR
-    when 'LOADNIL' then NumericFlow::NIL
-    when 'ARRAY' then NumericFlow::ARR
-    when 'HASH' then NumericFlow::HSH
+    when :STRING then NumericFlow::STR
+    when :LOADNIL then NumericFlow::NIL
+    when :ARRAY then NumericFlow::ARR
+    when :HASH then NumericFlow::HSH
     when :SEND0 then frozen_table_freeze_slot(irep, defs.first.index, writer)
-    when 'RANGE_INC', 'RANGE_EXC' then NumericFlow::RNG
+    when :RANGE_INC, :RANGE_EXC then NumericFlow::RNG
     when :GETCONST, :GETMCNST
       integer_constant_read?(writer) ? NumericFlow::INT : NumericFlow::OTHER
     # Only the literal LOADSYM is a Symbol here; SYMBOL interns a string at run time and stays OTHER.
-    when 'LOADSYM' then frozen_symbol_bit || NumericFlow::OTHER
+    when :LOADSYM then frozen_symbol_bit || NumericFlow::OTHER
     else NumericFlow::OTHER
     end
   end

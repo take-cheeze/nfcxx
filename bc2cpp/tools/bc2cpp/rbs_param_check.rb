@@ -147,7 +147,7 @@ module RbsParamCheck
   # Both names of every `alias new old` (an ALIAS instruction; `alias_method` spells Symbols, DynamicNames).
   def alias_names(ireps)
     ireps.each_value.with_object(Set.new) do |irep, names|
-      irep.each_with_op('ALIAS') do |insn, _index|
+      irep.each_with_op(:ALIAS) do |insn, _index|
         names << insn.sym if insn.sym
         old = insn.first_of(:name)&.value
         names << old if old
@@ -419,7 +419,7 @@ module RbsParamCheck
 
     reader = owner || gen.ivar_reader_owner(irep.label)
     sites, why = gen.ivar_write_sites_of(reader, name)
-    return "#{owner ? "#{owner}##{name} reads" : 'GETIV'} @#{name} (#{why})" if why
+    return "#{owner ? "#{owner}##{name} reads" : :GETIV} @#{name} (#{why})" if why
 
     key = [reader, name, cls]
     cache = ctx[:ivar_cache]

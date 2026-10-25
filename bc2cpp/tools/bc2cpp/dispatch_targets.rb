@@ -1141,7 +1141,7 @@ end
 
 def container_phi_merge(irep, at, reg)
   lit = BytecodeIR.for(irep).source_at(at + 1)
-  return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
+  return nil unless lit && %i[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   # The literal arm and the taken edge meet at the jump's target only in this shape. The definitions reaching that
   # join cover both arms and every other predecessor of it; the definitions before the branch do not.

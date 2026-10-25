@@ -7,7 +7,7 @@ require_relative 'bytecode_ir_containers'
 module IrYieldTypes
   MAX_INSTRUCTIONS = 256
   MAX_RECEIVERS = 8
-  PURE_OPS = %w[ENTER MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM STRING LOADL LOADI LOADINEG
+  PURE_OPS = %i[ENTER MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM STRING LOADL LOADI LOADINEG
                 LOADI16 LOADI32 JMP JMPIF JMPNOT JMPNIL BLKPUSH BLKCALL RETURN RETNIL
                 RETTRUE RETFALSE NOP].freeze
   Summary = Struct.new(:child, :arguments, :targets, :invocation_safe, keyword_init: true)
@@ -44,7 +44,7 @@ module IrYieldTypes
       targets << "yield:#{target.owner}##{target.name}"
       callee = BytecodeIR::Types.new(body, argument_facts: actuals.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] })
       yields = []
-      body.each_with_op('BLKCALL') { |insn, position| yields << [insn, position] }
+      body.each_with_op(:BLKCALL) { |insn, position| yields << [insn, position] }
       return nil if yields.empty?
 
       yields.each do |instruction, position|

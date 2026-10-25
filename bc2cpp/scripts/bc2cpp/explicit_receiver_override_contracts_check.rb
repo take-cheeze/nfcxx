@@ -34,7 +34,7 @@ end
 
 # `def use(o); o.greet; end`: R1 is the required argument, the SEND on R1 (index 1) sends +sym+, RETURN R1 (index 2).
 def explicit_call_irep(label, sym = 'greet')
-  instructions = [insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SEND', "R1\t:#{sym}\tn=0"), insn(2, 'RETURN', 'R1')]
+  instructions = [insn(0, :ENTER, '1:0:0:0:0:0:0:0 (0x0)'), insn(1, :SEND, "R1\t:#{sym}\tn=0"), insn(2, :RETURN, 'R1')]
   Irep.new(label: label, instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 2, reps: [], pool: [])
 end
 

@@ -17,9 +17,9 @@ require_relative 'irep_arity'
 # copies included); an argument of a closed-world method is followed into that method's parameter. Anything else,
 # or a use the flow query refuses, keeps the literal a fragment.
 module StaticDispatchFragmentUses
-  LOAD_OPS = Set['STRING', 'FSTRING', 'SYMBOL'].freeze
+  LOAD_OPS = Set[:STRING, :FSTRING, :SYMBOL].freeze
   # Ops that read the value without passing it on: a comparison, a branch on its truth.
-  PURE_OPS = Set['EQ', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  PURE_OPS = Set[:EQ, :JMPIF, :JMPNOT, :JMPNIL].freeze
   # Sends that only compare or measure their receiver.
   PURE_RECEIVER_SENDS = Set['==', '!=', '===', 'eql?', 'equal?', '=~', 'match?', 'start_with?', 'end_with?',
                             'include?', 'empty?', 'size', 'length', 'hash', 'nil?', 'is_a?', 'kind_of?',
@@ -134,7 +134,7 @@ module StaticDispatchFragmentUses
         elsif insn.op == :GETIDX
           # `x[value]`: the `[]` send GETIDX stands for, with the value as its argument (or receiver).
           return true if call_escapes?(irep, use, '[]', insn.reg.to_i, 1, register.to_i, false, ctx, depth)
-        elsif %w[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
+        elsif %i[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
           return true if container_escapes?(irep, use, insn.reg, ctx, depth + 1)
         elsif insn.op == :STRCAT
           return true unless concat_poisoned?(irep, use, insn.reg)
@@ -161,7 +161,7 @@ module StaticDispatchFragmentUses
   # Names of methods whose body calls `super`: a SUPER is a call site no send of the name shows.
   def super_names(ireps, method_of, body_of)
     ireps.each_value.with_object(Set.new) do |irep, names|
-      next if BytecodeIR.for(irep).instructions_with_op('SUPER').empty?
+      next if BytecodeIR.for(irep).instructions_with_op(:SUPER).empty?
 
       m = method_of[irep.label]
       names << body_of[m][1] if m
@@ -173,7 +173,7 @@ module StaticDispatchFragmentUses
     reads = Hash.new { |h, k| h[k] = [] }
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, index|
-        reads[insn.const_name.to_s] << [irep, index, insn.reg] if %w[GETCONST GETMCNST].include?(insn.op)
+        reads[insn.const_name.to_s] << [irep, index, insn.reg] if %i[GETCONST GETMCNST].include?(insn.op)
       end
     end
     reads
@@ -205,7 +205,7 @@ module StaticDispatchFragmentUses
           ctx[:constants][insn.const_name.to_s].each do |reader, at, value_reg|
             return true if container_escapes?(reader, at, value_reg, ctx, depth + 1)
           end
-        elsif %w[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
+        elsif %i[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
           return true if container_escapes?(irep, use, insn.reg, ctx, depth + 1)
         elsif BytecodeIR::Ops::SELF_SEND.include?(insn.op) && insn.reg.to_i == register.to_i
           next # only the result slot
@@ -246,7 +246,7 @@ module StaticDispatchFragmentUses
       next false if d.entry?
 
       insn = BytecodeIR.for(irep).source_at(d.index)
-      literal = %w[STRING FSTRING].include?(insn.op) && irep.pool[insn.pool_index]
+      literal = %i[STRING FSTRING].include?(insn.op) && irep.pool[insn.pool_index]
       literal.is_a?(String) && literal.match?(NON_NAME_CHAR)
     end
   end

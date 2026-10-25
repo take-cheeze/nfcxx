@@ -65,7 +65,7 @@ class CodeGen
   # block_fallback_region_has_return_blk?).
   def inline_nested_region_has_break?(region, available_upvars)
     block_irep = region[:block_irep]
-    return true if BytecodeIR.for(block_irep).op?('BREAK')
+    return true if BytecodeIR.for(block_irep).op?(:BREAK)
 
     recognize_block_fallback_regions(block_irep, available_upvars: region[:upvars] || available_upvars)
       .any? { |nregion| inline_nested_region_has_break?(nregion, available_upvars) }

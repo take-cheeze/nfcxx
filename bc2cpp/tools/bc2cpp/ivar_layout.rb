@@ -14,7 +14,7 @@ require_relative 'bytecode_ir'
 # later `@flag = v`. SETUPVAR's `b`/`c` are slot/level numbers in an ancestor
 # frame, not this irep's registers, so its only `R` token is a same-frame read.
 # IvarLayout.trace_type also steps over RESCUE's read operand; its write is a barrier.
-TRACE_TYPE_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | ['RESCUE']).freeze
+TRACE_TYPE_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | [:RESCUE]).freeze
 
 # ---------------------------------------------------------------------------
 # Step 6b: ivar embedding: which ivars can move out of iv_tbl into C struct
@@ -81,7 +81,7 @@ class IvarLayout
         next if d.owner.end_with?('.singleton')
 
         if d.irep
-          BytecodeIR.for(ireps.fetch(d.irep)).each_with_op('GETIV', 'SETIV') do |insn, _index|
+          BytecodeIR.for(ireps.fetch(d.irep)).each_with_op(:GETIV, :SETIV) do |insn, _index|
             name = insn.ivar
             ivars[d.owner] << name if name
           end
@@ -127,7 +127,7 @@ class IvarLayout
           d = def_of_irep[label]
           enter = irep.enter
           mand = enter ? enter.enter_fields.first : 0
-          irep.each_with_op('SETIV') do |insn, idx|
+          irep.each_with_op(:SETIV) do |insn, idx|
             ivar = insn.ivar
             # Not `$`-anchored: "SETIV @x R1 ; R1:v" carries a trailing local-name comment
             # whenever the source is a named local.
@@ -223,8 +223,8 @@ class IvarLayout
   #
   # True when any reaching definition is positively another type. A refused query is true as well: a site not proven
   # unreadable must keep poisoning.
-  ARITHMETIC_OPS = %w[ADD ADDI SUB SUBI MUL DIV].freeze
-  OTHER_LITERAL_OPS = %w[LOADSYM LOADTRUE LOADFALSE STRING ARRAY ARRAY2 HASH RANGE_INC RANGE_EXC].freeze
+  ARITHMETIC_OPS = %i[ADD ADDI SUB SUBI MUL DIV].freeze
+  OTHER_LITERAL_OPS = %i[LOADSYM LOADTRUE LOADFALSE STRING ARRAY ARRAY2 HASH RANGE_INC RANGE_EXC].freeze
 
   def self.readable_but_other(irep, idx, src_reg)
     pending = [[idx, src_reg]]

@@ -66,7 +66,7 @@ def struct_new_member_sets(irep, idx, insn)
     # A fresh packed array cannot escape or change between construction and use.
     return nil unless (use + 1...idx).all? do |at|
       op = program.source_at(at).op
-      %w[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE BLOCK].include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
+      %i[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE BLOCK].include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
     end
 
     registers = literal.value_regs
@@ -193,7 +193,7 @@ def build_registry(ireps, root_label)
     # Body EXEC by opener index (BytecodeIR.class_bodies). Walked at the opener:
     # the body EXEC is the next instruction, so nothing else in this irep runs
     # between them. A nil name (unrecognized singleton receiver) is not walked.
-    bodies = BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE', 'SCLASS')
+    bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     enter_body = lambda do |idx, body_name, ivar_owner|
       child_label = bodies[idx]
       next unless child_label && body_name
@@ -244,7 +244,7 @@ def build_registry(ireps, root_label)
                                               copy_owner: owner, core: CoreDefs.core_source?(irep.file))
     end
 
-    irep.each_with_op('CLASS', 'MODULE', 'SCLASS', 'SETCONST', 'ALIAS', 'TDEF', 'SDEF', 'DEF',
+    irep.each_with_op(:CLASS, :MODULE, :SCLASS, :SETCONST, :ALIAS, :TDEF, :SDEF, :DEF,
                       *BytecodeIR::Ops::SEND) do |insn, idx|
       case insn.op
       when :CLASS, :MODULE
@@ -430,7 +430,7 @@ def build_registry(ireps, root_label)
         # `private :a, :b` / `attr_reader :a, :b`: the Symbol arguments are LOADSYM'd
         # into consecutive registers right before the send; walk back to collect them.
         collect_loadsym_names = lambda do
-          irep.preceding_run('LOADSYM', idx - (packed ? 2 : 1), limit: n).map(&:sym_token)
+          irep.preceding_run(:LOADSYM, idx - (packed ? 2 : 1), limit: n).map(&:sym_token)
         end
 
         if %w[private protected public].include?(name)

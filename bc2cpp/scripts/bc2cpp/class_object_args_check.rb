@@ -87,18 +87,18 @@ end
 
 # def table(id, klass, name); klass.new(1, 2); end   -- the `new` is instruction 2 (receiver R4).
 def coa_table(label = 'T', body: nil)
-  list = body || [insn(0, 'ENTER', "3:0:0:0:0:0:0:0\t(0x0)"), insn(2, 'MOVE', "R4\tR2"), insn(4, 'SEND', "R4\t:new\tn=2"), insn(7, 'RETURN', 'R4')]
+  list = body || [insn(0, :ENTER, "3:0:0:0:0:0:0:0\t(0x0)"), insn(2, :MOVE, "R4\tR2"), insn(4, :SEND, "R4\t:new\tn=2"), insn(7, :RETURN, 'R4')]
   coa_irep(label, list)
 end
 
 # A caller: `table 1, <klass>, :x` with the class argument supplied by +klass_ops+ (instructions writing R3).
-def coa_caller(label, klass_ops, name: 'table', call: 'SSEND', argc: 3)
-  list = [insn(0, 'LOADSELF', "R1\t(R1)"), insn(2, 'LOADI_1', 'R2 (1)')] + klass_ops +
-         [insn(20, call, "R1\t:#{name}\tn=#{argc}"), insn(24, 'RETURN', 'R1')]
+def coa_caller(label, klass_ops, name: 'table', call: :SSEND, argc: 3)
+  list = [insn(0, :LOADSELF, "R1\t(R1)"), insn(2, :LOADI_1, 'R2 (1)')] + klass_ops +
+         [insn(20, call, "R1\t:#{name}\tn=#{argc}"), insn(24, :RETURN, 'R1')]
   coa_irep(label, list)
 end
 
-def coa_const(name) = [insn(4, 'GETCONST', "R3\t#{name}"), insn(8, 'LOADSYM', "R4\t:x")]
+def coa_const(name) = [insn(4, :GETCONST, "R3\t#{name}"), insn(8, :LOADSYM, "R4\t:x")]
 
 # classes the `new` receiver of the table body resolves to.
 def coa_resolve(cg, irep)
@@ -120,7 +120,7 @@ two = coa_caller('C2', coa_const('System'))
 cg = coa_codegen([coa_table, one, two], defs + [['Host', 'a', 'C1'], ['Host', 'b', 'C2']], world)
 check.call('two callers give the union, sorted', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']) == ['LCF::System', 'LCF::Title'])
 
-unknown_arg = coa_caller('C3', [insn(4, 'SEND0', "R3\t:klass_of"), insn(7, 'LOADSYM', "R4\t:x")])
+unknown_arg = coa_caller('C3', [insn(4, :SEND0, "R3\t:klass_of"), insn(7, :LOADSYM, "R4\t:x")])
 cg = coa_codegen([coa_table, one, unknown_arg], defs + [['Host', 'a', 'C1'], ['Host', 'c', 'C3']], world)
 check.call('one caller passing a call result leaves the receiver unresolved', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
@@ -128,19 +128,19 @@ nonclass = CoaWorld.new.tap { |w| w.classes = world.classes.dup; w.non_class << 
 cg = coa_codegen([coa_table, one], defs + [['Host', 'run', 'C1']], nonclass)
 check.call('a constant that may bind a non-class is not a class', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
-sym = coa_irep('CS', [insn(0, 'LOADSYM', "R2\t:table"), insn(3, 'RETURN', 'R2')])
+sym = coa_irep('CS', [insn(0, :LOADSYM, "R2\t:table"), insn(3, :RETURN, 'R2')])
 cg = coa_codegen([coa_table, one, sym], defs + [['Host', 'a', 'C1'], ['Host', 's', 'CS']], world)
 check.call('a Symbol naming the method poisons it', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
-splat = coa_irep('CP', [insn(0, 'LOADSELF', "R1\t(R1)"), insn(2, 'SSEND', "R1\t:table\tn=*"), insn(6, 'RETURN', 'R1')])
+splat = coa_irep('CP', [insn(0, :LOADSELF, "R1\t(R1)"), insn(2, :SSEND, "R1\t:table\tn=*"), insn(6, :RETURN, 'R1')])
 cg = coa_codegen([coa_table, one, splat], defs + [['Host', 'a', 'C1'], ['Host', 'p', 'CP']], world)
 check.call('a splat call poisons it', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
-kw = coa_irep('CK', [insn(0, 'LOADSELF', "R1\t(R1)"), insn(2, 'SSEND', "R1\t:table\tn=2|nk=1"), insn(6, 'RETURN', 'R1')])
+kw = coa_irep('CK', [insn(0, :LOADSELF, "R1\t(R1)"), insn(2, :SSEND, "R1\t:table\tn=2|nk=1"), insn(6, :RETURN, 'R1')])
 cg = coa_codegen([coa_table, one, kw], defs + [['Host', 'a', 'C1'], ['Host', 'k', 'CK']], world)
 check.call('a keyword call poisons it', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
-aliased = coa_irep('CA', [insn(0, 'ALIAS', "\t:other\ttable"), insn(3, 'RETURN', 'R1')])
+aliased = coa_irep('CA', [insn(0, :ALIAS, "\t:other\ttable"), insn(3, :RETURN, 'R1')])
 cg = coa_codegen([coa_table, one, aliased], defs + [['Host', 'a', 'C1'], ['Host', 'l', 'CA']], world)
 check.call('an alias of the method poisons it', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
@@ -158,65 +158,65 @@ cg = coa_codegen([coa_table, one], defs + [['Host', 'run', 'C1']], world, captur
 cg.instance_variable_get(:@foreign_method_names).add('table')
 check.call('a method a foreign Ruby source also defines is refused', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
-spelled = coa_irep('CC', [insn(0, 'STRING', "R2\tL[0]"), insn(3, 'RETURN', 'R2')])
+spelled = coa_irep('CC', [insn(0, :STRING, "R2\tL[0]"), insn(3, :RETURN, 'R2')])
 spelled.pool = ['table']
 cg = coa_codegen([coa_table, one, spelled], defs + [['Host', 'a', 'C1'], ['Host', 'c', 'CC']], world)
 check.call('a name the program spells as a String (a computed-name send can reach it) is refused',
            coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
-unspelled = coa_irep('CU', [insn(0, 'STRING', "R2\tL[0]"), insn(3, 'RETURN', 'R2')])
+unspelled = coa_irep('CU', [insn(0, :STRING, "R2\tL[0]"), insn(3, :RETURN, 'R2')])
 unspelled.pool = ['elsewhere']
 cg = coa_codegen([coa_table, one, unspelled], defs + [['Host', 'a', 'C1'], ['Host', 'c', 'CU']], world)
 check.call('and an unrelated String does not refuse it', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']) == ['LCF::Title'])
 
 # Two definitions of the name: the zero-argument one cannot take a three-argument call.
-other = coa_irep('O', [insn(0, 'ENTER', "0:0:0:0:0:0:0:0\t(0x0)"), insn(2, 'RETNIL', '')])
-zero_call = coa_irep('CZ', [insn(0, 'LOADSELF', "R1\t(R1)"), insn(2, 'SSEND0', "R1\t:table"), insn(5, 'RETURN', 'R1')])
+other = coa_irep('O', [insn(0, :ENTER, "0:0:0:0:0:0:0:0\t(0x0)"), insn(2, :RETNIL, '')])
+zero_call = coa_irep('CZ', [insn(0, :LOADSELF, "R1\t(R1)"), insn(2, :SSEND0, "R1\t:table"), insn(5, :RETURN, 'R1')])
 cg = coa_codegen([coa_table, one, other, zero_call], defs + [['Other', 'table', 'O'], ['Host', 'a', 'C1'], ['Host', 'z', 'CZ']], world)
 check.call('a name with two definitions is told apart by arity', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']) == ['LCF::Title'])
-supering = coa_irep('OS', [insn(0, 'ENTER', "0:0:0:0:0:0:0:0\t(0x0)"), insn(2, 'SUPER', "R1\tn=*"), insn(5, 'RETNIL', '')])
+supering = coa_irep('OS', [insn(0, :ENTER, "0:0:0:0:0:0:0:0\t(0x0)"), insn(2, :SUPER, "R1\tn=*"), insn(5, :RETNIL, '')])
 cg = coa_codegen([coa_table, one, supering], defs + [['Other', 'table', 'OS'], ['Host', 'a', 'C1']], world)
 check.call('another definition of the name that calls super withdraws it', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 
 # A parameter forwarded through a second method.
-forward = coa_irep('F', [insn(0, 'ENTER', "1:0:0:0:0:0:0:0\t(0x0)"), insn(2, 'LOADSELF', "R2\t(R2)"), insn(4, 'LOADI_1', 'R3 (1)'),
-                         insn(6, 'MOVE', 'R4 R1'), insn(8, 'SSEND', "R2\t:table\tn=3"), insn(12, 'RETURN', 'R2')])
+forward = coa_irep('F', [insn(0, :ENTER, "1:0:0:0:0:0:0:0\t(0x0)"), insn(2, :LOADSELF, "R2\t(R2)"), insn(4, :LOADI_1, 'R3 (1)'),
+                         insn(6, :MOVE, 'R4 R1'), insn(8, :SSEND, "R2\t:table\tn=3"), insn(12, :RETURN, 'R2')])
 fwd_call = coa_caller('FC', coa_const('Title'), name: 'wrap', argc: 1)
-fwd_call.instructions[1] = insn(2, 'LOADI_1', 'R2 (1)')
+fwd_call.instructions[1] = insn(2, :LOADI_1, 'R2 (1)')
 cg = coa_codegen([coa_table, forward, fwd_call], defs + [['Rec', 'wrap', 'F'], ['Host', 'a', 'FC']], world)
 check.call('a forwarding method with no resolvable caller stays unresolved', coa_resolve(cg, cg.instance_variable_get(:@ireps)['T']).nil?)
 # A method with a rest parameter is not the plain-arity case this pass understands.
-optional = coa_table('T', body: [insn(0, 'ENTER', "2:0:1:0:0:0:0:0\t(0x0)"), insn(2, 'MOVE', "R4\tR2"), insn(4, 'SEND', "R4\t:new\tn=2"), insn(7, 'RETURN', 'R4')])
+optional = coa_table('T', body: [insn(0, :ENTER, "2:0:1:0:0:0:0:0\t(0x0)"), insn(2, :MOVE, "R4\tR2"), insn(4, :SEND, "R4\t:new\tn=2"), insn(7, :RETURN, 'R4')])
 two_args = coa_caller('C1', coa_const('Title'), argc: 2)
 cg = coa_codegen([optional, two_args], defs + [['Host', 'run', 'C1']], world)
 check.call('a method with a rest parameter is refused', coa_resolve(cg, optional).nil?)
 
 # A block reading the parameter through GETUPVAR.
-block = coa_irep('B', [insn(0, 'GETUPVAR', "R3\t2\t0"), insn(4, 'SEND', "R3\t:new\tn=0"), insn(8, 'RETURN', 'R3')])
+block = coa_irep('B', [insn(0, :GETUPVAR, "R3\t2\t0"), insn(4, :SEND, "R3\t:new\tn=0"), insn(8, :RETURN, 'R3')])
 rows = lambda do |extra|
-  coa_irep('R', [insn(0, 'ENTER', "3:0:0:0:0:0:0:0\t(0x0)")] + extra +
-                [insn(10, 'BLOCK', "R5\tI[0]"), insn(13, 'SENDB', "R4\t:each\tn=0"), insn(17, 'RETURN', 'R4')], reps: ['B'])
+  coa_irep('R', [insn(0, :ENTER, "3:0:0:0:0:0:0:0\t(0x0)")] + extra +
+                [insn(10, :BLOCK, "R5\tI[0]"), insn(13, :SENDB, "R4\t:each\tn=0"), insn(17, :RETURN, 'R4')], reps: ['B'])
 end
 rows_defs = [['Rec', 'table', 'R']]
 stable = rows.call([])
 cg = coa_codegen([stable, block.dup, one], rows_defs + [['Host', 'run', 'C1']], world)
 check.call('a block reading a never-rewritten parameter resolves it', coa_resolve(cg, cg.instance_variable_get(:@ireps)['B']) == ['LCF::Title'])
-rewritten = rows.call([insn(4, 'LOADNIL', 'R2 (nil)')])
+rewritten = rows.call([insn(4, :LOADNIL, 'R2 (nil)')])
 cg = coa_codegen([rewritten, block.dup, one], rows_defs + [['Host', 'run', 'C1']], world)
 check.call('a rewritten parameter is refused', coa_resolve(cg, cg.instance_variable_get(:@ireps)['B']).nil?)
 # `klass = other_param`: the MOVE chain ends at another parameter's entry value, which is not the parameter's own.
-moved = rows.call([insn(4, 'MOVE', "R2\tR1")])
+moved = rows.call([insn(4, :MOVE, "R2\tR1")])
 cg = coa_codegen([moved, block.dup, one], rows_defs + [['Host', 'run', 'C1']], world)
 check.call('a parameter overwritten by a copy of another parameter is refused', coa_resolve(cg, cg.instance_variable_get(:@ireps)['B']).nil?)
 cg = coa_codegen([stable, block.dup, one], rows_defs + [['Host', 'run', 'C1']], world, capture: false)
 check.call('the capture precondition of CAPTURED_LOCAL_CLASS gates the block form', coa_resolve(cg, cg.instance_variable_get(:@ireps)['B']).nil?)
-writer = coa_irep('W', [insn(0, 'LOADNIL', 'R1 (nil)'), insn(2, 'SETUPVAR', "R1\t2\t0"), insn(6, 'RETURN', 'R1')])
+writer = coa_irep('W', [insn(0, :LOADNIL, 'R1 (nil)'), insn(2, :SETUPVAR, "R1\t2\t0"), insn(6, :RETURN, 'R1')])
 cg = coa_codegen([rows.call([]).tap { |r| r.reps = %w[B W] }, block.dup, writer, one], rows_defs + [['Host', 'run', 'C1']], world)
 check.call('a nested block that writes the parameter is refused', coa_resolve(cg, cg.instance_variable_get(:@ireps)['B']).nil?)
 
 # Recursion: the method passes its own parameter to itself (a cycle is not solved).
-self_call = coa_table('T', body: [insn(0, 'ENTER', "3:0:0:0:0:0:0:0\t(0x0)"), insn(2, 'MOVE', "R4\tR2"), insn(4, 'SEND', "R4\t:new\tn=2"),
-                                  insn(7, 'LOADSELF', "R5\t(R5)"), insn(9, 'MOVE', 'R6 R1'), insn(11, 'MOVE', 'R7 R2'), insn(13, 'MOVE', 'R8 R3'),
-                                  insn(15, 'SSEND', "R5\t:table\tn=3"), insn(19, 'RETURN', 'R5')])
+self_call = coa_table('T', body: [insn(0, :ENTER, "3:0:0:0:0:0:0:0\t(0x0)"), insn(2, :MOVE, "R4\tR2"), insn(4, :SEND, "R4\t:new\tn=2"),
+                                  insn(7, :LOADSELF, "R5\t(R5)"), insn(9, :MOVE, 'R6 R1'), insn(11, :MOVE, 'R7 R2'), insn(13, :MOVE, 'R8 R3'),
+                                  insn(15, :SSEND, "R5\t:table\tn=3"), insn(19, :RETURN, 'R5')])
 cg = coa_codegen([self_call, one], defs + [['Host', 'run', 'C1']], world)
 check.call('a pass-through that reaches its own parameter again is refused, not looped on', coa_resolve(cg, self_call).nil?)
 

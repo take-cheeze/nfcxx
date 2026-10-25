@@ -84,8 +84,8 @@ end
 names = ->(mask) { { INT => 'INT', FLT => 'FLT', ARR => 'ARR', NIL_ => 'NIL', OTHER => 'OTHER' }.select { |bit, _| mask.anybits?(bit) }.values.join('|') }
 
 puts '-- NumericFlow (host)'
-straight = [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'LOADI_2', "R3\t(2)"), insn(4, 'ADD', "R2\t(R3)"),
-            insn(6, 'MUL', "R2\t(R3)"), insn(8, 'RETURN', 'R2')]
+straight = [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :LOADI_2, "R3\t(2)"), insn(4, :ADD, "R2\t(R3)"),
+            insn(6, :MUL, "R2\t(R3)"), insn(8, :RETURN, 'R2')]
 states = flow.call(straight)
 check.call('Integer literals stay Integer through ADD and MUL', states[4][2] == INT && states[3][2] == INT)
 check.call('a register never written is unknown, not numeric', states[0][5] == OTHER)
@@ -95,48 +95,48 @@ check.call('a non-native operator gives no fact',
              (flow.call(straight, oracle)[4][2] & OTHER) != 0
            end)
 
-float_mix = [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'LOADL', "R3\tL[0]"), insn(5, 'ADD', "R2\t(R3)"), insn(7, 'RETURN', 'R2')]
+float_mix = [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :LOADL, "R3\tL[0]"), insn(5, :ADD, "R2\t(R3)"), insn(7, :RETURN, 'R2')]
 check.call('Integer + Float is Float', flow.call(float_mix)[3][2] == FLT)
-join = [insn(0, 'JMPNOT', "R1\t9"), insn(4, 'LOADI_1', "R2\t(1)"), insn(6, 'JMP', '12'), insn(9, 'LOADL', "R2\tL[0]"),
-        insn(12, 'RETURN', 'R2')]
+join = [insn(0, :JMPNOT, "R1\t9"), insn(4, :LOADI_1, "R2\t(1)"), insn(6, :JMP, '12'), insn(9, :LOADL, "R2\tL[0]"),
+        insn(12, :RETURN, 'R2')]
 check.call('a join of an Integer arm and a Float arm holds both classes', flow.call(join)[4][2] == (INT | FLT))
-opaque_arm = [insn(0, 'JMPNOT', "R1\t9"), insn(4, 'LOADI_1', "R2\t(1)"), insn(6, 'JMP', '11'), insn(9, 'SEND0', "R2\t:f"),
-              insn(11, 'RETURN', 'R2')]
+opaque_arm = [insn(0, :JMPNOT, "R1\t9"), insn(4, :LOADI_1, "R2\t(1)"), insn(6, :JMP, '11'), insn(9, :SEND0, "R2\t:f"),
+              insn(11, :RETURN, 'R2')]
 check.call('an arm of unknown class makes the join unknown', flow.call(opaque_arm)[4][2].anybits?(OTHER))
 
-counter = [insn(0, 'LOADI_0', "R2\t(0)"), insn(2, 'JMPNOT', "R1\t12"), insn(6, 'ADDI', "R2\t1"), insn(9, 'JMP', '2'),
-           insn(12, 'RETURN', 'R2')]
+counter = [insn(0, :LOADI_0, "R2\t(0)"), insn(2, :JMPNOT, "R1\t12"), insn(6, :ADDI, "R2\t1"), insn(9, :JMP, '2'),
+           insn(12, :RETURN, 'R2')]
 check.call('a loop-carried counter is Integer at the loop head', flow.call(counter)[1][2] == INT)
-float_loop = [insn(0, 'LOADI_0', "R2\t(0)"), insn(2, 'JMPNOT', "R1\t13"), insn(6, 'LOADL', "R3\tL[0]"),
-              insn(9, 'ADD', "R2\t(R3)"), insn(11, 'JMP', '2'), insn(13, 'RETURN', 'R2')]
+float_loop = [insn(0, :LOADI_0, "R2\t(0)"), insn(2, :JMPNOT, "R1\t13"), insn(6, :LOADL, "R3\tL[0]"),
+              insn(9, :ADD, "R2\t(R3)"), insn(11, :JMP, '2'), insn(13, :RETURN, 'R2')]
 check.call('a loop that turns the counter into a Float is Integer-or-Float, never plain Integer',
            flow.call(float_loop)[1][2] == (INT | FLT))
-poisoned_loop = [insn(0, 'LOADI_0', "R2\t(0)"), insn(2, 'JMPNOT', "R1\t11"), insn(6, 'SEND0', "R2\t:next"), insn(9, 'JMP', '2'),
-                 insn(11, 'RETURN', 'R2')]
+poisoned_loop = [insn(0, :LOADI_0, "R2\t(0)"), insn(2, :JMPNOT, "R1\t11"), insn(6, :SEND0, "R2\t:next"), insn(9, :JMP, '2'),
+                 insn(11, :RETURN, 'R2')]
 check.call('a loop that also stores an unknown call result is unknown', flow.call(poisoned_loop)[1][2].anybits?(OTHER))
 
 oracle = StubOracle.new.tap { |o| o.entry = { 2 => INT | NIL_ } }
-nil_then = [insn(0, 'ADDI', "R2\t1"), insn(3, 'RETURN', 'R2')]
+nil_then = [insn(0, :ADDI, "R2\t1"), insn(3, :RETURN, 'R2')]
 check.call('nil in a receiver only raises when nil has no such operator: the result is Integer',
            flow.call(nil_then, oracle)[1][2] == INT)
 oracle.nil_raises = false
 check.call('a nil receiver that could answer `+` makes the result unknown', flow.call(nil_then, oracle)[1][2].anybits?(OTHER))
 oracle.nil_raises = true
-refine = [insn(0, 'JMPNOT', "R2\t8"), insn(4, 'ADDI', "R2\t1"), insn(7, 'RETURN', 'R2'), insn(8, 'RETURN', 'R2')]
+refine = [insn(0, :JMPNOT, "R2\t8"), insn(4, :ADDI, "R2\t1"), insn(7, :RETURN, 'R2'), insn(8, :RETURN, 'R2')]
 states = flow.call(refine, oracle)
 check.call('a truthiness test removes nil from the register on the truthy edge', states[1][2] == INT)
 check.call('and leaves only nil on the falsy edge', states[3][2] == NIL_)
-jmpnil = [insn(0, 'JMPNIL', "R2\t8"), insn(4, 'RETURN', 'R2'), insn(8, 'RETURN', 'R2')]
+jmpnil = [insn(0, :JMPNIL, "R2\t8"), insn(4, :RETURN, 'R2'), insn(8, :RETURN, 'R2')]
 states = flow.call(jmpnil, oracle)
 check.call('JMPNIL: not nil on the fall-through edge, nil on the taken edge', states[1][2] == INT && states[2][2] == NIL_)
-alias_test = [insn(0, 'MOVE', "R3\tR2"), insn(3, 'JMPNOT', "R3\t9"), insn(7, 'RETURN', 'R2'), insn(9, 'RETURN', 'R2')]
+alias_test = [insn(0, :MOVE, "R3\tR2"), insn(3, :JMPNOT, "R3\t9"), insn(7, :RETURN, 'R2'), insn(9, :RETURN, 'R2')]
 states = flow.call(alias_test, oracle)
 check.call('testing a copy narrows the variable it was copied from', states[2][2] == INT && states[3][2] == NIL_)
-stale_alias = [insn(0, 'MOVE', "R3\tR2"), insn(3, 'LOADNIL', "R2\t(nil)"), insn(5, 'JMPNOT', "R3\t11"),
-               insn(9, 'RETURN', 'R2'), insn(11, 'RETURN', 'R2')]
+stale_alias = [insn(0, :MOVE, "R3\tR2"), insn(3, :LOADNIL, "R2\t(nil)"), insn(5, :JMPNOT, "R3\t11"),
+               insn(9, :RETURN, 'R2'), insn(11, :RETURN, 'R2')]
 states = flow.call(stale_alias, oracle)
 check.call('a copy no longer mirrors a variable written after the copy', states[3][2] == NIL_ && states[3][3] == INT)
-dead_edge = [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'JMPNIL', "R2\t9"), insn(6, 'RETURN', 'R2'), insn(9, 'RETURN', 'R2')]
+dead_edge = [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :JMPNIL, "R2\t9"), insn(6, :RETURN, 'R2'), insn(9, :RETURN, 'R2')]
 check.call('an edge the tested register can never take is infeasible (nil state)', flow.call(dead_edge)[3].nil?)
 
 # Boolean and Symbol literals carry their class bits (ExactOracle#literal_class_mask); FalseClass is falsy like nil.
@@ -145,29 +145,29 @@ class LiteralBitOracle < StubOracle
   FALSE_BIT = 1 << 10
   SYM_BIT = 1 << 11
 
-  def literal_class_mask(insn) = { 'LOADTRUE' => TRUE_BIT, 'LOADFALSE' => FALSE_BIT, 'LOADSYM' => SYM_BIT }[insn.op]
+  def literal_class_mask(insn) = { :LOADTRUE => TRUE_BIT, :LOADFALSE => FALSE_BIT, :LOADSYM => SYM_BIT }[insn.op]
   def false_class_bit = FALSE_BIT
 end
 bits = LiteralBitOracle.new
 check.call('a true literal is its own class bit',
-           flow.call([insn(0, 'LOADTRUE', "R2\t(true)"), insn(2, 'RETURN', 'R2')], bits)[1][2] == LiteralBitOracle::TRUE_BIT)
+           flow.call([insn(0, :LOADTRUE, "R2\t(true)"), insn(2, :RETURN, 'R2')], bits)[1][2] == LiteralBitOracle::TRUE_BIT)
 check.call('a Symbol literal is its own class bit',
-           flow.call([insn(0, 'LOADSYM', "R2\t:a"), insn(2, 'RETURN', 'R2')], bits)[1][2] == LiteralBitOracle::SYM_BIT)
-check.call('without the oracle a true literal stays unknown', flow.call([insn(0, 'LOADTRUE', "R2\t(true)"), insn(2, 'RETURN', 'R2')])[1][2] == OTHER)
-false_jmpif = [insn(0, 'LOADFALSE', "R2\t(false)"), insn(2, 'JMPIF', "R2\t8"), insn(6, 'RETURN', 'R2'), insn(8, 'RETURN', 'R2')]
+           flow.call([insn(0, :LOADSYM, "R2\t:a"), insn(2, :RETURN, 'R2')], bits)[1][2] == LiteralBitOracle::SYM_BIT)
+check.call('without the oracle a true literal stays unknown', flow.call([insn(0, :LOADTRUE, "R2\t(true)"), insn(2, :RETURN, 'R2')])[1][2] == OTHER)
+false_jmpif = [insn(0, :LOADFALSE, "R2\t(false)"), insn(2, :JMPIF, "R2\t8"), insn(6, :RETURN, 'R2'), insn(8, :RETURN, 'R2')]
 states = flow.call(false_jmpif, bits)
 check.call('a false literal reaches the falsy edge of a truthiness test', states[2][2] == LiteralBitOracle::FALSE_BIT)
 check.call('and makes the truthy edge infeasible (false is not truthy)', states[3].nil?)
-true_jmpnot = [insn(0, 'LOADTRUE', "R2\t(true)"), insn(2, 'JMPNOT', "R2\t8"), insn(6, 'RETURN', 'R2'), insn(8, 'RETURN', 'R2')]
+true_jmpnot = [insn(0, :LOADTRUE, "R2\t(true)"), insn(2, :JMPNOT, "R2\t8"), insn(6, :RETURN, 'R2'), insn(8, :RETURN, 'R2')]
 states = flow.call(true_jmpnot, bits)
 check.call('a true literal reaches the truthy edge of a negated test', states[2][2] == LiteralBitOracle::TRUE_BIT)
 check.call('and makes the falsy edge infeasible (true is not falsy)', states[3].nil?)
-false_jmpnil = [insn(0, 'LOADFALSE', "R2\t(false)"), insn(2, 'JMPNIL', "R2\t8"), insn(6, 'RETURN', 'R2'), insn(8, 'RETURN', 'R2')]
+false_jmpnil = [insn(0, :LOADFALSE, "R2\t(false)"), insn(2, :JMPNIL, "R2\t8"), insn(6, :RETURN, 'R2'), insn(8, :RETURN, 'R2')]
 states = flow.call(false_jmpnil, bits)
 check.call('JMPNIL on a false literal: the taken edge is infeasible (false is not nil)', states[3].nil?)
 # A class bit that arrives from outside the method (a call result, a pool) is narrowed by the FalseClass bit the oracle
 # names; an oracle that names none must keep it on both edges, since it may be false.
-entered = [insn(0, 'JMPIF', "R2\t4"), insn(2, 'RETURN', 'R2'), insn(4, 'RETURN', 'R2')]
+entered = [insn(0, :JMPIF, "R2\t4"), insn(2, :RETURN, 'R2'), insn(4, :RETURN, 'R2')]
 named = LiteralBitOracle.new.tap { |o| o.entry = { 2 => LiteralBitOracle::FALSE_BIT } }
 states = flow.call(entered, named)
 check.call('a FalseClass value from outside reaches the falsy edge of a truthiness test', states[1][2] == LiteralBitOracle::FALSE_BIT)
@@ -177,7 +177,7 @@ states = flow.call(entered, unnamed)
 check.call('an oracle that names no FalseClass bit keeps a class bit on the falsy edge', states[1][2] == LiteralBitOracle::FALSE_BIT)
 check.call('and on the truthy edge (it may be truthy too)', states[2][2] == LiteralBitOracle::FALSE_BIT)
 
-called = [insn(0, 'LOADI_1', "R3\t(1)"), insn(2, 'LOADI_2', "R1\t(2)"), insn(4, 'SEND0', "R2\t:f"), insn(6, 'RETURN', 'R2')]
+called = [insn(0, :LOADI_1, "R3\t(1)"), insn(2, :LOADI_2, "R1\t(2)"), insn(4, :SEND0, "R2\t:f"), insn(6, :RETURN, 'R2')]
 states = flow.call(called)
 check.call('a call clobbers every register above its receiver', states[3][3] == OTHER)
 check.call('and leaves the ones below untouched', states[3][1] == INT)
@@ -191,8 +191,8 @@ check.call('a register a nested block writes is never numeric',
 check.call('an irep whose handler target is not an instruction has no facts',
            flow.call(straight, StubOracle.new, Set.new, handlers: [CatchHandler.new(type: :rescue, begin_addr: 0,
                                                                                     end_addr: 4, target: 99)]).nil?)
-rescued = [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'LOADI_2', "R4\t(2)"), insn(4, 'SEND0', "R3\t:f"),
-           insn(6, 'LOADNIL', "R2\t(nil)"), insn(8, 'JMP', '14'), insn(10, 'RETURN', 'R2'), insn(14, 'RETURN', 'R2')]
+rescued = [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :LOADI_2, "R4\t(2)"), insn(4, :SEND0, "R3\t:f"),
+           insn(6, :LOADNIL, "R2\t(nil)"), insn(8, :JMP, '14'), insn(10, :RETURN, 'R2'), insn(14, :RETURN, 'R2')]
 rescue_states = flow.call(rescued, StubOracle.new, Set.new,
                           handlers: [CatchHandler.new(type: :rescue, begin_addr: 4, end_addr: 8, target: 10)])
 check.call('a handler starts from the state at any raise in its range: the value before or after the write',
@@ -204,15 +204,15 @@ check.call('a handler target nothing can raise into stays unreached',
            flow.call(rescued, StubOracle.new, Set.new,
                      handlers: [CatchHandler.new(type: :rescue, begin_addr: 100, end_addr: 104, target: 10)])[5].nil?)
 check.call('EXCEPT and RESCUE are modelled: the match flag is unknown, the exception register too',
-           flow.call([insn(0, 'EXCEPT', 'R2'), insn(2, 'RESCUE', "R2\tR3"), insn(5, 'RETURN', 'R3')])[2][3] == OTHER)
-check.call('a Range literal is exactly a Range', flow.call([insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'LOADI_2', "R3\t(2)"),
-                                                            insn(4, 'RANGE_INC', 'R2'), insn(6, 'RETURN', 'R2')])[3][2] == NF::RNG)
+           flow.call([insn(0, :EXCEPT, 'R2'), insn(2, :RESCUE, "R2\tR3"), insn(5, :RETURN, 'R3')])[2][3] == OTHER)
+check.call('a Range literal is exactly a Range', flow.call([insn(0, :LOADI_1, "R2\t(1)"), insn(2, :LOADI_2, "R3\t(2)"),
+                                                            insn(4, :RANGE_INC, 'R2'), insn(6, :RETURN, 'R2')])[3][2] == NF::RNG)
 check.call('an opcode outside the audited write list has no facts',
-           flow.call([insn(0, 'APOST', "R2\t1\t0"), insn(4, 'RETURN', 'R2')]).nil?)
+           flow.call([insn(0, :APOST, "R2\t1\t0"), insn(4, :RETURN, 'R2')]).nil?)
 
-optional = [insn(0, 'ENTER', '0:1:0:0:0:0:0:0 (0x1000)'), insn(4, 'JMP', '14'), insn(7, 'JMP', '16'),
-            insn(10, 'NOP', ''), insn(11, 'NOP', ''), insn(14, 'LOADI_5', "R1\t(5)"), insn(16, 'ADDI', "R1\t1"),
-            insn(19, 'RETURN', 'R1')]
+optional = [insn(0, :ENTER, '0:1:0:0:0:0:0:0 (0x1000)'), insn(4, :JMP, '14'), insn(7, :JMP, '16'),
+            insn(10, :NOP, ''), insn(11, :NOP, ''), insn(14, :LOADI_5, "R1\t(5)"), insn(16, :ADDI, "R1\t1"),
+            insn(19, :RETURN, 'R1')]
 states = flow.call(optional)
 check.call('the jump table after an OP_ENTER with optional arguments is reachable through every slot',
            !states[2].nil? && !states[5].nil?)
@@ -223,17 +223,17 @@ slot_oracle = StubOracle.new.tap do |o|
   o.entry_slot = { 'a' => INT | NIL_ }
   o.fact = { 'a' => INT }
 end
-slots = [insn(0, 'GETIV', "R2\t@a"), insn(3, 'LOADI_1', "R3\t(1)"), insn(5, 'SETIV', "@a\tR3"), insn(8, 'GETIV', "R4\t@a"),
-         insn(11, 'RETURN', 'R4')]
+slots = [insn(0, :GETIV, "R2\t@a"), insn(3, :LOADI_1, "R3\t(1)"), insn(5, :SETIV, "@a\tR3"), insn(8, :GETIV, "R4\t@a"),
+         insn(11, :RETURN, 'R4')]
 states = flow.call(slots, slot_oracle)
 check.call('an ivar not yet assigned reads its entry class or nil', states[1][2] == (INT | NIL_))
 check.call('after SETIV the slot is the assigned value', states[4][4] == INT)
-slot_test = [insn(0, 'GETIV', "R2\t@a"), insn(3, 'JMPNOT', "R2\t12"), insn(7, 'GETIV', "R3\t@a"), insn(10, 'RETURN', 'R3'),
-             insn(12, 'RETURN', 'R2')]
+slot_test = [insn(0, :GETIV, "R2\t@a"), insn(3, :JMPNOT, "R2\t12"), insn(7, :GETIV, "R3\t@a"), insn(10, :RETURN, 'R3'),
+             insn(12, :RETURN, 'R2')]
 states = flow.call(slot_test, slot_oracle)
 check.call('testing a register loaded from a slot narrows the slot itself', states[3][3] == INT && states[3][2] == INT)
-called_slot = [insn(0, 'LOADNIL', "R3\t(nil)"), insn(2, 'SETIV', "@a\tR3"), insn(5, 'SEND0', "R2\t:f"), insn(7, 'GETIV', "R4\t@a"),
-               insn(10, 'RETURN', 'R4')]
+called_slot = [insn(0, :LOADNIL, "R3\t(nil)"), insn(2, :SETIV, "@a\tR3"), insn(5, :SEND0, "R2\t:f"), insn(7, :GETIV, "R4\t@a"),
+               insn(10, :RETURN, 'R4')]
 states = flow.call(called_slot, slot_oracle)
 check.call('a call may store anything the ivar\'s whole-program fact allows', states[4][4] == (NIL_ | INT))
 idx_oracle = StubOracle.new.tap do |o|
@@ -242,14 +242,14 @@ idx_oracle = StubOracle.new.tap do |o|
   o.fact = { 'a' => NIL_ }
 end
 idx_slot = lambda do |op, operand|
-  [insn(0, 'LOADI_1', "R3\t(1)"), insn(2, 'SETIV', "@a\tR3"), insn(5, 'LOADNIL', "R2\t(nil)"),
-   insn(7, operand ? 'ARRAY' : 'LOADNIL', operand ? "R4\t0" : "R4\t(nil)"), insn(10, 'LOADI_1', "R5\t(1)"),
-   insn(12, op, "R4\t(R5)\t(R5)"), insn(14, 'GETIV', "R6\t@a"), insn(17, 'RETURN', 'R6')]
+  [insn(0, :LOADI_1, "R3\t(1)"), insn(2, :SETIV, "@a\tR3"), insn(5, :LOADNIL, "R2\t(nil)"),
+   insn(7, operand ? :ARRAY : :LOADNIL, operand ? "R4\t0" : "R4\t(nil)"), insn(10, :LOADI_1, "R5\t(1)"),
+   insn(12, op, "R4\t(R5)\t(R5)"), insn(14, :GETIV, "R6\t@a"), insn(17, :RETURN, 'R6')]
 end
-states = flow.call(idx_slot.call('SETIDX', false), idx_oracle)
+states = flow.call(idx_slot.call(:SETIDX, false), idx_oracle)
 check.call('SETIDX on a receiver that is not an exact Array may run a user #[]=: the slot is reset to its fact',
            states[7][6] == (INT | NIL_))
-states = flow.call(idx_slot.call('SETIDX', true), idx_oracle)
+states = flow.call(idx_slot.call(:SETIDX, true), idx_oracle)
 check.call('SETIDX on an exact Array with an Integer index runs no Ruby: the slot keeps its class', states[7][6] == INT)
 
 if ENV['MRBC']

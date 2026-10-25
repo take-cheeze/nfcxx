@@ -42,14 +42,14 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       end
       seen_pos = Set.new
 
-      irep.each_with_op('SETIV') do |insn, idx|
+      irep.each_with_op(:SETIV) do |insn, idx|
         src_reg = insn.regs.first
         pos = opaque_argument_position(irep, idx, src_reg, mand)
         next unless pos
         next if already_at.call(pos)
 
         ivar = insn.ivar
-        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand, via: 'SETIV' }
+        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand, via: :SETIV }
         seen_pos << pos
       end
 
@@ -93,11 +93,11 @@ end
 # ---------------------------------------------------------------------------
 
 IMPLICIT_DISPATCH_NAMES = {
-  'ADD' => '+', 'ADDI' => '+', 'ADDILV' => '+',
-  'SUB' => '-', 'SUBI' => '-', 'SUBILV' => '-',
-  'MUL' => '*', 'DIV' => '/',
-  'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=',
-  'GETIDX' => '[]', 'GETIDX0' => '[]', 'SETIDX' => '[]=',
+  :ADD => '+', :ADDI => '+', :ADDILV => '+',
+  :SUB => '-', :SUBI => '-', :SUBILV => '-',
+  :MUL => '*', :DIV => '/',
+  :EQ => '==', :LT => '<', :LE => '<=', :GT => '>', :GE => '>=',
+  :GETIDX => '[]', :GETIDX0 => '[]', :SETIDX => '[]=',
 }.freeze
 
 def collect_static_call_target_names(ireps)

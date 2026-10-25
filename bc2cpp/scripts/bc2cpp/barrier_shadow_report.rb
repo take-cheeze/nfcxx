@@ -31,8 +31,8 @@ def insn(addr, op, args)
   Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
 end
 
-INSNS = [insn(0, 'LOADI', "R1\t1"), insn(4, 'SEND', "R2\t:f\t0"), insn(8, 'MOVE', "R3\tR1"),
-         insn(12, 'RETURN', 'R3')].freeze
+INSNS = [insn(0, :LOADI, "R1\t1"), insn(4, :SEND, "R2\t:f\t0"), insn(8, :MOVE, "R3\tR1"),
+         insn(12, :RETURN, 'R3')].freeze
 
 def synthetic(name, handler)
   program = BytecodeIR::Program.new(Irep.new(label: name, instructions: INSNS, catch_handlers: [handler]))

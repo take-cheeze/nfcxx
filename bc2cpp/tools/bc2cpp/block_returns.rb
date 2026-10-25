@@ -163,11 +163,11 @@ module BlockReturns
       next unless seen.add?(label)
 
       child = ireps[label] or return 'has a nested block with no body'
-      exit = BytecodeIR.for(child).instructions_with_op('RETURN_BLK', 'BREAK').first
+      exit = BytecodeIR.for(child).instructions_with_op(:RETURN_BLK, :BREAK).first
       return "a nested block leaves with #{exit.op} at line #{exit.lineno}" if exit
 
       # A `yield` in a nested block runs the method's block too (OP_BLKPUSH reads the method frame's block).
-      BytecodeIR.for(child).instructions_with_op('BLKCALL').each do |insn|
+      BytecodeIR.for(child).instructions_with_op(:BLKCALL).each do |insn|
         n = insn.typed.find { |operand| operand.kind == :int }&.value
         return "yields #{n} argument(s) at line #{insn.lineno}, the block declares #{arity}" unless n == arity
       end

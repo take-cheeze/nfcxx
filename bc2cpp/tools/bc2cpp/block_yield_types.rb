@@ -22,7 +22,7 @@ require_relative 'block_self'
 #     between sites is the union of them, and a position with an unknown class is untyped.
 # The result is nil when the method yields nothing (there is no block to type).
 module BlockYieldTypes
-  CALL_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
+  CALL_OPS = %i[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
 
   module_function
 
@@ -90,7 +90,7 @@ module BlockYieldTypes
       if df.entry?
         df.reg.to_s == blk
       else
-        %w[BLKPUSH GETUPVAR].include?(program.source_at(df.index).op)
+        %i[BLKPUSH GETUPVAR].include?(program.source_at(df.index).op)
       end
     end
   end
@@ -101,7 +101,7 @@ module BlockYieldTypes
       next unless seen.add?(label)
 
       child = ireps[label] or return 'has a nested block with no body'
-      return 'yields from a nested block' if BytecodeIR.for(child).instructions_with_op('BLKCALL').any?
+      return 'yields from a nested block' if BytecodeIR.for(child).instructions_with_op(:BLKCALL).any?
 
       why = nested_yield_why(child, ireps, seen)
       return why if why

@@ -485,7 +485,7 @@ module CallFacts
 
     def transfer(insn, state, n, opaque)
       op = insn.op
-      return state if NO_WRITE.include?(op) || op == 'SETIV'
+      return state if NO_WRITE.include?(op) || op == :SETIV
 
       a = insn.reg&.to_i
       return state if a.nil? || a >= n

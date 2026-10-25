@@ -1507,7 +1507,7 @@ class CodeGen
       end
 
       # A literal-block send (compile_direct_block_send) is a SENDB at the site.
-      constant_ops = @call_block_expr ? %w[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %w[SEND0 SEND SSEND0 SSEND]
+      constant_ops = @call_block_expr ? %i[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %i[SEND0 SEND SSEND0 SSEND]
       if !self_implicit && irep && constant_site_idx && @closed_world &&
          constant_ops.include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         # A send inside a rescue or ensure range reads its receiver through the handler edges.
@@ -1527,14 +1527,14 @@ class CodeGen
       # NATIVE_SINGLETON_CALL: `File.exist?` and the other native singleton functions of a stable
       # constant, called through a per-site method cache instead of a by-name send.
       if !self_implicit && irep && constant_site_idx && @closed_world &&
-         %w[SEND0 SEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
+         %i[SEND0 SEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         singleton_code = native_singleton_call_code(name, n, d, recv, argv, irep, constant_site_idx,
                                                     unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                     owner_def&.owner, constant_owner)
         return singleton_code if singleton_code
       end
 
-      if %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+      if %i[SEND0 SEND SSEND0 SSEND].include?(insn.op)
         class_arg_proven = call_arguments.nil? &&
                            kernel_class_argument_proven?(name, argv, irep, constant_site_idx, trace_reg_offset, owner_def)
         kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit, class_arg_proven: class_arg_proven)
@@ -2171,12 +2171,12 @@ class CodeGen
 
     original = BytecodeIR.for(irep).source_at(trace_idx)
     unless original && original.addr == trace_insn.addr && original.op == trace_insn.op &&
-           original.sym == trace_insn.sym && %w[SEND SEND0].include?(original.op) &&
+           original.sym == trace_insn.sym && %i[SEND SEND0].include?(original.op) &&
            original.reg && trace_insn.reg && original.reg.to_i + reg_offset.to_i == trace_insn.reg.to_i
       # A synthetic send (addr 0: a typed index or splat helper) has no position of its own; an SSEND is a
       # self call, whose receiver is self and needs no set.
       reason = if trace_insn.addr.zero? then :synthetic_send
-               elsif trace_insn.op.start_with?('SSEND') then :self_send
+               elsif trace_insn.op.to_s.start_with?('SSEND') then :self_send
                else :position_mismatch
                end
       return loop_flow_refuse(irep, trace_idx, reason)

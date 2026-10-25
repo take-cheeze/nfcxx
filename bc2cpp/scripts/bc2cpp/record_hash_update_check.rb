@@ -54,7 +54,7 @@ RUBY
 suite.compile(source) do |ireps, _root, _directory|
   sites = Hash.new { |h, k| h[k] = { sets: [], gets: [], calls: [] } }
   ireps.each_value do |irep|
-    irep.each_with_op('SETIV', 'GETIV') do |insn, i|
+    irep.each_with_op(:SETIV, :GETIV) do |insn, i|
       sites[insn.ivar][insn.op == :SETIV ? :sets : :gets] << [irep, i] if insn.ivar
     end
   end

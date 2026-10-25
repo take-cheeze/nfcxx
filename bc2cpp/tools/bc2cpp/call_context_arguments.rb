@@ -26,7 +26,7 @@ module CallContextArguments
     masks.concat(arguments.last(post)) if post.positive?
     # Irep#enter is the first ENTER, so its index is the position of the first ENTER.
     index = nil
-    BytecodeIR.for(body).each_with_op('ENTER') { |_insn, i| index ||= i }
+    BytecodeIR.for(body).each_with_op(:ENTER) { |_insn, i| index ||= i }
     return nil unless index
 
     edges = {}

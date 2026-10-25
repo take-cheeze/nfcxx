@@ -7,10 +7,10 @@ module BytecodeIR
   # Value classes, not representation/width proofs.
   class Types
     LITERAL_TYPES = {
-      'LOADNIL' => :NilClass, 'LOADTRUE' => :TrueClass, 'LOADFALSE' => :FalseClass,
-      'LOADSYM' => :Symbol, 'SYMBOL' => :Symbol, 'INTERN' => :Symbol, 'STRING' => :String,
-      'ARRAY' => :Array, 'ARRAY2' => :Array, 'HASH' => :Hash,
-      'RANGE_INC' => :Range, 'RANGE_EXC' => :Range, 'LAMBDA' => :Proc, 'BLOCK' => :Proc
+      :LOADNIL => :NilClass, :LOADTRUE => :TrueClass, :LOADFALSE => :FalseClass,
+      :LOADSYM => :Symbol, :SYMBOL => :Symbol, :INTERN => :Symbol, :STRING => :String,
+      :ARRAY => :Array, :ARRAY2 => :Array, :HASH => :Hash,
+      :RANGE_INC => :Range, :RANGE_EXC => :Range, :LAMBDA => :Proc, :BLOCK => :Proc
     }.freeze
     POOL_TYPES = { int32: :Integer, int64: :Integer, bigint: :Integer, float: :Float }.freeze
     ENTER_TYPES = { rest: [:Array], hash: [:Hash], block: [:Proc, :NilClass], local: [:NilClass] }.transform_values(&:freeze).freeze
@@ -112,11 +112,11 @@ module BytecodeIR
     # literal, its +value+.
     Exact = Struct.new(:klass, :value)
 
-    EXACT_LITERAL_CLASSES = LITERAL_TYPES.except('LAMBDA', 'BLOCK').freeze
+    EXACT_LITERAL_CLASSES = LITERAL_TYPES.except(:LAMBDA, :BLOCK).freeze
     # Ops that add to the container R(a) already holds, so its class stays (vm.c OP_ARYPUSH and the rest).
     # OP_ARYCAT stores a fresh Array over a nil R(a): requiring the result class rules that out.
-    EXACT_EXTEND_OPS = { 'ARYPUSH' => :Array, 'ARYCAT' => :Array, 'HASHADD' => :Hash, 'HASHCAT' => :Hash,
-                         'STRCAT' => :String }.freeze
+    EXACT_EXTEND_OPS = { :ARYPUSH => :Array, :ARYCAT => :Array, :HASHADD => :Hash, :HASHCAT => :Hash,
+                         :STRCAT => :String }.freeze
 
     # EXACT_LITERAL: the Exact class every definition reaching the read of +reg+ at +index+ agrees on,
     # from literal writers only, or nil. No argument, signature, inferred or resolver fact enters: those bound a
@@ -210,8 +210,8 @@ module BytecodeIR
     def integer_literal(insn)
       case insn.op
       when :LOADI__1 then -1
-      when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
-      when 'LOADI', :LOADI8, :LOADI16, :LOADI32, :LOADINEG
+      when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+      when :LOADI, :LOADI8, :LOADI16, :LOADI32, :LOADINEG
         value = insn.imm_operand&.to_i
         value && insn.op == :LOADINEG ? -value.abs : value
       end
@@ -249,8 +249,8 @@ module BytecodeIR
 
       source = definitions.any? do |definition|
         definition.entry? || definition.built == :arg ||
-          (%w[GETIV GETCONST GETMCNST KARG GETUPVAR].include?(ir_program.source_at(definition.index).op) ||
-           ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %w[GETIDX GETIDX0 AREF].include?(ir_program.source_at(definition.index).op))
+          (%i[GETIV GETCONST GETMCNST KARG GETUPVAR].include?(ir_program.source_at(definition.index).op) ||
+           ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %i[GETIDX GETIDX0 AREF].include?(ir_program.source_at(definition.index).op))
       end
       if source && @source_resolver && (resolved = @source_resolver.call(index, reg))
         if resolved.is_a?(Fact)
@@ -279,7 +279,7 @@ module BytecodeIR
           end
           if !values && @call_resolver && !definition.entry?
             insn = ir_program.source_at(definition.index)
-            if %w[SEND SEND0].include?(insn.op) && insn.reg == definition.reg
+            if %i[SEND SEND0].include?(insn.op) && insn.reg == definition.reg
               receiver = query(definition.index, insn.reg, use_declarations: true, max_states: max_states, refusal: refusal)
               result = receiver && @call_resolver.call(insn, receiver, refusal)
               values = result&.classes
@@ -342,7 +342,7 @@ module BytecodeIR
       return nil if ENV['BC2CPP_IR_ELEMENT_TYPES'] == '0'
 
       insn = ir_program.source_at(definition.index)
-      return nil unless %w[GETIDX GETIDX0].include?(insn.op) && insn.reg == definition.reg
+      return nil unless %i[GETIDX GETIDX0].include?(insn.op) && insn.reg == definition.reg
 
       register = insn.op == :GETIDX0 ? insn.regs[1] : insn.reg
       receiver = query(definition.index, register, use_declarations: true, max_states: max_states, refusal: refusal)
@@ -405,7 +405,7 @@ module BytecodeIR
 
     # Ops that observe the frame's locals without naming the register: a closure captures them, ARGARY packs the
     # rest array for a zero-argument super, and binding/eval reach any local by name.
-    REST_ARRAY_OBSERVERS = %w[LAMBDA BLOCK ARGARY].freeze
+    REST_ARRAY_OBSERVERS = %i[LAMBDA BLOCK ARGARY].freeze
 
     # Every register holding the rest array (MOVE copies, flow-insensitive) may be read only as the receiver of an
     # element read (GETIDX, GETIDX0). Any other read can store a non-join element, so the join is withheld.
@@ -462,7 +462,7 @@ module BytecodeIR
       op = insn.op
       return :Integer if BytecodeIR::Ops::LOADI_OPS.include?(op)
       return LITERAL_TYPES[op] if LITERAL_TYPES.key?(op)
-      return nil unless op == 'LOADL'
+      return nil unless op == :LOADL
 
       pool_index = insn.pool_index
       entry = pool_index && pool && pool[pool_index]

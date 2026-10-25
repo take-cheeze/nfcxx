@@ -39,9 +39,9 @@ class ClosedWorld
   CLASS_FACTORIES = SendNames::CLASS_FACTORIES
   SEND_OPS = BytecodeIR::Ops::SEND
   # Ops whose operand names a method (ALIAS, UNDEF) or a symbol that may be one (LOADSYM).
-  NAME_BINDING_OPS = Set['ALIAS', 'UNDEF', 'LOADSYM'].freeze
+  NAME_BINDING_OPS = Set[:ALIAS, :UNDEF, :LOADSYM].freeze
   # Writers of a class body's lexical scope: nil at top level (LOADNIL) or Object (OCLASS).
-  CLASS_SCOPE_WRITERS = Set['LOADNIL', 'OCLASS'].freeze
+  CLASS_SCOPE_WRITERS = Set[:LOADNIL, :OCLASS].freeze
   C_STRING = /"((?:[^"\\\n]|\\.)*)"/
   # Native code that asks Ruby to define, alias or eval by name.
   NATIVE_DYNAMIC = /"(?:define_method|define_singleton_method|attr_reader|attr_writer|attr_accessor|attr|
@@ -66,7 +66,7 @@ class ClosedWorld
                    \bmrb_(?:funcall|check_funcall)\w*\s*\([^;]*(?:"freeze"|MRB_SYM\(freeze\))/x
   # What `x.freeze` leaves of a receiver that is one of these: a builtin value, never an instance of
   # a user class.
-  FREEZE_LITERAL_WRITERS = %w[ARRAY ARRAY2 HASH STRING STRCAT RANGE_INC RANGE_EXC].freeze
+  FREEZE_LITERAL_WRITERS = %i[ARRAY ARRAY2 HASH STRING STRCAT RANGE_INC RANGE_EXC].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
   # refusal already, see scan_send).
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
@@ -345,7 +345,7 @@ class ClosedWorld
     @class_object_bodies ||= @singleton_opens.each_with_object(Set.new) do |(irep, idx, insn), out|
       next unless insn.op == :SCLASS && class_constant_target?(irep, idx, insn.reg.to_s)
 
-      body = BytecodeIR.class_bodies(irep, 'SCLASS')[idx]
+      body = BytecodeIR.class_bodies(irep, :SCLASS)[idx]
       out << body if body
     end
     @class_object_bodies.include?(label)
@@ -1740,7 +1740,7 @@ class ClosedWorld
           next unless strings && definition.index == idx - n + position - 1
           next unless program.linear_corridor?(definition.index, idx, include_handlers: true)
           gap = (definition.index + 1...idx)
-          next unless gap.all? { |k| %w[LOADSYM STRING MOVE].include?(program.source_at(k).op) }
+          next unless gap.all? { |k| %i[LOADSYM STRING MOVE].include?(program.source_at(k).op) }
 
           irep.pool[writer.pool_index.to_i]
         end
@@ -1857,7 +1857,7 @@ class ClosedWorld
         return global!(:class_factory_escape) unless argc
 
         argc.times do |argument|
-          names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %w[LOADSYM])
+          names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %i[LOADSYM])
           return global!(:class_factory_escape) unless names
 
           names.each do |name|
@@ -1869,7 +1869,7 @@ class ClosedWorld
         return global!(:class_factory_escape) unless argc && argc <= 1
 
         bases = argc.zero? ? Set['Object'] :
-                factory_argument_names(irep, use, call.reg.to_i + 1, %w[GETCONST GETMCNST])
+                factory_argument_names(irep, use, call.reg.to_i + 1, %i[GETCONST GETMCNST])
         return global!(:class_factory_escape) unless bases
 
         @dynamic_subclassed.merge(bases)

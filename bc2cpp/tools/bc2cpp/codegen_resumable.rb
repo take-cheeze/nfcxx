@@ -70,7 +70,7 @@ class CodeGen
   def deep_fiber_yield?(irep, fiber_bodies, seen = Set.new.compare_by_identity)
     return false unless seen.add?(irep)
 
-    BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SEND, :SEND0) do |insn, idx|
       next unless insn.sym == 'yield'
 
       dest = insn.reg
@@ -83,7 +83,7 @@ class CodeGen
   def deep_called_names(irep, fiber_bodies, names = Set.new, seen = Set.new.compare_by_identity)
     return names unless seen.add?(irep)
 
-    BytecodeIR.for(irep).instructions_with_op('SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB').each do |insn|
+    BytecodeIR.for(irep).instructions_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB).each do |insn|
       names << insn.sym if insn.sym
     end
     nested_ireps(irep, fiber_bodies).each { |child| deep_called_names(child, fiber_bodies, names, seen) }
@@ -114,7 +114,7 @@ class CodeGen
   # Names of the methods a `Fiber.new { ... }` block body calls directly on self (not from a
   # nested block): the roots that are compiled as resumable when they qualify.
   def fiber_block_root_targets(seed_irep)
-    BytecodeIR.for(seed_irep).instructions_with_op('SSEND', 'SSEND0').filter_map(&:sym)
+    BytecodeIR.for(seed_irep).instructions_with_op(:SSEND, :SSEND0).filter_map(&:sym)
   end
 
   ResumablePlan = Struct.new(:label, :helpers)
@@ -159,7 +159,7 @@ class CodeGen
     return nil unless seen.add?(irep)
 
     program = BytecodeIR.for(irep)
-    program.each_with_op('SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB') do |insn, idx|
+    program.each_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB) do |insn, idx|
       name = insn.sym
       next unless name
 
@@ -171,7 +171,7 @@ class CodeGen
       end
       next unless @fiber_yield_names.include?(name)
 
-      unless %w[SSEND SSEND0].include?(insn.op)
+      unless %i[SSEND SSEND0].include?(insn.op)
         return "calls the yielding method #{name} with an explicit receiver or a block"
       end
       next if helpers.key?(name)

@@ -83,7 +83,7 @@ module SiteOriginTable
 
   module Writer
     # Call ops whose result is a call result: the SEND family, SUPER and BLKCALL.
-    CALL_RESULT_OPS = (BytecodeIR::Ops::CALL | ['BLKCALL']).freeze
+    CALL_RESULT_OPS = (BytecodeIR::Ops::CALL | [:BLKCALL]).freeze
 
     module_function
 
@@ -199,7 +199,7 @@ module SiteOriginTable
       when :GETIV then 'ivar_read'
       when :GETIDX, :GETIDX0, :AREF then 'indexed_result'
       when :GETUPVAR then 'captured_upvar'
-      when 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADL', 'ARRAY', 'ARRAY2', 'HASH', 'STRING', BytecodeIR::Ops::LOADI_OPS
+      when :LOADNIL, :LOADTRUE, :LOADFALSE, :LOADL, :ARRAY, :ARRAY2, :HASH, :STRING, BytecodeIR::Ops::LOADI_OPS
         'literal_or_fresh'
       when CALL_RESULT_OPS then 'call_result'
       else 'other'

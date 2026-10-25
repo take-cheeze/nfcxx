@@ -24,7 +24,7 @@ module ProvableErrorReport
   ROWS = {}
   ENGINE_GEMS = BC2CPP_CLOSED_WORLD_GEMS
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/
-  ARITH = { 'ADD' => '+', 'SUB' => '-', 'MUL' => '*', 'DIV' => '/', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.freeze
+  ARITH = { :ADD => '+', :SUB => '-', :MUL => '*', :DIV => '/', :LT => '<', :LE => '<=', :GT => '>', :GE => '>=' }.freeze
   NUM = %w[Integer Float].freeze
   # Operand class pairs (left, right) the core operator always rejects, by operator.
   OPERATOR_REJECTS = {
@@ -159,7 +159,7 @@ module ProvableErrorReport
   def error_send_rows(answers, irep, idx, insn, owner_def)
     name = insn.sym
     rows = []
-    explicit = %w[SEND SEND0 SENDB].include?(insn.op)
+    explicit = %i[SEND SEND0 SENDB].include?(insn.op)
     reach = nil
     emit = lambda do |kind, detail|
       reach ||= error_reach(irep, idx, owner_def, name)
@@ -234,7 +234,7 @@ module ProvableErrorReport
 
   def error_zero_literal?(irep, idx, reg)
     value = irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |w|
-      w.op.start_with?('LOADI') ? (w.paren_value || w.imm_operand).to_s : :other
+      w.op.to_s.start_with?('LOADI') ? (w.paren_value || w.imm_operand).to_s : :other
     end
     value == '0'
   end

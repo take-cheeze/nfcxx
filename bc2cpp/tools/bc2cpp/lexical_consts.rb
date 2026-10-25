@@ -22,9 +22,9 @@ module LexicalConsts
   # A string evaluated with one of these changes the cref of its code, which is not modelled.
   STRING_EVAL_SENDS = %w[class_eval module_eval instance_eval].freeze
   # The ops collect_definitions reads besides the sends: the class bodies and the constant writes.
-  DEFINITION_OPS = %w[CLASS MODULE SETCONST SETMCNST].freeze
+  DEFINITION_OPS = %i[CLASS MODULE SETCONST SETMCNST].freeze
   # The send-to-self ops (SSEND and its splat forms). Within SEND_FAMILY this is exactly the SS-prefixed ops.
-  SELF_SEND_FAMILY = (BytecodeIR::Ops::SELF_SEND | %w[SSENDV SSENDVB]).freeze
+  SELF_SEND_FAMILY = (BytecodeIR::Ops::SELF_SEND | %i[SSENDV SSENDVB]).freeze
 
   # read_keys: GETCONST/GETMCNST insn (by identity) -> qualified name of the definition it reads.
   # site_keys: SETCONST insn (by identity) -> qualified name it defines, nil when its scope is unknown.
@@ -90,7 +90,7 @@ module LexicalConsts
       site_keys = {}.compare_by_identity
       @ireps.each do |label, irep|
         scope = @scope.fetch(label, :unknown)
-        BytecodeIR.for(irep).each_with_op('SETCONST', 'GETCONST', 'GETMCNST') do |insn, idx|
+        BytecodeIR.for(irep).each_with_op(:SETCONST, :GETCONST, :GETMCNST) do |insn, idx|
           case insn.op
           when :SETCONST
             site_keys[insn] = scope == :unknown ? nil : LexicalConsts.qualify(scope, insn.const_name)
@@ -121,7 +121,7 @@ module LexicalConsts
         @scope[label] = parent
         irep = @ireps.fetch(label)
         body = {}
-        BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE', 'SCLASS').each do |idx, child|
+        BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).each do |idx, child|
           body[child] = body_scope(irep, idx, BytecodeIR.for(irep).source_at(idx), parent)
         end
         irep.reps.each { |child| stack << [child, body.fetch(child, parent)] }

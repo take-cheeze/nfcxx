@@ -15,8 +15,8 @@ require_relative 'codegen_callee_return_fold'
 # Nothing is cut. A taken fold keeps the fall-through code, which a label may still reach, and a not-taken fold keeps the
 # jump's target, so no arm is deleted and no jump-edge check is needed. BC2CPP_DECIDED_BRANCH=0 keeps every test.
 class CodeGen
-  DECIDED_BRANCH_OPS = %w[JMPIF JMPNOT JMPNIL].freeze
-  RANGE_COMPARE_OPS = %w[LT LE GT GE].freeze
+  DECIDED_BRANCH_OPS = %i[JMPIF JMPNOT JMPNIL].freeze
+  RANGE_COMPARE_OPS = %i[LT LE GT GE].freeze
 
   def decided_branch_enabled?
     ENV['BC2CPP_DECIDED_BRANCH'] != '0'

@@ -47,7 +47,7 @@ module ComputedSend
 
     names, irep, idx, owner_def = plan.values_at(:names, :irep, :idx, :owner_def)
     d = insn.reg.to_i
-    self_implicit = insn.op.start_with?('SSEND')
+    self_implicit = insn.op.to_s.start_with?('SSEND')
     rest = (2..insn.n_spec.to_i).map { |k| "r#{d + k}" }
     arms = names.names.map do |name|
       code = splat_send_with(name, d, self_implicit, irep, idx, owner_def, rest, nil)
@@ -61,7 +61,7 @@ module ComputedSend
   # nil, or the proven name set with the site the arms are compiled for.
   def computed_send_plan(insn, kwargs)
     irep, idx = kwargs.values_at(:irep, :idx)
-    return nil unless irep && idx && %w[SEND SSEND].include?(insn.op) &&
+    return nil unless irep && idx && %i[SEND SSEND].include?(insn.op) &&
                       computed_send_name?(insn.sym, insn.op == :SSEND ? kwargs[:owner_def]&.owner : nil)
     return nil unless kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil? && @call_block_expr.nil?
     return nil unless ENV[KILL_SWITCH] != '0' && NomethodReviewed.guard_violation_enabled? && insn.plain_fixed_argc?

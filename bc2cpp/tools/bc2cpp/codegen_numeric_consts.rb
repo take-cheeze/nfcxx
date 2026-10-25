@@ -54,7 +54,7 @@ class CodeGen
 
     poisoned = Set.new(@outside_const_names)
     @ireps.each_value do |irep|
-      BytecodeIR.for(irep).each_with_op('CLASS', 'MODULE', 'SETCONST', 'SETMCNST', 'GETCONST', 'GETMCNST') do |insn, idx|
+      BytecodeIR.for(irep).each_with_op(:CLASS, :MODULE, :SETCONST, :SETMCNST, :GETCONST, :GETMCNST) do |insn, idx|
         case insn.op
         when :CLASS, :MODULE
           poisoned << insn.sym_token

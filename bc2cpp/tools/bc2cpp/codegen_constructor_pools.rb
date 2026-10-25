@@ -36,11 +36,11 @@ require_relative 'bytecode_ir_ops'
 # BC2CPP_CONSTRUCTOR_POOLS=0 turns it off.
 class CodeGen
   # Ops that name a method without calling it, so the name can reach a body with arguments nobody sees.
-  CONSTRUCTOR_NAMING_OPS = %w[LOADSYM ALIAS KARG KEY_P].freeze
+  CONSTRUCTOR_NAMING_OPS = %i[LOADSYM ALIAS KARG KEY_P].freeze
 
   # Ops a CONSTRUCTOR_OPTIONALS default may consist of: each writes its leading register and reads none.
-  CONSTRUCTOR_LITERAL_DEFAULT_OPS = (BytecodeIR::Ops::LOADI_OPS | Set['LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM', 'LOADL',
-                                                                    'STRING']).freeze
+  CONSTRUCTOR_LITERAL_DEFAULT_OPS = (BytecodeIR::Ops::LOADI_OPS | Set[:LOADNIL, :LOADTRUE, :LOADFALSE, :LOADSYM, :LOADL,
+                                                                    :STRING]).freeze
 
   # [irep label, argument position] => [sites, position], as entry_arg_candidates.
   def constructor_pool_candidates
@@ -257,8 +257,8 @@ class CodeGen
       children = @ireps.values.flat_map { |irep| Array(irep.reps) }.to_set
       walk = lambda do |label, namespace|
         irep = @ireps.fetch(label)
-        bodies = BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE')
-        irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
+        bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE)
+        irep.each_with_op(:CLASS, :MODULE) do |insn, idx|
           full = BytecodeIR.class_body_path(irep, idx, namespace)
           next unless full && bodies.key?(idx)
 
@@ -428,7 +428,7 @@ class CodeGen
   def constructor_new_site(irep, idx, insn, owner, found)
     stats = found[:stats]
     stats[:new] += 1
-    argc = insn.op.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = insn.op.to_s.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     # No initialize this analysis pools takes zero arguments: a count of 0 raises in ENTER.
     return stats[:no_args] += 1 if argc&.zero?
 
@@ -439,8 +439,8 @@ class CodeGen
       site = [irep, idx - 1, insn.reg.to_i, argc, owner]
     end
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
-    classes = constructor_named_classes(irep, idx, insn) unless insn.op.start_with?('SS')
-    if classes.nil? && !insn.op.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
+    classes = constructor_named_classes(irep, idx, insn) unless insn.op.to_s.start_with?('SS')
+    if classes.nil? && !insn.op.to_s.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
       # CLASS_OBJECT_ARGS: the receiver is a parameter every caller passes class constants for.
       classes = via_param
       stats[:param_named] += 1
@@ -505,7 +505,7 @@ class CodeGen
   def constructor_new_root(irep, idx, insn, owner)
     return nil unless owner && !@closed_world.module_declared?(owner.owner.delete_suffix('.singleton'))
 
-    if insn.op.start_with?('SS')
+    if insn.op.to_s.start_with?('SS')
       owner.owner.end_with?('.singleton') ? owner.owner.delete_suffix('.singleton') : nil
     else
       constructor_self_class_root(irep, idx, insn, owner)
@@ -621,9 +621,9 @@ class CodeGen
       mask = return_class_raw_mask(irep, idx, (recv + k).to_s)
       next if mask && !mask.anybits?(CLASS_POOL_UNSHIPPABLE)
 
-      writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
+      writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                           exhausted: ->(last) { last == '0' ? 'self' : 'incoming_arg' }) do |ins|
-        %w[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.downcase
+        %i[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.to_s.downcase
       end
       writer.is_a?(String) ? writer : 'unknown'
     end

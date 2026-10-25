@@ -336,7 +336,7 @@ class CodeGen
     # (no SDEF and no SCLASS+EXEC) makes devirt_blocked_name? always false;
     # :unknown blocks devirtualization of every name in this method.
     exec_fallback_regions = recognize_exec_fallback_regions(irep)
-    if BytecodeIR.for(irep).op?('SDEF') || !exec_fallback_regions.empty?
+    if BytecodeIR.for(irep).op?(:SDEF) || !exec_fallback_regions.empty?
       @runtime_installed_names = runtime_installed_names_for(irep, exec_fallback_regions) || :unknown
     end
 
@@ -433,7 +433,7 @@ class CodeGen
     # `#error`. Disjoint opcodes, so order is convention only. SDEF first: one
     # method onto one singleton class, no class body (see
     # emit_sdef_fallback_glue).
-    irep.each_with_op('SDEF') do |insn, _idx|
+    irep.each_with_op(:SDEF) do |insn, _idx|
       next if suppressed.include?(insn.addr)
 
       region = sdef_fallback_region(insn, irep)

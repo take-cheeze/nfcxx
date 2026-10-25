@@ -50,7 +50,7 @@ module LoopInstallers
   PLAIN_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND - BytecodeIR::Ops::SELF_SEND).freeze
   # Control flow that ends or splits the straight-line walk.
   FLOW_OPS = BytecodeIR::Ops::FLOW_PREFIX_OPS
-  ARITH_OPS = %w[ADD SUB MUL DIV EQ LT LE GT GE ADDI SUBI].freeze
+  ARITH_OPS = %i[ADD SUB MUL DIV EQ LT LE GT GE ADDI SUBI].freeze
   LOAD_TRUTHY = BytecodeIR::Ops::LOAD_TRUTHY_OPS
   ATTR_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
   # A name define_method installs, or a Symbol an expansion loads: an identifier, optionally ending in ?, ! or =.
@@ -89,7 +89,7 @@ module LoopInstallers
   # Every `define_method` SSENDB of the block tree rooted at +label+, as [irep label, index].
   def define_method_sends(label, ireps, found = [])
     irep = ireps[label] or return found
-    irep.each_with_op('SSENDB') do |insn, i|
+    irep.each_with_op(:SSENDB) do |insn, i|
       found << [label, i] if insn.sym == 'define_method'
     end
     irep.reps.compact.each { |child| define_method_sends(child, ireps, found) }
@@ -99,7 +99,7 @@ module LoopInstallers
   # Every attr_* send of the block tree rooted at +label+, as [irep label, index].
   def attr_sends(label, ireps, found = [])
     irep = ireps[label] or return found
-    irep.each_with_op('SSEND', 'SSEND0') do |insn, i|
+    irep.each_with_op(:SSEND, :SSEND0) do |insn, i|
       found << [label, i] if ATTR_SENDS.include?(insn.sym)
     end
     irep.reps.compact.each { |child| attr_sends(child, ireps, found) }

@@ -33,7 +33,7 @@ class CodeGen
     @insn_source = saved
   end
 
-  CONST_READ_OPS = %w[GETCONST GETMCNST].freeze
+  CONST_READ_OPS = %i[GETCONST GETMCNST].freeze
 
   # BC2CPP_TRACE_TYPES=1 only: after a constant read, a marker that ParamTrace rewrites into a constant hit (see
   # param_trace.rb). It names the owner the read resolved to (LexicalConsts' `Owner::NAME`), or `-` when the read is not
@@ -237,7 +237,7 @@ class CodeGen
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
       else
-        guarded = guarded_game_integer_immediate('ADD', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+        guarded = guarded_game_integer_immediate(:ADD, irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
                                                  owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: addition stays inside Fixnum.\n" \
@@ -262,7 +262,7 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, "r#{s}")}\n"
       else
-        guarded = guarded_game_integer_pair('ADD', irep, idx, unshift_proof_reg(d, reg_offset),
+        guarded = guarded_game_integer_pair(:ADD, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
@@ -295,7 +295,7 @@ class CodeGen
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
       else
-        guarded = guarded_game_integer_immediate('SUB', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+        guarded = guarded_game_integer_immediate(:SUB, irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
                                                  owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: subtraction stays inside Fixnum.\n" \
@@ -320,7 +320,7 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, "r#{s}")}\n"
       else
-        guarded = guarded_game_integer_pair('SUB', irep, idx, unshift_proof_reg(d, reg_offset),
+        guarded = guarded_game_integer_pair(:SUB, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
@@ -355,7 +355,7 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('*', d, "r#{s}")}\n"
       else
-        guarded = guarded_game_integer_pair('MUL', irep, idx, unshift_proof_reg(d, reg_offset),
+        guarded = guarded_game_integer_pair(:MUL, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: the product interval fits Fixnum.\n" \
@@ -394,7 +394,7 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n"
       else
-        guarded = guarded_game_integer_pair('DIV', irep, idx, unshift_proof_reg(d, reg_offset),
+        guarded = guarded_game_integer_pair(:DIV, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: quotient fits Fixnum; helper preserves zero errors.\n" \
@@ -1039,7 +1039,7 @@ class CodeGen
   # is emitted (the same value the fast path computes).
   def compile_cmp(insn, irep = nil, idx = nil, owner_def = nil, reg_offset = 0)
     op = insn.op
-    sym = { 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.fetch(op)
+    sym = { :EQ => '==', :LT => '<', :LE => '<=', :GT => '>', :GE => '>=' }.fetch(op)
     d = insn.reg
     s = insn.paren_reg
     if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
@@ -1056,13 +1056,13 @@ class CodeGen
     # MONO/TYPED resolver so compiled operator methods are called directly. For
     # EQ the generated chain below already handles String/Symbol, so its fallback
     # must not repeat the registered-expression switch.
-    if op == 'EQ' && eqq_literal_devirt_safe?
+    if op == :EQ && eqq_literal_devirt_safe?
       # CLOSED_WORLD_EQUALITY: with no Ruby == override, mrb_equal is the VM's
       # own equality helper. It keeps native class-specific equality behavior
       # while avoiding a generated Ruby-send fallback for unmatched receiver tags.
       fallback = "r#{d} = mrb_bool_value(mrb_equal(M, r#{d}, r#{s}));\n"
     else
-      @suppress_native_expression_send = sym if op == 'EQ'
+      @suppress_native_expression_send = sym if op == :EQ
       begin
         fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
       ensure
@@ -1071,7 +1071,7 @@ class CodeGen
     end
     # String/Symbol `==` use their registered C bodies; Integer's other numeric
     # forms and unmatched tags keep mruby's mrb_equal semantics in the fallback.
-    fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == 'EQ'
+    fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == :EQ
 
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
     no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
@@ -1097,7 +1097,7 @@ class CodeGen
       }
     CPP
 
-    if op == 'EQ'
+    if op == :EQ
       <<~CPP
         if (mrb_obj_eq(M, r#{d}, r#{s})) {
           r#{d} = mrb_true_value();

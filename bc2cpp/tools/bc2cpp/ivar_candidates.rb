@@ -35,7 +35,7 @@ module IvarCandidates
     ctx.ireps.each do |label, irep|
       definer = gen.numeric_irep_owner[label]
       owner = definer&.owner
-      irep.each_with_op('GETIV', 'SETIV') do |insn, idx|
+      irep.each_with_op(:GETIV, :SETIV) do |insn, idx|
         name = insn.ivar.to_s
         # Code no owner claims (a module body, say) may touch any owner's slot, so no candidate for this name is sound.
         next opaque << name unless owner

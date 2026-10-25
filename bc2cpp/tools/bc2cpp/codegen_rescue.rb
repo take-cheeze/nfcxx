@@ -171,7 +171,7 @@ class CodeGen
       except_jump_srcs: except_jump_srcs, nested_rescue: nested, entry_label: !entries.empty? }
   end
 
-  ENSURE_BODY_REFUSED_OPS = %w[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].freeze
+  ENSURE_BODY_REFUSED_OPS = %i[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].freeze
 
   # ENSURE_NESTED_RESCUE: `begin X rescue C ... end` inside an ensure body (mruby-io's IO.open closes its io that way).
   # The rescue has the shape recognize_rescue_regions reads: [begin, end) protected, `JMP S` at end, `EXCEPT Rexc` at
@@ -378,7 +378,7 @@ class CodeGen
       # RESCUE_JOIN_RETURN_SUPPORT: a join `RETURN Rx` with Rx other than the
       # connector is not a tail return of the result; it takes the `goto
       # shared_target` path, correct for any join.
-      tail_return = %w[RETURN RETURN_BLK].include?(shared_i.op)
+      tail_return = %i[RETURN RETURN_BLK].include?(shared_i.op)
       connector_reg = exc_reg
       if tail_return
         tail_reg = shared_i.no_operands? ? '0' : shared_i.reg
@@ -453,13 +453,13 @@ class CodeGen
   # are not modelled. WRITES_LEADING_REG_OPS is the audited leading-operand set.
   def rescue_insn_written_regs(insn)
     op = insn.op
-    if BytecodeIR::Ops::READS_LEAD.include?(op) || op == 'JMPUW'
+    if BytecodeIR::Ops::READS_LEAD.include?(op) || op == :JMPUW
       []
-    elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
+    elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(op) || op.to_s.start_with?('LOADI')
       [insn.reg].compact
-    elsif op == 'RESCUE'
+    elsif op == :RESCUE
       [insn.regs[1]].compact
-    elsif op == 'EXCEPT'
+    elsif op == :EXCEPT
       [insn.reg].compact
     end
   end
@@ -549,7 +549,7 @@ class CodeGen
       # still need it); codegen_rescue puts it at cursp() above exc, checked here.
       return nil if cls_reg == exc_reg
 
-      segments = program.run_of_op(clause_idx + 1, 'GETMCNST')
+      segments = program.run_of_op(clause_idx + 1, :GETMCNST)
       segments.each do |seg_i|
         return nil unless seg_i.reg == cls_reg && seg_i.paren_reg == cls_reg && seg_i.mcnst_name
         cls_name = "#{cls_name}::#{seg_i.mcnst_name}"
@@ -689,7 +689,7 @@ class CodeGen
     return false if region[:needs_blk]
 
     block_irep = region[:block_irep]
-    block_irep.nil? || !irep_tree_has_op?(block_irep, 'RETURN_BLK')
+    block_irep.nil? || !irep_tree_has_op?(block_irep, :RETURN_BLK)
   end
 
   def irep_tree_has_op?(irep, op)

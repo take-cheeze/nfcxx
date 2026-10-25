@@ -118,10 +118,10 @@ module OperandSchema
     when :reg then (m = token.match(/\AR(\d+)\z/)) && Operand.new(:reg, m[1].to_i)
     when :preg then (m = token.match(/\A\(R(\d+)\)\z/)) && Operand.new(:preg, m[1].to_i)
     when :idx0 then (m = token.match(/\AR(\d+)\[0\]\z/)) && Operand.new(:idx0, m[1].to_i)
-    when :sym then token.start_with?(':') && token.length > 1 && Operand.new(:sym, token[1..].intern)
-    when :name then Operand.new(:name, token.intern)
+    when :sym then token.start_with?(':') && token.length > 1 && Operand.new(:sym, token[1..])
+    when :name then Operand.new(:name, token)
     when :mcnst
-      (m = token.match(/\A\(R(\d+)\)::(.+)\z/)) && Operand.new(:mcnst, [m[1].to_i, m[2].intern])
+      (m = token.match(/\A\(R(\d+)\)::(.+)\z/)) && Operand.new(:mcnst, [m[1].to_i, m[2]])
     when :pool then (m = token.match(/\AL\[(\d+)\]\z/)) && Operand.new(:pool, m[1].to_i)
     when :irep then (m = token.match(/\AI\[(\d+)\]\z/)) && Operand.new(:irep, m[1].to_i)
     when :int then token.match?(/\A-?\d+\z/) && Operand.new(:int, token.to_i)

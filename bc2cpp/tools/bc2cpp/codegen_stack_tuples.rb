@@ -24,20 +24,20 @@ require_relative 'escape_analysis'
 # its plan, so no read of the frame register survives without its buffer.
 class CodeGen
   STACK_TUPLE_MAX = 8
-  STACK_TUPLE_IMMEDIATE_OPS = Set['LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM'].freeze
+  STACK_TUPLE_IMMEDIATE_OPS = Set[:LOADNIL, :LOADTRUE, :LOADFALSE, :LOADSYM].freeze
   # Instructions that read no register: they write their leading register at most.
   STACK_TUPLE_PURE_OPS = Set[
-    'NOP', 'JMP', 'JMPUW', 'ENTER', 'STOP', 'RETNIL', 'RETTRUE', 'RETFALSE', 'LOADSELF', 'LOADNIL', 'LOADTRUE',
-    'LOADFALSE', 'LOADSYM', 'LOADL', 'STRING', 'SYMBOL', 'GETIV', 'GETCONST', 'GETGV', 'GETCV', 'GETUPVAR', 'OCLASS',
-    'TCLASS', 'EXCEPT', 'ALIAS', 'UNDEF', 'DEBUG', 'KEYEND'
+    :NOP, :JMP, :JMPUW, :ENTER, :STOP, :RETNIL, :RETTRUE, :RETFALSE, :LOADSELF, :LOADNIL, :LOADTRUE,
+    :LOADFALSE, :LOADSYM, :LOADL, :STRING, :SYMBOL, :GETIV, :GETCONST, :GETGV, :GETCV, :GETUPVAR, :OCLASS,
+    :TCLASS, :EXCEPT, :ALIAS, :UNDEF, :DEBUG, :KEYEND
   ].freeze
-  STACK_TUPLE_STORE_OPS = Set['SETIV', 'SETGV', 'SETSV', 'SETCV', 'SETCONST', 'SETMCNST', 'SETUPVAR'].freeze
-  STACK_TUPLE_LEAD_READS = Set['JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'RETURN', 'RETURN_BLK', 'BREAK', 'ADDI',
-                               'SUBI'].freeze
-  STACK_TUPLE_BINARY_OPS = Set['ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE'].freeze
-  STACK_TUPLE_WINDOW_OPS = Set['CLASS', 'MODULE', 'SCLASS', 'EXEC', 'DEF', 'TDEF', 'SDEF'].freeze
-  STACK_TUPLE_LIST_OPS = Set['ARYCAT', 'ARYSPLAT', 'HASHCAT', 'STRCAT', 'RANGE_INC', 'RANGE_EXC', 'HASH',
-                             'HASHADD'].freeze
+  STACK_TUPLE_STORE_OPS = Set[:SETIV, :SETGV, :SETSV, :SETCV, :SETCONST, :SETMCNST, :SETUPVAR].freeze
+  STACK_TUPLE_LEAD_READS = Set[:JMPIF, :JMPNOT, :JMPNIL, :RAISEIF, :RETURN, :RETURN_BLK, :BREAK, :ADDI,
+                               :SUBI].freeze
+  STACK_TUPLE_BINARY_OPS = Set[:ADD, :SUB, :MUL, :DIV, :EQ, :LT, :LE, :GT, :GE].freeze
+  STACK_TUPLE_WINDOW_OPS = Set[:CLASS, :MODULE, :SCLASS, :EXEC, :DEF, :TDEF, :SDEF].freeze
+  STACK_TUPLE_LIST_OPS = Set[:ARYCAT, :ARYSPLAT, :HASHCAT, :STRCAT, :RANGE_INC, :RANGE_EXC, :HASH,
+                             :HASHADD].freeze
   STACK_TUPLE_SIZE_NAMES = Set['size', 'length'].freeze
   # The Array methods a placed instruction stands in for: a Ruby definition of any of them could answer instead.
   STACK_TUPLE_REDEFINABLE = %w[[] []= size length].freeze
@@ -280,7 +280,7 @@ class CodeGen
   end
 
   def stack_tuple_no_arguments?(insn)
-    (insn.n_spec.nil? || insn.n_spec == '0') && insn.nk_spec.nil? && !insn.op.end_with?('B')
+    (insn.n_spec.nil? || insn.n_spec == '0') && insn.nk_spec.nil? && !insn.op.to_s.end_with?('B')
   end
 
   # True when every reaching definition of +reg+ at +at+ is an immediate: a LOADNIL/LOADTRUE/LOADFALSE/LOADSYM, or a
@@ -292,7 +292,7 @@ class CodeGen
     prods.all? do |p|
       next false if p.entry?
       next true if STACK_TUPLE_IMMEDIATE_OPS.include?(p.op)
-      next false unless p.op.match?(BytecodeIR::LOADI_OP)
+      next false unless p.op.to_s.match?(BytecodeIR::LOADI_OP)
 
       p.op != :LOADI32 || loadi_proven_fixnum?(p.insn)
     end
@@ -334,26 +334,26 @@ class CodeGen
   def stack_tuple_reads(insn, params)
     op = insn.op
     lead = reg_int(insn.reg)
-    return [] if STACK_TUPLE_PURE_OPS.include?(op) || op.match?(BytecodeIR::LOADI_OP)
-    return [] if %w[RETNIL RETTRUE RETFALSE].include?(op)
-    return [0] if op == 'RETSELF'
-    return (1..(params + 1)).to_a if op == 'ARGARY'
-    return [params + 1] if op == 'BLKPUSH'
-    return [reg_int(insn.regs[1])] if %w[GETIDX0 AREF].include?(op)
+    return [] if STACK_TUPLE_PURE_OPS.include?(op) || op.to_s.match?(BytecodeIR::LOADI_OP)
+    return [] if %i[RETNIL RETTRUE RETFALSE].include?(op)
+    return [0] if op == :RETSELF
+    return (1..(params + 1)).to_a if op == :ARGARY
+    return [params + 1] if op == :BLKPUSH
+    return [reg_int(insn.regs[1])] if %i[GETIDX0 AREF].include?(op)
     return :all if lead.nil?
     # R[b] and R[b+1] of ADDILV/SUBILV are the method-call fallback's scratch window: written, never read.
-    return [lead] if %w[ADDILV SUBILV].include?(op) || STACK_TUPLE_LEAD_READS.include?(op)
+    return [lead] if %i[ADDILV SUBILV].include?(op) || STACK_TUPLE_LEAD_READS.include?(op)
     return [lead, lead + 1] if STACK_TUPLE_BINARY_OPS.include?(op)
-    return [lead, lead + 1, lead + 2] if op == 'SETIDX'
-    return [lead, lead + 1] if op == 'GETIDX'
-    return [lead, reg_int(insn.paren_reg)].compact if op == 'GETMCNST'
+    return [lead, lead + 1, lead + 2] if op == :SETIDX
+    return [lead, lead + 1] if op == :GETIDX
+    return [lead, reg_int(insn.paren_reg)].compact if op == :GETMCNST
     return [reg_int(insn.reg_operand), lead].compact if STACK_TUPLE_STORE_OPS.include?(op)
     return [0, lead, lead + 1, lead + 2, lead + 3] if STACK_TUPLE_WINDOW_OPS.include?(op)
-    return [reg_int(insn.regs[0]), reg_int(insn.regs[1])] if op == 'RESCUE'
+    return [reg_int(insn.regs[0]), reg_int(insn.regs[1])] if op == :RESCUE
     return send_reads(insn, lead) if BytecodeIR::Ops::SEND.include?(op)
-    return (lead..(lead + insn.uint_operand.to_i + 1)).to_a if op == 'BLKCALL'
-    return array_reads(insn, lead) if op == 'ARRAY'
-    return (lead..(lead + insn.uint_operand.to_i)).to_a if op == 'ARYPUSH'
+    return (lead..(lead + insn.uint_operand.to_i + 1)).to_a if op == :BLKCALL
+    return array_reads(insn, lead) if op == :ARRAY
+    return (lead..(lead + insn.uint_operand.to_i)).to_a if op == :ARYPUSH
     return (lead..(lead + (2 * insn.uint_operand.to_i) + 3)).to_a if STACK_TUPLE_LIST_OPS.include?(op)
 
     :all
@@ -365,8 +365,8 @@ class CodeGen
 
     positional = insn.n_spec.nil? ? 0 : (insn.n_spec == '*' ? 1 : insn.n_spec.to_i)
     kw = insn.nk_spec.nil? ? 0 : 2 * insn.nk_spec.to_i
-    top = lead + positional + kw + (insn.op.end_with?('B') ? 1 : 0)
-    (insn.op.start_with?('SS') ? [] : [lead]) + (lead + 1..top).to_a
+    top = lead + positional + kw + (insn.op.to_s.end_with?('B') ? 1 : 0)
+    (insn.op.to_s.start_with?('SS') ? [] : [lead]) + (lead + 1..top).to_a
   end
 
   def array_reads(insn, lead)

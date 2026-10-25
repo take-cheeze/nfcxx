@@ -25,7 +25,7 @@ class CodeGen
     return region[:needs_ret] unless region[:needs_ret].nil?
 
     block_irep = region[:block_irep]
-    return true if BytecodeIR.for(block_irep).op?('RETURN_BLK')
+    return true if BytecodeIR.for(block_irep).op?(:RETURN_BLK)
 
     # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` must be the same set
     # emit_proc_fallback_fn will use for this body; a pre-scan recognizing fewer
@@ -61,7 +61,7 @@ class CodeGen
   def compute_block_upvar_needs(irep)
     needs = []
     walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |insn, depth|
-      next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
+      next unless %i[GETUPVAR SETUPVAR].include?(insn.op)
 
       upvar_idx, level = insn.upvar_ref
       # Relative to +irep+ a reference `depth` blocks down needs the frame `level - depth` up; a negative one is the
@@ -106,7 +106,7 @@ class CodeGen
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
-    BytecodeIR.for(irep).instructions_with_op('BLKPUSH').each do |insn|
+    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).each do |insn|
       lv = insn.paren_value
       return nil unless lv
 
@@ -161,7 +161,7 @@ class CodeGen
   # resumable step function. Transitive callers are handled
   # by compute_fiber_unsafe_methods.
   def calls_fiber_yield?(irep)
-    BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SEND, :SEND0) do |insn, idx|
       name = insn.sym
       next unless name == 'yield'
 
@@ -221,7 +221,7 @@ class CodeGen
 
     seeds = []
     @ireps.each_value do |irep|
-      BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB]) do |insn, paired, sendb_idx|
+      BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SENDB]) do |insn, paired, sendb_idx|
         idx = sendb_idx - 1
         next unless paired.sym == 'new'
 
@@ -302,7 +302,7 @@ class CodeGen
     return [] unless seen.add?(irep)
 
     names = []
-    BytecodeIR.for(irep).instructions_with_op('SSEND', 'SSEND0', 'SSENDB').each do |insn|
+    BytecodeIR.for(irep).instructions_with_op(:SSEND, :SSEND0, :SSENDB).each do |insn|
       name = insn.sym
       names << name if name
     end
@@ -315,7 +315,7 @@ class CodeGen
 
   def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
     regions = []
-    BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB SSENDB]) do |insn, paired, sendb_idx|
+    BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SENDB SSENDB]) do |insn, paired, sendb_idx|
       idx = sendb_idx - 1
       # EXPLICIT_ARGS_BLOCK_FALLBACK_SUPPORT: any fixed positional count
       # (`ary.inject(0) { }`, `ary.each_slice(2) { }`), but never `n=*` (a splat has
@@ -402,8 +402,8 @@ class CodeGen
                  parent_irep: irep }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
       # forwarded by every enclosing block, so it is needed for a `return` at any depth.
-      region[:needs_brk] = BytecodeIR.for(block_irep).op?('BREAK')
-      region[:needs_ret] = BytecodeIR.for(block_irep).op?('RETURN_BLK') ||
+      region[:needs_brk] = BytecodeIR.for(block_irep).op?(:BREAK)
+      region[:needs_ret] = BytecodeIR.for(block_irep).op?(:RETURN_BLK) ||
                            recognize_block_fallback_regions(block_irep, available_upvars: upvars).any? { |nested| nested[:needs_ret] }
       regions << region
     end
@@ -496,7 +496,7 @@ class CodeGen
 
     idx = irep.index_of_addr(region[:sendb_addr])
     insn = idx && BytecodeIR.for(irep).source_at(idx)
-    return nil unless insn&.op == (region[:self_implicit] ? 'SSENDB' : 'SENDB')
+    return nil unless insn&.op == (region[:self_implicit] ? :SSENDB : :SENDB)
 
     name = insn.sym.to_s
     definers = if region[:self_implicit]
@@ -742,7 +742,7 @@ class CodeGen
     # lexical scope the proc was built in, which compiled code cannot see.
     # Runs before the ivars are set, like the nested pass above.
     if region[:kind] == 'exec_fallback'
-      BytecodeIR.for(block_irep).instructions_with_op('TDEF').each do |tinsn|
+      BytecodeIR.for(block_irep).instructions_with_op(:TDEF).each do |tinsn|
         next if nested_suppressed.include?(tinsn.addr)
 
         tregion = tdef_fallback_region(tinsn, block_irep)
@@ -855,7 +855,7 @@ class CodeGen
     # this block) only leaves the proc; compile_insn throws bc2cpp_proc_exit for
     # it, caught here so it never reaches a call site.
     exits = kind == 'block_fallback' &&
-            (BytecodeIR.for(block_irep).op?('BREAK') || BytecodeIR.for(block_irep).op?('RETURN_BLK'))
+            (BytecodeIR.for(block_irep).op?(:BREAK) || BytecodeIR.for(block_irep).op?(:RETURN_BLK))
     # BLOCK_DIRECT_ENTRY: the entry replaces the cfunc wrapper for this block.
     region[:direct_entry] = block_direct_entry?(region, kind, exits)
     region[:yield_free] = region[:direct_entry] && note_block_yield_free(region[:block_irep])
@@ -1183,7 +1183,7 @@ class CodeGen
   # BLOCK_FALLBACK RProcs, whose break throws that type).
   def recognize_explicit_block_arg_regions(irep)
     regions = []
-    irep.each_with_op('SENDB', 'SSENDB') do |insn, idx|
+    irep.each_with_op(:SENDB, :SSENDB) do |insn, idx|
       prev = BytecodeIR.for(irep).previous(idx)
       next if prev && prev.op == :BLOCK
 

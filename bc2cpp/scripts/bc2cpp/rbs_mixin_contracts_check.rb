@@ -35,7 +35,7 @@ end
 
 # ENTER takes one required argument, R1, the receiver; the call at index 1 sends :m to it and index 2 returns it.
 def call_irep(label)
-  instructions = [insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SEND', 'R1 :m n=0'), insn(2, 'RETURN', 'R1')]
+  instructions = [insn(0, :ENTER, '1:0:0:0:0:0:0:0 (0x0)'), insn(1, :SEND, 'R1 :m n=0'), insn(2, :RETURN, 'R1')]
   Irep.new(label: label, instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 end
 

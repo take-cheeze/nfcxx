@@ -8,8 +8,8 @@
 # enters here. A compiled core body gets the literal proof only, as a checked proof.
 class CodeGen
   EXACT_LITERAL_CLASS = {
-    'ARRAY' => 'Array', 'ARRAY2' => 'Array', 'HASH' => 'Hash', 'STRING' => 'String',
-    'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range', 'LOADNIL' => 'NilClass'
+    :ARRAY => 'Array', :ARRAY2 => 'Array', :HASH => 'Hash', :STRING => 'String',
+    :RANGE_INC => 'Range', :RANGE_EXC => 'Range', :LOADNIL => 'NilClass'
   }.freeze
 
   # 'Array' | 'Hash' | 'Range' | 'String' (| 'NilClass', for arguments) when the value in `reg`

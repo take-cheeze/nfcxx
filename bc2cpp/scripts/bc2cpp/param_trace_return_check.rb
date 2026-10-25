@@ -189,8 +189,8 @@ check.call('a file with no constant marker has no constant sites and no constant
              plain_const_text.include?('bc2cpp_const_sites_fixture[1]'))
 
 # The codegen side of the constant marker: only under BC2CPP_TRACE_TYPES=1, and `-` without a closed-world proof.
-read = Struct.new(:op, :const_name, :mcnst_name, :reg).new('GETCONST', 'LIMIT', nil, 4)
-scoped = Struct.new(:op, :const_name, :mcnst_name, :reg).new('GETMCNST', nil, 'MAX', 5)
+read = Struct.new(:op, :const_name, :mcnst_name, :reg).new(:GETCONST, 'LIMIT', nil, 4)
+scoped = Struct.new(:op, :const_name, :mcnst_name, :reg).new(:GETMCNST, nil, 'MAX', 5)
 begin
   ENV['BC2CPP_TRACE_TYPES'] = '1'
   check.call('a constant read without a closed world leaves an unproven marker (the written name, the register)',

@@ -42,7 +42,7 @@ module RefineReport
     @refine_fallbacks = outer
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
-    return code unless irep && site && !kwargs[:self_implicit] && %w[SEND SEND0 SENDB].include?(insn.op)
+    return code unless irep && site && !kwargs[:self_implicit] && %i[SEND SEND0 SENDB].include?(insn.op)
 
     ROWS[:codegen] = self
     lines = code.each_line.reject { |l| l.lstrip.start_with?('//') }
@@ -120,7 +120,7 @@ module RefineReport
       parent = Hash.new { |h, k| h[k] = k }
       find = ->(k) { parent[k] == k ? k : (parent[k] = find.call(parent[k])) }
       uses = {}
-      program.each_with_op('SEND', 'SEND0', 'SENDB') do |insn, i|
+      program.each_with_op(:SEND, :SEND0, :SENDB) do |insn, i|
         next unless insn.sym
 
         defs = program.reaching_definitions(i, insn.reg, opaque_regs: opaque, shared: true)
@@ -140,7 +140,7 @@ module RefineReport
     rows.filter_map do |row|
       irep = @ireps[row[:label]]
       real = BytecodeIR.for(irep).source_at(row[:site])
-      next unless irep && real && %w[SEND SEND0 SENDB].include?(real.op) && real.sym == row[:name]
+      next unless irep && real && %i[SEND SEND0 SENDB].include?(real.op) && real.sym == row[:name]
 
       reg = real.reg.to_i
       owner_def = row[:owner_def]

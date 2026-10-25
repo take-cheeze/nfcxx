@@ -34,14 +34,14 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   def enter
     return @enter if defined?(@enter)
 
-    @enter = BytecodeIR.for(self).instructions_with_op('ENTER').first
+    @enter = BytecodeIR.for(self).instructions_with_op(:ENTER).first
   end
 
   def enter_index
     return @enter_index if defined?(@enter_index)
 
     @enter_index = nil
-    each_with_op('ENTER') do |_insn, index|
+    each_with_op(:ENTER) do |_insn, index|
       @enter_index = index
       break
     end
@@ -91,7 +91,7 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_ini
   # Hand-built test insns pass String ops; normalize to Symbol so every
   # consumer sees one type. Decoded insns already carry Symbols.
   def op=(name)
-    super(name.is_a?(String) ? name.intern : name)
+    self[:op] = name.is_a?(String) ? name.intern : name
   end
 
   def initialize(lineno: nil, addr: nil, op: nil, args: nil, raw: nil, frozen_literal: nil, **rest)

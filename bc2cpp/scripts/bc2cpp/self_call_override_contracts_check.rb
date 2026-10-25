@@ -36,7 +36,7 @@ end
 
 # The method body `def via_self; greet; end`: self (R0) sends :greet with no arguments, the result in R1 is returned.
 def self_call_irep(label)
-  instructions = [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SSEND', 'R1 :greet n=0'), insn(2, 'RETURN', 'R1')]
+  instructions = [insn(0, :ENTER, '0:0:0:0:0:0:0:0 (0x0)'), insn(1, :SSEND, 'R1 :greet n=0'), insn(2, :RETURN, 'R1')]
   Irep.new(label: label, instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 end
 
@@ -197,14 +197,14 @@ class InferredContextHarness < IrContextResults
 end
 
 def call_irep(name)
-  instructions = [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SEND', "R1 :#{name} n=0"), insn(2, 'RETURN', 'R1')]
+  instructions = [insn(0, :ENTER, '0:0:0:0:0:0:0:0 (0x0)'), insn(1, :SEND, "R1 :#{name} n=0"), insn(2, :RETURN, 'R1')]
   Irep.new(label: 'use', instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 end
 
 # A body that undefines `name` with a literal name (LOADSYM before the send), or with a computed name (a MOVE).
 def remover_irep(label, load:, name: 'greet')
-  instructions = [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, load, load == 'LOADSYM' ? "R1 :#{name}" : 'R1 R2'),
-                  insn(2, 'SEND', 'R0 :undef_method n=1'), insn(3, 'RETURN', 'R0')]
+  instructions = [insn(0, :ENTER, '0:0:0:0:0:0:0:0 (0x0)'), insn(1, load, load == :LOADSYM ? "R1 :#{name}" : 'R1 R2'),
+                  insn(2, :SEND, 'R0 :undef_method n=1'), insn(3, :RETURN, 'R0')]
   Irep.new(label: label, instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 end
 
@@ -222,7 +222,7 @@ def context_result(world, name)
   InferredContextHarness.new(gen, {}).send(:dispatch, nil, call_irep(name), 1, call_irep(name).instructions[1], {})
 end
 
-literal_world = removal_world(call_irep('use'), remover_irep('zap', load: 'LOADSYM'))
+literal_world = removal_world(call_irep('use'), remover_irep('zap', load: :LOADSYM))
 check('inferred: a call of a name removed in a subclass has no body-inferred result (direct path)',
       direct_result(literal_world, 'greet').nil?)
 check('inferred: the context-results send of a removed name is unknown, not the body join',
@@ -238,7 +238,7 @@ check('inferred: with no removal the body join stays (Integer, context path)',
 check('inferred: an unrelated removal keeps the join (Integer) for another name',
       direct_result(literal_world, 'other') == Set[:Integer] && context_result(literal_world, 'other') == NumericFlow::INT)
 
-computed_world = removal_world(call_irep('use'), remover_irep('zap', load: 'MOVE'))
+computed_world = removal_world(call_irep('use'), remover_irep('zap', load: :MOVE))
 check('inferred: a computed removal refuses every name (greet)', direct_result(computed_world, 'greet').nil?)
 check('inferred: a computed removal refuses every name (any other name)', direct_result(computed_world, 'other').nil?)
 check('inferred: a computed removal refuses the context-results send too',
@@ -270,7 +270,7 @@ check('return oracle: a send of a name removed in a subclass is refused (OTHER)'
       return_table_mask(literal_world, 'greet') == NumericFlow::OTHER)
 check('return oracle: a computed removal refuses every name (OTHER for greet)',
       return_table_mask(computed_world, 'greet') == NumericFlow::OTHER)
-other_world = removal_world(call_irep('use'), remover_irep('zap', load: 'LOADSYM', name: 'other'))
+other_world = removal_world(call_irep('use'), remover_irep('zap', load: :LOADSYM, name: 'other'))
 check('return oracle: an unrelated removal keeps the send of greet (Integer)',
       return_table_mask(other_world, 'greet') == NumericFlow::INT)
 

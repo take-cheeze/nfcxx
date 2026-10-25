@@ -115,11 +115,11 @@ module DeclaredConstants
     bindings = Hash.new { |h, k| h[k] = [] }
     class_named = Set.new
     ireps.each_value do |irep|
-      irep.each_with_op('SETCONST', 'SETMCNST') do |insn, idx|
+      irep.each_with_op(:SETCONST, :SETMCNST) do |insn, idx|
         bare = insn.op == :SETCONST ? insn.const_name : insn.mcnst_name
         bindings[bare] << [irep, idx, insn, qualified_at[[irep.label, idx]]] if bare
       end
-      irep.each_with_op('CLASS', 'MODULE') { |insn, _idx| class_named << insn.sym_token }
+      irep.each_with_op(:CLASS, :MODULE) { |insn, _idx| class_named << insn.sym_token }
     end
     # Without the outside-world scan every name may be bound elsewhere: the evaluator then reads literals only.
     blocked = poisoned ? poisoned | class_named : nil
@@ -629,7 +629,7 @@ module DeclaredConstants
     def loadi(insn)
       case insn.op
       when :LOADI__1 then -1
-      when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
+      when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
       else IntegerConstants.loadi_value(insn)
       end
     end
