@@ -84,11 +84,11 @@ check.call('a covering ensure that the target leaves wins over a plain rescue',
 
 # rescue_insn_written_regs: leading-operand writers, reads-only ops, and an
 # unmodelled op (nil, so every local is aliased).
-check.call('MOVE writes its destination', gen0.rescue_insn_written_regs(insn(0, :MOVE, "R3\tR1")) == ['3'])
+check.call('MOVE writes its destination', gen0.rescue_insn_written_regs(insn(0, :MOVE, "R3\tR1")) == [3])
 check.call('JMPIF writes nothing', gen0.rescue_insn_written_regs(insn(0, :JMPIF, "R3\t9")) == [])
 check.call('JMPUW writes nothing', gen0.rescue_insn_written_regs(insn(0, :JMPUW, '9')) == [])
-check.call('RESCUE writes its second operand', gen0.rescue_insn_written_regs(insn(0, :RESCUE, "R3\tR4")) == ['4'])
-check.call('EXCEPT writes its operand', gen0.rescue_insn_written_regs(insn(0, :EXCEPT, 'R3')) == ['3'])
+check.call('RESCUE writes its second operand', gen0.rescue_insn_written_regs(insn(0, :RESCUE, "R3\tR4")) == [4])
+check.call('EXCEPT writes its operand', gen0.rescue_insn_written_regs(insn(0, :EXCEPT, 'R3')) == [3])
 check.call('an unmodelled op is nil', gen0.rescue_insn_written_regs(insn(0, :ARGARY, "R3\t1:0:0:0")).nil?)
 
 # LOADL_BIGINT: the pool entry carries the base and digits mruby's OP_LOADL uses.

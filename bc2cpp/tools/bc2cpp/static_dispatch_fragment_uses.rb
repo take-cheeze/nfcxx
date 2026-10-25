@@ -253,7 +253,7 @@ module StaticDispatchFragmentUses
 
   def backward_poison?(irep, index, reg, depth)
     return false if depth > 32
-    return true if non_name_literal?(irep, index, reg) || non_name_literal?(irep, index, (reg.to_i + 1).to_s)
+    return true if non_name_literal?(irep, index, reg) || non_name_literal?(irep, index, reg + 1)
 
     defs = BytecodeIR.reaching_definitions(irep, index, reg) || []
     !defs.empty? && defs.all? do |d|
@@ -271,7 +271,7 @@ module StaticDispatchFragmentUses
     insn = BytecodeIR.for(irep).source_at(reads.first)
     return false unless insn.op == :STRCAT && insn.reg == reg
 
-    non_name_literal?(irep, reads.first, (reg.to_i + 1).to_s) || forward_poison?(irep, reads.first, reg, depth + 1)
+    non_name_literal?(irep, reads.first, reg + 1) || forward_poison?(irep, reads.first, reg, depth + 1)
   end
 
   # A method body returning the value: followed into the result of every bytecode send of its name.

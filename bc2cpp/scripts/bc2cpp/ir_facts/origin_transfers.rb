@@ -118,7 +118,7 @@ check.call('codegen walk (through_handlers, no origin) still refuses at the JMPU
 # Ops outside the origin transfers keep their default answer: an unmodelled op still refuses.
 unmodelled = program.call([insn(0, :CALL, ''), insn(2, :RETURN, 'R1')])
 check.call('an op without an origin transfer still refuses under the origin walk',
-           unmodelled.reaching_definitions(1, '1', origin_transfers: true).nil?)
+           unmodelled.reaching_definitions(1, 1, origin_transfers: true).nil?)
 
 # ENTER (vm.c OP_ENTER): each slot of its register layout is answered by the transfer for that slot (enter_slot).
 # Precondition of every typed slot: the walk reached the ENTER from the method entry, so the register is read after
@@ -186,35 +186,35 @@ begin
   query_reg = '1'.dup
   shared = shared_program.reaching_definitions(1, query_reg, shared: true)
   check.call('shared cache entries are reused and deeply frozen',
-             shared.equal?(shared_program.reaching_definitions(1, '1', shared: true)) && shared.frozen? &&
+             shared.equal?(shared_program.reaching_definitions(1, 1, shared: true)) && shared.frozen? &&
              shared.all? { |definition| definition.frozen? && definition.reg.frozen? })
   check.call('a shared query never freezes the caller register', !query_reg.frozen?)
-  mutable = shared_program.reaching_definitions(1, '1')
+  mutable = shared_program.reaching_definitions(1, 1)
   mutable.first.index = 99
   mutable.first.reg << 'changed'
   mutable.first.built = :changed
   mutable.clear
   check.call('public mutable results cannot poison shared snapshots',
-             shared_program.reaching_definitions(1, '1', shared: true).map { |definition| [definition.index, definition.reg, definition.built] } == [[0, '1', nil]])
-  opaque = Set['1']
+             shared_program.reaching_definitions(1, 1, shared: true).map { |definition| [definition.index, definition.reg, definition.built] } == [[0, '1', nil]])
+  opaque = Set[1]
   check.call('shared mutable opaque query refuses its current register',
-             shared_program.reaching_definitions(1, '1', opaque_regs: opaque, shared: true).nil?)
+             shared_program.reaching_definitions(1, 1, opaque_regs: opaque, shared: true).nil?)
   opaque.clear
   check.call('changing a mutable opaque set is observed by shared queries',
-             shared_program.reaching_definitions(1, '1', opaque_regs: opaque, shared: true).map(&:index) == [0])
+             shared_program.reaching_definitions(1, 1, opaque_regs: opaque, shared: true).map(&:index) == [0])
   cause = { cause: :existing }
   check.call('shared diagnostic query keeps the first caller cause',
-             shared_program.reaching_definitions(1, '1', max_states: 0, refusal: cause, shared: true).nil? && cause == { cause: :existing })
+             shared_program.reaching_definitions(1, 1, max_states: 0, refusal: cause, shared: true).nil? && cause == { cause: :existing })
   fresh_cause = {}
-  shared_program.reaching_definitions(1, '1', max_states: 0, refusal: fresh_cause, shared: true)
+  shared_program.reaching_definitions(1, 1, max_states: 0, refusal: fresh_cause, shared: true)
   check.call('shared capped query reports its own refusal', fresh_cause == { cause: :state_cap })
   BytecodeIR::DATAFLOW_CACHE_SIZE.times { |index| shared_program.reaching_definitions(index + 2, '1', shared: true) }
   check.call('shared cache saturation keeps answers and the original bound',
-             shared_program.reaching_definitions(1, '1', max_states: 401, shared: true).map(&:index) == [0] &&
+             shared_program.reaching_definitions(1, 1, max_states: 401, shared: true).map(&:index) == [0] &&
              shared_program.instance_variable_get(:@reaching_definitions_cache).size == BytecodeIR::DATAFLOW_CACHE_SIZE)
   ENV['BC2CPP_IR_SHARED_DEFINITIONS'] = '0'
   copied_program = program.call([insn(0, :LOADI_1, 'R1 (1)'), insn(2, :RETURN, 'R1')])
-  copies = 2.times.map { copied_program.reaching_definitions(1, '1', shared: true) }
+  copies = 2.times.map { copied_program.reaching_definitions(1, 1, shared: true) }
   check.call('sharing optout retains independent public copies',
              copies.first == copies.last && !copies.first.equal?(copies.last) && !copies.first.first.equal?(copies.last.first))
 ensure
@@ -230,11 +230,11 @@ begin
     before = key_program.reaching_definitions(1, reg, shared: true)
     reg.replace('9')
     check.call("query keys isolate the caller register in mode #{mode}",
-               key_program.reaching_definitions(1, '1', shared: true) == before && !reg.frozen?)
-    first = Set['2', '3'].freeze
-    reordered = Set['3', '2'].freeze
-    a = key_program.reaching_definitions(1, '1', opaque_regs: first, shared: true)
-    b = key_program.reaching_definitions(1, '1', opaque_regs: reordered, shared: true)
+               key_program.reaching_definitions(1, 1, shared: true) == before && !reg.frozen?)
+    first = Set[2, 3].freeze
+    reordered = Set[3, 2].freeze
+    a = key_program.reaching_definitions(1, 1, opaque_regs: first, shared: true)
+    b = key_program.reaching_definitions(1, 1, opaque_regs: reordered, shared: true)
     check.call("opaque-set order remains canonical in mode #{mode}", a.equal?(b))
     mutable_program = program.call([insn(0, :LOADI_1, 'R1 (1)'), insn(2, :RETURN, 'R1')])
     mutable_member = '1'.dup
@@ -243,15 +243,15 @@ begin
     identity_set.freeze
     poisoned = mutable_program.reaching_definitions(1, mutable_member, opaque_regs: identity_set, shared: true)
     mutable_member.replace('2')
-    recovered = mutable_program.reaching_definitions(1, '1', opaque_regs: identity_set, shared: true)
+    recovered = mutable_program.reaching_definitions(1, 1, opaque_regs: identity_set, shared: true)
     check.call("frozen identity sets still observe mutable members in mode #{mode}",
                poisoned.nil? && recovered&.map(&:index) == [0])
     array_program = program.call([insn(0, :LOADI_1, 'R1 (1)'), insn(2, :RETURN, 'R1')])
     mutable_array_member = '1'.dup
     array = [mutable_array_member].freeze
-    blocked = array_program.reaching_definitions(1, '1', opaque_regs: array, shared: true)
+    blocked = array_program.reaching_definitions(1, 1, opaque_regs: array, shared: true)
     mutable_array_member.replace('2')
-    unblocked = array_program.reaching_definitions(1, '1', opaque_regs: array, shared: true)
+    unblocked = array_program.reaching_definitions(1, 1, opaque_regs: array, shared: true)
     check.call("frozen arrays still observe mutable members in mode #{mode}", blocked.nil? && unblocked&.map(&:index) == [0])
     if mode == '1'
       memo = key_program.instance_variable_get(:@opaque_reg_keys)
@@ -260,11 +260,11 @@ begin
                  !mutable_program.instance_variable_get(:@opaque_reg_keys).key?(identity_set) &&
                  !array_program.instance_variable_get(:@opaque_reg_keys).key?(array))
       key = memo[first]
-      key_program.reaching_definitions(1, '1', opaque_regs: first, shared: true)
+      key_program.reaching_definitions(1, 1, opaque_regs: first, shared: true)
       check.call('immutable opaque snapshots are reused and deeply frozen',
                  memo[first].equal?(key) && key.frozen? && key.all?(&:frozen?))
       BytecodeIR::DATAFLOW_CACHE_SIZE.times do |index|
-        key_program.reaching_definitions(1, '1', opaque_regs: Set[(index + 10).to_s].freeze, shared: true)
+        key_program.reaching_definitions(1, 1, opaque_regs: Set[(index + 10).to_s].freeze, shared: true)
       end
       check.call('opaque snapshot memo stays bounded without losing old entries',
                  memo.size == BytecodeIR::DATAFLOW_CACHE_SIZE && memo[first].equal?(key))

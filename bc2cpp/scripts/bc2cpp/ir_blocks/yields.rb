@@ -44,8 +44,8 @@ Bc2cppIrBlockFixtures.compile(source, 'yields') do |ireps, _root|
     IrYieldTypes.summarize(ctx, body, position, BytecodeIR::Types.new(body))
   end
   summary = summarize.call('caller')
-  check.call('multiple direct yields union their independent argument classes', summary && summary.arguments['1'].classes == Set[:Symbol, :Integer])
-  check.call('independent yields carry no RBS assumptions', summary && !summary.arguments['1'].declared? && summary.arguments['1'].contracts.empty?)
+  check.call('multiple direct yields union their independent argument classes', summary && summary.arguments[1].classes == Set[:Symbol, :Integer])
+  check.call('independent yields carry no RBS assumptions', summary && !summary.arguments[1].declared? && summary.arguments[1].contracts.empty?)
   %w[effect_caller splat_caller unknown_caller wrong_arity escape_caller].each do |name|
     check.call("unsafe or unsupported #{name} refuses its protocol", summarize.call(name).nil?)
   end

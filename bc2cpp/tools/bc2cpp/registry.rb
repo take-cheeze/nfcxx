@@ -349,7 +349,7 @@ def build_registry(ireps, root_label)
         #   EXT2
         #   DEF     R1  :toned?  (R2)
         # previous_real_index steps over the interposed EXT lines.
-        reg = insn.reg_token
+        reg = insn.reg
         method_idx = irep.previous_real_index(idx - 1)
         method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
         next unless method_insn && method_insn.op == :METHOD
@@ -363,7 +363,7 @@ def build_registry(ireps, root_label)
         opener_insn = opener_idx >= 0 ? BytecodeIR.for(irep).source_at(opener_idx) : nil
         next unless opener_insn && BytecodeIR::Ops::TARGET_CLASS.include?(opener_insn.op)
 
-        opener_reg = opener_insn.reg_token
+        opener_reg = opener_insn.reg
         next unless opener_reg == reg
 
         child_label = irep.reps[method_insn.block_index]

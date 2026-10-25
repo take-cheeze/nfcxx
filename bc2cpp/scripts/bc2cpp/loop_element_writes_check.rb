@@ -42,7 +42,7 @@ def expect_decisions(check, prefix, cg, bodies)
 
   nested, nidx = bodies.fetch(:nested)
   check.call("#{prefix}: a nested block writes the body R1 (own_upvar_written_regs)",
-             BytecodeIR.own_upvar_written_regs(nested).include?('1'))
+             BytecodeIR.own_upvar_written_regs(nested).include?(1))
   cause = {}
   BytecodeIR.for(nested).reaching_definitions(nidx, nested.instructions[nidx].reg.to_s,
                                              opaque_regs: BytecodeIR.own_upvar_written_regs(nested),
