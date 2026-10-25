@@ -346,7 +346,7 @@ end
 class LocalLifetime
   attr_reader :errors
 
-  def initialize(f, infer_loan_ends = false, semantic_layouts = nil, call_effects = nil)
+  def initialize(f, infer_loan_ends = false, semantic_layouts = nil, call_effects = nil, abi_sizes = {})
     @infer_loan_ends = infer_loan_ends
     @layouts = semantic_layouts || BorrowLayouts.new([], BadIR, BorrowRefused)
     @call_effects = call_effects || BorrowCallEffects.new([], @layouts, BadIR, BorrowRefused)
@@ -368,6 +368,7 @@ class LocalLifetime
     @register_types = {}
     @symbols = {}
     @implicit_loans = {}
+    @byval = {}
     @register_defs = {}
     defs = lambda do |x|
       next unless x.is_a?(Array)
@@ -472,6 +473,20 @@ class LocalLifetime
       raise BorrowRefused, 'variadic functions are unsupported' if bh(p) == 'ellipsis'
       raise BadIR, 'param form' unless bh(p) == 'param' && p.length == 4
       @params << [p[1], bname(p[2]), bh(unconst(p[3])) == 'ptr', unconst(p[3])]
+      if bh(p[3]) == 'byval'
+        # The register is the address of the callee's own initialized copy: a
+        # synthetic local that lives for the whole call.
+        ty = p[3][1]
+        desc = @layouts.lookup(ty)
+        size = desc ? desc[:size] : (bh(ty) == 'struct' && ty[1].is_a?(IRStr) ? abi_sizes[ty[1].to_s] : nil)
+        raise BorrowRefused, 'by-value parameter of unknown size' unless size && size > 0
+        name = '*' + p[1]
+        raise BadIR, "by-value parameter slot #{name} collides with another name" if @slots[name] || @symbols[name]
+        @slot_info[name] = [@slots.length, size, ty, desc ? desc[:align] : 1]
+        @slots[name] = true
+        @declared[name] = true
+        @byval[p[1]] = name
+      end
     end
     @slots.each_key do |name|
       unless @declared[name] || @params.any? { |p| p[1] == name }
@@ -956,7 +971,8 @@ class LocalLifetime
 
   # Each storage state is a set: dead, uninitialized, initialized, moved. Pointer
   # provenance is a set of local storage identities, or external/unknown.
-  def access(place, state, read, borrowing = nil, width = nil, semantic_type = nil)
+  # copying: a read that carries byte states instead of requiring them initialized.
+  def access(place, state, read, borrowing = nil, width = nil, semantic_type = nil, copying = false)
     base = base_origin(place)
     if base == 'external'
       diagnostic('contract-not-closed', 'external memory') if @summary
@@ -991,7 +1007,7 @@ class LocalLifetime
     if required
       status = required.flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
     end
-    diagnostic('uninitialized', label) if read && status.include?('uninitialized')
+    diagnostic('uninitialized', label) if read && !copying && status.include?('uninitialized')
     diagnostic('use-after-move', label) if read && status.include?('moved')
     diagnostic('use-after-drop', label) if read && status.include?('dropped')
     @loans.each do |id, loan|
@@ -1042,6 +1058,61 @@ class LocalLifetime
     return if top == ['external']
     left = top.reject { |p| p == 'external' }.map { |p| b = base_origin(p); b.start_with?('ended:') ? b[6..-1] : (storage(p) || b) }
     diagnostic('eh-frame-not-popped', left.uniq.sort.join(','))
+  end
+
+  # (copy N DST SRC) moves byte states and the pointer values wholly inside the
+  # range from SRC to DST. External memory reads as initialized bytes without
+  # pointer provenance; a local address may not be copied into it.
+  def copy_memory(x, state)
+    n = constant_offset(x[1])
+    raise BadIR, 'negative copy length' if n < 0
+    src = value(x[3], state)
+    dst = value(x[2], state)
+    if src.empty? || dst.empty? || (src + dst).include?('unknown')
+      raise BorrowRefused, 'copy with unknown pointer provenance'
+    end
+    raise BorrowRefused, 'copy through an aliased place' unless src.length == 1 && dst.length == 1
+    raise BorrowRefused, 'copy through a dynamic index' if ranged?(src[0]) || ranged?(dst[0])
+    bytes = Array.new(n) { ['initialized'] }
+    pointers = []
+    if base_origin(src[0]) == 'external'
+      access(src[0], state, true, nil, n)
+    else
+      a = access(src[0], state, true, nil, n, nil, true)
+      return unless a
+      root, off, = a
+      raise BorrowRefused, 'copy of drop-obligated storage requires a copy contract' if @drops.values.any? { |d| d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
+      record_memory_loan_values(root, off, n, state)
+      bytes = (0...n).map { |i| (state[byte_key(root, off + i)] || ['dead']).map { |b| b == 'dead' ? 'uninitialized' : b }.uniq.sort }
+      prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+      state.each do |key, v|
+        next unless key.start_with?(prefix)
+        parts = key.split(':')
+        o, w = parts[2].to_i, parts[3].to_i
+        pointers << [o - off, w, v] if o >= off && o + w <= off + n
+      end
+    end
+    if base_origin(dst[0]) == 'external'
+      access(dst[0], state, false, nil, n)
+      if pointers.any? { |_o, _w, v| v.any? { |p| p != 'external' } }
+        raise BorrowRefused, 'copy into external storage may escape a local address'
+      end
+      return
+    end
+    a = access(dst[0], state, false, nil, n)
+    return unless a
+    root, off, = a
+    raise BorrowRefused, 'copy into drop-obligated storage requires a copy contract' if @drops.values.any? { |d| d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
+    if @regions.values.any? { |r| r[:name] == root }
+      raise BorrowRefused, 'copy of unknown pointer provenance into argument memory' if pointers.any? { |_o, _w, v| v.include?('unknown') }
+      diagnostic('contract-escape', root) if pointers.any? { |_o, _w, v| v.any? { |p| p != 'external' } }
+    end
+    forget_pointer_values(root, off, n, state)
+    n.times do |i|
+      key = byte_key(root, off + i)
+      state[key] = bytes[i] unless (state[key] || ['dead']).include?('dead')
+    end
+    pointers.each { |o, w, v| state[pointer_key(root, off + o, w)] = v }
   end
 
   def invalidate_pointers(state, from, to)
@@ -1358,7 +1429,7 @@ class LocalLifetime
   def transfer(x, state)
     arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[3, 4], 'store'=>[4], 'return'=>[1,2],
-               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
+               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3], 'copy'=>[4]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
@@ -1382,6 +1453,7 @@ class LocalLifetime
       end
     when 'scope-end'
       k = key(x[1])
+      k = 'slot:' + @byval[k] if k && @byval[k] # (scope-end %N) ends a by-value parameter's copy
       raise BadIR, 'scope-end requires a local slot' unless k && k.start_with?('slot:')
       name = k[5..-1]
       raise BadIR, "unknown local slot #{name}" unless @slots[name]
@@ -1479,6 +1551,8 @@ class LocalLifetime
         end
       end
       check_pending_drops(state)
+    when 'copy'
+      copy_memory(x, state)
     when 'condition', 'eval', 'nonnull'
       value(x[1], state)
     when 'bounds'
@@ -1498,6 +1572,10 @@ class LocalLifetime
     @drops.each_key { |id| initial[drop_key(id)] = ['dead'] }
     @params.each do |p, name, pointer|
       initial['value:' + p] = pointer ? ['external'] : []
+      if @byval[p]
+        reset_storage(@byval[p], initial, 'initialized')
+        initial['value:' + p] = ['local:' + @byval[p]]
+      end
       if @slots[name]
         reset_storage(name, initial, 'uninitialized')
         reset_drop_flags(name, initial, 'vacant')
@@ -1635,7 +1713,8 @@ end
 class SummaryInference
   attr_reader :effects, :inferred
 
-  def initialize(functions, layouts, effects, infer_loan_ends)
+  def initialize(functions, layouts, effects, infer_loan_ends, abi_sizes = {})
+    @abi_sizes = abi_sizes
     @functions = {}
     functions.each { |f| @functions[bname(f[1])] = f }
     @layouts = layouts
@@ -1746,7 +1825,7 @@ class SummaryInference
       form = ['call-effects', IRStr.new(name.bytes), returns, ['nothrow'], ['noescape'], ['closed'], ['args'] + args]
       begin
         candidate = @effects.with(name, form)
-        checker = LocalLifetime.new(f, @infer_loan_ends, @layouts, candidate)
+        checker = LocalLifetime.new(f, @infer_loan_ends, @layouts, candidate, @abi_sizes)
         checker.run
       rescue BorrowRefused, BadIR
         return nil
@@ -1800,14 +1879,20 @@ begin
   call_effects = BorrowCallEffects.new(forms, semantic_layouts, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
+  # (abi-type "N" SIZE ALIGN ...) gives the size of a by-value aggregate parameter.
+  abi_sizes = {}
+  forms.each do |f|
+    next unless bh(f) == 'abi-type' && f.length >= 3 && f[1].is_a?(IRStr) && f[2].is_a?(String)
+    abi_sizes[f[1].to_s] = f[2].to_i if f[2].bytes.all? { |c| c >= 48 && c <= 57 }
+  end
   if summaries
-    inference = SummaryInference.new(functions, semantic_layouts, call_effects, infer)
+    inference = SummaryInference.new(functions, semantic_layouts, call_effects, infer, abi_sizes)
     call_effects = inference.effects
     inference.inferred.each { |form| puts 'inferred: ' + form_text(form) }
   end
   errors = []
   functions.each do |f|
-    checker = LocalLifetime.new(f, infer, semantic_layouts, call_effects)
+    checker = LocalLifetime.new(f, infer, semantic_layouts, call_effects, abi_sizes)
     checker.run
     errors.concat(checker.errors)
   end
