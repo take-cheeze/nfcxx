@@ -269,10 +269,31 @@ but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
 layouts, dynamic offsets outside local arrays (see [Array indexing](#array-indexing)), out-of-bounds
-constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
+constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads and moves remain refused; aggregate copies are described below. Without semantic metadata,
 whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
 widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
+
+## Aggregate copies
+
+`(copy N DST SRC)` copies byte states. Each destination byte takes the state of its source
+byte, so copying a struct with uninitialized padding or fields is not an error. A later read of
+the uninitialized part still is. Pointer values that lie wholly inside the copied range keep their
+provenance at the new offset; other pointer values in the destination range become unknown.
+
+- The source must be alive and unmoved, and an exclusive loan over it conflicts.
+- The destination is checked as a write: alive, and no live loan overlaps it.
+- External memory reads as initialized bytes holding no known pointers. Copying a local address
+  into external memory is refused. Copying one into argument memory under a verified summary is
+  `contract-escape`.
+- Unknown or aliased places, dynamic indices, and drop-obligated storage are refused.
+
+A `byval` parameter's register is the address of the callee's own copy of the argument. The
+checker models that copy as a synthetic local slot `*%N`: initialized, alive until
+`(scope-end %N)`, and holding pointers of unknown provenance. Returning its address is
+`return-local-address`. Its size comes from the slot's semantic layout or from the module's
+`(abi-type "N" SIZE ...)` record. Callers still cannot pass aggregates by value, because call
+summaries have no by-value aggregate effect.
 
 ## Array indexing
 
@@ -685,6 +706,10 @@ removed.
 `tests/pathb-borrow/contracts/layouts.cpp` checks a reader of a padded nested struct through the
 frontend's layout records and is refused once they are removed, with identical QBE either way.
 `nolayouts.cpp` lists struct shapes that must get no record.
+Copy fixtures in `tests/pathb-borrow/copy` cover loans over either side, external sources,
+escaping copies, and copies from ended storage. The C++ cases `cpp/copy_*.cpp` carry an
+uninitialized field and a dangling pointer field through struct copies, and `cpp/byval_*.cpp`
+check a by-value parameter's copy and a returned address of it.
 `contracts/raii.cpp` checks a local with a destructor, its exception-stack frames, and the
 destructor's inferred summary, and runs natively. A variant that uses the object through a pointer
 after its scope reports `use-after-scope`. The fixtures in `tests/pathb-borrow/eh` cover push and
