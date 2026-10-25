@@ -46,7 +46,7 @@ class IrContextResults
     end
     def pool_mask(irep, insn) = @engine.gen.send(:numeric_oracle_pool_mask, irep, insn)
     def literal_class_mask(insn)
-      name = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol' }[insn.op]
+      name = CodeGen::ExactOracle::LITERAL_CLASSES[insn.op]
       name && @engine.gen.numeric_class_bit(name)
     end
     def false_class_bit = @engine.gen.numeric_class_bit('FalseClass')

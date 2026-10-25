@@ -46,12 +46,17 @@ class CodeGen
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
     # The class bit of a true, false or Symbol literal (exactly TrueClass, FalseClass or Symbol: each has one instance
     # or is a Symbol, and its mrb_class is that class, see the mrb_class immediate cases in mruby's class.h).
-    LITERAL_CLASSES = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol' }.freeze
+    LITERAL_CLASSES = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol', 'SYMBOL' => 'Symbol', 'INTERN' => 'Symbol' }.freeze
     def literal_class_mask(insn)
       klass = LITERAL_CLASSES[insn.op]
       return nil unless klass && @cg.immediate_class_bits_enabled?
 
       @cg.numeric_class_bit(klass)
+    end
+    def keyword_presence(_insn)
+      return NumericFlow::OTHER unless @cg.immediate_class_bits_enabled?
+
+      @cg.numeric_class_bit('TrueClass') | @cg.numeric_class_bit('FalseClass')
     end
     def false_class_bit = @cg.numeric_false_class_bit
     # EXACT_ARITH: `+ - * /` on numbers are the core Integer/Float bodies under the numeric flow's own gates, so an

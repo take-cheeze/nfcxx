@@ -175,7 +175,7 @@ unless ENV['MRBC']
 end
 
 Dir.mktmpdir('ir-context-results') do |dir|
-  source = <<~RUBY
+  source = <<~'RUBY'
     class ContextCases
       def identity(value); value; end
       def peer(value); identity(value); end
@@ -219,6 +219,8 @@ Dir.mktmpdir('ir-context-results') do |dir|
       def effect_write; @state = :held; opaque_writer('changed'); @state; end
       def call_int; identity(1); end
       def call_symbol; identity(:tag); end
+      def call_intern(value); :"prefix#{value}"; end
+      def call_pooled; %i[tag other].freeze[0]; end
       def call_peer; peer('text'); end
       def call_default; optional; end
       def call_given; optional(:tag); end
@@ -288,7 +290,7 @@ Dir.mktmpdir('ir-context-results') do |dir|
   check.call('leaf evaluation reuse preserves the complete report', report == run.call('BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve the complete report', report == run.call('BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
   returns = report['ir_feedback'].select { |row| row['kind'] == 'return' }.to_h { |row| [[row['owner'], row['method']], row] }
-  expected = { 'call_int' => ['Integer'], 'call_symbol' => ['Symbol'], 'call_peer' => ['String'],
+  expected = { 'call_int' => ['Integer'], 'call_symbol' => ['Symbol'], 'call_intern' => ['Symbol'], 'call_pooled' => ['Symbol'], 'call_peer' => ['String'],
                'call_post' => ['String'], 'call_default' => ['Integer'], 'call_given' => ['Symbol'], 'call_kw' => ['String'],
                'call_kw_default' => ['Symbol'], 'call_kw_given' => ['Integer'],
                'call_recursive' => ['String'], 'call_mutual' => ['Symbol'], 'call_array' => ['String'],

@@ -32,6 +32,15 @@ check.call('STRCAT keeps the String literal it extends', klass.call(straight.exa
 check.call('LOADINEG is an Integer with its negative value', straight.exact_at(5, '5').to_a == [:Integer, -5])
 check.call('an unwritten temporary has no exact class', straight.exact_at(5, '6').nil?)
 
+%w[SYMBOL INTERN].each do |op|
+  symbol = types.call([insn(0, op, op == 'SYMBOL' ? "R1\tL[0]" : 'R1'), insn(3, 'RETURN', 'R1')])
+  check.call("#{op} has a Symbol result type", symbol.at(1, '1') == Set[:Symbol])
+  check.call("#{op} has an exact Symbol result class", klass.call(symbol.exact_at(1, '1')) == :Symbol)
+end
+presence = types.call([insn(0, 'KEY_P', "R1\t:option"), insn(3, 'RETURN', 'R1')])
+check.call('keyword presence has both boolean classes', presence.at(1, '1') == Set[:TrueClass, :FalseClass])
+check.call('keyword presence does not claim one exact boolean class', presence.exact_at(1, '1').nil?)
+
 # A join of two literals on each register: R1 is 3 on both arms, R2 an Array on one and a Hash on the other.
 join = types.call([
   insn(0, 'JMPNOT', "R7\t12"), insn(4, 'LOADI_3', "R1\t(3)"), insn(6, 'ARRAY', "R2\t0"), insn(9, 'JMP', '16'),
