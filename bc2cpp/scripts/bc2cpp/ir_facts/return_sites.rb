@@ -77,10 +77,10 @@ early = irep_of([
   insn(12, :RETURN, 'R3')
 ])
 check.call('a RETURN of the register between the write and the read does not stop the dominance',
-           BytecodeIR.write_dominates?(early, 0, 3, '2'))
+           BytecodeIR.write_dominates?(early, 0, 3, 2))
 check.call('a real write of the register between them still does (negative)',
            !BytecodeIR.write_dominates?(irep_of([insn(0, :ARRAY, "R2\t0"), insn(3, :LOADNIL, "R2\t(nil)"),
-                                                 insn(5, :MOVE, "R3\tR2"), insn(8, :RETURN, 'R3')]), 0, 2, '2'))
+                                                 insn(5, :MOVE, "R3\tR2"), insn(8, :RETURN, 'R3')]), 0, 2, 2))
 
 if failures.empty?
   puts 'bc2cpp IR return sites check: PASS'

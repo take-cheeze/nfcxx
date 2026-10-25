@@ -101,7 +101,7 @@ class CodeGen
     return 0 unless state
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(r)
 
     state[r]
   end
@@ -190,7 +190,7 @@ class CodeGen
       reads = setter_arg_candidates[key]
       unless reads
         sites, k = @entry_cand.fetch(key)
-        reads = sites.map { |(irep, idx, recv, _argc, _own)| [irep, idx, (recv + k).to_s] }
+        reads = sites.map { |(irep, idx, recv, _argc, _own)| [irep, idx, recv + k] }
       end
       next unless grow_class_pool(@class_arg_pools, key, reads) { return_class_invalidate(key[0]) }
 
@@ -312,7 +312,7 @@ class CodeGen
 
       return nil unless argc == mand
 
-      reads << [irep, idx, (recv + k).to_s]
+      reads << [irep, idx, recv + k]
     end
     # Every site resolved and none reaches this definition: nothing calls it, so the pool has nothing to hold.
     return nil if reads.empty? && !pending
