@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <vector>
 
 #include <lvgl.h>
 #include <mruby.h>
@@ -72,11 +73,56 @@ bool report_exception(mrb_state* M, const char* where) {
   return clean_exit;
 }
 
-void print_scene(mrb_state* M, mrb_value game, long frame) {
+// Prints the scene every 50 frames and whenever it changes.
+void print_scene(mrb_state* M, mrb_value game, long frame, bool always) {
+  static char last[128];
   mrb_value name = bc2cpp_entry_RPG2k_current_scene_name(M, game);
-  fprintf(stdout, "TRACE_HOST frame=%ld scene=%s\n", frame,
-          mrb_string_p(name) ? RSTRING_PTR(name) : "?");
+  const char* const cur = mrb_string_p(name) ? RSTRING_PTR(name) : "?";
+  if (!always && strcmp(cur, last) == 0)
+    return;
+  snprintf(last, sizeof last, "%s", cur);
+  fprintf(stdout, "TRACE_HOST frame=%ld scene=%s\n", frame, cur);
   fflush(stdout);
+}
+
+// BC2CPP_HOST_KEYS: scripted input, "FRAME:KEY,FRAME:KEY,..." with KEY an
+// RGSS::Input constant name (C, B, DOWN, ...). Each key is pressed before
+// that frame's main_loop and released before the next one, the same
+// RGSS::Input.press / .release taps the battle-play probe uses
+// (mruby-rpg2k/mrblib/main.rb).
+struct KeyTap {
+  long frame;
+  char key[16];
+};
+
+std::vector<KeyTap> parse_keys(const char* spec) {
+  std::vector<KeyTap> taps;
+  while (spec && *spec) {
+    KeyTap tap{};
+    int used = 0;
+    if (sscanf(spec, "%ld:%15[A-Z0-9_]%n", &tap.frame, tap.key, &used) != 2) {
+      fprintf(stderr, "TRACE_HOST bad BC2CPP_HOST_KEYS entry: %s\n", spec);
+      exit(64);
+    }
+    taps.push_back(tap);
+    spec += used;
+    if (*spec == ',')
+      ++spec;
+  }
+  return taps;
+}
+
+void tap_keys(mrb_state* M, const std::vector<KeyTap>& taps, long frame) {
+  struct RClass* const input =
+      mrb_module_get_under(M, mrb_module_get(M, "RGSS"), "Input");
+  for (const KeyTap& tap : taps) {
+    if (tap.frame != frame && tap.frame != frame - 1)
+      continue;
+    const mrb_value key =
+        mrb_const_get(M, mrb_obj_value(input), mrb_intern_cstr(M, tap.key));
+    mrb_funcall(M, mrb_obj_value(input),
+                tap.frame == frame ? "press" : "release", 1, key);
+  }
 }
 
 }  // namespace
@@ -122,11 +168,17 @@ int main(int argc, char** argv) {
   set_const(M, "GAME_DIR", mrb_str_new_cstr(M, game_dir));
   set_const(M, "RTP_DIR", mrb_str_new_cstr(M, ""));
   set_const(M, "TEST_PLAY", mrb_false_value());
-  // Auto-selects New Game on the title screen
-  // (mruby-rpg2k/mrblib/scene/title.rb).
-  set_const(M, "RPG2K_NEW_GAME", mrb_true_value());
-  set_const(M, "RPG2K_CONTINUE", mrb_false_value());
-  set_const(M, "RPG2K_PREVIEW_MAP", mrb_fixnum_value(0));
+  // Auto-selects New Game on the title screen, or Continue with
+  // BC2CPP_HOST_CONTINUE=1 (mruby-rpg2k/mrblib/scene/title.rb).
+  const char* const cont = getenv("BC2CPP_HOST_CONTINUE");
+  const bool continue_game = cont && strcmp(cont, "1") == 0;
+  set_const(M, "RPG2K_NEW_GAME", mrb_bool_value(!continue_game));
+  set_const(M, "RPG2K_CONTINUE", mrb_bool_value(continue_game));
+  // BC2CPP_HOST_PREVIEW_MAP starts New Game on that map's centre tile instead
+  // of the project's start (mruby-rpg2k/mrblib/main.rb, #preview_map_id).
+  const char* const preview = getenv("BC2CPP_HOST_PREVIEW_MAP");
+  set_const(M, "RPG2K_PREVIEW_MAP",
+            mrb_fixnum_value(preview ? strtol(preview, nullptr, 10) : 0));
   // BC2CPP_HOST_BATTLE_TROOP opens a headless battle against that troop right
   // after New Game; BC2CPP_HOST_BATTLE_PLAY=1 also drives it with confirm taps
   // (mruby-rpg2k/mrblib/main.rb, #headless_battle_troop and
@@ -153,9 +205,14 @@ int main(int argc, char** argv) {
           BC2CPP_ENTRY_RPG2k_main_loop ? "direct" : "by-name",
           BC2CPP_ENTRY_RPG2k_current_scene_name ? "direct" : "by-name");
 
+  const std::vector<KeyTap> taps = parse_keys(getenv("BC2CPP_HOST_KEYS"));
   for (long frame = 0; frame < frames; ++frame) {
-    if (frame % 50 == 0)
-      print_scene(M, game, frame);
+    print_scene(M, game, frame, frame % 50 == 0);
+    tap_keys(M, taps, frame);
+    if (M->exc) {
+      report_exception(M, "BC2CPP_HOST_KEYS");
+      return 4;
+    }
     bc2cpp_entry_RPG2k_main_loop(M, game);
     if (M->exc) {
       const bool clean = report_exception(M, "main_loop");
@@ -164,7 +221,7 @@ int main(int argc, char** argv) {
       return clean ? 0 : 4;
     }
   }
-  print_scene(M, game, frames);
+  print_scene(M, game, frames, true);
   fprintf(stdout, "TRACE_HOST done frames=%ld\n", frames);
   return 0;
 }
