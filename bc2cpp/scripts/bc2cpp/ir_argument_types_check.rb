@@ -394,7 +394,7 @@ declared_only = declared_rest.call(rest_body, 2, 2, declared_rest_elements: { 1 
 check.call('a declared *Integer rest read in the body is Integer (nil for an absent index), and is declared',
            declared_only&.classes == Set[:NilClass, :Integer] && declared_only.declared?)
 check.call('a declared rest element is not visible to the undeclared query',
-           BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { 1 => Set[:Integer] }).at(2, '2').nil?)
+           BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { 1 => Set[:Integer] }).at(2, 2).nil?)
 check.call('a mutated rest with a declared *Integer takes only the declaration: the call-site join String is not added',
            declared_rest.call(rest_mutated, 4, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] },
                               declared_rest_elements: { 1 => Set[:Integer] })&.classes == Set[:NilClass, :Integer])
