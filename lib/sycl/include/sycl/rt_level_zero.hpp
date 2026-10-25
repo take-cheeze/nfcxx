@@ -158,21 +158,35 @@ class ze_rt {
     for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
     bool sliceable = true;
     for (int e = sd + 1; e < 3; e++) if (l[e] != 1) sliceable = false;
-    uint64_t inner = 1;   // the groups in the dimensions below sd
-    for (int e = 0; e < sd; e++) inner *= ng[e];
     uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
     uint64_t per_group = inv_group * stack_bytes + stride;
+    // the groups in the dimensions below d: one group along d takes them all
+    auto below = [&](int d) { uint64_t b = 1; for (int e = 0; e < d; e++) b *= ng[e]; return b; };
+    // when even one group along sd does not fit (with all the groups below it), the slab moves to the next dimension
+    // inward; the dimensions above it then run one group per launch, so they must be one invocation wide (l == 1) for the
+    // slab to stay contiguous in the linear index
+    if (stack_total + groups * stride > room)
+      while (sliceable && sd > 0 && l[sd] == 1 && below(sd) * per_group > room) sd--;
+    uint64_t inner = below(sd);
+    uint64_t outer = 1;   // the groups of the dimensions above sd, one per launch
+    for (int e = sd + 1; e < 3; e++) outer *= ng[e];
     uint32_t per_launch = ng[sd];   // groups along sd in one launch
     if (stack_total + groups * stride > room && sliceable) {
       uint64_t fit = room / (inner * per_group);
       per_launch = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
     }
+    const uint64_t chunks = (ng[sd] + per_launch - 1) / per_launch;   // launches along sd for each group above it
     std::memset(at(dev_base_), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
     ze_kernel_handle_t k = kernel(it->entry, l, it->module, it->subgroup_size);
-    for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_launch) {
+    for (uint64_t step = 0; step < outer * chunks; step++) {
+      // og: the group of each dimension above sd (the linear group index puts x fastest, as the emitter does)
+      const uint64_t above = step / chunks;
+      uint32_t og[3] = {0, 0, 0};
+      { uint64_t r = above; for (int e = sd + 1; e < 3; e++) { og[e] = (uint32_t)(r % ng[e]); r /= ng[e]; } }
+      uint32_t s0 = (uint32_t)(step % chunks) * per_launch;
       uint32_t cnt = std::min(per_launch, ng[sd] - s0);
-      uint64_t first_group = (uint64_t)s0 * inner;
+      uint64_t first_group = (above * ng[sd] + s0) * inner;
       uint64_t slab_groups = (uint64_t)cnt * inner;
       uint64_t slab_stack = slab_groups * inv_group * stack_bytes;
       uint64_t region = alloc(slab_stack + slab_groups * stride);
@@ -193,10 +207,14 @@ class ze_rt {
       p.ox = 0; p.oy = 0; p.oz = 0;
       uint32_t *o[3] = {&p.ox, &p.oy, &p.oz};
       *o[sd] = s0;
+      for (int e = sd + 1; e < 3; e++) *o[e] = og[e];
       std::memcpy(at(dev_base_ + ze_push_at), &p, sizeof p);
       void *push = at(dev_base_ + ze_push_at);
       check(zeKernelSetArgumentValue(k, 0, sizeof push, &push), "zeKernelSetArgumentValue");
-      ze_group_count_t gc = {sd == 0 ? cnt : ng[0], sd == 1 ? cnt : ng[1], sd == 2 ? cnt : ng[2]};
+      uint32_t ngs[3] = {ng[0], ng[1], ng[2]};
+      ngs[sd] = cnt;
+      for (int e = sd + 1; e < 3; e++) ngs[e] = 1;
+      ze_group_count_t gc = {ngs[0], ngs[1], ngs[2]};
       check(zeCommandListAppendLaunchKernel(imm_, k, &gc, nullptr, 0, nullptr), "zeCommandListAppendLaunchKernel");
       check(zeCommandListAppendBarrier(imm_, nullptr, 0, nullptr), "zeCommandListAppendBarrier");
       check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
