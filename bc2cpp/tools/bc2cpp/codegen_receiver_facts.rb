@@ -958,6 +958,9 @@ class CodeGen
     key = "#{owner_def.owner}##{owner_def.name}"
     return true if SUPER_TARGETS.include?(key)
 
+    # A whole-program memo like block_carrying_callers_of's, stored only once call facts can answer.
+    return no_caller_passes_block?(owner_def) unless call_facts_enabled?
+
     @super_no_caller_block ||= {}
     return @super_no_caller_block[key] if @super_no_caller_block.key?(key)
 
@@ -982,31 +985,37 @@ class CodeGen
   # Every block-carrying send of `name` in the build, as the set of receiver
   # class names it can provably hold. nil when some send's receiver class is
   # unproven (the caller must treat the question as open).
+  #
+  # SUPER_NO_CALLER_BLOCK: a whole-program memo (every caller of a name is fixed once the ireps are), kept across
+  # method compiles. Only an answer with call facts enabled is stored: they turn on once the closed world is set.
   def block_carrying_callers_of(name)
+    return nil unless call_facts_enabled?
+
     @block_carrying_callers ||= {}
     return @block_carrying_callers[name] if @block_carrying_callers.key?(name)
-    return @block_carrying_callers[name] = nil unless call_facts_enabled?
 
     found = []
     unknown = false
-    @ireps.each_value do |irep|
+    block_send_sites.fetch(name, []).each do |irep, idx, reg|
       states = call_facts_states(irep)
       next unless states
 
-      BytecodeIR.for(irep).each_with_op('SENDB', 'SSENDB') do |insn, idx|
-        next unless insn.sym == name
-
-        reg = insn.reg.to_i
-        names = states[idx] && CallFacts::Flow.facts(states[idx], reg)
-        classes = names && call_facts_classes(names)
-        if classes.nil?
-          unknown = true
-        else
-          found << classes
-        end
+      names = states[idx] && CallFacts::Flow.facts(states[idx], reg)
+      classes = names && call_facts_classes(names)
+      if classes.nil?
+        unknown = true
+      else
+        found << classes
       end
     end
     @block_carrying_callers[name] = unknown ? nil : found
+  end
+
+  # { name => [[irep, index, receiver register]] } for every block-carrying send in the build.
+  def block_send_sites
+    @block_send_sites ||= @ireps.each_value.with_object(Hash.new { |h, k| h[k] = [] }) do |irep, sites|
+      BytecodeIR.for(irep).each_with_op('SENDB', 'SSENDB') { |insn, idx| sites[insn.sym] << [irep, idx, insn.reg.to_i] }
+    end
   end
 
   # The superclass closure: every class whose instances can be an instance of

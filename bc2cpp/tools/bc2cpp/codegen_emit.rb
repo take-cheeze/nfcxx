@@ -18,18 +18,32 @@ class CodeGen
     return @clean_cache[label] if @clean_cache.key?(label)
     return false if @probing.include?(label)
 
+    probe_clean(label) do
+      # Specialization caches emitted clone text, so its probes must keep final-code optimization.
+      @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+      compile_method(label)
+    end
+  end
+
+  # One cleanliness probe of `label` (compiles_clean?, block_core_clean?). An answer a guard gave from an
+  # in-progress probe is conditional on that probe's stack, not on this label alone, so it is not memoized in
+  # @clean_cache. PROBE_CYCLE_CACHE: it is kept for the rest of the outermost probe instead, whose stack every
+  # nested probe shares; without it a ring of methods whose `super` probes each other (optcarrot's
+  # Oscillator#reset and its subclasses) recompiled each member for every site that reached the ring.
+  def probe_clean(label)
+    @cycle_clean_cache = {} if @probing.empty?
+    return @cycle_clean_cache[label] if @cycle_clean_cache&.key?(label) && ENV['BC2CPP_PROBE_CYCLE_CACHE'] != '0'
+
     @probing << label
     begin
       cycles = @guard_cycles
-      result = with_fresh_method_state do
-        # Specialization caches emitted clone text, so its probes must keep final-code optimization.
-        @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
-        compile_method(label)
-      end
+      result = with_fresh_method_state { yield }
       clean = !result[:code].include?('#error')
-      # Not memoized when a guard answered from an in-progress probe: the answer is then
-      # conditional on that probe's stack, not on this label alone.
-      @clean_cache[label] = clean if cycles == @guard_cycles
+      if cycles == @guard_cycles
+        @clean_cache[label] = clean
+      else
+        (@cycle_clean_cache ||= {})[label] = clean
+      end
       clean
     ensure
       @probing.delete(label)
@@ -48,10 +62,6 @@ class CodeGen
     # which @blk_param_level is derived from. Scoped like @blk_param_level (the
     # two are saved and restored together), so it resets per method too.
     :@block_fallback_depth => 0,
-    # SUPER_NO_CALLER_BLOCK: whole-program memos, not per-method state
-    # (they answer about every caller of a name, which is fixed once the ireps
-    # are). nil is the "no memo yet" marker each writes with `||=`.
-    :@super_no_caller_block => nil, :@block_carrying_callers => nil, :@superclass_closure => nil,
     :@block_ret_slot => nil, :@block_brk_slot => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     # LOOP_FLOW_POSITION: the enclosing inlined loop's SENDB. Saved and restored around each inlined

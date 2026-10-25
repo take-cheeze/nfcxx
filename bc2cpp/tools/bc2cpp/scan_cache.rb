@@ -28,13 +28,31 @@ module ScanCache
 
   # The key holds no environment because a cached scan may not read any: ENV read while a scan computes is an Error.
   module EnvGuard
-    %i[[] fetch key? has_key? include? member? assoc values_at slice to_h to_hash each each_pair select filter reject
+    def self.refuse(name, args)
+      raise Error, "bc2cpp: a cached scan read ENV.#{name}(#{args.map(&:inspect).join(', ')}); its key holds no " \
+                   'environment, so it may not read one'
+    end
+
+    # The reads codegen makes on hot paths (a switch per send) take no splat, so the guard costs one compare.
+    def [](name)
+      EnvGuard.refuse(:[], [name]) if ScanCache.computing.positive?
+      super
+    end
+
+    def key?(name)
+      EnvGuard.refuse(:key?, [name]) if ScanCache.computing.positive?
+      super
+    end
+
+    def fetch(*args, &block)
+      EnvGuard.refuse(:fetch, args) if ScanCache.computing.positive?
+      super
+    end
+
+    %i[has_key? include? member? assoc values_at slice to_h to_hash each each_pair select filter reject
        filter_map map keys values].each do |name|
       define_method(name) do |*args, **opts, &block|
-        if ScanCache.computing.positive?
-          raise Error, "bc2cpp: a cached scan read ENV.#{name}(#{args.map(&:inspect).join(', ')}); its key holds no " \
-                       'environment, so it may not read one'
-        end
+        EnvGuard.refuse(name, args) if ScanCache.computing.positive?
         super(*args, **opts, &block)
       end
     end
