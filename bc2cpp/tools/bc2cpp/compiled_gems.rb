@@ -337,10 +337,16 @@ BC2CPP_COMPILED_GEMS = {
 # mruby-enumerator (Ruby-only; a bytecode-stdlib blind spot this scan cannot
 # close).
 def core_native_srcs(mruby_root)
+  # Never built: mruby compiles only each gem's src/ (gem.rb srcs_to_objs)
+  # into libmruby.a; test/ holds the mrbtest runner's helpers (ProcExtTest,
+  # DirTest, binding_in_c, instance_exec_from_c on Kernel), which no shipped
+  # VM contains. Scanning them registers phantom definers that can only flip
+  # MONO to POLY or defeat a proof, never enable one.
   Dir["#{mruby_root}/src/*.c"] +
     Dir["#{mruby_root}/mrbgems/mruby-{array-ext,hash-ext,enum-ext,io,dir," \
         'numeric-ext,range-ext,symbol-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint,' \
         "binding,eval,metaprog,method,pack,proc-ext,string-ext,struct}/**/*.c"]
+      .reject { |path| path =~ %r{/(test|tools|bench|examples?|demos?|samples?)/} }
 end
 
 # The three external (non-`3rd/mruby/mrbgems`) mrbgems this project always
