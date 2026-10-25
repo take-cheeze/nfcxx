@@ -10,6 +10,8 @@
 #     - `s.each_char { }` / `s.each_line { }` on an unproven receiver get an exact-String arm, the dynamic send its else;
 #       a program String#each_char withdraws the arm;
 #     - an Integer literal receiver (`2.times { }` nested in an inlined loop) keeps no dynamic else;
+#     - a Range literal receiver of a name only core owners answer (`(1..n).map { }`, OUTSIDE_OWNER_CALL's bare
+#       line) takes the proven-receiver arm and keeps no dynamic else;
 #     - the Array/Hash/Range arms and the guarded loops are unchanged: an unproven receiver keeps
 #       its class tests and the dynamic send as the else;
 #     - BC2CPP_BLOCK_CORE_DIRECT=0 removes every arm of this change with the others.
@@ -81,6 +83,8 @@ SRC = <<~'RUBY'
     def lp_stop(n); i = 0; v = loop { i += 1; raise StopIteration if i == n }; [v, i]; end
     def lp_drain(a); r = []; loop { raise StopIteration if a.empty?; r << a.shift }; r; end
     def lp_raise(n); i = 0; loop { i += 1; raise ArgumentError, "at #{i}" if i == n }; rescue ArgumentError => e; e.message; end
+    def rng_map(n); (1..n).map { |i| i * 2 }; end
+    def rng_any(n); (1..n).any? { |i| i > 2 }; end
     def user_each(o); r = []; o.each { |x| r << x }; r; end
     def nil_each(o); o.each { |x| x }; rescue NoMethodError => e; e.class; end
   end
@@ -173,6 +177,11 @@ check.call('idx: an unproven receiver runs the inlined index loop behind an Arra
              ix.match?(DYNAMIC))
 check.call('idx_lit: a literal Array receiver is the plain index loop, no send',
            code_of(code, 'idx_lit').include?('bc2cpp_accum_') && !code_of(code, 'idx_lit').include?(BY_NAME))
+# OUTSIDE_OWNER_CALL's bare line (a name only core owners answer) reads the site's receiver proof too.
+%w[rng_map rng_any].each do |name|
+  check.call("#{name}: a Range literal receiver of an outside-owner name takes the proven arm, no dynamic send",
+             code_of(code, name).include?('-- proven Range receiver, yield-free block') && !code_of(code, name).match?(DYNAMIC))
+end
 user = code_of(code, 'user_each')
 check.call('user_each: an unproven receiver keeps the exact-class arms and the dynamic send as the else',
            user.include?('Array_each_impl(M, ') && user.match?(DYNAMIC))
@@ -232,6 +241,10 @@ DRIVER = <<~'RUBY'
   show.call('tm_literal') { fx.tm_literal(5) }
   show.call('red_lit_sym') { fx.red_lit_sym }
   [6, 9].each { |k| show.call("idx_lit/#{k}") { fx.idx_lit(k) } }
+  [0, 1, 4].each do |n|
+    show.call("rng_map/#{n}") { fx.rng_map(n) }
+    show.call("rng_any/#{n}") { fx.rng_any(n) }
+  end
   # Not a Fixnum: a bignum runs Integer#times, anything without `times` raises NoMethodError, a user `times` runs.
   # A positive bignum would count for ever, so it only runs to the first iteration's break.
   show.call('tm_first/big') { fx.tm_first(2**70) }

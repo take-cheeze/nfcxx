@@ -1599,8 +1599,9 @@ class CodeGen
       # TO_ENUM_DIRECT: the Enumerator is built in place, the checked arm's else is a guard violation.
       return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
 
-      # OUTSIDE_OWNER_CALL: a bare send whose every answering class the closed world names.
-      bare = outside_owner_bare_line(d, recv, name, argv, cw_site)
+      # OUTSIDE_OWNER_CALL: a bare send whose every answering class the closed world names. Its arm wrappers
+      # (BLOCK_CORE_DIRECT's proven-receiver arm) read the same receiver proof as the line above.
+      bare = with_exact_core_site(exact_site) { outside_owner_bare_line(d, recv, name, argv, cw_site) }
       return "#{miss}  #{bare}" if bare
 
       "#{diag}#{note}#{miss}  #{line}"
