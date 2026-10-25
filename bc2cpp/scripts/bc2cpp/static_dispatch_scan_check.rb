@@ -12,9 +12,14 @@
 #     bc2cpp_sym(M, i) use keeps it one.
 #   BYTECODE_PROC: what counts as generated C building a proc over a bytecode irep (which keeps every block of a
 #     registered compiled method runnable as bytecode).
-#   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources.
+#   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources, nor the workflows.
+#   CORE_BYTECODE_TOKENS (needs MRBC; skipped without it): core Ruby read as bytecode names a method only through a
+#     send whose receiver may be an engine object (self in a module, Object or Kernel method; any unknown value), a
+#     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
+#     file with a reflective send keeps the text rule. engine_ancestry follows superclasses, mruby's native
+#     exception chain included, and gives up (:all) on any other native superclass.
 #
-# Usage: ruby scripts/bc2cpp/static_dispatch_scan_check.rb   (no mrbc needed)
+# Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
@@ -95,6 +100,59 @@ others = (ruby + natives).select { |p| S::OTHER_MAKER_GEMS.any? { |g| p.start_wi
 check('closed scan reads no other maker gem', others.empty?)
 open_ruby, = S.outside_world_files(root)
 check('the full scan still reads them', open_ruby.any? { |p| p.start_with?("#{root}/mruby-wolf/") })
+check('closed scan reads no workflow', ruby.none? { |p| p.start_with?("#{root}/.github/") })
+check('the full scan reads the workflows', open_ruby.any? { |p| p.start_with?("#{root}/.github/") })
+
+# --- engine_ancestry ---
+check('ancestry: engine classes only reach Object',
+      S.engine_ancestry({ 'Game::A' => 'Game::B', 'Game::B' => :none }, []) == Set['Object', 'BasicObject'])
+exc = S.engine_ancestry({ 'LCF::SaveError' => 'LCF::StandardError' }, [])
+check('ancestry: a native exception superclass', exc != :all && exc.superset?(Set['StandardError', 'Exception']))
+check('ancestry: any other native superclass is unknown', S.engine_ancestry({ 'Game::N' => 'RGSS::Native' }, []) == :all)
+check('ancestry: an engine Struct', S.engine_ancestry({}, ['Game::Row']).include?('Struct'))
+
+# --- CORE_BYTECODE_TOKENS ---
+if ENV['MRBC']
+  require 'tmpdir'
+  ENV['BC2CPP_SIG_DIRS'] = ''
+  require_relative '../../tools/bc2cpp/bc2cpp'
+  Dir.mktmpdir('static_dispatch_scan_check') do |tmp|
+    plain = File.join(tmp, 'plain.rb')
+    File.write(plain, <<~'RUBY')
+      module FixMix
+        def fm = mixin_self_send
+      end
+      class FixCore
+        def fc
+          core_self_send
+          [].literal_send
+          FixCore.core_const_send
+          x = unknown_value
+          x.unknown_recv_send
+          [].push(:symbol_literal, 'string_literal_name')
+        end
+      end
+      class Object
+        def fo = object_self_send
+      end
+    RUBY
+    reflective = File.join(tmp, 'reflective.rb')
+    File.write(reflective, "class FixRefl\n  def r(m) = __send__(m, reflective_local_word)\nend\n")
+    tokens = Set.new
+    text = S.core_bytecode_tokens([plain, reflective], tokens, mrbc: ENV['MRBC'], superclass_of: {})
+    check('core: self in a module method counts', tokens.include?('mixin_self_send'))
+    check('core: self in an Object method counts', tokens.include?('object_self_send'))
+    check('core: self in a core class method does not', !tokens.include?('core_self_send'))
+    check('core: a literal or a core constant receiver does not',
+          !tokens.include?('literal_send') && !tokens.include?('core_const_send'))
+    check('core: an unknown receiver counts', tokens.include?('unknown_recv_send'))
+    check('core: symbols and identifier strings count',
+          tokens.include?('symbol_literal') && tokens.include?('string_literal_name'))
+    check('core: a reflective file keeps the text rule', text == [reflective] && !tokens.include?('reflective_local_word'))
+  end
+else
+  puts 'skip CORE_BYTECODE_TOKENS fixtures (no MRBC)'
+end
 
 if $failures.zero?
   puts 'static_dispatch_scan_check: all passed'
