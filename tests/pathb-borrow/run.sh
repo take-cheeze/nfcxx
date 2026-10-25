@@ -208,6 +208,41 @@ printf '%s\n' '(borrow-layout (struct "Plain") 16 8 (field "z" 0 int) (field "ne
 scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nolay.ir" > /dev/null
 echo "ok   frontend borrow-layout records, record-less mutant, unsupported structs, and native execution"
 pass=$((pass + 1))
+# A const pointer result gets a shared alias summary; writing its source while the
+# result is live conflicts. The printed summary validates in the emitter and oracle.
+calias=tests/pathb-borrow/contracts/const_alias.cpp
+sed 's/^  int v = \*q;$/  s.b = 5; int v = *q;/' "$calias" > "$tmp/calias_held.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$calias" > "$tmp/calias.ir"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/calias_held.cpp" > "$tmp/calias_held.ir"
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias.ir" > "$tmp/out"
+grep -Fq '(returns (ptr (const int)) (from-arg 0 4 shared))' "$tmp/out" && grep -Fq 'ok: local lifetime checks passed' "$tmp/out" ||
+  { echo "FAIL $calias"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias_held.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -q 'main: loan-conflict: s\[4\.\.8\] (&.*second.*#1)' "$tmp/out"; then
+  echo "FAIL $calias writing the source while the result is live: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+{ head -1 "$tmp/calias.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/calias.ir"; } > "$tmp/calias_pasted.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias-oracle.qbe"
+cmp "$tmp/calias.qbe" "$tmp/calias-oracle.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/calias.qbe" -o "$tmp/calias.s"
+cc "$tmp/calias.s" -o "$tmp/calias"
+"$tmp/calias" || { echo "FAIL $calias runtime: expected 0"; exit 1; }
+echo "ok   const pointer results: shared alias summary, held-result mutant, emitter validation, and native execution"
+pass=$((pass + 1))
+# A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
+# registration around it is still refused, for its own reason.)
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/vla.cpp > "$tmp/vla.ir"
+grep -Fq '(decl $"a" val)' "$tmp/vla.ir" && grep -Fq '(scope-end $"a")' "$tmp/vla.ir" ||
+  { echo "FAIL vla.cpp: no facts for the VLA"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/vla.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 3 ] || grep -Fq 'missing declaration facts' "$tmp/out"; then
+  echo "FAIL vla.cpp: expected a refusal other than missing facts, got $rc"; cat "$tmp/out"; exit 1
+fi
+echo "ok   declaration facts for lowered VLAs"
+pass=$((pass + 1))
 # Call-argument temporaries get (decl ... temp) facts around their full expression,
 # so a recursive callee gets a summary. An uninitialized argument is still found.
 temps=tests/pathb-borrow/contracts/temporaries.cpp

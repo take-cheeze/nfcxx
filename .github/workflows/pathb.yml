@@ -175,6 +175,8 @@ jobs:
               NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
           - name: mruby scripts against their Python oracles (Path B parts enabled)
             run: tests/mruby/run.sh
+          - name: mruby-ninja generic file tasks (rule is refused)
+            run: tests/mruby-ninja/run.sh
     name: ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"

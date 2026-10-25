@@ -111,9 +111,19 @@ copy by `run_astro.sh`:
 - **A null `entry` read by `ASTRO_LAZY_ARGS`** (bug 5): the first `def` of the prelude crashed in `DISPATCH_node_def`.
 - **`static const` in a constant initializer** (bug 6).
 
-The AOT bake (`--aot-compile --run` of `def fib(n) = n < 2 ? n : fib(n-1) + fib(n-2); puts fib(30)`) is where the qbe path runs out of
-patience, and it is not in the test: the program is right (832040, from the interpreter), but the store compiles thousands of
-generated files (233 in `code_store`, 2793 in the pool mode's `preload_store`) and it did not finish in 25 minutes (82 CPU-minutes).
+The AOT bake (`--aot-compile --run`, below) is where the qbe path runs out of patience, and it is not in the test: the store
+compiles thousands of generated files (2793 in the pool mode's `preload_store`, the prelude's methods, plus the program's own).
+Measured (`--aot-compile --run` of `fib(32)` and a 5,000,000-iteration `while` loop, store removed first; 4 cores, the code
+store's `make -j8`; one run each; after the run `koruby_test.rb` still prints CRuby's output):
+
+| backend | bake wall time | `preload_store/all.so` | loop script, `--plain` / baked |
+| --- | --- | --- | --- |
+| gcc | 6 min 6 s (17 CPU-min user) | 1.6 MB | 0.50 s / 0.16 s |
+| qbe, default | 19 min 11 s (54 CPU-min user) | 609 MB | 1.77 s / 1.58 s |
+| qbe, `NFCXX_QBE_DCE=1` | 9 min 54 s (33 CPU-min user) | 33 MB | 1.75 s / 1.59 s |
+
+(The gcc store had its `preload_store/all.so` after about a minute; the rest of its 6 minutes was the `code_store`.) On qbe the
+baked code is barely faster than the interpreter, as with `ackermann` above. The earlier 25-minute cut was this bake.
 The next section says where the time goes.
 
 ## Why the bake is slow on qbe
@@ -162,8 +172,9 @@ What was changed:
   Prototypes of static functions mention nothing. The result is the same program with a smaller object (the SD file above: 1.25 MB
   of assembly becomes 0.22 MB, the object 306 KB becomes 52 KB), so it is not the same assembly and stays off by default; ASTro's bake, which compiles the same
   header thousands of times, is what it is for. 79 pool files (every 35th) compiled with four jobs: 35.1 s before, 23.9 s with
-  the changes above, 15.2 s with `NFCXX_QBE_DCE=1` (gcc: 6.6 s). For the 2793 files that is about 21 minutes, 14 and 9 of wall
-  time at `-j4` on this machine.
+  the changes above, 15.2 s with `NFCXX_QBE_DCE=1` (gcc: 6.6 s). For the 2793 files that was estimated at 21 minutes, 14 and 9 of wall
+  time at `-j4`; the whole bake, measured (above), took 19 and 10 minutes with the changes and with `NFCXX_QBE_DCE=1`
+  (`-j8` on 4 cores; the 21-minute figure for "before" was not measured).
 
 What did not help: reading the source as an array of bytes in the tokenizer (`String#bytes`, then `bs[i]` instead of `getbyte`)
 did not change the time. The second `cc -E` that `qbe-cc` runs to find hand-written `__attribute__((weak))` costs 0.07 s and
@@ -258,12 +269,60 @@ Speed: ASTroGen is fast either way. calc: 0.09 s CRuby 3.3 vs 0.04 s mruby; koru
 end to end (calc and luastro need none; Prism's templates and the node.def patches of baruby_precise / koruby_precise in
 `run_astro.sh` still use CRuby, and the script stops there when it is missing).
 
+## lib/ast spike
+
+A feasibility spike of ASTro's node identity (Merkle hash) and code store in the numeric-kernel tier of `lib/ast` (`ast.md`,
+"Tiering"), not the Truffle-style redesign.
+
+**Built** (opt-in: `TierOptions::share`, `NFCAST_TIER_SHARE=1`; 0 by default, no change then). `nfcast_tier.cpp` hashes the lowered
+form of a unit (`IExpr` / `IStmt`) the way ASTro does: kind, operands, child hashes, bottom-up. Left out: lines, expression ids and
+names of locals (a variable is a number). Put in: constants, operators, variable numbers, the binding of every free variable and callee
+(kind, index, name), the argument types and the storage types the typing settled on. A map hash -> shared object is the code store:
+a version whose hash is there skips code generation and the source hash and `dlopen`s that object; `share == 2` generates anyway and
+counts a hash hit whose code differs (`tier_share_conflicts`, must be 0). `State::tier_merkle` returns the hashes of every node in
+pre-order, for tests. About 130 lines in the tier, none in the interpreter.
+
+**Results** (gcc back end, `tests/ast/run.sh`; the lib/ast suite passes before and after: 194 engine checks, 29 programs, and 347
+tier checks, 372 with the new ones; also with `NFCAST_TIER_SHARE=1` exported for the whole run). The new section of `tests/ast/tier.cpp`
+checks that the same function under other local names and lines hashes equal, that another operator, another tree or other argument
+types hash differently, that a shared subtree `(a + b)` has one hash in two functions, and that three equal functions plus a fourth
+different one give the same results with sharing off, on and checked, 2 driver runs and `tier_share_hits == 2` when on, no conflicts.
+Numbers (one machine, 100 functions of a 10-line loop kernel, each hot at its first call, wall time of the whole chunk; a
+throwaway benchmark, not committed):
+
+| 100 functions | driver runs | cold cache, share 0 / 1 | warm disk cache, share 0 / 1 (3 runs each) |
+| --- | --- | --- | --- |
+| all equal | 1 | 0.69 s / 0.63 s | 0.015, 0.030, 0.039 s / 0.006, 0.006, 0.006 s |
+| 10 different kernels, 10 copies each | 10 | 6.76 s / 6.38 s | 0.020, 0.014, 0.016 s / 0.011, 0.007, 0.009 s |
+
+The cold times are the compiler (about 0.6 s per kernel here); sharing does not change the number of driver runs, because the
+existing on-disk cache is keyed by the generated source text, which already has no lines and no local names, so equal kernels were
+already compiled once. What the hash saves is the work in front of that cache: generating the C++, hashing it, looking at the file.
+That is about 0.1 to 0.3 ms per version against 0.06 ms, small, noisy, and only seen when a program makes many equal hot functions.
+
+**What a Truffle-style direction would additionally need.** The tier's identity is a `Proto` serial, checked at every entry
+(`bind`), so a shared object is shared per hash but its entry metadata is still per function; sharing the guards and code between
+protos would need the metadata keyed by hash too. The hash covers only the tier's lowered form, a numeric subset: hashing the
+interpreter's own nodes (tables, strings, host objects, inline caches whose state is not structure) needs the node classes to be
+data (a `node.def`-like description, as ASTro has) instead of C++ classes found with `dynamic_cast` in `nfcast_tier_view.inc`. The
+self-specializing nodes would have to be keyed by hash and their specialization state split from their shape, which is what ASTro's
+per-node `SD` / dispatchers do, and the specialized dispatchers would have to be generated code per node (partial evaluation), which
+nfcxx does not have (`ast.md`). The code store here compiles a whole kernel per object; ASTro's per-node store compiles subtrees
+and links them, which would need inter-object calls between specialized nodes.
+
+**Recommendation: narrower.** No-go for the full redesign on this evidence: the hash is easy and sound for the kernel tier (zero
+conflicts in the checked mode), but the existing source-keyed disk cache already gives the compile sharing, and the measured gain
+beyond it is microseconds. Keep the hash as an opt-in, kernel-tier-only identity (it is also a cheap in-process key and a basis for
+a persistent cache keyed before code generation); a go would need a workload with many equal hot functions where code generation, not
+the compiler, dominates, or the node classes first being turned into data. Not measured: the qbe back end, `tier_merkle` on loops
+(on-stack replacement units are not hashed or shared), the async mode with sharing under load (it is covered by the test suite only
+with the env var set).
+
 ## Not done
 
 - The other 25 samples.
-- `koruby_precise`'s AOT bake on qbe (above), the
-  `--build` standalone executable, and the rubyspec suite.
+- `--build` standalone executable, and the rubyspec suite.
 - Compiling `sample/astrogre`'s AVX2 code on qbe: cproc cannot compile the intrinsics, so the regex engine is a gcc-backend
   shared object in both runs.
 - `astro_build.c`'s `--build` (standalone executables) and the tiered JIT daemon.
-- Feeding ASTro's hashing and specialization into `lib/ast` (`ast.md`), the idea this note started from.
+- Feeding ASTro's hashing and specialization into `lib/ast` (`ast.md`) beyond the spike below: only the numeric-kernel tier was tried, the node tree itself was not.
