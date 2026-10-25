@@ -629,7 +629,7 @@ module DeclaredConstants
     def loadi(insn)
       case insn.op
       when :LOADI__1 then -1
-      when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+      when BytecodeIR::Ops::LOADI_SLOT then BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op]
       else IntegerConstants.loadi_value(insn)
       end
     end

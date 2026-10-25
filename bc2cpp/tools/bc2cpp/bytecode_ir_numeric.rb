@@ -156,7 +156,7 @@ module BytecodeIR
       op = insn.op
       return -1 if op == :LOADI__1
       return -insn.uint_operand if op == :LOADINEG && insn.uint_operand
-      return op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(op)
+      return BytecodeIR::Ops::LOADI_SLOT_VALUE[op] if BytecodeIR::Ops::LOADI_SLOT.include?(op)
       return insn.imm_operand.to_i if %i[LOADI8 LOADI16 LOADI32].include?(op) && insn.imm_operand
 
       nil

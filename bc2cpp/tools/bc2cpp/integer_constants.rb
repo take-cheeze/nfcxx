@@ -379,7 +379,7 @@ module IntegerConstants
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
     # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode name; imm_operand is nil for them.
-    return insn.op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+    return BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == :LOADI__1
 
     tok = BytecodeIR::OperandModel.imm_operand(insn)

@@ -328,7 +328,7 @@ module InsnDecoder
       when :LOADI__1 then ["R#{a}\t(-1)#{lv_comment(a)}", [r(a), lit('-1')]]
       # A Symbol list, not a Regexp: a regexp `when` would stop the case from comparing by identity.
       when :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5, :LOADI_6, :LOADI_7
-        digit = name.name.delete_prefix('LOADI_')
+        digit = BytecodeIR::Ops::LOADI_SLOT_VALUE[name.name]
         ["R#{a}\t(#{digit})#{lv_comment(a)}", [r(a), lit(digit)]]
       when :LOADSYM then ["R#{a}\t:#{sym(b)}#{lv_comment(a)}", [r(a), sym_op(b)]]
       when :LOADNIL then ["R#{a}\t(nil)#{lv_comment(a)}", [r(a), lit('nil')]]

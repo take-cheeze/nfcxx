@@ -103,7 +103,7 @@ class CodeGen
 
       # SSEND reads self, not the previous contents of its result register.
       explicit = insn.dup
-      explicit.op = insn.op.to_s.delete_prefix('S')
+      explicit.op = BytecodeIR::Ops::SELF_SEND_TO_EXPLICIT.fetch(insn.op, insn.op)
       inputs = state.dup
       inputs[insn.reg.to_i] = @receiver
       @cg.return_class_send_mask(irep, index, explicit, inputs)
@@ -113,7 +113,7 @@ class CodeGen
       return super unless %i[SSEND SSEND0].include?(insn.op)
 
       explicit = insn.dup
-      explicit.op = insn.op.to_s.delete_prefix('S')
+      explicit.op = BytecodeIR::Ops::SELF_SEND_TO_EXPLICIT.fetch(insn.op, insn.op)
       inputs = state.dup
       inputs[insn.reg.to_i] = @receiver
       super(irep, index, explicit, inputs)

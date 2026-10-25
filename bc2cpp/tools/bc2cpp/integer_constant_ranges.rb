@@ -149,7 +149,7 @@ module IntegerConstantRanges
   # LOADI__1 carry no operand, so IntegerConstants.loadi_value cannot read them.
   def self.literal(insn)
     value = case insn.op
-            when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+            when BytecodeIR::Ops::LOADI_SLOT then BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op]
             when :LOADI__1 then -1
             else BytecodeIR::OperandModel.imm_operand(insn)&.to_i
             end
