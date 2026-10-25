@@ -122,7 +122,7 @@ module BlockReturns
     return 'has branch targets that are not instructions' unless program.resolved?
     return 'has exception handlers it cannot place' unless program.handlers_resolved?
 
-    blk = (1 + req).to_s
+    blk = 1 + req
     proc_def = lambda do |df|
       next df.reg == blk if df.entry?
 
