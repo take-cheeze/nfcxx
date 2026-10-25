@@ -191,7 +191,7 @@ int main(int argc, char** argv) {
             mrb_bool_value(play && strcmp(play, "1") == 0));
 
   mrb_value args = mrb_ary_new(M);
-  mrb_value game = mrb_obj_new(M, mrb_class_get(M, "RPG2k"), 1, &args);
+  mrb_value game = bc2cpp_entry_RPG2k_new(M, 1, &args);
   if (M->exc) {
     report_exception(M, "RPG2k.new");
     return 3;
@@ -199,9 +199,11 @@ int main(int argc, char** argv) {
   mrb_gc_register(M, game);
   fprintf(stdout, "TRACE_HOST game=RPG2k dir=%s frames=%ld\n", game_dir,
           frames);
-  // BC2CPP_ENTRY (include/bc2cpp_entry.hxx): whether main_loop and
+  // BC2CPP_ENTRY (include/bc2cpp_entry.hxx): whether new, main_loop and
   // current_scene_name call their compiled bodies directly.
-  fprintf(stdout, "TRACE_HOST entry main_loop=%s current_scene_name=%s\n",
+  fprintf(stdout,
+          "TRACE_HOST entry new=%s main_loop=%s current_scene_name=%s\n",
+          BC2CPP_ENTRY_RPG2k_new ? "direct" : "by-name",
           BC2CPP_ENTRY_RPG2k_main_loop ? "direct" : "by-name",
           BC2CPP_ENTRY_RPG2k_current_scene_name ? "direct" : "by-name");
 
