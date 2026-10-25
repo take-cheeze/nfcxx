@@ -280,7 +280,7 @@ class CodeGen
   end
 
   def stack_tuple_no_arguments?(insn)
-    (insn.n_spec.nil? || insn.n_spec == '0') && insn.nk_spec.nil? && BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(!insn.op)
+    (insn.n_spec.nil? || insn.n_spec == '0') && insn.nk_spec.nil? && !BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
   end
 
   # True when every reaching definition of +reg+ at +at+ is an immediate: a LOADNIL/LOADTRUE/LOADFALSE/LOADSYM, or a

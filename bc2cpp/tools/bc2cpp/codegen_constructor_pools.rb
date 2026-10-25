@@ -440,7 +440,7 @@ class CodeGen
     end
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
     classes = constructor_named_classes(irep, idx, insn) unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
-    if classes.nil? && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(!insn.op) && (via_param = class_object_receiver_classes(irep, idx, insn))
+    if classes.nil? && !BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) && (via_param = class_object_receiver_classes(irep, idx, insn))
       # CLASS_OBJECT_ARGS: the receiver is a parameter every caller passes class constants for.
       classes = via_param
       stats[:param_named] += 1
