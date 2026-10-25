@@ -79,30 +79,30 @@ eqq_mixed = program(
   [:SEND, "R4\t:===\tn=1"]
 )
 check.call('a receiver that is 5 on one path and a call on the other is not a literal',
-           trace_eqq_literal_receiver(eqq_mixed, 5, '4').nil?)
+           trace_eqq_literal_receiver(eqq_mixed, 5, 4).nil?)
 
 eqq_plain = program([:LOADI_5, "R4\t(5)"], [:MOVE, "R5\tR3"], [:SEND, "R4\t:===\tn=1"])
 check.call('a `when 5` receiver is the literal 5',
-           trace_eqq_literal_receiver(eqq_plain, 2, '4') == { type: :fixnum, value: '5' })
+           trace_eqq_literal_receiver(eqq_plain, 2, 4) == { type: :fixnum, value: '5' })
 
 eqq_agree = program(
   [:JMPNOT, "R1\t3"], [:LOADI_5, "R4\t(5)"], [:JMP, '4'], [:LOADI_5, "R4\t(5)"], [:MOVE, "R5\tR3"],
   [:SEND, "R4\t:===\tn=1"]
 )
 check.call('both paths load the same literal 5: still the literal',
-           trace_eqq_literal_receiver(eqq_agree, 5, '4') == { type: :fixnum, value: '5' })
+           trace_eqq_literal_receiver(eqq_agree, 5, 4) == { type: :fixnum, value: '5' })
 
 eqq_two = program(
   [:JMPNOT, "R1\t3"], [:LOADI_5, "R4\t(5)"], [:JMP, '4'], [:LOADI_6, "R4\t(6)"], [:MOVE, "R5\tR3"],
   [:SEND, "R4\t:===\tn=1"]
 )
-check.call('5 on one path and 6 on the other is no literal', trace_eqq_literal_receiver(eqq_two, 5, '4').nil?)
+check.call('5 on one path and 6 on the other is no literal', trace_eqq_literal_receiver(eqq_two, 5, 4).nil?)
 
 eqq_sym = program(
   [:JMPNOT, "R1\t3"], [:LOADSYM, "R4\t:a"], [:JMP, '4'], [:LOADSYM, "R4\t:b"], [:MOVE, "R5\tR3"],
   [:SEND, "R4\t:===\tn=1"]
 )
-check.call(':a on one path and :b on the other is no literal', trace_eqq_literal_receiver(eqq_sym, 5, '4').nil?)
+check.call(':a on one path and :b on the other is no literal', trace_eqq_literal_receiver(eqq_sym, 5, 4).nil?)
 
 puts '-- join mode is per trace (host, item 4)'
 # x = c ? [] : {}; y = x  -- an unguarded trace of y must refuse the join, however the trace was reached.
