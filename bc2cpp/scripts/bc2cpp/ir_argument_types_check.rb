@@ -390,22 +390,22 @@ check.call('a body that calls a method on the rest array (or a copy) refuses the
 declared_rest = lambda do |instructions, index, reg, **inputs|
   BytecodeIR::Types.new(body_irep.call(instructions), **inputs).fact_at(index, reg)
 end
-declared_only = declared_rest.call(rest_body, 2, '2', declared_rest_elements: { '1' => Set[:Integer] })
+declared_only = declared_rest.call(rest_body, 2, 2, declared_rest_elements: { 1 => Set[:Integer] })
 check.call('a declared *Integer rest read in the body is Integer (nil for an absent index), and is declared',
            declared_only&.classes == Set[:NilClass, :Integer] && declared_only.declared?)
 check.call('a declared rest element is not visible to the undeclared query',
-           BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { '1' => Set[:Integer] }).at(2, '2').nil?)
+           BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { 1 => Set[:Integer] }).at(2, '2').nil?)
 check.call('a mutated rest with a declared *Integer takes only the declaration: the call-site join String is not added',
-           declared_rest.call(rest_mutated, 4, '2', inferred_rest_elements: { 1 => Set[:Integer, :String] },
-                              declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer])
+           declared_rest.call(rest_mutated, 4, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] },
+                              declared_rest_elements: { 1 => Set[:Integer] })&.classes == Set[:NilClass, :Integer])
 rest_captured = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:LAMBDA, 'R3 I[0]'], [:GETIDX0, 'R2 R1[0]'], [:RETURN, 'R2']]
 check.call('a closure capturing the rest withdraws the join, and the declared *Integer types the read',
-           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { 1 => Set[:Integer, :String] },
-                              declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer] &&
-           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { 1 => Set[:Integer, :String] }).nil?)
+           declared_rest.call(rest_captured, 3, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] },
+                              declared_rest_elements: { 1 => Set[:Integer] })&.classes == Set[:NilClass, :Integer] &&
+           declared_rest.call(rest_captured, 3, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] }).nil?)
 check.call('a declared *String with a private join of Integer: the join is read, as for a required parameter',
-           declared_rest.call(rest_body, 2, '2', inferred_rest_elements: { 1 => Set[:Integer] },
-                              declared_rest_elements: { '1' => Set[:String] })&.classes == Set[:NilClass, :Integer])
+           declared_rest.call(rest_body, 2, 2, inferred_rest_elements: { 1 => Set[:Integer] },
+                              declared_rest_elements: { 1 => Set[:String] })&.classes == Set[:NilClass, :Integer])
 keyword_body = [[:ENTER, '0:0:0:0:1:0:0:0 (0x0)'], [:KARG, 'R3 :key'], [:RETURN, 'R3']]
 check.call('required keyword reads its joined type',
            body_fact.call(keyword_body, 2, 3, inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])

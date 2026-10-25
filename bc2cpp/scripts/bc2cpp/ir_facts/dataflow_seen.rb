@@ -39,7 +39,7 @@ begin
   program = BytecodeIR::Program.new(Irep.new(label: 'loop', instructions: list, catch_handlers: [], nregs: 6, nlocals: 5))
   found = program.reaching_definitions(8, 1)
   raise 'loop lost a reaching register definition' unless found&.map { |d| [d.index, d.reg] } == [[0, 1], [1, 2], [2, 3]]
-  found.first.reg.replace('caller mutation')
+  found.first.reg = 99
   raise 'caller mutation changed cached definitions' unless program.reaching_definitions(8, 1).first.reg == 1
   puts "scalar dataflow seen: #{cases} definition and refusal comparisons passed"
 ensure
