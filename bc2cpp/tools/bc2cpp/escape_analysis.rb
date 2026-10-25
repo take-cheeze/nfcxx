@@ -1250,7 +1250,7 @@ module EscapeAnalysis
       irep = run.irep
       closure_children(irep).each do |ci, child|
         refs = closure_refs(irep, ci, child).select do |ref|
-          ref[:kind] == :blk ? block_tracked : ever.include?(ref[:idx].to_s)
+          ref[:kind] == :blk ? block_tracked : ever.include?(ref[:idx])
         end
         next if refs.empty? && !run.self_tracked
 

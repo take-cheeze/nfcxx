@@ -127,7 +127,7 @@ module IntegerConstantRanges
   # be the load that writes the register: control reaching it runs that load.
   def self.source_kind(irep, idx, reg, entries, freeze_safe: false)
     barrier = lambda do |insn, cur|
-      load_here = insn.reg == cur.to_s && (LOADS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op))
+      load_here = insn.reg == cur && (LOADS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op))
       entries.include?(insn.addr) && !load_here
     end
     irep.walk_writers(idx - 1, reg, barrier: barrier, follow_moves: true) do |insn, j, cur|

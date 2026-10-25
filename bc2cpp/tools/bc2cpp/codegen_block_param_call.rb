@@ -93,7 +93,7 @@ module BlockParamCall
 
     mand, opt, rest, post, kw, kwrest, block = enter.enter_fields
     block.to_i.positive? && post.to_i.zero? && kw.to_i.zero? && kwrest.to_i.zero? &&
-      slot == (1 + mand + opt + rest).to_s
+      slot == 1 + mand + opt + rest
   end
 
   # `slot` holds the block the method `irep` was entered with and nothing changes it: the

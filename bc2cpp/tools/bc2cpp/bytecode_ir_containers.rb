@@ -140,7 +140,7 @@ module BytecodeIR
     # The child irep index of the `BLOCK R(recv+1) I[k]` directly before the block-carrying call at +index+.
     def adjacent_block_index(index, recv_reg)
       block = index.positive? ? source_at(index - 1) : nil
-      return nil unless block&.op == :BLOCK && block.reg == (recv_reg.to_i + 1).to_s
+      return nil unless block&.op == :BLOCK && block.reg == recv_reg + 1
 
       block.block_index
     end

@@ -420,7 +420,7 @@ class CodeGen
 
         written.merge(regs)
         if BytecodeIR::Ops::CALLEE_FRAME.include?(i.op) && i.reg
-          written.merge((i.reg.to_i...irep.nregs.to_i).map(&:to_s))
+          written.merge((i.reg...irep.nregs.to_i).to_a)
         end
       end
       next unless i.block_index && irep.reps
@@ -443,8 +443,8 @@ class CodeGen
       ref = insn.upvar_ref
       next unless ref && ref.last == depth
 
-      all << ref.first.to_s
-      written << ref.first.to_s if insn.op == :SETUPVAR
+      all << ref.first
+      written << ref.first if insn.op == :SETUPVAR
     end
     [all, written]
   end

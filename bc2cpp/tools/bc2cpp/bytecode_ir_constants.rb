@@ -176,7 +176,7 @@ module BytecodeIR
     # The node a writer at +index+ gives to +reg+, or nil when the writer is not a modelled literal or operator.
     def node_of(irep, index, reg, policy, depth)
       insn = BytecodeIR.for(irep).source_at(index)
-      return nil unless insn.reg == reg.to_s
+      return nil unless insn.reg == reg
 
       op = insn.op
       return int_node(loadi_value(insn)) if BytecodeIR::Ops::LOADI_OPS.include?(op)

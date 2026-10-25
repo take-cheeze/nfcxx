@@ -71,14 +71,14 @@ module ReceiverProofReport
   # Forced receiver class set of the one send being re-compiled (registers as the consumers ask: proof registers).
   def exact_flow_mask(irep, idx, reg)
     f = @rp_force
-    return f[:mask] if f && irep.label == f[:irep] && idx == f[:idx] && reg == f[:reg].to_s
+    return f[:mask] if f && irep.label == f[:irep] && idx == f[:idx] && reg == f[:reg]
 
     super
   end
 
   def exact_flow_class(irep, idx, reg)
     f = @rp_force
-    if f && irep.label == f[:irep] && idx == f[:idx] && reg == f[:reg].to_s
+    if f && irep.label == f[:irep] && idx == f[:idx] && reg == f[:reg]
       # The nil half is stripped as exact_flow_class does, or NILABLE_RECEIVER would never see a nil-or-class set.
       return return_class_of_mask(exact_flow_strip_nil(irep, idx, reg.to_i, f[:mask]))
     end

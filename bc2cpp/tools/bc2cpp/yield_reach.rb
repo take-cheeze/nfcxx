@@ -834,11 +834,11 @@ class YieldReach
   # the block register, so the register always holds the block.
   def only_block_writes?(method, index, bp)
     writers = BytecodeIR.for(method.irep).each_source.filter_map do |i, _|
-      i if i.reg == index.to_s && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
+      i if i.reg == index && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
     end
     if writers.empty?
       return false unless index == bp
-    elsif !writers.all? { |i| i.op == :MOVE && i.regs[1] == bp.to_s }
+    elsif !writers.all? { |i| i.op == :MOVE && i.regs[1] == bp }
       return false
     end
 

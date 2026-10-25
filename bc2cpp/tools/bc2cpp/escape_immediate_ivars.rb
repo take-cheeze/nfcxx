@@ -167,7 +167,7 @@ module EscapeAnalysis
       return object_send(frame, index, insn, s, self_frame, stores, found) if BytecodeIR::Ops::SEND_FAMILY.include?(op)
       return nil if s.empty?
 
-      operands = ([lead] + insn.regs.map(&:to_s)).compact
+      operands = ([lead] + insn.regs).compact
       here = "#{op} (#{frame.label}:#{index})"
       if STORES_LEAD.key?(op)
         return "#{here} stores the object" if operands.any? { |r| s.include?(r) }
@@ -175,7 +175,7 @@ module EscapeAnalysis
       end
       if KILLS_LEAD.include?(op)
         # Only INTERN and METHOD read their leading register; the rest read nothing but the register they write.
-        reads = %i[INTERN METHOD].include?(op) ? operands : insn.regs.drop(1).map(&:to_s)
+        reads = %i[INTERN METHOD].include?(op) ? operands : insn.regs.drop(1)
         return "#{here} reads the object" if reads.any? { |r| s.include?(r) }
         return nil
       end
@@ -206,7 +206,7 @@ module EscapeAnalysis
       when :ARYPUSH, :BLKCALL then from += 1; count = BytecodeIR::OperandModel.uint_operand(insn).to_i
       when :STRCAT then from += 1; count = 1
       end
-      (from...(from + count)).map(&:to_s)
+      (from...(from + count)).to_a
     end
 
     # A send whose receiver is the object (the explicit register, or implicit self in a method frame) runs the callee

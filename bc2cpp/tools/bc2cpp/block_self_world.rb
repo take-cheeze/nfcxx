@@ -409,7 +409,7 @@ module BlockSelfWorld
 
       out = Set.new
       BytecodeIR.for(frame).each_source do |w, j|
-        next unless w.reg == index.to_s && writes_leading?(w)
+        next unless w.reg == index && writes_leading?(w)
 
         found = w.op == :MOVE ? names_at(frame, j, w.regs[1], ireps, parents) : writer_names(frame, j, ireps, parents)
         return :unknown if found == :unknown
@@ -496,7 +496,7 @@ module BlockSelfWorld
       return false unless frame && index
       return false if setupvar_target?(frame, index, ireps)
 
-      writers = BytecodeIR.for(frame).each_source.select { |w, _| w.reg == index.to_s && writes_leading?(w) }
+      writers = BytecodeIR.for(frame).each_source.select { |w, _| w.reg == index && writes_leading?(w) }
       !writers.empty? && writers.all? do |w, j|
         case w.op
         when :LOADNIL, :BLOCK, :LAMBDA then true

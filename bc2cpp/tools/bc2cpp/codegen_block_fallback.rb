@@ -329,7 +329,7 @@ class CodeGen
       block_reg = insn.reg
       # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
       # :reduce n=1`), so the block is at dest + n + 1.
-      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + n + 1).to_s
+      next unless dest_reg && block_reg && block_reg == dest_reg + n + 1
 
       name = paired.sym
       next unless name
