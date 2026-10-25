@@ -48,6 +48,11 @@ SOURCE = <<~RUBY
   end
   class Probe
     def ps(o, x); o.push(x); end
+    def ps_lit(o); o.push(7); end
+    def ps_neg(o); o.push(-7); end
+    def ps_true(o); o.push(true); end
+    def ps_nil(o); o.push(nil); end
+    def ps_bool(o); o.push(false); end
     def ps0(o); o.push; end
     def fs(o); o.first; end
     def es(o); acc = []; o.each { |x| acc << x }; acc; end
@@ -72,6 +77,12 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
   check.call('push: the owner call stays as the else', ps.include?('bc2cpp_owner_call(M, ') &&
              ps.index('Bag_push_impl').to_i < ps.index('bc2cpp_owner_call(').to_i)
   check.call('push: two arms (Bag, SubBag inheriting Bag#push)', ps.scan(/bc2cpp_soc == bc2cpp_owner_class_\d+\(M\)\) \{/).size == 2)
+  %w[ps_lit ps_neg ps_true ps_nil ps_bool].each do |name|
+    literal_body = body.call(code, name)
+    check.call("#{name}: literal arguments get direct Ruby arms with the owner call as fallback",
+               literal_body.include?('STATIC_OWNER_ARMS :push') && literal_body.include?('Bag_push_impl(M, ') &&
+                 literal_body.include?('bc2cpp_owner_call(M, '))
+  end
   ps0 = body.call(code, 'ps0')
   check.call('push with no argument: no arm (arity does not fit), owner call only',
              !ps0.include?('STATIC_OWNER_ARMS') && ps0.include?('bc2cpp_owner_call(M, '))
@@ -123,6 +134,12 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
         row(M, "singleton bag.push (no arm)", "ps", eval(M, "b = Bag.new; b.singleton_class; b"), 1, two);
         row(M, "array.push", "ps", eval(M, "[1]"), 1, two);
         row(M, "nil.push", "ps", mrb_nil_value(), 1, two);
+        for (const char* meth : {"ps_lit", "ps_neg", "ps_nil", "ps_bool", "ps_true"}) {
+          row(M, meth, meth, eval(M, "SubBag.new"), 0, mrb_nil_value());
+          row(M, meth, meth, eval(M, "[1]"), 0, mrb_nil_value());
+          row(M, meth, meth, eval(M, "b = Bag.new; b.singleton_class; b"), 0, mrb_nil_value());
+          row(M, meth, meth, mrb_nil_value(), 0, mrb_nil_value());
+        }
         row(M, "bag.push no argument", "ps0", eval(M, "Bag.new"), 0, mrb_nil_value());
         row(M, "bag.first (private)", "fs", eval(M, "Bag.new"), 0, mrb_nil_value());
         row(M, "array.first", "fs", eval(M, "[7]"), 0, mrb_nil_value());
