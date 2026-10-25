@@ -58,8 +58,9 @@ A function pushes a frame by saving the global `@"__curr_eh_stack_entry"` in it 
 frame's address in the global. It pops the frame by storing the saved value back. The scalar
 global `@"__eh_curr_region"` is saved and restored the same way.
 
-The runtime reads frames only while unwinding. Every call the checker accepts is `nothrow`, so no
-unwinding can start while a frame is pushed. The checker therefore tracks the stack top as a value:
+The runtime reads frames only while unwinding. A call of a `may-throw` callee can start an unwind
+while a frame is pushed. The unwind is not a path the checker follows (see "Throwing calls" below),
+so the stack top is still tracked as a value on the normal paths:
 
 - A load of `@"__curr_eh_stack_entry"` yields what was last stored there, initially the caller's
   frames.
@@ -69,8 +70,9 @@ unwinding can start while a frame is pushed. The checker therefore tracks the st
 
 Stores into other external memory, such as globals, are allowed when the stored value is a
 scalar or an external pointer. Only a local address can escape that way, and that is still
-refused. A verified summary still reports any such access as `contract-not-closed`. Unwind
-cleanup edges are not modeled, because no accepted call can throw.
+refused. A verified summary still reports any such access as `contract-not-closed`. Writes to
+`@"__eh_curr_region"`, the region counter that tells the runtime which objects are alive, are
+bookkeeping, not program memory, and are accepted as scalar stores and loads.
 
 Slot names identify storage, `%N` values hold scalar values or address provenance, and
 `$"x"` produces the address of local storage. The checker tracks provenance through pointer
@@ -188,7 +190,7 @@ Explicit `loan-end` remains a hard boundary. An end after an inferred expiry is 
 explicit early end still invalidates later uses, and ending twice is still an error. Inference cannot
 bypass uninitialized borrows, permission checks, local-address returns, or unsupported-operation
 refusals. A dangling use can be diagnosed as an inactive loan after inferred expiry rather than as
-use-after-scope. Source locations and language-level region contracts remain future work.
+use-after-scope. Language-level region contracts remain future work.
 
 ## Explicit value moves and copies
 
@@ -301,6 +303,12 @@ synthetic slot. Summary inference gives a `byval` parameter `(byval T)` when `T`
 layout, so `long double` and `__int128` by-value parameters, which have none, get no summary yet.
 All three validators accept the effect.
 
+## Source locations
+
+With `NFCXX_IR_LOC=1` the frontend prints `(loc "FILE" LINE)` statements, and each diagnostic names the
+location of the statement it concerns: `main: uninitialized: x at FILE:6`. A statement takes the most
+recent `loc` above it in the text. Without `loc` statements the messages are unchanged.
+
 ## Array indexing
 
 `(index P I SIZE)` with a constant `I` is the constant offset `I * SIZE`. With a dynamic `I`, the
@@ -341,7 +349,8 @@ Optional module-level metadata separates value fields from physical padding:
 
 The size and alignment are 8 and 4 bytes. Field names are unique, offsets are absolute within the
 struct, and field types determine widths and alignment. Scalars, pointers, other declared struct
-layouts, and arrays `(array N T)` of these (1 to 4096 bytes, aligned like `T`) are supported. The
+layouts, and arrays `(array N T)` of these (1 to 4096 bytes, aligned like `T`) are supported, including
+as struct fields. The
 same types describe call-effect arguments, such as `(read (array 16 unsigned_char))`. Pointers do not recursively embed their pointee, so self-referential pointer
 types are valid. By-value cycles, missing nested layouts, duplicate fields/layouts, and out-of-bounds
 fields are errors. Overlapping or unaligned fields, empty arrays, and union descriptors are refused.
@@ -372,15 +381,45 @@ With `NFCXX_PATHB_BORROW=1` the C++ frontend prints a record, once per module, f
 that a slot holds or points to, and for the structs nested in those. The records go after the
 module header. A struct gets a record only if every non-static data member is a named scalar
 (`bool`, the `char` and integer types, `float` or `double`; an enum prints as its underlying
-type), a pointer, or a struct that itself gets a record, and is naturally aligned within its
-object. A struct with a base class, a bit-field, an array, a union, a `long double`, a
+type), a pointer, an array of these, or a struct that itself gets a record, and is naturally aligned
+within its object. A struct with a base class, a bit-field, a union, a `long double` member, a
 `[[no_unique_address]]` member, an anonymous member, or two members of one name (a lambda's
 captured pack) gets none, and the checker keeps requiring all of its bytes. Distinct types that
 print under one name, such as a local struct in each instance of a function template, share a
 record when their records agree. Otherwise neither gets one, and neither does any struct that
 holds one. A record the frontend prints therefore never makes the checker refuse. On the 93
 corpus programs that get records, checker results are the same with the records removed.
+The frontend also records the three by-value pseudo-structs of its floating and wide integer types,
+which are passed as `(byval (struct "__nfcxx_ld"))` and its siblings: a `long double` has 10
+significant bytes, and `_Float128` and `__int128` have 16. Records are not printed for them without
+the flag, and `(abi-type ...)` is unchanged. A value of such a type is a byte array in the IR
+(`(array 16 unsigned_char)`), so a byte array of the struct's exact size at offset 0 is accepted as
+holding that struct, with the struct's significant bytes required.
 Neither frontend emits ownership loan/transfer forms yet.
+
+### Throwing calls
+
+A callee's summary may say `(may-throw)` instead of `(nothrow)`. Such a call can leave the function by
+an exception, so the checker handles it like this:
+
+- The normal return is checked as for any call.
+- The exceptional edge is not followed. The runtime unwinds: it runs the destructors that the frames
+  pushed by this function, and by its callers, register, and it leaves every frame of this function
+  popped. Every local of this function then dies, and the checker's exit contracts apply only to
+  normal returns, since a caller never sees the outputs of a call that threw.
+- A destructor run by the unwind is the one the normal path checks at the object's scope end, on an
+  object that is initialized, since the runtime registers an object only after its construction. Its
+  summary is closed, so it writes only that object. The unwind therefore needs no state of its own. This
+  is the one assumption the model rests on, and the summaries it relies on are the trusted ones.
+- A call is refused while a drop obligation is `live`, because the unwind would have to discharge it,
+  and no frame does so for an explicit obligation.
+- Summary inference verifies each candidate as `may-throw`, so a throwing body is not a contract
+  violation, and then writes `(nothrow)` for a body that calls no throwing callee. Self-recursion does
+  not make a function throw. A function that calls a `may-throw` callee is inferred `may-throw`.
+
+Calls that may throw and the handlers that catch them (`_setjmp`, `__throw`) are still refused, so a
+program with a `try` block is not checked. The `throws` fixtures and `contracts/throws.cpp` cover the
+normal-path rules above.
 
 ## Explicit drop-state contracts
 
@@ -470,7 +509,8 @@ Contracts are validated before pruning, including unused declarations.
 | `init TYPE` | Definitely initializes the value's required bytes without reading the old value. |
 | `consume TYPE` | Consumes a matching live drop obligation on normal return. |
 
-`nothrow` excludes exceptional continuations. `noescape` promises that argument addresses are not
+`nothrow` excludes exceptional continuations. `may-throw` is the same contract with an exceptional
+continuation, which the checker handles as described under "Throwing calls". `noescape` promises that argument addresses are not
 retained beyond the call, except for an explicitly declared returned alias. `closed` promises no access to globals, hidden pointees, or other externally
 visible memory outside the declared argument regions; private callee-local storage is permitted.
 These are trusted imports at call sites, not facts inferred from names. For an external callee the
@@ -515,6 +555,18 @@ correctly returns to refusing those calls.
 The option can be repeated. Lines starting with `;` are comments, and any other form is
 malformed. A summary in the module itself takes precedence over a file's summary of the same
 name.
+
+`scripts/pathb-libc.effects` describes the few C library functions whose effects a closed summary can
+state exactly: scalar arguments and results, no memory access, no throw (`sched_yield`, `getpid`, `abs`,
+`labs`, `llabs`, `fabs`, `floor`, `ceil`, `trunc`). A function that takes a pointer of unknown size (`memcpy`,
+`strlen`), is variadic (`printf`), or keeps a pointer (`pthread_create`) has no such summary. Neither does
+one that returns storage of unknown provenance (`malloc`, `__errno_location`), since the checker cannot
+name what it returns. `sqrt` and the conversions are left out because they set `errno`, which is global.
+
+Scalar floating operations (`fadd` and its siblings, the comparisons `lt.f` and so on) and the conversions
+`cf2i`, `i2f`, `u2f` and `fconv` are value operations on scalars, and they are checked like the integer ones.
+A checked conversion traps on NaN or an out-of-range value, which is not a memory access, so the checker
+does not model the trap.
 
 `scripts/pathb-runtime.effects` describes the Path B runtime helpers of `be/nfcxx_ldrt.c` that
 implement `long double`, `__int128`, and `_Float128` operations, 106 in all. Each value is a
@@ -591,7 +643,8 @@ The other promises are checked as follows:
 - Returned alias: every returned pointer must lie in the declared argument region at the
   declared offset. An `exclusive` alias also needs an all-exclusive loan chain. A returned
   pointer that fails this is `contract-return-mismatch`.
-- `nothrow`: every call in the body already needs a contract, and every contract is `nothrow`.
+- `nothrow`: every call in the body already needs a contract, and no contract the body calls is `may-throw`.
+  A body that calls a `may-throw` callee, other than itself, is `contract-may-throw` under a `nothrow` summary.
 
 A verified function needs no local declaration facts beyond `(decl %N param)`. Region names
 cannot collide with local slots, symbols, or loan IDs. A body that calls an uncontracted function
@@ -666,14 +719,15 @@ still holds the alias reports `loan-conflict`.
 ## Refusals and limits
 
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
-error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics currently identify
-functions and slots; source spans remain future work.
+error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics identify functions and
+slots, and name the source line of the statement when the IR has `loc` statements.
 
 `(set %N OPERAND)`, which lowers `?:`, `&&` and `||`, reassigns a register. A pointer register
 assigned on each branch carries the union of their provenance. `(null PTR)` has no provenance, so
 it adds nothing at a join, and a value that can only be null cannot be dereferenced. Functions
-with an `sret` result or an `(ellipsis)` parameter are refused. A `byval` parameter has no
-provenance, so using it as an address is refused. The C++ cases `cpp/conditional_*.cpp` cover a
+with an `sret` result or an `(ellipsis)` parameter are refused, and so are calls that pass or return
+aggregates in a way the summaries cannot state. A `byval` parameter is the callee's own copy (see
+"Aggregate copies"). The C++ cases `cpp/conditional_*.cpp` cover a
 pointer `?:`, an uninitialized branch value, and a branch pointer to an ended scope.
 
 Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,

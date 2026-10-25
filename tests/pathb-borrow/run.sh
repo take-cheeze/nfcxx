@@ -327,6 +327,78 @@ cc "$tmp/byval.s" -o "$tmp/byval"
 "$tmp/byval" || { echo "FAIL $bvsrc runtime: expected 0"; exit 1; }
 echo "ok   by-value aggregate arguments: inferred byval summary, uninitialized field, emitter validation, and native execution"
 pass=$((pass + 1))
+# A call of a may-throw callee is checked on its normal path, and the exceptional edge leaves the function (the
+# runtime runs the destructors of its frames and every local dies). A destructor frame does not block the call,
+# and the callers are inferred as may-throw. The emitter and oracle accept the summaries.
+thr=tests/pathb-borrow/contracts/throws.cpp
+threff=tests/pathb-borrow/throws/may.effects
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$thr" > "$tmp/thr.ir"
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr.ir" > "$tmp/out"
+grep -Fq '(call-effects "_Z6calleei" (returns int) (may-throw)' "$tmp/out" &&
+  grep -Fq '(call-effects "_Z10with_locali" (returns int) (may-throw)' "$tmp/out" &&
+  grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $thr"; cat "$tmp/out"; exit 1; }
+{ head -1 "$tmp/thr.ir"; grep -v "^;" "$threff"; tail -n +2 "$tmp/thr.ir"; } > "$tmp/thr_effects.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/thr_effects.ir" > "$tmp/thr.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/thr_effects.ir" > "$tmp/thr-oracle.qbe"
+cmp "$tmp/thr.qbe" "$tmp/thr-oracle.qbe"
+# The mutant adds an uncalled function whose normal path writes an uninitialized local through the may-throw callee.
+{ cat "$thr"; printf '%s\n' 'int lone(int c) {' '  int x;' '  may(&x);' '  return x + c;' '}'; } > "$tmp/throws_uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/throws_uninit.cpp" > "$tmp/thr_uninit.ir" 2>/dev/null
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -Fq '_Z4lonei: uninitialized: x' "$tmp/out"; then
+  echo "FAIL $thr with an uninitialized local before the throwing call: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+# (loc ...) statements name the place of a diagnostic.
+NFCXX_IR_LOC=1 NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/throws_uninit.cpp" > "$tmp/thr_loc.ir" 2>/dev/null
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr_loc.ir" > "$tmp/out" 2>&1 || rc=$?
+grep -Fq "_Z4lonei: uninitialized: x at $tmp/throws_uninit.cpp:" "$tmp/out" || { echo "FAIL source locations in diagnostics (exit $rc)"; cat "$tmp/out"; exit 1; }
+echo "ok   calls of may-throw callees, destructor frames around them, uninitialized mutant, source locations, and emitter validation"
+pass=$((pass + 1))
+# Struct records with array fields, and a long double passed by value through the frontend's pseudo-struct record
+# (struct "__nfcxx_ld") with its 10 significant bytes. Each summary inferred from a body validates in the emitter and
+# oracle when pasted back, the mutants are found, and the long double program runs natively.
+for name in array_fields longdouble_byval; do
+  src=tests/pathb-borrow/contracts/$name.cpp
+  case $name in
+    array_fields) sed '/^  g.rows\[1\].tag = 1; g.rows\[1\].v\[0\] = 2; g.rows\[1\].v\[1\] = 3;$/d' "$src" > "$tmp/$name.mut.cpp" ; mut_want='main: uninitialized: g' ;;
+    longdouble_byval) sed 's/^  long double z = 1.5L;$/  long double z;/' "$src" > "$tmp/$name.mut.cpp"; mut_want='main: uninitialized: tmp.2' ;;
+  esac
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/$name.ir"
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/$name.mut.cpp" > "$tmp/$name.mut.ir" 2>/dev/null
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.ir" > "$tmp/out"
+  grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $src"; cat "$tmp/out"; exit 1; }
+  rc=0
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.mut.ir" > "$tmp/out" 2>&1 || rc=$?
+  if [ "$rc" != 1 ] || ! grep -Fq "$mut_want" "$tmp/out"; then
+    echo "FAIL $src mutant: expected exit 1 with '$mut_want', got $rc"; cat "$tmp/out"; exit 1
+  fi
+  { head -1 "$tmp/$name.ir"; scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --effects scripts/pathb-runtime.effects "$tmp/$name.ir" | sed -n 's/^inferred: //p'; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.pasted.ir"
+  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name.qbe"
+  scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
+  cmp "$tmp/$name.qbe" "$tmp/$name-oracle.qbe"
+  "${QBE:-build/qbe/qbe}" "$tmp/$name.qbe" -o "$tmp/$name.s"
+  cc "$tmp/$name.s" $(scripts/pathb-ldrt) -lstdc++ -lm -o "$tmp/$name"
+  "$tmp/$name" || { echo "FAIL $src runtime: expected 0"; exit 1; }
+done
+echo "ok   array fields in records, long double by value through the (struct \"__nfcxx_ld\") record, mutants, emitter validation, and native execution"
+pass=$((pass + 1))
+# Scalar C library functions have trusted summaries (scripts/pathb-libc.effects). The program declares the prototypes
+# itself, so the module holds nothing else; without the file its calls are refused, and with it the program runs.
+libsrc=tests/pathb-borrow/contracts/libc.cpp
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$libsrc" > "$tmp/libc.ir"
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/libc.ir" > "$tmp/out" 2>&1 || rc=$?
+[ "$rc" = 3 ] && grep -Fq 'calls require lifetime/effect contracts' "$tmp/out" || { echo "FAIL $libsrc without the libc summaries: expected exit 3, got $rc"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-libc.effects "$tmp/libc.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $libsrc"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/libc.ir" > "$tmp/libc.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/libc.qbe" -o "$tmp/libc.s"
+cc "$tmp/libc.s" -lm -o "$tmp/libc"
+"$tmp/libc" || { echo "FAIL $libsrc runtime: expected 0"; exit 1; }
+echo "ok   scalar C library summaries (--effects scripts/pathb-libc.effects) and native execution"
+pass=$((pass + 1))
 # A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
 # registration around it is still refused, for its own reason.)
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/vla.cpp > "$tmp/vla.ir"

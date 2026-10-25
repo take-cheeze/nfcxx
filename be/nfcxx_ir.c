@@ -1032,11 +1032,27 @@ static char *ir_layout_field_type(a_type_ptr t)
   int i;
   if (s->kind == tk_pointer) return ir_capture_type(s, 1);
   if (s->kind == tk_class || s->kind == tk_struct) return ir_layout_struct(s) ? ir_capture_type(s, 1) : NULL;
+  if (s->kind == tk_array) {
+    /* (array N ELEM): a fixed-size array of a supported element, at most 4096 bytes in all */
+    unsigned long cnt = (unsigned long)s->variant.array.variant.number_of_elements;
+    char *et;
+    if (s->variant.array.is_variable_size_array || cnt == 0 || ir_size_of(s) > 4096) return NULL;
+    et = ir_layout_field_type(s->variant.array.element_type);
+    return et == NULL ? NULL : ir_fmt("(array %lu %s)", cnt, et);
+  }
   if (s->kind != tk_integer && s->kind != tk_float) return NULL;
   txt = ir_capture_type(s, 1);
   for (i = 0; ir_layout_prims[i] != NULL; i++)
     if (strcmp(txt, ir_layout_prims[i]) == 0) return txt;
   return NULL;
+}
+
+/* The element type of a (possibly multidimensional) array, or the type itself. */
+static a_type_ptr ir_layout_base(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  while (s->kind == tk_array) s = skip_typerefs(s->variant.array.element_type);
+  return s;
 }
 
 /* Add the record of struct s, or return 0 when it has none. */
@@ -1063,9 +1079,13 @@ static int ir_layout_record(a_type_ptr s)
     fa = ir_align_of(f->type);
     if (off < end || off % fa != 0 || align < fa || off + ir_size_of(f->type) > size) return 0;
     end = off + ir_size_of(f->type);
-    if (fs->kind == tk_class || fs->kind == tk_struct) {
-      if (ndeps >= 256) return 0;
-      deps[ndeps++] = ft;
+    {
+      /* a struct held by value, directly or as an array element, must have its own record first */
+      a_type_ptr base = ir_layout_base(f->type);
+      if (base->kind == tk_class || base->kind == tk_struct) {
+        if (ndeps >= 256) return 0;
+        deps[ndeps++] = ir_capture_type(base, 1);
+      }
     }
     fields = ir_fmt("%s (field \"%s\" %llu %s)", fields, f->source_corresp.name, off, ft);
   }
@@ -4865,6 +4885,8 @@ static void ir_abi_note(a_type_ptr t)
       done = 1;
       ir_buf_begin(&ir_out_types);
       fputs("(abi-type \"__nfcxx_ld\" 16 16 (memory))\n", nf_out);
+      /* the x87 value is 10 bytes; the stores of the helpers and the thunks leave the rest unspecified */
+      if (ir_borrow) fputs("(borrow-layout (struct \"__nfcxx_ld\") 16 16 (field \"bytes\" 0 (array 10 unsigned_char)))\n", nf_out);
       ir_buf_end(&ir_out_types);
     }
     return;
@@ -4875,6 +4897,7 @@ static void ir_abi_note(a_type_ptr t)
       done = 1;
       ir_buf_begin(&ir_out_types);
       fputs("(abi-type \"__nfcxx_f128\" 16 16 (memory))\n", nf_out);
+      if (ir_borrow) fputs("(borrow-layout (struct \"__nfcxx_f128\") 16 16 (field \"bytes\" 0 (array 16 unsigned_char)))\n", nf_out);
       ir_buf_end(&ir_out_types);
     }
     return;
@@ -4885,6 +4908,7 @@ static void ir_abi_note(a_type_ptr t)
       done = 1;
       ir_buf_begin(&ir_out_types);
       fputs("(abi-type \"__nfcxx_i128\" 16 16 (leaf 0 l) (leaf 8 l))\n", nf_out);
+      if (ir_borrow) fputs("(borrow-layout (struct \"__nfcxx_i128\") 16 16 (field \"bytes\" 0 (array 16 unsigned_char)))\n", nf_out);
       ir_buf_end(&ir_out_types);
     }
     return;

@@ -536,8 +536,8 @@ class BorrowCallEffects
       end
       name = f[1].to_s
       raise bad, "duplicate call effects #{name}" if @entries.key?(name)
-      unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
-        raise refused, 'call contracts require nothrow, noescape, and closed effects'
+      unless %w[nothrow may-throw].include?(f[3].is_a?(Array) ? f[3][0] : nil) && f[3].length == 1 && f[4] == ['noescape'] && f[5] == ['closed']
+        raise refused, 'call contracts require nothrow or may-throw, noescape, and closed effects'
       end
       result = f[2][1]
       alias_result = f[2][2]
