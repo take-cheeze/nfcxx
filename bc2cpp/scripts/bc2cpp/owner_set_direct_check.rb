@@ -30,6 +30,30 @@ check = lambda do |what, condition|
 end
 abort 'SKIP: set MRBC' unless ENV['MRBC']
 
+# A checked core receiver cannot borrow engine inference; its argument proof must stand alone.
+require_relative '../../tools/bc2cpp/bc2cpp'
+core_probe = CodeGen.allocate
+core_probe.define_singleton_method(:core_body_exact_class) { |*_args, **_kwargs| 'String' }
+literal_value = BytecodeIR::Types::Exact.new(:Integer, 10)
+seen_register = nil
+core_probe.define_singleton_method(:exact_literal) do |_irep, _idx, reg|
+  seen_register = reg
+  literal_value
+end
+core_site = core_probe.checked_core_body_site(Object.new, 3, 1, ['r9'], 'r1', 'getbyte', 1, nil, 8)
+check.call('checked core argument proof uses the original unshifted register',
+           core_probe.native_core_integer_arg_proven?(['r9'], core_site, 0) && seen_register == 1)
+[IntegerConstantRanges::FIXNUM_MIN, IntegerConstantRanges::FIXNUM_MAX].each do |value|
+  literal_value = BytecodeIR::Types::Exact.new(:Integer, value)
+  check.call("checked core argument accepts target Fixnum boundary #{value}", core_probe.native_core_integer_arg_proven?(['r9'], core_site, 0))
+end
+[IntegerConstantRanges::FIXNUM_MIN - 1, IntegerConstantRanges::FIXNUM_MAX + 1, nil].each do |value|
+  literal_value = BytecodeIR::Types::Exact.new(:Integer, value)
+  check.call("checked core argument refuses unsafe or unknown literal #{value.inspect}", !core_probe.native_core_integer_arg_proven?(['r9'], core_site, 0))
+end
+literal_value = BytecodeIR::Types::Exact.new(:String, nil)
+check.call('checked core argument refuses a non-Integer literal', !core_probe.native_core_integer_arg_proven?(['r9'], core_site, 0))
+
 SOURCE = <<~RUBY
   class Bag
     def size; 2; end
@@ -39,6 +63,13 @@ SOURCE = <<~RUBY
     def secret; 1; end
   end
   class Probe
+    def gb(o); 'abc'.getbyte(1); end
+    def slice_one(o); 'abc'.byteslice(1); end
+    def slice_two(o); 'abc'.byteslice(1, 2); end
+    def slice_partial(o, n); 'abc'.byteslice(1, n); end
+    def radix(o); '101'.to_i(2); end
+    def bad_radix(o); '101'.to_i(-1); end
+    def gb_unknown(o, n); 'abc'.getbyte(n); end
     BAD_CLASS = 7
     def isa(o); o.is_a?(Bag); end
     def kind(o); o.kind_of?(Enumerable); end
@@ -70,6 +101,15 @@ body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*
 Dir.mktmpdir('owner-set-direct') do |dir|
   code, err = runtime.generate(SOURCE, dir, only_owners: OWNERS)
   File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'owner_set_direct.cxx'), code) if ENV['BC2CPP_KEEP_DIR']
+  %w[gb slice_one slice_two radix bad_radix].each do |name|
+    text = body.call(code, name)
+    check.call("#{name}: proven Integer arguments remove the guard and fallback",
+               text.include?('NATIVE_CORE_EXACT') && !text.include?('mrb_integer_p(') && !text.include?('bc2cpp_owner_call('))
+  end
+  check.call('an unknown getbyte index retains its type guard and fallback',
+             body.call(code, 'gb_unknown').include?('mrb_integer_p(') && body.call(code, 'gb_unknown').include?('bc2cpp_owner_call('))
+  check.call('byteslice with one proven argument tests only its unknown argument',
+             body.call(code, 'slice_partial').scan('mrb_integer_p(').size == 1)
   %w[isa kind].each do |name|
     text = body.call(code, name)
     check.call("#{name}: stable class/module argument removes the argument guard and fallback",
@@ -124,6 +164,16 @@ Dir.mktmpdir('owner-set-direct') do |dir|
   check.call('BC2CPP_OWNER_SET_DIRECT=0 keeps the owner calls',
              !off.include?('OWNER_SET_DIRECT :') && !off.include?('OWNER_SET_NATIVE_ARMS :') &&
              body.call(off, 'nl').include?('bc2cpp_owner_call(M, '))
+
+  saved_core_int = ENV['BC2CPP_CORE_INT_ARG_PROOF']
+  begin
+    ENV['BC2CPP_CORE_INT_ARG_PROOF'] = '0'
+    int_off, = runtime.generate(SOURCE, File.join(dir, 'core-int-off'), only_owners: OWNERS)
+    check.call('core Integer argument switch restores the type guard and fallback',
+               body.call(int_off, 'gb').include?('mrb_integer_p(') && body.call(int_off, 'gb').include?('bc2cpp_owner_call('))
+  ensure
+    saved_core_int.nil? ? ENV.delete('BC2CPP_CORE_INT_ARG_PROOF') : ENV['BC2CPP_CORE_INT_ARG_PROOF'] = saved_core_int
+  end
 
   saved_class_arg = ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF']
   begin
@@ -189,6 +239,7 @@ Dir.mktmpdir('owner-set-direct') do |dir|
       static mrb_value eval(mrb_state* M, const char* src) { return mrb_load_string(M, src); }
       static int scenario(mrb_state* M) {
         mrb_value bag = eval(M, "Bag.new");
+        mrb_gc_register(M, bag);
         for (const char* meth : {"rt_literal", "rt_private", "rt_missing", "rt_nested"}) {
           row(M, meth, meth, bag, 0, mrb_nil_value());
           row(M, meth, meth, mrb_nil_value(), 0, mrb_nil_value());
@@ -202,6 +253,14 @@ Dir.mktmpdir('owner-set-direct') do |dir|
           row(M, meth, meth, eval(M, "[]"), 0, mrb_nil_value());
         }
         row(M, "isa_dynamic invalid", "isa_dynamic", bag, 1, mrb_int_value(M, 7));
+        for (const char* meth : {"gb", "slice_one", "slice_two", "radix", "bad_radix"}) {
+          row(M, meth, meth, bag, 0, mrb_nil_value());
+        }
+        for (const char* meth : {"gb_unknown", "slice_partial"}) {
+          for (const char* value : {"2", "nil", "1.5", "2**70", "Object.new"}) {
+            row(M, (std::string(meth) + " " + value).c_str(), meth, bag, 1, eval(M, value));
+          }
+        }
         row(M, "nil.nil?", "nl", mrb_nil_value(), 0, mrb_nil_value());
         row(M, "bag.nil?", "nl", bag, 0, mrb_nil_value());
         row(M, "false.nil?", "nl", mrb_false_value(), 0, mrb_nil_value());
@@ -240,6 +299,7 @@ Dir.mktmpdir('owner-set-direct') do |dir|
         for (const char* e : oid) row(M, (std::string("object_id ") + e).c_str(), "oid", eval(M, e), 0, mrb_nil_value());
         const char* toint[] = {"5", "-5", "5.5", "'5'", "nil"};
         for (const char* e : toint) row(M, (std::string("__to_int ") + e).c_str(), "toint", eval(M, e), 0, mrb_nil_value());
+        mrb_gc_unregister(M, bag);
         return 0;
       }
     CPP
