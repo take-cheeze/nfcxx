@@ -43,7 +43,7 @@ MRUSTC_NFCC_CRATES=all check dlopen tests/mrustc/dlopen.rs $'strlen via dlsym: 5
 # Inline asm, outlined into helpers the host C compiler builds (mrustc-prep.rb): named and allocated registers, a
 # pointer operand, a byte output, a 16-byte compare-exchange.
 check asm tests/mrustc/asm.rs "42 0xf2 false true (3, 4) true false 5 6"
-MRUSTC_NFCC_CRATES=all check checked tests/mrustc/checked.rs $'None\nSome(12)\nNone\nNone\nNone\nNone\nNone\nSome(200)\nNone\nNone\nNone\nNone\nNone\nSome(170141183460469231731687303715884105728)\n(127, false)\n(0, true)\n(-2147483648, true)\n-2147483648 246\n-32768 255\nSome(16384)\n3486784401 20'
+MRUSTC_NFCC_CRATES=all check checked tests/mrustc/checked.rs $'None\nSome(12)\nNone\nNone\nNone\nNone\nNone\nSome(200)\nNone\nNone\nNone\nNone\nNone\nSome(170141183460469231731687303715884105728)\nNone\n(127, false)\n(0, true)\n(-2147483648, true)\n-2147483648 246\n-32768 255\nSome(16384)\n3486784401 20'
 
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]

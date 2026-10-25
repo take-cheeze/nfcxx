@@ -34,8 +34,6 @@ if ! (cd "$work" && MRUSTC_TARGET_VER=1.90 "$mrustc_bin/minicargo" "$src/cli" --
   tail -20 "$work/minicargo.log" >&2
   echo "FAIL mold: minicargo"; exit 1
 fi
-# mold's build script writes mold-wrapper.so (`mold -run`) beside the first ancestor named `build`, which is the root here.
-rm -f "$root/mold-wrapper.so"
 
 bin=$work/bin
 mkdir -p "$bin"
