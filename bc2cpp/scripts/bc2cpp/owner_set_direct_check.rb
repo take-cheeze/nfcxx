@@ -41,6 +41,12 @@ SOURCE = <<~RUBY
   class Probe
     def nl(o); o.nil?; end
     def rt(o, n); o.respond_to?(n); end
+    def rt_literal(o); o.respond_to?(:size); end
+    def rt_private(o); o.respond_to?(:secret, true); end
+    def rt_missing(o); o.respond_to?(:absent); end
+    def rt_join(o, flag); n = flag ? :size : :absent; o.respond_to?(n); end
+    def rt_mixed(o, flag); n = flag ? :size : 'absent'; o.respond_to?(n); end
+    def rt_nested(o); r = []; 2.times { r << o.respond_to?(:size) }; r; end
     def rt2(o, n); o.respond_to?(n, true); end
     def ti(o); o.to_i; end
     def tf(o); o.to_f; end
@@ -70,6 +76,12 @@ Dir.mktmpdir('owner-set-direct') do |dir|
   check.call('respond_to?: the owner call stays as the else', rt.include?('} else {') && rt.include?('bc2cpp_owner_call(M, '))
   rt2 = body.call(code, 'rt2')
   check.call('respond_to?(n, true): also direct', rt2.include?('OWNER_SET_DIRECT :respond_to?'))
+  %w[rt_literal rt_private rt_missing rt_join].each do |name|
+    text = body.call(code, name)
+    check.call("#{name}: proven Symbol removes the type guard and owner fallback",
+               text.include?('SYMBOL_PROBE_DIRECT') && !text.include?('mrb_symbol_p(') && !text.include?('bc2cpp_owner_call('))
+  end
+  check.call('a mixed String/Symbol argument retains the argument guard', body.call(code, 'rt_mixed').include?('mrb_symbol_p('))
   dp = body.call(code, 'dp')
   check.call('dup: OWNER_SET_DIRECT behind the not-a-class/module guard',
              dp.include?('OWNER_SET_DIRECT :dup') && dp.match?(/!\(mrb_class_p\(r\d+\) \|\| mrb_module_p/) &&
@@ -99,6 +111,28 @@ Dir.mktmpdir('owner-set-direct') do |dir|
              !off.include?('OWNER_SET_DIRECT :') && !off.include?('OWNER_SET_NATIVE_ARMS :') &&
              body.call(off, 'nl').include?('bc2cpp_owner_call(M, '))
 
+  saved_probe = ENV['BC2CPP_SYMBOL_PROBE_DIRECT']
+  begin
+    ENV['BC2CPP_SYMBOL_PROBE_DIRECT'] = '0'
+    disabled, = runtime.generate(SOURCE, File.join(dir, 'symbol-probe-off'), only_owners: OWNERS)
+    check.call('symbol-probe switch restores the guarded owner call',
+               !body.call(disabled, 'rt_literal').include?('SYMBOL_PROBE_DIRECT') &&
+                 body.call(disabled, 'rt_literal').include?('bc2cpp_owner_call('))
+  ensure
+    saved_probe.nil? ? ENV.delete('BC2CPP_SYMBOL_PROBE_DIRECT') : ENV['BC2CPP_SYMBOL_PROBE_DIRECT'] = saved_probe
+  end
+  ["class Bag; def respond_to?(n); false; end; end",
+   "class Bag; def respond_to_missing?(n, priv = false); true; end; end"].each_with_index do |override, i|
+    withdrawn, = runtime.generate(SOURCE + override, File.join(dir, "override-#{i}"), only_owners: OWNERS)
+    check.call("Ruby override #{i} withdraws the Symbol probe fast path",
+               !body.call(withdrawn, 'rt_literal').include?('SYMBOL_PROBE_DIRECT'))
+  end
+
+  unsealed, = runtime.generate(SOURCE + "class BareProbe < BasicObject; end", File.join(dir, 'basic-object'), only_owners: OWNERS)
+  check.call('a BasicObject subclass keeps the Kernel guard and owner fallback',
+             body.call(unsealed, 'rt_literal').include?('M->kernel_module') &&
+               body.call(unsealed, 'rt_literal').include?('bc2cpp_owner_call('))
+
   unless ENV['CC_GENERATED_ONLY'] == '1'
     harness = <<~'CPP'
       #include <mruby/error.h>
@@ -126,6 +160,14 @@ Dir.mktmpdir('owner-set-direct') do |dir|
       static mrb_value eval(mrb_state* M, const char* src) { return mrb_load_string(M, src); }
       static int scenario(mrb_state* M) {
         mrb_value bag = eval(M, "Bag.new");
+        for (const char* meth : {"rt_literal", "rt_private", "rt_missing", "rt_nested"}) {
+          row(M, meth, meth, bag, 0, mrb_nil_value());
+          row(M, meth, meth, mrb_nil_value(), 0, mrb_nil_value());
+        }
+        for (const char* meth : {"rt_join", "rt_mixed"}) {
+          row(M, meth, meth, bag, 1, mrb_true_value());
+          row(M, meth, meth, bag, 1, mrb_false_value());
+        }
         row(M, "nil.nil?", "nl", mrb_nil_value(), 0, mrb_nil_value());
         row(M, "bag.nil?", "nl", bag, 0, mrb_nil_value());
         row(M, "false.nil?", "nl", mrb_false_value(), 0, mrb_nil_value());
