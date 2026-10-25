@@ -103,7 +103,7 @@ class CodeGen
     sites.each do |(site_irep, site_idx, recv, argc)|
       next unless argc == mand
 
-      found = class_object_values(site_irep, site_idx, (recv + k).to_s, depth + 1, active)
+      found = class_object_values(site_irep, site_idx, recv + k, depth + 1, active)
       return nil unless found
 
       values.merge(found)
