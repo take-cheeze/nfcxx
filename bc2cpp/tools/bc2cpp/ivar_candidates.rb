@@ -107,7 +107,7 @@ module IvarCandidates
     return nil unless insn.reg && insn.argc && insn.argc >= count && count.positive?
 
     (1..count).map do |offset|
-      defs = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + offset).to_s, through_handlers: true)
+      defs = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + offset).to_s, through_handlers: true, shared: true)
       return nil unless defs
 
       program = BytecodeIR.for(irep)

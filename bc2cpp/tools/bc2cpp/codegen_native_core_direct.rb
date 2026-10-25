@@ -69,7 +69,7 @@ module NativeCoreDirectFallback
     return false unless rest == 1 && [opt, post, kw, kwrest].all?(&:zero?)
 
     slot = (1 + mand).to_s
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     defs&.size == 1 && defs.first.entry? && defs.first.reg == slot
   end
 

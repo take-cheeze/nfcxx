@@ -123,7 +123,7 @@ module RefineReport
       program.each_with_op('SEND', 'SEND0', 'SENDB') do |insn, i|
         next unless insn.sym
 
-        defs = program.reaching_definitions(i, insn.reg, opaque_regs: opaque)
+        defs = program.reaching_definitions(i, insn.reg, opaque_regs: opaque, shared: true)
         next if defs.nil? || defs.empty?
 
         keys = defs.map { |d| d.entry? ? "entry#{d.reg}" : d.index.to_s }

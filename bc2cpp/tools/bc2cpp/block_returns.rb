@@ -203,7 +203,7 @@ module BlockReturns
 
   # Reaching definitions that count a nested block's SETUPVAR into the method's registers.
   def definitions(irep, _program, idx, reg)
-    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
+    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
   end
 
   def return_value_why(irep, program, idx, reg, entry, holds_proc)

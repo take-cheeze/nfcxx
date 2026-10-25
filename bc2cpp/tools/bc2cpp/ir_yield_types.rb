@@ -50,7 +50,7 @@ module IrYieldTypes
       yields.each do |instruction, position|
         # No argument packing, arity coercion, escaped Proc, or outer lexical yield.
         return nil unless instruction.first_of(:int)&.value == count
-        definitions = BytecodeIR.reaching_definitions(body, position, instruction.reg, origin_transfers: true)
+        definitions = BytecodeIR.reaching_definitions(body, position, instruction.reg, origin_transfers: true, shared: true)
         producer = definitions&.size == 1 && !definitions.first.entry? && BytecodeIR.for(body).source_at(definitions.first.index)
         return nil unless producer && producer.op == 'BLKPUSH' && producer.argary_spec == [argc, 0, 0, 0] && producer.first_of(:plit)&.value.to_s == '0'
 
@@ -73,7 +73,7 @@ module IrYieldTypes
   end
 
   def literal_block(ireps, parent, index, register)
-    definitions = BytecodeIR.reaching_definitions(parent, index, register.to_s, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, register.to_s, origin_transfers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)

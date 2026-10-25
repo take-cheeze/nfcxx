@@ -20,7 +20,7 @@ module IrBlockOperands
     return nil unless index.is_a?(Integer) && index.between?(0, BytecodeIR.for(irep).size - 1)
 
     defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s, follow_moves: follow_moves, through_handlers: true,
-                                                                  origin_transfers: true)
+                                                                  origin_transfers: true, shared: true)
     defs && !defs.empty? ? defs : nil
   end
 

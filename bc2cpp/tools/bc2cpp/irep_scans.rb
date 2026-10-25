@@ -71,7 +71,7 @@ module IrepScans
   def agreed_constant_name(use, reg, depth = 0, through_handlers: false)
     return nil if depth > CONSTANT_SCOPE_DEPTH
 
-    defs = BytecodeIR.reaching_definitions(self, use, reg, through_handlers: through_handlers)
+    defs = BytecodeIR.reaching_definitions(self, use, reg, through_handlers: through_handlers, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     names = defs.map do |definition|

@@ -46,7 +46,7 @@ module BlockSelf
   def frame_why(irep, ireps, frames, blk)
     program = BytecodeIR.for(irep)
     proc_at = lambda do |idx, reg|
-      defs = program.reaching_definitions(idx, reg.to_s, through_handlers: true)
+      defs = program.reaching_definitions(idx, reg.to_s, through_handlers: true, shared: true)
       return :unknown if defs.nil?
 
       defs.any? { |df| proc_def?(irep, df, frames, blk) }

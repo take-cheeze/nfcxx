@@ -149,7 +149,7 @@ module BytecodeIR
   # Producers of +reg+ at +index+ in +irep+ (reaching_definitions with the irep's nested-block writes), or nil when
   # the dataflow refuses or finds none.
   def self.producers(irep, index, reg, **options)
-    defs = reaching_definitions(irep, index, reg.to_s, **options)
+    defs = reaching_definitions(irep, index, reg.to_s, shared: true, **options)
     return nil if defs.nil? || defs.empty?
 
     program = self.for(irep)

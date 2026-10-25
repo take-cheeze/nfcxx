@@ -516,7 +516,7 @@ class CodeGen
   def constructor_self_class_root(irep, idx, insn, owner)
     return nil if owner.owner.end_with?('.singleton') || !(@registry['class'] || []).all? { |d| d.owner == '<native>' }
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     send = BytecodeIR.for(irep).source_at(defs.first.index)
@@ -524,14 +524,14 @@ class CodeGen
     return owner.owner if send.op == 'SSEND0'
     return nil unless send.op == 'SEND0'
 
-    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg.to_s, through_handlers: true)
+    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg.to_s, through_handlers: true, shared: true)
     selves&.size == 1 && selves.first.entry? && selves.first.reg == '0' ? owner.owner : nil
   end
 
   # The declared classes the constant receiver of the `new` at +idx+ can name, or nil when some
   # definition reaching it is not a constant that only names classes.
   def constructor_named_classes(irep, idx, insn)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     names = defs.map do |definition|

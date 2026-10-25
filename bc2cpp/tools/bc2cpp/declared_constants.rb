@@ -279,7 +279,7 @@ module DeclaredConstants
   def frozen_array_defs(irep, idx, reg, registry, container_constants)
     return nil if (registry['freeze'] || []).any?(&:irep)
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     program = BytecodeIR.for(irep)

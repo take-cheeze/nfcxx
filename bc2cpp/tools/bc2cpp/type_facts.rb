@@ -444,7 +444,7 @@ module TypeFacts
   def textual_producer(ctx, irep, idx, reg)
     enter = irep.enter
     mand = enter ? enter.enter_fields.first.to_i : 0
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
     return 'unreadable' if defs.nil? || defs.empty?
 
     program = BytecodeIR.for(irep)
@@ -616,7 +616,7 @@ module TypeFacts
 
   # Every reaching definition of the receiver must be a freeze of the same literal, so no other arm can supply the value.
   def freeze_self_type(ctx, irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     program = BytecodeIR.for(irep)

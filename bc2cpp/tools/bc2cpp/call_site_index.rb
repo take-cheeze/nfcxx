@@ -100,7 +100,7 @@ class CallSiteIndex
     at = idx
     origin = nil
     idx.times do
-      writers = BytecodeIR.reaching_definitions(irep, at, reg, follow_moves: false, through_handlers: true)
+      writers = BytecodeIR.reaching_definitions(irep, at, reg, follow_moves: false, through_handlers: true, shared: true)
       return nil unless writers && writers.size == 1 && !writers.first.entry?
 
       writer = writers.first.index

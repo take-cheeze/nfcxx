@@ -96,7 +96,7 @@ end
 # the store, so proven_array_source_scan's single-writer walk finds nothing. Every definition being an Array (an ARRAY
 # allocation, or a schema Array read off an exact LCF file) makes the join an Array.
 def array_join_source?(irep, idx, reg, receiver_class)
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
   return false if defs.nil? || defs.size < 2
 
   defs.all? do |defn|

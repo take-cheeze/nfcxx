@@ -569,7 +569,7 @@ def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
   return nil unless TraceReaching::IN_PROGRESS.add?(key)
 
   begin
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
     return nil if defs.nil? || defs.empty?
 
     _ivar_classes, mand, arg_classes = rest
@@ -1148,7 +1148,7 @@ def container_phi_merge(irep, at, reg)
   return nil unless BytecodeIR.for(irep).decoded[at]&.goto == at + 2
 
   lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
-  defs = BytecodeIR.reaching_definitions(irep, at + 2, reg)
+  defs = BytecodeIR.reaching_definitions(irep, at + 2, reg, shared: true)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
   agree = defs.all? do |d|
@@ -1189,7 +1189,7 @@ end
 # such a literal, never as a general passthrough: RGSS::Transition#freeze is an
 # unrelated override with a different return value.
 def literal_container_class(irep, idx, reg)
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
   return nil if defs.nil? || defs.empty?
 
   classes = defs.map { |definition| literal_container_definition_class(irep, definition, Set.new) }
@@ -1212,7 +1212,7 @@ def literal_container_definition_class(irep, definition, path)
     key = [definition.index, definition.reg]
     return nil unless path.add?(key)
 
-    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg.to_s)
+    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg.to_s, shared: true)
     classes = frozen&.map { |inner| literal_container_definition_class(irep, inner, path) }
     path.delete(key)
     classes.first if classes&.first && classes.uniq.size == 1
@@ -1237,7 +1237,7 @@ end
 def trace_eqq_literal_receiver(irep, idx, reg)
   # Every definition reaching the receiver must load the same literal: a join with a call on one arm leaves
   # no literal. An argument or block-entry definition is not a literal either.
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
   return nil if defs.nil? || defs.empty?
 
   literals = defs.map { |definition| eqq_literal_of(irep, definition) }

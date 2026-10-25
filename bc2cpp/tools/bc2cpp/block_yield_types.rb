@@ -83,7 +83,7 @@ module BlockYieldTypes
   # Does the block register hold a Proc at +index+? Unknown reaching definitions count as holding one, so the refusal
   # is the conservative answer.
   def holds_block?(program, index, reg, blk)
-    defs = program.reaching_definitions(index, reg, through_handlers: true)
+    defs = program.reaching_definitions(index, reg, through_handlers: true, shared: true)
     return true if defs.nil?
 
     defs.any? do |df|

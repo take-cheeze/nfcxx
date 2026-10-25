@@ -609,7 +609,7 @@ module StaticDispatchRegistrations
 
   # The kind every definition of +reg+ reaching +index+ gives, or :unknown when they disagree or the query refuses.
   def receiver_kind_at(irep, index, reg, opaque)
-    defs = BytecodeIR.reaching_definitions(irep, index, reg, opaque_regs: opaque)
+    defs = BytecodeIR.reaching_definitions(irep, index, reg, opaque_regs: opaque, shared: true)
     return :unknown unless defs && !defs.empty?
 
     kinds = defs.map { |definition| definition_kind(irep, definition) }.uniq

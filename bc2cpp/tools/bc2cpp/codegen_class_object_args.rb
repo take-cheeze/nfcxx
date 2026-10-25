@@ -33,7 +33,7 @@ class CodeGen
   def class_object_values(irep, idx, reg, depth, active)
     return nil if depth > CLASS_OBJECT_ARGS_DEPTH
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     values = Set.new

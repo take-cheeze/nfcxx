@@ -233,7 +233,7 @@ class IvarLayout
       at, reg = pending.pop
       next unless seen.add?([at, reg])
 
-      defs = BytecodeIR.reaching_definitions(irep, at, reg, through_handlers: true)
+      defs = BytecodeIR.reaching_definitions(irep, at, reg, through_handlers: true, shared: true)
       return true if defs.nil?
 
       defs.each do |d|
@@ -301,7 +301,7 @@ class IvarLayout
     return BOTTOM unless TRACE_STATE[:active].add?(key)
 
     begin
-      defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+      defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
       return UNKNOWN if defs.nil? || defs.empty?
 
       defs.map do |d|

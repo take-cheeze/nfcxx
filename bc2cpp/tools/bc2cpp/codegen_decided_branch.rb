@@ -41,7 +41,7 @@ class CodeGen
     return nil unless mask.is_a?(Integer) && mask.positive?
     # A parameter's mask is built from the callers the flow sees, but a method installed by define_method is called by
     # name, so an argument such as `x` in `{ |x| return n if x.nil? }` can be nil with no caller in view. Keep the test.
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, shared: true)
     return nil if defs.nil? || defs.empty?
     # An entry value is the pooled proof only for a complete method. The entry
     # definition names the parameter's own register: a MOVE copy is followed back to it.

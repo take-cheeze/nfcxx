@@ -237,7 +237,7 @@ module ConstantArgumentSites
   def value_at(irep, index, reg, tuple, constants, depth = 0)
     return UNKNOWN if depth > 32
 
-    defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s, shared: true)
     return UNKNOWN if defs.nil? || defs.empty?
 
     values = defs.map { |d| definition_value(irep, d, tuple, constants) }

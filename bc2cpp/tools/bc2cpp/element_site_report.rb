@@ -26,7 +26,7 @@ module ElementSiteReport
   # scall:name (implicit self), upvar, fresh_lit, idx<..> (an element of the origin inside). A method
   # call is opaque here, whatever its name: only the index opcodes read an element.
   def element_origin(irep, idx, reg, depth = 0)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
     return ['refused'] unless defs
 
     defs.flat_map do |d|
@@ -81,7 +81,7 @@ module ElementSiteReport
   # A SETIV of a container: the class set of what the literal it stores already holds (OTHER for a value
   # that is not a literal, since then the contents come from elsewhere). nil stores hold nothing.
   def record_ivar_creation(insn, irep, owner_def, idx, owner)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.regs.first)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.regs.first, shared: true)
     return if defs&.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADNIL' }
 
     masks = defs ? defs.map { |d| literal_contents_mask(irep, d, owner_def) } : [NumericFlow::OTHER]

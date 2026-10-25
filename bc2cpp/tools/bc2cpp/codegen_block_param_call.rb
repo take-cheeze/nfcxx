@@ -55,7 +55,7 @@ module BlockParamCall
   def blkpush_receiver?(irep, idx, reg)
     return false unless idx.between?(0, BytecodeIR.for(irep).size - 1)
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return false if defs.nil? || defs.empty?
 
     defs.none?(&:entry?) && defs.all? { |definition| BytecodeIR.for(irep).source_at(definition.index).op == 'BLKPUSH' }
@@ -66,7 +66,7 @@ module BlockParamCall
   def block_param_receiver?(irep, idx, reg)
     return false unless idx.between?(0, BytecodeIR.for(irep).size - 1)
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return false unless defs&.size == 1
 
     definition = defs.first

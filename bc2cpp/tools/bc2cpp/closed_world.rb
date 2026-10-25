@@ -1620,7 +1620,7 @@ class ClosedWorld
   # its Definition. A join has one definition per branch, so the nearest writer says nothing about the others
   # (BytecodeIR.reaching_definitions). An entry value, no definition and a refused query all answer false.
   def every_definition?(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     defs.all? { |definition| yield BytecodeIR.for(irep).source_at(definition.index), definition }
@@ -1728,7 +1728,7 @@ class ClosedWorld
     program = BytecodeIR.for(irep)
     (1..n).map do |position|
       reg = (insn.reg.to_i + position).to_s
-      defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, origin_transfers: true)
+      defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, origin_transfers: true, shared: true)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
       names = defs.map do |definition|
@@ -1819,7 +1819,7 @@ class ClosedWorld
 
   # The one non-entry instruction that writes +reg+ at +use+, as [index, instruction], or nil.
   def sole_definition(irep, use, reg)
-    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, through_handlers: true, origin_transfers: true)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, through_handlers: true, origin_transfers: true, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     [defs.first.index, BytecodeIR.for(irep).source_at(defs.first.index)]
