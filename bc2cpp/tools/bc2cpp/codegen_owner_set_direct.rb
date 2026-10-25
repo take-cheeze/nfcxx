@@ -8,7 +8,18 @@
 #
 #   - `nil?` over Kernel (mrb_false) and NilClass (mrb_true): mrb_nil_p(recv);
 #   - `respond_to?(sym[, priv])` over Kernel (obj_respond_to): mrb_respond_to(recv, sym), because the only
-#     respond_to_missing? anywhere is Kernel's mrb_false default, which obj_respond_to skips.
+#     respond_to_missing? anywhere is Kernel's mrb_false default, which obj_respond_to skips;
+#   - `dup` over Kernel (mrb_obj_dup) and Module (mrb_mod_dup): mrb_obj_dup(recv) for a receiver that is not a
+#     class or module. Only a class/module-typed value can have Module among its ancestors, so the receiver guard
+#     (recv_guard) is what rules Module's body out, and only Kernel's row needs auditing (verify);
+#   - `object_id` over Kernel (mrb_obj_id_m) and `__to_int` over Kernel (mrb_ensure_int_type, the API itself).
+#
+# OWNER_SET_NATIVE_ARMS: an owner call whose name has no row above still gets exact-class arms for each owner whose
+# registration is a NativeCoreDirect::OWNER_ARM_ENTRIES (or NUMERIC_CONVERSION_ENTRIES) row, the receiver and
+# argument guards of that row in front and the owner call as the else: `to_i` on an Integer or a finite, fixable
+# Float, `to_f` on an Integer or Float, `<=>` between fixnums and Floats, `bytesize` on an exact String, `keys` on an
+# exact Hash. Each arm is NATIVE_CORE_DIRECT's (native_core_entry_safe?: verified body, no project definition on the
+# class, no prepend, no installer); an arm a guard earlier in the method already tests is left out.
 #
 # The name must have no Ruby definer and no runtime installer (ClosedWorld#ownerless_native_dispatch_safe?,
 # symbol_installed_names), and every receiver must include Kernel (kernel_receiver_sealed?; otherwise a Kernel guard
@@ -19,14 +30,27 @@
 # Like STATIC_OWNER_ARMS this rewrites the owner-call line after compile_method finishes, so every pass matching that
 # line has seen it. BC2CPP_OWNER_SET_DIRECT=0 turns it off.
 module OwnerSetDirect
-  Row = Struct.new(:owners, :argc, :expression, :arg_guard, :requires, keyword_init: true)
+  # `verify`: the owners whose rows must be audited (default: all of `owners`); `recv_guard`: a receiver test the
+  # expression needs, the owner call taking any other receiver.
+  Row = Struct.new(:owners, :argc, :expression, :arg_guard, :requires, :recv_guard, :verify, keyword_init: true) do
+    def audited
+      verify || owners
+    end
+  end
 
   OWNER_SET_ROWS = {
     'nil?' => Row.new(owners: %w[Kernel NilClass], argc: [0], expression: 'mrb_bool_value(mrb_nil_p(%<recv>s))',
                       arg_guard: nil, requires: []),
     'respond_to?' => Row.new(owners: %w[Kernel], argc: [1, 2],
                              expression: 'mrb_bool_value(mrb_respond_to(M, %<recv>s, mrb_symbol(%<a>s)))',
-                             arg_guard: 'mrb_symbol_p(%<a>s)', requires: %w[respond_to_missing?])
+                             arg_guard: 'mrb_symbol_p(%<a>s)', requires: %w[respond_to_missing?]),
+    'dup' => Row.new(owners: %w[Kernel Module], verify: %w[Kernel], argc: [0], expression: 'mrb_obj_dup(M, %<recv>s)',
+                     recv_guard: '!(mrb_class_p(%<r>s) || mrb_module_p(%<r>s) || mrb_sclass_p(%<r>s))',
+                     arg_guard: nil, requires: []),
+    'object_id' => Row.new(owners: %w[Kernel], argc: [0], expression: 'mrb_fixnum_value(mrb_obj_id(%<recv>s))',
+                           arg_guard: nil, requires: []),
+    '__to_int' => Row.new(owners: %w[Kernel], argc: [0], expression: 'mrb_ensure_int_type(M, %<recv>s)',
+                          arg_guard: nil, requires: [])
   }.freeze
 
   OWNER_SET_LINE = %r{^(?<indent>[ \t]*)(?<dest>r\d+)\ =\ (?<call>bc2cpp_owner_call_named\(M,\ (?<recv>r\d+|self),
@@ -61,9 +85,14 @@ module OwnerSetDirect
       next unless argv.size == m[:argc].to_i
 
       row = owner_set_direct_row(m[:name], argv.size)
-      next unless row
+      replacement = if row
+                      owner_set_direct_code(m, row, argv)
+                    else
+                      owner_set_native_arms_code(m, argv, code[[m.begin(0) - 4000, 0].max...m.begin(0)])
+                    end
+      next unless replacement
 
-      out << code[pos...m.begin(0)] << owner_set_direct_code(m, row, argv)
+      out << code[pos...m.begin(0)] << replacement
       pos = m.end(0)
     end
     return result if pos.zero?
@@ -77,6 +106,7 @@ module OwnerSetDirect
     expr = format(row.expression, recv: m[:recv], a: argv.first)
     guards = []
     guards << "mrb_obj_is_kind_of(M, #{m[:recv]}, M->kernel_module)" unless kernel_receiver_sealed?(owner_call_world)
+    guards << format(row.recv_guard, r: m[:recv]) if row.recv_guard
     guards << format(row.arg_guard, a: argv.first) if row.arg_guard
     note = "#{ind}// OWNER_SET_DIRECT :#{m[:name]} -> #{row.owners.join(', ')}: every owner is an audited mruby native; " \
            "no lookup\n"
@@ -99,7 +129,7 @@ module OwnerSetDirect
   def owner_set_direct_safe?(name, row)
     owners = name_owner_set(name)
     return false unless owners && !owners.empty? && (owners - row.owners).empty?
-    return false unless owners.all? { |owner| owner_set_entry_verified?(name, owner) }
+    return false unless row.audited.all? { |owner| owner_set_entry_verified?(name, owner) }
 
     row.requires.all? do |required|
       outside_owner_call_owners(required) == ['Kernel'] && owner_set_entry_verified?(required, 'Kernel')
@@ -112,6 +142,40 @@ module OwnerSetDirect
     return false if installed.nil? || installed.include?(name) || devirt_blocked_name?(name)
 
     owner_call_world.ownerless_native_dispatch_safe?(name)
+  end
+
+  # OWNER_SET_NATIVE_ARMS: the arms for this owner-call line, or nil when no owner of its name has an audited row
+  # that applies. `seen` is the method's text before the line; an arm whose guard is already there was tested.
+  def owner_set_native_arms_code(m, argv, seen)
+    owners = m[:call][/BC2CPP_OWNERS\(([^)]*)\)/, 1].to_s.scan(/"([^"]+)"/).flatten
+    entries = owner_set_arm_entries(m[:name], argv.size).select { |entry| owners.include?(entry.owner) }
+    entries = entries.reject { |entry| seen.include?(entry.guard(m[:recv], argv)) }
+    return nil if entries.empty?
+
+    ind = m[:indent]
+    note = "#{ind}// OWNER_SET_NATIVE_ARMS :#{m[:name]} -> #{entries.map(&:owner).join(', ')}: exact receiver, the " \
+           "audited core body; the owner call for any other\n"
+    branches = entries.map do |entry|
+      "if (#{entry.guard(m[:recv], argv)}) {\n#{ind}  #{m[:dest]} = #{entry.call(m[:recv], argv)};\n#{ind}} else "
+    end
+    "#{note}#{ind}#{branches.join}{\n#{ind}  #{m[:dest]} = #{m[:call]}\n#{ind}}"
+  end
+
+  ARM_ENTRY_SOURCES = %i[OWNER_ARM_ENTRIES NUMERIC_CONVERSION_ENTRIES].freeze
+
+  def owner_set_arm_entries(name, argc)
+    return [] if devirt_blocked_name?(name)
+
+    world = block_core_world
+    return [] unless world && @native_name_sources
+
+    @owner_set_arm_entries ||= {}
+    @owner_set_arm_entries.fetch([name, argc]) do
+      rows = ARM_ENTRY_SOURCES.flat_map { |source| NativeCoreDirect.const_get(source) }
+      @owner_set_arm_entries[[name, argc]] = rows.select do |entry|
+        entry.name == name && entry.arity == argc && native_core_entry_safe?(entry, world)
+      end
+    end
   end
 
   def owner_set_entry_verified?(name, owner)
