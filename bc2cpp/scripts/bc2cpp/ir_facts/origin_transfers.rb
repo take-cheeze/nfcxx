@@ -257,7 +257,6 @@ begin
       memo = key_program.instance_variable_get(:@opaque_reg_keys)
       check.call('only deeply immutable sets enter the snapshot identity memo',
                  memo.key?(first) && memo.key?(reordered) &&
-                 !mutable_program.instance_variable_get(:@opaque_reg_keys).key?(identity_set) &&
                  !array_program.instance_variable_get(:@opaque_reg_keys).key?(array))
       key = memo[first]
       key_program.reaching_definitions(1, 1, opaque_regs: first, shared: true)

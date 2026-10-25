@@ -252,7 +252,7 @@ module IrTypeFeedback
         rest = enter ? enter[2].to_i : 0
         if rest.positive? && ctx.gen.respond_to?(:bytecode_ir_rest_argument_classes)
           classes = ctx.gen.bytecode_ir_rest_argument_classes(definition)
-          inferred_rest_elements[(mandatory + optional + 1).to_s] = classes if classes
+          inferred_rest_elements[mandatory + optional + 1] = classes if classes
         end
         if ctx.gen.respond_to?(:bytecode_ir_keyword_argument_classes)
           irep.each_with_op(:KARG) do |insn, _index|

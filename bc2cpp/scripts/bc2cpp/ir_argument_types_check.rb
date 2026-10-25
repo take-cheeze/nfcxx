@@ -374,15 +374,15 @@ body_fact = lambda do |instructions, index, reg, **inputs|
 end
 rest_body = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:GETIDX0, 'R2 R1[0]'], [:RETURN, 'R2']]
 check.call('rest element receiver sees the joined element type (with nil for an absent index)',
-           body_fact.call(rest_body, 2, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] }) == Set[:NilClass, :Integer, :String])
-check.call('rest element receiver stays untyped without a join', body_fact.call(rest_body, 2, '2').nil?)
+           body_fact.call(rest_body, 2, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] }) == Set[:NilClass, :Integer, :String])
+check.call('rest element receiver stays untyped without a join', body_fact.call(rest_body, 2, 2).nil?)
 rest_copy = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:MOVE, 'R3 R1'], [:GETIDX0, 'R2 R3[0]'], [:RETURN, 'R2']]
 check.call('a MOVE copy read only by element reads keeps the join',
-           body_fact.call(rest_copy, 3, '2', inferred_rest_elements: { '1' => Set[:Integer] }) == Set[:NilClass, :Integer])
+           body_fact.call(rest_copy, 3, 2, inferred_rest_elements: { 1 => Set[:Integer] }) == Set[:NilClass, :Integer])
 rest_mutated = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:MOVE, 'R3 R1'], [:SEND, 'R3 :push n=1'],
                 [:GETIDX0, 'R2 R1[0]'], [:RETURN, 'R2']]
 check.call('a body that calls a method on the rest array (or a copy) refuses the element join',
-           body_fact.call(rest_mutated, 4, '2', inferred_rest_elements: { '1' => Set[:Integer] }).nil?)
+           body_fact.call(rest_mutated, 4, 2, inferred_rest_elements: { 1 => Set[:Integer] }).nil?)
 # A signature's `*T` (declared_rest_elements) types the element read where the call-site join is withheld: the join is
 # used only while the body cannot change the array, and the declared T stands in otherwise. With both, the join wins, as
 # for a required parameter (definition_types before declared_definition). A declared bound is not a body fact for the
@@ -396,20 +396,20 @@ check.call('a declared *Integer rest read in the body is Integer (nil for an abs
 check.call('a declared rest element is not visible to the undeclared query',
            BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { '1' => Set[:Integer] }).at(2, '2').nil?)
 check.call('a mutated rest with a declared *Integer takes only the declaration: the call-site join String is not added',
-           declared_rest.call(rest_mutated, 4, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] },
+           declared_rest.call(rest_mutated, 4, '2', inferred_rest_elements: { 1 => Set[:Integer, :String] },
                               declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer])
 rest_captured = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:LAMBDA, 'R3 I[0]'], [:GETIDX0, 'R2 R1[0]'], [:RETURN, 'R2']]
 check.call('a closure capturing the rest withdraws the join, and the declared *Integer types the read',
-           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] },
+           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { 1 => Set[:Integer, :String] },
                               declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer] &&
-           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] }).nil?)
+           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { 1 => Set[:Integer, :String] }).nil?)
 check.call('a declared *String with a private join of Integer: the join is read, as for a required parameter',
-           declared_rest.call(rest_body, 2, '2', inferred_rest_elements: { '1' => Set[:Integer] },
+           declared_rest.call(rest_body, 2, '2', inferred_rest_elements: { 1 => Set[:Integer] },
                               declared_rest_elements: { '1' => Set[:String] })&.classes == Set[:NilClass, :Integer])
 keyword_body = [[:ENTER, '0:0:0:0:1:0:0:0 (0x0)'], [:KARG, 'R3 :key'], [:RETURN, 'R3']]
 check.call('required keyword reads its joined type',
-           body_fact.call(keyword_body, 2, '3', inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])
-check.call('required keyword stays untyped without a join', body_fact.call(keyword_body, 2, '3').nil?)
+           body_fact.call(keyword_body, 2, 3, inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])
+check.call('required keyword stays untyped without a join', body_fact.call(keyword_body, 2, 3).nil?)
 declared_keyword = BytecodeIR::Types.new(body_irep.call(keyword_body), declared_keywords: { 'key' => Set[:Symbol] },
                                          inferred_keywords: { 'key' => Set[:String, :Integer] }).fact_at(2, 3)
 check.call('a declared keyword type wins over the call-site join', declared_keyword.classes == Set[:Symbol] && declared_keyword.declared?)
@@ -462,7 +462,7 @@ end_to_end = RestBodyHarness.new(rest_irep, { [caller, 2] => Set[:Left], [caller
 end_to_end.gather_sites = [[caller, 0, 2, 2]]
 rest_join_of = -> { end_to_end.bytecode_ir_rest_argument_classes(Rest) }
 body_element = lambda do |join|
-  inputs = join ? { inferred_rest_elements: { '2' => join } } : {}
+  inputs = join ? { inferred_rest_elements: { 2 => join } } : {}
   BytecodeIR::Types.new(rest_irep, **inputs).fact_at(2, 3)&.classes
 end
 check.call('codegen rest join reaches the body as the element type',
@@ -522,7 +522,7 @@ Dir.mktmpdir('rest-signature-fixture') do |dir|
              mixed&.classes == Set[:NilClass, :Integer] && mixed.declared?)
   check.call('a rest followed by a post parameter gives no declared element type (the layout is not the one ENTER fills)',
              body_of.call('post_rest').nil?)
-  joined = body_of.call('typed_rest', inferred_rest_elements: { '1' => Set[:Integer] })
+  joined = body_of.call('typed_rest', inferred_rest_elements: { 1 => Set[:Integer] })
   check.call('a signature `*Integer` and a complete private join of Integer read Integer',
              joined&.classes == Set[:NilClass, :Integer])
 end
