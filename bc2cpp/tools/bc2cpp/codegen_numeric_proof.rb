@@ -222,7 +222,7 @@ class CodeGen
       ancestor, creation = link
       cur = ancestor
     end
-    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index.to_s)
+    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index)
 
     states = numeric_states_for(ancestor)
     state = states && states[creation]

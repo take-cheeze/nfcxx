@@ -244,15 +244,15 @@ begin
     poisoned = mutable_program.reaching_definitions(1, mutable_member, opaque_regs: identity_set, shared: true)
     mutable_member = 2
     recovered = mutable_program.reaching_definitions(1, 1, opaque_regs: identity_set, shared: true)
-    check.call("frozen identity sets still observe mutable members in mode #{mode}",
-               poisoned.nil? && recovered&.map(&:index) == [0])
+    check.call("frozen identity sets keep Integer members in mode #{mode}",
+               poisoned.nil? && recovered.nil?)
     array_program = program.call([insn(0, :LOADI_1, 'R1 (1)'), insn(2, :RETURN, 'R1')])
     mutable_array_member = 1
     array = [mutable_array_member].freeze
     blocked = array_program.reaching_definitions(1, 1, opaque_regs: array, shared: true)
     mutable_array_member = 2
     unblocked = array_program.reaching_definitions(1, 1, opaque_regs: array, shared: true)
-    check.call("frozen arrays still observe mutable members in mode #{mode}", blocked.nil? && unblocked&.map(&:index) == [0])
+    check.call("frozen arrays keep Integer members in mode #{mode}", blocked.nil? && unblocked.nil?)
     if mode == '1'
       memo = key_program.instance_variable_get(:@opaque_reg_keys)
       check.call('only deeply immutable sets enter the snapshot identity memo',

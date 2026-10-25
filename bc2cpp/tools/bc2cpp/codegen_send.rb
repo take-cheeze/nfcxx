@@ -2214,7 +2214,7 @@ class CodeGen
 
     host = parent[:irep]
     k = upvars.first
-    return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k.to_s)
+    return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k)
 
     flow_insn = Insn.synthetic(:SEND, "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
     loop_flow_accept(irep, trace_idx, :upvar, { irep: host, idx: parent[:idx], insn: flow_insn })
