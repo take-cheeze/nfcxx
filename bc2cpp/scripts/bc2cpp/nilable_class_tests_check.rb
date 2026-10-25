@@ -30,6 +30,15 @@ SOURCE = <<~RUBY
     def x
       @x + 1
     end
+
+    def text_size(s); s; end
+    def draw_text(a, b); a; end
+    def blt(a, b, c, d); a; end
+    def stretch_blt(a, b, c); a; end
+    def copy_blt(a, b, c, d); a; end
+    def fill_rect(a, b, c, d, e); a; end
+    def tone=(v); @tone = v; end
+    def opacity=(v); @opacity = v; end
   end
 
   class Mark
@@ -52,6 +61,17 @@ SOURCE = <<~RUBY
     def where
       @spot.x
     end
+
+    def nilable_measure; @spot.text_size('hello'); end
+    def unknown_measure(o); o.text_size('hello'); end
+    def measure; Spot.new.text_size('hello'); end
+    def draw; Spot.new.draw_text(1, 2); end
+    def blit; Spot.new.blt(1, 2, 3, 4); end
+    def stretch; Spot.new.stretch_blt(1, 2, 3); end
+    def copy; Spot.new.copy_blt(1, 2, 3, 4); end
+    def paint; Spot.new.fill_rect(1, 2, 3, 4, 5); end
+    def tint; s = Spot.new; s.tone = 1; end
+    def fade; s = Spot.new; s.opacity = 2; end
 
     def mark
       Mark.new.x
@@ -80,5 +100,25 @@ check.call('a nil-or-Spot receiver takes the nil test and Spot#x',
              !on['Holder#where'].include?('POLY_SMALL_N') && class_tests.call(on['Holder#where']).zero?)
 check.call('an exact Mark receiver calls Mark#x with no class test',
            !on['Holder#mark'].to_s.include?('POLY_SMALL_N') && class_tests.call(on['Holder#mark']).zero?)
+
+%w[measure paint tint fade draw blit stretch copy].each do |name|
+  before = off["Holder##{name}"].to_s
+  after = on["Holder##{name}"].to_s
+  check.call("#{name}: exact Ruby receivers skip native wrapper tests", class_tests.call(before).positive? && class_tests.call(after).zero?)
+  check.call("#{name}: direct Ruby call replaces dispatch", after.include?('Spot_') && !after.include?('bc2cpp_send(M,'))
+end
+
+check.call('a nil-or-Ruby receiver reaches the nil guard and direct text_size call',
+           on['Holder#nilable_measure'].to_s.include?('NILABLE_RECEIVER :text_size') &&
+             class_tests.call(on['Holder#nilable_measure']).zero?)
+
+before_args = bodies.call('BC2CPP_RUBY_EXACT_PAST_NATIVE_ARGS' => '0')
+check.call('argument-only switch preserves the old native arm for text_size',
+           class_tests.call(before_args['Holder#measure']).positive?)
+check.call('argument-only switch keeps the existing zero-argument proof',
+           class_tests.call(before_args['Holder#mark']).zero?)
+check.call('an unproven receiver retains its native class guard and dispatch fallback',
+           class_tests.call(on['Holder#unknown_measure']).positive? &&
+             on['Holder#unknown_measure'] == before_args['Holder#unknown_measure'])
 
 suite.finish!
