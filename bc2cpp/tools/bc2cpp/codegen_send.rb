@@ -1558,6 +1558,9 @@ class CodeGen
       flow_core = exact_site && with_exact_core_site(exact_site) { flow_core_direct_line(d, recv, name, argv) }
       return flow_core if flow_core
 
+      native_exact = guard_proof_site && exact_site && with_exact_core_site(exact_site) { flow_native_direct_line(d, recv, name, argv) }
+      return native_exact if native_exact
+
       cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                   trace_insn: insn, trace_reg_offset: trace_reg_offset)
       # SUBTREE_DISPATCH: a receiver hinted to one closed subtree dispatches over that subtree only.
