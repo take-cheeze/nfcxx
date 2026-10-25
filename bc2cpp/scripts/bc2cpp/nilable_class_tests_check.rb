@@ -21,6 +21,9 @@ check = suite.method(:check)
 suite.require_mrbc!
 
 SOURCE = <<~RUBY
+  module RGSS
+    class Window; end
+  end
   class Spot
     def initialize
       @x = 1
@@ -51,6 +54,22 @@ SOURCE = <<~RUBY
     end
   end
 
+  class OtherWindow
+    def z=(v); @z = v; end
+    def x=(v); @x = v; end
+    def y=(v); @y = v; end
+    def visible=(v); @visible = v; end
+    def windowskin=(v); @skin = v; end
+  end
+  class NativeProbe
+    def sprite_z(v); s = RGSS::Sprite.new; s.z = v; end
+    def sprite_x(v); s = RGSS::Sprite.new; s.x = v; end
+    def sprite_y(v); s = RGSS::Sprite.new; s.y = v; end
+    def sprite_visible(v); s = RGSS::Sprite.new; s.visible = v; end
+    def window_skin(v); w = RGSS::Window.new(0, 0, 1, 1); w.windowskin = v; end
+    def unknown_z(s, v); s.z = v; end
+    def nested_z(v); 2.times { s = RGSS::Sprite.new; s.z = v }; end
+  end
   class Holder
     def initialize
       @spot = nil
@@ -92,8 +111,9 @@ RUBY
 bodies = lambda do |env|
   env.each { |k, v| ENV[k] = v }
   Dir.mktmpdir('nilable_class_tests') do |dir|
-    code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: %w[Spot Mark Holder])
+    code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: %w[Spot Mark Holder OtherWindow NativeProbe])
     result = code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }
+    result['NativeProbe#nested_z'] += code.scan(/^static mrb_value NativeProbe_nested_z_[^\n]*\n.*?^\}/m).join
     result['Holder#rescued_bump'] += code[/^static mrb_value Holder_rescued_bump_impl_rescue_try[^\n]*\n.*?^\}/m].to_s
     result
   end
@@ -148,6 +168,35 @@ end
 check.call('nilable_bump: the nil test still protects the exact non-nil payload call',
            on['Holder#nilable_bump'].to_s.include?('NILABLE_RECEIVER :bump') &&
              on['Holder#nilable_bump'].include?('bc2cpp_nil_receiver('))
+
+native_off = bodies.call('BC2CPP_NATIVE_EXACT_BEFORE_POLY' => '0')
+%w[sprite_z sprite_x sprite_y sprite_visible window_skin].each do |name|
+  before = native_off["NativeProbe##{name}"].to_s
+  after = on["NativeProbe##{name}"].to_s
+  check.call("#{name}: exact native receiver skips incompatible Ruby class arms",
+             before.include?('POLY_SMALL_N') && !after.include?('POLY_SMALL_N') &&
+               after.include?('NATIVE_DIRECT_EXACT') && class_tests.call(after) < class_tests.call(before))
+end
+check.call('native setters inside shifted inlined blocks retain direct native calls',
+           !on['NativeProbe#nested_z'].to_s.include?('POLY_SMALL_N') &&
+             on['NativeProbe#nested_z'].match?(/NATIVE_(?:DIRECT_)?EXACT/))
+check.call('an unknown native-or-Ruby receiver retains its class arms',
+           on['NativeProbe#unknown_z'].to_s.include?('POLY_SMALL_N'))
+check.call('native Integer conversion is retained for the setter argument',
+           on['NativeProbe#sprite_z'].to_s.include?('mrb_as_int(M,'))
+
+unbox_off = bodies.call('BC2CPP_NATIVE_PARAM_UNBOX' => '0')
+check.call('disabling native unboxing retains Integer argument checks and fallback',
+           unbox_off['NativeProbe#sprite_z'].to_s.include?('mrb_integer_p(') &&
+             unbox_off['NativeProbe#sprite_z'].include?('bc2cpp_owner_call(') &&
+             !unbox_off['NativeProbe#sprite_z'].include?('POLY_SMALL_N'))
+Dir.mktmpdir('native-before-poly-override') do |dir|
+  replaced, = Bc2cppFixtureRuntime.generate(SOURCE + "module RGSS; class Sprite; def z=(v); v; end; end; end", dir,
+                                           only_owners: %w[Spot Mark Holder OtherWindow NativeProbe RGSS::Sprite])
+  body = replaced[/^mrb_value NativeProbe_sprite_z_impl[^\n]*\n.*?^\}/m].to_s
+  check.call('a Ruby native-class setter override withdraws the native direct arm',
+             !body.include?('object_z_set_direct(M,'))
+end
 
 runtime_source = <<~RUBY
   class MonoSpot
