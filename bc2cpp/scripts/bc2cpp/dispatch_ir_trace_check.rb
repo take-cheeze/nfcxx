@@ -116,7 +116,7 @@ check.call('an unguarded trace of a joined value refuses (the reference answer)'
 # the guarded mode of the trace it was reached from.
 outer = program([:SEND0, "R2\t:foo"], [:RETURN, 'R2'])
 nested = []
-trace_new_target(outer, 1, '2', guarded: true, method_return_class: lambda { |_name|
+trace_new_target(outer, 1, 2, guarded: true, method_return_class: lambda { |_name|
   nested << trace_new_target(join_value, 5, 3)
   nil
 })
@@ -146,7 +146,7 @@ element_join = Irep.new(label: 'L', nlocals: 6, catch_handlers: [], instructions
 ])
 element_annotations = { 'L' => Struct.new(:arg_containers, :arg_elements, :ret_class).new(['Hash'], ['Integer'], nil) }
 check.call('an element of a receiver that is a literal Hash on one path and the annotated argument on the other',
-           trace_new_target(element_join, 4, '2', nil, 1, ['Hash'], class_layout: {}, registry: {},
+           trace_new_target(element_join, 4, 2, nil, 1, ['Hash'], class_layout: {}, registry: {},
                             element_annotations: element_annotations).nil?)
 
 # CONTAINER_PHI_MERGE assumes the join at `at + 2` is reached only by the two arms. A third predecessor (here 1 -> 5,

@@ -69,7 +69,7 @@ check.call('ADD R0 falls back to a send that writes R2: the LOADI before it does
            !BytecodeIR.write_dominates?(clobber, 0, 2, 2))
 check.call('ADD R5 writes only R5..R7 on its fallback: the LOADI of R2 still dominates (negative)',
            BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :ADD, "R5\t(R6)"),
-                                                 insn(2, :MOVE, "R3\tR2"), insn(3, :RETURN, 'R3')]), 0, 2, '2'))
+                                                 insn(2, :MOVE, "R3\tR2"), insn(3, :RETURN, 'R3')]), 0, 2, 2))
 check.call('GETIDX0 R0 writes R1 on its fallback: a LOADI of R1 does not dominate its read',
            !BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R1\t(5)"), insn(1, :GETIDX0, "R0\tR9[0]"),
                                                  insn(2, :MOVE, "R3\tR1"), insn(3, :RETURN, 'R3')]), 0, 2, '1'))
