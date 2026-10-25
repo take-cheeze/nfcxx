@@ -754,7 +754,7 @@ class CodeGen
 
   # The classes of a required positional that the value at +index+ still is (only its entry value reaches it), else nil.
   def yielded_param_classes(irep, index, register, param_classes)
-    defs = BytecodeIR.for(irep).reaching_definitions(index, register.to_s, through_handlers: true)
+    defs = BytecodeIR.for(irep).reaching_definitions(index, register.to_s, through_handlers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.all?(&:entry?)
 
     positions = defs.map { |df| df.reg.to_i }.uniq

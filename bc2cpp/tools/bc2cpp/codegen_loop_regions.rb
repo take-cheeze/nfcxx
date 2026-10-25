@@ -708,7 +708,7 @@ class CodeGen
 
       # Only the frame entry can be the host parameter at the call: a write on any reaching path, including a loop
       # back-edge from after the call, refuses it.
-      defs = host_ir.reaching_definitions(call_idx, upvar.to_s)
+      defs = host_ir.reaching_definitions(call_idx, upvar.to_s, shared: true)
       arg_pos = defs&.size == 1 && defs.first.entry? ? defs.first.reg.to_i : nil
       next unless arg_pos && arg_pos.between?(1, mandatory)
       next unless elements.arg_containers&.[](arg_pos - 1) == 'Hash'

@@ -112,10 +112,11 @@ module IrSymbolFlow
   end
 
   # Reaching definitions across handler edges. The cap scales with the irep so a long class body still answers.
+  # Shared frozen cache entries: every consumer only reads (size, first, each, map over index/reg).
   def reaching(irep, idx, reg, follow_moves: true)
     cap = [BytecodeIR::DATAFLOW_MAX_STATES, BytecodeIR.for(irep).size * 4].max
     BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, follow_moves: follow_moves,
-                                                         max_states: cap)
+                                                         max_states: cap, shared: true)
   end
 
   # One pass over every irep's instructions: SETCONST and GETCONST sites by name, names any MCNST op uses, writer

@@ -275,7 +275,7 @@ class CodeGen
     return false unless owner_def.owner == 'Game::Variables'
 
     # Every value reaching the read must be self: a join with any other writer, or the frame entry, refuses.
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
     return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     program = BytecodeIR.for(irep)

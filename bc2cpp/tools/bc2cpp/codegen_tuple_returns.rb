@@ -63,7 +63,7 @@ class CodeGen
     arrays = {}
     irep.each_with_op('RETURN') do |ret, r|
       reg = ret.reg
-      defs = BytecodeIR.reaching_definitions(irep, r, reg, follow_moves: false)
+      defs = BytecodeIR.reaching_definitions(irep, r, reg, follow_moves: false, shared: true)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
       defs.each do |df|

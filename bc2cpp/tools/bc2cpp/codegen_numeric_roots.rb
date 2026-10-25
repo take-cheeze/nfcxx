@@ -68,7 +68,7 @@ class CodeGen
   # The writer a report label names for +reg+ as read by +use+: the instruction every reaching definition shares,
   # :entry when the value comes from the frame, or :unknown when the query refuses or the writers disagree.
   def numeric_label_source(irep, use, reg)
-    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, shared: true)
     return :unknown if defs.nil? || defs.empty?
     return :entry if defs.all?(&:entry?)
     return :unknown if defs.any?(&:entry?)

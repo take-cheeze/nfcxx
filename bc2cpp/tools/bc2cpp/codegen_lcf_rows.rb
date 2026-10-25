@@ -207,7 +207,7 @@ class CodeGen
 
   # The literal Symbol a GETIDX key register holds, nil when there is not exactly one definition.
   def lcf_literal_key(irep, index, key_reg)
-    defs = BytecodeIR.reaching_definitions(irep, index, key_reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, index, key_reg.to_s, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)

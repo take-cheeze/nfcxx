@@ -569,7 +569,7 @@ module EscapeAnalysis
 
     # The Symbol every definition reaching +reg+ loads, or nil.
     def literal_symbol(irep, idx, reg)
-      defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+      defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
       loads = defs.map { |d| EscapeAnalysis.insn_at(irep, d.index) }

@@ -204,7 +204,7 @@ class CodeGen
   def receiver_trace_origin(irep, idx, dest_reg)
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
-    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg.to_s)
+    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg.to_s, shared: true)
     return "unproven.#{receiver_origin_by_walk(irep, idx, dest_reg)}" if defs.nil?
     return receiver_origin_by_walk(irep, idx, dest_reg) if defs.empty?
 
@@ -260,13 +260,13 @@ class CodeGen
   # that is the register's one definition and the name is a class the program knows.
   def top_level_constant_name(irep, idx, reg, through_handlers)
     program = BytecodeIR.for(irep)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: through_handlers)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: through_handlers, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     insn = program.source_at(defs.first.index)
     return nil unless insn.op == 'GETMCNST' && insn.paren_reg == insn.reg && insn.mcnst_name
 
-    scope = BytecodeIR.reaching_definitions(irep, defs.first.index, insn.reg, through_handlers: through_handlers)
+    scope = BytecodeIR.reaching_definitions(irep, defs.first.index, insn.reg, through_handlers: through_handlers, shared: true)
     return nil unless scope&.size == 1 && !scope.first.entry? && program.source_at(scope.first.index).op == 'OCLASS'
 
     ConstructClassNames.table.key?(insn.mcnst_name) ? insn.mcnst_name : nil
@@ -332,7 +332,7 @@ class CodeGen
     # A loop back-edge from after the send can carry a second write of dest_reg into it, which the backward walk
     # cannot see; a single reaching definition (following back-edges) is the only write that can be the receiver.
     # Handler edges are crossed: without through_handlers a send inside a rescue/ensure range is refused (:query_guarded).
-    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg.to_s, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     ref.name && ([ref.name] + ref.segments).join('::')

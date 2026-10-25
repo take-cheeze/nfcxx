@@ -28,7 +28,7 @@ module BytecodeIR
   def self.class_body_path(irep, idx, namespace)
     program = self.for(irep)
     insn = program.source_at(idx)
-    definitions = reaching_definitions(irep, idx, insn.reg, through_handlers: true, origin_transfers: true)
+    definitions = reaching_definitions(irep, idx, insn.reg, through_handlers: true, origin_transfers: true, shared: true)
     return nil if definitions.nil? || definitions.empty? || definitions.any?(&:entry?)
 
     paths = definitions.map do |definition|

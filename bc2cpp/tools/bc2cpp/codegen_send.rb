@@ -2151,7 +2151,7 @@ class CodeGen
     reg = recv[/\Ar(\d+)\z/, 1]
     return false unless reg && irep && idx
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADSELF' }
   end
 

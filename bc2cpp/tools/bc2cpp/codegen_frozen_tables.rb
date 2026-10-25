@@ -205,7 +205,7 @@ end
   # [literal op, its index, container] when the `freeze` at SEND0 +idx+ is applied to a single ARRAY/HASH
   # op right before it (same register), else nil. The shape and a frozen-literal slot both need it.
   def frozen_table_freeze_literal(irep, idx, insn)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     at = defs.first.index
@@ -240,7 +240,7 @@ end
 
   # The literal Integer or Symbol register +reg+ holds when instruction +at+ reads it, else nil.
   def frozen_table_literal_key(irep, at, reg)
-    defs = BytecodeIR.reaching_definitions(irep, at, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, at, reg.to_s, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)
@@ -260,7 +260,7 @@ end
   # The class set one literal slot has, from the writing op alone. OTHER for everything the literal
   # does not state (a Symbol, a call result, a constant not proven Integer).
   def frozen_table_slot_mask(irep, at, reg)
-    defs = BytecodeIR.reaching_definitions(irep, at, reg)
+    defs = BytecodeIR.reaching_definitions(irep, at, reg, shared: true)
     return NumericFlow::OTHER unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)

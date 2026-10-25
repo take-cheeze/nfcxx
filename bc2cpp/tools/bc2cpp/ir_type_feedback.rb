@@ -46,7 +46,7 @@ module IrTypeFeedback
     insn = BytecodeIR.for(parent).source_at(index)
     return [] unless BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && insn.plain_fixed_argc?
 
-    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true, shared: true)
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)

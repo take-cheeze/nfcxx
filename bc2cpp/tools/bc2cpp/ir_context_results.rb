@@ -424,7 +424,7 @@ class IrContextResults
     keyword_registers = []
     insn.nk_spec.to_i.times do |position|
       key_register = register + argc + 1 + position * 2
-      definitions = BytecodeIR.reaching_definitions(body, index, key_register.to_s, origin_transfers: true)
+      definitions = BytecodeIR.reaching_definitions(body, index, key_register.to_s, origin_transfers: true, shared: true)
       return nil unless definitions&.size == 1 && !definitions.first.entry?
 
       producer = BytecodeIR.for(body).source_at(definitions.first.index)
@@ -506,7 +506,7 @@ class IrContextResults
     return nil unless receivers.size == 1 && [:Array, :Hash].include?(receivers.first) &&
                       @gen.send(:frozen_table_name_safe?, 'freeze', receivers.first.to_s)
 
-    definitions = BytecodeIR.reaching_definitions(body, index, insn.reg, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(body, index, insn.reg, origin_transfers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     origin = definitions.first.index

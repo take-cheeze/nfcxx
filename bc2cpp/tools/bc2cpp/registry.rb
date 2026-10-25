@@ -17,7 +17,7 @@ SSEND_NO_BLOCK_OPS = (BytecodeIR::Ops::SELF_SEND - BytecodeIR::Ops::BLOCK_SEND).
 # The instructions that supply +reg+ to the read at +use+ on every path (BytecodeIR.reaching_definitions, MOVEs
 # followed), or nil when the IR cannot prove that set: a refused query, or a value from the frame's entry.
 def reaching_sources(irep, use, reg)
-  defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s)
+  defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, shared: true)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
   defs.map { |d| BytecodeIR.for(irep).source_at(d.index) }
@@ -43,7 +43,7 @@ end
 def struct_new_receiver?(irep, idx, insn)
   return false unless BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new' && insn.reg
 
-  definitions = BytecodeIR.reaching_definitions(irep, idx, insn.reg, origin_transfers: true, through_handlers: true)
+  definitions = BytecodeIR.reaching_definitions(irep, idx, insn.reg, origin_transfers: true, through_handlers: true, shared: true)
   definitions && !definitions.empty? && definitions.all? do |definition|
     source = !definition.entry? && BytecodeIR.for(irep).source_at(definition.index)
     source && source.op == 'GETCONST' && source.const_name == 'Struct'
@@ -76,7 +76,7 @@ def struct_new_member_sets(irep, idx, insn)
   return nil if registers.empty?
 
   registers.map do |register|
-    definitions = BytecodeIR.reaching_definitions(irep, use, register, origin_transfers: true, through_handlers: true)
+    definitions = BytecodeIR.reaching_definitions(irep, use, register, origin_transfers: true, through_handlers: true, shared: true)
     return nil unless definitions && !definitions.empty?
 
     names = definitions.map do |definition|
