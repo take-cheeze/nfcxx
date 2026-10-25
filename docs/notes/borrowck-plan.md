@@ -11,9 +11,11 @@ contracts model bounded reads, mutation, initialization, and owner consumption. 
 loans can alias one bounded argument region with a declared parent and permission. Summaries of functions
 defined in the module are verified against their bodies, and opt-in summary inference finds
 summaries for the rest. The C++ frontend prints declaration facts, including temporaries, and
-struct layout records. Dynamic indices into local arrays are checked with weak updates.
-Pointer arithmetic on arguments, source-language ownership policy, general lifetime signatures, and unwind cleanup
-remain planned. The historical design below was written against `origin/main` at
+struct layout records. Dynamic indices into local arrays are checked with weak updates. EDG's
+exception-handling frame stack is tracked as a value that each function must restore; because
+every accepted call is nothrow, no unwinding paths exist yet. Pointer arithmetic on arguments,
+throwing calls with unwind cleanup edges, source-language ownership policy, and general lifetime
+signatures remain planned. The historical design below was written against `origin/main` at
 `265991b`. Every claim about the code cites a file and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
 
 ## 0. Summary

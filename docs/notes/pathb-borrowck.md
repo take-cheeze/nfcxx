@@ -40,14 +40,37 @@ The C++ frontend also prints facts for storage that no declaration names:
   which the lowering initializes by assignment. It is declared at its first use and ends with
   that block.
 - A variable-length array. EDG's lowering makes it an ordinary local pointer to storage from
-  `__vla_alloc`, so it gets the facts of any local. The checker still refuses the function: the
-  lowering registers the array on EDG's exception-handling stack by storing a local address in a
-  global.
+  `__vla_alloc`, so it gets the facts of any local. Calls to `__vla_alloc` have no summary, so the
+  function is still refused.
+- An unnamed parameter. Unnamed parameters all print as `"tmp"` while their slots are `tmp`,
+  `tmp.1`, and so on. The checker pairs a parameter with the slot of its name, so a slot of another
+  name gets `(decl $"tmp.1" val)` before the parameter is stored into it.
 
 Exception-handling bookkeeping temporaries get the same treatment, which is conservative: a value
 or address carried to a later statement reads as uninitialized or out of scope, never as valid.
 Label depths for jumps count only declaration statements, so a jump can end a first-use local
 early. That is also conservative. With the flag unset, output is byte-identical.
+
+### EDG's exception-handling stack
+
+EDG lowers C++ exception handling to a linked stack of frames. Each frame is a local temporary.
+A function pushes a frame by saving the global `@"__curr_eh_stack_entry"` in it and storing the
+frame's address in the global. It pops the frame by storing the saved value back. The scalar
+global `@"__eh_curr_region"` is saved and restored the same way.
+
+The runtime reads frames only while unwinding. Every call the checker accepts is `nothrow`, so no
+unwinding can start while a frame is pushed. The checker therefore tracks the stack top as a value:
+
+- A load of `@"__curr_eh_stack_entry"` yields what was last stored there, initially the caller's
+  frames.
+- A store of a frame address replaces it. A store of unknown provenance is refused.
+- At every `return` and function exit the top must be the caller's frames again. A frame still
+  pushed, or one whose scope ended while pushed, reports `eh-frame-not-popped`.
+
+Stores into other external memory, such as globals, are allowed when the stored value is a
+scalar or an external pointer. Only a local address can escape that way, and that is still
+refused. A verified summary still reports any such access as `contract-not-closed`. Unwind
+cleanup edges are not modeled, because no accepted call can throw.
 
 Slot names identify storage, `%N` values hold scalar values or address provenance, and
 `$"x"` produces the address of local storage. The checker tracks provenance through pointer
@@ -662,6 +685,11 @@ removed.
 `tests/pathb-borrow/contracts/layouts.cpp` checks a reader of a padded nested struct through the
 frontend's layout records and is refused once they are removed, with identical QBE either way.
 `nolayouts.cpp` lists struct shapes that must get no record.
+`contracts/raii.cpp` checks a local with a destructor, its exception-stack frames, and the
+destructor's inferred summary, and runs natively. A variant that uses the object through a pointer
+after its scope reports `use-after-scope`. The fixtures in `tests/pathb-borrow/eh` cover push and
+pop, frames left pushed on some path, a pop after the frame's scope, unknown entries, and
+scalar and escaping stores to globals.
 `contracts/const_alias.cpp` infers a shared summary for a `const int *` result. A variant that
 writes the source while holding the result reports `loan-conflict`. The fixtures
 `returned/const_*.ir` cover the shared, conflicting, and refused exclusive forms.

@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir tests/pathb-borrow/index/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir tests/pathb-borrow/index/*.ir tests/pathb-borrow/eh/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
@@ -230,6 +230,33 @@ cmp "$tmp/calias.qbe" "$tmp/calias-oracle.qbe"
 cc "$tmp/calias.s" -o "$tmp/calias"
 "$tmp/calias" || { echo "FAIL $calias runtime: expected 0"; exit 1; }
 echo "ok   const pointer results: shared alias summary, held-result mutant, emitter validation, and native execution"
+pass=$((pass + 1))
+# A local with a destructor is bracketed by exception-stack frame pushes and pops;
+# the checker tracks the stack and infers the destructors' summaries. Using the
+# object through a pointer after its scope is still found.
+raii=tests/pathb-borrow/contracts/raii.cpp
+sed 's/^  return r - 3;$/  return get(k) - 3;/' "$raii" > "$tmp/raii_late.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$raii" > "$tmp/raii.ir"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/raii_late.cpp" > "$tmp/raii_late.ir" 2>/dev/null
+grep -Fq '@"__curr_eh_stack_entry" $"' "$tmp/raii.ir" || { echo "FAIL $raii: no exception-stack frame"; exit 1; }
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/raii.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $raii"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/raii_late.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -Fq 'main: use-after-scope: g' "$tmp/out"; then
+  echo "FAIL $raii using the object after its scope: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+scripts/mrb scripts/pathb-qbe-emit.rb "$tmp/raii.ir" > "$tmp/raii.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/raii.qbe" -o "$tmp/raii.s"
+# EDG's EH runtime (libC.a) defines the exception-stack globals, linked as tests/pathb-qbe/run.sh does.
+edglib=${EDG_LIB:-build/edg/lib}
+if [ -f "$edglib/libC.a" ]; then
+  cc "$tmp/raii.s" -o "$tmp/raii" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  "$tmp/raii" || { echo "FAIL $raii runtime: expected 0"; exit 1; }
+else
+  echo "skip $raii native run: no $edglib/libC.a"
+fi
+echo "ok   exception-stack frames around a destructor, after-scope mutant, and native execution"
 pass=$((pass + 1))
 # A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
 # registration around it is still refused, for its own reason.)

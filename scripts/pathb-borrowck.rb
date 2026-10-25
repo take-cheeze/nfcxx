@@ -133,6 +133,7 @@ def bh(x)
 end
 
 def borrow_scalar_type!(ty)
+  ty = unconst(ty)
   return if bh(ty) == 'ptr'
   scalars = %w[bool char signed_char unsigned_char short unsigned_short int unsigned_int long unsigned_long long_long unsigned_long_long float double]
   raise BorrowRefused, 'aggregate/unsupported values need field-sensitive provenance' unless scalars.include?(ty)
@@ -442,7 +443,10 @@ class LocalLifetime
       x.each { |y| scan.call(y) }
     end
     scan.call(f)
-    raise BorrowRefused, 'no local declaration facts; use NFCXX_PATHB_BORROW=1' unless @has_facts
+    # IR printed without the flag has no facts. A function with no slot and no
+    # parameter has nothing to declare either way.
+    needs_facts = f.drop(4).any? { |part| bh(part) == 'slot' } || f[3].length > 1
+    raise BorrowRefused, 'no local declaration facts; use NFCXX_PATHB_BORROW=1' if needs_facts && !@has_facts
     if !@implicit_loans.empty? && !@infer_loan_ends
       raise BorrowRefused, 'returned aliases from plain calls need call-borrow or --infer-loan-ends'
     end
@@ -467,7 +471,7 @@ class LocalLifetime
       raise BorrowRefused, 'aggregate results (sret) are unsupported' if bh(p) == 'sret'
       raise BorrowRefused, 'variadic functions are unsupported' if bh(p) == 'ellipsis'
       raise BadIR, 'param form' unless bh(p) == 'param' && p.length == 4
-      @params << [p[1], bname(p[2]), bh(p[3]) == 'ptr', p[3]]
+      @params << [p[1], bname(p[2]), bh(unconst(p[3])) == 'ptr', unconst(p[3])]
     end
     @slots.each_key do |name|
       unless @declared[name] || @params.any? { |p| p[1] == name }
@@ -1025,6 +1029,21 @@ class LocalLifetime
     nil
   end
 
+  # EDG's lowered exception handling links frames, which are locals, from the
+  # global @"__curr_eh_stack_entry". The runtime reads them only while unwinding,
+  # and every call this checker accepts is nothrow, so the stack is a tracked
+  # value: a function must leave it as it found it (the caller's frames).
+  def eh_top?(x)
+    x.is_a?(IRSym) && x.sig == '@' && x.name == '__curr_eh_stack_entry'
+  end
+
+  def check_eh_stack(state)
+    top = state['value:@eh'] || ['external']
+    return if top == ['external']
+    left = top.reject { |p| p == 'external' }.map { |p| b = base_origin(p); b.start_with?('ended:') ? b[6..-1] : (storage(p) || b) }
+    diagnostic('eh-frame-not-popped', left.uniq.sort.join(','))
+  end
+
   def invalidate_pointers(state, from, to)
     state.keys.each do |entry|
       if entry.start_with?('value:') || entry.start_with?('pointer:')
@@ -1123,6 +1142,14 @@ class LocalLifetime
       if mode == 'value'
         raise BorrowRefused, 'value call argument carries pointer provenance' unless origins.empty?
         check_value_argument(arg, ty)
+        resolved << [mode, ty, []]
+        next
+      end
+      # A pointer to ended storage or through an ended loan is an error at the call.
+      dead = origins.select { |p| b = base_origin(p); b.start_with?('ended:') || b.start_with?('expired:') }
+      dead.each { |p| access(p, state, true) }
+      origins -= dead
+      if origins.empty? && !dead.empty?
         resolved << [mode, ty, []]
         next
       end
@@ -1291,6 +1318,7 @@ class LocalLifetime
       end
     when 'load'
       borrow_scalar_type!(x[1])
+      return record_loan_values(state['value:@eh'] || ['external']) if eh_top?(x[2]) && bh(x[1]) == 'ptr'
       places = value(x[2], state)
       raise BorrowRefused, 'unknown pointer provenance' if places.empty?
       width = type_width(x[1])
@@ -1335,6 +1363,7 @@ class LocalLifetime
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
     when 'function-exit'
+      check_eh_stack(state)
       check_contract_exit(state) if @summary
       check_pending_drops(state)
     when 'drop-live', 'drop-state', 'drop-state-if-live'
@@ -1399,8 +1428,21 @@ class LocalLifetime
       width = zero ? constant_offset(x[1]) : type_width(x[1])
       raise BadIR, 'negative zero-fill length' if width < 0
       v = zero ? nil : value(x[3], state)
+      if !zero && eh_top?(x[2]) && bh(x[1]) == 'ptr'
+        # Pushing or popping a frame of EDG's exception-handling stack.
+        raise BorrowRefused, 'exception-stack entry of unknown provenance' if v.empty? || v.include?('unknown')
+        state['value:@eh'] = v
+        return state
+      end
       dest = value(x[2], state)
       dest.each { |p| access(p, state, false, nil, width) }
+      if dest == ['external']
+        # External memory is not tracked; only a local address can escape into it.
+        if v && v.any? { |p| p != 'external' }
+          raise BorrowRefused, 'store through external storage may escape a local address'
+        end
+        return state
+      end
       raise BorrowRefused, 'store through external storage may escape a local address' if dest.any? { |p| base_origin(p) == 'external' }
       raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
       if ranged?(dest[0])
@@ -1419,6 +1461,7 @@ class LocalLifetime
       track_drop_write(a[0], a[1], width, state)
       write_memory(a[0], a[1], width, state, !zero && bh(x[1]) == 'ptr' ? v : nil)
     when 'return'
+      check_eh_stack(state)
       refs = x[1] ? value(x[1], state) : []
       raise BorrowRefused, 'return with unknown pointer provenance' if refs.include?('unknown')
       if @summary
@@ -1461,6 +1504,7 @@ class LocalLifetime
       end
     end
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
+    initial['value:@eh'] = ['external']
     @regions.each do |reg, r|
       name = r[:name]
       r[:width].times { |i| initial[byte_key(name, i)] = ['uninitialized'] }
@@ -1644,7 +1688,7 @@ class SummaryInference
     params = f[3].drop(1)
     slots = []
     params.each do |p|
-      ty = p[3]
+      ty = unconst(p[3]) # a const pointer parameter, such as a destructor's this
       if bh(ty) == 'ptr'
         pointee = unconst(ty[1])
         desc = memory_type(pointee)
