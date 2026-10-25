@@ -39,6 +39,11 @@ SOURCE = <<~RUBY
     def secret; 1; end
   end
   class Probe
+    BAD_CLASS = 7
+    def isa(o); o.is_a?(Bag); end
+    def kind(o); o.kind_of?(Enumerable); end
+    def isa_dynamic(o, k); o.is_a?(k); end
+    def isa_bad(o); o.is_a?(BAD_CLASS); end
     def nl(o); o.nil?; end
     def rt(o, n); o.respond_to?(n); end
     def rt_literal(o); o.respond_to?(:size); end
@@ -65,6 +70,15 @@ body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*
 Dir.mktmpdir('owner-set-direct') do |dir|
   code, err = runtime.generate(SOURCE, dir, only_owners: OWNERS)
   File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'owner_set_direct.cxx'), code) if ENV['BC2CPP_KEEP_DIR']
+  %w[isa kind].each do |name|
+    text = body.call(code, name)
+    check.call("#{name}: stable class/module argument removes the argument guard and fallback",
+               text.include?('KERNEL_DIRECT') && !text.include?('mrb_class_p(') && !text.include?('bc2cpp_owner_call('))
+  end
+  %w[isa_dynamic isa_bad].each do |name|
+    check.call("#{name}: unproven class/module arguments keep the native type guard",
+               body.call(code, name).include?('mrb_class_p(') && body.call(code, name).include?('bc2cpp_owner_call('))
+  end
   nl = body.call(code, 'nl')
   check.call('nil?: OWNER_SET_DIRECT marker', nl.include?('OWNER_SET_DIRECT :nil?'))
   check.call('nil?: computed as mrb_nil_p', nl.include?('mrb_bool_value(mrb_nil_p('))
@@ -110,6 +124,21 @@ Dir.mktmpdir('owner-set-direct') do |dir|
   check.call('BC2CPP_OWNER_SET_DIRECT=0 keeps the owner calls',
              !off.include?('OWNER_SET_DIRECT :') && !off.include?('OWNER_SET_NATIVE_ARMS :') &&
              body.call(off, 'nl').include?('bc2cpp_owner_call(M, '))
+
+  saved_class_arg = ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF']
+  begin
+    ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF'] = '0'
+    class_off, = runtime.generate(SOURCE, File.join(dir, 'class-arg-off'), only_owners: OWNERS)
+    check.call('class-argument switch restores the type guard and fallback',
+               body.call(class_off, 'isa').include?('mrb_class_p(') && body.call(class_off, 'isa').include?('bc2cpp_owner_call('))
+  ensure
+    saved_class_arg.nil? ? ENV.delete('BC2CPP_KERNEL_CLASS_ARG_PROOF') : ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF'] = saved_class_arg
+  end
+  rebound, = runtime.generate(SOURCE + "Bag = 7", File.join(dir, 'rebound-class'), only_owners: OWNERS)
+  check.call('a reassigned class constant keeps the type guard and fallback',
+             body.call(rebound, 'isa').include?('mrb_class_p(') && body.call(rebound, 'isa').include?('bc2cpp_owner_call('))
+  replaced, = runtime.generate(SOURCE + "class Bag; def is_a?(k); false; end; end", File.join(dir, 'replaced-is-a'), only_owners: OWNERS)
+  check.call('a Ruby is_a? override withdraws the Kernel direct body', !body.call(replaced, 'isa').include?('KERNEL_DIRECT :is_a?'))
 
   saved_probe = ENV['BC2CPP_SYMBOL_PROBE_DIRECT']
   begin
@@ -168,6 +197,11 @@ Dir.mktmpdir('owner-set-direct') do |dir|
           row(M, meth, meth, bag, 1, mrb_true_value());
           row(M, meth, meth, bag, 1, mrb_false_value());
         }
+        for (const char* meth : {"isa", "kind", "isa_bad"}) {
+          row(M, meth, meth, bag, 0, mrb_nil_value());
+          row(M, meth, meth, eval(M, "[]"), 0, mrb_nil_value());
+        }
+        row(M, "isa_dynamic invalid", "isa_dynamic", bag, 1, mrb_int_value(M, 7));
         row(M, "nil.nil?", "nl", mrb_nil_value(), 0, mrb_nil_value());
         row(M, "bag.nil?", "nl", bag, 0, mrb_nil_value());
         row(M, "false.nil?", "nl", mrb_false_value(), 0, mrb_nil_value());
