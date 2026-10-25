@@ -136,7 +136,7 @@ class cl_rt {
     const image_module &mod = images_.modules[it->module];
     const uint32_t stack_bytes = mod.stack_bytes;
     const uint64_t static_local = mod.static_local;
-    check_limits(l, lmem, mod);
+    check_limits(l, lmem, mod, it->subgroup_size);
     for (int i = 0; i < nbufs; i++) sync_up(bufs[i], modes[i]);
     uint32_t ng[3], gs[3];
     uint64_t invocations = 1, groups = 1;
@@ -160,21 +160,35 @@ class cl_rt {
     for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
     bool sliceable = true;
     for (int e = sd + 1; e < 3; e++) if (l[e] != 1) sliceable = false;
-    uint64_t inner = 1;   // the groups in the dimensions below sd
-    for (int e = 0; e < sd; e++) inner *= ng[e];
     uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
     uint64_t per_group = inv_group * stack_bytes + stride;
+    // the groups in the dimensions below d: one group along d takes them all
+    auto below = [&](int d) { uint64_t b = 1; for (int e = 0; e < d; e++) b *= ng[e]; return b; };
+    // when even one group along sd does not fit (with all the groups below it), the slab moves to the next dimension
+    // inward; the dimensions above it then run one group per launch, so they must be one invocation wide (l == 1) for the
+    // slab to stay contiguous in the linear index
+    if (stack_total + groups * stride > room)
+      while (sliceable && sd > 0 && l[sd] == 1 && below(sd) * per_group > room) sd--;
+    uint64_t inner = below(sd);
+    uint64_t outer = 1;   // the groups of the dimensions above sd, one per launch
+    for (int e = sd + 1; e < 3; e++) outer *= ng[e];
     uint32_t per_launch = ng[sd];   // groups along sd in one launch
     if (stack_total + groups * stride > room && sliceable) {
       uint64_t fit = room / (inner * per_group);
       per_launch = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
     }
+    const uint64_t chunks = (ng[sd] + per_launch - 1) / per_launch;   // launches along sd for each group above it
     std::memset(at(dev_base_), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    cl_kernel k = kernel(it->entry, l, it->module);
-    for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_launch) {
+    cl_kernel k = kernel(it->entry, l, it->module, it->subgroup_size);
+    for (uint64_t step = 0; step < outer * chunks; step++) {
+      // og: the group of each dimension above sd (the linear group index puts x fastest, as the emitter does)
+      const uint64_t above = step / chunks;
+      uint32_t og[3] = {0, 0, 0};
+      { uint64_t r = above; for (int e = sd + 1; e < 3; e++) { og[e] = (uint32_t)(r % ng[e]); r /= ng[e]; } }
+      uint32_t s0 = (uint32_t)(step % chunks) * per_launch;
       uint32_t cnt = std::min(per_launch, ng[sd] - s0);
-      uint64_t first_group = (uint64_t)s0 * inner;
+      uint64_t first_group = (above * ng[sd] + s0) * inner;
       uint64_t slab_groups = (uint64_t)cnt * inner;
       uint64_t slab_stack = slab_groups * inv_group * stack_bytes;
       uint64_t region = alloc(slab_stack + slab_groups * stride);
@@ -197,6 +211,7 @@ class cl_rt {
       *o[sd] = s0;
       uint32_t ngs[3] = {ng[0], ng[1], ng[2]};
       ngs[sd] = cnt;
+      for (int e = sd + 1; e < 3; e++) { *o[e] = og[e]; ngs[e] = 1; }
       std::memcpy(at(dev_base_ + cl_push_at), &p, sizeof p);
       check(set_arg_mem_(k, 0, at(dev_base_ + cl_push_at)), "clSetKernelArgMemPointerINTEL");
       size_t global[3] = {(size_t)ngs[0] * l[0], (size_t)ngs[1] * l[1], (size_t)ngs[2] * l[2]};
@@ -310,7 +325,7 @@ class cl_rt {
     std::memset(host_, 0, 8192);
   }
 
-  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod) const {
+  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod, uint32_t subgroup_size) const {
     uint64_t total = 1;
     for (int d = 0; d < 3; d++) {
       if (l[d] > max_wi_[d]) fail("a work-group of " + std::to_string(l[d]) + " work-items in one dimension; the device allows " + std::to_string(max_wi_[d]));
@@ -320,17 +335,18 @@ class cl_rt {
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
     if (lmem + 1024 + mod.static_local > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
-    // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
-    if (mod.subgroup_size && total % mod.subgroup_size != 0)
-      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(mod.subgroup_size) +
-           " lanes, so the work-group size must be a multiple of " + std::to_string(mod.subgroup_size));
+    // a kernel that uses sub-group shuffles runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only,
+    // since a shuffle or a reduction over a partial sub-group would read lanes that are not there
+    if (subgroup_size && total % subgroup_size != 0)
+      fail("a work-group of " + std::to_string(total) + " work-items; the kernel's sub-groups have " + std::to_string(subgroup_size) +
+           " lanes, so the work-group size must be a multiple of " + std::to_string(subgroup_size));
   }
 
   uint64_t closure_addr() const { return dev_base_ + cl_closure_at; }
 
   // The kernel of an entry point of an image for a local size: a program per image and local size (the specialization
   // constants set the size).
-  cl_kernel kernel(const std::string &entry, const unsigned *l, size_t m) {
+  cl_kernel kernel(const std::string &entry, const unsigned *l, size_t m, uint32_t subgroup_size) {
     const image_module &mod = images_.modules[m];
     std::string k = std::to_string(m) + "/" + entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
     auto it = kernels_obj_.find(k);
@@ -350,13 +366,13 @@ class cl_rt {
     }
     cl_kernel kern = clCreateKernel(prog, entry.c_str(), &e);
     check(e, "clCreateKernel");
-    if (mod.subgroup_size) {
-      // the driver must run this local size with the sub-group size the module asks for (16 lanes)
+    if (subgroup_size) {
+      // the driver must run this local size with the sub-group size the kernel asks for (16 lanes)
       size_t lsz[3] = {l[0], l[1], l[2]}, sg = 0;
       check(clGetKernelSubGroupInfo(kern, dev_, CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE, sizeof lsz, lsz, sizeof sg, &sg, nullptr),
             "clGetKernelSubGroupInfo");
-      if (sg != mod.subgroup_size)
-        fail("the device runs sub-groups of " + std::to_string(sg) + " lanes for this kernel; the module needs " + std::to_string(mod.subgroup_size));
+      if (sg != subgroup_size)
+        fail("the device runs sub-groups of " + std::to_string(sg) + " lanes for this kernel; it needs " + std::to_string(subgroup_size));
     }
     clReleaseProgram(prog);
     kernels_obj_[k] = kern;

@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const { compile, LANGUAGES, root } = require("./pipeline.cjs");
 const bindings = require("./bindings.js");
+const inbrowser = require("./inbrowser-assets.cjs");
 
 const here = __dirname;
 const args = process.argv.slice(2);
@@ -32,7 +33,8 @@ async function buildExample(entry, examplesDir) {
   const language = entry.language || "c++";
   if (!LANGUAGES[language]) throw new Error(`${entry.id}: unknown language ${language}`);
   const builds = {};
-  for (const mode of LANGUAGES[language].modes) {
+  // an entry may name its modes (modes: ["asan"], for a program whose heap only the asan mode has)
+  for (const mode of entry.modes || LANGUAGES[language].modes) {
     const result = await compile(source, { language, mode });
     if (!result.ok) {
       throw new Error(`${entry.id} [${mode}]: ${result.stage}: ${result.message}`);
@@ -69,7 +71,19 @@ async function main() {
   }
   fs.copyFileSync(path.join(examplesDir, "index.json"), path.join(out, "examples", "index.json"));
   fs.copyFileSync(path.join(here, "index.html"), path.join(out, "index.html"));
-  fs.copyFileSync(path.join(here, "bindings.js"), path.join(out, "bindings.js"));
+  for (const f of ["bindings.js", "common.js", "inbrowser.js", "compile-worker.js"]) {
+    fs.copyFileSync(path.join(here, f), path.join(out, f));
+  }
+  // The in-browser compile (inbrowser.js: the front end and the emitter as wasm), when its tools are built; without
+  // them the page compiles the examples only (their prebuilt results). --require-inbrowser makes their absence an error.
+  if (inbrowser.available()) {
+    const bytes = inbrowser.write(path.join(out, "inbrowser"));
+    console.log(`in-browser compiler: inbrowser/, ${(bytes / 1048576).toFixed(1)} MB`);
+  } else if (args.includes("--require-inbrowser")) {
+    throw new Error("the in-browser compiler is not built (PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh, scripts/setup-mruby-wasm.sh)");
+  } else {
+    console.log("in-browser compiler: not built, so the site compiles the examples only");
+  }
   fs.writeFileSync(path.join(out, ".nojekyll"), "");
   console.log(`site written to ${out}`);
 }

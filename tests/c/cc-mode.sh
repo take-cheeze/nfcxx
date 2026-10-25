@@ -196,6 +196,449 @@ EOF
   rejects "unknown option" "frobnicate" --frobnicate -c util.c -o rej.o
   rejects "no input" "no input" -c -o rej.o
   rejects "-MD without -c" "needs -c" -MD util.c -o rej.o
+  # 7b. NFCXX_GCC_PASSTHROUGH=1 (the Linux kernel's build, docs/notes/linux-kernel.md): on the gcc backend the options
+  # QBE cannot honour reach gcc, in command-line order; on the qbe backend they are still refused.
+  printf 'int main(void) { char c = (char)200; return c > 0 ? 0 : 1; }\n' > uchar.c
+  printf 'int g; int *p(void) { return &g; }\n' > pic.c
+  if [ $b = gcc ]; then
+    if NFCXX_GCC_PASSTHROUGH=1 "$nfcc" -funsigned-char uchar.c -o uchar 2>/dev/null && ./uchar; then
+      ok "passthrough: -funsigned-char reaches gcc"
+    else bad "passthrough: -funsigned-char reaches gcc" "char stayed signed or the compile failed"; fi
+    # gcc takes the last of -fno-PIE ... -fPIC (the kernel's vDSO relies on it): no absolute 32-bit relocation
+    if [ "$(uname -m)" = x86_64 ]; then
+      if NFCXX_GCC_PASSTHROUGH=1 "$nfcc" -fno-PIE -mcmodel=kernel -fPIC -mcmodel=small -c pic.c -o pic.o 2>/dev/null &&
+         ! readelf -rW pic.o | grep -q 'R_X86_64_32S\? '; then ok "passthrough: codegen options keep their order"
+      else bad "passthrough: codegen options keep their order" "$(readelf -rW pic.o 2>&1 | grep R_X86 | head -2 | tr '\n' ' ')"; fi
+    fi
+  else
+    NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -funsigned-char" "funsigned-char" -funsigned-char -c util.c -o rej.o
+    NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -mno-sse" "mno-sse" -mno-sse -c util.c -o rej.o
+  fi
+  # 7c. NFCXX_QBE_KERNEL=1 (the qbe side of the kernel build): the kernel options the qbe path honours are accepted and
+  # honoured, -mno-sse is checked, unreferenced static functions are dropped; NFCXX_QBE_TRY moves a compile to qbe only
+  # when the objects match (docs/notes/linux-kernel.md)
+  if [ $b = qbe ] && [ "$(uname -m)" = x86_64 ]; then
+    K=(-fno-PIE -mno-red-zone -mno-sse -mno-80387 -funsigned-char -fshort-wchar -ftrivial-auto-var-init=zero)
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" uchar.c -o kuchar 2>/dev/null && ./kuchar; then ok "kernel mode: -funsigned-char honoured"
+    else bad "kernel mode: -funsigned-char honoured" "char stayed signed or the compile failed"; fi
+    cat > kzero.c <<'EOC'
+__attribute__((noinline)) static int dirty(void) { volatile int a[64]; for (int i = 0; i < 64; i++) a[i] = 0x55; return a[7]; }
+__attribute__((noinline)) static int fresh(void) { int a[64]; int s = 0; for (int i = 0; i < 64; i++) s |= a[i]; return s; }
+int main(void) { dirty(); return fresh(); }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kzero.c -o kzero 2>/dev/null && ./kzero; then ok "kernel mode: -ftrivial-auto-var-init=zero honoured"
+    else bad "kernel mode: -ftrivial-auto-var-init=zero honoured" "an uninitialized local was not zero"; fi
+    printf 'double h(double x) { return x * 3; }\n' > kfp.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kfp.c -o kfp.o 2>&1); then bad "kernel mode: SSE code refused under -mno-sse" "was accepted"
+    elif grep -q "SSE or x87" <<<"$out"; then ok "kernel mode: SSE code refused under -mno-sse"
+    else bad "kernel mode: SSE code refused under -mno-sse" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    printf 'extern int not_in_this_program(void);\nstatic inline int unused(void) { return not_in_this_program(); }\nint used(void) { return 1; }\n' > kinl.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kinl.c -o kinl.o 2>/dev/null && ! nm kinl.o | grep -q not_in_this_program; then
+      ok "kernel mode: unreferenced static inline functions dropped"
+    else bad "kernel mode: unreferenced static inline functions dropped" "$(nm kinl.o 2>&1 | head -3 | tr '\n' ' ')"; fi
+    # used keeps an object in a section (the kernel's __ADDRESSABLE in .discard.addressable); a section alone does not
+    printf 'int x;\nstatic void * __attribute__((__used__)) __attribute__((__section__(".discard.addressable"))) keep_me = (void *)&x;\nstatic int __attribute__((section(".init.data"))) drop_me = 1;\n' > kused.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kused.c -o kused.o 2>/dev/null && readelf -SW kused.o | grep -q discard.addressable &&
+       ! nm kused.o | grep -q drop_me; then ok "kernel mode: used keeps an object, a section alone does not"
+    else bad "kernel mode: used keeps an object, a section alone does not" "$(nm kused.o 2>&1 | tr '\n' ' ')"; fi
+    # a dropped function's asm: its refusal is not reported and its thunk (naming a symbol the program lacks) is gone;
+    # the same asm in a kept function is still refused
+    cat > kasm.c <<'EOC'
+extern int not_in_this_program(void);
+static inline int bit(long nr) { int r; __asm__("movl %1, %0; call not_in_this_program" : "=r"(r) : "i"(1 << (nr & 7))); return r; }
+static inline int named(void) { int r; __asm__("call %c1" : "=a"(r) : "i"(not_in_this_program)); return r; }
+int used(int x) { __asm__("addl $1, %0" : "+r"(x)); return x; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kasm.c -o kasm.o 2>/dev/null && ! nm kasm.o | grep -q not_in_this_program; then
+      ok "kernel mode: a dropped function's asm is neither refused nor emitted"
+    else bad "kernel mode: a dropped function's asm is neither refused nor emitted" "$(nm kasm.o 2>&1 | head -3 | tr '\n' ' ')"; fi
+    printf 'int keep(long n) { int r; __asm__("movl %%1, %%0" : "=r"(r) : "i"(1 << (n & 7))); return r; }\n' > kasm2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kasm2.c -o kasm2.o 2>&1); then bad "kernel mode: a kept function's unsatisfiable asm refused" "was accepted"
+    elif grep -q "kasm2.c:1:.*immediate operand" <<<"$out"; then ok "kernel mode: a kept function's unsatisfiable asm refused"
+    else bad "kernel mode: a kept function's unsatisfiable asm refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # file-scope asm (the kernel's EXPORT_SYMBOL): the text reaches the assembly, a section switched to and back, code
+    # defined in the section a file starts in
+    cat > ktop.c <<'EOC'
+__asm__(".pushsection .rodata\n.globl toplevel_answer\n.balign 4\ntoplevel_answer: .long 40\n.popsection");
+__asm__(".globl toplevel_two\n" "toplevel_two: movl $2, %eax\n\tret");
+extern const int toplevel_answer;
+int toplevel_two(void);
+int main(void) { return toplevel_answer + toplevel_two(); }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" ktop.c -o ktop 2>/dev/null && { ./ktop; [ $? = 42 ]; }; then ok "kernel mode: file-scope asm"
+    else bad "kernel mode: file-scope asm" "wrong result or the compile failed"; fi
+    # a packed struct whose bit-fields packing would move, or whose bytes no narrower unit holds: refused
+    printf 'struct m { char c; unsigned x: 4; int y; } __attribute__((packed));\nstruct m v;\n' > kpk1.c
+    printf 'struct s { unsigned char a; unsigned b: 20; } __attribute__((packed));\nstruct s v;\n' > kpk2.c
+    for f in kpk1 kpk2; do
+      if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c $f.c -o $f.o 2>&1); then bad "kernel mode: packed bit-fields refused ($f)" "was accepted"
+      elif grep -q "bit-fields in a packed struct are not supported" <<<"$out"; then ok "kernel mode: packed bit-fields refused ($f)"
+      else bad "kernel mode: packed bit-fields refused ($f)" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    done
+    # asm that cannot be reached (the kernel's cmpxchg switches on sizeof(*ptr): its cmpxchgb case would not assemble
+    # with an 8-byte operand, and an if (0) with an operand no constant satisfies) is neither emitted nor refused
+    cat > kdead.c <<'EOC'
+static inline long xchg_sz(void *p, long v, int sz) {
+	switch (sz) {
+	case 1: { unsigned char r; __asm__ volatile("xchgb %0, %1" : "=q"(r), "+m"(*(char *)p) : "0"((unsigned char)v)); return r; }
+	case 8: { long r = v; __asm__ volatile("xchgq %0, %1" : "+r"(r), "+m"(*(long *)p)); return r; }
+	}
+	return 0;
+}
+long cell = 5;
+long *ptr = &cell;
+int main(void) {
+	long old;
+	switch (sizeof(*ptr)) {
+	case 1: __asm__("cmpxchgb %1, %0" : "+m"(cell) : "q"(ptr)); break;
+	case 8: old = xchg_sz(&cell, 42, 8); break;
+	}
+	if (0) __asm__("movl %1, %%eax" : : "i"(1 << (old & 7)));
+	return cell == 42 && old == 5 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kdead.c -o kdead 2>/dev/null && { ./kdead; [ $? = 42 ]; }; then ok "kernel mode: unreachable asm dropped"
+    else bad "kernel mode: unreachable asm dropped" "wrong result or the compile failed"; fi
+    # __builtin_object_size: the answer for a size cproc cannot tell, the pointer not evaluated
+    cat > kobj.c <<'EOC'
+char buf[8];
+int n;
+unsigned long a(void) { return __builtin_object_size(buf + n++, 0); }
+unsigned long b(char *p) { return __builtin_object_size(p, 2); }
+int main(void) { return a() == (unsigned long)-1 && b(buf) == 0 && n == 0 ? 42 : 1; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kobj.c -o kobj 2>/dev/null && { ./kobj; [ $? = 42 ]; }; then ok "kernel mode: __builtin_object_size"
+    else bad "kernel mode: __builtin_object_size" "wrong result or the compile failed"; fi
+    # volatile aggregates of 1, 2, 4 and 8 bytes (WRITE_ONCE/READ_ONCE of the kernel's pte_t): one call each
+    cat > kvagg.c <<'EOC'
+typedef struct { unsigned long pte; } pte_t;
+typedef struct { unsigned short a; unsigned char b, c; } small_t;
+#define WRITE_ONCE(x, val) (*(volatile __typeof__(x) *)&(x) = (val))
+#define READ_ONCE(x) (*(const volatile __typeof__(x) *)&(x))
+pte_t table[4];
+small_t sm;
+int main(void) {
+	pte_t p = { 0x1234 };
+	WRITE_ONCE(table[1], p);
+	pte_t q = READ_ONCE(table[1]);
+	small_t s = { 7, 8, 9 };
+	WRITE_ONCE(sm, s);
+	small_t t = READ_ONCE(sm);
+	return q.pte == 0x1234 && table[0].pte == 0 && table[2].pte == 0 && t.a == 7 && t.c == 9 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvagg.c -S -o kvagg.s 2>/dev/null && [ "$(grep -c 'call.*nfcxx_v' kvagg.s)" = 4 ] &&
+       NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvagg.c -o kvagg 2>/dev/null && { ./kvagg; [ $? = 42 ]; }; then ok "kernel mode: volatile aggregates"
+    else bad "kernel mode: volatile aggregates" "$(grep -c 'call.*nfcxx_v' kvagg.s 2>/dev/null) helper calls, or a wrong result"; fi
+    printf 'struct big { long a[3]; };\nlong f(volatile struct big *p) { struct big b = *p; return b.a[0]; }\n' > kvbig.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kvbig.c -o kvbig.o 2>&1); then bad "kernel mode: a 24-byte volatile load refused" "was accepted"
+    elif grep -q "volatile load of this type" <<<"$out"; then ok "kernel mode: a 24-byte volatile load refused"
+    else bad "kernel mode: a 24-byte volatile load refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # gnu_inline (the kernel's inline): extern inline defines no symbol and its direct calls use the body; inline
+    # defines the external symbol
+    cat > kgnui.c <<'EOC'
+extern inline __attribute__((gnu_inline, always_inline)) unsigned long save_fl(void) { return 40; }
+inline __attribute__((gnu_inline)) int two(void) { return 2; }
+int main(void) { return save_fl() + two(); }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kgnui.c -o kgnui.o 2>/dev/null && ! nm kgnui.o | grep -qE ' [TU] save_fl$' &&
+       nm kgnui.o | grep -q ' T two$' && "$nfcc" kgnui.o -o kgnui 2>/dev/null && { ./kgnui; [ $? = 42 ]; }; then ok "kernel mode: gnu_inline"
+    else bad "kernel mode: gnu_inline" "$(nm kgnui.o 2>&1 | tr '\n' ' ')"; fi
+    # another calling convention (the kernel's __efiapi, ms_abi): declarations pass; a call is refused, unless only a
+    # function pruning drops makes it
+    printf 'long call(long (__attribute__((ms_abi)) *h)(long)) { return h(1); }\n' > kabi1.c
+    printf 'long decl(long (__attribute__((ms_abi)) *h)(long));\nstatic long dead(long (__attribute__((ms_abi)) *h)(long)) { return h(1); }\nint used(void) { return 1; }\n' > kabi2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kabi1.c -o kabi1.o 2>&1); then bad "kernel mode: an ms_abi call refused" "was accepted"
+    elif grep -q "ms_abi calling convention is not supported" <<<"$out"; then ok "kernel mode: an ms_abi call refused"
+    else bad "kernel mode: an ms_abi call refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kabi2.c -o kabi2.o 2>/dev/null; then ok "kernel mode: ms_abi declarations and dead calls pass"
+    else bad "kernel mode: ms_abi declarations and dead calls pass" "the compile failed"; fi
+    # an always_inline function whose asm needs "i"(1 << (bit & 7)) (the kernel's _static_cpu_has): a call with a
+    # constant bit gets a clone in which bit is that constant, as gcc's inlined copy; through a second always_inline
+    # function too; a call with a variable bit is still refused
+    cat > kclone.c <<'EOC'
+struct cpuinfo { unsigned int caps[4]; } boot_cpu = { { 0x5, 0x80, 0, 0 } };
+static inline __attribute__((always_inline)) int static_has(unsigned short bit)
+{
+	asm goto("testb %[bitnum], %P[cap_byte](%%rip)\n\tjnz %l[t_yes]"
+		 : : [bitnum] "i"(1 << (bit & 7)), [cap_byte] "i"(&((const char *)boot_cpu.caps)[bit >> 3])
+		 : "cc" : t_yes);
+	return 0;
+t_yes:
+	return 1;
+}
+#define has(bit) static_has(bit)
+static inline __attribute__((always_inline)) int twice_has(unsigned short bit) { return has(bit) + has(bit); }
+int a(void) { return has(0) + has(2) * 10 + has(1) * 100; }       /* bits 0 and 2 set, 1 clear: 11 */
+int b(void) { return has(39) + twice_has(39) + twice_has(40); }    /* bit 39 set (0x80 in byte 4): 3 */
+int main(void) { return a() == 11 && b() == 3 ? 42 : 1; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kclone.c -o kclone 2>/dev/null && { ./kclone; [ $? = 42 ]; }; then ok "kernel mode: constant-argument clones of always_inline functions"
+    else bad "kernel mode: constant-argument clones of always_inline functions" "wrong result or the compile failed"; fi
+    { sed -n 1,10p kclone.c; echo 'int c(unsigned short x) { return static_has(x); }'; } > kclone2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kclone2.c -o kclone2.o 2>&1); then bad "kernel mode: a variable argument is still refused" "was accepted"
+    elif grep -q "immediate operand" <<<"$out"; then ok "kernel mode: a variable argument is still refused"
+    else bad "kernel mode: a variable argument is still refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # a condition that folds to a constant leaves no code for the other way (the kernel's udelay(10) never calls
+    # __bad_udelay), and %P of an immediate is the bare number (call __get_user_%P4)
+    printf 'void bad(void);\nvoid cu(unsigned long);\n#define udelay(n) ({ if (__builtin_constant_p(n)) { if ((n) / 20000 >= 1) bad(); else cu((n) * 0x10C7ul); } })\nvoid g(void) { udelay(10); }\nint h(void) { int r; __asm__("movl $%%P1, %%0" : "=r"(r) : "i"(8)); return r; }\n' > kfold.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kfold.c -o kfold.o 2>/dev/null && ! nm kfold.o | grep -q ' U bad' && nm kfold.o | grep -q ' U cu' &&
+       objdump -d kfold.o | grep -q 'mov *\$0x8,'; then ok "kernel mode: constant conditions fold, %P of an immediate is bare"
+    else bad "kernel mode: constant conditions fold, %P of an immediate is bare" "$(nm kfold.o 2>&1 | tr '\n' ' ')"; fi
+    # GNU cleanup (cproc -G, the kernel's guard()): at the end of the scope and at every return, break, continue and
+    # goto that leaves it, innermost first, in gcc's order; a jump into the scope of such an object is refused
+    cat > kguard.c <<'EOC'
+static int log[64], n;
+static void rec(int *p) { log[n++] = *p; }
+#define guard(v) int v __attribute__((cleanup(rec)))
+static int early(int x) { guard(a) = 1; { guard(b) = 2; if (x) return 10; } guard(c) = 3; return 20; }
+static void loops(void) {
+	for (int i = 0; i < 3; i++) { guard(l) = 100 + i; if (i == 1) continue; if (i == 2) break; }
+	for (int s __attribute__((cleanup(rec))) = 7, done = 0; !done; done = 1) { guard(t) = 8; }
+	switch (n) { default: { guard(w) = 9; break; } }
+}
+static int jumps(int x) {
+	guard(k) = 32;
+	{ guard(g) = 30; if (x) goto out; guard(h) = 31; }
+out:
+	return 0;
+}
+int main(void) {
+	int want[] = { 2, 1, 2, 3, 1, 100, 101, 102, 8, 7, 9, 31, 30, 32, 30, 32 };
+	if (early(1) != 10) return 1;
+	if (early(0) != 20) return 2;
+	loops();
+	jumps(0); jumps(1);
+	if (n != (int)(sizeof want / sizeof want[0])) return 3;
+	for (int i = 0; i < n; i++) if (log[i] != want[i]) return 10 + i;
+	return 42;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kguard.c -o kguard 2>/dev/null && { ./kguard; [ $? = 42 ]; } &&
+       ! nm kguard | grep -q __gcc_personality_v0; then ok "kernel mode: GNU cleanup at scope exits, no unwind tables"
+    else bad "kernel mode: GNU cleanup at scope exits, no unwind tables" "wrong order or the compile failed"; fi
+    printf 'static void rec(int *p) { (void)p; }\nint f(int x) { if (x) goto in; { int v __attribute__((cleanup(rec))) = 1; in: return v; } }\n' > kguard2.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kguard2.c -o kguard2.o 2>&1); then bad "kernel mode: a jump into a cleanup scope refused" "was accepted"
+    elif grep -q "jump into the scope" <<<"$out"; then ok "kernel mode: a jump into a cleanup scope refused"
+    else bad "kernel mode: a jump into a cleanup scope refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # weak, alias and visibility: the same symbol table as gcc's (binding, type, section kind, visibility)
+    symtab() { objdump -t "$1" | awk -F'\t' 'NF >= 2 { n = split($2, t, " "); h = $1; s = h; sub(/.* /, "", s); print t[n], substr(h, 18, 2), substr(h, 25, 1), (s ~ /^\.text/ ? "text" : s ~ /^\.data|^\.bss/ ? "data" : s), (n > 2 ? t[2] : "") }' | grep -E '^(maybe|never|unused|sys_entry|hidden_one|tab)' | sort; }
+    if gcc -O2 -c "$root/tests/c/gnu_weak_alias.c" -o kwg.o && NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c "$root/tests/c/gnu_weak_alias.c" -o kwq.o 2>/dev/null &&
+       [ "$(symtab kwg.o)" = "$(symtab kwq.o)" ]; then ok "kernel mode: weak, alias and visibility as gcc writes them"
+    else bad "kernel mode: weak, alias and visibility as gcc writes them" "$(diff <(symtab kwg.o) <(symtab kwq.o) | tr '\n' ' ')"; fi
+    # -fno-asynchronous-unwind-tables (qbe -U): no .eh_frame, as gcc's kernel objects have none
+    printf 'int g(int);\nint f(int x) { return g(x) + 1; }\n' > kunw.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -fno-asynchronous-unwind-tables -c kunw.c -o kunw.o 2>/dev/null && ! readelf -SW kunw.o | grep -q eh_frame
+    then ok "kernel mode: -fno-asynchronous-unwind-tables honoured"
+    else bad "kernel mode: -fno-asynchronous-unwind-tables honoured" "$(readelf -SW kunw.o 2>&1 | grep -c eh_frame) .eh_frame"; fi
+    # #pragma GCC visibility push(hidden) (the kernel's compressed boot code, -include hidden.h) as gcc; a pragma that
+    # could change what the program means and that cproc does not take (#pragma weak) is refused
+    printf '#pragma GCC diagnostic push\n#pragma GCC visibility push(hidden)\nint cpu;\nint error(void) { return cpu; }\n#pragma GCC visibility pop\nint visible(void) { return 1; }\n' > kvis.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kvis.c -o kvis.o 2>/dev/null && objdump -t kvis.o | grep -q '.hidden error' &&
+       objdump -t kvis.o | grep -q '.hidden cpu' && ! objdump -t kvis.o | grep -q '.hidden visible'; then ok "kernel mode: #pragma GCC visibility"
+    else bad "kernel mode: #pragma GCC visibility" "$(objdump -t kvis.o 2>&1 | tail -4 | tr '\n' ' ')"; fi
+    printf 'int f(void);\n#pragma weak f\nint g(void) { return f ? f() : 0; }\n' > kpack.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kpack.c -o kpack.o 2>&1); then bad "kernel mode: #pragma weak refused" "was accepted"
+    elif grep -q "unsupported #pragma weak" <<<"$out"; then ok "kernel mode: #pragma weak refused"
+    else bad "kernel mode: #pragma weak refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # a call of a function whose body is { return C; } is C when its arguments have no side effects, as gcc's
+    # inlined and folded call (it links without copy_huge_pmd, which nothing defines); with a side effect it runs
+    cat > kconst.c <<'EOC'
+/* the kernel's pmd_trans_huge() without transparent huge pages: { return 0; }, and a call it guards names a function
+ * this configuration does not have */
+typedef struct { unsigned long pmd; } pmd_t;
+int copy_huge_pmd(pmd_t *);
+static inline int pmd_trans_huge(pmd_t pmd) { return 0; }
+static inline int always_one(void) { return 1; }
+static int calls;
+static int counted(void) { ++calls; return 0; }
+static inline int ignores(int x) { return 5; }
+int walk(pmd_t *p) {
+	if (pmd_trans_huge(*p))
+		return copy_huge_pmd(p);
+	return always_one() + 1;
+}
+int main(void) {
+	pmd_t p = { 3 };
+	int r = walk(&p) + ignores(counted());   /* an argument with a side effect: the call stays, and it runs */
+	return r == 7 && calls == 1 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kconst.c -o kconst 2>/dev/null && { ./kconst; [ $? = 42 ]; }; then ok "kernel mode: calls of constant functions fold"
+    else bad "kernel mode: calls of constant functions fold" "wrong result or the link failed"; fi
+    # x & 0, a call of an empty function (noinline too), a function called only from dead code and a hidden declaration
+    # used only in dead code leave no reference to symbols
+    # this program does not define (the link fails otherwise); the effects of the operands and arguments still happen
+    cat > kfold.c <<'EOC'
+#pragma GCC visibility push(hidden)
+extern unsigned int pgdir_shift;
+#pragma GCC visibility pop
+extern int no_dax(void), sites[], sites_end[];
+#define S_DAX 0
+static int calls;
+static int counted(void) { return ++calls; }
+static void apply(int *start, int *end) {}
+void seal(int *start, int *end) {}
+__attribute__((noinline)) void retpolines(int *start, int *end) {}   /* gcc drops the call too */
+static inline int thp_enabled(unsigned int *v) { return 0; }
+static inline int none(unsigned int *p) { return *p == 7; }
+static int create_huge(int *v) { return no_dax(); }   /* called only where thp_enabled() is false: not emitted */
+struct inode { unsigned int i_flags; };
+static inline int dax_mapping(struct inode *m) { return m && (m->i_flags & S_DAX); }   /* m && 0: 0 */
+extern int undefined_key;
+static inline void unused_blocking(void) {   /* a used static lives with its function, which is unused */
+	static void *addressable __attribute__((used)) = &undefined_key;
+}
+int dedupe(struct inode *in) {
+	if (!(in->i_flags & S_DAX))
+		return 1;
+	return no_dax();
+}
+int main(void) {
+	struct inode in = { 7 };
+	int r = dedupe(&in);
+	apply(sites, sites_end);
+	seal(sites, sites_end);
+	retpolines(sites, sites_end);
+	if (none(&in.i_flags) && thp_enabled(&in.i_flags))
+		return create_huge(&r);
+	if (0 && r)
+		pgdir_shift = 48;
+	if (dax_mapping(&in))
+		return no_dax();
+	int dax = dax_mapping(&in);   /* QBE folds the local */
+	if (dax)
+		return no_dax();
+	if (counted() & 0)   /* not folded, as the call has an effect: it runs */
+		return 1;
+	apply((int *)(long)counted(), 0);   /* an argument with an effect: the call stays */
+	return r == 1 && calls == 2 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kfold.c -o kfold 2>/dev/null && { ./kfold; [ $? = 42 ]; }; then ok "kernel mode: x & 0, x && 0, empty calls and dead code fold"
+    else bad "kernel mode: x & 0, x && 0, empty calls and dead code fold" "wrong result or the link failed"; fi
+    # a GNU attribute that changes what a declaration means and that cproc does not take is refused, not ignored
+    for at in 'vector_size(16)' 'naked' 'mode(TI)'; do
+      printf 'typedef int t __attribute__((%s));\n' "$at" > kattr.c
+      if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kattr.c -o kattr.o 2>&1); then bad "kernel mode: attribute $at refused" "was accepted"
+      elif grep -q "not supported" <<<"$out"; then ok "kernel mode: attribute $at refused"
+      else bad "kernel mode: attribute $at refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    done
+    NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
+    # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
+    # two, and a polling loop loads on every iteration; signed char loads are sign-extended
+    cat > kvol.c <<'EOC'
+int twice(volatile int *p) { return *p + *p; }
+void two_stores(volatile long *p) { *p = 1; *p = 2; }
+signed char sc(volatile signed char *p) { return *p; }
+int main(void) { volatile int x = 20; volatile long y; volatile signed char c = -5; two_stores(&y); return twice(&x) + (int)y + sc(&c) + 5; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -S kvol.c -o kvol.s 2>/dev/null &&
+       [ "$(awk '/^twice:/,/^\.size twice/' kvol.s | grep -c 'call.*nfcxx_vload4')" = 2 ] &&
+       [ "$(awk '/^two_stores:/,/^\.size two_stores/' kvol.s | grep -c 'call.*nfcxx_vstore8')" = 2 ] &&
+       NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvol.c -o kvol 2>/dev/null && { ./kvol; [ $? = 42 ]; }; then
+      ok "kernel mode: volatile accesses kept"
+    else bad "kernel mode: volatile accesses kept" "$(grep -c nfcxx_v kvol.s 2>/dev/null) helper calls"; fi
+    # __builtin_*_overflow lowered by cproc itself (no qbe-prep.rb in kernel mode): every type mix, against gcc's hash
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtins_overflow_matrix.c" -o kov 2>/dev/null && { ./kov; [ $? = 42 ]; }; then
+      ok "kernel mode: overflow built-ins match gcc for every type mix"
+    else bad "kernel mode: overflow built-ins match gcc for every type mix" "wrong results or the compile failed"; fi
+    # -mno-sse: QBE's slot-to-slot moves go through %rax (qbe -n), and a variadic function saves no %xmm registers
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/spill_rotation.c" -o kspill 2>/dev/null && { ./kspill; [ $? = 42 ]; }; then
+      ok "kernel mode: spilled values moved without SSE"
+    else bad "kernel mode: spilled values moved without SSE" "wrong result or the compile failed"; fi
+    cat > kva.c <<'EOC'
+typedef __builtin_va_list va_list;
+static long sum(int n, ...) { va_list ap; long s = 0; __builtin_va_start(ap, n); for (int i = 0; i < n; i++) s += i & 1 ? __builtin_va_arg(ap, long) : *__builtin_va_arg(ap, int *); __builtin_va_end(ap); return s; }
+long (*volatile fp)(int, ...) = sum;
+int main(void) { int a = 10, b = 4; return fp(9, &a, 1L, &b, 2L, &a, 3L, &b, 4L, &a) == 48 ? 42 : 1; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kva.c -o kva 2>/dev/null && { ./kva; [ $? = 42 ]; }; then ok "kernel mode: variadic function without SSE"
+    else bad "kernel mode: variadic function without SSE" "wrong result or the compile failed"; fi
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtin_bitcount.c" -o kbits 2>/dev/null && { ./kbits; [ $? = 42 ]; }; then
+      ok "kernel mode: bit-counting built-ins"
+    else bad "kernel mode: bit-counting built-ins" "wrong results or the compile failed"; fi
+    # qbe-try: an integer file moves to qbe; a file cproc cannot compile keeps the gcc object
+    printf 'int sq(int a) { return a * a; }\n' > kmove.c
+    printf 'void *up(void) { return __builtin_return_address(1); }\n' > kstay.c   # a level other than 0: refused
+    rm -f qbe.log
+    for f in kmove kstay; do
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -fno-PIE -mno-sse -c $f.c -o $f.o
+    done
+    if grep -q '^qbe kmove.c$' qbe.log && grep -q '^gcc kstay.c: ' qbe.log && [ -s kstay.o ]; then ok "qbe-try: moves what matches, keeps gcc otherwise"
+    else bad "qbe-try: moves what matches, keeps gcc otherwise" "$(tr '\n' '|' < qbe.log)"; fi
+    # an always_inline helper of __init code only goes to .init.text with it (gcc inlines it there); one that code in
+    # two init sections calls goes to .ref.text (lasting code allowed to call init code, where __ref code calling it
+    # has gcc's copy too), which gcc's object does not have; one that lasting code calls behind a condition gcc folds
+    # through a local stays in .text and would be lasting code calling __init code, which gcc's inlined copies are not
+    # and the kernel's modpost refuses: that file stays on gcc
+    printf 'void *alloc_try(long) __attribute__((section(".init.text")));\nstatic inline __attribute__((always_inline)) void *alloc(long n) { return alloc_try(n); }\n__attribute__((section(".init.text"))) void *boot(void) { return alloc(4); }\nstatic __attribute__((section(".init.text"))) int unused_init(void) { return 1; }\n' > kinit.c
+    sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/__attribute__((section(".meminit.text"))) void *later(void) { return alloc(8); }/' kinit.c > kinit2.c
+    sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/void later(void) { int x = 0; x \&= 1; if (x) alloc(8); }/' kinit.c > kinit3.c
+    rm -f qbe.log
+    for f in kinit kinit2 kinit3; do
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c $f.c -o $f.o
+    done
+    if grep -q '^qbe kinit.c$' qbe.log && grep -q '^qbe kinit2.c$' qbe.log && objdump -t kinit2.o | grep -q '\.ref\.text.* alloc$' &&
+       grep -q '^gcc kinit3.c: lasting code references init code' qbe.log && ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text or .ref.text, lasting callers of init code stay on gcc"
+    else bad "qbe-try: init-only helpers go to .init.text or .ref.text, lasting callers of init code stay on gcc" "$(tr '\n' '|' < qbe.log)"; fi
+    # a call gcc's object does not make (gcc folds the inlined branch away) keeps the gcc object; objdump gives an
+    # undefined symbol no binding flag, which an earlier qbe-try missed
+    printf 'void bad(void);\nstatic inline void g(int x) { if (x > 100) bad(); }\nint f(void) { g(5); return 0; }\n' > kneed.c
+    rm -f qbe.log
+    NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kneed.c -o kneed.o
+    if grep -q '^gcc kneed.c: qbe object needs more symbols: U bad' qbe.log; then ok "qbe-try: an extra undefined symbol keeps the gcc object"
+    else bad "qbe-try: an extra undefined symbol keeps the gcc object" "$(tr '\n' '|' < qbe.log)"; fi
+    # unless the gcc-built kernel defines it (NFCXX_QBE_KSYMS) and has it in no init section (NFCXX_QBE_INITSYMS)
+    rm -f qbe.log; printf 'bad\n' > ksyms.txt; : > noinit.txt
+    NFCXX_QBE_KSYMS=$PWD/ksyms.txt NFCXX_QBE_INITSYMS=$PWD/noinit.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' \
+      NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kneed.c -o kneed.o
+    if grep -q '^qbe kneed.c$' qbe.log; then ok "qbe-try: a symbol the kernel defines is not missing"
+    else bad "qbe-try: a symbol the kernel defines is not missing" "$(tr '\n' '|' < qbe.log)"; fi
+    # a special section only the qbe object has (code gcc folded away after inlining): taken when it is harmless
+    # (.discard.*), refused otherwise (an initcall would run)
+    for sec in .discard.addressable .initcall6.init; do
+      printf 'static inline void f(int x) { if (x) __asm__ volatile(".pushsection %s,\\"a\\"; .long 0; .popsection"); }\nint g(void) { f(0); return 1; }\n' "$sec" > ksec.c
+      rm -f qbe.log
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c ksec.c -o ksec.o
+      cp qbe.log "qbe-$sec.log"
+    done
+    if grep -q '^qbe ksec.c$' qbe-.discard.addressable.log && grep -q '^gcc ksec.c: sections differ: > .initcall6.init' qbe-.initcall6.init.log
+    then ok "qbe-try: an extra harmless section is taken, an extra initcall is not"
+    else bad "qbe-try: an extra harmless section is taken, an extra initcall is not" "$(cat qbe-*.log | tr '\n' '|')"; fi
+    # a special section only gcc's object has (gcc inlined code the qbe object calls): alternatives may be missing,
+    # nothing else may
+    for sec in .altinstructions .initcall6.init; do
+      printf 'static inline int f(int x) { if (__builtin_constant_p(x)) __asm__ volatile(".pushsection %s,\\"a\\"; .long 0; .popsection"); return x; }\nint g(void) { return f(3); }\n' "$sec" > kmiss.c
+      rm -f qbe.log
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kmiss.c -o kmiss.o
+      cp qbe.log "qbem-$sec.log"
+    done
+    if grep -q '^qbe kmiss.c$' qbem-.altinstructions.log && grep -q '^gcc kmiss.c: sections differ: < .initcall6.init' qbem-.initcall6.init.log
+    then ok "qbe-try: missing alternatives are taken, a missing initcall is not"
+    else bad "qbe-try: missing alternatives are taken, a missing initcall is not" "$(cat qbem-*.log | tr '\n' '|')"; fi
+    # code in .head.text (the kernel's __head, identity-mapped early boot code) stays on gcc
+    printf 'int __attribute__((section(".head.text"))) early(int x) { return x + 1; }\n' > khead.c
+    rm -f qbe.log
+    NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c khead.c -o khead.o
+    if grep -q '^gcc khead.c: code in .head.text' qbe.log; then ok "qbe-try: .head.text stays on gcc"
+    else bad "qbe-try: .head.text stays on gcc" "$(tr '\n' '|' < qbe.log)"; fi
+    # with the init symbols of a gcc-built kernel (NFCXX_QBE_INITSYMS), an undefined symbol not among them is not init
+    rm -f qbe.log; printf 'memblock_alloc_try_nid\n' > initsyms.txt
+    NFCXX_QBE_INITSYMS=$PWD/initsyms.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log \
+      "$nfcc" -O2 -fno-PIE -mno-sse -c kinit2.c -o kinit2.o
+    if grep -q '^qbe kinit2.c$' qbe.log; then ok "qbe-try: NFCXX_QBE_INITSYMS names the init symbols"
+    else bad "qbe-try: NFCXX_QBE_INITSYMS names the init symbols" "$(tr '\n' '|' < qbe.log)"; fi
+  fi
+  # an assembly source with another suffix keeps its -x language (the kernel's "-x assembler-with-cpp /dev/null" probe);
+  # the assembler answers --version as GNU as or, on macOS, as clang's integrated assembler
+  if out=$("$nfcc" -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null 2>&1) && grep -qE "GNU assembler|clang version" <<<"$out"; then
+    ok "-x assembler-with-cpp /dev/null reaches the assembler"
+  else bad "-x assembler-with-cpp /dev/null reaches the assembler" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+  # -MMD on an assembly source writes the dependency file (kbuild's fixdep reads it)
+  printf '#include "dep.h"\n.globl x\nx: ret\n' > depa.S; : > dep.h
+  if "$nfcc" -Wp,-MMD,depa.d -c depa.S -o depa.o 2>/dev/null && grep -q 'dep\.h' depa.d; then ok "-MMD on assembly writes the dependency file"
+  else bad "-MMD on assembly writes the dependency file" "no depa.d naming dep.h"; fi
   # 8. mixed-type overflow builtins (qbe-prep lowers them on the qbe backend; gcc has them natively)
   cat > mix.c <<'EOC'
 int main(void) {
@@ -212,6 +655,18 @@ EOC
     if out=$("$nfcc" mixd.c -o mixd 2>&1); then bad "floating operand to __builtin_add_overflow" "linked"
     elif grep -q overflow_unsupported_operand_types <<<"$out"; then ok "floating operand to __builtin_add_overflow fails at link, naming the symbol"
     else bad "floating operand to __builtin_add_overflow" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+  fi
+  if [ $b = qbe ] && [ "$(uname -m)" = x86_64 ]; then
+    # a call inside an asm template is made with %rsp 16-byte aligned, whatever the thunk pushes (gcc promises nothing
+    # here; the thunk is a function of its own, so it can)
+    cat > asmcall.c <<'EOC'
+static int misaligned;
+__attribute__((noinline)) long twice(long v) { misaligned |= (unsigned long)__builtin_frame_address(0) % 16 != 0; return 2 * v; }
+static long one(long a) { long r; __asm__ volatile("movq %[a], %%rdi\n\tcall twice\n\tmovq %%rax, %[r]" : [r] "=r"(r) : [a] "r"(a) : "rdi", "rax", "memory"); return r; }
+static long two(long a) { long r; __asm__ volatile("movq %[a], %%rdi\n\tcall twice\n\tmovq %%rax, %[r]" : [r] "=r"(r) : [a] "r"(a) : "rbx", "rdi", "rax", "memory"); return r; }
+int main(void) { return one(3) + two(4) == 14 && !misaligned ? 0 : 1; }
+EOC
+    check "a call in an asm template has an aligned stack" bash -c "'$nfcc' asmcall.c -o asmcall && ./asmcall"
   fi
   if [ "$b" = gcc ] && [ "$(uname -m)" != x86_64 ]; then echo "skip $b -mavx2 intrinsics (x86-64 only)"; fi
   if [ "$b" = gcc ] && [ "$(uname -m)" = x86_64 ]; then

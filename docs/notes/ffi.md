@@ -94,7 +94,7 @@ lib.callable("vec_add");   // false: a struct by value
 
 - **Kinds.** The front end writes a `kinds` record per function (`be/nfcxx_decl.c`, `nf_kind`): one letter for the
   return type and one per parameter. `i` signed integer, `u` unsigned integer (`bool` too), `f` float or double, `p`
-  pointer or array, `v` void, `s` struct, union, `long double` or 128-bit integer (as bytes), `x` anything else. `Declaration::return_kind` and `param_kinds` carry
+  pointer or array, `v` void, `s` struct, union, a float kind other than float and double, or a 128-bit integer (as bytes), `x` anything else. `Declaration::return_kind` and `param_kinds` carry
   them.
 - **Wrappers.** `void nfcffi_call_NAME(void **a, void *r)` converts each argument from `a[i]` (a `long long`, an
   `unsigned long long`, a `double` or a `void *`, by kind) to the declared parameter type in the cast, calls `NAME` and
@@ -113,9 +113,16 @@ lib.callable("vec_add");   // false: a struct by value
   with the same sequence are direct.
 - **Long double and 128-bit integers** travel as bytes, like a struct: `Value::of_bytes` of `sizeof` bytes (the x87
   80-bit format in the first ten bytes of a `long double`). Tested in `tests/ffi/wide.h`.
-- **Not callable** (listed by `declarations`, `callable` is false): overload sets, and any other kind the table lists as
-  `x` (for example other float kinds). Calling them throws `Error`. A callback with a struct, a variadic signature or a
-  pointer-to-pointer result is a plain pointer: pass a C function pointer, not a host callable.
+- **C++ overloads** (`Ffi::Dialect::Cxx`): every overload is a wrapper of its own, `nfcffi_call_NAME_k` (`Declaration::id`),
+  in a C++ translation unit (`.cpp`), so the call `NAME(args...)` resolves to the overload the cast argument types name.
+  `Library::call` picks the overload whose parameter kinds match the arguments exactly, or converts (the same conversions
+  as for a single function), and the first on a tie. No overload takes the arguments: `Error`. In C (the default
+  dialect) a repeated name is not a function, so nothing is wrapped.
+- **Other float kinds** (`_Float16`, `__float128`, `_Float32x`, ...) travel as bytes of their `sizeof`, in their own
+  representation, like `long double` (`tests/ffi/float.h`).
+- **Not callable** (listed by `declarations`, `callable` is false): a kind the table lists as `x`, which no current type
+  maps to. A callback with a struct, a variadic signature or a pointer-to-pointer result is a plain pointer: pass a C
+  function pointer, not a host callable.
 - **Value.** `Value::of_signed`, `of_unsigned`, `of_float`, `of_pointer`, `of_bytes(p, n)`; the accessors throw `Error`
   on another kind.
 - **Tests.** `tests/ffi/host.cpp` `check_library` (variadic: `snprintf` with integer, string and double extras, and a

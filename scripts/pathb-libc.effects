@@ -1,0 +1,14 @@
+; Trusted call-effects summaries of C library functions that take and return scalars only, for
+; scripts/pathb-borrowck.rb --effects. Each one reads no program memory and writes none, and does not throw. They
+; are deliberately few: a function that takes a pointer of unknown size (memcpy, strlen), is variadic (printf), or
+; keeps a pointer (pthread_create, malloc's storage) has no closed summary the checker can state. fabs, floor, ceil and
+; trunc set no errno, and abs, labs and llabs have no overflow to report, unlike sqrt or the conversions.
+(call-effects "sched_yield" (returns int) (nothrow) (noescape) (closed) (args))
+(call-effects "getpid" (returns int) (nothrow) (noescape) (closed) (args))
+(call-effects "abs" (returns int) (nothrow) (noescape) (closed) (args (value int)))
+(call-effects "labs" (returns long) (nothrow) (noescape) (closed) (args (value long)))
+(call-effects "llabs" (returns long_long) (nothrow) (noescape) (closed) (args (value long_long)))
+(call-effects "fabs" (returns double) (nothrow) (noescape) (closed) (args (value double)))
+(call-effects "floor" (returns double) (nothrow) (noescape) (closed) (args (value double)))
+(call-effects "ceil" (returns double) (nothrow) (noescape) (closed) (args (value double)))
+(call-effects "trunc" (returns double) (nothrow) (noescape) (closed) (args (value double)))

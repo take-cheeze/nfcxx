@@ -470,6 +470,16 @@ class BorrowLayouts
       raise @bad, 'semantic pointer field type' unless ty.length == 2
       return {size: 8, align: 8, used: (0...8).to_a, objects: []}
     end
+    if head(ty) == 'array'
+      raise @bad, 'semantic array field type' unless ty.length == 3
+      count = number(ty[1])
+      elem = field_type(ty[2], visiting)
+      n = elem[:size]
+      raise @refused, 'semantic arrays need 1 to 4096 bytes' unless count > 0 && count * n <= 4096
+      return {size: count * n, align: elem[:align],
+              used: (0...count).flat_map { |i| elem[:used].map { |b| i * n + b } },
+              objects: (0...count).flat_map { |i| elem[:objects].map { |o, t| [i * n + o, t] } }}
+    end
     k = key(ty)
     raise @refused, 'unsupported semantic field type' unless k
     resolve(k, visiting)
@@ -526,8 +536,8 @@ class BorrowCallEffects
       end
       name = f[1].to_s
       raise bad, "duplicate call effects #{name}" if @entries.key?(name)
-      unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
-        raise refused, 'call contracts require nothrow, noescape, and closed effects'
+      unless %w[nothrow may-throw].include?(f[3].is_a?(Array) ? f[3][0] : nil) && f[3].length == 1 && f[4] == ['noescape'] && f[5] == ['closed']
+        raise refused, 'call contracts require nothrow or may-throw, noescape, and closed effects'
       end
       result = f[2][1]
       alias_result = f[2][2]
@@ -536,7 +546,7 @@ class BorrowCallEffects
       end
       args = f[6].drop(1)
       args.each do |arg|
-        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
+        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval].include?(arg[0])
           raise bad, 'call argument effect form'
         end
         ty = arg[1]

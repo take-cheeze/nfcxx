@@ -1,0 +1,8 @@
+(ir-module "throws" (layout (pointer 8) (int 4)))
+(call-effects "may" (returns void) (may-throw) (noescape) (closed) (args (write int)))
+(call-effects "callee" (returns int) (may-throw) (noescape) (closed) (args))
+(function "test" (ret int) (params)
+(slot "x" int 4 4) (decl $"x" val) (zero-fill 4 $"x")
+(eval (call void &"may" $"x"))
+(let %0 int (load int $"x"))
+(scope-end $"x") (return %0))

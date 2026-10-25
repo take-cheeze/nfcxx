@@ -256,8 +256,8 @@ static int nf_spell(a_type_ptr t, const char *inner, char *out, size_t cap)
 }
 
 /* How a value of type T crosses a call made by lib/ffi (kinds records): 'i' signed integer, 'u' unsigned integer
-   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 's' struct, union, long double or
-   128-bit integer (by value, as bytes), 'c' pointer to a function a host callable can stand in for (nf_callback_routine),
+   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 's' struct, union, a float kind
+   other than float and double (long double, _Float16, __float128, ...), or a 128-bit integer (by value, as bytes), 'c' pointer to a function a host callable can stand in for (nf_callback_routine),
    'x' anything else. nf_kind_base is nf_kind without the callbacks (a callback's own parameters are checked with it). */
 static char nf_kind_base(a_type_ptr t)
 {
@@ -271,8 +271,9 @@ static char nf_kind_base(a_type_ptr t)
       return is_signed_integral_type(t) ? 'i' : 'u';
     case tk_float:
       if (t->variant.float_kind == fk_float || t->variant.float_kind == fk_double) return 'f';
-      /* long double travels as bytes (its x87 representation, sizeof bytes) */
-      return t->variant.float_kind == fk_long_double ? 's' : 'x';
+      /* the other float kinds (long double, _Float16, __float128, ...) travel as bytes of their sizeof, in their own
+         representation */
+      return 's';
     case tk_pointer:
       return t->variant.pointer.is_reference || t->variant.pointer.is_rvalue_reference ? 'x' : 'p';
     case tk_array:

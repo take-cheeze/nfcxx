@@ -13,8 +13,16 @@
 #include <type_traits>
 #include <vector>
 
+// oneMKL's mkl_version.h defines __INTEL_MKL__ (the year), and the dpct helper of ggml-sycl compiles its f16 and bfloat16
+// gemm and gemm_batch forms only under it: without it, MUL_MAT with f16 weights stops ("the combination of data type is
+// unsupported"). Those forms name oneapi::mkl::bfloat16.
+#ifndef __INTEL_MKL__
+#define __INTEL_MKL__ 2025
+#endif
+
 namespace oneapi {
 namespace mkl {
+using bfloat16 = sycl::ext::oneapi::bfloat16;
 enum class transpose { nontrans, trans, conjtrans };
 enum class side { left, right };
 enum class uplo { upper, lower };

@@ -1,0 +1,6 @@
+(ir-module "eh" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params (param %0 "p" (ptr (ptr (struct "F")))))
+(decl %0 param)
+(let %1 (ptr (struct "F")) (load (ptr (struct "F")) %0))
+(store (ptr (struct "F")) @"__curr_eh_stack_entry" %1)
+(return (const int 0)))

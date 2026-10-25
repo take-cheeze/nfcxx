@@ -291,6 +291,33 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   }
   CHECK(rethrown);
 
+  // Other float kinds: _Float16 and __float128 as bytes of their own format (1.5 and 1.0, the twice values 3.0 and 2.0).
+  nfcffi::Library fl = ffi.load(dir + "/float.h", read_text(dir + "/float_impl.c"));
+  CHECK(fl.callable("twice_h") && fl.callable("twice_q"));
+  const unsigned char half15[2] = {0x00, 0x3E};                                    // 1.5 as binary16
+  Value h = fl.call("twice_h", {Value::of_bytes(half15, 2)});
+  CHECK(h.as_bytes().size() == 2 && h.as_bytes()[0] == 0x00 && h.as_bytes()[1] == 0x42);  // 3.0
+  unsigned char one128[16] = {0};
+  one128[14] = 0xFF; one128[15] = 0x3F;                                            // 1.0 as binary128
+  Value q128 = fl.call("twice_q", {Value::of_bytes(one128, 16)});
+  CHECK(q128.as_bytes().size() == 16 && q128.as_bytes()[14] == 0x00 && q128.as_bytes()[15] == 0x40);  // 2.0
+
+  // C++ overloads: one wrapper per overload (a C++ translation unit); a call takes the overload its arguments match best.
+  nfcffi::Library ov = ffi.load(dir + "/overload.hpp", read_text(dir + "/overload_impl.cpp"), {},
+                                nfcffi::Ffi::Dialect::Cxx);
+  CHECK(ov.callable("pick") && ov.declarations().size() == 3);
+  CHECK(ov.call("pick", {Value::of_signed(3)}).as_signed() == 30);          // pick(int)
+  CHECK(ov.call("pick", {Value::of_float(0.5)}).as_signed() == 50);         // pick(double)
+  CHECK(ov.call("pick", {Value::of_pointer("abc")}).as_signed() == 3);      // pick(const char *)
+  CHECK(ov.call("pick", {Value::of_unsigned(4)}).as_signed() == 40);        // unsigned: the int overload converts
+  bool no_overload = false;
+  try {
+    ov.call("pick", {Value::of_bytes("xy", 2)});
+  } catch (const nfcffi::Error&) {
+    no_overload = true;
+  }
+  CHECK(no_overload);
+
   // Variadic functions: the extra arguments are passed by their promoted kinds (integer, double, pointer).
   nfcffi::Library vlib = ffi.load(dir + "/var.h", "", {"snprintf"});
   CHECK(vlib.callable("snprintf"));

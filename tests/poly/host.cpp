@@ -1,5 +1,5 @@
 // nfcpoly host test: exit status 0 when every check passes. Run by tests/poly/run.sh, which builds it with nfcxx together
-// with lib/poly/nfcpoly.cpp and the language backends it defines TEST_RUBY / TEST_LUA / TEST_PYTHON / TEST_AST / TEST_JS / TEST_GO for.
+// with lib/poly/nfcpoly.cpp and the language backends it defines TEST_RUBY / TEST_LUA / TEST_PYTHON / TEST_AST / TEST_JS / TEST_GO / TEST_ASTRO for.
 //
 // The checks that every language must pass are written once and run per language through the snippet builders of Lg;
 // what only one language can express follows, then the checks that share one Context between languages.
@@ -906,6 +906,239 @@ static void ast_tests() {
   // raw access: the engine's own State
   CHECK(S.globals->get_str(S.str("answer")).i == 42);
   CHECK(S.depth == 0 && S.top == S.stack && S.cur == nullptr);
+}
+#endif
+
+// ---- astro only (ASTro's luastro) -----------------------------------------------------------------------------------------------
+// Not part of the shared checks: luastro has no userdata, so it has no registered classes (docs/notes/poly.md), and the shared checks
+// are written with classes. This is what it does have, once, with the same helpers; one Context at a time (its interpreter is a
+// process global), so every part is a scope of its own.
+#ifdef TEST_ASTRO
+static void astro_tests() {
+  g_lang = "astro";
+  std::printf("-- [astro] values, arrays, bound functions and variables, errors, handles, the limits of luastro\n");
+  const Lg L{Ast, "astro"};  // Lua syntax
+  {  // plain values, both names, globals, arrays
+    Context ctx;
+    CHECK(ctx.eval<int>("astro", "1 + 2") == 3);
+    CHECK(ctx.eval<int>("luastro", "return 4 * 5") == 20);
+    CHECK(ctx.eval<double>("astro", "7 / 2") == 3.5);
+    CHECK(ctx.eval_value("astro", "7 // 2").is_int());
+    CHECK(ctx.eval<std::string>("astro", "'ab' .. 'c'") == "abc");
+    CHECK(ctx.eval<std::string>("astro", L.nul_string()).size() == 3);
+    CHECK(ctx.eval<bool>("astro", "1 < 2"));
+    CHECK(ctx.eval_value("astro", "nil").is_nil());
+    CHECK(ctx.eval_value("astro", "x = 5").is_nil());  // a statement has no value
+    CHECK(ctx.eval<int>("astro", "x * 2") == 10);       // globals persist
+    CHECK(ctx.eval<int>("astro", "local y = 3; return y") == 3);
+    CHECK(ctx.eval_value("astro", "y").is_nil());       // locals do not
+    CHECK(ctx.eval<long long>("astro", L.pow40()) == (1LL << 40));
+    CHECK(ctx.eval<std::string>("astro", L.str_rep()) == "ababab");
+    CHECK((ctx.eval<std::vector<int>>("astro", "{3, 1, 2}") == std::vector<int>{3, 1, 2}));
+    CHECK((ctx.eval<std::vector<std::vector<int>>>("astro", "{{1, 2}, {3}}") == std::vector<std::vector<int>>{{1, 2}, {3}}));
+    CHECK(ctx.eval_value("astro", "{}").is_array());
+    CHECK(ctx.eval_value("astro", "{1, 2, x = 3}").is_array() == false);
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<std::vector<int>>("astro", "{1, 2, x = 3}"); }));
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<int>("astro", "'x'"); }));
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<int>("astro", "2.5"); }));
+    CHECK(ctx.eval_value("astro", "2").class_name() == "integer" && ctx.eval_value("astro", "2.0").class_name() == "float");
+    CHECK(ctx.eval_value("astro", "{}").class_name() == "table" && ctx.eval_value("astro", "print").class_name() == "function");
+    CHECK(ctx.eval<std::string>("astro", "('abc'):upper() .. string.format('%03d', 7) .. math.type(1)") == "ABC007integer");
+    // luastro's integers have 63 bits
+    CHECK(ctx.eval<long long>("astro", "1 << 61") == (1LL << 61));
+    ctx.set("fits", 1LL << 61);
+    CHECK(ctx.eval<long long>("astro", "fits") == (1LL << 61));
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.set("toobig", 1LL << 62); }));  // astro is started: the declaration fails
+    // io and os are removed: no files, no exit, no clock
+    CHECK(ctx.eval<bool>("astro", "io == nil and os == nil"));
+    // set(): arrays and strings by copy; functions and tables are script values and stay in astro
+    ctx.set("answer", 42).set("greeting", std::string("hi")).set("pi", 3.25).set("nums", std::vector<int>{1, 2, 3});
+    CHECK(ctx.eval<int>("astro", "answer + #nums + nums[3]") == 48);
+    CHECK(ctx.eval<std::string>("astro", L.concat("greeting", "'!'")) == "hi!");
+  }
+  {  // functions, handles, calling back
+    Context ctx;
+    ctx.eval_void("astro", L.def_twice());
+    CHECK(ctx.eval<int>("astro", "twice(21)") == 42);
+    Value f = ctx.eval_value("astro", "function(a, b) return a * 10 + b end");
+    CHECK(f.class_name() == "function" && !f.is_nil());
+    CHECK(f.execute(4, 2).as<int>() == 42);
+    Value t = ctx.eval_value("astro", "{n = 5, add = function(self, k) return self.n + k end}");
+    CHECK(t.call("add", 10).as<int>() == 15);
+    CHECK(throws<nfcpoly::ScriptError>([&] { t.call("nope"); }));
+    CHECK(ctx.eval<std::string>("astro", "local t = {} return tostring(t):sub(1, 5)") == "table");
+    Value up = ctx.eval_value("astro", "'abc'");
+    CHECK(up.call("upper").as<std::string>() == "ABC");
+    Value lst = ctx.eval_value("astro", "{4, 5, 6}");
+    CHECK(lst.is_array() && (lst.as<std::vector<int>>() == std::vector<int>{4, 5, 6}));
+    CHECK(f.inspect().find("function") == 0 && lst.inspect().find("table") == 0);
+    // a handle roots its value across a collection
+    ctx.eval_void("astro", "collectgarbage()");
+    CHECK(f.execute(1, 1).as<int>() == 11 && t.call("add", 1).as<int>() == 6);
+    // a Value goes back into the same language as an argument
+    Value g = ctx.eval_value("astro", "function(h, x) return h(x, x) end");
+    CHECK(g.execute(f, 3).as<int>() == 33);
+  }
+  {  // bound functions
+    State st;
+    Context ctx;
+    ctx.bind_fn("twice_c", +[](int a) { return 2 * a; });
+    ctx.bind_fn("scale_fn", &scale_fn);
+    ctx.bind_fn("shout", &shout);
+    ctx.bind_fn("total", &total);
+    ctx.bind_fn("half", &half);
+    ctx.bind_fn("length_of", &length_of);
+    ctx.bind_fn("hit", [&st](int by) { st.hits += by; });
+    ctx.bind_fn("big", [&st]() -> std::vector<int> { return st.big; });
+    ctx.bind_fn("opt", [](int a, std::optional<int> b) { return a + b.value_or(100); }, 1);
+    ctx.bind_fn("call2", [](Value f, int a, int b) { return f.execute(a, b).as<int>(); });
+    ctx.eval_void("astro", L.prelude());
+    CHECK(ctx.eval<int>("astro", "twice_c(21)") == 42);
+    CHECK(ctx.eval<double>("astro", "scale_fn(2.5)") == 25.0);
+    CHECK(ctx.eval<std::string>("astro", "shout('hey')") == "hey!");
+    CHECK(ctx.eval<int>("astro", "total({1, 2, 3, 4})") == 10);
+    CHECK(ctx.eval<int>("astro", "half(8)") == 4);
+    CHECK(ctx.eval_value("astro", "half(7)").is_nil());
+    CHECK(ctx.eval<int>("astro", "length_of('hello')") == 5);
+    ctx.eval_void("astro", "hit(2) hit(3)");
+    CHECK(st.hits == 5);
+    st.big.assign({7, 8, 9});
+    CHECK(ctx.eval<int>("astro", "#big() + big()[2]") == 11);
+    CHECK(ctx.eval<int>("astro", "opt(1)") == 101 && ctx.eval<int>("astro", "opt(1, 2)") == 3);
+    CHECK(ctx.eval<int>("astro", "call2(function(x, y) return x * 10 + y end, 4, 2)") == 42);
+    CHECK(ctx.eval<int>("astro", L.sum_loop()) == 20);
+    // a function that is a value: passed around, stored in a table
+    CHECK(ctx.eval<int>("astro", "local t = {f = twice_c} return t.f(4)") == 8);
+    // arity and conversion errors are script errors
+    CHECK(ctx.eval<std::string>("astro", L.guard_cls("twice_c(1, 2)")) == "ArgumentError");
+    CHECK(ctx.eval<std::string>("astro", L.guard_msg("twice_c(1, 2)")) == "wrong number of arguments (given more than 1, expected 1)");
+    CHECK(ctx.eval<std::string>("astro", L.guard_cls("twice_c()")) == "TypeError");  // luastro does not count arguments: the nil is the error
+    CHECK(ctx.eval<std::string>("astro", L.guard_cls("opt(1, 2, 3)")) == "ArgumentError");
+    CHECK(ctx.eval<std::string>("astro", L.guard_cls("twice_c('x')")) == "TypeError");
+    CHECK(throws<nfcpoly::Error>([&] { ctx.bind_fn("Bad", [] { return 1; }); }));
+  }
+  {  // bound variables: read live, written back; set() and const
+    State st;
+    Context ctx;
+    ctx.bind("counter", st.counter).bind("label", st.label).bind("limit", st.limit);
+    ctx.bind_fn("hit", [&st](int by) { st.hits += by; });
+    ctx.bind_fn("peek", [&st]() { return st.counter; });
+    ctx.eval_void("astro", L.prelude());
+    CHECK(ctx.eval<int>("astro", "counter") == 5 && ctx.eval<std::string>("astro", "label") == "a");
+    st.counter = 9;
+    CHECK(ctx.eval<int>("astro", "counter + 1") == 10);
+    ctx.eval_void("astro", "counter = 42 label = label .. 'b'");
+    CHECK(st.counter == 42 && st.label == "ab");
+    CHECK(ctx.eval<int>("astro", "counter = 7 return peek()") == 7);  // the host function sees the script's write
+    ctx.bind_fn("bump", [&st]() { st.counter += 100; });
+    CHECK(ctx.eval<int>("astro", "bump() return counter") == 107);   // and the script sees the host's
+    CHECK(ctx.eval<int>("astro", "limit") == 10);
+    // a write to a read-only variable is noticed where the script hands control back (the end of the run, or a host function)
+    bool got = false;
+    try {
+      ctx.eval_void("astro", "limit = 3");
+    } catch (const nfcpoly::ScriptError& e) {
+      got = e.class_name() == "NameError" && e.message() == "variable limit is read-only";
+    }
+    CHECK(got);
+    CHECK(ctx.eval<std::string>("astro", L.guard_msg("(function() peek() limit = 1 peek() end)()")) == "variable limit is read-only");
+    CHECK(ctx.eval<int>("astro", "limit") == 10);
+    CHECK(st.limit == 10);
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval_void("astro", "counter = 'text'"); }));
+  }
+  {  // errors
+    State st;
+    Context ctx;
+    ctx.bind_fn("thrower", []() -> int { throw std::runtime_error("host boom"); });
+    ctx.bind_fn("fail7", []() -> int { throw HostFail("seven", 7); });
+    ctx.bind_fn("throw_int", []() -> int { throw 42; });
+    ctx.bind_fn("with_guard", [](Value f) -> int {
+      Guard g;
+      f.execute();
+      return 1;
+    });
+    ctx.eval_void("astro", L.prelude());
+    CHECK(throws<nfcpoly::SyntaxError>([&] { ctx.eval_void("astro", "x = = 1"); }));
+    CHECK(throws<nfcpoly::SyntaxError>([&] { ctx.eval_void("astro", "'unterminated"); }));
+    bool got = false;
+    try {
+      ctx.eval_void("astro", "error('boom')");
+    } catch (const nfcpoly::ScriptError& e) {
+      got = e.class_name() == "LuaError" && e.message().find("boom") != std::string::npos;
+    }
+    CHECK(got);
+    got = false;
+    try {
+      ctx.eval_void("astro", "local t = nil; return t.foo");
+    } catch (const nfcpoly::ScriptError& e) {
+      got = e.class_name() == "LuaError";
+    }
+    CHECK(got);
+    CHECK(ctx.eval<std::string>("astro", L.guard_cls("nilfn()")) == "LuaError");
+    CHECK(ctx.eval<std::string>("astro", L.guard_msg("raiser('inner')()")).find("inner") != std::string::npos);
+    CHECK(ctx.eval<int>("astro", "1 + 1") == 2);  // the interpreter is consistent after errors
+    // a host exception that nothing rescued comes out as itself
+    got = false;
+    try {
+      ctx.eval_void("astro", "fail7()");
+    } catch (const HostFail& e) {
+      got = e.code == 7;
+    }
+    CHECK(got);
+    CHECK(throws<std::runtime_error>([&] { ctx.eval_void("astro", "thrower()"); }));
+    CHECK(throws<int>([&] { ctx.eval_void("astro", "throw_int()"); }));  // a non-std exception comes out as itself too
+    // and as a script error when the script rescues it
+    CHECK(ctx.eval<std::string>("astro", L.guard_msg("thrower()")) == "host boom");
+    CHECK(ctx.eval<std::string>("astro", L.guard_cls("fail7()")) == L.host_cls());
+    // RAII objects of a host frame are released when the callback into the script fails, and the script error comes out as itself
+    int d0 = Guard::destroyed;
+    CHECK(ctx.eval<bool>("astro", "local ok, e = pcall(with_guard, raiser('inner')) return (not ok) and tostring(e):find('inner') ~= nil"));
+    CHECK(Guard::alive == 0 && Guard::destroyed == d0 + 1);
+    got = false;
+    try {
+      ctx.eval_void("astro", "with_guard(raiser('outer'))");
+    } catch (const nfcpoly::ScriptError& e) {
+      got = e.message().find("outer") != std::string::npos;
+    }
+    CHECK(got);
+    CHECK(throws<HostFail>([&] { ctx.eval_void("astro", "with_guard(raiser_host())"); }));
+    // an error value that is not a string or one of ours goes through a host function as the same object
+    CHECK(ctx.eval<bool>("astro", "local myobj = {k = 1}; local ok, e = pcall(with_guard, function() error(myobj) end); return e == myobj"));
+    // a Value that raises
+    Value bad = ctx.eval_value("astro", "function() error('from value') end");
+    CHECK(throws<nfcpoly::ScriptError>([&] { bad.execute(); }));
+    // a rescued error leaves the caller's upvalues alone
+    CHECK(ctx.eval<int>("astro", "local n = 1 local function g() n = n + 1 error('x') end local function f() pcall(g) n = n + 1 return n end return f()") == 3);
+  }
+  {  // registered classes: luastro has no value that can carry a C++ pointer
+    State st;
+    Context ctx;
+    ctx.def_class<Vec3>("Vec3").ctor<double, double, double>().field("x", &Vec3::x).method("len2", &Vec3::len2);
+    ctx.bind_fn("twice_c", +[](int a) { return 2 * a; });
+    CHECK(ctx.eval<int>("astro", "twice_c(2)") == 4);        // a class that is only declared does no harm
+    CHECK(ctx.eval_value("astro", "Vec3").is_nil());          // and its name is not there
+    ctx.bind_fn("mk", []() { return Vec3(1, 2, 3); });
+    CHECK(ctx.eval<std::string>("astro", L.prelude() + "return errcls(function() return mk() end)") == "TypeError");  // an object cannot cross
+    CHECK(throws<nfcpoly::ScriptError>([&] { ctx.eval_void("astro", "mk()"); }));
+    Context c2;  // (while this one is alive astro belongs to it)
+    CHECK(throws<nfcpoly::Error>([&] { c2.eval_void("astro", "1"); }));
+  }
+  {  // the interpreter is one per process: a new Context starts from fresh globals
+    {
+      Context a;
+      a.eval_void("astro", "leftover = 1");
+    }
+    Context b;
+    CHECK(b.eval_value("astro", "leftover").is_nil() && b.eval<int>("astro", "string.len('abc')") == 3);
+  }
+  {  // a Value outlives its Context safely
+    Value v;
+    {
+      Context ctx;
+      v = ctx.eval_value("astro", "{1, 2}");
+    }
+    CHECK(throws<nfcpoly::Error>([&] { v.as<std::vector<int>>(); }));
+  }
 }
 #endif
 
@@ -2049,6 +2282,9 @@ int main(int argc, char** argv) {
 #endif
 #ifdef TEST_AST
     ast_tests();
+#endif
+#ifdef TEST_ASTRO
+    astro_tests();   // not in `langs`: no registered classes, so not the shared checks
 #endif
 #ifdef TEST_JS
     js_tests();

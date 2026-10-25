@@ -14,7 +14,8 @@ qbe=${QBE:-$root/build/qbe/qbe}
 source "$(dirname "$0")/trace.sh"
 # NFCXX_QBE_PREP_RB, NFCXX_WEAK_SYMBOLS_RB: other copies of the two mruby scripts (tests/mruby/qbe-asm.sh runs the oracle ports).
 
-compile=0 asm=0 out="" src="" cppflags=() asflags=()
+compile=0 asm=0 pic=0 out="" src="" cppflags=() asflags=()
+kcproc=() nofp=0 nounwind=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   a=${args[i]}
@@ -22,13 +23,35 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     -c) compile=1 ;;
     -S) compile=1; asm=1 ;;   # stop at the assembly QBE wrote (-o - is stdout)
     -Wa,*) asflags+=("$a") ;;
+    -fPIC|-fpic) pic=1 ;;   # code for a shared object: QBE -p (thread-local symbols by initial exec, not local exec)
+    -fno-PIC|-fno-pic) pic=0 ;;
     -o) out=${args[++i]} ;;
     -D?*|-I?*|-U?*|-std=*|-ansi|-iquote?*|-isystem?*|-idirafter?*|-include?*|-imacros?*) cppflags+=("$a") ;;
     -D|-I|-U) cppflags+=("$a${args[++i]}") ;;
     -isystem|-iquote|-idirafter|-include|-imacros) cppflags+=("$a" "${args[++i]}") ;;
+    -nostdinc|-undef) cppflags+=("$a") ;;
+    # NFCXX_QBE_KERNEL: nfcc passes only the kernel options this path honours (nfcc's qbekernel). The preprocessor gets
+    # them all, since gcc derives predefined macros from them (__SSE__, __CHAR_UNSIGNED__, __code_model_kernel__ ...).
+    -f*|-m*)
+      if [ -n "${NFCXX_QBE_KERNEL:-}" ]; then
+        cppflags+=("$a")
+        case $a in
+          -funsigned-char) kcproc+=(-u) ;;
+          -fshort-wchar) kcproc+=(-W) ;;
+          -ftrivial-auto-var-init=zero) kcproc+=(-z) ;;
+          -mno-sse|-mno-sse2|-mno-80387|-msoft-float) nofp=1 ;;
+          -fno-asynchronous-unwind-tables) nounwind=1 ;;   # qbe -U: no .cfi directives, so no .eh_frame
+          -fasynchronous-unwind-tables) nounwind=0 ;;
+        esac
+      fi ;;
     *.c) src=$a ;;
   esac
 done
+# the kernel's headers define far more static inline functions than a file uses: drop the unreferenced ones (cproc -p)
+[ -z "${NFCXX_QBE_KERNEL:-}" ] || kcproc+=(-p -g -V)   # -g: the GNU keyword asm (the kernel is gnu11); -V: volatile accesses kept
+# -G: GNU C's cleanup attribute, which runs at the end of the object's scope (the kernel's guard()); nfcxx's EDG-made C
+# uses the attribute for its throw-only cleanups instead (docs/notes/cproc-nfcxx.md)
+[ -z "${NFCXX_QBE_KERNEL:-}${NFCXX_C_INPUT:-}" ] || kcproc+=(-G)
 
 if [ $compile = 0 ] && [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend (scripts/cil-cc): the link is cil-link.rb over the translation units' fragments (docs/notes/cil.md).
@@ -95,7 +118,13 @@ if [ $macos = 1 ]; then
 fi
 # __int128_t and __uint128_t are gcc and clang builtin typedefs (no header declares them): name cproc's 128-bit integer types.
 darwin+=('-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
-if [ -n "${NFCXX_C_INPUT:-}" ]; then
+if [ -n "${NFCXX_QBE_KERNEL:-}" ]; then
+  # The Linux kernel (nfcc's NFCXX_QBE_KERNEL): preprocessed exactly as gcc preprocesses it, with gcc's predefined
+  # macros and the kernel's options, so cproc sees the same translation unit as the gcc backend's reference object.
+  # The kernel needs gcc's identity (compiler_types.h stops on "Unknown compiler" without __GNUC__). The linemarkers
+  # stay, so cproc's errors name the header and line (the migration log, NFCXX_QBE_LOG, is read by them).
+  ${CCBIN[@]+"${CCBIN[@]}"} -E ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
+elif [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
   # glibc picks its ABI from __x86_64__ (gnu/stubs-32.h otherwise), gcc's stddef.h needs
   # __SIZE_TYPE__, limits.h needs __INT_MAX__. So pre-define the host target's macros, but not the
@@ -136,8 +165,12 @@ arm64=(); case "$(uname -m)" in arm64|aarch64) arm64=(--arm64) ;; esac
 # none present (and no CR, which it would normalize), its output is its input and the tail is empty, so the
 # file goes through unchanged. Under mruby the scan costs minutes on a multi-MB file (unicode_name_fsm: 11 MB).
 # NFCXX_PREP_ALWAYS=1 runs qbe-prep.rb on every input (tests/mruby/qbe-prep.sh counts them through the tap).
-if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|__sync_|volatile|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
-   ! grep -q "$(printf '\r')" "$tmp/pp.c"; then
+# NFCXX_QBE_KERNEL: no rewriting. The kernel's translation unit is exactly gcc's preprocessed source, so cproc either
+# compiles a construct itself or refuses it (and qbe-try keeps the gcc object); in particular volatile stays volatile
+# (cproc -V), where qbe-prep.rb would drop it.
+if [ -n "${NFCXX_QBE_KERNEL:-}" ] ||
+   { [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|__sync_|volatile|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
+     ! grep -q "$(printf '\r')" "$tmp/pp.c"; }; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
   "$(dirname "$0")/mrb" "${NFCXX_QBE_PREP_RB:-$(dirname "$0")/qbe-prep.rb}" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${prepdce[@]+"${prepdce[@]}"} ${macho[@]+"${macho[@]}"} ${arm64[@]+"${arm64[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
@@ -146,7 +179,17 @@ trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
 # macOS arm64: the aarch64-apple target (Apple's va_list, see scripts/cproc-apple-valist.patch); elsewhere the default.
 cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t aarch64-apple) ;; esac
-"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
+# GNU extended inline asm is lowered to out-of-line thunks cproc writes here (x86_64 ELF only; the Mach-O label prefix
+# and the CIL backend have no path, so -a is withheld there and cproc then refuses any asm instead of miscompiling it).
+asmarg=()
+if [ $macos = 0 ] && [ -z "${NFCXX_CIL:-}" ]; then asmarg=(-a "$tmp/asm.s"); : > "$tmp/asm.s"; fi
+# true/false/nullptr/bool are C23 keywords; before C23 (the default, and the gnu* dialects) they are ordinary
+# identifiers, which is how the Linux kernel's headers use them. cproc -K takes them as identifiers (its own default is
+# C23), so it is passed unless the standard is C23.
+c23=0
+for a in ${cppflags[@]+"${cppflags[@]}"}; do case $a in -std=c23|-std=c2x|-std=gnu23|-std=gnu2x) c23=1 ;; -std=*) c23=0 ;; esac; done
+[ $c23 = 1 ] || cprocarg+=(-K)
+"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} ${kcproc[@]+"${kcproc[@]}"} ${asmarg[@]+"${asmarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 if [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend: the QBE IL becomes a fragment for the link (scripts/qbe2cil.rb); no assembler, no weak symbols.
@@ -158,25 +201,48 @@ fi
 t=$(trace_start)
 # A cross check from a non-Darwin host: QBE's default target there is ELF, so the Apple arm64 target is named.
 qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_apple); fi
-"$qbe" ${qbetarget[@]+"${qbetarget[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
+# -mno-sse: qbe -n moves integers between stack slots through %rax, not %xmm15 (a commit of the fork, 3rd/qbe)
+qbenofp=(); [ $nofp = 0 ] || qbenofp=(-n)
+[ $nounwind = 0 ] || qbenofp+=(-U)
+[ $pic = 0 ] || qbenofp+=(-p)   # -fPIC: thread-local symbols by initial exec
+"$qbe" ${qbetarget[@]+"${qbetarget[@]}"} ${qbenofp[@]+"${qbenofp[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
 trace_end "$t" "qbe (IL to assembly)" qbe-backend
+# -mno-sse (NFCXX_QBE_KERNEL): QBE has no switch to avoid SSE and x87, so the code it wrote is checked instead (the
+# inline-asm thunks are the program's own instructions, as with gcc, and are appended later).
+if [ $nofp = 1 ] && grep -nE '%[xyz]mm[0-9]|%st\b|%st\(|^[[:space:]]+f[a-z]+[[:space:]]' "$tmp/out.s" > "$tmp/fp.txt"; then
+  echo "qbe-cc: $src: the code QBE generated uses SSE or x87 registers, which -mno-sse forbids:" >&2
+  head -3 "$tmp/fp.txt" >&2
+  exit 1
+fi
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
 # assembly too, so the link merges the per-object copies as gcc does.
 t=$(trace_start)
 # Mach-O: QBE's Apple targets prefix every label with "_" (T.assym), so the names are looked up with it.
 symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
-"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
+# --marked: the inline-asm side file, where cproc already wrote the .weak of hand-written C's weak attribute
+marked=(); [ ${#asmarg[@]} -eq 0 ] || marked=(--marked="$tmp/asm.s")
+"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${marked[@]+"${marked[@]}"} "$tmp/prep.c" "$tmp/out.s"
 # Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
 # __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
 # that text (weak-symbols.rb gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
 if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
   if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
      grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
-    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input "$tmp/pp.weak.c" "$tmp/out.s"
+    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input ${marked[@]+"${marked[@]}"} "$tmp/pp.weak.c" "$tmp/out.s"
   fi
 fi
 cat "$tmp/tail.s" >> "$tmp/out.s"
+[ ${#asmarg[@]} -eq 0 ] || cat "$tmp/asm.s" >> "$tmp/out.s"   # inline-asm thunks, appended as local functions
+# The weak or visibility directive of a symbol the unit only declares ("#nfcxx:ifused NAME", cproc's emitsymattr) stays
+# only when the assembly names the symbol elsewhere: QBE drops dead code, and with it the last use of the declaration.
+if grep -q '^#nfcxx:ifused ' "$tmp/out.s"; then
+  awk 'NR == FNR { if ($0 ~ /^#nfcxx:/) { skip = $0 ~ /^#nfcxx:ifused /; next } if (skip) { skip = 0; next }
+                   n = split($0, w, /[^A-Za-z0-9_.$]+/); for (i = 1; i <= n; i++) used[w[i]] = 1; next }
+       /^#nfcxx:ifused / { drop = !($2 in used); next }
+       drop { drop = 0; next }
+       { print }' "$tmp/out.s" "$tmp/out.s" > "$tmp/out.used.s" && mv "$tmp/out.used.s" "$tmp/out.s"
+fi
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)
 if [ $asm = 1 ]; then

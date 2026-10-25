@@ -30,6 +30,10 @@ has no dependency beyond node (22 was used).
 | `build-static.cjs` | The static site (run by `.github/workflows/wasm-explorer-build.yml`): each example in every mode of its language, run and checked, then the page and `builds/<id>.json`. |
 | `index.html` | The page (one file, no build step). |
 | `bindings.js` | The browser bindings (see "Browser bindings"), shared by the page and the static build. |
+| `common.js` | The modes, the languages, the option check and the diagnostics parser, shared by `pipeline.cjs`, `inbrowser.js` and the page. |
+| `inbrowser.js` | The compile without a server (see "Static build"): `pipeline.cjs`'s steps with the front end and the emitter as wasm. |
+| `compile-worker.js` | The page's worker that runs `inbrowser.js`. |
+| `inbrowser-assets.cjs`, `test-inbrowser.cjs` | The in-browser compiler's files from this checkout's builds (for the static build and node), and its check against `pipeline.cjs`. |
 | `examples/` | The sources and `index.json` (id, title, file, language (default `c++`), expected `main()` result). |
 
 ## The compile
@@ -57,8 +61,21 @@ its standards or empty (the front end's default), and `mode` is one of its modes
 | `c` | `pathb-dump --ir -std=cNN` (EDG in C mode, `--gcc`, C17 by default) | `c89`, `c99`, `c11`, `c17`, `c23` | all |
 | `rust` | `rustc --crate-type=cdylib -C opt-level=1 -C panic=abort -C overflow-checks=on -C lto=fat -C save-temps`, `llvm-dis` of the module after LTO, then `llvm-to-pathb.rb --wasm` | editions `2015`, `2018`, `2021` (default), `2024` | `lp64`, `asan` |
 | `go` | `tinygo build -o prog.ll -gc=leaking -scheduler=none -panic=trap -opt=1`, a `main()` wrapper, then `llvm-to-pathb.rb --wasm` | none | `lp64`, `asan` |
+| `swift` | `swiftfe emit-c --bindings prog.swift` (tools/swiftfe: LLVM-free, Swift to C), then `pathb-dump --ir` of that C and the emitter | none | `lp64`, `asan` |
 | `llvm` | `llvm-to-pathb.rb` (`pathb-llvm.md`: the subset of `clang -S -emit-llvm` it reads) | none | `lp64`, `asan` |
 | `ir` | none: the source is the IR (`pathb-stage2.md`, section 6); lines that start with `;` are blanked first | none | `lp64`, `asan` |
+
+Swift (`tools/swiftfe`, its README) is a subset: functions, `Int`, `Bool`, `while`, `if`, classes with
+stored properties and methods, and `print`. A class, or an array, needs a heap, which only the `asan` mode has (`lp64`
+calls `malloc` as a stub, see the note on it below). Printing a `Double` traps at run time in the browser: its format is
+Swift's, which the browser's bindings cannot reproduce. The emitted C is `swiftfe emit-c --bindings`: its runtime
+prints through the browser's `putchar` and traps through `abort`. Swift runs on the server only (the static build
+compiles its examples ahead of time, with `swiftc`'s expected output checked in `examples/index.json`).
+
+**Known gap, not Swift's:** in the `lp64` mode `malloc` and `free` are imports that the page stubs (`first argument + 1`),
+so a C or Swift program that allocates in `lp64` writes through a fake pointer. The result can look right, as a class's
+does here by chance, and corrupt data in other cases. Only `asan` provides an allocator. Giving `lp64` one is the fix.
+
 
 C goes through the same EDG front end and the same IR as C++: `pathb-dump` takes a C standard (`-std=c11`), or a `.c`
 file without one, and runs `cpfe --cNN --gcc` (no `-tused`); hosted, its system include directories are the host C
@@ -136,11 +153,25 @@ and the manifest), `builds/<id>.json` (the sources, IR, wasm and diagnostics per
 On a static host the page reads the manifest and the examples' sources at start, and an example's build
 (`builds/<id>.json`) only when it is compiled: `go-fmt`'s is about 4.7 MB. An example's source gets its prebuilt result
 (and the default standard only), matched by the source and the language. A mode whose IR is the same as an earlier
-mode's (`asan` and `lp64` share theirs) stores it once (`irFrom`). Any other source gets a message that it needs the
-local server. A permalink to an example works.
+mode's (`asan` and `lp64` share theirs) stores it once (`irFrom`). A permalink to an example works.
 
-The workflow builds the harness and the mruby tool as `pathb.yml` does, runs the static build (on pull requests too,
-without deploying), and deploys from `main`. The one-time repository setting is Settings > Pages > Source: GitHub
+**Compiling in the page.** When the in-browser compiler is built (`docs/notes/pathb-wasm-frontend.md`: the Path B front
+end and mruby, built with Emscripten), the static build writes it to `inbrowser/` (18.5 MB, about 4.8 MB as gzip: the
+front end's `cpfe.wasm` is 17.9 MB, mruby's 0.9 MB, EDG's base directory 0.3 MB), and any other source in C++, C, LLVM
+IR or the IR is compiled in the page: `compile-worker.js` loads the tools the first time (the page says so in its
+status line), and runs `inbrowser.js`, which is `pipeline.cjs`'s compile with the same front end (`cpfe.wasm`, with the
+arguments of `pathb-dump --ir`, in Emscripten's in-memory file system) and the same scripts (`llvm-to-pathb.rb`,
+`pathb-wasm-emit.rb`, run by `mruby.wasm`). The result is the server's, byte for byte (`test-inbrowser.cjs`: every
+example in every mode, and `tests/wasm` and `tests/pathb-ir` the same way, 299 compiles). A compile takes 20 to 200 ms
+once the tools are loaded. What it cannot do: Rust and Go (their compilers are not in the page), programs that include
+the C or C++ library headers (the page has EDG's own headers only: the error says so), and demangling the frames of a
+trap (no `c++filt`). With "auto" (off at first on a static host) an edit compiles as on the live server. Without the
+tools, any other source gets a message that it needs the local server.
+
+The workflow builds the harness and the mruby tool as `pathb.yml` does, and the in-browser compiler (Emscripten,
+`PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh`, `scripts/setup-mruby-wasm.sh`, each cached), checks it
+(`tests/pathb-wasm-frontend/run.sh`, `test-inbrowser.cjs`), runs the static build with `--require-inbrowser` (on pull
+requests too, without deploying), and deploys from `main`. The one-time repository setting is Settings > Pages > Source: GitHub
 Actions.
 
 **Previews on Cloudflare Workers.** A comment `/preview` on a pull request (alone on its first line, by someone with
@@ -263,7 +294,7 @@ and input events.
 | WAT (text format) | done | `wabt`, from the CDN. |
 | IR, bytes, download | done | |
 | Shareable links | done | Source and options in the hash. |
-| Static deployment | done | GitHub Pages, examples only. |
+| Static deployment | done | GitHub Pages and Cloudflare previews. C, C++, LLVM IR and the IR compile in the page (wasm); Rust and Go: the examples only. |
 | Other stages (the C from `--emit-c`, the QBE asm) | not done | Needs the Path A build (`setup-edg.sh`), a second pipeline. |
 | Side-by-side comparison, diff | not done | Two modes or two backends in two panels. |
 | Compiler flags beyond the standard (`-D`, `-I`, `--target`) | not done | Include directories must be limited to the repo, not free paths. |

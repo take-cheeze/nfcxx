@@ -4,10 +4,9 @@ fn opaque<T>(v: T) -> T {
 }
 
 // Checked, overflowing, wrapping and saturating arithmetic at several widths. Every operand goes through opaque, so the
-// operations are compiled and run, not folded by mrustc's constant evaluator. Two results mrustc gets wrong, so they are
-// not here: (1u128 << 100).checked_mul(1 << 28) should be None, but mrustc's 128-bit multiply helper (mul128_o) does not
-// flag the bits of the multiplicand it shifts out, and its gcc build gives Some(0) as well; and mrustc's constant evaluator
-// folds (-30000i16).checked_mul(2) to Some(5536), which opaque avoids.
+// operations are compiled and run, not folded by mrustc's constant evaluator. mrustc's constant evaluator folds
+// (-30000i16).checked_mul(2) to Some(5536), which opaque avoids. (1u128 << 100).checked_mul(1 << 28) gave Some(0) with
+// mrustc's former 128-bit multiply helper (bit by bit, which dropped the bits it shifted out); it is None now.
 fn main() {
     let one = std::env::args().count() as i32; // 1 when run without arguments
     println!("{:?}", opaque(i32::MAX - one + 1).checked_add(1));
@@ -24,6 +23,7 @@ fn main() {
     println!("{:?}", opaque(3usize).checked_sub(4));
     println!("{:?}", opaque(i128::MAX).checked_add(one as i128));
     println!("{:?}", opaque(1u128 << 100).checked_mul(1 << 27));
+    println!("{:?}", opaque(1u128 << 100).checked_mul(1 << 28));
     println!("{:?}", opaque(7i8).overflowing_add(120));
     println!("{:?}", opaque(255u8).overflowing_add(one as u8));
     println!("{:?}", opaque(i32::MIN).overflowing_neg());

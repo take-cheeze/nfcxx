@@ -151,6 +151,20 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   # The -D and -U options: the host compile gets them, and the device pass resolves its conditionals with them, so both
   # copies agree on every #if the defines decide.
   local defs_opts=(); for f in ${cflags[@]+${cflags[@]+"${cflags[@]}"}}; do case $f in -D*|-U*) defs_opts+=("$f");; esac; done
+  # The toolkit's version macros, for the device pass only: the host copy has them from the CUDA headers, the device unit
+  # includes none, and code tests them in #if (ggml-cuda's GGML_CUDA_USE_CUB is CUDART_VERSION >= 11070; without the
+  # value the host launched CUB-path kernels whose device bodies were the other branch). Read from the headers the host
+  # compile finds first (the -I directories, then CUDA_HOME); a -D of the same name on the command line wins.
+  local ver_opts=() d m v
+  for d in ${incs[@]+"${incs[@]#-I}"} "${CUDA_HOME:-/usr/local/cuda}/include"; do
+    [ -f "$d/cuda_runtime_api.h" ] || continue
+    for m in CUDART_VERSION:cuda_runtime_api.h CUDA_VERSION:cuda.h; do
+      case " ${defs_opts[*]+${defs_opts[*]}} " in *" -D${m%%:*}="*|*" -D${m%%:*} "*|*" -U${m%%:*} "*) continue ;; esac
+      v=$(sed -n "s/^#define ${m%%:*}  *\([0-9][0-9]*\).*/\1/p" "$d/${m#*:}" 2>/dev/null | head -1)
+      [ -z "$v" ] || ver_opts+=("-D${m%%:*}=$v")
+    done
+    break
+  done
   # Kernel name obfuscation: one seed for both copies of the file (the host copy and the device unit must agree).
   local obf=(); if [ "$obfuscate" = 1 ]; then obf=(--obfuscate="${NFCXX_OBFUSCATE_SEED:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"); fi
   # The front end parses the plain kernel launches (EDG --cuda, 3rd/edg); the rewriter leaves them. Launches with
@@ -166,9 +180,9 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
-  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
@@ -714,6 +728,12 @@ for f in ${files[@]+${files[@]+"${files[@]}"}}; do
     # its runpath, so it loads the same libcudart it was linked against (not whichever one the loader finds first).
     -lcudart)
       [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME/lib64" ] && eflist+=(--c_to_obj_option "-Wl,-rpath,$CUDA_HOME/lib64")
+      # The device-wide CUB algorithms behind lib/cuda/host/cub/cub.cuh (scripts/cuda-cub): an archive, ahead of
+      # libcudart, so only a program that calls them links them.
+      if [ $compile_only = 0 ]; then
+        cub_lib=$("$root/scripts/cuda-cub") || cub_lib=""
+        [ -z "$cub_lib" ] || eflist+=("$cub_lib")
+      fi
       eflist+=("--c_to_obj_lib=cudart") ;;
     -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;;
     # --no-as-needed keeps the libraries after it in DT_NEEDED; find_package(Torch) links libtorch_cpu, libtorch_cuda and

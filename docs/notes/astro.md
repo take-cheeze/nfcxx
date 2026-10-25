@@ -269,6 +269,26 @@ Speed: ASTroGen is fast either way. calc: 0.09 s CRuby 3.3 vs 0.04 s mruby; koru
 end to end (calc and luastro need none; Prism's templates and the node.def patches of baruby_precise / koruby_precise in
 `run_astro.sh` still use CRuby, and the script stops there when it is missing).
 
+## luastro as an nfcpoly language
+
+`tests/poly/run.sh` (POLY_LANGS=astro) evaluates scripts of luastro from a C++ program compiled with nfcxx, the way it does for Lua,
+Ruby or Python (`poly.md`, "astro: ASTro's luastro behind a C shim"). `scripts/setup-poly-astro.sh` fetches the same pin, applies the
+same two patches to a copy, runs ASTroGen and compiles with nfcc, per back end, `lib/poly/nfcpoly_astro_shim.c` (luastro's `main.c`
+without its command line) and the generated `node.c` into `libluastro.a`, which `lib/poly/nfcpoly_astro.cpp` and the C++ host link.
+Scripts run in the interpreter; the Code Store is off.
+
+What it shows: ASTro's generated evaluator, built by nfcc on gcc and on QBE/cproc, works as a library inside an nfcxx program: C++
+calls into it (eval, a call, a method call), it calls back into C++ (a bound function that throws, one that calls a script function),
+a script error is a `longjmp` in C that never crosses a C++ frame while a host exception is saved and rethrown at the boundary, and
+the same 97 checks pass on both back ends (and under valgrind on the gcc one).
+
+What it is not: the Code Store is not exercised (the SD_* specialization is what `run_astro.sh` checks); and luastro is not a
+complete Lua. Found while embedding it (all at the pin): its integers have 63 bits; `...` is not expanded in a call, a table
+constructor or a multiple assignment; its `pcall` does not restore the running closure's upvalues, so a caller that reads an upvalue
+after a caught error crashes (the shim wraps `pcall` and `xpcall`); `lua_pcall` leaves the result count of an earlier call in
+`ret_info` after a plain `return e`, so the shim does not use it for the result; there is no userdata, hence no registered C++
+classes in the backend; one interpreter per process (its interned names are globals); no limit on recursion depth (a segfault).
+
 ## lib/ast spike
 
 A feasibility spike of ASTro's node identity (Merkle hash) and code store in the numeric-kernel tier of `lib/ast` (`ast.md`,
@@ -325,4 +345,4 @@ with the env var set).
 - Compiling `sample/astrogre`'s AVX2 code on qbe: cproc cannot compile the intrinsics, so the regex engine is a gcc-backend
   shared object in both runs.
 - `astro_build.c`'s `--build` (standalone executables) and the tiered JIT daemon.
-- Feeding ASTro's hashing and specialization into `lib/ast` (`ast.md`) beyond the spike below: only the numeric-kernel tier was tried, the node tree itself was not.
+- Feeding ASTro's hashing and specialization into `lib/ast` (`ast.md`) beyond the spike above: only the numeric-kernel tier was tried, the node tree itself was not.
