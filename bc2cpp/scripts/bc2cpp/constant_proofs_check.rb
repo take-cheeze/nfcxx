@@ -270,7 +270,7 @@ receiver_at_send = lambda do |source|
       irep.instructions.each_with_index do |insn, idx|
         next unless insn.op.to_s.start_with?('SEND') && insn.sym == 'foo'
 
-        answers << [gen.send(:straight_line_constant_name, irep, idx, insn.reg), irep.agreed_constant_name(idx, insn.reg.to_s)]
+        answers << [gen.send(:straight_line_constant_name, irep, idx, insn.reg), irep.agreed_constant_name(idx, insn.reg)]
       end
     end
   end

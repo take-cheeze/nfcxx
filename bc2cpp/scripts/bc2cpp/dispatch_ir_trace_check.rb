@@ -49,7 +49,7 @@ array_or_hash = program(
   [:JMPNOT, "R1\t3"], [:ARRAY, "R2\t0"], [:JMP, '4'], [:HASH, "R2\t0"], [:SETCONST, "X\tR2"]
 )
 check.call('X = c ? [] : {} has no single container class (the last literal is not the value)',
-           literal_container_class(array_or_hash, 4, '2').nil?)
+           literal_container_class(array_or_hash, 4, 2).nil?)
 
 # X = c ? {} : []
 hash_or_array = program(

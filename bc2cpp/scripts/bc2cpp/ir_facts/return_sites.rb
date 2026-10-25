@@ -58,16 +58,16 @@ rescued = irep_of([
 ], [CatchHandler.new(type: :rescue, begin_addr: 4, end_addr: 7, target: 10)])
 rescued.tree = { rescued.label => rescued }
 check.call('`x rescue y`: the constant, the rescue value and the RAISEIF fall-through (nil)',
-           BytecodeIR.return_sources(rescued, 11, 2)&.sort_by(&:to_s) == [[1, '2'], [8, '2'], :nil].sort_by(&:to_s))
+           BytecodeIR.return_sources(rescued, 11, 2)&.sort_by(&:to_s) == [[1, 2], [8, 2], :nil].sort_by(&:to_s))
 check.call('without raiseif_nil the RAISEIF is a step over and the walk reaches the unmodelled RESCUE (negative)',
-           BytecodeIR.reaching_definitions(rescued, 11, '2', through_handlers: true).nil?)
+           BytecodeIR.reaching_definitions(rescued, 11, 2, through_handlers: true).nil?)
 
 joined = irep_of([
   insn(0, :JMPNOT, "R1\t7"), insn(3, :LOADNIL, "R2\t(nil)"), insn(5, :JMP, '9'), insn(7, :LOADI_3, "R2\t(3)"),
   insn(9, :MOVE, "R3\tR2"), insn(12, :RETURN, 'R3')
 ])
 check.call('a LOADNIL is a nil source; a MOVE is followed to its source',
-           BytecodeIR.for(joined).return_sources(5, 3)&.sort_by(&:to_s) == [[3, '2'], :nil].sort_by(&:to_s))
+           BytecodeIR.for(joined).return_sources(5, 3)&.sort_by(&:to_s) == [[3, 2], :nil].sort_by(&:to_s))
 check.call('an entry value refuses', BytecodeIR.for(joined).return_sources(0, 1).nil?)
 check.call('a missing register refuses', BytecodeIR.for(joined).return_sources(5, nil).nil?)
 

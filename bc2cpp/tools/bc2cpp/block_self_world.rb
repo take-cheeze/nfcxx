@@ -425,7 +425,7 @@ module BlockSelfWorld
 
     # Does a block nested (at any depth) in +frame+ store into its local +index+?
     def setupvar_target?(frame, index, _ireps)
-      BytecodeIR.own_upvar_written_regs(frame).include?(index.to_s)
+      BytecodeIR.own_upvar_written_regs(frame).include?(index)
     end
 
     # Every Symbol a block operand can be, which OP_SENDB turns into a Proc through Symbol#to_proc; :unknown when a

@@ -92,7 +92,7 @@ puts '-- adjacent_block_index'
 blocks = irep_of([insn(0, :BLOCK, "R3\tI[0]"), insn(3, :SENDB, "R2\t:map\tn=0"), insn(7, :RETURN, 'R2')],
                  reps: ['child'])
 check.call('the BLOCK writing the block slot of the call is found',
-           BytecodeIR.for(blocks).adjacent_block_index(1, '2') == 0)
-check.call('a BLOCK writing another register is not', BytecodeIR.for(blocks).adjacent_block_index(1, '1').nil?)
+           BytecodeIR.for(blocks).adjacent_block_index(1, 2) == 0)
+check.call('a BLOCK writing another register is not', BytecodeIR.for(blocks).adjacent_block_index(1, 1).nil?)
 
 suite.finish!

@@ -55,9 +55,9 @@ or_literal = irep_of([
   insn(9, :ARRAY, "R3\t0"), insn(12, :SETIV, "@x\tR3")
 ])
 check.call('the literal of `x = h[k] || []` does not dominate the read after the join',
-           !BytecodeIR.write_dominates?(or_literal, 3, 4, '3'))
+           !BytecodeIR.write_dominates?(or_literal, 3, 4, 3))
 check.call('the GETIDX before the branch does dominate the branch', BytecodeIR.write_dominates?(or_literal, 1, 2, '3'))
-check.call('a write directly before its read dominates it', BytecodeIR.write_dominates?(or_literal, 3, 4, '3') == false &&
+check.call('a write directly before its read dominates it', BytecodeIR.write_dominates?(or_literal, 3, 4, 3) == false &&
                                                              BytecodeIR.write_dominates?(or_literal, 0, 1, '3'))
 
 # A multi-write op between the write and the read can overwrite the register on its fallback or callee frame
