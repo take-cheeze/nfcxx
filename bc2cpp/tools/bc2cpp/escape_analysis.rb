@@ -1070,7 +1070,7 @@ module EscapeAnalysis
 
     # The shared send rule; returns the registers holding the value after the call.
     def send_site(run, i, insn, s, name, recv:, args:, dest:, block: nil)
-      out = s - [dest.to_s]
+      out = s - [dest]
       reg_held = ->(r) { r && s.include?(r) }
       held = recv.nil? ? s.include?(0) : reg_held.call(recv)
       klasses = receiver_klasses(run, i, recv, held)
@@ -1085,7 +1085,7 @@ module EscapeAnalysis
         return reject(run, insn, :send_receiver, s) unless result
 
         run.uses << Use.new(index: i, kind: :call, name: name, reg: recv) if recv && PROC_CALLS.include?(name)
-        out |= [dest.to_s] if result == :self
+        out |= [dest] if result == :self
       end
       args.each_with_index do |r, k|
         next unless reg_held.call(r)

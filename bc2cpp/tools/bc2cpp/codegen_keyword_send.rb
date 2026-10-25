@@ -722,7 +722,7 @@ class CodeGen
 
     kw_pairs =
       if nk_spec == '*'
-        pairs = splat_hash_literal_pairs(irep, idx, next_reg.to_s)
+        pairs = splat_hash_literal_pairs(irep, idx, next_reg)
         return nil unless pairs
 
         pairs

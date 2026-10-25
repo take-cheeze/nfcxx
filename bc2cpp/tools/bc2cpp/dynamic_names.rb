@@ -153,7 +153,8 @@ module DynamicNames
       case writer.op
       when :STRING then string_may_end_setter?(irep, writer)
       when :STRCAT
-        piece = BytecodeIR.reaching_writer_indices(irep, w, writer.paren_reg.to_s) or next true
+        paren = writer.paren_reg
+        piece = paren.nil? ? nil : BytecodeIR.reaching_writer_indices(irep, w, paren) or next true
         piece.empty? || piece.any? { |p| (s = program.source_at(p)).op != :STRING || string_may_end_setter?(irep, s) }
       else true
       end
@@ -255,7 +256,7 @@ module DynamicNames
   # vm.c OP_SSEND/SSEND0/SSENDB set R[a] = self before dispatching, so a value in a self send's R[a] is
   # overwritten there, never read: FactoryFlow's register-level reads count it, and it is no use.
   def self.self_send_slot?(insn, reg)
-    insn.op.to_s.start_with?('SSEND') && reg.to_s == insn.reg
+    insn.op.to_s.start_with?('SSEND') && reg == insn.reg
   end
 
   # Whether the program could route a probe's name into Ruby: it defines or aliases respond_to? or
