@@ -276,7 +276,7 @@ module IntegerConstants
     return nil unless name && insn.argc == 1
 
     left = const_source_kind(irep, j, cur, entries)
-    right = const_source_kind(irep, j, (cur.to_i + 1).to_s, entries)
+    right = const_source_kind(irep, j, cur.to_i + 1, entries)
     return nil unless source_operand_kind?(left) && source_operand_kind?(right)
 
     [:arithmetic, name, left, right]

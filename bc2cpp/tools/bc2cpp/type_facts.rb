@@ -835,7 +835,7 @@ module TypeFacts
     end
     Array(ctx.contradictions).each do |owner, name, pos, declared, got|
       d = (ctx.registry[name] || []).find { |x| x.owner == owner && x.irep } or next
-      slot = pos == :return ? 'return' : (pos + 1).to_s
+      slot = pos == :return ? 'return' : pos + 1
       add.call(d, slot, INT_TYPES.fetch(declared, declared), INT_TYPES.fetch(got, got), nil)
     end
     defs.each do |d|

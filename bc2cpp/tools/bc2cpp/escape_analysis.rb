@@ -800,7 +800,7 @@ module EscapeAnalysis
       enter = irep.enter
       return true unless enter && k < enter.enter_fields[0].to_i
 
-      flow(irep, { 0 => { (1 + k).to_s => true } }, value_class: klass).escapes?
+      flow(irep, { 0 => { 1 + k => true } }, value_class: klass).escapes?
     end
 
     # [:arg, k] of +mdef+ for an argument that is exactly a +klass+ instance.
@@ -846,7 +846,7 @@ module EscapeAnalysis
       insns = prog.instructions
       params = parameter_count(irep)
       run = Run.new(irep: irep, reasons: [], uses: [], self_tracked: self_tracked, params: params,
-                    block_slot: (params + 1).to_s, value_class: value_class, returns: returns, returned: false,
+                    block_slot: params + 1, value_class: value_class, returns: returns, returned: false,
                     self_klass: self_klass, block_given: block_given)
       state = Array.new(insns.size)
       work = []
@@ -997,7 +997,7 @@ module EscapeAnalysis
       when :ADDILV, :SUBILV
         # R[b], R[b+1] are the scratch window of the method-call fallback: written, never read.
         second = BytecodeIR::OperandModel.regs(insn)[1]
-        scratch = [second, (second.to_i + 1).to_s]
+        scratch = [second, second.to_i + 1]
         send_site(run, i, insn, s, op == :ADDILV ? '+' : '-', recv: lead, args: [], dest: lead) - scratch
       when :GETIDX then send_site(run, i, insn, s, '[]', recv: lead, args: [lead.to_i + 1], dest: lead)
       when :GETIDX0 then send_site(run, i, insn, s, '[]', recv: BytecodeIR::OperandModel.regs(insn)[1], args: [], dest: lead)
@@ -1030,7 +1030,7 @@ module EscapeAnalysis
         escape.call(:stored_hash) if window.call(lead.to_i + 1, 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s
       when :APOST
-        s - (0..BytecodeIR::OperandModel.post_count(insn)).map { |k| (lead.to_i + k).to_s }
+        s - (0..BytecodeIR::OperandModel.post_count(insn)).map { |k| lead.to_i + k }
       when :STRCAT
         # A String operand is copied; anything else is converted by its own to_s.
         escape.call(:string_operand) if held.call(lead.to_i + 1) && run.value_class != 'String'

@@ -246,7 +246,7 @@ module ReceiverProofReport
 
     sites, k = cand
     kinds = sites.filter_map do |ci, cx, recv, _argc, _own|
-      reg = (recv + k).to_s
+      reg = recv + k
       m = return_class_raw_mask(ci, cx, reg)
       rp_producer_kind(ci, cx, reg) if m.nil? || m.anybits?(CodeGen::CLASS_POOL_UNSHIPPABLE)
     end

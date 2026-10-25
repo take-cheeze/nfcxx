@@ -294,7 +294,7 @@ module RbsParamCheck
   def drop(ctx, label, pos)
     if (applied = ctx[:applied])
       [applied.ir_arg_types, applied.ir_arg_elements].each do |table|
-        table[label] = table[label].except((pos + 1).to_s).freeze if table[label]
+        table[label] = table[label].except(pos + 1).freeze if table[label]
       end
     end
     ann = ctx[:class_annotations][label] or return

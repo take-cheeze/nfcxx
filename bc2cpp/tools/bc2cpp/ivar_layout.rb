@@ -411,7 +411,7 @@ class IvarLayout
         # anywhere (native_only_mono?).
         name = insn.sym
         if registry && %w[% & | ^].include?(name) && insn.argc == 1 && native_only_mono?(registry, name)
-          arg_reg = (cur.to_i + 1).to_s
+          arg_reg = cur.to_i + 1
           left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, arg_reg, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           fixnum = fixnum_operands(left, right)

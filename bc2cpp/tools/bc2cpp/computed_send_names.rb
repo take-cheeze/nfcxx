@@ -160,7 +160,7 @@ end
 
       names = []
       (offset...count).step(stride) do |k|
-        defs = ComputedSendNames.reaching(irep, at, (first + k).to_s) or return nil
+        defs = ComputedSendNames.reaching(irep, at, first + k) or return nil
         defs.each do |definition|
           insn = BytecodeIR.for(irep).source_at(definition.index)
           return nil unless %i[LOADSYM SYMBOL].include?(insn.op)
