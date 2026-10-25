@@ -26,10 +26,10 @@ the program, and each crate of MRUSTC_NFCC_CRATES (cached as build/mrustc/nfcxx/
 `scripts/mrustc-nfcc.sh prog.rs -o prog` builds the program. `MRUSTC_NFCC_CRATES` names the crates to compile through
 nfcxx (`core alloc std`, or `all`); `MRUSTC_NFCC_CORE=1` is `core` alone. A crate is rebuilt when its C file or the
 rewrite scripts are newer than its object. `scripts/setup-mrustc.sh` builds mrustc and the 1.90 standard library into
-`build/mrustc/src` (pinned commit `016c5899` on take-cheeze/mrustc branch `nfcxx/fixes`: upstream `d85e86b` plus the fixes
-in that branch's `NFCXX-FIXES.md`; from the mrustc `build-1.90.0.sh` steps, with `MRUSTC_REPO` to override the repository).
-The census and the rewrites were re-run on this pin: `tests/mrustc/run.sh` (15 of 15) and `tests/realworld/run_mrustc.sh`
-(3 of 3) pass. The driver takes `MRUSTC` and
+`build/mrustc/src` (pinned commit `417733f9` on take-cheeze/mrustc branch `nfcxx/lifted-private`: upstream `d85e86b` plus the
+fixes in that branch's `NFCXX-FIXES.md`, rows 22 to 41 being the ones mold 3 needed, section 7; from the mrustc
+`build-1.90.0.sh` steps, with `MRUSTC_REPO` to override the repository). The census and the rewrites were re-run on this
+pin: `tests/mrustc/run.sh` (16 of 16) and `tests/realworld/run_mrustc.sh regex` pass. The driver takes `MRUSTC` and
 `MRUSTC_STD` to use another build. The edition defaults to 2021.
 
 Three choices in the first step matter:
@@ -60,11 +60,14 @@ list was found by rerunning, and a census of each construct sized what was left.
 | `extern T ZRG…(…)` then `asm("__rust_alloc");` (an asm label naming the symbol) | a few per crate | the label leaves the C; the tail defines the mangled name as `jmp LABEL@PLT` (weak) |
 | `extern T NAME asm("environ");` (a data object with a label, on one line) | 1 (std) | the name is replaced by the label throughout the file; the label leaves the declaration |
 | `#pragma pack(push, 1)` around a struct | 65 regions (libcore) | cproc ignores `#pragma`; the struct gets `__attribute__((packed))` after its keyword, which is the only place cproc reads it |
-| `__attribute__((__aligned__(16),))`, the trailing comma | 8 | dropped on attribute lines (`,)` also occurs in string literals) |
+| `__attribute__((__aligned__(16),))`, the trailing comma | 8 | dropped on attribute lines (`,)` also occurs in string literals); `qbe-prep.rb` also accepts the comma where it is left (a struct's closing line, `} __attribute__((__aligned__(128),));`) |
 | `__attribute__((section(".init_array.N")))` on a data object (std's argv capture) | 1 | the attribute leaves the declaration; the tail places `.quad FUNC` in `.init_array.N` (`FUNC` from the initialiser) |
 | Placeholders for unimplemented intrinsics: `({ if (!"MSG") ; else __assert_fail (…); })` | 1434 (libcore) | `(!"MSG" ? (void)0 : __assert_fail (…))`, the same test; `__PRETTY_FUNCTION__` becomes `__func__` |
 | Atomic load, store, exchange, compare-exchange in statement expressions (`({ __auto_type … })`) | 425 (libcore: 315 CAS, 50 exchange, 30 store, 30 load) | an expression over the sized builtin of the pointee's width, with a cast where a value comes back. Pointers are 8 bytes and their values go through `(unsigned long)`. The 15 on `uint128_t` (a struct) use four helpers after its typedef, over the generic libatomic calls |
 | Inline asm: `pause`, `xgetbv`, `cpuid` | 3 forms | matched by their text with the operand names kept (they differ per crate, e.g. `var401`); `pause` is a no-op hint and becomes `;`; the other two call helpers in the tail (x86-64, System V) |
+| Inline asm: the empty compiler barrier with a `"+r"` or `"+q"` operand (`/* %0 */`), `prefetcht0 [%0]` (crossbeam, rayon) | 2 forms | `;`: cproc emits no reordering across calls, and a prefetch is a hint |
+| Asm labels with a symbol version (`asm("memcpy@GLIBC_2.2.5")`) | mold 3's crates | the tail jumps to a local alias made with `.symver` |
+| Other inline asm (portable-atomic's `cmpxchg16b` loops, `lock bt*`, `lock neg`) | 62 statements (portable-atomic 1.15) | outlined: the statement moves unchanged into a weak helper of an `asm.c` file, which takes a pointer to each variable its operands name, declares it again (with its `register ... asm("REG")` binding), runs the asm and stores it back. `mrustc-nfcc.sh` builds the file with the host cc and joins it to the tail object. The block's register variables become plain locals, and the statement a call with their addresses. Operands must be variables of scalar or pointer type (`tests/mrustc/asm.rs`) |
 | glibc's `strerror_r` redirect, `__asm__ ("" "__xpg_strerror_r")` | 1 | dropped: libcore only declares the function |
 | Weak data: `__attribute__((weak)) union {…} NAME;` and `T NAME __attribute__((weak));` | 312 names (libcore) | the names go to `weak.txt`; `objcopy --weaken-symbols` in `scripts/mrustc-nfcc.sh` |
 | Weak references: `extern char __attribute__((weak)) NAME[0];` | 2 (std) | the same, on an undefined symbol |
@@ -82,7 +85,7 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 ## 3. Checks
 
-- `tests/mrustc/run.sh` (fifteen cases, about 40 seconds once the crates are cached; the first run of `vec_sum_all`
+- `tests/mrustc/run.sh` (sixteen cases, about 40 seconds once the crates are cached; the first run of `vec_sum_all`
   builds all of them, a few minutes). It runs in CI as the `mrustc` job, which is part of `build-and-test`:
   - `hello` prints `Hello, world!`; `vec_sum` prints `55 10`; `vec_sum_core` (`MRUSTC_NFCC_CORE=1`) and `vec_sum_all`
     (`MRUSTC_NFCC_CRATES=all`) print the same;
@@ -92,7 +95,9 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
   - also on the all-crates build: `time` (`Instant`, `SystemTime`, `sleep`, `Duration` formatting), `net` (a TCP echo
     over loopback with a server thread, a UDP datagram, a refused connection), `signals` (a handler installed with
     `signal` and raised with `raise`), `dlopen` (`dlopen`, `dlsym`, `dlclose`, `dlerror` on libc and libm), and
-    `checked` (checked, overflowing, wrapping and saturating arithmetic at several widths).
+    `checked` (checked, overflowing, wrapping and saturating arithmetic at several widths);
+  - `asm` (inline asm outlined into helpers: named and allocated registers, a pointer operand, a byte output, a 16-byte
+    compare-exchange).
   Each expected output was also produced by mrustc's gcc-built standard library, and checked against Rust's semantics.
   Two results mrustc gets wrong are left out (section 4).
 
@@ -115,17 +120,19 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
     has a 40 MB C file. It needed the QBE change below.
   Each takes a few minutes cold (`cargo vendor` and the mrustc build of the tree, then the pipeline) and needs network
   access for `cargo vendor`.
-- **QBE's parallel moves.** `rega.c` holds at most 64 copies in one parallel move, the copies a block edge needs for
-  phi operands and call arguments. A join with more stopped QBE with `no more pm slots` while building regex-automata.
-  `scripts/setup-qbe.sh` now raises the limit to 1024 in the build copy (a static array, so no cost). The change
-  belongs in the QBE fork as a commit; the pin in `3rd/qbe` is unchanged.
+- **QBE's parallel moves.** `rega.c` held at most 64 copies in one parallel move, the copies a block edge needs for
+  phi operands and call arguments. A join with more stopped QBE with `no more pm slots` while building regex-automata
+  (and mold 3, past 1024). The table now grows on demand: a commit of the QBE fork (branch `nfcxx/align-large`, the pin
+  in `3rd/qbe`).
 - libcore's object, built through nfcxx, has 19,796 defined symbols; mrustc's gcc-built `libcore.rlib.o` has 19,476.
   The counts are not expected to match exactly; they are a sanity check, not a proof.
 
 ## 4. What is not done, and what the numbers say
 
 - **The system is still gcc's.** The objects are nfcxx's, but the linker driver (`cc`), the assembler (`as`, which
-  QBE's output goes through) and glibc, libgcc_s, libm and the rest come from the host.
+  QBE's output goes through) and glibc, libgcc_s, libm and the rest come from the host. So do the helpers that
+  outlined inline asm runs in (section 2): the host cc compiles them, as it is the only compiler here that takes
+  GNU asm operands.
 - **Not exercised:** panics that unwind through more than one frame of user code, `std::fs` beyond the `fsio` case,
   the `libtest` and `proc_macro` crates (section 4 below), and the 16-byte atomics (no program reaches them). `time`,
   networking, signals, `dlopen` and checked arithmetic are now covered (section 3).
@@ -216,3 +223,64 @@ The undefined value is `UNDEF`, the constant `0xdeaddead` (`parse.c`). Those are
   `UNDEF` bytes are never read by a consumer, so the program's output does not depend on them. This is dead by
   construction for this site, not a general argument: the same shape in another function would need its own check.
   The root is mrustc's C, which leaves the union's unused tail unwritten; a fix would zero it in mrustc's output.
+
+## 7. mold 3
+
+mold 3.0.0 (rui314/mold, the Rust rewrite; `cargo vendor` of its lock file, x86-64 only:
+`--no-default-features --features x86_64`) builds in two ways. `tests/realworld/run_mrustc_mold.sh` checks the first,
+and with `--pipeline` the second too.
+
+- **mrustc's minicargo, gcc codegen.** mrustc needed the 20 fixes of rows 22 to 41 of `NFCXX-FIXES.md` on branch
+  `nfcxx/mold3` (and its follow-up `nfcxx/lifted-private`):
+  - minicargo: git dependencies from the vendor directory, workspace `default-members` and `version.workspace`, the
+    `cargo::` build-script syntax;
+  - `asm!` template pieces built by macros, and the operand modifiers `x l h y z` (portable-atomic);
+  - typeck: nested associated type bounds, a fuzzy inherent method match that waits, defaults and inference of
+    omitted const arguments, a renamed method generic in the placeholder matcher, raw pointers never deref-coercing,
+    custom receivers (`self: &mut &mut Self`), closures keeping bounds on const generics (rayon, either, cc, zstd-safe);
+  - lifetime inference of `impl Trait` in trait methods, async block captures;
+  - generic statics evaluated per instantiation, lifted statics always emitted (mold's `Target` constants; a first version made them global, and glob re-exports then imported core's into alloc);
+  - an impl parameter fixed by a later bound (rayon's `flat_map_iter`);
+  - a cap on the paths of `MIR_Validate_ValState` (mold's lib crate reached 13.8 GB without it, about 1.2 GB with it).
+
+  The binary links a C program, a C++ program with threads and exceptions, and mrustc itself (231 MB, 3.3 s on 4
+  cores).
+- **nfcxx's pipeline.** Every crate of the link goes through `mrustc-prep.rb`, cproc and QBE, portable-atomic's
+  inline asm outlined (section 2). The build takes about 7 minutes once mrustc's C exists (20 before cproc copied
+  structs with `blit`, below). The binary is 77 MB. What it needed:
+  - asm labels with a symbol version (`.symver`), and the barrier and prefetch asm forms (section 2);
+  - QBE (branch `nfcxx/align-large`):
+    - data alignments above 127;
+    - a parallel move table that grows;
+    - aggregates aligned on more than 16 as return pads, parameter copies and stack arguments. The alloc opcode was
+      computed from the alignment and overflowed into another instruction; stack arguments are placed as gcc does
+      since 4.6;
+  - cproc (branch `nfcxx/align-type`): QBE types carry a struct's over-alignment, member padding and size. A
+    `#[repr(align(128))]` value (crossbeam's `CachePadded`) was laid out as 8 bytes, and crossbeam-epoch's
+    `Global::new` crashed;
+  - cproc (branch `nfcxx/blit`): a struct copy larger than 16 bytes is one QBE `blit`. It was a load, a store and two
+    address adds per alignment unit: 4096 instructions for each copy of mold's 2 KB `HyperLogLog`, whose chains of
+    address temporaries were spilled. A test function with that value had a 34.9 KB frame (18.6 KB with `blit`, 14.5 KB
+    with gcc), and rayon's recursion overflowed its 2 MiB worker stacks when this mold linked mrustc;
+  - `qbe-prep.rb`: the `__aligned__(N),` trailing comma on a struct's closing line;
+  - `mrustc-nfcc.sh`, the link:
+    - the native archives that build scripts make (blake3's assembly, zstd, mimalloc) were dropped. Since the
+      crates call them through weak trampolines, the build ran and called address 0 (`--build-id` hashes with
+      blake3);
+    - a weak reference does not pull an archive member, so each archive symbol referenced weakly is passed as `-u`;
+    - libraries are linked `--no-as-needed`, since libz was referenced only weakly and was dropped.
+
+  The binary links the C program, with uncompressed, zlib and zstd debug sections, and the C++ program (same output).
+  It also links mrustc, with the default thread stacks, to an output byte-identical to the gcc-built mold's, in 8.9 s
+  (3.6 s for the gcc-built mold on the same 4 cores).
+- **Gaps.**
+  - **Stack size.** QBE's frames are still larger than gcc's (18.6 KB against 14.5 KB in the test function above):
+    QBE's slot coalescing skips slots whose address escapes, and mrustc's C takes the address of nearly every
+    aggregate local. Lifetimes for escaping slots in QBE, or mrustc's C scoping its locals, would close the rest.
+  - **Speed.** The link of mrustc takes 2.5 times as long as with the gcc-built mold.
+  - **Outlined asm** costs a call per statement, and needs operands that are variables (an expression operand is
+    left for cproc, which refuses it).
+  - **mold-wrapper.so.** mold's build script writes `mold-wrapper.so` (for `mold -run`) beside the first ancestor
+    directory named `build`, which is the repository root here. The test removes it.
+  - **Time.** The mrustc build of mold's two crates is most of the hour of a cold run; `MIR_Validate_ValState` is
+    about 20 minutes of each.

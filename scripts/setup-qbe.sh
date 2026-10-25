@@ -11,19 +11,20 @@
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
-# The pin is 78b430a, on the fork's branch nfcxx-linux-kernel: the earlier pin (9f706f5, nfcxx-stmt-expr: GNU statement
-# expressions ({ ... }), which ASTro's baruby_precise needs, docs/notes/astro.md) plus five commits: the __extension__
-# keyword, GNU extended inline asm lowered to out-of-line thunks (docs/notes/inline-asm.md; qbe-cc passes -a so cproc
-# writes the thunks to a side file appended to the assembly), the pre-C23 reading of true/false/nullptr/bool as
-# identifiers (cproc -K; qbe-cc passes it unless -std=c23), the aligned attribute on a typedef, and GNU attributes
-# between a pointer and the declarator name; then the GNU C of the Linux kernel, implemented as gcc does it or refused
-# (cproc -p, -V, -G: docs/notes/cproc-nfcxx.md, docs/notes/linux-kernel.md); and weak/visibility without effect where
-# there is no inline-asm side file (Mach-O), outside -p, as before cproc took them; and GNU mode on declarations of
-# integer types (glibc's register_t); and C + (x + C1) folded without overwriting the inner sum.
-# The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, the pin in 3rd/qbe): the pin is 55947e6, on its branch
-# nfcxx-linux-kernel: the earlier pin (5c5b125) plus 1024 copies in one parallel move (rega.c NPm), and what the kernel's
-# objects need (ELF .type/.size for data, -n without floating-point registers for -mno-sse, -U without unwind tables,
-# data alignments up to 65536, symbol offsets beyond 32 bits). No patch files are applied.
+# The pin is 25cc05d, on the fork's branch nfcxx-linux-kernel: main's earlier pin (8f98770, nfcxx/blit-stmt-expr: GNU
+# statement expressions ({ ... }), which ASTro's baruby_precise needs, docs/notes/astro.md; the alignment, padding and size
+# of over-aligned structs in QBE types and struct copies above 16 bytes as one blit) merged with this branch's commits: the
+# __extension__ keyword, GNU extended inline asm lowered to out-of-line thunks (docs/notes/inline-asm.md; qbe-cc passes
+# -a so cproc writes the thunks to a side file appended to the assembly), the pre-C23 reading of true/false/nullptr/bool
+# as identifiers (cproc -K; qbe-cc passes it unless -std=c23), the aligned attribute on a typedef, GNU attributes between
+# a pointer and the declarator name, and the GNU C of the Linux kernel, implemented as gcc does it or refused (cproc -p,
+# -V, -G: docs/notes/cproc-nfcxx.md, docs/notes/linux-kernel.md), GNU mode on declarations of integer types (glibc's
+# register_t), and weak/visibility without effect where there is no inline-asm side file (Mach-O), outside -p.
+# The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, the pin in 3rd/qbe): no patch files are applied. The pin
+# is d818b4f, on its branch nfcxx-linux-kernel: main's earlier pin (51c874c, nfcxx/align-large: data alignments above 127,
+# a parallel move table in rega.c that grows, and aggregates aligned on more than 16 laid out as gcc does) merged with
+# what the kernel's objects need (ELF .type/.size for data, -n without floating-point registers for -mno-sse, -U without
+# unwind tables, symbol offsets beyond 32 bits).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc

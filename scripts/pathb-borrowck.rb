@@ -122,6 +122,12 @@ def parse_forms(toks)
 end
 
 
+# A type without its outer const qualifiers.
+def unconst(ty)
+  ty = ty[1] while bh(ty) == 'const' && ty.length == 2
+  ty
+end
+
 def bh(x)
   x.is_a?(Array) ? x[0] : nil
 end
@@ -314,7 +320,13 @@ class BorrowCallEffects
       if alias_result[3] == 'exclusive' && source[0] != 'write'
         raise refused, 'exclusive returned aliases require a write source argument'
       end
-      width = layouts.field_type(result[1], [])[:size]
+      # A pointer to const grants no writes, so its alias is shared.
+      pointee = result[1]
+      pointee = pointee[1] while pointee.is_a?(Array) && pointee[0] == 'const' && pointee.length == 2
+      if !pointee.equal?(result[1]) && alias_result[3] != 'shared'
+        raise refused, 'returned aliases of const pointees must be shared'
+      end
+      width = layouts.field_type(pointee, [])[:size]
       if offset + width > layouts.field_type(source[1], [])[:size]
         raise refused, 'returned alias range escapes its source argument'
       end
@@ -355,6 +367,15 @@ class LocalLifetime
     @register_types = {}
     @symbols = {}
     @implicit_loans = {}
+    @register_defs = {}
+    defs = lambda do |x|
+      next unless x.is_a?(Array)
+      if %w[param let set].include?(bh(x)) && x.length >= 3 && x[1].is_a?(String)
+        (@register_defs[x[1]] ||= []) << x
+      end
+      x.each { |y| defs.call(y) }
+    end
+    f.each { |x| defs.call(x) }
     scan = lambda do |x|
       @symbols[x.name] = true if x.is_a?(IRSym) && x.sig == '$'
       return unless x.is_a?(Array)
@@ -373,7 +394,7 @@ class LocalLifetime
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
         place = direct_place(x[4])
         raise BorrowRefused, 'borrow requires a direct local place or constant field offset; use reborrow with an explicit parent' unless place
-        @loans[id] = [place[0], x[3], nil, place[1], x[1][1], x[1][1]]
+        @loans[id] = [place[0], x[3], nil, place[1], unconst(x[1][1]), unconst(x[1][1])]
       end
       if bh(x) == 'call-borrow'
         unless x.length >= 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) &&
@@ -391,9 +412,9 @@ class LocalLifetime
         if x[3] == 'root'
           place = direct_place(source)
           raise BorrowRefused, 'root returned aliases require a direct local place' unless place
-          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], x[1][1], x[1][1]]
+          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], unconst(x[1][1]), unconst(x[1][1])]
         elsif bh(x[3]) == 'parent' && x[3].length == 2 && x[3][1].is_a?(IRStr)
-          @loans[id] = [nil, a[:kind], bname(x[3][1]), expression_offset(source) + a[:offset], x[1][1], x[1][1]]
+          @loans[id] = [nil, a[:kind], bname(x[3][1]), expression_offset(source) + a[:offset], unconst(x[1][1]), unconst(x[1][1])]
         else
           raise BadIR, 'call-borrow parent form'
         end
@@ -404,11 +425,11 @@ class LocalLifetime
       if bh(x) == 'call' && x.length >= 3 && x[2].is_a?(IRSym) && x[2].sig == '&'
         summary = @call_effects.lookup(x[2].name)
         a = summary && summary[:alias]
-        place = a && x.length - 3 == summary[:args].length ? direct_place(x[3 + a[:arg]]) : nil
+        place = a && x.length - 3 == summary[:args].length ? cast_place(x[3 + a[:arg]]) : nil
         if place && bh(x[1]) == 'ptr'
           id = '&' + x[2].name + '#' + (@implicit_loans.length + 1).to_s
           raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
-          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], x[1][1], x[1][1]]
+          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], unconst(x[1][1]), unconst(x[1][1])]
           @implicit_loans[x.object_id] = id
         end
       end
@@ -416,7 +437,7 @@ class LocalLifetime
         raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
         id = bname(x[2])
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
-        @loans[id] = [nil, x[3], bname(x[4]), expression_offset(x[5]), x[1][1], x[1][1]]
+        @loans[id] = [nil, x[3], bname(x[4]), expression_offset(x[5]), unconst(x[1][1]), unconst(x[1][1])]
       end
       x.each { |y| scan.call(y) }
     end
@@ -443,7 +464,9 @@ class LocalLifetime
       end
     end
     f[3].drop(1).each do |p|
-      raise BadIR, 'param form' unless bh(p) == 'param'
+      raise BorrowRefused, 'aggregate results (sret) are unsupported' if bh(p) == 'sret'
+      raise BorrowRefused, 'variadic functions are unsupported' if bh(p) == 'ellipsis'
+      raise BadIR, 'param form' unless bh(p) == 'param' && p.length == 4
       @params << [p[1], bname(p[2]), bh(p[3]) == 'ptr', p[3]]
     end
     @slots.each_key do |name|
@@ -595,6 +618,18 @@ class LocalLifetime
     return 0 unless bh(x) == 'offset'
     raise BadIR, 'offset form' unless x.length == 3
     expression_offset(x[1]) + constant_offset(x[2])
+  end
+
+  # A direct place, or a register defined once as a pointer cast of one (the
+  # qualification conversion C++ inserts for a pointer-to-const argument).
+  def cast_place(x)
+    place = direct_place(x)
+    return place if place || !(x.is_a?(String) && x.start_with?('%'))
+    d = @register_defs[x]
+    return nil unless d && d.length == 1 && bh(d[0]) == 'let' && d[0].length == 4
+    e = d[0][3]
+    return nil unless bh(e) == 'bitcast' && e.length == 3 && bh(e[1]) == 'ptr'
+    direct_place(e[2])
   end
 
   def direct_place(x)
@@ -1187,6 +1222,11 @@ class LocalLifetime
     when 'const'
       borrow_scalar_type!(x[1])
       bh(x[1]) == 'ptr' ? ['unknown'] : []
+    when 'null'
+      # A null pointer names no place: dereferencing a value that can only be
+      # null is refused for lack of provenance, and a join adds nothing for it.
+      raise BadIR, 'null form' unless x.length == 2 && bh(x[1]) == 'ptr'
+      []
     when 'move-value', 'copy-value'
       raise BadIR, "#{bh(x)} form" unless x.length == 3
       borrow_scalar_type!(x[1])
@@ -1289,7 +1329,7 @@ class LocalLifetime
 
   def transfer(x, state)
     arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
-               'let'=>[4], 'set'=>[4], 'store'=>[4], 'return'=>[1,2],
+               'let'=>[4], 'set'=>[3, 4], 'store'=>[4], 'return'=>[1,2],
                'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
@@ -1348,8 +1388,9 @@ class LocalLifetime
       state['loan:' + id] = ['ended']
       invalidate_pointers(state, ['loan:' + id], 'expired:' + id)
     when 'let', 'set'
-      borrow_scalar_type!(x[2])
-      v = value(x[3], state)
+      # (set %N OPERAND) reassigns a register its (let ...) typed.
+      borrow_scalar_type!(x[2]) if x.length == 4
+      v = value(x[-1], state)
       raise BadIR, 'register destination' unless x[1].is_a?(String) && x[1].start_with?('%')
       state['value:' + x[1]] = v
     when 'store', 'zero-fill'
@@ -1587,11 +1628,6 @@ class SummaryInference
     end
   end
 
-  def strip_const(ty)
-    ty = ty[1] while bh(ty) == 'const' && ty.length == 2
-    ty
-  end
-
   # Width and alignment of a memory argument type, or nil if no contract can name it.
   def memory_type(ty)
     return nil if ty == 'void'
@@ -1610,7 +1646,7 @@ class SummaryInference
     params.each do |p|
       ty = p[3]
       if bh(ty) == 'ptr'
-        pointee = strip_const(ty[1])
+        pointee = unconst(ty[1])
         desc = memory_type(pointee)
         return nil unless desc
         slots << [p[1], pointee, desc]
@@ -1622,12 +1658,13 @@ class SummaryInference
     end
     aliases = [nil]
     if bh(ret) == 'ptr'
-      result = memory_type(ret[1])
-      return nil unless result && bh(ret[1]) != 'const'
+      result = memory_type(unconst(ret[1]))
+      return nil unless result
+      readonly = bh(ret[1]) == 'const'
       aliases = []
       slots.each_with_index do |(_reg, _ty, desc), i|
         next unless desc
-        0.step(desc[:size] - result[:size], result[:align]) { |off| aliases << [i, off] }
+        0.step(desc[:size] - result[:size], result[:align]) { |off| aliases << [i, off, readonly] }
       end
     elsif !(ret == 'void' || BorrowLayouts::PRIMITIVES.key?(ret))
       return nil
@@ -1645,6 +1682,9 @@ class SummaryInference
     choices = slots.each_with_index.map do |(_reg, _ty, desc), i|
       if desc.nil?
         [['value']]
+      elsif a && a[0] == i && a[2]
+        # A pointer to const grants no writes through the result.
+        [%w[read shared], %w[write shared]]
       elsif a && a[0] == i
         # A pointer to non-const lets the caller write through the result.
         [%w[write exclusive], %w[read shared], %w[write shared]]

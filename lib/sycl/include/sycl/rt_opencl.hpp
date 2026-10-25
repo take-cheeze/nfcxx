@@ -55,17 +55,20 @@ class cl_rt {
   }
 
   // ---- heap (the same allocator as rt_vulkan.hpp)
-  uint64_t alloc(uint64_t bytes) {
+  // align: a power of two; the address (not only the offset) is a multiple of it. A block's skipped head stays free.
+  uint64_t alloc(uint64_t bytes, uint64_t align = 16) {
     bytes = bytes ? (bytes + 15) & ~uint64_t(15) : 16;
+    if (align < 16) align = 16;
     for (auto it = free_.begin(); it != free_.end(); ++it) {
-      if (it->second >= bytes) {
-        uint64_t off = it->first;
-        uint64_t left = it->second - bytes;
-        free_.erase(it);
-        if (left) free_[off + bytes] = left;
-        used_[off] = bytes;
-        return dev_base_ + off;
-      }
+      const uint64_t start = it->first, size = it->second;
+      const uint64_t off = ((dev_base_ + start + align - 1) & ~(align - 1)) - dev_base_;
+      if (off - start + bytes > size) continue;
+      const uint64_t left = start + size - (off + bytes);
+      free_.erase(it);
+      if (off > start) free_[start] = off - start;
+      if (left) free_[off + bytes] = left;
+      used_[off] = bytes;
+      return dev_base_ + off;
     }
     fail("out of device memory (the heap is " + std::to_string(heap_size_ >> 20) + " MB; the stacks of a dispatch take "
          "invocations times stack bytes)");
@@ -133,7 +136,7 @@ class cl_rt {
     const image_module &mod = images_.modules[it->module];
     const uint32_t stack_bytes = mod.stack_bytes;
     const uint64_t static_local = mod.static_local;
-    check_limits(l, lmem, mod);
+    check_limits(l, lmem, mod, it->subgroup_size);
     for (int i = 0; i < nbufs; i++) sync_up(bufs[i], modes[i]);
     uint32_t ng[3], gs[3];
     uint64_t invocations = 1, groups = 1;
@@ -168,7 +171,7 @@ class cl_rt {
     }
     std::memset(at(dev_base_), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    cl_kernel k = kernel(it->entry, l, it->module);
+    cl_kernel k = kernel(it->entry, l, it->module, it->subgroup_size);
     for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_launch) {
       uint32_t cnt = std::min(per_launch, ng[sd] - s0);
       uint64_t first_group = (uint64_t)s0 * inner;
@@ -277,6 +280,7 @@ class cl_rt {
     set_arg_mem_ = (set_arg_mem_fn)clGetExtensionFunctionAddressForPlatform(plat_, "clSetKernelArgMemPointerINTEL");
     if (!shared_alloc_ || !set_arg_mem_) fail("cl_intel_unified_shared_memory entry points are not in the platform");
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof max_wg_, &max_wg_, nullptr);
+    clGetDeviceInfo(dev_, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof compute_units_, &compute_units_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof max_wi_, max_wi_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof local_mem_, &local_mem_, nullptr);
     cl_device_fp_config half_cfg = 0;
@@ -306,7 +310,7 @@ class cl_rt {
     std::memset(host_, 0, 8192);
   }
 
-  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod) const {
+  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod, uint32_t subgroup_size) const {
     uint64_t total = 1;
     for (int d = 0; d < 3; d++) {
       if (l[d] > max_wi_[d]) fail("a work-group of " + std::to_string(l[d]) + " work-items in one dimension; the device allows " + std::to_string(max_wi_[d]));
@@ -316,17 +320,18 @@ class cl_rt {
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
     if (lmem + 1024 + mod.static_local > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
-    // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
-    if (mod.subgroup_size && total % mod.subgroup_size != 0)
-      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(mod.subgroup_size) +
-           " lanes, so the work-group size must be a multiple of " + std::to_string(mod.subgroup_size));
+    // a kernel that uses sub-group shuffles runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only,
+    // since a shuffle or a reduction over a partial sub-group would read lanes that are not there
+    if (subgroup_size && total % subgroup_size != 0)
+      fail("a work-group of " + std::to_string(total) + " work-items; the kernel's sub-groups have " + std::to_string(subgroup_size) +
+           " lanes, so the work-group size must be a multiple of " + std::to_string(subgroup_size));
   }
 
   uint64_t closure_addr() const { return dev_base_ + cl_closure_at; }
 
   // The kernel of an entry point of an image for a local size: a program per image and local size (the specialization
   // constants set the size).
-  cl_kernel kernel(const std::string &entry, const unsigned *l, size_t m) {
+  cl_kernel kernel(const std::string &entry, const unsigned *l, size_t m, uint32_t subgroup_size) {
     const image_module &mod = images_.modules[m];
     std::string k = std::to_string(m) + "/" + entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
     auto it = kernels_obj_.find(k);
@@ -346,13 +351,13 @@ class cl_rt {
     }
     cl_kernel kern = clCreateKernel(prog, entry.c_str(), &e);
     check(e, "clCreateKernel");
-    if (mod.subgroup_size) {
-      // the driver must run this local size with the sub-group size the module asks for (16 lanes)
+    if (subgroup_size) {
+      // the driver must run this local size with the sub-group size the kernel asks for (16 lanes)
       size_t lsz[3] = {l[0], l[1], l[2]}, sg = 0;
       check(clGetKernelSubGroupInfo(kern, dev_, CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE, sizeof lsz, lsz, sizeof sg, &sg, nullptr),
             "clGetKernelSubGroupInfo");
-      if (sg != mod.subgroup_size)
-        fail("the device runs sub-groups of " + std::to_string(sg) + " lanes for this kernel; the module needs " + std::to_string(mod.subgroup_size));
+      if (sg != subgroup_size)
+        fail("the device runs sub-groups of " + std::to_string(sg) + " lanes for this kernel; it needs " + std::to_string(subgroup_size));
     }
     clReleaseProgram(prog);
     kernels_obj_[k] = kern;
@@ -363,6 +368,7 @@ class cl_rt {
  public:
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
+  unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
 
  private:
   // the USM entry points of cl_intel_unified_shared_memory (the ICD loader resolves them per platform)
@@ -376,6 +382,7 @@ class cl_rt {
   cl_context ctx_ = nullptr;
   cl_command_queue queue_ = nullptr;
   std::string device_name_;
+  cl_uint compute_units_ = 0;
   size_t max_wg_ = 0;
   size_t max_wi_[3] = {0, 0, 0};
   cl_ulong local_mem_ = 0;
@@ -416,10 +423,9 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
 }
 inline void backend_wait() {}
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
-  (void)align;
   (void)kind;
   cl_rt &r = cl_rt::get();
-  return (void *)r.at(r.alloc(bytes));
+  return (void *)r.at(r.alloc(bytes, align));
 }
 inline void backend_usm_free(void *p) {
   cl_rt &r = cl_rt::get();

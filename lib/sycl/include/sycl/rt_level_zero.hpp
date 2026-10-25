@@ -53,17 +53,20 @@ class ze_rt {
   }
 
   // ---- heap (the same allocator as rt_opencl.hpp)
-  uint64_t alloc(uint64_t bytes) {
+  // align: a power of two; the address (not only the offset) is a multiple of it. A block's skipped head stays free.
+  uint64_t alloc(uint64_t bytes, uint64_t align = 16) {
     bytes = bytes ? (bytes + 15) & ~uint64_t(15) : 16;
+    if (align < 16) align = 16;
     for (auto it = free_.begin(); it != free_.end(); ++it) {
-      if (it->second >= bytes) {
-        uint64_t off = it->first;
-        uint64_t left = it->second - bytes;
-        free_.erase(it);
-        if (left) free_[off + bytes] = left;
-        used_[off] = bytes;
-        return dev_base_ + off;
-      }
+      const uint64_t start = it->first, size = it->second;
+      const uint64_t off = ((dev_base_ + start + align - 1) & ~(align - 1)) - dev_base_;
+      if (off - start + bytes > size) continue;
+      const uint64_t left = start + size - (off + bytes);
+      free_.erase(it);
+      if (off > start) free_[start] = off - start;
+      if (left) free_[off + bytes] = left;
+      used_[off] = bytes;
+      return dev_base_ + off;
     }
     fail("out of device memory (the heap is " + std::to_string(heap_size_ >> 20) + " MB; the stacks of a dispatch take "
          "invocations times stack bytes)");
@@ -131,7 +134,7 @@ class ze_rt {
     const image_module &mod = images_.modules[it->module];
     const uint32_t stack_bytes = mod.stack_bytes;
     const uint64_t static_local = mod.static_local;
-    check_limits(l, lmem, mod);
+    check_limits(l, lmem, mod, it->subgroup_size);
     for (int i = 0; i < nbufs; i++) sync_up(bufs[i], modes[i]);
     uint32_t ng[3], gs[3];
     uint64_t invocations = 1, groups = 1;
@@ -166,7 +169,7 @@ class ze_rt {
     }
     std::memset(at(dev_base_), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    ze_kernel_handle_t k = kernel(it->entry, l, it->module);
+    ze_kernel_handle_t k = kernel(it->entry, l, it->module, it->subgroup_size);
     for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_launch) {
       uint32_t cnt = std::min(per_launch, ng[sd] - s0);
       uint64_t first_group = (uint64_t)s0 * inner;
@@ -223,6 +226,7 @@ class ze_rt {
 
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
+  unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
 
  private:
   ze_rt() {
@@ -279,6 +283,7 @@ class ze_rt {
     props.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
     check(zeDeviceGetProperties(dev_, &props), "zeDeviceGetProperties");
     device_name_ = props.name;
+    compute_units_ = props.numSlices * props.numSubslicesPerSlice * props.numEUsPerSubslice;   // the EUs, as DPC++ counts them
 
     ze_device_compute_properties_t cp = {};
     cp.stype = ZE_STRUCTURE_TYPE_DEVICE_COMPUTE_PROPERTIES;
@@ -346,7 +351,7 @@ class ze_rt {
     std::memset(host_, 0, 8192);
   }
 
-  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod) const {
+  void check_limits(const unsigned *l, unsigned lmem, const image_module &mod, uint32_t subgroup_size) const {
     uint64_t total = 1;
     for (int d = 0; d < 3; d++) {
       if (l[d] > max_wi_[d]) fail("a work-group of " + std::to_string(l[d]) + " work-items in one dimension; the device allows " + std::to_string(max_wi_[d]));
@@ -354,10 +359,11 @@ class ze_rt {
     }
     if (total > max_wg_)
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
-    // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
-    if (mod.subgroup_size && total % mod.subgroup_size != 0)
-      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(mod.subgroup_size) +
-           " lanes, so the work-group size must be a multiple of " + std::to_string(mod.subgroup_size));
+    // a kernel that uses sub-group shuffles runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only,
+    // since a shuffle or a reduction over a partial sub-group would read lanes that are not there
+    if (subgroup_size && total % subgroup_size != 0)
+      fail("a work-group of " + std::to_string(total) + " work-items; the kernel's sub-groups have " + std::to_string(subgroup_size) +
+           " lanes, so the work-group size must be a multiple of " + std::to_string(subgroup_size));
     if (lmem + 1024 + mod.static_local > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
   }
@@ -405,8 +411,7 @@ class ze_rt {
   }
 
   // The kernel of an entry point of an image for a local size.
-  ze_kernel_handle_t kernel(const std::string &entry, const unsigned *l, size_t m) {
-    const image_module &img = images_.modules[m];
+  ze_kernel_handle_t kernel(const std::string &entry, const unsigned *l, size_t m, uint32_t subgroup_size) {
     std::string k = std::to_string(m) + "/" + entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
     auto it = kernels_obj_.find(k);
     if (it != kernels_obj_.end()) return it->second;
@@ -416,14 +421,14 @@ class ze_rt {
     ze_kernel_handle_t kern = nullptr;
     check(zeKernelCreate(module(l, m), &kd, &kern), "zeKernelCreate");
     check(zeKernelSetGroupSize(kern, l[0], l[1], l[2]), "zeKernelSetGroupSize");
-    if (img.subgroup_size) {
-      // the kernel must be compiled for the sub-group size the module asks for (its SubgroupSize execution mode)
+    if (subgroup_size) {
+      // the kernel must be compiled for the sub-group size it asks for (its SubgroupSize execution mode)
       ze_kernel_properties_t kp = {};
       kp.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
       check(zeKernelGetProperties(kern, &kp), "zeKernelGetProperties");
-      if (kp.requiredSubgroupSize != img.subgroup_size)
-        fail("the kernel requires sub-groups of " + std::to_string(kp.requiredSubgroupSize) + " lanes; the module needs " +
-             std::to_string(img.subgroup_size));
+      if (kp.requiredSubgroupSize != subgroup_size)
+        fail("the kernel requires sub-groups of " + std::to_string(kp.requiredSubgroupSize) + " lanes; it needs " +
+             std::to_string(subgroup_size));
     }
     kernels_obj_[k] = kern;
     return kern;
@@ -434,6 +439,7 @@ class ze_rt {
   ze_context_handle_t ctx_ = nullptr;
   ze_command_list_handle_t imm_ = nullptr;
   std::string device_name_;
+  uint32_t compute_units_ = 0;
   uint32_t max_wg_ = 0;
   uint32_t max_wi_[3] = {0, 0, 0};
   uint32_t local_mem_ = 0;
@@ -475,10 +481,9 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
 }
 inline void backend_wait() {}
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
-  (void)align;
   (void)kind;
   ze_rt &r = ze_rt::get();
-  return (void *)r.at(r.alloc(bytes));
+  return (void *)r.at(r.alloc(bytes, align));
 }
 inline void backend_usm_free(void *p) {
   ze_rt &r = ze_rt::get();

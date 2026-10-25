@@ -600,14 +600,17 @@ def plain_aligned_object?(tk, i)
   true
 end
 
-# If toks[i] starts __attribute__((__aligned__(N))), return [end_index_exclusive, N].
+# If toks[i] starts __attribute__((__aligned__(N))), return [end_index_exclusive, N]. A comma may follow the
+# attribute (mrustc writes `__attribute__((__aligned__(128),))`).
 def aligned_group(tk, i)
   return nil if i + 8 >= tk.size || !tk.id?(i, '__attribute__')
   return nil unless tk.punct?(i + 1, '(') && tk.punct?(i + 2, '(') && tk.code(i + 3) == ID_CODE &&
                     (tk.text(i + 3) == '__aligned__' || tk.text(i + 3) == 'aligned') && tk.punct?(i + 4, '(') &&
-                    tk.code(i + 5) == NUM_CODE && tk.punct?(i + 6, ')') && tk.punct?(i + 7, ')') &&
-                    tk.punct?(i + 8, ')')
-  [i + 9, py_int0(tk.text(i + 5))]
+                    tk.code(i + 5) == NUM_CODE && tk.punct?(i + 6, ')')
+  j = i + 7
+  j += 1 if tk.punct?(j, ',')
+  return nil unless j + 1 < tk.size && tk.punct?(j, ')') && tk.punct?(j + 1, ')')
+  [j + 2, py_int0(tk.text(i + 5))]
 end
 
 # unicode_escape decoding of the body of a string literal (what Python's decode_str does for ASCII text).

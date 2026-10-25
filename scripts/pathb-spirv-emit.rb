@@ -995,6 +995,7 @@ end
 
 class SFn
   attr_reader :name, :fid, :ptypes, :ret, :frame, :callees, :ftype, :param_ids, :code, :vars, :param_lines
+  attr_reader :sg_used   # the function lowers a sub-group shuffle (its kernels need whole 16-lane sub-groups)
 
   def initialize(form, fid, mod, wgs_mode = false)
     @form = form
@@ -1942,6 +1943,7 @@ class SFn
       # SubgroupSize execution mode (see emit_module)
       raise Refused, "#{name}: sub-group shuffles need the OpenCL module (--kernel-cl)" unless @mod.kernel_cl
       @mod.subgroup_used = true
+      @sg_used = true
       @spv.cap(5568)   # SubgroupShuffleINTEL
       @spv.ext("SPV_INTEL_subgroups")
       v = u32_of(operand(args[0])[0], ["int", 4, false, false])
@@ -2595,14 +2597,17 @@ def emit_module(src, kernel_cl = false)
     wr.code.each { |inst| spv.func(inst) }
     spv.func([56])
     spv.add_entry(kernel_cl ? 6 : 5, wr.fid, "k#{k}", iface, smod.spec_ids)
-    if smod.subgroup_used
+    # a kernel that reaches a sub-group shuffle (directly called functions: the device code has no indirect calls; a static
+    # entry runs the clones) gets the SubgroupSize execution mode and its manifest line the size, which the runtimes check
+    # (rt_opencl.hpp, rt_level_zero.hpp: whole sub-groups). Any other kernel takes any work-group size.
+    sg = reach.call(e).any? { |n| (static_entries.include?(e) ? smod.fns_wgs[n] : fns[n])&.sg_used }
+    if sg
       # the sub-group size is fixed at 16 (the Intel default that ggml uses); the host picks work-group sizes that are multiples of it
       spv.cap(58)                        # SubgroupDispatch: the SubgroupSize execution mode needs it
       spv.entry_mode(wr.fid, 35, SUBGROUP_SIZE)
     end
-    manifest << "k#{k}\t#{key}\t#{sizes[struct] || 0}"
+    manifest << "k#{k}\t#{key}\t#{sizes[struct] || 0}" + (sg ? "\t#{SUBGROUP_SIZE}" : "")
   end
-  manifest << "G\t#{SUBGROUP_SIZE}" if smod.subgroup_used   # the sub-group size the runtimes check (rt_opencl.hpp, rt_level_zero.hpp)
   static_bytes = 0
   if mod.statics.size > 0 || !mod.static_order.empty?
     bytes, relocs = mod.static_image
