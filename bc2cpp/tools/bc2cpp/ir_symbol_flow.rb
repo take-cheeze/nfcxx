@@ -215,8 +215,24 @@ module IrSymbolFlow
   # Instructions that may read the value instruction idx leaves in reg: a forward walk over normal and handler
   # edges that stops at a write of reg (except along that write's own handler edges, raised before it). The
   # backward reaching definitions cannot answer this, since a callee frame below reg makes them refuse. nil when
-  # the edges do not resolve, or a nested block reads reg.
+  # the edges do not resolve, or a nested block reads reg. Memoized per irep
+  # object ([index, register]): labels repeat across separate irep trees in
+  # one process, so a global label-keyed memo would collide.
+  VALUE_READS_CAP = 1024
+
   def value_reads(irep, idx, reg)
+    return value_reads_compute(irep, idx, reg) if ENV['BC2CPP_SYMBOL_FLOW_MEMO'] == '0'
+
+    memo = irep.instance_variable_get(:@symbol_flow_reads) ||
+           irep.instance_variable_set(:@symbol_flow_reads, {})
+    key = [idx, reg.to_s]
+    return memo[key] if memo.key?(key)
+    memo.shift if memo.size >= VALUE_READS_CAP
+
+    memo[key] = value_reads_compute(irep, idx, reg)
+  end
+
+  def value_reads_compute(irep, idx, reg)
     program = BytecodeIR.for(irep)
     return nil unless program.resolved? && program.handlers_resolved?
     captured = captured_regs(irep) or return nil
@@ -238,13 +254,17 @@ module IrSymbolFlow
   end
 
   # Registers of irep that a nested block reads with GETUPVAR (the level that reaches irep only), or nil when the
-  # irep tree is not known.
+  # irep tree is not known. Memoized per irep object: the tree never changes after loading.
   def captured_regs(irep)
     return Set.new if Array(irep.reps).empty?
     return nil unless irep.tree
 
+    cached = irep.instance_variable_get(:@symbol_flow_captured)
+    return cached if cached
+
     out = Set.new
     collect_captures(irep.tree, irep, 1, out)
+    irep.instance_variable_set(:@symbol_flow_captured, out.freeze)
     out
   end
 
