@@ -74,7 +74,7 @@ end
 bounded = ->(klass) { klass == 'Base' ? %w[Base Child] : nil }
 base_greet = { ['Base', 'greet'] => Set[:Symbol] }
 child_greet = { ['Child', 'greet'] => Set[:Integer] }
-declared_base = { '1' => Set[:Base] }
+declared_base = { 1 => Set[:Base] }
 
 # (a) Override: Child#greet returns Integer, and a Base-declared receiver may be a Child.
 overridden = applied(ir_methods: [['Base', 'greet'], ['Child', 'greet']], returns: base_greet.merge(child_greet),
@@ -104,7 +104,7 @@ check('method_missing subclass makes the receiver unbounded (untyped)', declared
 core_array = ->(klass) { klass == 'Array' ? %w[Array] : nil }
 core_array_child = ->(klass) { { 'Array' => %w[Array Child], 'Child' => %w[Child] }[klass] }
 array_size = { ['Array', 'size'] => Set[:Integer] }
-declared_array = { '1' => Set[:Array] }
+declared_array = { 1 => Set[:Array] }
 
 # (a) No program subclass: Array#size keeps the core Integer.
 core_plain = applied(ir_methods: [['Array', 'size']], returns: array_size, owner: 'Base', arg_types: declared_array)
