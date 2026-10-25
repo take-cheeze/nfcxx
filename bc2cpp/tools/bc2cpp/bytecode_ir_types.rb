@@ -8,7 +8,7 @@ module BytecodeIR
   class Types
     LITERAL_TYPES = {
       'LOADNIL' => :NilClass, 'LOADTRUE' => :TrueClass, 'LOADFALSE' => :FalseClass,
-      'LOADSYM' => :Symbol, 'SYMBOL' => :Symbol, 'STRING' => :String,
+      'LOADSYM' => :Symbol, 'SYMBOL' => :Symbol, 'INTERN' => :Symbol, 'STRING' => :String,
       'ARRAY' => :Array, 'ARRAY2' => :Array, 'HASH' => :Hash,
       'RANGE_INC' => :Range, 'RANGE_EXC' => :Range, 'LAMBDA' => :Proc, 'BLOCK' => :Proc
     }.freeze
@@ -449,6 +449,7 @@ module BytecodeIR
       insn = ir_program.source_at(definition.index)
       return nil unless insn.reg == definition.reg
       return keyword_definition_types(insn) if insn.op == 'KARG'
+      return [:TrueClass, :FalseClass] if insn.op == 'KEY_P'
       return @inferred_calls[definition.index] if BytecodeIR::Ops::SEND.include?(insn.op)
 
       type = Types.literal_class(insn, @irep.pool)
