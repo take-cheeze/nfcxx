@@ -470,6 +470,16 @@ class BorrowLayouts
       raise @bad, 'semantic pointer field type' unless ty.length == 2
       return {size: 8, align: 8, used: (0...8).to_a, objects: []}
     end
+    if head(ty) == 'array'
+      raise @bad, 'semantic array field type' unless ty.length == 3
+      count = number(ty[1])
+      elem = field_type(ty[2], visiting)
+      n = elem[:size]
+      raise @refused, 'semantic arrays need 1 to 4096 bytes' unless count > 0 && count * n <= 4096
+      return {size: count * n, align: elem[:align],
+              used: (0...count).flat_map { |i| elem[:used].map { |b| i * n + b } },
+              objects: (0...count).flat_map { |i| elem[:objects].map { |o, t| [i * n + o, t] } }}
+    end
     k = key(ty)
     raise @refused, 'unsupported semantic field type' unless k
     resolve(k, visiting)
