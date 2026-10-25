@@ -10,7 +10,21 @@ require_relative 'strict_key_hash'
 module OperandSchema
   # kind: one of KINDS. value: Integer for numeric kinds, String for names, an
   # [Integer, String] pair for :mcnst, an [n, nk] pair for :argc (nil = `*`).
-  Operand = Struct.new(:kind, :value)
+  Operand = Struct.new(:kind, :value) do
+    def initialize(kind, value)
+      super
+      deduplicate_name!
+    end
+
+    # Only identifiers share storage; literal and diagnostic text keep their own representation.
+    def deduplicate_name!
+      case kind
+      when :sym, :name then self.value = -value
+      when :mcnst then self.value = [value[0], -value[1]]
+      end
+      self
+    end
+  end
 
   # One whitespace-delimited token each, except :argc (`n=3|nk=1`, one token),
   # :enter (one token, a trailing `(0x..)` flags token is kept as :plit) and

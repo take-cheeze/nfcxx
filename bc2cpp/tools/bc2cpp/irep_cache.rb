@@ -62,7 +62,11 @@ module IrepCache
 
     result[0].each_value do |irep|
       # Marshal restores containers unfrozen; decoded operand lists remain read-only.
-      BytecodeIR.for(irep).each_source { |insn, _index| insn.typed = insn.typed }
+      BytecodeIR.for(irep).each_source do |insn, _index|
+        operands = insn.typed
+        operands.each(&:deduplicate_name!)
+        insn.typed = operands
+      end
     end
     result
   rescue ArgumentError, TypeError, EOFError, Errno::ENOENT => e
