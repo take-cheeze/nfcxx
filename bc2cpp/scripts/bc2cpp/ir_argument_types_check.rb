@@ -129,9 +129,9 @@ graph_definitions = graph_bodies.keys.map { |label| GraphDefinition.new('Graph',
 graph_harness = GraphHarness.new({ 'middle' => graph_bodies['seed'], 'leaf' => graph_bodies['middle'] },
                                  { 'seed' => Set[:Integer].freeze })
 graph_facts = IrCallGraphTypes.collect(graph_harness, graph_definitions, graph_bodies)
-check.call('complete graph facts propagate over multiple rounds', graph_facts.dig('leaf', '1') == Set[:Integer])
+check.call('complete graph facts propagate over multiple rounds', graph_facts.dig('leaf', 1) == Set[:Integer])
 limited = IrCallGraphTypes.collect(graph_harness, graph_definitions, graph_bodies, max_rounds: 1)
-check.call('round limit retains completed facts without publishing pending nodes', limited.dig('middle', '1') == Set[:Integer] && !limited.key?('leaf'))
+check.call('round limit retains completed facts without publishing pending nodes', limited.dig('middle', 1) == Set[:Integer] && !limited.key?('leaf'))
 cyclic = GraphHarness.new({ 'seed' => graph_bodies['middle'], 'middle' => graph_bodies['seed'] }, {})
 check.call('an unresolved recursive component never becomes an empty inferred type',
            IrCallGraphTypes.collect(cyclic, graph_definitions.first(2), graph_bodies).empty?)

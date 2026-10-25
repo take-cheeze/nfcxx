@@ -26,7 +26,7 @@ module IrCallGraphTypes
       classes = gen.bytecode_ir_argument_classes(definition, position)
       # ENTRY_SEEDS: an entry point with no by-name caller is complete on its own (see ir_entry_seeds.rb).
       classes ||= gen.bytecode_ir_entry_seed_classes(definition, position) if gen.respond_to?(:bytecode_ir_entry_seed_classes)
-      (facts[definition.irep] ||= {})[position.to_s] = classes if classes
+      (facts[definition.irep] ||= {})[position] = classes if classes
     end
     max_rounds.times do
       analyses = {}
@@ -47,10 +47,10 @@ module IrCallGraphTypes
         analyses[body.label].at(index, register)
       end
       nodes.each do |definition, position|
-        next if facts.dig(definition.irep, position.to_s)
+        next if facts.dig(definition.irep, position)
 
         classes = gen.bytecode_ir_argument_classes(definition, position, read: read)
-        (added[definition.irep] ||= {})[position.to_s] = classes if classes
+        (added[definition.irep] ||= {})[position] = classes if classes
       end
       break if added.empty?
 

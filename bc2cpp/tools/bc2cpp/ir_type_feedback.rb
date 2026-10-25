@@ -236,13 +236,13 @@ module IrTypeFeedback
         (1..mandatory).each do |position|
           classes = ctx.gen.bytecode_ir_argument_classes(definition, position)
           classes ||= ctx.gen.bytecode_ir_call_graph_argument_classes(definition, position) if ctx.gen.respond_to?(:bytecode_ir_call_graph_argument_classes)
-          inferred_args[position.to_s] = classes if classes
+          inferred_args[position] = classes if classes
         end
         # Optional registers: only a complete call-site join, where every reaching call passed the argument.
         if ctx.gen.respond_to?(:bytecode_ir_optional_argument_classes)
           ((mandatory + 1)..(mandatory + (enter ? enter[1].to_i : 0))).each do |position|
             classes = ctx.gen.bytecode_ir_optional_argument_classes(definition, position)
-            inferred_args[position.to_s] = classes if classes
+            inferred_args[position] = classes if classes
           end
         end
         # Rest elements, keywords and the block: the same complete call-site joins the report rows use.
@@ -263,7 +263,7 @@ module IrTypeFeedback
         end
         declared_block = ctx.signature_contracts&.ir_block_signatures&.[]([definition.owner.to_s, definition.name.to_s])
         if !declared_block && ctx.gen.respond_to?(:bytecode_ir_block_proc_classes) && ctx.gen.bytecode_ir_block_proc_classes(definition)
-          inferred_args[(mandatory + optional + rest + 1).to_s] = Set[:Proc]
+          inferred_args[mandatory + optional + rest + 1] = Set[:Proc]
         end
       end
       analysis = if applied
