@@ -150,7 +150,8 @@ qbekernel() {
     -falign-loops=*|-falign-labels=*|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
     -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|-fomit-frame-pointer|-fno-omit-frame-pointer|-fmacro-prefix-map=*|\
     -m64|-mcmodel=kernel|-mno-red-zone|-mtune=*|-mpreferred-stack-boundary=3|-mskip-rax-setup|-mno-sse|-mno-sse2|-mno-mmx|\
-    -mno-3dnow|-mno-avx|-mno-80387|-mno-fp-ret-in-387|-msoft-float) kqf+=("$1") ;;
+    -mno-3dnow|-mno-avx|-mno-80387|-mno-fp-ret-in-387|-msoft-float|\
+    -m16|-march=i386|-mregparm=3|-mpreferred-stack-boundary=2) kqf+=("$1") ;;
     *) return 1 ;;
   esac
 }
