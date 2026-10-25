@@ -51,6 +51,7 @@ require_relative 'static_dispatch_unregistered'
 require_relative 'symbol_cache'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'static_dispatch_fragment_uses'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
@@ -519,7 +520,8 @@ module StaticDispatchRegistrations
              .merge(c_literals(r[:hand]))
     end
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
-    dynamic.merge(outside_world_tokens(repo_root, closed_only: closed_only, core: core))
+    outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core)
+    dynamic.merge(outside)
 
     # Which bytecode can run. No method body -- compiled or not -- runs as
     # bytecode except after a dynamic lookup of its own name: a direct C++ call
@@ -574,6 +576,11 @@ module StaticDispatchRegistrations
         dynamic.include?(name)
       end
     end)
+
+    # FRAGMENT_USES (closed only): only the literals that can reach a built string stay fragments.
+    if closed_only
+      fragments &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
+    end
 
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies }
   end
