@@ -303,7 +303,7 @@ class BorrowCallEffects
     end
     args = f[6].drop(1)
     args.each do |arg|
-      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
+      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval].include?(arg[0])
         raise bad, 'call argument effect form'
       end
       ty = arg[1]
@@ -568,6 +568,13 @@ class LocalLifetime
     end
     @params.each_with_index do |(reg, _name, pointer, pty), i|
       mode, ty = @summary[:args][i]
+      if mode == 'byval'
+        # The parameter is the callee's own copy (the synthetic slot *%N).
+        unless bh(pty) == 'byval' && same_type?(pty[1], ty)
+          raise BadIR, 'function parameter disagrees with its effect contract'
+        end
+        next
+      end
       if mode == 'value'
         unless !pointer && scalar_abi_class(pty) == scalar_abi_class(ty)
           raise BadIR, 'function parameter disagrees with its effect contract'
@@ -1221,6 +1228,17 @@ class LocalLifetime
     resolved = []
     args.each_with_index do |arg, i|
       mode, ty = summary[:args][i]
+      if bh(arg) == 'byval'
+        # (byval T PLACE): the callee gets its own copy, a read of the caller's object.
+        raise BadIR, 'byval argument form' unless arg.length == 3
+        unless mode == 'byval' && same_type?(arg[1], ty)
+          raise BadIR, 'by-value call argument disagrees with its effect contract'
+        end
+        arg = arg[2]
+        mode = 'read'
+      elsif mode == 'byval'
+        raise BadIR, 'by-value contract argument passed by address'
+      end
       origins = value(arg, state)
       if mode == 'value'
         raise BorrowRefused, 'value call argument carries pointer provenance' unless origins.empty?
@@ -1780,7 +1798,10 @@ class SummaryInference
     slots = []
     params.each do |p|
       ty = unconst(p[3]) # a const pointer parameter, such as a destructor's this
-      if bh(ty) == 'ptr'
+      if bh(ty) == 'byval'
+        return nil unless bh(ty[1]) == 'struct' && @layouts.lookup(ty[1])
+        slots << [p[1], ty[1], nil, true]
+      elsif bh(ty) == 'ptr'
         pointee = unconst(ty[1])
         desc = memory_type(pointee)
         return nil unless desc
@@ -1814,8 +1835,10 @@ class SummaryInference
   # Start every memory argument at the weakest effect and advance only the
   # arguments that diagnostics blame, until the body verifies or a choice runs out.
   def search_modes(f, name, ret, slots, a)
-    choices = slots.each_with_index.map do |(_reg, _ty, desc), i|
-      if desc.nil?
+    choices = slots.each_with_index.map do |(_reg, _ty, desc, byval), i|
+      if byval
+        [['byval']]
+      elsif desc.nil?
         [['value']]
       elsif a && a[0] == i && a[2]
         # A pointer to const grants no writes through the result.

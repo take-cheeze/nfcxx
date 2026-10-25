@@ -292,8 +292,14 @@ A `byval` parameter's register is the address of the callee's own copy of the ar
 checker models that copy as a synthetic local slot `*%N`: initialized, alive until
 `(scope-end %N)`, and holding pointers of unknown provenance. Returning its address is
 `return-local-address`. Its size comes from the slot's semantic layout or from the module's
-`(abi-type "N" SIZE ...)` record. Callers still cannot pass aggregates by value, because call
-summaries have no by-value aggregate effect.
+`(abi-type "N" SIZE ...)` record.
+
+The argument effect `(byval T)` describes such a parameter in a call summary, and the call passes
+`(byval T PLACE)`. The caller's object is read: its fields must be initialized (padding is exempt
+when `T` has a layout), and nothing is retained. Verifying the callee checks its own copy, the
+synthetic slot. Summary inference gives a `byval` parameter `(byval T)` when `T` has a semantic
+layout, so `long double` and `__int128` by-value parameters, which have none, get no summary yet.
+All three validators accept the effect.
 
 ## Array indexing
 
@@ -725,6 +731,9 @@ Copy fixtures in `tests/pathb-borrow/copy` cover loans over either side, externa
 escaping copies, and copies from ended storage. The C++ cases `cpp/copy_*.cpp` carry an
 uninitialized field and a dangling pointer field through struct copies, and `cpp/byval_*.cpp`
 check a by-value parameter's copy and a returned address of it.
+`contracts/byval.cpp` passes a struct by value through an inferred `(byval T)` summary, finds an
+uninitialized field in the caller's copy, and runs natively. The fixtures `calls/byval_*.ir` cover
+an uninitialized argument and a by-value contract passed by address.
 `contracts/longdouble.cpp` checks `long double` and `__int128` arithmetic through the runtime
 summaries. It is refused without them and finds an uninitialized operand at the helper call. A
 module's own summary overrides the file's. The emitter and oracle accept every summary in the

@@ -301,6 +301,32 @@ cc "$tmp/ld.s" "$ldrt" -lstdc++ -lm -o "$tmp/ld"
 "$tmp/ld" || { echo "FAIL $ldsrc runtime: expected 0"; exit 1; }
 echo "ok   runtime helper effects, uninitialized operand, module precedence, emitter validation, and native execution"
 pass=$((pass + 1))
+# A struct passed by value gets a (byval T) summary: the caller's copy must be
+# initialized, and the callee checks its own copy. The pasted summary validates
+# in the emitter and oracle.
+bvsrc=tests/pathb-borrow/contracts/byval.cpp
+sed 's/ v.d = 3;//' "$bvsrc" > "$tmp/byval_uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$bvsrc" > "$tmp/byval.ir"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/byval_uninit.cpp" > "$tmp/byval_uninit.ir" 2>/dev/null
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval.ir" > "$tmp/out"
+grep -Fq '(args (byval (struct "V"))))' "$tmp/out" && grep -Fq 'ok: local lifetime checks passed' "$tmp/out" ||
+  { echo "FAIL $bvsrc"; cat "$tmp/out"; exit 1; }
+{ head -1 "$tmp/byval.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/byval.ir"; } > "$tmp/byval_pasted.ir"
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/byval_pasted.ir" | grep -Fq 'ok: local lifetime checks passed' ||
+  { echo "FAIL $bvsrc with the pasted summary"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: tmp' "$tmp/out"; then
+  echo "FAIL $bvsrc passing an uninitialized field: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval-oracle.qbe"
+cmp "$tmp/byval.qbe" "$tmp/byval-oracle.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/byval.qbe" -o "$tmp/byval.s"
+cc "$tmp/byval.s" -o "$tmp/byval"
+"$tmp/byval" || { echo "FAIL $bvsrc runtime: expected 0"; exit 1; }
+echo "ok   by-value aggregate arguments: inferred byval summary, uninitialized field, emitter validation, and native execution"
+pass=$((pass + 1))
 # A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
 # registration around it is still refused, for its own reason.)
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/vla.cpp > "$tmp/vla.ir"
