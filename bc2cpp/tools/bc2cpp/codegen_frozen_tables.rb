@@ -196,7 +196,7 @@ end
 
     base = lit.reg.to_i
     stride = container == :array ? 1 : 2
-    slot_regs = (0...n).map { |k| (base + stride * k + (container == :array ? 0 : 1)).to_s }
+    slot_regs = (0...n).map { |k| base + stride * k + (container == :array ? 0 : 1) }
     slots = slot_regs.map { |r| frozen_table_slot_mask(irep, at, r) }
     keys = container == :hash ? frozen_table_hash_keys(irep, at, base, n) : nil
     registry.intern(container, slots, keys)

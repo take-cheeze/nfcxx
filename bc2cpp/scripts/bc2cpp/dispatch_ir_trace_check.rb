@@ -155,11 +155,11 @@ phi_extra_pred = program(
   [:HASH, "R2\t0"], [:JMPNOT, "R5\t5"], [:LOADNIL, "R2\t(0)"], [:JMPNOT, "R1\t5"], [:ARRAY, "R2\t0"], [:RETURN, 'R2']
 )
 check.call('a join with a third predecessor that keeps a Hash is no container merge',
-           container_phi_merge(phi_extra_pred, 3, '2').nil?)
+           container_phi_merge(phi_extra_pred, 3, 2).nil?)
 # `x = c && []` over an earlier nil: both arms are nil or an Array at the join.
 phi_nil_arm = program([:LOADNIL, "R2\t(0)"], [:JMPNOT, "R1\t3"], [:ARRAY, "R2\t0"], [:RETURN, 'R2'])
 check.call('a nil-or-Array join is an Array (the merge keeps its positive case)',
-           container_phi_merge(phi_nil_arm, 1, '2') == 'Array')
+           container_phi_merge(phi_nil_arm, 1, 2) == 'Array')
 
 puts '-- static dispatch receiver kinds (host, item 5)'
 # A nested block writes R2 with SETUPVAR, so the local LOADNIL is not the value the send sees.
