@@ -137,9 +137,10 @@ if [ -n "$mismatch" ]; then note "gcc $src: lasting code references init code wh
 # qbe object calls it). One only the qbe object has is taken when having it is harmless:
 # .discard.* (the link drops it), the alternatives of code that is there (.altinstructions and the code they patch
 # in), and init data (.init.rodata, .init.data: freed after boot; the check above refuses lasting code that refers to
-# init code) -- code gcc's object dropped after inlining can leave them. Any other (an initcall, a kernel parameter,
+# init code) -- code gcc's object dropped after inlining can leave them --, and .ref.text (lasting code, linked with
+# .text; cproc puts there a helper that only init and __ref code calls, where gcc's inlined copies are). Any other (an initcall, a kernel parameter,
 # an exported symbol) would change what the kernel does.
-harmless='^\.(discard\..*|altinstructions|altinstr_replacement|altinstr_aux|init\.rodata|init\.data)$'
+harmless='^\.(discard\..*|altinstructions|altinstr_replacement|altinstr_aux|init\.rodata|init\.data|ref\.text)$'
 optional='^\.(discard\..*|altinstructions|altinstr_replacement|altinstr_aux)$'
 if ! cmp -s "$tmp/g.sec" "$tmp/q.sec" &&
    { comm -23 "$tmp/g.sec" "$tmp/q.sec" | grep -qvE "$optional" || comm -13 "$tmp/g.sec" "$tmp/q.sec" | grep -qvE "$harmless"; }; then

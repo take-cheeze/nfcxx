@@ -40,9 +40,14 @@ particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cp
 - **`-p`: drop unreferenced internal functions and data**, as gcc does at `-O`. cproc writes its IL to a temporary file
   and prunes it at the end: an item is live when it is exported, is `used` (`# nfcxx:keep`), or is referenced
   (`$name`) by a live item; a section alone does not keep it (gcc drops an unreferenced static `__init` function).
+  A `used` static inside a function is live with that function (`# nfcxx:keepwith F`): gcc emits nothing of an
+  inline function it drops, and kvm_host.h's unused `static_call_cond()` helpers hold an `__ADDRESSABLE()` of a
+  static-call key this configuration does not define.
   Type definitions and other top-level lines are kept. An internal function that is only called, and only from
   functions in one init section, goes to that section, where gcc's inlined copy would be (the kernel's
-  `always_inline` `memblock_alloc`, which calls `__init` code).
+  `always_inline` `memblock_alloc`, which calls `__init` code); one called only from init sections and `.ref.text`
+  (`__ref`: lasting code allowed to call init code), or from different init sections, goes to `.ref.text`
+  (`sparse_index_alloc()` calls `memblock_alloc_node()` before the slab allocator is up).
 
 - **GNU statement expressions** `({ ... })`. cproc emits statements as it parses them but evaluates expressions later,
   from trees, so the statements are parsed into a chain of blocks that is not part of the function yet (`funcdetach`),
@@ -191,8 +196,10 @@ particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cp
   without transparent huge pages, and the call it guards names a function this configuration does not have. The
   call has no effect to keep (the body only returns C); an argument with a side effect keeps the call. Likewise a
   call of a function whose body is `{}` is nothing (`__apply_fineibt()` without CFI; `noinline` too, as gcc finds
-  such a function const and drops the call), and `x & 0` is 0 when `x` has no effect (`S_DAX`,
-  `ARCH_PAGE_TABLE_SYNC_MASK`). A weak function is not folded (the link may take another definition), nor a
+  such a function const and drops the call), `x & 0` is 0 when `x` has no effect (`S_DAX`,
+  `ARCH_PAGE_TABLE_SYNC_MASK`), and so are `x && 0` (`x || 1` is 1): `dax_mapping()` is
+  `mapping->host && IS_DAX(mapping->host)`, a `{ return 0; }` function then. What a local then carries
+  (`dax = dax_mapping(mapping); if (dax) ...`) QBE folds, dropping the call it guards. A weak function is not folded (the link may take another definition), nor a
   `noipa` one (qbe-prep.rb's `__nfcxx_keep(&x)`, whose call keeps a volatile local in memory).
 
 - **Dead code names nothing** under `-p`: a block cproc's own constant folding leaves unreachable is marked
