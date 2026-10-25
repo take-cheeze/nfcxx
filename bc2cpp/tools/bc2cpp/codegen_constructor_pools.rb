@@ -428,7 +428,7 @@ class CodeGen
   def constructor_new_site(irep, idx, insn, owner, found)
     stats = found[:stats]
     stats[:new] += 1
-    argc = insn.op.to_s.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     # No initialize this analysis pools takes zero arguments: a count of 0 raises in ENTER.
     return stats[:no_args] += 1 if argc&.zero?
 
@@ -439,8 +439,8 @@ class CodeGen
       site = [irep, idx - 1, insn.reg.to_i, argc, owner]
     end
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
-    classes = constructor_named_classes(irep, idx, insn) unless insn.op.to_s.start_with?('SS')
-    if classes.nil? && !insn.op.to_s.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
+    classes = constructor_named_classes(irep, idx, insn) unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+    if classes.nil? && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(!insn.op) && (via_param = class_object_receiver_classes(irep, idx, insn))
       # CLASS_OBJECT_ARGS: the receiver is a parameter every caller passes class constants for.
       classes = via_param
       stats[:param_named] += 1
@@ -505,7 +505,7 @@ class CodeGen
   def constructor_new_root(irep, idx, insn, owner)
     return nil unless owner && !@closed_world.module_declared?(owner.owner.delete_suffix('.singleton'))
 
-    if insn.op.to_s.start_with?('SS')
+    if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
       owner.owner.end_with?('.singleton') ? owner.owner.delete_suffix('.singleton') : nil
     else
       constructor_self_class_root(irep, idx, insn, owner)

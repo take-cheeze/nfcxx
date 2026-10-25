@@ -1063,9 +1063,9 @@ module EscapeAnalysis
       unpacked += ((a + positional + 1)..(a + positional + kw)).to_a
       return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r) }
 
-      send_site(run, i, insn, s, call.name, recv: insn.op.to_s.start_with?('SS') ? nil : a,
+      send_site(run, i, insn, s, call.name, recv: BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? nil : a,
                 args: spread ? [] : (1..positional).map { |k| a + k }, dest: a,
-                block: insn.op.to_s.end_with?('B') ? a + positional + kw + 1 : nil)
+                block: BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? a + positional + kw + 1 : nil)
     end
 
     # The shared send rule; returns the registers holding the value after the call.

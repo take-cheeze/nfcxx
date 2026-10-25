@@ -337,7 +337,7 @@ class CodeGen
           # An implicit-receiver installer in a class-object body acts on that body's own cref.
           # destinations_only: `alias_method :new, :old` installs `new` and leaves `old` as it was.
           syms = syms.first(1) if destinations_only && insn.sym == 'alias_method'
-          names.merge(syms) unless scoped && insn.op.to_s.start_with?('SSEND')
+          names.merge(syms) unless scoped && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
         end
       end
     end

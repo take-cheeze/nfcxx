@@ -51,7 +51,7 @@ class CodeGen
 
     unaudited = lambda do |insn, _cur|
       ctx[:protected].include?(insn.addr) ||
-        !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.to_s.start_with?('LOADI'))
+        !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op))
     end
     use_insn = idx >= 0 && BytecodeIR.for(irep).source_at(idx)
     return fixnum_interval_fail(why, 'barrier') if !use_insn || unaudited.call(use_insn, cur)
@@ -74,7 +74,7 @@ class CodeGen
 
   def fixnum_interval_source(irep, j, insn, wreg, owner_def, depth, why)
     op = insn.op
-    if op.to_s.start_with?('LOADI')
+    if BytecodeIR::Ops::LOADI_OPS.include?(op)
       value = IntegerConstantRanges.literal(insn)
       return value ? [value, value] : fixnum_interval_fail(why, 'literal')
     end
@@ -99,7 +99,7 @@ class CodeGen
       result = IntegerConstantRanges.combine(op, left, right)
       result || fixnum_interval_fail(why, "range:#{op}")
     else
-      fixnum_interval_fail(why, op.to_s.start_with?('SEND', 'SSEND') ? "send:#{insn.sym}" : op)
+      fixnum_interval_fail(why, BytecodeIR::Ops::SEND_FAMILY.include?(op) ? "send:#{insn.sym}" : op)
     end
   end
 

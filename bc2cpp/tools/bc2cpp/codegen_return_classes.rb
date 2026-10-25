@@ -395,7 +395,7 @@ class CodeGen
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_with_op(*POOL_SELF_SEND_OPS) do |insn, _|
         next unless POOL_SELF_REBINDING_SENDS.include?(insn.sym)
-        next if insn.sym == 'define_method' && insn.op.to_s.end_with?('B')
+        next if insn.sym == 'define_method' && BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
 
         return "#{insn.sym} at #{irep.label}"
       end
@@ -634,7 +634,7 @@ class CodeGen
     return nil unless state
 
     oracle = return_class_table_oracle(irep)
-    mask = insn.op.to_s.end_with?('B') ? oracle.block_send_mask(irep, index, insn, state) : oracle.send_mask(irep, index, insn, state)
+    mask = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? oracle.block_send_mask(irep, index, insn, state) : oracle.send_mask(irep, index, insn, state)
     if (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::OTHER)) && %i[SEND SEND0].include?(insn.op)
       receiver = state[insn.reg.to_i]
       known = NUMERIC_SEND_OWNERS.keys.sum

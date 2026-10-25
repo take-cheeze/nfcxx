@@ -69,7 +69,7 @@ class CodeGen
         next unless sym
 
         return false if names.include?(sym)
-        return false if CAPTURED_LOCAL_STRING_EVALS.include?(sym) && insn.op.to_s.include?('SEND') && !literal_block_argument?(irep, idx, insn)
+        return false if CAPTURED_LOCAL_STRING_EVALS.include?(sym) && BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && !literal_block_argument?(irep, idx, insn)
       end
     end
     !DynamicNames.universe(@ireps).intersect?(names)

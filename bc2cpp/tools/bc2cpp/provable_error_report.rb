@@ -234,7 +234,7 @@ module ProvableErrorReport
 
   def error_zero_literal?(irep, idx, reg)
     value = irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |w|
-      w.op.to_s.start_with?('LOADI') ? (w.paren_value || w.imm_operand).to_s : :other
+      BytecodeIR::Ops::LOADI_OPS.include?(w.op) ? (w.paren_value || w.imm_operand).to_s : :other
     end
     value == '0'
   end

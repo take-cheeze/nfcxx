@@ -246,7 +246,7 @@ end
     writer = BytecodeIR.for(irep).source_at(defs.first.index)
     return writer.sym&.to_sym if writer.op == :LOADSYM
 
-    writer.op.to_s.start_with?('LOADI') ? frozen_table_loadi(writer) : nil
+    BytecodeIR::Ops::LOADI_OPS.include?(writer.op) ? frozen_table_loadi(writer) : nil
   end
 
   # The Integer a LOADI* op loads: `LOADI_n` / `LOADI__1` print it in parentheses, the others as an operand.

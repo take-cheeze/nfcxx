@@ -2176,7 +2176,7 @@ class CodeGen
       # A synthetic send (addr 0: a typed index or splat helper) has no position of its own; an SSEND is a
       # self call, whose receiver is self and needs no set.
       reason = if trace_insn.addr.zero? then :synthetic_send
-               elsif trace_insn.op.to_s.start_with?('SSEND') then :self_send
+               elsif BytecodeIR::Ops::SELF_SEND_FAMILY.include?(trace_insn.op) then :self_send
                else :position_mismatch
                end
       return loop_flow_refuse(irep, trace_idx, reason)

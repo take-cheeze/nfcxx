@@ -136,7 +136,7 @@ module EscapeAnalysis
       else
         if BytecodeIR::Ops::SEND_FAMILY.include?(insn.op)
           # The result may be the receiver itself, so the destination holds the object when the call is on it.
-          self_call = insn.op.to_s.start_with?('SS') ? self_frame : s.include?(lead)
+          self_call = BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? self_frame : s.include?(lead)
           out.delete(lead)
           out << lead if self_call
         elsif lead && !STORES_LEAD.key?(insn.op) && !PASSES.include?(insn.op)
@@ -152,7 +152,7 @@ module EscapeAnalysis
       op = insn.op
       return nil if created == index || PASSES.include?(op) || op == :MOVE || op == :LOADSELF
       return "closure #{op} in #{frame.label} may run with the object" if CLOSURE_OPS.include?(op)
-      return "SUPER in #{frame.label} runs with the object as self" if self_frame && op.to_s.include?('SUPER')
+      return "SUPER in #{frame.label} runs with the object as self" if self_frame && op == :SUPER
       return "RETSELF of the object in #{frame.label}" if op == :RETSELF && self_frame
 
       lead = insn.reg
@@ -213,9 +213,9 @@ module EscapeAnalysis
     # with the object as self. The object is only reachable through those registers, so any other send cannot reach it.
     def object_send(frame, index, insn, s, self_frame, stores, found)
       a = insn.reg
-      self_call = insn.op.to_s.start_with?('SS') ? self_frame : s.include?(a)
+      self_call = BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? self_frame : s.include?(a)
       positional, kw = argument_slots(insn)
-      block = insn.op.to_s.end_with?('B') ? 1 : 0
+      block = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? 1 : 0
       args = ((a.to_i + 1)..(a.to_i + [positional + kw + block, 1].max)).to_a
       return "#{insn.op} passes the object (#{frame.label}:#{index})" if args.any? { |r| s.include?(r) }
       return nil unless self_call

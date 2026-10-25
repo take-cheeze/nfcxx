@@ -180,7 +180,7 @@ class CodeGen
           next
         end
 
-        zero = insn.op.to_s.end_with?('0')
+        zero = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op)
         if insn.reg.nil? || !(zero || insn.plain_fixed_argc?)
           poisoned << name
           next

@@ -208,7 +208,7 @@ module SendRootReport
 
         insn = BytecodeIR.for(irep).source_at(d.index)
         # The state after a literal is its own class set; a blocked `after` here is the join at a following branch target.
-        next [] if insn.op.to_s.start_with?('LOADI') || %i[LOADNIL ARRAY ARRAY2 HASH STRING LOADTRUE LOADFALSE LOADSYM RANGE_INC RANGE_EXC].include?(insn.op)
+        next [] if BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || %i[LOADNIL ARRAY ARRAY2 HASH STRING LOADTRUE LOADFALSE LOADSYM RANGE_INC RANGE_EXC].include?(insn.op)
 
         if insn.op == :MOVE && insn.regs[1] && depth < 6
           send_root_culprits(irep, d.index, insn.regs[1], depth + 1)

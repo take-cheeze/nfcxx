@@ -280,7 +280,7 @@ class CodeGen
   end
 
   def stack_tuple_no_arguments?(insn)
-    (insn.n_spec.nil? || insn.n_spec == '0') && insn.nk_spec.nil? && !insn.op.to_s.end_with?('B')
+    (insn.n_spec.nil? || insn.n_spec == '0') && insn.nk_spec.nil? && BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(!insn.op)
   end
 
   # True when every reaching definition of +reg+ at +at+ is an immediate: a LOADNIL/LOADTRUE/LOADFALSE/LOADSYM, or a
@@ -292,7 +292,7 @@ class CodeGen
     prods.all? do |p|
       next false if p.entry?
       next true if STACK_TUPLE_IMMEDIATE_OPS.include?(p.op)
-      next false unless p.op.to_s.match?(BytecodeIR::LOADI_OP)
+      next false unless BytecodeIR::Ops::LOADI_OPS.include?(p.op)
 
       p.op != :LOADI32 || loadi_proven_fixnum?(p.insn)
     end
@@ -334,7 +334,7 @@ class CodeGen
   def stack_tuple_reads(insn, params)
     op = insn.op
     lead = reg_int(insn.reg)
-    return [] if STACK_TUPLE_PURE_OPS.include?(op) || op.to_s.match?(BytecodeIR::LOADI_OP)
+    return [] if STACK_TUPLE_PURE_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
     return [] if %i[RETNIL RETTRUE RETFALSE].include?(op)
     return [0] if op == :RETSELF
     return (1..(params + 1)).to_a if op == :ARGARY
@@ -365,8 +365,8 @@ class CodeGen
 
     positional = insn.n_spec.nil? ? 0 : (insn.n_spec == '*' ? 1 : insn.n_spec.to_i)
     kw = insn.nk_spec.nil? ? 0 : 2 * insn.nk_spec.to_i
-    top = lead + positional + kw + (insn.op.to_s.end_with?('B') ? 1 : 0)
-    (insn.op.to_s.start_with?('SS') ? [] : [lead]) + (lead + 1..top).to_a
+    top = lead + positional + kw + BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?((insn.op) ? 1 : 0)
+    BytecodeIR::Ops::SELF_SEND_FAMILY.include?((insn.op) ? [] : [lead]) + (lead + 1..top).to_a
   end
 
   def array_reads(insn, lead)

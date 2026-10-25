@@ -143,7 +143,7 @@ class CodeGen
     return nil if !seen.empty? && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
 
-    block_given = insn.op.to_s.end_with?('B')
+    block_given = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
     return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
 
     # Every member must resolve and return a modelled class; a missing member
@@ -163,7 +163,7 @@ class CodeGen
   def core_ruby_name_result(irep, index, insn, arguments = [])
     return nil if ENV['BC2CPP_CORE_RUBY_NAME_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
-    block_given = insn.op.to_s.end_with?('B')
+    block_given = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
     return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
 
     @core_ruby_name_results ||= {}

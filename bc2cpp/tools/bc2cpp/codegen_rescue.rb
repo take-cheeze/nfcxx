@@ -455,7 +455,7 @@ class CodeGen
     op = insn.op
     if BytecodeIR::Ops::READS_LEAD.include?(op) || op == :JMPUW
       []
-    elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(op) || op.to_s.start_with?('LOADI')
+    elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
       [insn.reg].compact
     elsif op == :RESCUE
       [insn.regs[1]].compact

@@ -112,7 +112,7 @@ class CodeGen
     use_insn = idx >= 0 && BytecodeIR.for(irep).source_at(idx)
     return false unless use_insn
     return false if ctx[:protected].include?(use_insn.addr) ||
-                    !(FIXNUM_PROOF_STEP_OVER_OPS.include?(use_insn.op) || use_insn.op.to_s.start_with?('LOADI'))
+                    !(FIXNUM_PROOF_STEP_OVER_OPS.include?(use_insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(use_insn.op))
 
     BytecodeIR.for(irep).every_reaching_definition(idx, cur, opaque_regs: ctx[:upvars],
                                                         max_states: fixnum_proof_max_states(irep)) do |definition|
@@ -169,7 +169,7 @@ class CodeGen
 
   # Classify the instruction found writing `reg` (MOVE is handled by the caller).
   def fixnum_proof_source?(irep, j, insn, reg, owner_def, depth)
-    return loadi_proven_fixnum?(insn) if insn.op.to_s.start_with?('LOADI')
+    return loadi_proven_fixnum?(insn) if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
 
     case insn.op
     when :GETIV
@@ -216,7 +216,7 @@ class CodeGen
     # An unaudited opcode or one inside a protected range refuses (see
     # FIXNUM_PROOF_STEP_OVER_OPS).
     unaudited = lambda do |insn, _cur|
-      !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.to_s.start_with?('LOADI')) ||
+      !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)) ||
         fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
     end
     irep.walk_dominating_writers(idx - 1, reg, use: idx, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS,

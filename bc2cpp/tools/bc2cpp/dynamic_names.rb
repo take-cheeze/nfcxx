@@ -94,7 +94,7 @@ module DynamicNames
 
   # `to_enum`/`enum_for` with no name (:each) or a LOADSYM name, and `Enumerator.new(obj, :name, ...)` likewise.
   def self.literal_enumerator_name?(irep, program, idx, insn)
-    return true if insn.op.to_s.end_with?('0')
+    return true if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op)
     return insn.argc.to_i.zero? || literal_name_argument?(irep, program, idx, insn) if insn.plain_fixed_argc?
 
     insn.n_spec == '*' && literal_splat_head?(irep, program, idx, (insn.reg + 1))
@@ -256,7 +256,7 @@ module DynamicNames
   # vm.c OP_SSEND/SSEND0/SSENDB set R[a] = self before dispatching, so a value in a self send's R[a] is
   # overwritten there, never read: FactoryFlow's register-level reads count it, and it is no use.
   def self.self_send_slot?(insn, reg)
-    insn.op.to_s.start_with?('SSEND') && reg == insn.reg
+    BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) && reg == insn.reg
   end
 
   # Whether the program could route a probe's name into Ruby: it defines or aliases respond_to? or

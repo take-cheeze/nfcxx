@@ -47,7 +47,7 @@ module ComputedSend
 
     names, irep, idx, owner_def = plan.values_at(:names, :irep, :idx, :owner_def)
     d = insn.reg.to_i
-    self_implicit = insn.op.to_s.start_with?('SSEND')
+    self_implicit = BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
     rest = (2..insn.n_spec.to_i).map { |k| "r#{d + k}" }
     arms = names.names.map do |name|
       code = splat_send_with(name, d, self_implicit, irep, idx, owner_def, rest, nil)

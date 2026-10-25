@@ -175,7 +175,7 @@ class CodeGen
   def sealed_hash_sends_visible?(name)
     @ireps.each_value.none? do |ir|
       BytecodeIR.for(ir).each_source.any? do |insn, idx|
-        insn.sym == name && insn.op.to_s.include?('SEND') &&
+        insn.sym == name && BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) &&
           !(name == 'instance_variable_get' && literal_ivar_argument?(ir, idx, insn))
       end
     end
@@ -253,6 +253,6 @@ class CodeGen
   end
 
   def sealed_hash_load_op?(op)
-    SEALED_HASH_LOAD_OPS.include?(op) || op.to_s.start_with?('LOADI')
+    SEALED_HASH_LOAD_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
   end
 end
