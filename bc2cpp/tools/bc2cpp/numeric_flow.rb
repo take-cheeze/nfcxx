@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'strict_key_set'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_numeric'
 
@@ -458,6 +459,7 @@ module NumericFlow
     attr_writer :elide_load_copies
 
     def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
+      StrictKeySet.coerce(opaque)
       @elide_load_copies = false
       @elide_result_copies = false
       @irep = irep

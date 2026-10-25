@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_ops'
+require_relative 'strict_key_set'
 
 # Reaching definitions over BytecodeIR's normal-flow CFG: the SET of writes
 # that can supply a register's value at an instruction, through joins and
@@ -104,6 +105,7 @@ module BytecodeIR
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
                              through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false, shared: false)
       # Mutable opaque sets and refusal diagnostics belong to the caller; do not retain them.
+      StrictKeySet.coerce(opaque_regs)
       if refusal || (opaque_regs && !opaque_regs.frozen?)
         return compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                             max_states: max_states, through_handlers: through_handlers,
@@ -271,6 +273,7 @@ module BytecodeIR
     # when an edge set is incomplete or a nested block writes +reg+. Codegen's answer: ENTER's typed slots
     # (origin_effect typed_enter) stay refused here, as they were before the origin walk typed them.
     def write_dominates?(w, use, reg, opaque_regs: nil)
+      StrictKeySet.coerce(opaque_regs)
       return compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs) if opaque_regs && !opaque_regs.frozen?
 
       @write_dominates_cache ||= {}
@@ -646,7 +649,7 @@ module BytecodeIR
     cached = irep.instance_variable_get(:@own_upvar_written_regs)
     return cached if cached
 
-    written = Set.new
+    written = StrictKeySet.new
     if !irep.reps.nil? && !irep.reps.empty?
       tree = irep.tree
       if tree
