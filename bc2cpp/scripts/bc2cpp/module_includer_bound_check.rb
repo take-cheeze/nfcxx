@@ -160,7 +160,7 @@ world = { superclass_of: hierarchy, included_modules: { 'A' => ['M'], 'B' => ['M
 join = lambda do |core_redefined|
   result = RbsSignatures.ir_types(applied, module_irep, **world, subclasses: subclasses, includer_candidates: module_candidates,
                                   core_redefined: core_redefined, call_results: false)
-  result.fact_at(2, '1', refusal: {}).then { |fact| fact&.declared? ? fact.classes : nil }
+  result.fact_at(2, 1, refusal: {}).then { |fact| fact&.declared? ? fact.classes : nil }
 end
 check('a module with two includers and no program definition of greet joins (Symbol | Integer)',
       join.call(->(_owner, _name) { false }) == Set[:Symbol, :Integer])
@@ -179,7 +179,7 @@ world_fact = lambda do |native_text, lam_world|
                          walked: {}, native_paths: [path], ruby_paths: [], module_names: Set['M'])
     fact = RbsSignatures.ir_types(applied, module_irep, **lam_world, subclasses: subclasses,
                                   includer_candidates: ->(mod) { cw.known_includer_candidates(mod) }, call_results: false)
-                        .fact_at(2, '1', refusal: {})
+                        .fact_at(2, 1, refusal: {})
     fact&.declared? ? fact.classes : nil
   ensure
     ScanCache.directory_override = nil

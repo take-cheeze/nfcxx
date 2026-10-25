@@ -58,12 +58,12 @@ def results(applied_world, subclasses:, method_missing_classes: Set.new, supercl
                                                            method_missing_classes: method_missing_classes, core_redefined: core_redefined)
   prepared_refusal = {}
   prepared_result = RbsSignatures.ir_types(applied_world, explicit_call_irep('use', sym), prepared: prepared, removed: removed)
-                                 .fact_at(2, '1', refusal: prepared_refusal)
+                                 .fact_at(2, 1, refusal: prepared_refusal)
   direct_refusal = {}
   direct_result = RbsSignatures.ir_types(applied_world, explicit_call_irep('use', sym), **world, subclasses: subclasses,
                                                                                  method_missing_classes: method_missing_classes,
                                                                                  core_redefined: core_redefined, removed: removed)
-                                .fact_at(2, '1', refusal: direct_refusal)
+                                .fact_at(2, 1, refusal: direct_refusal)
   [prepared_result, direct_result, direct_refusal]
 end
 
@@ -140,7 +140,7 @@ check('core root redefined by the program records call_contract_missing', direct
 
 # (e) Object has core subclasses (Array, Hash, ...), so an instance of one is a receiver the program does not list.
 object_size = applied(ir_methods: [['Object', 'size']], returns: { ['Object', 'size'] => Set[:Integer] }, owner: 'Base',
-                      arg_types: { '1' => Set[:Object] })
+                      arg_types: { 1 => Set[:Object] })
 object_bounded = ->(klass) { klass == 'Object' ? %w[Object] : nil }
 _, object_direct, object_refusal = results(object_size, subclasses: object_bounded, superclass_of: CORE_HIERARCHY, sym: 'size')
 check('core ancestor with core subclasses (Object) is untyped', declared_classes(object_direct).nil?)

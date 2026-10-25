@@ -60,7 +60,7 @@ def results(applied_world, hierarchy: { 'Child' => 'Base', 'Base' => :none }, in
                                                                          method_missing_classes: method_missing_classes,
                                                                          removed: removed, includer_candidates: includer_candidates)
   prepared_result = prepared && RbsSignatures.ir_types(applied_world, self_call_irep('use'), prepared: prepared, removed: removed)
-  [prepared_result&.fact_at(2, '1', refusal: {}), direct.fact_at(2, '1', refusal: {})]
+  [prepared_result&.fact_at(2, 1, refusal: {}), direct.fact_at(2, 1, refusal: {})]
 end
 
 def declared_classes(fact)
