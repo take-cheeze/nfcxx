@@ -113,8 +113,13 @@ lib.callable("vec_add");   // false: a struct by value
   with the same sequence are direct.
 - **Long double and 128-bit integers** travel as bytes, like a struct: `Value::of_bytes` of `sizeof` bytes (the x87
   80-bit format in the first ten bytes of a `long double`). Tested in `tests/ffi/wide.h`.
-- **Not callable** (listed by `declarations`, `callable` is false): overload sets, and any other kind the table lists as
-  `x` (for example other float kinds). Calling them throws `Error`. A callback with a struct, a variadic signature or a
+- **C++ overloads** (`Ffi::Dialect::Cxx`): every overload is a wrapper of its own, `nfcffi_call_NAME_k` (`Declaration::id`),
+  in a C++ translation unit (`.cpp`), so the call `NAME(args...)` resolves to the overload the cast argument types name.
+  `Library::call` picks the overload whose parameter kinds match the arguments exactly, or converts (the same conversions
+  as for a single function), and the first on a tie. No overload takes the arguments: `Error`. In C (the default
+  dialect) a repeated name is not a function, so nothing is wrapped.
+- **Not callable** (listed by `declarations`, `callable` is false): any kind the table lists as `x` (for example other
+  float kinds). Calling them throws `Error`. A callback with a struct, a variadic signature or a
   pointer-to-pointer result is a plain pointer: pass a C function pointer, not a host callable.
 - **Value.** `Value::of_signed`, `of_unsigned`, `of_float`, `of_pointer`, `of_bytes(p, n)`; the accessors throw `Error`
   on another kind.

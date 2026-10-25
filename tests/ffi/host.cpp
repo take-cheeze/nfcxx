@@ -291,6 +291,22 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   }
   CHECK(rethrown);
 
+  // C++ overloads: one wrapper per overload (a C++ translation unit); a call takes the overload its arguments match best.
+  nfcffi::Library ov = ffi.load(dir + "/overload.hpp", read_text(dir + "/overload_impl.cpp"), {},
+                                nfcffi::Ffi::Dialect::Cxx);
+  CHECK(ov.callable("pick") && ov.declarations().size() == 3);
+  CHECK(ov.call("pick", {Value::of_signed(3)}).as_signed() == 30);          // pick(int)
+  CHECK(ov.call("pick", {Value::of_float(0.5)}).as_signed() == 50);         // pick(double)
+  CHECK(ov.call("pick", {Value::of_pointer("abc")}).as_signed() == 3);      // pick(const char *)
+  CHECK(ov.call("pick", {Value::of_unsigned(4)}).as_signed() == 40);        // unsigned: the int overload converts
+  bool no_overload = false;
+  try {
+    ov.call("pick", {Value::of_bytes("xy", 2)});
+  } catch (const nfcffi::Error&) {
+    no_overload = true;
+  }
+  CHECK(no_overload);
+
   // Variadic functions: the extra arguments are passed by their promoted kinds (integer, double, pointer).
   nfcffi::Library vlib = ffi.load(dir + "/var.h", "", {"snprintf"});
   CHECK(vlib.callable("snprintf"));
