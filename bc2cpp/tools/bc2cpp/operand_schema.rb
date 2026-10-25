@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'strict_key_hash'
+
 # Typed operands for every mruby opcode. The RITE-binary loader builds them
 # straight from decoded bytes (insn_decoder.rb). OperandSchema.parse builds them
 # from operand text by the per-opcode kind list below, only for synthetic
@@ -27,7 +29,10 @@ module OperandSchema
   RIR = %i[reg irep].freeze
   JC = %i[reg addr].freeze
 
-  SCHEMAS = {
+  # Opcode-keyed via StrictKeyHash: a String op (a pre-interning leftover)
+  # raises TypeError in dev instead of missing silently. Production aliases
+  # StrictKeyHash to Hash.
+  SCHEMAS = StrictKeyHash.new.merge!({
     :NOP => Z, :CALL => Z, :KEYEND => Z, :RETSELF => Z, :RETNIL => Z, :RETTRUE => Z,
     :RETFALSE => Z, :STOP => Z, :EXT1 => Z, :EXT2 => Z, :EXT3 => Z,
     :MOVE => %i[reg reg].freeze, :RESCUE => %i[reg reg].freeze,
@@ -72,7 +77,7 @@ module OperandSchema
     :CLASS => RS, :MODULE => RS,
     :ERR => %i[rest].freeze,
     :DEBUG => %i[int int int].freeze
-  }.freeze
+  }).freeze
 
   # `ARRAY2` is printed as `ARRAY` with a source register in front of the count.
   ARRAY2_SCHEMA = %i[reg reg int].freeze
