@@ -134,7 +134,7 @@ jobs:
       # The Swift examples: the Swift front end (tools/swiftfe, the swiftfe workflow's toolchain) emits the C that the
       # explorer compiles, so it is built here; the build checks the examples against the stored output of swiftc.
       - name: Install Swift
-        uses: swift-actions/setup-swift@v3
+        uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0"
 
