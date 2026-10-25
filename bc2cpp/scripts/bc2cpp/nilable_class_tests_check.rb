@@ -31,6 +31,7 @@ SOURCE = <<~RUBY
       @x + 1
     end
 
+    def bump; @x += 1; end
     def text_size(s); s; end
     def draw_text(a, b); a; end
     def blt(a, b, c, d); a; end
@@ -39,6 +40,9 @@ SOURCE = <<~RUBY
     def fill_rect(a, b, c, d, e); a; end
     def tone=(v); @tone = v; end
     def opacity=(v); @opacity = v; end
+  end
+
+  class ChildSpot < Spot
   end
 
   class Mark
@@ -62,6 +66,11 @@ SOURCE = <<~RUBY
       @spot.x
     end
 
+    def direct_bump; Spot.new.bump; end
+    def nilable_bump; @spot.bump; end
+    def unknown_bump(o); o.bump; end
+    def nested_bump; s = Spot.new; r = []; 2.times { r << s.bump }; r; end
+    def rescued_bump; s = Spot.new; s.bump; rescue ArgumentError; :bad; end
     def nilable_measure; @spot.text_size('hello'); end
     def unknown_measure(o); o.text_size('hello'); end
     def measure; Spot.new.text_size('hello'); end
@@ -84,7 +93,9 @@ bodies = lambda do |env|
   env.each { |k, v| ENV[k] = v }
   Dir.mktmpdir('nilable_class_tests') do |dir|
     code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: %w[Spot Mark Holder])
-    code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }
+    result = code.split(%r{^(?=// \w+#)}).to_h { |part| [part[%r{\A// (\S+)}, 1], part] }
+    result['Holder#rescued_bump'] += code[/^static mrb_value Holder_rescued_bump_impl_rescue_try[^\n]*\n.*?^\}/m].to_s
+    result
   end
 ensure
   env.each_key { |k| ENV.delete(k) }
@@ -120,5 +131,91 @@ check.call('argument-only switch keeps the existing zero-argument proof',
 check.call('an unproven receiver retains its native class guard and dispatch fallback',
            class_tests.call(on['Holder#unknown_measure']).positive? &&
              on['Holder#unknown_measure'] == before_args['Holder#unknown_measure'])
+
+mono_off = bodies.call('BC2CPP_MONO_EXACT_FLOW' => '0')
+%w[direct_bump nested_bump rescued_bump].each do |name|
+  check.call("#{name}: exact receiver removes the embedded payload class guard",
+             mono_off["Holder##{name}"].to_s.include?('MONO_EMBED_GUARD :bump') &&
+               on["Holder##{name}"].to_s.include?('MONO_EXACT_FLOW :bump') &&
+               class_tests.call(on["Holder##{name}"]) < class_tests.call(mono_off["Holder##{name}"]))
+end
+%w[unknown_bump].each do |name|
+  check.call("#{name}: nilable and unknown receivers retain their embedded payload guard",
+             on["Holder##{name}"].to_s.include?('MONO_EMBED_GUARD :bump') &&
+               class_tests.call(on["Holder##{name}"]).positive?)
+end
+
+check.call('nilable_bump: the nil test still protects the exact non-nil payload call',
+           on['Holder#nilable_bump'].to_s.include?('NILABLE_RECEIVER :bump') &&
+             on['Holder#nilable_bump'].include?('bc2cpp_nil_receiver('))
+
+runtime_source = <<~RUBY
+  class MonoSpot
+    def initialize; @x = 1; end
+    def bump; @x += 1; end
+  end
+  class MonoChild < MonoSpot; end
+  class MonoWrong; end
+  class MonoHolder
+    def initialize; @spot = nil; end
+    def place; @spot = MonoSpot.new; nil; end
+    def direct_bump; MonoSpot.new.bump; end
+    def nested_bump; s = MonoSpot.new; r = []; 2.times { r << s.bump }; r; end
+    def rescued_bump; s = MonoSpot.new; s.bump; rescue ArgumentError; :bad; end
+    def nilable_bump; @spot.bump; end
+    def unknown_bump(o); o.bump; end
+  end
+RUBY
+Dir.mktmpdir('mono-exact-runtime') do |dir|
+  code, err = Bc2cppFixtureRuntime.generate(runtime_source, dir, only_owners: %w[MonoSpot MonoChild MonoWrong MonoHolder])
+  singleton_code, = Bc2cppFixtureRuntime.generate(SOURCE + "class Holder; def touch(o); o.singleton_class; end; end",
+                                                File.join(dir, 'singleton'), only_owners: %w[Spot ChildSpot Mark Holder])
+  check.call('a singleton maker withdraws the general exact receiver proof', !singleton_code.include?('MONO_EXACT_FLOW :bump'))
+  unless ENV['CC_GENERATED_ONLY'] == '1'
+    build = Bc2cppFixtureRuntime.full_or_build
+    if build
+      driver = <<~'RUBY'
+        h = MonoHolder.new
+        show = lambda do |name, &block|
+          begin
+            puts "#{name}: #{block.call.inspect}"
+          rescue Exception => e
+            puts "#{name}: #{e.class}: #{e.message}"
+          end
+        end
+        show.call('direct') { h.direct_bump }
+        show.call('nested') { h.nested_bump }
+        show.call('rescue') { h.rescued_bump }
+        show.call('nilable nil') { h.nilable_bump }
+        h.place
+        show.call('nilable value') { h.nilable_bump }
+        show.call('unknown Spot') { h.unknown_bump(MonoSpot.new) }
+        show.call('unknown subclass') { h.unknown_bump(MonoChild.new) }
+        show.call('unknown nil') { h.unknown_bump(nil) }
+        show.call('unknown wrong class') { h.unknown_bump(MonoWrong.new) }
+        puts 'end'
+      RUBY
+      harness = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          mrb_load_string(M, R"MONO(#{driver})MONO");
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(dir, err, %w[MonoSpot MonoChild MonoWrong MonoHolder], harness, build: build, full: true)
+      sections = Bc2cppFixtureRuntime.sections(output)
+      interpreted = sections['interpreted']
+      compiled = sections['compiled']
+      check.call('monomorphic exact receiver runtime fixture builds and runs', built)
+      check.call('monomorphic exact receiver values and errors match interpreted mruby',
+                 interpreted && interpreted.last == 'end' && interpreted == compiled)
+      puts output unless built && interpreted && interpreted == compiled
+    else
+      puts '  SKIP: no full-core mruby build for monomorphic receiver runtime checks'
+    end
+  end
+end
 
 suite.finish!

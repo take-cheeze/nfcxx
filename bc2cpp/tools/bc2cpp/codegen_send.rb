@@ -1387,6 +1387,14 @@ class CodeGen
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
+        # The exact receiver proof establishes the same identity the payload guard checks.
+        if ENV['BC2CPP_MONO_EXACT_FLOW'] != '0' && !self_implicit && guard_proof_site &&
+           exact_flow_class(irep, guard_proof_site, drawing_proof_reg) == target.owner
+          note = "  // MONO_EXACT_FLOW :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
+                 "#{target.owner}), direct C++ call with no class guard#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
         check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
         note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
