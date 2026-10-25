@@ -55,17 +55,20 @@ class cl_rt {
   }
 
   // ---- heap (the same allocator as rt_vulkan.hpp)
-  uint64_t alloc(uint64_t bytes) {
+  // align: a power of two; the address (not only the offset) is a multiple of it. A block's skipped head stays free.
+  uint64_t alloc(uint64_t bytes, uint64_t align = 16) {
     bytes = bytes ? (bytes + 15) & ~uint64_t(15) : 16;
+    if (align < 16) align = 16;
     for (auto it = free_.begin(); it != free_.end(); ++it) {
-      if (it->second >= bytes) {
-        uint64_t off = it->first;
-        uint64_t left = it->second - bytes;
-        free_.erase(it);
-        if (left) free_[off + bytes] = left;
-        used_[off] = bytes;
-        return dev_base_ + off;
-      }
+      const uint64_t start = it->first, size = it->second;
+      const uint64_t off = ((dev_base_ + start + align - 1) & ~(align - 1)) - dev_base_;
+      if (off - start + bytes > size) continue;
+      const uint64_t left = start + size - (off + bytes);
+      free_.erase(it);
+      if (off > start) free_[start] = off - start;
+      if (left) free_[off + bytes] = left;
+      used_[off] = bytes;
+      return dev_base_ + off;
     }
     fail("out of device memory (the heap is " + std::to_string(heap_size_ >> 20) + " MB; the stacks of a dispatch take "
          "invocations times stack bytes)");
@@ -277,6 +280,7 @@ class cl_rt {
     set_arg_mem_ = (set_arg_mem_fn)clGetExtensionFunctionAddressForPlatform(plat_, "clSetKernelArgMemPointerINTEL");
     if (!shared_alloc_ || !set_arg_mem_) fail("cl_intel_unified_shared_memory entry points are not in the platform");
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof max_wg_, &max_wg_, nullptr);
+    clGetDeviceInfo(dev_, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof compute_units_, &compute_units_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof max_wi_, max_wi_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof local_mem_, &local_mem_, nullptr);
     cl_device_fp_config half_cfg = 0;
@@ -363,6 +367,7 @@ class cl_rt {
  public:
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
+  unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
 
  private:
   // the USM entry points of cl_intel_unified_shared_memory (the ICD loader resolves them per platform)
@@ -376,6 +381,7 @@ class cl_rt {
   cl_context ctx_ = nullptr;
   cl_command_queue queue_ = nullptr;
   std::string device_name_;
+  cl_uint compute_units_ = 0;
   size_t max_wg_ = 0;
   size_t max_wi_[3] = {0, 0, 0};
   cl_ulong local_mem_ = 0;
@@ -416,10 +422,9 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
 }
 inline void backend_wait() {}
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
-  (void)align;
   (void)kind;
   cl_rt &r = cl_rt::get();
-  return (void *)r.at(r.alloc(bytes));
+  return (void *)r.at(r.alloc(bytes, align));
 }
 inline void backend_usm_free(void *p) {
   cl_rt &r = cl_rt::get();

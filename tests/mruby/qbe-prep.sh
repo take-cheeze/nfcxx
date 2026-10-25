@@ -92,12 +92,14 @@ int pi1 __attribute__((aligned(64))) = 3, pi2 __attribute__((aligned(16)));
 int plain[4];
 char *ptrs[3] , other[2] __attribute__((__aligned__(4)));
 int tricky(int a[4] __attribute__((__aligned__(8))));
+struct CP { long x; } __attribute__((__aligned__(128),));
 EOF
 both aligned
 expect aligned out 'static char _Alignas(16) buf[40]'
 expect aligned out '_Alignas(16) char b[32];'
 expect aligned out '_Alignas(16) char b[0x20];'
 expect aligned out 'double _Alignas(32) m[2][3]'
+expect aligned out '_Alignas(128) long x;'
 expect aligned out 'struct S2 { _Alignas(16) char b[30]; }'
 expect aligned out 'struct S3 { _Alignas(16) int b[8]; }'
 expect aligned out 'struct S6 { unsigned f : 3; int g; } __attribute__((__aligned__(16)));'
@@ -352,6 +354,50 @@ EOF
 both bare_return
 expect bare_return+c out 'return (ET){};'
 expect bare_return+c out 'return (void *){};'
+# the fast paths of bare_return_edits / volatile_locals: several returns in one body, a body after a struct definition,
+# a `return ;` at file scope, a declaration with attributes, and unbalanced braces (the general path)
+cat >"$tmp/edge/bare_return2.c" <<'EOF'
+typedef void V;
+struct S { int a; } sv;
+unsigned long long int a(int x) { if (x) return ; if (x > 2) { return ; } return ; }
+static inline __attribute__((always_inline)) struct S b(void) { return ; }
+struct S c(void) { struct S { int z; } t; return ; }
+V d(void) { return ; }
+struct S e(void) { return ; } int fl; struct S f2(void) { { { return ; } } }
+int (*g(void))(void) { return ; }
+int ok;
+return ;
+EOF
+both bare_return2
+cat >"$tmp/edge/bare_return3.c" <<'EOF'
+int a(int x) { if (x) return ;
+int b(void) { return ; }
+EOF
+both bare_return3 status-only
+cat >"$tmp/edge/bare_return4.c" <<'EOF'
+int a(int x) { return ; } }
+int b(void) { return ; }
+EOF
+both bare_return4 status-only
+cat >"$tmp/edge/volatile2.c" <<'EOF'
+volatile int g;
+int a(void) { volatile int x = 1; return x; }
+int b(void) { for (;;) { volatile int y; } }
+int c(volatile int p) { return p; }
+int d(void) { int z = sizeof(volatile int); return z; }
+EOF
+both volatile2
+cat >"$tmp/edge/volatile3.c" <<'EOF'
+volatile int g;
+struct T { volatile int m; };
+int c(volatile int p) { return p; }
+int (*d)(volatile int);
+EOF
+both volatile3
+cat >"$tmp/edge/volatile4.c" <<'EOF'
+int a(void) { volatile int x = 1; return x; } }
+EOF
+both volatile4 status-only
 cat >"$tmp/edge/ldlits.c" <<'EOF'
 double a = ((double)2.2250738585072014e-308L);
 float b = ((float)1.5L);
@@ -529,6 +575,38 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
 else
   echo "skip qbe-prep corpus: needs EDG and QBE (scripts/setup-edg.sh, scripts/setup-qbe.sh); only the edge cases ran"
 fi
+
+# ---- 3. --dce: unused static functions ----------------------------------------------------------------------
+# No oracle (the option is new): the output keeps what is reachable and drops the rest, and without --dce nothing changes.
+cat >"$tmp/edge/dce.c" <<'EOF'
+typedef struct { int a; } S;
+static int proto_only(int);
+static int dead1(int x) { return x + 1; }
+static int dead2(int x) { return dead1(x) * 2; }
+static int rec(int n) { return n ? rec(n - 1) : 0; }
+static int live_leaf(int x) { return x; }
+static int live_mid(int x) { return live_leaf(x) + 1; }
+static int via_ptr(int x) { return x; }
+static int (*table[])(int) = { via_ptr };
+static S *mk(void) { static int main_like; return 0; }
+static int viaasm(void) { return 4; }
+static int usedattr(void) __attribute__((used));
+static int usedattr(void) { return 5; }
+void use_asm(void) { __asm__("call viaasm"); }
+static inline int ret_ptr_dead(int *p) { return *p; }
+int main(void) { static int local_static; return live_mid(1) + table[0](2) + (int)(long)mk(); }
+EOF
+dce() { mrb "$prep" --c-input --dce "$tmp/edge/dce.c" "$tmp/dce.out" "$tmp/dce.tail" 2>"$tmp/dce.err"; }
+mrb "$prep" --c-input "$tmp/edge/dce.c" "$tmp/dce0.out" "$tmp/dce0.tail" 2>/dev/null
+if dce; then
+  for kept in 'int live_leaf' 'int live_mid' 'int via_ptr' '*mk(void)' 'int viaasm' 'int usedattr(void) { return 5; }' 'int main(void)'; do
+    grep -qF -e "$kept" "$tmp/dce.out" || { echo "FAIL qbe-prep --dce: dropped '$kept'"; fail=1; }
+  done
+  for gone in 'int dead1' 'int dead2' 'int rec(' 'ret_ptr_dead'; do
+    grep -qF -e "$gone" "$tmp/dce.out" && { echo "FAIL qbe-prep --dce: kept '$gone'"; fail=1; }
+  done
+  grep -qF -e 'int dead1' "$tmp/dce0.out" || { echo "FAIL qbe-prep: dead1 missing without --dce"; fail=1; }
+else echo "FAIL qbe-prep --dce: $(head -2 "$tmp/dce.err")"; fail=1; fi
 
 # ---- non-vacuity ----------------------------------------------------------------------------------------
 if [ $changed -eq 0 ] || [ $total -lt 60 ]; then

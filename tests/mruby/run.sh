@@ -11,6 +11,7 @@
 #      refusal and error path) and, when the Path B harness exists, the IR of tests/pathb-qbe/{cases,multi,
 #      traps} and tests/cases; plus --no-prune, stdin, usage errors and --append-weak.
 #   4. scripts/qbe-prep.rb (oracle tests/mruby/oracle/qbe-prep.rb): tests/mruby/qbe-prep.sh (its own header says what it compares).
+#      tests/mruby/qbe-asm.sh: `nfcc -S` gives the same assembly with the scripts as with their oracle ports (tests/c, Lua, extra files).
 #   5. scripts/qbe2cil.rb (the Python oracle tests/mruby/oracle/qbe2cil.py): tests/mruby/qbe2cil.sh (the JSON fragment and the exit status over the QBE IL fixtures).
 #   6. scripts/pathb-cil-emit.rb (the Python oracle tests/mruby/oracle/pathb-cil-emit.py): tests/mruby/pathb-cil-emit.sh (the JSON fragment, stdout, stderr and status).
 #   7. scripts/cil-link.rb (the Python oracle tests/mruby/oracle/cil-link.py): tests/mruby/cil-link.sh (the CIL text, the exit status and the output of the linked
@@ -282,6 +283,7 @@ if [ $rcr -eq 0 ] && grep -q '^data \$p = { b 40, b 0 }' "$tmp/paren.out" && [ $
   report ok "pathb-qbe-emit reads a \"(\" string constant (the Python original misreads it as a parenthesis; scripts/pathb-qbe-emit.rb reads it: known difference)"
 else report fail "pathb-qbe-emit parenthesis string constant: rb= oracle="; fi
 "$root/tests/mruby/qbe-prep.sh" || fail=1
+"$root/tests/mruby/qbe-asm.sh" || fail=1
 "$root/tests/mruby/strip-atomic.sh" || fail=1
 "$root/tests/mruby/qbe2cil.sh" || fail=1
 "$root/tests/mruby/pathb-cil-emit.sh" || fail=1

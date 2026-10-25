@@ -21,9 +21,33 @@ The initial fact vocabulary is already accepted by the QBE emitter as metadata:
 (decl $"x" val)          local storage starts, initially uninitialized
 (decl $"r" ref)          reference storage starts; pointers retain the same provenance tracking
 (decl %0 ref)           reference parameter; caller-owned storage
+(decl $"tmp" temp)       a compiler temporary's storage starts, initially uninitialized
 (scope-end $"x")         local storage lifetime ends
 (rref-arg $"x")          C++ rvalue-reference argument; requires future move contracts
 ```
+
+The C++ frontend also prints facts for storage that no declaration names:
+
+- Temporaries made by EDG's lowering, plus the printer's own aggregate temporaries. A temporary
+  used in exactly one full expression gets `(decl $"tmp" temp)` before that expression and
+  `(scope-end $"tmp")` after its value is used. A pointer to it therefore cannot outlive the
+  full expression unnoticed.
+- Temporaries that carry a value across statements, such as a returned aggregate or a range-based
+  for's range and iterators. These get one `decl` at function entry and a `scope-end` at each
+  exit. This is decided at the end of each function, because the printer cannot know earlier
+  how many full expressions use a temporary.
+- A named local that no declaration statement introduces, such as a range-based for's variable,
+  which the lowering initializes by assignment. It is declared at its first use and ends with
+  that block.
+- A variable-length array. EDG's lowering makes it an ordinary local pointer to storage from
+  `__vla_alloc`, so it gets the facts of any local. The checker still refuses the function: the
+  lowering registers the array on EDG's exception-handling stack by storing a local address in a
+  global.
+
+Exception-handling bookkeeping temporaries get the same treatment, which is conservative: a value
+or address carried to a later statement reads as uninitialized or out of scope, never as valid.
+Label depths for jumps count only declaration statements, so a jump can end a first-use local
+early. That is also conservative. With the flag unset, output is byte-identical.
 
 Slot names identify storage, `%N` values hold scalar values or address provenance, and
 `$"x"` produces the address of local storage. The checker tracks provenance through pointer
@@ -221,11 +245,34 @@ value unknown. Writes to disjoint fields preserve it. `zero-fill` initializes th
 but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
-layouts, dynamic offsets/indices, out-of-bounds accesses, external pointer projections, and accesses
-outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
+layouts, dynamic offsets outside local arrays (see [Array indexing](#array-indexing)), out-of-bounds
+constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
 whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
 widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
+
+## Array indexing
+
+`(index P I SIZE)` with a constant `I` is the constant offset `I * SIZE`. With a dynamic `I`, the
+result is a *ranged* pointer: it points somewhere inside the array that `P` names. That is the
+whole slot when `P` is derived from a local slot of `(array N T)` type, or the loan's range when `P`
+is derived from a loan of such a slot. Ranged pointers have these rules:
+
+- A read through one requires every byte of that range to be initialized, unmoved, and alive.
+- A write is a *weak update*. It must be allowed on every byte, and live loans over any part of the
+  range conflict with it, but it initializes nothing. So `for (int &x : a) x = 0;` does not make
+  `a` initialized. Initializing an array element by element needs constant indices.
+- A pointer store through one, a borrow or reborrow from one, and a store into drop-obligated
+  storage are refused. A non-pointer store through one makes pointer values held in the range unknown.
+- At a CFG join, different offsets from one array base widen to that base's ranged pointer. A
+  pointer advanced in a loop, such as the iterators of a range-based `for`, therefore converges.
+
+Comparing pointers (`eq`, `ne`, `lt.u`, `le.u`, `gt.u`, `ge.u`) is allowed and yields no provenance.
+`(bounds IDX N)` evaluates its operands. The checker assumes a dynamic index stays inside its
+array: it proves temporal safety, not bounds. Path B's runtime `bounds` checks cover subscripts of
+arrays of known length, but not pointers advanced by other arithmetic. Pointer arithmetic on
+anything other than a local array is refused. That includes arguments, so a callee that indexes its
+pointer argument gets no inferred summary.
 
 The underlying model tracks **physical byte initialization**. Without semantic metadata,
 whole-object loans conservatively require all bytes initialized, including padding. Ordinary field
@@ -268,8 +315,21 @@ semantic aggregate borrow. Missing metadata retains the conservative physical-by
 Both QBE emitters validate the descriptor graph and emit no code for it. Removing metadata produces
 identical QBE and native behavior. Layout records are trusted frontend contracts: validation checks
 internal consistency, not correspondence with Rust or C++ source or completeness against a source
-type. Neither frontend emits these records or ownership loan/transfer forms yet. Source-language
-drop, active-member, and trait rules remain separate work.
+type. Source-language drop, active-member, and trait rules remain separate work.
+
+With `NFCXX_PATHB_BORROW=1` the C++ frontend prints a record, once per module, for each struct
+that a slot holds or points to, and for the structs nested in those. The records go after the
+module header. A struct gets a record only if every non-static data member is a named scalar
+(`bool`, the `char` and integer types, `float` or `double`; an enum prints as its underlying
+type), a pointer, or a struct that itself gets a record, and is naturally aligned within its
+object. A struct with a base class, a bit-field, an array, a union, a `long double`, a
+`[[no_unique_address]]` member, an anonymous member, or two members of one name (a lambda's
+captured pack) gets none, and the checker keeps requiring all of its bytes. Distinct types that
+print under one name, such as a local struct in each instance of a function template, share a
+record when their records agree. Otherwise neither gets one, and neither does any struct that
+holds one. A record the frontend prints therefore never makes the checker refuse. On the 93
+corpus programs that get records, checker results are the same with the records removed.
+Neither frontend emits ownership loan/transfer forms yet.
 
 ## Explicit drop-state contracts
 
@@ -413,7 +473,10 @@ A trusted summary may return a pointer into one argument's declared memory regio
 `from-arg` takes a zero-based argument index, a nonnegative byte offset, and `shared` or
 `exclusive`. The returned pointee must fit wholly inside that argument's region. Shared results
 require a `read` or `write` source; exclusive results require `write`. `value`, `init`, and `consume`
-sources are refused. An ordinary `call` cannot discard the required returned-loan identity.
+sources are refused. A result pointer to `const`, such as `(ptr (const int))`, grants no writes,
+so its alias must be `shared`. Its width comes from the unqualified pointee. The checker, the
+QBE emitter, and the emitter oracle validate this identically. An ordinary `call` cannot discard
+the required returned-loan identity.
 
 `root` requires a direct local place or constant offset. For a result derived from an existing
 loan, use `(parent "P")` instead; the actual source must preserve that parent's identity and
@@ -477,11 +540,76 @@ The fixtures are in `tests/pathb-borrow/verify`. The runner also lowers
 summaries, and checks both results. `tests/mruby/pathb-edge/verified_callee_facts.ir` links verified
 callees with their caller and runs natively.
 
+## Inferred summaries (opt-in)
+
+```sh
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries example.ir
+```
+
+This mode gives each defined function other than `main` that has no `call-effects` form a summary
+inferred from its body. Each inferred summary is printed as an `inferred: (call-effects ...)` line
+before the result, in a form the checker and both emitters accept. Callers are then checked
+against it, exactly as for a hand-written summary. Explicit summaries are never replaced; they are
+verified as before. The option combines with `--infer-loan-ends`, which applies both to the search
+and to the final check.
+
+The search is a verification loop, not a separate analysis:
+
+1. Functions are visited callees first. A self-recursive call uses the candidate under test.
+2. Scalar parameters become `value`. Each pointer parameter starts at `read` and moves to `init`,
+   then `write`, only when a diagnostic names its region `*%N`. A diagnostic that names no argument
+   region, or a refusal, ends the search with no summary.
+3. A pointer result tries each argument region and each aligned offset in turn. Its source
+   argument tries `write`/`exclusive` first, because a pointer to non-`const` lets the caller
+   write through it. It then tries `read`/`shared`, then `write`/`shared`.
+4. The first candidate whose body has no diagnostics is kept.
+
+A function with no surviving candidate keeps the plain analysis, and calls to it are still refused.
+So inference cannot accept anything the verifier would reject. It can only fail to find a
+summary. Pointee types come from the parameter types with `const` removed; `void` pointees,
+aggregates without semantic layouts, and by-value aggregates are not inferred. A `const` pointer
+result tries only `read`/`shared`, then `write`/`shared`. `consume` is never inferred, because it would assert an ownership policy that the body
+alone does not establish. Mutually recursive functions get no summary and need explicit ones.
+
+The order chooses one summary when several verify. `read` is preferred, and `init` over `write`,
+so a callee that only stores gets `init`. A returned alias is `exclusive` whenever the body
+allows it, even if the body only reads, so callers can write through the result.
+
+## Implicit returned loans
+
+A returned alias normally needs `call-borrow` to name its loan. The C++ frontend emits a plain
+`call` instead. When a plain `call` matches a returned-alias summary and its source argument is a
+direct local place or constant offset, the checker creates a root loan for that call site. The
+source can also be a register defined once by a pointer `bitcast` of such a place. That is the
+qualification conversion C++ inserts when it passes `&s` to a pointer-to-`const` parameter. The
+loan is named `&CALLEE#N` and has the summary's permission and range, so
+
+```text
+(let %0 (ptr int) (call (ptr int) &"pick" $"x"))
+```
+
+checks like `(call-borrow (ptr int) "&pick#1" root &"pick" $"x")`. Lowered C++ has no `loan-end`
+facts, so these loans require `--infer-loan-ends`; without it the function is refused. A source
+whose provenance is only known by dataflow, such as a pointer loaded from a slot, still needs an
+explicit `call-borrow` with a declared parent.
+
+Together with `--infer-summaries` and the temporary facts, a lowered C++ program can be checked
+end to end with no annotations. `tests/pathb-borrow/contracts/aliases.cpp`
+passes `bump(second(&s))` through an implicit exclusive loan. A variant that writes `s.b` while it
+still holds the alias reports `loan-conflict`.
+
 ## Refusals and limits
 
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
 error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics currently identify
 functions and slots; source spans remain future work.
+
+`(set %N OPERAND)`, which lowers `?:`, `&&` and `||`, reassigns a register. A pointer register
+assigned on each branch carries the union of their provenance. `(null PTR)` has no provenance, so
+it adds nothing at a join, and a value that can only be null cannot be dereferenced. Functions
+with an `sret` result or an `(ellipsis)` parameter are refused. A `byval` parameter has no
+provenance, so using it as an address is refused. The C++ cases `cpp/conditional_*.cpp` cover a
+pointer `?:`, an uninitialized branch value, and a branch pointer to an ended scope.
 
 Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
 aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
@@ -525,6 +653,21 @@ Call fixtures cover preconditions, aliasing, scalar signatures, initialization, 
 consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
 cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
 contracts, and inferred last-use release.
+Implicit-loan fixtures in `tests/pathb-borrow/inferred/implicit_*` cover last use, future
+conflicts, dangling results, and loops, in both loan modes.
+Summary-inference fixtures in `tests/pathb-borrow/summaries` cover each inferred effect,
+alias offsets and permissions, recursion, caller misuse, and functions left without a summary. A
+lowered C++ program is checked with inferred summaries, and fails once its initializing call is
+removed.
+`tests/pathb-borrow/contracts/layouts.cpp` checks a reader of a padded nested struct through the
+frontend's layout records and is refused once they are removed, with identical QBE either way.
+`nolayouts.cpp` lists struct shapes that must get no record.
+`contracts/const_alias.cpp` infers a shared summary for a `const int *` result. A variant that
+writes the source while holding the result reports `loan-conflict`. The fixtures
+`returned/const_*.ir` cover the shared, conflicting, and refused exclusive forms.
+Array-indexing fixtures in `tests/pathb-borrow/index` cover dynamic reads, weak writes, loans and
+shared loans of arrays, use after scope, and refusals. The C++ cases `cpp/array_*.cpp` check a
+range-based `for`, an indexed loop, an uninitialized element, and a dangling array pointer.
 Verified-summary fixtures cover each argument effect, nested and recursive contracted calls,
 argument reborrows, returned alias offsets and permissions, closed and noescape violations,
 missing outputs or consumption, and malformed signatures.

@@ -21,5 +21,18 @@ for be in $backends; do
   else
     echo "FAIL $be ffi"; head -30 <<<"$out"; fail=1
   fi
+  # The same through nfcpoly scripts (Python), when the CPython development files are installed (lib/ffi/nfcffi_poly.hpp).
+  if command -v python3-config >/dev/null && pyinc=$(python3-config --includes 2>/dev/null) && pylib=$(python3-config --ldflags --embed 2>/dev/null) &&
+     [ -f "$(python3-config --includes | sed 's/^-I\([^ ]*\).*/\1/')/Python.h" ]; then
+    if ! out=$(NFCXX_BACKEND=$be ./nfcxx -DTEST_PYTHON $pyinc -I lib/ffi -I lib/poly -rdynamic tests/ffi/poly_host.cpp lib/ffi/nfcffi.cpp lib/ffi/nfcffi_poly.cpp lib/poly/nfcpoly.cpp lib/poly/nfcpoly_python.cpp $pylib -o "$tmp/poly-$be" 2>&1); then
+      echo "FAIL $be ffi poly (host build)"; head -20 <<<"$out"; fail=1
+    elif out=$(NFCXX_BACKEND=$be NFCFFI_CACHE="$tmp/cache-poly-$be" "$tmp/poly-$be" "$root/tests/ffi" 2>&1); then
+      echo "ok   $be ffi poly (python): $(tail -1 <<<"$out")"
+    else
+      echo "FAIL $be ffi poly"; head -30 <<<"$out"; fail=1
+    fi
+  else
+    echo "SKIP $be ffi poly: python3-config or Python.h not found (apt-get install python3-dev)"
+  fi
 done
 exit $fail

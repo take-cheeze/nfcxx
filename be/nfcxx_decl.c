@@ -17,7 +17,8 @@ A function declaration is followed by one signature record for it (nfcxx-ffi, li
 ID is the function's record id, RETURN the spelling of its return type, VARIADIC 1 for a trailing "...", and each
 PARAM the spelling of a parameter type with "@" where its name goes ("int @", "int (*@)(const void *, const void *)").
 A kinds record follows it (lib/ffi calls functions by kind): kinds <TAB> ID <TAB> RETURN-KIND <TAB> PARAM-KINDS, one
-letter per parameter ("ifp"): i signed, u unsigned, f float or double, p pointer or array, v void, x other.
+letter per parameter ("ifp"): i signed, u unsigned, f float or double, p pointer or array, v void, s struct or union,
+x other.
 Spellings are C declarations. A function with a type that has no spelling (an anonymous struct, a C++ reference)
 gets no sig record. PARENT is 0 for a declaration at file scope. KIND is one of: namespace, struct, class, union, enum,
 enumerator, typedef, function, method, constructor, destructor, var, field, param, function_template,
@@ -255,25 +256,93 @@ static int nf_spell(a_type_ptr t, const char *inner, char *out, size_t cap)
 }
 
 /* How a value of type T crosses a call made by lib/ffi (kinds records): 'i' signed integer, 'u' unsigned integer
-   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 'x' anything else. */
-static char nf_kind(a_type_ptr t)
+   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 's' struct, union, long double or
+   128-bit integer (by value, as bytes), 'c' pointer to a function a host callable can stand in for (nf_callback_routine),
+   'x' anything else. nf_kind_base is nf_kind without the callbacks (a callback's own parameters are checked with it). */
+static char nf_kind_base(a_type_ptr t)
 {
   t = skip_typerefs(t);
   switch (t->kind) {
     case tk_void:
       return 'v';
     case tk_integer:
-      if (size_of_non_typeref_type(t) > 8) return 'x';
+      /* 128-bit integers travel as bytes, like a struct */
+      if (size_of_non_typeref_type(t) > 8) return 's';
       return is_signed_integral_type(t) ? 'i' : 'u';
     case tk_float:
-      return t->variant.float_kind == fk_float || t->variant.float_kind == fk_double ? 'f' : 'x';
+      if (t->variant.float_kind == fk_float || t->variant.float_kind == fk_double) return 'f';
+      /* long double travels as bytes (its x87 representation, sizeof bytes) */
+      return t->variant.float_kind == fk_long_double ? 's' : 'x';
     case tk_pointer:
       return t->variant.pointer.is_reference || t->variant.pointer.is_rvalue_reference ? 'x' : 'p';
     case tk_array:
       return 'p';
+    case tk_class:
+    case tk_struct:
+    case tk_union:
+      return 's';
     default:
       return 'x';
   }
+}
+
+/* The function type a pointer parameter stands for, when a host callable can implement it: scalar parameters and result
+   (iufp, and v as the result), not variadic. NULL otherwise. */
+static a_type_ptr nf_callback_routine(a_type_ptr t)
+{
+  a_type_ptr target;
+  a_routine_type_supplement_ptr x;
+  a_param_type_ptr p;
+  char k;
+
+  t = skip_typerefs(t);
+  if (t->kind != tk_pointer || t->variant.pointer.is_reference || t->variant.pointer.is_rvalue_reference) return NULL;
+  target = skip_typerefs(t->variant.pointer.type);
+  if (target->kind != tk_routine) return NULL;
+  x = target->variant.routine.extra_info;
+  if (x != NULL && x->has_ellipsis) return NULL;
+  k = nf_kind_base(target->variant.routine.return_type);
+  if (k == 'x' || strchr("iufpv", k) == NULL) return NULL;
+  if (x != NULL) {
+    for (p = x->param_type_list; p != NULL; p = p->next) {
+      k = nf_kind_base(p->type);
+      if (k == 'x' || k == 'v' || strchr("iufp", k) == NULL) return NULL;
+    }
+  }
+  return target;
+}
+
+static char nf_kind(a_type_ptr t)
+{
+  if (skip_typerefs(t)->kind == tk_pointer && nf_callback_routine(t) != NULL) return 'c';
+  return nf_kind_base(t);
+}
+
+/* The cb record of a callback parameter (index INDEX of the function with record id ID): the callback's result and
+   parameters, the parameters spelled with "@" for their names. */
+static void nf_emit_cb(a_type_ptr target, int id, int index)
+{
+  char ret[NF_SPELL_MAX], one[NF_SPELL_MAX], line[NF_SIG_MAX], pk[NF_SIG_MAX];
+  a_routine_type_supplement_ptr x = target->variant.routine.extra_info;
+  a_param_type_ptr p;
+  size_t used, n = 0;
+
+  if (!nf_spell(target->variant.routine.return_type, "", ret, sizeof ret)) return;
+  used = (size_t)snprintf(line, sizeof line, "cb\t%d\t%d\t%s\t%c\t", id, index, ret,
+                          nf_kind_base(target->variant.routine.return_type));
+  if (x != NULL) {
+    for (p = x->param_type_list; p != NULL && n + 1 < sizeof pk; p = p->next) pk[n++] = nf_kind_base(p->type);
+  }
+  pk[n] = '\0';
+  used += (size_t)snprintf(line + used, sizeof line - used, "%s", pk);
+  if (x != NULL) {
+    for (p = x->param_type_list; p != NULL; p = p->next) {
+      if (!nf_spell(p->type, "@", one, sizeof one)) return;
+      used += (size_t)snprintf(line + used, sizeof line - used, "\t%s", one);
+      if (used >= sizeof line) return;
+    }
+  }
+  fprintf(NF_OUT, "%s\n", line);
 }
 
 /* The sig record of a function: its return type and its parameter types, each spelled with "@" for the name. */
@@ -307,6 +376,15 @@ static void nf_emit_sig(a_routine_ptr rout, int id)
     }
     pk[n] = '\0';
     fprintf(NF_OUT, "kinds\t%d\t%c\t%s\n", id, nf_kind(fn_type->variant.routine.return_type), pk);
+  }
+
+  /* The callback parameters (kind 'c'): their signatures, for the trampolines lib/ffi generates. */
+  if (x != NULL) {
+    int i = 0;
+    for (p = x->param_type_list; p != NULL; p = p->next, i++) {
+      a_type_ptr target = nf_callback_routine(p->type);
+      if (target != NULL) nf_emit_cb(target, id, i);
+    }
   }
 }
 

@@ -7,11 +7,13 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <exception>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 
 #include "../eval/nfceval_build.hpp"
 
@@ -102,6 +104,10 @@ std::string abstract_type(const std::string& t) {
 }  // namespace
 
 std::vector<Declaration> Ffi::declarations(const std::string& file, Dialect dialect) const {
+  // The tool's output goes to a log in the cache directory: the directory must exist before the tool runs.
+  std::string err = build::ensure_cache_dir(cache_);
+  if (!err.empty()) throw Error("nfcffi: " + err);
+
   // Every file the source includes, not only the primary one: the front end reads NFCXX_DECL_ALL.
   std::vector<std::string> args{"/bin/sh", "-c", "NFCXX_DECL_ALL=1 exec \"$0\" \"$@\"", decl_tool_};
   if (dialect == Dialect::C) args.push_back("--c");
@@ -136,6 +142,15 @@ std::vector<Declaration> Ffi::declarations(const std::string& file, Dialect dial
       d.return_type = abstract_type(f[2]);
       d.variadic = f[3] == "1";
       for (std::size_t k = 4; k < f.size(); ++k) d.params.push_back(f[k]);
+    } else if (f.size() >= 6 && f[0] == "cb" && index.count(f[1])) {
+      Declaration& d = decls[index[f[1]]];
+      Declaration::Callback cb;
+      cb.index = std::strtoul(f[2].c_str(), nullptr, 10);
+      cb.return_type = abstract_type(f[3]);
+      cb.return_kind = f[4].empty() ? 'x' : f[4][0];
+      cb.param_kinds = f[5];
+      for (std::size_t k = 6; k < f.size(); ++k) cb.params.push_back(f[k]);
+      d.callbacks.push_back(cb);
     } else if (f.size() >= 3 && f[0] == "kinds" && index.count(f[1])) {
       Declaration& d = decls[index[f[1]]];
       d.return_kind = f[2].empty() ? 'x' : f[2][0];
@@ -272,43 +287,255 @@ const void* Value::as_pointer() const {
   return p_;
 }
 
+Value Value::of_callable(CallableFn fn) {
+  Value r;
+  r.kind_ = Kind::Callable;
+  r.fn_ = std::make_shared<CallableFn>(std::move(fn));
+  return r;
+}
+
+const CallableFn& Value::as_callable() const {
+  if (kind_ != Kind::Callable) wrong_kind("a host callable");
+  return *fn_;
+}
+
+Value Value::of_bytes(const void* p, std::size_t n) {
+  Value r;
+  r.kind_ = Kind::Bytes;
+  const unsigned char* b = static_cast<const unsigned char*>(p);
+  r.b_.assign(b, b + n);
+  return r;
+}
+
+const std::vector<unsigned char>& Value::as_bytes() const {
+  if (kind_ != Kind::Bytes) wrong_kind("a struct or union (bytes)");
+  return b_;
+}
+
 namespace {
 
 // A function can be called by name when its declaration has no variadic part, is not overloaded, and passes only
-// integers, floats and pointers (void as the result).
+// integers, floats, pointers, structs and unions (void as the result).
+const Declaration::Callback* callback_at(const Declaration& d, std::size_t i) {
+  for (const Declaration::Callback& cb : d.callbacks) {
+    if (cb.index == i) return &cb;
+  }
+  return nullptr;
+}
+
 bool passable(const Declaration& d) {
   if (d.variadic || d.overloaded) return false;
-  if (d.return_kind == 'x' || std::strchr("iufpv", d.return_kind) == nullptr) return false;
+  if (d.return_kind == 'x' || std::strchr("iufpvs", d.return_kind) == nullptr) return false;
   if (d.param_kinds.size() != d.params.size()) return false;
-  for (char k : d.param_kinds) {
-    if (k == 'v' || k == 'x' || std::strchr("iufp", k) == nullptr) return false;
+  for (std::size_t i = 0; i < d.param_kinds.size(); ++i) {
+    char k = d.param_kinds[i];
+    if (k == 'c') {
+      if (callback_at(d, i) == nullptr) return false;
+      continue;
+    }
+    if (k == 'v' || k == 'x' || std::strchr("iufps", k) == nullptr) return false;
   }
   return true;
 }
 
-// The wrapper for D: void nfcffi_call_NAME(void **a, void *r). Each argument is read from a[i] as its kind says
-// (long long, unsigned long long, double or void *); the result is stored in r the same way.
-std::string wrapper_text(const Declaration& d) {
-  std::string args;
+// The names of the callback context and trampoline of parameter I of D (generated with the wrappers).
+std::string callback_context(const Declaration& d, std::size_t i) { return "nfcffi_cbctx_" + d.name + "_" + std::to_string(i); }
+std::string callback_trampoline(const Declaration& d, std::size_t i) { return "nfcffi_tramp_" + d.name + "_" + std::to_string(i); }
+std::string callback_raw(const Declaration& d, std::size_t i) { return "nfcffi_cbraw_" + d.name + "_" + std::to_string(i); }
+
+// The layout function for D: void nfcffi_layout_NAME(unsigned long *s) stores the size of the result type at s[0] and of
+// parameter i at s[i + 1]; 0 for the types that are not structs or unions.
+std::string layout_text(const Declaration& d) {
+  std::string body = d.return_kind == 's' ? "  s[0] = sizeof(" + abstract_type(d.return_type) + ");\n" : "  s[0] = 0;\n";
+  for (std::size_t i = 0; i < d.params.size(); ++i) {
+    std::string n = std::to_string(i + 1);
+    body += d.param_kinds[i] == 's' ? "  s[" + n + "] = sizeof(" + abstract_type(d.params[i]) + ");\n"
+                                    : "  s[" + n + "] = 0;\n";
+  }
+  return "void nfcffi_layout_" + d.name + "(unsigned long *s) {\n" + body + "}\n";
+}
+
+// The argument expressions of D's fixed parameters, reading a[i] as each kind says (struct: a pointer to the bytes).
+std::vector<std::string> fixed_args(const Declaration& d) {
+  std::vector<std::string> out;
   for (std::size_t i = 0; i < d.params.size(); ++i) {
     char k = d.param_kinds[i];
     std::string slot = "a[" + std::to_string(i) + "]";
-    std::string src = k == 'i' ? "*(long long *)" + slot
-                    : k == 'u' ? "*(unsigned long long *)" + slot
-                    : k == 'f' ? "*(double *)" + slot
-                               : "*(void **)" + slot;
-    args += (i ? ", (" : "(") + abstract_type(d.params[i]) + ")" + src;
+    std::string type = abstract_type(d.params[i]);
+    if (k == 'c') {
+      std::string ctx = callback_context(d, i);
+      out.push_back(ctx + " ? (" + type + ")" + callback_trampoline(d, i) + " : (" + type + ")" + callback_raw(d, i));
+    } else if (k == 's') {
+      out.push_back("*(" + type + " *)" + slot);
+    } else {
+      std::string src = k == 'i' ? "*(long long *)" + slot
+                      : k == 'u' ? "*(unsigned long long *)" + slot
+                      : k == 'f' ? "*(double *)" + slot
+                                 : "*(void **)" + slot;
+      out.push_back("(" + type + ")" + src);
+    }
   }
-  std::string call = d.name + "(" + args + ")";
-  std::string body;
+  return out;
+}
+
+std::string join(const std::vector<std::string>& parts) {
+  std::string out;
+  for (std::size_t i = 0; i < parts.size(); ++i) out += (i ? ", " : "") + parts[i];
+  return out;
+}
+
+// The statement that stores CALL's value in r by D's return kind.
+std::string store_result(const Declaration& d, const std::string& call) {
   switch (d.return_kind) {
-    case 'i': body = "*(long long *)r = (long long)" + call; break;
-    case 'u': body = "*(unsigned long long *)r = (unsigned long long)" + call; break;
-    case 'f': body = "*(double *)r = (double)" + call; break;
-    case 'p': body = "*(void **)r = (void *)" + call; break;
-    default: body = call; break;
+    case 'i': return "*(long long *)r = (long long)" + call;
+    case 'u': return "*(unsigned long long *)r = (unsigned long long)" + call;
+    case 'f': return "*(double *)r = (double)" + call;
+    case 'p': return "*(void **)r = (void *)" + call;
+    case 's': return "*(" + abstract_type(d.return_type) + " *)r = " + call;
+    default: return call;
   }
-  return "void nfcffi_call_" + d.name + "(void **a, void *r) {\n  " + body + ";\n}\n";
+}
+
+// The wrapper for D: void nfcffi_call_NAME(void **a, void *r).
+std::string wrapper_text(const Declaration& d) {
+  std::string prefix;
+  for (std::size_t i = 0; i < d.param_kinds.size(); ++i) {
+    if (d.param_kinds[i] == 'c') {
+      // the argument is a pair {raw function pointer, host callback slot}
+      std::string pair = "((void **)*(void **)a[" + std::to_string(i) + "])";
+      prefix += callback_context(d, i) + " = " + pair + "[1]; " + callback_raw(d, i) + " = " + pair + "[0]; ";
+    }
+  }
+  return "void nfcffi_call_" + d.name + "(void **a, void *r) {\n  " + prefix +
+         store_result(d, d.name + "(" + join(fixed_args(d)) + ")") + ";\n}\n";
+}
+
+// The wrapper of a variadic D for the extra arguments of kinds SEQ ("n" integer, "f" double, "p" pointer), read from
+// a[fixed + k]: void nfcffi_vcall_NAME_SEQ(void **a, void *r).
+std::string vcall_text(const Declaration& d, const std::string& seq) {
+  std::vector<std::string> args = fixed_args(d);
+  for (std::size_t k = 0; k < seq.size(); ++k) {
+    std::string slot = "a[" + std::to_string(d.params.size() + k) + "]";
+    args.push_back(seq[k] == 'n' ? "*(long long *)" + slot
+                 : seq[k] == 'f' ? "*(double *)" + slot
+                                 : "*(void **)" + slot);
+  }
+  return "void nfcffi_vcall_" + d.name + "_" + seq + "(void **a, void *r) {\n  " +
+         store_result(d, d.name + "(" + join(args) + ")") + ";\n}\n";
+}
+
+// A variadic function with only scalar fixed arguments and result: callable with extra arguments.
+bool variadic_ok(const Declaration& d) {
+  if (!d.variadic || d.overloaded) return false;
+  if (d.return_kind == 'x' || d.return_kind == 's' || std::strchr("iufpv", d.return_kind) == nullptr) return false;
+  if (d.param_kinds.size() != d.params.size()) return false;
+  for (char k : d.param_kinds) {
+    if (k == 'v' || k == 's' || k == 'x' || std::strchr("iufp", k) == nullptr) return false;
+  }
+  return true;
+}
+
+// The promoted kind of a variadic argument.
+char vararg_kind(const Value& v, std::size_t i) {
+  switch (v.kind()) {
+    case Value::Kind::Signed:
+    case Value::Kind::Unsigned: return 'n';
+    case Value::Kind::Float: return 'f';
+    case Value::Kind::Pointer: return 'p';
+    default:
+      throw Error("nfcffi: variadic argument " + std::to_string(i) + " must be an integer, a float or a pointer");
+  }
+}
+
+
+const Declaration* find_declaration(const std::vector<Declaration>& decls, const std::string& name) {
+  for (const Declaration& d : decls) {
+    if (d.name == name) return &d;
+  }
+  return nullptr;
+}
+
+// A callback parameter of D, as C code: its context variable and a trampoline with the declared signature. The trampoline
+// stores its arguments canonically (long long, unsigned long long, double, void *), calls the host dispatcher with its
+// context, and returns the result converted to the declared type.
+std::string callback_text(const Declaration& d) {
+  std::string out;
+  for (const Declaration::Callback& cb : d.callbacks) {
+    const std::size_t n = cb.params.size();
+    std::string params, canon, argv;
+    for (std::size_t j = 0; j < n; ++j) {
+      std::string pn = "p" + std::to_string(j), cn = "c" + std::to_string(j);
+      std::string decl;
+      for (char c : cb.params[j]) {
+        if (c == '@') decl += pn;
+        else decl += c;
+      }
+      char k = cb.param_kinds[j];
+      std::string ctype = k == 'i' ? "long long" : k == 'u' ? "unsigned long long" : k == 'f' ? "double" : "void *";
+      params += (j ? ", " : "") + decl;
+      canon += "  " + ctype + " " + cn + " = (" + ctype + ")" + pn + ";\n";
+      argv += (j ? ", &" : "&") + cn;
+    }
+    if (n == 0) params = "void";
+    std::string body = "  void *a[" + std::to_string(n ? n : 1) + "] = {" + (n ? argv : std::string("0")) + "};\n";
+    std::string ret = cb.return_type;
+    std::string rtype = cb.return_kind == 'i' ? "long long" : cb.return_kind == 'u' ? "unsigned long long"
+                      : cb.return_kind == 'f' ? "double" : "void *";
+    if (cb.return_kind == 'v') {
+      body += "  nfcffi_host_dispatch(" + callback_context(d, cb.index) + ", a, 0);\n";
+    } else {
+      body += "  " + rtype + " rv = 0;\n  nfcffi_host_dispatch(" + callback_context(d, cb.index) + ", a, &rv);\n" +
+              "  return (" + ret + ")rv;\n";
+    }
+    out += "void *" + callback_context(d, cb.index) + ";\nvoid *" + callback_raw(d, cb.index) + ";\n" + ret + " " +
+           callback_trampoline(d, cb.index) + "(" + params +
+           ") {\n" + canon + body + "}\n";
+  }
+  return out;
+}
+
+// A host callable's state while a call uses it: the function, the parameter's signature and an exception it threw (it
+// cannot cross the C frames, so it is rethrown after the call).
+struct CallbackSlot {
+  const CallableFn* fn = nullptr;
+  const Declaration::Callback* sig = nullptr;
+  std::exception_ptr error;
+  void* words[2] = {nullptr, nullptr};  // {raw function pointer, this slot}: the argument the wrapper reads
+};
+
+// The host side of every trampoline: the arguments are canonical (see callback_text); the result is stored the same way.
+void dispatch_callback(void* ctx, void** a, void* r) {
+  CallbackSlot* s = static_cast<CallbackSlot*>(ctx);
+  try {
+    std::vector<Value> args;
+    for (std::size_t i = 0; i < s->sig->param_kinds.size(); ++i) {
+      switch (s->sig->param_kinds[i]) {
+        case 'i': args.push_back(Value::of_signed(*(long long*)a[i])); break;
+        case 'u': args.push_back(Value::of_unsigned(*(unsigned long long*)a[i])); break;
+        case 'f': args.push_back(Value::of_float(*(double*)a[i])); break;
+        default: args.push_back(Value::of_pointer(*(void**)a[i])); break;
+      }
+    }
+    Value v = (*s->fn)(args);
+    if (r == nullptr) return;
+    switch (s->sig->return_kind) {
+      case 'i':
+        *(long long*)r = v.kind() == Value::Kind::Unsigned ? (long long)v.as_unsigned() : v.as_signed();
+        break;
+      case 'u':
+        *(unsigned long long*)r = v.kind() == Value::Kind::Signed ? (unsigned long long)v.as_signed() : v.as_unsigned();
+        break;
+      case 'f':
+        *(double*)r = v.kind() == Value::Kind::Float ? v.as_float() : (double)v.as_signed();
+        break;
+      default:
+        *(void**)r = v.kind() == Value::Kind::Pointer ? const_cast<void*>(v.as_pointer()) : nullptr;
+        break;
+    }
+  } catch (...) {
+    if (!s->error) s->error = std::current_exception();
+    if (r != nullptr) std::memset(r, 0, 8);
+  }
 }
 
 std::string absolute_path(const std::string& p) {
@@ -322,39 +549,70 @@ std::string absolute_path(const std::string& p) {
 Library Ffi::load(const std::string& header, const std::string& source, const std::vector<std::string>& only) const {
   Library lib;
   const std::string path = absolute_path(header);
+  lib.ffi_ = *this;
+  lib.header_ = path;
+  lib.source_ = source;
   lib.decls_ = declarations(path);
 
-  // One translation unit: the header, the source, then a wrapper for each passable function.
-  std::string text = "#include \"" + path + "\"\n" + source + "\n";
+  // One translation unit: the header, the source, then a wrapper and a layout function for each passable function.
+  // Variadic functions get their wrappers when they are called (Library::vwrapper).
+  std::string text = "#include \"" + path + "\"\n" + source + "\n" +
+                     "void (*nfcffi_host_dispatch)(void *, void **, void *);\n";
   std::vector<std::string> wrapped;
   for (const Declaration& d : lib.decls_) {
     if (!only.empty() && std::find(only.begin(), only.end(), d.name) == only.end()) continue;
+    if (variadic_ok(d)) {
+      lib.variadic_.insert(d.name);
+      continue;
+    }
     if (!passable(d)) continue;
-    text += wrapper_text(d);
+    text += callback_text(d) + wrapper_text(d) + layout_text(d);
     wrapped.push_back(d.name);
   }
 
   lib.module_ = compile(text);
+  *lib.module_.variable<void (*)(void*, void**, void*)>("nfcffi_host_dispatch") = &dispatch_callback;
   for (const std::string& name : wrapped) {
     lib.wrappers_.emplace(name, lib.module_.function<void(void**, void*)>("nfcffi_call_" + name));
+    auto layout = lib.module_.function<void(unsigned long*)>("nfcffi_layout_" + name);
+    std::vector<unsigned long> sz(find_declaration(lib.decls_, name)->params.size() + 1, 0);
+    layout(sz.data());
+    lib.layouts_.emplace(name, layout);
+    lib.sizes_[name] = std::vector<std::size_t>(sz.begin(), sz.end());
   }
   return lib;
 }
 
+// The wrapper of variadic D for the extra kinds SEQ, compiled with the header and source on first use.
+const Function<void(void**, void*)>& Library::vwrapper(const Declaration& d, const std::string& seq) const {
+  std::string key = d.name + "#" + seq;
+  auto found = vwrappers_.find(key);
+  if (found != vwrappers_.end()) return found->second;
+  std::string text = "#include \"" + header_ + "\"\n" + source_ + "\n" + vcall_text(d, seq);
+  Module m = ffi_.compile(text);
+  Function<void(void**, void*)> fn = m.function<void(void**, void*)>("nfcffi_vcall_" + d.name + "_" + seq);
+  vmodules_.emplace(key, std::move(m));
+  return vwrappers_.emplace(key, fn).first->second;
+}
+
 Value Library::call(const std::string& name, const std::vector<Value>& args) const {
-  auto w = wrappers_.find(name);
-  const Declaration* d = nullptr;
-  for (const Declaration& x : decls_) {
-    if (x.name == name) d = &x;
-  }
-  if (w == wrappers_.end() || d == nullptr) {
-    throw Error("nfcffi: '" + name + "' is not callable: it is not a function of the header, or it has a struct, variadic, "
+  const Declaration* d = find_declaration(decls_, name);
+  const bool fixed = wrappers_.count(name) != 0;
+  const bool variadic = variadic_.count(name) != 0;
+  if (d == nullptr || !(fixed || variadic)) {
+    throw Error("nfcffi: '" + name + "' is not callable: it is not a function of the header, or it has a struct, "
                 "overloaded or long double part");
   }
-  if (args.size() != d->params.size()) {
-    throw Error("nfcffi: " + name + " takes " + std::to_string(d->params.size()) + " arguments, got " +
-                std::to_string(args.size()));
+  const std::size_t nfixed = d->params.size();
+  if (fixed ? args.size() != nfixed : args.size() < nfixed) {
+    throw Error("nfcffi: " + name + " takes " + std::string(variadic ? "at least " : "") + std::to_string(nfixed) +
+                " arguments, got " + std::to_string(args.size()));
   }
+
+  // The kinds of all arguments: the declared ones, then the promoted kinds of the extra ones.
+  std::string seq;
+  for (std::size_t i = nfixed; i < args.size(); ++i) seq += vararg_kind(args[i], i);
+  const std::vector<std::size_t>* sz = fixed ? &sizes_.at(name) : nullptr;
 
   std::size_t n = args.size();
   std::vector<long long> sv(n);
@@ -362,11 +620,38 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
   std::vector<double> fv(n);
   std::vector<void*> pv(n);
   std::vector<void*> slots(n);
+  std::vector<CallbackSlot> cbslots(n);
   for (std::size_t i = 0; i < n; ++i) {
     const Value& v = args[i];
+    const char k = i < nfixed ? d->param_kinds[i] : seq[i - nfixed];
     const std::string where = "nfcffi: argument " + std::to_string(i) + " of " + name;
-    switch (d->param_kinds[i]) {
+    switch (k) {
+      case 'c':
+        // a host callable (through its trampoline), a C function pointer (as is), or nil
+        if (v.kind() == Value::Kind::Callable) {
+          cbslots[i].fn = &v.as_callable();
+          cbslots[i].sig = callback_at(*d, i);
+          cbslots[i].words[1] = &cbslots[i];
+        } else if (v.kind() == Value::Kind::Pointer) {
+          cbslots[i].words[0] = const_cast<void*>(v.as_pointer());
+        } else if (v.kind() == Value::Kind::Signed && v.as_signed() == 0) {
+          // nil: both words stay null
+        } else {
+          throw Error(where + " must be a host callable, a function pointer or nil");
+        }
+        pv[i] = cbslots[i].words;
+        slots[i] = &pv[i];
+        break;
+      case 's':
+        if (v.kind() != Value::Kind::Bytes) throw Error(where + " must be a struct or union (Value::of_bytes)");
+        if (v.as_bytes().size() != (*sz)[i + 1]) {
+          throw Error(where + " must be " + std::to_string((*sz)[i + 1]) + " bytes, got " +
+                      std::to_string(v.as_bytes().size()));
+        }
+        slots[i] = const_cast<unsigned char*>(v.as_bytes().data());
+        break;
       case 'i':
+      case 'n':
         if (v.kind() == Value::Kind::Signed) sv[i] = v.as_signed();
         else if (v.kind() == Value::Kind::Unsigned) sv[i] = (long long)v.as_unsigned();
         else throw Error(where + " must be an integer");
@@ -398,21 +683,28 @@ Value Library::call(const std::string& name, const std::vector<Value>& args) con
   unsigned long long ru = 0;
   double rf = 0;
   void* rp = nullptr;
+  std::vector<unsigned char> rb(sz ? (*sz)[0] : 0);
   void* out = nullptr;
   switch (d->return_kind) {
     case 'i': out = &rs; break;
     case 'u': out = &ru; break;
     case 'f': out = &rf; break;
     case 'p': out = &rp; break;
+    case 's': out = rb.data(); break;
     default: break;
   }
-  w->second(slots.data(), out);
+  const Function<void(void**, void*)>& w = fixed ? wrappers_.at(name) : vwrapper(*d, seq);
+  w(slots.data(), out);
+  for (const CallbackSlot& cb : cbslots) {
+    if (cb.error) std::rethrow_exception(cb.error);
+  }
 
   switch (d->return_kind) {
     case 'i': return Value::of_signed(rs);
     case 'u': return Value::of_unsigned(ru);
     case 'f': return Value::of_float(rf);
     case 'p': return Value::of_pointer(rp);
+    case 's': return Value::of_bytes(rb.data(), rb.size());
     default: return Value();
   }
 }

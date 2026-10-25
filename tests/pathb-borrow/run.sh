@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir tests/pathb-borrow/index/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
@@ -54,6 +54,24 @@ for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pa
       options=(--infer-loan-ends)
       [ ! -f "${src%.ir}.inferred.expect" ] || expected=${src%.ir}.inferred.expect
     fi
+    want=$(head -1 "$expected")
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
+      echo "FAIL $src ($mode): expected exit $want, got $rc"
+      cat "$tmp/out"
+      exit 1
+    fi
+    echo "ok   $src ($mode)"
+    pass=$((pass + 1))
+  done
+done
+# Summary inference is opt-in; each fixture runs with it in both loan modes.
+for src in tests/pathb-borrow/summaries/*.ir; do
+  for mode in explicit inferred; do
+    options=(--infer-summaries)
+    [ "$mode" = explicit ] || options+=(--infer-loan-ends)
+    expected=${src%.ir}.expect
     want=$(head -1 "$expected")
     rc=0
     scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
@@ -102,6 +120,154 @@ for effects in tests/pathb-borrow/contracts/*.effects; do
   echo "ok   $effects against lowered C++ bodies"
   pass=$((pass + 1))
 done
+# Inferred summaries let callers of lowered C++ callees be checked without
+# annotations. Dropping the initializing call must expose the uninitialized use.
+# The frontend prints the (borrow-layout ...) records of the structs involved.
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/inferred.cpp > "$tmp/inferred0.layout.ir"
+grep -Fqx '(borrow-layout (struct "Pair") 8 4 (field "a" 0 int) (field "b" 4 int))' "$tmp/inferred0.layout.ir" ||
+  { echo "FAIL inferred.cpp: no borrow-layout record for Pair"; exit 1; }
+sed '/^  init_pair(&s, 2);$/d' tests/pathb-borrow/contracts/inferred.cpp > "$tmp/uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/uninit.cpp" > "$tmp/uninit0.layout.ir" 2>/dev/null
+for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/inferred0.layout.ir" > "$tmp/out"
+  grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL inferred.cpp ($options)"; cat "$tmp/out"; exit 1; }
+  rc=0
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/uninit0.layout.ir" > "$tmp/out" 2>&1 || rc=$?
+  if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: s' "$tmp/out"; then
+    echo "FAIL inferred.cpp without init_pair ($options): expected exit 1, got $rc"
+    cat "$tmp/out"
+    exit 1
+  fi
+done
+# Printed summaries are ordinary contracts: pasted back, they check without inference.
+{ head -1 "$tmp/inferred0.layout.ir"
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/inferred0.layout.ir" | sed -n 's/^inferred: //p'
+  tail -n +2 "$tmp/inferred0.layout.ir"; } > "$tmp/pasted.ir"
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/pasted.ir" > "$tmp/out"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted-oracle.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted.qbe"
+cmp "$tmp/pasted.qbe" "$tmp/pasted-oracle.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/inferred0.layout.ir" > "$tmp/inferred.qbe"
+cmp "$tmp/inferred.qbe" "$tmp/pasted.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/inferred.qbe" -o "$tmp/inferred.s"
+cc "$tmp/inferred.s" -o "$tmp/inferred"
+"$tmp/inferred" || { echo "FAIL inferred.cpp runtime: expected 0"; exit 1; }
+echo "ok   inferred summaries for lowered C++ callees, mutant, and native execution"
+pass=$((pass + 1))
+# Plain calls to inferred returned-alias callees get implicit loans. Holding the
+# returned alias across a direct write to its source must be a loan conflict.
+aliases=tests/pathb-borrow/contracts/aliases.cpp
+sed 's/^  bump(second(&s));$/  int *b = second(\&s); s.b = 9; bump(b);/' "$aliases" > "$tmp/aliases_held.cpp"
+for name in aliases aliases_held; do
+  src=$aliases
+  [ "$name" = aliases ] || src=$tmp/$name.cpp
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/$name.ir"
+done
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $aliases"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases_held.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -q 'main: loan-conflict: s\[4\.\.8\] (&.*second.*#1)' "$tmp/out"; then
+  echo "FAIL $aliases holding the alias across a write: expected exit 1, got $rc"
+  cat "$tmp/out"
+  exit 1
+fi
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/aliases.ir" > "$tmp/out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || { echo "FAIL $aliases: implicit loans need inference, got $rc"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/aliases.ir" > "$tmp/aliases.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/aliases.qbe" -o "$tmp/aliases.s"
+cc "$tmp/aliases.s" -o "$tmp/aliases"
+"$tmp/aliases" || { echo "FAIL $aliases runtime: expected 0"; exit 1; }
+echo "ok   implicit returned loans for lowered C++ calls, held-alias mutant, and native execution"
+pass=$((pass + 1))
+# The frontend's (borrow-layout ...) records let a reader of a padded struct be
+# summarized and checked. Without them the summary is not found, and the records
+# never change generated code. Structs a record cannot describe get none.
+lay=tests/pathb-borrow/contracts/layouts.cpp
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$lay" > "$tmp/lay.ir"
+grep -v '^(borrow-layout ' "$tmp/lay.ir" > "$tmp/lay_bare.ir"
+cmp -s "$tmp/lay.ir" "$tmp/lay_bare.ir" && { echo "FAIL $lay: no borrow-layout records"; exit 1; }
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $lay"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay_bare.ir" > "$tmp/out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || { echo "FAIL $lay without records: expected exit 3, got $rc"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay_bare.ir" > "$tmp/lay_bare.qbe"
+cmp "$tmp/lay.qbe" "$tmp/lay_bare.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay-oracle.qbe"
+cmp "$tmp/lay.qbe" "$tmp/lay-oracle.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/lay.qbe" -o "$tmp/lay.s"
+cc "$tmp/lay.s" -o "$tmp/lay"
+"$tmp/lay" || { echo "FAIL $lay runtime: expected 0"; exit 1; }
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/nolayouts.cpp > "$tmp/nolay.ir"
+grep '^(borrow-layout ' "$tmp/nolay.ir" > "$tmp/nolay.layouts" || true
+printf '%s\n' '(borrow-layout (struct "Plain") 16 8 (field "z" 0 int) (field "next" 8 (ptr (const (struct "Plain")))))' |
+  cmp - "$tmp/nolay.layouts" || { echo "FAIL nolayouts.cpp records"; cat "$tmp/nolay.layouts"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nolay.ir" > /dev/null
+echo "ok   frontend borrow-layout records, record-less mutant, unsupported structs, and native execution"
+pass=$((pass + 1))
+# A const pointer result gets a shared alias summary; writing its source while the
+# result is live conflicts. The printed summary validates in the emitter and oracle.
+calias=tests/pathb-borrow/contracts/const_alias.cpp
+sed 's/^  int v = \*q;$/  s.b = 5; int v = *q;/' "$calias" > "$tmp/calias_held.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$calias" > "$tmp/calias.ir"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/calias_held.cpp" > "$tmp/calias_held.ir"
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias.ir" > "$tmp/out"
+grep -Fq '(returns (ptr (const int)) (from-arg 0 4 shared))' "$tmp/out" && grep -Fq 'ok: local lifetime checks passed' "$tmp/out" ||
+  { echo "FAIL $calias"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias_held.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -q 'main: loan-conflict: s\[4\.\.8\] (&.*second.*#1)' "$tmp/out"; then
+  echo "FAIL $calias writing the source while the result is live: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+{ head -1 "$tmp/calias.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/calias.ir"; } > "$tmp/calias_pasted.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias-oracle.qbe"
+cmp "$tmp/calias.qbe" "$tmp/calias-oracle.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/calias.qbe" -o "$tmp/calias.s"
+cc "$tmp/calias.s" -o "$tmp/calias"
+"$tmp/calias" || { echo "FAIL $calias runtime: expected 0"; exit 1; }
+echo "ok   const pointer results: shared alias summary, held-result mutant, emitter validation, and native execution"
+pass=$((pass + 1))
+# A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
+# registration around it is still refused, for its own reason.)
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/vla.cpp > "$tmp/vla.ir"
+grep -Fq '(decl $"a" val)' "$tmp/vla.ir" && grep -Fq '(scope-end $"a")' "$tmp/vla.ir" ||
+  { echo "FAIL vla.cpp: no facts for the VLA"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/vla.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 3 ] || grep -Fq 'missing declaration facts' "$tmp/out"; then
+  echo "FAIL vla.cpp: expected a refusal other than missing facts, got $rc"; cat "$tmp/out"; exit 1
+fi
+echo "ok   declaration facts for lowered VLAs"
+pass=$((pass + 1))
+# Call-argument temporaries get (decl ... temp) facts around their full expression,
+# so a recursive callee gets a summary. An uninitialized argument is still found.
+temps=tests/pathb-borrow/contracts/temporaries.cpp
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$temps" > "$tmp/temps.ir"
+grep -Fq '(decl $"tmp" temp)' "$tmp/temps.ir" && grep -Fq '(scope-end $"tmp")' "$tmp/temps.ir" ||
+  { echo "FAIL $temps: missing temporary facts"; exit 1; }
+sed 's/int c = 0;/int c;/' "$temps" > "$tmp/temps_uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/temps_uninit.cpp" > "$tmp/temps_uninit.ir"
+for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/temps.ir" > "$tmp/out"
+  grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $temps ($options)"; cat "$tmp/out"; exit 1; }
+  rc=0
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/temps_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+  if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: c' "$tmp/out"; then
+    echo "FAIL $temps with an uninitialized argument ($options): expected exit 1, got $rc"
+    cat "$tmp/out"
+    exit 1
+  fi
+done
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/temps.ir" > "$tmp/temps.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/temps.qbe" -o "$tmp/temps.s"
+cc "$tmp/temps.s" -o "$tmp/temps"
+"$tmp/temps" || { echo "FAIL $temps runtime: expected 0"; exit 1; }
+echo "ok   temporary facts for lowered C++ call arguments, mutant, and native execution"
+pass=$((pass + 1))
 # Checking facts and value-transfer policy must not change native execution.
 # Loan erasure and replacing explicit transfers with loads must yield the same QBE.
 for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir tests/mruby/pathb-edge/move_facts.ir tests/mruby/pathb-edge/field_move_facts.ir tests/mruby/pathb-edge/drop_state_facts.ir; do

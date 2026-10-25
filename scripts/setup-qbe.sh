@@ -10,10 +10,15 @@
 # atomic-builtins), which this script applied before, the __builtin_strstr, __builtin_char_memchr and libc++ string builtins (strchr, strrchr, strpbrk, strlen, memcmp, memmove), and the aarch64-apple va_arg of aggregates. Earlier nfcxx patches (empty-struct, vaarg-aggregate, empty-copy,
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
-# this comment together when rebasing those patches onto a new upstream.
-# The pin is 9f706f5, on the fork's branch nfcxx-stmt-expr: the earlier pin (4030e86) plus GNU statement expressions ({ ... }),
-# which ASTro's baruby_precise needs (docs/notes/astro.md).
+# this comment together when rebasing those patches onto a new upstream. The pin itself is on branch
+# nfcxx/blit-stmt-expr, a merge of two branches over those commits and later fixes (static address minus a constant,
+# char pointers differing in signedness): nfcxx-stmt-expr, GNU statement expressions ({ ... }), which ASTro's
+# baruby_precise needs (docs/notes/astro.md); and nfcxx/blit, the alignment, padding and size of over-aligned structs
+# in QBE types (Rust #[repr(align(128))] through mrustc) and struct copies above 16 bytes as one blit.
 # The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe): no patch files are applied.
+# The pin is on branch nfcxx/align-large: nfcxx-patched plus data alignments above 127 (Rust #[repr(align(128))]) and a
+# parallel move table in rega.c that grows (it held 64 copies, which regex-automata 0.4.18 and mold 3 exceed), and
+# return pads, parameter copies and stack arguments of aggregates aligned on more than 16 (laid out as gcc does).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
@@ -26,11 +31,6 @@ for p in qbe cproc; do
   cp -r "$root/3rd/$p" "$root/build/$p"
   rm -rf "$root/build/$p/.git"
 done
-# rega.c holds at most NPm (64) copies in one parallel move, the copies a block edge needs (phi operands, call
-# arguments). A join with more (regex_automata 0.4.18, built by mrustc from the 1.13 regex crate) stops QBE with
-# "no more pm slots". The array is static, so 1024 costs nothing. A fork commit would be the proper home for this.
-sed -i.bak 's/NPm = 64,/NPm = 1024,/' "$root/build/qbe/rega.c" && rm -f "$root/build/qbe/rega.c.bak"
-grep -q 'NPm = 1024,' "$root/build/qbe/rega.c" || { echo "setup-qbe: NPm not found in rega.c" >&2; exit 1; }
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
