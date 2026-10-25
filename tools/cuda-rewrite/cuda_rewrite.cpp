@@ -5115,6 +5115,15 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   // for example selected by a ternary and handed to a helper. Each gets its wrapper (template_site), and the host table
   // maps the host instance's address to that wrapper (the addr file, read by pathb-ptx-emit --embed).
   g_addr_table.clear();
+  // The wrappers of the launches above: the host copy has a stub of each, and a launch passes that stub. When the
+  // instance's address is taken too, the table keeps both host addresses (the stub's and the instance's) for the one
+  // device entry (softmax.cu launches soft_max_f32<true, 0, 0> and passes its address to cudaFuncSetAttribute).
+  std::set<std::string> launched;
+  for (const auto &site : g_sites) launched.insert(site.wrapper);
+  auto add_addr = [&](const std::string &host, const std::string &w) {
+    g_addr_table.push_back({host, w});
+    if (launched.count(w)) g_addr_table.push_back({w, w});
+  };
   // a directive (a #define body too) is not code: its uses are seen where the macro is expanded
   const std::map<long, long> addr_dirs = directive_ends(text);
   // the text without directives (same length): the explicit calls of a template are read from code only
@@ -5148,7 +5157,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
           // block-local constants (constexpr bool in the body) take their values, as the launch path does
           std::string targs = resolve_local_constants(text, raw, i);
           std::string w = template_site(name, targs);
-          g_addr_table.push_back({name + "<" + targs + ">", w});
+          add_addr(name + "<" + targs + ">", w);
         } else {
           // depends on an enclosing template's parameter: one instance per explicit call of that template (as the
           // dependent launches do), each with its own wrapper and host address
@@ -5176,7 +5185,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
             if (taken == 0) continue;
             std::string cargs = instance_targs(text, i, raw, outer, inst);
             std::string w = template_site(name, cargs);
-            g_addr_table.push_back({name + "<" + cargs + ">", w});
+            add_addr(name + "<" + cargs + ">", w);
           }
         }
       }

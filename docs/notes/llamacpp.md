@@ -1,4 +1,4 @@
-# llama.cpp on the host side: ggml through nfcxx
+# llama.cpp: ggml through nfcxx (CPU and CUDA backends)
 
 `tests/llamacpp/run.sh` compiles llama.cpp's host-side ggml (ggml/src/*.c, *.cpp, and ggml-cpu/ with its tiled
 sources) through the nfcxx driver on the gcc backend, and links `tests/llamacpp/ggml_cpu_check.c` (a small
@@ -11,7 +11,42 @@ is `build/targets/llama.cpp` (`git clone --depth 1 https://github.com/ggml-org/l
   `ggml-opt.cpp`, `ggml-threading.cpp`) compile with the driver's C and C++ paths.
 - The CPU backend (`ggml-cpu/*.c`, `*.cpp`, `tiled/*.cpp`) compiles with `-DGGML_CPU_GENERIC` and without the SSE
   predefines (see below): 23 objects in all.
-- The link stops at one blocker (see the list): `XFAIL link` in `run.sh`. The check program does not run yet.
+- The check program links and runs (`ggml cpu check: ok`). The CUDA backend is in "CUDA backend" below.
+
+## CUDA backend
+
+`tests/llamacpp/cuda/build.sh` builds ggml with the CUDA backend (every `ggml-cuda/*.cu`, the template instances
+included, with the default FlashAttention types of llama.cpp's CMake: f16-f16 only) and links llama.cpp's
+`tests/test-backend-ops.cpp` against it, `-lcuda -lcublas -lcudart`: 214 objects, about 25 minutes at JOBS=2 under the
+8 GB cap (objects are kept in `build/llcu`, so a second run only links). `tests/llamacpp/cuda/run.sh` runs each op of
+`test-backend-ops test -b CUDA0` in its own process (a device fault aborts it) and checks it against its record. On the
+RTX 2060 (sm_75, CUDA 13.1): 99 ops pass every case, 11 fail, 19 have no cases.
+
+What it took (docs/notes/gpu.md, "Launch path", has the details):
+
+- f16 conversions: the device `half` was an `unsigned short`, so `(float)h` was the integer value of the bits. Every
+  f16 case of every op failed, and the quantized types too (their scales are f16). It is a struct now, as in cuda_fp16.h.
+- Device-wide CUB (`sum`, `mean`, `argsort`, `top_k`, `cumsum`): `lib/cuda/cub/device.cu`, linked with `-lcudart`.
+- `CUDART_VERSION` in the device pass: without it the host took CUB paths whose device code was the other branch
+  (`cumsum_cub_kernel` trapped with `NO_DEVICE_CODE`). With it, the device pass also needs what CUDA 11.8+ code uses on
+  sm_75: `movmatrix` asm (mma.cuh), `__nv_fp8_e4m3`, `__nv_cvt_e8m0_to_bf16raw` and `__nv_fp4x4_e2m1` (MXFP4).
+- A kernel launched through a dispatch stub and also passed to `cudaFuncSetAttribute` (softmax, mmid) had only one of
+  its two host addresses in the kernel table.
+- The emitter lowers `__cxa_vec_ctor` and `memset` (arrays of mma tiles, whose half2 members are now constructed).
+- A launch of a kernel with no device code was silent: the op left garbage and passed its CUDA_CHECK. It is reported
+  through `cudaGetLastError` now, with the kernel's address in the program.
+
+Known failures (the KNOWN list of `run.sh`):
+
+1. **ADD, SUB, MUL, DIV, REPEAT: `k_bin_bcast` has no device code.** binbcast.cu reaches it through
+   `bin_bcast_cuda<op>::operator()<src0_t, src1_t, dst_t>` (a member template of a class template, called as a
+   functor) and `launch_bin_bcast_pack<op, ...>(..., std::make_index_sequence<n_fuse>{})`. The rewriter finds a
+   template's instances from the text of its calls, and these calls give none; the launch is then taken as one whose
+   instances another unit defines, and dropped. The host compile knows the instances (the host object has 228 of
+   them, `nm -C` gives their template arguments as source text), so the fix is to take them from the front end.
+2. **CONV_2D, CONV_3D, MUL_MAT: misaligned address**, **MUL_MAT_ID: unspecified launch failure**,
+   **FLASH_ATTN_EXT: invalid resource handle**: not looked at yet.
+3. **LIGHTNING_INDEXER**: about 15 of 192 cases give wrong results (15 to 17 between runs: the inputs are random).
 
 ## Flags
 
@@ -38,14 +73,9 @@ includes `immintrin.h`, which needs AVX10.2 builtins EDG does not know (below). 
    GCC 15's `immintrin.h` includes `avx10_2*intrin.h` unconditionally, and the `-512` variants share `immintrin.h`'s own
    include guard, so the driver cannot skip them. The fix is in EDG's builtin table, not the driver. Until then the
    x86 SIMD code of ggml-cpu (and any program using `immintrin.h`) does not compile.
-2. **Template instance across translation units.** `ggml-backend-reg.cpp.o` references
-   `_ZNSt12__shared_ptrINSt10filesystem7__cxx114_DirELN9__gnu_cxx12_Lock_policyE2EED1Ev`
-   (`std::__shared_ptr<std::filesystem::__cxx11::_Dir>::~__shared_ptr`), which no object defines. g++ defines it in
-   each TU that uses it (weak); EDG's prelinker does not emit it for this TU. The link stops with
-   `undefined reference to ...`.
-3. **`C++ prelinker: warning: an error occurred during name decoding`** for `std::__cxx11::basic_string` symbols (about
-   20 in the link). Harmless here, but it is a sign of the same name-decoding gap.
-4. **`--emit-c` takes no `-I`** (known, `docs/notes/realworld.md`): it cannot preprocess ggml's headers.
+2. **`C++ prelinker: warning: an error occurred during name decoding`** for `std::__cxx11::basic_string` symbols (about
+   20 in the link). Harmless here, but it is a sign of a name-decoding gap.
+3. **`--emit-c` takes no `-I`** (known, `docs/notes/realworld.md`): it cannot preprocess ggml's headers.
 
 ## Environment
 
