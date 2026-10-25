@@ -508,7 +508,7 @@ Dir.mktmpdir('rest-signature-fixture') do |dir|
   body_of = lambda do |name, **inputs|
     irep = sig_ireps["sig_#{name}"]
     analysis = RbsSignatures.ir_types(applied, irep, **inputs)
-    analysis.fact_at(2, (irep.enter.enter_fields[0].to_i + irep.enter.enter_fields[1].to_i + 2).to_s)
+    analysis.fact_at(2, irep.enter.enter_fields[0].to_i + irep.enter.enter_fields[1].to_i + 2)
   end
   typed = body_of.call('typed_rest')
   check.call('a signature `*Integer` types the body element read as Integer (declared, nil for an absent index)',
