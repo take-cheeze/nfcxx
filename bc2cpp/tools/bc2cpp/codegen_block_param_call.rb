@@ -108,8 +108,8 @@ module BlockParamCall
     mand, opt, rest, post, kw, kwrest, block = enter.enter_fields
     return false unless block.to_i.positive? && post.to_i.zero? && kw.to_i.zero? && kwrest.to_i.zero?
 
-    incoming = (1 + mand + opt + rest).to_s
-    copy = (incoming.to_i + 1).to_s
+    incoming = 1 + mand + opt + rest
+    copy = incoming + 1
     return false unless [incoming, copy].include?(slot)
 
     upvar_written = BytecodeIR.own_upvar_written_regs(irep)

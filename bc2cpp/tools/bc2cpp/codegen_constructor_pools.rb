@@ -618,10 +618,10 @@ class CodeGen
 
     sites, = @constructor_pool_candidates.fetch([label, k])
     culprits = sites.filter_map do |irep, idx, recv, _argc, _owner|
-      mask = return_class_raw_mask(irep, idx, (recv + k).to_s)
+      mask = return_class_raw_mask(irep, idx, recv + k)
       next if mask && !mask.anybits?(CLASS_POOL_UNSHIPPABLE)
 
-      writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
+      writer = irep.walk_writers(idx - 1, recv + k, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                           exhausted: ->(last) { last == 0 ? 'self' : 'incoming_arg' }) do |ins|
         %i[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.to_s.downcase
       end

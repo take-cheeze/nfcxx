@@ -244,7 +244,7 @@ class CodeGen
     return 0 unless state
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(r)
 
     state[r]
   end

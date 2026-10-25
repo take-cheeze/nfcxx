@@ -465,7 +465,7 @@ class CodeGen
                   !PRIMITIVE_ELEMENT_CLASSES.include?(element)
 
       strict = STRICT_BLOCK_ELEMENT_SHAPES.include?([klass, name]) && shape.elements == [0]
-      return shape.elements.to_h { |pos| [(pos + 1).to_s, strict ? element : SoftElementHint.new(element)] }
+      return shape.elements.to_h { |pos| [pos + 1, strict ? element : SoftElementHint.new(element)] }
     end
     {}
   end
@@ -809,7 +809,7 @@ class CodeGen
     elem_hints = block_fallback_element_hints(region[:parent_irep], region, d.owner)
     if elem_hints.empty?
       rbs_class = block_fallback_rbs_param_class(region[:parent_irep], region, d.owner)
-      elem_hints = { '1' => rbs_class } if rbs_class
+      elem_hints = { 1 => rbs_class } if rbs_class
     end
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     arm_prune_block_analysis(block_irep, d, 0)
