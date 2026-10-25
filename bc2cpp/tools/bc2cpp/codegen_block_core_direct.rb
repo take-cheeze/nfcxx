@@ -311,15 +311,10 @@ module BlockCoreDirectFallback
     return @clean_cache[label] if @clean_cache.key?(label)
     return false if @probing.include?(label)
 
-    @probing << label
-    begin
-      cycles = @guard_cycles
-      result = with_fresh_method_state { compile_method(label) }
-      clean = !result[:code].include?('#error')
-      @clean_cache[label] = clean if cycles == @guard_cycles
-      clean
-    ensure
-      @probing.delete(label)
+    probe_clean(label) do
+      # Only #error is read, as in compiles_clean?: the probe skips the register-flow cleanup the same way.
+      @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+      compile_method(label)
     end
   end
 end
