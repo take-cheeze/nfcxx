@@ -653,7 +653,7 @@ class CodeGen
     (0...n).map do |k|
       key_reg = base + (2 * k)
       val_reg = base + (2 * k) + 1
-      kname = literal_symbol_write(irep, write_index, key_reg.to_s)
+      kname = literal_symbol_write(irep, write_index, key_reg)
       return nil unless kname
 
       { name: kname, val_reg: "r#{val_reg}" }
@@ -731,7 +731,7 @@ class CodeGen
         (0...nk).map do |k|
           key_reg = next_reg + (k * 2)
           val_reg = next_reg + (k * 2) + 1
-          kname = literal_symbol_write(irep, idx, key_reg.to_s)
+          kname = literal_symbol_write(irep, idx, key_reg)
           return nil unless kname
 
           { name: kname, val_reg: "r#{val_reg}" }

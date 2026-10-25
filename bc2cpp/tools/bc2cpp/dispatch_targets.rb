@@ -565,7 +565,7 @@ end
 def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
   return nil unless idx&.positive? && reg
 
-  key = [irep.label, idx, reg.to_s, opts[:resolving_new] ? true : false]
+  key = [irep.label, idx, reg, opts[:resolving_new] ? true : false]
   return nil unless TraceReaching::IN_PROGRESS.add?(key)
 
   begin

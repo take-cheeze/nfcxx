@@ -67,7 +67,7 @@ class CodeGen
       ancestor, = captured_local_frame(irep, level)
       return nil unless ancestor && class_object_param_stable?(ancestor, index)
 
-      class_object_param_values(ancestor, index.to_s, depth, active)
+      class_object_param_values(ancestor, index, depth, active)
     end
   end
 
@@ -201,7 +201,7 @@ class CodeGen
 
     # The write test of rbs_param_check.rb's upvar_why, without a reaching-definitions walk per instruction. A RETURN
     # of the register writes nothing a later instruction reads, so the NO_WRITE_OPS are not writes here.
-    reg = index.to_s
+    reg = index
     return false if BytecodeIR.own_upvar_written_regs(ancestor).include?(reg)
 
     program = BytecodeIR.for(ancestor)

@@ -955,7 +955,7 @@ module EscapeAnalysis
       op = insn.op
       lead = BytecodeIR::OperandModel.reg(insn)
       escape = ->(why) { run.reasons << [why, insn.addr] }
-      held = ->(r) { s.include?(r.to_s) }
+      held = ->(r) { s.include?(r) }
       window = ->(from, count) { (0...count).any? { |k| held.call(from.to_i + k) } }
 
       return s if PASSES.include?(op)
@@ -973,11 +973,11 @@ module EscapeAnalysis
 
       case op
       when :MOVE then s - [lead] | (held.call(BytecodeIR::OperandModel.move(insn).src) ? [lead] : [])
-      when :LOADSELF then s - [lead] | (s.include?('0') ? [lead] : [])
+      when :LOADSELF then s - [lead] | (s.include?(0) ? [lead] : [])
       when :RETSELF
-        if s.include?('0') && run.returns
+        if s.include?(0) && run.returns
           run.returned = true
-        elsif s.include?('0')
+        elsif s.include?(0)
           escape.call(:returned)
         end
         s
@@ -1010,7 +1010,7 @@ module EscapeAnalysis
         s - [lead]
       when :SUPER
         positional, kw = argument_slots(insn)
-        escape.call(:super_window) if window.call(lead, positional + kw + 2) || s.include?('0')
+        escape.call(:super_window) if window.call(lead, positional + kw + 2) || s.include?(0)
         s - [lead]
       when :ARRAY
         three = BytecodeIR::OperandModel.src_and_literal(insn)
@@ -1037,7 +1037,7 @@ module EscapeAnalysis
         s
       when *CLOSURE_OPS then s - [lead]
       when *WINDOW_OPS
-        escape.call(:class_machinery) if window.call(lead, 2) || s.include?('0')
+        escape.call(:class_machinery) if window.call(lead, 2) || s.include?(0)
         s - [lead]
       else
         escape.call(:unmodelled_op)
@@ -1061,7 +1061,7 @@ module EscapeAnalysis
       spread = BytecodeIR::OperandModel.argc_spec(insn).positional == '*'
       unpacked = spread ? [a + 1] : []
       unpacked += ((a + positional + 1)..(a + positional + kw)).to_a
-      return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r.to_s) }
+      return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r) }
 
       send_site(run, i, insn, s, call.name, recv: insn.op.to_s.start_with?('SS') ? nil : a,
                 args: spread ? [] : (1..positional).map { |k| a + k }, dest: a,
@@ -1071,8 +1071,8 @@ module EscapeAnalysis
     # The shared send rule; returns the registers holding the value after the call.
     def send_site(run, i, insn, s, name, recv:, args:, dest:, block: nil)
       out = s - [dest.to_s]
-      reg_held = ->(r) { r && s.include?(r.to_s) }
-      held = recv.nil? ? s.include?('0') : reg_held.call(recv)
+      reg_held = ->(r) { r && s.include?(r) }
+      held = recv.nil? ? s.include?(0) : reg_held.call(recv)
       klasses = receiver_klasses(run, i, recv, held)
       list = callees(run, name, recv, klasses)
       if held
@@ -1084,7 +1084,7 @@ module EscapeAnalysis
         result = receiver_result(name, list, chain, exact ? run.value_class : nil, block_given: given)
         return reject(run, insn, :send_receiver, s) unless result
 
-        run.uses << Use.new(index: i, kind: :call, name: name, reg: recv.to_s) if recv && PROC_CALLS.include?(name)
+        run.uses << Use.new(index: i, kind: :call, name: name, reg: recv) if recv && PROC_CALLS.include?(name)
         out |= [dest.to_s] if result == :self
       end
       args.each_with_index do |r, k|
@@ -1095,7 +1095,7 @@ module EscapeAnalysis
           return reject(run, insn, :send_argument, s)
         end
 
-        run.uses << Use.new(index: i, kind: :pass_arg, name: name, reg: r.to_s)
+        run.uses << Use.new(index: i, kind: :pass_arg, name: name, reg: r)
       end
       if reg_held.call(block)
         klass = klasses&.size == 1 ? klasses.first : nil

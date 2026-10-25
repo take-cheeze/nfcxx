@@ -35,7 +35,7 @@ def receiver_source(irep, use, reg)
     return nil
   end
 
-  irep.last_writer(use - 1, reg.to_s)
+  irep.last_writer(use - 1, reg)
 end
 
 # Struct layout needs one agreed Symbol at each position; native accessors may

@@ -35,7 +35,7 @@ class IrContextResults
     end
 
     def entry_mask(irep, reg)
-      return NumericFlow::NIL if BytecodeIR.for(irep).send(:enter_slot, irep.enter, reg.to_s) == :local
+      return NumericFlow::NIL if BytecodeIR.for(irep).send(:enter_slot, irep.enter, reg) == :local
 
       super
     end

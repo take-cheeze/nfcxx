@@ -145,7 +145,7 @@ class CallSiteIndex
         next unless %i[GETUPVAR SETUPVAR].include?(source.op)
 
         index, level = source.upvar_ref
-        captured = true if index.to_s == reg && level == depth
+        captured = true if index == reg && level == depth
       end
     end
     captured

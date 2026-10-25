@@ -1879,7 +1879,7 @@ class ClosedWorld
 
   def factory_argument_names(irep, index, register, ops)
     names = Set.new
-    known = every_definition?(irep, index, register.to_s) do |writer, definition|
+    known = every_definition?(irep, index, register) do |writer, definition|
       next false unless writer.reg == definition.reg && ops.include?(writer.op)
 
       name = writer.op == :LOADSYM ? writer.sym : writer.const_name

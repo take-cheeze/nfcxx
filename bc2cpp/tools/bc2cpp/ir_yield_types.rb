@@ -42,7 +42,7 @@ module IrYieldTypes
       return nil unless protocol_body?(body, argc)
 
       targets << "yield:#{target.owner}##{target.name}"
-      callee = BytecodeIR::Types.new(body, argument_facts: actuals.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] })
+      callee = BytecodeIR::Types.new(body, argument_facts: actuals.each_with_index.to_h { |fact, slot| [slot + 1, fact] })
       yields = []
       body.each_with_op(:BLKCALL) { |insn, position| yields << [insn, position] }
       return nil if yields.empty?
@@ -67,7 +67,7 @@ module IrYieldTypes
       # Callee facts are independent, but actual arguments can be contract bounds.
       declared = facts.any?(&:declared?)
       contracts = declared ? facts.flat_map(&:contracts).uniq.sort.freeze : [].freeze
-      [(slot + 1).to_s, BytecodeIR::Types::Fact.new(classes: classes, declared: declared, contracts: contracts).freeze]
+      [slot + 1, BytecodeIR::Types::Fact.new(classes: classes, declared: declared, contracts: contracts).freeze]
     end.freeze
     Summary.new(child: child, arguments: arguments, targets: targets.uniq.sort.freeze, invocation_safe: true).freeze
   end

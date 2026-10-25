@@ -24,7 +24,7 @@ class CodeGen
 
     ancestor, creation = captured_local_frame(irep, level)
     return NumericFlow::OTHER unless ancestor
-    return NumericFlow::OTHER if index >= ancestor.nregs.to_i || fixnum_proof_ctx(ancestor)[:upvars].include?(index.to_s)
+    return NumericFlow::OTHER if index >= ancestor.nregs.to_i || fixnum_proof_ctx(ancestor)[:upvars].include?(index)
 
     states = return_class_states(ancestor)
     state = states && states[creation]

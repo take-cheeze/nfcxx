@@ -63,13 +63,13 @@ module IrTypeFeedback
       contracts = bounds.values.flat_map(&:contracts).uniq.sort.freeze
       invocation_safe = summary.invocation_safe
     elsif binding && binding.argument_facts.size == fields.first
-      bounds = binding.argument_facts.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] }
+      bounds = binding.argument_facts.each_with_index.to_h { |fact, slot| [slot + 1, fact] }
       contracts = binding.contracts
       invocation_safe = false
     elsif elements && fields.first == (insn.sym == 'each_with_index' ? 2 : 1)
       contracts = (elements.contracts + ["iterator:#{insn.sym}"]).sort.freeze
-      bounds = { '1' => BytecodeIR::Types::Fact.new(classes: elements.classes, declared: true, contracts: contracts) }
-      bounds['2'] = BytecodeIR::Types::Fact.new(classes: Set[:Integer], declared: true, contracts: contracts) if fields.first == 2
+      bounds = { 1 => BytecodeIR::Types::Fact.new(classes: elements.classes, declared: true, contracts: contracts) }
+      bounds[2] = BytecodeIR::Types::Fact.new(classes: Set[:Integer], declared: true, contracts: contracts) if fields.first == 2
       invocation_safe = false
     else
       return []

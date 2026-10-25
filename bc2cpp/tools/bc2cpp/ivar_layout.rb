@@ -297,7 +297,7 @@ class IvarLayout
     walked = trace_type_walk(irep, idx, reg, *args)
     return walked unless walked == JOIN_BREAK
 
-    key = [irep.label, idx, reg.to_s]
+    key = [irep.label, idx, reg]
     return BOTTOM unless TRACE_STATE[:active].add?(key)
 
     begin

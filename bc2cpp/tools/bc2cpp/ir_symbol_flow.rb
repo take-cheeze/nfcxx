@@ -274,7 +274,7 @@ module IrSymbolFlow
       child = tree[label] or next
       BytecodeIR.for(child).each_with_op(:GETUPVAR) do |insn, _|
         index, level = insn.upvar_ref
-        out << index.to_s if index && level == depth - 1
+        out << index if index && level == depth - 1
       end
       collect_captures(tree, child, depth + 1, out)
     end

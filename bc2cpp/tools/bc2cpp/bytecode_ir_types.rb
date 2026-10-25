@@ -30,24 +30,24 @@ module BytecodeIR
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @argument_facts = argument_facts.to_h do |reg, fact|
-        number = reg.to_s
-        unless number.match?(/\A[1-9]\d*\z/) && number.to_i <= required && fact.is_a?(Fact) && !fact.classes.empty?
+        number = reg
+        unless number.is_a?(Integer) && number.between?(1, required) && fact.is_a?(Fact) && !fact.classes.empty?
           raise ArgumentError, "bc2cpp: invalid IR argument fact R#{number}"
         end
         contracts = fact.contracts.empty? && fact.declared? ? ["argument:R#{number}"] : fact.contracts.dup
         [number, Fact.new(classes: fact.classes.to_set.dup.freeze, declared: fact.declared?, contracts: contracts.freeze).freeze]
       end.freeze
       @declared_args = declared_args.to_h do |reg, types|
-        number = reg.to_s
-        unless number.match?(/\A[1-9]\d*\z/) && number.to_i <= required
+        number = reg
+        unless number.is_a?(Integer) && number.between?(1, required)
           raise ArgumentError, "bc2cpp: IR argument contract R#{number} is not a required parameter"
         end
         [number.dup.freeze, types.to_set.dup.freeze]
       end.freeze
       optional = irep.enter&.enter_fields&.[](1).to_i
       @declared_optional_args = declared_optional_args.to_h do |reg, types|
-        number = reg.to_s
-        unless number.match?(/\A[1-9]\d*\z/) && (required + 1..required + optional).cover?(number.to_i)
+        number = reg
+        unless number.is_a?(Integer) && (required + 1..required + optional).cover?(number)
           raise ArgumentError, "bc2cpp: IR optional contract R#{number} is not an optional parameter"
         end
         [number.dup.freeze, types.to_set.dup.freeze]
@@ -56,11 +56,11 @@ module BytecodeIR
       @declared_ivars = declared_ivars.to_h { |name, types| [name.to_s.delete_prefix('@').freeze, types.to_set.dup.freeze] }.freeze
       @declared_calls = declared_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
       @inferred_calls = inferred_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
-      @inferred_args = inferred_args.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @inferred_args = inferred_args.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
       @inferred_keywords = inferred_keywords.to_h { |name, types| [name.to_s, types.to_set.dup.freeze] }.freeze
-      @inferred_rest_elements = inferred_rest_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
-      @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
-      @declared_rest_elements = declared_rest_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @inferred_rest_elements = inferred_rest_elements.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
+      @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
+      @declared_rest_elements = declared_rest_elements.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
       @declared_ivar_elements = declared_ivar_elements.to_h { |name, types| [name.to_s.delete_prefix('@'), types.to_set.dup.freeze] }.freeze
       @declared_const_elements = declared_const_elements.to_h { |name, type| [name.to_s, Set[type.to_sym]] }.freeze
       @source_resolver = source_resolver

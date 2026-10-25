@@ -248,7 +248,7 @@ module DynamicNames
     !uses.empty? && uses.all? do |use, reg|
       send = program.source_at(use)
       BytecodeIR::Ops::SEND_FAMILY.include?(send.op) && PROBE_SENDS.include?(send.sym) && send.plain_fixed_argc? &&
-        (1..2).cover?(send.argc.to_i) && reg.to_s == (send.reg + 1)
+        (1..2).cover?(send.argc.to_i) && reg == send.reg + 1
     end
   end
 

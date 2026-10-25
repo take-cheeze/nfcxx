@@ -46,7 +46,7 @@ class CodeGen
     return fixnum_interval_fail(why, 'depth') if depth > FIXNUM_PROOF_MAX_DEPTH
 
     ctx = fixnum_proof_ctx(irep)
-    cur = reg.to_s
+    cur = reg
     return fixnum_interval_fail(why, 'upvar') if ctx[:upvars].include?(cur)
 
     unaudited = lambda do |insn, _cur|

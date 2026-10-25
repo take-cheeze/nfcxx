@@ -75,7 +75,7 @@ module NativeIntArgs
   end
 
   def native_int_arg_top(irep, proof_idx, reg)
-    insn = irep.source_writer(proof_idx - 1, reg.to_s)
+    insn = irep.source_writer(proof_idx - 1, reg)
     return 'param-or-none' unless insn
 
     op = insn.op

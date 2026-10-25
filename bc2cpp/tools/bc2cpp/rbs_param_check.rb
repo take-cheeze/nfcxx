@@ -428,7 +428,7 @@ module RbsParamCheck
 
     ctx[:ivar_active] << key
     found = sites.each do |site_irep, idx, reg|
-      why = trace(ctx, site_irep, idx, reg.to_s, cls, depth + 1)
+      why = trace(ctx, site_irep, idx, reg, cls, depth + 1)
       break "@#{name} = (#{why}) at #{display(ctx, site_irep.file)}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
     end
     ctx[:ivar_active].delete(key)
@@ -460,7 +460,7 @@ module RbsParamCheck
       return "#{where}: a local may be written by name (binding, local_variable_set or eval reachable)"
     end
 
-    reg = index.to_s
+    reg = index
     prog = BytecodeIR.for(frame)
     if BytecodeIR.own_upvar_written_regs(frame).include?(reg) || prog.each_source.any? { |i, _| prog.may_write?(i, reg) }
       return "#{where}: R#{reg} of #{ctx[:self_of][label]}##{ctx[:method_name][label]} is reassigned"

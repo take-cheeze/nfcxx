@@ -554,7 +554,7 @@ module BytecodeIR
     # The one exception is R[1] without keywords: argc==14 with a keyword hash packs the arguments into an
     # array there. R[0] (self) is never written.
     def enter_passes?(insn, reg)
-      return true if reg == '0'
+      return true if reg == 0
 
       req, opt, _rest, _post, kw, kwrest = insn.enter_fields
       keywords = kw.to_i.positive? || kwrest.to_i.positive?

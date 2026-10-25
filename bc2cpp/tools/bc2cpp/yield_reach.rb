@@ -777,7 +777,7 @@ class YieldReach
     # The origin walk answers a slot ENTER stores (the block, R1) with ENTER itself.
     if df.entry? || BytecodeIR.for(irep).source_at(df.index).op == :ENTER
       return [[:forward]] if df.reg.to_i == block_reg_of(irep)
-      return [[:param, 1]] if df.reg == '1' && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
+      return [[:param, 1]] if df.reg == 1 && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
 
       return [[:unknown]]
     end
@@ -827,7 +827,7 @@ class YieldReach
     return true unless writers_of(node.irep)[index].empty?
     return true if BytecodeIR.for(node.irep).instructions_with_op(:SETUPVAR).any? { |i| i.upvar_ref&.first == index }
 
-    BytecodeIR.own_upvar_written_regs(node.irep).include?(index.to_s)
+    BytecodeIR.own_upvar_written_regs(node.irep).include?(index)
   end
 
   # Every write of register +index+ in the method (and every SETUPVAR of it below) is a MOVE of
@@ -842,7 +842,7 @@ class YieldReach
       return false
     end
 
-    !BytecodeIR.own_upvar_written_regs(method.irep).include?(index.to_s)
+    !BytecodeIR.own_upvar_written_regs(method.irep).include?(index)
   end
 
   def classify_block(node, program, _insn, idx, block_reg)
@@ -915,16 +915,16 @@ class YieldReach
   # SETUPVAR into it. The fallback for a register a point query refuses; a register already being expanded adds
   # nothing more (+seen+), and nil means a stored value is unaccountable.
   def stored_kinds(node, reg, seen = Set.new)
-    return [] unless seen.add?([node.label, reg.to_s])
+    return [] unless seen.add?([node.label, reg])
 
     irep = node.irep
-    kinds = classify_definition(node, BytecodeIR::Definition.new(BytecodeIR::ENTRY, reg.to_s), false, false, 0)
+    kinds = classify_definition(node, BytecodeIR::Definition.new(BytecodeIR::ENTRY, reg), false, false, 0)
     writers_of(irep)[reg.to_i].each do |i|
       w = BytecodeIR.for(irep).source_at(i)
       found = if w.op == :MOVE
                 classify_kinds(node, i, w.regs[1], fallback: true, seen: seen)
               else
-                classify_definition(node, BytecodeIR::Definition.new(i, reg.to_s), false, false, 0)
+                classify_definition(node, BytecodeIR::Definition.new(i, reg), false, false, 0)
               end
       return nil unless found
 
