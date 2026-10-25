@@ -69,6 +69,25 @@ module OwnerSetDirect
     end
   end
 
+  # The argument's IR proof survives register shifts in inlined blocks; Symbol values cannot change type.
+  def owner_set_symbol_probe_code(name, d, recv, argv, irep, idx, offset)
+    return nil unless name == 'respond_to?' && [1, 2].include?(argv.size) && irep && idx
+    return nil if ENV['BC2CPP_OWNER_SET_DIRECT'] == '0' || ENV['BC2CPP_SYMBOL_PROBE_DIRECT'] == '0'
+
+    reg = argv.first[/\Ar(\d+)\z/, 1]
+    return nil unless reg && exact_literal(irep, idx, reg.to_i - offset)&.klass == :Symbol
+
+    row = owner_set_direct_row(name, argv.size)
+    return nil unless row
+
+    expr = format(row.expression, recv: recv, a: argv.first)
+    note = "  // SYMBOL_PROBE_DIRECT :respond_to? -- proven Symbol argument, audited Kernel body\n"
+    return "#{note}  r#{d} = #{expr};\n" if kernel_receiver_sealed?(owner_call_world)
+
+    "#{note}  if (mrb_obj_is_kind_of(M, #{recv}, M->kernel_module)) {\n" \
+      "    r#{d} = #{expr};\n  } else {\n    #{dynamic_dispatch_line(d, recv, name, argv).chomp}\n  }\n"
+  end
+
   private
 
   def owner_set_direct_expand(result)

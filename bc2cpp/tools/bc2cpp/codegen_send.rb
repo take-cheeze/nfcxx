@@ -73,6 +73,9 @@ class CodeGen
     end
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    probe = call_arguments.nil? && owner_set_symbol_probe_code(name, d, recv, argv, irep, drawing_proof_idx, trace_reg_offset)
+    return probe if probe
+
     drawing_enter = irep&.enter
     drawing_mand = drawing_enter ? drawing_enter.enter_fields.first : 0
     drawing_arg_classes = owner_def && @class_annotations[irep&.label]&.args
