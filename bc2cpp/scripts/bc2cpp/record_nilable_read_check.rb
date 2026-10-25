@@ -148,6 +148,14 @@ check.call('an escaped object record yields no exact object read proof',
 check.call('an unproven object factory is not treated as a constructor proof',
            !on['ObjectUnknown#value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS) :value/))
 
+Dir.mktmpdir('record-object-constructor') do |dir|
+  replaced, = Bc2cppFixtureRuntime.generate(SOURCE + "class Item; def self.new; 'replacement'; end; end", dir,
+                                           only_owners: %w[Scene Leaky Item ObjectScene ObjectLeak ObjectUnknown Item.singleton])
+  body = replaced[/^mrb_value ObjectScene_guarded_value_impl[^\n]*\n.*?^\}/m].to_s
+  check.call('a replaced constructor withdraws the stored Item class proof',
+             !body.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS) :value/))
+end
+
 unless ENV['CC_GENERATED_ONLY'] == '1'
   build = Bc2cppFixtureRuntime.full_or_build
   if build
