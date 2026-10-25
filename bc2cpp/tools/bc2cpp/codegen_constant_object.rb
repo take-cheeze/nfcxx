@@ -114,7 +114,7 @@ class CodeGen
     return nil unless @closed_world && irep && site_idx
 
     op = BytecodeIR.for(irep).source_at(site_idx).op
-    return nil unless %w[SEND0 SEND SSEND0 SSEND].include?(op)
+    return nil unless %i[SEND0 SEND SSEND0 SSEND].include?(op)
 
     if self_implicit
       base = owner_def&.owner&.end_with?('.singleton') && owner_def.owner.delete_suffix('.singleton')
@@ -128,7 +128,7 @@ class CodeGen
     return code if code
     # A bare send is SSEND: the helper's lookup takes only a public method, and anything else goes through the
     # slot's own checked dispatch, so the self-call check level is kept.
-    return nil unless self_implicit || %w[SEND0 SEND].include?(op)
+    return nil unless self_implicit || %i[SEND0 SEND].include?(op)
 
     native_singleton_call_code(name, n, d, recv, argv, irep, site_idx, reg, owner_def&.owner, constant_owner)
   end

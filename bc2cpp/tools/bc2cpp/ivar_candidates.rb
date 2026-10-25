@@ -35,13 +35,13 @@ module IvarCandidates
     ctx.ireps.each do |label, irep|
       definer = gen.numeric_irep_owner[label]
       owner = definer&.owner
-      irep.each_with_op('GETIV', 'SETIV') do |insn, idx|
+      irep.each_with_op(:GETIV, :SETIV) do |insn, idx|
         name = insn.ivar.to_s
         # Code no owner claims (a module body, say) may touch any owner's slot, so no candidate for this name is sound.
         next opaque << name unless owner
 
         entry = table[[gen.numeric_family(owner), name]]
-        if insn.op == 'GETIV'
+        if insn.op == :GETIV
           next if store_first?(definer, label, irep, idx, name, reflective, unstored_reads)
 
           next entry[:read_owners] << owner
@@ -67,9 +67,9 @@ module IvarCandidates
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, idx|
         case insn.op
-        when 'LOADSYM'
+        when :LOADSYM
           return ALL_NAMES if REFLECTIVE_NAMES.include?(insn.sym.to_s)
-        when 'SEND', 'SENDB', 'SSEND', 'SSENDB'
+        when :SEND, :SENDB, :SSEND, :SSENDB
           found = reflective_send(irep, idx, insn)
           return ALL_NAMES if found == ALL_NAMES
 
@@ -112,7 +112,7 @@ module IvarCandidates
 
       program = BytecodeIR.for(irep)
       writers = defs.map { |df| df.entry? ? nil : program.source_at(df.index) }
-      return nil unless writers.all? { |writer| writer&.op == 'LOADSYM' }
+      return nil unless writers.all? { |writer| writer&.op == :LOADSYM }
 
       syms = writers.map { |writer| writer.sym.to_s }.uniq
       return nil unless syms.size == 1

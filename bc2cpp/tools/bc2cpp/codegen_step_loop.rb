@@ -25,7 +25,7 @@ class CodeGen
       shape = STEP_LOOP_KINDS[insn.sym]
       shape[:block_offset] if shape && insn.argc_text == shape[:argc]
     end
-    each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, sendb_idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, sendb_idx, block_insn, dest_reg, block_irep|
       next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
       next unless block_blk_needs(block_irep) == []
 

@@ -45,7 +45,7 @@ module SealedInt16Locals
     prog = BytecodeIR.for(irep)
     claimed = Set.new
     proven = []
-    prog.each_with_op('ARRAY') do |insn, i|
+    prog.each_with_op(:ARRAY) do |insn, i|
       array = prove(irep, prog, i, insn)
       next unless array
       next if array.actions.keys.any? { |j| claimed.include?(j) }
@@ -107,7 +107,7 @@ module SealedInt16Locals
     changed = true
     while changed
       changed = false
-      prog.each_with_op('MOVE') do |insn, j|
+      prog.each_with_op(:MOVE) do |insn, j|
         dst, src = insn.regs.first(2).map(&:to_i)
         next unless aliases.include?(src) && !aliases.include?(dst)
 
@@ -125,14 +125,14 @@ module SealedInt16Locals
   # The sealed action for reading +reg+ (the array) at instruction +j+, or nil when the read is not a sealed form.
   def sealed_action(irep, prog, j, insn, reg, size)
     case insn.op
-    when 'MOVE'
+    when :MOVE
       { kind: :alias } if insn.regs[1].to_i == reg
-    when 'GETIDX'
+    when :GETIDX
       index = literal_value(irep, prog, j, insn.regs[0].to_i + 1)
       { kind: :get, dst: insn.regs[0].to_i, index: index } if index && index >= 0 && insn.regs[0].to_i == reg
-    when 'GETIDX0'
+    when :GETIDX0
       { kind: :get, dst: insn.regs[0].to_i, index: 0 } if insn.regs[1].to_i == reg
-    when 'SETIDX'
+    when :SETIDX
       receiver = insn.regs[0].to_i
       return nil unless receiver == reg
 
@@ -141,7 +141,7 @@ module SealedInt16Locals
       return nil unless index && index >= 0 && index < size && value && RANGE.cover?(value)
 
       { kind: :set, dst: receiver, index: index, value_reg: receiver + 2, value: value }
-    when 'SEND0'
+    when :SEND0
       { kind: :size, dst: insn.regs[0].to_i } if insn.regs[0].to_i == reg && insn.sym == SIZE_SYM
     end
   end
@@ -159,8 +159,8 @@ module SealedInt16Locals
 
   # The value a LOADI-family instruction loads (the same decode as BytecodeIR::ConstantFacts#loadi_value).
   def loadi_value(insn)
-    return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
-    return -1 if insn.op == 'LOADI__1'
+    return insn.op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+    return -1 if insn.op == :LOADI__1
 
     BytecodeIR::OperandModel.imm_operand(insn)&.to_i
   end

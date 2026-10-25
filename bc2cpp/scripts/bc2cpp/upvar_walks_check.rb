@@ -179,7 +179,7 @@ RUBY
           candidate.singleton_class.prepend(Module.new do
             def compile_insn(insn, *rest)
               text = super
-              insn.op == 'RETURN' ? "  r1 = /* #error probe sentinel */ 0;\n" + text : text
+              insn.op == :RETURN ? "  r1 = /* #error probe sentinel */ 0;\n" + text : text
             end
           end)
         when :audit

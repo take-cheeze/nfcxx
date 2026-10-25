@@ -39,14 +39,14 @@ module StableClassConstants
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn|
         case insn.op
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           name = insn.sym_token
           class_defs[name] += 1 if name
-        when 'SETCONST'
+        when :SETCONST
           assigned << insn.const_name
-        when 'SETMCNST'
+        when :SETMCNST
           assigned << insn.mcnst_name
-        when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
+        when :SEND, :SEND0, :SSEND, :SSEND0, :SENDB, :SSENDB, :LOADSYM
           return Set.new if insn.sym.to_s.match?(DYNAMIC_MUTATION)
         end
       end
@@ -138,11 +138,11 @@ module StableClassConstants
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn|
         case insn.op
-        when 'SETCONST'
+        when :SETCONST
           assigned << insn.const_name
-        when 'SETMCNST'
+        when :SETMCNST
           assigned << insn.mcnst_name
-        when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
+        when :SEND, :SEND0, :SSEND, :SSEND0, :SENDB, :SSENDB, :LOADSYM
           return Set.new if insn.sym.to_s.match?(DYNAMIC_MUTATION)
         end
       end

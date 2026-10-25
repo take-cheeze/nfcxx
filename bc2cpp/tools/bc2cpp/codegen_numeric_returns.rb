@@ -34,7 +34,7 @@ class CodeGen
     @numeric_return_send_ireps = Hash.new { |h, k| h[k] = Set.new }
     numeric_return_candidates.each { |name| @numeric_return[name] = 0 }
     @ireps.each_value do |irep|
-      BytecodeIR.for(irep).each_with_op('SEND', 'SEND0', 'SSEND', 'SSEND0') do |insn, _index|
+      BytecodeIR.for(irep).each_with_op(:SEND, :SEND0, :SSEND, :SSEND0) do |insn, _index|
         next unless @numeric_return.key?(insn.sym)
 
         @numeric_return_send_ireps[insn.sym] << irep.label
@@ -96,11 +96,11 @@ class CodeGen
       @ireps.each_value do |irep|
         program = BytecodeIR.for(irep)
         aliasing = program.each_source.any? do |i, _index|
-          i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
+          i.op == :ALIAS || (i.op.to_s.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
         end
         next unless aliasing
 
-        program.each_with_op('ALIAS', 'LOADSYM') { |i, _index| names << i.sym if i.sym }
+        program.each_with_op(:ALIAS, :LOADSYM) { |i, _index| names << i.sym if i.sym }
       end
       names.freeze
     end
@@ -114,9 +114,9 @@ class CodeGen
   # its pool has grown that provenance.
   def aliased_operand_name_set
     @aliased_operand_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
-      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
+      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == :ALIAS || (i.op.to_s.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
 
-      names.merge(aliased_operand_names(irep) || BytecodeIR.for(irep).instructions_with_op('ALIAS', 'LOADSYM').filter_map { |i| i.sym if i.sym })
+      names.merge(aliased_operand_names(irep) || BytecodeIR.for(irep).instructions_with_op(:ALIAS, :LOADSYM).filter_map { |i| i.sym if i.sym })
     end
   end
 
@@ -134,17 +134,17 @@ class CodeGen
     names = Set.new
     program = BytecodeIR.for(irep)
     program.each_source do |insn, idx|
-      if insn.op == 'ALIAS'
+      if insn.op == :ALIAS
         names << insn.sym
         old = insn.first_of(:name)&.value
         names << old if old
-      elsif insn.op.include?('SEND') && (count = ALIAS_NAME_ARGUMENTS[insn.sym])
+      elsif insn.op.to_s.include?('SEND') && (count = ALIAS_NAME_ARGUMENTS[insn.sym])
         return nil unless insn.plain_fixed_argc? && insn.argc.to_i >= count
 
         # Every name that can reach each argument, not only the textually last arm of a join.
         literal = (1..count).all? do |k|
           sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + k).to_s)&.map { |i| program.source_at(i) }
-          next false unless sources&.all? { |w| w.op == 'LOADSYM' && w.sym }
+          next false unless sources&.all? { |w| w.op == :LOADSYM && w.sym }
 
           sources.each { |w| names << w.sym }
         end
@@ -248,14 +248,14 @@ class CodeGen
     return lcf if lcf
 
     # A literal frozen in place: the kind of its slots.
-    table = name == 'freeze' && insn.op == 'SEND0' && frozen_table_freeze_site(irep, index)
+    table = name == 'freeze' && insn.op == :SEND0 && frozen_table_freeze_site(irep, index)
     return (state[insn.reg.to_i] || 0).zero? ? 0 : table if table
 
     tracked = @numeric_return && @numeric_return[name]
     return tracked if tracked
     return NumericFlow::INT if @fixnum_return_names.include?(name)
     return NumericFlow::ARR if @array_return_names.include?(name)
-    return NumericFlow::OTHER if insn.op.start_with?('SS')
+    return NumericFlow::OTHER if insn.op.to_s.start_with?('SS')
 
     native = native_result_numeric_mask(irep, index, insn)
     return native if native
@@ -264,7 +264,7 @@ class CodeGen
     return NumericFlow::OTHER unless recv
 
     # SEND0 carries no operand count; a keyword or splat form has no plain count.
-    argc = insn.op.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = insn.op.to_s.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     mask = 0
     tables = @frozen_tables ? @frozen_tables.tables(recv) : 0
     if tables.nonzero?

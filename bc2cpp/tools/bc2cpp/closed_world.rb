@@ -39,9 +39,9 @@ class ClosedWorld
   CLASS_FACTORIES = SendNames::CLASS_FACTORIES
   SEND_OPS = BytecodeIR::Ops::SEND
   # Ops whose operand names a method (ALIAS, UNDEF) or a symbol that may be one (LOADSYM).
-  NAME_BINDING_OPS = Set['ALIAS', 'UNDEF', 'LOADSYM'].freeze
+  NAME_BINDING_OPS = Set[:ALIAS, :UNDEF, :LOADSYM].freeze
   # Writers of a class body's lexical scope: nil at top level (LOADNIL) or Object (OCLASS).
-  CLASS_SCOPE_WRITERS = Set['LOADNIL', 'OCLASS'].freeze
+  CLASS_SCOPE_WRITERS = Set[:LOADNIL, :OCLASS].freeze
   C_STRING = /"((?:[^"\\\n]|\\.)*)"/
   # Native code that asks Ruby to define, alias or eval by name.
   NATIVE_DYNAMIC = /"(?:define_method|define_singleton_method|attr_reader|attr_writer|attr_accessor|attr|
@@ -66,7 +66,7 @@ class ClosedWorld
                    \bmrb_(?:funcall|check_funcall)\w*\s*\([^;]*(?:"freeze"|MRB_SYM\(freeze\))/x
   # What `x.freeze` leaves of a receiver that is one of these: a builtin value, never an instance of
   # a user class.
-  FREEZE_LITERAL_WRITERS = %w[ARRAY ARRAY2 HASH STRING STRCAT RANGE_INC RANGE_EXC].freeze
+  FREEZE_LITERAL_WRITERS = %i[ARRAY ARRAY2 HASH STRING STRCAT RANGE_INC RANGE_EXC].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
   # refusal already, see scan_send).
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
@@ -343,9 +343,9 @@ class ClosedWorld
   # body): its cref is that object's singleton class.
   def class_object_body?(label)
     @class_object_bodies ||= @singleton_opens.each_with_object(Set.new) do |(irep, idx, insn), out|
-      next unless insn.op == 'SCLASS' && class_constant_target?(irep, idx, insn.reg.to_s)
+      next unless insn.op == :SCLASS && class_constant_target?(irep, idx, insn.reg.to_s)
 
-      body = BytecodeIR.class_bodies(irep, 'SCLASS')[idx]
+      body = BytecodeIR.class_bodies(irep, :SCLASS)[idx]
       out << body if body
     end
     @class_object_bodies.include?(label)
@@ -761,7 +761,7 @@ class ClosedWorld
 
     base = insn.reg.to_i
     BytecodeIR.all_writers_reaching?(irep, idx, base) { |_j, w| CLASS_SCOPE_WRITERS.include?(w.op) } &&
-      BytecodeIR.all_writers_reaching?(irep, idx, base + 1) { |_j, w| w.op == 'LOADNIL' }
+      BytecodeIR.all_writers_reaching?(irep, idx, base + 1) { |_j, w| w.op == :LOADNIL }
   end
 
   def referenced_labels(tree)
@@ -1506,35 +1506,35 @@ class ClosedWorld
       BytecodeIR.for(irep).each_source do |insn, idx|
         scan_singleton_maker(irep, idx, insn) if own_source
         case insn.op
-        when 'TDEF', 'SDEF'
+        when :TDEF, :SDEF
           child = irep.reps[insn.block_index]
-          note_unknown_def(insn.sym, insn.op == 'TDEF' ? irep.label : nil) unless registered.include?(child)
-        when 'DEF'
+          note_unknown_def(insn.sym, insn.op == :TDEF ? irep.label : nil) unless registered.include?(child)
+        when :DEF
           sym = insn.sym_token
           child = def_method_body(irep, idx, insn)
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
           scan_probe_send(irep, idx, insn) if PROBE_SENDS.include?(insn.sym)
           scan_send(irep, idx, insn)
-        when 'UNDEF'
+        when :UNDEF
           @removed_names << insn.sym
-        when 'LOADSYM'
+        when :LOADSYM
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
-        when 'GETCONST', 'GETMCNST'
+        when :GETCONST, :GETMCNST
           const = insn.const_name
           @basic_object_referenced = true if const == 'BasicObject'
           scan_factory(irep, idx, insn, const) if CLASS_FACTORIES.include?(const)
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           name = insn.sym_token
           if name
             bare = name.split('::').last
             @class_constant_names << bare
-            @class_declared_names << bare unless insn.op == 'CLASS' && root_reopen?(irep, idx, insn)
+            @class_declared_names << bare unless insn.op == :CLASS && root_reopen?(irep, idx, insn)
           end
-        when 'SETCONST', 'SETMCNST'
+        when :SETCONST, :SETMCNST
           name = insn.const_name.to_s
           @rebound << name
           @constant_write_counts[name] += 1
@@ -1557,7 +1557,7 @@ class ClosedWorld
 
     bodies = writers.map do |writer|
       method = BytecodeIR.for(irep).source_at(writer)
-      return nil unless method.op == 'METHOD' && method.block_index
+      return nil unless method.op == :METHOD && method.block_index
 
       child = irep.reps[method.block_index]
       return nil unless child
@@ -1580,9 +1580,9 @@ class ClosedWorld
 
   def scan_singleton_maker(irep, idx, insn)
     case insn.op
-    when 'SDEF', 'SCLASS'
+    when :SDEF, :SCLASS
       @singleton_opens << [irep, idx, insn]
-    when 'LOADSYM'
+    when :LOADSYM
       @singleton_makers << [irep.label, insn.sym_token] if SINGLETON_MAKERS.include?(insn.sym_token)
     when *SEND_OPS
       @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
@@ -1594,9 +1594,9 @@ class ClosedWorld
   def class_object_register?(irep, idx, reg)
     every_definition?(irep, idx, reg) do |writer, definition|
       case writer.op
-      when 'LOADSELF' then @walked.include?(irep.label)
-      when 'GETCONST', 'GETMCNST' then class_constant?(writer.op == 'GETCONST' ? writer.const_name : writer.mcnst_name)
-      when 'SEND0' then writer.sym == 'new' && fresh_object_class?(irep, definition.index, definition.reg)
+      when :LOADSELF then @walked.include?(irep.label)
+      when :GETCONST, :GETMCNST then class_constant?(writer.op == :GETCONST ? writer.const_name : writer.mcnst_name)
+      when :SEND0 then writer.sym == 'new' && fresh_object_class?(irep, definition.index, definition.reg)
       else false
       end
     end
@@ -1608,9 +1608,9 @@ class ClosedWorld
   def class_constant_target?(irep, idx, reg)
     every_definition?(irep, idx, reg) do |writer|
       case writer.op
-      when 'LOADSELF' then @walked.include?(irep.label)
-      when 'GETCONST' then class_constant?(writer.const_name)
-      when 'GETMCNST' then class_constant?(writer.mcnst_name)
+      when :LOADSELF then @walked.include?(irep.label)
+      when :GETCONST then class_constant?(writer.const_name)
+      when :GETMCNST then class_constant?(writer.mcnst_name)
       else false
       end
     end
@@ -1701,8 +1701,8 @@ class ClosedWorld
                irep.walk_dominating_writers(idx - 1, insn.reg.to_s, use: idx, follow_moves: true) do |writer|
                  case writer.op
                  when *FREEZE_LITERAL_WRITERS then true
-                 when 'GETCONST' then (constant = writer.const_name) && true
-                 when 'GETMCNST' then (constant = writer.mcnst_name) && true
+                 when :GETCONST then (constant = writer.const_name) && true
+                 when :GETMCNST then (constant = writer.mcnst_name) && true
                  end
                end
     return @freeze_possible = true unless harmless == true
@@ -1734,13 +1734,13 @@ class ClosedWorld
       names = defs.map do |definition|
         writer = program.source_at(definition.index)
         case writer.op
-        when 'LOADSYM' then writer.sym_token
-        when 'DEF', 'TDEF', 'SDEF' then writer.sym_token if definitions
-        when 'STRING'
+        when :LOADSYM then writer.sym_token
+        when :DEF, :TDEF, :SDEF then writer.sym_token if definitions
+        when :STRING
           next unless strings && definition.index == idx - n + position - 1
           next unless program.linear_corridor?(definition.index, idx, include_handlers: true)
           gap = (definition.index + 1...idx)
-          next unless gap.all? { |k| %w[LOADSYM STRING MOVE].include?(program.source_at(k).op) }
+          next unless gap.all? { |k| %i[LOADSYM STRING MOVE].include?(program.source_at(k).op) }
 
           irep.pool[writer.pool_index.to_i]
         end
@@ -1788,18 +1788,18 @@ class ClosedWorld
 
     # `*names` with a variable: `LOADNIL Ra; ARYCAT Ra (Rb)` copies the packed array into a fresh one, so the
     # ARYCAT is the splat's only reader of the packed array.
-    if source.op == 'ARYCAT'
+    if source.op == :ARYCAT
       base = sole_definition(irep, source_idx, source.reg)&.last
-      return nil unless base&.op == 'LOADNIL'
+      return nil unless base&.op == :LOADNIL
 
       copied = source.regs[1]
       arr_idx, arr = sole_definition(irep, source_idx, copied)
-      return nil unless arr&.op == 'ARRAY'
+      return nil unless arr&.op == :ARRAY
 
       expected = [source_idx, copied]
     else
       arr_idx, arr = source_idx, source
-      return nil unless arr.op == 'ARRAY'
+      return nil unless arr.op == :ARRAY
 
       expected = [idx, (insn.reg.to_i + 1).to_s]
     end
@@ -1811,7 +1811,7 @@ class ClosedWorld
 
     (0...literal.count).map do |offset|
       _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset).to_s)
-      return nil unless writer&.op == 'LOADSYM'
+      return nil unless writer&.op == :LOADSYM
 
       writer.sym_token
     end
@@ -1857,7 +1857,7 @@ class ClosedWorld
         return global!(:class_factory_escape) unless argc
 
         argc.times do |argument|
-          names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %w[LOADSYM])
+          names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %i[LOADSYM])
           return global!(:class_factory_escape) unless names
 
           names.each do |name|
@@ -1869,7 +1869,7 @@ class ClosedWorld
         return global!(:class_factory_escape) unless argc && argc <= 1
 
         bases = argc.zero? ? Set['Object'] :
-                factory_argument_names(irep, use, call.reg.to_i + 1, %w[GETCONST GETMCNST])
+                factory_argument_names(irep, use, call.reg.to_i + 1, %i[GETCONST GETMCNST])
         return global!(:class_factory_escape) unless bases
 
         @dynamic_subclassed.merge(bases)
@@ -1882,7 +1882,7 @@ class ClosedWorld
     known = every_definition?(irep, index, register.to_s) do |writer, definition|
       next false unless writer.reg == definition.reg && ops.include?(writer.op)
 
-      name = writer.op == 'LOADSYM' ? writer.sym : writer.const_name
+      name = writer.op == :LOADSYM ? writer.sym : writer.const_name
       name && names.add(name)
     end
     names if known

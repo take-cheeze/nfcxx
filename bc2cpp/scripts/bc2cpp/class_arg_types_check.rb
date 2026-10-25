@@ -50,12 +50,12 @@ class ClassArgTypesTest < Minitest::Test
   end
 
   def send_insn(dest, name, argc)
-    InsnStub.new(op: 'SEND', args: "R#{dest}\t:#{name}\tn=#{argc}")
+    InsnStub.new(op: :SEND, args: "R#{dest}\t:#{name}\tn=#{argc}")
   end
 
   def test_poly_names_are_skipped
     # Two definitions => a POLY name; its call sites may target either.
-    target = irep('t', [InsnStub.new(op: 'ENTER', args: '1:0:0:0:0:0:0:0 (0x0)')])
+    target = irep('t', [InsnStub.new(op: :ENTER, args: '1:0:0:0:0:0:0:0 (0x0)')])
     caller = irep('c', [send_insn(0, 'thing', 1)])
     registry = { 'thing' => [MethodDefStub.new(irep: 't', owner: 'K', name: 'thing'),
                              MethodDefStub.new(irep: 't2', owner: 'L', name: 'thing')] }
@@ -70,7 +70,7 @@ class ClassArgTypesTest < Minitest::Test
   end
 
   def test_zero_mandatory_arguments_are_skipped
-    target = irep('t', [InsnStub.new(op: 'ENTER', args: '0:0:0:0:0:0:0:0 (0x0)')])
+    target = irep('t', [InsnStub.new(op: :ENTER, args: '0:0:0:0:0:0:0:0 (0x0)')])
     registry = { 'thing' => [MethodDefStub.new(irep: 't', owner: 'K', name: 'thing')] }
     assert_empty ClassArgTypes.analyze({ 't' => target }, registry, { 't' => 'K' })
   end
@@ -78,7 +78,7 @@ class ClassArgTypesTest < Minitest::Test
   def test_arity_mismatch_call_site_is_ignored
     # A call passing 2 args to a 1-arg definition is not this method's call
     # site; counting it would read an argument register that belongs elsewhere.
-    target = irep('t', [InsnStub.new(op: 'ENTER', args: '1:0:0:0:0:0:0:0 (0x0)')])
+    target = irep('t', [InsnStub.new(op: :ENTER, args: '1:0:0:0:0:0:0:0 (0x0)')])
     caller = irep('c', [send_insn(0, 'thing', 2)])
     registry = { 'thing' => [MethodDefStub.new(irep: 't', owner: 'K', name: 'thing')] }
     owners = { 't' => 'K', 'c' => 'C' }
@@ -91,10 +91,10 @@ class ClassArgTypesTest < Minitest::Test
     # result). That is an ABSENT fact, and the table must say so rather than
     # inventing a class -- the same rule the :nil_literal case in
     # AnnotationContradictions turned on.
-    target = irep('t', [InsnStub.new(op: 'ENTER', args: '1:0:0:0:0:0:0:0 (0x0)')])
+    target = irep('t', [InsnStub.new(op: :ENTER, args: '1:0:0:0:0:0:0:0 (0x0)')])
     caller = irep('c', [
                     send_insn(0, 'thing', 1),
-                    InsnStub.new(op: 'SEND0', args: "R1\t:mystery")
+                    InsnStub.new(op: :SEND0, args: "R1\t:mystery")
                   ])
     registry = { 'thing' => [MethodDefStub.new(irep: 't', owner: 'K', name: 'thing')] }
     owners = { 't' => 'K', 'c' => 'C' }
@@ -123,17 +123,17 @@ class ClassArgTypesTest < Minitest::Test
   # length the send does not name, so a packed caller can pass any class and is no fact. The count is nil for it.
   ENTER_ONE = '1:0:0:0:0:0:0:0 (0x40000)'
 
-  def set_callee = irep('set', [InsnStub.new(op: 'ENTER', args: ENTER_ONE)])
+  def set_callee = irep('set', [InsnStub.new(op: :ENTER, args: ENTER_ONE)])
   def set_registry = { 'set' => [MethodDefStub.new(irep: 'set', owner: 'Box', name: 'set')] }
 
   # A packed caller whose argument array sits in R2 (LOADNIL R3; MOVE R2 R3 stands in for the array build).
   def packed_caller(name = 'set')
-    irep('packed', [InsnStub.new(op: 'LOADNIL', args: "R3\t(nil)"), InsnStub.new(op: 'MOVE', args: "R2\tR3"),
+    irep('packed', [InsnStub.new(op: :LOADNIL, args: "R3\t(nil)"), InsnStub.new(op: :MOVE, args: "R2\tR3"),
                     send_insn(1, name, '*')])
   end
 
   def test_call_site_index_records_a_packed_send_with_no_count
-    caller = irep('c', [send_insn(0, 'thing', 1), send_insn(0, 'thing', '*'), InsnStub.new(op: 'SEND0', args: "R1\t:thing")])
+    caller = irep('c', [send_insn(0, 'thing', 1), send_insn(0, 'thing', '*'), InsnStub.new(op: :SEND0, args: "R1\t:thing")])
     counts = CallSiteIndex.build({ 'c' => caller })['thing'].map { |*, n| n }
     # The plain send keeps its count, the packed send has none, and a SEND0 is still zero arguments.
     assert_equal [1, nil, 0], counts
@@ -141,17 +141,17 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_packed_caller_gives_no_argument_type_fact
     # An unpacked caller passes a Fixnum (LOADI_1). The packed caller can pass a String, so position 1 has no fact.
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [nil], arg_types_for('plain' => plain, 'packed' => packed_caller)
   end
 
   def test_packed_send_to_another_name_leaves_the_argument_type
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [:fixnum], arg_types_for('plain' => plain, 'packed' => packed_caller('other'))
   end
 
   def test_unpacked_callers_keep_their_argument_type
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [:fixnum], arg_types_for('plain' => plain)
   end
 
@@ -192,19 +192,19 @@ class ClassArgTypesTest < Minitest::Test
   # Block-passing sends (`f(a) { }`, SENDB/SSENDB). vm.c OP_SENDB puts the block at R[a+n+1], after the positional
   # arguments: the count is still n and the block is no argument. They were not indexed at all, so a block-passing
   # caller could contradict the plain callers without anything noticing.
-  def sendb_insn(dest, name, argc, op: 'SENDB')
+  def sendb_insn(dest, name, argc, op: :SENDB)
     InsnStub.new(op: op, args: "R#{dest}\t:#{name}\tn=#{argc}")
   end
 
   # A block-passing caller that passes a String at position 1 (STRING R2 L[0]), then the block in R3 (BLOCK R3 I[0]).
-  def string_block_caller(op: 'SENDB', argc: 1)
+  def string_block_caller(op: :SENDB, argc: 1)
     Irep.new(label: 'blk', pool: ['s'],
-             instructions: [InsnStub.new(op: 'STRING', args: "R2\tL[0]"), InsnStub.new(op: 'BLOCK', args: "R3\tI[0]"),
+             instructions: [InsnStub.new(op: :STRING, args: "R2\tL[0]"), InsnStub.new(op: :BLOCK, args: "R3\tI[0]"),
                             sendb_insn(1, 'set', argc, op: op)])
   end
 
   def test_call_site_index_records_block_sends_with_their_positional_count
-    caller = irep('c', [send_insn(0, 'thing', 1), sendb_insn(0, 'thing', 2), sendb_insn(0, 'thing', '*', op: 'SSENDB')])
+    caller = irep('c', [send_insn(0, 'thing', 1), sendb_insn(0, 'thing', 2), sendb_insn(0, 'thing', '*', op: :SSENDB)])
     counts = CallSiteIndex.build({ 'c' => caller })['thing'].map { |*, n| n }
     # The block register is not counted: a SENDB with n=2 has count 2, and the packed SSENDB has none.
     assert_equal [1, 2, nil], counts
@@ -212,25 +212,25 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_block_passing_caller_gives_no_argument_type_fact
     # The plain caller passes a Fixnum; the block-passing caller passes a String at the same position.
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [nil], arg_types_for('plain' => plain, 'blk' => string_block_caller)
   end
 
   def test_self_implicit_block_passing_caller_gives_no_argument_type_fact
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
-    assert_equal [nil], arg_types_for('plain' => plain, 'blk' => string_block_caller(op: 'SSENDB'))
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    assert_equal [nil], arg_types_for('plain' => plain, 'blk' => string_block_caller(op: :SSENDB))
   end
 
   def test_packed_block_passing_caller_gives_no_argument_type_fact
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
-    packed_blk = irep('packed_blk', [InsnStub.new(op: 'LOADNIL', args: "R3\t(nil)"), InsnStub.new(op: 'MOVE', args: "R2\tR3"),
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    packed_blk = irep('packed_blk', [InsnStub.new(op: :LOADNIL, args: "R3\t(nil)"), InsnStub.new(op: :MOVE, args: "R2\tR3"),
                                      sendb_insn(1, 'set', '*')])
     assert_equal [nil], arg_types_for('plain' => plain, 'packed_blk' => packed_blk)
   end
 
   def test_agreeing_block_passing_caller_keeps_the_argument_type
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
-    agree = irep('blk', [InsnStub.new(op: 'LOADI_2', args: "R2\t(2)"), InsnStub.new(op: 'BLOCK', args: "R3\tI[0]"),
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    agree = irep('blk', [InsnStub.new(op: :LOADI_2, args: "R2\t(2)"), InsnStub.new(op: :BLOCK, args: "R3\tI[0]"),
                          sendb_insn(1, 'set', 1)])
     assert_equal [:fixnum], arg_types_for('plain' => plain, 'blk' => agree)
   end
@@ -239,8 +239,8 @@ class ClassArgTypesTest < Minitest::Test
     # set(x, y) with a plain two-argument caller. The block-passing caller passes ONE argument, so it is not
     # this arity's call site; if its block register R3 were counted as argument two, position two would lose
     # its Fixnum fact.
-    two_args = irep('set', [InsnStub.new(op: 'ENTER', args: '2:0:0:0:0:0:0:0 (0x40000)')])
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), InsnStub.new(op: 'LOADI_2', args: "R3\t(2)"),
+    two_args = irep('set', [InsnStub.new(op: :ENTER, args: '2:0:0:0:0:0:0:0 (0x40000)')])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), InsnStub.new(op: :LOADI_2, args: "R3\t(2)"),
                            send_insn(1, 'set', 2)])
     ireps = { 'set' => two_args, 'plain' => plain, 'blk' => string_block_caller }
     sites = CallSiteIndex.build(ireps)
@@ -273,11 +273,11 @@ class ClassArgTypesTest < Minitest::Test
 
   # Keyword sends (`f(k: v)`, n=0|nk=1): vm.c OP_SEND packs the nk pairs into one Hash at position n+1 and sets
   # ci->nk = CALL_MAXARGS, so the callee's position 1 receives a Hash. The count is nil, as for a packed send.
-  def keyword_send(dest, name, n, nk) = InsnStub.new(op: 'SEND', args: "R#{dest}\t:#{name}\tn=#{n}|nk=#{nk}")
+  def keyword_send(dest, name, n, nk) = InsnStub.new(op: :SEND, args: "R#{dest}\t:#{name}\tn=#{n}|nk=#{nk}")
 
   # The keyword key sits in R2 (LOADSYM :k), the value in R3; the Hash lands at R2, the callee's position 1.
   def keyword_caller(name = 'set')
-    irep('kw', [InsnStub.new(op: 'LOADSYM', args: "R2\t:k"), InsnStub.new(op: 'LOADNIL', args: "R3\t(nil)"),
+    irep('kw', [InsnStub.new(op: :LOADSYM, args: "R2\t:k"), InsnStub.new(op: :LOADNIL, args: "R3\t(nil)"),
                 keyword_send(1, name, 0, 1)])
   end
 
@@ -291,7 +291,7 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_keyword_caller_gives_no_argument_type_fact
     # The plain caller passes a Fixnum; the keyword caller passes a Hash at position 1, so there is no fact.
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [nil], arg_types_for('plain' => plain, 'kw' => keyword_caller)
   end
 
@@ -303,7 +303,7 @@ class ClassArgTypesTest < Minitest::Test
   end
 
   def test_keyword_send_to_another_name_leaves_the_argument_type
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [:fixnum], arg_types_for('plain' => plain, 'kw' => keyword_caller('other'))
   end
 
@@ -312,9 +312,9 @@ class ClassArgTypesTest < Minitest::Test
   def insn(op, args) = InsnStub.new(op: op, args: args)
 
   # `to_enum(:set, 1)` / `recv.enum_for(:set, 1)`: LOADSYM R2, LOADI_1 R3, then the send at R1 with n=2.
-  def enum_caller(op: 'to_enum', send_op: 'SSEND', name: 'set', value: 'LOADI_1', argc: 2, nk: nil)
+  def enum_caller(op: 'to_enum', send_op: :SSEND, name: 'set', value: :LOADI_1, argc: 2, nk: nil)
     spec = nk ? "n=#{argc}|nk=#{nk}" : "n=#{argc}"
-    irep('enum', [insn('LOADSYM', "R2\t:#{name}"), insn(value, value == 'LOADI_1' ? "R3\t(1)" : "R3"),
+    irep('enum', [insn(:LOADSYM, "R2\t:#{name}"), insn(value, value == :LOADI_1 ? "R3\t(1)" : "R3"),
                   insn(send_op, "R1\t:#{op}\t#{spec}")])
   end
 
@@ -333,19 +333,19 @@ class ClassArgTypesTest < Minitest::Test
   end
 
   def test_to_enum_with_only_a_name_is_a_zero_argument_call
-    sites = CallSiteIndex.build({ 'e' => irep('e', [insn('LOADSYM', "R2\t:set"), insn('SSEND', "R1\t:to_enum\tn=1")]) })
+    sites = CallSiteIndex.build({ 'e' => irep('e', [insn(:LOADSYM, "R2\t:set"), insn(:SSEND, "R1\t:to_enum\tn=1")]) })
     assert_equal [0], sites['set'].map { |*, n| n }
   end
 
   def test_to_enum_with_no_arguments_is_a_call_of_each
-    sites = CallSiteIndex.build({ 'e' => irep('e', [insn('SSEND0', "R1\t:to_enum")]) })
+    sites = CallSiteIndex.build({ 'e' => irep('e', [insn(:SSEND0, "R1\t:to_enum")]) })
     assert_equal [0], sites['each'].map { |*, n| n }
   end
 
   # ArgTypes already refuses every name spelled as a Symbol literal, so a literal to_enum
   # never produced an unsound fixnum fact; ClassArgTypes had no such guard, which is what the index closes.
   def test_arg_types_refuses_a_to_enum_target_either_way
-    plain = irep('plain', [insn('LOADI_1', "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [insn(:LOADI_1, "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_nil arg_types_for('plain' => plain, 'enum' => enum_caller)
     assert_nil arg_types_for('enum' => enum_caller)
   end
@@ -368,8 +368,8 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_to_enum_class_fact_is_a_caller_fact_for_block_and_other_receiver_forms
     with_tracer_answering('A') do
-      assert_equal ['A'], class_types_for('enum' => enum_caller(send_op: 'SSENDB'), 'plain' => direct_caller)
-      assert_equal ['A'], class_types_for('enum' => enum_caller(op: 'enum_for', send_op: 'SEND'))
+      assert_equal ['A'], class_types_for('enum' => enum_caller(send_op: :SSENDB), 'plain' => direct_caller)
+      assert_equal ['A'], class_types_for('enum' => enum_caller(op: 'enum_for', send_op: :SEND))
     end
   end
 
@@ -386,8 +386,8 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_to_enum_with_a_packed_splat_gives_no_fact
     # `to_enum(:set, *r)`: LOADSYM R2; ARRAY R2 1; MOVE R3 R9; ARYCAT R2 (R3); SSEND R1 n=*.
-    packed = irep('packed', [insn('LOADSYM', "R2\t:set"), insn('ARRAY', "R2\t1"), insn('MOVE', "R3\tR9"),
-                             insn('ARYCAT', "R2\t(R3)"), insn('SSEND', "R1\t:to_enum\tn=*")])
+    packed = irep('packed', [insn(:LOADSYM, "R2\t:set"), insn(:ARRAY, "R2\t1"), insn(:MOVE, "R3\tR9"),
+                             insn(:ARYCAT, "R2\t(R3)"), insn(:SSEND, "R1\t:to_enum\tn=*")])
     index = CallSiteIndex.build({ 'e' => packed })
     assert_equal [nil], index['set'].map { |*, n| n }
     assert_empty index[CallSiteIndex::UNKNOWN_TARGET]
@@ -398,40 +398,40 @@ class ClassArgTypesTest < Minitest::Test
   end
 
   def test_to_enum_name_through_a_move_is_literal
-    moved = irep('moved', [insn('LOADSYM', "R5\t:set"), insn('MOVE', "R2\tR5"), insn('LOADI_1', "R3\t(1)"),
-                           insn('SSEND', "R1\t:to_enum\tn=2")])
+    moved = irep('moved', [insn(:LOADSYM, "R5\t:set"), insn(:MOVE, "R2\tR5"), insn(:LOADI_1, "R3\t(1)"),
+                           insn(:SSEND, "R1\t:to_enum\tn=2")])
     assert_equal [1], CallSiteIndex.build({ 'e' => moved })['set'].map { |*, n| n }
   end
 
   def test_to_enum_with_a_computed_name_is_a_caller_of_every_same_arity_name
     # `to_enum(name, str)`: name (R2) comes from an argument, not a LOADSYM. It may reach `set`.
-    computed = irep('enum', [insn('MOVE', "R2\tR7"), insn('SSEND', "R1\t:to_enum\tn=2")])
+    computed = irep('enum', [insn(:MOVE, "R2\tR7"), insn(:SSEND, "R1\t:to_enum\tn=2")])
     index = CallSiteIndex.build({ 'e' => computed })
     assert_equal [1], CallSiteIndex.sites(index, 'set').map { |*, n| n }
     with_tracer_by_caller('plain' => 'A', 'enum' => 'B') do
       assert_equal [nil], class_types_for('plain' => direct_caller, 'enum' => computed)
     end
     # A different arity is no caller of a one-argument target.
-    two = irep('two', [insn('MOVE', "R2\tR7"), insn('SSEND', "R1\t:to_enum\tn=3")])
+    two = irep('two', [insn(:MOVE, "R2\tR7"), insn(:SSEND, "R1\t:to_enum\tn=3")])
     with_tracer_by_caller('plain' => 'A', 'two' => 'B') do
       assert_equal ['A'], class_types_for('plain' => direct_caller, 'two' => two)
     end
   end
 
   def test_to_enum_with_a_computed_packed_or_keyword_name_blocks_every_target
-    packed = irep('packed', [insn('MOVE', "R2\tR7"), insn('SSEND', "R1\t:to_enum\tn=*")])
+    packed = irep('packed', [insn(:MOVE, "R2\tR7"), insn(:SSEND, "R1\t:to_enum\tn=*")])
     with_tracer_answering('A') { assert_equal [nil], class_types_for('plain' => direct_caller, 'packed' => packed) }
   end
 
   def test_to_enum_with_a_conditional_name_records_every_literal
     # `to_enum(c ? :set : :other, 1)`: the nearest LOADSYM of R2 is :other, but a jump lands between it and the send.
     branch = Irep.new(label: 'cond', instructions: [
-      Insn.new(lineno: 0, addr: 0, op: 'JMPNOT', args: "R7\t010", raw: 'JMPNOT R7 010'),
-      Insn.new(lineno: 0, addr: 4, op: 'LOADSYM', args: "R2\t:set", raw: ''),
-      Insn.new(lineno: 0, addr: 7, op: 'JMP', args: '013', raw: ''),
-      Insn.new(lineno: 0, addr: 10, op: 'LOADSYM', args: "R2\t:other", raw: ''),
-      Insn.new(lineno: 0, addr: 13, op: 'LOADI_1', args: "R3\t(1)", raw: ''),
-      Insn.new(lineno: 0, addr: 15, op: 'SSEND', args: "R1\t:to_enum\tn=2", raw: '')
+      Insn.new(lineno: 0, addr: 0, op: :JMPNOT, args: "R7\t010", raw: 'JMPNOT R7 010'),
+      Insn.new(lineno: 0, addr: 4, op: :LOADSYM, args: "R2\t:set", raw: ''),
+      Insn.new(lineno: 0, addr: 7, op: :JMP, args: '013', raw: ''),
+      Insn.new(lineno: 0, addr: 10, op: :LOADSYM, args: "R2\t:other", raw: ''),
+      Insn.new(lineno: 0, addr: 13, op: :LOADI_1, args: "R3\t(1)", raw: ''),
+      Insn.new(lineno: 0, addr: 15, op: :SSEND, args: "R1\t:to_enum\tn=2", raw: '')
     ])
     index = CallSiteIndex.build({ 'e' => branch })
     assert_equal [1], index['set'].map { |*, n| n }
@@ -442,8 +442,8 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_block_form_to_enum_still_forwards_only_the_positional_arguments
     # The block of `to_enum(:set, 1) { size }` is the size block, not an argument of set.
-    blk = irep('blk', [insn('LOADSYM', "R2\t:set"), insn('LOADI_1', "R3\t(1)"), insn('BLOCK', "R4\tI[0]"),
-                       insn('SSENDB', "R1\t:to_enum\tn=2")])
+    blk = irep('blk', [insn(:LOADSYM, "R2\t:set"), insn(:LOADI_1, "R3\t(1)"), insn(:BLOCK, "R4\tI[0]"),
+                       insn(:SSENDB, "R1\t:to_enum\tn=2")])
     assert_equal [1], CallSiteIndex.build({ 'e' => blk })['set'].map { |*, n| n }
   end
 
@@ -452,12 +452,12 @@ class ClassArgTypesTest < Minitest::Test
   # registry, so its name can stay MONO) is. The super sits in irep 'sup', the body of `def <name>`.
   def super_def_irep(def_name, super_insn)
     parent = Irep.new(label: 'p', reps: ['sup'],
-                      instructions: [InsnStub.new(op: 'TDEF', args: "R1\t:#{def_name}\tI[0]")])
-    sup = irep('sup', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), super_insn])
+                      instructions: [InsnStub.new(op: :TDEF, args: "R1\t:#{def_name}\tI[0]")])
+    sup = irep('sup', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), super_insn])
     { 'p' => parent, 'sup' => sup }
   end
 
-  def super_insn(count) = InsnStub.new(op: 'SUPER', args: "R1\tn=#{count}")
+  def super_insn(count) = InsnStub.new(op: :SUPER, args: "R1\tn=#{count}")
 
   def test_call_site_index_keys_a_super_by_the_enclosing_method_name
     index = CallSiteIndex.build(super_def_irep('set', super_insn(1)))
@@ -468,26 +468,26 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_super_that_disagrees_drops_the_argument_type_fact
     # The direct caller passes a Fixnum; `def set` calls super with a Symbol (a Symbol stands in for a non-Fixnum).
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     sup = super_def_irep('set', super_insn(1))
-    sup['sup'] = irep('sup', [InsnStub.new(op: 'LOADSYM', args: "R2\t:k"), super_insn(1)])
+    sup['sup'] = irep('sup', [InsnStub.new(op: :LOADSYM, args: "R2\t:k"), super_insn(1)])
     assert_equal [nil], arg_types_for('plain' => plain, **sup)
   end
 
   def test_super_that_agrees_keeps_the_argument_type_fact
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [:fixnum], arg_types_for('plain' => plain, **super_def_irep('set', super_insn(1)))
   end
 
   def test_super_in_an_unrelated_method_does_not_interfere
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     sup = super_def_irep('other', super_insn(1))
-    sup['sup'] = irep('sup', [InsnStub.new(op: 'LOADSYM', args: "R2\t:k"), super_insn(1)])
+    sup['sup'] = irep('sup', [InsnStub.new(op: :LOADSYM, args: "R2\t:k"), super_insn(1)])
     assert_equal [:fixnum], arg_types_for('plain' => plain, **sup)
   end
 
   def test_packed_super_drops_the_argument_type_fact
-    plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
+    plain = irep('plain', [InsnStub.new(op: :LOADI_1, args: "R2\t(1)"), send_insn(1, 'set', 1)])
     assert_equal [nil], arg_types_for('plain' => plain, **super_def_irep('set', super_insn('*')))
   end
 

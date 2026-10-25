@@ -22,7 +22,7 @@ class CodeGen
   # else nil. Shared by compile_keyword_send and splat_hash_literal_pairs.
   def literal_symbol_write(irep, use, reg)
     writers = BytecodeIR.reaching_writer_indices(irep, use, reg)&.map { |i| BytecodeIR.for(irep).source_at(i) }
-    return nil unless writers&.all? { |w| w.op == 'LOADSYM' }
+    return nil unless writers&.all? { |w| w.op == :LOADSYM }
 
     names = writers.map { |w| w.sym_token&.sub(/\A:/, '') }.uniq
     names.size == 1 ? names.first : nil
@@ -572,7 +572,7 @@ class CodeGen
     return nil if universe.nil?
 
     send_insn = BytecodeIR.for(irep).source_at(idx)
-    return nil unless send_insn && send_insn.op == 'SEND'
+    return nil unless send_insn && send_insn.op == :SEND
 
     recv_reg = d.to_i
     # The only write of the receiver register that reaches the send must be the constant read itself.
@@ -580,7 +580,7 @@ class CodeGen
     return nil unless write_index
 
     write = BytecodeIR.for(irep).source_at(write_index)
-    return nil unless write.op == 'GETCONST'
+    return nil unless write.op == :GETCONST
 
     const_name = write.const_name
     return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
@@ -622,7 +622,7 @@ class CodeGen
     return nil unless write_index
 
     insn = BytecodeIR.for(irep).source_at(write_index)
-    return nil unless %w[ARRAY ARRAY2].include?(insn.op)
+    return nil unless %i[ARRAY ARRAY2].include?(insn.op)
 
     n = insn.uint_operand
     return nil if n.nil?
@@ -643,7 +643,7 @@ class CodeGen
     return nil unless write_index
 
     insn = BytecodeIR.for(irep).source_at(write_index)
-    return nil unless insn.op == 'HASH'
+    return nil unless insn.op == :HASH
 
     n = insn.uint_operand
     return nil if n.nil?

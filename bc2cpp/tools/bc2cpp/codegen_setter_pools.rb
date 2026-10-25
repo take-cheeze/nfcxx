@@ -102,7 +102,7 @@ class CodeGen
       irep = @ireps[d.irep]
       return :no_body unless irep
       return :arity unless pure_mandatory_arity?(irep) && mandatory_arity(irep) == 1
-      return :super if irep_tree_op?(irep, 'SUPER')
+      return :super if irep_tree_op?(irep, :SUPER)
     end
     nil
   end

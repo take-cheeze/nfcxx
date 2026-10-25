@@ -25,7 +25,7 @@ class CodeGen
     return region[:needs_ret] unless region[:needs_ret].nil?
 
     block_irep = region[:block_irep]
-    return true if BytecodeIR.for(block_irep).op?('RETURN_BLK')
+    return true if BytecodeIR.for(block_irep).op?(:RETURN_BLK)
 
     # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` must be the same set
     # emit_proc_fallback_fn will use for this body; a pre-scan recognizing fewer
@@ -61,7 +61,7 @@ class CodeGen
   def compute_block_upvar_needs(irep)
     needs = []
     walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |insn, depth|
-      next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
+      next unless %i[GETUPVAR SETUPVAR].include?(insn.op)
 
       upvar_idx, level = insn.upvar_ref
       # Relative to +irep+ a reference `depth` blocks down needs the frame `level - depth` up; a negative one is the
@@ -106,7 +106,7 @@ class CodeGen
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
-    BytecodeIR.for(irep).instructions_with_op('BLKPUSH').each do |insn|
+    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).each do |insn|
       lv = insn.paren_value
       return nil unless lv
 
@@ -148,7 +148,7 @@ class CodeGen
 
   def const_receiver?(irep, call_idx, dest_reg, const_name)
     writer = irep.source_writer(call_idx - 1, dest_reg)
-    writer&.op == 'GETCONST' && writer.const_name == const_name
+    writer&.op == :GETCONST && writer.const_name == const_name
   end
 
   # FIBER_YIELD_UNSAFE_SUPPORT: `Fiber.yield` is a plain SEND (`GETCONST R2
@@ -161,7 +161,7 @@ class CodeGen
   # resumable step function. Transitive callers are handled
   # by compute_fiber_unsafe_methods.
   def calls_fiber_yield?(irep)
-    BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SEND, :SEND0) do |insn, idx|
       name = insn.sym
       next unless name == 'yield'
 
@@ -221,7 +221,7 @@ class CodeGen
 
     seeds = []
     @ireps.each_value do |irep|
-      BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB]) do |insn, paired, sendb_idx|
+      BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SENDB]) do |insn, paired, sendb_idx|
         idx = sendb_idx - 1
         next unless paired.sym == 'new'
 
@@ -302,7 +302,7 @@ class CodeGen
     return [] unless seen.add?(irep)
 
     names = []
-    BytecodeIR.for(irep).instructions_with_op('SSEND', 'SSEND0', 'SSENDB').each do |insn|
+    BytecodeIR.for(irep).instructions_with_op(:SSEND, :SSEND0, :SSENDB).each do |insn|
       name = insn.sym
       names << name if name
     end
@@ -315,7 +315,7 @@ class CodeGen
 
   def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
     regions = []
-    BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB SSENDB]) do |insn, paired, sendb_idx|
+    BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SENDB SSENDB]) do |insn, paired, sendb_idx|
       idx = sendb_idx - 1
       # EXPLICIT_ARGS_BLOCK_FALLBACK_SUPPORT: any fixed positional count
       # (`ary.inject(0) { }`, `ary.each_slice(2) { }`), but never `n=*` (a splat has
@@ -335,7 +335,7 @@ class CodeGen
       next unless name
 
       # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: never admit `Fiber.new { ... }`.
-      next if paired.op == 'SENDB' && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
+      next if paired.op == :SENDB && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
 
       block_irep_idx = insn.block_index
       next unless block_irep_idx
@@ -398,12 +398,12 @@ class CodeGen
 
       region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
                  block_irep: block_irep, name: name, n: n,
-                 self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk,
+                 self_implicit: paired.op == :SSENDB, upvars: upvars, needs_blk: needs_blk,
                  parent_irep: irep }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
       # forwarded by every enclosing block, so it is needed for a `return` at any depth.
-      region[:needs_brk] = BytecodeIR.for(block_irep).op?('BREAK')
-      region[:needs_ret] = BytecodeIR.for(block_irep).op?('RETURN_BLK') ||
+      region[:needs_brk] = BytecodeIR.for(block_irep).op?(:BREAK)
+      region[:needs_ret] = BytecodeIR.for(block_irep).op?(:RETURN_BLK) ||
                            recognize_block_fallback_regions(block_irep, available_upvars: upvars).any? { |nested| nested[:needs_ret] }
       regions << region
     end
@@ -438,7 +438,7 @@ class CodeGen
 
     idx = irep.index_of_addr(region[:sendb_addr])
     insn = idx && BytecodeIR.for(irep).source_at(idx)
-    return {} unless insn&.op == 'SENDB'
+    return {} unless insn&.op == :SENDB
 
     shapes = CoreBlockParamSigs.shapes.select do |(klass, name), shape|
       name == region[:name] && shape.argc.cover?(region[:n]) && shape.arity == fields.first && !shape.elements.empty? &&
@@ -496,7 +496,7 @@ class CodeGen
 
     idx = irep.index_of_addr(region[:sendb_addr])
     insn = idx && BytecodeIR.for(irep).source_at(idx)
-    return nil unless insn&.op == (region[:self_implicit] ? 'SSENDB' : 'SENDB')
+    return nil unless insn&.op == (region[:self_implicit] ? :SSENDB : :SENDB)
 
     name = insn.sym.to_s
     definers = if region[:self_implicit]
@@ -742,7 +742,7 @@ class CodeGen
     # lexical scope the proc was built in, which compiled code cannot see.
     # Runs before the ivars are set, like the nested pass above.
     if region[:kind] == 'exec_fallback'
-      BytecodeIR.for(block_irep).instructions_with_op('TDEF').each do |tinsn|
+      BytecodeIR.for(block_irep).instructions_with_op(:TDEF).each do |tinsn|
         next if nested_suppressed.include?(tinsn.addr)
 
         tregion = tdef_fallback_region(tinsn, block_irep)
@@ -814,7 +814,7 @@ class CodeGen
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     arm_prune_block_analysis(block_irep, d, 0)
     BytecodeIR.for(block_irep).each_source do |insn, idx|
-      next if insn.op == 'ENTER'
+      next if insn.op == :ENTER
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
 
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
@@ -855,7 +855,7 @@ class CodeGen
     # this block) only leaves the proc; compile_insn throws bc2cpp_proc_exit for
     # it, caught here so it never reaches a call site.
     exits = kind == 'block_fallback' &&
-            (BytecodeIR.for(block_irep).op?('BREAK') || BytecodeIR.for(block_irep).op?('RETURN_BLK'))
+            (BytecodeIR.for(block_irep).op?(:BREAK) || BytecodeIR.for(block_irep).op?(:RETURN_BLK))
     # BLOCK_DIRECT_ENTRY: the entry replaces the cfunc wrapper for this block.
     region[:direct_entry] = block_direct_entry?(region, kind, exits)
     region[:yield_free] = region[:direct_entry] && note_block_yield_free(region[:block_irep])
@@ -1183,9 +1183,9 @@ class CodeGen
   # BLOCK_FALLBACK RProcs, whose break throws that type).
   def recognize_explicit_block_arg_regions(irep)
     regions = []
-    irep.each_with_op('SENDB', 'SSENDB') do |insn, idx|
+    irep.each_with_op(:SENDB, :SSENDB) do |insn, idx|
       prev = BytecodeIR.for(irep).previous(idx)
-      next if prev && prev.op == 'BLOCK'
+      next if prev && prev.op == :BLOCK
 
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.
       # The args Array is already built in R(dest+1) (see compile_dynamic_splat_send)
@@ -1202,12 +1202,12 @@ class CodeGen
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
                      argv_reg: (dest_reg.to_i + 1).to_s,
                      blk_reg: (dest_reg.to_i + 2).to_s, name: name,
-                     self_implicit: insn.op == 'SSENDB' }
+                     self_implicit: insn.op == :SSENDB }
       else
         n = insn.n_spec.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
                      blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
-                     self_implicit: insn.op == 'SSENDB', parent_irep: irep }
+                     self_implicit: insn.op == :SSENDB, parent_irep: irep }
       end
     end
     regions

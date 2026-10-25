@@ -120,8 +120,8 @@ class EntryGraphHarness
 end
 bodies = %w[ctor forward].to_h do |label|
   [label, Irep.new(label: label, nlocals: 2, nregs: 2, instructions: [
-    Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: '1:0:0:0:0:0:0:0 (0x0)'),
-    Insn.new(lineno: 1, addr: 4, op: 'RETURN', args: 'R1')
+    Insn.new(lineno: 1, addr: 0, op: :ENTER, args: '1:0:0:0:0:0:0:0 (0x0)'),
+    Insn.new(lineno: 1, addr: 4, op: :RETURN, args: 'R1')
   ])]
 end
 definitions = [EntryDefinition.new('MZ', 'initialize', 'ctor'), EntryDefinition.new('Sink', 'forward', 'forward')]

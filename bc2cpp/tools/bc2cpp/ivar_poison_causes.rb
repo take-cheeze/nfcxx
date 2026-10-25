@@ -19,14 +19,14 @@ require_relative 'bytecode_ir_ops'
 #   unreadable:<cause>           reaching definitions refused (BytecodeIR's refusal cause)
 module IvarPoisonCauses
   LITERALS = {
-    'LOADTRUE' => 'bool', 'LOADFALSE' => 'bool', 'LOADL' => 'numeric',
-    'LOADSYM' => 'symbol', 'STRING' => 'string', 'STRCAT' => 'string', 'LOADNIL' => 'nil', 'LOADSELF' => 'self',
-    'GETIDX' => 'getidx', 'GETIDX0' => 'getidx', 'GETUPVAR' => 'upvar', 'GETGV' => 'gv', 'GETCV' => 'cv',
-    'LAMBDA' => 'proc', 'BLOCK' => 'proc', 'METHOD' => 'proc', 'HASH' => 'hash', 'ARRAY' => 'array', 'ARRAY2' => 'array',
-    'RANGE_INC' => 'range', 'RANGE_EXC' => 'range', 'GETCONST' => 'getconst', 'GETMCNST' => 'getconst',
-    'OCLASS' => 'getconst', 'CLASS' => 'class_body', 'MODULE' => 'class_body', 'EXEC' => 'class_body'
+    :LOADTRUE => 'bool', :LOADFALSE => 'bool', :LOADL => 'numeric',
+    :LOADSYM => 'symbol', :STRING => 'string', :STRCAT => 'string', :LOADNIL => 'nil', :LOADSELF => 'self',
+    :GETIDX => 'getidx', :GETIDX0 => 'getidx', :GETUPVAR => 'upvar', :GETGV => 'gv', :GETCV => 'cv',
+    :LAMBDA => 'proc', :BLOCK => 'proc', :METHOD => 'proc', :HASH => 'hash', :ARRAY => 'array', :ARRAY2 => 'array',
+    :RANGE_INC => 'range', :RANGE_EXC => 'range', :GETCONST => 'getconst', :GETMCNST => 'getconst',
+    :OCLASS => 'getconst', :CLASS => 'class_body', :MODULE => 'class_body', :EXEC => 'class_body'
   }.freeze
-  CALLS = (BytecodeIR::Ops::CALL | %w[ARYCAT ARYPUSH]).freeze
+  CALLS = (BytecodeIR::Ops::CALL | %i[ARYCAT ARYPUSH]).freeze
   # A literal that is an immediate (or nil): no registry class names it, so no class hint can ever hold it.
   IMMEDIATE_ATOMS = %w[integer numeric bool symbol nil].freeze
   # Buckets in priority order: an ivar is counted once, in the first bucket one of its unresolved stores falls in.
@@ -67,13 +67,13 @@ module IvarPoisonCauses
     end
     insn = BytecodeIR.for(irep).source_at(defn.index)
     op = insn.op
-    if op == 'MOVE'
+    if op == :MOVE
       return ['unreadable', 'move'] if depth > 6 || insn.regs[1].nil?
 
       return classify(irep, defn.index, insn.regs[1], mand, method_name, registry, depth + 1)
     end
     return ['integer', nil] if BytecodeIR::Ops::LOADI_OPS.include?(op)
-    return ['getiv', insn.ivar.to_s] if op == 'GETIV'
+    return ['getiv', insn.ivar.to_s] if op == :GETIV
     return [LITERALS.fetch(op), nil] if LITERALS.key?(op)
     return ["call:#{call_kind(insn.sym, registry)}", insn.sym.to_s] if CALLS.include?(op) && insn.sym
 

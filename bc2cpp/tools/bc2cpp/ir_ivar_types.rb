@@ -26,7 +26,7 @@ module IrIvarTypes
     constructors_read = group.readers.any? do |label|
       definition = gen.numeric_irep_owner[label]
       irep = gen.instance_variable_get(:@ireps)&.[](label)
-      definition&.name == 'initialize' && irep && BytecodeIR.for(irep).instructions_with_op('GETIV').any? { |insn| insn.ivar.to_s == name.to_s }
+      definition&.name == 'initialize' && irep && BytecodeIR.for(irep).instructions_with_op(:GETIV).any? { |insn| insn.ivar.to_s == name.to_s }
     end
     mask |= NumericFlow::NIL if constructors_read || !gen.numeric_ivar_assured?(owner, name.to_s)
     gen.bytecode_ir_mask_classes(mask)

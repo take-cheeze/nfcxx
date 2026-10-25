@@ -483,7 +483,7 @@ class CodeGen
         next if initializers.empty?
 
         has_super = initializers.one? && initializers.first.irep &&
-                    BytecodeIR.for(@ireps.fetch(initializers.first.irep)).op?('SUPER')
+                    BytecodeIR.for(@ireps.fetch(initializers.first.irep)).op?(:SUPER)
         unless has_super
           raise "bc2cpp storage error: #{klass}#initialize must call super " \
                 "to inherit embedded ivars from #{owner}"
@@ -556,8 +556,8 @@ class CodeGen
     irep = @ireps[definition.irep]
     return false unless irep
 
-    first =BytecodeIR.for(irep).each_source.find { |insn, _| !%w[ENTER LINE NOP MOVE].include?(insn.op) }&.first
-    first&.op == 'SUPER' && super_reaches_superclass?(definition) &&
+    first =BytecodeIR.for(irep).each_source.find { |insn, _| !%i[ENTER LINE NOP MOVE].include?(insn.op) }&.first
+    first&.op == :SUPER && super_reaches_superclass?(definition) &&
       Array(@prepended_modules[definition.owner]).empty?
   end
 
@@ -612,7 +612,7 @@ class CodeGen
     @own_ivar_names ||= {}
     @own_ivar_names[label] ||= begin
       names = Set.new
-      BytecodeIR.for(@ireps.fetch(label)).each_with_op('GETIV', 'SETIV') { |insn, _| names << insn.ivar if insn.ivar }
+      BytecodeIR.for(@ireps.fetch(label)).each_with_op(:GETIV, :SETIV) { |insn, _| names << insn.ivar if insn.ivar }
       names.freeze
     end
   end

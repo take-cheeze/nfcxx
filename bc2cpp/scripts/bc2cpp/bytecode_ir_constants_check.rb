@@ -200,7 +200,7 @@ suite.compile(constant_path_source) do |ireps, root|
   path_of_new = lambda do |name|
     md = registry.fetch(name).find { |d| d.owner == 'CpJoin' }
     irep = ireps.fetch(md.irep)
-    idx = irep.instructions.index { |i| %w[SEND SEND0 SENDB].include?(i.op) && i.sym == 'new' }
+    idx = irep.instructions.index { |i| %i[SEND SEND0 SENDB].include?(i.op) && i.sym == 'new' }
     [irep, idx, irep.instructions[idx].reg]
   end
 
@@ -225,7 +225,7 @@ suite.compile(constant_path_source) do |ireps, root|
   # Barrier callers (codegen_receiver_facts) keep the textual walk: their barrier ops are the proof.
   irep, idx, reg = path_of_new.call('pick')
   barrier = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY,
-                                                                  barrier: %w[JMPUW])
+                                                                  barrier: %i[JMPUW])
   check.call('a barrier caller keeps the textual walk (nearest arm Hash; codegen asks every definition itself)',
              barrier&.name == 'Hash')
 end

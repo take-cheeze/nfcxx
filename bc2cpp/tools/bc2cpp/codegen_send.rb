@@ -1507,7 +1507,7 @@ class CodeGen
       end
 
       # A literal-block send (compile_direct_block_send) is a SENDB at the site.
-      constant_ops = @call_block_expr ? %w[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %w[SEND0 SEND SSEND0 SSEND]
+      constant_ops = @call_block_expr ? %i[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %i[SEND0 SEND SSEND0 SSEND]
       if !self_implicit && irep && constant_site_idx && @closed_world &&
          constant_ops.include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         # A send inside a rescue or ensure range reads its receiver through the handler edges.
@@ -1527,14 +1527,14 @@ class CodeGen
       # NATIVE_SINGLETON_CALL: `File.exist?` and the other native singleton functions of a stable
       # constant, called through a per-site method cache instead of a by-name send.
       if !self_implicit && irep && constant_site_idx && @closed_world &&
-         %w[SEND0 SEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
+         %i[SEND0 SEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         singleton_code = native_singleton_call_code(name, n, d, recv, argv, irep, constant_site_idx,
                                                     unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                     owner_def&.owner, constant_owner)
         return singleton_code if singleton_code
       end
 
-      if %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+      if %i[SEND0 SEND SSEND0 SSEND].include?(insn.op)
         class_arg_proven = call_arguments.nil? &&
                            kernel_class_argument_proven?(name, argv, irep, constant_site_idx, trace_reg_offset, owner_def)
         kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit, class_arg_proven: class_arg_proven)
@@ -2152,7 +2152,7 @@ class CodeGen
     return false unless reg && irep && idx
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
-    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADSELF' }
+    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == :LOADSELF }
   end
 
   # LOOP_FLOW_POSITION: the flow position of a send compiled from an inlined loop body (compile_insn
@@ -2171,12 +2171,12 @@ class CodeGen
 
     original = BytecodeIR.for(irep).source_at(trace_idx)
     unless original && original.addr == trace_insn.addr && original.op == trace_insn.op &&
-           original.sym == trace_insn.sym && %w[SEND SEND0].include?(original.op) &&
+           original.sym == trace_insn.sym && %i[SEND SEND0].include?(original.op) &&
            original.reg && trace_insn.reg && original.reg.to_i + reg_offset.to_i == trace_insn.reg.to_i
       # A synthetic send (addr 0: a typed index or splat helper) has no position of its own; an SSEND is a
       # self call, whose receiver is self and needs no set.
       reason = if trace_insn.addr.zero? then :synthetic_send
-               elsif trace_insn.op.start_with?('SSEND') then :self_send
+               elsif trace_insn.op.to_s.start_with?('SSEND') then :self_send
                else :position_mismatch
                end
       return loop_flow_refuse(irep, trace_idx, reason)
@@ -2193,13 +2193,13 @@ class CodeGen
     # The receiver holds the loop element (the block's parameter R1, possibly copied: its definition is the entry
     # value, index ENTRY, or the ENTER that binds it) and the body writes R1 again.
     element = defs.any? do |d|
-      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == 'ENTER')
+      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == :ENTER)
     end
     if element && loop_element_reassigned?(irep)
       return loop_flow_refuse(irep, trace_idx, :element_reassigned)
     end
 
-    upvars = writers.map { |w| w&.op == 'GETUPVAR' && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
+    upvars = writers.map { |w| w&.op == :GETUPVAR && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
     return loop_flow_accept(irep, trace_idx, :local, { irep: irep, idx: trace_idx, insn: original }) if upvars.none?
 
     loop_upvar_position(original, upvars, irep, trace_idx)
@@ -2216,7 +2216,7 @@ class CodeGen
     k = upvars.first
     return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k.to_s)
 
-    flow_insn = Insn.synthetic('SEND', "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
+    flow_insn = Insn.synthetic(:SEND, "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
     loop_flow_accept(irep, trace_idx, :upvar, { irep: host, idx: parent[:idx], insn: flow_insn })
   end
 
@@ -2254,7 +2254,7 @@ class CodeGen
     @loop_element_reassigned.fetch(irep) do
       @loop_element_reassigned[irep] = BytecodeIR.own_upvar_written_regs(irep).include?(LOOP_ELEMENT_REG) ||
                                        BytecodeIR.for(irep).each_source.any? do |i, _|
-                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != 'ENTER' &&
+                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != :ENTER &&
                                            !NumericFlow::NO_WRITE_OPS.include?(i.op)
                                        end
     end

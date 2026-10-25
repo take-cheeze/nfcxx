@@ -89,14 +89,14 @@ module IrSymbolFlow
       return nil if d.entry?
 
       insn = BytecodeIR.for(irep).source_at(d.index)
-      next :nil if insn.op == 'LOADNIL'
-      return nil unless insn.op == 'ARYCAT'
+      next :nil if insn.op == :LOADNIL
+      return nil unless insn.op == :ARYCAT
 
       onto = reaching(irep, d.index, insn.reg) or return nil
-      return nil unless onto.all? { |o| !o.entry? && BytecodeIR.for(irep).source_at(o.index).op == 'LOADNIL' }
+      return nil unless onto.all? { |o| !o.entry? && BytecodeIR.for(irep).source_at(o.index).op == :LOADNIL }
 
-      get = single_def(irep, d.index, (insn.reg.to_i + 1).to_s, 'GETIDX') or return nil
-      getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, 'GETCONST') or return nil
+      get = single_def(irep, d.index, (insn.reg.to_i + 1).to_s, :GETIDX) or return nil
+      getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, :GETCONST) or return nil
       BytecodeIR.for(irep).source_at(getc).const_name or return nil
     end
     found = consts.reject { |c| c == :nil }.uniq
@@ -128,11 +128,11 @@ module IrSymbolFlow
       BytecodeIR.for(irep).instructions.each do |instruction|
         insn = instruction.source
         case insn.op
-        when 'SETCONST' then index[:setconst][insn.const_name] << label if insn.const_name
-        when 'GETCONST' then index[:getconst][insn.const_name] << [label, instruction.index] if insn.const_name
-        when 'GETMCNST', 'SETMCNST' then index[:mcnst] << insn.const_name if insn.const_name
-        when 'LOADSYM' then index[:spelled] << insn.sym if insn.sym
-        when 'SYMBOL', 'STRING'
+        when :SETCONST then index[:setconst][insn.const_name] << label if insn.const_name
+        when :GETCONST then index[:getconst][insn.const_name] << [label, instruction.index] if insn.const_name
+        when :GETMCNST, :SETMCNST then index[:mcnst] << insn.const_name if insn.const_name
+        when :LOADSYM then index[:spelled] << insn.sym if insn.sym
+        when :SYMBOL, :STRING
           entry = irep.pool[insn.pool_index.to_i]
           index[:spelled] << entry if entry.is_a?(String)
         when *BytecodeIR::Ops::SEND then index[:sends][insn.sym] << [label, instruction.index] if insn.sym
@@ -189,8 +189,8 @@ module IrSymbolFlow
       return nil unless insn.reg == reg
 
       case insn.op
-      when 'SETIDX' then writes << n
-      when 'GETIDX' then return nil unless element_reads_splat_only?(irep, n, reg)
+      when :SETIDX then writes << n
+      when :GETIDX then return nil unless element_reads_splat_only?(irep, n, reg)
       else return nil
       end
     end
@@ -200,18 +200,18 @@ module IrSymbolFlow
     uses = value_reads(irep, idx, reg) or return false
     uses.all? do |n|
       insn = BytecodeIR.for(irep).source_at(n)
-      insn.op == 'ARYCAT' && insn.reg.to_i + 1 == reg.to_i
+      insn.op == :ARYCAT && insn.reg.to_i + 1 == reg.to_i
     end
   end
 
   # Ops that write R[a] on every normal exit (vm.c), so the value an earlier write left there is gone. Ops that
   # write no register, only maybe write it (a callee frame above a send) or mutate R[a] in place are absent.
-  KILLS_LEAD = Set['MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE', 'GETGV', 'GETSV',
-                   'GETIV', 'GETCV', 'GETCONST', 'GETMCNST', 'GETUPVAR', 'GETIDX', 'GETIDX0', 'SETIDX', 'SSEND',
-                   'SSEND0', 'SSENDB', 'SEND', 'SEND0', 'SENDB', 'SUPER', 'BLKCALL', 'ADD', 'ADDI', 'SUB', 'SUBI',
-                   'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'ARRAY', 'ARRAY2', 'AREF', 'INTERN', 'SYMBOL',
-                   'STRING', 'HASH', 'LAMBDA', 'BLOCK', 'METHOD', 'RANGE_INC', 'RANGE_EXC', 'OCLASS', 'CLASS',
-                   'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'SCLASS', 'TCLASS', 'EXCEPT'].freeze
+  KILLS_LEAD = Set[:MOVE, :LOADL, :LOADSYM, :LOADNIL, :LOADSELF, :LOADTRUE, :LOADFALSE, :GETGV, :GETSV,
+                   :GETIV, :GETCV, :GETCONST, :GETMCNST, :GETUPVAR, :GETIDX, :GETIDX0, :SETIDX, :SSEND,
+                   :SSEND0, :SSENDB, :SEND, :SEND0, :SENDB, :SUPER, :BLKCALL, :ADD, :ADDI, :SUB, :SUBI,
+                   :MUL, :DIV, :EQ, :LT, :LE, :GT, :GE, :ARRAY, :ARRAY2, :AREF, :INTERN, :SYMBOL,
+                   :STRING, :HASH, :LAMBDA, :BLOCK, :METHOD, :RANGE_INC, :RANGE_EXC, :OCLASS, :CLASS,
+                   :MODULE, :EXEC, :DEF, :TDEF, :SDEF, :SCLASS, :TCLASS, :EXCEPT].freeze
 
   # Instructions that may read the value instruction idx leaves in reg: a forward walk over normal and handler
   # edges that stops at a write of reg (except along that write's own handler edges, raised before it). The
@@ -272,7 +272,7 @@ module IrSymbolFlow
   def collect_captures(tree, irep, depth, out)
     Array(irep.reps).each do |label|
       child = tree[label] or next
-      BytecodeIR.for(child).each_with_op('GETUPVAR') do |insn, _|
+      BytecodeIR.for(child).each_with_op(:GETUPVAR) do |insn, _|
         index, level = insn.upvar_ref
         out << index.to_s if index && level == depth - 1
       end
@@ -285,18 +285,18 @@ module IrSymbolFlow
     regs = insn.regs.map(&:to_i)
     a = regs.first
     case insn.op
-    when *BytecodeIR::Ops::LOAD_PREFIX_OPS, 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETUPVAR', 'STRING', 'SYMBOL', 'LAMBDA',
-         'BLOCK', 'METHOD', 'OCLASS', 'TCLASS', 'TDEF', 'ENTER', 'NOP', 'STOP', 'JMP', 'JMPUW', 'EXCEPT' then []
-    when 'MOVE', 'AREF', 'GETIDX0' then regs.drop(1)
-    when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'SETGV', 'SETSV', 'SETIV', 'SETCV',
-         'SETCONST', 'SETUPVAR', 'INTERN', 'ARYSPLAT', 'SCLASS', 'MODULE', 'EXEC', 'ADDI', 'SUBI', 'ADDILV', 'SUBILV'
+    when *BytecodeIR::Ops::LOAD_PREFIX_OPS, :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST, :GETUPVAR, :STRING, :SYMBOL, :LAMBDA,
+         :BLOCK, :METHOD, :OCLASS, :TCLASS, :TDEF, :ENTER, :NOP, :STOP, :JMP, :JMPUW, :EXCEPT then []
+    when :MOVE, :AREF, :GETIDX0 then regs.drop(1)
+    when :RETURN, :RETURN_BLK, :BREAK, :JMPIF, :JMPNOT, :JMPNIL, :SETGV, :SETSV, :SETIV, :SETCV,
+         :SETCONST, :SETUPVAR, :INTERN, :ARYSPLAT, :SCLASS, :MODULE, :EXEC, :ADDI, :SUBI, :ADDILV, :SUBILV
       [a]
-    when 'GETIDX', 'ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'ARYCAT', 'STRCAT', 'HASHCAT',
-         'RANGE_INC', 'RANGE_EXC', 'SETMCNST'
+    when :GETIDX, :ADD, :SUB, :MUL, :DIV, :EQ, :LT, :LE, :GT, :GE, :ARYCAT, :STRCAT, :HASHCAT,
+         :RANGE_INC, :RANGE_EXC, :SETMCNST
       [a, a + 1]
-    when 'SETIDX' then [a, a + 1, a + 2]
-    when 'ARRAY', 'ARRAY2' then element_regs(insn, 1)
-    when 'HASH' then element_regs(insn, 2)
+    when :SETIDX then [a, a + 1, a + 2]
+    when :ARRAY, :ARRAY2 then element_regs(insn, 1)
+    when :HASH then element_regs(insn, 2)
     when *BytecodeIR::Ops::SEND
       # R[a] (the receiver), then n arguments or one splat Array, then the block for the B forms.
       args = if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) then 0
@@ -321,7 +321,7 @@ module IrSymbolFlow
   def literal_constants(ctx, index, class_label, const)
     irep = ctx.ireps[class_label]
     lits = {}
-    BytecodeIR.for(irep).each_with_op('SETCONST') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SETCONST) do |insn, idx|
       name = insn.const_name
       next unless name && name != const && index[:setconst][name].size == 1 && !index[:mcnst].include?(name)
 
@@ -358,7 +358,7 @@ module IrSymbolFlow
   # The writer's ENTER takes exactly arity required parameters and nothing else.
   def required_only?(irep, arity)
     enter = BytecodeIR.for(irep).instruction_at(0)&.source
-    return false unless enter&.op == 'ENTER'
+    return false unless enter&.op == :ENTER
 
     fields = enter.enter_fields.first(7).map(&:to_i)
     fields.size == 7 && fields[0] == arity && fields[1..].all?(&:zero?)
@@ -392,18 +392,18 @@ module IrSymbolFlow
     insn = BytecodeIR.for(ctx.ireps[label]).source_at(n)
     reg = insn.reg.to_i
     case insn.op
-    when 'LOADSYM' then insn.sym ? Set[insn.sym] : nil
+    when :LOADSYM then insn.sym ? Set[insn.sym] : nil
     when LITERAL_LOAD then EMPTY
-    when 'ARRAY', 'ARRAY2' then union(ctx, label, n, element_regs(insn, 1), visiting)
-    when 'HASH' then union(ctx, label, n, element_regs(insn, 2), visiting)
-    when 'ARYCAT' then union(ctx, label, n, [reg, reg + 1], visiting)
-    when 'ARYPUSH', 'HASHADD'
-      width = insn.op == 'HASHADD' ? 2 * insn.uint_operand.to_i : insn.uint_operand.to_i
+    when :ARRAY, :ARRAY2 then union(ctx, label, n, element_regs(insn, 1), visiting)
+    when :HASH then union(ctx, label, n, element_regs(insn, 2), visiting)
+    when :ARYCAT then union(ctx, label, n, [reg, reg + 1], visiting)
+    when :ARYPUSH, :HASHADD
+      width = insn.op == :HASHADD ? 2 * insn.uint_operand.to_i : insn.uint_operand.to_i
       union(ctx, label, n, (reg..(reg + width)), visiting)
-    when 'MOVE', 'AREF', 'GETIDX0' then values_at(ctx, label, n, insn.regs[1], visiting)
-    when 'GETIDX' then values_at(ctx, label, n, insn.reg, visiting) # an element, whatever the index
-    when 'GETCONST' then ctx.literal_consts[insn.const_name]
-    when 'GETUPVAR' then upvalue_values(ctx, label, insn, visiting)
+    when :MOVE, :AREF, :GETIDX0 then values_at(ctx, label, n, insn.regs[1], visiting)
+    when :GETIDX then values_at(ctx, label, n, insn.reg, visiting) # an element, whatever the index
+    when :GETCONST then ctx.literal_consts[insn.const_name]
+    when :GETUPVAR then upvalue_values(ctx, label, insn, visiting)
     end
   end
 
@@ -479,8 +479,8 @@ module IrSymbolFlow
   # values not followed.
   def mutation_regs(ctx, insn)
     case insn.op
-    when 'SETIDX' then [setidx_value_reg(insn)]
-    when 'ASET' then nil
+    when :SETIDX then [setidx_value_reg(insn)]
+    when :ASET then nil
     when *BytecodeIR::Ops::SEND
       return [] unless MUTATORS.include?(insn.sym) || OTHER_MUTATORS.include?(insn.sym)
       return nil if OTHER_MUTATORS.include?(insn.sym) || ctx.user_methods.include?(insn.sym)
@@ -502,8 +502,8 @@ module IrSymbolFlow
 
   # P5: no symbol is created at run time.
   def symbol_free?(irep)
-    BytecodeIR.for(irep).instructions_with_op('INTERN', *BytecodeIR::Ops::SEND).none? do |insn|
-      insn.op == 'INTERN' || SYMBOL_SENDS.include?(insn.sym)
+    BytecodeIR.for(irep).instructions_with_op(:INTERN, *BytecodeIR::Ops::SEND).none? do |insn|
+      insn.op == :INTERN || SYMBOL_SENDS.include?(insn.sym)
     end
   end
 end

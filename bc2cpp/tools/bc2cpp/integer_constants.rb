@@ -65,16 +65,16 @@ module IntegerConstants
     poisoned = Set.new
     ireps.each_value do |irep|
       entries = const_entry_addrs(irep)
-      BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST', 'CLASS', 'MODULE') do |insn, i|
+      BytecodeIR.for(irep).each_with_op(:SETCONST, :SETMCNST, :CLASS, :MODULE) do |insn, i|
         case insn.op
-        when 'SETCONST', 'SETMCNST'
+        when :SETCONST, :SETMCNST
           name = insn.const_name
           next unless name
 
           src = insn.regs.last
           # A jump landing on the SETCONST (`X = c || 1`) leaves `c` in the register on the other path.
           defs[name] << (src && !entries.include?(insn.addr) ? const_source_kind(irep, i, src, entries) : nil)
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           nm = insn.sym_token
           poisoned << nm if nm
         end
@@ -190,10 +190,10 @@ module IntegerConstants
       return nil if left.nil? || right.nil?
 
       value = case kind[1]
-              when 'ADD', 'ADDI' then left + right
-              when 'SUB', 'SUBI' then left - right
-              when 'MUL' then left * right
-              when 'DIV'
+              when :ADD, :ADDI then left + right
+              when :SUB, :SUBI then left - right
+              when :MUL then left * right
+              when :DIV
                 # mruby's fixnum DIV floors (-7 / 2 == -4). A zero divisor raises at run time, so it is no constant.
                 return nil if right.zero?
 
@@ -237,20 +237,20 @@ module IntegerConstants
       next(loadi_value(insn) || :literal) if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
 
       case insn.op
-      when 'GETCONST'
+      when :GETCONST
         # `"GETCONST\tR%d\t%s"` -- register first, bare name second.
         n = insn.const_name
         n && [:alias, n]
-      when 'GETMCNST'
+      when :GETMCNST
         # `"GETMCNST\tR%d\t(R%d)::%s"`: only the bare name after `::` is used; the
         # scope register is not modelled, so the proof must hold for every constant
         # of that name.
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL', 'DIV'
+      when :ADD, :SUB, :ADDI, :SUBI, :MUL, :DIV
         args = insn.regs
         left = const_source_kind(irep, j, cur, entries)
-        right = if %w[ADDI SUBI].include?(insn.op)
+        right = if %i[ADDI SUBI].include?(insn.op)
                   immediate = BytecodeIR::OperandModel.imm_operand(insn)
                   next nil unless immediate
 
@@ -263,7 +263,7 @@ module IntegerConstants
         next nil unless source_operand_kind?(left) && source_operand_kind?(right)
 
         [:arithmetic, insn.op, left, right]
-      when 'SEND'
+      when :SEND
         bit_op_kind(irep, j, insn, cur, entries)
       end
     end
@@ -296,7 +296,7 @@ module IntegerConstants
     defs = Hash.new { |h, k| h[k] = [] }
     ireps.each_value do |irep|
       entries = const_entry_addrs(irep)
-      irep.each_with_op('SETCONST', 'SETMCNST') do |insn, i|
+      irep.each_with_op(:SETCONST, :SETMCNST) do |insn, i|
         name = insn.const_name
         next unless name && admitted.include?(name)
 
@@ -337,16 +337,16 @@ module IntegerConstants
       end
 
       case insn.op
-      when 'GETCONST'
+      when :GETCONST
         n = insn.const_name
         n && [:alias, n]
-      when 'GETMCNST'
+      when :GETMCNST
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL', 'DIV'
+      when :ADD, :SUB, :ADDI, :SUBI, :MUL, :DIV
         args = insn.regs
         left = literal_value_kind(irep, j, cur, entries)
-        right = if %w[ADDI SUBI].include?(insn.op)
+        right = if %i[ADDI SUBI].include?(insn.op)
                   immediate = BytecodeIR::OperandModel.imm_operand(insn)
                   next nil unless immediate
 
@@ -359,7 +359,7 @@ module IntegerConstants
         next nil unless left && right
 
         [:arithmetic, insn.op, left, right]
-      when 'SEND'
+      when :SEND
         literal_bit_op_kind(irep, j, insn, cur, entries)
       end
     end
@@ -379,14 +379,14 @@ module IntegerConstants
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
     # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode name; imm_operand is nil for them.
-    return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
-    return -1 if insn.op == 'LOADI__1'
+    return insn.op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+    return -1 if insn.op == :LOADI__1
 
     tok = BytecodeIR::OperandModel.imm_operand(insn)
     return nil unless tok
 
     value = tok.to_i
-    return nil if insn.op == 'LOADI32' && !value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
+    return nil if insn.op == :LOADI32 && !value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
 
     value
   end
@@ -432,13 +432,13 @@ module IntegerConstants
   def self.defined_name_universe(ireps, native_paths, foreign_paths)
     names = Set.new
     ireps.each_value do |irep|
-      BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST', 'CLASS', 'MODULE') do |insn, _index|
+      BytecodeIR.for(irep).each_with_op(:SETCONST, :SETMCNST, :CLASS, :MODULE) do |insn, _index|
         case insn.op
-        when 'SETCONST'
+        when :SETCONST
           names << insn.const_name
-        when 'SETMCNST'
+        when :SETMCNST
           names << insn.mcnst_name
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           names << insn.sym_token
         end
       end

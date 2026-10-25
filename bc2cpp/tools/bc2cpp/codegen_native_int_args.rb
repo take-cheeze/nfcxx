@@ -80,10 +80,10 @@ module NativeIntArgs
 
     op = insn.op
     case op
-    when 'SEND', 'SEND0', 'SSEND', 'SSEND0' then "send:#{insn.sym}"
-    when 'GETCONST' then "const:#{insn.const_name}"
-    when 'GETMCNST' then "const:#{insn.mcnst_name}"
-    when 'GETIV' then "iv:#{insn.ivar}"
+    when :SEND, :SEND0, :SSEND, :SSEND0 then "send:#{insn.sym}"
+    when :GETCONST then "const:#{insn.const_name}"
+    when :GETMCNST then "const:#{insn.mcnst_name}"
+    when :GETIV then "iv:#{insn.ivar}"
     else op
     end
   end

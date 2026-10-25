@@ -30,7 +30,7 @@ Bc2cppIrBlockFixtures.compile(source, 'yields') do |ireps, _root|
   methods = {}
   ireps.each_value do |body|
     body.instructions.each do |insn|
-      methods[insn.sym] = ireps[body.reps[insn.block_index.to_i]] if insn.op == 'TDEF'
+      methods[insn.sym] = ireps[body.reps[insn.block_index.to_i]] if insn.op == :TDEF
     end
   end
   target = Struct.new(:owner, :name, :irep)
@@ -40,7 +40,7 @@ Bc2cppIrBlockFixtures.compile(source, 'yields') do |ireps, _root|
   ctx = Struct.new(:gen, :ireps).new(gen, ireps)
   summarize = lambda do |name|
     body = methods.fetch(name)
-    position = body.instructions.index { |insn| %w[SENDB SSENDB].include?(insn.op) }
+    position = body.instructions.index { |insn| %i[SENDB SSENDB].include?(insn.op) }
     IrYieldTypes.summarize(ctx, body, position, BytecodeIR::Types.new(body))
   end
   summary = summarize.call('caller')
@@ -50,7 +50,7 @@ Bc2cppIrBlockFixtures.compile(source, 'yields') do |ireps, _root|
     check.call("unsafe or unsupported #{name} refuses its protocol", summarize.call(name).nil?)
   end
   declared_body = methods.fetch('declared_caller')
-  declared_position = declared_body.instructions.index { |insn| %w[SENDB SSENDB].include?(insn.op) }
+  declared_position = declared_body.instructions.index { |insn| %i[SENDB SSENDB].include?(insn.op) }
   actual = BytecodeIR::Types::Fact.new(classes: Set[:String], declared: true, contracts: ['fixture:argument'])
   declared = IrYieldTypes.summarize(ctx, declared_body, declared_position, BytecodeIR::Types.new(declared_body, argument_facts: { '1' => actual }))
   check.call('yielded caller contract preserves conditional provenance', declared && declared.arguments['1'].declared? && declared.arguments['1'].contracts == ['fixture:argument'] && declared.arguments['1'].classes == Set[:String, :Integer])

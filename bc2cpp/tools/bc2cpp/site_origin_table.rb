@@ -83,7 +83,7 @@ module SiteOriginTable
 
   module Writer
     # Call ops whose result is a call result: the SEND family, SUPER and BLKCALL.
-    CALL_RESULT_OPS = (BytecodeIR::Ops::CALL | ['BLKCALL']).freeze
+    CALL_RESULT_OPS = (BytecodeIR::Ops::CALL | [:BLKCALL]).freeze
 
     module_function
 
@@ -137,18 +137,18 @@ module SiteOriginTable
       return entry_category(irep, definition.reg) if definition.entry?
 
       insn = BytecodeIR.for(irep).source_at(definition.index)
-      return 'self' if insn.op == 'LOADSELF'
+      return 'self' if insn.op == :LOADSELF
 
       # ENTER's typed definitions (rest, keyword hash, block, R1, post arguments) are the method's own parameters;
       # the one it stores that is not is a local, which starts as the nil every local starts as.
-      return(definition.built == :local ? 'literal_or_fresh' : 'parameter') if insn.op == 'ENTER'
+      return(definition.built == :local ? 'literal_or_fresh' : 'parameter') if insn.op == :ENTER
 
       text = SiteOriginTable::INSN_TEXT[[irep.label, definition.index]]
       # The read's own opcode decides these: their emitted text can be a multi-line
       # block whose last assignment is a temporary (`r5 = r5_tmp;`), which says nothing.
       case insn.op
-      when 'GETCONST', 'GETMCNST' then return 'constant'
-      when 'GETIV' then return text&.match?(/_ivars\*\)DATA_PTR/) ? 'embedded_ivar' : 'ivar_read'
+      when :GETCONST, :GETMCNST then return 'constant'
+      when :GETIV then return text&.match?(/_ivars\*\)DATA_PTR/) ? 'embedded_ivar' : 'ivar_read'
       end
 
       rhs = text ? assignment_rhs(text, definition.reg) : []
@@ -187,8 +187,8 @@ module SiteOriginTable
     def result_category(op)
       case op
       when CALL_RESULT_OPS then 'call_result'
-      when 'ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI', 'EQ', 'LT', 'LE', 'GT', 'GE' then 'operator_result'
-      when 'GETIDX', 'GETIDX0', 'AREF' then 'indexed_result'
+      when :ADD, :SUB, :MUL, :DIV, :ADDI, :SUBI, :EQ, :LT, :LE, :GT, :GE then 'operator_result'
+      when :GETIDX, :GETIDX0, :AREF then 'indexed_result'
       end
     end
 
@@ -196,10 +196,10 @@ module SiteOriginTable
     # (direct or by name is not provable without its text), and other writes are 'other' as the text walk called them.
     def opcode_category(op)
       case op
-      when 'GETIV' then 'ivar_read'
-      when 'GETIDX', 'GETIDX0', 'AREF' then 'indexed_result'
-      when 'GETUPVAR' then 'captured_upvar'
-      when 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADL', 'ARRAY', 'ARRAY2', 'HASH', 'STRING', BytecodeIR::Ops::LOADI_OPS
+      when :GETIV then 'ivar_read'
+      when :GETIDX, :GETIDX0, :AREF then 'indexed_result'
+      when :GETUPVAR then 'captured_upvar'
+      when :LOADNIL, :LOADTRUE, :LOADFALSE, :LOADL, :ARRAY, :ARRAY2, :HASH, :STRING, BytecodeIR::Ops::LOADI_OPS
         'literal_or_fresh'
       when CALL_RESULT_OPS then 'call_result'
       else 'other'

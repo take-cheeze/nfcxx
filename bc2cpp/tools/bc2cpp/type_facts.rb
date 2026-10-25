@@ -46,12 +46,12 @@ module TypeFacts
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
   PRODUCERS = {
-    'GETIV' => 'ivar', 'GETIDX' => 'element', 'GETIDX0' => 'element', 'GETCONST' => 'constant', 'GETMCNST' => 'constant',
-    'GETUPVAR' => 'upvar', 'GETGV' => 'global', 'GETCV' => 'class_variable', 'STRING' => 'literal:String',
-    'STRCAT' => 'literal:String', 'ARRAY' => 'literal:Array', 'ARRAY2' => 'literal:Array', 'HASH' => 'literal:Hash',
-    'RANGE_INC' => 'literal:Range', 'RANGE_EXC' => 'literal:Range', 'LAMBDA' => 'literal:Proc', 'BLOCK' => 'literal:Proc',
-    'LOADSYM' => 'literal:Symbol', 'LOADSELF' => 'self', 'LOADNIL' => 'literal:nil', 'LOADTRUE' => 'literal:bool',
-    'LOADFALSE' => 'literal:bool', 'LOADL' => 'literal:Numeric'
+    :GETIV => 'ivar', :GETIDX => 'element', :GETIDX0 => 'element', :GETCONST => 'constant', :GETMCNST => 'constant',
+    :GETUPVAR => 'upvar', :GETGV => 'global', :GETCV => 'class_variable', :STRING => 'literal:String',
+    :STRCAT => 'literal:String', :ARRAY => 'literal:Array', :ARRAY2 => 'literal:Array', :HASH => 'literal:Hash',
+    :RANGE_INC => 'literal:Range', :RANGE_EXC => 'literal:Range', :LAMBDA => 'literal:Proc', :BLOCK => 'literal:Proc',
+    :LOADSYM => 'literal:Symbol', :LOADSELF => 'self', :LOADNIL => 'literal:nil', :LOADTRUE => 'literal:bool',
+    :LOADFALSE => 'literal:bool', :LOADL => 'literal:Numeric'
   }.freeze
 
   module_function
@@ -163,8 +163,8 @@ module TypeFacts
         'type' => (types || inferred) && BytecodeIR::Types.type_name(types || inferred),
         'source' => types ? 'signature' : inferred ? 'inferred:receiver-call-sites' : nil }
     end
-    optional_keywords = BytecodeIR.for(irep).instructions_with_op('KEY_P').filter_map { |insn| insn.sym.to_s }.to_set
-    keyword_params = BytecodeIR.for(irep).instructions_with_op('KARG').filter_map { |insn| insn.sym.to_s }.uniq.map do |name|
+    optional_keywords = BytecodeIR.for(irep).instructions_with_op(:KEY_P).filter_map { |insn| insn.sym.to_s }.to_set
+    keyword_params = BytecodeIR.for(irep).instructions_with_op(:KARG).filter_map { |insn| insn.sym.to_s }.uniq.map do |name|
       types = ctx.signature_contracts&.ir_keyword_types&.dig(d.irep, name)
       required = !optional_keywords.include?(name)
       inferred = (types || !gen.respond_to?(:bytecode_ir_keyword_argument_classes)) ? nil : gen.bytecode_ir_keyword_argument_classes(d, name)
@@ -363,13 +363,13 @@ module TypeFacts
   # A body whose every exit is RETSELF / RETNIL / RETTRUE / RETFALSE (no value register to trace).
   def trivial_return(irep)
     # The IR's exits minus STOP: it ends the program, not the body, and the grep this replaces never matched it.
-    ops = BytecodeIR.for(irep).exits.map(&:op).reject { |o| o == 'STOP' }
-    return nil if ops.empty? || ops.any? { |o| %w[RETURN RETURN_BLK BREAK].include?(o) }
+    ops = BytecodeIR.for(irep).exits.map(&:op).reject { |o| o == :STOP }
+    return nil if ops.empty? || ops.any? { |o| %i[RETURN RETURN_BLK BREAK].include?(o) }
     # A `return` in a nested block (RETURN_BLK) leaves this method with the block's value. That exit is not in this
     # body's exit list, so the body's own RETNIL would otherwise stand for the whole method.
     return nil if BytecodeIR.nested_exit?(irep, :block_return)
 
-    kinds = ops.map { |o| { 'RETSELF' => 'self', 'RETNIL' => 'nil', 'RETTRUE' => 'bool', 'RETFALSE' => 'bool' }[o] }.uniq
+    kinds = ops.map { |o| { :RETSELF => 'self', :RETNIL => 'nil', :RETTRUE => 'bool', :RETFALSE => 'bool' }[o] }.uniq
     kinds.size == 1 ? kinds.first : nil
   end
 
@@ -402,7 +402,7 @@ module TypeFacts
     if cant
       why = if (irep.catch_handlers || []).any? { |h| h.type == :ensure } then 'ensure'
             elsif gen.send(:subtree_has_nonlocal_exit?, irep) then 'nonlocal-exit'
-            elsif BytecodeIR.for(irep).exits.none? { |ex| %w[RETURN RETURN_BLK].include?(ex.op) } then 'implicit-return-op'
+            elsif BytecodeIR.for(irep).exits.none? { |ex| %i[RETURN RETURN_BLK].include?(ex.op) } then 'implicit-return-op'
             else 'rescue'
             end
       return "unanalyzable:#{why}"
@@ -414,7 +414,7 @@ module TypeFacts
       idx = ex.index
       insn = BytecodeIR.for(irep).source_at(idx)
       case insn.op
-      when 'RETURN'
+      when :RETURN
         srcs = gen.respond_to?(:return_value_sources, true) ? gen.send(:return_value_sources, irep, idx, insn.reg) : nil
         if srcs.nil?
           causes << textual_producer(ctx, irep, idx, insn.reg)
@@ -427,10 +427,10 @@ module TypeFacts
             causes << producer_of(ctx, w)
           end
         end
-      when 'RETSELF' then causes << 'self'
-      when 'RETTRUE', 'RETFALSE' then causes << 'literal:bool'
-      when 'RETNIL' then causes << 'literal:nil'
-      when 'RETURN_BLK', 'BREAK' then causes << 'block-return'
+      when :RETSELF then causes << 'self'
+      when :RETTRUE, :RETFALSE then causes << 'literal:bool'
+      when :RETNIL then causes << 'literal:nil'
+      when :RETURN_BLK, :BREAK then causes << 'block-return'
       end
     end
     causes.empty? ? 'unknown' : causes.to_a.sort.first(4).join('+')
@@ -467,7 +467,7 @@ module TypeFacts
 
     if BytecodeIR::Ops::CALL.include?(w.op)
       "send_result:#{w.sym}#{definer_kind(ctx, w.sym)}"
-    elsif w.op == 'GETIV'
+    elsif w.op == :GETIV
       "ivar:@#{w.ivar}"
     elsif BytecodeIR::Ops::LOADI_OPS.include?(w.op)
       'literal:Integer'
@@ -499,7 +499,7 @@ module TypeFacts
         irep = d.irep && ctx.ireps[d.irep]
         next unless irep&.file
 
-        irep.each_with_op('SETIV') do |insn, _|
+        irep.each_with_op(:SETIV) do |insn, _|
           first_store[[d.owner, insn.ivar.to_s]] ||= { 'file' => relative(ctx, irep.file), 'line' => insn.lineno,
             'col' => column_of(reader.call(irep.file), insn.lineno, /@#{Regexp.escape(insn.ivar.to_s)}\b/, 0), 'method' => d.name }
         end
@@ -622,7 +622,7 @@ module TypeFacts
     program = BytecodeIR.for(irep)
     klasses = defs.map do |d|
       freeze = program.source_at(d.index)
-      next nil unless freeze.op == 'SEND0' && freeze.sym == 'freeze'
+      next nil unless freeze.op == :SEND0 && freeze.sym == 'freeze'
 
       FREEZE_SELF_LITERALS[textual_producer(ctx, irep, d.index, freeze.reg)]
     end

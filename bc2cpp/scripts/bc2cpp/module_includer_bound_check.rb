@@ -145,8 +145,8 @@ check('an undeclared name is never a module owner (nil)', candidates('Q', native
 # program source defines on one of them is untyped. Built on the same contract tables as self_call_override checks.
 puts '-- the module receiver same-name guard'
 def insn(addr, op, args) = Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
-module_irep = Irep.new(label: 'via_mod', instructions: [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SSEND', 'R1 :greet n=0'),
-                                                        insn(2, 'RETURN', 'R1')],
+module_irep = Irep.new(label: 'via_mod', instructions: [insn(0, :ENTER, '0:0:0:0:0:0:0:0 (0x0)'), insn(1, :SSEND, 'R1 :greet n=0'),
+                                                        insn(2, :RETURN, 'R1')],
                        catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 applied = RbsSignatures::Applied.new(
   ir_methods: Set[['M', 'via_mod'], ['A', 'greet'], ['B', 'greet']], ir_named_returns: { ['A', 'greet'] => Set[:Symbol], ['B', 'greet'] => Set[:Integer] },

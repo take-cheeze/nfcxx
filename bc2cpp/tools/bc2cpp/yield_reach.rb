@@ -55,24 +55,24 @@ class YieldReach
   YIELDER_MESSAGES = %w[<< yield call].freeze
   # Names bytecode operators dispatch to.
   OP_NAMES = {
-    'ADD' => '+', 'ADDI' => '+', 'ADDILV' => '+', 'SUB' => '-', 'SUBI' => '-', 'SUBILV' => '-', 'MUL' => '*',
-    'DIV' => '/', 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=', 'AREF' => '[]',
-    'ASET' => '[]=', 'GETIDX' => '[]', 'GETIDX0' => '[]', 'SETIDX' => '[]=', 'STRCAT' => 'to_s', 'ARYCAT' => 'to_a', 'ARYSPLAT' => 'to_a', 'APOST' => 'to_a',
-    'HASHCAT' => 'to_hash', 'RANGE_INC' => '<=>', 'RANGE_EXC' => '<=>', 'GETCONST' => 'const_missing',
-    'GETMCNST' => 'const_missing', 'CLASS' => 'inherited', 'TDEF' => 'singleton_method_added',
-    'DEF' => 'method_added', 'SDEF' => 'singleton_method_added', 'EXCEPT' => 'exception'
+    :ADD => '+', :ADDI => '+', :ADDILV => '+', :SUB => '-', :SUBI => '-', :SUBILV => '-', :MUL => '*',
+    :DIV => '/', :EQ => '==', :LT => '<', :LE => '<=', :GT => '>', :GE => '>=', :AREF => '[]',
+    :ASET => '[]=', :GETIDX => '[]', :GETIDX0 => '[]', :SETIDX => '[]=', :STRCAT => 'to_s', :ARYCAT => 'to_a', :ARYSPLAT => 'to_a', :APOST => 'to_a',
+    :HASHCAT => 'to_hash', :RANGE_INC => '<=>', :RANGE_EXC => '<=>', :GETCONST => 'const_missing',
+    :GETMCNST => 'const_missing', :CLASS => 'inherited', :TDEF => 'singleton_method_added',
+    :DEF => 'method_added', :SDEF => 'singleton_method_added', :EXCEPT => 'exception'
   }.freeze
   # Punctuation names have no identifier for the outside-source scan to find.
   OPERATOR_NAMES = %w[+ - * / % ** == != < <= > >= <=> === =~ !~ [] []= << >> ! & | ^ ~ +@ -@].freeze
   # Ops that copy a value without keeping or running it, or read it only as a condition.
-  NEUTRAL_OPS = %w[MOVE GETUPVAR BLKPUSH BLKCALL JMPIF JMPNOT JMPNIL ENTER NOP STOP].freeze
+  NEUTRAL_OPS = %i[MOVE GETUPVAR BLKPUSH BLKCALL JMPIF JMPNOT JMPNIL ENTER NOP STOP].freeze
   # Ops that read their leading register and never define it. It is BytecodeIR::Ops::LEAD_READ_ONLY with two
   # deliberate differences: MATCHERR is left out (writers_of counts it as a writer, the conservative answer),
   # and the stores and in-place appends are added (they read R(a) and define nothing in it; LEAD_READ_ONLY
   # is audited against the walk-over semantics, so it does not list them).
-  LEAD_READERS = (BytecodeIR::Ops::LEAD_READ_ONLY - ['MATCHERR'] +
-                  %w[SETIV SETGV SETCV SETCONST SETMCNST SETSV SETIDX ASET ARYPUSH HASHADD]).freeze
-  NON_WRITERS = %w[JMP JMPUW STOP RETSELF].freeze
+  LEAD_READERS = (BytecodeIR::Ops::LEAD_READ_ONLY - [:MATCHERR] +
+                  %i[SETIV SETGV SETCV SETCONST SETMCNST SETSV SETIDX ASET ARYPUSH HASHADD]).freeze
+  NON_WRITERS = %i[JMP JMPUW STOP RETSELF].freeze
 
   Node = Struct.new(:label, :irep, :kind, :name, :parent, :owner, :calls, :lit, :bodies, :seed, :native,
                     :unknown_call, :proc_call, :unknown_block, :invokes, :stored_read, :fiber_body,
@@ -146,7 +146,7 @@ class YieldReach
     irep = @ireps[label]
     return false unless irep
 
-    BytecodeIR.for(irep).each_with_op('SENDB') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SENDB) do |insn, idx|
       next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
 
       return true unless literal_block_child(irep, idx).nil?
@@ -215,13 +215,13 @@ class YieldReach
         node = @nodes[child]
         node.parent = irep.label
         case insn.op
-        when 'TDEF', 'DEF', 'SDEF'
+        when :TDEF, :DEF, :SDEF
           node.kind = :method
           node.name = insn.sym
           @defs_by_name[insn.sym] << child
-        when 'BLOCK', 'LAMBDA', 'METHOD'
+        when :BLOCK, :LAMBDA, :METHOD
           node.kind = :block
-        when 'EXEC'
+        when :EXEC
           node.kind = :body
           node.klass = class_of_exec(irep, insn)
         end
@@ -233,7 +233,7 @@ class YieldReach
 
   # CLASS R :Name has its superclass in R+1; a name declared twice with different supers is unknown.
   def record_class_decl(irep, insn, idx)
-    if insn.op == 'MODULE'
+    if insn.op == :MODULE
       @module_names << insn.sym
       return
     end
@@ -249,8 +249,8 @@ class YieldReach
 
       w = BytecodeIR.for(irep).source_at(df.index)
       case w.op
-      when 'LOADNIL' then :object
-      when 'GETCONST', 'GETMCNST' then w.const_name
+      when :LOADNIL then :object
+      when :GETCONST, :GETMCNST then w.const_name
       else :unknown
       end
     end.uniq
@@ -315,25 +315,25 @@ class YieldReach
         op = insn.op
         node.calls << OP_NAMES[op] if OP_NAMES[op] && !insn.block_index
         case op
-        when 'GETCONST', 'GETMCNST'
-          fiber_sites += 1 if op == 'GETCONST' && insn.const_name == 'Fiber'
+        when :GETCONST, :GETMCNST
+          fiber_sites += 1 if op == :GETCONST && insn.const_name == 'Fiber'
           @yielder_named_outside = true if %w[Yielder Generator].include?(insn.const_name) && !internal_file?(node)
-        when 'BLKPUSH', 'BLKCALL' then node.invokes = true
-        when 'SUPER'
+        when :BLKPUSH, :BLKCALL then node.invokes = true
+        when :SUPER
           # The block this method received goes on to the super method.
           node.calls << (@nodes[node.owner]&.name || '')
           node.super_forward = true
-        when 'LOADSYM' then @fiber_roots_unknown = true if insn.sym == 'Fiber'
-        when 'STRING', 'SYMBOL'
+        when :LOADSYM then @fiber_roots_unknown = true if insn.sym == 'Fiber'
+        when :STRING, :SYMBOL
           @fiber_roots_unknown = true if insn.pool_index && irep.pool[insn.pool_index] == 'Fiber'
-        when 'ALIAS'
+        when :ALIAS
           new_name, old_name = insn.args.to_s.scan(/:?([^\s:]+)/).flatten
           @alias_of[new_name] << old_name if new_name && old_name
-        when 'BLOCK', 'LAMBDA', 'METHOD'
+        when :BLOCK, :LAMBDA, :METHOD
           child = irep.reps[insn.block_index]
           node.lit << child if child
-          @storing_blocks << child if child && op == 'LAMBDA'
-        when 'EXEC'
+          @storing_blocks << child if child && op == :LAMBDA
+        when :EXEC
           child = irep.reps[insn.block_index]
           node.bodies << child if child
         end
@@ -352,7 +352,7 @@ class YieldReach
   def mark_generators
     @nodes.each_value do |node|
       irep = node.irep
-      BytecodeIR.for(irep).each_with_op('SENDB') do |insn, idx|
+      BytecodeIR.for(irep).each_with_op(:SENDB) do |insn, idx|
         next unless insn.sym == 'new'
         next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
 
@@ -363,7 +363,7 @@ class YieldReach
   end
 
   # Values that are never a Proc, so `x[i]` on them does not run one.
-  NON_PROC_WRITERS = %w[ARRAY ARRAY2 STRING HASH LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
+  NON_PROC_WRITERS = %i[ARRAY ARRAY2 STRING HASH LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
                         LOADI_7 LOADI8 LOADINEG LOADI16 LOADI32 LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE INTERN
                         SYMBOL RANGE_INC RANGE_EXC STRCAT].freeze
 
@@ -386,8 +386,8 @@ class YieldReach
 
       src = BytecodeIR.for(irep).source_at(df.index)
       NON_PROC_WRITERS.include?(src.op) ||
-        (src.op == 'GETIV' && proc_free_ivar?(src.ivar.to_s)) ||
-        ((src.op == 'SEND' || src.op == 'MUL') && array_times?(irep, df.index, src))
+        (src.op == :GETIV && proc_free_ivar?(src.ivar.to_s)) ||
+        ((src.op == :SEND || src.op == :MUL) && array_times?(irep, df.index, src))
     end
   end
 
@@ -395,7 +395,7 @@ class YieldReach
   # String (Array#join), neither a Proc.
   # OP_MUL (`*` on a non-numeric receiver) is a send of `*`, so it is judged as one.
   def array_times?(irep, index, src)
-    times = src.op == 'MUL' || src.sym == '*'
+    times = src.op == :MUL || src.sym == '*'
     times && @defs_by_name.fetch('*', []).empty? && non_proc_value_array?(irep, index, src.reg)
   end
 
@@ -424,7 +424,7 @@ class YieldReach
     @ireps.each_value.all? do |irep|
       program = BytecodeIR.for(irep)
       program.each_source.all? do |src, j|
-        next true unless src.op == 'SETIV' && src.ivar.to_s == name
+        next true unless src.op == :SETIV && src.ivar.to_s == name
 
         non_proc_value?(irep, j, src.regs.first, 1)
       end
@@ -775,7 +775,7 @@ class YieldReach
   def classify_definition(node, df, elem0, fallback, depth, seen = nil)
     irep = node.irep
     # The origin walk answers a slot ENTER stores (the block, R1) with ENTER itself.
-    if df.entry? || BytecodeIR.for(irep).source_at(df.index).op == 'ENTER'
+    if df.entry? || BytecodeIR.for(irep).source_at(df.index).op == :ENTER
       return [[:forward]] if df.reg.to_i == block_reg_of(irep)
       return [[:param, 1]] if df.reg.to_s == '1' && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
 
@@ -783,20 +783,20 @@ class YieldReach
     end
     w = BytecodeIR.for(irep).source_at(df.index)
     case w.op
-    when 'MOVE' then classify_kinds(node, df.index, w.regs[1], elem0: elem0, fallback: fallback, depth: depth + 1, seen: seen)
-    when 'BLOCK', 'LAMBDA' then [[:lit, irep.reps[w.block_index]]]
-    when 'LOADSYM' then [[:sym, w.sym]]
-    when 'BLKPUSH' then [[:forward]]
-    when 'GETCONST' then [[:const, w.const_name]]
-    when 'GETIV' then [[:ivar, w.ivar]]
-    when 'GETUPVAR' then [classify_upvar(node, w)]
-    when 'ARRAY'
+    when :MOVE then classify_kinds(node, df.index, w.regs[1], elem0: elem0, fallback: fallback, depth: depth + 1, seen: seen)
+    when :BLOCK, :LAMBDA then [[:lit, irep.reps[w.block_index]]]
+    when :LOADSYM then [[:sym, w.sym]]
+    when :BLKPUSH then [[:forward]]
+    when :GETCONST then [[:const, w.const_name]]
+    when :GETIV then [[:ivar, w.ivar]]
+    when :GETUPVAR then [classify_upvar(node, w)]
+    when :ARRAY
       # The first element of an argument array: R(a) before `ARRAY R(a) n`, R(b) of `ARRAY R(a) R(b) n`.
       count = w.typed.find { |operand| operand.kind == :int }&.value.to_i
       return [[:unknown]] unless elem0 && count.positive?
 
       classify_kinds(node, df.index, w.regs.size >= 2 ? w.regs[1] : df.reg, fallback: fallback, depth: depth + 1, seen: seen)
-    when 'ARYCAT', 'ARYPUSH'
+    when :ARYCAT, :ARYPUSH
       # Appending keeps the first element of the array being appended to.
       return [[:unknown]] unless elem0
 
@@ -825,7 +825,7 @@ class YieldReach
   # Does the node, or a block below it, assign register +index+ (by write or SETUPVAR)?
   def writes_reg?(node, index)
     return true unless writers_of(node.irep)[index].empty?
-    return true if BytecodeIR.for(node.irep).instructions_with_op('SETUPVAR').any? { |i| i.upvar_ref&.first == index }
+    return true if BytecodeIR.for(node.irep).instructions_with_op(:SETUPVAR).any? { |i| i.upvar_ref&.first == index }
 
     BytecodeIR.own_upvar_written_regs(node.irep).include?(index.to_s)
   end
@@ -838,7 +838,7 @@ class YieldReach
     end
     if writers.empty?
       return false unless index == bp
-    elsif !writers.all? { |i| i.op == 'MOVE' && i.regs[1] == bp.to_s }
+    elsif !writers.all? { |i| i.op == :MOVE && i.regs[1] == bp.to_s }
       return false
     end
 
@@ -921,7 +921,7 @@ class YieldReach
     kinds = classify_definition(node, BytecodeIR::Definition.new(BytecodeIR::ENTRY, reg.to_s), false, false, 0)
     writers_of(irep)[reg.to_i].each do |i|
       w = BytecodeIR.for(irep).source_at(i)
-      found = if w.op == 'MOVE'
+      found = if w.op == :MOVE
                 classify_kinds(node, i, w.regs[1], fallback: true, seen: seen)
               else
                 classify_definition(node, BytecodeIR::Definition.new(i, reg.to_s), false, false, 0)
@@ -945,7 +945,7 @@ class YieldReach
       child = @nodes[label]
       next unless child
 
-      BytecodeIR.for(child.irep).each_with_op('SETUPVAR') do |insn, i|
+      BytecodeIR.for(child.irep).each_with_op(:SETUPVAR) do |insn, i|
         out << [child, i, insn.reg] if insn.upvar_ref == [reg, depth]
       end
       upvar_stores(child, reg, depth + 1, out)

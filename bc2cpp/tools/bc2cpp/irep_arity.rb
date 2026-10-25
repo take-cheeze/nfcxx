@@ -56,7 +56,7 @@ def keyword_join_shape?(irep, name)
   _mand, _opt, _rest, _post, kw, kwrest = irep.enter.enter_fields.map(&:to_i)
   return false unless kw.positive? && kwrest.zero?
 
-  BytecodeIR.for(irep).instructions_with_op('KARG').any? { |insn| insn.sym.to_s == name }
+  BytecodeIR.for(irep).instructions_with_op(:KARG).any? { |insn| insn.sym.to_s == name }
 end
 
 # KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: can this def receive `nk`
@@ -217,7 +217,7 @@ end
 # site to vet, so recognize_lambda_fallback_regions requires
 # lambda_proc_frame_confined? over the enclosing irep instead. A lambda with no
 # upvars needs no such proof.
-LAMBDA_FALLBACK_UNSAFE_OPS = %w[
+LAMBDA_FALLBACK_UNSAFE_OPS = %i[
   LAMBDA BLOCK SENDB SSENDB
   RESCUE RAISEIF EXCEPT
 ].freeze
@@ -314,7 +314,7 @@ def optional_arg_table(irep)
 
   enter_idx = irep.enter_index
   jmps = instruction_run(irep, enter_idx + 1, opt + 1)
-  return [opt, nil, nil] unless jmps && jmps.all? { |i| i.op == 'JMP' }
+  return [opt, nil, nil] unless jmps && jmps.all? { |i| i.op == :JMP }
 
   [opt, jmps.map(&:addr), jmps.map { |i| i.jmp_addr }]
 end
@@ -330,7 +330,7 @@ def optional_block_arg_table(irep)
   return nil unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.positive?
 
   jmps = instruction_run(irep, irep.enter_index + 1, opt + 1)
-  return nil unless jmps && jmps.all? { |i| i.op == 'JMP' }
+  return nil unless jmps && jmps.all? { |i| i.op == :JMP }
 
   [opt, jmps.map(&:addr), jmps.map(&:jmp_addr)]
 end
@@ -364,7 +364,7 @@ def keyword_arg_table(irep)
 
   order = []
   required = {}
-  irep.each_with_op('KEY_P', 'KARG') do |insn, _index|
+  irep.each_with_op(:KEY_P, :KARG) do |insn, _index|
     sym = insn.sym_token
     next unless sym
 
@@ -372,7 +372,7 @@ def keyword_arg_table(irep)
       order << sym
       required[sym] = true
     end
-    required[sym] = false if insn.op == 'KEY_P'
+    required[sym] = false if insn.op == :KEY_P
   end
   return nil unless order.size == kw
 

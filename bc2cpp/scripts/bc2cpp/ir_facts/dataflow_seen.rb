@@ -4,9 +4,9 @@ require_relative '../../../tools/bc2cpp/irep'
 require_relative '../../../tools/bc2cpp/bytecode_ir'
 
 # Moves around a back edge revisit the same instruction with several registers.
-ops = [['LOADI_1', 'R1 (1)'], ['LOADI_2', 'R2 (2)'], ['LOADI_3', 'R3 (3)'],
-       ['JMPNOT', 'R4 8'], ['MOVE', 'R1 R2'], ['MOVE', 'R2 R3'], ['MOVE', 'R3 R1'],
-       ['JMP', '3'], ['RETURN', 'R1']]
+ops = [[:LOADI_1, 'R1 (1)'], [:LOADI_2, 'R2 (2)'], [:LOADI_3, 'R3 (3)'],
+       [:JMPNOT, 'R4 8'], [:MOVE, 'R1 R2'], [:MOVE, 'R2 R3'], [:MOVE, 'R3 R1'],
+       [:JMP, '3'], [:RETURN, 'R1']]
 list = ops.each_with_index.map { |(op, args), i| Insn.new(lineno: 1, addr: i, op: op, args: args, raw: "#{op} #{args}") }
 handlers = [CatchHandler.new(type: :rescue, begin_addr: 4, end_addr: 7, target: 8)]
 options = [{}, { follow_moves: false }, { origin_transfers: true }, { through_handlers: true },

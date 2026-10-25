@@ -6,9 +6,9 @@ require_relative 'bytecode_ir_containers'
 # returns a fresh literal `[e0, e1, ...]` of one length, each AREF reads the class set the flow proved for that
 # position. The producer and consumer conditions are `tuple_shape` and `tuple_aref_call`.
 class CodeGen
-  TUPLE_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
+  TUPLE_CALL_OPS = %i[SEND SEND0 SSEND SSEND0].freeze
   # Any other way out of a method: the result is not an Array literal.
-  TUPLE_FOREIGN_RETURN_OPS = %w[RETNIL RETSELF RETTRUE RETFALSE RETURN_BLK BREAK STOP].freeze
+  TUPLE_FOREIGN_RETURN_OPS = %i[RETNIL RETSELF RETTRUE RETFALSE RETURN_BLK BREAK STOP].freeze
   TUPLE_KEPT_BITS = NumericFlow::NUM | NumericFlow::NIL
   TUPLE_WALK_LIMIT = 64
 
@@ -28,7 +28,7 @@ class CodeGen
     return if @tuple_returns.empty?
 
     @ireps.each_value do |irep|
-      irep.each_with_op('AREF') do |insn, idx|
+      irep.each_with_op(:AREF) do |insn, idx|
         src, = insn.src_and_literal
         name = src && tuple_aref_call(irep, idx, src)
         @tuple_consumers[name] << irep.label if name && @tuple_returns.key?(name)
@@ -61,14 +61,14 @@ class CodeGen
     return nil if program.op?(*TUPLE_FOREIGN_RETURN_OPS) || tuple_block_returns?(irep)
 
     arrays = {}
-    irep.each_with_op('RETURN') do |ret, r|
+    irep.each_with_op(:RETURN) do |ret, r|
       reg = ret.reg
       defs = BytecodeIR.reaching_definitions(irep, r, reg, follow_moves: false, shared: true)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
       defs.each do |df|
         array = program.source_at(df.index)
-        n = array.op == 'ARRAY' ? array.uint_operand : nil
+        n = array.op == :ARRAY ? array.uint_operand : nil
         return nil unless n && array.reg == reg && tuple_walk_to_return(program, df.index, reg) == r
 
         arrays[df.index] = n
@@ -83,7 +83,7 @@ class CodeGen
       child = @ireps[label]
       next false unless child && seen.add?(label)
 
-      BytecodeIR.for(child).op?('RETURN_BLK') || tuple_block_returns?(child, seen)
+      BytecodeIR.for(child).op?(:RETURN_BLK) || tuple_block_returns?(child, seen)
     end
   end
 
@@ -97,8 +97,8 @@ class CodeGen
       cur = succ.first
       insn = program.instruction_at(cur).source
       case insn.op
-      when 'JMP', 'NOP' then next
-      when 'RETURN' then return insn.reg == reg ? cur : nil
+      when :JMP, :NOP then next
+      when :RETURN then return insn.reg == reg ? cur : nil
       else return nil
       end
     end
@@ -118,7 +118,7 @@ class CodeGen
     # Only AREFs of src may sit between the call and the destructure: any other op could mutate the array.
     return nil unless ((j + 1)...index).all? do |k|
       insn = program.source_at(k)
-      insn.op == 'AREF' && insn.reg != src && insn.src_and_literal&.first == src
+      insn.op == :AREF && insn.reg != src && insn.src_and_literal&.first == src
     end
 
     preds = program.instruction_predecessors(include_handlers: true)

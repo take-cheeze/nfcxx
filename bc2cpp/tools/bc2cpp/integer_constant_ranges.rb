@@ -14,8 +14,8 @@ module IntegerConstantRanges
   # CodeGen::LOADI_FIXNUM_MIN/MAX, the narrowest target Fixnum range (CodeGen loads after this file).
   FIXNUM_MIN = -1_073_741_824
   FIXNUM_MAX = 1_073_741_823
-  OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
-  LOADS = %w[GETCONST GETMCNST].freeze
+  OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
+  LOADS = %i[GETCONST GETMCNST].freeze
 
   # BC2CPP_NUMERIC_CONSTANTS=0 turns the analysis and every use of it off (the output is master's).
   def self.enabled?
@@ -54,14 +54,14 @@ module IntegerConstantRanges
       entries = IntegerConstants.const_entry_addrs(irep)
       BytecodeIR.for(irep).each_source do |insn, i|
         case insn.op
-        when 'SETCONST', 'SETMCNST'
+        when :SETCONST, :SETMCNST
           name = insn.const_name
           next unless name
 
           src = insn.regs.last
           kind = src && !entries.include?(insn.addr) ? source_kind(irep, i, src, entries, freeze_safe: freeze_safe) : nil
           defs[name] << kind
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           poisoned << insn.sym_token
           class_names << insn.sym_token
         end
@@ -131,15 +131,15 @@ module IntegerConstantRanges
       entries.include?(insn.addr) && !load_here
     end
     irep.walk_writers(idx - 1, reg.to_s, barrier: barrier, follow_moves: true) do |insn, j, cur|
-      next IrepScans::KEEP if freeze_safe && insn.op == 'SEND0' && insn.sym == 'freeze'
+      next IrepScans::KEEP if freeze_safe && insn.op == :SEND0 && insn.sym == 'freeze'
       if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
         value = literal(insn)
         next value.nil? ? nil : [:literal, value]
       end
 
       case insn.op
-      when 'GETCONST' then (n = insn.const_name) && [:alias, n]
-      when 'GETMCNST' then (n = insn.mcnst_name) && [:alias, n]
+      when :GETCONST then (n = insn.const_name) && [:alias, n]
+      when :GETMCNST then (n = insn.mcnst_name) && [:alias, n]
       when *OPS then arith_kind(irep, j, insn, cur, entries, freeze_safe: freeze_safe)
       end
     end
@@ -149,8 +149,8 @@ module IntegerConstantRanges
   # LOADI__1 carry no operand, so IntegerConstants.loadi_value cannot read them.
   def self.literal(insn)
     value = case insn.op
-            when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
-            when 'LOADI__1' then -1
+            when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+            when :LOADI__1 then -1
             else BytecodeIR::OperandModel.imm_operand(insn)&.to_i
             end
     value if value && value >= FIXNUM_MIN && value <= FIXNUM_MAX
@@ -160,7 +160,7 @@ module IntegerConstantRanges
     return nil if entries.include?(insn.addr)
 
     left = source_kind(irep, idx, cur, entries, freeze_safe: freeze_safe)
-    right = if %w[ADDI SUBI].include?(insn.op)
+    right = if %i[ADDI SUBI].include?(insn.op)
               imm = BytecodeIR::OperandModel.imm_operand(insn)
               imm && [:literal, imm.to_i]
             else
@@ -182,10 +182,10 @@ module IntegerConstantRanges
 
   def self.combine(op, left, right)
     case op
-    when 'ADD', 'ADDI' then fit([left[0] + right[0], left[1] + right[1]])
-    when 'SUB', 'SUBI' then fit([left[0] - right[1], left[1] - right[0]])
-    when 'MUL' then corners(left, right) { |a, b| a * b }
-    when 'DIV'
+    when :ADD, :ADDI then fit([left[0] + right[0], left[1] + right[1]])
+    when :SUB, :SUBI then fit([left[0] - right[1], left[1] - right[0]])
+    when :MUL then corners(left, right) { |a, b| a * b }
+    when :DIV
       # A divisor interval holding 0 raises or is unknown: no interval.
       return nil if right[0] <= 0 && right[1] >= 0
 

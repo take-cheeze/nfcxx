@@ -54,17 +54,17 @@ class CodeGen
 
     poisoned = Set.new(@outside_const_names)
     @ireps.each_value do |irep|
-      BytecodeIR.for(irep).each_with_op('CLASS', 'MODULE', 'SETCONST', 'SETMCNST', 'GETCONST', 'GETMCNST') do |insn, idx|
+      BytecodeIR.for(irep).each_with_op(:CLASS, :MODULE, :SETCONST, :SETMCNST, :GETCONST, :GETMCNST) do |insn, idx|
         case insn.op
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           poisoned << insn.sym_token
-        when 'SETCONST', 'SETMCNST'
+        when :SETCONST, :SETMCNST
           key = const_site_key(insn)
           next unless key
 
           group = (@numeric_const_groups[key] ||= NumericConstGroup.new(key, 0, [], Set.new, false, false))
           group.sites << [irep, idx, insn.regs.last]
-        when 'GETCONST', 'GETMCNST'
+        when :GETCONST, :GETMCNST
           key = const_group_key(insn)
           next unless key
 
@@ -80,7 +80,7 @@ class CodeGen
   # INTEGER_CONSTANT_PROOF for one GETCONST/GETMCNST: its bare name is proven, or it resolves (LEXICAL_CONST) to a
   # definition DECLARED_CONSTANT_CHECK proved on its own (CodeGen.integer_constant_keys).
   def integer_constant_read?(insn)
-    name = insn.op == 'GETMCNST' ? insn.mcnst_name : insn.const_name
+    name = insn.op == :GETMCNST ? insn.mcnst_name : insn.const_name
     return true if name && @integer_constants&.include?(name)
 
     keys = self.class.integer_constant_keys

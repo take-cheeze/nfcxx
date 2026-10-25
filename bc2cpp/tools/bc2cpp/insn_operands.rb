@@ -9,9 +9,9 @@ require_relative 'operand_schema'
 # accessor is a lookup by operand kind.
 module InsnOperands
   # Unconditional jumps, whose address operand is the target (jmp_addr). Conditional jumps are BRANCH_OPS.
-  JMP_ADDR_OPS = Set['JMP', 'JMPUW'].freeze
+  JMP_ADDR_OPS = Set[:JMP, :JMPUW].freeze
   # Ops whose first operand names an upvar slot (upvar_ref): `R(a) index level`.
-  UPVAR_REF_OPS = Set['GETUPVAR', 'SETUPVAR'].freeze
+  UPVAR_REF_OPS = Set[:GETUPVAR, :SETUPVAR].freeze
 
   # The typed operand list. An instruction the schema cannot parse is a schema
   # gap, so it raises instead of answering nil to every question.
@@ -116,8 +116,8 @@ module InsnOperands
   # Constant name of GETCONST/SETCONST (bare) and GETMCNST/SETMCNST (`::Name`).
   def const_name
     case op
-    when 'SETCONST', 'GETCONST' then first_kind(:name)&.value
-    when 'GETMCNST', 'SETMCNST' then mcnst_name
+    when :SETCONST, :GETCONST then first_kind(:name)&.value
+    when :GETMCNST, :SETMCNST then mcnst_name
     end
   end
 
@@ -189,7 +189,7 @@ module InsnOperands
   # Target of JMP/JMPUW/JMPIF/JMPNOT/JMPNIL excluding JMPUW (Insn#jump_target's
   # historical scope, kept for BytecodeIR).
   def jump_target
-    op == 'JMPUW' ? nil : branch_target
+    op == :JMPUW ? nil : branch_target
   end
 
   def jmp_addr

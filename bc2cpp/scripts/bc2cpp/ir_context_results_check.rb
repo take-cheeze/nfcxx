@@ -27,8 +27,8 @@ shape_body = lambda do |specs, handlers = []|
 end
 shape_gen = Struct.new(:numeric_class_bit_count, :frozen_tables_model).new(0, nil)
 shape_engine = IrContextResults.new(shape_gen, {})
-allocation = ['ARRAY', "R4\t1"]
-freeze_call = ['SEND0', "R4\t:freeze"]
+allocation = [:ARRAY, "R4\t1"]
+freeze_call = [:SEND0, "R4\t:freeze"]
 check_shape_path = lambda do |message, specs, expected, handlers = []|
   body = shape_body.call(specs, handlers)
   target = specs.index(freeze_call)
@@ -36,29 +36,29 @@ check_shape_path = lambda do |message, specs, expected, handlers = []|
   check.call(message, result == expected)
   check.call("#{message} (cached)", shape_engine.frozen_shape_preserved?(body, 0, target) == expected)
 end
-check_shape_path.call('linear moves retain shapes', [allocation, ['MOVE', "R5\tR4"], freeze_call], true)
-check_shape_path.call('branch joins preserve aliases', [allocation, ['JMPNOT', "R1\t4"], ['MOVE', "R5\tR4"],
-                                                       ['JMP', '5'], ['MOVE', "R5\tR4"], freeze_call], true)
-check_shape_path.call('pure backedges retain shapes', [allocation, ['JMPNOT', "R1\t5"], ['MOVE', "R5\tR4"],
-                                                     ['LOADFALSE', 'R1'], ['JMP', '1'], freeze_call], true)
-check_shape_path.call('unreachable mutations do not affect shapes', [allocation, ['JMP', '3'],
-                                                                  ['ARYPUSH', "R4\tR1\t1"], freeze_call], true)
-check_shape_path.call('allocation re-entry refuses shapes', [allocation, ['JMPIF', "R1\t0"], freeze_call], false)
-check_shape_path.call('unresolved branch targets refuse shapes', [allocation, ['JMPIF', "R1\t99"], freeze_call], false)
+check_shape_path.call('linear moves retain shapes', [allocation, [:MOVE, "R5\tR4"], freeze_call], true)
+check_shape_path.call('branch joins preserve aliases', [allocation, [:JMPNOT, "R1\t4"], [:MOVE, "R5\tR4"],
+                                                       [:JMP, '5'], [:MOVE, "R5\tR4"], freeze_call], true)
+check_shape_path.call('pure backedges retain shapes', [allocation, [:JMPNOT, "R1\t5"], [:MOVE, "R5\tR4"],
+                                                     [:LOADFALSE, 'R1'], [:JMP, '1'], freeze_call], true)
+check_shape_path.call('unreachable mutations do not affect shapes', [allocation, [:JMP, '3'],
+                                                                  [:ARYPUSH, "R4\tR1\t1"], freeze_call], true)
+check_shape_path.call('allocation re-entry refuses shapes', [allocation, [:JMPIF, "R1\t0"], freeze_call], false)
+check_shape_path.call('unresolved branch targets refuse shapes', [allocation, [:JMPIF, "R1\t99"], freeze_call], false)
 check_shape_path.call('a mutation on an exiting branch still conservatively refuses shapes',
-                     [allocation, ['JMPNOT', "R1\t4"], ['ARYPUSH', "R4\tR1\t1"], ['RETURN', 'R4'], freeze_call], false)
+                     [allocation, [:JMPNOT, "R1\t4"], [:ARYPUSH, "R4\tR1\t1"], [:RETURN, 'R4'], freeze_call], false)
 [
-  ['ARYPUSH', "R5\tR1\t1"], ['HASHADD', "R5\t1"], ['SETIDX', 'R5'],
-  ['SEND0', "R8\t:unknown"], ['SETIV', '@saved R5'], ['SETUPVAR', "R5\t1\t0"],
-  ['BLOCK', "R8\tI(0)"], ['LAMBDA', "R8\tI(0)"], ['UNMODELLED', 'R5']
+  [:ARYPUSH, "R5\tR1\t1"], [:HASHADD, "R5\t1"], [:SETIDX, 'R5'],
+  [:SEND0, "R8\t:unknown"], [:SETIV, '@saved R5'], [:SETUPVAR, "R5\t1\t0"],
+  [:BLOCK, "R8\tI(0)"], [:LAMBDA, "R8\tI(0)"], ['UNMODELLED', 'R5']
 ].each do |effect|
   check_shape_path.call("#{effect.first} through an alias or unrelated receiver refuses shapes",
-                       [allocation, ['MOVE', "R5\tR4"], ['JMPNOT', "R1\t4"], effect, freeze_call], false)
+                       [allocation, [:MOVE, "R5\tR4"], [:JMPNOT, "R1\t4"], effect, freeze_call], false)
 end
 handler = CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 2, target: 2)
-check_shape_path.call('handler edges refuse shapes', [allocation, ['NOP', ''], freeze_call], false, [handler])
+check_shape_path.call('handler edges refuse shapes', [allocation, [:NOP, ''], freeze_call], false, [handler])
 check_shape_path.call('shape CFG budget exhaustion refuses shapes',
-                     [allocation] + Array.new(IrContextResults::MAX_SHAPE_PATH_STATES) { ['NOP', ''] } + [freeze_call], false)
+                     [allocation] + Array.new(IrContextResults::MAX_SHAPE_PATH_STATES) { [:NOP, ''] } + [freeze_call], false)
 
 # The middle node's return stabilizes before its state-dependent effect does.
 context_harness = Class.new(IrContextResults) do

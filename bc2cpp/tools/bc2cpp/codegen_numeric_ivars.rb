@@ -65,7 +65,7 @@ class CodeGen
 
     @ireps.each_value do |irep|
       owner = numeric_irep_owner[irep.label]
-      BytecodeIR.for(irep).each_with_op('GETIV', 'SETIV') do |insn, idx|
+      BytecodeIR.for(irep).each_with_op(:GETIV, :SETIV) do |insn, idx|
         name = insn.ivar
         next unless name
 
@@ -83,7 +83,7 @@ class CodeGen
         group = (@numeric_ivar_groups[[numeric_family(owner.owner), name]] ||=
                    NumericIvarGroup.new(numeric_family(owner.owner), name, 0, [], Set.new, false, false, nil))
         group.readers << irep.label
-        group.sites << [irep, idx, insn.regs.first] if insn.op == 'SETIV'
+        group.sites << [irep, idx, insn.regs.first] if insn.op == :SETIV
       end
     end
     add_native_store_groups
@@ -158,13 +158,13 @@ class CodeGen
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, idx|
         sym = insn.sym
-        if sym && insn.op == 'LOADSYM'
+        if sym && insn.op == :LOADSYM
           names << sym.delete_prefix('@') if sym.start_with?('@') && !sym.start_with?('@@')
           @numeric_ivar_disabled = "LOADSYM #{sym}" if (NUMERIC_IVAR_NAMED_WRITES + NUMERIC_SELF_REBINDERS).include?(sym)
-        elsif sym && insn.op.include?('SEND') && NUMERIC_IVAR_NAMED_WRITES.include?(sym)
+        elsif sym && insn.op.to_s.include?('SEND') && NUMERIC_IVAR_NAMED_WRITES.include?(sym)
           @numeric_ivar_disabled = "non-literal #{sym} in #{irep.label}" unless literal_ivar_argument?(irep, idx, insn)
         end
-        if insn.op == 'STRING'
+        if insn.op == :STRING
           entry = irep.pool[insn.pool_index.to_i]
           names << entry[1..] if entry.is_a?(String) && entry.start_with?('@') && !entry.start_with?('@@')
         end
@@ -182,7 +182,7 @@ class CodeGen
     out = Set.new
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, idx|
-        next unless insn.op.include?('SEND') && NUMERIC_SELF_REBINDERS.include?(insn.sym)
+        next unless insn.op.to_s.include?('SEND') && NUMERIC_SELF_REBINDERS.include?(insn.sym)
 
         @numeric_ivar_disabled = "rebinder #{insn.sym} without literal block in #{irep.label}" unless literal_block_argument?(irep, idx, insn)
         stack = Array(irep.reps).dup
@@ -199,9 +199,9 @@ class CodeGen
 
   # SENDB whose block register is written by BLOCK/LAMBDA in the same irep.
   def literal_block_argument?(irep, idx, insn)
-    return false unless insn.op.end_with?('B') && insn.reg
+    return false unless insn.op.to_s.end_with?('B') && insn.reg
 
-    n = insn.op.end_with?('0B') ? 0 : insn.argc
+    n = insn.op.to_s.end_with?('0B') ? 0 : insn.argc
     return false unless n
 
     writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + n + 1).to_s)
@@ -217,7 +217,7 @@ class CodeGen
     writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
     writers&.all? do |i|
       writer = BytecodeIR.for(irep).source_at(i)
-      writer.op == 'LOADSYM' && writer.sym.to_s.start_with?('@')
+      writer.op == :LOADSYM && writer.sym.to_s.start_with?('@')
     end || false
   end
 
@@ -272,7 +272,7 @@ class CodeGen
         fam = numeric_family(owner.owner)
         names = @numeric_ivar_groups.select { |(f, _), g| f == fam && !g.failed && g.readers.include?(irep.label) }
                                     .keys.map(&:last)
-        BytecodeIR.for(irep).each_with_op('GETIV', 'SETIV') do |insn, _index|
+        BytecodeIR.for(irep).each_with_op(:GETIV, :SETIV) do |insn, _index|
           names << insn.ivar if insn.ivar && embed_type(owner.owner, insn.ivar) == :fixnum
         end
         names.uniq.sort
@@ -387,7 +387,7 @@ class CodeGen
 
     @numeric_allocate_free = @ireps.each_value.none? do |irep|
       BytecodeIR.for(irep).each_source.any? do |insn, _index|
-        insn.sym == 'allocate' && (insn.op == 'LOADSYM' || insn.op.include?('SEND'))
+        insn.sym == 'allocate' && (insn.op == :LOADSYM || insn.op.to_s.include?('SEND'))
       end
     end
   end
@@ -454,8 +454,8 @@ class CodeGen
       insns.each do |instruction|
         i = instruction.index
         insn = instruction.source
-        assigned = before.call(i) || (insn.op == 'SETIV' && insn.ivar == ivar) ||
-                   (insn.op == 'SUPER' && super_assigns)
+        assigned = before.call(i) || (insn.op == :SETIV && insn.ivar == ivar) ||
+                   (insn.op == :SUPER && super_assigns)
         next if out[i] == assigned
 
         out[i] = assigned
@@ -464,10 +464,10 @@ class CodeGen
     end
     insns.all? do |instruction|
       insn = instruction.source
-      exposing = BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) && !(insn.op == 'SUPER' && super_safe)
+      exposing = BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) && !(insn.op == :SUPER && super_safe)
       observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || exposing ||
-                 (insn.op == 'GETIV' && insn.ivar == ivar) ||
-                 (!%w[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
+                 (insn.op == :GETIV && insn.ivar == ivar) ||
+                 (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
       before.call(instruction.index) || !observes
     end
   end
@@ -487,10 +487,10 @@ class CodeGen
     super_ok = parent.is_a?(String) && super_reaches_superclass?(definition)
     super_free = parent.is_a?(String) ? super_ok && numeric_init_exposure_free?(parent, seen) : parent == :none
     BytecodeIR.for(@ireps[definition.irep]).each_source.all? do |insn, _index|
-      next super_free if insn.op == 'SUPER'
+      next super_free if insn.op == :SUPER
 
       !BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) &&
-        (%w[GETIV SETIV].include?(insn.op) || !insn.regs.include?('0'))
+        (%i[GETIV SETIV].include?(insn.op) || !insn.regs.include?('0'))
     end
   end
 end

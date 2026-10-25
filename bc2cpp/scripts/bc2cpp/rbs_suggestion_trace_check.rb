@@ -1074,7 +1074,7 @@ module RbsSuggestionTrace
       File.write(element_bad, (param_rows(0, 'Box#pack', 1, 2, 0, 'Array' => 2) +
                                elem_rows('PARAM', 0, 'array', 3, 0, 'Integer' => 2, 'String' => 1) +
                                return_rows(1, 'Box#bucket', 1, 0, 'Array' => 1) +
-                               elem_rows('RETURN', 1, 'array', 2, 0, 'String' => 2) +
+                               elem_rows(:RETURN, 1, 'array', 2, 0, 'String' => 2) +
                                param_rows(2, 'Box#tally', 1, 2, 0, 'Hash' => 2) +
                                elem_rows('PARAM', 2, 'key', 2, 0, 'Symbol' => 2) +
                                elem_rows('PARAM', 2, 'value', 2, 0, 'Integer' => 2)).join("\n") << "\n")
@@ -1090,7 +1090,7 @@ module RbsSuggestionTrace
       File.write(element_ok, (param_rows(0, 'Box#pack', 1, 2, 0, 'Array' => 2) +
                               elem_rows('PARAM', 0, 'array', 3, 0, 'Integer' => 3) +
                               return_rows(1, 'Box#bucket', 1, 0, 'Array' => 1) +
-                              elem_rows('RETURN', 1, 'array', 2, 0, 'Integer' => 2) +
+                              elem_rows(:RETURN, 1, 'array', 2, 0, 'Integer' => 2) +
                               param_rows(2, 'Box#tally', 1, 2, 0, 'Hash' => 2) +
                               elem_rows('PARAM', 2, 'key', 2, 0, 'Symbol' => 2) +
                               elem_rows('PARAM', 2, 'value', 2, 0, 'String' => 2)).join("\n") << "\n")

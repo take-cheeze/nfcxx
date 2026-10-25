@@ -11,8 +11,8 @@ require_relative 'irep_arity'
 class CodeGen
   CLASS_OBJECT_ARGS_DEPTH = 3
   # Ops that name a method without making a plain positional call; a call index entry of one of them poisons the name.
-  CLASS_OBJECT_DEFINING_OPS = Set['DEF', 'SDEF', 'TDEF'].freeze
-  CLASS_OBJECT_CALL_OPS = Set['SEND', 'SENDB', 'SSEND', 'SSENDB', 'SEND0', 'SSEND0'].freeze
+  CLASS_OBJECT_DEFINING_OPS = Set[:DEF, :SDEF, :TDEF].freeze
+  CLASS_OBJECT_CALL_OPS = Set[:SEND, :SENDB, :SSEND, :SSENDB, :SEND0, :SSEND0].freeze
 
   def class_object_args_enabled?
     ENV.fetch('BC2CPP_CLASS_OBJECT_ARGS', '1') != '0'
@@ -52,12 +52,12 @@ class CodeGen
 
   def class_object_writer_values(irep, writer, depth, active)
     case writer.op
-    when 'GETCONST', 'GETMCNST'
+    when :GETCONST, :GETMCNST
       name = writer.const_name
       return nil unless name && @closed_world.class_valued_constant?(name)
 
       @closed_world.classes_named(name)
-    when 'GETUPVAR'
+    when :GETUPVAR
       index, level = writer.upvar_ref
       return nil unless index
 
@@ -144,7 +144,7 @@ class CodeGen
       next unless seen.add?(label)
 
       irep = @ireps[label] or return true
-      return true if BytecodeIR.for(irep).op?('SUPER')
+      return true if BytecodeIR.for(irep).op?(:SUPER)
 
       stack.concat(Array(irep.reps))
     end
@@ -169,7 +169,7 @@ class CodeGen
         next if CLASS_OBJECT_DEFINING_OPS.include?(insn.op)
 
         # `alias new old` reaches old's body through `new`; both names are poisoned.
-        if insn.op == 'ALIAS'
+        if insn.op == :ALIAS
           old = insn.first_of(:name)&.value
           poisoned << old if old
           poisoned << name
@@ -180,7 +180,7 @@ class CodeGen
           next
         end
 
-        zero = insn.op.end_with?('0')
+        zero = insn.op.to_s.end_with?('0')
         if insn.reg.nil? || !(zero || insn.plain_fixed_argc?)
           poisoned << name
           next
@@ -207,7 +207,7 @@ class CodeGen
     program = BytecodeIR.for(ancestor)
     program.each_source.none? do |insn, i|
       op = insn.op
-      op != 'ENTER' && !NumericFlow::NO_WRITE_OPS.include?(op) && program.may_write_at?(i, reg)
+      op != :ENTER && !NumericFlow::NO_WRITE_OPS.include?(op) && program.may_write_at?(i, reg)
     end
   end
 end

@@ -62,9 +62,9 @@ xs = defined_by.call(registry, 'da_x') + defined_by.call(registry, 'da_y')
 check.call('each loop name is a public method of the class body', xs.size == 2 && xs.all? { |d| d.owner == 'DmA' && d.visibility == :public })
 check.call('each expansion has its own irep, numbered in iteration order',
            xs.map(&:irep).uniq.size == 2 && xs.map { |d| d.irep[/~dm\d+\z/] } == %w[~dm0 ~dm1])
-loads = xs.map { |d| ireps.fetch(d.irep).instructions.select { |i| i.op == 'LOADSYM' }.map(&:sym) }
+loads = xs.map { |d| ireps.fetch(d.irep).instructions.select { |i| i.op == :LOADSYM }.map(&:sym) }
 check.call('the loop variable is the Symbol each iteration bound', loads == [['da_x'], ['da_y']])
-check.call('no expansion reads an upvar', xs.none? { |d| ireps.fetch(d.irep).instructions.any? { |i| i.op.end_with?('UPVAR') } })
+check.call('no expansion reads an upvar', xs.none? { |d| ireps.fetch(d.irep).instructions.any? { |i| i.op.to_s.end_with?('UPVAR') } })
 check.call('a body without captures registers too (`self`)', defined_by.call(registry, 'da_p').size == 1 && defined_by.call(registry, 'da_q').size == 1)
 check.call('a literal site whose body returns registers (ADR 0288 refused it)', defined_by.call(registry, 'da_lit').size == 1)
 check.call('settled sends install nothing unknown', !installed.nil? && (installed & %w[da_x da_y da_p da_q da_lit]).empty?)

@@ -7,10 +7,10 @@ module BytecodeIR
   # Value classes, not representation/width proofs.
   class Types
     LITERAL_TYPES = {
-      'LOADNIL' => :NilClass, 'LOADTRUE' => :TrueClass, 'LOADFALSE' => :FalseClass,
-      'LOADSYM' => :Symbol, 'SYMBOL' => :Symbol, 'INTERN' => :Symbol, 'STRING' => :String,
-      'ARRAY' => :Array, 'ARRAY2' => :Array, 'HASH' => :Hash,
-      'RANGE_INC' => :Range, 'RANGE_EXC' => :Range, 'LAMBDA' => :Proc, 'BLOCK' => :Proc
+      :LOADNIL => :NilClass, :LOADTRUE => :TrueClass, :LOADFALSE => :FalseClass,
+      :LOADSYM => :Symbol, :SYMBOL => :Symbol, :INTERN => :Symbol, :STRING => :String,
+      :ARRAY => :Array, :ARRAY2 => :Array, :HASH => :Hash,
+      :RANGE_INC => :Range, :RANGE_EXC => :Range, :LAMBDA => :Proc, :BLOCK => :Proc
     }.freeze
     POOL_TYPES = { int32: :Integer, int64: :Integer, bigint: :Integer, float: :Float }.freeze
     ENTER_TYPES = { rest: [:Array], hash: [:Hash], block: [:Proc, :NilClass], local: [:NilClass] }.transform_values(&:freeze).freeze
@@ -112,11 +112,11 @@ module BytecodeIR
     # literal, its +value+.
     Exact = Struct.new(:klass, :value)
 
-    EXACT_LITERAL_CLASSES = LITERAL_TYPES.except('LAMBDA', 'BLOCK').freeze
+    EXACT_LITERAL_CLASSES = LITERAL_TYPES.except(:LAMBDA, :BLOCK).freeze
     # Ops that add to the container R(a) already holds, so its class stays (vm.c OP_ARYPUSH and the rest).
     # OP_ARYCAT stores a fresh Array over a nil R(a): requiring the result class rules that out.
-    EXACT_EXTEND_OPS = { 'ARYPUSH' => :Array, 'ARYCAT' => :Array, 'HASHADD' => :Hash, 'HASHCAT' => :Hash,
-                         'STRCAT' => :String }.freeze
+    EXACT_EXTEND_OPS = { :ARYPUSH => :Array, :ARYCAT => :Array, :HASHADD => :Hash, :HASHCAT => :Hash,
+                         :STRCAT => :String }.freeze
 
     # EXACT_LITERAL: the Exact class every definition reaching the read of +reg+ at +index+ agrees on,
     # from literal writers only, or nil. No argument, signature, inferred or resolver fact enters: those bound a
@@ -188,7 +188,7 @@ module BytecodeIR
       end
       return { rest: [:Array], local: [:NilClass] }[definition.built] if definition.built
       return nil unless insn.reg == definition.reg
-      return [self_class] if insn.op == 'LOADSELF'
+      return [self_class] if insn.op == :LOADSELF
 
       value = integer_literal(insn)
       return [:Integer, value] unless value.nil?
@@ -202,18 +202,18 @@ module BytecodeIR
       return definition.reg == '0' && !self_class ? :self_unknown : :entry_value unless insn
       return "entry:#{definition.built}" if definition.built
       return :side_write unless insn.reg == definition.reg
-      return :self_unknown if insn.op == 'LOADSELF'
+      return :self_unknown if insn.op == :LOADSELF
 
       "producer:#{insn.op}"
     end
 
     def integer_literal(insn)
       case insn.op
-      when 'LOADI__1' then -1
-      when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
-      when 'LOADI', 'LOADI8', 'LOADI16', 'LOADI32', 'LOADINEG'
+      when :LOADI__1 then -1
+      when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+      when :LOADI, :LOADI8, :LOADI16, :LOADI32, :LOADINEG
         value = insn.imm_operand&.to_i
-        value && insn.op == 'LOADINEG' ? -value.abs : value
+        value && insn.op == :LOADINEG ? -value.abs : value
       end
     end
 
@@ -249,8 +249,8 @@ module BytecodeIR
 
       source = definitions.any? do |definition|
         definition.entry? || definition.built == :arg ||
-          (%w[GETIV GETCONST GETMCNST KARG GETUPVAR].include?(ir_program.source_at(definition.index).op) ||
-           ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %w[GETIDX GETIDX0 AREF].include?(ir_program.source_at(definition.index).op))
+          (%i[GETIV GETCONST GETMCNST KARG GETUPVAR].include?(ir_program.source_at(definition.index).op) ||
+           ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %i[GETIDX GETIDX0 AREF].include?(ir_program.source_at(definition.index).op))
       end
       if source && @source_resolver && (resolved = @source_resolver.call(index, reg))
         if resolved.is_a?(Fact)
@@ -279,7 +279,7 @@ module BytecodeIR
           end
           if !values && @call_resolver && !definition.entry?
             insn = ir_program.source_at(definition.index)
-            if %w[SEND SEND0].include?(insn.op) && insn.reg == definition.reg
+            if %i[SEND SEND0].include?(insn.op) && insn.reg == definition.reg
               receiver = query(definition.index, insn.reg, use_declarations: true, max_states: max_states, refusal: refusal)
               result = receiver && @call_resolver.call(insn, receiver, refusal)
               values = result&.classes
@@ -309,9 +309,9 @@ module BytecodeIR
       return [nil, nil] unless insn.reg == definition.reg
 
       case insn.op
-      when 'KARG' then [@declared_keywords[insn.sym.to_s], "keyword:#{insn.sym}"]
-      when 'GETIV' then [@declared_ivars[insn.ivar], "ivar:@#{insn.ivar}"]
-      when 'SSEND', 'SSEND0', 'SSENDB' then [@declared_calls[definition.index], "self-call:#{insn.sym}"]
+      when :KARG then [@declared_keywords[insn.sym.to_s], "keyword:#{insn.sym}"]
+      when :GETIV then [@declared_ivars[insn.ivar], "ivar:@#{insn.ivar}"]
+      when :SSEND, :SSEND0, :SSENDB then [@declared_calls[definition.index], "self-call:#{insn.sym}"]
       else [nil, nil]
       end
     end
@@ -321,12 +321,12 @@ module BytecodeIR
     # spelling the name can give (LcfSchemaOracle.by_name, receiver-independent). A key that is not a literal Symbol
     # has no such bound: it is reported as a non-literal key and stays untyped.
     def lcf_row_field(definition, insn, register, max_states:, refusal:)
-      key_register = insn.op == 'GETIDX0' ? nil : (insn.reg.to_i + 1)
+      key_register = insn.op == :GETIDX0 ? nil : (insn.reg.to_i + 1)
       return nil unless key_register
       key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, shared: true, origin_transfers: true,
                                                  max_states: max_states, refusal: refusal)
       syms = key_defs&.map { |source| source.entry? ? nil : ir_program.source_at(source.index) }
-      unless syms && !syms.empty? && syms.all? { |producer| producer&.op == 'LOADSYM' }
+      unless syms && !syms.empty? && syms.all? { |producer| producer&.op == :LOADSYM }
         return unknown(refusal, :lcf_non_literal_key)
       end
 
@@ -342,16 +342,16 @@ module BytecodeIR
       return nil if ENV['BC2CPP_IR_ELEMENT_TYPES'] == '0'
 
       insn = ir_program.source_at(definition.index)
-      return nil unless %w[GETIDX GETIDX0].include?(insn.op) && insn.reg == definition.reg
+      return nil unless %i[GETIDX GETIDX0].include?(insn.op) && insn.reg == definition.reg
 
-      register = insn.op == 'GETIDX0' ? insn.regs[1] : insn.reg
+      register = insn.op == :GETIDX0 ? insn.regs[1] : insn.reg
       receiver = query(definition.index, register, use_declarations: true, max_states: max_states, refusal: refusal)
       return lcf_row_field(definition, insn, register, max_states: max_states, refusal: refusal) if
         receiver && receiver.classes == Set[:'LCF::Array1D']
       return nil unless receiver && receiver.classes.size == 1 && [:Array, :Hash].include?(receiver.classes.first)
 
       contracts = receiver.contracts.to_set
-      if receiver.classes == Set[:Array] && insn.op != 'GETIDX0'
+      if receiver.classes == Set[:Array] && insn.op != :GETIDX0
         key = query(definition.index, (insn.reg.to_i + 1).to_s, use_declarations: true, max_states: max_states, refusal: refusal)
         return nil unless key && key.classes == Set[:Integer]
 
@@ -386,8 +386,8 @@ module BytecodeIR
     # The declared element bound of a receiver written by an ivar or constant read, with its provenance.
     def element_bound_of(producer)
       case producer.op
-      when 'GETIV' then [@declared_ivar_elements[producer.ivar], "element:ivar:@#{producer.ivar}"]
-      when 'GETCONST' then [@declared_const_elements[producer.const_name], "element:constant:#{producer.const_name}"]
+      when :GETIV then [@declared_ivar_elements[producer.ivar], "element:ivar:@#{producer.ivar}"]
+      when :GETCONST then [@declared_const_elements[producer.const_name], "element:constant:#{producer.const_name}"]
       else [nil, nil]
       end
     end
@@ -405,7 +405,7 @@ module BytecodeIR
 
     # Ops that observe the frame's locals without naming the register: a closure captures them, ARGARY packs the
     # rest array for a zero-argument super, and binding/eval reach any local by name.
-    REST_ARRAY_OBSERVERS = %w[LAMBDA BLOCK ARGARY].freeze
+    REST_ARRAY_OBSERVERS = %i[LAMBDA BLOCK ARGARY].freeze
 
     # Every register holding the rest array (MOVE copies, flow-insensitive) may be read only as the receiver of an
     # element read (GETIDX, GETIDX0). Any other read can store a non-join element, so the join is withheld.
@@ -418,7 +418,7 @@ module BytecodeIR
       aliases = Set[reg.to_i]
       loop do
         grew = ir_program.each_source.any? do |insn, _index|
-          insn.op == 'MOVE' && aliases.include?(insn.regs[1].to_i) && aliases.add?(insn.regs[0].to_i)
+          insn.op == :MOVE && aliases.include?(insn.regs[1].to_i) && aliases.add?(insn.regs[0].to_i)
         end
         break unless grew
       end
@@ -433,9 +433,9 @@ module BytecodeIR
       return false if reads.empty?
 
       case insn.op
-      when 'MOVE' then false
-      when 'GETIDX0' then reads != [insn.regs[1].to_i]
-      when 'GETIDX' then reads != [insn.reg.to_i]
+      when :MOVE then false
+      when :GETIDX0 then reads != [insn.regs[1].to_i]
+      when :GETIDX then reads != [insn.reg.to_i]
       else true
       end
     end
@@ -448,8 +448,8 @@ module BytecodeIR
 
       insn = ir_program.source_at(definition.index)
       return nil unless insn.reg == definition.reg
-      return keyword_definition_types(insn) if insn.op == 'KARG'
-      return [:TrueClass, :FalseClass] if insn.op == 'KEY_P'
+      return keyword_definition_types(insn) if insn.op == :KARG
+      return [:TrueClass, :FalseClass] if insn.op == :KEY_P
       return @inferred_calls[definition.index] if BytecodeIR::Ops::SEND.include?(insn.op)
 
       type = Types.literal_class(insn, @irep.pool)
@@ -462,7 +462,7 @@ module BytecodeIR
       op = insn.op
       return :Integer if BytecodeIR::Ops::LOADI_OPS.include?(op)
       return LITERAL_TYPES[op] if LITERAL_TYPES.key?(op)
-      return nil unless op == 'LOADL'
+      return nil unless op == :LOADL
 
       pool_index = insn.pool_index
       entry = pool_index && pool && pool[pool_index]

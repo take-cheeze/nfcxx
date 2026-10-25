@@ -65,7 +65,7 @@ end
 
 puts '-- loop_flow_position on hand-built bytecode (host)'
 ENTER_ONE = "1:0:0:0:0:0:0:0\t(0x0)"
-ELEMENT = ['MOVE', "R3\tR1"]
+ELEMENT = [:MOVE, "R3\tR1"]
 
 # A body from [op, args] rows, addressed by position (the row index is the instruction index the walk uses).
 def hand_irep(label, rows, reps: [])
@@ -74,15 +74,15 @@ def hand_irep(label, rows, reps: [])
            file: 'loop_element.rb')
 end
 
-lam = hand_irep('lam', [['ENTER', '0:0:0:0:0:0:0:0\t(0x0)'], ['LOADI_2', 'R2\t(2)'], ['SETUPVAR', "R2\t1\t0"], ['RETURN', 'R2']])
+lam = hand_irep('lam', [[:ENTER, '0:0:0:0:0:0:0:0\t(0x0)'], [:LOADI_2, 'R2\t(2)'], [:SETUPVAR, "R2\t1\t0"], [:RETURN, 'R2']])
 hand = {
-  plain: hand_irep('plain', [['ENTER', ENTER_ONE], ELEMENT, ['SEND0', "R3\t:succ"], ['RETURN', 'R3']]),
-  nested: hand_irep('nested', [['ENTER', ENTER_ONE], ELEMENT, ['LAMBDA', "R4\tI[0]"], ['SEND0', "R4\t:call"],
-                               ['SEND0', "R3\t:pred"], ['RETURN', 'R3']], reps: ['lam']),
-  direct: hand_irep('direct', [['ENTER', ENTER_ONE], ELEMENT, ['LOADI_2', "R1\t(2)"], ['SEND0', "R3\t:next"],
-                               ['RETURN', 'R3']]),
-  rescued: hand_irep('rescued', [['ENTER', ENTER_ONE], ELEMENT, ['SEND0', "R3\t:ord"], ['EXCEPT', 'R4'],
-                                 ['LOADI_1', "R5\t(1)"], ['RESCUE', "R4\tR5"], ['RETURN', 'R3']])
+  plain: hand_irep('plain', [[:ENTER, ENTER_ONE], ELEMENT, [:SEND0, "R3\t:succ"], [:RETURN, 'R3']]),
+  nested: hand_irep('nested', [[:ENTER, ENTER_ONE], ELEMENT, [:LAMBDA, "R4\tI[0]"], [:SEND0, "R4\t:call"],
+                               [:SEND0, "R3\t:pred"], [:RETURN, 'R3']], reps: ['lam']),
+  direct: hand_irep('direct', [[:ENTER, ENTER_ONE], ELEMENT, [:LOADI_2, "R1\t(2)"], [:SEND0, "R3\t:next"],
+                               [:RETURN, 'R3']]),
+  rescued: hand_irep('rescued', [[:ENTER, ENTER_ONE], ELEMENT, [:SEND0, "R3\t:ord"], [:EXCEPT, 'R4'],
+                                 [:LOADI_1, "R5\t(1)"], [:RESCUE, "R4\tR5"], [:RETURN, 'R3']])
 }
 hand_tree = (hand.values + [lam]).to_h { |irep| [irep.label, irep] }
 hand_tree.each_value { |irep| irep.tree = hand_tree }
@@ -129,9 +129,9 @@ if ENV['MRBC']
     File.write(path, source)
     ireps = load_ireps(run_mrbc([path], 'loop_element', directory)).first
     body_of = lambda do |name|
-      ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'SEND0' && i.sym == name } }
+      ireps.values.find { |irep| irep.instructions.any? { |i| i.op == :SEND0 && i.sym == name } }
     end
-    send_index = ->(irep, name) { irep.instructions.index { |i| i.op == 'SEND0' && i.sym == name } }
+    send_index = ->(irep, name) { irep.instructions.index { |i| i.op == :SEND0 && i.sym == name } }
     compiled = { plain: 'succ', nested: 'pred', direct: 'next', rescued: 'ord' }.to_h do |key, name|
       body = body_of.call(name)
       [key, [body, send_index.call(body, name)]]
@@ -149,9 +149,9 @@ if ENV['MRBC']
       path = File.join(directory, 'fixture.rb')
       File.write(path, source)
       ireps = load_ireps(run_mrbc([path], 'hash_capture', directory)).first
-      host = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'SENDB' && i.sym == 'each' } }
-      sendb = host.instructions.find { |i| i.op == 'SENDB' && i.sym == 'each' }
-      block = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'GETUPVAR' } }
+      host = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == :SENDB && i.sym == 'each' } }
+      sendb = host.instructions.find { |i| i.op == :SENDB && i.sym == 'each' }
+      block = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == :GETUPVAR } }
       gen = CodeGen.allocate
       gen.instance_variable_set(:@element_annotations, { host.label => annotation.new(['Hash', nil], ['Symbol', nil]) })
       gen.send(:inline_hash_capture_hints, host, { block_irep: block, sendb_addr: sendb.addr })

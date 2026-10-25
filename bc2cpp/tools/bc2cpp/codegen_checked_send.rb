@@ -11,8 +11,8 @@
 # path is not an OP_SEND, so mruby checks no visibility there), an inlined loop body and a
 # synthetic send keep the plain call.
 module CheckedSend
-  EXPLICIT_OPS = %w[SEND SEND0].freeze
-  IMPLICIT_OPS = %w[SSEND SSEND0].freeze
+  EXPLICIT_OPS = %i[SEND SEND0].freeze
+  IMPLICIT_OPS = %i[SSEND SSEND0].freeze
 
   def compile_send(insn, **kwargs)
     code = super

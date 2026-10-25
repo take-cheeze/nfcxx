@@ -16,7 +16,7 @@ module IrepScans
   ConstantPath = BytecodeIR::ConstantPath
 
   # origin_ivar's walk steps over BLOCK's proc register and every lead-read-only op.
-  ORIGIN_IVAR_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | ['BLOCK']).freeze
+  ORIGIN_IVAR_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | [:BLOCK]).freeze
 
   def self.follow(reg)
     Follow.new(reg)
@@ -40,7 +40,7 @@ module IrepScans
       next nil unless BytecodeIR.write_dominates?(self, index, read, cur)
 
       read = index
-      if follow_moves && insn.op == 'MOVE'
+      if follow_moves && insn.op == :MOVE
         IrepScans.follow(insn.regs[1])
       else
         yield insn, index, cur
@@ -77,8 +77,8 @@ module IrepScans
     names = defs.map do |definition|
       insn = BytecodeIR.for(self).source_at(definition.index)
       case insn.op
-      when 'GETCONST' then insn.const_name
-      when 'GETMCNST'
+      when :GETCONST then insn.const_name
+      when :GETMCNST
         scope = agreed_constant_name(definition.index, insn.reg, depth + 1, through_handlers: through_handlers)
         scope && insn.mcnst_name && "#{scope}::#{insn.mcnst_name}"
       end
@@ -97,9 +97,9 @@ module IrepScans
   # `Owner#@ivar` when the nearest defining instruction is a GETIV, else empty.
   def self.origin_ivar(irep, site, reg, owner_def)
     irep.walk_writers(site - 1, reg.to_s, skip_ops: ORIGIN_IVAR_SKIP_OPS) do |ins|
-      next follow(ins.regs[1]) if ins.op == 'MOVE' && ins.regs[1]
+      next follow(ins.regs[1]) if ins.op == :MOVE && ins.regs[1]
 
-      break "#{owner_def&.owner}#@#{ins.ivar}" if ins.op == 'GETIV'
+      break "#{owner_def&.owner}#@#{ins.ivar}" if ins.op == :GETIV
     end.to_s
   end
 end

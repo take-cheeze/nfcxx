@@ -26,7 +26,7 @@ module InsnDecoder
   ].map { |entry| name, fmt = entry.split(':'); [name.to_sym, fmt] }.freeze
 
   # Op names are Symbols so every dispatch (`case`, Hash lookups, `==`) compares
-  # identity; Insn#op and the printed text still get the String the name spells.
+  # identity; diagnostic and disassembly text use the name's String spelling.
   EXT_WIDTH = { EXT1: 1, EXT2: 2, EXT3: 3 }.freeze
   OPERAND_BYTES = { 'B' => 1, 'S' => 2, 'W' => 3 }.freeze
   Operand = OperandSchema::Operand
@@ -328,7 +328,7 @@ module InsnDecoder
       when :LOADI__1 then ["R#{a}\t(-1)#{lv_comment(a)}", [r(a), lit('-1')]]
       # A Symbol list, not a Regexp: a regexp `when` would stop the case from comparing by identity.
       when :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5, :LOADI_6, :LOADI_7
-        digit = name.to_s.delete_prefix('LOADI_')
+        digit = name.name.delete_prefix('LOADI_')
         ["R#{a}\t(#{digit})#{lv_comment(a)}", [r(a), lit(digit)]]
       when :LOADSYM then ["R#{a}\t:#{sym(b)}#{lv_comment(a)}", [r(a), sym_op(b)]]
       when :LOADNIL then ["R#{a}\t(nil)#{lv_comment(a)}", [r(a), lit('nil')]]
@@ -398,7 +398,7 @@ module InsnDecoder
     # ERR's operand is a free-form message, the one text-typed operand.
     def err_body(index)
       text = @rite.pool.fetch(index).kind == :str ? pool_str(index) : "L[#{index}]"
-      [text, OperandSchema.parse('ERR', text.split("\n", 2).first.to_s) || [Operand.new(:rest, '')]]
+      [text, OperandSchema.parse(:ERR, text.split("\n", 2).first.to_s) || [Operand.new(:rest, '')]]
     end
 
     # `ERR\tL[n]` (a non-string pool slot) is padded with one tab, not two.
@@ -410,12 +410,12 @@ module InsnDecoder
 
     def build(name, values, next_pc, start, line_pc = start, debug_file = debug_file_at(line_pc))
       rest, operands = body(name, values, next_pc)
-      op = name == :ARRAY2 ? 'ARRAY' : name.to_s
+      op = name == :ARRAY2 ? :ARRAY : name
       # FSTRING is a STRING load of a frozen, persistent object: one op name for every pass that
       # reads String loads, with frozen_literal set for the passes that must not treat it as fresh.
       frozen = name == :FSTRING
-      op = 'STRING' if frozen
-      printed = frozen ? name.to_s : op
+      op = :STRING if frozen
+      printed = frozen ? name.to_s : op.to_s
       lineno = line_at(line_pc, debug_file)
       raise "bc2cpp: no line info for #{op} at #{line_pc}" if lineno.negative?
 

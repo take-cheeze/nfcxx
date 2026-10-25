@@ -141,11 +141,11 @@ end
 # Bytecode can re-enter a textually adjacent send without reloading its String.
 # Mutating an alias leaves the String's register definition unchanged.
 ops = [
-  ['STRING', 'R1 L[0]'],
-  ['SEND', 'R0 :remove_method n=1'],
-  ['MOVE', 'R3 R1'],
-  ['SEND', 'R3 :clear n=0'],
-  ['JMP', '1']
+  [:STRING, 'R1 L[0]'],
+  [:SEND, 'R0 :remove_method n=1'],
+  [:MOVE, 'R3 R1'],
+  [:SEND, 'R3 :clear n=0'],
+  [:JMP, '1']
 ].each_with_index.map do |(op, args), index|
   Insn.new(lineno: 1, addr: index, op: op, args: args, raw: "#{op} #{args}")
 end

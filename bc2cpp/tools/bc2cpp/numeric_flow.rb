@@ -135,19 +135,19 @@ module NumericFlow
   # leaders and the two a rescue clause adds: EXCEPT writes its leading register,
   # RESCUE its second. Any other op has no facts.
   SUPPORTED_OPS = (BytecodeIR::WRITES_LEADING_REG_OPS | BytecodeIR::Ops::READS_LEAD |
-                   Set['EXCEPT', 'RESCUE']).freeze
+                   Set[:EXCEPT, :RESCUE]).freeze
   # Leading register is only read (or the op writes an enclosing frame).
-  NO_WRITE_OPS = Set['NOP', 'ENTER', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RETURN', 'RETURN_BLK', 'RETSELF',
-                     'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP', 'SETUPVAR', 'SETIDX', 'DEBUG',
-                     'KEYEND', 'RAISEIF', 'MATCHERR'].freeze
+  NO_WRITE_OPS = Set[:NOP, :ENTER, :JMP, :JMPIF, :JMPNOT, :JMPNIL, :RETURN, :RETURN_BLK, :RETSELF,
+                     :RETNIL, :RETTRUE, :RETFALSE, :BREAK, :STOP, :SETUPVAR, :SETIDX, :DEBUG,
+                     :KEYEND, :RAISEIF, :MATCHERR].freeze
   # How many copies of one variable a recorded class test follows.
   CLASS_TEST_CHAIN_MAX = 8
   # How many branches on one test boolean a narrowed edge is carried through.
   CLASS_TEST_THREAD_MAX = 4
-  ARITH_OPS = { 'ADD' => '+', 'SUB' => '-', 'MUL' => '*' }.freeze
-  IMM_ARITH_OPS = { 'ADDI' => '+', 'SUBI' => '-', 'ADDILV' => '+', 'SUBILV' => '-' }.freeze
+  ARITH_OPS = { :ADD => '+', :SUB => '-', :MUL => '*' }.freeze
+  IMM_ARITH_OPS = { :ADDI => '+', :SUBI => '-', :ADDILV => '+', :SUBILV => '-' }.freeze
   # In-place container builders: the register keeps its exact class.
-  KEEPS_CLASS = { 'ARYPUSH' => ARR, 'ARYCAT' => ARR, 'HASHADD' => HSH, 'HASHCAT' => HSH, 'STRCAT' => STR }.freeze
+  KEEPS_CLASS = { :ARYPUSH => ARR, :ARYCAT => ARR, :HASHADD => HSH, :HASHCAT => HSH, :STRCAT => STR }.freeze
 
   # The facts the compiler proves elsewhere, as an object answering:
   #   entry_mask(irep, reg)                class set of an incoming argument
@@ -309,22 +309,22 @@ module NumericFlow
   K_EQ = 28
   K_OTHER = 29
   STEP_KINDS = {
-    'SETIV' => K_SETIV, 'LOADL' => K_LOADL, 'LOADSELF' => K_LOADSELF, 'LOADNIL' => K_LOADNIL,
-    'LOADTRUE' => K_LITERAL, 'LOADFALSE' => K_LITERAL, 'LOADSYM' => K_LITERAL, 'SYMBOL' => K_LITERAL, 'INTERN' => K_LITERAL, 'MOVE' => K_MOVE, 'KARG' => K_KARG,
-    'KEY_P' => K_KEY_P, 'GETCONST' => K_CONST, 'GETMCNST' => K_CONST, 'GETUPVAR' => K_GETUPVAR, 'GETIV' => K_GETIV,
-    'EXCEPT' => K_EXCEPT, 'RESCUE' => K_RESCUE, 'RANGE_INC' => K_RANGE, 'RANGE_EXC' => K_RANGE, 'ARRAY' => K_ARRAY,
-    'ARRAY2' => K_ARRAY, 'HASH' => K_HASH, 'STRING' => K_STRING, 'ARYPUSH' => K_KEEPS, 'ARYCAT' => K_KEEPS,
-    'HASHADD' => K_KEEPS, 'HASHCAT' => K_KEEPS, 'STRCAT' => K_KEEPS, 'ADD' => K_ARITH, 'SUB' => K_ARITH,
-    'MUL' => K_ARITH, 'ADDI' => K_IMM, 'SUBI' => K_IMM, 'ADDILV' => K_IMM_LV, 'SUBILV' => K_IMM_LV, 'DIV' => K_DIV,
-    'GETIDX' => K_GETIDX, 'GETIDX0' => K_GETIDX, 'AREF' => K_AREF, 'EQ' => K_EQ
+    :SETIV => K_SETIV, :LOADL => K_LOADL, :LOADSELF => K_LOADSELF, :LOADNIL => K_LOADNIL,
+    :LOADTRUE => K_LITERAL, :LOADFALSE => K_LITERAL, :LOADSYM => K_LITERAL, :SYMBOL => K_LITERAL, :INTERN => K_LITERAL, :MOVE => K_MOVE, :KARG => K_KARG,
+    :KEY_P => K_KEY_P, :GETCONST => K_CONST, :GETMCNST => K_CONST, :GETUPVAR => K_GETUPVAR, :GETIV => K_GETIV,
+    :EXCEPT => K_EXCEPT, :RESCUE => K_RESCUE, :RANGE_INC => K_RANGE, :RANGE_EXC => K_RANGE, :ARRAY => K_ARRAY,
+    :ARRAY2 => K_ARRAY, :HASH => K_HASH, :STRING => K_STRING, :ARYPUSH => K_KEEPS, :ARYCAT => K_KEEPS,
+    :HASHADD => K_KEEPS, :HASHCAT => K_KEEPS, :STRCAT => K_KEEPS, :ADD => K_ARITH, :SUB => K_ARITH,
+    :MUL => K_ARITH, :ADDI => K_IMM, :SUBI => K_IMM, :ADDILV => K_IMM_LV, :SUBILV => K_IMM_LV, :DIV => K_DIV,
+    :GETIDX => K_GETIDX, :GETIDX0 => K_GETIDX, :AREF => K_AREF, :EQ => K_EQ
   }.freeze
   # Call kinds: which oracle question answers the result.
   C_SEND = 1 # SEND SEND0 SSEND SSEND0
   C_BLOCK = 2 # SENDB SSENDB
   C_SUPER = 3
   C_NONE = 4 # EXEC BLKCALL
-  CALL_KINDS = { 'SEND' => C_SEND, 'SEND0' => C_SEND, 'SSEND' => C_SEND, 'SSEND0' => C_SEND, 'SENDB' => C_BLOCK,
-                 'SSENDB' => C_BLOCK, 'SUPER' => C_SUPER, 'EXEC' => C_NONE, 'BLKCALL' => C_NONE }.freeze
+  CALL_KINDS = { :SEND => C_SEND, :SEND0 => C_SEND, :SSEND => C_SEND, :SSEND0 => C_SEND, :SENDB => C_BLOCK,
+                 :SSENDB => C_BLOCK, :SUPER => C_SUPER, :EXEC => C_NONE, :BLKCALL => C_NONE }.freeze
   # Silent kinds (see #step_silent_call?): how the op decides whether it dispatches to Ruby.
   S_NONE = 0
   S_NUMERIC = 1 # ADD SUB MUL DIV EQ LT LE GT GE
@@ -333,10 +333,10 @@ module NumericFlow
   S_STRCAT = 4
   S_ALWAYS = 5
   S_CONST = 6 # GETCONST GETMCNST
-  SILENT_KINDS = { 'ADD' => S_NUMERIC, 'SUB' => S_NUMERIC, 'MUL' => S_NUMERIC, 'DIV' => S_NUMERIC, 'EQ' => S_NUMERIC,
-                   'LT' => S_NUMERIC, 'LE' => S_NUMERIC, 'GT' => S_NUMERIC, 'GE' => S_NUMERIC, 'GETIDX' => S_INDEX,
-                   'SETIDX' => S_INDEX, 'GETIDX0' => S_INDEX0, 'STRCAT' => S_STRCAT, 'GETCONST' => S_CONST,
-                   'GETMCNST' => S_CONST }.freeze
+  SILENT_KINDS = { :ADD => S_NUMERIC, :SUB => S_NUMERIC, :MUL => S_NUMERIC, :DIV => S_NUMERIC, :EQ => S_NUMERIC,
+                   :LT => S_NUMERIC, :LE => S_NUMERIC, :GT => S_NUMERIC, :GE => S_NUMERIC, :GETIDX => S_INDEX,
+                   :SETIDX => S_INDEX, :GETIDX0 => S_INDEX0, :STRCAT => S_STRCAT, :GETCONST => S_CONST,
+                   :GETMCNST => S_CONST }.freeze
   # Branch kinds of a conditional jump: BytecodeIR's (Decoded#cond).
   B_IF = BytecodeIR::COND_IF
   B_NOT = BytecodeIR::COND_NOT
@@ -384,12 +384,12 @@ module NumericFlow
     silent = SILENT_KINDS.fetch(op) { SILENT_CALL_OPS.include?(op) ? S_ALWAYS : S_NONE }
     step = Step.new(op, nil, nil, silent, decoded.cond)
     if NO_WRITE_OPS.include?(op)
-      step.kind = op == 'SETIDX' ? K_SETIDX : K_NO_WRITE
-      step.a = decoded.reg.to_i if op == 'SETIDX' || op == 'RAISEIF' || step.branch
+      step.kind = op == :SETIDX ? K_SETIDX : K_NO_WRITE
+      step.a = decoded.reg.to_i if op == :SETIDX || op == :RAISEIF || step.branch
       step.goto = decoded.goto if step.branch
       return step
     end
-    if op == 'SETIV'
+    if op == :SETIV
       step.kind = K_SETIV
       step.ivar = operands.ivar
       step.b = operands.b
@@ -554,7 +554,7 @@ module NumericFlow
   # tested register (and whatever it was loaded or copied from) by truthiness; nil
   # and false are the only falsy values. nil when the edge is infeasible.
   def step_refine_edge(step, index, target, state, c)
-    return refine_raiseif(step.a, state) if step.op == 'RAISEIF'
+    return refine_raiseif(step.a, state) if step.op == :RAISEIF
 
     branch = step.branch
     return state unless branch
@@ -869,7 +869,7 @@ module NumericFlow
                oracle.super_mask(irep, index, insn, state)
              else OTHER
              end
-      test = c.tb && (step.op == 'SEND' || step.op == 'SEND0') ? oracle.class_test(irep, index, insn, state) : nil
+      test = c.tb && (step.op == :SEND || step.op == :SEND0) ? oracle.class_test(irep, index, insn, state) : nil
       out.fill(OTHER, a + 1, nregs - a - 1) if a + 1 < nregs
       out.fill(ELEM_UNKNOWN, c.elem_base + a + 1, nregs - a - 1) if c.elem_base && a + 1 < nregs
       preserve = c.preserves && oracle.preserves_ivar_slots?(irep, index, insn, state)
@@ -1071,9 +1071,9 @@ module NumericFlow
   # Non-call ops that dispatch to Ruby the flow does not follow, with the same `self`
   # an operator on a non-number, an index on anything but an exact
   # Array with an Integer index, interpolation, hash/array splat, range or constant lookup.
-  SILENT_CALL_OPS = Set['ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'GETIDX', 'GETIDX0', 'SETIDX',
-                        'STRCAT', 'HASH', 'HASHADD', 'HASHCAT', 'ARYCAT', 'ARYSPLAT', 'AREF', 'RANGE_INC',
-                        'RANGE_EXC', 'GETCONST', 'GETMCNST'].freeze
+  SILENT_CALL_OPS = Set[:ADD, :SUB, :MUL, :DIV, :EQ, :LT, :LE, :GT, :GE, :GETIDX, :GETIDX0, :SETIDX,
+                        :STRCAT, :HASH, :HASHADD, :HASHCAT, :ARYCAT, :ARYSPLAT, :AREF, :RANGE_INC,
+                        :RANGE_EXC, :GETCONST, :GETMCNST].freeze
 
   def step_silent_call?(step, state, c)
     silent = step.silent

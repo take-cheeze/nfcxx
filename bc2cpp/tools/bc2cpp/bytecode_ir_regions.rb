@@ -148,7 +148,7 @@ module BytecodeIR
           next
         end
 
-        if follow_moves && insn.op == 'MOVE'
+        if follow_moves && insn.op == :MOVE
           moves += 1
           return nil if max_moves && moves > max_moves
 

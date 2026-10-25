@@ -20,7 +20,7 @@ class CallSiteIndex
   # `build` keys it by the name of the nearest enclosing `def` body. Without it the one `def set` a
   # `Class.new(A) { def set(x) = super("s") }` super call reaches (that def is in a block, so not
   # in the registry: `set` stays MONO) would look fed by its direct callers only.
-  SUPER_OP = 'SUPER'
+  SUPER_OP = :SUPER
 
   def self.build(ireps)
     by_name = Hash.new { |hash, name| hash[name] = [] }
@@ -84,8 +84,8 @@ class CallSiteIndex
     names = writers.map do |index|
       writer = program.source_at(index)
       case writer.op
-      when 'LOADSYM' then writer.sym
-      when 'SYMBOL'
+      when :LOADSYM then writer.sym
+      when :SYMBOL
         value = irep.pool[writer.pool_index]
         value if value.is_a?(String)
       end
@@ -105,11 +105,11 @@ class CallSiteIndex
 
       writer = writers.first.index
       source = program.source_at(writer)
-      if source.op == 'ARRAY'
+      if source.op == :ARRAY
         origin = writer
         break
       end
-      return nil unless %w[ARYCAT ARYPUSH].include?(source.op) && source.reg == reg
+      return nil unless %i[ARYCAT ARYPUSH].include?(source.op) && source.reg == reg
 
       at = writer
     end
@@ -120,12 +120,12 @@ class CallSiteIndex
     return nil if packed_register_captured?(irep, reg)
     return nil unless (origin + 1...idx).all? do |index|
       source = program.source_at(index)
-      if %w[ARYCAT ARYPUSH].include?(source.op)
+      if %i[ARYCAT ARYPUSH].include?(source.op)
         source.reg == reg
-      elsif source.op == 'NOP'
+      elsif source.op == :NOP
         true
       else
-        quiet = %w[MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE STRING SYMBOL GETUPVAR].include?(source.op) ||
+        quiet = %i[MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE STRING SYMBOL GETUPVAR].include?(source.op) ||
                 BytecodeIR::Ops::LOADI_OPS.include?(source.op)
         quiet && !source.regs.include?(reg)
       end
@@ -142,7 +142,7 @@ class CallSiteIndex
     lookup = ->(label) { irep.tree.fetch(label) }
     Array(irep.reps).each do |label|
       BytecodeIR.each_nested_insn(lookup.call(label), lookup) do |source, depth|
-        next unless %w[GETUPVAR SETUPVAR].include?(source.op)
+        next unless %i[GETUPVAR SETUPVAR].include?(source.op)
 
         index, level = source.upvar_ref
         captured = true if index.to_s == reg && level == depth
@@ -160,15 +160,15 @@ class CallSiteIndex
     parent = {}
     ireps.each_value do |irep|
       (irep.reps || []).each { |child| parent[child] = irep.label }
-      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, idx|
+      irep.each_with_op(:TDEF, :SDEF, :DEF) do |insn, idx|
         case insn.op
-        when 'TDEF', 'SDEF'
+        when :TDEF, :SDEF
           child = irep.reps[insn.block_index]
           body_name[child] = insn.sym if child && insn.sym
-        when 'DEF'
+        when :DEF
           mi = irep.previous_real_index(idx - 1)
           meth = mi >= 0 ? BytecodeIR.for(irep).source_at(mi) : nil
-          next unless meth && meth.op == 'METHOD' && insn.paren_reg == meth.reg
+          next unless meth && meth.op == :METHOD && insn.paren_reg == meth.reg
 
           child = irep.reps[meth.block_index]
           body_name[child] = insn.sym if child && insn.sym

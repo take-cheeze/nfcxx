@@ -27,15 +27,15 @@ module BytecodeIR
     FIXNUM_MIN = -1_073_741_824
     FIXNUM_MAX = 1_073_741_823
     # The operators an interval may combine. The bit operators are exact-value only (as IntegerConstantRanges).
-    INTERVAL_OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
-    ARITH_OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
+    INTERVAL_OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
+    ARITH_OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
     # `a | b` is `SEND R(a) :| n=1` (mruby 4 has no opcode for it).
     BIT_OPS = { '|' => 'BIT_OR', '&' => 'BIT_AND', '^' => 'BIT_XOR' }.freeze
     LITERAL_CLASSES = {
-      'LOADNIL' => :NilClass, 'LOADTRUE' => :TrueClass, 'LOADFALSE' => :FalseClass,
-      'LOADSYM' => :Symbol, 'SYMBOL' => :Symbol, 'STRING' => :String,
-      'ARRAY' => :Array, 'ARRAY2' => :Array, 'HASH' => :Hash,
-      'RANGE_INC' => :Range, 'RANGE_EXC' => :Range
+      :LOADNIL => :NilClass, :LOADTRUE => :TrueClass, :LOADFALSE => :FalseClass,
+      :LOADSYM => :Symbol, :SYMBOL => :Symbol, :STRING => :String,
+      :ARRAY => :Array, :ARRAY2 => :Array, :HASH => :Hash,
+      :RANGE_INC => :Range, :RANGE_EXC => :Range
     }.freeze
     LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
     POOL_INT = /\A\.i(?:32|64)=(-?\d+)\z/
@@ -92,10 +92,10 @@ module BytecodeIR
       ireps.each_value do |irep|
         BytecodeIR.for(irep).each_source do |insn, idx|
           case insn.op
-          when 'CLASS', 'MODULE'
+          when :CLASS, :MODULE
             poison << insn.sym_token if insn.sym_token
-          when 'SETCONST', 'SETMCNST'
-            bare = insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name
+          when :SETCONST, :SETMCNST
+            bare = insn.op == :SETCONST ? insn.const_name : insn.mcnst_name
             next unless bare
 
             src = insn.regs.last
@@ -180,16 +180,16 @@ module BytecodeIR
 
       op = insn.op
       return int_node(loadi_value(insn)) if BytecodeIR::Ops::LOADI_OPS.include?(op)
-      return hash_node(irep, index, insn, policy, depth) if op == 'HASH' && policy.hash_lookup_safe
+      return hash_node(irep, index, insn, policy, depth) if op == :HASH && policy.hash_lookup_safe
       return [:cls, LITERAL_CLASSES[op]].freeze if LITERAL_CLASSES.key?(op)
 
       case op
-      when 'LOADL' then pool_node(irep, insn)
-      when 'GETCONST' then (name = insn.const_name) && [:alias, name].freeze
-      when 'GETMCNST' then (name = insn.mcnst_name) && [:alias, name].freeze
+      when :LOADL then pool_node(irep, insn)
+      when :GETCONST then (name = insn.const_name) && [:alias, name].freeze
+      when :GETMCNST then (name = insn.mcnst_name) && [:alias, name].freeze
       when *ARITH_OPS then policy.operators_safe ? arith_node(irep, index, insn, policy, depth) : nil
-      when 'GETIDX' then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
-      when 'SEND0'
+      when :GETIDX then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
+      when :SEND0
         # Object#freeze answers its receiver, for the classes whose freeze is stock (freeze_classes; freeze_safe is
         # the Integer case). The node carries the classes it may answer for, and node_classes checks the receiver.
         return nil unless insn.sym == 'freeze'
@@ -201,7 +201,7 @@ module BytecodeIR
         return nil if receiver.nil? || (policy.hash_lookup_safe && !hash_frozen_in_place?(irep, index, receiver))
 
         receiver && [:freeze, receiver, allowed].freeze
-      when 'SEND'
+      when :SEND
         name = BIT_OPS[insn.sym]
         return nil unless name && insn.argc == 1 && policy.operators_safe
 
@@ -301,7 +301,7 @@ module BytecodeIR
     def arith_node(irep, index, insn, policy, depth)
       op = insn.op
       left = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
-      right = if %w[ADDI SUBI].include?(op)
+      right = if %i[ADDI SUBI].include?(op)
                 imm = insn.imm_operand
                 imm && [int_node(imm.to_i)].freeze
               else
@@ -335,8 +335,8 @@ module BytecodeIR
     end
 
     def loadi_value(insn)
-      return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
-      return -1 if insn.op == 'LOADI__1'
+      return insn.op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+      return -1 if insn.op == :LOADI__1
 
       insn.imm_operand&.to_i
     end
@@ -384,7 +384,7 @@ module BytecodeIR
         case node[0]
         when :freeze then zero_divisor?(node[1], known)
         when :arith
-          (node[1] == 'DIV' && exact_of(node[3], known) == 0) || zero_divisor?(node[2], known) || zero_divisor?(node[3], known)
+          (node[1] == :DIV && exact_of(node[3], known) == 0) || zero_divisor?(node[2], known) || zero_divisor?(node[3], known)
         else false
         end
       end
@@ -416,10 +416,10 @@ module BytecodeIR
     # mruby's fixnum DIV floors (-7 / 2 == -4); a zero divisor raises at run time, so it has no value.
     def arith_value(op, left, right)
       case op
-      when 'ADD', 'ADDI' then left + right
-      when 'SUB', 'SUBI' then left - right
-      when 'MUL' then left * right
-      when 'DIV' then right.zero? ? nil : left.div(right)
+      when :ADD, :ADDI then left + right
+      when :SUB, :SUBI then left - right
+      when :MUL then left * right
+      when :DIV then right.zero? ? nil : left.div(right)
       when 'BIT_OR' then left | right
       when 'BIT_AND' then left & right
       when 'BIT_XOR' then left ^ right
@@ -450,10 +450,10 @@ module BytecodeIR
 
     def combine(op, left, right)
       case op
-      when 'ADD', 'ADDI' then fit([left[0] + right[0], left[1] + right[1]])
-      when 'SUB', 'SUBI' then fit([left[0] - right[1], left[1] - right[0]])
-      when 'MUL' then corners(left, right) { |a, b| a * b }
-      when 'DIV'
+      when :ADD, :ADDI then fit([left[0] + right[0], left[1] + right[1]])
+      when :SUB, :SUBI then fit([left[0] - right[1], left[1] - right[0]])
+      when :MUL then corners(left, right) { |a, b| a * b }
+      when :DIV
         # A divisor interval holding 0 raises or is unknown: no interval.
         return nil if right[0] <= 0 && right[1] >= 0
 

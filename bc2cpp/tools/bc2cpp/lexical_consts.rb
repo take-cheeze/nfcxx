@@ -22,9 +22,9 @@ module LexicalConsts
   # A string evaluated with one of these changes the cref of its code, which is not modelled.
   STRING_EVAL_SENDS = %w[class_eval module_eval instance_eval].freeze
   # The ops collect_definitions reads besides the sends: the class bodies and the constant writes.
-  DEFINITION_OPS = %w[CLASS MODULE SETCONST SETMCNST].freeze
+  DEFINITION_OPS = %i[CLASS MODULE SETCONST SETMCNST].freeze
   # The send-to-self ops (SSEND and its splat forms). Within SEND_FAMILY this is exactly the SS-prefixed ops.
-  SELF_SEND_FAMILY = (BytecodeIR::Ops::SELF_SEND | %w[SSENDV SSENDVB]).freeze
+  SELF_SEND_FAMILY = (BytecodeIR::Ops::SELF_SEND | %i[SSENDV SSENDVB]).freeze
 
   # read_keys: GETCONST/GETMCNST insn (by identity) -> qualified name of the definition it reads.
   # site_keys: SETCONST insn (by identity) -> qualified name it defines, nil when its scope is unknown.
@@ -90,14 +90,14 @@ module LexicalConsts
       site_keys = {}.compare_by_identity
       @ireps.each do |label, irep|
         scope = @scope.fetch(label, :unknown)
-        BytecodeIR.for(irep).each_with_op('SETCONST', 'GETCONST', 'GETMCNST') do |insn, idx|
+        BytecodeIR.for(irep).each_with_op(:SETCONST, :GETCONST, :GETMCNST) do |insn, idx|
           case insn.op
-          when 'SETCONST'
+          when :SETCONST
             site_keys[insn] = scope == :unknown ? nil : LexicalConsts.qualify(scope, insn.const_name)
-          when 'GETCONST'
+          when :GETCONST
             key = lexical_key(scope, insn.const_name)
             read_keys[insn] = key if key
-          when 'GETMCNST'
+          when :GETMCNST
             key = scoped_key(class_path(irep, idx, insn.paren_reg, scope), insn.mcnst_name)
             read_keys[insn] = key if key
           end
@@ -121,7 +121,7 @@ module LexicalConsts
         @scope[label] = parent
         irep = @ireps.fetch(label)
         body = {}
-        BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE', 'SCLASS').each do |idx, child|
+        BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).each do |idx, child|
           body[child] = body_scope(irep, idx, BytecodeIR.for(irep).source_at(idx), parent)
         end
         irep.reps.each { |child| stack << [child, body.fetch(child, parent)] }
@@ -129,8 +129,8 @@ module LexicalConsts
     end
 
     def body_scope(irep, idx, insn, parent)
-      return :unknown if insn.op == 'SCLASS' || parent == :unknown
-      return :unknown unless all_writers?(irep, idx, reg_number(insn)) { |_j, w| w.op == 'LOADNIL' }
+      return :unknown if insn.op == :SCLASS || parent == :unknown
+      return :unknown unless all_writers?(irep, idx, reg_number(insn)) { |_j, w| w.op == :LOADNIL }
 
       LexicalConsts.qualify(parent, insn.sym)
     end
@@ -140,19 +140,19 @@ module LexicalConsts
         scope = @scope.fetch(label, :unknown)
         BytecodeIR.for(irep).each_with_op(*DEFINITION_OPS, *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
           case insn.op
-          when 'CLASS', 'MODULE'
+          when :CLASS, :MODULE
             define(scope, insn.sym, klass: true)
-            next unless insn.op == 'CLASS' && scope != :unknown
+            next unless insn.op == :CLASS && scope != :unknown
 
             # The superclass register is the one after the class's own; only a LOADNIL on every path there is "none"
             # (`class X < (c ? B : nil)` joins a class into it).
             super_reg = (reg_number(insn).to_i + 1).to_s
-            unless all_writers?(irep, idx, super_reg) { |_j, w| w.op == 'LOADNIL' }
+            unless all_writers?(irep, idx, super_reg) { |_j, w| w.op == :LOADNIL }
               @explicit_super << LexicalConsts.qualify(scope, insn.sym)
             end
-          when 'SETCONST'
+          when :SETCONST
             define(scope, insn.const_name, value: true)
-          when 'SETMCNST'
+          when :SETMCNST
             @unknown << insn.mcnst_name
           else
             # A private constant raises for a scoped `K::NAME` read from outside, which scoped_key does not model.
@@ -177,10 +177,10 @@ module LexicalConsts
     def collect_mixin(scope, irep, idx, insn)
       recv = reg_number(insn)
       # SSEND is a send to self, so its receiver register is not read; a SEND needs every writer to be LOADSELF.
-      on_self = SELF_SEND_FAMILY.include?(insn.op) || (recv && all_writers?(irep, idx, recv) { |_j, w| w.op == 'LOADSELF' })
+      on_self = SELF_SEND_FAMILY.include?(insn.op) || (recv && all_writers?(irep, idx, recv) { |_j, w| w.op == :LOADSELF })
       # One constant on every arm: `include(c ? A : B)` names no single module.
       names = recv && BytecodeIR.writers_reaching(irep, idx, (recv.to_i + 1).to_s)&.map do |_j, w|
-        w.op == 'GETCONST' ? w.const_name : nil
+        w.op == :GETCONST ? w.const_name : nil
       end
       name = names.first if names && names.uniq.size == 1
       well_formed = scope != :unknown && on_self && insn.argc == 1 && name
@@ -274,10 +274,10 @@ module LexicalConsts
 
     def class_path_of(irep, j, w, scope, depth)
       case w.op
-      when 'GETCONST'
+      when :GETCONST
         hit = lexical_hit(scope, w.const_name)
         class_definition?(w.const_name, hit) ? LexicalConsts.qualify(hit, w.const_name) : nil
-      when 'GETMCNST'
+      when :GETMCNST
         base = class_path(irep, j, w.paren_reg, scope, depth + 1)
         key = scoped_key(base, w.mcnst_name)
         key if key && class_definition?(w.mcnst_name, base)

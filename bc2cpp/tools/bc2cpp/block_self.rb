@@ -15,21 +15,21 @@ require_relative 'bytecode_ir'
 # (they pass the frame's block on). A read whose reaching definitions are not computable refuses. Proc#call runs
 # the Proc under the self it closed over, so the block of a plain yielder never runs under another self.
 module BlockSelf
-  WRITE_ONLY_OPS = Set['ENTER', 'NOP', 'GETCONST', 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETUPVAR', 'BLOCK', 'LAMBDA',
-                       'METHOD', 'JMP', 'RETNIL', 'RETSELF', 'RETTRUE', 'RETFALSE', 'BLKPUSH', 'OCLASS', 'TCLASS',
-                       'EXCEPT', 'STRING', 'MOVE', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
-  FORWARDING_OPS = Set['SUPER', 'ARGARY'].freeze
+  WRITE_ONLY_OPS = Set[:ENTER, :NOP, :GETCONST, :GETGV, :GETSV, :GETIV, :GETCV, :GETUPVAR, :BLOCK, :LAMBDA,
+                       :METHOD, :JMP, :RETNIL, :RETSELF, :RETTRUE, :RETFALSE, :BLKPUSH, :OCLASS, :TCLASS,
+                       :EXCEPT, :STRING, :MOVE, :JMPIF, :JMPNOT, :JMPNIL].freeze
+  FORWARDING_OPS = Set[:SUPER, :ARGARY].freeze
   # Operators whose read set is R(a)..R(a+width-1) (vm.c OP_ADD..OP_GE: R(a) op R(a+1); OP_GETIDX: R(a)[R(a+1)];
   # OP_SETIDX: R(a)[R(a+1)] = R(a+2); OP_ADDI/OP_SUBI and the patched OP_ADDILV/OP_SUBILV: R(a) op an immediate, whose
   # fallback writes the immediate before sending), including their method-send fallback, which passes exactly those.
-  FIXED_WINDOW_OPS = { 'ADD' => 2, 'SUB' => 2, 'MUL' => 2, 'DIV' => 2, 'EQ' => 2, 'LT' => 2, 'LE' => 2, 'GT' => 2,
-                       'GE' => 2, 'GETIDX' => 2, 'SETIDX' => 3, 'ADDI' => 1, 'SUBI' => 1, 'ADDILV' => 1,
-                       'SUBILV' => 1 }.freeze
+  FIXED_WINDOW_OPS = { :ADD => 2, :SUB => 2, :MUL => 2, :DIV => 2, :EQ => 2, :LT => 2, :LE => 2, :GT => 2,
+                       :GE => 2, :GETIDX => 2, :SETIDX => 3, :ADDI => 1, :SUBI => 1, :ADDILV => 1,
+                       :SUBILV => 1 }.freeze
 
   # Operators whose read set the operand count fixes (vm.c): ARRAY a b reads R(a)..R(a+b-1), ARRAY2 a b c reads
   # R(b)..R(b+c-1), ARYPUSH a b reads R(a)..R(a+b), HASH a b reads R(a)..R(a+2b-1), HASHADD a b reads R(a)..R(a+2b),
   # and ARYCAT/HASHCAT/STRCAT a read R(a) and R(a+1), ARYSPLAT a only R(a).
-  COUNTED_WINDOW_OPS = %w[ARRAY ARYPUSH HASH HASHADD ARYCAT HASHCAT STRCAT ARYSPLAT].freeze
+  COUNTED_WINDOW_OPS = %i[ARRAY ARYPUSH HASH HASHADD ARYCAT HASHCAT STRCAT ARYSPLAT].freeze
 
   module_function
 
@@ -70,13 +70,13 @@ module BlockSelf
       end
     end
     # Captured slots for the nested blocks: every register this frame may write a Proc into.
-    program.each_with_op('MOVE', 'BLKPUSH', 'GETUPVAR') do |insn, idx|
+    program.each_with_op(:MOVE, :BLKPUSH, :GETUPVAR) do |insn, idx|
       next unless insn.reg
 
       slots << insn.reg if case insn.op
-                           when 'MOVE' then proc_at.call(idx, insn.regs[1]) == true
-                           when 'BLKPUSH' then true
-                           when 'GETUPVAR' then proc_def?(irep, BytecodeIR::Definition.new(idx, insn.reg), frames, blk)
+                           when :MOVE then proc_at.call(idx, insn.regs[1]) == true
+                           when :BLKPUSH then true
+                           when :GETUPVAR then proc_def?(irep, BytecodeIR::Definition.new(idx, insn.reg), frames, blk)
                            else false
                            end
     end
@@ -93,8 +93,8 @@ module BlockSelf
 
     insn = BytecodeIR.for(irep).source_at(df.index)
     case insn.op
-    when 'BLKPUSH' then true
-    when 'GETUPVAR'
+    when :BLKPUSH then true
+    when :GETUPVAR
       index, level = insn.upvar_ref
       pos = index && frames.length - 2 - level
       frame = pos && pos >= 0 ? frames[pos] : nil
@@ -125,17 +125,17 @@ module BlockSelf
     a = insn.reg&.to_i or return nil
     count = insn.typed.find { |operand| operand.kind == :int }&.value
     case insn.op
-    when 'ARRAY'
+    when :ARRAY
       regs = insn.regs
       return nil unless count
 
       # ARRAY2 prints as ARRAY with its source register in front of the count.
       from = regs.size > 1 ? regs[1].to_i : a
       (from...(from + count)).to_a
-    when 'ARYPUSH' then count && (a..(a + count)).to_a
-    when 'HASH' then count && (a...(a + (2 * count))).to_a
-    when 'HASHADD' then count && (a..(a + (2 * count))).to_a
-    when 'ARYSPLAT' then [a]
+    when :ARYPUSH then count && (a..(a + count)).to_a
+    when :HASH then count && (a...(a + (2 * count))).to_a
+    when :HASHADD then count && (a..(a + (2 * count))).to_a
+    when :ARYSPLAT then [a]
     else [a, a + 1]
     end
   end
@@ -152,7 +152,7 @@ module BlockSelf
       args = (1..n).map { |k| [(d + k).to_s, :argument] }
       return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d.to_s, :receiver]] + args
     end
-    if op == 'BLKCALL'
+    if op == :BLKCALL
       # `yield`'s call (vm.c OP_BLKCALL): runs R(a) as a block, under its own self, with R(a+1..a+n).
       n = insn.typed.find { |operand| operand.kind == :int }&.value
       return nil unless insn.reg && n
@@ -161,7 +161,7 @@ module BlockSelf
       return [[d.to_s, :called]] + (1..n).map { |k| [(d + k).to_s, :argument] }
     end
     case op
-    when 'RETURN', 'RETURN_BLK', 'BREAK', 'SETIV', 'SETGV', 'SETSV', 'SETCV', 'SETCONST', 'SETUPVAR', 'GETMCNST'
+    when :RETURN, :RETURN_BLK, :BREAK, :SETIV, :SETGV, :SETSV, :SETCV, :SETCONST, :SETUPVAR, :GETMCNST
       regs.map { |r| [r, :argument] }
     when *FIXED_WINDOW_OPS.keys
       # vm.c: these read R(a) and the next width-1 registers only, also when they fall back to a send.

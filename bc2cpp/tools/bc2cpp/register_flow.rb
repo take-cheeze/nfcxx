@@ -25,7 +25,7 @@ class RegisterFlow
   # A reader whose text takes the register as one plain operand. Window
   # consumers (SEND, ARRAY, ADD, ...) stay out: their texts write registers
   # next to the one they read.
-  COPY_READER_OPS = Set['MOVE', 'RETURN', 'JMPIF', 'JMPNOT', 'JMPNIL', 'SETIV', 'SETGV', 'SETCV', 'SETCONST'].freeze
+  COPY_READER_OPS = Set[:MOVE, :RETURN, :JMPIF, :JMPNOT, :JMPNIL, :SETIV, :SETGV, :SETCV, :SETCONST].freeze
   # Experimental, off by default: BC2CPP_REGISTER_FLOW_WINDOWS=1 also rewrites reads inside window consumers.
   WALK_BUDGET = 400
   CLEAN_DEF = /\A  r(\d+) = ([^;{}\n"]*);\n\z/
@@ -91,7 +91,7 @@ class RegisterFlow
     lookup = ->(label) { tree[label] or raise ArgumentError, "bc2cpp: irep #{label} missing from the tree" }
     Array(irep.reps).all? do |label|
       BytecodeIR.each_nested_insn(lookup.call(label), lookup) do |insn, depth|
-        return false if insn.op == 'ARGARY'
+        return false if insn.op == :ARGARY
 
         index, level = insn.upvar_ref
         found << index.to_i if index && level == depth
@@ -377,7 +377,7 @@ class RegisterFlow
       dropped.merge(fresh)
     end
     dropped.each do |i|
-      Stats["dropped #{BytecodeIR::Ops::LOADI_OPS.include?(@insns[i].op) ? 'LOADI' : @insns[i].op}"] += 1
+      Stats["dropped #{BytecodeIR::Ops::LOADI_OPS.include?(@insns[i].op) ? :LOADI : @insns[i].op}"] += 1
       @texts[i] = ''
     end
   end
@@ -385,7 +385,7 @@ class RegisterFlow
   # --- copy propagation -------------------------------------------------------
 
   def propagate_copies
-    @program.each_with_op('MOVE') do |_insn, i|
+    @program.each_with_op(:MOVE) do |_insn, i|
       match = /\A  r(\d+) = r(\d+);\n\z/.match(@texts[i]) or next
       dest = match[1].to_i
       src = match[2].to_i

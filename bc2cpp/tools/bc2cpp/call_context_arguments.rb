@@ -26,7 +26,7 @@ module CallContextArguments
     masks.concat(arguments.last(post)) if post.positive?
     # Irep#enter is the first ENTER, so its index is the position of the first ENTER.
     index = nil
-    BytecodeIR.for(body).each_with_op('ENTER') { |_insn, i| index ||= i }
+    BytecodeIR.for(body).each_with_op(:ENTER) { |_insn, i| index ||= i }
     return nil unless index
 
     edges = {}
@@ -34,7 +34,7 @@ module CallContextArguments
       target = index + supplied + 1
       # A run cut short by the end of the irep leaves a missing slot, which fails the JMP check like a non-JMP does.
       program = BytecodeIR.for(body)
-      return nil unless (index + 1...(index + optional + 2)).all? { |k| program.source_at(k)&.op == 'JMP' }
+      return nil unless (index + 1...(index + optional + 2)).all? { |k| program.source_at(k)&.op == :JMP }
 
       edges[index] = [target]
     end

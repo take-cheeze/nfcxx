@@ -378,8 +378,8 @@ module RbsSignatures
            fields[3].to_i.zero? && fields[4].to_i.zero? && fields[5].to_i.zero?
           ap.ir_rest_elements[d.irep] = { (mand + optional_count + 1).to_s => sig.rest_type.value_classes }.freeze
         end
-        runtime_keywords = BytecodeIR.for(runtime).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.to_set
-        runtime_optional = BytecodeIR.for(runtime).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.to_set
+        runtime_keywords = BytecodeIR.for(runtime).instructions_with_op(:KARG).map { |insn| insn.sym.to_s }.to_set
+        runtime_optional = BytecodeIR.for(runtime).instructions_with_op(:KEY_P).map { |insn| insn.sym.to_s }.to_set
         if runtime_keywords == (sig.keywords || {}).keys.to_set && runtime_keywords - runtime_optional == (sig.required_keywords || Set.new)
           ap.ir_keyword_types[d.irep] = (sig.keywords || {}).filter_map { |name, type| [name, type.value_classes] if type.value_classes }.to_h.freeze
         end

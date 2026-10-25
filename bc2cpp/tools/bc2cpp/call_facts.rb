@@ -485,7 +485,7 @@ module CallFacts
 
     def transfer(insn, state, n, opaque)
       op = insn.op
-      return state if NO_WRITE.include?(op) || op == 'SETIV'
+      return state if NO_WRITE.include?(op) || op == :SETIV
 
       a = insn.reg&.to_i
       return state if a.nil? || a >= n
@@ -500,17 +500,17 @@ module CallFacts
         return out
       end
       case op
-      when 'MOVE'
+      when :MOVE
         src = insn.regs[1].to_i
         if src < n && src != a && !opaque.include?(a.to_s) && !opaque.include?(src.to_s)
           attach!(out, a, src)
         else
           detach!(out, a)
         end
-      when 'ADDILV', 'SUBILV'
+      when :ADDILV, :SUBILV
         b = insn.regs[1].to_i
         [a, b, b + 1].each { |r| detach!(out, r) if r < n }
-      when 'RESCUE'
+      when :RESCUE
         b = insn.regs[1].to_i
         detach!(out, b) if b < n
       else

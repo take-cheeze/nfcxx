@@ -50,7 +50,7 @@ end
 # whose ivar is +ivar+). Implicit-self sends are SSEND/SSENDB, so a call site is matched by /SEND/.
 def index_of(irep, op, sym: nil, ivar: nil)
   irep.instructions.index do |insn|
-    (op.is_a?(Regexp) ? insn.op.match?(op) : insn.op == op) && (sym.nil? || insn.sym == sym) && (ivar.nil? || insn.ivar == ivar)
+    (op.is_a?(Regexp) ? insn.op.to_s.match?(op) : insn.op == op) && (sym.nil? || insn.sym == sym) && (ivar.nil? || insn.ivar == ivar)
   end
 end
 
@@ -69,18 +69,18 @@ end
 # `a = c ? [1, 2] : [3]; f(*a)` with the array in R5, the splat register of `SSEND R4 :f n=*`. Each arm's ARRAY
 # writes R5 and both reach the send; the textually last one is `[3]`.
 joined = hand_irep([
-  hand_insn(0, 'JMPNOT', "R1\t12"),
-  hand_insn(4, 'ARRAY', "R5\t2"),
-  hand_insn(8, 'JMP', '16'),
-  hand_insn(12, 'ARRAY', "R5\t1"),
-  hand_insn(16, 'SSEND', "R4\t:f\tn=*")
+  hand_insn(0, :JMPNOT, "R1\t12"),
+  hand_insn(4, :ARRAY, "R5\t2"),
+  hand_insn(8, :JMP, '16'),
+  hand_insn(12, :ARRAY, "R5\t1"),
+  hand_insn(16, :SSEND, "R4\t:f\tn=*")
 ])
 check.call('splat unroll: an ARRAY that only one arm of a join writes is not the splat (was: unrolled to 1 element)',
            gen.splat_array_literal_regs(joined, 4, '5').nil?)
 
 single = hand_irep([
-  hand_insn(0, 'ARRAY', "R5\t2"),
-  hand_insn(4, 'SSEND', "R4\t:f\tn=*")
+  hand_insn(0, :ARRAY, "R5\t2"),
+  hand_insn(4, :SSEND, "R4\t:f\tn=*")
 ])
 check.call('splat unroll: a single reaching literal still unrolls to its two elements',
            gen.splat_array_literal_regs(single, 1, '5')&.size == 2)
@@ -97,7 +97,7 @@ compiled(<<~'RUBY') do |ireps|
   end
 RUBY
   splats = ireps.values.flat_map do |irep|
-    irep.instructions.each_index.filter_map { |idx| [irep, idx] if irep.instructions[idx].op == 'SSEND' && irep.instructions[idx].n_spec == '*' }
+    irep.instructions.each_index.filter_map { |idx| [irep, idx] if irep.instructions[idx].op == :SSEND && irep.instructions[idx].n_spec == '*' }
   end
   check.call('mrbc splat of a join: both sends are n=* splats (fixture sanity)', splats.size == 2)
   check.call('mrbc splat of a join: refused, so the splat stays dynamic',
@@ -201,7 +201,7 @@ ivar_str = method_irep(<<~'RUBY')
     end
   end
 RUBY
-setiv = index_of(ivar_str, 'SETIV', ivar: 'f')
+setiv = index_of(ivar_str, :SETIV, ivar: 'f')
 check.call('readable_but_other: a join of a STRING and nil is readable as another type (was: tolerated)',
            IvarLayout.readable_but_other(ivar_str, setiv, ivar_str.instructions[setiv].regs.first) == true)
 

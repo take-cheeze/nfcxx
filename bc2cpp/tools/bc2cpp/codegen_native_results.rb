@@ -62,7 +62,7 @@ class CodeGen
   # one of the two boolean class bits whatever the receiver. Gated like the other core results: exact instances, and no
   # program definition or installer of `!=` or `!` (a program override of either would change the answer).
   def native_core_neq_class_result(insn, state)
-    return nil unless insn.op == 'SEND' && insn.sym == '!=' && insn.plain_fixed_argc? && insn.argc == 1
+    return nil unless insn.op == :SEND && insn.sym == '!=' && insn.plain_fixed_argc? && insn.argc == 1
     return nil unless @closed_world&.exact_instances_singleton_free?
 
     installed = symbol_installed_names
@@ -78,15 +78,15 @@ class CodeGen
   # Gated: exact instances, no installed or program definition of the name, and the result is NumericFlow::ENUMERATOR,
   # which names no class.
   def native_core_blockless_enumerator_result(insn, state)
-    return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
-    return nil unless insn.op == 'SEND0' || insn.plain_fixed_argc?
+    return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %i[SEND SEND0].include?(insn.op)
+    return nil unless insn.op == :SEND0 || insn.plain_fixed_argc?
     return nil unless @closed_world&.exact_instances_singleton_free?
 
     owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]
     return nil unless owner && CoreHierarchySigs.hierarchy[1].fetch(owner, []).include?('Enumerable')
     return nil unless CoreBlocklessIteratorSigs.results.dig('Enumerable', insn.sym) == 'Enumerator'
 
-    argc = insn.op == 'SEND0' ? 0 : insn.argc
+    argc = insn.op == :SEND0 ? 0 : insn.argc
     min, max = CoreBlocklessIteratorSigs.arity('Enumerable', insn.sym)
     return nil unless argc && argc >= min && (max.nil? || argc <= max)
     return nil if symbol_installed_names.nil? || symbol_installed_names.include?(insn.sym)
@@ -103,7 +103,7 @@ class CodeGen
 
     enumerator = native_core_blockless_enumerator_result(insn, state)
     return enumerator if enumerator
-    return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
+    return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %i[SEND SEND0].include?(insn.op)
 
     owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]
     return nil unless owner && native_core_declared_result(insn.sym, owner)
@@ -130,12 +130,12 @@ class CodeGen
 
     @ireps.each_value do |irep|
       program = BytecodeIR.for(irep)
-      aliasing = program.each_source.any? { |insn, _index| insn.op == 'ALIAS' || insn.sym == 'alias_method' }
+      aliasing = program.each_source.any? { |insn, _index| insn.op == :ALIAS || insn.sym == 'alias_method' }
       program.each_source do |insn, _index|
-        return false if %w[UNDEF ALIAS].include?(insn.op) && insn.sym == 'inspect'
-        next unless aliasing && insn.sym == 'to_s' && %w[ALIAS LOADSYM].include?(insn.op)
+        return false if %i[UNDEF ALIAS].include?(insn.op) && insn.sym == 'inspect'
+        next unless aliasing && insn.sym == 'to_s' && %i[ALIAS LOADSYM].include?(insn.op)
 
-        return false unless insn.op == 'ALIAS' && insn.first_of(:name)&.value == 'inspect' &&
+        return false unless insn.op == :ALIAS && insn.first_of(:name)&.value == 'inspect' &&
                             NativeClassResults.source_matches?(irep.file, NativeClassResults::STRUCT_ALIAS_PATH, NativeClassResults::STRUCT_ALIAS_SHA)
       end
     end
@@ -237,7 +237,7 @@ class CodeGen
 
   # NumericFlow's answer for a SEND whose receiver the exact-class flow knows (nil: no fact).
   def native_result_numeric_mask(irep, index, insn)
-    return nil unless @native_results_ready && %w[SEND SEND0].include?(insn.op)
+    return nil unless @native_results_ready && %i[SEND SEND0].include?(insn.op)
 
     native_result_flow_mask(insn.sym, exact_flow_mask(irep, index, insn.reg), classes: false)
   end
@@ -245,7 +245,7 @@ class CodeGen
   # FIXNUM_RETURN_PROOF's native source: the send provably returns mrb_fixnum_value(..). INT alone
   # means every class bit of the receiver had a :fixnum fact (a bit without one adds OTHER).
   def native_fixnum_result?(irep, index, insn)
-    return false unless @native_results_ready && %w[SEND SEND0].include?(insn.op)
+    return false unless @native_results_ready && %i[SEND SEND0].include?(insn.op)
 
     native_result_flow_mask(insn.sym, exact_flow_mask(irep, index, insn.reg), classes: false) == NumericFlow::INT
   end

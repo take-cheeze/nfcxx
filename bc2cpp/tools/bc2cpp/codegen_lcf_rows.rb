@@ -38,13 +38,13 @@ class CodeGen
   def lcf_index_mask(irep, index, insn, state)
     return NumericFlow::OTHER unless @lcf_rows
 
-    recv = state[insn.op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i]
+    recv = state[insn.op == :GETIDX0 ? insn.regs[1].to_i : insn.reg.to_i]
     return NumericFlow::OTHER unless recv
     # No value yet (the fixpoint grows from empty): the result must not be OTHER, which never shrinks.
     return 0 if recv.zero?
     return NumericFlow::OTHER unless @lcf_rows.lcf_bits(recv).nonzero?
 
-    key = insn.op == 'GETIDX0' ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
+    key = insn.op == :GETIDX0 ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
     @lcf_rows.index(recv, key, nil_raises: numeric_nil_raises?('[]'))
   end
 
@@ -58,7 +58,7 @@ class CodeGen
   def exact_lcf_index_mask(irep, index, insn, state)
     return NumericFlow::OTHER unless @lcf_rows
 
-    recv = state[insn.op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i]
+    recv = state[insn.op == :GETIDX0 ? insn.regs[1].to_i : insn.reg.to_i]
     return NumericFlow::OTHER unless recv
     # No value yet (the fixpoint grows from empty): the result must not be OTHER, which never shrinks.
     return 0 if recv.zero?
@@ -67,7 +67,7 @@ class CodeGen
     kinds = exact_lcf_file_kinds(recv)
     return NumericFlow::OTHER unless @lcf_rows.lcf_bits(kinds).nonzero?
 
-    key = insn.op == 'GETIDX0' ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
+    key = insn.op == :GETIDX0 ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
     @lcf_rows.index(kinds, key, nil_raises: numeric_nil_raises?('[]'))
   end
 
@@ -106,7 +106,7 @@ class CodeGen
   # the receiver is nothing but Array1D rows (no OTHER, no Database or table kind). Runs in the final
   # emission pass, where the proof is settled, so a partial mask in the fixpoint cannot raise early.
   def check_lcf_array1d_key(irep, index, insn, reg, owner_def)
-    return unless @lcf_rows && insn.op == 'GETIDX'
+    return unless @lcf_rows && insn.op == :GETIDX
 
     key = lcf_literal_key(irep, index, insn.reg.to_i + 1)
     return unless key.is_a?(Symbol)
@@ -211,6 +211,6 @@ class CodeGen
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)
-    writer.op == 'LOADSYM' ? writer.sym&.to_sym : nil
+    writer.op == :LOADSYM ? writer.sym&.to_sym : nil
   end
 end
