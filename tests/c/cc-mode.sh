@@ -484,6 +484,11 @@ static inline int thp_enabled(unsigned int *v) { return 0; }
 static inline int none(unsigned int *p) { return *p == 7; }
 static int create_huge(int *v) { return no_dax(); }   /* called only where thp_enabled() is false: not emitted */
 struct inode { unsigned int i_flags; };
+static inline int dax_mapping(struct inode *m) { return m && (m->i_flags & S_DAX); }   /* m && 0: 0 */
+extern int undefined_key;
+static inline void unused_blocking(void) {   /* a used static lives with its function, which is unused */
+	static void *addressable __attribute__((used)) = &undefined_key;
+}
 int dedupe(struct inode *in) {
 	if (!(in->i_flags & S_DAX))
 		return 1;
@@ -499,14 +504,19 @@ int main(void) {
 		return create_huge(&r);
 	if (0 && r)
 		pgdir_shift = 48;
+	if (dax_mapping(&in))
+		return no_dax();
+	int dax = dax_mapping(&in);   /* QBE folds the local */
+	if (dax)
+		return no_dax();
 	if (counted() & 0)   /* not folded, as the call has an effect: it runs */
 		return 1;
 	apply((int *)(long)counted(), 0);   /* an argument with an effect: the call stays */
 	return r == 1 && calls == 2 ? 42 : 1;
 }
 EOC
-    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kfold.c -o kfold 2>/dev/null && { ./kfold; [ $? = 42 ]; }; then ok "kernel mode: x & 0, empty calls and dead code fold"
-    else bad "kernel mode: x & 0, empty calls and dead code fold" "wrong result or the link failed"; fi
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kfold.c -o kfold 2>/dev/null && { ./kfold; [ $? = 42 ]; }; then ok "kernel mode: x & 0, x && 0, empty calls and dead code fold"
+    else bad "kernel mode: x & 0, x && 0, empty calls and dead code fold" "wrong result or the link failed"; fi
     # a GNU attribute that changes what a declaration means and that cproc does not take is refused, not ignored
     for at in 'vector_size(16)' 'naked' 'mode(TI)'; do
       printf 'typedef int t __attribute__((%s));\n' "$at" > kattr.c
@@ -558,17 +568,20 @@ EOC
     if grep -q '^qbe kmove.c$' qbe.log && grep -q '^gcc kstay.c: ' qbe.log && [ -s kstay.o ]; then ok "qbe-try: moves what matches, keeps gcc otherwise"
     else bad "qbe-try: moves what matches, keeps gcc otherwise" "$(tr '\n' '|' < qbe.log)"; fi
     # an always_inline helper of __init code only goes to .init.text with it (gcc inlines it there); one that code in
-    # two init sections calls stays in .text and would be lasting code calling __init code, which gcc's inlined copies
-    # are not and the kernel's modpost refuses: that file stays on gcc
+    # two init sections calls goes to .ref.text (lasting code allowed to call init code, where __ref code calling it
+    # has gcc's copy too), which gcc's object does not have; one that lasting code calls behind a condition gcc folds
+    # through a local stays in .text and would be lasting code calling __init code, which gcc's inlined copies are not
+    # and the kernel's modpost refuses: that file stays on gcc
     printf 'void *alloc_try(long) __attribute__((section(".init.text")));\nstatic inline __attribute__((always_inline)) void *alloc(long n) { return alloc_try(n); }\n__attribute__((section(".init.text"))) void *boot(void) { return alloc(4); }\nstatic __attribute__((section(".init.text"))) int unused_init(void) { return 1; }\n' > kinit.c
     sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/__attribute__((section(".meminit.text"))) void *later(void) { return alloc(8); }/' kinit.c > kinit2.c
+    sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/void later(void) { int x = 0; x \&= 1; if (x) alloc(8); }/' kinit.c > kinit3.c
     rm -f qbe.log
-    for f in kinit kinit2; do
+    for f in kinit kinit2 kinit3; do
       NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c $f.c -o $f.o
     done
-    if grep -q '^qbe kinit.c$' qbe.log && grep -q '^gcc kinit2.c: lasting code references init code' qbe.log &&
-       ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc"
-    else bad "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc" "$(tr '\n' '|' < qbe.log)"; fi
+    if grep -q '^qbe kinit.c$' qbe.log && grep -q '^qbe kinit2.c$' qbe.log && objdump -t kinit2.o | grep -q '\.ref\.text.* alloc$' &&
+       grep -q '^gcc kinit3.c: lasting code references init code' qbe.log && ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text or .ref.text, lasting callers of init code stay on gcc"
+    else bad "qbe-try: init-only helpers go to .init.text or .ref.text, lasting callers of init code stay on gcc" "$(tr '\n' '|' < qbe.log)"; fi
     # a call gcc's object does not make (gcc folds the inlined branch away) keeps the gcc object; objdump gives an
     # undefined symbol no binding flag, which an earlier qbe-try missed
     printf 'void bad(void);\nstatic inline void g(int x) { if (x > 100) bad(); }\nint f(void) { g(5); return 0; }\n' > kneed.c
