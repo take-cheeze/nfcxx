@@ -1,2 +1,2 @@
 3
-refused: returned aliases require call-borrow
+refused: returned aliases from plain calls need call-borrow or --infer-loan-ends

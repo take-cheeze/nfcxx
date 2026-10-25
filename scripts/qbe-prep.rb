@@ -78,7 +78,13 @@
 #     `__atomic_compare_exchange_n`, seq_cst, with GCC's results. `__builtin_prefetch` and `__builtin_ia32_pause`
 #     are hints and become empty helpers; `__builtin_ffs` a small helper.
 #
-# Usage: scripts/mrb scripts/qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL
+#   * --dce (opt-in, NFCXX_QBE_DCE=1 in qbe-cc): the definitions of `static` functions that nothing reachable refers to
+#     are removed, as gcc does not emit them. cproc and QBE compile every static function, used or not, so a
+#     translation unit that includes a big header of static inline functions (ASTro's generated SD_*.c include the whole
+#     evaluator: 1750 functions of which a few are used) spends most of its time on dead code. The output assembly is
+#     smaller, not identical, and the program is the same. See dead_static_ranges for what is kept.
+#
+# Usage: scripts/mrb scripts/qbe-prep.rb [--c-input] [--dce] PREPROCESSED_C REWRITTEN_C ASM_TAIL
 # ASM_TAIL is appended to the QBE assembly by qbe-cc.
 #
 # Port of the Python original (tests/mruby/oracle/qbe-prep.py, deleted; the oracle port is tests/mruby/oracle/qbe-prep.rb), byte for byte on the tested inputs (tests/mruby/qbe-prep.sh).
@@ -295,12 +301,19 @@ SYM_SHIFT = 40
 class Toks
   attr_reader :src, :k, :p, :l, :names
 
-  def initialize(src, k, p, l, names)
+  # balanced: every `{` has its `}` and no `}` comes first, so the depth of a token is the number of open braces around
+  # it (the fast paths of bare_return_edits and volatile_locals rely on it; otherwise they take the general path).
+  def initialize(src, k, p, l, names, balanced = false)
     @src = src
     @k = k
     @p = p
     @l = l
     @names = names
+    @balanced = balanced
+  end
+
+  def balanced?
+    @balanced
   end
 
   def size
@@ -392,6 +405,8 @@ def tokenize(src)
   i = 0
   braces = 0
   parens = 0
+  min_braces = 0
+  ctx = (DEP_OFF << DEP_SHIFT) | (DEP_OFF << PDEP_SHIFT)  # the brace and parenthesis depths of the token being scanned
   while i < n
     c = src.getbyte(i)
     if SPACE_B[c]
@@ -431,7 +446,7 @@ def tokenize(src)
       stop = scan_quoted(src, q, n)
       unless stop.nil?
         code = src.getbyte(q) == 34 ? STR_CODE : CHR_CODE
-        ks << (code | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+        ks << (code | ctx)
         ps << i
         ls << (stop - i)
         i = stop
@@ -450,7 +465,7 @@ def tokenize(src)
           break
         end
       end
-      ks << (NUM_CODE | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+      ks << (NUM_CODE | ctx)
       ps << i
       ls << (j - i)
       i = j
@@ -466,27 +481,32 @@ def tokenize(src)
         names << name
         syms[name] = sym
       end
-      ks << (ID_CODE | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+      ks << (ID_CODE | ctx)
       ps << i
       ls << ((j - i) | (sym << SYM_SHIFT))
       i = j
       next
     end
-    ks << (c | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+    ks << (c | ctx)
     ps << i
     ls << 1
     if c == 123
       braces += 1
+      ctx += 1 << DEP_SHIFT
     elsif c == 125
       braces -= 1
+      min_braces = braces if braces < min_braces
+      ctx -= 1 << DEP_SHIFT
     elsif c == 40
       parens += 1
+      ctx += 1 << PDEP_SHIFT
     elsif c == 41
       parens -= 1
+      ctx -= 1 << PDEP_SHIFT
     end
     i += 1
   end
-  Toks.new(src, ks, ps, ls, names)
+  Toks.new(src, ks, ps, ls, names, braces == 0 && min_braces == 0)
 end
 
 # Index of the token matching the close token at i, searching backwards.
@@ -596,14 +616,17 @@ def plain_aligned_object?(tk, i)
   true
 end
 
-# If toks[i] starts __attribute__((__aligned__(N))), return [end_index_exclusive, N].
+# If toks[i] starts __attribute__((__aligned__(N))), return [end_index_exclusive, N]. A comma may follow the
+# attribute (mrustc writes `__attribute__((__aligned__(128),))`).
 def aligned_group(tk, i)
   return nil if i + 8 >= tk.size || !tk.id?(i, '__attribute__')
   return nil unless tk.punct?(i + 1, '(') && tk.punct?(i + 2, '(') && tk.code(i + 3) == ID_CODE &&
                     (tk.text(i + 3) == '__aligned__' || tk.text(i + 3) == 'aligned') && tk.punct?(i + 4, '(') &&
-                    tk.code(i + 5) == NUM_CODE && tk.punct?(i + 6, ')') && tk.punct?(i + 7, ')') &&
-                    tk.punct?(i + 8, ')')
-  [i + 9, py_int0(tk.text(i + 5))]
+                    tk.code(i + 5) == NUM_CODE && tk.punct?(i + 6, ')')
+  j = i + 7
+  j += 1 if tk.punct?(j, ',')
+  return nil unless j + 1 < tk.size && tk.punct?(j, ')') && tk.punct?(j + 1, ')')
+  [j + 2, py_int0(tk.text(i + 5))]
 end
 
 # unicode_escape decoding of the body of a string literal (what Python's decode_str does for ASCII text).
@@ -855,6 +878,29 @@ end
 # Skipped: arrays, function pointers and function declarations, typedef/static/extern/register
 # declarations, `for` declarations and function parameters (none of which need it or can take it).
 def volatile_locals(tk)
+  # Only a volatile qualifier inside braces and outside parentheses is looked at below. With none (the common case: the
+  # headers declare volatile objects at file scope), and braces that balance, there is nothing to do.
+  if tk.balanced?
+    quals = []
+    tk.names.each_with_index { |nm, sym| quals << sym if VOLATILE_QUALS.include?(nm) }
+    return [] if quals.empty?
+    k = tk.k
+    l = tk.l
+    hit = false
+    (0...k.size).each do |i|
+      ki = k[i]
+      next unless (ki & 511) == ID_CODE && quals.include?(l[i] >> SYM_SHIFT)
+      if ((ki >> DEP_SHIFT) & ((1 << 22) - 1)) != DEP_OFF && (ki >> PDEP_SHIFT) == DEP_OFF
+        hit = true
+        break
+      end
+    end
+    return [] unless hit
+  end
+  volatile_locals_walk(tk)
+end
+
+def volatile_locals_walk(tk)
   edits = []
   stack = []  # :func, :block or :other for each open brace
   seen = {}
@@ -1089,8 +1135,14 @@ end
 def weak_function_names(tk)
   names = {}
   n = tk.size
+  ka = tk.k
+  la = tk.l
+  # an attribute group can only name __weak__ if the identifier occurs at all
+  return names if tk.names.index('__weak__').nil?
+  as = tk.names.index('__attribute__')
+  return names if as.nil?
   (0...n).each do |i|
-    next unless tk.id?(i, '__attribute__') && tk.punct?(i + 1, '(')
+    next unless (ka[i] & 511) == ID_CODE && (la[i] >> SYM_SHIFT) == as && tk.punct?(i + 1, '(')
     stop = match_fwd(tk, i + 1, '(', ')') + 1
     next unless (i...stop).any? { |k| tk.id?(k, '__weak__') }
     # The first identifier followed by '(' after the attribute, before the declaration ends.
@@ -1136,11 +1188,19 @@ end
 def void_typedefs(tk)
   names = {}
   n = tk.size
+  k = tk.k
+  l = tk.l
+  ts = tk.names.index('typedef')
+  return names if ts.nil?
+  # `typedef T N ;` at i: the only places the loop below looks at
+  cands = []
+  (0...n - 3).each do |i|
+    cands << i if (k[i] & 511) == ID_CODE && (l[i] >> SYM_SHIFT) == ts && (k[i + 3] & 511) == 59 && (k[i + 2] & 511) == ID_CODE
+  end
   changed = true
   while changed
     changed = false
-    (0...n - 3).each do |i|
-      next unless tk.id?(i, 'typedef') && tk.punct?(i + 3, ';') && tk.code(i + 2) == ID_CODE
+    cands.each do |i|
       next if names.key?(tk.text(i + 2))
       base = tk.text(i + 1)
       next unless base == 'void' || names.key?(base)
@@ -1156,6 +1216,58 @@ end
 # does not return (exit), which never runs. It becomes `return (T){};`, a zero value of the return type: cproc
 # accepts that for scalars, pointers and structs (`(T){0}` crashes it for an empty struct).
 def bare_return_edits(tk)
+  return bare_return_edits_fast(tk) if tk.balanced?
+  bare_return_edits_walk(tk)
+end
+
+# Same edits as bare_return_edits_walk for brace-balanced input, without walking the whole file: only a `return ;`
+# can be edited, so each one is found first (a pass over the token codes), and for it the enclosing file-scope braces
+# and the start of the declaration they belong to are looked for backwards. Most files have none, or a few.
+def bare_return_edits_fast(tk)
+  edits = []
+  k = tk.k
+  l = tk.l
+  n = k.size
+  rs = tk.names.index('return')
+  return edits if rs.nil?
+  voids = nil
+  mask = (1 << 22) - 1
+  ret = nil
+  close = -1  # the end of the body the previous `return ;` was in: later ones before it share `ret`
+  i = 0
+  while i < n - 1
+    if (k[i] & 511) == ID_CODE && (l[i] >> SYM_SHIFT) == rs && (k[i + 1] & 511) == 59 && ((k[i] >> DEP_SHIFT) & mask) != DEP_OFF
+      if i > close
+        ret = nil
+        # the file-scope `{` before i: the nearest token before it at depth 0 (everything in a body is deeper)
+        o = i - 1
+        o -= 1 while o >= 0 && ((k[o] >> DEP_SHIFT) & mask) != DEP_OFF
+        if o >= 0 && (k[o] & 511) == 123
+          close = o + 1
+          close += 1 until (k[close] & 511) == 125 && ((k[close] >> DEP_SHIFT) & mask) == DEP_OFF + 1
+          # the declaration starts after the previous `;` at depth 0 or the `}` that closed the previous body
+          d = o - 1
+          while d >= 0
+            kd = k[d]
+            break if (kd & 511) == 59 && ((kd >> DEP_SHIFT) & mask) == DEP_OFF
+            break if (kd & 511) == 125 && ((kd >> DEP_SHIFT) & mask) == DEP_OFF + 1
+            d -= 1
+          end
+          ret = function_return_type(tk, d + 1, o)
+          if ret
+            voids ||= void_typedefs(tk)
+            ret = nil if ret == 'void' || voids.key?(ret)
+          end
+        end
+      end
+      edits << [tk.start(i), tk.stop(i), "return (#{ret}){}"] if ret
+    end
+    i += 1
+  end
+  edits
+end
+
+def bare_return_edits_walk(tk)
   edits = []
   n = tk.size
   voids = void_typedefs(tk)
@@ -1267,6 +1379,171 @@ end
 
 # ---- main -----------------------------------------------------------------------------------------
 
+# ---- --dce: unused static functions -------------------------------------------------------------------------------
+# Words that make a chunk (a file-scope declaration or function definition) stay: something outside the C text may
+# refer to it (inline asm, attributes), or it is run without being called.
+DCE_KEEP_WORDS = %w[asm __asm __asm__ __attribute__ __attribute used __used__ constructor __constructor__ destructor
+                    __destructor__ alias __alias__ weak __weak__ section __section__ ifunc __ifunc__ _Pragma __pragma]
+
+# Token ranges [first, last] of the file-scope definitions `static T name(params) { ... }` that no live code refers to.
+# A chunk is live when it is not such a definition (variables, types, non-static functions, anything unusual: roots) or
+# when a live chunk mentions its name (any identifier token with that name: shadowing locals only keep more). Prototypes
+# `static T name(params);` mention nothing. Brace-unbalanced input, or one without `static`, has no dead range.
+def dead_static_ranges(tk)
+  return [] unless tk.balanced?
+  names = tk.names
+  static_sym = names.index('static')
+  return [] if static_sym.nil?
+  keep = Array.new(names.size, false)
+  names.each_with_index { |nm, sym| keep[sym] = true if DCE_KEEP_WORDS.include?(nm) }
+  k = tk.k
+  l = tk.l
+  n = k.size
+  mask = (1 << 22) - 1
+  live = Array.new(names.size, false)
+  funcs = {}   # name sym -> [first, last, refs]
+  symidx = nil
+  decl = 0
+  i = 0
+  while i <= n
+    stop = nil   # the last token of the chunk that starts at decl
+    fn = nil     # the `{` of a function definition
+    if i == n
+      stop = n - 1
+    else
+      ki = k[i]
+      c = ki & 511
+      if ((ki >> DEP_SHIFT) & mask) == DEP_OFF
+        if c == 59
+          stop = i
+        elsif c == 123
+          close = i + 1
+          close += 1 until (k[close] & 511) == 125 && ((k[close] >> DEP_SHIFT) & mask) == DEP_OFF + 1
+          if (k[i - 1] & 511) == 41 && i > decl
+            fn = i
+            stop = close
+          end
+          i = close
+        end
+      end
+    end
+    if stop
+      if stop >= decl
+        # classify the chunk: static, no keep word, and the tokens before the name only identifiers and `*`
+        keepit = false
+        refs = []
+        j = decl
+        while j <= stop
+          kj = k[j]
+          if (kj & 511) == ID_CODE
+            sym = l[j] >> SYM_SHIFT
+            refs << sym
+            keepit = true if keep[sym]
+          end
+          j += 1
+        end
+        removable = false
+        if !keepit
+          name_i = nil
+          if fn
+            lp = match_back(tk, fn - 1, '(', ')')
+            name_i = lp - 1 if lp > 0
+          elsif (k[stop] & 511) == 59 && stop > decl && (k[stop - 1] & 511) == 41
+            lp = match_back(tk, stop - 1, '(', ')')
+            name_i = lp - 1 if lp > 0
+          end
+          if name_i && name_i >= decl && (k[name_i] & 511) == ID_CODE
+            # the specifiers and the type: identifiers and `*`, one of them `static` (a `static` in the body is not one)
+            plain = false
+            (decl...name_i).each do |q|
+              cq = k[q] & 511
+              if cq == ID_CODE
+                plain = true if (l[q] >> SYM_SHIFT) == static_sym
+              elsif cq != 42
+                plain = false
+                break
+              end
+            end
+            if plain
+              if fn.nil?
+                removable = :proto
+              else
+                nsym = l[name_i] >> SYM_SHIFT
+                removable = true unless funcs.key?(nsym)
+                funcs[nsym] = [decl, stop, refs.reject { |r| r == nsym }] if removable
+              end
+            end
+          end
+        end
+        if removable == :proto
+          # a declaration mentions no function that must be defined
+        elsif !removable
+          refs.each { |r| live[r] = true }
+          # strings of inline asm can name a function
+          if keepit
+            symidx ||= begin h = {}; names.each_with_index { |nm, sym| h[nm] = sym }; h end
+            (decl..stop).each do |q|
+              next unless (k[q] & 511) == STR_CODE
+              w = tk.text(q)
+              pos = 0
+              wl = w.bytesize
+              while pos < wl
+                b = w.getbyte(pos)
+                if IDSTART_B[b]
+                  e = pos + 1
+                  e += 1 while e < wl && IDCONT_B[w.getbyte(e)]
+                  sy = symidx[w.byteslice(pos, e - pos)]
+                  live[sy] = true if sy
+                  pos = e
+                else
+                  pos += 1
+                end
+              end
+            end
+          end
+        end
+      end
+      decl = stop + 1
+    end
+    i += 1
+  end
+  queue = funcs.keys.select { |sym| live[sym] }
+  until queue.empty?
+    sym = queue.pop
+    funcs[sym][2].each do |r|
+      next if live[r]
+      live[r] = true
+      queue << r if funcs.key?(r)
+    end
+  end
+  dead = []
+  funcs.each { |sym, f| dead << [f[0], f[1]] unless live[sym] }
+  dead.sort
+end
+
+# Remove the edits that lie in a dead range ([first, last] token ranges, sorted).
+def drop_edits_in_dead(tk, edits, dead)
+  return edits if dead.empty?
+  spans = dead.map { |a, b| [tk.start(a), tk.stop(b)] }
+  edits.reject do |e|
+    lo = 0
+    hi = spans.size - 1
+    inside = false
+    while lo <= hi
+      mid = (lo + hi) / 2
+      if e[0] < spans[mid][0]
+        hi = mid - 1
+      elsif e[1] > spans[mid][1]
+        lo = mid + 1
+      else
+        inside = true
+        break
+      end
+    end
+    inside
+  end
+end
+
 def read_text(path)
   s = File.open(path, 'rb') { |f| f.read } || ''
   # Python's text mode: universal newlines on read
@@ -1285,23 +1562,27 @@ def main(argv)
   c_input = false
   macho = false
   arm64 = false
+  dce = false
   args = argv.dup
-  while args.first == '--c-input' || args.first == '--macho' || args.first == '--arm64'
+  while args.first == '--c-input' || args.first == '--macho' || args.first == '--arm64' || args.first == '--dce'
     case args.shift
     when '--macho' then macho = true
     when '--arm64' then arm64 = true
+    when '--dce' then dce = true
     else c_input = true
     end
   end
   label = ->(name) { macho ? "_#{name}" : name }
-  die 'usage: qbe-prep.rb [--c-input] [--macho] [--arm64] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
+  die 'usage: qbe-prep.rb [--c-input] [--macho] [--arm64] [--dce] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
   src_path, out_path, tail_path = args
   src = read_text(src_path)
   tk = tokenize(src)
   n = tk.size
   edits = []  # [start, end, replacement]
   tail = []   # assembly directives, in source order
-  edits.concat(bare_return_edits(tk))
+  dead = dce ? dead_static_ranges(tk) : []
+  edits.concat(drop_edits_in_dead(tk, bare_return_edits(tk), dead))
+  dead.each { |a, b| edits << [tk.start(a), tk.stop(b), ''] }
   weak = weak_function_names(tk)
   weak_marked = {}
   ctors = []  # constructor functions, in source order
@@ -1309,7 +1590,7 @@ def main(argv)
   need_int3 = false
   need_fence = false
   prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
-  keep = volatile_locals(tk)
+  keep = drop_edits_in_dead(tk, volatile_locals(tk), dead)
   unless keep.empty?
     edits.concat(keep)
     prelude[KEEP_NAME] = KEEP_DEF
@@ -1326,11 +1607,24 @@ def main(argv)
     end
   end
 
+  kk = tk.k
+  ll = tk.l
+  attr_sym = tk.names.index('__attribute__') || -1
+  di = 0
+  dstart = dead.empty? ? n + 1 : dead[0][0]
   i = 0
   while i < n
-    c = tk.code(i)
+    if i >= dstart
+      # inside a dead definition: skipped whole
+      di += 1 while di < dead.size && dead[di][1] < i
+      i = dead[di][1] + 1 if di < dead.size && i >= dead[di][0]
+      dstart = di < dead.size ? dead[di][0] : n + 1
+      next
+    end
+    c = kk[i] & 511
     if c == ID_CODE
-      unless flags[tk.sym(i)] || tk.punct?(i + 1, '[') || tk.id?(i + 1, '__attribute__')
+      unless flags[ll[i] >> SYM_SHIFT] ||
+             (i + 1 < n && ((c1 = kk[i + 1] & 511) == 91 || (c1 == ID_CODE && ll[i + 1] >> SYM_SHIFT == attr_sym)))
         i += 1
         next
       end

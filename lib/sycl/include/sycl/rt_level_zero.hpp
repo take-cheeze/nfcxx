@@ -53,17 +53,20 @@ class ze_rt {
   }
 
   // ---- heap (the same allocator as rt_opencl.hpp)
-  uint64_t alloc(uint64_t bytes) {
+  // align: a power of two; the address (not only the offset) is a multiple of it. A block's skipped head stays free.
+  uint64_t alloc(uint64_t bytes, uint64_t align = 16) {
     bytes = bytes ? (bytes + 15) & ~uint64_t(15) : 16;
+    if (align < 16) align = 16;
     for (auto it = free_.begin(); it != free_.end(); ++it) {
-      if (it->second >= bytes) {
-        uint64_t off = it->first;
-        uint64_t left = it->second - bytes;
-        free_.erase(it);
-        if (left) free_[off + bytes] = left;
-        used_[off] = bytes;
-        return dev_base_ + off;
-      }
+      const uint64_t start = it->first, size = it->second;
+      const uint64_t off = ((dev_base_ + start + align - 1) & ~(align - 1)) - dev_base_;
+      if (off - start + bytes > size) continue;
+      const uint64_t left = start + size - (off + bytes);
+      free_.erase(it);
+      if (off > start) free_[start] = off - start;
+      if (left) free_[off + bytes] = left;
+      used_[off] = bytes;
+      return dev_base_ + off;
     }
     fail("out of device memory (the heap is " + std::to_string(heap_size_ >> 20) + " MB; the stacks of a dispatch take "
          "invocations times stack bytes)");
@@ -223,6 +226,7 @@ class ze_rt {
 
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
+  unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
 
  private:
   ze_rt() {
@@ -279,6 +283,7 @@ class ze_rt {
     props.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
     check(zeDeviceGetProperties(dev_, &props), "zeDeviceGetProperties");
     device_name_ = props.name;
+    compute_units_ = props.numSlices * props.numSubslicesPerSlice * props.numEUsPerSubslice;   // the EUs, as DPC++ counts them
 
     ze_device_compute_properties_t cp = {};
     cp.stype = ZE_STRUCTURE_TYPE_DEVICE_COMPUTE_PROPERTIES;
@@ -434,6 +439,7 @@ class ze_rt {
   ze_context_handle_t ctx_ = nullptr;
   ze_command_list_handle_t imm_ = nullptr;
   std::string device_name_;
+  uint32_t compute_units_ = 0;
   uint32_t max_wg_ = 0;
   uint32_t max_wi_[3] = {0, 0, 0};
   uint32_t local_mem_ = 0;
@@ -475,10 +481,9 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
 }
 inline void backend_wait() {}
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
-  (void)align;
   (void)kind;
   ze_rt &r = ze_rt::get();
-  return (void *)r.at(r.alloc(bytes));
+  return (void *)r.at(r.alloc(bytes, align));
 }
 inline void backend_usm_free(void *p) {
   ze_rt &r = ze_rt::get();

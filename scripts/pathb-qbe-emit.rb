@@ -565,7 +565,13 @@ class BorrowCallEffects
         if alias_result[3] == 'exclusive' && source[0] != 'write'
           raise refused, 'exclusive returned aliases require a write source argument'
         end
-        width = layouts.field_type(result[1], [])[:size]
+        # A pointer to const grants no writes, so its alias is shared.
+        pointee = result[1]
+        pointee = pointee[1] while pointee.is_a?(Array) && pointee[0] == 'const' && pointee.length == 2
+        if !pointee.equal?(result[1]) && alias_result[3] != 'shared'
+          raise refused, 'returned aliases of const pointees must be shared'
+        end
+        width = layouts.field_type(pointee, [])[:size]
         if offset + width > layouts.field_type(source[1], [])[:size]
           raise refused, 'returned alias range escapes its source argument'
         end

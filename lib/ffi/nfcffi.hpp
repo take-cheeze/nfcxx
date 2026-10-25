@@ -10,6 +10,10 @@
 #pragma once
 #include <cstddef>
 #include <cstring>
+#include <functional>
+#include <map>
+#include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -67,6 +71,12 @@ class Module {
 
   bool valid() const { return handle_ != nullptr; }
 
+  // The address of the global variable NAME (a function pointer or data). Throws Error when the module has no such symbol.
+  template <class T>
+  T* variable(const std::string& name) const {
+    return static_cast<T*>(symbol(name));
+  }
+
   // NAME as a function of type Sig = R(A...). Throws Error when the module has no such symbol.
   template <class Sig>
   Function<Sig> function(const std::string& name) const {
@@ -91,10 +101,61 @@ struct Declaration {
   std::vector<std::string> params;       // C types; "@" marks where the name goes: "int (*@)(const void *, const void *)"
   bool variadic = false;                 // a trailing "..."
   bool overloaded = false;               // C++ overloads share the name (C has one function per name)
+  char return_kind = 'x';                // how the return value crosses a call: i u f p v, or x (see Library)
+  std::string param_kinds;               // one letter per parameter, same alphabet
+  // A parameter that is a pointer to a function a host callable can implement (kind 'c'): its signature.
+  struct Callback {
+    std::size_t index = 0;                     // the parameter
+    std::string return_type;                   // abstract C type
+    char return_kind = 'x';
+    std::string param_kinds;
+    std::vector<std::string> params;           // "@" marks the name
+  };
+  std::vector<Callback> callbacks;
 
   // The declaration of parameter I with NAME ("int (*cmp)(const void *, const void *)"); an empty NAME gives the abstract type.
   std::string param_decl(std::size_t i, const std::string& name) const;
 };
+
+// A host function a C function can call through a callback parameter (see Library::call). It receives the arguments as
+// Values and returns the result as a Value.
+class Value;
+using CallableFn = std::function<Value(const std::vector<Value>&)>;
+
+// A value passed to or returned from Library::call: a signed or unsigned integer, a float or double, a pointer, void, a
+// struct or union passed by value, as its bytes (the C layout of the type, see Library::call), or a host callable.
+class Value {
+ public:
+  enum class Kind { Void, Signed, Unsigned, Float, Pointer, Bytes, Callable };
+
+  Value() = default;
+  static Value of_signed(long long v);
+  static Value of_unsigned(unsigned long long v);
+  static Value of_float(double v);
+  static Value of_pointer(const void* p);
+  static Value of_bytes(const void* p, std::size_t n);
+  static Value of_callable(CallableFn fn);
+
+  Kind kind() const { return kind_; }
+  // Each accessor throws Error when the value has another kind.
+  long long as_signed() const;
+  unsigned long long as_unsigned() const;
+  double as_float() const;
+  const void* as_pointer() const;
+  const std::vector<unsigned char>& as_bytes() const;
+  const CallableFn& as_callable() const;
+
+ private:
+  Kind kind_ = Kind::Void;
+  long long s_ = 0;
+  unsigned long long u_ = 0;
+  double f_ = 0;
+  const void* p_ = nullptr;
+  std::vector<unsigned char> b_;
+  std::shared_ptr<CallableFn> fn_;
+};
+
+class Library;
 
 // The compiler and its options. Compiling the same source with the same options reuses the shared object in the cache.
 class Ffi {
@@ -109,6 +170,10 @@ class Ffi {
 
   // Compiles SOURCE (C) into a shared object and loads it. Throws CompileError when the source does not compile.
   Module compile(const std::string& source) const;
+
+  // Compiles HEADER (with SOURCE after it, when given) and a wrapper for each callable function of HEADER, or only for
+  // the functions in ONLY when it is not empty. The header's path is included as is, so give an absolute path.
+  Library load(const std::string& header, const std::string& source = {}, const std::vector<std::string>& only = {}) const;
 
   // The functions declared in FILE and in the headers it includes (with their signatures), in the order the front end
   // lists them. CXX reads the file as C++ (overloads come out flagged); the default reads it as C. Reads the front end of the
@@ -126,6 +191,41 @@ class Ffi {
   std::vector<std::string> flags_;
   std::string decl_tool_;
   unsigned timeout_ = 300;
+};
+
+// A set of header declarations compiled into one shared object, with a wrapper per function that can be called by name
+// (Library::callable). A wrapper converts its arguments from the kinds of the declaration: integers, floats, pointers,
+// and structs or unions by value. Variadic functions take their extra arguments by their promoted types (see call);
+// overload sets and 128-bit or long double values are not callable (the declaration is still listed). Move-only.
+class Library {
+ public:
+  const std::vector<Declaration>& declarations() const { return decls_; }
+  bool callable(const std::string& name) const { return wrappers_.count(name) != 0 || variadic_.count(name) != 0; }
+
+  // Calls NAME with ARGS, converted to the declared parameter kinds. The extra arguments of a variadic function are
+  // passed as the C default promotions of their Values: an integer as long long, a float as double, a pointer as a
+  // pointer (so the callee's format must match them, as in C): signed and unsigned integers convert to each other,
+  // integers convert to float, and a pointer parameter takes a pointer or the integer 0. A struct or union parameter takes
+  // Value::of_bytes of the object's bytes, of the size the C compiler gives the type (the same layout as a C++ struct
+  // with the same members); a struct result comes back the same way. Throws Error for an uncallable name, a wrong argument
+  // count or kind, or a wrong size.
+  Value call(const std::string& name, const std::vector<Value>& args) const;
+
+ private:
+  friend class Ffi;
+  const Function<void(void**, void*)>& vwrapper(const Declaration& d, const std::string& seq) const;
+
+  Ffi ffi_;                  // the compiler and options, for the variadic wrappers compiled on demand
+  std::string header_;      // absolute path
+  std::string source_;
+  std::vector<Declaration> decls_;
+  std::map<std::string, Function<void(void**, void*)>> wrappers_;
+  std::map<std::string, Function<void(unsigned long*)>> layouts_;
+  std::map<std::string, std::vector<std::size_t>> sizes_;  // [0] the result's size, [i + 1] parameter i's (0 unless a struct)
+  std::set<std::string> variadic_;                       // callable with extra arguments
+  mutable std::map<std::string, Module> vmodules_;       // one per (function, sequence of extra kinds)
+  mutable std::map<std::string, Function<void(void**, void*)>> vwrappers_;
+  Module module_;
 };
 
 }  // namespace nfcffi

@@ -1,6 +1,7 @@
 // nfcffi host: compiles tests/ffi/lib.c at run time and calls it through C++ signatures, then calls functions of the C library
 // that gcc compiled (div, ldiv, qsort, strlen). Usage: host <dir holding lib.c>. Exits 0 when every check passes.
 #include <cstdio>
+#include <stdexcept>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -193,9 +194,155 @@ void check_declarations(const nfcffi::Ffi& ffi, const std::string& dir) {
   CHECK(no_tool);
 }
 
+int twice_fn(int x) { return 2 * x; }
+
+// Calls by name through a Library (Ffi::load): the header and the source are compiled together, one wrapper per callable
+// function; values are converted by the declared kinds (docs/notes/ffi.md, "Calls by name").
+void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
+  using nfcffi::Value;
+  nfcffi::Library lib = ffi.load(dir + "/dyn.h", read_text(dir + "/dyn_impl.c"));
+
+  CHECK(lib.callable("add_int") && lib.callable("scale") && lib.callable("halve") && lib.callable("mixed"));
+  CHECK(lib.callable("count_bytes") && lib.callable("call_back"));
+  CHECK(lib.callable("vec_add") && lib.callable("big_make"));    // structs by value
+  CHECK(lib.callable("sum_all"));                                // variadic: callable with extra arguments
+  CHECK(lib.declarations().size() == 9);                          // every function is listed
+
+  Value sum = lib.call("add_int", {Value::of_signed(4), Value::of_signed(5)});
+  CHECK(sum.kind() == Value::Kind::Signed && sum.as_signed() == 9);
+  CHECK(lib.call("add_int", {Value::of_unsigned(7), Value::of_signed(-2)}).as_signed() == 5);  // integers convert
+  CHECK(lib.call("scale", {Value::of_float(1.5), Value::of_signed(4)}).as_float() == 6.0);     // to floating point
+  CHECK(lib.call("halve", {Value::of_float(3.0)}).as_float() == 1.5);
+  CHECK(lib.call("mixed", {Value::of_float(0.5), Value::of_signed(2), Value::of_float(0.25), Value::of_signed(1)})
+            .as_float() == 3.75);
+  // Structs by value: the bytes of a host struct with the C layout, in and out.
+  Vec2 p{1, 2}, q{3, 4};
+  Value vsum = lib.call("vec_add", {Value::of_bytes(&p, sizeof p), Value::of_bytes(&q, sizeof q)});
+  CHECK(vsum.kind() == Value::Kind::Bytes && vsum.as_bytes().size() == sizeof(Vec2));
+  Vec2 vout{};
+  std::memcpy(&vout, vsum.as_bytes().data(), sizeof vout);
+  CHECK(vout.x == 4 && vout.y == 6);
+  Value big = lib.call("big_make", {Value::of_signed(7)});
+  Big bout{};
+  std::memcpy(&bout, big.as_bytes().data(), sizeof bout);
+  CHECK(big.as_bytes().size() == sizeof(Big) && bout.a == 7 && bout.b == 14 && bout.c == 21);
+
+  CHECK(lib.call("count_bytes", {Value::of_pointer("hello")}).as_unsigned() == 5);
+  CHECK(lib.call("call_back", {Value::of_pointer(reinterpret_cast<const void*>(&twice_fn)), Value::of_signed(21)})
+            .as_signed() == 42);  // the C code calls a host function through a pointer
+
+  // long double and 128-bit integers: callable, as the bytes of the value.
+  nfcffi::Library wide = ffi.load(dir + "/wide.h", read_text(dir + "/wide_impl.c"));
+  CHECK(wide.callable("twice_ld") && wide.callable("twice_i128"));
+  long double ld = 1.25L;
+  Value ldr = wide.call("twice_ld", {Value::of_bytes(&ld, sizeof ld)});
+  long double ldout = 0;
+  CHECK(ldr.as_bytes().size() == sizeof(long double));
+  std::memcpy(&ldout, ldr.as_bytes().data(), sizeof ldout);
+  CHECK(ldout == 2.5L);
+  __int128 wide128 = (static_cast<__int128>(1) << 100) + 7;
+  Value wide128r = wide.call("twice_i128", {Value::of_bytes(&wide128, sizeof wide128)});
+  __int128 wide128out = 0;
+  std::memcpy(&wide128out, wide128r.as_bytes().data(), sizeof wide128out);
+  CHECK(wide128out == wide128 * 2);
+
+  // Callbacks: a host callable stands in for a C function pointer; the C side calls it through a trampoline.
+  nfcffi::Library cbs = ffi.load(dir + "/cb.h", read_text(dir + "/cb_impl.c"));
+  CHECK(cbs.callable("apply_twice") && cbs.callable("each_pair") && cbs.callable("sum_with"));
+  CHECK(cbs.declarations().size() == 3);
+  Value twice = cbs.call("apply_twice", {Value::of_callable([](const std::vector<Value>& a) {
+                                          return Value::of_signed(a[0].as_signed() * 3);
+                                        }),
+                                        Value::of_signed(2)});
+  CHECK(twice.as_signed() == 18);  // 2 -> 6 -> 18: the C code calls the host twice
+  std::vector<long long> seen;
+  double seen_last = 0;
+  cbs.call("each_pair", {Value::of_callable([&](const std::vector<Value>& a) {
+                           seen.push_back(a[0].as_signed());
+                           seen_last = a[1].as_float();
+                           return Value();
+                         }),
+                         Value::of_signed(4)});
+  CHECK(seen.size() == 4 && seen[3] == 3 && seen_last == 1.5);
+  Value total = cbs.call("sum_with", {Value::of_callable([](const std::vector<Value>& a) {
+                                        return Value::of_signed(a[0].as_signed() + (long long)(a[1].as_float() * 4));
+                                      }),
+                                      Value::of_signed(4)});
+  CHECK(total.as_signed() == 10);  // f(i, 0.25) = i + 1 for i = 0..3
+  CHECK(cbs.call("each_pair", {Value::of_pointer(nullptr), Value::of_signed(0)}).kind() == Value::Kind::Void);  // nil, unused
+
+  bool kind_error = false;
+  try {
+    cbs.call("apply_twice", {Value::of_signed(5), Value::of_signed(2)});
+  } catch (const nfcffi::Error&) {
+    kind_error = true;
+  }
+  CHECK(kind_error);
+
+  // A callable's exception crosses the C frames as a rethrow after the call.
+  bool rethrown = false;
+  try {
+    cbs.call("apply_twice", {Value::of_callable([](const std::vector<Value>&) -> Value {
+                              throw std::runtime_error("boom");
+                            }),
+                            Value::of_signed(2)});
+  } catch (const std::runtime_error& e) {
+    rethrown = std::strcmp(e.what(), "boom") == 0;
+  }
+  CHECK(rethrown);
+
+  // Variadic functions: the extra arguments are passed by their promoted kinds (integer, double, pointer).
+  nfcffi::Library vlib = ffi.load(dir + "/var.h", "", {"snprintf"});
+  CHECK(vlib.callable("snprintf"));
+  char buf[64] = {0};
+  Value written = vlib.call("snprintf", {Value::of_pointer(buf), Value::of_unsigned(sizeof buf),
+                                         Value::of_pointer("%d-%s-%.2f"), Value::of_signed(42),
+                                         Value::of_pointer("hi"), Value::of_float(3.14159)});
+  CHECK(written.as_signed() == 10 && std::strcmp(buf, "42-hi-3.14") == 0);
+  // The same function with another kind sequence (a second wrapper, compiled on demand).
+  char buf2[32] = {0};
+  CHECK(vlib.call("snprintf", {Value::of_pointer(buf2), Value::of_unsigned(sizeof buf2), Value::of_pointer("%ld"),
+                               Value::of_unsigned(1234567890123ULL)}).as_signed() == 13 &&
+        std::strcmp(buf2, "1234567890123") == 0);
+
+  // Errors: an uncallable name, a wrong count, a wrong kind, and an accessor for another kind.
+  auto throws = [](auto&& f) {
+    try {
+      f();
+    } catch (const nfcffi::Error&) {
+      return true;
+    }
+    return false;
+  };
+  CHECK(throws([&] { lib.call("vec_add", {}); }));
+  CHECK(throws([&] { lib.call("vec_add", {Value::of_bytes(&p, 8), Value::of_bytes(&q, sizeof q)}); }));  // size
+  CHECK(throws([&] { lib.call("vec_add", {Value::of_signed(1), Value::of_bytes(&q, sizeof q)}); }));     // kind
+  CHECK(throws([&] { lib.call("add_int", {Value::of_signed(1)}); }));
+  CHECK(throws([&] { lib.call("add_int", {Value::of_pointer(nullptr), Value::of_signed(1)}); }));
+  CHECK(throws([&] { lib.call("halve", {Value::of_pointer("x")}); }));
+  CHECK(throws([&] { vlib.call("snprintf", {Value::of_pointer(buf)}); }));  // fewer than the fixed arguments
+  CHECK(throws([&] { sum.as_float(); }));
+
+  // A function of the C library by name, from a header that includes <string.h>; only strlen is wrapped.
+  nfcffi::Library libc = ffi.load(dir + "/str.h", "", {"strlen"});
+  CHECK(libc.callable("strlen") && !libc.callable("strcmp"));
+  CHECK(libc.call("strlen", {Value::of_pointer("abc")}).as_unsigned() == 3);
+}
+
 }  // namespace
 
+static int run_checks(int argc, char** argv);
+
 int main(int argc, char** argv) {
+  try {
+    return run_checks(argc, argv);
+  } catch (const std::exception& e) {
+    std::printf("FAILED: %s\n", e.what());
+    return 1;
+  }
+}
+
+static int run_checks(int argc, char** argv) {
   if (argc != 2) {
     std::fprintf(stderr, "usage: %s <dir with lib.c>\n", argv[0]);
     return 2;
@@ -219,6 +366,7 @@ int main(int argc, char** argv) {
   check_process();
   check_errors(ffi);
   check_declarations(ffi, argv[1]);
+  check_library(ffi, argv[1]);
 
   std::printf("%s: %d of %d checks passed\n", failures ? "FAILED" : "ok", checks - failures, checks);
   return failures ? 1 : 0;

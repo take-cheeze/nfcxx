@@ -1,0 +1,5 @@
+0
+inferred: (call-effects "get" (returns int) (nothrow) (noescape) (closed) (args (read int)))
+inferred: (call-effects "put" (returns void) (nothrow) (noescape) (closed) (args (init int) (value int)))
+inferred: (call-effects "bump" (returns void) (nothrow) (noescape) (closed) (args (write int)))
+ok: local lifetime checks passed (supported subset only)

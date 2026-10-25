@@ -1,4 +1,3 @@
-(borrow-layout (struct "Pair") 8 4 (field "a" 0 int) (field "b" 4 int))
 (call-effects "_Z9init_pairP4Pairi" (returns void) (nothrow) (noescape) (closed) (args (init (struct "Pair")) (value int)))
 (call-effects "_Z3sumPK4Pair" (returns int) (nothrow) (noescape) (closed) (args (read (struct "Pair"))))
 (call-effects "_Z6secondP4Pair" (returns (ptr int) (from-arg 0 4 exclusive)) (nothrow) (noescape) (closed) (args (write (struct "Pair"))))

@@ -1572,7 +1572,16 @@ class device {
   info::device_type info_of(info::device::device_type *) const { return is_gpu() ? info::device_type::gpu : info::device_type::cpu; }
   size_t info_of(info::device::max_work_group_size *) const { return is_gpu() ? 256 : 1024; }
   unsigned info_of(info::device::max_work_item_dimensions *) const { return 3; }
-  unsigned info_of(info::device::max_compute_units *) const { return 1; }
+  // OpenCL and Level Zero: the device's count (the EUs of an Intel GPU, as DPC++ reports it; ggml-sycl divides it by 16
+  // for its Xe cores, so 1 would give it none). Elsewhere 1.
+  unsigned info_of(info::device::max_compute_units *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().compute_units();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().compute_units();
+#endif
+    return 1;
+  }
   unsigned long info_of(info::device::global_mem_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
   unsigned long info_of(info::device::global_mem_cache_size *) const { return 1ul << 20; }
   unsigned info_of(info::device::mem_base_addr_align *) const { return 1024; }
@@ -2119,7 +2128,11 @@ enum class alloc { host, device, shared, unknown };
 }
 
 namespace detail {
+// A USM allocation starts at a multiple of the device's mem_base_addr_align (1024 bits) at least, as DPC++'s do: ggml takes
+// the base of a buffer from malloc_device to be aligned to its buffer type's 128 bytes.
+constexpr size_t usm_align = 128;
 inline void *usm_malloc(size_t bytes, size_t align, int kind) {
+  if (align < usm_align) align = usm_align;
   void *p = backend_usm_alloc(bytes, (unsigned)align, kind);
   if (!p && bytes) throw exception(errc::memory_allocation, "sycl: USM allocation failed");
   return p;

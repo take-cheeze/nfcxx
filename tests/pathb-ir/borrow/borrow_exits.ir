@@ -1,4 +1,5 @@
 (ir-module "borrow_exits.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(borrow-layout (struct "Own") 8 8 (field "p" 0 (ptr int)))
 (global "__eh_curr_region" unsigned_short 2 2 (extern))
 (global "__curr_eh_stack_entry" (ptr (struct "__C7")) 8 8 (extern))
 (global "tmp" (array 2 (struct "__C8")) 32 8 (static) (init
@@ -44,6 +45,9 @@
   (slot "b" (struct "Own") 8 8)
   (slot "tmp.2" int 4 4)
   (decl %0 param)
+  (decl $"tmp" temp)
+  (decl $"tmp.1" temp)
+  (decl $"tmp.2" temp)
   (store int $"n" %0)
   (let %1 (ptr (struct "__C7")) (load (ptr (struct "__C7")) @"__curr_eh_stack_entry"))
   (store (ptr (struct "__C7")) $"tmp" %1)
@@ -167,6 +171,9 @@
       (let %42 int (load int $"tmp.2"))
       (scope-end $"total")
       (scope-end $"n")
+      (scope-end $"tmp.2")
+      (scope-end $"tmp.1")
+      (scope-end $"tmp")
       (return %42))))
 
 (function "_Z10goto_exitsi"
@@ -184,6 +191,9 @@
   (slot "q" (struct "Own") 8 8)
   (slot "tmp.2" int 4 4)
   (decl %0 param)
+  (decl $"tmp" temp)
+  (decl $"tmp.1" temp)
+  (decl $"tmp.2" temp)
   (store int $"n" %0)
   (let %1 (ptr (struct "__C7")) (load (ptr (struct "__C7")) @"__curr_eh_stack_entry"))
   (store (ptr (struct "__C7")) $"tmp" %1)
@@ -351,4 +361,7 @@
       (scope-end $"x")
       (scope-end $"acc")
       (scope-end $"n")
+      (scope-end $"tmp.2")
+      (scope-end $"tmp.1")
+      (scope-end $"tmp")
       (return %49))))

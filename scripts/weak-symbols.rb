@@ -145,17 +145,20 @@ def attribute_weak?(text, a)
   return false if i.nil?
   depth = 0
   j = i
-  while j < text.size
-    c = text[j]
-    if c == "("
+  n = text.bytesize
+  while j < n
+    c = text.getbyte(j)
+    if c == 40
       depth += 1
-    elsif c == ")"
+    elsif c == 41
       depth -= 1
       break if depth == 0
     end
     j += 1
   end
   group = text[i, j - i + 1]
+  # no "weak" substring in the group, no word: the common case (aligned, always_inline, ...)
+  return false if group.index("weak").nil?
   has_word?(group, "weak") || has_word?(group, "__weak__")
 end
 
@@ -214,13 +217,23 @@ end
 # Labels at the start of a line: ^([A-Za-z_.$][\w.$]*):
 def defined_labels(asm)
   defs = {}
-  asm.each_line do |line|
-    c = line[0]
-    next if c.nil?
-    next unless ident_start?(c) || c == "." || c == "$"
-    i = 1
-    i += 1 while i < line.size && (word_char?(line[i]) || line[i] == "." || line[i] == "$")
-    defs[line[0, i]] = true if line[i] == ":"
+  n = asm.bytesize
+  pos = 0
+  while pos < n
+    c = asm.getbyte(pos)
+    # an instruction or directive line (tab or space) or an empty line: next line
+    if c != 9 && c != 32 && c != 10 && (c == 95 || c == 46 || c == 36 || (c >= 97 && c <= 122) || (c >= 65 && c <= 90))
+      i = pos + 1
+      while i < n
+        b = asm.getbyte(i)
+        break unless b == 95 || b == 46 || b == 36 || (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57)
+        i += 1
+      end
+      defs[asm.byteslice(pos, i - pos)] = true if i < n && asm.getbyte(i) == 58
+    end
+    nl = asm.index("\n", pos)
+    break if nl.nil?
+    pos = nl + 1
   end
   defs
 end
