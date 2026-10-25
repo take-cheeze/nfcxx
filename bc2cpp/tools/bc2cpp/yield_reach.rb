@@ -739,12 +739,12 @@ class YieldReach
   def writers_of(irep)
     @writers ||= {}.compare_by_identity
     @writers[irep] ||= begin
-      map = Hash.new { |h, k| h[k] = [] }
+      map = Array.new(irep.nregs.to_i) { [] }
       BytecodeIR.for(irep).each_source do |i, n|
         r = i.reg
-        map[r.to_i] << n if r && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
+        map[r] << n if r && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
       end
-      map
+      map.map(&:freeze).freeze
     end
   end
 
@@ -824,7 +824,7 @@ class YieldReach
 
   # Does the node, or a block below it, assign register +index+ (by write or SETUPVAR)?
   def writes_reg?(node, index)
-    return true unless writers_of(node.irep)[index].empty?
+    return true unless (writers_of(node.irep)[index] || []).empty?
     return true if BytecodeIR.for(node.irep).instructions_with_op(:SETUPVAR).any? { |i| i.upvar_ref&.first == index }
 
     BytecodeIR.own_upvar_written_regs(node.irep).include?(index)
@@ -919,7 +919,7 @@ class YieldReach
 
     irep = node.irep
     kinds = classify_definition(node, BytecodeIR::Definition.new(BytecodeIR::ENTRY, reg), false, false, 0)
-    writers_of(irep)[reg.to_i].each do |i|
+    (writers_of(irep)[reg.to_i] || []).each do |i|
       w = BytecodeIR.for(irep).source_at(i)
       found = if w.op == :MOVE
                 classify_kinds(node, i, w.regs[1], fallback: true, seen: seen)

@@ -190,8 +190,11 @@ module BytecodeIR
     end
 
     def lead_indices
-      @lead_indices ||= @instructions.group_by { |instruction| instruction.source.reg }
-                                     .transform_values { |list| list.map(&:index).freeze }.freeze
+      @lead_indices ||= begin
+        by_reg = @instructions.group_by { |instruction| instruction.source.reg }
+        size = (by_reg.keys.compact.max || -1) + 1
+        Array.new(size) { |reg| by_reg.fetch(reg, []).map(&:index).freeze }
+      end.freeze
     end
   end
 end
