@@ -97,6 +97,7 @@ class Module {
 // A function declared in a header, as the front end reads it (docs/notes/ffi.md, "Declarations").
 struct Declaration {
   std::string name;
+  std::string id;                        // a C identifier unique in the header: name, or name_k for the k-th overload of name
   std::string return_type;               // a C type, e.g. "const char *" or "size_t"
   std::vector<std::string> params;       // C types; "@" marks where the name goes: "int (*@)(const void *, const void *)"
   bool variadic = false;                 // a trailing "..."
@@ -160,6 +161,8 @@ class Library;
 // The compiler and its options. Compiling the same source with the same options reuses the shared object in the cache.
 class Ffi {
  public:
+  enum class Dialect { C, Cxx };
+
   // DRIVER: the nfcxx driver; empty means $NFCXX, then <repo>/nfcxx, then `nfcxx` on PATH.
   explicit Ffi(std::string driver = {});
 
@@ -169,17 +172,17 @@ class Ffi {
   Ffi& set_decl_tool(std::string path);        // scripts/libclang-cursors; default <repo>/scripts/libclang-cursors
 
   // Compiles SOURCE (C) into a shared object and loads it. Throws CompileError when the source does not compile.
-  Module compile(const std::string& source) const;
+  Module compile(const std::string& source, bool cxx = false) const;
 
   // Compiles HEADER (with SOURCE after it, when given) and a wrapper for each callable function of HEADER, or only for
   // the functions in ONLY when it is not empty. The header's path is included as is, so give an absolute path.
-  Library load(const std::string& header, const std::string& source = {}, const std::vector<std::string>& only = {}) const;
+  Library load(const std::string& header, const std::string& source = {}, const std::vector<std::string>& only = {},
+               Dialect dialect = Dialect::C) const;
 
   // The functions declared in FILE and in the headers it includes (with their signatures), in the order the front end
   // lists them. CXX reads the file as C++ (overloads come out flagged); the default reads it as C. Reads the front end of the
   // libclang shim: build with scripts/setup-libclang-edg.sh. Throws Error when the tool cannot be run, CompileError when the
   // file does not parse.
-  enum class Dialect { C, Cxx };
   std::vector<Declaration> declarations(const std::string& file, Dialect dialect = Dialect::C) const;
 
   const std::string& driver() const { return driver_; }
@@ -200,7 +203,7 @@ class Ffi {
 class Library {
  public:
   const std::vector<Declaration>& declarations() const { return decls_; }
-  bool callable(const std::string& name) const { return wrappers_.count(name) != 0 || variadic_.count(name) != 0; }
+  bool callable(const std::string& name) const;
 
   // Calls NAME with ARGS, converted to the declared parameter kinds. The extra arguments of a variadic function are
   // passed as the C default promotions of their Values: an integer as long long, a float as double, a pointer as a
@@ -214,12 +217,14 @@ class Library {
  private:
   friend class Ffi;
   const Function<void(void**, void*)>& vwrapper(const Declaration& d, const std::string& seq) const;
+  const Declaration* select(const std::string& name, const std::vector<Value>& args) const;
 
   Ffi ffi_;                  // the compiler and options, for the variadic wrappers compiled on demand
   std::string header_;      // absolute path
   std::string source_;
   std::vector<Declaration> decls_;
-  std::map<std::string, Function<void(void**, void*)>> wrappers_;
+  bool cxx_ = false;                                     // the wrappers are C++ (overloads)
+  std::map<std::string, Function<void(void**, void*)>> wrappers_;  // by Declaration::id
   std::map<std::string, Function<void(unsigned long*)>> layouts_;
   std::map<std::string, std::vector<std::size_t>> sizes_;  // [0] the result's size, [i + 1] parameter i's (0 unless a struct)
   std::set<std::string> variadic_;                       // callable with extra arguments
