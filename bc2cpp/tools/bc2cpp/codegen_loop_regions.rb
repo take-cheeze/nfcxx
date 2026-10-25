@@ -124,7 +124,7 @@ class CodeGen
 
   # EACH_BLOCK_SUPPORT: inline `ary.each { |x| ... }`. Same BLOCK +
   # `SENDB`/`SSENDB Ra :each n=0` adjacency as times. `#each` has bytecode
-  # definitions (Game::Actors, Game::Party, LCF::Array2D), so the receiver must
+  # definitions(Game::Actors, Game::Party, LCF::Array2D), so the receiver must
   # trace (trace_new_target) to exactly "Array". An SSENDB (self receiver) is
   # admitted only when the owner is Array itself. Anything unproven gives no
   # region.
@@ -708,7 +708,7 @@ class CodeGen
 
       # Only the frame entry can be the host parameter at the call: a write on any reaching path, including a loop
       # back-edge from after the call, refuses it.
-      defs = host_ir.reaching_definitions(call_idx, upvar.to_s, shared: true)
+      defs = host_ir.reaching_definitions(call_idx, upvar, shared: true)
       arg_pos = defs&.size == 1 && defs.first.entry? ? defs.first.reg.to_i : nil
       next unless arg_pos && arg_pos.between?(1, mandatory)
       next unless elements.arg_containers&.[](arg_pos - 1) == 'Hash'

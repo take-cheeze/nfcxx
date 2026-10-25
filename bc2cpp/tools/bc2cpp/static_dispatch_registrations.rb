@@ -618,7 +618,7 @@ module StaticDispatchRegistrations
 
   def definition_kind(irep, definition)
     # Only R0 is a known value at entry; an argument or a caller's local is not.
-    return definition.reg == '0' ? :self : :unknown if definition.entry?
+    return definition.reg == 0 ? :self : :unknown if definition.entry?
 
     insn = BytecodeIR.for(irep).source_at(definition.index)
     case insn.op
@@ -743,7 +743,7 @@ end
 if $PROGRAM_NAME == __FILE__
   repo_root = File.expand_path('../..', __dir__)
   mrbc = ENV['MRBC'] || 'mrbc'
-  # --closed-only: the list only the closed build uses (see static_dispatch_unregistered_closed.rb).
+  # --closed-only: the list only the closed build uses(see static_dispatch_unregistered_closed.rb).
   closed_only = ARGV.include?('--closed-only')
   # The probe generates with BC2CPP_BUILD_NAME=closed (bc2cpp_closed_world_probe_env), so the closed list's entries
   # are already missing from its registrations. They must count as already unregistered, or a re-run drops every

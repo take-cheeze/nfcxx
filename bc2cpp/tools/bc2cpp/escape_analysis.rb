@@ -530,7 +530,7 @@ module EscapeAnalysis
           elsif BytecodeIR::Ops::SEND.include?(insn.op) && NAMING_SENDS.include?(insn.sym)
             scan_naming_send(irep, idx, insn, insn.sym, 1)
           elsif BytecodeIR::Ops::SEND.include?(insn.op) && FORWARDING_SENDS.include?(insn.sym)
-            named = insn.plain_fixed_argc? && insn.argc.to_i.positive? && literal_symbol(irep, idx, (insn.reg.to_i + 1).to_s)
+            named = insn.plain_fixed_argc? && insn.argc.to_i.positive? && literal_symbol(irep, idx, (insn.reg + 1))
             scan_naming_send(irep, idx, insn, named, 2) if named && NAMING_SENDS.include?(named)
           end
         end
@@ -552,7 +552,7 @@ module EscapeAnalysis
     def scan_naming_send(irep, idx, insn, sym, first)
       count = insn.plain_fixed_argc? ? insn.argc.to_i : -1
       last = count - first + 1
-      names = last.positive? ? (first..count).map { |k| literal_symbol(irep, idx, (insn.reg.to_i + k).to_s) } : []
+      names = last.positive? ? (first..count).map { |k| literal_symbol(irep, idx, (insn.reg + k)) } : []
       literal = !names.empty? && names.none?(&:nil?)
       case sym
       when 'alias_method'
@@ -912,7 +912,7 @@ module EscapeAnalysis
       insn = prog.source_at(index)
       return nil unless %i[JMPIF JMPNOT JMPNIL].include?(insn.op)
 
-      defs = prog.reaching_definitions(index, insn.reg.to_s, opaque_regs: BytecodeIR.own_upvar_written_regs(run.irep),
+      defs = prog.reaching_definitions(index, insn.reg, opaque_regs: BytecodeIR.own_upvar_written_regs(run.irep),
                                                              shared: true)
       return nil unless defs&.any? && defs.all? { |d| block_slot_entry?(run, prog, d) }
 
@@ -926,7 +926,7 @@ module EscapeAnalysis
 
     # A definition that is the block slot's value on entry: the ENTRY pseudo-definition, or the ENTER that stores the slot.
     def block_slot_entry?(run, prog, defn)
-      return false unless defn.reg.to_s == run.block_slot
+      return false unless defn.reg == run.block_slot
 
       defn.entry? || (defn.built == :block && prog.source_at(defn.index).op == :ENTER)
     end
@@ -938,7 +938,7 @@ module EscapeAnalysis
       return false unless block && %i[SENDB SSENDB].include?(insn.op)
 
       prog = BytecodeIR.for(irep)
-      defs = prog.reaching_definitions(index, block.to_s, shared: true)
+      defs = prog.reaching_definitions(index, block, shared: true)
       defs&.size == 1 && !defs.first.entry? && prog.source_at(defs.first.index).op == :BLOCK
     end
 
@@ -1101,7 +1101,7 @@ module EscapeAnalysis
         klass = klasses&.size == 1 ? klasses.first : nil
         return reject(run, insn, :send_block, s) if block_captured_by_name?(name, list, klass)
 
-        run.uses << Use.new(index: i, kind: :pass_block, name: name, reg: block.to_s)
+        run.uses << Use.new(index: i, kind: :pass_block, name: name, reg: block)
       end
       out
     end

@@ -131,25 +131,25 @@ class CodeGen
   # +stores+) or a SEALED_HASH_READ_SENDS send, through its copies in this frame and never by a block.
   def sealed_hash_getiv_stores(irep, g, stores)
     reg = BytecodeIR.for(irep).source_at(g).reg
-    return false unless reg && !fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return false unless reg && !fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     uses = FactoryFlow.uses(irep, g, reg) or return false
     program = BytecodeIR.for(irep)
     found = []
     ok = uses.all? do |use, r|
       insn = program.source_at(use)
-      next false if fixnum_proof_ctx(irep)[:upvars].include?(r.to_s)
+      next false if fixnum_proof_ctx(irep)[:upvars].include?(r)
 
       case insn.op
-      when :GETIDX then insn.reg == r.to_s
+      when :GETIDX then insn.reg == r
       when :SETIDX
         recv, key, value = insn.regs
-        next false unless recv == r.to_s && value && ![key, value].include?(r.to_s)
+        next false unless recv == r && value && ![key, value].include?(r)
 
         found << [irep, use, value]
       when :SEND, :SEND0
         argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
-        insn.reg == r.to_s && SEALED_HASH_READ_SENDS.include?([insn.sym, argc])
+        insn.reg == r && SEALED_HASH_READ_SENDS.include?([insn.sym, argc])
       else false
       end
     end
@@ -212,7 +212,7 @@ class CodeGen
       unless producer.index == idx - 1 && preds && preds[idx] == Set[idx - 1]
         return 'a Hash literal another instruction can see before it is stored'
       end
-      return 'a Hash literal whose register is read after the store' unless sealed_hash_dead_after?(irep, idx, reg.to_s)
+      return 'a Hash literal whose register is read after the store' unless sealed_hash_dead_after?(irep, idx, reg)
 
       literal.value_regs.each_with_index do |value, k|
         why = prove.call(irep, producer.index, value)

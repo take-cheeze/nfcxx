@@ -33,7 +33,7 @@ class CodeGen
 
   # An Array index the Fixnum proof (with the interval sources) covers: no integer test, no `[]` funcall else.
   def proven_index_operand?(irep, idx, reg, owner_def)
-    ENV['BC2CPP_NUMERIC_INTERVALS'] != '0' && !reg.nil? && proven_fixnum_operand?(irep, idx, reg.to_s, owner_def)
+    ENV['BC2CPP_NUMERIC_INTERVALS'] != '0' && !reg.nil? && proven_fixnum_operand?(irep, idx, reg, owner_def)
   end
 
   def fixnum_interval_const?(name)

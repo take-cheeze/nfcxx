@@ -502,7 +502,7 @@ module CallFacts
       case op
       when :MOVE
         src = insn.regs[1].to_i
-        if src < n && src != a && !opaque.include?(a.to_s) && !opaque.include?(src.to_s)
+        if src < n && src != a && !opaque.include?(a.to_s) && !opaque.include?(src)
           attach!(out, a, src)
         else
           detach!(out, a)

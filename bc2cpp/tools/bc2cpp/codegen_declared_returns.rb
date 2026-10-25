@@ -211,7 +211,7 @@ class CodeGen
       idx = exit.index
       case exit.kind
       when :value, :block_return
-        why = declared_return_value_failure(entry, d, irep, idx, exit.reg&.to_s, breaks)
+        why = declared_return_value_failure(entry, d, irep, idx, exit.reg, breaks)
         flag.call(irep, idx, why) if why
       when :nil
         flag.call(irep, idx, 'a path returns nil') unless entry.nilable && entry.kind == :class
@@ -223,7 +223,7 @@ class CodeGen
     end
     # A `return` from a block leaves the method.
     BytecodeIR.nested_exits(irep, :block_return).each do |child, exit|
-      why = declared_return_value_failure(entry, d, child, exit.index, exit.reg&.to_s, breaks)
+      why = declared_return_value_failure(entry, d, child, exit.index, exit.reg, breaks)
       flag.call(child, exit.index, "a `return` inside a block: #{why}") if why
     end
     out

@@ -54,7 +54,7 @@ class CodeGen
   def record_hash_exact_class(irep, idx, reg)
     return nil unless RecordHash.table && @closed_world
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     slots = defs.flat_map do |d|
@@ -86,7 +86,7 @@ class CodeGen
   # The exact class of the value register +reg+ holds at +idx+ when every reaching definition is a
   # heap literal or a `Klass.new` whose constructor is stable (exact_new_receiver_class).
   def record_writer_exact_class(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     classes = defs.map do |d|

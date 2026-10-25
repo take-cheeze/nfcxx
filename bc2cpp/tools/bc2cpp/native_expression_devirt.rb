@@ -299,7 +299,7 @@ module NativeExpressionDevirt
   end
 
   # The two maps of scan_class_registrations as plain Hashes, which is what ScanCache stores; the
-  # callers get them back with the access-creates-empty defaults the scan itself uses (registrations_from_plain).
+  # callers get them back with the access-creates-empty defaults the scan itself uses(registrations_from_plain).
   def plain_registrations(registrations, opaque_owners)
     [registrations.to_a.to_h, opaque_owners.to_a.to_h]
   end

@@ -130,7 +130,7 @@ module IntegerConstantRanges
       load_here = insn.reg == cur.to_s && (LOADS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op))
       entries.include?(insn.addr) && !load_here
     end
-    irep.walk_writers(idx - 1, reg.to_s, barrier: barrier, follow_moves: true) do |insn, j, cur|
+    irep.walk_writers(idx - 1, reg, barrier: barrier, follow_moves: true) do |insn, j, cur|
       next IrepScans::KEEP if freeze_safe && insn.op == :SEND0 && insn.sym == 'freeze'
       if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
         value = literal(insn)

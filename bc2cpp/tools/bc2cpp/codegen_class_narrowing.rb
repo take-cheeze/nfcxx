@@ -126,17 +126,17 @@ class CodeGen
     when 'field?'
       # LCF.field?(obj, :name) (lcf.rb): a true answer needs obj to answer :name, so for a name nil does not answer,
       # the true edge is a non-nil obj. The false edge says nothing (any object may answer false).
-      return nil unless argc == 2 && insn.op == :SEND && irep.agreed_constant_name(index, insn.reg.to_s) == 'LCF'
+      return nil unless argc == 2 && insn.op == :SEND && irep.agreed_constant_name(index, insn.reg) == 'LCF'
       return nil unless @registry.fetch('field?', []).all? { |d| d.owner.start_with?('LCF') }
 
-      meth = irep.walk_dominating_writers(index - 1, (insn.reg.to_i + 2).to_s, use: index, follow_moves: true) do |writer|
+      meth = irep.walk_dominating_writers(index - 1, (insn.reg + 2), use: index, follow_moves: true) do |writer|
         writer.sym if writer.op == :LOADSYM
       end
       meth.is_a?(String) && nil_unanswerable?(meth) ? [1, class_test_object(:present, nil)] : nil
     when 'respond_to?'
       return nil unless argc == 1 && insn.op == :SEND && class_test_name_safe?(name) && respond_to_missing_absent?
 
-      meth = irep.walk_dominating_writers(index - 1, (insn.reg.to_i + 1).to_s, use: index, follow_moves: true) do |writer|
+      meth = irep.walk_dominating_writers(index - 1, (insn.reg + 1), use: index, follow_moves: true) do |writer|
         writer.sym if writer.op == :LOADSYM
       end
       meth.is_a?(String) ? [0, class_test_object(:responds, meth)] : nil
@@ -230,7 +230,7 @@ class CodeGen
   # The class the constant in register +reg+ of the SEND at +index+ names, as a full class name: a core class
   # this file models, or a declared class whose constant identity is stable. A module or anything else is nil.
   def class_test_constant(irep, index, reg)
-    name = irep.agreed_constant_name(index, reg.to_s)
+    name = irep.agreed_constant_name(index, reg)
     return nil unless name
 
     if CLASS_TEST_CORE_POSITIVE.key?(name) || CLASS_TEST_BITLESS_CORE.include?(name)
@@ -255,7 +255,7 @@ class CodeGen
     return nil unless insn.n_spec == '1' && insn.nk_spec.nil?
     return nil unless @closed_world && @closed_world.global_refusal.nil? && class_test_name_safe?(insn.sym)
 
-    written = straight_line_constant_name(irep, index, (insn.reg.to_i + 1).to_s)
+    written = straight_line_constant_name(irep, index, (insn.reg + 1))
     written && @closed_world.is_a_guard_constant?(written) ? written : nil
   end
 

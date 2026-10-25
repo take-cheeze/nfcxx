@@ -44,7 +44,7 @@ module IrCallGraphTypes
           end.to_h
           BytecodeIR::Types.new(body, inferred_args: facts.fetch(body.label, {}), inferred_calls: calls)
         end
-        analyses[body.label].at(index, register.to_s)
+        analyses[body.label].at(index, register)
       end
       nodes.each do |definition, position|
         next if facts.dig(definition.irep, position.to_s)

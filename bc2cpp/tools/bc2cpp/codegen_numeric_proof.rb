@@ -244,7 +244,7 @@ class CodeGen
     return 0 unless state
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     state[r]
   end
@@ -293,7 +293,8 @@ class CodeGen
 
   def fixnum_exact_tier(name, dest, rhs)
     overflow, helper = FIXNUM_TIER_OPS.fetch(name)
-    register = rhs.start_with?('r')
+    # Integer rhs is a bare literal; String rhs is either a register ref ("rN") or literal text.
+    register = rhs.is_a?(String) && rhs.start_with?('r')
     "{ mrb_int bc2cpp_z; " \
       "if (#{overflow}(mrb_fixnum(r#{dest}), #{register ? "mrb_fixnum(#{rhs})" : rhs}, &bc2cpp_z) || !FIXABLE(bc2cpp_z)) " \
       "{ r#{dest} = #{helper}(M, r#{dest}, #{register ? rhs : "mrb_fixnum_value(#{rhs})"}); } " \

@@ -55,7 +55,7 @@ module ComputedSendNames
   end
 
   def self.reaching(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     defs

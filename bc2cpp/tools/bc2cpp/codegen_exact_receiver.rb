@@ -89,7 +89,7 @@ class CodeGen
       return { klass: klass, recv: recv, name: name,
                int_site: [irep, idx, owner_def, reg_offset],
                arg_class: lambda do |position|
-                 reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
+                 reg = argv[position].to_s[/\Ar(\d+)\z/, 1]&.to_i
                  reg && exact_core_value_class(irep, idx, reg.to_i - reg_offset)
                end }
     end
@@ -107,7 +107,7 @@ class CodeGen
 
     { klass: klass, recv: recv, name: name, int_site: nil, arg_class: ->(_position) {},
       literal_int_arg: lambda do |position|
-        reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
+        reg = argv[position].to_s[/\Ar(\d+)\z/, 1]&.to_i
         literal = reg && exact_literal(irep, idx, reg.to_i - reg_offset)
         literal && literal.klass == :Integer && literal.value &&
           literal.value.between?(IntegerConstantRanges::FIXNUM_MIN, IntegerConstantRanges::FIXNUM_MAX)

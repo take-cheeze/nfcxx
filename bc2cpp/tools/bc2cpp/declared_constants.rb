@@ -246,7 +246,7 @@ module DeclaredConstants
       return 'the frozen array is not an array literal' unless literal&.op == :ARRAY && literal.uint_operand
 
       bad = (0...literal.uint_operand).find do |offset|
-        fact = types.fact_at(literal_index, (literal.reg.to_i + offset).to_s)
+        fact = types.fact_at(literal_index, (literal.reg + offset))
         fact.nil? || fact.classes != want
       end
       return "element #{bad} of the literal is not proven #{entry.elem}" if bad
@@ -261,7 +261,7 @@ module DeclaredConstants
     seen = Set[]
     index = idx
     loop do
-      writers = BytecodeIR.writers_reaching(irep, index, reg.to_s)
+      writers = BytecodeIR.writers_reaching(irep, index, reg)
       return nil unless writers&.length == 1
 
       writer_index, insn = writers.first
@@ -279,7 +279,7 @@ module DeclaredConstants
   def frozen_array_defs(irep, idx, reg, registry, container_constants)
     return nil if (registry['freeze'] || []).any?(&:irep)
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     program = BytecodeIR.for(irep)
@@ -388,14 +388,14 @@ module DeclaredConstants
     return false unless range && BytecodeIR::Ops::RANGE_BUILD.include?(range.op) && range.reg
 
     lo = literal_kind(irep, k, range.reg)
-    hi = literal_kind(irep, k, (range.reg.to_i + 1).to_s)
+    hi = literal_kind(irep, k, (range.reg + 1))
     !lo.nil? && lo == hi
   end
 
   # The writer of +reg+ before +idx+ that dominates the read, skipping `.freeze` (which answers its receiver):
   # [index, instruction, register holding the value at that index], or nil.
   def dominating_writer(irep, idx, reg)
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, cur|
+    irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |insn, j, cur|
       next IrepScans::KEEP if insn.op == :SEND0 && insn.sym == 'freeze'
 
       [j, insn, cur]
@@ -414,7 +414,7 @@ module DeclaredConstants
   # The writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil. Dominating: a join between
   # the writer and the read may hold another value, and then there is no single writer to prove.
   def sum_writer(irep, idx, reg)
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, _cur|
+    irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |insn, j, _cur|
       next IrepScans::KEEP if insn.op == :SEND0 && insn.sym == 'freeze'
 
       [j, insn]
@@ -502,7 +502,7 @@ module DeclaredConstants
 
   # The writer of +reg+ before +idx+ that dominates the read, as [index, instruction], or nil (see sum_writer).
   def merge_writer(irep, idx, reg)
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, _cur|
+    irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |insn, j, _cur|
       [j, insn]
     end
   end
@@ -574,7 +574,7 @@ module DeclaredConstants
       return false if entry_site?(irep, insn) || !(src = insn.regs.last)
 
       entries = @entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)
-      irep.walk_writers(idx - 1, src.to_s, barrier: ->(w, _cur) { entries.include?(w.addr) }, barrier_result: false,
+      irep.walk_writers(idx - 1, src, barrier: ->(w, _cur) { entries.include?(w.addr) }, barrier_result: false,
                                            follow_moves: true) do |w, _j, _cur|
         (w.op == :GETCONST && w.const_name == name) || (w.op == :GETMCNST && w.mcnst_name == name)
       end == true
@@ -586,7 +586,7 @@ module DeclaredConstants
       return nil if depth > MAX_DEPTH
 
       entries = @entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)
-      irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
+      irep.walk_writers(idx - 1, reg, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                            follow_moves: true) do |insn, j, cur|
         if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
           v = loadi(insn)

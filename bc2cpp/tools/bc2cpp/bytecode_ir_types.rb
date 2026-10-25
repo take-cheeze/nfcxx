@@ -125,14 +125,14 @@ module BytecodeIR
     # +refusal+, when a Hash, receives `:cause`, the first reason the proof failed; the answer does not depend on it.
     def exact_at(index, reg, self_class: nil, max_states: DATAFLOW_MAX_STATES, refusal: nil)
       @exact_cache ||= {}
-      key = [index, reg.to_s.dup.freeze, self_class, max_states]
+      key = [index, reg, self_class, max_states]
       if (cached = @exact_cache[key])
         unknown(refusal, cached[1]) if cached[1]
         return cached[0]
       end
 
       cause = {}
-      result = compute_exact(index, reg.to_s, self_class, max_states, cause)
+      result = compute_exact(index, reg, self_class, max_states, cause)
       @exact_cache[key] = [result, cause[:cause]].freeze if @exact_cache.size < QUERY_CACHE_CAP
       unknown(refusal, cause[:cause]) if cause[:cause]
       result
@@ -182,7 +182,7 @@ module BytecodeIR
 
     def exact_definition(definition, insn, self_class)
       unless insn
-        return [self_class] if definition.reg == '0'
+        return [self_class] if definition.reg == 0
 
         return nil
       end
@@ -199,7 +199,7 @@ module BytecodeIR
 
     # Why exact_definition gave no class for +definition+, for exact_at's refusal.
     def exact_refusal(definition, insn, self_class)
-      return definition.reg == '0' && !self_class ? :self_unknown : :entry_value unless insn
+      return definition.reg == 0 && !self_class ? :self_unknown : :entry_value unless insn
       return "entry:#{definition.built}" if definition.built
       return :side_write unless insn.reg == definition.reg
       return :self_unknown if insn.op == :LOADSELF
@@ -218,7 +218,7 @@ module BytecodeIR
     end
 
     def query(index, reg, use_declarations:, max_states:, refusal:)
-      key = [index, reg.to_s.dup.freeze, use_declarations, max_states]
+      key = [index, reg, use_declarations, max_states]
       if (cached = @query_cache[key])
         unknown(refusal, cached[1]) if cached[1]
         return cached[0]
@@ -323,7 +323,7 @@ module BytecodeIR
     def lcf_row_field(definition, insn, register, max_states:, refusal:)
       key_register = insn.op == :GETIDX0 ? nil : (insn.reg.to_i + 1)
       return nil unless key_register
-      key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, shared: true, origin_transfers: true,
+      key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register, shared: true, origin_transfers: true,
                                                  max_states: max_states, refusal: refusal)
       syms = key_defs&.map { |source| source.entry? ? nil : ir_program.source_at(source.index) }
       unless syms && !syms.empty? && syms.all? { |producer| producer&.op == :LOADSYM }
@@ -352,7 +352,7 @@ module BytecodeIR
 
       contracts = receiver.contracts.to_set
       if receiver.classes == Set[:Array] && insn.op != :GETIDX0
-        key = query(definition.index, (insn.reg.to_i + 1).to_s, use_declarations: true, max_states: max_states, refusal: refusal)
+        key = query(definition.index, (insn.reg + 1), use_declarations: true, max_states: max_states, refusal: refusal)
         return nil unless key && key.classes == Set[:Integer]
 
         contracts.merge(key.contracts)

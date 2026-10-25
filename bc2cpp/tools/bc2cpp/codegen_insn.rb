@@ -45,7 +45,7 @@ class CodeGen
     "  /*BC2CPP_CONST_HIT #{const_read_owner(insn) || '-'} #{written} r#{insn.reg}*/\n"
   end
 
-  # The owner a read resolves to, from the same analysis the closed world uses (codegen_numeric_consts.rb). Nil
+  # The owner a read resolves to, from the same analysis the closed world uses(codegen_numeric_consts.rb). Nil
   # without a closed-world proof (a core body compiles with none), and for a read the analysis refuses. A read
   # compiled from a shifted copy of its insn (an inlined block) is a new object, so it is refused too. Its own memo:
   # the first caller of lexical_const_info fixes its closed-world state, and a trace must not change that.

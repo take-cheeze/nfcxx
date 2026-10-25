@@ -21,7 +21,7 @@ module CoreRubyResults
 
         argc = %i[alias_method define_method define_singleton_method].include?(insn.sym) ? 1 : insn.argc
         (1..argc).each do |arg|
-          name = body.walk_dominating_writers(index - 1, (insn.reg.to_i + arg).to_s, follow_moves: true) do |writer|
+          name = body.walk_dominating_writers(index - 1, (insn.reg + arg), follow_moves: true) do |writer|
             writer.sym if writer.op == :LOADSYM
           end
           return nil unless name
@@ -265,7 +265,7 @@ class CodeGen
   # no `break` that could replace the callee's result (an exception unwinds past the call and yields none), the
   # same fact a literal block without BREAK states. BC2CPP_CORE_RUBY_SYMBOL_BLOCKS=0 withdraws it.
   def core_ruby_literal_block_safe?(irep, index, insn)
-    irep.walk_dominating_writers(index - 1, (insn.reg.to_i + insn.argc + 1).to_s, follow_moves: true) do |writer|
+    irep.walk_dominating_writers(index - 1, (insn.reg + insn.argc + 1), follow_moves: true) do |writer|
       next true if writer.op == :LOADSYM && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'
 
       body = writer.op == :BLOCK && @ireps[irep.reps[writer.block_index]]

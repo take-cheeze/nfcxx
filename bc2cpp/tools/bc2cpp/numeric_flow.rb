@@ -463,7 +463,7 @@ module NumericFlow
       @irep = irep
       @oracle = oracle
       @opaque = opaque
-      @opq = (opaque.empty? ? Array.new(nregs, false) : Array.new(nregs) { |r| opaque.include?(r.to_s) }).freeze
+      @opq = (opaque.empty? ? Array.new(nregs, false) : Array.new(nregs) { |r| opaque.include?(r) }).freeze
       @nregs = nregs
       @slots = slots
       @nslots = slots.size

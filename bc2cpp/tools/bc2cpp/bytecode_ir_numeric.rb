@@ -115,16 +115,16 @@ module BytecodeIR
       return nil unless count && count.positive? && literal_index.between?(-count, count - 1)
 
       element = source.to_i + (literal_index % count)
-      return nil if opaque.include?(element.to_s)
+      return nil if opaque.include?(element)
 
-      defs = program.reaching_definitions(origin, element.to_s, shared: true, opaque_regs: opaque)
+      defs = program.reaching_definitions(origin, element, shared: true, opaque_regs: opaque)
       return nil unless defs && !defs.empty?
 
       defs.reduce(0) do |mask, definition|
         return nil if definition.entry?
 
         writer = program.instructions[definition.index].source
-        return nil unless writer.reg.to_s == definition.reg.to_s
+        return nil unless writer.reg == definition.reg
 
         bit = NumericFlow::LITERAL_CLASS_MASKS[BytecodeIR::Types.literal_class(writer, irep.pool)]
         return nil unless bit
@@ -136,11 +136,11 @@ module BytecodeIR
     # [index, insn] of the one instruction whose write of +reg+ reaches +index+ (MOVE chains followed when
     # +follow_moves+), or nil.
     def single_writer(program, index, reg, opaque, follow_moves:)
-      defs = program.reaching_definitions(index, reg.to_s, shared: true, opaque_regs: opaque, follow_moves: follow_moves)
+      defs = program.reaching_definitions(index, reg, shared: true, opaque_regs: opaque, follow_moves: follow_moves)
       return nil unless defs && defs.size == 1 && !defs.first.entry?
 
       writer = program.instructions[defs.first.index].source
-      writer.reg.to_s == defs.first.reg.to_s ? [defs.first.index, writer] : nil
+      writer.reg == defs.first.reg ? [defs.first.index, writer] : nil
     end
 
     # Nothing between the ARRAY at +origin+ and the read at +index+ can reach the Array: a straight run of quiet ops.

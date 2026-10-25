@@ -51,8 +51,8 @@ module NilNarrowing
   # #raise_never_returns?(irep, index) (nil: no guard narrows and every call may return);
   # +cache+ (a Hash the caller owns, one per pair of callables) keeps each irep's states.
   def non_nil?(irep, idx, reg, nil_unanswerable, cache = {}, class_guard: nil)
-    state = state_at(irep, idx, reg.to_s, nil_unanswerable, class_guard, cache)
-    !state.nil? && (state == :all || state.include?(reg.to_s))
+    state = state_at(irep, idx, reg, nil_unanswerable, class_guard, cache)
+    !state.nil? && (state == :all || state.include?(reg))
   end
 
   # IS_A_GUARD: true when +reg+ holds an instance of exactly +klass+ on entry to instruction +idx+, because every
@@ -60,8 +60,8 @@ module NilNarrowing
   def instance_of?(irep, idx, reg, klass, nil_unanswerable, cache = {}, class_guard: nil)
     return false unless class_guard
 
-    state = state_at(irep, idx, reg.to_s, nil_unanswerable, class_guard, cache)
-    !state.nil? && (state == :all || state.include?([reg.to_s, klass]))
+    state = state_at(irep, idx, reg, nil_unanswerable, class_guard, cache)
+    !state.nil? && (state == :all || state.include?([reg, klass]))
   end
 
   # The state on entry to +idx+, or nil when +reg+ is never proven (a nested block writes it) or the irep's edges

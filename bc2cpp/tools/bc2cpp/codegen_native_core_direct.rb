@@ -36,7 +36,7 @@ module NativeCoreDirectFallback
     return nil unless block_core_world&.exact_instances_singleton_free?
 
     entry = rest_param_native_entry(name, argv.size)
-    return nil unless entry && rest_param_receiver?(irep, idx, reg.to_s)
+    return nil unless entry && rest_param_receiver?(irep, idx, reg)
 
     "  // NATIVE_CORE_DIRECT_REST :#{name} -- receiver is the *rest parameter, a fresh exact Array\n" \
       "  r#{d} = #{entry.call(recv, argv)};\n"
@@ -135,7 +135,7 @@ module NativeCoreDirectFallback
   def kernel_class_argument_proven?(name, argv, irep, idx, offset, owner_def)
     return false unless ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF'] != '0' && %w[is_a? kind_of?].include?(name) && argv.size == 1
 
-    reg = argv.first[/\Ar(\d+)\z/, 1]
+    reg = argv.first[/\Ar(\d+)\z/, 1]&.to_i
     reg && stable_constant_register(irep, idx, reg.to_i - offset, owner_def&.owner)
   end
 

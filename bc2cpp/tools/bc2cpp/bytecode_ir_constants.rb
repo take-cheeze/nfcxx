@@ -162,7 +162,7 @@ module BytecodeIR
     def alternatives(irep, index, reg, policy, depth: 0)
       return nil if depth > 64
 
-      defs = BytecodeIR.for(irep).reaching_definitions(index, reg.to_s, shared: true, origin_transfers: true)
+      defs = BytecodeIR.for(irep).reaching_definitions(index, reg, shared: true, origin_transfers: true)
       return nil unless defs && !defs.empty?
 
       nodes = defs.map do |definition|
@@ -206,7 +206,7 @@ module BytecodeIR
         return nil unless name && insn.argc == 1 && policy.operators_safe
 
         left = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
-        right = alternatives(irep, index, (insn.reg.to_i + 1).to_s, policy, depth: depth + 1)
+        right = alternatives(irep, index, (insn.reg + 1), policy, depth: depth + 1)
         left && right ? [:arith, name, left, right].freeze : nil
       end
     end
@@ -238,7 +238,7 @@ module BytecodeIR
     # is resolved after every binding is known (resolve_lookups); the receiver name and key are kept until then.
     def hash_lookup_node(irep, index, insn, policy, depth)
       receiver = single_alternative(irep, index, insn.reg, policy, depth)
-      key = single_alternative(irep, index, (insn.reg.to_i + 1).to_s, policy, depth)
+      key = single_alternative(irep, index, (insn.reg + 1), policy, depth)
       return nil unless receiver && receiver[0] == :alias && key && key[0] == :int && key[1]
 
       [:hash_lookup, receiver[1], key[1]].freeze

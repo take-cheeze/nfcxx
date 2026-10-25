@@ -43,7 +43,7 @@ module BytecodeIR
     def return_sources(index, reg, opaque_regs: nil, max_states: DATAFLOW_MAX_STATES)
       return nil unless reg
 
-      definitions = reaching_definitions(index, reg.to_s, opaque_regs: opaque_regs, max_states: max_states,
+      definitions = reaching_definitions(index, reg, opaque_regs: opaque_regs, max_states: max_states,
                                                           through_handlers: true, raiseif_nil: true, shared: true)
       return nil unless definitions
 

@@ -139,7 +139,7 @@ module SiteOriginTable
       insn = BytecodeIR.for(irep).source_at(definition.index)
       return 'self' if insn.op == :LOADSELF
 
-      # ENTER's typed definitions (rest, keyword hash, block, R1, post arguments) are the method's own parameters;
+      # ENTER's typed definitions(rest, keyword hash, block, R1, post arguments) are the method's own parameters;
       # the one it stores that is not is a local, which starts as the nil every local starts as.
       return(definition.built == :local ? 'literal_or_fresh' : 'parameter') if insn.op == :ENTER
 
@@ -166,7 +166,7 @@ module SiteOriginTable
 
     # The method's own value on entry: self, a positional parameter, or the nil every local starts as.
     def entry_category(irep, reg)
-      return 'self' if reg == '0'
+      return 'self' if reg == 0
 
       fields = irep.enter ? irep.enter.enter_fields : []
       positional = fields.first(SiteOriginTable::POSITIONAL_FIELDS).sum

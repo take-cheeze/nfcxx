@@ -204,7 +204,7 @@ class CodeGen
     n = insn.op.to_s.end_with?('0B') ? 0 : insn.argc
     return false unless n
 
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + n + 1).to_s)
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + n + 1))
     program = BytecodeIR.for(irep)
     writers&.all? { |i| BytecodeIR::Ops::LITERAL_PROC.include?(program.source_at(i).op) } || false
   end
@@ -214,7 +214,7 @@ class CodeGen
   def literal_ivar_argument?(irep, idx, insn)
     return false unless insn.reg
 
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + 1))
     writers&.all? do |i|
       writer = BytecodeIR.for(irep).source_at(i)
       writer.op == :LOADSYM && writer.sym.to_s.start_with?('@')
@@ -467,7 +467,7 @@ class CodeGen
       exposing = BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) && !(insn.op == :SUPER && super_safe)
       observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || exposing ||
                  (insn.op == :GETIV && insn.ivar == ivar) ||
-                 (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
+                 (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?(0))
       before.call(instruction.index) || !observes
     end
   end
@@ -490,7 +490,7 @@ class CodeGen
       next super_free if insn.op == :SUPER
 
       !BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) &&
-        (%i[GETIV SETIV].include?(insn.op) || !insn.regs.include?('0'))
+        (%i[GETIV SETIV].include?(insn.op) || !insn.regs.include?(0))
     end
   end
 end

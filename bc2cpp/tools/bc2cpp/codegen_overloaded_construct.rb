@@ -93,7 +93,7 @@ class CodeGen
     return true if type == :boolish
 
     int = native_int_arg_proven?(*int_site, argv, i)
-    reg = argv[i].to_s[/\Ar(\d+)\z/, 1]
+    reg = argv[i].to_s[/\Ar(\d+)\z/, 1]&.to_i
     mask = reg && int_site[3].to_i.zero? ? exact_flow_mask(irep, proof_site, reg) : nil
     str = mask == NumericFlow::STR
     case type

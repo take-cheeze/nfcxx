@@ -127,7 +127,7 @@ module NativeSingletonCall
   def native_top_level_constant(irep, idx, reg, lexical_owner)
     return nil unless irep && idx && reg && lexical_owner.is_a?(String)
 
-    written = straight_line_constant_name(irep, idx, reg) || irep.agreed_constant_name(idx, reg.to_s)
+    written = straight_line_constant_name(irep, idx, reg) || irep.agreed_constant_name(idx, reg)
     return nil unless written && !written.include?('::') && CodeGen.stable_class_constants&.include?(written)
 
     scopes = native_nested_constant_scopes(written)

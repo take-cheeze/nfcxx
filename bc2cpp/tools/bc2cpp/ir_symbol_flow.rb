@@ -10,7 +10,7 @@ require_relative 'bytecode_ir'
 # value stored in TABLE is literal, the names the send can reach form a known finite set, and yield_reach records
 # the send as calls to exactly those names.
 #
-# Values propagate along BytecodeIR's reaching definitions (handler edges included, MOVE chains followed): the
+# Values propagate along BytecodeIR's reaching definitions(handler edges included, MOVE chains followed): the
 # symbol set of a register at a read is the union over the definitions that reach it, and a definition the model
 # cannot account for (a refused query, a send result, an unlisted op) makes the set unknown. The premises:
 #
@@ -95,7 +95,7 @@ module IrSymbolFlow
       onto = reaching(irep, d.index, insn.reg) or return nil
       return nil unless onto.all? { |o| !o.entry? && BytecodeIR.for(irep).source_at(o.index).op == :LOADNIL }
 
-      get = single_def(irep, d.index, (insn.reg.to_i + 1).to_s, :GETIDX) or return nil
+      get = single_def(irep, d.index, insn.reg + 1, :GETIDX) or return nil
       getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, :GETCONST) or return nil
       BytecodeIR.for(irep).source_at(getc).const_name or return nil
     end
@@ -115,7 +115,7 @@ module IrSymbolFlow
   # Shared frozen cache entries: every consumer only reads (size, first, each, map over index/reg).
   def reaching(irep, idx, reg, follow_moves: true)
     cap = [BytecodeIR::DATAFLOW_MAX_STATES, BytecodeIR.for(irep).size * 4].max
-    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, follow_moves: follow_moves,
+    BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, follow_moves: follow_moves,
                                                          max_states: cap, shared: true)
   end
 
@@ -226,7 +226,7 @@ module IrSymbolFlow
 
     memo = irep.instance_variable_get(:@symbol_flow_reads) ||
            irep.instance_variable_set(:@symbol_flow_reads, {})
-    key = [idx, reg.to_s]
+    key = [idx, reg]
     return memo[key] if memo.key?(key)
     memo.shift if memo.size >= VALUE_READS_CAP
 
@@ -347,8 +347,8 @@ module IrSymbolFlow
     params = Hash.new { |h, k| h[k] = Set.new }
     calls.zip(insns).each do |(label, idx), insn|
       (1..arities.first).each do |k|
-        set = values_at(ctx, label, idx, (insn.reg.to_i + k).to_s, Set.new) or return nil
-        params[(k).to_s].merge(set)
+        set = values_at(ctx, label, idx, insn.reg + k, Set.new) or return nil
+        params[k].merge(set)
       end
     end
     params.default_proc = nil
@@ -370,7 +370,7 @@ module IrSymbolFlow
   def values_at(ctx, label, idx, reg, visiting)
     return nil if reg.nil?
 
-    key = [label, idx, reg.to_s]
+    key = [label, idx, reg]
     return EMPTY if visiting.include?(key)
 
     irep = ctx.ireps[label]
@@ -390,7 +390,7 @@ module IrSymbolFlow
   # The symbol set the instruction at n of irep label produces, or nil.
   def definition_values(ctx, label, n, visiting)
     insn = BytecodeIR.for(ctx.ireps[label]).source_at(n)
-    reg = insn.reg.to_i
+    reg = insn.reg
     case insn.op
     when :LOADSYM then insn.sym ? Set[insn.sym] : nil
     when LITERAL_LOAD then EMPTY
@@ -409,7 +409,7 @@ module IrSymbolFlow
 
   def union(ctx, label, n, regs, visiting)
     regs.each_with_object(Set.new) do |r, out|
-      set = values_at(ctx, label, n, r.to_s, visiting) or return nil
+      set = values_at(ctx, label, n, r, visiting) or return nil
       out.merge(set)
     end
   end
@@ -426,7 +426,7 @@ module IrSymbolFlow
     return nil unless target
 
     target_irep = ctx.ireps[target]
-    reg = index.to_s
+    reg = index
     return nil if BytecodeIR.own_upvar_written_regs(target_irep).include?(reg)
 
     program = BytecodeIR.for(target_irep)
@@ -486,14 +486,14 @@ module IrSymbolFlow
       return nil if OTHER_MUTATORS.include?(insn.sym) || ctx.user_methods.include?(insn.sym)
       return nil unless insn.plain_fixed_argc?
 
-      (1..insn.argc).map { |k| (insn.reg.to_i + k).to_s }
+      (1..insn.argc).map { |k| (insn.reg + k) }
     else []
     end
   end
 
   # SETIDX a stores R[a+2].
   def setidx_value_reg(insn)
-    (insn.reg.to_i + 2).to_s
+    (insn.reg + 2)
   end
 
   def int_operand(insn)

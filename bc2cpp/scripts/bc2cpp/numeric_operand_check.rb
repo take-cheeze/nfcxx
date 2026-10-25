@@ -187,7 +187,7 @@ check.call('the call result is what the oracle says', begin
 end)
 
 check.call('a register a nested block writes is never numeric',
-           flow.call(straight, StubOracle.new, Set['2'])[4][2] == OTHER)
+           flow.call(straight, StubOracle.new, Set[2])[4][2] == OTHER)
 check.call('an irep whose handler target is not an instruction has no facts',
            flow.call(straight, StubOracle.new, Set.new, handlers: [CatchHandler.new(type: :rescue, begin_addr: 0,
                                                                                     end_addr: 4, target: 99)]).nil?)

@@ -108,7 +108,7 @@ check.call('a back edge from after the read refuses the entry value',
 
 nested = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :RETURN, 'R3')])
 check.call('a register a nested block writes is never dominated',
-           !BytecodeIR.for(nested).write_dominates?(0, 1, '2', opaque_regs: Set['2']))
+           !BytecodeIR.for(nested).write_dominates?(0, 1, 2, opaque_regs: Set[2]))
 check.call('an op outside the audited write list between write and read refuses',
            !BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :APOST, "R4\t1\t0"),
                                                  insn(6, :RETURN, 'R2')]), 0, 2, '2'))

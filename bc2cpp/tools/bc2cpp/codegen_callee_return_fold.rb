@@ -27,7 +27,7 @@ class CodeGen
   def callee_return_outcome(insn, irep, idx)
     return nil unless return_fold_enabled? && idx
 
-    kinds = call_result_literal_kinds(irep, idx, insn.reg.to_s)
+    kinds = call_result_literal_kinds(irep, idx, insn.reg)
     return nil unless kinds
 
     # JMPNIL is taken exactly on nil; a result that is never nil never takes it.
@@ -107,7 +107,7 @@ class CodeGen
       case exit.kind
       when :true, :false, :nil then kinds << exit.kind
       when :value
-        sources = BytecodeIR.return_sources(irep, exit.index, exit.reg&.to_s)
+        sources = BytecodeIR.return_sources(irep, exit.index, exit.reg)
         return nil unless sources && !sources.empty?
 
         sources.each do |source|

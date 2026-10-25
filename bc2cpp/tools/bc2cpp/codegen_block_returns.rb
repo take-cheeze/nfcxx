@@ -193,7 +193,7 @@ class CodeGen
   def compute_block_return_site(irep, index, insn)
     return nil unless @closed_world&.exact_instances_singleton_free? && captured_local_class_enabled?
 
-    reg = (insn.reg.to_i + insn.argc + 1).to_s
+    reg = (insn.reg + insn.argc + 1)
     body = irep.walk_dominating_writers(index - 1, reg, follow_moves: true) do |writer|
       @ireps[irep.reps[writer.block_index]] if writer.op == :BLOCK
     end

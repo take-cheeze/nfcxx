@@ -34,8 +34,8 @@ module IrTypeFeedback
     signature = target && IrRbsBlockTypes.signature_for(applied, target, insn.sym)
     return nil unless signature
 
-    arguments = (1..insn.argc).map { |slot| analysis.fact_at(index, (insn.reg.to_i + slot).to_s) }
-    elements = (1..insn.argc).map { |slot| analysis.element_fact_at(index, (insn.reg.to_i + slot).to_s) }
+    arguments = (1..insn.argc).map { |slot| analysis.fact_at(index, (insn.reg + slot)) }
+    elements = (1..insn.argc).map { |slot| analysis.element_fact_at(index, (insn.reg + slot)) }
     IrRbsBlockTypes.bind(signature, arguments: arguments, argument_elements: elements)
   end
 
@@ -46,7 +46,7 @@ module IrTypeFeedback
     insn = BytecodeIR.for(parent).source_at(index)
     return [] unless BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && insn.plain_fixed_argc?
 
-    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true, shared: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg + insn.argc + 1), origin_transfers: true, shared: true)
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)

@@ -13,7 +13,7 @@ require_relative 'native_rom_owners'
 #   can exist, so the receiver is exactly the owner); otherwise it is refused;
 # - every proven class is the same.
 #
-# The caller admits a name only when its Ruby definitions (if any) also return that class. A name that fails any
+# The caller admits a name only when its Ruby definitions(if any) also return that class. A name that fails any
 # rule is absent from the table, with the reason kept for the report.
 module NativeReturnClasses
   SELF = 'self'

@@ -576,7 +576,7 @@ class CodeGen
 
     recv_reg = d.to_i
     # The only write of the receiver register that reaches the send must be the constant read itself.
-    write_index = sole_reaching_write(irep, idx, recv_reg.to_s)
+    write_index = sole_reaching_write(irep, idx, recv_reg)
     return nil unless write_index
 
     write = BytecodeIR.for(irep).source_at(write_index)
@@ -587,7 +587,7 @@ class CodeGen
     return nil if universe.include?(const_name)
 
     # The GETCONST must hold the register on every path to the send, so no jump or handler entry lands between.
-    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, recv_reg.to_s)
+    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, recv_reg)
 
     out = String.new
     out << "  // KEYWORD_NEVER_DEFINED_CONST :#{name} (n=#{n}|nk=#{nk}) -- receiver is the value of " \
@@ -706,7 +706,7 @@ class CodeGen
 
     next_reg = dest_reg + 1
     if n_spec == '*'
-      positional = splat_array_literal_regs(irep, idx, next_reg.to_s)
+      positional = splat_array_literal_regs(irep, idx, next_reg)
       if positional.nil?
         return nil if nk_spec
 

@@ -67,14 +67,14 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   end
 
   def last_writer_index(from, reg)
-    BytecodeIR.for(self).last_writer_index(from, reg.to_s)
+    BytecodeIR.for(self).last_writer_index(from, reg)
   end
 
   # The first non-MOVE instruction writing +reg+ at or before index +from+,
   # following MOVE copies to their source register (BytecodeIR::Program#copy_root).
   # Nil when the register is never written or a MOVE has no source.
   def source_writer(from, reg)
-    BytecodeIR.for(self).copy_root(from, reg.to_s)&.writer
+    BytecodeIR.for(self).copy_root(from, reg)&.writer
   end
 
   # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).

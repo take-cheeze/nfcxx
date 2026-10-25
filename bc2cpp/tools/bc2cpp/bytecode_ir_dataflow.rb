@@ -114,36 +114,36 @@ module BytecodeIR
       @reaching_definitions_cache ||= {}
       @compact_dataflow_keys = ENV['BC2CPP_IR_QUERY_KEYS'] != '0' if @compact_dataflow_keys.nil?
       opaque_key = reaching_opaque_key(opaque_regs)
-      key = [index, @compact_dataflow_keys ? reg.to_s : reg.to_s.dup.freeze, opaque_key, follow_moves, max_states,
+      key = [index, reg, opaque_key, follow_moves, max_states,
              through_handlers, origin_transfers, raiseif_nil]
       unless @reaching_definitions_cache.key?(key)
-        key[1] = key[1].dup.freeze if @compact_dataflow_keys
+        key[1] = key[1].freeze if @compact_dataflow_keys
         result = compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                              max_states: max_states, through_handlers: through_handlers,
                                              origin_transfers: origin_transfers, raiseif_nil: raiseif_nil)
         return result if @reaching_definitions_cache.size >= DATAFLOW_CACHE_SIZE
 
-        @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg.dup.freeze, d.built).freeze }&.freeze
+        @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg, d.built).freeze }&.freeze
       end
       # Shared readers never mutate returned definitions; public callers keep fresh copies.
       if shared
         @share_reaching_definitions = ENV['BC2CPP_IR_SHARED_DEFINITIONS'] != '0' if @share_reaching_definitions.nil?
         return @reaching_definitions_cache[key] if @share_reaching_definitions
       end
-      @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg.dup, d.built) }
+      @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg, d.built) }
     end
 
     # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable strings.
     def reaching_opaque_key(opaque_regs)
       return nil unless opaque_regs
-      return opaque_regs.map { |r| r.dup.freeze }.sort.freeze unless @compact_dataflow_keys
+      return opaque_regs.sort.freeze unless @compact_dataflow_keys
 
       @opaque_reg_keys ||= {}.compare_by_identity
       return @opaque_reg_keys[opaque_regs] if @opaque_reg_keys.key?(opaque_regs)
 
-      key = opaque_regs.map { |r| r.dup.freeze }.sort.freeze
+      key = opaque_regs.sort.freeze
       if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && opaque_regs.instance_of?(Set) && opaque_regs.frozen? &&
-         opaque_regs.all? { |register| register.is_a?(String) && register.frozen? }
+         opaque_regs.all? { |register| register.is_a?(Integer) }
         @opaque_reg_keys[opaque_regs] = key
       end
       key
@@ -182,7 +182,7 @@ module BytecodeIR
       seen = {}
       states = 0
       defs = Set.new
-      work = [index, reg.to_s]
+      work = [index, reg]
       until work.empty?
         r = work.pop
         i = work.pop
@@ -254,7 +254,7 @@ module BytecodeIR
           end
         end
       end
-      defs.sort_by { |d| [d.index, d.reg.to_i] }
+      defs.sort_by { |d| [d.index, d.reg] }
     end
 
     private :compute_reaching_definitions
@@ -274,8 +274,8 @@ module BytecodeIR
       return compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs) if opaque_regs && !opaque_regs.frozen?
 
       @write_dominates_cache ||= {}
-      opaque_key = opaque_regs&.map { |r| r.dup.freeze }&.sort&.freeze
-      key = [w, use, reg.to_s.dup.freeze, opaque_key]
+      opaque_key = opaque_regs&.sort&.freeze
+      key = [w, use, reg, opaque_key]
       unless @write_dominates_cache.key?(key)
         result = compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs)
         return result if @write_dominates_cache.size >= DATAFLOW_CACHE_SIZE
@@ -286,19 +286,19 @@ module BytecodeIR
     end
 
     def compute_write_dominates?(w, use, reg, opaque_regs: nil)
-      return false if opaque_regs&.include?(reg.to_s)
+      return false if opaque_regs&.include?(reg)
       return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
 
       preds = instruction_predecessors(include_handlers: true) or return false
       low = [w, 0].max
       # The write itself must leave +reg+ holding its value on every path (a side write does not).
-      return false if w >= 0 && origin_effect(@instructions[w].source, reg.to_s, typed_enter: false) != :define
+      return false if w >= 0 && origin_effect(@instructions[w].source, reg, typed_enter: false) != :define
       ((w + 1)..use).each do |k|
         insn = @instructions[k].source
         return false unless k == use || dataflow_steps_over?(insn)
         # An exit's leading register is read, not written, and nothing falls through from it to +use+.
         return false if k != use && !BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) &&
-                        %i[callee_clobber define].include?(origin_effect(insn, reg.to_s, typed_enter: false))
+                        %i[callee_clobber define].include?(origin_effect(insn, reg, typed_enter: false))
 
         preds[k].each do |p|
           return false if p == ENTRY ? w != ENTRY : (p < low || p > use)
@@ -342,7 +342,7 @@ module BytecodeIR
         assigned = reached.empty? || reached.all?
         observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || SELF_EXPOSING_OPS.include?(insn.op) ||
                    (insn.op == :GETIV && insn.ivar == ivar) ||
-                   (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
+                   (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?(0))
         assigned || !observes
       end
     end
@@ -399,12 +399,12 @@ module BytecodeIR
     # below the register, an unmodelled op) counts. NIL_NARROWING and the captured-parameter rule read it
     # (rbs_param_check.rb, nil_narrowing.rb).
     def may_write?(insn, reg)
-      dataflow_effect(insn, reg.to_s) != :pass
+      dataflow_effect(insn, reg) != :pass
     end
 
     # may_write? of the instruction at +index+, from the walk's per-instruction effect table.
     def may_write_at?(index, reg)
-      effect_of(dataflow_effect_at(index), reg.to_s) != :pass
+      effect_of(dataflow_effect_at(index), reg) != :pass
     end
 
     private
@@ -431,7 +431,7 @@ module BytecodeIR
       case insn.op
       when :RESCUE
         second = insn.typed[1]
-        second&.kind == :reg && second.value.to_s == reg ? :define : :pass
+        second&.kind == :reg && second.value == reg ? :define : :pass
       when :EXCEPT then insn.reg == reg ? :define : :pass
       when :ENTER
         if typed_enter then enter_origin_effect(insn, reg)
@@ -588,10 +588,10 @@ module BytecodeIR
 
     def effect_of(entry, reg)
       return :pass if entry.pass
-      return(entry.run.cover?(reg.to_i) ? :define : :pass) if entry.run
-      return :callee_clobber if entry.frame && (entry.lead_i.nil? || entry.lead_i < reg.to_i)
+      return(entry.run.cover?(reg) ? :define : :pass) if entry.run
+      return :callee_clobber if entry.frame && (entry.lead_i.nil? || entry.lead_i < reg)
       return :refuse unless entry.writes
-      return :callee_clobber if entry.callee && entry.lead_i && entry.lead_i < reg.to_i
+      return :callee_clobber if entry.callee && entry.lead_i && entry.lead_i < reg
 
       entry.lead == reg ? :define : :pass
     end
@@ -652,7 +652,7 @@ module BytecodeIR
       if tree
         collect_upvar_writes(tree, irep, written)
       else
-        (1...irep.nlocals.to_i).each { |n| written << n.to_s }
+        (1...irep.nlocals.to_i).each { |n| written << n }
       end
     end
     irep.instance_variable_set(:@own_upvar_written_regs, written.freeze)
@@ -683,7 +683,7 @@ module BytecodeIR
         next unless insn.op == :SETUPVAR
 
         index, level = insn.upvar_ref
-        written << index.to_s if level == depth
+        written << index.to_i if level == depth
       end
     end
   end
@@ -698,7 +698,7 @@ module BytecodeIR
   # Nil when the answer is not provable (a refusal, the method's entry value, or a definition whose instruction does
   # not write that register).
   def self.writers_reaching(irep, index, reg)
-    defs = reaching_definitions(irep, index, reg.to_s, origin_transfers: true, shared: true)
+    defs = reaching_definitions(irep, index, reg, origin_transfers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.none?(&:entry?)
 
     program = self.for(irep)

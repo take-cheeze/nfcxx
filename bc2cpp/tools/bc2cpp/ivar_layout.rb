@@ -301,7 +301,7 @@ class IvarLayout
     return BOTTOM unless TRACE_STATE[:active].add?(key)
 
     begin
-      defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+      defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
       return UNKNOWN if defs.nil? || defs.empty?
 
       defs.map do |d|

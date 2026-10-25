@@ -17,7 +17,7 @@ SSEND_NO_BLOCK_OPS = (BytecodeIR::Ops::SELF_SEND - BytecodeIR::Ops::BLOCK_SEND).
 # The instructions that supply +reg+ to the read at +use+ on every path (BytecodeIR.reaching_definitions, MOVEs
 # followed), or nil when the IR cannot prove that set: a refused query, or a value from the frame's entry.
 def reaching_sources(irep, use, reg)
-  defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, shared: true)
+  defs = BytecodeIR.reaching_definitions(irep, use, reg, shared: true)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
   defs.map { |d| BytecodeIR.for(irep).source_at(d.index) }
@@ -56,7 +56,7 @@ def struct_new_member_sets(irep, idx, insn)
   program = BytecodeIR.for(irep)
   use = idx
   if insn.n_spec == '*'
-    definitions = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + 1).to_s,
+    definitions = BytecodeIR.reaching_definitions(irep, idx, (insn.reg + 1),
                                                  origin_transfers: true, through_handlers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
@@ -71,7 +71,7 @@ def struct_new_member_sets(irep, idx, insn)
 
     registers = literal.value_regs
   else
-    registers = (1..insn.argc.to_i).map { |position| (insn.reg.to_i + position).to_s }
+    registers = (1..insn.argc.to_i).map { |position| (insn.reg + position) }
   end
   return nil if registers.empty?
 
@@ -93,7 +93,7 @@ end
 def struct_new_owner(irep, idx, insn, namespace)
   program = BytecodeIR.for(irep)
   assignment = program.source_at(idx + 1)
-  return nil unless assignment&.op == :SETCONST && assignment.reg_operand == insn.reg.to_s &&
+  return nil unless assignment&.op == :SETCONST && assignment.reg_operand == insn.reg &&
                     program.linear_corridor?(idx, idx + 1, include_handlers: true)
 
   name = assignment.const_name
@@ -215,7 +215,7 @@ def build_registry(ireps, root_label)
     # trusted; anything else is unrecognized (a safe miss). Shared by the SCLASS
     # body case and the unfused DEF case below.
     resolve_singleton_receiver = lambda do |reg, before_idx|
-      prev = receiver_source(irep, before_idx, reg.delete_prefix('R'))
+      prev = receiver_source(irep, before_idx, reg)
       case prev&.op
       when :LOADSELF
         namespace || 'Object'
@@ -249,12 +249,12 @@ def build_registry(ireps, root_label)
       case insn.op
       when :CLASS, :MODULE
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
-        reg = insn.reg_token
+        reg = insn.reg
         name = insn.sym
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
         # `class Outer::Name` / `module Outer::Name` (a compact definition)
         # is named by its resolved outer constant, not by the lexical namespace.
-        outer_qualified = compact_outer_name(irep, idx, reg[/\d+/], namespace, module_names)
+        outer_qualified = compact_outer_name(irep, idx, reg, namespace, module_names)
         opener_name = if outer_qualified
                         "#{outer_qualified}::#{name}"
                       else
@@ -266,10 +266,10 @@ def build_registry(ireps, root_label)
         # (mruby/ops.h, vm.c), and the superclass expression is evaluated right before
         # it, so resolve_superclass_ref walks back from this CLASS.
         if insn.op == :CLASS
-          superclass_reg = (reg[/\d+/].to_i + 1).to_s
+          superclass_reg = reg + 1
           resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
           superclass_of[opener_name] = resolved if resolved
-          outer_nil = resolve_superclass_ref(irep, idx, reg[/\d+/], nil) == :none
+          outer_nil = resolve_superclass_ref(irep, idx, reg, nil) == :none
           class_decls[opener_name] << { super: resolved, outer_nil: outer_nil,
                                         outer_qualified: !outer_qualified.nil? }
         end
@@ -280,7 +280,7 @@ def build_registry(ireps, root_label)
         # Without this, defs inside it (e.g. RGSS::Bitmap.extensions) were unregistered.
         # The receiver is resolved by resolve_singleton_receiver (LOADSELF or GETCONST
         # only; anything else is a safe miss).
-        reg = insn.reg_token
+        reg = insn.reg
         recv = resolve_singleton_receiver.call(reg, idx)
         # "X.singleton" is a pseudo-owner, never a real constant path, so ONLY_OWNERS
         # can never select it. nil (unrecognized receiver) leaves the body unwalked.
@@ -334,7 +334,7 @@ def build_registry(ireps, root_label)
         # registered rather than attributed to `namespace`.
         sdef_name = insn.sym
         sdef_child_label = irep.reps[insn.block_index]
-        recv = resolve_singleton_receiver.call(insn.reg_token, idx)
+        recv = resolve_singleton_receiver.call(insn.reg, idx)
         if recv
           registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{recv}.singleton",
                                                 irep: sdef_child_label, visibility: :public)
@@ -408,7 +408,7 @@ def build_registry(ireps, root_label)
           self_reg = insn.reg
           mixin_n = insn.argc
           recognized = SSEND_NO_BLOCK_OPS.include?(insn.op) && mixin_n == 1 && self_reg
-          ref = recognized ? resolve_mixin_ref(irep, idx, (self_reg.to_i + 1).to_s) : nil
+          ref = recognized ? resolve_mixin_ref(irep, idx, self_reg + 1) : nil
           if ref
             mixin_sites << { owner: mixin_owner, kind: name, namespace: namespace, ref: ref }
           else

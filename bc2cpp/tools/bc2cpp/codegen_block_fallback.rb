@@ -1200,13 +1200,13 @@ class CodeGen
 
       if insn.n_spec == '*'
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
-                     argv_reg: (dest_reg.to_i + 1).to_s,
-                     blk_reg: (dest_reg.to_i + 2).to_s, name: name,
+                     argv_reg: dest_reg + 1,
+                     blk_reg: dest_reg + 2, name: name,
                      self_implicit: insn.op == :SSENDB }
       else
         n = insn.n_spec.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
-                     blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
+                     blk_reg: dest_reg + n + 1, name: name,
                      self_implicit: insn.op == :SSENDB, parent_irep: irep }
       end
     end

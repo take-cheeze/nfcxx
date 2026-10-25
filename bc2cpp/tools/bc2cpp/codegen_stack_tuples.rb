@@ -211,7 +211,7 @@ class CodeGen
     verdict = analyzer.creation(irep, idx)
     return refuse(verdict.reason || :escapes) if verdict.escapes?
 
-    tracked = verdict.tracked.map { |reg| reg.to_s.to_i }.to_set
+    tracked = verdict.tracked.map { |reg| reg.to_i }.to_set
     tracked.add(lead)
     params = stack_tuple_params(irep)
     return refuse(:parameter_register) if tracked.any? { |reg| reg.between?(1, params + 1) }
@@ -236,7 +236,7 @@ class CodeGen
       reads = stack_tuple_reads(insn, params)
       candidates = reads == :all ? tracked : reads.select { |reg| tracked.include?(reg) }
       candidates.each do |reg|
-        prods = BytecodeIR.producers(irep, j, reg.to_s, through_handlers: true)
+        prods = BytecodeIR.producers(irep, j, reg, through_handlers: true)
         return refuse("no_producers for r#{reg} read by #{insn.op} at #{j}") if prods.nil? || prods.empty?
 
         holding = prods.count { |p| !p.entry? && p.index == site.idx }
@@ -286,7 +286,7 @@ class CodeGen
   # True when every reaching definition of +reg+ at +at+ is an immediate: a LOADNIL/LOADTRUE/LOADFALSE/LOADSYM, or a
   # LOADI whose value is a fixnum.
   def stack_tuple_immediate_at?(irep, at, reg)
-    prods = BytecodeIR.producers(irep, at, reg.to_s, through_handlers: true)
+    prods = BytecodeIR.producers(irep, at, reg, through_handlers: true)
     return false if prods.nil? || prods.empty?
 
     prods.all? do |p|
@@ -300,7 +300,7 @@ class CodeGen
 
   # The integer +reg+ holds at +at+ when exactly one literal load reaches it, else nil.
   def stack_tuple_literal_index(irep, at, reg)
-    prods = BytecodeIR.producers(irep, at, reg.to_s, through_handlers: true)
+    prods = BytecodeIR.producers(irep, at, reg, through_handlers: true)
     return refuse(:index_not_literal) unless prods&.size == 1 && !prods.first.entry?
 
     insn = prods.first.insn
@@ -377,7 +377,7 @@ class CodeGen
   end
 
   def reg_int(reg)
-    reg.nil? ? nil : reg.to_s.to_i
+    reg.nil? ? nil : reg.to_i
   end
 
   # Always nil. BC2CPP_STACK_TUPLES_REPORT=1 prints why the ARRAY under analysis (@stack_tuple_where) is not placed.

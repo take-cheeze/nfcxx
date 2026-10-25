@@ -51,7 +51,7 @@ module EscapeAnalysis
         body = body_irep(mdef)
         return ['not_immediate', "unenumerated: initialize #{mdef.owner}##{mdef.name} has no body"] unless body
 
-        frames << [body, ['0'], true, nil]
+        frames << [body, [0], true, nil]
       end
 
       stores = {}
@@ -121,15 +121,15 @@ module EscapeAnalysis
 
     # The registers holding the object after +insn+, given the set +s+ before it.
     def object_transfer(insn, s, self_frame, created)
-      lead = insn.reg&.to_s
+      lead = insn.reg
       return s | [lead] if created
 
       out = Set.new(s)
       case insn.op
       when :MOVE
         move = BytecodeIR::OperandModel.move(insn)
-        out.delete(move.dest.to_s)
-        out << move.dest.to_s if s.include?(move.src.to_s)
+        out.delete(move.dest)
+        out << move.dest if s.include?(move.src)
       when :LOADSELF
         out.delete(lead)
         out << lead if self_frame
@@ -155,10 +155,10 @@ module EscapeAnalysis
       return "SUPER in #{frame.label} runs with the object as self" if self_frame && op.to_s.include?('SUPER')
       return "RETSELF of the object in #{frame.label}" if op == :RETSELF && self_frame
 
-      lead = insn.reg&.to_s
+      lead = insn.reg
       if op == :SETIV
         # SETIV has no leading register: its stored value is its first register operand (as in STORES_LEAD).
-        value = BytecodeIR::OperandModel.reg_operand(insn).to_s
+        value = BytecodeIR::OperandModel.reg_operand(insn)
         return "SETIV stores the object (#{frame.label}:#{index})" if s.include?(value)
 
         record_store(frame, index, value, stores) if self_frame
@@ -212,11 +212,11 @@ module EscapeAnalysis
     # A send whose receiver is the object (the explicit register, or implicit self in a method frame) runs the callee
     # with the object as self. The object is only reachable through those registers, so any other send cannot reach it.
     def object_send(frame, index, insn, s, self_frame, stores, found)
-      a = insn.reg.to_s
+      a = insn.reg
       self_call = insn.op.to_s.start_with?('SS') ? self_frame : s.include?(a)
       positional, kw = argument_slots(insn)
       block = insn.op.to_s.end_with?('B') ? 1 : 0
-      args = ((a.to_i + 1)..(a.to_i + [positional + kw + block, 1].max)).map(&:to_s)
+      args = ((a.to_i + 1)..(a.to_i + [positional + kw + block, 1].max)).to_a
       return "#{insn.op} passes the object (#{frame.label}:#{index})" if args.any? { |r| s.include?(r) }
       return nil unless self_call
 
@@ -229,10 +229,10 @@ module EscapeAnalysis
       defs.each do |mdef|
         body = body_irep(mdef)
         if body
-          found << [body, ['0'], true, nil]
+          found << [body, [0], true, nil]
         elsif mdef.kind == :ivar_accessor
           # An attribute reader keeps nothing; a writer stores its one argument, read in this frame.
-          record_store(frame, index, (a.to_i + 1).to_s, stores) if name.end_with?('=') && positional == 1 && kw.zero?
+          record_store(frame, index, a.to_i + 1, stores) if name.end_with?('=') && positional == 1 && kw.zero?
         else
           why ||= "send #{name} to the object: opaque #{mdef.owner}##{mdef.name}"
         end
@@ -259,16 +259,16 @@ module EscapeAnalysis
       # ENTER's fields are mand, opt, rest, post, kw, kwrest, block, noblock: the caller writes R1..R(the sum of the
       # first seven), the block slot included when the method takes one.
       fields = frame.enter ? frame.enter.enter_fields : []
-      formals = (1..fields.first(7).sum(&:to_i)).map(&:to_s).to_set
+      formals = (1..fields.first(7).sum(&:to_i)).to_set
       writers = Hash.new { |h, k| h[k] = [] }
       insns.each do |insn|
         next if PASSES.include?(insn.op) || STORES_LEAD.key?(insn.op) || %i[SETIDX ARYPUSH HASHADD].include?(insn.op)
 
-        lead = insn.reg&.to_s or next
+        lead = insn.reg or next
         writers[lead] << if IMMEDIATE_LOADS.include?(insn.op)
                            [:imm]
                          elsif insn.op == :MOVE
-                           [:move, BytecodeIR::OperandModel.move(insn).src.to_s]
+                           [:move, BytecodeIR::OperandModel.move(insn).src]
                          else
                            [:other]
                          end

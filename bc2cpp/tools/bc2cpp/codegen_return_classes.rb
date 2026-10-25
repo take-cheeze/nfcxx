@@ -741,7 +741,7 @@ class CodeGen
 
                                  # Keyword pairs (key, value) follow the positionals; the block is the slot after them.
                                  block = register + argc + 2 * nk.to_i + 1
-                                 BytecodeIR.all_writers_reaching?(body, index, block.to_s) { |_, writer| %i[LAMBDA BLOCK].include?(writer.op) }
+                                 BytecodeIR.all_writers_reaching?(body, index, block) { |_, writer| %i[LAMBDA BLOCK].include?(writer.op) }
                                })
   end
 
@@ -759,7 +759,7 @@ class CodeGen
 
   # The classes of a required positional that the value at +index+ still is (only its entry value reaches it), else nil.
   def yielded_param_classes(irep, index, register, param_classes)
-    defs = BytecodeIR.for(irep).reaching_definitions(index, register.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.for(irep).reaching_definitions(index, register, through_handlers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.all?(&:entry?)
 
     positions = defs.map { |df| df.reg.to_i }.uniq
@@ -840,9 +840,9 @@ class CodeGen
   # Read-point facts retain slot invalidation and incoming-argument proofs.
   def bytecode_ir_source_classes(irep, index, reg)
     return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
-    return nil unless reg.to_s.match?(/\A\d+\z/) && reg.to_i < irep.nregs
+    return nil unless reg.is_a?(Integer) && reg < irep.nregs
 
-    bytecode_ir_mask_classes(return_class_states(irep)&.[](index)&.[](reg.to_i))
+    bytecode_ir_mask_classes(return_class_states(irep)&.[](index)&.[](reg))
   end
 
   def bytecode_ir_mask_classes(mask)
@@ -1142,7 +1142,7 @@ class CodeGen
     return nil unless @rc_states && irep && idx && reg && @closed_world&.exact_instances_singleton_free?
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     # The one register CHECKED_POOL_EXACT is compiling under its class test.
     return @checked_pool_override[:klass] if @checked_pool_override && @checked_pool_override[:key] == [irep.label, idx, r]
@@ -1157,7 +1157,7 @@ class CodeGen
     return nil unless @rc_states && irep && idx && reg && @closed_world&.exact_instances_singleton_free?
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]

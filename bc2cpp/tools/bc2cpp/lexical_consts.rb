@@ -146,7 +146,7 @@ module LexicalConsts
 
             # The superclass register is the one after the class's own; only a LOADNIL on every path there is "none"
             # (`class X < (c ? B : nil)` joins a class into it).
-            super_reg = (reg_number(insn).to_i + 1).to_s
+            super_reg = reg_number(insn) + 1
             unless all_writers?(irep, idx, super_reg) { |_j, w| w.op == :LOADNIL }
               @explicit_super << LexicalConsts.qualify(scope, insn.sym)
             end
@@ -179,7 +179,7 @@ module LexicalConsts
       # SSEND is a send to self, so its receiver register is not read; a SEND needs every writer to be LOADSELF.
       on_self = SELF_SEND_FAMILY.include?(insn.op) || (recv && all_writers?(irep, idx, recv) { |_j, w| w.op == :LOADSELF })
       # One constant on every arm: `include(c ? A : B)` names no single module.
-      names = recv && BytecodeIR.writers_reaching(irep, idx, (recv.to_i + 1).to_s)&.map do |_j, w|
+      names = recv && BytecodeIR.writers_reaching(irep, idx, recv + 1)&.map do |_j, w|
         w.op == :GETCONST ? w.const_name : nil
       end
       name = names.first if names && names.uniq.size == 1
@@ -265,7 +265,7 @@ module LexicalConsts
     def class_path(irep, idx, reg, scope, depth = 0)
       return nil if reg.nil? || depth > 8
 
-      writers = BytecodeIR.writers_reaching(irep, idx, reg.to_s)
+      writers = BytecodeIR.writers_reaching(irep, idx, reg)
       return nil unless writers
 
       keys = writers.map { |j, w| class_path_of(irep, j, w, scope, depth) }
@@ -296,7 +296,7 @@ module LexicalConsts
     end
 
     def reg_number(insn)
-      insn.reg_token&.[](/\d+/)
+      insn.reg
     end
   end
 end

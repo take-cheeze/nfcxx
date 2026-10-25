@@ -2148,7 +2148,7 @@ class CodeGen
 
   # Every definition of the receiver register reaching the send is a LOADSELF of this irep.
   def receiver_loaded_self?(recv, irep, idx)
-    reg = recv[/\Ar(\d+)\z/, 1]
+    reg = recv[/\Ar(\d+)\z/, 1]&.to_i
     return false unless reg && irep && idx
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
@@ -2182,7 +2182,7 @@ class CodeGen
       return loop_flow_refuse(irep, trace_idx, reason)
     end
 
-    reg = original.reg.to_s
+    reg = original.reg
     return loop_flow_refuse(irep, trace_idx, :opaque_reg) if fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     defs = BytecodeIR.for(irep).reaching_definitions(trace_idx, reg, follow_moves: true,
@@ -2193,7 +2193,7 @@ class CodeGen
     # The receiver holds the loop element (the block's parameter R1, possibly copied: its definition is the entry
     # value, index ENTRY, or the ENTER that binds it) and the body writes R1 again.
     element = defs.any? do |d|
-      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == :ENTER)
+      d.reg == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == :ENTER)
     end
     if element && loop_element_reassigned?(irep)
       return loop_flow_refuse(irep, trace_idx, :element_reassigned)
@@ -2245,7 +2245,7 @@ class CodeGen
   end
 
   # The block's mandatory parameter (R1) is the loop element in the inlined each/map/select bodies.
-  LOOP_ELEMENT_REG = '1'
+  LOOP_ELEMENT_REG = 1
 
   # The body writes R1 after ENTER bound it: a nested block's SETUPVAR (not one of the body's instructions) or the body's
   # own leading-register write. Not may_write?, which counts EXCEPT/RESCUE as writing every register.
@@ -2254,7 +2254,7 @@ class CodeGen
     @loop_element_reassigned.fetch(irep) do
       @loop_element_reassigned[irep] = BytecodeIR.own_upvar_written_regs(irep).include?(LOOP_ELEMENT_REG) ||
                                        BytecodeIR.for(irep).each_source.any? do |i, _|
-                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != :ENTER &&
+                                         i.reg == LOOP_ELEMENT_REG && i.op != :ENTER &&
                                            !NumericFlow::NO_WRITE_OPS.include?(i.op)
                                        end
     end

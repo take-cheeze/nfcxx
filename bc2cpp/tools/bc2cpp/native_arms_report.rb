@@ -80,7 +80,7 @@ module NativeArmsReport
     return ['none', nil] unless irep && insn&.sym == name && %i[SEND SEND0].include?(insn.op)
 
     reg = insn.reg.to_i
-    return ['none', nil] if reg >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return ['none', nil] if reg >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     states = call_facts_states(irep)
     names = states && CallFacts::Flow.facts(states[cw_site[:idx]], reg)

@@ -96,7 +96,7 @@ module IrepScans
 
   # `Owner#@ivar` when the nearest defining instruction is a GETIV, else empty.
   def self.origin_ivar(irep, site, reg, owner_def)
-    irep.walk_writers(site - 1, reg.to_s, skip_ops: ORIGIN_IVAR_SKIP_OPS) do |ins|
+    irep.walk_writers(site - 1, reg, skip_ops: ORIGIN_IVAR_SKIP_OPS) do |ins|
       next follow(ins.regs[1]) if ins.op == :MOVE && ins.regs[1]
 
       break "#{owner_def&.owner}#@#{ins.ivar}" if ins.op == :GETIV

@@ -424,7 +424,7 @@ class IrContextResults
     keyword_registers = []
     insn.nk_spec.to_i.times do |position|
       key_register = register + argc + 1 + position * 2
-      definitions = BytecodeIR.reaching_definitions(body, index, key_register.to_s, origin_transfers: true, shared: true)
+      definitions = BytecodeIR.reaching_definitions(body, index, key_register, origin_transfers: true, shared: true)
       return nil unless definitions&.size == 1 && !definitions.first.entry?
 
       producer = BytecodeIR.for(body).source_at(definitions.first.index)

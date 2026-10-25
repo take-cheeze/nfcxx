@@ -113,7 +113,7 @@ module SelfNewConstruct
     end
     return nil if self_implicit || !@closed_world.class_declared?(owner) || !kernel_class_only?
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     source = BytecodeIR.for(irep).source_at(defs.first.index)
@@ -126,8 +126,8 @@ module SelfNewConstruct
 
   # Every definition of `reg` at `idx` is the method's own `self` (register 0 on entry).
   def self_register?(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
-    defs&.size == 1 && defs.first.entry? && defs.first.reg.to_s == '0'
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
+    defs&.size == 1 && defs.first.entry? && defs.first.reg == 0
   end
 
   def kernel_class_only?

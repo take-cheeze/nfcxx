@@ -127,7 +127,7 @@ class CodeGen
     return false unless irep
 
     BytecodeIR.for(irep).exits.all? do |exit|
-      exit.kind == :value && exit.reg && proven_fixnum_operand?(irep, exit.index, exit.reg.to_s, d)
+      exit.kind == :value && exit.reg && proven_fixnum_operand?(irep, exit.index, exit.reg, d)
     end
   end
 
@@ -204,7 +204,7 @@ class CodeGen
     dominated = ->(w_idx, use_idx, r) { return_write_dominates?(irep, w_idx, use_idx, r) }
 
     BytecodeIR.for(irep).exits.all? do |exit|
-      reg = exit.reg&.to_s
+      reg = exit.reg
       exit.kind == :value && reg && straightline_return_reg?(irep, exit.index, reg) &&
         proven_array_operand?(irep, exit.index, reg, d.owner, mand, ivar_classes, arg_classes, dominated: dominated)
     end
@@ -233,7 +233,7 @@ class CodeGen
       case exit.kind
       # RETURN_BLK in a method body is a plain return (methods are strict procs).
       when :value, :block_return
-        sources = return_value_sources(irep, exit.index, exit.reg&.to_s)
+        sources = return_value_sources(irep, exit.index, exit.reg)
         return nil unless sources
 
         sources.each do |src|
@@ -466,7 +466,7 @@ class CodeGen
   # Does the write of `reg` at `w_idx` (-1: method entry) reach `use_idx` on every path? JOIN_DOMINANCE over the
   # audited write list, with the body's own nested-block writes opaque (BytecodeIR.write_dominates?).
   def return_write_dominates?(irep, w_idx, use_idx, reg)
-    BytecodeIR.write_dominates?(irep, w_idx, use_idx, reg.to_s)
+    BytecodeIR.write_dominates?(irep, w_idx, use_idx, reg)
   end
 
   # "Is `reg` at `idx` provably an Array?": recognize_each_regions' two-step
@@ -492,8 +492,8 @@ class CodeGen
     return reg if reg_offset.zero?
     return nil if reg.nil?
 
-    n = reg.to_i - reg_offset
-    n.negative? ? nil : n.to_s
+    n = reg - reg_offset
+    n.negative? ? nil : n
   end
 
   # Both operand registers of one binary opcode, proven at the same point.

@@ -23,7 +23,7 @@ class CodeGen
   def class_object_receiver_classes(irep, idx, insn)
     return nil unless class_object_args_enabled? && @foreign_method_names && @closed_world
 
-    classes = class_object_values(irep, idx, insn.reg.to_s, 0, Set.new)
+    classes = class_object_values(irep, idx, insn.reg, 0, Set.new)
     classes && classes.to_a.sort
   end
 

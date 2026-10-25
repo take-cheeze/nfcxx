@@ -43,12 +43,12 @@ module InsnOperands
     @first_of_kind[kind]
   end
 
-  # First register operand as digits, only when it is the leading operand.
+  # First register operand as an Integer, only when it is the leading operand.
   def reg
     return @reg if defined?(@reg)
 
     lead = typed.first
-    @reg = lead&.kind == :reg ? lead.value.to_s : nil
+    @reg = lead&.kind == :reg ? lead.value : nil
   end
 
   def reg_token
@@ -56,12 +56,12 @@ module InsnOperands
   end
 
   # Every register an operand names, in operand order (`(R5)`, `R2[0]` and the
-  # scope register of `(R5)::Name` included).
+  # scope register of `(R5)::Name` included), as Integers.
   def regs
     @regs ||= typed.filter_map do |operand|
       case operand.kind
-      when :reg, :preg, :idx0 then operand.value.to_s
-      when :mcnst then operand.value[0].to_s
+      when :reg, :preg, :idx0 then operand.value
+      when :mcnst then operand.value[0]
       end
     end.freeze
   end
@@ -72,21 +72,21 @@ module InsnOperands
   end
 
   # First register operand wherever it sits (the value register of SETCONST,
-  # whose leading operand is the name).
+  # whose leading operand is the name), as an Integer.
   def reg_operand
-    typed.find { |operand| operand.kind == :reg }&.value&.to_s
+    typed.find { |operand| operand.kind == :reg }&.value
   end
 
   def mentions_reg?(number)
-    regs.include?(number.to_s)
+    regs.include?(number)
   end
 
-  # Register in parentheses: `(R2)` or the scope of `(R2)::Name`.
+  # Register in parentheses: `(R2)` or the scope of `(R2)::Name`, as an Integer.
   def paren_reg
     return @paren_reg if defined?(@paren_reg)
 
     operand = first_of(:preg, :mcnst)
-    @paren_reg = operand && (operand.kind == :mcnst ? operand.value[0] : operand.value).to_s
+    @paren_reg = operand && (operand.kind == :mcnst ? operand.value[0] : operand.value)
   end
 
   def sym
@@ -217,7 +217,7 @@ module InsnOperands
     return @src_and_literal if defined?(@src_and_literal)
 
     a, b, c = typed
-    @src_and_literal = a&.kind == :reg && b&.kind == :reg && c&.kind == :int ? [b.value.to_s, c.value.to_s] : nil
+    @src_and_literal = a&.kind == :reg && b&.kind == :reg && c&.kind == :int ? [b.value, c.value] : nil
   end
 
   # Text inside the first parentheses: `(5)` of LOADI_n, `(0)` of BLKPUSH, the

@@ -516,7 +516,7 @@ class CodeGen
   def constructor_self_class_root(irep, idx, insn, owner)
     return nil if owner.owner.end_with?('.singleton') || !(@registry['class'] || []).all? { |d| d.owner == '<native>' }
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     send = BytecodeIR.for(irep).source_at(defs.first.index)
@@ -524,14 +524,14 @@ class CodeGen
     return owner.owner if send.op == :SSEND0
     return nil unless send.op == :SEND0
 
-    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg.to_s, through_handlers: true, shared: true)
-    selves&.size == 1 && selves.first.entry? && selves.first.reg == '0' ? owner.owner : nil
+    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg, through_handlers: true, shared: true)
+    selves&.size == 1 && selves.first.entry? && selves.first.reg == 0 ? owner.owner : nil
   end
 
   # The declared classes the constant receiver of the `new` at +idx+ can name, or nil when some
   # definition reaching it is not a constant that only names classes.
   def constructor_named_classes(irep, idx, insn)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     names = defs.map do |definition|
@@ -622,7 +622,7 @@ class CodeGen
       next if mask && !mask.anybits?(CLASS_POOL_UNSHIPPABLE)
 
       writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
-                                                          exhausted: ->(last) { last == '0' ? 'self' : 'incoming_arg' }) do |ins|
+                                                          exhausted: ->(last) { last == 0 ? 'self' : 'incoming_arg' }) do |ins|
         %i[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.to_s.downcase
       end
       writer.is_a?(String) ? writer : 'unknown'

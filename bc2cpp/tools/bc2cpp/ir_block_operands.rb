@@ -19,7 +19,7 @@ module IrBlockOperands
   def definitions(irep, index, reg, follow_moves: true)
     return nil unless index.is_a?(Integer) && index.between?(0, BytecodeIR.for(irep).size - 1)
 
-    defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s, follow_moves: follow_moves, through_handlers: true,
+    defs = BytecodeIR.reaching_definitions(irep, index, reg, follow_moves: follow_moves, through_handlers: true,
                                                                   origin_transfers: true, shared: true)
     defs && !defs.empty? ? defs : nil
   end
@@ -35,7 +35,7 @@ module IrBlockOperands
                elsif nk.nil? then 1
                else 2 * nk
                end
-    (insn.reg.to_i + positional + keywords + 1).to_s
+    (insn.reg + positional + keywords + 1)
   end
 
   # Labels of the literal blocks the block operand of the send at +index+ can be, when every reaching definition is a

@@ -101,7 +101,7 @@ class CodeGen
     return 0 unless state
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     state[r]
   end
@@ -328,7 +328,7 @@ class CodeGen
     mask = if %i[SSEND SSEND0 SSENDB].include?(insn.op)
              return_class_self_receiver(irep)
            else
-             return_class_raw_mask(irep, idx, recv.to_s)
+             return_class_raw_mask(irep, idx, recv)
            end
     return nil if mask.nil?
     return [] if mask.is_a?(Integer) && mask.zero?

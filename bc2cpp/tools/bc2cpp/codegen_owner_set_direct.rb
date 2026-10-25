@@ -74,7 +74,7 @@ module OwnerSetDirect
     return nil unless name == 'respond_to?' && [1, 2].include?(argv.size) && irep && idx
     return nil if ENV['BC2CPP_OWNER_SET_DIRECT'] == '0' || ENV['BC2CPP_SYMBOL_PROBE_DIRECT'] == '0'
 
-    reg = argv.first[/\Ar(\d+)\z/, 1]
+    reg = argv.first[/\Ar(\d+)\z/, 1]&.to_i
     return nil unless reg && exact_literal(irep, idx, reg.to_i - offset)&.klass == :Symbol
 
     row = owner_set_direct_row(name, argv.size)

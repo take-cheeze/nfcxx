@@ -21,8 +21,8 @@ def snapshot(body)
     returns: program.exits.map { |e| program.return_sources(e.index, e.reg) },
     values: body.instructions.each_index.map do |index|
       (0...body.nregs).map do |reg|
-        [program.reaching_definitions(index, reg.to_s)&.map(&:to_a),
-         types.exact_at(index, reg.to_s)&.to_a]
+        [program.reaching_definitions(index, reg)&.map(&:to_a),
+         types.exact_at(index, reg)&.to_a]
       end
     end
   }

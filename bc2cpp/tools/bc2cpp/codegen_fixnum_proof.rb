@@ -104,7 +104,7 @@ class CodeGen
     ctx = fixnum_proof_ctx(irep)
     return false unless ctx
 
-    cur = reg.to_s
+    cur = reg
     return false if ctx[:upvars].include?(cur)
 
     # The use itself must be an audited op outside a protected range: that range
@@ -219,7 +219,7 @@ class CodeGen
       !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.to_s.start_with?('LOADI')) ||
         fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
     end
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS,
+    irep.walk_dominating_writers(idx - 1, reg, use: idx, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS,
                                                     barrier: unaudited, follow_moves: true) do |insn, j, cur|
       case insn.op
       when /^LOADI/
@@ -275,7 +275,7 @@ class CodeGen
     return false unless owner_def.owner == 'Game::Variables'
 
     # Every value reaching the read must be self: a join with any other writer, or the frame entry, refuses.
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     program = BytecodeIR.for(irep)
@@ -622,7 +622,7 @@ class CodeGen
   # Admission rule 9: R[a+k] at every site proves (OP_SEND regs[a+1..a+n]).
   def entry_arg_sites_proven?(sites, k)
     sites.all? do |(irep, idx, recv, _argc, owner)|
-      proven_fixnum_operand?(irep, idx, (recv + k).to_s, owner)
+      proven_fixnum_operand?(irep, idx, (recv + k), owner)
     end
   end
 

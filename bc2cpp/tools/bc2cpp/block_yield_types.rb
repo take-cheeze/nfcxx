@@ -51,7 +51,7 @@ module BlockYieldTypes
 
         yields << [idx, insn.reg.to_i, argc]
       when *CALL_OPS
-        next unless insn.sym.to_s == 'call' && insn.reg && holds_block?(program, idx, insn.reg.to_s, blk)
+        next unless insn.sym.to_s == 'call' && insn.reg && holds_block?(program, idx, insn.reg, blk)
 
         return { reason: 'yields through Proc#call' }
       end
@@ -88,7 +88,7 @@ module BlockYieldTypes
 
     defs.any? do |df|
       if df.entry?
-        df.reg.to_s == blk
+        df.reg == blk
       else
         %i[BLKPUSH GETUPVAR].include?(program.source_at(df.index).op)
       end

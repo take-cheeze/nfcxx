@@ -143,7 +143,7 @@ class CodeGen
 
         # Every name that can reach each argument, not only the textually last arm of a join.
         literal = (1..count).all? do |k|
-          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + k).to_s)&.map { |i| program.source_at(i) }
+          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + k))&.map { |i| program.source_at(i) }
           next false unless sources&.all? { |w| w.op == :LOADSYM && w.sym }
 
           sources.each { |w| names << w.sym }

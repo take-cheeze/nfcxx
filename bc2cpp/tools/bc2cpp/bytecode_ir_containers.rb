@@ -16,11 +16,11 @@ module BytecodeIR
 
     # Element registers of an Array, value registers of a Hash.
     def value_regs
-      kind == :hash ? (0...count).map { |k| (base + (2 * k) + 1).to_s } : (0...count).map { |k| (base + k).to_s }
+      kind == :hash ? (0...count).map { |k| base + (2 * k) + 1 } : (0...count).map { |k| base + k }
     end
 
     def key_regs
-      kind == :hash ? (0...count).map { |k| (base + (2 * k)).to_s } : []
+      kind == :hash ? (0...count).map { |k| base + (2 * k) } : []
     end
   end
 
@@ -149,7 +149,7 @@ module BytecodeIR
   # Producers of +reg+ at +index+ in +irep+ (reaching_definitions with the irep's nested-block writes), or nil when
   # the dataflow refuses or finds none.
   def self.producers(irep, index, reg, **options)
-    defs = reaching_definitions(irep, index, reg.to_s, shared: true, **options)
+    defs = reaching_definitions(irep, index, reg, shared: true, **options)
     return nil if defs.nil? || defs.empty?
 
     program = self.for(irep)

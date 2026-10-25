@@ -18,7 +18,7 @@ module BaseSection
   MARKER_LINE = /^# bc2cpp-native: \S+\n/
   STALE_DECL = /(?:#{MARKER_LINE})?#{DECL}/
 
-  # Gem directory name to the table tag the section uses (base_<tag>). Listed rather than derived: a gem whose name does
+  # Gem directory name to the table tag the section uses(base_<tag>). Listed rather than derived: a gem whose name does
   # not give its tag (mruby-numeric-ext is base_numeric) would otherwise share one with another gem. A gem missing from
   # the table raises, so a new gem cannot silently join a block.
   TAGS = {

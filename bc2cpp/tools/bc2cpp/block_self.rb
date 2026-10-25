@@ -39,14 +39,14 @@ module BlockSelf
 
     req, opt, rest, post, key, kdict = irep.enter&.enter_fields&.first(6)&.map(&:to_i) || [0, 0, 0, 0, 0, 0]
     blk = 1 + req + opt + rest + post + (key.positive? || kdict.positive? ? 1 : 0)
-    frame_why(irep, ireps, [[irep, Set[blk.to_s]]], blk.to_s)
+    frame_why(irep, ireps, [[irep, Set[blk]]], blk)
   end
 
   # +frames+: [[irep, captured proc slots], ...] from the method body down to +irep+.
   def frame_why(irep, ireps, frames, blk)
     program = BytecodeIR.for(irep)
     proc_at = lambda do |idx, reg|
-      defs = program.reaching_definitions(idx, reg.to_s, through_handlers: true, shared: true)
+      defs = program.reaching_definitions(idx, reg, through_handlers: true, shared: true)
       return :unknown if defs.nil?
 
       defs.any? { |df| proc_def?(irep, df, frames, blk) }
@@ -89,7 +89,7 @@ module BlockSelf
   end
 
   def proc_def?(irep, df, frames, blk)
-    return df.reg.to_s == blk if df.entry?
+    return df.reg == blk if df.entry?
 
     insn = BytecodeIR.for(irep).source_at(df.index)
     case insn.op
@@ -98,7 +98,7 @@ module BlockSelf
       index, level = insn.upvar_ref
       pos = index && frames.length - 2 - level
       frame = pos && pos >= 0 ? frames[pos] : nil
-      !frame || frame[1].include?(index.to_s)
+      !frame || frame[1].include?(index)
     else false
     end
   end
@@ -148,17 +148,17 @@ module BlockSelf
       n = send_window(insn)
       return nil unless insn.reg && n
 
-      d = insn.reg.to_i
-      args = (1..n).map { |k| [(d + k).to_s, :argument] }
-      return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d.to_s, :receiver]] + args
+      d = insn.reg
+      args = (1..n).map { |k| [d + k, :argument] }
+      return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d, :receiver]] + args
     end
     if op == :BLKCALL
       # `yield`'s call (vm.c OP_BLKCALL): runs R(a) as a block, under its own self, with R(a+1..a+n).
       n = insn.typed.find { |operand| operand.kind == :int }&.value
       return nil unless insn.reg && n
 
-      d = insn.reg.to_i
-      return [[d.to_s, :called]] + (1..n).map { |k| [(d + k).to_s, :argument] }
+      d = insn.reg
+      return [[d, :called]] + (1..n).map { |k| [d + k, :argument] }
     end
     case op
     when :RETURN, :RETURN_BLK, :BREAK, :SETIV, :SETGV, :SETSV, :SETCV, :SETCONST, :SETUPVAR, :GETMCNST
@@ -167,19 +167,19 @@ module BlockSelf
       # vm.c: these read R(a) and the next width-1 registers only, also when they fall back to a send.
       return nil unless insn.reg
 
-      FIXED_WINDOW_OPS[op].times.map { |k| [(insn.reg.to_i + k).to_s, :argument] }
+      FIXED_WINDOW_OPS[op].times.map { |k| [(insn.reg + k), :argument] }
     when *COUNTED_WINDOW_OPS
       window = counted_window(insn)
       return nil unless window
 
-      window.map { |r| [r.to_s, :argument] }
+      window.map { |r| [r, :argument] }
     else
       # An operator window (ADD, ARRAY, HASH, STRCAT, ...) reads past its listed registers: every register from the
       # lowest listed one up to the frame's last.
-      lo = regs.map(&:to_i).min
+      lo = regs.min
       return [] unless lo
 
-      (lo...[irep.nregs.to_i, lo + 1].max).map { |r| [r.to_s, :argument] }
+      (lo...[irep.nregs.to_i, lo + 1].max).map { |r| [r, :argument] }
     end
   end
 end

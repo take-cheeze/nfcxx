@@ -777,7 +777,7 @@ class YieldReach
     # The origin walk answers a slot ENTER stores (the block, R1) with ENTER itself.
     if df.entry? || BytecodeIR.for(irep).source_at(df.index).op == :ENTER
       return [[:forward]] if df.reg.to_i == block_reg_of(irep)
-      return [[:param, 1]] if df.reg.to_s == '1' && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
+      return [[:param, 1]] if df.reg == '1' && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
 
       return [[:unknown]]
     end

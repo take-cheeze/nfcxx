@@ -118,7 +118,7 @@ module ArgShapeCalls
   # Only inside compile_send: the other users of the gate build their own
   # argument lists and cannot marshal a rest array or a block.
   # An unguarded by-name MONO to one of the new shapes is refused: the registry
-  # does not list core Ruby-level definitions (`sort` in Enumerable), so a
+  # does not list core Ruby-level definitions(`sort` in Enumerable), so a
   # unique name proves no receiver class. The send is compiled again without
   # by-name MONO, leaving the guarded, typed and self resolutions.
   def compile_send(*args, **kwargs)
@@ -392,7 +392,7 @@ module ArgShapeCalls
     return nil unless %i[SEND SSEND].include?(insn.op)
 
     args_reg = d.to_i + 1
-    literal = splat_array_literal_regs(irep, idx, args_reg.to_s)
+    literal = splat_array_literal_regs(irep, idx, args_reg)
     return splat_send_with(name, d, self_implicit, irep, idx, owner_def, literal, 'literal-sized splat') if literal
 
     counts = splat_arities(name)

@@ -31,7 +31,7 @@ module IrYieldTypes
     receivers = ctx.gen.bytecode_ir_argument_receiver_classes(parent, index, call.reg)
     return nil unless receivers && receivers.size.between?(1, MAX_RECEIVERS)
 
-    actuals = (1..argc).map { |position| analysis.fact_at(index, (call.reg.to_i + position).to_s) }
+    actuals = (1..argc).map { |position| analysis.fact_at(index, (call.reg + position)) }
     return nil if actuals.any?(&:nil?)
 
     joined = Array.new(count) { [] }
@@ -55,7 +55,7 @@ module IrYieldTypes
         return nil unless producer && producer.op == :BLKPUSH && producer.argary_spec == [argc, 0, 0, 0] && producer.first_of(:plit)&.value.to_s == '0'
 
         count.times do |slot|
-          fact = callee.fact_at(position, (instruction.reg.to_i + slot + 1).to_s)
+          fact = callee.fact_at(position, (instruction.reg + slot + 1))
           return nil unless fact
 
           joined[slot] << fact
@@ -73,7 +73,7 @@ module IrYieldTypes
   end
 
   def literal_block(ireps, parent, index, register)
-    definitions = BytecodeIR.reaching_definitions(parent, index, register.to_s, origin_transfers: true, shared: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, register, origin_transfers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)
