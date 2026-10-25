@@ -10,8 +10,8 @@ ops = [[:LOADI_1, 'R1 (1)'], [:LOADI_2, 'R2 (2)'], [:LOADI_3, 'R3 (3)'],
 list = ops.each_with_index.map { |(op, args), i| Insn.new(lineno: 1, addr: i, op: op, args: args, raw: "#{op} #{args}") }
 handlers = [CatchHandler.new(type: :rescue, begin_addr: 4, end_addr: 7, target: 8)]
 options = [{}, { follow_moves: false }, { origin_transfers: true }, { through_handlers: true },
-           { through_handlers: true, origin_transfers: true }, { opaque_regs: Set['2'].freeze },
-           { opaque_regs: Set['2'] }, { raiseif_nil: true }]
+           { through_handlers: true, origin_transfers: true }, { opaque_regs: Set[2].freeze },
+           { opaque_regs: Set[2] }, { raiseif_nil: true }]
 flag = 'BC2CPP_IR_SCALAR_SEEN'
 saved = ENV[flag]
 begin

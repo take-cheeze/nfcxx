@@ -110,14 +110,14 @@ join_value = program(
   [:JMPNOT, "R1\t3"], [:ARRAY, "R2\t0"], [:JMP, '4'], [:HASH, "R2\t0"], [:MOVE, "R3\tR2"], [:RETURN, 'R3']
 )
 check.call('an unguarded trace of a joined value refuses (the reference answer)',
-           trace_new_target(join_value, 5, '3').nil?)
+           trace_new_target(join_value, 5, 3).nil?)
 
 # A guarded consumer's method_return_class callback runs an unguarded trace of its own. That trace must not inherit
 # the guarded mode of the trace it was reached from.
 outer = program([:SEND0, "R2\t:foo"], [:RETURN, 'R2'])
 nested = []
 trace_new_target(outer, 1, '2', guarded: true, method_return_class: lambda { |_name|
-  nested << trace_new_target(join_value, 5, '3')
+  nested << trace_new_target(join_value, 5, 3)
   nil
 })
 check.call('an unguarded trace nested in a guarded one still refuses the join',
@@ -130,10 +130,10 @@ new_on_join = program(
   [:JMPNOT, "R1\t3"], [:GETCONST, "R2\tA"], [:JMP, '4'], [:GETCONST, "R2\tB"], [:SEND0, "R2\t:new"], [:RETURN, 'R2']
 )
 check.call('(c ? A : B).new has no single class (the join is not skipped)',
-           trace_new_target(new_on_join, 5, '2').nil?)
+           trace_new_target(new_on_join, 5, 2).nil?)
 
 straight_new = program([:GETCONST, "R2\tA"], [:SEND0, "R2\t:new"], [:RETURN, 'R2'])
-check.call('A.new is an A (straight-line control)', trace_new_target(straight_new, 2, '2') == 'A')
+check.call('A.new is an A (straight-line control)', trace_new_target(straight_new, 2, 2) == 'A')
 
 # The GETIDX arm reads the argument an alias of the receiver came from (the annotated element class of the argument
 # applies only when the receiver IS that argument). The alias walk must dominate the GETIDX too.

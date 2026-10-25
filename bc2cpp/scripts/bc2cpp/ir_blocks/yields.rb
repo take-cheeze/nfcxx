@@ -52,8 +52,8 @@ Bc2cppIrBlockFixtures.compile(source, 'yields') do |ireps, _root|
   declared_body = methods.fetch('declared_caller')
   declared_position = declared_body.instructions.index { |insn| %i[SENDB SSENDB].include?(insn.op) }
   actual = BytecodeIR::Types::Fact.new(classes: Set[:String], declared: true, contracts: ['fixture:argument'])
-  declared = IrYieldTypes.summarize(ctx, declared_body, declared_position, BytecodeIR::Types.new(declared_body, argument_facts: { '1' => actual }))
-  check.call('yielded caller contract preserves conditional provenance', declared && declared.arguments['1'].declared? && declared.arguments['1'].contracts == ['fixture:argument'] && declared.arguments['1'].classes == Set[:String, :Integer])
+  declared = IrYieldTypes.summarize(ctx, declared_body, declared_position, BytecodeIR::Types.new(declared_body, argument_facts: { 1 => actual }))
+  check.call('yielded caller contract preserves conditional provenance', declared && declared.arguments[1].declared? && declared.arguments[1].contracts == ['fixture:argument'] && declared.arguments[1].classes == Set[:String, :Integer])
   gen.define_singleton_method(:closed_world_exact_target) { |*| nil }
   check.call('unproven method identity refuses a literal-looking protocol', summarize.call('caller').nil?)
 end

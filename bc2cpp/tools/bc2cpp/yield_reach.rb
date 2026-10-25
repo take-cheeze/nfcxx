@@ -612,7 +612,7 @@ class YieldReach
   def dispatch_send_universe(node, idx, dest)
     return nil unless @sound && dest
 
-    table = IrSymbolFlow.splat_table(node.irep, idx, (dest.to_i + 1).to_s)
+    table = IrSymbolFlow.splat_table(node.irep, idx, dest + 1)
     table && dispatch_universes[table]
   end
 

@@ -18,13 +18,13 @@ instruction = ->(index, op, args) { Insn.new(lineno: 1, addr: index * 4, op: op,
 body = Irep.new(label: 'typed_block', nlocals: 2, nregs: 4, instructions: [
   instruction.call(0, :ENTER, '1:0:0:0:0:0:0:0 (0x0)'), instruction.call(1, :MOVE, 'R2 R1'), instruction.call(2, :RETURN, 'R2')])
 bound = BytecodeIR::Types::Fact.new(classes: Set[:String], declared: true, contracts: ['rbs-block:Owner#callback'])
-analysis = BytecodeIR::Types.new(body, argument_facts: { '1' => bound })
-check.call('seeded callback arguments retain declaration provenance', analysis.fact_at(2, '2')&.contracts == bound.contracts)
-check.call('declared callback arguments cannot become independent classes', analysis.at(2, '2').nil?)
+analysis = BytecodeIR::Types.new(body, argument_facts: { 1 => bound })
+check.call('seeded callback arguments retain declaration provenance', analysis.fact_at(2, 2)&.contracts == bound.contracts)
+check.call('declared callback arguments cannot become independent classes', analysis.at(2, 2).nil?)
 body.instructions[1] = instruction.call(1, :GETUPVAR, 'R2 1 0')
 capture_analysis = BytecodeIR::Types.new(body, source_resolver: ->(_index, _reg) { bound })
-check.call('source Fact callbacks preserve capture declarations', capture_analysis.fact_at(2, '2')&.declared?)
-check.call('declared source Facts cannot become independent classes', capture_analysis.at(2, '2').nil?)
+check.call('source Fact callbacks preserve capture declarations', capture_analysis.fact_at(2, 2)&.declared?)
+check.call('declared source Facts cannot become independent classes', capture_analysis.at(2, 2).nil?)
 
 unless ENV['MRBC']
   puts 'SKIP mrbc block protocol integration fixtures (set MRBC)'

@@ -43,7 +43,7 @@ jmpuw_guarded = program.call([
 check.call('JMPUW inside a protected range refuses under the origin walk',
            jmpuw_guarded.reaching_definitions(4, '1', origin_transfers: true).nil?)
 check.call('JMPUW inside a protected range refuses under the default walk',
-           jmpuw_guarded.reaching_definitions(4, '1').nil?)
+           jmpuw_guarded.reaching_definitions(4, 1).nil?)
 check.call('JMPUW inside a protected range refuses under through_handlers',
            jmpuw_guarded.reaching_definitions(4, '1', through_handlers: true).nil?)
 
@@ -57,7 +57,7 @@ check.call('RESCUE: the query on its written register is defined by the RESCUE (
            defs_of.call(rescue_, 5, '3', origin_transfers: true) == [2])
 check.call('RESCUE: a query on its read-only register passes through to the earlier write',
            defs_of.call(rescue_, 5, '2', origin_transfers: true) == [0])
-check.call('RESCUE: the default walk still refuses at it', rescue_.reaching_definitions(5, '3').nil?)
+check.call('RESCUE: the default walk still refuses at it', rescue_.reaching_definitions(5, 3).nil?)
 
 # RESCUE inside a protected range: the walk still refuses at the protected predecessor.
 rescue_guarded = program.call([
@@ -75,7 +75,7 @@ except = program.call([
 ], [CatchHandler.new(type: :rescue, begin_addr: 2, end_addr: 3, target: 8)])
 check.call('EXCEPT: a use of its own register is defined by the EXCEPT (origin walk)',
            defs_of.call(except, 3, '3', origin_transfers: true) == [2])
-check.call('EXCEPT: the default walk still refuses at the handler target', except.reaching_definitions(3, '3').nil?)
+check.call('EXCEPT: the default walk still refuses at the handler target', except.reaching_definitions(3, 3).nil?)
 check.call('EXCEPT: a register it does not write is refused by the normal origin walk (the handler target is guarded)',
            except.reaching_definitions(3, '1', origin_transfers: true).nil?)
 
@@ -97,7 +97,7 @@ except_clobber = program.call([
 ], [CatchHandler.new(type: :rescue, begin_addr: 2, end_addr: 4, target: 8)])
 check.call('EXCEPT: a register above the raising send\'s frame still refuses (negative)',
            except_clobber.reaching_definitions(4, '4', origin_transfers: true, through_handlers: true).nil?)
-check.call('EXCEPT: the default walk still refuses at the handler target (negative)', except_pass.reaching_definitions(4, '1').nil?)
+check.call('EXCEPT: the default walk still refuses at the handler target (negative)', except_pass.reaching_definitions(4, 1).nil?)
 
 # A break out of begin/ensure: the JMPUW on the normal edge unwinds through the ensure body (vm.c OP_JMPUW, then
 # RAISEIF jumps to the target), so the target reads the ensure body's write. The ensure's own fall-through does not
@@ -175,7 +175,7 @@ handler_live = program.call([
   insn(0, :LOADNIL, 'R1 (nil)'), insn(2, :SEND0, "R2\t:f"), insn(4, :JMP, '10'), insn(8, :LOADI_1, 'R1 (1)'),
   insn(10, :RETURN, 'R1')
 ], [CatchHandler.new(type: :rescue, begin_addr: 2, end_addr: 4, target: 8)])
-check.call('a handler body is live: the join after it refuses', handler_live.reaching_definitions(4, '1').nil?)
+check.call('a handler body is live: the join after it refuses', handler_live.reaching_definitions(4, 1).nil?)
 check.call('without the handler the same body is dead and skipped',
            defs_of.call(program.call(handler_live.instructions.map(&:source)), 4, '1') == [0])
 

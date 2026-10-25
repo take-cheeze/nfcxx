@@ -411,7 +411,7 @@ check.call('required keyword reads its joined type',
            body_fact.call(keyword_body, 2, '3', inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])
 check.call('required keyword stays untyped without a join', body_fact.call(keyword_body, 2, '3').nil?)
 declared_keyword = BytecodeIR::Types.new(body_irep.call(keyword_body), declared_keywords: { 'key' => Set[:Symbol] },
-                                         inferred_keywords: { 'key' => Set[:String, :Integer] }).fact_at(2, '3')
+                                         inferred_keywords: { 'key' => Set[:String, :Integer] }).fact_at(2, 3)
 check.call('a declared keyword type wins over the call-site join', declared_keyword.classes == Set[:Symbol] && declared_keyword.declared?)
 # Optional keyword `flag` in the layout mrbc emits: KEY_P, a JMPIF over the default, the default, a JMP to the join
 # after KARG. The read is the last instruction, so its reaching definitions are the KARG value and the default.
@@ -422,7 +422,7 @@ optional_fact = lambda do |default, **inputs|
   irep = Irep.new(label: 'body', nlocals: 4, nregs: 8, instructions: insns.each_with_index.map do |(op, args), i|
     Insn.new(lineno: 1, addr: 4 * i, op: op, args: args)
   end)
-  BytecodeIR::Types.new(irep, **inputs).fact_at(insns.size - 1, '3')&.classes
+  BytecodeIR::Types.new(irep, **inputs).fact_at(insns.size - 1, 3)&.classes
 end
 check.call('optional keyword reads its join, which holds the passed class and the literal default class',
            optional_fact.call([[:LOADI_1, 'R3 (1)']], inferred_keywords: { 'flag' => Set[:Integer] }) == Set[:Integer])
@@ -436,8 +436,8 @@ check.call('a declared optional keyword type wins over the join',
                                                       inferred_keywords: { 'flag' => Set[:Integer] }) == Set[:Symbol])
 block_body = [[:ENTER, '0:0:0:0:0:0:1:0 (0x0)'], [:SEND, 'R1 :call n=0']]
 check.call('a block called with .call is a Proc when every caller passes a literal block',
-           body_fact.call(block_body, 1, '1', inferred_args: { '1' => Set[:Proc] }) == Set[:Proc])
-check.call('a block without the join keeps its nominal Proc-or-nil bound', body_fact.call(block_body, 1, '1') == Set[:Proc, :NilClass])
+           body_fact.call(block_body, 1, 1, inferred_args: { 1 => Set[:Proc] }) == Set[:Proc])
+check.call('a block without the join keeps its nominal Proc-or-nil bound', body_fact.call(block_body, 1, 1) == Set[:Proc, :NilClass])
 
 # End to end through the codegen joins: a poisoned name (a splatted or dynamic caller) refuses the rest join, so the
 # body sees nothing; the same name with a plain caller gives the join; BC2CPP_IR_ARGUMENT_TYPES=0 withdraws it.
@@ -463,7 +463,7 @@ end_to_end.gather_sites = [[caller, 0, 2, 2]]
 rest_join_of = -> { end_to_end.bytecode_ir_rest_argument_classes(Rest) }
 body_element = lambda do |join|
   inputs = join ? { inferred_rest_elements: { '2' => join } } : {}
-  BytecodeIR::Types.new(rest_irep, **inputs).fact_at(2, '3')&.classes
+  BytecodeIR::Types.new(rest_irep, **inputs).fact_at(2, 3)&.classes
 end
 check.call('codegen rest join reaches the body as the element type',
            rest_join_of.call == Set[:Integer] && body_element.call(rest_join_of.call) == Set[:NilClass, :Integer])
