@@ -1,5 +1,6 @@
 // nfcffi host: compiles tests/ffi/lib.c at run time and calls it through C++ signatures, then calls functions of the C library
 // that gcc compiled (div, ldiv, qsort, strlen). Usage: host <dir holding lib.c>. Exits 0 when every check passes.
+#include <cstddef>
 #include <cstdio>
 #include <stdexcept>
 #include <cstdlib>
@@ -249,7 +250,7 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   // Callbacks: a host callable stands in for a C function pointer; the C side calls it through a trampoline.
   nfcffi::Library cbs = ffi.load(dir + "/cb.h", read_text(dir + "/cb_impl.c"));
   CHECK(cbs.callable("apply_twice") && cbs.callable("each_pair") && cbs.callable("sum_with"));
-  CHECK(cbs.declarations().size() == 3);
+  CHECK(cbs.declarations().size() == 5);
   Value twice = cbs.call("apply_twice", {Value::of_callable([](const std::vector<Value>& a) {
                                           return Value::of_signed(a[0].as_signed() * 3);
                                         }),
@@ -270,6 +271,55 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
                                       Value::of_signed(4)});
   CHECK(total.as_signed() == 10);  // f(i, 0.25) = i + 1 for i = 0..3
   CHECK(cbs.call("each_pair", {Value::of_pointer(nullptr), Value::of_signed(0)}).kind() == Value::Kind::Void);  // nil, unused
+
+  // Struct callbacks: the callable gets the parameter's bytes and returns the result's bytes (a Pt is two doubles).
+  double in_pt[2] = {1.0, 3.0};
+  Value stepped = cbs.call("step_pt", {Value::of_callable([](const std::vector<Value>& a) {
+                                         double p[2];
+                                         std::memcpy(p, a[0].as_bytes().data(), sizeof p);
+                                         double q[2] = {p[0] + 1, p[1] * 2};
+                                         return Value::of_bytes(q, sizeof q);
+                                       }),
+                                       Value::of_bytes(in_pt, sizeof in_pt)});
+  double out_pt[2] = {0, 0};
+  std::memcpy(out_pt, stepped.as_bytes().data(), sizeof out_pt);
+  CHECK(out_pt[0] == 3.0 && out_pt[1] == 12.0);  // (1, 3) -> (2, 6) -> (3, 12)
+  Value counted = cbs.call("count_pts", {Value::of_callable([](const std::vector<Value>& a) {
+                                           double p[2];
+                                           std::memcpy(p, a[0].as_bytes().data(), sizeof p);
+                                           return Value::of_signed((long long)(p[0] + p[1]));
+                                         }),
+                                         Value::of_signed(3)});
+  CHECK(counted.as_signed() == 9);  // (i, 2i) gives 3i for i = 0..2
+  bool struct_error = false;
+  try {
+    cbs.call("step_pt", {Value::of_callable([in_pt](const std::vector<Value>&) { return Value::of_bytes(in_pt, 8); }),
+                         Value::of_bytes(in_pt, sizeof in_pt)});
+  } catch (const nfcffi::Error&) {
+    struct_error = true;
+  }
+  CHECK(struct_error);  // a result of the wrong size is an error, rethrown after the call
+
+  // The host's mirror of the header's Pt has the C layout: its offsets are the C compiler's. A struct with the members in
+  // another order does not, and the check tells them apart.
+  struct HostPt {
+    double x, y;
+  };
+  struct WrongPt {
+    double y;
+    double x;
+  };
+  const std::vector<std::size_t> pt_layout = cbs.member_offsets("Pt", {"x", "y"});
+  CHECK(pt_layout.size() == 3 && pt_layout[0] == sizeof(HostPt));
+  CHECK(pt_layout[1] == offsetof(HostPt, x) && pt_layout[2] == offsetof(HostPt, y));
+  CHECK(pt_layout != (std::vector<std::size_t>{sizeof(WrongPt), offsetof(WrongPt, x), offsetof(WrongPt, y)}));
+  bool bad_member = false;
+  try {
+    cbs.member_offsets("Pt", {"x; int z"});
+  } catch (const nfcffi::Error&) {
+    bad_member = true;
+  }
+  CHECK(bad_member);  // a member name that is not an identifier is refused before the compiler sees it
 
   bool kind_error = false;
   try {

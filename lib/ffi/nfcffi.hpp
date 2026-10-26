@@ -111,6 +111,7 @@ struct Declaration {
     char return_kind = 'x';
     std::string param_kinds;
     std::vector<std::string> params;           // "@" marks the name
+    std::vector<std::size_t> sizes;            // Ffi::load: the sizes of the struct parts: [0] the result, [j + 1] parameter j
   };
   std::vector<Callback> callbacks;
 
@@ -213,6 +214,12 @@ class Library {
   // with the same members); a struct result comes back the same way. Throws Error for an uncallable name, a wrong argument
   // count or kind, or a wrong size.
   Value call(const std::string& name, const std::vector<Value>& args) const;
+
+  // The C layout of TYPE, a type of the header spelled as C spells it ("Pt", "struct Rec"): [0] its sizeof, then the offsetof
+  // of each of MEMBERS in order. The host compares these with its own struct before it passes the struct's bytes (a
+  // struct that differs from the C one is read and written at the wrong places). Throws CompileError for a type or member
+  // the header does not have, and Error for a member name that is not an identifier.
+  std::vector<std::size_t> member_offsets(const std::string& type, const std::vector<std::string>& members) const;
 
  private:
   friend class Ffi;

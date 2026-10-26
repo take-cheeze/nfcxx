@@ -136,9 +136,9 @@ lib.callable("vec_add");   // false: a struct by value
 
 ## Callbacks (Milestone 7)
 
-A parameter that is a pointer to a function with scalar parameters and result (`iufp`, result also `v`, not variadic) has
-kind `c`. The front end writes a `cb` record for it (`be/nfcxx_decl.c`, `nf_emit_cb`): the callback's result, its kinds
-and its parameters. A callback that is variadic, or has a struct parameter, keeps kind `p` (a plain pointer).
+A parameter that is a pointer to a function with parameters and result of the kinds `iufps` (result also `v`, not
+variadic) has kind `c`. The front end writes a `cb` record for it (`be/nfcxx_decl.c`, `nf_emit_cb`): the callback's
+result, its kinds and its parameters. A callback that is variadic, or has a kind it cannot pass (`x`), keeps kind `p`.
 
 - **Trampolines.** For each callback parameter the generated C has a context variable, a raw-pointer variable and a
   trampoline with the callback's declared signature. The trampoline stores its arguments canonically (`long long`,
@@ -148,10 +148,21 @@ and its parameters. A callback that is variadic, or has a struct parameter, keep
   returns a `Value`. A C function pointer is passed as `Value::of_pointer` and goes straight through. `Value()` with
   an integer 0 (or a null pointer) is nil. The wrapper picks the trampoline when the context is set, and the raw
   pointer otherwise.
+- **Struct parameters and results.** A struct parameter reaches the callable as `Value::of_bytes` of its size: the
+  trampoline passes the address of its parameter, and the layout function reports the sizes of each callback's result
+  and parameters (`Declaration::Callback::sizes`). A struct result is the bytes the callable returns, copied into the
+  declared type; a result of another size is an error, rethrown after the call.
+- **Script functions.** The Python and Ruby bindings pass a script function (a Python callable, a Ruby Proc) as the
+  callable: it runs with the converted arguments and its result is converted back (`nfcffi_poly.cpp`, `script_callable`).
+  An exception in the script is rethrown to the caller.
 - **Exceptions.** A callable's exception cannot cross the C frames, so the dispatcher catches it and `Library::call`
   rethrows the first one after the C call returns.
+- **Limit: variadic callbacks.** A callback has a fixed signature, which the trampoline must spell, so a variadic
+  callback type (`int (*)(const char *, ...)`) is not callable: its trampoline cannot be written generically. Such a
+  parameter keeps kind `p`.
 - **Tests.** `tests/ffi/host.cpp` `check_library` (callbacks): a callable that multiplies, a callable that writes into a
-  host list, an int/double callback, a nil callback, a wrong-kind argument, and an exception rethrown.
+  host list, an int/double callback, a nil callback, a wrong-kind argument, an exception rethrown, and struct parameters
+  and results as bytes (`step_pt`, `count_pts`). `tests/ffi/poly_host.cpp` runs Python and Ruby functions as callbacks.
 
 ## Python (Milestone 6)
 
@@ -170,6 +181,7 @@ ctx.eval<long long>("python", "lib = ffi_load('/abs/dyn.h', src_text, ['add_int'
   for the call), nil (a null pointer, or 0), or an array of integers 0..255 (the bytes of a struct or union).
 - A result is an integer, a float, nil (a null pointer), or an array of bytes (a struct or union). A pointer result is its
   address as an integer.
+- A script function passed for a callback parameter is called with the arguments of the C call (see Callbacks).
 - Errors reach the script as script errors (an `Error` of the library is a `RuntimeError`-like error in each language).
 - Test: `tests/ffi/poly_host.cpp`, with CPython (`python3-config`); `tests/ffi/run.sh` builds it when the CPython
   development files are present and skips it otherwise.
@@ -179,6 +191,10 @@ ctx.eval<long long>("python", "lib = ffi_load('/abs/dyn.h', src_text, ['add_int'
 - **ABI.** The checks above cover the SysV x86-64 cases the tests use. Other targets are not covered.
 - **Host and module compiler.** The module must be built by the same nfcxx backend as the host for C++ types to match;
   the test runs both with the same backend.
+- **Struct layout is not derived from the header.** The host's struct must match the C one. `Library::member_offsets`
+  returns the C compiler's `sizeof` and `offsetof` for named members, so a host can check its own struct against it
+  (`tests/ffi/host.cpp` compares a mirror of `Pt`, and tells a reordered one apart). The check is explicit, not automatic:
+  the declarations do not carry the members' types.
 
 ## Plan
 
@@ -189,3 +205,5 @@ ctx.eval<long long>("python", "lib = ffi_load('/abs/dyn.h', src_text, ['add_int'
 5. (done) Variadic calls: a wrapper per sequence of extra argument kinds, compiled on first use.
    (done) Long double and 128-bit integers, as bytes. (done) Callbacks: a host callable behind a function pointer.
 6. (done) Python through `nfcpoly` (`nfcffi_poly.cpp`): `ffi_load` and `FfiLibrary.call`, with the same argument rules.
+7. (done) Script functions as callbacks (Python, Ruby); struct parameters and results of callbacks; `member_offsets` for
+   the host's struct check. Variadic callbacks are a documented limit (see Callbacks).
