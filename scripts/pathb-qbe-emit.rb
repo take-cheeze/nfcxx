@@ -1,6 +1,7 @@
 # Path B stage 3: emit QBE IL from the nfcxx mid-level IR text (docs/notes/pathb-stage2.md, sections 6 and 7).
 #
-# Usage: scripts/mrb scripts/pathb-qbe-emit.rb [FILE.ir | -]   QBE IL on stdout (reads stdin for '-' or no argument)
+# Usage: scripts/mrb scripts/pathb-qbe-emit.rb [--safe] [FILE.ir | -]   QBE IL on stdout (reads stdin for '-' or no argument)
+#          --safe: the checks of -fsafe-pointers (docs/notes/safe-pointers.md)
 #        scripts/mrb scripts/pathb-qbe-emit.rb --append-weak IL.ssa ASM.s
 #                                                              append `.weak` lines for the IR (weak) definitions
 #
@@ -819,7 +820,8 @@ CMP_INT = { "lt.s" => "cslt", "le.s" => "csle", "lt.u" => "cult", "le.u" => "cul
 CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
-  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers, :ubfiles
+  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers, :ubfiles,
+                :gsizes, :sp_globals
 
   def initialize
     @globals = {}       # IR name -> type
@@ -836,6 +838,8 @@ class Module_
     @abi = {}           # struct name -> AbiType: the C calling convention shape of aggregates by value
     @asmhelpers = {}    # machine-level helpers ("fence", "rdtsc") that append_asm_helpers writes into the assembly
     @ubfiles = {}       # source file name -> index, for the failure reports of the checks (see Fn#abort_label)
+    @gsizes = {}        # IR name -> size in bytes of each global defined here (safe pointers: static offsets)
+    @sp_globals = []    # [QBE symbol, size] of the objects the safe-pointers constructor registers
   end
 end
 
@@ -929,7 +933,7 @@ UB_KIND = { trap: 0, overflow: 1, divzero: 2, shift: 3, bounds: 4, null: 5, unre
 # One function body. Statements are emitted into body; registers and slots into allocs.
 class Fn
   attr_accessor :mod, :name, :ret_ty, :body, :allocs, :inits, :returns_twice, :dead, :regs, :slots, :nslot,
-                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf, :loc
+                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf, :loc, :escaped, :slot_sizes
 
   def initialize(mod, name, ret_ty)
     @mod = mod
@@ -954,6 +958,9 @@ class Fn
     @loc = nil              # [file, line] of the last (loc ...) statement: set only when the checks report themselves
     @ubsites = {}           # [kind, file, line] -> label of the block that reports that failure
     @sret_buf = nil         # a function returning an aggregate in the C convention: the buffer it returns the address of
+    @escaped = {}           # safe pointers: slots whose address is used other than as the address of a load or store
+    @slot_sizes = {}        # IR slot name -> size in bytes
+    @no_escape = false
   end
 
   # ---- output
@@ -1003,6 +1010,7 @@ class Fn
 
   def ret(v = nil)
     ensure_live
+    put(SP_LEAVE) if $safe   # replaced by the frame's __nfcxx_sp_leave call, or dropped (emit_function)
     put(v.nil? ? (@sret_buf.nil? ? "ret" : "ret #{@sret_buf}") : "ret #{v}")
     @dead = true
   end
@@ -1092,7 +1100,19 @@ class Fn
   def slot_val(name)
     raise BadIR, "slot $\"#{name}\" not declared in #{@name}" unless @slots.key?(name)
     q, ty = @slots[name]
+    @escaped[name] = true unless @no_escape
     Val.new(q, "l", ["ptr", ty])
+  end
+
+  # The address operand of a load or store. A slot used only this way does not escape (safe pointers).
+  def addr_opnd(op)
+    @no_escape = true
+    begin
+      v = opnd(op, "l")
+    ensure
+      @no_escape = false
+    end
+    v
   end
 
   # ---- operands
@@ -1635,6 +1655,10 @@ def r_offset(fn, x)
   n = as_int(x[2])
   t = fn.tmp
   fn.emit("#{t} =l add #{a.t}, #{n}")
+  if $safe
+    sz = sp_static_size(fn, x[1])
+    t = sp_derive(fn, a.t, t) unless !sz.nil? && n >= 0 && n <= sz   # a member of a named object is in it
+  end
   Val.new(t, "l", ["ptr", nil])
 end
 
@@ -1667,6 +1691,7 @@ def r_index(fn, x)
   fn.emit("#{m} =l mul #{i64}, #{size}")
   t = fn.tmp
   fn.emit("#{t} =l add #{base.t}, #{m}")
+  t = sp_derive(fn, base.t, t) if $safe
   Val.new(t, "l", ["ptr", nil])
 end
 
@@ -1680,6 +1705,55 @@ def r_pdiff(fn, x)
   t = fn.tmp
   fn.emit("#{t} =l div #{d}, #{size}")
   Val.new(t, "l", ["int", 8, true, false])
+end
+
+# -fsafe-pointers (docs/notes/safe-pointers.md, the runtime is lib/safeptr/nfcxx_safeptr.c): every load and store
+# through a computed address is preceded by __nfcxx_sp_check(addr, size, file, line), and the result of pointer arithmetic
+# (offset, index) goes through __nfcxx_sp_derive(base, result, file, line), which fails when it leaves base's object.
+# Slots whose address escapes are registered with the runtime at function entry (__nfcxx_sp_frame) and released at each
+# return (__nfcxx_sp_leave), the defined globals and strings by a constructor of the module (__nfcxx_sp_globals). Each
+# registered object gets one byte of padding, so the address one past its end is never another object's start.
+$safe = false
+SP_LEAVE = "#sp-leave"
+
+# A load or store at a slot or a global needs no check: the address is the object's own, the type its own.
+def sp_static_addr?(op)
+  op.is_a?(IRSym) && (op.sig == "$" || op.sig == "@")
+end
+
+# The size of the object a static address names, or nil.
+def sp_static_size(fn, op)
+  return nil unless op.is_a?(IRSym)
+  return fn.slot_sizes[op.name] if op.sig == "$"
+  return nil if op.sig != "@" || fn.mod.thread.key?(op.name)
+  return fn.mod.gsizes[op.name] if fn.mod.gsizes.key?(op.name)
+  fn.mod.strings.key?(op.name) ? fn.mod.strings[op.name].length : nil
+end
+
+# The file and line arguments of a check: the last (loc ...), or none (the report says "?").
+def sp_where(fn)
+  return "l 0, w 0" if fn.loc.nil?
+  idx = (fn.mod.ubfiles[fn.loc[0]] ||= fn.mod.ubfiles.length)
+  "l $__nfcxx_ubf#{idx}, w #{fn.loc[1]}"
+end
+
+def sp_check(fn, addr, n)
+  fn.emit("call $__nfcxx_sp_check(l #{addr}, l #{n}, #{sp_where(fn)})")
+end
+
+def sp_derive(fn, base, res)
+  r = fn.tmp
+  fn.emit("#{r} =l call $__nfcxx_sp_derive(l #{base}, l #{res}, #{sp_where(fn)})")
+  r
+end
+
+# The address of an access: a static one is not checked, any other gets a check of n bytes.
+def sp_access(fn, op, n)
+  return fn.opnd(op, "l") unless $safe
+  return fn.addr_opnd(op) if sp_static_addr?(op)
+  v = fn.opnd(op, "l")
+  sp_check(fn, v.t, n)
+  v
 end
 
 # Volatile accesses. QBE has no volatile: its load optimisation forwards a store to a later load of the same
@@ -1707,7 +1781,7 @@ def r_load(fn, x)
   vol = x[0] == "load.v"
   ty = parse_type(x[1])
   raise Refused, "load of an aggregate (aggregates are addresses)" if is_agg(ty)
-  addr = fn.opnd(x[2], "l")
+  addr = sp_access(fn, x[2], ty_size(ty))
   op, cls = load_op(ty)
   t = fn.tmp
   if vol
@@ -1796,6 +1870,11 @@ def r_call(fn, x)
     end
   end
   parts << "..." if !nfixed.nil? && nfixed == args.length
+  if $safe && x[2].is_a?(IRSym) && x[2].sig == "&" && SP_MEMFN.key?(x[2].name) && args.length == 3 && !args.include?(nil)
+    # the library's block functions: both ranges are checked here, since the library itself is not
+    n = args[2][0]
+    SP_MEMFN[x[2].name].each { |i| sp_check(fn, args[i][0].t, n.t) } if n.cls == "l"
+  end
   target = callee.t
   if !sret.nil?
     info, dest = sret
@@ -1819,6 +1898,9 @@ def r_call(fn, x)
 end
 
 # (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE's vaarg takes w, l, s and d.
+# Library functions whose pointer arguments (by index) span the length in argument 2.
+SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }
+
 def r_vaarg(fn, x)
   raise BadIR, "vaarg form" if x.length != 3
   ty = parse_type(x[1])
@@ -1918,7 +2000,7 @@ def s_store(fn, x)
   vol = x[0] == "store.v"
   ty = parse_type(x[1])
   raise Refused, "store of an aggregate type" if is_agg(ty)
-  addr = fn.opnd(x[2], "l")
+  addr = sp_access(fn, x[2], ty_size(ty))
   val = fn.opnd(x[3])
   if ty[0] == "ptr" || ty[0] == "fn" || (ty[0] == "int" && ty[1] == 8)
     op = "storel"
@@ -1965,7 +2047,7 @@ def r_bfload(fn, x)
   unit, boff, width = bf_args(x, 6)
   ty = parse_type(x[1])
   raise Refused, "bit-field of type #{tyrepr(ty)}" if ty[0] != "int"
-  addr = fn.opnd(x[3], "l")
+  addr = sp_access(fn, x[3], unit)
   ucls = unit == 8 ? "l" : "w"
   ubits = unit == 8 ? 64 : 32
   t = fn.tmp
@@ -2007,7 +2089,7 @@ def s_bfstore(fn, x)
   unit, boff, width = bf_args(x, 7)
   ty = parse_type(x[1])
   raise Refused, "bit-field of type #{tyrepr(ty)}" if ty[0] != "int"
-  addr = fn.opnd(x[3], "l")
+  addr = sp_access(fn, x[3], unit)
   val = fn.opnd(x[6])
   ucls = unit == 8 ? "l" : "w"
   ubits = unit == 8 ? 64 : 32
@@ -2112,6 +2194,10 @@ def s_copy(fn, x)
   dst = fn.opnd(x[2], "l")
   src = fn.opnd(x[3], "l")
   return if n == 0
+  if $safe
+    sp_check(fn, dst.t, n)
+    sp_check(fn, src.t, n)
+  end
   fn.emit("call $memmove(l #{dst.t}, l #{src.t}, l #{n})")
 end
 
@@ -2120,6 +2206,7 @@ def s_zero_fill(fn, x)
   n = x[1].is_a?(String) && x[1][0] == "%" ? fn.opnd(x[1], "l").t : as_int(x[1])
   dst = fn.opnd(x[2], "l")
   return if n == 0
+  sp_check(fn, dst.t, n) if $safe
   fn.emit("call $memset(l #{dst.t}, w 0, l #{n})")
 end
 
@@ -2670,7 +2757,9 @@ def x87_entry_thunk(name, linkage, ints, stack, complex = false)
   mr = (m + 15) / 16 * 16
   frame = mr + (complex ? 40 : 24)
   global = linkage == "local" ? [] : [(linkage == "weak" ? ".weak #{name}" : ".globl #{name}")]
-  out = [".text", *global, ".type #{name}, @function", name + ":",
+  # Aligned as QBE aligns functions: the entry is the function's address, and the Itanium pointer-to-member ABI reads
+  # an odd one as a virtual function's vtable offset.
+  out = [".text", ".balign 16", *global, ".type #{name}, @function", name + ":",
          "\tsubq $#{frame}, %rsp"]
   out.concat(x87_copy_args(stack, frame))
   if ints < 6
@@ -2773,6 +2862,10 @@ def emit_global(mod, g)
   raise Refused, "global #{name}: alignment #{align} (QBE data aligns to at most 64)" if align > 64
   items = global_items(mod, name, init)
   pieces = emit_data_items(mod, name, size, items)
+  if $safe && !thread
+    pieces << "z 1"   # padding: see the safe-pointers section
+    mod.sp_globals << [qsym(name), size]
+  end
   linkage = (thread ? "thread " : "") + (static ? "" : "export ")
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}data $#{qsym(name)} = align #{align} { #{pieces.join(", ")} }"
@@ -2792,11 +2885,29 @@ def emit_string(mod, d)
   raw = raw + [0] * (total - raw.length)
   mod.strings[name] = raw
   parts = raw.map { |c| "b #{c}" }
+  if $safe
+    parts << "z 1"
+    mod.sp_globals << [qsym(name), raw.length]
+  end
   if parts.empty?
     mod.out << "data $#{qsym(name)} = { z 0 }"
   else
     mod.out << "data $#{qsym(name)} = { #{parts.join(", ")} }"
   end
+end
+
+# Safe pointers: register the escaping slots at entry, release them at each return (the SP_LEAVE lines of Fn#ret).
+def sp_frame(fn, slot_pad)
+  esc = fn.slots.keys.select { |s| fn.escaped[s] }
+  leave = esc.empty? ? nil : "\tcall $__nfcxx_sp_leave(l #{fn.slots[esc[0]][0]})"
+  fn.body = fn.body.map { |l| l == "\t" + SP_LEAVE ? leave : l }.compact
+  return if esc.empty?
+  args = esc.map do |s|
+    i, padded = slot_pad[s]
+    fn.allocs[i] = padded
+    "l #{fn.slots[s][0]}, l #{fn.slot_sizes[s]}"
+  end
+  fn.inits << "\tcall $__nfcxx_sp_frame(w #{esc.length}, ..., #{args.join(", ")})"
 end
 
 def emit_function(mod, f)
@@ -2812,6 +2923,7 @@ def emit_function(mod, f)
   static = false
   weak = false
   startup = []
+  slot_pad = {}
   qparams = []
   param_stores = []
   body_forms = []
@@ -2839,6 +2951,10 @@ def emit_function(mod, f)
       salign = as_int(part[4])
       q = "%s#{fn.nslot}"
       fn.nslot += 1
+      fn.slot_sizes[sname] = ssize
+      # safe pointers: the alloc line of the slot and the same line with one byte of padding, for an escaping slot
+      slot_pad[sname] = [fn.allocs.length, salign > 16 ? "\t#{q}r =l alloc16 #{ssize + salign}" :
+                         "\t#{q} =l alloc#{salign >= 16 ? 16 : salign >= 8 ? 8 : 4} #{ssize + 1}"]
       if salign > 16
         # QBE stack slots are at most 16-aligned: over-allocate and round the address up. The extra lines
         # are address arithmetic on the start block's alloc, so the slot is a plain pointer for the rest.
@@ -2922,6 +3038,7 @@ def emit_function(mod, f)
       fn.jmp(fn.abort_label(:missing_return))
     end
   end
+  sp_frame(fn, slot_pad) if $safe
   fn.ub_blocks
   if fn.abort_used
     fn.body << "@abort"
@@ -3138,6 +3255,19 @@ def emit_x87_thunks(mod, forms)
   end
 end
 
+# Safe pointers: a constructor that registers the module's globals and strings before other constructors run.
+def sp_globals_ctor(mod)
+  return if mod.sp_globals.empty?
+  mod.out << "data $__nfcxx_sp_gtab = align 8 { #{mod.sp_globals.map { |q, n| "l $#{q}, l #{n}" }.join(", ")} }"
+  mod.out << "function $__nfcxx_sp_gctor() {"
+  mod.out << "@start"
+  mod.out << "\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{mod.sp_globals.length})"
+  mod.out << "\tret"
+  mod.out << "}"
+  mod.out << ""
+  mod.startup << [".init_array", 101, "__nfcxx_sp_gctor"]
+end
+
 def emit_module(text, do_prune = true, ld_trap = false)
   forms = parse_forms(tokenize(text))
   raise BadIR, "the input is not an (ir-module ...) IR text" if forms.empty? || head_of(forms[0]) != "ir-module"
@@ -3154,6 +3284,7 @@ def emit_module(text, do_prune = true, ld_trap = false)
   forms.drop(1).each do |f|   # the globals that stay: a dropped one (unreferenced) may have a type this emitter refuses
     next if head_of(f) != "global"
     mod.globals[pstr(f[1])] = parse_type(f[2])
+    mod.gsizes[pstr(f[1])] = as_int(f[3])
     if f.drop(5).any? { |p| head_of(p) == "weak" } && f.drop(5).any? { |p| head_of(p) == "extern" } &&
        !f.drop(5).any? { |p| head_of(p) == "thread" }
       mod.weakdata[pstr(f[1])] = true
@@ -3181,6 +3312,7 @@ def emit_module(text, do_prune = true, ld_trap = false)
     end
   end
   emit_x87_thunks(mod, forms)
+  sp_globals_ctor(mod) if $safe
   emit_startup_tables(mod)
   mod.got.each { |name, cell| mod.out << "data $#{cell} = align 8 { l $#{qsym(name)} }" }
   mod.out << "data $#{SINK} = align 8 { z 8 }" if mod.need_sink
@@ -3212,6 +3344,10 @@ def main(argv)
   end
   if !args.empty? && args[0] == "--long-double=trap"
     ld_trap = true
+    args = args.drop(1)
+  end
+  if !args.empty? && args[0] == "--safe"
+    $safe = true
     args = args.drop(1)
   end
   if args.length > 1

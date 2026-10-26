@@ -37,6 +37,10 @@
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). The gcc and qbe
 #                  backends instrument the code; Path B is refused. docs/notes/asan.md. -fno-sanitize=address undoes it;
 #                  other -fsanitize= values are refused.
+#   -fsafe-pointers: Fil-C-style memory safety checks (docs/notes/safe-pointers.md). Implies Path B: pointer arithmetic must
+#                  stay in its object, loads and stores must be in a live object (heap, global, escaping local), and a
+#                  freed or returned-from object cannot be used; a failure prints "file:line: safety error: ..." and
+#                  aborts. -fno-safe-pointers turns it off.
 #   --freestanding: headers come only from lib/ (no EDG std headers, no hosted libc++/libstdc++),
 #                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
 #   --target=NAME: with --freestanding and --emit-c only. The front end lays out the program for an EDG target (sizes,
@@ -56,7 +60,7 @@ sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
-asan=0; backend_explicit=0; asanopts=()
+asan=0; backend_explicit=0; asanopts=(); safeptr=0
 dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
@@ -341,6 +345,8 @@ while [ $# -gt 0 ]; do
     --backend=*) backend=${1#--backend=}; backend_explicit=1 ;;
     --obfuscate-kernels) obfuscate=1 ;;
     -fsanitize=address) asan=1 ;;
+    -fsafe-pointers) safeptr=1 ;;
+    -fno-safe-pointers) safeptr=0 ;;
     -fno-sanitize=address) asan=0 ;;
     -fsanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=address; docs/notes/asan.md)" >&2; exit 2 ;;
     -fno-omit-frame-pointer|-fomit-frame-pointer) asanopts+=("$1") ;;   # asan's usual companions; they go to the C compile
@@ -597,6 +603,13 @@ if [ -n "$sanitize" ]; then
   export NFCXX_IR_SANITIZE=$sanitize
   backend=pathb
 fi
+if [ $safeptr = 1 ]; then
+  # The checks are emitted from the Path B IR (docs/notes/safe-pointers.md), and the runtime replaces malloc and free.
+  [ $freestanding = 0 ] || { echo "nfcxx: -fsafe-pointers needs Path B, which compiles hosted programs only" >&2; exit 2; }
+  [ $asan = 0 ] || { echo "nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one" >&2; exit 2; }
+  export NFCXX_SAFE_POINTERS=1
+  backend=pathb
+fi
 [ "${NFCXX_PATH:-}" != b ] || backend=pathb   # NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md)
 [ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
 case $backend in
@@ -712,7 +725,8 @@ if [ $backend = pathb ]; then
   t=$(trace_start)
   # libnfcxxld.a: the long double helpers and nothing else (scripts/pathb-ldrt, docs/notes/pathb-longdouble.md)
   ldrt=$("$root/scripts/pathb-ldrt")
-  cc ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  sprt=(); [ $safeptr = 0 ] || [ $compile_only = 1 ] || sprt=("$("$root/scripts/safeptr-rt")" -pthread)   # first: its malloc wins
+  cc ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   trace_end "$t" "link" pathb
   exit 0
 fi

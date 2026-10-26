@@ -12,6 +12,7 @@ name: Path B
 #   tests/wasm/run.sh        the wasm emitter (scripts/pathb-wasm-emit.rb): IR -> wasm, run under node, against EXPECT
 #   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
 #   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
+#   tests/safeptr/run.sh     -fsafe-pointers (lib/safeptr, docs/notes/safe-pointers.md), and the Path B probes under it
 #   tests/mruby/run.sh       the mruby ports against their Python oracles, with the Path B parts enabled
 on:
   push:
@@ -45,6 +46,9 @@ on:
       - "tests/ehshim/**"
       - "lib/ehshim/**"
       - "scripts/ehshim"
+      - "tests/safeptr/**"
+      - "lib/safeptr/**"
+      - "scripts/safeptr-rt"
       - "nfcxx"
       - "tests/realworld/tinyxml2_main.cpp"
       - ".github/workflows/pathb.yml"
@@ -78,6 +82,9 @@ on:
       - "tests/ehshim/**"
       - "lib/ehshim/**"
       - "scripts/ehshim"
+      - "tests/safeptr/**"
+      - "lib/safeptr/**"
+      - "scripts/safeptr-rt"
       - "nfcxx"
       - "tests/realworld/tinyxml2_main.cpp"
       - ".github/workflows/pathb.yml"
@@ -167,6 +174,8 @@ jobs:
             run: FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
           - name: EH shim (gcc, qbe and Path B)
             run: tests/ehshim/run.sh
+          - name: Safe pointers (-fsafe-pointers, with the sweep of the Path B probes)
+            run: SAFEPTR_SWEEP=1 tests/safeptr/run.sh
           - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
             run: |
               sudo apt-get install -y -q spirv-tools libvulkan-dev mesa-vulkan-drivers
