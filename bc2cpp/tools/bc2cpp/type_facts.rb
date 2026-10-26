@@ -156,7 +156,7 @@ module TypeFacts
     mono = defs_of_name.size == 1
     params = (1..mand).map { |k| param_row(ctx, gen, d, irep, k, names[k - 1], mono, defs_of_name.size, sites) }
     optional_params = (1..opt).map do |position|
-      register = (mand + position).to_s
+      register = mand + position
       types = ctx.signature_contracts&.ir_optional_types&.dig(d.irep, register)
       inferred = (types || !gen.respond_to?(:bytecode_ir_optional_argument_classes)) ? nil : gen.bytecode_ir_optional_argument_classes(d, mand + position)
       { 'pos' => mand + position, 'name' => names[mand + position - 1].to_s,
