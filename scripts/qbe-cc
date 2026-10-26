@@ -218,6 +218,9 @@ qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_app
 # -mno-sse: qbe -n moves integers between stack slots through %rax, not %xmm15 (a commit of the fork, 3rd/qbe)
 qbenofp=(); [ $nofp = 0 ] || qbenofp=(-n)
 [ $nounwind = 0 ] || qbenofp+=(-U)
+# NFCXX_QBE_ABS=1 (qbe-try, for the kernel's .head.text): global addresses are absolute immediates, as gcc's kernel model
+# writes them, and loads of globals are rip-relative (qbe -A, a commit of the fork, 3rd/qbe)
+[ -z "${NFCXX_QBE_ABS:-}" ] || qbenofp+=(-A)
 [ $pic = 0 ] || qbenofp+=(-p)   # -fPIC: thread-local symbols by initial exec
 "$qbe" ${qbetarget[@]+"${qbetarget[@]}"} ${qbenofp[@]+"${qbenofp[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
 trace_end "$t" "qbe (IL to assembly)" qbe-backend
