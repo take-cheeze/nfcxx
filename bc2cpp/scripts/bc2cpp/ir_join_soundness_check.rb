@@ -101,7 +101,7 @@ RUBY
   end
   check.call('mrbc splat of a join: both sends are n=* splats (fixture sanity)', splats.size == 2)
   check.call('mrbc splat of a join: refused, so the splat stays dynamic',
-             splats.all? { |irep, idx| gen.splat_array_literal_regs(irep, idx, (irep.instructions[idx].reg.to_i + 1).to_s).nil? })
+             splats.all? { |irep, idx| gen.splat_array_literal_regs(irep, idx, irep.instructions[idx].reg.to_i + 1).nil? })
 end
 
 # --- 2. Literal-argument guards at a join ------------------------------------------------------------------------
