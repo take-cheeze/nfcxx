@@ -16,6 +16,7 @@ source "$(dirname "$0")/trace.sh"
 
 compile=0 asm=0 pic=0 out="" src="" cppflags=() asflags=()
 kcproc=() nofp=0 nounwind=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
+i386=0 regparm=0 m16=0        # the kernel's real-mode code (-m16 -march=i386 -mregparm=3): cproc and QBE's i386 targets
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   a=${args[i]}
@@ -42,6 +43,9 @@ for ((i = 0; i < ${#args[@]}; i++)); do
           -mno-sse|-mno-sse2|-mno-80387|-msoft-float) nofp=1 ;;
           -fno-asynchronous-unwind-tables) nounwind=1 ;;   # qbe -U: no .cfi directives, so no .eh_frame
           -fasynchronous-unwind-tables) nounwind=0 ;;
+          -m16) m16=1; i386=1 ;;
+          -march=i386) i386=1 ;;
+          -mregparm=3) regparm=1 ;;
         esac
       fi ;;
     *.c) src=$a ;;
@@ -188,6 +192,15 @@ if [ $macos = 0 ] && [ -z "${NFCXX_CIL:-}" ]; then asmarg=(-a "$tmp/asm.s"); : >
 # C23), so it is passed unless the standard is C23.
 c23=0
 for a in ${cppflags[@]+"${cppflags[@]}"}; do case $a in -std=c23|-std=c2x|-std=gnu23|-std=gnu2x) c23=1 ;; -std=*) c23=0 ;; esac; done
+# the i386 targets (the kernel's real-mode boot code): cproc's ILP32 layout, with the calling convention QBE writes; the
+# regparm name also tells cproc's volatile helpers the convention. The object is 32-bit (cc -m32 below).
+qbei386=(); cc32=()
+if [ $i386 = 1 ]; then
+  if [ $regparm = 1 ]; then cprocarg=(-t i386_regparm3); qbei386=(-t i386_regparm3)
+  else cprocarg=(-t i386); qbei386=(-t i386); fi
+  [ $m16 = 0 ] || qbei386+=(-m16)
+  cc32=(-m32)
+fi
 [ $c23 = 1 ] || cprocarg+=(-K)
 "$cproc" ${cprocarg[@]+"${cprocarg[@]}"} ${kcproc[@]+"${kcproc[@]}"} ${asmarg[@]+"${asmarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
@@ -201,6 +214,7 @@ fi
 t=$(trace_start)
 # A cross check from a non-Darwin host: QBE's default target there is ELF, so the Apple arm64 target is named.
 qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_apple); fi
+[ $i386 = 0 ] || qbetarget=("${qbei386[@]}")
 # -mno-sse: qbe -n moves integers between stack slots through %rax, not %xmm15 (a commit of the fork, 3rd/qbe)
 qbenofp=(); [ $nofp = 0 ] || qbenofp=(-n)
 [ $nounwind = 0 ] || qbenofp+=(-U)
@@ -248,6 +262,6 @@ t=$(trace_start)
 if [ $asm = 1 ]; then
   if [ "$out" = - ]; then cat "$tmp/out.s"; else cp "$tmp/out.s" "${out:-${src%.c}.s}"; fi
 else
-  ${CCBIN[@]+"${CCBIN[@]}"} -c "${asflags[@]+"${asflags[@]}"}" -o "${out:-${src%.c}.o}" "$tmp/out.s"
+  ${CCBIN[@]+"${CCBIN[@]}"} ${cc32[@]+"${cc32[@]}"} -c "${asflags[@]+"${asflags[@]}"}" -o "${out:-${src%.c}.o}" "$tmp/out.s"
 fi
 trace_end "$t" "cc -c (assemble)" qbe-backend

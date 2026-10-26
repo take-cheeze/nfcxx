@@ -524,7 +524,11 @@ EOC
       elif grep -q "not supported" <<<"$out"; then ok "kernel mode: attribute $at refused"
       else bad "kernel mode: attribute $at refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     done
-    NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
+    NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m32" "m32" -m32 -c util.c -o rej.o
+    # the kernel's real-mode code (-m16 -march=i386 -mregparm=3): a 32-bit object, the i386 targets
+    if NFCXX_QBE_KERNEL=1 "$nfcc" -m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2 -fno-pic -ffreestanding -c util.c -o m16.o 2>/dev/null &&
+       readelf -h m16.o | grep -q "Intel 80386"; then ok "kernel mode: -m16 compiles to an i386 object (qbe i386_regparm3)"
+    else bad "kernel mode: -m16 compiles to an i386 object (qbe i386_regparm3)" "$(NFCXX_QBE_KERNEL=1 "$nfcc" -m16 -march=i386 -mregparm=3 -c util.c -o m16.o 2>&1 | head -2 | tr '\n' ' ')"; fi
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
     cat > kvol.c <<'EOC'

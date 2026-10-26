@@ -37,6 +37,8 @@ for p in qbe cproc; do
   rm -rf "$root/build/$p"; mkdir -p "$root/build"
   cp -r "$root/3rd/$p" "$root/build/$p"
   rm -rf "$root/build/$p/.git"
+  # the submodule's own build products (left by a build in 3rd/) are stale for these sources: make rebuilds them
+  find "$root/build/$p" \( -name '*.o' -o -name "$p" -o -name cproc-qbe -o -name cproc \) -type f -delete
 done
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
