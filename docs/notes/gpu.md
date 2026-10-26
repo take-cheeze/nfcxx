@@ -103,6 +103,13 @@ placeholders, and each device module is registered with the runtime.
 - **Zero bytes of an initializer** are stored no wider than the object's alignment (`zero_tail.cu`), and the
   runtime's queries on a kernel's host address (`cudaOccupancyMaxActiveBlocksPerMultiprocessor`,
   `cudaFuncGetAttributes`) look the kernel up first (`func_query.cu`).
+- **Float to integer** in device code is the GPU's conversion, as nvcc emits it (`pathb-ptx-emit --f2i=convert`, which
+  the driver passes): `cvt.rzi` saturates, NaN gives 0 up to 32 bits, and a 1- or 2-byte target converts to 32 bits
+  and keeps the low bytes (`intrinsics/cf2i_convert.cu`, its expected values from nvcc). The IR's range check, which
+  traps, is the emitter's default. quantize_mmq_q8_1 rounds NaN into a `char4` for a block of zeros (127 / 0), and
+  the trap was the mmq path's "unspecified launch failure".
+- **Half bits**: `__half_as_ushort`, `__ushort_as_half`, `__half_as_short` and `__short_as_half` read and write the
+  half's bits. A cast between `__half` and an integer converts the value, as in `cuda_fp16.h`.
 
 ## CUDA source (`.cu`)
 

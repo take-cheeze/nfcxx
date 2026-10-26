@@ -26,6 +26,11 @@ struct RegInfo {
   Ty ty;
 };
 
+// --f2i=convert (the .cu device path): cf2i is the GPU's conversion, as nvcc emits it (cvt.rzi saturates, NaN gives 0
+// up to 32 bits; a 1- or 2-byte target converts to 32 bits and keeps the low bytes), not the range check that traps. CUDA
+// code relies on it (llama.cpp's quantize_mmq_q8_1 converts NaN for an all-zero block).
+extern bool g_f2i_convert;
+
 // Ruby's Float#to_s (shortest round-trip digits; fixed notation for decimal exponents -3..16, else d.ddde+XX).
 std::string ruby_float_s(double d);
 
