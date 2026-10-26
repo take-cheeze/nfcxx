@@ -224,7 +224,7 @@ class CodeGen
     when :SEND, :SEND0
       return nil unless insn.sym == 'yield' && idx
 
-      dest = (insn.reg.to_i - reg_offset).to_s
+      dest = insn.reg - reg_offset
       return nil unless fiber_const_receiver?(irep, idx, dest)
 
       resumable_yield_site(insn)
