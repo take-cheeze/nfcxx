@@ -1,0 +1,10 @@
+# Builds build/cuda-rewrite (the C++ port of scripts/cuda-rewrite.rb). See PORTING.md. Run: ninja -C tools/cuda-rewrite
+# CXX and CXXFLAGS come from the environment, with the defaults of the Makefile this replaces.
+ninja_required_version = 1.7
+root = ../..
+
+rule cxx
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -o $out.tmp $in && mv -f $out.tmp $out
+  description = CXX $out
+
+build $root/build/cuda-rewrite: cxx cuda_rewrite.cpp | tables.inc

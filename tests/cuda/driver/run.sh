@@ -67,7 +67,7 @@ if command -v cmake >/dev/null; then
   printf '#!/bin/sh\necho "Cuda compilation tools, release 12.9, V12.9.86"\n' > "$fake/bin/nvcc"; chmod +x "$fake/bin/nvcc"
   for m in auto libcuda; do
     b=$tmp/cmake-$m
-    if out=$(env -u CUDA_HOME NFCXX_CUDA_DRIVER=$m cmake -S $d/cmake -B "$b" -DCMAKE_C_COMPILER="$PWD/nfcc" -DCUDAToolkit_ROOT="$fake" 2>&1 &&
+    if out=$(env -u CUDA_HOME NFCXX_CUDA_DRIVER=$m cmake -S $d/cmake -B "$b" -G Ninja -DCMAKE_C_COMPILER="$PWD/nfcc" -DCUDAToolkit_ROOT="$fake" 2>&1 &&
              env -u CUDA_HOME NFCXX_CUDA_DRIVER=$m cmake --build "$b" 2>&1); then
       n=$(readelf -dW "$b/real" | grep NEEDED)
       case $m:$n in
