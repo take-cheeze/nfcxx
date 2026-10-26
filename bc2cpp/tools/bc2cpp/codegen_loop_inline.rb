@@ -519,6 +519,57 @@ class CodeGen
     out
   end
 
+  # RANGE_MAP_INLINE: the inlined loop for a recognize_range_map_regions region (nil if not clean):
+  # emit_range_each_inline's counter loop carrying emit_collect_inline's map accumulator, `next` value and `break`
+  # flag. The element is pushed before the bound check, so the last one is collected too. The Integer test is
+  # emit_range_each_inline's tripwire: the recognizer proved two literal bounds.
+  def emit_range_map_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv = "r#{dest_reg}"
+    param_reg = 1 + offset
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_rmap_iter_#{addr}"
+    break_label = "Lbc2cpp_rmap_end_#{addr}"
+    result_var = "bc2cpp_rmap_v_#{addr}"
+    broke = "bc2cpp_rmap_broke_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: broke, elem_reg: '1')
+    return nil unless body
+
+    counter = "bc2cpp_rmap_i_#{addr}"
+    last = "bc2cpp_rmap_z_#{addr}"
+    excl = "bc2cpp_rmap_x_#{addr}"
+    acc = "bc2cpp_rmap_acc_#{addr}"
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_range_p', recv, 'Range receiver for inlined #map')
+    out << "    mrb_value bc2cpp_rmap_b_#{addr} = mrb_range_beg(M, #{recv});\n"
+    out << "    mrb_value bc2cpp_rmap_e_#{addr} = mrb_range_end(M, #{recv});\n"
+    out << "    if (!mrb_integer_p(bc2cpp_rmap_b_#{addr}) || !mrb_integer_p(bc2cpp_rmap_e_#{addr})) { " \
+           "#{inline_raise('TypeError', 'expected Integer Range bounds for inlined #map')} }\n"
+    out << "    mrb_int #{last} = mrb_integer(bc2cpp_rmap_e_#{addr});\n"
+    out << "    mrb_bool #{excl} = mrb_range_excl_p(M, #{recv});\n"
+    out << "    mrb_value #{acc} = mrb_ary_new(M);\n"
+    out << "    mrb_bool #{broke} = FALSE;\n"
+    out << "    for (mrb_int #{counter} = mrb_integer(bc2cpp_rmap_b_#{addr}); " \
+           "#{excl} ? #{counter} < #{last} : #{counter} <= #{last};) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    out << "      r#{param_reg} = FIXABLE(#{counter}) ? mrb_fixnum_value(#{counter}) : mrb_int_value(M, #{counter});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "      mrb_ary_push(M, #{acc}, #{result_var});\n"
+    out << "      if (#{counter} >= #{last}) break;\n"
+    out << "      ++#{counter};\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "    if (!#{broke}) r#{dest_reg} = #{acc};\n"
+    out << "  }\n"
+    out
+  end
+
   # MAP_BLOCK_SUPPORT: the inlined loop for a collection-block region (nil if not
   # clean). Differences from emit_each_inline:
   #   - result: map pushes each yielded value into a fresh accumulator (the
