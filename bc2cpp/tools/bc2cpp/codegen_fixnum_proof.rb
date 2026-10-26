@@ -155,7 +155,7 @@ class CodeGen
   # A LOADI* literal, or nil: the second whitespace-separated token
   # (`LOADI32\tR1\t9999999\t; R1:x`). LOADINEG prints the negated value.
   def loadi_literal(insn)
-    BytecodeIR::OperandModel.imm_operand(insn)&.to_i
+    BytecodeIR::OperandModel.imm_operand(insn)
   end
 
   def loadi_proven_fixnum?(insn)
@@ -248,7 +248,9 @@ class CodeGen
         next guarded_integer_binary_range(insn.op, left, right) ||
           (insn.op == :MUL ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
       when :ADDI, :SUBI
-        literal = BytecodeIR::OperandModel.imm_operand(insn).to_i
+        literal = BytecodeIR::OperandModel.imm_operand(insn)
+        next nil if literal.nil?
+
         left = guarded_game_integer_range(irep, j, cur, owner_def, depth + 1)
         next nil unless left
 
