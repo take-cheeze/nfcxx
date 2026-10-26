@@ -77,9 +77,11 @@ kmake -s tinyconfig
   --enable DEVTMPFS --enable DEVTMPFS_MOUNT --enable MULTIUSER
 # SUSPEND=1: suspend to RAM (ACPI S3) and resume before the marker, so the real-mode wakeup code of arch/x86/realmode/rm
 # (built with CONFIG_ACPI_SLEEP) runs; qemu's PIIX4 power management has S3 on for it (see the qemu command below).
+# PCI: the DSDT's PCI root has operation regions the ACPI interpreter must initialize; without PCI it fails them
+# (AE_BAD_PARAMETER), and ACPI sleep states go with it.
 suspend=${SUSPEND:-}
 [ -z "$suspend" ] || "$src/scripts/config" --file "$out/.config" --enable ACPI --enable PM --enable SUSPEND \
-  --enable ACPI_SLEEP --enable PM_SLEEP --enable HIBERNATE_CALLBACKS
+  --enable ACPI_SLEEP --enable PM_SLEEP --enable HIBERNATE_CALLBACKS --enable PCI
 kmake -s olddefconfig
 kmake -s -j"$(nproc)" bzImage
 cp "$out/arch/x86/boot/bzImage" "$dir/bzImage-$tag"
