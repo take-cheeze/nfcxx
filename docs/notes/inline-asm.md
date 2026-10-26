@@ -53,7 +53,7 @@ or, when the asm clobbers them all (the kernel's `call_on_stack()`, which calls 
 callee-saved one the thunk preserves. Early-clobber (`&`) is automatically satisfied, since every operand has its own
 register and the values round-trip through the slot.
 
-## Supported (x86_64 only)
+## Supported (x86_64 only, and i386)
 
 - `__asm__` / `asm`, with or without `volatile` (every lowered asm is a call, which QBE never reorders or removes).
 - Output constraints `=r`, `+r`; input `r`; tied operands (`"0"`–`"9"`).
@@ -114,11 +114,28 @@ its target, so the kernel's `cmpxchg`, which switches on `sizeof(*ptr)`, has no 
 operand is 8 bytes wide (it would not even assemble: `%rsi` with a `b` suffix); asm after a `return` or `break` is
 dropped. QBE removes the unreachable blocks, and with them the calls of the thunks left out.
 
+## The i386 targets
+
+The same thunk model on `i386` (cdecl) and `i386_regparm3` (gcc's `-mregparm=3`, the kernel's real-mode boot code), with
+its 32-bit instructions:
+
+- The slot pointer arrives in `%eax` (regparm3) or at `4(%esp)` (cdecl), and the thunk moves it into its holder
+  register first. Callee-saved: `%ebx`, `%esi`, `%edi`, `%ebp`.
+- Registers: the eight i386 ones. `%esi` and `%edi` have no byte form, so a byte operand, a `q` constraint and a flag
+  output take `%eax`, `%ecx`, `%edx` or `%ebx`.
+- Operands of 8 bytes are refused. A memory operand's pointer is a word.
+- `%rip`-relative symbol operands are absolute on i386, as the code is non-PIC.
+- Anything outside this subset is refused, as on x86_64.
+
+`test/i386/asm.c` in the cproc fork checks fixed registers, byte and flag outputs, a clobbered `%ebx` (`cpuid`) and a
+memory operand against gcc `-m32`. The kernel's real-mode files (`arch/x86/boot`) use `in`/`out`, `movw %%fs`,
+`btl` with a flag output and `cpuid`; they compile through these thunks.
+
 ## Not yet supported (refused, never miscompiled)
 
 Each of these raises a compile error rather than quietly producing wrong code:
 
-- Any target other than x86_64; the CIL backend and Mach-O (`qbe-cc` withholds `-a` there).
+- Any target other than x86_64 and the i386 targets; the CIL backend and Mach-O (`qbe-cc` withholds `-a` there).
 - SSE/floating operands (`x`, `v`, `Yz`, …).
 - Operands in a file-scope `asm`.
 - More register operands than the free registers hold (one callee-saved register stays for the slot pointer).
