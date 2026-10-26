@@ -814,9 +814,22 @@ end
     name, argv = INDEX_CHAIN_ARGS.fetch(kind)
     # INDEX_CLOSED when every class that can answer has an arm; else the by-name tail.
     body = index_helper_closed_source(fast, name, argv) || index_helper_open_source(kind, fast, name, argv)
-    "// OUTLINED_INDEX_OPS -- #{kind.upcase}'s generic chain, see bc2cpp.rb's INDEX_HELPERS comment.\n" \
-      "static mrb_value bc2cpp_#{kind}(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
-      "#{body.gsub(/^(?=.)/, '  ')}}\n\n"
+    whole = "// OUTLINED_INDEX_OPS -- #{kind.upcase}'s generic chain, see bc2cpp.rb's INDEX_HELPERS comment.\n" \
+            "static mrb_value bc2cpp_#{kind}(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
+            "#{body.gsub(/^(?=.)/, '  ')}}\n\n"
+    return whole unless kind == 'getidx'
+
+    # GETIDX_INLINE_ARRAY: the exact-Array Fixnum read is inline at every call site (one compare and an element load),
+    # so a site no longer pays a call for the common case. Everything else stays in the outlined body.
+    "// GETIDX_INLINE_ARRAY -- exact Array and Fixnum index inline; other receivers take bc2cpp_getidx_slow.\n" \
+      "static mrb_value bc2cpp_getidx_slow(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
+      "#{body.gsub(/^(?=.)/, '  ')}}\n\n" \
+      "static inline mrb_value bc2cpp_getidx(mrb_state* M, mrb_value recv, mrb_value key) {\n" \
+      "  if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {\n" \
+      "    return bc2cpp_ary_entry(M, recv, mrb_integer(key));\n" \
+      "  }\n" \
+      "  return bc2cpp_getidx_slow(M, recv, key);\n" \
+      "}\n\n"
   end
 
   # The by-name helper: INDEX_CHAIN's tail (getidx, with the result in r0, the name compile_poly_small_n spells as
