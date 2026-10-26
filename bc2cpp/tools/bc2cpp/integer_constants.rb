@@ -370,7 +370,7 @@ module IntegerConstants
     return nil unless name && insn.argc == 1
 
     left = literal_value_kind(irep, j, cur, entries)
-    right = literal_value_kind(irep, j, (cur.to_i + 1).to_s, entries)
+    right = literal_value_kind(irep, j, cur.to_i + 1, entries)
     left && right ? [:arithmetic, name, left, right] : nil
   end
 

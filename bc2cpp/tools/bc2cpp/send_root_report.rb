@@ -198,7 +198,7 @@ module SendRootReport
         if cand
           # The pool was a candidate: the culprits are the values its call sites pass.
           sites, k = cand
-          via = sites.flat_map { |(sirep, sidx, srecv, _argc, _own)| send_root_culprits(sirep, sidx, (srecv + k).to_s, depth + 2) }
+          via = sites.flat_map { |(sirep, sidx, srecv, _argc, _own)| send_root_culprits(sirep, sidx, srecv + k, depth + 2) }
           next via.map { |m, kd, n, st| [m, "via_#{reason.split(':').first}_arg:#{kd}", n, st] } unless via.empty?
         end
         [['other', 'entry', d.reg.to_i.zero? ? 'self' : "arg#{d.reg}", reason]]
