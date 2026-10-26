@@ -492,6 +492,85 @@ class CodeGen
     regions
   end
 
+  # RANGE_MAP_INLINE: inline `(a..b).map { |i| BODY }` (and `a...b`) as emit_range_map_inline's counter loop. The
+  # receiver's dominating writer must be a RANGE_INC/RANGE_EXC of two Integer literals inside RANGE_MAP_BOUND, so the
+  # loop's Integer header never refuses and the counter stays a Fixnum on every target; the block takes one plain
+  # parameter; and BLOCK_CORE_DIRECT's proof (block_core_target) must find that `map` on a Range is core
+  # Enumerable#collect and `each` core Range#each, the bodies the loop follows (`ary.push(block.call(i))` for each i
+  # of Range#each's Integer path). BC2CPP_RANGE_MAP_INLINE=0 keeps the send.
+  RANGE_MAP_BOUND = 0x4000_0000
+
+  def recognize_range_map_regions(irep)
+    return [] unless ENV['BC2CPP_RANGE_MAP_INLINE'] != '0' && range_map_core?
+
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB], layout: named_layout('map')) do |insn, idx, block_insn, dest_reg, block_irep|
+      next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      next unless integer_range_literal?(irep, idx, dest_reg)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: 'map', elem_class: 'Integer' }
+    end
+    regions
+  end
+
+  # RANGE_MAP_INLINE, in a BLOCK_FALLBACK body (emit_proc_fallback_fn_body): the inlined loops of `block_irep`,
+  # [[region, code]]. Level 0 of the inlined block is the host function's own frame, as in a method; level n is the
+  # host's level n - 1, one of the frames it captured (inline_host_upvar_name). A block that nests another block or
+  # lambda (whose own capture levels this does not shift) or returns (which must leave the method, not the host
+  # cfunc) stays a nested region.
+  def fallback_range_map_inlines(block_irep, upvar_regs, d)
+    regions = recognize_range_map_regions(block_irep).reject do |region|
+      program = BytecodeIR.for(region[:block_irep])
+      %i[BLOCK LAMBDA RETURN_BLK].any? { |op| program.op?(op) }
+    end
+    return [] if regions.empty?
+
+    saved = @inline_fallback_host_upvars
+    @inline_fallback_host_upvars = upvar_regs
+    regions.filter_map { |region| (code = emit_range_map_inline(region, block_irep, d)) && [region, code] }
+  ensure
+    @inline_fallback_host_upvars = saved
+  end
+
+  # The host function's parameter for a level-`level` upvar of a body inlined into a BLOCK_FALLBACK function, or nil
+  # (see fallback_range_map_inlines; compile_insn's GETUPVAR names the same parameter).
+  def inline_host_upvar_name(level, upvar_idx)
+    key = [level - 1, upvar_idx]
+    upvar_var_name(*key) if @inline_fallback_host_upvars&.include?(key)
+  end
+
+  # Cached once the world it reads is there: an analysis pass compiles before the closed world is attached.
+  # The question is block_core_direct_wrap's for a literal-block send, asked with the `&block` callee shapes
+  # compile_send admits (codegen_arg_shapes.rb).
+  def range_map_core?
+    return @range_map_core unless @range_map_core.nil?
+    return false unless block_core_direct_enabled? && block_core_world && @native_name_sources
+
+    saved = @extended_callee_shapes
+    @extended_callee_shapes = true
+    chain = BlockCoreDirectFallback::RECEIVERS.fetch('Range')[:chain]
+    core = lambda do |name, owner, def_name|
+      target = block_core_target('Range', chain, name, 0)
+      target && target.core && target.owner == owner && target.name == def_name
+    end
+    @range_map_core = !!(core.call('map', 'Enumerable', 'collect') && core.call('each', 'Range', 'each'))
+  ensure
+    @extended_callee_shapes = saved
+  end
+
+  # The register's dominating writer at `idx` builds a Range from two Integer literals within RANGE_MAP_BOUND.
+  def integer_range_literal?(irep, idx, reg)
+    found = irep.walk_dominating_writers(idx - 1, reg, use: idx) { |insn, index| [insn, index] }
+    return false unless found && %i[RANGE_INC RANGE_EXC].include?(found[0].op)
+
+    range_insn, at = found
+    [range_insn.reg, range_insn.reg + 1].all? do |bound|
+      exact = exact_literal(irep, at, bound)
+      exact&.klass == :Integer && exact.value.is_a?(Integer) && exact.value.abs < RANGE_MAP_BOUND
+    end
+  end
+
   # INTERP_UNLOCK: Game::Interpreter#range returns a Range on every path (`a..b`
   # or `1..0`). A single exact Owner#name allowlist (SUPER_TARGETS style), so a
   # `range` method elsewhere never matches and a non-Range change to #range
@@ -817,6 +896,8 @@ class CodeGen
       upvar_idx, level = insn.upvar_ref
       if level.zero?
         "  r#{insn.reg.to_i + offset} = r#{upvar_idx};\n"
+      elsif (vname = inline_host_upvar_name(level, upvar_idx))
+        "  r#{insn.reg.to_i + offset} = *#{vname};\n"
       else
         "  #error unhandled opcode GETUPVAR -- not in this prototype's supported subset\n"
       end
@@ -824,6 +905,8 @@ class CodeGen
       upvar_idx, level = insn.upvar_ref
       if level.zero?
         "  r#{upvar_idx} = r#{insn.reg.to_i + offset};\n"
+      elsif (vname = inline_host_upvar_name(level, upvar_idx))
+        "  *#{vname} = r#{insn.reg.to_i + offset};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg.to_i + offset});\n"
       else
         "  #error unhandled opcode SETUPVAR -- not in this prototype's supported subset\n"
       end

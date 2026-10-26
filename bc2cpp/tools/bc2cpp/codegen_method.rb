@@ -26,6 +26,7 @@ class CodeGen
     InlineLoopPass.new(:recognize_hash_each_value_regions, :emit_hash_each_value_inline, :block_addr, true),
     InlineLoopPass.new(:recognize_each_key_regions, :emit_each_key_inline, :block_addr, true), # EACH_KEY_SUPPORT
     InlineLoopPass.new(:recognize_range_each_regions, :emit_range_each_inline, :block_addr, true), # INTERP_UNLOCK
+    InlineLoopPass.new(:recognize_range_map_regions, :emit_range_map_inline, :block_addr, false), # RANGE_MAP_INLINE
     # `&:sym` has no BLOCK instruction; its glue replaces the symbol load.
     InlineLoopPass.new(:recognize_sym_regions, :emit_sym_inline, :sym_addr, true), # EACH_BLOCK_SUPPORT
     InlineLoopPass.new(:recognize_collect_regions, :emit_collect_inline, :block_addr, true), # MAP_BLOCK_SUPPORT

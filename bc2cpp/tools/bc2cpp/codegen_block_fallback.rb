@@ -709,6 +709,14 @@ class CodeGen
     # uvenv(lv-1) is a different frame for each. Set here, before the nested
     # pass, so a child can derive its own level from it.
     @blk_param_level = @block_fallback_depth
+    # RANGE_MAP_INLINE: a counted `(a..b).map` in this body runs as a loop here, not as one nested cfunc call per
+    # element (fallback_range_map_inlines); claimed before the nested pass so it does not take the block.
+    fallback_range_map_inlines(block_irep, upvar_regs, d).each do |rregion, code|
+      next if nested_suppressed.include?(rregion[:block_addr]) || nested_suppressed.include?(rregion[:sendb_addr])
+
+      nested_suppressed << rregion[:block_addr] << rregion[:sendb_addr]
+      nested_glue_at[rregion[:block_addr]] = code
+    end
     recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs,
                                      blk_available: needs_blk).each do |nregion|
       # BLOCK_FALLBACK_RESCUE_SUPPORT: regions inside a rescue range belong to that
