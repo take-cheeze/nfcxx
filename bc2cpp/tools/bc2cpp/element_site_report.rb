@@ -26,7 +26,7 @@ module ElementSiteReport
   # scall:name (implicit self), upvar, fresh_lit, idx<..> (an element of the origin inside). A method
   # call is opaque here, whatever its name: only the index opcodes read an element.
   def element_origin(irep, idx, reg, depth = 0)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return ['refused'] unless defs
 
     defs.flat_map do |d|
@@ -115,8 +115,8 @@ module ElementSiteReport
   # and the numeric flow each know things the other does
   # not. nil when neither models the method.
   def element_value_mask(irep, idx, reg, owner_def)
-    exact = exact_flow_mask(irep, idx, reg.to_s)
-    numeric = numeric_raw_mask(irep, idx, reg.to_s, owner_def)
+    exact = exact_flow_mask(irep, idx, reg)
+    numeric = numeric_raw_mask(irep, idx, reg, owner_def)
     return exact || numeric unless exact && numeric
     return numeric if exact.anybits?(NumericFlow::OTHER)
     return exact if numeric.anybits?(NumericFlow::OTHER)

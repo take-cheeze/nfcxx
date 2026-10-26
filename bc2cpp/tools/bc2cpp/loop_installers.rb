@@ -192,7 +192,7 @@ module LoopInstallers
       @ireps = ireps
       @registry = registry
       @sites = sites
-      @regs = {}
+      @regs = Array.new(irep.nregs.to_i, OPAQUE)
       @consts = {}
     end
 
@@ -253,7 +253,7 @@ module LoopInstallers
       interp = Interp.new(@ireps, @consts, reached, definer: definer?(namespace))
       interp.iterate(insn.sym, recv, block)
       @regs[insn.reg.to_i] = recv
-      @regs.delete(insn.reg.to_i + 1)
+      @regs[insn.reg.to_i + 1] = OPAQUE
       Result.new(installs: interp.installs, sites: LoopInstallers.attr_sends(block.label, @ireps),
                  namespace: namespace)
     rescue Refused => e
@@ -325,7 +325,7 @@ module LoopInstallers
     # The operands of a constructor or call are consumed: a stale copy in a dead register must not be
     # mistaken for a live reference (poisoning it would poison the object it was built into).
     def consume(from, count)
-      count.times { |i| @regs.delete(from + i) }
+      count.times { |i| @regs[from + i] = OPAQUE }
     end
 
     # `ARRAY Ra n` takes Ra..Ra+n-1; the disassembly also calls `ARRAY2 Ra Rb c` (Rb..Rb+c-1) ARRAY.
@@ -425,7 +425,7 @@ module LoopInstallers
       first = prog.source_at(0)
       refuse('a block without plain parameters') unless first&.op == :ENTER && first.enter_fields[0] == args.size &&
                                                         first.enter_fields[1..].all?(&:zero?)
-      regs = {}
+      regs = Array.new(irep.nregs.to_i, OPAQUE)
       args.each_with_index { |v, i| regs[i + 1] = v }
       defines = []
       pc = 1

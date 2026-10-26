@@ -147,7 +147,7 @@ module RefineReport
       site = closed_world_site("r#{reg}", irep, row[:site], owner_def)
       existing = receiver_instances(site, row[:name]) if site
       states = call_facts_states(irep)
-      usable = states && reg < irep.nregs.to_i && !fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+      usable = states && reg < irep.nregs.to_i && !fixnum_proof_ctx(irep)[:upvars].include?(reg)
       facts = usable ? CallFacts::Flow.facts(states[row[:site]], reg).to_a : []
       fwd = refine_verdict(row, facts)
       single = refine_single(row, facts)

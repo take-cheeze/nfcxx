@@ -26,7 +26,7 @@ class CodeGen
     return EQQ_LITERAL_KINDS[literal.klass] || (literal.value && eqq_fixnum_kind(literal.value)) if literal
 
     # Both constant tables key bare names (a SETMCNST under its last segment).
-    name = irep.agreed_constant_name(idx, reg.to_s)
+    name = irep.agreed_constant_name(idx, reg)
     name && eqq_constant_kind(name.split('::').last)
   end
 

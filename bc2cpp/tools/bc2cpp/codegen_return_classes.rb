@@ -103,7 +103,7 @@ class CodeGen
 
       # SSEND reads self, not the previous contents of its result register.
       explicit = insn.dup
-      explicit.op = insn.op.to_s.delete_prefix('S')
+      explicit.op = BytecodeIR::Ops::SELF_SEND_TO_EXPLICIT.fetch(insn.op, insn.op)
       inputs = state.dup
       inputs[insn.reg.to_i] = @receiver
       @cg.return_class_send_mask(irep, index, explicit, inputs)
@@ -113,7 +113,7 @@ class CodeGen
       return super unless %i[SSEND SSEND0].include?(insn.op)
 
       explicit = insn.dup
-      explicit.op = insn.op.to_s.delete_prefix('S')
+      explicit.op = BytecodeIR::Ops::SELF_SEND_TO_EXPLICIT.fetch(insn.op, insn.op)
       inputs = state.dup
       inputs[insn.reg.to_i] = @receiver
       super(irep, index, explicit, inputs)
@@ -395,7 +395,7 @@ class CodeGen
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_with_op(*POOL_SELF_SEND_OPS) do |insn, _|
         next unless POOL_SELF_REBINDING_SENDS.include?(insn.sym)
-        next if insn.sym == 'define_method' && insn.op.to_s.end_with?('B')
+        next if insn.sym == 'define_method' && BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
 
         return "#{insn.sym} at #{irep.label}"
       end
@@ -634,7 +634,7 @@ class CodeGen
     return nil unless state
 
     oracle = return_class_table_oracle(irep)
-    mask = insn.op.to_s.end_with?('B') ? oracle.block_send_mask(irep, index, insn, state) : oracle.send_mask(irep, index, insn, state)
+    mask = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? oracle.block_send_mask(irep, index, insn, state) : oracle.send_mask(irep, index, insn, state)
     if (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::OTHER)) && %i[SEND SEND0].include?(insn.op)
       receiver = state[insn.reg.to_i]
       known = NUMERIC_SEND_OWNERS.keys.sum
@@ -741,7 +741,7 @@ class CodeGen
 
                                  # Keyword pairs (key, value) follow the positionals; the block is the slot after them.
                                  block = register + argc + 2 * nk.to_i + 1
-                                 BytecodeIR.all_writers_reaching?(body, index, block.to_s) { |_, writer| %i[LAMBDA BLOCK].include?(writer.op) }
+                                 BytecodeIR.all_writers_reaching?(body, index, block) { |_, writer| %i[LAMBDA BLOCK].include?(writer.op) }
                                })
   end
 
@@ -759,7 +759,7 @@ class CodeGen
 
   # The classes of a required positional that the value at +index+ still is (only its entry value reaches it), else nil.
   def yielded_param_classes(irep, index, register, param_classes)
-    defs = BytecodeIR.for(irep).reaching_definitions(index, register.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.for(irep).reaching_definitions(index, register, through_handlers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.all?(&:entry?)
 
     positions = defs.map { |df| df.reg.to_i }.uniq
@@ -796,7 +796,7 @@ class CodeGen
                                       next nil unless nk.is_a?(Integer)
 
                                       pairs = (0...nk.to_i).map do |k|
-                                        [literal_symbol_write(body, index, (register + argc + 1 + 2 * k).to_s), register + argc + 2 + 2 * k]
+                                        [literal_symbol_write(body, index, register + argc + 1 + 2 * k), register + argc + 2 + 2 * k]
                                       end
                                       next nil if pairs.any? { |key, _| key.nil? }
 
@@ -804,7 +804,7 @@ class CodeGen
                                       next Set[] if matches.empty? && optional
                                       next nil unless matches.size == 1
 
-                                      bytecode_ir_source_classes(body, index, matches.first.last.to_s)
+                                      bytecode_ir_source_classes(body, index, matches.first.last)
                                     })
   end
 
@@ -813,7 +813,7 @@ class CodeGen
     return nil unless @native_results_ready && @rc_scoped_ready
 
     @ir_call_graph_arguments ||= IrCallGraphTypes.collect(self, @registry.values.flatten, @ireps)
-    @ir_call_graph_arguments.dig(definition.irep, position.to_s)
+    @ir_call_graph_arguments.dig(definition.irep, position)
   end
 
   def numeric_oracle_pool_mask(irep, insn)
@@ -840,9 +840,9 @@ class CodeGen
   # Read-point facts retain slot invalidation and incoming-argument proofs.
   def bytecode_ir_source_classes(irep, index, reg)
     return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
-    return nil unless reg.to_s.match?(/\A\d+\z/) && reg.to_i < irep.nregs
+    return nil unless reg.is_a?(Integer) && reg < irep.nregs
 
-    bytecode_ir_mask_classes(return_class_states(irep)&.[](index)&.[](reg.to_i))
+    bytecode_ir_mask_classes(return_class_states(irep)&.[](index)&.[](reg))
   end
 
   def bytecode_ir_mask_classes(mask)
@@ -1050,7 +1050,7 @@ class CodeGen
 
     ancestor, creation = captured_local_frame(irep, level)
     return NumericFlow::OTHER unless ancestor && index < ancestor.nregs.to_i
-    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index.to_s)
+    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index)
 
     frame = contexts[ancestor.label]
     state = frame && frame[:states]&.[](creation)
@@ -1142,7 +1142,7 @@ class CodeGen
     return nil unless @rc_states && irep && idx && reg && @closed_world&.exact_instances_singleton_free?
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     # The one register CHECKED_POOL_EXACT is compiling under its class test.
     return @checked_pool_override[:klass] if @checked_pool_override && @checked_pool_override[:key] == [irep.label, idx, r]
@@ -1157,7 +1157,7 @@ class CodeGen
     return nil unless @rc_states && irep && idx && reg && @closed_world&.exact_instances_singleton_free?
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]

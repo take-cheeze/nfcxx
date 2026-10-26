@@ -25,20 +25,20 @@ module NativeIntArgs
     on = native_int_args_on? && static_constant_world?
     return false unless on || legacy
 
-    reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
+    reg = argv[position].to_s[/\Ar(\d+)\z/, 1]&.to_i
     return false unless reg
 
     shifted = unshift_proof_reg(reg.to_i, reg_offset)
     return false if shifted.nil?
 
-    return proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def) unless on
-    return true if fixnum_interval(irep, proof_idx, shifted.to_s, owner_def)
+    return proven_fixnum_operand?(irep, proof_idx, shifted, owner_def) unless on
+    return true if fixnum_interval(irep, proof_idx, shifted, owner_def)
 
     # A constant leaf is the interval's to prove: INTEGER_CONSTANT_PROOF's name scan misses a native definition
     # so it does not vouch for one here.
     @fixnum_proof_skip_constants = true
     begin
-      proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def)
+      proven_fixnum_operand?(irep, proof_idx, shifted, owner_def)
     ensure
       @fixnum_proof_skip_constants = false
     end
@@ -49,7 +49,7 @@ module NativeIntArgs
     return unless ENV['SKIP_UNSUPPORTED'] == '1' && irep && proof_idx && owner_def
 
     argv.each_index do |pos|
-      reg = argv[pos].to_s[/\Ar(\d+)\z/, 1]
+      reg = argv[pos].to_s[/\Ar(\d+)\z/, 1]&.to_i
       shifted = reg && unshift_proof_reg(reg.to_i, reg_offset)
       key = [:nint, irep.label, proof_idx, pos]
       id = "#{irep.label}:#{proof_idx}"
@@ -57,12 +57,12 @@ module NativeIntArgs
         NativeIntArgs.lines[key] = ['NINT', id, site, owner_def.owner, pos, 'substituted', '-', '-'].join("\t")
         next
       end
-      if proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def)
+      if proven_fixnum_operand?(irep, proof_idx, shifted, owner_def)
         NativeIntArgs.lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'PROVEN', '-', '-'].join("\t")
         next
       end
       why = []
-      if fixnum_interval(irep, proof_idx, shifted.to_s, owner_def, 0, why)
+      if fixnum_interval(irep, proof_idx, shifted, owner_def, 0, why)
         NativeIntArgs.lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'RANGE', '-', '-'].join("\t")
         next
       end
@@ -75,7 +75,7 @@ module NativeIntArgs
   end
 
   def native_int_arg_top(irep, proof_idx, reg)
-    insn = irep.source_writer(proof_idx - 1, reg.to_s)
+    insn = irep.source_writer(proof_idx - 1, reg)
     return 'param-or-none' unless insn
 
     op = insn.op

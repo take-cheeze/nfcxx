@@ -32,7 +32,7 @@ class CodeGen
       kind = insn.sym
       step = 1
       if kind == 'step'
-        step = step_loop_literal(irep, sendb_idx - 1, (dest_reg.to_i + 2).to_s)
+        step = step_loop_literal(irep, sendb_idx - 1, dest_reg.to_i + 2)
         next if step.nil? || step.zero?
       elsif kind == 'downto'
         step = -1
@@ -40,7 +40,7 @@ class CodeGen
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
                    bind_counter: mandatory_arity(block_irep) == 1, kind: kind, step: step,
-                   sendb_idx: sendb_idx, limit_reg: (dest_reg.to_i + 1).to_s }
+                   sendb_idx: sendb_idx, limit_reg: dest_reg.to_i + 1 }
     end
     regions
   end

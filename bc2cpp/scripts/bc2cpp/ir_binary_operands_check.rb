@@ -21,8 +21,8 @@ def snapshot(body)
     returns: program.exits.map { |e| program.return_sources(e.index, e.reg) },
     values: body.instructions.each_index.map do |index|
       (0...body.nregs).map do |reg|
-        [program.reaching_definitions(index, reg.to_s)&.map(&:to_a),
-         types.exact_at(index, reg.to_s)&.to_a]
+        [program.reaching_definitions(index, reg)&.map(&:to_a),
+         types.exact_at(index, reg)&.to_a]
       end
     end
   }
@@ -82,7 +82,13 @@ suite.compile(source) do |baseline, _, directory|
               %i[Integer Array].all? { |klass| facts.any? { |_, exact| exact&.first == klass } } &&
               facts.any? { |_, exact| exact.nil? })
   suite.check('fixture exercises reaching definitions with multiple incoming writers',
-              facts.any? { |definitions, _| definitions && definitions.size > 1 })
+                facts.any? { |definitions, _| definitions && definitions.size > 1 })
+  suite.check('registers are Integers internally (nil only when the op has no leading register)',
+              baseline.values.all? do |b|
+                b.instructions.all? do |i|
+                  (i.reg.nil? || i.reg.is_a?(Integer)) && i.regs.all?(Integer)
+                end
+              end)
   baseline.each do |label, body|
     suite.check("irep #{label}: cold IR queries agree with disassembly access forbidden",
                 snapshot(body) == snapshot(guarded.fetch(label)))

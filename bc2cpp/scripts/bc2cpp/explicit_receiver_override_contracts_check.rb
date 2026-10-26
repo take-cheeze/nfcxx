@@ -64,12 +64,12 @@ def results(applied_world, subclasses:, method_missing_classes: Set.new, supercl
                                                            method_missing_classes: method_missing_classes, core_redefined: core_redefined)
   prepared_refusal = {}
   prepared_result = RbsSignatures.ir_types(applied_world, explicit_call_irep('use', sym), prepared: prepared, removed: removed)
-                                 .fact_at(2, '1', refusal: prepared_refusal)
+                                 .fact_at(2, 1, refusal: prepared_refusal)
   direct_refusal = {}
   direct_result = RbsSignatures.ir_types(applied_world, explicit_call_irep('use', sym), **world, subclasses: subclasses,
                                                                                  method_missing_classes: method_missing_classes,
                                                                                  core_redefined: core_redefined, removed: removed)
-                                .fact_at(2, '1', refusal: direct_refusal)
+                                .fact_at(2, 1, refusal: direct_refusal)
   [prepared_result, direct_result, direct_refusal]
 end
 
@@ -80,7 +80,7 @@ end
 bounded = ->(klass) { klass == 'Base' ? %w[Base Child] : nil }
 base_greet = { ['Base', 'greet'] => Set[:Symbol] }
 child_greet = { ['Child', 'greet'] => Set[:Integer] }
-declared_base = { '1' => Set[:Base] }
+declared_base = { 1 => Set[:Base] }
 
 # (a) Override: Child#greet returns Integer, and a Base-declared receiver may be a Child.
 overridden = applied(ir_methods: [['Base', 'greet'], ['Child', 'greet']], returns: base_greet.merge(child_greet),
@@ -110,7 +110,7 @@ check('method_missing subclass makes the receiver unbounded (untyped)', declared
 core_array = ->(klass) { klass == 'Array' ? %w[Array] : nil }
 core_array_child = ->(klass) { { 'Array' => %w[Array Child], 'Child' => %w[Child] }[klass] }
 array_size = { ['Array', 'size'] => Set[:Integer] }
-declared_array = { '1' => Set[:Array] }
+declared_array = { 1 => Set[:Array] }
 
 # (a) No program subclass: Array#size keeps the core Integer.
 core_plain = applied(ir_methods: [['Array', 'size']], returns: array_size, owner: 'Base', arg_types: declared_array)
@@ -146,7 +146,7 @@ check('core root redefined by the program records call_contract_missing', direct
 
 # (e) Object has core subclasses (Array, Hash, ...), so an instance of one is a receiver the program does not list.
 object_size = applied(ir_methods: [['Object', 'size']], returns: { ['Object', 'size'] => Set[:Integer] }, owner: 'Base',
-                      arg_types: { '1' => Set[:Object] })
+                      arg_types: { 1 => Set[:Object] })
 object_bounded = ->(klass) { klass == 'Object' ? %w[Object] : nil }
 _, object_direct, object_refusal = results(object_size, subclasses: object_bounded, superclass_of: CORE_HIERARCHY, sym: 'size')
 check('core ancestor with core subclasses (Object) is untyped', declared_classes(object_direct).nil?)

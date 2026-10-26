@@ -33,22 +33,22 @@ puts '-- join of an ivar and self (host)'
 joined = irep_of([insn(0, :GETIV, "R2\t@data"), insn(1, :JMPNOT, "R1\t3"), insn(2, :LOADSELF, "R2\t(R2)"),
                   insn(3, :GETIDX, "R3\t(R2)")])
 check.call('a receiver that is @data on one path is not a game-variables receiver',
-           gen.game_variables_index_receiver?(joined, 3, '2', owner) == false)
+           gen.game_variables_index_receiver?(joined, 3, 2, owner) == false)
 
 puts '-- straight-line self (host)'
 straight = irep_of([insn(0, :LOADSELF, "R2\t(R2)"), insn(1, :GETIDX, "R3\t(R2)")])
 check.call('a straight-line self receiver is a game-variables receiver',
-           gen.game_variables_index_receiver?(straight, 1, '2', owner) == true)
+           gen.game_variables_index_receiver?(straight, 1, 2, owner) == true)
 
 puts '-- join of self with self (host)'
 both_self = irep_of([insn(0, :LOADSELF, "R2\t(R2)"), insn(1, :JMPNOT, "R1\t3"), insn(2, :LOADSELF, "R2\t(R2)"),
                      insn(3, :GETIDX, "R3\t(R2)")])
 check.call('self on every path stays a game-variables receiver',
-           gen.game_variables_index_receiver?(both_self, 3, '2', owner) == true)
+           gen.game_variables_index_receiver?(both_self, 3, 2, owner) == true)
 
 puts '-- no writer in the body (host)'
 entry = irep_of([insn(0, :GETIDX, "R3\t(R2)")])
-check.call('a receiver from the frame entry is not proven', gen.game_variables_index_receiver?(entry, 0, '2', owner) == false)
+check.call('a receiver from the frame entry is not proven', gen.game_variables_index_receiver?(entry, 0, 2, owner) == false)
 
 if failures.empty?
   puts 'game_variables_receiver_check: all checks passed'

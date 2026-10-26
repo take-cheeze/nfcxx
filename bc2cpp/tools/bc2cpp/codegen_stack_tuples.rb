@@ -211,7 +211,7 @@ class CodeGen
     verdict = analyzer.creation(irep, idx)
     return refuse(verdict.reason || :escapes) if verdict.escapes?
 
-    tracked = verdict.tracked.map { |reg| reg.to_s.to_i }.to_set
+    tracked = verdict.tracked.map { |reg| reg.to_i }.to_set
     tracked.add(lead)
     params = stack_tuple_params(irep)
     return refuse(:parameter_register) if tracked.any? { |reg| reg.between?(1, params + 1) }
@@ -236,7 +236,7 @@ class CodeGen
       reads = stack_tuple_reads(insn, params)
       candidates = reads == :all ? tracked : reads.select { |reg| tracked.include?(reg) }
       candidates.each do |reg|
-        prods = BytecodeIR.producers(irep, j, reg.to_s, through_handlers: true)
+        prods = BytecodeIR.producers(irep, j, reg, through_handlers: true)
         return refuse("no_producers for r#{reg} read by #{insn.op} at #{j}") if prods.nil? || prods.empty?
 
         holding = prods.count { |p| !p.entry? && p.index == site.idx }
@@ -280,19 +280,19 @@ class CodeGen
   end
 
   def stack_tuple_no_arguments?(insn)
-    (insn.argc_operand.nil? || insn.argc == 0) && !insn.keyword_arguments? && !insn.op.to_s.end_with?('B')
+    (insn.argc_operand.nil? || insn.argc == 0) && !insn.keyword_arguments? && !BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
   end
 
   # True when every reaching definition of +reg+ at +at+ is an immediate: a LOADNIL/LOADTRUE/LOADFALSE/LOADSYM, or a
   # LOADI whose value is a fixnum.
   def stack_tuple_immediate_at?(irep, at, reg)
-    prods = BytecodeIR.producers(irep, at, reg.to_s, through_handlers: true)
+    prods = BytecodeIR.producers(irep, at, reg, through_handlers: true)
     return false if prods.nil? || prods.empty?
 
     prods.all? do |p|
       next false if p.entry?
       next true if STACK_TUPLE_IMMEDIATE_OPS.include?(p.op)
-      next false unless p.op.to_s.match?(BytecodeIR::LOADI_OP)
+      next false unless BytecodeIR::Ops::LOADI_OPS.include?(p.op)
 
       p.op != :LOADI32 || loadi_proven_fixnum?(p.insn)
     end
@@ -300,7 +300,7 @@ class CodeGen
 
   # The integer +reg+ holds at +at+ when exactly one literal load reaches it, else nil.
   def stack_tuple_literal_index(irep, at, reg)
-    prods = BytecodeIR.producers(irep, at, reg.to_s, through_handlers: true)
+    prods = BytecodeIR.producers(irep, at, reg, through_handlers: true)
     return refuse(:index_not_literal) unless prods&.size == 1 && !prods.first.entry?
 
     insn = prods.first.insn
@@ -334,7 +334,7 @@ class CodeGen
   def stack_tuple_reads(insn, params)
     op = insn.op
     lead = reg_int(insn.reg)
-    return [] if STACK_TUPLE_PURE_OPS.include?(op) || op.to_s.match?(BytecodeIR::LOADI_OP)
+    return [] if STACK_TUPLE_PURE_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
     return [] if %i[RETNIL RETTRUE RETFALSE].include?(op)
     return [0] if op == :RETSELF
     return (1..(params + 1)).to_a if op == :ARGARY
@@ -365,8 +365,8 @@ class CodeGen
 
     positional = insn.argc_operand.nil? ? 0 : (insn.positional_splat? ? 1 : insn.argc.to_i)
     kw = !insn.keyword_arguments? ? 0 : 2 * insn.keyword_argc.to_i
-    top = lead + positional + kw + (insn.op.to_s.end_with?('B') ? 1 : 0)
-    (insn.op.to_s.start_with?('SS') ? [] : [lead]) + (lead + 1..top).to_a
+    top = lead + positional + kw + (BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? 1 : 0)
+    BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? [] : [lead] + (lead + 1..top).to_a
   end
 
   def array_reads(insn, lead)
@@ -377,7 +377,7 @@ class CodeGen
   end
 
   def reg_int(reg)
-    reg.nil? ? nil : reg.to_s.to_i
+    reg.nil? ? nil : reg.to_i
   end
 
   # Always nil. BC2CPP_STACK_TUPLES_REPORT=1 prints why the ARRAY under analysis (@stack_tuple_where) is not placed.

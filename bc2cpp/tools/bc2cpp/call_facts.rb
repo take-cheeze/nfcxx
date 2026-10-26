@@ -493,7 +493,7 @@ module CallFacts
       out = dup_state(state)
       if CALLS.include?(op)
         names = state[1][state[0][a]]
-        names = ((names || []) | [insn.sym]).sort.freeze if REFINING.include?(op) && a.positive? && !opaque.include?(a.to_s) && insn.sym
+        names = ((names || []) | [insn.sym]).sort.freeze if REFINING.include?(op) && a.positive? && !opaque.include?(a) && insn.sym
         kept = (0...n).select { |k| state[0][k] == state[0][a] && k < a }
         clobber!(out, a, n)
         out[1][out[0][kept.first]] = names unless kept.empty?
@@ -502,7 +502,7 @@ module CallFacts
       case op
       when :MOVE
         src = insn.regs[1].to_i
-        if src < n && src != a && !opaque.include?(a.to_s) && !opaque.include?(src.to_s)
+        if src < n && src != a && !opaque.include?(a) && !opaque.include?(src)
           attach!(out, a, src)
         else
           detach!(out, a)

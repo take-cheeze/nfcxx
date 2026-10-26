@@ -100,8 +100,8 @@ def real_candidate(methods, gen, owner, name)
 end
 
 set = lambda { |reg| StubInsn.new(:SETIV, :x, [reg]) }
-get = StubInsn.new(:GETIV, :x, ['1'])
-load_nil = StubInsn.new(:LOADNIL, nil, ['2'])
+get = StubInsn.new(:GETIV, :x, [1])
+load_nil = StubInsn.new(:LOADNIL, nil, [2])
 
 # The reported case: #set stores, #get reads, and nothing assures that #get runs after a store.
 gen = FakeGen.new

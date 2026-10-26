@@ -418,7 +418,7 @@ class CodeGen
 
     allowed = IVAR_SETTER_SLOT_TYPES.fetch(type)
     untyped = here.any? do |(irep, idx, recv, _argc, _own)|
-      !allowed.include?(IvarLayout.trace_type(irep, idx, (recv + 1).to_s, {}, nil, 0, nil, nil, @registry,
+      !allowed.include?(IvarLayout.trace_type(irep, idx, recv + 1, {}, nil, 0, nil, nil, @registry,
                                               @integer_constants, nil))
     end
     'attr_writer called with an untyped value' if untyped

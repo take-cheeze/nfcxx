@@ -127,7 +127,7 @@ class CodeGen
 def frozen_table_exact_class(irep, idx, reg)
   return nil unless @frozen_tables && @closed_world&.exact_instances_singleton_free?
 
-  mask = numeric_raw_mask(irep, idx, reg.to_s, true)
+  mask = numeric_raw_mask(irep, idx, reg, true)
   return nil unless mask.is_a?(Integer) && mask.positive? && (mask & ~@frozen_tables.mask).zero?
 
   containers = []
@@ -196,7 +196,7 @@ end
 
     base = lit.reg.to_i
     stride = container == :array ? 1 : 2
-    slot_regs = (0...n).map { |k| (base + stride * k + (container == :array ? 0 : 1)).to_s }
+    slot_regs = (0...n).map { |k| base + stride * k + (container == :array ? 0 : 1) }
     slots = slot_regs.map { |r| frozen_table_slot_mask(irep, at, r) }
     keys = container == :hash ? frozen_table_hash_keys(irep, at, base, n) : nil
     registry.intern(container, slots, keys)
@@ -205,7 +205,7 @@ end
   # [literal op, its index, container] when the `freeze` at SEND0 +idx+ is applied to a single ARRAY/HASH
   # op right before it (same register), else nil. The shape and a frozen-literal slot both need it.
   def frozen_table_freeze_literal(irep, idx, insn)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     at = defs.first.index
@@ -240,13 +240,13 @@ end
 
   # The literal Integer or Symbol register +reg+ holds when instruction +at+ reads it, else nil.
   def frozen_table_literal_key(irep, at, reg)
-    defs = BytecodeIR.reaching_definitions(irep, at, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, at, reg, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)
     return writer.sym&.to_sym if writer.op == :LOADSYM
 
-    writer.op.to_s.start_with?('LOADI') ? frozen_table_loadi(writer) : nil
+    BytecodeIR::Ops::LOADI_OPS.include?(writer.op) ? frozen_table_loadi(writer) : nil
   end
 
   # The Integer a LOADI* op loads: `LOADI_n` / `LOADI__1` print it in parentheses, the others as an operand.

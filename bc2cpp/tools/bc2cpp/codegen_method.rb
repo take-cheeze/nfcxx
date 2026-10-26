@@ -274,7 +274,7 @@ class CodeGen
     step_body_start = nil
     if resumable
       # RESUMABLE_ENTRY: the frame, registers and dispatch open the function once the body has
-      # said how many registers it uses (resumable_step_function).
+      # said how many registers it uses(resumable_step_function).
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'is initialize') if d.name == 'initialize'
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'reads its block') if needs_blk_param || has_blk
 

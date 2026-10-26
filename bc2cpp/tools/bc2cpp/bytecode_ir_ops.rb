@@ -15,6 +15,8 @@ module BytecodeIR
     SEND_FAMILY = (SEND | %i[SENDV SENDVB SSENDV SSENDVB]).freeze
     # SEND plus SUPER: every op that dispatches a method by name.
     CALL = (SEND | [:SUPER]).freeze
+    # Self-send to explicit-send normalization (SSEND reads self, not R[a]).
+    SELF_SEND_TO_EXPLICIT = { SSEND: :SEND, SSEND0: :SEND0 }.freeze
     # Every op whose callee frame starts at R(a) and may overwrite R(a) and above.
     CALLEE_FRAME = (CALL | %i[EXEC BLKCALL]).freeze
 # Sends that pass a block proc (the BLOCK instruction before them).
@@ -70,6 +72,9 @@ ZERO_ARG_SEND = Set[:SEND0, :SSEND0].freeze
                     :LOADI_5, :LOADI_6, :LOADI_7, :LOADI16, :LOADI32].freeze
     # The one-byte-immediate forms LOADI_0..LOADI_7 of the same table.
     LOADI_SLOT = Set[:LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5, :LOADI_6, :LOADI_7].freeze
+    # Slot value for each LOADI_SLOT opcode, avoiding Symbol -> String -> suffix -> Integer.
+    LOADI_SLOT_VALUE = { LOADI_0: 0, LOADI_1: 1, LOADI_2: 2, LOADI_3: 3,
+                         LOADI_4: 4, LOADI_5: 5, LOADI_6: 6, LOADI_7: 7 }.freeze
     # LOADI_SLOT plus LOADI16 and LOADI32: what /\ALOADI(?:_\d+|16|32)?\z/ matches among the table names.
     # LOADI8, LOADINEG and LOADI__1 are not in it.
     LOADI_SLOT_OR_WIDE = (LOADI_SLOT | %i[LOADI16 LOADI32]).freeze

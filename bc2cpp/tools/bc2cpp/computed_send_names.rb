@@ -55,7 +55,7 @@ module ComputedSendNames
   end
 
   def self.reaching(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     defs
@@ -160,7 +160,7 @@ end
 
       names = []
       (offset...count).step(stride) do |k|
-        defs = ComputedSendNames.reaching(irep, at, (first + k).to_s) or return nil
+        defs = ComputedSendNames.reaching(irep, at, first + k) or return nil
         defs.each do |definition|
           insn = BytecodeIR.for(irep).source_at(definition.index)
           return nil unless %i[LOADSYM SYMBOL].include?(insn.op)

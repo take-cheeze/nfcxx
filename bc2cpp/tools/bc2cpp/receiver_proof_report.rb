@@ -71,14 +71,14 @@ module ReceiverProofReport
   # Forced receiver class set of the one send being re-compiled (registers as the consumers ask: proof registers).
   def exact_flow_mask(irep, idx, reg)
     f = @rp_force
-    return f[:mask] if f && irep.label == f[:irep] && idx == f[:idx] && reg.to_s == f[:reg].to_s
+    return f[:mask] if f && irep.label == f[:irep] && idx == f[:idx] && reg == f[:reg]
 
     super
   end
 
   def exact_flow_class(irep, idx, reg)
     f = @rp_force
-    if f && irep.label == f[:irep] && idx == f[:idx] && reg.to_s == f[:reg].to_s
+    if f && irep.label == f[:irep] && idx == f[:idx] && reg == f[:reg]
       # The nil half is stripped as exact_flow_class does, or NILABLE_RECEIVER would never see a nil-or-class set.
       return return_class_of_mask(exact_flow_strip_nil(irep, idx, reg.to_i, f[:mask]))
     end
@@ -216,7 +216,7 @@ module ReceiverProofReport
   # [source, detail, hypothesis] of the receiver register: the nearest textual writer, and the set the source would
   # give were it proven (see the header). hypothesis is {mask:, complete:} or nil when the source has no candidate.
   def rp_source(irep, site, reg, hypothesis: true)
-    found = irep.walk_writers(site - 1, reg.to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
+    found = irep.walk_writers(site - 1, reg, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                   exhausted: ->(last) { rp_incoming(irep, last, hypothesis) }) do |ins, i|
       rp_writer(irep, site, reg, ins, i, hypothesis)
     end
@@ -225,7 +225,7 @@ module ReceiverProofReport
 
   # The register was never written in the body: self, or an incoming argument with its class pool state.
   def rp_incoming(irep, reg, hypothesis)
-    return ['self', '-', nil] if reg == '0'
+    return ['self', '-', nil] if reg == 0
     return ['argument', "arg#{reg}", nil] unless hypothesis
 
     key = [irep.label, reg.to_i]
@@ -246,7 +246,7 @@ module ReceiverProofReport
 
     sites, k = cand
     kinds = sites.filter_map do |ci, cx, recv, _argc, _own|
-      reg = (recv + k).to_s
+      reg = recv + k
       m = return_class_raw_mask(ci, cx, reg)
       rp_producer_kind(ci, cx, reg) if m.nil? || m.anybits?(CodeGen::CLASS_POOL_UNSHIPPABLE)
     end
@@ -314,8 +314,8 @@ module ReceiverProofReport
     klass = LITERAL_CLASS[ins.op]
     return ['literal', klass, nil] if exact_core_value_class(irep, site, reg)
 
-    other = irep.walk_writers(index - 1, ins.reg.to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
-                                                       exhausted: ->(last) { last == '0' ? 'self' : 'argument' }) do |w, _wi|
+    other = irep.walk_writers(index - 1, ins.reg, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
+                                                       exhausted: ->(last) { last == 0 ? 'self' : 'argument' }) do |w, _wi|
       case w.op
       when *BytecodeIR::Ops::SEND then "call:#{w.sym}"
       when :GETIV then "ivar:#{w.ivar}"
@@ -383,7 +383,7 @@ module ReceiverProofReport
       mask = insn.reg ? states[idx][insn.reg.to_i] || NumericFlow::OTHER : NumericFlow::OTHER
       next unless mask.anybits?(NumericFlow::OTHER)
 
-      kinds << (%i[RETURN RETURN_BLK].include?(insn.op) ? rp_producer_kind(irep, idx, insn.reg.to_s) : insn.op.to_s.downcase)
+      kinds << (%i[RETURN RETURN_BLK].include?(insn.op) ? rp_producer_kind(irep, idx, insn.reg) : insn.op.to_s.downcase)
     end
     block = return_class_block_returns(irep)
     kinds << 'block_return' if block.nil? || block.anybits?(NumericFlow::OTHER)

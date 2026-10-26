@@ -530,7 +530,7 @@ module EscapeAnalysis
           elsif BytecodeIR::Ops::SEND.include?(insn.op) && NAMING_SENDS.include?(insn.sym)
             scan_naming_send(irep, idx, insn, insn.sym, 1)
           elsif BytecodeIR::Ops::SEND.include?(insn.op) && FORWARDING_SENDS.include?(insn.sym)
-            named = insn.plain_fixed_argc? && insn.argc.to_i.positive? && literal_symbol(irep, idx, (insn.reg.to_i + 1).to_s)
+            named = insn.plain_fixed_argc? && insn.argc.to_i.positive? && literal_symbol(irep, idx, (insn.reg + 1))
             scan_naming_send(irep, idx, insn, named, 2) if named && NAMING_SENDS.include?(named)
           end
         end
@@ -552,7 +552,7 @@ module EscapeAnalysis
     def scan_naming_send(irep, idx, insn, sym, first)
       count = insn.plain_fixed_argc? ? insn.argc.to_i : -1
       last = count - first + 1
-      names = last.positive? ? (first..count).map { |k| literal_symbol(irep, idx, (insn.reg.to_i + k).to_s) } : []
+      names = last.positive? ? (first..count).map { |k| literal_symbol(irep, idx, (insn.reg + k)) } : []
       literal = !names.empty? && names.none?(&:nil?)
       case sym
       when 'alias_method'
@@ -661,7 +661,7 @@ module EscapeAnalysis
         if irep.nil?
           true
         else
-          verdict = flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true, value_class: klass,
+          verdict = flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true, value_class: klass,
                                                          block_given: true)
           verdict.escapes? || verdict.returned == true
         end
@@ -702,7 +702,7 @@ module EscapeAnalysis
       if fields[6].to_i.positive?
         return failed(:block_param_kept) if fields[4].to_i.positive? || fields[5].to_i.positive?
 
-        local = (1 + fields[0].to_i + fields[1].to_i + fields[2].to_i + fields[3].to_i).to_s
+        local = 1 + fields[0].to_i + fields[1].to_i + fields[2].to_i + fields[3].to_i
         starts[0] = { local => true }
       end
       if starts.empty? && sources.empty? && !nested_block_reads?(irep)
@@ -743,10 +743,10 @@ module EscapeAnalysis
 
       irep = body_irep(mdef) or return true
       case position[0]
-      when :self then flow(irep, { 0 => { '0' => true } }, self_tracked: true).escapes?
-      when :self_keep then flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true).escapes?
+      when :self then flow(irep, { 0 => { 0 => true } }, self_tracked: true).escapes?
+      when :self_keep then flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true).escapes?
       when :self_returns
-        verdict = flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true)
+        verdict = flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true)
         verdict.escapes? || verdict.returned == true
       when :arg then arg_captured?(irep, position[1])
       when :block then block_captured?(irep)
@@ -764,7 +764,7 @@ module EscapeAnalysis
       cyclic([:self_as, mdef.object_id, klass, block_given]) do
         irep = body_irep(mdef)
         irep.nil? ||
-          flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true, value_class: klass,
+          flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true, value_class: klass,
                                                block_given: block_given).escapes?
       end
     end
@@ -800,7 +800,7 @@ module EscapeAnalysis
       enter = irep.enter
       return true unless enter && k < enter.enter_fields[0].to_i
 
-      flow(irep, { 0 => { (1 + k).to_s => true } }, value_class: klass).escapes?
+      flow(irep, { 0 => { 1 + k => true } }, value_class: klass).escapes?
     end
 
     # [:arg, k] of +mdef+ for an argument that is exactly a +klass+ instance.
@@ -846,7 +846,7 @@ module EscapeAnalysis
       insns = prog.instructions
       params = parameter_count(irep)
       run = Run.new(irep: irep, reasons: [], uses: [], self_tracked: self_tracked, params: params,
-                    block_slot: (params + 1).to_s, value_class: value_class, returns: returns, returned: false,
+                    block_slot: params + 1, value_class: value_class, returns: returns, returned: false,
                     self_klass: self_klass, block_given: block_given)
       state = Array.new(insns.size)
       work = []
@@ -912,7 +912,7 @@ module EscapeAnalysis
       insn = prog.source_at(index)
       return nil unless %i[JMPIF JMPNOT JMPNIL].include?(insn.op)
 
-      defs = prog.reaching_definitions(index, insn.reg.to_s, opaque_regs: BytecodeIR.own_upvar_written_regs(run.irep),
+      defs = prog.reaching_definitions(index, insn.reg, opaque_regs: BytecodeIR.own_upvar_written_regs(run.irep),
                                                              shared: true)
       return nil unless defs&.any? && defs.all? { |d| block_slot_entry?(run, prog, d) }
 
@@ -926,7 +926,7 @@ module EscapeAnalysis
 
     # A definition that is the block slot's value on entry: the ENTRY pseudo-definition, or the ENTER that stores the slot.
     def block_slot_entry?(run, prog, defn)
-      return false unless defn.reg.to_s == run.block_slot
+      return false unless defn.reg == run.block_slot
 
       defn.entry? || (defn.built == :block && prog.source_at(defn.index).op == :ENTER)
     end
@@ -938,7 +938,7 @@ module EscapeAnalysis
       return false unless block && %i[SENDB SSENDB].include?(insn.op)
 
       prog = BytecodeIR.for(irep)
-      defs = prog.reaching_definitions(index, block.to_s, shared: true)
+      defs = prog.reaching_definitions(index, block, shared: true)
       defs&.size == 1 && !defs.first.entry? && prog.source_at(defs.first.index).op == :BLOCK
     end
 
@@ -955,7 +955,7 @@ module EscapeAnalysis
       op = insn.op
       lead = BytecodeIR::OperandModel.reg(insn)
       escape = ->(why) { run.reasons << [why, insn.addr] }
-      held = ->(r) { s.include?(r.to_s) }
+      held = ->(r) { s.include?(r) }
       window = ->(from, count) { (0...count).any? { |k| held.call(from.to_i + k) } }
 
       return s if PASSES.include?(op)
@@ -973,11 +973,11 @@ module EscapeAnalysis
 
       case op
       when :MOVE then s - [lead] | (held.call(BytecodeIR::OperandModel.move(insn).src) ? [lead] : [])
-      when :LOADSELF then s - [lead] | (s.include?('0') ? [lead] : [])
+      when :LOADSELF then s - [lead] | (s.include?(0) ? [lead] : [])
       when :RETSELF
-        if s.include?('0') && run.returns
+        if s.include?(0) && run.returns
           run.returned = true
-        elsif s.include?('0')
+        elsif s.include?(0)
           escape.call(:returned)
         end
         s
@@ -997,7 +997,7 @@ module EscapeAnalysis
       when :ADDILV, :SUBILV
         # R[b], R[b+1] are the scratch window of the method-call fallback: written, never read.
         second = BytecodeIR::OperandModel.regs(insn)[1]
-        scratch = [second, (second.to_i + 1).to_s]
+        scratch = [second, second.to_i + 1]
         send_site(run, i, insn, s, op == :ADDILV ? '+' : '-', recv: lead, args: [], dest: lead) - scratch
       when :GETIDX then send_site(run, i, insn, s, '[]', recv: lead, args: [lead.to_i + 1], dest: lead)
       when :GETIDX0 then send_site(run, i, insn, s, '[]', recv: BytecodeIR::OperandModel.regs(insn)[1], args: [], dest: lead)
@@ -1010,7 +1010,7 @@ module EscapeAnalysis
         s - [lead]
       when :SUPER
         positional, kw = argument_slots(insn)
-        escape.call(:super_window) if window.call(lead, positional + kw + 2) || s.include?('0')
+        escape.call(:super_window) if window.call(lead, positional + kw + 2) || s.include?(0)
         s - [lead]
       when :ARRAY
         three = BytecodeIR::OperandModel.src_and_literal(insn)
@@ -1030,14 +1030,14 @@ module EscapeAnalysis
         escape.call(:stored_hash) if window.call(lead.to_i + 1, 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s
       when :APOST
-        s - (0..BytecodeIR::OperandModel.post_count(insn)).map { |k| (lead.to_i + k).to_s }
+        s - (0..BytecodeIR::OperandModel.post_count(insn)).map { |k| lead.to_i + k }
       when :STRCAT
         # A String operand is copied; anything else is converted by its own to_s.
         escape.call(:string_operand) if held.call(lead.to_i + 1) && run.value_class != 'String'
         s
       when *CLOSURE_OPS then s - [lead]
       when *WINDOW_OPS
-        escape.call(:class_machinery) if window.call(lead, 2) || s.include?('0')
+        escape.call(:class_machinery) if window.call(lead, 2) || s.include?(0)
         s - [lead]
       else
         escape.call(:unmodelled_op)
@@ -1059,18 +1059,18 @@ module EscapeAnalysis
       spread = insn.positional_splat?
       unpacked = spread ? [a + 1] : []
       unpacked += ((a + positional + 1)..(a + positional + kw)).to_a
-      return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r.to_s) }
+      return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r) }
 
-      send_site(run, i, insn, s, call.name, recv: insn.op.to_s.start_with?('SS') ? nil : a,
+      send_site(run, i, insn, s, call.name, recv: BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? nil : a,
                 args: spread ? [] : (1..positional).map { |k| a + k }, dest: a,
-                block: insn.op.to_s.end_with?('B') ? a + positional + kw + 1 : nil)
+                block: BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? a + positional + kw + 1 : nil)
     end
 
     # The shared send rule; returns the registers holding the value after the call.
     def send_site(run, i, insn, s, name, recv:, args:, dest:, block: nil)
-      out = s - [dest.to_s]
-      reg_held = ->(r) { r && s.include?(r.to_s) }
-      held = recv.nil? ? s.include?('0') : reg_held.call(recv)
+      out = s - [dest]
+      reg_held = ->(r) { r && s.include?(r) }
+      held = recv.nil? ? s.include?(0) : reg_held.call(recv)
       klasses = receiver_klasses(run, i, recv, held)
       list = callees(run, name, recv, klasses)
       if held
@@ -1082,8 +1082,8 @@ module EscapeAnalysis
         result = receiver_result(name, list, chain, exact ? run.value_class : nil, block_given: given)
         return reject(run, insn, :send_receiver, s) unless result
 
-        run.uses << Use.new(index: i, kind: :call, name: name, reg: recv.to_s) if recv && PROC_CALLS.include?(name)
-        out |= [dest.to_s] if result == :self
+        run.uses << Use.new(index: i, kind: :call, name: name, reg: recv) if recv && PROC_CALLS.include?(name)
+        out |= [dest] if result == :self
       end
       args.each_with_index do |r, k|
         next unless reg_held.call(r)
@@ -1093,13 +1093,13 @@ module EscapeAnalysis
           return reject(run, insn, :send_argument, s)
         end
 
-        run.uses << Use.new(index: i, kind: :pass_arg, name: name, reg: r.to_s)
+        run.uses << Use.new(index: i, kind: :pass_arg, name: name, reg: r)
       end
       if reg_held.call(block)
         klass = klasses&.size == 1 ? klasses.first : nil
         return reject(run, insn, :send_block, s) if block_captured_by_name?(name, list, klass)
 
-        run.uses << Use.new(index: i, kind: :pass_block, name: name, reg: block.to_s)
+        run.uses << Use.new(index: i, kind: :pass_block, name: name, reg: block)
       end
       out
     end
@@ -1248,7 +1248,7 @@ module EscapeAnalysis
       irep = run.irep
       closure_children(irep).each do |ci, child|
         refs = closure_refs(irep, ci, child).select do |ref|
-          ref[:kind] == :blk ? block_tracked : ever.include?(ref[:idx].to_s)
+          ref[:kind] == :blk ? block_tracked : ever.include?(ref[:idx])
         end
         next if refs.empty? && !run.self_tracked
 
@@ -1284,7 +1284,7 @@ module EscapeAnalysis
       end
       return nil unless run.self_tracked
 
-      verdict = flow(child, { 0 => { '0' => true } }, self_tracked: true)
+      verdict = flow(child, { 0 => { 0 => true } }, self_tracked: true)
       verdict.escapes? ? verdict.reason : nil
     end
 

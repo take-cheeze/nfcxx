@@ -27,7 +27,7 @@ module BytecodeIR
       return constant_path_walk(from, reg, skip_ops: skip_ops, barrier: barrier) if barrier
 
       # +from+ is inclusive, so the definitions are those reaching the instruction after it.
-      constant_path_at(from + 1, reg.to_s, Set[])
+      constant_path_at(from + 1, reg, Set[])
     end
 
     # Every reaching definition of +reg+ at +from+ must produce the same constant expression.
@@ -53,7 +53,7 @@ module BytecodeIR
         return nil unless segment && active.add?(index)
 
         begin
-          scope = constant_path_at(index, insn.reg.to_s, active)
+          scope = constant_path_at(index, insn.reg, active)
         ensure
           active.delete(index)
         end

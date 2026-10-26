@@ -62,7 +62,7 @@ module InterfaceTableReport
     nilable = code.include?('// NILABLE_RECEIVER') ? '+nilable' : ''
     owner_def = kwargs[:owner_def]
     [owner_def ? "#{owner_def.owner}##{owner_def.name}" : irep.label, irep.label, site, name, fb[:argc],
-     insn.op.to_s.end_with?('B') ? 'block' : '-', family, else_kind, gates(name, fb, instances).join(','),
+     BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? 'block' : '-', family, else_kind, gates(name, fb, instances).join(','),
      set + nilable, receiver_trace_origin(irep, site, reg), IrepScans.origin_ivar(irep, site, reg, owner_def),
      fb[:listed].join('|'), cells(name, fb, instances), native_detail(name)].join("\t")
   end

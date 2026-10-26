@@ -237,7 +237,7 @@ module ConstantArgumentSites
   def value_at(irep, index, reg, tuple, constants, depth = 0)
     return UNKNOWN if depth > 32
 
-    defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, index, reg, shared: true)
     return UNKNOWN if defs.nil? || defs.empty?
 
     values = defs.map { |d| definition_value(irep, d, tuple, constants) }
@@ -260,7 +260,7 @@ module ConstantArgumentSites
   def integer_literal(insn)
     case insn.op
     when :LOADI__1 then -1
-    when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+    when BytecodeIR::Ops::LOADI_SLOT then BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op]
     when :LOADI8, :LOADI16, :LOADI32, :LOADINEG
       value = insn.imm_operand
       value && insn.op == :LOADINEG ? -value.abs : value

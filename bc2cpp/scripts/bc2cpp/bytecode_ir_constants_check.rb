@@ -206,25 +206,25 @@ suite.compile(constant_path_source) do |ireps, root|
 
   irep, idx, reg = path_of_new.call('pick')
   check.call('a join of Array and Hash has no constant path (the textual walk answered Hash)',
-             BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY).nil?)
+             BytecodeIR.for(irep).constant_path(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY).nil?)
 
   irep, idx, reg = path_of_new.call('plain')
-  plain = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s)
+  plain = BytecodeIR.for(irep).constant_path(idx - 1, reg)
   check.call('a single GETCONST is its own constant path (Array, no segments, unqualified)',
              plain && plain.root == :const && plain.name == 'Array' && plain.segments.empty? && !plain.qualified)
 
   irep, idx, reg = path_of_new.call('qualified')
-  qualified = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s)
+  qualified = BytecodeIR.for(irep).constant_path(idx - 1, reg)
   check.call('Fx::Inner is rooted at Fx with the Inner segment, qualified',
              qualified && qualified.name == 'Fx' && qualified.segments == ['Inner'] && qualified.qualified)
 
   irep, idx, reg = path_of_new.call('loop_scope')
   check.call('a scope rebound inside a loop has no constant path (Outer on entry, Outer::Inner after one pass)',
-             BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s).nil?)
+             BytecodeIR.for(irep).constant_path(idx - 1, reg).nil?)
 
   # Barrier callers (codegen_receiver_facts) keep the textual walk: their barrier ops are the proof.
   irep, idx, reg = path_of_new.call('pick')
-  barrier = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY,
+  barrier = BytecodeIR.for(irep).constant_path(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY,
                                                                   barrier: %i[JMPUW])
   check.call('a barrier caller keeps the textual walk (nearest arm Hash; codegen asks every definition itself)',
              barrier&.name == 'Hash')

@@ -161,7 +161,7 @@ class CodeGen
         if sym && insn.op == :LOADSYM
           names << sym.delete_prefix('@') if sym.start_with?('@') && !sym.start_with?('@@')
           @numeric_ivar_disabled = "LOADSYM #{sym}" if (NUMERIC_IVAR_NAMED_WRITES + NUMERIC_SELF_REBINDERS).include?(sym)
-        elsif sym && insn.op.to_s.include?('SEND') && NUMERIC_IVAR_NAMED_WRITES.include?(sym)
+        elsif sym && BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && NUMERIC_IVAR_NAMED_WRITES.include?(sym)
           @numeric_ivar_disabled = "non-literal #{sym} in #{irep.label}" unless literal_ivar_argument?(irep, idx, insn)
         end
         if insn.op == :STRING
@@ -182,7 +182,7 @@ class CodeGen
     out = Set.new
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, idx|
-        next unless insn.op.to_s.include?('SEND') && NUMERIC_SELF_REBINDERS.include?(insn.sym)
+        next unless BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && NUMERIC_SELF_REBINDERS.include?(insn.sym)
 
         @numeric_ivar_disabled = "rebinder #{insn.sym} without literal block in #{irep.label}" unless literal_block_argument?(irep, idx, insn)
         stack = Array(irep.reps).dup
@@ -199,12 +199,12 @@ class CodeGen
 
   # SENDB whose block register is written by BLOCK/LAMBDA in the same irep.
   def literal_block_argument?(irep, idx, insn)
-    return false unless insn.op.to_s.end_with?('B') && insn.reg
+    return false unless BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) && insn.reg
 
-    n = insn.op.to_s.end_with?('0B') ? 0 : insn.argc
+    n = insn.argc
     return false unless n
 
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + n + 1).to_s)
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + n + 1))
     program = BytecodeIR.for(irep)
     writers&.all? { |i| BytecodeIR::Ops::LITERAL_PROC.include?(program.source_at(i).op) } || false
   end
@@ -214,7 +214,7 @@ class CodeGen
   def literal_ivar_argument?(irep, idx, insn)
     return false unless insn.reg
 
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + 1))
     writers&.all? do |i|
       writer = BytecodeIR.for(irep).source_at(i)
       writer.op == :LOADSYM && writer.sym.to_s.start_with?('@')
@@ -387,7 +387,7 @@ class CodeGen
 
     @numeric_allocate_free = @ireps.each_value.none? do |irep|
       BytecodeIR.for(irep).each_source.any? do |insn, _index|
-        insn.sym == 'allocate' && (insn.op == :LOADSYM || insn.op.to_s.include?('SEND'))
+        insn.sym == 'allocate' && (insn.op == :LOADSYM || BytecodeIR::Ops::SEND_FAMILY.include?(insn.op))
       end
     end
   end
@@ -467,7 +467,7 @@ class CodeGen
       exposing = BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) && !(insn.op == :SUPER && super_safe)
       observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || exposing ||
                  (insn.op == :GETIV && insn.ivar == ivar) ||
-                 (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
+                 (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?(0))
       before.call(instruction.index) || !observes
     end
   end
@@ -490,7 +490,7 @@ class CodeGen
       next super_free if insn.op == :SUPER
 
       !BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) &&
-        (%i[GETIV SETIV].include?(insn.op) || !insn.regs.include?('0'))
+        (%i[GETIV SETIV].include?(insn.op) || !insn.regs.include?(0))
     end
   end
 end

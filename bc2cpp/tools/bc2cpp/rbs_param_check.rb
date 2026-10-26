@@ -163,7 +163,7 @@ module RbsParamCheck
     sites.filter_map do |irep, idx, dest, argc|
       next if argc < req || (rest.zero? && argc > req + opt)
 
-      why = trace(ctx, irep, idx, (dest + pos + 1).to_s, cls, 0)
+      why = trace(ctx, irep, idx, dest + pos + 1, cls, 0)
       [irep, idx, why] if why
     end
   end
@@ -294,7 +294,7 @@ module RbsParamCheck
   def drop(ctx, label, pos)
     if (applied = ctx[:applied])
       [applied.ir_arg_types, applied.ir_arg_elements].each do |table|
-        table[label] = table[label].except((pos + 1).to_s).freeze if table[label]
+        table[label] = table[label].except(pos + 1).freeze if table[label]
       end
     end
     ann = ctx[:class_annotations][label] or return
@@ -428,7 +428,7 @@ module RbsParamCheck
 
     ctx[:ivar_active] << key
     found = sites.each do |site_irep, idx, reg|
-      why = trace(ctx, site_irep, idx, reg.to_s, cls, depth + 1)
+      why = trace(ctx, site_irep, idx, reg, cls, depth + 1)
       break "@#{name} = (#{why}) at #{display(ctx, site_irep.file)}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
     end
     ctx[:ivar_active].delete(key)
@@ -460,7 +460,7 @@ module RbsParamCheck
       return "#{where}: a local may be written by name (binding, local_variable_set or eval reachable)"
     end
 
-    reg = index.to_s
+    reg = index
     prog = BytecodeIR.for(frame)
     if BytecodeIR.own_upvar_written_regs(frame).include?(reg) || prog.each_source.any? { |i, _| prog.may_write?(i, reg) }
       return "#{where}: R#{reg} of #{ctx[:self_of][label]}##{ctx[:method_name][label]} is reassigned"

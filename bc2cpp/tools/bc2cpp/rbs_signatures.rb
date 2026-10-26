@@ -355,11 +355,11 @@ module RbsSignatures
       ap.ir_arg_types[d.irep] = sig.args.each_with_index.filter_map do |type, index|
         commented = annotations[d.irep]&.args&.[](index) || class_annotations[d.irep]&.args&.[](index) ||
                     element_annotations[d.irep]&.arg_elements&.[](index)
-        [((index + 1).to_s), type.value_classes] if type.value_classes && !commented
+        [index + 1, type.value_classes] if type.value_classes && !commented
       end.to_h.freeze if ap.ir_owners[d.irep] == sig.owner
       if ap.ir_owners[d.irep] == sig.owner
         ap.ir_arg_elements[d.irep] = sig.args.each_with_index.filter_map do |type, index|
-          register = (index + 1).to_s
+          register = index + 1
           [register, type.element_classes] if type.element_classes && ap.ir_arg_types[d.irep]&.key?(register)
         end.to_h.freeze
       end
@@ -368,7 +368,7 @@ module RbsSignatures
         optional_count = runtime.enter&.enter_fields&.[](1).to_i
         if Array(sig.optional_args).size == optional_count
           ap.ir_optional_types[d.irep] = Array(sig.optional_args).each_with_index.filter_map do |type, index|
-            register = (mand + index + 1).to_s
+            register = mand + index + 1
             commented = annotations[d.irep]&.args&.[](mand + index) || class_annotations[d.irep]&.args&.[](mand + index) ||
                         element_annotations[d.irep]&.arg_elements&.[](mand + index)
             next if commented
@@ -381,7 +381,7 @@ module RbsSignatures
         fields = runtime.enter&.enter_fields&.map(&:to_i) || []
         if sig.rest_type&.value_classes && Array(sig.optional_args).size == optional_count && fields[2].to_i.positive? &&
            fields[3].to_i.zero? && fields[4].to_i.zero? && fields[5].to_i.zero?
-          ap.ir_rest_elements[d.irep] = { (mand + optional_count + 1).to_s => sig.rest_type.value_classes }.freeze
+          ap.ir_rest_elements[d.irep] = { mand + optional_count + 1 => sig.rest_type.value_classes }.freeze
         end
         runtime_keywords = BytecodeIR.for(runtime).instructions_with_op(:KARG).map { |insn| insn.sym.to_s }.to_set
         runtime_optional = BytecodeIR.for(runtime).instructions_with_op(:KEY_P).map { |insn| insn.sym.to_s }.to_set

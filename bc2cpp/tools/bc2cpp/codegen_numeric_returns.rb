@@ -96,7 +96,7 @@ class CodeGen
       @ireps.each_value do |irep|
         program = BytecodeIR.for(irep)
         aliasing = program.each_source.any? do |i, _index|
-          i.op == :ALIAS || (i.op.to_s.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
+          i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?(i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym)
         end
         next unless aliasing
 
@@ -114,7 +114,7 @@ class CodeGen
   # its pool has grown that provenance.
   def aliased_operand_name_set
     @aliased_operand_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
-      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == :ALIAS || (i.op.to_s.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
+      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?(i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym) }
 
       names.merge(aliased_operand_names(irep) || BytecodeIR.for(irep).instructions_with_op(:ALIAS, :LOADSYM).filter_map { |i| i.sym if i.sym })
     end
@@ -138,12 +138,12 @@ class CodeGen
         names << insn.sym
         old = insn.first_of(:name)&.value
         names << old if old
-      elsif insn.op.to_s.include?('SEND') && (count = ALIAS_NAME_ARGUMENTS[insn.sym])
+      elsif BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && (count = ALIAS_NAME_ARGUMENTS[insn.sym])
         return nil unless insn.plain_fixed_argc? && insn.argc.to_i >= count
 
         # Every name that can reach each argument, not only the textually last arm of a join.
         literal = (1..count).all? do |k|
-          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + k).to_s)&.map { |i| program.source_at(i) }
+          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + k))&.map { |i| program.source_at(i) }
           next false unless sources&.all? { |w| w.op == :LOADSYM && w.sym }
 
           sources.each { |w| names << w.sym }
@@ -255,7 +255,7 @@ class CodeGen
     return tracked if tracked
     return NumericFlow::INT if @fixnum_return_names.include?(name)
     return NumericFlow::ARR if @array_return_names.include?(name)
-    return NumericFlow::OTHER if insn.op.to_s.start_with?('SS')
+    return NumericFlow::OTHER if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
 
     native = native_result_numeric_mask(irep, index, insn)
     return native if native
@@ -264,7 +264,7 @@ class CodeGen
     return NumericFlow::OTHER unless recv
 
     # SEND0 carries no operand count; a keyword or splat form has no plain count.
-    argc = insn.op.to_s.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     mask = 0
     tables = @frozen_tables ? @frozen_tables.tables(recv) : 0
     if tables.nonzero?

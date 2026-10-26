@@ -76,14 +76,14 @@ class CodeGen
   # private method; every other send of the name is an explicit receiver.
   def unlisted_ssend?(site, name)
     insn = unlisted_site_insn(site)
-    !insn.nil? && insn.sym == name && insn.op.to_s.start_with?('SSEND')
+    !insn.nil? && insn.sym == name && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
   end
 
   # An explicit, non-self receiver: vm.c's OP_SEND raises vis_error before the
   # callee runs. `self_owner` keeps a send that may still be an implicit one out.
   def unlisted_private_call(target, klass, name, d, recv, argv, site)
     insn = unlisted_site_insn(site)
-    return nil unless insn && insn.sym == name && insn.op.to_s.match?(/\ASEND0?B?\z/) && site[:self_owner].nil?
+    return nil unless insn && insn.sym == name && BytecodeIR::Ops::SEND_PREFIX_OPS.include?(insn.op) && site[:self_owner].nil?
     return nil if argv.size > FUNCALL_ARGC_MAX
 
     pack = argv.empty? ? 'mrb_ary_new(M)' : "({ mrb_value bc2cpp_pargs[] = { #{argv.join(', ')} }; mrb_ary_new_from_values(M, #{argv.size}, bc2cpp_pargs); })"

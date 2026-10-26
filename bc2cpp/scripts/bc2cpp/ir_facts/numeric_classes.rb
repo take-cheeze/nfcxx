@@ -107,7 +107,7 @@ check.call('a Symbol element stays unproven (a closed-world class bit only the o
                     insn(9, :RETURN, 'R5')]).nil?)
 check.call('a captured element register refuses',
            element([insn(0, :LOADI_2, "R3\t(2)"), insn(2, :ARRAY, "R3\t1"), insn(5, :GETIDX0, "R5\tR3[0]"),
-                    insn(8, :RETURN, 'R5')], opaque: Set['3']).nil?)
+                    insn(8, :RETURN, 'R5')], opaque: Set[3]).nil?)
 check.call('an index past the end refuses',
            element([insn(0, :LOADI_2, "R3\t(2)"), insn(2, :ARRAY, "R3\t1"), insn(5, :LOADI_1, "R4\t(1)"),
                     insn(7, :GETIDX, "R3\t(R4)"), insn(9, :RETURN, 'R3')]).nil?)

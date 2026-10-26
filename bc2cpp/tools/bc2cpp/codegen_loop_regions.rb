@@ -24,7 +24,7 @@ class CodeGen
 
       dest_reg = insn.reg
       prev_reg = prev_insn.reg
-      next unless dest_reg && prev_reg && prev_reg == (dest_reg.to_i + offset).to_s
+      next unless dest_reg && prev_reg && prev_reg == dest_reg + offset
 
       yield insn, idx, prev_insn, dest_reg
     end
@@ -124,7 +124,7 @@ class CodeGen
 
   # EACH_BLOCK_SUPPORT: inline `ary.each { |x| ... }`. Same BLOCK +
   # `SENDB`/`SSENDB Ra :each n=0` adjacency as times. `#each` has bytecode
-  # definitions (Game::Actors, Game::Party, LCF::Array2D), so the receiver must
+  # definitions(Game::Actors, Game::Party, LCF::Array2D), so the receiver must
   # trace (trace_new_target) to exactly "Array". An SSENDB (self receiver) is
   # admitted only when the owner is Array itself. Anything unproven gives no
   # region.
@@ -407,7 +407,7 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: insn.sym, init_reg: is_fold ? (dest_reg.to_i + 1).to_s : nil,
+                   method_name: insn.sym, init_reg: is_fold ? (dest_reg + 1) : nil,
                    ssendb: insn.op == :SSENDB,
                    elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                    owner_name) }
@@ -572,7 +572,7 @@ class CodeGen
       # BLOCK_FALLBACK.
       next unless profiler_section_receiver?(irep, idx, dest_reg, meth)
 
-      section_name = meth == 'section' ? profiler_section_literal(irep, idx, (dest_reg.to_i + 1).to_s) : nil
+      section_name = meth == 'section' ? profiler_section_literal(irep, idx, (dest_reg + 1)) : nil
       next if meth == 'section' && section_name.nil?
 
       upvars = block_upvar_needs(block_irep)
@@ -617,10 +617,10 @@ class CodeGen
   def receiver_pair_before?(irep, block_idx, reg)
     mcnst = BytecodeIR.for(irep).source_at(block_idx - 1)
     return false unless mcnst && mcnst.op == :GETMCNST
-    return false unless mcnst.reg == reg.to_s && mcnst.paren_reg == reg.to_s && mcnst.mcnst_name == 'Profiler'
+    return false unless mcnst.reg == reg && mcnst.paren_reg == reg && mcnst.mcnst_name == 'Profiler'
 
     const = BytecodeIR.for(irep).source_at(block_idx - 2)
-    const && const.op == :GETCONST && const.reg == reg.to_s && const.const_name == 'RGSS'
+    const && const.op == :GETCONST && const.reg == reg && const.const_name == 'RGSS'
   end
 
   # The String pool literal for :section's name argument, or nil. The VM wrote
@@ -708,7 +708,7 @@ class CodeGen
 
       # Only the frame entry can be the host parameter at the call: a write on any reaching path, including a loop
       # back-edge from after the call, refuses it.
-      defs = host_ir.reaching_definitions(call_idx, upvar.to_s, shared: true)
+      defs = host_ir.reaching_definitions(call_idx, upvar, shared: true)
       arg_pos = defs&.size == 1 && defs.first.entry? ? defs.first.reg.to_i : nil
       next unless arg_pos && arg_pos.between?(1, mandatory)
       next unless elements.arg_containers&.[](arg_pos - 1) == 'Hash'

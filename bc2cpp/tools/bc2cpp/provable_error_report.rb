@@ -79,7 +79,7 @@ module ProvableErrorReport
 
   # The classes the receiver register may hold at +idx+ (both flows agree: each is a sound over-approximation).
   def error_receiver_classes(irep, idx, reg, owner_def)
-    return nil if fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     sets = [exact_flow_mask(irep, idx, reg), (numeric_raw_mask(irep, idx, reg, owner_def) if owner_def)]
            .filter_map { |m| error_mask_classes(m) }
@@ -233,8 +233,8 @@ module ProvableErrorReport
   end
 
   def error_zero_literal?(irep, idx, reg)
-    value = irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |w|
-      w.op.to_s.start_with?('LOADI') ? (w.paren_value || w.imm_operand).to_s : :other
+    value = irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |w|
+      BytecodeIR::Ops::LOADI_OPS.include?(w.op) ? (w.paren_value || w.imm_operand).to_s : :other
     end
     value == '0'
   end

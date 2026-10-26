@@ -253,7 +253,7 @@ module StaticDispatchFragmentUses
 
   def backward_poison?(irep, index, reg, depth)
     return false if depth > 32
-    return true if non_name_literal?(irep, index, reg) || non_name_literal?(irep, index, (reg.to_i + 1).to_s)
+    return true if non_name_literal?(irep, index, reg) || non_name_literal?(irep, index, reg + 1)
 
     defs = BytecodeIR.reaching_definitions(irep, index, reg) || []
     !defs.empty? && defs.all? do |d|
@@ -271,7 +271,7 @@ module StaticDispatchFragmentUses
     insn = BytecodeIR.for(irep).source_at(reads.first)
     return false unless insn.op == :STRCAT && insn.reg == reg
 
-    non_name_literal?(irep, reads.first, (reg.to_i + 1).to_s) || forward_poison?(irep, reads.first, reg, depth + 1)
+    non_name_literal?(irep, reads.first, reg + 1) || forward_poison?(irep, reads.first, reg, depth + 1)
   end
 
   # A method body returning the value: followed into the result of every bytecode send of its name.
@@ -302,7 +302,7 @@ module StaticDispatchFragmentUses
     return false if position.zero? && self_send
     return true if position > argc # the block slot
     return true unless (position.zero? ? PURE_RECEIVER_SENDS : PURE_ARGUMENT_SENDS).include?(name)
-    return true if RESULT_CARRYING_SENDS.include?(name) && escapes?(irep, use, base.to_s, ctx, depth + 1)
+    return true if RESULT_CARRYING_SENDS.include?(name) && escapes?(irep, use, base, ctx, depth + 1)
 
     # A closed-world definition of the name gets the value as self or as parameter `position`.
     ctx[:bodies][name].any? do |body|
@@ -313,7 +313,7 @@ module StaticDispatchFragmentUses
       next true unless callee && enter && optional_positionals_only?(callee)
       next false if position > enter.enter_fields[0] + enter.enter_fields[1]
 
-      escapes?(callee, 0, position.to_s, ctx, depth + 1)
+      escapes?(callee, 0, position, ctx, depth + 1)
     end
   end
 end

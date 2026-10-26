@@ -576,7 +576,7 @@ class CodeGen
 
     recv_reg = d.to_i
     # The only write of the receiver register that reaches the send must be the constant read itself.
-    write_index = sole_reaching_write(irep, idx, recv_reg.to_s)
+    write_index = sole_reaching_write(irep, idx, recv_reg)
     return nil unless write_index
 
     write = BytecodeIR.for(irep).source_at(write_index)
@@ -587,7 +587,7 @@ class CodeGen
     return nil if universe.include?(const_name)
 
     # The GETCONST must hold the register on every path to the send, so no jump or handler entry lands between.
-    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, recv_reg.to_s)
+    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, recv_reg)
 
     out = String.new
     out << "  // KEYWORD_NEVER_DEFINED_CONST :#{name} (n=#{n}|nk=#{nk}) -- receiver is the value of " \
@@ -653,7 +653,7 @@ class CodeGen
     (0...n).map do |k|
       key_reg = base + (2 * k)
       val_reg = base + (2 * k) + 1
-      kname = literal_symbol_write(irep, write_index, key_reg.to_s)
+      kname = literal_symbol_write(irep, write_index, key_reg)
       return nil unless kname
 
       { name: kname, val_reg: "r#{val_reg}" }
@@ -704,7 +704,7 @@ class CodeGen
 
     next_reg = dest_reg + 1
     if insn.positional_splat?
-      positional = splat_array_literal_regs(irep, idx, next_reg.to_s)
+      positional = splat_array_literal_regs(irep, idx, next_reg)
       if positional.nil?
         return nil if insn.keyword_arguments?
 
@@ -720,7 +720,7 @@ class CodeGen
 
     kw_pairs =
       if insn.keyword_splat?
-        pairs = splat_hash_literal_pairs(irep, idx, next_reg.to_s)
+        pairs = splat_hash_literal_pairs(irep, idx, next_reg)
         return nil unless pairs
 
         pairs
@@ -729,7 +729,7 @@ class CodeGen
         (0...nk).map do |k|
           key_reg = next_reg + (k * 2)
           val_reg = next_reg + (k * 2) + 1
-          kname = literal_symbol_write(irep, idx, key_reg.to_s)
+          kname = literal_symbol_write(irep, idx, key_reg)
           return nil unless kname
 
           { name: kname, val_reg: "r#{val_reg}" }

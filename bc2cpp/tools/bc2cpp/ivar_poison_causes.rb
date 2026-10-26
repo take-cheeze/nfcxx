@@ -50,7 +50,7 @@ module IvarPoisonCauses
   # [cause, detail] for the value `reg` holds at `idx` in `irep`. +method_name+ is the enclosing method's name.
   def self.classify(irep, idx, reg, mand, method_name, registry, depth = 0)
     why = {}
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, refusal: why, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, refusal: why, through_handlers: true)
     return ['unreadable', why[:cause].to_s] if defs.nil? || defs.empty?
 
     parts = defs.map { |d| classify_definition(irep, d, mand, method_name, registry, depth) }.uniq

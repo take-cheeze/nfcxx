@@ -71,13 +71,13 @@ class CallSiteIndex
 
   # Every possible literal Symbol name, or nil when any reaching value is unknown.
   def self.enum_targets(irep, idx, insn, reg)
-    return packed_enum_targets(irep, idx, reg.to_s) if insn.positional_splat?
+    return packed_enum_targets(irep, idx, reg) if insn.positional_splat?
 
     symbol_targets(irep, idx, reg)
   end
 
   def self.symbol_targets(irep, idx, reg)
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg.to_s)
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg)
     return nil unless writers
 
     program = BytecodeIR.for(irep)
@@ -131,7 +131,7 @@ class CallSiteIndex
       end
     end
 
-    symbol_targets(irep, origin, literal.base.to_s)
+    symbol_targets(irep, origin, literal.base)
   end
 
   def self.packed_register_captured?(irep, reg)
@@ -145,7 +145,7 @@ class CallSiteIndex
         next unless %i[GETUPVAR SETUPVAR].include?(source.op)
 
         index, level = source.upvar_ref
-        captured = true if index.to_s == reg && level == depth
+        captured = true if index == reg && level == depth
       end
     end
     captured

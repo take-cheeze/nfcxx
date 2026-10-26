@@ -30,24 +30,24 @@ module BytecodeIR
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @argument_facts = argument_facts.to_h do |reg, fact|
-        number = reg.to_s
-        unless number.match?(/\A[1-9]\d*\z/) && number.to_i <= required && fact.is_a?(Fact) && !fact.classes.empty?
+        number = reg
+        unless number.is_a?(Integer) && number.between?(1, required) && fact.is_a?(Fact) && !fact.classes.empty?
           raise ArgumentError, "bc2cpp: invalid IR argument fact R#{number}"
         end
         contracts = fact.contracts.empty? && fact.declared? ? ["argument:R#{number}"] : fact.contracts.dup
         [number, Fact.new(classes: fact.classes.to_set.dup.freeze, declared: fact.declared?, contracts: contracts.freeze).freeze]
       end.freeze
       @declared_args = declared_args.to_h do |reg, types|
-        number = reg.to_s
-        unless number.match?(/\A[1-9]\d*\z/) && number.to_i <= required
+        number = reg
+        unless number.is_a?(Integer) && number.between?(1, required)
           raise ArgumentError, "bc2cpp: IR argument contract R#{number} is not a required parameter"
         end
         [number.dup.freeze, types.to_set.dup.freeze]
       end.freeze
       optional = irep.enter&.enter_fields&.[](1).to_i
       @declared_optional_args = declared_optional_args.to_h do |reg, types|
-        number = reg.to_s
-        unless number.match?(/\A[1-9]\d*\z/) && (required + 1..required + optional).cover?(number.to_i)
+        number = reg
+        unless number.is_a?(Integer) && (required + 1..required + optional).cover?(number)
           raise ArgumentError, "bc2cpp: IR optional contract R#{number} is not an optional parameter"
         end
         [number.dup.freeze, types.to_set.dup.freeze]
@@ -56,11 +56,11 @@ module BytecodeIR
       @declared_ivars = declared_ivars.to_h { |name, types| [name.to_s.delete_prefix('@').freeze, types.to_set.dup.freeze] }.freeze
       @declared_calls = declared_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
       @inferred_calls = inferred_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
-      @inferred_args = inferred_args.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @inferred_args = inferred_args.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
       @inferred_keywords = inferred_keywords.to_h { |name, types| [name.to_s, types.to_set.dup.freeze] }.freeze
-      @inferred_rest_elements = inferred_rest_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
-      @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
-      @declared_rest_elements = declared_rest_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @inferred_rest_elements = inferred_rest_elements.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
+      @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
+      @declared_rest_elements = declared_rest_elements.to_h { |reg, types| [reg, types.to_set.dup.freeze] }.freeze
       @declared_ivar_elements = declared_ivar_elements.to_h { |name, types| [name.to_s.delete_prefix('@'), types.to_set.dup.freeze] }.freeze
       @declared_const_elements = declared_const_elements.to_h { |name, type| [name.to_s, Set[type.to_sym]] }.freeze
       @source_resolver = source_resolver
@@ -125,14 +125,14 @@ module BytecodeIR
     # +refusal+, when a Hash, receives `:cause`, the first reason the proof failed; the answer does not depend on it.
     def exact_at(index, reg, self_class: nil, max_states: DATAFLOW_MAX_STATES, refusal: nil)
       @exact_cache ||= {}
-      key = [index, reg.to_s.dup.freeze, self_class, max_states]
+      key = [index, reg, self_class, max_states]
       if (cached = @exact_cache[key])
         unknown(refusal, cached[1]) if cached[1]
         return cached[0]
       end
 
       cause = {}
-      result = compute_exact(index, reg.to_s, self_class, max_states, cause)
+      result = compute_exact(index, reg, self_class, max_states, cause)
       @exact_cache[key] = [result, cause[:cause]].freeze if @exact_cache.size < QUERY_CACHE_CAP
       unknown(refusal, cause[:cause]) if cause[:cause]
       result
@@ -182,7 +182,7 @@ module BytecodeIR
 
     def exact_definition(definition, insn, self_class)
       unless insn
-        return [self_class] if definition.reg == '0'
+        return [self_class] if definition.reg == 0
 
         return nil
       end
@@ -199,7 +199,7 @@ module BytecodeIR
 
     # Why exact_definition gave no class for +definition+, for exact_at's refusal.
     def exact_refusal(definition, insn, self_class)
-      return definition.reg == '0' && !self_class ? :self_unknown : :entry_value unless insn
+      return definition.reg == 0 && !self_class ? :self_unknown : :entry_value unless insn
       return "entry:#{definition.built}" if definition.built
       return :side_write unless insn.reg == definition.reg
       return :self_unknown if insn.op == :LOADSELF
@@ -210,7 +210,7 @@ module BytecodeIR
     def integer_literal(insn)
       case insn.op
       when :LOADI__1 then -1
-      when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+      when BytecodeIR::Ops::LOADI_SLOT then BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op]
       when :LOADI, :LOADI8, :LOADI16, :LOADI32, :LOADINEG
         value = insn.imm_operand
         value && insn.op == :LOADINEG ? -value.abs : value
@@ -218,7 +218,7 @@ module BytecodeIR
     end
 
     def query(index, reg, use_declarations:, max_states:, refusal:)
-      key = [index, reg.to_s.dup.freeze, use_declarations, max_states]
+      key = [index, reg, use_declarations, max_states]
       if (cached = @query_cache[key])
         unknown(refusal, cached[1]) if cached[1]
         return cached[0]
@@ -323,7 +323,7 @@ module BytecodeIR
     def lcf_row_field(definition, insn, register, max_states:, refusal:)
       key_register = insn.op == :GETIDX0 ? nil : (insn.reg.to_i + 1)
       return nil unless key_register
-      key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, shared: true, origin_transfers: true,
+      key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register, shared: true, origin_transfers: true,
                                                  max_states: max_states, refusal: refusal)
       syms = key_defs&.map { |source| source.entry? ? nil : ir_program.source_at(source.index) }
       unless syms && !syms.empty? && syms.all? { |producer| producer&.op == :LOADSYM }
@@ -352,7 +352,7 @@ module BytecodeIR
 
       contracts = receiver.contracts.to_set
       if receiver.classes == Set[:Array] && insn.op != :GETIDX0
-        key = query(definition.index, (insn.reg.to_i + 1).to_s, use_declarations: true, max_states: max_states, refusal: refusal)
+        key = query(definition.index, (insn.reg + 1), use_declarations: true, max_states: max_states, refusal: refusal)
         return nil unless key && key.classes == Set[:Integer]
 
         contracts.merge(key.contracts)

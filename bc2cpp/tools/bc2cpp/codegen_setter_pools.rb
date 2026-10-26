@@ -41,7 +41,7 @@ class CodeGen
     @setter_pool_reads[setter] = if setter_pool_refusal(setter)
                                    nil
                                  else
-                                   entry_arg_call_index.first[setter].map { |(irep, idx, recv, _argc, _owner)| [irep, idx, (recv + 1).to_s] }
+                                   entry_arg_call_index.first[setter].map { |(irep, idx, recv, _argc, _owner)| [irep, idx, recv + 1] }
                                  end
   end
 

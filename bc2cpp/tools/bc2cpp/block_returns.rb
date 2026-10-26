@@ -122,9 +122,9 @@ module BlockReturns
     return 'has branch targets that are not instructions' unless program.resolved?
     return 'has exception handlers it cannot place' unless program.handlers_resolved?
 
-    blk = (1 + req).to_s
+    blk = 1 + req
     proc_def = lambda do |df|
-      next df.reg.to_s == blk if df.entry?
+      next df.reg == blk if df.entry?
 
       BytecodeIR.for(irep).source_at(df.index).op == :BLKPUSH
     end
@@ -203,7 +203,7 @@ module BlockReturns
 
   # Reaching definitions that count a nested block's SETUPVAR into the method's registers.
   def definitions(irep, _program, idx, reg)
-    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
+    BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
   end
 
   def return_value_why(irep, program, idx, reg, entry, holds_proc)
@@ -212,7 +212,7 @@ module BlockReturns
 
     defs.each do |df|
       if df.entry?
-        next if entry.kind == :self && df.reg.to_s == '0'
+        next if entry.kind == :self && df.reg == 0
 
         return "returns R#{df.reg} as passed in"
       end
@@ -224,7 +224,7 @@ module BlockReturns
         if writer.op == :BLKCALL && holds_proc.call(df.index, writer.reg)
           next
         end
-        next if writer.op == :SEND && writer.sym == 'call' && writer.reg.to_s == df.reg.to_s &&
+        next if writer.op == :SEND && writer.sym == 'call' && writer.reg == df.reg &&
                 holds_proc.call(df.index, writer.reg)
       end
       what = entry.kind == :self ? 'self' : 'a value its block returned'

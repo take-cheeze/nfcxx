@@ -36,8 +36,8 @@ module IrTypeFeedback
     signature = target && IrRbsBlockTypes.signature_for(applied, target, insn.sym)
     return nil unless signature
 
-    arguments = (1..insn.argc).map { |slot| analysis.fact_at(index, (insn.reg.to_i + slot).to_s) }
-    elements = (1..insn.argc).map { |slot| analysis.element_fact_at(index, (insn.reg.to_i + slot).to_s) }
+    arguments = (1..insn.argc).map { |slot| analysis.fact_at(index, (insn.reg + slot)) }
+    elements = (1..insn.argc).map { |slot| analysis.element_fact_at(index, (insn.reg + slot)) }
     IrRbsBlockTypes.bind(signature, arguments: arguments, argument_elements: elements)
   end
 
@@ -48,7 +48,7 @@ module IrTypeFeedback
     insn = BytecodeIR.for(parent).source_at(index)
     return [] unless BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && insn.plain_fixed_argc?
 
-    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true, shared: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg + insn.argc + 1), origin_transfers: true, shared: true)
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)
@@ -65,13 +65,13 @@ module IrTypeFeedback
       contracts = bounds.values.flat_map(&:contracts).uniq.sort.freeze
       invocation_safe = summary.invocation_safe
     elsif binding && binding.argument_facts.size == fields.first
-      bounds = binding.argument_facts.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] }
+      bounds = binding.argument_facts.each_with_index.to_h { |fact, slot| [slot + 1, fact] }
       contracts = binding.contracts
       invocation_safe = false
     elsif elements && fields.first == (insn.sym == 'each_with_index' ? 2 : 1)
       contracts = (elements.contracts + ["iterator:#{insn.sym}"]).sort.freeze
-      bounds = { '1' => BytecodeIR::Types::Fact.new(classes: elements.classes, declared: true, contracts: contracts) }
-      bounds['2'] = BytecodeIR::Types::Fact.new(classes: Set[:Integer], declared: true, contracts: contracts) if fields.first == 2
+      bounds = { 1 => BytecodeIR::Types::Fact.new(classes: elements.classes, declared: true, contracts: contracts) }
+      bounds[2] = BytecodeIR::Types::Fact.new(classes: Set[:Integer], declared: true, contracts: contracts) if fields.first == 2
       invocation_safe = false
     else
       return []
@@ -238,13 +238,13 @@ module IrTypeFeedback
         (1..mandatory).each do |position|
           classes = ctx.gen.bytecode_ir_argument_classes(definition, position)
           classes ||= ctx.gen.bytecode_ir_call_graph_argument_classes(definition, position) if ctx.gen.respond_to?(:bytecode_ir_call_graph_argument_classes)
-          inferred_args[position.to_s] = classes if classes
+          inferred_args[position] = classes if classes
         end
         # Optional registers: only a complete call-site join, where every reaching call passed the argument.
         if ctx.gen.respond_to?(:bytecode_ir_optional_argument_classes)
           ((mandatory + 1)..(mandatory + (enter ? enter[1].to_i : 0))).each do |position|
             classes = ctx.gen.bytecode_ir_optional_argument_classes(definition, position)
-            inferred_args[position.to_s] = classes if classes
+            inferred_args[position] = classes if classes
           end
         end
         # Rest elements, keywords and the block: the same complete call-site joins the report rows use.
@@ -254,7 +254,7 @@ module IrTypeFeedback
         rest = enter ? enter[2].to_i : 0
         if rest.positive? && ctx.gen.respond_to?(:bytecode_ir_rest_argument_classes)
           classes = ctx.gen.bytecode_ir_rest_argument_classes(definition)
-          inferred_rest_elements[(mandatory + optional + 1).to_s] = classes if classes
+          inferred_rest_elements[mandatory + optional + 1] = classes if classes
         end
         if ctx.gen.respond_to?(:bytecode_ir_keyword_argument_classes)
           irep.each_with_op(:KARG) do |insn, _index|
@@ -265,7 +265,7 @@ module IrTypeFeedback
         end
         declared_block = ctx.signature_contracts&.ir_block_signatures&.[]([definition.owner.to_s, definition.name.to_s])
         if !declared_block && ctx.gen.respond_to?(:bytecode_ir_block_proc_classes) && ctx.gen.bytecode_ir_block_proc_classes(definition)
-          inferred_args[(mandatory + optional + rest + 1).to_s] = Set[:Proc]
+          inferred_args[mandatory + optional + rest + 1] = Set[:Proc]
         end
       end
       analysis = if applied

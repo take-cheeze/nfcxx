@@ -475,7 +475,7 @@ class CodeGen
             if stable_constructor
               return "#{note}" \
                      "  r#{d} = bc2cpp_direct_alloc(M, #{accessor});\n" \
-                     "  #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n"
+                     "  #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n"
             end
 
             else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
@@ -486,7 +486,7 @@ class CodeGen
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-                   "    #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n" \
+                   "    #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n" \
                    "  } else {\n" \
                    "    #{else_arm}" \
                    "  }\n"
@@ -2140,7 +2140,7 @@ class CodeGen
 
   # Every definition of the receiver register reaching the send is a LOADSELF of this irep.
   def receiver_loaded_self?(recv, irep, idx)
-    reg = recv[/\Ar(\d+)\z/, 1]
+    reg = recv[/\Ar(\d+)\z/, 1]&.to_i
     return false unless reg && irep && idx
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
@@ -2168,13 +2168,13 @@ class CodeGen
       # A synthetic send (addr 0: a typed index or splat helper) has no position of its own; an SSEND is a
       # self call, whose receiver is self and needs no set.
       reason = if trace_insn.addr.zero? then :synthetic_send
-               elsif trace_insn.op.to_s.start_with?('SSEND') then :self_send
+               elsif BytecodeIR::Ops::SELF_SEND_FAMILY.include?(trace_insn.op) then :self_send
                else :position_mismatch
                end
       return loop_flow_refuse(irep, trace_idx, reason)
     end
 
-    reg = original.reg.to_s
+    reg = original.reg
     return loop_flow_refuse(irep, trace_idx, :opaque_reg) if fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     defs = BytecodeIR.for(irep).reaching_definitions(trace_idx, reg, follow_moves: true,
@@ -2185,7 +2185,7 @@ class CodeGen
     # The receiver holds the loop element (the block's parameter R1, possibly copied: its definition is the entry
     # value, index ENTRY, or the ENTER that binds it) and the body writes R1 again.
     element = defs.any? do |d|
-      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == :ENTER)
+      d.reg == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == :ENTER)
     end
     if element && loop_element_reassigned?(irep)
       return loop_flow_refuse(irep, trace_idx, :element_reassigned)
@@ -2206,7 +2206,7 @@ class CodeGen
 
     host = parent[:irep]
     k = upvars.first
-    return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k.to_s)
+    return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k)
 
     flow_insn = Insn.synthetic(:SEND, "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
     loop_flow_accept(irep, trace_idx, :upvar, { irep: host, idx: parent[:idx], insn: flow_insn })
@@ -2237,7 +2237,7 @@ class CodeGen
   end
 
   # The block's mandatory parameter (R1) is the loop element in the inlined each/map/select bodies.
-  LOOP_ELEMENT_REG = '1'
+  LOOP_ELEMENT_REG = 1
 
   # The body writes R1 after ENTER bound it: a nested block's SETUPVAR (not one of the body's instructions) or the body's
   # own leading-register write. Not may_write?, which counts EXCEPT/RESCUE as writing every register.
@@ -2246,7 +2246,7 @@ class CodeGen
     @loop_element_reassigned.fetch(irep) do
       @loop_element_reassigned[irep] = BytecodeIR.own_upvar_written_regs(irep).include?(LOOP_ELEMENT_REG) ||
                                        BytecodeIR.for(irep).each_source.any? do |i, _|
-                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != :ENTER &&
+                                         i.reg == LOOP_ELEMENT_REG && i.op != :ENTER &&
                                            !NumericFlow::NO_WRITE_OPS.include?(i.op)
                                        end
     end

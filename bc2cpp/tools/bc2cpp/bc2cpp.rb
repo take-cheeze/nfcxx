@@ -715,7 +715,7 @@ if $PROGRAM_NAME == __FILE__
     RecordHash.analyze(ireps, registry, native_paths: native_paths, foreign_paths: foreign_ruby_srcs,
                                         closed_world: closed_world,
                                         outside_tokens: outside_world_tokens(native_paths + foreign_ruby_srcs),
-                                        trusted: ->(irep, idx, reg) { proven_array_source_scan(irep, idx, reg.to_s, registry) == 'Array' })
+                                        trusted: ->(irep, idx, reg) { proven_array_source_scan(irep, idx, reg, registry) == 'Array' })
   end
   RecordHash.table = record_hash.table
   RecordHash.readers = record_hash.readers

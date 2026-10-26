@@ -428,7 +428,7 @@ class CodeGen
   def constructor_new_site(irep, idx, insn, owner, found)
     stats = found[:stats]
     stats[:new] += 1
-    argc = insn.op.to_s.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     # No initialize this analysis pools takes zero arguments: a count of 0 raises in ENTER.
     return stats[:no_args] += 1 if argc&.zero?
 
@@ -439,8 +439,8 @@ class CodeGen
       site = [irep, idx - 1, insn.reg.to_i, argc, owner]
     end
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
-    classes = constructor_named_classes(irep, idx, insn) unless insn.op.to_s.start_with?('SS')
-    if classes.nil? && !insn.op.to_s.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
+    classes = constructor_named_classes(irep, idx, insn) unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+    if classes.nil? && !BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) && (via_param = class_object_receiver_classes(irep, idx, insn))
       # CLASS_OBJECT_ARGS: the receiver is a parameter every caller passes class constants for.
       classes = via_param
       stats[:param_named] += 1
@@ -505,7 +505,7 @@ class CodeGen
   def constructor_new_root(irep, idx, insn, owner)
     return nil unless owner && !@closed_world.module_declared?(owner.owner.delete_suffix('.singleton'))
 
-    if insn.op.to_s.start_with?('SS')
+    if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
       owner.owner.end_with?('.singleton') ? owner.owner.delete_suffix('.singleton') : nil
     else
       constructor_self_class_root(irep, idx, insn, owner)
@@ -516,7 +516,7 @@ class CodeGen
   def constructor_self_class_root(irep, idx, insn, owner)
     return nil if owner.owner.end_with?('.singleton') || !(@registry['class'] || []).all? { |d| d.owner == '<native>' }
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     send = BytecodeIR.for(irep).source_at(defs.first.index)
@@ -524,14 +524,14 @@ class CodeGen
     return owner.owner if send.op == :SSEND0
     return nil unless send.op == :SEND0
 
-    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg.to_s, through_handlers: true, shared: true)
-    selves&.size == 1 && selves.first.entry? && selves.first.reg == '0' ? owner.owner : nil
+    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg, through_handlers: true, shared: true)
+    selves&.size == 1 && selves.first.entry? && selves.first.reg == 0 ? owner.owner : nil
   end
 
   # The declared classes the constant receiver of the `new` at +idx+ can name, or nil when some
   # definition reaching it is not a constant that only names classes.
   def constructor_named_classes(irep, idx, insn)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     names = defs.map do |definition|
@@ -618,11 +618,11 @@ class CodeGen
 
     sites, = @constructor_pool_candidates.fetch([label, k])
     culprits = sites.filter_map do |irep, idx, recv, _argc, _owner|
-      mask = return_class_raw_mask(irep, idx, (recv + k).to_s)
+      mask = return_class_raw_mask(irep, idx, recv + k)
       next if mask && !mask.anybits?(CLASS_POOL_UNSHIPPABLE)
 
-      writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
-                                                          exhausted: ->(last) { last == '0' ? 'self' : 'incoming_arg' }) do |ins|
+      writer = irep.walk_writers(idx - 1, recv + k, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
+                                                          exhausted: ->(last) { last == 0 ? 'self' : 'incoming_arg' }) do |ins|
         %i[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.to_s.downcase
       end
       writer.is_a?(String) ? writer : 'unknown'

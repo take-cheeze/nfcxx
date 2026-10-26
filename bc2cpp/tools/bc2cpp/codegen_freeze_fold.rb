@@ -25,9 +25,9 @@ class CodeGen
   # register it writes), or nil when the flow does not decide it. +index+ is the send's instruction index.
   def freeze_fold_code(name, dest, irep, index, insn, reg, owner_def)
     return nil unless freeze_fold_enabled? && irep && index && reg && owner_def
-    return nil unless insn.reg.to_s == reg.to_s && (FREEZE_FOLD_CLASS_TESTS.include?(name) || name == 'frozen?')
+    return nil unless insn.reg == reg && (FREEZE_FOLD_CLASS_TESTS.include?(name) || name == 'frozen?')
 
-    mask = numeric_raw_mask(irep, index, reg.to_s, owner_def)
+    mask = numeric_raw_mask(irep, index, reg, owner_def)
     return nil unless mask.is_a?(Integer) && mask.positive?
 
     answer = if name == 'frozen?'

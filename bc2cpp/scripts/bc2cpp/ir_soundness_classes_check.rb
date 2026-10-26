@@ -55,8 +55,8 @@ if mrbc
 
       irep, idx, insn = scs.first
       world = world_for.call(ireps)
-      got_register = world.send(:class_object_register?, irep, idx, insn.reg.to_s)
-      got_target = world.send(:class_constant_target?, irep, idx, insn.reg.to_s)
+      got_register = world.send(:class_object_register?, irep, idx, insn.reg)
+      got_target = world.send(:class_constant_target?, irep, idx, insn.reg)
       check.call("#{what}: class_object_register? is #{register} (got #{got_register.inspect})", got_register == register)
       check.call("#{what}: class_constant_target? is #{target} (got #{got_target.inspect})", got_target == target)
     end

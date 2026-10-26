@@ -552,7 +552,7 @@ class JoinDominance
   end
 
   def call(w_idx, use_idx, reg)
-    BytecodeIR.write_dominates?(@irep, w_idx, use_idx, reg.to_s)
+    BytecodeIR.write_dominates?(@irep, w_idx, use_idx, reg)
   end
 end
 
@@ -565,11 +565,11 @@ end
 def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
   return nil unless idx&.positive? && reg
 
-  key = [irep.label, idx, reg.to_s, opts[:resolving_new] ? true : false]
+  key = [irep.label, idx, reg, opts[:resolving_new] ? true : false]
   return nil unless TraceReaching::IN_PROGRESS.add?(key)
 
   begin
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty?
 
     _ivar_classes, mand, arg_classes = rest
@@ -1134,7 +1134,7 @@ end
 # MOVE aliases; every other write ends the proof, while trace_new_target repeats
 # the walk and proves the class expression itself.
 def assigned_from_new_send?(irep, idx, reg)
-  irep.walk_writers(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, follow_moves: true) do |insn|
+  irep.walk_writers(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, follow_moves: true) do |insn|
     BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new'
   end || false
 end
@@ -1189,7 +1189,7 @@ end
 # such a literal, never as a general passthrough: RGSS::Transition#freeze is an
 # unrelated override with a different return value.
 def literal_container_class(irep, idx, reg)
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
   return nil if defs.nil? || defs.empty?
 
   classes = defs.map { |definition| literal_container_definition_class(irep, definition, Set.new) }
@@ -1212,7 +1212,7 @@ def literal_container_definition_class(irep, definition, path)
     key = [definition.index, definition.reg]
     return nil unless path.add?(key)
 
-    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg.to_s, shared: true)
+    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg, shared: true)
     classes = frozen&.map { |inner| literal_container_definition_class(irep, inner, path) }
     path.delete(key)
     classes.first if classes&.first && classes.uniq.size == 1
@@ -1237,7 +1237,7 @@ end
 def trace_eqq_literal_receiver(irep, idx, reg)
   # Every definition reaching the receiver must load the same literal: a join with a call on one arm leaves
   # no literal. An argument or block-entry definition is not a literal either.
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, shared: true)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
   return nil if defs.nil? || defs.empty?
 
   literals = defs.map { |definition| eqq_literal_of(irep, definition) }

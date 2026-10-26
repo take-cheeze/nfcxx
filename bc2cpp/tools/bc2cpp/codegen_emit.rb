@@ -476,7 +476,7 @@ class CodeGen
       # 1000 dfree calls with p == NULL, every one of them at mrb_close (gc_sweep
       # skips them because the sweep's liveness test never sees them; free_heap
       # frees every non-MRB_TT_FREE slot unconditionally). Same `if (!p) return;`
-      # the hand-written DataType<T>::free_obj already uses (mruby-rgss/src/lib.cxx).
+      # the hand-written DataType<T>::free_obj already uses(mruby-rgss/src/lib.cxx).
       out << "static void #{sanitize(owner)}_ivars_free(mrb_state* mrb, void* p) {\n"
       out << "  if (!p) return;\n"
       out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"

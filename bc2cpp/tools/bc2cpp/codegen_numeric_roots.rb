@@ -68,7 +68,7 @@ class CodeGen
   # The writer a report label names for +reg+ as read by +use+: the instruction every reaching definition shares,
   # :entry when the value comes from the frame, or :unknown when the query refuses or the writers disagree.
   def numeric_label_source(irep, use, reg)
-    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg, shared: true)
     return :unknown if defs.nil? || defs.empty?
     return :entry if defs.all?(&:entry?)
     return :unknown if defs.any?(&:entry?)
@@ -92,7 +92,7 @@ class CodeGen
 
       seen[[i, r]] = true
       refusal = {}
-      defs = BytecodeIR.reaching_definitions(irep, i, r.to_s, through_handlers: true, refusal: refusal)
+      defs = BytecodeIR.reaching_definitions(irep, i, r, through_handlers: true, refusal: refusal)
       unless defs
         out << "unproven:#{refusal[:cause]}"
         next
@@ -112,7 +112,7 @@ class CodeGen
   end
 
   def numeric_root_writer?(insn)
-    insn.op.to_s.start_with?('LOADI') || ROOT_WRITERS.include?(insn.op)
+    BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || ROOT_WRITERS.include?(insn.op)
   end
 
   # Why a method argument is not a proven number: the admission rule it fails (entry_arg_candidates), or, for an
@@ -231,7 +231,7 @@ class CodeGen
     case op
     when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
       recv = numeric_raw_mask(irep, i, insn.reg.to_i, owner_def)
-      kind = if op.to_s.start_with?('SS') then 'self'
+      kind = if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(op) then 'self'
              else recv.nil? ? 'unmodelled' : numeric_mask_name(recv)
              end
       sname = insn.sym
@@ -256,7 +256,7 @@ class CodeGen
       wi = numeric_label_source(irep, i, src)
       what = if wi == :entry then 'param'
              elsif !wi.is_a?(Insn) then '?'
-             elsif wi.op.to_s.start_with?('SEND', 'SSEND') then "send:#{wi.sym}"
+             elsif BytecodeIR::Ops::SEND_FAMILY.include?(wi.op) then "send:#{wi.sym}"
              else wi.op
              end
       ["aref<#{what}>"]

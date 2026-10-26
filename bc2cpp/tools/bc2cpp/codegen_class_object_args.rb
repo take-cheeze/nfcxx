@@ -23,7 +23,7 @@ class CodeGen
   def class_object_receiver_classes(irep, idx, insn)
     return nil unless class_object_args_enabled? && @foreign_method_names && @closed_world
 
-    classes = class_object_values(irep, idx, insn.reg.to_s, 0, Set.new)
+    classes = class_object_values(irep, idx, insn.reg, 0, Set.new)
     classes && classes.to_a.sort
   end
 
@@ -67,7 +67,7 @@ class CodeGen
       ancestor, = captured_local_frame(irep, level)
       return nil unless ancestor && class_object_param_stable?(ancestor, index)
 
-      class_object_param_values(ancestor, index.to_s, depth, active)
+      class_object_param_values(ancestor, index, depth, active)
     end
   end
 
@@ -103,7 +103,7 @@ class CodeGen
     sites.each do |(site_irep, site_idx, recv, argc)|
       next unless argc == mand
 
-      found = class_object_values(site_irep, site_idx, (recv + k).to_s, depth + 1, active)
+      found = class_object_values(site_irep, site_idx, recv + k, depth + 1, active)
       return nil unless found
 
       values.merge(found)
@@ -180,7 +180,7 @@ class CodeGen
           next
         end
 
-        zero = insn.op.to_s.end_with?('0')
+        zero = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op)
         if insn.reg.nil? || !(zero || insn.plain_fixed_argc?)
           poisoned << name
           next
@@ -201,7 +201,7 @@ class CodeGen
 
     # The write test of rbs_param_check.rb's upvar_why, without a reaching-definitions walk per instruction. A RETURN
     # of the register writes nothing a later instruction reads, so the NO_WRITE_OPS are not writes here.
-    reg = index.to_s
+    reg = index
     return false if BytecodeIR.own_upvar_written_regs(ancestor).include?(reg)
 
     program = BytecodeIR.for(ancestor)

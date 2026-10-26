@@ -231,7 +231,7 @@ module IntegerConstants
   # JMPNOT/STRING/JMP/LOADI_1/SETCONST, whose nearest backward writer is a LOADI
   # even though the other arm binds a String.
   def self.const_source_kind(irep, idx, reg, entries)
-    irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
+    irep.walk_writers(idx - 1, reg, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                          follow_moves: true) do |insn, j, cur|
       # The value rides along so arithmetic on a register-held literal (`2 * M3`) can be evaluated.
       next(loadi_value(insn) || :literal) if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
@@ -276,7 +276,7 @@ module IntegerConstants
     return nil unless name && insn.argc == 1
 
     left = const_source_kind(irep, j, cur, entries)
-    right = const_source_kind(irep, j, (cur.to_i + 1).to_s, entries)
+    right = const_source_kind(irep, j, cur.to_i + 1, entries)
     return nil unless source_operand_kind?(left) && source_operand_kind?(right)
 
     [:arithmetic, name, left, right]
@@ -329,7 +329,7 @@ module IntegerConstants
   # const_source_kind's walk, returning `[:literal, N]` for LOADI* and exact
   # operand expressions for ADD/SUB. Everything else is refused.
   def self.literal_value_kind(irep, idx, reg, entries)
-    irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
+    irep.walk_writers(idx - 1, reg, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                          follow_moves: true) do |insn, j, cur|
       if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
         value = loadi_value(insn)
@@ -379,7 +379,7 @@ module IntegerConstants
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
     # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode name; imm_operand is nil for them.
-    return insn.op.to_s.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+    return BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == :LOADI__1
 
     value = BytecodeIR::OperandModel.imm_operand(insn)

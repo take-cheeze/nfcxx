@@ -38,7 +38,7 @@ class ArgTypes
         (1..mand).each do |k|
           # No caller ivar context here: a GETIV-sourced argument traces to UNKNOWN,
           # which is safe.
-          t = IvarLayout.trace_type(caller_irep, idx, (d + k).to_s, {}, nil, 0, nil, nil, registry)
+          t = IvarLayout.trace_type(caller_irep, idx, d + k, {}, nil, 0, nil, nil, registry)
           arg_types[k - 1] = IvarLayout.join(arg_types[k - 1], t)
         end
       end

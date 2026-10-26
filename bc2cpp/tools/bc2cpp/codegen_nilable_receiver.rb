@@ -73,11 +73,11 @@ module NilableReceiverSend
 
     irep = kwargs[:irep]
     # An inlined send has no instruction index of its own: its source index and register are the
-    # ones compile_send's proof uses (trace_idx, and the register unshifted by trace_reg_offset).
+    # ones compile_send's proof uses(trace_idx, and the register unshifted by trace_reg_offset).
     idx = kwargs[:idx] || kwargs[:trace_idx]
     return nil unless irep && idx && insn.sym
 
-    proof_reg = unshift_proof_reg(insn.reg.to_s, kwargs[:trace_reg_offset].to_i)&.to_i
+    proof_reg = unshift_proof_reg(insn.reg, kwargs[:trace_reg_offset].to_i)&.to_i
     return nil unless proof_reg
 
     n = insn.argc.to_i

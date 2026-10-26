@@ -94,10 +94,10 @@ module DynamicNames
 
   # `to_enum`/`enum_for` with no name (:each) or a LOADSYM name, and `Enumerator.new(obj, :name, ...)` likewise.
   def self.literal_enumerator_name?(irep, program, idx, insn)
-    return true if insn.op.to_s.end_with?('0')
+    return true if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op)
     return insn.argc.to_i.zero? || literal_name_argument?(irep, program, idx, insn) if insn.plain_fixed_argc?
 
-    insn.positional_splat? && literal_splat_head?(irep, program, idx, (insn.reg.to_i + 1).to_s)
+    insn.positional_splat? && literal_splat_head?(irep, program, idx, (insn.reg + 1))
   end
 
   # A splat call's packed argument Array (`f(:name, *rest)`: ARRAY then ARYCAT/ARYPUSH onto it) starts with a LOADSYM.
@@ -110,11 +110,11 @@ module DynamicNames
       writer = program.source_at(writers.first)
       case writer.op
       when :ARYCAT, :ARYPUSH
-        return false unless writer.reg.to_s == reg
+        return false unless writer.reg == reg
 
         at = writers.first
       when :ARRAY
-        return false unless writer.regs.size == 1 && writer.reg.to_s == reg && writer.uint_operand.to_i.positive?
+        return false unless writer.regs.size == 1 && writer.reg == reg && writer.uint_operand.to_i.positive?
 
         heads = BytecodeIR.reaching_writer_indices(irep, writers.first, reg)
         return heads && !heads.empty? && heads.all? { |i| program.source_at(i).op == :LOADSYM }
@@ -146,14 +146,15 @@ module DynamicNames
   # `:"...#{x}..."`: STRING/STRCAT pieces then INTERN. Its value ends in `=` only when its last piece can: safe when
   # every writer of the interned register is a STRCAT whose appended operand, or a STRING, is a literal not ending in `=`.
   def self.interned_setter?(irep, program, idx, insn)
-    reg = insn.reg.to_s
+    reg = insn.reg
     writers = BytecodeIR.reaching_writer_indices(irep, idx, reg) or return true
     writers.empty? || writers.any? do |w|
       writer = program.source_at(w)
       case writer.op
       when :STRING then string_may_end_setter?(irep, writer)
       when :STRCAT
-        piece = BytecodeIR.reaching_writer_indices(irep, w, writer.paren_reg.to_s) or next true
+        paren = writer.paren_reg
+        piece = paren.nil? ? nil : BytecodeIR.reaching_writer_indices(irep, w, paren) or next true
         piece.empty? || piece.any? { |p| (s = program.source_at(p)).op != :STRING || string_may_end_setter?(irep, s) }
       else true
       end
@@ -170,7 +171,7 @@ module DynamicNames
   def self.name_value_used?(irep, idx, reg, parents, depth = 0)
     return true if reg.nil? || depth > 8
 
-    uses = FactoryFlow.uses(irep, idx, reg.to_s) or return true
+    uses = FactoryFlow.uses(irep, idx, reg) or return true
     program = BytecodeIR.for(irep)
     uses.any? do |use, used_reg|
       user = program.source_at(use)
@@ -235,7 +236,7 @@ module DynamicNames
   # Every write of the name argument reaching the send is a LOADSYM: one non-literal arm of a join makes it computed.
   def self.literal_name_argument?(irep, program, idx, insn)
     writers = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
-              BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
+              BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + 1))
     writers && writers.all? { |i| program.instruction_at(i).op == :LOADSYM } || false
   end
 
@@ -243,19 +244,19 @@ module DynamicNames
   # `respond_to?(name)` / `respond_to?(name, include_all)` send.
   def self.probe_only?(irep, idx, insn)
     program = BytecodeIR.for(irep)
-    uses = FactoryFlow.uses(irep, idx, insn.reg.to_s) or return false
+    uses = FactoryFlow.uses(irep, idx, insn.reg) or return false
     uses = uses.reject { |use, reg| self_send_slot?(program.source_at(use), reg) }
     !uses.empty? && uses.all? do |use, reg|
       send = program.source_at(use)
       BytecodeIR::Ops::SEND_FAMILY.include?(send.op) && PROBE_SENDS.include?(send.sym) && send.plain_fixed_argc? &&
-        (1..2).cover?(send.argc.to_i) && reg.to_s == (send.reg.to_i + 1).to_s
+        (1..2).cover?(send.argc.to_i) && reg == send.reg + 1
     end
   end
 
   # vm.c OP_SSEND/SSEND0/SSENDB set R[a] = self before dispatching, so a value in a self send's R[a] is
   # overwritten there, never read: FactoryFlow's register-level reads count it, and it is no use.
   def self.self_send_slot?(insn, reg)
-    insn.op.to_s.start_with?('SSEND') && reg.to_s == insn.reg.to_s
+    BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) && reg == insn.reg
   end
 
   # Whether the program could route a probe's name into Ruby: it defines or aliases respond_to? or

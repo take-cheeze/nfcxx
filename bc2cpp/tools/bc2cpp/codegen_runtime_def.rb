@@ -108,7 +108,7 @@ class CodeGen
       next unless insn.mentions_reg?(d)
 
       # (3) the only permitted consumer: `MOVE R<t> R<d>` into a temporary.
-      return nil unless insn.op == :MOVE && insn.regs[1] == d.to_s
+      return nil unless insn.op == :MOVE && insn.regs[1] == d
 
       t = insn.reg.to_i
       return nil unless t >= nlocals
@@ -136,7 +136,7 @@ class CodeGen
     ((i + 1)...program.size).each do |j|
       nxt = program.source_at(j)
       if %i[SEND SEND0].include?(nxt.op) &&
-         nxt.reg == t.to_s && nxt.sym == 'call' && !nxt.keyword_arguments? && !nxt.positional_splat?
+         nxt.reg == t && nxt.sym == 'call' && !nxt.keyword_arguments? && !nxt.positional_splat?
         # A catch handler entering the run reaches the call without the MOVE (BytecodeIR's handler edges).
         return nil unless BytecodeIR.for(irep).linear_corridor?(i, j, include_handlers: true)
 

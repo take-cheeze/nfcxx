@@ -74,7 +74,7 @@ class ClassArgTypes
 
         caller_owner = owner_of[caller_irep.label]
         (1..mand).each do |k|
-          found = trace_new_target(caller_irep, idx, (d + k).to_s, {}, mand, nil,
+          found = trace_new_target(caller_irep, idx, d + k, {}, mand, nil,
                                    owner: caller_owner, class_layout: layout_snapshot,
                                    registry: registry_snapshot,
                                    container_constants: container_constants)

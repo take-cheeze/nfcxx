@@ -343,7 +343,7 @@ class ClosedWorld
   # body): its cref is that object's singleton class.
   def class_object_body?(label)
     @class_object_bodies ||= @singleton_opens.each_with_object(Set.new) do |(irep, idx, insn), out|
-      next unless insn.op == :SCLASS && class_constant_target?(irep, idx, insn.reg.to_s)
+      next unless insn.op == :SCLASS && class_constant_target?(irep, idx, insn.reg)
 
       body = BytecodeIR.class_bodies(irep, :SCLASS)[idx]
       out << body if body
@@ -1552,7 +1552,7 @@ class ClosedWorld
     register = insn.reg
     return nil unless register
 
-    writers = BytecodeIR.reaching_writer_indices(irep, index, (register.to_i + 1).to_s)
+    writers = BytecodeIR.reaching_writer_indices(irep, index, (register + 1))
     return nil unless writers
 
     bodies = writers.map do |writer|
@@ -1572,7 +1572,7 @@ class ClosedWorld
   # Judged after the scan: class_constant? needs every SETCONST counted.
   def singleton_makers
     @singleton_makers_all ||= @singleton_makers + @singleton_opens.filter_map do |irep, idx, insn|
-      [irep.label, insn.op] unless class_object_register?(irep, idx, insn.reg.to_s)
+      [irep.label, insn.op] unless class_object_register?(irep, idx, insn.reg)
     end
   end
   # constructor_pools_refusal (codegen_constructor_pools.rb) names the makers it refuses over.
@@ -1698,7 +1698,7 @@ class ClosedWorld
 
     constant = nil
     harmless = BytecodeIR::Ops::SEND_PREFIX_OPS.include?(insn.op) && insn.argc.to_i.zero? &&
-               irep.walk_dominating_writers(idx - 1, insn.reg.to_s, use: idx, follow_moves: true) do |writer|
+               irep.walk_dominating_writers(idx - 1, insn.reg, use: idx, follow_moves: true) do |writer|
                  case writer.op
                  when *FREEZE_LITERAL_WRITERS then true
                  when :GETCONST then (constant = writer.const_name) && true
@@ -1727,7 +1727,7 @@ class ClosedWorld
   def argument_name_sets(irep, idx, insn, n, definitions: false, strings: false)
     program = BytecodeIR.for(irep)
     (1..n).map do |position|
-      reg = (insn.reg.to_i + position).to_s
+      reg = (insn.reg + position)
       defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, origin_transfers: true, shared: true)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
@@ -1783,7 +1783,7 @@ class ClosedWorld
     return nil unless insn.pure_splat?
 
     program = BytecodeIR.for(irep)
-    source_idx, source = sole_definition(irep, idx, (insn.reg.to_i + 1).to_s)
+    source_idx, source = sole_definition(irep, idx, (insn.reg + 1))
     return nil unless source
 
     # `*names` with a variable: `LOADNIL Ra; ARYCAT Ra (Rb)` copies the packed array into a fresh one, so the
@@ -1801,7 +1801,7 @@ class ClosedWorld
       arr_idx, arr = source_idx, source
       return nil unless arr.op == :ARRAY
 
-      expected = [idx, (insn.reg.to_i + 1).to_s]
+      expected = [idx, (insn.reg + 1)]
     end
     uses = FactoryFlow.uses(irep, arr_idx, arr.reg)
     return nil unless uses && uses.size == 1 && uses.first == expected
@@ -1810,7 +1810,7 @@ class ClosedWorld
     return nil unless literal&.kind == :array && literal.count.positive?
 
     (0...literal.count).map do |offset|
-      _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset).to_s)
+      _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset))
       return nil unless writer&.op == :LOADSYM
 
       writer.sym_token
@@ -1819,7 +1819,7 @@ class ClosedWorld
 
   # The one non-entry instruction that writes +reg+ at +use+, as [index, instruction], or nil.
   def sole_definition(irep, use, reg)
-    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, through_handlers: true, origin_transfers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg, through_handlers: true, origin_transfers: true, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     [defs.first.index, BytecodeIR.for(irep).source_at(defs.first.index)]
@@ -1879,7 +1879,7 @@ class ClosedWorld
 
   def factory_argument_names(irep, index, register, ops)
     names = Set.new
-    known = every_definition?(irep, index, register.to_s) do |writer, definition|
+    known = every_definition?(irep, index, register) do |writer, definition|
       next false unless writer.reg == definition.reg && ops.include?(writer.op)
 
       name = writer.op == :LOADSYM ? writer.sym : writer.const_name

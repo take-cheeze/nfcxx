@@ -109,7 +109,7 @@ module BlockSelfWorld
 
   # Reaching definitions with the irep's nested SETUPVAR writes counted (BytecodeIR.reaching_definitions).
   def definitions(irep, idx, reg, **options)
-    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, **options)
+    BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, **options)
   end
 
   class World
@@ -307,7 +307,7 @@ module BlockSelfWorld
 
     # The superclass operand every reaching definition agrees on, else :unknown.
     def class_statement_super(irep, idx, insn)
-      defs = BlockSelfWorld.definitions(irep, idx, (insn.reg.to_i + 1).to_s) or return :unknown
+      defs = BlockSelfWorld.definitions(irep, idx, (insn.reg + 1)) or return :unknown
       found = defs.map do |df|
         next :unknown if df.entry?
 
@@ -336,7 +336,7 @@ module BlockSelfWorld
     def name_operand(irep, idx, insn, ireps, parents)
       return :unknown unless insn.reg
 
-      reg = (insn.reg.to_i + 1).to_s
+      reg = (insn.reg + 1)
       return names_at(irep, idx, reg, ireps, parents) if insn.argc&.positive?
       return :unknown unless insn.positional_splat?
 
@@ -383,7 +383,7 @@ module BlockSelfWorld
       insn = BytecodeIR.for(irep).source_at(index)
       case insn.op
       when :LOADSYM then Set[insn.sym]
-      when :LOADSELF then entry_names(irep, '0', ireps)
+      when :LOADSELF then entry_names(irep, 0, ireps)
       when :LOADNIL, :LOADTRUE, :LOADFALSE then Set.new
       when :GETUPVAR then upvar_names(irep, insn, ireps, parents)
       else :unknown
@@ -392,7 +392,7 @@ module BlockSelfWorld
 
     # `self` of mruby's Symbol#to_proc is a Symbol the program passed as a block; nothing else is known at entry.
     def entry_names(irep, reg, _ireps)
-      return :unknown unless reg.to_s == '0' && @method_labels[irep.label] == %w[Symbol to_proc]
+      return :unknown unless reg == 0 && @method_labels[irep.label] == %w[Symbol to_proc]
 
       symbol_block_names
     end
@@ -409,7 +409,7 @@ module BlockSelfWorld
 
       out = Set.new
       BytecodeIR.for(frame).each_source do |w, j|
-        next unless w.reg == index.to_s && writes_leading?(w)
+        next unless w.reg == index && writes_leading?(w)
 
         found = w.op == :MOVE ? names_at(frame, j, w.regs[1], ireps, parents) : writer_names(frame, j, ireps, parents)
         return :unknown if found == :unknown
@@ -425,7 +425,7 @@ module BlockSelfWorld
 
     # Does a block nested (at any depth) in +frame+ store into its local +index+?
     def setupvar_target?(frame, index, _ireps)
-      BytecodeIR.own_upvar_written_regs(frame).include?(index.to_s)
+      BytecodeIR.own_upvar_written_regs(frame).include?(index)
     end
 
     # Every Symbol a block operand can be, which OP_SENDB turns into a Proc through Symbol#to_proc; :unknown when a
@@ -464,7 +464,7 @@ module BlockSelfWorld
 
       defs.each_with_object(Set.new) do |df, out|
         if df.entry?
-          return :unknown unless df.reg.to_s == block_param_register(irep)
+          return :unknown unless df.reg == block_param_register(irep)
 
           next
         end
@@ -484,7 +484,7 @@ module BlockSelfWorld
       return nil unless fields
 
       req, opt, rest, post, key, kdict = fields.first(6).map(&:to_i)
-      (1 + req + opt + rest + post + (key.positive? || kdict.positive? ? 1 : 0)).to_s
+      1 + req + opt + rest + post + (key.positive? || kdict.positive? ? 1 : 0)
     end
 
     # A GETUPVAR of an enclosing frame's local that only ever holds that frame's block (mrbc copies a named `&block`
@@ -496,13 +496,13 @@ module BlockSelfWorld
       return false unless frame && index
       return false if setupvar_target?(frame, index, ireps)
 
-      writers = BytecodeIR.for(frame).each_source.select { |w, _| w.reg == index.to_s && writes_leading?(w) }
+      writers = BytecodeIR.for(frame).each_source.select { |w, _| w.reg == index && writes_leading?(w) }
       !writers.empty? && writers.all? do |w, j|
         case w.op
         when :LOADNIL, :BLOCK, :LAMBDA then true
         when :MOVE
           defs = BlockSelfWorld.definitions(frame, j, w.regs[1])
-          defs && !defs.empty? && defs.all? { |df| df.entry? && df.reg.to_s == block_param_register(frame) }
+          defs && !defs.empty? && defs.all? { |df| df.entry? && df.reg == block_param_register(frame) }
         else false
         end
       end

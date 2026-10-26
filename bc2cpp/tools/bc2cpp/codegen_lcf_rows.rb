@@ -111,7 +111,7 @@ class CodeGen
     key = lcf_literal_key(irep, index, insn.reg.to_i + 1)
     return unless key.is_a?(Symbol)
 
-    mask = numeric_raw_mask(irep, index, reg.to_s, owner_def)
+    mask = numeric_raw_mask(irep, index, reg, owner_def)
     return unless mask.is_a?(Integer)
 
     rows = @lcf_rows.kinds.select { |k| (mask & k.bit).nonzero? }
@@ -137,7 +137,7 @@ class CodeGen
   def lcf_exact_receiver(irep, idx, reg, owner_def, name)
     return nil unless @lcf_rows && irep && idx && reg
 
-    mask = numeric_raw_mask(irep, idx, reg.to_s, owner_def)
+    mask = numeric_raw_mask(irep, idx, reg, owner_def)
     return nil unless mask.is_a?(Integer)
 
     nilable = mask.anybits?(NumericFlow::NIL)
@@ -207,7 +207,7 @@ class CodeGen
 
   # The literal Symbol a GETIDX key register holds, nil when there is not exactly one definition.
   def lcf_literal_key(irep, index, key_reg)
-    defs = BytecodeIR.reaching_definitions(irep, index, key_reg.to_s, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, index, key_reg, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)

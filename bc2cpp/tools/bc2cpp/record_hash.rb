@@ -360,7 +360,7 @@ module RecordHash
 
     # The ivar named by the first argument of a reflective send, when literal.
     def literal_ivar_arg(irep, idx, insn)
-      arg = (insn.reg.to_i + 1).to_s
+      arg = (insn.reg + 1)
       sources = BytecodeIR.producers(irep, idx, arg, through_handlers: true) or return nil
 
       names = sources.map do |d|
@@ -632,7 +632,7 @@ module RecordHash
       chain = []
       at = k
       loop do
-        sources = BytecodeIR.producers(irep, at, reg.to_s)
+        sources = BytecodeIR.producers(irep, at, reg)
         return nil unless sources&.size == 1 && !sources.first.entry? && sources.first.reg.to_i == reg
 
         index = sources.first.index

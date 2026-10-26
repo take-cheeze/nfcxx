@@ -19,7 +19,7 @@ class CodeGen
     # RESCUE reads its first register and writes its second; the caught
     # exception remains live in the input register for the handler.
     rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
-    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false,
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false,
                                               follow_moves: true) do |insn, _index, exc_reg|
       next false unless insn.op == :EXCEPT
 
@@ -77,7 +77,7 @@ class CodeGen
   end
 
   # ELEMENT_CLASS_SUPPORT: element class of a proven-Array block receiver, from
-  # the same scan ArrayElementLayout uses (so they cannot drift). nil (the usual
+  # the same scan ArrayElementLayout uses(so they cannot drift). nil (the usual
   # answer) leaves per-element calls as POLY mrb_funcall.
   def proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
     array_element_source_scan(irep, idx, dest_reg, element_ctx(ivar_classes, mand, arg_classes, owner_name))
@@ -204,7 +204,7 @@ class CodeGen
   def receiver_trace_origin(irep, idx, dest_reg)
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
-    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg.to_s, shared: true)
+    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg, shared: true)
     return "unproven.#{receiver_origin_by_walk(irep, idx, dest_reg)}" if defs.nil?
     return receiver_origin_by_walk(irep, idx, dest_reg) if defs.empty?
 
@@ -213,14 +213,14 @@ class CodeGen
   end
 
   def receiver_definition_origin(irep, definition)
-    return (definition.reg.to_s == '0' ? 'self_register' : 'incoming_or_unwritten_register') if definition.entry?
+    return (definition.reg == 0 ? 'self_register' : 'incoming_or_unwritten_register') if definition.entry?
 
     receiver_producer_origin(BytecodeIR.for(irep).source_at(definition.index))
   end
 
   def receiver_origin_by_walk(irep, idx, dest_reg)
-    at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
-    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
+    at_entry = ->(last) { last == 0 ? 'self_register' : 'incoming_or_unwritten_register' }
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
       insn.op == :MOVE ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
     end
   end
@@ -245,7 +245,7 @@ class CodeGen
                       idx < BytecodeIR.for(irep).size && dest_reg
 
     written = straight_line_constant_name(irep, idx, dest_reg) ||
-              irep.agreed_constant_name(idx, dest_reg.to_s, through_handlers: through_handlers)
+              irep.agreed_constant_name(idx, dest_reg, through_handlers: through_handlers)
     owner = if written
               resolve_class_constant_name(written, lexical_owner)
             else
@@ -260,7 +260,7 @@ class CodeGen
   # that is the register's one definition and the name is a class the program knows.
   def top_level_constant_name(irep, idx, reg, through_handlers)
     program = BytecodeIR.for(irep)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: through_handlers, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: through_handlers, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     insn = program.source_at(defs.first.index)
@@ -281,7 +281,7 @@ class CodeGen
     return nil unless @closed_world && @closed_world.global_refusal.nil? && guard_violation_enabled? &&
                       @call_block_expr.nil? && irep && idx && reg && idx < BytecodeIR.for(irep).size
 
-    name = irep.agreed_constant_name(idx, reg.to_s, through_handlers: through_handlers)
+    name = irep.agreed_constant_name(idx, reg, through_handlers: through_handlers)
     return name if name && !name.include?('::') && CodeGen.stable_class_constants&.include?(name)
 
     # A qualified or declared-class constant: the proof behind CLOSED_WORLD_CONSTANT_OBJECT.
@@ -323,7 +323,7 @@ class CodeGen
     return nil unless branch_edges
 
     barriers = skip_blocks ? %i[JMPUW ONERR RESCUE EXCEPT] : %i[JMPUW ONERR RESCUE EXCEPT BLOCK]
-    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
+    ref = irep.constant_path(idx - 1, dest_reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
     return nil unless ref&.root == :const
 
     # A forward edge from before this write into the send's block could
@@ -332,7 +332,7 @@ class CodeGen
     # A loop back-edge from after the send can carry a second write of dest_reg into it, which the backward walk
     # cannot see; a single reaching definition (following back-edges) is the only write that can be the receiver.
     # Handler edges are crossed: without through_handlers a send inside a rescue/ensure range is refused (:query_guarded).
-    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     ref.name && ([ref.name] + ref.segments).join('::')

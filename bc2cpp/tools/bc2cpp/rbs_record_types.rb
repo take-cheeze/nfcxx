@@ -278,7 +278,7 @@ module RbsRecordTypes
   end
 
   def value_errors(irep, idx, reg, field, ctx)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return ["value of :#{field.key} cannot be traced (declare it untyped)"] if defs.nil? || defs.empty?
 
     defs.filter_map do |d|
@@ -388,7 +388,7 @@ module RbsRecordTypes
     lambda do |irep, idx, reg|
       next nil unless defined?(proven_array_source_scan)
 
-      'Array' if proven_array_source_scan(irep, idx, reg.to_s, registry) == 'Array'
+      'Array' if proven_array_source_scan(irep, idx, reg, registry) == 'Array'
     end
   end
 
@@ -549,7 +549,7 @@ module RbsRecordTypes
       return escape("#{name} arity") unless insn.op == :EQ || plain_args?(insn, 1)
       return escape("#{name} of the Hash with itself") if state.include?(lead + 1)
 
-      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1).to_s, through_handlers: true, shared: true)
+      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1), through_handlers: true, shared: true)
       nil_operand = defs && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == :LOADNIL }
       return escape("#{name} against a value other than nil") unless nil_operand
 
@@ -654,7 +654,7 @@ module RbsRecordTypes
       return escape("#{insn.sym} arity (one Hash literal, no block)") unless plain_args?(insn, 1)
       return escape("#{insn.sym} of the Hash itself") if state.include?(lead + 1)
 
-      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1).to_s, through_handlers: true, shared: true)
+      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1), through_handlers: true, shared: true)
       lit = defs&.size == 1 && !defs.first.entry? && BytecodeIR.for(irep).source_at(defs.first.index)
       return escape("non-literal #{insn.sym}") unless lit && lit.op == :HASH && lit.uint_operand
 

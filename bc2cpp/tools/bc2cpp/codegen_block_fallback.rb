@@ -329,7 +329,7 @@ class CodeGen
       block_reg = insn.reg
       # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
       # :reduce n=1`), so the block is at dest + n + 1.
-      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + n + 1).to_s
+      next unless dest_reg && block_reg && block_reg == dest_reg + n + 1
 
       name = paired.sym
       next unless name
@@ -465,7 +465,7 @@ class CodeGen
                   !PRIMITIVE_ELEMENT_CLASSES.include?(element)
 
       strict = STRICT_BLOCK_ELEMENT_SHAPES.include?([klass, name]) && shape.elements == [0]
-      return shape.elements.to_h { |pos| [(pos + 1).to_s, strict ? element : SoftElementHint.new(element)] }
+      return shape.elements.to_h { |pos| [pos + 1, strict ? element : SoftElementHint.new(element)] }
     end
     {}
   end
@@ -809,7 +809,7 @@ class CodeGen
     elem_hints = block_fallback_element_hints(region[:parent_irep], region, d.owner)
     if elem_hints.empty?
       rbs_class = block_fallback_rbs_param_class(region[:parent_irep], region, d.owner)
-      elem_hints = { '1' => rbs_class } if rbs_class
+      elem_hints = { 1 => rbs_class } if rbs_class
     end
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     arm_prune_block_analysis(block_irep, d, 0)
@@ -1200,13 +1200,13 @@ class CodeGen
 
       if insn.positional_splat?
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
-                     argv_reg: (dest_reg.to_i + 1).to_s,
-                     blk_reg: (dest_reg.to_i + 2).to_s, name: name,
+                     argv_reg: dest_reg + 1,
+                     blk_reg: dest_reg + 2, name: name,
                      self_implicit: insn.op == :SSENDB }
       else
         n = insn.argc.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
-                     blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
+                     blk_reg: dest_reg + n + 1, name: name,
                      self_implicit: insn.op == :SSENDB, parent_irep: irep }
       end
     end

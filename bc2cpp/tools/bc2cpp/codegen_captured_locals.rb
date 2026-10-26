@@ -24,7 +24,7 @@ class CodeGen
 
     ancestor, creation = captured_local_frame(irep, level)
     return NumericFlow::OTHER unless ancestor
-    return NumericFlow::OTHER if index >= ancestor.nregs.to_i || fixnum_proof_ctx(ancestor)[:upvars].include?(index.to_s)
+    return NumericFlow::OTHER if index >= ancestor.nregs.to_i || fixnum_proof_ctx(ancestor)[:upvars].include?(index)
 
     states = return_class_states(ancestor)
     state = states && states[creation]
@@ -69,7 +69,7 @@ class CodeGen
         next unless sym
 
         return false if names.include?(sym)
-        return false if CAPTURED_LOCAL_STRING_EVALS.include?(sym) && insn.op.to_s.include?('SEND') && !literal_block_argument?(irep, idx, insn)
+        return false if CAPTURED_LOCAL_STRING_EVALS.include?(sym) && BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && !literal_block_argument?(irep, idx, insn)
       end
     end
     !DynamicNames.universe(@ireps).intersect?(names)

@@ -124,7 +124,7 @@ states_changed = NF.states(irep, changed, Set.new)
 check.call('a changed entry answer reaches the result through the same plan', states_changed[1][2] == (INT | FLT))
 changed_send = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT)
 check.call('a changed send answer reaches the result', NF.states(irep, changed_send, Set.new)[5][4] == FLT)
-check.call('an opaque register is an input too', NF.states(irep, LogOracle.new({ 1 => INT, 3 => INT }, INT), Set['2'])[1][2] == OTHER)
+check.call('an opaque register is an input too', NF.states(irep, LogOracle.new({ 1 => INT, 3 => INT }, INT), Set[2])[1][2] == OTHER)
 writes = {}
 NF.states(irep, LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT), Set.new, writes)
 check.call('writes collect every store', writes[2] == INT && writes[4] == INT && writes[5] == INT)
@@ -199,10 +199,10 @@ end
 check.call('wide and negative masks retain union and provenance behavior across 2,000 joins', join_matches)
 
 puts '-- opaque registers (host)'
-[Set.new, Set['0', '2', '02', '8', 1]].each do |opaque|
+[Set.new, Set[0, 2, 2, 8, 1]].each do |opaque|
   context = NF::Ctx.new(nil, Object.new, opaque, 4, [], {}, [], 4, nil)
-  check.call("opaque register membership matches canonical strings: #{opaque.to_a.inspect}",
-             context.opq == Array.new(4) { |reg| opaque.include?(reg.to_s) } && context.opq.frozen?)
+  check.call("opaque register membership matches canonical integers: #{opaque.to_a.inspect}",
+             context.opq == Array.new(4) { |reg| opaque.include?(reg) } && context.opq.frozen?)
 end
 
 puts '-- Hash ctx (host)'
@@ -212,10 +212,10 @@ hash_oracle.define_singleton_method(:send_mask) { |*_args| NF::STR }
 ctx = { oracle: hash_oracle, irep: nil, nregs: 4, slots: ['@value'], facts: [OTHER], slot_of: { '@value' => 4 },
         prov_base: 5, opaque: Set.new, writes: nil }
 state = [OTHER, NF::STR, INT, OTHER, INT, 0, 0, 1, 0]
-after = NF.transfer(0, FakeCall.new(:SEND0, '1'), state, ctx)
+after = NF.transfer(0, FakeCall.new(:SEND0, 1), state, ctx)
 check.call('transfer: the call result, the frame above it and the slot widened',
            after[1] == NF::STR && after[2] == OTHER && after[4] == (INT | OTHER) && after[5, 4].all?(&:zero?))
-raised_state = NF.raise_state(FakeCall.new(:SEND0, '1'), state, after, ctx)
+raised_state = NF.raise_state(FakeCall.new(:SEND0, 1), state, after, ctx)
 check.call('raise_state joins the widened state with the result', raised_state[1] == (NF::STR | OTHER))
 
 puts '-- scalar result states (host)'
@@ -346,7 +346,7 @@ opaque_input = clean_load.dup
 opaque_input[1] = OTHER
 opaque_input.freeze
 check.call('captured registers use the effective OTHER mask before deciding to share',
-           NF.copy_reg_write(opaque_input, 1, INT, load_context.call({}, Set['1'])).equal?(opaque_input))
+           NF.copy_reg_write(opaque_input, 1, INT, load_context.call({}, Set[1])).equal?(opaque_input))
 manual_load = load_context.call({})
 load_instruction = insn(0, :LOADI_1, 'R1 (1)')
 manual_result = NF.transfer(0, load_instruction, clean_load, manual_load)
@@ -468,7 +468,7 @@ cases = [
   ['repeated loads and oracle order', loads_body, Set.new, loads_factory],
   ['same-class rewrite invalidates register aliases', alias_loads, Set.new, loads_factory],
   ['loop and ivar provenance', irep, Set.new, -> { LogOracle.new({ 1 => INT | NIL_, 3 => FLT }, INT) }],
-  ['captured registers', irep, Set['1', '2'], -> { LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT) }],
+  ['captured registers', irep, Set[1, 2], -> { LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT) }],
   ['optional entry, rescue and ensure', enter_irep, Set.new, -> { LogOracle.new({ 1 => INT }, INT) }],
   ['sibling branch isolation', split_irep, Set.new, -> { LogOracle.new({}, INT) }],
   ['raising call, slots and EXCEPT/RAISEIF', handler_irep, Set.new, -> { LogOracle.new({}, FLT) }],

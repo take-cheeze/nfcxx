@@ -127,10 +127,10 @@ module IntegerConstantRanges
   # be the load that writes the register: control reaching it runs that load.
   def self.source_kind(irep, idx, reg, entries, freeze_safe: false)
     barrier = lambda do |insn, cur|
-      load_here = insn.reg == cur.to_s && (LOADS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op))
+      load_here = insn.reg == cur && (LOADS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op))
       entries.include?(insn.addr) && !load_here
     end
-    irep.walk_writers(idx - 1, reg.to_s, barrier: barrier, follow_moves: true) do |insn, j, cur|
+    irep.walk_writers(idx - 1, reg, barrier: barrier, follow_moves: true) do |insn, j, cur|
       next IrepScans::KEEP if freeze_safe && insn.op == :SEND0 && insn.sym == 'freeze'
       if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
         value = literal(insn)
@@ -149,7 +149,7 @@ module IntegerConstantRanges
   # LOADI__1 carry no operand, so IntegerConstants.loadi_value cannot read them.
   def self.literal(insn)
     value = case insn.op
-            when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
+            when BytecodeIR::Ops::LOADI_SLOT then BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op]
             when :LOADI__1 then -1
             else BytecodeIR::OperandModel.imm_operand(insn)
             end

@@ -44,7 +44,7 @@ def splat_tables(suite, source)
       irep.instructions.each_with_index.filter_map do |insn, idx|
         next unless insn.sym == 'send' && insn.n_spec == '*'
 
-        [IrSymbolFlow.splat_table(irep, idx, (insn.reg.to_i + 1).to_s)]
+        [IrSymbolFlow.splat_table(irep, idx, insn.reg.to_i + 1)]
       end
     end.flatten(1)
   end

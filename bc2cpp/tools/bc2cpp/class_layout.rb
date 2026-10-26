@@ -83,7 +83,7 @@ end
 def lcf_file_array_read?(irep, pin_idx, pin, receiver_class)
   return false unless receiver_class
 
-  keys = BytecodeIR.producers(irep, pin_idx, (pin.reg.to_i + 1).to_s)
+  keys = BytecodeIR.producers(irep, pin_idx, (pin.reg + 1))
   return false unless keys&.size == 1 && !keys.first.entry? && keys.first.insn&.op == :LOADSYM
 
   file_class = receiver_class.call(pin_idx, pin)
@@ -96,7 +96,7 @@ end
 # the store, so proven_array_source_scan's single-writer walk finds nothing. Every definition being an Array (an ARRAY
 # allocation, or a schema Array read off an exact LCF file) makes the join an Array.
 def array_join_source?(irep, idx, reg, receiver_class)
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, shared: true)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
   return false if defs.nil? || defs.size < 2
 
   defs.all? do |defn|

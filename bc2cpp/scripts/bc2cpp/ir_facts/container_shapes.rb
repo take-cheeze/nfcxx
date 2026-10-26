@@ -29,11 +29,11 @@ literals = irep_of([insn(0, :ARRAY, "R3\t2"), insn(3, :ARRAY, "R3\tR5\t2"), insn
                     insn(10, :HASH, "R2\t0"), insn(13, :RETURN, 'R2')])
 program = BytecodeIR.for(literals)
 array = program.container_literal(0)
-check.call('ARRAY R3 2 reads R3, R4', array.kind == :array && array.value_regs == %w[3 4] && array.key_regs.empty?)
+check.call('ARRAY R3 2 reads R3, R4', array.kind == :array && array.value_regs == [3, 4] && array.key_regs.empty?)
 array2 = program.container_literal(1)
-check.call('the two-register ARRAY (ARRAY2) reads from its source register', array2.value_regs == %w[5 6])
+check.call('the two-register ARRAY (ARRAY2) reads from its source register', array2.value_regs == [5, 6])
 hash = program.container_literal(2)
-check.call('HASH R2 2 has keys R2, R4 and values R3, R5', hash.key_regs == %w[2 4] && hash.value_regs == %w[3 5])
+check.call('HASH R2 2 has keys R2, R4 and values R3, R5', hash.key_regs == [2, 4] && hash.value_regs == [3, 5])
 check.call('an empty HASH is empty', program.container_literal(3).empty?)
 check.call('a RETURN builds no container', program.container_literal(4).nil?)
 
@@ -42,18 +42,18 @@ puts '-- producers through a join'
 joined = irep_of([insn(0, :JMPNOT, "R1\t9"), insn(4, :ARRAY, "R3\t0"), insn(7, :JMP, '15'),
                   insn(9, :LOADI_1, "R3\t(1)"), insn(11, :ARRAY, "R3\t1"), insn(15, :SETIV, "@a\tR3"),
                   insn(18, :RETURN, 'R3')])
-sources = BytecodeIR.producers(joined, 5, '3')
+sources = BytecodeIR.producers(joined, 5, 3)
 check.call('both arms of the join produce the stored value', sources&.map(&:index) == [1, 4])
 check.call('a producer carries its instruction', sources&.map(&:op) == %i[ARRAY ARRAY])
 check.call('the element join skips the empty arm and takes the other one',
-           join_element_producers(joined, 5, '3') { |p| p.index == 1 ? ArrayElementLayout::VACUOUS : 'Game::Actor' } ==
+           join_element_producers(joined, 5, 3) { |p| p.index == 1 ? ArrayElementLayout::VACUOUS : 'Game::Actor' } ==
              'Game::Actor')
 check.call('the element join refuses when the arms disagree',
-           join_element_producers(joined, 5, '3') { |p| p.index == 1 ? 'A' : 'B' }.nil?)
+           join_element_producers(joined, 5, 3) { |p| p.index == 1 ? 'A' : 'B' }.nil?)
 check.call('the element join refuses when one arm is unknown',
-           join_element_producers(joined, 5, '3') { |p| p.index == 1 ? 'A' : nil }.nil?)
+           join_element_producers(joined, 5, 3) { |p| p.index == 1 ? 'A' : nil }.nil?)
 check.call('an argument read is the entry producer',
-           BytecodeIR.producers(joined, 0, '1')&.map(&:entry?) == [true])
+           BytecodeIR.producers(joined, 0, 1)&.map(&:entry?) == [true])
 
 puts '-- literal classes'
 classes = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :STRING, "R3\tL[0]"), insn(3, :LOADNIL, "R4\t(nil)"),
@@ -92,7 +92,7 @@ puts '-- adjacent_block_index'
 blocks = irep_of([insn(0, :BLOCK, "R3\tI[0]"), insn(3, :SENDB, "R2\t:map\tn=0"), insn(7, :RETURN, 'R2')],
                  reps: ['child'])
 check.call('the BLOCK writing the block slot of the call is found',
-           BytecodeIR.for(blocks).adjacent_block_index(1, '2') == 0)
-check.call('a BLOCK writing another register is not', BytecodeIR.for(blocks).adjacent_block_index(1, '1').nil?)
+           BytecodeIR.for(blocks).adjacent_block_index(1, 2) == 0)
+check.call('a BLOCK writing another register is not', BytecodeIR.for(blocks).adjacent_block_index(1, 1).nil?)
 
 suite.finish!
