@@ -433,7 +433,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   CRubyRuns.plan(RbConfig.ruby).each do |run|
     cruby_descriptions[run[:label]] = CRubyRuns.description(RbConfig.ruby, run)
     puts "#{run[:label]}: #{cruby_descriptions[run[:label]]}"
-    benchmarks << run_benchmark(run[:label], [RbConfig.ruby, *run[:args], cruby_bundle, ROM, FRAMES.to_s], env: run[:env])
+    ruby = run[:ruby] || RbConfig.ruby
+    benchmarks << run_benchmark(run[:label], [ruby, *run[:args], cruby_bundle, ROM, FRAMES.to_s], env: run[:env])
   end
   profile_dir = File.join(temp, 'profile')
   interpreted_profile_dir = File.join(profile_dir, 'interpreted')

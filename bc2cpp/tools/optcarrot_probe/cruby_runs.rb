@@ -6,9 +6,14 @@ require 'open3'
 # plain interpreter (RUBY_YJIT_ENABLE=0, plus --disable=jit when that Ruby accepts it) and once with --yjit when that
 # Ruby has YJIT, so a ratio never silently compares against whatever the calling shell enabled.
 # OPTCARROT_CRUBY_YJIT=0 skips the YJIT run.
+# TRUFFLERUBY_RUN: OPTCARROT_TRUFFLERUBY names a TruffleRuby `ruby` to time as one more reference, on the same bundle.
 module CRubyRuns
   INTERPRETER_LABEL = 'CRuby (interpreter)'
   YJIT_LABEL = 'CRuby + YJIT'
+  TRUFFLERUBY_LABEL = 'TruffleRuby'
+  REFERENCE_LABELS = [INTERPRETER_LABEL, YJIT_LABEL, TRUFFLERUBY_LABEL].freeze
+  # The runner runs under `bundle exec`; another Ruby must not load this Ruby's Bundler setup or gems.
+  FOREIGN_RUBY_ENV = %w[RUBYOPT RUBYLIB GEM_HOME GEM_PATH BUNDLE_GEMFILE BUNDLE_BIN_PATH].to_h { |k| [k, nil] }.freeze
 
   module_function
 
@@ -29,19 +34,22 @@ module CRubyRuns
     if wanted && probe.call(ruby, ['--yjit'], 'exit(defined?(RubyVM::YJIT) && RubyVM::YJIT.enabled? ? 0 : 1)', {})
       runs << { label: YJIT_LABEL, args: ['--yjit'], env: { 'RUBY_YJIT_ENABLE' => '1' } }
     end
+    truffle = env.fetch('OPTCARROT_TRUFFLERUBY', '')
+    runs << { label: TRUFFLERUBY_LABEL, ruby: truffle, args: [], env: FOREIGN_RUBY_ENV } unless truffle.empty?
     runs
   end
 
-  # RUBY_DESCRIPTION as that run sees it ("+YJIT" appears when YJIT is on).
+  # RUBY_DESCRIPTION as that run sees it ("+YJIT" appears when YJIT is on). A run's own `ruby` wins over `ruby`.
   def description(ruby, run)
-    out, status = Open3.capture2e(run[:env], ruby, *run[:args], '-e', 'print RUBY_DESCRIPTION')
-    status.success? ? out.strip : "unknown (#{out.strip})"
+    # stdout only: TruffleRuby warns on stderr (about the locale, for one), which is not the description.
+    out, err, status = Open3.capture3(run[:env], run[:ruby] || ruby, *run[:args], '-e', 'print RUBY_DESCRIPTION')
+    status.success? ? out.strip : "unknown (#{(out + err).strip})"
   end
 
   # Wall-time ratio lines for the summary: every non-CRuby row against every CRuby row, then bc2cpp against the
   # mruby interpreter. `results` are compiled_run.rb's benchmark hashes ({label:, seconds:}).
   def ratio_lines(results)
-    cruby = results.select { |r| [INTERPRETER_LABEL, YJIT_LABEL].include?(r[:label]) }
+    cruby = results.select { |r| REFERENCE_LABELS.include?(r[:label]) }
     interp = results.find { |r| r[:label] == 'mruby interpreter' }
     compiled = results.find { |r| r[:label].start_with?('mruby + bc2cpp') }
     lines = []

@@ -39,6 +39,21 @@ Each row prints its own `RUBY_DESCRIPTION` (`+YJIT` when on) and must match
 the checksum. The summary gives every mruby and bc2cpp ratio against both
 CRuby rows.
 
+**TruffleRuby.** `OPTCARROT_TRUFFLERUBY=/path/to/truffleruby/bin/ruby` adds a
+`TruffleRuby` row on the same bundle, run with the runner's Bundler environment
+cleared; it joins the checksum agreement and the ratios. One local comparison
+(best of three, current master, TruffleRuby 34.0.1 native, CRuby 4.0.9):
+
+| Runtime | 180 frames | 1800 frames |
+| --- | ---: | ---: |
+| CRuby + YJIT | 1.10 s | 7.85 s |
+| mruby + bc2cpp | 1.39 s | 8.98 s |
+| TruffleRuby | 2.91 s | 9.45 s |
+| CRuby (interpreter) | 3.20 s | |
+
+TruffleRuby is still warming up at 180 frames; over 1800 it has the best
+frame rate (about 270 fps reported, YJIT about 247, bc2cpp about 200).
+
 Every CRuby figure in this file older than that change, the ones above
 included, came from a single run under whatever `RUBY_YJIT_ENABLE` the
 calling shell had. The Nix dev shells set it to 1 since ADR 0488; plain
