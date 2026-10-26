@@ -164,11 +164,12 @@ module OwnerSetDirect
   end
 
   # OWNER_SET_NATIVE_ARMS: the arms for this owner-call line, or nil when no owner of its name has an audited row
-  # that applies. `seen` is the method's text before the line; an arm whose guard is already there was tested.
+  # that applies. `seen` is the method's text before the line; an arm whose guard already opens an `if` there was
+  # tested. A guard that is only part of a condition (an operator's tag pair) is not.
   def owner_set_native_arms_code(m, argv, seen)
     owners = m[:call][/BC2CPP_OWNERS\(([^)]*)\)/, 1].to_s.scan(/"([^"]+)"/).flatten
     entries = owner_set_arm_entries(m[:name], argv.size).select { |entry| owners.include?(entry.owner) }
-    entries = entries.reject { |entry| seen.include?(entry.guard(m[:recv], argv)) }
+    entries = entries.reject { |entry| seen.include?("if (#{entry.guard(m[:recv], argv)}) {") }
     return nil if entries.empty?
 
     ind = m[:indent]

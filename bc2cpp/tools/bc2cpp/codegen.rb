@@ -18,6 +18,21 @@
 #     could not prove monomorphic.
 # ---------------------------------------------------------------------------
 class CodeGen
+  # TYPE_TEST: mruby's type predicates are macros on the boxed word; mrb_type is an inline function that GCC stops
+  # inlining in large generated bodies, which made every numeric tag test an out-of-line call.
+  TYPE_PREDICATES = {
+    'MRB_TT_INTEGER' => 'mrb_integer_p', 'MRB_TT_FLOAT' => 'mrb_float_p', 'MRB_TT_SYMBOL' => 'mrb_symbol_p',
+    'MRB_TT_STRING' => 'mrb_string_p', 'MRB_TT_ARRAY' => 'mrb_array_p', 'MRB_TT_HASH' => 'mrb_hash_p',
+    'MRB_TT_PROC' => 'mrb_proc_p', 'MRB_TT_RANGE' => 'mrb_range_p', 'MRB_TT_CLASS' => 'mrb_class_p',
+    'MRB_TT_MODULE' => 'mrb_module_p', 'MRB_TT_SCLASS' => 'mrb_sclass_p', 'MRB_TT_EXCEPTION' => 'mrb_exception_p'
+  }.freeze
+
+  # The C test that +expr+ has type +tag+ (an MRB_TT_ name).
+  def self.type_test(expr, tag)
+    predicate = TYPE_PREDICATES[tag]
+    predicate ? "#{predicate}(#{expr})" : "mrb_type(#{expr}) == #{tag}"
+  end
+
   # EMBED_WIRED (compiled_gems.rb BC2CPP_WIRED_EMBEDDINGS): nil leaves embedding
   # unrestricted (unit checks); the driver sets it for a real gem build.
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in

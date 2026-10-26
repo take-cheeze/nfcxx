@@ -188,9 +188,9 @@ class CodeGen
                  end
       return "  // FLOAT_DIV_RECEIVER :/ -> Float#/, guarded by exact Float type\n" \
              "  #ifdef MRB_USE_COMPLEX\n" \
-             "  if (mrb_type(#{recv}) == MRB_TT_FLOAT && mrb_type(#{arg}) != MRB_TT_COMPLEX) {\n" \
+             "  if (mrb_float_p(#{recv}) && mrb_type(#{arg}) != MRB_TT_COMPLEX) {\n" \
              "  #else\n" \
-             "  if (mrb_type(#{recv}) == MRB_TT_FLOAT) {\n" \
+             "  if (mrb_float_p(#{recv})) {\n" \
              "  #endif\n" \
              "    r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
              "  } else {\n" \

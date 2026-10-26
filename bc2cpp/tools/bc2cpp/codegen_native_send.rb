@@ -344,7 +344,7 @@ class CodeGen
                       " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}"
       <<~CPP.chomp
         #{source_comment}
-        if (mrb_type(#{recv}) == #{owner[:tag]}#{exact_class}) {
+        if (#{CodeGen.type_test(recv, owner[:tag])}#{exact_class}) {
           r#{d} = #{expression};
         } else
       CPP

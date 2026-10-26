@@ -405,14 +405,14 @@ class CodeGen
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+          #{guarded_arm}  if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_div_int_value(M, mrb_integer(r#{d}), mrb_integer(r#{s}));
           #ifndef MRB_NO_FLOAT
-          } else if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+          } else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(r#{d}), mrb_float(r#{s})));
-          } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+          } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), (mrb_float)mrb_integer(r#{s})));
-          } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+          } else if (mrb_float_p(r#{d}) && mrb_float_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), mrb_float(r#{s})));
           #endif
           } else {
@@ -1078,7 +1078,7 @@ class CodeGen
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
     no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
     numeric_dispatch = <<~CPP
-      if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+      if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
       #ifdef MRB_NO_FLOAT
         r#{d} = mrb_bool_value(#{no_float_accessor});
       #else
@@ -1086,11 +1086,11 @@ class CodeGen
       #endif
       }
       #ifndef MRB_NO_FLOAT
-      else if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+      else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
         r#{d} = mrb_bool_value(mrb_integer(r#{d}) #{sym} mrb_float(r#{s}));
-      } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+      } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
         r#{d} = mrb_bool_value(mrb_float(r#{d}) #{sym} mrb_integer(r#{s}));
-      } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+      } else if (mrb_float_p(r#{d}) && mrb_float_p(r#{s})) {
         r#{d} = mrb_bool_value(mrb_float(r#{d}) #{sym} mrb_float(r#{s}));
       }
       #endif
@@ -1132,7 +1132,7 @@ class CodeGen
     recv = "r#{d}"
     chain = entries.map do |entry|
       owner = entry[:owner]
-      guard = "mrb_type(#{recv}) == #{owner[:tag]}"
+      guard = CodeGen.type_test(recv, owner[:tag])
       guard += " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}" unless IMMEDIATE_NATIVE_CLASSES.include?(owner[:class_name])
       expression = entry[:expression].gsub('recv', recv).gsub('BC2CPP_ARG0', "r#{s}")
       "  if (#{guard}) {\n    r#{d} = #{expression};\n  } else "
