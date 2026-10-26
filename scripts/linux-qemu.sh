@@ -132,10 +132,23 @@ accel=tcg
 [ -w /dev/kvm ] && accel=kvm
 log=$dir/boot-$tag.log
 set +e
-s3=(); [ -z "$suspend" ] || s3=(-global PIIX4_PM.disable_s3=0 -global PIIX4_PM.disable_s4=0)
-timeout ${QEMU_TIMEOUT:-300} qemu-system-x86_64 -accel "$accel" -m 256 -nographic -no-reboot ${s3[@]+"${s3[@]}"} \
+s3=(); mon=(); waker=""
+if [ -n "$suspend" ]; then
+  # qemu keeps a guest in S3 paused until the monitor says system_wakeup: a waker sends it every 5 s from 60 s on, and
+  # does nothing while the guest is running (qemu answers that with an error, which the monitor discards)
+  s3=(-global PIIX4_PM.disable_s3=0 -global PIIX4_PM.disable_s4=0)
+  sock=$dir/qemu-mon.sock; rm -f "$sock"
+  mon=(-monitor "unix:$sock,server,nowait")
+  ( sleep 60; for _ in $(seq 1 60); do
+      python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.sendall(b"system_wakeup\n"); time.sleep(0.3); s.close()' "$sock" 2>/dev/null
+      sleep 5
+    done ) &
+  waker=$!
+fi
+timeout ${QEMU_TIMEOUT:-300} qemu-system-x86_64 -accel "$accel" -m 256 -nographic -no-reboot ${s3[@]+"${s3[@]}"} ${mon[@]+"${mon[@]}"} \
   -kernel "$dir/bzImage-$tag" -initrd "$dir/initramfs.cpio" -append "console=ttyS0 panic=-1${suspend:+ mem_sleep_default=deep}" > "$log" 2>&1
 status=$?
+[ -z "$waker" ] || kill "$waker" 2>/dev/null || true
 set -e
 cat "$log"
 if [ "$status" -ne 0 ] || ! grep -qF "$marker" "$log"; then
