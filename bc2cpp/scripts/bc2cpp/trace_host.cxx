@@ -168,6 +168,9 @@ int main(int argc, char** argv) {
   set_const(M, "GAME_DIR", mrb_str_new_cstr(M, game_dir));
   set_const(M, "RTP_DIR", mrb_str_new_cstr(M, ""));
   set_const(M, "TEST_PLAY", mrb_false_value());
+  // No 60 fps pacing (mruby-rgss/src/lib.cxx): every game timer runs off
+  // frame_count, so the frames are the same and a timed run measures work.
+  set_const(M, "NO_RENDER_WAIT", mrb_true_value());
   // Auto-selects New Game on the title screen, or Continue with
   // BC2CPP_HOST_CONTINUE=1 (mruby-rpg2k/mrblib/scene/title.rb).
   const char* const cont = getenv("BC2CPP_HOST_CONTINUE");
