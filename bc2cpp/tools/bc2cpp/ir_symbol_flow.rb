@@ -219,18 +219,33 @@ module IrSymbolFlow
   # the edges do not resolve, or a nested block reads reg. Memoized per irep
   # object ([index, register]): labels repeat across separate irep trees in
   # one process, so a global label-keyed memo would collide.
+  #
+  # The memo is two-level: the outer table is keyed by instruction index, the inner by register. A flat
+  # [idx, reg] tuple key allocates an Array on every lookup, including hot hits; the index alone and the
+  # caller's register key the same entries with no per-query container. Cached nil (a refusal) stays
+  # distinct from an absent entry via the inner table's key. The 1,024-query bound counts logical queries
+  # and evicts oldest-first; eviction drops a whole instruction bucket at a time, which only re-runs a
+  # pure recomputation.
   VALUE_READS_CAP = 1024
 
   def value_reads(irep, idx, reg)
     return value_reads_compute(irep, idx, reg) if ENV['BC2CPP_SYMBOL_FLOW_MEMO'] == '0'
 
-    memo = irep.instance_variable_get(:@symbol_flow_reads) ||
-           irep.instance_variable_set(:@symbol_flow_reads, {})
-    key = [idx, reg]
-    return memo[key] if memo.key?(key)
-    memo.shift if memo.size >= VALUE_READS_CAP
+    outer = irep.instance_variable_get(:@symbol_flow_reads) ||
+            irep.instance_variable_set(:@symbol_flow_reads, {})
+    inner = outer[idx]
+    return inner[reg] if inner && inner.key?(reg)
 
-    memo[key] = value_reads_compute(irep, idx, reg)
+    total = irep.instance_variable_get(:@symbol_flow_reads_total) || 0
+    if total >= VALUE_READS_CAP
+      until total < VALUE_READS_CAP || outer.empty?
+        total -= outer.shift[1].size
+      end
+      irep.instance_variable_set(:@symbol_flow_reads_total, total)
+    end
+    inner = outer[idx] ||= {}
+    irep.instance_variable_set(:@symbol_flow_reads_total, total + 1)
+    inner[reg] = value_reads_compute(irep, idx, reg)
   end
 
   def value_reads_compute(irep, idx, reg)

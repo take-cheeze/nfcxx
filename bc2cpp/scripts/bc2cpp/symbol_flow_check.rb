@@ -106,4 +106,41 @@ check.call('an entry grown by << keeps a finite universe', universe_of(suite, pu
 prefixed = LITERAL_TABLE.sub('send(*TABLE[code])', 'send(:wait, *TABLE[code])')
 check.call('`send(:name, *TABLE[i])` is not a table send', splat_tables(suite, prefixed) == [nil])
 
+# Two-level value_reads memo: instruction-indexed outer table of register-keyed
+# entries. No per-query tuple key, cached nil stays distinct from absent, the
+# bound counts logical queries, and memo-off answers match.
+compiled(suite, LITERAL_TABLE) do |ireps, _, _|
+  irep = ireps.values.find { |r| r.instructions.any? { |i| i.op == :GETIDX } }
+  idx = irep.instructions.index { |i| i.op == :GETIDX }
+  reg = irep.instructions[idx].reg
+  first = IrSymbolFlow.value_reads(irep, idx, reg)
+  check.call('a repeated query reuses its entry without recomputing',
+             IrSymbolFlow.value_reads(irep, idx, reg).equal?(first))
+  check.call('a query for another register of the same instruction shares the bucket',
+             irep.instance_variable_get(:@symbol_flow_reads).size == 1)
+  missing = IrSymbolFlow.value_reads(irep, idx, reg.to_i + 10_000)
+  check.call('a cached empty answer stays distinct from an absent entry',
+             missing == [] && IrSymbolFlow.value_reads(irep, idx, reg.to_i + 10_000).equal?(missing) &&
+             irep.instance_variable_get(:@symbol_flow_reads)[idx].key?(reg.to_i + 10_000))
+  flag = ENV['BC2CPP_SYMBOL_FLOW_MEMO']
+  begin
+    ENV['BC2CPP_SYMBOL_FLOW_MEMO'] = '0'
+    check.call('memo-off answers match the memoized ones',
+               IrSymbolFlow.value_reads(irep, idx, reg) == first &&
+               IrSymbolFlow.value_reads(irep, idx, reg.to_i + 10_000) == [])
+  ensure
+    flag ? ENV['BC2CPP_SYMBOL_FLOW_MEMO'] = flag : ENV.delete('BC2CPP_SYMBOL_FLOW_MEMO')
+  end
+  IrSymbolFlow::VALUE_READS_CAP.times do |n|
+    IrSymbolFlow.value_reads(irep, (idx + n + 1) % irep.instructions.length, reg)
+  end
+  total = irep.instance_variable_get(:@symbol_flow_reads_total)
+  outer = irep.instance_variable_get(:@symbol_flow_reads)
+  check.call('the memo bound counts logical queries',
+             total <= IrSymbolFlow::VALUE_READS_CAP &&
+             outer.values.sum(&:size) == total)
+  check.call('an evicted query recomputes the same answer',
+             IrSymbolFlow.value_reads(irep, idx, reg) == first)
+end
+
 suite.finish!
