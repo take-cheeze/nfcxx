@@ -77,6 +77,43 @@ check.call('a mask that is exactly one kind names its class',
 check.call('two kinds, or a kind with anything else, name no class',
            model.exact_owner(row | db_bit).nil? && model.exact_owner(row | NF::INT).nil?)
 
+rows_by_path = model.instance_variable_get(:@rows)
+previous_index = lambda do |recv, key, nil_raises|
+  result = 0
+  foreign = recv & ~model.mask
+  foreign &= ~NF::NIL if nil_raises
+  result |= NF::OTHER if foreign.nonzero?
+  model.kinds.each do |kind|
+    next if (recv & kind.bit).zero?
+
+    result |= case kind.role
+              when :file, :row then model.send(:field_mask, kind.path, key)
+              when :table then NF::NIL | rows_by_path.fetch(kind.path).bit
+              end
+  end
+  result
+end
+mask_random = Random.new(20261026)
+mask_limit = 1 << (model.mask.bit_length + 16)
+mask_inputs = [0, -1, row, row | NF::NIL, row | NF::OTHER, mask_limit]
+500.times { mask_inputs << mask_random.rand(mask_limit) }
+mask_inputs += mask_inputs.first(20).map { |mask| ~mask }
+check.call('predicate masks preserve wide, empty, foreign and negative receiver unions',
+           mask_inputs.all? do |mask|
+             [true, false].all? do |nil_raises|
+               [:name, :player, 7, nil].all? do |key|
+                 model.index(mask, key, nil_raises: nil_raises) == previous_index.call(mask, key, nil_raises)
+               end
+             end
+           end)
+check.call('every cached kind position names its single kind bit',
+           model.kinds.all? { |kind| kind.bit == 1 << kind.position })
+model.index(row, 7)
+before = GC.stat(:total_allocated_objects)
+1000.times { model.index(row, 7) }
+predicate_allocations = GC.stat(:total_allocated_objects) - before
+check.call('wide row queries avoid per-kind temporary intersections', predicate_allocations < 3000)
+
 puts '-- model against the real reader (host)'
 $VERBOSE = nil
 load File.join(MRBLIB, 'lcf.rb')
