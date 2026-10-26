@@ -1747,12 +1747,13 @@ def sp_derive(fn, base, res)
   r
 end
 
-# The address of an access: a static one is not checked, any other gets a check of n bytes.
+# The address of an access: a static one is not checked, any other gets a check of n bytes (n: a size, or a scalar type,
+# whose size is taken after the operand, so that an error in either is reported in the order of the unchecked emitter).
 def sp_access(fn, op, n)
   return fn.opnd(op, "l") unless $safe
   return fn.addr_opnd(op) if sp_static_addr?(op)
   v = fn.opnd(op, "l")
-  sp_check(fn, v.t, n)
+  sp_check(fn, v.t, n.is_a?(Array) ? ty_size(n) : n)
   v
 end
 
@@ -1781,7 +1782,7 @@ def r_load(fn, x)
   vol = x[0] == "load.v"
   ty = parse_type(x[1])
   raise Refused, "load of an aggregate (aggregates are addresses)" if is_agg(ty)
-  addr = sp_access(fn, x[2], ty_size(ty))
+  addr = sp_access(fn, x[2], ty)
   op, cls = load_op(ty)
   t = fn.tmp
   if vol
@@ -2000,7 +2001,7 @@ def s_store(fn, x)
   vol = x[0] == "store.v"
   ty = parse_type(x[1])
   raise Refused, "store of an aggregate type" if is_agg(ty)
-  addr = sp_access(fn, x[2], ty_size(ty))
+  addr = sp_access(fn, x[2], ty)
   val = fn.opnd(x[3])
   if ty[0] == "ptr" || ty[0] == "fn" || (ty[0] == "int" && ty[1] == 8)
     op = "storel"
