@@ -1531,6 +1531,10 @@ if $PROGRAM_NAME == __FILE__
     #define mrb_ary_shift bc2cpp_mrb_ary_shift
     #define mrb_hash_delete_key bc2cpp_mrb_hash_delete_key
   CPP
+  # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
+  if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
+    puts CodeGen.respond_to_phantom_runtime
+  end
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
   # call-site glue catches (mruby is built with MRB_USE_CXX_EXCEPTION). Always
   # emitted: a header-only struct with nothing to link.

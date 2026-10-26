@@ -162,7 +162,10 @@ class CodeGen
         }
       CPP
     end
-    # The stub also serves the hand-written registrations a HAND_REGISTRATION_GUARD wraps (any owner).
+    # LEFT_OUT: what stands in for an entry the build leaves out of the tables. A verify build registers the stub
+    # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
+    # from its cause; a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb). The hand-written registrations a
+    # HAND_REGISTRATION_GUARD wraps (any owner) call it too.
     if compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
@@ -176,6 +179,17 @@ class CodeGen
           abort();
         }
         #endif
+        [[maybe_unused]] static void bc2cpp_left_out(mrb_state* M, struct RClass* c, const char* name, mrb_bool singleton) {
+        #if defined(BC2CPP_UNREGISTERED_VERIFY)
+          if (singleton) mrb_define_class_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+          else mrb_define_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+        #elif defined(BC2CPP_RESPOND_TO_PHANTOM)
+          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
+          bc2cpp_phantom_add(M, owner, mrb_intern_cstr(M, name));
+        #else
+          (void)M; (void)c; (void)name; (void)singleton;
+        #endif
+        }
       CPP
     end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
@@ -197,11 +211,7 @@ class CodeGen
         end
         if unregistered.include?("#{owner}##{m[:name]}")
           out << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
-          # UNREGISTERED_VERIFY: a verify build registers a stub under the name, so a lookup the proof missed
-          # aborts naming the method instead of raising a NoMethodError far from its cause.
-          out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n" \
-                 "  #{singleton ? 'mrb_define_class_method' : 'mrb_define_method'}(M, #{var}, " \
-                 "#{c_string_literal(m[:name])}, bc2cpp_unregistered_stub, MRB_ARGS_ANY());\n#endif\n"
+          out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(m[:name])}, #{singleton});\n"
           next
         end
         names = [m[:name]]
@@ -858,6 +868,67 @@ class CodeGen
     else
       !core_only
     end
+  end
+
+  # RESPOND_TO_PHANTOM (closed build): the closed proof lets `respond_to?(:name)` take a Symbol that names a method
+  # the build leaves out of the tables (SYMBOL_USES, static_dispatch_symbol_uses.rb), so respond_to? must still answer
+  # true for it. bc2cpp_left_out (LEFT_OUT) records each left-out entry's class in one table shared by every compiled
+  # gem; mrb_respond_to (renamed below, for the generated code) and the Kernel#respond_to? it installs consult it when
+  # the method table says no. mruby's respond_to? ignores visibility and the closed world has no UNDEF, so "the
+  # receiver is a kind of an owner of the entry" is the whole answer.
+  def self.respond_to_phantom_runtime
+    <<~'CPP'
+        #define BC2CPP_RESPOND_TO_PHANTOM 1
+        [[maybe_unused]] static mrb_value bc2cpp_phantom_table(mrb_state* M) {
+          return mrb_iv_get(M, mrb_obj_value(M->kernel_module), mrb_intern_lit(M, "__bc2cpp_left_out__"));
+        }
+        [[maybe_unused]] static mrb_bool bc2cpp_phantom_responds(mrb_state* M, mrb_value obj, mrb_sym id) {
+          mrb_value table = bc2cpp_phantom_table(M);
+          if (!mrb_hash_p(table)) return FALSE;
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_symbol_value(id), mrb_nil_value());
+          if (!mrb_array_p(owners)) return FALSE;
+          for (mrb_int i = 0; i < RARRAY_LEN(owners); i++) {
+            if (mrb_obj_is_kind_of(M, obj, mrb_class_ptr(RARRAY_PTR(owners)[i]))) return TRUE;
+          }
+          return FALSE;
+        }
+        [[maybe_unused]] static inline mrb_bool bc2cpp_mrb_respond_to(mrb_state* M, mrb_value obj, mrb_sym id) {
+          return mrb_respond_to(M, obj, id) || bc2cpp_phantom_responds(M, obj, id);
+        }
+        // The first gem's install keeps mruby's own Kernel#respond_to? (kernel.c obj_respond_to) and answers with it,
+        // then with the table; a later gem only adds to the table.
+        static mrb_func_t bc2cpp_original_respond_to = nullptr;
+        [[maybe_unused]] static mrb_value bc2cpp_kernel_respond_to(mrb_state* M, mrb_value self) {
+          mrb_value answer = bc2cpp_original_respond_to(M, self);
+          if (mrb_test(answer)) return answer;
+          mrb_sym id;
+          mrb_bool priv = FALSE;
+          mrb_get_args(M, "n|b", &id, &priv);
+          return mrb_bool_value(bc2cpp_phantom_responds(M, self, id));
+        }
+        [[maybe_unused]] static void bc2cpp_phantom_add(mrb_state* M, struct RClass* owner, mrb_sym id) {
+          mrb_value kernel = mrb_obj_value(M->kernel_module);
+          mrb_value table = bc2cpp_phantom_table(M);
+          if (!mrb_hash_p(table)) {
+            struct RClass* k = M->kernel_module;
+            mrb_method_t m = mrb_method_search_vm(M, &k, mrb_intern_lit(M, "respond_to?"));
+            if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) {
+              mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: RESPOND_TO_PHANTOM: Kernel#respond_to? is not mruby's native");
+            }
+            bc2cpp_original_respond_to = MRB_METHOD_CFUNC(m);
+            table = mrb_hash_new(M);
+            mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out__"), table);
+            mrb_define_method(M, M->kernel_module, "respond_to?", bc2cpp_kernel_respond_to, MRB_ARGS_ARG(1, 1));
+          }
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_symbol_value(id), mrb_nil_value());
+          if (!mrb_array_p(owners)) {
+            owners = mrb_ary_new(M);
+            mrb_hash_set(M, table, mrb_symbol_value(id), owners);
+          }
+          mrb_ary_push(M, owners, mrb_obj_value(owner));
+        }
+        #define mrb_respond_to bc2cpp_mrb_respond_to
+    CPP
   end
 
   # HAND_REGISTRATION_GUARD: one `#define BC2CPP_UNREGISTERED_<entry> 1` per compiled entry this build leaves
