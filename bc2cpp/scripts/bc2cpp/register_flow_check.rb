@@ -57,6 +57,47 @@ end
 
 puts '-- unused-register declarations'
 generator = CodeGen.allocate
+block_before = lambda do |code|
+  text = code.gsub(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/, '""').strip
+  next false unless text.start_with?('{') && text.end_with?('}')
+
+  depth = 0
+  valid = true
+  text.each_char.with_index do |char, index|
+    depth += 1 if char == '{'
+    depth -= 1 if char == '}'
+    valid = false if depth.zero? && index != text.length - 1
+  end
+  valid && depth.zero?
+end
+block_cases = {
+  '' => false, '{}' => true, ' { {} } ' => true, '{} {}' => false,
+  '{{}' => false, '{}}' => false, '{x} y {}' => false,
+  '{ "}"; }' => true, "{ '}' ; }" => true,
+  '{ /* 日本語 */ { x; } }' => true, '{日本語} {次}' => false,
+  "{\n x;\n}" => true, %q({ "a\"}"; }) => true
+}
+check.call('single-block scope decisions preserve nesting, quoted braces and UTF-8',
+           block_cases.all? { |text, expected| generator.single_block?(text) == expected })
+block_random = Random.new(20261026)
+block_tokens = ['{', '}', 'x;', ' ', '日本語', '"}"', "'{'", %q("a\"}"), "\n"]
+block_random_cases = Array.new(2000) do
+  body = Array.new(block_random.rand(0..40)) { block_tokens.sample(random: block_random) }.join
+  block_random.rand(2).zero? ? "{#{body}}" : body
+end
+check.call('byte traversal matches character traversal on randomized snippets',
+           block_random_cases.all? { |text| generator.single_block?(text) == block_before.call(text) })
+small_block = '{' + 'x;' * 10 + '}'
+large_block = '{' + 'x;' * 10_000 + '}'
+[small_block, large_block].each { |text| generator.single_block?(text) }
+allocation_counts = [small_block, large_block].map do |text|
+  before = GC.stat(:total_allocated_objects)
+  10.times { generator.single_block?(text) }
+  GC.stat(:total_allocated_objects) - before
+end
+check.call('single-block allocations do not grow with the number of characters',
+           allocation_counts.last <= allocation_counts.first + 20)
+
 prune_before = lambda do |code|
   uses = code.scan(/\br\d+\b/).tally
   code.gsub(/^ +mrb_value (r\d+) = (?:mrb_nil_value\(\)|[A-Za-z_]\w*);\n/) do |declaration|
