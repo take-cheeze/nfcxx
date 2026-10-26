@@ -27,10 +27,12 @@ module IrTypeFeedback
     return nil unless receiver&.size == 1
 
     applied = ctx.signature_contracts
-    owners = prepared ? prepared.owners(receiver.first.to_s) : RbsSignatures.contract_owners(receiver.first.to_s, ctx.superclass_of || {},
+    receiver_name = RbsSignatures.ir_class_name(receiver.first)
+    name = insn.sym.to_s
+    owners = prepared ? prepared.owners(receiver_name) : RbsSignatures.contract_owners(receiver_name, ctx.superclass_of || {},
                                           included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
                                           unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
-    target = prepared ? prepared.target(receiver.first.to_s, insn.sym.to_s) : owners.find { |owner| applied.ir_methods.include?([owner, insn.sym.to_s]) }
+    target = prepared ? prepared.target(receiver_name, name) : owners.find { |owner| applied.ir_methods.include?([owner, name]) }
     signature = target && IrRbsBlockTypes.signature_for(applied, target, insn.sym)
     return nil unless signature
 
