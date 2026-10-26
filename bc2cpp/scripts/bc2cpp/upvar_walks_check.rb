@@ -61,7 +61,7 @@ with_ireps.call(SNIPPET) do |ireps, top_label, gen|
 
   puts '-- nested snippet'
   check.call('the top frame: only the nested blocks write x and y (R1, R2), not the read-only z',
-             BytecodeIR.own_upvar_written_regs(top).to_a.sort == %w[1 2])
+             BytecodeIR.own_upvar_written_regs(top).to_a.sort == [1, 2])
   check.call('the top frame: every register a nested block touches, reads included (x, y, z)',
              RegisterFlow.captured_registers(top).map(&:to_s).sort == %w[1 2 3])
   check.call('block1 needs x and y at level 0 and z at level 0 (block2 needs x, y one level up)',

@@ -128,9 +128,9 @@ definitions = [EntryDefinition.new('MZ', 'initialize', 'ctor'), EntryDefinition.
 graph = EntryGraphHarness.new({ 'forward' => bodies['ctor'] }, { 'ctor' => Set[:Array].freeze })
 facts = IrCallGraphTypes.collect(graph, definitions, bodies)
 check.call('an entry seed is a complete fact and forwards to the callee it feeds',
-           facts.dig('ctor', '1') == Set[:Array] && facts.dig('forward', '1') == Set[:Array])
+           facts.dig('ctor', 1) == Set[:Array] && facts.dig('forward', 1) == Set[:Array])
 unseeded = IrCallGraphTypes.collect(EntryGraphHarness.new({ 'forward' => bodies['ctor'] }, {}), definitions, bodies)
-check.call('without the seed the entry makes no fact', unseeded.dig('ctor', '1').nil? && unseeded.dig('forward', '1').nil?)
+check.call('without the seed the entry makes no fact', unseeded.dig('ctor', 1).nil? && unseeded.dig('forward', 1).nil?)
 
 # -- the real compiler: a program of its own has no native entry, so a maker of that name is not seeded --------
 if ENV['MRBC']
