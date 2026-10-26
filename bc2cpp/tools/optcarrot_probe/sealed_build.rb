@@ -3,6 +3,7 @@
 require 'fileutils'
 require 'shellwords'
 require_relative 'onig_aliases'
+require_relative 'class_body_hoist'
 
 module OptcarrotSealedBuild
   def self.prepare(root, temp, compiled_gem)
@@ -28,6 +29,20 @@ module OptcarrotSealedBuild
     raise 'benchmark tail changed' unless source.end_with?(tail)
 
     source = source.delete_suffix(tail)
+    # CORE_PRELUDE_INSTALL: the compiled core methods go in right after the shims, before any optcarrot class body.
+    # Those bodies build their LUTs (PPU::TILE_LUT) with Range#each, Enumerable#collect and Array#transpose, which
+    # install! (at run) reaches too late; the shims come first because Integer#[] and friends are core-owner entries.
+    prelude = %w[shims.rb shim_integer_aref.rb].map do |name|
+      File.read(File.join(root, 'tools/optcarrot_probe', name))
+    end.join
+    raise 'benchmark prelude changed' unless source.start_with?(prelude)
+
+    program = source.delete_prefix(prelude)
+    # CLASS_BODY_HOIST (class_body_hoist.rb); OPTCARROT_CLASS_BODY_HOIST=0 keeps the initializers in their class
+    # bodies for a before/after measurement.
+    program, = ClassBodyHoist.rewrite(program) unless ENV['OPTCARROT_CLASS_BODY_HOIST'] == '0'
+    # On the prelude's last line, so the bundle's line numbers stay those of build_bundle.rb's output.
+    source = "#{prelude.chomp}; OptcarrotProbe.install_prelude!\n#{program}"
     source << "\nmodule OptcarrotBenchmark\n  def self.run\n    OptcarrotProbe.install!\n"
     source << tail.lines.map { |line| "    #{line}" }.join
     source << "  end\nend\n"

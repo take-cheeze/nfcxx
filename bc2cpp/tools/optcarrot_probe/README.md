@@ -1344,6 +1344,7 @@ these.
   part of the project's real build.
 - `compiled_run.rb` -- builds an isolated bc2cpp-enabled mruby and runs the
   headless checksum benchmark; build artifacts stay in a temporary directory.
+- `class_body_hoist.rb` -- the sealed build's class-body initializer hoist (see "Load-time LUT builders" below).
 - the pinned fork commit (mruby-module-function-scope),
   the pinned fork commit (mruby-parser-dump-back-nth-ref) -- see points 4 and 5
   above; both *are* part of the project's real build.
@@ -1473,6 +1474,28 @@ See [PPU core](../../docs/optcarrot-ppu-core.md) for measurements and proof limi
 probe, with a separate `irinline` build suffix. It keeps the Ruby helpers
 small enough for mrbc and expands eligible direct-call bodies afterward.
 See [method inlining](../../docs/bc2cpp-method-inlining.md) for scope and checks.
+
+## Load-time LUT builders
+
+Loading the bundle runs every class body once, before `OptcarrotBenchmark.run` calls `install!`, and those bodies
+build optcarrot's lookup tables: `PPU::TILE_LUT` alone is about two million block calls through `Range#each`,
+`Enumerable#collect` and `Array#transpose`. All of that used to run interpreted, which made startup about half of a
+180-frame run. The sealed build now compiles it in two steps:
+
+- **CORE_PRELUDE_INSTALL**: right after the shims, the bundle calls `OptcarrotProbe.install_prelude!`, which runs
+  bc2cpp's own `bc2cpp_register_owner_methods`. That installs the compiled core mrblib (and the core-owner shims such
+  as `Integer#[]`) before any optcarrot class body, saves each guarded method's bytecode for its Fiber fallback, and
+  registers the core aliases (`Enumerable#map`) that `install!` never did. `install!` leaves those owners to it, so an
+  entry whose name now resolves to a C function (onig-regexp's `String#gsub` over core mrblib's) stays as it is.
+- **CLASS_BODY_HOIST**: a class-body constant initializer that loops through a block becomes a singleton method of
+  the same class, which bc2cpp compiles like any other, and the constant is assigned from it once
+  `OptcarrotProbe.install_hoisted!` has installed the compiled body. The rewrite stays on the initializer's own
+  lines and refuses anything a method would read differently (a class-body local, a receiver-less call, `__LINE__`,
+  a heredoc, a constant assignment inside). `OPTCARROT_CLASS_BODY_HOIST=0` turns it off;
+  `ruby scripts/optcarrot/class_body_hoist_check.rb` checks it, including that CRuby builds the same constants.
+
+Measured locally (best of three, same machine): startup (1 frame) went from 1.49 s to 1.06 s with the prelude
+install and to 0.76 s with the hoist; the 180-frame run from 2.65 s to 2.13 s. Checksum `59662` throughout.
 
 ## Bytecode IR tile-table startup
 
