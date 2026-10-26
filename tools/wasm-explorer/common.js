@@ -22,6 +22,7 @@
     "c++": { title: "C++", file: "prog.cpp", standards: ["c++17", "c++20", "c++23"], modes: Object.keys(MODES) },
     c: { title: "C", file: "prog.c", standards: ["c89", "c99", "c11", "c17", "c23"], modes: Object.keys(MODES) },
     llvm: { title: "LLVM IR", file: "prog.ll", standards: [], modes: ["lp64", "asan"] },
+    swift: { title: "Swift", file: "prog.swift", standards: [], modes: ["lp64", "asan"] },
     rust: { title: "Rust", file: "prog.rs", standards: ["2015", "2018", "2021", "2024"], modes: ["lp64", "asan"] },
     go: { title: "Go", file: "prog.go", standards: [], modes: ["lp64", "asan"] },
     ir: { title: "nfcxx IR", file: "prog.ir", standards: [], modes: ["lp64", "asan"] },
@@ -85,7 +86,13 @@
           message: `not supported by the wasm emitter: ${r2[1]} (in ${r2[2]})` });
         continue;
       }
-      const g = /prog\.go:(\d+):\d+: (.*)$/.exec(line);
+      // a Swift program's error (swiftfe, tools/swiftfe): "prog.swift:3:7: error: this expression is not supported in M2"
+    const sw = /^prog\.swift:(\d+):\d+: (error|warning): (.*)$/.exec(line);
+    if (sw) {
+      out.push({ line: Number(sw[1]), severity: sw[2], message: sw[3].trim() });
+      continue;
+    }
+    const g = /prog\.go:(\d+):\d+: (.*)$/.exec(line);
       if (g) out.push({ line: Number(g[1]), severity: "error", message: g[2].trim() });
     }
     return out;

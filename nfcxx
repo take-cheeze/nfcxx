@@ -151,6 +151,20 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   # The -D and -U options: the host compile gets them, and the device pass resolves its conditionals with them, so both
   # copies agree on every #if the defines decide.
   local defs_opts=(); for f in ${cflags[@]+${cflags[@]+"${cflags[@]}"}}; do case $f in -D*|-U*) defs_opts+=("$f");; esac; done
+  # The toolkit's version macros, for the device pass only: the host copy has them from the CUDA headers, the device unit
+  # includes none, and code tests them in #if (ggml-cuda's GGML_CUDA_USE_CUB is CUDART_VERSION >= 11070; without the
+  # value the host launched CUB-path kernels whose device bodies were the other branch). Read from the headers the host
+  # compile finds first (the -I directories, then CUDA_HOME); a -D of the same name on the command line wins.
+  local ver_opts=() d m v
+  for d in ${incs[@]+"${incs[@]#-I}"} "${CUDA_HOME:-/usr/local/cuda}/include"; do
+    [ -f "$d/cuda_runtime_api.h" ] || continue
+    for m in CUDART_VERSION:cuda_runtime_api.h CUDA_VERSION:cuda.h; do
+      case " ${defs_opts[*]+${defs_opts[*]}} " in *" -D${m%%:*}="*|*" -D${m%%:*} "*|*" -U${m%%:*} "*) continue ;; esac
+      v=$(sed -n "s/^#define ${m%%:*}  *\([0-9][0-9]*\).*/\1/p" "$d/${m#*:}" 2>/dev/null | head -1)
+      [ -z "$v" ] || ver_opts+=("-D${m%%:*}=$v")
+    done
+    break
+  done
   # Kernel name obfuscation: one seed for both copies of the file (the host copy and the device unit must agree).
   local obf=(); if [ "$obfuscate" = 1 ]; then obf=(--obfuscate="${NFCXX_OBFUSCATE_SEED:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"); fi
   # The front end parses the plain kernel launches (EDG --cuda, 3rd/edg); the rewriter leaves them. Launches with
@@ -166,9 +180,9 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
-  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
@@ -208,6 +222,12 @@ ecp_arg() {  # ecp_arg ARG: ARG as eccp receives it (its paths absolute when ecc
       IFS=, read -r -a parts <<< "${1#-Wl,}"
       for p in ${parts[@]+"${parts[@]}"}; do
         case $p in
+          # Files the link writes (CMake 4 passes -Wl,--dependency-file=CMakeFiles/T.dir/link.d): absolute when their
+          # directory exists here, since they do not exist yet.
+          --dependency-file=*|-Map=*|--Map=*)
+            if [ -e "${p#*=}" ] || [ -d "$(dirname -- "${p#*=}")" ]; then
+              p="${p%%=*}=$(abs_path "$(dirname -- "${p#*=}")")/$(basename -- "${p#*=}")"
+            fi ;;
           *=*) if [ -e "${p#*=}" ]; then p="${p%%=*}=$(abs_path "${p#*=}")"; fi ;;
           *) if [ -e "$p" ]; then p=$(abs_path "$p"); fi ;;
         esac
@@ -684,7 +704,7 @@ fi
 # (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
-eflist=(); userinc=()
+eflist=(); userinc=(); no_as_needed=0; as_needed=0
 # -fkeep-static-functions is a GCC option; clang (the C compiler on macOS) rejects it.
 keep_static=(--c_to_obj_option -fkeep-static-functions)
 "${NFCXX_GCC:-cc}" --version 2>/dev/null | head -1 | grep -qi clang && keep_static=()
@@ -708,19 +728,45 @@ for f in ${files[@]+${files[@]+"${files[@]}"}}; do
     # its runpath, so it loads the same libcudart it was linked against (not whichever one the loader finds first).
     -lcudart)
       [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME/lib64" ] && eflist+=(--c_to_obj_option "-Wl,-rpath,$CUDA_HOME/lib64")
+      # The device-wide CUB algorithms behind lib/cuda/host/cub/cub.cuh (scripts/cuda-cub): an archive, ahead of
+      # libcudart, so only a program that calls them links them.
+      if [ $compile_only = 0 ]; then
+        cub_lib=$("$root/scripts/cuda-cub") || cub_lib=""
+        [ -z "$cub_lib" ] || eflist+=("$cub_lib")
+      fi
       eflist+=("--c_to_obj_lib=cudart") ;;
     -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;;
+    # --no-as-needed keeps the libraries after it in DT_NEEDED; find_package(Torch) links libtorch_cpu, libtorch_cuda and
+    # libtorch as -Wl,--no-as-needed,LIB ... -Wl,--as-needed. eccp puts its --c_to_obj_option items before every
+    # input, so the option cannot be kept where it is: one --no-as-needed for the whole link stands for every such
+    # span (every library is then kept, which only adds DT_NEEDED entries), and the items given with the option stay
+    # inputs in place. The --as-needed that closes a span is dropped then; alone, it applies to the whole link.
+    -Wl,--no-as-needed|-Wl,--no-as-needed,*)
+      no_as_needed=1
+      if [ "$f" != -Wl,--no-as-needed ]; then
+        IFS=, read -r -a nan_items <<< "${f#-Wl,--no-as-needed,}"
+        for item in ${nan_items[@]+"${nan_items[@]}"}; do
+          case $item in
+            -l?*) eflist+=("--c_to_obj_lib=${item#-l}") ;;
+            -*) eflist+=(--c_to_obj_option "$(ecp_arg "-Wl,$item")") ;;
+            *) eflist+=("$(ecp_arg "$item")") ;;
+          esac
+        done
+      fi ;;
+    -Wl,--as-needed) as_needed=1 ;;
     # eccp puts its --c_to_obj_option items before every object and archive, so a link option that acts on the
     # arguments after it would act on the wrong ones. Refused rather than moved (docs/notes/cxx-driver.md).
     -Wl,--whole-archive|-Wl,--whole-archive,*|-Wl,--no-whole-archive|-Wl,--no-whole-archive,*|\
--Wl,--start-group|-Wl,--start-group,*|-Wl,--end-group|-Wl,--end-group,*|-Wl,--as-needed|-Wl,--as-needed,*|\
--Wl,--no-as-needed|-Wl,--no-as-needed,*|-Wl,-Bstatic|-Wl,-Bstatic,*|-Wl,-Bdynamic|-Wl,-Bdynamic,*)
+-Wl,--start-group|-Wl,--start-group,*|-Wl,--end-group|-Wl,--end-group,*|-Wl,--as-needed,*|\
+-Wl,-Bstatic|-Wl,-Bstatic,*|-Wl,-Bdynamic|-Wl,-Bdynamic,*)
       echo "nfcxx: $f: an order-dependent link option cannot be kept with C++ inputs (docs/notes/cxx-driver.md)" >&2
       exit 2 ;;
     -Wl,*) eflist+=(--c_to_obj_option "$(ecp_arg "$f")") ;;   # -Wl,-rpath,DIR, -Wl,-E, ...: the host link (eccp's C compile options)
     *) eflist+=("$(ecp_arg "$f")") ;;
   esac
 done
+if [ $no_as_needed = 1 ]; then eflist+=(--c_to_obj_option -Wl,--no-as-needed)
+elif [ $as_needed = 1 ]; then eflist+=(--c_to_obj_option -Wl,--as-needed); fi
 # -c: eccp writes the records of each source (<stem>.ti, the requests) beside its object, and the link reads them there. eccp
 # adds to a .ti that exists, so the records of the sources being compiled are removed first and the compile starts clean
 # (eccp keeps the old content of a .ti and writes the new record ahead of it). The first source takes the name of -o, as eccp names it.

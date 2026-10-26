@@ -49,6 +49,7 @@ static int run(const std::string& dir) {
   nfcpoly::Context ctx;
   nfcffi::bind_poly(ctx);
 
+#ifdef TEST_PYTHON
   // Python: integers, floats, a C string argument, and a struct by value through an array of its bytes.
   const std::string load = "lib = ffi_load('" + dir + "/dyn.h', '''" + src + "''')\n";
   ctx.eval<void>("python", load);
@@ -67,6 +68,20 @@ static int run(const std::string& dir) {
   ctx.eval<void>("python", "cstd = ffi_load('" + dir + "/var.h', '', ['snprintf'])\n");
   check(ctx.eval<long long>("python", "cstd.call('snprintf', [None, 0, '%d-%s', 42, 'hi'])") == 5,
         "python snprintf (variadic: the length with a null buffer)");
+
+#endif
+#ifdef TEST_RUBY
+  // mruby: the same library through ffi_load and lib.call, with the source in a heredoc.
+  ctx.eval<void>("ruby", "lib = ffi_load('" + dir + "/dyn.h', <<'SRC')\n" + src + "\nSRC\n");
+  check(ctx.eval<long long>("ruby", "lib.call('add_int', [4, 5])") == 9, "ruby add_int");
+  check(ctx.eval<double>("ruby", "lib.call('scale', [1.5, 4])") == 6.0, "ruby scale (integer to double)");
+  check(ctx.eval<double>("ruby", "lib.call('halve', [3.0])") == 1.5, "ruby halve");
+  check(ctx.eval<long long>("ruby", "lib.call('count_bytes', ['hello'])") == 5, "ruby count_bytes (string)");
+  check(ctx.eval<bool>("ruby", "lib.callable('vec_add') && !lib.callable('no_such')"), "ruby callable");
+  check(ctx.eval<long long>("ruby", "cstd = ffi_load('" + dir + "/var.h', '', ['snprintf'])\n"
+                                    "cstd.call('snprintf', [nil, 0, '%d-%s', 42, 'hi'])") == 5,
+        "ruby snprintf (variadic)");
+#endif
 
   // Errors reach the script as script errors, and the C++ side can read the result of an eval.
   bool error = false;

@@ -95,7 +95,7 @@
       const language = options.language || "c++";
       const mode = options.mode || "lp64";
       const std = options.std || "";
-      if (language === "rust" || language === "go") {
+      if (language === "rust" || language === "go" || language === "swift") {
         return { ok: false, stage: "browser", diagnostics: [],
           message: `${C.LANGUAGES[language].title} needs its compiler, which runs on the server only` };
       }

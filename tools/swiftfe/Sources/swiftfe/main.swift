@@ -60,16 +60,16 @@ func parseForCompile(_ path: String) -> (SourceFileSyntax, SourceLocationConvert
   }
 }
 
-/// Lowers a file to C source, printing the first compile error.
-func compileToC(_ path: String) -> String? {
+/// Lowers a file to C source. A compile error goes to stderr (the explorer reads it there).
+func compileToC(_ path: String, bindings: Bool = false) -> String? {
   guard let (tree, converter) = parseForCompile(path) else { return nil }
   do {
     let program = try Lowerer(converter: converter).lower(tree)
-    return CEmit.emit(program)
+    return CEmit.emit(program, bindings: bindings)
   } catch let e as CompileError {
-    print("\(path):\(e.line):\(e.column): error: \(e.message)")
+    fail("\(path):\(e.line):\(e.column): error: \(e.message)")
   } catch {
-    print("\(path): error: \(error)")
+    fail("\(path): error: \(error)")
   }
   return nil
 }
@@ -143,11 +143,14 @@ func runCheck(_ args: [String]) -> Int32 {
 // MARK: - emit-c and build (M1)
 
 func runEmitC(_ args: [String]) -> Int32 {
-  guard args.count == 1 else {
-    fail("usage: swiftfe emit-c <file.swift>")
+  // --bindings: the C for the browser (the wasm explorer): the runtime prints through the browser's bindings
+  let bindings = args.contains("--bindings")
+  let files = args.filter { $0 != "--bindings" }
+  guard files.count == 1 else {
+    fail("usage: swiftfe emit-c [--bindings] <file.swift>")
     return 2
   }
-  guard let c = compileToC(args[0]) else { return 1 }
+  guard let c = compileToC(files[0], bindings: bindings) else { return 1 }
   print(c, terminator: "")
   return 0
 }

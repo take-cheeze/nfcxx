@@ -46,6 +46,14 @@ pass enum_extern_block.cu "enum extern block: no error, 0 mismatches"
 pass local_const.cu "local const: no error, 41 40"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
 pass host_cub_helper.cu "host cub helper: no error, 0 mismatches"
+# Device-wide CUB through the host shim (on the include path first, as for llama.cpp's build).
+if "$root/nfcxx" -c -I"$root/lib/cuda/host" -I"$cuda/include" cub_device.cu -o "$out/cubd.o" > "$out/cubd.log" 2>&1 \
+   && "$root/nfcxx" "$out/cubd.o" -L"$cuda/lib64" -lcudart -o "$out/cubd" >> "$out/cubd.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/cubd") && [[ "$run" == *"no error, 0 mismatches"* ]]; then
+  echo "pass cub_device: $run"
+else
+  echo "FAIL cub_device"; grep -m5 -E 'error|refused|undefined|mismatch' "$out/cubd.log"; fail=1
+fi
 pass fnptr_addr.cu "fnptr addr: 0 mismatches"
 pass init_list_range.cu "init list: no error, 0 mismatches"
 # Mutant: the flag compares against the wrong function, so the check must see a mismatch.
@@ -189,6 +197,13 @@ if "$root/nfcxx" -c -I"$cuda/include" constexpr_guard_mutant.cu -o "$out/cgm.o" 
 else
   echo "FAIL constexpr_guard mutant: not caught"; fail=1
 fi
+# half <-> float in device code (cast, initialization, return, generic cast, half arithmetic, half2 lanes): values, not bits.
+pass half_convert.cu "half convert: no error, 0 mismatches"
+# A dependent launch whose instance address is taken too (both host addresses find the device entry), and a launch
+# of a function with no device code (cudaGetLastError reports it once).
+pass stub_addr.cu "stub addr: no error, invalid device function, no error, 0 mismatches"
+# An array of class objects with a non-trivial default constructor (__cxa_vec_ctor) that zeroes first (memset).
+pass vec_ctor.cu "vec ctor: no error, 0 mismatches"
 pass helper_launch.cu "helper launch: no error, 0 mismatches"
 # Mutant: the helper launches the wrong template instance, so every element must mismatch.
 if "$root/nfcxx" -c -I"$cuda/include" helper_launch_mutant.cu -o "$out/hlm.o" > "$out/hlm.log" 2>&1 \

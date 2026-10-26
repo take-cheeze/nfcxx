@@ -33,7 +33,8 @@ async function buildExample(entry, examplesDir) {
   const language = entry.language || "c++";
   if (!LANGUAGES[language]) throw new Error(`${entry.id}: unknown language ${language}`);
   const builds = {};
-  for (const mode of LANGUAGES[language].modes) {
+  // an entry may name its modes (modes: ["asan"], for a program whose heap only the asan mode has)
+  for (const mode of entry.modes || LANGUAGES[language].modes) {
     const result = await compile(source, { language, mode });
     if (!result.ok) {
       throw new Error(`${entry.id} [${mode}]: ${result.stage}: ${result.message}`);

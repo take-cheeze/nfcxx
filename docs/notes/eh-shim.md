@@ -48,6 +48,8 @@ the last handler or pointer is gone and the entry stays on the throw stack until
 | `__eh_pin(h)`, `__eh_unpin(h)` | copy / release of an `exception_ptr`; the last release calls the destructor |
 | `__eh_pinned_object(h)`, `__eh_pinned_type(h)` | object address and `type_info` |
 | `__eh_rethrow_pinned(h)` | throw it again as a rethrow of the primary entry (`rethrow_exception`) |
+| `__eh_find_destination(type, flags, object)` | the EH stack entry a throw of the object would stop at, or NULL; nothing changes (`__cxa_throw`, branch `nfcxx/foreign-eh`) |
+| `__eh_throw_detached(h)` | throw a detached entry, passing the caller's reference on to the throw (`__cxa_throw`, `__cxa_rethrow`) |
 
 Also in `throw.c`: a handler that ends clears the entry's `in_handler` (a later `throw;` never picks an entry that only a pointer keeps),
 `throw;` inside the handler of a rethrow finds the primary entry through `primary_entry`, and the free loop of `__free_thrown_object`
@@ -56,6 +58,42 @@ is a function (`free_discarded_entries`) that stops at an entry that is still re
 The references to these functions in the shim are weak. With a `libC.a` that predates them the `__throw_*` functions still work,
 `std::current_exception()` returns an empty pointer, `std::make_exception_ptr` too, and `std::rethrow_exception` of an empty pointer
 terminates. `tests/cases/eh_exception_ptr.cpp` notices (an empty `current_exception()` inside a handler) and reports SKIP.
+
+## Exceptions thrown by gcc-compiled code (`__cxa_throw`)
+
+A plain `throw` in gcc-compiled code (libtorch's `c10::Error`, the rest of libstdc++, any C++ library on the system) calls
+`__cxa_throw`, and `throw;` calls `__cxa_rethrow`. The shim defines both, and they win over libstdc++'s as the `__throw_*` functions
+do. Each decides who handles the exception, as the two-phase unwinder would if EDG's handlers were in its tables:
+
+1. EDG's runtime names the entry of its EH stack at which its handler search would stop (`__eh_find_destination`, the first pass of
+   `__throw` without side effects): a try block with a matching catch, or a noexcept or throw specification that ends in terminate.
+   None: libstdc++'s throw, as before.
+2. That entry lies in the frame of the EDG function that holds it, so the frames between the throw and it have their CFA below the
+   entry. Each is asked what the unwinder's search phase asks (its personality routine, read from the CIE of its FDE, with
+   `_UA_SEARCH_PHASE`). A handler of gcc-compiled code there (or a noexcept function, which terminates) keeps the exception with
+   libstdc++, and so does a stack that never reaches the entry: another thread's (EDG's EH stack is a process global).
+3. Otherwise the object, which libstdc++ allocated and initialized (`__cxa_init_primary_exception`), becomes a detached EDG entry
+   as for `std::make_exception_ptr` and is thrown as a rethrow of it (`__eh_throw_detached`, which passes the shim's reference on to
+   the throw). Its destructor and storage go back to libstdc++ when the last handler or `exception_ptr` lets it go. For
+   `__cxa_rethrow` the library's handler is ended first (`__cxa_end_catch`, which its frame would call on the way out), unless the
+   program is built with `NFCXX_EH_UNWIND=1`, where the unwinder runs that frame's cleanup.
+
+So `catch (const c10::Error&)`, `catch (const std::exception&)` (EDG's runtime walks the base classes of the library's
+`type_info`), `catch (int)`, `catch (...)` with `throw;`, `std::current_exception` and `std::rethrow_exception` all work on them,
+and a library that catches its own exceptions keeps doing so, also inside a try block of the program. The frames of `__cxa_throw`
+and `__cxa_rethrow` keep off EDG's EH stack (no local objects with destructors, no function-local statics): libstdc++'s unwinder
+leaves them when the library keeps the exception, which would leave a stale entry on EDG's stack.
+
+### The vtables of the type_info classes
+
+`libC.a` defines the `type_info` objects of the fundamental types, of pointers to them and of `std::exception` and the classes around
+it, and the executable exports them, since libstdc++ and every C++ library refer to them: one object per type, which EDG's handlers
+need (`matching_type_info` compares name pointers). Their vtables were EDG's, with the two destructors only. libstdc++ calls
+`__do_catch`, `__do_upcast` and the class ones through those vtables when gcc-compiled code catches or `dynamic_cast`s through one of
+these types (a library's own `catch (int)`, or `catch (std::exception&)` of a class derived from it), and it jumped past their end:
+a crash, with or without the shim's `__cxa_throw`. The shim defines the ten `__cxxabiv1` vtables as libstdc++ has them, slot for slot,
+naming libstdc++'s functions; they replace `libC.a`'s weak ones. The `type_info` layouts are the IA-64 ABI's in both. Freestanding
+programs link `libC.a` without the shim and keep EDG's tables.
 
 ## Link order change (Path A)
 
@@ -82,15 +120,19 @@ EDG's `std::bad_alloc::what()` is `""`, libstdc++'s is `"std::bad_alloc"`.
 | `tests/pathb-qbe/cases/hosted_new.cpp` | `new` of a huge size (EDG's `operator new` through the new link order), compared with the gcc backend since the link order change |
 | `tests/eval/host.cpp` | a libstdc++ exception inside an nfceval snippet, caught by the snippet or returned as `RuntimeError` |
 | `tests/ehshim/run.sh` | programs that cproc or Path B cannot compile (`<future>`, `<regex>`; `__atomic_test_and_set`): `future_promise.cpp`, `regex_error.cpp` on the gcc backend; `exception_ptr_fuzz.cpp` (random mixes of throws, nested handlers, `throw;`, stored pointers) on gcc, qbe and Path B. Each backend's output and exit code must equal the same program built by the host g++ |
+| `tests/ehshim/foreign` (in `tests/ehshim/run.sh`) | a library built by g++ that throws with plain `throw`, called by a program built by nfcxx (gcc, qbe, and gcc with `NFCXX_EH_UNWIND=1`): `std::runtime_error`, a class derived from it caught exactly and as `std::exception`, `int`, `const char*`, `catch (...)` and `throw;`, `exception_ptr`, `throw;` inside the library, the library's own handlers inside the program's try block and beyond a frame of the program, a second thread, each object destroyed once; output equal to the all-g++ build |
+| `tests/bundle/torch.sh` | `c10::Error` from libc10 (a bad `reshape`, a CUDA tensor without a GPU), by hand |
 
 ## Limits
 
-- Only exceptions thrown through `std::__throw_*` or `std::rethrow_exception` are EDG exceptions. libstdc++ code that throws with a
-  plain `throw` (not through a `__throw_*` function) still uses `__cxa_throw` and aborts; the library's own `terminate` handlers and
-  `std::uncaught_exceptions` (always 0) are untouched. The `__throw_*` functions for classes the library defines in headers only
-  (`std::bad_optional_access`, `std::bad_variant_access`, `std::bad_weak_ptr` thrown inline) were never a problem.
-- EDG's `longjmp` skips the destructors of libstdc++'s own frames between the throw and the handler: an exception out of
-  `std::string::append`, `std::thread` and such can leak what those frames own. User frames are cleaned up.
+- The library's own `terminate` handlers and `std::uncaught_exceptions` are untouched: the count is libstdc++'s and does not see an
+  exception on its way to an EDG handler. A thrown multi-level pointer or pointer to member stays with libstdc++ (the runtime's
+  `ptr_flags` array is not built), so EDG's handlers do not see it.
+- EDG's `longjmp` skips the destructors of gcc-compiled frames between the throw and the handler: an exception out of
+  `std::string::append`, `std::thread`, libtorch and such can leak what those frames own. User frames are cleaned up. With
+  `NFCXX_EH_UNWIND=1` the unwinder runs those destructors too.
+- A frame of EDG-compiled code between a gcc-compiled throw and a gcc-compiled handler (a callback the library calls inside its try
+  block) must not have objects with destructors: libstdc++'s unwinder leaves it without popping its entry on EDG's stack.
 - EDG's EH stack and throw stack are process globals (not thread-local): exceptions are only safe in one thread at a time. A task
   that throws in a `std::async` thread is not supported.
 - Shared objects loaded by a program (`nfcxx -shared`, nfceval snippets) get the shim from the executable, which must be linked by

@@ -358,6 +358,9 @@ void Fn::stmt(const Node &s) {
   if (h == "block") {
     for (size_t i = 1; i < s.items.size(); i++) stmt(s.items[i]);
   } else if (h == "let") {
+    const Node &v = at(s, 3);
+    if (head_of(v) == "bitcast" && v.items.size() == 3 && v.items[2].kind == Node::Sym && v.items[2].sig == '&')
+      fn_values_[at(s, 1).text] = v.items[2].text;
     Ty ty = parse_type(&at(s, 2));
     std::string dest = ir_reg(at(s, 1).text, ty);
     rval(at(s, 3), dest, ty);
@@ -615,6 +618,25 @@ void Fn::call_value(const Node &x, const std::string &dest, const Ty &ty) {
     return;
   }
   if (!name.empty() && FnCtx::call(x, dest, ty)) return;
+  if (name == "memset") {
+    // (call (ptr void) &"memset" P V N), N a constant: EDG's zeroing of an object before its constructor runs (the
+    // value-initialization of llama.cpp's mma tiles). Byte stores (the alignment of P is not known, as for copy); the
+    // value is P.
+    if (x.items.size() != 6) throw Refused("memset takes (pointer, value, count)");
+    const Node &nn = at(x, 5);
+    if (head_of(nn) != "const" || nn.items.size() != 3) throw Refused("memset of a size that is not a constant");
+    const long long count = static_cast<long long>(as_int(&nn.items[2]));
+    if (count < 0 || count > 4096) throw Refused("memset of " + std::to_string(count) + " bytes");
+    Operand p = operand(at(x, 3)), v = operand(at(x, 4));
+    if (p.ty.kind != "ptr") throw Refused("memset of a non-pointer");
+    if (!(v.ty.kind == "int" && type_size(v.ty) == 4)) throw Refused("memset with a value of type " + v.ty.kind);
+    const std::string base = reg_of(p.text, p.ty);
+    const std::string b = reg_of(v.text, v.ty);  // st.u8 stores the low byte of a 32-bit register, as copy's do
+    for (long long i = 0; i < count; i++) emit("st.u8 [" + base + "+" + std::to_string(i) + "], " + b + ";");
+    if (ty.kind != "ptr") throw Refused("memset returns a pointer");
+    emit("mov.u64 " + dest + ", " + base + ";");
+    return;
+  }
   if (name == "printf") {
     printf_call(x, dest, ty);
   } else if (find_entry(SCALAR_U32, SCALAR_U32_N, name)) {
@@ -816,6 +838,11 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     emit("bar.warp.sync " + reg_of(mop.text, mop.ty) + ";");
     return;
   }
+  if (cname == "__cxa_vec_ctor") {
+    if (!dest.empty()) throw Refused("__cxa_vec_ctor has no value");
+    vec_ctor(x);
+    return;
+  }
   if (find_entry(DEVICE_INTRINSICS, DEVICE_INTRINSICS_N, cname)) throw Refused("call of intrinsic " + cname + " as a statement");
   Fn *callee = nullptr;
   if (module_fns) {
@@ -895,4 +922,46 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     emit("  call " + cname + ", (" + list + ");");
   }
   emit("}");
+}
+
+// (call void &"__cxa_vec_ctor" ARRAY COUNT SIZE CTOR DTOR): the default construction of an array of class objects (EDG's
+// lowering of `T a[N];` when T's default constructor does something, as llama.cpp's mma tiles of half2 do). The count and
+// the element size are constants, the constructor is a function of the module, and the destructor is null (device code
+// has no exceptions to unwind): one direct call of the constructor per element, at ARRAY + i * SIZE.
+void Fn::vec_ctor(const Node &x) {
+  if (x.items.size() != 8) throw Refused("__cxa_vec_ctor takes (array, count, size, constructor, destructor)");
+  auto constant = [&](const Node &c, const char *what) {
+    if (head_of(c) != "const" || c.items.size() != 3) throw Refused(std::string("__cxa_vec_ctor: the ") + what + " is not a constant");
+    return static_cast<long long>(as_int(&c.items[2]));
+  };
+  const long long count = constant(at(x, 4), "count"), size = constant(at(x, 5), "element size");
+  if (count < 0 || count > 4096) throw Refused("__cxa_vec_ctor of " + std::to_string(count) + " elements");
+  if (head_of(at(x, 7)) != "null") throw Refused("__cxa_vec_ctor with a destructor");
+  const Node &cn = at(x, 6);
+  std::string ctor;
+  if (cn.kind == Node::Sym && cn.sig == '&') ctor = cn.text;
+  else if (fn_values_.count(cn.text)) ctor = fn_values_[cn.text];
+  else throw Refused("__cxa_vec_ctor: the constructor is not a known function");
+  Fn *callee = nullptr;
+  if (module_fns) {
+    auto it = module_fns->find(ctor);
+    if (it != module_fns->end()) callee = it->second;
+  }
+  if (!callee) throw Refused("__cxa_vec_ctor: constructor " + ctor + " is not a function of this module");
+  callee->setup();
+  if (callee->params.size() != 1 || callee->params[0].kind != "ptr" || callee->ret)
+    throw Refused("__cxa_vec_ctor: constructor " + ctor + " does not take (this)");
+  Operand arr = operand(at(x, 3));
+  if (arr.ty.kind != "ptr") throw Refused("__cxa_vec_ctor of a non-pointer");
+  const std::string base = reg_of(arr.text, arr.ty);
+  for (long long i = 0; i < count; i++) {
+    std::string p = fresh("rd");
+    emit("add.u64 " + p + ", " + base + ", " + std::to_string(i * size) + ";");
+    const std::string c = "$call" + std::to_string(++ncall_);
+    emit("{");
+    emit("  .param ." + ptx_type(callee->params[0]) + " " + c + "_p0;");
+    emit("  st.param." + ptx_type(callee->params[0]) + " [" + c + "_p0], " + p + ";");
+    emit("  call " + ctor + ", (" + c + "_p0);");
+    emit("}");
+  }
 }

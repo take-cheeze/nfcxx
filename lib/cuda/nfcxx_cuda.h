@@ -10,6 +10,7 @@
 #define NFCXX_CUDA_H
 
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -178,6 +179,40 @@ struct __nfcxx_module_init {
   }
 };
 
+// A launch of a host function with no device code (the rewriter did not put its instance in the device unit) fails
+// with cudaErrorInvalidDeviceFunction. The runtime never sees that launch, so its cudaGetLastError would report success
+// and the caller's check would pass: the error is kept here, and cudaGetLastError / cudaPeekAtLastError (macros below)
+// report it first. The first failure of each address is printed with its offset in its object (addr2line -f -C -e).
+inline thread_local cudaError_t __nfcxx_launch_error = cudaSuccess;
+
+inline cudaError_t __nfcxx_missing_kernel(const void *host) {
+  static std::vector<const void *> reported;
+  bool seen = false;
+  for (const void *p : reported) seen = seen || p == host;
+  if (!seen) {
+    reported.push_back(host);
+    Dl_info info{};
+    if (dladdr(host, &info) && info.dli_fname)
+      std::fprintf(stderr, "nfcxx: launch of a kernel with no device code: %s+0x%lx%s%s\n", info.dli_fname,
+                   (unsigned long)((const char *)host - (const char *)info.dli_fbase), info.dli_sname ? " " : "",
+                   info.dli_sname ? info.dli_sname : "");
+    else
+      std::fprintf(stderr, "nfcxx: launch of a kernel with no device code: %p\n", host);
+  }
+  __nfcxx_launch_error = cudaErrorInvalidDeviceFunction;
+  return cudaErrorInvalidDeviceFunction;
+}
+
+inline cudaError_t __nfcxx_get_last_error(bool clear) {
+  cudaError_t own = __nfcxx_launch_error;
+  cudaError_t rt = clear ? (cudaGetLastError)() : (cudaPeekAtLastError)();
+  if (own == cudaSuccess) return rt;
+  if (clear) __nfcxx_launch_error = cudaSuccess;
+  return own;
+}
+#define cudaGetLastError() __nfcxx_get_last_error(true)
+#define cudaPeekAtLastError() __nfcxx_get_last_error(false)
+
 inline cudaKernel_t __nfcxx_find_kernel(const void *host) {
   for (const auto &e : __nfcxx_registry()) {
     if (e.first == host) return e.second;
@@ -204,7 +239,7 @@ inline cudaError_t __nfcxx_cuda_launch(void (*kernel)(P...), dim3 grid, dim3 blo
                                        cudaStream_t stream, A... args) {
   static_assert(sizeof...(P) == sizeof...(A), "kernel launch: wrong number of arguments");
   cudaKernel_t device = __nfcxx_find_kernel(reinterpret_cast<const void *>(kernel));
-  if (device == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (device == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(kernel));
   std::tuple<P...> packed(static_cast<P>(args)...);
   return __nfcxx_cuda_launch_impl(device, grid, block, shmem, stream, packed, std::index_sequence_for<P...>());
 }
@@ -223,7 +258,7 @@ template <typename... P, typename... A>
 inline cudaError_t __nfcxx_cudaLaunchKernelEx(const cudaLaunchConfig_t *config, void (*kernel)(P...), A &&...args) {
   static_assert(sizeof...(P) == sizeof...(A), "kernel launch: wrong number of arguments");
   cudaKernel_t device = __nfcxx_find_kernel(reinterpret_cast<const void *>(kernel));
-  if (device == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (device == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(kernel));
   std::tuple<P...> packed(static_cast<P>(args)...);
   return __nfcxx_launch_ex_impl(config, device, packed, std::index_sequence_for<P...>());
 }
@@ -237,7 +272,7 @@ inline cudaError_t __nfcxx_cudaLaunchKernelEx(const cudaLaunchConfig_t *config, 
 template <typename F>
 inline cudaError_t __nfcxx_cuda_func_set_attribute(F func, cudaFuncAttribute attr, int value) {
   cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
-  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
   int device = 0;
   cudaError_t err = cudaGetDevice(&device);
   if (err != cudaSuccess) return err;
@@ -248,7 +283,7 @@ template <typename F>
 inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void **args, std::size_t shmem,
                                            cudaStream_t stream) {
   cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
-  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = grid;
   cfg.blockDim = block;
@@ -268,7 +303,7 @@ template <typename F>
 inline cudaError_t __nfcxx_cuda_launch_cooperative(F func, dim3 grid, dim3 block, void **args, std::size_t shmem,
                                                    cudaStream_t stream) {
   cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
-  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = grid;
   cfg.blockDim = block;

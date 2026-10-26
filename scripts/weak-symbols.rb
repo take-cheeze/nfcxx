@@ -253,6 +253,30 @@ def defined_labels(asm)
   defs
 end
 
+# Names the assembly mentions outside a label definition: the operands of instructions and directives
+# ([A-Za-z_.$][\w.$]* runs, as defined_labels reads a label).
+def referenced_names(asm)
+  refs = {}
+  asm.each_line do |line|
+    i = 0
+    n = line.size
+    while i < n
+      c = line[i]
+      if ident_start?(c) || c == "." || c == "$"
+        j = i + 1
+        j += 1 while j < n && (word_char?(line[j]) || line[j] == "." || line[j] == "$")
+        refs[line[i, j - i]] = true unless j < n && line[j] == ":"
+        i = j
+      elsif word_char?(c)
+        i += 1 while i < n && word_char?(line[i])
+      else
+        i += 1
+      end
+    end
+  end
+  refs
+end
+
 extern_inline = true
 # --sym-prefix=P: the target's prefix on every label (QBE's Apple targets prefix "_", so a Mach-O label is __Z5f for the C name
 # _Z5f). The directive line names the label the assembly defines, so the names are looked up with the prefix. Empty elsewhere.
@@ -285,8 +309,22 @@ marked = weak_marked(asm)
 weak_marked(File.open(marked_path, "rb") { |f| f.read }).each_key { |k| marked[k] = true } if marked_path && File.exist?(marked_path)
 weak = weak_names(text, extern_inline).select { |n, how| how == :edg || !marked[prefix + n] }.keys
 weak = weak.map { |n| prefix + n }.select { |n| defs[n] }.sort
-unless weak.empty?
+# A weak declaration the assembly only refers to is a weak undefined reference, as gcc makes it: the address of an
+# absent definition reads as null. EDG declares the init function of an extern thread_local this way
+# (extern __attribute__((__weak__)) void _ZTH<name>(void)), and its wrapper calls it only when the address is not
+# null; the defining unit has none when the variable needs no dynamic initialization. ELF only (Mach-O would need
+# .weak_reference), and only the attribute's names: an extern __inline__ function that lives in another unit must stay
+# a strong reference (a weak one would not make the link pull it from an archive or keep its library --as-needed).
+weak_refs = []
+# Mach-O: the prefixed mode, or clang's assembly for an Apple target, which ends with .subsections_via_symbols (the gcc
+# back end on macOS calls this without --sym-prefix).
+macho = !prefix.empty? || asm.include?(".subsections_via_symbols")
+unless macho
+  refs = referenced_names(asm)
+  weak_refs = weak_names(text, false).select { |n, how| !defs[n] && refs[n] && (how == :edg || !marked[prefix + n]) }.keys.sort
+end
+unless weak.empty? && weak_refs.empty?
   File.open(asm_path, "ab") do |f|
-    f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join)
+    f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join + weak_refs.map { |n| ".weak #{n}\n" }.join)
   end
 end

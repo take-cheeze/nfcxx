@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Print the path of the device-wide CUB archive (lib/cuda/cub/device.cu: DeviceReduce::Sum, DeviceScan::InclusiveSum
+# and the SortPairs sorts that ggml-cuda calls, behind the host shim lib/cuda/host/cub/cub.cuh), building it first when
+# it is missing or older than its sources or the tools that build it. The driver adds it to hosted links that name
+# -lcudart; it is an archive, so a program that calls none of these links none of it.
+#   NFCXX_CUDA_CUB=0      print nothing (link without it)
+#   NFCXX_CUDA_CUB_DIR=d  where the archive is kept (default build/cuda-cub)
+# The object is compiled by nfcxx itself (its kernels go through the same device flow as any .cu input), with EDG's
+# local instantiation: the archive member has no prelinker records, so each template it uses is instantiated in it.
+# When it cannot be built the script prints a warning on stderr and nothing on stdout: the link then reports the CUB
+# functions as undefined.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+[ "${NFCXX_CUDA_CUB:-1}" != 0 ] || exit 0
+cuda=${CUDA_HOME:-/usr/local/cuda}
+src=$root/lib/cuda/cub/device.cu
+backend=${NFCXX_BACKEND:-qbe}
+dir=${NFCXX_CUDA_CUB_DIR:-$root/build/cuda-cub}/$backend
+out=$dir/libnfcxx_cub.a
+stale=0
+[ -f "$out" ] || stale=1
+for dep in "$src" "$root/lib/cuda/nfcxx_cuda.h" "$root/build/cuda-rewrite" "$root/build/pathb-ptx-emit" "$0"; do
+  [ $stale = 1 ] || [ ! -e "$dep" ] || [ ! "$dep" -nt "$out" ] || stale=1
+done
+if [ $stale = 1 ]; then
+  mkdir -p "$dir"
+  tmp=$(mktemp -d "$dir/.build.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+  if ! env -u NFCXX_CUDA_CUB TMPDIR="$tmp" "$root/nfcxx" --backend="$backend" -c --instantiate=local -I"$cuda/include" \
+       "$src" -o "$tmp/device.o" > "$tmp/log" 2>&1; then
+    echo "cuda-cub: cannot build $src; linking without it:" >&2
+    grep -m5 -E 'error|refused' "$tmp/log" >&2 || head -5 "$tmp/log" >&2
+    exit 0
+  fi
+  ar rcs "$tmp/libnfcxx_cub.a" "$tmp/device.o"
+  mv -f "$tmp/libnfcxx_cub.a" "$out"   # atomic: concurrent builds each write their own copy
+fi
+printf '%s\n' "$out"
