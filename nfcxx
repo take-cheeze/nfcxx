@@ -141,7 +141,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
 # so a CUDA_HOME-shaped directory from PyPI wheels (scripts/fetch-cudart-wheel.sh) behaves like the toolkit's.
 [ -n "${CUDA_HOME:-}" ] && export NFCXX_SYSTEM_PATHS="$CUDA_HOME${NFCXX_SYSTEM_PATHS:+:$NFCXX_SYSTEM_PATHS}"
 # The rewriter: the C++ tool (build/cuda-rewrite, built from tools/cuda-rewrite on first use).
-[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit $?
+[ -x "$root/build/cuda-rewrite" ] || ninja -C "$root/tools/cuda-rewrite" >/dev/null || exit $?
 rewriter=("$root/build/cuda-rewrite")
 cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, with the device image appended
   local src=$1 copy=$2
@@ -172,7 +172,7 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
-  [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
+  [ -x "$root/build/pathb-ptx-emit" ] || ninja -C "$root/tools/pathb-ptx-emit" >/dev/null || exit 1
   # The kernels are partitioned into modules within the budgets (NFCXX_CUDA_MAX_CONST_BYTES: the constant data a module
   # references, 64 KB is ptxas's limit; NFCXX_CUDA_MAX_PTX_LINES: its functions). A file that fits one module has one
   # group. Each group is one PTX module: $base.groups/gNNNN.ptx and its kernels in groups.txt.

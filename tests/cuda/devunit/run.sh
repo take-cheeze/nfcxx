@@ -10,7 +10,7 @@
 # needs only the rewriter (mruby).
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
-[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
+[ -x "$root/build/cuda-rewrite" ] || ninja -C "$root/tools/cuda-rewrite" >/dev/null || exit 1
 cuda=${CUDA_HOME:-/usr/local/cuda}
 fail=0
 out=$(mktemp -d)

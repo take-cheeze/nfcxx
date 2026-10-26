@@ -46,7 +46,7 @@ bundle_wrap() {
   [ $link = 1 ] || exit 0
   local tool=$root/build/nfcbundle
   if [ ! -x "$tool" ] || [ "$root/tools/bundle/nfcbundle.cpp" -nt "$tool" ]; then
-    make -s -C "$root/tools/bundle" >&2 || { echo "$(basename "$driver"): cannot build $tool (tools/bundle)" >&2; exit 1; }
+    ninja -C "$root/tools/bundle" >/dev/null || { echo "$(basename "$driver"): cannot build $tool (tools/bundle)" >&2; exit 1; }
   fi
   exec "$tool" ${opts[@]+"${opts[@]}"} "$out" -o "$out"
 }

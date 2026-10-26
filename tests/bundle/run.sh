@@ -14,7 +14,7 @@ root=$PWD
 d=tests/bundle
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-make -s -C tools/bundle || exit 1
+ninja -C tools/bundle >/dev/null || exit 1
 B=$root/build/nfcbundle
 
 ok()   { echo "ok   $1"; }

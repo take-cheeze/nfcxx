@@ -25,7 +25,7 @@ fetch() {
 fetch https://github.com/onnxsim/onnxsim $onnxsim_rev $out/src
 fetch https://github.com/onnxsim/onnx $onnx_rev $out/src/third_party/onnx
 rm -rf $out/src/.git $out/src/third_party/onnx/.git
-cmake -S scripts/onnxsim -B $out/b -DONNXSIM_SRC="$PWD/$out/src" -DCMAKE_BUILD_TYPE=Release >&2
+cmake -S scripts/onnxsim -B $out/b -G Ninja -DONNXSIM_SRC="$PWD/$out/src" -DCMAKE_BUILD_TYPE=Release >&2
 cmake --build $out/b --target nfconnxsim -j "${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}" >&2
 cp $out/b/libnfconnxsim.so $out/libnfconnxsim.so
 rm -f $out/built-*; touch "$stamp"

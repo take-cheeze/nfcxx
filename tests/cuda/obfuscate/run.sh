@@ -7,8 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
-[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
-[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
+[ -x "$root/build/cuda-rewrite" ] || ninja -C "$root/tools/cuda-rewrite" >/dev/null || exit 1
+[ -x "$root/build/pathb-ptx-emit" ] || ninja -C "$root/tools/pathb-ptx-emit" >/dev/null || exit 1
 rw() { "$root/build/cuda-rewrite" "$@"; }
 fail=0
 out=$(mktemp -d)
@@ -40,7 +40,7 @@ check "same seed, same output" bash -c 'cmp -s "$1" "$2" && cmp -s "$3" "$4"' _ 
   "$out/host_a.cpp" "$out/host_a2.cpp" "$out/dev_a.cpp" "$out/dev_a2.cpp"
 check "other seed, other names" bash -c '! cmp -s "$1" "$2"' _ "$out/a.kernels" "$out/b.kernels"
 # 3b. The C++ rewriter (the default, tools/cuda-rewrite) gives the same output as the Ruby reference, host and device.
-[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite"
+[ -x "$root/build/cuda-rewrite" ] || ninja -C "$root/tools/cuda-rewrite" >/dev/null
 "$root/build/cuda-rewrite" --obfuscate=seedA kern.cu > "$out/cxx_host_a.cpp"
 "$root/build/cuda-rewrite" --obfuscate=seedA --device --kernels="$out/cxx_a.kernels" kern.cu > "$out/cxx_dev_a.cpp"
 check "C++ rewriter matches the Ruby reference" bash -c 'cmp -s "$1" "$2" && cmp -s "$3" "$4" && cmp -s "$5" "$6"' _ \
