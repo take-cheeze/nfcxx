@@ -143,30 +143,27 @@ class vk_rt {
     for (int d = 0; d < 3; d++) lim[d] = limits_.maxComputeWorkGroupCount[d];
     uint64_t stride = (uint64_t(lmem) + 1024 + 15) & ~uint64_t(15);
     // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
-    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd); the
-    // dimensions above sd must be a single invocation, so the slab's invocations are contiguous in the emitter's linear
-    // index. The emitter numbers stacks and local memory over the whole grid (the offsets ox/oy/oz are in that index), so
+    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd), with
+    // every group below sd and one group of each dimension above it: consecutive groups in the linear group index (x
+    // fastest). The emitter numbers stacks and local memory over the whole grid, group by group (the offsets ox/oy/oz are in that index), so
     // each slab's bases are biased by the slab's first index and the region holds just the slab. Inside a slab, the
     // device's group-count limit still tiles the slab's range.
     uint64_t room = largest_free();
     int sd = 0;
     for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
-    bool sliceable = true;
-    for (int e = sd + 1; e < 3; e++) if (l[e] != 1) sliceable = false;
     uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
     uint64_t per_group = inv_group * stack_bytes_ + stride;
     // the groups in the dimensions below d: one group along d takes them all
     auto below = [&](int d) { uint64_t b = 1; for (int e = 0; e < d; e++) b *= ng[e]; return b; };
     // when even one group along sd does not fit (with all the groups below it), the slab moves to the next dimension
-    // inward; the dimensions above it then run one group per slab, so they must be one invocation wide (l == 1) for the
-    // slab to stay contiguous in the linear index
+    // inward; the dimensions above it then run one group per slab
     if (invocations * stack_bytes_ + groups * stride > room)
-      while (sliceable && sd > 0 && l[sd] == 1 && below(sd) * per_group > room) sd--;
+      while (sd > 0 && below(sd) * per_group > room) sd--;
     uint64_t inner = below(sd);
     uint64_t outer = 1;   // the groups of the dimensions above sd, one per slab
     for (int e = sd + 1; e < 3; e++) outer *= ng[e];
     uint32_t per_slab = ng[sd];   // groups along sd in one slab
-    if (invocations * stack_bytes_ + groups * stride > room && sliceable) {
+    if (invocations * stack_bytes_ + groups * stride > room) {
       uint64_t fit = room / (inner * per_group);
       per_slab = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
     }
