@@ -280,4 +280,21 @@ suite.compile('factory = Class; copy = factory; copy.new(Object); nil') do |irep
              FactoryFlow.uses(body, index, body.instructions[index].reg, max_aliases: 0).nil?)
 end
 
+# Shared forward-use walk: MOVE aliases are chased without per-state pair
+# Arrays, so repeated walks find the same uses in the same order. Budgets at
+# and below the visited-state count answer and refuse respectively.
+suite.compile('factory = Class; copy = factory; copy.new(Object); nil') do |ireps, root|
+  body = ireps.fetch(root)
+  index = body.instructions.index { |i| i.op == :GETCONST && i.const_name == 'Class' }
+  reg = body.instructions[index].reg
+  first = FactoryFlow.uses(body, index, reg)
+  check.call('a shared-walk traversal finds the same uses in the same order',
+             first.to_a == FactoryFlow.uses(body, index, reg).to_a)
+  exact = first.size + body.instructions.length
+  check.call('a budget at the visited-state count still answers',
+             !FactoryFlow.uses(body, index, reg, max_aliases: exact).nil?)
+  check.call('a budget below the visited-state count refuses',
+             FactoryFlow.uses(body, index, reg, max_aliases: 1).nil?)
+end
+
 suite.finish!

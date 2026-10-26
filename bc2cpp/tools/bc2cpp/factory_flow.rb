@@ -6,26 +6,17 @@ require_relative 'ir_symbol_flow'
 module FactoryFlow
   module_function
 
+  # Collected as [use index, register] pairs, one per join arm; the register is
+  # the alias name at that use. Nil when the answer is not provable (a refusal,
+  # a use the walk cannot list) or the alias budget is exceeded.
   def uses(irep, index, reg, max_aliases: BytecodeIR::DATAFLOW_MAX_STATES)
-    program = BytecodeIR.for(irep)
-    work = [[index, reg]]
-    seen = Set.new
     uses = Set.new
-    until work.empty?
-      origin, register = work.pop
-      next unless seen.add?([origin, register])
-      return nil if seen.size > max_aliases
-
-      reads = IrSymbolFlow.value_reads(irep, origin, register) or return nil
-      reads.each do |use|
-        instruction = program.source_at(use)
-        if instruction.op == :MOVE
-          work << [use, instruction.reg]
-        else
-          uses << [use, register]
-        end
-      end
+    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg, max_states: max_aliases) do |use, _insn, register|
+      uses << [use, register]
+      nil
     end
+    return nil if walked.nil?
+
     uses
   end
 end

@@ -115,37 +115,25 @@ module StaticDispatchFragmentUses
   end
 
   def uses_escape?(irep, index, reg, ctx, depth)
-    program = BytecodeIR.for(irep)
-    work = [[index, reg]]
-    seen = Set.new
-    until work.empty?
-      origin, register = work.pop
-      next unless seen.add?([origin, register])
-
-      reads = IrSymbolFlow.value_reads(irep, origin, register) or return true
-      reads.each do |use|
-        insn = program.source_at(use)
-        if insn.op == :MOVE
-          work << [use, insn.reg]
-        elsif PURE_OPS.include?(insn.op)
-          next
-        elsif BytecodeIR::Ops::SEND.include?(insn.op)
-          return true if send_escapes?(irep, use, insn, register.to_i, ctx, depth)
-        elsif insn.op == :GETIDX
-          # `x[value]`: the `[]` send GETIDX stands for, with the value as its argument (or receiver).
-          return true if call_escapes?(irep, use, '[]', insn.reg.to_i, 1, register.to_i, false, ctx, depth)
-        elsif %i[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
-          return true if container_escapes?(irep, use, insn.reg, ctx, depth + 1)
-        elsif insn.op == :STRCAT
-          return true unless concat_poisoned?(irep, use, insn.reg)
-        elsif insn.op == :RETURN
-          return true if result_escapes?(irep, ctx, depth + 1)
-        else
-          return true
-        end
+    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg) do |use, insn, register|
+      if PURE_OPS.include?(insn.op)
+        nil
+      elsif BytecodeIR::Ops::SEND.include?(insn.op)
+        send_escapes?(irep, use, insn, register.to_i, ctx, depth)
+      elsif insn.op == :GETIDX
+        # `x[value]`: the `[]` send GETIDX stands for, with the value as its argument (or receiver).
+        call_escapes?(irep, use, '[]', insn.reg.to_i, 1, register.to_i, false, ctx, depth)
+      elsif %i[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
+        container_escapes?(irep, use, insn.reg, ctx, depth + 1)
+      elsif insn.op == :STRCAT
+        !concat_poisoned?(irep, use, insn.reg)
+      elsif insn.op == :RETURN
+        result_escapes?(irep, ctx, depth + 1)
+      else
+        true
       end
     end
-    false
+    walked.nil? || walked
   end
 
   def callers_by_name(ireps)
@@ -187,45 +175,39 @@ module StaticDispatchFragmentUses
   end
 
   def container_uses_escape?(irep, index, reg, ctx, depth)
-    program = BytecodeIR.for(irep)
-    work = [[index, reg]]
-    seen = Set.new
-    until work.empty?
-      origin, register = work.pop
-      next unless seen.add?([origin, register])
-
-      reads = IrSymbolFlow.value_reads(irep, origin, register) or return true
-      reads.each do |use|
-        insn = program.source_at(use)
-        if insn.op == :MOVE then work << [use, insn.reg]
-        elsif PURE_OPS.include?(insn.op) then next
-        elsif insn.op == :SETCONST
-          return true if ctx[:outside].include?(insn.const_name.to_s) # native code may read it
-
-          ctx[:constants][insn.const_name.to_s].each do |reader, at, value_reg|
-            return true if container_escapes?(reader, at, value_reg, ctx, depth + 1)
-          end
-        elsif %i[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
-          return true if container_escapes?(irep, use, insn.reg, ctx, depth + 1)
-        elsif BytecodeIR::Ops::SELF_SEND.include?(insn.op) && insn.reg.to_i == register.to_i
-          next # only the result slot
-        elsif BytecodeIR::Ops::SEND.include?(insn.op) && insn.reg.to_i == register.to_i && send_argc(insn)
-          name = insn.sym.to_s
-          # A closed-world definition of the name (mruby-rgss's Array#include?) gets the collection as self.
-          container_bodies = ctx[:bodies][name].select { |body| CONTAINER_OWNERS.include?(ctx[:body_of][body][0]) }
-          return true if container_bodies.any? { |body| self_escapes?(body, ctx, depth + 1) }
-
-          if SAME_CONTAINER_SENDS.include?(name) then work << [use, insn.reg]
-          elsif ELEMENT_SENDS.include?(name)
-            return true if escapes?(irep, use, insn.reg, ctx, depth + 1)
-          elsif !PURE_CONTAINER_SENDS.include?(name) then return true
-          end
+    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg) do |use, insn, register|
+      if PURE_OPS.include?(insn.op)
+        nil
+      elsif insn.op == :SETCONST
+        if ctx[:outside].include?(insn.const_name.to_s) # native code may read it
+          true
         else
-          return true
+          ctx[:constants][insn.const_name.to_s].any? do |reader, at, value_reg|
+            container_escapes?(reader, at, value_reg, ctx, depth + 1)
+          end
         end
+      elsif %i[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
+        container_escapes?(irep, use, insn.reg, ctx, depth + 1)
+      elsif BytecodeIR::Ops::SELF_SEND.include?(insn.op) && insn.reg.to_i == register.to_i
+        nil # only the result slot
+      elsif BytecodeIR::Ops::SEND.include?(insn.op) && insn.reg.to_i == register.to_i && send_argc(insn)
+        name = insn.sym.to_s
+        # A closed-world definition of the name (mruby-rgss's Array#include?) gets the collection as self.
+        container_bodies = ctx[:bodies][name].select { |body| CONTAINER_OWNERS.include?(ctx[:body_of][body][0]) }
+        if container_bodies.any? { |body| self_escapes?(body, ctx, depth + 1) }
+          true
+        elsif SAME_CONTAINER_SENDS.include?(name)
+          IrSymbolFlow::Follow.new(insn.reg)
+        elsif ELEMENT_SENDS.include?(name)
+          escapes?(irep, use, insn.reg, ctx, depth + 1)
+        else
+          !PURE_CONTAINER_SENDS.include?(name)
+        end
+      else
+        true
       end
     end
-    false
+    walked.nil? || walked
   end
 
   # A closed-world method whose self is the collection: it only queries self (or the elements it takes out).

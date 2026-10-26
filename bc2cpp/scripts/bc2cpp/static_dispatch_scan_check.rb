@@ -171,6 +171,14 @@ if ENV['MRBC']
         def handed(o) = o.anything('handed_word')
         def label = 'returned_word'
         def use_label(x) = "#{x}#{label}"
+        def duped_array_handed(o)
+          list = ['duped_elem_word', 'other'].dup
+          o.anything(list)
+        end
+        def frozen_array_queried(x)
+          list = ['frozen_elem_word', 'other'].freeze
+          list.include?(x)
+        end
       end
     RUBY
     ireps, root_label = compile_ireps([fragments], 'static_dispatch_scan_check', tmp, mrbc: ENV['MRBC'])
@@ -194,6 +202,9 @@ if ENV['MRBC']
     check('fragment uses: a stored literal is one', escaping.include?('stored_word'))
     check('fragment uses: an argument of an unknown method is one', escaping.include?('handed_word'))
     check('fragment uses: a returned literal concatenated by a caller is one', escaping.include?('returned_word'))
+    check('fragment uses: an element of a duped array handed out is one', escaping.include?('duped_elem_word'))
+    check('fragment uses: an element of a frozen array only queried is no fragment',
+          !escaping.include?('frozen_elem_word'))
   end
 else
   puts 'skip CORE_BYTECODE_TOKENS / FRAGMENT_USES fixtures (no MRBC)'
