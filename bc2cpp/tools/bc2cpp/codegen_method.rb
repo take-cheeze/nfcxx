@@ -527,6 +527,12 @@ class CodeGen
                      suppressed.empty? && glue_at.empty? && prefix_at.empty? && guarded_inline[:at].empty? &&
                      guarded_inline[:after].empty?
     arm_prune_refuse(:ineligible) if arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !arm_prune_drop
+    # SPLAT_SHARED (codegen_computed_send.rb): the ARYCAT's text is handed to the guarded splat send after it.
+    splat_blocked = lambda do |addr|
+      arm_prune_drop || targets.include?(addr) || suppressed.include?(addr) || glue_at.key?(addr) ||
+        prefix_at.key?(addr) || guarded_inline[:at].key?(addr) || guarded_inline[:after].key?(addr)
+    end
+    pending_splat = nil
     BytecodeIR.for(irep).each_source do |insn, idx|
       stack_tuple_visit(irep, idx, suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr))
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
@@ -538,7 +544,17 @@ class CodeGen
 
       jump_label = targets.include?(insn.addr) ? "  L#{insn.addr}:;\n" : ''
       # The guarded-inline prefix is part of this instruction's text, so the flow pass sees it as one unit.
-      text = (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
+      text = if splat_shared_pair?(irep, idx, splat_blocked)
+               pending_splat = { irep: irep, idx: idx + 1, reg: insn.reg.to_i, src: insn.paren_reg.to_i,
+                                 arycat: compile_insn(insn, irep, d, idx) }
+               ''
+             elsif pending_splat
+               shared_send = splat_shared_send(pending_splat) { compile_insn(insn, irep, d, idx) }
+               pending_splat = nil
+               shared_send
+             else
+               (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
+             end
       if arm_prune_drop && arm_prune.include?(idx)
         # A flow body keeps its '' slot until the decision below, so the pass never sees a dropped text.
         arm_texts[idx] = [jump_label, text]
