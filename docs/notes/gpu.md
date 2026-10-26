@@ -92,6 +92,17 @@ placeholders, and each device module is registered with the runtime.
 - **Arrays of class objects** (`tile a[2];` when the tile's default constructor converts floats to half2): the front
   end lowers them to `__cxa_vec_ctor` and the constructor zeroes with `memset`. The emitter lowers both: one direct call
   of the constructor per element (count and size constants, no destructor) and byte stores (`vec_ctor.cu`).
+- **Kernel instances from the host compile** (binbcast.cu): a launch or kernel address in a template that the unit
+  calls only with deduced or dependent arguments (`launch_bin_bcast_pack<op, ...>(..., std::index_sequence<I...>)`)
+  gives the rewriter no instance. It lists such kernel templates (`<kernels>.unresolved`); after the host compile the
+  driver reads the output's symbols (`nm -C`, EDG's `_INTERNAL_` namespace removed), and when they have an instance of
+  one of them it builds again with them (`NFCXX_CUDA_HOST_SYMBOLS`, `--host-symbols`): each instance gets its entry
+  and a row in the kernel table. A unit whose templates other units instantiate (fattn.cu, mmq.cu) has none in its
+  object and builds once. One `.cu` input only. A kernel's function parameter pack is one entry parameter per element
+  (`host_instances.cu`).
+- **Zero bytes of an initializer** are stored no wider than the object's alignment (`zero_tail.cu`), and the
+  runtime's queries on a kernel's host address (`cudaOccupancyMaxActiveBlocksPerMultiprocessor`,
+  `cudaFuncGetAttributes`) look the kernel up first (`func_query.cu`).
 
 ## CUDA source (`.cu`)
 

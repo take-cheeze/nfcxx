@@ -73,6 +73,23 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
     emit("add.s64 " + dest + ", " + breg + ", " + off + ";");
     return true;
   }
+  if (h == "pdiff") {
+    // (pdiff A B SIZE): (A - B) / SIZE, the difference of two pointers in elements of SIZE bytes (a constant, as for
+    // index); the result is the 8-byte pointer difference type
+    if (!(dty.kind == "int" && type_size(dty) == 8)) throw Refused("pdiff of type " + dty.kind);
+    Operand a = operand(at(x, 1)), b = operand(at(x, 2));
+    if (a.ty.kind != "ptr" || b.ty.kind != "ptr") throw Refused("pdiff of a non-pointer");
+    i128 size = as_int(&at(x, 3));
+    if (size <= 0) throw Refused("pdiff with element size " + i128_text(size));
+    if (size == 1) {
+      emit("sub.s64 " + dest + ", " + reg_of(a.text, a.ty) + ", " + reg_of(b.text, b.ty) + ";");
+    } else {
+      std::string d = fresh("rd");
+      emit("sub.s64 " + d + ", " + reg_of(a.text, a.ty) + ", " + reg_of(b.text, b.ty) + ";");
+      emit("div.s64 " + dest + ", " + d + ", " + i128_text(size) + ";");
+    }
+    return true;
+  }
   return false;
 }
 

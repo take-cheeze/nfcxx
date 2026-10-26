@@ -204,6 +204,14 @@ pass half_convert.cu "half convert: no error, 0 mismatches"
 pass stub_addr.cu "stub addr: no error, invalid device function, no error, 0 mismatches"
 # An array of class objects with a non-trivial default constructor (__cxa_vec_ctor) that zeroes first (memset).
 pass vec_ctor.cu "vec ctor: no error, 0 mismatches"
+# The lanes of nv_bfloat162 are bf16 values, and half2 / nv_bfloat162 are 4-byte aligned (an int read of one is aligned).
+pass pair_lanes.cu "pair lanes: no error, 0 mismatches"
+# The zero bytes of an aggregate initializer are stored no wider than the object's alignment.
+pass zero_tail.cu "zero tail: no error, 0 mismatches"
+# cudaOccupancyMaxActiveBlocksPerMultiprocessor and cudaFuncGetAttributes on a kernel's host address.
+pass func_query.cu "func query: no error, no error, 0 mismatches"
+# Kernel instances only the host compile knows (binbcast.cu): the driver builds twice, with the first object's symbols.
+pass host_instances.cu "host instances: no error, 0 mismatches"
 pass helper_launch.cu "helper launch: no error, 0 mismatches"
 # Mutant: the helper launches the wrong template instance, so every element must mismatch.
 if "$root/nfcxx" -c -I"$cuda/include" helper_launch_mutant.cu -o "$out/hlm.o" > "$out/hlm.log" 2>&1 \

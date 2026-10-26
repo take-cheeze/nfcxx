@@ -4551,6 +4551,8 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
 }
 
 /* Store zero bytes over [off, off + n) of the object at base, in the widest naturally aligned integer stores.
+   align is the object's alignment: no store is wider than it (the trailing zeros of a float[2][2] are two 4-byte
+   stores, not one 8-byte store, which faults on a GPU when the array is not 8-byte aligned).
    Returns 0 (and emits nothing) when that would take more than 128 stores. */
 /* 1 when the constant is the integer 0 (a repeated zero is a block of zero bytes). */
 static int ir_const_is_zero(a_constant_ptr c)
@@ -4558,11 +4560,13 @@ static int ir_const_is_zero(a_constant_ptr c)
   return c != NULL && c->kind == ck_integer && strcmp(ir_capture_constant(c), "0") == 0;
 }
 
-static int ir_zero_bytes(const char *base, unsigned long long off, unsigned long long n)
+static int ir_zero_bytes(const char *base, unsigned long long off, unsigned long long n, unsigned long long align)
 {
   unsigned long long cnt = 0, o = off, left = n;
+  unsigned long long wmax = align >= 8 ? 8 : align >= 4 ? 4 : align >= 2 ? 2 : 1;
   while (left > 0) {
-    unsigned long long w = (o % 8 == 0 && left >= 8) ? 8 : (o % 4 == 0 && left >= 4) ? 4 : (o % 2 == 0 && left >= 2) ? 2 : 1;
+    unsigned long long w = (wmax >= 8 && o % 8 == 0 && left >= 8) ? 8 : (wmax >= 4 && o % 4 == 0 && left >= 4) ? 4
+                           : (wmax >= 2 && o % 2 == 0 && left >= 2) ? 2 : 1;
     o += w;
     left -= w;
     if (++cnt > 128) {
@@ -4574,7 +4578,8 @@ static int ir_zero_bytes(const char *base, unsigned long long off, unsigned long
   o = off;
   left = n;
   while (left > 0) {
-    unsigned long long w = (o % 8 == 0 && left >= 8) ? 8 : (o % 4 == 0 && left >= 4) ? 4 : (o % 2 == 0 && left >= 2) ? 2 : 1;
+    unsigned long long w = (wmax >= 8 && o % 8 == 0 && left >= 8) ? 8 : (wmax >= 4 && o % 4 == 0 && left >= 4) ? 4
+                           : (wmax >= 2 && o % 2 == 0 && left >= 2) ? 2 : 1;
     a_type_ptr it = integer_type(w == 8 ? ik_unsigned_long : w == 4 ? ik_unsigned_int : w == 2 ? ik_unsigned_short : ik_unsigned_char);
     ir_val sub = ir_subobject(base, o, it, 0);
     ir_store(it, sub.s, ir_zero(it), 0);
@@ -4589,7 +4594,7 @@ static int ir_zero_bytes(const char *base, unsigned long long off, unsigned long
 static void ir_zero_object(ir_val dst, a_type_ptr t)
 {
   if (ir_is_memval(t)) {
-    if (!ir_zero_bytes(dst.s, 0, ir_size_of(t))) ir_emit("(unsupported init zero-aggregate)");
+    if (!ir_zero_bytes(dst.s, 0, ir_size_of(t), ir_align_of(t))) ir_emit("(unsupported init zero-aggregate)");
     return;
   }
   ir_store(t, dst.s, ir_zero(t), dst.vol);
@@ -4992,7 +4997,7 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
         }
         if (cnt > n - i) cnt = n - i;
         if (ir_const_is_zero(rc) && !ir_is_aggregate(elem)) {
-          ir_zero_bytes(dst.s, i * esz, cnt * esz);
+          ir_zero_bytes(dst.s, i * esz, cnt * esz, ir_align_of(elem));
         } else {
           for (j = 0; j < cnt; j++) {
             ir_val sj = ir_subobject(dst.s, (i + j) * esz, elem, 0);
@@ -5062,7 +5067,7 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
     a_field_ptr f = ir_union_member(t, c, &val);
     unsigned long long usz = ir_size_of(t);
     if (f == NULL || val == NULL || f->is_bit_field || ir_size_of(f->type) != usz) {
-      if (!ir_zero_bytes(dst.s, 0, usz)) {
+      if (!ir_zero_bytes(dst.s, 0, usz, ir_align_of(t))) {
         ir_note(4, dik_constant, 0);
         ir_emit("(unsupported init zero-aggregate)");
         return;
