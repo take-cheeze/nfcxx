@@ -302,7 +302,7 @@ module StaticDispatchFragmentUses
     return false if position.zero? && self_send
     return true if position > argc # the block slot
     return true unless (position.zero? ? PURE_RECEIVER_SENDS : PURE_ARGUMENT_SENDS).include?(name)
-    return true if RESULT_CARRYING_SENDS.include?(name) && escapes?(irep, use, base.to_s, ctx, depth + 1)
+    return true if RESULT_CARRYING_SENDS.include?(name) && escapes?(irep, use, base, ctx, depth + 1)
 
     # A closed-world definition of the name gets the value as self or as parameter `position`.
     ctx[:bodies][name].any? do |body|
@@ -313,7 +313,7 @@ module StaticDispatchFragmentUses
       next true unless callee && enter && optional_positionals_only?(callee)
       next false if position > enter.enter_fields[0] + enter.enter_fields[1]
 
-      escapes?(callee, 0, position.to_s, ctx, depth + 1)
+      escapes?(callee, 0, position, ctx, depth + 1)
     end
   end
 end
