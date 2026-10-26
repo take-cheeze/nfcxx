@@ -270,6 +270,12 @@ std::vector<Site> g_sites;
 std::map<std::string, size_t> g_site_index;
 // Address-taken template kernel instances: (host expression, wrapper). Written to the addr file with the kernel list.
 std::vector<std::pair<std::string, std::string>> g_addr_table;
+// Kernel templates whose launch or address depends on an enclosing template that the unit never instantiates with
+// explicit arguments (binbcast.cu's launch_bin_bcast_pack: its arguments are deduced, its pack an index sequence), so the
+// text does not give their instances. Written to <kernels>.unresolved; the driver then compiles the host copy and passes
+// the demangled symbols of that object back (--host-symbols=FILE), whose instances of these kernels are the unit's.
+std::set<std::string> g_unresolved;
+std::vector<std::string> g_host_symbols;
 
 // Ruby slicing text[a...b] / text[a, n] with the bounds clipped to the string (a past the end gives "").
 std::string sl(const std::string &s, long a, long b) {
@@ -568,6 +574,45 @@ std::string name_comment_params(const std::string &s) {
 
 std::string blank_comments(const std::string &text);
 
+// A kernel's function parameter pack (binbcast.cu's `const src1_ptrs... src1s`), one parameter per element of the
+// template argument pack: `float const* const src1s__0, float const* const src1s__1`. A cv-qualifier in front of the
+// pack goes after the element (`const` + `float const*` is not a type). substitute then has no pack left to expand
+// here: it would give the elements one name, the last.
+std::string expand_param_pack(const std::string &params, const KernelTemplate &kt, const std::vector<std::string> &args) {
+  if (!kt.has_pack || kt.pack < 0 || kt.pack >= (long)kt.names.size()) return params;
+  const std::string &pk = kt.names[(size_t)kt.pack];
+  long np = (long)args.size() - ((long)kt.names.size() - 1);
+  std::string out;
+  bool changed = false;
+  for (const auto &part : split_top(params)) {
+    std::string p = strip(part);
+    long at = -1, dots = -1;
+    for (long i = str_index(p, pk, 0); i >= 0; i = str_index(p, pk, i + 1)) {
+      if (i > 0 && ident_c(ch(p, i - 1))) continue;
+      long k = i + (long)pk.size();
+      if (k < (long)p.size() && ident_c(ch(p, k))) continue;
+      while (k < (long)p.size() && white_c(ch(p, k))) k++;
+      if (sl_n(p, k, 3) == "...") { at = i; dots = k; break; }
+    }
+    if (at < 0) {
+      out += (out.empty() ? "" : ", ") + p;
+      continue;
+    }
+    changed = true;
+    std::string prefix = strip(sl(p, 0, at));
+    std::string decl = strip(sl(p, dots + 3, (long)p.size()));
+    bool cv_only = true;
+    for (const auto &t : tokens_of(prefix))
+      if (t != "const" && t != "volatile") cv_only = false;
+    for (long q = 0; q < np; q++) {
+      const std::string &elem = args[(size_t)(kt.pack + q)];
+      std::string ty = cv_only ? elem + (prefix.empty() ? "" : " " + prefix) : prefix + " " + elem;
+      out += (out.empty() ? "" : ", ") + ty + (decl.empty() ? "" : " " + decl + "__" + std::to_string(q));
+    }
+  }
+  return changed ? out : params;
+}
+
 // Ruby template_site (line 288): the wrapper of a template launch. Registers it in g_sites.
 std::string template_site(const std::string &name, const std::string &targs) {
   KernelTemplate kt;
@@ -575,7 +620,7 @@ std::string template_site(const std::string &name, const std::string &targs) {
   std::vector<std::string> args = split_top(targs);
   bool bad = kt.has_pack ? (long)args.size() < (long)kt.names.size() - 1 : args.size() != kt.names.size();
   if (bad) refuse("template kernel " + name + "<" + targs + ">: explicit arguments must give every template parameter");
-  std::string decl = name_comment_params(substitute(kt.params, kt.names, args, kt.has_pack, kt.pack));
+  std::string decl = name_comment_params(substitute(expand_param_pack(kt.params, kt, args), kt.names, args, kt.has_pack, kt.pack));
   std::vector<std::string> call;
   std::string plain;  // the wrapper's parameters without their defaults: the stub and the definition both spell them
   for (const auto &part : split_top(decl)) {
@@ -652,6 +697,38 @@ long matching_angle(const std::string &s, long open) {
     k += 1;
   }
   return -1;
+}
+
+// The template arguments of the host compile's instances of kernel template name, read from the demangled symbols of
+// the host object (--host-symbols, `nm -C`): `void _INTERNAL_12_binbcast_cpp_1bc382ed::k_bin_bcast<&_INTERNAL_12_..
+// ::op_add, float, float, float, float const*>(...)` gives `&op_add, float, float, float, float const*`. The names of
+// the unit's internal namespace (EDG's _INTERNAL_ prefix, an anonymous namespace) are dropped: the expressions are
+// written at the end of the host copy and in the device unit, at file scope.
+std::vector<std::string> host_instances(const std::string &name) {
+  std::vector<std::string> out;
+  for (const auto &raw : g_host_symbols) {
+    std::string line;
+    for (size_t i = 0; i < raw.size();) {
+      if (raw.compare(i, 10, "_INTERNAL_") == 0) {
+        size_t e = raw.find("::", i);
+        if (e != std::string::npos) { i = e + 2; continue; }
+      }
+      if (raw.compare(i, 23, "(anonymous namespace)::") == 0) { i += 23; continue; }
+      line.push_back(raw[i]);
+      i++;
+    }
+    for (size_t at = line.find(name + "<"); at != std::string::npos; at = line.find(name + "<", at + 1)) {
+      if (at > 0 && (ident_c((unsigned char)line[at - 1]))) continue;
+      long open = (long)(at + name.size());
+      long close = matching_angle(line, open);
+      // the kernel itself (its parameter list follows), not a template argument that names it
+      if (close < 0 || close + 1 >= (long)line.size() || line[(size_t)close + 1] != '(') continue;
+      std::string targs = strip(line.substr((size_t)open + 1, (size_t)(close - open - 1)));
+      if (std::find(out.begin(), out.end(), targs) == out.end()) out.push_back(targs);
+      break;
+    }
+  }
+  return out;
 }
 
 // Ruby directive_spans (line 372): [start, end) of each directive, continuation lines included.
@@ -922,6 +999,22 @@ const std::vector<std::string> DECL_WORDS = {"void", "static", "inline", "int", 
                                              "__global__", "__forceinline__", "constexpr", "auto"};
 
 // Ruby plain_call_sites (line 819): the unqualified calls name(args) of a template function, as {args, position}.
+// Whether the unit names template function outer.fname outside its own head, followed by `<` or `(`: a call, which
+// the host compile instantiates, though its arguments may be deduced or dependent. A template the unit only defines
+// (fattn-tile.cuh's launch functions, instantiated by the template-instances units) is not called here.
+bool called_in_unit(const std::string &text, const OuterTemplate &outer) {
+  const std::string &name = outer.fname;
+  for (long p = str_index(text, name, 0); p >= 0; p = str_index(text, name, p + 1)) {
+    if (p >= outer.st && p < outer.open) continue;
+    if (p > 0 && ident_c(ch(text, p - 1))) continue;
+    long k = p + (long)name.size();
+    if (k < (long)text.size() && ident_c(ch(text, k))) continue;
+    while (k < (long)text.size() && white_c(ch(text, k))) k++;
+    if (k < (long)text.size() && (ch(text, k) == '<' || ch(text, k) == '(')) return true;
+  }
+  return false;
+}
+
 std::vector<std::pair<std::vector<std::string>, long>> plain_call_sites(const std::string &text, const std::string &name) {
   std::vector<std::pair<std::vector<std::string>, long>> out;
   std::vector<Range> pp;
@@ -2995,6 +3088,7 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
              outer.fname + ": the unit has no explicit call of it with all its template arguments, so its instances are "
              "not known");
     if (uninstantiated) {
+      if (called_in_unit(text, outer)) g_unresolved.insert(tl.name);
       DependentLaunch d;
       d.name = tl.name;
       d.targs = tl.targs;
@@ -5176,6 +5270,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
           if (insts.empty() && !uninstantiated)
             refuse("address of template kernel " + name + "<" + raw + "> depends on the template parameter " + dep +
                    " of " + outer.fname + ": the unit has no explicit call of it with all its template arguments");
+          if (uninstantiated && called_in_unit(code_text, outer)) g_unresolved.insert(name);
           for (const auto &inst : insts) {
             std::string why;
             int taken = guards_taken(text, i, outer, inst, guards, why);
@@ -5194,6 +5289,10 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
     }
     i = j;
   }
+  // The host compile's instances of the unresolved kernel templates (--host-symbols): each gets its wrapper, and the
+  // table maps the host instance's address to it, as for an address taken above.
+  for (const auto &name : g_unresolved)
+    for (const auto &targs : host_instances(name)) add_addr(name + "<" + targs + ">", template_site(name, targs));
   static const std::vector<std::string> dq(DEVICE_QUALIFIERS.begin(), DEVICE_QUALIFIERS.end());
   // Device functions are kept only when the unit names them (the fixed point below): a function that no kept piece
   // mentions is not in the unit. Kernels, and the other device pieces (classes, variables with an initializer), are kept
@@ -7125,6 +7224,13 @@ int main(int argc, char **argv) {
     } else if (arg.compare(0, 10, "--kernels=") == 0) {
       has_kernels = true;
       kernels_path = arg.substr(10);
+    } else if (arg.compare(0, 15, "--host-symbols=") == 0) {
+      std::string syms;
+      if (!read_file(arg.substr(15), syms)) {
+        std::fprintf(stderr, "cuda-rewrite: cannot read %s\n", arg.substr(15).c_str());
+        return 1;
+      }
+      g_host_symbols = ruby_split_nl(syms);
     } else if (arg.compare(0, 12, "--obfuscate=") == 0) {
       has_obfuscate = true;
       obfuscate_seed = arg.substr(12);
@@ -7202,6 +7308,12 @@ int main(int argc, char **argv) {
         for (const auto &p : g_addr_table)
           if (seen_host.insert(p.first).second) std::fprintf(af_file, "%s\t%s\n", p.first.c_str(), p.second.c_str());
         std::fclose(af_file);
+      }
+      // the kernel templates whose instances the text does not give (one name per line, empty if none)
+      FILE *uf = std::fopen((kernels_path + ".unresolved").c_str(), "wb");
+      if (uf) {
+        for (const auto &u : g_unresolved) std::fprintf(uf, "%s\n", u.c_str());
+        std::fclose(uf);
       }
     }
     result = dk.first;

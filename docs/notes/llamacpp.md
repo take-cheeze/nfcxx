@@ -20,7 +20,7 @@ included, with the default FlashAttention types of llama.cpp's CMake: f16-f16 on
 `tests/test-backend-ops.cpp` against it, `-lcuda -lcublas -lcudart`: 214 objects, about 25 minutes at JOBS=2 under the
 8 GB cap (objects are kept in `build/llcu`, so a second run only links). `tests/llamacpp/cuda/run.sh` runs each op of
 `test-backend-ops test -b CUDA0` in its own process (a device fault aborts it) and checks it against its record. On the
-RTX 2060 (sm_75, CUDA 13.1): 99 ops pass every case, 11 fail, 19 have no cases.
+RTX 2060 (sm_75, CUDA 13.1): 105 ops pass every case, 5 fail, 19 have no cases.
 
 What it took (docs/notes/gpu.md, "Launch path", has the details):
 
@@ -35,18 +35,23 @@ What it took (docs/notes/gpu.md, "Launch path", has the details):
 - The emitter lowers `__cxa_vec_ctor` and `memset` (arrays of mma tiles, whose half2 members are now constructed).
 - A launch of a kernel with no device code was silent: the op left garbage and passed its CUDA_CHECK. It is reported
   through `cudaGetLastError` now, with the kernel's address in the program.
+- binbcast.cu (ADD, SUB, MUL, DIV, REPEAT): `k_bin_bcast` is reached through `bin_bcast_cuda<op>::operator()` and
+  `launch_bin_bcast_pack<op, ...>(..., std::make_index_sequence<n_fuse>{})`, whose calls give the rewriter no instance.
+  The driver now builds such a unit twice: the host compile instantiates the kernels, and the second device rewrite
+  takes their instances from the object's symbols (`nm -C`: 228 of them). binbcast.cu takes about 19 minutes instead
+  of 6. The kernel's function parameter pack (`const src1_ptrs... src1s`) gives one entry parameter per element.
+- The zero bytes of an aggregate initializer were stored as if the object were 8-byte aligned: mmvq's
+  `float tmp[2][2] = {{0.0f}}` got an 8-byte store at 4 mod 8 (misaligned address, q4_0 MUL_MAT).
+- The lanes of `nv_bfloat162` are bf16 values (they converted as integers), and `half2`/`nv_bfloat162` are 4-byte
+  aligned (bf16 MUL_MAT, LIGHTNING_INDEXER).
+- `cudaOccupancyMaxActiveBlocksPerMultiprocessor` and `cudaFuncGetAttributes` on a kernel's host address look the
+  kernel up first, as `cudaFuncSetAttribute` does (FLASH_ATTN_EXT's launch_fattn: invalid resource handle).
 
 Known failures (the KNOWN list of `run.sh`):
 
-1. **ADD, SUB, MUL, DIV, REPEAT: `k_bin_bcast` has no device code.** binbcast.cu reaches it through
-   `bin_bcast_cuda<op>::operator()<src0_t, src1_t, dst_t>` (a member template of a class template, called as a
-   functor) and `launch_bin_bcast_pack<op, ...>(..., std::make_index_sequence<n_fuse>{})`. The rewriter finds a
-   template's instances from the text of its calls, and these calls give none; the launch is then taken as one whose
-   instances another unit defines, and dropped. The host compile knows the instances (the host object has 228 of
-   them, `nm -C` gives their template arguments as source text), so the fix is to take them from the front end.
-2. **CONV_2D, CONV_3D, MUL_MAT: misaligned address**, **MUL_MAT_ID: unspecified launch failure**,
-   **FLASH_ATTN_EXT: invalid resource handle**: not looked at yet.
-3. **LIGHTNING_INDEXER**: about 15 of 192 cases give wrong results (15 to 17 between runs: the inputs are random).
+1. **MUL_MAT**: f16 with n=4 and n=8 gives wrong values (mmvf's half accumulation; n=1..3, 5..7 pass), and the
+   mul_mat_q (mmq) kernels fail to launch ("unspecified launch failure"); **MUL_MAT_ID** stops at the same mmq launch.
+2. **CONV_2D, CONV_3D, FLASH_ATTN_EXT**: an illegal memory access, not looked at yet.
 
 ## Flags
 
