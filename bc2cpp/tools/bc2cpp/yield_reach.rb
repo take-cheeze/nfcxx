@@ -494,8 +494,8 @@ class YieldReach
     scan_special_call(node, program, idx, dest, name, explicit, lit_block, recv_const, insn)
     node.stored_read = true if STORED_READS.include?(name)
     node.calls << resolved unless name == 'yield' && fiber_recv
-    node.calls << 'to_a' if insn.n_spec == '*'
-    node.calls << 'to_hash' if insn.nk_spec == '*'
+    node.calls << 'to_a' if insn.positional_splat?
+    node.calls << 'to_hash' if insn.keyword_splat?
     consumed
   end
 
@@ -572,7 +572,7 @@ class YieldReach
 
   # A send whose name is computed. Returns the literal name when there is one.
   def scan_dynamic_send(node, program, insn, idx, dest, lit_block, forward)
-    kind, ref = dest ? classify_reg(node, program, idx, dest.to_i + 1, elem0: insn.n_spec == '*') : [:unknown]
+    kind, ref = dest ? classify_reg(node, program, idx, dest.to_i + 1, elem0: insn.positional_splat?) : [:unknown]
     return ref if kind == :sym
 
     file = node.irep.file.to_s
@@ -673,7 +673,7 @@ class YieldReach
     return if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) || insn.argc == 0
     return unless dest
 
-    n = insn.n_spec == '*' ? nil : insn.n_spec.to_i
+    n = insn.positional_splat? ? nil : insn.argc.to_i
     kind, ref = n ? classify_reg(node, program, idx, dest.to_i + n) : [:unknown]
     kind == :sym ? @callable_names << ref : @callable_all = true
   end
@@ -688,7 +688,7 @@ class YieldReach
     elsif name == 'new' && recv_const == 'Enumerator'
       kind, ref = dest ? classify_reg(node, program, idx, dest.to_i + 2) : [:unknown]
       @enum_names << ref if kind == :sym
-      @enum_all = true if kind != :sym && BytecodeIR.for(node.irep).source_at(idx).n_spec.to_i >= 2
+      @enum_all = true if kind != :sym && BytecodeIR.for(node.irep).source_at(idx).argc.to_i >= 2
     end
   end
 
@@ -852,7 +852,7 @@ class YieldReach
   def literal_symbol_arg(node, program, idx, dest)
     return nil unless dest
 
-    kind, ref = classify_reg(node, program, idx, dest.to_i + 1, elem0: BytecodeIR.for(node.irep).source_at(idx).n_spec == '*')
+    kind, ref = classify_reg(node, program, idx, dest.to_i + 1, elem0: BytecodeIR.for(node.irep).source_at(idx).positional_splat?)
     kind == :sym ? ref : nil
   end
 
@@ -895,8 +895,8 @@ class YieldReach
 
   def send_keeps?(node, program, insn, idx, &holds)
     dest = insn.reg or return false
-    pos = insn.n_spec == '*' ? 1 : insn.n_spec.to_i
-    kw = insn.nk_spec.nil? ? 0 : (insn.nk_spec == '*' ? 1 : insn.nk_spec.to_i * 2)
+    pos = insn.positional_splat? ? 1 : insn.argc.to_i
+    kw = !insn.keyword_arguments? ? 0 : (insn.keyword_splat? ? 1 : insn.keyword_argc.to_i * 2)
     return true if (1..(pos + kw)).any? { |k| may_hold?(node, program, idx, dest.to_i + k, &holds) }
     return false unless BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op)
 

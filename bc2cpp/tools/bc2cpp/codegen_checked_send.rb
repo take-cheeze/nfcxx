@@ -37,14 +37,14 @@ module CheckedSend
     irep = kwargs[:irep]
     idx = kwargs[:idx]
     return nil unless irep && idx && insn.sym && kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil?
-    return nil if insn.n_spec == '*' || insn.nk_spec
+    return nil if insn.positional_splat? || insn.keyword_arguments?
 
     original = BytecodeIR.for(irep).source_at(idx)
     return nil unless original && original.op == insn.op && original.sym == insn.sym
 
     if EXPLICIT_OPS.include?(insn.op) && !kwargs[:self_implicit]
       :explicit
-    elsif IMPLICIT_OPS.include?(insn.op) && kwargs[:self_implicit] && insn.n_spec.to_i.positive? &&
+    elsif IMPLICIT_OPS.include?(insn.op) && kwargs[:self_implicit] && insn.argc.to_i.positive? &&
           attr_reader_name?(insn.sym)
       :noarg
     end

@@ -51,11 +51,11 @@ def struct_new_receiver?(irep, idx, insn)
 end
 
 def struct_new_member_sets(irep, idx, insn)
-  return nil unless insn.n_spec && insn.nk_spec != '*'
+  return nil unless insn.argc_operand && !insn.keyword_splat?
 
   program = BytecodeIR.for(irep)
   use = idx
-  if insn.n_spec == '*'
+  if insn.positional_splat?
     definitions = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + 1).to_s,
                                                  origin_transfers: true, through_handlers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
@@ -421,7 +421,7 @@ def build_registry(ireps, root_label)
 
         n = insn.argc.to_i
         # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
-        packed = insn.n_spec == '*'
+        packed = insn.positional_splat?
         if packed
           arr = idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
           n = arr && arr.op == :ARRAY ? arr.uint_operand.to_i : -1

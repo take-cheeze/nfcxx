@@ -702,7 +702,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
         # is the result's class.
         # SEND0 prints no `n=`; a `.dup(x)` with arguments is an ArgumentError and
         # proves nothing.
-        return nil if insn.n_spec && insn.n_spec != '0'
+        return nil if insn.argc_operand && insn.argc != 0
 
         return trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
                                  class_layout: class_layout, registry: registry,
@@ -747,7 +747,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
           return element_annotations[annotated.irep].ret_class if annotated
         end
 
-        return nil if insn.n_spec && insn.n_spec != '0'
+        return nil if insn.argc_operand && insn.argc != 0
 
         # An attr_writer is registered as "name=", so `registry[name]` only matches
         # getters.

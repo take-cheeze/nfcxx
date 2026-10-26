@@ -97,7 +97,7 @@ module DynamicNames
     return true if insn.op.to_s.end_with?('0')
     return insn.argc.to_i.zero? || literal_name_argument?(irep, program, idx, insn) if insn.plain_fixed_argc?
 
-    insn.n_spec == '*' && literal_splat_head?(irep, program, idx, (insn.reg.to_i + 1).to_s)
+    insn.positional_splat? && literal_splat_head?(irep, program, idx, (insn.reg.to_i + 1).to_s)
   end
 
   # A splat call's packed argument Array (`f(:name, *rest)`: ARRAY then ARYCAT/ARYPUSH onto it) starts with a LOADSYM.

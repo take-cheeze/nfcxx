@@ -57,7 +57,7 @@ module ReceiverProofReport
     return super if @rp_force || !ReceiverProofReport.active?
 
     code = super
-    return code unless @closed_world && @native_results_ready && insn.n_spec != '*' && !insn.nk_spec && !kwargs[:self_implicit]
+    return code unless @closed_world && @native_results_ready && !insn.positional_splat? && !insn.keyword_arguments? && !kwargs[:self_implicit]
 
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
@@ -110,7 +110,7 @@ module ReceiverProofReport
     reg = unshift_proof_reg(kwargs[:trace_receiver_reg] || insn.reg, kwargs[:trace_reg_offset] || 0)
     owner = kwargs[:owner_def]
     owner_name = owner ? "#{owner.owner}##{owner.name}" : '-'
-    argc = (insn.n_spec || '0').to_i
+    argc = (insn.argc || 0)
     where = "#{irep.file.to_s.sub(%r{.*/(mruby-)}, '\\1')}:#{BytecodeIR.for(irep).source_at(site)&.lineno}"
     source, detail, mask_h = reg ? rp_source(irep, site, reg) : ['other', 'no_reg', nil]
     why = mask_h && mask_h[:why] || '-'

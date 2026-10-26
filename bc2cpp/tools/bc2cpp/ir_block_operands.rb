@@ -31,7 +31,7 @@ module IrBlockOperands
 
     n, nk, = insn.argc_operand
     positional = n.nil? ? 1 : n
-    keywords = if insn.nk_spec.nil? then 0
+    keywords = if !insn.keyword_arguments? then 0
                elsif nk.nil? then 1
                else 2 * nk
                end

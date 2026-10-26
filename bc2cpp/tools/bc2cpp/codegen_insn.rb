@@ -962,7 +962,7 @@ class CodeGen
       # module and forwards this frame's block, as OP_SUPER does.
        target_def = super_target(owner_def)
        d_reg = insn.reg
-       n = insn.plain_fixed_argc? ? insn.n_spec : nil
+       n = insn.plain_fixed_argc? ? insn.argc : nil
        zsuper_kind = reg_offset.zero? ? zsuper_native_kind(owner_def, irep, idx) : nil
        zsuper_plan = reg_offset.zero? && zsuper_kind.nil? ? zsuper_forward_plan(owner_def, irep, idx) : nil
        if target_def && d_reg && n

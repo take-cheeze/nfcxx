@@ -69,7 +69,7 @@ module NilableReceiverSend
   def nilable_receiver_plan(insn, kwargs)
     return nil unless @class_pools_on && @closed_world && NILABLE_OPS.include?(insn.op)
     return nil if kwargs[:self_implicit] || kwargs[:call_receiver] || kwargs[:call_arguments]
-    return nil if insn.n_spec == '*' || insn.nk_spec
+    return nil if insn.positional_splat? || insn.keyword_arguments?
 
     irep = kwargs[:irep]
     # An inlined send has no instruction index of its own: its source index and register are the
@@ -80,7 +80,7 @@ module NilableReceiverSend
     proof_reg = unshift_proof_reg(insn.reg.to_s, kwargs[:trace_reg_offset].to_i)&.to_i
     return nil unless proof_reg
 
-    n = insn.n_spec.to_i
+    n = insn.argc.to_i
     return nil if n > CodeGen::FUNCALL_ARGC_MAX
 
     reg = insn.reg.to_i
