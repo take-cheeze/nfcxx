@@ -44,6 +44,8 @@ if [ ! -f Makefile ]; then
     --disable-mos65c02-port --disable-f8-port --disable-f8l-port > "$work/sdcc-configure.log" 2>&1 ||
     { echo "FAIL sdcc: configure"; tail -5 "$work/sdcc-configure.log"; exit 1; }
 fi
+# Clean first: the tree is reused between runs, and objects left by the nfcc builds below would be linked into the reference.
+make clean > /dev/null 2>&1
 if ! make -j"$jobs" > "$work/sdcc-ref-build.log" 2>&1; then
   echo "FAIL sdcc: reference build with gcc"; grep -m5 -E "error|Error" "$work/sdcc-ref-build.log"; exit 1
 fi
