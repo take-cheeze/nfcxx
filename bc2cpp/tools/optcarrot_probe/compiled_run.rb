@@ -152,8 +152,14 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   FileUtils.mkdir_p(output_dir)
   # bc2cpp compiles closed-world programs only, so the benchmark always runs sealed.
   benchmark_source, sealed_gems = OptcarrotSealedBuild.prepare(ROOT, temp, File.dirname(output_dir))
-  sources = [benchmark_source]
   native_sources, foreign_sources = bc2cpp_closed_world_outside_srcs('optcarrot-probe', sealed_gems, ROOT)
+  # mruby's own Ruby (Range#each, Enumerable#collect, ...) is compiled with the program, as the game builds'
+  # mruby-core-compiled does: it runs every LUT a class body builds and every core iterator the frame loop calls.
+  # OPTCARROT_CORE_COMPILED=0 leaves it interpreted (outside Ruby) for a before/after measurement.
+  core_sources = ENV['OPTCARROT_CORE_COMPILED'] == '0' ? [] : core_compiled_mrblib_srcs(ROOT, sealed_gems.keys)
+  core_sources = core_sources.map { |path| File.expand_path(path) }
+  sources = core_sources + [benchmark_source]
+  foreign_sources -= core_sources
   base_env = {
     'MRBC' => PROBE_MRBC,
     'OUT_SYMBOL' => 'optcarrot_probe',
@@ -222,6 +228,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
   end.uniq
+  # The core bodies are emitted only by a run whose owners cover every core owner (CodeGen#emit_unit_allows?).
+  owners |= BC2CPP_CORE_OWNERS unless core_sources.empty?
   compiled_env = scan_env.merge('OUT_DIR' => temp, 'ONLY_OWNERS' => owners.join(','))
   compiled_cpp, diagnostics = run_bc2cpp(sources, compiled_env)
   File.write(File.join(output_dir, 'optcarrot_probe_gen.cpp'), compiled_cpp)
