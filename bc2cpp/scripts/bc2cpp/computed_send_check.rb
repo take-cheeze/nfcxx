@@ -104,7 +104,7 @@ Dir.mktmpdir do |dir|
   src = File.join(dir, 'cs.rb')
   File.write(src, FIXTURE)
   generate = lambda do |switch, extra = {}|
-    out_dir = File.join(dir, "out-#{switch}-#{extra.size}")
+    out_dir = File.join(dir, "out-#{switch}-#{extra.size}-#{extra.keys.join('-')}")
     Dir.mkdir(out_dir)
     env = { 'MRBC' => MRBC_BIN, 'SKIP_UNSUPPORTED' => '1', 'OUT_SYMBOL' => 'cs', 'OUT_DIR' => out_dir,
             'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_COMPUTED_SEND' => switch, **extra }
@@ -152,6 +152,11 @@ Dir.mktmpdir do |dir|
     check.call('via_splat: every arity of the spelled names is a direct arm',
                %w[one two zero].all? { |name| splat.include?("CsCheck__Guarded_#{name}_impl(M") })
     check.call('via_splat: the guarded splat keeps the original send for any other value', by_name_lines.call(splat).any?)
+    check.call('via_splat: SPLAT_SHARED reads the list in place and copies it only for the original send',
+               splat.include?('// SPLAT_SHARED') && splat.scan('mrb_ary_splat(').size == 2)
+    shared_off = guarded_body.call(generate.call('1', 'BC2CPP_SPLAT_SHARED' => '0'), 'via_splat')
+    check.call('BC2CPP_SPLAT_SHARED=0 keeps the ARYCAT copy before the guarded splat',
+               !shared_off.include?('// SPLAT_SHARED') && shared_off.include?('// COMPUTED_SEND_GUARDED :send n=*'))
     check.call('other_receiver: a computed send on another receiver is not guarded',
                !guarded_body.call(on, 'other_receiver').include?('// COMPUTED_SEND_GUARDED'))
     guarded_off = generate.call('1', 'BC2CPP_COMPUTED_SEND_GUARDED' => '0')
@@ -173,6 +178,7 @@ GUARDED_SRC = <<~RUBY
     def one(x) = x + 1
     def two(x, y = 10) = x + y
     def zero = :zero
+    def keep(*rest) = rest << :kept
 
     def via_send(name, *rest)
       case rest.size
@@ -219,6 +225,12 @@ GUARDED_DRIVER = <<~'RUBY'
   show.call('splat empty') { fx.via_splat([]) }
   show.call('splat wrong arity') { fx.via_splat([:one]) }
   show.call('splat unknown') { fx.via_splat([:nope]) }
+  show.call('splat objects') { fx.via_splat([:two, 'a', 'b']) }
+  show.call('splat rest') { fx.via_splat([:keep, 1, 2]) }
+  list = [:keep, 3]
+  show.call('splat list kept') { [fx.via_splat(list), list] }
+  show.call('splat private') { fx.via_splat([:hidden, 4]) }
+  show.call('splat long') { fx.via_splat([:keep, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) }
   puts 'end'
 RUBY
 
@@ -232,6 +244,7 @@ if MRBC_BIN && ENV['CC_GENERATED_ONLY'] != '1'
     code, err = Bc2cppFixtureRuntime.generate(GUARDED_SRC, dir, core: true, only_owners: %w[GsFx])
     check.call('guarded fixture: via_send and via_splat take the guarded expansion',
                code.scan('// COMPUTED_SEND_GUARDED').size >= 3)
+    check.call('guarded fixture: via_splat reads its list in place (SPLAT_SHARED)', code.include?('// SPLAT_SHARED'))
     body = <<~CPP
       static int scenario(mrb_state* M) {
         std::fflush(stdout);

@@ -30,6 +30,10 @@ module ComputedSend
   GUARDED_MAX_ARMS = 512
   # =0 keeps every computed send as one by-name call (the before side of a measurement).
   KILL_SWITCH = 'BC2CPP_COMPUTED_SEND'
+  # =0 keeps ARYCAT's copy of a guarded splat send's list on every call.
+  SPLAT_SHARED_SWITCH = 'BC2CPP_SPLAT_SHARED'
+  # SPLAT_SHARED: how far back the LOADNIL of the list register is looked for.
+  SPLAT_SHARED_WINDOW = 16
   # Core containers whose [] / freeze the table proof reads through.
   TABLE_READERS = [%w[Array []], %w[Hash []]].freeze
   TABLE_FREEZERS = [%w[Array freeze], %w[Hash freeze], %w[Object freeze], %w[Kernel freeze]].freeze
@@ -142,6 +146,7 @@ module ComputedSend
   def computed_send_guarded_splat(insn, irep, idx, owner_def)
     d = insn.reg.to_i
     ary = "bc2cpp_gsplat_#{d}"
+    shared = @splat_shared if @splat_shared&.[](:irep).equal?(irep) && @splat_shared[:idx] == idx && @splat_shared[:reg] == d + 1
     groups = (0..[CodeGen::FUNCALL_ARGC_MAX - 1, 8].min).filter_map do |argc|
       argv = (1..argc).map { |k| "#{ary}_a#{k}" }
       arms = computed_send_guarded_names(owner_def.owner, argc).filter_map do |name|
@@ -157,6 +162,11 @@ module ComputedSend
     list = "r#{d + 1}"
     out = +"  // COMPUTED_SEND_GUARDED :#{insn.sym} n=* over #{total} spelled names of self's class by arity; " \
            "any other value keeps the original send\n  {\n    bool #{ary}_done = false;\n"
+    if shared
+      list = "#{ary}_list"
+      out << splat_shared_prologue(ary, shared, groups.map(&:first).max + 1)
+      fallback = "if (#{ary}_shared) r#{shared[:reg]} = mrb_ary_splat(M, r#{shared[:src]});\n#{fallback}"
+    end
     out << "    if (mrb_array_p(#{list}) && RARRAY_LEN(#{list}) >= 1 && mrb_symbol_p(RARRAY_PTR(#{list})[0])) {\n"
     out << "      mrb_sym #{ary}_id = mrb_symbol(RARRAY_PTR(#{list})[0]);\n      switch (RARRAY_LEN(#{list}) - 1) {\n"
     groups.each do |argc, arms|
@@ -168,7 +178,57 @@ module ComputedSend
     out << "      default: break;\n      }\n    }\n    if (!#{ary}_done) {\n"
     out << fallback.lines.map { |line| "    #{line}" }.join
     out << "    }\n  }\n"
+    shared[:emitted] = out if shared
     out
+  end
+
+  # SPLAT_SHARED: an Array of at most +max+ immediates is read in place, so ARYCAT's copy is made only for the fallback
+  # send, which may keep it. Immediates need no root once read; any other list is copied first, as before.
+  def splat_shared_prologue(ary, shared, max)
+    src = "r#{shared[:src]}"
+    out = +"    // SPLAT_SHARED: the list is read from #{src} in place; ARYCAT's copy is made only when no arm takes it\n"
+    out << "    bool #{ary}_shared = mrb_array_p(#{src}) && RARRAY_LEN(#{src}) <= #{max};\n"
+    out << "    for (mrb_int k = 0; #{ary}_shared && k < RARRAY_LEN(#{src}); ++k) " \
+           "#{ary}_shared = mrb_immediate_p(RARRAY_PTR(#{src})[k]);\n"
+    # The list register was nil (LOADNIL), so ARYCAT's effect is the copy alone.
+    out << "    if (!#{ary}_shared) r#{shared[:reg]} = mrb_ary_splat(M, #{src});\n"
+    out << "    mrb_value #{ary}_list = #{ary}_shared ? #{src} : r#{shared[:reg]};\n"
+    out
+  end
+
+  # SPLAT_SHARED: true when the ARYCAT at +idx+ only builds the list of the guarded splat send after it, so the
+  # method loop may hand its text to that send (codegen_method.rb). The list register must still hold the nil of a
+  # LOADNIL: the instructions after it compute the splat operand above the list register, and no jump, glue or
+  # prefix touches them.
+  def splat_shared_pair?(irep, idx, blocked)
+    return false if @resumable || ENV[KILL_SWITCH] == '0' || ENV[SPLAT_SHARED_SWITCH] == '0'
+    return false unless (prog = BytecodeIR.for(irep)) && idx + 1 < prog.size
+
+    arycat = prog.source_at(idx)
+    send = prog.source_at(idx + 1)
+    return false unless arycat.op == :ARYCAT && send.op == :SSEND && send.positional_splat? && !send.keyword_arguments?
+
+    list = arycat.reg.to_i
+    return false unless send.reg.to_i + 1 == list && arycat.paren_reg.to_i > list
+
+    (idx - 1).downto([idx - SPLAT_SHARED_WINDOW, 0].max) do |i|
+      insn = prog.source_at(i)
+      return false if blocked.call(insn.addr)
+      return (i + 1..idx + 1).none? { |j| blocked.call(prog.source_at(j).addr) } if insn.op == :LOADNIL && insn.reg.to_i == list
+      return false unless insn.reg && insn.reg.to_i > list
+    end
+    false
+  end
+
+  # The send's text under +pending+; the deferred ARYCAT text goes first unless the guarded splat took it.
+  def splat_shared_send(pending)
+    saved = @splat_shared
+    @splat_shared = pending
+    code = yield
+    # Only the expansion itself may stand in for the pair: a wrapper around it could read the list register.
+    pending[:emitted] == code ? code : pending[:arycat] + code
+  ensure
+    @splat_shared = saved
   end
 
   # The arm for Symbol `id` among `arms`: a per-site table from Symbol id to arm number, built on the first call
