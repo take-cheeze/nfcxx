@@ -96,7 +96,7 @@ class CodeGen
     warn "bc2cpp stack tuple plan #{label}: #{plan.keys}" if ENV['BC2CPP_STACK_TUPLES_REPORT'] == '1'
     return yield(plan) if plan.empty?
 
-    state = { label: label, plan: plan, map: stack_tuple_map(plan), hooked: Set.new, bypassed: Set.new }
+    state = { label: label, plan: plan, map: stack_tuple_map(plan, BytecodeIR.for(irep).size), hooked: Set.new, bypassed: Set.new }
     saved = @stack_tuple_state
     @stack_tuple_state = state
     text = begin
@@ -106,7 +106,7 @@ class CodeGen
     end
     return text if stack_tuple_complete?(state)
 
-    unplaced = state[:map].keys.reject { |idx| state[:hooked].include?(idx) }
+    unplaced = stack_tuple_mapped_indices(state[:map]).reject { |idx| state[:hooked].include?(idx) }
     @stack_tuple_where = label
     refuse("placement incomplete (bypassed #{state[:bypassed].to_a.sort}, not placed #{unplaced.sort})")
     (@stack_tuple_off ||= Set.new) << label
@@ -125,7 +125,7 @@ class CodeGen
   # call compile_insn (suppressed, glued, or behind a guarded prefix).
   def stack_tuple_visit(irep, idx, bypassed)
     state = @stack_tuple_state
-    return unless bypassed && state && state[:label] == irep.label && state[:map].key?(idx)
+    return unless bypassed && state && state[:label] == irep.label && !state[:map][idx].nil?
 
     state[:bypassed] << idx
   end
@@ -153,15 +153,21 @@ class CodeGen
     "bc2cpp_tup#{idx}"
   end
 
-  def stack_tuple_map(plan)
-    plan.each_with_object({}) do |(idx, site), map|
+  def stack_tuple_map(plan, size)
+    map = Array.new(size)
+    plan.each do |idx, site|
       map[idx] = [:site, site]
       site.uses.each { |j, use| map[j] = [:use, use] }
     end
+    map.freeze
   end
 
   def stack_tuple_complete?(state)
-    state[:bypassed].empty? && state[:map].keys.all? { |idx| state[:hooked].include?(idx) }
+    state[:bypassed].empty? && stack_tuple_mapped_indices(state[:map]).all? { |idx| state[:hooked].include?(idx) }
+  end
+
+  def stack_tuple_mapped_indices(map)
+    map.each_index.select { |idx| !map[idx].nil? }
   end
 
   def stack_tuple_site_text(site)
