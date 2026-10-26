@@ -95,6 +95,8 @@ SOURCE = <<~RUBY
   end
 RUBY
 OWNERS = %w[Bag Probe].freeze
+OWNER_PREDICATES = { 'Float' => 'mrb_float_p', 'Integer' => 'mrb_integer_p', 'String' => 'mrb_string_p',
+                     'Hash' => 'mrb_hash_p' }.freeze
 
 body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
 
@@ -147,7 +149,11 @@ Dir.mktmpdir('owner-set-direct') do |dir|
     'bs' => ['bytesize', %w[String]], 'ks' => ['keys', %w[Hash]] }.each do |m, (name, owners)|
     text = body.call(code, m)
     marker = text[/OWNER_SET_NATIVE_ARMS :#{Regexp.escape(name)} -> ([^:]+):/, 1].to_s.split(', ')
-    check.call("#{name}: OWNER_SET_NATIVE_ARMS for #{owners.join('/')}", (owners - marker).empty?)
+    # An owner the native registration's own chain already tests (`if (mrb_float_p(r3)) {`) needs no second arm.
+    before = text[0...(text.index('OWNER_SET_NATIVE_ARMS') || text.size)]
+    chained = owners.select { |owner| before.match?(/^\s*if \(#{OWNER_PREDICATES.fetch(owner)}\(r\d+\)/) }
+    check.call("#{name}: OWNER_SET_NATIVE_ARMS or the native chain for #{owners.join('/')}",
+               (owners - marker - chained).empty? && (marker & chained).empty?)
     check.call("#{name}: the owner call stays as the else", text.include?('bc2cpp_owner_call(M, '))
   end
   check.call('Float#to_i arm only for a finite, fixable Float',
