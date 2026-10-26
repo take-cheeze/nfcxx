@@ -69,7 +69,8 @@ FOREIGN_METHOD_NAME_RE = %r{[\w+\-*/<>=!?\[\]&|^~%@]+}
 # `def self.x`, `alias`, `attr_*`, `alias_method :x`, `define_method(:x)`): a line-start
 # regex misses all the modifier and one-line forms.
 class ForeignDefNames < Prism::Visitor
-  INSTALLERS = %w[alias_method define_method attr attr_reader attr_writer attr_accessor].freeze
+  ACCESSORS = %i[attr attr_reader attr_writer attr_accessor].freeze
+  INSTALLERS = (%i[alias_method define_method] + ACCESSORS).freeze
 
   attr_reader :names
 
@@ -89,8 +90,8 @@ class ForeignDefNames < Prism::Visitor
   end
 
   def visit_call_node(node)
-    if INSTALLERS.include?(node.name.to_s)
-      accessor = node.name.to_s.start_with?('attr')
+    if INSTALLERS.include?(node.name)
+      accessor = ACCESSORS.include?(node.name)
       (node.arguments&.arguments || []).each { |arg| literal(arg, accessor) }
     end
     super
@@ -160,11 +161,12 @@ end
 HiddenRubyOwners = Struct.new(:names, :owners, :wild, :mixins, :global)
 
 class HiddenRubyOwnerScan < Prism::Visitor
-  DEFINER_CALLS = %w[define_method define_singleton_method alias_method attr attr_reader attr_writer attr_accessor].freeze
-  EVAL_CALLS = %w[class_eval module_eval instance_eval class_exec module_exec instance_exec eval].freeze
-  MIXIN_CALLS = %w[include prepend extend].freeze
-  SEND_CALLS = %w[send __send__ public_send].freeze
-  DEFINING_CALLS = (DEFINER_CALLS + EVAL_CALLS + MIXIN_CALLS + %w[alias undef]).freeze
+  DEFINER_CALLS = %i[define_method define_singleton_method alias_method attr attr_reader attr_writer attr_accessor].freeze
+  EVAL_CALLS = %i[class_eval module_eval instance_eval class_exec module_exec instance_exec eval].freeze
+  MIXIN_CALLS = %i[include prepend extend].freeze
+  SEND_CALLS = %i[send __send__ public_send].freeze
+  # Reflective send arguments are literal text, so compare without interning source names.
+  DEFINING_CALLS = (DEFINER_CALLS + EVAL_CALLS + MIXIN_CALLS + %i[alias undef]).map(&:to_s).freeze
 
   attr_reader :owners, :unowned, :wild, :mixins, :global
 
@@ -208,7 +210,7 @@ class HiddenRubyOwnerScan < Prism::Visitor
       record_def(name)
     end
     # A def inside a def body defines on whatever class runs it.
-    forwarding = node.receiver.nil? && MIXIN_CALLS.include?(name)
+    forwarding = node.receiver.nil? && MIXIN_CALLS.include?(node.name)
     @forwarding += 1 if forwarding
     push([:unknown]) { visit_child_nodes(node) }
   ensure
@@ -222,7 +224,7 @@ class HiddenRubyOwnerScan < Prism::Visitor
   end
 
   def visit_call_node(node)
-    name = node.name.to_s
+    name = node.name
     args = node.arguments&.arguments || []
     if DEFINER_CALLS.include?(name)
       definer_call(name, node, args)
@@ -276,11 +278,11 @@ class HiddenRubyOwnerScan < Prism::Visitor
   # define_method(name), alias_method(new, old), attr_*(names). Literal names are name-level.
   def definer_call(name, node, args)
     name_args = case name
-                when 'define_method', 'define_singleton_method' then args.first(1)
-                when 'alias_method' then args.first(2)
+                when :define_method, :define_singleton_method then args.first(1)
+                when :alias_method then args.first(2)
                 else args
                 end
-    accessor = %w[attr_writer attr_accessor].include?(name)
+    accessor = %i[attr_writer attr_accessor].include?(name)
     name_args.each do |arg|
       literal = literal_name(arg)
       if literal
@@ -298,9 +300,9 @@ class HiddenRubyOwnerScan < Prism::Visitor
     prefix = computed_prefix(arg)
     @unowned << prefix if prefix
     scope = @stack.last
-    if node.receiver.nil? && name != 'define_singleton_method' && scope.nil?
+    if node.receiver.nil? && name != :define_singleton_method && scope.nil?
       @wild << 'Object'
-    elsif node.receiver.nil? && name != 'define_singleton_method' && scope&.first == :class
+    elsif node.receiver.nil? && name != :define_singleton_method && scope&.first == :class
       @wild << scope[1]
     else
       @global = true

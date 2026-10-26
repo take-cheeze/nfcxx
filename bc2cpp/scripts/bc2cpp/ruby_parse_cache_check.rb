@@ -42,6 +42,47 @@ def signature(result)
    result.value.inspect.gsub(/0x\h+/, '')]
 end
 
+puts '-- Symbol dispatch in foreign method-name visitors'
+source = <<~'RUBY_SOURCE'
+  class ForeignSymbols
+    def known; end
+    attr :plain
+    attr_reader :read
+    attr_writer :write
+    attr_accessor :both
+    alias_method :renamed, :known
+    define_method("dynamic") { 1 }
+    alias copied known
+  end
+RUBY_SOURCE
+tree = Prism.parse(source).value
+names = ForeignDefNames.new
+tree.accept(names)
+check.call('all installer spellings still collect String method names',
+           names.names == %w[known plain plain= read read= write write= both both= renamed dynamic copied].to_set)
+owners = HiddenRubyOwnerScan.new
+tree.accept(owners)
+check.call('owner scans retain String names and setter spellings',
+           owners.owners['known'] == Set['ForeignSymbols'] &&
+           owners.unowned == %w[plain read write write= both both= renamed known dynamic copied].to_set && !owners.global)
+%w[send __send__ public_send].each do |send_name|
+  [':define_method', '"define_method"'].each do |literal|
+    walker = HiddenRubyOwnerScan.new
+    Prism.parse("#{send_name}(#{literal}, :hidden) { 1 }").value.accept(walker)
+    check.call("#{send_name} recognizes reflective definer #{literal}", walker.global)
+  end
+end
+forwarder = HiddenRubyOwnerScan.new
+Prism.parse('def include(*mods); Object.include(*mods); end; include KnownMixin').value.accept(forwarder)
+check.call('mixin forwarding still recognizes the Symbol definition name',
+           !forwarder.global && forwarder.mixins == Set['KnownMixin'])
+computed = HiddenRubyOwnerScan.new
+Prism.parse('class KnownOwner; define_method(computed_name) { 1 }; end').value.accept(computed)
+check.call('computed instance definers stay scoped to their owner', !computed.global && computed.wild == Set['KnownOwner'])
+singleton = HiddenRubyOwnerScan.new
+Prism.parse('class KnownOwner; define_singleton_method(computed_name) { 1 }; end').value.accept(singleton)
+check.call('computed singleton definers still refuse globally', singleton.global)
+
 puts '-- the same tree from every read of a file'
 foreign = Dir["#{ROOT}/3rd/mruby/mrblib/**/*.rb"] + Dir["#{ROOT}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"] +
           Dir["#{ROOT}/3rd/mruby-marshal/mrblib/**/*.rb"] + Dir["#{ROOT}/3rd/mruby-onig-regexp/mrblib/**/*.rb"] +
