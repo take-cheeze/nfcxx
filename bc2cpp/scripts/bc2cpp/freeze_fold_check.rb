@@ -22,6 +22,35 @@ suite = FixtureCheck.new('freeze_fold_check')
 NF = NumericFlow
 ROOT = File.expand_path('../..', __dir__)
 
+puts '== per-IREP class-test cache (host)'
+cache = CodeGen.allocate
+cache.define_singleton_method(:class_narrowing_enabled?) { true }
+computations = []
+cache.define_singleton_method(:compute_class_test) do |irep, index, insn|
+  computations << [irep.label, index]
+  insn
+end
+first_body = Irep.new(label: 'first')
+second_body = Irep.new(label: 'second')
+answer = Object.new
+suite.check('a positive class test is cached', cache.class_test_for(first_body, 0, answer).equal?(answer) &&
+            cache.class_test_for(first_body, 0, nil).equal?(answer))
+2.times { cache.class_test_for(first_body, 1, nil) }
+suite.check('a negative class test is cached', computations.count { |site| site == ['first', 1] } == 1)
+allocated_before = GC.stat(:total_allocated_objects)
+1_000.times { cache.class_test_for(first_body, 1, nil) }
+cache_allocations = GC.stat(:total_allocated_objects) - allocated_before
+suite.check('warm class-test cache hits avoid per-query key allocations', cache_allocations < 50)
+suite.check('the same instruction index in another IREP is independent',
+            cache.class_test_for(second_body, 0, nil).nil? && computations.include?(['second', 0]))
+cache.note_class_test(first_body, 0, [6], 5, nil)
+cache.note_class_test(second_body, 0, [8], 5, nil)
+subjects = cache.instance_variable_get(:@class_test_subjects)
+suite.check('class-test subjects preserve register zero and IREP identity', subjects.dig('first', 0) == 0 &&
+            subjects.dig('second', 0) == 2)
+cache.note_class_test(first_body, 0, [1], 5, nil)
+suite.check('an ivar test clears a previously recorded register subject', subjects.dig('first', 0).nil?)
+
 puts '== frozen? mask rule (host)'
 cg = CodeGen.allocate
 cg.instance_variable_set(:@frozen_symbol_bit, nil)

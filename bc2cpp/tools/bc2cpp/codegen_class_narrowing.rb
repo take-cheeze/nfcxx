@@ -95,10 +95,10 @@ class CodeGen
     return nil unless class_narrowing_enabled?
 
     @class_tests ||= {}
-    key = [irep.label, index]
-    return @class_tests[key] if @class_tests.key?(key)
+    sites = (@class_tests[irep.label] ||= {})
+    return sites[index] if sites.key?(index)
 
-    @class_tests[key] = compute_class_test(irep, index, insn)
+    sites[index] = compute_class_test(irep, index, insn)
   end
 
   def compute_class_test(irep, index, insn)
@@ -188,7 +188,9 @@ class CodeGen
   # an EQ site reads it, since EQ has no receiver of its own.
   def note_class_test(irep, index, codes, slots, _pred)
     reg_code = codes.find { |code| code > slots }
-    (@class_test_subjects ||= {})[[irep.label, index]] = reg_code && reg_code - slots - 1
+    @class_test_subjects ||= {}
+    sites = (@class_test_subjects[irep.label] ||= {})
+    sites[index] = reg_code && reg_code - slots - 1
   end
 
   def class_test_object(kind, klass)
@@ -473,7 +475,7 @@ module ClassNarrowingGuard
 
     # The flow records the subject when it reaches the instruction: make sure it has run.
     exact_flow_mask(irep, idx, BytecodeIR.for(irep).source_at(idx).reg)
-    mask_reg = (@class_test_subjects || {})[[irep.label, idx]]
+    mask_reg = @class_test_subjects&.dig(irep.label, idx)
     return nil unless mask_reg
 
     test = class_eq_site_test(irep, idx)
