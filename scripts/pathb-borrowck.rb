@@ -563,6 +563,8 @@ class LocalLifetime
       @drops[r[:name]] = {root: r[:name], off: 0, width: r[:width], type: r[:type], required: r[:required]}
     end
     body = f.drop(4).reject { |x| ['slot', 'static', 'weak', 'drop-obligation'].include?(bh(x)) }
+    @try_stack = []
+    @exc = {}
     @entry = sequence(body, node(['function-exit'], []), nil, nil)
     @nodes.each do |n|
       n[1].map! do |edge|
@@ -971,9 +973,25 @@ class LocalLifetime
         follow = sequence(x.drop(1), follow, brk, cont)
       when 'if'
         raise BadIR, 'if form' unless bh(x[2]) == 'then' && (x[3].nil? || bh(x[3]) == 'else')
-        a = sequence(x[2].drop(1), follow, brk, cont)
-        b = x[3] ? sequence(x[3].drop(1), follow, brk, cont) : follow
-        follow = node(['condition', x[1]], [a, b])
+        frame = x[3] && try_frame(x[1])
+        if frame
+          # EDG's try block: if (_setjmp(frame.buffer) == 0) BODY else HANDLER. _setjmp returns 0 first, so the
+          # handler is entered only from the throw points of the body, by the runtime's longjmp. Throws in the
+          # handler go to the enclosing try blocks, so it is built outside this one.
+          b = sequence(x[3].drop(1), follow, brk, cont)
+          @try_stack.push([b, frame, declared_slots(x[2]), catch_all?(x[3].drop(1))])
+          a = sequence(x[2].drop(1), follow, brk, cont)
+          @try_stack.pop
+          follow = node(['condition', x[1]], [a])
+        elsif !x[3] && clause_test?(x[1])
+          # The last typed clause of a handler's dispatch: the runtime longjmps only into a try whose catch table
+          # matches, so __catch_clause_number names one of its clauses, and no match is not a path.
+          follow = node(['condition', x[1]], [sequence(x[2].drop(1), follow, brk, cont)])
+        else
+          a = sequence(x[2].drop(1), follow, brk, cont)
+          b = x[3] ? sequence(x[3].drop(1), follow, brk, cont) : follow
+          follow = node(['condition', x[1]], [a, b])
+        end
       when 'loop'
         raise BadIR, 'loop form' unless x.drop(1).all? { |p| ['body', 'step'].include?(bh(p)) }
         header = node(['join'], [])
@@ -997,10 +1015,94 @@ class LocalLifetime
       when 'return', 'unreachable'
         follow = node(x, [])
       else
-        follow = node(x, [follow])
+        # __throw and __rethrow do not return; any other throwing call also continues normally.
+        follow = node(x, eh_noreturn?(x) ? [] : [follow])
+        # A throw point reaches the handler of every enclosing try block of this function: which one catches
+        # depends on the exception's type, which no summary states.
+        if !@try_stack.empty? && throw_point?(x)
+          targets = []
+          @try_stack.reverse_each do |handler, frame, slots, all|
+            targets << [handler, frame, slots]
+            break if all # a catch (...) keeps the exception from the enclosing try blocks
+          end
+          @exc[follow] = targets
+        end
       end
     end
     follow
+  end
+
+  EH_THROWS = %w[__throw __rethrow].freeze
+
+  def direct_callee(x)
+    return nil unless x.is_a?(Array)
+    callee = bh(x) == 'call' ? x[2] : (bh(x) == 'call-borrow' ? x[4] : nil)
+    callee.is_a?(IRSym) && callee.sig == '&' ? callee.name : nil
+  end
+
+  # A statement that calls __throw, __rethrow, or a callee whose summary may throw.
+  def throw_point?(x)
+    return false unless x.is_a?(Array)
+    name = direct_callee(x)
+    if name
+      return true if EH_THROWS.include?(name)
+      summary = @call_effects.lookup(name)
+      return true if summary && summary[:throws]
+    end
+    x.any? { |y| throw_point?(y) }
+  end
+
+  def eh_noreturn?(x)
+    bh(x) == 'eval' && EH_THROWS.include?(direct_callee(x[1]))
+  end
+
+  # The frame slot of a try block, when cond is (eq int R (const int 0)) with R the result of _setjmp on a pointer
+  # into a local slot.
+  def try_frame(cond)
+    d = cond.is_a?(String) ? @register_defs[cond] : nil
+    return nil unless d && d.length == 1 && bh(d[0]) == 'let' && d[0].length == 4
+    e = d[0][3]
+    return nil unless bh(e) == 'eq' && e.length == 4 && e[3] == ['const', 'int', '0'] && e[2].is_a?(String)
+    r = @register_defs[e[2]]
+    return nil unless r && r.length == 1 && bh(r[0]) == 'let' && r[0].length == 4
+    call = r[0][3]
+    return nil unless direct_callee(call) == '_setjmp' && call.length == 4
+    root_slot(call[3])
+  end
+
+  # The local slot a pointer is derived from by constant offsets and casts, or nil.
+  def root_slot(x)
+    return x.name if x.is_a?(IRSym) && x.sig == '$'
+    return root_slot(x[1]) if bh(x) == 'offset' && x.length == 3
+    return root_slot(x[2]) if bh(x) == 'bitcast' && x.length == 3
+    return nil unless x.is_a?(String) && x.start_with?('%')
+    d = @register_defs[x]
+    return nil unless d && d.length == 1 && bh(d[0]) == 'let' && d[0].length == 4
+    root_slot(d[0][3])
+  end
+
+  # A handler catches every exception when it has no clause dispatch (catch (...) alone), or when its dispatch on
+  # __catch_clause_number ends in a final else (a last catch (...)). A dispatch without one lets the runtime pass
+  # other types on: pass 1 of __throw longjmps only into a try whose catch table matches.
+  def catch_all?(stmts)
+    dispatch = stmts.find { |y| bh(y) == 'if' && clause_test?(y[1]) }
+    return true unless dispatch
+    return false unless dispatch[3]
+    catch_all?(dispatch[3].drop(1))
+  end
+
+  def clause_test?(cond)
+    d = cond.is_a?(String) ? @register_defs[cond] : nil
+    return false unless d && d.length == 1 && bh(d[0]) == 'let' && d[0].length == 4 && bh(d[0][3]) == 'eq'
+    r = @register_defs[d[0][3][2]]
+    r && r.length == 1 && bh(r[0]) == 'let' && r[0].length == 4 && bh(r[0][3]) == 'load' && eh_global?(r[0][3][2], '__catch_clause_number')
+  end
+
+  # The slots a statement subtree declares.
+  def declared_slots(x)
+    return [] unless x.is_a?(Array)
+    own = bh(x) == 'decl' && x[1].is_a?(IRSym) && x[1].sig == '$' ? [x[1].name] : []
+    (own + x.flat_map { |y| declared_slots(y) }).uniq
   end
 
   def diagnostic(code, place)
@@ -1023,6 +1125,7 @@ class LocalLifetime
   # copying: a read that carries byte states instead of requiring them initialized.
   def access(place, state, read, borrowing = nil, width = nil, semantic_type = nil, copying = false)
     base = base_origin(place)
+    return if base == 'eh' # the exception object: runtime storage, not caller memory
     if base == 'external'
       diagnostic('contract-not-closed', 'external memory') if @summary
       return
@@ -1104,6 +1207,10 @@ class LocalLifetime
 
   # The region counter (EDG's __eh_curr_region) says which frame objects are alive, for the runtime's unwinding. It is
   # scalar bookkeeping that the normal path updates around each object, not program memory.
+  def eh_global?(x, name)
+    x.is_a?(IRSym) && x.sig == '@' && x.name == name
+  end
+
   def eh_region?(x)
     x.is_a?(IRSym) && x.sig == '@' && x.name == '__eh_curr_region'
   end
@@ -1130,7 +1237,7 @@ class LocalLifetime
     raise BorrowRefused, 'copy through a dynamic index' if ranged?(src[0]) || ranged?(dst[0])
     bytes = Array.new(n) { ['initialized'] }
     pointers = []
-    if base_origin(src[0]) == 'external'
+    if %w[external eh].include?(base_origin(src[0]))
       access(src[0], state, true, nil, n)
     else
       a = access(src[0], state, true, nil, n, nil, true)
@@ -1147,7 +1254,7 @@ class LocalLifetime
         pointers << [o - off, w, v] if o >= off && o + w <= off + n
       end
     end
-    if base_origin(dst[0]) == 'external'
+    if %w[external eh].include?(base_origin(dst[0]))
       access(dst[0], state, false, nil, n)
       if pointers.any? { |_o, _w, v| v.any? { |p| p != 'external' } }
         raise BorrowRefused, 'copy into external storage may escape a local address'
@@ -1250,18 +1357,62 @@ class LocalLifetime
     end
   end
 
+  def refuse_live_drops(state)
+    live = @drops.keys.select { |id| (state[drop_key(id)] || []).include?('live') }
+    raise BorrowRefused, 'throwing calls with live drop obligations require cleanup contracts' unless live.empty?
+  end
+
+  # EDG's exception runtime (lib_src/throw.c), whose protocol the checker knows by name, like its globals:
+  #   _setjmp(buf)                 the try block's first return (0); the handler is entered by exceptional edges
+  #   __throw(), __rethrow()       throw points that do not return
+  #   __throw_setup*(ti, size, f)  the exception object: provenance eh, storage of the runtime
+  #   __exception_caught()         bookkeeping
+  #   __destroy_exception_object() ends the caught object: pointers to it become dangling
+  # Returns nil for any other callee.
+  def eh_runtime_call(x, state)
+    name = x[2].name
+    args = x.drop(3)
+    case name
+    when '_setjmp'
+      raise BadIR, '_setjmp form' unless args.length == 1
+      v = value(args[0], state)
+      raise BorrowRefused, '_setjmp requires a local frame buffer' unless v.length == 1 && address(v[0])
+      []
+    when '__exception_caught'
+      raise BadIR, "#{name} form" unless args.empty?
+      []
+    when '__destroy_exception_object'
+      raise BadIR, "#{name} form" unless args.empty?
+      invalidate_pointers(state, ['eh'], 'ended:exception object')
+      []
+    when '__throw', '__rethrow'
+      raise BadIR, "#{name} form" unless args.empty?
+      refuse_live_drops(state)
+      @throws = true
+      []
+    when '__throw_setup', '__throw_setup_dtor', '__throw_setup_ptr'
+      args.each do |a|
+        v = value(a, state)
+        raise BorrowRefused, 'exception setup with a local address' if v.any? { |p| p != 'external' }
+      end
+      ['eh']
+    end
+  end
+
   def apply_call(x, state, returned_id = nil)
     unless x.length >= 3 && x[2].is_a?(IRSym) && x[2].sig == '&'
       raise BorrowRefused, 'contracted calls require direct function symbols'
     end
+    eh = eh_runtime_call(x, state)
+    return eh if eh
     summary = @call_effects.lookup(x[2].name)
     raise BorrowRefused, 'calls require lifetime/effect contracts' unless summary
     if summary[:throws] && x[2].name != @name
-      # Unwinding is not modeled as a path: the runtime leaves this function's frames and runs their destructors (the
-      # same destructors the normal path checks at scope end), and every local of this function dies with it, so the
-      # exceptional edge needs no state. Obligations that only a destructor frame would discharge are refused.
-      live = @drops.keys.select { |id| (state[drop_key(id)] || []).include?('live') }
-      raise BorrowRefused, 'throwing calls with live drop obligations require cleanup contracts' unless live.empty?
+      # Unwinding out of this function is not a path: the runtime runs the destructors of its frames (the same
+      # destructors the normal path checks at scope end), and every local dies with it. An enclosing try block of
+      # this function gets an exceptional edge instead (sequence). Obligations that only a destructor frame would
+      # discharge are refused.
+      refuse_live_drops(state)
       @throws = true
     end
     raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
@@ -1300,6 +1451,12 @@ class LocalLifetime
       dead.each { |p| access(p, state, true) }
       origins -= dead
       if origins.empty? && !dead.empty?
+        resolved << [mode, ty, []]
+        next
+      end
+      if origins.include?('eh')
+        # The exception object is the runtime's storage, which the checker does not track (its constructor, say).
+        raise BorrowRefused, 'call argument that may be the exception object or a local place' unless origins == ['eh']
         resolved << [mode, ty, []]
         next
       end
@@ -1469,7 +1626,8 @@ class LocalLifetime
     when 'load'
       borrow_scalar_type!(x[1])
       return record_loan_values(state['value:@eh'] || ['external']) if eh_top?(x[2]) && bh(x[1]) == 'ptr'
-      return [] if eh_region?(x[2])
+      return [] if eh_region?(x[2]) || eh_global?(x[2], '__catch_clause_number')
+      return ['eh'] if eh_global?(x[2], '__caught_object_address') && bh(x[1]) == 'ptr'
       places = value(x[2], state)
       raise BorrowRefused, 'unknown pointer provenance' if places.empty?
       width = type_width(x[1])
@@ -1593,14 +1751,15 @@ class LocalLifetime
       end
       dest = value(x[2], state)
       dest.each { |p| access(p, state, false, nil, width) }
-      if dest == ['external']
-        # External memory is not tracked; only a local address can escape into it.
-        if v && v.any? { |p| p != 'external' }
+      if dest == ['external'] || dest == ['eh']
+        # External memory and the exception object are not tracked; only a local address can escape into them.
+        if v && v.any? { |p| p != 'external' && !(p == 'eh' && dest == ['eh']) }
+          raise BorrowRefused, 'store into the exception object may escape a local address' if dest == ['eh']
           raise BorrowRefused, 'store through external storage may escape a local address'
         end
         return state
       end
-      raise BorrowRefused, 'store through external storage may escape a local address' if dest.any? { |p| base_origin(p) == 'external' }
+      raise BorrowRefused, 'store through external storage may escape a local address' if dest.any? { |p| %w[external eh].include?(base_origin(p)) }
       raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
       if ranged?(dest[0])
         raise BorrowRefused, 'pointer store through a dynamic index' if !zero && bh(x[1]) == 'ptr'
@@ -1627,6 +1786,7 @@ class LocalLifetime
       end
       refs.each do |p|
         next if p == 'external'
+        raise BorrowRefused, 'returning the address of an exception object' if p == 'eh'
         # Argument pointers are checked against the returned alias contract.
         next if @regions.values.any? { |r| r[:name] == storage(p) }
         if p.start_with?('expired:')
@@ -1699,30 +1859,60 @@ class LocalLifetime
     state
   end
 
+  def join_states(old, edge)
+    merged = edge.dup
+    (old.keys + edge.keys).uniq.each do |k|
+      # Missing register definitions cannot acquire provenance from just
+      # one predecessor. Slot entries exist on every path.
+      a = old[k] || ['unknown']
+      b = edge[k] || ['unknown']
+      merged[k] = (a + b).uniq.sort
+      merged[k] = widen(merged[k]) if k.start_with?('value:') || k.start_with?('pointer:')
+    end
+    merged
+  end
+
+  # The state at a handler's entry, from the states before and after a throwing call: the callee may have applied
+  # any part of its effects. Unwinding destroyed the objects declared in the try body (their destructors are the ones
+  # the normal path checks at scope end), and the runtime's longjmp leaves the try's frame on top of the stack.
+  def unwind_to(state, frame, slots)
+    state = state.dup
+    slots.each do |name|
+      next unless @slots[name]
+      reset_storage(name, state, 'dead', false)
+      reset_drop_flags(name, state, 'dead')
+      origins = ['local:' + name]
+      @loans.each do |id, loan|
+        next unless loan[0] == name
+        origins << 'loan:' + id
+        state['loan:' + id] = ['ended']
+      end
+      invalidate_pointers(state, origins, 'ended:' + name)
+    end
+    state['value:@eh'] = ['local:' + frame]
+    state
+  end
+
   def solve(expire = false)
     incoming = { @entry => initial_state }
     queue = [@entry]
+    flow = lambda do |succ, edge|
+      old = incoming[succ]
+      merged = old ? join_states(old, edge) : edge.dup
+      if old != merged
+        incoming[succ] = merged
+        queue << succ unless queue.include?(succ)
+      end
+    end
     until queue.empty?
       id = queue.shift
       out = transfer(@nodes[id][0], incoming[id].dup)
       @nodes[id][1].each do |succ|
-        edge = expire ? expire_dead_loans(out.dup, @needed[succ]) : out
-        old = incoming[succ]
-        merged = edge.dup
-        if old
-          (old.keys + edge.keys).uniq.each do |k|
-            # Missing register definitions cannot acquire provenance from just
-            # one predecessor. Slot entries exist on every path.
-            a = old[k] || ['unknown']
-            b = edge[k] || ['unknown']
-            merged[k] = (a + b).uniq.sort
-            merged[k] = widen(merged[k]) if k.start_with?('value:') || k.start_with?('pointer:')
-          end
-        end
-        if old != merged
-          incoming[succ] = merged
-          queue << succ unless queue.include?(succ)
-        end
+        flow.call(succ, expire ? expire_dead_loans(out.dup, @needed[succ]) : out)
+      end
+      (@exc[id] || []).each do |handler, frame, slots|
+        edge = unwind_to(join_states(incoming[id], out), frame, slots)
+        flow.call(handler, expire ? expire_dead_loans(edge, @needed[handler]) : edge)
       end
     end
     incoming
@@ -1748,7 +1938,8 @@ class LocalLifetime
     while changed
       changed = false
       incoming.keys.reverse_each do |id|
-        after = @nodes[id][1].flat_map { |succ| @needed[succ] }.uniq
+        succs = @nodes[id][1] + (@exc[id] || []).map(&:first)
+        after = succs.flat_map { |succ| @needed[succ] }.uniq
         before = (uses[id] + (after - defs[id])).uniq
         # A child can remain usable only while its ancestor chain remains live.
         before = before.flat_map { |loan| [loan] + @ancestors[loan] }.uniq.sort
