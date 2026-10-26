@@ -28,6 +28,19 @@ suite.check('non-ASCII name bytes and encoding survive', utf8.value == '名前' 
 binary = operand.new(:sym, "\xff".b)
 suite.check('binary name encoding survives', binary.value.bytes == [255] && binary.value.encoding == Encoding::BINARY)
 
+lookup = Insn.new(op: :MOVE, args: 'R1 R2')
+peer = Insn.new(op: :MOVE, args: 'R3 R4')
+peer.typed
+suite.check('schema indexes share storage without sharing operand values', lookup.first_kind(:reg).value == 1 &&
+            peer.first_kind(:reg).value == 3 &&
+            lookup.instance_variable_get(:@kind_positions).equal?(peer.instance_variable_get(:@kind_positions)))
+suite.check('shared schema indexes are frozen', peer.instance_variable_get(:@kind_positions).frozen?)
+suite.check('single-kind lookup returns the earliest duplicate', lookup.first_kind(:reg).equal?(lookup.typed.first))
+suite.check('single-kind lookup returns nil for absent kinds', lookup.first_kind(:sym).nil?)
+suite.check('empty operand lists support lookup', Insn.new(op: :NOP, args: '').first_kind(:reg).nil?)
+lookup.typed = [operand.new(:name, 'replacement')]
+suite.check('replacing typed operands updates lookup', lookup.first_kind(:reg).nil? && lookup.first_kind(:name).value == 'replacement')
+
 rows = [['SEND0', 'R1 :shared_name'], ['GETCONST', 'R2 shared_name'], ['GETMCNST', 'R3 (R3)::shared_name']]
 body = Irep.new(label: 'names', nregs: 4, nlocals: 1, catch_handlers: [], reps: [], pool: [],
                 instructions: rows.each_with_index.map { |(op, args), index| Insn.new(op: op, args: args, addr: index) })
