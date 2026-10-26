@@ -558,7 +558,14 @@ name.
 
 `scripts/pathb-libc.effects` describes the few C library functions whose effects a closed summary can
 state exactly: scalar arguments and results, no memory access, no throw (`sched_yield`, `getpid`, `abs`,
-`labs`, `llabs`, `fabs`, `floor`, `ceil`, `trunc`). A function that takes a pointer of unknown size (`memcpy`,
+`labs`, `llabs`, `fabs`, `floor`, `ceil`, `trunc`) and glibc's pure floating predicates
+(`__issignalingf`, `__issignaling`, `__issignalingl`, `__iscanonicalf`, `__iscanonical`, `__iscanonicall`). The C23
+quiet comparisons `__iseqsig*` raise FE_INVALID on NaN, a global status the model does not track, so they have no
+summary.
+
+A summary in an `--effects` file that the module cannot state, such as one over a `long double` in a module that
+never uses that type, is dropped. A call the module makes to such a function is refused at the call, as it would be
+with no file; a malformed file is still an error. A function that takes a pointer of unknown size (`memcpy`,
 `strlen`), is variadic (`printf`), or keeps a pointer (`pthread_create`) has no such summary. Neither does
 one that returns storage of unknown provenance (`malloc`, `__errno_location`), since the checker cannot
 name what it returns. `sqrt` and the conversions are left out because they set `errno`, which is global.

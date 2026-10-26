@@ -2000,6 +2000,14 @@ begin
     end
   end
   semantic_layouts = BorrowLayouts.new(forms, BadIR, BorrowRefused)
+  # A file summary this module cannot state (its layouts are absent, say) is dropped rather than refusing the module:
+  # a call the module makes to it is then refused at the call. A malformed file is still an error.
+  extra = extra.select do |f|
+    BorrowCallEffects.new([f], semantic_layouts, BadIR, BorrowRefused)
+    true
+  rescue BorrowRefused
+    false
+  end
   call_effects = BorrowCallEffects.new(forms + extra, semantic_layouts, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?

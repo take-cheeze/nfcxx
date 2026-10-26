@@ -385,7 +385,8 @@ done
 echo "ok   array fields in records, long double by value through the (struct \"__nfcxx_ld\") record, mutants, emitter validation, and native execution"
 pass=$((pass + 1))
 # Scalar C library functions have trusted summaries (scripts/pathb-libc.effects). The program declares the prototypes
-# itself, so the module holds nothing else; without the file its calls are refused, and with it the program runs.
+# itself, so the module holds nothing else; without the file its calls are refused, and with it the program runs. The
+# file's __issignalingl takes a long double, which this module has no record for: that summary is dropped, not an error.
 libsrc=tests/pathb-borrow/contracts/libc.cpp
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$libsrc" > "$tmp/libc.ir"
 rc=0
