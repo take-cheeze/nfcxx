@@ -48,11 +48,7 @@ set +f
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 note() { printf '%s\n' "$1" >> "$log"; }
-# .head.text (the kernel's __head: head64.c) runs identity-mapped, before the kernel's page tables: its addresses must be
-# gcc's kernel-model absolute ones and its loads rip-relative, which QBE's -A gives (NFCXX_QBE_ABS=1). Without -A the
-# GOT loads the link relaxes to leas are the wrong values there, so the object stays on gcc.
-headtext=0; readelf -SW "$obj" | grep -q ' \.head\.text ' && headtext=1
-if ! NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 NFCXX_GCC_PASSTHROUGH= NFCXX_QBE_TRY= NFCXX_QBE_ABS=$headtext \
+if ! NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 NFCXX_GCC_PASSTHROUGH= NFCXX_QBE_TRY= \
      "$nfcc" "${qargs[@]}" -o "$tmp/q.o" 2> "$tmp/err"; then
   why=$(grep -m1 -E 'error|refuse|forbid|not supported' "$tmp/err" || head -n1 "$tmp/err")
   note "gcc $src: $(cut -c1-200 <<<"${why:-the qbe compile failed without a message}")"
@@ -110,6 +106,11 @@ refs() {
       if (ndx[n] == "UND" ? !haveinit || (n in initsym) : initlike(secname[ndx[n]])) print "init " n; else print "other " n
     }' | sort -u
 }
+# Code in .head.text (the kernel's __head: head64.c) runs identity-mapped, before the kernel's page tables, and its
+# C depends on how gcc addresses symbols (absolute for &sym, which fixup_pointer corrects; rip-relative loads), which
+# the objects cannot show: it stays on gcc. QBE's GOT loads become absolute addresses in the kernel's link, and a
+# kernel with head64.c from QBE did not print its banner.
+if readelf -SW "$obj" | grep -q ' \.head\.text '; then note "gcc $src: code in .head.text (runs before the kernel's mapping) stays on gcc"; exit 0; fi
 syms "$obj" > "$tmp/g.syms"; syms "$tmp/q.o" > "$tmp/q.syms"
 specials "$obj" > "$tmp/g.sec"; specials "$tmp/q.o" > "$tmp/q.sec"
 grep '^D ' "$tmp/g.syms" > "$tmp/g.def"; grep '^D ' "$tmp/q.syms" > "$tmp/q.def"
