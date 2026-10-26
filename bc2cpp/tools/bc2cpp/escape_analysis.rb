@@ -1048,8 +1048,7 @@ module EscapeAnalysis
     # -- sends ---------------------------------------------------------------------------------------
     # [positional slots, keyword slots] after the receiver; `n=*` packs the arguments in one slot.
     def argument_slots(insn)
-      spec = BytecodeIR::OperandModel.argc_spec(insn)
-      [spec.positional_slots, spec.keyword_slots]
+      [insn.positional_slots, insn.keyword_slots]
     end
 
     def send_op(run, i, insn, s)

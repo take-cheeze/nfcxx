@@ -157,6 +157,15 @@ module InsnOperands
     !!(spec && !spec[2] && spec[1].nil?)
   end
 
+  # Packed positional and keyword arguments each occupy one register.
+  def positional_slots
+    positional_splat? ? 1 : (argc || 0)
+  end
+
+  def keyword_slots
+    keyword_splat? ? 1 : 2 * (keyword_argc || 0)
+  end
+
   # `n=` / `nk=` as printed: digits, `*`, or nil when absent.
   def n_spec
     spec = argc_operand or return nil

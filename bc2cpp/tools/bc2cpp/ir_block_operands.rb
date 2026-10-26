@@ -25,17 +25,11 @@ module IrBlockOperands
   end
 
   # The register a SENDB/SSENDB reads its block from (vm.c OP_SENDB: R(a + argc + kwargs + 1), a packed `*` argument
-  # list and a packed `**` hash taking one register each), as digits.
+  # list and a packed `**` hash taking one register each), as an Integer.
   def block_register(insn)
     return nil unless insn.reg && insn.argc_operand
 
-    n, nk, = insn.argc_operand
-    positional = n.nil? ? 1 : n
-    keywords = if !insn.keyword_arguments? then 0
-               elsif nk.nil? then 1
-               else 2 * nk
-               end
-    (insn.reg + positional + keywords + 1)
+    insn.reg + insn.positional_slots + insn.keyword_slots + 1
   end
 
   # Labels of the literal blocks the block operand of the send at +index+ can be, when every reaching definition is a

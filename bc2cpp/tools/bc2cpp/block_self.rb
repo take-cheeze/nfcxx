@@ -110,14 +110,9 @@ module BlockSelf
     block = BytecodeIR::Ops::B_SUFFIX_OPS.include?(op) ? 1 : 0
     return block if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(op)
 
-    spec = insn.argc_operand or return nil
-    n, nk, plain = spec
-    positional = n.nil? ? 1 : n
-    keywords = if plain then 0
-               elsif nk.nil? then 1
-               else 2 * nk
-               end
-    positional + keywords + block
+    return nil unless insn.argc_operand
+
+    insn.positional_slots + insn.keyword_slots + block
   end
 
   # The registers a COUNTED_WINDOW_OPS operator reads, or nil when its operands do not parse.
