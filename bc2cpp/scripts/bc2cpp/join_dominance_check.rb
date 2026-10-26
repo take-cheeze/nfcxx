@@ -118,6 +118,57 @@ handler = irep_of([insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SEND0, "R3\t:f"), insn
 check.call('an exception edge from before the write into the read refuses',
            !BytecodeIR.write_dominates?(handler, 2, 3, 2))
 
+# Canonical opaque-register keys: write_dominates? shares the reaching_definitions
+# snapshot helper. Distinct empty Sets share one frozen snapshot while nil stays
+# distinct; frozen Integer Sets (including dev-time StrictKeySet) reuse their
+# snapshot by identity; mutable inputs take the uncached path; the
+# BC2CPP_IR_QUERY_KEYS control initializes consistently on a dominance-first
+# Program and restores per-query copying when off.
+opaque_body = [insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :RETURN, 'R3')]
+opaque_prog = -> { BytecodeIR::Program.new(irep_of(opaque_body)) }
+check.call('an explicitly empty opaque Set still dominates',
+           opaque_prog.call.write_dominates?(0, 1, 2, opaque_regs: Set[].freeze))
+check.call('distinct empty opaque Sets share one snapshot while nil stays distinct',
+           opaque_prog.call.write_dominates?(0, 1, 2, opaque_regs: Set[].freeze) &&
+           opaque_prog.call.write_dominates?(0, 1, 2) &&
+           BytecodeIR::Program::EMPTY_OPAQUE_KEY.frozen?)
+mutable_opaque = Set[9]
+prog_mut = opaque_prog.call
+check.call('a mutable opaque Set takes the uncached path (no query cache entry)',
+           prog_mut.write_dominates?(0, 1, 2, opaque_regs: mutable_opaque) &&
+           prog_mut.instance_variable_get(:@write_dominates_cache).nil?)
+mutable_opaque << 2
+check.call('a mutable opaque Set change is observed (no retained snapshot)',
+           !prog_mut.write_dominates?(0, 1, 2, opaque_regs: mutable_opaque))
+flag = ENV['BC2CPP_IR_QUERY_KEYS']
+begin
+  ENV['BC2CPP_IR_QUERY_KEYS'] = '1'
+  first_prog = opaque_prog.call
+  strict_set = StrictKeySet.new([2]).freeze
+  check.call('a dominance-first query initializes the key control and memoizes a StrictKeySet snapshot',
+             !first_prog.write_dominates?(0, 1, 2, opaque_regs: strict_set) &&
+             first_prog.instance_variable_get(:@compact_dataflow_keys) == true &&
+             first_prog.instance_variable_get(:@opaque_reg_keys).key?(strict_set))
+  first_prog.write_dominates?(0, 1, 2, opaque_regs: StrictKeySet.new([2]).freeze)
+  check.call('equal distinct StrictKeySets each keep their own snapshot',
+             first_prog.instance_variable_get(:@opaque_reg_keys).size == 2)
+  first_prog.write_dominates?(0, 1, 2, opaque_regs: strict_set)
+  check.call('a repeated identical StrictKeySet reuses its snapshot without growing the memo',
+             first_prog.instance_variable_get(:@opaque_reg_keys).size == 2)
+  ENV['BC2CPP_IR_QUERY_KEYS'] = '0'
+  off_prog = opaque_prog.call
+  check.call('control-off dominance answers stay correct and copy per query',
+             !off_prog.write_dominates?(0, 1, 2, opaque_regs: strict_set) &&
+             off_prog.write_dominates?(0, 1, 2, opaque_regs: Set[].freeze) &&
+             off_prog.instance_variable_get(:@opaque_reg_keys).nil?)
+ensure
+  flag ? ENV['BC2CPP_IR_QUERY_KEYS'] = flag : ENV.delete('BC2CPP_IR_QUERY_KEYS')
+end
+bound_prog = opaque_prog.call
+BytecodeIR::DATAFLOW_CACHE_SIZE.times { |i| bound_prog.write_dominates?(0, 1, 2, opaque_regs: Set[i + 10].freeze) }
+check.call('opaque snapshot memo stays bounded for dominance queries',
+           bound_prog.instance_variable_get(:@opaque_reg_keys).size == BytecodeIR::DATAFLOW_CACHE_SIZE)
+
 puts '-- walk_dominating_writers (host)'
 moves = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :MOVE, "R4\tR3"), insn(8, :RETURN, 'R4')])
 found = moves.walk_dominating_writers(2, 4, use: 3, follow_moves: true) { |i| i.op }

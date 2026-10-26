@@ -135,16 +135,22 @@ module BytecodeIR
       @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg, d.built) }
     end
 
-    # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable strings.
+    # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable
+    # strings. StrictKeySet is a Set subclass whose dev-time coercion already rejects non-Integer members, so a
+    # frozen one holds only Integers: is_a? admits it where instance_of? never did, which left the identity memo
+    # empty in dev and every repeated query sorting again.
+    EMPTY_OPAQUE_KEY = [].freeze
+
     def reaching_opaque_key(opaque_regs)
       return nil unless opaque_regs
+      return EMPTY_OPAQUE_KEY if opaque_regs.empty?
       return opaque_regs.sort.freeze unless @compact_dataflow_keys
 
       @opaque_reg_keys ||= {}.compare_by_identity
       return @opaque_reg_keys[opaque_regs] if @opaque_reg_keys.key?(opaque_regs)
 
       key = opaque_regs.sort.freeze
-      if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && opaque_regs.instance_of?(Set) && opaque_regs.frozen? &&
+      if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && opaque_regs.is_a?(Set) && opaque_regs.frozen? &&
          opaque_regs.all? { |register| register.is_a?(Integer) }
         @opaque_reg_keys[opaque_regs] = key
       end
@@ -277,7 +283,8 @@ module BytecodeIR
       return compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs) if opaque_regs && !opaque_regs.frozen?
 
       @write_dominates_cache ||= {}
-      opaque_key = opaque_regs&.sort&.freeze
+      @compact_dataflow_keys = ENV['BC2CPP_IR_QUERY_KEYS'] != '0' if @compact_dataflow_keys.nil?
+      opaque_key = reaching_opaque_key(opaque_regs)
       key = [w, use, reg, opaque_key]
       unless @write_dominates_cache.key?(key)
         result = compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs)
