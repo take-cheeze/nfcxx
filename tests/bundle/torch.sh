@@ -24,7 +24,7 @@ if [ -z "${LIBTORCH:-}" ]; then
 fi
 L=$LIBTORCH/lib
 [ -f "$L/libtorch_cuda.so" ] || { echo "FAIL $L/libtorch_cuda.so not found (a CUDA libtorch is needed)"; exit 1; }
-make -s -C tools/bundle || exit 1
+ninja -C tools/bundle >/dev/null || exit 1
 B=$root/build/nfcbundle
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # The libraries that are dlopen'ed rather than needed: they stay files next to the stubs.

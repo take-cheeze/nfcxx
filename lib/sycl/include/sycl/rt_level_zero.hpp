@@ -6,8 +6,11 @@
 //
 // Memory. The heap is one shared USM allocation (zeMemAllocShared): the host and the device see it at the same addresses, so
 // a device address is the host address (the identity case of rt_vulkan.hpp). The device must support atomic access to shared
-// allocations (ZE_MEMORY_ACCESS_CAP_FLAG_ATOMIC); the runtime checks it. Layout: the flag word at 0, the push block at 4352,
-// the kernel's captured state at 256 (up to 4096 bytes), then the allocator from 8192.
+// allocations (ZE_MEMORY_ACCESS_CAP_FLAG_ATOMIC); the runtime checks it. The allocator starts at 8192.
+// The words the host writes or reads on every dispatch are in a separate host allocation (zeMemAllocHost, ctl_): the flag
+// word at 0, the kernel's captured state at 256 (up to 4096 bytes) and the push block at 4352. The driver migrates a
+// shared allocation as a whole when the host touches it, so with them in the heap every dispatch moved all of it to the
+// host and back (0.4 ms per MB, 400 ms per dispatch with the 1 GB default).
 //
 // Dispatch. The local size is the module's specialization constants (ids 0, 1, 2, ze_module_constants_t), and the group size
 // is set with zeKernelSetGroupSize. A module is built once per local size (the same cache as the OpenCL programs). Each
@@ -42,7 +45,7 @@ struct ze_push {
   uint64_t hlo, hsize, dbase;
 };
 static_assert(sizeof(ze_push) == 112, "push block layout");
-constexpr uint64_t ze_push_at = 4352;   // the push block's offset in the heap
+constexpr uint64_t ze_push_at = 4352;   // the push block's offset in the control block (ctl_)
 constexpr uint64_t ze_closure_at = 256;
 
 class ze_rt {
@@ -96,7 +99,7 @@ class ze_rt {
   // a check that failed in the kernel sets the flag: the program stops with the reason
   void check_flag() {
     uint32_t flag = 0;
-    std::memcpy(&flag, at(dev_base_), 4);
+    std::memcpy(&flag, ctl_, 4);
     if (flag) {
       static const char *why[] = {"", "integer division by zero or INT_MIN / -1", "shift count out of range", "index out of bounds",
                                   "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
@@ -148,36 +151,33 @@ class ze_rt {
     // the group's local region: the user's local memory, the 1024-byte scratch tail, then the work-group statics (manifest L)
     uint64_t stride = (uint64_t(lmem) + 1024 + static_local + 15) & ~uint64_t(15);
     // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
-    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd); the
-    // dimensions above sd must be a single invocation, so the slab's invocations are contiguous in the emitter's linear
-    // index. The emitter numbers stacks and local memory over the whole grid (the slab offset ox/oy/oz is in that
+    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd), with
+    // every group below sd and one group of each dimension above it: consecutive groups in the linear group index (x
+    // fastest). The emitter numbers stacks and local memory over the whole grid, group by group (the slab offset ox/oy/oz is in that
     // index), so each slab's bases are biased by the slab's first index and the region holds just the slab.
     uint64_t stack_total = invocations * stack_bytes;
     uint64_t room = largest_free();
     int sd = 0;
     for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
-    bool sliceable = true;
-    for (int e = sd + 1; e < 3; e++) if (l[e] != 1) sliceable = false;
     uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
     uint64_t per_group = inv_group * stack_bytes + stride;
     // the groups in the dimensions below d: one group along d takes them all
     auto below = [&](int d) { uint64_t b = 1; for (int e = 0; e < d; e++) b *= ng[e]; return b; };
     // when even one group along sd does not fit (with all the groups below it), the slab moves to the next dimension
-    // inward; the dimensions above it then run one group per launch, so they must be one invocation wide (l == 1) for the
-    // slab to stay contiguous in the linear index
+    // inward; the dimensions above it then run one group per launch
     if (stack_total + groups * stride > room)
-      while (sliceable && sd > 0 && l[sd] == 1 && below(sd) * per_group > room) sd--;
+      while (sd > 0 && below(sd) * per_group > room) sd--;
     uint64_t inner = below(sd);
     uint64_t outer = 1;   // the groups of the dimensions above sd, one per launch
     for (int e = sd + 1; e < 3; e++) outer *= ng[e];
     uint32_t per_launch = ng[sd];   // groups along sd in one launch
-    if (stack_total + groups * stride > room && sliceable) {
+    if (stack_total + groups * stride > room) {
       uint64_t fit = room / (inner * per_group);
       per_launch = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
     }
     const uint64_t chunks = (ng[sd] + per_launch - 1) / per_launch;   // launches along sd for each group above it
-    std::memset(at(dev_base_), 0, 4);   // the flag
-    std::memcpy(at(closure_addr()), closure, closure_bytes);
+    std::memset(ctl_, 0, 4);   // the flag
+    std::memcpy(ctl_ + ze_closure_at, closure, closure_bytes);
     ze_kernel_handle_t k = kernel(it->entry, l, it->module, it->subgroup_size);
     for (uint64_t step = 0; step < outer * chunks; step++) {
       // og: the group of each dimension above sd (the linear group index puts x fastest, as the emitter does)
@@ -195,7 +195,7 @@ class ze_rt {
       p.statics = mod.statics;
       p.stack = region - first_group * inv_group * stack_bytes;   // biased: the slab's first invocation is at region
       p.local = region + slab_stack - first_group * stride;
-      p.flag = dev_base_;
+      p.flag = (uint64_t)(uintptr_t)ctl_;
       p.hlo = (uint64_t)(uintptr_t)host_;
       p.hsize = heap_size_;
       p.dbase = dev_base_;
@@ -208,8 +208,8 @@ class ze_rt {
       uint32_t *o[3] = {&p.ox, &p.oy, &p.oz};
       *o[sd] = s0;
       for (int e = sd + 1; e < 3; e++) *o[e] = og[e];
-      std::memcpy(at(dev_base_ + ze_push_at), &p, sizeof p);
-      void *push = at(dev_base_ + ze_push_at);
+      std::memcpy(ctl_ + ze_push_at, &p, sizeof p);
+      void *push = ctl_ + ze_push_at;
       check(zeKernelSetArgumentValue(k, 0, sizeof push, &push), "zeKernelSetArgumentValue");
       uint32_t ngs[3] = {ng[0], ng[1], ng[2]};
       ngs[sd] = cnt;
@@ -367,6 +367,11 @@ class ze_rt {
     dev_base_ = (uint64_t)(uintptr_t)host_;   // shared USM: the device sees the host address
     free_[8192] = heap_size_ - 8192;
     std::memset(host_, 0, 8192);
+    // the control block: host memory the device reads and writes over the bus, so touching it moves nothing
+    void *c = nullptr;
+    check(zeMemAllocHost(ctx_, &hmem, 8192, 64, &c), "zeMemAllocHost of the control block");
+    ctl_ = (uint8_t *)c;
+    std::memset(ctl_, 0, 8192);
   }
 
   void check_limits(const unsigned *l, unsigned lmem, const image_module &mod, uint32_t subgroup_size) const {
@@ -386,7 +391,7 @@ class ze_rt {
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
   }
 
-  uint64_t closure_addr() const { return dev_base_ + ze_closure_at; }
+  uint64_t closure_addr() const { return (uint64_t)(uintptr_t)(ctl_ + ze_closure_at); }
 
   // The module of an image for a local size: one module per image and local size (the specialization constants set the size).
   ze_module_handle_t module(const unsigned *l, size_t m) {
@@ -439,6 +444,11 @@ class ze_rt {
     ze_kernel_handle_t kern = nullptr;
     check(zeKernelCreate(module(l, m), &kd, &kern), "zeKernelCreate");
     check(zeKernelSetGroupSize(kern, l[0], l[1], l[2]), "zeKernelSetGroupSize");
+    // the kernel's only argument is the push block in the control block; the heap (stacks, the closure's USM pointers,
+    // the statics) is reached through pointers, so the driver is told to keep the shared allocations resident
+    check(zeKernelSetIndirectAccess(kern, ZE_KERNEL_INDIRECT_ACCESS_FLAG_SHARED | ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST |
+                                              ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE),
+          "zeKernelSetIndirectAccess");
     if (subgroup_size) {
       // the kernel must be compiled for the sub-group size it asks for (its SubgroupSize execution mode)
       ze_kernel_properties_t kp = {};
@@ -463,6 +473,7 @@ class ze_rt {
   uint32_t local_mem_ = 0;
   bool has_fp16_ = false;
   uint8_t *host_ = nullptr;
+  uint8_t *ctl_ = nullptr;   // the flag, the captured state and the push block (see Memory above)
   uint64_t dev_base_ = 0;
   uint64_t heap_size_ = 0;
   std::map<uint64_t, uint64_t> free_, used_;

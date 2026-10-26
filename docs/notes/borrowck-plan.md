@@ -16,8 +16,9 @@ exception-handling frame stack is tracked as a value that each function must res
 `may-throw` callees are checked on their normal path: the unwind leaves the function, and every local
 dies with it, so it needs no separate edge (the destructors it runs are the ones the normal path
 already checks). Aggregates are passed and returned by value (results through a caller's buffer), and runtime helpers and scalar C library functions
-have trusted summaries (`--effects`). Still planned: `try` and `throw` (EDG's `_setjmp` and `__throw`
-protocol), pointer arithmetic on arguments, source-language ownership policy, and general lifetime
+have trusted summaries (`--effects`). `try`, `catch`, and `throw` are checked through EDG's `_setjmp`
+protocol: a handler is entered from the throw points of its body, with the body's locals destroyed.
+Still planned: pointer arithmetic on arguments, source-language ownership policy, and general lifetime
 signatures. The historical design below was written against `origin/main` at
 `265991b`. Every claim about the code cites a file and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
 

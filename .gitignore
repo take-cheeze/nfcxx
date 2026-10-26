@@ -6,3 +6,7 @@ a.out
 /build
 
 _site/
+
+# ninja state of the tools built by build.ninja
+tools/*/.ninja_log
+tools/*/.ninja_deps

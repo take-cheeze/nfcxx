@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
-[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
+[ -x "$root/build/cuda-rewrite" ] || ninja -C "$root/tools/cuda-rewrite" >/dev/null || exit 1
 cuda=${CUDA_HOME:-/usr/local/cuda}
 if [ ! -f "$cuda/include/cuda_runtime.h" ] || [ ! -e "$cuda/lib64/libcudart.so" ]; then
   echo "SKIP: cuda: needs cuda_runtime.h and libcudart (CUDA_HOME)"; exit 0
@@ -51,7 +51,7 @@ done
 # The C++ rewriter (the default driver tool) on the two cases of the launch-argument and device-constant change: the
 # Ruby reference refuses them (its launch argument split has the same `->` bug, and it refuses __device__ constants).
 cxx="$root/build/cuda-rewrite"
-[ -x "$cxx" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
+[ -x "$cxx" ] || ninja -C "$root/tools/cuda-rewrite" >/dev/null || exit 1
 for c in launch_arrow_args device_const_scalar host_cub_helper bare_dim template_alias_fnptr vec4_alignas nested_fnptr helper_launch addr_taken constexpr_guard default_targs dynshared_operator dep_enumerate braced_range_for extern_instances; do
   if "$cxx" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
      && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then

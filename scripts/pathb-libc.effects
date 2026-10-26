@@ -12,3 +12,13 @@
 (call-effects "floor" (returns double) (nothrow) (noescape) (closed) (args (value double)))
 (call-effects "ceil" (returns double) (nothrow) (noescape) (closed) (args (value double)))
 (call-effects "trunc" (returns double) (nothrow) (noescape) (closed) (args (value double)))
+; glibc's canonical check of a long double, which takes the value in memory (byval) and reads nothing else.
+(call-effects "__iscanonicall" (returns int) (nothrow) (noescape) (closed) (args (byval (struct "__nfcxx_ld"))))
+; glibc's signaling and canonical checks of a float, double or long double: pure predicates that raise no status flag.
+; (The C23 quiet comparisons __iseqsig* raise FE_INVALID on NaN, a global status the model does not track, so they are
+; not described.)
+(call-effects "__issignalingf" (returns int) (nothrow) (noescape) (closed) (args (value float)))
+(call-effects "__issignaling" (returns int) (nothrow) (noescape) (closed) (args (value double)))
+(call-effects "__issignalingl" (returns int) (nothrow) (noescape) (closed) (args (byval (struct "__nfcxx_ld"))))
+(call-effects "__iscanonicalf" (returns int) (nothrow) (noescape) (closed) (args (value float)))
+(call-effects "__iscanonical" (returns int) (nothrow) (noescape) (closed) (args (value double)))

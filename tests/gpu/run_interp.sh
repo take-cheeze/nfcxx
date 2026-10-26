@@ -6,10 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
-[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
+[ -x "$root/build/pathb-ptx-emit" ] || ninja -C "$root/tools/pathb-ptx-emit" >/dev/null || exit 1
 # The PTX emitter: the C++ tool (tools/pathb-ptx-emit).
 emit_ptx() {
-  [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
+  [ -x "$root/build/pathb-ptx-emit" ] || ninja -C "$root/tools/pathb-ptx-emit" >/dev/null || return 1
   "$root/build/pathb-ptx-emit" --emit "$@"
 }
 out=$(mktemp -d)

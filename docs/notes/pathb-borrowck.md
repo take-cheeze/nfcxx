@@ -417,9 +417,48 @@ an exception, so the checker handles it like this:
   violation, and then writes `(nothrow)` for a body that calls no throwing callee. Self-recursion does
   not make a function throw. A function that calls a `may-throw` callee is inferred `may-throw`.
 
-Calls that may throw and the handlers that catch them (`_setjmp`, `__throw`) are still refused, so a
-program with a `try` block is not checked. The `throws` fixtures and `contracts/throws.cpp` cover the
-normal-path rules above.
+The `throws` fixtures and `contracts/throws.cpp` cover the normal-path rules above.
+
+### try and catch
+
+EDG lowers a try block to a frame of kind 5 and `if (_setjmp(frame.buffer) == 0) BODY else HANDLER`
+(`docs/notes/pathb-stage3.md`, "C++ exceptions"). The checker recognizes that `if`: its condition is
+`(eq R 0)` with `R` the result of `_setjmp` on a pointer into a local slot, the frame. `_setjmp` returns 0
+first, so the handler has no edge from the `if`. It is entered by exceptional edges from the throw points
+of the body: calls of `__throw`, `__rethrow`, or a `may-throw` callee.
+
+- A throw point reaches the handler of every enclosing try block of the function, because the
+  exception's type is not known statically, except that a handler that catches everything ends the
+  search. A handler catches everything when it has no dispatch on `__catch_clause_number` (a lone
+  `catch (...)`), or when its dispatch chain ends in a final `else` (a last `catch (...)`). A typed chain
+  has no such `else`: the runtime longjmps only into a try whose catch table matches. For the same reason,
+  the "no clause matched" fall-through of a typed chain is not a path. EDG's lowering leaves dead code
+  there, such as `main`'s implicit `return 0` without its frame pop.
+- A throw inside a handler goes to the enclosing try blocks, not to the handler's own.
+- The state at the handler's entry joins the states before and after the throwing call, since the callee
+  may have applied any part of its effects. Every slot declared inside the try body is ended, because
+  unwinding destroyed it (with the destructors the normal path checks), and pointers to it dangle. The
+  exception-stack top is the try's frame, as the runtime's longjmp leaves it.
+- `__throw` and `__rethrow` do not return.
+
+The exception object is the runtime's storage, with provenance `eh`. `__throw_setup` and its variants
+return it (their arguments may not hold a local address), and a load of `@"__caught_object_address"`
+yields it. Reads and writes through it are not tracked and are not `contract-not-closed`, since it is not
+the caller's memory. A local address stored into it is refused, because the exception may outlive the frame. That refusal is
+conservative: `int v; try { throw &v; } catch (int *p) { ... }` is valid C++ when the same function
+catches it, but the exception object's contents are not tracked, so the checker cannot tell.
+A call may take it as an argument, such as the exception's constructor, and the call's effects on it are
+not tracked. `__destroy_exception_object` ends it: a pointer to the caught object used after its handler
+is `use-after-scope: exception object`. Returning its address is refused. `@"__catch_clause_number"` is
+scalar bookkeeping, and `__exception_caught` is a no-op.
+
+Summary inference does not use catch clauses to prove a function `nothrow`: a function with a throw
+point is `may-throw` even when its own handler catches the exception. `contracts/try_catch.cpp` checks
+a typed clause with a `catch (...)` after it and a rethrow, and runs natively.
+`contracts/try_catch_errors.cpp` has one function per handler-path rule: an initialization after the
+throwing call, a pointer to a body local, the caught object after its handler, an outer handler reached
+directly past a typed inner one, and the two correct counterparts (initialization before the try, and an
+outer handler reached only through the rethrow of an inner `catch (...)`).
 
 ## Explicit drop-state contracts
 
@@ -558,7 +597,14 @@ name.
 
 `scripts/pathb-libc.effects` describes the few C library functions whose effects a closed summary can
 state exactly: scalar arguments and results, no memory access, no throw (`sched_yield`, `getpid`, `abs`,
-`labs`, `llabs`, `fabs`, `floor`, `ceil`, `trunc`). A function that takes a pointer of unknown size (`memcpy`,
+`labs`, `llabs`, `fabs`, `floor`, `ceil`, `trunc`) and glibc's pure floating predicates
+(`__issignalingf`, `__issignaling`, `__issignalingl`, `__iscanonicalf`, `__iscanonical`, `__iscanonicall`). The C23
+quiet comparisons `__iseqsig*` raise FE_INVALID on NaN, a global status the model does not track, so they have no
+summary.
+
+A summary in an `--effects` file that the module cannot state, such as one over a `long double` in a module that
+never uses that type, is dropped. A call the module makes to such a function is refused at the call, as it would be
+with no file; a malformed file is still an error. A function that takes a pointer of unknown size (`memcpy`,
 `strlen`), is variadic (`printf`), or keeps a pointer (`pthread_create`) has no such summary. Neither does
 one that returns storage of unknown provenance (`malloc`, `__errno_location`), since the checker cannot
 name what it returns. `sqrt` and the conversions are left out because they set `errno`, which is global.
