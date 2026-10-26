@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <exception>
 #include <climits>
@@ -351,16 +352,34 @@ std::string callback_raw(const Declaration& d, std::size_t i) { return "nfcffi_c
 // C++ wrappers are extern "C", so that dlsym finds them by their names.
 std::string linkage(bool cxx) { return cxx ? "extern \"C\" " : ""; }
 
+// The size of a value of KIND and abstract TYPE: sizeof for a struct or union, else 0.
+std::string struct_size(char kind, const std::string& type) {
+  return kind == 's' ? "sizeof(" + abstract_type(type) + ")" : "0";
+}
+
 // The layout function for D: void nfcffi_layout_NAME(unsigned long *s) stores the size of the result type at s[0] and of
-// parameter i at s[i + 1]; 0 for the types that are not structs or unions.
+// parameter i at s[i + 1]; 0 for the types that are not structs or unions. Then, for each callback in order, the sizes of
+// its result and its parameters (see layout_slots).
 std::string layout_text(const Declaration& d, bool cxx) {
-  std::string body = d.return_kind == 's' ? "  s[0] = sizeof(" + abstract_type(d.return_type) + ");\n" : "  s[0] = 0;\n";
+  std::string body = "  s[0] = " + struct_size(d.return_kind, d.return_type) + ";\n";
   for (std::size_t i = 0; i < d.params.size(); ++i) {
-    std::string n = std::to_string(i + 1);
-    body += d.param_kinds[i] == 's' ? "  s[" + n + "] = sizeof(" + abstract_type(d.params[i]) + ");\n"
-                                    : "  s[" + n + "] = 0;\n";
+    body += "  s[" + std::to_string(i + 1) + "] = " + struct_size(d.param_kinds[i], d.params[i]) + ";\n";
+  }
+  std::size_t next = d.params.size() + 1;
+  for (const Declaration::Callback& cb : d.callbacks) {
+    body += "  s[" + std::to_string(next++) + "] = " + struct_size(cb.return_kind, cb.return_type) + ";\n";
+    for (std::size_t j = 0; j < cb.params.size(); ++j) {
+      body += "  s[" + std::to_string(next++) + "] = " + struct_size(cb.param_kinds[j], cb.params[j]) + ";\n";
+    }
   }
   return linkage(cxx) + "void nfcffi_layout_" + d.id + "(unsigned long *s) {\n" + body + "}\n";
+}
+
+// The number of entries layout_text writes for D.
+std::size_t layout_slots(const Declaration& d) {
+  std::size_t n = d.params.size() + 1;
+  for (const Declaration::Callback& cb : d.callbacks) n += 1 + cb.params.size();
+  return n;
 }
 
 // The argument expressions of D's fixed parameters, reading a[i] as each kind says (struct: a pointer to the bytes).
@@ -480,8 +499,10 @@ std::string callback_text(const Declaration& d) {
       }
       char k = cb.param_kinds[j];
       std::string ctype = k == 'i' ? "long long" : k == 'u' ? "unsigned long long" : k == 'f' ? "double" : "void *";
+      // a struct parameter is passed as the address of its bytes
+      std::string init = k == 's' ? "&" + pn : "(" + ctype + ")" + pn;
       params += (j ? ", " : "") + decl;
-      canon += "  " + ctype + " " + cn + " = (" + ctype + ")" + pn + ";\n";
+      canon += "  " + ctype + " " + cn + " = " + init + ";\n";
       argv += (j ? ", &" : "&") + cn;
     }
     if (n == 0) params = "void";
@@ -491,6 +512,9 @@ std::string callback_text(const Declaration& d) {
                       : cb.return_kind == 'f' ? "double" : "void *";
     if (cb.return_kind == 'v') {
       body += "  nfcffi_host_dispatch(" + callback_context(d, cb.index) + ", a, 0);\n";
+    } else if (cb.return_kind == 's') {
+      // a struct result: the host writes its bytes into a variable of the declared type
+      body += "  " + ret + " rs;\n  nfcffi_host_dispatch(" + callback_context(d, cb.index) + ", a, &rs);\n  return rs;\n";
     } else {
       body += "  " + rtype + " rv = 0;\n  nfcffi_host_dispatch(" + callback_context(d, cb.index) + ", a, &rv);\n" +
               "  return (" + ret + ")rv;\n";
@@ -521,11 +545,18 @@ void dispatch_callback(void* ctx, void** a, void* r) {
         case 'i': args.push_back(Value::of_signed(*(long long*)a[i])); break;
         case 'u': args.push_back(Value::of_unsigned(*(unsigned long long*)a[i])); break;
         case 'f': args.push_back(Value::of_float(*(double*)a[i])); break;
+        case 's': args.push_back(Value::of_bytes(*(void**)a[i], s->sig->sizes.at(i + 1))); break;
         default: args.push_back(Value::of_pointer(*(void**)a[i])); break;
       }
     }
     Value v = (*s->fn)(args);
     if (r == nullptr) return;
+    if (s->sig->return_kind == 's') {
+      const std::vector<unsigned char>& bytes = v.as_bytes();
+      if (bytes.size() != s->sig->sizes.at(0)) throw Error("nfcffi: a callback's struct result has the wrong size");
+      std::memcpy(r, bytes.data(), bytes.size());
+      return;
+    }
     switch (s->sig->return_kind) {
       case 'i':
         *(long long*)r = v.kind() == Value::Kind::Unsigned ? (long long)v.as_unsigned() : v.as_signed();
@@ -542,7 +573,7 @@ void dispatch_callback(void* ctx, void** a, void* r) {
     }
   } catch (...) {
     if (!s->error) s->error = std::current_exception();
-    if (r != nullptr) std::memset(r, 0, 8);
+    if (r != nullptr) std::memset(r, 0, s->sig->return_kind == 's' ? s->sig->sizes.at(0) : 8);
   }
 }
 
@@ -569,8 +600,8 @@ Library Ffi::load(const std::string& header, const std::string& source, const st
   // Variadic functions get their wrappers when they are called (Library::vwrapper).
   std::string text = "#include \"" + path + "\"\n" + source + "\n" +
                      "void (*nfcffi_host_dispatch)(void *, void **, void *);\n";
-  std::vector<const Declaration*> wrapped;
-  for (const Declaration& d : lib.decls_) {
+  std::vector<Declaration*> wrapped;
+  for (Declaration& d : lib.decls_) {
     if (!only.empty() && std::find(only.begin(), only.end(), d.name) == only.end()) continue;
     if (variadic_ok(d)) {
       lib.variadic_.insert(d.name);
@@ -583,13 +614,19 @@ Library Ffi::load(const std::string& header, const std::string& source, const st
 
   lib.module_ = compile(text, cxx);
   *lib.module_.variable<void (*)(void*, void**, void*)>("nfcffi_host_dispatch") = &dispatch_callback;
-  for (const Declaration* d : wrapped) {
+  for (Declaration* d : wrapped) {
     lib.wrappers_.emplace(d->id, lib.module_.function<void(void**, void*)>("nfcffi_call_" + d->id));
     auto layout = lib.module_.function<void(unsigned long*)>("nfcffi_layout_" + d->id);
-    std::vector<unsigned long> sz(d->params.size() + 1, 0);
+    std::vector<unsigned long> sz(layout_slots(*d), 0);
     layout(sz.data());
     lib.layouts_.emplace(d->id, layout);
-    lib.sizes_[d->id] = std::vector<std::size_t>(sz.begin(), sz.end());
+    lib.sizes_[d->id] = std::vector<std::size_t>(sz.begin(), sz.begin() + d->params.size() + 1);
+    // the callbacks' sizes follow the parameters' (see layout_text)
+    std::size_t next = d->params.size() + 1;
+    for (Declaration::Callback& cb : d->callbacks) {
+      cb.sizes.assign(sz.begin() + next, sz.begin() + next + 1 + cb.params.size());
+      next += 1 + cb.params.size();
+    }
   }
   return lib;
 }
@@ -656,6 +693,24 @@ const Declaration* Library::select(const std::string& name, const std::vector<Va
   if (!any) return nullptr;
   if (best == nullptr) throw Error("nfcffi: no overload of " + name + " takes these arguments");
   return best;
+}
+
+std::vector<std::size_t> Library::member_offsets(const std::string& type, const std::vector<std::string>& members) const {
+  std::string body = "  o[0] = sizeof(" + type + ");\n";
+  for (std::size_t i = 0; i < members.size(); ++i) {
+    const std::string& m = members[i];
+    if (m.empty() || !std::all_of(m.begin(), m.end(), [](char c) { return std::isalnum((unsigned char)c) || c == '_'; })) {
+      throw Error("nfcffi: member_offsets: '" + m + "' is not a member name");
+    }
+    body += "  o[" + std::to_string(i + 1) + "] = offsetof(" + type + ", " + m + ");\n";
+  }
+  // compiled with the header and source, like a variadic wrapper; the module is closed once its values are read
+  const std::string text = "#include <stddef.h>\n#include \"" + header_ + "\"\n" + source_ + "\n" +
+                           linkage(cxx_) + "void nfcffi_offsets(unsigned long *o) {\n" + body + "}\n";
+  Module m = ffi_.compile(text, cxx_);
+  std::vector<unsigned long> o(members.size() + 1, 0);
+  m.function<void(unsigned long*)>("nfcffi_offsets")(o.data());
+  return std::vector<std::size_t>(o.begin(), o.end());
 }
 
 Value Library::call(const std::string& name, const std::vector<Value>& args) const {

@@ -3,6 +3,7 @@
 
 #include <climits>
 #include <deque>
+#include <memory>
 
 #include "nfcffi.hpp"
 
@@ -13,6 +14,20 @@ namespace {
 using Var = nfcpoly::detail::Var;  // the script value (nfcpoly::Value wraps it)
 
 // The Value of a script value. Strings are kept in STRINGS, so their C strings outlive the call.
+Value to_value(const Var& v, std::deque<std::string>& strings);
+Var to_var(const Value& r);
+
+// A script function (a Python callable, a Ruby Proc, ...) as a host callable: it runs with the converted arguments and its
+// result comes back as a Value. The strings it returns are kept in the closure, so the C side may read them after the call.
+Value script_callable(const Var& f) {
+  auto strings = std::make_shared<std::deque<std::string>>();
+  return Value::of_callable([f, strings](const std::vector<Value>& args) {
+    std::vector<Var> argv;
+    for (const Value& a : args) argv.push_back(to_var(a));
+    return to_value(nfcpoly::detail::call_in(f, std::string(), argv), *strings);
+  });
+}
+
 Value to_value(const Var& v, std::deque<std::string>& strings) {
   switch (v.kind()) {
     case Var::Nil:
@@ -36,6 +51,8 @@ Value to_value(const Var& v, std::deque<std::string>& strings) {
       }
       return Value::of_bytes(bytes.data(), bytes.size());
     }
+    case Var::Script:
+      return script_callable(v);
     default:
       throw Error(std::string("nfcffi: cannot pass a ") + v.kind_name() + " to a C function");
   }

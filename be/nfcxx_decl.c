@@ -303,11 +303,11 @@ static a_type_ptr nf_callback_routine(a_type_ptr t)
   x = target->variant.routine.extra_info;
   if (x != NULL && x->has_ellipsis) return NULL;
   k = nf_kind_base(target->variant.routine.return_type);
-  if (k == 'x' || strchr("iufpv", k) == NULL) return NULL;
+  if (k == 'x' || strchr("iufpvs", k) == NULL) return NULL;
   if (x != NULL) {
     for (p = x->param_type_list; p != NULL; p = p->next) {
       k = nf_kind_base(p->type);
-      if (k == 'x' || k == 'v' || strchr("iufp", k) == NULL) return NULL;
+      if (k == 'x' || k == 'v' || strchr("iufps", k) == NULL) return NULL;
     }
   }
   return target;

@@ -69,6 +69,29 @@ static int run(const std::string& dir) {
   check(ctx.eval<long long>("python", "cstd.call('snprintf', [None, 0, '%d-%s', 42, 'hi'])") == 5,
         "python snprintf (variadic: the length with a null buffer)");
 
+  // Python functions as the callbacks of C functions: the C side calls them through trampolines.
+  ctx.eval<void>("python", "cb = ffi_load('" + dir + "/cb.h', '''" + read_text(dir + "/cb_impl.c") + "''')\n");
+  check(ctx.eval<long long>("python", "cb.call('apply_twice', [lambda x: x * 3, 2])") == 18,
+        "python callback (apply_twice: the script's result, twice)");
+  check(ctx.eval<long long>("python", "cb.call('sum_with', [lambda i, d: i * 10, 3])") == 30,
+        "python callback (sum_with: a script function with an int and a double)");
+  check(ctx.eval<double>("python",
+                         "seen = []\n"
+                         "cb.call('each_pair', [lambda i, d: seen.append(d), 3])\n"
+                         "sum(seen)") == 1.5,
+        "python callback (each_pair: a void callback)");
+  check(ctx.eval<long long>("python",
+                            "import struct\n"
+                            "cb.call('count_pts', [lambda p: int(sum(struct.unpack('dd', bytes(p)))), 3])") == 9,
+        "python callback with a struct parameter (the bytes of a Pt)");
+  bool script_error = false;
+  try {
+    ctx.eval<long long>("python", "cb.call('apply_twice', [lambda x: 1 // 0, 2])");
+  } catch (const std::exception&) {
+    script_error = true;
+  }
+  check(script_error, "python callback: an exception in the script is rethrown to the caller");
+
 #endif
 #ifdef TEST_RUBY
   // mruby: the same library through ffi_load and lib.call, with the source in a heredoc.
@@ -81,6 +104,14 @@ static int run(const std::string& dir) {
   check(ctx.eval<long long>("ruby", "cstd = ffi_load('" + dir + "/var.h', '', ['snprintf'])\n"
                                     "cstd.call('snprintf', [nil, 0, '%d-%s', 42, 'hi'])") == 5,
         "ruby snprintf (variadic)");
+  // Ruby blocks and lambdas as the callbacks of C functions.
+  ctx.eval<void>("ruby", "cb = ffi_load('" + dir + "/cb.h', <<'SRC')\n" + read_text(dir + "/cb_impl.c") + "\nSRC\n");
+  check(ctx.eval<long long>("ruby", "cb.call('apply_twice', [->(x) { x * 3 }, 2])") == 18,
+        "ruby callback (apply_twice)");
+  check(ctx.eval<double>("ruby", "$seen = []\n"
+                                 "cb.call('each_pair', [->(i, d) { $seen << d }, 3])\n"
+                                 "$seen.inject(0.0) { |a, b| a + b }") == 1.5,
+        "ruby callback (each_pair: a void callback)");
 #endif
 
   // Errors reach the script as script errors, and the C++ side can read the result of an eval.
