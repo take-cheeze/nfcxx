@@ -275,6 +275,54 @@ module IrSymbolFlow
     out
   end
 
+  # Every non-MOVE use of the value +reg+ leaves at +index+, following MOVE
+  # copies over normal and handler edges: the shared skeleton of the factory
+  # use walk and the fragment escape walks. Yields (use index, instruction,
+  # register) per use. A falsy block value continues the walk; a truthy one
+  # stops it and is returned, except a Follow, which continues the walk from
+  # (use, Follow.reg) instead (a same-value SEND like freeze/dup/clone, whose
+  # escape checks run in the block first). Returns nil when a reads query
+  # refuses or +max_states+ visited states are exceeded, false when the walk
+  # completes with no truthy block value. The work stack is flat and visited
+  # states are tracked per origin, so no per-state pair Array is built.
+  Follow = Struct.new(:reg)
+
+  def follow_forward_uses(irep, index, reg, max_states: nil)
+    program = BytecodeIR.for(irep)
+    work = [index, reg]
+    seen = {}
+    count = 0
+    until work.empty?
+      register = work.pop
+      origin = work.pop
+      by_origin = seen[origin] ||= {}
+      next if by_origin.key?(register)
+
+      by_origin[register] = true
+      if max_states
+        count += 1
+        return nil if count > max_states
+      end
+
+      reads = value_reads(irep, origin, register)
+      return nil unless reads
+      reads.each do |use|
+        insn = program.source_at(use)
+        if insn.op == :MOVE
+          work.push(use, insn.reg)
+          next
+        end
+        result = yield(use, insn, register)
+        if Follow === result
+          work.push(use, result.reg)
+        elsif result
+          return result
+        end
+      end
+    end
+    false
+  end
+
   # Registers of irep that a nested block reads with GETUPVAR (the level that reaches irep only), or nil when the
   # irep tree is not known. Memoized per irep object: the tree never changes after loading.
   def captured_regs(irep)
