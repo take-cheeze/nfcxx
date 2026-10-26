@@ -106,4 +106,41 @@ check.call('an entry grown by << keeps a finite universe', universe_of(suite, pu
 prefixed = LITERAL_TABLE.sub('send(*TABLE[code])', 'send(:wait, *TABLE[code])')
 check.call('`send(:name, *TABLE[i])` is not a table send', splat_tables(suite, prefixed) == [nil])
 
+suite.compile('def read_cache(flag); a = :cache_a; b = :cache_b; flag ? consume(a) : consume(b); [a, b]; end') do |ireps, _root|
+  body = ireps.values.find { |irep| irep.instructions.any? { |insn| insn.op == :LOADSYM && insn.sym == 'cache_a' } }
+  origins = body.instructions.each_with_index.filter_map do |insn, index|
+    [index, insn.reg] if insn.op == :LOADSYM
+  end
+  previous = ENV['BC2CPP_SYMBOL_READS_CACHE']
+  begin
+    ENV['BC2CPP_SYMBOL_READS_CACHE'] = '0'
+    expected = origins.map { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) }
+    ENV.delete('BC2CPP_SYMBOL_READS_CACHE')
+    actual = origins.map { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) }
+    check.call('shared instruction reads preserve distinct value queries', actual == expected)
+    program = BytecodeIR.for(body)
+    lists = program.instance_variable_get(:@symbol_flow_instruction_reads)
+    check.call('instruction read lists are frozen and instruction-aligned',
+               lists.size == program.instructions.size && lists.each_with_index.all? do |regs, index|
+                 regs.nil? || (regs.frozen? && regs == IrSymbolFlow.reads(body, program.source_at(index)))
+               end)
+    first_list = lists.compact.find { |regs| !regs.empty? }
+    check.call('read-register caching stores Integer registers', first_list && first_list.all? { |reg| reg.is_a?(Integer) })
+    copy = Irep.new(label: body.label, nregs: body.nregs, instructions: body.instructions, reps: [], catch_handlers: body.catch_handlers)
+    origins.each { |index, reg| IrSymbolFlow.value_reads_compute(copy, index, reg) }
+    check.call('matching labels in separate bodies keep separate read caches',
+               !lists.equal?(BytecodeIR.for(copy).instance_variable_get(:@symbol_flow_instruction_reads)))
+    counts = [nil, '0'].map do |setting|
+      ENV['BC2CPP_SYMBOL_READS_CACHE'] = setting
+      origins.each { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) }
+      before = GC.stat(:total_allocated_objects)
+      100.times { origins.each { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) } }
+      GC.stat(:total_allocated_objects) - before
+    end
+    check.call('repeated walks avoid rebuilding instruction read collections', counts.first < counts.last)
+  ensure
+    ENV['BC2CPP_SYMBOL_READS_CACHE'] = previous
+  end
+end
+
 suite.finish!
