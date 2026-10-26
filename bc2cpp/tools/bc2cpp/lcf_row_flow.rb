@@ -26,7 +26,7 @@ module LcfRowFlow
   ROW_OWNER = 'LCF::Array1D'
   TABLE_OWNER = 'LCF::Array2D'
 
-  Kind = Struct.new(:role, :path, :bit, :owner, :file_class, keyword_init: true)
+  Kind = Struct.new(:role, :path, :bit, :owner, :file_class, :position, keyword_init: true)
 
   FIELD_CLASS_BITS = {
     'Integer' => NumericFlow::INT, 'Float' => NumericFlow::FLT, 'String' => NumericFlow::STR,
@@ -46,7 +46,7 @@ module LcfRowFlow
       @by_id = Hash.new { |h, k| h[k] = {} }
       next_bit = FIRST_BIT
       alloc = lambda do |role, path, owner, file_class = nil|
-        kind = Kind.new(role: role, path: path, bit: 1 << next_bit, owner: owner, file_class: file_class)
+        kind = Kind.new(role: role, path: path, bit: 1 << next_bit, owner: owner, file_class: file_class, position: next_bit)
         next_bit += 1
         @kinds << kind
         kind
@@ -69,6 +69,9 @@ module LcfRowFlow
       end
       @by_bit = @kinds.to_h { |k| [k.bit, k] }
       @mask = @kinds.sum(&:bit)
+      # The kind table is fixed, so foreign-class predicates can share these complements.
+      @non_lcf_mask = ~@mask
+      @non_lcf_non_nil_mask = ~(@mask | NumericFlow::NIL)
       @field_masks = {}
     end
 
@@ -106,11 +109,11 @@ module LcfRowFlow
     # nil contributes nothing when +nil_raises+ (`nil[]` raises NoMethodError).
     def index(recv_mask, key, nil_raises: false)
       result = 0
-      foreign = recv_mask & ~@mask
-      foreign &= ~NumericFlow::NIL if nil_raises
-      result |= NumericFlow::OTHER if foreign.nonzero?
+      foreign = nil_raises ? @non_lcf_non_nil_mask : @non_lcf_mask
+      result |= NumericFlow::OTHER if recv_mask.anybits?(foreign)
       @kinds.each do |k|
-        next if (recv_mask & k.bit).zero?
+        # Each kind owns one bit; indexing avoids a temporary bignum intersection.
+        next unless recv_mask[k.position] == 1
 
         result |= case k.role
                   when :file, :row then field_mask(k.path, key)

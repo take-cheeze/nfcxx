@@ -114,7 +114,7 @@ class CodeGen
     mask = numeric_raw_mask(irep, index, reg, owner_def)
     return unless mask.is_a?(Integer)
 
-    rows = @lcf_rows.kinds.select { |k| (mask & k.bit).nonzero? }
+    rows = @lcf_rows.kinds.select { |k| mask[k.position] == 1 }
     return if rows.empty? || rows.any? { |k| k.role != :row }
     return unless (mask & ~NumericFlow::NIL & ~rows.sum(&:bit)).zero?
 
