@@ -279,7 +279,7 @@ module TypeFacts
   end
 
   def mask_classes_of_numeric(gen, mask)
-    gen.send(:numeric_mask_name, mask).to_s.split('|').reject { |n| n == 'NONE' }.map { |n| CORE_NAMES.fetch(n, n) }.uniq
+    gen.send(:numeric_mask_classes, mask).reject { |n| n == 'NONE' }.map { |n| CORE_NAMES.fetch(n, n) }.uniq
   end
 
   def entry_fixnum?(gen, label, k)
@@ -291,7 +291,7 @@ module TypeFacts
                  'RNG' => 'Range', 'NIL' => 'nil' }.freeze
 
   def mask_classes(gen, mask)
-    gen.send(:class_mask_name, mask).to_s.split('|').reject { |n| n == 'CHECKED' || n == 'NONE' }
+    gen.send(:class_mask_classes, mask).reject { |n| n == 'CHECKED' || n == 'NONE' }
        .map { |n| CORE_NAMES.fetch(n, n) }.uniq
   end
 
