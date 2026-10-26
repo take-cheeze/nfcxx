@@ -225,7 +225,7 @@ module InsnOperands
     @uint_operand = reg && second && %i[int addr].include?(second.kind) && second.value >= 0 ? second.value : nil
   end
 
-  # Signed literal right after the leading register, as printed (`R1 -5`). The read is defined once, in
+  # Signed Integer right after the leading register (`R1 -5`), or nil. The read is defined once, in
   # BytecodeIR::OperandModel.imm_operand; this memoizes it per instruction.
   def imm_operand
     return @imm_operand if defined?(@imm_operand)

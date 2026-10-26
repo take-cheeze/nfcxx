@@ -303,7 +303,7 @@ module BytecodeIR
       left = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
       right = if %i[ADDI SUBI].include?(op)
                 imm = insn.imm_operand
-                imm && [int_node(imm.to_i)].freeze
+                imm && [int_node(imm)].freeze
               else
                 insn.regs[1] && alternatives(irep, index, insn.regs[1], policy, depth: depth + 1)
               end
@@ -338,7 +338,7 @@ module BytecodeIR
       return BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
       return -1 if insn.op == :LOADI__1
 
-      insn.imm_operand&.to_i
+      insn.imm_operand
     end
 
     # The fact as the report prints it: `classes=A,B` ('?' unknown), `value=N` ('-' none), `interval=lo..hi` ('-' none).

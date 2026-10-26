@@ -162,6 +162,6 @@ module SealedInt16Locals
     return BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == :LOADI__1
 
-    BytecodeIR::OperandModel.imm_operand(insn)&.to_i
+    BytecodeIR::OperandModel.imm_operand(insn)
   end
 end

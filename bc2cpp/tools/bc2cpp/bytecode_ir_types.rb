@@ -212,7 +212,7 @@ module BytecodeIR
       when :LOADI__1 then -1
       when BytecodeIR::Ops::LOADI_SLOT then BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op]
       when :LOADI, :LOADI8, :LOADI16, :LOADI32, :LOADINEG
-        value = insn.imm_operand&.to_i
+        value = insn.imm_operand
         value && insn.op == :LOADINEG ? -value.abs : value
       end
     end

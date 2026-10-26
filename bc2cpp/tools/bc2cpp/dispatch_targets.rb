@@ -1260,6 +1260,6 @@ def eqq_literal_of(irep, definition)
   when BytecodeIR::Ops::LOADI_OPS
     # Same two literal shapes as LOADI's codegen.
     lit = insn.paren_value || BytecodeIR::OperandModel.imm_operand(insn)
-    lit ? { type: :fixnum, value: lit } : nil
+    lit ? { type: :fixnum, value: lit.to_s } : nil
   end
 end

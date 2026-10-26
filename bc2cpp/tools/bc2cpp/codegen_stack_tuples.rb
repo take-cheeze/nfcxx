@@ -307,7 +307,7 @@ class CodeGen
     case insn.op
     when :LOADI__1 then -1
     when /\ALOADI_([0-7])\z/ then Regexp.last_match(1).to_i
-    when :LOADI8, :LOADI16, :LOADI32 then insn.imm_operand&.to_i
+    when :LOADI8, :LOADI16, :LOADI32 then insn.imm_operand
     end
   end
 

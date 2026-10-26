@@ -89,7 +89,7 @@ class CodeGen
     when *FIXNUM_INTERVAL_OPS
       left = fixnum_interval(irep, j, insn.regs[0], owner_def, depth + 1, why)
       right = if %i[ADDI SUBI].include?(op)
-                imm = insn.imm_operand&.to_i
+                imm = insn.imm_operand
                 imm && [imm, imm]
               else
                 fixnum_interval(irep, j, insn.regs[1], owner_def, depth + 1, why)

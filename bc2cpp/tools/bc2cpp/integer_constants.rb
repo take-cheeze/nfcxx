@@ -254,7 +254,7 @@ module IntegerConstants
                   immediate = BytecodeIR::OperandModel.imm_operand(insn)
                   next nil unless immediate
 
-                  immediate.to_i
+                  immediate
                 else
                   next nil unless args[1]
 
@@ -350,7 +350,7 @@ module IntegerConstants
                   immediate = BytecodeIR::OperandModel.imm_operand(insn)
                   next nil unless immediate
 
-                  immediate.to_i
+                  immediate
                 else
                   next nil unless args[1]
 
@@ -382,10 +382,8 @@ module IntegerConstants
     return BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == :LOADI__1
 
-    tok = BytecodeIR::OperandModel.imm_operand(insn)
-    return nil unless tok
-
-    value = tok.to_i
+    value = BytecodeIR::OperandModel.imm_operand(insn)
+    return nil unless value
     return nil if insn.op == :LOADI32 && !value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
 
     value

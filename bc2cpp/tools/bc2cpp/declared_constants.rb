@@ -606,7 +606,7 @@ module DeclaredConstants
     def arithmetic(irep, j, insn, cur, visiting, depth)
       left = value(irep, j, cur, visiting, depth + 1)
       right = if BytecodeIR::Ops::IMM_ARITH.include?(insn.op)
-                (i = insn.imm_operand&.to_i) && [i, i]
+                (i = insn.imm_operand) && [i, i]
               elsif insn.regs[1]
                 value(irep, j, insn.regs[1], visiting, depth + 1)
               end
