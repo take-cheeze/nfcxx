@@ -17,6 +17,8 @@
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
 #   --module-dir=DIR: where C++ module interface files (NAME.eifc) are written and read; the default is the directory of -o.
 #                  A program with `export module` or `import` is built one source at a time (docs/notes/modules.md).
+#   NFCXX_CUDA_HOST_SYMBOLS=FILE: internal (the second pass of a .cu compile, see "Kernel instances from the host
+#                  compile" below): the demangled symbols of the first pass's output, for the device rewrite.
 #   NFCXX_KEEP_INTERMEDIATES=1: a compile and link keeps its intermediates (the .o files, <stem>.ii, <stem>.ti) in the
 #                  temporary directory the driver names on stderr, instead of removing it on exit. A -c compile keeps
 #                  <stem>.ii and <stem>.ti beside its object in any case: the link that follows reads them there.
@@ -180,7 +182,7 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} ${NFCXX_CUDA_HOST_SYMBOLS:+"--host-symbols=$NFCXX_CUDA_HOST_SYMBOLS"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
   NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
@@ -856,6 +858,26 @@ t=$(trace_start)
 )
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 link_records_rm
+# Kernel instances from the host compile. The rewriter lists the kernel templates whose instances the text does not
+# give (<kernels>.unresolved: a launch or address in a template the unit calls with deduced or dependent arguments,
+# binbcast.cu's launch_bin_bcast_pack), and their device code is not made. The host compile made them, though: when its
+# output has an instance of one of them (nm -C), the build runs again with those symbols (NFCXX_CUDA_HOST_SYMBOLS), and
+# the device rewrite makes each instance's entry. A unit whose templates are instantiated by other units (fattn.cu)
+# has none, and builds once. One .cu input only: the symbols of two units' static kernels could not be told apart.
+if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $preprocess = 0 ] && [ -f "$out" ] \
+   && [ -s "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved" ]; then
+  hsyms=$cudatmp/host.syms
+  nm -C "$out" 2>/dev/null | sed 's/_INTERNAL_[A-Za-z0-9_]*:://g' > "$hsyms" || true
+  found=0
+  while IFS= read -r k; do
+    [ -n "$k" ] && grep -qE "(^|[ :])$k<" "$hsyms" && found=1
+  done < "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved"
+  if [ $found = 1 ]; then
+    t=$(trace_start)
+    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= "$root/nfcxx" "${args0[@]}" || exit $?
+    trace_end "$t" "second pass (kernel instances from the host compile)" eccp
+  fi
+fi
 if [ -n "$cache_entry" ] && [ ! -f "$cache_entry/obj" ]; then   # a whole entry appears at once: a partial copy is never a hit
   ctmp=$cache_entry.tmp.$$; mkdir -p "$ctmp" "$(dirname "$cache_entry")"
   cp "$out" "$ctmp/obj"

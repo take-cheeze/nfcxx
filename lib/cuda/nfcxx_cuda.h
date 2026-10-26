@@ -292,10 +292,29 @@ inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void *
   return cudaLaunchKernelExC(&cfg, reinterpret_cast<const void *>(kernel), args);
 }
 
+// The queries llama.cpp makes on a kernel (launch_fattn's occupancy, common.cuh's PDL check): the runtime takes the
+// cudaKernel_t in place of the host address, as cudaLaunchKernelExC does.
+template <typename F>
+inline cudaError_t __nfcxx_cuda_occupancy(int *blocks, F func, int block_size, std::size_t shmem) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
+  return (cudaOccupancyMaxActiveBlocksPerMultiprocessor)(blocks, reinterpret_cast<const void *>(kernel), block_size,
+                                                         shmem);
+}
+
+template <typename F>
+inline cudaError_t __nfcxx_cuda_func_get_attributes(cudaFuncAttributes *attr, F func) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
+  return (cudaFuncGetAttributes)(attr, reinterpret_cast<const void *>(kernel));
+}
+
 // The macros take the whole argument list: a kernel's template-id in the first argument (gdn_single<C, V, B>) has commas
 // that a macro parameter would split, and the call is a function call in CUDA.
 #define cudaFuncSetAttribute(...) __nfcxx_cuda_func_set_attribute(__VA_ARGS__)
 #define cudaLaunchKernel(...) __nfcxx_cuda_launch_raw(__VA_ARGS__)
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor(...) __nfcxx_cuda_occupancy(__VA_ARGS__)
+#define cudaFuncGetAttributes(...) __nfcxx_cuda_func_get_attributes(__VA_ARGS__)
 
 // A cooperative launch: the driver checks that every block is resident (cudaErrorCooperativeLaunchTooLarge otherwise),
 // which the grid barrier of grid_group::sync (scripts/cuda-rewrite.rb's GRID_DEF in the device unit) relies on.
