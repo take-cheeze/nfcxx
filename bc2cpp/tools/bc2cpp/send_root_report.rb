@@ -32,9 +32,9 @@ module SendRootReport
 
   def send_root_row(insn, kwargs, irep, site, id)
     owner = kwargs[:owner_def]&.owner
-    if kwargs[:self_implicit] || !irep || !site || insn.n_spec == '*' || insn.nk_spec
+    if kwargs[:self_implicit] || !irep || !site || insn.positional_splat? || insn.keyword_arguments?
       kind = if kwargs[:self_implicit] then 'self_implicit'
-             elsif insn.n_spec == '*' || insn.nk_spec then 'splat_or_keyword'
+             elsif insn.positional_splat? || insn.keyword_arguments? then 'splat_or_keyword'
              else 'no_site'
              end
       return [id, owner, irep&.label, site, insn.sym, '-', "skipped:#{kind}", '-', '-'].join("\t")

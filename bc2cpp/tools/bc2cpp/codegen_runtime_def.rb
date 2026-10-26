@@ -136,11 +136,11 @@ class CodeGen
     ((i + 1)...program.size).each do |j|
       nxt = program.source_at(j)
       if %i[SEND SEND0].include?(nxt.op) &&
-         nxt.reg == t.to_s && nxt.sym == 'call' && nxt.nk_spec.nil? && nxt.n_spec != '*'
+         nxt.reg == t.to_s && nxt.sym == 'call' && !nxt.keyword_arguments? && !nxt.positional_splat?
         # A catch handler entering the run reaches the call without the MOVE (BytecodeIR's handler edges).
         return nil unless BytecodeIR.for(irep).linear_corridor?(i, j, include_handlers: true)
 
-        return { send_addr: nxt.addr, dest_reg: t, n: nxt.n_spec.to_i }
+        return { send_addr: nxt.addr, dest_reg: t, n: nxt.argc.to_i }
       end
 
       return nil unless LAMBDA_CONFINED_CALL_SETUP_OPS.include?(nxt.op)
@@ -286,12 +286,12 @@ class CodeGen
 
         names << insn.sym_token
       when :SSEND, :SSEND0
-        return nil unless insn.reg && insn.sym_token && insn.nk_spec.nil? && insn.n_spec != '*'
+        return nil unless insn.reg && insn.sym_token && !insn.keyword_arguments? && !insn.positional_splat?
 
         kind = CLASS_BODY_INSTALLER_SENDS[insn.sym_token]
         return nil unless kind
 
-        syms = literal_symbol_args(body, idx, insn.reg.to_i, insn.n_spec.to_i)
+        syms = literal_symbol_args(body, idx, insn.reg.to_i, insn.argc.to_i)
         return nil unless syms && !syms.empty?
 
         case kind

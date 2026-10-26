@@ -184,11 +184,11 @@ class CodeGen
   def constructor_keyword_argc(insn)
     return nil unless constructor_keywords_enabled?
 
-    n = insn.n_spec
-    nk = insn.nk_spec
-    return nil unless n && n != '*' && nk && nk != '*' && nk.to_i.positive?
+    n = insn.argc
+    nk = insn.keyword_argc
+    return nil unless n && nk && nk.positive?
 
-    n.to_i
+    n
   end
 
   # Does a keyword call with +positionals+ positional arguments leave all of D's mandatory positions (1..mand) as plain
@@ -482,7 +482,7 @@ class CodeGen
   # predecessor. BC2CPP_CTOR_PACKED=0 leaves such a `new` a splat.
   def constructor_packed_argc(irep, idx, insn)
     return nil if ENV['BC2CPP_CTOR_PACKED'] == '0' || idx.zero?
-    return nil unless insn.n_spec == '*' && insn.nk_spec.nil?
+    return nil unless insn.positional_splat? && !insn.keyword_arguments?
 
     program = BytecodeIR.for(irep)
     array = program.source_at(idx - 1)

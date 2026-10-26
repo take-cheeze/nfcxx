@@ -1049,16 +1049,14 @@ module EscapeAnalysis
     # [positional slots, keyword slots] after the receiver; `n=*` packs the arguments in one slot.
     def argument_slots(insn)
       spec = BytecodeIR::OperandModel.argc_spec(insn)
-      n = spec.positional
-      nk = spec.keyword
-      [n.nil? ? 0 : (n == '*' ? 1 : n.to_i), nk.nil? ? 0 : (nk == '*' ? 1 : 2 * nk.to_i)]
+      [spec.positional_slots, spec.keyword_slots]
     end
 
     def send_op(run, i, insn, s)
       call = BytecodeIR::OperandModel.send_call(insn)
       a = call.receiver.to_i
       positional, kw = argument_slots(insn)
-      spread = BytecodeIR::OperandModel.argc_spec(insn).positional == '*'
+      spread = insn.positional_splat?
       unpacked = spread ? [a + 1] : []
       unpacked += ((a + positional + 1)..(a + positional + kw)).to_a
       return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r.to_s) }
