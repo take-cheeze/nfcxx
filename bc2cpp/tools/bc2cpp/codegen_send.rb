@@ -1912,7 +1912,8 @@ class CodeGen
              "  if (bc2cpp_cconst_have[#{i}]) return bc2cpp_cconst_slots[#{i}];\n" \
              "  mrb_value r0 = mrb_nil_value();\n"
       out << slot[:body].lines.map { |l| "  #{l}" }.join
-      out << "  if (mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE) {\n" \
+      # A value entry (CONST_VALUE_CACHE) stores whatever the one binding holds.
+      out << "  if (#{slot[:value] ? 'true' : 'mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE'}) {\n" \
              "    bc2cpp_cconst_slots[#{i}] = r0;\n" \
              "    bc2cpp_cconst_have[#{i}] = true;\n" \
              "  }\n" \

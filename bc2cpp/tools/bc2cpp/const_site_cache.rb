@@ -66,6 +66,52 @@ module StableClassConstants
   end
 end
 
+# CONST_VALUE_CACHE: the same cache for a bare name whose one binding is not a
+# class/module, e.g. optcarrot's Integer `CLK_3` (bound by a `map` masgn, so no
+# literal folds it) and FOREVER_CLOCK = 0xffffffff, too large for a Fixnum fold.
+# Every read paid the whole scope-chain lookup. Soundness is the class proof's,
+# with "not a class" standing in for "is a class": exactly one SETCONST/SETMCNST of
+# the bare name in the program, no CLASS/MODULE of it, no native or foreign
+# definition, no const_set/remove_const. The one binding is then fixed for the
+# life of the VM, and a failed lookup raises before anything is stored.
+module StableValueConstants
+  module_function
+
+  def analyze(ireps, native_paths, foreign_paths)
+    return Set.new unless native_paths && foreign_paths
+
+    bindings = Hash.new(0)
+    class_defs = Hash.new(0)
+    ireps.each_value do |irep|
+      BytecodeIR.for(irep).each_source do |insn|
+        case insn.op
+        when :CLASS, :MODULE
+          name = insn.sym_token
+          class_defs[name] += 1 if name
+        when :SETCONST
+          bindings[insn.const_name] += 1
+        when :SETMCNST
+          bindings[insn.mcnst_name] += 1
+        when :SEND, :SEND0, :SSEND, :SSEND0, :SENDB, :SSENDB, :LOADSYM
+          return Set.new if insn.sym.to_s.match?(StableClassConstants::DYNAMIC_MUTATION)
+        end
+      end
+    end
+    Array(foreign_paths).each do |path|
+      text = begin
+        File.read(path, encoding: 'UTF-8')
+      rescue SystemCallError => e
+        warn "[bc2cpp] StableValueConstants: cannot read #{path}: #{e.message}"
+        return Set.new
+      end
+      return Set.new if text.match?(StableClassConstants::DYNAMIC_MUTATION)
+    end
+    outside = IntegerConstants.native_defined_const_names(native_paths) |
+              IntegerConstants.foreign_const_names(foreign_paths)
+    bindings.select { |name, count| count == 1 && class_defs[name].zero? && !outside.include?(name) }.keys.to_set
+  end
+end
+
 # NATIVE_CLASS_CONSTANT_CACHE: the same cache for bare names a native
 # `mrb_define_class`/`_module` defines (Symbol, Array, ... and every native
 # gem's classes), which leave no CLASS/MODULE bytecode for `analyze` to see --

@@ -1144,6 +1144,11 @@ if $PROGRAM_NAME == __FILE__
       StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   end
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
+  CodeGen.stable_value_constants = profile_call.call('StableValueConstants.analyze') do
+    StableValueConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
+  end
+  warn "== stable value constants (CONST_VALUE_CACHE): #{CodeGen.stable_value_constants.size} =="
+  CodeGen.stable_value_constants.sort.each { |n| warn "  STABLE_VALUE #{n}" }
   # ENUMERATOR_MODEL: the `Enumerator` constant Kernel#to_enum reads, proven apart from StableClassConstants (mruby's
   # chain/lazy gems reopen the class, which that analysis counts as a second definition).
   if CodeGen.enumerator_model
