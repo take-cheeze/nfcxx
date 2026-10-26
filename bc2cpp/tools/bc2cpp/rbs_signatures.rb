@@ -56,6 +56,11 @@ module RbsSignatures
 
   module_function
 
+  # IR classes are Symbols; their frozen spelling avoids transient lookup keys without retaining a new table.
+  def ir_class_name(klass)
+    klass.is_a?(Symbol) ? klass.name : klass.to_s
+  end
+
   def dirs_from_env(root)
     value = ENV['BC2CPP_SIG_DIRS']
     return value.empty? ? [] : value.split(File::PATH_SEPARATOR) if value
@@ -460,8 +465,9 @@ module RbsSignatures
         refusal[:cause] ||= :call_receiver_union_cap
         next nil
       end
+      name = insn.sym.to_s
       # REMOVED: a name some class may undefine has no declared contract on any receiver (self_call_types refuses it too).
-      if removed&.call(insn.sym.to_s)
+      if removed&.call(name)
         refusal[:cause] ||= "call_removed:#{insn.sym}"
         next nil
       end
@@ -469,29 +475,30 @@ module RbsSignatures
       contracts = receiver.contracts.to_set
       failed = false
       receiver.classes.each do |klass|
+        klass_name = ir_class_name(klass)
         # The class's own chain is checked before its receiver bound: a chain contract_owners refuses (a module reached
         # twice) has no owners, so it reports call_contract_missing, not call_receiver_unbounded.
-        found = target.call(klass.to_s, insn.sym.to_s)
-        unless found && named_returns.key?([found, insn.sym.to_s])
+        found = target.call(klass_name, name)
+        unless found && named_returns.key?([found, name])
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
           break
         end
         # SELF_CALL_JOIN: a declared receiver is a nominal bound, so its dispatch joins every bounded subclass, as for self.
-        bounded = prepared ? prepared.receivers(klass.to_s) : self_receivers(klass.to_s, lookup: lookup, subclasses: subclasses, method_missing_classes: method_missing_classes)
+        bounded = prepared ? prepared.receivers(klass_name) : self_receivers(klass_name, lookup: lookup, subclasses: subclasses, method_missing_classes: method_missing_classes)
         unless bounded
           refusal[:cause] ||= "call_receiver_unbounded:#{klass}##{insn.sym}"
           failed = true
           break
         end
-        types = self_call_types(bounded, insn.sym.to_s, target: target, named_returns: named_returns, core_redefined: core_redefined)
+        types = self_call_types(bounded, name, target: target, named_returns: named_returns, core_redefined: core_redefined)
         unless types
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
           break
         end
         classes.merge(types)
-        bounded.each { |candidate| contracts << "call-result:#{target.call(candidate, insn.sym.to_s)}##{insn.sym}".freeze }
+        bounded.each { |candidate| contracts << "call-result:#{target.call(candidate, name)}##{insn.sym}".freeze }
       end
       next nil if failed
 
