@@ -372,7 +372,7 @@ class CodeGen
     positional = insn.argc_operand.nil? ? 0 : (insn.positional_splat? ? 1 : insn.argc.to_i)
     kw = !insn.keyword_arguments? ? 0 : 2 * insn.keyword_argc.to_i
     top = lead + positional + kw + (BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? 1 : 0)
-    BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? [] : [lead] + (lead + 1..top).to_a
+    (BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? [] : [lead]) + (lead + 1..top).to_a
   end
 
   def array_reads(insn, lead)
