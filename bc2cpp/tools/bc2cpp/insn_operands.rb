@@ -25,10 +25,9 @@ module InsnOperands
     install_typed(operands)
   end
 
-  # Installs the operand list with its first-operand-per-kind index, so a single-kind lookup is one hash read.
+  # Ordinary instructions share the index for their schema.
   def install_typed(operands)
-    @first_of_kind = {}
-    operands.each { |operand| @first_of_kind[operand.kind] ||= operand }
+    @kind_positions = OperandSchema.kind_positions(op, operands)
     @typed = operands.freeze
   end
 
@@ -39,8 +38,20 @@ module InsnOperands
   end
 
   def first_kind(kind)
-    typed
-    @first_of_kind[kind]
+    operands = typed
+    if @kind_positions
+      position = @kind_positions[kind]
+      return position && operands[position]
+    end
+
+    index = 0
+    while index < operands.length
+      operand = operands[index]
+      return operand if operand.kind == kind
+
+      index += 1
+    end
+    nil
   end
 
   # First register operand as digits, only when it is the leading operand.

@@ -102,6 +102,26 @@ module OperandSchema
     SCHEMAS[op]
   end
 
+  # Positions are shared by schema, while each instruction keeps its own operand values.
+  KIND_POSITIONS = (SCHEMAS.values + [ARRAY2_SCHEMA]).uniq.to_h do |schema|
+    positions = {}
+    schema.each_with_index { |kind, index| positions[kind] ||= index }
+    [schema, positions.freeze]
+  end.freeze
+
+  def self.kind_positions(op, operands)
+    schema = schema_for(op, operands.length)
+    return nil unless schema && schema.length == operands.length
+
+    index = 0
+    while index < schema.length
+      return nil unless schema[index] == operands[index].kind
+
+      index += 1
+    end
+    KIND_POSITIONS.fetch(schema)
+  end
+
   # The operand text of an instruction with mrbc's trailing `\t; comment`
   # removed.
   def self.strip_comment(args)
