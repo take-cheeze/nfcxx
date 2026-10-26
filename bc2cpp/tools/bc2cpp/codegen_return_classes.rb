@@ -796,7 +796,7 @@ class CodeGen
                                       next nil unless nk&.match?(/\A\d+\z/)
 
                                       pairs = (0...nk.to_i).map do |k|
-                                        [literal_symbol_write(body, index, (register + argc + 1 + 2 * k).to_s), register + argc + 2 + 2 * k]
+                                        [literal_symbol_write(body, index, register + argc + 1 + 2 * k), register + argc + 2 + 2 * k]
                                       end
                                       next nil if pairs.any? { |key, _| key.nil? }
 
@@ -804,7 +804,7 @@ class CodeGen
                                       next Set[] if matches.empty? && optional
                                       next nil unless matches.size == 1
 
-                                      bytecode_ir_source_classes(body, index, matches.first.last.to_s)
+                                      bytecode_ir_source_classes(body, index, matches.first.last)
                                     })
   end
 
@@ -813,7 +813,7 @@ class CodeGen
     return nil unless @native_results_ready && @rc_scoped_ready
 
     @ir_call_graph_arguments ||= IrCallGraphTypes.collect(self, @registry.values.flatten, @ireps)
-    @ir_call_graph_arguments.dig(definition.irep, position.to_s)
+    @ir_call_graph_arguments.dig(definition.irep, position)
   end
 
   def numeric_oracle_pool_mask(irep, insn)
