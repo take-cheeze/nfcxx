@@ -891,11 +891,11 @@ class CodeGen
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
     spec = argary.argary_spec
-    return nil unless spec && argary.reg && argary.paren_value&.match?(/\A\d+\z/)
+    return nil unless spec && argary.reg && !argary.paren_int.nil?
 
     argary_dest = argary.reg
     m = spec[0]
-    return nil unless spec[1..].all?(&:zero?) && argary.paren_value.to_i.zero?
+    return nil unless spec[1..].all?(&:zero?) && argary.paren_int.to_i.zero?
     return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
 
     # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
@@ -1096,7 +1096,7 @@ class CodeGen
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
     # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.
     return nil unless argary.argary_spec&.join(':') == shape[:argary]
-    return nil unless argary.paren_value == '0'
+    return nil unless argary.paren_int == 0
 
     # (5) The superclass is the implicit Object (:none means a CLASS with no
     # superclass expression, not "unrecognized").

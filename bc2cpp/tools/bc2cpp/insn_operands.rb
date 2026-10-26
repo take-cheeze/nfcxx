@@ -254,6 +254,17 @@ module InsnOperands
                    end
   end
 
+  # Numeric text inside the first parentheses as an Integer (`(0)` of BLKPUSH/ARGARY),
+  # or nil for non-numeric text and parenthesized registers. For metadata reads;
+  # paren_value stays the text accessor for diagnostics.
+  def paren_int
+    return @paren_int if defined?(@paren_int)
+
+    operand = first_of(:plit)
+    text = operand&.value
+    @paren_int = text.is_a?(String) && text.match?(/\A\d+\z/) ? text.to_i : nil
+  end
+
   # [index, level] of a GETUPVAR/SETUPVAR (`R3 1 0`), as Integers.
   def upvar_ref
     return @upvar_ref if defined?(@upvar_ref)

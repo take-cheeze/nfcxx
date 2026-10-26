@@ -77,6 +77,11 @@ module BytecodeIR
       insn.paren_value
     end
 
+    # Numeric parenthesized metadata as an Integer (Insn#paren_int), or nil.
+    def paren_int(insn)
+      insn.paren_int
+    end
+
     # The post-argument count of APOST R(a) pre post: its third operand's value (Insn#typed).
     def post_count(insn)
       insn.typed[2].value
