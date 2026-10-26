@@ -1,6 +1,11 @@
 #!/usr/bin/env ruby
 # monomir-to-pathb.rb: translate mrustc monomir (.mir) to Path B IR (.ir)
-abort "usage: #{$0} INPUT.mir [OUTPUT.ir]" if ARGV.empty?
+# --borrow: input for scripts/pathb-borrowck.rb, not for code generation. Only the program's own
+# functions get bodies (standard library calls stay external), locals are not zero-filled, mrustc's
+# SCOPEEND statements (MRUSTC_MMIR_SCOPE_END=1) become decl/scope-end facts, and a borrow of a local
+# place becomes a shared or exclusive loan. See docs/notes/mrustc-borrowck.md.
+$borrow = !ARGV.delete("--borrow").nil?
+abort "usage: #{$0} [--borrow] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
 input = ARGV[0]
 outpath = ARGV[1]
 src = File.read(input)
@@ -1322,10 +1327,112 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
         end
       end
     end
+    if $borrow
+      loan = borrow_loan(expr, place, types, locals, params, stmts, regi)
+      return loan if loan
+    end
     addr, regi = place_addr(place, types, locals, params, param_reg, stmts, regi)
     return [addr, regi]
   end
   load_operand(expr, types, locals, params, param_reg, stmts, regi)
+end
+
+# --borrow: `&place` and `&mut place` of a local place reached without a deref become
+# (borrow (ptr T) "Ln" shared|exclusive PLACE), PLACE being the slot or a constant offset into it.
+# Other borrows (through a deref, a dynamic index, of a static or a zero-sized place) stay plain
+# addresses, which carry the provenance of the pointer they come from.
+def borrow_loan(expr, place, types, locals, params, stmts, regi)
+  p = parse_place(place)
+  return nil unless locals.assoc(p[:root]) || p[:root] =~ /^arg\d+$/
+  ty = local_type(p[:root], locals, params)
+  return nil unless ty
+  ty = ty.strip
+  off = 0
+  p[:ops].each do |w|
+    case w[:k]
+    when :field
+      o, ft = field_offset_and_type(ty, w[:idx], types)
+      return nil unless ft
+      off += o; ty = ft.strip
+    when :downcast
+      vf = types[ty] && types[ty][:fields][w[:idx]]
+      return nil unless vf
+      ty = vf[:type].strip
+    else
+      return nil
+    end
+  end
+  sz, _ = type_size_align(ty, types)
+  return nil if sz == 0
+  pt = rust_type_to_pathb(ty, types)
+  kind = expr.start_with?("&mut ") || expr.start_with?("&move ") ? "exclusive" : "shared"
+  base = "$\"#{p[:root]}\""
+  base = "(offset #{base} #{off})" if off != 0
+  $loan_n += 1
+  r = regi; regi += 1
+  stmts << "(let %#{r} (ptr #{pt}) (borrow (ptr #{pt}) \"L#{$loan_n}\" #{kind} #{base}))"
+  ["%#{r}", regi]
+end
+
+# --borrow: the local whose storage a MIR statement writes as a whole or in part (not through a
+# deref): ASSIGN's destination, or a call's result.
+def mir_written_local(ln)
+  m = ln.match(/^ASSIGN (.+?) = /) || ln.match(/^CALL (.+?) = /)
+  return nil unless m
+  p = parse_place(m[1].strip)
+  return nil if p[:ops].any? { |w| w[:k] == :deref }
+  p[:root] =~ /^var\d+$/ ? p[:root] : nil
+end
+
+def mir_successors(content)
+  term = content.lines.map(&:strip).reject(&:empty?).last || ""
+  case term
+  when /^GOTO (\d+)/ then [$1]
+  when /^SWITCHVALUE /
+    term.sub(/^SWITCHVALUE .*? \{ /, "").scan(/= (\d+)/).flatten
+  when /^SWITCH /
+    term[term.rindex("{")..-1].scan(/\d+/)
+  when /goto (\d+) else (\d+)/ then [$1, $2]
+  when /^PANIC (\d+)/ then [$1]
+  else []
+  end
+end
+
+# --borrow: the locals whose storage may have started on some path into each block. A write to a
+# local outside that set starts its storage there (a decl); SCOPEEND ends it. MIR has no storage-start
+# statement, and a write is where Rust's storage is first observable.
+def mir_storage_starts(blocks, block_nums, locals)
+  succ = {}
+  block_nums.each { |b| succ[b] = mir_successors(blocks[b] || "") }
+  gen = lambda do |b, live|
+    (blocks[b] || "").each_line do |ln|
+      ln = ln.strip
+      if ln.start_with?("SCOPEEND")
+        ln.sub(/;$/, "").split.drop(1).each { |v| live.delete(v) }
+      else
+        root = mir_written_local(ln)
+        live << root if root && !live.include?(root)
+      end
+    end
+    live
+  end
+  inn = {}
+  block_nums.each { |b| inn[b] = [] }
+  work = block_nums.first ? [block_nums.first] : []
+  seen = {}
+  until work.empty?
+    b = work.shift
+    seen[b] = true
+    out = gen.call(b, inn[b].dup)
+    succ[b].each do |t|
+      next unless inn.key?(t)
+      merged = (inn[t] | out)
+      next if seen[t] && merged.size == inn[t].size
+      inn[t] = merged
+      work << t unless work.include?(t)
+    end
+  end
+  {in: inn}
 end
 
 def is_zst_ty(ty, types)
@@ -1839,6 +1946,7 @@ functions.each do |fn|
   next if fn[:body].nil?
   next if name == "panic_impl" || name.start_with?("panic_impl")
   next if name == "main"
+  next if $borrow && (!program_item?(name) || name == "main#")
   if name.include?("sync6atomic11atomic_load1g") || name.include?("sync6atomic11atomic_store1g")
     params = parse_params_str(params_str)
     pathb_ret = rust_type_to_pathb(ret, types)
@@ -1896,8 +2004,14 @@ functions.each do |fn|
     rpt = agg_ret ? rust_type_to_pathb(ret, types) : pathb_ret
     slot_lines << "(slot \"retval\" #{rpt} #{rsz} #{ral})"
   end
+  # --borrow: zero-sized locals have no storage to check, so they get no slot and no facts.
+  zst_locals = {}
   locals.each do |n, t|
     sz, al = type_size_align(t, types)
+    if $borrow && (sz == 0 || rust_type_to_pathb(t, types) == "void")
+      zst_locals[n] = true
+      next
+    end
     al = 1 if al == 0
     sz = 1 if sz == 0
     slot_lines << "(slot #{n.inspect} #{rust_type_to_pathb(t, types)} #{sz} #{al})"
@@ -1954,7 +2068,9 @@ functions.each do |fn|
     sz, _ = type_size_align(t, types)
     next if sz == 0 || sz > 1024
     stmts << "(zero-fill #{sz} $\"#{n}\")"
-  end
+  end unless $borrow
+  $loan_n = 0
+  storage = $borrow ? mir_storage_starts(blocks, block_nums, locals) : nil
   params.each_with_index do |t, i|
     r = param_reg[i]
     next if r.nil?
@@ -1970,10 +2086,35 @@ functions.each do |fn|
   block_nums.each do |bn|
     content = blocks[bn] || ""
     stmts << "(label #{bn.inspect})"
+    live = storage && storage[:in][bn].dup
+    # mrustc ends a temporary's storage before the terminator that reads it (`SCOPEEND var13;`
+    # then `IF var13 goto ...`). Those ends are emitted after the terminator's reads instead.
+    term_line = content.lines.map(&:strip).reject(&:empty?).last
+    deferred = []
+    term_start = nil
     content.each_line do |ln|
       ln = ln.strip
       next if ln.empty?
-      if ln.start_with?("ASSIGN")
+      term_start = stmts.size if live && ln == term_line
+      if live
+        root = mir_written_local(ln)
+        if root && !live.include?(root) && !zst_locals[root]
+          kind = (locals.assoc(root) || [nil, ""])[1].start_with?("&") ? "ref" : "val"
+          stmts << "(decl $\"#{root}\" #{kind})"
+          live << root
+        end
+      end
+      if ln.start_with?("SCOPEEND")
+        ln.sub(/;$/, "").split.drop(1).each do |v|
+          live.delete(v) if live
+          next if zst_locals[v]
+          if live && term_line =~ /\b#{v}\b/
+            deferred << v
+          else
+            stmts << "(scope-end $\"#{v}\")"
+          end
+        end
+      elsif ln.start_with?("ASSIGN")
         m = ln.match(/^ASSIGN (.+?) = (.+);$/)
         place = m[1].strip
         rhs = m[2].strip
@@ -3161,6 +3302,13 @@ functions.each do |fn|
         # skip
       end
     end
+    unless deferred.empty?
+      at = ((term_start || stmts.size)...stmts.size).find do |i|
+        st = stmts[i]
+        st =~ /^\((goto|return|unreachable)\b/ || (st.start_with?("(if ") && st.include?("(goto "))
+      end || stmts.size
+      stmts.insert(at, *deferred.map { |v| "(scope-end $\"#{v}\")" })
+    end
   end
 
   func_text = []
@@ -3174,11 +3322,73 @@ functions.each do |fn|
   func_text << "  (weak)"
   slot_lines.each { |s| func_text << "  #{s}" }
   ($lit_slots || []).each { |s| func_text << "  #{s}" }
+  if $borrow
+    # Storage that no MIR statement starts (the result, drop flags, the translator's own
+    # temporaries) lives for the whole call. Parameter spill slots are named after their parameter.
+    declared = {}
+    stmts.each { |st| declared[$1] = true if st =~ /^\(decl \$"([^"]+)"/ }
+    params.each_index { |i| declared["arg#{i}"] = true }
+    param_reg.each_value { |r| func_text << "  (decl %#{r} param)" if r }
+    # A shared reference parameter: the function cannot write through it (UnsafeCell aside).
+    params.each_with_index do |t, i|
+      r = param_reg[i]
+      func_text << "  (readonly %#{r})" if r && t.strip =~ /^&(?!mut |move )/ && rust_type_to_pathb(t, types).start_with?("(ptr ")
+    end
+    (slot_lines + ($lit_slots || [])).each do |sl|
+      n = sl[/^\(slot "([^"]+)"/, 1]
+      func_text << "  (decl $\"#{n}\" val)" unless declared[n]
+    end
+  end
   stmts.each { |s| func_text << "  #{s}" }
   func_text << ")"
   lines << func_text.join("\n")
 end
 
+
+if $borrow
+  # (borrow-layout (struct "T") SIZE ALIGN (field "fN" OFF TYPE)...) for each struct the functions
+  # name, from the dump's type records, so the checker can track their fields. A type with
+  # overlapping fields (an enum's variants) or a field the checker cannot describe gets none.
+  prim = {"bool"=>1, "char"=>1, "signed_char"=>1, "unsigned_char"=>1, "short"=>2, "unsigned_short"=>2,
+          "int"=>4, "unsigned_int"=>4, "long"=>8, "unsigned_long"=>8, "long_long"=>8,
+          "unsigned_long_long"=>8, "float"=>4, "double"=>8}
+  records = {}
+  describe = nil
+  field_ok = lambda do |pt|
+    return [prim[pt], prim[pt]] if prim[pt]
+    return [8, 8] if pt.start_with?("(ptr ")
+    m = pt.match(/^\(struct "(.*)"\)$/)
+    return nil unless m && describe.call(m[1])
+    t = types[m[1]]
+    [t[:size], t[:align]]
+  end
+  describe = lambda do |name|
+    return records[name] != false if records.key?(name)
+    records[name] = false
+    t = types[name]
+    return false unless t && !t[:tag] && t[:size] > 0 && t[:size] <= 4096 && t[:align] > 0 && t[:size] % t[:align] == 0
+    fields = []
+    ranges = []
+    t[:fields].each_with_index do |f, i|
+      fsz, _ = type_size_align(f[:type], types)
+      next if fsz == 0
+      pt = rust_type_to_pathb(f[:type], types)
+      sa = field_ok.call(pt)
+      return false unless sa && sa[0] == fsz && f[:off] % sa[1] == 0 && sa[1] <= t[:align] && f[:off] + fsz <= t[:size]
+      return false if ranges.any? { |o, n| f[:off] < o + n && o < f[:off] + fsz }
+      ranges << [f[:off], fsz]
+      fields << "(field \"f#{i}\" #{f[:off]} #{pt})"
+    end
+    records[name] = "(borrow-layout (struct #{name.inspect}) #{t[:size]} #{t[:align]} #{fields.join(' ')})"
+    true
+  end
+  lines.join("\n").scan(/\(struct "([^"]+)"\)/).flatten.uniq.each { |n| describe.call(n) }
+  layout_lines = records.values.select { |r| r }
+  lines.insert(1, *layout_lines) unless layout_lines.empty?
+  File.write(outpath, lines.join("\n") + "\n") if outpath
+  puts lines.join("\n") unless outpath
+  exit 0
+end
 
 # alloc shims and panic globals (mrustc codegen_c provides these in the C route)
 lines << "(global \"mrustc_panic_target\" (ptr void) 8 8 (thread) (init (zero 0 8)))"

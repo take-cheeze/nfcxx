@@ -722,7 +722,9 @@ The search is a verification loop, not a separate analysis:
 1. Functions are visited callees first. A self-recursive call uses the candidate under test.
 2. Scalar parameters become `value`. Each pointer parameter starts at `read` and moves to `init`,
    then `write`, only when a diagnostic names its region `*%N`. A diagnostic that names no argument
-   region, or a refusal, ends the search with no summary.
+   region, or a refusal, ends the search with no summary. A parameter with a `(readonly %N)` fact
+   (a Rust `&T`, from the monomir translator) is only ever `read`, and as a result's source only
+   `read`/`shared`.
 3. A pointer result tries each argument region and each aligned offset in turn. Its source
    argument tries `write`/`exclusive` first, because a pointer to non-`const` lets the caller
    write through it. It then tries `read`/`shared`, then `write`/`shared`.
@@ -753,9 +755,14 @@ loan is named `&CALLEE#N` and has the summary's permission and range, so
 ```
 
 checks like `(call-borrow (ptr int) "&pick#1" root &"pick" $"x")`. Lowered C++ has no `loan-end`
-facts, so these loans require `--infer-loan-ends`; without it the function is refused. A source
-whose provenance is only known by dataflow, such as a pointer loaded from a slot, still needs an
-explicit `call-borrow` with a declared parent.
+facts, so these loans require `--infer-loan-ends`; without it the function is refused.
+
+A source whose provenance is only known by dataflow, such as a pointer loaded from a slot, gets no
+loan of its own. Rust passes such pointers: the argument is a reference the caller already holds.
+The result is the source pointer moved by the summary's offset, with the same provenance, as a copy
+of the pointer would be. Its uses therefore need the source's loans and storage live, and
+`--infer-loan-ends` keeps them live while the result is used. A `call-borrow` with a declared parent
+still names a separate child loan.
 
 Together with `--infer-summaries` and the temporary facts, a lowered C++ program can be checked
 end to end with no annotations. `tests/pathb-borrow/contracts/aliases.cpp`
@@ -790,21 +797,21 @@ external stores, and stores through multiple possible destinations. Unknown inst
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
 
-Full Rust move semantics, C++ destructor interpretation, exception cleanup analysis, container
-invalidation, interior mutability and cross-function region inference are not implemented.
+Full Rust move semantics, C++ destructor interpretation, container invalidation, interior
+mutability and cross-function region inference are not implemented. Exception handling is checked
+through EDG's `try` protocol ("try and catch"), not through cleanup edges of its own.
 `rref-arg` does not mean that an ordinary C++ moved-from value is dead.
 
 ## Rust frontend boundary
 
-The facts and CFG engine are language independent, but **the monomir driver is not yet connected**.
-Its current output does not preserve enough source storage boundaries and lifetime contracts.
-Adding function-wide declarations alone would hide dangling references and must not be used as a
-substitute. The next frontend task is to preserve storage and borrow facts from mrustc MIR before
-lowering erases them. Full Rust conformance also requires checking generic bodies before
-monomorphization, including bodies not instantiated by a program.
+Rust programs are checked through mrustc's monomorphised MIR: `scripts/mrustc-borrowck.sh prog.rs`
+runs mrustc, `scripts/monomir-to-pathb.rb --borrow`, and this checker with `--infer-loan-ends` and
+`--infer-summaries`. [mrustc-borrowck.md](mrustc-borrowck.md) describes the facts it emits, the
+verdicts mrustc gives itself, and `tests/mrustc-borrow`, which records rustc's verdict for each
+case. Generic bodies are checked only as the instances a program uses, and moves are not checked.
 
-The next steps are frontend layout/ownership emission, summary emission or inference for defined functions, general returned and
-retained reference relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
+`(readonly %N)` is the one fact only that translator emits: parameter `%N` is a pointer the function
+does not write through (a Rust `&T`). Summary inference gives it read-only modes.
 
 ## Tests
 
