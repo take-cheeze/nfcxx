@@ -32,6 +32,12 @@ def insn(addr, op, args)
   Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
 end
 
+spelling = RbsSignatures.ir_class_name(:'Outer::名前')
+check('IR class spelling reuses the Symbol name String', spelling.equal?(:'Outer::名前'.name) && spelling.frozen?)
+existing_name = String.new('Base')
+check('String class names retain their object', RbsSignatures.ir_class_name(existing_name).equal?(existing_name))
+check('nil class names retain the empty spelling', RbsSignatures.ir_class_name(nil) == '')
+
 # `def use(o); o.greet; end`: R1 is the required argument, the SEND on R1 (index 1) sends +sym+, RETURN R1 (index 2).
 def explicit_call_irep(label, sym = 'greet')
   instructions = [insn(0, :ENTER, '1:0:0:0:0:0:0:0 (0x0)'), insn(1, :SEND, "R1\t:#{sym}\tn=0"), insn(2, :RETURN, 'R1')]

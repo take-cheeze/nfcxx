@@ -32,7 +32,7 @@ class CallSiteIndex
 
         dest = insn.reg.to_i
         # A packed send (`f(*a)`, n=*, vm.c CALL_MAXARGS) has no count: nil, so no consumer reads it as 0 args.
-        argc = insn.n_spec == '*' || (insn.nk_spec && insn.nk_spec != '0') ? nil : insn.argc.to_i
+        argc = insn.positional_splat? || (insn.keyword_arguments? && insn.keyword_argc != 0) ? nil : insn.argc.to_i
         by_name[name] << [irep, idx, dest, argc]
         add_enum_site(by_name, irep, idx, insn, dest, argc) if ENUM_SENDS.include?(name)
       end
@@ -71,7 +71,7 @@ class CallSiteIndex
 
   # Every possible literal Symbol name, or nil when any reaching value is unknown.
   def self.enum_targets(irep, idx, insn, reg)
-    return packed_enum_targets(irep, idx, reg) if insn.n_spec == '*'
+    return packed_enum_targets(irep, idx, reg) if insn.positional_splat?
 
     symbol_targets(irep, idx, reg)
   end

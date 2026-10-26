@@ -48,7 +48,7 @@ module RefineReport
     lines = code.each_line.reject { |l| l.lstrip.start_with?('//') }
     ROWS[[irep.label, site]] = {
       label: irep.label, site: site, name: insn.sym, op: insn.op, owner_def: kwargs[:owner_def],
-      plain: insn.n_spec != '*' && !insn.nk_spec, argc: insn.argc,
+      plain: !insn.positional_splat? && !insn.keyword_arguments?, argc: insn.argc,
       byname: lines.count { |l| l.match?(BY_NAME) }, nomethod: code.include?('bc2cpp_nomethod_named'),
       sample: lines.find { |l| l.match?(BY_NAME) }.to_s.strip[0, 150],
       family: CHAIN_FAMILIES.find { |f| code.match?(%r{^\s*// #{f}\b}) } || '-',

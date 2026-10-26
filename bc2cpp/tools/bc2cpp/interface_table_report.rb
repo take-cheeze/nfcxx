@@ -34,7 +34,7 @@ module InterfaceTableReport
     @itab_fallbacks = outer
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
-    return code unless irep && site && !kwargs[:self_implicit] && insn.n_spec != '*' && !insn.nk_spec
+    return code unless irep && site && !kwargs[:self_implicit] && !insn.positional_splat? && !insn.keyword_arguments?
     return code if fallbacks.empty?
 
     family = CHAIN_FAMILIES.find { |f| code.match?(%r{^\s*// #{f}\b}) } || 'OTHER'

@@ -695,39 +695,37 @@ class CodeGen
   def compile_splat_send(insn, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
     return nil unless irep && idx
 
-    n_spec = insn.n_spec
-    nk_spec = insn.nk_spec
-    return nil unless n_spec
+    return nil unless insn.argc_operand
 
-    return nil unless n_spec == '*' || nk_spec == '*'
+    return nil unless insn.positional_splat? || insn.keyword_splat?
 
     dest_reg = d.to_i
     recv = self_implicit ? 'self' : "r#{d}"
 
     next_reg = dest_reg + 1
-    if n_spec == '*'
+    if insn.positional_splat?
       positional = splat_array_literal_regs(irep, idx, next_reg)
       if positional.nil?
-        return nil if nk_spec
+        return nil if insn.keyword_arguments?
 
         return compile_dynamic_splat_send(name, recv, d, next_reg, irep: irep, idx: idx, self_implicit: self_implicit)
       end
 
       next_reg += 1 # the single register the splatted array itself occupied.
     else
-      n = n_spec.to_i
+      n = insn.argc || 0
       positional = (1..n).map { |k| "r#{dest_reg + k}" }
       next_reg += n
     end
 
     kw_pairs =
-      if nk_spec == '*'
+      if insn.keyword_splat?
         pairs = splat_hash_literal_pairs(irep, idx, next_reg)
         return nil unless pairs
 
         pairs
-      elsif nk_spec
-        nk = nk_spec.to_i
+      elsif insn.keyword_arguments?
+        nk = insn.keyword_argc || 0
         (0...nk).map do |k|
           key_reg = next_reg + (k * 2)
           val_reg = next_reg + (k * 2) + 1

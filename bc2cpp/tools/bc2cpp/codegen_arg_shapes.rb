@@ -378,7 +378,7 @@ module ArgShapeCalls
   # switches on the Array length into the same calls, dynamic for any other
   # length (which is where an ArgumentError comes from).
   def compile_splat_send(insn, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
-    if irep && idx && owner_def && insn.n_spec == '*' && insn.nk_spec.nil?
+    if irep && idx && owner_def && insn.positional_splat? && !insn.keyword_arguments?
       direct = compile_splat_direct(insn, self_implicit: self_implicit, irep: irep, idx: idx, name: name, d: d,
                                           owner_def: owner_def)
       return direct if direct

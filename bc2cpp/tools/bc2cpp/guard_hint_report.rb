@@ -19,7 +19,7 @@ module GuardHintReport
     code = super
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
-    if irep && site && !kwargs[:self_implicit] && insn.n_spec != '*' && !insn.nk_spec
+    if irep && site && !kwargs[:self_implicit] && !insn.positional_splat? && !insn.keyword_arguments?
       family = FAMILIES.find { |f| code.match?(%r{^\s*// #{f}\b}) }
       if family
         kept = code.scan(/CLOSED_WORLD kept: (\w+)/).flatten.uniq

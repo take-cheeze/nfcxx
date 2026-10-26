@@ -207,13 +207,13 @@ class CodeGen
   def checked_pool_plan(insn, kwargs)
     return nil unless @checked_pools_used && @class_pools_on && @closed_world && NilableReceiverSend::NILABLE_OPS.include?(insn.op)
     return nil if kwargs[:self_implicit] || kwargs[:call_receiver] || kwargs[:call_arguments] || !kwargs[:trace_reg_offset].to_i.zero?
-    return nil if insn.n_spec == '*' || insn.nk_spec
+    return nil if insn.positional_splat? || insn.keyword_arguments?
 
     irep = kwargs[:irep]
     idx = kwargs[:idx]
     return nil unless irep && idx && insn.sym
 
-    n = insn.n_spec.to_i
+    n = insn.argc.to_i
     return nil if n > CodeGen::FUNCALL_ARGC_MAX
 
     reg = insn.reg.to_i

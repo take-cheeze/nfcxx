@@ -280,7 +280,7 @@ class CodeGen
   end
 
   def stack_tuple_no_arguments?(insn)
-    (insn.n_spec.nil? || insn.n_spec == '0') && insn.nk_spec.nil? && !BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
+    (insn.argc_operand.nil? || insn.argc == 0) && !insn.keyword_arguments? && !BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
   end
 
   # True when every reaching definition of +reg+ at +at+ is an immediate: a LOADNIL/LOADTRUE/LOADFALSE/LOADSYM, or a
@@ -361,10 +361,10 @@ class CodeGen
 
   # The receiver (unless the op is a self send), the positional and keyword argument registers, and the block register.
   def send_reads(insn, lead)
-    return :all if insn.nk_spec == '*'
+    return :all if insn.keyword_splat?
 
-    positional = insn.n_spec.nil? ? 0 : (insn.n_spec == '*' ? 1 : insn.n_spec.to_i)
-    kw = insn.nk_spec.nil? ? 0 : 2 * insn.nk_spec.to_i
+    positional = insn.argc_operand.nil? ? 0 : (insn.positional_splat? ? 1 : insn.argc.to_i)
+    kw = !insn.keyword_arguments? ? 0 : 2 * insn.keyword_argc.to_i
     top = lead + positional + kw + (BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? 1 : 0)
     BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) ? [] : [lead] + (lead + 1..top).to_a
   end

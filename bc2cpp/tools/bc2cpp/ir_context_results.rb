@@ -418,11 +418,11 @@ class IrContextResults
     return nil unless NO_BLOCK_SEND.include?(insn.op)
 
     argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : insn.argc
-    return nil unless argc && insn.nk_spec != '*'
+    return nil unless argc && !insn.keyword_splat?
 
     register = insn.reg.to_i
     keyword_registers = []
-    insn.nk_spec.to_i.times do |position|
+    insn.keyword_argc.to_i.times do |position|
       key_register = register + argc + 1 + position * 2
       definitions = BytecodeIR.reaching_definitions(body, index, key_register, origin_transfers: true, shared: true)
       return nil unless definitions&.size == 1 && !definitions.first.entry?

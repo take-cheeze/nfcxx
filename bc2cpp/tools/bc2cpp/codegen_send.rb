@@ -25,23 +25,15 @@ class CodeGen
     # "", ...)`): the C++ compiles and links, then raises NoMethodError at runtime,
     # which no `#error` check catches. Keep every copy of this charset in sync.
     name = insn.sym
-    # Parse `n=` including the other print_args shapes (src/codedump.c):
-    #   - "n=3|nk=1": keyword pairs, which OP_SEND packs into a Hash at runtime;
-    #   - "n=*": a splat (CALL_MAXARGS) with no fixed register list.
-    # A bare `/n=(\d+)/` misparsed both (nil.to_i == 0), silently dropping splatted
-    # arguments or keyword hashes (e.g. `charged:`, `keep:`, `preserve_mod: false`)
-    # while compiling cleanly. Such sites now go to the keyword/splat paths or get
-    # `#error` (SKIP_UNSUPPORTED keeps them interpreted). SEND0/SSEND0 print no
-    # `n=` (vm.c OP_SEND0 has c=0), so nil still means n=0.
-    n_spec = insn.n_spec
-    nk_spec = insn.nk_spec
-    if n_spec == '*' || nk_spec
+    # Packed arguments and keyword presence determine the calling convention. SEND0 has no count operand,
+    # so its positional count is zero; explicit nk=0 still enters the keyword path.
+    if insn.positional_splat? || insn.keyword_arguments?
       # Keyword call site (nk > 0, no splat): try compile_keyword_send before
       # `#error`.
-      if n_spec != '*' && nk_spec != '*' && irep && !idx.nil?
+      if !insn.positional_splat? && !insn.keyword_splat? && irep && !idx.nil?
         kw_result = compile_keyword_send(self_implicit: self_implicit, irep: irep, idx: idx,
                                          owner_def: owner_def, name: name, d: d,
-                                         n: n_spec.to_i, nk: nk_spec.to_i)
+                                         n: insn.argc || 0, nk: insn.keyword_argc || 0)
         return kw_result if kw_result
       end
       # SPLAT_UNROLL_SUPPORT: try compile_splat_send (literal Array/Hash) before
@@ -54,7 +46,7 @@ class CodeGen
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{insn.argc_text}) -- not in this prototype's supported subset\n"
     end
 
-    n = n_spec.to_i
+    n = insn.argc || 0
     recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
     new_proof_idx = idx || trace_idx

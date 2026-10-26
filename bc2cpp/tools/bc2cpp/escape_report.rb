@@ -160,7 +160,7 @@ module EscapeReport
     when :ARRAY then 'array'
     when :HASH then 'hash'
     when :STRING then 'string'
-    when :SEND0, :SEND, :SENDB then 'object' if insn.sym == 'new' && insn.n_spec != '*'
+    when :SEND0, :SEND, :SENDB then 'object' if insn.sym == 'new' && !insn.positional_splat?
     when :BLOCK
       call = BytecodeIR.for(irep).source_at(index + 1)
       call && %i[SENDB SSENDB].include?(call.op) ? "block:#{call.sym}" : 'block:?'

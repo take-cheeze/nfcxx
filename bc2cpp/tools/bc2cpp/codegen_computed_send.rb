@@ -48,7 +48,7 @@ module ComputedSend
     names, irep, idx, owner_def = plan.values_at(:names, :irep, :idx, :owner_def)
     d = insn.reg.to_i
     self_implicit = BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
-    rest = (2..insn.n_spec.to_i).map { |k| "r#{d + k}" }
+    rest = (2..insn.argc.to_i).map { |k| "r#{d + k}" }
     arms = names.names.map do |name|
       code = splat_send_with(name, d, self_implicit, irep, idx, owner_def, rest, nil)
       return nil unless code && computed_send_arm_direct?(code)
@@ -66,7 +66,7 @@ module ComputedSend
     return nil unless kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil? && @call_block_expr.nil?
     return nil unless ENV[KILL_SWITCH] != '0' && NomethodReviewed.guard_violation_enabled? && insn.plain_fixed_argc?
 
-    count = insn.n_spec.to_i
+    count = insn.argc.to_i
     return nil unless count.between?(1, CodeGen::FUNCALL_ARGC_MAX)
 
     original = BytecodeIR.for(irep).source_at(idx)
@@ -120,10 +120,10 @@ module ComputedSend
 
     original = BytecodeIR.for(irep).source_at(idx)
     return nil unless original && original.addr == insn.addr && original.op == insn.op && original.sym == insn.sym
-    return computed_send_guarded_splat(insn, irep, idx, owner_def, &) if insn.n_spec == '*' && insn.nk_spec.nil?
+    return computed_send_guarded_splat(insn, irep, idx, owner_def, &) if insn.positional_splat? && !insn.keyword_arguments?
     return nil unless insn.plain_fixed_argc?
 
-    count = insn.n_spec.to_i
+    count = insn.argc.to_i
     return nil unless count.between?(1, CodeGen::FUNCALL_ARGC_MAX)
 
     d = insn.reg.to_i
@@ -268,7 +268,7 @@ module ComputedSend
   def computed_send_code(insn, names, arms, self_implicit)
     d = insn.reg.to_i
     recv = self_implicit ? 'self' : "r#{d}"
-    all = (1..insn.n_spec.to_i).map { |k| "r#{d + k}" }
+    all = (1..insn.argc.to_i).map { |k| "r#{d + k}" }
     var = "bc2cpp_csend_#{d}"
     violation = guard_violation_line(d, recv, insn.sym, all, 'COMPUTED_SEND')
     out = +"  // COMPUTED_SEND :#{insn.sym} (#{names.source}) over #{names.names.join('/')}: direct arm per name, " \

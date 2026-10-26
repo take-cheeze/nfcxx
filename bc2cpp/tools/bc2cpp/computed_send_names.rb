@@ -141,7 +141,7 @@ end
       return nil unless frozen&.size == 1
 
       call = BytecodeIR.for(irep).source_at(frozen.first.index)
-      return nil unless %i[SEND SEND0].include?(call.op) && call.sym == 'freeze' && call.n_spec.to_i.zero? && !call.nk_spec
+      return nil unless %i[SEND SEND0].include?(call.op) && call.sym == 'freeze' && call.argc.to_i.zero? && !call.keyword_arguments?
 
       literal = ComputedSendNames.reaching(irep, frozen.first.index, call.reg)
       return nil unless literal&.size == 1

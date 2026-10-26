@@ -369,7 +369,7 @@ module LoopInstallers
     # A call may mutate whatever it was handed and, by name, any constant.
     def generic_call(insn)
       base = insn.reg.to_i
-      span = insn.argc.to_i + 2 * insn.nk_spec.to_i + 2
+      span = insn.argc.to_i + 2 * insn.keyword_argc.to_i + 2
       (base..(base + span)).each { |r| LoopInstallers.poison(get(r)) }
       poison_consts
       consume(base, span + 1)

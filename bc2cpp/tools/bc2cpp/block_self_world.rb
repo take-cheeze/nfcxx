@@ -338,7 +338,7 @@ module BlockSelfWorld
 
       reg = (insn.reg + 1)
       return names_at(irep, idx, reg, ireps, parents) if insn.argc&.positive?
-      return :unknown unless insn.n_spec == '*'
+      return :unknown unless insn.positional_splat?
 
       packed_first_names(irep, idx, reg, ireps, parents)
     end

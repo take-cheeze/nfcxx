@@ -103,9 +103,9 @@ class CodeGen
 
   def compute_class_test(irep, index, insn)
     name = insn.sym
-    return nil if insn.n_spec == '*' || insn.nk_spec
+    return nil if insn.positional_splat? || insn.keyword_arguments?
 
-    argc = insn.op == :SEND0 ? 0 : insn.n_spec.to_i
+    argc = insn.op == :SEND0 ? 0 : insn.argc.to_i
     case name
     when 'is_a?', 'kind_of?', 'instance_of?'
       return nil unless argc == 1 && insn.op == :SEND && class_test_name_safe?(name)
@@ -252,7 +252,7 @@ class CodeGen
   def is_a_guard_class(irep, index)
     insn = irep && BytecodeIR.for(irep).source_at(index)
     return nil unless insn && insn.op == :SEND && %w[is_a? kind_of?].include?(insn.sym)
-    return nil unless insn.n_spec == '1' && insn.nk_spec.nil?
+    return nil unless insn.argc == 1 && !insn.keyword_arguments?
     return nil unless @closed_world && @closed_world.global_refusal.nil? && class_test_name_safe?(insn.sym)
 
     written = straight_line_constant_name(irep, index, (insn.reg + 1))
@@ -535,7 +535,7 @@ module ClassNarrowingGuard
 
   def class_narrowing_guarded(code, insn, kwargs, plan)
     d = insn.reg
-    n = insn.op == :SEND0 ? 0 : insn.n_spec.to_i
+    n = insn.op == :SEND0 ? 0 : insn.argc.to_i
     recv = kwargs[:call_receiver] || "r#{d}"
     argv = kwargs[:call_arguments] || (1..n).map { |k| "r#{d.to_i + k}" }
     subject = plan[:offset].zero? ? recv : argv.fetch(0)

@@ -324,7 +324,7 @@ class CodeGen
       # funcall_args_capture).
       next unless paired.plain_fixed_argc?
 
-      n = paired.n_spec.to_i
+      n = paired.argc.to_i
       dest_reg = paired.reg
       block_reg = insn.reg
       # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
@@ -1190,7 +1190,7 @@ class CodeGen
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.
       # The args Array is already built in R(dest+1) (see compile_dynamic_splat_send)
       # and the block is in R(dest+2).
-      next unless insn.n_spec && insn.nk_spec.nil?
+      next unless insn.argc_operand && !insn.keyword_arguments?
 
       dest_reg = insn.reg
       next unless dest_reg
@@ -1198,13 +1198,13 @@ class CodeGen
       name = insn.sym
       next unless name
 
-      if insn.n_spec == '*'
+      if insn.positional_splat?
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
                      argv_reg: dest_reg + 1,
                      blk_reg: dest_reg + 2, name: name,
                      self_implicit: insn.op == :SSENDB }
       else
-        n = insn.n_spec.to_i
+        n = insn.argc.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
                      blk_reg: dest_reg + n + 1, name: name,
                      self_implicit: insn.op == :SSENDB, parent_irep: irep }
