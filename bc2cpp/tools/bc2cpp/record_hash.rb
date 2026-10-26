@@ -542,13 +542,13 @@ module RecordHash
       lead = insn.reg&.to_i
       case op
       when :MOVE
-        dst, src = insn.regs.map(&:to_i)
+        dst, src = insn.regs
         return state - [dst] unless state.include?(src)
         return nil unless scan_captures(irep, dst)
 
         state | [dst]
       when :GETIDX
-        recv, key = insn.regs.map(&:to_i)
+        recv, key = insn.regs
         return escape('used as a key') if state.include?(key)
         return state unless state.include?(recv)
         return escape('unexpected GETIDX operands') unless key == recv + 1
@@ -557,7 +557,7 @@ module RecordHash
         @reads += 1
         state - [recv]
       when :SETIDX
-        recv, key, val = insn.regs.map(&:to_i)
+        recv, key, val = insn.regs
         return escape('stored as a value or key') if state.include?(val) || state.include?(key)
         return state unless state.include?(recv)
 
@@ -646,7 +646,7 @@ module RecordHash
           pairs = literal.key_regs.zip(literal.value_regs).map { |key, value| [index, key, value.to_i] }
           chain.drop(1).each do |add_index, add|
             count = add.uint_operand or return nil
-            count.times { |i| pairs << [add_index, (reg + 1 + 2 * i).to_s, reg + 2 + 2 * i] }
+            count.times { |i| pairs << [add_index, reg + 1 + 2 * i, reg + 2 + 2 * i] }
           end
           chained = chain.map(&:first).to_set
           (start + 1...k).each do |i|
@@ -663,7 +663,7 @@ module RecordHash
     # Does +insn+ read +reg+, as an explicit operand or through its leading register's range (read_span)?
     def reads_reg?(insn, reg)
       lead = insn.reg&.to_i
-      explicit = (lead ? insn.regs.drop(1) : insn.regs).map(&:to_i)
+      explicit = (lead ? insn.regs.drop(1) : insn.regs)
       return true if explicit.include?(reg)
       return false if lead.nil? || WRITE_LEAD_ONLY.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
 
@@ -683,7 +683,7 @@ module RecordHash
     end
 
     def generic_step(insn, state, lead)
-      others = (lead ? insn.regs.drop(1) : insn.regs).map(&:to_i)
+      others = (lead ? insn.regs.drop(1) : insn.regs)
       return escape("operand of #{insn.op}") if others.any? { |x| state.include?(x) }
       return state unless lead
 
