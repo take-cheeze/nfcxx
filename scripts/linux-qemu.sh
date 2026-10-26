@@ -75,6 +75,13 @@ kmake -s tinyconfig
   --enable BLK_DEV_INITRD --enable BINFMT_ELF --enable BINFMT_SCRIPT \
   --enable PROC_FS --enable SYSFS --enable TMPFS \
   --enable DEVTMPFS --enable DEVTMPFS_MOUNT --enable MULTIUSER
+# SUSPEND=1: suspend to RAM (ACPI S3) and resume before the marker, so the real-mode wakeup code of arch/x86/realmode/rm
+# (built with CONFIG_ACPI_SLEEP) runs; qemu's PIIX4 power management has S3 on for it (see the qemu command below).
+# PCI: the DSDT's PCI root has operation regions the ACPI interpreter must initialize; without PCI it fails them
+# (AE_BAD_PARAMETER), and ACPI sleep states go with it.
+suspend=${SUSPEND:-}
+[ -z "$suspend" ] || "$src/scripts/config" --file "$out/.config" --enable ACPI --enable PM --enable SUSPEND \
+  --enable ACPI_SLEEP --enable PM_SLEEP --enable HIBERNATE_CALLBACKS --enable PCI
 kmake -s olddefconfig
 kmake -s -j"$(nproc)" bzImage
 cp "$out/arch/x86/boot/bzImage" "$dir/bzImage-$tag"
@@ -107,11 +114,17 @@ rm -r /tmp/d; check rmdir "$(ls /tmp | tr '\n' ' ')" "abc abc3 zero "
 sleep 5 & pid=$!; kill -TERM $pid; wait $pid; check signal $? 143
 check self "$(sha256sum /bin/busybox | cut -c1-64)" "$(cat /bin/busybox | sha256sum | cut -c1-64)"
 check proc "$(grep -c '^processor' /proc/cpuinfo)" 1
+SUSPENDLINE
 [ $fail = 0 ] && echo "MARKER"
 uname -a
 reboot -f
 EOF
 sed -i "s/MARKER/$marker/" "$root/init"
+if [ -n "$suspend" ]; then   # suspend to RAM and resume: the kernel wakes up through the real-mode code, then the checks go on
+  sed -i 's|^SUSPENDLINE$|echo "DIAG tables: $(ls /sys/firmware/acpi/tables \| tr "\\n" " ")"; echo "DIAG S3 names in DSDT: $(grep -c _S3_ /sys/firmware/acpi/tables/DSDT)"; echo "DIAG states: $(cat /sys/power/state) mem_sleep: $(cat /sys/power/mem_sleep)"; echo "DIAG FACP:"; od -A d -t x1 /sys/firmware/acpi/tables/FACP \| head -8; echo "DIAG end"\necho mem > /sys/power/state; check resume $? 0|' "$root/init"
+else
+  sed -i '/^SUSPENDLINE$/d' "$root/init"
+fi
 chmod +x "$root/init"
 (cd "$root" && find . | cpio -o -H newc --owner=0:0 --quiet) > "$dir/initramfs.cpio"
 
@@ -119,9 +132,23 @@ accel=tcg
 [ -w /dev/kvm ] && accel=kvm
 log=$dir/boot-$tag.log
 set +e
-timeout 300 qemu-system-x86_64 -accel "$accel" -m 256 -nographic -no-reboot \
-  -kernel "$dir/bzImage-$tag" -initrd "$dir/initramfs.cpio" -append "console=ttyS0 panic=-1" > "$log" 2>&1
+s3=(); mon=(); waker=""
+if [ -n "$suspend" ]; then
+  # qemu keeps a guest in S3 paused until the monitor says system_wakeup: a waker sends it every 5 s from 60 s on, and
+  # does nothing while the guest is running (qemu answers that with an error, which the monitor discards)
+  s3=(-global PIIX4_PM.disable_s3=0 -global PIIX4_PM.disable_s4=0)
+  sock=$dir/qemu-mon.sock; rm -f "$sock"
+  mon=(-monitor "unix:$sock,server,nowait")
+  ( sleep 60; for _ in $(seq 1 60); do
+      python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.sendall(b"system_wakeup\n"); time.sleep(0.3); s.close()' "$sock" 2>/dev/null
+      sleep 5
+    done ) &
+  waker=$!
+fi
+timeout ${QEMU_TIMEOUT:-300} qemu-system-x86_64 -accel "$accel" -m 256 -nographic -no-reboot ${s3[@]+"${s3[@]}"} ${mon[@]+"${mon[@]}"} \
+  -kernel "$dir/bzImage-$tag" -initrd "$dir/initramfs.cpio" -append "console=ttyS0 panic=-1${suspend:+ mem_sleep_default=deep}" > "$log" 2>&1
 status=$?
+[ -z "$waker" ] || kill "$waker" 2>/dev/null || true
 set -e
 cat "$log"
 if [ "$status" -ne 0 ] || ! grep -qF "$marker" "$log"; then
