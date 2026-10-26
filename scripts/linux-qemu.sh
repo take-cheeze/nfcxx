@@ -119,7 +119,7 @@ reboot -f
 EOF
 sed -i "s/MARKER/$marker/" "$root/init"
 if [ -n "$suspend" ]; then   # suspend to RAM and resume: the kernel wakes up through the real-mode code, then the checks go on
-  sed -i 's|^SUSPENDLINE$|echo mem > /sys/power/state; check resume $? 0|' "$root/init"
+  sed -i 's|^SUSPENDLINE$|echo "DIAG tables: $(ls /sys/firmware/acpi/tables \| tr "\\n" " ")"; echo "DIAG S3 names in DSDT: $(grep -c _S3_ /sys/firmware/acpi/tables/DSDT)"; echo "DIAG states: $(cat /sys/power/state) mem_sleep: $(cat /sys/power/mem_sleep)"; echo "DIAG FACP:"; od -A d -t x1 /sys/firmware/acpi/tables/FACP \| head -8; echo "DIAG end"\necho mem > /sys/power/state; check resume $? 0|' "$root/init"
 else
   sed -i '/^SUSPENDLINE$/d' "$root/init"
 fi
