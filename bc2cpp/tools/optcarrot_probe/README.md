@@ -24,10 +24,25 @@ using its real, unmodified upstream source, and produces the exact same
 checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
-Latest local 180-frame wall times from the comparative runner: CRuby ~4.5s,
-interpreted mruby ~12.8s, and bc2cpp ~3.7s (varies by machine); CI
-publishes each run's numbers and relative slowdown in the job summary. All
-three produce checksum `59662`. `compiled_run.rb` installs every compiled
+Latest local 180-frame wall times from the comparative runner: CRuby ~4.5s
+(JIT state not recorded), interpreted mruby ~12.8s, and bc2cpp ~3.7s (varies
+by machine). All three produce checksum `59662`.
+
+**CRuby JIT.** `compiled_run.rb` now runs CRuby twice (`cruby_runs.rb`):
+
+- **`CRuby (interpreter)`**: `RUBY_YJIT_ENABLE=0`, plus `--disable=jit` when
+  the Ruby accepts it.
+- **`CRuby + YJIT`**: `--yjit`, only when that Ruby was built with YJIT.
+  `OPTCARROT_CRUBY_YJIT=0` skips this run.
+
+Each row prints its own `RUBY_DESCRIPTION` (`+YJIT` when on) and must match
+the checksum. The summary gives every mruby and bc2cpp ratio against both
+CRuby rows.
+
+Every CRuby figure in this file older than that change, the ones above
+included, came from a single run under whatever `RUBY_YJIT_ENABLE` the
+calling shell had. The Nix dev shells set it to 1 since ADR 0488; plain
+shells and older Rubies didn't. Read them as **JIT state not recorded**. `compiled_run.rb` installs every compiled
 entry point (398 methods): bc2cpp itself refuses the methods a `Fiber.yield`
 can cross ([yield analysis](../../docs/bc2cpp-yield-c-boundary.md)), and
 `PPU#main_loop` is a resumable step function driven from the interpreted

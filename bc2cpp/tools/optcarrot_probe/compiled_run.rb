@@ -34,6 +34,7 @@ abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless Fil
 
 require File.join(ROOT, 'tools/bc2cpp/compiled_gems')
 require_relative 'sealed_build'
+require_relative 'cruby_runs'
 
 def section_lines(text, header)
   start = text.index("== #{header} ==")
@@ -53,10 +54,10 @@ def run_bc2cpp(sources, env)
   [stdout, stderr]
 end
 
-def run_benchmark(label, command, chdir: nil)
+def run_benchmark(label, command, chdir: nil, env: {})
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   options = chdir ? { chdir: chdir } : {}
-  output, status = Open3.capture2e(*command, **options)
+  output, status = Open3.capture2e(env, *command, **options)
   elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
   unless status.success?
     result = status.signaled? ? "signal #{status.termsig}" : "exit #{status.exitstatus}"
@@ -386,7 +387,14 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   puts "bc2cpp installed #{count} compiled methods; " \
        "CPU#run=#{cpu_run_mode}; PPU#run=#{ppu_run_mode}; PPU#main_loop=#{ppu_loop_mode}"
   benchmarks = []
-  benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
+  # CRUBY_JIT_RUNS (cruby_runs.rb): the interpreter, then YJIT when this Ruby has it, each labeled with its own
+  # RUBY_DESCRIPTION, so no ratio depends on what the calling shell enabled.
+  cruby_descriptions = {}
+  CRubyRuns.plan(RbConfig.ruby).each do |run|
+    cruby_descriptions[run[:label]] = CRubyRuns.description(RbConfig.ruby, run)
+    puts "#{run[:label]}: #{cruby_descriptions[run[:label]]}"
+    benchmarks << run_benchmark(run[:label], [RbConfig.ruby, *run[:args], cruby_bundle, ROM, FRAMES.to_s], env: run[:env])
+  end
   profile_dir = File.join(temp, 'profile')
   interpreted_profile_dir = File.join(profile_dir, 'interpreted')
   compiled_profile_dir = File.join(profile_dir, 'compiled')
@@ -421,10 +429,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
         summary.puts format('| %s | %.2f s | %.2f | %s | %s |', result[:label], result[:seconds],
                             FRAMES / result[:seconds], result[:reported_fps] || 'n/a', result[:checksum])
       end
-      summary.puts '', 'All three runtimes produced the same checksum.'
-      summary.puts format('Wall-time ratios: mruby/CRuby %.2fx; bc2cpp/mruby %.2fx (lower is faster).',
-                          benchmarks[1][:seconds] / benchmarks[0][:seconds],
-                          benchmarks[2][:seconds] / benchmarks[1][:seconds])
+      summary.puts '', "All #{benchmarks.size} runs produced the same checksum."
+      cruby_descriptions.each { |label, desc| summary.puts "#{label}: `#{desc}`" }
+      summary.puts '', 'Wall-time ratios (lower is faster):'
+      CRubyRuns.ratio_lines(benchmarks).each { |line| summary.puts "- #{line}" }
       summary.puts "Installed #{count} compiled methods; CPU#run is #{cpu_run_mode}; PPU#run is #{ppu_run_mode}; PPU#main_loop is #{ppu_loop_mode}. " \
                    'Unsupported and Fiber-unsafe methods stay interpreted.'
       summary.puts 'A compiled PPU#main_loop uses a resumable step function (ADR 0273).'
