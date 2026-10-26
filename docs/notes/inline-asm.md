@@ -125,9 +125,9 @@ its 32-bit instructions:
   output take `%eax`, `%ecx`, `%edx` or `%ebx`.
 - Operands of 8 bytes are refused. A memory operand's pointer is a word.
 - `%rip`-relative symbol operands are absolute on i386, as the code is non-PIC.
-- Same-thunk refusals as x86_64: anything outside the constraint subset is an error.
+- Anything outside this subset is refused, as on x86_64.
 
-`tests/i386/asm.c` in the cproc fork checks fixed registers, byte and flag outputs, a clobbered `%ebx` (`cpuid`) and a
+`test/i386/asm.c` in the cproc fork checks fixed registers, byte and flag outputs, a clobbered `%ebx` (`cpuid`) and a
 memory operand against gcc `-m32`. The kernel's real-mode files (`arch/x86/boot`) use `in`/`out`, `movw %%fs`,
 `btl` with a flag output and `cpuid`; they compile through these thunks.
 
