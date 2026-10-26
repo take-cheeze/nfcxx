@@ -87,7 +87,7 @@ with_ireps.call(SNIPPET) do |ireps, top_label, gen|
   end
   all, written = refs_into.call(gen, block1)
   check.call('upvar_refs_into(block1): block1 and block2 reference the top frame (x, y, z); written x, y',
-             all.to_a.sort == %w[1 2 3] && written.to_a.sort == %w[1 2])
+             all.to_a.sort == [1, 2, 3] && written.to_a.sort == [1, 2])
   all, written = refs_into.call(gen, block2)
   check.call("upvar_refs_into(block2): it touches no register of block1, its parent (block2's refs go past it)",
              all.empty? && written.empty?)
