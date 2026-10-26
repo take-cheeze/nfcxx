@@ -1417,7 +1417,6 @@ class LocalLifetime
     end
     raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
     returned_id ||= @implicit_loans[x.object_id] if summary[:alias]
-    raise BorrowRefused, 'returned aliases require call-borrow' if summary[:alias] && !returned_id
     args = x.drop(3)
     raise BadIR, 'call arity disagrees with its effect contract' unless args.length == summary[:args].length
     resolved = []
@@ -1519,9 +1518,17 @@ class LocalLifetime
         end
       end
     end
-    return [] unless returned_id
-    loan = @loans[returned_id]
     a = summary[:alias]
+    unless returned_id
+      return [] unless a
+      # The source is a pointer value, not a local place the call site could name (Rust passes a reference it
+      # already holds): the result is that pointer, moved by the alias offset. It keeps the source's loans and
+      # storage, so its uses need them live, as for a copy of the pointer.
+      sources = resolved[a[:arg]][2]
+      raise BorrowRefused, 'returned alias requires a known source place' if sources.empty?
+      return sources.map { |src| project(src[0], a[:offset]) }.uniq
+    end
+    loan = @loans[returned_id]
     sources = resolved[a[:arg]][2]
     raise BorrowRefused, 'returned alias requires one known source place' unless sources.length == 1
     origin = sources[0][0]
@@ -1671,7 +1678,7 @@ class LocalLifetime
     @cur_loc = @locs[x.object_id]
     arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[3, 4], 'store'=>[4], 'return'=>[1,2],
-               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3], 'copy'=>[4]}
+               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3], 'copy'=>[4], 'readonly'=>[2]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
@@ -1683,6 +1690,10 @@ class LocalLifetime
       return drop_event(x, state)
     when 'join', 'unreachable', 'loc'
       # Locations are preserved in input; diagnostics currently identify functions and slots.
+    when 'readonly'
+      # (readonly %N): the parameter is a pointer the function never writes through (a Rust `&T`). Summary
+      # inference gives it read-only modes; a summary verified against the body enforces that.
+      raise BadIR, 'readonly form' unless x[1].is_a?(String) && @params.any? { |p| p[0] == x[1] && p[2] }
     when 'decl'
       raise BadIR, 'decl form' unless x.length == 3 && %w[val ref param temp].include?(x[2])
       k = key(x[1])
@@ -2043,6 +2054,7 @@ class SummaryInference
     name = bname(f[1])
     ret = f[2][1]
     params = f[3].drop(1)
+    readonly = f.drop(4).select { |x| bh(x) == 'readonly' }.map { |x| x[1] }
     slots = []
     params.each do |p|
       if bh(p) == 'sret'
@@ -2060,7 +2072,7 @@ class SummaryInference
         pointee = unconst(ty[1])
         desc = memory_type(pointee)
         return nil unless desc
-        slots << [p[1], pointee, desc]
+        slots << [p[1], pointee, desc, readonly.include?(p[1]) ? 'readonly' : nil]
       elsif ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
         slots << [p[1], ty, nil]
       else
@@ -2097,6 +2109,8 @@ class SummaryInference
         [['init']]
       elsif desc.nil?
         [['value']]
+      elsif kind == 'readonly'
+        a && a[0] == i ? [%w[read shared]] : [['read']]
       elsif a && a[0] == i && a[2]
         # A pointer to const grants no writes through the result.
         [%w[read shared], %w[write shared]]

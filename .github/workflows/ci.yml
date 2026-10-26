@@ -461,6 +461,11 @@ jobs:
       - name: The mrustc suite (every crate through nfcxx)
         run: tests/mrustc/run.sh
 
+      # Rust programs borrow-checked through mrustc's MIR (scripts/mrustc-borrowck.sh), each case's verdict also
+      # checked against the runner image's rustc.
+      - name: Rust borrow checks through mrustc
+        run: tests/mrustc-borrow/run.sh
+
       # The real-world cases that pass: clap, regex, serde-json, and batch (13 small crates, through the QBE large-block and large-alloc fixes).
       # They run only when the change touches the Rust frontend path: the real-world cases, their runner, the mrustc scripts
       # and the mrustc suite. A push to main compares with the commit before it.
