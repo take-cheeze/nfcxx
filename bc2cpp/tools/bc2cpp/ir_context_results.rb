@@ -4,6 +4,7 @@ require_relative 'bytecode_ir_regions'
 require_relative 'numeric_flow'
 require_relative 'call_context_arguments'
 require_relative 'ir_context_leaf_evaluations'
+require_relative 'rbs_signatures'
 
 # Reporting contexts form a finite may-set graph. Bottom stays private until a whole fixpoint settles.
 class IrContextResults
@@ -455,10 +456,10 @@ class IrContextResults
       return frozen if frozen
 
       site = @gen.frozen_table_freeze_site(body, index)
-      return site if site && site.positive? && receivers.all? { |klass| @gen.send(:frozen_table_name_safe?, 'freeze', klass.to_s) }
+      return site if site && site.positive? && receivers.all? { |klass| @gen.send(:frozen_table_name_safe?, 'freeze', RbsSignatures.ir_class_name(klass)) }
     end
     receivers.reduce(0) do |joined, klass|
-      definition = @gen.send(:closed_world_exact_target, insn.sym, klass.to_s)
+      definition = @gen.send(:closed_world_exact_target, insn.sym, RbsSignatures.ir_class_name(klass))
       result = if definition&.irep
                  callee = @ireps.fetch(definition.irep)
                  binding = bind(callee, arguments, keywords)
@@ -476,12 +477,12 @@ class IrContextResults
     private_bits = receiver & @shape_mask
     if private_bits.nonzero? && (receiver & ~private_bits).zero? && argc.zero?
       if insn.sym == 'freeze'
-        return receiver if @gen.send(:frozen_table_name_safe?, 'freeze', klass.to_s)
+        return receiver if @gen.send(:frozen_table_name_safe?, 'freeze', RbsSignatures.ir_class_name(klass))
       end
     end
-    expression = @gen.bytecode_ir_native_expression_classes(insn.sym, klass.to_s, argc)
+    expression = @gen.bytecode_ir_native_expression_classes(insn.sym, RbsSignatures.ir_class_name(klass), argc)
     return receiver if expression == Set[klass] && Array(@gen.instance_variable_get(:@native_registered_expressions)&.[](insn.sym)).any? { |entry|
-      entry[:owner][:class_name] == klass.to_s && entry[:arity] == argc && entry[:expression] == 'recv'
+      entry[:owner][:class_name] == RbsSignatures.ir_class_name(klass) && entry[:arity] == argc && entry[:expression] == 'recv'
     }
     return mask(expression) if expression
 
@@ -596,7 +597,7 @@ class IrContextResults
     return false unless keywords.empty? && (receivers = classes(receiver))
 
     receivers.all? do |klass|
-      definition = @gen.send(:closed_world_exact_target, insn.sym, klass.to_s)
+      definition = @gen.send(:closed_world_exact_target, insn.sym, RbsSignatures.ir_class_name(klass))
       callee = definition&.irep && @ireps[definition.irep]
       next false unless callee && Array(callee.reps).empty? && !BytecodeIR.for(callee).handlers?
       fields = callee.enter&.enter_fields
