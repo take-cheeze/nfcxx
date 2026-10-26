@@ -132,7 +132,7 @@ log=$dir/boot-$tag.log
 set +e
 s3=(); [ -z "$suspend" ] || s3=(-global PIIX4_PM.disable_s3=0 -global PIIX4_PM.disable_s4=0)
 timeout 300 qemu-system-x86_64 -accel "$accel" -m 256 -nographic -no-reboot ${s3[@]+"${s3[@]}"} \
-  -kernel "$dir/bzImage-$tag" -initrd "$dir/initramfs.cpio" -append "console=ttyS0 panic=-1" > "$log" 2>&1
+  -kernel "$dir/bzImage-$tag" -initrd "$dir/initramfs.cpio" -append "console=ttyS0 panic=-1${suspend:+ mem_sleep_default=deep}" > "$log" 2>&1
 status=$?
 set -e
 cat "$log"
