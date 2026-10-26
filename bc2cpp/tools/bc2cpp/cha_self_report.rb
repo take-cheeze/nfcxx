@@ -19,12 +19,12 @@ module ChaSelfReport
     code = super
     owner_def = kwargs[:owner_def]
     irep = kwargs[:irep]
-    if owner_def && irep && @closed_world && insn.n_spec != '*' && !insn.nk_spec
+    if owner_def && irep && @closed_world && !insn.positional_splat? && !insn.keyword_arguments?
       recv = kwargs[:call_receiver] || (kwargs[:self_implicit] ? 'self' : "r#{insn.reg}")
       site = closed_world_site(recv, irep, kwargs[:idx], owner_def)
       if site && site[:self_owner]
         name = insn.sym
-        plan, reason = cha_self_plan(name, insn.n_spec.to_i, site[:self_owner], explicit: !kwargs[:self_implicit])
+        plan, reason = cha_self_plan(name, insn.argc.to_i, site[:self_owner], explicit: !kwargs[:self_implicit])
         construct = CONSTRUCTS.find { |c| code.match?(%r{^\s*// #{c}\b}) } || 'OTHER'
         dispatches = code.scan(/\bmrb_funcall(?:_id|_with_block)?\(M,/).size
         detail = plan ? plan[:arms].map { |t, classes| "#{t.owner}=#{classes.size}" }.join(',') : ''

@@ -15,8 +15,8 @@ require_relative 'codegen_callee_return_fold'
 # Nothing is cut. A taken fold keeps the fall-through code, which a label may still reach, and a not-taken fold keeps the
 # jump's target, so no arm is deleted and no jump-edge check is needed. BC2CPP_DECIDED_BRANCH=0 keeps every test.
 class CodeGen
-  DECIDED_BRANCH_OPS = %w[JMPIF JMPNOT JMPNIL].freeze
-  RANGE_COMPARE_OPS = %w[LT LE GT GE].freeze
+  DECIDED_BRANCH_OPS = %i[JMPIF JMPNOT JMPNIL].freeze
+  RANGE_COMPARE_OPS = %i[LT LE GT GE].freeze
 
   def decided_branch_enabled?
     ENV['BC2CPP_DECIDED_BRANCH'] != '0'
@@ -41,13 +41,13 @@ class CodeGen
     return nil unless mask.is_a?(Integer) && mask.positive?
     # A parameter's mask is built from the callers the flow sees, but a method installed by define_method is called by
     # name, so an argument such as `x` in `{ |x| return n if x.nil? }` can be nil with no caller in view. Keep the test.
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, shared: true)
     return nil if defs.nil? || defs.empty?
     # An entry value is the pooled proof only for a complete method. The entry
     # definition names the parameter's own register: a MOVE copy is followed back to it.
     return nil unless defs.select(&:entry?).all? { |d| param_fold_proves_entry?(irep, d.reg, owner_def) }
 
-    if insn.op == 'JMPNIL'
+    if insn.op == :JMPNIL
       return :taken if mask == NumericFlow::NIL
       # OTHER is an unknown value that may be nil, so only a mask with neither NIL nor OTHER is never nil.
       return :not_taken if (mask & (NumericFlow::NIL | NumericFlow::OTHER)).zero?
@@ -58,7 +58,7 @@ class CodeGen
     truthy = (mask & NumericFlow::FALSY).zero?
     return nil unless truthy || mask == NumericFlow::NIL
 
-    jumps = truthy == (insn.op == 'JMPIF')
+    jumps = truthy == (insn.op == :JMPIF)
     jumps ? :taken : :not_taken
   end
 
@@ -70,7 +70,7 @@ class CodeGen
   end
 
   def range_compare_outcome(insn, irep, owner_def, idx)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, origin_transfers: true, shared: true,
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, origin_transfers: true, shared: true,
                                                                      through_handlers: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
@@ -82,9 +82,9 @@ class CodeGen
     return nil if truth.nil?
 
     case insn.op
-    when 'JMPNIL' then :not_taken # a boolean is never nil
-    when 'JMPIF' then truth ? :taken : :not_taken
-    when 'JMPNOT' then truth ? :not_taken : :taken
+    when :JMPNIL then :not_taken # a boolean is never nil
+    when :JMPIF then truth ? :taken : :not_taken
+    when :JMPNOT then truth ? :not_taken : :taken
     end
   end
 
@@ -97,10 +97,10 @@ class CodeGen
     lo1, hi1 = left
     lo2, hi2 = right
     case cmp.op
-    when 'LT' then hi1 < lo2 ? true : (lo1 >= hi2 ? false : nil)
-    when 'LE' then hi1 <= lo2 ? true : (lo1 > hi2 ? false : nil)
-    when 'GT' then lo1 > hi2 ? true : (hi1 <= lo2 ? false : nil)
-    when 'GE' then lo1 >= hi2 ? true : (hi1 < lo2 ? false : nil)
+    when :LT then hi1 < lo2 ? true : (lo1 >= hi2 ? false : nil)
+    when :LE then hi1 <= lo2 ? true : (lo1 > hi2 ? false : nil)
+    when :GT then lo1 > hi2 ? true : (hi1 <= lo2 ? false : nil)
+    when :GE then lo1 >= hi2 ? true : (hi1 < lo2 ? false : nil)
     end
   end
 

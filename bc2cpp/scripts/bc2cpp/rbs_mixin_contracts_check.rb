@@ -35,7 +35,7 @@ end
 
 # ENTER takes one required argument, R1, the receiver; the call at index 1 sends :m to it and index 2 returns it.
 def call_irep(label)
-  instructions = [insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SEND', 'R1 :m n=0'), insn(2, 'RETURN', 'R1')]
+  instructions = [insn(0, :ENTER, '1:0:0:0:0:0:0:0 (0x0)'), insn(1, :SEND, 'R1 :m n=0'), insn(2, :RETURN, 'R1')]
   Irep.new(label: label, instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 end
 
@@ -51,7 +51,7 @@ end
 def result_fact(world, applied_world)
   analysis = RbsSignatures.ir_types(applied_world, call_irep('use'), **world)
   refusal = {}
-  [analysis.fact_at(2, '1', refusal: refusal), refusal]
+  [analysis.fact_at(2, 1, refusal: refusal), refusal]
 end
 
 # Accepted: Child < Base, Child includes M once; M declares m, Base does not.
@@ -78,7 +78,7 @@ check('module reached through two include paths supplies no contract', dup_owner
 dup_world = { superclass_of: shared, included_modules: { 'Child' => ['M'], 'Base' => ['M'] }, prepended_modules: {}, unknown_mixins: Set.new,
               subclasses: closed }
 dup_applied = applied(ir_methods: [['M', 'm'], ['Base', 'm']], returns: { ['M', 'm'] => Set[:Symbol], ['Base', 'm'] => Set[:Integer] },
-                      owner: 'Use', arg_types: { '1' => Set[:Child] })
+                      owner: 'Use', arg_types: { 1 => Set[:Child] })
 dup_fact, dup_refusal = result_fact(dup_world, dup_applied)
 check('duplicate include refuses the call instead of returning M#m (Symbol)', dup_fact.nil? && dup_refusal[:cause] == 'call_contract_missing:Child#m')
 check('duplicate include yields no contract at all', !dup_fact&.declared?)
@@ -90,7 +90,7 @@ unknown = RbsSignatures.contract_owners('Child', hierarchy, included_modules: { 
 check('unknown mixin in the chain supplies no contract', unknown.empty?)
 
 # Accepted: the receiver is a declared Child, and the module's contract is its only candidate.
-accepted_applied = applied(ir_methods: [['M', 'm']], returns: { ['M', 'm'] => Set[:Symbol] }, owner: 'Use', arg_types: { '1' => Set[:Child] })
+accepted_applied = applied(ir_methods: [['M', 'm']], returns: { ['M', 'm'] => Set[:Symbol] }, owner: 'Use', arg_types: { 1 => Set[:Child] })
 accepted_fact, = result_fact(world, accepted_applied)
 check('proven receiver resolves the module contract', accepted_fact&.classes == Set[:Symbol] && accepted_fact.declared?)
 check('module call result records its call-result dependency',

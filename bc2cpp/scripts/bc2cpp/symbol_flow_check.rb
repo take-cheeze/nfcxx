@@ -22,7 +22,7 @@ def compiled(suite, source)
     names = {}
     ireps.each_value do |irep|
       irep.instructions.each do |insn|
-        next unless %w[SDEF TDEF METHOD DEF].include?(insn.op)
+        next unless %i[SDEF TDEF METHOD DEF].include?(insn.op)
 
         target = insn.typed.find { |o| o.kind == :irep }
         names[irep.reps[target.value]] = insn.sym if target && insn.sym && irep.reps[target.value]
@@ -44,7 +44,7 @@ def splat_tables(suite, source)
       irep.instructions.each_with_index.filter_map do |insn, idx|
         next unless insn.sym == 'send' && insn.n_spec == '*'
 
-        [IrSymbolFlow.splat_table(irep, idx, (insn.reg.to_i + 1).to_s)]
+        [IrSymbolFlow.splat_table(irep, idx, insn.reg.to_i + 1)]
       end
     end.flatten(1)
   end
@@ -105,5 +105,79 @@ check.call('an entry grown by << keeps a finite universe', universe_of(suite, pu
 
 prefixed = LITERAL_TABLE.sub('send(*TABLE[code])', 'send(:wait, *TABLE[code])')
 check.call('`send(:name, *TABLE[i])` is not a table send', splat_tables(suite, prefixed) == [nil])
+
+suite.compile('def read_cache(flag); a = :cache_a; b = :cache_b; flag ? consume(a) : consume(b); [a, b]; end') do |ireps, _root|
+  body = ireps.values.find { |irep| irep.instructions.any? { |insn| insn.op == :LOADSYM && insn.sym == 'cache_a' } }
+  origins = body.instructions.each_with_index.filter_map do |insn, index|
+    [index, insn.reg] if insn.op == :LOADSYM
+  end
+  previous = ENV['BC2CPP_SYMBOL_READS_CACHE']
+  begin
+    ENV['BC2CPP_SYMBOL_READS_CACHE'] = '0'
+    expected = origins.map { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) }
+    ENV.delete('BC2CPP_SYMBOL_READS_CACHE')
+    actual = origins.map { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) }
+    check.call('shared instruction reads preserve distinct value queries', actual == expected)
+    program = BytecodeIR.for(body)
+    lists = program.instance_variable_get(:@symbol_flow_instruction_reads)
+    check.call('instruction read lists are frozen and instruction-aligned',
+               lists.size == program.instructions.size && lists.each_with_index.all? do |regs, index|
+                 regs.nil? || (regs.frozen? && regs == IrSymbolFlow.reads(body, program.source_at(index)))
+               end)
+    first_list = lists.compact.find { |regs| !regs.empty? }
+    check.call('read-register caching stores Integer registers', first_list && first_list.all? { |reg| reg.is_a?(Integer) })
+    copy = Irep.new(label: body.label, nregs: body.nregs, instructions: body.instructions, reps: [], catch_handlers: body.catch_handlers)
+    origins.each { |index, reg| IrSymbolFlow.value_reads_compute(copy, index, reg) }
+    check.call('matching labels in separate bodies keep separate read caches',
+               !lists.equal?(BytecodeIR.for(copy).instance_variable_get(:@symbol_flow_instruction_reads)))
+    counts = [nil, '0'].map do |setting|
+      ENV['BC2CPP_SYMBOL_READS_CACHE'] = setting
+      origins.each { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) }
+      before = GC.stat(:total_allocated_objects)
+      100.times { origins.each { |index, reg| IrSymbolFlow.value_reads_compute(body, index, reg) } }
+      GC.stat(:total_allocated_objects) - before
+    end
+    check.call('repeated walks avoid rebuilding instruction read collections', counts.first < counts.last)
+  ensure
+    ENV['BC2CPP_SYMBOL_READS_CACHE'] = previous
+  end
+end
+
+# Two-level value_reads memo: instruction-indexed outer table of register-keyed
+# entries. No per-query tuple key, cached nil stays distinct from absent, the
+# bound counts logical queries, and memo-off answers match.
+compiled(suite, LITERAL_TABLE) do |ireps, _, _|
+  irep = ireps.values.find { |r| r.instructions.any? { |i| i.op == :GETIDX } }
+  idx = irep.instructions.index { |i| i.op == :GETIDX }
+  reg = irep.instructions[idx].reg
+  first = IrSymbolFlow.value_reads(irep, idx, reg)
+  check.call('a repeated query reuses its entry without recomputing',
+             IrSymbolFlow.value_reads(irep, idx, reg).equal?(first))
+  check.call('a query for another register of the same instruction shares the bucket',
+             irep.instance_variable_get(:@symbol_flow_reads).size == 1)
+  missing = IrSymbolFlow.value_reads(irep, idx, reg.to_i + 10_000)
+  check.call('a cached empty answer stays distinct from an absent entry',
+             missing == [] && IrSymbolFlow.value_reads(irep, idx, reg.to_i + 10_000).equal?(missing) &&
+             irep.instance_variable_get(:@symbol_flow_reads)[idx].key?(reg.to_i + 10_000))
+  flag = ENV['BC2CPP_SYMBOL_FLOW_MEMO']
+  begin
+    ENV['BC2CPP_SYMBOL_FLOW_MEMO'] = '0'
+    check.call('memo-off answers match the memoized ones',
+               IrSymbolFlow.value_reads(irep, idx, reg) == first &&
+               IrSymbolFlow.value_reads(irep, idx, reg.to_i + 10_000) == [])
+  ensure
+    flag ? ENV['BC2CPP_SYMBOL_FLOW_MEMO'] = flag : ENV.delete('BC2CPP_SYMBOL_FLOW_MEMO')
+  end
+  IrSymbolFlow::VALUE_READS_CAP.times do |n|
+    IrSymbolFlow.value_reads(irep, (idx + n + 1) % irep.instructions.length, reg)
+  end
+  total = irep.instance_variable_get(:@symbol_flow_reads_total)
+  outer = irep.instance_variable_get(:@symbol_flow_reads)
+  check.call('the memo bound counts logical queries',
+             total <= IrSymbolFlow::VALUE_READS_CAP &&
+             outer.values.sum(&:size) == total)
+  check.call('an evicted query recomputes the same answer',
+             IrSymbolFlow.value_reads(irep, idx, reg) == first)
+end
 
 suite.finish!

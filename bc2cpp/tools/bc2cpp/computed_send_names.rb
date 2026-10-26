@@ -35,11 +35,11 @@ module ComputedSendNames
     defs.each do |definition|
       insn = BytecodeIR.for(irep).source_at(definition.index)
       case insn.op
-      when 'LOADSYM', 'SYMBOL'
+      when :LOADSYM, :SYMBOL
         literal = symbol_literal(irep, insn) or return nil
         names << literal
         sources << :literal
-      when 'GETIDX'
+      when :GETIDX
         found = table_names(irep, definition.index, insn, tables) or return nil
         names.concat(found)
         nilable = true
@@ -55,7 +55,7 @@ module ComputedSendNames
   end
 
   def self.reaching(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     defs
@@ -63,7 +63,7 @@ module ComputedSendNames
 
   # LOADSYM :a names its symbol; SYMBOL (what %i[a b] and :"a b" compile to) reads the pool.
   def self.symbol_literal(irep, insn)
-    return insn.sym if insn.op == 'LOADSYM'
+    return insn.sym if insn.op == :LOADSYM
 
     entry = irep.pool[insn.pool_index.to_i]
     entry if entry.is_a?(String)
@@ -78,7 +78,7 @@ module ComputedSendNames
     sets = receivers.map do |definition|
       load = BytecodeIR.for(irep).source_at(definition.index)
       bare = case load.op
-             when 'GETCONST', 'GETMCNST' then load.const_name
+             when :GETCONST, :GETMCNST then load.const_name
              end
       bare && tables[bare]
     end
@@ -103,12 +103,12 @@ module ComputedSendNames
       defs = Hash.new { |h, k| h[k] = [] }
       poisoned = Set.new
       ireps.each_value do |irep|
-        BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST', 'CLASS', 'MODULE') do |insn, idx|
+        BytecodeIR.for(irep).each_with_op(:SETCONST, :SETMCNST, :CLASS, :MODULE) do |insn, idx|
           case insn.op
-          when 'SETCONST', 'SETMCNST'
+          when :SETCONST, :SETMCNST
             name = insn.const_name or next
             defs[name] << definition_names(irep, idx, insn.regs.last)
-          when 'CLASS', 'MODULE'
+          when :CLASS, :MODULE
             poisoned << insn.sym_token if insn.sym_token
           end
         end
@@ -127,7 +127,7 @@ def self.rebinder?(ireps)
   ireps.each_value.any? do |irep|
     BytecodeIR.for(irep).each_source.any? do |insn, _|
       name = case insn.op
-             when 'STRING', 'SYMBOL' then irep.pool[insn.pool_index.to_i]
+             when :STRING, :SYMBOL then irep.pool[insn.pool_index.to_i]
              else insn.sym
              end
       CONST_REBINDERS.include?(name)
@@ -141,15 +141,15 @@ end
       return nil unless frozen&.size == 1
 
       call = BytecodeIR.for(irep).source_at(frozen.first.index)
-      return nil unless %w[SEND SEND0].include?(call.op) && call.sym == 'freeze' && call.n_spec.to_i.zero? && !call.nk_spec
+      return nil unless %i[SEND SEND0].include?(call.op) && call.sym == 'freeze' && call.argc.to_i.zero? && !call.keyword_arguments?
 
       literal = ComputedSendNames.reaching(irep, frozen.first.index, call.reg)
       return nil unless literal&.size == 1
 
       container = BytecodeIR.for(irep).source_at(literal.first.index)
       case container.op
-      when 'ARRAY' then element_names(irep, literal.first.index, container.reg.to_i, container.uint_operand.to_i, 1, 0)
-      when 'HASH' then element_names(irep, literal.first.index, container.reg.to_i, container.uint_operand.to_i * 2, 2, 1)
+      when :ARRAY then element_names(irep, literal.first.index, container.reg.to_i, container.uint_operand.to_i, 1, 0)
+      when :HASH then element_names(irep, literal.first.index, container.reg.to_i, container.uint_operand.to_i * 2, 2, 1)
       end
     end
 
@@ -160,10 +160,10 @@ end
 
       names = []
       (offset...count).step(stride) do |k|
-        defs = ComputedSendNames.reaching(irep, at, (first + k).to_s) or return nil
+        defs = ComputedSendNames.reaching(irep, at, first + k) or return nil
         defs.each do |definition|
           insn = BytecodeIR.for(irep).source_at(definition.index)
-          return nil unless %w[LOADSYM SYMBOL].include?(insn.op)
+          return nil unless %i[LOADSYM SYMBOL].include?(insn.op)
 
           literal = ComputedSendNames.symbol_literal(irep, insn) or return nil
           names << literal

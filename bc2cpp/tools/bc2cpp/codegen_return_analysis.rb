@@ -127,7 +127,7 @@ class CodeGen
     return false unless irep
 
     BytecodeIR.for(irep).exits.all? do |exit|
-      exit.kind == :value && exit.reg && proven_fixnum_operand?(irep, exit.index, exit.reg.to_s, d)
+      exit.kind == :value && exit.reg && proven_fixnum_operand?(irep, exit.index, exit.reg, d)
     end
   end
 
@@ -204,7 +204,7 @@ class CodeGen
     dominated = ->(w_idx, use_idx, r) { return_write_dominates?(irep, w_idx, use_idx, r) }
 
     BytecodeIR.for(irep).exits.all? do |exit|
-      reg = exit.reg&.to_s
+      reg = exit.reg
       exit.kind == :value && reg && straightline_return_reg?(irep, exit.index, reg) &&
         proven_array_operand?(irep, exit.index, reg, d.owner, mand, ivar_classes, arg_classes, dominated: dominated)
     end
@@ -233,7 +233,7 @@ class CodeGen
       case exit.kind
       # RETURN_BLK in a method body is a plain return (methods are strict procs).
       when :value, :block_return
-        sources = return_value_sources(irep, exit.index, exit.reg&.to_s)
+        sources = return_value_sources(irep, exit.index, exit.reg)
         return nil unless sources
 
         sources.each do |src|
@@ -317,14 +317,14 @@ class CodeGen
       scoped = skip_class_object && @closed_world&.class_object_body?(label)
       BytecodeIR.for(irep).each_source do |insn, idx|
         case insn.op
-        when 'ALIAS', 'UNDEF'
+        when :ALIAS, :UNDEF
           # ALIAS_SITES: a settled class-body alias is a registry definition of its new name.
-          next if insn.op == 'ALIAS' && AliasSites.settled?(@registry, label, idx)
+          next if insn.op == :ALIAS && AliasSites.settled?(@registry, label, idx)
 
           names << insn.sym unless scoped
-        when 'LOADSYM'
+        when :LOADSYM
           return nil if NAME_INSTALLER_SENDS.include?(insn.sym)
-        when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+        when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
           # DEFINE_METHOD_SITES: the registry defines this one, so it names nothing unknown.
           next if insn.sym == 'define_method' && DefineMethodSites.settled?(@registry, irep, idx, @ireps)
@@ -337,7 +337,7 @@ class CodeGen
           # An implicit-receiver installer in a class-object body acts on that body's own cref.
           # destinations_only: `alias_method :new, :old` installs `new` and leaves `old` as it was.
           syms = syms.first(1) if destinations_only && insn.sym == 'alias_method'
-          names.merge(syms) unless scoped && insn.op.start_with?('SSEND')
+          names.merge(syms) unless scoped && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
         end
       end
     end
@@ -454,9 +454,9 @@ class CodeGen
     use = idx
     irep.walk_writers(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY) do |pin, i, r|
       # proven_array_source_scan steps over BLOCK, so it must not end this walk.
-      next false if pin.op == 'BLOCK'
+      next false if pin.op == :BLOCK
       next false unless return_write_dominates?(irep, i, use, r)
-      next true unless pin.op == 'MOVE'
+      next true unless pin.op == :MOVE
 
       use = i
       IrepScans.follow(pin.regs[1])
@@ -466,7 +466,7 @@ class CodeGen
   # Does the write of `reg` at `w_idx` (-1: method entry) reach `use_idx` on every path? JOIN_DOMINANCE over the
   # audited write list, with the body's own nested-block writes opaque (BytecodeIR.write_dominates?).
   def return_write_dominates?(irep, w_idx, use_idx, reg)
-    BytecodeIR.write_dominates?(irep, w_idx, use_idx, reg.to_s)
+    BytecodeIR.write_dominates?(irep, w_idx, use_idx, reg)
   end
 
   # "Is `reg` at `idx` provably an Array?": recognize_each_regions' two-step
@@ -492,8 +492,8 @@ class CodeGen
     return reg if reg_offset.zero?
     return nil if reg.nil?
 
-    n = reg.to_i - reg_offset
-    n.negative? ? nil : n.to_s
+    n = reg - reg_offset
+    n.negative? ? nil : n
   end
 
   # Both operand registers of one binary opcode, proven at the same point.

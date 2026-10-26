@@ -42,13 +42,13 @@ module RefineReport
     @refine_fallbacks = outer
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
-    return code unless irep && site && !kwargs[:self_implicit] && %w[SEND SEND0 SENDB].include?(insn.op)
+    return code unless irep && site && !kwargs[:self_implicit] && %i[SEND SEND0 SENDB].include?(insn.op)
 
     ROWS[:codegen] = self
     lines = code.each_line.reject { |l| l.lstrip.start_with?('//') }
     ROWS[[irep.label, site]] = {
       label: irep.label, site: site, name: insn.sym, op: insn.op, owner_def: kwargs[:owner_def],
-      plain: insn.n_spec != '*' && !insn.nk_spec, argc: insn.argc,
+      plain: !insn.positional_splat? && !insn.keyword_arguments?, argc: insn.argc,
       byname: lines.count { |l| l.match?(BY_NAME) }, nomethod: code.include?('bc2cpp_nomethod_named'),
       sample: lines.find { |l| l.match?(BY_NAME) }.to_s.strip[0, 150],
       family: CHAIN_FAMILIES.find { |f| code.match?(%r{^\s*// #{f}\b}) } || '-',
@@ -120,10 +120,10 @@ module RefineReport
       parent = Hash.new { |h, k| h[k] = k }
       find = ->(k) { parent[k] == k ? k : (parent[k] = find.call(parent[k])) }
       uses = {}
-      program.each_with_op('SEND', 'SEND0', 'SENDB') do |insn, i|
+      program.each_with_op(:SEND, :SEND0, :SENDB) do |insn, i|
         next unless insn.sym
 
-        defs = program.reaching_definitions(i, insn.reg, opaque_regs: opaque)
+        defs = program.reaching_definitions(i, insn.reg, opaque_regs: opaque, shared: true)
         next if defs.nil? || defs.empty?
 
         keys = defs.map { |d| d.entry? ? "entry#{d.reg}" : d.index.to_s }
@@ -140,14 +140,14 @@ module RefineReport
     rows.filter_map do |row|
       irep = @ireps[row[:label]]
       real = BytecodeIR.for(irep).source_at(row[:site])
-      next unless irep && real && %w[SEND SEND0 SENDB].include?(real.op) && real.sym == row[:name]
+      next unless irep && real && %i[SEND SEND0 SENDB].include?(real.op) && real.sym == row[:name]
 
       reg = real.reg.to_i
       owner_def = row[:owner_def]
       site = closed_world_site("r#{reg}", irep, row[:site], owner_def)
       existing = receiver_instances(site, row[:name]) if site
       states = call_facts_states(irep)
-      usable = states && reg < irep.nregs.to_i && !fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+      usable = states && reg < irep.nregs.to_i && !fixnum_proof_ctx(irep)[:upvars].include?(reg)
       facts = usable ? CallFacts::Flow.facts(states[row[:site]], reg).to_a : []
       fwd = refine_verdict(row, facts)
       single = refine_single(row, facts)

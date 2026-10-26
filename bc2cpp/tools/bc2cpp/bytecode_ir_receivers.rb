@@ -12,25 +12,25 @@ module BytecodeIR
   module Receivers
     # The walk steps over these: RESCUE (its write is the barrier's business) and the read-only ops, except
     # the conditional jumps the container phi merge must see.
-    SKIP_OPS = ['RESCUE', *(Ops::LEAD_READ_ONLY - %w[JMPIF JMPNOT])].freeze
-    RESCUE = Set['RESCUE'].freeze
+    SKIP_OPS = [:RESCUE, *(Ops::LEAD_READ_ONLY - %i[JMPIF JMPNOT])].freeze
+    RESCUE = Set[:RESCUE].freeze
     # A plain register copy, followed to its source.
-    COPY = Set['MOVE'].freeze
+    COPY = Set[:MOVE].freeze
     # GETIDX overwrites its receiver register; GETIDX0 reads it from a separate source.
-    INDEX_READ_IN_PLACE = Set['GETIDX'].freeze
+    INDEX_READ_IN_PLACE = Set[:GETIDX].freeze
     # The plain-receiver send forms (SEND, SEND0) and the implicit-self forms (SSEND, SSEND0) the walk reads
     # `.new`, `.dup` and accessors through. SENDB is the block-carrying `.new` form.
-    PLAIN_SEND = Set['SEND', 'SEND0'].freeze
-    SELF_SEND = Set['SSEND', 'SSEND0'].freeze
-    BLOCK_NEW_SEND = Set['SENDB'].freeze
+    PLAIN_SEND = Set[:SEND, :SEND0].freeze
+    SELF_SEND = Set[:SSEND, :SSEND0].freeze
+    BLOCK_NEW_SEND = Set[:SENDB].freeze
     # A Hash literal (HASH); Array and Range literals are BytecodeIR::Ops::ARRAY_ALLOC and RANGE_BUILD.
-    HASH_LITERAL = Set['HASH'].freeze
+    HASH_LITERAL = Set[:HASH].freeze
     # Reads of an ivar, an upvalue, a constant and a constant-path segment.
-    IVAR_READ = Set['GETIV'].freeze
-    UPVAR_READ = Set['GETUPVAR'].freeze
-    CONST_READ = Set['GETCONST'].freeze
-    CONST_PATH_SEGMENT = Set['GETMCNST'].freeze
+    IVAR_READ = Set[:GETIV].freeze
+    UPVAR_READ = Set[:GETUPVAR].freeze
+    CONST_READ = Set[:GETCONST].freeze
+    CONST_PATH_SEGMENT = Set[:GETMCNST].freeze
     # The conditional jumps the container phi merge inspects.
-    COND_JUMP = Set['JMPNOT', 'JMPIF'].freeze
+    COND_JUMP = Set[:JMPNOT, :JMPIF].freeze
   end
 end

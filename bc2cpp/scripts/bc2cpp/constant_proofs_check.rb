@@ -103,7 +103,7 @@ check.call('the rows do not type it as an array sum either', !redefined[:rows_su
 setconst_of = lambda do |ireps, name|
   ireps.each_value.flat_map do |irep|
     irep.instructions.each_with_index.filter_map do |insn, idx|
-      [irep, idx, insn.regs.last] if insn.op == 'SETCONST' && insn.const_name == name
+      [irep, idx, insn.regs.last] if insn.op == :SETCONST && insn.const_name == name
     end
   end.first
 end
@@ -182,7 +182,7 @@ reads_of = lambda do |source|
     reads = []
     ireps.each_value do |irep|
       irep.instructions.each do |insn|
-        reads << [insn.op, insn.const_name, info.read_keys[insn]] if %w[GETCONST GETMCNST].include?(insn.op)
+        reads << [insn.op, insn.const_name, info.read_keys[insn]] if %i[GETCONST GETMCNST].include?(insn.op)
       end
     end
     reads
@@ -199,7 +199,7 @@ check.call('the fact is keyed by the definition A::X, not the bare name X',
 site_keys = LexicalConsts.analyze(scoped[:ireps], static: true).site_keys
 check.call('LEXICAL_CONST qualifies the fact\'s own SETCONST as A::X too (bc2cpp.rb keeps the key)',
            site_keys[scoped[:integer_keys]['A::X']] == 'A::X')
-scoped_reads = reads_of.call(scoped_src).select { |op, name,| op == 'GETCONST' && name == 'X' }.map(&:last)
+scoped_reads = reads_of.call(scoped_src).select { |op, name,| op == :GETCONST && name == 'X' }.map(&:last)
 check.call('the X read in A resolves to A::X and the one in C to C::X', scoped_reads.sort == %w[A::X C::X])
 
 puts '== a scoped read through a ternary holder'
@@ -210,7 +210,7 @@ holder = reads_of.call(<<~RUBY)
   def pick; (c ? A2 : B2)::X; end
 RUBY
 check.call('(c ? A2 : B2)::X is refused: the arms name different holders, and A2::X is reachable',
-           holder.include?(['GETMCNST', 'X', nil]) && !holder.include?(['GETMCNST', 'X', 'B2::X']))
+           holder.include?([:GETMCNST, 'X', nil]) && !holder.include?([:GETMCNST, 'X', 'B2::X']))
 
 agree = reads_of.call(<<~RUBY)
   module A3; X = 1; end
@@ -219,7 +219,7 @@ agree = reads_of.call(<<~RUBY)
   def pick; (c ? A3 : A3)::X; end
 RUBY
 check.call('(c ? A3 : A3)::X resolves: both arms name A3, so the holder is one definition',
-           agree.include?(['GETMCNST', 'X', 'A3::X']))
+           agree.include?([:GETMCNST, 'X', 'A3::X']))
 
 puts '== a superclass that is a ternary'
 super_arm = reads_of.call(<<~RUBY)
@@ -231,7 +231,7 @@ super_arm = reads_of.call(<<~RUBY)
   end
 RUBY
 check.call('W in S0 is refused: the superclass arm B0 supplies B0::W ahead of the top-level W',
-           super_arm.include?(['GETCONST', 'W', nil]) && !super_arm.include?(['GETCONST', 'W', 'W']))
+           super_arm.include?([:GETCONST, 'W', nil]) && !super_arm.include?([:GETCONST, 'W', 'W']))
 
 puts '== a mixin argument that is a ternary'
 mixin_arm = reads_of.call(<<~RUBY)
@@ -245,7 +245,7 @@ mixin_arm = reads_of.call(<<~RUBY)
   end
 RUBY
 check.call('U in C1 is refused: the included arm A1 supplies A1::U ahead of the top-level U',
-           mixin_arm.include?(['GETCONST', 'U', nil]) && !mixin_arm.include?(['GETCONST', 'U', 'U']))
+           mixin_arm.include?([:GETCONST, 'U', nil]) && !mixin_arm.include?([:GETCONST, 'U', 'U']))
 
 mixin_agree = reads_of.call(<<~RUBY)
   U = 0
@@ -257,7 +257,7 @@ mixin_agree = reads_of.call(<<~RUBY)
   end
 RUBY
 check.call('U in C4 resolves when both arms include B4 (a module that does not define U)',
-           mixin_agree.include?(['GETCONST', 'U', 'U']))
+           mixin_agree.include?([:GETCONST, 'U', 'U']))
 
 
 # The receiver of a send is a constant on every path only when one write reaches it. A loop back-edge from after the
@@ -268,9 +268,9 @@ receiver_at_send = lambda do |source|
   compile.call(source) do |ireps, _root, _dir|
     ireps.each_value do |irep|
       irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op.start_with?('SEND') && insn.sym == 'foo'
+        next unless insn.op.to_s.start_with?('SEND') && insn.sym == 'foo'
 
-        answers << [gen.send(:straight_line_constant_name, irep, idx, insn.reg), irep.agreed_constant_name(idx, insn.reg.to_s)]
+        answers << [gen.send(:straight_line_constant_name, irep, idx, insn.reg), irep.agreed_constant_name(idx, insn.reg)]
       end
     end
   end

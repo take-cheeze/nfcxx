@@ -6,7 +6,7 @@ module BytecodeIR
   # A yielding helper keeps its registers in the caller's persistent frame.
   # Reject unresolved control flow before assigning any resume states.
   class ResumableRegion
-    RETURNS = %w[RETURN RETSELF RETNIL RETTRUE RETFALSE].freeze
+    RETURNS = %i[RETURN RETSELF RETNIL RETTRUE RETFALSE].freeze
     attr_reader :program
 
     def self.build(irep)
@@ -16,9 +16,9 @@ module BytecodeIR
       program = BytecodeIR.for(irep)
       return nil unless program.resolved? && program.instructions.any?
       return nil unless RETURNS.include?(program.instructions.last.op)
-      return nil if program.instructions.any? { |node| %w[JMPUW BREAK RETURN_BLK STOP].include?(node.op) }
-      return nil if program.instructions.drop(1).any? { |node| node.op == 'ENTER' }
-      return nil if program.branch_edges.any? { |edge| program.insn_at_addr(edge.target)&.op == 'ENTER' }
+      return nil if program.instructions.any? { |node| %i[JMPUW BREAK RETURN_BLK STOP].include?(node.op) }
+      return nil if program.instructions.drop(1).any? { |node| node.op == :ENTER }
+      return nil if program.branch_edges.any? { |edge| program.insn_at_addr(edge.target)&.op == :ENTER }
 
       new(program)
     end

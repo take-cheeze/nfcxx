@@ -25,23 +25,15 @@ class CodeGen
     # "", ...)`): the C++ compiles and links, then raises NoMethodError at runtime,
     # which no `#error` check catches. Keep every copy of this charset in sync.
     name = insn.sym
-    # Parse `n=` including the other print_args shapes (src/codedump.c):
-    #   - "n=3|nk=1": keyword pairs, which OP_SEND packs into a Hash at runtime;
-    #   - "n=*": a splat (CALL_MAXARGS) with no fixed register list.
-    # A bare `/n=(\d+)/` misparsed both (nil.to_i == 0), silently dropping splatted
-    # arguments or keyword hashes (e.g. `charged:`, `keep:`, `preserve_mod: false`)
-    # while compiling cleanly. Such sites now go to the keyword/splat paths or get
-    # `#error` (SKIP_UNSUPPORTED keeps them interpreted). SEND0/SSEND0 print no
-    # `n=` (vm.c OP_SEND0 has c=0), so nil still means n=0.
-    n_spec = insn.n_spec
-    nk_spec = insn.nk_spec
-    if n_spec == '*' || nk_spec
+    # Packed arguments and keyword presence determine the calling convention. SEND0 has no count operand,
+    # so its positional count is zero; explicit nk=0 still enters the keyword path.
+    if insn.positional_splat? || insn.keyword_arguments?
       # Keyword call site (nk > 0, no splat): try compile_keyword_send before
       # `#error`.
-      if n_spec != '*' && nk_spec != '*' && irep && !idx.nil?
+      if !insn.positional_splat? && !insn.keyword_splat? && irep && !idx.nil?
         kw_result = compile_keyword_send(self_implicit: self_implicit, irep: irep, idx: idx,
                                          owner_def: owner_def, name: name, d: d,
-                                         n: n_spec.to_i, nk: nk_spec.to_i)
+                                         n: insn.argc || 0, nk: insn.keyword_argc || 0)
         return kw_result if kw_result
       end
       # SPLAT_UNROLL_SUPPORT: try compile_splat_send (literal Array/Hash) before
@@ -54,7 +46,7 @@ class CodeGen
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{insn.argc_text}) -- not in this prototype's supported subset\n"
     end
 
-    n = n_spec.to_i
+    n = insn.argc || 0
     recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
     new_proof_idx = idx || trace_idx
@@ -73,6 +65,9 @@ class CodeGen
     end
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    probe = call_arguments.nil? && owner_set_symbol_probe_code(name, d, recv, argv, irep, drawing_proof_idx, trace_reg_offset)
+    return probe if probe
+
     drawing_enter = irep&.enter
     drawing_mand = drawing_enter ? drawing_enter.enter_fields.first : 0
     drawing_arg_classes = owner_def && @class_annotations[irep&.label]&.args
@@ -480,7 +475,7 @@ class CodeGen
             if stable_constructor
               return "#{note}" \
                      "  r#{d} = bc2cpp_direct_alloc(M, #{accessor});\n" \
-                     "  #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n"
+                     "  #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n"
             end
 
             else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
@@ -491,7 +486,7 @@ class CodeGen
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-                   "    #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n" \
+                   "    #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n" \
                    "  } else {\n" \
                    "    #{else_arm}" \
                    "  }\n"
@@ -555,7 +550,10 @@ class CodeGen
 
     # RUBY_EXACT_PAST_NATIVE_ARMS: a receiver the exact-class flow proves is one Ruby class is no instance of the
     # native classes the arms below test, so it skips them for the exact-class path further down.
-    ruby_exact = n.zero? && !self_implicit && irep && drawing_proof_idx && NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name) &&
+    wrapper_name = NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name) ||
+                   (ENV['BC2CPP_RUBY_EXACT_PAST_NATIVE_ARGS'] != '0' &&
+                    (ExactNativeWrappers::CALLS.key?(name) || name == 'draw_text'))
+    ruby_exact = wrapper_name && !self_implicit && irep && drawing_proof_idx &&
                  ruby_exact_receiver?(irep, drawing_proof_idx, drawing_proof_reg)
 
     # Frame-independent RGSS entry points need only a native class identity
@@ -593,7 +591,7 @@ class CodeGen
       end
     end
 
-    if name == 'fill_rect' && n == 5 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    if name == 'fill_rect' && !ruby_exact && n == 5 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#fill_rect -- exact runtime class proves the native wrapper target
@@ -604,7 +602,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'blt' && [4, 5].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'blt' && !ruby_exact && [4, 5].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       opacity = n == 4 ? 'mrb_fixnum_value(255)' : argv[4]
       opacity_given = n == 5 ? 'TRUE' : 'FALSE'
@@ -617,7 +615,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'stretch_blt' && [3, 4].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'stretch_blt' && !ruby_exact && [3, 4].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       opacity = n == 3 ? 'mrb_fixnum_value(255)' : argv[3]
       opacity_given = n == 4 ? 'TRUE' : 'FALSE'
@@ -630,7 +628,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'draw_text' && [2, 3, 5, 6].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'draw_text' && !ruby_exact && [2, 3, 5, 6].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#draw_text -- exact runtime class proves the native wrapper target
@@ -641,7 +639,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'copy_blt' && n == 4 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'copy_blt' && !ruby_exact && n == 4 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#copy_blt -- exact runtime class proves the native wrapper target
@@ -652,7 +650,7 @@ class CodeGen
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
       CPP
-    elsif name == 'text_size' && n == 1 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    elsif name == 'text_size' && !ruby_exact && n == 1 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#text_size -- exact runtime class proves the native wrapper target
@@ -664,7 +662,7 @@ class CodeGen
       CPP
     end
 
-    if %w[openness= tone= opacity=].include?(name) && n == 1 && !self_implicit && irep && drawing_proof_idx
+    if !ruby_exact && %w[openness= tone= opacity=].include?(name) && n == 1 && !self_implicit && irep && drawing_proof_idx
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -720,7 +718,7 @@ class CodeGen
       end
     end
 
-    if name == 'opacity=' && n == 1 && !self_implicit &&
+    if !ruby_exact && name == 'opacity=' && n == 1 && !self_implicit &&
        native_wrapper_owner_safe?(name, 'RGSS::Sprite')
       @native_construct_used << 'RGSS::Sprite'
       return <<~CPP
@@ -733,7 +731,7 @@ class CodeGen
       CPP
     end
 
-    if name == 'tone=' && n == 1 && !self_implicit
+    if !ruby_exact && name == 'tone=' && n == 1 && !self_implicit
       tone_targets = [
         ['RGSS::Sprite', 'native_sprite_class', 'sprite_tone_set_direct'],
         ['RGSS::Window', 'native_window_class', 'window_tone_set_direct'],
@@ -1381,6 +1379,14 @@ class CodeGen
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
+        # The exact receiver proof establishes the same identity the payload guard checks.
+        if ENV['BC2CPP_MONO_EXACT_FLOW'] != '0' && !self_implicit && guard_proof_site &&
+           exact_flow_class(irep, guard_proof_site, drawing_proof_reg) == target.owner
+          note = "  // MONO_EXACT_FLOW :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
+                 "#{target.owner}), direct C++ call with no class guard#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
         check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
         note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
@@ -1493,7 +1499,7 @@ class CodeGen
       end
 
       # A literal-block send (compile_direct_block_send) is a SENDB at the site.
-      constant_ops = @call_block_expr ? %w[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %w[SEND0 SEND SSEND0 SSEND]
+      constant_ops = @call_block_expr ? %i[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %i[SEND0 SEND SSEND0 SSEND]
       if !self_implicit && irep && constant_site_idx && @closed_world &&
          constant_ops.include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         # A send inside a rescue or ensure range reads its receiver through the handler edges.
@@ -1513,15 +1519,17 @@ class CodeGen
       # NATIVE_SINGLETON_CALL: `File.exist?` and the other native singleton functions of a stable
       # constant, called through a per-site method cache instead of a by-name send.
       if !self_implicit && irep && constant_site_idx && @closed_world &&
-         %w[SEND0 SEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
+         %i[SEND0 SEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         singleton_code = native_singleton_call_code(name, n, d, recv, argv, irep, constant_site_idx,
                                                     unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                     owner_def&.owner, constant_owner)
         return singleton_code if singleton_code
       end
 
-      if %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
-        kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit)
+      if %i[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+        class_arg_proven = call_arguments.nil? &&
+                           kernel_class_argument_proven?(name, argv, irep, constant_site_idx, trace_reg_offset, owner_def)
+        kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit, class_arg_proven: class_arg_proven)
         return kernel_code if kernel_code
 
         to_enum_code = to_enum_any_receiver_line(d, recv, name, argv)
@@ -1541,6 +1549,9 @@ class CodeGen
       # FLOW_CORE_DIRECT: a flow-proven core receiver has no user class to chain for.
       flow_core = exact_site && with_exact_core_site(exact_site) { flow_core_direct_line(d, recv, name, argv) }
       return flow_core if flow_core
+
+      native_exact = guard_proof_site && exact_site && with_exact_core_site(exact_site) { flow_native_direct_line(d, recv, name, argv) }
+      return native_exact if native_exact
 
       cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                   trace_insn: insn, trace_reg_offset: trace_reg_offset)
@@ -1599,8 +1610,9 @@ class CodeGen
       # TO_ENUM_DIRECT: the Enumerator is built in place, the checked arm's else is a guard violation.
       return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
 
-      # OUTSIDE_OWNER_CALL: a bare send whose every answering class the closed world names.
-      bare = outside_owner_bare_line(d, recv, name, argv, cw_site)
+      # OUTSIDE_OWNER_CALL: a bare send whose every answering class the closed world names. Its arm wrappers
+      # (BLOCK_CORE_DIRECT's proven-receiver arm) read the same receiver proof as the line above.
+      bare = with_exact_core_site(exact_site) { outside_owner_bare_line(d, recv, name, argv, cw_site) }
       return "#{miss}  #{bare}" if bare
 
       "#{diag}#{note}#{miss}  #{line}"
@@ -2128,11 +2140,11 @@ class CodeGen
 
   # Every definition of the receiver register reaching the send is a LOADSELF of this irep.
   def receiver_loaded_self?(recv, irep, idx)
-    reg = recv[/\Ar(\d+)\z/, 1]
+    reg = recv[/\Ar(\d+)\z/, 1]&.to_i
     return false unless reg && irep && idx
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
-    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADSELF' }
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
+    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == :LOADSELF }
   end
 
   # LOOP_FLOW_POSITION: the flow position of a send compiled from an inlined loop body (compile_insn
@@ -2151,35 +2163,35 @@ class CodeGen
 
     original = BytecodeIR.for(irep).source_at(trace_idx)
     unless original && original.addr == trace_insn.addr && original.op == trace_insn.op &&
-           original.sym == trace_insn.sym && %w[SEND SEND0].include?(original.op) &&
+           original.sym == trace_insn.sym && %i[SEND SEND0].include?(original.op) &&
            original.reg && trace_insn.reg && original.reg.to_i + reg_offset.to_i == trace_insn.reg.to_i
       # A synthetic send (addr 0: a typed index or splat helper) has no position of its own; an SSEND is a
       # self call, whose receiver is self and needs no set.
       reason = if trace_insn.addr.zero? then :synthetic_send
-               elsif trace_insn.op.start_with?('SSEND') then :self_send
+               elsif BytecodeIR::Ops::SELF_SEND_FAMILY.include?(trace_insn.op) then :self_send
                else :position_mismatch
                end
       return loop_flow_refuse(irep, trace_idx, reason)
     end
 
-    reg = original.reg.to_s
+    reg = original.reg
     return loop_flow_refuse(irep, trace_idx, :opaque_reg) if fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     defs = BytecodeIR.for(irep).reaching_definitions(trace_idx, reg, follow_moves: true,
-                                                                    opaque_regs: fixnum_proof_ctx(irep)[:upvars])
+                                                                    opaque_regs: fixnum_proof_ctx(irep)[:upvars], shared: true)
     return loop_flow_refuse(irep, trace_idx, :unproven_definition) if defs.nil? || defs.empty?
 
     writers = defs.map { |d| d.index.negative? ? nil : BytecodeIR.for(irep).source_at(d.index) }
     # The receiver holds the loop element (the block's parameter R1, possibly copied: its definition is the entry
     # value, index ENTRY, or the ENTER that binds it) and the body writes R1 again.
     element = defs.any? do |d|
-      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == 'ENTER')
+      d.reg == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == :ENTER)
     end
     if element && loop_element_reassigned?(irep)
       return loop_flow_refuse(irep, trace_idx, :element_reassigned)
     end
 
-    upvars = writers.map { |w| w&.op == 'GETUPVAR' && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
+    upvars = writers.map { |w| w&.op == :GETUPVAR && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
     return loop_flow_accept(irep, trace_idx, :local, { irep: irep, idx: trace_idx, insn: original }) if upvars.none?
 
     loop_upvar_position(original, upvars, irep, trace_idx)
@@ -2194,9 +2206,9 @@ class CodeGen
 
     host = parent[:irep]
     k = upvars.first
-    return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k.to_s)
+    return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k)
 
-    flow_insn = Insn.synthetic('SEND', "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
+    flow_insn = Insn.synthetic(:SEND, "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
     loop_flow_accept(irep, trace_idx, :upvar, { irep: host, idx: parent[:idx], insn: flow_insn })
   end
 
@@ -2225,7 +2237,7 @@ class CodeGen
   end
 
   # The block's mandatory parameter (R1) is the loop element in the inlined each/map/select bodies.
-  LOOP_ELEMENT_REG = '1'
+  LOOP_ELEMENT_REG = 1
 
   # The body writes R1 after ENTER bound it: a nested block's SETUPVAR (not one of the body's instructions) or the body's
   # own leading-register write. Not may_write?, which counts EXCEPT/RESCUE as writing every register.
@@ -2234,7 +2246,7 @@ class CodeGen
     @loop_element_reassigned.fetch(irep) do
       @loop_element_reassigned[irep] = BytecodeIR.own_upvar_written_regs(irep).include?(LOOP_ELEMENT_REG) ||
                                        BytecodeIR.for(irep).each_source.any? do |i, _|
-                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != 'ENTER' &&
+                                         i.reg == LOOP_ELEMENT_REG && i.op != :ENTER &&
                                            !NumericFlow::NO_WRITE_OPS.include?(i.op)
                                        end
     end

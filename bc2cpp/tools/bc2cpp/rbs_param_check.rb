@@ -147,7 +147,7 @@ module RbsParamCheck
   # Both names of every `alias new old` (an ALIAS instruction; `alias_method` spells Symbols, DynamicNames).
   def alias_names(ireps)
     ireps.each_value.with_object(Set.new) do |irep, names|
-      irep.each_with_op('ALIAS') do |insn, _index|
+      irep.each_with_op(:ALIAS) do |insn, _index|
         names << insn.sym if insn.sym
         old = insn.first_of(:name)&.value
         names << old if old
@@ -163,7 +163,7 @@ module RbsParamCheck
     sites.filter_map do |irep, idx, dest, argc|
       next if argc < req || (rest.zero? && argc > req + opt)
 
-      why = trace(ctx, irep, idx, (dest + pos + 1).to_s, cls, 0)
+      why = trace(ctx, irep, idx, dest + pos + 1, cls, 0)
       [irep, idx, why] if why
     end
   end
@@ -294,7 +294,7 @@ module RbsParamCheck
   def drop(ctx, label, pos)
     if (applied = ctx[:applied])
       [applied.ir_arg_types, applied.ir_arg_elements].each do |table|
-        table[label] = table[label].except((pos + 1).to_s).freeze if table[label]
+        table[label] = table[label].except(pos + 1).freeze if table[label]
       end
     end
     ann = ctx[:class_annotations][label] or return
@@ -377,7 +377,7 @@ module RbsParamCheck
   def writer_why(ctx, irep, definition, cls, depth)
     insn = BytecodeIR.for(irep).source_at(definition.index)
     case insn.op
-    when 'LOADSELF'
+    when :LOADSELF
       owner = ctx[:self_of][irep.label]
       unless owner
         # BLOCK_SELF (codegen_block_self.rb): a block only ever called keeps its method's self.
@@ -390,9 +390,9 @@ module RbsParamCheck
       return nil if owner == cls && !ctx[:subclassed].include?(cls)
 
       "self (#{owner})"
-    when 'GETIV'
+    when :GETIV
       ivar_why(ctx, irep, insn.ivar, cls, depth)
-    when 'GETUPVAR'
+    when :GETUPVAR
       upvar_why(ctx, irep, insn, cls)
     when *BytecodeIR::Ops::SEND
       name = insn.sym
@@ -419,7 +419,7 @@ module RbsParamCheck
 
     reader = owner || gen.ivar_reader_owner(irep.label)
     sites, why = gen.ivar_write_sites_of(reader, name)
-    return "#{owner ? "#{owner}##{name} reads" : 'GETIV'} @#{name} (#{why})" if why
+    return "#{owner ? "#{owner}##{name} reads" : :GETIV} @#{name} (#{why})" if why
 
     key = [reader, name, cls]
     cache = ctx[:ivar_cache]
@@ -428,7 +428,7 @@ module RbsParamCheck
 
     ctx[:ivar_active] << key
     found = sites.each do |site_irep, idx, reg|
-      why = trace(ctx, site_irep, idx, reg.to_s, cls, depth + 1)
+      why = trace(ctx, site_irep, idx, reg, cls, depth + 1)
       break "@#{name} = (#{why}) at #{display(ctx, site_irep.file)}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
     end
     ctx[:ivar_active].delete(key)
@@ -460,7 +460,7 @@ module RbsParamCheck
       return "#{where}: a local may be written by name (binding, local_variable_set or eval reachable)"
     end
 
-    reg = index.to_s
+    reg = index
     prog = BytecodeIR.for(frame)
     if BytecodeIR.own_upvar_written_regs(frame).include?(reg) || prog.each_source.any? { |i, _| prog.may_write?(i, reg) }
       return "#{where}: R#{reg} of #{ctx[:self_of][label]}##{ctx[:method_name][label]} is reassigned"
@@ -475,7 +475,7 @@ module RbsParamCheck
     BytecodeIR.for(body).exits.each do |ex|
       idx = ex.index
       insn = BytecodeIR.for(body).source_at(idx)
-      return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless ex.op == 'RETURN'
+      return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless ex.op == :RETURN
 
       why = trace(ctx, body, idx, insn.reg, cls, depth + 1)
       return "the block of #{name} returns (#{why})" if why

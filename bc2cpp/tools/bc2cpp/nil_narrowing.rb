@@ -40,7 +40,7 @@ module NilNarrowing
   module_function
 
   # The truthy edge of these is where an `is_a?` result held true (JMPNIL tests nil, not truth).
-  TRUTH_TESTS = %w[JMPIF JMPNOT].freeze
+  TRUTH_TESTS = %i[JMPIF JMPNOT].freeze
   IS_A_NAMES = %w[is_a? kind_of?].freeze
   # Sends with an explicit receiver: the SEND family minus the self-receiver forms (SSEND*), which nil can answer too.
   RECEIVER_CALLS = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::SELF_SEND).freeze
@@ -51,8 +51,8 @@ module NilNarrowing
   # #raise_never_returns?(irep, index) (nil: no guard narrows and every call may return);
   # +cache+ (a Hash the caller owns, one per pair of callables) keeps each irep's states.
   def non_nil?(irep, idx, reg, nil_unanswerable, cache = {}, class_guard: nil)
-    state = state_at(irep, idx, reg.to_s, nil_unanswerable, class_guard, cache)
-    !state.nil? && (state == :all || state.include?(reg.to_s))
+    state = state_at(irep, idx, reg, nil_unanswerable, class_guard, cache)
+    !state.nil? && (state == :all || state.include?(reg))
   end
 
   # IS_A_GUARD: true when +reg+ holds an instance of exactly +klass+ on entry to instruction +idx+, because every
@@ -60,8 +60,8 @@ module NilNarrowing
   def instance_of?(irep, idx, reg, klass, nil_unanswerable, cache = {}, class_guard: nil)
     return false unless class_guard
 
-    state = state_at(irep, idx, reg.to_s, nil_unanswerable, class_guard, cache)
-    !state.nil? && (state == :all || state.include?([reg.to_s, klass]))
+    state = state_at(irep, idx, reg, nil_unanswerable, class_guard, cache)
+    !state.nil? && (state == :all || state.include?([reg, klass]))
   end
 
   # The state on entry to +idx+, or nil when +reg+ is never proven (a nested block writes it) or the irep's edges
@@ -150,8 +150,8 @@ module NilNarrowing
     return out unless normal
 
     op = env[:decoded][p].op
-    return Set.new if op == 'JMPUW'
-    return move(env, state, out, p) if op == 'MOVE'
+    return Set.new if op == :JMPUW
+    return move(env, state, out, p) if op == :MOVE
 
     tested = narrowed_register(env, p, i)
     return out unless tested
@@ -187,7 +187,7 @@ module NilNarrowing
 
     prog = env[:prog]
     send = prog.instruction_at(p - 1).source
-    return [] unless send.op == 'SEND'
+    return [] unless send.op == :SEND
 
     call = BytecodeIR::OperandModel.send_call(send)
     return [] unless IS_A_NAMES.include?(call.name) && call.receiver == tested

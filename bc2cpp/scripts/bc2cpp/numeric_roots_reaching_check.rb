@@ -48,54 +48,54 @@ end
 
 puts '-- join (host)'
 # if !R1 then R2 = foo else R2 = 1 end; R5 = R2 (the read is at index 4)
-join = irep_of([insn(0, 'JMPNOT', "R1\t8"), insn(3, 'SEND0', "R2\t:foo"), insn(7, 'JMP', '9'),
-                insn(8, 'LOADI_1', "R2\t(1)"), insn(9, 'MOVE', "R5\tR2"), insn(10, 'RETURN', 'R5')])
+join = irep_of([insn(0, :JMPNOT, "R1\t8"), insn(3, :SEND0, "R2\t:foo"), insn(7, :JMP, '9'),
+                insn(8, :LOADI_1, "R2\t(1)"), insn(9, :MOVE, "R5\tR2"), insn(10, :RETURN, 'R5')])
 got = leaves(roots_gen, join, 4, 2)
 check.call('the then-branch write reaches the join: its send is a leaf (the textual walk saw only LOADI_1)',
            got.size == 1 && got.first.start_with?('send:foo@'))
 
 puts '-- loop-carried non-arithmetic writer (host)'
 # R2 = 0; loop { read R2 (index 1); R2 = R2.next (SEND0); break unless R3 }
-loop_carried = irep_of([insn(0, 'LOADI_0', "R2\t(0)"), insn(1, 'NOP', ''), insn(2, 'SEND0', "R2\t:next"),
-                        insn(5, 'JMPNOT', "R3\t1"), insn(7, 'RETURN', 'R2')])
+loop_carried = irep_of([insn(0, :LOADI_0, "R2\t(0)"), insn(1, :NOP, ''), insn(2, :SEND0, "R2\t:next"),
+                        insn(5, :JMPNOT, "R3\t1"), insn(7, :RETURN, 'R2')])
 got = leaves(roots_gen, loop_carried, 1, 2)
 check.call('a SEND later in the loop reaches the loop head through the back edge (the old list had only MOVE/arithmetic)',
            got.any? { |l| l.start_with?('send:next@') })
 
 puts '-- a write that cannot reach the read (host)'
 # R2 = foo; R5 = R2 (read at index 1); R2 = R2 + R3 later, with R3 = bar.
-unreachable = irep_of([insn(0, 'SEND0', "R2\t:foo"), insn(1, 'MOVE', "R5\tR2"), insn(2, 'SEND0', "R3\t:bar"),
-                       insn(3, 'ADD', "R2\t(R3)"), insn(4, 'RETURN', 'R2')])
+unreachable = irep_of([insn(0, :SEND0, "R2\t:foo"), insn(1, :MOVE, "R5\tR2"), insn(2, :SEND0, "R3\t:bar"),
+                       insn(3, :ADD, "R2\t(R3)"), insn(4, :RETURN, 'R2')])
 got = leaves(roots_gen, unreachable, 1, 2)
 check.call('the read sees only foo: bar is written after the read and never reaches it',
            got.size == 1 && got.first.start_with?('send:foo@'))
 
 puts '-- refused query (host)'
 # ADD R2 writes R2 and its send fallback's frame starts at R2: R3 above it may be clobbered on that path.
-clobbered = irep_of([insn(0, 'SEND0', "R3\t:foo"), insn(1, 'ADD', "R2\t(R4)"), insn(2, 'MOVE', "R5\tR3"),
-                     insn(3, 'RETURN', 'R5')])
+clobbered = irep_of([insn(0, :SEND0, "R3\t:foo"), insn(1, :ADD, "R2\t(R4)"), insn(2, :MOVE, "R5\tR3"),
+                     insn(3, :RETURN, 'R5')])
 got = leaves(roots_gen, clobbered, 2, 3)
 check.call('R3 across an ADD of a lower register is unproven (the fallback frame may overwrite it), not foo',
            got == ['unproven:callee_frame_clobber'])
 
 puts '-- entry value through a join (host)'
 # R1 is the method's argument; the then branch rebinds it to foo, the else branch keeps the argument.
-param_join = irep_of([insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x1000)'), insn(3, 'JMPNOT', "R2\t12"),
-                      insn(7, 'SEND0', "R1\t:foo"), insn(10, 'JMP', '15'), insn(12, 'NOP', ''),
-                      insn(15, 'MOVE', "R5\tR1"), insn(17, 'RETURN', 'R5')])
+param_join = irep_of([insn(0, :ENTER, '1:0:0:0:0:0:0:0 (0x1000)'), insn(3, :JMPNOT, "R2\t12"),
+                      insn(7, :SEND0, "R1\t:foo"), insn(10, :JMP, '15'), insn(12, :NOP, ''),
+                      insn(15, :MOVE, "R5\tR1"), insn(17, :RETURN, 'R5')])
 got = leaves(roots_gen, param_join, 5, 1)
 check.call('the join reports both the foo write and the entry value of R1 (param:noowner without an owner)',
            got.any? { |l| l.start_with?('send:foo@') } && got.include?('param:noowner'))
 
 puts '-- report label source (host)'
 # The label names the writer every reaching definition shares: a join of two different writers names none.
-label_join = irep_of([insn(0, 'JMPNOT', "R1\t8"), insn(3, 'SEND0', "R2\t:foo"), insn(7, 'JMP', '9'),
-                      insn(8, 'LOADI_1', "R2\t(1)"), insn(9, 'MOVE', "R5\tR2"), insn(10, 'RETURN', 'R5')])
+label_join = irep_of([insn(0, :JMPNOT, "R1\t8"), insn(3, :SEND0, "R2\t:foo"), insn(7, :JMP, '9'),
+                      insn(8, :LOADI_1, "R2\t(1)"), insn(9, :MOVE, "R5\tR2"), insn(10, :RETURN, 'R5')])
 gen = roots_gen
 check.call('a join of different writers has no label source',
            gen.numeric_label_source(label_join, 4, 2) == :unknown)
 check.call('a parameter read is an entry label source',
-           gen.numeric_label_source(irep_of([insn(0, 'MOVE', "R5\tR2"), insn(1, 'RETURN', 'R5')]), 0, 2) == :entry)
+           gen.numeric_label_source(irep_of([insn(0, :MOVE, "R5\tR2"), insn(1, :RETURN, 'R5')]), 0, 2) == :entry)
 
 if ENV['MRBC'] && !ENV['MRBC'].empty?
   puts '-- compiled Ruby (MRBC)'
@@ -135,7 +135,7 @@ if ENV['MRBC'] && !ENV['MRBC'].empty?
   def addi_read(ireps, registry, name)
     md = registry.fetch(name).find { |d| d.owner == 'NumRootsJoin' }
     irep = ireps.fetch(md.irep)
-    idx = irep.instructions.rindex { |i| i.op == 'ADDI' }
+    idx = irep.instructions.rindex { |i| i.op == :ADDI }
     [irep, idx, irep.instructions[idx].reg]
   end
 

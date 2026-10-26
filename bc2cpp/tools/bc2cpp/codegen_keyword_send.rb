@@ -22,7 +22,7 @@ class CodeGen
   # else nil. Shared by compile_keyword_send and splat_hash_literal_pairs.
   def literal_symbol_write(irep, use, reg)
     writers = BytecodeIR.reaching_writer_indices(irep, use, reg)&.map { |i| BytecodeIR.for(irep).source_at(i) }
-    return nil unless writers&.all? { |w| w.op == 'LOADSYM' }
+    return nil unless writers&.all? { |w| w.op == :LOADSYM }
 
     names = writers.map { |w| w.sym_token&.sub(/\A:/, '') }.uniq
     names.size == 1 ? names.first : nil
@@ -572,22 +572,22 @@ class CodeGen
     return nil if universe.nil?
 
     send_insn = BytecodeIR.for(irep).source_at(idx)
-    return nil unless send_insn && send_insn.op == 'SEND'
+    return nil unless send_insn && send_insn.op == :SEND
 
     recv_reg = d.to_i
     # The only write of the receiver register that reaches the send must be the constant read itself.
-    write_index = sole_reaching_write(irep, idx, recv_reg.to_s)
+    write_index = sole_reaching_write(irep, idx, recv_reg)
     return nil unless write_index
 
     write = BytecodeIR.for(irep).source_at(write_index)
-    return nil unless write.op == 'GETCONST'
+    return nil unless write.op == :GETCONST
 
     const_name = write.const_name
     return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
     return nil if universe.include?(const_name)
 
     # The GETCONST must hold the register on every path to the send, so no jump or handler entry lands between.
-    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, recv_reg.to_s)
+    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, recv_reg)
 
     out = String.new
     out << "  // KEYWORD_NEVER_DEFINED_CONST :#{name} (n=#{n}|nk=#{nk}) -- receiver is the value of " \
@@ -622,7 +622,7 @@ class CodeGen
     return nil unless write_index
 
     insn = BytecodeIR.for(irep).source_at(write_index)
-    return nil unless %w[ARRAY ARRAY2].include?(insn.op)
+    return nil unless %i[ARRAY ARRAY2].include?(insn.op)
 
     n = insn.uint_operand
     return nil if n.nil?
@@ -643,7 +643,7 @@ class CodeGen
     return nil unless write_index
 
     insn = BytecodeIR.for(irep).source_at(write_index)
-    return nil unless insn.op == 'HASH'
+    return nil unless insn.op == :HASH
 
     n = insn.uint_operand
     return nil if n.nil?
@@ -653,7 +653,7 @@ class CodeGen
     (0...n).map do |k|
       key_reg = base + (2 * k)
       val_reg = base + (2 * k) + 1
-      kname = literal_symbol_write(irep, write_index, key_reg.to_s)
+      kname = literal_symbol_write(irep, write_index, key_reg)
       return nil unless kname
 
       { name: kname, val_reg: "r#{val_reg}" }
@@ -695,43 +695,41 @@ class CodeGen
   def compile_splat_send(insn, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
     return nil unless irep && idx
 
-    n_spec = insn.n_spec
-    nk_spec = insn.nk_spec
-    return nil unless n_spec
+    return nil unless insn.argc_operand
 
-    return nil unless n_spec == '*' || nk_spec == '*'
+    return nil unless insn.positional_splat? || insn.keyword_splat?
 
     dest_reg = d.to_i
     recv = self_implicit ? 'self' : "r#{d}"
 
     next_reg = dest_reg + 1
-    if n_spec == '*'
-      positional = splat_array_literal_regs(irep, idx, next_reg.to_s)
+    if insn.positional_splat?
+      positional = splat_array_literal_regs(irep, idx, next_reg)
       if positional.nil?
-        return nil if nk_spec
+        return nil if insn.keyword_arguments?
 
         return compile_dynamic_splat_send(name, recv, d, next_reg, irep: irep, idx: idx, self_implicit: self_implicit)
       end
 
       next_reg += 1 # the single register the splatted array itself occupied.
     else
-      n = n_spec.to_i
+      n = insn.argc || 0
       positional = (1..n).map { |k| "r#{dest_reg + k}" }
       next_reg += n
     end
 
     kw_pairs =
-      if nk_spec == '*'
-        pairs = splat_hash_literal_pairs(irep, idx, next_reg.to_s)
+      if insn.keyword_splat?
+        pairs = splat_hash_literal_pairs(irep, idx, next_reg)
         return nil unless pairs
 
         pairs
-      elsif nk_spec
-        nk = nk_spec.to_i
+      elsif insn.keyword_arguments?
+        nk = insn.keyword_argc || 0
         (0...nk).map do |k|
           key_reg = next_reg + (k * 2)
           val_reg = next_reg + (k * 2) + 1
-          kname = literal_symbol_write(irep, idx, key_reg.to_s)
+          kname = literal_symbol_write(irep, idx, key_reg)
           return nil unless kname
 
           { name: kname, val_reg: "r#{val_reg}" }

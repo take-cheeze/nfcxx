@@ -9,9 +9,9 @@ require_relative 'operand_schema'
 # accessor is a lookup by operand kind.
 module InsnOperands
   # Unconditional jumps, whose address operand is the target (jmp_addr). Conditional jumps are BRANCH_OPS.
-  JMP_ADDR_OPS = Set['JMP', 'JMPUW'].freeze
+  JMP_ADDR_OPS = Set[:JMP, :JMPUW].freeze
   # Ops whose first operand names an upvar slot (upvar_ref): `R(a) index level`.
-  UPVAR_REF_OPS = Set['GETUPVAR', 'SETUPVAR'].freeze
+  UPVAR_REF_OPS = Set[:GETUPVAR, :SETUPVAR].freeze
 
   # The typed operand list. An instruction the schema cannot parse is a schema
   # gap, so it raises instead of answering nil to every question.
@@ -25,10 +25,9 @@ module InsnOperands
     install_typed(operands)
   end
 
-  # Installs the operand list with its first-operand-per-kind index, so a single-kind lookup is one hash read.
+  # Ordinary instructions share the index for their schema.
   def install_typed(operands)
-    @first_of_kind = {}
-    operands.each { |operand| @first_of_kind[operand.kind] ||= operand }
+    @kind_positions = OperandSchema.kind_positions(op, operands)
     @typed = operands.freeze
   end
 
@@ -39,16 +38,28 @@ module InsnOperands
   end
 
   def first_kind(kind)
-    typed
-    @first_of_kind[kind]
+    operands = typed
+    if @kind_positions
+      position = @kind_positions[kind]
+      return position && operands[position]
+    end
+
+    index = 0
+    while index < operands.length
+      operand = operands[index]
+      return operand if operand.kind == kind
+
+      index += 1
+    end
+    nil
   end
 
-  # First register operand as digits, only when it is the leading operand.
+  # First register operand as an Integer, only when it is the leading operand.
   def reg
     return @reg if defined?(@reg)
 
     lead = typed.first
-    @reg = lead&.kind == :reg ? lead.value.to_s : nil
+    @reg = lead&.kind == :reg ? lead.value : nil
   end
 
   def reg_token
@@ -56,12 +67,12 @@ module InsnOperands
   end
 
   # Every register an operand names, in operand order (`(R5)`, `R2[0]` and the
-  # scope register of `(R5)::Name` included).
+  # scope register of `(R5)::Name` included), as Integers.
   def regs
     @regs ||= typed.filter_map do |operand|
       case operand.kind
-      when :reg, :preg, :idx0 then operand.value.to_s
-      when :mcnst then operand.value[0].to_s
+      when :reg, :preg, :idx0 then operand.value
+      when :mcnst then operand.value[0]
       end
     end.freeze
   end
@@ -72,21 +83,21 @@ module InsnOperands
   end
 
   # First register operand wherever it sits (the value register of SETCONST,
-  # whose leading operand is the name).
+  # whose leading operand is the name), as an Integer.
   def reg_operand
-    typed.find { |operand| operand.kind == :reg }&.value&.to_s
+    typed.find { |operand| operand.kind == :reg }&.value
   end
 
   def mentions_reg?(number)
-    regs.include?(number.to_s)
+    regs.include?(number)
   end
 
-  # Register in parentheses: `(R2)` or the scope of `(R2)::Name`.
+  # Register in parentheses: `(R2)` or the scope of `(R2)::Name`, as an Integer.
   def paren_reg
     return @paren_reg if defined?(@paren_reg)
 
     operand = first_of(:preg, :mcnst)
-    @paren_reg = operand && (operand.kind == :mcnst ? operand.value[0] : operand.value).to_s
+    @paren_reg = operand && (operand.kind == :mcnst ? operand.value[0] : operand.value)
   end
 
   def sym
@@ -116,8 +127,8 @@ module InsnOperands
   # Constant name of GETCONST/SETCONST (bare) and GETMCNST/SETMCNST (`::Name`).
   def const_name
     case op
-    when 'SETCONST', 'GETCONST' then first_kind(:name)&.value
-    when 'GETMCNST', 'SETMCNST' then mcnst_name
+    when :SETCONST, :GETCONST then first_kind(:name)&.value
+    when :GETMCNST, :SETMCNST then mcnst_name
     end
   end
 
@@ -134,6 +145,36 @@ module InsnOperands
     return @argc if defined?(@argc)
 
     @argc = argc_operand&.at(0)
+  end
+
+  # Counts remain numeric internally; presence distinguishes absent keywords from explicit nk=0.
+  def keyword_argc
+    spec = argc_operand
+    spec && !spec[2] ? spec[1] : nil
+  end
+
+  def keyword_arguments?
+    spec = argc_operand
+    !!(spec && !spec[2])
+  end
+
+  def positional_splat?
+    spec = argc_operand
+    !!(spec && spec[0].nil?)
+  end
+
+  def keyword_splat?
+    spec = argc_operand
+    !!(spec && !spec[2] && spec[1].nil?)
+  end
+
+  # Packed positional and keyword arguments each occupy one register.
+  def positional_slots
+    positional_splat? ? 1 : (argc || 0)
+  end
+
+  def keyword_slots
+    keyword_splat? ? 1 : 2 * (keyword_argc || 0)
   end
 
   # `n=` / `nk=` as printed: digits, `*`, or nil when absent.
@@ -189,7 +230,7 @@ module InsnOperands
   # Target of JMP/JMPUW/JMPIF/JMPNOT/JMPNIL excluding JMPUW (Insn#jump_target's
   # historical scope, kept for BytecodeIR).
   def jump_target
-    op == 'JMPUW' ? nil : branch_target
+    op == :JMPUW ? nil : branch_target
   end
 
   def jmp_addr
@@ -204,7 +245,7 @@ module InsnOperands
     @uint_operand = reg && second && %i[int addr].include?(second.kind) && second.value >= 0 ? second.value : nil
   end
 
-  # Signed literal right after the leading register, as printed (`R1 -5`). The read is defined once, in
+  # Signed Integer right after the leading register (`R1 -5`), or nil. The read is defined once, in
   # BytecodeIR::OperandModel.imm_operand; this memoizes it per instruction.
   def imm_operand
     return @imm_operand if defined?(@imm_operand)
@@ -217,7 +258,7 @@ module InsnOperands
     return @src_and_literal if defined?(@src_and_literal)
 
     a, b, c = typed
-    @src_and_literal = a&.kind == :reg && b&.kind == :reg && c&.kind == :int ? [b.value.to_s, c.value.to_s] : nil
+    @src_and_literal = a&.kind == :reg && b&.kind == :reg && c&.kind == :int ? [b.value, c.value] : nil
   end
 
   # Text inside the first parentheses: `(5)` of LOADI_n, `(0)` of BLKPUSH, the
@@ -231,6 +272,17 @@ module InsnOperands
                    when :preg then "R#{operand.value}"
                    when :mcnst then "R#{operand.value[0]}"
                    end
+  end
+
+  # Numeric text inside the first parentheses as an Integer (`(0)` of BLKPUSH/ARGARY),
+  # or nil for non-numeric text and parenthesized registers. For metadata reads;
+  # paren_value stays the text accessor for diagnostics.
+  def paren_int
+    return @paren_int if defined?(@paren_int)
+
+    operand = first_of(:plit)
+    text = operand&.value
+    @paren_int = text.is_a?(String) && text.match?(/\A\d+\z/) ? text.to_i : nil
   end
 
   # [index, level] of a GETUPVAR/SETUPVAR (`R3 1 0`), as Integers.

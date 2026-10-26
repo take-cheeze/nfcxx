@@ -41,7 +41,7 @@ class CodeGen
     @setter_pool_reads[setter] = if setter_pool_refusal(setter)
                                    nil
                                  else
-                                   entry_arg_call_index.first[setter].map { |(irep, idx, recv, _argc, _owner)| [irep, idx, (recv + 1).to_s] }
+                                   entry_arg_call_index.first[setter].map { |(irep, idx, recv, _argc, _owner)| [irep, idx, recv + 1] }
                                  end
   end
 
@@ -102,7 +102,7 @@ class CodeGen
       irep = @ireps[d.irep]
       return :no_body unless irep
       return :arity unless pure_mandatory_arity?(irep) && mandatory_arity(irep) == 1
-      return :super if irep_tree_op?(irep, 'SUPER')
+      return :super if irep_tree_op?(irep, :SUPER)
     end
     nil
   end
@@ -207,13 +207,13 @@ class CodeGen
   def checked_pool_plan(insn, kwargs)
     return nil unless @checked_pools_used && @class_pools_on && @closed_world && NilableReceiverSend::NILABLE_OPS.include?(insn.op)
     return nil if kwargs[:self_implicit] || kwargs[:call_receiver] || kwargs[:call_arguments] || !kwargs[:trace_reg_offset].to_i.zero?
-    return nil if insn.n_spec == '*' || insn.nk_spec
+    return nil if insn.positional_splat? || insn.keyword_arguments?
 
     irep = kwargs[:irep]
     idx = kwargs[:idx]
     return nil unless irep && idx && insn.sym
 
-    n = insn.n_spec.to_i
+    n = insn.argc.to_i
     return nil if n > CodeGen::FUNCALL_ARGC_MAX
 
     reg = insn.reg.to_i

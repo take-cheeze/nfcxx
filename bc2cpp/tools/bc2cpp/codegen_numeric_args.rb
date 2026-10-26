@@ -20,7 +20,7 @@ class CodeGen
     owner = numeric_owner_of(irep)
     return NumericFlow::OTHER unless owner
 
-    return NumericFlow::INT if fixnum_proof_entry_arg?(irep, reg.to_s, owner)
+    return NumericFlow::INT if fixnum_proof_entry_arg?(irep, reg, owner)
 
     pooled = @entry_arg_numeric && @entry_arg_numeric[[irep.label, reg.to_i]]
     pooled.nil? ? NumericFlow::OTHER : pooled
@@ -44,7 +44,7 @@ class CodeGen
 
       joined = 0
       sites.each do |(irep, idx, recv, _argc, owner)|
-        mask = numeric_raw_mask(irep, idx, (recv + k).to_s, owner)
+        mask = numeric_raw_mask(irep, idx, recv + k, owner)
         if mask.nil? || (mask & NumericFlow::OPAQUE) != 0
           joined = nil
           break

@@ -50,14 +50,14 @@ gen0 = CodeGen.allocate
 # JMPUW is a branch for the region recognizers: a `break` leaving a try body is
 # a boundary breach, one landing on the exit JMP is not.
 inside = Irep.new(label: 'a', instructions: [
-                    insn(0, 'LOADNIL', 'R1 (nil)'), insn(1, 'JMPUW', '6'), insn(4, 'LOADNIL', 'R1 (nil)'),
-                    insn(5, 'NOP', ''), insn(6, 'JMP', '10'), insn(9, 'NOP', ''), insn(10, 'RETURN', 'R1')
+                    insn(0, :LOADNIL, 'R1 (nil)'), insn(1, :JMPUW, '6'), insn(4, :LOADNIL, 'R1 (nil)'),
+                    insn(5, :NOP, ''), insn(6, :JMP, '10'), insn(9, :NOP, ''), insn(10, :RETURN, 'R1')
                   ])
 check.call('JMPUW to the exit JMP stays inside the region',
            BytecodeIR::Program.new(inside).region_boundary_breaches(0...6, 6).empty?)
 leaving = Irep.new(label: 'b', instructions: [
-                     insn(0, 'LOADNIL', 'R1 (nil)'), insn(1, 'JMPUW', '10'), insn(4, 'NOP', ''),
-                     insn(6, 'JMP', '10'), insn(10, 'RETURN', 'R1')
+                     insn(0, :LOADNIL, 'R1 (nil)'), insn(1, :JMPUW, '10'), insn(4, :NOP, ''),
+                     insn(6, :JMP, '10'), insn(10, :RETURN, 'R1')
                    ])
 check.call('JMPUW out of the region is a breach',
            BytecodeIR::Program.new(leaving).region_boundary_breaches(0...6, 6).map(&:src) == [1])
@@ -65,7 +65,7 @@ check.call('JMPUW out of the region is a breach',
 # jmpuw_plain_jump_at?: only an ENSURE handler that covers the JMPUW and whose
 # range the target leaves can intercept it (vm.c OP_JMPUW).
 handler = ->(type, b, e) { CatchHandler.new(type: type, begin_addr: b, end_addr: e, target: e) }
-jmp = insn(10, 'JMPUW', '20')
+jmp = insn(10, :JMPUW, '20')
 with = lambda do |handlers, ins = jmp|
   irep = Irep.new(label: 'h', instructions: [ins], catch_handlers: handlers)
   gen0.jmpuw_plain_jump_at?(irep, ins)
@@ -84,12 +84,12 @@ check.call('a covering ensure that the target leaves wins over a plain rescue',
 
 # rescue_insn_written_regs: leading-operand writers, reads-only ops, and an
 # unmodelled op (nil, so every local is aliased).
-check.call('MOVE writes its destination', gen0.rescue_insn_written_regs(insn(0, 'MOVE', "R3\tR1")) == ['3'])
-check.call('JMPIF writes nothing', gen0.rescue_insn_written_regs(insn(0, 'JMPIF', "R3\t9")) == [])
-check.call('JMPUW writes nothing', gen0.rescue_insn_written_regs(insn(0, 'JMPUW', '9')) == [])
-check.call('RESCUE writes its second operand', gen0.rescue_insn_written_regs(insn(0, 'RESCUE', "R3\tR4")) == ['4'])
-check.call('EXCEPT writes its operand', gen0.rescue_insn_written_regs(insn(0, 'EXCEPT', 'R3')) == ['3'])
-check.call('an unmodelled op is nil', gen0.rescue_insn_written_regs(insn(0, 'ARGARY', "R3\t1:0:0:0")).nil?)
+check.call('MOVE writes its destination', gen0.rescue_insn_written_regs(insn(0, :MOVE, "R3\tR1")) == [3])
+check.call('JMPIF writes nothing', gen0.rescue_insn_written_regs(insn(0, :JMPIF, "R3\t9")) == [])
+check.call('JMPUW writes nothing', gen0.rescue_insn_written_regs(insn(0, :JMPUW, '9')) == [])
+check.call('RESCUE writes its second operand', gen0.rescue_insn_written_regs(insn(0, :RESCUE, "R3\tR4")) == [4])
+check.call('EXCEPT writes its operand', gen0.rescue_insn_written_regs(insn(0, :EXCEPT, 'R3')) == [3])
+check.call('an unmodelled op is nil', gen0.rescue_insn_written_regs(insn(0, :ARGARY, "R3\t1:0:0:0")).nil?)
 
 # LOADL_BIGINT: the pool entry carries the base and digits mruby's OP_LOADL uses.
 [["\n4294967296", 10, '4294967296'], ["\xf0100000000".b, -16, '100000000']].each do |bytes, base, digits|

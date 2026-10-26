@@ -119,6 +119,21 @@ module NativeDirectFallback
     !plan.nil? && plan[:lift]
   end
 
+  # An exact native receiver cannot enter a Ruby owner's class arm ahead of this same native fallback.
+  def flow_native_direct_line(d, recv, name, argv)
+    return nil if ENV['BC2CPP_NATIVE_EXACT_BEFORE_POLY'] == '0'
+
+    site = exact_core_site_for(recv, name)
+    return nil unless site && !site[:checked] && CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.key?(site[:klass])
+
+    plan = native_direct_plan(name, argv.size, closed_world_site: true)
+    spec = plan && plan[:arms][site[:klass]]
+    return nil unless spec
+
+    @native_construct_used << site[:klass]
+    native_direct_exact_line(d, recv, name, argv, [site[:klass], spec], dynamic_dispatch_line(d, recv, name, argv), site[:int_site])
+  end
+
   def native_direct_wrap(d, recv, name, argv, arms, tail)
     return tail if arms.empty?
 

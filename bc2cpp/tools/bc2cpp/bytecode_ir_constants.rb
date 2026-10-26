@@ -27,16 +27,22 @@ module BytecodeIR
     FIXNUM_MIN = -1_073_741_824
     FIXNUM_MAX = 1_073_741_823
     # The operators an interval may combine. The bit operators are exact-value only (as IntegerConstantRanges).
-    INTERVAL_OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
-    ARITH_OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
+    INTERVAL_OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
+    ARITH_OPS = %i[ADD SUB MUL DIV ADDI SUBI].freeze
     # `a | b` is `SEND R(a) :| n=1` (mruby 4 has no opcode for it).
     BIT_OPS = { '|' => 'BIT_OR', '&' => 'BIT_AND', '^' => 'BIT_XOR' }.freeze
     LITERAL_CLASSES = {
-      'LOADNIL' => :NilClass, 'LOADTRUE' => :TrueClass, 'LOADFALSE' => :FalseClass,
-      'LOADSYM' => :Symbol, 'SYMBOL' => :Symbol, 'STRING' => :String,
-      'ARRAY' => :Array, 'ARRAY2' => :Array, 'HASH' => :Hash,
-      'RANGE_INC' => :Range, 'RANGE_EXC' => :Range
+      :LOADNIL => :NilClass, :LOADTRUE => :TrueClass, :LOADFALSE => :FalseClass,
+      :LOADSYM => :Symbol, :SYMBOL => :Symbol, :STRING => :String,
+      :ARRAY => :Array, :ARRAY2 => :Array, :HASH => :Hash,
+      :RANGE_INC => :Range, :RANGE_EXC => :Range
     }.freeze
+    # Only builtin literal classes are retained; arbitrary alias names stay in the build's fact tables.
+    LITERAL_CLASS_SETS = (LITERAL_CLASSES.values + [:Integer, :Float]).uniq.to_h do |klass|
+      [klass, Set[klass].freeze]
+    end.freeze
+    INTEGER_CLASSES = LITERAL_CLASS_SETS.fetch(:Integer)
+    EMPTY_CLASSES = Set.new.freeze
     LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
     POOL_INT = /\A\.i(?:32|64)=(-?\d+)\z/
 
@@ -50,13 +56,13 @@ module BytecodeIR
       # Names a read may hold as a Fixnum: every binding is an Integer with an exact value or an interval, both of
       # which are inside the Fixnum margin by construction.
       def fixnum_names
-        groups.select { |_, f| f.classes == Set[:Integer] && (f.value || f.interval) }.keys.to_set
+        groups.select { |_, f| f.classes == INTEGER_CLASSES && (f.value || f.interval) }.keys.to_set
       end
 
       # Names every binding of which is an Integer, whatever its size: the bignum-capable class proof (CLASS_INTEGER_PROOF,
       # the type check's integer-class rows). An out-of-margin literal is an Integer class with no value, so it is here.
       def integer_class_names
-        groups.select { |name, f| f.classes == Set[:Integer] && !zero_divisors.include?(name) }.keys.to_set
+        groups.select { |name, f| f.classes == INTEGER_CLASSES && !zero_divisors.include?(name) }.keys.to_set
       end
 
       # bare name => exact Integer, for groups with one value.
@@ -82,8 +88,8 @@ module BytecodeIR
     # SETCONST by its full path. +poisoned+: bare names bound outside the bytecode (native, foreign Ruby).
     # +lookup_poisoned+ (with the poison set) is every name a native or foreign definition may bind; a Hash table is
     # read only for a name outside it. Only the class run passes hash_lookup_safe.
-    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false, freeze_classes: Set.new,
-                hash_lookup_safe: false, lookup_poisoned: Set.new)
+    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false, freeze_classes: EMPTY_CLASSES,
+                hash_lookup_safe: false, lookup_poisoned: EMPTY_CLASSES)
       policy = Policy.new(operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes,
                           hash_lookup_safe: hash_lookup_safe)
       path_at = sites.to_h { |site| [[site[:irep], site[:idx]], site[:name]] }
@@ -92,10 +98,10 @@ module BytecodeIR
       ireps.each_value do |irep|
         BytecodeIR.for(irep).each_source do |insn, idx|
           case insn.op
-          when 'CLASS', 'MODULE'
+          when :CLASS, :MODULE
             poison << insn.sym_token if insn.sym_token
-          when 'SETCONST', 'SETMCNST'
-            bare = insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name
+          when :SETCONST, :SETMCNST
+            bare = insn.op == :SETCONST ? insn.const_name : insn.mcnst_name
             next unless bare
 
             src = insn.regs.last
@@ -162,7 +168,7 @@ module BytecodeIR
     def alternatives(irep, index, reg, policy, depth: 0)
       return nil if depth > 64
 
-      defs = BytecodeIR.for(irep).reaching_definitions(index, reg.to_s, shared: true, origin_transfers: true)
+      defs = BytecodeIR.for(irep).reaching_definitions(index, reg, shared: true, origin_transfers: true)
       return nil unless defs && !defs.empty?
 
       nodes = defs.map do |definition|
@@ -176,37 +182,37 @@ module BytecodeIR
     # The node a writer at +index+ gives to +reg+, or nil when the writer is not a modelled literal or operator.
     def node_of(irep, index, reg, policy, depth)
       insn = BytecodeIR.for(irep).source_at(index)
-      return nil unless insn.reg == reg.to_s
+      return nil unless insn.reg == reg
 
       op = insn.op
       return int_node(loadi_value(insn)) if BytecodeIR::Ops::LOADI_OPS.include?(op)
-      return hash_node(irep, index, insn, policy, depth) if op == 'HASH' && policy.hash_lookup_safe
+      return hash_node(irep, index, insn, policy, depth) if op == :HASH && policy.hash_lookup_safe
       return [:cls, LITERAL_CLASSES[op]].freeze if LITERAL_CLASSES.key?(op)
 
       case op
-      when 'LOADL' then pool_node(irep, insn)
-      when 'GETCONST' then (name = insn.const_name) && [:alias, name].freeze
-      when 'GETMCNST' then (name = insn.mcnst_name) && [:alias, name].freeze
+      when :LOADL then pool_node(irep, insn)
+      when :GETCONST then (name = insn.const_name) && [:alias, name].freeze
+      when :GETMCNST then (name = insn.mcnst_name) && [:alias, name].freeze
       when *ARITH_OPS then policy.operators_safe ? arith_node(irep, index, insn, policy, depth) : nil
-      when 'GETIDX' then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
-      when 'SEND0'
+      when :GETIDX then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
+      when :SEND0
         # Object#freeze answers its receiver, for the classes whose freeze is stock (freeze_classes; freeze_safe is
         # the Integer case). The node carries the classes it may answer for, and node_classes checks the receiver.
         return nil unless insn.sym == 'freeze'
 
-        allowed = policy.freeze_classes | (policy.freeze_safe ? Set[:Integer] : Set.new)
+        allowed = policy.freeze_classes | (policy.freeze_safe ? INTEGER_CLASSES : EMPTY_CLASSES)
         return nil if allowed.empty?
 
         receiver = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
         return nil if receiver.nil? || (policy.hash_lookup_safe && !hash_frozen_in_place?(irep, index, receiver))
 
         receiver && [:freeze, receiver, allowed].freeze
-      when 'SEND'
+      when :SEND
         name = BIT_OPS[insn.sym]
         return nil unless name && insn.argc == 1 && policy.operators_safe
 
         left = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
-        right = alternatives(irep, index, (insn.reg.to_i + 1).to_s, policy, depth: depth + 1)
+        right = alternatives(irep, index, (insn.reg + 1), policy, depth: depth + 1)
         left && right ? [:arith, name, left, right].freeze : nil
       end
     end
@@ -238,7 +244,7 @@ module BytecodeIR
     # is resolved after every binding is known (resolve_lookups); the receiver name and key are kept until then.
     def hash_lookup_node(irep, index, insn, policy, depth)
       receiver = single_alternative(irep, index, insn.reg, policy, depth)
-      key = single_alternative(irep, index, (insn.reg.to_i + 1).to_s, policy, depth)
+      key = single_alternative(irep, index, (insn.reg + 1), policy, depth)
       return nil unless receiver && receiver[0] == :alias && key && key[0] == :int && key[1]
 
       [:hash_lookup, receiver[1], key[1]].freeze
@@ -301,9 +307,9 @@ module BytecodeIR
     def arith_node(irep, index, insn, policy, depth)
       op = insn.op
       left = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
-      right = if %w[ADDI SUBI].include?(op)
+      right = if %i[ADDI SUBI].include?(op)
                 imm = insn.imm_operand
-                imm && [int_node(imm.to_i)].freeze
+                imm && [int_node(imm)].freeze
               else
                 insn.regs[1] && alternatives(irep, index, insn.regs[1], policy, depth: depth + 1)
               end
@@ -335,10 +341,10 @@ module BytecodeIR
     end
 
     def loadi_value(insn)
-      return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
-      return -1 if insn.op == 'LOADI__1'
+      return BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op] if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
+      return -1 if insn.op == :LOADI__1
 
-      insn.imm_operand&.to_i
+      insn.imm_operand
     end
 
     # The fact as the report prints it: `classes=A,B` ('?' unknown), `value=N` ('-' none), `interval=lo..hi` ('-' none).
@@ -363,9 +369,9 @@ module BytecodeIR
 
     def node_classes(node, known)
       case node[0]
-      when :int, :bigint then Set[:Integer].freeze
-      when :cls then Set[node[1]].freeze
-      when :hash then Set[:Hash].freeze
+      when :int, :bigint then INTEGER_CLASSES
+      when :cls then LITERAL_CLASS_SETS.fetch(node[1]) { Set[node[1]].freeze }
+      when :hash then LITERAL_CLASS_SETS.fetch(:Hash)
       when :alias then known[node[1]]
       when :freeze
         classes = union_classes(node[1], known)
@@ -373,7 +379,7 @@ module BytecodeIR
       when :arith
         left = union_classes(node[2], known)
         right = union_classes(node[3], known)
-        integer = Set[:Integer]
+        integer = INTEGER_CLASSES
         left && right && !left.empty? && !right.empty? && left.subset?(integer) && right.subset?(integer) ? integer : nil
       end
     end
@@ -384,7 +390,7 @@ module BytecodeIR
         case node[0]
         when :freeze then zero_divisor?(node[1], known)
         when :arith
-          (node[1] == 'DIV' && exact_of(node[3], known) == 0) || zero_divisor?(node[2], known) || zero_divisor?(node[3], known)
+          (node[1] == :DIV && exact_of(node[3], known) == 0) || zero_divisor?(node[2], known) || zero_divisor?(node[3], known)
         else false
         end
       end
@@ -416,10 +422,10 @@ module BytecodeIR
     # mruby's fixnum DIV floors (-7 / 2 == -4); a zero divisor raises at run time, so it has no value.
     def arith_value(op, left, right)
       case op
-      when 'ADD', 'ADDI' then left + right
-      when 'SUB', 'SUBI' then left - right
-      when 'MUL' then left * right
-      when 'DIV' then right.zero? ? nil : left.div(right)
+      when :ADD, :ADDI then left + right
+      when :SUB, :SUBI then left - right
+      when :MUL then left * right
+      when :DIV then right.zero? ? nil : left.div(right)
       when 'BIT_OR' then left | right
       when 'BIT_AND' then left & right
       when 'BIT_XOR' then left ^ right
@@ -450,10 +456,10 @@ module BytecodeIR
 
     def combine(op, left, right)
       case op
-      when 'ADD', 'ADDI' then fit([left[0] + right[0], left[1] + right[1]])
-      when 'SUB', 'SUBI' then fit([left[0] - right[1], left[1] - right[0]])
-      when 'MUL' then corners(left, right) { |a, b| a * b }
-      when 'DIV'
+      when :ADD, :ADDI then fit([left[0] + right[0], left[1] + right[1]])
+      when :SUB, :SUBI then fit([left[0] - right[1], left[1] - right[0]])
+      when :MUL then corners(left, right) { |a, b| a * b }
+      when :DIV
         # A divisor interval holding 0 raises or is unknown: no interval.
         return nil if right[0] <= 0 && right[1] >= 0
 

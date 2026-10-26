@@ -50,7 +50,7 @@ begin
                     { missing: 'Array' }, { unknown: 'Array' }, { world: false }, { sources: false },
                     { flag: 'BC2CPP_CORE_RUBY_RESULTS' }, { flag: 'BC2CPP_CORE_RUBY_POSITIONAL_RESULTS' },
                     { flag: 'BC2CPP_CORE_RUBY_RECEIVER_UNIONS' }, { flag: 'BC2CPP_CORE_RUBY_NESTED_RESULTS' }]
-  instructions = %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB ADD].product([0, 2], [true, false]).map do |op, argc, fixed|
+  instructions = %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB ADD].product([0, 2], [true, false]).map do |op, argc, fixed|
     insn_type.new(op, 'map', 1, argc, fixed)
   end
   masks.product(configurations, instructions, [true, false], [false, true]).each do |mask, config, insn, name_results, recursive|

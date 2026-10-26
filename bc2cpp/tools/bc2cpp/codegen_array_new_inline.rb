@@ -73,7 +73,7 @@ class CodeGen
 
     regions = []
     layout = ->(insn) { 2 if insn.sym == 'new' && insn.argc_text == 'n=1' }
-    each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       world = array_new_receiver_constant?(irep, idx, insn, owner_name)
       next note_array_new_site(irep, idx, world) if world.is_a?(String)
       next unless world

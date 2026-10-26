@@ -70,7 +70,7 @@ class CodeGen
   def deep_fiber_yield?(irep, fiber_bodies, seen = Set.new.compare_by_identity)
     return false unless seen.add?(irep)
 
-    BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SEND, :SEND0) do |insn, idx|
       next unless insn.sym == 'yield'
 
       dest = insn.reg
@@ -83,7 +83,7 @@ class CodeGen
   def deep_called_names(irep, fiber_bodies, names = Set.new, seen = Set.new.compare_by_identity)
     return names unless seen.add?(irep)
 
-    BytecodeIR.for(irep).instructions_with_op('SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB').each do |insn|
+    BytecodeIR.for(irep).instructions_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB).each do |insn|
       names << insn.sym if insn.sym
     end
     nested_ireps(irep, fiber_bodies).each { |child| deep_called_names(child, fiber_bodies, names, seen) }
@@ -114,7 +114,7 @@ class CodeGen
   # Names of the methods a `Fiber.new { ... }` block body calls directly on self (not from a
   # nested block): the roots that are compiled as resumable when they qualify.
   def fiber_block_root_targets(seed_irep)
-    BytecodeIR.for(seed_irep).instructions_with_op('SSEND', 'SSEND0').filter_map(&:sym)
+    BytecodeIR.for(seed_irep).instructions_with_op(:SSEND, :SSEND0).filter_map(&:sym)
   end
 
   ResumablePlan = Struct.new(:label, :helpers)
@@ -159,7 +159,7 @@ class CodeGen
     return nil unless seen.add?(irep)
 
     program = BytecodeIR.for(irep)
-    program.each_with_op('SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB') do |insn, idx|
+    program.each_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB) do |insn, idx|
       name = insn.sym
       next unless name
 
@@ -171,7 +171,7 @@ class CodeGen
       end
       next unless @fiber_yield_names.include?(name)
 
-      unless %w[SSEND SSEND0].include?(insn.op)
+      unless %i[SSEND SSEND0].include?(insn.op)
         return "calls the yielding method #{name} with an explicit receiver or a block"
       end
       next if helpers.key?(name)
@@ -221,14 +221,14 @@ class CodeGen
   # function, a non-step inline loop) both are `#error`: no frame is there to resume.
   def resumable_intercept(insn, irep, d, idx, reg_offset)
     case insn.op
-    when 'SEND', 'SEND0'
+    when :SEND, :SEND0
       return nil unless insn.sym == 'yield' && idx
 
-      dest = (insn.reg.to_i - reg_offset).to_s
+      dest = insn.reg - reg_offset
       return nil unless fiber_const_receiver?(irep, idx, dest)
 
       resumable_yield_site(insn)
-    when 'SSEND', 'SSEND0'
+    when :SSEND, :SSEND0
       return nil unless @fiber_yield_names.include?(insn.sym)
 
       resumable_helper_call(insn, irep, idx, reg_offset)
@@ -249,7 +249,7 @@ class CodeGen
   # Positional argument count of a Fiber.yield call, nil for a splat or keywords. Only 0 and 1
   # round-trip: `Fiber.yield a, b` yields an Array that the driver's one-value yield cannot rebuild.
   def fiber_yield_argc(insn)
-    return 0 if insn.op == 'SEND0'
+    return 0 if insn.op == :SEND0
 
     insn.plain_fixed_argc? ? insn.argc : nil
   end
@@ -285,7 +285,7 @@ class CodeGen
 
     label = @resumable.helpers[name]
     return resumable_error("no inlinable helper #{name}") unless label
-    return resumable_error("helper #{name} called with arguments") unless insn.op == 'SSEND0' || insn.argc == 0
+    return resumable_error("helper #{name} called with arguments") unless insn.op == :SSEND0 || insn.argc == 0
 
     helper = @ireps.fetch(label)
     region = BytecodeIR::ResumableRegion.build(helper)
@@ -311,7 +311,7 @@ class CodeGen
     begin
       region.program.instructions.each do |node|
         hinsn = node.source
-        next if hinsn.op == 'ENTER'
+        next if hinsn.op == :ENTER
 
         out << "  #{prefix}#{hinsn.addr}:;\n" if targets.include?(hinsn.addr)
         out << resumable_helper_insn(hinsn, helper, helper_def, base, dest, end_label, prefix, node.index)
@@ -325,11 +325,11 @@ class CodeGen
 
   def resumable_helper_insn(hinsn, helper, helper_def, base, dest, end_label, prefix, hidx)
     case hinsn.op
-    when 'RETURN' then "  r#{dest} = r#{hinsn.reg.to_i + base};\n  goto #{end_label};\n"
-    when 'RETNIL' then "  r#{dest} = mrb_nil_value();\n  goto #{end_label};\n"
-    when 'RETTRUE' then "  r#{dest} = mrb_true_value();\n  goto #{end_label};\n"
-    when 'RETFALSE' then "  r#{dest} = mrb_false_value();\n  goto #{end_label};\n"
-    when 'RETSELF' then "  r#{dest} = self;\n  goto #{end_label};\n"
+    when :RETURN then "  r#{dest} = r#{hinsn.reg.to_i + base};\n  goto #{end_label};\n"
+    when :RETNIL then "  r#{dest} = mrb_nil_value();\n  goto #{end_label};\n"
+    when :RETTRUE then "  r#{dest} = mrb_true_value();\n  goto #{end_label};\n"
+    when :RETFALSE then "  r#{dest} = mrb_false_value();\n  goto #{end_label};\n"
+    when :RETSELF then "  r#{dest} = self;\n  goto #{end_label};\n"
     else
       # No block, no break: the nil break label makes BREAK an `#error`.
       compile_block_body_insn(hinsn, helper, helper_def, base, end_label, prefix, idx: hidx)

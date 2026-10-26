@@ -34,7 +34,7 @@ module InterfaceTableReport
     @itab_fallbacks = outer
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
-    return code unless irep && site && !kwargs[:self_implicit] && insn.n_spec != '*' && !insn.nk_spec
+    return code unless irep && site && !kwargs[:self_implicit] && !insn.positional_splat? && !insn.keyword_arguments?
     return code if fallbacks.empty?
 
     family = CHAIN_FAMILIES.find { |f| code.match?(%r{^\s*// #{f}\b}) } || 'OTHER'
@@ -62,7 +62,7 @@ module InterfaceTableReport
     nilable = code.include?('// NILABLE_RECEIVER') ? '+nilable' : ''
     owner_def = kwargs[:owner_def]
     [owner_def ? "#{owner_def.owner}##{owner_def.name}" : irep.label, irep.label, site, name, fb[:argc],
-     insn.op.end_with?('B') ? 'block' : '-', family, else_kind, gates(name, fb, instances).join(','),
+     BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? 'block' : '-', family, else_kind, gates(name, fb, instances).join(','),
      set + nilable, receiver_trace_origin(irep, site, reg), IrepScans.origin_ivar(irep, site, reg, owner_def),
      fb[:listed].join('|'), cells(name, fb, instances), native_detail(name)].join("\t")
   end

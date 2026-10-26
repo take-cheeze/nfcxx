@@ -8,7 +8,7 @@ require_relative 'core_defs'
 module CoreRubyResults
   EMPTY_SEEN = Set.new.freeze
   EMPTY_ARGUMENTS = [].freeze
-  INSTALLERS = %w[alias_method define_method define_singleton_method undef_method remove_method].freeze
+  INSTALLERS = %i[alias_method define_method define_singleton_method undef_method remove_method].freeze
 
   def self.installed_names(ireps)
     names = Set.new
@@ -16,13 +16,13 @@ module CoreRubyResults
       next unless CoreDefs.core_source?(body.file)
 
       BytecodeIR.for(body).each_source do |insn, index|
-        next unless insn.op.include?('SEND') && INSTALLERS.include?(insn.sym)
+        next unless BytecodeIR::Ops::SEND_PREFIX_OPS.include?(insn.op) && INSTALLERS.include?(insn.sym)
         return nil unless insn.plain_fixed_argc? && insn.argc.positive?
 
-        argc = %w[alias_method define_method define_singleton_method].include?(insn.sym) ? 1 : insn.argc
+        argc = %i[alias_method define_method define_singleton_method].include?(insn.sym) ? 1 : insn.argc
         (1..argc).each do |arg|
-          name = body.walk_dominating_writers(index - 1, (insn.reg.to_i + arg).to_s, follow_moves: true) do |writer|
-            writer.sym if writer.op == 'LOADSYM'
+          name = body.walk_dominating_writers(index - 1, (insn.reg + arg), follow_moves: true) do |writer|
+            writer.sym if writer.op == :LOADSYM
           end
           return nil unless name
 
@@ -55,7 +55,7 @@ module CoreRubyResults
   def self.skippable_alias?(body, name)
     program = BytecodeIR.for(body)
     program.instructions.any? do |alias_insn|
-      next false unless alias_insn.op == 'ALIAS' && alias_insn.source.sym == name
+      next false unless alias_insn.op == :ALIAS && alias_insn.source.sym == name
 
       reached = program.reachable_from(0, include_handlers: true, avoiding: alias_insn.index)
       program.exits.any? { |frame_exit| reached.include?(frame_exit.index) }
@@ -117,9 +117,9 @@ class CodeGen
     scratch = ENV['BC2CPP_CORE_RUBY_QUERY_SCRATCH'] != '0'
     seen ||= scratch ? CoreRubyResults::EMPTY_SEEN : Set.new
     return nil if ENV['BC2CPP_CORE_RUBY_RESULTS'] == '0'
-    return nil unless %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB].include?(insn.op)
-    return nil unless insn.sym && (%w[SEND0 SSEND0].include?(insn.op) || insn.plain_fixed_argc?)
-    argc = %w[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
+    return nil unless %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB].include?(insn.op)
+    return nil unless insn.sym && (%i[SEND0 SSEND0].include?(insn.op) || insn.plain_fixed_argc?)
+    argc = %i[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
     return nil if argc.positive? && ENV['BC2CPP_CORE_RUBY_POSITIONAL_RESULTS'] == '0'
 
     arguments = if scratch
@@ -143,7 +143,7 @@ class CodeGen
     return nil if !seen.empty? && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
 
-    block_given = insn.op.end_with?('B')
+    block_given = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
     return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
 
     # Every member must resolve and return a modelled class; a missing member
@@ -163,7 +163,7 @@ class CodeGen
   def core_ruby_name_result(irep, index, insn, arguments = [])
     return nil if ENV['BC2CPP_CORE_RUBY_NAME_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
-    block_given = insn.op.end_with?('B')
+    block_given = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
     return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
 
     @core_ruby_name_results ||= {}
@@ -217,10 +217,10 @@ class CodeGen
 
     mask = BytecodeIR::NumericClasses.exit_mask(body, states) do |exit, state|
       case exit.op
-      when 'RETURN' then state[exit.reg]
-      when 'RETSELF' then receiver
-      when 'RETNIL' then NumericFlow::NIL
-      when 'RETURN_BLK', 'BREAK' then 0
+      when :RETURN then state[exit.reg]
+      when :RETSELF then receiver
+      when :RETNIL then NumericFlow::NIL
+      when :RETURN_BLK, :BREAK then 0
       else NumericFlow::OTHER
       end
     end
@@ -265,10 +265,10 @@ class CodeGen
   # no `break` that could replace the callee's result (an exception unwinds past the call and yields none), the
   # same fact a literal block without BREAK states. BC2CPP_CORE_RUBY_SYMBOL_BLOCKS=0 withdraws it.
   def core_ruby_literal_block_safe?(irep, index, insn)
-    irep.walk_dominating_writers(index - 1, (insn.reg.to_i + insn.argc + 1).to_s, follow_moves: true) do |writer|
-      next true if writer.op == 'LOADSYM' && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'
+    irep.walk_dominating_writers(index - 1, (insn.reg + insn.argc + 1), follow_moves: true) do |writer|
+      next true if writer.op == :LOADSYM && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'
 
-      body = writer.op == 'BLOCK' && @ireps[irep.reps[writer.block_index]]
+      body = writer.op == :BLOCK && @ireps[irep.reps[writer.block_index]]
       body && core_ruby_result_exits_safe?(body, caller: true)
     end || false
   end
@@ -276,19 +276,19 @@ class CodeGen
   # A nested break can replace a block-taking send's value. Callee nonlocal
   # returns also need a context-sensitive child flow, which is not modelled here.
   def core_ruby_result_exits_safe?(irep, caller: false)
-    forbidden = caller ? %w[BREAK] : %w[BREAK RETURN_BLK]
+    forbidden = caller ? %i[BREAK] : %i[BREAK RETURN_BLK]
     return false if BytecodeIR.for(irep).op?(*forbidden)
 
     irep.reps.all? { |label| core_ruby_result_exits_safe?(@ireps.fetch(label), caller: caller) }
   end
 
   def core_ruby_static_send_mask(insn, state)
-    return NumericFlow::OTHER unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op)
+    return NumericFlow::OTHER unless %i[SEND SEND0 SSEND SSEND0].include?(insn.op)
     installed = self.class.core_result_installed_names
     opaque = self.class.core_result_opaque_defs
     return NumericFlow::OTHER unless installed && !installed.include?(insn.sym) && opaque && opaque.none? { |_owner, name| name == insn.sym }
 
-    if insn.sym == 'dup' && insn.op == 'SEND0' && native_dup_result_safe?
+    if insn.sym == 'dup' && insn.op == :SEND0 && native_dup_result_safe?
       return state[insn.reg.to_i]
     end
     core = native_core_class_result(insn, state)

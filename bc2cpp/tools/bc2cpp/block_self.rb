@@ -15,21 +15,21 @@ require_relative 'bytecode_ir'
 # (they pass the frame's block on). A read whose reaching definitions are not computable refuses. Proc#call runs
 # the Proc under the self it closed over, so the block of a plain yielder never runs under another self.
 module BlockSelf
-  WRITE_ONLY_OPS = Set['ENTER', 'NOP', 'GETCONST', 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETUPVAR', 'BLOCK', 'LAMBDA',
-                       'METHOD', 'JMP', 'RETNIL', 'RETSELF', 'RETTRUE', 'RETFALSE', 'BLKPUSH', 'OCLASS', 'TCLASS',
-                       'EXCEPT', 'STRING', 'MOVE', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
-  FORWARDING_OPS = Set['SUPER', 'ARGARY'].freeze
+  WRITE_ONLY_OPS = Set[:ENTER, :NOP, :GETCONST, :GETGV, :GETSV, :GETIV, :GETCV, :GETUPVAR, :BLOCK, :LAMBDA,
+                       :METHOD, :JMP, :RETNIL, :RETSELF, :RETTRUE, :RETFALSE, :BLKPUSH, :OCLASS, :TCLASS,
+                       :EXCEPT, :STRING, :MOVE, :JMPIF, :JMPNOT, :JMPNIL].freeze
+  FORWARDING_OPS = Set[:SUPER, :ARGARY].freeze
   # Operators whose read set is R(a)..R(a+width-1) (vm.c OP_ADD..OP_GE: R(a) op R(a+1); OP_GETIDX: R(a)[R(a+1)];
   # OP_SETIDX: R(a)[R(a+1)] = R(a+2); OP_ADDI/OP_SUBI and the patched OP_ADDILV/OP_SUBILV: R(a) op an immediate, whose
   # fallback writes the immediate before sending), including their method-send fallback, which passes exactly those.
-  FIXED_WINDOW_OPS = { 'ADD' => 2, 'SUB' => 2, 'MUL' => 2, 'DIV' => 2, 'EQ' => 2, 'LT' => 2, 'LE' => 2, 'GT' => 2,
-                       'GE' => 2, 'GETIDX' => 2, 'SETIDX' => 3, 'ADDI' => 1, 'SUBI' => 1, 'ADDILV' => 1,
-                       'SUBILV' => 1 }.freeze
+  FIXED_WINDOW_OPS = { :ADD => 2, :SUB => 2, :MUL => 2, :DIV => 2, :EQ => 2, :LT => 2, :LE => 2, :GT => 2,
+                       :GE => 2, :GETIDX => 2, :SETIDX => 3, :ADDI => 1, :SUBI => 1, :ADDILV => 1,
+                       :SUBILV => 1 }.freeze
 
   # Operators whose read set the operand count fixes (vm.c): ARRAY a b reads R(a)..R(a+b-1), ARRAY2 a b c reads
   # R(b)..R(b+c-1), ARYPUSH a b reads R(a)..R(a+b), HASH a b reads R(a)..R(a+2b-1), HASHADD a b reads R(a)..R(a+2b),
   # and ARYCAT/HASHCAT/STRCAT a read R(a) and R(a+1), ARYSPLAT a only R(a).
-  COUNTED_WINDOW_OPS = %w[ARRAY ARYPUSH HASH HASHADD ARYCAT HASHCAT STRCAT ARYSPLAT].freeze
+  COUNTED_WINDOW_OPS = %i[ARRAY ARYPUSH HASH HASHADD ARYCAT HASHCAT STRCAT ARYSPLAT].freeze
 
   module_function
 
@@ -39,14 +39,14 @@ module BlockSelf
 
     req, opt, rest, post, key, kdict = irep.enter&.enter_fields&.first(6)&.map(&:to_i) || [0, 0, 0, 0, 0, 0]
     blk = 1 + req + opt + rest + post + (key.positive? || kdict.positive? ? 1 : 0)
-    frame_why(irep, ireps, [[irep, Set[blk.to_s]]], blk.to_s)
+    frame_why(irep, ireps, [[irep, Set[blk]]], blk)
   end
 
   # +frames+: [[irep, captured proc slots], ...] from the method body down to +irep+.
   def frame_why(irep, ireps, frames, blk)
     program = BytecodeIR.for(irep)
     proc_at = lambda do |idx, reg|
-      defs = program.reaching_definitions(idx, reg.to_s, through_handlers: true)
+      defs = program.reaching_definitions(idx, reg, through_handlers: true, shared: true)
       return :unknown if defs.nil?
 
       defs.any? { |df| proc_def?(irep, df, frames, blk) }
@@ -70,13 +70,13 @@ module BlockSelf
       end
     end
     # Captured slots for the nested blocks: every register this frame may write a Proc into.
-    program.each_with_op('MOVE', 'BLKPUSH', 'GETUPVAR') do |insn, idx|
+    program.each_with_op(:MOVE, :BLKPUSH, :GETUPVAR) do |insn, idx|
       next unless insn.reg
 
       slots << insn.reg if case insn.op
-                           when 'MOVE' then proc_at.call(idx, insn.regs[1]) == true
-                           when 'BLKPUSH' then true
-                           when 'GETUPVAR' then proc_def?(irep, BytecodeIR::Definition.new(idx, insn.reg), frames, blk)
+                           when :MOVE then proc_at.call(idx, insn.regs[1]) == true
+                           when :BLKPUSH then true
+                           when :GETUPVAR then proc_def?(irep, BytecodeIR::Definition.new(idx, insn.reg), frames, blk)
                            else false
                            end
     end
@@ -89,16 +89,16 @@ module BlockSelf
   end
 
   def proc_def?(irep, df, frames, blk)
-    return df.reg.to_s == blk if df.entry?
+    return df.reg == blk if df.entry?
 
     insn = BytecodeIR.for(irep).source_at(df.index)
     case insn.op
-    when 'BLKPUSH' then true
-    when 'GETUPVAR'
+    when :BLKPUSH then true
+    when :GETUPVAR
       index, level = insn.upvar_ref
       pos = index && frames.length - 2 - level
       frame = pos && pos >= 0 ? frames[pos] : nil
-      !frame || frame[1].include?(index.to_s)
+      !frame || frame[1].include?(index)
     else false
     end
   end
@@ -110,14 +110,9 @@ module BlockSelf
     block = BytecodeIR::Ops::B_SUFFIX_OPS.include?(op) ? 1 : 0
     return block if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(op)
 
-    spec = insn.argc_operand or return nil
-    n, nk, plain = spec
-    positional = n.nil? ? 1 : n
-    keywords = if plain then 0
-               elsif nk.nil? then 1
-               else 2 * nk
-               end
-    positional + keywords + block
+    return nil unless insn.argc_operand
+
+    insn.positional_slots + insn.keyword_slots + block
   end
 
   # The registers a COUNTED_WINDOW_OPS operator reads, or nil when its operands do not parse.
@@ -125,17 +120,17 @@ module BlockSelf
     a = insn.reg&.to_i or return nil
     count = insn.typed.find { |operand| operand.kind == :int }&.value
     case insn.op
-    when 'ARRAY'
+    when :ARRAY
       regs = insn.regs
       return nil unless count
 
       # ARRAY2 prints as ARRAY with its source register in front of the count.
       from = regs.size > 1 ? regs[1].to_i : a
       (from...(from + count)).to_a
-    when 'ARYPUSH' then count && (a..(a + count)).to_a
-    when 'HASH' then count && (a...(a + (2 * count))).to_a
-    when 'HASHADD' then count && (a..(a + (2 * count))).to_a
-    when 'ARYSPLAT' then [a]
+    when :ARYPUSH then count && (a..(a + count)).to_a
+    when :HASH then count && (a...(a + (2 * count))).to_a
+    when :HASHADD then count && (a..(a + (2 * count))).to_a
+    when :ARYSPLAT then [a]
     else [a, a + 1]
     end
   end
@@ -148,38 +143,38 @@ module BlockSelf
       n = send_window(insn)
       return nil unless insn.reg && n
 
-      d = insn.reg.to_i
-      args = (1..n).map { |k| [(d + k).to_s, :argument] }
-      return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d.to_s, :receiver]] + args
+      d = insn.reg
+      args = (1..n).map { |k| [d + k, :argument] }
+      return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d, :receiver]] + args
     end
-    if op == 'BLKCALL'
+    if op == :BLKCALL
       # `yield`'s call (vm.c OP_BLKCALL): runs R(a) as a block, under its own self, with R(a+1..a+n).
       n = insn.typed.find { |operand| operand.kind == :int }&.value
       return nil unless insn.reg && n
 
-      d = insn.reg.to_i
-      return [[d.to_s, :called]] + (1..n).map { |k| [(d + k).to_s, :argument] }
+      d = insn.reg
+      return [[d, :called]] + (1..n).map { |k| [d + k, :argument] }
     end
     case op
-    when 'RETURN', 'RETURN_BLK', 'BREAK', 'SETIV', 'SETGV', 'SETSV', 'SETCV', 'SETCONST', 'SETUPVAR', 'GETMCNST'
+    when :RETURN, :RETURN_BLK, :BREAK, :SETIV, :SETGV, :SETSV, :SETCV, :SETCONST, :SETUPVAR, :GETMCNST
       regs.map { |r| [r, :argument] }
     when *FIXED_WINDOW_OPS.keys
       # vm.c: these read R(a) and the next width-1 registers only, also when they fall back to a send.
       return nil unless insn.reg
 
-      FIXED_WINDOW_OPS[op].times.map { |k| [(insn.reg.to_i + k).to_s, :argument] }
+      FIXED_WINDOW_OPS[op].times.map { |k| [(insn.reg + k), :argument] }
     when *COUNTED_WINDOW_OPS
       window = counted_window(insn)
       return nil unless window
 
-      window.map { |r| [r.to_s, :argument] }
+      window.map { |r| [r, :argument] }
     else
       # An operator window (ADD, ARRAY, HASH, STRCAT, ...) reads past its listed registers: every register from the
       # lowest listed one up to the frame's last.
-      lo = regs.map(&:to_i).min
+      lo = regs.min
       return [] unless lo
 
-      (lo...[irep.nregs.to_i, lo + 1].max).map { |r| [r.to_s, :argument] }
+      (lo...[irep.nregs.to_i, lo + 1].max).map { |r| [r, :argument] }
     end
   end
 end

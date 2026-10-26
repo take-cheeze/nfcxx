@@ -60,7 +60,7 @@ analysis = lambda do |source|
     sites = ireps.values.flat_map do |irep|
       irep.instructions.each_index.filter_map do |idx|
         insn = irep.instructions[idx]
-        next unless insn.op == 'SETCONST'
+        next unless insn.op == :SETCONST
 
         # SETCONST keeps its value register in regs[0] (its reg is nil).
         [insn.const_name.to_s, DeclaredConstants.io_open_site?(irep, idx, insn.regs[0], io_open_safe: safe)]

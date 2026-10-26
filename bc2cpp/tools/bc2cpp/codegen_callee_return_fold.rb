@@ -20,18 +20,18 @@ class CodeGen
     ENV['BC2CPP_RETURN_FOLD'] == '1'
   end
 
-  RETURN_FOLD_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
-  RETURN_FOLD_LITERALS = { 'LOADTRUE' => :true, 'LOADFALSE' => :false, 'LOADNIL' => :nil }.freeze
+  RETURN_FOLD_CALL_OPS = %i[SEND SEND0 SSEND SSEND0].freeze
+  RETURN_FOLD_LITERALS = { :LOADTRUE => :true, :LOADFALSE => :false, :LOADNIL => :nil }.freeze
 
   # :taken or :not_taken for the jump +insn+ at +idx+ of +irep+ decided by its call result's literal kinds, else nil.
   def callee_return_outcome(insn, irep, idx)
     return nil unless return_fold_enabled? && idx
 
-    kinds = call_result_literal_kinds(irep, idx, insn.reg.to_s)
+    kinds = call_result_literal_kinds(irep, idx, insn.reg)
     return nil unless kinds
 
     # JMPNIL is taken exactly on nil; a result that is never nil never takes it.
-    if insn.op == 'JMPNIL'
+    if insn.op == :JMPNIL
       return :taken if kinds == Set[:nil]
 
       return :not_taken unless kinds.include?(:nil)
@@ -43,7 +43,7 @@ class CodeGen
     falsy = kinds.subset?(Set[:false, :nil])
     return nil unless truthy || falsy
 
-    jumps = truthy == (insn.op == 'JMPIF')
+    jumps = truthy == (insn.op == :JMPIF)
     jumps ? :taken : :not_taken
   end
 
@@ -107,7 +107,7 @@ class CodeGen
       case exit.kind
       when :true, :false, :nil then kinds << exit.kind
       when :value
-        sources = BytecodeIR.return_sources(irep, exit.index, exit.reg&.to_s)
+        sources = BytecodeIR.return_sources(irep, exit.index, exit.reg)
         return nil unless sources && !sources.empty?
 
         sources.each do |source|

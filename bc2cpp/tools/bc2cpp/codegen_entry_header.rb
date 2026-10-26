@@ -19,16 +19,37 @@
 # The direct call keeps mrb_funcall's error contract (vm.c funcall_with_block_m): outside any protected region (no
 # M->jmp) a raise is caught, M->exc holds the exception and the exception object is returned; inside one, it
 # propagates. It does not push a call frame, so the entry method has no frame of its own in an exception's backtrace.
+#
+# BC2CPP_ENTRY_NEW: `Owner.new/argc` declares a constructor entry, `bc2cpp_entry_<Owner>_new(M, argc, argv)` with
+# mrb_obj_new's contract (class.c): allocate an instance of the class, run `initialize`, return the object (the
+# exception, if any, is left in M->exc). mrb_obj_new never dispatches `new` or `allocate`, so the proof is about
+# `initialize` alone: the same conditions as above, except visibility (initialize is private, and mrb_obj_new calls it
+# regardless). At run time the direct form needs the allocation mrb_instance_alloc would do to be plain (an ordinary
+# class whose instances are T_OBJECT, allocator defined) and the declared argument count; anything else takes
+# mrb_obj_new.
 module EntryHeader
-  # Owner#name/argc of the methods hosts call. Override with BC2CPP_ENTRY_POINTS ("Owner#name/argc ...").
-  ENTRY_POINTS = %w[RPG2k#main_loop/0 RPG2k#start/0 RPG2k#current_scene_name/0].freeze
+  # Owner#name/argc (or Owner.new/argc) of the methods hosts call. Override with BC2CPP_ENTRY_POINTS.
+  ENTRY_POINTS = %w[RPG2k#main_loop/0 RPG2k#start/0 RPG2k#current_scene_name/0 RPG2k.new/1].freeze
+  # Entries hosts call whose owner no bc2cpp build compiles (app/psp's RPGXP/RPGVX branches: mruby-rpgxp and
+  # mruby-rpgvx are never compiled gems). include/bc2cpp_entry.hxx gives them by-name forms only; they turn direct
+  # once a compiled gem defines the owner and they move to ENTRY_POINTS.
+  HOST_ONLY_ENTRY_POINTS = %w[RPGXP.new/1 RPGXP#main_loop/0 RPGXP#current_scene_name/0
+                              RPGVX.new/1 RPGVX#main_loop/0 RPGVX#current_scene_name/0].freeze
 
-  Entry = Struct.new(:owner, :name, :argc)
+  Entry = Struct.new(:owner, :name, :argc, :ctor) do
+    # The method the entry runs: `initialize` for a constructor entry.
+    def method_name = ctor ? 'initialize' : name
+  end
 
   def self.entry_points(spec = ENV.fetch('BC2CPP_ENTRY_POINTS', nil))
-    (spec ? spec.split : ENTRY_POINTS).map do |item|
-      m = item.match(%r{\A([A-Z]\w*(?:::[A-Z]\w*)*)#([^/\s]+)/(\d+)\z}) or raise ArgumentError, "BC2CPP_ENTRY_POINTS: bad entry #{item.inspect}"
-      Entry.new(m[1], m[2], m[3].to_i)
+    parse(spec ? spec.split : ENTRY_POINTS)
+  end
+
+  def self.parse(items)
+    items.map do |item|
+      m = item.match(%r{\A([A-Z]\w*(?:::[A-Z]\w*)*)(?:#([^/\s]+)|\.(new))/(\d+)\z}) or
+        raise ArgumentError, "BC2CPP_ENTRY_POINTS: bad entry #{item.inspect}"
+      Entry.new(m[1], m[2] || m[3], m[4].to_i, !m[3].nil?)
     end
   end
 
@@ -92,9 +113,9 @@ class CodeGen
     out << "#pragma once\n#include <mruby.h>\n"
     out << EntryHeader::SUPPORT
     entries.each do |e|
-      m = compiled.find { |c| c[:owner] == e.owner && c[:name] == e.name && !c[:unsupported] }
+      m = compiled.find { |c| c[:owner] == e.owner && c[:name] == e.method_name && !c[:unsupported] }
       why = m ? entry_direct_refusal(m, e) : 'not compiled'
-      out << "\n" << entry_header_function(e, m, why)
+      out << "\n" << (e.ctor ? entry_header_constructor(e, m, why) : entry_header_function(e, m, why))
     end
     out
   end
@@ -104,17 +125,17 @@ class CodeGen
   # nil when calling `m`'s _impl is what dispatching `e` on an exact `e.owner` receiver runs, else why not.
   def entry_direct_refusal(m, e)
     return 'no closed world' unless @closed_world
-    return 'not public' unless m[:visibility] == :public
+    return 'not public' unless e.ctor || m[:visibility] == :public
     return "argc #{m[:arity]}, declared #{e.argc}" unless m[:arity] == e.argc
     return 'not compiled clean' unless m[:label] && compiles_clean?(m[:label])
     return 'impl takes typed or extra parameters' unless decl_line(m) == entry_plain_decl(m[:impl], e.argc)
     return 'entry is not a plain forwarder (guard, hand-off or argument decoding)' unless entry_plain_forwarder?(m, e.argc)
-    return 'name installed, aliased or undefined at run time' if devirt_blocked_name?(e.name) ||
+    return 'name installed, aliased or undefined at run time' if devirt_blocked_name?(e.method_name) ||
                                                                  symbol_installed_names.nil? ||
-                                                                 symbol_installed_names.include?(e.name)
+                                                                 symbol_installed_names.include?(e.method_name)
     return 'owner has a prepended or unknown mixin' if !Array(@prepended_modules[e.owner]).empty? ||
                                                        @unknown_mixins.include?(e.owner)
-    return 'owner has more than one definition' unless @registry.fetch(e.name, []).count { |d| d.owner == e.owner } == 1
+    return 'owner has more than one definition' unless @registry.fetch(e.method_name, []).count { |d| d.owner == e.owner } == 1
 
     nil
   end
@@ -134,6 +155,32 @@ class CodeGen
                "  return #{impl}\\(M, self(?:, \\w+){#{argc}}\\);\\n"
            end
     m[:code].match?(/^static mrb_value #{entry}\(mrb_state\* M, mrb_value self\) \{\n#{body}\}/)
+  end
+
+  # BC2CPP_ENTRY_NEW: mrb_obj_new(M, <owner>, argc, argv), with the compiled initialize called directly where proved.
+  def entry_header_constructor(e, m, why)
+    fn = "bc2cpp_entry_#{cpp_name(e.owner, 'new')}"
+    params = 'mrb_state* M, mrb_int argc, const mrb_value* argv'
+    by_name = "mrb_obj_new(M, mrb_class_get(M, \"#{e.owner}\"), argc, argv)"
+    if why
+      return "// #{e.owner}.new: mrb_obj_new (#{why}).\n" \
+             "#define BC2CPP_ENTRY_#{cpp_name(e.owner, 'new')} 0\n" \
+             "static inline mrb_value #{fn}(#{params}) { return #{by_name}; }\n"
+    end
+
+    args = Array.new(e.argc) { |i| "argv[#{i}]" }
+    "// #{e.owner}.new: allocate as mrb_instance_alloc does and call #{m[:impl]} directly, else mrb_obj_new.\n" \
+      "#define BC2CPP_ENTRY_#{cpp_name(e.owner, 'new')} 1\n" \
+      "#{entry_plain_decl(m[:impl], e.argc)};\n" \
+      "static inline mrb_value #{fn}(#{params}) {\n" \
+      "  struct RClass* klass = bc2cpp_entry_class(M, \"#{e.owner}\");\n" \
+      "  if (!klass || klass->tt != MRB_TT_CLASS || argc != #{e.argc} || MRB_UNDEF_ALLOCATOR_P(klass) ||\n" \
+      "      (MRB_INSTANCE_TT(klass) != 0 && MRB_INSTANCE_TT(klass) != MRB_TT_OBJECT))\n" \
+      "    return #{by_name};\n" \
+      "  mrb_value self = mrb_obj_value(mrb_obj_alloc(M, MRB_TT_OBJECT, klass));\n" \
+      "  bc2cpp_entry_call(M, self, [&] { return #{m[:impl]}(#{(['M', 'self'] + args).join(', ')}); });\n" \
+      "  return self;\n" \
+      "}\n"
   end
 
   def entry_header_function(e, m, why)

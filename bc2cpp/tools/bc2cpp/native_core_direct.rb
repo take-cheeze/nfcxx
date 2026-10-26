@@ -22,7 +22,10 @@ module NativeCoreDirect
     'Array' => { guard: 'mrb_array_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->array_class' },
     'String' => { guard: 'mrb_string_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->string_class' },
     'Integer' => { guard: 'mrb_integer_p(%<r>s)' },
-    'Range' => { guard: 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class' }
+    'Range' => { guard: 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class' },
+    # OWNER_ARM_ENTRIES only (below). A Float has no singleton class and no subclass instances.
+    'Float' => { guard: 'mrb_float_p(%<r>s)' },
+    'Hash' => { guard: 'mrb_hash_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->hash_class' }
   }.freeze
 
   # A guard that keeps the C wrapper's argument coercion out of the fast path:
@@ -35,20 +38,25 @@ module NativeCoreDirect
     two_integers: 'mrb_integer_p(%<a>s) && mrb_integer_p(%<b>s)',
     # 'c' accepts exactly these (class_ptr_p); anything else raises TypeError through the send.
     class_or_module: '(mrb_class_p(%<a>s) || mrb_sclass_p(%<a>s) || mrb_module_p(%<a>s))',
-    nil_or_string: '(mrb_nil_p(%<a>s) || mrb_string_p(%<a>s))'
+    nil_or_string: '(mrb_nil_p(%<a>s) || mrb_string_p(%<a>s))',
+    # cmpnum's two direct branches: fixnum against fixnum, or either against a Float. A heap Integer (word boxing)
+    # or any other argument keeps the send.
+    fixnum_or_float: '(mrb_fixnum_p(%<a>s) || mrb_float_p(%<a>s))'
   }.freeze
 
   # `checks` are [function, expected body, :exact | :prefix, optional file next to the
   # registration's]; the first is the registered function. Bodies are compared with
   # whitespace and comments removed. `internals` and `implicit_self` are KERNEL_ENTRIES' (below).
+  # `recv_guard` narrows the receiver further, to the values the expression computes exactly (OWNER_ARM_ENTRIES).
   Entry = Struct.new(:name, :owner, :arity, :arg, :aspec, :expression, :checks, :apis, :helper, :internals,
-                     :implicit_self, :explicit_receiver, keyword_init: true) do
+                     :implicit_self, :explicit_receiver, :recv_guard, keyword_init: true) do
     def function
       checks.first.first
     end
 
     def guard(recv, argv)
       parts = [format(OWNERS.fetch(owner)[:guard], r: recv)]
+      parts << format(recv_guard, r: recv) if recv_guard
       arg_guard = ARG_GUARDS.fetch(arg)
       parts << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard
       parts.join(' && ')
@@ -786,14 +794,204 @@ module NativeCoreDirect
                 }
                 return mrb_bool_value(respond_to_p);
               C
+    INHERITED_ENTRIES.find { |entry| entry.name == 'dup' },
+    Entry.new(name: 'object_id', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_fixnum_value(mrb_obj_id(recv))', apis: [%w[mruby.h mrb_obj_id]],
+              checks: [['mrb_obj_id_m', 'return mrb_fixnum_value(mrb_obj_id(self));', :exact]]),
+    # The registered function is the public API itself, called with the receiver as its value.
+    Entry.new(name: '__to_int', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_ensure_int_type(M, recv)', apis: [%w[mruby.h mrb_ensure_int_type]],
+              checks: [['mrb_ensure_int_type', <<~C, :exact, 'object.c']]),
+                val = mrb_ensure_integer_type(mrb, val);
+                #ifdef MRB_USE_BIGINT
+                if (mrb_bigint_p(val)) {
+                  return mrb_int_value(mrb, mrb_bint_as_int(mrb, val));
+                }
+                #endif
+                return val;
+              C
     # respond_to? consults respond_to_missing? only when it is not this default.
     Entry.new(name: 'respond_to_missing?', owner: 'Kernel', arity: 2, arg: :none,
               aspec: 'MRB_ARGS_ARG(1,1) | MRB_MT_PRIVATE', expression: 'mrb_false_value()', apis: [],
               checks: [['mrb_false', 'return mrb_false_value();', :exact]])
   ].freeze
 
+  # cmpnum (numeric.c), the comparison num_cmp delegates to; bc2cpp_num_cmp copies its two direct branches. A
+  # three-parameter static function, so it is checked as :source text.
+  CMPNUM_BODY = <<~C
+    #ifdef MRB_NO_FLOAT             /* integer version */
+
+      if (!mrb_fixnum_p(v2)) {
+        if (!mrb_obj_is_kind_of(mrb, v2, mrb_class_get_id(mrb, MRB_SYM(Numeric)))) {
+          return -2;
+        }
+        v1 = mrb_funcall_argv(mrb, v2, MRB_OPSYM(cmp), 1, &v1);
+        if (mrb_integer_p(v1)) {
+          return -mrb_integer(v1);
+        }
+        return -2;
+      }
+      mrb_int x = mrb_as_int(mrb, v1);
+      mrb_int y = mrb_integer(v2);
+
+    #else                           /* float version */
+
+      mrb_float x, y;
+
+      if (mrb_fixnum_p(v1)) {
+        if (mrb_fixnum_p(v2)) {
+          mrb_int x = mrb_integer(v1);
+          mrb_int y = mrb_integer(v2);
+
+          if (x > y) return 1;
+          else if (x < y) return -1;
+          return 0;
+        }
+    #ifdef MRB_USE_BIGINT
+        if (mrb_bigint_p(v2)) {
+          return -mrb_bint_cmp(mrb, v2, v1);
+        }
+    #endif
+        x = (mrb_float)mrb_integer(v1);
+      }
+    #ifdef MRB_USE_BIGINT
+      else if (mrb_bigint_p(v1)) {
+        if (mrb_integer_p(v2) || mrb_bigint_p(v2)) {
+          return mrb_bint_cmp(mrb, v1, v2);
+        }
+        x = mrb_as_float(mrb, v1);
+      }
+    #endif
+      else {
+        x = mrb_as_float(mrb, v1);
+      }
+
+      switch (mrb_type(v2)) {
+    #ifdef MRB_USE_RATIONAL
+      case MRB_TT_RATIONAL:
+    #endif
+    #ifdef MRB_USE_BIGINT
+      case MRB_TT_BIGINT:
+    #endif
+      case MRB_TT_INTEGER:
+        if (mrb_fixnum_p(v2)) {
+          y = (mrb_float)mrb_integer(v2);
+          break;
+        }
+        /* fall through */
+      case MRB_TT_FLOAT:
+        y = mrb_as_float(mrb, v2);
+        break;
+      default:
+        if (!mrb_obj_is_kind_of(mrb, v2, mrb_class_get_id(mrb, MRB_SYM(Numeric)))) {
+          return -2;
+        }
+        /* fall through */
+    #ifdef MRB_USE_COMPLEX
+      case MRB_TT_COMPLEX:
+    #endif
+        v1 = mrb_funcall_argv(mrb, v2, MRB_OPSYM(cmp), 1, &v1);
+        if (mrb_fixnum_p(v1)) {
+          return -mrb_integer(v1);
+        }
+        return -2;
+      }
+    #endif
+      if (x > y)
+        return 1;
+      else if (x < y)
+        return -1;
+      return 0;
+  C
+
+  # OWNER_ARM_ENTRIES (codegen_owner_set_direct.rb, owner_set_native_arms): exact-class arms in front of an owner
+  # call, for an owner of its name whose registration is one of these. Used only there, so the typed-receiver passes
+  # that read ENTRIES are unchanged. Integer#to_i is NUMERIC_CONVERSION_ENTRIES' row.
+  OWNER_ARM_ENTRIES = [
+    # flo_to_i raises for NaN/Infinity (mrb_check_num_exact) and widens past the fixnum range; the receiver guard
+    # leaves both to the send, so the arm is the truncating cast alone.
+    Entry.new(name: 'to_i', owner: 'Float', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              recv_guard: 'isfinite(mrb_float(%<r>s)) && FIXABLE_FLOAT(mrb_float(%<r>s))',
+              expression: 'mrb_int_value(M, (mrb_int)(mrb_float(recv) > 0.0 ? floor(mrb_float(recv)) : ceil(mrb_float(recv))))',
+              apis: [],
+              checks: [['flo_to_i', <<~C, :exact]]),
+                mrb_float f = mrb_float(num);
+                mrb_check_num_exact(mrb, f);
+                if (!FIXABLE_FLOAT(f)) {
+                #ifdef MRB_USE_BIGINT
+                  return mrb_bint_new_float(mrb, f);
+                #else
+                  mrb_int_overflow(mrb, "to_f");
+                #endif
+                }
+                if (f > 0.0) f = floor(f);
+                if (f < 0.0) f = ceil(f);
+                return mrb_int_value(mrb, (mrb_int)f);
+              C
+    Entry.new(name: 'to_f', owner: 'Integer', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_float_value(M, (mrb_float)mrb_integer(recv))', apis: [],
+              checks: [['int_to_f', <<~C, :exact]]),
+                #ifdef MRB_USE_BIGINT
+                if (mrb_bigint_p(num)) {
+                  return mrb_float_value(mrb, mrb_bint_as_float(mrb, num));
+                }
+                #endif
+                return mrb_float_value(mrb, (mrb_float)mrb_integer(num));
+              C
+    Entry.new(name: 'to_f', owner: 'Float', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'recv', apis: [],
+              checks: [['mrb_obj_itself', 'return self;', :exact, 'object.c']]),
+    # num_cmp over cmpnum, for its two direct branches only: fixnum against fixnum, or a fixnum/Float pair compared
+    # as doubles (so NaN answers 0, as cmpnum does). A heap Integer receiver or argument keeps the send.
+    Entry.new(name: '<=>', owner: 'Integer', arity: 1, arg: :fixnum_or_float, aspec: 'MRB_ARGS_REQ(1)',
+              recv_guard: 'mrb_fixnum_p(%<r>s)',
+              expression: 'bc2cpp_num_cmp(recv, ARG0)', apis: [], helper: 'bc2cpp_num_cmp',
+              checks: [['num_cmp', <<~C, :exact],
+                mrb_value other = mrb_get_arg1(mrb);
+                mrb_int n = cmpnum(mrb, self, other);
+                if (n == -2) return mrb_nil_value();
+                return mrb_fixnum_value(n);
+              C
+                       ['cmpnum', CMPNUM_BODY, :source]]),
+    Entry.new(name: '<=>', owner: 'Float', arity: 1, arg: :fixnum_or_float, aspec: 'MRB_ARGS_REQ(1)',
+              expression: 'bc2cpp_num_cmp(recv, ARG0)', apis: [], helper: 'bc2cpp_num_cmp',
+              checks: [['num_cmp', <<~C, :exact],
+                mrb_value other = mrb_get_arg1(mrb);
+                mrb_int n = cmpnum(mrb, self, other);
+                if (n == -2) return mrb_nil_value();
+                return mrb_fixnum_value(n);
+              C
+                       ['cmpnum', CMPNUM_BODY, :source]]),
+    Entry.new(name: 'bytesize', owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_int_value(M, RSTRING_LEN(recv))', apis: [],
+              checks: [['mrb_str_bytesize', 'return mrb_int_value(mrb, RSTRING_LEN(self));', :exact]]),
+    # The registered function is the public API itself, called with the receiver as its value.
+    Entry.new(name: 'keys', owner: 'Hash', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_hash_keys(M, recv)', apis: [%w[mruby/hash.h mrb_hash_keys]],
+              checks: [['mrb_hash_keys', <<~C, :exact]])
+                struct RHash *h = mrb_hash_ptr(hash);
+                mrb_value ary = mrb_ary_new_capa(mrb, (mrb_int)h_size(h));
+                H_EACH(h, entry) {
+                  mrb_ary_push(mrb, ary, entry->key);
+                }
+                return ary;
+              C
+  ].freeze
+
   # The C text of each helper, emitted once per output that calls it.
   HAND_HELPERS = {
+    # cmpnum's direct branches (OWNER_ARM_ENTRIES' guards keep everything else on the send).
+    'bc2cpp_num_cmp' => <<~CPP,
+      static inline mrb_value bc2cpp_num_cmp(mrb_value a, mrb_value b) {
+        if (mrb_fixnum_p(a) && mrb_fixnum_p(b)) {
+          mrb_int x = mrb_integer(a), y = mrb_integer(b);
+          return mrb_fixnum_value(x > y ? 1 : x < y ? -1 : 0);
+        }
+        mrb_float x = mrb_fixnum_p(a) ? (mrb_float)mrb_integer(a) : mrb_float(a);
+        mrb_float y = mrb_fixnum_p(b) ? (mrb_float)mrb_integer(b) : mrb_float(b);
+        return mrb_fixnum_value(x > y ? 1 : x < y ? -1 : 0);
+      }
+    CPP
     'bc2cpp_ary_compact' => <<~CPP,
       static inline mrb_value bc2cpp_ary_compact(mrb_state* M, mrb_value self) {
         mrb_value ary = mrb_ary_new_capa(M, RARRAY_LEN(self));
@@ -990,7 +1188,7 @@ module NativeCoreDirect
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
     headers = (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
-     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
+     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES + OWNER_ARM_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
     key += headers.map(&:first).uniq.map do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
@@ -1006,7 +1204,7 @@ module NativeCoreDirect
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
     (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
-     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES).to_h do |entry|
+     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES + OWNER_ARM_ENTRIES).to_h do |entry|
       [entry, audit_entry(entry, registrations, opaque_owners, include_dir)]
     end
   end

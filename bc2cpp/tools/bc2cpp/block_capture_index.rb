@@ -16,7 +16,7 @@ class BlockCaptureIndex
     @upvars.fetch(irep) do
       needs = []
       walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: @max_depth) do |insn, depth|
-        next unless insn.op == 'GETUPVAR' || insn.op == 'SETUPVAR'
+        next unless insn.op == :GETUPVAR || insn.op == :SETUPVAR
 
         index, level = insn.upvar_ref
         needs << [level - depth, index].freeze if level >= depth
@@ -34,13 +34,13 @@ class BlockCaptureIndex
     return by_depth[depth] if by_depth.key?(depth)
 
     needs = []
-    BytecodeIR.for(irep).instructions_with_op('BLKPUSH').each do |insn|
+    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).each do |insn|
       level = insn.paren_value
       return store_levels(by_depth, depth, nil) unless level
 
       needs << level.to_i
     end
-    if given && BytecodeIR.for(irep).instructions_with_op('SSEND0').any? { |insn| @block_given_names.include?(insn.sym) }
+    if given && BytecodeIR.for(irep).instructions_with_op(:SSEND0).any? { |insn| @block_given_names.include?(insn.sym) }
       needs << depth + 1
     end
     (irep.reps || []).each do |label|

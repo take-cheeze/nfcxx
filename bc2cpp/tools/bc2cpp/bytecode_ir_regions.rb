@@ -26,10 +26,7 @@ module BytecodeIR
 
     # Yields [source, index] for the same instructions, in program order.
     def each_with_op(*ops)
-      ops = ops.uniq
-      indices = ops.flat_map { |op| indices_by_op.fetch(op, []) }
-      indices.sort! if ops.size > 1
-      indices.each { |index| yield @instructions[index].source, index }
+      indices_with_op(ops).each { |index| yield @instructions[index].source, index }
     end
 
     def op?(*ops)
@@ -54,9 +51,7 @@ module BytecodeIR
     def adjacent_pairs(first_op, second_ops)
       return enum_for(:adjacent_pairs, first_op, second_ops) unless block_given?
 
-      indices = second_ops.uniq.flat_map { |op| indices_by_op.fetch(op, []) }
-      indices.sort! if second_ops.uniq.size > 1
-      indices.each do |index|
+      indices_with_op(second_ops).each do |index|
         next unless index.positive?
 
         instruction = @instructions[index]
@@ -153,7 +148,7 @@ module BytecodeIR
           next
         end
 
-        if follow_moves && insn.op == 'MOVE'
+        if follow_moves && insn.op == :MOVE
           moves += 1
           return nil if max_moves && moves > max_moves
 
@@ -179,13 +174,27 @@ module BytecodeIR
 
     # Per-op and per-leading-register index lists, built once (the instruction
     # list never changes after loading; see #built_from?).
+    # The sorted indices of the instructions whose op is one of +ops+. Callers ask with the same op lists over and
+    # over (every SEND variant, ...), so each list is merged once.
+    def indices_with_op(ops)
+      (@indices_with_op ||= {})[ops] ||= begin
+        list = ops.uniq
+        indices = list.flat_map { |op| indices_by_op.fetch(op, []) }
+        indices.sort! if list.size > 1
+        indices.freeze
+      end
+    end
+
     def indices_by_op
       @indices_by_op ||= @instructions.group_by(&:op).transform_values { |list| list.map(&:index).freeze }.freeze
     end
 
     def lead_indices
-      @lead_indices ||= @instructions.group_by { |instruction| instruction.source.reg }
-                                     .transform_values { |list| list.map(&:index).freeze }.freeze
+      @lead_indices ||= begin
+        by_reg = @instructions.group_by { |instruction| instruction.source.reg }
+        size = (by_reg.keys.compact.max || -1) + 1
+        Array.new(size) { |reg| by_reg.fetch(reg, []).map(&:index).freeze }
+      end.freeze
     end
   end
 end

@@ -95,7 +95,7 @@ class ReceiverHarness < CodeGen
 end
 receiver_harness = ReceiverHarness.new
 receiver_harness.self_mask = Set[:Left]
-implicit_body = ReceiverBody.new([Insn.new(lineno: 1, addr: 0, op: 'SSEND', args: '')])
+implicit_body = ReceiverBody.new([Insn.new(lineno: 1, addr: 0, op: :SSEND, args: '')])
 check.call('implicit call uses lexical self rather than polluted output register',
            receiver_harness.bytecode_ir_argument_receiver_classes(implicit_body, 0, 2) == Set[:Left])
 receiver_harness.self_mask = nil
@@ -121,17 +121,17 @@ class GraphHarness
 end
 graph_bodies = %w[seed middle leaf].to_h do |label|
   [label, Irep.new(label: label, nlocals: 2, nregs: 2, instructions: [
-    Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: '1:0:0:0:0:0:0:0 (0x0)'),
-    Insn.new(lineno: 1, addr: 4, op: 'RETURN', args: 'R1')
+    Insn.new(lineno: 1, addr: 0, op: :ENTER, args: '1:0:0:0:0:0:0:0 (0x0)'),
+    Insn.new(lineno: 1, addr: 4, op: :RETURN, args: 'R1')
   ])]
 end
 graph_definitions = graph_bodies.keys.map { |label| GraphDefinition.new('Graph', label, label) }
 graph_harness = GraphHarness.new({ 'middle' => graph_bodies['seed'], 'leaf' => graph_bodies['middle'] },
                                  { 'seed' => Set[:Integer].freeze })
 graph_facts = IrCallGraphTypes.collect(graph_harness, graph_definitions, graph_bodies)
-check.call('complete graph facts propagate over multiple rounds', graph_facts.dig('leaf', '1') == Set[:Integer])
+check.call('complete graph facts propagate over multiple rounds', graph_facts.dig('leaf', 1) == Set[:Integer])
 limited = IrCallGraphTypes.collect(graph_harness, graph_definitions, graph_bodies, max_rounds: 1)
-check.call('round limit retains completed facts without publishing pending nodes', limited.dig('middle', '1') == Set[:Integer] && !limited.key?('leaf'))
+check.call('round limit retains completed facts without publishing pending nodes', limited.dig('middle', 1) == Set[:Integer] && !limited.key?('leaf'))
 cyclic = GraphHarness.new({ 'seed' => graph_bodies['middle'], 'middle' => graph_bodies['seed'] }, {})
 check.call('an unresolved recursive component never becomes an empty inferred type',
            IrCallGraphTypes.collect(cyclic, graph_definitions.first(2), graph_bodies).empty?)
@@ -238,18 +238,18 @@ require_relative '../../tools/bc2cpp/irep'
 arity_spellings = (0..16).map { |count| "n=#{count}" } +
                   %w[n=* n=0|nk=0 n=3|nk=2 n=3|nk=* n=*|nk=0 n=*|nk=2 n=*|nk=*]
 arity_spellings.each do |spelling|
-  instruction = Insn.synthetic('SEND', "R1 :arity_probe #{spelling}")
+  instruction = Insn.synthetic(:SEND, "R1 :arity_probe #{spelling}")
   expected_plain = instruction.n_spec && instruction.n_spec != '*' && instruction.nk_spec.nil?
   expected_splat = instruction.n_spec == '*' && instruction.nk_spec.nil?
   check.call("decoded arity matches printed semantics for #{spelling}",
              instruction.plain_fixed_argc? == expected_plain && instruction.pure_splat? == expected_splat)
 end
-zero_call = Insn.synthetic('SEND0', 'R1 :arity_probe')
+zero_call = Insn.synthetic(:SEND0, 'R1 :arity_probe')
 check.call('absent argc retains nil fixed-arity and false pure-splat results',
            zero_call.plain_fixed_argc?.nil? && zero_call.pure_splat? == false)
-reinstalled_call = Insn.synthetic('SEND', 'R1 :arity_probe n=2')
+reinstalled_call = Insn.synthetic(:SEND, 'R1 :arity_probe n=2')
 check.call('fixed argc is classified before operand replacement', reinstalled_call.plain_fixed_argc? == true)
-reinstalled_call.typed = OperandSchema.parse('SEND', 'R1 :arity_probe n=*')
+reinstalled_call.typed = OperandSchema.parse(:SEND, 'R1 :arity_probe n=*')
 check.call('classification observes replacement operands without a stale memo',
            reinstalled_call.plain_fixed_argc? == false && reinstalled_call.pure_splat? == true)
 
@@ -372,17 +372,17 @@ end
 body_fact = lambda do |instructions, index, reg, **inputs|
   BytecodeIR::Types.new(body_irep.call(instructions), **inputs).fact_at(index, reg)&.classes
 end
-rest_body = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['GETIDX0', 'R2 R1[0]'], ['RETURN', 'R2']]
+rest_body = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:GETIDX0, 'R2 R1[0]'], [:RETURN, 'R2']]
 check.call('rest element receiver sees the joined element type (with nil for an absent index)',
-           body_fact.call(rest_body, 2, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] }) == Set[:NilClass, :Integer, :String])
-check.call('rest element receiver stays untyped without a join', body_fact.call(rest_body, 2, '2').nil?)
-rest_copy = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['MOVE', 'R3 R1'], ['GETIDX0', 'R2 R3[0]'], ['RETURN', 'R2']]
+           body_fact.call(rest_body, 2, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] }) == Set[:NilClass, :Integer, :String])
+check.call('rest element receiver stays untyped without a join', body_fact.call(rest_body, 2, 2).nil?)
+rest_copy = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:MOVE, 'R3 R1'], [:GETIDX0, 'R2 R3[0]'], [:RETURN, 'R2']]
 check.call('a MOVE copy read only by element reads keeps the join',
-           body_fact.call(rest_copy, 3, '2', inferred_rest_elements: { '1' => Set[:Integer] }) == Set[:NilClass, :Integer])
-rest_mutated = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['MOVE', 'R3 R1'], ['SEND', 'R3 :push n=1'],
-                ['GETIDX0', 'R2 R1[0]'], ['RETURN', 'R2']]
+           body_fact.call(rest_copy, 3, 2, inferred_rest_elements: { 1 => Set[:Integer] }) == Set[:NilClass, :Integer])
+rest_mutated = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:MOVE, 'R3 R1'], [:SEND, 'R3 :push n=1'],
+                [:GETIDX0, 'R2 R1[0]'], [:RETURN, 'R2']]
 check.call('a body that calls a method on the rest array (or a copy) refuses the element join',
-           body_fact.call(rest_mutated, 4, '2', inferred_rest_elements: { '1' => Set[:Integer] }).nil?)
+           body_fact.call(rest_mutated, 4, 2, inferred_rest_elements: { 1 => Set[:Integer] }).nil?)
 # A signature's `*T` (declared_rest_elements) types the element read where the call-site join is withheld: the join is
 # used only while the body cannot change the array, and the declared T stands in otherwise. With both, the join wins, as
 # for a required parameter (definition_types before declared_definition). A declared bound is not a body fact for the
@@ -390,54 +390,54 @@ check.call('a body that calls a method on the rest array (or a copy) refuses the
 declared_rest = lambda do |instructions, index, reg, **inputs|
   BytecodeIR::Types.new(body_irep.call(instructions), **inputs).fact_at(index, reg)
 end
-declared_only = declared_rest.call(rest_body, 2, '2', declared_rest_elements: { '1' => Set[:Integer] })
+declared_only = declared_rest.call(rest_body, 2, 2, declared_rest_elements: { 1 => Set[:Integer] })
 check.call('a declared *Integer rest read in the body is Integer (nil for an absent index), and is declared',
            declared_only&.classes == Set[:NilClass, :Integer] && declared_only.declared?)
 check.call('a declared rest element is not visible to the undeclared query',
-           BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { '1' => Set[:Integer] }).at(2, '2').nil?)
+           BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { 1 => Set[:Integer] }).at(2, 2).nil?)
 check.call('a mutated rest with a declared *Integer takes only the declaration: the call-site join String is not added',
-           declared_rest.call(rest_mutated, 4, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] },
-                              declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer])
-rest_captured = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['LAMBDA', 'R3 I[0]'], ['GETIDX0', 'R2 R1[0]'], ['RETURN', 'R2']]
+           declared_rest.call(rest_mutated, 4, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] },
+                              declared_rest_elements: { 1 => Set[:Integer] })&.classes == Set[:NilClass, :Integer])
+rest_captured = [[:ENTER, '0:0:1:0:0:0:0:0 (0x0)'], [:LAMBDA, 'R3 I[0]'], [:GETIDX0, 'R2 R1[0]'], [:RETURN, 'R2']]
 check.call('a closure capturing the rest withdraws the join, and the declared *Integer types the read',
-           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] },
-                              declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer] &&
-           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] }).nil?)
+           declared_rest.call(rest_captured, 3, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] },
+                              declared_rest_elements: { 1 => Set[:Integer] })&.classes == Set[:NilClass, :Integer] &&
+           declared_rest.call(rest_captured, 3, 2, inferred_rest_elements: { 1 => Set[:Integer, :String] }).nil?)
 check.call('a declared *String with a private join of Integer: the join is read, as for a required parameter',
-           declared_rest.call(rest_body, 2, '2', inferred_rest_elements: { '1' => Set[:Integer] },
-                              declared_rest_elements: { '1' => Set[:String] })&.classes == Set[:NilClass, :Integer])
-keyword_body = [['ENTER', '0:0:0:0:1:0:0:0 (0x0)'], ['KARG', 'R3 :key'], ['RETURN', 'R3']]
+           declared_rest.call(rest_body, 2, 2, inferred_rest_elements: { 1 => Set[:Integer] },
+                              declared_rest_elements: { 1 => Set[:String] })&.classes == Set[:NilClass, :Integer])
+keyword_body = [[:ENTER, '0:0:0:0:1:0:0:0 (0x0)'], [:KARG, 'R3 :key'], [:RETURN, 'R3']]
 check.call('required keyword reads its joined type',
-           body_fact.call(keyword_body, 2, '3', inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])
-check.call('required keyword stays untyped without a join', body_fact.call(keyword_body, 2, '3').nil?)
+           body_fact.call(keyword_body, 2, 3, inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])
+check.call('required keyword stays untyped without a join', body_fact.call(keyword_body, 2, 3).nil?)
 declared_keyword = BytecodeIR::Types.new(body_irep.call(keyword_body), declared_keywords: { 'key' => Set[:Symbol] },
-                                         inferred_keywords: { 'key' => Set[:String, :Integer] }).fact_at(2, '3')
+                                         inferred_keywords: { 'key' => Set[:String, :Integer] }).fact_at(2, 3)
 check.call('a declared keyword type wins over the call-site join', declared_keyword.classes == Set[:Symbol] && declared_keyword.declared?)
 # Optional keyword `flag` in the layout mrbc emits: KEY_P, a JMPIF over the default, the default, a JMP to the join
 # after KARG. The read is the last instruction, so its reaching definitions are the KARG value and the default.
 optional_fact = lambda do |default, **inputs|
   karg = 4 + default.size # ENTER, KEY_P, JMPIF, default..., JMP, then KARG
-  insns = [['ENTER', '0:0:0:0:1:0:0:0 (0x0)'], ['KEY_P', 'R3 :flag'], ['JMPIF', "R3 #{4 * karg}"]] + default +
-          [['JMP', (4 * (karg + 1)).to_s], ['KARG', 'R3 :flag'], ['KEYEND', ''], ['RETURN', 'R3']]
+  insns = [[:ENTER, '0:0:0:0:1:0:0:0 (0x0)'], [:KEY_P, 'R3 :flag'], [:JMPIF, "R3 #{4 * karg}"]] + default +
+          [[:JMP, (4 * (karg + 1)).to_s], [:KARG, 'R3 :flag'], [:KEYEND, ''], [:RETURN, 'R3']]
   irep = Irep.new(label: 'body', nlocals: 4, nregs: 8, instructions: insns.each_with_index.map do |(op, args), i|
     Insn.new(lineno: 1, addr: 4 * i, op: op, args: args)
   end)
-  BytecodeIR::Types.new(irep, **inputs).fact_at(insns.size - 1, '3')&.classes
+  BytecodeIR::Types.new(irep, **inputs).fact_at(insns.size - 1, 3)&.classes
 end
 check.call('optional keyword reads its join, which holds the passed class and the literal default class',
-           optional_fact.call([['LOADI_1', 'R3 (1)']], inferred_keywords: { 'flag' => Set[:Integer] }) == Set[:Integer])
+           optional_fact.call([[:LOADI_1, 'R3 (1)']], inferred_keywords: { 'flag' => Set[:Integer] }) == Set[:Integer])
 check.call('a joined default class (omitted site) is read with the passed class',
-           optional_fact.call([['LOADNIL', 'R3 (0)']], inferred_keywords: { 'flag' => Set[:String, :NilClass] }) == Set[:String, :NilClass])
-check.call('optional keyword with a literal default stays untyped without a join', optional_fact.call([['LOADI_1', 'R3 (1)']]).nil?)
+           optional_fact.call([[:LOADNIL, 'R3 (0)']], inferred_keywords: { 'flag' => Set[:String, :NilClass] }) == Set[:String, :NilClass])
+check.call('optional keyword with a literal default stays untyped without a join', optional_fact.call([[:LOADI_1, 'R3 (1)']]).nil?)
 check.call('optional keyword with a non-literal default stays untyped even with the join absent',
-           optional_fact.call([['SEND0', 'R3 :to_s']]).nil?)
+           optional_fact.call([[:SEND0, 'R3 :to_s']]).nil?)
 check.call('a declared optional keyword type wins over the join',
-           optional_fact.call([['LOADSYM', 'R3 :x']], declared_keywords: { 'flag' => Set[:Symbol] },
+           optional_fact.call([[:LOADSYM, 'R3 :x']], declared_keywords: { 'flag' => Set[:Symbol] },
                                                       inferred_keywords: { 'flag' => Set[:Integer] }) == Set[:Symbol])
-block_body = [['ENTER', '0:0:0:0:0:0:1:0 (0x0)'], ['SEND', 'R1 :call n=0']]
+block_body = [[:ENTER, '0:0:0:0:0:0:1:0 (0x0)'], [:SEND, 'R1 :call n=0']]
 check.call('a block called with .call is a Proc when every caller passes a literal block',
-           body_fact.call(block_body, 1, '1', inferred_args: { '1' => Set[:Proc] }) == Set[:Proc])
-check.call('a block without the join keeps its nominal Proc-or-nil bound', body_fact.call(block_body, 1, '1') == Set[:Proc, :NilClass])
+           body_fact.call(block_body, 1, 1, inferred_args: { 1 => Set[:Proc] }) == Set[:Proc])
+check.call('a block without the join keeps its nominal Proc-or-nil bound', body_fact.call(block_body, 1, 1) == Set[:Proc, :NilClass])
 
 # End to end through the codegen joins: a poisoned name (a splatted or dynamic caller) refuses the rest join, so the
 # body sees nothing; the same name with a plain caller gives the join; BC2CPP_IR_ARGUMENT_TYPES=0 withdraws it.
@@ -453,17 +453,17 @@ class RestBodyHarness < ArgumentHarness
 end
 # One required parameter and a rest parameter: the rest register is R2 (mandatory + optional + 1), its element R3.
 rest_irep = Irep.new(label: 'rest_def', nlocals: 4, nregs: 8, instructions: [
-  Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: '1:0:1:0:0:0:0:0 (0x0)'),
-  Insn.new(lineno: 1, addr: 4, op: 'GETIDX0', args: 'R3 R2[0]'),
-  Insn.new(lineno: 1, addr: 8, op: 'RETURN', args: 'R3')
+  Insn.new(lineno: 1, addr: 0, op: :ENTER, args: '1:0:1:0:0:0:0:0 (0x0)'),
+  Insn.new(lineno: 1, addr: 4, op: :GETIDX0, args: 'R3 R2[0]'),
+  Insn.new(lineno: 1, addr: 8, op: :RETURN, args: 'R3')
 ])
-caller = ReceiverBody.new([Insn.new(lineno: 1, addr: 0, op: 'SEND', args: 'R2 :gather n=1')])
+caller = ReceiverBody.new([Insn.new(lineno: 1, addr: 0, op: :SEND, args: 'R2 :gather n=1')])
 end_to_end = RestBodyHarness.new(rest_irep, { [caller, 2] => Set[:Left], [caller, 4] => Set[:Integer] })
 end_to_end.gather_sites = [[caller, 0, 2, 2]]
 rest_join_of = -> { end_to_end.bytecode_ir_rest_argument_classes(Rest) }
 body_element = lambda do |join|
-  inputs = join ? { inferred_rest_elements: { '2' => join } } : {}
-  BytecodeIR::Types.new(rest_irep, **inputs).fact_at(2, '3')&.classes
+  inputs = join ? { inferred_rest_elements: { 2 => join } } : {}
+  BytecodeIR::Types.new(rest_irep, **inputs).fact_at(2, 3)&.classes
 end
 check.call('codegen rest join reaches the body as the element type',
            rest_join_of.call == Set[:Integer] && body_element.call(rest_join_of.call) == Set[:NilClass, :Integer])
@@ -494,9 +494,9 @@ sig_methods.each do |name, (mand, opt, rest, post, type)|
   rest_reg = mand + opt + 1
   sig_source << "  def #{name}: #{type}\n"
   sig_ireps[label] = Irep.new(label: label, nlocals: 4, nregs: 8, instructions: [
-    Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: "#{mand}:#{opt}:#{rest}:#{post}:0:0:0:0 (0x0)"),
-    Insn.new(lineno: 1, addr: 4, op: 'GETIDX0', args: "R#{rest_reg + 1} R#{rest_reg}[0]"),
-    Insn.new(lineno: 1, addr: 8, op: 'RETURN', args: "R#{rest_reg + 1}")
+    Insn.new(lineno: 1, addr: 0, op: :ENTER, args: "#{mand}:#{opt}:#{rest}:#{post}:0:0:0:0 (0x0)"),
+    Insn.new(lineno: 1, addr: 4, op: :GETIDX0, args: "R#{rest_reg + 1} R#{rest_reg}[0]"),
+    Insn.new(lineno: 1, addr: 8, op: :RETURN, args: "R#{rest_reg + 1}")
   ])
   sig_registry[name] = [SigDef.new('RestSig', name, label, nil)]
 end
@@ -508,7 +508,7 @@ Dir.mktmpdir('rest-signature-fixture') do |dir|
   body_of = lambda do |name, **inputs|
     irep = sig_ireps["sig_#{name}"]
     analysis = RbsSignatures.ir_types(applied, irep, **inputs)
-    analysis.fact_at(2, (irep.enter.enter_fields[0].to_i + irep.enter.enter_fields[1].to_i + 2).to_s)
+    analysis.fact_at(2, irep.enter.enter_fields[0].to_i + irep.enter.enter_fields[1].to_i + 2)
   end
   typed = body_of.call('typed_rest')
   check.call('a signature `*Integer` types the body element read as Integer (declared, nil for an absent index)',
@@ -522,7 +522,7 @@ Dir.mktmpdir('rest-signature-fixture') do |dir|
              mixed&.classes == Set[:NilClass, :Integer] && mixed.declared?)
   check.call('a rest followed by a post parameter gives no declared element type (the layout is not the one ENTER fills)',
              body_of.call('post_rest').nil?)
-  joined = body_of.call('typed_rest', inferred_rest_elements: { '1' => Set[:Integer] })
+  joined = body_of.call('typed_rest', inferred_rest_elements: { 1 => Set[:Integer] })
   check.call('a signature `*Integer` and a complete private join of Integer read Integer',
              joined&.classes == Set[:NilClass, :Integer])
 end

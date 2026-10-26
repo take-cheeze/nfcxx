@@ -145,8 +145,8 @@ check('an undeclared name is never a module owner (nil)', candidates('Q', native
 # program source defines on one of them is untyped. Built on the same contract tables as self_call_override checks.
 puts '-- the module receiver same-name guard'
 def insn(addr, op, args) = Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
-module_irep = Irep.new(label: 'via_mod', instructions: [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SSEND', 'R1 :greet n=0'),
-                                                        insn(2, 'RETURN', 'R1')],
+module_irep = Irep.new(label: 'via_mod', instructions: [insn(0, :ENTER, '0:0:0:0:0:0:0:0 (0x0)'), insn(1, :SSEND, 'R1 :greet n=0'),
+                                                        insn(2, :RETURN, 'R1')],
                        catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 applied = RbsSignatures::Applied.new(
   ir_methods: Set[['M', 'via_mod'], ['A', 'greet'], ['B', 'greet']], ir_named_returns: { ['A', 'greet'] => Set[:Symbol], ['B', 'greet'] => Set[:Integer] },
@@ -160,7 +160,7 @@ world = { superclass_of: hierarchy, included_modules: { 'A' => ['M'], 'B' => ['M
 join = lambda do |core_redefined|
   result = RbsSignatures.ir_types(applied, module_irep, **world, subclasses: subclasses, includer_candidates: module_candidates,
                                   core_redefined: core_redefined, call_results: false)
-  result.fact_at(2, '1', refusal: {}).then { |fact| fact&.declared? ? fact.classes : nil }
+  result.fact_at(2, 1, refusal: {}).then { |fact| fact&.declared? ? fact.classes : nil }
 end
 check('a module with two includers and no program definition of greet joins (Symbol | Integer)',
       join.call(->(_owner, _name) { false }) == Set[:Symbol, :Integer])
@@ -179,7 +179,7 @@ world_fact = lambda do |native_text, lam_world|
                          walked: {}, native_paths: [path], ruby_paths: [], module_names: Set['M'])
     fact = RbsSignatures.ir_types(applied, module_irep, **lam_world, subclasses: subclasses,
                                   includer_candidates: ->(mod) { cw.known_includer_candidates(mod) }, call_results: false)
-                        .fact_at(2, '1', refusal: {})
+                        .fact_at(2, 1, refusal: {})
     fact&.declared? ? fact.classes : nil
   ensure
     ScanCache.directory_override = nil

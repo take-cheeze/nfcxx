@@ -67,9 +67,10 @@ module BlockCoreDirectFallback
     # else stays: a Fiber's frames need a real callinfo to reach the bytecode.
     site = exact_core_site_for(recv, name)
     exact = site ? arms.select { |arm| arm[:class] == site[:klass] } : []
-    # BLOCK_ITERATOR_DIRECT: an Integer literal receiver (`3.times { }`) is an Integer in every world.
-    literal = exact.empty? && arms.any? { |arm| arm[:class] == 'Integer' } && block_core_integer_literal?
-    exact = arms.select { |arm| arm[:class] == 'Integer' } if literal
+    # Read the original block registers when the enclosing send has no site proof.
+    literal_class = exact.empty? && block_core_literal_class
+    literal = literal_class && arms.any? { |arm| arm[:class] == literal_class }
+    exact = arms.select { |arm| arm[:class] == literal_class } if literal
     exact_class = !exact.empty?
     arms = exact if exact_class
     sole_call = nil
@@ -106,10 +107,10 @@ module BlockCoreDirectFallback
       "  }\n"
   end
 
-  # BLOCK_ITERATOR_DIRECT: is the receiver of the literal-block send being compiled an Integer literal on
+  # BLOCK_ITERATOR_DIRECT: is the receiver of the literal-block send being compiled a core literal on
   # every reaching path? The registers are the send's own irep's (the parent irep of a block nested in an inlined
   # loop body, read unshifted).
-  def block_core_integer_literal?
+  def block_core_literal_class
     region = @call_block_region
     irep = region && region[:parent_irep]
     return false unless irep && region[:dest_reg] && !region[:self_implicit]
@@ -117,7 +118,11 @@ module BlockCoreDirectFallback
     idx = irep.index_of_addr(region[:sendb_addr])
     return false unless idx&.positive?
 
-    exact_literal(irep, idx, region[:dest_reg])&.klass == :Integer
+    klass = exact_literal(irep, idx, region[:dest_reg])&.klass&.to_s
+    return 'Integer' if klass == 'Integer'
+
+    # Heap literals can acquire singleton methods; the whole-program gate excludes that.
+    klass if block_core_world.exact_instances_singleton_free? && BLOCK_RECEIVERS.key?(klass)
   end
 
   # BLOCK_ITERATOR_DIRECT: an implicit-self literal-block send (`loop { }`) whose only definition in the
@@ -311,15 +316,10 @@ module BlockCoreDirectFallback
     return @clean_cache[label] if @clean_cache.key?(label)
     return false if @probing.include?(label)
 
-    @probing << label
-    begin
-      cycles = @guard_cycles
-      result = with_fresh_method_state { compile_method(label) }
-      clean = !result[:code].include?('#error')
-      @clean_cache[label] = clean if cycles == @guard_cycles
-      clean
-    ensure
-      @probing.delete(label)
+    probe_clean(label) do
+      # Only #error is read, as in compiles_clean?: the probe skips the register-flow cleanup the same way.
+      @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+      compile_method(label)
     end
   end
 end

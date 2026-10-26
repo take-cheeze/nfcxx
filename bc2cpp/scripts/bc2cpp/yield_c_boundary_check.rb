@@ -25,6 +25,10 @@ FIXTURE = <<~RUBY
     def cb_target
       pause
     end
+
+    def cb_only
+      pause
+    end
   end
 
   class Caller
@@ -54,7 +58,7 @@ FIXTURE = <<~RUBY
   end.resume
 RUBY
 
-METHODS = %w[pause cb_target via_native self_send other_send].freeze
+METHODS = %w[pause cb_target cb_only via_native self_send other_send].freeze
 
 # Child: compile the fixture, run the analysis under the inherited switches and print { name => yield_free? }.
 if ARGV.first == '--probe'
@@ -68,12 +72,15 @@ if ARGV.first == '--probe'
     system(ENV.fetch('MRBC'), '-g', '-o', out, src, exception: true)
     image = Struct.new(:bytes).new(File.binread(out))
     ireps = load_ireps(image, cache: nil).first
-    # `native_m` is defined by native code, which may call back into `cb_target`.
-    reach = YieldReach.new(ireps: ireps, sound: true, opaque_names: Set['cb_target'], native_names: Set['native_m'])
+    # `native_m` is defined by native code, which may call back into `cb_target` or `cb_only`.
+    reach = YieldReach.new(ireps: ireps, sound: true, opaque_names: Set['cb_target', 'cb_only'],
+                           native_names: Set['native_m'])
     result = METHODS.to_h do |name|
       node = reach.nodes.values.find { |n| n.kind == :method && n.name == name }
       [name, node && reach.yield_free?(node.label)]
     end
+    cb_only = reach.nodes.values.find { |n| n.kind == :method && n.name == 'cb_only' }
+    result['cb_only_unsafe'] = !reach.fiber_unsafe([cb_only.label]).empty?
     puts JSON.generate(result)
   end
   exit 0
@@ -105,8 +112,13 @@ check.call('a native whose callback yields is not a yield path (C boundary)', de
 check.call('a computed send on self does not reach another class', default['self_send'] == true)
 check.call('a computed send on another receiver may reach a spelled yielding method', default['other_send'] == false)
 
+check.call('a yielding method reached from a Fiber only through a native callback is not Fiber-unsafe',
+           default['cb_only'] == false && default['cb_only_unsafe'] == false)
+
 boundary_off = probe.call('BC2CPP_YIELD_C_BOUNDARY' => '0')
 check.call('BC2CPP_YIELD_C_BOUNDARY=0 counts the native callback again', boundary_off['via_native'] == false)
+check.call('BC2CPP_YIELD_C_BOUNDARY=0 makes the callback-only method Fiber-unsafe again',
+           boundary_off['cb_only_unsafe'] == true)
 
 spelled_off = probe.call('BC2CPP_YIELD_SPELLED_SENDS' => '0')
 check.call('BC2CPP_YIELD_SPELLED_SENDS=0 lets the self send reach every method again', spelled_off['self_send'] == false)

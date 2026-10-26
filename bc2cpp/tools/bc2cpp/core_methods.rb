@@ -89,7 +89,7 @@ module CoreMethods
     ops = all_ops(irep, ireps)
     tags = []
     tags << 'block' if CoreDefs.touches_block?(irep, ireps)
-    tags << 'rescue' if %w[RESCUE EXCEPT ONERR POPERR].any? { |op| ops.include?(op) }
+    tags << 'rescue' if %i[RESCUE EXCEPT ONERR POPERR].any? { |op| ops.include?(op) }
     tags << 'super' if ops.include?('SUPER')
     tags << 'lambda' if ops.include?('LAMBDA')
     fields = irep.enter&.enter_fields&.map(&:to_i)

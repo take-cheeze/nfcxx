@@ -274,7 +274,7 @@ class CodeGen
     step_body_start = nil
     if resumable
       # RESUMABLE_ENTRY: the frame, registers and dispatch open the function once the body has
-      # said how many registers it uses (resumable_step_function).
+      # said how many registers it uses(resumable_step_function).
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'is initialize') if d.name == 'initialize'
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'reads its block') if needs_blk_param || has_blk
 
@@ -336,7 +336,7 @@ class CodeGen
     # (no SDEF and no SCLASS+EXEC) makes devirt_blocked_name? always false;
     # :unknown blocks devirtualization of every name in this method.
     exec_fallback_regions = recognize_exec_fallback_regions(irep)
-    if BytecodeIR.for(irep).op?('SDEF') || !exec_fallback_regions.empty?
+    if BytecodeIR.for(irep).op?(:SDEF) || !exec_fallback_regions.empty?
       @runtime_installed_names = runtime_installed_names_for(irep, exec_fallback_regions) || :unknown
     end
 
@@ -433,7 +433,7 @@ class CodeGen
     # `#error`. Disjoint opcodes, so order is convention only. SDEF first: one
     # method onto one singleton class, no class body (see
     # emit_sdef_fallback_glue).
-    irep.each_with_op('SDEF') do |insn, _idx|
+    irep.each_with_op(:SDEF) do |insn, _idx|
       next if suppressed.include?(insn.addr)
 
       region = sdef_fallback_region(insn, irep)
@@ -797,10 +797,16 @@ class CodeGen
     return false unless text.start_with?('{') && text.end_with?('}')
 
     depth = 0
-    text.each_char.with_index do |char, index|
-      depth += 1 if char == '{'
-      depth -= 1 if char == '}'
-      return false if depth.zero? && index != text.length - 1
+    # Braces are ASCII bytes even when generated literals or comments contain UTF-8.
+    index = 0
+    last = text.bytesize - 1
+    while index <= last
+      byte = text.getbyte(index)
+      depth += 1 if byte == 123
+      depth -= 1 if byte == 125
+      return false if depth.zero? && index != last
+
+      index += 1
     end
     depth.zero?
   end

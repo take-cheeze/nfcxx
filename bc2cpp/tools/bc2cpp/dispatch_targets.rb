@@ -552,7 +552,7 @@ class JoinDominance
   end
 
   def call(w_idx, use_idx, reg)
-    BytecodeIR.write_dominates?(@irep, w_idx, use_idx, reg.to_s)
+    BytecodeIR.write_dominates?(@irep, w_idx, use_idx, reg)
   end
 end
 
@@ -565,11 +565,11 @@ end
 def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
   return nil unless idx&.positive? && reg
 
-  key = [irep.label, idx, reg.to_s, opts[:resolving_new] ? true : false]
+  key = [irep.label, idx, reg, opts[:resolving_new] ? true : false]
   return nil unless TraceReaching::IN_PROGRESS.add?(key)
 
   begin
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty?
 
     _ivar_classes, mand, arg_classes = rest
@@ -658,7 +658,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # GETIDX keeps its Hash and subclass dispatch guards at codegen.
       captured_reg = nil
       alias_probe = proc do |prior|
-        captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
+        captured_reg = prior.reg.to_i if prior.op == :GETUPVAR && prior.upvar_ref&.last&.zero?
         nil
       end
       # An unguarded alias must dominate this GETIDX: a join the alias skips would name the argument on one path
@@ -702,7 +702,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
         # is the result's class.
         # SEND0 prints no `n=`; a `.dup(x)` with arguments is an ArgumentError and
         # proves nothing.
-        return nil if insn.n_spec && insn.n_spec != '0'
+        return nil if insn.argc_operand && insn.argc != 0
 
         return trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
                                  class_layout: class_layout, registry: registry,
@@ -747,7 +747,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
           return element_annotations[annotated.irep].ret_class if annotated
         end
 
-        return nil if insn.n_spec && insn.n_spec != '0'
+        return nil if insn.argc_operand && insn.argc != 0
 
         # An attr_writer is registered as "name=", so `registry[name]` only matches
         # getters.
@@ -1134,28 +1134,28 @@ end
 # MOVE aliases; every other write ends the proof, while trace_new_target repeats
 # the walk and proves the class expression itself.
 def assigned_from_new_send?(irep, idx, reg)
-  irep.walk_writers(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, follow_moves: true) do |insn|
+  irep.walk_writers(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, follow_moves: true) do |insn|
     BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new'
   end || false
 end
 
 def container_phi_merge(irep, at, reg)
   lit = BytecodeIR.for(irep).source_at(at + 1)
-  return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
+  return nil unless lit && %i[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   # The literal arm and the taken edge meet at the jump's target only in this shape. The definitions reaching that
   # join cover both arms and every other predecessor of it; the definitions before the branch do not.
   return nil unless BytecodeIR.for(irep).decoded[at]&.goto == at + 2
 
-  lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
-  defs = BytecodeIR.reaching_definitions(irep, at + 2, reg)
+  lit_class = lit.op == :HASH ? 'Hash' : 'Array'
+  defs = BytecodeIR.reaching_definitions(irep, at + 2, reg, shared: true)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
   agree = defs.all? do |d|
     case BytecodeIR.for(irep).source_at(d.index).op
-    when 'LOADNIL' then true
-    when 'ARRAY', 'ARRAY2' then lit_class == 'Array'
-    when 'HASH' then lit_class == 'Hash'
+    when :LOADNIL then true
+    when :ARRAY, :ARRAY2 then lit_class == 'Array'
+    when :HASH then lit_class == 'Hash'
     else false
     end
   end
@@ -1179,7 +1179,7 @@ end
 # LOADNIL (following MOVEs). A false negative only falls back to the ordinary
 # join; a false positive would drop real evidence.
 def nil_literal_write?(irep, idx, reg)
-  irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) { |insn| insn.op == 'LOADNIL' } == true
+  irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) { |insn| insn.op == :LOADNIL } == true
 end
 
 # CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` holds a fresh Array/Hash/Range
@@ -1189,7 +1189,7 @@ end
 # such a literal, never as a general passthrough: RGSS::Transition#freeze is an
 # unrelated override with a different return value.
 def literal_container_class(irep, idx, reg)
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
   return nil if defs.nil? || defs.empty?
 
   classes = defs.map { |definition| literal_container_definition_class(irep, definition, Set.new) }
@@ -1205,20 +1205,20 @@ def literal_container_definition_class(irep, definition, path)
   return nil unless insn.reg == definition.reg
 
   case insn.op
-  when 'SEND0'
+  when :SEND0
     return nil unless insn.sym == 'freeze'
 
     # A loop-carried `x = x.freeze` names its own definition again: no class.
     key = [definition.index, definition.reg]
     return nil unless path.add?(key)
 
-    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg.to_s)
+    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg, shared: true)
     classes = frozen&.map { |inner| literal_container_definition_class(irep, inner, path) }
     path.delete(key)
     classes.first if classes&.first && classes.uniq.size == 1
-  when 'ARRAY', 'ARRAY2' then 'Array'
-  when 'HASH' then 'Hash'
-  when 'RANGE_INC', 'RANGE_EXC' then 'Range'
+  when :ARRAY, :ARRAY2 then 'Array'
+  when :HASH then 'Hash'
+  when :RANGE_INC, :RANGE_EXC then 'Range'
   end
 end
 
@@ -1237,7 +1237,7 @@ end
 def trace_eqq_literal_receiver(irep, idx, reg)
   # Every definition reaching the receiver must load the same literal: a join with a call on one arm leaves
   # no literal. An argument or block-entry definition is not a literal either.
-  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
   return nil if defs.nil? || defs.empty?
 
   literals = defs.map { |definition| eqq_literal_of(irep, definition) }
@@ -1253,13 +1253,13 @@ def eqq_literal_of(irep, definition)
   return nil unless insn.reg == definition.reg
 
   case insn.op
-  when 'LOADSYM'
+  when :LOADSYM
     # Same extraction as LOADSYM's codegen (stops before a local-name comment).
     name = insn.sym_token
     name ? { type: :symbol, name: name } : nil
   when BytecodeIR::Ops::LOADI_OPS
     # Same two literal shapes as LOADI's codegen.
     lit = insn.paren_value || BytecodeIR::OperandModel.imm_operand(insn)
-    lit ? { type: :fixnum, value: lit } : nil
+    lit ? { type: :fixnum, value: lit.to_s } : nil
   end
 end

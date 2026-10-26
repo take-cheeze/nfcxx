@@ -142,7 +142,7 @@ module SymbolCache
 
   # The symbol index of every `bc2cpp_send(M, RECV, i, ...)` (and
   # `bc2cpp_nomethod(M, RECV, i...)`) in `code`, found with the same receiver
-  # scan the rewrite uses (RECV may nest sends).
+  # scan the rewrite uses(RECV may nest sends).
   def send_indices(code)
     send_index_kinds(code).map(&:last)
   end

@@ -6,13 +6,13 @@ require_relative 'bytecode_ir_containers'
 # the class set of each operand and the leaves it is computed from. Measurement only: the generated code
 # is byte-identical with it on.
 class CodeGen
-  ROOT_ARITH = { 'ADD' => 1, 'SUB' => 1, 'MUL' => 1, 'DIV' => 1 }.freeze
-  ROOT_ARITH_IMM = %w[ADDI SUBI ADDILV SUBILV].freeze
+  ROOT_ARITH = { :ADD => 1, :SUB => 1, :MUL => 1, :DIV => 1 }.freeze
+  ROOT_ARITH_IMM = %i[ADDI SUBI ADDILV SUBILV].freeze
   # Core sends whose result is a number exactly when the receiver (and operand) is one.
   ROOT_PASSTHROUGH = %w[% -@ to_i to_f abs floor ceil round truncate sin cos sqrt fdiv].freeze
   # Ops that define their leading register (the rest of WRITES_LEADING_REG_OPS only read it or store elsewhere).
   ROOT_WRITERS = (BytecodeIR::WRITES_LEADING_REG_OPS -
-                  %w[NOP SETGV SETSV SETIV SETCV SETCONST SETMCNST SETIDX JMP JMPIF JMPNOT JMPNIL ENTER KEYEND RETURN
+                  %i[NOP SETGV SETSV SETIV SETCV SETCONST SETMCNST SETIDX JMP JMPIF JMPNOT JMPNIL ENTER KEYEND RETURN
                      RETURN_BLK RETSELF RETNIL RETTRUE RETFALSE BREAK DEBUG STOP]).freeze
 
   def numeric_root_probe(name, dest_reg, arg_reg, irep, idx, owner_def, reg_offset)
@@ -68,7 +68,7 @@ class CodeGen
   # The writer a report label names for +reg+ as read by +use+: the instruction every reaching definition shares,
   # :entry when the value comes from the frame, or :unknown when the query refuses or the writers disagree.
   def numeric_label_source(irep, use, reg)
-    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg, shared: true)
     return :unknown if defs.nil? || defs.empty?
     return :entry if defs.all?(&:entry?)
     return :unknown if defs.any?(&:entry?)
@@ -92,7 +92,7 @@ class CodeGen
 
       seen[[i, r]] = true
       refusal = {}
-      defs = BytecodeIR.reaching_definitions(irep, i, r.to_s, through_handlers: true, refusal: refusal)
+      defs = BytecodeIR.reaching_definitions(irep, i, r, through_handlers: true, refusal: refusal)
       unless defs
         out << "unproven:#{refusal[:cause]}"
         next
@@ -112,7 +112,7 @@ class CodeGen
   end
 
   def numeric_root_writer?(insn)
-    insn.op.start_with?('LOADI') || ROOT_WRITERS.include?(insn.op)
+    BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || ROOT_WRITERS.include?(insn.op)
   end
 
   # Why a method argument is not a proven number: the admission rule it fails (entry_arg_candidates), or, for an
@@ -222,53 +222,53 @@ class CodeGen
       end
       return []
     end
-    if %w[SEND SEND0].include?(op) && ROOT_PASSTHROUGH.include?(insn.sym) && insn.sym != 'min' && insn.sym != 'max'
+    if %i[SEND SEND0].include?(op) && ROOT_PASSTHROUGH.include?(insn.sym) && insn.sym != 'min' && insn.sym != 'max'
       regs = [insn.reg.to_i]
       regs << (insn.reg.to_i + 1) if insn.argc.to_i == 1 && %w[% fdiv clamp].include?(insn.sym)
       regs.each { |r| work << [i, r] unless NumericFlow.numeric?(numeric_raw_mask(irep, i, r, owner_def)) }
       return []
     end
     case op
-    when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+    when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
       recv = numeric_raw_mask(irep, i, insn.reg.to_i, owner_def)
-      kind = if op.start_with?('SS') then 'self'
+      kind = if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(op) then 'self'
              else recv.nil? ? 'unmodelled' : numeric_mask_name(recv)
              end
       sname = insn.sym
       tracked = @numeric_return && @numeric_return[sname]
       defs = (@registry[sname] || []).map { |d| d.owner == '<native>' ? 'native' : 'ruby' }.tally
       ["send:#{sname}@#{kind}[#{tracked ? "ret=#{numeric_mask_name(tracked)}" : 'untracked'} defs=#{defs.map { |k, v| "#{k}#{v}" }.join(',')}]"]
-    when 'GETIDX', 'GETIDX0'
-      src = op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i
+    when :GETIDX, :GETIDX0
+      src = op == :GETIDX0 ? insn.regs[1].to_i : insn.reg.to_i
       recv = numeric_raw_mask(irep, i, src, owner_def)
-      key = if op == 'GETIDX0' then '0'
+      key = if op == :GETIDX0 then '0'
             else
               # Label only: the shared writer of the key register (not a feed set).
               kins = numeric_label_source(irep, i, insn.reg.to_i + 1)
               kins = nil unless kins.is_a?(Insn)
-              kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
+              kins&.op == :LOADSYM ? ":#{kins.sym}" : (kins&.op || '?')
             end
       inner = numeric_root_nest('') { numeric_root_leaves(irep, i, src, owner_def).first(2).join('+') }
       ["idx[#{key}]@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}<#{inner}>"]
-    when 'AREF'
+    when :AREF
       src = insn.regs[1].to_i
       # Label only, as the GETIDX key above.
       wi = numeric_label_source(irep, i, src)
       what = if wi == :entry then 'param'
              elsif !wi.is_a?(Insn) then '?'
-             elsif wi.op.start_with?('SEND', 'SSEND') then "send:#{wi.sym}"
+             elsif BytecodeIR::Ops::SEND_FAMILY.include?(wi.op) then "send:#{wi.sym}"
              else wi.op
              end
       ["aref<#{what}>"]
-    when 'GETIV' then ["iv:#{insn.ivar && "@#{insn.ivar}"}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
-    when 'GETCONST', 'GETMCNST'
+    when :GETIV then ["iv:#{insn.ivar && "@#{insn.ivar}"}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
+    when :GETCONST, :GETMCNST
       cname = insn.const_name || insn.mcnst_name
       key = const_group_key(insn)
       group = key && @numeric_const_groups && @numeric_const_groups[key]
       state = group ? (group.failed ? (group.structural ? 'structural' : 'flowfail') : numeric_mask_name(group.mask)) : 'nogroup'
       ["const:#{cname}[#{state}#{@integer_constants&.include?(cname) ? ',intconst' : ''}]"]
-    when 'GETUPVAR' then ['upvar']
-    when 'LOADI_0', 'LOADI_1', 'LOADI8', 'LOADI16', 'LOADI32', 'LOADL' then []
+    when :GETUPVAR then ['upvar']
+    when :LOADI_0, :LOADI_1, :LOADI8, :LOADI16, :LOADI32, :LOADL then []
     else ["op:#{op}"]
     end
   end

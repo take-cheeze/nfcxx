@@ -56,6 +56,11 @@ module RbsSignatures
 
   module_function
 
+  # IR classes are Symbols; their frozen spelling avoids transient lookup keys without retaining a new table.
+  def ir_class_name(klass)
+    klass.is_a?(Symbol) ? klass.name : klass.to_s
+  end
+
   def dirs_from_env(root)
     value = ENV['BC2CPP_SIG_DIRS']
     return value.empty? ? [] : value.split(File::PATH_SEPARATOR) if value
@@ -350,11 +355,11 @@ module RbsSignatures
       ap.ir_arg_types[d.irep] = sig.args.each_with_index.filter_map do |type, index|
         commented = annotations[d.irep]&.args&.[](index) || class_annotations[d.irep]&.args&.[](index) ||
                     element_annotations[d.irep]&.arg_elements&.[](index)
-        [((index + 1).to_s), type.value_classes] if type.value_classes && !commented
+        [index + 1, type.value_classes] if type.value_classes && !commented
       end.to_h.freeze if ap.ir_owners[d.irep] == sig.owner
       if ap.ir_owners[d.irep] == sig.owner
         ap.ir_arg_elements[d.irep] = sig.args.each_with_index.filter_map do |type, index|
-          register = (index + 1).to_s
+          register = index + 1
           [register, type.element_classes] if type.element_classes && ap.ir_arg_types[d.irep]&.key?(register)
         end.to_h.freeze
       end
@@ -363,7 +368,7 @@ module RbsSignatures
         optional_count = runtime.enter&.enter_fields&.[](1).to_i
         if Array(sig.optional_args).size == optional_count
           ap.ir_optional_types[d.irep] = Array(sig.optional_args).each_with_index.filter_map do |type, index|
-            register = (mand + index + 1).to_s
+            register = mand + index + 1
             commented = annotations[d.irep]&.args&.[](mand + index) || class_annotations[d.irep]&.args&.[](mand + index) ||
                         element_annotations[d.irep]&.arg_elements&.[](mand + index)
             next if commented
@@ -376,10 +381,10 @@ module RbsSignatures
         fields = runtime.enter&.enter_fields&.map(&:to_i) || []
         if sig.rest_type&.value_classes && Array(sig.optional_args).size == optional_count && fields[2].to_i.positive? &&
            fields[3].to_i.zero? && fields[4].to_i.zero? && fields[5].to_i.zero?
-          ap.ir_rest_elements[d.irep] = { (mand + optional_count + 1).to_s => sig.rest_type.value_classes }.freeze
+          ap.ir_rest_elements[d.irep] = { mand + optional_count + 1 => sig.rest_type.value_classes }.freeze
         end
-        runtime_keywords = BytecodeIR.for(runtime).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.to_set
-        runtime_optional = BytecodeIR.for(runtime).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.to_set
+        runtime_keywords = BytecodeIR.for(runtime).instructions_with_op(:KARG).map { |insn| insn.sym.to_s }.to_set
+        runtime_optional = BytecodeIR.for(runtime).instructions_with_op(:KEY_P).map { |insn| insn.sym.to_s }.to_set
         if runtime_keywords == (sig.keywords || {}).keys.to_set && runtime_keywords - runtime_optional == (sig.required_keywords || Set.new)
           ap.ir_keyword_types[d.irep] = (sig.keywords || {}).filter_map { |name, type| [name, type.value_classes] if type.value_classes }.to_h.freeze
         end
@@ -460,8 +465,9 @@ module RbsSignatures
         refusal[:cause] ||= :call_receiver_union_cap
         next nil
       end
+      name = insn.sym.to_s
       # REMOVED: a name some class may undefine has no declared contract on any receiver (self_call_types refuses it too).
-      if removed&.call(insn.sym.to_s)
+      if removed&.call(name)
         refusal[:cause] ||= "call_removed:#{insn.sym}"
         next nil
       end
@@ -469,29 +475,30 @@ module RbsSignatures
       contracts = receiver.contracts.to_set
       failed = false
       receiver.classes.each do |klass|
+        klass_name = ir_class_name(klass)
         # The class's own chain is checked before its receiver bound: a chain contract_owners refuses (a module reached
         # twice) has no owners, so it reports call_contract_missing, not call_receiver_unbounded.
-        found = target.call(klass.to_s, insn.sym.to_s)
-        unless found && named_returns.key?([found, insn.sym.to_s])
+        found = target.call(klass_name, name)
+        unless found && named_returns.key?([found, name])
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
           break
         end
         # SELF_CALL_JOIN: a declared receiver is a nominal bound, so its dispatch joins every bounded subclass, as for self.
-        bounded = prepared ? prepared.receivers(klass.to_s) : self_receivers(klass.to_s, lookup: lookup, subclasses: subclasses, method_missing_classes: method_missing_classes)
+        bounded = prepared ? prepared.receivers(klass_name) : self_receivers(klass_name, lookup: lookup, subclasses: subclasses, method_missing_classes: method_missing_classes)
         unless bounded
           refusal[:cause] ||= "call_receiver_unbounded:#{klass}##{insn.sym}"
           failed = true
           break
         end
-        types = self_call_types(bounded, insn.sym.to_s, target: target, named_returns: named_returns, core_redefined: core_redefined)
+        types = self_call_types(bounded, name, target: target, named_returns: named_returns, core_redefined: core_redefined)
         unless types
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
           break
         end
         classes.merge(types)
-        bounded.each { |candidate| contracts << "call-result:#{target.call(candidate, insn.sym.to_s)}##{insn.sym}".freeze }
+        bounded.each { |candidate| contracts << "call-result:#{target.call(candidate, name)}##{insn.sym}".freeze }
       end
       next nil if failed
 

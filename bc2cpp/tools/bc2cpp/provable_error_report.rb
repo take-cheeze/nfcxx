@@ -24,7 +24,7 @@ module ProvableErrorReport
   ROWS = {}
   ENGINE_GEMS = BC2CPP_CLOSED_WORLD_GEMS
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/
-  ARITH = { 'ADD' => '+', 'SUB' => '-', 'MUL' => '*', 'DIV' => '/', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.freeze
+  ARITH = { :ADD => '+', :SUB => '-', :MUL => '*', :DIV => '/', :LT => '<', :LE => '<=', :GT => '>', :GE => '>=' }.freeze
   NUM = %w[Integer Float].freeze
   # Operand class pairs (left, right) the core operator always rejects, by operator.
   OPERATOR_REJECTS = {
@@ -79,7 +79,7 @@ module ProvableErrorReport
 
   # The classes the receiver register may hold at +idx+ (both flows agree: each is a sound over-approximation).
   def error_receiver_classes(irep, idx, reg, owner_def)
-    return nil if fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     sets = [exact_flow_mask(irep, idx, reg), (numeric_raw_mask(irep, idx, reg, owner_def) if owner_def)]
            .filter_map { |m| error_mask_classes(m) }
@@ -159,7 +159,7 @@ module ProvableErrorReport
   def error_send_rows(answers, irep, idx, insn, owner_def)
     name = insn.sym
     rows = []
-    explicit = %w[SEND SEND0 SENDB].include?(insn.op)
+    explicit = %i[SEND SEND0 SENDB].include?(insn.op)
     reach = nil
     emit = lambda do |kind, detail|
       reach ||= error_reach(irep, idx, owner_def, name)
@@ -226,15 +226,15 @@ module ProvableErrorReport
     if left && right && !left.empty? && !right.empty? && left.product(right).all? { |l, r| OPERATOR_REJECTS.fetch(sym).call(l, r) }
       emit.call('operator', "#{left.sort.join('|')} #{sym} #{right.sort.join('|')}")
     end
-    if insn.op == 'DIV' && left && left == ['Integer'] && error_zero_literal?(irep, idx, b)
+    if insn.op == :DIV && left && left == ['Integer'] && error_zero_literal?(irep, idx, b)
       emit.call('zero_divide', 'Integer / 0')
     end
     rows
   end
 
   def error_zero_literal?(irep, idx, reg)
-    value = irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |w|
-      w.op.start_with?('LOADI') ? (w.paren_value || w.imm_operand).to_s : :other
+    value = irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |w|
+      BytecodeIR::Ops::LOADI_OPS.include?(w.op) ? (w.paren_value || w.imm_operand).to_s : :other
     end
     value == '0'
   end

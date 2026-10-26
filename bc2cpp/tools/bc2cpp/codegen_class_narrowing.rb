@@ -95,25 +95,25 @@ class CodeGen
     return nil unless class_narrowing_enabled?
 
     @class_tests ||= {}
-    key = [irep.label, index]
-    return @class_tests[key] if @class_tests.key?(key)
+    sites = (@class_tests[irep.label] ||= {})
+    return sites[index] if sites.key?(index)
 
-    @class_tests[key] = compute_class_test(irep, index, insn)
+    sites[index] = compute_class_test(irep, index, insn)
   end
 
   def compute_class_test(irep, index, insn)
     name = insn.sym
-    return nil if insn.n_spec == '*' || insn.nk_spec
+    return nil if insn.positional_splat? || insn.keyword_arguments?
 
-    argc = insn.op == 'SEND0' ? 0 : insn.n_spec.to_i
+    argc = insn.op == :SEND0 ? 0 : insn.argc.to_i
     case name
     when 'is_a?', 'kind_of?', 'instance_of?'
-      return nil unless argc == 1 && insn.op == 'SEND' && class_test_name_safe?(name)
+      return nil unless argc == 1 && insn.op == :SEND && class_test_name_safe?(name)
 
       klass = class_test_constant(irep, index, insn.reg.to_i + 1)
       klass && [0, class_test_object(name == 'instance_of?' ? :instance_of : :kind_of, klass)]
     when '==='
-      return nil unless argc == 1 && insn.op == 'SEND' && eqq_direct_safe?
+      return nil unless argc == 1 && insn.op == :SEND && eqq_direct_safe?
 
       klass = class_test_constant(irep, index, insn.reg.to_i)
       klass && [1, class_test_object(:kind_of, klass)]
@@ -122,22 +122,22 @@ class CodeGen
     when '!'
       argc.zero? && class_test_name_safe?(name) ? [0, class_test_object(:falsy, nil)] : nil
     when 'class'
-      argc.zero? && insn.op == 'SEND0' && class_test_name_safe?(name) ? [0, CLASS_OF] : nil
+      argc.zero? && insn.op == :SEND0 && class_test_name_safe?(name) ? [0, CLASS_OF] : nil
     when 'field?'
       # LCF.field?(obj, :name) (lcf.rb): a true answer needs obj to answer :name, so for a name nil does not answer,
       # the true edge is a non-nil obj. The false edge says nothing (any object may answer false).
-      return nil unless argc == 2 && insn.op == 'SEND' && irep.agreed_constant_name(index, insn.reg.to_s) == 'LCF'
+      return nil unless argc == 2 && insn.op == :SEND && irep.agreed_constant_name(index, insn.reg) == 'LCF'
       return nil unless @registry.fetch('field?', []).all? { |d| d.owner.start_with?('LCF') }
 
-      meth = irep.walk_dominating_writers(index - 1, (insn.reg.to_i + 2).to_s, use: index, follow_moves: true) do |writer|
-        writer.sym if writer.op == 'LOADSYM'
+      meth = irep.walk_dominating_writers(index - 1, (insn.reg + 2), use: index, follow_moves: true) do |writer|
+        writer.sym if writer.op == :LOADSYM
       end
       meth.is_a?(String) && nil_unanswerable?(meth) ? [1, class_test_object(:present, nil)] : nil
     when 'respond_to?'
-      return nil unless argc == 1 && insn.op == 'SEND' && class_test_name_safe?(name) && respond_to_missing_absent?
+      return nil unless argc == 1 && insn.op == :SEND && class_test_name_safe?(name) && respond_to_missing_absent?
 
-      meth = irep.walk_dominating_writers(index - 1, (insn.reg.to_i + 1).to_s, use: index, follow_moves: true) do |writer|
-        writer.sym if writer.op == 'LOADSYM'
+      meth = irep.walk_dominating_writers(index - 1, (insn.reg + 1), use: index, follow_moves: true) do |writer|
+        writer.sym if writer.op == :LOADSYM
       end
       meth.is_a?(String) ? [0, class_test_object(:responds, meth)] : nil
     end
@@ -188,7 +188,9 @@ class CodeGen
   # an EQ site reads it, since EQ has no receiver of its own.
   def note_class_test(irep, index, codes, slots, _pred)
     reg_code = codes.find { |code| code > slots }
-    (@class_test_subjects ||= {})[[irep.label, index]] = reg_code && reg_code - slots - 1
+    @class_test_subjects ||= {}
+    sites = (@class_test_subjects[irep.label] ||= {})
+    sites[index] = reg_code && reg_code - slots - 1
   end
 
   def class_test_object(kind, klass)
@@ -221,7 +223,7 @@ class CodeGen
   # `raise` never returns: Kernel#raise (kernel.c mrb_f_raise) is the only definition, so the flow has no normal
   # successor after it and `raise X unless x.is_a?(C)` narrows x for the rest of the method.
   def class_narrowing_noreturn_call?(_irep, _index, insn)
-    return false unless insn.sym == 'raise' && (insn.op == 'SSEND' || insn.op == 'SSEND0') && class_narrowing_enabled?
+    return false unless insn.sym == 'raise' && (insn.op == :SSEND || insn.op == :SSEND0) && class_narrowing_enabled?
 
     @class_narrowing_raise = class_test_name_safe?('raise') unless defined?(@class_narrowing_raise)
     @class_narrowing_raise
@@ -230,7 +232,7 @@ class CodeGen
   # The class the constant in register +reg+ of the SEND at +index+ names, as a full class name: a core class
   # this file models, or a declared class whose constant identity is stable. A module or anything else is nil.
   def class_test_constant(irep, index, reg)
-    name = irep.agreed_constant_name(index, reg.to_s)
+    name = irep.agreed_constant_name(index, reg)
     return nil unless name
 
     if CLASS_TEST_CORE_POSITIVE.key?(name) || CLASS_TEST_BITLESS_CORE.include?(name)
@@ -251,11 +253,11 @@ class CodeGen
   # Not class_narrowing_enabled?: this runs before the code generator's tables exist, and needs none of them.
   def is_a_guard_class(irep, index)
     insn = irep && BytecodeIR.for(irep).source_at(index)
-    return nil unless insn && insn.op == 'SEND' && %w[is_a? kind_of?].include?(insn.sym)
-    return nil unless insn.n_spec == '1' && insn.nk_spec.nil?
+    return nil unless insn && insn.op == :SEND && %w[is_a? kind_of?].include?(insn.sym)
+    return nil unless insn.argc == 1 && !insn.keyword_arguments?
     return nil unless @closed_world && @closed_world.global_refusal.nil? && class_test_name_safe?(insn.sym)
 
-    written = straight_line_constant_name(irep, index, (insn.reg.to_i + 1).to_s)
+    written = straight_line_constant_name(irep, index, (insn.reg + 1))
     written && @closed_world.is_a_guard_constant?(written) ? written : nil
   end
 
@@ -265,7 +267,7 @@ class CodeGen
   # code generator's CLASS_NARROWING.
   def raise_never_returns?(irep, index)
     insn = irep && BytecodeIR.for(irep).source_at(index)
-    return false unless insn && %w[SSEND SSEND0].include?(insn.op) && insn.sym == 'raise'
+    return false unless insn && %i[SSEND SSEND0].include?(insn.op) && insn.sym == 'raise'
 
     !@closed_world.nil? && @closed_world.global_refusal.nil? && class_test_name_safe?('raise')
   end
@@ -439,7 +441,7 @@ module ClassNarrowingGuard
   # `x.class == C`: EQ has no receiver, so the subject is the register the flow recorded for the test.
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
     code = super
-    return code unless insn.op == 'EQ' && irep && idx && !code.include?('#error')
+    return code unless insn.op == :EQ && irep && idx && !code.include?('#error')
 
     plan = class_eq_guard_plan(irep, idx)
     plan ? class_eq_guarded(code, insn, reg_offset, plan) : code
@@ -449,7 +451,7 @@ module ClassNarrowingGuard
   # is on the edge the test took: a member of the narrowed set when that set names only classes, else (an unknown
   # part stays) not one of the classes the narrowing dropped.
   def class_narrowing_guard_plan(insn, kwargs)
-    return nil unless class_narrowing_enabled? && (insn.op == 'SEND' || insn.op == 'SEND0')
+    return nil unless class_narrowing_enabled? && (insn.op == :SEND || insn.op == :SEND0)
 
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
@@ -473,7 +475,7 @@ module ClassNarrowingGuard
 
     # The flow records the subject when it reaches the instruction: make sure it has run.
     exact_flow_mask(irep, idx, BytecodeIR.for(irep).source_at(idx).reg)
-    mask_reg = (@class_test_subjects || {})[[irep.label, idx]]
+    mask_reg = @class_test_subjects&.dig(irep.label, idx)
     return nil unless mask_reg
 
     test = class_eq_site_test(irep, idx)
@@ -535,7 +537,7 @@ module ClassNarrowingGuard
 
   def class_narrowing_guarded(code, insn, kwargs, plan)
     d = insn.reg
-    n = insn.op == 'SEND0' ? 0 : insn.n_spec.to_i
+    n = insn.op == :SEND0 ? 0 : insn.argc.to_i
     recv = kwargs[:call_receiver] || "r#{d}"
     argv = kwargs[:call_arguments] || (1..n).map { |k| "r#{d.to_i + k}" }
     subject = plan[:offset].zero? ? recv : argv.fetch(0)

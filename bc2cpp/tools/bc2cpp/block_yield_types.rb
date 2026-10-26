@@ -22,7 +22,7 @@ require_relative 'block_self'
 #     between sites is the union of them, and a position with an unknown class is untyped.
 # The result is nil when the method yields nothing (there is no block to type).
 module BlockYieldTypes
-  CALL_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
+  CALL_OPS = %i[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
 
   module_function
 
@@ -45,13 +45,13 @@ module BlockYieldTypes
     yields = []
     program.each_source do |insn, idx|
       case insn.op
-      when 'BLKCALL'
+      when :BLKCALL
         argc = insn.typed.find { |operand| operand.kind == :int }&.value
         return { reason: 'yields an unknown number of arguments' } unless argc && insn.reg
 
         yields << [idx, insn.reg.to_i, argc]
       when *CALL_OPS
-        next unless insn.sym.to_s == 'call' && insn.reg && holds_block?(program, idx, insn.reg.to_s, blk)
+        next unless insn.sym.to_s == 'call' && insn.reg && holds_block?(program, idx, insn.reg, blk)
 
         return { reason: 'yields through Proc#call' }
       end
@@ -83,14 +83,14 @@ module BlockYieldTypes
   # Does the block register hold a Proc at +index+? Unknown reaching definitions count as holding one, so the refusal
   # is the conservative answer.
   def holds_block?(program, index, reg, blk)
-    defs = program.reaching_definitions(index, reg, through_handlers: true)
+    defs = program.reaching_definitions(index, reg, through_handlers: true, shared: true)
     return true if defs.nil?
 
     defs.any? do |df|
       if df.entry?
-        df.reg.to_s == blk
+        df.reg == blk
       else
-        %w[BLKPUSH GETUPVAR].include?(program.source_at(df.index).op)
+        %i[BLKPUSH GETUPVAR].include?(program.source_at(df.index).op)
       end
     end
   end
@@ -101,7 +101,7 @@ module BlockYieldTypes
       next unless seen.add?(label)
 
       child = ireps[label] or return 'has a nested block with no body'
-      return 'yields from a nested block' if BytecodeIR.for(child).instructions_with_op('BLKCALL').any?
+      return 'yields from a nested block' if BytecodeIR.for(child).instructions_with_op(:BLKCALL).any?
 
       why = nested_yield_why(child, ireps, seen)
       return why if why

@@ -10,8 +10,8 @@ require_relative 'bytecode_ir_containers'
 # blocks' SETUPVAR writes, crosses handler edges and uses the origin walk's RESCUE/EXCEPT/ENTER model (a slot ENTER
 # stores is defined by the ENTER), and a refused query is nil: each caller states what nil means.
 module IrBlockOperands
-  LITERAL_BLOCK_OPS = Set['BLOCK', 'LAMBDA'].freeze
-  CONST_LOADS = Set['GETCONST', 'GETMCNST'].freeze
+  LITERAL_BLOCK_OPS = Set[:BLOCK, :LAMBDA].freeze
+  CONST_LOADS = Set[:GETCONST, :GETMCNST].freeze
 
   module_function
 
@@ -19,23 +19,17 @@ module IrBlockOperands
   def definitions(irep, index, reg, follow_moves: true)
     return nil unless index.is_a?(Integer) && index.between?(0, BytecodeIR.for(irep).size - 1)
 
-    defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s, follow_moves: follow_moves, through_handlers: true,
-                                                                  origin_transfers: true)
+    defs = BytecodeIR.reaching_definitions(irep, index, reg, follow_moves: follow_moves, through_handlers: true,
+                                                                  origin_transfers: true, shared: true)
     defs && !defs.empty? ? defs : nil
   end
 
   # The register a SENDB/SSENDB reads its block from (vm.c OP_SENDB: R(a + argc + kwargs + 1), a packed `*` argument
-  # list and a packed `**` hash taking one register each), as digits.
+  # list and a packed `**` hash taking one register each), as an Integer.
   def block_register(insn)
     return nil unless insn.reg && insn.argc_operand
 
-    n, nk, = insn.argc_operand
-    positional = n.nil? ? 1 : n
-    keywords = if insn.nk_spec.nil? then 0
-               elsif nk.nil? then 1
-               else 2 * nk
-               end
-    (insn.reg.to_i + positional + keywords + 1).to_s
+    insn.reg + insn.positional_slots + insn.keyword_slots + 1
   end
 
   # Labels of the literal blocks the block operand of the send at +index+ can be, when every reaching definition is a

@@ -82,7 +82,7 @@ class CodeGen
     # A Symbol literal in a register carries the Symbol bit, as it does in the exact-class run; the
     # consumers of the numeric masks are audited in docs/bc2cpp-symbol-class.md. TrueClass and FalseClass stay OTHER.
     def literal_class_mask(insn)
-      insn.op == 'LOADSYM' ? @cg.numeric_loadsym_bit : nil
+      %i[LOADSYM SYMBOL INTERN].include?(insn.op) ? @cg.numeric_loadsym_bit : nil
     end
 
     def pool_mask(irep, insn)
@@ -222,7 +222,7 @@ class CodeGen
       ancestor, creation = link
       cur = ancestor
     end
-    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index.to_s)
+    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index)
 
     states = numeric_states_for(ancestor)
     state = states && states[creation]
@@ -244,7 +244,7 @@ class CodeGen
     return 0 unless state
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(r)
 
     state[r]
   end
@@ -257,11 +257,17 @@ class CodeGen
 
   # Class-set names for the diagnostic and the report, e.g. "INT|NIL".
   def numeric_mask_name(mask)
+    found = numeric_mask_classes(mask)
+    found.empty? ? 'NONE' : found.join('|')
+  end
+
+  # Class-name collection behind numeric_mask_name, without the display join.
+  def numeric_mask_classes(mask)
     found = NUMERIC_MASK_NAMES.filter_map { |position, name| name if mask[position] == 1 }
     @lcf_rows&.kinds&.each { |k| found << @lcf_rows.name(k.bit) if mask[k.bit.bit_length - 1] == 1 }
     @frozen_tables&.each_shape_in(mask) { |s| found << @frozen_tables.name(s.bit) }
     found << 'SYM' if frozen_symbol_bit && mask.anybits?(frozen_symbol_bit)
-    found.empty? ? 'NONE' : found.join('|')
+    found
   end
 
   # One line per fact, sorted, for the bc2cpp.rb diagnostic (and the coverage
@@ -293,7 +299,8 @@ class CodeGen
 
   def fixnum_exact_tier(name, dest, rhs)
     overflow, helper = FIXNUM_TIER_OPS.fetch(name)
-    register = rhs.start_with?('r')
+    # Integer rhs is a bare literal; String rhs is either a register ref ("rN") or literal text.
+    register = rhs.is_a?(String) && rhs.start_with?('r')
     "{ mrb_int bc2cpp_z; " \
       "if (#{overflow}(mrb_fixnum(r#{dest}), #{register ? "mrb_fixnum(#{rhs})" : rhs}, &bc2cpp_z) || !FIXABLE(bc2cpp_z)) " \
       "{ r#{dest} = #{helper}(M, r#{dest}, #{register ? rhs : "mrb_fixnum_value(#{rhs})"}); } " \

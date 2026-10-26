@@ -14,7 +14,7 @@ module BytecodeIR
     program = self.for(irep)
     irep.each_with_op(*ops) do |insn, idx|
       exec = program.source_at(idx + 1)
-      next unless exec&.op == 'EXEC' && exec.reg_token == insn.reg_token
+      next unless exec&.op == :EXEC && exec.reg_token == insn.reg_token
 
       bodies[idx] = irep.reps[exec.block_index]
     end
@@ -28,13 +28,13 @@ module BytecodeIR
   def self.class_body_path(irep, idx, namespace)
     program = self.for(irep)
     insn = program.source_at(idx)
-    definitions = reaching_definitions(irep, idx, insn.reg, through_handlers: true, origin_transfers: true)
+    definitions = reaching_definitions(irep, idx, insn.reg, through_handlers: true, origin_transfers: true, shared: true)
     return nil if definitions.nil? || definitions.empty? || definitions.any?(&:entry?)
 
     paths = definitions.map do |definition|
       case program.source_at(definition.index).op
-      when 'LOADNIL' then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
-      when 'OCLASS' then insn.sym
+      when :LOADNIL then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
+      when :OCLASS then insn.sym
       end
     end
     paths.first if paths.first && paths.uniq.size == 1

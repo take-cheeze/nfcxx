@@ -4,6 +4,7 @@ require_relative 'bytecode_ir_regions'
 require_relative 'numeric_flow'
 require_relative 'call_context_arguments'
 require_relative 'ir_context_leaf_evaluations'
+require_relative 'rbs_signatures'
 
 # Reporting contexts form a finite may-set graph. Bottom stays private until a whole fixpoint settles.
 class IrContextResults
@@ -11,14 +12,14 @@ class IrContextResults
   MAX_ROUNDS = 48
   MAX_CLASSES = 16
   MAX_SHAPE_PATH_STATES = 4096
-  SHAPE_PRESERVING_OPS = Set['MOVE', 'NOP', 'LOADNIL', 'LOADSYM', 'LOADTRUE', 'LOADFALSE',
-                             'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  SHAPE_PRESERVING_OPS = Set[:MOVE, :NOP, :LOADNIL, :LOADSYM, :LOADTRUE, :LOADFALSE,
+                             :JMP, :JMPIF, :JMPNOT, :JMPNIL].freeze
   CLASS_CACHE_LIMIT = 2048
   EMPTY_FRAME_ARGUMENTS = [].freeze
   EMPTY_FRAME_KEYWORDS = {}.freeze
   FIXED_BINDING_EDGES = {}.freeze
-  PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
-                 'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  PURE_OPS = Set[:ENTER, :NOP, :MOVE, :LOADSELF, :LOADNIL, :LOADTRUE, :LOADFALSE, :LOADSYM,
+                 :GETIV, :RETURN, :RETSELF, :RETNIL, :RETTRUE, :RETFALSE, :JMP, :JMPIF, :JMPNOT, :JMPNIL].freeze
   # SEND and SSEND forms without a block argument (Ops::BLOCK_SEND removed).
   NO_BLOCK_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
@@ -35,7 +36,7 @@ class IrContextResults
     end
 
     def entry_mask(irep, reg)
-      return NumericFlow::NIL if BytecodeIR.for(irep).send(:enter_slot, irep.enter, reg.to_s) == :local
+      return NumericFlow::NIL if BytecodeIR.for(irep).send(:enter_slot, irep.enter, reg) == :local
 
       super
     end
@@ -46,7 +47,7 @@ class IrContextResults
     end
     def pool_mask(irep, insn) = @engine.gen.send(:numeric_oracle_pool_mask, irep, insn)
     def literal_class_mask(insn)
-      name = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol' }[insn.op]
+      name = CodeGen::ExactOracle::LITERAL_CLASSES[insn.op]
       name && @engine.gen.numeric_class_bit(name)
     end
     def false_class_bit = @engine.gen.numeric_class_bit('FalseClass')
@@ -266,10 +267,10 @@ class IrContextResults
     return nil unless index
     if optional.positive?
       program = BytecodeIR.for(body)
-      return nil unless (index + 1..index + optional + 1).all? { |table| program.source_at(table)&.op == 'JMP' }
+      return nil unless (index + 1..index + optional + 1).all? { |table| program.source_at(table)&.op == :JMP }
     end
-    names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
-    optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
+    names = BytecodeIR.for(body).instructions_with_op(:KARG).map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
+    optional_names = BytecodeIR.for(body).instructions_with_op(:KEY_P).map { |insn| insn.sym.to_s }.uniq
     fixed = optional.zero? && rest.zero? && post.zero? && key_count.zero? && keydict.zero? && names.empty?
     [fields.dup.freeze, names, (names - optional_names).freeze, index, fixed].freeze
   end
@@ -375,11 +376,11 @@ class IrContextResults
 
     BytecodeIR::NumericClasses.exit_mask(body, node.states) do |exit, state|
       case exit.op
-      when 'RETURN' then state[exit.reg]
-      when 'RETSELF' then node.receiver
-      when 'RETNIL' then NumericFlow::NIL
-      when 'RETTRUE' then @gen.numeric_class_bit('TrueClass')
-      when 'RETFALSE' then @gen.numeric_class_bit('FalseClass')
+      when :RETURN then state[exit.reg]
+      when :RETSELF then node.receiver
+      when :RETNIL then NumericFlow::NIL
+      when :RETTRUE then @gen.numeric_class_bit('TrueClass')
+      when :RETFALSE then @gen.numeric_class_bit('FalseClass')
       else NumericFlow::OTHER
       end
     end
@@ -418,21 +419,21 @@ class IrContextResults
     return nil unless NO_BLOCK_SEND.include?(insn.op)
 
     argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : insn.argc
-    return nil unless argc && insn.nk_spec != '*'
+    return nil unless argc && !insn.keyword_splat?
 
     register = insn.reg.to_i
     keyword_registers = []
-    insn.nk_spec.to_i.times do |position|
+    insn.keyword_argc.to_i.times do |position|
       key_register = register + argc + 1 + position * 2
-      definitions = BytecodeIR.reaching_definitions(body, index, key_register.to_s, origin_transfers: true)
+      definitions = BytecodeIR.reaching_definitions(body, index, key_register, origin_transfers: true, shared: true)
       return nil unless definitions&.size == 1 && !definitions.first.entry?
 
       producer = BytecodeIR.for(body).source_at(definitions.first.index)
-      return nil unless producer.op == 'LOADSYM'
+      return nil unless producer.op == :LOADSYM
 
       keyword_registers << [producer.sym.to_s.dup.freeze, key_register + 1].freeze
     end
-    [%w[SSEND SSEND0].include?(insn.op), register, argc, keyword_registers.freeze].freeze
+    [%i[SSEND SSEND0].include?(insn.op), register, argc, keyword_registers.freeze].freeze
   end
 
   def dispatch(node, body, index, insn, state)
@@ -455,10 +456,10 @@ class IrContextResults
       return frozen if frozen
 
       site = @gen.frozen_table_freeze_site(body, index)
-      return site if site && site.positive? && receivers.all? { |klass| @gen.send(:frozen_table_name_safe?, 'freeze', klass.to_s) }
+      return site if site && site.positive? && receivers.all? { |klass| @gen.send(:frozen_table_name_safe?, 'freeze', RbsSignatures.ir_class_name(klass)) }
     end
     receivers.reduce(0) do |joined, klass|
-      definition = @gen.send(:closed_world_exact_target, insn.sym, klass.to_s)
+      definition = @gen.send(:closed_world_exact_target, insn.sym, RbsSignatures.ir_class_name(klass))
       result = if definition&.irep
                  callee = @ireps.fetch(definition.irep)
                  binding = bind(callee, arguments, keywords)
@@ -476,12 +477,12 @@ class IrContextResults
     private_bits = receiver & @shape_mask
     if private_bits.nonzero? && (receiver & ~private_bits).zero? && argc.zero?
       if insn.sym == 'freeze'
-        return receiver if @gen.send(:frozen_table_name_safe?, 'freeze', klass.to_s)
+        return receiver if @gen.send(:frozen_table_name_safe?, 'freeze', RbsSignatures.ir_class_name(klass))
       end
     end
-    expression = @gen.bytecode_ir_native_expression_classes(insn.sym, klass.to_s, argc)
+    expression = @gen.bytecode_ir_native_expression_classes(insn.sym, RbsSignatures.ir_class_name(klass), argc)
     return receiver if expression == Set[klass] && Array(@gen.instance_variable_get(:@native_registered_expressions)&.[](insn.sym)).any? { |entry|
-      entry[:owner][:class_name] == klass.to_s && entry[:arity] == argc && entry[:expression] == 'recv'
+      entry[:owner][:class_name] == RbsSignatures.ir_class_name(klass) && entry[:arity] == argc && entry[:expression] == 'recv'
     }
     return mask(expression) if expression
 
@@ -491,7 +492,7 @@ class IrContextResults
       return @gen.frozen_table_send_mask(tables, insn.sym, argc) if other.zero?
     end
     explicit = insn.dup
-    explicit.op = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 'SEND0' : 'SEND'
+    explicit.op = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? :SEND0 : :SEND
     inputs = state.dup
     inputs[insn.reg.to_i] = mask(Set[klass])
     result = @gen.send(:return_class_send_mask, body, index, explicit, inputs) || NumericFlow::OTHER
@@ -506,7 +507,7 @@ class IrContextResults
     return nil unless receivers.size == 1 && [:Array, :Hash].include?(receivers.first) &&
                       @gen.send(:frozen_table_name_safe?, 'freeze', receivers.first.to_s)
 
-    definitions = BytecodeIR.reaching_definitions(body, index, insn.reg, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(body, index, insn.reg, origin_transfers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     origin = definitions.first.index
@@ -559,7 +560,7 @@ class IrContextResults
   end
 
   def index_mask(body, index, insn, state)
-    register = insn.op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i
+    register = insn.op == :GETIDX0 ? insn.regs[1].to_i : insn.reg.to_i
     receiver = state[register]
     private_bits = receiver & @shape_mask
     rest = receiver & ~private_bits
@@ -572,8 +573,8 @@ class IrContextResults
       if shape.container == :Hash
         result |= shape.elements.reduce(NumericFlow::NIL, :|)
       else
-        key = insn.op == 'GETIDX0' ? 0 : @gen.send(:frozen_table_literal_key, body, index, register + 1)
-        integer = insn.op == 'GETIDX0' || state[register + 1] == NumericFlow::INT
+        key = insn.op == :GETIDX0 ? 0 : @gen.send(:frozen_table_literal_key, body, index, register + 1)
+        integer = insn.op == :GETIDX0 || state[register + 1] == NumericFlow::INT
         return NumericFlow::OTHER unless integer
 
         result |= if key.is_a?(Integer)
@@ -596,7 +597,7 @@ class IrContextResults
     return false unless keywords.empty? && (receivers = classes(receiver))
 
     receivers.all? do |klass|
-      definition = @gen.send(:closed_world_exact_target, insn.sym, klass.to_s)
+      definition = @gen.send(:closed_world_exact_target, insn.sym, RbsSignatures.ir_class_name(klass))
       callee = definition&.irep && @ireps[definition.irep]
       next false unless callee && Array(callee.reps).empty? && !BytecodeIR.for(callee).handlers?
       fields = callee.enter&.enter_fields

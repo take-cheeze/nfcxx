@@ -154,20 +154,20 @@ end
 bad_handler = Irep.new(label: 'unresolved_struct_handler', nlocals: 2, nregs: 8, reps: [],
                        catch_handlers: [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 2, target: 99)],
                        instructions: [
-                         Insn.new(addr: 0, op: 'GETCONST', args: "R4\tStruct"),
-                         Insn.new(addr: 1, op: 'LOADSYM', args: "R5\t:flow_nearest"),
-                         Insn.new(addr: 2, op: 'SEND', args: "R4\t:new\tn=1"),
-                         Insn.new(addr: 3, op: 'SETCONST', args: "Foo\tR4")
+                         Insn.new(addr: 0, op: :GETCONST, args: "R4\tStruct"),
+                         Insn.new(addr: 1, op: :LOADSYM, args: "R5\t:flow_nearest"),
+                         Insn.new(addr: 2, op: :SEND, args: "R4\t:new\tn=1"),
+                         Insn.new(addr: 3, op: :SETCONST, args: "Foo\tR4")
                        ])
 check.call('an unresolved receiver query never falls back to its nearest GETCONST',
            !struct_new_receiver?(bad_handler, 2, bad_handler.instructions[2]))
-%w[SSEND SSEND0 SSENDB].each do |op|
+%i[SSEND SSEND0 SSENDB].each do |op|
   implicit = Irep.new(label: "implicit_struct_#{op}", nlocals: 2, nregs: 8, reps: [], catch_handlers: [],
                       instructions: [
-                        Insn.new(addr: 0, op: 'GETCONST', args: "R4\tStruct"),
-                        Insn.new(addr: 1, op: 'LOADSYM', args: "R5\t:flow_stale"),
+                        Insn.new(addr: 0, op: :GETCONST, args: "R4\tStruct"),
+                        Insn.new(addr: 1, op: :LOADSYM, args: "R5\t:flow_stale"),
                         Insn.new(addr: 2, op: op, args: "R4\t:new\tn=1"),
-                        Insn.new(addr: 3, op: 'SETCONST', args: "Foo\tR4")
+                        Insn.new(addr: 3, op: :SETCONST, args: "Foo\tR4")
                       ])
   check.call("#{op} ignores stale Struct in the call frame receiver slot", !struct_new_receiver?(implicit, 2, implicit.instructions[2]))
 end
@@ -275,9 +275,26 @@ end
 
 suite.compile('factory = Class; copy = factory; copy.new(Object); nil') do |ireps, root|
   body = ireps.fetch(root)
-  index = body.instructions.index { |i| i.op == 'GETCONST' && i.const_name == 'Class' }
+  index = body.instructions.index { |i| i.op == :GETCONST && i.const_name == 'Class' }
   check.call('an exhausted alias budget refuses instead of returning partial uses',
              FactoryFlow.uses(body, index, body.instructions[index].reg, max_aliases: 0).nil?)
+end
+
+# Shared forward-use walk: MOVE aliases are chased without per-state pair
+# Arrays, so repeated walks find the same uses in the same order. Budgets at
+# and below the visited-state count answer and refuse respectively.
+suite.compile('factory = Class; copy = factory; copy.new(Object); nil') do |ireps, root|
+  body = ireps.fetch(root)
+  index = body.instructions.index { |i| i.op == :GETCONST && i.const_name == 'Class' }
+  reg = body.instructions[index].reg
+  first = FactoryFlow.uses(body, index, reg)
+  check.call('a shared-walk traversal finds the same uses in the same order',
+             first.to_a == FactoryFlow.uses(body, index, reg).to_a)
+  exact = first.size + body.instructions.length
+  check.call('a budget at the visited-state count still answers',
+             !FactoryFlow.uses(body, index, reg, max_aliases: exact).nil?)
+  check.call('a budget below the visited-state count refuses',
+             FactoryFlow.uses(body, index, reg, max_aliases: 1).nil?)
 end
 
 suite.finish!

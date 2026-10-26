@@ -22,6 +22,35 @@ suite = FixtureCheck.new('freeze_fold_check')
 NF = NumericFlow
 ROOT = File.expand_path('../..', __dir__)
 
+puts '== per-IREP class-test cache (host)'
+cache = CodeGen.allocate
+cache.define_singleton_method(:class_narrowing_enabled?) { true }
+computations = []
+cache.define_singleton_method(:compute_class_test) do |irep, index, insn|
+  computations << [irep.label, index]
+  insn
+end
+first_body = Irep.new(label: 'first')
+second_body = Irep.new(label: 'second')
+answer = Object.new
+suite.check('a positive class test is cached', cache.class_test_for(first_body, 0, answer).equal?(answer) &&
+            cache.class_test_for(first_body, 0, nil).equal?(answer))
+2.times { cache.class_test_for(first_body, 1, nil) }
+suite.check('a negative class test is cached', computations.count { |site| site == ['first', 1] } == 1)
+allocated_before = GC.stat(:total_allocated_objects)
+1_000.times { cache.class_test_for(first_body, 1, nil) }
+cache_allocations = GC.stat(:total_allocated_objects) - allocated_before
+suite.check('warm class-test cache hits avoid per-query key allocations', cache_allocations < 50)
+suite.check('the same instruction index in another IREP is independent',
+            cache.class_test_for(second_body, 0, nil).nil? && computations.include?(['second', 0]))
+cache.note_class_test(first_body, 0, [6], 5, nil)
+cache.note_class_test(second_body, 0, [8], 5, nil)
+subjects = cache.instance_variable_get(:@class_test_subjects)
+suite.check('class-test subjects preserve register zero and IREP identity', subjects.dig('first', 0) == 0 &&
+            subjects.dig('second', 0) == 2)
+cache.note_class_test(first_body, 0, [1], 5, nil)
+suite.check('an ivar test clears a previously recorded register subject', subjects.dig('first', 0).nil?)
+
 puts '== frozen? mask rule (host)'
 cg = CodeGen.allocate
 cg.instance_variable_set(:@frozen_symbol_bit, nil)
@@ -44,19 +73,19 @@ def fold_insn(addr, op, args) = Insn.new(lineno: 1, addr: addr, op: op, args: ar
 def fold_irep(list) = Irep.new(label: 'fold', nregs: 10, reps: [], pool: ['s'], catch_handlers: [], nlocals: 2,
                                instructions: list)
 # r = c ? "s" : 1; r.freeze -- the textually last arm is the Integer literal, but the String arm reaches the freeze.
-join = fold_irep([fold_insn(0, 'JMPNOT', "R1\t3"), fold_insn(1, 'STRING', "R2\tL[0]"), fold_insn(2, 'JMP', '4'),
-                  fold_insn(3, 'LOADI_1', "R2\t(1)"), fold_insn(4, 'SEND0', "R2\t:freeze")])
+join = fold_irep([fold_insn(0, :JMPNOT, "R1\t3"), fold_insn(1, :STRING, "R2\tL[0]"), fold_insn(2, :JMP, '4'),
+                  fold_insn(3, :LOADI_1, "R2\t(1)"), fold_insn(4, :SEND0, "R2\t:freeze")])
 suite.check('a join of a String and an Integer has no literal producer',
             TypeFacts.textual_producer(nil, join, 4, 2) == 'unreadable')
-single = fold_irep([fold_insn(0, 'STRING', "R2\tL[0]"), fold_insn(1, 'SEND0', "R2\t:freeze")])
+single = fold_irep([fold_insn(0, :STRING, "R2\tL[0]"), fold_insn(1, :SEND0, "R2\t:freeze")])
 suite.check('a straight-line String keeps its literal producer',
             TypeFacts.textual_producer(nil, single, 1, 2) == 'literal:String')
-param = fold_irep([fold_insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), fold_insn(1, 'SEND0', "R1\t:freeze")])
+param = fold_irep([fold_insn(0, :ENTER, '1:0:0:0:0:0:0:0 (0x0)'), fold_insn(1, :SEND0, "R1\t:freeze")])
 suite.check('a frame argument is a param, not a literal', TypeFacts.textual_producer(nil, param, 1, 1) == 'param')
 
 # r = c ? foo : "a".freeze; r.freeze -- the inner freeze is the nearest textual one, but foo's result reaches the outer.
-arm = fold_irep([fold_insn(0, 'JMPNOT', "R1\t3"), fold_insn(1, 'SEND0', "R2\t:foo"), fold_insn(2, 'JMP', '5'),
-                 fold_insn(3, 'STRING', "R2\tL[0]"), fold_insn(4, 'SEND0', "R2\t:freeze"), fold_insn(5, 'SEND0', "R2\t:freeze")])
+arm = fold_irep([fold_insn(0, :JMPNOT, "R1\t3"), fold_insn(1, :SEND0, "R2\t:foo"), fold_insn(2, :JMP, '5'),
+                 fold_insn(3, :STRING, "R2\tL[0]"), fold_insn(4, :SEND0, "R2\t:freeze"), fold_insn(5, :SEND0, "R2\t:freeze")])
 suite.check('a freeze reached through another arm names no literal class',
             TypeFacts.send(:freeze_self_type, nil, arm, 5, 2).nil?)
 

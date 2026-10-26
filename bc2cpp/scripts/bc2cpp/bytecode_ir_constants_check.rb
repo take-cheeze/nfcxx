@@ -15,6 +15,19 @@ require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/bytecode_ir_constants'
 
 suite = FixtureCheck.new('bytecode_ir_constants_check')
+facts = BytecodeIR::ConstantFacts
+integer_classes = facts.node_classes([:int, 1], {})
+suite.check('Integer literal class facts share a frozen singleton', integer_classes.frozen? &&
+            integer_classes.equal?(facts.node_classes([:bigint], {})) && integer_classes == Set[:Integer])
+suite.check('builtin class nodes share their frozen singleton', facts.node_classes([:cls, :Hash], {}).equal?(
+            facts.node_classes([:hash], {})))
+suite.check('custom class nodes preserve their class without retention', facts.node_classes([:cls, :CustomClass], {}) == Set[:CustomClass] &&
+            !facts::LITERAL_CLASS_SETS.key?(:CustomClass))
+unknown_alias = [:alias, 'unknown']
+suite.check('unknown aliases remain unknown', facts.node_classes(unknown_alias, {}).nil?)
+suite.check('mixed alternatives still join classes', facts.union_classes([[:int, 1], [:cls, :String]], {}) == Set[:Integer, :String])
+suite.check('shared singleton cannot be changed by a union result', !facts.union_classes([[:int, 1]], {}).equal?(integer_classes))
+
 suite.require_mrbc!
 
 check = suite.method(:check)
@@ -200,32 +213,32 @@ suite.compile(constant_path_source) do |ireps, root|
   path_of_new = lambda do |name|
     md = registry.fetch(name).find { |d| d.owner == 'CpJoin' }
     irep = ireps.fetch(md.irep)
-    idx = irep.instructions.index { |i| %w[SEND SEND0 SENDB].include?(i.op) && i.sym == 'new' }
+    idx = irep.instructions.index { |i| %i[SEND SEND0 SENDB].include?(i.op) && i.sym == 'new' }
     [irep, idx, irep.instructions[idx].reg]
   end
 
   irep, idx, reg = path_of_new.call('pick')
   check.call('a join of Array and Hash has no constant path (the textual walk answered Hash)',
-             BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY).nil?)
+             BytecodeIR.for(irep).constant_path(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY).nil?)
 
   irep, idx, reg = path_of_new.call('plain')
-  plain = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s)
+  plain = BytecodeIR.for(irep).constant_path(idx - 1, reg)
   check.call('a single GETCONST is its own constant path (Array, no segments, unqualified)',
              plain && plain.root == :const && plain.name == 'Array' && plain.segments.empty? && !plain.qualified)
 
   irep, idx, reg = path_of_new.call('qualified')
-  qualified = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s)
+  qualified = BytecodeIR.for(irep).constant_path(idx - 1, reg)
   check.call('Fx::Inner is rooted at Fx with the Inner segment, qualified',
              qualified && qualified.name == 'Fx' && qualified.segments == ['Inner'] && qualified.qualified)
 
   irep, idx, reg = path_of_new.call('loop_scope')
   check.call('a scope rebound inside a loop has no constant path (Outer on entry, Outer::Inner after one pass)',
-             BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s).nil?)
+             BytecodeIR.for(irep).constant_path(idx - 1, reg).nil?)
 
   # Barrier callers (codegen_receiver_facts) keep the textual walk: their barrier ops are the proof.
   irep, idx, reg = path_of_new.call('pick')
-  barrier = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY,
-                                                                  barrier: %w[JMPUW])
+  barrier = BytecodeIR.for(irep).constant_path(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY,
+                                                                  barrier: %i[JMPUW])
   check.call('a barrier caller keeps the textual walk (nearest arm Hash; codegen asks every definition itself)',
              barrier&.name == 'Hash')
 end

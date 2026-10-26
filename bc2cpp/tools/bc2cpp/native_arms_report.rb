@@ -41,7 +41,7 @@ module NativeArmsReport
     @arms_fallbacks = outer
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
-    return code unless irep && site && !kwargs[:self_implicit] && %w[SEND SEND0 SENDB].include?(insn.op)
+    return code unless irep && site && !kwargs[:self_implicit] && %i[SEND SEND0 SENDB].include?(insn.op)
 
     lines = code.each_line.reject { |l| l.lstrip.start_with?('//') }
     unless lines.any? { |l| l.match?(BY_NAME) }
@@ -77,10 +77,10 @@ module NativeArmsReport
 
     irep = cw_site[:irep]
     insn = cw_site[:insn]
-    return ['none', nil] unless irep && insn&.sym == name && %w[SEND SEND0].include?(insn.op)
+    return ['none', nil] unless irep && insn&.sym == name && %i[SEND SEND0].include?(insn.op)
 
     reg = insn.reg.to_i
-    return ['none', nil] if reg >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return ['none', nil] if reg >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     states = call_facts_states(irep)
     names = states && CallFacts::Flow.facts(states[cw_site[:idx]], reg)
@@ -199,14 +199,14 @@ module NativeArmsReport
 
       BytecodeIR.for(irep).each_source do |insn, idx|
         case insn.op
-        when 'ALIAS', 'UNDEF'
+        when :ALIAS, :UNDEF
           sites[insn.sym] << "#{irep.file}:#{insn.lineno}"
-        when 'DEF'
+        when :DEF
           method = nil
-          BytecodeIR.for(irep).each_with_op('METHOD') { |m, mi| method = m if mi < idx }
+          BytecodeIR.for(irep).each_with_op(:METHOD) { |m, mi| method = m if mi < idx }
           child = method && irep.reps[method.block_index.to_i]
           sites[insn.sym_token] << "#{irep.file}:#{insn.lineno}" unless child && registered.include?(child)
-        when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+        when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
           next unless CodeGen::NAME_INSTALLER_SENDS.include?(insn.sym)
 
           syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)

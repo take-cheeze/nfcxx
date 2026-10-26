@@ -211,7 +211,7 @@ class CodeGen
       idx = exit.index
       case exit.kind
       when :value, :block_return
-        why = declared_return_value_failure(entry, d, irep, idx, exit.reg&.to_s, breaks)
+        why = declared_return_value_failure(entry, d, irep, idx, exit.reg, breaks)
         flag.call(irep, idx, why) if why
       when :nil
         flag.call(irep, idx, 'a path returns nil') unless entry.nilable && entry.kind == :class
@@ -223,7 +223,7 @@ class CodeGen
     end
     # A `return` from a block leaves the method.
     BytecodeIR.nested_exits(irep, :block_return).each do |child, exit|
-      why = declared_return_value_failure(entry, d, child, exit.index, exit.reg&.to_s, breaks)
+      why = declared_return_value_failure(entry, d, child, exit.index, exit.reg, breaks)
       flag.call(child, exit.index, "a `return` inside a block: #{why}") if why
     end
     out
@@ -258,7 +258,7 @@ class CodeGen
       end
       w, r = src
       writer = BytecodeIR.for(ir).source_at(w)
-      if breaks && %w[SENDB SSENDB].include?(writer.op)
+      if breaks && %i[SENDB SSENDB].include?(writer.op)
         return "a block passed to `#{writer.sym}` (line #{writer.lineno}) may `break`, replacing the call's value"
       end
 
@@ -302,7 +302,7 @@ class CodeGen
       return "#{what} is a #{traced}, not exactly #{entry.cls}" if traced
 
       # SEALED_HASH_IVAR: `@h[k]` answers a stored value or nil, so only a `C?` declaration may take it.
-      if entry.nilable && writer.op == 'GETIDX' && writer.reg == r
+      if entry.nilable && writer.op == :GETIDX && writer.reg == r
         why = sealed_hash_read_failure(ir, w, entry.cls, declared_sealed_value_prover(entry))
         return why ? "#{what} is not a proven #{entry.cls} (#{why})" : nil
       end
@@ -331,7 +331,7 @@ class CodeGen
     return 'Array' if traced == 'Array' || declared_array_scan(d, ir, w + 1, r)
 
     writer = BytecodeIR.for(ir).source_at(w)
-    return traced unless writer.op == 'ADD' && depth < FIXNUM_PROOF_MAX_DEPTH && declared_array_plus_safe?
+    return traced unless writer.op == :ADD && depth < FIXNUM_PROOF_MAX_DEPTH && declared_array_plus_safe?
 
     sources = return_value_sources(ir, w, writer.reg)
     return traced unless sources && !sources.empty? && sources.none?(:nil)

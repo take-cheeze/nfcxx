@@ -28,9 +28,9 @@ module SelfNewConstruct
   def self_new_construct(insn, self_implicit:, irep: nil, idx: nil, owner_def: nil, call_receiver: nil,
                          call_arguments: nil, **)
     return nil unless insn.sym == 'new' && @closed_world && @closed_world.global_refusal.nil? && !@call_block_expr
-    return nil unless irep && idx && call_receiver.nil? && call_arguments.nil? && insn.n_spec != '*' && !insn.nk_spec
+    return nil unless irep && idx && call_receiver.nil? && call_arguments.nil? && !insn.positional_splat? && !insn.keyword_arguments?
 
-    n = insn.n_spec.to_i
+    n = insn.argc.to_i
     return nil if n > CodeGen::FUNCALL_ARGC_MAX
 
     d = insn.reg
@@ -113,21 +113,21 @@ module SelfNewConstruct
     end
     return nil if self_implicit || !@closed_world.class_declared?(owner) || !kernel_class_only?
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     source = BytecodeIR.for(irep).source_at(defs.first.index)
-    return nil unless source && source.sym == 'class' && %w[SEND0 SEND SSEND0 SSEND].include?(source.op) &&
-                      source.n_spec.to_i.zero? && !source.nk_spec
-    return nil unless source.op.start_with?('SSEND') || self_register?(irep, defs.first.index, source.reg)
+    return nil unless source && source.sym == 'class' && %i[SEND0 SEND SSEND0 SSEND].include?(source.op) &&
+                      source.argc.to_i.zero? && !source.keyword_arguments?
+    return nil unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(source.op) || self_register?(irep, defs.first.index, source.reg)
 
     [owner, 'self.class in an instance method']
   end
 
   # Every definition of `reg` at `idx` is the method's own `self` (register 0 on entry).
   def self_register?(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
-    defs&.size == 1 && defs.first.entry? && defs.first.reg.to_s == '0'
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
+    defs&.size == 1 && defs.first.entry? && defs.first.reg == 0
   end
 
   def kernel_class_only?

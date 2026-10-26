@@ -36,7 +36,7 @@ module NativeCoreDirectFallback
     return nil unless block_core_world&.exact_instances_singleton_free?
 
     entry = rest_param_native_entry(name, argv.size)
-    return nil unless entry && rest_param_receiver?(irep, idx, reg.to_s)
+    return nil unless entry && rest_param_receiver?(irep, idx, reg)
 
     "  // NATIVE_CORE_DIRECT_REST :#{name} -- receiver is the *rest parameter, a fresh exact Array\n" \
       "  r#{d} = #{entry.call(recv, argv)};\n"
@@ -69,7 +69,7 @@ module NativeCoreDirectFallback
     return false unless rest == 1 && [opt, post, kw, kwrest].all?(&:zero?)
 
     slot = (1 + mand).to_s
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     defs&.size == 1 && defs.first.entry? && defs.first.reg == slot
   end
 
@@ -110,7 +110,7 @@ module NativeCoreDirectFallback
   # receiver can lack Kernel (ClosedWorld#kernel_native_dispatch_safe?). Core bodies
   # get it too: these are program-wide facts, not the static-binding proofs a core
   # body is denied (block_core_world).
-  def kernel_direct_code(name, d, recv, argv, self_implicit = true)
+  def kernel_direct_code(name, d, recv, argv, self_implicit = true, class_arg_proven: false)
     entry = !devirt_blocked_name?(name) && kernel_direct_entry(name, argv.size, self_implicit)
     return nil unless entry
 
@@ -124,11 +124,19 @@ module NativeCoreDirectFallback
       guards << "mrb_obj_is_kind_of(M, #{recv}, M->kernel_module)"
     end
     arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
-    guards << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard
+    guards << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard && !(entry.arg == :class_or_module && class_arg_proven)
     return "#{note}  #{call}" if guards.empty?
 
     # A receiver or argument the guards reject keeps the send, so the method's own error is unchanged.
     "#{note}  if (#{guards.join(' && ')}) {\n    #{call}  } else {\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+  end
+
+  # A stable class/module binding already satisfies the native type check; a hint does not.
+  def kernel_class_argument_proven?(name, argv, irep, idx, offset, owner_def)
+    return false unless ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF'] != '0' && %w[is_a? kind_of?].include?(name) && argv.size == 1
+
+    reg = argv.first[/\Ar(\d+)\z/, 1]&.to_i
+    reg && stable_constant_register(irep, idx, reg.to_i - offset, owner_def&.owner)
   end
 
   # BASIC_OBJECT_SEALED: the Kernel guard of an explicit-receiver row is dead when no bare BasicObject can exist
@@ -300,13 +308,28 @@ module NativeCoreDirectFallback
     when :none then true
     when :nil_or_string then %w[NilClass String].include?(site[:arg_class].call(0))
     when :array then site[:arg_class].call(0) == 'Array'
-    when :integer, :two_integers then false
+    when :integer then native_core_integer_arg_proven?(argv, site, 0)
+    when :two_integers then [0, 1].all? { |position| native_core_integer_arg_proven?(argv, site, position) }
     end
+  end
+
+  # The Fixnum proof is narrower than the native Integer guard and excludes conversion failures.
+  def native_core_integer_arg_proven?(argv, site, position)
+    return false if ENV['BC2CPP_CORE_INT_ARG_PROOF'] == '0'
+    return site[:literal_int_arg]&.call(position) unless site[:int_site]
+
+    native_int_arg_proven?(*site[:int_site], argv, position)
   end
 
   # The class test is a fact at an exact site; the argument guard stays unless proven.
   def native_core_guard(entry, recv, argv, site)
     return entry.guard(recv, argv) unless site && entry.owner == site[:klass]
+
+    if %i[integer two_integers].include?(entry.arg)
+      positions = entry.arg == :integer ? [0] : [0, 1]
+      checks = positions.reject { |position| native_core_integer_arg_proven?(argv, site, position) }
+      return checks.empty? ? 'true' : checks.map { |position| "mrb_integer_p(#{argv[position]})" }.join(' && ')
+    end
 
     arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
     arg_guard ? format(arg_guard, a: argv.first, b: argv[1]) : 'true'

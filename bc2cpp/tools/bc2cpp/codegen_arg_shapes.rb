@@ -38,7 +38,7 @@ module ArgShapeCalls
   end
 
   def calls_block_given?(irep)
-    BytecodeIR.for(irep).instructions_with_op('SSEND0').any? { |insn| BLOCK_GIVEN_NAMES.include?(insn.sym) }
+    BytecodeIR.for(irep).instructions_with_op(:SSEND0).any? { |insn| BLOCK_GIVEN_NAMES.include?(insn.sym) }
   end
 
   # `block_given?` is this frame's block being non-nil. A frame whose wrapper
@@ -88,7 +88,7 @@ module ArgShapeCalls
   # no frame-reading self call, at any block depth.
   def block_transparent_callee?(irep, seen = Set.new.compare_by_identity)
     return true unless seen.add?(irep)
-    return false if BytecodeIR.for(irep).op?('SUPER', 'ARGARY')
+    return false if BytecodeIR.for(irep).op?(:SUPER, :ARGARY)
     return false unless (self_call_targets(irep) & FRAME_READING_NAMES).empty?
 
     (irep.reps || []).all? do |label|
@@ -101,7 +101,7 @@ module ArgShapeCalls
   # signature and the call sites must agree on this one predicate.
   def yields_block_param?(irep, regions = nil)
     return false unless pure_mandatory_arity?(irep)
-    return true if BytecodeIR.for(irep).instructions_with_op('BLKPUSH').any? { |insn| insn.paren_value == '0' }
+    return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
     return true if block_given_modelled? && block_given_reads?(irep)
 
     (regions || recognize_block_fallback_regions(irep, blk_available: true)).any? { |region| region[:needs_blk] }
@@ -118,7 +118,7 @@ module ArgShapeCalls
   # Only inside compile_send: the other users of the gate build their own
   # argument lists and cannot marshal a rest array or a block.
   # An unguarded by-name MONO to one of the new shapes is refused: the registry
-  # does not list core Ruby-level definitions (`sort` in Enumerable), so a
+  # does not list core Ruby-level definitions(`sort` in Enumerable), so a
   # unique name proves no receiver class. The send is compiled again without
   # by-name MONO, leaving the guarded, typed and self resolutions.
   def compile_send(*args, **kwargs)
@@ -319,7 +319,7 @@ module ArgShapeCalls
     return nil unless idx
 
     offset = inline_offset || 0
-    insn = Insn.synthetic(region[:self_implicit] ? 'SSEND' : 'SEND',
+    insn = Insn.synthetic(region[:self_implicit] ? :SSEND : :SEND,
                           "R#{region[:dest_reg].to_i + offset} :#{region[:name]} n=#{region[:n]}")
     saved = [@call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls,
              @call_block_stack_expr]
@@ -378,7 +378,7 @@ module ArgShapeCalls
   # switches on the Array length into the same calls, dynamic for any other
   # length (which is where an ArgumentError comes from).
   def compile_splat_send(insn, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
-    if irep && idx && owner_def && insn.n_spec == '*' && insn.nk_spec.nil?
+    if irep && idx && owner_def && insn.positional_splat? && !insn.keyword_arguments?
       direct = compile_splat_direct(insn, self_implicit: self_implicit, irep: irep, idx: idx, name: name, d: d,
                                           owner_def: owner_def)
       return direct if direct
@@ -389,10 +389,10 @@ module ArgShapeCalls
   SPLAT_SWITCH_MAX_ARMS = 8
 
   def compile_splat_direct(insn, self_implicit:, irep:, idx:, name:, d:, owner_def:)
-    return nil unless %w[SEND SSEND].include?(insn.op)
+    return nil unless %i[SEND SSEND].include?(insn.op)
 
     args_reg = d.to_i + 1
-    literal = splat_array_literal_regs(irep, idx, args_reg.to_s)
+    literal = splat_array_literal_regs(irep, idx, args_reg)
     return splat_send_with(name, d, self_implicit, irep, idx, owner_def, literal, 'literal-sized splat') if literal
 
     counts = splat_arities(name)
@@ -428,7 +428,7 @@ module ArgShapeCalls
   # The compile_send code for `name` with `argv` as its arguments, when it
   # reaches compiled code; nil when it would only dispatch.
   def splat_send_with(name, d, self_implicit, irep, idx, owner_def, argv, note)
-    insn = Insn.synthetic(self_implicit ? 'SSEND' : 'SEND', "R#{d} :#{name} n=#{argv.size}")
+    insn = Insn.synthetic(self_implicit ? :SSEND : :SEND, "R#{d} :#{name} n=#{argv.size}")
     code = with_private_poly_diag_cache do
       compile_send(insn, self_implicit: self_implicit, irep: irep, idx: nil, owner_def: owner_def,
                          call_arguments: argv, trace_idx: idx, trace_reg_offset: 0)

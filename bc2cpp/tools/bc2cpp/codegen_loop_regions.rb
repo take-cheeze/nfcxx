@@ -24,7 +24,7 @@ class CodeGen
 
       dest_reg = insn.reg
       prev_reg = prev_insn.reg
-      next unless dest_reg && prev_reg && prev_reg == (dest_reg.to_i + offset).to_s
+      next unless dest_reg && prev_reg && prev_reg == dest_reg + offset
 
       yield insn, idx, prev_insn, dest_reg
     end
@@ -32,7 +32,7 @@ class CodeGen
 
   # each_call_site over `BLOCK I[k]`, also resolving the block's irep.
   def each_block_site(irep, send_ops:, layout:)
-    each_call_site(irep, prev_op: 'BLOCK', send_ops: send_ops, layout: layout) do |insn, idx, block_insn, dest_reg|
+    each_call_site(irep, prev_op: :BLOCK, send_ops: send_ops, layout: layout) do |insn, idx, block_insn, dest_reg|
       block_irep_idx = block_insn.block_index
       next unless block_irep_idx
 
@@ -54,7 +54,7 @@ class CodeGen
   # CHAINED_ACCESSOR_SUPPORT: passing @class_layout/@registry can only turn nil
   # into 'Array'.
   def region_receiver?(irep, idx, insn, dest_reg, klass, owner_name, mand, ivar_classes, arg_classes)
-    return owner_name == klass if insn.op == 'SSENDB'
+    return owner_name == klass if insn.op == :SSENDB
 
     # A complete flow set takes precedence over the older chained-return hints.
     # In particular, reject can return Hash as well as Array.
@@ -91,7 +91,7 @@ class CodeGen
   def recognize_times_regions(irep)
     regions = []
     layout = ->(insn) { 1 if insn.sym == 'times' && insn.argc_text == 'n=0' }
-    each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       # TIMES_NO_PARAM_SUPPORT: `n.times { ... }` (no block parameter) is the same
       # loop; only the counter binding is dropped (emit_times_inline).
       next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
@@ -124,7 +124,7 @@ class CodeGen
 
   # EACH_BLOCK_SUPPORT: inline `ary.each { |x| ... }`. Same BLOCK +
   # `SENDB`/`SSENDB Ra :each n=0` adjacency as times. `#each` has bytecode
-  # definitions (Game::Actors, Game::Party, LCF::Array2D), so the receiver must
+  # definitions(Game::Actors, Game::Party, LCF::Array2D), so the receiver must
   # trace (trace_new_target) to exactly "Array". An SSENDB (self receiver) is
   # admitted only when the owner is Array itself. Anything unproven gives no
   # region.
@@ -139,14 +139,14 @@ class CodeGen
 
   def recognize_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
       arity = mandatory_arity(block_irep)
       next unless pure_mandatory_arity?(block_irep)
       next unless arity == 1 || (arity.between?(2, EACH_SPREAD_MAX) && each_spread_enabled?)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB', spread: arity > 1 ? arity : nil,
+                   ssendb: insn.op == :SSENDB, spread: arity > 1 ? arity : nil,
                    elem_class: arity == 1 ? region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                                  owner_name) : nil }
     end
@@ -162,12 +162,12 @@ class CodeGen
   # kept for symmetry.
   def recognize_hash_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
       next unless mandatory_arity(block_irep) == 2 && pure_mandatory_arity?(block_irep)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB',
+                   ssendb: insn.op == :SSENDB,
                    elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                         owner_name) }
     end
@@ -176,12 +176,12 @@ class CodeGen
 
   def recognize_hash_each_value_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: named_layout('each_value')) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each_value')) do |insn, idx, block_insn, dest_reg, block_irep|
       next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB',
+                   ssendb: insn.op == :SSENDB,
                    elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                         owner_name) }
     end
@@ -207,12 +207,12 @@ class CodeGen
   # array_sort.rb, and LCF::Array1D/Array2D are not Array subclasses).
   def recognize_each_index_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: named_layout('each_index')) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each_index')) do |insn, idx, block_insn, dest_reg, block_irep|
       next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB' }
+                   ssendb: insn.op == :SSENDB }
     end
     regions
   end
@@ -231,12 +231,12 @@ class CodeGen
   # recognize_hash_each_regions; no bytecode override exists.
   def recognize_each_key_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: named_layout('each_key')) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each_key')) do |insn, idx, block_insn, dest_reg, block_irep|
       next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB' }
+                   ssendb: insn.op == :SSENDB }
     end
     regions
   end
@@ -245,14 +245,14 @@ class CodeGen
   # answers nil: its receiver is self (only admitted when the owner is Array),
   # with no register to scan.
   def region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
-    return nil if insn.op == 'SSENDB'
+    return nil if insn.op == :SSENDB
 
     proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
   end
 
   # HASH_ELEMENT_SUPPORT: region_element_class for Hash values.
   def region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
-    return nil if insn.op == 'SSENDB'
+    return nil if insn.op == :SSENDB
 
     proven_hash_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
   end
@@ -318,7 +318,7 @@ class CodeGen
                       @lcf_rows&.file_bit(receiver_class)
 
     saved_hint = @elem_class_hint
-    code = compile_send(Insn.synthetic('SEND', "R#{dest_reg} :[] n=1"), self_implicit: false, irep: irep,
+    code = compile_send(Insn.synthetic(:SEND, "R#{dest_reg} :[] n=1"), self_implicit: false, irep: irep,
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{receiver_reg}", call_arguments: [index_expr],
                         trace_idx: idx, trace_reg_offset: reg_offset,
@@ -335,7 +335,7 @@ class CodeGen
     return nil unless @registry['[]=']&.any? { |md| md.owner == receiver_class && md.irep }
 
     saved_hint = @elem_class_hint
-    code = compile_send(Insn.synthetic('SEND', "R#{receiver_reg} :[]= n=2"), self_implicit: false, irep: irep,
+    code = compile_send(Insn.synthetic(:SEND, "R#{receiver_reg} :[]= n=2"), self_implicit: false, irep: irep,
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{receiver_reg}", call_arguments: ["r#{index_reg}", "r#{value_reg}"],
                         trace_idx: idx, trace_reg_offset: reg_offset,
@@ -398,7 +398,7 @@ class CodeGen
     # `reduce(init)`: dest, init, block, so BLOCK is at dest+2 (`BLOCK R4` +
     # `SENDB R2 :reduce n=1`).
     layout = ->(insn) { { pred: 1, fold: 2 }[accum_kind.call(insn)] }
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       is_fold = accum_kind.call(insn) == :fold
       want_arity = is_fold ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
@@ -407,8 +407,8 @@ class CodeGen
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: insn.sym, init_reg: is_fold ? (dest_reg.to_i + 1).to_s : nil,
-                   ssendb: insn.op == 'SSENDB',
+                   method_name: insn.sym, init_reg: is_fold ? (dest_reg + 1) : nil,
+                   ssendb: insn.op == :SSENDB,
                    elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                    owner_name) }
     end
@@ -431,14 +431,14 @@ class CodeGen
   def recognize_collect_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
     layout = ->(insn) { 1 if insn.argc_text == 'n=0' && COLLECT_BLOCK_METHODS.include?(insn.sym) }
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       want_arity = meth == 'each_with_index' ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: meth, ssendb: insn.op == 'SSENDB',
+                   method_name: meth, ssendb: insn.op == :SSENDB,
                    elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                    owner_name) }
     end
@@ -461,13 +461,13 @@ class CodeGen
     # n=0), which the LOADSYM just wrote (register match in each_call_site).
     # A keyword call also LOADSYMs its key symbols into later registers, but it is
     # always SEND/SSEND, never SENDB/SSENDB, so it cannot form a region here.
-    each_call_site(irep, prev_op: 'LOADSYM', send_ops: %w[SENDB SSENDB], layout: layout) do |insn, idx, loadsym_insn, dest_reg|
+    each_call_site(irep, prev_op: :LOADSYM, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, loadsym_insn, dest_reg|
       sym_name = loadsym_insn.sym_token&.sub(/\A:/, '')
       next unless sym_name && !sym_name.empty?
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { sym_addr: loadsym_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
-                   method_name: insn.sym, sym_name: sym_name, ssendb: insn.op == 'SSENDB' }
+                   method_name: insn.sym, sym_name: sym_name, ssendb: insn.op == :SSENDB }
     end
     regions
   end
@@ -479,7 +479,7 @@ class CodeGen
   # game class is a Range.
   def recognize_range_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    each_block_site(irep, send_ops: %w[SENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
       next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
 
       traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
@@ -502,7 +502,7 @@ class CodeGen
     pin = irep.walk_dominating_writers(idx - 1, dest_reg, use: idx) { |insn| insn }
     # Only a `range` call made FROM a Game::Interpreter method counts (checked via
     # the irep's MethodDef owner), not just the name.
-    return nil unless pin && %w[SEND SSEND SEND0 SSEND0].include?(pin.op) && pin.sym == 'range'
+    return nil unless pin && %i[SEND SSEND SEND0 SSEND0].include?(pin.op) && pin.sym == 'range'
 
     RANGE_RETURN_METHODS.include?("#{@owner_of.fetch(irep.label).owner}#range") ? 'Range' : nil
   end
@@ -559,7 +559,7 @@ class CodeGen
       want_argc = PROFILER_SECTION_NAMES[insn.sym]
       1 + want_argc if want_argc && insn.argc_text == "n=#{want_argc}"
     end
-    each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       next unless mandatory_arity(block_irep).zero? && pure_mandatory_arity?(block_irep)
       next if @closed_world && !profiler_native_lookup_safe?(meth)
@@ -572,7 +572,7 @@ class CodeGen
       # BLOCK_FALLBACK.
       next unless profiler_section_receiver?(irep, idx, dest_reg, meth)
 
-      section_name = meth == 'section' ? profiler_section_literal(irep, idx, (dest_reg.to_i + 1).to_s) : nil
+      section_name = meth == 'section' ? profiler_section_literal(irep, idx, (dest_reg + 1)) : nil
       next if meth == 'section' && section_name.nil?
 
       upvars = block_upvar_needs(block_irep)
@@ -616,11 +616,11 @@ class CodeGen
   # occupying the two slots immediately before index `block_idx` (the BLOCK).
   def receiver_pair_before?(irep, block_idx, reg)
     mcnst = BytecodeIR.for(irep).source_at(block_idx - 1)
-    return false unless mcnst && mcnst.op == 'GETMCNST'
-    return false unless mcnst.reg == reg.to_s && mcnst.paren_reg == reg.to_s && mcnst.mcnst_name == 'Profiler'
+    return false unless mcnst && mcnst.op == :GETMCNST
+    return false unless mcnst.reg == reg && mcnst.paren_reg == reg && mcnst.mcnst_name == 'Profiler'
 
     const = BytecodeIR.for(irep).source_at(block_idx - 2)
-    const && const.op == 'GETCONST' && const.reg == reg.to_s && const.const_name == 'RGSS'
+    const && const.op == :GETCONST && const.reg == reg && const.const_name == 'RGSS'
   end
 
   # The String pool literal for :section's name argument, or nil. The VM wrote
@@ -630,7 +630,7 @@ class CodeGen
   # the method can never be mistaken for this call's name.
   def profiler_section_literal(irep, idx, reg)
     insn = BytecodeIR.for(irep).source_at(idx - 2)
-    return nil unless insn && insn.op == 'STRING' && insn.reg == reg
+    return nil unless insn && insn.op == :STRING && insn.reg == reg
 
     pool_idx = insn.pool_index
     return nil unless pool_idx
@@ -655,14 +655,14 @@ class CodeGen
   def recognize_sort_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
     layout = ->(insn) { 1 if insn.argc_text == 'n=0' && SORT_BLOCK_METHODS.include?(insn.sym) }
-    each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       want_arity = meth == 'sort' ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: meth, ssendb: insn.op == 'SSENDB',
+                   method_name: meth, ssendb: insn.op == :SSENDB,
                    elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
                                                    owner_name) }
     end
@@ -690,7 +690,7 @@ class CodeGen
   # fallbacks.
   def inline_hash_capture_hints(host_irep, region)
     block_irep = region[:block_irep]
-    return {} if BytecodeIR.for(block_irep).op?('SETUPVAR', 'BLOCK', 'SENDB', 'SSENDB')
+    return {} if BytecodeIR.for(block_irep).op?(:SETUPVAR, :BLOCK, :SENDB, :SSENDB)
 
     call_idx = host_irep.index_of_addr(region[:sendb_addr])
     return {} unless call_idx
@@ -702,13 +702,13 @@ class CodeGen
 
     captures = {}
     host_ir = BytecodeIR.for(host_irep)
-    BytecodeIR.for(block_irep).instructions_with_op('GETUPVAR').each do |insn|
+    BytecodeIR.for(block_irep).instructions_with_op(:GETUPVAR).each do |insn|
       upvar, level = insn.upvar_ref
       next unless level.zero?
 
       # Only the frame entry can be the host parameter at the call: a write on any reaching path, including a loop
       # back-edge from after the call, refuses it.
-      defs = host_ir.reaching_definitions(call_idx, upvar.to_s)
+      defs = host_ir.reaching_definitions(call_idx, upvar, shared: true)
       arg_pos = defs&.size == 1 && defs.first.entry? ? defs.first.reg.to_i : nil
       next unless arg_pos && arg_pos.between?(1, mandatory)
       next unless elements.arg_containers&.[](arg_pos - 1) == 'Hash'
@@ -736,7 +736,7 @@ class CodeGen
   # explicit-receiver sends qualify (SSEND receivers are self).
   def with_element_hint(block_irep, insn, i, elem_reg, elem_class)
     hint = nil
-    if elem_class && elem_reg && %w[SEND SEND0].include?(insn.op) &&
+    if elem_class && elem_reg && %i[SEND SEND0].include?(insn.op) &&
        element_receiver?(block_irep, i, insn.reg, elem_reg)
       hint = elem_class
     end
@@ -752,7 +752,7 @@ class CodeGen
   # instruction's receiver gets the hint of the parameter it still holds.
   def with_element_hints(block_irep, insn, i, hints, &block)
     reg, hint = hints.find { |elem_reg, _| element_receiver?(block_irep, i, insn.reg, elem_reg) } if
-      !hints.empty? && %w[SEND SEND0].include?(insn.op)
+      !hints.empty? && %i[SEND SEND0].include?(insn.op)
     with_element_hint(block_irep, insn, i, reg, hint, &block)
   end
 
@@ -785,7 +785,7 @@ class CodeGen
     # An unclaimed one falls through to compile_insn, which emits `#error`, so the
     # driving emitter gives up and the loop falls back to BLOCK_FALLBACK as
     # before.
-    when 'BLOCK', 'SENDB', 'SSENDB'
+    when :BLOCK, :SENDB, :SSENDB
       glue = @inline_nested&.glue&.[](insn.addr)
       if glue
         glue
@@ -797,12 +797,12 @@ class CodeGen
         # the driving emitter abandon the region.
         compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
       end
-    when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
+    when :RETURN, :RETNIL, :RETFALSE, :RETTRUE
       "  goto #{iter_end_label};\n"
-    when 'RETURN_BLK'
+    when :RETURN_BLK
       r = insn.no_operands? ? '0' : insn.reg
       "  return r#{r.to_i + offset};\n"
-    when 'BREAK'
+    when :BREAK
       # EACH_BLOCK_SUPPORT: `break` (bare breaks carry a LOADNIL'd register) makes
       # the value the whole SEND's result (vm.c OP_BREAK L_UNWINDING). Inlined:
       # assign the SENDB destination and jump past the loop. Only the each/sym
@@ -813,14 +813,14 @@ class CodeGen
       else
         "  #error unhandled opcode BREAK -- not in this prototype's supported subset\n"
       end
-    when 'GETUPVAR'
+    when :GETUPVAR
       upvar_idx, level = insn.upvar_ref
       if level.zero?
         "  r#{insn.reg.to_i + offset} = r#{upvar_idx};\n"
       else
         "  #error unhandled opcode GETUPVAR -- not in this prototype's supported subset\n"
       end
-    when 'SETUPVAR'
+    when :SETUPVAR
       upvar_idx, level = insn.upvar_ref
       if level.zero?
         "  r#{upvar_idx} = r#{insn.reg.to_i + offset};\n"
@@ -832,9 +832,9 @@ class CodeGen
     # collide with a same-numbered label of the enclosing method (goto labels have
     # function scope). `.to_i`: disassembly zero-pads addresses ("016") but labels
     # use the integer value.
-    when 'JMP'
+    when :JMP
       "  goto #{label_prefix}#{insn.jmp_addr};\n"
-    when 'JMPUW'
+    when :JMPUW
       # JMPUW_SUPPORT: as compile_insn's JMPUW case, but against `block_irep`'s own
       # catch handlers and jump targets, and with prefixed labels (see JMP above).
       if jmpuw_is_plain_jump?(block_irep)
@@ -842,7 +842,7 @@ class CodeGen
       else
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end
-    when 'JMPNOT'
+    when :JMPNOT
       # The insn is unshifted and idx is its position in block_irep, so the decision reads block_irep's own state with
       # block_irep's own register numbers. Only the emitted name needs the offset (compile_shifted_body_insn, which does
       # shift the insn, keeps the offset guard).
@@ -850,12 +850,12 @@ class CodeGen
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
       decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
         "  if (!mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
-    when 'JMPIF'
+    when :JMPIF
       reg = insn.reg
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
       decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
         "  if (mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
-    when 'JMPNIL'
+    when :JMPNIL
       reg = insn.reg
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
       decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||

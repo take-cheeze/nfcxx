@@ -104,8 +104,8 @@ class CodeGen
     block = program.source_at(creation)
     send = program.source_at(creation + 1)
     where = "#{parent.file}:#{block.lineno}"
-    return "the block at #{where} is a lambda" unless block.op == 'BLOCK'
-    unless send && %w[SENDB SSENDB].include?(send.op) && send.plain_fixed_argc? &&
+    return "the block at #{where} is a lambda" unless block.op == :BLOCK
+    unless send && %i[SENDB SSENDB].include?(send.op) && send.plain_fixed_argc? &&
            block.reg.to_i == send.reg.to_i + send.argc.to_i + 1
       return "the block at #{where} is not a literal block argument"
     end

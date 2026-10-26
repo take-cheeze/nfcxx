@@ -27,6 +27,7 @@ require_relative '../../tools/bc2cpp/numeric_flow'
 require_relative '../../tools/bc2cpp/codegen_frozen_tables'
 require_relative '../../tools/bc2cpp/codegen_class_narrowing'
 require_relative '../../tools/bc2cpp/codegen_numeric_proof'
+require_relative '../../tools/bc2cpp/codegen_return_classes'
 
 failures = []
 check = lambda do |what, condition|
@@ -60,7 +61,7 @@ class LiteralOracle
     @bit = bit
   end
 
-  def literal_class_mask(insn) = insn.op == 'LOADSYM' ? @bit : nil
+  def literal_class_mask(insn) = %i[LOADSYM SYMBOL INTERN].include?(insn.op) ? @bit : nil
   def entry_mask(_irep, _reg) = OTHER
   def const_mask(_insn) = OTHER
   def ivar_slots(_irep) = []
@@ -73,17 +74,17 @@ class LiteralOracle
   def send_mask(_irep, _index, _insn, _state) = OTHER
 end
 
-def symbol_program
+def symbol_program(op = :LOADSYM)
   irep = Irep.new(label: 'sym', nregs: 4, nlocals: 1)
-  rows = [['LOADSYM', 'R1 :a'], ['RETURN', 'R1']]
+  rows = [[op, { :SYMBOL => 'R1 L[0]', :INTERN => 'R1' }.fetch(op, 'R1 :a')], [:RETURN, 'R1']]
   irep.instructions = rows.each_with_index.map do |(op, args), address|
     Insn.new(lineno: 1, addr: address, op: op, args: args, raw: "#{op} #{args}")
   end
   irep
 end
 
-def loadsym_mask(bit)
-  irep = symbol_program
+def loadsym_mask(bit, op = :LOADSYM)
+  irep = symbol_program(op)
   states = NumericFlow.states(irep, LiteralOracle.new(bit), [])
   states && states[1] && states[1][1]
 end
@@ -96,8 +97,35 @@ check.call('without a literal mask (switch off, no bit) it holds OTHER', loadsym
 cg = codegen
 oracle = CodeGen::NumericOracle.new(cg)
 loadsym = symbol_program.instructions[0]
-loadtrue = Insn.new(lineno: 1, addr: 0, op: 'LOADTRUE', args: 'R1', raw: 'LOADTRUE R1')
+loadtrue = Insn.new(lineno: 1, addr: 0, op: :LOADTRUE, args: 'R1', raw: 'LOADTRUE R1')
 check.call('CodeGen::NumericOracle gives LOADSYM the Symbol bit', oracle.literal_class_mask(loadsym) == SYM)
+pooled_symbol = symbol_program(:SYMBOL).instructions[0]
+check.call('a pooled SYMBOL register holds the Symbol bit', loadsym_mask(SYM, :SYMBOL) == SYM)
+check.call('a pooled SYMBOL register without a class bit stays OTHER', loadsym_mask(nil, :SYMBOL) == OTHER)
+check.call('NumericOracle recognizes pooled SYMBOL', oracle.literal_class_mask(pooled_symbol) == SYM)
+check.call('ExactOracle recognizes pooled SYMBOL', CodeGen::ExactOracle.new(cg).literal_class_mask(pooled_symbol) == SYM)
+intern = symbol_program(:INTERN).instructions[0]
+check.call('INTERN produces a Symbol register on normal completion', loadsym_mask(SYM, :INTERN) == SYM)
+check.call('NumericOracle recognizes INTERN', oracle.literal_class_mask(intern) == SYM)
+check.call('ExactOracle recognizes INTERN', CodeGen::ExactOracle.new(cg).literal_class_mask(intern) == SYM)
+boolean = CodeGen::ExactOracle.new(cg).keyword_presence(nil)
+check.call('keyword presence retains both boolean classes', boolean == (cg.numeric_class_bit('TrueClass') | cg.numeric_class_bit('FalseClass')))
+boolean_oracle = Class.new(LiteralOracle) do
+  def initialize(bit, false_bit)
+    super(bit)
+    @false_bit = false_bit
+  end
+  def keyword_presence(_insn) = @bit
+  def false_class_bit = @false_bit
+end.new(boolean, cg.numeric_class_bit('FalseClass'))
+presence = Irep.new(label: 'presence', nregs: 4, nlocals: 1,
+                    instructions: [[:KEY_P, 'R1 :option'], [:JMPNOT, 'R1 3'], [:RETURN, 'R1'], [:RETURN, 'R1']].each_with_index.map do |(op, args), address|
+                      Insn.new(lineno: 1, addr: address, op: op, args: args)
+                    end)
+boolean_states = NumericFlow.states(presence, boolean_oracle, [])
+check.call('keyword truth edge contains TrueClass only', boolean_states[2][1] == cg.numeric_class_bit('TrueClass'))
+check.call('keyword false edge contains FalseClass only', boolean_states[3][1] == cg.numeric_class_bit('FalseClass'))
+
 check.call('CodeGen::NumericOracle gives TrueClass and FalseClass literals no bit here', oracle.literal_class_mask(loadtrue).nil?)
 check.call('no Symbol bit allocated: LOADSYM is OTHER', CodeGen::NumericOracle.new(codegen(symbol_bit: nil)).literal_class_mask(loadsym).nil?)
 
@@ -110,6 +138,7 @@ ensure
 end
 
 with_loadsym_switch('0') do
+  check.call('BC2CPP_LOADSYM_CLASS=0 also disables pooled SYMBOL bits', oracle.literal_class_mask(pooled_symbol).nil?)
   check.call('BC2CPP_LOADSYM_CLASS=0: the numeric oracle gives LOADSYM no bit', oracle.literal_class_mask(loadsym).nil?)
   check.call('BC2CPP_LOADSYM_CLASS=0: a Symbol class test keeps the bit on both edges (no chain)',
              CodeGen::ClassTest.new(cg, :kind_of, 'Symbol').narrow(SYM, false) == SYM &&
@@ -136,13 +165,16 @@ end
 puts '-- generated code (host mrbc)'
 if ENV['MRBC']
   require_relative 'fixture_runtime'
-  FIXTURE = <<~RUBY
+  FIXTURE = <<~'RUBY'
     module LsTables
       NAMES = [:a, :b, :c].freeze
     end
 
     class LsUse
       def pick_sym; :a; end
+      def pooled_symbols; %i[a b]; end
+      def interpolated_symbol(value); :"prefix#{value}"; end
+      def optional_symbol(value: :default); value; end
       def pick_or_int(c); c ? :a : 1; end
       def narrow_int(c); x = pick_or_int(c); if x.is_a?(Integer) then x + 1 else 0 end; end
       def arith_sym; x = pick_sym; x + 1; end
@@ -173,6 +205,43 @@ if ENV['MRBC']
     check.call('the Integer-narrowed value keeps its numeric proof with the bit on',
                on_code.scan('NUMERIC_OPERAND_PROOF').size >= off_code.scan('NUMERIC_OPERAND_PROOF').size)
     check.call('the on run generates the fixture', !on_code.empty?)
+    build = Bc2cppFixtureRuntime.full_or_build
+    if build
+      driver = <<~'RUBY'
+        probe = LsUse.new
+        p probe.pooled_symbols
+        p probe.interpolated_symbol('value')
+        p probe.optional_symbol
+        p probe.optional_symbol(value: :provided)
+        p probe.narrow_int(true)
+        p probe.narrow_int(false)
+        begin
+          probe.arith_sym
+        rescue NoMethodError => e
+          puts e.class
+        end
+        puts 'end'
+      RUBY
+      harness = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          mrb_load_string(M, R"SYM(#{driver})SYM");
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(File.join(root, 'on'), on_err, OWNERS, harness, build: build, full: true)
+      sections = Bc2cppFixtureRuntime.sections(output)
+      interpreted = sections['interpreted']
+      check.call('Symbol and keyword fixture builds and runs', built)
+      check.call('Symbol values, keyword defaults and arithmetic errors match interpreted mruby',
+                 interpreted && interpreted.last == 'end' && interpreted == sections['compiled'])
+      puts output unless built && interpreted && interpreted == sections['compiled']
+    else
+      puts '  SKIP runtime: no full-core mruby build'
+    end
+
   end
 else
   puts '  SKIP generated code: set MRBC'

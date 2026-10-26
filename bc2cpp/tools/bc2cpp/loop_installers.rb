@@ -50,7 +50,7 @@ module LoopInstallers
   PLAIN_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND - BytecodeIR::Ops::SELF_SEND).freeze
   # Control flow that ends or splits the straight-line walk.
   FLOW_OPS = BytecodeIR::Ops::FLOW_PREFIX_OPS
-  ARITH_OPS = %w[ADD SUB MUL DIV EQ LT LE GT GE ADDI SUBI].freeze
+  ARITH_OPS = %i[ADD SUB MUL DIV EQ LT LE GT GE ADDI SUBI].freeze
   LOAD_TRUTHY = BytecodeIR::Ops::LOAD_TRUTHY_OPS
   ATTR_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
   # A name define_method installs, or a Symbol an expansion loads: an identifier, optionally ending in ?, ! or =.
@@ -75,12 +75,12 @@ module LoopInstallers
   # True when the SENDB at insns[idx] is a loop whose block tree sends an attr_* installer or define_method.
   def candidate?(irep, idx, ireps)
     insn = BytecodeIR.for(irep).source_at(idx)
-    return false unless insn.op == 'SENDB' && ITERATORS.include?(insn.sym)
+    return false unless insn.op == :SENDB && ITERATORS.include?(insn.sym)
 
     return false if idx.zero?
 
     block = BytecodeIR.for(irep).source_at(idx - 1)
-    return false unless block.op == 'BLOCK' && block.block_index
+    return false unless block.op == :BLOCK && block.block_index
 
     label = irep.reps[block.block_index]
     label ? !(attr_sends(label, ireps).empty? && define_method_sends(label, ireps).empty?) : false
@@ -89,7 +89,7 @@ module LoopInstallers
   # Every `define_method` SSENDB of the block tree rooted at +label+, as [irep label, index].
   def define_method_sends(label, ireps, found = [])
     irep = ireps[label] or return found
-    irep.each_with_op('SSENDB') do |insn, i|
+    irep.each_with_op(:SSENDB) do |insn, i|
       found << [label, i] if insn.sym == 'define_method'
     end
     irep.reps.compact.each { |child| define_method_sends(child, ireps, found) }
@@ -99,7 +99,7 @@ module LoopInstallers
   # Every attr_* send of the block tree rooted at +label+, as [irep label, index].
   def attr_sends(label, ireps, found = [])
     irep = ireps[label] or return found
-    irep.each_with_op('SSEND', 'SSEND0') do |insn, i|
+    irep.each_with_op(:SSEND, :SSEND0) do |insn, i|
       found << [label, i] if ATTR_SENDS.include?(insn.sym)
     end
     irep.reps.compact.each { |child| attr_sends(child, ireps, found) }
@@ -192,7 +192,7 @@ module LoopInstallers
       @ireps = ireps
       @registry = registry
       @sites = sites
-      @regs = {}
+      @regs = Array.new(irep.nregs.to_i, OPAQUE)
       @consts = {}
     end
 
@@ -253,7 +253,7 @@ module LoopInstallers
       interp = Interp.new(@ireps, @consts, reached, definer: definer?(namespace))
       interp.iterate(insn.sym, recv, block)
       @regs[insn.reg.to_i] = recv
-      @regs.delete(insn.reg.to_i + 1)
+      @regs[insn.reg.to_i + 1] = OPAQUE
       Result.new(installs: interp.installs, sites: LoopInstallers.attr_sends(block.label, @ireps),
                  namespace: namespace)
     rescue Refused => e
@@ -276,23 +276,23 @@ module LoopInstallers
     def step(insn)
       op = insn.op
       case op
-      when 'MOVE' then @regs[insn.regs[0].to_i] = get(insn.regs[1])
-      when 'LOADSYM' then @regs[insn.reg.to_i] = Sym.new(insn.sym_token)
-      when 'SYMBOL' then @regs[insn.reg.to_i] = pool_symbol(insn)
-      when 'LOADNIL' then @regs[insn.reg.to_i] = nil
-      when 'LOADTRUE' then @regs[insn.reg.to_i] = true
-      when 'LOADFALSE' then @regs[insn.reg.to_i] = false
-      when 'LOADSELF' then @regs[insn.reg.to_i] = SELF
+      when :MOVE then @regs[insn.regs[0].to_i] = get(insn.regs[1])
+      when :LOADSYM then @regs[insn.reg.to_i] = Sym.new(insn.sym_token)
+      when :SYMBOL then @regs[insn.reg.to_i] = pool_symbol(insn)
+      when :LOADNIL then @regs[insn.reg.to_i] = nil
+      when :LOADTRUE then @regs[insn.reg.to_i] = true
+      when :LOADFALSE then @regs[insn.reg.to_i] = false
+      when :LOADSELF then @regs[insn.reg.to_i] = SELF
       when LOAD_TRUTHY then @regs[insn.reg.to_i] = TRUTHY
-      when 'ARRAY', 'ARRAY2' then @regs[insn.reg.to_i] = build_array(insn)
-      when 'HASH' then @regs[insn.reg.to_i] = build_hash(insn)
-      when 'BLOCK' then @regs[insn.reg.to_i] = BlockVal.new(@irep.reps[insn.block_index])
-      when 'LAMBDA', 'METHOD', 'TDEF', 'SDEF', 'TCLASS', 'SCLASS', 'GETIV', 'GETUPVAR', 'GETGV', 'GETCV', 'GETSV'
+      when :ARRAY, :ARRAY2 then @regs[insn.reg.to_i] = build_array(insn)
+      when :HASH then @regs[insn.reg.to_i] = build_hash(insn)
+      when :BLOCK then @regs[insn.reg.to_i] = BlockVal.new(@irep.reps[insn.block_index])
+      when :LAMBDA, :METHOD, :TDEF, :SDEF, :TCLASS, :SCLASS, :GETIV, :GETUPVAR, :GETGV, :GETCV, :GETSV
         @regs[insn.reg.to_i] = OPAQUE
-      when 'SETCONST' then @consts[insn.const_name] = get(insn.reg_operand)
-      when 'GETCONST' then get_const(insn)
-      when 'NOP' then nil
-      when 'GETMCNST', 'GETIDX', 'SETIDX', *ARITH_OPS then operand_call(insn)
+      when :SETCONST then @consts[insn.const_name] = get(insn.reg_operand)
+      when :GETCONST then get_const(insn)
+      when :NOP then nil
+      when :GETMCNST, :GETIDX, :SETIDX, *ARITH_OPS then operand_call(insn)
       else
         CALLS.include?(op) ? call(insn) : havoc
       end
@@ -311,7 +311,7 @@ module LoopInstallers
       base = insn.reg.to_i
       (base..(base + 2)).each { |r| LoopInstallers.poison(get(r)) }
       poison_consts
-      return if insn.op == 'SETIDX'
+      return if insn.op == :SETIDX
 
       consume(base, 3)
       @regs[base] = OPAQUE
@@ -325,7 +325,7 @@ module LoopInstallers
     # The operands of a constructor or call are consumed: a stale copy in a dead register must not be
     # mistaken for a live reference (poisoning it would poison the object it was built into).
     def consume(from, count)
-      count.times { |i| @regs.delete(from + i) }
+      count.times { |i| @regs[from + i] = OPAQUE }
     end
 
     # `ARRAY Ra n` takes Ra..Ra+n-1; the disassembly also calls `ARRAY2 Ra Rb c` (Rb..Rb+c-1) ARRAY.
@@ -369,7 +369,7 @@ module LoopInstallers
     # A call may mutate whatever it was handed and, by name, any constant.
     def generic_call(insn)
       base = insn.reg.to_i
-      span = insn.argc.to_i + 2 * insn.nk_spec.to_i + 2
+      span = insn.argc.to_i + 2 * insn.keyword_argc.to_i + 2
       (base..(base + span)).each { |r| LoopInstallers.poison(get(r)) }
       poison_consts
       consume(base, span + 1)
@@ -423,9 +423,9 @@ module LoopInstallers
       irep = @ireps[block.label] or refuse('a missing block body')
       prog = BytecodeIR.for(irep)
       first = prog.source_at(0)
-      refuse('a block without plain parameters') unless first&.op == 'ENTER' && first.enter_fields[0] == args.size &&
+      refuse('a block without plain parameters') unless first&.op == :ENTER && first.enter_fields[0] == args.size &&
                                                         first.enter_fields[1..].all?(&:zero?)
-      regs = {}
+      regs = Array.new(irep.nregs.to_i, OPAQUE)
       args.each_with_index { |v, i| regs[i + 1] = v }
       defines = []
       pc = 1
@@ -458,30 +458,30 @@ module LoopInstallers
     def exec(irep, insn, pc, regs, defines)
       get = ->(r) { regs.fetch(r.to_i, OPAQUE) }
       case insn.op
-      when 'MOVE' then regs[insn.regs[0].to_i] = get.call(insn.regs[1])
-      when 'LOADSYM' then regs[insn.reg.to_i] = Sym.new(insn.sym_token)
-      when 'SYMBOL'
+      when :MOVE then regs[insn.regs[0].to_i] = get.call(insn.regs[1])
+      when :LOADSYM then regs[insn.reg.to_i] = Sym.new(insn.sym_token)
+      when :SYMBOL
         entry = irep.pool[insn.pool_index.to_i]
         regs[insn.reg.to_i] = entry.is_a?(String) ? Sym.new(entry) : OPAQUE
-      when 'LOADNIL' then regs[insn.reg.to_i] = nil
-      when 'LOADTRUE' then regs[insn.reg.to_i] = true
-      when 'LOADFALSE' then regs[insn.reg.to_i] = false
-      when 'LOADSELF' then regs[insn.reg.to_i] = SELF
+      when :LOADNIL then regs[insn.reg.to_i] = nil
+      when :LOADTRUE then regs[insn.reg.to_i] = true
+      when :LOADFALSE then regs[insn.reg.to_i] = false
+      when :LOADSELF then regs[insn.reg.to_i] = SELF
       when LOAD_TRUTHY then regs[insn.reg.to_i] = TRUTHY
-      when 'NOP' then nil
-      when 'RETURN', 'RETNIL', 'RETSELF', 'RETTRUE', 'RETFALSE' then return nil
-      when 'JMP' then return jump(irep, insn)
-      when 'JMPNOT' then return truthy(get.call(insn.reg)) ? pc + 1 : jump(irep, insn)
-      when 'JMPIF' then return truthy(get.call(insn.reg)) ? jump(irep, insn) : pc + 1
-      when 'JMPNIL' then return opaque_check(get.call(insn.reg)).nil? ? jump(irep, insn) : pc + 1
-      when 'GETIDX' then regs[insn.regs[0].to_i] = fetch(get.call(insn.regs[0]), get.call(insn.regs[1]))
-      when 'SETIDX' then store(get.call(insn.regs[0]), get.call(insn.regs[1]), get.call(insn.regs[2]))
-      when 'GETCONST' then regs[insn.reg.to_i] = scratch_const(insn.const_name)
-      when 'BLOCK' then regs[insn.reg.to_i] = BlockVal.new(irep.reps[insn.block_index])
-      when 'SEND' then regs[insn.reg.to_i] = send_op(insn, get)
-      when 'SSEND', 'SSEND0' then install(insn, get)
-      when 'SSENDB' then regs[insn.reg.to_i] = define_site(irep, insn, pc, get, defines)
-      when 'SENDB' then nested(insn, get, regs)
+      when :NOP then nil
+      when :RETURN, :RETNIL, :RETSELF, :RETTRUE, :RETFALSE then return nil
+      when :JMP then return jump(irep, insn)
+      when :JMPNOT then return truthy(get.call(insn.reg)) ? pc + 1 : jump(irep, insn)
+      when :JMPIF then return truthy(get.call(insn.reg)) ? jump(irep, insn) : pc + 1
+      when :JMPNIL then return opaque_check(get.call(insn.reg)).nil? ? jump(irep, insn) : pc + 1
+      when :GETIDX then regs[insn.regs[0].to_i] = fetch(get.call(insn.regs[0]), get.call(insn.regs[1]))
+      when :SETIDX then store(get.call(insn.regs[0]), get.call(insn.regs[1]), get.call(insn.regs[2]))
+      when :GETCONST then regs[insn.reg.to_i] = scratch_const(insn.const_name)
+      when :BLOCK then regs[insn.reg.to_i] = BlockVal.new(irep.reps[insn.block_index])
+      when :SEND then regs[insn.reg.to_i] = send_op(insn, get)
+      when :SSEND, :SSEND0 then install(insn, get)
+      when :SSENDB then regs[insn.reg.to_i] = define_site(irep, insn, pc, get, defines)
+      when :SENDB then nested(insn, get, regs)
       else refuse("the unmodeled opcode #{insn.op}")
       end
       pc + 1

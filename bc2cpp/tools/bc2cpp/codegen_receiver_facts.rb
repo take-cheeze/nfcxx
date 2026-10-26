@@ -18,10 +18,10 @@ class CodeGen
 
     # RESCUE reads its first register and writes its second; the caught
     # exception remains live in the input register for the handler.
-    rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
-    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %w[RESCUE], barrier: rescue_write, barrier_result: false,
+    rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false,
                                               follow_moves: true) do |insn, _index, exc_reg|
-      next false unless insn.op == 'EXCEPT'
+      next false unless insn.op == :EXCEPT
 
       recognize_rescue_regions(irep).any? do |region|
         region[:kind] == :rescue_class && region[:exc_reg] == exc_reg &&
@@ -77,7 +77,7 @@ class CodeGen
   end
 
   # ELEMENT_CLASS_SUPPORT: element class of a proven-Array block receiver, from
-  # the same scan ArrayElementLayout uses (so they cannot drift). nil (the usual
+  # the same scan ArrayElementLayout uses(so they cannot drift). nil (the usual
   # answer) leaves per-element calls as POLY mrb_funcall.
   def proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
     array_element_source_scan(irep, idx, dest_reg, element_ctx(ivar_classes, mand, arg_classes, owner_name))
@@ -111,7 +111,7 @@ class CodeGen
     irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, follow_moves: true) do |insn|
       # The known-class trace already resolved this SEND's constant path;
       # stability above proves that path still denotes the same class.
-      expected_class if %w[SEND SEND0].include?(insn.op) && insn.sym == 'new'
+      expected_class if %i[SEND SEND0].include?(insn.op) && insn.sym == 'new'
     end
   end
 
@@ -128,7 +128,7 @@ class CodeGen
     return nil if self_implicit
 
     literal = irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |insn|
-      { 'ARRAY' => 'Array', 'ARRAY2' => 'Array', 'HASH' => 'Hash', 'STRING' => 'String' }[insn.op]
+      { :ARRAY => 'Array', :ARRAY2 => 'Array', :HASH => 'Hash', :STRING => 'String' }[insn.op]
     end
     [:literal, literal] if literal
   end
@@ -175,7 +175,7 @@ class CodeGen
     reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     exact_class ||= exact_new_class_at(irep, site_idx, reg, owner_def) unless self_implicit
     constant_owner = nil
-    if !self_implicit && idx && %w[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(idx).op)
+    if !self_implicit && idx && %i[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(idx).op)
       constant_owner = constant_object_owner(irep, idx, reg, owner_def&.owner)
     end
     kind, klass = proven_receiver_class(irep, site_idx, reg, closed_world_site(recv, irep, idx, owner_def),
@@ -204,7 +204,7 @@ class CodeGen
   def receiver_trace_origin(irep, idx, dest_reg)
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
-    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg.to_s)
+    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg, shared: true)
     return "unproven.#{receiver_origin_by_walk(irep, idx, dest_reg)}" if defs.nil?
     return receiver_origin_by_walk(irep, idx, dest_reg) if defs.empty?
 
@@ -213,28 +213,28 @@ class CodeGen
   end
 
   def receiver_definition_origin(irep, definition)
-    return (definition.reg.to_s == '0' ? 'self_register' : 'incoming_or_unwritten_register') if definition.entry?
+    return (definition.reg == 0 ? 'self_register' : 'incoming_or_unwritten_register') if definition.entry?
 
     receiver_producer_origin(BytecodeIR.for(irep).source_at(definition.index))
   end
 
   def receiver_origin_by_walk(irep, idx, dest_reg)
-    at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
-    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
-      insn.op == 'MOVE' ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
+    at_entry = ->(last) { last == 0 ? 'self_register' : 'incoming_or_unwritten_register' }
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
+      insn.op == :MOVE ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
     end
   end
 
   # The label of a non-copy writer; a MOVE is followed by the caller, never labelled here.
   def receiver_producer_origin(insn)
     case insn.op
-    when 'GETIV' then 'get_ivar'
-    when 'GETIDX', 'GETIDX0' then 'indexed_result'
-    when 'GETUPVAR' then 'captured_upvar'
-    when 'GETCONST', 'GETMCNST' then 'constant_lookup'
+    when :GETIV then 'get_ivar'
+    when :GETIDX, :GETIDX0 then 'indexed_result'
+    when :GETUPVAR then 'captured_upvar'
+    when :GETCONST, :GETMCNST then 'constant_lookup'
     when *BytecodeIR::Ops::SEND then 'send_result'
-    when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
-    else "write_#{insn.op.downcase}"
+    when :ARRAY, :ARRAY2, :HASH, :STRING, 'STR' then 'literal_container'
+    else "write_#{insn.op.to_s.downcase}"
     end
   end
 
@@ -245,7 +245,7 @@ class CodeGen
                       idx < BytecodeIR.for(irep).size && dest_reg
 
     written = straight_line_constant_name(irep, idx, dest_reg) ||
-              irep.agreed_constant_name(idx, dest_reg.to_s, through_handlers: through_handlers)
+              irep.agreed_constant_name(idx, dest_reg, through_handlers: through_handlers)
     owner = if written
               resolve_class_constant_name(written, lexical_owner)
             else
@@ -260,14 +260,14 @@ class CodeGen
   # that is the register's one definition and the name is a class the program knows.
   def top_level_constant_name(irep, idx, reg, through_handlers)
     program = BytecodeIR.for(irep)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: through_handlers)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: through_handlers, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     insn = program.source_at(defs.first.index)
-    return nil unless insn.op == 'GETMCNST' && insn.paren_reg == insn.reg && insn.mcnst_name
+    return nil unless insn.op == :GETMCNST && insn.paren_reg == insn.reg && insn.mcnst_name
 
-    scope = BytecodeIR.reaching_definitions(irep, defs.first.index, insn.reg, through_handlers: through_handlers)
-    return nil unless scope&.size == 1 && !scope.first.entry? && program.source_at(scope.first.index).op == 'OCLASS'
+    scope = BytecodeIR.reaching_definitions(irep, defs.first.index, insn.reg, through_handlers: through_handlers, shared: true)
+    return nil unless scope&.size == 1 && !scope.first.entry? && program.source_at(scope.first.index).op == :OCLASS
 
     ConstructClassNames.table.key?(insn.mcnst_name) ? insn.mcnst_name : nil
   end
@@ -281,7 +281,7 @@ class CodeGen
     return nil unless @closed_world && @closed_world.global_refusal.nil? && guard_violation_enabled? &&
                       @call_block_expr.nil? && irep && idx && reg && idx < BytecodeIR.for(irep).size
 
-    name = irep.agreed_constant_name(idx, reg.to_s, through_handlers: through_handlers)
+    name = irep.agreed_constant_name(idx, reg, through_handlers: through_handlers)
     return name if name && !name.include?('::') && CodeGen.stable_class_constants&.include?(name)
 
     # A qualified or declared-class constant: the proof behind CLOSED_WORLD_CONSTANT_OBJECT.
@@ -292,7 +292,7 @@ class CodeGen
   # so its own receiver/argument registers can be asked about.
   def proof_send_insn(irep, idx, name)
     insn = irep && idx && BytecodeIR.for(irep).source_at(idx)
-    insn if insn && %w[SEND SEND0].include?(insn.op) && insn.sym == name
+    insn if insn && %i[SEND SEND0].include?(insn.op) && insn.sym == name
   end
 
   # GUARD_VIOLATION: `Klass.new`'s receiver is the stable constant naming `klass`, so the
@@ -319,11 +319,11 @@ class CodeGen
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
   def straight_line_constant_name(irep, idx, dest_reg, skip_blocks: false)
-    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT JMPNIL JMPUW])
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %i[JMP JMPIF JMPNOT JMPNIL JMPUW])
     return nil unless branch_edges
 
-    barriers = skip_blocks ? %w[JMPUW ONERR RESCUE EXCEPT] : %w[JMPUW ONERR RESCUE EXCEPT BLOCK]
-    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
+    barriers = skip_blocks ? %i[JMPUW ONERR RESCUE EXCEPT] : %i[JMPUW ONERR RESCUE EXCEPT BLOCK]
+    ref = irep.constant_path(idx - 1, dest_reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
     return nil unless ref&.root == :const
 
     # A forward edge from before this write into the send's block could
@@ -332,7 +332,7 @@ class CodeGen
     # A loop back-edge from after the send can carry a second write of dest_reg into it, which the backward walk
     # cannot see; a single reaching definition (following back-edges) is the only write that can be the receiver.
     # Handler edges are crossed: without through_handlers a send inside a rescue/ensure range is refused (:query_guarded).
-    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     ref.name && ([ref.name] + ref.segments).join('::')
@@ -371,7 +371,7 @@ class CodeGen
   # calls), so the instance-owner proof is reusable only when the body neither
   # observes self nor ties itself to instance state: ivars, class variables,
   # `super` or ARGARY, anywhere in its blocks too.
-  MODULE_FUNCTION_INSTANCE_OPS = %w[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
+  MODULE_FUNCTION_INSTANCE_OPS = %i[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
 
   def module_function_copy_self_safe?(irep, owner)
     return false unless irep
@@ -876,13 +876,13 @@ class CodeGen
 
     # (1) The adjacent ARGARY + SUPER pair (`SUPER R(a)` + `ARGARY R(a+1)`). An
     # interposed EXT declines.
-    argary_idx = program.source_at(idx)&.op == 'ARGARY' ? idx : idx - 1
+    argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
     return nil if argary_idx.negative?
 
     argary = program.source_at(argary_idx)
     super_insn = program.source_at(argary_idx + 1)
     return nil unless argary && super_insn
-    return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
+    return nil unless argary.op == :ARGARY && super_insn.op == :SUPER
 
     # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
     # keyword `nk=` variant.
@@ -891,11 +891,11 @@ class CodeGen
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
     spec = argary.argary_spec
-    return nil unless spec && argary.reg && argary.paren_value&.match?(/\A\d+\z/)
+    return nil unless spec && argary.reg && !argary.paren_int.nil?
 
     argary_dest = argary.reg
     m = spec[0]
-    return nil unless spec[1..].all?(&:zero?) && argary.paren_value.to_i.zero?
+    return nil unless spec[1..].all?(&:zero?) && argary.paren_int.to_i.zero?
     return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
 
     # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
@@ -958,6 +958,9 @@ class CodeGen
     key = "#{owner_def.owner}##{owner_def.name}"
     return true if SUPER_TARGETS.include?(key)
 
+    # A whole-program memo like block_carrying_callers_of's, stored only once call facts can answer.
+    return no_caller_passes_block?(owner_def) unless call_facts_enabled?
+
     @super_no_caller_block ||= {}
     return @super_no_caller_block[key] if @super_no_caller_block.key?(key)
 
@@ -982,31 +985,37 @@ class CodeGen
   # Every block-carrying send of `name` in the build, as the set of receiver
   # class names it can provably hold. nil when some send's receiver class is
   # unproven (the caller must treat the question as open).
+  #
+  # SUPER_NO_CALLER_BLOCK: a whole-program memo (every caller of a name is fixed once the ireps are), kept across
+  # method compiles. Only an answer with call facts enabled is stored: they turn on once the closed world is set.
   def block_carrying_callers_of(name)
+    return nil unless call_facts_enabled?
+
     @block_carrying_callers ||= {}
     return @block_carrying_callers[name] if @block_carrying_callers.key?(name)
-    return @block_carrying_callers[name] = nil unless call_facts_enabled?
 
     found = []
     unknown = false
-    @ireps.each_value do |irep|
+    block_send_sites.fetch(name, []).each do |irep, idx, reg|
       states = call_facts_states(irep)
       next unless states
 
-      BytecodeIR.for(irep).each_with_op('SENDB', 'SSENDB') do |insn, idx|
-        next unless insn.sym == name
-
-        reg = insn.reg.to_i
-        names = states[idx] && CallFacts::Flow.facts(states[idx], reg)
-        classes = names && call_facts_classes(names)
-        if classes.nil?
-          unknown = true
-        else
-          found << classes
-        end
+      names = states[idx] && CallFacts::Flow.facts(states[idx], reg)
+      classes = names && call_facts_classes(names)
+      if classes.nil?
+        unknown = true
+      else
+        found << classes
       end
     end
     @block_carrying_callers[name] = unknown ? nil : found
+  end
+
+  # { name => [[irep, index, receiver register]] } for every block-carrying send in the build.
+  def block_send_sites
+    @block_send_sites ||= @ireps.each_value.with_object(Hash.new { |h, k| h[k] = [] }) do |irep, sites|
+      BytecodeIR.for(irep).each_with_op(:SENDB, :SSENDB) { |insn, idx| sites[insn.sym] << [irep, idx, insn.reg.to_i] }
+    end
   end
 
   # The superclass closure: every class whose instances can be an instance of
@@ -1067,14 +1076,14 @@ class CodeGen
     # (2) The adjacent pair codegen_zsuper emits (`SUPER R(a)` + `ARGARY R(a+1)`;
     # OP_SUPER reads the packed argument from regs[a+1]). `idx - 1` must not go
     # negative: Ruby would index from the end of the list.
-    argary_idx = BytecodeIR.for(irep).source_at(idx)&.op == 'ARGARY' ? idx : idx - 1
+    argary_idx = BytecodeIR.for(irep).source_at(idx)&.op == :ARGARY ? idx : idx - 1
     return nil if argary_idx.negative?
 
     argary = BytecodeIR.for(irep).source_at(argary_idx)
     super_insn = BytecodeIR.for(irep).source_at(argary_idx + 1)
     return nil unless argary && super_insn
     # Strict adjacency: an interposed EXT declines.
-    return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
+    return nil unless argary.op == :ARGARY && super_insn.op == :SUPER
 
     argary_dest = argary.reg
     super_dest = super_insn.reg
@@ -1087,7 +1096,7 @@ class CodeGen
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
     # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.
     return nil unless argary.argary_spec&.join(':') == shape[:argary]
-    return nil unless argary.paren_value == '0'
+    return nil unless argary.paren_int == 0
 
     # (5) The superclass is the implicit Object (:none means a CLASS with no
     # superclass expression, not "unrecognized").

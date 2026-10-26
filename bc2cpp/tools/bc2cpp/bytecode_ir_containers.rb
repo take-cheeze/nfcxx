@@ -16,11 +16,11 @@ module BytecodeIR
 
     # Element registers of an Array, value registers of a Hash.
     def value_regs
-      kind == :hash ? (0...count).map { |k| (base + (2 * k) + 1).to_s } : (0...count).map { |k| (base + k).to_s }
+      kind == :hash ? (0...count).map { |k| base + (2 * k) + 1 } : (0...count).map { |k| base + k }
     end
 
     def key_regs
-      kind == :hash ? (0...count).map { |k| (base + (2 * k)).to_s } : []
+      kind == :hash ? (0...count).map { |k| base + (2 * k) } : []
     end
   end
 
@@ -78,10 +78,10 @@ module BytecodeIR
       return nil unless insn
 
       case insn.op
-      when 'HASH'
+      when :HASH
         count = insn.uint_operand
         count && ContainerLiteral.new(index, :hash, insn.reg.to_i, count)
-      when 'ARRAY'
+      when :ARRAY
         if insn.regs.size == 2
           count = insn.typed.last.value
           count.is_a?(Integer) && count >= 0 ? ContainerLiteral.new(index, :array, insn.regs[1].to_i, count) : nil
@@ -100,7 +100,7 @@ module BytecodeIR
       return 'Integer' if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
       literal = BytecodeIR.literal_value_classes
       return literal[insn.op] if literal.key?(insn.op)
-      return nil unless insn.op == 'LOADL'
+      return nil unless insn.op == :LOADL
 
       entry = insn.pool_index && pool && pool[insn.pool_index]
       entry.is_a?(Hash) ? BytecodeIR.pool_value_classes[entry[:type]] : nil
@@ -123,8 +123,8 @@ module BytecodeIR
     # Nothing between +from+ and +to+ can change a container built at +from+: every instruction strictly between them
     # is a QUIET_OPS load or a jump into (from, to], so each path from +from+ stays in that span until it reaches +to+
     # and runs no method. A literal mutated before its use (`a = []; a << x; @v = a`) fails this.
-    QUIET_OPS = Set['NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE', 'GETIV',
-                    'GETCONST', 'GETUPVAR', 'STRING', 'BLOCK', 'LAMBDA', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+    QUIET_OPS = Set[:NOP, :MOVE, :LOADL, :LOADSYM, :LOADNIL, :LOADSELF, :LOADTRUE, :LOADFALSE, :GETIV,
+                    :GETCONST, :GETUPVAR, :STRING, :BLOCK, :LAMBDA, :JMP, :JMPIF, :JMPNOT, :JMPNIL].freeze
 
     def quiet_span?(from, to)
       return false unless from < to && resolved?
@@ -140,7 +140,7 @@ module BytecodeIR
     # The child irep index of the `BLOCK R(recv+1) I[k]` directly before the block-carrying call at +index+.
     def adjacent_block_index(index, recv_reg)
       block = index.positive? ? source_at(index - 1) : nil
-      return nil unless block&.op == 'BLOCK' && block.reg == (recv_reg.to_i + 1).to_s
+      return nil unless block&.op == :BLOCK && block.reg == recv_reg + 1
 
       block.block_index
     end
@@ -149,7 +149,7 @@ module BytecodeIR
   # Producers of +reg+ at +index+ in +irep+ (reaching_definitions with the irep's nested-block writes), or nil when
   # the dataflow refuses or finds none.
   def self.producers(irep, index, reg, **options)
-    defs = reaching_definitions(irep, index, reg.to_s, **options)
+    defs = reaching_definitions(irep, index, reg, shared: true, **options)
     return nil if defs.nil? || defs.empty?
 
     program = self.for(irep)

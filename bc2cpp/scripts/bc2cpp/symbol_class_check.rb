@@ -60,9 +60,9 @@ check.call('a Symbol is not numeric and not a container', !NF.numeric?(SYM) && !
 check.call('a Symbol is OPAQUE: it does not cross a method boundary through an argument, ivar or constant',
            NF::OPAQUE & SYM != 0)
 check.call('a Symbol is truthy: the falsy edge of a test drops it, keeping nil and OTHER',
-           NF.narrow_by_truth('JMPIF', false, SYM | NIL_ | OTHER, 0, FALSE_BIT) == (NIL_ | OTHER))
+           NF.narrow_by_truth(:JMPIF, false, SYM | NIL_ | OTHER, 0, FALSE_BIT) == (NIL_ | OTHER))
 check.call('a Symbol is truthy: the truthy edge keeps it',
-           NF.narrow_by_truth('JMPIF', true, SYM | NIL_, 0, FALSE_BIT) == SYM)
+           NF.narrow_by_truth(:JMPIF, true, SYM | NIL_, 0, FALSE_BIT) == SYM)
 check.call('the Symbol bit does not collide with a class bit below it or an object kind',
            SYM > NF::RNG && SYM < (1 << NF::OBJECT_KIND_BASE) && SYM != NF::CHECKED)
 

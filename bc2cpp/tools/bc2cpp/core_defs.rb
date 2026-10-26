@@ -44,13 +44,13 @@ module CoreDefs
   def conditional_def_labels(ireps)
     out = Set.new
     ireps.each_value do |irep|
-      spans = BytecodeIR.for(irep).instructions_with_op('JMPIF', 'JMPNOT', 'JMPNIL', 'JMP').filter_map do |insn|
+      spans = BytecodeIR.for(irep).instructions_with_op(:JMPIF, :JMPNOT, :JMPNIL, :JMP).filter_map do |insn|
         target = insn.branch_target
         [insn.addr, target] if target && target > insn.addr
       end
       next if spans.empty?
 
-      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, index|
+      irep.each_with_op(:TDEF, :SDEF, :DEF) do |insn, index|
         next unless spans.any? { |from, to| from < insn.addr && insn.addr < to }
 
         label = def_body_label(irep, insn, index)
@@ -87,7 +87,7 @@ module CoreDefs
   end
 
   # Opcodes that build or forward a block, and the ENTER block field.
-  BLOCK_OPS = (BytecodeIR::Ops::BLOCK_SEND | %w[BLKPUSH BLOCK LAMBDA]).freeze
+  BLOCK_OPS = (BytecodeIR::Ops::BLOCK_SEND | %i[BLKPUSH BLOCK LAMBDA]).freeze
 
   # Does the method body (or a block or lambda nested in it) take, build, yield to or
   # forward a block? Such a compiled frame stays on the C++ stack while the block
@@ -107,7 +107,7 @@ module CoreDefs
   # method's result; the guard covers frames that sit on the stack while a block runs,
   # not a closure that a Fiber calls after the frame is gone.
   def builds_lambda?(irep, ireps)
-    return true if BytecodeIR.for(irep).op?('LAMBDA')
+    return true if BytecodeIR.for(irep).op?(:LAMBDA)
 
     irep.reps.any? { |child| child && builds_lambda?(ireps.fetch(child), ireps) }
   end
@@ -116,7 +116,7 @@ module CoreDefs
   # Generator run their iteration inside a Fiber; a compiled frame in there breaks
   # the same way.
   def references_fiber?(irep, ireps)
-    return true if BytecodeIR.for(irep).instructions_with_op('GETCONST', 'GETMCNST').any? { |insn| insn.const_name == 'Fiber' }
+    return true if BytecodeIR.for(irep).instructions_with_op(:GETCONST, :GETMCNST).any? { |insn| insn.const_name == 'Fiber' }
 
     irep.reps.any? { |child| child && references_fiber?(ireps.fetch(child), ireps) }
   end
@@ -124,10 +124,10 @@ module CoreDefs
   # The child irep a TDEF/SDEF names, or, for the unfused DEF, the METHOD before it.
   # +idx+ is the index of +insn+ in +irep+.
   def def_body_label(irep, insn, idx)
-    return irep.reps[insn.block_index] unless insn.op == 'DEF'
+    return irep.reps[insn.block_index] unless insn.op == :DEF
 
     method_idx = irep.previous_real_index(idx - 1)
     method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
-    method_insn && method_insn.op == 'METHOD' ? irep.reps[method_insn.block_index] : nil
+    method_insn && method_insn.op == :METHOD ? irep.reps[method_insn.block_index] : nil
   end
 end

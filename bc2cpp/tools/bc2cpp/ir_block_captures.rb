@@ -5,7 +5,7 @@ require_relative 'bytecode_ir_containers'
 
 # Capture facts apply only during a proven synchronous, nonescaping invocation.
 class IrBlockCaptures
-  PURE_OPS = %w[ENTER MOVE LOADSELF LOADNIL LOADTRUE LOADFALSE LOADSYM SYMBOL STRING
+  PURE_OPS = %i[ENTER MOVE LOADSELF LOADNIL LOADTRUE LOADFALSE LOADSYM SYMBOL STRING
                 LOADI LOADI16 LOADI32 LOADINEG LOADL GETUPVAR JMP JMPIF JMPNOT JMPNIL
                 RETURN RETSELF RETNIL RETTRUE RETFALSE NOP].freeze
 
@@ -22,20 +22,20 @@ class IrBlockCaptures
   def fact_at(index, reg)
     return nil unless @safe
 
-    definitions = BytecodeIR.reaching_definitions(@child, index, reg.to_s, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(@child, index, reg, origin_transfers: true, shared: true)
     return nil unless definitions && !definitions.empty?
 
     facts = definitions.map do |definition|
       return nil if definition.entry?
 
       instruction = BytecodeIR.for(@child).source_at(definition.index)
-      return nil unless instruction.op == 'GETUPVAR'
+      return nil unless instruction.op == :GETUPVAR
 
       slot, level = instruction.upvar_ref
       return nil unless level == 0 && slot.to_i.positive? && slot.to_i < @parent.nlocals.to_i
-      return nil if BytecodeIR.own_upvar_written_regs(@parent).include?(slot.to_s)
+      return nil if BytecodeIR.own_upvar_written_regs(@parent).include?(slot)
 
-      fact = @analysis.fact_at(@call_index, slot.to_s)
+      fact = @analysis.fact_at(@call_index, slot)
       return nil unless fact && !fact.classes.empty?
 
       fact
@@ -57,16 +57,16 @@ class IrBlockCaptures
     call = parent.source_at(@call_index)
     producer = parent.source_at(producer_index)
     return false unless call && BytecodeIR::Ops::BLOCK_SEND.include?(call.op) && call.plain_fixed_argc?
-    return false unless producer&.op == 'BLOCK' && ireps[Array(@parent.reps)[producer.block_index.to_i]].equal?(@child)
+    return false unless producer&.op == :BLOCK && ireps[Array(@parent.reps)[producer.block_index.to_i]].equal?(@child)
 
-    block_reg = (call.reg.to_i + call.argc + 1).to_s
-    definitions = BytecodeIR.reaching_definitions(@parent, @call_index, block_reg, origin_transfers: true)
+    block_reg = (call.reg + call.argc + 1)
+    definitions = BytecodeIR.reaching_definitions(@parent, @call_index, block_reg, origin_transfers: true, shared: true)
     return false unless definitions&.size == 1 && definitions.first.index == producer_index
 
     # Straight-line transport prevents another invocation or escape before this call.
     (producer_index + 1...@call_index).all? do |index|
       instruction = parent.source_at(index)
-      %w[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op)
+      %i[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op)
     end
   end
 end

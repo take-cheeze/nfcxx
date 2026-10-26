@@ -7,7 +7,7 @@ require_relative 'bytecode_ir_containers'
 module IrYieldTypes
   MAX_INSTRUCTIONS = 256
   MAX_RECEIVERS = 8
-  PURE_OPS = %w[ENTER MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM STRING LOADL LOADI LOADINEG
+  PURE_OPS = %i[ENTER MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM STRING LOADL LOADI LOADINEG
                 LOADI16 LOADI32 JMP JMPIF JMPNOT JMPNIL BLKPUSH BLKCALL RETURN RETNIL
                 RETTRUE RETFALSE NOP].freeze
   Summary = Struct.new(:child, :arguments, :targets, :invocation_safe, keyword_init: true)
@@ -31,7 +31,7 @@ module IrYieldTypes
     receivers = ctx.gen.bytecode_ir_argument_receiver_classes(parent, index, call.reg)
     return nil unless receivers && receivers.size.between?(1, MAX_RECEIVERS)
 
-    actuals = (1..argc).map { |position| analysis.fact_at(index, (call.reg.to_i + position).to_s) }
+    actuals = (1..argc).map { |position| analysis.fact_at(index, (call.reg + position)) }
     return nil if actuals.any?(&:nil?)
 
     joined = Array.new(count) { [] }
@@ -42,20 +42,20 @@ module IrYieldTypes
       return nil unless protocol_body?(body, argc)
 
       targets << "yield:#{target.owner}##{target.name}"
-      callee = BytecodeIR::Types.new(body, argument_facts: actuals.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] })
+      callee = BytecodeIR::Types.new(body, argument_facts: actuals.each_with_index.to_h { |fact, slot| [slot + 1, fact] })
       yields = []
-      body.each_with_op('BLKCALL') { |insn, position| yields << [insn, position] }
+      body.each_with_op(:BLKCALL) { |insn, position| yields << [insn, position] }
       return nil if yields.empty?
 
       yields.each do |instruction, position|
         # No argument packing, arity coercion, escaped Proc, or outer lexical yield.
         return nil unless instruction.first_of(:int)&.value == count
-        definitions = BytecodeIR.reaching_definitions(body, position, instruction.reg, origin_transfers: true)
+        definitions = BytecodeIR.reaching_definitions(body, position, instruction.reg, origin_transfers: true, shared: true)
         producer = definitions&.size == 1 && !definitions.first.entry? && BytecodeIR.for(body).source_at(definitions.first.index)
-        return nil unless producer && producer.op == 'BLKPUSH' && producer.argary_spec == [argc, 0, 0, 0] && producer.first_of(:plit)&.value.to_s == '0'
+        return nil unless producer && producer.op == :BLKPUSH && producer.argary_spec == [argc, 0, 0, 0] && producer.first_of(:plit)&.value.to_s == '0'
 
         count.times do |slot|
-          fact = callee.fact_at(position, (instruction.reg.to_i + slot + 1).to_s)
+          fact = callee.fact_at(position, (instruction.reg + slot + 1))
           return nil unless fact
 
           joined[slot] << fact
@@ -67,17 +67,17 @@ module IrYieldTypes
       # Callee facts are independent, but actual arguments can be contract bounds.
       declared = facts.any?(&:declared?)
       contracts = declared ? facts.flat_map(&:contracts).uniq.sort.freeze : [].freeze
-      [(slot + 1).to_s, BytecodeIR::Types::Fact.new(classes: classes, declared: declared, contracts: contracts).freeze]
+      [slot + 1, BytecodeIR::Types::Fact.new(classes: classes, declared: declared, contracts: contracts).freeze]
     end.freeze
     Summary.new(child: child, arguments: arguments, targets: targets.uniq.sort.freeze, invocation_safe: true).freeze
   end
 
   def literal_block(ireps, parent, index, register)
-    definitions = BytecodeIR.reaching_definitions(parent, index, register.to_s, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, register, origin_transfers: true, shared: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)
-    producer.op == 'BLOCK' ? ireps[Array(parent.reps)[producer.block_index.to_i]] : nil
+    producer.op == :BLOCK ? ireps[Array(parent.reps)[producer.block_index.to_i]] : nil
   end
 
   def protocol_body?(body, argc)

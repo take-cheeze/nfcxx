@@ -44,7 +44,7 @@ class CodeGen
     @frozen_symbol_bit = symbol_class_enabled? ? numeric_class_bit('Symbol') : nil
     registry = FrozenTables::Registry.new(symbol_bit: @frozen_symbol_bit)
     @ireps.each do |label, irep|
-      irep.each_with_op('SEND0') do |insn, idx|
+      irep.each_with_op(:SEND0) do |insn, idx|
         next unless insn.sym == 'freeze'
 
         shape = frozen_table_literal_shape(irep, idx, insn, registry)
@@ -102,16 +102,16 @@ class CodeGen
   def element_index_mask(irep, index, insn, state)
     return lcf_index_mask(irep, index, insn, state) unless @frozen_tables
 
-    recv_reg = insn.op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i
+    recv_reg = insn.op == :GETIDX0 ? insn.regs[1].to_i : insn.reg.to_i
     recv = state[recv_reg]
     tables = recv ? @frozen_tables.tables(recv) : 0
     return lcf_index_mask(irep, index, insn, state) if tables.zero?
 
     key_reg = insn.reg.to_i + 1
-    key = insn.op == 'GETIDX0' ? 0 : frozen_table_literal_key(irep, index, key_reg)
-    key_int = insn.op == 'GETIDX0' || state[key_reg] == NumericFlow::INT
+    key = insn.op == :GETIDX0 ? 0 : frozen_table_literal_key(irep, index, key_reg)
+    key_int = insn.op == :GETIDX0 || state[key_reg] == NumericFlow::INT
     # No index value yet (the fixpoint grows from empty): the result must not be OTHER.
-    return 0 if state[key_reg]&.zero? && insn.op != 'GETIDX0'
+    return 0 if state[key_reg]&.zero? && insn.op != :GETIDX0
 
     result = 0
     @frozen_tables.each_shape_in(tables) do |shape|
@@ -127,7 +127,7 @@ class CodeGen
 def frozen_table_exact_class(irep, idx, reg)
   return nil unless @frozen_tables && @closed_world&.exact_instances_singleton_free?
 
-  mask = numeric_raw_mask(irep, idx, reg.to_s, true)
+  mask = numeric_raw_mask(irep, idx, reg, true)
   return nil unless mask.is_a?(Integer) && mask.positive? && (mask & ~@frozen_tables.mask).zero?
 
   containers = []
@@ -149,7 +149,7 @@ end
     return 0 if rest.zero?
     return NumericFlow::OTHER unless @lcf_rows&.lcf_bits(rest)&.nonzero?
 
-    lcf_key = insn.op == 'GETIDX0' ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
+    lcf_key = insn.op == :GETIDX0 ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
     @lcf_rows.index(rest, lcf_key, nil_raises: numeric_nil_raises?('[]'))
   end
 
@@ -196,7 +196,7 @@ end
 
     base = lit.reg.to_i
     stride = container == :array ? 1 : 2
-    slot_regs = (0...n).map { |k| (base + stride * k + (container == :array ? 0 : 1)).to_s }
+    slot_regs = (0...n).map { |k| base + stride * k + (container == :array ? 0 : 1) }
     slots = slot_regs.map { |r| frozen_table_slot_mask(irep, at, r) }
     keys = container == :hash ? frozen_table_hash_keys(irep, at, base, n) : nil
     registry.intern(container, slots, keys)
@@ -205,17 +205,17 @@ end
   # [literal op, its index, container] when the `freeze` at SEND0 +idx+ is applied to a single ARRAY/HASH
   # op right before it (same register), else nil. The shape and a frozen-literal slot both need it.
   def frozen_table_freeze_literal(irep, idx, insn)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     at = defs.first.index
     lit = BytecodeIR.for(irep).source_at(at)
-    return nil unless %w[ARRAY HASH].include?(lit.op) && lit.regs.size == 1
+    return nil unless %i[ARRAY HASH].include?(lit.op) && lit.regs.size == 1
     # The literal's own `.freeze`, back to back: any other instruction in between could hand the
     # still-mutable array to code that changes its slots.
     return nil unless at + 1 == idx && lit.reg == insn.reg
 
-    container = lit.op == 'ARRAY' ? :array : :hash
+    container = lit.op == :ARRAY ? :array : :hash
     return nil unless frozen_table_name_safe?('freeze', container == :array ? 'Array' : 'Hash')
 
     [lit, at, container]
@@ -240,13 +240,13 @@ end
 
   # The literal Integer or Symbol register +reg+ holds when instruction +at+ reads it, else nil.
   def frozen_table_literal_key(irep, at, reg)
-    defs = BytecodeIR.reaching_definitions(irep, at, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, at, reg, shared: true)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)
-    return writer.sym&.to_sym if writer.op == 'LOADSYM'
+    return writer.sym&.to_sym if writer.op == :LOADSYM
 
-    writer.op.start_with?('LOADI') ? frozen_table_loadi(writer) : nil
+    BytecodeIR::Ops::LOADI_OPS.include?(writer.op) ? frozen_table_loadi(writer) : nil
   end
 
   # The Integer a LOADI* op loads: `LOADI_n` / `LOADI__1` print it in parentheses, the others as an operand.
@@ -260,23 +260,23 @@ end
   # The class set one literal slot has, from the writing op alone. OTHER for everything the literal
   # does not state (a Symbol, a call result, a constant not proven Integer).
   def frozen_table_slot_mask(irep, at, reg)
-    defs = BytecodeIR.reaching_definitions(irep, at, reg)
+    defs = BytecodeIR.reaching_definitions(irep, at, reg, shared: true)
     return NumericFlow::OTHER unless defs && defs.size == 1 && !defs.first.entry?
 
     writer = BytecodeIR.for(irep).source_at(defs.first.index)
     case writer.op
     when /\ALOADI/ then NumericFlow::INT
-    when 'LOADL' then frozen_table_pool_mask(irep, writer)
-    when 'STRING' then NumericFlow::STR
-    when 'LOADNIL' then NumericFlow::NIL
-    when 'ARRAY' then NumericFlow::ARR
-    when 'HASH' then NumericFlow::HSH
-    when 'SEND0' then frozen_table_freeze_slot(irep, defs.first.index, writer)
-    when 'RANGE_INC', 'RANGE_EXC' then NumericFlow::RNG
-    when 'GETCONST', 'GETMCNST'
+    when :LOADL then frozen_table_pool_mask(irep, writer)
+    when :STRING then NumericFlow::STR
+    when :LOADNIL then NumericFlow::NIL
+    when :ARRAY then NumericFlow::ARR
+    when :HASH then NumericFlow::HSH
+    when :SEND0 then frozen_table_freeze_slot(irep, defs.first.index, writer)
+    when :RANGE_INC, :RANGE_EXC then NumericFlow::RNG
+    when :GETCONST, :GETMCNST
       integer_constant_read?(writer) ? NumericFlow::INT : NumericFlow::OTHER
     # Only the literal LOADSYM is a Symbol here; SYMBOL interns a string at run time and stays OTHER.
-    when 'LOADSYM' then frozen_symbol_bit || NumericFlow::OTHER
+    when :LOADSYM then frozen_symbol_bit || NumericFlow::OTHER
     else NumericFlow::OTHER
     end
   end

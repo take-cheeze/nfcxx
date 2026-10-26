@@ -10,7 +10,7 @@ require_relative 'bytecode_ir'
 # value stored in TABLE is literal, the names the send can reach form a known finite set, and yield_reach records
 # the send as calls to exactly those names.
 #
-# Values propagate along BytecodeIR's reaching definitions (handler edges included, MOVE chains followed): the
+# Values propagate along BytecodeIR's reaching definitions(handler edges included, MOVE chains followed): the
 # symbol set of a register at a read is the union over the definitions that reach it, and a definition the model
 # cannot account for (a refused query, a send result, an unlisted op) makes the set unknown. The premises:
 #
@@ -89,14 +89,14 @@ module IrSymbolFlow
       return nil if d.entry?
 
       insn = BytecodeIR.for(irep).source_at(d.index)
-      next :nil if insn.op == 'LOADNIL'
-      return nil unless insn.op == 'ARYCAT'
+      next :nil if insn.op == :LOADNIL
+      return nil unless insn.op == :ARYCAT
 
       onto = reaching(irep, d.index, insn.reg) or return nil
-      return nil unless onto.all? { |o| !o.entry? && BytecodeIR.for(irep).source_at(o.index).op == 'LOADNIL' }
+      return nil unless onto.all? { |o| !o.entry? && BytecodeIR.for(irep).source_at(o.index).op == :LOADNIL }
 
-      get = single_def(irep, d.index, (insn.reg.to_i + 1).to_s, 'GETIDX') or return nil
-      getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, 'GETCONST') or return nil
+      get = single_def(irep, d.index, insn.reg + 1, :GETIDX) or return nil
+      getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, :GETCONST) or return nil
       BytecodeIR.for(irep).source_at(getc).const_name or return nil
     end
     found = consts.reject { |c| c == :nil }.uniq
@@ -112,10 +112,11 @@ module IrSymbolFlow
   end
 
   # Reaching definitions across handler edges. The cap scales with the irep so a long class body still answers.
+  # Shared frozen cache entries: every consumer only reads (size, first, each, map over index/reg).
   def reaching(irep, idx, reg, follow_moves: true)
     cap = [BytecodeIR::DATAFLOW_MAX_STATES, BytecodeIR.for(irep).size * 4].max
-    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, follow_moves: follow_moves,
-                                                         max_states: cap)
+    BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, follow_moves: follow_moves,
+                                                         max_states: cap, shared: true)
   end
 
   # One pass over every irep's instructions: SETCONST and GETCONST sites by name, names any MCNST op uses, writer
@@ -127,11 +128,11 @@ module IrSymbolFlow
       BytecodeIR.for(irep).instructions.each do |instruction|
         insn = instruction.source
         case insn.op
-        when 'SETCONST' then index[:setconst][insn.const_name] << label if insn.const_name
-        when 'GETCONST' then index[:getconst][insn.const_name] << [label, instruction.index] if insn.const_name
-        when 'GETMCNST', 'SETMCNST' then index[:mcnst] << insn.const_name if insn.const_name
-        when 'LOADSYM' then index[:spelled] << insn.sym if insn.sym
-        when 'SYMBOL', 'STRING'
+        when :SETCONST then index[:setconst][insn.const_name] << label if insn.const_name
+        when :GETCONST then index[:getconst][insn.const_name] << [label, instruction.index] if insn.const_name
+        when :GETMCNST, :SETMCNST then index[:mcnst] << insn.const_name if insn.const_name
+        when :LOADSYM then index[:spelled] << insn.sym if insn.sym
+        when :SYMBOL, :STRING
           entry = irep.pool[insn.pool_index.to_i]
           index[:spelled] << entry if entry.is_a?(String)
         when *BytecodeIR::Ops::SEND then index[:sends][insn.sym] << [label, instruction.index] if insn.sym
@@ -188,8 +189,8 @@ module IrSymbolFlow
       return nil unless insn.reg == reg
 
       case insn.op
-      when 'SETIDX' then writes << n
-      when 'GETIDX' then return nil unless element_reads_splat_only?(irep, n, reg)
+      when :SETIDX then writes << n
+      when :GETIDX then return nil unless element_reads_splat_only?(irep, n, reg)
       else return nil
       end
     end
@@ -199,29 +200,64 @@ module IrSymbolFlow
     uses = value_reads(irep, idx, reg) or return false
     uses.all? do |n|
       insn = BytecodeIR.for(irep).source_at(n)
-      insn.op == 'ARYCAT' && insn.reg.to_i + 1 == reg.to_i
+      insn.op == :ARYCAT && insn.reg.to_i + 1 == reg.to_i
     end
   end
 
   # Ops that write R[a] on every normal exit (vm.c), so the value an earlier write left there is gone. Ops that
   # write no register, only maybe write it (a callee frame above a send) or mutate R[a] in place are absent.
-  KILLS_LEAD = Set['MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE', 'GETGV', 'GETSV',
-                   'GETIV', 'GETCV', 'GETCONST', 'GETMCNST', 'GETUPVAR', 'GETIDX', 'GETIDX0', 'SETIDX', 'SSEND',
-                   'SSEND0', 'SSENDB', 'SEND', 'SEND0', 'SENDB', 'SUPER', 'BLKCALL', 'ADD', 'ADDI', 'SUB', 'SUBI',
-                   'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'ARRAY', 'ARRAY2', 'AREF', 'INTERN', 'SYMBOL',
-                   'STRING', 'HASH', 'LAMBDA', 'BLOCK', 'METHOD', 'RANGE_INC', 'RANGE_EXC', 'OCLASS', 'CLASS',
-                   'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'SCLASS', 'TCLASS', 'EXCEPT'].freeze
+  KILLS_LEAD = Set[:MOVE, :LOADL, :LOADSYM, :LOADNIL, :LOADSELF, :LOADTRUE, :LOADFALSE, :GETGV, :GETSV,
+                   :GETIV, :GETCV, :GETCONST, :GETMCNST, :GETUPVAR, :GETIDX, :GETIDX0, :SETIDX, :SSEND,
+                   :SSEND0, :SSENDB, :SEND, :SEND0, :SENDB, :SUPER, :BLKCALL, :ADD, :ADDI, :SUB, :SUBI,
+                   :MUL, :DIV, :EQ, :LT, :LE, :GT, :GE, :ARRAY, :ARRAY2, :AREF, :INTERN, :SYMBOL,
+                   :STRING, :HASH, :LAMBDA, :BLOCK, :METHOD, :RANGE_INC, :RANGE_EXC, :OCLASS, :CLASS,
+                   :MODULE, :EXEC, :DEF, :TDEF, :SDEF, :SCLASS, :TCLASS, :EXCEPT].freeze
 
   # Instructions that may read the value instruction idx leaves in reg: a forward walk over normal and handler
   # edges that stops at a write of reg (except along that write's own handler edges, raised before it). The
   # backward reaching definitions cannot answer this, since a callee frame below reg makes them refuse. nil when
-  # the edges do not resolve, or a nested block reads reg.
+  # the edges do not resolve, or a nested block reads reg. Memoized per irep
+  # object ([index, register]): labels repeat across separate irep trees in
+  # one process, so a global label-keyed memo would collide.
+  #
+  # The memo is two-level: the outer table is keyed by instruction index, the inner by register. A flat
+  # [idx, reg] tuple key allocates an Array on every lookup, including hot hits; the index alone and the
+  # caller's register key the same entries with no per-query container. Cached nil (a refusal) stays
+  # distinct from an absent entry via the inner table's key. The 1,024-query bound counts logical queries
+  # and evicts oldest-first; eviction drops a whole instruction bucket at a time, which only re-runs a
+  # pure recomputation.
+  VALUE_READS_CAP = 1024
+
   def value_reads(irep, idx, reg)
+    return value_reads_compute(irep, idx, reg) if ENV['BC2CPP_SYMBOL_FLOW_MEMO'] == '0'
+
+    outer = irep.instance_variable_get(:@symbol_flow_reads) ||
+            irep.instance_variable_set(:@symbol_flow_reads, {})
+    inner = outer[idx]
+    return inner[reg] if inner && inner.key?(reg)
+
+    total = irep.instance_variable_get(:@symbol_flow_reads_total) || 0
+    if total >= VALUE_READS_CAP
+      until total < VALUE_READS_CAP || outer.empty?
+        total -= outer.shift[1].size
+      end
+      irep.instance_variable_set(:@symbol_flow_reads_total, total)
+    end
+    inner = outer[idx] ||= {}
+    irep.instance_variable_set(:@symbol_flow_reads_total, total + 1)
+    inner[reg] = value_reads_compute(irep, idx, reg)
+  end
+
+  def value_reads_compute(irep, idx, reg)
     program = BytecodeIR.for(irep)
     return nil unless program.resolved? && program.handlers_resolved?
     captured = captured_regs(irep) or return nil
     return nil if captured.include?(reg)
 
+    read_sets = if ENV['BC2CPP_SYMBOL_READS_CACHE'] != '0'
+                  program.instance_variable_get(:@symbol_flow_instruction_reads) ||
+                    program.instance_variable_set(:@symbol_flow_instruction_reads, Array.new(program.instructions.length))
+                end
     seen = Set.new
     out = []
     work = program.instructions[idx].successors.dup
@@ -230,30 +266,84 @@ module IrSymbolFlow
       next unless seen.add?(n)
 
       insn = program.instructions[n].source
-      out << n if reads(irep, insn).include?(reg.to_i)
+      # Read registers depend only on this immutable body's instruction, not the queried value.
+      read_regs = read_sets ? (read_sets[n] ||= reads(irep, insn).freeze) : reads(irep, insn)
+      out << n if read_regs.include?(reg.to_i)
       kills = (KILLS_LEAD.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)) && insn.reg == reg
       work.concat(kills ? program.raise_targets.fetch(n, []) : program.successors_of(n, include_handlers: true))
     end
     out
   end
 
+  # Every non-MOVE use of the value +reg+ leaves at +index+, following MOVE
+  # copies over normal and handler edges: the shared skeleton of the factory
+  # use walk and the fragment escape walks. Yields (use index, instruction,
+  # register) per use. A falsy block value continues the walk; a truthy one
+  # stops it and is returned, except a Follow, which continues the walk from
+  # (use, Follow.reg) instead (a same-value SEND like freeze/dup/clone, whose
+  # escape checks run in the block first). Returns nil when a reads query
+  # refuses or +max_states+ visited states are exceeded, false when the walk
+  # completes with no truthy block value. The work stack is flat and visited
+  # states are tracked per origin, so no per-state pair Array is built.
+  Follow = Struct.new(:reg)
+
+  def follow_forward_uses(irep, index, reg, max_states: nil)
+    program = BytecodeIR.for(irep)
+    work = [index, reg]
+    seen = {}
+    count = 0
+    until work.empty?
+      register = work.pop
+      origin = work.pop
+      by_origin = seen[origin] ||= {}
+      next if by_origin.key?(register)
+
+      by_origin[register] = true
+      if max_states
+        count += 1
+        return nil if count > max_states
+      end
+
+      reads = value_reads(irep, origin, register)
+      return nil unless reads
+      reads.each do |use|
+        insn = program.source_at(use)
+        if insn.op == :MOVE
+          work.push(use, insn.reg)
+          next
+        end
+        result = yield(use, insn, register)
+        if Follow === result
+          work.push(use, result.reg)
+        elsif result
+          return result
+        end
+      end
+    end
+    false
+  end
+
   # Registers of irep that a nested block reads with GETUPVAR (the level that reaches irep only), or nil when the
-  # irep tree is not known.
+  # irep tree is not known. Memoized per irep object: the tree never changes after loading.
   def captured_regs(irep)
     return Set.new if Array(irep.reps).empty?
     return nil unless irep.tree
 
+    cached = irep.instance_variable_get(:@symbol_flow_captured)
+    return cached if cached
+
     out = Set.new
     collect_captures(irep.tree, irep, 1, out)
+    irep.instance_variable_set(:@symbol_flow_captured, out.freeze)
     out
   end
 
   def collect_captures(tree, irep, depth, out)
     Array(irep.reps).each do |label|
       child = tree[label] or next
-      BytecodeIR.for(child).each_with_op('GETUPVAR') do |insn, _|
+      BytecodeIR.for(child).each_with_op(:GETUPVAR) do |insn, _|
         index, level = insn.upvar_ref
-        out << index.to_s if index && level == depth - 1
+        out << index if index && level == depth - 1
       end
       collect_captures(tree, child, depth + 1, out)
     end
@@ -264,18 +354,18 @@ module IrSymbolFlow
     regs = insn.regs.map(&:to_i)
     a = regs.first
     case insn.op
-    when *BytecodeIR::Ops::LOAD_PREFIX_OPS, 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETUPVAR', 'STRING', 'SYMBOL', 'LAMBDA',
-         'BLOCK', 'METHOD', 'OCLASS', 'TCLASS', 'TDEF', 'ENTER', 'NOP', 'STOP', 'JMP', 'JMPUW', 'EXCEPT' then []
-    when 'MOVE', 'AREF', 'GETIDX0' then regs.drop(1)
-    when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'SETGV', 'SETSV', 'SETIV', 'SETCV',
-         'SETCONST', 'SETUPVAR', 'INTERN', 'ARYSPLAT', 'SCLASS', 'MODULE', 'EXEC', 'ADDI', 'SUBI', 'ADDILV', 'SUBILV'
+    when *BytecodeIR::Ops::LOAD_PREFIX_OPS, :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST, :GETUPVAR, :STRING, :SYMBOL, :LAMBDA,
+         :BLOCK, :METHOD, :OCLASS, :TCLASS, :TDEF, :ENTER, :NOP, :STOP, :JMP, :JMPUW, :EXCEPT then []
+    when :MOVE, :AREF, :GETIDX0 then regs.drop(1)
+    when :RETURN, :RETURN_BLK, :BREAK, :JMPIF, :JMPNOT, :JMPNIL, :SETGV, :SETSV, :SETIV, :SETCV,
+         :SETCONST, :SETUPVAR, :INTERN, :ARYSPLAT, :SCLASS, :MODULE, :EXEC, :ADDI, :SUBI, :ADDILV, :SUBILV
       [a]
-    when 'GETIDX', 'ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'ARYCAT', 'STRCAT', 'HASHCAT',
-         'RANGE_INC', 'RANGE_EXC', 'SETMCNST'
+    when :GETIDX, :ADD, :SUB, :MUL, :DIV, :EQ, :LT, :LE, :GT, :GE, :ARYCAT, :STRCAT, :HASHCAT,
+         :RANGE_INC, :RANGE_EXC, :SETMCNST
       [a, a + 1]
-    when 'SETIDX' then [a, a + 1, a + 2]
-    when 'ARRAY', 'ARRAY2' then element_regs(insn, 1)
-    when 'HASH' then element_regs(insn, 2)
+    when :SETIDX then [a, a + 1, a + 2]
+    when :ARRAY, :ARRAY2 then element_regs(insn, 1)
+    when :HASH then element_regs(insn, 2)
     when *BytecodeIR::Ops::SEND
       # R[a] (the receiver), then n arguments or one splat Array, then the block for the B forms.
       args = if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) then 0
@@ -300,7 +390,7 @@ module IrSymbolFlow
   def literal_constants(ctx, index, class_label, const)
     irep = ctx.ireps[class_label]
     lits = {}
-    BytecodeIR.for(irep).each_with_op('SETCONST') do |insn, idx|
+    BytecodeIR.for(irep).each_with_op(:SETCONST) do |insn, idx|
       name = insn.const_name
       next unless name && name != const && index[:setconst][name].size == 1 && !index[:mcnst].include?(name)
 
@@ -326,8 +416,8 @@ module IrSymbolFlow
     params = Hash.new { |h, k| h[k] = Set.new }
     calls.zip(insns).each do |(label, idx), insn|
       (1..arities.first).each do |k|
-        set = values_at(ctx, label, idx, (insn.reg.to_i + k).to_s, Set.new) or return nil
-        params[(k).to_s].merge(set)
+        set = values_at(ctx, label, idx, insn.reg + k, Set.new) or return nil
+        params[k].merge(set)
       end
     end
     params.default_proc = nil
@@ -337,7 +427,7 @@ module IrSymbolFlow
   # The writer's ENTER takes exactly arity required parameters and nothing else.
   def required_only?(irep, arity)
     enter = BytecodeIR.for(irep).instruction_at(0)&.source
-    return false unless enter&.op == 'ENTER'
+    return false unless enter&.op == :ENTER
 
     fields = enter.enter_fields.first(7).map(&:to_i)
     fields.size == 7 && fields[0] == arity && fields[1..].all?(&:zero?)
@@ -349,7 +439,7 @@ module IrSymbolFlow
   def values_at(ctx, label, idx, reg, visiting)
     return nil if reg.nil?
 
-    key = [label, idx, reg.to_s]
+    key = [label, idx, reg]
     return EMPTY if visiting.include?(key)
 
     irep = ctx.ireps[label]
@@ -369,26 +459,26 @@ module IrSymbolFlow
   # The symbol set the instruction at n of irep label produces, or nil.
   def definition_values(ctx, label, n, visiting)
     insn = BytecodeIR.for(ctx.ireps[label]).source_at(n)
-    reg = insn.reg.to_i
+    reg = insn.reg
     case insn.op
-    when 'LOADSYM' then insn.sym ? Set[insn.sym] : nil
+    when :LOADSYM then insn.sym ? Set[insn.sym] : nil
     when LITERAL_LOAD then EMPTY
-    when 'ARRAY', 'ARRAY2' then union(ctx, label, n, element_regs(insn, 1), visiting)
-    when 'HASH' then union(ctx, label, n, element_regs(insn, 2), visiting)
-    when 'ARYCAT' then union(ctx, label, n, [reg, reg + 1], visiting)
-    when 'ARYPUSH', 'HASHADD'
-      width = insn.op == 'HASHADD' ? 2 * insn.uint_operand.to_i : insn.uint_operand.to_i
+    when :ARRAY, :ARRAY2 then union(ctx, label, n, element_regs(insn, 1), visiting)
+    when :HASH then union(ctx, label, n, element_regs(insn, 2), visiting)
+    when :ARYCAT then union(ctx, label, n, [reg, reg + 1], visiting)
+    when :ARYPUSH, :HASHADD
+      width = insn.op == :HASHADD ? 2 * insn.uint_operand.to_i : insn.uint_operand.to_i
       union(ctx, label, n, (reg..(reg + width)), visiting)
-    when 'MOVE', 'AREF', 'GETIDX0' then values_at(ctx, label, n, insn.regs[1], visiting)
-    when 'GETIDX' then values_at(ctx, label, n, insn.reg, visiting) # an element, whatever the index
-    when 'GETCONST' then ctx.literal_consts[insn.const_name]
-    when 'GETUPVAR' then upvalue_values(ctx, label, insn, visiting)
+    when :MOVE, :AREF, :GETIDX0 then values_at(ctx, label, n, insn.regs[1], visiting)
+    when :GETIDX then values_at(ctx, label, n, insn.reg, visiting) # an element, whatever the index
+    when :GETCONST then ctx.literal_consts[insn.const_name]
+    when :GETUPVAR then upvalue_values(ctx, label, insn, visiting)
     end
   end
 
   def union(ctx, label, n, regs, visiting)
     regs.each_with_object(Set.new) do |r, out|
-      set = values_at(ctx, label, n, r.to_s, visiting) or return nil
+      set = values_at(ctx, label, n, r, visiting) or return nil
       out.merge(set)
     end
   end
@@ -405,7 +495,7 @@ module IrSymbolFlow
     return nil unless target
 
     target_irep = ctx.ireps[target]
-    reg = index.to_s
+    reg = index
     return nil if BytecodeIR.own_upvar_written_regs(target_irep).include?(reg)
 
     program = BytecodeIR.for(target_irep)
@@ -458,21 +548,21 @@ module IrSymbolFlow
   # values not followed.
   def mutation_regs(ctx, insn)
     case insn.op
-    when 'SETIDX' then [setidx_value_reg(insn)]
-    when 'ASET' then nil
+    when :SETIDX then [setidx_value_reg(insn)]
+    when :ASET then nil
     when *BytecodeIR::Ops::SEND
       return [] unless MUTATORS.include?(insn.sym) || OTHER_MUTATORS.include?(insn.sym)
       return nil if OTHER_MUTATORS.include?(insn.sym) || ctx.user_methods.include?(insn.sym)
       return nil unless insn.plain_fixed_argc?
 
-      (1..insn.argc).map { |k| (insn.reg.to_i + k).to_s }
+      (1..insn.argc).map { |k| (insn.reg + k) }
     else []
     end
   end
 
   # SETIDX a stores R[a+2].
   def setidx_value_reg(insn)
-    (insn.reg.to_i + 2).to_s
+    (insn.reg + 2)
   end
 
   def int_operand(insn)
@@ -481,8 +571,8 @@ module IrSymbolFlow
 
   # P5: no symbol is created at run time.
   def symbol_free?(irep)
-    BytecodeIR.for(irep).instructions_with_op('INTERN', *BytecodeIR::Ops::SEND).none? do |insn|
-      insn.op == 'INTERN' || SYMBOL_SENDS.include?(insn.sym)
+    BytecodeIR.for(irep).instructions_with_op(:INTERN, *BytecodeIR::Ops::SEND).none? do |insn|
+      insn.op == :INTERN || SYMBOL_SENDS.include?(insn.sym)
     end
   end
 end

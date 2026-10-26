@@ -36,11 +36,11 @@ require_relative 'bytecode_ir_ops'
 # BC2CPP_CONSTRUCTOR_POOLS=0 turns it off.
 class CodeGen
   # Ops that name a method without calling it, so the name can reach a body with arguments nobody sees.
-  CONSTRUCTOR_NAMING_OPS = %w[LOADSYM ALIAS KARG KEY_P].freeze
+  CONSTRUCTOR_NAMING_OPS = %i[LOADSYM ALIAS KARG KEY_P].freeze
 
   # Ops a CONSTRUCTOR_OPTIONALS default may consist of: each writes its leading register and reads none.
-  CONSTRUCTOR_LITERAL_DEFAULT_OPS = (BytecodeIR::Ops::LOADI_OPS | Set['LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM', 'LOADL',
-                                                                    'STRING']).freeze
+  CONSTRUCTOR_LITERAL_DEFAULT_OPS = (BytecodeIR::Ops::LOADI_OPS | Set[:LOADNIL, :LOADTRUE, :LOADFALSE, :LOADSYM, :LOADL,
+                                                                    :STRING]).freeze
 
   # [irep label, argument position] => [sites, position], as entry_arg_candidates.
   def constructor_pool_candidates
@@ -184,11 +184,11 @@ class CodeGen
   def constructor_keyword_argc(insn)
     return nil unless constructor_keywords_enabled?
 
-    n = insn.n_spec
-    nk = insn.nk_spec
-    return nil unless n && n != '*' && nk && nk != '*' && nk.to_i.positive?
+    n = insn.argc
+    nk = insn.keyword_argc
+    return nil unless n && nk && nk.positive?
 
-    n.to_i
+    n
   end
 
   # Does a keyword call with +positionals+ positional arguments leave all of D's mandatory positions (1..mand) as plain
@@ -215,10 +215,10 @@ class CodeGen
       program.each_source do |insn, idx|
         return 'explicit initialize call' if insn.sym == 'initialize' && BytecodeIR::Ops::SEND.include?(insn.op)
 
-        string_spelled ||= insn.op == 'STRING' && %w[new initialize].include?(irep.pool[insn.pool_index.to_i])
+        string_spelled ||= insn.op == :STRING && %w[new initialize].include?(irep.pool[insn.pool_index.to_i])
         next unless CONSTRUCTOR_NAMING_OPS.include?(insn.op)
 
-        names = [insn.sym, (insn.first_of(:name)&.value if insn.op == 'ALIAS')].compact
+        names = [insn.sym, (insn.first_of(:name)&.value if insn.op == :ALIAS)].compact
         next unless names.any? { |name| %w[new initialize].include?(name) }
 
         klass = constructor_alias_class(label, insn, program, idx)
@@ -238,14 +238,14 @@ class CodeGen
     return nil unless klass
 
     other = ->(name) { name && !%w[initialize new].include?(name) }
-    return (insn.first_of(:name)&.value == 'initialize' && other.call(insn.sym) ? klass : nil) if insn.op == 'ALIAS'
-    return nil unless insn.op == 'LOADSYM' && insn.sym == 'initialize'
+    return (insn.first_of(:name)&.value == 'initialize' && other.call(insn.sym) ? klass : nil) if insn.op == :ALIAS
+    return nil unless insn.op == :LOADSYM && insn.sym == 'initialize'
 
     # The neighbours keep the raw index window (idx +/- 1, nil past either end), so they stay source_at reads.
     call = program.source_at(idx + 1)
     prior = idx.positive? ? program.source_at(idx - 1) : nil
-    alias_call = call&.op == 'SSEND' && call.sym == 'alias_method' && call.plain_fixed_argc? && call.argc == 2 &&
-                 call.reg.to_i + 2 == insn.reg.to_i && prior&.op == 'LOADSYM' && prior.reg.to_i == call.reg.to_i + 1 &&
+    alias_call = call&.op == :SSEND && call.sym == 'alias_method' && call.plain_fixed_argc? && call.argc == 2 &&
+                 call.reg.to_i + 2 == insn.reg.to_i && prior&.op == :LOADSYM && prior.reg.to_i == call.reg.to_i + 1 &&
                  other.call(prior.sym)
     alias_call ? klass : nil
   end
@@ -257,8 +257,8 @@ class CodeGen
       children = @ireps.values.flat_map { |irep| Array(irep.reps) }.to_set
       walk = lambda do |label, namespace|
         irep = @ireps.fetch(label)
-        bodies = BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE')
-        irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
+        bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE)
+        irep.each_with_op(:CLASS, :MODULE) do |insn, idx|
           full = BytecodeIR.class_body_path(irep, idx, namespace)
           next unless full && bodies.key?(idx)
 
@@ -312,7 +312,7 @@ class CodeGen
     @ireps.each_value do |irep|
       owner = entry_arg_body_owner[irep.label]
       BytecodeIR.for(irep).each_source do |insn, idx|
-        if insn.op == 'SUPER'
+        if insn.op == :SUPER
           constructor_super_site(irep, idx, insn, owner, found)
         elsif BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym == 'new'
           constructor_new_site(irep, idx, insn, owner, found)
@@ -428,7 +428,7 @@ class CodeGen
   def constructor_new_site(irep, idx, insn, owner, found)
     stats = found[:stats]
     stats[:new] += 1
-    argc = insn.op.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     # No initialize this analysis pools takes zero arguments: a count of 0 raises in ENTER.
     return stats[:no_args] += 1 if argc&.zero?
 
@@ -439,8 +439,8 @@ class CodeGen
       site = [irep, idx - 1, insn.reg.to_i, argc, owner]
     end
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
-    classes = constructor_named_classes(irep, idx, insn) unless insn.op.start_with?('SS')
-    if classes.nil? && !insn.op.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
+    classes = constructor_named_classes(irep, idx, insn) unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+    if classes.nil? && !BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) && (via_param = class_object_receiver_classes(irep, idx, insn))
       # CLASS_OBJECT_ARGS: the receiver is a parameter every caller passes class constants for.
       classes = via_param
       stats[:param_named] += 1
@@ -482,11 +482,11 @@ class CodeGen
   # predecessor. BC2CPP_CTOR_PACKED=0 leaves such a `new` a splat.
   def constructor_packed_argc(irep, idx, insn)
     return nil if ENV['BC2CPP_CTOR_PACKED'] == '0' || idx.zero?
-    return nil unless insn.n_spec == '*' && insn.nk_spec.nil?
+    return nil unless insn.positional_splat? && !insn.keyword_arguments?
 
     program = BytecodeIR.for(irep)
     array = program.source_at(idx - 1)
-    return nil unless array.op == 'ARRAY' && array.typed.size == 2 && array.reg.to_i == insn.reg.to_i + 1
+    return nil unless array.op == :ARRAY && array.typed.size == 2 && array.reg.to_i == insn.reg.to_i + 1
 
     preds = program.instruction_predecessors(include_handlers: true)
     return nil unless preds && preds[idx] == Set[idx - 1]
@@ -498,14 +498,14 @@ class CodeGen
   # The `new` send a constructor site reads its arguments for: the site's own instruction, or the send after a
   # PACKED_NEW ARRAY (constructor_packed_argc).
   def constructor_site_send_index(irep, idx)
-    BytecodeIR.for(irep).source_at(idx).op == 'ARRAY' ? idx + 1 : idx
+    BytecodeIR.for(irep).source_at(idx).op == :ARRAY ? idx + 1 : idx
   end
 
   # `new` of `def self.m` in X, or `self.class.new` in an instance method of X.
   def constructor_new_root(irep, idx, insn, owner)
     return nil unless owner && !@closed_world.module_declared?(owner.owner.delete_suffix('.singleton'))
 
-    if insn.op.start_with?('SS')
+    if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
       owner.owner.end_with?('.singleton') ? owner.owner.delete_suffix('.singleton') : nil
     else
       constructor_self_class_root(irep, idx, insn, owner)
@@ -516,22 +516,22 @@ class CodeGen
   def constructor_self_class_root(irep, idx, insn, owner)
     return nil if owner.owner.end_with?('.singleton') || !(@registry['class'] || []).all? { |d| d.owner == '<native>' }
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     send = BytecodeIR.for(irep).source_at(defs.first.index)
     return nil unless irep.label == owner.irep && send.sym == 'class'
-    return owner.owner if send.op == 'SSEND0'
-    return nil unless send.op == 'SEND0'
+    return owner.owner if send.op == :SSEND0
+    return nil unless send.op == :SEND0
 
-    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg.to_s, through_handlers: true)
-    selves&.size == 1 && selves.first.entry? && selves.first.reg == '0' ? owner.owner : nil
+    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg, through_handlers: true, shared: true)
+    selves&.size == 1 && selves.first.entry? && selves.first.reg == 0 ? owner.owner : nil
   end
 
   # The declared classes the constant receiver of the `new` at +idx+ can name, or nil when some
   # definition reaching it is not a constant that only names classes.
   def constructor_named_classes(irep, idx, insn)
-    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     names = defs.map do |definition|
@@ -539,8 +539,8 @@ class CodeGen
 
       writer = BytecodeIR.for(irep).source_at(definition.index)
       case writer.op
-      when 'GETCONST' then writer.const_name
-      when 'GETMCNST' then writer.mcnst_name
+      when :GETCONST then writer.const_name
+      when :GETMCNST then writer.mcnst_name
       end
     end
     return nil unless names.all? && names.all? { |name| @closed_world.class_valued_constant?(name) }
@@ -618,12 +618,12 @@ class CodeGen
 
     sites, = @constructor_pool_candidates.fetch([label, k])
     culprits = sites.filter_map do |irep, idx, recv, _argc, _owner|
-      mask = return_class_raw_mask(irep, idx, (recv + k).to_s)
+      mask = return_class_raw_mask(irep, idx, recv + k)
       next if mask && !mask.anybits?(CLASS_POOL_UNSHIPPABLE)
 
-      writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
-                                                          exhausted: ->(last) { last == '0' ? 'self' : 'incoming_arg' }) do |ins|
-        %w[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.downcase
+      writer = irep.walk_writers(idx - 1, recv + k, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
+                                                          exhausted: ->(last) { last == 0 ? 'self' : 'incoming_arg' }) do |ins|
+        %i[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.to_s.downcase
       end
       writer.is_a?(String) ? writer : 'unknown'
     end

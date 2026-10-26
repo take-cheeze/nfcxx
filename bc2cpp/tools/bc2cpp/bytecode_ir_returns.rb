@@ -8,10 +8,10 @@ require_relative 'bytecode_ir'
 module BytecodeIR
   # How each exit op leaves the frame. RETURN_BLK is a plain return in a method body (methods are strict procs) and
   # leaves the enclosing method from a block; BREAK ends the call that took the block.
-  EXIT_KINDS = { 'RETURN' => :value, 'RETURN_BLK' => :block_return, 'RETNIL' => :nil, 'RETSELF' => :self,
-                 'RETTRUE' => :true, 'RETFALSE' => :false, 'BREAK' => :break, 'STOP' => :stop }.freeze
+  EXIT_KINDS = { :RETURN => :value, :RETURN_BLK => :block_return, :RETNIL => :nil, :RETSELF => :self,
+                 :RETTRUE => :true, :RETFALSE => :false, :BREAK => :break, :STOP => :stop }.freeze
 
-  VALUE_EXIT_OPS = Set['RETURN', 'RETURN_BLK', 'BREAK'].freeze
+  VALUE_EXIT_OPS = Set[:RETURN, :RETURN_BLK, :BREAK].freeze
 
   # One exit instruction: its +op+, +kind+ (EXIT_KINDS) and +reg+, the Integer register RETURN, RETURN_BLK and BREAK
   # hand back (nil for the others). The one shape both the return analyses and NumericClasses read.
@@ -43,14 +43,14 @@ module BytecodeIR
     def return_sources(index, reg, opaque_regs: nil, max_states: DATAFLOW_MAX_STATES)
       return nil unless reg
 
-      definitions = reaching_definitions(index, reg.to_s, opaque_regs: opaque_regs, max_states: max_states,
-                                                          through_handlers: true, raiseif_nil: true)
+      definitions = reaching_definitions(index, reg, opaque_regs: opaque_regs, max_states: max_states,
+                                                          through_handlers: true, raiseif_nil: true, shared: true)
       return nil unless definitions
 
       definitions.map do |definition|
         return nil if definition.entry?
 
-        nil_source = %w[LOADNIL RAISEIF].include?(@instructions[definition.index].op)
+        nil_source = %i[LOADNIL RAISEIF].include?(@instructions[definition.index].op)
         nil_source ? NIL_SOURCE : [definition.index, definition.reg]
       end
     end

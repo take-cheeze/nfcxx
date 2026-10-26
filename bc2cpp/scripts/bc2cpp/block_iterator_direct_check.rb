@@ -10,6 +10,8 @@
 #     - `s.each_char { }` / `s.each_line { }` on an unproven receiver get an exact-String arm, the dynamic send its else;
 #       a program String#each_char withdraws the arm;
 #     - an Integer literal receiver (`2.times { }` nested in an inlined loop) keeps no dynamic else;
+#     - a Range literal receiver of a name only core owners answer (`(1..n).map { }`, OUTSIDE_OWNER_CALL's bare
+#       line) takes the proven-receiver arm and keeps no dynamic else;
 #     - the Array/Hash/Range arms and the guarded loops are unchanged: an unproven receiver keeps
 #       its class tests and the dynamic send as the else;
 #     - BC2CPP_BLOCK_CORE_DIRECT=0 removes every arm of this change with the others.
@@ -31,6 +33,25 @@ failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
+end
+
+# Exercise the original-register proof independently of compile_send's site proof.
+class CodeGen; end
+require_relative '../../tools/bc2cpp/codegen_block_core_direct'
+literal_probe = Object.new.extend(BlockCoreDirectFallback)
+probe_irep = Object.new
+probe_irep.define_singleton_method(:index_of_addr) { |_addr| 1 }
+literal_probe.instance_variable_set(:@call_block_region, { parent_irep: probe_irep, dest_reg: 2, sendb_addr: 4 })
+probe_world = Struct.new(:safe) do
+  def exact_instances_singleton_free?; safe; end
+end.new(true)
+literal_probe.define_singleton_method(:block_core_world) { probe_world }
+%w[Integer String Array Hash Range].each do |klass|
+  literal_probe.define_singleton_method(:exact_literal) { |_irep, _idx, _reg| Struct.new(:klass).new(klass.to_sym) }
+  check.call("original-register literal proof: #{klass}", literal_probe.block_core_literal_class == klass)
+  probe_world.safe = false
+  check.call("singleton gate: #{klass}", literal_probe.block_core_literal_class == (klass == 'Integer' ? klass : nil))
+  probe_world.safe = true
 end
 
 unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
@@ -81,6 +102,10 @@ SRC = <<~'RUBY'
     def lp_stop(n); i = 0; v = loop { i += 1; raise StopIteration if i == n }; [v, i]; end
     def lp_drain(a); r = []; loop { raise StopIteration if a.empty?; r << a.shift }; r; end
     def lp_raise(n); i = 0; loop { i += 1; raise ArgumentError, "at #{i}" if i == n }; rescue ArgumentError => e; e.message; end
+    def chars_nested(n); r = []; n.times { "ab".each_char { |c| r << c } }; r; end
+    def chars_nested_break(n); r = []; n.times { r << "ab".each_char { |c| break c } }; r; end
+    def rng_map(n); (1..n).map { |i| i * 2 }; end
+    def rng_any(n); (1..n).any? { |i| i > 2 }; end
     def user_each(o); r = []; o.each { |x| r << x }; r; end
     def nil_each(o); o.each { |x| x }; rescue NoMethodError => e; e.class; end
   end
@@ -153,6 +178,11 @@ nested = code_with_blocks(code, 'tm_nested')
 check.call('tm_nested: the Integer literal receiver of the inner times keeps no dynamic else',
            nested.include?('literal Integer receiver') && nested.include?('Integer_times_impl(M, ') &&
            nested.scan(DYNAMIC).size == 1 && code_of(code, 'tm_nested').scan(DYNAMIC).size == 1)
+nested_chars = code_with_blocks(code, 'chars_nested')
+check.call('chars_nested: a String literal in a nested block keeps no class test or dynamic else',
+           nested_chars.match?(/-- (?:literal|proven) String receiver, yield-free block/) && nested_chars.scan(DYNAMIC).size == 1)
+check.call('chars_nested_break: a nonlocal break keeps the root-context guard',
+           code_with_blocks(code, 'chars_nested_break').match?(/(?:literal|proven) String receiver at the root context/))
 tm = code_of(code, 'tm')
 check.call('tm: an unproven receiver runs the inlined loop behind a Fixnum test, the send with its Integer arm as the else',
            tm.match?(/GUARDED_BLOCK_INLINE :times .*\n\s+if \(M->c == M->root_c && mrb_integer_p\(r\d+\)\) \{\n/) &&
@@ -173,6 +203,11 @@ check.call('idx: an unproven receiver runs the inlined index loop behind an Arra
              ix.match?(DYNAMIC))
 check.call('idx_lit: a literal Array receiver is the plain index loop, no send',
            code_of(code, 'idx_lit').include?('bc2cpp_accum_') && !code_of(code, 'idx_lit').include?(BY_NAME))
+# OUTSIDE_OWNER_CALL's bare line (a name only core owners answer) reads the site's receiver proof too.
+%w[rng_map rng_any].each do |name|
+  check.call("#{name}: a Range literal receiver of an outside-owner name takes the proven arm, no dynamic send",
+             code_of(code, name).include?('-- proven Range receiver, yield-free block') && !code_of(code, name).match?(DYNAMIC))
+end
 user = code_of(code, 'user_each')
 check.call('user_each: an unproven receiver keeps the exact-class arms and the dynamic send as the else',
            user.include?('Array_each_impl(M, ') && user.match?(DYNAMIC))
@@ -186,12 +221,19 @@ check.call('a BasicObject subclass withdraws the Kernel arm', !code_of(c, 'lp').
 c, = generate_world(SRC + "class BiMeta\n  def install(n); Object.send(:define_method, n) { 1 }; end\nend\n")
 check.call('a dynamic installer withdraws the Kernel and String arms',
            !code_of(c, 'lp').include?(KERNEL_LOOP) && !code_of(c, 'chars').include?('String_each_char_impl'))
-c, = generate_world(SRC + "class String\n  def each_char; yield 'z'; end\nend\n")
-# The core arm (an exact-String test in front of the core body) goes. A STATIC_OWNER_ARMS arm may stay: it calls the
-# program's own String#each_char, which is what an exact String receiver's lookup finds.
+c, = generate_world(SRC + "class BiSingleton\n  def touch(o); o.singleton_class; end\nend\n")
+check.call('singleton makers withdraw the heap literal proof',
+           !code_with_blocks(c, 'chars_nested').match?(/-- (?:literal|proven) String receiver/))
+c, = generate_world(SRC + "class String\n  def each_char; yield 'z'; end\nend\n" \
+                    "class Array\n  def index(*a); :mine; end\nend\n")
+# A program String#each_char withdraws the core String arm, and a program
+# Array#index the index loops, and neither disturbs the other: the checks are
+# per name over disjoint lookup chains (String/Comparable vs
+# Array/Enumerable), so one world proves both. A STATIC_OWNER_ARMS arm may
+# stay for each_char: it calls the program's own String#each_char, which is
+# what an exact String receiver's lookup finds.
 check.call('a program String#each_char withdraws the core String arm',
            !code_of(c, 'chars').match?(/M->string_class\) \{\n\s+r\d+ = String_each_char_impl/))
-c, = generate_world(SRC + "class Array\n  def index(*a); :mine; end\nend\n")
 check.call('a program Array#index withdraws the index loops, proven and guarded',
            %w[idx idx_lit].none? { |m| code_of(c, m).include?('bc2cpp_accum_') })
 c, = generate_world(SRC, { 'BC2CPP_BLOCK_CORE_DIRECT' => '0' })
@@ -225,6 +267,8 @@ DRIVER = <<~'RUBY'
   end
   show.call('frozen grow') { fx.grow([1].freeze) }
   [0, 1, 4].each do |n|
+    show.call("chars_nested/#{n}") { fx.chars_nested(n) }
+    show.call("chars_nested_break/#{n}") { fx.chars_nested_break(n) }
     show.call("tm/#{n}") { fx.tm(n) }
     show.call("tm_nested/#{n}") { fx.tm_nested(n) }
     show.call("tm_nested_break/#{n}") { fx.tm_nested_break(n) }
@@ -232,6 +276,10 @@ DRIVER = <<~'RUBY'
   show.call('tm_literal') { fx.tm_literal(5) }
   show.call('red_lit_sym') { fx.red_lit_sym }
   [6, 9].each { |k| show.call("idx_lit/#{k}") { fx.idx_lit(k) } }
+  [0, 1, 4].each do |n|
+    show.call("rng_map/#{n}") { fx.rng_map(n) }
+    show.call("rng_any/#{n}") { fx.rng_any(n) }
+  end
   # Not a Fixnum: a bignum runs Integer#times, anything without `times` raises NoMethodError, a user `times` runs.
   # A positive bignum would count for ever, so it only runs to the first iteration's break.
   show.call('tm_first/big') { fx.tm_first(2**70) }

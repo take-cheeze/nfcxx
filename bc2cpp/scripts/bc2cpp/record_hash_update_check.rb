@@ -54,8 +54,8 @@ RUBY
 suite.compile(source) do |ireps, _root, _directory|
   sites = Hash.new { |h, k| h[k] = { sets: [], gets: [], calls: [] } }
   ireps.each_value do |irep|
-    irep.each_with_op('SETIV', 'GETIV') do |insn, i|
-      sites[insn.ivar][insn.op == 'SETIV' ? :sets : :gets] << [irep, i] if insn.ivar
+    irep.each_with_op(:SETIV, :GETIV) do |insn, i|
+      sites[insn.ivar][insn.op == :SETIV ? :sets : :gets] << [irep, i] if insn.ivar
     end
   end
   scan = lambda do |name, registry: {}, redefined: Set.new, installed: Set.new|
@@ -68,6 +68,18 @@ suite.compile(source) do |ireps, _root, _directory|
   check.call('a key only update stores is its literal class or nil', strict.call(ui, 'list') == Set['Array', 'NilClass'])
   check.call('a Symbol literal value keeps its class', strict.call(ui, 'phase') == Set['Symbol', 'NilClass'])
   check.call('an argument value is unknown, not a refusal', strict.call(ui, 'troop')&.include?(:unknown))
+
+  pair_scanner = RecordHash::Scanner.new('big', sites['big'], nil, World.new(Set.new, Set.new), {})
+  update_pairs = ireps.values.flat_map do |irep|
+    irep.instructions.each_with_index.filter_map do |insn, index|
+      next unless insn.op == :SEND && insn.sym == 'update'
+
+      pair_scanner.send(:adjacent_hash_pairs, irep, index, insn.reg + 1)
+    end
+  end
+  long_update = update_pairs.find { |pairs| pairs.length == 40 }
+  check.call('HASH and HASHADD pair registers stay Integers', long_update &&
+             long_update.all? { |_index, key, value| key.is_a?(Integer) && value.is_a?(Integer) })
 
   big = scan.call('big')
   check.call('a long literal split into HASHADD chunks proves every pair',

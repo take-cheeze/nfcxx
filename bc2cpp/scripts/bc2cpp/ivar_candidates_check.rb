@@ -62,7 +62,7 @@ def scene(methods)
 end
 
 # The stub for nil_literal_write?: a SETIV fed directly by LOADNIL is a nil store.
-NIL_WRITE = ->(irep, idx, _reg) { idx.positive? && irep.insns[idx - 1].op == 'LOADNIL' }
+NIL_WRITE = ->(irep, idx, _reg) { idx.positive? && irep.insns[idx - 1].op == :LOADNIL }
 
 # The stubbed ireps carry no BytecodeIR, so the store-first oracle answers nil (every read counts) here. The cases
 # that exercise the real per-path dataflow are in real_candidate below.
@@ -91,7 +91,7 @@ def real_index(methods, gen)
   end
   ctx = Struct.new(:ireps, :store_log).new(ireps, store_log)
   gen.owner_of.merge!(owners)
-  real_nil_write = ->(irep, idx, _reg) { idx.positive? && irep.instructions[idx - 1].op == 'LOADNIL' }
+  real_nil_write = ->(irep, idx, _reg) { idx.positive? && irep.instructions[idx - 1].op == :LOADNIL }
   IvarCandidates.index(ctx, gen, nil_write: real_nil_write)
 end
 
@@ -99,9 +99,9 @@ def real_candidate(methods, gen, owner, name)
   IvarCandidates.type(real_index(methods, gen), gen, owner, name)
 end
 
-set = lambda { |reg| StubInsn.new('SETIV', :x, [reg]) }
-get = StubInsn.new('GETIV', :x, ['1'])
-load_nil = StubInsn.new('LOADNIL', nil, ['2'])
+set = lambda { |reg| StubInsn.new(:SETIV, :x, [reg]) }
+get = StubInsn.new(:GETIV, :x, [1])
+load_nil = StubInsn.new(:LOADNIL, nil, [2])
 
 # The reported case: #set stores, #get reads, and nothing assures that #get runs after a store.
 gen = FakeGen.new
@@ -155,37 +155,37 @@ check.call('an ivar with no traced store has no class-layout candidate',
 def insn(addr, op, args) = Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
 
 gen = FakeGen.new
-store_first = { 1 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'GETIV', "R3\t@x"),
-                              insn(6, 'RETURN', 'R3')], { 1 => 'Bar' }] }
+store_first = { 1 => ['Foo', [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@x\tR2"), insn(4, :GETIV, "R3\t@x"),
+                              insn(6, :RETURN, 'R3')], { 1 => 'Bar' }] }
 check.call('a method that stores before reading adds no nil',
            real_candidate(store_first, gen, 'Foo', 'x') == 'Bar')
 
 gen = FakeGen.new
-read_first = { 1 => ['Foo', [insn(0, 'GETIV', "R3\t@x"), insn(2, 'LOADI_1', "R2\t(1)"), insn(4, 'SETIV', "@x\tR2"),
-                             insn(6, 'RETURN', 'R3')], { 2 => 'Bar' }] }
+read_first = { 1 => ['Foo', [insn(0, :GETIV, "R3\t@x"), insn(2, :LOADI_1, "R2\t(1)"), insn(4, :SETIV, "@x\tR2"),
+                             insn(6, :RETURN, 'R3')], { 2 => 'Bar' }] }
 check.call('a method that reads before storing adds nil',
            real_candidate(read_first, gen, 'Foo', 'x') == 'Bar | nil')
 
 gen = FakeGen.new
 # JMPNOT at 0 skips the store at 4 and reaches the read at 8 unstored.
-conditional = { 1 => ['Foo', [insn(0, 'JMPNOT', "R1\t8"), insn(4, 'SETIV', "@x\tR2"), insn(8, 'GETIV', "R3\t@x"),
-                              insn(12, 'RETURN', 'R3')], { 1 => 'Bar' }] }
+conditional = { 1 => ['Foo', [insn(0, :JMPNOT, "R1\t8"), insn(4, :SETIV, "@x\tR2"), insn(8, :GETIV, "R3\t@x"),
+                              insn(12, :RETURN, 'R3')], { 1 => 'Bar' }] }
 check.call('a read after a conditional store adds nil',
            real_candidate(conditional, gen, 'Foo', 'x') == 'Bar | nil')
 
 gen = FakeGen.new
 # #reader calls #setter, which may store: the call does not prove the store, so the read keeps nil.
 self_call = {
-  1 => ['Foo', [insn(0, 'SEND0', "R2\t:set_x"), insn(4, 'GETIV', "R3\t@x"), insn(6, 'RETURN', 'R3')], nil],
-  2 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'RETURN', 'R2')], { 1 => 'Bar' }]
+  1 => ['Foo', [insn(0, :SEND0, "R2\t:set_x"), insn(4, :GETIV, "R3\t@x"), insn(6, :RETURN, 'R3')], nil],
+  2 => ['Foo', [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@x\tR2"), insn(4, :RETURN, 'R2')], { 1 => 'Bar' }]
 }
 check.call('a read after a self-call that may store adds nil',
            real_candidate(self_call, gen, 'Foo', 'x') == 'Bar | nil')
 
 gen = FakeGen.new
 # The rescue edge leaves the state before the SETIV at 2 (it may raise before storing): the handler's read is unstored.
-handler = { 1 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'RETURN', 'R2'),
-                          insn(6, 'GETIV', "R3\t@x"), insn(8, 'RETURN', 'R3')], { 1 => 'Bar' }, [
+handler = { 1 => ['Foo', [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@x\tR2"), insn(4, :RETURN, 'R2'),
+                          insn(6, :GETIV, "R3\t@x"), insn(8, :RETURN, 'R3')], { 1 => 'Bar' }, [
                             CatchHandler.new(type: :rescue, begin_addr: 2, end_addr: 4, target: 6)
                           ]] }
 check.call('a read in a rescue handler of the store adds nil', real_candidate(handler, gen, 'Foo', 'x') == 'Bar | nil')
@@ -193,46 +193,46 @@ check.call('a read in a rescue handler of the store adds nil', real_candidate(ha
 gen = FakeGen.new
 # A block's own store does not prove a read in that block: its frame can be entered before the method stores.
 block_read = {
-  1 => ['Foo', [insn(0, 'RETNIL', '')], nil],
-  2 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'GETIV', "R3\t@x"),
-                insn(6, 'RETURN', 'R3')], { 1 => 'Bar' }, nil, 1]
+  1 => ['Foo', [insn(0, :RETNIL, '')], nil],
+  2 => ['Foo', [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@x\tR2"), insn(4, :GETIV, "R3\t@x"),
+                insn(6, :RETURN, 'R3')], { 1 => 'Bar' }, nil, 1]
 }
 check.call('a read in a block of the method keeps nil after its own store',
            real_candidate(block_read, gen, 'Foo', 'x') == 'Bar | nil')
 
 gen = FakeGen.new
 # remove_instance_variable anywhere can clear the slot between the store and the read, so no read is store-first.
-reflective = { 1 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"),
-                             insn(4, 'SEND', "R2\t:remove_instance_variable\tn=1"), insn(8, 'GETIV', "R3\t@x"),
-                             insn(10, 'RETURN', 'R3')], { 1 => 'Bar' }] }
+reflective = { 1 => ['Foo', [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@x\tR2"),
+                             insn(4, :SEND, "R2\t:remove_instance_variable\tn=1"), insn(8, :GETIV, "R3\t@x"),
+                             insn(10, :RETURN, 'R3')], { 1 => 'Bar' }] }
 check.call('a reflective ivar removal voids the store-first proof',
            real_candidate(reflective, gen, 'Foo', 'x') == 'Bar | nil')
 
 # Reflection the GETIV scan cannot see. Method 1 is store-first; method 2 is the reflective access under test.
-store_then_read = [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'GETIV', "R3\t@x"),
-                   insn(6, 'RETURN', 'R3')]
+store_then_read = [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@x\tR2"), insn(4, :GETIV, "R3\t@x"),
+                   insn(6, :RETURN, 'R3')]
 store_program = ->(extra) { { 1 => ['Foo', store_then_read, { 1 => 'Bar' }], 2 => ['Foo', extra, nil] } }
 
 gen = FakeGen.new
-literal_send = [insn(0, 'LOADSYM', "R2\t:greet"), insn(2, 'SEND', "R1\t:send\tn=1"), insn(4, 'RETURN', 'R1')]
+literal_send = [insn(0, :LOADSYM, "R2\t:greet"), insn(2, :SEND, "R1\t:send\tn=1"), insn(4, :RETURN, 'R1')]
 check.call('a literal read in a store-first method drops nil beside a literal non-reflective send',
            real_candidate(store_program.call(literal_send), gen, 'Foo', 'x') == 'Bar')
 
 gen = FakeGen.new
-computed_send = [insn(0, 'SEND', "R1\t:send\tn=1"), insn(2, 'RETURN', 'R1')]
+computed_send = [insn(0, :SEND, "R1\t:send\tn=1"), insn(2, :RETURN, 'R1')]
 check.call('a computed-name send keeps nil on the store-first read',
            real_candidate(store_program.call(computed_send), gen, 'Foo', 'x') == 'Bar | nil')
 
 {
-  'an instance_variable_get of a computed name' => [insn(0, 'SEND', "R1\t:instance_variable_get\tn=1")],
-  'an instance_variable_get of a literal name' => [insn(0, 'LOADSYM', "R2\t:@x"),
-                                                    insn(2, 'SEND', "R1\t:instance_variable_get\tn=1")],
-  'send(:instance_variable_get, ...)' => [insn(0, 'LOADSYM', "R2\t:instance_variable_get"),
-                                          insn(2, 'SEND', "R1\t:send\tn=1")],
-  'a Symbol naming a reflective method (&:instance_variable_get)' => [insn(0, 'LOADSYM', "R2\t:instance_variable_get")],
-  'a computed method name for method(name)' => [insn(0, 'SEND', "R1\t:method\tn=1")],
-  'a literal attr_reader' => [insn(0, 'LOADSYM', "R2\t:x"), insn(2, 'SEND', "R1\t:attr_reader\tn=1")],
-  'a string eval' => [insn(0, 'SEND', "R1\t:eval\tn=1")]
+  'an instance_variable_get of a computed name' => [insn(0, :SEND, "R1\t:instance_variable_get\tn=1")],
+  'an instance_variable_get of a literal name' => [insn(0, :LOADSYM, "R2\t:@x"),
+                                                    insn(2, :SEND, "R1\t:instance_variable_get\tn=1")],
+  'send(:instance_variable_get, ...)' => [insn(0, :LOADSYM, "R2\t:instance_variable_get"),
+                                          insn(2, :SEND, "R1\t:send\tn=1")],
+  'a Symbol naming a reflective method (&:instance_variable_get)' => [insn(0, :LOADSYM, "R2\t:instance_variable_get")],
+  'a computed method name for method(name)' => [insn(0, :SEND, "R1\t:method\tn=1")],
+  'a literal attr_reader' => [insn(0, :LOADSYM, "R2\t:x"), insn(2, :SEND, "R1\t:attr_reader\tn=1")],
+  'a string eval' => [insn(0, :SEND, "R1\t:eval\tn=1")]
 }.each do |label, extra|
   gen = FakeGen.new
   check.call("#{label} keeps nil on the store-first read",

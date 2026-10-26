@@ -33,7 +33,7 @@ INT = NF::INT
 
 # SEND0 takes no count operand; SEND carries n=0.
 def insn(op, sym, reg: 1, argc: 0)
-  args = op.end_with?('0') ? "R#{reg}\t:#{sym}" : "R#{reg}\t:#{sym}\tn=#{argc}"
+  args = op.to_s.end_with?('0') ? "R#{reg}\t:#{sym}" : "R#{reg}\t:#{sym}\tn=#{argc}"
   Insn.new(lineno: 1, addr: 0, op: op, args: args, raw: "#{op} #{args}")
 end
 
@@ -84,29 +84,29 @@ check.call('a method without a blockless Enumerator is absent from the blockless
 puts '== codegen hook'
 cg = codegen_with(defs: native_defs('map', 'collect'))
 check.call('SEND map on an exact Array is ENUMERATOR',
-           cg.native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(ARR)) == NF::ENUMERATOR)
+           cg.native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(ARR)) == NF::ENUMERATOR)
 check.call('SEND map on an exact Hash is ENUMERATOR',
-           cg.native_core_blockless_enumerator_result(insn('SEND', 'collect'), state_for(HSH)) == NF::ENUMERATOR)
+           cg.native_core_blockless_enumerator_result(insn(:SEND, 'collect'), state_for(HSH)) == NF::ENUMERATOR)
 check.call('SENDB map is not the blockless result',
-           cg.native_core_blockless_enumerator_result(insn('SENDB', 'map'), state_for(ARR)).nil?)
-check.call('an Integer receiver is not claimed', cg.native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(INT)).nil?)
-check.call('a name outside the table is not claimed', cg.native_core_blockless_enumerator_result(insn('SEND0', 'each'), state_for(ARR)).nil?)
+           cg.native_core_blockless_enumerator_result(insn(:SENDB, 'map'), state_for(ARR)).nil?)
+check.call('an Integer receiver is not claimed', cg.native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(INT)).nil?)
+check.call('a name outside the table is not claimed', cg.native_core_blockless_enumerator_result(insn(:SEND0, 'each'), state_for(ARR)).nil?)
 check.call('an inexact receiver is not claimed',
-           codegen_with(exact: false, defs: native_defs('map')).native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(ARR)).nil?)
+           codegen_with(exact: false, defs: native_defs('map')).native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(ARR)).nil?)
 check.call('a program definition of map withdraws the claim',
-           codegen_with(defs: { 'map' => [Struct.new(:owner).new('Bag')] }).native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(ARR)).nil?)
+           codegen_with(defs: { 'map' => [Struct.new(:owner).new('Bag')] }).native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(ARR)).nil?)
 check.call('an installed map withdraws the claim',
-           codegen_with(installed: Set['map'], defs: native_defs('map')).native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(ARR)).nil?)
+           codegen_with(installed: Set['map'], defs: native_defs('map')).native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(ARR)).nil?)
 check.call('no installer data withdraws the claim',
            codegen_with(defs: native_defs('map')).tap { |c| c.define_singleton_method(:symbol_installed_names) { nil } }
-                                                 .native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(ARR)).nil?)
+                                                 .native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(ARR)).nil?)
 ENV['BC2CPP_NATIVE_CLASS_RESULTS'] = '0'
 check.call('the kill switch BC2CPP_NATIVE_CLASS_RESULTS=0 withdraws the claim',
-           cg.native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(ARR)).nil? &&
-           cg.native_core_class_result(insn('SEND0', 'map'), state_for(ARR)).nil?)
+           cg.native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(ARR)).nil? &&
+           cg.native_core_class_result(insn(:SEND0, 'map'), state_for(ARR)).nil?)
 ENV.delete('BC2CPP_NATIVE_CLASS_RESULTS')
 check.call('native_core_class_result returns the bit for a blockless map',
-           cg.native_core_class_result(insn('SEND0', 'map'), state_for(ARR)) == NF::ENUMERATOR)
+           cg.native_core_class_result(insn(:SEND0, 'map'), state_for(ARR)) == NF::ENUMERATOR)
 
 check.call('every declared blockless name answers Enumerator on Enumerable',
            CoreBlocklessIteratorSigs.results['Enumerable'].values.all? { |k| k == 'Enumerator' })
@@ -115,18 +115,18 @@ check.call('find_index is not declared (its blockless call with an argument is n
 check.call('arity: each_slice takes exactly one argument', CoreBlocklessIteratorSigs.arity('Enumerable', 'each_slice') == [1, 1])
 check.call('arity: each_entry takes any number', CoreBlocklessIteratorSigs.arity('Enumerable', 'each_entry') == [0, nil])
 check.call('a Range receiver is claimed (Range includes Enumerable)',
-           cg.native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(NF::RNG)) == NF::ENUMERATOR)
+           cg.native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(NF::RNG)) == NF::ENUMERATOR)
 check.call('a String receiver is refused (String does not include Enumerable)',
-           cg.native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(NF::STR)).nil?)
+           cg.native_core_blockless_enumerator_result(insn(:SEND0, 'map'), state_for(NF::STR)).nil?)
 check.call('SEND0 each_slice (no argument) is refused: the arity needs one',
-           cg.native_core_blockless_enumerator_result(insn('SEND0', 'each_slice'), state_for(ARR)).nil?)
+           cg.native_core_blockless_enumerator_result(insn(:SEND0, 'each_slice'), state_for(ARR)).nil?)
 check.call('SEND each_slice with one argument is claimed',
-           cg.native_core_blockless_enumerator_result(insn('SEND', 'each_slice', argc: 1), state_for(ARR)) == NF::ENUMERATOR)
+           cg.native_core_blockless_enumerator_result(insn(:SEND, 'each_slice', argc: 1), state_for(ARR)) == NF::ENUMERATOR)
 check.call('SEND map with one argument is refused (map takes none)',
-           cg.native_core_blockless_enumerator_result(insn('SEND', 'map', argc: 1), state_for(ARR)).nil?)
+           cg.native_core_blockless_enumerator_result(insn(:SEND, 'map', argc: 1), state_for(ARR)).nil?)
 check.call('a splat argument count is refused', cg.native_core_blockless_enumerator_result(
-  Insn.new(lineno: 1, addr: 0, op: 'SEND', args: "R1\t:map\tn=*", raw: 'SEND R1 :map n=*'), state_for(ARR)).nil?)
-check.call('a Hash receiver is claimed', cg.native_core_blockless_enumerator_result(insn('SEND0', 'select'), state_for(HSH)) == NF::ENUMERATOR)
+  Insn.new(lineno: 1, addr: 0, op: :SEND, args: "R1\t:map\tn=*", raw: 'SEND R1 :map n=*'), state_for(ARR)).nil?)
+check.call('a Hash receiver is claimed', cg.native_core_blockless_enumerator_result(insn(:SEND0, 'select'), state_for(HSH)) == NF::ENUMERATOR)
 
 puts '== union rule'
 check.call('every declared member is the union of a blockless and a block overload',

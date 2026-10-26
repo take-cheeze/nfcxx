@@ -12,7 +12,7 @@ require_relative 'nomethod_reviewed'
 # withdrawal conditions are theirs: see codegen_class_pools.rb.
 module NilableReceiverSend
   # Plain SEND/SEND0 only: SENDB carries a block register and SSEND has no receiver.
-  NILABLE_OPS = %w[SEND SEND0].freeze
+  NILABLE_OPS = %i[SEND SEND0].freeze
   # An unguarded exact-receiver path: no class test, so a nil test is the cheaper guard.
   EXACT_MARK = %r{^\s*// (?:EXACT_TYPED|CLOSED_WORLD_EXACT_CLASS|NATIVE_EXACT_DIRECT|EXACT_NATIVE_WRAPPER|NATIVE_DIRECT_EXACT|NATIVE_CORE_EXACT|CLOSED_WORLD_NATIVE_EXACT|INDEX_EXACT)\b}
 
@@ -69,18 +69,18 @@ module NilableReceiverSend
   def nilable_receiver_plan(insn, kwargs)
     return nil unless @class_pools_on && @closed_world && NILABLE_OPS.include?(insn.op)
     return nil if kwargs[:self_implicit] || kwargs[:call_receiver] || kwargs[:call_arguments]
-    return nil if insn.n_spec == '*' || insn.nk_spec
+    return nil if insn.positional_splat? || insn.keyword_arguments?
 
     irep = kwargs[:irep]
     # An inlined send has no instruction index of its own: its source index and register are the
-    # ones compile_send's proof uses (trace_idx, and the register unshifted by trace_reg_offset).
+    # ones compile_send's proof uses(trace_idx, and the register unshifted by trace_reg_offset).
     idx = kwargs[:idx] || kwargs[:trace_idx]
     return nil unless irep && idx && insn.sym
 
-    proof_reg = unshift_proof_reg(insn.reg.to_s, kwargs[:trace_reg_offset].to_i)&.to_i
+    proof_reg = unshift_proof_reg(insn.reg, kwargs[:trace_reg_offset].to_i)&.to_i
     return nil unless proof_reg
 
-    n = insn.n_spec.to_i
+    n = insn.argc.to_i
     return nil if n > CodeGen::FUNCALL_ARGC_MAX
 
     reg = insn.reg.to_i
@@ -130,7 +130,7 @@ CodeGen.prepend(NilableReceiverSend)
 # SETIDX are not sends, so the module above never sees them. An exact Array/Hash receiver takes the
 # fast path with no class test (INDEX_EXACT in compile_insn).
 module NilableIndexOps
-  INDEX_OPS = { 'GETIDX' => '[]', 'GETIDX0' => '[]', 'SETIDX' => '[]=' }.freeze
+  INDEX_OPS = { :GETIDX => '[]', :GETIDX0 => '[]', :SETIDX => '[]=' }.freeze
 
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
     plan = nilable_index_plan(insn, irep, idx, reg_offset)
@@ -163,7 +163,7 @@ module NilableIndexOps
 
     regs = insn.regs
     dest = regs[0]
-    recv_reg = insn.op == 'GETIDX0' ? regs[1] : regs[0]
+    recv_reg = insn.op == :GETIDX0 ? regs[1] : regs[0]
     proof_reg = unshift_proof_reg(recv_reg, reg_offset)
     return nil unless proof_reg
 
@@ -174,8 +174,8 @@ module NilableIndexOps
     return nil unless %w[Array Hash].include?(klass)
 
     argv = case insn.op
-           when 'GETIDX' then ["r#{regs[1]}"]
-           when 'GETIDX0' then ['mrb_fixnum_value(0)']
+           when :GETIDX then ["r#{regs[1]}"]
+           when :GETIDX0 then ['mrb_fixnum_value(0)']
            else ["r#{regs[1]}", "r#{regs[2]}"]
            end
     { key: [irep.label, idx, proof_reg.to_i], klass: klass, name: name, recv: "r#{recv_reg}", dest: dest, argv: argv }

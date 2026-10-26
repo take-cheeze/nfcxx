@@ -49,15 +49,15 @@ module ConstantArgumentSites
   # Opcodes with no side effect of their own and no way to raise. GETCONST/GETMCNST may run const_missing or raise NameError,
   # so they are may_raise (see RAISING_OPS), not here.
   PURE_OPS = Set.new(BytecodeIR::Ops::PURE_LOAD.to_a + BytecodeIR::CONDITIONAL_BRANCHES +
-                     %w[NOP STRING ENTER RETURN JMP GETIV GETUPVAR SEND SEND0 SEND1 SENDV]).freeze
+                     %i[NOP STRING ENTER RETURN JMP GETIV GETUPVAR SEND SEND0 SEND1 SENDV]).freeze
   # Arithmetic and ordering ops: gated (condition 3) and may raise on a non-numeric operand (condition 4).
-  ARITH_OPS = Set.new(%w[ADD SUB MUL DIV ADDI SUBI LT LE GT GE]).freeze
-  RAISING_OPS = Set.new(%w[GETCONST GETMCNST]).freeze
+  ARITH_OPS = Set.new(%i[ADD SUB MUL DIV ADDI SUBI LT LE GT GE]).freeze
+  RAISING_OPS = Set.new(%i[GETCONST GETMCNST]).freeze
   # Ops that dispatch to a method by name without a SEND (vm.c OP_EQ is `==`, OP_NOT is `!`). They are checked against the
   # redefined names like a send, and they cannot raise.
-  DISPATCH_OPS = { 'EQ' => '==', 'NOT' => '!' }.freeze
+  DISPATCH_OPS = { :EQ => '==', 'NOT' => '!' }.freeze
   # Every send opcode the call-site index reads (SEND0, SENDB, SSEND*), plus the two it does not list.
-  SEND_OPS = (CallSiteIndex::SEND_OPS + %w[SEND1 SENDV]).uniq.freeze
+  SEND_OPS = (CallSiteIndex::SEND_OPS + %i[SEND1 SENDV]).uniq.freeze
   # Sends that install or dispatch a method by a name the argument carries: their target is the first argument.
   DYNAMIC_SENDS = %w[send __send__ public_send method instance_method define_method alias_method].freeze
 
@@ -143,7 +143,7 @@ module ConstantArgumentSites
           names[target] << "#{sym} #{target}"
         end
       end
-      irep.each_with_op('ALIAS') { |_insn, idx| alias_unresolved(irep, idx, names, global) }
+      irep.each_with_op(:ALIAS) { |_insn, idx| alias_unresolved(irep, idx, names, global) }
     end
     global << 'to_enum with a computed name' unless index.fetch(CallSiteIndex::UNKNOWN_TARGET, []).empty?
     dynamic = computed.empty? ? Set.new : DynamicNames.universe(ireps).to_set
@@ -207,13 +207,13 @@ module ConstantArgumentSites
         impure << "redefined #{name}" if redefined.key?(name)
       elsif ARITH_OPS.include?(op)
         impure << "operator gate #{op}" unless gate_ok
-        may_raise << op
+        may_raise << op.to_s
       elsif RAISING_OPS.include?(op)
-        may_raise << op
+        may_raise << op.to_s
       elsif BytecodeIR::Ops::LOADI_OPS.include?(op) || PURE_OPS.include?(op)
         next
       else
-        impure << op
+        impure << op.to_s
       end
     end
     { impure: impure.uniq, may_raise: may_raise.uniq }
@@ -237,7 +237,7 @@ module ConstantArgumentSites
   def value_at(irep, index, reg, tuple, constants, depth = 0)
     return UNKNOWN if depth > 32
 
-    defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s)
+    defs = BytecodeIR.reaching_definitions(irep, index, reg, shared: true)
     return UNKNOWN if defs.nil? || defs.empty?
 
     values = defs.map { |d| definition_value(irep, d, tuple, constants) }
@@ -259,11 +259,11 @@ module ConstantArgumentSites
   # The value of a LOADI* literal, decoded as the numeric pass does (bytecode_ir_types.rb#integer_literal).
   def integer_literal(insn)
     case insn.op
-    when 'LOADI__1' then -1
-    when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
-    when 'LOADI8', 'LOADI16', 'LOADI32', 'LOADINEG'
-      value = insn.imm_operand&.to_i
-      value && insn.op == 'LOADINEG' ? -value.abs : value
+    when :LOADI__1 then -1
+    when BytecodeIR::Ops::LOADI_SLOT then BytecodeIR::Ops::LOADI_SLOT_VALUE[insn.op]
+    when :LOADI8, :LOADI16, :LOADI32, :LOADINEG
+      value = insn.imm_operand
+      value && insn.op == :LOADINEG ? -value.abs : value
     end
   end
 
@@ -276,11 +276,11 @@ module ConstantArgumentSites
       return value.nil? ? UNKNOWN : [:int, value]
     end
     case op
-    when 'LOADNIL' then nil
-    when 'LOADTRUE' then true
-    when 'LOADFALSE' then false
-    when 'LOADSYM' then insn.sym_token ? [:sym, insn.sym_token.to_s] : UNKNOWN
-    when 'GETCONST' then constants.fetch(insn.const_name.to_s, UNKNOWN)
+    when :LOADNIL then nil
+    when :LOADTRUE then true
+    when :LOADFALSE then false
+    when :LOADSYM then insn.sym_token ? [:sym, insn.sym_token.to_s] : UNKNOWN
+    when :GETCONST then constants.fetch(insn.const_name.to_s, UNKNOWN)
     else UNKNOWN
     end
   end

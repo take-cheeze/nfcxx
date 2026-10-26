@@ -58,7 +58,7 @@ end
 last_each = lambda do |ireps, registry, owner, name|
   md = registry.fetch(name).find { |d| d.owner == owner }
   irep = ireps.fetch(md.irep)
-  idx = irep.instructions.rindex { |insn| insn.op == 'SENDB' && insn.sym == 'each' }
+  idx = irep.instructions.rindex { |insn| insn.op == :SENDB && insn.sym == 'each' }
   [irep, idx, irep.instructions[idx].reg]
 end
 

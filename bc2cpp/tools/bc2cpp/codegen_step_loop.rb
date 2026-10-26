@@ -25,14 +25,14 @@ class CodeGen
       shape = STEP_LOOP_KINDS[insn.sym]
       shape[:block_offset] if shape && insn.argc_text == shape[:argc]
     end
-    each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, sendb_idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, sendb_idx, block_insn, dest_reg, block_irep|
       next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
       next unless block_blk_needs(block_irep) == []
 
       kind = insn.sym
       step = 1
       if kind == 'step'
-        step = step_loop_literal(irep, sendb_idx - 1, (dest_reg.to_i + 2).to_s)
+        step = step_loop_literal(irep, sendb_idx - 1, dest_reg.to_i + 2)
         next if step.nil? || step.zero?
       elsif kind == 'downto'
         step = -1
@@ -40,7 +40,7 @@ class CodeGen
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
                    bind_counter: mandatory_arity(block_irep) == 1, kind: kind, step: step,
-                   sendb_idx: sendb_idx, limit_reg: (dest_reg.to_i + 1).to_s }
+                   sendb_idx: sendb_idx, limit_reg: dest_reg.to_i + 1 }
     end
     regions
   end

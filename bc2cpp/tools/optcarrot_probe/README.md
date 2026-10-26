@@ -24,8 +24,8 @@ using its real, unmodified upstream source, and produces the exact same
 checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
-Latest local 180-frame wall times from the comparative runner: CRuby ~5.7s,
-interpreted mruby ~18.7s, and bc2cpp ~12.9s (varies by machine); CI
+Latest local 180-frame wall times from the comparative runner: CRuby ~4.5s,
+interpreted mruby ~12.8s, and bc2cpp ~3.7s (varies by machine); CI
 publishes each run's numbers and relative slowdown in the job summary. All
 three produce checksum `59662`. `compiled_run.rb` installs every compiled
 entry point (398 methods): bc2cpp itself refuses the methods a `Fiber.yield`

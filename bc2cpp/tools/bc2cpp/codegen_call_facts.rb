@@ -49,10 +49,10 @@ class CodeGen
     return nil unless call_facts_enabled? && @native_results_ready
 
     irep, idx, insn = site_flow_position(site)
-    return nil unless irep && idx && insn&.sym == name && %w[SEND SEND0].include?(insn.op)
+    return nil unless irep && idx && insn&.sym == name && %i[SEND SEND0].include?(insn.op)
 
     reg = insn.reg.to_i
-    return nil if reg >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if reg >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     states = call_facts_states(irep)
     names = states && CallFacts::Flow.facts(states[idx], reg)

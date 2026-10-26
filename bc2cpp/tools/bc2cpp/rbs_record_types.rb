@@ -206,11 +206,11 @@ module RbsRecordTypes
     wanted = names.to_set
     sites = Hash.new { |h, k| h[k] = { sets: [], gets: [], calls: [] } }
     ireps.each_value do |irep|
-      irep.each_with_op('SETIV', 'GETIV') do |insn, i|
+      irep.each_with_op(:SETIV, :GETIV) do |insn, i|
         name = insn.ivar
         next unless wanted.include?(name)
 
-        (insn.op == 'SETIV' ? sites[name][:sets] : sites[name][:gets]) << [irep, i]
+        (insn.op == :SETIV ? sites[name][:sets] : sites[name][:gets]) << [irep, i]
       end
       irep.each_with_op(*BytecodeIR::Ops::CALL) do |insn, i|
         sites[insn.sym][:calls] << [irep, i] if wanted.include?(insn.sym) && readers.include?(insn.sym)
@@ -278,7 +278,7 @@ module RbsRecordTypes
   end
 
   def value_errors(irep, idx, reg, field, ctx)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return ["value of :#{field.key} cannot be traced (declare it untyped)"] if defs.nil? || defs.empty?
 
     defs.filter_map do |d|
@@ -309,15 +309,15 @@ module RbsRecordTypes
   LITERAL_CLASS = lambda do |irep, d|
     insn = BytecodeIR.for(irep).source_at(d)
     case insn.op
-    when 'ARRAY' then 'Array'
-    when 'HASH' then 'Hash'
-    when 'STRING' then 'String'
-    when 'LOADSYM' then 'Symbol'
-    when 'LOADTRUE' then 'TrueClass'
-    when 'LOADFALSE' then 'FalseClass'
-    when 'LOADNIL' then 'NilClass'
+    when :ARRAY then 'Array'
+    when :HASH then 'Hash'
+    when :STRING then 'String'
+    when :LOADSYM then 'Symbol'
+    when :LOADTRUE then 'TrueClass'
+    when :LOADFALSE then 'FalseClass'
+    when :LOADNIL then 'NilClass'
     when *BytecodeIR::Ops::RANGE_BUILD then 'Range'
-    when 'LOADL'
+    when :LOADL
       entry = irep.pool[insn.pool_index]
       entry.is_a?(Hash) && entry[:type] == :float ? 'Float' : (entry.is_a?(Hash) ? 'Integer' : nil)
     else BytecodeIR::Ops::LOADI_OPS.include?(insn.op) ? 'Integer' : nil
@@ -388,7 +388,7 @@ module RbsRecordTypes
     lambda do |irep, idx, reg|
       next nil unless defined?(proven_array_source_scan)
 
-      'Array' if proven_array_source_scan(irep, idx, reg.to_s, registry) == 'Array'
+      'Array' if proven_array_source_scan(irep, idx, reg, registry) == 'Array'
     end
   end
 
@@ -483,14 +483,14 @@ module RbsRecordTypes
 
     def store_ok?(irep, i)
       insn = BytecodeIR.for(irep).source_at(i)
-      defs = BytecodeIR.reaching_definitions(irep, i, insn.regs.first, through_handlers: true)
+      defs = BytecodeIR.reaching_definitions(irep, i, insn.regs.first, through_handlers: true, shared: true)
       return fail!('store source not provable') if defs.nil? || defs.empty?
 
       defs.each do |d|
         src = d.entry? ? nil : BytecodeIR.for(irep).source_at(d.index)
-        if src&.op == 'LOADNIL'
+        if src&.op == :LOADNIL
           @nil_stores << [irep, i]
-        elsif src&.op == 'HASH'
+        elsif src&.op == :HASH
           @literals << [irep, d.index] unless @literals.any? { |l, x| l.equal?(irep) && x == d.index }
         else
           fail!(d.entry? ? 'store from an argument' : "store from #{src.op} (only a Hash literal or nil)")
@@ -501,7 +501,7 @@ module RbsRecordTypes
 
     def step(irep, k, insn, state)
       lead = insn.reg&.to_i
-      if insn.op == 'SEND' && lead && state.include?(lead)
+      if insn.op == :SEND && lead && state.include?(lead)
         case insn.sym
         when 'update', 'merge!' then return update_step(irep, k, insn, state, lead)
         when 'store' then return store_step(irep, k, insn, state, lead)
@@ -511,9 +511,9 @@ module RbsRecordTypes
         when '!=' then return nil_compare_step(irep, k, insn, state, lead)
         end
       end
-      return nil_test_step(insn, state, lead) if insn.op == 'SEND0' && lead && state.include?(lead) &&
+      return nil_test_step(insn, state, lead) if insn.op == :SEND0 && lead && state.include?(lead) &&
                                                  NIL_TESTS.include?(insn.sym)
-      return nil_compare_step(irep, k, insn, state, lead) if insn.op == 'EQ' && state.include?(lead)
+      return nil_compare_step(irep, k, insn, state, lead) if insn.op == :EQ && state.include?(lead)
       if BytecodeIR::Ops::SEND.include?(insn.op) && lead
         unless held_call?(insn, state, lead)
           # Only a self send's leading register held it: overwritten with self, nothing is passed.
@@ -537,20 +537,20 @@ module RbsRecordTypes
     # a Hash can reach it (the same check as update/merge!).
     def nil_test_step(insn, state, lead)
       return escape("Hash##{insn.sym} may be redefined") unless native_hash?(insn.sym)
-      return escape("#{insn.sym} arity") unless insn.op == 'SEND0' || plain_args?(insn, 0)
+      return escape("#{insn.sym} arity") unless insn.op == :SEND0 || plain_args?(insn, 0)
 
       state.reject { |x| x >= lead }.to_set
     end
 
     # `h == nil` (OP_EQ) / `h != nil`: an identity test against a literal nil.
     def nil_compare_step(irep, k, insn, state, lead)
-      name = insn.op == 'EQ' ? '==' : '!='
+      name = insn.op == :EQ ? '==' : '!='
       return escape("Hash##{name} may be redefined") unless native_hash?('==') && native_hash?(name)
-      return escape("#{name} arity") unless insn.op == 'EQ' || plain_args?(insn, 1)
+      return escape("#{name} arity") unless insn.op == :EQ || plain_args?(insn, 1)
       return escape("#{name} of the Hash with itself") if state.include?(lead + 1)
 
-      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1).to_s, through_handlers: true)
-      nil_operand = defs && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADNIL' }
+      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1), through_handlers: true, shared: true)
+      nil_operand = defs && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == :LOADNIL }
       return escape("#{name} against a value other than nil") unless nil_operand
 
       state.reject { |x| x >= lead }.to_set
@@ -654,9 +654,9 @@ module RbsRecordTypes
       return escape("#{insn.sym} arity (one Hash literal, no block)") unless plain_args?(insn, 1)
       return escape("#{insn.sym} of the Hash itself") if state.include?(lead + 1)
 
-      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1).to_s, through_handlers: true)
+      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1), through_handlers: true, shared: true)
       lit = defs&.size == 1 && !defs.first.entry? && BytecodeIR.for(irep).source_at(defs.first.index)
-      return escape("non-literal #{insn.sym}") unless lit && lit.op == 'HASH' && lit.uint_operand
+      return escape("non-literal #{insn.sym}") unless lit && lit.op == :HASH && lit.uint_operand
 
       base = lit.reg.to_i
       lit.uint_operand.times do |j|
@@ -688,7 +688,7 @@ module RbsRecordTypes
 
     def read_step(insn, state, lead)
       return escape("Hash##{insn.sym} may be redefined") unless native_hash?(insn.sym)
-      return escape("operand of #{insn.sym}") if insn.op != 'SEND' || insn.argc.nil? ||
+      return escape("operand of #{insn.sym}") if insn.op != :SEND || insn.argc.nil? ||
                                                    (1..insn.argc).any? { |j| state.include?(lead + j) }
 
       state.reject { |x| x >= lead }.to_set

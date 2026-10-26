@@ -57,6 +57,47 @@ end
 
 puts '-- unused-register declarations'
 generator = CodeGen.allocate
+block_before = lambda do |code|
+  text = code.gsub(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/, '""').strip
+  next false unless text.start_with?('{') && text.end_with?('}')
+
+  depth = 0
+  valid = true
+  text.each_char.with_index do |char, index|
+    depth += 1 if char == '{'
+    depth -= 1 if char == '}'
+    valid = false if depth.zero? && index != text.length - 1
+  end
+  valid && depth.zero?
+end
+block_cases = {
+  '' => false, '{}' => true, ' { {} } ' => true, '{} {}' => false,
+  '{{}' => false, '{}}' => false, '{x} y {}' => false,
+  '{ "}"; }' => true, "{ '}' ; }" => true,
+  '{ /* 日本語 */ { x; } }' => true, '{日本語} {次}' => false,
+  "{\n x;\n}" => true, %q({ "a\"}"; }) => true
+}
+check.call('single-block scope decisions preserve nesting, quoted braces and UTF-8',
+           block_cases.all? { |text, expected| generator.single_block?(text) == expected })
+block_random = Random.new(20261026)
+block_tokens = ['{', '}', 'x;', ' ', '日本語', '"}"', "'{'", %q("a\"}"), "\n"]
+block_random_cases = Array.new(2000) do
+  body = Array.new(block_random.rand(0..40)) { block_tokens.sample(random: block_random) }.join
+  block_random.rand(2).zero? ? "{#{body}}" : body
+end
+check.call('byte traversal matches character traversal on randomized snippets',
+           block_random_cases.all? { |text| generator.single_block?(text) == block_before.call(text) })
+small_block = '{' + 'x;' * 10 + '}'
+large_block = '{' + 'x;' * 10_000 + '}'
+[small_block, large_block].each { |text| generator.single_block?(text) }
+allocation_counts = [small_block, large_block].map do |text|
+  before = GC.stat(:total_allocated_objects)
+  10.times { generator.single_block?(text) }
+  GC.stat(:total_allocated_objects) - before
+end
+check.call('single-block allocations do not grow with the number of characters',
+           allocation_counts.last <= allocation_counts.first + 20)
+
 prune_before = lambda do |code|
   uses = code.scan(/\br\d+\b/).tally
   code.gsub(/^ +mrb_value (r\d+) = (?:mrb_nil_value\(\)|[A-Za-z_]\w*);\n/) do |declaration|
@@ -119,10 +160,10 @@ end)
 
 puts '-- hand-built shapes'
 # t = a; t = b; return t
-list = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'MOVE', "R3\tR2"), insn(4, 'RETURN', 'R3')]
+list = [insn(0, :MOVE, "R3\tR1"), insn(2, :MOVE, "R3\tR2"), insn(4, :RETURN, 'R3')]
 texts = ["  r3 = r1;\n", "  r3 = r2;\n", "  return r3;\n"]
 check.call('an overwritten MOVE is dropped and the survivor propagated', flow(list, texts) == ['', '', "  return r2;\n"])
-wide = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'MOVE', "R3\tR2"), insn(4, 'ADDI', "R4\tR3\t1")]
+wide = [insn(0, :MOVE, "R3\tR1"), insn(2, :MOVE, "R3\tR2"), insn(4, :ADDI, "R4\tR3\t1")]
 wide_texts = ["  r3 = r1;\n", "  r3 = r2;\n", "  r4 = bc2cpp_add1(r3);\n"]
 check.call('an overwritten MOVE read next by a window op is dropped, the other kept',
            flow(wide, wide_texts) == ['', "  r3 = r2;\n", "  r4 = bc2cpp_add1(r3);\n"])
@@ -132,38 +173,38 @@ check.call('an address-taken register keeps its write',
              ["  r3 = r1;\n", "  r3 = r2;\n", "  return bc2cpp_f(&r3);\n"])
 check.call('a register redeclared inside a text is pinned',
            flow(list, ["  r3 = r1;\n", "  r3 = r2;\n", "  { mrb_value r3 = r1; return r3; }\n"]).first == "  r3 = r1;\n")
-check.call('r0 is never dropped', flow([insn(0, 'LOADSELF', 'R0'), insn(2, 'RETNIL', '')],
+check.call('r0 is never dropped', flow([insn(0, :LOADSELF, 'R0'), insn(2, :RETNIL, '')],
                                        ["  r0 = self;\n", "  return mrb_nil_value();\n"]).first == "  r0 = self;\n")
 
 # b = a; return b  -> return a, and the copy is gone
-list = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'RETURN', 'R3')]
+list = [insn(0, :MOVE, "R3\tR1"), insn(2, :RETURN, 'R3')]
 check.call('a copy read by one RETURN is propagated and dropped',
            flow(list, ["  r3 = r1;\n", "  return r3;\n"]) == ['', "  return r1;\n"])
 check.call('a read of the copy by a window consumer keeps the copy',
-           flow([insn(0, 'MOVE', "R4\tR1"), insn(2, 'SEND', "R3\t:f\t1"), insn(4, 'RETURN', 'R3')],
+           flow([insn(0, :MOVE, "R4\tR1"), insn(2, :SEND, "R3\t:f\t1"), insn(4, :RETURN, 'R3')],
                 ["  r4 = r1;\n", "  r3 = bc2cpp_send(M, r3, 1, 1, r4);\n", "  return r3;\n"]) ==
              ["  r4 = r1;\n", "  r3 = bc2cpp_send(M, r3, 1, 1, r4);\n", "  return r3;\n"])
 check.call('the source overwritten before the read keeps the copy',
-           flow([insn(0, 'MOVE', "R3\tR1"), insn(2, 'LOADI_5', 'R1 (5)'), insn(4, 'RETURN', 'R3')],
+           flow([insn(0, :MOVE, "R3\tR1"), insn(2, :LOADI_5, 'R1 (5)'), insn(4, :RETURN, 'R3')],
                 ["  r3 = r1;\n", "  r1 = mrb_fixnum_value(5);\n", "  return r3;\n"]) ==
              ["  r3 = r1;\n", '', "  return r3;\n"])
 check.call('a source captured by a block is never substituted',
            flow(list, ["  r3 = r1;\n", "  return r3;\n"], captured: Set[1]) == ["  r3 = r1;\n", "  return r3;\n"])
 
 # if c then x = a end; return x   (the copy is not on every path)
-join = [insn(0, 'JMPNOT', "R1\t8"), insn(3, 'MOVE', "R3\tR2"), insn(5, 'JMP', '8'), insn(8, 'RETURN', 'R3')]
+join = [insn(0, :JMPNOT, "R1\t8"), insn(3, :MOVE, "R3\tR2"), insn(5, :JMP, '8'), insn(8, :RETURN, 'R3')]
 join_texts = ["  if (!mrb_test(r1)) goto L8;\n", "  r3 = r2;\n", "  goto L8;\n", "  return r3;\n"]
 check.call('a copy missing on one path to the read is kept', flow(join, join_texts) == join_texts)
-check.call('a write live on one branch survives', flow([insn(0, 'LOADNIL', 'R3'), insn(2, 'JMPNOT', "R1\t8"),
-                                                        insn(5, 'LOADI_1', 'R3 (1)'), insn(7, 'NOP', ''),
-                                                        insn(8, 'RETURN', 'R3')],
+check.call('a write live on one branch survives', flow([insn(0, :LOADNIL, 'R3'), insn(2, :JMPNOT, "R1\t8"),
+                                                        insn(5, :LOADI_1, 'R3 (1)'), insn(7, :NOP, ''),
+                                                        insn(8, :RETURN, 'R3')],
                                                        ["  r3 = mrb_nil_value();\n", "  if (!mrb_test(r1)) goto L8;\n",
                                                         "  r3 = mrb_fixnum_value(1);\n", '', "  return r3;\n"]).first ==
                                                        "  r3 = mrb_nil_value();\n")
 
 # Loop: the write before the loop is read on the next iteration.
-loop_list = [insn(0, 'LOADNIL', 'R3'), insn(2, 'MOVE', "R4\tR3"), insn(4, 'LOADI_1', 'R3 (1)'),
-             insn(6, 'JMPIF', "R1\t2"), insn(9, 'RETURN', 'R4')]
+loop_list = [insn(0, :LOADNIL, 'R3'), insn(2, :MOVE, "R4\tR3"), insn(4, :LOADI_1, 'R3 (1)'),
+             insn(6, :JMPIF, "R1\t2"), insn(9, :RETURN, 'R4')]
 loop_texts = ["  r3 = mrb_nil_value();\n", "  r4 = r3;\n", "  r3 = mrb_fixnum_value(1);\n",
               "  if (mrb_test(r1)) goto L2;\n", "  return r4;\n"]
 loop_out = flow(loop_list, loop_texts)
@@ -175,8 +216,8 @@ check.call('a method with a catch handler is untouched',
 puts '-- catch handlers (the rescue model, REGISTER_FLOW handler edges)'
 # 0 r3 = r1; 2 glue (protects [2, 4)); 4 goto 8; 6 EXCEPT (its text is empty: the glue
 # runs the handler); 7 the clause reads r3; 8 returns r4.
-rescue_list = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'SEND', "R4\t:try\t0"), insn(4, 'JMP', '8'),
-               insn(6, 'EXCEPT', 'R5'), insn(7, 'RETURN', 'R3'), insn(8, 'RETURN', 'R4')]
+rescue_list = [insn(0, :MOVE, "R3\tR1"), insn(2, :SEND, "R4\t:try\t0"), insn(4, :JMP, '8'),
+               insn(6, :EXCEPT, 'R5'), insn(7, :RETURN, 'R3'), insn(8, :RETURN, 'R4')]
 rescue_texts = ["  r3 = r1;\n", "  r4 = bc2cpp_try(r1);\n", "  goto L8;\n", '', "  return r3;\n", "  return r4;\n"]
 rescue_on = flow(rescue_list, rescue_texts, handlers: [rescue_handler(2, 4, 6)], model: rescue_model(2, 4, 6))
 check.call('a copy read only by a handler clause is propagated through the handler edge',
@@ -186,8 +227,8 @@ check.call('the same shape without the handler model is refused', flow(rescue_li
 
 # The glue writes r3 on the normal path only: a handler raised before the write
 # still reads the old r3, so the write before the glue stays live.
-kill_list = [insn(0, 'MOVE', "R3\tR2"), insn(2, 'MOVE', "R3\tR1"), insn(4, 'JMP', '8'),
-             insn(6, 'EXCEPT', 'R5'), insn(7, 'RETURN', 'R3'), insn(8, 'RETURN', 'R3')]
+kill_list = [insn(0, :MOVE, "R3\tR2"), insn(2, :MOVE, "R3\tR1"), insn(4, :JMP, '8'),
+             insn(6, :EXCEPT, 'R5'), insn(7, :RETURN, 'R3'), insn(8, :RETURN, 'R3')]
 kill_texts = ["  r3 = r2;\n", "  r3 = bc2cpp_try(r1);\n", "  goto L8;\n", '', "  return r3;\n", "  return r3;\n"]
 kill_model = rescue_model(2, 4, 6)
 check.call('a write the glue kills on the normal path stays live for its handler',
@@ -218,8 +259,8 @@ refused.call('a goto to an address the normal flow does not reach is still refus
              goto_texts, [rescue_handler(2, 4, 6)], rescue_model(2, 4, 6))
 # A non-glue instruction inside the protected range would be a handler edge the
 # outer C++ does not run, so the method is refused.
-protected_list = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'SEND', "R4\t:try\t0"), insn(4, 'MOVE', "R6\tR1"),
-                  insn(6, 'RETURN', 'R4'), insn(7, 'EXCEPT', 'R5'), insn(8, 'RETURN', 'R3')]
+protected_list = [insn(0, :MOVE, "R3\tR1"), insn(2, :SEND, "R4\t:try\t0"), insn(4, :MOVE, "R6\tR1"),
+                  insn(6, :RETURN, 'R4'), insn(7, :EXCEPT, 'R5'), insn(8, :RETURN, 'R3')]
 protected_texts = ["  r3 = r1;\n", "  r4 = bc2cpp_try(r1);\n", "  r6 = r1;\n", "  return r4;\n", '', "  return r3;\n"]
 before = RegisterFlow::Stats['refused handlers']
 check.call('a text inside the protected range that is not the glue is refused',
@@ -236,7 +277,7 @@ check.call('window mode keeps refusing handler methods (the model widens only th
            flow(rescue_list, rescue_texts, handlers: [rescue_handler(2, 4, 6)], model: rescue_model(2, 4, 6)) == rescue_texts)
 ENV.delete('BC2CPP_REGISTER_FLOW_WINDOWS')
 check.call('an unresolved branch target leaves the texts alone',
-           flow([insn(0, 'JMP', '99'), insn(2, 'RETURN', 'R3')], ["  goto L99;\n", "  return r3;\n"]) ==
+           flow([insn(0, :JMP, '99'), insn(2, :RETURN, 'R3')], ["  goto L99;\n", "  return r3;\n"]) ==
              ["  goto L99;\n", "  return r3;\n"])
 check.call('a goto the IR does not allow refuses the method',
            flow(list, ["  r3 = r1;\n  goto L4;\n", "  r3 = r2;\n", "  return r3;\n"]) ==
@@ -245,16 +286,16 @@ check.call('a terminator whose text falls through refuses the method',
            flow(list, ["  r3 = r1;\n", "  r3 = r2;\n", "  (void)r3;\n"]) == ["  r3 = r1;\n", "  r3 = r2;\n", "  (void)r3;\n"])
 check.call('a reference alias refuses the method',
            flow(list, ["  r3 = r1;\n", "  mrb_value& r5 = r3;\n", "  return r3;\n"]).first == "  r3 = r1;\n")
-skipped = flow([insn(0, 'MOVE', "R3\tR1"), insn(2, 'JMP', '6'), insn(4, 'RETURN', 'R3'), insn(6, 'LOADNIL', 'R3'),
-                insn(8, 'RETURN', 'R3')],
+skipped = flow([insn(0, :MOVE, "R3\tR1"), insn(2, :JMP, '6'), insn(4, :RETURN, 'R3'), insn(6, :LOADNIL, 'R3'),
+                insn(8, :RETURN, 'R3')],
                ["  r3 = r1;\n", '', "  return r3;\n", "  r3 = mrb_nil_value();\n", "  return r3;\n"])
 check.call('a suppressed JMP does not hide the fall-through into the next text',
            skipped[0] == "  r3 = r1;\n" || skipped[2] == "  return r1;\n")
 
 # def f(a, b = 1) style table: ENTER, the first table JMP is the switch over the
 # default-value targets (addrs 3 and 4), the second table JMP is suppressed.
-dispatch_list = [insn(0, 'ENTER', "0:1:0:0:0:0:0:0\t(0x0)"), insn(1, 'JMP', '3'), insn(2, 'JMP', '4'),
-                 insn(3, 'MOVE', "R3\tR1"), insn(4, 'MOVE', "R3\tR2"), insn(5, 'RETURN', 'R3')]
+dispatch_list = [insn(0, :ENTER, "0:1:0:0:0:0:0:0\t(0x0)"), insn(1, :JMP, '3'), insn(2, :JMP, '4'),
+                 insn(3, :MOVE, "R3\tR1"), insn(4, :MOVE, "R3\tR2"), insn(5, :RETURN, 'R3')]
 switch_text = RegisterFlow.dispatch_text([3, 4])
 dispatch_texts = ["  // ENTER\n", switch_text, '', "  r3 = r1;\n", "  r3 = r2;\n", "  return r3;\n"]
 check.call('the switch text is the one codegen emits',

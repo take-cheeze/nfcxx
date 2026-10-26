@@ -27,7 +27,7 @@ module OutsideOwnerCall
 
   # NAME_OWNER_SET: the receiver of a send of `name` can only be an instance of a class that answers it
   # (anything else raises NoMethodError), and in the closed world every such class is named: the program's own Ruby
-  # definitions (the registry, core Ruby included) and every outside one. So any by-name send of such a name becomes
+  # definitions(the registry, core Ruby included) and every outside one. So any by-name send of such a name becomes
   # the owner call over that whole set, wherever it is emitted (a chain's else, a bare send, the else of the
   # registered-expression and NATIVE_OWNER_MAP arms). A block send keeps its by-name call.
   def dynamic_dispatch_line(d, recv, name, argv)

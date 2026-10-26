@@ -16,12 +16,26 @@ class CodeGen
   # branch rules it out (`@slot[:key] || []`, `return unless x`). The proof is record_hash_exact_class's; nil when
   # +insn+ is not a record read or a stored value has no bit here.
   def record_index_mask(irep, index, insn)
-    return nil unless insn.op == 'GETIDX' && RecordHash.table && @closed_world && record_nilable_reads?
+    return nil unless insn.op == :GETIDX && RecordHash.table && @closed_world && record_nilable_reads?
 
     slots = RecordHash.read_slots(irep, index) or return nil
     mask = slots.reduce(0) do |acc, (name, key)|
-      classes = RecordHash.table.dig(name, key, RecordHash.consumer_tier) or return nil
-      classes.reduce(acc) { |m, klass| m | (RECORD_READ_BITS[klass] or return nil) }
+      info = RecordHash.table.dig(name, key) or return nil
+      classes = info[RecordHash.consumer_tier]
+      # Reuse the per-writer constructor proof; missing/deleted keys still contribute nil.
+      if classes&.include?(:unknown) && ENV['BC2CPP_RECORD_OBJECT_READS'] != '0'
+        classes = info[:writers].map { |writer| record_writer_exact_class(*writer) }
+        return nil if classes.empty? || classes.any?(&:nil?)
+
+        classes << 'NilClass' if info[:nilable]
+      end
+      return nil unless classes
+
+      classes.reduce(acc) do |m, klass|
+        bit = RECORD_READ_BITS[klass]
+        bit ||= numeric_class_bit(klass) if klass.is_a?(String) && !RETURN_BITLESS_CLASSES.include?(klass)
+        m | (bit or return nil)
+      end
     end
     # 0 is the flow's "not reached yet", never a value.
     mask.zero? ? nil : mask
@@ -40,11 +54,11 @@ class CodeGen
   def record_hash_exact_class(irep, idx, reg)
     return nil unless RecordHash.table && @closed_world
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     slots = defs.flat_map do |d|
-      return nil if d.entry? || BytecodeIR.for(irep).source_at(d.index).op != 'GETIDX'
+      return nil if d.entry? || BytecodeIR.for(irep).source_at(d.index).op != :GETIDX
 
       RecordHash.read_slots(irep, d.index) or return nil
     end
@@ -72,7 +86,7 @@ class CodeGen
   # The exact class of the value register +reg+ holds at +idx+ when every reaching definition is a
   # heap literal or a `Klass.new` whose constructor is stable (exact_new_receiver_class).
   def record_writer_exact_class(irep, idx, reg)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     classes = defs.map do |d|
@@ -80,10 +94,11 @@ class CodeGen
 
       writer = BytecodeIR.for(irep).source_at(d.index)
       case writer.op
-      when 'ARRAY' then 'Array'
-      when 'HASH' then 'Hash'
-      when 'STRING' then 'String'
-      when 'SEND', 'SEND0', 'SENDB' then record_new_class(irep, d.index, writer)
+      when :ARRAY then 'Array'
+      when :HASH then 'Hash'
+      when :STRING then 'String'
+      when :LOADNIL then 'NilClass'
+      when :SEND, :SEND0, :SENDB then record_new_class(irep, d.index, writer)
       end
     end
     classes.first if classes.all? && classes.uniq.size == 1

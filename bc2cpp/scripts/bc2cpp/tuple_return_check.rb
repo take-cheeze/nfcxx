@@ -70,7 +70,7 @@ class TupleAnswering < TupleStubOracle
 end
 
 puts '-- NumericFlow AREF transfer (host)'
-list = [insn(0, 'SEND0', "R2\t:pair"), insn(2, 'AREF', "R3\tR2\t1"), insn(6, 'ADDI', "R3\t1"), insn(9, 'RETURN', 'R3')]
+list = [insn(0, :SEND0, "R2\t:pair"), insn(2, :AREF, "R3\tR2\t1"), insn(6, :ADDI, "R3\t1"), insn(9, :RETURN, 'R3')]
 irep = Irep.new(label: 'tq0', nregs: 8, instructions: list, catch_handlers: [], reps: [], pool: [])
 states = NumericFlow.states(irep, TupleStubOracle.new, Set.new)
 check.call('an oracle without aref_mask leaves the AREF result unknown', states[2][3] == OTHER)
@@ -90,23 +90,23 @@ shape_of = lambda do |list|
   cg.tuple_shape(Irep.new(label: "tq#{list.hash}", nregs: 8, instructions: list, catch_handlers: [], reps: [], pool: []))
 end
 check.call('ARRAY straight into RETURN is a tuple',
-           shape_of.call([insn(0, 'ARRAY', "R3\t2"), insn(3, 'RETURN', 'R3')]) == [[0, 2]])
+           shape_of.call([insn(0, :ARRAY, "R3\t2"), insn(3, :RETURN, 'R3')]) == [[0, 2]])
 check.call('two arms, each an ARRAY then a jump to the RETURN, are a tuple',
-           shape_of.call([insn(0, 'JMPNOT', "R1\t11"), insn(4, 'ARRAY', "R3\t2"), insn(7, 'JMP', '14'),
-                          insn(11, 'ARRAY', "R3\t2"), insn(14, 'RETURN', 'R3')]) == [[1, 2], [3, 2]])
+           shape_of.call([insn(0, :JMPNOT, "R1\t11"), insn(4, :ARRAY, "R3\t2"), insn(7, :JMP, '14'),
+                          insn(11, :ARRAY, "R3\t2"), insn(14, :RETURN, 'R3')]) == [[1, 2], [3, 2]])
 check.call('arms of different length are not',
-           shape_of.call([insn(0, 'JMPNOT', "R1\t11"), insn(4, 'ARRAY', "R3\t2"), insn(7, 'JMP', '14'),
-                          insn(11, 'ARRAY', "R3\t3"), insn(14, 'RETURN', 'R3')]).nil?)
+           shape_of.call([insn(0, :JMPNOT, "R1\t11"), insn(4, :ARRAY, "R3\t2"), insn(7, :JMP, '14'),
+                          insn(11, :ARRAY, "R3\t3"), insn(14, :RETURN, 'R3')]).nil?)
 check.call('an instruction that reads the Array before it leaves is not (SETIV)',
-           shape_of.call([insn(0, 'ARRAY', "R3\t2"), insn(3, 'SETIV', "@x\tR3"), insn(6, 'RETURN', 'R3')]).nil?)
+           shape_of.call([insn(0, :ARRAY, "R3\t2"), insn(3, :SETIV, "@x\tR3"), insn(6, :RETURN, 'R3')]).nil?)
 check.call('nor is a call between the ARRAY and the RETURN',
-           shape_of.call([insn(0, 'ARRAY', "R3\t2"), insn(3, 'SEND0', "R4\t:f"), insn(5, 'RETURN', 'R3')]).nil?)
-check.call('a returned parameter is not', shape_of.call([insn(0, 'RETURN', 'R1')]).nil?)
+           shape_of.call([insn(0, :ARRAY, "R3\t2"), insn(3, :SEND0, "R4\t:f"), insn(5, :RETURN, 'R3')]).nil?)
+check.call('a returned parameter is not', shape_of.call([insn(0, :RETURN, 'R1')]).nil?)
 check.call('a copy of the Array is not',
-           shape_of.call([insn(0, 'ARRAY', "R4\t2"), insn(3, 'MOVE', "R3\tR4"), insn(6, 'RETURN', 'R3')]).nil?)
+           shape_of.call([insn(0, :ARRAY, "R4\t2"), insn(3, :MOVE, "R3\tR4"), insn(6, :RETURN, 'R3')]).nil?)
 check.call('a path that returns nil is not',
-           shape_of.call([insn(0, 'JMPNOT', "R1\t9"), insn(4, 'ARRAY', "R3\t2"), insn(7, 'RETURN', 'R3'),
-                          insn(9, 'RETNIL', '')]).nil?)
+           shape_of.call([insn(0, :JMPNOT, "R1\t9"), insn(4, :ARRAY, "R3\t2"), insn(7, :RETURN, 'R3'),
+                          insn(9, :RETNIL, '')]).nil?)
 
 if ENV['MRBC']
   runtime = Bc2cppFixtureRuntime

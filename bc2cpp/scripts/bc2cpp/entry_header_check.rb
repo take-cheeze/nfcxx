@@ -14,8 +14,13 @@
 #     - a raise inside leaves the exception in M->exc and returns it, as mrb_funcall does, and does not escape;
 #       inside a protected region it propagates to that region instead;
 #     - a subclass receiver and a receiver with a singleton class take the by-name call;
+#   constructor entries (Owner.new/argc, BC2CPP_ENTRY_NEW)
+#     - a class whose initialize is a clean plain forwarder gets the direct form; a rest-argument initialize does not;
+#     - the direct form allocates an instance of the class and runs the compiled initialize with no dynamic dispatch;
+#     - a raising initialize leaves the exception in M->exc and returns the new object, as mrb_obj_new does;
+#     - a different argument count takes mrb_obj_new (and its ArgumentError), as does a by-name constructor entry;
 #   include/bc2cpp_entry.hxx
-#     - has a by-name fallback for every entry in ENTRY_POINTS.
+#     - has a by-name fallback for every entry in ENTRY_POINTS and HOST_ONLY_ENTRY_POINTS.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/entry_header_check.rb
 
@@ -34,12 +39,16 @@ end
 
 puts '-- include/bc2cpp_entry.hxx'
 fallback = File.read(File.join(Bc2cppFixtureRuntime::ROOT, 'include/bc2cpp_entry.hxx'))
-EntryHeader.entry_points(nil).each do |e|
+(EntryHeader.entry_points(nil) + EntryHeader.parse(EntryHeader::HOST_ONLY_ENTRY_POINTS)).each do |e|
   ident = "#{e.owner.gsub('::', '__')}_#{e.name}"
-  check.call("a by-name fallback for #{e.owner}##{e.name}",
+  call = if e.ctor
+           "mrb_obj_new(M, mrb_class_get(M, \"#{e.owner}\"), argc, argv)"
+         else
+           "mrb_funcall(M, self, \"#{e.name}\", #{e.argc}"
+         end
+  check.call("a by-name fallback for #{e.owner}#{e.ctor ? '.' : '#'}#{e.name}",
              fallback.include?("#ifndef BC2CPP_ENTRY_#{ident}\n") &&
-               fallback.include?("bc2cpp_entry_#{ident}(") &&
-               fallback.include?("mrb_funcall(M, self, \"#{e.name}\", #{e.argc}"))
+               fallback.include?("bc2cpp_entry_#{ident}(") && fallback.include?(call))
 end
 
 unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
@@ -84,11 +93,38 @@ SRC = <<~'RUBY'
       @n += 100
     end
   end
+
+  class EntryMade
+    def initialize(start)
+      @n = start + 1
+    end
+
+    def count
+      @n
+    end
+  end
+
+  class EntryBoomInit
+    def initialize(x)
+      raise ArgumentError, "init #{x}"
+    end
+  end
+
+  class EntryRestInit
+    def initialize(*xs)
+      @n = xs.size
+    end
+
+    def size
+      @n
+    end
+  end
 RUBY
 
-OWNERS = %w[EntryGame EntrySub].freeze
+OWNERS = %w[EntryGame EntrySub EntryMade EntryBoomInit EntryRestInit].freeze
 ENV['BC2CPP_ENTRY_POINTS'] = %w[EntryGame#tick/0 EntryGame#add/1 EntryGame#count/0 EntryGame#boom/0
-                                EntryGame#gather/0 EntryGame#each_twice/0].join(' ')
+                                EntryGame#gather/0 EntryGame#each_twice/0 EntryGame.new/0 EntryMade.new/1
+                                EntryBoomInit.new/1 EntryRestInit.new/1].join(' ')
 
 Dir.mktmpdir('bc2cpp-entry-header') do |dir|
   puts '-- generated header'
@@ -103,6 +139,11 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
   check.call('EntryGame#each_twice (yields its block) stays by name',
              header.include?("#define BC2CPP_ENTRY_EntryGame_each_twice 0\n"))
   check.call('an undeclared method gets no entry', !header.include?('bc2cpp_entry_EntrySub_tick'))
+  %w[EntryGame EntryMade EntryBoomInit].each do |owner|
+    check.call("#{owner}.new is the direct form", header.include?("#define BC2CPP_ENTRY_#{owner}_new 1\n"))
+  end
+  check.call('EntryRestInit.new (rest-argument initialize) stays mrb_obj_new',
+             header.include?("#define BC2CPP_ENTRY_EntryRestInit_new 0\n"))
 
   build = Bc2cppFixtureRuntime.full_or_build
   unless build
@@ -163,6 +204,35 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
       long gathered = fix(bc2cpp_entry_EntryGame_gather(M, g));
       made = dispatches;
       std::printf("by-name gather=%ld dispatches=%d\\n", gathered, made);
+
+      mrb_value seven = mrb_fixnum_value(7);
+      dispatches = 0;
+      mrb_value em = bc2cpp_entry_EntryMade_new(M, 1, &seven);
+      made = dispatches;
+      std::printf("new class=%s count=%ld dispatches=%d exc=%d\\n", mrb_obj_classname(M, em),
+                  fix(mrb_funcall(M, em, "count", 0)), made,
+                  M->exc != nullptr);
+      mrb_value eg = bc2cpp_entry_EntryGame_new(M, 0, nullptr);
+      std::printf("new0 count=%ld\\n", fix(bc2cpp_entry_EntryGame_count(M, eg)));
+
+      dispatches = 0;
+      mrb_value eb = bc2cpp_entry_EntryBoomInit_new(M, 1, &seven);
+      made = dispatches;
+      std::printf("new boom class=%s exc=%s dispatches=%d\\n", mrb_obj_classname(M, eb),
+                  M->exc ? mrb_obj_classname(M, mrb_obj_value(M->exc)) : "none", made);
+      M->exc = nullptr;
+      mrb_value ob = mrb_obj_new(M, mrb_class_get(M, "EntryBoomInit"), 1, &seven);
+      std::printf("obj_new boom class=%s exc=%s\\n", mrb_obj_classname(M, ob),
+                  M->exc ? mrb_obj_classname(M, mrb_obj_value(M->exc)) : "none");
+      M->exc = nullptr;
+
+      mrb_bool argc_error = FALSE;
+      mrb_value wrong = mrb_protect_error(M, [](mrb_state* M, void*) -> mrb_value {
+        return bc2cpp_entry_EntryMade_new(M, 0, nullptr);
+      }, nullptr, &argc_error);
+      std::printf("new argc error=%d class=%s\\n", argc_error, mrb_obj_classname(M, wrong));
+      mrb_value er = bc2cpp_entry_EntryRestInit_new(M, 1, &seven);
+      std::printf("new rest class=%s size=%ld\\n", mrb_obj_classname(M, er), fix(mrb_funcall(M, er, "size", 0)));
       std::printf("end\\n");
       return 0;
     }
@@ -180,6 +250,13 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
   check.call('a subclass receiver runs its own method, by name', lines.include?('sub tick=100 dispatches=1'))
   check.call('a receiver with a singleton method runs it, by name', lines.include?('singleton tick=1000 dispatches=1'))
   check.call('a by-name entry dispatches', lines.include?('by-name gather=0 dispatches=1'))
+  check.call('the direct new runs the compiled initialize with no dynamic dispatch',
+             lines.include?('new class=EntryMade count=8 dispatches=0 exc=0') && lines.include?('new0 count=0'))
+  check.call('a raising initialize leaves M->exc and returns the object, as mrb_obj_new does',
+             lines.include?('new boom class=EntryBoomInit exc=ArgumentError dispatches=0') &&
+               lines.include?('obj_new boom class=EntryBoomInit exc=ArgumentError'))
+  check.call('a different argument count takes mrb_obj_new', lines.include?('new argc error=1 class=ArgumentError'))
+  check.call('a by-name new runs initialize as mrb_obj_new does', lines.include?('new rest class=EntryRestInit size=1'))
   puts output.lines.last(30).join unless built && lines.last == 'end'
 end
 

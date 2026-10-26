@@ -11,8 +11,8 @@ require_relative 'irep_arity'
 class CodeGen
   CLASS_OBJECT_ARGS_DEPTH = 3
   # Ops that name a method without making a plain positional call; a call index entry of one of them poisons the name.
-  CLASS_OBJECT_DEFINING_OPS = Set['DEF', 'SDEF', 'TDEF'].freeze
-  CLASS_OBJECT_CALL_OPS = Set['SEND', 'SENDB', 'SSEND', 'SSENDB', 'SEND0', 'SSEND0'].freeze
+  CLASS_OBJECT_DEFINING_OPS = Set[:DEF, :SDEF, :TDEF].freeze
+  CLASS_OBJECT_CALL_OPS = Set[:SEND, :SENDB, :SSEND, :SSENDB, :SEND0, :SSEND0].freeze
 
   def class_object_args_enabled?
     ENV.fetch('BC2CPP_CLASS_OBJECT_ARGS', '1') != '0'
@@ -23,7 +23,7 @@ class CodeGen
   def class_object_receiver_classes(irep, idx, insn)
     return nil unless class_object_args_enabled? && @foreign_method_names && @closed_world
 
-    classes = class_object_values(irep, idx, insn.reg.to_s, 0, Set.new)
+    classes = class_object_values(irep, idx, insn.reg, 0, Set.new)
     classes && classes.to_a.sort
   end
 
@@ -33,7 +33,7 @@ class CodeGen
   def class_object_values(irep, idx, reg, depth, active)
     return nil if depth > CLASS_OBJECT_ARGS_DEPTH
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty?
 
     values = Set.new
@@ -52,12 +52,12 @@ class CodeGen
 
   def class_object_writer_values(irep, writer, depth, active)
     case writer.op
-    when 'GETCONST', 'GETMCNST'
+    when :GETCONST, :GETMCNST
       name = writer.const_name
       return nil unless name && @closed_world.class_valued_constant?(name)
 
       @closed_world.classes_named(name)
-    when 'GETUPVAR'
+    when :GETUPVAR
       index, level = writer.upvar_ref
       return nil unless index
 
@@ -67,7 +67,7 @@ class CodeGen
       ancestor, = captured_local_frame(irep, level)
       return nil unless ancestor && class_object_param_stable?(ancestor, index)
 
-      class_object_param_values(ancestor, index.to_s, depth, active)
+      class_object_param_values(ancestor, index, depth, active)
     end
   end
 
@@ -103,7 +103,7 @@ class CodeGen
     sites.each do |(site_irep, site_idx, recv, argc)|
       next unless argc == mand
 
-      found = class_object_values(site_irep, site_idx, (recv + k).to_s, depth + 1, active)
+      found = class_object_values(site_irep, site_idx, recv + k, depth + 1, active)
       return nil unless found
 
       values.merge(found)
@@ -144,7 +144,7 @@ class CodeGen
       next unless seen.add?(label)
 
       irep = @ireps[label] or return true
-      return true if BytecodeIR.for(irep).op?('SUPER')
+      return true if BytecodeIR.for(irep).op?(:SUPER)
 
       stack.concat(Array(irep.reps))
     end
@@ -169,7 +169,7 @@ class CodeGen
         next if CLASS_OBJECT_DEFINING_OPS.include?(insn.op)
 
         # `alias new old` reaches old's body through `new`; both names are poisoned.
-        if insn.op == 'ALIAS'
+        if insn.op == :ALIAS
           old = insn.first_of(:name)&.value
           poisoned << old if old
           poisoned << name
@@ -180,7 +180,7 @@ class CodeGen
           next
         end
 
-        zero = insn.op.end_with?('0')
+        zero = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op)
         if insn.reg.nil? || !(zero || insn.plain_fixed_argc?)
           poisoned << name
           next
@@ -201,13 +201,13 @@ class CodeGen
 
     # The write test of rbs_param_check.rb's upvar_why, without a reaching-definitions walk per instruction. A RETURN
     # of the register writes nothing a later instruction reads, so the NO_WRITE_OPS are not writes here.
-    reg = index.to_s
+    reg = index
     return false if BytecodeIR.own_upvar_written_regs(ancestor).include?(reg)
 
     program = BytecodeIR.for(ancestor)
     program.each_source.none? do |insn, i|
       op = insn.op
-      op != 'ENTER' && !NumericFlow::NO_WRITE_OPS.include?(op) && program.may_write_at?(i, reg)
+      op != :ENTER && !NumericFlow::NO_WRITE_OPS.include?(op) && program.may_write_at?(i, reg)
     end
   end
 end

@@ -11,6 +11,7 @@ require_relative 'call_context_arguments'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir_returns'
 require_relative 'block_yield_types'
+require_relative 'rbs_signatures'
 
 # CodeGen: RETURN_CLASS_TABLE.
 #
@@ -20,7 +21,7 @@ require_relative 'block_yield_types'
 # them. Everything needs ClosedWorld#exact_instances_singleton_free?.
 class CodeGen
   CLASS_MEMBER_CACHE_LIMIT = 2048
-  RETURN_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
+  RETURN_CALL_OPS = %i[SEND SEND0 SSEND SSEND0].freeze
   # Classes with bits of their own in NumericFlow: a `Klass.new` of one of them gets no class bit.
   RETURN_CORE_CLASS = NumericFlow.class_bits('Array', 'Hash', 'String', 'Range')
   RETURN_CORE_MASK = RETURN_CORE_CLASS.keys.reduce(0, :|)
@@ -46,12 +47,17 @@ class CodeGen
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
     # The class bit of a true, false or Symbol literal (exactly TrueClass, FalseClass or Symbol: each has one instance
     # or is a Symbol, and its mrb_class is that class, see the mrb_class immediate cases in mruby's class.h).
-    LITERAL_CLASSES = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol' }.freeze
+    LITERAL_CLASSES = { :LOADTRUE => 'TrueClass', :LOADFALSE => 'FalseClass', :LOADSYM => 'Symbol', :SYMBOL => 'Symbol', :INTERN => 'Symbol' }.freeze
     def literal_class_mask(insn)
       klass = LITERAL_CLASSES[insn.op]
       return nil unless klass && @cg.immediate_class_bits_enabled?
 
       @cg.numeric_class_bit(klass)
+    end
+    def keyword_presence(_insn)
+      return NumericFlow::OTHER unless @cg.immediate_class_bits_enabled?
+
+      @cg.numeric_class_bit('TrueClass') | @cg.numeric_class_bit('FalseClass')
     end
     def false_class_bit = @cg.numeric_false_class_bit
     # EXACT_ARITH: `+ - * /` on numbers are the core Integer/Float bodies under the numeric flow's own gates, so an
@@ -60,7 +66,7 @@ class CodeGen
     def nil_raises?(sym) = @cg.exact_arith? && @cg.numeric_nil_raises?(sym)
 
     def ivar_slots(irep)
-      BytecodeIR.for(irep).instructions_with_op('GETIV', 'SETIV').filter_map(&:ivar).uniq.sort
+      BytecodeIR.for(irep).instructions_with_op(:GETIV, :SETIV).filter_map(&:ivar).uniq.sort
     end
 
     def send_mask(irep, index, insn, state)
@@ -94,21 +100,21 @@ class CodeGen
     end
 
     def send_mask(irep, index, insn, state)
-      return super unless %w[SSEND SSEND0].include?(insn.op)
+      return super unless %i[SSEND SSEND0].include?(insn.op)
 
       # SSEND reads self, not the previous contents of its result register.
       explicit = insn.dup
-      explicit.op = insn.op.delete_prefix('S')
+      explicit.op = BytecodeIR::Ops::SELF_SEND_TO_EXPLICIT.fetch(insn.op, insn.op)
       inputs = state.dup
       inputs[insn.reg.to_i] = @receiver
       @cg.return_class_send_mask(irep, index, explicit, inputs)
     end
 
     def preserves_ivar_slots?(irep, index, insn, state)
-      return super unless %w[SSEND SSEND0].include?(insn.op)
+      return super unless %i[SSEND SSEND0].include?(insn.op)
 
       explicit = insn.dup
-      explicit.op = insn.op.delete_prefix('S')
+      explicit.op = BytecodeIR::Ops::SELF_SEND_TO_EXPLICIT.fetch(insn.op, insn.op)
       inputs = state.dup
       inputs[insn.reg.to_i] = @receiver
       super(irep, index, explicit, inputs)
@@ -156,7 +162,7 @@ class CodeGen
   # class with a NumericFlow bit: an Integer, Float, String, Array, Hash or Range result.
   def joined_send_class_bit(name, insn)
     return nil if ENV['BC2CPP_JOINED_RETURN_MASKS'] == '0'
-    return nil unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op)
+    return nil unless %i[SEND SEND0 SSEND SSEND0].include?(insn.op)
 
     klass = class_return_names[name]
     entry = klass && NumericFlow::BIT_TABLE.find { |_bit, (_const, cname)| cname == klass }
@@ -390,7 +396,7 @@ class CodeGen
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_with_op(*POOL_SELF_SEND_OPS) do |insn, _|
         next unless POOL_SELF_REBINDING_SENDS.include?(insn.sym)
-        next if insn.sym == 'define_method' && insn.op.end_with?('B')
+        next if insn.sym == 'define_method' && BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
 
         return "#{insn.sym} at #{irep.label}"
       end
@@ -398,7 +404,7 @@ class CodeGen
     nil
   end
 
-  POOL_SELF_SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
+  POOL_SELF_SEND_OPS = %i[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
 
   # On-demand counterpart to the table-building flow. It can use stable scoped
   # return facts without changing the global name summaries or class pools.
@@ -509,17 +515,17 @@ class CodeGen
                                      (recv & (NumericFlow::NUM | NumericFlow::OTHER | NumericFlow::EXC)).zero?
 
     @operator_send_insns ||= {}
-    send = @operator_send_insns[[sym, insn.reg]] ||= Insn.synthetic('SEND', "R#{insn.reg} :#{sym} n=1")
+    send = @operator_send_insns[[sym, insn.reg]] ||= Insn.synthetic(:SEND, "R#{insn.reg} :#{sym} n=1")
     return_class_send_mask(irep, index, send, state)
   end
 
   # EXACT_ARITH: a send whose receiver is only Integer or Float gets the numeric flow's answer (`%`, `abs`, `to_i`,
   # the bit operators; numeric_send_on_class and its gates), or nil when that answer is not a class.
   def exact_numeric_send_mask(insn, state)
-    return nil unless exact_arith? && %w[SEND SEND0].include?(insn.op)
+    return nil unless exact_arith? && %i[SEND SEND0].include?(insn.op)
 
     recv = state[insn.reg.to_i]
-    argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     # A receiver no path has reached yet (0) gives no value either, so a pool still growing is not dropped.
     if recv == 0
       answered = !numeric_send_on_class(NumericFlow::INT, insn.sym, argc, insn, state).anybits?(NumericFlow::OTHER)
@@ -562,7 +568,7 @@ class CodeGen
     core_result = state && native_core_class_result(insn, state)
     return core_result if core_result
 
-    if name == 'dup' && insn.op == 'SEND0' && state && native_dup_result_safe?
+    if name == 'dup' && insn.op == :SEND0 && state && native_dup_result_safe?
       mask = state[insn.reg.to_i]
       allowed = RETURN_CORE_CLASS.keys.reduce(NumericFlow::NIL, :|) | (@numeric_class_bits || {}).values.reduce(0, :|)
       return mask if mask.is_a?(Integer) && (mask & ~allowed).zero?
@@ -573,15 +579,15 @@ class CodeGen
     scoped = state && @rc_scoped_ready && return_class_scoped_send_mask(name, insn, state)
     return scoped if scoped
     return tracked if tracked
-    return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == 'SEND0'
+    return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == :SEND0
 
-    native = state && %w[SEND SEND0].include?(insn.op) && native_result_flow_mask(name, state[insn.reg.to_i])
+    native = state && %i[SEND SEND0].include?(insn.op) && native_result_flow_mask(name, state[insn.reg.to_i])
     return native if native
     # NATIVE_RETURN_CLASSES: a name the join proves returns one class returns it for every receiver, so an unknown
     # receiver's send has that class too.
     joined = joined_send_class_bit(name, insn)
     return joined if joined
-    return NumericFlow::OTHER unless name == 'new' && %w[SEND SEND0].include?(insn.op)
+    return NumericFlow::OTHER unless name == 'new' && %i[SEND SEND0].include?(insn.op)
 
     # Read the constructor input before its result joins another CFG path.
     if ENV['BC2CPP_USER_RECEIVER_UNIONS'] != '0'
@@ -629,12 +635,12 @@ class CodeGen
     return nil unless state
 
     oracle = return_class_table_oracle(irep)
-    mask = insn.op.end_with?('B') ? oracle.block_send_mask(irep, index, insn, state) : oracle.send_mask(irep, index, insn, state)
-    if (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::OTHER)) && %w[SEND SEND0].include?(insn.op)
+    mask = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? oracle.block_send_mask(irep, index, insn, state) : oracle.send_mask(irep, index, insn, state)
+    if (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::OTHER)) && %i[SEND SEND0].include?(insn.op)
       receiver = state[insn.reg.to_i]
       known = NUMERIC_SEND_OWNERS.keys.sum
       if receiver.is_a?(Integer) && receiver.positive? && (receiver & ~known).zero?
-        argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+        argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
         mask = NUMERIC_SEND_OWNERS.keys.reduce(0) do |joined, bit|
           receiver.anybits?(bit) ? joined | numeric_send_on_class(bit, insn.sym, argc, insn, state) : joined
         end
@@ -642,12 +648,12 @@ class CodeGen
     end
     classes = bytecode_ir_mask_classes(mask)
     return classes if classes
-    return nil unless %w[SEND SEND0].include?(insn.op) && (argc = insn.op == 'SEND0' ? 0 : insn.plain_fixed_argc? && insn.argc)
+    return nil unless %i[SEND SEND0].include?(insn.op) && (argc = insn.op == :SEND0 ? 0 : insn.plain_fixed_argc? && insn.argc)
 
     receivers = bytecode_ir_mask_classes(state[insn.reg.to_i])
     return nil unless receivers
 
-    results = receivers.map { |klass| bytecode_ir_native_expression_classes(insn.sym, klass.to_s, argc) }
+    results = receivers.map { |klass| bytecode_ir_native_expression_classes(insn.sym, RbsSignatures.ir_class_name(klass), argc) }
     results.any?(&:nil?) ? nil : results.reduce(Set.new, :|).freeze
   end
 
@@ -698,7 +704,7 @@ class CodeGen
 
   def call_site_lookups(read)
     { receiver: ->(body, index, register) {
-        implicit = read && %w[SSEND SSEND0 SSENDB].include?(BytecodeIR.for(body).source_at(index).op)
+        implicit = read && %i[SSEND SSEND0 SSENDB].include?(BytecodeIR.for(body).source_at(index).op)
         read && !implicit ? read.call(body, index, register) : bytecode_ir_argument_receiver_classes(body, index, register)
       },
       target: ->(method, klass) { closed_world_exact_target(method, klass) } }
@@ -716,7 +722,7 @@ class CodeGen
     IrArgumentTypes.rest_classes(definition, sites, **call_site_lookups(nil), fixed: mandatory_arity(irep) + optional_arity(irep),
                                  minimum: mandatory_arity(irep),
                                  argument: ->(body, index, register) { bytecode_ir_source_classes(body, index, register) },
-                                 admit: ->(body, index) { BytecodeIR.for(body).source_at(index).nk_spec.nil? })
+                                 admit: ->(body, index) { !BytecodeIR.for(body).source_at(index).keyword_arguments? })
   end
 
   # Block parameter: Set[:Proc] when every reaching call passes a literal block or lambda. A site that passes no
@@ -731,12 +737,12 @@ class CodeGen
     IrArgumentTypes.block_proc(definition, sites, **call_site_lookups(nil),
                                proc_value: ->(body, index, register, argc) {
                                  insn = BytecodeIR.for(body).source_at(index)
-                                 nk = insn.nk_spec
-                                 next false unless %w[SENDB SSENDB].include?(insn.op) && (nk.nil? || nk.match?(/\A\d+\z/))
+                                 nk = insn.keyword_argc
+                                 next false unless %i[SENDB SSENDB].include?(insn.op) && !insn.keyword_splat?
 
                                  # Keyword pairs (key, value) follow the positionals; the block is the slot after them.
                                  block = register + argc + 2 * nk.to_i + 1
-                                 BytecodeIR.all_writers_reaching?(body, index, block.to_s) { |_, writer| %w[LAMBDA BLOCK].include?(writer.op) }
+                                 BytecodeIR.all_writers_reaching?(body, index, block) { |_, writer| %i[LAMBDA BLOCK].include?(writer.op) }
                                })
   end
 
@@ -754,7 +760,7 @@ class CodeGen
 
   # The classes of a required positional that the value at +index+ still is (only its entry value reaches it), else nil.
   def yielded_param_classes(irep, index, register, param_classes)
-    defs = BytecodeIR.for(irep).reaching_definitions(index, register.to_s, through_handlers: true)
+    defs = BytecodeIR.for(irep).reaching_definitions(index, register, through_handlers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.all?(&:entry?)
 
     positions = defs.map { |df| df.reg.to_i }.uniq
@@ -774,24 +780,24 @@ class CodeGen
     return nil unless sites
 
     program = BytecodeIR.for(irep)
-    karg = program.each_source.find { |insn, _index| insn.op == 'KARG' && insn.sym.to_s == name }&.last
-    optional = program.instructions_with_op('KEY_P').any? { |insn| insn.sym.to_s == name }
+    karg = program.each_source.find { |insn, _index| insn.op == :KARG && insn.sym.to_s == name }&.last
+    optional = program.instructions_with_op(:KEY_P).any? { |insn| insn.sym.to_s == name }
     default = optional ? BytecodeIR::Types.optional_keyword_default_class(irep, karg, program.source_at(karg).reg) : nil
     return nil if optional && !default
 
     IrArgumentTypes.keyword_classes(definition, sites, **call_site_lookups(nil), default: default && Set[default],
                                     value: ->(body, index, register, argc) {
                                       insn = BytecodeIR.for(body).source_at(index)
-                                      nk = insn.nk_spec
-                                      # No keyword token (nk_spec nil) passes no keyword when the positional count is fixed,
+                                      nk = insn.keyword_argc
+                                      # No keyword token passes no keyword when the positional count is fixed,
                                       # or absent (SEND0); a splatted count may carry a keyword hash, so it refuses.
-                                      if nk.nil? && (insn.argc_operand.nil? || insn.argc.is_a?(Integer))
+                                      if !insn.keyword_arguments? && (insn.argc_operand.nil? || insn.argc.is_a?(Integer))
                                         next optional ? Set[] : nil
                                       end
-                                      next nil unless nk&.match?(/\A\d+\z/)
+                                      next nil unless nk.is_a?(Integer)
 
                                       pairs = (0...nk.to_i).map do |k|
-                                        [literal_symbol_write(body, index, (register + argc + 1 + 2 * k).to_s), register + argc + 2 + 2 * k]
+                                        [literal_symbol_write(body, index, register + argc + 1 + 2 * k), register + argc + 2 + 2 * k]
                                       end
                                       next nil if pairs.any? { |key, _| key.nil? }
 
@@ -799,7 +805,7 @@ class CodeGen
                                       next Set[] if matches.empty? && optional
                                       next nil unless matches.size == 1
 
-                                      bytecode_ir_source_classes(body, index, matches.first.last.to_s)
+                                      bytecode_ir_source_classes(body, index, matches.first.last)
                                     })
   end
 
@@ -808,7 +814,7 @@ class CodeGen
     return nil unless @native_results_ready && @rc_scoped_ready
 
     @ir_call_graph_arguments ||= IrCallGraphTypes.collect(self, @registry.values.flatten, @ireps)
-    @ir_call_graph_arguments.dig(definition.irep, position.to_s)
+    @ir_call_graph_arguments.dig(definition.irep, position)
   end
 
   def numeric_oracle_pool_mask(irep, insn)
@@ -825,7 +831,7 @@ class CodeGen
   end
 
   def bytecode_ir_argument_receiver_classes(irep, index, register)
-    if %w[SSEND SSEND0 SSENDB].include?(BytecodeIR.for(irep).source_at(index).op)
+    if %i[SSEND SSEND0 SSENDB].include?(BytecodeIR.for(irep).source_at(index).op)
       bytecode_ir_mask_classes(return_class_self_receiver(irep))
     else
       bytecode_ir_source_classes(irep, index, register)
@@ -835,9 +841,9 @@ class CodeGen
   # Read-point facts retain slot invalidation and incoming-argument proofs.
   def bytecode_ir_source_classes(irep, index, reg)
     return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
-    return nil unless reg.to_s.match?(/\A\d+\z/) && reg.to_i < irep.nregs
+    return nil unless reg.is_a?(Integer) && reg < irep.nregs
 
-    bytecode_ir_mask_classes(return_class_states(irep)&.[](index)&.[](reg.to_i))
+    bytecode_ir_mask_classes(return_class_states(irep)&.[](index)&.[](reg))
   end
 
   def bytecode_ir_mask_classes(mask)
@@ -877,14 +883,14 @@ class CodeGen
   # body. Analyze that body with the CFG-aware flow; the element tracer's linear
   # writer scan is only suitable for guarded hints.
   def return_class_scoped_send_mask(name, insn, state)
-    return nil unless %w[SEND SEND0].include?(insn.op)
+    return nil unless %i[SEND SEND0].include?(insn.op)
 
     receiver = state[insn.reg.to_i]
     receiver_class = return_class_of_mask(receiver)
     return return_class_union_send_mask(name, insn, state, receiver) unless receiver_class
     return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)
 
-    argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    argc = insn.op == :SEND0 ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     arguments = argc && (1..argc).map { |arg| state[insn.reg.to_i + arg] || NumericFlow::OTHER }
     contextual = arguments && ENV['BC2CPP_CALL_CONTEXT_RESULTS'] != '0'
     key = [receiver_class, name, contextual ? arguments : nil]
@@ -926,7 +932,7 @@ class CodeGen
   # either; the loop re-runs it when the name grows. Answering OTHER there dropped `x.keys.select { }` and
   # `@slot = @slot.select { }` for good, since a dropped name never returns to the table.
   def bottom_block_receiver_mask(insn, state)
-    return nil unless bottom_block_receivers_enabled? && insn.op == 'SENDB' && !@rc_scoped_ready
+    return nil unless bottom_block_receivers_enabled? && insn.op == :SENDB && !@rc_scoped_ready
 
     state[insn.reg.to_i] == 0 ? 0 : nil
   end
@@ -1030,9 +1036,9 @@ class CodeGen
 
     BytecodeIR::NumericClasses.exit_mask(body, states, block_returns) do |exit, state|
       case exit.op
-      when 'RETURN' then state[exit.reg] || NumericFlow::OTHER
-      when 'RETSELF' then receiver
-      when 'RETNIL' then NumericFlow::NIL
+      when :RETURN then state[exit.reg] || NumericFlow::OTHER
+      when :RETSELF then receiver
+      when :RETNIL then NumericFlow::NIL
       else NumericFlow::OTHER
       end
     end
@@ -1045,7 +1051,7 @@ class CodeGen
 
     ancestor, creation = captured_local_frame(irep, level)
     return NumericFlow::OTHER unless ancestor && index < ancestor.nregs.to_i
-    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index.to_s)
+    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index)
 
     frame = contexts[ancestor.label]
     state = frame && frame[:states]&.[](creation)
@@ -1137,7 +1143,7 @@ class CodeGen
     return nil unless @rc_states && irep && idx && reg && @closed_world&.exact_instances_singleton_free?
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     # The one register CHECKED_POOL_EXACT is compiling under its class test.
     return @checked_pool_override[:klass] if @checked_pool_override && @checked_pool_override[:key] == [irep.label, idx, r]
@@ -1152,7 +1158,7 @@ class CodeGen
     return nil unless @rc_states && irep && idx && reg && @closed_world&.exact_instances_singleton_free?
 
     r = reg.to_i
-    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]

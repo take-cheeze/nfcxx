@@ -34,14 +34,14 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   def enter
     return @enter if defined?(@enter)
 
-    @enter = BytecodeIR.for(self).instructions_with_op('ENTER').first
+    @enter = BytecodeIR.for(self).instructions_with_op(:ENTER).first
   end
 
   def enter_index
     return @enter_index if defined?(@enter_index)
 
     @enter_index = nil
-    each_with_op('ENTER') do |_insn, index|
+    each_with_op(:ENTER) do |_insn, index|
       @enter_index = index
       break
     end
@@ -67,14 +67,14 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   end
 
   def last_writer_index(from, reg)
-    BytecodeIR.for(self).last_writer_index(from, reg.to_s)
+    BytecodeIR.for(self).last_writer_index(from, reg)
   end
 
   # The first non-MOVE instruction writing +reg+ at or before index +from+,
   # following MOVE copies to their source register (BytecodeIR::Program#copy_root).
   # Nil when the register is never written or a MOVE has no source.
   def source_writer(from, reg)
-    BytecodeIR.for(self).copy_root(from, reg.to_s)&.writer
+    BytecodeIR.for(self).copy_root(from, reg)&.writer
   end
 
   # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).
@@ -87,6 +87,17 @@ end
 # InsnOperands (see OperandSchema).
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_init: true) do
   include InsnOperands
+
+  # Hand-built test insns pass String ops; normalize to Symbol so every
+  # consumer sees one type. Decoded insns already carry Symbols.
+  def op=(name)
+    self[:op] = name.is_a?(String) ? name.intern : name
+  end
+
+  def initialize(lineno: nil, addr: nil, op: nil, args: nil, raw: nil, frozen_literal: nil, **rest)
+    super(lineno: lineno, addr: addr, op: op.is_a?(String) ? op.intern : op, args: args, raw: raw,
+          frozen_literal: frozen_literal, **rest)
+  end
 
   # An Insn for code the compiler synthesizes (no disassembly line behind it).
   def self.synthetic(op, args)

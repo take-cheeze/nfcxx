@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_ops'
+require_relative 'strict_key_set'
 
 # Reaching definitions over BytecodeIR's normal-flow CFG: the SET of writes
 # that can supply a register's value at an instruction, through joins and
@@ -28,21 +29,21 @@ module BytecodeIR
   # entry point (ops.h, vm.c). CodeGen::FIXNUM_PROOF_STEP_OVER_OPS is this
   # Set. LOADI* is matched by prefix. Anything else refuses.
   WRITES_LEADING_REG_OPS = Set[
-    'NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE',
-    'GETGV', 'SETGV', 'GETSV', 'SETSV', 'GETIV', 'SETIV', 'GETCV', 'SETCV',
-    'GETCONST', 'SETCONST', 'GETMCNST', 'SETMCNST', 'GETUPVAR',
-    'GETIDX', 'GETIDX0', 'SETIDX',
-    'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL',
-    'SSEND', 'SSEND0', 'SSENDB', 'SEND', 'SEND0', 'SENDB', 'SUPER', 'BLKCALL', 'BLKPUSH',
-    'ENTER', 'KEY_P', 'KEYEND', 'KARG',
-    'RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK',
-    'ADD', 'ADDI', 'SUB', 'SUBI', 'ADDILV', 'SUBILV', 'MUL', 'DIV',
-    'EQ', 'LT', 'LE', 'GT', 'GE',
-    'ARRAY', 'ARRAY2', 'ARYCAT', 'ARYPUSH', 'ARYSPLAT', 'AREF',
-    'INTERN', 'SYMBOL', 'STRING', 'STRCAT', 'HASH', 'HASHADD', 'HASHCAT',
-    'LAMBDA', 'BLOCK', 'METHOD', 'RANGE_INC', 'RANGE_EXC',
-    'OCLASS', 'CLASS', 'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'ALIAS', 'UNDEF',
-    'SCLASS', 'TCLASS', 'DEBUG', 'STOP'
+    :NOP, :MOVE, :LOADL, :LOADSYM, :LOADNIL, :LOADSELF, :LOADTRUE, :LOADFALSE,
+    :GETGV, :SETGV, :GETSV, :SETSV, :GETIV, :SETIV, :GETCV, :SETCV,
+    :GETCONST, :SETCONST, :GETMCNST, :SETMCNST, :GETUPVAR,
+    :GETIDX, :GETIDX0, :SETIDX,
+    :JMP, :JMPIF, :JMPNOT, :JMPNIL,
+    :SSEND, :SSEND0, :SSENDB, :SEND, :SEND0, :SENDB, :SUPER, :BLKCALL, :BLKPUSH,
+    :ENTER, :KEY_P, :KEYEND, :KARG,
+    :RETURN, :RETURN_BLK, :RETSELF, :RETNIL, :RETTRUE, :RETFALSE, :BREAK,
+    :ADD, :ADDI, :SUB, :SUBI, :ADDILV, :SUBILV, :MUL, :DIV,
+    :EQ, :LT, :LE, :GT, :GE,
+    :ARRAY, :ARRAY2, :ARYCAT, :ARYPUSH, :ARYSPLAT, :AREF,
+    :INTERN, :SYMBOL, :STRING, :STRCAT, :HASH, :HASHADD, :HASHCAT,
+    :LAMBDA, :BLOCK, :METHOD, :RANGE_INC, :RANGE_EXC,
+    :OCLASS, :CLASS, :MODULE, :EXEC, :DEF, :TDEF, :SDEF, :ALIAS, :UNDEF,
+    :SCLASS, :TCLASS, :DEBUG, :STOP
   ].freeze
 
   # Ops that write a run of registers from their leading operand (vm.c), not just that operand. The run's extent
@@ -58,10 +59,10 @@ module BytecodeIR
     return nil unless lead
 
     case insn.op
-    when 'ARGARY'
+    when :ARGARY
       spec = insn.typed[1].value # [m1, r, m2, kd]
       lead.to_i..(lead.to_i + (spec[3] == 1 ? 2 : 1))
-    when 'APOST'
+    when :APOST
       lead.to_i..(lead.to_i + insn.typed[2].value)
     end
   end
@@ -70,8 +71,8 @@ module BytecodeIR
   # starts a frame at R(a) and writes R(a+2) (nil); GETIDX0 and ADDI/SUBI also write R(a+1), SETIDX R(a+3). Every
   # such write is above a. ADDILV/SUBILV are not listed: their fallback is mrb_funcall, whose frame sits above the
   # caller's nregs.
-  ORIGIN_FRAME_OPS = Set['GETIDX', 'GETIDX0', 'SETIDX', 'ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI',
-                         'EQ', 'LT', 'LE', 'GT', 'GE', 'BLKCALL'].freeze
+  ORIGIN_FRAME_OPS = Set[:GETIDX, :GETIDX0, :SETIDX, :ADD, :SUB, :MUL, :DIV, :ADDI, :SUBI,
+                         :EQ, :LT, :LE, :GT, :GE, :BLKCALL].freeze
 
   # Expanded (instruction, register) states before a query gives up.
   DATAFLOW_MAX_STATES = 400
@@ -104,6 +105,7 @@ module BytecodeIR
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
                              through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false, shared: false)
       # Mutable opaque sets and refusal diagnostics belong to the caller; do not retain them.
+      StrictKeySet.coerce(opaque_regs)
       if refusal || (opaque_regs && !opaque_regs.frozen?)
         return compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                             max_states: max_states, through_handlers: through_handlers,
@@ -114,36 +116,42 @@ module BytecodeIR
       @reaching_definitions_cache ||= {}
       @compact_dataflow_keys = ENV['BC2CPP_IR_QUERY_KEYS'] != '0' if @compact_dataflow_keys.nil?
       opaque_key = reaching_opaque_key(opaque_regs)
-      key = [index, @compact_dataflow_keys ? reg.to_s : reg.to_s.dup.freeze, opaque_key, follow_moves, max_states,
+      key = [index, reg, opaque_key, follow_moves, max_states,
              through_handlers, origin_transfers, raiseif_nil]
       unless @reaching_definitions_cache.key?(key)
-        key[1] = key[1].dup.freeze if @compact_dataflow_keys
+        key[1] = key[1].freeze if @compact_dataflow_keys
         result = compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                              max_states: max_states, through_handlers: through_handlers,
                                              origin_transfers: origin_transfers, raiseif_nil: raiseif_nil)
         return result if @reaching_definitions_cache.size >= DATAFLOW_CACHE_SIZE
 
-        @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg.dup.freeze, d.built).freeze }&.freeze
+        @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg, d.built).freeze }&.freeze
       end
       # Shared readers never mutate returned definitions; public callers keep fresh copies.
       if shared
         @share_reaching_definitions = ENV['BC2CPP_IR_SHARED_DEFINITIONS'] != '0' if @share_reaching_definitions.nil?
         return @reaching_definitions_cache[key] if @share_reaching_definitions
       end
-      @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg.dup, d.built) }
+      @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg, d.built) }
     end
 
-    # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable strings.
+    # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable
+    # strings. StrictKeySet is a Set subclass whose dev-time coercion already rejects non-Integer members, so a
+    # frozen one holds only Integers: is_a? admits it where instance_of? never did, which left the identity memo
+    # empty in dev and every repeated query sorting again.
+    EMPTY_OPAQUE_KEY = [].freeze
+
     def reaching_opaque_key(opaque_regs)
       return nil unless opaque_regs
-      return opaque_regs.map { |r| r.dup.freeze }.sort.freeze unless @compact_dataflow_keys
+      return EMPTY_OPAQUE_KEY if opaque_regs.empty?
+      return opaque_regs.sort.freeze unless @compact_dataflow_keys
 
       @opaque_reg_keys ||= {}.compare_by_identity
       return @opaque_reg_keys[opaque_regs] if @opaque_reg_keys.key?(opaque_regs)
 
-      key = opaque_regs.map { |r| r.dup.freeze }.sort.freeze
-      if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && opaque_regs.instance_of?(Set) && opaque_regs.frozen? &&
-         opaque_regs.all? { |register| register.is_a?(String) && register.frozen? }
+      key = opaque_regs.sort.freeze
+      if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && opaque_regs.is_a?(Set) && opaque_regs.frozen? &&
+         opaque_regs.all? { |register| register.is_a?(Integer) }
         @opaque_reg_keys[opaque_regs] = key
       end
       key
@@ -182,7 +190,7 @@ module BytecodeIR
       seen = {}
       states = 0
       defs = Set.new
-      work = [index, reg.to_s]
+      work = [index, reg]
       until work.empty?
         r = work.pop
         i = work.pop
@@ -219,15 +227,15 @@ module BytecodeIR
           # An origin-only EXCEPT defines its own register on every entry (origin_effect), so its handler
           # edges need not be known for that register.
           return refused(refusal, :query_guarded) if guarded && guarded[p] &&
-                                                     !(origin_transfers && insn.op == 'EXCEPT' && insn.reg == r)
+                                                     !(origin_transfers && insn.op == :EXCEPT && insn.reg == r)
           # A protected JMPUW on a normal edge unwinds through its ensure (vm.c OP_JMPUW): the ensure body runs,
           # then RAISEIF jumps to the target, so that body's writes reach the target by no normal edge. The guard
           # above is off under through_handlers, so refuse here. The JMPUW's handler edge into the ensure stays
           # exact: the JMPUW writes nothing, so the ensure is entered with the values the JMPUW saw.
-          return refused(refusal, :unwinding_jump) if insn.op == 'JMPUW' && preds[i].include?(p) &&
+          return refused(refusal, :unwinding_jump) if insn.op == :JMPUW && preds[i].include?(p) &&
                                                      dataflow_guarded_at[p]
 
-          if raiseif_nil && insn.op == 'RAISEIF' && insn.reg == r && preds[i].include?(p) &&
+          if raiseif_nil && insn.op == :RAISEIF && insn.reg == r && preds[i].include?(p) &&
              !raise_targets.fetch(p, EMPTY_TARGETS).include?(i)
             defs << Definition.new(p, r)
             next
@@ -242,19 +250,19 @@ module BytecodeIR
           when :callee_clobber then return refused(refusal, :callee_frame_clobber)
           when :pass then work.push(p, r)
           when :define
-            if follow_moves && insn.op == 'MOVE'
+            if follow_moves && insn.op == :MOVE
               source = insn.regs[1]
               return refused(refusal, :move_without_source) unless source
 
               work.push(p, source)
             else
-              built = insn.op == 'ENTER' ? enter_built_kind(insn, r) : nil
+              built = insn.op == :ENTER ? enter_built_kind(insn, r) : nil
               defs << Definition.new(p, r, built)
             end
           end
         end
       end
-      defs.sort_by { |d| [d.index, d.reg.to_i] }
+      defs.sort_by { |d| [d.index, d.reg] }
     end
 
     private :compute_reaching_definitions
@@ -271,11 +279,13 @@ module BytecodeIR
     # when an edge set is incomplete or a nested block writes +reg+. Codegen's answer: ENTER's typed slots
     # (origin_effect typed_enter) stay refused here, as they were before the origin walk typed them.
     def write_dominates?(w, use, reg, opaque_regs: nil)
+      StrictKeySet.coerce(opaque_regs)
       return compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs) if opaque_regs && !opaque_regs.frozen?
 
       @write_dominates_cache ||= {}
-      opaque_key = opaque_regs&.map { |r| r.dup.freeze }&.sort&.freeze
-      key = [w, use, reg.to_s.dup.freeze, opaque_key]
+      @compact_dataflow_keys = ENV['BC2CPP_IR_QUERY_KEYS'] != '0' if @compact_dataflow_keys.nil?
+      opaque_key = reaching_opaque_key(opaque_regs)
+      key = [w, use, reg, opaque_key]
       unless @write_dominates_cache.key?(key)
         result = compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs)
         return result if @write_dominates_cache.size >= DATAFLOW_CACHE_SIZE
@@ -286,19 +296,19 @@ module BytecodeIR
     end
 
     def compute_write_dominates?(w, use, reg, opaque_regs: nil)
-      return false if opaque_regs&.include?(reg.to_s)
+      return false if opaque_regs&.include?(reg)
       return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
 
       preds = instruction_predecessors(include_handlers: true) or return false
       low = [w, 0].max
       # The write itself must leave +reg+ holding its value on every path (a side write does not).
-      return false if w >= 0 && origin_effect(@instructions[w].source, reg.to_s, typed_enter: false) != :define
+      return false if w >= 0 && origin_effect(@instructions[w].source, reg, typed_enter: false) != :define
       ((w + 1)..use).each do |k|
         insn = @instructions[k].source
         return false unless k == use || dataflow_steps_over?(insn)
         # An exit's leading register is read, not written, and nothing falls through from it to +use+.
         return false if k != use && !BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) &&
-                        %i[callee_clobber define].include?(origin_effect(insn, reg.to_s, typed_enter: false))
+                        %i[callee_clobber define].include?(origin_effect(insn, reg, typed_enter: false))
 
         preds[k].each do |p|
           return false if p == ENTRY ? w != ENTRY : (p < low || p > use)
@@ -310,7 +320,7 @@ module BytecodeIR
     private :compute_write_dominates?
 
     # Ops that can hand `self` to code that reads its ivars.
-    SELF_EXPOSING_OPS = Set['LOADSELF', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLOCK', 'LAMBDA', 'METHOD', 'EXEC', 'SCLASS'].freeze
+    SELF_EXPOSING_OPS = Set[:LOADSELF, :SSEND, :SSEND0, :SSENDB, :SUPER, :BLOCK, :LAMBDA, :METHOD, :EXEC, :SCLASS].freeze
 
     # INIT_ASSIGNED: on every path, is `@ivar` assigned before it is
     # read, before the frame exits and before `self` can reach other code? A
@@ -328,7 +338,7 @@ module BytecodeIR
           i = instruction.index
           reached = preds[i].map { |p| p == ENTRY ? false : out[p] }
           assigned = reached.empty? ? true : reached.all?
-          assigned ||= instruction.source.op == 'SETIV' && instruction.source.ivar == ivar
+          assigned ||= instruction.source.op == :SETIV && instruction.source.ivar == ivar
           next if out[i] == assigned
 
           out[i] = assigned
@@ -341,8 +351,8 @@ module BytecodeIR
         reached = preds[i].map { |p| p == ENTRY ? false : out[p] }
         assigned = reached.empty? || reached.all?
         observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || SELF_EXPOSING_OPS.include?(insn.op) ||
-                   (insn.op == 'GETIV' && insn.ivar == ivar) ||
-                   (!%w[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
+                   (insn.op == :GETIV && insn.ivar == ivar) ||
+                   (!%i[GETIV SETIV].include?(insn.op) && insn.regs.include?(0))
         assigned || !observes
       end
     end
@@ -373,7 +383,7 @@ module BytecodeIR
           incoming = normal[i].map { |p| p == ENTRY ? false : stored_out[p] }
           incoming.concat(raised_from[i].map { |src| stored_in[src] })
           in_i = incoming.empty? || incoming.all?
-          out_i = in_i || (instruction.source.op == 'SETIV' && instruction.source.ivar.to_s == name)
+          out_i = in_i || (instruction.source.op == :SETIV && instruction.source.ivar.to_s == name)
           next if stored_in[i] == in_i && stored_out[i] == out_i
 
           stored_in[i] = in_i
@@ -383,7 +393,7 @@ module BytecodeIR
       end
       @instructions.filter_map do |instruction|
         i = instruction.index
-        i if instruction.source.op == 'GETIV' && instruction.source.ivar.to_s == name && !stored_in[i]
+        i if instruction.source.op == :GETIV && instruction.source.ivar.to_s == name && !stored_in[i]
       end.to_set.freeze
     end
 
@@ -399,12 +409,12 @@ module BytecodeIR
     # below the register, an unmodelled op) counts. NIL_NARROWING and the captured-parameter rule read it
     # (rbs_param_check.rb, nil_narrowing.rb).
     def may_write?(insn, reg)
-      dataflow_effect(insn, reg.to_s) != :pass
+      dataflow_effect(insn, reg) != :pass
     end
 
     # may_write? of the instruction at +index+, from the walk's per-instruction effect table.
     def may_write_at?(index, reg)
-      effect_of(dataflow_effect_at(index), reg.to_s) != :pass
+      effect_of(dataflow_effect_at(index), reg) != :pass
     end
 
     private
@@ -429,11 +439,11 @@ module BytecodeIR
     # argument pass to the entry value, every other slot (and the packed R(1)) refuses.
     def origin_effect(insn, reg, typed_enter: true)
       case insn.op
-      when 'RESCUE'
+      when :RESCUE
         second = insn.typed[1]
-        second&.kind == :reg && second.value.to_s == reg ? :define : :pass
-      when 'EXCEPT' then insn.reg == reg ? :define : :pass
-      when 'ENTER'
+        second&.kind == :reg && second.value == reg ? :define : :pass
+      when :EXCEPT then insn.reg == reg ? :define : :pass
+      when :ENTER
         if typed_enter then enter_origin_effect(insn, reg)
         else enter_passes?(insn, reg) ? :pass : :refuse
         end
@@ -515,7 +525,7 @@ module BytecodeIR
     # Instruction indices a closure-creating op can reach (origin only): a block or lambda of this frame, or a
     # body run in place (EXEC, CLASS, MODULE, SCLASS), can write an outer register only once one of those ops
     # has run. Nil when handler edges do not resolve, as origin_reachable.
-    ORIGIN_CLOSURE_OPS = Set['BLOCK', 'LAMBDA', 'EXEC', 'CLASS', 'MODULE', 'SCLASS'].freeze
+    ORIGIN_CLOSURE_OPS = Set[:BLOCK, :LAMBDA, :EXEC, :CLASS, :MODULE, :SCLASS].freeze
 
     def origin_closure_reach
       return @origin_closure_reach if defined?(@origin_closure_reach)
@@ -554,7 +564,7 @@ module BytecodeIR
     # The one exception is R[1] without keywords: argc==14 with a keyword hash packs the arguments into an
     # array there. R[0] (self) is never written.
     def enter_passes?(insn, reg)
-      return true if reg == '0'
+      return true if reg == 0
 
       req, opt, _rest, _post, kw, kwrest = insn.enter_fields
       keywords = kw.to_i.positive? || kwrest.to_i.positive?
@@ -580,7 +590,7 @@ module BytecodeIR
       def self.for(insn)
         op = insn.op
         lead = insn.reg
-        new(BytecodeIR::Ops::READS_LEAD.include?(op) || op == 'JMPUW', BytecodeIR.written_run(insn),
+        new(BytecodeIR::Ops::READS_LEAD.include?(op) || op == :JMPUW, BytecodeIR.written_run(insn),
             ORIGIN_FRAME_OPS.include?(op), WRITES_LEADING_REG_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op),
             BytecodeIR::Ops::CALLEE_FRAME.include?(op), lead, lead&.to_i).freeze
       end
@@ -588,10 +598,10 @@ module BytecodeIR
 
     def effect_of(entry, reg)
       return :pass if entry.pass
-      return(entry.run.cover?(reg.to_i) ? :define : :pass) if entry.run
-      return :callee_clobber if entry.frame && (entry.lead_i.nil? || entry.lead_i < reg.to_i)
+      return(entry.run.cover?(reg) ? :define : :pass) if entry.run
+      return :callee_clobber if entry.frame && (entry.lead_i.nil? || entry.lead_i < reg)
       return :refuse unless entry.writes
-      return :callee_clobber if entry.callee && entry.lead_i && entry.lead_i < reg.to_i
+      return :callee_clobber if entry.callee && entry.lead_i && entry.lead_i < reg
 
       entry.lead == reg ? :define : :pass
     end
@@ -646,13 +656,13 @@ module BytecodeIR
     cached = irep.instance_variable_get(:@own_upvar_written_regs)
     return cached if cached
 
-    written = Set.new
+    written = StrictKeySet.new
     if !irep.reps.nil? && !irep.reps.empty?
       tree = irep.tree
       if tree
         collect_upvar_writes(tree, irep, written)
       else
-        (1...irep.nlocals.to_i).each { |n| written << n.to_s }
+        (1...irep.nlocals.to_i).each { |n| written << n }
       end
     end
     irep.instance_variable_set(:@own_upvar_written_regs, written.freeze)
@@ -680,10 +690,10 @@ module BytecodeIR
     lookup = ->(label) { tree[label] or raise ArgumentError, "bc2cpp: irep #{label} missing from the tree" }
     Array(irep.reps).each do |label|
       each_nested_insn(lookup.call(label), lookup) do |insn, depth|
-        next unless insn.op == 'SETUPVAR'
+        next unless insn.op == :SETUPVAR
 
         index, level = insn.upvar_ref
-        written << index.to_s if level == depth
+        written << index.to_i if level == depth
       end
     end
   end
@@ -698,7 +708,7 @@ module BytecodeIR
   # Nil when the answer is not provable (a refusal, the method's entry value, or a definition whose instruction does
   # not write that register).
   def self.writers_reaching(irep, index, reg)
-    defs = reaching_definitions(irep, index, reg.to_s, origin_transfers: true, shared: true)
+    defs = reaching_definitions(irep, index, reg, origin_transfers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.none?(&:entry?)
 
     program = self.for(irep)

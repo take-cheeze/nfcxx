@@ -17,7 +17,7 @@ module BlockParamCall
   def block_param_call_code(irep, idx, reg, d, recv, argv)
     return nil unless @compiling_core && irep && idx && reg && argv.size < CodeGen::FUNCALL_ARGC_MAX
     return nil if devirt_blocked_name?('call')
-    return nil unless block_param_receiver?(irep, idx, reg.to_s) && block_param_nil_call_dead?
+    return nil unless block_param_receiver?(irep, idx, reg) && block_param_nil_call_dead?
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
     "  // BLOCK_PARAM_CALL :call -- receiver is the method's own &block (nil or a Proc): a Proc is " \
@@ -38,7 +38,7 @@ module BlockParamCall
   def block_param_call_splat_code(irep, idx, d, recv, argv_reg)
     return nil unless @compiling_core && irep && !idx.nil?
     return nil if devirt_blocked_name?('call')
-    return nil unless block_param_receiver?(irep, idx, d.to_s) || blkpush_receiver?(irep, idx, d.to_s)
+    return nil unless block_param_receiver?(irep, idx, d) || blkpush_receiver?(irep, idx, d)
     return nil unless block_param_nil_call_dead?
 
     "  // BLOCK_PARAM_CALL_SPLAT :call -- receiver is the method's own &block (nil or a Proc): a Proc is " \
@@ -55,10 +55,10 @@ module BlockParamCall
   def blkpush_receiver?(irep, idx, reg)
     return false unless idx.between?(0, BytecodeIR.for(irep).size - 1)
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return false if defs.nil? || defs.empty?
 
-    defs.none?(&:entry?) && defs.all? { |definition| BytecodeIR.for(irep).source_at(definition.index).op == 'BLKPUSH' }
+    defs.none?(&:entry?) && defs.all? { |definition| BytecodeIR.for(irep).source_at(definition.index).op == :BLKPUSH }
   end
 
   # Every definition of the register at `idx` is the block a method was entered with,
@@ -66,7 +66,7 @@ module BlockParamCall
   def block_param_receiver?(irep, idx, reg)
     return false unless idx.between?(0, BytecodeIR.for(irep).size - 1)
 
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return false unless defs&.size == 1
 
     definition = defs.first
@@ -74,12 +74,12 @@ module BlockParamCall
       block_param_incoming_slot?(irep, definition.reg)
     else
       insn = BytecodeIR.for(irep).source_at(definition.index)
-      return false unless insn.op == 'GETUPVAR' && insn.upvar_ref
+      return false unless insn.op == :GETUPVAR && insn.upvar_ref
 
       slot, level = insn.upvar_ref
       owner = irep
       (level + 1).times { owner &&= block_param_parent(owner) }
-      !owner.nil? && block_param_slot_pristine?(owner, slot.to_s)
+      !owner.nil? && block_param_slot_pristine?(owner, slot)
     end
   end
 
@@ -93,7 +93,7 @@ module BlockParamCall
 
     mand, opt, rest, post, kw, kwrest, block = enter.enter_fields
     block.to_i.positive? && post.to_i.zero? && kw.to_i.zero? && kwrest.to_i.zero? &&
-      slot == (1 + mand + opt + rest).to_s
+      slot == 1 + mand + opt + rest
   end
 
   # `slot` holds the block the method `irep` was entered with and nothing changes it: the
@@ -108,8 +108,8 @@ module BlockParamCall
     mand, opt, rest, post, kw, kwrest, block = enter.enter_fields
     return false unless block.to_i.positive? && post.to_i.zero? && kw.to_i.zero? && kwrest.to_i.zero?
 
-    incoming = (1 + mand + opt + rest).to_s
-    copy = (incoming.to_i + 1).to_s
+    incoming = 1 + mand + opt + rest
+    copy = incoming + 1
     return false unless [incoming, copy].include?(slot)
 
     upvar_written = BytecodeIR.own_upvar_written_regs(irep)
@@ -123,11 +123,11 @@ module BlockParamCall
     return false unless copies.size == 1
 
     move = BytecodeIR.for(irep).source_at(copies.first)
-    return false unless move.op == 'MOVE' && move.regs[1] == incoming
+    return false unless move.op == :MOVE && move.regs[1] == incoming
 
-    return true if copies.first == 1 && BytecodeIR.for(irep).source_at(0).op == 'ENTER'
+    return true if copies.first == 1 && BytecodeIR.for(irep).source_at(0).op == :ENTER
 
-    irep.each_with_op('BLOCK', 'LAMBDA') do |_insn, i|
+    irep.each_with_op(:BLOCK, :LAMBDA) do |_insn, i|
       return false unless BytecodeIR.write_dominates?(irep, copies.first, i, copy)
     end
     true

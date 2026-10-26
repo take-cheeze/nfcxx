@@ -105,15 +105,15 @@ module EnumeratorModel
 
   # `Enumerator.new self, meth, *args, **kwd` and nothing else: the default :each, one constant read (Enumerator), the
   # argument packing, and one `new` send. Any other call, block, instance variable or branch makes the model refuse.
-  BODY_OPS = %w[ENTER JMP LOADSYM GETCONST LOADSELF MOVE ARRAY ARYCAT HASH HASHCAT SEND RETURN].freeze
+  BODY_OPS = %i[ENTER JMP LOADSYM GETCONST LOADSELF MOVE ARRAY ARYCAT HASH HASHCAT SEND RETURN].freeze
 
   def to_enum_body?(body, _ireps)
     return false unless body.reps.empty? && BytecodeIR.for(body).instructions.all? { |i| BODY_OPS.include?(i.op) }
 
     program = BytecodeIR.for(body)
-    sends = program.instructions_with_op('SEND')
-    consts = program.instructions_with_op('GETCONST')
-    syms = program.instructions_with_op('LOADSYM')
+    sends = program.instructions_with_op(:SEND)
+    consts = program.instructions_with_op(:GETCONST)
+    syms = program.instructions_with_op(:LOADSYM)
     sends.size == 1 && sends.first.sym == 'new' && consts.size == 1 && consts.first.const_name == 'Enumerator' &&
       syms.all? { |i| i.sym == 'each' }
   end
@@ -128,19 +128,19 @@ module EnumeratorModel
     return 'no native/foreign inputs' unless native_paths && foreign_paths
 
     ireps.each_value do |irep|
-      BytecodeIR.for(irep).instructions_with_op('CLASS', 'MODULE', 'SETCONST', 'SETMCNST', 'LOADSYM',
+      BytecodeIR.for(irep).instructions_with_op(:CLASS, :MODULE, :SETCONST, :SETMCNST, :LOADSYM,
                                                 *BytecodeIR::Ops::SEND).each do |insn|
         case insn.op
-        when 'CLASS', 'MODULE'
+        when :CLASS, :MODULE
           # The compiled sources run as one script, whose own irep holds the top-level statements. A statement there
           # reopens or creates Object::Enumerator; one in a class body, a block or a method (`module Kernel; class
           # Enumerator`) defines a second constant that Kernel#to_enum's lexical lookup would find first.
           if insn.sym_token == 'Enumerator' && irep.label != root_label
             return "a nested class/module Enumerator statement (#{irep.label})"
           end
-        when 'SETCONST' then return "assigned in #{irep.file}" if insn.const_name == 'Enumerator'
-        when 'SETMCNST' then return "assigned in #{irep.file}" if insn.mcnst_name == 'Enumerator'
-        when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
+        when :SETCONST then return "assigned in #{irep.file}" if insn.const_name == 'Enumerator'
+        when :SETMCNST then return "assigned in #{irep.file}" if insn.mcnst_name == 'Enumerator'
+        when :SEND, :SEND0, :SSEND, :SSEND0, :SENDB, :SSENDB, :LOADSYM
           return "dynamic constant mutation (#{insn.sym}) in #{irep.file}" if insn.sym.to_s.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
       end

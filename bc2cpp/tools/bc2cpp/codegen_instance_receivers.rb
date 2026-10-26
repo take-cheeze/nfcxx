@@ -14,7 +14,7 @@ class CodeGen
   def receiver_instances(site, name)
     irep, idx, insn = site_flow_position(site)
     return nil unless @native_results_ready && irep && idx && insn&.sym == name
-    return nil unless %w[SEND SEND0].include?(insn.op)
+    return nil unless %i[SEND SEND0].include?(insn.op)
 
     mask = exact_flow_mask(irep, idx, insn.reg)
     return nil unless mask.is_a?(Integer) && mask.positive?

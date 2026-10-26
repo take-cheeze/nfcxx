@@ -27,17 +27,17 @@ module BytecodeIR
   # Ops after which control never reaches the next instruction. RAISE and
   # RAISEIF are deliberately absent: a missing predecessor makes a proof wrong
   # while an extra one only costs a proof, so they conservatively fall through.
-  NO_FALLTHROUGH = %w[JMP JMPUW RETURN RETURN_BLK RETSELF RETNIL RETTRUE RETFALSE BREAK STOP].freeze
-  CONDITIONAL_BRANCHES = %w[JMPIF JMPNOT JMPNIL].freeze
+  NO_FALLTHROUGH = %i[JMP JMPUW RETURN RETURN_BLK RETSELF RETNIL RETTRUE RETFALSE BREAK STOP].freeze
+  CONDITIONAL_BRANCHES = %i[JMPIF JMPNOT JMPNIL].freeze
   TERMINATORS = (NO_FALLTHROUGH + CONDITIONAL_BRANCHES).freeze
   # Predecessor id of the method-entry edge into instruction 0.
   ENTRY = -1
-  BRANCH_OPS = %w[JMP JMPUW JMPIF JMPNOT JMPNIL].freeze
+  BRANCH_OPS = %i[JMP JMPUW JMPIF JMPNOT JMPNIL].freeze
   # Conditional-branch kinds (Decoded#cond): which test of R(a) sends control to the branch target.
   COND_IF = 1 # JMPIF: R(a) truthy
   COND_NOT = 2 # JMPNOT: R(a) falsy
   COND_NIL = 3 # JMPNIL: R(a) nil
-  COND_KINDS = { 'JMPIF' => COND_IF, 'JMPNOT' => COND_NOT, 'JMPNIL' => COND_NIL }.freeze
+  COND_KINDS = { :JMPIF => COND_IF, :JMPNOT => COND_NOT, :JMPNIL => COND_NIL }.freeze
 
   # One instruction's analysis-independent operands (Program#decoded): +op+, +cond+ (a COND_* kind, nil unless a
   # conditional branch), +reg+ (the leading register as an Integer, nil when the leading operand is not a register)
@@ -220,7 +220,7 @@ module BytecodeIR
         targets << next_index if next_index < @instructions.length && !NO_FALLTHROUGH.include?(instruction.op)
         # OP_ENTER lands on one of the `o + 1` JMP table entries that follow it (vm.c
         # `ci->pc += o*3` and its argc form), so each entry has ENTER as a predecessor.
-        if instruction.op == 'ENTER'
+        if instruction.op == :ENTER
           optional = instruction.source.enter_fields[1].to_i
           (1..optional).each do |k|
             table = instruction.index + 1 + k

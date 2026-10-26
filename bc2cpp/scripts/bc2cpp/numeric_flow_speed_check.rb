@@ -62,8 +62,8 @@ class LogOracle
 end
 
 # r2 = 0; while r1; r2 += r3; r4 = r2.f; end; return r2
-loop_body = [insn(0, 'LOADI_0', "R2\t(0)"), insn(2, 'JMPNOT', "R1\t15"), insn(6, 'ADD', "R2\t(R3)"),
-             insn(8, 'SEND0', "R4\t:f"), insn(11, 'GETIV', "R5\t@n"), insn(13, 'JMP', '2'), insn(15, 'RETURN', 'R2')]
+loop_body = [insn(0, :LOADI_0, "R2\t(0)"), insn(2, :JMPNOT, "R1\t15"), insn(6, :ADD, "R2\t(R3)"),
+             insn(8, :SEND0, "R4\t:f"), insn(11, :GETIV, "R5\t@n"), insn(13, :JMP, '2'), insn(15, :RETURN, 'R2')]
 irep = Irep.new(label: 'speed', nregs: 6, instructions: loop_body, catch_handlers: [], reps: [], pool: [])
 
 puts '-- scalar truthiness facts (host)'
@@ -109,7 +109,7 @@ check.call('the first run derives the table once, on the Program', plan.is_a?(NF
 check.call('no second irep-level cache',
            irep.instance_variables.sort == (Irep.new.instance_variables + [:@bytecode_ir]).sort)
 check.call('steps take op, branch kind and target from the BytecodeIR decode',
-           plan.steps[1].op == 'JMPNOT' && plan.steps[1].branch == BytecodeIR::COND_NOT && plan.steps[1].goto == 6 &&
+           plan.steps[1].op == :JMPNOT && plan.steps[1].branch == BytecodeIR::COND_NOT && plan.steps[1].goto == 6 &&
            program.decoded[1].goto == 6 && program.decoded[1].reg == 1 && program.decoded[5].goto == 1 &&
            program.decoded[2].cond.nil? && program.decoded[2].goto.nil?)
 check.call('the flow answers as before: an Integer counter at the loop head', states[1][2] == INT && states[6][2] == INT)
@@ -124,7 +124,7 @@ states_changed = NF.states(irep, changed, Set.new)
 check.call('a changed entry answer reaches the result through the same plan', states_changed[1][2] == (INT | FLT))
 changed_send = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT)
 check.call('a changed send answer reaches the result', NF.states(irep, changed_send, Set.new)[5][4] == FLT)
-check.call('an opaque register is an input too', NF.states(irep, LogOracle.new({ 1 => INT, 3 => INT }, INT), Set['2'])[1][2] == OTHER)
+check.call('an opaque register is an input too', NF.states(irep, LogOracle.new({ 1 => INT, 3 => INT }, INT), Set[2])[1][2] == OTHER)
 writes = {}
 NF.states(irep, LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT), Set.new, writes)
 check.call('writes collect every store', writes[2] == INT && writes[4] == INT && writes[5] == INT)
@@ -147,9 +147,9 @@ check.call('a Program whose irep has another instruction list raises', raised)
 puts '-- shared bytecode facts (host)'
 # def f(a, b = 1, c = 2); r = 0; begin; r = a; rescue; r = 1; ensure; r = 2; end; r; end, flattened: ENTER with two
 # optional arguments jumps into a three-entry JMP table; one rescue and one ensure handler share a range.
-enter_body = [insn(0, 'ENTER', "1:2:0:0:0:0:0:0\t(0x0)"), insn(4, 'JMP', '13'), insn(7, 'JMP', '10'),
-              insn(10, 'LOADI_1', "R2\t(1)"), insn(13, 'LOADI_2', "R3\t(2)"), insn(16, 'MOVE', "R4\tR1"),
-              insn(19, 'EXCEPT', 'R5'), insn(21, 'LOADI_1', "R4\t(1)"), insn(23, 'RETURN', 'R4')]
+enter_body = [insn(0, :ENTER, "1:2:0:0:0:0:0:0\t(0x0)"), insn(4, :JMP, '13'), insn(7, :JMP, '10'),
+              insn(10, :LOADI_1, "R2\t(1)"), insn(13, :LOADI_2, "R3\t(2)"), insn(16, :MOVE, "R4\tR1"),
+              insn(19, :EXCEPT, 'R5'), insn(21, :LOADI_1, "R4\t(1)"), insn(23, :RETURN, 'R4')]
 handlers = [CatchHandler.new(type: :rescue, begin_addr: 16, end_addr: 19, target: 19),
             CatchHandler.new(type: :ensure, begin_addr: 16, end_addr: 19, target: 21)]
 enter_irep = Irep.new(label: 'enter', nregs: 6, instructions: enter_body, catch_handlers: handlers, reps: [], pool: [])
@@ -199,10 +199,10 @@ end
 check.call('wide and negative masks retain union and provenance behavior across 2,000 joins', join_matches)
 
 puts '-- opaque registers (host)'
-[Set.new, Set['0', '2', '02', '8', 1]].each do |opaque|
+[Set.new, Set[0, 2, 2, 8, 1]].each do |opaque|
   context = NF::Ctx.new(nil, Object.new, opaque, 4, [], {}, [], 4, nil)
-  check.call("opaque register membership matches canonical strings: #{opaque.to_a.inspect}",
-             context.opq == Array.new(4) { |reg| opaque.include?(reg.to_s) } && context.opq.frozen?)
+  check.call("opaque register membership matches canonical integers: #{opaque.to_a.inspect}",
+             context.opq == Array.new(4) { |reg| opaque.include?(reg) } && context.opq.frozen?)
 end
 
 puts '-- Hash ctx (host)'
@@ -212,22 +212,22 @@ hash_oracle.define_singleton_method(:send_mask) { |*_args| NF::STR }
 ctx = { oracle: hash_oracle, irep: nil, nregs: 4, slots: ['@value'], facts: [OTHER], slot_of: { '@value' => 4 },
         prov_base: 5, opaque: Set.new, writes: nil }
 state = [OTHER, NF::STR, INT, OTHER, INT, 0, 0, 1, 0]
-after = NF.transfer(0, FakeCall.new('SEND0', '1'), state, ctx)
+after = NF.transfer(0, FakeCall.new(:SEND0, 1), state, ctx)
 check.call('transfer: the call result, the frame above it and the slot widened',
            after[1] == NF::STR && after[2] == OTHER && after[4] == (INT | OTHER) && after[5, 4].all?(&:zero?))
-raised_state = NF.raise_state(FakeCall.new('SEND0', '1'), state, after, ctx)
+raised_state = NF.raise_state(FakeCall.new(:SEND0, 1), state, after, ctx)
 check.call('raise_state joins the widened state with the result', raised_state[1] == (NF::STR | OTHER))
 
 puts '-- scalar result states (host)'
-scalar_instructions = [insn(0, 'GETCONST', "R1\t:Known"), insn(0, 'GETUPVAR', "R1\t0\t1"),
-                       insn(0, 'ARRAY', "R1\t0"), insn(0, 'HASH', "R1\t0"), insn(0, 'ARYPUSH', "R1\t1"),
-                       insn(0, 'ADD', "R1\t(R2)"), insn(0, 'ADDI', "R1\t1"), insn(0, 'DIV', "R1\t(R2)"),
-                       insn(0, 'GETIDX', "R1\t(R2)"), insn(0, 'AREF', "R1\tR2\t0"), insn(0, 'EXCEPT', 'R1'),
-                       insn(0, 'KEY_P', "R1\t:flag"), insn(0, 'KARG', "R1\t:flag"), insn(0, 'LAMBDA', "R1\tI[0]")]
+scalar_instructions = [insn(0, :GETCONST, "R1\t:Known"), insn(0, :GETUPVAR, "R1\t0\t1"),
+                       insn(0, :ARRAY, "R1\t0"), insn(0, :HASH, "R1\t0"), insn(0, :ARYPUSH, "R1\t1"),
+                       insn(0, :ADD, "R1\t(R2)"), insn(0, :ADDI, "R1\t1"), insn(0, :DIV, "R1\t(R2)"),
+                       insn(0, :GETIDX, "R1\t(R2)"), insn(0, :AREF, "R1\tR2\t0"), insn(0, :EXCEPT, 'R1'),
+                       insn(0, :KEY_P, "R1\t:flag"), insn(0, :KARG, "R1\t:flag"), insn(0, :LAMBDA, "R1\tI[0]")]
 scalar_random = Random.new(539)
 scalar_matches = scalar_instructions.all? do |instruction|
   method = Irep.new(label: "scalar-#{instruction.op}", nregs: 3,
-                    instructions: [instruction, insn(4, 'RETURN', 'R1')], catch_handlers: [], reps: [], pool: [])
+                    instructions: [instruction, insn(4, :RETURN, 'R1')], catch_handlers: [], reps: [], pool: [])
   40.times.all? do
     input = Array.new(4) { [INT, FLT, OTHER, NF::ARR, 1 << 240, -1].sample(random: scalar_random) }
     input += Array.new(3, NF::ELEM_UNKNOWN) + Array.new(3) { scalar_random.rand(3) }
@@ -246,7 +246,7 @@ scalar_matches = scalar_instructions.all? do |instruction|
 end
 check.call('scalar sharing preserves masks, metadata, writes and oracle order across 560 transfers', scalar_matches)
 constant_insn = scalar_instructions.first
-constant_method = Irep.new(label: 'constant-sharing', nregs: 3, instructions: [constant_insn, insn(4, 'RETURN', 'R1')],
+constant_method = Irep.new(label: 'constant-sharing', nregs: 3, instructions: [constant_insn, insn(4, :RETURN, 'R1')],
                            catch_handlers: [], reps: [], pool: [])
 constant_oracle = LogOracle.new({}, INT)
 constant_context = NF::Ctx.for_run(constant_method, constant_oracle, Set.new, {}, Set.new)
@@ -346,9 +346,9 @@ opaque_input = clean_load.dup
 opaque_input[1] = OTHER
 opaque_input.freeze
 check.call('captured registers use the effective OTHER mask before deciding to share',
-           NF.copy_reg_write(opaque_input, 1, INT, load_context.call({}, Set['1'])).equal?(opaque_input))
+           NF.copy_reg_write(opaque_input, 1, INT, load_context.call({}, Set[1])).equal?(opaque_input))
 manual_load = load_context.call({})
-load_instruction = insn(0, 'LOADI_1', 'R1 (1)')
+load_instruction = insn(0, :LOADI_1, 'R1 (1)')
 manual_result = NF.transfer(0, load_instruction, clean_load, manual_load)
 check.call('standalone transfer contexts retain copied write results', !manual_result.equal?(clean_load) && manual_result == clean_load)
 hash_load = { irep: nil, oracle: Object.new, opaque: Set.new, nregs: 4, slots: ['n'],
@@ -413,16 +413,16 @@ class ClassLogOracle < LogOracle
   def preserves_ivar_slots?(*_args) = true
 end
 
-class_body = [insn(0, 'GETIV', "R1\t@n"), insn(3, 'MOVE', "R2\tR1"), insn(6, 'SEND0', "R2\t:is_a?"),
-              insn(9, 'JMPNOT', "R2\t17"), insn(13, 'GETIV', "R3\t@n"), insn(16, 'RETURN', 'R3'),
-              insn(17, 'LOADNIL', 'R3 (nil)'), insn(19, 'RETURN', 'R3')]
+class_body = [insn(0, :GETIV, "R1\t@n"), insn(3, :MOVE, "R2\tR1"), insn(6, :SEND0, "R2\t:is_a?"),
+              insn(9, :JMPNOT, "R2\t17"), insn(13, :GETIV, "R3\t@n"), insn(16, :RETURN, 'R3'),
+              insn(17, :LOADNIL, 'R3 (nil)'), insn(19, :RETURN, 'R3')]
 class_irep = Irep.new(label: 'shared-class', nregs: 6, instructions: class_body, catch_handlers: [], reps: [], pool: [])
 # Two targets receive exactly the same unrefined edge; rewriting either target must leave the other alone.
-split_body = [insn(0, 'JMPNOT', "R1\t9"), insn(4, 'LOADI_1', "R2\t(1)"), insn(6, 'JMP', '12'),
-              insn(9, 'LOADL', "R2\tL[0]"), insn(12, 'RETURN', 'R2')]
+split_body = [insn(0, :JMPNOT, "R1\t9"), insn(4, :LOADI_1, "R2\t(1)"), insn(6, :JMP, '12'),
+              insn(9, :LOADL, "R2\tL[0]"), insn(12, :RETURN, 'R2')]
 split_irep = Irep.new(label: 'shared-split', nregs: 6, instructions: split_body, catch_handlers: [], reps: [], pool: [])
-handler_body = [insn(0, 'GETIV', "R1\t@n"), insn(3, 'SEND0', "R2\t:f"), insn(6, 'RETURN', 'R2'),
-                insn(8, 'EXCEPT', 'R3'), insn(10, 'RAISEIF', 'R3'), insn(12, 'RETURN', 'R1')]
+handler_body = [insn(0, :GETIV, "R1\t@n"), insn(3, :SEND0, "R2\t:f"), insn(6, :RETURN, 'R2'),
+                insn(8, :EXCEPT, 'R3'), insn(10, :RAISEIF, 'R3'), insn(12, :RETURN, 'R1')]
 handler_irep = Irep.new(label: 'shared-handler', nregs: 6, instructions: handler_body,
                         catch_handlers: [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 6, target: 8)],
                         reps: [], pool: [])
@@ -431,7 +431,7 @@ class_factory = lambda do
   oracle.define_singleton_method(:ivar_entry_mask) { |_irep, name| note(:ivar_entry_mask, name) && (INT | NIL_) }
   oracle
 end
-element_body = [insn(0, 'SENDB', "R2\t:map\tn=0"), insn(4, 'MOVE', "R1\tR2"), insn(7, 'RETURN', 'R1')]
+element_body = [insn(0, :SENDB, "R2\t:map\tn=0"), insn(4, :MOVE, "R1\tR2"), insn(7, :RETURN, 'R1')]
 element_irep = Irep.new(label: 'shared-elements', nregs: 6, instructions: element_body, catch_handlers: [], reps: [], pool: [])
 element_factory = lambda do
   oracle = LogOracle.new({}, INT)
@@ -452,15 +452,15 @@ loads_factory = lambda do
 end
 loads_body = Irep.new(label: 'repeated-loads', nregs: 4, catch_handlers: [], reps: [],
                      pool: ['text', { type: :float, value: '1.5' }], instructions: [
-  insn(0, 'LOADI_1', 'R1 (1)'), insn(1, 'LOADI_1', 'R1 (1)'),
-  insn(2, 'LOADSELF', 'R1 (R0)'), insn(3, 'LOADSELF', 'R1 (R0)'),
-  insn(4, 'LOADL', 'R1 L[1]'), insn(5, 'LOADL', 'R1 L[1]'),
-  insn(6, 'LOADSYM', 'R1 :value'), insn(7, 'LOADSYM', 'R1 :value'),
-  insn(8, 'STRING', 'R1 L[0]'), insn(9, 'STRING', 'R1 L[0]'),
-  insn(10, 'LOADNIL', 'R1 (nil)'), insn(11, 'LOADNIL', 'R1 (nil)'), insn(12, 'RETURN', 'R1')])
+  insn(0, :LOADI_1, 'R1 (1)'), insn(1, :LOADI_1, 'R1 (1)'),
+  insn(2, :LOADSELF, 'R1 (R0)'), insn(3, :LOADSELF, 'R1 (R0)'),
+  insn(4, :LOADL, 'R1 L[1]'), insn(5, :LOADL, 'R1 L[1]'),
+  insn(6, :LOADSYM, 'R1 :value'), insn(7, :LOADSYM, 'R1 :value'),
+  insn(8, :STRING, 'R1 L[0]'), insn(9, :STRING, 'R1 L[0]'),
+  insn(10, :LOADNIL, 'R1 (nil)'), insn(11, :LOADNIL, 'R1 (nil)'), insn(12, :RETURN, 'R1')])
 alias_loads = Irep.new(label: 'load-alias-invalidation', nregs: 4, catch_handlers: [], reps: [], pool: [], instructions: [
-  insn(0, 'LOADI_1', 'R1 (1)'), insn(1, 'MOVE', 'R2 R1'), insn(2, 'MOVE', 'R2 R1'),
-  insn(3, 'LOADI_1', 'R1 (1)'), insn(4, 'RETURN', 'R2')])
+  insn(0, :LOADI_1, 'R1 (1)'), insn(1, :MOVE, 'R2 R1'), insn(2, :MOVE, 'R2 R1'),
+  insn(3, :LOADI_1, 'R1 (1)'), insn(4, :RETURN, 'R2')])
 alias_plan = NF.table(BytecodeIR.for(alias_loads))
 check.call('the immutable load-reader index records MOVE destinations without duplicates',
            alias_plan.load_readers == { 1 => [2] } && alias_plan.load_readers.frozen? && alias_plan.load_readers[1].frozen?)
@@ -468,7 +468,7 @@ cases = [
   ['repeated loads and oracle order', loads_body, Set.new, loads_factory],
   ['same-class rewrite invalidates register aliases', alias_loads, Set.new, loads_factory],
   ['loop and ivar provenance', irep, Set.new, -> { LogOracle.new({ 1 => INT | NIL_, 3 => FLT }, INT) }],
-  ['captured registers', irep, Set['1', '2'], -> { LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT) }],
+  ['captured registers', irep, Set[1, 2], -> { LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT) }],
   ['optional entry, rescue and ensure', enter_irep, Set.new, -> { LogOracle.new({ 1 => INT }, INT) }],
   ['sibling branch isolation', split_irep, Set.new, -> { LogOracle.new({}, INT) }],
   ['raising call, slots and EXCEPT/RAISEIF', handler_irep, Set.new, -> { LogOracle.new({}, FLT) }],
@@ -498,7 +498,7 @@ cases.each do |name, body, opaque, factory|
     check.call('the block-call fixture carries its element mask to the successor', shared[1][9] == INT)
   end
 end
-noop_body = Irep.new(label: 'shared-noop', nregs: 2, instructions: [insn(0, 'NOP', ''), insn(1, 'RETURN', 'R1')],
+noop_body = Irep.new(label: 'shared-noop', nregs: 2, instructions: [insn(0, :NOP, ''), insn(1, :RETURN, 'R1')],
                      catch_handlers: [], reps: [], pool: [])
 shared_noop = NF.states(noop_body, LogOracle.new({}, INT), Set.new, share_states: true)
 copied_noop = NF.states(noop_body, LogOracle.new({}, INT), Set.new, share_states: false)

@@ -51,11 +51,12 @@ require_relative 'static_dispatch_unregistered'
 require_relative 'symbol_cache'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'static_dispatch_fragment_uses'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
   # Ops::SEND plus LOADSYM, whose symbol operand is read as a method name.
-  SEND_OPS = (BytecodeIR::Ops::SEND | %w[LOADSYM]).freeze
+  SEND_OPS = (BytecodeIR::Ops::SEND | %i[LOADSYM]).freeze
   NAME_ARG = %r{:([\w+\-*/<>=!?\[\]&|^~%@]+)}
   # The identifier group accepts `$`: a generated symbol for an operator or
   # predicate name carries the mangling's `$<hex>` escapes
@@ -316,7 +317,7 @@ module StaticDispatchRegistrations
 
   def core_reflective?(irep)
     BytecodeIR.for(irep).each_source.any? do |insn, _|
-      (SEND_OPS.include?(insn.op) || %w[TDEF SDEF].include?(insn.op)) && CORE_REFLECTIVE_SENDS.include?(insn.sym.to_s)
+      (SEND_OPS.include?(insn.op) || %i[TDEF SDEF].include?(insn.op)) && CORE_REFLECTIVE_SENDS.include?(insn.sym.to_s)
     end
   end
 
@@ -324,10 +325,10 @@ module StaticDispatchRegistrations
   def core_irep_tokens(irep, tokens, self_may, method_name)
     irep.pool.each { |v| tokens << v if v.is_a?(String) && v.match?(IDENT) }
     insns = BytecodeIR.for(irep).each_source.to_a
-    tokens.merge(irep.syms.map(&:to_s)) if insns.any? { |insn, _| %w[ALIAS UNDEF].include?(insn.op) }
+    tokens.merge(irep.syms.map(&:to_s)) if insns.any? { |insn, _| %i[ALIAS UNDEF].include?(insn.op) }
     kinds = receiver_kinds(irep)
     insns.each_with_index do |(insn, _), i|
-      if insn.op == 'LOADSYM'
+      if insn.op == :LOADSYM
         tokens << insn.sym.to_s
       elsif SEND_OPS.include?(insn.op)
         kind = kinds[i]
@@ -338,7 +339,7 @@ module StaticDispatchRegistrations
               else true
               end
         tokens << insn.sym.to_s if may
-      elsif insn.op == 'SUPER'
+      elsif insn.op == :SUPER
         tokens << method_name if self_may && method_name
       elsif (op_name = IMPLICIT_DISPATCH_NAMES[insn.op])
         tokens << op_name
@@ -503,7 +504,7 @@ module StaticDispatchRegistrations
     dynamic = Set.new(ALWAYS_DYNAMIC)
     fragments = Set.new
     ireps.each_value do |irep|
-      BytecodeIR.for(irep).instructions_with_op('SUPER').each do
+      BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
         up = method_of[irep.label]
         dynamic << body_of[up][1] if up
       end
@@ -519,7 +520,8 @@ module StaticDispatchRegistrations
              .merge(c_literals(r[:hand]))
     end
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
-    dynamic.merge(outside_world_tokens(repo_root, closed_only: closed_only, core: core))
+    outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core)
+    dynamic.merge(outside)
 
     # Which bytecode can run. No method body -- compiled or not -- runs as
     # bytecode except after a dynamic lookup of its own name: a direct C++ call
@@ -575,10 +577,15 @@ module StaticDispatchRegistrations
       end
     end)
 
+    # FRAGMENT_USES (closed only): only the literals that can reach a built string stay fragments.
+    if closed_only
+      fragments &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
+    end
+
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies }
   end
 
-  LITERAL_OPS = %w[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
+  LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
                    HASH HASHADD HASHCAT RANGE_INC RANGE_EXC SYMBOL LAMBDA BLOCK METHOD INTERN].freeze
   INSTANTIATING = %w[new allocate dup clone load _load marshal_load].freeze
   ENGINE_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\z)/
@@ -589,10 +596,10 @@ module StaticDispatchRegistrations
   # so its send is :unknown rather than the kind of the local write.
   def receiver_kinds(irep)
     # APOST writes a whole run of registers, which the query does not model: no receiver facts for this irep.
-    apost = BytecodeIR.for(irep).op?('APOST')
+    apost = BytecodeIR.for(irep).op?(:APOST)
     opaque = BytecodeIR.own_upvar_written_regs(irep)
     BytecodeIR.for(irep).each_source.map do |insn, index|
-      next nil unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
+      next nil unless SEND_OPS.include?(insn.op) && insn.op != :LOADSYM
       next :self if BytecodeIR::Ops::SELF_SEND.include?(insn.op)
       next :unknown if apost
 
@@ -602,7 +609,7 @@ module StaticDispatchRegistrations
 
   # The kind every definition of +reg+ reaching +index+ gives, or :unknown when they disagree or the query refuses.
   def receiver_kind_at(irep, index, reg, opaque)
-    defs = BytecodeIR.reaching_definitions(irep, index, reg, opaque_regs: opaque)
+    defs = BytecodeIR.reaching_definitions(irep, index, reg, opaque_regs: opaque, shared: true)
     return :unknown unless defs && !defs.empty?
 
     kinds = defs.map { |definition| definition_kind(irep, definition) }.uniq
@@ -611,12 +618,12 @@ module StaticDispatchRegistrations
 
   def definition_kind(irep, definition)
     # Only R0 is a known value at entry; an argument or a caller's local is not.
-    return definition.reg == '0' ? :self : :unknown if definition.entry?
+    return definition.reg == 0 ? :self : :unknown if definition.entry?
 
     insn = BytecodeIR.for(irep).source_at(definition.index)
     case insn.op
-    when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
-    when 'LOADSELF' then :self
+    when :GETCONST, :GETMCNST then [:const, insn.const_name.to_s]
+    when :LOADSELF then :self
     else BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || LITERAL_OPS.include?(insn.op) ? :core : :unknown
     end
   end
@@ -662,7 +669,7 @@ module StaticDispatchRegistrations
       self_kind = if m.nil? then :class
                   else singleton.call(body_of[m][0]) ? :class : :instance
                   end
-      irep.each_with_op(*(SEND_OPS - ['LOADSYM'])) do |insn, idx|
+      irep.each_with_op(*(SEND_OPS - [:LOADSYM])) do |insn, idx|
         name = insn.sym
         next unless name
 
@@ -736,7 +743,7 @@ end
 if $PROGRAM_NAME == __FILE__
   repo_root = File.expand_path('../..', __dir__)
   mrbc = ENV['MRBC'] || 'mrbc'
-  # --closed-only: the list only the closed build uses (see static_dispatch_unregistered_closed.rb).
+  # --closed-only: the list only the closed build uses(see static_dispatch_unregistered_closed.rb).
   closed_only = ARGV.include?('--closed-only')
   # The probe generates with BC2CPP_BUILD_NAME=closed (bc2cpp_closed_world_probe_env), so the closed list's entries
   # are already missing from its registrations. They must count as already unregistered, or a re-run drops every

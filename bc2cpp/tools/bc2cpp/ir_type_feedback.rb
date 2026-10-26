@@ -10,10 +10,10 @@ require_relative 'core_hierarchy_sigs'
 
 module IrTypeFeedback
   # FRAME_EXIT without STOP: a STOP is not a return kind for these block and method rows.
-  RETURN_OPS = (BytecodeIR::Ops::FRAME_EXIT - ['STOP']).freeze
+  RETURN_OPS = (BytecodeIR::Ops::FRAME_EXIT - [:STOP]).freeze
   # Sends with an explicit receiver in R(a): the SSEND forms take self implicitly.
-  EXPLICIT_RECEIVER_SENDS = (BytecodeIR::Ops::SEND - %w[SSEND SSEND0 SSENDB]).freeze
-  LITERAL_RETURNS = { 'RETNIL' => :NilClass, 'RETTRUE' => :TrueClass, 'RETFALSE' => :FalseClass }.freeze
+  EXPLICIT_RECEIVER_SENDS = (BytecodeIR::Ops::SEND - %i[SSEND SSEND0 SSENDB]).freeze
+  LITERAL_RETURNS = { :RETNIL => :NilClass, :RETTRUE => :TrueClass, :RETFALSE => :FalseClass }.freeze
   # Core superclasses and mixins, read from sig/bc2cpp/declarations.rbs#core_hierarchy (fails if that section is empty).
   CORE_PARENTS, CORE_MIXINS = CoreHierarchySigs.symbol_hierarchy
 
@@ -23,19 +23,21 @@ module IrTypeFeedback
     return nil if ENV['BC2CPP_IR_RBS_BLOCK_TYPES'] == '0' || !ctx.signature_contracts
 
     insn = BytecodeIR.for(parent).source_at(index)
-    receiver = insn.op == 'SSENDB' ? Set[definition.owner.to_sym] : analysis.fact_at(index, insn.reg)&.classes
+    receiver = insn.op == :SSENDB ? Set[definition.owner.to_sym] : analysis.fact_at(index, insn.reg)&.classes
     return nil unless receiver&.size == 1
 
     applied = ctx.signature_contracts
-    owners = prepared ? prepared.owners(receiver.first.to_s) : RbsSignatures.contract_owners(receiver.first.to_s, ctx.superclass_of || {},
+    receiver_name = RbsSignatures.ir_class_name(receiver.first)
+    name = insn.sym.to_s
+    owners = prepared ? prepared.owners(receiver_name) : RbsSignatures.contract_owners(receiver_name, ctx.superclass_of || {},
                                           included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
                                           unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
-    target = prepared ? prepared.target(receiver.first.to_s, insn.sym.to_s) : owners.find { |owner| applied.ir_methods.include?([owner, insn.sym.to_s]) }
+    target = prepared ? prepared.target(receiver_name, name) : owners.find { |owner| applied.ir_methods.include?([owner, name]) }
     signature = target && IrRbsBlockTypes.signature_for(applied, target, insn.sym)
     return nil unless signature
 
-    arguments = (1..insn.argc).map { |slot| analysis.fact_at(index, (insn.reg.to_i + slot).to_s) }
-    elements = (1..insn.argc).map { |slot| analysis.element_fact_at(index, (insn.reg.to_i + slot).to_s) }
+    arguments = (1..insn.argc).map { |slot| analysis.fact_at(index, (insn.reg + slot)) }
+    elements = (1..insn.argc).map { |slot| analysis.element_fact_at(index, (insn.reg + slot)) }
     IrRbsBlockTypes.bind(signature, arguments: arguments, argument_elements: elements)
   end
 
@@ -46,15 +48,15 @@ module IrTypeFeedback
     insn = BytecodeIR.for(parent).source_at(index)
     return [] unless BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && insn.plain_fixed_argc?
 
-    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg + insn.argc + 1), origin_transfers: true, shared: true)
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = BytecodeIR.for(parent).source_at(definitions.first.index)
-    child = ctx.ireps[Array(parent.reps)[producer.block_index.to_i]] if producer.op == 'BLOCK'
+    child = ctx.ireps[Array(parent.reps)[producer.block_index.to_i]] if producer.op == :BLOCK
     fields = child&.enter&.enter_fields
     return [] unless child&.file && fields && fields.drop(1).all?(&:zero?) && fields.first.between?(0, 8)
 
-    iterator = insn.op == 'SENDB' && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
+    iterator = insn.op == :SENDB && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
     elements = analysis.element_fact_at(index, insn.reg) if iterator
     binding = callback_binding(ctx, definition, parent, index, analysis, prepared: prepared)
     summary = IrYieldTypes.summarize(ctx, parent, index, analysis)
@@ -63,13 +65,13 @@ module IrTypeFeedback
       contracts = bounds.values.flat_map(&:contracts).uniq.sort.freeze
       invocation_safe = summary.invocation_safe
     elsif binding && binding.argument_facts.size == fields.first
-      bounds = binding.argument_facts.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] }
+      bounds = binding.argument_facts.each_with_index.to_h { |fact, slot| [slot + 1, fact] }
       contracts = binding.contracts
       invocation_safe = false
     elsif elements && fields.first == (insn.sym == 'each_with_index' ? 2 : 1)
       contracts = (elements.contracts + ["iterator:#{insn.sym}"]).sort.freeze
-      bounds = { '1' => BytecodeIR::Types::Fact.new(classes: elements.classes, declared: true, contracts: contracts) }
-      bounds['2'] = BytecodeIR::Types::Fact.new(classes: Set[:Integer], declared: true, contracts: contracts) if fields.first == 2
+      bounds = { 1 => BytecodeIR::Types::Fact.new(classes: elements.classes, declared: true, contracts: contracts) }
+      bounds[2] = BytecodeIR::Types::Fact.new(classes: Set[:Integer], declared: true, contracts: contracts) if fields.first == 2
       invocation_safe = false
     else
       return []
@@ -107,7 +109,7 @@ module IrTypeFeedback
     exits = []
     BytecodeIR.for(child).each_source do |instruction, position|
       kind = if RETURN_OPS.include?(instruction.op) then 'block_return'
-             elsif instruction.op == 'SETIV' then 'block_ivar_store'
+             elsif instruction.op == :SETIV then 'block_ivar_store'
              elsif EXPLICIT_RECEIVER_SENDS.include?(instruction.op) then 'block_receiver'
              end
       next unless kind
@@ -115,7 +117,7 @@ module IrTypeFeedback
       refusal = {}
       fact = if LITERAL_RETURNS.key?(instruction.op)
                BytecodeIR::Types::Fact.new(classes: Set[LITERAL_RETURNS[instruction.op]], declared: false, contracts: [])
-             elsif %w[RETURN_BLK BREAK RETSELF].include?(instruction.op) || !Array(child.catch_handlers).empty?
+             elsif %i[RETURN_BLK BREAK RETSELF].include?(instruction.op) || !Array(child.catch_handlers).empty?
                refusal[:cause] = "unsupported:block-exit-or-handler"
                nil
              else
@@ -128,7 +130,7 @@ module IrTypeFeedback
       exits << fact if kind == 'block_return'
     end
     if !exits.empty? && exits.none?(&:nil?) && Array(child.catch_handlers).empty? &&
-       !BytecodeIR.for(child).op?('RETURN_BLK', 'BREAK')
+       !BytecodeIR.for(child).op?(:RETURN_BLK, :BREAK)
       returned = BytecodeIR::Types::Fact.new(classes: exits.reduce(Set.new) { |set, fact| set | fact.classes },
                                           declared: exits.any?(&:declared?), contracts: exits.flat_map(&:contracts).uniq.sort)
       if binding && callback_inputs_fit
@@ -236,13 +238,13 @@ module IrTypeFeedback
         (1..mandatory).each do |position|
           classes = ctx.gen.bytecode_ir_argument_classes(definition, position)
           classes ||= ctx.gen.bytecode_ir_call_graph_argument_classes(definition, position) if ctx.gen.respond_to?(:bytecode_ir_call_graph_argument_classes)
-          inferred_args[position.to_s] = classes if classes
+          inferred_args[position] = classes if classes
         end
         # Optional registers: only a complete call-site join, where every reaching call passed the argument.
         if ctx.gen.respond_to?(:bytecode_ir_optional_argument_classes)
           ((mandatory + 1)..(mandatory + (enter ? enter[1].to_i : 0))).each do |position|
             classes = ctx.gen.bytecode_ir_optional_argument_classes(definition, position)
-            inferred_args[position.to_s] = classes if classes
+            inferred_args[position] = classes if classes
           end
         end
         # Rest elements, keywords and the block: the same complete call-site joins the report rows use.
@@ -252,10 +254,10 @@ module IrTypeFeedback
         rest = enter ? enter[2].to_i : 0
         if rest.positive? && ctx.gen.respond_to?(:bytecode_ir_rest_argument_classes)
           classes = ctx.gen.bytecode_ir_rest_argument_classes(definition)
-          inferred_rest_elements[(mandatory + optional + 1).to_s] = classes if classes
+          inferred_rest_elements[mandatory + optional + 1] = classes if classes
         end
         if ctx.gen.respond_to?(:bytecode_ir_keyword_argument_classes)
-          irep.each_with_op('KARG') do |insn, _index|
+          irep.each_with_op(:KARG) do |insn, _index|
             name = insn.sym.to_s
             classes = ctx.gen.bytecode_ir_keyword_argument_classes(definition, name)
             inferred_keywords[name] = classes if classes
@@ -263,7 +265,7 @@ module IrTypeFeedback
         end
         declared_block = ctx.signature_contracts&.ir_block_signatures&.[]([definition.owner.to_s, definition.name.to_s])
         if !declared_block && ctx.gen.respond_to?(:bytecode_ir_block_proc_classes) && ctx.gen.bytecode_ir_block_proc_classes(definition)
-          inferred_args[(mandatory + optional + rest + 1).to_s] = Set[:Proc]
+          inferred_args[mandatory + optional + rest + 1] = Set[:Proc]
         end
       end
       analysis = if applied
@@ -281,7 +283,7 @@ module IrTypeFeedback
       exits = []
       BytecodeIR.for(irep).each_source do |insn, index|
         kind = if RETURN_OPS.include?(insn.op) then 'return'
-               elsif insn.op == 'SETIV' then 'ivar_store'
+               elsif insn.op == :SETIV then 'ivar_store'
                elsif EXPLICIT_RECEIVER_SENDS.include?(insn.op) then 'receiver'
                end
         rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis, prepared: prepared)) if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
@@ -290,7 +292,7 @@ module IrTypeFeedback
         refusal = {}
         fact = if LITERAL_RETURNS.key?(insn.op)
                  BytecodeIR::Types::Fact.new(classes: Set[LITERAL_RETURNS[insn.op]].freeze, declared: false, contracts: [].freeze).freeze
-               elsif %w[RETURN_BLK BREAK RETSELF].include?(insn.op)
+               elsif %i[RETURN_BLK BREAK RETSELF].include?(insn.op)
                  refusal[:cause] = "unsupported:#{insn.op}"
                  nil
                else
