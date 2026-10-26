@@ -1140,7 +1140,7 @@ if $PROGRAM_NAME == __FILE__
   # BC2CPP_SELF_REGISTERING: same guard as for the probing CodeGen above.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   CodeGen.stable_class_constants = profile_call.call('StableClassConstants.analyze') do
-    StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
+    StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs, root_label) |
       StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   end
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="

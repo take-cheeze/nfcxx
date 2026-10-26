@@ -4,6 +4,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'source_text'
 require_relative 'scan_cache'
+require_relative 'unique_class_names'
 
 # CONST_SITE_CACHE: a GETCONST inside a namespaced owner resolves its lexical
 # scope chain on every execution -- one mrb_const_get per owner path segment,
@@ -12,8 +13,12 @@ require_relative 'scan_cache'
 #
 # Caching the result per site is only sound if the lookup can never resolve
 # differently later. StableClassConstants proves that for a bare name that
-#   (a) is introduced by exactly ONE `class`/`module` statement in the program,
-#       so no other scope can define, reopen-as-something-else or shadow it;
+#   (a) every `class`/`module` statement of which opens the same qualified path
+#       (UniqueClassNames.bytecode_class_paths from the root irep), so no other
+#       scope can define, reopen-as-something-else or shadow it: a reopening
+#       statement at that path finds the one constant and defines nothing new
+#       (`module LCF` in every file of mruby-lcf). Without the root irep, exactly
+#       ONE statement, as before;
 #   (b) is never assigned with `Name = ...` (SETCONST/SETMCNST), which is how a
 #       constant gets reassigned, nor defined by a native (mrb_define_class /
 #       mrb_define_const / mrb_const_set) or foreign Ruby source compiled into
@@ -31,7 +36,7 @@ module StableClassConstants
 
   module_function
 
-  def analyze(ireps, native_paths, foreign_paths)
+  def analyze(ireps, native_paths, foreign_paths, root_label = nil)
     return Set.new unless native_paths && foreign_paths
 
     class_defs = Hash.new(0)
@@ -62,7 +67,10 @@ module StableClassConstants
     end
     outside = IntegerConstants.native_defined_const_names(native_paths) |
               IntegerConstants.foreign_const_names(foreign_paths)
-    class_defs.select { |name, count| count == 1 && !assigned.include?(name) && !outside.include?(name) }.keys.to_set
+    paths = root_label && UniqueClassNames.bytecode_class_paths(ireps, root_label)
+    one_path = ->(name, count) { paths ? paths[name].size == 1 && paths[name].first.is_a?(String) : count == 1 }
+    class_defs.select { |name, count| one_path.call(name, count) && !assigned.include?(name) && !outside.include?(name) }
+              .keys.to_set
   end
 end
 
