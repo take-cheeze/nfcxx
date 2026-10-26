@@ -354,16 +354,23 @@ class CodeGen
 
   # "NIL|Game::Foo" style name of a class mask.
   def class_mask_name(mask)
+    parts = class_mask_classes(mask)
+    parts.empty? ? 'NONE' : parts.join('|')
+  end
+
+  # Class-name collection behind class_mask_name, without the display join.
+  def class_mask_classes(mask)
     parts = []
     parts << 'CHECKED' if mask.anybits?(NumericFlow::CHECKED)
-    parts << numeric_mask_name(mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)) if (mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)).nonzero?
-    # numeric_mask_name may register Symbol; take the append-only snapshot afterwards.
+    numeric_part = numeric_mask_classes(mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1))
+    parts.concat(numeric_part.empty? && (mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)).nonzero? ? ['NONE'] : numeric_part)
+    # numeric_mask_classes may register Symbol; take the append-only snapshot afterwards.
     native_result_class_bits.each do |klass, _bit, position|
       parts << klass if position >= NumericFlow::CLASS_BIT_BASE && mask[position] == 1
     end
     # LCF kinds (EXACT_LCF_ROWS) ride in this flow too.
     @lcf_rows&.kinds&.each { |k| parts << @lcf_rows.name(k.bit) if mask[k.bit.bit_length - 1] == 1 }
-    parts.empty? ? 'NONE' : parts.join('|')
+    parts
   end
 end
 

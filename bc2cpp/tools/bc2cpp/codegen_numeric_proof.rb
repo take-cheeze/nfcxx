@@ -257,11 +257,17 @@ class CodeGen
 
   # Class-set names for the diagnostic and the report, e.g. "INT|NIL".
   def numeric_mask_name(mask)
+    found = numeric_mask_classes(mask)
+    found.empty? ? 'NONE' : found.join('|')
+  end
+
+  # Class-name collection behind numeric_mask_name, without the display join.
+  def numeric_mask_classes(mask)
     found = NUMERIC_MASK_NAMES.filter_map { |position, name| name if mask[position] == 1 }
     @lcf_rows&.kinds&.each { |k| found << @lcf_rows.name(k.bit) if mask[k.bit.bit_length - 1] == 1 }
     @frozen_tables&.each_shape_in(mask) { |s| found << @frozen_tables.name(s.bit) }
     found << 'SYM' if frozen_symbol_bit && mask.anybits?(frozen_symbol_bit)
-    found.empty? ? 'NONE' : found.join('|')
+    found
   end
 
   # One line per fact, sorted, for the bc2cpp.rb diagnostic (and the coverage

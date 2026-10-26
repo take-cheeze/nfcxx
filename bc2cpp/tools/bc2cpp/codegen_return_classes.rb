@@ -11,6 +11,7 @@ require_relative 'call_context_arguments'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir_returns'
 require_relative 'block_yield_types'
+require_relative 'rbs_signatures'
 
 # CodeGen: RETURN_CLASS_TABLE.
 #
@@ -652,7 +653,7 @@ class CodeGen
     receivers = bytecode_ir_mask_classes(state[insn.reg.to_i])
     return nil unless receivers
 
-    results = receivers.map { |klass| bytecode_ir_native_expression_classes(insn.sym, klass.to_s, argc) }
+    results = receivers.map { |klass| bytecode_ir_native_expression_classes(insn.sym, RbsSignatures.ir_class_name(klass), argc) }
     results.any?(&:nil?) ? nil : results.reduce(Set.new, :|).freeze
   end
 

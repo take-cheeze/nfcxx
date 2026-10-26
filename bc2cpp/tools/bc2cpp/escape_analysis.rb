@@ -696,7 +696,7 @@ module EscapeAnalysis
     # :call use.
     def block_verdict(irep, self_klass: nil)
       fields = irep.enter ? irep.enter.enter_fields : []
-      sources = EscapeAnalysis.op_sites(irep, BLKPUSH).filter_map { |insn, j| j if insn.paren_value.to_i.zero? }
+      sources = EscapeAnalysis.op_sites(irep, BLKPUSH).filter_map { |insn, j| j if insn.paren_int.to_i.zero? }
       starts = {}
       local = nil
       if fields[6].to_i.positive?
@@ -989,7 +989,7 @@ module EscapeAnalysis
         escape.call(:stored_array) if s.any? { |r| r.to_i.between?(1, run.params) }
         s - [lead]
       when :BLKPUSH
-        s - [lead] | (BytecodeIR::OperandModel.paren_value(insn).to_i.zero? && held.call(run.block_slot) ? [lead] : [])
+        s - [lead] | (BytecodeIR::OperandModel.paren_int(insn).to_i.zero? && held.call(run.block_slot) ? [lead] : [])
       when *BINARY_NAMES.keys
         send_site(run, i, insn, s, BINARY_NAMES[op], recv: lead, args: [lead.to_i + 1], dest: lead)
       when :ADDI, :SUBI
@@ -1303,7 +1303,7 @@ module EscapeAnalysis
           if insn.op == :GETUPVAR
             idx, level = insn.upvar_ref
             refs << { kind: :up, idx: idx, irep: node, index: j, dest: insn.reg, chain: c } if level == d
-          elsif insn.paren_value.to_i == d + 1
+          elsif insn.paren_int == d + 1
             refs << { kind: :blk, irep: node, index: j, dest: insn.reg, chain: c }
           end
         end
