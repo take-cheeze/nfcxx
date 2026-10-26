@@ -382,9 +382,9 @@ module LoopInstallers
 
     # An op this walk does not model: anything it held may have been reached or replaced.
     def havoc
-      @regs.each_value { |v| LoopInstallers.poison(v) }
+      @regs.each { |v| LoopInstallers.poison(v) }
       poison_consts
-      @regs.clear
+      @regs.fill(OPAQUE)
     end
   end
 
