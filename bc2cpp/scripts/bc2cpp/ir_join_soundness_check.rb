@@ -76,14 +76,14 @@ joined = hand_irep([
   hand_insn(16, :SSEND, "R4\t:f\tn=*")
 ])
 check.call('splat unroll: an ARRAY that only one arm of a join writes is not the splat (was: unrolled to 1 element)',
-           gen.splat_array_literal_regs(joined, 4, '5').nil?)
+           gen.splat_array_literal_regs(joined, 4, 5).nil?)
 
 single = hand_irep([
   hand_insn(0, :ARRAY, "R5\t2"),
   hand_insn(4, :SSEND, "R4\t:f\tn=*")
 ])
 check.call('splat unroll: a single reaching literal still unrolls to its two elements',
-           gen.splat_array_literal_regs(single, 1, '5')&.size == 2)
+           gen.splat_array_literal_regs(single, 1, 5)&.size == 2)
 
 # mrbc lowers both `f(*(c ? [1, 2] : [3]))` and `f(*a)` through LOADNIL + ARYCAT: the walk refuses, so the splat
 # stays dynamic. Pins that the refusal is what mrbc output gets.
