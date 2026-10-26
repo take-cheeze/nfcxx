@@ -5,6 +5,8 @@ require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir_operands'
 require_relative '../../tools/bc2cpp/escape_analysis'
 require_relative '../../tools/bc2cpp/call_site_index'
+require_relative '../../tools/bc2cpp/block_self'
+require_relative '../../tools/bc2cpp/ir_block_operands'
 require_relative 'check_support'
 
 suite = FixtureCheck.new('typed_argc_check')
@@ -29,7 +31,12 @@ cases.each do |label, (op, args, expected, slots, call_argc)|
   insn.define_singleton_method(:nk_spec) { raise 'analysis formatted a keyword count' }
   spec = model.argc_spec(insn)
   suite.check("#{label}: numeric counts and explicit flags", spec.to_a == expected)
+  suite.check("#{label}: primitive slot counts", [insn.positional_slots, insn.keyword_slots] == slots)
   suite.check("#{label}: packed argument register spans", analyzer.send(:argument_slots, insn) == slots)
+  expected_block = insn.argc_operand ? insn.reg + slots.sum + 1 : nil
+  suite.check("#{label}: block operand register", IrBlockOperands.block_register(insn) == expected_block)
+  block_slot = BytecodeIR::Ops::B_SUFFIX_OPS.include?(op) ? 1 : 0
+  suite.check("#{label}: block-self send window", BlockSelf.send_window(insn) == slots.sum + block_slot)
   body = Irep.new(label: label, instructions: [insn], nregs: 32, nlocals: 1, catch_handlers: [], reps: [], pool: [])
   if BytecodeIR::Ops::RECEIVER_SEND.include?(op)
     site = CallSiteIndex.build({ label => body })['target'].first
@@ -39,6 +46,18 @@ cases.each do |label, (op, args, expected, slots, call_argc)|
   suite.check("#{label}: formatting stays at the text boundary",
               text == (old_n ? "n=#{old_n}#{old_nk ? "|nk=#{old_nk}" : ''}" : nil))
 end
+
+probe = Insn.new(op: :SEND, args: 'R2 :target n=3|nk=2')
+probe.typed
+probe.argc
+before = GC.stat(:total_allocated_objects)
+10_000.times { probe.positional_slots; probe.keyword_slots }
+allocated = GC.stat(:total_allocated_objects) - before
+suite.check('primitive slot queries allocate no per-query objects', allocated < 20)
+before = GC.stat(:total_allocated_objects)
+10_000.times { analyzer.send(:argument_slots, probe) }
+allocated = GC.stat(:total_allocated_objects) - before
+suite.check('escape spans allocate only the returned pair', allocated.between?(10_000, 10_020))
 
 if ENV['MRBC']
   suite.require_mrbc!
