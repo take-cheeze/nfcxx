@@ -237,7 +237,7 @@ class CodeGen
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
       else
-        guarded = guarded_game_integer_immediate(:ADD, irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+        guarded = guarded_game_integer_immediate(:ADD, irep, idx, unshift_proof_reg(d, reg_offset), lit,
                                                  owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: addition stays inside Fixnum.\n" \
@@ -295,7 +295,7 @@ class CodeGen
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
       else
-        guarded = guarded_game_integer_immediate(:SUB, irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+        guarded = guarded_game_integer_immediate(:SUB, irep, idx, unshift_proof_reg(d, reg_offset), lit,
                                                  owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: subtraction stays inside Fixnum.\n" \

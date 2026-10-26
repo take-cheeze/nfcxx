@@ -262,7 +262,7 @@ module ConstantArgumentSites
     when :LOADI__1 then -1
     when BytecodeIR::Ops::LOADI_SLOT then insn.op.to_s.delete_prefix('LOADI_').to_i
     when :LOADI8, :LOADI16, :LOADI32, :LOADINEG
-      value = insn.imm_operand&.to_i
+      value = insn.imm_operand
       value && insn.op == :LOADINEG ? -value.abs : value
     end
   end

@@ -293,7 +293,7 @@ class CodeGen
 
   def fixnum_exact_tier(name, dest, rhs)
     overflow, helper = FIXNUM_TIER_OPS.fetch(name)
-    register = rhs.start_with?('r')
+    register = rhs.is_a?(String) && rhs.start_with?('r')
     "{ mrb_int bc2cpp_z; " \
       "if (#{overflow}(mrb_fixnum(r#{dest}), #{register ? "mrb_fixnum(#{rhs})" : rhs}, &bc2cpp_z) || !FIXABLE(bc2cpp_z)) " \
       "{ r#{dest} = #{helper}(M, r#{dest}, #{register ? rhs : "mrb_fixnum_value(#{rhs})"}); } " \
