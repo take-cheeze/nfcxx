@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir tests/pathb-borrow/index/*.ir tests/pathb-borrow/eh/*.ir tests/pathb-borrow/copy/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir tests/pathb-borrow/index/*.ir tests/pathb-borrow/eh/*.ir tests/pathb-borrow/copy/*.ir tests/pathb-borrow/throws/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
@@ -424,6 +424,43 @@ if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: q' "$tmp/out"; then
   echo "FAIL sret without the call: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
 fi
 echo "ok   aggregate results (sret) as init arguments, __int128 by value and by result, mutant, emitter validation, and native execution"
+pass=$((pass + 1))
+# try/catch: EDG's try block is _setjmp on a frame, and its handler is entered from the throw points of the body,
+# with the body's locals destroyed. A typed catch with a catch (...) after it, and a rethrow from an inner handler,
+# check and run natively. The errors module has one function per handler-path rule; its two correct cases give no
+# diagnostic.
+tc=tests/pathb-borrow/contracts/try_catch.cpp
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tc" > "$tmp/tc.ir"
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/tc.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $tc"; cat "$tmp/out"; exit 1; }
+{ head -1 "$tmp/tc.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/tc.ir"; } > "$tmp/tc_pasted.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/tc_pasted.ir" > "$tmp/tc.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/tc_pasted.ir" > "$tmp/tc-oracle.qbe"
+cmp "$tmp/tc.qbe" "$tmp/tc-oracle.qbe"
+edglib=${EDG_LIB:-build/edg/lib}
+if [ -f "$edglib/libC.a" ]; then
+  "${QBE:-build/qbe/qbe}" "$tmp/tc.qbe" -o "$tmp/tc.s"
+  cc "$tmp/tc.s" -o "$tmp/tc" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  "$tmp/tc" || { echo "FAIL $tc runtime: expected 0"; exit 1; }
+else
+  echo "skip $tc native run: no $edglib/libC.a"
+fi
+tce=tests/pathb-borrow/contracts/try_catch_errors.cpp
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tce" > "$tmp/tce.ir"
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends --effects tests/pathb-borrow/throws/may.effects "$tmp/tce.ir" > "$tmp/out" 2>&1 || rc=$?
+printf '%s\n' '_Z9late_initv: uninitialized: x' '_Z13dangling_bodyv: use-after-scope: inner' \
+  '_Z12outer_directv: uninitialized: x' '_Z18dangling_exceptionv: use-after-scope: exception object' > "$tmp/tce.expect"
+if [ "$rc" != 1 ] || ! diff -u "$tmp/tce.expect" "$tmp/out"; then
+  echo "FAIL $tce: expected exit 1 with the handler-path diagnostics, got $rc"; exit 1
+fi
+# A handler with only typed clauses has no "no clause matched" path (the runtime longjmps only into a matching try):
+# tests/cases/exceptions.cpp returns from both its body and its one typed handler, and EDG's dead fall-through after
+# them does not pop main's frame.
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/cases/exceptions.cpp > "$tmp/exceptions.ir"
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/exceptions.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL tests/cases/exceptions.cpp"; cat "$tmp/out"; exit 1; }
+echo "ok   try/catch handlers from throw points, typed and catch-all clauses, rethrow, handler-path mutants, and native execution"
 pass=$((pass + 1))
 # A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
 # registration around it is still refused, for its own reason.)
