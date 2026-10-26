@@ -797,10 +797,16 @@ class CodeGen
     return false unless text.start_with?('{') && text.end_with?('}')
 
     depth = 0
-    text.each_char.with_index do |char, index|
-      depth += 1 if char == '{'
-      depth -= 1 if char == '}'
-      return false if depth.zero? && index != text.length - 1
+    # Braces are ASCII bytes even when generated literals or comments contain UTF-8.
+    index = 0
+    last = text.bytesize - 1
+    while index <= last
+      byte = text.getbyte(index)
+      depth += 1 if byte == 123
+      depth -= 1 if byte == 125
+      return false if depth.zero? && index != last
+
+      index += 1
     end
     depth.zero?
   end
