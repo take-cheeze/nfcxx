@@ -565,14 +565,16 @@ class CodeGen
       end
 
       owner_path = lexical_scope_path(owner_def.owner)
-      if self.class.stable_class_constants&.include?(name)
+      value_const = self.class.stable_value_constants&.include?(name)
+      if value_const || self.class.stable_class_constants&.include?(name)
         # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
         # (lexical scope, name); it runs the ordinary lookup until it finds a
-        # class/module, then returns the stored value.
+        # class/module (any value for CONST_VALUE_CACHE), then returns the stored value.
         @const_site_cache ||= {}
         key = [owner_path, name]
         unless @const_site_cache.key?(key)
-          @const_site_cache[key] = { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path) }
+          @const_site_cache[key] = { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path),
+                                     value: value_const }
         end
         return "  r#{d} = bc2cpp_cconst_#{@const_site_cache[key][:index]}(M);\n"
       end

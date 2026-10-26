@@ -23,7 +23,7 @@ class CodeGen
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in
   # storage order); nil proves nothing.
   class << self
-    attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
+    attr_accessor :wired_embeddings, :stable_class_constants, :stable_value_constants, :struct_members,
                   :integer_constant_values, :integer_constant_keys, :integer_constant_ranges, :constant_value_classes,
                   :module_names, :core_hidden_defs,
                   :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
