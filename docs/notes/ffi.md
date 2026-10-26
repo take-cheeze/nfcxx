@@ -51,6 +51,11 @@ pointer, a small struct returned in a register, a host function called back from
 the C library, which gcc compiled: `div` and `ldiv` (struct returns in registers), `qsort` with a host comparator,
 `strlen`; a missing symbol and a compile error give `Error` and `CompileError`; a moved `Module`; the cache.
 
+ABI integration: `tests/ffi/abi_gcc.c` (built by the system `cc`) and `tests/ffi/abi_host.cpp` (built by nfcxx, called
+through nfcffi) print the same 11 lines for the functions of `tests/ffi/abi.h`: the struct layouts (`offsetof` against
+`Library::member_offsets`), a `long double`, structs by value in both directions, and struct and scalar callbacks. Their
+output is compared byte for byte, on both back ends.
+
 ## Declarations (Milestone 2)
 
 `Ffi::declarations(file, dialect)` lists the functions a source declares, with their signatures, read from the
