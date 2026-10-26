@@ -13,6 +13,9 @@
 #   BYTECODE_PROC: what counts as generated C building a proc over a bytecode irep (which keeps every block of a
 #     registered compiled method runnable as bytecode).
 #   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources, nor the workflows.
+#   SUFFIX_BASES: `x=` / `x?` / `x!` follows a dynamic `x` only when `x` was read as text (a Ruby text scan, a naming
+#     macro's argument); an exact name from bytecode or a C literal keeps its own suffix only. A pool literal "=",
+#     "?" or "!" that may reach a built string (FRAGMENT_USES) puts the rule back for every name.
 #   HAND_REGISTRATION_GUARD: every closed-listed hand line in register.cxx is wrapped in #ifndef
 #     BC2CPP_UNREGISTERED_<entry> (prune_static_dispatch_registrations.rb --closed --check), and the closed list may
 #     take RGSS owners and engine module singletons, never reopened core classes (CLOSED_OWNER_RE).
@@ -65,11 +68,24 @@ check('naming_macros: stringification', naming.include?('CALL_NAMED') && naming.
 check('naming_macros: a macro passing its parameter on to a naming one', naming.include?('CALL_VIA'))
 check('naming_macros: a macro that names nothing', !naming.include?('PLAIN'))
 tokens = Set.new
-S.native_name_tokens(native, tokens, naming)
+text_tokens = Set.new
+S.native_name_tokens(native, tokens, naming, text_tokens: text_tokens)
 check('native: string literal', tokens.include?('refresh'))
 check('native: MRB_SYM_Q / MRB_SYM_E', tokens.include?('visible?') && tokens.include?('width='))
 check('native: naming macro arguments', tokens.include?('redraw') && tokens.include?('relayout'))
 check('native: bare identifiers name nothing', !tokens.include?('size') && !tokens.include?('preview_map_id'))
+check('native: only naming macro arguments are text tokens',
+      text_tokens == Set['self', 'redraw', 'relayout'] && !text_tokens.include?('refresh'))
+
+# --- SUFFIX_BASES ---
+dyn = Set['done', 'width']
+check('suffix: a text-read base keeps its setter', S.dynamic_name?('width=', dyn, Set.new, Set['width']))
+check('suffix: an exact base does not keep its predicate or setter',
+      !S.dynamic_name?('done?', dyn, Set.new, Set['width']) && !S.dynamic_name?('done=', dyn, Set.new, Set.new))
+check('suffix: the base itself stays dynamic', S.dynamic_name?('done', dyn, Set.new, Set.new))
+check('suffix: the default keeps the rule for every dynamic base', S.dynamic_name?('done?', dyn, Set.new))
+check('suffix: "=", "?", "!" are the suffix literals',
+      %w[= ? !].all? { |c| c.match?(S::SUFFIX_LITERAL) } && !'=='.match?(S::SUFFIX_LITERAL))
 root = File.expand_path('../..', __dir__)
 scanning = "#{root}/3rd/mruby/include/mruby/presym/scanning.h"
 check('naming_macros: presym/scanning.h redefinitions are not the build',
@@ -171,6 +187,8 @@ if ENV['MRBC']
           "#{x}: #{kind}"
         end
         def built(x) = respond_to?("#{x}_built_suffix")
+        def setter_name(x) = respond_to?("#{x}=")
+        def bang_char(c) = c == '!'
         def stored = @word = 'stored_word'
         def handed(o) = o.anything('handed_word')
         def label = 'returned_word'
@@ -209,6 +227,9 @@ if ENV['MRBC']
     check('fragment uses: an element of a duped array handed out is one', escaping.include?('duped_elem_word'))
     check('fragment uses: an element of a frozen array only queried is no fragment',
           !escaping.include?('frozen_elem_word'))
+    suffixes = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, Set.new, S::SUFFIX_LITERAL)
+    check('suffix: a "=" building a setter name reaches a built string', suffixes.include?('='))
+    check('suffix: a compared "!" does not', !suffixes.include?('!'))
   end
 else
   puts 'skip CORE_BYTECODE_TOKENS / FRAGMENT_USES fixtures (no MRBC)'

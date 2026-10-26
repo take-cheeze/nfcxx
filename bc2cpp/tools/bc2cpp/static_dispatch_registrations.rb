@@ -75,6 +75,8 @@ module StaticDispatchRegistrations
   # identifier it is rather than as a runtime-built name.
   IDENT = /\A[a-z_][A-Za-z0-9_$]*[?!=]?\z/
   FRAGMENT = /\A[\w?!=]{2,}\z/
+  # A literal that can turn a base name into its setter / predicate / bang name (SUFFIX_BASES).
+  SUFFIX_LITERAL = /\A[=?!]\z/
   ALWAYS_DYNAMIC = %w[
     initialize initialize_copy method_missing respond_to_missing? respond_to?
     to_s inspect == != ! eql? equal? <=> === =~ hash call to_proc to_ary to_a
@@ -244,9 +246,12 @@ module StaticDispatchRegistrations
 
   # `core`: with closed_only, the closed world's {mrbc:, superclass_of:, struct_owners:} turns on CORE_BYTECODE_TOKENS
   # for the Ruby under 3rd/ (and adds the program-core gems' mrblib, which no other scan reads).
-  def outside_world_tokens(repo_root, closed_only: false, core: nil)
+  # `text`: a Set that also receives every token read as text (Ruby read as text, native naming-macro arguments),
+  # the only tokens SUFFIX_BASES needs.
+  def outside_world_tokens(repo_root, closed_only: false, core: nil, text: nil)
     ruby, native = outside_world_files(repo_root, closed_only: closed_only)
     tokens = Set.new
+    text ||= Set.new
     naming = closed_only ? naming_macros(native) : []
     if closed_only && core
       third = "#{File.expand_path(repo_root)}/3rd/"
@@ -256,16 +261,17 @@ module StaticDispatchRegistrations
       ruby += core_bytecode_tokens(precise.sort, tokens, **core)
     end
     (ruby + native).each do |path|
-      text = File.read(path, encoding: 'BINARY')
+      src = File.read(path, encoding: 'BINARY')
       if closed_only && native.include?(path)
-        native_name_tokens(text, tokens, naming)
+        native_name_tokens(src, tokens, naming, text_tokens: text)
         next
       end
-      text.scan(/[A-Za-z_][A-Za-z0-9_]*[?!=]?/) do |t|
-        tokens << t
-        tokens << t.chomp('=').chomp('?').chomp('!')
+      src.scan(/[A-Za-z_][A-Za-z0-9_]*[?!=]?/) do |t|
+        base = t.chomp('=').chomp('?').chomp('!')
+        tokens << t << base
+        text << t << base
       end
-      text.scan(/MRB_(?:Q?SYM)_([QBE])\((\w+)\)/) do |kind, name|
+      src.scan(/MRB_(?:Q?SYM)_([QBE])\((\w+)\)/) do |kind, name|
         tokens << name + { 'Q' => '?', 'B' => '!', 'E' => '=' }.fetch(kind)
       end
     end
@@ -416,11 +422,15 @@ module StaticDispatchRegistrations
   # that makes a name of its argument (naming_macros). A bare C identifier spelled like a method name (a local
   # `size`, a field `preview_map_id`) looks nothing up, so native files contribute only those.
   # Comments are scanned too: a literal there only adds names, which is the safe direction.
-  def native_name_tokens(text, tokens, macros)
+  # `text_tokens`: also receives a naming macro's arguments, which the macro may suffix itself (`#name "="`).
+  def native_name_tokens(text, tokens, macros, text_tokens: nil)
     text.scan(STRING_LITERAL) { |(s)| tokens << unescape(s) }
     unless macros.empty?
       text.scan(/\b(?:#{macros.map { |m| Regexp.escape(m) }.join('|')})\s*\(([^()]*)\)/) do |(args)|
-        args.scan(/[A-Za-z_][A-Za-z0-9_]*/) { |t| tokens << t }
+        args.scan(/[A-Za-z_][A-Za-z0-9_]*/) do |t|
+          tokens << t
+          text_tokens << t if text_tokens
+        end
       end
     end
     text.scan(/MRB_(?:Q?SYM|OPSYM)(?:_([QBE]))?\(\s*(\w+)\s*\)/) do |kind, name|
@@ -524,7 +534,8 @@ module StaticDispatchRegistrations
              .merge(c_literals(r[:hand]))
     end
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
-    outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core)
+    text = Set.new
+    outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text)
     dynamic.merge(outside)
 
     # Which bytecode can run. No method body -- compiled or not -- runs as
@@ -582,12 +593,16 @@ module StaticDispatchRegistrations
     end)
 
     # FRAGMENT_USES (closed only): only the literals that can reach a built string stay fragments.
+    # SUFFIX_BASES (closed only): see dynamic_name?. nil keeps the rule for every dynamic name.
+    suffix_bases = nil
     if closed_only
       fragments &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
+      built = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, SUFFIX_LITERAL)
+      suffix_bases = text if built.empty?
     end
 
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
-      closed_only: closed_only }
+      closed_only: closed_only, suffix_bases: suffix_bases }
   end
 
   LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
@@ -728,9 +743,14 @@ module StaticDispatchRegistrations
     [bodies, names]
   end
 
-  def dynamic_name?(name, dynamic, fragments)
+  # SUFFIX_BASES: `x=` / `x?` / `x!` counts as dynamic when its base `x` is in `suffix_bases` (default: every
+  # dynamic name). A text scan reads `obj.x = 1` as `x`, so a base read as text may stand for the suffixed name; a
+  # name taken from bytecode or a C string literal is the exact name looked up. The closed analysis passes only the
+  # text-read tokens -- unless some pool literal "=", "?" or "!" may reach a string built at run time
+  # (FRAGMENT_USES), where `"#{x}="` could name the suffixed method from a base found anywhere.
+  def dynamic_name?(name, dynamic, fragments, suffix_bases = dynamic)
     return true if dynamic.include?(name) || !name.match?(IDENT)
-    return true if name.end_with?('=', '?', '!') && dynamic.include?(name[0..-2])
+    return true if name.end_with?('=', '?', '!') && suffix_bases.include?(name[0..-2])
 
     fragments.any? { |f| f != name && (name.start_with?(f) || name.end_with?(f)) }
   end
@@ -750,7 +770,8 @@ module StaticDispatchRegistrations
     re = owner_re(analysis[:closed_only])
     analysis[:registered].select do |m|
       m[:owner].match?(re) &&
-        !dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments])
+        !dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments],
+                       analysis[:suffix_bases] || analysis[:dynamic])
     end
   end
 end
