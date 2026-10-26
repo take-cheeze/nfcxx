@@ -140,7 +140,9 @@ inline bool spawn(Child& c, const std::vector<std::string>& args, const std::str
   }
   if (pid == 0) {
     ::setpgid(0, 0);
+    // The log, or /dev/null when it cannot be opened: the child must not write to the parent's stdout.
     int fd = ::open(logfile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) fd = ::open("/dev/null", O_WRONLY);
     int in = ::open("/dev/null", O_RDONLY);
     if (fd >= 0) {
       ::dup2(fd, 1);
