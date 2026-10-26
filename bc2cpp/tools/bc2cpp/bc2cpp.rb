@@ -145,6 +145,7 @@ require_relative 'codegen_tuple_returns'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
+require_relative 'codegen_kernel_loop'
 require_relative 'codegen_resumable'
 require_relative 'codegen_block_fallback'
 require_relative 'codegen_yield_free'
@@ -1833,6 +1834,29 @@ if $PROGRAM_NAME == __FILE__
   # std::uncaught_exceptions(): the guard's "is an unwind in flight" test (see
   # the guard).
   puts '#include <exception>'
+  # KERNEL_LOOP_INLINE (codegen_kernel_loop.rb): an inlined Kernel#loop runs its body under its own mrb_jmpbuf.
+  # The guard puts M->jmp back on every way out of the loop. The rescue answers a StopIteration with its result,
+  # after popping the callinfo frames the raise left (as mrb_protect_error does); anything else, a break object
+  # included, is thrown on to the jmpbuf the loop found, untouched, as if the loop had not caught it.
+  puts <<~'KERNEL_LOOP'
+    struct bc2cpp_jmp_restore {
+      mrb_state* M;
+      struct mrb_jmpbuf* prev;
+      ~bc2cpp_jmp_restore() { M->jmp = prev; }
+    };
+    [[maybe_unused]] static mrb_value bc2cpp_loop_rescue(mrb_state* M, const Bc2cppVmMark& mark) {
+      M->jmp = mark.jmp;
+      mrb_value exc = M->exc ? mrb_obj_value(M->exc) : mrb_nil_value();
+      if (mrb_nil_p(exc) || mrb_break_p(exc) ||
+          !mrb_obj_is_kind_of(M, exc, mrb_class_get(M, "StopIteration"))) {
+        if (!M->jmp) { mrb_print_error(M); abort(); }
+        MRB_THROW(M->jmp);
+      }
+      bc2cpp_vm_restore(M, mark);
+      M->exc = NULL;
+      return mrb_funcall_argv(M, exc, mrb_intern_lit(M, "result"), 0, nullptr);
+    }
+  KERNEL_LOOP
   puts <<~'ENSURE_GUARD'
     template <class F>
     struct bc2cpp_ensure_guard {
