@@ -190,6 +190,11 @@ module SymbolCache
     nil
   end
 
+  # OWNER_CALL, with OWNER_CALL_ICACHE compiled out when BC2CPP_OWNER_ICACHE=0.
+  def owner_call_source
+    ENV['BC2CPP_OWNER_ICACHE'] == '0' ? "#define BC2CPP_NO_OWNER_ICACHE 1\n#{OWNER_CALL}" : OWNER_CALL
+  end
+
   # The file-scope cache. Keyed on the mrb_state so a second live VM cannot read
   # the first one's ids, and reset from each gem's gem_final so a VM opened
   # later at a reused address cannot either. Symbols are never collected, so a
@@ -242,7 +247,7 @@ module SymbolCache
       #{checked ? "  if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, bc2cpp_sym(M, i), argc, argv, bc2cpp_sym_check[i] == 2);" : ''}
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
-      #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? OWNER_CALL : ''}
+      #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? owner_call_source : ''}
       #{table.nomethod_used ? NOMETHOD : ''}
       #{table.violation_used ? GUARD_VIOLATION : ''}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
@@ -372,6 +377,16 @@ module SymbolCache
   # dispatch raises (the receiver is proven method_missing-free, so a dispatch that returns is a violated proof); any
   # other owner is a definer the closed world did not see, and raises. Owners already matched are kept per site and
   # VM (up to 32), so the name test runs once per owner.
+  #
+  # OWNER_CALL_ICACHE: each site also keeps its last (receiver class, argument count) -> (method, owner) that
+  # passed every check. A repeat call with the same class and count skips the lookup, the owner test and the
+  # checks, but only while mruby's own method cache (mrb->cache, which mrb_method_search_vm fills) still holds
+  # that same entry: mruby clears an entry whenever a definition, removal, undef, include, prepend or the freeing
+  # of either class could change it (class.c mc_clear_by_id, mrb_method_cache_clear, mrb_mc_clear_by_class), so
+  # a present, equal entry is exactly what the full lookup would return, and the checks depend only on it and the
+  # count. Protected methods are not kept (their check reads the receiver). The slot is per VM like the owner set.
+  # Builds with MRB_NO_METHOD_CACHE, -DBC2CPP_NO_OWNER_ICACHE or BC2CPP_OWNER_ICACHE=0 at generation take the full
+  # path every time.
   OWNER_CALL = <<~CPP
     #include <string.h>
     #ifdef BC2CPP_NOMETHOD_VERIFY
@@ -379,13 +394,49 @@ module SymbolCache
     #include <stdlib.h>
     #endif
     extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
+    #if !defined(MRB_NO_METHOD_CACHE) && !defined(BC2CPP_NO_OWNER_ICACHE)
+    #define BC2CPP_OWNER_ICACHE 1
+    #endif
     struct bc2cpp_owner_set {
       const char* const* names;
       unsigned epoch;
       mrb_state* state;
       int seen_count;
       struct RClass* seen[32];
+      // OWNER_CALL_ICACHE: the last call that passed every check (hit_klass null: none).
+      struct RClass* hit_klass;
+      struct RClass* hit_c;
+      mrb_method_t hit_m;
+      mrb_int hit_argc;
     };
+    #ifdef BC2CPP_OWNER_ICACHE_STATS
+    // Hits and full lookups, for scripts/bc2cpp/owner_call_icache_check.rb; printed at exit.
+    #include <stdio.h>
+    static unsigned long bc2cpp_owner_icache_hits = 0;
+    static unsigned long bc2cpp_owner_icache_misses = 0;
+    static struct bc2cpp_owner_icache_report {
+      ~bc2cpp_owner_icache_report() { fprintf(stderr, "bc2cpp: OWNER_ICACHE hits=%lu lookups=%lu\\n", bc2cpp_owner_icache_hits, bc2cpp_owner_icache_misses); }
+    } bc2cpp_owner_icache_report_at_exit;
+    #endif
+    #ifdef BC2CPP_OWNER_ICACHE
+    static inline bool bc2cpp_method_eq(const mrb_method_t& a, const mrb_method_t& b) {
+      uintptr_t x, y;
+      memcpy(&x, &a.as, sizeof x);
+      memcpy(&y, &b.as, sizeof y);
+      return a.flags == b.flags && x == y;
+    }
+    // The site's kept call, while mruby's method cache still holds the same entry for (klass, mid).
+    static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc) {
+      if (s.hit_klass != klass || s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch || s.state != M) return false;
+      int h = mrb_int_hash_func(M, ((intptr_t)klass) ^ mid) & (MRB_METHOD_CACHE_SIZE - 1);
+      const struct mrb_cache_entry* mc = &M->cache[h];
+      if (mc->c != klass || mc->mid != mid || mc->c0 != s.hit_c || !bc2cpp_method_eq(mc->m, s.hit_m)) return false;
+    #ifdef BC2CPP_OWNER_ICACHE_STATS
+      ++bc2cpp_owner_icache_hits;
+    #endif
+      return true;
+    }
+    #endif
     #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, 0, nullptr, 0, {} }; return s; }())
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
@@ -425,7 +476,14 @@ module SymbolCache
       mrb_sym mid = bc2cpp_sym(M, i);
       // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
       if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
-      struct RClass* c = mrb_class(M, recv);
+      struct RClass* klass = mrb_class(M, recv);
+    #ifdef BC2CPP_OWNER_ICACHE
+      if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return mrb_funcall_with_method(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk);
+    #endif
+    #ifdef BC2CPP_OWNER_ICACHE_STATS
+      ++bc2cpp_owner_icache_misses;
+    #endif
+      struct RClass* c = klass;
       mrb_method_t m = mrb_method_search_vm(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) {
         if (mrb_nil_p(blk)) bc2cpp_funcall_argv(M, recv, mid, argc, argv);
@@ -437,6 +495,7 @@ module SymbolCache
         s.epoch = bc2cpp_owner_epoch;
         s.state = M;
         s.seen_count = 0;
+        s.hit_klass = nullptr;
       }
       bool seen = false;
       for (int k = 0; k < s.seen_count; ++k) seen = seen || s.seen[k] == owner;
@@ -466,6 +525,14 @@ module SymbolCache
           if (argc < min || (max >= 0 && argc > max)) mrb_argnum_error(M, argc, min, max);
         }
       }
+    #ifdef BC2CPP_OWNER_ICACHE
+      if (!(m.flags & MRB_METHOD_PROTECTED_FL)) {
+        s.hit_klass = klass;
+        s.hit_c = c;
+        s.hit_m = m;
+        s.hit_argc = argc;
+      }
+    #endif
       return mrb_funcall_with_method(M, recv, mid, &m, c, argc, argv, blk);
     }
     static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
