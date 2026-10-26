@@ -157,7 +157,7 @@ class CodeGen
     call = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv, kw_names: [], kw_val_exprs: [],
                                 self_implicit: self_implicit, owner_def: owner_def)
     return nil unless call
-    return call unless @ivar_layout.key?(target.owner)
+    return call unless embeds_storage?(target.owner)
 
     site = closed_world_site(recv, irep, idx, owner_def)
     return call if self_implicit && site&.dig(:self_owner) == target.owner && @closed_world&.exact_class?(target.owner)

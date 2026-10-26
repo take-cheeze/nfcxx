@@ -1337,7 +1337,7 @@ class CodeGen
                "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
                "no runtime check)#{native_note}\n"
         note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
-      elsif @ivar_layout.key?(target.owner)
+      elsif embeds_storage?(target.owner)
         # MONO_EMBED_GUARD: MONO says nothing about method_missing: a class answering a
         # name via method_missing (LCF::Array1D/Array2D) adds no registry entry, so
         # MONO may call `impl` on a receiver that is not target.owner. Normally that

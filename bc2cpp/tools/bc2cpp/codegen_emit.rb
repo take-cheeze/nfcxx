@@ -91,7 +91,7 @@ class CodeGen
   end
 
   def embed_type(owner, ivar)
-    (@ivar_layout[owner] || {})[ivar]
+    (@ivar_layout[embed_storage_owner(owner)] || {})[ivar]
   end
 
   def embedding_classes
@@ -305,12 +305,13 @@ class CodeGen
     out
   end
 
+  # EMBED_FAMILY: a folded subclass names its family root's struct and data type (embed_storage_owner).
   def struct_name(owner)
-    sanitize("#{owner}_ivars")
+    sanitize("#{embed_storage_owner(owner)}_ivars")
   end
 
   def type_var(owner)
-    sanitize("#{owner}_ivars_type")
+    sanitize("#{embed_storage_owner(owner)}_ivars_type")
   end
 
   # ATTR_STRUCT_DEVIRT: the compiled getter/setter for one [owner, ivar,

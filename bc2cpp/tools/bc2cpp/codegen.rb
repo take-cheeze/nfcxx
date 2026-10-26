@@ -453,9 +453,71 @@ class CodeGen
       strict_subclass?(candidate, owner) || strict_subclass?(owner, candidate)
   end
 
+  # EMBED_FAMILY: a base class and subclasses that each have a layout share one struct, the base's, holding every
+  # ivar of the family (a name typed differently by two members is a boxed slot). The subclasses leave the layout
+  # and read the base's (embed_storage_owner): their instances get the base's storage from its #initialize, as a
+  # layout-less subclass's already do, so every subclass #initialize must start with super. A family with a member
+  # that could not embed on its own is not folded and keeps its ivars in iv_tbl. BC2CPP_EMBED_FAMILIES=0 keeps the
+  # old refusal.
+  def fold_embed_families(layout)
+    return [layout, {}] if ENV['BC2CPP_EMBED_FAMILIES'] == '0'
+
+    owners = layout.keys
+    roots = owners.reject { |owner| owners.any? { |other| other != owner && strict_subclass?(owner, other) } }
+    merged = layout.dup
+    folded = {}
+    roots.each do |root|
+      members = owners.select { |owner| owner != root && strict_subclass?(owner, root) }
+      next if members.empty? || !embed_family_foldable?(root, members)
+
+      union = {}
+      [root, *members].each do |owner|
+        layout[owner].each { |name, type| union[name] = union.key?(name) && union[name] != type ? :value : type }
+      end
+      merged[root] = union
+      members.each do |member|
+        merged.delete(member)
+        folded[member] = root
+      end
+    end
+    [merged, folded]
+  end
+
+  # Every member may embed on its own, and every subclass #initialize of the root (members or not) starts with super,
+  # so no subclass code runs before the root's #initialize has built the storage.
+  def embed_family_foldable?(root, members)
+    family = [root, *members]
+    return false if family.any? { |owner| NATIVE_DATA_OWNERS.include?(owner) }
+    # Engine worlds (EMBED_WIRED) keep one layout per chain for now: their registrations wire each owner separately.
+    return false if self.class.wired_embeddings
+
+    @superclass_of.each_key.all? do |klass|
+      next true unless strict_subclass?(klass, root)
+
+      initializers = (@registry['initialize'] || []).select { |d| d.owner == klass }
+      next true if initializers.empty?
+
+      initializers.one? && initializers.first.irep &&
+        BytecodeIR.for(@ireps.fetch(initializers.first.irep)).op?(:SUPER) &&
+        initializer_starts_with_super?(initializers.first, bare: true)
+    end
+  end
+
+  # The owner whose layout and struct hold `owner`'s ivars: its family root when EMBED_FAMILY folded it.
+  def embed_storage_owner(owner)
+    @embed_root_of&.[](owner) || owner
+  end
+
+  # Does code compiled for `owner` read ivars through DATA_PTR (its own layout or its folded family's)?
+  def embeds_storage?(owner)
+    @ivar_layout.key?(embed_storage_owner(owner))
+  end
+
   def select_embeddings(ivar_layout)
+    ivar_layout, @embed_root_of = fold_embed_families(ivar_layout)
+    family_members = @embed_root_of.keys.group_by { |member| @embed_root_of[member] }
     embedding_owners = ivar_layout.keys.to_set
-    ivar_layout.each_with_object({}) do |(owner, ivars), out|
+    selected = ivar_layout.each_with_object({}) do |(owner, ivars), out|
       # One object has one DATA_PTR: a base class and a subclass that both embed
       # would overwrite it with different layouts. Keep both in iv_tbl unless one
       # shared struct covers the whole chain.
@@ -474,18 +536,22 @@ class CodeGen
       # slot accessor. Other native accessors stay eligible only when they are the
       # plain iv_tbl implementation; mrb_iv_get/mrb_iv_set now route those through
       # the RData slot descriptor too. Interpreted Ruby methods use the same API.
+      # EMBED_FAMILY: a folded subclass's own native accessors count as the root's do.
+      holders = [owner, *family_members[owner]]
       safe = ivars.reject do |name, _|
-
-        reader_native = natively_exposed?(owner, name)
-        writer_native = natively_exposed?(owner, "#{name}=")
-        reader_blocked = reader_native && !synthesizable_accessor_only?(owner, name)
-        writer_blocked = writer_native && !synthesizable_accessor_only?(owner, "#{name}=")
-        next true if reader_blocked || writer_blocked
+        exposed = holders.map { |holder| [holder, natively_exposed?(holder, name), natively_exposed?(holder, "#{name}=")] }
+        blocked = exposed.any? do |holder, reader_native, writer_native|
+          (reader_native && !synthesizable_accessor_only?(holder, name)) ||
+            (writer_native && !synthesizable_accessor_only?(holder, "#{name}="))
+        end
+        next true if blocked
 
         # Synthesize only the accessor that exists natively: adding an `x=` to a class
         # with only `attr_reader :x` would change behavior.
-        @synthesize_accessor_for << [owner, name, :reader] if reader_native
-        @synthesize_accessor_for << [owner, name, :writer] if writer_native
+        exposed.each do |holder, reader_native, writer_native|
+          @synthesize_accessor_for << [holder, name, :reader] if reader_native
+          @synthesize_accessor_for << [holder, name, :writer] if writer_native
+        end
         false
       end
 
@@ -506,7 +572,7 @@ class CodeGen
 
         # A later or conditional super is legal Ruby, but cannot prove that
         # inherited storage exists before the initializer's earlier work.
-        next if initializer_starts_with_super?(initializers.first)
+        next if initializer_starts_with_super?(initializers.first, bare: family_members.key?(owner))
 
         safe = {}
         break
@@ -514,6 +580,9 @@ class CodeGen
 
       out[owner] = safe unless safe.empty?
     end
+    # A root that did not embed after all leaves its folded members as they were: no DATA_PTR storage.
+    @embed_root_of.select! { |_member, root| selected.key?(root) }
+    selected
   end
 
   # TYPED_SLOT_INTERPRETED_ACCESS: a method left on the interpreter reaches a
@@ -565,13 +634,19 @@ class CodeGen
     saved.each { |ivar, value| instance_variable_set(ivar, value) unless ivar == :@clean_cache }
   end
 
-  def initializer_starts_with_super?(definition)
+  def initializer_starts_with_super?(definition, bare: false)
     return false unless definition.irep
 
     irep = @ireps[definition.irep]
     return false unless irep
 
-    first =BytecodeIR.for(irep).each_source.find { |insn, _| !%i[ENTER LINE NOP MOVE].include?(insn.op) }&.first
+    # A bare `super` passes the method's own arguments: ARGARY (which only gathers them) builds the array SUPER's
+    # `n=*` reads from the next register (`ARGARY R4`, `SUPER R3 n=*`). Only EMBED_FAMILY roots accept it yet, so
+    # the single-layout chains of engine worlds embed exactly as before.
+    leading = BytecodeIR.for(irep).each_source.lazy.map { |insn, _| insn }
+                        .reject { |insn| %i[ENTER LINE NOP MOVE].include?(insn.op) }.first(2)
+    first = leading.first
+    first = leading[1] if bare && first&.op == :ARGARY && leading[1]&.op == :SUPER && leading[1].reg.to_i + 1 == first.reg.to_i
     first&.op == :SUPER && super_reaches_superclass?(definition) &&
       Array(@prepended_modules[definition.owner]).empty?
   end
