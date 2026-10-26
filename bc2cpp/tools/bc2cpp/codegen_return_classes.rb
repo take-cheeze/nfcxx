@@ -721,7 +721,7 @@ class CodeGen
     IrArgumentTypes.rest_classes(definition, sites, **call_site_lookups(nil), fixed: mandatory_arity(irep) + optional_arity(irep),
                                  minimum: mandatory_arity(irep),
                                  argument: ->(body, index, register) { bytecode_ir_source_classes(body, index, register) },
-                                 admit: ->(body, index) { BytecodeIR.for(body).source_at(index).nk_spec.nil? })
+                                 admit: ->(body, index) { !BytecodeIR.for(body).source_at(index).keyword_arguments? })
   end
 
   # Block parameter: Set[:Proc] when every reaching call passes a literal block or lambda. A site that passes no
@@ -736,8 +736,8 @@ class CodeGen
     IrArgumentTypes.block_proc(definition, sites, **call_site_lookups(nil),
                                proc_value: ->(body, index, register, argc) {
                                  insn = BytecodeIR.for(body).source_at(index)
-                                 nk = insn.nk_spec
-                                 next false unless %i[SENDB SSENDB].include?(insn.op) && (nk.nil? || nk.match?(/\A\d+\z/))
+                                 nk = insn.keyword_argc
+                                 next false unless %i[SENDB SSENDB].include?(insn.op) && !insn.keyword_splat?
 
                                  # Keyword pairs (key, value) follow the positionals; the block is the slot after them.
                                  block = register + argc + 2 * nk.to_i + 1
@@ -787,13 +787,13 @@ class CodeGen
     IrArgumentTypes.keyword_classes(definition, sites, **call_site_lookups(nil), default: default && Set[default],
                                     value: ->(body, index, register, argc) {
                                       insn = BytecodeIR.for(body).source_at(index)
-                                      nk = insn.nk_spec
-                                      # No keyword token (nk_spec nil) passes no keyword when the positional count is fixed,
+                                      nk = insn.keyword_argc
+                                      # No keyword token passes no keyword when the positional count is fixed,
                                       # or absent (SEND0); a splatted count may carry a keyword hash, so it refuses.
-                                      if nk.nil? && (insn.argc_operand.nil? || insn.argc.is_a?(Integer))
+                                      if !insn.keyword_arguments? && (insn.argc_operand.nil? || insn.argc.is_a?(Integer))
                                         next optional ? Set[] : nil
                                       end
-                                      next nil unless nk&.match?(/\A\d+\z/)
+                                      next nil unless nk.is_a?(Integer)
 
                                       pairs = (0...nk.to_i).map do |k|
                                         [literal_symbol_write(body, index, (register + argc + 1 + 2 * k).to_s), register + argc + 2 + 2 * k]

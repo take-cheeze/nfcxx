@@ -52,7 +52,7 @@ module LexicalConsts
   def string_argument?(insn)
     return false if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) # SEND0 / SSEND0 carry no arguments
 
-    insn.n_spec != '0' || !insn.nk_spec.nil?
+    insn.argc != 0 || !!insn.keyword_arguments?
   end
 
   def qualify(scope, name)

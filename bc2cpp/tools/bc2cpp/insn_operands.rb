@@ -136,6 +136,27 @@ module InsnOperands
     @argc = argc_operand&.at(0)
   end
 
+  # Counts remain numeric internally; presence distinguishes absent keywords from explicit nk=0.
+  def keyword_argc
+    spec = argc_operand
+    spec && !spec[2] ? spec[1] : nil
+  end
+
+  def keyword_arguments?
+    spec = argc_operand
+    !!(spec && !spec[2])
+  end
+
+  def positional_splat?
+    spec = argc_operand
+    !!(spec && spec[0].nil?)
+  end
+
+  def keyword_splat?
+    spec = argc_operand
+    !!(spec && !spec[2] && spec[1].nil?)
+  end
+
   # `n=` / `nk=` as printed: digits, `*`, or nil when absent.
   def n_spec
     spec = argc_operand or return nil

@@ -73,7 +73,7 @@ module ElementSiteReport
     case insn.op
     when :SETIDX then insn.reg.to_i + 2
     when :SEND, :SEND0
-      n = insn.n_spec.to_i
+      n = insn.argc.to_i
       insn.reg.to_i + n if ELEMENT_STORES.include?(insn.sym) && n.positive?
     end
   end
@@ -132,7 +132,7 @@ module ElementSiteReport
   # `[a, b].max` / `.min`: the literal is built by the instruction right before the send, so nothing else
   # can hold it and its elements are the registers' values there. One row per element: its class set.
   def record_literal_extreme(insn, irep, owner_def, idx, owner)
-    return unless %i[SEND SEND0].include?(insn.op) && %w[min max].include?(insn.sym) && insn.n_spec.to_i.zero?
+    return unless %i[SEND SEND0].include?(insn.op) && %w[min max].include?(insn.sym) && insn.argc.to_i.zero?
 
     prev = BytecodeIR.for(irep).previous(idx)
     unless prev && %i[ARRAY ARRAY2].include?(prev.op) && prev.reg == insn.reg

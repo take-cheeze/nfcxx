@@ -10,8 +10,14 @@ module BytecodeIR
     Move = Struct.new(:dest, :src)
     # A method send: the receiver register (Insn#reg, the leading operand) and the method name (Insn#sym).
     Send = Struct.new(:receiver, :name)
-    # A send's argument counts as printed: positional (Insn#n_spec) and keyword (Insn#nk_spec) slots, nil when absent.
-    ArgcSpec = Struct.new(:positional, :keyword)
+    # Numeric counts plus explicit flags: nil alone cannot distinguish absent counts from splats.
+    ArgcSpec = Struct.new(:positional, :keyword, :positional_splat, :keyword_present, :keyword_splat) do
+      def positional_splat? = positional_splat
+      def keyword? = keyword_present
+      def keyword_splat? = keyword_splat
+      def positional_slots = positional_splat? ? 1 : (positional || 0)
+      def keyword_slots = keyword_splat? ? 1 : 2 * (keyword || 0)
+    end
 
     module_function
 
@@ -44,9 +50,9 @@ module BytecodeIR
       insn.reg_operand
     end
 
-    # The argument counts of a send (Insn#n_spec and Insn#nk_spec).
+    # Formatting is reserved for Insn#argc_text and the legacy textual accessors.
     def argc_spec(insn)
-      ArgcSpec.new(insn.n_spec, insn.nk_spec)
+      ArgcSpec.new(insn.argc, insn.keyword_argc, insn.positional_splat?, insn.keyword_arguments?, insn.keyword_splat?)
     end
 
     # The integer right after the leading register (Insn#uint_operand).
