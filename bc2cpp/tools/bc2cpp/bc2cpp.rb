@@ -1958,6 +1958,7 @@ if $PROGRAM_NAME == __FILE__
   # that compiles only when the closed world proves a fact a desktop build lacks. It guards such a
   # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.
   print gen.emit_skipped_entry_macros(skipped_entries)
+  print gen.emit_unregistered_entry_macros(compiled)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new

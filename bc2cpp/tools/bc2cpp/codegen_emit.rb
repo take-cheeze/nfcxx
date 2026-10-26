@@ -162,7 +162,8 @@ class CodeGen
         }
       CPP
     end
-    if targets.any? { |o| by_owner[o].any? { |m| unregistered.include?("#{o}##{m[:name]}") } }
+    # The stub also serves the hand-written registrations a HAND_REGISTRATION_GUARD wraps (any owner).
+    if compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
         #include <stdio.h>
@@ -856,6 +857,20 @@ class CodeGen
     else
       !core_only
     end
+  end
+
+  # HAND_REGISTRATION_GUARD: one `#define BC2CPP_UNREGISTERED_<entry> 1` per compiled entry this build leaves
+  # unregistered (static_dispatch_unregistered_for). A hand-written register.cxx line for such an entry is wrapped in
+  # `#ifndef BC2CPP_UNREGISTERED_<entry>` (scripts/bc2cpp/prune_static_dispatch_registrations.rb --closed), so it
+  # registers the method only in builds whose list keeps it, and the verify stub otherwise.
+  def emit_unregistered_entry_macros(compiled,
+                                     unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']) |
+                                                   ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set)
+    entries = compiled.select { |m| m[:entry] && unregistered.include?("#{m[:owner]}##{m[:name]}") }.map { |m| m[:entry] }
+    return '' if entries.empty?
+
+    "// HAND_REGISTRATION_GUARD: entries this build leaves unregistered.\n" +
+      entries.uniq.sort.map { |e| "#define BC2CPP_UNREGISTERED_#{e} 1\n" }.join + "\n"
   end
 
   # SKIPPED_ENTRY_MACROS: one `#define BC2CPP_SKIPPED_<entry> 1` per entry SKIP_UNSUPPORTED dropped from this output.
