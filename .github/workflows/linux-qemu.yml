@@ -1,0 +1,96 @@
+name: Linux under qemu
+
+# The Linux kernel built and booted under qemu-system-x86_64 (scripts/linux-qemu.sh, docs/notes/linux-kernel.md): a
+# tinyconfig kernel built by gcc as the baseline, the same built by nfcc with most of its C files on the qbe backend
+# (QBE_TRY), and the suspend-to-RAM variant (SUSPEND=1: S3 through the real-mode wakeup code of arch/x86/realmode/rm),
+# built by gcc and by nfcc. Each job passes when its guest prints the marker. Nightly, on demand, and when a change can
+# affect the kernel build (the compiler, the QBE and cproc forks, the kernel script).
+on:
+  schedule:
+    - cron: "41 3 * * *"   # nightly, UTC
+  push:
+    branches: [main]
+    paths:
+      - "nfcc"
+      - "scripts/qbe-cc"
+      - "scripts/qbe-try"
+      - "scripts/setup-qbe.sh"
+      - "scripts/linux-qemu*.sh"
+      - ".github/workflows/linux-qemu.yml"
+      - "3rd/qbe"
+      - "3rd/cproc"
+  pull_request:
+    paths:
+      - "nfcc"
+      - "scripts/qbe-cc"
+      - "scripts/qbe-try"
+      - "scripts/setup-qbe.sh"
+      - "scripts/linux-qemu*.sh"
+      - ".github/workflows/linux-qemu.yml"
+      - "3rd/qbe"
+      - "3rd/cproc"
+  workflow_dispatch:
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tinyconfig, gcc
+            kcc: gcc
+            suspend: ""
+          - name: tinyconfig, nfcc with the qbe backend (QBE_TRY)
+            kcc: nfcc
+            suspend: ""
+          - name: suspend to RAM, gcc
+            kcc: gcc
+            suspend: "1"
+          - name: suspend to RAM, nfcc with the qbe backend (QBE_TRY)
+            kcc: nfcc
+            suspend: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install the kernel build and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bc bison flex libelf-dev libssl-dev cpio curl \
+            qemu-system-x86 busybox-static
+
+      # The forks' QBE and cproc, the compiler nfcc drives: built from the pinned submodules (scripts/setup-qbe.sh).
+      - name: Build QBE and cproc
+        if: matrix.kcc == 'nfcc'
+        run: scripts/setup-qbe.sh
+
+      - name: Build Linux and boot it under qemu
+        run: scripts/linux-qemu.sh build/linux-qemu-${{ matrix.kcc }}-${{ matrix.suspend || 'plain' }}
+        env:
+          KCC: ${{ matrix.kcc }}
+          SUSPEND: ${{ matrix.suspend }}
+          QBE_TRY: ${{ matrix.kcc == 'nfcc' && '*' || '' }}
+          QEMU_TIMEOUT: "900"
+
+      - name: The guest's console and the qbe log
+        if: always()
+        run: |
+          d=build/linux-qemu-${{ matrix.kcc }}-${{ matrix.suspend || 'plain' }}
+          for f in "$d"/boot-*.log "$d"/qbe-try.log; do [ -f "$f" ] && { echo "== $f"; tr -d '\000' < "$f" | tail -n 60; }; done || true
+
+      - name: Keep the boot logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-qemu-${{ matrix.kcc }}-${{ matrix.suspend || 'plain' }}
+          path: build/linux-qemu-${{ matrix.kcc }}-${{ matrix.suspend || 'plain' }}/*.log
+          if-no-files-found: ignore
