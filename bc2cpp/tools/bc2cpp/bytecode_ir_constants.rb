@@ -37,6 +37,12 @@ module BytecodeIR
       :ARRAY => :Array, :ARRAY2 => :Array, :HASH => :Hash,
       :RANGE_INC => :Range, :RANGE_EXC => :Range
     }.freeze
+    # Only builtin literal classes are retained; arbitrary alias names stay in the build's fact tables.
+    LITERAL_CLASS_SETS = (LITERAL_CLASSES.values + [:Integer, :Float]).uniq.to_h do |klass|
+      [klass, Set[klass].freeze]
+    end.freeze
+    INTEGER_CLASSES = LITERAL_CLASS_SETS.fetch(:Integer)
+    EMPTY_CLASSES = Set.new.freeze
     LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
     POOL_INT = /\A\.i(?:32|64)=(-?\d+)\z/
 
@@ -50,13 +56,13 @@ module BytecodeIR
       # Names a read may hold as a Fixnum: every binding is an Integer with an exact value or an interval, both of
       # which are inside the Fixnum margin by construction.
       def fixnum_names
-        groups.select { |_, f| f.classes == Set[:Integer] && (f.value || f.interval) }.keys.to_set
+        groups.select { |_, f| f.classes == INTEGER_CLASSES && (f.value || f.interval) }.keys.to_set
       end
 
       # Names every binding of which is an Integer, whatever its size: the bignum-capable class proof (CLASS_INTEGER_PROOF,
       # the type check's integer-class rows). An out-of-margin literal is an Integer class with no value, so it is here.
       def integer_class_names
-        groups.select { |name, f| f.classes == Set[:Integer] && !zero_divisors.include?(name) }.keys.to_set
+        groups.select { |name, f| f.classes == INTEGER_CLASSES && !zero_divisors.include?(name) }.keys.to_set
       end
 
       # bare name => exact Integer, for groups with one value.
@@ -82,8 +88,8 @@ module BytecodeIR
     # SETCONST by its full path. +poisoned+: bare names bound outside the bytecode (native, foreign Ruby).
     # +lookup_poisoned+ (with the poison set) is every name a native or foreign definition may bind; a Hash table is
     # read only for a name outside it. Only the class run passes hash_lookup_safe.
-    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false, freeze_classes: Set.new,
-                hash_lookup_safe: false, lookup_poisoned: Set.new)
+    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false, freeze_classes: EMPTY_CLASSES,
+                hash_lookup_safe: false, lookup_poisoned: EMPTY_CLASSES)
       policy = Policy.new(operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes,
                           hash_lookup_safe: hash_lookup_safe)
       path_at = sites.to_h { |site| [[site[:irep], site[:idx]], site[:name]] }
@@ -194,7 +200,7 @@ module BytecodeIR
         # the Integer case). The node carries the classes it may answer for, and node_classes checks the receiver.
         return nil unless insn.sym == 'freeze'
 
-        allowed = policy.freeze_classes | (policy.freeze_safe ? Set[:Integer] : Set.new)
+        allowed = policy.freeze_classes | (policy.freeze_safe ? INTEGER_CLASSES : EMPTY_CLASSES)
         return nil if allowed.empty?
 
         receiver = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
@@ -363,9 +369,9 @@ module BytecodeIR
 
     def node_classes(node, known)
       case node[0]
-      when :int, :bigint then Set[:Integer].freeze
-      when :cls then Set[node[1]].freeze
-      when :hash then Set[:Hash].freeze
+      when :int, :bigint then INTEGER_CLASSES
+      when :cls then LITERAL_CLASS_SETS.fetch(node[1]) { Set[node[1]].freeze }
+      when :hash then LITERAL_CLASS_SETS.fetch(:Hash)
       when :alias then known[node[1]]
       when :freeze
         classes = union_classes(node[1], known)
@@ -373,7 +379,7 @@ module BytecodeIR
       when :arith
         left = union_classes(node[2], known)
         right = union_classes(node[3], known)
-        integer = Set[:Integer]
+        integer = INTEGER_CLASSES
         left && right && !left.empty? && !right.empty? && left.subset?(integer) && right.subset?(integer) ? integer : nil
       end
     end

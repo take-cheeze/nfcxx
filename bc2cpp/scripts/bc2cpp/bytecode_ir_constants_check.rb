@@ -15,6 +15,19 @@ require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/bytecode_ir_constants'
 
 suite = FixtureCheck.new('bytecode_ir_constants_check')
+facts = BytecodeIR::ConstantFacts
+integer_classes = facts.node_classes([:int, 1], {})
+suite.check('Integer literal class facts share a frozen singleton', integer_classes.frozen? &&
+            integer_classes.equal?(facts.node_classes([:bigint], {})) && integer_classes == Set[:Integer])
+suite.check('builtin class nodes share their frozen singleton', facts.node_classes([:cls, :Hash], {}).equal?(
+            facts.node_classes([:hash], {})))
+suite.check('custom class nodes preserve their class without retention', facts.node_classes([:cls, :CustomClass], {}) == Set[:CustomClass] &&
+            !facts::LITERAL_CLASS_SETS.key?(:CustomClass))
+unknown_alias = [:alias, 'unknown']
+suite.check('unknown aliases remain unknown', facts.node_classes(unknown_alias, {}).nil?)
+suite.check('mixed alternatives still join classes', facts.union_classes([[:int, 1], [:cls, :String]], {}) == Set[:Integer, :String])
+suite.check('shared singleton cannot be changed by a union result', !facts.union_classes([[:int, 1]], {}).equal?(integer_classes))
+
 suite.require_mrbc!
 
 check = suite.method(:check)
