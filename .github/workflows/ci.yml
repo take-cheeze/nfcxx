@@ -155,7 +155,7 @@ jobs:
             run: NFCXX_BACKEND=gcc tests/uop/run_poly.sh
           - name: C++ PTX emitter (build) and GPU kernel on the PTX interpreter
             run: |
-              make -C tools/pathb-ptx-emit
+              ninja -C tools/pathb-ptx-emit
               tests/gpu/run_interp.sh
           - name: AddressSanitizer (gcc and qbe backends)
             run: |

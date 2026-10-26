@@ -3,7 +3,7 @@
 `nfcxx --bundle-libs` and `nfcc --bundle-libs` copy the shared libraries the output needs into the output itself,
 so the program (or shared object) runs on a machine that has glibc but not libstdc++, libgcc_s or the program's own
 libraries. The work is done after the link by `build/nfcbundle` (`tools/bundle/nfcbundle.cpp`, one C++17 file built by
-`make -C tools/bundle`, which the driver runs on first use). It takes the idea of [pfnet/sold](https://github.com/pfnet/sold)
+`ninja -C tools/bundle`, which the driver runs on first use). It takes the idea of [pfnet/sold](https://github.com/pfnet/sold)
 and is written anew (sold is GPLv3; nfcbundle is MIT like the rest of the repository). sold only takes shared objects;
 nfcbundle takes executables (PIE and position-dependent) as well.
 
