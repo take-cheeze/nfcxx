@@ -44,6 +44,8 @@ if [ ! -f Makefile ]; then
     --disable-mos65c02-port --disable-f8-port --disable-f8l-port > "$work/sdcc-configure.log" 2>&1 ||
     { echo "FAIL sdcc: configure"; tail -5 "$work/sdcc-configure.log"; exit 1; }
 fi
+# Clean first: the tree is reused between runs, and objects left by the nfcc builds below would be linked into the reference.
+make clean > /dev/null 2>&1
 if ! make -j"$jobs" > "$work/sdcc-ref-build.log" 2>&1; then
   echo "FAIL sdcc: reference build with gcc"; grep -m5 -E "error|Error" "$work/sdcc-ref-build.log"; exit 1
 fi
@@ -81,6 +83,9 @@ compare_one() {
 export -f compare_one
 export ref nfc fwk dev out xfail_test xfail_be
 # Every test the reference accepts for mcs51, in name order (the list is fixed, so a run is repeatable).
+# The qbe back end runs scripts/mrb for each compile. Build the mruby tool first: when it is missing, the first qbe compile
+# starts setup-mruby.sh, which builds the onig gem through nfcc, which runs mrb again, and the two wait on each other.
+PATH=$base_path "$root/scripts/setup-mruby.sh" || exit 1
 backends=${NFCXX_BACKEND:-"gcc qbe"}
 for b in $backends; do
   # The nfcc build: the compiler proper (src/), objects from scratch, on this back end.
