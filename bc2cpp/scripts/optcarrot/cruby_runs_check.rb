@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # CRUBY_JIT_RUNS / TRUFFLERUBY_RUN (tools/optcarrot_probe/cruby_runs.rb): which reference runs compiled_run.rb makes,
-# with a stub probe so no real Ruby is started, and the wall-time ratio lines over them.
+# with a stub probe so no real Ruby is started, the wall-time ratio lines over them, and HOT_PATH_FPS.
 
 require_relative '../../tools/optcarrot_probe/cruby_runs'
 
@@ -40,6 +40,24 @@ lines = CRubyRuns.ratio_lines(results)
 check.call('bc2cpp is compared against TruffleRuby too',
            lines.any? { |l| l.include?('mruby + bc2cpp (sealed)/TruffleRuby 0.75x') })
 check.call('bc2cpp against the interpreter is still the last line', lines.last == 'bc2cpp/mruby interpreter 0.19x.')
+
+check.call('the warmup run defaults to a tenth of the frames', CRubyRuns.warmup_frames(1800, env: {}) == 180)
+check.call('OPTCARROT_WARMUP_FRAMES sets the warmup run',
+           CRubyRuns.warmup_frames(1800, env: { 'OPTCARROT_WARMUP_FRAMES' => '300' }) == 300)
+check.call('OPTCARROT_WARMUP_FRAMES=0 skips the warmup run',
+           CRubyRuns.warmup_frames(1800, env: { 'OPTCARROT_WARMUP_FRAMES' => '0' }).nil?)
+check.call('a warmup no shorter than the full run is skipped',
+           CRubyRuns.warmup_frames(180, env: { 'OPTCARROT_WARMUP_FRAMES' => '180' }).nil? &&
+             CRubyRuns.warmup_frames(5, env: {}).nil?)
+check.call('a negative OPTCARROT_WARMUP_FRAMES is refused',
+           begin
+             CRubyRuns.warmup_frames(1800, env: { 'OPTCARROT_WARMUP_FRAMES' => '-1' })
+             false
+           rescue ArgumentError
+             true
+           end)
+check.call('hot-path fps subtracts the short run', (CRubyRuns.hot_fps(1800, 9.45, 180, 2.91) - 247.7).abs < 0.1)
+check.call('a short run no faster than the full one gives no hot-path fps', CRubyRuns.hot_fps(200, 1.0, 20, 1.0).nil?)
 
 if failures.zero?
   puts 'cruby_runs_check: all checks passed'

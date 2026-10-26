@@ -54,6 +54,14 @@ cleared; it joins the checksum agreement and the ratios. One local comparison
 TruffleRuby is still warming up at 180 frames; over 1800 it has the best
 frame rate (about 270 fps reported, YJIT about 247, bc2cpp about 200).
 
+**Hot-path fps.** Wall time counts process start, loading and JIT warmup. So
+each runtime also makes a short run of `OPTCARROT_WARMUP_FRAMES` frames
+(default a tenth of the full run; `0` skips it). The summary's *Hot-path fps*
+column is `(FRAMES - warmup) / (full wall - short wall)`, the steady-state frame
+rate with those fixed costs subtracted out. Optcarrot's own *Optcarrot fps* is
+taken over only the last 10 frames, so it is noisier. A profiling run makes no
+short run, because it would overwrite the profile.
+
 Every CRuby figure in this file older than that change, the ones above
 included, came from a single run under whatever `RUBY_YJIT_ENABLE` the
 calling shell had. The Nix dev shells set it to 1 since ADR 0488; plain
