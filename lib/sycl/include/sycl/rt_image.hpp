@@ -105,10 +105,19 @@ class image_set {
     std::string path = prefix + ".man";
     FILE *f = std::fopen(path.c_str(), "rb");
     if (!f) fail("cannot read " + path);
-    char line[4096];
+    // a line of any length: the statics line (S) holds the whole static region in hex, often more than one buffer
+    auto next_line = [&](std::string &s) {
+      s.clear();
+      char buf[4096];
+      while (std::fgets(buf, sizeof buf, f)) {
+        s += buf;
+        if (s.back() == '\n') return true;
+      }
+      return !s.empty();
+    };
     size_t index = modules.size();
-    while (std::fgets(line, sizeof line, f)) {
-      std::string s(line);
+    std::string s;
+    while (next_line(s)) {
       while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
       if (s.size() >= 2 && s[0] == 'k' && s.find('\t') != std::string::npos) {
         size_t a = s.find('\t'), b = s.find('\t', a + 1), c = s.find('\t', b + 1);
