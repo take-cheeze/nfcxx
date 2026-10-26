@@ -496,7 +496,12 @@ class LocalLifetime
       end
     end
     f[3].drop(1).each do |p|
-      raise BorrowRefused, 'aggregate results (sret) are unsupported' if bh(p) == 'sret'
+      if bh(p) == 'sret'
+        # The caller's buffer for an aggregate result: a pointer the callee must initialize (summary mode init).
+        raise BadIR, 'sret form' unless p.length == 3 && p[1].is_a?(String)
+        @params << [p[1], nil, true, ['ptr', p[2]]]
+        next
+      end
       raise BorrowRefused, 'variadic functions are unsupported' if bh(p) == 'ellipsis'
       raise BadIR, 'param form' unless bh(p) == 'param' && p.length == 4
       @params << [p[1], bname(p[2]), bh(unconst(p[3])) == 'ptr', unconst(p[3])]
@@ -1267,7 +1272,12 @@ class LocalLifetime
     resolved = []
     args.each_with_index do |arg, i|
       mode, ty = summary[:args][i]
-      if bh(arg) == 'byval'
+      if bh(arg) == 'sret'
+        # (sret T PLACE): the caller's buffer for an aggregate result, which the callee initializes.
+        raise BadIR, 'sret argument form' unless arg.length == 3
+        raise BadIR, 'sret argument disagrees with its effect contract' unless mode == 'init' && same_type?(arg[1], ty)
+        arg = arg[2]
+      elsif bh(arg) == 'byval'
         # (byval T PLACE): the callee gets its own copy, a read of the caller's object.
         raise BadIR, 'byval argument form' unless arg.length == 3
         unless mode == 'byval' && same_type?(arg[1], ty)
@@ -1844,10 +1854,17 @@ class SummaryInference
     params = f[3].drop(1)
     slots = []
     params.each do |p|
+      if bh(p) == 'sret'
+        # The result buffer: initialized by the callee, its one choice is init.
+        desc = memory_type(p[2])
+        return nil unless desc
+        slots << [p[1], p[2], desc, 'sret']
+        next
+      end
       ty = unconst(p[3]) # a const pointer parameter, such as a destructor's this
       if bh(ty) == 'byval'
         return nil unless bh(ty[1]) == 'struct' && @layouts.lookup(ty[1])
-        slots << [p[1], ty[1], nil, true]
+        slots << [p[1], ty[1], nil, 'byval']
       elsif bh(ty) == 'ptr'
         pointee = unconst(ty[1])
         desc = memory_type(pointee)
@@ -1882,9 +1899,11 @@ class SummaryInference
   # Start every memory argument at the weakest effect and advance only the
   # arguments that diagnostics blame, until the body verifies or a choice runs out.
   def search_modes(f, name, ret, slots, a)
-    choices = slots.each_with_index.map do |(_reg, _ty, desc, byval), i|
-      if byval
+    choices = slots.each_with_index.map do |(_reg, _ty, desc, kind), i|
+      if kind == 'byval'
         [['byval']]
+      elsif kind == 'sret'
+        [['init']]
       elsif desc.nil?
         [['value']]
       elsif a && a[0] == i && a[2]

@@ -399,6 +399,31 @@ cc "$tmp/libc.s" -lm -o "$tmp/libc"
 "$tmp/libc" || { echo "FAIL $libsrc runtime: expected 0"; exit 1; }
 echo "ok   scalar C library summaries (--effects scripts/pathb-libc.effects) and native execution"
 pass=$((pass + 1))
+# Aggregate results: the caller's buffer (sret) is an init argument, summarized from the callee's body. A missing call
+# leaves the buffer uninitialized at its use. __int128 passed and returned by value runs natively over the runtime
+# helpers; its pasted summaries validate in the emitter and oracle.
+for name in sret int128_return; do
+  src=tests/pathb-borrow/contracts/$name.cpp
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/$name.ir"
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.ir" > "$tmp/out"
+  grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $src"; cat "$tmp/out"; exit 1; }
+  { head -1 "$tmp/$name.ir"; scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --effects scripts/pathb-runtime.effects "$tmp/$name.ir" | sed -n 's/^inferred: //p'; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.pasted.ir"
+  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name.qbe"
+  scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
+  cmp "$tmp/$name.qbe" "$tmp/$name-oracle.qbe"
+  "${QBE:-build/qbe/qbe}" "$tmp/$name.qbe" -o "$tmp/$name.s"
+  cc "$tmp/$name.s" $(scripts/pathb-ldrt) -lstdc++ -lm -o "$tmp/$name"
+  "$tmp/$name" || { echo "FAIL $src runtime: expected 0"; exit 1; }
+done
+sed 's/^  P q = make(2);$/  P q;/' tests/pathb-borrow/contracts/sret.cpp > "$tmp/sret_nocall.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/sret_nocall.cpp" > "$tmp/sret_nocall.ir" 2>/dev/null
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/sret_nocall.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: q' "$tmp/out"; then
+  echo "FAIL sret without the call: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
+fi
+echo "ok   aggregate results (sret) as init arguments, __int128 by value and by result, mutant, emitter validation, and native execution"
+pass=$((pass + 1))
 # A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
 # registration around it is still refused, for its own reason.)
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/vla.cpp > "$tmp/vla.ir"

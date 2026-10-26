@@ -725,9 +725,17 @@ slots, and name the source line of the statement when the IR has `loc` statement
 `(set %N OPERAND)`, which lowers `?:`, `&&` and `||`, reassigns a register. A pointer register
 assigned on each branch carries the union of their provenance. `(null PTR)` has no provenance, so
 it adds nothing at a join, and a value that can only be null cannot be dereferenced. Functions
-with an `sret` result or an `(ellipsis)` parameter are refused, and so are calls that pass or return
-aggregates in a way the summaries cannot state. A `byval` parameter is the callee's own copy (see
-"Aggregate copies"). The C++ cases `cpp/conditional_*.cpp` cover a
+with an `(ellipsis)` parameter are refused. A `byval` parameter is the callee's own copy (see
+"Aggregate copies").
+
+An aggregate result is returned through a caller's buffer, `(sret %N TYPE)` in the callee and
+`(sret TYPE PLACE)` as the first argument of the call. The callee's buffer is a pointer parameter whose
+summary mode is `init`: the callee must initialize all of the result's declared bytes, and the caller's
+buffer is initialized by the call. Summary inference gives it that one choice. The result is therefore
+checked like any other output, so a callee that leaves a field unwritten has no summary, and a caller
+that uses the buffer before the call reports `uninitialized`. `tests/pathb-borrow/contracts/sret.cpp`
+and `int128_return.cpp` cover the cases, the second with `__int128` passed and returned by value over
+the runtime helpers. The C++ cases `cpp/conditional_*.cpp` cover a
 pointer `?:`, an uninitialized branch value, and a branch pointer to an ended scope.
 
 Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
