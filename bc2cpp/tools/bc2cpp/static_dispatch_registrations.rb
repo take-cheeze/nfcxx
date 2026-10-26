@@ -32,7 +32,10 @@
 #
 # Only internal RPG2000/2003 owners (NeverCalledRegistrations::
 # SAFE_UNREGISTER_OWNER_RE) qualify: RGSS classes are the scripting API a
-# game's Data/Scripts.rxdata calls.
+# game's Data/Scripts.rxdata calls. The closed list (--closed-only) also takes
+# RGSS owners and the engine modules' own singletons (CLOSED_OWNER_RE): the
+# closed build is RPG2000/2003 only, whose games carry no Ruby, so no script
+# can call an RGSS method there.
 #
 # What remains is reached only through direct `Owner_name_impl(...)` calls, so
 # dropping the registration lets `-Wl,--gc-sections` discard the mrb_get_args
@@ -355,10 +358,11 @@ module StaticDispatchRegistrations
     modules.include?(owner) || CORE_SELF_CONTEXTS.include?(owner) || ancestry.include?(owner)
   end
 
-  # Every class an engine class (SAFE_UNREGISTER_OWNER_RE) inherits from, outside the engine itself; :all when a
-  # superclass is unrecognized or defined only natively (no superclass_of entry), so no class can be ruled out.
+  # Every class an engine class (CLOSED_OWNER_RE, the owners the closed list may unregister) inherits from, outside
+  # the engine itself; :all when a superclass is unrecognized or defined only natively (no superclass_of entry), so
+  # no class can be ruled out.
   def engine_ancestry(superclass_of, struct_owners)
-    re = NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE
+    re = CLOSED_OWNER_RE
     found = Set['Object', 'BasicObject']
     found << 'Struct' if struct_owners.any? { |o| o.match?(re) }
     superclass_of.each do |klass, sup|
@@ -582,7 +586,8 @@ module StaticDispatchRegistrations
       fragments &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
     end
 
-    { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies }
+    { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
+      closed_only: closed_only }
   end
 
   LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
@@ -732,9 +737,19 @@ module StaticDispatchRegistrations
 
   # Registered compiled entries (owner/name/entry/gem) no runtime lookup can
   # ever reach.
+  # CLOSED_OWNER_RE: the owners the closed list may unregister -- the engine's own (Game, RPG2k, RPG2k3, LCF), RGSS,
+  # and the singletons of those modules themselves (`Game.singleton`). Reopened core classes (Array, StringIO, ...)
+  # stay out: the core's own code calls their methods on values of every kind.
+  CLOSED_OWNER_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\.singleton\z|\z)/
+
+  def owner_re(closed_only)
+    closed_only ? CLOSED_OWNER_RE : NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE
+  end
+
   def eligible(analysis)
+    re = owner_re(analysis[:closed_only])
     analysis[:registered].select do |m|
-      m[:owner].match?(NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE) &&
+      m[:owner].match?(re) &&
         !dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments])
     end
   end

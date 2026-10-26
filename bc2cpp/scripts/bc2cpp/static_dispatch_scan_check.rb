@@ -13,6 +13,9 @@
 #   BYTECODE_PROC: what counts as generated C building a proc over a bytecode irep (which keeps every block of a
 #     registered compiled method runnable as bytecode).
 #   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources, nor the workflows.
+#   HAND_REGISTRATION_GUARD: every closed-listed hand line in register.cxx is wrapped in #ifndef
+#     BC2CPP_UNREGISTERED_<entry> (prune_static_dispatch_registrations.rb --closed --check), and the closed list may
+#     take RGSS owners and engine module singletons, never reopened core classes (CLOSED_OWNER_RE).
 #   CORE_BYTECODE_TOKENS (needs MRBC; skipped without it): core Ruby read as bytecode names a method only through a
 #     send whose receiver may be an engine object (self in a module, Object or Kernel method; any unknown value), a
 #     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
@@ -25,6 +28,7 @@
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
+require 'rbconfig'
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
@@ -209,6 +213,17 @@ if ENV['MRBC']
 else
   puts 'skip CORE_BYTECODE_TOKENS / FRAGMENT_USES fixtures (no MRBC)'
 end
+
+# --- HAND_REGISTRATION_GUARD ---
+guard_out = IO.popen([RbConfig.ruby, File.expand_path('prune_static_dispatch_registrations.rb', __dir__), '--closed',
+                      '--check'], err: %i[child out], &:read)
+check("hand registrations: every closed-listed register.cxx line is guarded (#{guard_out.lines.first&.strip})",
+      $?.success?)
+check('closed owners: RGSS is unregisterable only for the closed list',
+      S.owner_re(true).match?('RGSS::Sprite') && !S.owner_re(false).match?('RGSS::Sprite'))
+check('closed owners: engine module singletons, but not reopened core classes',
+      S.owner_re(true).match?('Game.singleton') && !S.owner_re(true).match?('Array') &&
+      !S.owner_re(true).match?('Game2::X'))
 
 if $failures.zero?
   puts 'static_dispatch_scan_check: all passed'

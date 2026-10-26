@@ -220,6 +220,19 @@ NEGATIVE = <<~RUBY
         a
       end
     end
+
+    # A self send (SSEND) reads its argument registers too: the literal escapes into the callee.
+    def self_passed
+      a = [1, 2]
+      own_first(a)
+    end
+
+    def self_passed_literal
+      own_include([2, 8], 8)
+    end
+
+    def own_first(x); x[0]; end
+    def own_include(pair, v); pair.include?(v); end
   end
 RUBY
 
@@ -239,6 +252,8 @@ NEGATIVE_EXPECTED = {
   'TupNeg.new.string_store' => '"x"',
   'TupNeg.new.neg_store' => '5',
   'TupNeg.new.rescue_escape' => '[1, 2]',
+  'TupNeg.new.self_passed' => '1',
+  'TupNeg.new.self_passed_literal' => 'true',
 }.freeze
 
 OWNERS_POS = %w[TupPos].freeze

@@ -1504,6 +1504,27 @@ if $PROGRAM_NAME == __FILE__
   # mrb_proc_new_cfunc for BLOCK_CFUNC_FALLBACK_SUPPORT; this header has a
   # C-linkage guard, so a plain #include is fine.
   puts '#include <mruby/proc.h>'
+  # GC_KEEP_REMOVED: a compiled register is a C local, which the GC does not scan, where the interpreter's register is
+  # a VM stack slot it does. A value an mruby API has just unlinked from its container (Array#pop / #shift,
+  # Hash#delete) is referenced by nothing else, so the next allocation's GC step could sweep it while the compiled
+  # code still holds it -- LRUBitmapCache#[]'s `v = @entries.delete(key); @entries[key] = v` re-inserted a swept
+  # Bitmap once mrb_hash_set's String-key copy ran a GC. Each such API is renamed to a wrapper that roots its result
+  # in the GC arena, as a new object is rooted, so it lives until the enclosing arena restore, as long as the VM's
+  # register would keep it.
+  puts <<~'CPP'
+    static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
+      if (!mrb_immediate_p(v)) mrb_gc_protect(M, v);
+      return v;
+    }
+    static inline mrb_value bc2cpp_mrb_ary_pop(mrb_state* M, mrb_value a) { return bc2cpp_keep_removed(M, mrb_ary_pop(M, a)); }
+    static inline mrb_value bc2cpp_mrb_ary_shift(mrb_state* M, mrb_value a) { return bc2cpp_keep_removed(M, mrb_ary_shift(M, a)); }
+    static inline mrb_value bc2cpp_mrb_hash_delete_key(mrb_state* M, mrb_value h, mrb_value k) {
+      return bc2cpp_keep_removed(M, mrb_hash_delete_key(M, h, k));
+    }
+    #define mrb_ary_pop bc2cpp_mrb_ary_pop
+    #define mrb_ary_shift bc2cpp_mrb_ary_shift
+    #define mrb_hash_delete_key bc2cpp_mrb_hash_delete_key
+  CPP
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
   # call-site glue catches (mruby is built with MRB_USE_CXX_EXCEPTION). Always
   # emitted: a header-only struct with nothing to link.
@@ -1958,6 +1979,7 @@ if $PROGRAM_NAME == __FILE__
   # that compiles only when the closed world proves a fact a desktop build lacks. It guards such a
   # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.
   print gen.emit_skipped_entry_macros(skipped_entries)
+  print gen.emit_unregistered_entry_macros(compiled)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
