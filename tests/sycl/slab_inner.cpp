@@ -1,6 +1,6 @@
 // A grid too large for the heap even one group at a time along its outermost dimension: the runtimes split it along the
 // next dimension inward and run the outer dimension's groups one per launch. The stacks are numbered over the whole grid
-// (global linear index), so each launch's stack and local bases are biased by its first invocation. ggml-sycl's get_rows
+// (group by group), so each launch's stack and local bases are biased by its first group. ggml-sycl's get_rows
 // for 70000 rows in two batches (a 2 x 70000 x 1 grid of 256-wide work-groups) needed 13 GB of stacks in one launch.
 // The heap is set to 64 MB here (NFCXX_SYCL_HEAP_MB, before the runtime starts); a 1 KB stack array per work-item makes the
 // grid's stacks about 2 GB.

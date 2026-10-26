@@ -1052,15 +1052,19 @@ class SFn
       @ftype = @spv.t_fn(@spv.t_void, [])
     end
     @ret_t = @spv.t_void
-    gx = global_comp(0)
-    gy = global_comp(1)
-    gz = global_comp(2)
-    # the stack is indexed over the dispatched grid (groups times local size), which can exceed the SYCL range
+    # the stack is indexed over the dispatched grid (groups times local size), which can exceed the SYCL range, group by
+    # group: the work-group's linear index (x fastest, as local_base) times the group's invocations, plus the invocation's
+    # local linear index. A run of consecutive groups (a launch of a large grid) then has a contiguous run of stacks.
     t32 = @spv.t_int(32)
     t64 = @spv.t_int(64)
-    sx = res(IMUL, t32, push_load(:nx, nil), @mod.spec_size(0))
-    sy = res(IMUL, t32, push_load(:ny, nil), @mod.spec_size(1))
-    lin = res(IADD, t32, res(IMUL, t32, res(IADD, t32, res(IMUL, t32, gz, sy), gy), sx), gx)
+    wlin = res(IADD, t32, res(IMUL, t32, res(IADD, t32, res(IMUL, t32, group_comp(2), push_load(:ny, nil)), group_comp(1)),
+                                    push_load(:nx, nil)), group_comp(0))
+    lsx = @mod.spec_size(0)
+    lsy = @mod.spec_size(1)
+    llin = res(IADD, t32, res(IMUL, t32, res(IADD, t32, res(IMUL, t32, builtin_component(@mod.lid, 2), lsy),
+                                              builtin_component(@mod.lid, 1)), lsx), builtin_component(@mod.lid, 0))
+    inv = res(IMUL, t32, res(IMUL, t32, lsx, lsy), @mod.spec_size(2))
+    lin = res(IADD, t32, res(IMUL, t32, wlin, inv), llin)
     sbytes = to_u64(push_load(:stack_bytes, nil), ["int", 4, false, false])
     base = push_load(:stack, nil)
     off = res(IMUL, t64, to_u64(lin, ["int", 4, false, false]), sbytes)
