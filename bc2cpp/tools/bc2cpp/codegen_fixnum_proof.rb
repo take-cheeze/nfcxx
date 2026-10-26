@@ -115,7 +115,7 @@ class CodeGen
                     !(FIXNUM_PROOF_STEP_OVER_OPS.include?(use_insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(use_insn.op))
 
     BytecodeIR.for(irep).every_reaching_definition(idx, cur, opaque_regs: ctx[:upvars],
-                                                        max_states: fixnum_proof_max_states(irep)) do |definition|
+                                                        max_states: fixnum_proof_max_states(irep), shared: true) do |definition|
       if definition.entry?
         fixnum_proof_entry_arg?(irep, definition.reg, owner_def)
       else

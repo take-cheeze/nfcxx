@@ -254,6 +254,10 @@ module IrSymbolFlow
     captured = captured_regs(irep) or return nil
     return nil if captured.include?(reg)
 
+    read_sets = if ENV['BC2CPP_SYMBOL_READS_CACHE'] != '0'
+                  program.instance_variable_get(:@symbol_flow_instruction_reads) ||
+                    program.instance_variable_set(:@symbol_flow_instruction_reads, Array.new(program.instructions.length))
+                end
     seen = Set.new
     out = []
     work = program.instructions[idx].successors.dup
@@ -262,7 +266,9 @@ module IrSymbolFlow
       next unless seen.add?(n)
 
       insn = program.instructions[n].source
-      out << n if reads(irep, insn).include?(reg.to_i)
+      # Read registers depend only on this immutable body's instruction, not the queried value.
+      read_regs = read_sets ? (read_sets[n] ||= reads(irep, insn).freeze) : reads(irep, insn)
+      out << n if read_regs.include?(reg.to_i)
       kills = (KILLS_LEAD.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)) && insn.reg == reg
       work.concat(kills ? program.raise_targets.fetch(n, []) : program.successors_of(n, include_handlers: true))
     end
