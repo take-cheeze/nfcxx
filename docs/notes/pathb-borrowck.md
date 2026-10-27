@@ -116,7 +116,12 @@ other accesses, while reads and writes through its own pointer remain permitted.
 conflicting loan, writing through a shared loan, or ending storage with an active loan is an
 error. Access through an ended loan is an error even through an older pointer copy. Possible
 active loans are unioned at CFG joins, so a loan ended on only one incoming path still constrains
-accesses at the join. Local names and internal provenance tokens occupy distinct namespaces.
+accesses at the join. A pointer carries a loan only on paths where that loan is active, because ending a
+loan, its inferred expiry, and the end of its storage all rewrite every pointer that carries it. So an
+access through a pointer needs its loans possibly active, not active on every path. After
+`p = c ? &a : &b`, each loan is active only on its own branch, and `*p` is still allowed. A pointer
+copy kept from an ended loan reads as ended and is an error. Local names and internal provenance tokens
+occupy distinct namespaces.
 
 By default, loan ends are **explicit**. The opt-in inference mode below can shorten them.
 IDs may execute repeatedly in a loop
@@ -556,8 +561,9 @@ These are trusted imports at call sites, not facts inferred from names. For an e
 producer must ensure the real implementation satisfies the summary. A function defined in the same
 module is checked against its own summary (see below).
 
-Read effects may have several possible known local targets, all of which are checked. Mutation,
-initialization, and consumption require one known place. Read/read aliases are allowed; arguments
+Read effects may have several possible known local targets, all of which are checked. So may mutation,
+as a weak update of each (see "Refusals and limits"). Initialization and consumption require one known
+place. Read/read aliases are allowed; arguments
 whose ranges overlap and include mutation are refused before applying postconditions. Summaries do
 not prescribe ordering inside a callee, so an initializer cannot silently make a same-call reader
 safe. More permissive alias/ordering contracts remain future work.
@@ -649,10 +655,37 @@ apply to the returned loan and its ancestors. Field-range results protect only t
 after the call, while call preconditions still cover the complete argument effect region.
 
 These contracts remain trusted: the checker does not inspect the callee to prove where its pointer
-actually points. Heap-owned returns, aliases selected from several arguments, retained borrows,
-generic lifetime signatures, and Rust frontend emission remain unsupported. The emitter erases
-`call-borrow` to an ordinary call. A native C identity helper verifies the actual pointer return,
+actually points. Heap-owned returns, retained borrows, generic lifetime signatures, and Rust
+frontend emission remain unsupported. The emitter erases `call-borrow` to an ordinary call. A native C identity helper verifies the actual pointer return,
 write through the result, byte-identical metadata erasure, and emitter/oracle agreement.
+
+### Several sources
+
+A result that may point into any of several argument ranges lists one `from-arg` per range:
+
+```text
+(call-effects "pick"
+  (returns (ptr int) (from-arg 0 0 shared) (from-arg 1 0 shared))
+  (nothrow) (noescape) (closed) (args (read int) (read int) (value int)))
+(call-effects "get"
+  (returns (ptr int) (from-arg 0 0 exclusive) (from-arg 0 4 exclusive))
+  (nothrow) (noescape) (closed) (args (write (struct "Pair")) (value int)))
+```
+
+These are `fn pick<'a>(a: &'a i32, b: &'a i32, c: bool) -> &'a i32` and NLL's "problem case 3", a
+`&mut` result that borrows one of two fields. Each source is validated as above. Two sources in one
+argument must not overlap, since a call takes a loan of each, and two exclusive loans of one byte
+would conflict with each other. At a call, the result's provenance is the union over the sources:
+
+- A source whose argument is a pointer value contributes that pointer moved by the source's offset,
+  with its loans.
+- A source whose argument is a local place gets an implicit loan, as below. With several sources,
+  these loans are named `&CALLEE#N.K`, for the K-th source of the N-th call site.
+
+The result therefore keeps every source borrowed while it is live. A write to any source then
+conflicts, and the end of any source's storage leaves the result dangling. A read through the result
+reads every possible place. A write through it is a weak update of each (see "Refusals and limits").
+`call-borrow` names a single loan, so it is refused for a summary with several sources.
 
 ## Verified callee summaries
 
@@ -686,9 +719,10 @@ The other promises are checked as follows:
 - `noescape`: storing a local, argument, or loan-derived pointer into argument memory is
   `contract-escape`. Storing a pointer of unknown provenance there is refused. Returning an
   argument pointer is allowed only through the declared returned alias.
-- Returned alias: every returned pointer must lie in the declared argument region at the
-  declared offset. An `exclusive` alias also needs an all-exclusive loan chain. A returned
-  pointer that fails this is `contract-return-mismatch`.
+- Returned alias: every returned pointer must lie in a declared source's argument region at that
+  source's offset. An `exclusive` source also needs an all-exclusive loan chain. A returned
+  pointer that matches no source is `contract-return-mismatch`, naming the region of a source in
+  the same argument, or else the first source's region.
 - `nothrow`: every call in the body already needs a contract, and no contract the body calls is `may-throw`.
   A body that calls a `may-throw` callee, other than itself, is `contract-may-throw` under a `nothrow` summary.
 
@@ -729,6 +763,11 @@ The search is a verification loop, not a separate analysis:
    argument tries `write`/`exclusive` first, because a pointer to non-`const` lets the caller
    write through it. It then tries `read`/`shared`, then `write`/`shared`.
 4. The first candidate whose body has no diagnostics is kept.
+5. If no single source verifies, the result tries the set of argument ranges that the candidates'
+   bodies returned (on any path), once it has at least two. Each source argument's modes advance as
+   in step 3. A candidate that returns a range outside the set adds it, and the larger set is tried,
+   at most once per range. `pick` above returns `*%0` on one path and `*%1` on the other, so no
+   single source verifies, and the set of both does.
 
 A function with no surviving candidate keeps the plain analysis, and calls to it are still refused.
 So inference cannot accept anything the verifier would reject. It can only fail to find a
@@ -739,7 +778,9 @@ alone does not establish. Mutually recursive functions get no summary and need e
 
 The order chooses one summary when several verify. `read` is preferred, and `init` over `write`,
 so a callee that only stores gets `init`. A returned alias is `exclusive` whenever the body
-allows it, even if the body only reads, so callers can write through the result.
+allows it, even if the body only reads, so callers can write through the result. One source is
+preferred over several, since every source stays borrowed at a call. The C++ `std::max` and `std::min`
+of libstdc++ get two-source summaries this way.
 
 ## Implicit returned loans
 
@@ -754,7 +795,9 @@ loan is named `&CALLEE#N` and has the summary's permission and range, so
 (let %0 (ptr int) (call (ptr int) &"pick" $"x"))
 ```
 
-checks like `(call-borrow (ptr int) "&pick#1" root &"pick" $"x")`. Lowered C++ has no `loan-end`
+checks like `(call-borrow (ptr int) "&pick#1" root &"pick" $"x")`. A summary with several sources
+gets one such loan per source whose argument is a place, `&pick#1.1`, `&pick#1.2`, and so on (see
+"Several sources"). Lowered C++ has no `loan-end`
 facts, so these loans require `--infer-loan-ends`; without it the function is refused.
 
 A source whose provenance is only known by dataflow, such as a pointer loaded from a slot, gets no
@@ -777,7 +820,16 @@ slots, and name the source line of the statement when the IR has `loc` statement
 
 `(set %N OPERAND)`, which lowers `?:`, `&&` and `||`, reassigns a register. A pointer register
 assigned on each branch carries the union of their provenance. `(null PTR)` has no provenance, so
-it adds nothing at a join, and a value that can only be null cannot be dereferenced. Functions
+it adds nothing at a join, and a value that can only be null cannot be dereferenced.
+
+A store through a pointer that may name several places writes one of them. It is a *weak update*:
+every place must allow the write (live storage, no conflicting loan, no shared loan), and each place
+may keep its old contents. Its bytes become initialized only where they already were. A stored pointer
+joins the provenance it may replace, which is none if the bytes were never initialized, and a scalar
+store makes a pointer held there unknown. A `write` call argument that may name several places is
+handled the same way. A store into drop-obligated storage, a dynamic index among the places, and `init`
+or `consume` arguments still need one place. `cases/weak_store_*.ir` cover an uninitialized place, an
+initialized pair, and a stored pointer to a local whose scope ends. Functions
 with an `(ellipsis)` parameter are refused. A `byval` parameter is the callee's own copy (see
 "Aggregate copies").
 
@@ -793,7 +845,7 @@ pointer `?:`, an uninitialized branch value, and a branch pointer to an ended sc
 
 Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
 aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
-external stores, and stores through multiple possible destinations. Unknown instructions are
+and external stores. Unknown instructions are
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
 
@@ -835,6 +887,12 @@ cover root/parent identities, field ranges, permissions, scope and parent expiry
 contracts, and inferred last-use release.
 Implicit-loan fixtures in `tests/pathb-borrow/inferred/implicit_*` cover last use, future
 conflicts, dangling results, and loops, in both loan modes.
+Two-source fixtures (`inferred/implicit_two_sources_*`, `returned/two_*`, `verify/alias_two_*`,
+`summaries/alias_two_*`) cover a write to either source while the result is live, a source that dies
+first, a write through a two-field result, overlapping sources, `call-borrow`, a body that returns
+an undeclared range, and inference of both shapes. `contracts/two_sources.cpp` infers both shapes
+from lowered C++, reports a conflict for a write to the second argument or the second field while
+the result is held, and runs natively.
 Summary-inference fixtures in `tests/pathb-borrow/summaries` cover each inferred effect,
 alias offsets and permissions, recursion, caller misuse, and functions left without a summary. A
 lowered C++ program is checked with inferred summaries, and fails once its initializing call is

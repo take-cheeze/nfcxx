@@ -1,7 +1,7 @@
 // rustc: ok
-// nfcxx: refused
-// NLL's "problem case 3", accepted by rustc 1.99. The result borrows one of two fields, but a summary
-// names one source range, so `get` has none and its body is refused.
+// nfcxx: ok
+// NLL's "problem case 3", accepted by rustc 1.99. The result borrows one of two fields, so the summary of
+// `get` lists both, and the write through the result may go to either.
 struct M {
     a: i32,
     b: i32,

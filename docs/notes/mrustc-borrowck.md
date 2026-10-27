@@ -51,13 +51,13 @@ mrustc also rejects some programs itself, and the driver reports those as errors
 ## Results
 
 `tests/mrustc-borrow/cases` has one program per rule, each with rustc 1.99's verdict. The suite
-checks this pipeline's verdict, and compares rustc's when one is installed. 15 of the 20 cases agree
+checks this pipeline's verdict, and compares rustc's when one is installed. 22 of the 24 cases agree
 with rustc:
 
 | Verdict | Cases |
 | --- | --- |
-| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow |
-| Rejected, as by rustc | E0499 two `&mut`, E0502 (twice), E0506, E0597 dangling, E0381 and E0382 (mrustc), E0515 (mrustc) |
+| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals |
+| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc) |
 | Different | below |
 
 The differences are the known gaps:
@@ -67,11 +67,15 @@ The differences are the known gaps:
   forms (pathb-borrowck.md, "Explicit value moves and copies") are the next step.
 - **Two-phase borrows** (`c.set(c.get() + 1)`) give a false `loan-conflict`. rustc reserves the
   receiver's `&mut` and activates it after the arguments. The checker takes the exclusive loan first.
-- **A result that may borrow from either of two arguments, or two fields** (`pick(&x, &y)`, NLL's
-  "problem case 3", which rustc 1.99 accepts) is refused. A summary names one source range, and
-  with lifetimes erased the translator cannot say that the result borrows from both.
-- **A borrow stored across loop iterations** (E0499) is refused: a store through a pointer with
-  joined provenance is outside the subset.
+
+With lifetimes erased, the translator cannot say that `pick<'a>(a: &'a i32, b: &'a i32) -> &'a i32` returns a
+borrow of either argument. Summary inference finds it instead: a summary may list several sources
+(pathb-borrowck.md, "Several sources"), and inference tries the set of argument ranges the body returns
+when no single one verifies. A caller keeps every source borrowed while the result is live, which is
+what the shared lifetime `'a` says. The same covers NLL's problem case 3, whose result borrows one of
+two fields of its `&mut` argument. A write through a reference to either of two places is a weak update
+of both. In `err_loop_store` the checker rejects the use of the kept borrow after the next iteration
+ends it, where rustc reports the next iteration's `&mut x`.
 
 Generic functions are checked only as the instances the program uses, after monomorphisation.
 Standard library calls are refused for lack of summaries, which limits the route to small
@@ -101,4 +105,3 @@ As of October 2026:
 - Moves: `move-value` for moved operands, then drop obligations for types with drop glue.
 - Two-phase borrows: a reserved state for the receiver's loan until the call.
 - Summaries for the standard library functions small programs use (formatting, `Vec`, `Box`).
-- Results that borrow from several sources, which needs region parameters in summaries.

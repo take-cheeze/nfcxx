@@ -5,7 +5,7 @@
 # with optional `// diag: TEXT` lines that must appear in the output. The cases where the two differ
 # are the known gaps. The rustc verdicts are those of rustc 1.99.0. When rustc is installed, its verdict
 # is compared with the case's and a difference is printed as a note: an older rustc rejects some
-# programs that 1.99 accepts (gap_two_offsets, NLL's problem case 3). Needs scripts/setup-mrustc.sh first.
+# programs that 1.99 accepts (ok_two_offsets, NLL's problem case 3). Needs scripts/setup-mrustc.sh first.
 cd "$(dirname "$0")/../.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0; agree=0; differ=0
