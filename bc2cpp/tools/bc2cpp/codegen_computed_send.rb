@@ -34,6 +34,10 @@ module ComputedSend
   SPLAT_SHARED_SWITCH = 'BC2CPP_SPLAT_SHARED'
   # SPLAT_SHARED: how far back the LOADNIL of the list register is looked for.
   SPLAT_SHARED_WINDOW = 16
+  # =0 keeps SPLAT_ROW_MEMO off: every `send(*recv[i])` finds its arm through the length and Symbol tables.
+  SPLAT_ROW_MEMO_SWITCH = 'BC2CPP_SPLAT_ROW_MEMO'
+  # SPLAT_ROW_MEMO: memo entries per site, indexed by `i`; any other index takes the tables.
+  SPLAT_ROW_MEMO_SLOTS = 256
   # Core containers whose [] / freeze the table proof reads through.
   TABLE_READERS = [%w[Array []], %w[Hash []]].freeze
   TABLE_FREEZERS = [%w[Array freeze], %w[Hash freeze], %w[Object freeze], %w[Kernel freeze]].freeze
@@ -159,6 +163,9 @@ module ComputedSend
     return nil if groups.empty? || total > GUARDED_MAX_ARMS
 
     fallback = yield
+    key = shared && splat_row_memo_key(irep, idx, shared)
+    return splat_row_memo_send(insn, ary, shared, key, groups, total, fallback) if key
+
     list = "r#{d + 1}"
     out = +"  // COMPUTED_SEND_GUARDED :#{insn.sym} n=* over #{total} spelled names of self's class by arity; " \
            "any other value keeps the original send\n  {\n    bool #{ary}_done = false;\n"
@@ -184,15 +191,88 @@ module ComputedSend
 
   # SPLAT_SHARED: an Array of at most +max+ immediates is read in place, so ARYCAT's copy is made only for the fallback
   # send, which may keep it. Immediates need no root once read; any other list is copied first, as before.
-  def splat_shared_prologue(ary, shared, max)
+  def splat_shared_prologue(ary, shared, max, declare: true)
     src = "r#{shared[:src]}"
     out = +"    // SPLAT_SHARED: the list is read from #{src} in place; ARYCAT's copy is made only when no arm takes it\n"
-    out << "    bool #{ary}_shared = mrb_array_p(#{src}) && RARRAY_LEN(#{src}) <= #{max};\n"
+    out << "    #{'bool ' if declare}#{ary}_shared = mrb_array_p(#{src}) && RARRAY_LEN(#{src}) <= #{max};\n"
     out << "    for (mrb_int k = 0; #{ary}_shared && k < RARRAY_LEN(#{src}); ++k) " \
            "#{ary}_shared = mrb_immediate_p(RARRAY_PTR(#{src})[k]);\n"
     # The list register was nil (LOADNIL), so ARYCAT's effect is the copy alone.
     out << "    if (!#{ary}_shared) r#{shared[:reg]} = mrb_ary_splat(M, #{src});\n"
     out << "    mrb_value #{ary}_list = #{ary}_shared ? #{src} : r#{shared[:reg]};\n"
+    out
+  end
+
+  # SPLAT_ROW_MEMO: `send(*recv[i])`, a GETIDX straight before the shared pair's ARYCAT, is keyed by the index
+  # register, which nothing writes between the two. nil for any other list.
+  def splat_row_memo_key(irep, idx, shared)
+    return nil if ENV[SPLAT_ROW_MEMO_SWITCH] == '0' || idx < 2
+
+    getidx = BytecodeIR.for(irep).source_at(idx - 2)
+    getidx&.op == :GETIDX && getidx.reg.to_i == shared[:src] ? "r#{shared[:src] + 1}" : nil
+  end
+
+  # SPLAT_ROW_MEMO: the guarded splat with a per-site memo from the index to the arm. An entry is a copy of a list
+  # that was all immediates when its arm was found. A list equal to it bit for bit has the same length and leading
+  # Symbol, so it takes the same arm, and its immediates can be read from the copy. Any other list, or an index
+  # outside the memo, takes the length and Symbol tables as before and refills the entry. The key only picks the
+  # entry, so nothing about the table (frozen, reassigned, rows written) needs proving: a changed row misses.
+  def splat_row_memo_send(insn, ary, shared, key, groups, total, fallback)
+    src = "r#{shared[:src]}"
+    width = groups.map(&:first).max + 1
+    memo = "#{ary}_memo_#{(@computed_send_site_seq || 0) + 1}"
+    numbered = groups.flat_map { |argc, arms| arms.map { |name, code| [argc, name, code] } }
+                     .each_with_index.map { |(argc, name, code), i| [argc, name, code, i + 1] }
+    out = +"  // COMPUTED_SEND_GUARDED :#{insn.sym} n=* over #{total} spelled names of self's class by arity; " \
+           "any other value keeps the original send\n  {\n    bool #{ary}_done = false;\n"
+    out << "    // SPLAT_ROW_MEMO: the arm of #{src} is remembered per index #{key} while the list stays bit-identical\n"
+    out << "    static mrb_state* #{memo}_M = nullptr;\n"
+    out << "    static struct { mrb_int n; uint16_t arm; mrb_value v[#{width}]; } #{memo}[#{SPLAT_ROW_MEMO_SLOTS}];\n"
+    out << "    if (mrb_unlikely(#{memo}_M != M)) { memset(#{memo}, 0, sizeof(#{memo})); #{memo}_M = M; }\n"
+    out << "    uint16_t #{ary}_arm = 0;\n    const mrb_value* #{ary}_argv = nullptr;\n    bool #{ary}_shared = false;\n"
+    out << "    const bool #{ary}_keyed = mrb_fixnum_p(#{key}) && (mrb_uint)mrb_fixnum(#{key}) < #{SPLAT_ROW_MEMO_SLOTS};\n"
+    out << "    if (mrb_likely(#{ary}_keyed && mrb_array_p(#{src}))) {\n"
+    out << "      auto& e = #{memo}[mrb_fixnum(#{key})];\n"
+    # Bit equality: equal words are one immediate (a word-boxed Float's sign of zero included). The compare is
+    # unrolled from the entry's length down, which is at most the width.
+    out << "      auto same = [](mrb_value a, mrb_value b) {\n#if defined(MRB_WORD_BOXING)\n        return a.w == b.w;\n" \
+           "#else\n        return memcmp(&a, &b, sizeof(mrb_value)) == 0;\n#endif\n      };\n"
+    out << "      const mrb_value* p = RARRAY_PTR(#{src});\n      bool hit = false;\n"
+    out << "      switch (RARRAY_LEN(#{src}) == e.n ? e.n : 0) {\n"
+    width.downto(2) do |k|
+      out << "      case #{k}: if (!same(p[#{k - 1}], e.v[#{k - 1}])) break; [[fallthrough]];\n"
+    end
+    out << "      case 1: hit = same(p[0], e.v[0]); break;\n      default: break;\n      }\n"
+    out << "      if (mrb_likely(hit)) { #{ary}_arm = e.arm; #{ary}_argv = e.v + 1; }\n    }\n"
+    out << "    if (#{ary}_arm == 0) {\n"
+    out << splat_shared_prologue(ary, shared, width, declare: false)
+    list = "#{ary}_list"
+    out << "    if (mrb_array_p(#{list}) && RARRAY_LEN(#{list}) >= 1 && mrb_symbol_p(RARRAY_PTR(#{list})[0])) {\n"
+    out << "      mrb_sym #{ary}_id = mrb_symbol(RARRAY_PTR(#{list})[0]);\n      switch (RARRAY_LEN(#{list}) - 1) {\n"
+    groups.each do |argc, _|
+      arms = numbered.select { |a, *| a == argc }.map { |_, name, _, number| [name, number] }
+      out << "      case #{argc}: {\n"
+      out << computed_send_guarded_lookup("#{ary}_id", "#{ary}_arm", arms, '        ')
+      out << "        break;\n      }\n"
+    end
+    out << "      default: break;\n      }\n      #{ary}_argv = RARRAY_PTR(#{list}) + 1;\n"
+    # Only an all-immediates list is copied: the copy needs no GC root.
+    out << "      if (#{ary}_arm != 0 && #{ary}_shared && #{ary}_keyed) {\n"
+    out << "        auto& e = #{memo}[mrb_fixnum(#{key})];\n        e.n = RARRAY_LEN(#{list});\n"
+    out << "        for (mrb_int k = 0; k < e.n; ++k) e.v[k] = RARRAY_PTR(#{list})[k];\n        e.arm = #{ary}_arm;\n"
+    out << "      }\n    }\n    }\n    switch (#{ary}_arm) {\n"
+    numbered.each do |argc, name, code, number|
+      out << "    case #{number}: {  // :#{name}/#{argc}\n"
+      # Read before the call: a re-entrant call may refill the entry.
+      (1..argc).each { |k| out << "      mrb_value #{ary}_a#{k} = #{ary}_argv[#{k - 1}];\n" }
+      out << code.lines.map { |line| "      #{line}" }.join
+      out << "      #{ary}_done = true;\n      break;\n    }\n"
+    end
+    out << "    default: break;\n    }\n    if (!#{ary}_done) {\n"
+    fallback = "if (#{ary}_shared) r#{shared[:reg]} = mrb_ary_splat(M, #{src});\n#{fallback}"
+    out << fallback.lines.map { |line| "    #{line}" }.join
+    out << "    }\n  }\n"
+    shared[:emitted] = out
     out
   end
 
@@ -251,6 +331,23 @@ module ComputedSend
       out << "#{pad}  #{done} = true;\n#{pad}  break;\n#{pad}}\n"
     end
     out << "#{pad}default: break;\n#{pad}}\n"
+    out
+  end
+
+  # SPLAT_ROW_MEMO: computed_send_guarded_dispatch's table alone, storing the arm's number (0: none) into +var+.
+  def computed_send_guarded_lookup(id, var, arms, pad)
+    @computed_send_site_seq = (@computed_send_site_seq || 0) + 1
+    tab = "bc2cpp_gtab_#{@computed_send_site_seq}"
+    syms = arms.map { |name, _| "mrb_intern_lit(M, \"#{name}\")" }
+    out = +"#{pad}static mrb_state* #{tab}_M = nullptr;\n#{pad}static uint16_t* #{tab} = nullptr;\n" \
+           "#{pad}static mrb_sym #{tab}_max = 0;\n"
+    out << "#{pad}if (#{tab}_M != M) {\n#{pad}  const mrb_sym syms[] = { #{syms.join(', ')} };\n"
+    out << "#{pad}  const uint16_t nums[] = { #{arms.map(&:last).join(', ')} };\n"
+    out << "#{pad}  mrb_sym max = 0;\n#{pad}  for (mrb_sym s : syms) if (s > max) max = s;\n"
+    out << "#{pad}  free(#{tab});\n#{pad}  #{tab} = static_cast<uint16_t*>(calloc(max + 1, sizeof(uint16_t)));\n"
+    out << "#{pad}  for (size_t k = 0; k < sizeof(syms) / sizeof(syms[0]); ++k) #{tab}[syms[k]] = nums[k];\n"
+    out << "#{pad}  #{tab}_max = max;\n#{pad}  #{tab}_M = M;\n#{pad}}\n"
+    out << "#{pad}#{var} = #{id} <= #{tab}_max ? #{tab}[#{id}] : 0;\n"
     out
   end
 
