@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "rt_image.hpp"
+#include "rt_spirv_split.hpp"
 
 namespace sycl {
 namespace detail {
@@ -356,15 +357,17 @@ class cl_rt {
 
   uint64_t closure_addr() const { return (uint64_t)(uintptr_t)(ctl_ + cl_closure_at); }
 
-  // The kernel of an entry point of an image for a local size: a program per image and local size (the specialization
-  // constants set the size).
+  // The kernel of an entry point of an image for a local size: a program per kernel and local size, built from the entry
+  // point's own module (rt_spirv_split.hpp: the driver compiles that kernel alone; the specialization constants set the size).
   cl_kernel kernel(const std::string &entry, const unsigned *l, size_t m, uint32_t subgroup_size) {
     const image_module &mod = images_.modules[m];
     std::string k = std::to_string(m) + "/" + entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
     auto it = kernels_obj_.find(k);
     if (it != kernels_obj_.end()) return it->second;
     cl_int e = CL_SUCCESS;
-    cl_program prog = clCreateProgramWithIL(ctx_, mod.il.data(), mod.il.size(), &e);
+    std::vector<uint32_t> il = detail::spirv_entry_module(mod.il.data(), mod.il.size(), entry);
+    if (il.empty()) fail("the image has no entry point " + entry);
+    cl_program prog = clCreateProgramWithIL(ctx_, il.data(), il.size() * 4, &e);
     check(e, "clCreateProgramWithIL");
     cl_uint sz[3] = {l[0], l[1], l[2]};
     for (cl_uint i = 0; i < 3; i++) check(clSetProgramSpecializationConstant(prog, i, sizeof(cl_uint), &sz[i]), "clSetProgramSpecializationConstant");
