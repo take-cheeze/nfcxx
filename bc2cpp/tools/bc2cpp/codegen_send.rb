@@ -828,7 +828,7 @@ class CodeGen
           // ARRAY_SLICE_WRITE :[]= -- exact Array and fixnum indices only; preserve coercion and overrides
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
               mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
-            mrb_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
+            bc2cpp_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
             r#{d} = #{replacement};
           } else {
             #{fallback.chomp}
@@ -845,7 +845,7 @@ class CodeGen
       return <<~CPP
           // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-            mrb_ary_push(M, #{recv}, #{value});
+            bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
             #{fallback.chomp}
@@ -879,7 +879,7 @@ class CodeGen
         array_arm = <<~CPP
             // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
             if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-              mrb_ary_push(M, #{recv}, #{value});
+              bc2cpp_ary_push(M, #{recv}, #{value});
               r#{d} = #{recv};
             } else\x20
         CPP
@@ -913,7 +913,7 @@ class CodeGen
       return <<~CPP
           // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-            mrb_ary_push(M, #{recv}, #{value});
+            bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
             #{fallback.chomp}
