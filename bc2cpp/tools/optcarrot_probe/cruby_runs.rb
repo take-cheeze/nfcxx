@@ -7,6 +7,9 @@ require 'open3'
 # Ruby has YJIT, so a ratio never silently compares against whatever the calling shell enabled.
 # OPTCARROT_CRUBY_YJIT=0 skips the YJIT run.
 # TRUFFLERUBY_RUN: OPTCARROT_TRUFFLERUBY names a TruffleRuby `ruby` to time as one more reference, on the same bundle.
+# HOT_PATH_FPS: each runtime also runs a short warmup-length run, and (FRAMES - warmup) / (wall - short wall) is its
+# frame rate with process start, load and the warmup frames subtracted out. OPTCARROT_WARMUP_FRAMES sets the short
+# run's length (default FRAMES / 10); 0 skips it.
 module CRubyRuns
   INTERPRETER_LABEL = 'CRuby (interpreter)'
   YJIT_LABEL = 'CRuby + YJIT'
@@ -44,6 +47,21 @@ module CRubyRuns
     # stdout only: TruffleRuby warns on stderr (about the locale, for one), which is not the description.
     out, err, status = Open3.capture3(run[:env], run[:ruby] || ruby, *run[:args], '-e', 'print RUBY_DESCRIPTION')
     status.success? ? out.strip : "unknown (#{(out + err).strip})"
+  end
+
+  # The short run's frame count, or nil when there is none to make.
+  def warmup_frames(frames, env: ENV)
+    warmup = Integer(env.fetch('OPTCARROT_WARMUP_FRAMES', (frames / 10).to_s), 10)
+    raise ArgumentError, 'OPTCARROT_WARMUP_FRAMES must not be negative' if warmup.negative?
+
+    warmup if warmup.positive? && warmup < frames
+  end
+
+  # HOT_PATH_FPS from a full run and a short run of the same runtime; nil when the difference is not a positive time
+  # (timer noise on a tiny frame count).
+  def hot_fps(frames, seconds, warmup, warmup_seconds)
+    delta = seconds - warmup_seconds
+    (frames - warmup) / delta if delta.positive?
   end
 
   # Wall-time ratio lines for the summary: every non-CRuby row against every CRuby row, then bc2cpp against the

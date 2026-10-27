@@ -54,7 +54,7 @@ def run_bc2cpp(sources, env)
   [stdout, stderr]
 end
 
-def run_benchmark(label, command, chdir: nil, env: {})
+def run_benchmark(label, command, chdir: nil, env: {}, frames: FRAMES)
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   options = chdir ? { chdir: chdir } : {}
   output, status = Open3.capture2e(env, *command, **options)
@@ -68,9 +68,24 @@ def run_benchmark(label, command, chdir: nil, env: {})
   raise "#{label} benchmark did not print a checksum:\n#{output}" unless checksum
 
   fps = output[/^fps: ([\d.]+)$/, 1]
-  puts "#{label}: #{format('%.2f s (%.2f frames/s)', elapsed, FRAMES / elapsed)}; " \
+  puts "#{label}: #{format('%.2f s (%.2f frames/s)', elapsed, frames / elapsed)}; " \
        "reported fps=#{fps || 'n/a'}, checksum=#{checksum}"
   { label: label, seconds: elapsed, checksum: checksum, reported_fps: fps }
+end
+
+WARMUP_FRAMES = CRubyRuns.warmup_frames(FRAMES)
+
+# HOT_PATH_FPS (cruby_runs.rb): `command` without its frame count; the full run, then the short one. A profiling run
+# makes no short run: it would overwrite the full run's profile in the same directory.
+def run_timed(label, command, chdir: nil, env: {})
+  result = run_benchmark(label, [*command, FRAMES.to_s], chdir: chdir, env: env)
+  return result unless WARMUP_FRAMES && chdir.nil?
+
+  short = run_benchmark("#{label} (#{WARMUP_FRAMES} frames)", [*command, WARMUP_FRAMES.to_s], env: env,
+                                                                                              frames: WARMUP_FRAMES)
+  result[:hot_fps] = CRubyRuns.hot_fps(FRAMES, result[:seconds], WARMUP_FRAMES, short[:seconds])
+  puts "#{label}: hot-path #{result[:hot_fps] ? format('%.2f frames/s', result[:hot_fps]) : 'n/a'}"
+  result
 end
 
 # The .text a linked mruby actually contains, so a comparison is a code-size
@@ -434,20 +449,18 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     cruby_descriptions[run[:label]] = CRubyRuns.description(RbConfig.ruby, run)
     puts "#{run[:label]}: #{cruby_descriptions[run[:label]]}"
     ruby = run[:ruby] || RbConfig.ruby
-    benchmarks << run_benchmark(run[:label], [ruby, *run[:args], cruby_bundle, ROM, FRAMES.to_s], env: run[:env])
+    benchmarks << run_timed(run[:label], [ruby, *run[:args], cruby_bundle, ROM], env: run[:env])
   end
   profile_dir = File.join(temp, 'profile')
   interpreted_profile_dir = File.join(profile_dir, 'interpreted')
   compiled_profile_dir = File.join(profile_dir, 'compiled')
   FileUtils.mkdir_p([interpreted_profile_dir, compiled_profile_dir]) if profiling
-  benchmarks << run_benchmark('mruby interpreter', [interpreted_binary, bundle, ROM, FRAMES.to_s],
-                              chdir: (interpreted_profile_dir if profiling))
+  benchmarks << run_timed('mruby interpreter', [interpreted_binary, bundle, ROM],
+                          chdir: (interpreted_profile_dir if profiling))
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
   modes = ['sealed']
   core_label += " (#{modes.join(', ')})" unless modes.empty?
-  compiled_command = [compiled_binary, ROM, FRAMES.to_s]
-  compiled_result = run_benchmark(core_label, compiled_command,
-                                  chdir: (compiled_profile_dir if profiling))
+  compiled_result = run_timed(core_label, [compiled_binary, ROM], chdir: (compiled_profile_dir if profiling))
   benchmarks << compiled_result
   # The A/B size figure, when the experiment ran: this binary's own .text, so
   # the cost of the tagged field is a measurement of the artifact that was
@@ -464,13 +477,19 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   if (summary_path = ENV['GITHUB_STEP_SUMMARY']) && !summary_path.empty?
     File.open(summary_path, 'a') do |summary|
       summary.puts "## Optcarrot benchmark (#{FRAMES} frames, #{build_mode})", '',
-                   '| Runtime | Wall time | Wall fps | Optcarrot fps | Checksum |',
-                   '| --- | ---: | ---: | ---: | ---: |'
+                   '| Runtime | Wall time | Wall fps | Hot-path fps | Optcarrot fps | Checksum |',
+                   '| --- | ---: | ---: | ---: | ---: | ---: |'
       benchmarks.each do |result|
-        summary.puts format('| %s | %.2f s | %.2f | %s | %s |', result[:label], result[:seconds],
-                            FRAMES / result[:seconds], result[:reported_fps] || 'n/a', result[:checksum])
+        hot = result[:hot_fps] ? format('%.2f', result[:hot_fps]) : 'n/a'
+        summary.puts format('| %s | %.2f s | %.2f | %s | %s | %s |', result[:label], result[:seconds],
+                            FRAMES / result[:seconds], hot, result[:reported_fps] || 'n/a', result[:checksum])
       end
       summary.puts '', "All #{benchmarks.size} runs produced the same checksum."
+      if WARMUP_FRAMES
+        summary.puts "Hot-path fps is (#{FRAMES} - #{WARMUP_FRAMES}) frames over the wall time between a #{FRAMES}- " \
+                     "and a #{WARMUP_FRAMES}-frame run: process start, load and the first #{WARMUP_FRAMES} frames' " \
+                     'warmup cancel out. Optcarrot fps is its own figure over the last 10 frames.'
+      end
       cruby_descriptions.each { |label, desc| summary.puts "#{label}: `#{desc}`" }
       summary.puts '', 'Wall-time ratios (lower is faster):'
       CRubyRuns.ratio_lines(benchmarks).each { |line| summary.puts "- #{line}" }
