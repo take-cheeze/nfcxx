@@ -20,7 +20,7 @@ included, with the default FlashAttention types of llama.cpp's CMake: f16-f16 on
 `tests/test-backend-ops.cpp` against it, `-lcuda -lcublas -lcudart`: 214 objects, about 25 minutes at JOBS=2 under the
 8 GB cap (objects are kept in `build/llcu`, so a second run only links). `tests/llamacpp/cuda/run.sh` runs each op of
 `test-backend-ops test -b CUDA0` in its own process (a device fault aborts it) and checks it against its record. On the
-RTX 2060 (sm_75, CUDA 13.1): 109 ops pass every case, 1 fails, 19 have no cases.
+RTX 2060 (sm_75, CUDA 13.1): 110 ops pass every case, none fails, 19 have no cases.
 
 What it took (docs/notes/gpu.md, "Launch path", has the details):
 
@@ -53,9 +53,27 @@ What it took (docs/notes/gpu.md, "Launch path", has the details):
   `__byte_perm`'s selector, and f16 with 8 columns mmvf's `half2 sumh2[8] = {{0.0f, 0.0f}}`, whose other elements
   were not zeroed (docs/notes/gpu.md).
 
-Known failures (the KNOWN list of `run.sh`):
+- FLASH_ATTN_EXT: its "unspecified launch failure" was the emitter's divide-by-zero trap in flash_attn_ext_vec, which
+  computes `sequence % ne33` with ne33 == 0 when there is no mask (docs/notes/gpu.md, "Integer division"). All 4004
+  cases pass; the op takes about 20 minutes, so run.sh gives each op 40.
 
-1. **FLASH_ATTN_EXT**: NaN for f16 K and V with hsk=40, then an unspecified launch failure.
+The KNOWN list of `run.sh` is empty.
+
+End to end: `tests/llamacpp/cuda/e2e.sh MODEL.gguf [PROMPT]` links llama.cpp's examples/simple against these objects
+(libllama and simple.cpp by the host g++, which is not what is tested here; the link is nfcxx's) and runs it with every
+layer on the GPU (NGL, default 99). With Qwen2.5-0.5B-Instruct Q4_0 and "The capital of France is", greedy:
+
+| build | output | eval |
+| --- | --- | --- |
+| llama.cpp's CMake, gcc, CPU | Paris, and it is the capital of Europe. It is also the capital of the world. ... | 75 tok/s |
+| nfcxx, CPU (`-ngl 0`) | Paris, and it is the capital of Europe. It is the largest city in Europe, ... | 40 tok/s |
+| nfcxx, CUDA (`-ngl 99`) | Paris, and it is the largest city in Europe. It is located in the center of ... | 4.4 tok/s |
+
+The text is right and the runs part where the next token is a close call (different arithmetic on each path). Open:
+the CUDA path is slow (227 ms a token for a 0.5B model; an nvcc build is far faster), and the CPU run crashes at exit
+(EDG's exception-handling state, `__curr_eh_stack_entry`, is a plain global, and ggml's CPU worker threads run
+EDG-compiled code with destructors; libstdc++'s exit-time flush then calls EDG's `std::uncaught_exceptions` on a dead
+entry).
 
 ## Flags
 

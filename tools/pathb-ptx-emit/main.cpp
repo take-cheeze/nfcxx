@@ -82,6 +82,8 @@ int main(int argc, char **argv) {
       decls = true;
     } else if (a == "--f2i=convert") {
       g_f2i_convert = true;
+    } else if (a == "--int=gpu") {
+      g_int_gpu = true;
     } else if (a.rfind("--sm=", 0) == 0) {
       sm = "sm_" + a.substr(5);
     } else if (a.rfind("--kernel=", 0) == 0) {
@@ -103,13 +105,13 @@ int main(int argc, char **argv) {
     } else if (a == "--emit") {
       emit = true;
     } else if (a.size() > 1 && a[0] == '-' && a[1] == '-') {
-      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
+      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--int=gpu] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
       return 1;
     } else if (!have_file) {
       file = a;
       have_file = true;
     } else {
-      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
+      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--int=gpu] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
       return 1;
     }
   }

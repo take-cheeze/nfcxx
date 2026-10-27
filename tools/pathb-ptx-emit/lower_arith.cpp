@@ -148,6 +148,16 @@ void FnCtx::checked_div(const std::string &op, const std::string &dest, const Ty
   Operand b = operand(xb);
   std::string ra = reg_of(a.text, ty);
   std::string min = imm(ty, -(static_cast<i128>(1) << (ty.size * 8 - 1)));
+  if (g_int_gpu) {
+    // the divisor in a register: ptxas folds a division by the immediate 0
+    std::string rb = b.text;
+    if (rb.empty() || rb[0] != '%') {
+      rb = fresh(reg_class(ty));
+      emit("mov." + ptx_type(ty) + " " + rb + ", " + b.text + ";");
+    }
+    emit((op == "cdiv" ? std::string("div") : std::string("rem")) + "." + t + " " + dest + ", " + ra + ", " + rb + ";");
+    return;
+  }
   if (b.text == "0") {
     emit("trap;");
   } else if (!b.text.empty() && b.text[0] == '%') {
@@ -179,7 +189,18 @@ void FnCtx::checked_shift(const std::string &op, const std::string &dest, const 
   if (!(c.ty.kind == "int" && !c.ty.is_bool && (c.ty.size == 4 || c.ty.size == 8)))
     throw Refused("shift count of type " + c.ty.kind);
   std::string cnt = c.text;
-  if (!c.text.empty() && c.text[0] == '%') {
+  if (g_int_gpu) {
+    // shl/shr clamp the count to the width (a 64-bit count is truncated to 32 bits, as nvcc converts it)
+    if (!c.text.empty() && c.text[0] == '%') {
+      if (reg_class(c.ty) == "rd") {
+        cnt = fresh("r");
+        emit("cvt.u32.u64 " + cnt + ", " + c.text + ";");
+      }
+    } else {
+      cnt = fresh("r");
+      emit("mov.u32 " + cnt + ", " + c.text + ";");
+    }
+  } else if (!c.text.empty() && c.text[0] == '%') {
     std::string p = fresh("p");
     if (reg_class(c.ty) == "rd") {
       emit("setp.hs.u64 " + p + ", " + c.text + ", " + std::to_string(bits) + ";");
@@ -245,6 +266,7 @@ void FnCtx::int_convert(const std::string &dest, const Ty &ty, const std::string
 }
 
 bool g_f2i_convert = false;
+bool g_int_gpu = false;
 
 void FnCtx::float_to_int(const std::string &dest, const Ty &ty, const std::string &a0, const Ty &aty) {
   if (!(ty.kind == "int" && !ty.is_bool && (ty.size == 1 || ty.size == 2 || ty.size == 4 || ty.size == 8)))

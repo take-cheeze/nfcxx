@@ -31,6 +31,12 @@ struct RegInfo {
 // code relies on it (llama.cpp's quantize_mmq_q8_1 converts NaN for an all-zero block).
 extern bool g_f2i_convert;
 
+// --int=gpu (the .cu device path): integer division and remainder by zero, INT_MIN / -1, and shift counts of the width
+// or more are what the GPU does with them, as nvcc emits them (div/rem: an unspecified value; shl/shr: the count is
+// clamped to the width), not the checks that trap. CUDA code relies on it (llama.cpp's flash_attn_ext_vec computes
+// `sequence % ne33` with ne33 == 0 when there is no mask, and does not use the result).
+extern bool g_int_gpu;
+
 // Ruby's Float#to_s (shortest round-trip digits; fixed notation for decimal exponents -3..16, else d.ddde+XX).
 std::string ruby_float_s(double d);
 
