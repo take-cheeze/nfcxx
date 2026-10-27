@@ -12,9 +12,10 @@
 #   <alloc::vec::Vec<i32,alloc::alloc::Global> as core::ops::index::Index<usize>>::index
 # Non-generic functions have no body in the dump, and so no path; they match by symbol.
 #
-# Containers are covered only for an element type that is a primitive scalar. Such an element holds
+# SUMMARIES cover containers of an element type that is a primitive scalar. Such an element holds
 # no reference, so a Vec or Box of it never keeps a borrow, and its drop reads nothing but its own
-# place. Pushing a reference into a Vec would keep it, which a summary cannot say.
+# place. Pushing a reference into a Vec keeps it, which a summary cannot say: KEPT adds the stores
+# of the pointers that slices, iterators and Vec<&T> keep.
 module MonomirStd
   SCALARS = %w[u8 i8 u16 i16 u32 i32 u64 i64 usize isize f32 f64 bool char].freeze
   VEC = 'alloc::vec::Vec<(?<t>\w+),alloc::alloc::Global>'
@@ -58,11 +59,117 @@ module MonomirStd
     [/\A<#{OPTION}>::is_none\z/, [:read], :scalar]
   ].freeze
 
+  # Views and containers of references. A summary keeps no pointer, so the translator follows the call
+  # with stores of the pointers the result or an argument keeps (KEPT, below). Each entry: [path
+  # pattern, argument effects, result, keeps]. Effects and results are as above, plus :ref (a
+  # reference argument to a scalar or a reference, read), :slice (a `&[T]` or `&str` passed by value,
+  # read with what it points to: (byval-deep T)), :ret (a pointer result, the kept pointer) and
+  # [:alias, ARG, MODE, OFF]. A keep is [TO, FROM] or [TO, FROM, :join]:
+  #   FROM  [:arg, I, OFF]  pointer argument I moved by OFF bytes
+  #         [:at, I, OFF]   the pointer stored at OFF in argument I (its referent, or its by-value
+  #                         copy), read before the call, since a call that writes forgets it
+  #         :null           no pointer
+  #   TO    [:dest, OFF]    the result's buffer; :ret the result; [:at, I, OFF] argument I's memory.
+  #         :join keeps the pointer there as well, so the place holds the union of both; :first
+  #         stores before the call instead of after it.
+  #
+  # A slice `&[T]` or `&str` is two words, the address of its first element and its length
+  # (fat_layout). Its elements are modelled by the first one, as a Vec's are by the Vec: indexing a
+  # slice is the slice's own pointer, and its loans are those of the place it was made from. A slice
+  # of a Vec points at the Vec, at offset 0 for scalar elements. A Vec<&T> keeps the references
+  # pushed into it at offset 8 of the Vec (its buffer pointer's bytes), each push joining the new one
+  # with the ones there, so every element's loans stay live while the Vec is used, as rustc's single
+  # lifetime for the element type does. Writes of an element of a Vec<&T> would replace that union
+  # (a strong update), so its index_mut, as_mut_slice and iter_mut have no entries.
+  #
+  # Slice iterators hold their position as a pointer at offsets 0 and 8, both the slice's pointer
+  # here; next returns an Option<&T>, whose layout is one pointer (option_ref_layout).
+  EL = '(?<t>(?:& )*\w+)'
+  REF = '(?<t>(?:& )+\w+)'
+  VEC_EL = "alloc::vec::Vec<#{EL},alloc::alloc::Global>"
+  VEC_REF = "alloc::vec::Vec<#{REF},alloc::alloc::Global>"
+  ITER = "core::slice::iter::Iter<#{EL}>"
+  STRING = 'alloc::string::String'
+  INTO_ITER = 'core::iter::traits::collect::IntoIterator>::into_iter'
+  ITER_SLICE = [[[:dest, 0], [:at, 0, 0]], [[:dest, 8], [:at, 0, 0]]].freeze
+  VEC_SLICE = [[[:dest, 0], [:arg, 0, :e]]].freeze
+  VEC_ITER = [[[:dest, 0], [:arg, 0, :e]], [[:dest, 8], [:arg, 0, :e]]].freeze
+  VEC_KEEP = [[[:at, 0, 8], [:at, 0, 8]]].freeze
+  TOUCH = [[:touch, 0]].freeze
+  KEPT = [
+    [/\A<#{VEC_REF}>::new\z/, [], :init, [[[:dest, 8], :null]]],
+    [/\A<#{VEC_REF}>::with_capacity\z/, [:value], :init, [[[:dest, 8], :null]]],
+    [/\A<#{VEC_REF}>::push\z/, [:write, :ref], :void, TOUCH + [[[:at, 0, 8], [:arg, 1, 0], :join]]],
+    [/\A<#{VEC_REF}>::pop\z/, [:write], :init, TOUCH + [[[:dest, 0], [:at, 0, 8]]] + VEC_KEEP],
+    [/\A<#{VEC_REF}>::clear\z/, [:write], :void, TOUCH + VEC_KEEP],
+    [/\A<#{VEC_REF}>::truncate\z/, [:write, :value], :void, TOUCH + VEC_KEEP],
+    [/\A<#{VEC_REF}>::(len|is_empty|capacity)\z/, [:read], :scalar, TOUCH],
+    [/\A<#{VEC_REF} as core::ops::index::Index<usize>>::index\z/, [:read, :value], [:alias, 0, :shared, 8], TOUCH],
+    # Vec's Drop is #[may_dangle]: dropping it does not use the references it holds, which are gone first.
+    [/\A<#{VEC_REF}>::#drop_glue\z/, [:write], :void, [[[:at, 0, 8], :null, :first]]],
+    [/\A<#{VEC_EL}>::as_slice\z/, [:read], :init, VEC_SLICE],
+    [/\A<#{VEC_EL} as core::ops::deref::Deref>::deref\z/, [:read], :init, VEC_SLICE],
+    [/\A<#{VEC}>::as_mut_slice\z/, [:write], :init, VEC_SLICE],
+    [/\A<#{VEC} as core::ops::deref::DerefMut>::deref_mut\z/, [:write], :init, VEC_SLICE],
+    [/\A<& #{VEC_EL} as #{INTO_ITER}\z/, [:read], :init, VEC_ITER],
+    [/\A<\[#{EL}\]>::(len|is_empty)\z/, [:slice], :scalar, []],
+    [/\A<\[#{EL}\]>::iter\z/, [:slice], :init, ITER_SLICE],
+    [/\A<& \[#{EL}\] as #{INTO_ITER}\z/, [:slice], :init, ITER_SLICE],
+    [/\A<\[#{EL}\]>::(first|last)\z/, [:slice], :init, [[[:dest, 0], [:at, 0, 0]]]],
+    [/\A<#{ITER} as #{INTO_ITER}\z/, [:byval], :init, [[[:dest, 0], [:at, 0, 0]], [[:dest, 8], [:at, 0, 8]]]],
+    [/\A<#{ITER} as core::iter::traits::iterator::Iterator>::next\z/, [:write], :init,
+     [[[:dest, 0], [:at, 0, 0]], [[:at, 0, 0], [:at, 0, 0]], [[:at, 0, 8], [:at, 0, 8]]]],
+    [/\A<core::option::Option<#{REF}>>::unwrap\z/, [:byval], :ret, [[:ret, [:at, 0, 0]]]],
+    [/\A<core::option::Option<#{REF}>>::(is_some|is_none)\z/, [:read], :scalar, []],
+    [/\A<#{STRING}>::new\z/, [], :init, []],
+    [/\A<#{STRING}>::push_str\z/, [:write, :slice], :void, []],
+    [/\A<#{STRING}>::push\z/, [:write, :value], :void, []],
+    [/\A<#{STRING}>::clear\z/, [:write], :void, []],
+    [/\A<#{STRING}>::(len|is_empty|capacity)\z/, [:read], :scalar, []],
+    [/\A<#{STRING}>::as_str\z/, [:read], :init, [[[:dest, 0], [:arg, 0, 0]]]],
+    [/\A<#{STRING} as core::ops::deref::Deref>::deref\z/, [:read], :init, [[[:dest, 0], [:arg, 0, 0]]]],
+    [/\A<#{STRING} as core::clone::Clone>::clone\z/, [:read], :init, []],
+    [/\A<#{STRING}>::#drop_glue\z/, [:write], :void, []],
+    [/\A<#{STRING} as core::convert::From<& str>>::from\z/, [:slice], :init, []],
+    [/\A<str as alloc::string::ToString>::to_string\z/, [:slice], :init, []],
+    [/\A<str>::(len|is_empty)\z/, [:slice], :scalar, []]
+  ].freeze
+
+  # The element type of a slice or str reference, as a Path B type, or nil for any other type. Only
+  # elements of at most a word, scalars and references, are described.
+  def self.fat_elem(ty, types)
+    return nil unless ty && ty.strip =~ /\A&(mut )?\s*(.*)\z/
+    rest = $2.strip
+    return 'unsigned_char' if rest == 'str'
+    return nil unless rest.start_with?('[') && rest.end_with?(']') && !rest.include?(';')
+    e = rest[1...-1].strip
+    return nil unless SCALARS.include?(e) || e =~ /\A&(&|\s)*\w+\z/ && SCALARS.include?(e.delete('& '))
+    rust_type_to_pathb(e, types)
+  end
+
+  def self.fat_layout(name, types)
+    e = fat_elem(name, types)
+    e && "(borrow-layout (struct #{name.inspect}) 16 8 (field \"ptr\" 0 (ptr #{e})) (field \"len\" 8 unsigned_long))"
+  end
+
+  # Option<&T> is one pointer, null for None.
+  def self.option_ref_layout(name, types)
+    t = types[name]
+    return nil unless t && t[:size] == 8 && t[:fields].length == 2 && t[:fields][0][:type].strip == '()'
+    some = types[t[:fields][1][:type].strip]
+    return nil unless some && some[:fields].length == 1 && some[:fields][0][:off] == 0
+    ref = some[:fields][0][:type].strip
+    return nil unless ref =~ /\A&(&|\s)*\w+\z/ && SCALARS.include?(ref.delete('& '))
+    "(borrow-layout (struct #{name.inspect}) 8 8 (field \"f0\" 0 #{rust_type_to_pathb(ref, types)}))"
+  end
+
   # Option<T> of a scalar is an enum, which gets no layout from its type record. It holds no
   # pointer, so its bytes are described as one array: a call that initializes it defines them all.
   OPTION_TYPE = /\AZRG2cE9core0_0_06option6Option1g/
 
   def self.layout(name, types)
+    return fat_layout(name, types) if name.start_with?('&')
+    return option_ref_layout(name, types) if name.match?(OPTION_TYPE) && option_ref_layout(name, types)
     t = types[name]
     return nil unless name.match?(OPTION_TYPE) && t && t[:tag] && t[:size] > 0 && t[:size] % t[:align] == 0
     plain = ->(ty) { ty == '()' || SCALARS.include?(ty) }
@@ -196,6 +303,7 @@ module MonomirStd
 
   # The (call-effects ...) form for NAME, or nil when no entry describes it.
   def self.summary(name, types)
+    return uses_summary(name) if name.start_with?(USES_PREFIX)
     if SYMBOLS[name] == :print
       return "(call-effects #{name.inspect} (returns void) (nothrow) (noescape) (closed) " \
              "(args (byval-deep (struct #{ARGUMENTS.inspect}))))"
@@ -239,6 +347,157 @@ module MonomirStd
         end
       return "(call-effects #{name.inspect} (returns #{returns}) (nothrow) (noescape) (closed) (args #{args.join(' ')}))"
     end
+    kept_summary(name, path, types)
+  end
+
+  # The KEPT entry for NAME and its element type's offset in a Vec, or nil.
+  def self.kept_entry(name)
+    path = @paths && @paths[name]
+    return nil unless path
+    KEPT.each do |entry|
+      m = entry[0].match(path)
+      next unless m
+      t = m.names.include?('t') ? m[:t].delete(' ') : nil
+      return nil unless t.nil? || SCALARS.include?(t.delete('&'))
+      return [entry, t && t.start_with?('&') ? 8 : 0]
+    end
     nil
+  end
+
+  def self.kept_summary(name, path, types)
+    entry, _ = kept_entry(name)
+    return nil unless entry
+    _, effects, result, = entry
+    params, ret = @sigs[name]
+    return nil unless params.length == effects.length
+    thin = ->(pt) { pt.start_with?('(ptr ') || !pt.start_with?('(') }
+    args = []
+    args << "(init #{rust_type_to_pathb(ret, types)})" if result == :init
+    params.each_with_index do |t, i|
+      t = t.strip
+      case effects[i]
+      when :read, :write
+        return nil unless t =~ /\A&(mut |move )?(.+)\z/
+        pointee = rust_type_to_pathb($2, types)
+        return nil unless pointee.start_with?('(struct ') && !pointee.start_with?('(struct "&')
+        args << "(#{effects[i]} #{pointee})"
+      when :ref
+        return nil unless t =~ /\A&(.+)\z/ && !$1.start_with?('mut ')
+        pointee = rust_type_to_pathb($1, types)
+        return nil unless thin.call(pointee) && pointee != 'void'
+        args << "(read #{pointee})"
+      when :value
+        return nil unless SCALARS.include?(t)
+        args << "(value #{rust_type_to_pathb(t, types)})"
+      when :byval
+        pt = rust_type_to_pathb(t, types)
+        return nil unless pt.start_with?('(struct ') && !pt.start_with?('(struct "&')
+        args << "(byval #{pt})"
+      when :slice
+        return nil unless fat_elem(t, types)
+        args << "(byval-deep #{rust_type_to_pathb(t, types)})"
+      end
+    end
+    returns =
+      case result
+      when :void, :init, :ret then 'void'
+      when :scalar
+        return nil unless SCALARS.include?(ret)
+        rust_type_to_pathb(ret, types)
+      else
+        return nil unless ret =~ /\A&(&|\s)*\w+\z/ && SCALARS.include?(ret.delete('& '))
+        "#{rust_type_to_pathb(ret, types)} (from-arg #{result[1]} #{result[3]} #{result[2]})"
+      end
+    "(call-effects #{name.inspect} (returns #{returns}) (nothrow) (noescape) (closed) (args #{args.join(' ')}))"
+  end
+
+  # The keeps of NAME's entry, or nil when it has none.
+  def self.kept(name)
+    entry, = kept_entry(name)
+    entry && !entry[3].empty? ? entry : nil
+  end
+
+  # Statements for a call to a KEPT entry with keeps: the call, with SRET (the result's `(sret T
+  # ADDR)`, or nil), the argument operands ARGS and the result type RET (nil for none or an sret),
+  # then the stores of the kept pointers. Returns [statements, the result's value, next register].
+  #
+  # A [:touch, I] keep reads what the Vec<&T> that argument I refers to holds, through a call of
+  # USES_PREFIX + its type, whose summary is a byval-deep read of it: using the Vec uses the references
+  # in it, so one whose referent is gone is an error there (E0597), as rustc's lifetime of the element
+  # type is live wherever the Vec is. Its drop glue does not touch them (Vec's Drop is #[may_dangle]).
+  def self.lower_kept(name, sret, args, ret, regi)
+    (_, _, kind, keeps), eoff = kept_entry(name)
+    ret = nil unless kind == :scalar || kind.is_a?(Array)
+    out = []
+    fresh = lambda do |ty, expr|
+      out << "(let %#{regi} #{ty} #{expr})"
+      regi += 1
+      "%#{regi - 1}"
+    end
+    # Argument I's memory: a by-value argument's copy, or a reference argument's referent.
+    mem = ->(i) { args[i] =~ /\A\(byval .* (\S+)\)\z/ ? $1 : args[i] }
+    addr = lambda do |base, off|
+      off = eoff if off == :e
+      off == 0 ? base : fresh.call('(ptr (ptr void))', "(offset #{base} #{off})")
+    end
+    place = lambda do |to|
+      to[0] == :dest ? addr.call(sret.split.last.chomp(')'), to[1]) : addr.call(mem.call(to[1]), to[2])
+    end
+    keeps.select { |to, _| to == :touch }.each do |_, i|
+      ty = @sigs[name][0][i].strip.sub(/\A&(mut |move )?/, '')
+      out << "(eval (call void &#{(USES_PREFIX + ty).inspect} (byval (struct #{ty.inspect}) #{mem.call(i)})))"
+    end
+    plan = keeps.reject { |to, _| to == :touch }.map do |to, from, join|
+      v =
+        case from
+        when :null then '(null (ptr void))'
+        else
+          from[0] == :arg ? addr.call(args[from[1]], from[2]) : fresh.call('(ptr void)', "(load (ptr void) #{addr.call(mem.call(from[1]), from[2])})")
+        end
+      if join == :first
+        out << "(store (ptr void) #{place.call(to)} #{v})"
+        next
+      end
+      old = join ? fresh.call('(ptr void)', "(load (ptr void) #{place.call(to)})") : nil
+      [to, v, old]
+    end.compact
+    call = "(call #{ret || 'void'} &#{name.inspect} #{[sret, *args].compact.join(' ')})"
+    result = ret ? fresh.call(ret, call) : (out << "(eval #{call})"; nil)
+    plan.each do |to, v, old|
+      if old
+        u = fresh.call('(ptr void)', old)
+        out << "(if (const bool 0) (then (set #{u} #{v})))"
+        v = u
+      end
+      if to == :ret
+        result = v
+      else
+        out << "(store (ptr void) #{place.call(to)} #{v})"
+      end
+    end
+    [out, result, regi]
+  end
+
+  # A DROP of a value whose drop glue has :first keeps (Vec<&T>): their stores, appended to STMTS
+  # before the glue's call at ADDR. Returns the next register.
+  def self.before_drop(name, addr, stmts, regi)
+    entry, = kept_entry(name)
+    return regi unless entry
+    entry[3].each do |to, from, join|
+      next unless join == :first && to[0] == :at && from == :null
+      stmts << "(let %#{regi} (ptr (ptr void)) (offset #{addr} #{to[2]}))"
+      stmts << "(store (ptr void) %#{regi} (null (ptr void)))"
+      regi += 1
+    end
+    regi
+  end
+
+  USES_PREFIX = 'nfcxx.uses.'
+
+  # The summary of a USES_PREFIX function (lower_kept), or nil.
+  def self.uses_summary(name)
+    return nil unless name.start_with?(USES_PREFIX)
+    "(call-effects #{name.inspect} (returns void) (nothrow) (noescape) (closed) " \
+      "(args (byval-deep (struct #{name.delete_prefix(USES_PREFIX).inspect}))))"
   end
 end

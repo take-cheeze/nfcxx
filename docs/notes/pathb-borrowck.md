@@ -594,6 +594,12 @@ These are trusted imports at call sites, not facts inferred from names. For an e
 producer must ensure the real implementation satisfies the summary. A function defined in the same
 module is checked against its own summary (see below).
 
+A `read` argument that points only to external memory, such as a Rust string literal's static bytes, is
+accepted when the callee is defined in the module. The callee's body is verified to read only through
+it, so the call is the caller's own read of that memory, which is reported as `contract-not-closed` when
+the caller itself is checked against a summary. For an external callee it is still refused
+(`calls/external_pointer.ir` against `calls/external_pointer_defined.ir`).
+
 Read effects may have several possible known local targets, all of which are checked. So may mutation,
 as a weak update of each (see "Refusals and limits"). Initialization and consumption require one known
 place. Read/read aliases are allowed; arguments
@@ -897,7 +903,9 @@ case. Generic bodies are checked only as the instances a program uses. Moves of 
 are `move-value`s; drop obligations for them are not emitted.
 
 `(readonly %N)` is the one fact only that translator emits: parameter `%N` is a pointer the function
-does not write through (a Rust `&T`). Summary inference gives it read-only modes.
+does not write through (a Rust `&T`). Summary inference gives it read-only modes. A slice or `&str`
+parameter is passed as two parameters, its pointer and its length, and a function returning one returns
+its pointer, so that summaries describe both as they do thin references.
 
 ## Tests
 

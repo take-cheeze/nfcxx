@@ -435,6 +435,7 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
   cur_ty = cur_ty.strip unless cur_ty.nil?
   addr = base
   addr_ty = cur_ty
+  slice_elem = false
   # --borrow: a Box<T> of a scalar holds its value in its own place (scripts/monomir-std.rb). mrustc
   # derefs a Box as `(*b.0 .0 .0)`, its pointer field, which is then the Box's own address.
   boxed = $borrow && MonomirStd.box_scalar(cur_ty, types) ? [addr, MonomirStd.box_scalar(cur_ty, types)] : nil
@@ -460,6 +461,7 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
         addr = "%#{r}"
         addr_ty = et
         cur_ty = et
+        slice_elem = $borrow && kind == :slice_elem
       else
         ipt = rust_type_to_pathb(inner, types)
         r = regi; regi += 1
@@ -468,10 +470,14 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
         addr_ty = inner
         cur_ty = inner
       end
+    elsif slice_elem && w[:k] == :index
+      # --borrow: a slice's elements are modelled by its first (scripts/monomir-std.rb, KEPT).
+      slice_elem = false
     else
       addr, cur_ty, regi = apply_wrapper_addr(addr, cur_ty, w, types, locals, params, stmts, regi)
       addr_ty = cur_ty
     end
+    slice_elem = false unless w[:k] == :deref
     next if boxed && w[:k] == :field && w[:idx] == 0
     inner = $borrow && MonomirStd.box_scalar(cur_ty, types)
     boxed = inner ? [addr, inner] : nil
@@ -1711,7 +1717,15 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
     addr, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi)
     r1 = regi; regi += 1
     stmts << "(let %#{r1} (ptr (const char)) #{pv})"
-    stmts << "(store (ptr (const char)) #{addr} %#{r1})"
+    # --borrow: a slice's elements are modelled by its first (scripts/monomir-std.rb), which would
+    # lose the pointers in the others of an array of references, so such a slice's pointer is unknown.
+    dt = place_type(dst_place, types, locals, params) rescue nil
+    elem = dt && dt.strip[/\A&(?:mut )?\s*\[(.+)\]\z/, 1]
+    if $borrow && elem && !elem.include?(";") && !MonomirStd::SCALARS.include?(elem.strip)
+      stmts << "(store unsigned_long #{addr} (const unsigned_long 0))"
+    else
+      stmts << "(store (ptr (const char)) #{addr} %#{r1})"
+    end
     r2 = regi; regi += 1
     stmts << "(let %#{r2} unsigned_long #{mv})"
     r3 = regi; regi += 1
@@ -1973,7 +1987,12 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
         elsif (stn.start_with?("[") && stn.include?(";")) || stn.start_with?("&")
           r1 = regi; regi += 1
           stmts << "(let %#{r1} (ptr unsigned_long) (load (ptr unsigned_long) #{saddr}))" if false
-          stmts << "(store unsigned_long #{addr0} #{svv})"
+          # --borrow: a slice of an array of scalars keeps the provenance of the reference it is made
+          # from. Its elements are modelled by the first (scripts/monomir-std.rb), which would lose the
+          # other elements' pointers for an array of references, so that slice's pointer is unknown.
+          elem = stn[/\A\[\s*(\w+)\s*;/, 1]
+          keep = $borrow && elem && MonomirStd::SCALARS.include?(elem)
+          stmts << "(store #{keep ? "(ptr void)" : "unsigned_long"} #{addr0} #{svv})"
           n = stn[/\[\s*[^\];]+;\s*(\d+)/, 1]
           n ||= "0"
           r4 = regi; regi += 1
@@ -2164,6 +2183,9 @@ functions.each do |fn|
   $cur_ret = ret
   $agg_ret = agg_ret && !big_ret
   $big_ret = big_ret
+  # --borrow: a function returning a slice or str reference returns its pointer, which a summary can
+  # describe as a returned alias. The result slot holds both words as before.
+  $fat_ret = $borrow && MonomirStd.fat_elem(ret, types)
   $ret_reg = nil
   locals = []
   body.scan(/^\tlet (.+?): (.+);$/) { |n, t| locals << [n.strip, t.strip] }
@@ -2189,8 +2211,10 @@ functions.each do |fn|
   end
   param_lines = []
   param_reg = {}
-  ri = ($agg_ret || $big_ret) ? 1 : 0
-  if $agg_ret
+  fat_len_reg = {}
+  ri = ($agg_ret || $big_ret) && !$fat_ret ? 1 : 0
+  if $fat_ret
+  elsif $agg_ret
     param_lines << "(sret %0 #{rust_type_to_pathb(ret, types)})"
   elsif $big_ret
     param_lines << "(param %0 \"__sret\" (ptr unsigned_char))"
@@ -2202,6 +2226,14 @@ functions.each do |fn|
       next
     end
     param_reg[i] = ri
+    if $borrow && (fe = MonomirStd.fat_elem(t, types))
+      # --borrow: a slice or str reference is passed as its two words, so that its pointer is a
+      # parameter of its own, which a summary can describe (scripts/monomir-std.rb, fat_layout).
+      param_lines << "(param %#{ri} \"arg#{i}\" (ptr #{fe})) (param %#{ri + 1} \"arg#{i}.len\" unsigned_long)"
+      fat_len_reg[i] = ri + 1
+      ri += 2
+      next
+    end
     if pt.start_with?("(") && !pt.start_with?("(ptr") && !pt.start_with?("(fn") && !pt.start_with?("(array ?")
       # aggregate: pass by value
       param_lines << "(param %#{ri} \"arg#{i}\" (byval #{pt}))"
@@ -2249,7 +2281,12 @@ functions.each do |fn|
     pt = rust_type_to_pathb(t, types)
     agg = pt.start_with?("(") && !pt.start_with?("(ptr") && !pt.start_with?("(fn")
     sz0, _ = type_size_align(t, types)
-    if agg
+    if fat_len_reg[i]
+      stmts << "(store (ptr #{MonomirStd.fat_elem(t, types)}) $\"arg#{i}\" %#{r})"
+      stmts << "(let %#{regi} (ptr unsigned_long) (offset $\"arg#{i}\" 8))"
+      stmts << "(store unsigned_long %#{regi} %#{fat_len_reg[i]})"
+      regi += 1
+    elsif agg
       stmts << "(copy #{sz0} $\"arg#{i}\" %#{r})" unless sz0 == 0
     else
       stmts << "(store #{pt} $\"arg#{i}\" %#{r})"
@@ -2363,6 +2400,7 @@ functions.each do |fn|
             glue = sty && types.key?(sty) ? types[sty][:drop] : nil
             if glue
               addr, regi2 = place_addr(slot, types, locals, params, param_reg, stmts, regi)
+              regi2 = MonomirStd.before_drop(pb_sym(glue), addr, stmts, regi2) if $borrow
               stmts << "(eval (call void &\"#{pb_sym(glue)}\" #{addr}))"
               regi = regi2
             end
@@ -2375,6 +2413,7 @@ functions.each do |fn|
               stmts << "(let %#{r} bool (load bool $\"df#{flag}\"))"
               before = stmts.size
               addr, regi = place_addr(slot, types, locals, params, param_reg, stmts, regi)
+              regi = MonomirStd.before_drop(pb_sym(glue), addr, stmts, regi) if $borrow
               stmts << "(eval (call void &\"#{pb_sym(glue)}\" #{addr}))"
               added = stmts[before..-1] || []
               stmts[before..-1] = ["(if %#{r} (then #{added.join(' ')}))"]
@@ -2514,6 +2553,16 @@ functions.each do |fn|
               addr = v
             else
               addr, regi = place_addr(a, types, locals, params, param_reg, stmts, regi)
+            end
+            fe = $borrow && program_item?(fexpr.to_s) && MonomirStd.fat_elem(at || "&str", types)
+            if fe
+              # A program function takes a slice's two words (see its parameters).
+              stmts << "(let %#{regi} (ptr #{fe}) (load (ptr #{fe}) #{addr}))"
+              stmts << "(let %#{regi + 1} (ptr unsigned_long) (offset #{addr} 8))"
+              stmts << "(let %#{regi + 2} unsigned_long (load unsigned_long %#{regi + 1}))"
+              arg_vals << ["%#{regi}", at] << ["%#{regi + 2}", "usize"]
+              regi += 3
+              next
             end
             arg_vals << ["(byval #{apt} #{addr})", at || "&str"]
           else
@@ -3272,6 +3321,14 @@ functions.each do |fn|
           low, regi = MonomirStd.lower(std_kind, dest_addr, arg_vals.map(&:first), regi)
           stmts.concat(low)
           stmts << "(goto #{retblk.inspect})"
+        elsif $borrow && MonomirStd.kept(pb_sym(fexpr))
+          # A standard library call whose result or argument keeps a pointer (scripts/monomir-std.rb,
+          # KEPT): the call, then the stores of the pointers kept.
+          sret = dest_agg ? "(sret #{rust_type_to_pathb(dest == "RETURN" ? ret : dest_ty, types)} #{dest_addr})" : nil
+          low, kept_ptr, regi = MonomirStd.lower_kept(pb_sym(fexpr), sret, arg_vals.map(&:first), ret_void || dest_agg ? nil : dest_pt, regi)
+          stmts.concat(low)
+          store_dest.call(kept_ptr) if kept_ptr && !ret_void
+          stmts << "(goto #{retblk.inspect})"
         else
           fname = fexpr
           if $extern_map && $extern_map[pb_sym(fname)]
@@ -3281,7 +3338,16 @@ functions.each do |fn|
           argstr = arg_vals.map(&:first).join(' ')
           dest_sz = dest == "RETURN" ? type_size_align(ret, types)[0] : (dest_ty ? type_size_align(dest_ty, types)[0] : 0)
           dest_big = dest_agg && dest_sz > 16
-          if dest == "RETURN"
+          fat_dest = $borrow && dest_agg && program_item?(pb_sym(fname)) && MonomirStd.fat_elem(dest == "RETURN" ? ret : dest_ty, types)
+          if fat_dest
+            # A program function returns a slice's pointer (see $fat_ret). Its length is not tracked.
+            stmts << "(let %#{regi} (ptr #{fat_dest}) (call (ptr #{fat_dest}) #{callee_code} #{argstr}))"
+            stmts << "(store (ptr #{fat_dest}) #{dest_addr} %#{regi})"
+            stmts << "(let %#{regi + 1} (ptr unsigned_long) (offset #{dest_addr} 8))"
+            stmts << "(store unsigned_long %#{regi + 1} (const unsigned_long 0))"
+            regi += 2
+            stmts << "(goto #{retblk.inspect})"
+          elsif dest == "RETURN"
             if $big_ret
               dpt = rust_type_to_pathb(ret, types)
               stmts << "(eval (call void #{callee_code} $\"retval\" #{argstr}))"
@@ -3317,6 +3383,10 @@ functions.each do |fn|
           rsz, _ = type_size_align($cur_ret, types)
           stmts << "(copy #{rsz} %0 $\"retval\")"
           stmts << "(return)"
+        elsif $fat_ret
+          stmts << "(let %#{regi} (ptr #{$fat_ret}) (load (ptr #{$fat_ret}) $\"retval\"))"
+          stmts << "(return %#{regi})"
+          regi += 1
         elsif $agg_ret
           rsz, _ = type_size_align($cur_ret, types)
           stmts << "(copy #{rsz} %0 $\"retval\")"
@@ -3500,7 +3570,7 @@ functions.each do |fn|
 
   func_text = []
   func_text << "(function #{name.inspect}"
-  func_text << "  (ret #{pathb_ret})"
+  func_text << "  (ret #{$fat_ret ? "(ptr #{$fat_ret})" : pathb_ret})"
   func_text << "  (params #{param_lines.join(' ')})"
   # Weak: the dump repeats std functions that also live in mrustc's gcc-built
   # rlib objects (linked for the functions the dump lacks); the strong
@@ -3516,10 +3586,12 @@ functions.each do |fn|
     stmts.each { |st| declared[$1] = true if st =~ /^\(decl \$"([^"]+)"/ }
     params.each_index { |i| declared["arg#{i}"] = true }
     param_reg.each_value { |r| func_text << "  (decl %#{r} param)" if r }
+    fat_len_reg.each_value { |r| func_text << "  (decl %#{r} param)" }
     # A shared reference parameter: the function cannot write through it (UnsafeCell aside).
     params.each_with_index do |t, i|
       r = param_reg[i]
-      func_text << "  (readonly %#{r})" if r && t.strip =~ /^&(?!mut |move )/ && rust_type_to_pathb(t, types).start_with?("(ptr ")
+      thin = rust_type_to_pathb(t, types).start_with?("(ptr ") || fat_len_reg[i]
+      func_text << "  (readonly %#{r})" if r && t.strip =~ /^&(?!mut |move )/ && thin
     end
     (slot_lines + ($lit_slots || [])).each do |sl|
       n = sl[/^\(slot "([^"]+)"/, 1]
