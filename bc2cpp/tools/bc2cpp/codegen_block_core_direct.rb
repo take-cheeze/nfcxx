@@ -158,6 +158,13 @@ module BlockCoreDirectFallback
   end
 
   def block_core_kernel_target(name, arity)
+    definition = block_core_kernel_definition(name, arity)
+    definition && block_core_callable(definition, arity, 'Kernel', name)
+  end
+
+  # mruby's compiled Kernel body of +name+ when it is the program's only definition (block_core_kernel_line's proof),
+  # else nil. KERNEL_LOOP_INLINE reads it too.
+  def block_core_kernel_definition(name, arity)
     why = ->(reason) { block_core_refuse('Kernel', name, arity, reason) }
     return why.call('a dynamic installer names it') if symbol_installed_names.nil? || symbol_installed_names.include?(name)
     return why.call('a program definition of the name') unless (@registry[name] || []).empty?
@@ -175,7 +182,7 @@ module BlockCoreDirectFallback
       return why.call('an outside definer, or a BasicObject subclass')
     end
 
-    block_core_callable(defs.first, arity, 'Kernel', name)
+    defs.first
   end
 
   # Is the site's literal block proved yield-free and the arm's body relaxable? Recorded for the
