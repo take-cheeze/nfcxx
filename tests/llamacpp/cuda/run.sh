@@ -28,8 +28,8 @@ TIMESTEP_EMBEDDING TOP_K TRI TRUNC UPSCALE XIELU"
 # op | why it fails now (see docs/notes/llamacpp.md)
 KNOWN="CONV_2D|illegal memory access
 CONV_3D|illegal memory access
-MUL_MAT|f16 n=4 and n=8 wrong (half accumulation), then mul_mat_q (mmq) launch failure
-MUL_MAT_ID|mul_mat_q (mmq) launch failure
+MUL_MAT|f16 n=4 and n=8 wrong (half accumulation), then mul_mat_q (mmq) illegal memory access
+MUL_MAT_ID|mul_mat_q (mmq) illegal memory access
 FLASH_ATTN_EXT|illegal memory access"
 
 fail=0
