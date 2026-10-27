@@ -254,10 +254,13 @@ class CodeGen
 
   # GEM_HOOKS: what every compiled gem's register.cxx runs. Init installs the compiled methods over the bytecode
   # the gem's mrblib loaded. Final drops the ids, constants and class pointers cached for this VM, so a later VM
-  # at a reused address never sees them.
+  # at a reused address never sees them. Init clears the constant and class slots too (VM_CACHE_LIFETIME): their
+  # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
   def emit_gem_hooks
     <<~CPP
       [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
+        bc2cpp_reset_const_site_cache();
+        bc2cpp_reset_owner_classes();
         bc2cpp_set_instance_tts(M);
         bc2cpp_register_owner_methods(M);
         bc2cpp_capture_direct_construct_classes(M);

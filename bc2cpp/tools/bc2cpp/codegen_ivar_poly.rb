@@ -640,10 +640,6 @@ class CodeGen
         // `Graphics.update`: a class or module receiver is never a row
         // (POLY_TABLE_NO_CLASS_ROW), so skip the scan.
         if (c == M->class_class || c == M->module_class) return nullptr;
-        if (bc2cpp_owner_class_state != M) {
-          bc2cpp_reset_owner_classes();
-          bc2cpp_owner_class_state = M;
-        }
         uintptr_t h = reinterpret_cast<uintptr_t>(c);
         bc2cpp_poly_memo& m = t.memo[((h >> 4) ^ (h >> 10)) & #{POLY_TABLE_MEMO - 1}];
         if (m.c == c) return m.fn;
