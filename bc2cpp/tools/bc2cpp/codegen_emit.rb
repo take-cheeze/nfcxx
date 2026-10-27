@@ -141,6 +141,7 @@ class CodeGen
     copies.each { |m| (by_owner[m[:owner]] ||= []) << m }
     targets = (owners + copies.map { |m| m[:owner] }).uniq.select { |o| by_owner.key?(o) }
     accessors = left_out_accessors(compiled, unregistered)
+    natives = left_out_natives(compiled, unregistered)
 
     # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
     # mrb_define_method_raw (src/class.c) only forces a singleton-class method
@@ -171,7 +172,7 @@ class CodeGen
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
     # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
     # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
-    if accessors.any? || compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
+    if accessors.any? || natives.any? || compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
         #include <stdio.h>
@@ -184,6 +185,16 @@ class CodeGen
           abort();
         }
         #endif
+        // LEFT_OUT_NATIVES: the class at `path` under Object, or NULL when some segment is not defined.
+        [[maybe_unused]] static struct RClass* bc2cpp_native_owner(mrb_state* M, const char* const* path, int n) {
+          mrb_value v = mrb_obj_value(M->object_class);
+          for (int i = 0; i < n; i++) {
+            mrb_sym id = mrb_intern_cstr(M, path[i]);
+            if (!mrb_const_defined_at(M, v, id)) return NULL;
+            v = mrb_const_get(M, v, id);
+          }
+          return mrb_class_ptr(v);
+        }
         [[maybe_unused]] static void bc2cpp_left_out(mrb_state* M, struct RClass* c, const char* name, mrb_bool singleton) {
         #if defined(BC2CPP_UNREGISTERED_VERIFY)
           if (singleton) mrb_define_class_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
@@ -209,7 +220,10 @@ class CodeGen
     { 'core' => core_targets, 'program' => program_targets }.each do |part, part_targets|
       out << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
       emit_owner_registration_lines(out, part_targets, by_owner, unregistered)
-      emit_left_out_accessor_lines(out, accessors) if part == 'program'
+      if part == 'program'
+        emit_left_out_accessor_lines(out, accessors)
+        emit_left_out_native_lines(out, natives)
+      end
       out << "}\n"
     end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
@@ -268,6 +282,21 @@ class CodeGen
     end
   end
 
+  # The removal of each listed native (left_out_natives), in the program half. A native's class may be missing from a
+  # build that does not link its source.
+  def emit_left_out_native_lines(out, natives)
+    natives.group_by(&:first).each do |owner, entries|
+      path = lexical_scope_path(owner).map { |seg| c_string_literal(seg) }
+      out << "  {\n    static const char* const path[] = {#{path.join(', ')}};\n"
+      out << "    if (struct RClass* c = bc2cpp_native_owner(M, path, #{path.size})) {\n"
+      entries.each do |_, name|
+        out << "      // #{owner}##{name} (native) left unregistered: statically dispatched only (docs/adr/0203).\n"
+        out << "      bc2cpp_left_out(M, c, #{c_string_literal(name)}, #{owner.end_with?('.singleton')});\n"
+      end
+      out << "    }\n  }\n"
+    end
+  end
+
   # LEFT_OUT_ACCESSORS: [owner, name] of each listed attr_* accessor of this gem's owners (ONLY_OWNERS) with no
   # compiled entry. The registration proof lists one when nothing looks its name up (ACCESSOR_CANDIDATES), so it is
   # removed like a left-out compiled entry.
@@ -281,6 +310,27 @@ class CodeGen
         [d.owner, name] if d.kind == :ivar_accessor && !d.core && @only_owners.include?(d.owner) &&
                            unregistered.include?(key) && !entries.include?(key)
       end
+    end.uniq.sort
+  end
+
+  # LEFT_OUT_NATIVES: [owner, name] of each listed native registration (NATIVE_CANDIDATES,
+  # static_dispatch_registrations.rb) whose owner this gem removes natives of (bc2cpp_native_strip_gem, by
+  # OUT_SYMBOL) and which is none of its compiled entries. As there, a name Ruby defines on the owner is skipped.
+  def left_out_natives(compiled, unregistered)
+    map = native_owner_map
+    symbol = ENV['OUT_SYMBOL']
+    return [] unless map && symbol
+
+    gem = BC2CPP_COMPILED_GEMS.find { |_name, g| g[:out_symbol] == symbol }&.first
+    entries = compiled.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    map.registrations.filter_map do |owner, name, _fn|
+      next unless owner.is_a?(String) && name && gem && bc2cpp_native_strip_gem(owner) == gem
+
+      key = "#{owner}##{name}"
+      next unless unregistered.include?(key) && !entries.include?(key)
+      next if Array(@registry[name]).any? { |d| d.owner == owner }
+
+      [owner, name]
     end.uniq.sort
   end
 

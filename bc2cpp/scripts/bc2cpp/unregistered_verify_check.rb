@@ -11,6 +11,8 @@
 #     - bc2cpp_left_out registers the stub only under #if defined(BC2CPP_UNREGISTERED_VERIFY), and removes the
 #       definition otherwise;
 #     - BC2CPP_UNREGISTERED_EXTRA adds entries to the list;
+#     - a listed native registration goes to bc2cpp_left_out in its namespace's gem only (LEFT_OUT_NATIVES), and a
+#       registration's own name literal is no lookup (REGISTRATION_NAME_EXEMPTION);
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - the host defines VFix#pruned first, as a gem's mrblib does;
 #     - without the define, bc2cpp_left_out removes that definition: a by-name call of the unregistered name raises
@@ -28,6 +30,7 @@ require 'tmpdir'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/bc2cpp'
+require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
 ENV['BC2CPP_SIG_DIRS'] = ''
 suite = FixtureCheck.new('unregistered_verify_check')
@@ -56,20 +59,27 @@ ENTRIES = [
 ].freeze
 OWNERS = %w[VFix VFix.singleton].freeze
 
+# LEFT_OUT_NATIVES: native registrations, as NativeOwnerMap would report two of RGSS::VNat's.
+NATIVES = Struct.new(:registrations).new([['RGSS::VNat', 'gone', 'vnat_gone'], ['RGSS::VNat', 'kept_native', 'vnat_kept']])
+
 registration = lambda do |unregistered: nil, extra: nil|
   previous = ENV['BC2CPP_UNREGISTERED_EXTRA']
+  previous_symbol = ENV['OUT_SYMBOL']
   ENV['BC2CPP_UNREGISTERED_EXTRA'] = extra
+  ENV['OUT_SYMBOL'] = 'rgss_compiled'
   suite.compile(SOURCE) do |ireps, root|
     registry = build_registry(ireps, root)[0]
     gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+    gen.define_singleton_method(:native_owner_map) { NATIVES }
     unregistered ? gen.emit_owner_registrations(ENTRIES, OWNERS, unregistered: unregistered)
                  : gen.emit_owner_registrations(ENTRIES, OWNERS)
   end
 ensure
   ENV['BC2CPP_UNREGISTERED_EXTRA'] = previous
+  ENV['OUT_SYMBOL'] = previous_symbol
 end
 
-listed = registration.call(unregistered: Set['VFix#pruned', 'VFix.singleton#cpruned'])
+listed = registration.call(unregistered: Set['VFix#pruned', 'VFix.singleton#cpruned', 'RGSS::VNat#gone'])
 suite.check('an unlisted entry is registered', listed.include?('vfix_kept, MRB_ARGS_NONE())'))
 suite.check('a listed entry is not registered', !listed.include?('vfix_pruned') && !listed.include?('vfix_cpruned'))
 suite.check('a listed entry goes to bc2cpp_left_out, with its singleton flag',
@@ -78,10 +88,37 @@ suite.check('a listed entry goes to bc2cpp_left_out, with its singleton flag',
 left_out = listed[/static void bc2cpp_left_out\(.*?^}/m].to_s
 suite.check('bc2cpp_left_out registers the stub only in a verify build, and removes the definition otherwise',
             left_out.match?(/#if defined\(BC2CPP_UNREGISTERED_VERIFY\)\n[^#]*bc2cpp_unregistered_stub[^#]*#else\n[^#]*mrb_remove_method/m))
-extra = registration.call(extra: 'VFix#pruned,VFix.singleton#cpruned')
+extra = registration.call(extra: 'VFix#pruned,VFix.singleton#cpruned,RGSS::VNat#gone')
 suite.check('BC2CPP_UNREGISTERED_EXTRA leaves the entry unregistered', extra == listed)
 none = registration.call(unregistered: Set.new)
 suite.check('with nothing listed there is no stub', !none.include?('bc2cpp_unregistered_stub'))
+natives = listed[/^  \{\n    static const char\* const path\[\].*?^  \}\n/m].to_s
+suite.check('a listed native of the gem\'s namespace goes to bc2cpp_left_out, under a class-exists guard, and an ' \
+            'unlisted one does not', natives.include?('bc2cpp_native_owner(M, path, 2)') &&
+            natives.scan('bc2cpp_left_out(').size == 1 && !natives.include?('kept_native'))
+outside = ENV['OUT_SYMBOL']
+ENV['OUT_SYMBOL'] = 'lcf_compiled'
+other_gem = suite.compile(SOURCE) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  gen.define_singleton_method(:native_owner_map) { NATIVES }
+  gen.emit_owner_registrations(ENTRIES, OWNERS, unregistered: Set['RGSS::VNat#gone'])
+end
+ENV['OUT_SYMBOL'] = outside
+suite.check('another namespace\'s gem leaves the native alone', !other_gem.include?('bc2cpp_native_owner(M, path'))
+
+# REGISTRATION_NAME_EXEMPTION: a registration's own name argument is no lookup; the same name elsewhere, and both
+# names of an alias, are.
+tokens = Set.new
+StaticDispatchRegistrations.native_name_tokens(<<~'C', tokens, [])
+  mrb_define_method(M, c, "only_defined", f, MRB_ARGS_NONE());
+  mrb_define_class_method_id(M, c, MRB_SYM(only_defined_id), f, MRB_ARGS_NONE());
+  mrb_define_method(M, c, "defined_and_called", f, MRB_ARGS_NONE());
+  mrb_funcall(M, v, "defined_and_called", 0);
+  mrb_define_alias(M, c, "alias_new", "alias_old");
+C
+suite.check('a registration\'s own name is no lookup', !tokens.include?('only_defined') && !tokens.include?('only_defined_id'))
+suite.check('the same name elsewhere, and an alias\'s names, still are',
+            tokens.include?('defined_and_called') && tokens.include?('alias_new') && tokens.include?('alias_old'))
 
 full = Bc2cppFixtureRuntime.full_or_build
 if full.nil?
@@ -101,6 +138,8 @@ else
       static mrb_value vfix_pruned(mrb_state*, mrb_value) { return mrb_fixnum_value(2); }
       static mrb_value vfix_cpruned(mrb_state*, mrb_value) { return mrb_fixnum_value(3); }
       static mrb_value vfix_mrblib_pruned(mrb_state*, mrb_value) { return mrb_fixnum_value(20); }
+      static mrb_value vnat_gone(mrb_state*, mrb_value) { return mrb_fixnum_value(30); }
+      static mrb_value vnat_kept(mrb_state*, mrb_value) { return mrb_fixnum_value(31); }
       #ifdef FIX_PHANTOM
       #{CodeGen.respond_to_phantom_runtime}
       #endif
@@ -115,6 +154,9 @@ else
         struct RClass* vfix = mrb_define_class(M, "VFix", M->object_class);
         struct RClass* sub = mrb_define_class(M, "VFixSub", vfix);
         mrb_define_method(M, vfix, "pruned", vfix_mrblib_pruned, MRB_ARGS_NONE());
+        struct RClass* vnat = mrb_define_class_under(M, mrb_define_module(M, "RGSS"), "VNat", M->object_class);
+        mrb_define_method(M, vnat, "gone", vnat_gone, MRB_ARGS_NONE());
+        mrb_define_method(M, vnat, "kept_native", vnat_kept, MRB_ARGS_NONE());
         bc2cpp_register_owner_methods(M);
         mrb_value o = mrb_obj_new(M, vfix, 0, nullptr);
         mrb_value s = mrb_obj_new(M, sub, 0, nullptr);
@@ -129,6 +171,13 @@ else
         mrb_funcall(M, o, "pruned", 0);
         if (M->exc) std::printf("pruned=%s\\n", mrb_obj_classname(M, mrb_obj_value(M->exc)));
         else std::printf("pruned=answered\\n");
+        M->exc = nullptr;
+        mrb_value n = mrb_obj_new(M, vnat, 0, nullptr);
+        std::printf("native responds gone=%d kept_native=%d\\n", responds(M, n, "gone"), responds(M, n, "kept_native"));
+        mrb_funcall(M, n, "gone", 0);
+        if (M->exc) { std::printf("gone=%s\\n", mrb_obj_classname(M, mrb_obj_value(M->exc))); M->exc = nullptr; }
+        else std::printf("gone=answered\\n");
+        std::printf("kept_native=%d\\n", (int)mrb_integer(mrb_funcall(M, n, "kept_native", 0)));
         mrb_close(M);
         return 0;
       }
@@ -149,6 +198,9 @@ else
     out, = Open3.capture2e(plain_exe)
     suite.check('without the define the kept name answers and the unregistered one, defined before, raises NoMethodError',
                 out.include?('kept=1') && out.include?('pruned=NoMethodError'))
+    suite.check('a listed native is removed, an unlisted one stays',
+                out.include?('gone=NoMethodError') && out.include?('kept_native=31') &&
+                out.include?('native responds gone=0 kept_native=1'))
     suite.check('without RESPOND_TO_PHANTOM respond_to? is false for a left-out entry',
                 out.include?('responds kept=1 pruned=0 sub_pruned=0 other=0 class_cpruned=0'))
     out, = Open3.capture2e(phantom_exe)
@@ -157,6 +209,8 @@ else
                 out.include?('responds kept=1 pruned=1 sub_pruned=1 other=0 class_cpruned=1 sub_class_cpruned=1 ' \
                              'obj_cpruned=0 class_pruned=0'))
     suite.check('RESPOND_TO_PHANTOM: the left-out entry still is not callable by name', out.include?('pruned=NoMethodError'))
+    suite.check('RESPOND_TO_PHANTOM: a removed native still responds',
+                out.include?('native responds gone=1 kept_native=1') && out.include?('gone=NoMethodError'))
     out, status = Open3.capture2e(verify_exe)
     suite.check('with the define the unregistered name aborts naming the method',
                 status.signaled? && out.include?('unregistered method looked up by name: VFix#pruned'))

@@ -56,6 +56,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
+require_relative 'native_owner_map'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
@@ -436,6 +437,7 @@ module StaticDispatchRegistrations
   # Comments are scanned too: a literal there only adds names, which is the safe direction.
   # `text_tokens`: also receives a naming macro's arguments, which the macro may suffix itself (`#name "="`).
   def native_name_tokens(text, tokens, macros, text_tokens: nil)
+    text = blank_registration_names(text)
     text.scan(STRING_LITERAL) { |(s)| tokens << unescape(s) }
     unless macros.empty?
       text.scan(/\b(?:#{macros.map { |m| Regexp.escape(m) }.join('|')})\s*\(([^()]*)\)/) do |(args)|
@@ -449,6 +451,76 @@ module StaticDispatchRegistrations
       tokens << name
       tokens << name + { 'Q' => '?', 'B' => '!', 'E' => '=' }.fetch(kind) if kind
     end
+  end
+
+  # NATIVE_CANDIDATES (closed only): each native registration on a literal engine owner (NativeOwnerMap), which the
+  # owner's compiled gem (bc2cpp_native_strip_gem) removes when listed. Not ROM method-table entries
+  # (MRB_MT_ENTRY), whose runtime removal adds a RAM tombstone. A key is left out when Ruby defines the name on that
+  # owner too (bc2cpp_left_out would remove the Ruby method), when a native alias or undef names it there, when the
+  # owner has a computed-name registration, or when it is already a candidate.
+  def native_candidates(repo_root, registry, candidates)
+    _ruby, native = outside_world_files(repo_root, closed_only: true)
+    map = NativeOwnerMap.build(native)
+    keys = candidates.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    blocked = Set.new
+    map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
+    map.registrations.each { |owner, name, fn| blocked << "#{owner}##{name}" if fn.nil? }
+    map.registrations.filter_map do |owner, name, _fn|
+      next unless owner.is_a?(String) && name && !map.computed.include?(owner)
+
+      gem = bc2cpp_native_strip_gem(owner)
+      key = "#{owner}##{name}"
+      next unless gem && GEMS.include?(gem) && !blocked.include?(key)
+      next if Array(registry[name]).any? { |d| d.owner == owner }
+      next unless keys.add?(key)
+
+      { owner: owner, name: name, entry: nil, gem: gem, native: true }
+    end
+  end
+
+  # REGISTRATION_NAME_EXEMPTION (closed only): a native's own registration call (mrb_define_method and the other
+  # defining NativeOwnerMap::FAMILIES) defines its name, it looks nothing up, so that one argument -- a string literal
+  # or a presym operand -- is blanked before native_name_tokens reads the file. Every other occurrence of the name
+  # still counts, an alias's old name included.
+  DEFINING_FAMILIES = NativeOwnerMap::FAMILIES.select { |family, spec| family.start_with?('define_') && spec[:fn] }
+  REGISTRATION_NAME_ARG = /\A(?:"(?:[^"\\]|\\.)*"|MRB_(?:Q?SYM|OPSYM)(?:_[QBE])?\(\s*\w+\s*\))\z/
+
+  def blank_registration_names(text)
+    out = nil
+    text.scan(/\bmrb_(define_\w+)\s*\(/) do |(family)|
+      spec = DEFINING_FAMILIES[family] or next
+      spans = call_arg_spans(text, Regexp.last_match.end(0) - 1) or next
+      from, to = spans[spec[:name]] || next
+      next unless text[from...to].strip.match?(REGISTRATION_NAME_ARG)
+
+      (out ||= text.dup)[from...to] = ' ' * (to - from)
+    end
+    out || text
+  end
+
+  # [from, to) of each top-level argument of the call whose '(' is at `open`; nil when unbalanced.
+  def call_arg_spans(text, open)
+    depth = 0
+    spans = []
+    start = open + 1
+    i = open
+    while i < text.length
+      c = text[i]
+      if c == '"' || c == "'"
+        i += 1
+        i += (text[i] == '\\' ? 2 : 1) while i < text.length && text[i] != c
+      elsif c == '('
+        depth += 1
+      elsif c == ')'
+        depth -= 1
+        return spans << [start, i] if depth.zero?
+      elsif c == ',' && depth == 1
+        spans << [start, i]
+        start = i + 1
+      end
+      i += 1
+    end
+    nil
   end
 
   # A function-like macro that turns a parameter into a name -- `#param` stringification, a presym macro applied to
@@ -532,6 +604,7 @@ module StaticDispatchRegistrations
         candidates << { owner: d.owner, name: name, entry: nil, gem: gem_of[d.owner], accessor: true }
       end
     end
+    candidates.concat(native_candidates(repo_root, registry, candidates)) if closed_only
 
     body_of = {} # method-body irep label => [owner, name]
     registry.each do |name, defs|
