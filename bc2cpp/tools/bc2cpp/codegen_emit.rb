@@ -137,7 +137,9 @@ class CodeGen
                                unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']) |
                                              ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set)
     by_owner = compiled.group_by { |m| m[:owner] }
-    targets = owners.select { |o| by_owner.key?(o) }
+    copies = module_function_copies(compiled)
+    copies.each { |m| (by_owner[m[:owner]] ||= []) << m }
+    targets = (owners + copies.map { |m| m[:owner] }).uniq.select { |o| by_owner.key?(o) }
 
     # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
     # mrb_define_method_raw (src/class.c) only forces a singleton-class method
@@ -272,6 +274,21 @@ class CodeGen
     out << "static void bc2cpp_reset_direct_construct_classes() {\n"
     owners.each { |owner| out << "  bc2cpp_direct_construct_#{sanitize(owner)} = nullptr;\n" }
     out << "}\n\n"
+  end
+
+  # MODULE_FUNCTION_COPY: `module_function :x` gives the module's singleton class a copy of #x, which `Mod.x`
+  # reaches by name. The copy runs the same body with the module as self, so the compiled entry registers there too
+  # when the body never observes self (module_function_copy_self_safe?). Otherwise the copy stays bytecode.
+  def module_function_copies(compiled)
+    by_label = compiled.group_by { |m| m[:label] }
+    @registry.values.flatten.filter_map do |d|
+      next unless d.kind == :module_function && d.copy_irep
+
+      m = by_label[d.copy_irep]&.find { |c| c[:owner] == d.copy_owner }
+      next unless m && module_function_copy_self_safe?(@ireps[d.copy_irep], d.copy_owner)
+
+      m.merge(owner: d.owner, visibility: :public)
+    end
   end
 
   # GEM_HOOKS: what every compiled gem's register.cxx runs. Init installs the compiled methods over the bytecode

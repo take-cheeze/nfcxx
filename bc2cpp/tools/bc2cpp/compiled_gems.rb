@@ -218,7 +218,13 @@ BC2CPP_COMPILED_GEMS = {
     # touches no ivar.
     owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
                LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections
-               LCF::Array1D LCF::Array2D LCF.singleton StringIO],
+               LCF::Array1D LCF::Array2D LCF.singleton StringIO
+               # docs/adr/0400: the typed save records (mruby-lcf/gen_save_typed_accessors.rb).
+               LCF::SaveTyped.singleton LCF::SaveTyped::Record LCF::SaveTyped::Save LCF::SaveTyped::Title
+               LCF::SaveTyped::System LCF::SaveTyped::Screen LCF::SaveTyped::Picture LCF::SaveTyped::PartyLocation
+               LCF::SaveTyped::Movable LCF::SaveTyped::PartyActor LCF::SaveTyped::Inventory LCF::SaveTyped::Target
+               LCF::SaveTyped::MapEvent LCF::SaveTyped::EventExecState LCF::SaveTyped::CommonEvent
+               LCF::SaveTyped::Bgm LCF::SaveTyped::Se LCF::SaveTyped::MoveRoute LCF::SaveTyped::EventExecFrame],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
@@ -242,10 +248,9 @@ BC2CPP_COMPILED_GEMS = {
     # - A POLY name in the registry only stops other call sites devirtualizing
     #   into it; it never blocks registering the owner's own method.
     #
-    # `LCF.singleton` selects module_function copies for selective emission. Their
-    # shared source ireps are emitted as LCF-owned implementations only when the
-    # copy is included in the hot-method set; the module instance methods remain
-    # bytecode and are not registered as compiled replacements.
+    # `LCF.singleton` selects the module_function copies: compile_all emits their
+    # shared bodies as LCF entries, which register on LCF and, when the body never
+    # observes self, on LCF's singleton class too (MODULE_FUNCTION_COPY).
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -285,7 +290,7 @@ BC2CPP_COMPILED_GEMS = {
                Game::Interpreter::KeyInputRequest Game::Interpreter::KeyInputAccepted
                Game::Interpreter::DiagnosticPosition Game::CommonEvent::CommonEventRecord
                Game::Message::Segment Game::Message::SpeedMarker Game::Message::PauseMarker
-               Game::Message::ScanResult],
+               Game::Message::ScanResult Game::MoveCommand RPG2k.singleton],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
@@ -305,7 +310,8 @@ BC2CPP_COMPILED_GEMS = {
     #   mruby-lcf-compiled.
     owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap RGSS::Bitmap.singleton
                RGSS.singleton RGSS::Audio.singleton RGSS::Input.singleton RGSS::ErrorReport.singleton
-               RGSS::Graphics.singleton RGSS::Font.singleton RGSS::ErrorReport::Tee Array],
+               RGSS::Graphics.singleton RGSS::Font.singleton RGSS::ErrorReport::Tee Array
+               RGSS::Font RGSS::HashArchive RGSS::Bitmap::LoadError],
     out_symbol: 'rgss_compiled',
   },
   'mruby-core-compiled' => {
