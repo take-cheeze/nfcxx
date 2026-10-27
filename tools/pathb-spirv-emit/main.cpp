@@ -14,7 +14,7 @@
 
 int main(int argc, char **argv) {
   std::string manifest_path;
-  bool have_manifest = false, kernel_cl = false;
+  bool have_manifest = false, kernel_cl = false, no_div_trap = false;
   int i = 1;
   for (; i < argc && std::strncmp(argv[i], "--", 2) == 0; i++) {
     std::string opt = argv[i];
@@ -23,8 +23,10 @@ int main(int argc, char **argv) {
       have_manifest = true;
     } else if (opt == "--kernel-cl") {
       kernel_cl = true;
+    } else if (opt == "--no-div-trap") {
+      no_div_trap = true;
     } else {
-      std::fputs("usage: pathb-spirv-emit.rb [--kernel-cl] [--manifest=FILE] [FILE.ir | -] > out.spv\n", stderr);
+      std::fputs("usage: pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--manifest=FILE] [FILE.ir | -] > out.spv\n", stderr);
       return 1;
     }
   }
@@ -43,7 +45,7 @@ int main(int argc, char **argv) {
   }
   Emitted out;
   try {
-    out = emit_module(src, kernel_cl);
+    out = emit_module(src, kernel_cl, no_div_trap);
   } catch (Refused &e) {
     std::string m = "refused: " + e.text + "\n";
     std::fwrite(m.data(), 1, m.size(), stderr);

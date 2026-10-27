@@ -86,6 +86,12 @@ if [ $cl_ok = 1 ]; then
     "$out/cl_trap_div" > /dev/null 2> "$out/cl_trap_div.err"; rc=$?
     if [ $rc = 71 ] && grep -q "division by zero" "$out/cl_trap_div.err"; then echo "opencl    trap_div: trapped (exit 71)"; else echo "opencl    trap_div: FAIL (exit $rc)"; cat "$out/cl_trap_div.err"; fail=1; fi
   else echo "opencl    trap_div: FAIL (build)"; fail=1; fi
+  # --no-div-trap: the same division runs to the end (the divisor is 1 where it is undefined, as on a GPU)
+  if [ $clprobe = 1 ]; then
+    if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl --no-div-trap trap_div.cpp -o "$out/cl_ndt" > "$out/cl_ndt.log" 2>&1 &&
+       [ "$("$out/cl_ndt" 2>&1 | tail -1)" = "trap_div finished" ]; then echo "opencl    trap_div --no-div-trap: ok"
+    else echo "opencl    trap_div --no-div-trap: FAIL"; tail -3 "$out/cl_ndt.log"; fail=1; fi
+  fi
   # the barrier scopes in the module of sg_barrier_scope (built above): group_barrier(sub_group) is
   # OpControlBarrier(Subgroup, Subgroup, ...), group_barrier(group) keeps OpControlBarrier(Workgroup, Workgroup, ...)
   if [ -s "$out/cl_sg_barrier_scope.cl.spv" ] && command -v spirv-dis >/dev/null; then
@@ -149,6 +155,11 @@ if [ $lz_ok = 1 ]; then
     "$out/lz_trap_div" > /dev/null 2> "$out/lz_trap_div.err"; rc=$?
     if [ $rc = 71 ] && grep -q "division by zero" "$out/lz_trap_div.err"; then echo "level-zero trap_div: trapped (exit 71)"; else echo "level-zero trap_div: FAIL (exit $rc)"; cat "$out/lz_trap_div.err"; fail=1; fi
   else echo "level-zero trap_div: FAIL (build)"; fail=1; fi
+  if [ $lzprobe = 1 ]; then
+    if "$root/scripts/sycl-build.sh" --backend=level-zero --no-div-trap trap_div.cpp -o "$out/lz_ndt" > "$out/lz_ndt.log" 2>&1 &&
+       [ "$("$out/lz_ndt" 2>&1 | tail -1)" = "trap_div finished" ]; then echo "level-zero trap_div --no-div-trap: ok"
+    else echo "level-zero trap_div --no-div-trap: FAIL"; tail -3 "$out/lz_ndt.log"; fail=1; fi
+  fi
 else
   echo "SKIP: level-zero: needs spirv-val, the Level Zero headers (/usr/include/level_zero) and libze_loader.so.1"
 fi

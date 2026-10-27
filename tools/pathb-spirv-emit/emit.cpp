@@ -78,6 +78,7 @@ struct SpvModule {
   int64_t wgs_total = 0;
   uint32_t wgs_var = 0;
   uint32_t sg_size_var = 0;   // the SubgroupSize builtin input, once a function reads it
+  bool no_div_trap = false;   // --no-div-trap
 
   SpvModule(Spv *s, bool kcl) : spv(s), kernel_cl(kcl) {
     push = kcl ? 0 : s->push_var();
@@ -861,7 +862,13 @@ struct SFn {
     } else {
       c = res(170, {tbool(), b, zero});
     }
-    trap_if(c, 1);
+    if (mod->no_div_trap) {
+      // the divisor is 1 where the division is undefined: the result is defined and meaningless, as a GPU's is
+      uint32_t st = sty(ty);
+      b = res(169, {st, c, int_const_of(ty, 1), b});
+    } else {
+      trap_if(c, 1);
+    }
     uint32_t code_ = ty.sign ? (h == "cdiv" ? 135 : 138) : (h == "cdiv" ? 134 : 137);
     return canon(res(code_, {sty(ty), a, b}), ty);
   }
@@ -1574,7 +1581,7 @@ struct SFn {
 
 // ------------------------------------------------------------------ the module
 
-Emitted emit_module(const std::string &src, bool kernel_cl) {
+Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap) {
   std::vector<Node> forms = read_forms(src);
   Mod mod;
   std::unordered_map<std::string, int64_t> sizes;
@@ -1634,6 +1641,7 @@ Emitted emit_module(const std::string &src, bool kernel_cl) {
   }
   spv.glsl_id();
   SpvModule smod(&spv, kernel_cl);
+  smod.no_div_trap = no_div_trap;
   smod.irmod = &mod;
 
   // the reach of a function over a call relation (the calls, or every address of a function)
