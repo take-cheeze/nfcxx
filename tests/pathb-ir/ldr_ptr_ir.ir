@@ -20,7 +20,7 @@
     (addr 16 long &"_ZN1BD1Ev" 0)
     (addr 24 long &"_ZN1BD0Ev" 0)
     (addr 32 long &"_ZN1B1vEe" 0)))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "_ZTVN10__cxxabiv120__si_class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
 (global "_ZTS1D" (const (array 3 (const char))) 3 1 (weak) (init
     (bytes 0 3 @"const.1")))
@@ -34,7 +34,7 @@
     (addr 16 long &"_ZN1DD1Ev" 0)
     (addr 24 long &"_ZN1DD0Ev" 0)
     (addr 32 long &"_ZN1D1vEe" 0)))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
 (global "tmp" (array 2 (struct "__C2")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZdlPvm" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))

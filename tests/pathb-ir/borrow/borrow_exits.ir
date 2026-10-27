@@ -1,7 +1,7 @@
 (ir-module "borrow_exits.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 (borrow-layout (struct "Own") 8 8 (field "p" 0 (ptr int)))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
-(global "__curr_eh_stack_entry" (ptr (struct "__C7")) 8 8 (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C7")) 8 8 (thread) (extern))
 (global "tmp" (array 2 (struct "__C8")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZN3OwnD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))

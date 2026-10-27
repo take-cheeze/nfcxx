@@ -9,7 +9,7 @@
     (scalar 8 unsigned_long (const unsigned_long 1))
     (scalar 16 unsigned_int (const unsigned_int 0))
     (scalar 20 bool (const bool 1))))
-(global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (thread) (extern))
 (data "const" (const (array 2 (const char))) (string "n\000"))
 
 (function "main"

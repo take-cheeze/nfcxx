@@ -1,5 +1,5 @@
 (ir-module "sycl_kernel_name.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "name1" (const (struct "_ZN4sycl3_V16detail11string_viewE")) 16 8 (static) (init
     (addr 0 (ptr (const char)) @"const" 0)
     (scalar 8 unsigned_long (const unsigned_long 3))))

@@ -1,5 +1,5 @@
 (ir-module "sycl_unique_stable_name_array.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "_ZN1QI1AE1nE" (const (ptr (const char))) 8 8 (weak) (init
     (addr 0 (ptr (const char)) @"const" 0)))
 (global "_ZN1QI1AE3lenE" (const unsigned_long) 8 8 (weak) (init

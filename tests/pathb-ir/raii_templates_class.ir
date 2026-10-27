@@ -1,8 +1,8 @@
 (ir-module "raii_templates_class.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 (global "live" int 4 4 (static) (init
     (scalar 0 int (const int 0))))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
-(global "__curr_eh_stack_entry" (ptr (struct "__C7")) 8 8 (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C7")) 8 8 (thread) (extern))
 (global "tmp" (array 2 (struct "__C8")) 32 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZN3BoxIiED1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))

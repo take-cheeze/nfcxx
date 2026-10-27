@@ -57,6 +57,9 @@ if [ -n "$target" ]; then
 fi
 
 sys_inc=(); gnu_opts=()
+# Hosted: the program links EDG's runtime; when its exception handling state is per thread (RUNTIME_EH_TLS, the eh-tls
+# marker of scripts/setup-edg.sh), the EH variables of the IR are thread-local too, as the nfcxx driver has them.
+eh_tls=(); [ "$hosted" = 0 ] || [ ! -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 if [ "$hosted" != 0 ]; then
   while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes "$lang")
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
@@ -76,7 +79,7 @@ for file in "${files[@]}"; do
   # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR. C has no templates.
   tused=(); [ $lang = c ] || tused=(-tused)
   # NFCXX_PATHB_CUDA=1 (the driver's device pass): the front end reads the unit as CUDA (cpfe --cuda)
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" $dialect --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${NFCXX_PATHB_CUDA:+--cuda --no_exceptions} --sys_include="$base/include" "$f") || status=$?
+  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" $dialect --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${NFCXX_PATHB_CUDA:+--cuda --no_exceptions} ${eh_tls[@]+"${eh_tls[@]}"} --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status

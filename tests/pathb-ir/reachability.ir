@@ -13,7 +13,7 @@
     (scalar 0 long (const long 0))
     (addr 8 long @"_ZTI4Used" 0)
     (addr 16 long &"_ZN4Used1gEv" 0)))
-(global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (thread) (extern))
 (data "const" (const (array 6 (const char))) (string "4Used\000"))
 
 (function "__nfcxx_ldr__ZN34_INTERNAL_16_reachability_cpp_main13unused_staticEe"

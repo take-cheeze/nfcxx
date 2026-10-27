@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Print the path of the EH shim object (lib/ehshim/nfcxx_eh_shim.cpp, docs/notes/eh-shim.md), building it first when it
-# is missing or older than its source. The shim makes exceptions thrown by libstdc++.so (std::__throw_* functions) and
-# std::exception_ptr work on EDG's exception runtime; the driver and the Path B test harness link the object into
+# is missing or older than its source or EDG's runtime. The shim makes exceptions thrown by libstdc++.so (std::__throw_*
+# functions) and std::exception_ptr work on EDG's exception runtime; the driver and the Path B test harness link the object into
 # every hosted program.
 #   NFCXX_EHSHIM=0       print nothing (link without the shim)
 #   NFCXX_EHSHIM_DIR=d   where the object is kept (default build/ehshim)
@@ -14,8 +14,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/scripts/host-sys.sh"
 src=$root/lib/ehshim/nfcxx_eh_shim.cpp
 dir=${NFCXX_EHSHIM_DIR:-$root/build/ehshim}
-out=$dir/nfcxx_eh_shim-$(host_gnu_version).o
-if [ ! -f "$out" ] || [ "$src" -nt "$out" ]; then
+# -tls: built against an EDG runtime whose exception handling state is thread-local (the eh-tls marker of
+# scripts/setup-edg.sh): its references to that state are TLS ones, which do not link against the other runtime.
+tls=; [ ! -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ] || tls=-tls
+out=$dir/nfcxx_eh_shim-$(host_gnu_version)$tls.o
+rt=${EDG_BUILD:-$root/build/edg}/lib/libC.a   # an EDG rebuild rebuilds the shim too
+if [ ! -f "$out" ] || [ "$src" -nt "$out" ] || { [ -f "$rt" ] && [ "$rt" -nt "$out" ]; }; then
   mkdir -p "$dir"
   tmp=$(mktemp -d "$dir/.build.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   # the driver of this checkout; NFCXX_PATH=b, NFCXX_BACKEND and NFCXX_CC (set by the qbe backend) must not redirect the shim to another compiler.
