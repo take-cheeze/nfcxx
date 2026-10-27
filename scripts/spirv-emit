@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# The SPIR-V emitter of the SYCL path, as scripts/sycl-build.sh and tests/gpu/ggml/sweep.sh run it:
+#   scripts/spirv-emit [--kernel-cl] --manifest=FILE FILE.ir > out.spv
+# NFCXX_SPIRV_EMITTER picks the implementation (default: cxx when ninja is installed, else ruby):
+#   cxx             build/pathb-spirv-emit, the C++ port (tools/pathb-spirv-emit; built here with ninja when missing or
+#                   older than its sources): about 1 s for ggml-sycl's fattn-vec-instance-f16-f16
+#   ruby            scripts/pathb-spirv-emit.rb, on CRuby when it is installed (NFCXX_SPIRV_RUBY names the interpreter), else
+#                   on scripts/mrb (mruby, whose garbage collector makes the same image take ~2000 s; CRuby ~16 s)
+#   check           both: the module, the manifest, the exit status and the message must be the same, byte for byte (exit 99
+#                   and a report on stderr otherwise); the outputs are the Ruby's
+root=$(cd "$(dirname "$0")/.." && pwd)
+rb=${NFCXX_SPIRV_RUBY:-$(command -v ruby || echo "$root/scripts/mrb")}
+cxx=$root/build/pathb-spirv-emit
+need_cxx() {
+  [ -x "$cxx" ] && [ -z "$(find "$root/tools/pathb-spirv-emit" -newer "$cxx" -name '*.[ch]pp' 2>/dev/null | head -1)" ] && return
+  # one build at a time (parallel compiles can all find the binary missing)
+  exec 8>"$root/build/.pathb-spirv-emit.lock"
+  command -v flock >/dev/null && flock 8
+  ninja -C "$root/tools/pathb-spirv-emit" >&2 || { echo "spirv-emit: building the C++ emitter failed" >&2; exit 1; }
+}
+dflt=ruby
+command -v ninja >/dev/null && dflt=cxx
+case ${NFCXX_SPIRV_EMITTER:-$dflt} in
+  ruby) exec "$rb" "$root/scripts/pathb-spirv-emit.rb" "$@" ;;
+  cxx) need_cxx; exec "$cxx" "$@" ;;
+  check)
+    need_cxx
+    args=() man=
+    for a in "$@"; do
+      case $a in --manifest=*) man=${a#--manifest=} ;; *) args+=("$a") ;; esac
+    done
+    tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf "$tmp"' EXIT
+    "$rb" "$root/scripts/pathb-spirv-emit.rb" ${man:+--manifest="$tmp/rb.man"} "${args[@]}" > "$tmp/rb.spv" 2> "$tmp/rb.err"
+    rrc=$?
+    "$cxx" ${man:+--manifest="$tmp/cx.man"} "${args[@]}" > "$tmp/cx.spv" 2> "$tmp/cx.err"
+    crc=$?
+    bad=
+    [ $rrc = $crc ] || bad="exit $rrc (Ruby) against $crc (C++)"
+    cmp -s "$tmp/rb.spv" "$tmp/cx.spv" || bad="${bad:+$bad; }the modules differ"
+    cmp -s "$tmp/rb.err" "$tmp/cx.err" || bad="${bad:+$bad; }the messages differ"
+    # a refused module has no manifest from either
+    if [ -n "$man" ] && { [ -e "$tmp/rb.man" ] || [ -e "$tmp/cx.man" ]; } && ! cmp -s "$tmp/rb.man" "$tmp/cx.man"; then
+      bad="${bad:+$bad; }the manifests differ"
+    fi
+    if [ -n "$bad" ]; then
+      echo "spirv-emit: the C++ emitter differs from the Ruby on ${args[*]}: $bad" >&2
+      head -3 "$tmp/rb.err" "$tmp/cx.err" >&2
+      exit 99
+    fi
+    cat "$tmp/rb.err" >&2
+    [ -n "$man" ] && [ -e "$tmp/rb.man" ] && cp "$tmp/rb.man" "$man"
+    cat "$tmp/rb.spv"
+    exit $rrc
+    ;;
+  *) echo "spirv-emit: NFCXX_SPIRV_EMITTER is ruby, cxx or check (got ${NFCXX_SPIRV_EMITTER})" >&2; exit 2 ;;
+esac
