@@ -3,6 +3,7 @@
 # CodeGen: sends devirtualized to native primitives.
 
 require_relative 'native_direct'
+require_relative 'tagged_fixnum'
 
 class CodeGen
   # Owners of the wrapper tables below come from NativeDirect::ENTRIES (the
@@ -225,7 +226,9 @@ class CodeGen
   def compile_neq_op_eq(d, recv, arg)
     num = ->(lhs, rhs) { "mrb_bool_value(#{lhs}(#{recv}) != #{rhs}(#{arg}))" }
     "  // NEQ_OP_EQ :!= -- OP_EQ negated, as class.c's `!(self == other)` runs it (codegen_native_send.rb)\n" \
-      "  if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
+      "  if (#{TaggedFixnum.pair(recv, arg)}) {\n" \
+      "    r#{d} = mrb_bool_value(#{TaggedFixnum.compare(recv, '!=', arg)});\n" \
+      "  } else if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
       "    r#{d} = #{num.call('mrb_integer', 'mrb_integer')};\n" \
       "  } else if (mrb_obj_eq(M, #{recv}, #{arg})) {\n" \
       "    r#{d} = mrb_false_value();\n" \
