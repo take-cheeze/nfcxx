@@ -32,6 +32,7 @@ enum : uint32_t {
   BUILTIN_WORKGROUP_ID = 26,
   BUILTIN_LOCAL_INVOCATION_ID = 27,
   BUILTIN_GLOBAL_INVOCATION_ID = 28,
+  BUILTIN_SUBGROUP_SIZE = 36,
   DEC_BUILTIN = 11,
   DEC_SPEC_ID = 1,
   DEC_BLOCK = 2,
@@ -79,6 +80,7 @@ class Spv {
   uint32_t workgroup_size(const std::vector<uint32_t> &ids);
   uint32_t var(uint32_t sc, uint32_t ptr_type);
   uint32_t builtin_input(uint32_t builtin);
+  uint32_t builtin_input_u32(uint32_t builtin);   // a 32-bit scalar builtin input (the sub-group size)
   uint32_t push_var();
   uint32_t private_var(uint32_t elem);
   uint32_t t_array(uint32_t elem, uint32_t len);

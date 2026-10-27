@@ -3470,7 +3470,8 @@ def emit_module(text, do_prune = true, ld_trap = false)
     elsif h == "alias"
       name, target, kind, weak = alias_parts(f)
       mod.out << "#{ALIAS_MARK}#{kind} #{qsym(name)} #{qsym(target)}#{weak ? " weak" : ""}"
-    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk" && h != "borrow-layout" && h != "call-effects"
+    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk" && h != "borrow-layout" && h != "call-effects" &&
+          h != "sycl-kernel-attr"   # a SYCL kernel's attributes, for the SPIR-V emitter
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end
