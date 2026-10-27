@@ -556,6 +556,10 @@ class CodeGen
   def return_class_send_mask(irep, index, insn, state = nil)
     name = insn.sym
     return NumericFlow::OTHER unless name
+
+    # ARRAY_TIMES_RESULT holds for a removed Array#* too (native_array_times_result).
+    times = state && ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && native_array_times_result(insn, state)
+    return times if times
     # A removed name's body may not be the one that runs: the same refusal as bytecode_ir_call_result_classes.
     return NumericFlow::OTHER if @closed_world && bytecode_ir_name_removed?(name)
 
