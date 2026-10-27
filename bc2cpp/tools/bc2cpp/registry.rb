@@ -204,7 +204,7 @@ def build_registry(ireps, root_label)
     # `private`/`protected`/`public` tracking, scoped to this body. A bare call
     # (n=0) switches the mode for later defs; a call with Symbol arguments marks
     # already-defined methods without changing the mode. Getting visibility wrong
-    # would let a register.cxx registration expose a private method.
+    # would let the generated registration expose a private method.
     default_visibility = :public
     # A bare `module_function` (this mruby's MODFUNC scope bit, src/class.c): every later def in the body also gets a
     # public singleton copy, and no later bare private/public clears it.
@@ -310,7 +310,7 @@ def build_registry(ireps, root_label)
         # #initialize, #initialize_copy and #respond_to_missing? are always private,
         # whatever mode is in effect: src/class.c's define_method path sets
         # MRB_METHOD_PRIVATE_FL for them unconditionally. default_visibility cannot
-        # see that rule, and reporting them public would let register.cxx expose them.
+        # see that rule, and reporting them public would let the generated registration expose them.
         register_instance_def.call(insn.sym, irep.reps[insn.block_index])
       when :SDEF
         # "SDEF R1 :clamp I[5]": `def self.foo` / `def SomeConst.foo`. codegen_sdef
