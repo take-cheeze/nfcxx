@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
+
 # SYMBOL_CACHE: generated C++ used to spell every ivar/constant/method name and
 # symbol literal as `mrb_intern_cstr(M, "name")` (or a `mrb_funcall(M, r,
 # "name", ...)`, which interns the same way), paying a presym binary search plus
@@ -212,7 +214,7 @@ module SymbolCache
       #else
       #define BC2CPP_NOIPA [[gnu::noipa, maybe_unused]]
       #endif
-      #endif
+      #endif#{"\n#{BranchHints.prelude.chomp}" if BranchHints.on?}
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
       static mrb_sym bc2cpp_syms[#{[table.size, 1].max}] = {};

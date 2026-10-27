@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
+
 # CodeGen: per-method compile state and file-level emission.
 
 class CodeGen
@@ -164,7 +166,8 @@ class CodeGen
     end
     # LEFT_OUT: what stands in for an entry the build leaves out of the tables. A verify build registers the stub
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
-    # from its cause; a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
+    # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
+    # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
     if compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
@@ -182,11 +185,16 @@ class CodeGen
         #if defined(BC2CPP_UNREGISTERED_VERIFY)
           if (singleton) mrb_define_class_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
           else mrb_define_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
-        #elif defined(BC2CPP_RESPOND_TO_PHANTOM)
-          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
-          bc2cpp_phantom_add(M, owner, mrb_intern_cstr(M, name));
         #else
-          (void)M; (void)c; (void)name; (void)singleton;
+          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
+          mrb_sym id = mrb_intern_cstr(M, name);
+          // Only a definition on the owner itself: an inherited one belongs to another entry.
+          struct RClass* definer = owner;
+          mrb_method_t m = mrb_method_search_vm(M, &definer, id);
+          if (!MRB_METHOD_UNDEF_P(m) && definer == owner) mrb_remove_method(M, owner, id);
+        #if defined(BC2CPP_RESPOND_TO_PHANTOM)
+          bc2cpp_phantom_add(M, owner, id);
+        #endif
         #endif
         }
       CPP
@@ -254,10 +262,13 @@ class CodeGen
 
   # GEM_HOOKS: what every compiled gem's register.cxx runs. Init installs the compiled methods over the bytecode
   # the gem's mrblib loaded. Final drops the ids, constants and class pointers cached for this VM, so a later VM
-  # at a reused address never sees them.
+  # at a reused address never sees them. Init clears the constant and class slots too (VM_CACHE_LIFETIME): their
+  # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
   def emit_gem_hooks
     <<~CPP
       [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
+        bc2cpp_reset_const_site_cache();
+        bc2cpp_reset_owner_classes();
         bc2cpp_set_instance_tts(M);
         bc2cpp_register_owner_methods(M);
         bc2cpp_capture_direct_construct_classes(M);
@@ -665,7 +676,7 @@ class CodeGen
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int len = ARY_LEN(a);
         if (n < 0) n += len;
-        if (n < 0 || len <= n) return mrb_nil_value();
+        if (#{BranchHints.unlikely('n < 0 || len <= n')}) return mrb_nil_value();
         return ARY_PTR(a)[n];
       }
 
@@ -681,7 +692,7 @@ class CodeGen
     'bc2cpp_ary_push' => <<~CPP,
       static inline void bc2cpp_ary_push(mrb_state* M, mrb_value ary, mrb_value elem) {
         struct RArray* a = mrb_ary_ptr(ary);
-        if (!ARY_EMBED_P(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a) && a->as.heap.len < a->as.heap.aux.capa) {
+        if (mrb_likely(!ARY_EMBED_P(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a) && a->as.heap.len < a->as.heap.aux.capa)) {
           a->as.heap.ptr[a->as.heap.len++] = elem;
           mrb_field_write_barrier_value(M, (struct RBasic*)a, elem);
           return;
@@ -694,7 +705,7 @@ class CodeGen
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int len = ARY_LEN(a);
         mrb_int at = n < 0 ? n + len : n;
-        if (at >= 0 && at < len && !ARY_SHARED_P(a) && !mrb_frozen_p(a)) {
+        if (mrb_likely(at >= 0 && at < len && !ARY_SHARED_P(a) && !mrb_frozen_p(a))) {
           ARY_PTR(a)[at] = val;
           mrb_field_write_barrier_value(M, (struct RBasic*)a, val);
           return;
@@ -708,8 +719,8 @@ class CodeGen
       static inline void bc2cpp_ary_splice(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len, mrb_value rpl) {
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int alen = ARY_LEN(a);
-        if (head >= 0 && len >= 0 && head < alen && len <= alen - head && !ARY_SHARED_P(a) && !mrb_frozen_p(a) &&
-            mrb_array_p(rpl) && RARRAY_LEN(rpl) == len && RARRAY_PTR(rpl) != ARY_PTR(a)) {
+        if (mrb_likely(head >= 0 && len >= 0 && head < alen && len <= alen - head && !ARY_SHARED_P(a) && !mrb_frozen_p(a) &&
+            mrb_array_p(rpl) && RARRAY_LEN(rpl) == len && RARRAY_PTR(rpl) != ARY_PTR(a))) {
           mrb_value* dst = ARY_PTR(a) + head;
           const mrb_value* src = RARRAY_PTR(rpl);
           for (mrb_int i = 0; i < len; i++) dst[i] = src[i];
@@ -725,7 +736,7 @@ class CodeGen
   def emit_ary_write_helpers(compiled)
     index = emit_index_helpers(compiled)
     ARY_WRITE_HELPERS.filter_map do |name, text|
-      "#{text}\n" if compiled.any? { |m| m[:code].include?("#{name}(") } || index.include?("#{name}(")
+      "#{BranchHints.text(text)}\n" if compiled.any? { |m| m[:code].include?("#{name}(") } || index.include?("#{name}(")
     end.join
   end
 

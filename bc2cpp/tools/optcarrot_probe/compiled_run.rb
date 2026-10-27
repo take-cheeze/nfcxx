@@ -319,6 +319,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   gray_stack_config = "cc.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'\ncxx.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'"
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
   target_suffix += 'sealed'
+  # OPTCARROT_COMPILED_FLAGS: extra compiler and linker flags for the compiled binary (a PGO experiment), built in
+  # its own directory because mruby's build does not rebuild an object when only its flags change.
+  extra_flags = ENV['OPTCARROT_COMPILED_FLAGS'].to_s.split
+  unless extra_flags.empty?
+    target_suffix += 'xflags'
+    build_mode += ", extra flags: #{extra_flags.join(' ')}"
+  end
   compiled_target = "optcarrotcompiled#{target_suffix}"
   puts "Optcarrot build mode: #{build_mode}"
   puts 'Optcarrot core: original CPU dispatch, Fiber PPU, and LUT initializer'
@@ -355,6 +362,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     MRuby::Build.new(#{compiled_target.dump}) do
       #{compiled_base}
       #{gray_stack_config}
+      #{extra_flags.empty? ? '' : "[cc, cxx, linker].each { |tool| tool.flags << #{extra_flags.inspect} }"}
       # The compiled gem's only source is C++ (register.cxx), and its generated
       # code raises real C++ exceptions (its own bc2cpp_ensure_guard /
       # bc2cpp_block_break), so the build needs MRB_USE_CXX_EXCEPTION and the

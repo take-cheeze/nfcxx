@@ -41,6 +41,7 @@ require_relative 'native_ivar_scopes'
 require_relative 'outside_ruby_ivar_scopes'
 
 require_relative 'native_expression_devirt'
+require_relative 'branch_hints'
 require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
