@@ -36,8 +36,12 @@ require File.join(ROOT, 'tools/bc2cpp/compiled_gems')
 require_relative 'sealed_build'
 require_relative 'cruby_runs'
 require_relative 'register_emit'
+require File.join(ROOT, 'tools/bc2cpp/shard_output')
 
 extend OptcarrotRegister
+
+# BC2CPP_SHARDS (docs/bc2cpp-shards.md): the generated code in this many translation units, compiled in parallel.
+PROBE_SHARDS = ShardOutput.count(ENV.to_h.merge('BC2CPP_SHARDS' => ENV.fetch('BC2CPP_SHARDS', '4')))
 
 def run_bc2cpp(sources, env)
   command = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *sources]
@@ -96,12 +100,14 @@ end
 
 Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   scan_dir = File.join(temp, 'scan')
-  # The gem's src/ dir holds both the generated C++ and register.cxx. Created
-  # here (and register.cxx touched below, before the gem is added to a build)
-  # because mruby discovers a gem's sources by globbing src/ at add time.
+  # The gem's src/ dir holds register.cxx. Created here (and register.cxx touched below, before the gem is added to
+  # a build) because mruby discovers a gem's sources by globbing src/ at add time. The generated C++ register.cxx
+  # #includes lives beside it in generated/: inside src/ mruby would also compile it as a translation unit of its own.
   output_dir = File.join(temp, 'gem', 'src')
+  generated_dir = File.join(temp, 'gem', 'generated')
   FileUtils.mkdir_p(scan_dir)
   FileUtils.mkdir_p(output_dir)
+  FileUtils.mkdir_p(generated_dir)
   # bc2cpp compiles closed-world programs only, so the benchmark always runs sealed.
   benchmark_source, sealed_gems = OptcarrotSealedBuild.prepare(ROOT, temp, File.dirname(output_dir))
   native_sources, foreign_sources = bc2cpp_closed_world_outside_srcs('optcarrot-probe', sealed_gems, ROOT)
@@ -151,7 +157,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     # unconditionally, since this file was first written.
     'BC2CPP_SELF_REGISTERING' => '1',
     # sig/bc2cpp describes RPG engine classes that the optcarrot program does not define (RBS_SIGNATURES would abort).
-    'BC2CPP_SIG_DIRS' => ''
+    'BC2CPP_SIG_DIRS' => '',
+    'BC2CPP_SHARDS' => PROBE_SHARDS.to_s
   }
   base_env.merge!(OptcarrotSealedBuild.environment(sealed_gems))
   # NILABLE_EMBED_EXPERIMENT: OPTIN set only for the A/B run, so the default
@@ -181,8 +188,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   owners |= BC2CPP_CORE_OWNERS unless core_sources.empty?
   compiled_env = scan_env.merge('OUT_DIR' => temp, 'ONLY_OWNERS' => owners.join(','))
   compiled_cpp, diagnostics = run_bc2cpp(sources, compiled_env)
-  File.write(File.join(output_dir, 'optcarrot_probe_gen.cpp'), compiled_cpp)
-  FileUtils.cp(File.join(temp, 'optcarrot_probe_decls.h'), output_dir)
+  File.write(File.join(generated_dir, 'optcarrot_probe_gen.cpp'), compiled_cpp)
+  FileUtils.cp(File.join(temp, 'optcarrot_probe_decls.h'), generated_dir)
+  # BC2CPP_SHARDS (docs/bc2cpp-shards.md): each further shard is a translation unit of its own, so it goes to src/.
+  (1...PROBE_SHARDS).each { |k| FileUtils.cp(ShardOutput.shard_path(temp, 'optcarrot_probe', k), output_dir) }
   count = emit_register(diagnostics, output_dir)
 
   gem_dir = File.join(temp, 'gem')
@@ -203,6 +212,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       # bc2cpp's emitted `#include "rgss_construct.hxx"`, the same wiring the
       # real compiled gems use.
       spec.cxx.include_paths << #{File.join(ROOT, 'include').dump}
+      spec.cxx.include_paths << #{generated_dir.dump}
     end
   RUBY
   profiling = ENV['GPROF'] == '1'
@@ -324,7 +334,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   end.merge('MRUBY_CONFIG' => config)
   rake_env['LD'] = rake_env['CC'] || 'cc'
   tasks = %w[verify_optcarrot_world link_optcarrot]
-  output, status = Open3.capture2e(rake_env, 'rake', *tasks, "-j#{Etc.nprocessors}", chdir: MRUBY)
+  # -m: without it rake runs every file task one after another and -j has nothing to schedule.
+  output, status = Open3.capture2e(rake_env, 'rake', '-m', *tasks, "-j#{Etc.nprocessors}", chdir: MRUBY)
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..] || output}" unless status.success?
 
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/optcarrot")
