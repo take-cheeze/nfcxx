@@ -144,7 +144,8 @@ else
 fi
 
 # 12. Intermediates: a compile and link leaves no .ii, .ti or .o in its directory; NFCXX_KEEP_INTERMEDIATES=1 keeps the
-# records in the directory the driver names on stderr. The sources use a template, so the prelinker writes records.
+# records in the directory the driver names on stderr. The sources use a template, so the prelinker writes records (in
+# NFCXX_INSTANTIATE=auto, the prelinker's mode; the default instantiates in each unit and has no records).
 mkdir -p "$tmp/cwd" && printf 'template <class T> T twice(T x) { return x + x; }\n' > "$tmp/cwd/common.h"
 printf '#include "common.h"\nint fx(int v) { return twice(v); }\n' > "$tmp/cwd/x.cpp"
 printf 'int fx(int);\nint main() { return fx(2) == 4 ? 0 : 1; }\n' > "$tmp/cwd/main.cpp"
@@ -154,7 +155,7 @@ if [ "$got" -eq 0 ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; th
 else
   bad "compile and link leave no .ii, .ti or .o in the directory" "exit $got, $(ls -A "$tmp/cwd" | tr '\n' ' ')"
 fi
-keep_msg=$(cd "$tmp/cwd" && NFCXX_KEEP_INTERMEDIATES=1 "$nfcxx" -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
+keep_msg=$(cd "$tmp/cwd" && NFCXX_INSTANTIATE=auto NFCXX_KEEP_INTERMEDIATES=1 "$nfcxx" -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
 if [ -n "$keep_msg" ] && [ -f "$keep_msg/x.ti" ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; then
   ok "NFCXX_KEEP_INTERMEDIATES=1 keeps the records in the named directory"
 else
@@ -196,14 +197,15 @@ else
   echo "--- test 14 files in $tmp/rel:"; ls -la "$tmp/rel"
 fi
 
-# 15. NFCXX_CACHE (docs/notes/cxx-driver.md): a -c compile is kept, and a later identical compile takes the copy. The template
-# instance comes from the prelinker's records, so the restored .ti must come back with the object for the link to find it;
+# 15. NFCXX_CACHE (docs/notes/cxx-driver.md): a -c compile is kept, and a later identical compile takes the copy. In
+# NFCXX_INSTANTIATE=auto the template instance comes from the prelinker's records, so the restored .ti must come back with the
+# object for the link to find it (the default mode has no records: its object holds the instance);
 # a changed header is compiled again, and reverting it takes the first copy.
 c15=$tmp/cache15; mkdir -p "$c15/o"
 printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
 printf '#include "tpl.h"\nint run_tpl(void) { return twice(20) + BIAS; }\n' > "$c15/tpl.cpp"
 printf 'int run_tpl(void);\nint main(void) { return run_tpl() - 41; }\n' > "$c15/main.cpp"
-export NFCXX_CACHE=$c15/cache
+export NFCXX_CACHE=$c15/cache NFCXX_INSTANTIATE=auto
 c15_entries() { ls "$c15/cache/objects" 2>/dev/null | wc -l | tr -d ' '; }
 check "cache: a compile is stored" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
 check "cache: a restored object links with its records" sh -c "
@@ -231,7 +233,7 @@ wait
 n=$(grep -c '^== ' "$c15/plog"); k=$(grep -c '^key ' "$c15/plog"); s=$(grep -cx -e hit -e miss "$c15/plog")
 [ "$n" = 4 ] && [ "$k" = 4 ] && [ "$s" = 4 ] && ok "cache log: parallel compiles keep whole blocks" \
   || bad "cache log: parallel compiles keep whole blocks" "$n blocks, $k keys, $s states"
-unset NFCXX_CACHE_LOG NFCXX_CACHE
+unset NFCXX_CACHE_LOG NFCXX_CACHE NFCXX_INSTANTIATE
 
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]
