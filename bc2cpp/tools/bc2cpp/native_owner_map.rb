@@ -5,6 +5,7 @@ require_relative 'native_names'
 require_relative 'native_direct'
 require_relative 'irep'
 require_relative 'scan_cache'
+require_relative 'core_hierarchy_sigs'
 
 # NATIVE_OWNER_MAP: for each method name, the classes some native C registration
 # defines it on, with the class expression each call names. A poly chain that calls a Ruby body
@@ -79,8 +80,10 @@ module NativeOwnerMap
   # owner is not a known class: the core's API forwarders and reflection primitives install a name the
   # Ruby program or a caller supplies, which the Ruby side's closed world already treats as a dynamic
   # install (unknown_defs). `verdict` refuses them unless the caller trusts that (core_dynamic_trusted:).
+  # NIL_NATIVE_ANSWERS: `instance` is the instance-table registrations alone, as [owner, name, core] (name nil when
+  # computed), and `mixins` each native include/prepend as [target, module, core]; see nil_native_answers.
   Result = Struct.new(:by_name, :computed, :computed_unknown, :core_dynamic_unknown, :refusals, :calls, :registrations, :aliases,
-                      keyword_init: true)
+                      :instance, :mixins, keyword_init: true)
 
   module_function
 
@@ -306,7 +309,7 @@ module NativeOwnerMap
 
   def new_result
     Result.new(by_name: Hash.new { |h, k| h[k] = Set.new }, computed: Set.new, registrations: [], aliases: [],
-               computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0)
+               computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0, instance: [], mixins: [])
   end
 
   # A file's Result is a function of the file and the sibling sources scan_file reads, so ScanCache stores it under
@@ -328,13 +331,15 @@ module NativeOwnerMap
     result.calls += file.calls
     result.registrations.concat(file.registrations)
     result.aliases.concat(file.aliases)
+    result.instance.concat(file.instance)
+    result.mixins.concat(file.mixins)
   end
 
   def to_plain(result)
     Result.new(by_name: result.by_name.transform_values(&:to_a), computed: result.computed.to_a,
                computed_unknown: result.computed_unknown, core_dynamic_unknown: result.core_dynamic_unknown,
                refusals: result.refusals.to_h, calls: result.calls, registrations: result.registrations,
-               aliases: result.aliases)
+               aliases: result.aliases, instance: result.instance, mixins: result.mixins)
   end
 
   def from_plain(plain)
@@ -343,7 +348,7 @@ module NativeOwnerMap
     Result.new(by_name: by_name, computed: Set.new(plain.computed), registrations: plain.registrations,
                aliases: plain.aliases, computed_unknown: plain.computed_unknown,
                core_dynamic_unknown: plain.core_dynamic_unknown, refusals: Hash.new(0).merge(plain.refusals),
-               calls: plain.calls)
+               calls: plain.calls, instance: plain.instance, mixins: plain.mixins)
   end
 
   # One file's registrations, in the order its calls appear, as a Result of its own.
@@ -355,6 +360,7 @@ module NativeOwnerMap
     file_vars = NativeDirect.class_variables(typed, NativeDirect.sibling_param_owners(path))
     scopes = static_param_scopes(typed, block_scopes(typed, file_vars))
     vars_at = ->(pos) { scopes.find { |from, to, _| pos.between?(from, to) }&.last || file_vars }
+    core = path.include?('/3rd/mruby/')
     # Calls are read from `typed`, the text the scopes were built on, so a position names the same block
     # in both.
     typed.scan(CALL_RE) do
@@ -363,8 +369,10 @@ module NativeOwnerMap
       args, close = call_args(typed, match.end(0) - 1)
       next if args.nil? || definition?(typed, match.begin(0), close)
 
-      if family == 'prepend_module'
-        result.refusals[path.include?('/3rd/mruby/') ? :core_prepend : :native_prepend] += 1
+      if family == 'prepend_module' || family == 'include_module'
+        scope = vars_at.call(match.begin(0))
+        result.mixins << [owner_of(args.fetch(1, ''), scope), owner_of(args.fetch(2, ''), scope), core]
+        result.refusals[core ? :core_prepend : :native_prepend] += 1 if family == 'prepend_module'
         next
       end
       spec = FAMILIES[family]
@@ -385,6 +393,8 @@ module NativeOwnerMap
                  [owner]
                end
       name = name_of(args.fetch(spec[:name], ''))
+      # The main object's singleton and a class-object table are never on an instance's lookup path.
+      result.instance << [owner, name, core] unless instance || spec[:suffix] == '.singleton'
       if spec[:alias_of] && name && !owners.include?(UNKNOWN)
         original = name_of(args.fetch(spec[:alias_of], ''))
         owners.each { |registered| result.aliases << [registered, name, original] } if original
@@ -435,6 +445,7 @@ module NativeOwnerMap
       body.scan(ROM_ENTRY_RE) do |macro, tok|
         name = resolve_mrb_sym_token(macro, tok)
         result.by_name[name].merge(owners)
+        owners.each { |owner| result.instance << [owner, name, false] }
       end
       attributed << [match.begin(0), match.end(0) + body.size]
     end
@@ -442,7 +453,9 @@ module NativeOwnerMap
       pos = Regexp.last_match.begin(0)
       next if attributed.any? { |from, to| pos >= from && pos < to }
 
-      result.by_name[resolve_mrb_sym_token(macro, tok)] << UNKNOWN
+      name = resolve_mrb_sym_token(macro, tok)
+      result.by_name[name] << UNKNOWN
+      result.instance << [UNKNOWN, name, false]
     end
   end
 
@@ -462,6 +475,39 @@ module NativeOwnerMap
     return [:refused, :native_owner_overlap] unless overlap.empty?
 
     [:proven]
+  end
+
+  # NIL_NATIVE_ANSWERS: what native code may put on nil's lookup path. `modules` is nil's ancestors plus every
+  # module a native include/prepend adds to one of them (or to a class it cannot resolve); `names` is every name an
+  # instance-table registration puts on one of those, or on a class it cannot resolve. nil, with `reason`, when any
+  # name may land there. A computed-name registration or a mixin of an unresolved module inside 3rd/mruby is one of
+  # the core's forwarders for Ruby's own define_method/include/extend, which the closed world models (the trust
+  # `verdict` takes as core_dynamic_trusted).
+  NilAnswers = Struct.new(:names, :modules, :reason, keyword_init: true)
+
+  def nil_native_answers(map)
+    modules = CoreHierarchySigs.with_scan_spellings(CoreHierarchySigs.ancestors('NilClass')).to_set
+    loop do
+      grew = false
+      map.mixins.each do |target, mod, core|
+        next unless target == UNKNOWN || modules.include?(target)
+        next if mod == UNKNOWN && core
+        return NilAnswers.new(reason: 'a native include/prepend of an unresolved module') if mod == UNKNOWN
+
+        grew = true if modules.add?(mod)
+      end
+      break unless grew
+    end
+    names = Set.new
+    map.instance.each do |owner, name, core|
+      if name.nil?
+        next if owner == UNKNOWN ? core : !modules.include?(owner)
+
+        return NilAnswers.new(reason: "a native registration with a computed name on #{owner}")
+      end
+      names << name if owner == UNKNOWN || modules.include?(owner)
+    end
+    NilAnswers.new(names: names, modules: modules)
   end
 end
 

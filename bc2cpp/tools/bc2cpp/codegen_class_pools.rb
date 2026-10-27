@@ -382,15 +382,18 @@ class CodeGen
 
   # Modules that reach nil through an include or prepend on one of its ancestors.
   def nil_ancestor_modules
-    @nil_ancestor_modules ||= begin
-      found = Set.new(NIL_OWNER_NAMES)
-      queue = NIL_OWNER_NAMES.dup
-      until queue.empty?
-        owner = queue.shift
-        (Array(@included_modules[owner]) + Array(@prepended_modules[owner])).each { |mod| queue << mod if found.add?(mod) }
-      end
-      found
+    @nil_ancestor_modules ||= mixin_closure(NIL_OWNER_NAMES)
+  end
+
+  # +owners+ and every module the program includes or prepends into one of them, transitively.
+  def mixin_closure(owners)
+    found = Set.new(owners)
+    queue = found.to_a
+    until queue.empty?
+      owner = queue.shift
+      (Array(@included_modules[owner]) + Array(@prepended_modules[owner])).each { |mod| queue << mod if found.add?(mod) }
     end
+    found
   end
 
   # nil has no method +name+ anywhere in the build, so `nil.name` only raises NoMethodError: no

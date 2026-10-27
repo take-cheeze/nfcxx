@@ -127,9 +127,9 @@ class CodeGen
     entry_arg_body_owner[irep.label]
   end
 
-  # nil answers +sym+ only by raising NoMethodError: no Ruby definition on nil's
-  # ancestors, no method_missing anywhere that could see nil, and no native
-  # definition on NilClass (@nil_operator_names is the scanned set).
+  # nil answers +sym+ only by raising NoMethodError: no method_missing anywhere that could see nil, and no
+  # definition on nil's lookup path -- native (NativeOwnerMap.nil_native_answers), program, foreign Ruby or dynamic,
+  # including on a module a native or program include adds to it.
   def numeric_nil_raises?(sym)
     # Not memoized for a core body, which compiles with the closed world withheld (see lexical_const_info).
     return false if @closed_world.nil?
@@ -137,10 +137,17 @@ class CodeGen
     @numeric_nil_raises ||= {}
     return @numeric_nil_raises[sym] if @numeric_nil_raises.key?(sym)
 
+    answers = @nil_native_answers
     @numeric_nil_raises[sym] =
-      !@nil_operator_names.nil? && !@closed_world.nil? && @closed_world.global_refusal.nil? &&
-      @closed_world.method_missing_classes.empty? && !@nil_operator_names.include?(sym) &&
-      (@registry[sym] || []).none? { |d| %w[NilClass Object Kernel BasicObject].include?(d.owner) }
+      !answers.nil? && !answers.names.nil? && !answers.names.include?(sym) && @closed_world.global_refusal.nil? &&
+      @closed_world.method_missing_classes.empty? && numeric_nil_ruby_free?(sym, answers.modules)
+  end
+
+  def numeric_nil_ruby_free?(sym, native_modules)
+    modules = mixin_closure(nil_ancestor_modules | native_modules)
+    modules.none? { |mod| @unknown_mixins.include?(mod) } &&
+      (@registry[sym] || []).none? { |d| modules.include?(d.owner) } &&
+      @closed_world.nil_foreign_definition_free?(sym, modules.to_a)
   end
 
   # The facts that feed each other -- pooled entry arguments, ivar classes, return
