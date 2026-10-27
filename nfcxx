@@ -15,6 +15,9 @@
 #   file.cpp2:     Cpp2 source, experimental: cppfront (build/cppfront, scripts/setup-cppfront.sh) translates it to C++ first.
 #                  docs/notes/cpp2.md.
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
+#   NFCXX_TIME_LOG=FILE: appends one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", to FILE; the compiles
+#                  of a parallel build can share it (sort -rn FILE ranks them). A .cu file's stages are the rewriter's two
+#                  passes, the device front end, the PTX emitter, ptxas, the embed step and the host compile (eccp).
 #   --module-dir=DIR: where C++ module interface files (NAME.eifc) are written and read; the default is the directory of -o.
 #                  A program with `export module` or `import` is built one source at a time (docs/notes/modules.md).
 #   NFCXX_CUDA_HOST_SYMBOLS=FILE: internal (the second pass of a .cu compile, see "Kernel instances from the host
@@ -33,6 +36,8 @@
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
 #   NFCXX_LD=NAME: link with -fuse-ld=NAME (mold, lld, gold, bfd; needs ld.NAME on PATH). Default: the system linker.
 #   NFCXX_CACHE=DIR: keeps each -c compile in DIR and takes it back when nothing it depends on changed (docs/notes/cxx-driver.md).
+#                  For a .cu file it keeps the device images (DIR/cu-device): an unchanged device unit skips the device
+#                  front end, the PTX emitter and ptxas; the rewriter and the host compile still run.
 #   NFCXX_CACHE_LOG=FILE: with NFCXX_CACHE, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). The gcc and qbe
 #                  backends instrument the code; Path B is refused. docs/notes/asan.md. -fno-sanitize=address undoes it;
@@ -79,13 +84,22 @@ cudatmp=""
 # NFCXX_CUDA_MAX_PTX_LINES; each module is one cubin (a file that fits has one). The cubins are embedded at the end of
 # the host copy with a registration tail (pathb-ptx-emit --embed), so the one object holds the host code and its device
 # images. A file with no kernel gets no device image.
+# The cache helpers (the compile cache below and the device image cache of cu_rewrite).
+cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when it is set (a diagnostic; no effect on the key).
+  # Parallel compiles share the file, so each append takes a lock (mkdir, which is portable) and is a single printf.
+  [ -n "${NFCXX_CACHE_LOG:-}" ] || return 0
+  while ! mkdir "$NFCXX_CACHE_LOG.lock" 2>/dev/null; do sleep 0.05; done
+  printf '%s\n' "$*" >> "$NFCXX_CACHE_LOG"
+  rmdir "$NFCXX_CACHE_LOG.lock"
+}
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
 cu_keep=""   # with -c: the directory the device images are kept in (the link re-reads the copy, and the copy names them)
 cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
   [ ${#cu_inputs[@]} -gt 0 ] || return 0
-  cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT
+  cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"; trace_finish' EXIT
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
     # The copy must outlive the compile: the prelinker re-reads it when it needs a template instance at link time,
@@ -199,34 +213,82 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
     # options recorded at compile time, and it must see --cuda there too (see the eccp call below).
     cuda_opts=(--cuda)
   fi
+  local t; t=$(trace_start)
   ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
+  trace_end "$t" "cuda-rewrite (host copy): $base.cu" cuda
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
+  t=$(trace_start)
   ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} ${NFCXX_CUDA_HOST_SYMBOLS:+"--host-symbols=$NFCXX_CUDA_HOST_SYMBOLS"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  trace_end "$t" "cuda-rewrite (device unit): $base.cu" cuda
   [ -s "$dev.kernels" ] || return 0
-  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} --ir --freestanding "$dev.cpp" > "$dev.ir" \
-    || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
-  # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
-  kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
   ensure_tool "$root/tools/pathb-ptx-emit" "$root/build/pathb-ptx-emit" || exit 1
+  local groups=${cu_keep:-$cudatmp}/$base.groups ext=cubin
+  [ "${NFCXX_CUDA_JIT:-0}" != 1 ] || ext=ptx
+  rm -rf "$groups"
+  # The device image cache (with NFCXX_CACHE): the front end, the emitter and ptxas depend only on the device unit and
+  # its kernel list, the options below and the tools, so a device unit seen before takes its IR and groups from the
+  # cache. The rewriter runs every time (its output is the key).
+  local dkey="" dent=""
+  if [ -n "${NFCXX_CACHE:-}" ]; then
+    dkey=$(cu_device_key "$dev" "$sm" "$ptxas" "$ext" ${defs_opts[@]+"${defs_opts[@]}"} ${ver_opts[@]+"${ver_opts[@]}"})
+    dent=$NFCXX_CACHE/cu-device/$dkey
+  fi
+  if [ -n "$dent" ] && [ -f "$dent/ir" ]; then
+    cp "$dent/ir" "$dev.ir"; cp -R "$dent/groups" "$groups"
+    cache_log "== $base.cu device unit"$'\n'"key $dkey"$'\n'"hit"
+  else
+    [ -z "$dent" ] || cache_log "== $base.cu device unit"$'\n'"key $dkey"$'\n'"miss"
+    cu_device_build "$src" "$dev" "$groups" "$sm" "$ptxas" "$ext" ${defs_opts[@]+"${defs_opts[@]}"} ${ver_opts[@]+"${ver_opts[@]}"}
+    if [ -n "$dent" ]; then   # a whole entry appears at once (a rename), so a partial copy is never a hit
+      local ctmp=$dent.tmp.$$
+      mkdir -p "$ctmp" && cp "$dev.ir" "$ctmp/ir" && cp -R "$groups" "$ctmp/groups" && { [ -e "$dent" ] || mv "$ctmp" "$dent" 2>/dev/null || true; }
+      rm -rf "$ctmp"
+    fi
+  fi
+  t=$(trace_start)
+  "$root/build/pathb-ptx-emit" --embed --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
+  trace_end "$t" "pathb-ptx-emit --embed: $base.cu" cuda
+}
+cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image cache key of the unit DEV.cpp (cu_rewrite)
+  local dev=$1 sm=$2 ptxas=$3 ext=$4 f; shift 4
+  {
+    printf 'nfcxx-cu-device-1\nsm %s ext %s\nopts:' "$sm" "$ext"; printf ' %q' "$@"
+    printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-60000}"
+    cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
+    cache_sha < "$root/scripts/pathb-dump"; cache_sha < "$root/scripts/host-sys.sh"
+    for f in "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" "$root/build/pathb-ptx-emit"; do
+      if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
+    done
+    find "${PATHB_BASE:-$root/build/pathb/edg-base}" -maxdepth 1 -type f -print0 2>/dev/null | LC_ALL=C sort -z | xargs -0 cat | cache_sha
+    if [ "$ext" = cubin ]; then "$ptxas" --version 2>&1 | tail -1; fi
+  } | cache_sha | cut -c1-40
+}
+cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DEV.ir and the module images in GROUPS
+  local src=$1 dev=$2 groups=$3 sm=$4 ptxas=$5 ext=$6 t k; shift 6
+  t=$(trace_start)
+  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+    || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
+  trace_end "$t" "pathb-dump --ir (device front end): $(basename "$src")" cuda
+  # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
+  local kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
   # The kernels are partitioned into modules within the budgets (NFCXX_CUDA_MAX_CONST_BYTES: the constant data a module
   # references, 64 KB is ptxas's limit; NFCXX_CUDA_MAX_PTX_LINES: its functions). A file that fits one module has one
   # group. Each group is one PTX module: $base.groups/gNNNN.ptx and its kernels in groups.txt.
   # The images are the copy's .incbin files: with -c they are kept beside the copy, which the link re-reads (cu_prepare).
-  local groups=${cu_keep:-$cudatmp}/$base.groups
-  rm -rf "$groups"
+  t=$(trace_start)
   "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --groups-dir="$groups" \
     --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-60000} \
     ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
-  # NFCXX_CUDA_JIT=1: the image of each group is its PTX text, loaded by the runtime's JIT (cudaLibraryLoadData); ptxas is not run.
-  local ext=cubin g
-  if [ "${NFCXX_CUDA_JIT:-0}" = 1 ]; then
-    ext=ptx
-  else
+  trace_end "$t" "pathb-ptx-emit --emit: $(basename "$src") ($(ls "$groups"/g*.ptx | wc -l | tr -d ' ') groups)" cuda
+  # NFCXX_CUDA_JIT=1 (EXT ptx): the image of each group is its PTX text, loaded by the runtime's JIT (cudaLibraryLoadData);
+  # ptxas is not run.
+  if [ "$ext" = cubin ]; then
     # The groups are independent: assemble them NFCXX_PTXAS_JOBS at a time (default 4; each ptxas is ~170 MB at 8 kernels).
+    t=$(trace_start)
     ls "$groups"/g*.ptx | xargs -P "${NFCXX_PTXAS_JOBS:-4}" -I{} sh -c 'f=$1; "$2" -arch=sm_$3 "$f" -o "${f%.ptx}.cubin"' _ {} "$ptxas" "$sm" || exit $?
+    trace_end "$t" "ptxas: $(basename "$src")" cuda
   fi
-  "$root/build/pathb-ptx-emit" --embed --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
 }
 # A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
 # <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the
@@ -450,6 +512,10 @@ if [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 
   exit $sy_rc
 fi
 [ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see ecp_arg)
+# The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
+# and .cpp2 inputs are prepared, whose stages it records.
+trace_unit=${srcs[0]-$out}; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end scripts it runs log under it too
+[ -z "$trace" ] || trace_begin "$trace"
 cu_prepare
 cpp2_prepare
 if [ $preprocess = 1 ]; then
@@ -473,7 +539,6 @@ if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 
   [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
-[ -z "$trace" ] || trace_begin "$trace"
 # C++ modules (docs/notes/modules.md). A program whose sources declare or import a module is built by mod_build_program, which
 # runs this driver once per source. A compile gets the module options: --modules, the directory of the interface files (BMIs,
 # --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.
@@ -825,16 +890,9 @@ link_records_rm
 # everything that can change the object: the command as given, the absolute output path (the prelinker records it in the
 # object's .ti), the working directory, the source and each header the host preprocessor lists (-M), the NFCXX_* environment,
 # the driver and its scripts, the EDG and QBE binaries, and the host compilers. A hit copies the object back with its
-# <stem>.ti and <stem>.ii, which the link reads beside it. Not cached: .cu, C and -E inputs, -MD (its dependency file), several
-# sources in one command, and an -o without an extension. A file name with spaces in the header list is not handled.
-cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
-cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when it is set (a diagnostic; no effect on the key).
-  # Parallel compiles share the file, so each append takes a lock (mkdir, which is portable) and is a single printf.
-  [ -n "${NFCXX_CACHE_LOG:-}" ] || return 0
-  while ! mkdir "$NFCXX_CACHE_LOG.lock" 2>/dev/null; do sleep 0.05; done
-  printf '%s\n' "$*" >> "$NFCXX_CACHE_LOG"
-  rmdir "$NFCXX_CACHE_LOG.lock"
-}
+# <stem>.ti and <stem>.ii, which the link reads beside it. Not cached: .cu (its device images are, in cu_rewrite), C and
+# -E inputs, -MD (its dependency file), several sources in one command, and an -o without an extension. A file name with
+# spaces in the header list is not handled.
 cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the headers cannot be listed. With NFCXX_CACHE_LOG
   # the whole lookup is logged in one write: the output, the key inputs, the key, and hit or miss.
   local src=$1 out=$2 deps f pre=() inputs key state
@@ -843,7 +901,8 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
   deps=$(sed 's/\\$//' <<<"$deps" | tr ' ' '\n' | sed '/^$/d' | tail -n +2)
   inputs=$({
     printf 'nfcxx-cache-1\nargv:'; printf ' %q' "${nfcxx_argv[@]}"; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
-    (env | grep '^NFCXX_' | grep -v '^NFCXX_CACHE_LOG=' || true) | LC_ALL=C sort   # the log is a diagnostic: it must not change the key
+    # The logs and the trace are diagnostics: they must not change the key.
+    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
     cache_sha < "$root/nfcxx"
     find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha

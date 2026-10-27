@@ -166,6 +166,27 @@ fi
 left=$(find "$root/tests/cuda" "$out" -name .nfcxx 2>/dev/null || true)
 if [ -z "$left" ]; then echo "no .nfcxx left in the tree: ok"; else echo "no .nfcxx left in the tree: FAIL: $left"; fail=1; fi
 
+# 4b. NFCXX_CACHE keeps the device images: a second compile of the same unit (another object) takes them from the cache,
+#     so its time log (NFCXX_TIME_LOG) has no device front end, emitter or ptxas stage, and its program runs. A changed
+#     kernel misses.
+c4=$out/c4; mkdir -p "$c4"
+dev_stages() { cut -f3 "$1" | grep -cE '^(pathb-dump|pathb-ptx-emit --emit|ptxas)' || true; }
+for i in 1 2; do
+  NFCXX_CACHE=$c4/cache NFCXX_CACHE_LOG=$c4/cache.log NFCXX_TIME_LOG=$c4/time$i.log \
+    "$root/nfcxx" -c -I"$cuda/include" mul2.cu -o "$c4/m$i.o" > "$c4/build.log" 2>&1 || { cat "$c4/build.log"; echo "cache build $i: FAIL"; fail=1; }
+done
+sed 's/a\[i\] \* 2;/a[i] * 2 + 0 * n;/' mul2.cu > "$c4/mul2b.cu"
+NFCXX_CACHE=$c4/cache NFCXX_CACHE_LOG=$c4/cache.log "$root/nfcxx" -c -I"$cuda/include" "$c4/mul2b.cu" -o "$c4/m3.o" > "$c4/build.log" 2>&1 \
+  || { cat "$c4/build.log"; echo "cache build 3: FAIL"; fail=1; }
+states=$(grep -E '^(hit|miss)$' "$c4/cache.log" | tr '\n' ' ')
+if [ "$states" = "miss hit miss " ] && [ "$(dev_stages "$c4/time1.log")" = 3 ] && [ "$(dev_stages "$c4/time2.log")" = 0 ] \
+   && cut -f2 "$c4/time2.log" | grep -qx eccp && "$root/nfcxx" "$c4/m2.o" -L"$cuda/lib64" -lcudart -o "$c4/m2" >> "$c4/build.log" 2>&1 \
+   && [ "$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$c4/m2")" = "$(printf 'launch: no error\nmul2: 1000 elements, 0 mismatches')" ]; then
+  echo "device image cache (miss, hit, changed kernel misses) and time log: ok"
+else
+  echo "device image cache: FAIL ($states)"; cat "$c4/time1.log" "$c4/time2.log"; fail=1
+fi
+
 # 4. The launch path (llama.cpp features): tests/cuda/launch/run.sh.
 "$root/tests/cuda/launch/run.sh" || fail=1
 # 5. Kernels split into several device modules (the driver's grouping; tests/cuda/groups/run.sh).

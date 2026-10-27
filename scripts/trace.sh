@@ -6,16 +6,25 @@
 
 trace_now() { local t; t=$(date +%s%N); echo $((t / 1000)); }
 
+# NFCXX_TIME_LOG=FILE: every span is also appended to FILE as one text line, "SECONDS<Tab>CATEGORY<Tab>NAME<Tab>UNIT".
+# UNIT is the source the driver compiles (its trace_unit; the scripts it runs get it as NFCXX_TRACE_UNIT), so the
+# compiles of a parallel build (one driver per source) can share one file, and sort -rn FILE ranks the stages. A line
+# is a single short append, which the compiles do not interleave.
+
 # Start time for trace_end: a clock reading when tracing, 0 otherwise (no date call when disabled).
-trace_start() { if [ -n "${NFCXX_TRACE:-}" ]; then trace_now; else echo 0; fi; }
+trace_start() { if [ -n "${NFCXX_TRACE:-}${NFCXX_TIME_LOG:-}" ]; then trace_now; else echo 0; fi; }
 
 trace_escape() { local s=${1//\\/\\\\}; printf '%s' "${s//\"/\\\"}"; }
 
 # Record a span from start (from trace_start) to now. Args: start name category.
 trace_end() {
-  [ -n "${NFCXX_TRACE:-}" ] || return 0
+  [ -n "${NFCXX_TRACE:-}${NFCXX_TIME_LOG:-}" ] || return 0
   local start=$1 now
   now=$(trace_now)
+  if [ -n "${NFCXX_TIME_LOG:-}" ]; then
+    printf '%d.%06d\t%s\t%s\t%s\n' $(((now - start) / 1000000)) $(((now - start) % 1000000)) "$3" "$2" "${trace_unit:-${NFCXX_TRACE_UNIT:-}}" >> "$NFCXX_TIME_LOG"
+  fi
+  [ -n "${NFCXX_TRACE:-}" ] || return 0
   printf '{"name":"%s","cat":"%s","ph":"X","ts":%s,"dur":%s,"pid":%s,"tid":1},\n' \
     "$(trace_escape "$2")" "$3" "$start" $((now - start)) "${BASHPID:-$$}" >> "$NFCXX_TRACE"
 }
