@@ -863,19 +863,33 @@ module Bc2cppCompiledGemGeneration
     end
   end
 
+  # GC_TUNING: one generation keeps about 6 million live objects, and Ruby's default heap grows in small steps, so
+  # GC ran about 250 times (35 of them major) for ~21 s of a ~140 s run. Starting larger with higher malloc limits
+  # halves the count for ~45 MB more peak memory; the generated code is unchanged. A RUBY_GC_* the caller set wins.
+  GC_ENV = {
+    'RUBY_GC_HEAP_0_INIT_SLOTS' => '4000000', 'RUBY_GC_HEAP_1_INIT_SLOTS' => '1000000',
+    'RUBY_GC_HEAP_2_INIT_SLOTS' => '500000', 'RUBY_GC_HEAP_GROWTH_FACTOR' => '2.0',
+    'RUBY_GC_MALLOC_LIMIT' => '268435456', 'RUBY_GC_MALLOC_LIMIT_MAX' => '1073741824',
+    'RUBY_GC_OLDMALLOC_LIMIT' => '1073741824', 'RUBY_GC_OLDMALLOC_LIMIT_MAX' => '4294967296'
+  }.freeze
+
+  def gc_env
+    GC_ENV.reject { |key, _| ENV.key?(key) }
+  end
+
   def run_group(common, srcs, group, gems_root)
     bc2cpp = File.join(gems_root, 'tools/bc2cpp/bc2cpp.rb')
     group.each { |env, _, _| FileUtils.mkdir_p(env.fetch('OUT_DIR')) }
     if group.size == 1
       env, _, generated = group.first
-      sh env, "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
+      sh env.merge(gc_env), "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
     else
       plan = "#{group.first[2]}.units.json"
       units = group.map do |env, _, generated|
         { 'env' => env.slice(*SharedGeneration::UNIT_KEYS), 'out' => generated, 'err' => "#{generated}.stderr" }
       end
       File.write(plan, JSON.generate(units))
-      sh common.merge(SharedGeneration::UNIT_KEYS.to_h { |k| [k, nil] }),
+      sh common.merge(SharedGeneration::UNIT_KEYS.to_h { |k| [k, nil] }, gc_env),
          "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{SharedGeneration::FLAG} #{plan.shellescape} " \
          "#{srcs.map(&:shellescape).join(' ')}"
       FileUtils.rm_f([plan, *units.map { |unit| unit['err'] }])
