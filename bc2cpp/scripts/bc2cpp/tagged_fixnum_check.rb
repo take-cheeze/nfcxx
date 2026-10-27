@@ -201,16 +201,9 @@ DRIVER = <<~'RUBY'
   vals = [0, 1, -1, 2, -2, 100, fmax, fmax - 1, fmax + 1, fmin, fmin + 1, fmin - 1, 0x7fff_ffff_ffff_ffff,
           -0x8000_0000_0000_0000, 0x8000_0000_0000_0000, 2**70, -(2**70), 1.5, -0.0, nan, nil, :tag]
   ops = %i[add sub mul lt le gt ge eq ne band bor bxor]
-  bigs = [2**70, -(2**70)]
   ops.each do |op|
     vals.each_with_index do |a, i|
-      # The interpreter answers `2**70 == 0` true (mruby's bigint ==); the compiled mrb_equal does not.
-      show.call("#{op} #{i}") do
-        vals.map do |b|
-          zero = b.is_a?(Numeric) && b.to_f == 0.0
-          %i[eq ne].include?(op) && bigs.include?(a) && zero ? :skip : t.__send__(op, a, b)
-        end
-      end
+      show.call("#{op} #{i}") { vals.map { |b| t.__send__(op, a, b) } }
     end
     show.call("#{op} hook") { $tf_hook }
   end
