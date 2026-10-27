@@ -38,6 +38,8 @@ on:
       - "scripts/sycl-build.sh"
       - "scripts/pathb-wgsl-emit.rb"
       - "scripts/pathb-spirv-emit.rb"
+      - "scripts/spirv-emit"
+      - "tools/pathb-spirv-emit/**"
       - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
@@ -74,6 +76,8 @@ on:
       - "scripts/sycl-build.sh"
       - "scripts/pathb-wgsl-emit.rb"
       - "scripts/pathb-spirv-emit.rb"
+      - "scripts/spirv-emit"
+      - "tools/pathb-spirv-emit/**"
       - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
@@ -181,7 +185,10 @@ jobs:
               sudo apt-get install -y -q spirv-tools libvulkan-dev mesa-vulkan-drivers
               npm install --prefix "$RUNNER_TEMP/pw" playwright
               "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
-              NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
+              # every device compile runs both SPIR-V emitters (scripts/spirv-emit): the C++ port must match the Ruby
+              NFCXX_SPIRV_EMITTER=check NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
+          - name: C++ SPIR-V emitter against the Ruby (both modes, every SYCL test's device IR)
+            run: tools/pathb-spirv-emit/check.sh
           - name: mruby scripts against their Python oracles (Path B parts enabled)
             run: tests/mruby/run.sh
           - name: mruby-ninja generic file tasks (rule is refused)
