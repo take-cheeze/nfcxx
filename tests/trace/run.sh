@@ -46,12 +46,13 @@ done
 ./nfcxx --emit-c --trace="$tmp/emit.json" "$src" > /dev/null || fail=1
 check_json "$tmp/emit.json" emit-c "nfcxx" "host C++ headers" "cpfe --emit-c (front end)" || fail=1
 
-# NFCXX_TIME_LOG: one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", the back-end scripts' stages too, and
-# no trace file. Two compiles append to the same log.
-tl=$tmp/time.log
-for i in 1 2; do NFCXX_TIME_LOG=$tl NFCXX_BACKEND=qbe ./nfcxx "$src" -o "$tmp/tl$i.bin" > "$tmp/tl.log" 2>&1 || { echo "FAIL time log: build"; cat "$tmp/tl.log"; fail=1; }; done
+# NFCXX_TIME_LOG: one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", the QBE back end's script stages
+# too, and no trace file. Two compiles append to the same log. On the first backend of the run (macOS has gcc only).
+tl=$tmp/time.log; tb=${backends%% *}
+for i in 1 2; do NFCXX_TIME_LOG=$tl NFCXX_BACKEND=$tb ./nfcxx "$src" -o "$tmp/tl$i.bin" > "$tmp/tl.log" 2>&1 || { echo "FAIL time log: build"; cat "$tmp/tl.log"; fail=1; }; done
+qsteps=0; [ "$tb" != qbe ] || qsteps=8
 if awk -F'\t' -v src="$src" 'NF != 4 || $1 !~ /^[0-9]+\.[0-9]{6}$/ || $4 != src { bad = 1 } END { exit bad }' "$tl" \
-   && [ "$(cut -f3 "$tl" | grep -c '^eccp (front end, C compile, link)$')" = 2 ] && [ "$(cut -f2 "$tl" | grep -c '^qbe-backend$')" -ge 8 ]; then
+   && [ "$(cut -f3 "$tl" | grep -c '^eccp (front end, C compile, link)$')" = 2 ] && [ "$(cut -f2 "$tl" | grep -c '^qbe-backend$')" -ge $qsteps ]; then
   echo "ok   time log: $(wc -l < "$tl") lines"
 else
   echo "FAIL time log:"; cat "$tl"; fail=1
