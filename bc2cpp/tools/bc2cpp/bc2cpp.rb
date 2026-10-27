@@ -1559,6 +1559,16 @@ if $PROGRAM_NAME == __FILE__
     #define mrb_ary_shift bc2cpp_mrb_ary_shift
     #define mrb_hash_delete_key bc2cpp_mrb_hash_delete_key
   CPP
+  # HOT_INLINE: the per-element Array helpers (bc2cpp_ary_entry/push/set, bc2cpp_getidx's front) are a few
+  # instructions, but GCC's -O3 inliner drops them from large callers and pays a call per element. -Os builds
+  # (the flash-bound boards) keep the compiler's choice. See docs/bc2cpp-hot-inline.md.
+  puts <<~'CPP'
+    #if defined(__GNUC__) && !defined(__OPTIMIZE_SIZE__)
+    #define BC2CPP_HOT_INLINE __attribute__((always_inline))
+    #else
+    #define BC2CPP_HOT_INLINE
+    #endif
+  CPP
   # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
   if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
     puts CodeGen.respond_to_phantom_runtime
