@@ -164,8 +164,7 @@ class CodeGen
     end
     # LEFT_OUT: what stands in for an entry the build leaves out of the tables. A verify build registers the stub
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
-    # from its cause; a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb). The hand-written registrations a
-    # HAND_REGISTRATION_GUARD wraps (any owner) call it too.
+    # from its cause; a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
     if compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
@@ -229,6 +228,50 @@ class CodeGen
     end
     out << "}\n\n"
     out
+  end
+
+  # DIRECT_CONSTRUCT_ACCESSORS (dispatch_targets.rb): `<Owner>_compiled_class()` for each listed owner whose
+  # #initialize this gem compiles, with C++ linkage, so the other gems' direct-construct sites link to it. The class
+  # is captured when this gem registers its methods and dropped by bc2cpp_gem_final. The capture and reset functions
+  # are always emitted, empty when the gem owns none.
+  def emit_direct_construct_accessors(compiled)
+    own = compiled.select { |m| m[:name] == 'initialize' }.map { |m| m[:owner] }.to_set
+    owners = DIRECT_CONSTRUCT_ACCESSOR_TARGETS.select { |owner| own.include?(owner) }
+    out = +"// DIRECT_CONSTRUCT_ACCESSORS -- see emit_direct_construct_accessors.\n"
+    owners.each do |owner|
+      out << "static RClass* bc2cpp_direct_construct_#{sanitize(owner)} = nullptr;\n"
+      out << "RClass* #{direct_construct_class_fn(owner)}(void) { return bc2cpp_direct_construct_#{sanitize(owner)}; }\n"
+    end
+    out << "static void bc2cpp_capture_direct_construct_classes([[maybe_unused]] mrb_state* M) {\n"
+    owners.each do |owner|
+      out << "  bc2cpp_direct_construct_#{sanitize(owner)} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+    end
+    out << "}\n"
+    out << "static void bc2cpp_reset_direct_construct_classes() {\n"
+    owners.each { |owner| out << "  bc2cpp_direct_construct_#{sanitize(owner)} = nullptr;\n" }
+    out << "}\n\n"
+  end
+
+  # GEM_HOOKS: what every compiled gem's register.cxx runs. Init installs the compiled methods over the bytecode
+  # the gem's mrblib loaded. Final drops the ids, constants and class pointers cached for this VM, so a later VM
+  # at a reused address never sees them. Init clears the constant and class slots too (VM_CACHE_LIFETIME): their
+  # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
+  def emit_gem_hooks
+    <<~CPP
+      [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
+        bc2cpp_reset_const_site_cache();
+        bc2cpp_reset_owner_classes();
+        bc2cpp_set_instance_tts(M);
+        bc2cpp_register_owner_methods(M);
+        bc2cpp_capture_direct_construct_classes(M);
+      }
+      [[maybe_unused]] static void bc2cpp_gem_final() {
+        bc2cpp_reset_symbol_cache();
+        bc2cpp_reset_const_site_cache();
+        bc2cpp_reset_owner_classes();
+        bc2cpp_reset_direct_construct_classes();
+      }
+    CPP
   end
 
   # CORE_BLOCK_GUARD: the run-time half of core_block_guard. The bytecode of
@@ -812,7 +855,7 @@ class CodeGen
 
   # Class-identity accessor name for a DIRECT_CONSTRUCT_TARGETS owner
   # ("Game::Transition" -> "Game__Transition_compiled_class"), derived with
-  # `sanitize`; the owning gem's register.cxx defines it with this spelling.
+  # `sanitize`; the owning gem's emit_direct_construct_accessors defines it.
   def direct_construct_class_fn(owner)
     "#{sanitize(owner)}_compiled_class"
   end
@@ -838,7 +881,7 @@ class CodeGen
 
   # Declarations for direct compiled construction actually used:
   # 1. bc2cpp_direct_alloc: mirrors mrb_instance_alloc's checks and allocation.
-  # 2. Accessors only for listed targets, defined in the same gem's register.cxx.
+  # 2. Accessors only for listed targets, defined by the owning gem's generated code (DIRECT_CONSTRUCT_ACCESSORS).
   #    Other local classes use the owner-class cache instead.
   def emit_direct_construct_decls
     return '' unless @direct_alloc_used || @direct_construct_used.any?
@@ -882,7 +925,7 @@ class CodeGen
     out << "  return mrb_obj_value(mrb_obj_alloc(M, ttype, c));\n"
     out << "}\n\n"
     out << "// Class-identity accessors for explicitly listed target classes\n"
-    out << "// owners define in their compiled gem's own register.cxx (mirroring\n"
+    out << "// their owning gem's generated code defines (mirroring\n"
     out << "// NATIVE_CONSTRUCT_TARGETS' own class_fn precedent) -- a real,\n"
     out << "// durable RClass* captured once at that gem's own gem-init time, NOT\n"
     out << "// a second mrb_const_get/mrb_class_get_under lookup (see\n"
@@ -1010,20 +1053,6 @@ class CodeGen
     CPP
   end
 
-  # HAND_REGISTRATION_GUARD: one `#define BC2CPP_UNREGISTERED_<entry> 1` per compiled entry this build leaves
-  # unregistered (static_dispatch_unregistered_for). A hand-written register.cxx line for such an entry is wrapped in
-  # `#ifndef BC2CPP_UNREGISTERED_<entry>` (scripts/bc2cpp/prune_static_dispatch_registrations.rb --closed), so it
-  # registers the method only in builds whose list keeps it, and the verify stub otherwise.
-  def emit_unregistered_entry_macros(compiled,
-                                     unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']) |
-                                                   ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set)
-    entries = compiled.select { |m| m[:entry] && unregistered.include?("#{m[:owner]}##{m[:name]}") }.map { |m| m[:entry] }
-    return '' if entries.empty?
-
-    "// HAND_REGISTRATION_GUARD: entries this build leaves unregistered.\n" +
-      entries.uniq.sort.map { |e| "#define BC2CPP_UNREGISTERED_#{e} 1\n" }.join + "\n"
-  end
-
   # SKIPPED_ENTRY_MACROS: one `#define BC2CPP_SKIPPED_<entry> 1` per entry SKIP_UNSUPPORTED dropped from this output.
   def emit_skipped_entry_macros(entries)
     return '' if entries.empty?
@@ -1038,9 +1067,8 @@ class CodeGen
     out = String.new
     compiled.each do |m|
       out << "#{decl_line(m)};\n"
-      # The entry wrapper stays static: only this gem's registration calls it. A hand-written registration
-      # (mruby-rpg2k-compiled/src/register.cxx) may leave a method on its direct `_impl` calls alone, so the
-      # entry can go unused.
+      # The entry wrapper stays static: only this gem's registration calls it. An entry the build leaves out of the
+      # tables (static_dispatch_unregistered_for) is reached only by direct `_impl` calls, so it can go unused.
       out << "[[maybe_unused]] static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"
     end
     out << "\n"

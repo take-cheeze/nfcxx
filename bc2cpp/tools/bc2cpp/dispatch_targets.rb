@@ -71,21 +71,21 @@ module DispatchTargetSources
     targets.freeze
   end
 
-  # DIRECT_CONSTRUCT_ACCESSOR_TARGETS: the owners with a `<Owner>_compiled_class` definition in
-  # register.cxx. The name is sanitize(owner) (codegen.rb: each ':' becomes '_'), so each definition is
-  # mapped back and must map forward to the same name, and name a DIRECT_CONSTRUCT_TARGETS owner.
+  # DIRECT_CONSTRUCT_ACCESSORS: the owners whose class a direct-construct site reads from a `<Owner>_compiled_class`
+  # accessor, captured once when the owning gem registers its methods (CodeGen#emit_direct_construct_accessors), so a
+  # constant reassigned later is caught by the site's guard. Every other DIRECT_CONSTRUCT_TARGETS owner uses the
+  # owner-class cache. Each must be a target.
+  DIRECT_CONSTRUCT_ACCESSOR_OWNERS = %w[
+    Game::Battle Game::ChipSet Game::Interpreter Game::Map Game::MessageConfig Game::MoveRoute Game::NumberInput
+    Game::Screen Game::Switches Game::Timer Game::Transition RPG2k::Scene::ChipsetEditor RPG2k::Scene::DebugMenu
+    RPG2k::Scene::ItemMenu RPG2k::Scene::Map RPG2k::Scene::MapViewer RPG2k::Scene::Menu
+  ].freeze
+
   def direct_construct_accessor_targets(targets)
-    names = read('mruby-rpg2k-compiled/src/register.cxx').scan(/^RClass\* (\w+)_compiled_class\(void\)\s*\{/).flatten
-    raise 'bc2cpp: register.cxx defines no *_compiled_class accessor' if names.empty?
+    stray = DIRECT_CONSTRUCT_ACCESSOR_OWNERS.reject { |owner| targets.include?(owner) }
+    raise "bc2cpp: DIRECT_CONSTRUCT_ACCESSOR_OWNERS names no DIRECT_CONSTRUCT_TARGETS owner: #{stray.join(', ')}" if stray.any?
 
-    names.map do |name|
-      owner = name.gsub('__', '::')
-      unless targets.include?(owner) && owner.tr(':', '_') == name
-        raise "bc2cpp: register.cxx accessor #{name} names no DIRECT_CONSTRUCT_TARGETS owner"
-      end
-
-      owner
-    end.freeze
+    DIRECT_CONSTRUCT_ACCESSOR_OWNERS
   end
 end
 
@@ -155,7 +155,7 @@ end
 # accessor is implied (`class_fn`-style, guarding a reassigned constant).
 #
 # Derived (DispatchTargetSources.direct_construct_targets), not hand-listed. An
-# entry needs no accessor: a full build reads register.cxx's `*_compiled_class`
+# entry needs no accessor: a full build reads a generated `*_compiled_class`
 # only for DIRECT_CONSTRUCT_ACCESSOR_TARGETS, and the rest use the owner-class cache.
 #
 # Soundness bar for an entry, re-checked live by compile_send:
@@ -191,11 +191,10 @@ end
 # #initialize, and the measurement decides which of them actually fire.
 DIRECT_CONSTRUCT_TARGETS = DispatchTargetSources.direct_construct_targets
 
-# The DIRECT_CONSTRUCT_TARGETS owners whose `<Owner>_compiled_class()` accessor is
-# defined in mruby-rpg2k-compiled/src/register.cxx (DispatchTargetSources.
-# direct_construct_accessor_targets). A full build reads that accessor for these;
-# every other listed target uses the owner-class cache (owner_class_ptr_expr). The accessor definitions are the source, so
-# a new one is picked up here; one naming no listed owner raises at load time.
+# The DIRECT_CONSTRUCT_TARGETS owners whose `<Owner>_compiled_class()` accessor the owning gem's generated code
+# defines (DispatchTargetSources::DIRECT_CONSTRUCT_ACCESSOR_OWNERS). A full build reads that accessor for these;
+# every other listed target uses the owner-class cache (owner_class_ptr_expr). One naming no listed owner raises at
+# load time.
 DIRECT_CONSTRUCT_ACCESSOR_TARGETS = DispatchTargetSources.direct_construct_accessor_targets(DIRECT_CONSTRUCT_TARGETS)
 
 # NATIVE_ARG_TARGETS (the Set after sanitize_c_ident below): human-vetted
