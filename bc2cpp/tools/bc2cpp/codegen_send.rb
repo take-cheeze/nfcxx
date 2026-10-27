@@ -1845,8 +1845,8 @@ class CodeGen
     out
   end
 
-  # The uncached GETCONST lookup: resolve the owner's lexical scope chain, probe
-  # each scope innermost-first, fall back to Object. `d` is the destination
+  # The uncached GETCONST lookup: resolve the owner's lexical scope chain, then
+  # look the name up in mrb_vm_const_get's order (emit_const_lookup_helper). `d` is the destination
   # register number (a string). Used at ordinary sites and as the slow path of a
   # CONST_SITE_CACHE helper (which passes d = "0").
   def const_lookup_block(d, name, owner_path)
@@ -1876,14 +1876,52 @@ class CodeGen
         out << "  mrb_value scope#{i} = mrb_const_get(M, #{current}, mrb_intern_cstr(M, \"#{seg}\"));\n"
         current = "scope#{i}"
       end
-      out << "  mrb_bool ok = FALSE;\n  mrb_value result = mrb_nil_value();\n"
+      out << "  mrb_value result;\n"
       (owner_path.size - 1).downto(0) do |i|
-        out << "  if (!ok) result = bc2cpp_const_try(M, scope#{i}, name, &ok);\n"
+        out << "  if (bc2cpp_const_own(M, scope#{i}, name, &result)) return result;\n"
       end
-      out << "  if (!ok) result = mrb_const_get(M, mrb_obj_value(M->object_class), name);\n"
-      out << "  return result;\n}\n"
+      out << "  if (bc2cpp_const_own(M, mrb_obj_value(M->object_class), name, &result)) return result;\n"
+      out << "  return bc2cpp_const_inherited(M, scope#{owner_path.size - 1}, name);\n}\n"
     end
     out
+  end
+
+  # The CONST_SITE_CACHE helper index for (lexical scope, name). +paths+ (CONST_BINDING_CACHE) are the owner paths
+  # of every binding of the name; the helper stores a result only once all of them exist.
+  def const_site_slot(owner_path, name, value: false, paths: nil)
+    @const_site_cache ||= {}
+    slot = (@const_site_cache[[owner_path, name]] ||=
+              { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path), value: value,
+                paths: paths, name: name, scope: owner_path })
+    slot[:index]
+  end
+
+  # Every binding of +name+ is made once and never changed (CONST_SITE_CACHE / CONST_BINDING_CACHE).
+  def immutable_constant?(name)
+    !!(self.class.const_bindings&.key?(name) || self.class.stable_value_constants&.include?(name) ||
+       self.class.stable_class_constants&.include?(name))
+  end
+
+  # Register +reg+ at +idx+ holds `::` (OCLASS) or an immutable constant on every path that reaches it.
+  def constant_scope_register?(irep, idx, reg)
+    return false unless idx
+
+    writers = BytecodeIR.writers_reaching(irep, idx, reg)
+    !!writers&.all? do |_j, w|
+      case w.op
+      when :OCLASS then true
+      when :GETCONST then immutable_constant?(w.const_name)
+      when :GETMCNST then immutable_constant?(w.mcnst_name)
+      else false
+      end
+    end
+  end
+
+  # One GETMCNST cache per site of +name+; each keeps the receiver its value was read from.
+  def const_member_slot(name)
+    @const_member_sites ||= []
+    @const_member_sites << name
+    @const_member_sites.size - 1
   end
 
   # File-scope state and helpers for CONST_SITE_CACHE. Each helper returns the
@@ -1901,10 +1939,15 @@ class CodeGen
     out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
     out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
     out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
+    members = [(@const_member_sites || []).size, 1].max
+    out << "static mrb_value bc2cpp_mcnst_from[#{members}], bc2cpp_mcnst_slots[#{members}];\n"
+    out << "static bool bc2cpp_mcnst_have[#{members}] = {};\n"
     out << "static void bc2cpp_reset_const_site_cache() {\n" \
            "  bc2cpp_cconst_state = nullptr;\n" \
            "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
+           "  for (bool& h : bc2cpp_mcnst_have) h = false;\n" \
            "}\n"
+    out << emit_const_path_test if entries.any? { |slot| slot[:paths] }
     entries.each do |slot|
       i = slot[:index]
       next if called && !called.include?(i)
@@ -1918,9 +1961,68 @@ class CodeGen
              "  mrb_value r0 = mrb_nil_value();\n"
       out << slot[:body].lines.map { |l| "  #{l}" }.join
       # A value entry (CONST_VALUE_CACHE) stores whatever the one binding holds.
-      out << "  if (#{slot[:value] ? 'true' : 'mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE'}) {\n" \
+      fill = if slot[:paths]
+               sym = "mrb_intern_cstr(M, \"#{slot[:name]}\")"
+               tests = slot[:paths].map { |path| "bc2cpp_const_path_has(M, \"#{path}\", #{sym})" }
+               scope = slot[:scope] == ['Object'] ? [] : slot[:scope]
+               unless scope.empty?
+                 tests << "bc2cpp_const_path_has(M, \"#{scope[0...-1].join('::')}\", mrb_intern_cstr(M, \"#{scope.last}\"))"
+               end
+               tests.join(' && ')
+             elsif slot[:value]
+               'true'
+             else
+               'mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE'
+             end
+      out << "  if (#{fill}) {\n" \
              "    bc2cpp_cconst_slots[#{i}] = r0;\n" \
              "    bc2cpp_cconst_have[#{i}] = true;\n" \
+             "  }\n" \
+             "  return r0;\n" \
+             "}\n"
+    end
+    out << emit_const_member_cache(used)
+    out
+  end
+
+  # CONST_BINDING_CACHE's path test: the binding at +path+ ("" is Object) exists, each segment and the name read from
+  # its scope's own table only (mrb_const_defined_at on Object would also search Object's mixins).
+  def emit_const_path_test
+    <<~CPP
+      static bool bc2cpp_const_path_has(mrb_state* M, const char* path, mrb_sym name) {
+        mrb_value scope = mrb_obj_value(M->object_class);
+        while (*path) {
+          const char* end = strstr(path, "::");
+          size_t len = end ? (size_t)(end - path) : strlen(path);
+          mrb_sym seg = mrb_intern(M, path, len);
+          if (!mrb_iv_defined(M, scope, seg)) return false;
+          scope = mrb_iv_get(M, scope, seg);
+          if (!mrb_class_p(scope) && !mrb_module_p(scope)) return false;
+          path += len + (end ? 2 : 0);
+        }
+        return mrb_iv_defined(M, scope, name);
+      }
+    CPP
+  end
+
+  # CONST_BINDING_CACHE's GETMCNST caches, one per site.
+  def emit_const_member_cache(used)
+    called = used && helper_calls(used, 'bc2cpp_mcnst_')
+    sites = (@const_member_sites || []).each_with_index.reject { |_, i| called && !called.include?(i) }
+    out = +''
+    sites.each do |name, i|
+      out << "static mrb_value bc2cpp_mcnst_#{i}(mrb_state* M, mrb_value recv) {\n" \
+             "  if (bc2cpp_cconst_state != M) {\n" \
+             "    bc2cpp_reset_const_site_cache();\n" \
+             "    bc2cpp_cconst_state = M;\n" \
+             "  }\n" \
+             "  if (bc2cpp_mcnst_have[#{i}] && mrb_obj_eq(M, bc2cpp_mcnst_from[#{i}], recv)) return bc2cpp_mcnst_slots[#{i}];\n" \
+             "  mrb_sym name = mrb_intern_cstr(M, \"#{name}\");\n" \
+             "  mrb_value r0 = mrb_const_get(M, recv, name);\n" \
+             "  if ((mrb_class_p(recv) || mrb_module_p(recv)) && mrb_const_defined_at(M, recv, name)) {\n" \
+             "    bc2cpp_mcnst_from[#{i}] = recv;\n" \
+             "    bc2cpp_mcnst_slots[#{i}] = r0;\n" \
+             "    bc2cpp_mcnst_have[#{i}] = true;\n" \
              "  }\n" \
              "  return r0;\n" \
              "}\n"

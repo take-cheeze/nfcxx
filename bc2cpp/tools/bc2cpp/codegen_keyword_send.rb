@@ -552,8 +552,8 @@ class CodeGen
   #   1. the name is absent from defined_name_universe (SETCONST/SETMCNST/
   #      CLASS/MODULE opcodes, native const/class/module definitions, foreign
   #      `NAME =`/class/module);
-  #   2. such a GETCONST compiles to the bc2cpp_const_try chain ending in
-  #      mrb_const_get from Object, which raises NameError (src/variable.c);
+  #   2. such a GETCONST compiles to the lexical lookup ending in mrb_const_get,
+  #      which raises NameError (src/variable.c);
   #   3. every write of the receiver register that reaches the call is that
   #      GETCONST (BytecodeIR.reaching_writer_indices), and it dominates the call.
   # So the send never executes. It is still emitted in the faithful OP_SEND form
