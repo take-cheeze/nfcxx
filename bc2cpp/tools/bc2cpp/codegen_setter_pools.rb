@@ -262,7 +262,7 @@ module CheckedPoolReceiverSend
     nil_test = plan[:nilable] ? "if (mrb_nil_p(#{recv})) {\n    #{nil_arm}  } else " : ''
     "  // CHECKED_POOL_EXACT :#{plan[:name]} -- receiver is #{plan[:nilable] ? 'nil or ' : ''}exactly #{plan[:klass]} by a checked " \
       "setter-site pool (ADR 0370); a class miss is a guard violation\n" \
-      "  #{nil_test}if (mrb_obj_class(M, #{recv}) == #{checked_pool_class_expr(plan[:klass])}) {\n" \
+      "  #{nil_test}if (#{exact_class_guard(checked_pool_class_expr(plan[:klass]), recv)}) {\n" \
       "#{body}" \
       "  } else {\n" \
       "    #{violation}" \

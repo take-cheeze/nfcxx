@@ -68,7 +68,7 @@ ensure
 end
 on = bodies.call({})
 off = bodies.call('BC2CPP_OPTIONAL_ARG_POOLS' => '0')
-class_tests = ->(body) { body.to_s.scan('mrb_obj_class(M,').size }
+class_tests = ->(body) { body.to_s.scan(/bc2cpp_(?:obj_class|class_is)\(M,/).size }
 
 check.call('before, the mandatory argument of a method with an optional one is a class-test chain',
            off['Arena#strike'].to_s.include?('POLY_SMALL_N :power') && off['Arena#land_blow'].to_s.include?('POLY_SMALL_N :power'))

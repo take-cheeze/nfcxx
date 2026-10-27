@@ -1016,7 +1016,7 @@ class CodeGen
     last = calls.pop.last
     branches = calls.map { |check, call| "if (#{check}) {\n    #{call}\n  } else " }.join
     "  // USER_RECEIVER_CASES :#{name}, exhaustive exact class set, direct C++ calls with no dynamic fallback\n" \
-      "  {\n  struct RClass* bc2cpp_union_class = mrb_obj_class(M, #{recv});\n  #{branches}{\n    #{last}\n  }\n  }\n"
+      "  {\n  struct RClass* bc2cpp_union_class = #{obj_class_expr(recv)};\n  #{branches}{\n    #{last}\n  }\n  }\n"
   end
 
   # Nested returns use independent block flows; caller masks belong only to the

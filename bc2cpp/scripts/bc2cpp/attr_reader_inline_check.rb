@@ -3,8 +3,8 @@
 # frozen_string_literal: true
 
 # ATTR_READER_INLINE (tools/bc2cpp/codegen_ivar_poly.rb): a devirtualized call to a synthesized attr_reader of an
-# embedded ivar reads the struct field in place instead of calling the reader, and its exact-class guard tests the
-# object's own class pointer before mrb_obj_class.
+# embedded ivar reads the struct field in place instead of calling the reader, behind the shared inline class read
+# (CLASS_READ_INLINE, bc2cpp_class_is).
 #
 #   generated code (needs a host mrbc)
 #     - `@conf.level` (IVAR_ACCESSOR and POLY_SMALL_N arms) is the field read behind the class-pointer test, no
@@ -103,8 +103,8 @@ code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true
 run = code_of(code, 'ArCpu_run')
 check.call('@conf.level reads the field in place (no reader call)',
            inline_read?(run, 'level') && !run.include?('ArConf_level_impl(M'))
-check.call('its guard tests the class pointer before mrb_obj_class',
-           run.match?(/!mrb_immediate_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == bc2cpp_owner_class_\d+\(M\)\) \|\| bc2cpp_owner_class_\d+\(M\) == mrb_obj_class/))
+check.call('its guard tests the class inline (bc2cpp_class_is)',
+           run.match?(/bc2cpp_class_is\(M, r\d+, bc2cpp_owner_class_\d+\(M\)\)/) && !run.include?('mrb_obj_class(M'))
 check.call('the subclass override keeps its own arm calling its def', run.include?('ArLoud_level_impl(M'))
 check.call('the other class answering the name keeps its arm', run.include?('ArOther_level_impl(M'))
 tag = code_of(code, 'ArCpu_tag_of')

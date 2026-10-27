@@ -639,7 +639,7 @@ if ENV['MRBC']
              label.include?('NATIVE_EXACT_DIRECT :width -> RGSS::Rect') && label.include?('operands proven Fixnum'))
   check.call('and the sum has no by-name fallback', !label.include?('bc2cpp_slow_add'))
   check.call('the unproven receiver of text_size keeps its class guard and Bitmap owner-call fallback',
-             label.match?(/native_bitmap_class\(\)\) \{\n\s*r\d+ = rgss::bitmap_text_size_direct[^\n]*\n\} else \{\n\s*r\d+ = bc2cpp_owner_call\([^\n]*BC2CPP_OWNERS\("RGSS::Bitmap"\)/))
+             label.match?(/bc2cpp_class_is\(M, r\d+, rgss::native_bitmap_class\(\)\)\) \{\n\s*r\d+ = rgss::bitmap_text_size_direct[^\n]*\n\} else \{\n\s*r\d+ = bc2cpp_owner_call\([^\n]*BC2CPP_OWNERS\("RGSS::Bitmap"\)/))
 
   override = generate.call(PRELUDE.sub('class Bitmap; end', "class Bitmap\n    def width; 1.5; end\n  end") + <<~'RUBY', 'nr_override')
     class NrBox

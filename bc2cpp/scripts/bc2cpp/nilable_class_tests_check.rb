@@ -122,7 +122,7 @@ ensure
 end
 on = bodies.call({})
 off = bodies.call('BC2CPP_RUBY_EXACT_PAST_NATIVE' => '0', 'BC2CPP_NILABLE_CLASS_TESTS' => '0')
-class_tests = ->(body) { body.to_s.scan('mrb_obj_class(M,').size }
+class_tests = ->(body) { body.to_s.scan(/bc2cpp_(?:obj_class|class_is)\(M,/).size }
 
 check.call('before, `@spot.x` and `Mark.new.x` are class-test chains behind the RGSS arms',
            off['Holder#where'].to_s.include?('POLY_SMALL_N :x') && off['Holder#mark'].to_s.include?('POLY_SMALL_N :x'))

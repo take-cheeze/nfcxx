@@ -305,18 +305,18 @@ module SiteCensus
 
   def classify_send(lines, i, l, cur, name, argc, origins = nil)
     prev = lines[0...i].reverse.find { |x| x !~ /^\s*$/ }.to_s
-    class_arm = prev =~ /(?:if|else if) \(.*(?:bc2cpp_owner_class_\d+\(M\) == mrb_obj_class|native_class ==)/ ? true : false
+    class_arm = prev =~ /(?:if|else if) \(.*(?:bc2cpp_class_is\(M, \w+, bc2cpp_owner_class_\d+\(M\)\)|native_class ==)/ ? true : false
     else_arm = prev =~ /\belse\s*\{?\s*$/ || prev =~ /if \(!\w*(?:done|ok)\w*\)/ ? true : false
     ctx = lines[[i - 25, 0].max...i].reverse
     diag = ctx.first(10).find { |c| c.include?('POLY_DIAG') }
     marker = marker_before(lines, i)
     guard = ctx.first(8).reject { |c| c =~ %r{^\s*//} }.join
     shape = case guard
-            when /bc2cpp_owner_class_\d+\(M\) == mrb_obj_class/ then 'owner_class_chain'
+            when /bc2cpp_class_is\(M, \w+, bc2cpp_owner_class_\d+\(M\)\)/ then 'owner_class_chain'
             when /native_class ==|rgss::native_\w+_class\(\)/ then 'rgss_native_class_guard'
             when /M->(?:array|hash|string|range)_class/ then 'core_exact_class_chain'
             when /mrb_integer_p|mrb_float_p|mrb_fixnum_p/ then 'numeric_tag_guard'
-            when /mrb_obj_class\(M, \w+\) ==|->c == / then 'other_class_guard'
+            when /bc2cpp_class_is\(M, \w+, |bc2cpp_obj_class\(M, \w+\) ==|->c == / then 'other_class_guard'
             else 'no_guard_nearby'
             end
     why = if diag

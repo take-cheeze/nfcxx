@@ -164,7 +164,7 @@ if ENV['MRBC']
 
     %w[read_box read_box_count].each do |fn|
       check.call("PlHost##{fn}: an ivar every constructor assigns a fresh PlBox is a guard-free direct call",
-                 exact.call(code, 'PlHost', fn) && !body_of.call(code, 'PlHost', fn).include?('mrb_obj_class(M, r'))
+                 exact.call(code, 'PlHost', fn) && !body_of.call(code, 'PlHost', fn).match?(/bc2cpp_(?:obj_class|class_is)\(M, r/))
     end
     %w[read_maybe read_maybe_count].each do |fn|
       check.call("PlHost##{fn}: nil-or-PlBox takes one nil test, then the guard-free call",

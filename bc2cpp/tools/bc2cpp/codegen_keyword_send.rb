@@ -162,7 +162,7 @@ class CodeGen
     site = closed_world_site(recv, irep, idx, owner_def)
     return call if self_implicit && site&.dig(:self_owner) == target.owner && @closed_world&.exact_class?(target.owner)
 
-    check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+    check = exact_class_guard(owner_class_ptr_expr(target.owner), recv)
     # KEYWORDLESS_FALLBACK: the keywordless call is an ordinary send of `name` with `argv`, so the
     # else arm is MONO_EMBED_GUARD's: the closed world's proven fallback (nomethod / unlisted-class arms) or,
     # when it cannot prove the chain, the same by-name dispatch as before.

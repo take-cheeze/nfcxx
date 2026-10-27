@@ -79,7 +79,7 @@ module CoreSelfNative
                  dynamic_dispatch_line_without_core_self(d, name, argv)
                end
     branches = arms.map do |klass, definer|
-      "if (mrb_obj_class(M, self) == #{owner_class_ptr_expr(klass)}) {\n" \
+      "if (#{exact_class_guard(owner_class_ptr_expr(klass), 'self')}) {\n" \
         "    r#{d} = bc2cpp_native_owner_named(M, self, \"#{name}\", #{owner_class_ptr_expr(definer)}, #{argv.size}#{args}); " \
         "/* CORE_SELF_NATIVE: #{klass}##{name} is #{definer}'s registration */\n  } else "
     end

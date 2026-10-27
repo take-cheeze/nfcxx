@@ -515,14 +515,14 @@ module ClassNarrowingGuard
 
       rest &= ~bit
       field = CodeGen::CLASS_TEST_CORE_FIELDS[name]
-      parts << (field ? "mrb_obj_class(M, #{subject}) == M->#{field}" : "mrb_nil_p(#{subject})")
+      parts << (field ? exact_class_guard("M->#{field}", subject) : "mrb_nil_p(#{subject})")
     end
     (@numeric_class_bits || {}).each do |klass, bit|
       next unless mask.anybits?(bit)
       return nil unless @closed_world.class_declared?(klass)
 
       rest &= ~bit
-      parts << "#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{subject})"
+      parts << exact_class_guard(owner_class_ptr_expr(klass), subject)
     end
     rest.zero? ? (parts.empty? ? 'false' : parts.join(' || ')) : nil
   end

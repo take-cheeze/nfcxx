@@ -578,7 +578,7 @@ class CodeGen
         branches = owners.map do |owner|
           class_accessor = NATIVE_WRAPPER_CLASS_ACCESSORS.fetch(owner)
           helper = helpers.fetch(owner)
-          "if (mrb_obj_class(M, #{recv}) == rgss::#{class_accessor}()) {\n" \
+          "if (#{exact_class_guard("rgss::#{class_accessor}()", recv)}) {\n" \
             "  r#{d} = rgss::#{helper}(M, #{recv});\n} else "
         end.join
         fallback = with_native_arms_emitted(name, owners) do
@@ -597,7 +597,7 @@ class CodeGen
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#fill_rect -- exact runtime class proves the native wrapper target
-          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+          if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
             r#{d} = rgss::bitmap_fill_rect_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{argv[4]});
           } else {
@@ -610,7 +610,7 @@ class CodeGen
       opacity_given = n == 5 ? 'TRUE' : 'FALSE'
       return <<~CPP
           // RGSS Bitmap#blt -- exact runtime class proves the native wrapper target
-          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+          if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
             r#{d} = rgss::bitmap_blt_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{opacity}, #{opacity_given});
           } else {
@@ -623,7 +623,7 @@ class CodeGen
       opacity_given = n == 4 ? 'TRUE' : 'FALSE'
       return <<~CPP
           // RGSS Bitmap#stretch_blt -- exact runtime class proves the native wrapper target
-          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+          if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
             r#{d} = rgss::bitmap_stretch_blt_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{opacity}, #{opacity_given});
           } else {
@@ -634,7 +634,7 @@ class CodeGen
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#draw_text -- exact runtime class proves the native wrapper target
-          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+          if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
             mrb_value bc2cpp_draw_text_args[] = { #{argv.join(', ')} };
             r#{d} = rgss::bitmap_draw_text_direct(M, #{recv}, #{n}, bc2cpp_draw_text_args);
           } else {
@@ -645,7 +645,7 @@ class CodeGen
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#copy_blt -- exact runtime class proves the native wrapper target
-          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+          if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
             r#{d} = rgss::bitmap_copy_blt_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]});
           } else {
@@ -656,7 +656,7 @@ class CodeGen
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#text_size -- exact runtime class proves the native wrapper target
-          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+          if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
             r#{d} = rgss::bitmap_text_size_direct(M, #{recv}, #{argv.first});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -682,7 +682,7 @@ class CodeGen
         direct = name == 'openness=' ? 'window_openness_set_direct' : 'window_tone_set_direct'
         return <<~CPP
             // RGSS Window##{name} -- frame-independent native body under exact class identity
-            if (mrb_obj_class(M, #{recv}) == rgss::native_window_class()) {
+            if (#{exact_class_guard("rgss::native_window_class()", recv)}) {
               r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
             } else {
               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -697,7 +697,7 @@ class CodeGen
         direct = name == 'opacity=' ? 'sprite_opacity_set_direct' : 'sprite_tone_set_direct'
         return <<~CPP
             // RGSS Sprite##{name} -- frame-independent native body under exact class identity
-            if (mrb_obj_class(M, #{recv}) == rgss::native_sprite_class()) {
+            if (#{exact_class_guard("rgss::native_sprite_class()", recv)}) {
               r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
             } else {
               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -711,7 +711,7 @@ class CodeGen
         @native_construct_used << 'RGSS::Viewport'
         return <<~CPP
             // RGSS Viewport#tone= -- frame-independent native body under exact class identity
-            if (mrb_obj_class(M, #{recv}) == rgss::native_viewport_class()) {
+            if (#{exact_class_guard("rgss::native_viewport_class()", recv)}) {
               r#{d} = rgss::viewport_tone_set_direct(M, #{recv}, #{argv.first});
             } else {
               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -725,7 +725,7 @@ class CodeGen
       @native_construct_used << 'RGSS::Sprite'
       return <<~CPP
           // RGSS Sprite#opacity= -- exact runtime class identity proves the native wrapper target
-          if (mrb_obj_class(M, #{recv}) == rgss::native_sprite_class()) {
+          if (#{exact_class_guard("rgss::native_sprite_class()", recv)}) {
             r#{d} = rgss::sprite_opacity_set_direct(M, #{recv}, #{argv.first});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -744,7 +744,7 @@ class CodeGen
         branches = tone_targets.map.with_index do |(_owner, class_fn, direct), i|
           keyword = i.zero? ? 'if' : 'else if'
           <<~CPP.chomp
-            #{keyword} (mrb_obj_class(M, #{recv}) == rgss::#{class_fn}()) {
+            #{keyword} (#{exact_class_guard("rgss::#{class_fn}()", recv)}) {
               r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
             }
           CPP
@@ -1304,7 +1304,7 @@ class CodeGen
         end
 
         check_owner = typed_guard_class || target.owner
-        check = "#{owner_class_ptr_expr(check_owner)} == mrb_obj_class(M, #{recv})"
+        check = exact_class_guard(owner_class_ptr_expr(check_owner), recv)
         # EXACT_TYPED_UNGUARDED: the receiver is proven to be exactly check_owner, so
         # the guard below can only be true and its fallback is dead.
         if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
@@ -1396,7 +1396,7 @@ class CodeGen
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
-        check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+        check = exact_class_guard(owner_class_ptr_expr(target.owner), recv)
         note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
                "direct C++ call, mrb_funcall fallback#{native_note}\n"
@@ -1442,9 +1442,7 @@ class CodeGen
       # the real class may differ from the trace (subclass, reassigned constant), with
       # an mrb_funcall fallback.
       owner = ivar_accessor_target.owner
-      check = if inline_reader_arm?(owner, name) then exact_class_check(owner, recv)
-              else "#{owner_class_ptr_expr(owner)} == mrb_obj_class(M, #{recv})"
-              end
+      check = exact_class_guard(owner_class_ptr_expr(owner), recv)
       # ELEMENT_CLASS_SUPPORT: same tag as the TYPED branch.
       traced_note = via_element ? "inlined block element of Array<#{owner}>" : "receiver traced to #{owner}"
       ivar = name.chomp('=')
@@ -1785,6 +1783,20 @@ class CodeGen
   # in every TYPED/POLY_SMALL_N guard on the hot path.
   def owner_class_ptr_expr(owner)
     "#{owner_class_fn_name(owner)}(M)"
+  end
+
+  # CLASS_READ_INLINE: a compiled guard reads the receiver's class through bc2cpp_obj_class (bc2cpp.rb's
+  # prelude), which returns exactly what mrb_obj_class does, without the out-of-line call for a plain class.
+  def obj_class_expr(recv)
+    "bc2cpp_obj_class(M, #{recv})"
+  end
+
+  # CLASS_READ_INLINE: `cls == mrb_obj_class(M, recv)`. bc2cpp_class_is first accepts an object whose class pointer
+  # is `cls` itself, which is the same answer only when `cls` is a plain class (MRB_TT_CLASS) or null. Every `cls`
+  # here is: an owner-cache constant names a class a `class X` statement opened (mrb_vm_define_class refuses any
+  # other value), the core and RGSS accessors return defined classes, and an iclass is never a Ruby value.
+  def exact_class_guard(cls, recv)
+    "bc2cpp_class_is(M, #{recv}, #{cls})"
   end
 
   # The cache getter itself, for a table that stores it (POLY_TABLE).

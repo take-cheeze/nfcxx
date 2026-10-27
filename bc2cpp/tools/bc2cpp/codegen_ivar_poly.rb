@@ -205,20 +205,6 @@ class CodeGen
     end
   end
 
-  # ATTR_READER_INLINE's guard: `cls == mrb_obj_class(M, recv)` with the object's own class pointer tested first.
-  # A heap object whose `c` is the real class `cls` has mrb_obj_class == cls, so the first test only skips the
-  # call; a singleton class or an immediate falls through to mrb_obj_class.
-  def exact_class_check(owner, recv)
-    cls = owner_class_ptr_expr(owner)
-    "(!mrb_immediate_p(#{recv}) && mrb_obj_ptr(#{recv})->c == #{cls}) || #{cls} == mrb_obj_class(M, #{recv})"
-  end
-
-  # Is the guarded call to `owner`'s `name` an ATTR_READER_INLINE read (so its guard takes exact_class_check)?
-  def inline_reader_arm?(owner, name)
-    type = !name.end_with?('=') && ivar_embed_type(owner, name)
-    type && type != :unknown && attr_reader_inline?(owner, name)
-  end
-
   # IVAR_ACCESS's write half: the statement storing `src` into @ivar, or nil.
   # Same rules as ivar_get_code. With `dst`, it also leaves `src` (attr_writer's
   # return value) in `dst`.
@@ -373,17 +359,13 @@ class CodeGen
     # singleton), so the tag test reads it without the mrb_obj_class call, and the Integer arm is tested first.
     integer_tag = ENV['BC2CPP_POLY_INTEGER_TAG'] != '0' && candidates.any? { |t| t.owner == 'Integer' }
     hoist = subclassed || integer_tag
-    recv_class = hoist ? 'bc2cpp_recv_class' : "mrb_obj_class(M, #{recv})"
-    class_read = integer_tag ? "mrb_integer_p(#{recv}) ? M->integer_class : mrb_obj_class(M, #{recv})" : "mrb_obj_class(M, #{recv})"
+    recv_class = hoist ? 'bc2cpp_recv_class' : obj_class_expr(recv)
+    class_read = integer_tag ? "mrb_integer_p(#{recv}) ? M->integer_class : #{obj_class_expr(recv)}" : obj_class_expr(recv)
     ordered = integer_tag ? candidates.partition { |t| t.owner == 'Integer' }.flatten : candidates
     branches = ordered.map do |target|
       check = ([target.owner] + inherited[target.owner]).map do |owner|
-        "#{owner_class_ptr_expr(owner)} == #{recv_class}"
+        hoist ? "#{owner_class_ptr_expr(owner)} == #{recv_class}" : exact_class_guard(owner_class_ptr_expr(owner), recv)
       end.join(' || ')
-      if !hoist && inherited[target.owner].empty? && target.kind == :ivar_accessor && target.irep.nil? &&
-         inline_reader_arm?(target.owner, name)
-        check = exact_class_check(target.owner, recv)
-      end
       call = if target.kind == :ivar_accessor && target.irep.nil?
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c), or the
@@ -555,7 +537,7 @@ class CodeGen
 
     note = arms.map { |t, classes| "#{t.owner} (#{classes.join(', ')})" }.join('; ')
     hoist = arms.sum { |_, classes| classes.size } > 1
-    recv_class = hoist ? 'bc2cpp_recv_class' : "mrb_obj_class(M, #{recv})"
+    recv_class = hoist ? 'bc2cpp_recv_class' : obj_class_expr(recv)
     branches = arms.map do |t, classes|
       check = classes.map { |k| "#{owner_class_ptr_expr(k)} == #{recv_class}" }.join(' || ')
       "if (#{check}) {\n    #{cha_call_code(t, self_owner, recv, name, d, argv, indent: '    ')}\n  } else "
@@ -566,7 +548,7 @@ class CodeGen
            "the inherited definition for every other receiver\n"
     return "#{head}  #{chain}" unless hoist
 
-    "#{head}  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
+    "#{head}  {\n  struct RClass* #{recv_class} = #{obj_class_expr(recv)};\n  #{chain}  }\n"
   end
 
   # POLY_TABLE: a name with more than POLY_SMALL_N_MAX candidates
@@ -598,7 +580,7 @@ class CodeGen
     fallback = strict_hint_wrap('poly_table', d, recv, name, argv, nil, listed: table[:entries].map(&:first)) do
       guarded_fallback_line(d, recv, name, argv, table[:entries].map(&:first), closed_world_site)
     end
-    "#{diag}#{note}  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, mrb_obj_class(M, #{recv}), " \
+    "#{diag}#{note}  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, #{obj_class_expr(recv)}, " \
       "#{table[:symbol]})) {\n" \
       "    r#{d} = reinterpret_cast<#{fn_type}>(bc2cpp_pfn)(M, #{([recv] + argv).join(', ')});\n" \
       "  } else {\n" \

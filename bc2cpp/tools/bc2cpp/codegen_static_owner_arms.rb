@@ -112,8 +112,9 @@ module StaticOwnerArms
     return false unless slot
 
     expr = Regexp.escape("bc2cpp_owner_class_#{slot}(M)")
-    cls = "mrb_obj_class\\(M, #{Regexp.escape(recv)}\\)|bc2cpp_recv_class"
-    seen.match?(/#{expr} == (?:#{cls})|(?:#{cls}) == #{expr}/)
+    cls = "bc2cpp_obj_class\(M, #{Regexp.escape(recv)}\)|bc2cpp_recv_class"
+    is = Regexp.escape("bc2cpp_class_is(M, #{recv}, ") + expr
+    seen.match?(/#{expr} == (?:#{cls})|(?:#{cls}) == #{expr}|#{is}\)/)
   end
 
   # [[class, definition]] for the arms of `name` called with `argc` arguments (and a block when `block`), at most

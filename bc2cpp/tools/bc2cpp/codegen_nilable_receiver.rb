@@ -55,7 +55,7 @@ module NilableReceiverSend
 
   # Runtime class tests in a piece of generated C++: a class read, or a compare against the hoisted one.
   def class_test_count(code)
-    code.scan(/\bmrb_obj_class\(M,|== bc2cpp_recv_class\b/).size
+    code.scan(/\bbc2cpp_(?:obj_class|class_is)\(M,|== bc2cpp_recv_class\b/).size
   end
 
   # By-name dispatches in a piece of generated C++.

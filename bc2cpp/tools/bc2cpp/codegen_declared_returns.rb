@@ -393,7 +393,7 @@ class CodeGen
     when :module then "mrb_obj_is_kind_of(M, #{var}, mrb_module_get(M, \"#{cls}\"))"
     when :union then cls.map { |k, c, n| "(#{declared_return_condition(k, c, n, var)})" }.join(' || ')
     when :class
-      exact = "mrb_obj_class(M, #{var}) == #{owner_class_ptr_expr(cls)}"
+      exact = exact_class_guard(owner_class_ptr_expr(cls), var)
       nilable ? "mrb_nil_p(#{var}) || #{exact}" : exact
     else raise "DECLARED_RETURN_GUARD: no runtime check for kind #{kind.inspect}"
     end
