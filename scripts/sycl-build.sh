@@ -75,11 +75,15 @@ fi
 absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 "$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" ${diag[@]+"${diag[@]}"} "$src" > "$absout.dev.ir"
 rc=0
+# The SPIR-V emitter runs on CRuby when it is installed, else on scripts/mrb (mruby); the output is the same. On ggml-sycl's
+# flash-attention images (26 MB of IR, a 750 MB heap) mruby spends most of its time in its garbage collector: about 2000 s
+# for fattn-vec-instance-f16-f16 against 54 s on CRuby. NFCXX_SPIRV_RUBY names the interpreter.
+spvrb=${NFCXX_SPIRV_RUBY:-$(command -v ruby || echo "$root/scripts/mrb")}
 if [ $backend = vulkan ]; then
-  "$root/scripts/mrb" "$root/scripts/pathb-spirv-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
+  "$spvrb" "$root/scripts/pathb-spirv-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
 elif [ $backend = opencl ] || [ $backend = level-zero ]; then
   # the Kernel-capability module (OpenCL 2.2): one kernel per entry point, the push block as its argument (OpenCL and Level Zero)
-  "$root/scripts/mrb" "$root/scripts/pathb-spirv-emit.rb" --kernel-cl --manifest="$absout.man" "$absout.dev.ir" > "$absout.cl.spv" || rc=$?
+  "$spvrb" "$root/scripts/pathb-spirv-emit.rb" --kernel-cl --manifest="$absout.man" "$absout.dev.ir" > "$absout.cl.spv" || rc=$?
 else
   "$root/scripts/mrb" "$root/scripts/pathb-wgsl-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.wgsl" || rc=$?
 fi
