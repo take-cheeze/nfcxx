@@ -266,6 +266,17 @@ def collect_calls(x, acc)
   acc
 end
 
+# The functions a form names by address: its calls and the addresses it stores or passes (&"name")
+def collect_fn_refs(x, acc)
+  if x.is_a?(IRSym)
+    acc << x.name if x.sig == "&"
+    return acc
+  end
+  return acc unless x.is_a?(Array)
+  x.each { |y| collect_fn_refs(y, acc) }
+  acc
+end
+
 # Names of the slots a form takes the address of in a way other than the address of a load or a store.
 # A function-pointer local whose every store is the address of one function (a constexpr pointer, e.g. a template selector's
 # result: the front end stores it into a slot, then calls it through a load) is folded: the stores are dropped and each call
@@ -2542,7 +2553,21 @@ def emit_module(src, kernel_cl = false)
     seen.keys
   end
   if kernel_cl
-    smod.wgs, smod.wgs_total = wgs_layout(mod.defs, entries.map { |e| reach.call(e) })
+    # the layout runs before the functions' setup folds constexpr function-pointer slots into direct calls
+    # (fold_fnptr_slots), so its reach follows every address of a function, not only the calls: a superset of the callees
+    # that only adds conflicts
+    refs = lambda do |root|
+      seen = {}
+      stack = [root]
+      until stack.empty?
+        n = stack.pop
+        next if seen[n] || !mod.defs.key?(n)
+        seen[n] = true
+        stack.concat(collect_fn_refs(mod.defs[n], []).select { |c| mod.defs.key?(c) })
+      end
+      seen.keys
+    end
+    smod.wgs, smod.wgs_total = wgs_layout(mod.defs, entries.map { |e| refs.call(e) })
     # the static storage: a Workgroup variable (OpenCL local memory) of the group's static bytes, when there are statics
     smod.wgs_var = spv.wgs_var(smod.wgs_total / 4) if smod.wgs_total > 0
   end
