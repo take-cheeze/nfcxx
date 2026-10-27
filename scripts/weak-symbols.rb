@@ -6,7 +6,10 @@
 # attributes, so QBE emits them as strong symbols and the link fails with "multiple definition".
 # Usage: scripts/mrb scripts/weak-symbols.rb [--c-input] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
 #
-# mruby has no Regexp, so the scanning is by hand. It mirrors the Python original (tests/mruby/oracle/weak-symbols.py, deleted; the oracle port is tests/mruby/oracle/weak-symbols.rb).
+# It mirrors the Python original (tests/mruby/oracle/weak-symbols.py, deleted; the oracle port is
+# tests/mruby/oracle/weak-symbols.rb). The large inputs (EDG's C for a unit with many template instances is tens of
+# MB) are cut into their ; { } chunks and scanned with the regexp gem (Onigmo) once; the per-chunk helpers work on
+# short strings. Character positions in a large string cost a scan from its start in mruby, so nothing indexes it.
 
 SPACE = " \t\n\r\f\v"
 
@@ -123,21 +126,6 @@ def identifiers(s)
   ids
 end
 
-# The chunk (between the ; { } delimiters) around position w: [start, end].
-def chunk_around(text, w)
-  b = 0
-  [";", "{", "}"].each do |d|
-    x = w > 0 ? text.rindex(d, w - 1) : nil
-    b = x + 1 if x && x + 1 > b
-  end
-  e = text.size
-  [";", "{", "}"].each do |d|
-    x = text.index(d, w)
-    e = x if x && x < e
-  end
-  [b, e]
-end
-
 # Whether the __attribute__ at position a has a group that names weak (hand-written C: __attribute__((weak)); EDG's
 # __weak__ is found on its own).
 def attribute_weak?(text, a)
@@ -168,27 +156,18 @@ end
 # (COMDAT data: variable templates, static data members of templates, local statics of inline functions,
 # helper constants such as __cmp_cat_id) has no such name, so every identifier before its "=" is a
 # candidate; the caller keeps only the ones the assembly defines.
-# With extern_inline, a function declared "extern" and "__inline__" is weak too: EDG emits the inline members of
-# an "extern template" class that way (GNU89 meaning: the out-of-line copy lives in another translation unit,
-# for libstdc++'s std::allocator<char> that is libstdc++ itself), while a C99 compiler such as cproc makes it a
-# strong definition in every object that uses it.
 # The value of each name is :edg (EDG's __weak__, as the Python original finds it) or :hand (only hand-written C's
 # __attribute__((weak))).
-def weak_names(text, extern_inline)
+def weak_names(chunks)
   names = {}
-  pos = 0
-  nw = text.index("__weak__", 0)       # the next EDG spelling
-  na = text.index("__attribute__", 0)  # the next attribute group, which may be hand-written C's __attribute__((weak))
-  while true
-    # An attribute group counts when it names weak or __weak__.
-    while na && !attribute_weak?(text, na)
-      na = text.index("__attribute__", na + 13)
-    end
-    w = (nw && na) ? (nw < na ? nw : na) : (nw || na)
-    break if w.nil?
-    how = w == nw ? :edg : attribute_weak?(text, w)
-    b, e = chunk_around(text, w)
-    s = strip_attributes(text[b, e - b])
+  chunks.each do |c|
+    nw = c.index("__weak__")             # EDG's spelling
+    na = c.index("__attribute__")        # an attribute group, which may be hand-written C's __attribute__((weak))
+    next if nw.nil? && na.nil?
+    na = c.index("__attribute__", na + 13) while na && !attribute_weak?(c, na)
+    next if nw.nil? && na.nil?
+    how = (nw && (na.nil? || nw < na)) ? :edg : attribute_weak?(c, na)
+    s = strip_attributes(c)
     q = s.index("=")
     s = s[0, q] if q
     n = first_call_name(s)
@@ -198,23 +177,21 @@ def weak_names(text, extern_inline)
     else
       identifiers(s).each { |x| names[x] = :edg if how == :edg; names[x] ||= how }
     end
-    pos = e + 1
-    nw = text.index("__weak__", pos) if nw && nw < pos
-    na = text.index("__attribute__", pos) if na && na < pos
   end
-  if extern_inline
-    pos = 0
-    while true
-      w = text.index("__inline__", pos)
-      break if w.nil?
-      b, e = chunk_around(text, w)
-      chunk = text[b, e - b]
-      if has_word?(chunk, "extern") && !has_word?(chunk, "static")
-        n = first_call_name(strip_attributes(chunk))
-        names[n] = :edg if n
-      end
-      pos = e + 1
-    end
+  names
+end
+
+# A function declared "extern" and "__inline__" is weak too: EDG emits the inline members of an "extern template"
+# class that way (GNU89 meaning: the out-of-line copy lives in another translation unit, for libstdc++'s
+# std::allocator<char> that is libstdc++ itself), while a C99 compiler such as cproc makes it a strong definition in
+# every object that uses it.
+def extern_inline_names(chunks)
+  names = {}
+  chunks.each do |c|
+    next unless c.include?("__inline__")
+    next unless has_word?(c, "extern") && !has_word?(c, "static")
+    n = first_call_name(strip_attributes(c))
+    names[n] = :edg if n
   end
   names
 end
@@ -254,25 +231,24 @@ def defined_labels(asm)
 end
 
 # Names the assembly mentions outside a label definition: the operands of instructions and directives
-# ([A-Za-z_.$][\w.$]* runs, as defined_labels reads a label).
+# ([A-Za-z_.$][\w.$]* runs, as defined_labels reads a label). The assembly is cut into runs of those characters and ":"
+# in one split, and each distinct run (uniq: a 16 MB assembly has 1.3 million runs, 70 thousand distinct) is read
+# here. A name followed by ":" is a label, so only the part after a run's last ":" can be a reference; in it, a
+# leading [0-9A-Za-z_]* run (a number, or a word that starts with a digit) is skipped, and what follows (from a "."
+# or "$") is a name.
 def referenced_names(asm)
   refs = {}
-  asm.each_line do |line|
-    i = 0
-    n = line.size
-    while i < n
-      c = line[i]
-      if ident_start?(c) || c == "." || c == "$"
-        j = i + 1
-        j += 1 while j < n && (word_char?(line[j]) || line[j] == "." || line[j] == "$")
-        refs[line[i, j - i]] = true unless j < n && line[j] == ":"
-        i = j
-      elsif word_char?(c)
-        i += 1 while i < n && word_char?(line[i])
-      else
-        i += 1
-      end
+  asm.split(/[^A-Za-z0-9_.$:]+/).uniq.each do |t|
+    c = t.rindex(":")
+    t = t[c + 1, t.size - c - 1] if c
+    next if t.empty?
+    if t[0] >= "0" && t[0] <= "9"
+      i = 1
+      i += 1 while i < t.size && word_char?(t[i])
+      next if i == t.size
+      t = t[i, t.size - i]
     end
+    refs[t] = true
   end
   refs
 end
@@ -300,14 +276,23 @@ while args.first && args.first[0, 2] == "--"
   end
 end
 c_path, asm_path = args
-text = File.open(c_path, "rb") { |f| f.read }
 asm = File.open(asm_path, "rb") { |f| f.read }
+# Mach-O: the prefixed mode, or clang's assembly for an Apple target, which ends with .subsections_via_symbols (the gcc
+# back end on macOS calls this without --sym-prefix).
+macho = !prefix.empty? || asm.include?(".subsections_via_symbols")
+# The names the assembly refers to (for the weak references below, ELF only), first: referenced_names makes a million
+# short-lived strings on a large assembly, and every collection of the garbage collector marks what is live then.
+refs = macho ? {} : referenced_names(asm)
 defs = defined_labels(asm)
 # A name only hand-written C's __attribute__((weak)) marks gets no second .weak where cproc already wrote one (x86-64 ELF,
 # its inline-asm side file); elsewhere (Mach-O) this line is the only one. EDG's names are taken as the original does.
 marked = weak_marked(asm)
 weak_marked(File.open(marked_path, "rb") { |f| f.read }).each_key { |k| marked[k] = true } if marked_path && File.exist?(marked_path)
-weak = weak_names(text, extern_inline).select { |n, how| how == :edg || !marked[prefix + n] }.keys
+chunks = File.open(c_path, "rb") { |f| f.read }.split(/[;{}]/, -1)
+attr_names = weak_names(chunks)
+all_names = attr_names.dup
+extern_inline_names(chunks).each_key { |n| all_names[n] = :edg } if extern_inline
+weak = all_names.select { |n, how| how == :edg || !marked[prefix + n] }.keys
 weak = weak.map { |n| prefix + n }.select { |n| defs[n] }.sort
 # A weak declaration the assembly only refers to is a weak undefined reference, as gcc makes it: the address of an
 # absent definition reads as null. EDG declares the init function of an extern thread_local this way
@@ -316,12 +301,8 @@ weak = weak.map { |n| prefix + n }.select { |n| defs[n] }.sort
 # .weak_reference), and only the attribute's names: an extern __inline__ function that lives in another unit must stay
 # a strong reference (a weak one would not make the link pull it from an archive or keep its library --as-needed).
 weak_refs = []
-# Mach-O: the prefixed mode, or clang's assembly for an Apple target, which ends with .subsections_via_symbols (the gcc
-# back end on macOS calls this without --sym-prefix).
-macho = !prefix.empty? || asm.include?(".subsections_via_symbols")
 unless macho
-  refs = referenced_names(asm)
-  weak_refs = weak_names(text, false).select { |n, how| !defs[n] && refs[n] && (how == :edg || !marked[prefix + n]) }.keys.sort
+  weak_refs = attr_names.select { |n, how| !defs[n] && refs[n] && (how == :edg || !marked[prefix + n]) }.keys.sort
 end
 unless weak.empty? && weak_refs.empty?
   File.open(asm_path, "ab") do |f|
