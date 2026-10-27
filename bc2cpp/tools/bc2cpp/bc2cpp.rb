@@ -1150,6 +1150,11 @@ if $PROGRAM_NAME == __FILE__
   end
   warn "== stable value constants (CONST_VALUE_CACHE): #{CodeGen.stable_value_constants.size} =="
   CodeGen.stable_value_constants.sort.each { |n| warn "  STABLE_VALUE #{n}" }
+  CodeGen.const_bindings = profile_call.call('ConstBindings.analyze') do
+    ConstBindings.analyze(ireps, root_label, native_paths, foreign_ruby_srcs, static: closed_world.constants_static?,
+                          included: included_modules, prepended: prepended_modules, unknown_mixins: unknown_mixins)
+  end
+  warn "== const bindings (CONST_BINDING_CACHE): #{CodeGen.const_bindings.size} =="
   # ENUMERATOR_MODEL: the `Enumerator` constant Kernel#to_enum reads, proven apart from StableClassConstants (mruby's
   # chain/lazy gems reopen the class, which that analysis counts as a second definition).
   if CodeGen.enumerator_model
