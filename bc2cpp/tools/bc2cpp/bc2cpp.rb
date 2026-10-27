@@ -1963,6 +1963,7 @@ if $PROGRAM_NAME == __FILE__
   puts ''
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
+  print gen.emit_ary_write_helpers(compiled)
   print gen.emit_to_enum_helper(compiled)
   print gen.emit_collect_direct_helper(compiled)
   print gen.emit_bool_check_helper(compiled)

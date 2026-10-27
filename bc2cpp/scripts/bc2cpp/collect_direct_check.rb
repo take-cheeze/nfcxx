@@ -3,14 +3,12 @@
 # frozen_string_literal: true
 
 # COLLECT_DIRECT (tools/bc2cpp/codegen_collect_direct.rb): `map`/`collect` on an exact Array calls bc2cpp_ary_collect
-# instead of the compiled Enumerable#collect; NEQ_INTEGER_PAIR (codegen_native_send.rb): `!=` on two Integers compares
-# them without mrb_equal's by-name `==`.
+# instead of the compiled Enumerable#collect. NEQ_INTEGER_PAIR and POLY_INTEGER_TAG, which the startup also leans on,
+# have their generated-code checks in array_write_inline_check.rb; this one keeps their behaviour cases.
 #
 #   generated code (needs a host mrbc)
 #     - a literal-block `map` on an exact Array calls bc2cpp_ary_collect, and so does Array#transpose's inner map;
 #     - BC2CPP_COLLECT_DIRECT=0 keeps the Enumerable#collect call;
-#     - `!=` tests the Integer pair before mrb_equal (NEQ_INTEGER_PAIR);
-#     - a POLY_SMALL_N `[]` chain tests an Integer receiver by its tag first (POLY_IMMEDIATE_TAG, codegen_ivar_poly.rb).
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same for map with break/next, a block that resizes its receiver,
 #       destructuring, an Array subclass, nested maps, transpose, GC.stress, a Fiber, `[]` over Integer, bignum,
@@ -79,8 +77,6 @@ SRC = <<~'RUBY'
   end
 RUBY
 
-NEQ_PAIR = /\(mrb_integer_p\((r\d+)\) && mrb_integer_p\((r\d+)\)\) \? mrb_bool_value\(mrb_integer\(\1\) != mrb_integer\(\2\)\)/
-
 OWNERS = %w[Integer CdBox CdList CdEq CdMaps].freeze
 
 def method_code(code, name)
@@ -103,10 +99,6 @@ check.call('a literal-block map on an Array calls bc2cpp_ary_collect',
            code.include?('static mrb_value bc2cpp_ary_collect(') && code.scan(/= bc2cpp_ary_collect\(M, /).size >= 3)
 check.call("Array#transpose's inner map calls bc2cpp_ary_collect",
            method_code(code, 'Array_transpose').include?('bc2cpp_ary_collect(M, self, '))
-check.call('`!=` tests the Integer pair before mrb_equal',
-           method_code(code, 'CdMaps_neq').match?(NEQ_PAIR))
-check.call('a `[]` chain tests an Integer receiver by its tag, ahead of the class reads',
-           code[/static mrb_value bc2cpp_getidx_slow\(.*?^}/m].to_s.match?(/POLY_SMALL_N :\[\].*?\n\s*if \(\(mrb_integer_p\(recv\) \|\| mrb_type\(recv\) == MRB_TT_BIGINT\)\) \{\n\s*r0 = Integer_/m))
 check.call('no #error in the generated code', !code.include?('#error'))
 off, = generate_world('BC2CPP_COLLECT_DIRECT' => '0')
 check.call('BC2CPP_COLLECT_DIRECT=0: no bc2cpp_ary_collect', !off.include?('bc2cpp_ary_collect('))
