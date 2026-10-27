@@ -2711,7 +2711,9 @@ def x87_entry_thunk(name, linkage, ints, stack, complex = false)
   mr = (m + 15) / 16 * 16
   frame = mr + (complex ? 40 : 24)
   global = linkage == "local" ? [] : [(linkage == "weak" ? ".weak #{name}" : ".globl #{name}")]
-  out = [".text", *global, ".type #{name}, @function", name + ":",
+  # Aligned as QBE aligns functions: the entry is the function's address, and the Itanium pointer-to-member ABI reads
+  # an odd one as a virtual function's vtable offset.
+  out = [".text", ".balign 16", *global, ".type #{name}, @function", name + ":",
          "\tsubq $#{frame}, %rsp"]
   out.concat(x87_copy_args(stack, frame))
   if ints < 6

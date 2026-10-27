@@ -5,6 +5,8 @@
 # validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
 # Usage: scripts/pathb-cc [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 #   PATHB_KEEP=dir   keep file.ir, file.ssa and file.s there
+#   NFCXX_SAFE_POINTERS=1  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
+#                    the IR carries (loc ...) lines for the reports. Link with $(scripts/safeptr-rt) first.
 #   PATHB_LONG_DOUBLE=trap (or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
 #                    becomes a stub that aborts when run. long double itself is supported (docs/notes/pathb-longdouble.md): link the
 #                    object with $(scripts/pathb-ldrt) (the helpers in be/nfcxx_ldrt.c; the driver and the test scripts do)
@@ -31,10 +33,11 @@ done
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 n=$(basename "${src%.*}")
+safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_IR_LOC=1; }
 "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"
 rc=0
 ldopt=(); [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ldopt=(--long-double=trap)
-"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
+"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
 if [ $rc != 0 ]; then
   echo "pathb-cc: $src: $(head -1 "$tmp/$n.emit")" >&2
   [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
