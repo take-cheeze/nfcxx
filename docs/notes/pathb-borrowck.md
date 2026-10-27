@@ -222,7 +222,8 @@ prove that a type is copyable. Scalar representations in tests can model consumi
 are not claims that moving a Rust integer makes it unusable. Transfers currently require
 scalar/pointer values in direct locals or constant-offset fields.
 Whole-aggregate value transfers, moves through arbitrary aliases, drops, and ownership effects
-of calls remain unsupported. Neither frontend emits these forms yet.
+of calls remain unsupported. The mrustc route emits `move-value` for Rust moves, one per scalar of the
+moved place ([mrustc-borrowck.md](mrustc-borrowck.md)); the C++ frontend emits neither form.
 
 C++ `rref-arg` is still refused: an rvalue-reference argument alone does not authorize treating the
 source as dead. Ordinary C++ moved-from objects can remain usable; their contracts need separate
@@ -808,7 +809,8 @@ Rust programs are checked through mrustc's monomorphised MIR: `scripts/mrustc-bo
 runs mrustc, `scripts/monomir-to-pathb.rb --borrow`, and this checker with `--infer-loan-ends` and
 `--infer-summaries`. [mrustc-borrowck.md](mrustc-borrowck.md) describes the facts it emits, the
 verdicts mrustc gives itself, and `tests/mrustc-borrow`, which records rustc's verdict for each
-case. Generic bodies are checked only as the instances a program uses, and moves are not checked.
+case. Generic bodies are checked only as the instances a program uses. Moves of non-Copy places
+are `move-value`s; drop obligations for them are not emitted.
 
 `(readonly %N)` is the one fact only that translator emits: parameter `%N` is a pointer the function
 does not write through (a Rust `&T`). Summary inference gives it read-only modes.

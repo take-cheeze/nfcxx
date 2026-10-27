@@ -18,7 +18,8 @@ The pipeline is:
    dump prints them as `SCOPEEND var3 var4;`: the points where locals' storage ends. And
    `-Z disable-mir-opt` also turns off the inlining and optimisation after monomorphisation, which
    ran regardless and could delete a borrow whose result is unused. Without the variable and the
-   flag, mrustc's output is unchanged.
+   flag, mrustc's output is unchanged. `-Z dump-hir` also writes the crate's HIR, for its
+   `impl Copy` items (below).
 2. **`scripts/monomir-to-pathb.rb --borrow`**, which writes checker input instead of code:
    - Only the program's own functions (`bin#` paths) get bodies. Standard library functions stay
      external, so a call to one has no summary and the caller is refused.
@@ -32,6 +33,14 @@ The pipeline is:
    - `&place` and `&mut place` of a local place reached without a deref (fields and enum variants
      included) become `(borrow (ptr T) "Ln" shared|exclusive PLACE)`. A borrow through a deref is a
      plain address and carries the loans of the pointer it derefs, so a reborrow has no loan of its own.
+   - A move of a local place of a non-Copy type (a use, an aggregate's operand, or a call argument)
+     is followed by `(eval (move-value T PLACE))` for each scalar of the place, after the statement
+     that reads it (pathb-borrowck.md, "Explicit value moves and copies"). The checker then rejects
+     a move with a live loan of the place (E0505). The dump prints a move and a copy alike, so the
+     translator decides: a type moves if it has drop glue, is a `&mut`, or is one of the program's
+     types with no `impl Copy` in the HIR (`--hir`); tuples and arrays follow their elements. Other
+     types count as Copy, which can miss a move but not report a false one. Enum fields, moves
+     through a deref or out of an enum variant, and fat pointers get no marks.
    - A `&T` parameter gets `(readonly %N)`, which keeps summary inference to read-only modes. The
      signature's `&` against `&mut` is the information the checker would otherwise not have.
    - `(borrow-layout ...)` records for the structs the functions use come from the dump's `type`
@@ -51,20 +60,17 @@ mrustc also rejects some programs itself, and the driver reports those as errors
 ## Results
 
 `tests/mrustc-borrow/cases` has one program per rule, each with rustc 1.99's verdict. The suite
-checks this pipeline's verdict, and compares rustc's when one is installed. 15 of the 20 cases agree
+checks this pipeline's verdict, and compares rustc's when one is installed. 18 of the 22 cases agree
 with rustc:
 
 | Verdict | Cases |
 | --- | --- |
-| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow |
-| Rejected, as by rustc | E0499 two `&mut`, E0502 (twice), E0506, E0597 dangling, E0381 and E0382 (mrustc), E0515 (mrustc) |
+| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, move after the borrow's last use, Copy value passed while borrowed |
+| Rejected, as by rustc | E0499 two `&mut`, E0502 (twice), E0505 move while borrowed, E0506, E0597 dangling, E0381 and E0382 (mrustc), E0515 (mrustc) |
 | Different | below |
 
 The differences are the known gaps:
 
-- **Move while borrowed (E0505) is accepted.** The translator lowers a move as a copy, and mrustc's
-  validation only sees the moved-from local itself, not the borrow's use. Explicit `move-value`
-  forms (pathb-borrowck.md, "Explicit value moves and copies") are the next step.
 - **Two-phase borrows** (`c.set(c.get() + 1)`) give a false `loan-conflict`. rustc reserves the
   receiver's `&mut` and activates it after the arguments. The checker takes the exclusive loan first.
 - **A result that may borrow from either of two arguments, or two fields** (`pick(&x, &y)`, NLL's
@@ -98,7 +104,8 @@ As of October 2026:
 
 ## Next steps
 
-- Moves: `move-value` for moved operands, then drop obligations for types with drop glue.
+- Moves: drop obligations for types with drop glue, so a moved value is not dropped and an unmoved
+  one is; moves of enums and out of enum variants.
 - Two-phase borrows: a reserved state for the receiver's loan until the call.
 - Summaries for the standard library functions small programs use (formatting, `Vec`, `Box`).
 - Results that borrow from several sources, which needs region parameters in summaries.

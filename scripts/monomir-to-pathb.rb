@@ -4,8 +4,17 @@
 # functions get bodies (standard library calls stay external), locals are not zero-filled, mrustc's
 # SCOPEEND statements (MRUSTC_MMIR_SCOPE_END=1) become decl/scope-end facts, and a borrow of a local
 # place becomes a shared or exclusive loan. See docs/notes/mrustc-borrowck.md.
+# --hir FILE (with --borrow): mrustc's `-Z dump-hir` output, whose `impl Copy` items tell which of
+# the program's own types are copied rather than moved. Without it, no move is marked.
 $borrow = !ARGV.delete("--borrow").nil?
-abort "usage: #{$0} [--borrow] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
+if (i = ARGV.index("--hir"))
+  hir = File.read(ARGV[i + 1])
+  ARGV.slice!(i, 2)
+  # The paths of the program's types with an `impl Copy`, whatever its bounds: an instance whose
+  # impl does not apply then counts as Copy too, which only misses that instance's moves.
+  $copy_impls = hir.scan(/^impl\b.*?::marker::Copy for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
+end
+abort "usage: #{$0} [--borrow [--hir FILE]] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
 input = ARGV[0]
 outpath = ARGV[1]
 src = File.read(input)
@@ -1384,6 +1393,119 @@ def mir_written_local(ln)
   p[:root] =~ /^var\d+$/ ? p[:root] : nil
 end
 
+# --borrow: the path of one of the program's types, "m::S" for ZRG2cD3bin1m1S0g, or nil for
+# another crate's type or a closure (a component with '#'). A capital letter before a component's
+# length is the position of a '#' in it.
+def bin_type_path(ty)
+  m = ty.match(/^ZRG(\d+)cD3bin/)
+  return nil unless m
+  rest = m.post_match
+  parts = m[1].to_i.times.map do
+    c = rest.match(/^([A-Z]?)(\d+)/)
+    return nil unless c
+    part = c.post_match[0, c[2].to_i]
+    rest = c.post_match[c[2].to_i..-1] || ""
+    return nil unless c[1].empty?
+    part
+  end
+  parts.join("::")
+end
+
+# --borrow: whether a value of TY is copied rather than moved. The dump does not say, as mrustc
+# prints a move and a copy both as a use. A type moves when it has drop glue, is a `&mut`, or is
+# one of the program's own types without an `impl Copy` in the HIR dump. Tuples and arrays follow
+# their elements. Others (the standard library's types without drop glue, closures) count as Copy:
+# taking a move for a copy only misses an error, and the opposite would report false ones.
+def copy_type?(ty, types)
+  ty = ty.strip
+  return false if ty.start_with?("&mut ") || ty.start_with?("&move ")
+  return copy_type?(ty[1...-1].split(";", 2)[0], types) if ty.start_with?("[") && ty.include?(";")
+  t = types[ty]
+  return true unless t && $copy_impls
+  return false if t[:drop]
+  return t[:fields].all? { |f| copy_type?(f[:type], types) } if ty.start_with?("ZRTT")
+  path = bin_type_path(ty)
+  path.nil? || $copy_impls.include?(path)
+end
+
+# --borrow: [root, offset, type] of a local place reached without a deref or a downcast, as for
+# borrow_loan; nil otherwise.
+def local_place(place, types, locals, params)
+  p = parse_place(place)
+  return nil unless locals.assoc(p[:root]) || p[:root] =~ /^arg\d+$/
+  ty = local_type(p[:root], locals, params)
+  return nil unless ty
+  ty = ty.strip
+  off = 0
+  p[:ops].each do |w|
+    return nil unless w[:k] == :field
+    o, ft = field_offset_and_type(ty, w[:idx], types)
+    return nil unless ft
+    off += o; ty = ft.strip
+  end
+  [p[:root], off, ty]
+end
+
+# --borrow: the scalars of a value of TY as [offset, Path B type], or nil when one is not a plain
+# scalar (a fat pointer, i128). An enum field's bytes are left out, as which of them hold a value
+# depends on the variant.
+def move_leaves(ty, types, base = 0)
+  ty = ty.strip
+  sz, _ = type_size_align(ty, types)
+  return [] if sz == 0
+  if ty.start_with?("[") && ty.include?(";")
+    inner, n = ty[1...-1].split(";", 2).map(&:strip)
+    es, _ = type_size_align(inner, types)
+    out = []
+    n.to_i.times do |i|
+      sub = move_leaves(inner, types, base + i * es)
+      return nil unless sub
+      out.concat(sub)
+    end
+    return out
+  end
+  if (t = types[ty])
+    return [] if t[:tag]
+    out = []
+    t[:fields].each do |f|
+      sub = move_leaves(f[:type], types, base + f[:off])
+      return nil unless sub
+      out.concat(sub)
+    end
+    return out
+  end
+  pt = rust_type_to_pathb(ty, types)
+  return nil if pt.start_with?("(") && !pt.start_with?("(ptr ")
+  [[base, pt]]
+end
+
+# --borrow: the statements that move the non-Copy local places among OPERANDS (MIR operands, which
+# can also be constants): an (eval (move-value T PLACE)) for each scalar of the place, after the
+# statement that read it. The checker then rejects a move of a place with a live loan (E0505) and,
+# as mrustc's validation does, a later read of it.
+def move_marks(operands, types, locals, params)
+  operands.flat_map do |op|
+    op = op.strip
+    next [] unless op =~ /^(var|arg)\d+\b/
+    root, off, ty = local_place(op, types, locals, params)
+    next [] if root.nil? || copy_type?(ty, types)
+    (move_leaves(ty, types, off) || []).map do |o, pt|
+      place = o == 0 ? "$\"#{root}\"" : "(offset $\"#{root}\" #{o})"
+      "(eval (move-value #{pt} #{place}))"
+    end
+  end
+end
+
+# --borrow: the operands an ASSIGN's right-hand side moves: a use's place, or the operands of an
+# aggregate (struct, tuple, array or enum variant).
+def mir_moved_operands(rhs)
+  case rhs
+  when /^=(.+)$/ then [$1]
+  when /^\{(.*)\}:/, /^ENUM \S+ \d+ \{(.*)\}$/, /^\((.*)\)$/, /^\[(.*)\]$/ then split_top($1)
+  else []
+  end
+end
+
 def mir_successors(content)
   term = content.lines.map(&:strip).reject(&:empty?).last || ""
   case term
@@ -2092,6 +2214,7 @@ functions.each do |fn|
     term_line = content.lines.map(&:strip).reject(&:empty?).last
     deferred = []
     term_start = nil
+    call_moves = nil
     content.each_line do |ln|
       ln = ln.strip
       next if ln.empty?
@@ -2119,6 +2242,7 @@ functions.each do |fn|
         place = m[1].strip
         rhs = m[2].strip
         regi = store_rvalue(place, rhs, types, locals, params, param_reg, stmts, regi, lines, pathb_ret)
+        stmts.concat(move_marks(mir_moved_operands(rhs), types, locals, params)) if $borrow
       elsif ln.start_with?("SETFLAG")
         m = ln.match(/^SETFLAG df(\d+) = (!?)df?(\d*);?$/)
         if m
@@ -2294,6 +2418,7 @@ functions.each do |fn|
         end
         raw_args = args_str.empty? ? [] : split_top(args_str)
         raw_args = raw_args.map(&:strip).reject(&:empty?)
+        call_moves = raw_args if $borrow
         arg_vals = []
         raw_args.each_with_index do |a, ai|
           at = place_type(a, types, locals, params)
@@ -3300,6 +3425,12 @@ functions.each do |fn|
         stmts << "(unreachable)"
       else
         # skip
+      end
+      # A call moves its arguments after reading them, before its goto.
+      if call_moves
+        at = ((term_start || stmts.size)...stmts.size).find { |i| stmts[i].start_with?("(goto ") } || stmts.size
+        stmts.insert(at, *move_marks(call_moves, types, locals, params))
+        call_moves = nil
       end
     end
     unless deferred.empty?
