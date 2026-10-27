@@ -1214,12 +1214,12 @@ if $PROGRAM_NAME == __FILE__
   # source 3 reads @ivar_layout), e.g. optcarrot's `@_pc =
   # peek16(RESET_VECTOR)` where peek16 is proven only through ivar reads.
   # Stratified like ARRAY_RETURN_IVAR_HINT: Level 0 = `ivar_layout` as computed
-  # above; Level 1 = FIXNUM_RETURN_PROOF from a probing CodeGen on Level 0
-  # (`analysis_only: :fixnum_return`), with every other table already final
+  # above; Level 1 = FIXNUM_RETURN_PROOF from a probing CodeGen that embeds no
+  # ivars (`analysis_only: :fixnum_return`), with every other table already final
   # (none of them take ivar_layout); Level 2 = IvarLayout.analyze with Level 1
   # available to trace_type's SEND arm, passed to the real CodeGen.
-  # Sound: Level 1 is the unchanged proof run on a subset of the final ivar
-  # facts (never more permissive). Level 2 only turns UNKNOWN SEND sites into
+  # Sound: Level 1 is the unchanged proof run with no embedded ivar facts, a
+  # subset of the final ones (never more permissive). Level 2 only turns UNKNOWN SEND sites into
   # :fixnum (guarded by MONO uniqueness), so it is a superset of Level 0. Not
   # iterated further, for the reasons given for ARRAY_RETURN_IVAR_HINT; the real
   # CodeGen recomputes FIXNUM_RETURN_PROOF against Level 2.
