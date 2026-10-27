@@ -106,9 +106,9 @@ module EscapeAnalysis
                     3rd/mruby/mrbgems/mruby-socket/src/socket.c],
     'raise' => %w[3rd/mruby/src/kernel.c],
     # kernel.c:683 (kernel_rom_entries, MRB_MT_INIT_ROM at kernel.c:721) -> mrb_obj_freeze, kernel.c:356: flags and
-    # returns the receiver. mruby-rgss-compiled/src/register.cxx:542 is Graphics' singleton freeze (not NATIVE_SRCS):
+    # returns the receiver. The generated registration also installs Graphics' singleton freeze (not NATIVE_SRCS):
     # Ruby body mruby-rgss/mrblib/lib.rb:1644, returns nil, keeps no receiver.
-    'freeze' => %w[3rd/mruby/src/kernel.c mruby-rgss-compiled/src/register.cxx],
+    'freeze' => %w[3rd/mruby/src/kernel.c],
     'to_s' => %w[3rd/mruby/src/numeric.c 3rd/mruby/src/hash.c 3rd/mruby/src/object.c 3rd/mruby/src/array.c
                  3rd/mruby/src/kernel.c 3rd/mruby/src/class.c 3rd/mruby/src/range.c 3rd/mruby/src/string.c
                  3rd/mruby/src/error.c 3rd/mruby/src/symbol.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
@@ -143,7 +143,7 @@ module EscapeAnalysis
 
   # Natives that keep none of the ARGUMENT at the listed positions. files: every file that registers the name
   # among NATIVE_SRCS, plus the audited files (a NATIVE_SRCS registration elsewhere refuses the name, see
-  # native_files_audited?; the generated *-compiled register.cxx files are not NATIVE_SRCS). recv: Ruby or
+  # native_files_audited?; the generated registrations of the *-compiled gems are not NATIVE_SRCS). recv: Ruby or
   # native methods the natives call with the argument as receiver, judged by NATIVE_RECEIVER_OK or the
   # receiver field here, plus the user summaries. arg: [name, position] pairs the natives call with the
   # argument as an argument. Set#eql? is a C alias of Set#== (set.c), covered by the == entry.

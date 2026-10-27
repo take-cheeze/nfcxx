@@ -69,7 +69,7 @@ module StaticDispatchRegistrations
   # back as a truncated name that matched no owner and counted as an extra
   # dynamic reference -- which is how a list of provably-unreachable names
   # (`STATIC_DISPATCH_UNREGISTERED`) suddenly looked reachable.
-  REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,[^;]*\);/m
+  REGISTRATION_CALL = /(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(\s*M\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,[^;]*\);/m
   # LEFT_OUT (codegen_emit.rb): what stands in for a left-out entry's registration, which looks nothing up.
   LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);/m
   # A Ruby identifier, and -- because a generated C++ symbol may contain the
@@ -486,13 +486,17 @@ module StaticDispatchRegistrations
 
   # Runs bc2cpp.rb for each compiled gem and the closed-world parse; returns
   # everything eligibility needs.
-  def analyze(repo_root, mrbc, unregistered: STATIC_DISPATCH_UNREGISTERED, closed_only: false)
+  # unregistered: what the build being proven leaves out (default: its own lists). The probe generates with
+  # BC2CPP_BUILD_NAME=closed, so both lists are missing from its registrations whichever build is proven.
+  def analyze(repo_root, mrbc, unregistered: nil, closed_only: false)
+    both = STATIC_DISPATCH_UNREGISTERED | STATIC_DISPATCH_UNREGISTERED_CLOSED
+    unregistered ||= closed_only ? both : STATIC_DISPATCH_UNREGISTERED
+    absent = both | unregistered
     # Every gem, from one shared analysis.
     fresh = NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc)
     runs = GEMS.to_h do |gem|
       out, err = fresh.fetch(gem)
-      [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err),
-              hand: File.read(File.join(repo_root, gem, 'src', 'register.cxx'), encoding: 'UTF-8') }]
+      [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
     end
     ireps, registry, superclass_of, struct_owners = closed_world(repo_root, mrbc)
     subclassed = subclassed_paths(repo_root, superclass_of)
@@ -504,14 +508,14 @@ module StaticDispatchRegistrations
     # unregistered by this mechanism (so re-running the proof after the
     # registrations are gone re-checks exactly the same set).
     candidates = []
-    overridden = Set.new # "Owner#name" whose compiled override stays registered
+    overridden = Set.new # "Owner#name" whose compiled override the proven build registers
     runs.each do |gem, r|
-      live = (registrations(r[:hand]) + registrations(r[:gen])).map(&:first).to_set
+      live = registrations(r[:gen]).map(&:first).to_set
       r[:entries].each do |m|
         key = "#{m[:owner]}##{m[:name]}"
-        listed = unregistered.include?(key)
-        overridden << key if live.include?(m[:entry]) && !listed
-        candidates << m.merge(gem: gem, listed: listed) if listed || live.include?(m[:entry])
+        present = live.include?(m[:entry]) || absent.include?(key)
+        overridden << key if present && !unregistered.include?(key)
+        candidates << m.merge(gem: gem) if present
       end
     end
 
@@ -547,7 +551,6 @@ module StaticDispatchRegistrations
     end
     runs.each_value do |r|
       dynamic.merge(c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?)))
-             .merge(c_literals(r[:hand]))
     end
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
     text = Set.new
@@ -595,7 +598,7 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
-    bytecode_blocks = runs.each_value.any? { |r| r[:gen].match?(BYTECODE_PROC) || r[:hand].match?(BYTECODE_PROC) }
+    bytecode_blocks = runs.each_value.any? { |r| r[:gen].match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
       m = method_of[label]
       next true if m.nil?
@@ -797,11 +800,9 @@ if $PROGRAM_NAME == __FILE__
   mrbc = ENV['MRBC'] || 'mrbc'
   # --closed-only: the list only the closed build uses(see static_dispatch_unregistered_closed.rb).
   closed_only = ARGV.include?('--closed-only')
-  # The probe generates with BC2CPP_BUILD_NAME=closed (bc2cpp_closed_world_probe_env), so the closed list's entries
-  # are already missing from its registrations. They must count as already unregistered, or a re-run drops every
-  # one of them from the candidates and "proves" a smaller list than the committed one.
-  unregistered = closed_only ? STATIC_DISPATCH_UNREGISTERED | STATIC_DISPATCH_UNREGISTERED_CLOSED : STATIC_DISPATCH_UNREGISTERED
-  analysis = StaticDispatchRegistrations.analyze(repo_root, mrbc, unregistered: unregistered, closed_only: closed_only)
+  # analyze counts both lists' entries as candidates although the probe (BC2CPP_BUILD_NAME=closed) leaves them out;
+  # otherwise a re-run drops them and "proves" a smaller list than the committed one.
+  analysis = StaticDispatchRegistrations.analyze(repo_root, mrbc, closed_only: closed_only)
   list = StaticDispatchRegistrations.eligible(analysis)
   warn "registered compiled entries: #{analysis[:registered].size}, statically-dispatched-only: #{list.size}"
   list.sort_by { |m| [m[:owner], m[:name]] }.each { |m| puts "#{m[:owner]}##{m[:name]}\t#{m[:entry]}\t#{m[:gem]}" }

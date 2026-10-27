@@ -8,7 +8,7 @@
 # OTHER_OWNERS/OTHER_DECLS_HEADER from the *other* entries here, so a direct
 # call can reference another gem's _impl through its *_decls.h without either
 # codegen step reading the other's output (that would be a circular Rake
-# dependency; only the final register.cxx compile needs both).
+# dependency; only the final link needs both).
 #
 # EMBED_WIRED: the classes whose embedded-ivar layout is actually wired at
 # runtime. Its instances use MRB_TT_DATA, and #initialize must be compiled so
@@ -18,10 +18,8 @@
 # bc2cpp.rb's driver generates that registration itself (OWNER_METHOD_
 # REGISTRATION, emit_owner_registrations) for every entry of these classes in
 # `compiled` -- by compile_all's #error partition, exactly the entries that
-# compile clean -- so the equivalence holds by construction rather than by a
-# hand-written register.cxx kept in sync.
-# register.cxx calls it once, right after bc2cpp_set_instance_tts.
-# It must match the generated output; a hand mrb_define_method for the same name/aspec counts too.
+# compile clean -- so the equivalence holds by construction.
+# The generated bc2cpp_gem_init calls it once, right after bc2cpp_set_instance_tts.
 BC2CPP_WIRED_EMBEDDINGS = %w[
   Game::Screen Game::ChipSet Game::Switches RPG2k::Scene::VehicleWorld
   LCF::EventCommand LCF::MoveCommand Game::Interpreter Game::Transition Game::Map
@@ -290,10 +288,9 @@ BC2CPP_COMPILED_GEMS = {
     #   an SSEND, not OP_ALIAS, so the aliased name never enters the registry
     #   under any owner. A call to an alias_method-defined name therefore always
     #   stays ordinary dispatch (safe, just never devirtualized).
-    # - RGSS::Graphics.singleton#brightness_sprite is private and compiles, but
-    #   mruby has no private class-method registration, so it stays out of
-    #   register.cxx and is reached only through the devirtualized call in
-    #   `brightness=`.
+    # - RGSS::Graphics.singleton#brightness_sprite is private and compiles. mruby
+    #   has no private class-method registration, so the generated
+    #   bc2cpp_define_private_class_method installs it.
     # - Array is reopened by mruby-rgss/mrblib/array_include.rb (an index-loop
     #   #include?). Its POLY collision with native Module#include? is by bare
     #   name only, and `add_dependency 'mruby-rgss'` runs the reopening before
@@ -309,7 +306,7 @@ BC2CPP_COMPILED_GEMS = {
     # pipeline. Every eligible method (CoreMethods: not Fiber-naming, lambda-building,
     # conditional, shadowed or refused; the root-context guard covers the block-taking ones) is
     # emitted, and registered through the
-    # generated bc2cpp_register_owner_methods (no hand register.cxx to drift)
+    # generated bc2cpp_register_owner_methods
     # after the core gems that define the bytecode it replaces. Array and
     # StringIO are also engine owners: each gem emits the definitions of its own
     # source files (CodeGen#emit_unit_allows?).
