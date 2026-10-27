@@ -117,7 +117,7 @@ puts '== accepted methods'
   suite.check("#{name}: every goto left in the pruned text lands on a label it defines",
               (gotos_used.call(on[name][:code]) - labels_defined.call(on[name][:code])).empty?)
 end
-arm = /mrb_int_add_overflow\(mrb_fixnum\(r\d+\), 1, &bc2cpp_z\)/
+arm = /bc2cpp_fixnum_add\(r(\d+), mrb_fixnum_value\(1\), r\1\)/
 suite.check('route: the unreachable `r += 1 if y` arm is gone',
             !arm.match?(on['route'][:code]) && arm.match?(off['route'][:code]))
 

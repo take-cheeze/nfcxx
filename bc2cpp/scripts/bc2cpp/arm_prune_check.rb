@@ -62,7 +62,7 @@ gotos_used = ->(code) { code.scan(/goto L(\d+);/).flatten.to_set }
 
 puts '== stage A'
 suite.check('with stage B off (0) the unreachable arm keeps its text',
-            plain.include?('mrb_fixnum(r6), 1, &bc2cpp_z'))
+            plain.include?('bc2cpp_fixnum_add(r6, mrb_fixnum_value(1), r6)'))
 suite.check('stage B is on when the variable is unset (the default)',
             route_code.call(FLOW_OFF.reject { |k, _| k == 'BC2CPP_PRUNE_ARMS' }) == pruned)
 suite.check('the stage A count is positive on the fixture',
@@ -70,7 +70,7 @@ suite.check('the stage A count is positive on the fixture',
 
 puts '== stage B'
 suite.check('stage B drops the unreachable `r += 1 if y` arm',
-            plain.include?('mrb_fixnum(r6), 1, &bc2cpp_z') && !pruned.include?('mrb_fixnum(r6), 1, &bc2cpp_z'))
+            plain.include?('bc2cpp_fixnum_add(r6, mrb_fixnum_value(1), r6)') && !pruned.include?('bc2cpp_fixnum_add(r6, mrb_fixnum_value(1), r6)'))
 suite.check('stage B removes the pruned jump as well',
             plain.scan(/goto L\d+;/).size - pruned.scan(/goto L\d+;/).size == 1)
 suite.check('stage B leaves a goto only to a label the method defines',
@@ -88,7 +88,7 @@ pruned_targets = removed.keys.filter_map { |l| l[/goto (L\d+);/, 1] }
 suite.check('stage B only removes the pruned lines and adds none',
             added.empty? && removed.values.sum == 3 + pruned_targets.size &&
             removed.keys.all? do |l|
-              l.include?('mrb_fixnum(r6), 1, &bc2cpp_z') || l.include?('// operands proven Fixnum') ||
+              l.include?('bc2cpp_fixnum_add(r6, mrb_fixnum_value(1), r6)') || l.include?('// operands proven Fixnum') ||
                 l.match?(/goto L\d+;/) || pruned_targets.include?(l[/\A *(L\d+):;\n\z/, 1])
             end)
 suite.check('without the decided folds nothing is unreachable, so stage B drops nothing',

@@ -40,7 +40,9 @@ cg = CodeGen.allocate
 [0, -17, 255, 1_073_741_823].each do |value|
   suite.check("Integer #{value} emits the same overflow tier as its spelling", cg.fixnum_exact_tier('+', '1', value) == cg.fixnum_exact_tier('+', '1', value.to_s))
 end
-suite.check('register-expression rhs keeps register extraction', cg.fixnum_exact_tier('+', '1', 'r2').include?('mrb_fixnum(r2)'))
+suite.check('register-expression rhs passes the register, a literal its boxed value',
+            cg.fixnum_exact_tier('+', '1', 'r2').include?('bc2cpp_fixnum_add(r1, r2, r1)') &&
+              cg.fixnum_exact_tier('+', '1', 7).include?('bc2cpp_fixnum_add(r1, mrb_fixnum_value(7), r1)'))
 
 optional_body = Irep.new(label: 'optional', file: 'primitive_fixture.rb', nregs: 3, nlocals: 2,
                          lv: ['value'], catch_handlers: [], reps: [], pool: [], instructions: [
