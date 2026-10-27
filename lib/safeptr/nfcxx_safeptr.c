@@ -224,6 +224,9 @@ static void thread_gone(void *v)
   if (t->prev) t->prev->next = t->next; else threads = t->next;
   if (t->next) t->next->prev = t->prev;
   pthread_mutex_unlock(&sp_lock);
+  /* Other key destructors may still run instrumented code on this thread (EDG's thread_local destructors,
+     lib_src/thread_dtor.c): they must not find the record. The destructor runs on the exiting thread, so me is its own. */
+  me = NULL;
   munmap(t, sizeof *t);
 }
 
