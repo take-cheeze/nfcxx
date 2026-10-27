@@ -15,8 +15,8 @@
 #              closed build applies (HAND_REGISTRATION_GUARD): the line is wrapped
 #              in `#ifndef BC2CPP_UNREGISTERED_<entry>`. The generated code defines
 #              that macro exactly in the builds whose list leaves the entry
-#              unregistered, and a BC2CPP_UNREGISTERED_VERIFY build registers the
-#              abort stub there instead.
+#              unregistered; there the `#else` arm calls bc2cpp_left_out (LEFT_OUT,
+#              codegen_emit.rb: the verify stub, or the RESPOND_TO_PHANTOM record).
 #   --check    with --closed: change nothing, exit 1 if a listed line is not wrapped
 #              or a wrapped line is no longer listed.
 #
@@ -39,7 +39,11 @@ def wanted(list)
 end
 
 LINE = /^([ \t]*)mrb_define_(private_|class_)?method\(\s*M\s*,\s*(\w+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,[^;]*\);\n/m
-GUARDED = /^#ifndef BC2CPP_UNREGISTERED_([A-Za-z_][A-Za-z0-9_$]*)\n(.*?)^#elif defined\(BC2CPP_UNREGISTERED_VERIFY\)\n.*?^#endif\n/m
+GUARDED = /^#ifndef BC2CPP_UNREGISTERED_([A-Za-z_][A-Za-z0-9_$]*)\n(.*?)^(#else|#elif defined\(BC2CPP_UNREGISTERED_VERIFY\))\n(.*?)^#endif\n/m
+# The `#else` arm a current guard has: bc2cpp_left_out on the line's own class and name.
+def left_out_arm(indent, kind, var, name_lit)
+  "#{indent}bc2cpp_left_out(M, #{var}, \"#{name_lit}\", #{kind == 'class_'});\n"
+end
 
 root = File.expand_path('../..', __dir__)
 closed = ARGV.include?('--closed')
@@ -56,11 +60,16 @@ if closed
     src = File.read(path, encoding: 'UTF-8')
     # Unwrap first: a guard whose entry left the list goes back to a plain line.
     out = src.gsub(GUARDED) do
-      whole, entry, body = Regexp.last_match.values_at(0, 1, 2)
+      whole, entry, body, arm_kind, arm = Regexp.last_match.values_at(0, 1, 2, 3, 4)
       line = body.match(LINE)
       key = line && [StaticDispatchRegistrations.unescape(line[4]), entry]
       if key && want.include?(key)
-        whole
+        # Whitespace aside: clang-format may wrap the arm.
+        want_arm = left_out_arm(line[1], line[2], line[3], line[4])
+        next whole if arm_kind == '#else' && arm.gsub(/\s+/, '') == want_arm.gsub(/\s+/, '')
+
+        missing << "#{gem}: #{entry} (old guard)"
+        "#ifndef BC2CPP_UNREGISTERED_#{entry}\n#{body}#else\n#{want_arm}#endif\n"
       else
         stale << "#{gem}: #{entry}"
         body
@@ -74,9 +83,7 @@ if closed
 
       missing << "#{gem}: #{entry}"
       wrapped += 1
-      stub = kind == 'class_' ? 'mrb_define_class_method' : 'mrb_define_method'
-      "#ifndef BC2CPP_UNREGISTERED_#{entry}\n#{line}#elif defined(BC2CPP_UNREGISTERED_VERIFY)\n" \
-        "#{indent}#{stub}(M, #{var}, \"#{name_lit}\", bc2cpp_unregistered_stub, MRB_ARGS_ANY());\n#endif\n"
+      "#ifndef BC2CPP_UNREGISTERED_#{entry}\n#{line}#else\n#{left_out_arm(indent, kind, var, name_lit)}#endif\n"
     end
     File.write(path, out) if !check && out != src
   end

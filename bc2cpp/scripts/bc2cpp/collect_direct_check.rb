@@ -3,12 +3,14 @@
 # frozen_string_literal: true
 
 # COLLECT_DIRECT (tools/bc2cpp/codegen_collect_direct.rb): `map`/`collect` on an exact Array calls bc2cpp_ary_collect
-# instead of the compiled Enumerable#collect. NEQ_INTEGER_PAIR and POLY_INTEGER_TAG, which the startup also leans on,
+# instead of the compiled Enumerable#collect. NEQ_OP_EQ and POLY_INTEGER_TAG, which the startup also leans on,
 # have their generated-code checks in array_write_inline_check.rb; this one keeps their behaviour cases.
 #
 #   generated code (needs a host mrbc)
 #     - a literal-block `map` on an exact Array calls bc2cpp_ary_collect, and so does Array#transpose's inner map;
 #     - BC2CPP_COLLECT_DIRECT=0 keeps the Enumerable#collect call;
+#     - the helper tests the block once, before its loop, and cuts the arena back after each store
+#       (COLLECT_YIELD_HOIST);
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same for map with break/next, a block that resizes its receiver,
 #       destructuring, an Array subclass, nested maps, transpose, GC.stress, a Fiber, `[]` over Integer, bignum,
@@ -74,6 +76,7 @@ SRC = <<~'RUBY'
     def any(a); a.map { |x| x.to_s }; end
     def neq(a, b); a != b; end
     def bits(xs, i); xs.map { |x| x[i] }; end
+    def fresh(a); a.map { |x| [x, x.to_s * 2] }; end
   end
 RUBY
 
@@ -102,6 +105,15 @@ check.call("Array#transpose's inner map calls bc2cpp_ary_collect",
 check.call('no #error in the generated code', !code.include?('#error'))
 off, = generate_world('BC2CPP_COLLECT_DIRECT' => '0')
 check.call('BC2CPP_COLLECT_DIRECT=0: no bc2cpp_ary_collect', !off.include?('bc2cpp_ary_collect('))
+helper = code[/static mrb_value bc2cpp_ary_collect\(.*?^}/m].to_s
+loop_body = helper[/for \(mrb_int i = 0;.*\z/m].to_s
+check.call('bc2cpp_ary_collect decodes a compiled block before its loop',
+           helper.index('bc2cpp_block_entry(env)').to_i < helper.index('for (mrb_int i = 0;').to_i &&
+             loop_body.include?('entry(M, env, false, 1, &v)') && !loop_body.include?('bc2cpp_yield_argv'))
+check.call('bc2cpp_ary_collect cuts the arena back after each store',
+           helper.index('mrb_gc_arena_save(M)').to_i < helper.index('for (mrb_int i = 0;').to_i &&
+             loop_body.index('mrb_ary_push(M, acc, r)').to_i < loop_body.index('mrb_gc_arena_restore(M, ai)').to_i &&
+             !loop_body.include?('mrb_gc_protect'))
 
 DRIVER = <<~'RUBY'
   show = lambda do |name, &blk|
@@ -130,7 +142,8 @@ DRIVER = <<~'RUBY'
   show.call('raise') { m.squares([1, 'a']) }
   show.call('gc stress') do
     GC.stress = true if GC.respond_to?(:stress=)
-    out = m.any((1..30).to_a) + m.nested(4).flatten.map(&:to_s)
+    out = m.any((1..30).to_a) + m.nested(4).flatten.map(&:to_s) + m.fresh((1..300).to_a).last(3) +
+          [m.fresh((1..300).to_a).map(&:last).join.size]
     GC.stress = false if GC.respond_to?(:stress=)
     out
   end

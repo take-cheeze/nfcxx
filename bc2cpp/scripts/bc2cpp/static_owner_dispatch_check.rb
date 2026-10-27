@@ -9,8 +9,9 @@
 #      Bag#push, but none for OddBag's own push (two Ruby definitions take the POLY chain, not this) and none in
 #      front of a private definition (`o.first`) or an arity that does not fit (`o.push` with no argument); the arm
 #      tests mrb_class (a singleton class never matches) and the owner call is still the else;
-#      BLOCK_OWNER_ARMS: `o.each { ... }` (Bag#each yields) gets an arm passing the call's own block -- the heap RProc,
-#      or the block parameter for a block that breaks or returns -- and a block given to Bag#tag, which takes none,
+#      BLOCK_OWNER_ARMS: `o.each { ... }` (Bag#each yields) gets an arm passing the call's own block -- the frame-local
+#      block (STACK_BLOCK) while the owner call keeps the lazy heap RProc, or the block parameter for a block that breaks
+#      or returns -- and a block given to Bag#tag, which takes none,
 #      gets no block arm;
 #   2. run on a full-core mruby, compiled against interpreted: Bag, SubBag, a subclass made at run time (no arm, owner
 #      call), a Bag with a singleton class (no arm, owner call), Array (native owner), nil (NoMethodError), the
@@ -93,7 +94,7 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
   eb = body.call(code, 'eb')
   check.call('block each: STATIC_OWNER_ARMS marker', es.include?('STATIC_OWNER_ARMS :each') && eb.include?('STATIC_OWNER_ARMS :each'))
   check.call('block each: the arm passes the call\'s own block to Bag_each_impl',
-             es.match?(/Bag_each_impl\(M, r\d+, bc2cpp_blk_heap_\d+\(\)\);/) &&
+             es.match?(/Bag_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\);/) &&
              eb.match?(/Bag_each_impl\(M, r\d+, mrb_obj_value\(bc2cpp_blk_proc_\d+\)\);/))
   check.call('block each: the block owner call stays as the else',
              es.match?(/bc2cpp_owner_call\(M, r\d+, \d+, 0, BC2CPP_OWNERS\([^)]*\), bc2cpp_blk_heap_\d+\(\), 0\)/))

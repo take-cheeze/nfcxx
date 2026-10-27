@@ -81,6 +81,28 @@ module CoreDefs
     end
   end
 
+  # CORE_UNSEEN_DEFINERS: a listed name must also count the Ruby definers the registry leaves out, or MONO binds a
+  # plain Array's `map` to the program's lone Array-subclass `map` (docs/bc2cpp-core-definers.md). An unlisted name
+  # stays absent, so its core-only proofs are unchanged. Returns the names flipped from MONO.
+  def add_unseen_placeholders!(registry, ireps, core_defs, alias_sites, outside_names)
+    unseen = Set.new(outside_names)
+    core_defs.each { |d| unseen << d.name unless registry[d.name]&.any? { |r| r.owner == d.owner && r.irep == d.irep } }
+    alias_sites.each do |site|
+      next unless core_source?(ireps.fetch(site[:irep]).file)
+
+      unseen << site[:new] unless registry[site[:new]]&.any? { |r| r.owner == site[:owner] }
+    end
+    flipped = []
+    unseen.each do |name|
+      defs = registry[name]
+      next if defs.nil? || defs.empty? || defs.any? { |d| d.owner == '<native>' }
+
+      flipped << name if defs.size == 1
+      defs << MethodDef.new(name: name, owner: '<native>', irep: nil, visibility: :public)
+    end
+    flipped
+  end
+
   # mruby-enumerator runs Enumerator#next and the generators on a Fiber.
   def fiber_gem?(file)
     file.to_s.include?('/mruby-enumerator/')
