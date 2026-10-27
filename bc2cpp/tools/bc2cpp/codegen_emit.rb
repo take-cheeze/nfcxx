@@ -922,8 +922,7 @@ class CodeGen
   def self.respond_to_phantom_runtime
     <<~'CPP'
         #define BC2CPP_RESPOND_TO_PHANTOM 1
-        // Keyed by the symbol's number: mruby hashes a Symbol key as U32(mrb_fixnum(key)), and under 64-bit word
-        // boxing that drops the id (it sits above bit 32), so a Symbol-keyed table this size is one bucket.
+        // Keyed by the symbol's number, which hashes by value under every boxing and every mruby pin.
         [[maybe_unused]] static mrb_value bc2cpp_phantom_table(mrb_state* M) {
           return mrb_iv_get(M, mrb_obj_value(M->kernel_module), mrb_intern_lit(M, "__bc2cpp_left_out__"));
         }
