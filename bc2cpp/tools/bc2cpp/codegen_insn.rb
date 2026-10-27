@@ -206,7 +206,7 @@ class CodeGen
       d = insn.reg
       ivar = insn.ivar
       klass = self_class(owner_def)
-      code = ivar_get_code(klass, 'self', ivar, "r#{d}", self_of_klass: true)
+      code = ivar_get_code(klass, 'self', ivar, "r#{d}", self_of_klass: true, irep_label: irep&.label)
       type = embed_type(klass, ivar) if klass
       if code.nil?
         "  #error GETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"

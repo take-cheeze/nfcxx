@@ -423,6 +423,11 @@ class ClosedWorld
     @dynamic_removal || @removed_names.include?(name)
   end
 
+  # A literal `undef`/`remove_method`/`undef_method` names +name+ (method_removed? without the computed case).
+  def method_removed_literally?(name)
+    @removed_names.include?(name)
+  end
+
   # MODULE_INCLUDERS: the classes a module's includers are drawn from (the declared classes), or nil when an includer
   # may be one the program does not declare: the world is open (known_subclasses), the module is rebound, or a native
   # or outside Ruby source names it (an `include` there is not in the registry). The caller checks each candidate's

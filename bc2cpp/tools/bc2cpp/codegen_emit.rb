@@ -349,7 +349,10 @@ class CodeGen
       impl = "#{base}_impl"
       entry = base
       field = "((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}"
-      value = type == :value ? "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})" : "#{ops[:box]}(#{field})"
+      value = if type != :value then "#{ops[:box]}(#{field})"
+              elsif slot_reader_assured?(owner, ivar) then field
+              else "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})"
+              end
       code = <<~CPP
         // #{owner}##{ivar} -- synthesized attr_reader override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
