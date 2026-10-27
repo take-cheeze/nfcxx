@@ -1840,8 +1840,8 @@ class CodeGen
     out
   end
 
-  # The uncached GETCONST lookup: resolve the owner's lexical scope chain, probe
-  # each scope innermost-first, fall back to Object. `d` is the destination
+  # The uncached GETCONST lookup: resolve the owner's lexical scope chain, then
+  # look the name up in mrb_vm_const_get's order (emit_const_lookup_helper). `d` is the destination
   # register number (a string). Used at ordinary sites and as the slow path of a
   # CONST_SITE_CACHE helper (which passes d = "0").
   def const_lookup_block(d, name, owner_path)
@@ -1871,12 +1871,12 @@ class CodeGen
         out << "  mrb_value scope#{i} = mrb_const_get(M, #{current}, mrb_intern_cstr(M, \"#{seg}\"));\n"
         current = "scope#{i}"
       end
-      out << "  mrb_bool ok = FALSE;\n  mrb_value result = mrb_nil_value();\n"
+      out << "  mrb_value result;\n"
       (owner_path.size - 1).downto(0) do |i|
-        out << "  if (!ok) result = bc2cpp_const_try(M, scope#{i}, name, &ok);\n"
+        out << "  if (bc2cpp_const_own(M, scope#{i}, name, &result)) return result;\n"
       end
-      out << "  if (!ok) result = mrb_const_get(M, mrb_obj_value(M->object_class), name);\n"
-      out << "  return result;\n}\n"
+      out << "  if (bc2cpp_const_own(M, mrb_obj_value(M->object_class), name, &result)) return result;\n"
+      out << "  return bc2cpp_const_inherited(M, scope#{owner_path.size - 1}, name);\n}\n"
     end
     out
   end

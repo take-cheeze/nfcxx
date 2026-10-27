@@ -217,8 +217,8 @@ class CodeGen
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
     @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.
-    # Set when a compiled method needs bc2cpp_const_get_or_object;
-    # emit_const_lookup_helper emits it (and mruby/error.h) only then.
+    # Set when a compiled method needs a lexical constant lookup;
+    # emit_const_lookup_helper emits its helpers only then.
     @const_lookup_helper_used = false
     # NATIVE_CONSTRUCT_TARGETS keys actually used; read by
     # emit_native_construct_decls.
