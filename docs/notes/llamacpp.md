@@ -50,7 +50,9 @@ What it took (docs/notes/gpu.md, "Launch path", has the details):
 Known failures (the KNOWN list of `run.sh`):
 
 1. **MUL_MAT**: f16 with n=4 and n=8 gives wrong values (mmvf's half accumulation; n=1..3, 5..7 pass), and the
-   mul_mat_q (mmq) kernels fail to launch ("unspecified launch failure"); **MUL_MAT_ID** stops at the same mmq launch.
+   mul_mat_q (mmq) kernel (`mul_mat_q<GGML_TYPE_Q4_0, 16, true>`, n > 8) makes an illegal memory access; **MUL_MAT_ID**
+   stops at the same kernel. Its "unspecified launch failure" before was quantize_mmq_q8_1's float-to-integer trap
+   (NaN for a block of zeros), now the GPU's conversion (docs/notes/gpu.md, "Float to integer").
 2. **CONV_2D, CONV_3D, FLASH_ATTN_EXT**: an illegal memory access, not looked at yet.
 
 ## Flags
