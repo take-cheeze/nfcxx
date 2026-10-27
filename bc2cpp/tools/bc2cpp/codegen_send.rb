@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
 require_relative 'bytecode_ir_containers'
 
 # CodeGen: compile_send and const/owner caches.

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
+
 # CodeGen: POLY_SMALL_N chains, ivar access and outlined index helpers.
 
 class CodeGen

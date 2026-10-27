@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
 require_relative 'fixpoint'
 require_relative 'numeric_flow'
 require_relative 'bytecode_ir_regions'

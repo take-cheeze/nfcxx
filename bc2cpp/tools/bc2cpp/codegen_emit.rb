@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
+
 # CodeGen: per-method compile state and file-level emission.
 
 class CodeGen

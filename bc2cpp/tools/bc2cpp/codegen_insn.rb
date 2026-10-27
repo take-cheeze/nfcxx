@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
+
 # CodeGen: compile_insn and comparisons.
 
 class CodeGen
