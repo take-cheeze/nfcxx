@@ -58,6 +58,8 @@ void __nfcxx_sycl_fence(int order, int scope);
 // sub-group shuffles (OpGroupNonUniformShuffle, ShuffleXor in the OpenCL module): the word of lane src, of lane (lane ^ mask)
 unsigned __nfcxx_sycl_sg_shuffle_u32(unsigned w, unsigned src);
 unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
+// the lanes of the caller's sub-group: 16, or the kernel's [[sycl::reqd_sub_group_size(N)]] (OpenCL SubgroupSize builtin)
+unsigned __nfcxx_sycl_sg_size(void);
 float __nfcxx_sycl_fn1(int op, float x);  // math builtins; op is a literal: see SYCL_MATH in scripts/pathb-wgsl-emit.rb
 float __nfcxx_sycl_fn2(int op, float x, float y);
 float __nfcxx_sycl_fn3(int op, float x, float y, float z);
@@ -340,15 +342,23 @@ inline multi_ptr<T, AS, Dec> make_ptr(T *p) { return multi_ptr<T, AS, Dec>(p); }
 
 template <class T, int N> class vec;
 
-// A sub-group has 16 lanes (detail::kSubGroupSize: the Intel default that ggml uses; the work-groups of a kernel that uses
-// sub-groups are multiples of it). Lane k of sub-group j is the work-item with local linear id 16j+k. The exchanges are real:
-// on the device they are the sub-group shuffles of the OpenCL module (scripts/pathb-spirv-emit.rb gives such a kernel the
-// SubgroupSize 16 execution mode); on the host the work-items of a group, which run as fibers, swap the words through the
-// group's scratch words, with a barrier before and after each swap.
+// A sub-group has n lanes, detail::sg_size(): 16 (detail::kSubGroupSize, the Intel default that ggml uses), or on the device
+// the N of the kernel's [[sycl::reqd_sub_group_size(N)]] (ggml-sycl's flash-attention tile kernels: 32). The work-groups of a
+// kernel that uses sub-groups are multiples of n. Lane k of sub-group j is the work-item with local linear id nj+k. The
+// exchanges are real: on the device they are the sub-group shuffles of the OpenCL module (scripts/pathb-spirv-emit.rb gives
+// such a kernel the SubgroupSize n execution mode); on the host (n = 16) the work-items of a group, which run as fibers, swap
+// the words through the group's scratch words, with a barrier before and after each swap.
 namespace detail {
 constexpr unsigned kSubGroupSize = 16;
-inline unsigned sg_shuffle32(unsigned w, unsigned src);       // the word of lane src (0..15) of the caller's sub-group
-inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask);  // the word of lane (lane ^ mask), mask 0..15
+inline unsigned sg_size() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return __nfcxx_sycl_sg_size();
+#else
+  return kSubGroupSize;
+#endif
+}
+inline unsigned sg_shuffle32(unsigned w, unsigned src);       // the word of lane src (0..n-1) of the caller's sub-group
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask);  // the word of lane (lane ^ mask), mask 0..n-1
 // x of any trivially copyable type, moved word by word
 template <class T> inline T sg_shuffle(T x, unsigned src) {
   constexpr size_t n = (sizeof(T) + 3) / 4;
@@ -363,7 +373,7 @@ template <class T> inline T sg_shuffle_xor(T x, unsigned mask) {
   constexpr size_t n = (sizeof(T) + 3) / 4;
   unsigned w[n] = {};
   std::memcpy(w, &x, sizeof(T));
-  for (size_t i = 0; i < n; i++) w[i] = sg_shuffle_xor32(w[i], mask & 15);
+  for (size_t i = 0; i < n; i++) w[i] = sg_shuffle_xor32(w[i], mask);
   T r;
   std::memcpy(&r, w, sizeof(T));
   return r;
@@ -372,15 +382,18 @@ template <class T> inline T sg_shuffle_xor(T x, unsigned mask) {
 
 class sub_group {
  public:
-  sub_group() : lane_(0), sg_(0), nsg_(1) {}
+  sub_group() : lane_(0), sg_(0), nsg_(1), n_(detail::kSubGroupSize) {}
   // lin: the work-item's local linear id, wg: the work-group size
-  sub_group(size_t lin, size_t wg)
-      : lane_(lin % detail::kSubGroupSize), sg_(lin / detail::kSubGroupSize), nsg_((wg + detail::kSubGroupSize - 1) / detail::kSubGroupSize) {}
+  sub_group(size_t lin, size_t wg) : n_(detail::sg_size()) {
+    lane_ = lin % n_;
+    sg_ = lin / n_;
+    nsg_ = (wg + n_ - 1) / n_;
+  }
   id<1> get_local_id() const { return id<1>(lane_); }
   size_t get_local_linear_id() const { return lane_; }
-  range<1> get_local_range() const { return range<1>(detail::kSubGroupSize); }
-  range<1> get_max_local_range() const { return range<1>(detail::kSubGroupSize); }
-  size_t get_local_linear_range() const { return detail::kSubGroupSize; }
+  range<1> get_local_range() const { return range<1>(n_); }
+  range<1> get_max_local_range() const { return range<1>(n_); }
+  size_t get_local_linear_range() const { return n_; }
   id<1> get_group_id() const { return id<1>(sg_); }
   size_t get_group_linear_id() const { return sg_; }
   range<1> get_group_range() const { return range<1>(nsg_); }
@@ -401,7 +414,7 @@ class sub_group {
   template <class T> void store(T *p, const T &x) const { *p = x; }
 
  private:
-  size_t lane_, sg_, nsg_;
+  size_t lane_, sg_, nsg_, n_;
 };
 
 template <int D = 1> class nd_item {
@@ -443,13 +456,13 @@ template <int D = 1> class nd_item {
 };
 
 // the lanes of the caller's sub-group exchange values; every lane must reach each of these (the sub-group is collective)
-template <class T> inline T select_from_group(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)(i[0] & 15)); }
+template <class T> inline T select_from_group(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)i[0]); }
 template <class T> inline T group_broadcast(sub_group, T x) { return detail::sg_shuffle(x, 0u); }
-template <class T> inline T group_broadcast(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)(i[0] & 15)); }
+template <class T> inline T group_broadcast(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)i[0]); }
 // the value of lane lane + delta (or of the caller itself when that lane is past the end)
 template <class T> inline T shift_group_left(sub_group sg, T x, unsigned delta = 1) {
   unsigned lane = (unsigned)sg.get_local_linear_id();
-  return detail::sg_shuffle(x, lane + delta < detail::kSubGroupSize ? lane + delta : lane);
+  return detail::sg_shuffle(x, lane + delta < sg.get_local_linear_range() ? lane + delta : lane);
 }
 // the value of lane lane - delta (or of the caller itself when that lane is before the start)
 template <class T> inline T shift_group_right(sub_group sg, T x, unsigned delta = 1) {
@@ -457,28 +470,28 @@ template <class T> inline T shift_group_right(sub_group sg, T x, unsigned delta 
   return detail::sg_shuffle(x, lane >= delta ? lane - delta : lane);
 }
 template <class T> inline T permute_group_by_xor(sub_group, T x, unsigned mask) { return detail::sg_shuffle_xor(x, mask); }
-// butterfly over the 16 lanes: after the xor steps 8, 4, 2, 1 every lane holds the whole sum (op commutative, as SYCL requires)
-template <class T, class Op> inline T reduce_over_group(sub_group, T x, Op op) {
-  for (unsigned m = detail::kSubGroupSize / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
+// butterfly over the n lanes: after the xor steps n/2, ..., 2, 1 every lane holds the whole sum (op commutative, as SYCL requires)
+template <class T, class Op> inline T reduce_over_group(sub_group sg, T x, Op op) {
+  for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
   return x;
 }
-// Hillis-Steele: after the steps 1, 2, 4, 8 lane k holds the combination of lanes 0..k
+// Hillis-Steele: after the steps 1, 2, 4, ..., n/2 lane k holds the combination of lanes 0..k
 template <class T, class Op> inline T inclusive_scan_over_group(sub_group sg, T x, Op op) {
   unsigned lane = (unsigned)sg.get_local_linear_id();
-  for (unsigned d = 1; d < detail::kSubGroupSize; d <<= 1) {
+  for (unsigned d = 1; d < sg.get_local_linear_range(); d <<= 1) {
     T y = shift_group_right(sg, x, d);
     if (lane >= d) x = op(y, x);
   }
   return x;
 }
-inline bool any_of_group(sub_group, bool p) {
+inline bool any_of_group(sub_group sg, bool p) {
   unsigned r = p ? 1u : 0u;
-  for (unsigned m = detail::kSubGroupSize / 2; m > 0; m >>= 1) r |= detail::sg_shuffle_xor(r, m);
+  for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r |= detail::sg_shuffle_xor(r, m);
   return r != 0;
 }
-inline bool all_of_group(sub_group, bool p) {
+inline bool all_of_group(sub_group sg, bool p) {
   unsigned r = p ? 1u : 0u;
-  for (unsigned m = detail::kSubGroupSize / 2; m > 0; m >>= 1) r &= detail::sg_shuffle_xor(r, m);
+  for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r &= detail::sg_shuffle_xor(r, m);
   return r != 0;
 }
 inline bool none_of_group(sub_group sg, bool p) { return !any_of_group(sg, p); }
@@ -1238,8 +1251,8 @@ inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask) {
 #else
 namespace detail {
 inline void barrier_on_host() {}   // never called on the device: nd_item::barrier lowers to __nfcxx_sycl_barrier
-inline unsigned sg_shuffle32(unsigned w, unsigned src) { return __nfcxx_sycl_sg_shuffle_u32(w, src & 15); }
-inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask) { return __nfcxx_sycl_sg_shuffle_xor_u32(w, mask & 15); }
+inline unsigned sg_shuffle32(unsigned w, unsigned src) { return __nfcxx_sycl_sg_shuffle_u32(w, src & (sg_size() - 1)); }
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask) { return __nfcxx_sycl_sg_shuffle_xor_u32(w, mask & (sg_size() - 1)); }
 }  // namespace detail
 #endif
 

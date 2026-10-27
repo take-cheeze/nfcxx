@@ -328,6 +328,7 @@ SYCL_VALUES = {
   "__nfcxx_sycl_grange_x" => "args.gsize.x", "__nfcxx_sycl_grange_y" => "args.gsize.y", "__nfcxx_sycl_grange_z" => "args.gsize.z",
   "__nfcxx_sycl_lrange_x" => "WGX", "__nfcxx_sycl_lrange_y" => "WGY", "__nfcxx_sycl_lrange_z" => "WGZ",
   "__nfcxx_sycl_closure" => "0xc0000000u", "__nfcxx_sycl_local_base" => "0x40000000u",
+  "__nfcxx_sycl_sg_size" => "16u",   # the lanes of a sub-group (WGSL has no sub-group operations here: the shim's 16)
   "__nfcxx_sycl_scratch" => "(0x40000000u + WG_WORDS * 4u)",
 }
 

@@ -641,6 +641,7 @@ SUBGROUP_SIZE = 16   # the fixed sub-group size of the OpenCL module (lib/sycl: 
 BUILTIN_WORKGROUP_ID = 26
 BUILTIN_LOCAL_INVOCATION_ID = 27
 BUILTIN_GLOBAL_INVOCATION_ID = 28
+BUILTIN_SUBGROUP_SIZE = 36
 DEC_BUILTIN = 11
 DEC_SPEC_ID = 1
 DEC_BLOCK = 2
@@ -898,6 +899,15 @@ class Spv
     end
   end
 
+  # a 32-bit scalar builtin input (the sub-group size)
+  def builtin_input_u32(builtin)
+    memo([:builtin_u32, builtin]) do
+      v = var(SC_INPUT, t_ptr(SC_INPUT, t_int(32)))
+      ann([71, v, DEC_BUILTIN, builtin])
+      v
+    end
+  end
+
   def push_var
     memo([:push]) do
       u64 = t_int(64)
@@ -967,6 +977,7 @@ end
 class SpvModule
   attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
   attr_accessor :stack_bytes, :fns, :fns_wgs, :defs, :subgroup_used, :wgs, :wgs_total, :wgs_var
+  attr_accessor :sg_size_var   # the SubgroupSize builtin input, once a function reads it
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -1978,6 +1989,12 @@ class SFn
       m = u32_of(operand(args[1])[0], ["int", 4, false, false])
       op = name.end_with?("_xor_u32") ? 5574 : 5571   # OpSubgroupShuffleXorINTEL, OpSubgroupShuffleINTEL
       return [res(op, @spv.t_int(32), v, m), ["int", 4, false, false]]
+    when "__nfcxx_sycl_sg_size"
+      # the lanes of the caller's sub-group: the OpenCL SubgroupSize builtin (16, or the kernel's reqd_sub_group_size, see
+      # emit_module); the Vulkan module has no sub-group operations, so the shim's 16
+      return [@spv.c_u32(SUBGROUP_SIZE), ["int", 4, false, false]] unless @mod.kernel_cl
+      @mod.sg_size_var ||= @spv.builtin_input_u32(BUILTIN_SUBGROUP_SIZE)
+      return [res(61, @spv.t_int(32), @mod.sg_size_var), ["int", 4, false, false]]
     when "__nfcxx_sycl_barrier"
       ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(@mod.kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)])
       return nil
@@ -2492,9 +2509,12 @@ def emit_module(src, kernel_cl = false)
   forms = parse_forms(tokenize(strip_comments(src)))
   mod = Mod.new
   sizes = {}
+  kernel_sg = {}   # function name => the sub-group size its [[sycl::reqd_sub_group_size(N)]] asks for (be/nfcxx_ir.c)
   forms.each do |f|
     h = head_of(f)
-    if h == "function"
+    if h == "sycl-kernel-attr"
+      f.drop(2).each { |a| kernel_sg[f[1].to_s] = as_int(a[1]) if head_of(a) == "reqd-sub-group-size" }
+    elsif h == "function"
       mod.defs[f[1].to_s] = f
     elsif h == "abi-type"
       sizes[f[1].to_s] = as_int(f[2])
@@ -2625,6 +2645,7 @@ def emit_module(src, kernel_cl = false)
     smod.fns_wgs[n].function_text.each { |inst| spv.func(inst) }
   end
   iface = kernel_cl ? [smod.gid, smod.lid, smod.wid] : [smod.gid, smod.lid, smod.wid, smod.sp, smod.dead, smod.push]
+  iface += [smod.sg_size_var] if smod.sg_size_var
   manifest = []
   entries.each_with_index do |e, k|
     f = smod.fns_wgs.key?(e) ? smod.fns_wgs[e] : fns[e]
@@ -2642,13 +2663,18 @@ def emit_module(src, kernel_cl = false)
     # a kernel that reaches a sub-group shuffle (directly called functions: the device code has no indirect calls; a static
     # entry runs the clones) gets the SubgroupSize execution mode and its manifest line the size, which the runtimes check
     # (rt_opencl.hpp, rt_level_zero.hpp: whole sub-groups). Any other kernel takes any work-group size.
-    sg = reach.call(e).any? { |n| (static_entries.include?(e) ? smod.fns_wgs[n] : fns[n])&.sg_used }
+    reached = reach.call(e)
+    sg = reached.any? { |n| (static_entries.include?(e) ? smod.fns_wgs[n] : fns[n])&.sg_used }
+    # the sub-group size: 16 (the Intel default that ggml uses), or what the kernel's [[sycl::reqd_sub_group_size(N)]] asks
+    # for (ggml-sycl's flash-attention tile kernels: 32); the host picks work-group sizes that are multiples of it
+    asked = reached.map { |n| kernel_sg[n] }.compact.uniq
+    raise Refused, "kernel #{e}: its functions ask for different sub-group sizes (#{asked.join(", ")})" if asked.length > 1
+    sgsz = asked.first || SUBGROUP_SIZE
     if sg
-      # the sub-group size is fixed at 16 (the Intel default that ggml uses); the host picks work-group sizes that are multiples of it
       spv.cap(58)                        # SubgroupDispatch: the SubgroupSize execution mode needs it
-      spv.entry_mode(wr.fid, 35, SUBGROUP_SIZE)
+      spv.entry_mode(wr.fid, 35, sgsz)
     end
-    manifest << "k#{k}\t#{key}\t#{sizes[struct] || 0}" + (sg ? "\t#{SUBGROUP_SIZE}" : "")
+    manifest << "k#{k}\t#{key}\t#{sizes[struct] || 0}" + (sg ? "\t#{sgsz}" : "")
   end
   static_bytes = 0
   if mod.statics.size > 0 || !mod.static_order.empty?

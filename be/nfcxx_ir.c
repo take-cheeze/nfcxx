@@ -3427,6 +3427,35 @@ static ir_val ir_builtin_overflow(an_expr_node_ptr e, int op, int pred)
   }
 }
 
+/* SYCL kernel attributes: the top-level form (sycl-kernel-attr "NAME" (reqd-sub-group-size N)) after the function NAME, for
+   [[sycl::reqd_sub_group_size(N)]] (a form of its own, which the other emitters skip). The attribute of a kernel lambda
+   follows its parameters, so it appertains to the call operator's type (al_post_func); on a function it is the routine's.
+   EDG knows the attribute only in this harness (scripts/setup-pathb.sh adds it to the attribute table: namespace sycl,
+   one integral constant, evaluated in the template instance); the SPIR-V emitter runs the kernel with N-lane sub-groups. */
+static void ir_kernel_attrs(a_routine_ptr rout)
+{
+  an_attribute_ptr lists[3];
+  a_type_ptr t = rout->type;
+  int k;
+  lists[0] = rout->source_corresp.attributes;
+  lists[1] = t != NULL ? t->source_corresp.attributes : NULL;
+  t = t != NULL ? skip_typerefs(t) : NULL;
+  lists[2] = t != NULL && t != rout->type ? t->source_corresp.attributes : NULL;
+  for (k = 0; k < 3; k++) {
+    an_attribute_ptr ap;
+    for (ap = lists[k]; ap != NULL; ap = ap->next) {
+      an_attribute_arg_ptr a = ap->arguments;
+      if (ap->name == NULL || strcmp(ap->name, "reqd_sub_group_size") != 0) continue;
+      if (ap->namespace_name == NULL || strcmp(ap->namespace_name, "sycl") != 0) continue;
+      if (a == NULL || a->kind != aak_constant || a->variant.constant == NULL || a->variant.constant->kind != ck_integer) continue;
+      fputs("(sycl-kernel-attr ", nf_out);
+      nf_put_quoted_name(ir_rout_name(rout));
+      fprintf(nf_out, " (reqd-sub-group-size %s))\n", ir_capture_constant(a->variant.constant));
+      return;
+    }
+  }
+}
+
 /* The constant integer value of a built-in's argument, or -1 when it is not an integer constant. */
 static long long ir_const_arg(an_expr_node_ptr n)
 {
@@ -6594,6 +6623,7 @@ static void ir_function(a_routine_ptr rout)
   }
   ir_fact_forget();
   fputs(")\n", nf_out);
+  ir_kernel_attrs(rout);
   ir_buf_end(&ir_out_funcs);
 
   ir_buf_close(&hdr);

@@ -2225,10 +2225,10 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
         o.refusal = "data #{f[1]}: #{e.message}"
         objs << o
       end
-    elsif h == "abi-type" || h == "x87-thunk"
+    elsif h == "abi-type" || h == "x87-thunk" || h == "sycl-kernel-attr"
       # for the QBE emitter only: the C ABI shape of an aggregate passed or returned by value, and the assembly thunks of
       # long double calls. This emitter refuses such a parameter, result, argument or call where it is used (in the
-      # function, with its line), not here
+      # function, with its line), not here; sycl-kernel-attr is a SYCL kernel's attributes, for the SPIR-V emitter
       next
     else
       raise Refused, "top-level form #{h || form_text(f)}"
