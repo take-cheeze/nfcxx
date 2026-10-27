@@ -566,13 +566,13 @@ class CodeGen
         # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
         # (lexical scope, name); it runs the ordinary lookup until it finds a
         # class/module (any value for CONST_VALUE_CACHE), then returns the stored value.
-        @const_site_cache ||= {}
-        key = [owner_path, name]
-        unless @const_site_cache.key?(key)
-          @const_site_cache[key] = { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path),
-                                     value: value_const }
-        end
-        return "  r#{d} = bc2cpp_cconst_#{@const_site_cache[key][:index]}(M);\n"
+        return "  r#{d} = bc2cpp_cconst_#{const_site_slot(owner_path, name, value: value_const)}(M);\n"
+      end
+      owners = self.class.const_bindings&.[](name)
+      if owners && (owner_path == ['Object'] || owner_path.all? { |seg| immutable_constant?(seg) })
+        # CONST_BINDING_CACHE: see tools/bc2cpp/const_site_cache.rb. Stored once every binding and the scopes the
+        # lookup walks exist; the scopes' own names are never rebound.
+        return "  r#{d} = bc2cpp_cconst_#{const_site_slot(owner_path, name, paths: owners)}(M);\n"
       end
 
       const_lookup_block(d, name, owner_path)
@@ -592,6 +592,12 @@ class CodeGen
       # the hot `case cmd.code when Cmd::X` shape.
       if (value = self.class.integer_constant_values&.[](name))
         return "  r#{d} = mrb_fixnum_value(#{value});\n"
+      end
+
+      if immutable_constant?(name) && constant_scope_register?(irep, idx, d)
+        # CONST_BINDING_CACHE: a binding in the receiver's own table is the one mrb_const_get returns, and an
+        # immutable one never changes; the receiver came from a constant that is never rebound, so it stays alive.
+        return "  r#{d} = bc2cpp_mcnst_#{const_member_slot(name)}(M, r#{d});\n"
       end
 
       "  r#{d} = mrb_const_get(M, r#{d}, mrb_intern_cstr(M, \"#{name}\"));\n"

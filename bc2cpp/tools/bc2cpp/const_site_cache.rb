@@ -5,6 +5,8 @@ require_relative 'bytecode_ir_containers'
 require_relative 'source_text'
 require_relative 'scan_cache'
 require_relative 'unique_class_names'
+require_relative 'lexical_consts'
+require_relative 'integer_constants'
 
 # CONST_SITE_CACHE: a GETCONST inside a namespaced owner resolves its lexical
 # scope chain on every execution -- one mrb_const_get per owner path segment,
@@ -212,5 +214,85 @@ module StableClassConstants
     end
     foreign_reassigned = foreign_reassigned_names(foreign_paths)
     native_class_module_names(native_paths).reject { |name| assigned.include?(name) || foreign_reassigned.include?(name) }.to_set
+  end
+end
+
+# CONST_BINDING_CACHE: the per-site cache for a bare name bound at several paths (`RGSS::Window` and
+# `RPG2k::Window`, a `SCREEN_W` in every scene class). Each binding is fixed once made: a class/module statement never
+# rebinds, and the one SETCONST of a path runs at most once. analyze gives each such name the owner paths of all its
+# bindings ('' is the top level). Once every binding exists, a lookup cannot change its answer (the scopes it walks
+# and their superclasses are fixed, and no binding is left to appear), so the cache stores a result only then. A name
+# qualifies when
+#   - every class/module statement for it opens a known path (UniqueClassNames.bytecode_class_paths);
+#   - every SETCONST of it has a known lexical scope (LexicalConsts) in a body that runs once: the root or a
+#     class/module body, with no backward branch; each path has one binding;
+#   - nothing else binds it: no SETMCNST, no native or foreign definition, no const_set/remove_const or string
+#     eval in the program (ClosedWorld#constants_static?, passed as +static+);
+#   - an include cannot reorder its bindings: no owner is prepended or included anywhere but Object, at most one
+#     owner is mixed into Object (Kernel counts), and no mixin is unresolved.
+module ConstBindings
+  module_function
+
+  def analyze(ireps, root_label, native_paths, foreign_paths, static:, included: {}, prepended: {}, unknown_mixins: [])
+    return {} unless static && root_label && native_paths && foreign_paths && unknown_mixins.empty?
+
+    paths = Hash.new { |hash, name| hash[name] = [] }
+    refused = Set.new
+    UniqueClassNames.bytecode_class_paths(ireps, root_label).each do |name, fulls|
+      fulls.each do |full|
+        next refused << name unless full.is_a?(String)
+
+        paths[name] << (full == name ? '' : full.delete_suffix("::#{name}"))
+      end
+    end
+    once = run_once_bodies(ireps, root_label)
+    sites = LexicalConsts.analyze(ireps, static: true).site_keys
+    ireps.each do |label, irep|
+      looped = backward_branch?(irep)
+      BytecodeIR.for(irep).each_with_op(:SETCONST, :SETMCNST) do |insn, _idx|
+        name = insn.op == :SETCONST ? insn.const_name : insn.mcnst_name
+        key = insn.op == :SETCONST && sites[insn]
+        next refused << name unless key && once.include?(label) && !looped
+
+        paths[name] << (key == name ? '' : key.delete_suffix("::#{name}"))
+      end
+    end
+    outside = IntegerConstants.native_defined_const_names(native_paths) |
+              IntegerConstants.foreign_const_names(foreign_paths) |
+              StableClassConstants.native_class_module_names(native_paths)
+    # Kernel is mixed into Object natively, after the program's own includes.
+    object_mixins = Array(included['Object']).to_set << 'Kernel'
+    elsewhere = (included.reject { |owner, _| owner == 'Object' }.values + prepended.values).flatten.to_set
+    paths.each_with_object({}) do |(name, owners), out|
+      next if refused.include?(name) || outside.include?(name) || owners.uniq.size != owners.size
+
+      mixed = owners.map { |owner| [owner, owner.split('::').last] }
+      next if mixed.any? { |forms| forms.any? { |f| elsewhere.include?(f) } }
+      next if mixed.count { |forms| forms.any? { |f| object_mixins.include?(f) } } > 1
+
+      out[name] = owners.sort.freeze
+    end
+  end
+
+  # The root irep and the class/module bodies reached from it through bodies with no backward branch: each runs
+  # once, when its statement does.
+  def run_once_bodies(ireps, root_label)
+    seen = Set.new
+    work = [root_label]
+    until work.empty?
+      label = work.pop
+      next unless seen.add?(label)
+
+      irep = ireps.fetch(label)
+      work.concat(BytecodeIR.class_bodies(irep, :CLASS, :MODULE).values.compact) unless backward_branch?(irep)
+    end
+    seen
+  end
+
+  def backward_branch?(irep)
+    BytecodeIR.for(irep).each_source.any? do |insn, _idx|
+      target = insn.branch_target
+      target && target <= insn.addr
+    end
   end
 end
