@@ -58,6 +58,8 @@ if ! NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 NFCXX_GCC_PASSTHROUGH= NFCXX_QBE_TRY= 
   note "gcc $src: $(cut -c1-200 <<<"${why:-the qbe compile failed without a message}")"
   exit 0
 fi
+# NFCXX_QBE_KEEP=PATH (development, scripts/qbe-file-check.sh): a copy of the qbe object, whatever the verdict
+[ -z "${NFCXX_QBE_KEEP:-}" ] || cp "$tmp/q.o" "$NFCXX_QBE_KEEP"
 
 # symbols: "name binding type section-kind visibility" for globals and weak symbols; undefined ones separately. The
 # tail of an objdump -t line is "SIZE [.hidden|.protected|.internal] NAME".

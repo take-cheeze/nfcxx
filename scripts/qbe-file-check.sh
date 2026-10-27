@@ -11,7 +11,9 @@ out=$dir/out-nfcc
 cmdfile=$out/$(dirname "$obj")/.$(basename "$obj").cmd
 [ -f "$cmdfile" ] || { echo "qbe-file-check: no compile flags for $obj in $out (build the kernel first)" >&2; exit 2; }
 src=$(sed -n '1s/^savedcmd_[^ ]* := //p' "$cmdfile" | tr ' ' '\n' | grep '\.c$' | tail -1)
-read -ra w <<< "$(sed -n '1s/^savedcmd_[^ ]* := //p' "$cmdfile" | sed 's/ *; *\.\/tools.*//')"
+# the command line is the shell's (kbuild's own .cmd file, from this build): its quotes are words' quotes, as in
+# -DKBUILD_MODNAME='"process"'
+eval "w=($(sed -n '1s/^savedcmd_[^ ]* := //p' "$cmdfile" | sed 's/ *; *\.\/tools.*//'))"
 args=()
 for ((i = 1; i < ${#w[@]}; i++)); do
   case ${w[i]} in
