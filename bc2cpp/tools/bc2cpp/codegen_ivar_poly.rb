@@ -237,6 +237,12 @@ class CodeGen
 
   # nil: use the runtime ivar API, which routes through an RData slot descriptor
   # when present and falls back to iv_tbl for dynamic names.
+  # Does `klass` keep @ivar in storage other than `owner`'s? A class folded into `owner`'s family (EMBED_FAMILY) shares
+  # its struct.
+  def own_ivar_storage?(klass, owner, ivar)
+    embed_type(klass, ivar) && embed_storage_owner(klass) != embed_storage_owner(owner)
+  end
+
   def ivar_embed_type(klass, ivar)
     return embed_type(klass, ivar) if klass
 
@@ -297,7 +303,7 @@ class CodeGen
       if t.kind == :ivar_accessor && t.irep.nil?
         subs = subs.reject do |s|
           k = s
-          k = @superclass_of[k] until k == t.owner || embed_type(k, name.chomp('='))
+          k = @superclass_of[k] until k == t.owner || own_ivar_storage?(k, t.owner, name.chomp('='))
           k != t.owner
         end
       end
@@ -457,7 +463,7 @@ class CodeGen
       # A descendant that embeds the ivar the accessor's owner keeps in iv_tbl
       # (or the reverse) has a different storage than the accessor's.
       ivar = name.chomp('=')
-      return :embedded_elsewhere if descendants.any? { |k| k != t.owner && embed_type(k, ivar) }
+      return :embedded_elsewhere if descendants.any? { |k| k != t.owner && own_ivar_storage?(k, t.owner, ivar) }
       return :accessor_unlinkable if ivar_accessor_call_code(t.owner, 'recv', name, 0, ['arg']).nil?
 
       return nil

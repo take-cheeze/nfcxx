@@ -375,7 +375,7 @@ class CodeGen
 
   def module_function_copy_self_safe?(irep, owner)
     return false unless irep
-    return false if @ivar_layout.key?(owner)
+    return false if embeds_storage?(owner)
 
     [irep, *BytecodeIR.nested_bodies(irep)].none? do |body|
       BytecodeIR.for(body).op?(*MODULE_FUNCTION_INSTANCE_OPS) ||
