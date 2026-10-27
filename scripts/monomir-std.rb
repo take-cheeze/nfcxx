@@ -24,7 +24,7 @@ module MonomirStd
 
   # Each entry: [path pattern, argument effects, result]. An argument effect is :read or :write for
   # a reference argument (its referent), :value for a scalar, :byval for a struct passed by value
-  # (read, and not kept). The `T` the pattern names must be a scalar. The result is :void, :scalar,
+  # (read, and not kept). The `T` the pattern names, if any, must be a scalar. The result is :void, :scalar,
   # :init (an aggregate the callee initializes in the caller's buffer, which comes first), or
   # [:alias, ARG, :shared|:exclusive], a reference into argument ARG's referent.
   #
@@ -55,7 +55,10 @@ module MonomirStd
     [/\A<#{RANGE} as core::iter::traits::iterator::Iterator>::next\z/, [:write], :init],
     [/\A<#{OPTION}>::unwrap\z/, [:byval], :scalar],
     [/\A<#{OPTION}>::is_some\z/, [:read], :scalar],
-    [/\A<#{OPTION}>::is_none\z/, [:read], :scalar]
+    [/\A<#{OPTION}>::is_none\z/, [:read], :scalar],
+    # mem::drop and mem::forget take a value of any type by value and keep nothing: the caller has
+    # moved it into the call, so its drop is the callee's (or never happens).
+    [/\Acore::mem::(drop|forget)<.+>\z/, [:byval], :void]
   ].freeze
 
   # Option<T> of a scalar is an enum, which gets no layout from its type record. It holds no
@@ -205,7 +208,7 @@ module MonomirStd
     (SUMMARIES + CELL_SUMMARIES).each do |re, effects, result|
       m = re.match(path)
       next unless m
-      return nil unless SCALARS.include?(m[:t])
+      return nil if m.names.include?('t') && !SCALARS.include?(m[:t])
       params, ret = @sigs[name]
       return nil unless params.length == effects.length
       args = []
