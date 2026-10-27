@@ -749,7 +749,8 @@ class CodeGen
           CPP
         end
         typed = compile_typed_index_send(irep, idx, owner_def, d, d, "r#{s}", reg_offset, index_class, fallback)
-        typed || fallback
+        generic = typed || fallback
+        integer_bit_aref_site(irep, idx, unshift_proof_reg(d, reg_offset), owner_def, d, s, generic) || generic
       end
     when :GETIDX0
       # "GETIDX0 R7 R4[0]": R[a] = R[b][0] (vm.c), separate dest/source registers
