@@ -45,13 +45,15 @@ The pipeline is:
      that reads it (pathb-borrowck.md, "Explicit value moves and copies"). The checker then rejects
      a move with a live loan of the place (E0505). The dump prints a move and a copy alike, so the
      translator decides: a type moves if it has drop glue, is a `&mut`, or is one of the program's
-     types with no `impl Copy` in the HIR (`--hir`); tuples and arrays follow their elements. Other
+     types with no `impl Copy` in the HIR (`--hir`); tuples and arrays follow their elements. A type
+     that holds an `UnsafeCell` (`Cell`, `RefCell`) moves too, since it cannot be Copy. Other
      types count as Copy, which can miss a move but not report a false one. Enum fields, moves
      through a deref or out of an enum variant, and fat pointers get no marks.
    - A `&T` parameter gets `(readonly %N)`, which keeps summary inference to read-only modes. The
      signature's `&` against `&mut` is the information the checker would otherwise not have.
    - `(borrow-layout ...)` records for the structs the functions use come from the dump's `type`
-     records. Enums (overlapping variants) get none.
+     records. Enums (overlapping variants) get none. Each `UnsafeCell<T>` with a record also gets
+     `(interior-mutable (struct ...))` (below, "Interior mutability").
 3. **`scripts/pathb-borrowck.rb --infer-loan-ends --infer-summaries`**. Loans end at their last use
    (NLL's rule), and each function gets a summary inferred from its body, which its callers are
    checked against.
@@ -89,6 +91,33 @@ Vec or Box of one keeps no borrow and its drop reads only its own place. A Vec o
 (`Box<[T]>`), slices (`&[T]` is a two-word value, which a summary cannot return), iterators,
 `String`, and a user `impl Display` (it calls `Formatter` methods) have no summaries and are refused.
 
+### Interior mutability
+
+The bytes of an `UnsafeCell<T>` may be written through a shared reference. The translator marks each
+`UnsafeCell` type `(interior-mutable ...)`, and the checker accepts a write through a shared loan into
+those bytes only when it leaves the checker's state unchanged: a scalar written over initialized bytes
+that hold no pointer (pathb-borrowck.md, "Interior mutability"). Everything the checker concluded from
+the loan being shared therefore still holds, including a `read` summary of a `&T` parameter, so
+`(readonly %N)` needs no exception for the cell's bytes. As for containers, only cells of primitive
+scalars have summaries:
+
+- **`Cell<T>`**: `new`, `get`, `into_inner`; `set`, `replace`, `take`, whose `&self` argument is a
+  `write` the checker accepts through a shared loan; `get_mut`, a returned exclusive alias of `&mut self`.
+  Cell hands out no other reference into itself, so nothing can point at the value it overwrites.
+- **`RefCell<T>`**: `new`, and `replace` (a `write`). `borrow` and `borrow_mut` become, as the
+  formatting constructors do, the stores of the guard's two references into the RefCell (its value and
+  its borrow flag), plus a read and write of the flag through the shared reference for the dynamic
+  check. The guard therefore keeps the RefCell borrowed while it is used, and its drop glue, which reads
+  and writes the flag through its reference, is such a use: a guard that outlives its RefCell is an
+  error (E0597), and moving the RefCell while a guard is live is E0505. Two guards at once are left to
+  RefCell's runtime check, as rustc does.
+- **`Ref::deref`** and **`RefMut::deref`** return `&T`, which is modelled as a reference into the guard,
+  with the loan of the guard that deref takes: the loan rustc gives it. **`RefMut::deref_mut`** loads the
+  value's reference from the guard, because a `&mut T` is written through; it keeps the RefCell's loan.
+
+`try_borrow`, `Ref::map`, `Rc<RefCell<T>>`, atomics, and cells of anything but a primitive scalar have
+no summaries and are refused.
+
 mrustc also rejects some programs itself, and the driver reports those as errors (exit 1):
 
 - `mrustc-mir-validation:`, from mrustc's MIR validation. It tracks which locals hold a value, so it
@@ -100,13 +129,13 @@ mrustc also rejects some programs itself, and the driver reports those as errors
 ## Results
 
 `tests/mrustc-borrow/cases` has one program per rule, each with rustc 1.99's verdict. The suite
-checks this pipeline's verdict, and compares rustc's when one is installed. 38 of the 40 cases agree
+checks this pipeline's verdict, and compares rustc's when one is installed. 49 of the 52 cases agree
 with rustc:
 
 | Verdict | Cases |
 | --- | --- |
-| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes |
-| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502); with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec |
+| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes, Cell set/get through two shared references, `&self` and `&Cell` functions that write a Cell, RefCell borrow_mut and borrow through `&self` methods, a Ref and a RefMut at once (runtime-checked) |
+| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502); with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec; with cells, E0505 a Cell moved and a RefCell moved while borrowed, E0506 a Cell assigned while borrowed, E0502 Cell::get_mut while borrowed, E0597 a Ref or RefMut guard that outlives its RefCell and a Ref's `&T` that outlives the guard |
 | Different | below |
 
 The differences are the known gaps:
@@ -115,6 +144,9 @@ The differences are the known gaps:
   accepted. rustc makes only autoref borrows two-phase, and the MIR does not say which this was. The
   program only reads `c` before the call, so the borrow is still not violated.
 - **A Vec of references** is refused: its functions have summaries only for scalar elements.
+- **A `&mut` from `RefMut::deref_mut` kept past its guard** (E0597) is accepted. It has the RefCell's
+  loan, not one of the guard, so it stays within the RefCell's borrow and cannot dangle, but RefCell's
+  runtime check no longer covers it.
 
 With lifetimes erased, the translator cannot say that `pick<'a>(a: &'a i32, b: &'a i32) -> &'a i32`
 returns a borrow of either argument. Summary inference finds it instead: a summary may list several
@@ -126,8 +158,7 @@ is a weak update of both. In `err_loop_store` the checker rejects the use of the
 next iteration ends it, where rustc reports the next iteration's `&mut x`.
 
 Generic functions are checked only as the instances the program uses, after monomorphisation.
-Standard library calls outside the table above are refused for lack of summaries. Interior mutability
-(`Cell`, `RefCell`) is not modelled: a write through a shared borrow is an error.
+Standard library calls outside the table above are refused for lack of summaries.
 
 ## How this compares with other implementations
 

@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir tests/pathb-borrow/index/*.ir tests/pathb-borrow/eh/*.ir tests/pathb-borrow/copy/*.ir tests/pathb-borrow/throws/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir tests/pathb-borrow/index/*.ir tests/pathb-borrow/eh/*.ir tests/pathb-borrow/copy/*.ir tests/pathb-borrow/throws/*.ir tests/pathb-borrow/interior/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
