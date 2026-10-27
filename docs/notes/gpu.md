@@ -118,6 +118,10 @@ placeholders, and each device module is registered with the runtime.
   aligned, while here a string before one gave mxfp4's mmq a misaligned address (`intrinsics/table_align.cu`).
 - **`__byte_perm`** masks its selector with 0x7777, as nvcc does before `prmt`: bit 3 of a nibble would be `prmt`'s
   sign replication, and llama.cpp's q1_0, q2_0 and FP4 lookups pass selectors with it set (`intrinsics/int.cu`).
+- **Integer division** by zero, `INT_MIN / -1`, and shift counts of the width or more are what the GPU does with them
+  (`pathb-ptx-emit --int=gpu`, which the driver passes): plain `div`/`rem` (an unspecified value) and `shl`/`shr` (the
+  count clamped to the width), as nvcc emits them, not the IR's checks that trap. llama.cpp's flash_attn_ext_vec takes
+  `sequence % ne33` with ne33 == 0 when there is no mask and does not use the result (`intrinsics/int_gpu.cu`).
 - **Partial aggregate initialization** of a local with constructors (`half2 s[8] = {{0.0f, 0.0f}}`): IL lowering
   makes only the constructor calls of the first element, and Path B zeroes the variable at its declaration first, as
   EDG's C back end does (`tests/pathb-qbe/cases/partial_init_ctor.cpp`).

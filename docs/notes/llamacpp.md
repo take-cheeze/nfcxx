@@ -20,7 +20,7 @@ included, with the default FlashAttention types of llama.cpp's CMake: f16-f16 on
 `tests/test-backend-ops.cpp` against it, `-lcuda -lcublas -lcudart`: 214 objects, about 25 minutes at JOBS=2 under the
 8 GB cap (objects are kept in `build/llcu`, so a second run only links). `tests/llamacpp/cuda/run.sh` runs each op of
 `test-backend-ops test -b CUDA0` in its own process (a device fault aborts it) and checks it against its record. On the
-RTX 2060 (sm_75, CUDA 13.1): 109 ops pass every case, 1 fails, 19 have no cases.
+RTX 2060 (sm_75, CUDA 13.1): 110 ops pass every case, none fails, 19 have no cases.
 
 What it took (docs/notes/gpu.md, "Launch path", has the details):
 
@@ -53,9 +53,11 @@ What it took (docs/notes/gpu.md, "Launch path", has the details):
   `__byte_perm`'s selector, and f16 with 8 columns mmvf's `half2 sumh2[8] = {{0.0f, 0.0f}}`, whose other elements
   were not zeroed (docs/notes/gpu.md).
 
-Known failures (the KNOWN list of `run.sh`):
+- FLASH_ATTN_EXT: its "unspecified launch failure" was the emitter's divide-by-zero trap in flash_attn_ext_vec, which
+  computes `sequence % ne33` with ne33 == 0 when there is no mask (docs/notes/gpu.md, "Integer division"). All 4004
+  cases pass; the op takes about 20 minutes, so run.sh gives each op 40.
 
-1. **FLASH_ATTN_EXT**: NaN for f16 K and V with hsk=40, then an unspecified launch failure.
+The KNOWN list of `run.sh` is empty.
 
 ## Flags
 
