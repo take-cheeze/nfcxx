@@ -15,6 +15,7 @@ source "$(dirname "$0")/trace.sh"
 # NFCXX_QBE_PREP_RB, NFCXX_WEAK_SYMBOLS_RB: other copies of the two mruby scripts (tests/mruby/qbe-asm.sh runs the oracle ports).
 
 compile=0 asm=0 pic=0 out="" src="" cppflags=() asflags=()
+fsections=0 dsections=0
 kcproc=() nofp=0 nounwind=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
 i386=0 regparm=0 m16=0        # the kernel's real-mode code (-m16 -march=i386 -mregparm=3): cproc and QBE's i386 targets
 args=("$@")
@@ -26,6 +27,8 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     -Wa,*) asflags+=("$a") ;;
     -fPIC|-fpic) pic=1 ;;   # code for a shared object: QBE -p (thread-local symbols by initial exec, not local exec)
     -fno-PIC|-fno-pic) pic=0 ;;
+    -ffunction-sections) fsections=1 ;;   # each function in its own section (.text.NAME), each object (.data.NAME):
+    -fdata-sections) dsections=1 ;;       # a link with --gc-sections then drops the ones nothing reaches
     -o) out=${args[++i]} ;;
     -D?*|-I?*|-U?*|-std=*|-ansi|-iquote?*|-isystem?*|-idirafter?*|-include?*|-imacros?*) cppflags+=("$a") ;;
     -D|-I|-U) cppflags+=("$a${args[++i]}") ;;
@@ -230,6 +233,26 @@ if [ $nofp = 1 ] && grep -nE '%[xyz]mm[0-9]|%st\b|%st\(|^[[:space:]]+f[a-z]+[[:s
   echo "qbe-cc: $src: the code QBE generated uses SSE or x87 registers, which -mno-sse forbids:" >&2
   head -3 "$tmp/fp.txt" >&2
   exit 1
+fi
+# -ffunction-sections, -fdata-sections: QBE opens each definition with .text or .data (then .balign, .globl and the
+# label); that directive becomes a section of the definition's own, named after its label, as gcc names them. nfcxx's
+# NFCXX_INSTANTIATE=used: every unit has its copy of an instance, and --gc-sections keeps the one the link chose.
+if [ $macos = 0 ] && [ $((fsections + dsections)) -gt 0 ]; then
+  awk -v f=$fsections -v d=$dsections '
+    function flush() { if (n) { print open; for (i = 1; i <= n; i++) print held[i] } n = 0; open = "" }
+    open != "" && /^[A-Za-z_.$][A-Za-z0-9_.$]*:/ {
+      name = substr($0, 1, length($0) - 1)
+      if (kind == ".text") print ".section .text." name ",\"ax\",@progbits"
+      else if (kind == ".data") print ".section .data." name ",\"aw\",@progbits"
+      else print ".section .bss." name ",\"aw\",@nobits"
+      for (i = 1; i <= n; i++) print held[i]
+      n = 0; open = ""; print; next
+    }
+    open != "" && /^\.(balign|p2align|align|globl|hidden|protected|local)[ \t]/ { held[++n] = $0; next }
+    open != "" { flush() }
+    ($0 == ".text" && f) || (($0 == ".data" || $0 == ".bss") && d) { open = $0; kind = $0; next }
+    { print }
+    END { flush() }' "$tmp/out.s" > "$tmp/out.sec.s" && mv "$tmp/out.sec.s" "$tmp/out.s"
 fi
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
 # assembly too, so the link merges the per-object copies as gcc does.
