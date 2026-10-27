@@ -880,6 +880,8 @@ module Bc2cppCompiledGemGeneration
   def run_group(common, srcs, group, gems_root)
     bc2cpp = File.join(gems_root, 'tools/bc2cpp/bc2cpp.rb')
     group.each { |env, _, _| FileUtils.mkdir_p(env.fetch('OUT_DIR')) }
+    return stub_group(group) if ENV['BC2CPP_STUB_GENERATION'] == '1'
+
     if group.size == 1
       env, _, generated = group.first
       sh env.merge(gc_env), "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
@@ -895,5 +897,24 @@ module Bc2cppCompiledGemGeneration
       FileUtils.rm_f([plan, *units.map { |unit| unit['err'] }])
     end
     group.each { |_, _, generated| @done[generated] = true }
+  end
+
+  # BC2CPP_STUB_GENERATION (scripts/bc2cpp/closed_build.bash, phase 1): that phase builds only the presym list, which
+  # needs every source to preprocess, not the generated code; the native-kind analysis that follows reads its own
+  # presym overlay (analysis_headers.rb). Each output bc2cpp.rb would write is an empty stub instead, marked so a stub
+  # left behind is recognisable; phase 2 deletes the stub `_gen.cpp` files and generates for real.
+  STUB = "// BC2CPP_STUB_GENERATION: placeholder for closed_build.bash phase 1\n"
+
+  def stub_group(group)
+    group.each do |env, _, generated|
+      symbol = env.fetch('OUT_SYMBOL')
+      headers = [File.join(env.fetch('OUT_DIR'), "#{symbol}_decls.h"), File.join(env.fetch('OUT_DIR'), "#{symbol}_entry.h")]
+      headers << File.join(env['BC2CPP_ENTRY_INCLUDE_DIR'], "#{symbol}_entry.h") if env['BC2CPP_ENTRY_INCLUDE_DIR']
+      [generated, *headers].each do |path|
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, STUB)
+      end
+      @done[generated] = true
+    end
   end
 end

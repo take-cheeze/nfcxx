@@ -47,9 +47,10 @@ rake_closed() {
   )
 }
 
-# Phase 1 generates the closed world's code without the native return-kind table: the table needs the presym list
-# that this phase writes (analysis_headers.rb), so it cannot exist before the first bc2cpp run.
-rake_closed "$build_dir/closed/presym"
+# Phase 1 builds the presym list the native return-kind table's analysis needs (analysis_headers.rb). That list only
+# needs every source to preprocess, so the compiled gems' outputs are empty stubs here (BC2CPP_STUB_GENERATION in
+# tools/bc2cpp/compiled_gems.rb) rather than a full bc2cpp run whose code phase 2 throws away.
+BC2CPP_STUB_GENERATION=1 rake_closed "$build_dir/closed/presym"
 ruby "$root/scripts/bc2cpp/analysis_headers.rb" "$build_dir/closed"
 ruby "$root/scripts/bc2cpp/native_fn_kinds.rb" "$build_dir/closed" > "$build_dir/closed/analysis/fn-kinds.tsv"
 echo "wrote $build_dir/closed/analysis/fn-kinds.tsv"
