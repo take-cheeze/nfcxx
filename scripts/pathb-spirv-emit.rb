@@ -339,28 +339,41 @@ end
 # A work-group static (syclex::work_group_static<T>, lib/sycl ext/oneapi/work_group_static.hpp) is one buffer per work-group,
 # not one per work-item. Its object (a kernel-body slot whose type names work_group_static) is placed in the group's static
 # local region, after the 1024-byte scratch tail of the group's local memory: the host reserves wgs_total bytes more per
-# work-group (manifest line L; rt_opencl.hpp, rt_level_zero.hpp). Offsets are unique across the module; the map is keyed by
-# [function name, slot name] and wgs_layout returns [map, total bytes (16-aligned)].
+# work-group (manifest line L; rt_opencl.hpp, rt_level_zero.hpp). The map is keyed by [function name, slot name] and
+# wgs_layout returns [map, total bytes (16-aligned)]. A function's statics are contiguous; they start after those of every
+# function placed before it that some kernel reaches together with it (groups: the functions with statics that each kernel
+# reaches), so statics no kernel uses together share offsets and the total is that of the largest kernel, not the sum over
+# the module (ggml's fattn-tile instances: 34 kernels of one image asked 305 KB of local memory each). Without groups,
+# every function conflicts with every other and the offsets are unique across the module.
 def mentions_wgs?(t)
   return t.to_s.include?("work_group_static") if t.is_a?(String) || t.is_a?(IRStr)   # quoted names are IRStr
   return false unless t.is_a?(Array)
   t.any? { |y| mentions_wgs?(y) }
 end
 
-def wgs_layout(defs)
-  map = {}
-  total = 0
+def wgs_layout(defs, groups = nil)
+  slots = {}   # function name => [[slot name, size, align]] of its work-group statics
   defs.each do |fname, form|
     next unless form.is_a?(Array)
     form.each do |f|
       # the object itself: a slot of the struct type (not a pointer to it, as the constructors' parameters are)
       next unless head_of(f) == "slot" && f.length == 5 && head_of(f[2]) == "struct" && mentions_wgs?(f[2])
-      size = as_int(f[3])
-      align = [as_int(f[4]), 16].max
-      total = (total + align - 1) / align * align
-      map[[fname, f[1].to_s]] = total
-      total += size
+      (slots[fname] ||= []) << [f[1].to_s, as_int(f[3]), [as_int(f[4]), 16].max]
     end
+  end
+  map = {}
+  ends = {}    # function name => the end of its statics
+  total = 0
+  slots.each do |fname, list|
+    peers = groups ? groups.select { |g| g.include?(fname) }.flatten.uniq : ends.keys
+    off = peers.map { |n| ends[n] || 0 }.max || 0
+    list.each do |sname, size, align|
+      off = (off + align - 1) / align * align
+      map[[fname, sname]] = off
+      off += size
+    end
+    ends[fname] = off
+    total = [total, off].max
   end
   [map, (total + 15) / 16 * 16]
 end
@@ -2517,8 +2530,19 @@ def emit_module(src, kernel_cl = false)
   smod.irmod = mod
   smod.defs = mod.defs
   # the work-group statics live in the group's static local region (OpenCL-style modules; the Vulkan module keeps frames)
+  reach = lambda do |root|
+    seen = {}
+    stack = [root]
+    until stack.empty?
+      n = stack.pop
+      next if seen[n] || !mod.defs.key?(n)
+      seen[n] = true
+      stack.concat(collect_calls(mod.defs[n], []).select { |c| mod.defs.key?(c) })
+    end
+    seen.keys
+  end
   if kernel_cl
-    smod.wgs, smod.wgs_total = wgs_layout(mod.defs)
+    smod.wgs, smod.wgs_total = wgs_layout(mod.defs, entries.map { |e| reach.call(e) })
     # the static storage: a Workgroup variable (OpenCL local memory) of the group's static bytes, when there are statics
     smod.wgs_var = spv.wgs_var(smod.wgs_total / 4) if smod.wgs_total > 0
   end
@@ -2533,17 +2557,6 @@ def emit_module(src, kernel_cl = false)
   # original keeps the global path. Non-static kernels reach only originals, so their code is unchanged. The clones are
   # created after the originals, so the originals' ids do not move; each clone compiles from its own copy of the IR.
   static_names = smod.wgs ? smod.wgs.keys.map { |k| k[0] }.uniq : []
-  reach = lambda do |root|
-    seen = {}
-    stack = [root]
-    until stack.empty?
-      n = stack.pop
-      next if seen[n] || !mod.defs.key?(n)
-      seen[n] = true
-      stack.concat(collect_calls(mod.defs[n], []).select { |c| mod.defs.key?(c) })
-    end
-    seen.keys
-  end
   static_entries = entries.select { |e| reach.call(e).any? { |n| static_names.include?(n) } }
   clone_set = static_entries.flat_map { |e| reach.call(e) }.uniq
   clone_order = order.select { |n| clone_set.include?(n) }
