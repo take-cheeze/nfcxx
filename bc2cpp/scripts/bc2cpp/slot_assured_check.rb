@@ -13,7 +13,8 @@
 #     - a literal argument of a construction-time self-call (`reset(mapping: false)`, `prepare(false)`) leaves the
 #       arm it switches off out of the reach;
 #     - an assignment made by a self-called helper or by `super` counts; one made on a single branch does not;
-#     - BC2CPP_SLOT_ASSURED=0 keeps every test.
+#     - a world that names remove_instance_variable, removing a method the construction calls, and
+#       BC2CPP_SLOT_ASSURED=0 keep the tests.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same for the methods, reflection (instance_variables,
 #       instance_variable_get on an unset ivar), dup, a block kept from a construction that raised, GC.stress and
@@ -118,10 +119,10 @@ def bare?(code, owner, ivar)
   code.include?("((#{owner}_ivars*)DATA_PTR(self))->ivar_#{ivar};") && !checked?(code, owner, ivar)
 end
 
-def generate_world(env = {})
+def generate_world(env = {}, src: SRC)
   saved = env.keys.to_h { |k| [k, ENV.fetch(k, nil)] }
   env.each { |k, v| ENV[k] = v }
-  Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: OWNERS) }
+  Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(src, dir, core: true, only_owners: OWNERS) }
 ensure
   saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
@@ -152,9 +153,14 @@ left = code_of(code, 'SaLeft_left_triple')
 check.call('an assignment made by super counts for the subclass',
            bare?(left, 'SaBase', 'base') && bare?(left, 'SaBase', 'left') && bare?(left, 'SaBase', 'shared'))
 check.call('no #error in the generated code', !code.include?('#error'))
-off, = generate_world('BC2CPP_SLOT_ASSURED' => '0')
+off, = generate_world({ 'BC2CPP_SLOT_ASSURED' => '0' })
 check.call('BC2CPP_SLOT_ASSURED=0 keeps every test', checked?(code_of(off, 'SaPlain_sum'), 'SaPlain', 'alpha') &&
                                                      checked?(code_of(off, 'SaLeft_left_triple'), 'SaBase', 'left'))
+unset, = generate_world(src: "#{SRC}$sa_x.remove_instance_variable(:@alpha) if $sa_never\n")
+check.call('a world that names remove_instance_variable keeps every test', checked?(code_of(unset, 'SaPlain_sum'), 'SaPlain', 'alpha'))
+removed, = generate_world(src: "#{SRC}SaPlain.send(:remove_method, :pick) if $sa_never\n")
+check.call('removing a method the construction calls keeps its family\'s tests',
+           checked?(code_of(removed, 'SaPlain_sum'), 'SaPlain', 'alpha') && bare?(code_of(removed, 'SaLeft_left_triple'), 'SaBase', 'left'))
 
 DRIVER = <<~'RUBY'
   $sa_hooks = []

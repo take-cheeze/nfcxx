@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'dynamic_names'
 
 # CodeGen: SLOT_ASSURED. An embedded mrb_value slot starts as undef (unset), so a compiled read normalises it:
 # `mrb_undef_p(f) ? nil : f`. The read can use the field as it is when it provably runs after the slot was
@@ -139,17 +140,28 @@ class CodeGen
     nil
   end
 
+  # A computed-name send counts as a removal (ClosedWorld#method_removed?), but under the closed-world model a name
+  # it carries is spelled somewhere, so it removes nothing while no source names a remover.
+  def slot_removal_possible?(name)
+    return false unless @closed_world.method_removed?(name)
+    return true if @closed_world.method_removed_literally?(name)
+
+    ClosedWorld::REMOVER_SENDS.any? { |remover| slot_world_names?(remover) }
+  end
+
   # Some definition (or an invisible definer) answers +name+.
   def slot_name_definable?(name)
     !@registry.fetch(name, []).empty? || @closed_world.invisibly_definable?(name)
   end
 
-  # Does any bytecode (as a send, Symbol or String) or foreign Ruby source spell +name+?
+  # Does any bytecode (as a send, Symbol or String), foreign Ruby source or computed name (DynamicNames) spell +name+?
   def slot_world_names?(name)
     @slot_world_names ||= {}
     return @slot_world_names[name] if @slot_world_names.key?(name)
 
-    @slot_world_names[name] = @closed_world.foreign_ruby_token_files.each_value.any? { |tokens| tokens.include?(name) } ||
+    @slot_dynamic_names ||= DynamicNames.universe(@ireps)
+    @slot_world_names[name] = @slot_dynamic_names.include?(name) ||
+                              @closed_world.foreign_ruby_token_files.each_value.any? { |tokens| tokens.include?(name) } ||
                               @ireps.each_value.any? do |irep|
                                 BytecodeIR.for(irep).each_source.any? do |insn, _index|
                                   insn.sym.to_s == name ||
@@ -195,10 +207,13 @@ class CodeGen
     false
   end
 
-  # The #initialize instances of +klass+ run: a MethodDef with a body, or why there is none.
+  # The #initialize instances of +klass+ run: a MethodDef with a body, or why there is none. A class an outside
+  # source spells may carry a native #initialize the registry cannot place.
   def slot_initialize(klass)
     seen = Set.new
     while klass.is_a?(String) && seen.add?(klass)
+      return "may be native (#{klass} is spelled outside)" unless slot_sealed?(klass)
+
       definition = numeric_init_definition(klass)
       return 'is not a single bytecode definition' if definition == :unknown
       return definition if definition
@@ -251,6 +266,8 @@ class CodeGen
   # unless a method_missing answers it.
   def slot_resolve(name, chain)
     return "#{name} has a computed definer" if @closed_world.unknown_def?(name)
+    # A removal sends the call to an ancestor's definition or to method_missing.
+    return "#{name} may be removed" if slot_removal_possible?(name)
 
     defs = @registry.fetch(name, [])
     native = defs.any? { |d| d.irep.nil? && d.kind != :ivar_accessor } || @closed_world.invisibly_definable?(name)
@@ -338,9 +355,12 @@ class CodeGen
   end
 
   # `super` reaches the ancestors' definitions of the method's own name. For #initialize, a native one can only be
-  # BasicObject's no-op: every other class on the chain is sealed (slot_family_facts refuses an outside-spelled one).
+  # BasicObject's no-op when every other owner on the chain is sealed.
   def slot_reach_super(owner, chain, queue)
-    unless owner.name == 'initialize'
+    if owner.name == 'initialize'
+      open = chain.find { |o, sealed| !sealed && !%w[Object Kernel BasicObject].include?(o) }
+      return "super from #initialize may reach a native one on #{open.first}" if open
+    else
       target = slot_resolve(owner.name, chain)
       return target if target.is_a?(String)
     end
