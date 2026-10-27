@@ -269,14 +269,16 @@ class CodeGen
     # @ivar_layout or @fixnum_return_names (its predicate is trace_new_target, a
     # top-level function, plus proven_array_source).
     # FIXNUM_RETURN_IVAR_HINT (`analysis_only == :fixnum_return`): stop after
-    # FIXNUM_RETURN_PROOF instead. Its proof source 3 reads @ivar_layout, so
-    # drop_unsafe_embeddings runs first, or an ivar it would reject could leak a
-    # false proof. The ENTRY_ARG alternation is skipped; the final CodeGen runs it.
+    # FIXNUM_RETURN_PROOF instead. Its proof source 3 reads @ivar_layout, and an
+    # ivar the final CodeGen would not embed could leak a false proof, so the
+    # probe embeds nothing: a weaker layout only proves less, and the final
+    # CodeGen recomputes the proof against its own. That skips the embedding
+    # probes (compiles_clean? of every embedding #initialize and its callees).
+    # The ENTRY_ARG alternation is skipped; the final CodeGen runs it.
     if analysis_only == :fixnum_return
-      # Without the foreign-method scan this probe cannot prove a return, so embedding checks cannot help.
       return unless @foreign_method_names
 
-      @ivar_layout = drop_unsafe_embeddings(ivar_layout)
+      @ivar_layout = {}
       compute_fixnum_return_names
       return
     end
