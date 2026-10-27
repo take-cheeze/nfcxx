@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "rt_image.hpp"
+#include "rt_spirv_split.hpp"
 
 namespace sycl {
 namespace detail {
@@ -393,12 +394,24 @@ class ze_rt {
 
   uint64_t closure_addr() const { return (uint64_t)(uintptr_t)(ctl_ + ze_closure_at); }
 
-  // The module of an image for a local size: one module per image and local size (the specialization constants set the size).
-  ze_module_handle_t module(const unsigned *l, size_t m) {
+  // The SPIR-V of one entry point of an image (rt_spirv_split.hpp: the driver then compiles that kernel alone), kept per image.
+  const std::vector<uint32_t> &entry_il(const std::string &entry, size_t m) {
+    std::string k = std::to_string(m) + "/" + entry;
+    auto it = entry_il_.find(k);
+    if (it != entry_il_.end()) return it->second;
     const image_module &img = images_.modules[m];
-    std::string k = std::to_string(m) + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
+    std::vector<uint32_t> il = detail::spirv_entry_module(img.il.data(), img.il.size(), entry);
+    if (il.empty()) fail("the image has no entry point " + entry);
+    return entry_il_[k] = std::move(il);
+  }
+
+  // The module of an entry point of an image for a local size: one module per kernel and local size (the specialization
+  // constants set the size).
+  ze_module_handle_t module(const std::string &entry, const unsigned *l, size_t m) {
+    std::string k = std::to_string(m) + "/" + entry + "/" + std::to_string(l[0]) + "/" + std::to_string(l[1]) + "/" + std::to_string(l[2]);
     auto it = modules_.find(k);
     if (it != modules_.end()) return it->second;
+    const std::vector<uint32_t> &il = entry_il(entry, m);
     uint32_t ids[3] = {0, 1, 2};
     uint32_t vals[3] = {l[0], l[1], l[2]};
     const void *ptrs[3] = {&vals[0], &vals[1], &vals[2]};
@@ -409,8 +422,8 @@ class ze_rt {
     ze_module_desc_t desc = {};
     desc.stype = ZE_STRUCTURE_TYPE_MODULE_DESC;
     desc.format = ZE_MODULE_FORMAT_IL_SPIRV;
-    desc.inputSize = img.il.size();
-    desc.pInputModule = img.il.data();
+    desc.inputSize = il.size() * 4;
+    desc.pInputModule = reinterpret_cast<const uint8_t *>(il.data());
     desc.pBuildFlags = "";
     desc.pConstants = &consts;
     ze_module_handle_t mod = nullptr;
@@ -442,7 +455,7 @@ class ze_rt {
     kd.stype = ZE_STRUCTURE_TYPE_KERNEL_DESC;
     kd.pKernelName = entry.c_str();
     ze_kernel_handle_t kern = nullptr;
-    check(zeKernelCreate(module(l, m), &kd, &kern), "zeKernelCreate");
+    check(zeKernelCreate(module(entry, l, m), &kd, &kern), "zeKernelCreate");
     check(zeKernelSetGroupSize(kern, l[0], l[1], l[2]), "zeKernelSetGroupSize");
     // the kernel's only argument is the push block in the control block; the heap (stacks, the closure's USM pointers,
     // the statics) is reached through pointers, so the driver is told to keep the shared allocations resident
@@ -479,6 +492,7 @@ class ze_rt {
   std::map<uint64_t, uint64_t> free_, used_;
   image_set images_;
   std::map<std::string, ze_module_handle_t> modules_;
+  std::map<std::string, std::vector<uint32_t>> entry_il_;   // image/entry => the entry point's module
   std::map<std::string, ze_kernel_handle_t> kernels_obj_;
 };
 
