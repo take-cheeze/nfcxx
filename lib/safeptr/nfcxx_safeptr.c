@@ -1,5 +1,5 @@
-/* nfcxx -fsafe-pointers runtime (docs/notes/safe-pointers.md): a table of the program's live and freed objects, and
-   the two checks Path B code calls before it uses a pointer.
+/* nfcxx -fsafe-pointers runtime (docs/notes/safe-pointers.md): a table of the program's live and freed objects, the
+   two checks Path B code calls before it uses a pointer, and the check of calls through pointers (at the end).
 
    __nfcxx_sp_check(p, n, file, line)          before a load, store or block access of n bytes at p
    __nfcxx_sp_derive(base, res, file, line)    after pointer arithmetic: res = base + something
@@ -14,11 +14,20 @@
    Memory that is in no object (libc's data, thread-local objects, stacks of uninstrumented code) is not checked: the
    checks are Fil-C's, the guarantee is not, since the program shares memory with code built without them.
 
-   free() does not give a block back at once: it stays in the table as dead (a use is "use after free") until the
-   quarantine (QUAR_MAX blocks, QUAR_BYTES bytes) pushes it out. Stack slots below the current stack pointer belong to
-   frames that returned: a pointer to one is "use after return". */
+   free() does not give a block back at once: it stays in the table as dead (a use is "use after free"). When enough has
+   been freed since the last time, a conservative collector (collect) scans the roots: the writable segments of every
+   loaded module, the stacks of the threads that run instrumented code, and the live heap blocks. A dead block that no
+   word of them points into goes back to glibc; one that is still pointed to stays dead, so the use is found however
+   late it comes. A root the scan misses (registers of other threads, memory from mmap) can only let a block go back
+   early, never keep a live block from being used: the collector frees nothing that was not freed by the program.
+   Stack slots below the current stack pointer belong to frames that returned: a pointer to one is "use after return".
+
+   __nfcxx_sp_call(fn, sig, file, line) before a call through a function pointer: a function of an instrumented unit
+   (registered with its signature hash by the unit's constructor, __nfcxx_sp_funcs) must have the signature of the call;
+   a pointer into a data object (heap, global, stack slot) is not a function. Other code is not checked. */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <link.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -34,7 +43,7 @@ extern void __libc_free(void *);
 extern void *__libc_calloc(size_t, size_t);
 extern void *__libc_memalign(size_t, size_t);
 
-enum { K_OOB = 0, K_ARITH, K_UAF, K_RETURN, K_DFREE, K_BADFREE };
+enum { K_OOB = 0, K_ARITH, K_UAF, K_RETURN, K_DFREE, K_BADFREE, K_CALLTYPE, K_CALLDATA };
 static const char *const sp_msg[] = {
   "out-of-bounds access",
   "pointer arithmetic leaves its object",
@@ -42,6 +51,8 @@ static const char *const sp_msg[] = {
   "use of a stack object after its function returned",
   "double free",
   "free of a pointer that is not the start of a heap block",
+  "call through a function pointer of the wrong type",
+  "call of a pointer that is not a function",
 };
 
 static void sp_fail(int kind, const void *p, const char *file, int line)
@@ -58,9 +69,10 @@ enum { OBJ_LIVE = 1, OBJ_DEAD = 2 };
 enum { KIND_HEAP = 1, KIND_GLOBAL = 2 };
 struct obj {
   uintptr_t lo, hi;      /* [lo, hi): the object; hi is allowed as a pointer, the byte at hi is padding */
-  unsigned char state, kind;
+  unsigned char state, kind, mark;
   void *raw;             /* the block to give to __libc_free (heap) */
-  struct obj *qnext;     /* quarantine order */
+  struct obj *qnext;     /* the dead blocks */
+  struct obj *lnext, *lprev;   /* the live heap blocks (the collector's roots) */
   struct obj *bnext;     /* big list */
   struct obj *fnext;     /* free list of records */
 };
@@ -73,6 +85,8 @@ struct node {            /* one granule of one object */
 #define GSHIFT 8
 #define BIG (64u * 1024u)
 #define NBUCKET (1u << 20)
+/* A collection runs when more than max(QUAR_MAX, live blocks / 4) blocks or max(QUAR_BYTES, live bytes / 4) bytes were
+   freed since the last one: its cost (a scan of the live heap) is then proportional to what was freed. */
 #define QUAR_MAX 4096
 #define QUAR_BYTES (64u << 20)
 
@@ -81,8 +95,11 @@ static struct node **buckets;
 static struct obj *bigs;
 static struct obj *ofree;
 static struct node *nfree;
-static struct obj *qhead, *qtail;
-static size_t qcount, qbytes;
+static struct obj *qhead;              /* the dead blocks, not in any order */
+static size_t qcount, qbytes;          /* all dead blocks */
+static size_t qnew, qnewbytes;         /* freed since the last collection */
+static struct obj *live;               /* the live heap blocks */
+static size_t live_count, live_bytes;
 /* Bumped (under the lock) whenever an object dies or leaves the table. Each thread keeps the last live object it found,
    with the generation it found it in, and uses it without the lock while the generation is the same. */
 static volatile unsigned long sp_gen;
@@ -187,6 +204,34 @@ static __thread size_t fdepth, fcap;
 static __thread uintptr_t stk_lo, stk_hi;   /* this thread's stack, from pthread_getattr_np (0: not known yet) */
 static __thread int stk_known;
 
+/* The threads that run instrumented code, for the collector: the top of each one's stack and the lowest stack pointer it
+   was seen with (the stack between them is mapped). A thread leaves the list in a key destructor, before its stack is
+   freed; the collector holds sp_lock while it reads a stack, and the destructor takes it. */
+struct sp_thread {
+  uintptr_t hi;
+  volatile uintptr_t low;
+  struct sp_thread *next, *prev;
+};
+static struct sp_thread *threads;
+static __thread struct sp_thread *me;
+static pthread_key_t thread_key;
+static pthread_once_t thread_once = PTHREAD_ONCE_INIT;
+
+static void thread_gone(void *v)
+{
+  struct sp_thread *t = v;
+  pthread_mutex_lock(&sp_lock);
+  if (t->prev) t->prev->next = t->next; else threads = t->next;
+  if (t->next) t->next->prev = t->prev;
+  pthread_mutex_unlock(&sp_lock);
+  /* Other key destructors may still run instrumented code on this thread (EDG's thread_local destructors,
+     lib_src/thread_dtor.c): they must not find the record. The destructor runs on the exiting thread, so me is its own. */
+  me = NULL;
+  munmap(t, sizeof *t);
+}
+
+static void thread_key_init(void) { pthread_key_create(&thread_key, thread_gone); }
+
 static void stack_bounds(void)
 {
   pthread_attr_t at;
@@ -196,6 +241,24 @@ static void stack_bounds(void)
   if (pthread_getattr_np(pthread_self(), &at) != 0) return;
   if (pthread_attr_getstack(&at, &addr, &size) == 0) { stk_lo = (uintptr_t)addr; stk_hi = (uintptr_t)addr + size; }
   pthread_attr_destroy(&at);
+  if (!stk_hi) return;
+  pthread_once(&thread_once, thread_key_init);
+  struct sp_thread *t = sp_mmap(sizeof *t);
+  t->hi = stk_hi;
+  t->low = (uintptr_t)__builtin_frame_address(0);
+  pthread_mutex_lock(&sp_lock);
+  t->next = threads;
+  if (threads) threads->prev = t;
+  threads = t;
+  pthread_mutex_unlock(&sp_lock);
+  me = t;
+  pthread_setspecific(thread_key, t);
+}
+
+/* Note the stack pointer of an instrumented frame: the collector scans this thread's stack down to the lowest one. */
+static inline void saw_sp(uintptr_t sp)
+{
+  if (me && sp < me->low) me->low = sp;
 }
 
 static void *grow(void *old, size_t used, size_t *cap, size_t elt)
@@ -222,6 +285,8 @@ void __nfcxx_sp_frame(int n, ...)
     if (a + z > hi) hi = a + z;
   }
   va_end(ap);
+  if (!stk_known) stack_bounds();
+  saw_sp(lo);
   /* Frames below this frame's top are gone (left by longjmp). */
   while (fdepth > 0 && frames[fdepth - 1].lo < hi) sdepth = frames[--fdepth].start;
   if (fdepth == fcap) frames = grow(frames, fdepth, &fcap, sizeof *frames);
@@ -274,6 +339,7 @@ void __nfcxx_sp_check(void *p, size_t n, const char *file, int line)
   if (a == 0) return;   /* null dereferences are the nonnull check's */
   if (c_gen == sp_gen && c_lo <= a && a < c_hi && n <= c_hi - a) return;
   struct srec *r = srec_find(a, sp);
+  saw_sp(sp);
   if (r) {
     if (a >= r->hi || n > r->hi - a) sp_fail(K_OOB, p, file, line);
     return;
@@ -298,6 +364,7 @@ void *__nfcxx_sp_derive(void *base, void *res, const char *file, int line)
   if (b == 0 || b == r) return res;
   if (c_gen == sp_gen && c_lo <= b && b <= c_hi && c_lo <= r && r <= c_hi) return res;
   struct srec *s = srec_find(b, sp);
+  saw_sp(sp);
   if (s) {
     if (r < s->lo || r > s->hi) sp_fail(K_ARITH, res, file, line);
     return res;
@@ -333,6 +400,57 @@ void __nfcxx_sp_globals(const uintptr_t *t, long n)
   pthread_mutex_unlock(&sp_lock);
 }
 
+/* ---- functions of instrumented units and their signatures: an open-addressing table, address -> signature hash. */
+struct fent { uintptr_t fn; long sig; };
+static struct fent *ftab;
+static size_t fcount, fsize;   /* fsize: a power of two */
+static __thread uintptr_t cf_fn;
+static __thread long cf_sig;
+
+static size_t fslot(uintptr_t fn) { return (size_t)((fn * 0x9E3779B97F4A7C15ull) >> 20) & (fsize - 1); }
+
+static void fput(uintptr_t fn, long sig)
+{
+  size_t i = fslot(fn);
+  while (ftab[i].fn && ftab[i].fn != fn) i = (i + 1) & (fsize - 1);
+  if (!ftab[i].fn) { ftab[i].fn = fn; ftab[i].sig = sig; fcount++; }   /* a COMDAT function: the first unit's entry */
+}
+
+/* __nfcxx_sp_funcs(table, n): n pairs (function, signature hash) of one translation unit, from its constructor. */
+void __nfcxx_sp_funcs(const uintptr_t *t, long n)
+{
+  pthread_mutex_lock(&sp_lock);
+  if ((fcount + n) * 2 > fsize) {
+    struct fent *old = ftab;
+    size_t osize = fsize;
+    while ((fcount + n) * 2 > fsize) fsize = fsize ? fsize * 2 : 4096;
+    ftab = sp_mmap(fsize * sizeof *ftab);
+    fcount = 0;
+    for (size_t i = 0; i < osize; i++) if (old[i].fn) fput(old[i].fn, old[i].sig);
+    if (old) munmap(old, osize * sizeof *old);
+  }
+  for (long i = 0; i < n; i++) fput(t[2 * i], (long)t[2 * i + 1]);
+  pthread_mutex_unlock(&sp_lock);
+}
+
+void __nfcxx_sp_call(void *f, long sig, const char *file, int line)
+{
+  uintptr_t fn = (uintptr_t)f;
+  if (fn == 0 || (fn == cf_fn && sig == cf_sig)) return;   /* null calls are the nonnull check's */
+  int kind = -1;
+  pthread_mutex_lock(&sp_lock);
+  if (fsize) {
+    size_t i = fslot(fn);
+    while (ftab[i].fn && ftab[i].fn != fn) i = (i + 1) & (fsize - 1);
+    if (ftab[i].fn) kind = ftab[i].sig == sig ? -2 : K_CALLTYPE;
+  }
+  if (kind == -1 && obj_find(fn)) kind = K_CALLDATA;
+  pthread_mutex_unlock(&sp_lock);
+  if (kind == -1 && srec_find(fn, (uintptr_t)__builtin_frame_address(0))) kind = K_CALLDATA;
+  if (kind >= 0) sp_fail(kind, f, file, line);
+  if (kind == -2) { cf_fn = fn; cf_sig = sig; }
+}
+
 /* ---- the heap: malloc and friends over glibc's, one padding byte per block */
 static void *heap_track(void *raw, void *p, size_t n)
 {
@@ -342,6 +460,10 @@ static void *heap_track(void *raw, void *p, size_t n)
   struct obj *o = obj_new();
   o->lo = (uintptr_t)p; o->hi = (uintptr_t)p + n; o->state = OBJ_LIVE; o->kind = KIND_HEAP; o->raw = raw;
   obj_insert(o);
+  o->lnext = live;
+  if (live) live->lprev = o;
+  live = o;
+  live_count++; live_bytes += n;
   pthread_mutex_unlock(&sp_lock);
   return p;
 }
@@ -396,6 +518,75 @@ static struct obj *heap_lookup_locked(void *p, int *kind)
   return o;
 }
 
+/* ---- the collector. Roots are scanned word by word; a word is a pointer into a dead block when the table finds a dead
+   object for it ([lo, hi], as a pointer one past the end is still the block's). */
+struct range { uintptr_t lo, hi; };
+static struct range *segs;
+static size_t nsegs, segcap;
+static pthread_mutex_t collect_lock = PTHREAD_MUTEX_INITIALIZER;
+static uintptr_t dead_lo, dead_hi;
+
+static int seg_cb(struct dl_phdr_info *info, size_t size, void *data)
+{
+  (void)size; (void)data;
+  for (int i = 0; i < info->dlpi_phnum; i++) {
+    const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+    if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_W)) continue;
+    if (nsegs == segcap) segs = grow(segs, nsegs, &segcap, sizeof *segs);
+    segs[nsegs].lo = info->dlpi_addr + ph->p_vaddr;
+    segs[nsegs].hi = info->dlpi_addr + ph->p_vaddr + ph->p_memsz;
+    nsegs++;
+  }
+  return 0;
+}
+
+static void scan(uintptr_t lo, uintptr_t hi)
+{
+  lo = (lo + 7) & ~(uintptr_t)7;
+  for (const uintptr_t *w = (const uintptr_t *)lo; (uintptr_t)(w + 1) <= hi; w++) {
+    uintptr_t v = *w;
+    if (v < dead_lo || v > dead_hi) continue;
+    struct obj *o = obj_find(v);
+    if (o && o->state == OBJ_DEAD) o->mark = 1;
+  }
+}
+
+/* noinline: the callee-saved registers of the caller are spilled into this frame, which the scan of this thread's stack
+   covers. */
+static __attribute__((noinline)) void collect(void)
+{
+  if (pthread_mutex_trylock(&collect_lock) != 0) return;   /* another thread is collecting */
+  /* The segments are listed without sp_lock: dl_iterate_phdr takes the loader's lock, and a thread in dlopen that holds
+     it may be waiting for sp_lock in malloc. */
+  nsegs = 0;
+  dl_iterate_phdr(seg_cb, NULL);
+  if (!stk_known) stack_bounds();   /* before sp_lock: it takes the lock, and pthread_getattr_np may malloc */
+  __builtin_unwind_init();
+  uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+  pthread_mutex_lock(&sp_lock);
+  dead_lo = UINTPTR_MAX; dead_hi = 0;
+  for (struct obj *o = qhead; o; o = o->qnext) {
+    o->mark = 0;
+    if (o->lo < dead_lo) dead_lo = o->lo;
+    if (o->hi > dead_hi) dead_hi = o->hi;
+  }
+  for (size_t i = 0; i < nsegs; i++) scan(segs[i].lo, segs[i].hi);
+  for (struct sp_thread *t = threads; t; t = t->next) scan(t == me ? sp : t->low, t->hi);
+  for (struct obj *o = live; o; o = o->lnext) scan(o->lo, o->hi);
+  for (struct obj **pp = &qhead; *pp;) {
+    struct obj *o = *pp;
+    if (o->mark) { pp = &o->qnext; continue; }
+    *pp = o->qnext;
+    qcount--; qbytes -= o->hi - o->lo;
+    obj_remove(o);
+    __libc_free(o->raw);   /* glibc's free never calls back into this file */
+    o->fnext = ofree; ofree = o;
+  }
+  qnew = 0; qnewbytes = 0;
+  pthread_mutex_unlock(&sp_lock);
+  pthread_mutex_unlock(&collect_lock);
+}
+
 void free(void *p)
 {
   int kind;
@@ -406,23 +597,17 @@ void free(void *p)
   if (!o) { pthread_mutex_unlock(&sp_lock); __libc_free(p); return; }   /* allocated before us, or not by malloc */
   o->state = OBJ_DEAD;
   sp_gen++;
-  o->qnext = NULL;
-  if (qtail) qtail->qnext = o; else qhead = o;
-  qtail = o;
+  if (o->lprev) o->lprev->lnext = o->lnext; else live = o->lnext;
+  if (o->lnext) o->lnext->lprev = o->lprev;
+  live_count--; live_bytes -= o->hi - o->lo;
+  o->qnext = qhead;
+  qhead = o;
   qcount++; qbytes += o->hi - o->lo;
-  void *give[16];
-  int ng = 0;
-  while (qhead && (qcount > QUAR_MAX || qbytes > QUAR_BYTES) && ng < 16) {
-    struct obj *v = qhead;
-    qhead = v->qnext;
-    if (!qhead) qtail = NULL;
-    qcount--; qbytes -= v->hi - v->lo;
-    obj_remove(v);
-    give[ng++] = v->raw;
-    v->fnext = ofree; ofree = v;
-  }
+  qnew++; qnewbytes += o->hi - o->lo;
+  int due = qnew > (live_count / 4 > QUAR_MAX ? live_count / 4 : QUAR_MAX) ||
+            qnewbytes > (live_bytes / 4 > QUAR_BYTES ? live_bytes / 4 : QUAR_BYTES);
   pthread_mutex_unlock(&sp_lock);
-  for (int i = 0; i < ng; i++) __libc_free(give[i]);
+  if (due) collect();
 }
 
 void cfree(void *p) { free(p); }
