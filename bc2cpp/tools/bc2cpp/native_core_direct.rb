@@ -1095,6 +1095,7 @@ module NativeCoreDirect
       }
     CPP
     'bc2cpp_ary_rotate_bang' => <<~CPP,
+      #define BC2CPP_ROTATE_SMALL_MAX 16
       static inline void bc2cpp_ary_rev(mrb_value *p, mrb_int beg, mrb_int end) {
         for (mrb_int i = beg, j = end - 1; i < j; i++, j--) {
           mrb_value v = p[i];
@@ -1122,6 +1123,23 @@ module NativeCoreDirect
         }
         else {
           idx = count % len;
+        }
+        // ROTATE_SMALL_SHIFT: the triple reversal leaves the same order, so a shift whose short side fits the
+        // buffer is moved in place instead; mrb_ary_modify above already did the unshare and the write barrier.
+        if (idx == 0) return self;
+        mrb_int rest = len - idx;
+        mrb_value buf[BC2CPP_ROTATE_SMALL_MAX];
+        if (idx <= BC2CPP_ROTATE_SMALL_MAX) {
+          memcpy(buf, p, sizeof(mrb_value) * idx);
+          memmove(p, p + idx, sizeof(mrb_value) * rest);
+          memcpy(p + rest, buf, sizeof(mrb_value) * idx);
+          return self;
+        }
+        if (rest <= BC2CPP_ROTATE_SMALL_MAX) {
+          memcpy(buf, p + idx, sizeof(mrb_value) * rest);
+          memmove(p + rest, p, sizeof(mrb_value) * idx);
+          memcpy(p, buf, sizeof(mrb_value) * rest);
+          return self;
         }
         bc2cpp_ary_rev(p, 0, len);
         bc2cpp_ary_rev(p, 0, len-idx);
