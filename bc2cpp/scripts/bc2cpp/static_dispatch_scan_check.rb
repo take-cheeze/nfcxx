@@ -20,9 +20,9 @@
 #   SUFFIX_BASES: `x=` / `x?` / `x!` follows a dynamic `x` only when `x` was read as text (a Ruby text scan, a naming
 #     macro's argument); an exact name from bytecode or a C literal keeps its own suffix only. A pool literal "=",
 #     "?" or "!" that may reach a built string (FRAGMENT_USES) puts the rule back for every name.
-#   HAND_REGISTRATION_GUARD: every closed-listed hand line in register.cxx is wrapped in #ifndef
-#     BC2CPP_UNREGISTERED_<entry> (prune_static_dispatch_registrations.rb --closed --check), and the closed list may
-#     take RGSS owners and engine module singletons, never reopened core classes (CLOSED_OWNER_RE).
+#   GENERATED_REGISTRATION: no compiled gem's src/register.cxx registers a method by hand (the generated
+#     bc2cpp_register_owner_methods is the only registration, so the lists' left-out entries stay out), and the
+#     closed list may take RGSS owners and engine module singletons, never reopened core classes (CLOSED_OWNER_RE).
 #   CORE_BYTECODE_TOKENS (needs MRBC; skipped without it): core Ruby read as bytecode names a method only through a
 #     send whose receiver may be an engine object (self in a module, Object or Kernel method; any unknown value), a
 #     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
@@ -35,7 +35,6 @@
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
-require 'rbconfig'
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
@@ -301,11 +300,11 @@ else
   puts 'skip CORE_BYTECODE_TOKENS / FRAGMENT_USES fixtures (no MRBC)'
 end
 
-# --- HAND_REGISTRATION_GUARD ---
-guard_out = IO.popen([RbConfig.ruby, File.expand_path('prune_static_dispatch_registrations.rb', __dir__), '--closed',
-                      '--check'], err: %i[child out], &:read)
-check("hand registrations: every closed-listed register.cxx line is guarded (#{guard_out.lines.first&.strip})",
-      $?.success?)
+# --- GENERATED_REGISTRATION ---
+S::GEMS.each do |gem|
+  src = File.read(File.join(root, gem, 'src', 'register.cxx')).gsub(%r{//[^\n]*}, '')
+  check("#{gem}: src/register.cxx registers nothing by hand", !src.match?(/\bmrb_define_\w*method\s*\(/))
+end
 check('closed owners: RGSS is unregisterable only for the closed list',
       S.owner_re(true).match?('RGSS::Sprite') && !S.owner_re(false).match?('RGSS::Sprite'))
 check('closed owners: engine module singletons, but not reopened core classes',

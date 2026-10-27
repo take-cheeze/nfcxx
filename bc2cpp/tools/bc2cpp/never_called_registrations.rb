@@ -1,23 +1,14 @@
 # frozen_string_literal: true
 
-# Turns bc2cpp.rb's "== never called ==" diagnostic (a candidate for deletion,
-# not proof of it) into the registered entries this project can stop
-# registering: compiled and registered, with no call site in the program's
-# bytecode or NATIVE_SRCS, and owned by a class a missed call site cannot hide
-# behind.
+# Runs bc2cpp.rb the way each compiled gem's mrbgem.rake does and parses its
+# "== compiled entry points ==" and "== never called ==" diagnostics, for the
+# registration proof (static_dispatch_registrations.rb).
 #
-# Only the RPG2000/2003 engine namespaces (Game::/RPG2k::/RPG2k3::/LCF::)
-# qualify: RGSS classes are the public scripting API a game's own scripts
-# call, invisible to static analysis. The check is by namespace, not by gem,
-# so core classes owned by a compiled gem (StringIO, Array) stay excluded.
-#
-# A wired-embedding owner (BC2CPP_WIRED_EMBEDDINGS) is never safe to
-# unregister: every compiled entry of the class must be installed together
-# (see compiled_gems.rb's EMBED_WIRED comment), or an interpreted fallback
-# reads the ordinary iv_tbl and sees nil.
-#
-# `.singleton` owners are excluded too, conservatively (no DEFS/SCLASS
-# span-finding).
+# SAFE_UNREGISTER_OWNER_RE: only the RPG2000/2003 engine namespaces
+# (Game::/RPG2k::/RPG2k3::/LCF::) qualify for the open list. RGSS classes are
+# the public scripting API a game's own scripts call, invisible to static
+# analysis. The check is by namespace, not by gem, so core classes owned by a
+# compiled gem (StringIO, Array) stay excluded.
 require 'open3'
 require 'set'
 require 'shellwords'
@@ -57,7 +48,7 @@ module NeverCalledRegistrations
     closed_world_srcs = closed_world_mrblib_srcs(repo_root, core_gems: :canonical)
     # The canonical, target-independent native source set (as in
     # the wired-embedding registration above): every target
-    # shares one register.cxx per gem, so a target-specific set would make one
+    # shares one generated registration per gem, so a target-specific set would make one
     # target's "never called" verdict unsound for the others.
     native_srcs = Dir["#{repo_root}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{repo_root}/3rd/mruby") +
                   external_gem_native_srcs(repo_root)
@@ -127,51 +118,5 @@ module NeverCalledRegistrations
 
     section = section.split(/\n== /, 2)[0]
     section.each_line.filter_map { |l| l.chomp[/\A {2}(\S+)\z/, 1] }.reject { |n| n == '(none)' }.to_set
-  end
-
-  # See the header comment: a namespace check plus the wired-embedding and
-  # `.singleton` exclusions.
-  def safe_to_unregister?(owner)
-    return false if owner.end_with?('.singleton')
-    return false if BC2CPP_WIRED_EMBEDDINGS.include?(owner)
-
-    owner.match?(SAFE_UNREGISTER_OWNER_RE)
-  end
-
-  # Every compiled entry point of `gem_name` that is never called and whose
-  # owner passes safe_to_unregister?, whether or not register.cxx still
-  # registers it. The set must agree with the real register.cxx.
-  def prunable_entries(gem_name, repo_root, mrbc)
-    prunable_entries_in(run_bc2cpp(gem_name, repo_root, mrbc))
-  end
-
-  # prunable_entries from a run's stderr (run_bc2cpp_full_many gives several gems' at once).
-  def prunable_entries_in(stderr)
-    compiled = parse_compiled_entries(stderr)
-    never_called = parse_never_called_names(stderr)
-    compiled.select { |m| never_called.include?("#{m[:owner]}##{m[:name]}") && safe_to_unregister?(m[:owner]) }
-  end
-
-  # The register.cxx line a `mrb_define_method`/`mrb_define_private_method` call
-  # for `entry` spans, anchored on the unique generated entry symbol (never the
-  # method name, which repeats across owners). `mrb_define_class_method` is
-  # excluded: safe_to_unregister? already drops every `.singleton` owner.
-  def registration_line_pattern(entry)
-    /^[ \t]*mrb_define_(?:private_)?method\(\s*M\s*,\s*\w+\s*,\s*"[^"]*"\s*,\s*#{Regexp.escape(entry)}\s*,[^;]*\);\n/
-  end
-
-  # The C++ entry-point identifiers any `mrb_define_(private_|class_)?method`
-  # or generated `bc2cpp_define_private_class_method` call installs, across
-  # the gem's hand register.cxx and bc2cpp.rb's own generated
-  # bc2cpp_register_owner_methods -- the same shape
-  # the wired-embedding registrations must match. A name argument may be
-  # a string literal or a macro/variable; the function is always the fourth.
-  # Comments are dropped first: register.cxx quotes calls in prose.
-  INSTALL_CALL = /(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(\s*M\s*,\s*[^,]+,\s*(?:"[^"]*"|\S+)\s*,\s*(\w+)\s*,/m
-
-  def installed_entries(*sources)
-    sources.flat_map do |src|
-      src.gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '').scan(INSTALL_CALL).flatten
-    end.to_set
   end
 end

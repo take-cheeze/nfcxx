@@ -11,10 +11,12 @@
 #     - BC2CPP_COLLECT_DIRECT=0 keeps the Enumerable#collect call;
 #     - the helper tests the block once, before its loop, and cuts the arena back after each store
 #       (COLLECT_YIELD_HOIST);
+#     - a block that can be nil (`map(&nil)`, an absent `&b` passed on) takes Enumerable#collect at nil;
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same for map with break/next, a block that resizes its receiver,
 #       destructuring, an Array subclass, nested maps, transpose, GC.stress, a Fiber, `[]` over Integer, bignum,
-#       program and core receivers, and `!=` over mixed operands.
+#       program and core receivers, `!=` over mixed operands, and a nil block given to map and the other block arms
+#       (an Enumerator, where the helper used to yield to nil).
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/collect_direct_check.rb
 
@@ -77,6 +79,13 @@ SRC = <<~'RUBY'
     def neq(a, b); a != b; end
     def bits(xs, i); xs.map { |x| x[i] }; end
     def fresh(a); a.map { |x| [x, x.to_s * 2] }; end
+    def lit_nil(a); a.map(&nil); end
+    def passed(a, &b); a.map(&b); end
+    def given(a, b); a.collect(&b); end
+    def nil_arms(a)
+      [a.select(&nil), a.each(&nil), a.each_with_index(&nil), a.reject(&nil), a.each_index(&nil), a.find(&nil),
+       a.sort_by(&nil), { 1 => 2 }.map(&nil), { 1 => 2 }.each(&nil), (1..2).map(&nil), 2.times(&nil)]
+    end
   end
 RUBY
 
@@ -103,6 +112,10 @@ check.call('a literal-block map on an Array calls bc2cpp_ary_collect',
 check.call("Array#transpose's inner map calls bc2cpp_ary_collect",
            method_code(code, 'Array_transpose').include?('bc2cpp_ary_collect(M, self, '))
 check.call('no #error in the generated code', !code.include?('#error'))
+%w[lit_nil passed given].each do |fn|
+  check.call("CdMaps##{fn}: a block that can be nil takes Enumerable#collect, not bc2cpp_ary_collect",
+             method_code(code, "CdMaps_#{fn}").match?(/= mrb_nil_p\((\w+)\) \? Enumerable_collect_impl\(M, r\d+, \1\) : bc2cpp_ary_collect\(M, r\d+, \1\);/))
+end
 off, = generate_world('BC2CPP_COLLECT_DIRECT' => '0')
 check.call('BC2CPP_COLLECT_DIRECT=0: no bc2cpp_ary_collect', !off.include?('bc2cpp_ary_collect('))
 helper = code[/static mrb_value bc2cpp_ary_collect\(.*?^}/m].to_s
@@ -153,6 +166,11 @@ DRIVER = <<~'RUBY'
     m.with_index([:p, :q])
   end
   show.call('fiber') { [f.resume, f.resume] }
+  enum = ->(e) { e.is_a?(Enumerator) ? [:enum, e.to_a] : e }
+  show.call('map(&nil)') { enum.call(m.lit_nil([1, 2])) }
+  show.call('absent &b passed on') { [enum.call(m.passed([1, 2])), m.passed([1, 2]) { |x| -x }] }
+  show.call('nil, Symbol and Proc block arguments') { [enum.call(m.given([3], nil)), m.given([3], :to_s), m.given([3], proc { |x| x * 2 })] }
+  show.call('the other block arms with a nil block') { m.nil_arms([2, 1]).map(&enum) }
   big = 2**70
   show.call('bits') { m.bits([5, 6, -3, CdBox.new, [7, 8], { 1 => :h }], 1) }
   show.call('neq') do

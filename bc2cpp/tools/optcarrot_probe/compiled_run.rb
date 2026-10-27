@@ -241,15 +241,12 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     # subset.
     'SKIP_UNSUPPORTED' => '1',
     # BC2CPP_SELF_REGISTERING: bc2cpp.rb's own EMBED_WIRED allowlist
-    # (compiled_gems.rb's BC2CPP_WIRED_EMBEDDINGS) exists only because the
-    # REAL compiled gems' hand-written register.cxx does not install every
-    # compiled entry point of an embedding class by construction. This
-    # file's own `emit_register` below has no such gap: it installs every
+    # (compiled_gems.rb's BC2CPP_WIRED_EMBEDDINGS) names only the project's
+    # classes. This file's own `emit_register` below installs every
     # compiled method of any owner its own `embeds` diagnostic names (see
     # that function's own comment), computed from the exact same
-    # diagnostic bc2cpp.rb itself prints -- so "embeddable" and
-    # "installed" can never drift apart here the way they can for a
-    # hand-maintained register.cxx. Setting this tells bc2cpp.rb's driver
+    # diagnostic bc2cpp.rb itself prints, so "embeddable" and
+    # "installed" cannot drift apart. Setting this tells bc2cpp.rb's driver
     # to skip that allowlist (nothing in this closed world is on it
     # anyway -- it names only real-project classes) and let every ivar
     # IvarLayout/drop_unsafe_embeddings themselves already proved safe
