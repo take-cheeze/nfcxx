@@ -695,16 +695,10 @@ These are trusted imports at call sites, not facts inferred from names. For an e
 producer must ensure the real implementation satisfies the summary. A function defined in the same
 module is checked against its own summary (see below).
 
-A `read` argument that points only to external memory, such as a Rust string literal's static bytes, is
-accepted when the callee is defined in the module. The callee's body is verified to read only through
-it, so the call is the caller's own read of that memory, which is reported as `contract-not-closed` when
-the caller itself is checked against a summary. For an external callee it is still refused
-(`calls/external_pointer.ir` against `calls/external_pointer_defined.ir`).
-
 Read effects may have several possible known local targets, all of which are checked. So may mutation,
 as a weak update of each (see "Refusals and limits"). Initialization and consumption require one known
 place. An argument that points only into external memory (a global, or a pointer parameter of a function
-checked without a summary) is accepted for `read`, `write` and `init`, as a load or store through it would be:
+checked without a summary, or a Rust string literal's static bytes) is accepted for `read`, `write` and `init`, as a load or store through it would be:
 that memory is not tracked and is not the caller's storage, so it overlaps no local argument, and `noescape`
 keeps argument pointers out of it. A returned alias into it is external memory. Under a verified summary it is
 `contract-not-closed`. `consume` and an argument that may be external or local are still refused
@@ -1020,11 +1014,8 @@ and external stores. Unknown instructions are
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
 
-Full Rust move semantics, C++ destructor interpretation, container invalidation, interior
-mutability beyond state-preserving writes ("Interior mutability") and cross-function region inference
-are not implemented. Exception handling is checked
-Full Rust move semantics, container invalidation, interior
-mutability and cross-function region inference are not implemented. Exception handling is checked
+Full Rust move semantics, container invalidation, interior mutability beyond state-preserving writes
+("Interior mutability") and cross-function region inference are not implemented. Exception handling is checked
 through EDG's `try` protocol ("try and catch"), not through cleanup edges of its own.
 `rref-arg` does not mean that an ordinary C++ moved-from value is dead. C++ destructors end objects
 only as described in "C++ destructors"; placement new and storage reuse by the program are refused.
@@ -1041,11 +1032,9 @@ whose MIR drops are `drop-state` facts, `drop-state-if-live` under a drop flag.
 
 `(readonly %N)` and `(interior-mutable ...)` are the facts only that translator emits. The first says
 that parameter `%N` is a pointer the function does not write through (a Rust `&T`), except for interior
-writes, and summary inference gives it read-only modes.
-`(readonly %N)` is the one fact only that translator emits: parameter `%N` is a pointer the function
-does not write through (a Rust `&T`). Summary inference gives it read-only modes. A slice or `&str`
-parameter is passed as two parameters, its pointer and its length, and a function returning one returns
-its pointer, so that summaries describe both as they do thin references.
+writes, and summary inference gives it read-only modes. A slice or `&str` parameter is passed as two
+parameters, its pointer and its length, and a function returning one returns its pointer, so that
+summaries describe both as they do thin references.
 
 ## Tests
 
