@@ -112,6 +112,48 @@ class CodeGen
     kind && native_result_bits(kind, true)
   end
 
+  # ARRAY_TIMES_RESULT: `ary * n` is a fresh, exact Array when n is an Integer. Array#* joins instead for an argument
+  # mrb_check_string_type converts, so the argument must be proven Integer and nothing may give Integer a `to_str`.
+  # A removed Array#* answers no value or an ancestor's `*`, so no ancestor may define one; the fact then holds
+  # whether or not a computed send removes it. BC2CPP_ARRAY_TIMES_RESULT=0 drops the fact.
+  def native_array_times_result(insn, state)
+    return nil unless insn.op == :SEND && insn.sym == '*' && insn.plain_fixed_argc? && insn.argc == 1
+    return nil unless ENV['BC2CPP_ARRAY_TIMES_RESULT'] != '0' && state[insn.reg.to_i] == NumericFlow::ARR
+
+    arg = state[insn.reg.to_i + 1]
+    return nil unless arg.is_a?(Integer) && arg.positive? && (arg & ~NumericFlow::INT).zero?
+    return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources
+
+    entry = NativeCoreDirect::RESULT_ENTRIES.find { |candidate| candidate.owner == 'Array' && candidate.name == '*' }
+    entry && native_core_entry_safe?(entry) && integer_to_str_free? && array_ancestors_times_free? ? NumericFlow::ARR : nil
+  end
+
+  # No ancestor of Array but Array itself can answer `*`: no registry definition on one, no outside Ruby definition,
+  # and no native spelling of the name outside mruby's core (which defines it on Array and the numbers only).
+  def array_ancestors_times_free?
+    return @array_ancestors_times_free if defined?(@array_ancestors_times_free)
+
+    owners = CoreHierarchySigs.ancestors('Array') - ['Array']
+    @array_ancestors_times_free =
+      !@closed_world.unknown_definer?('*') && (@registry['*'] || []).none? { |definition| owners.include?(definition.owner) } &&
+      owners.all? { |owner| @closed_world.core_native_arm_safe?('*', owner) } &&
+      @closed_world.native_paths_spelling('*').all? { |path| path.match?(ClosedWorld::NATIVE_CORE) }
+  end
+
+  # No definition of `to_str` can answer an Integer: none in the registry on its ancestors, no installer, no
+  # outside Ruby source that spells it and no native one outside mruby's core (which defines it on String only).
+  def integer_to_str_free?
+    return @integer_to_str_free if defined?(@integer_to_str_free)
+
+    owners = CoreHierarchySigs.ancestors('Integer')
+    installed = symbol_installed_names
+    @integer_to_str_free =
+      !installed.nil? && !installed.include?('to_str') && !@closed_world.unknown_definer?('to_str') &&
+      (@registry['to_str'] || []).none? { |definition| owners.include?(definition.owner) } &&
+      !@closed_world.outside_ruby_token?('to_str') &&
+      @closed_world.native_paths_spelling('to_str').all? { |path| path.match?(ClosedWorld::NATIVE_CORE) }
+  end
+
   # The core Struct alias copies its native inspect entry. Any unmodelled
   # replacement of that entry or another alias of to_s withdraws this bridge.
   def native_struct_string_alias_safe?

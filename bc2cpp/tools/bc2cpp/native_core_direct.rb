@@ -628,6 +628,48 @@ module NativeCoreDirect
                   size_t blen = capa * sizeof(mrb_value);
                   struct RArray *a = MRB_OBJ_ALLOC(mrb, MRB_TT_ARRAY, mrb->array_class);
               C
+    # ARRAY_TIMES_RESULT (CodeGen#native_array_times_result): for an argument that is no String and answers no
+    # to_str, mrb_ary_times returns mrb_ary_new (mrb_ary_new_capa's ary_new_capa) or its own ary_new_capa.
+    Entry.new(name: '*', owner: 'Array', arity: 1, arg: :integer, aspec: 'MRB_ARGS_REQ(1)', expression: nil, apis: [],
+              checks: [['mrb_ary_times', <<~C, :exact],
+                struct RArray *a1 = mrb_ary_ptr(self);
+
+                mrb_value arg = mrb_get_arg1(mrb);
+                mrb_value tmp = mrb_check_string_type(mrb, arg);
+                if (!mrb_nil_p(tmp)) {
+                  return mrb_ary_join(mrb, self, tmp);
+                }
+
+                mrb_int times = mrb_as_int(mrb, arg);
+                if (times < 0) {
+                  mrb_raise(mrb, E_ARGUMENT_ERROR, "negative argument");
+                }
+                if (times == 0) return mrb_ary_new(mrb);
+                if (ARY_MAX_SIZE / times < ARY_LEN(a1)) {
+                  ary_too_big(mrb);
+                }
+
+                mrb_int len1 = ARY_LEN(a1);
+                struct RArray *a2 = ary_new_capa(mrb, len1 * times);
+                ARY_SET_LEN(a2, len1 * times);
+
+                mrb_value *ptr = ARY_PTR(a2);
+                while (times--) {
+                  array_copy(ptr, ARY_PTR(a1), len1);
+                  ptr += len1;
+                }
+
+                return mrb_obj_value(a2);
+              C
+                       ['ary_new_capa', <<~C, :source]]),
+                static struct RArray*
+                ary_new_capa(mrb_state *mrb, mrb_int capa)
+                {
+                  ary_check_too_big(mrb, capa, 0);
+
+                  size_t blen = capa * sizeof(mrb_value);
+                  struct RArray *a = MRB_OBJ_ALLOC(mrb, MRB_TT_ARRAY, mrb->array_class);
+              C
     # With one argument ary_subtract_internal returns the mrb_ary_new it pushed into (ary_subtract_body's ctx->result
     # is the same object; MRB_ENSURE re-raises on failure), which is mrb_ary_new_capa's ary_new_capa.
     Entry.new(name: '-', owner: 'Array', arity: 1, arg: :array, aspec: 'MRB_ARGS_REQ(1)', expression: nil, apis: [],
