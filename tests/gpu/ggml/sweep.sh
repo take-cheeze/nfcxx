@@ -28,6 +28,8 @@ files=("$@")
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
+# the SPIR-V emitter's interpreter, as scripts/sycl-build.sh picks it (CRuby when installed, else mruby)
+spvrb=${NFCXX_SPIRV_RUBY:-$(command -v ruby || echo "$root/scripts/mrb")}
 # one FILE: the device pass of one TU; prints its verdict line
 one() {
   local f=$1 b
@@ -39,7 +41,7 @@ one() {
       -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." "$f" > "$out/$b.ir" 2> "$out/$b.err"; then
     echo "$b: FAIL (front end) $(grep -m1 -A1 -E 'error' "$out/$b.err" | tr -s ' \n' ' ' | cut -c1-200)"; return
   fi
-  if ! "$root/scripts/mrb" "$root/scripts/pathb-spirv-emit.rb" --kernel-cl --manifest="$out/$b.man" "$out/$b.ir" \
+  if ! "$spvrb" "$root/scripts/pathb-spirv-emit.rb" --kernel-cl --manifest="$out/$b.man" "$out/$b.ir" \
       > "$out/$b.spv" 2> "$out/$b.err"; then
     echo "$b: FAIL (emitter) $(head -1 "$out/$b.err" | cut -c1-200)"; return
   fi
@@ -52,7 +54,7 @@ one() {
   rm -f "$out/$b.ir" "$out/$b.spv"
 }
 export -f one
-export root ggml_src out
+export root ggml_src out spvrb
 printf '%s\n' "${files[@]}" | xargs -P "$jobs" -I{} bash -c 'one "$1"' _ {} | sort > "$out/verdicts"
 cat "$out/verdicts"
 n=$(wc -l < "$out/verdicts"); ok=$(grep -c ': ok (' "$out/verdicts")
