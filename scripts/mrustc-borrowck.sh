@@ -32,10 +32,11 @@ fi
 
 # Unoptimised MIR (-Z disable-mir-opt also turns off inlining after monomorphisation), so the checker
 # sees the borrows and scopes the source has, with SCOPEEND statements for the ends of storage.
-# -Z dump-hir writes prog_2_hir.rs, whose `impl Copy` items tell the translator which uses are moves.
+# -Z dump-hir writes prog_2_hir.rs, whose `impl Copy` items tell the translator which uses are moves,
+# and -Z dump-ast prog_1_ast.rs, whose explicit `&mut` arguments tell it which borrows are not two-phase.
 # A subshell, so that the shell's own report of an aborted mrustc goes to the log too.
 ( MRUSTC_MMIR_SCOPE_END=1 MRUSTC_TARGET_VER=${MRUSTC_TARGET_VER:-1.90} exec "$mrustc" "$src" -o "$tmp/prog" -L "$std" \
-  --edition 2021 -C codegen-type=monomir -Z disable-mir-opt -Z dump-hir ${extra[@]+"${extra[@]}"} ) >"$tmp/mrustc.log" 2>&1 || {
+  --edition 2021 -C codegen-type=monomir -Z disable-mir-opt -Z dump-hir -Z dump-ast ${extra[@]+"${extra[@]}"} ) >"$tmp/mrustc.log" 2>&1 || {
   # mrustc's MIR validation tracks which locals are valid, so it rejects a use after a move or of an
   # uninitialized local itself, and its lifetime inference rejects a reference that outlives its
   # referent's function. Those are verdicts on the program, reported as the checker's errors are.
@@ -49,6 +50,6 @@ fi
   fi
   tail -20 "$tmp/mrustc.log" >&2; echo "mrustc-borrowck: mrustc failed" >&2; exit 4
 }
-ruby "$root/scripts/monomir-to-pathb.rb" --borrow --hir "$tmp/prog_2_hir.rs" "$tmp/prog.mir" "$tmp/prog.ir" ||
+ruby "$root/scripts/monomir-to-pathb.rb" --borrow --hir "$tmp/prog_2_hir.rs" --ast "$tmp/prog_1_ast.rs" "$tmp/prog.mir" "$tmp/prog.ir" ||
   { echo "mrustc-borrowck: monomir-to-pathb failed" >&2; exit 4; }
 "$root/scripts/mrb" "$root/scripts/pathb-borrowck.rb" --infer-loan-ends --infer-summaries "$tmp/prog.ir"

@@ -19,7 +19,7 @@ The pipeline is:
    `-Z disable-mir-opt` also turns off the inlining and optimisation after monomorphisation, which
    ran regardless and could delete a borrow whose result is unused. Without the variable and the
    flag, mrustc's output is unchanged. `-Z dump-hir` also writes the crate's HIR, for its
-   `impl Copy` items (below).
+   `impl Copy` items, and `-Z dump-ast` the expanded AST, for its explicit `&mut` arguments (below).
 2. **`scripts/monomir-to-pathb.rb --borrow`**, which writes checker input instead of code:
    - Only the program's own functions (`bin#` paths) get bodies. Standard library functions stay
      external. Those in `scripts/monomir-std.rb` get trusted summaries (below); a call to any other
@@ -35,11 +35,16 @@ The pipeline is:
      included) become `(borrow (ptr T) "Ln" shared|exclusive PLACE)`. A borrow through a deref is a
      plain address and carries the loans of the pointer it derefs, so a reborrow has no loan of its own.
    - A `&mut` of such a place is `two-phase` instead of `exclusive` when its local is assigned only
-     there and its one other mention is as the first argument of a `CALL`: the shape of an autoref'd
-     method receiver. The checker treats it as shared until the call and exclusive from there
-     (pathb-borrowck.md, "Two-phase loans"). MIR has lost the autoref marker. A `&mut` variable does
-     not match, since mrustc passes it as a reborrow `&mut (*varN)`, but an explicit `&mut x` first
-     argument does.
+     there and its one other mention is as the first argument of a `CALL` to a path: the shape of an
+     autoref'd method receiver and of an overloaded `+=`'s left side, rustc's two-phase borrows. The
+     checker treats it as shared until the call and exclusive from there (pathb-borrowck.md,
+     "Two-phase loans"). A `&mut` variable does not match, since mrustc passes it as a reborrow
+     `&mut (*varN)`. An explicit `&mut x` first argument or receiver matches too, and the MIR and the
+     final HIR (where method calls are already paths with their autorefs) cannot tell it from an
+     autoref. The expanded AST (`--ast`) still can: the functions it calls with a written `&mut` as
+     first argument are collected by name (a `&mut` elsewhere in an expression names every function
+     called on its line), and a call whose mangled callee holds one of those names gets no two-phase
+     borrow. Without `--ast`, none is two-phase.
    - A move of a local place of a non-Copy type (a use, an aggregate's operand, or a call argument)
      is followed by `(eval (move-value T PLACE))` for each scalar of the place, after the statement
      that reads it (pathb-borrowck.md, "Explicit value moves and copies"). The checker then rejects
@@ -100,20 +105,23 @@ mrustc also rejects some programs itself, and the driver reports those as errors
 ## Results
 
 `tests/mrustc-borrow/cases` has one program per rule, each with rustc 1.99's verdict. The suite
-checks this pipeline's verdict, and compares rustc's when one is installed. 38 of the 40 cases agree
+checks this pipeline's verdict, and compares rustc's when one is installed. 44 of the 47 cases agree
 with rustc:
 
 | Verdict | Cases |
 | --- | --- |
-| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes |
-| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502); with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec |
+| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`, `v.push(v.len())`) and overloaded `+=` (`c += c.get()`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes |
+| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502, also for `+=`); E0502 for an explicit `&mut c` first argument, receiver, or `AddAssign::add_assign(&mut c, ..)`, which are not two-phase; with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec |
 | Different | below |
 
 The differences are the known gaps:
 
-- **An explicit `&mut x` first argument is two-phase too** (`set(&mut c, c.get())`, E0502), so it is
-  accepted. rustc makes only autoref borrows two-phase, and the MIR does not say which this was. The
-  program only reads `c` before the call, so the borrow is still not violated.
+- **A callee also called with an explicit `&mut`** gets no two-phase receivers anywhere in the
+  program, since calls are matched to the AST only by name: `C::set(&mut c, 2); c.set(c.get())` is
+  rejected (`gap_two_phase_same_name`). This only rejects more.
+- **mrustc evaluates an index before IndexMut's `&mut v`**, where rustc takes the borrow first (it is
+  not two-phase), so `v[v.len() - 1] = 7` (E0502) is accepted (`gap_index_mut_order`). The index
+  only reads `v` before the borrow, so the program is still memory-safe.
 - **A Vec of references** is refused: its functions have summaries only for scalar elements.
 
 With lifetimes erased, the translator cannot say that `pick<'a>(a: &'a i32, b: &'a i32) -> &'a i32`
@@ -137,7 +145,8 @@ As of October 2026:
   next checker, Polonius alpha (location-sensitive), was enabled on nightly in August 2026. Full
   Polonius remains future work. This route follows the same model as NLL on a lower level IR:
   storage ends, loans, and liveness-based loan ends. Its input is monomorphised and has lost lifetimes
-  and the autoref marker, so two-phase borrows come from the shape of the MIR.
+  and the autoref marker, so two-phase borrows come from the shape of the MIR and the AST's explicit
+  `&mut` arguments.
 - **gccrs** lowers to its own borrow-checker IR (BIR), generates Polonius facts from it, and runs the
   Polonius library. That is the same arrangement as here: a frontend's IR, then a separate checker.
   It reached GCC 15 in 2025.
