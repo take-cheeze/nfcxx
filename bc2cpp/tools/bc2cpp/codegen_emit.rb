@@ -290,8 +290,30 @@ class CodeGen
     CPP
   end
 
+  # INSTANCE_TT_SUBCLASSES: a class copies its superclass's instance type when it is created, so a subclass made
+  # before the switch (`Class.new(C)` in a class body: a gem's mrblib loads before its compiled gem's init runs this)
+  # keeps MRB_TT_OBJECT, and mrb_data_init would put the embedded payload in a plain object the GC neither marks nor
+  # frees. Such subclasses are switched too, found by the heap walk Class#subclasses (mruby-class-ext) uses, when a
+  # switched class has any subclass (MRB_FL_CLASS_IS_INHERITED).
+  INSTANCE_TT_SUBCLASS_WALK = <<~CPP
+    struct Bc2cppInstanceTtRoots { struct RClass** classes; int count; };
+    static int bc2cpp_instance_tt_subclass(mrb_state*, struct RBasic* obj, void* data) {
+      if (obj->tt != MRB_TT_CLASS) return MRB_EACH_OBJ_OK;
+      struct RClass* c = (struct RClass*)obj;
+      if (MRB_INSTANCE_TT(c) != MRB_TT_OBJECT) return MRB_EACH_OBJ_OK;
+      const Bc2cppInstanceTtRoots* roots = (const Bc2cppInstanceTtRoots*)data;
+      for (struct RClass* s = c->super; s; s = s->super) {
+        for (int i = 0; i < roots->count; ++i) {
+          if (s == roots->classes[i]) { MRB_SET_INSTANCE_TT(c, MRB_TT_DATA); return MRB_EACH_OBJ_OK; }
+        }
+      }
+      return MRB_EACH_OBJ_OK;
+    }
+  CPP
+
   def emit_instance_tt_setup(compiled = [])
     out = +"// INSTANCE_TT_SETUP -- see bc2cpp.rb's own emit_instance_tt_setup comment.\n"
+    out << INSTANCE_TT_SUBCLASS_WALK
     out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
     out << "  static const char* const paths[][6] = {\n"
     embedding_classes.each do |klass|
@@ -304,6 +326,9 @@ class CodeGen
     end
     out << "    { nullptr },\n  };\n"
     out << <<~CPP
+      struct RClass* found_classes[sizeof(paths) / sizeof(paths[0])];
+      Bc2cppInstanceTtRoots roots = { found_classes, 0 };
+      bool switched = false, inherited = false;
       for (const auto& path : paths) {
         if (!path[0]) break;
         mrb_value scope = mrb_obj_value(M->object_class);
@@ -313,8 +338,15 @@ class CodeGen
           if (!mrb_const_defined_at(M, scope, name)) { found = false; break; }
           scope = mrb_const_get(M, scope, name);
         }
-        if (found && mrb_type(scope) == MRB_TT_CLASS) MRB_SET_INSTANCE_TT(mrb_class_ptr(scope), MRB_TT_DATA);
+        if (!found || mrb_type(scope) != MRB_TT_CLASS) continue;
+        struct RClass* c = mrb_class_ptr(scope);
+        switched = switched || MRB_INSTANCE_TT(c) != MRB_TT_DATA;
+        inherited = inherited || (c->flags & MRB_FL_CLASS_IS_INHERITED);
+        MRB_SET_INSTANCE_TT(c, MRB_TT_DATA);
+        found_classes[roots.count++] = c;
       }
+      // INSTANCE_TT_SUBCLASSES (codegen_emit.rb): a later call with nothing new to switch has nothing new to find.
+      if (switched && inherited) mrb_objspace_each_objects(M, bc2cpp_instance_tt_subclass, &roots);
     CPP
     # RESUMABLE_ENTRY: define the frame class and the driver where no fiber is running.
     out << "  bc2cpp_resumable_init(M);\n" if compiled.any? { |m| m[:resumable] }

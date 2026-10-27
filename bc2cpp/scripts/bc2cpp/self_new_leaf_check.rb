@@ -11,7 +11,10 @@
 #   1. generated code: the leaf's sites are unguarded direct constructions, the inherited singleton method and
 #      `self.class.new` of the base have one arm per class of {base, kid}, and Class.new keeps the by-name send;
 #   2. run (full-core mruby), interpreted against compiled: every site builds an object of the receiver's class with
-#      the right initialize, including the kid that inherits `make` and the kid that overrides initialize.
+#      the right initialize, including the kid that inherits `make` and the kid that overrides initialize;
+#   3. INSTANCE_TT_SUBCLASSES (tools/bc2cpp/codegen_emit.rb): SN_ANON and SN_FLOW_ANON, made in the fixture's body
+#      before bc2cpp_set_instance_tts runs, end with SnOpen's instance type, so their instances get a real RData (under
+#      MRB_DEBUG mrb_data_init asserted on the plain objects they had).
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/self_new_leaf_check.rb
 
@@ -102,6 +105,12 @@ Dir.mktmpdir('self-new-leaf') do |dir|
           if (M->exc) { show_exc(M, src); continue; }
           show(M, src, v);
         }
+        // A subclass made before INSTANCE_TT_SETUP shares its superclass's instance type in both runs.
+        struct RClass* open = mrb_class_get(M, "SnOpen");
+        for (const char* name : { "SN_ANON", "SN_FLOW_ANON" }) {
+          struct RClass* anon = mrb_class_ptr(mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, name)));
+          std::printf("%s instance type is SnOpen's => %s\n", name, MRB_INSTANCE_TT(anon) == MRB_INSTANCE_TT(open) ? "true" : "false");
+        }
         return 0;
       }
     CPP
@@ -115,6 +124,8 @@ Dir.mktmpdir('self-new-leaf') do |dir|
       check.call('a factory alias with a joined superclass builds the anonymous subclass',
                  sections['compiled'].to_a.any? { |l| l.include?('SN_FLOW_ANON.make(3); [o.class == SN_FLOW_ANON, o.a] => [true, 3]') })
       check.call('the kid that inherits make builds a kid', sections['compiled'].to_a.any? { |l| l.include?('SnKid.make(1); [o.class, o.a] => [SnKid, 10]') })
+      check.call('an anonymous subclass made before the instance-type switch is switched too',
+                 sections['compiled'].to_a.count { |l| l.end_with?("instance type is SnOpen's => true") } == 2)
       warn output unless failures.empty?
     else
       puts '  SKIP run: no full-core mruby build'
