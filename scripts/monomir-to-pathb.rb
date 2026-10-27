@@ -15,7 +15,13 @@ if (i = ARGV.index("--hir"))
   # impl does not apply then counts as Copy too, which only misses that instance's moves.
   $copy_impls = hir.scan(/^impl\b.*?::marker::Copy for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
 end
-abort "usage: #{$0} [--borrow [--hir FILE]] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
+# --ast FILE (with --borrow): mrustc's `-Z dump-ast` output, which still tells an explicit `&mut x`
+# from a method call's autoref (mir_two_phase_locals). Without it, no borrow is two-phase.
+if (i = ARGV.index("--ast"))
+  $ast_src = File.read(ARGV[i + 1])
+  ARGV.slice!(i, 2)
+end
+abort "usage: #{$0} [--borrow [--hir FILE] [--ast FILE]] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
 input = ARGV[0]
 outpath = ARGV[1]
 src = File.read(input)
@@ -1408,13 +1414,18 @@ def borrow_loan(expr, place, types, locals, params, stmts, regi)
 end
 
 # --borrow: the locals that hold a `&mut` of a place only to pass it as the first argument of a call,
-# local => the borrow. MIR has lost rustc's autoref marker, so this is the shape of an autoref'd
-# method receiver (`c.set(c.get() + 1)`): the local is assigned once, from `&mut PLACE`, and its one
-# other mention is as the call's first argument. A user's `&mut` variable does not match, since mrustc
-# passes it as a reborrow `&mut (*varN)`; an explicit `&mut x` first argument (`C::set(&mut c, ..)`)
-# does, though rustc does not make it two-phase. The checker makes these loans two-phase: shared until
-# the call, exclusive from there.
+# local => the borrow. This is the shape of an autoref'd method receiver (`c.set(c.get() + 1)`) and of
+# an overloaded compound assignment's left side (`c += c.get()`), which rustc makes two-phase: the
+# local is assigned once, from `&mut PLACE`, and its one other mention is as the first argument of a
+# call to a path. A user's `&mut` variable does not match, since mrustc passes it as a reborrow
+# `&mut (*varN)`. An explicit `&mut x` first argument (`set(&mut c, ..)`) or receiver does match, and
+# rustc does not make it two-phase. The MIR and the HIR have lost the difference, so the callees of
+# the AST's explicit ones (ast_explicit_mut_callees) are left out: a call to a function of one of those
+# names never gets a two-phase receiver. The checker makes these loans two-phase: shared until the
+# call, exclusive from there.
 def mir_two_phase_locals(blocks)
+  return {} unless $ast_src
+  $explicit_mut_callees ||= ast_explicit_mut_callees($ast_src)
   lines = blocks.values.flat_map { |c| c.lines.map(&:strip) }.reject { |l| l.empty? || l.start_with?("SCOPEEND") }
   found = {}
   lines.each do |ln|
@@ -1424,10 +1435,39 @@ def mir_two_phase_locals(blocks)
     uses = lines.select { |l| l =~ /\b#{v}\b/ }
     next unless uses.length == 2 && uses.count(ln) == 1
     call = (uses - [ln])[0]
-    next unless call =~ /^CALL [^=]+ = [^\s(]+\(#{v}, / && call.scan(/\b#{v}\b/).length == 1
+    c = call.match(/^CALL [^=]+ = (ZR[^\s(]+)\(#{v}, /)
+    next unless c && call.scan(/\b#{v}\b/).length == 1
+    # mrustc's mangled paths spell a name as its length and its text (`3set`).
+    next if $explicit_mut_callees.any? { |n| c[1].include?("#{n.length}#{n}") }
     found[v] = m[2].strip
   end
   found
+end
+
+# --borrow: the names of the functions that the AST (-Z dump-ast, after macro expansion) calls with
+# an explicit `&mut` first argument (`set(&mut c, ..)`, `C::set(&mut c, ..)`, under a `use` alias
+# too). A `&mut` elsewhere in an expression (`(&mut c).set(..)`, `f((&mut c), ..)`, `let r = &mut c`)
+# names every function called on its line. A `&mut` after `:`, `->`, `<` or `as` is a type.
+# A name too many only loses a two-phase borrow, which rejects more programs, not fewer.
+def ast_explicit_mut_callees(ast)
+  names = []
+  ast.each_line do |ln|
+    next unless ln.include?("&mut")
+    # The resolved path of a called function is a comment after it: `s/*v:Function[crate::set]*/(`.
+    s = ln.gsub(%r{/\*v:Function\[(?:[^\]]*::)?(\w+)\]\*/}) { " #{$1}" }.gsub(%r{/\*.*?\*/}, "")
+    s.to_enum(:scan, /&mut\b/).each do
+      pre = $~.pre_match
+      next if pre =~ /(?:[:<]|->|\bas|\bdyn|\bimpl)\s*\z/
+      m = pre.match(/([A-Za-z_]\w*)(?:::<[^()]*>)?(?:\s+([A-Za-z_]\w*))?\s*\(\s*\z/)
+      if m
+        names << m[1]
+        names << m[2] if m[2]
+      else
+        names.concat(s.scan(/([A-Za-z_]\w*)\s*(?:::<[^()]*>)?\s*\(/).flatten)
+      end
+    end
+  end
+  names.uniq
 end
 
 # --borrow: the local whose storage a MIR statement writes as a whole or in part (not through a

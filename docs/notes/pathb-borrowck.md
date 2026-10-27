@@ -163,7 +163,7 @@ to the source pointer, preserving runtime code generation.
 ## Two-phase loans
 
 `two-phase` is a third borrow kind, Rust's two-phase borrow of an autoref'd method receiver
-(`c.set(c.get() + 1)`):
+(`c.set(c.get() + 1)`) or an overloaded compound assignment's left side (`c += c.get()`):
 
 ```text
 (let %0 (ptr int) (borrow (ptr int) "a" two-phase $"x"))
