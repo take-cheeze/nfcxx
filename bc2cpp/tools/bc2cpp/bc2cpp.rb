@@ -1537,6 +1537,30 @@ if $PROGRAM_NAME == __FILE__
   end
   puts '#include "mrb_array_access.hxx"'
   puts '#include <mruby/class.h>'
+  # CLASS_READ_INLINE (docs/bc2cpp-class-read-inline.md): mrb_obj_class is mrb_class_real(mrb_class(v)), out of
+  # line in src/class.c, and class_real returns its argument unless it is a singleton class or an iclass. So a heap
+  # object whose class pointer is a plain class already holds the answer; anything else takes the real call.
+  # bc2cpp_class_is's first test needs `cls` to be a plain class (or null): see CodeGen#exact_class_guard.
+  if ENV['BC2CPP_CLASS_READ_INLINE'] == '0'
+    puts <<~'CPP'
+      static inline struct RClass* bc2cpp_obj_class(mrb_state* M, mrb_value v) { return mrb_obj_class(M, v); }
+      static inline bool bc2cpp_class_is(mrb_state* M, mrb_value v, struct RClass* cls) { return cls == mrb_obj_class(M, v); }
+    CPP
+  else
+    puts <<~'CPP'
+      static inline struct RClass* bc2cpp_obj_class(mrb_state* M, mrb_value v) {
+        if (!mrb_immediate_p(v)) {
+          struct RClass* c = mrb_obj_ptr(v)->c;
+          if (c->tt == MRB_TT_CLASS) return c;
+        }
+        return mrb_obj_class(M, v);
+      }
+      static inline bool bc2cpp_class_is(mrb_state* M, mrb_value v, struct RClass* cls) {
+        if (!mrb_immediate_p(v) && mrb_obj_ptr(v)->c == cls) return true;
+        return cls == bc2cpp_obj_class(M, v);
+      }
+    CPP
+  end
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
   # mrb_protect_error for the RESCUE_SUPPORT bodies (core API, not the

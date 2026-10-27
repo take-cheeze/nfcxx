@@ -42,7 +42,7 @@ class CodeGen
     branches = targets.map do |target|
       impl = "#{cpp_name(target.owner, target.name)}_impl"
       call_argv, = direct_call_args(target, argv, impl)
-      "if (#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})) {\n" \
+      "if (#{exact_class_guard(owner_class_ptr_expr(target.owner), recv)}) {\n" \
         "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n  } else "
     end
     "  // NATIVE_OWNER_MAP :#{name} -- exact instance of a Ruby definition's class, no native definer (ADR 0397)\n" \

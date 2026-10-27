@@ -176,7 +176,7 @@ module NativeDirectFallback
     end
     "// NATIVE_DIRECT :#{name} -- exact RGSS class identity selects the shared native entry point\n" \
       "  {\n" \
-      "  struct RClass* bc2cpp_native_class = mrb_obj_class(M, #{recv});\n" \
+      "  struct RClass* bc2cpp_native_class = #{obj_class_expr(recv)};\n" \
       "  #{branches.join}{\n" \
       "    #{tail.chomp}\n" \
       "  }\n" \

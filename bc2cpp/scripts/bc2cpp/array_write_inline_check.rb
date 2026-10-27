@@ -12,7 +12,7 @@
 #     - NEQ_OP_EQ: `a != b` compares two Integers in place before mrb_equal, as BasicObject#!= (`!(self == other)`
 #       through OP_EQ) does even in a program that reopens Integer#==;
 #     - POLY_INTEGER_TAG: a POLY_SMALL_N chain with an Integer arm reads an Integer receiver's class from its tag,
-#       and BC2CPP_POLY_INTEGER_TAG=0 keeps the mrb_obj_class read.
+#       and BC2CPP_POLY_INTEGER_TAG=0 keeps the class read.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same, the fallbacks included: frozen and shared receivers, negative
 #       and out-of-range indices, splices that resize or take the receiver itself, rotate! counts of every sign,
@@ -123,11 +123,11 @@ check.call('a program that reopens Integer#== keeps the Integer-pair arm, as OP_
 getidx = code[/static mrb_value bc2cpp_getidx_slow\(.*?\n\}\n/m].to_s
 check.call('the shared `[]` chain reads an Integer receiver\'s class from its tag, Integer arm first',
            getidx.include?('POLY_INTEGER_TAG :[]') &&
-             getidx.include?('struct RClass* bc2cpp_recv_class = mrb_integer_p(recv) ? M->integer_class : mrb_obj_class(M, recv);') &&
+             getidx.include?('struct RClass* bc2cpp_recv_class = mrb_integer_p(recv) ? M->integer_class : bc2cpp_obj_class(M, recv);') &&
              getidx.match?(/if \(bc2cpp_owner_class_\d+\(M\) == bc2cpp_recv_class\) \{\n\s*r0 = Integer_\$5b\$5d_impl/))
 off, = generate_world({ 'BC2CPP_POLY_INTEGER_TAG' => '0' })
-check.call('BC2CPP_POLY_INTEGER_TAG=0 keeps the mrb_obj_class read', !off.include?('POLY_INTEGER_TAG') &&
-           off[/static mrb_value bc2cpp_getidx_slow\(.*?\n\}\n/m].to_s.include?('== mrb_obj_class(M, recv)'))
+check.call('BC2CPP_POLY_INTEGER_TAG=0 keeps the class read', !off.include?('POLY_INTEGER_TAG') &&
+           off[/static mrb_value bc2cpp_getidx_slow\(.*?\n\}\n/m].to_s.include?('bc2cpp_class_is(M, recv, '))
 
 DRIVER = <<~'RUBY'
   show = lambda do |name, &blk|

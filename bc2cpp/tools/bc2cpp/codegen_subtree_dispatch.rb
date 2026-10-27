@@ -177,7 +177,7 @@ class CodeGen
     note = "  // SUBTREE_TABLE :#{name}/#{n} -> #{sym} slot #{slot} (receiver hint: #{root} or a descendant; " \
            "#{arms.join('; ')}), class row lookup then indexed direct C++ call, mrb_funcall fallback\n"
     "#{note}  {\n" \
-      "  int bc2cpp_vrow = bc2cpp_vtbl_lookup(M, mrb_obj_class(M, #{recv}), #{sym});\n" \
+      "  int bc2cpp_vrow = bc2cpp_vtbl_lookup(M, #{obj_class_expr(recv)}, #{sym});\n" \
       "  bc2cpp_vtbl_fn bc2cpp_vfn = bc2cpp_vrow >= 0 ? #{sym}_fns[bc2cpp_vrow][#{slot}] : nullptr;\n" \
       "  if (bc2cpp_vfn) {\n" \
       "    r#{d} = reinterpret_cast<#{fn_type}>(bc2cpp_vfn)(M, #{([recv] + argv).join(', ')});\n" \

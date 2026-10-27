@@ -58,7 +58,7 @@ RUBY
 
 # The probed body: the send of `probe` on its argument, which nothing proves exact.
 PROBE_FN = /^mrb_value CxHolder_probe_impl\(mrb_state\* M.*?(?=^mrb_value \w+\(mrb_state\* M|\z)/m
-ARM = %r{(?:// NATIVE_OWNER_MAP :empty\? -- [^\n]*\n\s*)?if \(bc2cpp_owner_class_\d+\(M\) == mrb_obj_class\(M, r\d+\)\) \{\n\s*r\d+ = CxQueue_empty\$3f_impl\(M, r\d+\);\n\s*\} else }
+ARM = %r{(?:// NATIVE_OWNER_MAP :empty\? -- [^\n]*\n\s*)?if \(bc2cpp_class_is\(M, r\d+, bc2cpp_owner_class_\d+\(M\)\)\) \{\n\s*r\d+ = CxQueue_empty\$3f_impl\(M, r\d+\);\n\s*\} else }
 # The by-name else: a plain send, or with the owner map on, the closed-world owner call over the same owners.
 BY_NAME_ELSE = /bc2cpp_send\(M, r\d+, \d+, 0\)|bc2cpp_owner_call\(M, r\d+, \d+, \d+, BC2CPP_OWNERS\(.*?\), mrb_nil_value\(\), 0\)/
 

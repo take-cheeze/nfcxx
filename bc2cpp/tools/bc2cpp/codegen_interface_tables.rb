@@ -27,7 +27,7 @@ module InterfaceTables
     end
     fn_type = "mrb_value (*)(#{(['mrb_state*'] + Array.new(n + 1, 'mrb_value')).join(', ')})"
     "  // INTERFACE_TABLE :#{name}/#{n} -> #{table[:symbol]} (#{rows.size} exact classes)\n" \
-      "  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, mrb_obj_class(M, #{recv}), #{table[:symbol]})) {\n" \
+      "  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, #{obj_class_expr(recv)}, #{table[:symbol]})) {\n" \
       "    r#{d} = reinterpret_cast<#{fn_type}>(bc2cpp_pfn)(M, #{([recv] + argv).join(', ')});\n" \
       "  } else {\n    #{fallback}  }\n"
   end

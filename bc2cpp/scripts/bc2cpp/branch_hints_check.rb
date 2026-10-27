@@ -106,7 +106,7 @@ user = code_of(code, 'BhRun_pick') + code_of(code, 'BhRun_count')
 check.call('the program\'s own `if` and `while` tests carry no hint',
            user.include?('mrb_test(') && !user.match?(/mrb_(?:un)?likely\(!?mrb_test/))
 check.call('a class-guarded direct call predicts its guard',
-           code_of(code, 'BhRun_cell').match?(/if \(mrb_likely\(bc2cpp_owner_class_\d+\(M\) == mrb_obj_class\(M, r\d+\)\)\)/))
+           code_of(code, 'BhRun_cell').match?(/if \(mrb_likely\(bc2cpp_class_is\(M, r\d+, bc2cpp_owner_class_\d+\(M\)\)\)\)/))
 tick = code_of(code, 'BhRun_tick')
 check.call('a POLY_SMALL_N chain\'s last else is a cold arm, its arms unhinted',
            tick.include?('POLY_SMALL_N :tick') && tick.match?(/\} else \{\n\s*BC2CPP_COLD_ARM /) &&

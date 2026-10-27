@@ -1050,7 +1050,7 @@ class CodeGen
     target.each_with_index do |branch, i|
       d = branch[:definition]
       impl = cpp_name(d.owner, d.name) + '_impl'
-      check = "#{owner_class_ptr_expr(branch[:guard_owner])} == mrb_obj_class(M, #{elem_expr})"
+      check = exact_class_guard(owner_class_ptr_expr(branch[:guard_owner]), elem_expr)
       out << (i.zero? ? '      ' : '      else ')
       out << "if (#{check}) { #{result_var} = #{impl}(M, #{elem_expr}); }\n"
     end
@@ -1085,7 +1085,7 @@ class CodeGen
     target.each_with_index do |branch, i|
       d = branch[:definition]
       impl = cpp_name(d.owner, d.name) + '_impl'
-      check = "#{owner_class_ptr_expr(branch[:guard_owner])} == mrb_obj_class(M, #{elem_expr})"
+      check = exact_class_guard(owner_class_ptr_expr(branch[:guard_owner]), elem_expr)
       out << (i.zero? ? '      ' : '      else ')
       out << "if (#{check}) { #{impl}(M, #{elem_expr}); }\n"
     end
