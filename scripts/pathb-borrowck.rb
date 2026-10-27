@@ -288,7 +288,7 @@ class BorrowCallEffects
     bad = @bad
     refused = @refused
     unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
-           f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
+           f[2].is_a?(Array) && f[2][0] == 'returns' && f[2].length >= 2 &&
            f[6].is_a?(Array) && f[6][0] == 'args'
       raise bad, 'call-effects form'
     end
@@ -297,13 +297,15 @@ class BorrowCallEffects
       raise refused, 'call contracts require nothrow or may-throw, noescape, and closed effects'
     end
     result = f[2][1]
-    alias_result = f[2][2]
+    # One (from-arg ...) per source the returned pointer may borrow from.
+    alias_forms = f[2].drop(2)
+    alias_result = alias_forms[0]
     unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
       raise refused, 'call effects support only void or scalar results'
     end
     args = f[6].drop(1)
     args.each do |arg|
-      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval].include?(arg[0])
+      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval byval-deep].include?(arg[0])
         raise bad, 'call argument effect form'
       end
       ty = arg[1]
@@ -318,31 +320,41 @@ class BorrowCallEffects
       end
     end
     if alias_result
-      unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
-             alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
-             %w[shared exclusive].include?(alias_result[3])
-        raise bad, 'returned alias contract form'
+      alias_result = alias_forms.map do |form|
+        unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+               form.is_a?(Array) && form.length == 4 && form[0] == 'from-arg' &&
+               %w[shared exclusive].include?(form[3])
+          raise bad, 'returned alias contract form'
+        end
+        index = layouts.number(form[1])
+        offset = layouts.number(form[2])
+        source = args[index]
+        unless source && %w[read write].include?(source[0])
+          raise refused, 'returned aliases require a read or write source argument'
+        end
+        if form[3] == 'exclusive' && source[0] != 'write'
+          raise refused, 'exclusive returned aliases require a write source argument'
+        end
+        # A pointer to const grants no writes, so its alias is shared.
+        pointee = result[1]
+        pointee = pointee[1] while pointee.is_a?(Array) && pointee[0] == 'const' && pointee.length == 2
+        if !pointee.equal?(result[1]) && form[3] != 'shared'
+          raise refused, 'returned aliases of const pointees must be shared'
+        end
+        width = layouts.field_type(pointee, [])[:size]
+        if offset + width > layouts.field_type(source[1], [])[:size]
+          raise refused, 'returned alias range escapes its source argument'
+        end
+        {arg: index, offset: offset, kind: form[3], width: width}
       end
-      index = layouts.number(alias_result[1])
-      offset = layouts.number(alias_result[2])
-      source = args[index]
-      unless source && %w[read write].include?(source[0])
-        raise refused, 'returned aliases require a read or write source argument'
+      # Sources in one argument must be disjoint ranges: a call takes a loan of each.
+      alias_result.each_with_index do |s, i|
+        alias_result.drop(i + 1).each do |t|
+          if s[:arg] == t[:arg] && s[:offset] < t[:offset] + t[:width] && t[:offset] < s[:offset] + s[:width]
+            raise refused, 'returned alias sources overlap'
+          end
+        end
       end
-      if alias_result[3] == 'exclusive' && source[0] != 'write'
-        raise refused, 'exclusive returned aliases require a write source argument'
-      end
-      # A pointer to const grants no writes, so its alias is shared.
-      pointee = result[1]
-      pointee = pointee[1] while pointee.is_a?(Array) && pointee[0] == 'const' && pointee.length == 2
-      if !pointee.equal?(result[1]) && alias_result[3] != 'shared'
-        raise refused, 'returned aliases of const pointees must be shared'
-      end
-      width = layouts.field_type(pointee, [])[:size]
-      if offset + width > layouts.field_type(source[1], [])[:size]
-        raise refused, 'returned alias range escapes its source argument'
-      end
-      alias_result = {arg: index, offset: offset, kind: alias_result[3]}
     elsif result.is_a?(Array)
       raise refused, 'call effects support only void or scalar results'
     end
@@ -360,8 +372,12 @@ class LocalLifetime
   # true when the body calls a callee that may throw (other than the function itself)
   attr_reader :throws
 
+  # [argument index, offset] of the argument pointers the body returns, checked against its summary's sources
+  attr_reader :returned_sources
+
   def initialize(f, infer_loan_ends = false, semantic_layouts = nil, call_effects = nil, abi_sizes = {})
     @infer_loan_ends = infer_loan_ends
+    @returned_sources = []
     @layouts = semantic_layouts || BorrowLayouts.new([], BadIR, BorrowRefused)
     @call_effects = call_effects || BorrowCallEffects.new([], @layouts, BadIR, BorrowRefused)
     raise BadIR, 'function header' unless f.length >= 4 && bh(f[2]) == 'ret' && bh(f[3]) == 'params'
@@ -420,7 +436,8 @@ class LocalLifetime
         summary = @call_effects.lookup(x[4].name)
         raise BorrowRefused, 'call-borrow requires a returned alias contract' unless summary && summary[:alias]
         raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
-        a = summary[:alias]
+        raise BorrowRefused, 'call-borrow requires a returned alias with one source' unless summary[:alias].length == 1
+        a = summary[:alias][0]
         source = x[5 + a[:arg]]
         raise BadIR, 'call arity disagrees with its effect contract' unless x.length - 5 == summary[:args].length
         id = bname(x[2])
@@ -437,16 +454,23 @@ class LocalLifetime
       end
       # A plain call to a returned-alias contract whose source is a direct place
       # gets an implicit root loan for this call site, so lowered C++ needs no
-      # call-borrow form. Its end must come from last-use inference.
+      # call-borrow form. Its end must come from last-use inference. A summary with several sources gets one loan
+      # per source that is such a place, named &CALLEE#N.K for the K-th source.
       if bh(x) == 'call' && x.length >= 3 && x[2].is_a?(IRSym) && x[2].sig == '&'
         summary = @call_effects.lookup(x[2].name)
-        a = summary && summary[:alias]
-        place = a && x.length - 3 == summary[:args].length ? cast_place(x[3 + a[:arg]]) : nil
-        if place && bh(x[1]) == 'ptr'
-          id = '&' + x[2].name + '#' + (@implicit_loans.length + 1).to_s
-          raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
-          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], unconst(x[1][1]), unconst(x[1][1])]
-          @implicit_loans[x.object_id] = id
+        sources = summary && summary[:alias]
+        if sources && x.length - 3 == summary[:args].length && bh(x[1]) == 'ptr'
+          site = {}
+          sources.each_with_index do |a, j|
+            place = cast_place(x[3 + a[:arg]])
+            next unless place
+            id = '&' + x[2].name + '#' + (@implicit_loans.length + 1).to_s
+            id += '.' + (j + 1).to_s if sources.length > 1
+            raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
+            @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], unconst(x[1][1]), unconst(x[1][1])]
+            site[j] = id
+          end
+          @implicit_loans[x.object_id] = site unless site.empty?
         end
       end
       if bh(x) == 'reborrow'
@@ -591,7 +615,7 @@ class LocalLifetime
     end
     @params.each_with_index do |(reg, _name, pointer, pty), i|
       mode, ty = @summary[:args][i]
-      if mode == 'byval'
+      if mode == 'byval' || mode == 'byval-deep'
         # The parameter is the callee's own copy (the synthetic slot *%N).
         unless bh(pty) == 'byval' && same_type?(pty[1], ty)
           raise BadIR, 'function parameter disagrees with its effect contract'
@@ -629,17 +653,26 @@ class LocalLifetime
     end
   end
 
+  # Every returned pointer must be one of the declared sources. A mismatch names the region of a source in the
+  # same argument if there is one, else the first source's, so summary inference knows which argument to change.
   def check_contract_return(refs)
-    a = @summary[:alias]
-    return unless a
-    region = @regions[@params[a[:arg]][0]][:name]
-    diagnostic('contract-return-mismatch', region) if refs.empty?
+    sources = @summary[:alias]
+    return unless sources
+    regions = sources.map { |a| @regions[@params[a[:arg]][0]][:name] }
+    diagnostic('contract-return-mismatch', regions[0]) if refs.empty?
     refs.each do |p|
       next if base_origin(p).start_with?('expired:') || base_origin(p).start_with?('ended:')
       root, off, own = address(p)
-      exact = root == region && off == a[:offset] && own &&
-              (a[:kind] == 'shared' || ([own] + @ancestors[own]).all? { |id| @loans[id][1] != 'shared' })
-      diagnostic('contract-return-mismatch', region) unless exact
+      # The (argument, offset) pairs returned under the candidate, which summary inference collects.
+      if @report && own && !ranged?(p)
+        i = @params.index { |q| @regions[q[0]] && @regions[q[0]][:name] == root }
+        @returned_sources << [i, off] if i && !@returned_sources.include?([i, off])
+      end
+      exact = sources.each_with_index.any? do |a, j|
+        root == regions[j] && off == a[:offset] && own &&
+          (a[:kind] == 'shared' || ([own] + @ancestors[own]).all? { |id| @loans[id][1] != 'shared' })
+      end
+      diagnostic('contract-return-mismatch', regions.include?(root) ? root : regions[0]) unless exact
     end
   end
 
@@ -850,6 +883,45 @@ class LocalLifetime
       state[key] = (state[key] || ['dead']).map { |s| s == 'dead' ? s : 'initialized' }.uniq.sort
     end
     state[pointer_key(root, off, width)] = provenance if provenance
+  end
+
+  # A store through a pointer that may name several places writes one of them. Each must allow the write, which
+  # the caller has checked, and each may keep its old contents: its bytes may become initialized, and a stored
+  # pointer joins the provenance it may replace (nothing, if the bytes were never initialized).
+  def weak_store(dest, width, provenance, state)
+    dest.each do |p|
+      raise BorrowRefused, 'store through an aliased destination' if ranged?(p)
+      a = address(p)
+      next unless a # ended storage or an expired loan, already diagnosed
+      root, off = a
+      raise BorrowRefused, 'store through an aliased destination into drop-obligated storage' if @drops.values.any? { |d| d[:root] == root }
+      if provenance && @regions.values.any? { |r| r[:name] == root }
+        raise BorrowRefused, 'store of unknown pointer provenance into argument memory' if provenance.include?('unknown')
+        diagnostic('contract-escape', root) if provenance.any? { |q| q != 'external' }
+      end
+      key = pointer_key(root, off, width)
+      old = state[key]
+      unless old || !provenance
+        set = (0...width).any? { |i| (state[byte_key(root, off + i)] || []).include?('initialized') }
+        old = set ? ['unknown'] : []
+      end
+      prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+      state.keys.each do |k|
+        next unless k.start_with?(prefix) && k != key
+        parts = k.split(':')
+        state[k] = ['unknown'] if overlaps(off, width, parts[2].to_i, parts[3].to_i)
+      end
+      if provenance
+        state[key] = (old + provenance).uniq.sort
+      elsif state[key]
+        state[key] = ['unknown']
+      end
+      width.times do |i|
+        k = byte_key(root, off + i)
+        state[k] = (state[k] || ['dead']).flat_map { |s| s == 'dead' ? [s] : [s, 'initialized'] }.uniq.sort
+      end
+    end
+    state
   end
 
   def reset_storage(root, state, status, clear_pointers = true)
@@ -1148,7 +1220,7 @@ class LocalLifetime
       loan = @loans[own]
       raise BorrowRefused, 'access escapes its loan range' unless off >= loan[3] && off + width <= loan[3] + loan[4]
       ([own] + @ancestors[own]).each do |id|
-        diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
+        diagnostic('inactive-loan', id) unless state['loan:' + id].include?('active')
       end
       diagnostic('write-through-shared-loan', own) if !read && loan[1] == 'shared'
       activate_loans([own] + @ancestors[own], state)
@@ -1180,7 +1252,7 @@ class LocalLifetime
     raise BorrowRefused, 'access wider than its array' if width > n
     if own
       ([own] + @ancestors[own]).each do |id|
-        diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
+        diagnostic('inactive-loan', id) unless state['loan:' + id].include?('active')
       end
       diagnostic('write-through-shared-loan', own) if !read && @loans[own][1] == 'shared'
       activate_loans([own] + @ancestors[own], state)
@@ -1358,6 +1430,37 @@ class LocalLifetime
     end
   end
 
+  # A byval-deep argument: the callee reads what the pointers stored in ROOT[OFF, OFF + WIDTH) reach,
+  # transitively (formatting reads the values a fmt::Arguments refers to). Each pointer's referent is
+  # the range of its loan, or the rest of its slot. Its bytes are read as a copy would, carrying their
+  # states (the callee reads only the bytes its types define). A pointer of unknown provenance
+  # could reach a local, so it is refused; one into external memory reaches nothing tracked.
+  def read_through(root, off, width, state, seen)
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.keys.each do |key|
+      next unless key.start_with?(prefix)
+      parts = key.split(':')
+      next unless overlaps(off, width, parts[2].to_i, parts[3].to_i)
+      state[key].each do |v|
+        b = base_origin(v)
+        next if b == 'external' || b == 'eh'
+        if b.start_with?('ended:') || b.start_with?('expired:')
+          access(v, state, true)
+          next
+        end
+        a = address(v)
+        raise BorrowRefused, 'read-through argument holds a pointer of unknown provenance' unless a
+        record_loan_values([v])
+        name, poff, own = a
+        n = own ? @loans[own][3] + @loans[own][4] - poff : @slot_info[name][1] - poff
+        next if n <= 0 || seen.include?([name, poff, n])
+        seen << [name, poff, n]
+        access(v, state, true, nil, n, nil, true)
+        read_through(name, poff, n, state, seen)
+      end
+    end
+  end
+
   def scalar_abi_class(ty)
     return 's' if ty == 'float'
     return 'd' if ty == 'double'
@@ -1381,19 +1484,23 @@ class LocalLifetime
     end
   end
 
-  def apply_call_output(root, off, width, ty, state, initialize)
+  # weak: the argument may name this place or another one, so the place may also keep its old bytes.
+  def apply_call_output(root, off, width, ty, state, initialize, weak = false)
     required = semantic_bytes(root, off, ty) || (0...width).to_a
     mask = {}
     required.each { |i| mask[i] = true }
     forget_pointer_values(root, off, width, state)
+    update = lambda do |key, to|
+      state[key] = state[key].flat_map { |v| v == 'dead' ? [v] : (weak ? [v, to] : [to]) }.uniq.sort
+    end
     width.times do |i|
       key = byte_key(root, off + i)
       if mask[i]
-        state[key] = state[key].map { |v| v == 'dead' ? v : 'initialized' }.uniq.sort if initialize
+        update.call(key, 'initialized') if initialize
       else
         # A typed mutation/construction does not promise to preserve or define
         # padding, even when the caller had initialized those bytes earlier.
-        state[key] = state[key].map { |v| v == 'dead' ? v : 'uninitialized' }.uniq.sort
+        update.call(key, 'uninitialized')
       end
     end
   end
@@ -1457,12 +1564,12 @@ class LocalLifetime
       @throws = true
     end
     raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
-    returned_id ||= @implicit_loans[x.object_id] if summary[:alias]
     args = x.drop(3)
     raise BadIR, 'call arity disagrees with its effect contract' unless args.length == summary[:args].length
     resolved = []
     args.each_with_index do |arg, i|
       mode, ty = summary[:args][i]
+      deep = false
       if bh(arg) == 'sret'
         # (sret T PLACE): the caller's buffer for an aggregate result, which the callee initializes.
         raise BadIR, 'sret argument form' unless arg.length == 3
@@ -1471,12 +1578,13 @@ class LocalLifetime
       elsif bh(arg) == 'byval'
         # (byval T PLACE): the callee gets its own copy, a read of the caller's object.
         raise BadIR, 'byval argument form' unless arg.length == 3
-        unless mode == 'byval' && same_type?(arg[1], ty)
+        unless %w[byval byval-deep].include?(mode) && same_type?(arg[1], ty)
           raise BadIR, 'by-value call argument disagrees with its effect contract'
         end
         arg = arg[2]
+        deep = mode == 'byval-deep'
         mode = 'read'
-      elsif mode == 'byval'
+      elsif %w[byval byval-deep].include?(mode)
         raise BadIR, 'by-value contract argument passed by address'
       end
       origins = value(arg, state)
@@ -1502,7 +1610,8 @@ class LocalLifetime
       end
       raise BorrowRefused, 'memory call arguments require known local provenance' if origins.empty? || origins.any? { |p| !address(p) }
       check_memory_argument_abi(arg)
-      if mode != 'read' && origins.length != 1
+      # A write argument that may name several places mutates one of them; init and consume need the one place.
+      if mode != 'read' && origins.length != 1 && (mode != 'write' || origins.any? { |p| ranged?(p) })
         raise BorrowRefused, 'mutating call arguments require one known local place'
       end
       places = origins.map do |p|
@@ -1512,7 +1621,7 @@ class LocalLifetime
         semantic_bytes(root, off, ty)
         [p, root, off, width, own]
       end
-      resolved << [mode, ty, places]
+      resolved << [mode, ty, places, deep]
     end
     # Summaries do not prescribe an evaluation order within the callee. Reject
     # overlapping mutation footprints before any postcondition can initialize,
@@ -1529,13 +1638,14 @@ class LocalLifetime
         end
       end
     end
-    resolved.each do |mode, ty, places|
+    resolved.each do |mode, ty, places, deep|
       places.each do |origin, root, off, width, own|
         activate_memory_loans(root, off, width, state) unless mode == 'init'
         case mode
         when 'read'
           access(origin, state, true, nil, width, ty)
           record_memory_loan_values(root, off, width, state)
+          read_through(root, off, width, state, []) if deep
         when 'write'
           # A mutation requires an existing initialized value and preserves its
           # ownership identity; its resulting pointer contents are unknown.
@@ -1545,7 +1655,7 @@ class LocalLifetime
           if own && @loans[own][1] == 'shared'
             diagnostic('write-through-shared-loan', own)
           end
-          apply_call_output(root, off, width, ty, state, false)
+          apply_call_output(root, off, width, ty, state, false, places.length > 1)
         when 'init'
           access(origin, state, false, nil, width, ty)
           track_drop_write(root, off, width, state)
@@ -1560,16 +1670,23 @@ class LocalLifetime
         end
       end
     end
-    a = summary[:alias]
-    unless returned_id
-      return [] unless a
+    return [] unless summary[:alias]
+    return returned_loan(summary[:alias][0], resolved, state, returned_id) if returned_id
+    # The result may point into any of the sources, so its provenance is the union of theirs.
+    implicit = @implicit_loans[x.object_id] || {}
+    summary[:alias].each_with_index.flat_map do |a, j|
+      next returned_loan(a, resolved, state, implicit[j]) if implicit[j]
       # The source is a pointer value, not a local place the call site could name (Rust passes a reference it
       # already holds): the result is that pointer, moved by the alias offset. It keeps the source's loans and
       # storage, so its uses need them live, as for a copy of the pointer.
       sources = resolved[a[:arg]][2]
       raise BorrowRefused, 'returned alias requires a known source place' if sources.empty?
-      return sources.map { |src| project(src[0], a[:offset]) }.uniq
-    end
+      sources.map { |src| project(src[0], a[:offset]) }
+    end.uniq
+  end
+
+  # The loan a call creates for a returned alias whose source is a local place: named by call-borrow, or implicit.
+  def returned_loan(a, resolved, state, returned_id)
     loan = @loans[returned_id]
     sources = resolved[a[:arg]][2]
     raise BorrowRefused, 'returned alias requires one known source place' unless sources.length == 1
@@ -1814,7 +1931,8 @@ class LocalLifetime
         return state
       end
       raise BorrowRefused, 'store through external storage may escape a local address' if dest.any? { |p| %w[external eh].include?(base_origin(p)) }
-      raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
+      raise BorrowRefused, 'store through an aliased destination' if dest.empty?
+      return weak_store(dest, width, !zero && bh(x[1]) == 'ptr' ? v : nil, state) if dest.length > 1
       if ranged?(dest[0])
         raise BorrowRefused, 'pointer store through a dynamic index' if !zero && bh(x[1]) == 'ptr'
         root, lo, n, = array_range(base_origin(dest[0]))
@@ -2136,8 +2254,21 @@ class SummaryInference
     elsif !(ret == 'void' || BorrowLayouts::PRIMITIVES.key?(ret))
       return nil
     end
+    returned = []
     aliases.each do |a|
-      form = search_modes(f, name, ret, slots, a)
+      form = search_modes(f, name, ret, slots, a && [a], returned)
+      return form if form
+    end
+    return nil unless bh(ret) == 'ptr'
+    # No single source verifies: try the set of argument ranges the body was seen to return, growing it by what
+    # each candidate returns. Every candidate is still verified, so the set only has to be found, not proven.
+    set = []
+    aliases.length.times do
+      grown = aliases.select { |s| set.include?(s) || returned.include?(s[0, 2]) }
+      break if grown.length < 2 || grown == set
+      set = grown
+      returned = []
+      form = search_modes(f, name, ret, slots, set, returned)
       return form if form
     end
     nil
@@ -2145,8 +2276,11 @@ class SummaryInference
 
   # Start every memory argument at the weakest effect and advance only the
   # arguments that diagnostics blame, until the body verifies or a choice runs out.
-  def search_modes(f, name, ret, slots, a)
+  # SOURCES: the [argument, offset, const result] ranges the result may point into, or nil. RETURNED collects the
+  # [argument, offset] pairs that the candidates' bodies return.
+  def search_modes(f, name, ret, slots, sources, returned)
     choices = slots.each_with_index.map do |(_reg, _ty, desc, kind), i|
+      a = sources && sources.find { |s| s[0] == i }
       if kind == 'byval'
         [['byval']]
       elsif kind == 'sret'
@@ -2154,11 +2288,11 @@ class SummaryInference
       elsif desc.nil?
         [['value']]
       elsif kind == 'readonly'
-        a && a[0] == i ? [%w[read shared]] : [['read']]
-      elsif a && a[0] == i && a[2]
+        a ? [%w[read shared]] : [['read']]
+      elsif a && a[2]
         # A pointer to const grants no writes through the result.
         [%w[read shared], %w[write shared]]
-      elsif a && a[0] == i
+      elsif a
         # A pointer to non-const lets the caller write through the result.
         [%w[write exclusive], %w[read shared], %w[write shared]]
       else
@@ -2169,7 +2303,7 @@ class SummaryInference
     while true
       returns = ['returns', ret]
       args = slots.each_with_index.map { |(_reg, ty, _desc), i| [choices[i][index[i]][0], ty] }
-      if a
+      (sources || []).each do |a|
         returns << ['from-arg', a[0].to_s, a[1].to_s, choices[a[0]][index[a[0]]][1]]
       end
       # Verified as may-throw, so a throwing body is not a contract violation. The final form says what the
@@ -2182,6 +2316,7 @@ class SummaryInference
       rescue BorrowRefused, BadIR
         return nil
       end
+      checker.returned_sources.each { |s| returned << s unless returned.include?(s) }
       if checker.errors.empty?
         form[3] = [checker.throws ? 'may-throw' : 'nothrow']
         return form

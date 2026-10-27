@@ -570,7 +570,7 @@ class BorrowCallEffects
     forms.each do |f|
       next unless f.is_a?(Array) && f[0] == 'call-effects'
       unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
-             f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
+             f[2].is_a?(Array) && f[2][0] == 'returns' && f[2].length >= 2 &&
              f[6].is_a?(Array) && f[6][0] == 'args'
         raise bad, 'call-effects form'
       end
@@ -580,13 +580,15 @@ class BorrowCallEffects
         raise refused, 'call contracts require nothrow or may-throw, noescape, and closed effects'
       end
       result = f[2][1]
-      alias_result = f[2][2]
+      # One (from-arg ...) per source the returned pointer may borrow from.
+      alias_forms = f[2].drop(2)
+      alias_result = alias_forms[0]
       unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
         raise refused, 'call effects support only void or scalar results'
       end
       args = f[6].drop(1)
       args.each do |arg|
-        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval].include?(arg[0])
+        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval byval-deep].include?(arg[0])
           raise bad, 'call argument effect form'
         end
         ty = arg[1]
@@ -601,31 +603,41 @@ class BorrowCallEffects
         end
       end
       if alias_result
-        unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
-               alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
-               %w[shared exclusive].include?(alias_result[3])
-          raise bad, 'returned alias contract form'
+        alias_result = alias_forms.map do |form|
+          unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+                 form.is_a?(Array) && form.length == 4 && form[0] == 'from-arg' &&
+                 %w[shared exclusive].include?(form[3])
+            raise bad, 'returned alias contract form'
+          end
+          index = layouts.number(form[1])
+          offset = layouts.number(form[2])
+          source = args[index]
+          unless source && %w[read write].include?(source[0])
+            raise refused, 'returned aliases require a read or write source argument'
+          end
+          if form[3] == 'exclusive' && source[0] != 'write'
+            raise refused, 'exclusive returned aliases require a write source argument'
+          end
+          # A pointer to const grants no writes, so its alias is shared.
+          pointee = result[1]
+          pointee = pointee[1] while pointee.is_a?(Array) && pointee[0] == 'const' && pointee.length == 2
+          if !pointee.equal?(result[1]) && form[3] != 'shared'
+            raise refused, 'returned aliases of const pointees must be shared'
+          end
+          width = layouts.field_type(pointee, [])[:size]
+          if offset + width > layouts.field_type(source[1], [])[:size]
+            raise refused, 'returned alias range escapes its source argument'
+          end
+          {arg: index, offset: offset, kind: form[3], width: width}
         end
-        index = layouts.number(alias_result[1])
-        offset = layouts.number(alias_result[2])
-        source = args[index]
-        unless source && %w[read write].include?(source[0])
-          raise refused, 'returned aliases require a read or write source argument'
+        # Sources in one argument must be disjoint ranges: a call takes a loan of each.
+        alias_result.each_with_index do |s, i|
+          alias_result.drop(i + 1).each do |t|
+            if s[:arg] == t[:arg] && s[:offset] < t[:offset] + t[:width] && t[:offset] < s[:offset] + s[:width]
+              raise refused, 'returned alias sources overlap'
+            end
+          end
         end
-        if alias_result[3] == 'exclusive' && source[0] != 'write'
-          raise refused, 'exclusive returned aliases require a write source argument'
-        end
-        # A pointer to const grants no writes, so its alias is shared.
-        pointee = result[1]
-        pointee = pointee[1] while pointee.is_a?(Array) && pointee[0] == 'const' && pointee.length == 2
-        if !pointee.equal?(result[1]) && alias_result[3] != 'shared'
-          raise refused, 'returned aliases of const pointees must be shared'
-        end
-        width = layouts.field_type(pointee, [])[:size]
-        if offset + width > layouts.field_type(source[1], [])[:size]
-          raise refused, 'returned alias range escapes its source argument'
-        end
-        alias_result = {arg: index, offset: offset, kind: alias_result[3]}
       elsif result.is_a?(Array)
         raise refused, 'call effects support only void or scalar results'
       end
