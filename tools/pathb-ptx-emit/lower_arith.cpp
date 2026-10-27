@@ -244,6 +244,8 @@ void FnCtx::int_convert(const std::string &dest, const Ty &ty, const std::string
   }
 }
 
+bool g_f2i_convert = false;
+
 void FnCtx::float_to_int(const std::string &dest, const Ty &ty, const std::string &a0, const Ty &aty) {
   if (!(ty.kind == "int" && !ty.is_bool && (ty.size == 1 || ty.size == 2 || ty.size == 4 || ty.size == 8)))
     throw Refused("cf2i to " + ty.kind + " of " + std::to_string(ty.size) + " bytes");
@@ -252,6 +254,15 @@ void FnCtx::float_to_int(const std::string &dest, const Ty &ty, const std::strin
   int fsz = aty.size;
   std::string ft = ptx_type(aty);
   std::string a = reg_of(a0, aty);
+  if (g_f2i_convert) {
+    if (bits >= 32) {
+      emit("cvt.rzi." + ptx_type(ty) + "." + ft + " " + dest + ", " + a + ";");
+    } else {
+      emit(std::string("cvt.rzi.") + (ty.is_signed ? "s32." : "u32.") + ft + " " + dest + ", " + a + ";");
+      canon(dest, ty);
+    }
+    return;
+  }
   i128 lo, hi;
   std::string lo_op;
   double lo_v;

@@ -11,8 +11,7 @@ namespace ext::oneapi::experimental {
 
 // the kernel-property list (sycl_ext_oneapi_properties) as ggml-sycl uses it: properties{ key, ... }
 template <class... P> struct properties {
-  constexpr properties() = default;
-  constexpr explicit properties(P...) {}
+  constexpr explicit properties(P...) {}   // with no P, the default constructor
 };
 
 }  // namespace ext::oneapi::experimental

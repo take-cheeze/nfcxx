@@ -4,7 +4,10 @@
 # spirv-val. Nothing is linked or run; the sweep says which TUs of the backend the front end and the emitter accept.
 # The macros are the reference build's (compile_commands.json of build-sycl) without GGML_SYCL_SUPPORT_LEVEL_ZERO_API (the
 # lib/sycl runtime reports the OpenCL backend, so ggml's Level Zero calls are not reached) and without GGML_SYCL_GRAPH (lib/sycl
-# has no sycl_ext_oneapi_graph; both are CMake options of the backend).
+# has no sycl_ext_oneapi_graph; both are CMake options of the backend), and with GGML_SYCL_HAS_BF16 and GGML_SYCL_DMMV_HAS_BF16:
+# common.hpp and dmmv.cpp define them only for icpx (__INTEL_LLVM_COMPILER), and without them the backend still offers bf16
+# ops and aborts in them ("GGML tensor type not supported", "dequantize_mul_mat_vec unsupported GGML_TYPE 30"); lib/sycl has
+# sycl::ext::oneapi::bfloat16.
 #
 #   tests/gpu/ggml/sweep.sh [-j N] [FILE.cpp ...]     (default: every .cpp of GGML_SRC, 8 jobs)
 #
@@ -31,7 +34,7 @@ one() {
   b=$(basename "$f" .cpp)
   if ! "$root/scripts/pathb-dump" --ir -std=c++17 -D__NFCXX_SYCL_DEVICE__ -DNDEBUG --diag_warning=narrowing_conversion \
       -I"$root/lib/sycl/include" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED \
-      -DGGML_SCHED_MAX_COPIES=4 -DGGML_SYCL_DNNL=0 -DGGML_SYCL_F16 -DGGML_SYCL_HOST_MEM_FALLBACK \
+      -DGGML_SCHED_MAX_COPIES=4 -DGGML_SYCL_DNNL=0 -DGGML_SYCL_F16 -DGGML_SYCL_HAS_BF16 -DGGML_SYCL_DMMV_HAS_BF16 -DGGML_SYCL_HOST_MEM_FALLBACK \
       -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -Dggml_sycl_EXPORTS \
       -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." "$f" > "$out/$b.ir" 2> "$out/$b.err"; then
     echo "$b: FAIL (front end) $(grep -m1 -A1 -E 'error' "$out/$b.err" | tr -s ' \n' ' ' | cut -c1-200)"; return

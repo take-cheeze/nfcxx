@@ -215,7 +215,7 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   # The images are the copy's .incbin files: with -c they are kept beside the copy, which the link re-reads (cu_prepare).
   local groups=${cu_keep:-$cudatmp}/$base.groups
   rm -rf "$groups"
-  "$root/build/pathb-ptx-emit" --emit --sm=$sm --groups-dir="$groups" \
+  "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --groups-dir="$groups" \
     --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-60000} \
     ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
   # NFCXX_CUDA_JIT=1: the image of each group is its PTX text, loaded by the runtime's JIT (cudaLibraryLoadData); ptxas is not run.

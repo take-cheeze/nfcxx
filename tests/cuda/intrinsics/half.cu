@@ -1,4 +1,4 @@
-// __float2half and __half2float on the device (the device unit's half type is an unsigned short), against CUDA's own
+// __float2half and __half2float on the device (halves given as bit patterns), against CUDA's own
 // host conversions (cuda_fp16.h): round to nearest, even; subnormals; overflow to infinity; signed zero.
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -7,8 +7,8 @@
 
 __global__ void k(unsigned short *h, float *back, const float *x) {
   unsigned i = threadIdx.x;
-  h[i] = __float2half(x[i]);
-  back[i] = __half2float((__half)h[i]);
+  h[i] = __half_as_ushort(__float2half(x[i]));
+  back[i] = __half2float(__ushort_as_half(h[i]));
 }
 
 int main() {

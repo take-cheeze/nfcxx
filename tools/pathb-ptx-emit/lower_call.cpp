@@ -171,9 +171,10 @@ void FnCtx::asm_stmt(const Node &s) {
     Ty ty;
   };
   std::vector<Store> stores;
-  // ldmatrix reads shared memory through a 32-bit shared-state address: its pointer input (the "l" operand of
-  // llama.cpp's mma.cuh) is a generic address, converted here as nvcc does
-  const bool ldmatrix = tmpl.compare(0, 9, "ldmatrix.") == 0;
+  // An ldmatrix with .shared reads through a 32-bit shared-state address, so its pointer input (a generic address) is
+  // converted. Without a state space (llama.cpp's mma.cuh) the address is generic, and the "l" operand is passed as it
+  // is, as nvcc does: the converted offset read as a generic address was an illegal memory access (ldmatrix.cu).
+  const bool ldmatrix = tmpl.compare(0, 9, "ldmatrix.") == 0 && tmpl.find(".shared") != std::string::npos;
   for (size_t i = 2; i < s.items.size(); i++) {
     const Node &o = s.items[i];
     const std::string *h = head(o);

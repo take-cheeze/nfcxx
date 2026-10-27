@@ -604,6 +604,7 @@ using async_handler = std::function<void(exception_list)>;
 // ------------------------------------------------------------------------------------------------ backend interface
 
 class handler;
+namespace ext::oneapi::experimental { template <class... P> struct properties; }
 
 namespace detail {
 
@@ -912,6 +913,12 @@ class handler {
   template <class Name = void, int D, class F> void parallel_for(range<D> r, F f);
   template <class Name = void, class F> void parallel_for(size_t n, F f) { parallel_for<Name>(range<1>(n), f); }
   template <class Name = void, int D, class F> void parallel_for(nd_range<D> r, F f);
+  // with a kernel-property list (sycl_ext_oneapi_kernel_properties, ext/intel/experimental/grf_size_properties.hpp): the
+  // shim's properties change nothing, so the kernel runs as it would without them
+  template <class Name = void, int D, class... P, class F>
+  void parallel_for(range<D> r, ext::oneapi::experimental::properties<P...>, F f) { parallel_for<Name>(r, f); }
+  template <class Name = void, int D, class... P, class F>
+  void parallel_for(nd_range<D> r, ext::oneapi::experimental::properties<P...>, F f) { parallel_for<Name>(r, f); }
   template <class Name = void, class F> void single_task(F f);
   template <class Name = void, int D, class T, class Op, class F> void parallel_for(range<D> r, reduction_desc<T, Op> red, F f);
   template <class Name = void, int D, class T, class Op, class F> void parallel_for(nd_range<D> r, reduction_desc<T, Op> red, F f);
