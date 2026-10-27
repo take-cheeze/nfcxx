@@ -23,7 +23,7 @@ The initial fact vocabulary is already accepted by the QBE emitter as metadata:
 (decl %0 ref)           reference parameter; caller-owned storage
 (decl $"tmp" temp)       a compiler temporary's storage starts, initially uninitialized
 (scope-end $"x")         local storage lifetime ends
-(rref-arg $"x")          C++ rvalue-reference argument; requires future move contracts
+(rref-arg $"x")          C++ rvalue-reference argument; a plain reference argument, not a move
 ```
 
 The C++ frontend also prints facts for storage that no declaration names:
@@ -254,9 +254,9 @@ Whole-aggregate value transfers, moves through arbitrary aliases, drops, and own
 of calls remain unsupported. The mrustc route emits `move-value` for Rust moves, one per scalar of the
 moved place ([mrustc-borrowck.md](mrustc-borrowck.md)); the C++ frontend emits neither form.
 
-C++ `rref-arg` is still refused: an rvalue-reference argument alone does not authorize treating the
-source as dead. Ordinary C++ moved-from objects can remain usable; their contracts need separate
-modeling before a frontend can emit a consuming transfer.
+C++ `rref-arg` is accepted as a plain reference argument: an rvalue-reference argument alone does not
+authorize treating the source as dead. Ordinary C++ moved-from objects remain usable and are still
+destroyed (see "C++ destructors"); a consuming transfer would need its own contract.
 
 ## Field ranges and partial moves
 
@@ -318,7 +318,7 @@ provenance at the new offset; other pointer values in the destination range beco
 - External memory reads as initialized bytes holding no known pointers. Copying a local address
   into external memory is refused. Copying one into argument memory under a verified summary is
   `contract-escape`.
-- Unknown or aliased places, dynamic indices, and drop-obligated storage are refused.
+- Unknown or aliased places, dynamic indices, and drop-obligated storage other than a C++ object are refused.
 
 A `byval` parameter's register is the address of the callee's own copy of the argument. The
 checker models that copy as a synthetic local slot `*%N`: initialized, alive until
@@ -359,7 +359,7 @@ is derived from a loan of such a slot. Ranged pointers have these rules:
   range conflict with it, but it initializes nothing. So `for (int &x : a) x = 0;` does not make
   `a` initialized. Initializing an array element by element needs constant indices.
 - A pointer store through one, a borrow or reborrow from one, and a store into drop-obligated
-  storage are refused. A non-pointer store through one makes pointer values held in the range unknown.
+  storage other than a C++ object are refused. A non-pointer store through one makes pointer values held in the range unknown.
 - At a CFG join, different offsets from one array base widen to that base's ranged pointer. A
   pointer advanced in a loop, such as the iterators of a range-based `for`, therefore converges.
 
@@ -450,7 +450,8 @@ an exception, so the checker handles it like this:
   summary is closed, so it writes only that object. The unwind therefore needs no state of its own. This
   is the one assumption the model rests on, and the summaries it relies on are the trusted ones.
 - A call is refused while a drop obligation is `live`, because the unwind would have to discharge it,
-  and no frame does so for an explicit obligation.
+  and no frame does so for an explicit obligation. A C++ object obligation is the exception: EDG's frames
+  destroy it (see "C++ destructors").
 - Summary inference verifies each candidate as `may-throw`, so a throwing body is not a contract
   violation, and then writes `(nothrow)` for a body that calls no throwing callee. Self-recursion does
   not make a function throw. A function that calls a `may-throw` callee is inferred `may-throw`.
@@ -502,7 +503,8 @@ outer handler reached only through the rethrow of an inner `catch (...)`).
 
 Drop-state forms describe an ownership protocol for declared local values. They are **checking
 facts**, not destructor instructions: the producer must supply any real cleanup and runtime guard
-code separately. Neither frontend emits these facts yet. The bounded call contracts below can
+code separately. The C++ frontend emits them, with an `object` obligation, for objects with a destructor
+(see "C++ destructors" below); the mrustc route does not yet. The bounded call contracts below can
 connect actual calls to checking effects; they do not prove general destructor, deallocation, or
 unwind behavior.
 
@@ -562,6 +564,58 @@ construction. Explicit `unreachable`/abort paths do not require cleanup; excepti
 remain unsupported. The marker asserts that the matching real cleanup or runtime guard exists;
 the checker does not generate or verify that code. The QBE emitter and oracle accept these facts
 as validated no-ops, and a native integer test verifies marker erasure preserves generated code.
+
+## C++ destructors
+
+With `NFCXX_PATHB_BORROW=1` the C++ frontend gives each local or temporary whose complete-object
+destructor EDG's lowering calls an obligation of type `object`, which takes the whole slot:
+
+```text
+(drop-obligation "tmp.2" object $"tmp.2")
+(drop-live "tmp.2")
+(eval (call void &"_ZN1SC1Ei" $"tmp.2" (const int 5)))
+...
+(eval (call void &"_ZN1SD1Ev" $"tmp.2"))
+(drop-state "tmp.2")
+```
+
+- `(drop-state ID)` follows every call of the object's complete-object destructor (`D1`) whose `this`
+  is the whole local: the calls the lowering makes at a block end, `return`, `break`, `continue` and
+  `goto`, at the end of a temporary's full expression, and an explicit `s.~S()`.
+- `(drop-live ID)` registers the object. A declared local, and a range-based `for`'s variable, is
+  registered right after its `(decl)`. A temporary is registered right before the call that makes it: its
+  complete-object constructor, or a function that returns a class through a first parameter (the
+  lowering's form for a class with a non-trivial destructor). Whether a slot gets a destructor call is
+  known only at the end of the function, so the frontend keeps a registration only for slots that do.
+
+The checker treats an object obligation as a C++ object's lifetime, not as Rust ownership:
+
+- Registration and the object's state are independent of its bytes. A member may stay uninitialized,
+  no semantic layout is needed, and writes, aggregate copies, weak stores and dynamic-index stores into a
+  live object do not change its state. Registering a live object is refused.
+- `drop-state` ends the object as an exclusive access, so a loan of it still live there is
+  `loan-conflict`. A destructor of a never-registered object, such as a temporary made on one branch of
+  `?:`, whose destructor EDG guards with a flag the checker does not correlate, is refused. A second
+  destructor is `double-drop`.
+- After the destructor, the bytes read as dropped until the storage ends: a read through any pointer to
+  the object is `use-after-drop`. A write is refused, because placement new could make a new object there
+  and the checker cannot tell that from a store. A temporary made again in a loop reuses its storage: the
+  new registration invalidates pointers to the previous object as a scope end does.
+- A storage end or return with the object still live is `missing-drop`.
+- A C++ move is not an ownership transfer. `rref-arg` is accepted as a plain reference argument: the
+  callee's summary says what it does to the source, which stays live and is still destroyed. A
+  `move-value` of an object obligation is refused.
+- A throwing call with a live object is accepted: EDG's region table holds the object while it is
+  live, and the unwind runs its destructor. At a throw into a handler of the same function, a temporary
+  whose storage spans the function (its `decl` is not in the try body) is refused while it is live, since
+  the checker cannot tell whether the unwind destroyed it.
+
+The point of the facts is storage that outlives its object. EDG gives many temporaries function-wide
+storage, so `const int *q = S(5).p(); return *q;` read initialized live bytes and was accepted before;
+it is now `use-after-drop`. A destructor whose summary only reads (`~S() {}`) no longer hides it.
+Destructor calls are checked through their summaries as before, so a class without a semantic layout
+still has no inferred destructor summary and stays refused. Arrays of objects (`__vec_delete`),
+base and member subobjects, and objects reached through pointers get no obligation.
 
 ## Closed call-effect contracts
 
@@ -876,16 +930,17 @@ and `int128_return.cpp` cover the cases, the second with `__int128` passed and r
 the runtime helpers. The C++ cases `cpp/conditional_*.cpp` cover a
 pointer `?:`, an uninitialized branch value, and a branch pointer to an ended scope.
 
-Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
+Calls without a supported closed effect contract are refused. So are
 aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
 and external stores. Unknown instructions are
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
 
-Full Rust move semantics, C++ destructor interpretation, container invalidation, interior
+Full Rust move semantics, container invalidation, interior
 mutability and cross-function region inference are not implemented. Exception handling is checked
 through EDG's `try` protocol ("try and catch"), not through cleanup edges of its own.
-`rref-arg` does not mean that an ordinary C++ moved-from value is dead.
+`rref-arg` does not mean that an ordinary C++ moved-from value is dead. C++ destructors end objects
+only as described in "C++ destructors"; placement new and storage reuse by the program are refused.
 
 ## Rust frontend boundary
 
@@ -951,7 +1006,15 @@ module's own summary overrides the file's. The emitter and oracle accept every s
 file, and the program runs natively.
 `contracts/raii.cpp` checks a local with a destructor, its exception-stack frames, and the
 destructor's inferred summary, and runs natively. A variant that uses the object through a pointer
-after its scope reports `use-after-scope`. The fixtures in `tests/pathb-borrow/eh` cover push and
+after its scope reports `use-after-scope`.
+`tests/pathb-borrow/destructors` lowers C++ with destructors and checks it with inferred summaries and
+loan ends: `raii_ok.cpp` (locals at exits, temporaries in a loop, a class result, a reference-bound
+temporary, a moved-from object, a caught throw) is accepted and runs natively; a pointer into a destroyed
+temporary, a loan live at a temporary's destruction, a read after an explicit destructor, a write after it,
+a conditional temporary, and a temporary live at a caught throw are reported or refused. Without the drop
+facts the dangling temporary is accepted, with identical QBE. The `drops/object_*.ir` fixtures and
+`throws/live_object_ok.ir` cover each rule of object obligations, and `tests/mruby/pathb-edge/object_drop_facts.ir`
+their erasure. The fixtures in `tests/pathb-borrow/eh` cover push and
 pop, frames left pushed on some path, a pop after the frame's scope, unknown entries, and
 scalar and escaping stores to globals.
 `contracts/const_alias.cpp` infers a shared summary for a `const int *` result. A variant that

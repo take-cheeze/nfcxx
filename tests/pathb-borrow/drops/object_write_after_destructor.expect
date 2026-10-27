@@ -1,0 +1,2 @@
+3
+refused: write to a destroyed C++ object (placement new is unsupported)
