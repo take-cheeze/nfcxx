@@ -164,7 +164,8 @@ class CodeGen
     end
     # LEFT_OUT: what stands in for an entry the build leaves out of the tables. A verify build registers the stub
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
-    # from its cause; a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
+    # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
+    # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
     if compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
@@ -182,11 +183,16 @@ class CodeGen
         #if defined(BC2CPP_UNREGISTERED_VERIFY)
           if (singleton) mrb_define_class_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
           else mrb_define_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
-        #elif defined(BC2CPP_RESPOND_TO_PHANTOM)
-          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
-          bc2cpp_phantom_add(M, owner, mrb_intern_cstr(M, name));
         #else
-          (void)M; (void)c; (void)name; (void)singleton;
+          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
+          mrb_sym id = mrb_intern_cstr(M, name);
+          // Only a definition on the owner itself: an inherited one belongs to another entry.
+          struct RClass* definer = owner;
+          mrb_method_t m = mrb_method_search_vm(M, &definer, id);
+          if (!MRB_METHOD_UNDEF_P(m) && definer == owner) mrb_remove_method(M, owner, id);
+        #if defined(BC2CPP_RESPOND_TO_PHANTOM)
+          bc2cpp_phantom_add(M, owner, id);
+        #endif
         #endif
         }
       CPP
