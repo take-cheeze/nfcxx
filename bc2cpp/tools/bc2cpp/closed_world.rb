@@ -67,6 +67,9 @@ class ClosedWorld
   # What `x.freeze` leaves of a receiver that is one of these: a builtin value, never an instance of
   # a user class.
   FREEZE_LITERAL_WRITERS = %i[ARRAY ARRAY2 HASH STRING STRCAT RANGE_INC RANGE_EXC].freeze
+  # Core iterators whose result on a builtin receiver is a new Array or Hash (fresh_builtin_result?).
+  FRESH_BUILTIN_SENDS = %w[map collect select filter reject flat_map collect_concat sort sort_by to_a entries zip
+                           uniq compact reverse].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
   # refusal already, see scan_send).
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
@@ -145,6 +148,7 @@ class ClosedWorld
     @freeze_possible = false
     @factory_read_names = Set.new
     @frozen_constants = Set.new
+    @fresh_freeze_names = Set.new
     @memo = {}
     @desc_memo = {}
     @native_paths = native_paths
@@ -880,7 +884,7 @@ class ClosedWorld
 
     unless defined?(@user_objects_unfrozen)
       @user_objects_unfrozen = @frozen_constants.all? { |name| class_constant?(name) } &&
-                               !DynamicNames.universe(@ireps).include?('freeze')
+                               fresh_builtin_names_core? && !DynamicNames.universe(@ireps).include?('freeze')
     end
     @user_objects_unfrozen
   end
@@ -1703,16 +1707,45 @@ class ClosedWorld
 
     constant = nil
     harmless = BytecodeIR::Ops::SEND_PREFIX_OPS.include?(insn.op) && insn.argc.to_i.zero? &&
-               irep.walk_dominating_writers(idx - 1, insn.reg, use: idx, follow_moves: true) do |writer|
+               irep.walk_dominating_writers(idx - 1, insn.reg, use: idx, follow_moves: true) do |writer, index|
                  case writer.op
                  when *FREEZE_LITERAL_WRITERS then true
                  when :GETCONST then (constant = writer.const_name) && true
                  when :GETMCNST then (constant = writer.mcnst_name) && true
+                 when *BytecodeIR::Ops::SEND_PREFIX_OPS then fresh_builtin_result?(irep, index, writer)
                  end
                end
     return @freeze_possible = true unless harmless == true
 
     @frozen_constants << constant if constant
+  end
+
+  # FRESH_BUILTIN_FREEZE: `(0..n).map { }.freeze`. A core iterator of FRESH_BUILTIN_SENDS called on a builtin
+  # literal (or on such a result) returns a new builtin value, never a user object, as long as only mruby's own
+  # code defines the name. That is judged after the scan (fresh_builtin_names_core?), when every definer is known.
+  # BC2CPP_FRESH_FREEZE=0 refuses it, for comparison.
+  def fresh_builtin_result?(irep, index, writer, depth = 0)
+    return false if ENV['BC2CPP_FRESH_FREEZE'] == '0'
+    return false unless FRESH_BUILTIN_SENDS.include?(writer.sym.to_s) && depth < 4
+
+    literal = irep.walk_dominating_writers(index - 1, writer.reg, use: index, follow_moves: true) do |receiver, at|
+      FREEZE_LITERAL_WRITERS.include?(receiver.op) ||
+        (BytecodeIR::Ops::SEND_PREFIX_OPS.include?(receiver.op) && fresh_builtin_result?(irep, at, receiver, depth + 1))
+    end
+    return false unless literal == true
+
+    @fresh_freeze_names << writer.sym.to_s
+    true
+  end
+
+  # Every definer of a FRESH_BUILTIN_FREEZE name is mruby's own: core Ruby or a core native.
+  def fresh_builtin_names_core?
+    @fresh_freeze_names.all? do |name|
+      !@unknown_defs.include?(name) &&
+        @registry.fetch(name, []).all? { |d| d.irep.nil? || CoreDefs.core_source?(@ireps[d.irep]&.file) } &&
+        outside_ruby_paths_defining(name).all? { |path| CoreDefs.core_source?(path) } &&
+        (@outside_name_paths[name] || []).all? { |path| path.match?(NATIVE_CORE) }
+    end
   end
 
   # `private :a, :b` / `private def a`: the names it hides. Any other argument
