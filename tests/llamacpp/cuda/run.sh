@@ -17,7 +17,7 @@ log=$("$root/tests/llamacpp/cuda/build.sh" "$out") || { echo "$log" | tail -5; e
 case $log in *SKIP:*) echo "$log"; exit 0 ;; esac
 prog=$out/test-backend-ops
 
-PASS="ABS ACC ADD ADD_ID ARANGE ARGMAX ARGSORT CEIL CLAMP COL2IM_1D CONCAT CONT CONV_2D_DW CONV_TRANSPOSE_1D
+PASS="ABS ACC ADD ADD_ID ARANGE ARGMAX ARGSORT CEIL CLAMP COL2IM_1D CONCAT CONT CONV_2D CONV_2D_DW CONV_3D CONV_TRANSPOSE_1D
 CONV_TRANSPOSE_2D COS COUNT_EQUAL CPY CROSS_ENTROPY_LOSS CROSS_ENTROPY_LOSS_BACK CUMSUM DIAG DIAG_MASK_INF DIV DSV4_HC_COMB
 DSV4_HC_POST DSV4_HC_PRE DUP ELU EXP EXPM1 FILL FLOOR GATED_DELTA_NET GATED_LINEAR_ATTN GEGLU GEGLU_ERF GEGLU_QUICK GELU
 GELU_ERF GELU_QUICK GET_ROWS GET_ROWS_BACK GROUP_NORM HARDSIGMOID HARDSWISH IM2COL IM2COL_3D L2_NORM LEAKY_RELU LIGHTNING_INDEXER LOG MEAN
@@ -26,11 +26,9 @@ RMS_NORM_BACK ROLL ROPE ROPE_BACK ROUND RWKV_WKV6 RWKV_WKV7 SCALE SET SET_ROWS S
 SOFT_MAX SOFT_MAX_BACK SOLVE_TRI SQR SQRT SSM_CONV SSM_SCAN STEP SUB SUM SUM_ROWS SWIGLU SWIGLU_CLAMP SWIGLU_OAI TANH
 TIMESTEP_EMBEDDING TOP_K TRI TRUNC UPSCALE XIELU"
 # op | why it fails now (see docs/notes/llamacpp.md)
-KNOWN="CONV_2D|illegal memory access
-CONV_3D|illegal memory access
-MUL_MAT|f16 n=4 and n=8 wrong (half accumulation), then mul_mat_q (mmq) illegal memory access
-MUL_MAT_ID|mul_mat_q (mmq) illegal memory access
-FLASH_ATTN_EXT|illegal memory access"
+KNOWN="MUL_MAT|f16 n=4 and n=8, q1_0, q2_0 and mxfp4 wrong, then a misaligned address
+MUL_MAT_ID|misaligned address
+FLASH_ATTN_EXT|f16 hsk=40 gives NaN, then an unspecified launch failure"
 
 fail=0
 run_op() {  # run_op OP: res = "passed/total" ("" when the process died before its summary), err = the first error

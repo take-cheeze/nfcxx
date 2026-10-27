@@ -108,6 +108,9 @@ placeholders, and each device module is registered with the runtime.
   and keeps the low bytes (`intrinsics/cf2i_convert.cu`, its expected values from nvcc). The IR's range check, which
   traps, is the emitter's default. quantize_mmq_q8_1 rounds NaN into a `char4` for a block of zeros (127 / 0), and
   the trap was the mmq path's "unspecified launch failure".
+- **ldmatrix** in inline asm (mma.cuh) names no state space, so its address is generic: the pointer operand is passed
+  as it is, as nvcc does. Only a template with `.shared` gets the 32-bit shared address (`intrinsics/ldmatrix.cu`;
+  converting it always was mmq's illegal memory access).
 - **Half bits**: `__half_as_ushort`, `__ushort_as_half`, `__half_as_short` and `__short_as_half` read and write the
   half's bits. A cast between `__half` and an integer converts the value, as in `cuda_fp16.h`.
 
