@@ -707,11 +707,12 @@ class CodeGen
           "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));\n"
         else
           # INTEGER_TAG_ELSE: an exact Array receiver's non-fixnum key runs the Array body directly.
+          # UNSIGNED_INDEX: the arm tests the fixnum tag only; a heap Integer key takes the else, which is `[]` itself.
           direct = integer_tag_else_array_call('[]', exact, "r#{d}", ["r#{s}"])
           by_name = direct ? "r#{d} = #{direct};" : index_else_statement(d, s)
           <<~CPP
-            #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
-              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+            #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_fixnum_p(r#{s})) {
+              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_fixnum(r#{s}));
             } else {
               #{by_name}
             }

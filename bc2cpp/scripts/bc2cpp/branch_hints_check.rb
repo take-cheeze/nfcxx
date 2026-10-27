@@ -117,7 +117,7 @@ shl = code_of(code, 'BhRun_shl')
 check.call('`a << v`, whose Array and Integer arms are both live, carries no hint',
            shl.include?('ARRAY_PUSH :<<') && shl.include?('INTEGER_LSHIFT :<<') && !shl.include?('mrb_likely('))
 check.call('bc2cpp_ary_entry predicts the index in range',
-           code.include?('if (mrb_unlikely(n < 0 || len <= n)) return mrb_nil_value();'))
+           code.include?('if (mrb_likely((mrb_uint)n < len)) return p[n];'))
 
 # The same directory, so the fixture paths the output spells match.
 off_dir = Dir.mktmpdir('bc2cpp-branch-hints-off')

@@ -836,13 +836,14 @@ end
     return whole unless kind == 'getidx'
 
     # GETIDX_INLINE_ARRAY: the exact-Array Fixnum read is inline at every call site (one compare and an element load),
-    # so a site no longer pays a call for the common case. Everything else stays in the outlined body.
+    # so a site no longer pays a call for the common case. Everything else stays in the outlined body; a heap Integer
+    # key (UNSIGNED_INDEX: the front tests the fixnum tag only) meets the outlined body's own Integer arm.
     "// GETIDX_INLINE_ARRAY -- exact Array and Fixnum index inline; other receivers take bc2cpp_getidx_slow.\n" \
       "static mrb_value bc2cpp_getidx_slow(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
       "#{body.gsub(/^(?=.)/, '  ')}}\n\n" \
       "BC2CPP_HOT_INLINE static inline mrb_value bc2cpp_getidx(mrb_state* M, mrb_value recv, mrb_value key) {\n" \
-      "  if (#{BranchHints.likely('mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)')}) {\n" \
-      "    return bc2cpp_ary_entry(M, recv, mrb_integer(key));\n" \
+      "  if (#{BranchHints.likely('mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_fixnum_p(key)')}) {\n" \
+      "    return bc2cpp_ary_entry(M, recv, mrb_fixnum(key));\n" \
       "  }\n" \
       "#{integer_bit_aref_helper_arm}" \
       "  return bc2cpp_getidx_slow(M, recv, key);\n" \

@@ -11,7 +11,8 @@
 #     - every fixture `each` gets the guarded loop, the send label behind it, and no tripwire (one in a rescue
 #       try body, which has no place for the send, keeps the send alone);
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - interpreted and compiled runs print the same over String, Float, bigint and Integer bounds.
+#     - interpreted and compiled runs print the same over String, Float, bigint and Integer bounds, including the
+#       Fixnum and mrb_int edges (RANGE_EACH_INT_MAX: an inclusive end at MRB_INT_MAX is the interpreter's).
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/range_each_guard_check.rb
 
@@ -39,6 +40,7 @@ SRC = <<~'RUBY'
     def lit_big; r = []; (0x1_0000_0000_0000_0000..0x1_0000_0000_0000_0002).each { |x| r << x }; r; end
     def var(a, b); r = []; (a..b).each { |x| r << x }; r; end
     def xvar(a, b); r = []; (a...b).each { |x| r << x }; r; end
+    def cnt(a, b); n = 0; (a..b).each { |x| n += 1 }; [n, b - a]; end
     def ret(a, b); (a..b).each { |x| return x if x == b }; :none; end
     def brk(a, b); (a..b).each { |x| break x if x == b }; end
     def resc(a, b)
@@ -52,9 +54,16 @@ SRC = <<~'RUBY'
     end
   end
   class RegUse
+    IMAX = 0x7fff_ffff_ffff_ffff
+    IMIN = -IMAX - 1
+    FMAX = 0x3fff_ffff_ffff_ffff
     CALLS = [[:lit_str], [:lit_flt], [:lit_big], [:var, 1, 3], [:var, 'x', 'z'], [:var, 1, 2.5], [:xvar, 1, 4],
              [:xvar, 1.0, 3], [:var, 0x1_0000_0000_0000_0000, 0x1_0000_0000_0000_0001], [:ret, 'a', 'c'], [:ret, 1, 3],
-             [:brk, 'a', 'b'], [:brk, 2, 4], [:resc, 'a', 'b'], [:resc, 1, 2], [:resc, 1.0, 2]].freeze
+             [:brk, 'a', 'b'], [:brk, 2, 4], [:resc, 'a', 'b'], [:resc, 1, 2], [:resc, 1.0, 2],
+             # The mrb_int and Fixnum edges: mrblib's `lim = last + 1` is a bigint at MRB_INT_MAX.
+             [:var, IMAX - 2, IMAX], [:cnt, IMAX - 600, IMAX], [:xvar, IMAX - 2, IMAX], [:brk, IMAX - 2, IMAX],
+             [:ret, IMAX - 1, IMAX], [:var, FMAX - 1, FMAX + 1], [:xvar, FMAX - 1, FMAX + 1], [:var, IMIN, IMIN + 2],
+             [:xvar, IMIN, IMIN + 2]].freeze
     def run
       CALLS.map do |m, *args|
         begin
@@ -68,7 +77,7 @@ SRC = <<~'RUBY'
 RUBY
 
 OWNERS = %w[RegBox RegUse].freeze
-METHODS = %w[lit_str lit_flt lit_big var xvar ret brk].freeze
+METHODS = %w[lit_str lit_flt lit_big var xvar cnt ret brk].freeze
 
 def method_code(code, name)
   code[/^mrb_value #{name}_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
@@ -86,6 +95,8 @@ METHODS.each do |name|
   check.call("RegBox##{name}: the counter loop runs behind the Integer-bounds guard, the send behind it",
              body.include?('RANGE_EACH_GUARD :each') && guard && body.include?("#{guard}:;") &&
                body.match?(/Lbc2cpp_range_after_\d+:;/))
+  check.call("RegBox##{name}: an inclusive end at MRB_INT_MAX takes the send (RANGE_EACH_INT_MAX)",
+             guard && body.match?(/== MRB_INT_MAX\) goto #{guard};/))
 end
 
 DRIVER = <<~'RUBY'
