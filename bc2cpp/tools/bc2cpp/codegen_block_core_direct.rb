@@ -83,7 +83,7 @@ module BlockCoreDirectFallback
       tests = []
       tests << 'M->c == M->root_c' unless unguarded
       tests << format(arm[:guard], r: recv) unless exact_class
-      call = "r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});"
+      call = block_core_collect_call(arm, d, recv, args) || "r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});"
       sole_call = call if tests.empty? && exact_class && arms.size == 1 && block_arm_reach?
       "if (#{tests.empty? ? 'true' : tests.join(' && ')}) {\n" \
         "    #{call}\n" \

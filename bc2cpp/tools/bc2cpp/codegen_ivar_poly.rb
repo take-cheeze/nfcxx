@@ -318,6 +318,12 @@ class CodeGen
       compile_poly_table(name, d, recv, argv, n, closed_world_site: closed_world_site)
   end
 
+  # The class test, by type tag, of a class that has no subclasses or singleton classes. A bignum is read by its tag:
+  # mrb_bigint_p is FALSE in a unit compiled without MRB_USE_BIGINT even when the library has bignums.
+  POLY_IMMEDIATE_TAGS = {
+    'Integer' => '(mrb_integer_p(%<r>s) || mrb_type(%<r>s) == MRB_TT_BIGINT)', 'Float' => 'mrb_float_p(%<r>s)', 'Symbol' => 'mrb_symbol_p(%<r>s)'
+  }.freeze
+
   def compile_poly_small_n(name, d, recv, argv, n, closed_world_site: nil)
     candidates = poly_small_n_targets(name, n)
     return nil unless candidates
@@ -327,10 +333,18 @@ class CodeGen
     # branch; the receiver's class is then read once instead of per compare.
     hoist = inherited.values.any?(&:any?)
     recv_class = hoist ? 'bc2cpp_recv_class' : "mrb_obj_class(M, #{recv})"
+    # POLY_IMMEDIATE_TAG: the exact-class tests are exclusive, so an immediate class's tag test may go first and
+    # spare that receiver the class reads of the other arms.
+    tagged, rest = candidates.partition { |t| POLY_IMMEDIATE_TAGS.key?(t.owner) && inherited[t.owner].empty? }
+    candidates = tagged + rest
     branches = candidates.map do |target|
-      check = ([target.owner] + inherited[target.owner]).map do |owner|
-        "#{owner_class_ptr_expr(owner)} == #{recv_class}"
-      end.join(' || ')
+      check = if tagged.include?(target)
+                format(POLY_IMMEDIATE_TAGS.fetch(target.owner), r: recv)
+              else
+                ([target.owner] + inherited[target.owner]).map do |owner|
+                  "#{owner_class_ptr_expr(owner)} == #{recv_class}"
+                end.join(' || ')
+              end
       call = if target.kind == :ivar_accessor && target.irep.nil?
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c), or the

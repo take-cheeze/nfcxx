@@ -218,12 +218,15 @@ class CodeGen
       # (src/object.c) gives the same answer for every type (for a Symbol with the
       # default `==`, mrb_func_basic_p skips dispatch and returns false), so
       # `!mrb_equal(...)` needs no fallback.
+      # NEQ_INTEGER_PAIR: OP_EQ compares two Integers by value without a send, while mrb_equal reaches that answer
+      # through a by-name `==` call whenever the values differ, so that pair is tested first.
       arg = argv.first
       "  // != -- native primitive, no lookup needed for any receiver (real\n" \
       "  // bytecode is exactly `!(self == other)`, mrb_equal reproduces ==\n" \
       "  // exactly for every type -- see compile_native_primitive_send's own\n" \
       "  // NEQ_UNCONDITIONAL comment)\n" \
-      "  r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));\n"
+      "  r#{d} = (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) ? " \
+        "mrb_bool_value(mrb_integer(#{recv}) != mrb_integer(#{arg})) : mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));\n"
     else
       dynamic_dispatch_line(d, recv, name, argv)
     end

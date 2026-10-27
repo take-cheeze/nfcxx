@@ -11,9 +11,10 @@ require_relative 'native_owner_map'
 #   VAR = mrb_define_class(mrb, "Name", ...)             -> Name
 #   VAR = mrb_class_get_id(mrb, MRB_SYM(Name))           -> Name
 #   VAR = mrb-><core field>                              -> the field's class (NativeOwnerMap::CORE_FIELD_OWNERS)
+#   VAR = mrb_define_class_under_id(mrb, OUTER, MRB_SYM(Name), ...) -> OUTER's owner::Name (Name under Object)
 #   VAR = OTHER                                          -> OTHER's owner, up to MAX_COPY_HOPS copies
 #
-# Anything else (a class defined under an outer class, a computed name, an install outside its function) is UNKNOWN.
+# Anything else (an outer class it cannot resolve, a computed name, an install outside its function) is UNKNOWN.
 # Unknown is recorded rather than guessed: the caller treats those entries as unattributed, as NativeOwnerMap does today.
 #
 #   ruby tools/bc2cpp/native_rom_owners.rb FILE...        # per table: owner, entry count
@@ -26,6 +27,8 @@ module NativeRomOwners
   TABLE = /static\s+const\s+mrb_mt_entry\s+(\w+)\s*\[\]\s*=\s*\{(.*?)\}\s*;/m
   ENTRY = /MRB_MT_ENTRY\s*\(\s*(\w+)\s*,\s*MRB_\w*SYM\w*\s*\(\s*(\w+)\s*\)/
   DEFINE = /\Amrb_define_(?:class|module)(?:_id)?\s*\(\s*mrb\s*,\s*(?:MRB_SYM\s*\(\s*(\w+)\s*\)|"(\w+)")/
+  UNDER = /\Amrb_(?:define_(?:class|module)|(?:class|module)_get)_under(?:_id)?\s*\(\s*mrb\s*,\s*((?:mrb->)?\w+)\s*,\s*
+             (?:MRB_SYM\s*\(\s*(\w+)\s*\)|"(\w+)")/x
   CLASS_GET = /\Amrb_class_get(?:_id)?\s*\(\s*mrb\s*,\s*(?:MRB_SYM\s*\(\s*(\w+)\s*\)|"(\w+)")\s*\)\z/
   FIELD = /\Amrb->(\w+)\z/
   IDENT = /\A(\w+)\z/
@@ -67,6 +70,14 @@ module NativeRomOwners
       owner == UNKNOWN ? named_class(text, pos, m[1]) : owner
     elsif (m = DEFINE.match(arg))
       m[1] || m[2]
+    elsif (m = UNDER.match(arg))
+      # The outer class is resolved as part of this step, not as another copy.
+      outer = owner_of(text, pos, m[1], depth)
+      name = m[2] || m[3]
+      if outer == UNKNOWN then UNKNOWN
+      elsif outer == 'Object' then name
+      else "#{outer}::#{name}"
+      end
     else
       UNKNOWN
     end
