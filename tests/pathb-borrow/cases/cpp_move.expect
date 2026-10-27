@@ -1,2 +1,2 @@
-3
-refused: rvalue-reference arguments require language-specific move contracts
+0
+ok: local lifetime checks passed (supported subset only)

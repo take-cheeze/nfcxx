@@ -2303,14 +2303,15 @@ end
 # where it ends (scope-end OP), and the rvalue-reference argument of the call that follows (rref-arg OP). They describe
 # the code and do not change it, so they are accepted as no-ops; only the shape is checked.
 # Drop-state records describe checking policy only. Cleanup code must already
-# exist in the producer's IR; these forms do not call or synthesize a destructor.
+# exist in the producer's IR; these forms do not call or synthesize a destructor. The type `object` is a C++ object
+# with a destructor, which takes its whole slot.
 def s_drop_obligation(fn, x)
   place = x[3]
   place = place[1] while head_of(place) == "offset" && place.length == 3
   unless x.length == 4 && x[1].is_a?(IRStr) && !x[1].to_s.empty? && place.is_a?(IRSym) && place.sig == "$"
     raise BadIR, "drop-obligation form"
   end
-  parse_type(x[2])
+  parse_type(x[2]) unless x[2] == "object"
 end
 
 def s_drop_event(fn, x)

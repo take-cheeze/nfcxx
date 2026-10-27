@@ -413,6 +413,7 @@ class LocalLifetime
     @errors = []
     @report = false
     @declared = {}
+    @temps = {}
     @loans = {}
     @drops = {}
     @register_types = {}
@@ -439,6 +440,7 @@ class LocalLifetime
       if bh(x) == 'decl'
         @has_facts = true
         @declared[x[1].name] = true if x[1].is_a?(IRSym) && x[1].sig == '$'
+        @temps[x[1].name] = true if x[1].is_a?(IRSym) && x[1].sig == '$' && x[2] == 'temp'
       end
       if bh(x) == 'borrow'
         raise BadIR, 'borrow form' unless x.length == 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && %w[shared exclusive two-phase].include?(x[3])
@@ -589,6 +591,16 @@ class LocalLifetime
       root, off = place
       raise BadIR, "drop obligation refers to unknown slot #{root}" unless @slots[root]
       ty = part[2]
+      if ty == 'object'
+        # A C++ object with a destructor: the whole slot, live from its registration to its destructor call,
+        # whatever its bytes hold (see "C++ destructors" in docs/notes/pathb-borrowck.md).
+        raise BadIR, 'object drop obligations name a whole local slot' unless off == 0 && part[3].is_a?(IRSym)
+        if @drops.values.any? { |d| d[:root] == root }
+          raise BorrowRefused, 'overlapping drop obligations require hierarchical cleanup contracts'
+        end
+        @drops[id] = {root: root, off: 0, width: @slot_info[root][1], type: ty, required: [], object: true}
+        next
+      end
       desc = @layouts.lookup(ty)
       if %w[struct union array].include?(bh(ty)) && !desc
         raise BorrowRefused, 'aggregate drop obligations require semantic layouts'
@@ -916,7 +928,7 @@ class LocalLifetime
       a = address(p)
       next unless a # ended storage or an expired loan, already diagnosed
       root, off = a
-      raise BorrowRefused, 'store through an aliased destination into drop-obligated storage' if @drops.values.any? { |d| d[:root] == root }
+      raise BorrowRefused, 'store through an aliased destination into drop-obligated storage' if @drops.values.any? { |d| !d[:object] && d[:root] == root }
       if provenance && @regions.values.any? { |r| r[:name] == root }
         raise BorrowRefused, 'store of unknown pointer provenance into argument memory' if provenance.include?('unknown')
         diagnostic('contract-escape', root) if provenance.any? { |q| q != 'external' }
@@ -978,10 +990,17 @@ class LocalLifetime
     end
   end
 
+  # A C++ object (an object obligation) keeps its registration through writes: its constructor and its members'
+  # assignments write it. A write to it once its destructor has run is refused (see access).
+  def object_slot?(root)
+    @drops.values.any? { |d| d[:object] && d[:root] == root }
+  end
+
   # TY, when given, is the type of a typed store: one that covers the whole obligation but is not of its
   # type writes a field of it (a struct of one field), which keeps the value.
   def track_drop_write(root, off, width, state, ty = nil)
     @drops.each do |id, d|
+      next if d[:object]
       next unless d[:root] == root && overlaps(off, width, d[:off], d[:width])
       flags = state[drop_key(id)]
       full = off <= d[:off] && off + width >= d[:off] + d[:width] && (ty.nil? || same_type?(ty, d[:type]))
@@ -993,6 +1012,9 @@ class LocalLifetime
   def track_drop_transfer(root, off, width, ty, moving, state)
     @drops.each do |id, d|
       next unless d[:root] == root && overlaps(off, width, d[:off], d[:width])
+      # A C++ move leaves the source a live object, which is still destroyed: never vacant.
+      raise BorrowRefused, 'value transfers of C++ objects are not ownership moves' if d[:object] && moving
+      next if d[:object]
       exact = off == d[:off] && width == d[:width] && same_type?(ty, d[:type])
       if moving && !exact
         raise BorrowRefused, 'partial or reinterpreted moves of drop-obligated values require cleanup contracts'
@@ -1026,6 +1048,7 @@ class LocalLifetime
     end
     id = x[1].to_s
     d = @drops[id]
+    return object_event(x, id, d, state) if d[:object]
     flags = state[drop_key(id)]
     root, off, width = d[:root], d[:off], d[:width]
     place = project('local:' + root, off)
@@ -1064,6 +1087,49 @@ class LocalLifetime
                      (state[key].map { |s| s == 'initialized' ? 'dropped' : s } + ['dropped']).uniq.sort
                    end
     end
+    state[drop_key(id)] = flags.map { |f| f == 'live' ? 'dropped' : f }.uniq.sort
+    state
+  end
+
+  # The lifetime of a C++ object, an object obligation. (drop-live ID) registers it where its construction starts.
+  # Its storage may hold a destroyed object, which a temporary made again in a loop reuses: pointers to that one are
+  # invalidated as at a scope end. (drop-state ID) follows its destructor call and ends it, as an exclusive access, so a
+  # loan of it still live there conflicts. Its bytes then read as dropped until its storage ends, so a read through any
+  # pointer to it is use-after-drop. A write to them is refused in access: only placement new could make a new object
+  # there. Bytes are not required initialized: a C++ object may hold uninitialized members.
+  def object_event(x, id, d, state)
+    flags = state[drop_key(id)]
+    root, width = d[:root], d[:width]
+    keys = (0...width).map { |i| byte_key(root, i) }
+    if bh(x) == 'drop-live'
+      diagnostic('drop-outside-storage', id) if flags.include?('dead')
+      raise BorrowRefused, 'construction of a C++ object over a live one' if flags.include?('live')
+      if flags.include?('dropped')
+        keys.each { |k| state[k] = state[k].map { |s| s == 'dropped' ? 'uninitialized' : s }.uniq.sort }
+        origins = ['local:' + root]
+        @loans.each do |lid, loan|
+          next unless loan[0] == root
+          record_loan_definition(lid)
+          diagnostic('loan-conflict', root + ' (' + lid + ')') if state['loan:' + lid].include?('active')
+          origins << 'loan:' + lid
+          state['loan:' + lid] = ['ended']
+        end
+        invalidate_pointers(state, origins, 'ended:' + root)
+      end
+      state[drop_key(id)] = flags.map { |f| f == 'dead' ? f : 'live' }.uniq.sort
+      return state
+    end
+    diagnostic('drop-outside-storage', id) if flags.include?('dead')
+    if bh(x) == 'drop-state'
+      raise BorrowRefused, 'destructor of a C++ object not registered on every path' if flags.include?('vacant')
+      diagnostic('double-drop', id) if flags.include?('dropped')
+    end
+    return state unless flags.include?('live')
+    guarded = state.dup
+    keys.each { |k| guarded[k] = state[k].map { |s| s == 'dropped' ? 'initialized' : s }.uniq.sort }
+    access('local:' + root, guarded, false, nil, width)
+    record_memory_loan_values(root, 0, width, state)
+    keys.each { |k| state[k] = flags == ['live'] ? ['dropped'] : (state[k] + ['dropped']).uniq.sort }
     state[drop_key(id)] = flags.map { |f| f == 'live' ? 'dropped' : f }.uniq.sort
     state
   end
@@ -1267,6 +1333,7 @@ class LocalLifetime
     label = off == 0 && width == @slot_info[name][1] ? name : name + '[' + off.to_s + '..' + (off + width).to_s + ']'
     status = (0...width).flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
     diagnostic('use-after-scope', label) if status.include?('dead')
+    refuse_destroyed_write(name) if !read && status.include?('dropped')
     required = semantic_type ? semantic_bytes(name, off, semantic_type) : nil
     if required
       status = required.flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
@@ -1280,6 +1347,12 @@ class LocalLifetime
       diagnostic('loan-conflict', label + ' (' + id + ')') if loan_kind(id, state) == 'exclusive' || !read || borrowing == 'exclusive'
     end
     [name, off, width]
+  end
+
+  # A write into a C++ object after its destructor ran is undefined, unless placement new makes a new object there,
+  # which the checker cannot tell from a store.
+  def refuse_destroyed_write(name)
+    raise BorrowRefused, 'write to a destroyed C++ object (placement new is unsupported)' if object_slot?(name)
   end
 
   # An access at an unknown position of an array: every byte of the range must
@@ -1299,6 +1372,7 @@ class LocalLifetime
     label = lo == 0 && n == @slot_info[name][1] ? name : name + '[' + lo.to_s + '..' + (lo + n).to_s + ']'
     status = (0...n).flat_map { |i| state[byte_key(name, lo + i)] || ['dead'] }.uniq
     diagnostic('use-after-scope', label) if status.include?('dead')
+    refuse_destroyed_write(name) if !read && status.include?('dropped')
     diagnostic('uninitialized', label) if read && status.include?('uninitialized')
     diagnostic('use-after-move', label) if read && status.include?('moved')
     diagnostic('use-after-drop', label) if read && status.include?('dropped')
@@ -1424,9 +1498,11 @@ class LocalLifetime
       a = access(src[0], state, true, moving ? 'exclusive' : nil, n, nil, true)
       return unless a
       root, off, = a
+      # A C++ object is never moved as a Rust value is: its destructor still runs.
+      raise BorrowRefused, 'move of a C++ object' if moving && @drops.values.any? { |d| d[:object] && d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
       if moving
         move_drop_obligations(root, off, n, state)
-      elsif @drops.values.any? { |d| d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
+      elsif @drops.values.any? { |d| !d[:object] && d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
         raise BorrowRefused, 'copy of drop-obligated storage requires a copy contract'
       end
       record_memory_loan_values(root, off, n, state)
@@ -1456,9 +1532,10 @@ class LocalLifetime
     a = access(dst[0], state, false, nil, n)
     return unless a
     root, off, = a
+    raise BorrowRefused, 'move into a C++ object' if moving && @drops.values.any? { |d| d[:object] && d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
     if moving
       track_drop_write(root, off, n, state)
-    elsif @drops.values.any? { |d| d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
+    elsif @drops.values.any? { |d| !d[:object] && d[:root] == root && overlaps(off, n, d[:off], d[:width]) }
       raise BorrowRefused, 'copy into drop-obligated storage requires a copy contract'
     end
     if @regions.values.any? { |r| r[:name] == root }
@@ -1588,8 +1665,10 @@ class LocalLifetime
     end
   end
 
+  # A C++ object is in EDG's region table while it is live, and the unwind runs its destructor: only the other
+  # obligations would need a cleanup contract.
   def refuse_live_drops(state)
-    live = @drops.keys.select { |id| (state[drop_key(id)] || []).include?('live') }
+    live = @drops.keys.select { |id| !@drops[id][:object] && (state[drop_key(id)] || []).include?('live') }
     raise BorrowRefused, 'throwing calls with live drop obligations require cleanup contracts' unless live.empty?
   end
 
@@ -2033,7 +2112,7 @@ class LocalLifetime
       if ranged?(dest[0])
         raise BorrowRefused, 'pointer store through a dynamic index' if !zero && bh(x[1]) == 'ptr'
         root, lo, n, = array_range(base_origin(dest[0]))
-        raise BorrowRefused, 'store through a dynamic index into drop-obligated storage' if @drops.values.any? { |d| d[:root] == root }
+        raise BorrowRefused, 'store through a dynamic index into drop-obligated storage' if @drops.values.any? { |d| !d[:object] && d[:root] == root }
         forget_pointer_values(root, lo, n, state)
         return state
       end
@@ -2073,7 +2152,8 @@ class LocalLifetime
       raise BorrowRefused, 'pointer-valued index' unless value(x[1], state).empty?
       value(x[2], state)
     when 'rref-arg'
-      raise BorrowRefused, 'rvalue-reference arguments require language-specific move contracts'
+      # A C++ rvalue-reference argument is a reference argument like any other: the callee's summary says what it does
+      # to the source, which stays a live object that its destructor still ends. It is not an ownership move.
     else
       raise BorrowRefused, "statement #{bh(x)}"
     end
@@ -2147,6 +2227,12 @@ class LocalLifetime
   # the normal path checks at scope end), and the runtime's longjmp leaves the try's frame on top of the stack.
   def unwind_to(state, frame, slots)
     state = state.dup
+    # A temporary whose storage spans the function (its decl is not in the try body) may be a C++ object the unwind
+    # destroys: the checker cannot tell whether it was made inside the try block.
+    @drops.each do |id, d|
+      next unless d[:object] && @temps[d[:root]] && !slots.include?(d[:root]) && (state[drop_key(id)] || []).include?('live')
+      raise BorrowRefused, 'a live C++ temporary at a throw into a handler of the function'
+    end
     slots.each do |name|
       next unless @slots[name]
       reset_storage(name, state, 'dead', false)

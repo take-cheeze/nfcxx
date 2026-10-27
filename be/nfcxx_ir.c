@@ -999,7 +999,7 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
    Tier 0 of docs/notes/borrowck-plan.md (section 1.3). With the flag unset nothing here prints, and no slot or
    other state is created, so the default output is unchanged. */
 
-static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end) and (rref-arg) facts */
+static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end), (rref-arg) and drop facts */
 
 /* (borrow-layout (struct "N") SIZE ALIGN (field "F" OFF TYPE)...): which bytes of a struct are fields, so a borrow of
    the whole struct does not require its padding initialized (docs/notes/pathb-borrowck.md, "Semantic struct layouts").
@@ -1257,6 +1257,8 @@ static void ir_fact_open(a_variable_ptr var)
 /* A named local used before any declaration of it in the function: the variable of a range-based for, which the
    lowering initializes by an assignment and no stmk_decl declares. It is declared at its first use, and ends with the
    block it is used in, as a block's own locals do. A local whose scope has ended is not declared again. */
+static void ir_obl_live(a_variable_ptr var, const char *op, int d);
+
 static void ir_fact_first_use(a_variable_ptr var, const char *op)
 {
   ir_decl_rec *r;
@@ -1264,6 +1266,7 @@ static void ir_fact_first_use(a_variable_ptr var, const char *op)
   for (r = ir_decl_seen; r != NULL; r = r->prev)
     if (r->var == var) return;
   ir_line(ir_depth, ir_fmt("(decl %s %s)", op, ir_is_ref_type(var->type) ? "ref" : "val"));
+  ir_obl_live(var, op, ir_depth);
   ir_fact_open(var);
 }
 
@@ -1286,6 +1289,89 @@ static int ir_fact_is_open(a_variable_ptr var)
   return 0;
 }
 
+/* C++ objects with a destructor (flag only; docs/notes/pathb-borrowck.md, "C++ destructors"). A local whose
+   complete-object destructor the lowering calls gets (drop-obligation "S" object $"S"), and each such call is followed by
+   (drop-state "S"). The object is registered by (drop-live "S"): a declared local right after its (decl), a temporary
+   right before the complete-object constructor, or the call returning a class through its first parameter, that makes
+   it. Whether a slot gets a destructor call is known only at the end of the function, so the registrations are printed
+   marked, as \005OP\002FACT\002, and ir_tmp_write keeps those of the slots in ir_obl. */
+static char **ir_obl;  /* the slot operands, $"S", of the function's objects that a destructor call ends */
+static int ir_obl_n, ir_obl_cap;
+
+static int ir_obl_has(const char *op)
+{
+  int i;
+  for (i = 0; i < ir_obl_n; i++)
+    if (strcmp(ir_obl[i], op) == 0) return 1;
+  return 0;
+}
+
+static void ir_obl_add(const char *op)
+{
+  if (ir_obl_has(op)) return;
+  if (ir_obl_n == ir_obl_cap) {
+    ir_obl_cap = ir_obl_cap == 0 ? 8 : ir_obl_cap * 2;
+    ir_obl = (char **)realloc(ir_obl, (size_t)ir_obl_cap * sizeof *ir_obl);
+    if (ir_obl == NULL) abort();
+  }
+  ir_obl[ir_obl_n++] = ir_dup(op);
+}
+
+static int ir_is_class_type(a_type_ptr t)
+{
+  a_type_ptr s = t == NULL ? NULL : skip_typerefs(t);
+  return s != NULL && (s->kind == tk_class || s->kind == tk_struct);
+}
+
+/* The registration of local var, marked (see above), when it is an object of class type. */
+static void ir_obl_live(a_variable_ptr var, const char *op, int d)
+{
+  if (ir_is_class_type(var->type) && op[0] == '$') ir_line(d, ir_fmt("\005%s\002(drop-live %s)\002", op, op + 1));
+}
+
+/* The local whose whole object a call's first argument arg addresses (&V, V of the class arg points to), or NULL. */
+static a_variable_ptr ir_obj_arg(an_expr_node_ptr arg)
+{
+  an_expr_node_ptr v;
+  a_type_ptr pt;
+  a_variable_ptr var;
+  if (arg == NULL || arg->kind != enk_operation || arg->variant.operation.kind != eok_address_of) return NULL;
+  v = arg->variant.operation.operands;
+  if (v == NULL || v->kind != enk_variable) return NULL;
+  var = v->variant.variable.ptr;
+  pt = skip_typerefs(arg->type);
+  if (!ir_fact_var(var) || pt->kind != tk_pointer || !ir_is_class_type(var->type)) return NULL;
+  return skip_typerefs(pt->variant.pointer.type) == skip_typerefs(var->type) ? var : NULL;
+}
+
+/* 1 for a call of a complete-object destructor (dtor) or constructor of the class of its first argument. */
+static int ir_is_cdtor_call(an_expr_node_ptr f, int dtor)
+{
+  a_routine_ptr r;
+  if (f == NULL || f->kind != enk_routine) return 0;
+  r = f->variant.routine.ptr;
+  return r->special_kind == (dtor ? sfk_destructor : sfk_constructor) && r->ctor_dtor_kind == cdk_complete;
+}
+
+/* 1 for a call that makes the object its first argument addresses: a complete-object constructor, or a function
+   that returns a class through a first parameter (the lowering's, for a class with a non-trivial destructor). */
+static int ir_makes_first_arg(an_expr_node_ptr f)
+{
+  a_type_ptr ft = ir_callee_fn_type(f);
+  if (ir_is_cdtor_call(f, 0)) return 1;
+  return ft != NULL && ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->value_returned_as_parameter &&
+         !ft->variant.routine.extra_info->return_value_parameter_follows_this;
+}
+
+/* 1 when var was declared (or declared at its first use) in the function: it is registered at its (decl). */
+static int ir_fact_seen(a_variable_ptr var)
+{
+  ir_decl_rec *r;
+  for (r = ir_decl_seen; r != NULL; r = r->prev)
+    if (r->var == var) return 1;
+  return 0;
+}
+
 /* (decl OP KIND) at a declaration point: KIND is ref for a reference, val for an object. */
 static void ir_fact_decl(a_statement_ptr s, int d)
 {
@@ -1293,11 +1379,14 @@ static void ir_fact_decl(a_statement_ptr s, int d)
   if (!ir_borrow) return;
   for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
     a_variable_ptr var;
+    const char *op;
     if (entry->entity.kind != iek_variable) continue;
     var = (a_variable_ptr)entry->entity.ptr;
     if (!ir_fact_var(var)) continue;
     ir_fact_open(var); /* first: naming its slot below is not a use before its declaration */
-    ir_line(d, ir_fmt("(decl %s %s)", ir_var_addr(var, var->type, 0).s, ir_is_ref_type(var->type) ? "ref" : "val"));
+    op = ir_var_addr(var, var->type, 0).s;
+    ir_line(d, ir_fmt("(decl %s %s)", op, ir_is_ref_type(var->type) ? "ref" : "val"));
+    ir_obl_live(var, op, d);
   }
 }
 
@@ -1529,6 +1618,19 @@ static void ir_tmp_write(const char *data, size_t len, FILE *out)
       while (end < eol && data[end] != '\002') end++;
       u = ir_tmp_use_of(ir_fmt("%.*s", (int)(fact - op), data + op));
       if (u->uses == 1) {
+        fputc('\n', out);
+        fwrite(data + i, 1, p - i, out);
+        fwrite(data + fact + 1, 1, end - fact - 1, out);
+      }
+      rest = end + 1;
+    } else if (p < eol && data[p] == '\005') {
+      /* a C++ object's registration: kept when a destructor call ends the object */
+      size_t op = p + 1, fact, end;
+      fact = op;
+      while (fact < eol && data[fact] != '\002') fact++;
+      end = fact + 1;
+      while (end < eol && data[end] != '\002') end++;
+      if (ir_obl_has(ir_fmt("%.*s", (int)(fact - op), data + op))) {
         fputc('\n', out);
         fwrite(data + i, 1, p - i, out);
         fwrite(data + fact + 1, 1, end - fact - 1, out);
@@ -4143,6 +4245,8 @@ static ir_val ir_call(an_expr_node_ptr e)
   char *indirect_fp = NULL;     /* a call through a function pointer: its value (the callee of the indirect call thunk) */
   ir_val sret = ir_mk_void();
   ir_val ldres = ir_mk_void();
+  const char *obj_op = NULL;       /* the first argument, when it is a whole local object of class type (flag only) */
+  a_variable_ptr obj_var = NULL;
   if (f->kind == enk_routine) {
     const char *bsym = ir_builtin_sym(f->variant.routine.ptr->source_corresp.name);
     ir_note(2, enk_routine, 1);
@@ -4217,6 +4321,7 @@ static ir_val ir_call(an_expr_node_ptr e)
     for (arg = ir_operand(e, 1), idx = 0; arg != NULL; arg = arg->next, idx++) {
       ir_val a = ir_rval(arg);
       if (ir_borrow && nrref < 32 && ir_is_rref_type(ir_arg_param_type(f, idx, nargs))) rref[nrref++] = a.s;
+      if (ir_borrow && idx == 0 && !agg_ret && !x87_ret && a.s[0] == '$' && (obj_var = ir_obj_arg(arg)) != NULL) obj_op = a.s;
       if (thunk_sym != NULL && !ir_x87_param(a.t, &ints, &sse, &stack)) shape_ok = 0;
       if (f128w && ir_is_f128(a.t)) { /* a wrapper takes the _Float128 by address */
         args = ir_fmt("%s %s", args, a.s);
@@ -4256,9 +4361,17 @@ static ir_val ir_call(an_expr_node_ptr e)
       callee = ir_fmt("%s (variadic %d)", callee, named);
     }
   }
+  /* A temporary of class type is registered when the call that makes it starts (see ir_obl). */
+  if (obj_op != NULL && !ir_fact_seen(obj_var) && ir_makes_first_arg(f)) {
+    ir_emit(ir_fmt("\005%s\002(drop-live %s)\002", obj_op, obj_op + 1));
+  }
   ir_note(0, eok_call, 1);
   if (ir_is_void(e->type) || agg_ret || x87_ret) {
     ir_emit(ir_fmt("(eval (call void %s%s))", callee, args));
+    if (obj_op != NULL && ir_is_cdtor_call(f, 1)) { /* the destructor has run: the object's lifetime is over */
+      ir_obl_add(obj_op);
+      ir_emit(ir_fmt("(drop-state %s)", obj_op + 1));
+    }
     if (agg_ret) return ir_mk_addr(sret.s, e->type, 0);
     if (x87_ret) return ir_is_aggregate(e->type) ? ir_mk_addr(ldres.s, e->type, 0) : ir_mk_value(ldres.s, e->type);
     return ir_mk_void();
@@ -6295,6 +6408,7 @@ static void ir_function(a_routine_ptr rout)
   ir_labels.n = 0;
   ir_loop_n = 0;
   ir_decl_top = NULL;
+  ir_obl_n = 0;
   ir_cur_scope = scope;
   ir_buf_open(&ir_slot_buf);
 
@@ -6436,8 +6550,15 @@ static void ir_function(a_routine_ptr rout)
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
   ir_startup_markers(rout);
   ir_buf_write(&ir_slot_buf, nf_out);
-  if (ir_borrow) ir_tmp_write(body.data, body.len, nf_out);
-  else ir_buf_write(&body, nf_out);
+  if (ir_borrow) {
+    int i;
+    for (i = 0; i < ir_obl_n; i++) fprintf(nf_out, "\n  (drop-obligation %s object %s)", ir_obl[i] + 1, ir_obl[i]);
+    ir_tmp_write(body.data, body.len, nf_out);
+    for (i = 0; i < ir_obl_n; i++) free(ir_obl[i]);
+    ir_obl_n = 0;
+  } else {
+    ir_buf_write(&body, nf_out);
+  }
   ir_fact_forget();
   fputs(")\n", nf_out);
   ir_buf_end(&ir_out_funcs);
