@@ -3,7 +3,7 @@
 # frozen_string_literal: true
 
 # COLLECT_DIRECT (tools/bc2cpp/codegen_collect_direct.rb): `map`/`collect` on an exact Array calls bc2cpp_ary_collect
-# instead of the compiled Enumerable#collect. NEQ_INTEGER_PAIR and POLY_INTEGER_TAG, which the startup also leans on,
+# instead of the compiled Enumerable#collect. NEQ_OP_EQ and POLY_INTEGER_TAG, which the startup also leans on,
 # have their generated-code checks in array_write_inline_check.rb; this one keeps their behaviour cases.
 #
 #   generated code (needs a host mrbc)
