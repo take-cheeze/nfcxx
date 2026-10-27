@@ -301,7 +301,10 @@ but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
 layouts, dynamic offsets outside local arrays (see [Array indexing](#array-indexing)), out-of-bounds
-constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads and moves remain refused; aggregate copies are described below. Without semantic metadata,
+constant accesses, projections of pointers of unknown provenance, and accesses outside a loan's range. A constant
+offset or a dynamic index from an external pointer is external memory: C++ pointer arithmetic stays inside the
+object it started in, which is not this frame's (no local address is ever stored into external memory), and
+accesses to external memory are not tracked (`index/external_*.ir`). Aggregate value loads and moves remain refused; aggregate copies are described below. Without semantic metadata,
 whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
 widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
@@ -367,8 +370,8 @@ Comparing pointers (`eq`, `ne`, `lt.u`, `le.u`, `gt.u`, `ge.u`) is allowed and y
 `(bounds IDX N)` evaluates its operands. The checker assumes a dynamic index stays inside its
 array: it proves temporal safety, not bounds. Path B's runtime `bounds` checks cover subscripts of
 arrays of known length, but not pointers advanced by other arithmetic. Pointer arithmetic on
-anything other than a local array is refused. That includes arguments, so a callee that indexes its
-pointer argument gets no inferred summary.
+anything other than a local array or external memory is refused. That includes argument regions, so a callee
+that indexes its pointer argument gets no inferred summary.
 
 The underlying model tracks **physical byte initialization**. Without semantic metadata,
 whole-object loans conservatively require all bytes initialized, including padding. Ordinary field
@@ -596,7 +599,12 @@ module is checked against its own summary (see below).
 
 Read effects may have several possible known local targets, all of which are checked. So may mutation,
 as a weak update of each (see "Refusals and limits"). Initialization and consumption require one known
-place. Read/read aliases are allowed; arguments
+place. An argument that points only into external memory (a global, or a pointer parameter of a function
+checked without a summary) is accepted for `read`, `write` and `init`, as a load or store through it would be:
+that memory is not tracked and is not the caller's storage, so it overlaps no local argument, and `noescape`
+keeps argument pointers out of it. A returned alias into it is external memory. Under a verified summary it is
+`contract-not-closed`. `consume` and an argument that may be external or local are still refused
+(`calls/external_*.ir`). Read/read aliases are allowed; arguments
 whose ranges overlap and include mutation are refused before applying postconditions. Summaries do
 not prescribe ordering inside a callee, so an initializer cannot silently make a same-call reader
 safe. More permissive alias/ordering contracts remain future work.
@@ -850,6 +858,32 @@ still holds the alias reports `loan-conflict`.
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
 error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics identify functions and
 slots, and name the source line of the statement when the IR has `loc` statements.
+
+With `--emitted-only` the checker analyzes only the functions the QBE emitter keeps (its `prune`): external
+definitions, `(constructor)`/`(destructor)` functions and alias targets, and whatever they refer to by `&` or
+`@`, transitively, including through global initializers. A `(weak)` (inline, template) or `(static)` definition
+nothing reaches is not emitted, so the checked code is the emitted code: another translation unit that needs a
+weak definition has its own copy, checked with that unit. The many unused library instantiations of a hosted
+C++ unit then no longer refuse it (`tests/pathb-borrow/emitted`). It is opt-in because a source language may
+require more: Rust rejects a borrow error in a function nothing calls, and the Rust translator marks every
+function `(weak)`.
+
+`scripts/pathb-borrowck-tally.sh` lowers a corpus (by default the C++ programs under `tests/`) and counts the
+verdicts and first refusal messages in four modes: plain, with `--infer-loan-ends --infer-summaries`, with the
+runtime and libc effects files too, and with `--emitted-only` on top. On 139 lowered programs, before and
+after accepting external projections and external call arguments (and adding `--emitted-only`):
+
+| mode | accepted | errors | refused |
+| --- | --- | --- | --- |
+| plain | 35 → 38 | 11 → 11 | 93 → 90 |
+| inferred | 70 → 72 | 13 → 13 | 56 → 54 |
+| inferred, effects files | 74 → 76 | 13 → 13 | 52 → 50 |
+| inferred, effects files, `--emitted-only` | — → 78 | — → 13 | — → 48 |
+
+Every error stayed the same error. Counted with each function checked on its own, refused functions in the
+inferred mode fell from 8416 to 6152, and to 759 among emitted functions. The leading program refusal is still
+a call without a contract: mostly a module function that gets no summary, because a parameter points to a
+struct with no layout record (`std::string`, `void *`), it touches globals, or its body is refused.
 
 `(set %N OPERAND)`, which lowers `?:`, `&&` and `||`, reassigns a register. A pointer register
 assigned on each branch carries the union of their provenance. `(null PTR)` has no provenance, so
