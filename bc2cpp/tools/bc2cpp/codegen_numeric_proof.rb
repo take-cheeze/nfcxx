@@ -302,7 +302,7 @@ class CodeGen
     # Integer rhs is a bare literal; String rhs is either a register ref ("rN") or literal text.
     register = rhs.is_a?(String) && rhs.start_with?('r')
     "{ mrb_int bc2cpp_z; " \
-      "if (#{overflow}(mrb_fixnum(r#{dest}), #{register ? "mrb_fixnum(#{rhs})" : rhs}, &bc2cpp_z) || !FIXABLE(bc2cpp_z)) " \
+      "if (#{BranchHints.unlikely("#{overflow}(mrb_fixnum(r#{dest}), #{register ? "mrb_fixnum(#{rhs})" : rhs}, &bc2cpp_z) || !FIXABLE(bc2cpp_z)")}) " \
       "{ r#{dest} = #{helper}(M, r#{dest}, #{register ? rhs : "mrb_fixnum_value(#{rhs})"}); } " \
       "else { r#{dest} = mrb_fixnum_value(bc2cpp_z); } }"
   end

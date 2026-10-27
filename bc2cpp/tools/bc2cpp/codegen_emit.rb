@@ -665,7 +665,7 @@ class CodeGen
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int len = ARY_LEN(a);
         if (n < 0) n += len;
-        if (n < 0 || len <= n) return mrb_nil_value();
+        if (#{BranchHints.unlikely('n < 0 || len <= n')}) return mrb_nil_value();
         return ARY_PTR(a)[n];
       }
 
@@ -681,7 +681,7 @@ class CodeGen
     'bc2cpp_ary_push' => <<~CPP,
       static inline void bc2cpp_ary_push(mrb_state* M, mrb_value ary, mrb_value elem) {
         struct RArray* a = mrb_ary_ptr(ary);
-        if (!ARY_EMBED_P(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a) && a->as.heap.len < a->as.heap.aux.capa) {
+        if (mrb_likely(!ARY_EMBED_P(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a) && a->as.heap.len < a->as.heap.aux.capa)) {
           a->as.heap.ptr[a->as.heap.len++] = elem;
           mrb_field_write_barrier_value(M, (struct RBasic*)a, elem);
           return;
@@ -694,7 +694,7 @@ class CodeGen
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int len = ARY_LEN(a);
         mrb_int at = n < 0 ? n + len : n;
-        if (at >= 0 && at < len && !ARY_SHARED_P(a) && !mrb_frozen_p(a)) {
+        if (mrb_likely(at >= 0 && at < len && !ARY_SHARED_P(a) && !mrb_frozen_p(a))) {
           ARY_PTR(a)[at] = val;
           mrb_field_write_barrier_value(M, (struct RBasic*)a, val);
           return;
@@ -708,8 +708,8 @@ class CodeGen
       static inline void bc2cpp_ary_splice(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len, mrb_value rpl) {
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int alen = ARY_LEN(a);
-        if (head >= 0 && len >= 0 && head < alen && len <= alen - head && !ARY_SHARED_P(a) && !mrb_frozen_p(a) &&
-            mrb_array_p(rpl) && RARRAY_LEN(rpl) == len && RARRAY_PTR(rpl) != ARY_PTR(a)) {
+        if (mrb_likely(head >= 0 && len >= 0 && head < alen && len <= alen - head && !ARY_SHARED_P(a) && !mrb_frozen_p(a) &&
+            mrb_array_p(rpl) && RARRAY_LEN(rpl) == len && RARRAY_PTR(rpl) != ARY_PTR(a))) {
           mrb_value* dst = ARY_PTR(a) + head;
           const mrb_value* src = RARRAY_PTR(rpl);
           for (mrb_int i = 0; i < len; i++) dst[i] = src[i];
@@ -725,7 +725,7 @@ class CodeGen
   def emit_ary_write_helpers(compiled)
     index = emit_index_helpers(compiled)
     ARY_WRITE_HELPERS.filter_map do |name, text|
-      "#{text}\n" if compiled.any? { |m| m[:code].include?("#{name}(") } || index.include?("#{name}(")
+      "#{BranchHints.text(text)}\n" if compiled.any? { |m| m[:code].include?("#{name}(") } || index.include?("#{name}(")
     end.join
   end
 
