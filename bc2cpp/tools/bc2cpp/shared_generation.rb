@@ -36,16 +36,37 @@ module SharedGeneration
       attr_accessor :armed
     end
 
-    %i[[] fetch key? has_key? include? member? assoc values_at slice to_h to_hash each each_pair select filter reject
+    def self.refuse(name, touched)
+      raise Error, "bc2cpp: SHARED_GENERATION: #{touched.join(', ')} read through ENV.#{name} before the per-unit " \
+                   'fork; the shared analysis would not be the per-unit one'
+    end
+
+    # The one-name reads are the analysis's hot path (a switch per send or per flow run, all while armed): they test
+    # their String arguments directly, without the generic form's per-call splat, flat_map and set intersection.
+    def [](name)
+      EnvGuard.refuse(:[], [name]) if EnvGuard.armed && UNIT_KEYS.include?(name)
+      super
+    end
+
+    def key?(name)
+      EnvGuard.refuse(:key?, [name]) if EnvGuard.armed && UNIT_KEYS.include?(name)
+      super
+    end
+
+    def fetch(*args, &block)
+      if EnvGuard.armed && args.any? { |arg| UNIT_KEYS.include?(arg) }
+        EnvGuard.refuse(:fetch, args.grep(String) & UNIT_KEYS)
+      end
+      super
+    end
+
+    %i[has_key? include? member? assoc values_at slice to_h to_hash each each_pair select filter reject
        filter_map map keys values].each do |name|
       define_method(name) do |*args, **opts, &block|
         if EnvGuard.armed
           touched = args.flat_map { |arg| Array(arg) }.grep(String) & UNIT_KEYS
           touched = UNIT_KEYS if touched.empty? && args.empty?
-          unless touched.empty?
-            raise Error, "bc2cpp: SHARED_GENERATION: #{touched.join(', ')} read through ENV.#{name} before the per-unit " \
-                         'fork; the shared analysis would not be the per-unit one'
-          end
+          EnvGuard.refuse(name, touched) unless touched.empty?
         end
         super(*args, **opts, &block)
       end
