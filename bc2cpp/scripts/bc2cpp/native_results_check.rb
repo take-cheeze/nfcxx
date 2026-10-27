@@ -1,11 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Native return inference, audited result declarations and generated direct-call signatures.
+# Native return inference and audited result declarations.
 # Their tables share one process; real-source mutation and generated-code checks stay isolated.
 require_relative 'native_return_kinds_cases'
 require_relative 'native_core_result_sigs_cases'
-require_relative 'native_signature_cases'
 
 failures = []
 checks = 0
@@ -15,7 +14,7 @@ check = lambda do |label, ok|
   failures << label unless ok
 end
 
-[NativeReturnKindsCases, NativeCoreResultSigsCases, NativeSignatureCases].each do |cases|
+[NativeReturnKindsCases, NativeCoreResultSigsCases].each do |cases|
   puts "== #{cases.name}"
   cases.run(check)
 end

@@ -1,19 +1,20 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Writes the trace candidates that sig/bc2cpp/declarations.rbs does not already declare to generated/bc2cpp/
-# trace_proposals.rbs, a file nothing loads. Conflicts (a method declared with another signature) are listed and left
+# Writes the trace candidates that sig/bc2cpp/declarations.rbs does not already declare to build/trace_proposals.rbs
+# (git-ignored), a file nothing loads. Conflicts (a method declared with another signature) are listed and left
 # alone. See tools/bc2cpp/trace_merge.rb.
 #
 #   ruby scripts/bc2cpp/trace_merge.rb CANDIDATES.rbs [DECLARATIONS] [--out FILE]
 #
 # Refuses an output under sig/: rbs_signatures.rb loads every sig/**/*.rbs.
 
+require 'fileutils'
 require 'optparse'
 require_relative '../../tools/bc2cpp/trace_merge'
 
 ROOT = File.expand_path('../..', __dir__)
-out = File.join(ROOT, 'generated/bc2cpp/trace_proposals.rbs')
+out = File.join(ROOT, 'build/trace_proposals.rbs')
 parser = OptionParser.new do |opts|
   opts.banner = 'usage: trace_merge.rb CANDIDATES.rbs [DECLARATIONS] [--out FILE]'
   opts.on('--out FILE', 'Write the proposals to FILE (not under sig/)') { |f| out = File.expand_path(f) }
@@ -24,6 +25,7 @@ abort 'trace_merge: the output must not be under sig/ (it would be loaded)' if o
 
 declarations = File.expand_path(ARGV[1] || File.join(ROOT, 'sig/bc2cpp/declarations.rbs'))
 result = TraceMerge.compare(File.read(ARGV[0]), File.read(declarations))
+FileUtils.mkdir_p(File.dirname(out))
 File.write(out, TraceMerge.render(result.proposed))
 puts "trace merge: #{result.proposed.size} proposed, #{result.same.size} already declared, " \
      "#{result.conflicts.size} conflicting (kept as declared), #{result.skipped_interfaces} interfaces not read"
