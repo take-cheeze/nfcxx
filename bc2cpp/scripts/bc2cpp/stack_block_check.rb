@@ -151,7 +151,9 @@ else
     CPP
     built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, %w[SbFx SbColl], body, build: build, full: true)
     check.call('the fixtures build and run', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
+    # The two VMs need not lay their heaps out alike (bc2cpp_set_instance_tts may walk it), so `#<SbColl:0x...>`
+    # is compared without its address.
+    sections = Bc2cppFixtureRuntime.sections(output).transform_values { |lines| lines.map { |l| l.gsub(/:0x\h+>/, '>') } }
     interpreted = sections['interpreted']
     compiled = sections['compiled']
     check.call("the driver prints #{interpreted&.size} lines in both runs",
