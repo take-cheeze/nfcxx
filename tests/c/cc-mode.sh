@@ -543,6 +543,30 @@ EOC
        NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvol.c -o kvol 2>/dev/null && { ./kvol; [ $? = 42 ]; }; then
       ok "kernel mode: volatile accesses kept"
     else bad "kernel mode: volatile accesses kept" "$(grep -c nfcxx_v kvol.s 2>/dev/null) helper calls"; fi
+    # constants through locals whose address is not taken (cproc funcsccp): a condition they decide folds, and a static
+    # function called with an argument that is then constant goes to a clone where what the constant rules out is gone
+    # (the kernel's fpu/signal.c); never_defined is not defined, so the link fails if a call of it is left. A value a
+    # loop changes is not taken for a constant.
+    cat > ksccp.c <<'EOC'
+void never_defined(void);
+static int helper(int buf, _Bool ia32) { if (!ia32) return buf + 1; never_defined(); return 0; }
+static int calc(int buf, int frame) { _Bool fx = 0; frame &= 0; if (frame) fx = 1; return helper(buf, fx); }
+static int loopsum(int n) { int s = 0, k = 3; for (int i = 0; i < n; ++i) { s += k; if (i == 2) k = 4; } return s; }
+int main(void)
+{
+	volatile int n = 5, b = 40, fr = 1;
+	_Bool fx = n != b;
+	fx &= 0;
+	if (fx || 0)
+		never_defined();
+	if (loopsum(n) != 17)
+		return 1;
+	return calc(b, fr) + 1 == 42 ? 42 : 2;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" ksccp.c -o ksccp 2>/dev/null && { ./ksccp; [ $? = 42 ]; } &&
+       ! nm ksccp | grep -q ' helper$'; then ok "kernel mode: constants through locals fold conditions and calls"
+    else bad "kernel mode: constants through locals fold conditions and calls" "wrong result or the link failed"; fi
     # __builtin_*_overflow lowered by cproc itself (no qbe-prep.rb in kernel mode): every type mix, against gcc's hash
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtins_overflow_matrix.c" -o kov 2>/dev/null && { ./kov; [ $? = 42 ]; }; then
       ok "kernel mode: overflow built-ins match gcc for every type mix"
@@ -574,21 +598,25 @@ EOC
     # an always_inline helper of __init code only goes to .init.text with it (gcc inlines it there); one that code in
     # two init sections calls goes to .ref.text (lasting code allowed to call init code, where __ref code calling it
     # has gcc's copy too), which gcc's object does not have; one that lasting code calls behind a condition gcc folds
-    # through a local stays in .text and would be lasting code calling __init code, which gcc's inlined copies are not
-    # and the kernel's modpost refuses: that file stays on gcc
+    # through a local whose address is taken stays in .text and would be lasting code calling __init code, which gcc's
+    # inlined copies are not and the kernel's modpost refuses: that file stays on gcc. Behind a condition on a local
+    # whose address is not taken, cproc folds it too (qbe.c funcsccp), and the call is gone as in gcc's object
     printf 'void *alloc_try(long) __attribute__((section(".init.text")));\nstatic inline __attribute__((always_inline)) void *alloc(long n) { return alloc_try(n); }\n__attribute__((section(".init.text"))) void *boot(void) { return alloc(4); }\nstatic __attribute__((section(".init.text"))) int unused_init(void) { return 1; }\n' > kinit.c
     sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/__attribute__((section(".meminit.text"))) void *later(void) { return alloc(8); }/' kinit.c > kinit2.c
-    sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/void later(void) { int x = 0; x \&= 1; if (x) alloc(8); }/' kinit.c > kinit3.c
+    sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/void later(void) { int x = 0, *p = \&x; *p \&= 1; if (x) alloc(8); }/' kinit.c > kinit3.c
+    sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/void later(void) { int x = 0; x \&= 1; if (x) alloc(8); }/' kinit.c > kinit4.c
     rm -f qbe.log
-    for f in kinit kinit2 kinit3; do
+    for f in kinit kinit2 kinit3 kinit4; do
       NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c $f.c -o $f.o
     done
     if grep -q '^qbe kinit.c$' qbe.log && grep -q '^qbe kinit2.c$' qbe.log && objdump -t kinit2.o | grep -q '\.ref\.text.* alloc$' &&
-       grep -q '^gcc kinit3.c: lasting code references init code' qbe.log && ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text or .ref.text, lasting callers of init code stay on gcc"
+       grep -q '^gcc kinit3.c: lasting code references init code' qbe.log && grep -q '^qbe kinit4.c$' qbe.log &&
+       ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text or .ref.text, lasting callers of init code stay on gcc"
     else bad "qbe-try: init-only helpers go to .init.text or .ref.text, lasting callers of init code stay on gcc" "$(tr '\n' '|' < qbe.log)"; fi
-    # a call gcc's object does not make (gcc folds the inlined branch away) keeps the gcc object; objdump gives an
-    # undefined symbol no binding flag, which an earlier qbe-try missed
-    printf 'void bad(void);\nstatic inline void g(int x) { if (x > 100) bad(); }\nint f(void) { g(5); return 0; }\n' > kneed.c
+    # a call gcc's object does not make (gcc folds the inlined branch away, through a local whose address is taken,
+    # which cproc does not follow) keeps the gcc object; objdump gives an undefined symbol no binding flag, which an
+    # earlier qbe-try missed
+    printf 'void bad(void);\nstatic inline void g(int *x) { if (*x > 100) bad(); }\nint f(void) { int v = 5; g(&v); return 0; }\n' > kneed.c
     rm -f qbe.log
     NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kneed.c -o kneed.o
     if grep -q '^gcc kneed.c: qbe object needs more symbols: U bad' qbe.log; then ok "qbe-try: an extra undefined symbol keeps the gcc object"
@@ -621,12 +649,29 @@ EOC
     if grep -q '^qbe kmiss.c$' qbem-.altinstructions.log && grep -q '^gcc kmiss.c: sections differ: < .initcall6.init' qbem-.initcall6.init.log
     then ok "qbe-try: missing alternatives are taken, a missing initcall is not"
     else bad "qbe-try: missing alternatives are taken, a missing initcall is not" "$(cat qbem-*.log | tr '\n' '|')"; fi
-    # code in .head.text (the kernel's __head, identity-mapped early boot code) stays on gcc
-    printf 'int __attribute__((section(".head.text"))) early(int x) { return x + 1; }\n' > khead.c
+    # code in .head.text (the kernel's __head, identity-mapped early boot code) goes to qbe with gcc's kernel-model
+    # addressing (qbe -A): an address is an absolute immediate, a load or store of a global is rip-relative, and an asm
+    # memory operand of an object passed by address to a static inline helper names the object rip-relative, in a clone
+    # of the helper and a thunk in .head.text (cproc funcclone), as in gcc's inlined copy
+    cat > khead.c <<'EOC'
+struct dp { unsigned short size; unsigned long address; } __attribute__((packed));
+static struct dp descr __attribute__((section(".init.data")));
+static char table[16];
+static inline void load(const struct dp *p) { __asm__ volatile("lgdt %0" : : "m"(*p)); }
+unsigned long __attribute__((section(".head.text"))) early(unsigned long phys)
+{
+	descr.address = (unsigned long)table - phys;
+	load(&descr);
+	return descr.address;
+}
+EOC
     rm -f qbe.log
-    NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c khead.c -o khead.o
-    if grep -q '^gcc khead.c: code in .head.text' qbe.log; then ok "qbe-try: .head.text stays on gcc"
-    else bad "qbe-try: .head.text stays on gcc" "$(tr '\n' '|' < qbe.log)"; fi
+    NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -mcmodel=kernel -c khead.c -o khead.o
+    if grep -q '^qbe khead.c$' qbe.log && objdump -dr --section=.head.text khead.o > khead.d &&
+       grep -A1 'mov *\$0x0,%rax' khead.d | grep -q 'R_X86_64_32S.*\.bss' && grep -q 'mov *%rax,0x0(%rip)' khead.d &&
+       grep -q 'lgdt *0x0(%rip)' khead.d &&
+       ! objdump -dr --section=.text khead.o | grep -q lgdt; then ok "qbe-try: .head.text goes to qbe with gcc's kernel-model addressing"
+    else bad "qbe-try: .head.text goes to qbe with gcc's kernel-model addressing" "$(tr '\n' '|' < qbe.log) $(grep -c lgdt khead.d 2>/dev/null)"; fi
     # with the init symbols of a gcc-built kernel (NFCXX_QBE_INITSYMS), an undefined symbol not among them is not init
     rm -f qbe.log; printf 'memblock_alloc_try_nid\n' > initsyms.txt
     NFCXX_QBE_INITSYMS=$PWD/initsyms.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log \

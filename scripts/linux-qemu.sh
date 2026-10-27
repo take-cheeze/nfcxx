@@ -63,7 +63,9 @@ if [ -n "${QBE_TRY:-}" ]; then
     export NFCXX_QBE_KSYMS=$dir/kernel-syms.txt
     break
   done
-  rm -rf "$out"   # every object must go through qbe-try, so nothing is reused from an earlier build
+  # every object must go through qbe-try, so nothing is reused from an earlier build; KEEP_OUT=1 (development only) keeps
+  # the output tree, so only the files whose sources or flags changed are compiled again -- never for a verification run
+  [ -n "${KEEP_OUT:-}" ] || rm -rf "$out"
 fi
 kmake() { make -C "$src" O="$out" ARCH=x86_64 CC="$cc" "$@"; }
 mkdir -p "$out"

@@ -57,7 +57,9 @@ With `NFCXX_QBE_TRY="PATTERN ..."` on the gcc backend, nfcc hands each compile t
    `.exit.*`, `.meminit.*`, `.ref.*`, `.head.text`) to init code or to an undefined symbol that gcc's object makes only
    from init code (the kernel's modpost refuses lasting code that calls `__init` code; gcc's inlined `always_inline`
    helpers make none, cproc's out-of-line copies can). An object with `.head.text` (the kernel's `__head` code,
-   which runs identity-mapped and depends on how gcc addresses symbols) always stays. Otherwise the gcc object stays. Either way one line goes
+   which runs identity-mapped, before the kernel's page tables) is compiled with QBE's `-A` (`NFCXX_QBE_ABS=1`):
+   an address is an absolute 32-bit immediate and a load or store of a global is rip-relative, gcc's kernel model,
+   which `fixup_pointer()` expects. Otherwise the gcc object stays. Either way one line goes
    to `NFCXX_QBE_LOG`: `qbe SRC`, or `gcc SRC: reason` (the first error, or what differed).
 
 The kernel then has to boot. The log is the migration's to-do list: sorted by reason, it says which missing feature
@@ -95,9 +97,9 @@ is not an error, and that function's asm thunks are dropped with it (docs/notes/
 
 ### Status (tinyconfig, Linux 6.8)
 
-615 C files are tried; 613 of them are in the kernel from the qbe backend, and it boots and runs the init script's
-checks (processes, pipes, files, signals). The migration went 3, 8, 19, 42, 47, 87, 252, 403, 541, 571, 589, 593, 600,
-613 over the
+615 C files are tried; all 615 are in the kernel from the qbe backend, and it boots and runs the init script's
+checks (processes, pipes, files, signals): no C file of the kernel is gcc's. The migration went 3, 8, 19, 42, 47, 87,
+252, 403, 541, 571, 589, 593, 600, 613, 615 over the
 runs that took the blockers below away, largest first; the ones that mattered beyond compiling were:
 
 - `asm goto`, constant-argument clones of `always_inline` functions (`_static_cpu_has`'s `"i"(1 << (bit & 7))`),
@@ -118,14 +120,13 @@ runs that took the blockers below away, largest first; the ones that mattered be
   of which 13 need the asm thunks;
 - two kernels that linked and did not run, found by `scripts/linux-qemu-bisect.sh`: `put_user`'s pointer
   truncated by an `asm` input tied to a narrower output (`/init` failed with EFAULT), and `head64.c`'s
-  `.head.text`, which runs before the kernel's mapping and now always stays on gcc.
-
-What keeps the other 2 on gcc, by the number of files whose first error or difference it is:
-
-| files | reason |
-| ----: | ------ |
-|   1 | `fpu/signal.c`: the qbe object calls `convert_to_fxsr`, which this configuration does not have, behind a constant gcc carries into the static `__fpu_restore_sig()` by inlining it (`ia32_fxstate`); QBE folds within a function only |
-|   1 | `.head.text` |
+  `.head.text`, which runs before the kernel's mapping: QBE's GOT loads became absolute addresses there;
+- the last two: `head64.c` with QBE's `-A` (gcc's kernel-model addressing) and cproc's address clones (its
+  `native_load_gdt(&startup_gdt_descr)` loads the GDT rip-relative, as gcc's inlined copy does, not through an
+  absolute pointer the identity mapping does not cover), and `fpu/signal.c` with cproc's constant propagation
+  through locals and clones for the constant arguments it finds (`ia32_fxstate`, cleared with
+  `&= IS_ENABLED(CONFIG_IA32_EMULATION)` and false at `__fpu_restore_sig()`'s one call), which take the calls of
+  `convert_from_fxsr` and `convert_to_fxsr`, not in this configuration, away (docs/notes/cproc-nfcxx.md).
 
 The real-mode files are built with `-mpreferred-stack-boundary=2`, which keeps 4-byte stack alignment; QBE's i386 target
 does not realign the stack, so a local with a larger alignment is only aligned when the caller keeps 16 bytes. The boot
