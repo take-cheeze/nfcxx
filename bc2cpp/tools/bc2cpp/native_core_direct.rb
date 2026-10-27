@@ -87,6 +87,47 @@ module NativeCoreDirect
               checks: [['mrb_obj_itself', 'return self;', :exact, 'object.c']]),
   ].freeze
 
+  ARY_ROTATE_BANG = <<~C
+    mrb_int count=1;
+    mrb_get_args(mrb, "|i", &count);
+    struct RArray *a = mrb_ary_ptr(self);
+    mrb_int len = ARY_LEN(a);
+    mrb_int idx;
+    mrb_ary_modify(mrb, a);
+    mrb_value *p = ARY_PTR(a);
+    if (len == 0 || count == 0) return self;
+    if (count == 1) {
+      mrb_value v = p[0];
+      for (mrb_int i=1; i<len; i++) {
+        p[i-1] = p[i];
+      }
+      p[len-1] = v;
+      return self;
+    }
+    if (count < 0) {
+      idx = len - (~count % len) - 1;
+    }
+    else {
+      idx = count % len;
+    }
+    rev(p, 0, len);
+    rev(p, 0, len-idx);
+    rev(p, len-idx, len);
+    return self;
+  C
+
+  ARY_REV = <<~C
+    static void
+    rev(mrb_value *p, mrb_int beg, mrb_int end)
+    {
+      for (mrb_int i=beg,j=end-1; i<j; i++,j--) {
+        mrb_value v = p[i];
+        p[i] = p[j];
+        p[j] = v;
+      }
+    }
+  C
+
   HAND_ENTRIES = [
     Entry.new(name: 'join', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_OPT(1)',
               expression: 'mrb_ary_join(M, recv, mrb_nil_value())',
@@ -153,6 +194,16 @@ module NativeCoreDirect
                 ARY_SET_LEN(RARRAY(self), j);
                 return self;
               C
+    # ary_rotate_bang and rev are static, so the call is a mirror in emit_native_core_helpers; "|i" on a fixnum (the
+    # Integer guard) is mrb_integer, and the public mrb_ary_modify adds only a write barrier to the static ary_modify.
+    Entry.new(name: 'rotate!', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_OPT(1)',
+              expression: 'bc2cpp_ary_rotate_bang(M, recv, 1)', helper: 'bc2cpp_ary_rotate_bang',
+              apis: [%w[mruby/array.h mrb_ary_modify]],
+              checks: [['ary_rotate_bang', ARY_ROTATE_BANG, :exact], ['rev', ARY_REV, :source]]),
+    Entry.new(name: 'rotate!', owner: 'Array', arity: 1, arg: :integer, aspec: 'MRB_ARGS_OPT(1)',
+              expression: 'bc2cpp_ary_rotate_bang(M, recv, mrb_integer(ARG0))', helper: 'bc2cpp_ary_rotate_bang',
+              apis: [%w[mruby/array.h mrb_ary_modify]],
+              checks: [['ary_rotate_bang', ARY_ROTATE_BANG, :exact], ['rev', ARY_REV, :source]]),
     Entry.new(name: 'index', owner: 'Array', arity: 1, arg: :none, aspec: 'MRB_ARGS_OPT(1)',
               expression: 'bc2cpp_ary_index(M, recv, ARG0)', helper: 'bc2cpp_ary_index',
               apis: [],
@@ -999,6 +1050,41 @@ module NativeCoreDirect
           if (!mrb_nil_p(RARRAY_PTR(self)[i])) mrb_ary_push(M, ary, RARRAY_PTR(self)[i]);
         }
         return ary;
+      }
+    CPP
+    'bc2cpp_ary_rotate_bang' => <<~CPP,
+      static inline void bc2cpp_ary_rev(mrb_value *p, mrb_int beg, mrb_int end) {
+        for (mrb_int i = beg, j = end - 1; i < j; i++, j--) {
+          mrb_value v = p[i];
+          p[i] = p[j];
+          p[j] = v;
+        }
+      }
+      static inline mrb_value bc2cpp_ary_rotate_bang(mrb_state* M, mrb_value self, mrb_int count) {
+        struct RArray *a = mrb_ary_ptr(self);
+        mrb_int len = ARY_LEN(a);
+        mrb_int idx;
+        mrb_ary_modify(M, a);
+        mrb_value *p = ARY_PTR(a);
+        if (len == 0 || count == 0) return self;
+        if (count == 1) {
+          mrb_value v = p[0];
+          for (mrb_int i = 1; i < len; i++) {
+            p[i-1] = p[i];
+          }
+          p[len-1] = v;
+          return self;
+        }
+        if (count < 0) {
+          idx = len - (~count % len) - 1;
+        }
+        else {
+          idx = count % len;
+        }
+        bc2cpp_ary_rev(p, 0, len);
+        bc2cpp_ary_rev(p, 0, len-idx);
+        bc2cpp_ary_rev(p, len-idx, len);
+        return self;
       }
     CPP
     'bc2cpp_ary_index' => <<~CPP,

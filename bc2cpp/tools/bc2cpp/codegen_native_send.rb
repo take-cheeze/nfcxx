@@ -227,7 +227,8 @@ class CodeGen
       return "#{neq}  #{generic}\n" unless integer_eq_native?
 
       # NEQ_INTEGER_PAIR: see integer_eq_native?.
-      "#{neq}  if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
+      "#{neq}  // NEQ_INTEGER_PAIR -- two Integers compare by value, with no Integer#== send\n" \
+        "  if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
         "    r#{d} = mrb_bool_value(mrb_integer(#{recv}) != mrb_integer(#{arg}));\n" \
         "  } else {\n    #{generic}\n  }\n"
     else

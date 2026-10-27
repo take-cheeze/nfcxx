@@ -31,7 +31,7 @@ class CodeGen
     return nil unless exact_core_arm_class(irep, idx, reg, self_implicit) == 'Array'
 
     "  // ARRAY_PUSH :#{name} -- receiver proven exactly Array (class flow, ADR 0309); no class test, no dispatch\n" \
-      "  mrb_ary_push(M, #{recv}, #{value});\n" \
+      "  bc2cpp_ary_push(M, #{recv}, #{value});\n" \
       "  r#{dest} = #{recv};\n"
   end
 end
