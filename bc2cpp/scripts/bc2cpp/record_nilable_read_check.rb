@@ -140,20 +140,20 @@ check.call('a stored object read flows through an ivar pool to its exact non-nil
            on['ObjectScene#active_value'].to_s.include?('NILABLE_RECEIVER :value') &&
              !objects_off['ObjectScene#active_value'].to_s.include?('NILABLE_RECEIVER :value'))
 check.call('a truthiness check narrows a stored object to its exact class',
-           on['ObjectScene#guarded_value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS) :value/) &&
-             !objects_off['ObjectScene#guarded_value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS) :value/))
+           on['ObjectScene#guarded_value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS|EXACT_TYPED) :value/) &&
+             !objects_off['ObjectScene#guarded_value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS|EXACT_TYPED) :value/))
 
 check.call('an escaped object record yields no exact object read proof',
-           !on['ObjectLeak#value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS) :value/))
+           !on['ObjectLeak#value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS|EXACT_TYPED) :value/))
 check.call('an unproven object factory is not treated as a constructor proof',
-           !on['ObjectUnknown#value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS) :value/))
+           !on['ObjectUnknown#value'].to_s.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS|EXACT_TYPED) :value/))
 
 Dir.mktmpdir('record-object-constructor') do |dir|
   replaced, = Bc2cppFixtureRuntime.generate(SOURCE + "class Item; def self.new; 'replacement'; end; end", dir,
                                            only_owners: %w[Scene Leaky Item ObjectScene ObjectLeak ObjectUnknown Item.singleton])
   body = replaced[/^mrb_value ObjectScene_guarded_value_impl[^\n]*\n.*?^\}/m].to_s
   check.call('a replaced constructor withdraws the stored Item class proof',
-             !body.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS) :value/))
+             !body.match?(/(?:MONO_EXACT_FLOW|CLOSED_WORLD_EXACT_CLASS|EXACT_TYPED) :value/))
 end
 
 unless ENV['CC_GENERATED_ONLY'] == '1'

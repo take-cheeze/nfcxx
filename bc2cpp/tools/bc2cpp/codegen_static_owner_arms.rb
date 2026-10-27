@@ -92,6 +92,8 @@ module StaticOwnerArms
     ind = m[:indent]
     note = arms.map(&:first).join(', ')
     @call_block_expr = m[:blk] == NO_BLOCK ? nil : m[:blk]
+    # The lazy heap block of emit_block_fallback_glue sits next to its frame-local one (stack_block_glue).
+    @call_block_stack_expr = (heap = m[:blk][/\Abc2cpp_blk_heap_(\d+)\(\)\z/, 1]) && "bc2cpp_blk_stack_#{heap}.value()"
     branches = arms.map do |klass, t|
       impl = "#{cpp_name(t.owner, t.name)}_impl"
       call_argv, = direct_call_args(t, argv, impl)
