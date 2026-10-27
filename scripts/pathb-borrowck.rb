@@ -405,7 +405,7 @@ class LocalLifetime
         @declared[x[1].name] = true if x[1].is_a?(IRSym) && x[1].sig == '$'
       end
       if bh(x) == 'borrow'
-        raise BadIR, 'borrow form' unless x.length == 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
+        raise BadIR, 'borrow form' unless x.length == 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && %w[shared exclusive two-phase].include?(x[3])
         id = bname(x[2])
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
         place = direct_place(x[4])
@@ -638,7 +638,7 @@ class LocalLifetime
       next if base_origin(p).start_with?('expired:') || base_origin(p).start_with?('ended:')
       root, off, own = address(p)
       exact = root == region && off == a[:offset] && own &&
-              (a[:kind] == 'shared' || ([own] + @ancestors[own]).all? { |id| @loans[id][1] == 'exclusive' })
+              (a[:kind] == 'shared' || ([own] + @ancestors[own]).all? { |id| @loans[id][1] != 'shared' })
       diagnostic('contract-return-mismatch', region) unless exact
     end
   end
@@ -1151,6 +1151,7 @@ class LocalLifetime
         diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
       end
       diagnostic('write-through-shared-loan', own) if !read && loan[1] == 'shared'
+      activate_loans([own] + @ancestors[own], state)
     end
     label = off == 0 && width == @slot_info[name][1] ? name : name + '[' + off.to_s + '..' + (off + width).to_s + ']'
     status = (0...width).flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
@@ -1165,7 +1166,7 @@ class LocalLifetime
     @loans.each do |id, loan|
       next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
       next unless overlaps(off, width, loan[3], loan[4])
-      diagnostic('loan-conflict', label + ' (' + id + ')') if loan[1] == 'exclusive' || !read || borrowing == 'exclusive'
+      diagnostic('loan-conflict', label + ' (' + id + ')') if loan_kind(id, state) == 'exclusive' || !read || borrowing == 'exclusive'
     end
     [name, off, width]
   end
@@ -1182,6 +1183,7 @@ class LocalLifetime
         diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
       end
       diagnostic('write-through-shared-loan', own) if !read && @loans[own][1] == 'shared'
+      activate_loans([own] + @ancestors[own], state)
     end
     label = lo == 0 && n == @slot_info[name][1] ? name : name + '[' + lo.to_s + '..' + (lo + n).to_s + ']'
     status = (0...n).flat_map { |i| state[byte_key(name, lo + i)] || ['dead'] }.uniq
@@ -1192,9 +1194,48 @@ class LocalLifetime
     @loans.each do |id, loan|
       next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
       next unless overlaps(lo, n, loan[3], loan[4])
-      diagnostic('loan-conflict', label + ' (' + id + ')') if loan[1] == 'exclusive' || !read
+      diagnostic('loan-conflict', label + ' (' + id + ')') if loan_kind(id, state) == 'exclusive' || !read
     end
     nil
+  end
+
+  # A two-phase loan (Rust's autoref `&mut` of a method receiver) is reserved when it is created and acts
+  # as a shared loan until its first use, a deref or a call argument, which activates it: from then on it
+  # is exclusive, and the loans of its place still live there conflict with it. On a path join that
+  # activated it on one side it counts as exclusive.
+  def loan_kind(id, state)
+    kind = @loans[id][1]
+    return kind unless kind == 'two-phase'
+    (state['phase:' + id] || ['activated']).include?('activated') ? 'exclusive' : 'shared'
+  end
+
+  def activate_loans(ids, state)
+    ids.each do |id|
+      next unless @loans[id][1] == 'two-phase' && (state['phase:' + id] || []).include?('reserved')
+      loan = @loans[id]
+      @loans.each do |other, l|
+        next if other == id || @ancestors[id].include?(other) || @ancestors[other].include?(id)
+        next unless l[0] == loan[0] && (state['loan:' + other] || []).include?('active')
+        next unless overlaps(loan[3], loan[4], l[3], l[4])
+        label = loan[3] == 0 && loan[4] == @slot_info[loan[0]][1] ? loan[0] : loan[0] + '[' + loan[3].to_s + '..' + (loan[3] + loan[4]).to_s + ']'
+        diagnostic('loan-conflict', label + ' (' + other + ')')
+      end
+      state['phase:' + id] = ['activated']
+    end
+  end
+
+  # The two-phase loans of the pointers stored in a call argument's memory: the callee may use them.
+  def activate_memory_loans(root, off, width, state)
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.each do |key, values|
+      next unless key.start_with?(prefix)
+      parts = key.split(':')
+      next unless overlaps(off, width, parts[2].to_i, parts[3].to_i)
+      values.each do |v|
+        b = base_origin(v)
+        activate_loans([b[5..-1]] + @ancestors[b[5..-1]], state) if b.start_with?('loan:')
+      end
+    end
   end
 
   # EDG's lowered exception handling links frames, which are locals, from the
@@ -1490,6 +1531,7 @@ class LocalLifetime
     end
     resolved.each do |mode, ty, places|
       places.each do |origin, root, off, width, own|
+        activate_memory_loans(root, off, width, state) unless mode == 'init'
         case mode
         when 'read'
           access(origin, state, true, nil, width, ty)
@@ -1594,6 +1636,7 @@ class LocalLifetime
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
       access(project('local:' + loan[0], loan[3]), state, true, loan[1], loan[4], loan[5])
       state['loan:' + id] = ['active']
+      state['phase:' + id] = ['reserved'] if loan[1] == 'two-phase'
       ['loan:' + id]
     when 'reborrow'
       id = bname(x[2])
@@ -1838,6 +1881,7 @@ class LocalLifetime
       end
     end
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
+    @loans.each { |id, loan| initial['phase:' + id] = ['reserved'] if loan[1] == 'two-phase' }
     initial['value:@eh'] = ['external']
     @regions.each do |reg, r|
       name = r[:name]

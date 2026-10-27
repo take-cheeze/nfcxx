@@ -1532,7 +1532,7 @@ def r_value_transfer(fn, x)
 end
 
 def r_borrow(fn, x)
-  raise BadIR, "borrow form" unless x.length == 5 && x[2].is_a?(IRStr) && ["shared", "exclusive"].include?(x[3])
+  raise BadIR, "borrow form" unless x.length == 5 && x[2].is_a?(IRStr) && ["shared", "exclusive", "two-phase"].include?(x[3])
   pt = parse_type(x[1])
   raise BadIR, "borrow requires pointer type" unless pt[0] == "ptr"
   v = fn.opnd(x[4], "l")

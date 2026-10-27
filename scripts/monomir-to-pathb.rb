@@ -1340,7 +1340,8 @@ end
 # --borrow: `&place` and `&mut place` of a local place reached without a deref become
 # (borrow (ptr T) "Ln" shared|exclusive PLACE), PLACE being the slot or a constant offset into it.
 # Other borrows (through a deref, a dynamic index, of a static or a zero-sized place) stay plain
-# addresses, which carry the provenance of the pointer they come from.
+# addresses, which carry the provenance of the pointer they come from. A `&mut` that
+# mir_two_phase_locals finds to be a call's receiver is two-phase instead of exclusive.
 def borrow_loan(expr, place, types, locals, params, stmts, regi)
   p = parse_place(place)
   return nil unless locals.assoc(p[:root]) || p[:root] =~ /^arg\d+$/
@@ -1366,12 +1367,36 @@ def borrow_loan(expr, place, types, locals, params, stmts, regi)
   return nil if sz == 0
   pt = rust_type_to_pathb(ty, types)
   kind = expr.start_with?("&mut ") || expr.start_with?("&move ") ? "exclusive" : "shared"
+  kind = "two-phase" if kind == "exclusive" && $borrow_dst && $two_phase[$borrow_dst] == expr
   base = "$\"#{p[:root]}\""
   base = "(offset #{base} #{off})" if off != 0
   $loan_n += 1
   r = regi; regi += 1
   stmts << "(let %#{r} (ptr #{pt}) (borrow (ptr #{pt}) \"L#{$loan_n}\" #{kind} #{base}))"
   ["%#{r}", regi]
+end
+
+# --borrow: the locals that hold a `&mut` of a place only to pass it as the first argument of a call,
+# local => the borrow. MIR has lost rustc's autoref marker, so this is the shape of an autoref'd
+# method receiver (`c.set(c.get() + 1)`): the local is assigned once, from `&mut PLACE`, and its one
+# other mention is as the call's first argument. A user's `&mut` variable does not match, since mrustc
+# passes it as a reborrow `&mut (*varN)`; an explicit `&mut x` first argument (`C::set(&mut c, ..)`)
+# does, though rustc does not make it two-phase. The checker makes these loans two-phase: shared until
+# the call, exclusive from there.
+def mir_two_phase_locals(blocks)
+  lines = blocks.values.flat_map { |c| c.lines.map(&:strip) }.reject { |l| l.empty? || l.start_with?("SCOPEEND") }
+  found = {}
+  lines.each do |ln|
+    m = ln.match(/^ASSIGN (var\d+) = (&mut [^;]+);$/)
+    next unless m
+    v = m[1]
+    uses = lines.select { |l| l =~ /\b#{v}\b/ }
+    next unless uses.length == 2 && uses.count(ln) == 1
+    call = (uses - [ln])[0]
+    next unless call =~ /^CALL [^=]+ = [^\s(]+\(#{v}, / && call.scan(/\b#{v}\b/).length == 1
+    found[v] = m[2].strip
+  end
+  found
 end
 
 # --borrow: the local whose storage a MIR statement writes as a whole or in part (not through a
@@ -1920,8 +1945,10 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
     end
   end
   $binop_hint = hint
+  $borrow_dst = dst_place.strip
   val, regi = eval_rvalue_operand(rhs, types, locals, params, param_reg, stmts, regi, lines)
   $binop_hint = nil
+  $borrow_dst = nil
   vty = place_type(rhs, types, locals, params)
   vpt = vty ? rust_type_to_pathb(vty, types) : nil
   if val.start_with?("(") && !val.start_with?("(const") && !val.start_with?("(load")
@@ -2071,6 +2098,7 @@ functions.each do |fn|
   end unless $borrow
   $loan_n = 0
   storage = $borrow ? mir_storage_starts(blocks, block_nums, locals) : nil
+  $two_phase = $borrow ? mir_two_phase_locals(blocks) : {}
   params.each_with_index do |t, i|
     r = param_reg[i]
     next if r.nil?
