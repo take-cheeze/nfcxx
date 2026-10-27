@@ -9,7 +9,7 @@ module NativeClassResults
   FILES = {
     '3rd/mruby/mrbgems/mruby-io/src/file.c' => %w[cc1202e26515fcf1af8b6014359b05b198bc81214ce20348c07778f037271102 dec83df295fbae0157686e55882e73acebdfa0825edf2ab542cfe51d7f03c53e 2bf54ced4214251c7706ca7bcef3e9ee35293313f10d06cea2ba1d7ab43754fb],
     '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => '8065d3073a5bb5290cafe20df0785ccdfecc0563ef14ac211f203915c1a2fc29',
-    '3rd/mruby/src/hash.c' => '42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16',
+    '3rd/mruby/src/hash.c' => %w[42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16 a2f064d6a6def159eb9209feafb6796925938c7f372ab2be9c6ca008dac991ea],
     '3rd/mruby/src/string.c' => %w[1ea0c045842b4feeefcad548ef79951a5fb3408d31908063fd9fec106de71f00 d4cbdaef5a4e33016077ee8f3855df407edb065a749f0c7ecffc9bf53d6d78bb 816452d8da507aa55a530e92009d779ed13e33a23efd4a59ad0c4914fca49435],
     '3rd/mruby/src/array.c' => %w[5e0541466b6aa9c8eaab0bcc7d51db15babae7059871854eeef81f08ac53dc11 7cc81d821c7893fd5bbc510cdaa3c2601d752e7fbf3947466c55620732cdf815],
     '3rd/mruby/mrbgems/mruby-struct/src/struct.c' => %w[2e536e12e4bcfc62d7581966860789eb31edcf6282e2ec67ec70e85db34fbec5 bb57a55a157602b58e0218f3f5e2d1f5175a0d1b36e43388af390896fb672027],
