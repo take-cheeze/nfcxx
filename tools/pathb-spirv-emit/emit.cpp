@@ -77,6 +77,7 @@ struct SpvModule {
   std::map<std::pair<std::string, std::string>, int64_t> wgs;
   int64_t wgs_total = 0;
   uint32_t wgs_var = 0;
+  uint32_t sg_size_var = 0;   // the SubgroupSize builtin input, once a function reads it
 
   SpvModule(Spv *s, bool kcl) : spv(s), kernel_cl(kcl) {
     push = kcl ? 0 : s->push_var();
@@ -974,6 +975,13 @@ struct SFn {
       uint32_t op = nm == "__nfcxx_sycl_sg_shuffle_xor_u32" ? 5574 : 5571;
       return Opnd{res(op, {t32(), v, m}), U32};
     }
+    if (nm == "__nfcxx_sycl_sg_size") {
+      // the lanes of the caller's sub-group: the OpenCL SubgroupSize builtin (16, or the kernel's reqd_sub_group_size, see
+      // emit_module); the Vulkan module has no sub-group operations, so the shim's 16
+      if (!mod->kernel_cl) return Opnd{spv->c_u32(SUBGROUP_SIZE), U32};
+      if (!mod->sg_size_var) mod->sg_size_var = spv->builtin_input_u32(BUILTIN_SUBGROUP_SIZE);
+      return Opnd{res(61, {t32(), mod->sg_size_var}), U32};
+    }
     if (nm == "__nfcxx_sycl_barrier") {
       ins({224, spv->c_u32(SCOPE_WORKGROUP), spv->c_u32(SCOPE_WORKGROUP),
            spv->c_u32(mod->kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)});
@@ -1570,10 +1578,15 @@ Emitted emit_module(const std::string &src, bool kernel_cl) {
   std::vector<Node> forms = read_forms(src);
   Mod mod;
   std::unordered_map<std::string, int64_t> sizes;
+  // function name => the sub-group size its [[sycl::reqd_sub_group_size(N)]] asks for (be/nfcxx_ir.c)
+  std::unordered_map<std::string, int64_t> kernel_sg;
   for (Node &f : forms) {
     const std::string *h = head_of(f);
     if (!h) continue;
-    if (*h == "function") mod.defs.set(to_s(f.items.at(1)), &f);
+    if (*h == "sycl-kernel-attr") {
+      for (size_t i = 2; i < f.items.size(); i++)
+        if (head_is(f.items[i], "reqd-sub-group-size")) kernel_sg[to_s(f.items.at(1))] = as_int(f.items[i].items.at(1));
+    } else if (*h == "function") mod.defs.set(to_s(f.items.at(1)), &f);
     else if (*h == "abi-type") {
       sizes[to_s(f.items.at(1))] = as_int(f.items.at(2));
       if (f.items.size() > 4 && head_is(f.items[4], "empty")) mod.empty_types.insert(to_s(f.items[1]));
@@ -1773,6 +1786,7 @@ Emitted emit_module(const std::string &src, bool kernel_cl) {
     for (auto &inst : smod.fns_wgs[n]->function_text()) spv.func(inst);
   std::vector<uint32_t> iface = kernel_cl ? std::vector<uint32_t>{smod.gid, smod.lid, smod.wid}
                                           : std::vector<uint32_t>{smod.gid, smod.lid, smod.wid, smod.sp, smod.dead, smod.push};
+  if (smod.sg_size_var) iface.push_back(smod.sg_size_var);
   for (size_t k = 0; k < entries.size(); k++) {
     const std::string &e = entries[k];
     SFn *f = smod.fns_wgs.count(e) ? smod.fns_wgs[e] : fns[e];
@@ -1796,13 +1810,25 @@ Emitted emit_module(const std::string &src, bool kernel_cl) {
       auto it = table.find(n);
       if (it != table.end() && it->second->sg_used) sg = true;
     }
+    // the sub-group size: 16, or what the kernel's [[sycl::reqd_sub_group_size(N)]] asks for
+    std::vector<int64_t> asked;
+    for (auto &n : reach_of[e]) {
+      auto it = kernel_sg.find(n);
+      if (it != kernel_sg.end() && std::find(asked.begin(), asked.end(), it->second) == asked.end()) asked.push_back(it->second);
+    }
+    if (asked.size() > 1) {
+      std::string l;
+      for (size_t i = 0; i < asked.size(); i++) l += (i ? ", " : "") + std::to_string(asked[i]);
+      throw Refused("kernel " + e + ": its functions ask for different sub-group sizes (" + l + ")");
+    }
+    int64_t sgsz = asked.empty() ? (int64_t)SUBGROUP_SIZE : asked[0];
     if (sg) {
       spv.cap(58);
-      spv.entry_mode(wr.fid, 35, SUBGROUP_SIZE);
+      spv.entry_mode(wr.fid, 35, (uint32_t)sgsz);
     }
     auto sz = sizes.find(strukt);
     out.manifest.push_back("k" + std::to_string(k) + "\t" + key + "\t" + std::to_string(sz == sizes.end() ? 0 : sz->second) +
-                           (sg ? "\t" + std::to_string(SUBGROUP_SIZE) : std::string()));
+                           (sg ? "\t" + std::to_string(sgsz) : std::string()));
   }
   if (mod.statics.size() > 0 || !mod.static_order.empty()) {
     std::vector<uint8_t> bytes;
