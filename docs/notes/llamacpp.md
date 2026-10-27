@@ -59,6 +59,22 @@ What it took (docs/notes/gpu.md, "Launch path", has the details):
 
 The KNOWN list of `run.sh` is empty.
 
+End to end: `tests/llamacpp/cuda/e2e.sh MODEL.gguf [PROMPT]` links llama.cpp's examples/simple against these objects
+(libllama and simple.cpp by the host g++, which is not what is tested here; the link is nfcxx's) and runs it with every
+layer on the GPU (NGL, default 99). With Qwen2.5-0.5B-Instruct Q4_0 and "The capital of France is", greedy:
+
+| build | output | eval |
+| --- | --- | --- |
+| llama.cpp's CMake, gcc, CPU | Paris, and it is the capital of Europe. It is also the capital of the world. ... | 75 tok/s |
+| nfcxx, CPU (`-ngl 0`) | Paris, and it is the capital of Europe. It is the largest city in Europe, ... | 40 tok/s |
+| nfcxx, CUDA (`-ngl 99`) | Paris, and it is the largest city in Europe. It is located in the center of ... | 4.4 tok/s |
+
+The text is right and the runs part where the next token is a close call (different arithmetic on each path). Open:
+the CUDA path is slow (227 ms a token for a 0.5B model; an nvcc build is far faster), and the CPU run crashes at exit
+(EDG's exception-handling state, `__curr_eh_stack_entry`, is a plain global, and ggml's CPU worker threads run
+EDG-compiled code with destructors; libstdc++'s exit-time flush then calls EDG's `std::uncaught_exceptions` on a dead
+entry).
+
 ## Flags
 
 llama.cpp's CMake gives `_GNU_SOURCE` on Linux (`ggml-cpu.c` needs it for `CPU_ZERO`). The test passes it, plus
