@@ -30,8 +30,12 @@ class CodeGen
     @lexical_consts_enabled = ENV.fetch('BC2CPP_LEXICAL_CONST', '1') != '0'
   end
 
+  # A core body compiles with the closed world withheld (compile_method), so its empty answer is not memoized: a
+  # core compile probe that runs before setup_numeric_consts would otherwise leave every constant unkeyed.
   def lexical_const_info
-    @lexical_const_info ||= LexicalConsts.analyze(@ireps, static: @closed_world&.constants_static? || false)
+    return LexicalConsts.analyze(@ireps, static: false) unless @closed_world
+
+    @lexical_const_info ||= LexicalConsts.analyze(@ireps, static: @closed_world.constants_static?)
   end
 
   # The group key a GETCONST/GETMCNST reads, or nil when its definition is not proven.
