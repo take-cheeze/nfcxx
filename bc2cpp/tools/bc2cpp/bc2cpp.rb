@@ -24,6 +24,7 @@ require_relative 'type_check_variants'
 type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
+require_relative 'shard_output'
 require_relative 'shared_generation'
 require_relative 'embed_init_guard'
 require_relative 'inframe_placement'
@@ -1478,6 +1479,15 @@ if $PROGRAM_NAME == __FILE__
     report.each { |l| warn "  #{l}" }
   end
 
+  # BC2CPP_SHARDS (shard_output.rb, docs/bc2cpp-shards.md): registered first, so it splits the text every rewriter
+  # below leaves. The traces instrument the one text they see, so a traced run is one unit and comment-only shards.
+  shards = ShardOutput.count
+  if shards > 1 && %w[BC2CPP_TRACE_TYPES BC2CPP_TRACE_ELSE BC2CPP_TRACE_RECV].any? { |k| ENV[k] == '1' }
+    warn "bc2cpp: BC2CPP_SHARDS=#{shards} with a BC2CPP_TRACE_* instrumenter: writing one translation unit"
+    (1...shards).each { |k| File.write(ShardOutput.shard_path(out_dir, symbol, k), ShardOutput.empty_shard(symbol, k, shards)) }
+    shards = 1
+  end
+  ShardOutput.capture_stdout(symbol, out_dir, shards) if shards > 1
   CompactOutput.capture_stdout unless annotated
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
@@ -2168,7 +2178,11 @@ if $PROGRAM_NAME == __FILE__
   print eqq_helper_code
   print numeric_slow_code
   print poly_tables_code
-  compiled.each { |m| print m[:code] }
+  compiled.each do |m|
+    print ShardOutput.unit_mark(m[:owner]) if shards > 1
+    print m[:code]
+  end
+  print ShardOutput::HOOKS_MARK if shards > 1
   print gen.emit_gem_hooks
 
   # This run's cross-TU declarations header, for other gems'

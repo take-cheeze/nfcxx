@@ -831,7 +831,35 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     # libmruby already has), so `#include <bc2cpp_entry.hxx>` finds it with `__has_include`.
     'BC2CPP_ENTRY_INCLUDE_DIR' => "#{spec.build.build_dir}/include"
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
+  env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
+end
+
+# BC2CPP_SHARDS (docs/bc2cpp-shards.md): translation units per compiled gem, default 4 (the CI runners' cores). A
+# gem with too little code for that many keeps fewer (ShardOutput::MIN_SHARD_BYTES); the rest are empty files.
+def bc2cpp_gem_shards
+  require_relative 'shard_output'
+  ShardOutput.count(ENV.to_h.merge('BC2CPP_SHARDS' => ENV.fetch('BC2CPP_SHARDS', '4')))
+end
+
+# Adds shards 1...N-1 of `generated` to `spec`'s objects. The bc2cpp run that writes `generated` writes them, and
+# each includes `generated`, so they depend on it and on `prereqs` (what `generated` includes). `generated` depends
+# on a stamp holding N, so a changed BC2CPP_SHARDS regenerates instead of leaving a shard file missing.
+def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
+  require 'fileutils'
+  shards = bc2cpp_gem_shards
+  stamp = File.join(spec.build_dir, 'bc2cpp_shards')
+  FileUtils.mkdir_p(spec.build_dir)
+  File.write(stamp, "#{shards}\n") unless File.exist?(stamp) && File.read(stamp) == "#{shards}\n"
+  Rake::Task[generated].enhance([stamp])
+  symbol = File.basename(generated).delete_suffix('_gen.cpp')
+  (1...shards).each do |index|
+    src = ShardOutput.shard_path(spec.build_dir, symbol, index)
+    file src => [generated, *prereqs] do |t|
+      raise "#{t.name} is missing after #{generated} was written (docs/bc2cpp-shards.md)" unless File.exist?(t.name)
+    end
+    spec.objs << src.ext(spec.build.exts.object)
+  end
 end
 
 # Generates `spec`'s file together with every other compiled gem of the same build whose file is out of date, in one
@@ -914,7 +942,8 @@ module Bc2cppCompiledGemGeneration
       symbol = env.fetch('OUT_SYMBOL')
       headers = [File.join(env.fetch('OUT_DIR'), "#{symbol}_decls.h"), File.join(env.fetch('OUT_DIR'), "#{symbol}_entry.h")]
       headers << File.join(env['BC2CPP_ENTRY_INCLUDE_DIR'], "#{symbol}_entry.h") if env['BC2CPP_ENTRY_INCLUDE_DIR']
-      [generated, *headers].each do |path|
+      shards = (1...Integer(env.fetch('BC2CPP_SHARDS', '1'))).map { |k| ShardOutput.shard_path(env.fetch('OUT_DIR'), symbol, k) }
+      [generated, *headers, *shards].each do |path|
         FileUtils.mkdir_p(File.dirname(path))
         File.write(path, STUB)
       end

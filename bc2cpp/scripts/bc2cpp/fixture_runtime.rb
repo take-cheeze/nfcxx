@@ -250,7 +250,9 @@ module Bc2cppFixtureRuntime
   # environment Hashes) the binary runs once per entry, each in its own process
   # so one crashing scenario cannot hide the others, and `output` is the Array
   # of their outputs paired with the exit status: [[output, success], ...].
-  def run(dir, err, owners, body, build:, full: false, vms: [false, true], envs: nil, exact_arity: false)
+  # `extra_srcs`: further translation units linked in, e.g. the shards of a BC2CPP_SHARDS run.
+  def run(dir, err, owners, body, build:, full: false, vms: [false, true], envs: nil, exact_arity: false,
+          extra_srcs: [])
     regs = registrations(err, owners, exact_arity: exact_arity).join("\n")
     File.write(File.join(dir, 'main.cpp'), <<~CPP)
       #include <mruby.h>
@@ -331,7 +333,8 @@ module Bc2cppFixtureRuntime
     flags.concat(library_defines(build) - flags) if full
     flags.concat(Shellwords.split(ENV.fetch('BC2CPP_CXXFLAGS', '')))
     built = Bc2cppCxx.system(*flags, "-I#{dir}", "-I#{build}/include", "-I#{ROOT}/3rd/mruby/include",
-                   "-I#{ROOT}/mruby-rgss/src", "-I#{ROOT}/include", File.join(dir, 'main.cpp'), lib, '-lm', '-o', binary)
+                   "-I#{ROOT}/mruby-rgss/src", "-I#{ROOT}/include", File.join(dir, 'main.cpp'), *extra_srcs, lib, '-lm',
+                   '-o', binary)
     return [false, ''] unless built
 
     FileUtils.cp_r(dir, ENV['BC2CPP_KEEP_DIR'], remove_destination: true) if ENV['BC2CPP_KEEP_DIR']
