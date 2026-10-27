@@ -1506,10 +1506,14 @@ build optcarrot's lookup tables: `PPU::TILE_LUT` alone is about two million bloc
 180-frame run. The sealed build now compiles it in two steps:
 
 - **CORE_PRELUDE_INSTALL**: right after the shims, the bundle calls `OptcarrotProbe.install_prelude!`, which runs
-  bc2cpp's own `bc2cpp_register_owner_methods`. That installs the compiled core mrblib (and the core-owner shims such
-  as `Integer#[]`) before any optcarrot class body, saves each guarded method's bytecode for its Fiber fallback, and
-  registers the core aliases (`Enumerable#map`) that `install!` never did. `install!` leaves those owners to it, so an
-  entry whose name now resolves to a C function (onig-regexp's `String#gsub` over core mrblib's) stays as it is.
+  the core half of bc2cpp's generated registration, `bc2cpp_register_core_owner_methods`. That installs the compiled
+  core mrblib (and the core-owner shims such as `Integer#[]`) before any optcarrot class body, saves each guarded
+  method's bytecode for its Fiber fallback, and registers the core aliases (`Enumerable#map`). An entry whose name
+  now resolves to a C function (onig-regexp's `String#gsub` over core mrblib's) stays as it is. The program half,
+  `bc2cpp_register_program_owner_methods`, looks the `Optcarrot` classes up by name, so `install!` runs it once the
+  class bodies have defined them (REGISTRATION_SPLIT, `tools/bc2cpp/codegen_emit.rb`; the register.cxx is written by
+  `register_emit.rb`). `ruby scripts/bc2cpp/registration_split_check.rb` checks the split and that order on a small
+  fixture, since pull-request CI does not build the probe.
 - **CLASS_BODY_HOIST**: a class-body constant initializer that loops through a block becomes a singleton method of
   the same class, which bc2cpp compiles like any other, and the constant is assigned from it once
   `OptcarrotProbe.install_hoisted!` has installed the compiled body. The rewrite stays on the initializer's own

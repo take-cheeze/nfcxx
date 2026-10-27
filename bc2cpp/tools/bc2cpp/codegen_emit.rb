@@ -133,7 +133,7 @@ class CodeGen
   # interpreted fallback to read iv_tbl.
   # BC2CPP_UNREGISTERED_EXTRA ("Owner#name,..."): more entries to leave unregistered, for a check fixture that has
   # no place in the committed lists (scripts/bc2cpp/unregistered_verify_check.rb).
-  def emit_owner_registrations(compiled, owners,
+  def emit_owner_registrations(compiled, owners, core_owners: owners,
                                unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']) |
                                              ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set)
     by_owner = compiled.group_by { |m| m[:owner] }
@@ -199,7 +199,23 @@ class CodeGen
         }
       CPP
     end
+    # REGISTRATION_SPLIT: the `core_owners` half resolves only classes that exist before any program class body
+    # runs, so a program can install it first and the program half once its classes are defined (the optcarrot
+    # probe's install_prelude! / install!). bc2cpp_register_owner_methods runs both, in the same order as one list.
+    core_targets, program_targets = targets.partition { |owner| core_owners.include?(owner) }
+    { 'core' => core_targets, 'program' => program_targets }.each do |part, part_targets|
+      out << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
+      emit_owner_registration_lines(out, part_targets, by_owner, unregistered)
+      out << "}\n"
+    end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
+    out << "  bc2cpp_register_core_owner_methods(M);\n"
+    out << "  bc2cpp_register_program_owner_methods(M);\n"
+    out << "}\n\n"
+    out
+  end
+
+  def emit_owner_registration_lines(out, targets, by_owner, unregistered)
     targets.each do |owner|
       singleton = owner.end_with?('.singleton')
       var = "bc2cpp_owner_reg_#{sanitize(owner)}"
@@ -234,8 +250,6 @@ class CodeGen
         end
       end
     end
-    out << "}\n\n"
-    out
   end
 
   # DIRECT_CONSTRUCT_ACCESSORS (dispatch_targets.rb): `<Owner>_compiled_class()` for each listed owner whose

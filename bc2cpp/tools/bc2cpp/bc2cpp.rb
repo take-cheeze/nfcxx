@@ -2040,7 +2040,8 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_owner_class_cache
   print gen.emit_direct_construct_accessors(compiled)
   # OWNER_METHOD_REGISTRATION: every owner this gem compiles an entry for. No registration is written by hand.
-  print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS + compiled.map { |m| m[:owner] }).uniq)
+  registration_owners, core_owners = bc2cpp_registration_owners(compiled.map { |m| m[:owner] })
+  print gen.emit_owner_registrations(compiled, registration_owners, core_owners: core_owners)
   # SKIPPED_ENTRY_MACROS: the entries this run refused (SKIP_UNSUPPORTED), e.g. a method that compiles only when the
   # closed world proves a fact a desktop build lacks, as `#define BC2CPP_SKIPPED_<entry>` markers.
   print gen.emit_skipped_entry_macros(skipped_entries)
