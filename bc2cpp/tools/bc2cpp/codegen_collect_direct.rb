@@ -36,12 +36,33 @@ module CollectDirect
 
   # Array#each re-reads the length and the slot on every pass, so a block that resizes the receiver sees what the
   # Ruby loop would. Only Array#push grows the result, so its capacity is not observable.
+  # COLLECT_YIELD_HOIST: bc2cpp_yield_argv's compiled-block test is made once, since `blk` cannot change. A result is
+  # stored before the arena is cut back to `ai`, so the arena holds `acc` (below `ai`), not one slot per element.
+  # Nothing outside the helper sees `acc` before it returns, so it is never shared or frozen here.
   HELPER = <<~CPP
     static mrb_value bc2cpp_ary_collect(mrb_state* M, mrb_value self, mrb_value blk) {
       mrb_value acc = mrb_ary_new_capa(M, ARY_LEN(mrb_ary_ptr(self)));
+      Bc2cppBlockEntry entry = nullptr;
+      struct REnv* env = nullptr;
+      if (mrb_type(blk) == MRB_TT_PROC) {
+        struct RProc* p = mrb_proc_ptr(blk);
+        if (MRB_PROC_CFUNC_P(p) && MRB_PROC_CFUNC(p) == bc2cpp_block_thunk && !MRB_PROC_STRICT_P(p)) {
+          env = MRB_PROC_ENV(p);
+          entry = bc2cpp_block_entry(env);
+        }
+      }
+      int ai = mrb_gc_arena_save(M);
       for (mrb_int i = 0; i < ARY_LEN(mrb_ary_ptr(self)); ++i) {
         mrb_value v = ARY_PTR(mrb_ary_ptr(self))[i];
-        mrb_ary_push(M, acc, bc2cpp_yield_argv(M, blk, 1, &v));
+        mrb_value r = entry ? entry(M, env, false, 1, &v) : mrb_yield_argv(M, blk, 1, &v);
+        struct RArray* a = mrb_ary_ptr(acc);
+        if (!ARY_EMBED_P(a) && a->as.heap.len < a->as.heap.aux.capa) {
+          a->as.heap.ptr[a->as.heap.len++] = r;
+          mrb_field_write_barrier_value(M, (struct RBasic*)a, r);
+        } else {
+          mrb_ary_push(M, acc, r);
+        }
+        mrb_gc_arena_restore(M, ai);
       }
       return acc;
     }
