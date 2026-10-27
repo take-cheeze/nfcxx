@@ -119,15 +119,18 @@ module CollectDirect
     end
   end
 
-  # Does the def that starts at the body's first line read as COLLECT_DIRECT_BODIES says, blank lines and
-  # indentation aside?
+  # Does the def read as COLLECT_DIRECT_BODIES says?
   def core_def_text_matches?(definition, owner)
-    expected = COLLECT_DIRECT_BODIES[[owner, definition.name]]
+    core_def_text_is?(definition, COLLECT_DIRECT_BODIES[[owner, definition.name]], 'COLLECT_DIRECT')
+  end
+
+  # Does the def that starts at `definition`'s first line read as `expected`, blank lines and indentation aside?
+  def core_def_text_is?(definition, expected, what)
     irep = @ireps[definition.irep]
     return false unless expected && irep&.file
 
     line = irep.instructions&.first&.lineno
-    text = line && SourceText.read(irep.file, 'COLLECT_DIRECT')
+    text = line && SourceText.read(irep.file, what)
     return false unless text
 
     lines = text.lines.drop(line - 1)
