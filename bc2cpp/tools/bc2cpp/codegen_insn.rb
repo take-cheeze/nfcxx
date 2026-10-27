@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
+
 # CodeGen: compile_insn and comparisons.
 
 class CodeGen
@@ -241,14 +243,14 @@ class CodeGen
                                                  owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: addition stays inside Fixnum.\n" \
-                          "  if (#{guarded[:condition]}) {\n" \
+                          "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
                           "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n" \
                           "  } else {\n"
                       else
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_fixnum_p(r#{d})) {
+          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('+', d, lit)}
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
@@ -266,14 +268,14 @@ class CodeGen
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
-                          "  if (#{guarded[:condition]}) {\n" \
+                          "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
                           "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n" \
                           "  } else {\n"
                       else
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})")}) {
             #{fixnum_exact_tier('+', d, "r#{s}")}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -299,14 +301,14 @@ class CodeGen
                                                  owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: subtraction stays inside Fixnum.\n" \
-                          "  if (#{guarded[:condition]}) {\n" \
+                          "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
                           "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n" \
                           "  } else {\n"
                       else
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_fixnum_p(r#{d})) {
+          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('-', d, lit)}
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
@@ -324,14 +326,14 @@ class CodeGen
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
-                          "  if (#{guarded[:condition]}) {\n" \
+                          "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
                           "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n" \
                           "  } else {\n"
                       else
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})")}) {
             #{fixnum_exact_tier('-', d, "r#{s}")}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -359,14 +361,14 @@ class CodeGen
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: the product interval fits Fixnum.\n" \
-                          "  if (#{guarded[:condition]}) {\n" \
+                          "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
                           "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n" \
                           "  } else {\n"
                       else
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})")}) {
             #{fixnum_exact_tier('*', d, "r#{s}")}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -398,14 +400,14 @@ class CodeGen
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: quotient fits Fixnum; helper preserves zero errors.\n" \
-                          "  if (#{guarded[:condition]}) {\n" \
+                          "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
                           "    r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n" \
                           "  } else {\n"
                       else
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+          #{guarded_arm}  if (#{BranchHints.likely("mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})")}) {
             r#{d} = mrb_div_int_value(M, mrb_integer(r#{d}), mrb_integer(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
@@ -872,7 +874,7 @@ class CodeGen
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
       else
         <<~CPP
-          if (mrb_fixnum_p(r#{d})) {
+          if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('+', d, lit)}
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
@@ -888,7 +890,7 @@ class CodeGen
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
       else
         <<~CPP
-          if (mrb_fixnum_p(r#{d})) {
+          if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('-', d, lit)}
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
@@ -1080,8 +1082,11 @@ class CodeGen
 
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
     no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
+    # EQ meets every type, so only the ordering operators hint their Integer pair.
+    pair = "mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})"
+    pair = BranchHints.likely(pair) unless op == :EQ
     numeric_dispatch = <<~CPP
-      if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+      if (#{pair}) {
       #ifdef MRB_NO_FLOAT
         r#{d} = mrb_bool_value(#{no_float_accessor});
       #else

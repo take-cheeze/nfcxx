@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
 require_relative 'bytecode_ir_containers'
 
 # CodeGen: compile_send and const/owner caches.
@@ -844,7 +845,7 @@ class CodeGen
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
           // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
             bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
@@ -884,9 +885,12 @@ class CodeGen
             } else\x20
         CPP
       end
+      # Both arms at once meet Arrays and Integers alike, so only a lone Integer arm is hinted.
+      shift_ok = "mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN"
+      shift_ok = BranchHints.likely(shift_ok) if array_arm.empty?
       return <<~CPP
           #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers inline; overflow to a bigint, a bigint receiver and other classes take NUMERIC_SLOW_PATH
-          if (mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN) {
+          if (#{shift_ok}) {
             mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
             if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
               r#{d} = #{recv};
@@ -912,7 +916,7 @@ class CodeGen
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
           // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
             bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
@@ -949,7 +953,7 @@ class CodeGen
                   end
       return <<~CPP
           // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
-          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}")}) {
             #{operation}
           } else {
             #{fallback.chomp}
@@ -965,7 +969,7 @@ class CodeGen
           {
           mrb_bool bc2cpp_shift_fast = FALSE;
           mrb_int bc2cpp_shift_result = 0;
-          if (mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})")}) {
             mrb_int bc2cpp_shift_value = mrb_fixnum(#{value});
             mrb_int bc2cpp_shift_width = mrb_fixnum(#{width});
             if (bc2cpp_shift_width == 0) {
@@ -998,7 +1002,7 @@ class CodeGen
               }
             }
           }
-          if (bc2cpp_shift_fast) {
+          if (#{BranchHints.likely('bc2cpp_shift_fast')}) {
             r#{d} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
           } else {
             #{fallback.chomp}
@@ -1013,7 +1017,7 @@ class CodeGen
       operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
       return <<~CPP
           // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
-          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})")}) {
             r#{d} = mrb_bool_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));
           } else {
             #{fallback.chomp}
@@ -1327,7 +1331,7 @@ class CodeGen
                                            closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                                              trace_insn: insn, trace_reg_offset: trace_reg_offset))
                    end
-        "#{note}  if (#{check}) {\n" \
+        "#{note}  if (#{BranchHints.likely(check)}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
           "    #{fallback}" \
@@ -1404,7 +1408,7 @@ class CodeGen
           guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
         end
         body = "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
-        "#{note}  if (#{check}) {\n" \
+        "#{note}  if (#{BranchHints.likely(check)}) {\n" \
           "#{body}" \
           "  } else {\n" \
           "    #{fallback}" \
@@ -1463,7 +1467,7 @@ class CodeGen
                               closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                                 trace_insn: insn, trace_reg_offset: trace_reg_offset))
       end
-      "#{note}  if (#{check}) {\n" \
+      "#{note}  if (#{BranchHints.likely(check)}) {\n" \
         "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
         "  } else {\n" \
         "    #{fallback}" \
@@ -1789,9 +1793,10 @@ class CodeGen
   end
 
   # File-scope cache emitted ahead of the compiled bodies. A static per owner,
-  # also keyed on the mrb_state pointer and reset by the gem's gem_final
-  # (bc2cpp_reset_owner_classes), so a later VM at a reused address never sees a
-  # stale pointer. Every caller is a class-equality guard with a dynamic
+  # cleared by bc2cpp_reset_owner_classes, which each compiled gem's gem_init and
+  # gem_final call (VM_CACHE_LIFETIME, docs/bc2cpp-constant-lookup.md), so a later
+  # VM never sees a stale pointer. The hit is a plain inline load; only the fill
+  # checks the mrb_state (bc2cpp_owner_class_bind). Every caller is a class-equality guard with a dynamic
   # fallback, so an undefined class yields nullptr (guard false) instead of
   # raising NameError (an RGSS-only run never defines Game). nullptr is not
   # cached, so a later definition is found. A later reassignment of the constant
@@ -1808,12 +1813,14 @@ class CodeGen
            "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n" \
            "#{memo.empty? ? '' : "  for (bc2cpp_poly_memo& m : bc2cpp_poly_memos) m = {};\n"}" \
            "}\n"
+    out << vm_cache_bind('bc2cpp_owner_class_bind', 'bc2cpp_owner_class_state', 'OWNER_CLASS_CACHE')
     unless entries.empty?
       # CLOSED_WORLD: a guard whose else arm raises must name exactly the class
       # the registry means, never a same-named constant found through ancestry.
       defined = @closed_world ? 'mrb_const_defined_at' : 'mrb_const_defined'
       out << <<~CPP
-        static struct RClass* bc2cpp_owner_class_lookup(mrb_state* M, const char* const* path, int n) {
+        [[gnu::noinline]] static struct RClass* bc2cpp_owner_class_lookup(mrb_state* M, const char* const* path, int n) {
+          bc2cpp_owner_class_bind(M);
           mrb_value v = mrb_obj_value(M->object_class);
           for (int i = 0; i < n; ++i) {
             mrb_sym s = mrb_intern_cstr(M, path[i]);
@@ -1829,10 +1836,6 @@ class CodeGen
       path = lexical_scope_path(owner)
       out << <<~CPP
         static inline struct RClass* bc2cpp_owner_class_#{i}(mrb_state* M) {
-          if (bc2cpp_owner_class_state != M) {
-            bc2cpp_reset_owner_classes();
-            bc2cpp_owner_class_state = M;
-          }
           struct RClass* c = bc2cpp_owner_class_slots[#{i}];
           if (!c) {
             static const char* const path[] = {#{path.map { |seg| "\"#{seg}\"" }.join(', ')}};
@@ -1938,9 +1941,11 @@ class CodeGen
   # File-scope state and helpers for CONST_SITE_CACHE. Each helper returns the
   # constant's class or module, running the full lookup only until that first
   # succeeds (a failed lookup still raises from the same code and stores
-  # nothing). Only a class/module value is stored. Keyed on the mrb_state* with
-  # its own reset, dropped by each compiled gem's gem_final via
-  # bc2cpp_reset_const_site_cache(); always emitted so gem_final can call it.
+  # nothing). Only a class/module value is stored. Each compiled gem's gem_init
+  # and gem_final clear the slots via bc2cpp_reset_const_site_cache()
+  # (VM_CACHE_LIFETIME), so the hit is an inline slot load with no mrb_state
+  # compare; the out-of-line fill binds the slots to one VM
+  # (bc2cpp_cconst_bind). Always emitted so the gems can call the reset.
   # +used+ as for emit_const_scope_helpers: the slots stay sized for every index.
   def emit_const_site_cache(used = nil)
     entries = (@const_site_cache || {}).values
@@ -1951,24 +1956,23 @@ class CodeGen
     out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
     out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
     members = [(@const_member_sites || []).size, 1].max
-    out << "static mrb_value bc2cpp_mcnst_from[#{members}], bc2cpp_mcnst_slots[#{members}];\n"
-    out << "static bool bc2cpp_mcnst_have[#{members}] = {};\n"
+    # A GETMCNST slot is filled only for a class/module receiver, so the receiver's RClass* is the key and nullptr
+    # marks an empty slot.
+    out << "static struct RClass* bc2cpp_mcnst_from[#{members}];\n"
+    out << "static mrb_value bc2cpp_mcnst_slots[#{members}];\n"
     out << "static void bc2cpp_reset_const_site_cache() {\n" \
            "  bc2cpp_cconst_state = nullptr;\n" \
            "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
-           "  for (bool& h : bc2cpp_mcnst_have) h = false;\n" \
+           "  for (struct RClass*& f : bc2cpp_mcnst_from) f = nullptr;\n" \
            "}\n"
+    out << vm_cache_bind('bc2cpp_cconst_bind', 'bc2cpp_cconst_state', 'CONST_SITE_CACHE')
     out << emit_const_path_test if entries.any? { |slot| slot[:paths] }
     entries.each do |slot|
       i = slot[:index]
       next if called && !called.include?(i)
 
-      out << "static mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
-             "  if (bc2cpp_cconst_state != M) {\n" \
-             "    bc2cpp_reset_const_site_cache();\n" \
-             "    bc2cpp_cconst_state = M;\n" \
-             "  }\n" \
-             "  if (bc2cpp_cconst_have[#{i}]) return bc2cpp_cconst_slots[#{i}];\n" \
+      out << "[[gnu::noinline]] static mrb_value bc2cpp_cconst_fill_#{i}(mrb_state* M) {\n" \
+             "  bc2cpp_cconst_bind(M);\n" \
              "  mrb_value r0 = mrb_nil_value();\n"
       out << slot[:body].lines.map { |l| "  #{l}" }.join
       # A value entry (CONST_VALUE_CACHE) stores whatever the one binding holds.
@@ -1990,6 +1994,9 @@ class CodeGen
              "    bc2cpp_cconst_have[#{i}] = true;\n" \
              "  }\n" \
              "  return r0;\n" \
+             "}\n" \
+             "static inline mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
+             "  return bc2cpp_cconst_have[#{i}] ? bc2cpp_cconst_slots[#{i}] : bc2cpp_cconst_fill_#{i}(M);\n" \
              "}\n"
     end
     out << emit_const_member_cache(used)
@@ -2022,23 +2029,39 @@ class CodeGen
     sites = (@const_member_sites || []).each_with_index.reject { |_, i| called && !called.include?(i) }
     out = +''
     sites.each do |name, i|
-      out << "static mrb_value bc2cpp_mcnst_#{i}(mrb_state* M, mrb_value recv) {\n" \
-             "  if (bc2cpp_cconst_state != M) {\n" \
-             "    bc2cpp_reset_const_site_cache();\n" \
-             "    bc2cpp_cconst_state = M;\n" \
-             "  }\n" \
-             "  if (bc2cpp_mcnst_have[#{i}] && mrb_obj_eq(M, bc2cpp_mcnst_from[#{i}], recv)) return bc2cpp_mcnst_slots[#{i}];\n" \
+      out << "[[gnu::noinline]] static mrb_value bc2cpp_mcnst_fill_#{i}(mrb_state* M, mrb_value recv) {\n" \
+             "  bc2cpp_cconst_bind(M);\n" \
              "  mrb_sym name = mrb_intern_cstr(M, \"#{name}\");\n" \
              "  mrb_value r0 = mrb_const_get(M, recv, name);\n" \
              "  if ((mrb_class_p(recv) || mrb_module_p(recv)) && mrb_const_defined_at(M, recv, name)) {\n" \
-             "    bc2cpp_mcnst_from[#{i}] = recv;\n" \
+             "    bc2cpp_mcnst_from[#{i}] = mrb_class_ptr(recv);\n" \
              "    bc2cpp_mcnst_slots[#{i}] = r0;\n" \
-             "    bc2cpp_mcnst_have[#{i}] = true;\n" \
              "  }\n" \
              "  return r0;\n" \
+             "}\n" \
+             "static inline mrb_value bc2cpp_mcnst_#{i}(mrb_state* M, mrb_value recv) {\n" \
+             "  if ((mrb_class_p(recv) || mrb_module_p(recv)) && mrb_class_ptr(recv) == bc2cpp_mcnst_from[#{i}]) return bc2cpp_mcnst_slots[#{i}];\n" \
+             "  return bc2cpp_mcnst_fill_#{i}(M, recv);\n" \
              "}\n"
     end
     out
+  end
+
+  # VM_CACHE_LIFETIME: the per-VM slots hold one VM's values. The compiled gems clear them at gem_init and gem_final
+  # (the game's deferred gem init never runs gem_final), so the hit path need not compare the mrb_state. Only one VM
+  # running compiled code is live at a time in every host; a fill binds the slots to its VM and stops at mruby's
+  # mrb_bug if another one is still bound, rather than letting it read the other VM's pointers.
+  def vm_cache_bind(fn, state, cache)
+    <<~CPP
+      [[gnu::cold, gnu::noinline]] static void #{fn}_conflict(mrb_state* M) {
+        mrb_bug(M, "bc2cpp #{cache}: compiled code ran in a second live mrb_state; the slots hold one VM's values");
+      }
+      static inline void #{fn}(mrb_state* M) {
+        if (#{state} == M) return;
+        if (#{state}) #{fn}_conflict(M);
+        #{state} = M;
+      }
+    CPP
   end
 
   # The indices of the numbered helpers +prefix+<N> that +text+ calls.

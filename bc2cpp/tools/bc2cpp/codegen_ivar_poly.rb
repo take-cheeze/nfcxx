@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
+
 # CodeGen: POLY_SMALL_N chains, ivar access and outlined index helpers.
 
 class CodeGen
@@ -362,7 +364,7 @@ class CodeGen
     fallback = strict_hint_wrap('poly_small_n', d, recv, name, argv, nil, listed: listed) do
       guarded_fallback_line(d, recv, name, argv, listed, closed_world_site)
     end
-    chain = "#{branches.join}{\n    #{fallback}  }\n"
+    chain = "#{branches.join}{\n    #{BranchHints.cold_arm}#{fallback}  }\n"
     return "#{diag}#{note}  #{chain}" unless hoist
 
     subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
@@ -640,10 +642,6 @@ class CodeGen
         // `Graphics.update`: a class or module receiver is never a row
         // (POLY_TABLE_NO_CLASS_ROW), so skip the scan.
         if (c == M->class_class || c == M->module_class) return nullptr;
-        if (bc2cpp_owner_class_state != M) {
-          bc2cpp_reset_owner_classes();
-          bc2cpp_owner_class_state = M;
-        }
         uintptr_t h = reinterpret_cast<uintptr_t>(c);
         bc2cpp_poly_memo& m = t.memo[((h >> 4) ^ (h >> 10)) & #{POLY_TABLE_MEMO - 1}];
         if (m.c == c) return m.fn;
@@ -843,7 +841,7 @@ end
       "static mrb_value bc2cpp_getidx_slow(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
       "#{body.gsub(/^(?=.)/, '  ')}}\n\n" \
       "BC2CPP_HOT_INLINE static inline mrb_value bc2cpp_getidx(mrb_state* M, mrb_value recv, mrb_value key) {\n" \
-      "  if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {\n" \
+      "  if (#{BranchHints.likely('mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)')}) {\n" \
       "    return bc2cpp_ary_entry(M, recv, mrb_integer(key));\n" \
       "  }\n" \
       "#{integer_bit_aref_helper_arm}" \
