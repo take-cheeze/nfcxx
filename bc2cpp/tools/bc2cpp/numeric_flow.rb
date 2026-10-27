@@ -137,8 +137,9 @@ module NumericFlow
   # RESCUE its second. Any other op has no facts.
   SUPPORTED_OPS = (BytecodeIR::WRITES_LEADING_REG_OPS | BytecodeIR::Ops::READS_LEAD |
                    Set[:EXCEPT, :RESCUE]).freeze
-  # Leading register is only read (or the op writes an enclosing frame).
-  NO_WRITE_OPS = Set[:NOP, :ENTER, :JMP, :JMPIF, :JMPNOT, :JMPNIL, :RETURN, :RETURN_BLK, :RETSELF,
+  # Leading register is only read (or the op writes an enclosing frame). JMPUW is one only where
+  # #plain_jmpuw? holds.
+  NO_WRITE_OPS = Set[:NOP, :ENTER, :JMP, :JMPUW, :JMPIF, :JMPNOT, :JMPNIL, :RETURN, :RETURN_BLK, :RETSELF,
                      :RETNIL, :RETTRUE, :RETFALSE, :BREAK, :STOP, :SETUPVAR, :SETIDX, :DEBUG,
                      :KEYEND, :RAISEIF, :MATCHERR].freeze
   # How many copies of one variable a recorded class test follows.
@@ -358,7 +359,9 @@ module NumericFlow
   def table(program)
     program.numeric_flow_table ||= begin
       instructions = program.instructions
-      supported = instructions.all? { |i| SUPPORTED_OPS.include?(i.op) || BytecodeIR::Ops::LOADI_OPS.include?(i.op) }
+      supported = instructions.all? do |i|
+        SUPPORTED_OPS.include?(i.op) || BytecodeIR::Ops::LOADI_OPS.include?(i.op) || (i.op == :JMPUW && plain_jmpuw?(program))
+      end
       decoded = program.decoded if supported
       operands = program.operands if supported
       steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index], operands[i.index]).freeze }.freeze if supported)
@@ -371,6 +374,13 @@ module NumericFlow
       readers.transform_values! { |registers| registers.uniq.freeze }
       Table.new(supported, steps, readers.freeze).freeze
     end
+  end
+
+  # JMPUW_PLAIN: with no catch handler in the irep, vm.c's OP_JMPUW never throws to an ensure and is exactly
+  # OP_JMP (the `break`/`next` of a `while`; see CodeGen#jmpuw_is_plain_jump?). Its target is already a
+  # successor edge of the IR, so the flow reads it as a JMP. BC2CPP_NUMERIC_JMPUW=0 leaves such an irep unmodelled.
+  def plain_jmpuw?(program)
+    ENV['BC2CPP_NUMERIC_JMPUW'] != '0' && !program.handlers?
   end
 
   # The flow's Step of an instruction from its IR facts: the BytecodeIR decode +decoded+ and the Operands +operands+

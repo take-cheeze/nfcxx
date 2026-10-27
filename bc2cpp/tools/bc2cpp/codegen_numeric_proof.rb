@@ -130,6 +130,9 @@ class CodeGen
   # ancestors, no method_missing anywhere that could see nil, and no native
   # definition on NilClass (@nil_operator_names is the scanned set).
   def numeric_nil_raises?(sym)
+    # Not memoized for a core body, which compiles with the closed world withheld (see lexical_const_info).
+    return false if @closed_world.nil?
+
     @numeric_nil_raises ||= {}
     return @numeric_nil_raises[sym] if @numeric_nil_raises.key?(sym)
 
