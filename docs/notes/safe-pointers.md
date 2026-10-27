@@ -1,6 +1,6 @@
 # Safe pointers (`nfcxx -fsafe-pointers`): Fil-C-style checks on Path B
 
-Status: prototype (phase 1 of the plan at the end). `nfcxx -fsafe-pointers x.cpp -o x` builds a program in which every
+Status: prototype (phases 1 and 2 of the plan at the end). `nfcxx -fsafe-pointers x.cpp -o x` builds a program in which every
 pointer has an object, the object it was derived from, and the program stops when it uses a pointer outside that object
 or after the object is gone:
 
@@ -26,9 +26,11 @@ operations to instrument.
 | --- | --- | --- |
 | out-of-bounds access | a load, store, bit-field access, `copy`, `zero-fill`, or a call of `memcpy` `memmove` `memset` `memcmp` `bcmp`, through a computed address, that does not fit in its object | out-of-bounds access |
 | pointer arithmetic out of the object | `offset` and `index` whose result is outside `[lo, hi]` of the base's object (one past the end is allowed, as C++ allows it) | pointer arithmetic leaves its object |
-| use after free | an access or arithmetic on a heap block that was freed and is still in the quarantine | use after free |
+| use after free | an access or arithmetic on a heap block that was freed: the block stays dead while the collector finds a pointer to it | use after free |
 | use after return | an access or arithmetic on the stack below the current frame | use of a stack object after its function returned |
 | double free, bad free | `free`/`delete` of a freed block, or of a pointer into a block that is not its start | double free / free of a pointer that is not the start of a heap block |
+| call of the wrong type | a call through a function pointer that reaches a function of an instrumented unit whose signature differs from the call's | call through a function pointer of the wrong type |
+| call of data | a call through a pointer into a heap block, a global or a stack slot | call of a pointer that is not a function |
 
 The objects are:
 
@@ -67,7 +69,13 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
      length argument;
    - escaping slots: one byte of padding in their `alloc`, `call $__nfcxx_sp_frame(w N, ..., l SLOT, l SIZE, ...)` after
      the allocs, `call $__nfcxx_sp_leave(l FIRST-SLOT)` before every `ret`;
-   - defined globals and strings: `z 1` at the end of the data item, and a table plus a constructor that registers them.
+   - defined globals and strings: `z 1` at the end of the data item, and a table plus a constructor that registers them;
+   - every defined function: its address and signature hash in a second table of the same constructor
+     (`__nfcxx_sp_funcs`); before every call through a pointer, `call $__nfcxx_sp_call(l CALLEE, l HASH, l FILE, w LINE)`.
+     The signature is the QBE class of the result and of each parameter up to `...`, an aggregate by value as its size
+     and alignment (`sp_sig`): the ABI shape, made by the same code for the definition and the call, so a call that
+     agrees with its callee's ABI always passes. `long double` functions are not registered (their address is the x87
+     entry thunk, not the QBE function).
 
    Without `--safe` the output is byte-identical to before: every hook is gated on `$safe`.
 3. The runtime is `lib/safeptr/nfcxx_safeptr.c`, built by `scripts/safeptr-rt` into `build/safeptr/nfcxx_safeptr.o`. The
@@ -76,7 +84,19 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
      over 64 KiB. Its memory comes from `mmap`, so `malloc` can update it. One mutex protects it. Each thread caches the
      last object it found, with a generation counter that every `free` bumps, so the common case (the same object again)
      takes no lock.
-   - Freed blocks stay in the table as dead in a FIFO quarantine of 4096 blocks / 64 MiB before glibc gets them back.
+   - Freed blocks stay in the table as dead. A collection (`collect`, from `free`) runs when more than
+     max(4096, live blocks / 4) blocks or max(64 MiB, live bytes / 4) bytes were freed since the last one, so its cost,
+     a scan of the live heap, is proportional to what was freed. It marks every dead block that a word of a root points
+     into (`[lo, hi]`, one past the end included), and gives the others back to glibc. The roots are the writable
+     `PT_LOAD` segments of every loaded module (`dl_iterate_phdr`, listed before the table's lock is taken: a thread in
+     `dlopen` holds the loader's lock and may be waiting in `malloc`), the stack of every thread that ran instrumented
+     code from the lowest stack pointer it was seen with to its top (the collector's own from its frame, after
+     `__builtin_unwind_init` spilled its caller's registers), and the contents of every live heap block. The collector
+     never frees what the program did not free, so a root it misses (another thread's registers, memory from `mmap`,
+     TLS) can only let a dead block go back early, which makes a later use of it unreported, never a correct program fail.
+   - Functions: an open-addressing table from address to signature hash, and a one-entry cache per thread. A callee in
+     the table must have the call's hash; a callee that is not in it but lies in a heap block, a global or a stack slot is
+     data; any other callee (libc, libstdc++.so, `.c` inputs) is not checked.
    - Stack slots: per thread, an array sorted from the highest address down (each frame's slots are sorted at entry,
      and frames nest), searched by bisection, and a stack of frames. An address between the thread's stack bottom
      (`pthread_getattr_np`) and the current stack pointer is in a frame that returned.
@@ -90,9 +110,16 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
   without the flag it must not report. The cases are `heap_overflow`, `heap_arith` (arithmetic from one heap block into
   the next, which redzone-based ASan does not see when the jump is past the redzone), `use_after_free`, `double_free`,
   `stack_overflow` (a local array read through a pointer, past the bounds check's reach), `use_after_return`,
-  `global_overflow` and `memcpy_overflow`.
+  `global_overflow`, `memcpy_overflow`, `uaf_after_churn` (a dangling pointer in a global, used after 20000 more frees
+  than the old quarantine held), `uaf_heap_root` (the dangling pointer is in a live `std::vector`'s buffer),
+  `call_wrong_type` (a function taking a pointer called as `int (*)(int, int)`) and `call_data` (a heap block called as
+  a function).
 - `clean_containers.cpp`, `clean_threads_eh.cpp` (`// EXPECT: 0`): vectors, strings, maps, exceptions through frames
   with escaping locals, deep recursion, `realloc`, four threads. Nothing is reported.
+- `clean_calls.cpp`: virtual calls with this-adjusting thunks, function pointers, member function pointers,
+  `std::function`, `qsort` callbacks, pointers to libc functions. `clean_churn.cpp`: two million 1 KiB blocks allocated
+  and freed while a linked list stays live; the peak resident size must stay under 512 MiB (the collector gives the
+  unreferenced blocks back).
 - The driver refuses `--freestanding` and `-fsanitize=address` with the flag.
 - `SAFEPTR_SWEEP=1`: every program of `tests/pathb-qbe/cases` and `tests/cases` is built with and without the flag, and
   the exit status and standard output must be the same. 150 of 150 Path B programs agree (`qbe_floatnx_gnu_source.cpp`
@@ -112,7 +139,7 @@ Measured on one program (2M-element `std::vector<int>` sort and 20 passes over i
 | --- | --- |
 | `nfcxx` (qbe backend) | 1.0 s |
 | `nfcxx --backend=pathb` | 2.5 s |
-| `nfcxx -fsafe-pointers` | 37 s |
+| `nfcxx -fsafe-pointers` | 37 s (30 s with phase 2) |
 
 That is about 15x over Path B, mostly the number of calls: every element access through an iterator is a call of the
 iterator's `operator*`, which registers its frame, plus a `derive` and a `check`. There is no inlining on Path B and no
@@ -133,11 +160,16 @@ Each of these is a false negative: a bad access that is not reported. None of th
 - **Not objects**: thread-local variables, `alloca` and C VLA storage (QBE `alloc16` in the body; C++ VLAs are
   `__vla_alloc`, i.e. heap), slots after the 64th escaping slot of one frame, memory from `mmap`, blocks allocated before
   the runtime started.
-- **Use after free** is found while the block is in the quarantine. After that its memory can hold a new block, and a
-  dangling pointer into it is valid for the new block. Fil-C's collector never reuses memory that a pointer can reach.
+- **Use after free** is found while a pointer to the block is in a root the collector scans. A pointer kept only where
+  it does not look (a register of another thread, `mmap` memory, thread-local storage, a heap block of memory not from
+  `malloc`, a pointer hidden as an integer it cannot recognize, such as one XORed with a key) lets the block go back to
+  glibc, and a later use through it finds whatever was allocated there.
+- **Retention**: a freed block stays allocated while any word of a root looks like a pointer into it (conservative,
+  as Fil-C's FUGC is for stacks). Memory a long-running program frees but keeps a stale pointer to is never given back.
 - **Use after return** is found for addresses below the current stack pointer. A dangling pointer into a frame that a
   later call has reused at the same depth finds that call's objects.
-- Indirect calls are null-checked (Path B's `nonnull`), not checked against the function's type.
+- **Call checks compare ABI shapes**, not C++ types: `int (*)(int *)` called as `int (*)(long)` passes (both take one
+  `l`). Callees outside instrumented units are not checked, and a pointer into the middle of a function is not found.
 - One lock for the heap table; the per-thread cache keeps it off the common path. A race between a check and a `free` of
   the same block in another thread can pass (the program has a data race on the block anyway).
 - Whole programs only: the driver's Path B route has no `-c` (it writes no object, with or without the flag), so a
@@ -145,12 +177,10 @@ Each of these is a false negative: a bad access that is not reported. None of th
 
 ## Plan
 
-1. Done (this note): bounds, provenance at arithmetic, use after free (quarantine), use after return, double free, on
-   Path B, with the layout unchanged.
-2. Memory safety without the quarantine limit: `free` never gives memory back while a pointer may reach it, i.e. a
-   conservative mark-sweep collector over the object table (the roots: the registered stacks and globals, and the
-   uninstrumented memory conservatively). Type-checked indirect calls: a signature tag on each function entry, compared
-   at `nonnull`.
+1. Done: bounds, provenance at arithmetic, use after free (quarantine), use after return, double free, on Path B, with
+   the layout unchanged.
+2. Done: a conservative collector decides when a freed block goes back (never while a scanned root points to it), and
+   calls through pointers are checked against the callee's signature and against data objects.
 3. Capability pointers: a 16-byte `(pointer, object)` pair in the IR for `--freestanding` programs and `lib/`, which are
    compiled entirely from source, so the layout can change. `i2p` then gives a pointer with no object.
 4. Whole-program hosted mode: a C library (musl) and the C++ runtime built through Path B, so that nothing is unchecked.

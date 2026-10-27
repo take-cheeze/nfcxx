@@ -821,7 +821,7 @@ CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
   attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers, :ubfiles,
-                :gsizes, :sp_globals
+                :gsizes, :sp_globals, :sp_funcs
 
   def initialize
     @globals = {}       # IR name -> type
@@ -840,6 +840,7 @@ class Module_
     @ubfiles = {}       # source file name -> index, for the failure reports of the checks (see Fn#abort_label)
     @gsizes = {}        # IR name -> size in bytes of each global defined here (safe pointers: static offsets)
     @sp_globals = []    # [QBE symbol, size] of the objects the safe-pointers constructor registers
+    @sp_funcs = []      # [QBE symbol, signature hash] of the functions it registers
   end
 end
 
@@ -1730,6 +1731,27 @@ def sp_static_size(fn, op)
   fn.mod.strings.key?(op.name) ? fn.mod.strings[op.name].length : nil
 end
 
+# The signature of a function or of a call through a pointer, as the hash the runtime compares (32-bit FNV-1a): the
+# QBE class of the result and of each parameter up to "...", an aggregate by value as its size and alignment (the QBE
+# type names are per module). Both sides are made from the QBE classes the emitter gives them, so a call that matches
+# its callee's ABI matches its hash; the C++ types themselves (int* against long*) are not compared.
+def sp_sig(mod, rcls, parts)
+  canon = lambda do |c|
+    next c unless c.start_with?(":")
+    a = mod.abi.values.find { |t| t.tn == c }
+    a.nil? ? c : "a#{a.size}.#{a.align}"
+  end
+  text = canon.call(rcls) + "("
+  parts.each do |p|
+    c = p.split(" ")[0]
+    text += canon.call(c) + ","
+    break if c == "..."
+  end
+  h = 0x811c9dc5
+  text.each_byte { |b| h = ((h ^ b) * 0x01000193) & 0xffffffff }
+  h
+end
+
 # The file and line arguments of a check: the last (loc ...), or none (the report says "?").
 def sp_where(fn)
   return "l 0, w 0" if fn.loc.nil?
@@ -1877,6 +1899,11 @@ def r_call(fn, x)
     SP_MEMFN[x[2].name].each { |i| sp_check(fn, args[i][0].t, n.t) } if n.cls == "l"
   end
   target = callee.t
+  if $safe && !(x[2].is_a?(IRSym) && x[2].sig == "&")
+    # a call through a pointer: the callee must be a function with this signature (see sp_sig)
+    rcls = !sret.nil? ? (sret[0].shape == "empty" ? "" : sret[0].tn) : ret == VOID ? "" : qcls(ret)
+    fn.emit("call $__nfcxx_sp_call(l #{target}, l #{sp_sig(fn.mod, rcls, parts)}, #{sp_where(fn)})")
+  end
   if !sret.nil?
     info, dest = sret
     if info.shape == "empty"
@@ -1898,10 +1925,10 @@ def r_call(fn, x)
   Val.new(t, cls, ret)
 end
 
-# (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE's vaarg takes w, l, s and d.
 # Library functions whose pointer arguments (by index) span the length in argument 2.
 SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }
 
+# (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE's vaarg takes w, l, s and d.
 def r_vaarg(fn, x)
   raise BadIR, "vaarg form" if x.length != 3
   ty = parse_type(x[1])
@@ -3048,6 +3075,9 @@ def emit_function(mod, f)
   end
   rc = ret == VOID ? "" : qcls(ret) + " "
   rc = sret_tn + " " unless sret_tn.nil?
+  # safe pointers: the function and its signature, for the checks of calls through pointers (sp_sig). A long double
+  # function's address is its x87 entry thunk, not this definition, so it is not registered.
+  mod.sp_funcs << [qsym(name), sp_sig(mod, rc.strip, qparams)] if $safe && !name.start_with?("__nfcxx_ldr_")
   linkage = static ? "" : "export "
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}function #{rc}$#{qsym(name)}(#{qparams.join(", ")}) {"
@@ -3256,13 +3286,17 @@ def emit_x87_thunks(mod, forms)
   end
 end
 
-# Safe pointers: a constructor that registers the module's globals and strings before other constructors run.
+# Safe pointers: a constructor that registers the module's globals, strings and functions before other constructors run.
 def sp_globals_ctor(mod)
-  return if mod.sp_globals.empty?
-  mod.out << "data $__nfcxx_sp_gtab = align 8 { #{mod.sp_globals.map { |q, n| "l $#{q}, l #{n}" }.join(", ")} }"
+  return if mod.sp_globals.empty? && mod.sp_funcs.empty?
+  [["gtab", mod.sp_globals], ["ftab", mod.sp_funcs]].each do |tab, rows|
+    next if rows.empty?
+    mod.out << "data $__nfcxx_sp_#{tab} = align 8 { #{rows.map { |q, n| "l $#{q}, l #{n}" }.join(", ")} }"
+  end
   mod.out << "function $__nfcxx_sp_gctor() {"
   mod.out << "@start"
-  mod.out << "\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{mod.sp_globals.length})"
+  mod.out << "\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{mod.sp_globals.length})" unless mod.sp_globals.empty?
+  mod.out << "\tcall $__nfcxx_sp_funcs(l $__nfcxx_sp_ftab, l #{mod.sp_funcs.length})" unless mod.sp_funcs.empty?
   mod.out << "\tret"
   mod.out << "}"
   mod.out << ""
