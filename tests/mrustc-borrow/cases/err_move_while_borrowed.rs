@@ -1,8 +1,8 @@
 // rustc: E0505
 // nfcxx: error
 // diag: loan-conflict
-// A move out of a borrowed local while the borrow is still used. The move is a move-value of the
-// local's fields, which conflicts with the live shared loan.
+// A move out of a borrowed local while the borrow is still used. The move of the local's bytes
+// conflicts with the live shared loan.
 struct S {
     v: i32,
 }

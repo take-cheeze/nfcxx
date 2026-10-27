@@ -1,0 +1,8 @@
+(ir-module "drops" (layout (pointer 8) (int 4)))
+
+(function "test" (ret int) (params )
+(slot "s" (struct "P") 8 4)
+(slot "q" (ptr int) 8 8)
+(drop-obligation "s" object $"s")
+(decl $"q" val)(decl $"s" val)(let %0 (ptr int) (offset $"s" 0))(store (ptr int) $"q" %0)(loop (body (drop-live "s")(store int $"s" (const int 1))(let %1 (ptr int) (load (ptr int) $"q"))(let %2 int (load int %1))(store (ptr int) $"q" $"s")(drop-state "s"))(step))(scope-end $"s")(return (const int 0))
+)

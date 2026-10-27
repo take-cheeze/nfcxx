@@ -6,7 +6,8 @@
 # SCOPEEND statements (MRUSTC_MMIR_SCOPE_END=1) become decl/scope-end facts, and a borrow of a local
 # place becomes a shared or exclusive loan. See docs/notes/mrustc-borrowck.md.
 # --hir FILE (with --borrow): mrustc's `-Z dump-hir` output, whose `impl Copy` items tell which of
-# the program's own types are copied rather than moved. Without it, no move is marked.
+# the program's own types are copied rather than moved, and `impl Drop` items which are dropped as a
+# whole. Without it, no move or drop obligation is marked.
 $borrow = !ARGV.delete("--borrow").nil?
 if (i = ARGV.index("--hir"))
   hir = File.read(ARGV[i + 1])
@@ -14,8 +15,16 @@ if (i = ARGV.index("--hir"))
   # The paths of the program's types with an `impl Copy`, whatever its bounds: an instance whose
   # impl does not apply then counts as Copy too, which only misses that instance's moves.
   $copy_impls = hir.scan(/^impl\b.*?::marker::Copy for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
+  # And those with an `impl Drop`: a value of one is dropped as a whole (drop_units).
+  $drop_impls = hir.scan(/^impl\b.*?::ops::drop::Drop for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
 end
-abort "usage: #{$0} [--borrow [--hir FILE]] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
+# --ast FILE (with --borrow): mrustc's `-Z dump-ast` output, which still tells an explicit `&mut x`
+# from a method call's autoref (mir_two_phase_locals). Without it, no borrow is two-phase.
+if (i = ARGV.index("--ast"))
+  $ast_src = File.read(ARGV[i + 1])
+  ARGV.slice!(i, 2)
+end
+abort "usage: #{$0} [--borrow [--hir FILE] [--ast FILE]] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
 input = ARGV[0]
 outpath = ARGV[1]
 src = File.read(input)
@@ -435,6 +444,7 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
   cur_ty = cur_ty.strip unless cur_ty.nil?
   addr = base
   addr_ty = cur_ty
+  slice_elem = false
   # --borrow: a Box<T> of a scalar holds its value in its own place (scripts/monomir-std.rb). mrustc
   # derefs a Box as `(*b.0 .0 .0)`, its pointer field, which is then the Box's own address.
   boxed = $borrow && MonomirStd.box_scalar(cur_ty, types) ? [addr, MonomirStd.box_scalar(cur_ty, types)] : nil
@@ -460,6 +470,7 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
         addr = "%#{r}"
         addr_ty = et
         cur_ty = et
+        slice_elem = $borrow && kind == :slice_elem
       else
         ipt = rust_type_to_pathb(inner, types)
         r = regi; regi += 1
@@ -468,10 +479,14 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
         addr_ty = inner
         cur_ty = inner
       end
+    elsif slice_elem && w[:k] == :index
+      # --borrow: a slice's elements are modelled by its first (scripts/monomir-std.rb, KEPT).
+      slice_elem = false
     else
       addr, cur_ty, regi = apply_wrapper_addr(addr, cur_ty, w, types, locals, params, stmts, regi)
       addr_ty = cur_ty
     end
+    slice_elem = false unless w[:k] == :deref
     next if boxed && w[:k] == :field && w[:idx] == 0
     inner = $borrow && MonomirStd.box_scalar(cur_ty, types)
     boxed = inner ? [addr, inner] : nil
@@ -1408,13 +1423,18 @@ def borrow_loan(expr, place, types, locals, params, stmts, regi)
 end
 
 # --borrow: the locals that hold a `&mut` of a place only to pass it as the first argument of a call,
-# local => the borrow. MIR has lost rustc's autoref marker, so this is the shape of an autoref'd
-# method receiver (`c.set(c.get() + 1)`): the local is assigned once, from `&mut PLACE`, and its one
-# other mention is as the call's first argument. A user's `&mut` variable does not match, since mrustc
-# passes it as a reborrow `&mut (*varN)`; an explicit `&mut x` first argument (`C::set(&mut c, ..)`)
-# does, though rustc does not make it two-phase. The checker makes these loans two-phase: shared until
-# the call, exclusive from there.
+# local => the borrow. This is the shape of an autoref'd method receiver (`c.set(c.get() + 1)`) and of
+# an overloaded compound assignment's left side (`c += c.get()`), which rustc makes two-phase: the
+# local is assigned once, from `&mut PLACE`, and its one other mention is as the first argument of a
+# call to a path. A user's `&mut` variable does not match, since mrustc passes it as a reborrow
+# `&mut (*varN)`. An explicit `&mut x` first argument (`set(&mut c, ..)`) or receiver does match, and
+# rustc does not make it two-phase. The MIR and the HIR have lost the difference, so the callees of
+# the AST's explicit ones (ast_explicit_mut_callees) are left out: a call to a function of one of those
+# names never gets a two-phase receiver. The checker makes these loans two-phase: shared until the
+# call, exclusive from there.
 def mir_two_phase_locals(blocks)
+  return {} unless $ast_src
+  $explicit_mut_callees ||= ast_explicit_mut_callees($ast_src)
   lines = blocks.values.flat_map { |c| c.lines.map(&:strip) }.reject { |l| l.empty? || l.start_with?("SCOPEEND") }
   found = {}
   lines.each do |ln|
@@ -1424,10 +1444,39 @@ def mir_two_phase_locals(blocks)
     uses = lines.select { |l| l =~ /\b#{v}\b/ }
     next unless uses.length == 2 && uses.count(ln) == 1
     call = (uses - [ln])[0]
-    next unless call =~ /^CALL [^=]+ = [^\s(]+\(#{v}, / && call.scan(/\b#{v}\b/).length == 1
+    c = call.match(/^CALL [^=]+ = (ZR[^\s(]+)\(#{v}, /)
+    next unless c && call.scan(/\b#{v}\b/).length == 1
+    # mrustc's mangled paths spell a name as its length and its text (`3set`).
+    next if $explicit_mut_callees.any? { |n| c[1].include?("#{n.length}#{n}") }
     found[v] = m[2].strip
   end
   found
+end
+
+# --borrow: the names of the functions that the AST (-Z dump-ast, after macro expansion) calls with
+# an explicit `&mut` first argument (`set(&mut c, ..)`, `C::set(&mut c, ..)`, under a `use` alias
+# too). A `&mut` elsewhere in an expression (`(&mut c).set(..)`, `f((&mut c), ..)`, `let r = &mut c`)
+# names every function called on its line. A `&mut` after `:`, `->`, `<` or `as` is a type.
+# A name too many only loses a two-phase borrow, which rejects more programs, not fewer.
+def ast_explicit_mut_callees(ast)
+  names = []
+  ast.each_line do |ln|
+    next unless ln.include?("&mut")
+    # The resolved path of a called function is a comment after it: `s/*v:Function[crate::set]*/(`.
+    s = ln.gsub(%r{/\*v:Function\[(?:[^\]]*::)?(\w+)\]\*/}) { " #{$1}" }.gsub(%r{/\*.*?\*/}, "")
+    s.to_enum(:scan, /&mut\b/).each do
+      pre = $~.pre_match
+      next if pre =~ /(?:[:<]|->|\bas|\bdyn|\bimpl)\s*\z/
+      m = pre.match(/([A-Za-z_]\w*)(?:::<[^()]*>)?(?:\s+([A-Za-z_]\w*))?\s*\(\s*\z/)
+      if m
+        names << m[1]
+        names << m[2] if m[2]
+      else
+        names.concat(s.scan(/([A-Za-z_]\w*)\s*(?:::<[^()]*>)?\s*\(/).flatten)
+      end
+    end
+  end
+  names.uniq
 end
 
 # --borrow: the local whose storage a MIR statement writes as a whole or in part (not through a
@@ -1475,8 +1524,8 @@ def copy_type?(ty, types)
   path.nil? || $copy_impls.include?(path)
 end
 
-# --borrow: [root, offset, type] of a local place reached without a deref or a downcast, as for
-# borrow_loan; nil otherwise.
+# --borrow: [root, offset, type] of a local place reached without a deref (fields and enum variants
+# included), as for borrow_loan; nil otherwise.
 def local_place(place, types, locals, params)
   p = parse_place(place)
   return nil unless locals.assoc(p[:root]) || p[:root] =~ /^arg\d+$/
@@ -1485,12 +1534,54 @@ def local_place(place, types, locals, params)
   ty = ty.strip
   off = 0
   p[:ops].each do |w|
-    return nil unless w[:k] == :field
-    o, ft = field_offset_and_type(ty, w[:idx], types)
-    return nil unless ft
-    off += o; ty = ft.strip
+    case w[:k]
+    when :field
+      o, ft = field_offset_and_type(ty, w[:idx], types)
+      return nil unless ft
+      off += o; ty = ft.strip
+    when :downcast
+      vf = types[ty] && types[ty][:tag] && types[ty][:fields][w[:idx]]
+      return nil unless vf
+      off += vf[:off]; ty = vf[:type].strip
+    else
+      return nil
+    end
   end
   [p[:root], off, ty]
+end
+
+# --borrow: the values a place of TY owes a drop, as [id, offset, type]: a std type with drop glue,
+# or a program type with an `impl Drop`, is one; a program struct or a tuple without one owes its
+# fields' drops, each moved and dropped on its own (mrustc drops what a partial move leaves field by
+# field), and an array its elements'. [] when TY has no drop glue; nil when one of them cannot be an
+# obligation: an enum (no layout, and mrustc's drop elaboration of enums is not complete, below) or
+# a type without a borrow layout.
+def drop_units(ty, types, id, base = 0)
+  ty = ty.strip
+  sz, _ = type_size_align(ty, types)
+  return [] if sz == 0
+  parts = nil
+  if ty.start_with?("[") && ty.include?(";")
+    inner, n = ty[1...-1].split(";", 2).map(&:strip)
+    es, _ = type_size_align(inner, types)
+    parts = n.to_i.times.map { |i| [inner, "#{id}[#{i}]", base + i * es] }
+  else
+    t = types[ty]
+    return [] unless t && t[:drop]
+    return nil if t[:tag]
+    path = bin_type_path(ty)
+    if ty.start_with?("ZRTT") || (path && !($drop_impls || []).include?(path))
+      parts = t[:fields].each_with_index.map { |f, i| [f[:type], "#{id}.#{i}", base + f[:off]] }
+    end
+  end
+  if parts
+    return parts.each_with_object([]) do |(pty, pid, poff), out|
+      sub = drop_units(pty, types, pid, poff)
+      return nil unless sub
+      out.concat(sub)
+    end
+  end
+  borrow_layout?(ty, types) ? [[id, base, ty]] : nil
 end
 
 # --borrow: the scalars of a value of TY as [offset, Path B type], or nil when one is not a plain
@@ -1526,21 +1617,153 @@ def move_leaves(ty, types, base = 0)
   [[base, pt]]
 end
 
-# --borrow: the statements that move the non-Copy local places among OPERANDS (MIR operands, which
-# can also be constants): an (eval (move-value T PLACE)) for each scalar of the place, after the
-# statement that read it. The checker then rejects a move of a place with a live loan (E0505) and,
-# as mrustc's validation does, a later read of it.
-def move_marks(operands, types, locals, params)
-  operands.flat_map do |op|
+# --borrow: (borrow-layout (struct "T") SIZE ALIGN (field "fN" OFF TYPE)...) for each struct the
+# functions name, from the dump's type records, so the checker can track their fields. A type with
+# overlapping fields (an enum's variants) or a field the checker cannot describe gets none. Whether
+# NAME gets one; the records are kept in $layout_records.
+LAYOUT_PRIM = {"bool"=>1, "char"=>1, "signed_char"=>1, "unsigned_char"=>1, "short"=>2, "unsigned_short"=>2,
+               "int"=>4, "unsigned_int"=>4, "long"=>8, "unsigned_long"=>8, "long_long"=>8,
+               "unsigned_long_long"=>8, "float"=>4, "double"=>8}.freeze
+
+def borrow_layout?(name, types)
+  records = ($layout_records ||= MonomirStd::LAYOUTS.dup)
+  return records[name] != false if records.key?(name)
+  records[name] = MonomirStd.layout(name, types) || false
+  return true if records[name]
+  t = types[name]
+  return false unless t && !t[:tag] && t[:size] > 0 && t[:size] <= 4096 && t[:align] > 0 && t[:size] % t[:align] == 0
+  field_ok = lambda do |pt|
+    return [LAYOUT_PRIM[pt], LAYOUT_PRIM[pt]] if LAYOUT_PRIM[pt]
+    return [8, 8] if pt.start_with?("(ptr ")
+    m = pt.match(/^\(struct "(.*)"\)$/)
+    return nil unless m && borrow_layout?(m[1], types)
+    ft = types[m[1]]
+    [ft[:size], ft[:align]]
+  end
+  fields = []
+  ranges = []
+  t[:fields].each_with_index do |f, i|
+    fsz, _ = type_size_align(f[:type], types)
+    next if fsz == 0
+    pt = rust_type_to_pathb(f[:type], types)
+    sa = field_ok.call(pt)
+    return false unless sa && sa[0] == fsz && f[:off] % sa[1] == 0 && sa[1] <= t[:align] && f[:off] + fsz <= t[:size]
+    return false if ranges.any? { |o, n| f[:off] < o + n && o < f[:off] + fsz }
+    ranges << [f[:off], fsz]
+    fields << "(field \"f#{i}\" #{f[:off]} #{pt})"
+  end
+  records[name] = "(borrow-layout (struct #{name.inspect}) #{t[:size]} #{t[:align]} #{fields.join(' ')})"
+  true
+end
+
+def local_place_text(root, off)
+  off == 0 ? "$\"#{root}\"" : "(offset $\"#{root}\" #{off})"
+end
+
+# --borrow: the non-Copy local places among OPERANDS (MIR operands, which can also be constants), as
+# [root, offset, type, size]. A use of one moves it.
+def moved_places(operands, types, locals, params)
+  operands.filter_map do |op|
     op = op.strip
-    next [] unless op =~ /^(var|arg)\d+\b/
+    next unless op =~ /^(var|arg)\d+\b/
     root, off, ty = local_place(op, types, locals, params)
-    next [] if root.nil? || copy_type?(ty, types)
+    next if root.nil? || copy_type?(ty, types)
+    sz, _ = type_size_align(ty, types)
+    next if sz == 0
+    [root, off, ty, sz]
+  end
+end
+
+# --borrow: whether a moved value of TY is a byte range (a struct, tuple, enum or array: `move`)
+# rather than scalars (`move-value`). Fat pointers are neither, and get no mark.
+def move_whole?(ty, types)
+  ty = ty.strip
+  return false unless types[ty] || (ty.start_with?("[") && ty.include?(";"))
+  pt = rust_type_to_pathb(ty, types)
+  (pt.start_with?("(struct ") && !pt.start_with?("(struct \"&")) || pt.start_with?("(array ")
+end
+
+# --borrow: the statements that move the non-Copy local places among OPERANDS, after the statement
+# that read them: a (move N PLACE) for an aggregate, which moves its bytes and the drop obligations
+# inside them, or an (eval (move-value T PLACE)) for each scalar of the place. The checker then
+# rejects a move of a place with a live loan (E0505) and, as mrustc's validation does, a later read
+# of it. For an ASSIGN, the translator turns the copy that read the place into a (move N DST PLACE)
+# instead (mir_move_copies).
+def move_marks(operands, types, locals, params)
+  moved_places(operands, types, locals, params).flat_map do |root, off, ty, sz|
+    next ["(move #{sz} #{local_place_text(root, off)})"] if move_whole?(ty, types)
     (move_leaves(ty, types, off) || []).map do |o, pt|
-      place = o == 0 ? "$\"#{root}\"" : "(offset $\"#{root}\" #{o})"
-      "(eval (move-value #{pt} #{place}))"
+      "(eval (move-value #{pt} #{local_place_text(root, o)}))"
     end
   end
+end
+
+# --borrow: the moves of an ASSIGN whose statements are STMTS[FROM..]. The `(copy N DST SRC)` that
+# read a moved aggregate becomes `(move N DST SRC)`, so that DST gets the value with its bytes and
+# pointers; the other moved places get move_marks after the statements. A place INSIDE says is
+# part of one drop obligation (a field of a value with an `impl Drop`, E0509) keeps its copy, which
+# the checker refuses.
+def mir_move_copies(stmts, from, operands, types, locals, params, inside)
+  operands.each do |op|
+    pl = moved_places([op], types, locals, params)[0]
+    next unless pl
+    next if inside.call(op)
+    root, off, ty, sz = pl
+    at = move_whole?(ty, types) && (from...stmts.size).find do |i|
+      next false unless stmts[i].start_with?("(copy #{sz} ")
+      e = sexp_elems(stmts[i])
+      e.length == 4 && stmt_place(e[3], stmts[0...i]) == [root, off]
+    end
+    if at
+      stmts[at] = stmts[at].sub(/\A\(copy /, "(move ")
+    else
+      stmts.concat(move_marks([op], types, locals, params))
+    end
+  end
+end
+
+# --borrow: the elements of the s-expression TEXT, one level deep.
+def sexp_elems(text)
+  inner = text.strip[1...-1]
+  out = []; depth = 0; cur = +""; instr = false
+  inner.each_char do |c|
+    if instr
+      cur << c; instr = false if c == '"'; next
+    end
+    case c
+    when '"' then instr = true; cur << c
+    when '(' then depth += 1; cur << c
+    when ')' then depth -= 1; cur << c
+    when ' '
+      if depth == 0
+        out << cur unless cur.empty?
+        cur = +""
+      else
+        cur << c
+      end
+    else cur << c
+    end
+  end
+  out << cur unless cur.empty?
+  out
+end
+
+# --borrow: [slot, offset] of an address operand of STMTS: $"x", (offset A N), or a register a
+# (let %r T A) defines; nil otherwise.
+def stmt_place(addr, stmts)
+  addr = addr.strip
+  return [$1, 0] if addr =~ /\A\$"([^"]+)"\z/
+  if addr.start_with?("(offset ")
+    e = sexp_elems(addr)
+    return nil unless e.length == 3 && e[2] =~ /\A-?\d+\z/
+    base = stmt_place(e[1], stmts)
+    return base && [base[0], base[1] + e[2].to_i]
+  end
+  return nil unless addr =~ /\A%\d+\z/
+  d = stmts.reverse_each.find { |s| s.start_with?("(let #{addr} ") }
+  return nil unless d
+  e = sexp_elems(d)
+  e.length == 4 ? stmt_place(e[3], stmts) : nil
 end
 
 # --borrow: the operands an ASSIGN's right-hand side moves: a use's place, or the operands of an
@@ -1711,7 +1934,15 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
     addr, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi)
     r1 = regi; regi += 1
     stmts << "(let %#{r1} (ptr (const char)) #{pv})"
-    stmts << "(store (ptr (const char)) #{addr} %#{r1})"
+    # --borrow: a slice's elements are modelled by its first (scripts/monomir-std.rb), which would
+    # lose the pointers in the others of an array of references, so such a slice's pointer is unknown.
+    dt = place_type(dst_place, types, locals, params) rescue nil
+    elem = dt && dt.strip[/\A&(?:mut )?\s*\[(.+)\]\z/, 1]
+    if $borrow && elem && !elem.include?(";") && !MonomirStd::SCALARS.include?(elem.strip)
+      stmts << "(store unsigned_long #{addr} (const unsigned_long 0))"
+    else
+      stmts << "(store (ptr (const char)) #{addr} %#{r1})"
+    end
     r2 = regi; regi += 1
     stmts << "(let %#{r2} unsigned_long #{mv})"
     r3 = regi; regi += 1
@@ -1973,7 +2204,12 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
         elsif (stn.start_with?("[") && stn.include?(";")) || stn.start_with?("&")
           r1 = regi; regi += 1
           stmts << "(let %#{r1} (ptr unsigned_long) (load (ptr unsigned_long) #{saddr}))" if false
-          stmts << "(store unsigned_long #{addr0} #{svv})"
+          # --borrow: a slice of an array of scalars keeps the provenance of the reference it is made
+          # from. Its elements are modelled by the first (scripts/monomir-std.rb), which would lose the
+          # other elements' pointers for an array of references, so that slice's pointer is unknown.
+          elem = stn[/\A\[\s*(\w+)\s*;/, 1]
+          keep = $borrow && elem && MonomirStd::SCALARS.include?(elem)
+          stmts << "(store #{keep ? "(ptr void)" : "unsigned_long"} #{addr0} #{svv})"
           n = stn[/\[\s*[^\];]+;\s*(\d+)/, 1]
           n ||= "0"
           r4 = regi; regi += 1
@@ -2111,13 +2347,19 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
   regi
 end
 
+# --borrow: the drop glue of the program's enums, which is compiler-generated and switches on the
+# variant through a pointer to the enum, which has no layout. It gets no body, so no summary: a drop
+# of an enum is refused at its call (enums get no drop obligation, see drop_units), and a program
+# that only moves its enums is checked.
+enum_glue = $borrow ? types.values.select { |t| t[:tag] && t[:drop] }.map { |t| t[:drop] } : []
+
 functions.each do |fn|
   header = fn[:header]
   name, params_str, ret = parse_fn_header(header)
   next if fn[:body].nil?
   next if name == "panic_impl" || name.start_with?("panic_impl")
   next if name == "main"
-  next if $borrow && (!program_item?(name) || name == "main#")
+  next if $borrow && (!program_item?(name) || name == "main#" || enum_glue.include?(name))
   if name.include?("sync6atomic11atomic_load1g") || name.include?("sync6atomic11atomic_store1g")
     params = parse_params_str(params_str)
     pathb_ret = rust_type_to_pathb(ret, types)
@@ -2164,6 +2406,9 @@ functions.each do |fn|
   $cur_ret = ret
   $agg_ret = agg_ret && !big_ret
   $big_ret = big_ret
+  # --borrow: a function returning a slice or str reference returns its pointer, which a summary can
+  # describe as a returned alias. The result slot holds both words as before.
+  $fat_ret = $borrow && MonomirStd.fat_elem(ret, types)
   $ret_reg = nil
   locals = []
   body.scan(/^\tlet (.+?): (.+);$/) { |n, t| locals << [n.strip, t.strip] }
@@ -2187,10 +2432,41 @@ functions.each do |fn|
     sz = 1 if sz == 0
     slot_lines << "(slot #{n.inspect} #{rust_type_to_pathb(t, types)} #{sz} #{al})"
   end
+  # --borrow: the drop obligations of the locals and by-value parameters with drop glue
+  # (drop_units), local => [[id, offset, type]...]. A local one of whose values cannot be an
+  # obligation gets none, and its DROPs stay calls of its drop glue. Without --hir no move is
+  # marked, so no obligation either.
+  drops = {}
+  if $borrow && $copy_impls
+    (locals + params.each_with_index.map { |t, i| ["arg#{i}", t] }).each do |n, t|
+      next if zst_locals[n] || rust_type_to_pathb(t, types) == "void"
+      sz, _ = type_size_align(t, types)
+      next if sz == 0 || sz > 4096
+      units = drop_units(t, types, n)
+      drops[n] = units if units && !units.empty?
+    end
+  end
+  # The obligations of the values inside the local place PLACE (fields of a local), by id: those
+  # whose field path it starts. A field of a value with an `impl Drop` holds none.
+  drop_ids = lambda do |place|
+    p = parse_place(place)
+    next [] unless drops[p[:root]] && p[:ops].all? { |w| w[:k] == :field }
+    pid = ([p[:root]] + p[:ops].map { |w| w[:idx].to_s }).join(".")
+    drops[p[:root]].map(&:first).select { |id| id == pid || id.start_with?(pid + ".") || id.start_with?(pid + "[") }
+  end
+  # Whether the local place PLACE is a proper part of one obligation's value.
+  drop_inside = lambda do |place|
+    p = parse_place(place.strip.sub(/\A=/, ""))
+    next false unless drops[p[:root]] && !p[:ops].empty?
+    pid = ([p[:root]] + p[:ops].map { |w| w[:k] == :field ? w[:idx].to_s : "?" }).join(".")
+    drops[p[:root]].any? { |id, _, _| pid.start_with?(id + ".") }
+  end
   param_lines = []
   param_reg = {}
-  ri = ($agg_ret || $big_ret) ? 1 : 0
-  if $agg_ret
+  fat_len_reg = {}
+  ri = ($agg_ret || $big_ret) && !$fat_ret ? 1 : 0
+  if $fat_ret
+  elsif $agg_ret
     param_lines << "(sret %0 #{rust_type_to_pathb(ret, types)})"
   elsif $big_ret
     param_lines << "(param %0 \"__sret\" (ptr unsigned_char))"
@@ -2202,6 +2478,14 @@ functions.each do |fn|
       next
     end
     param_reg[i] = ri
+    if $borrow && (fe = MonomirStd.fat_elem(t, types))
+      # --borrow: a slice or str reference is passed as its two words, so that its pointer is a
+      # parameter of its own, which a summary can describe (scripts/monomir-std.rb, fat_layout).
+      param_lines << "(param %#{ri} \"arg#{i}\" (ptr #{fe})) (param %#{ri + 1} \"arg#{i}.len\" unsigned_long)"
+      fat_len_reg[i] = ri + 1
+      ri += 2
+      next
+    end
     if pt.start_with?("(") && !pt.start_with?("(ptr") && !pt.start_with?("(fn") && !pt.start_with?("(array ?")
       # aggregate: pass by value
       param_lines << "(param %#{ri} \"arg#{i}\" (byval #{pt}))"
@@ -2249,7 +2533,16 @@ functions.each do |fn|
     pt = rust_type_to_pathb(t, types)
     agg = pt.start_with?("(") && !pt.start_with?("(ptr") && !pt.start_with?("(fn")
     sz0, _ = type_size_align(t, types)
-    if agg
+    if fat_len_reg[i]
+      stmts << "(store (ptr #{MonomirStd.fat_elem(t, types)}) $\"arg#{i}\" %#{r})"
+      stmts << "(let %#{regi} (ptr unsigned_long) (offset $\"arg#{i}\" 8))"
+      stmts << "(store unsigned_long %#{regi} %#{fat_len_reg[i]})"
+      regi += 1
+    elsif agg && drops["arg#{i}"]
+      # The parameter owns the value the caller moved into it.
+      stmts << "(move #{sz0} $\"arg#{i}\" %#{r})"
+      drops["arg#{i}"].each { |id, _, _| stmts << "(drop-live #{id.inspect})" }
+    elsif agg
       stmts << "(copy #{sz0} $\"arg#{i}\" %#{r})" unless sz0 == 0
     else
       stmts << "(store #{pt} $\"arg#{i}\" %#{r})"
@@ -2265,6 +2558,7 @@ functions.each do |fn|
     deferred = []
     term_start = nil
     call_moves = nil
+    call_dest = nil
     content.each_line do |ln|
       ln = ln.strip
       next if ln.empty?
@@ -2292,8 +2586,13 @@ functions.each do |fn|
         m = ln.match(/^ASSIGN (.+?) = (.+);$/)
         place = m[1].strip
         rhs = m[2].strip
+        from = stmts.size
         regi = store_rvalue(place, rhs, types, locals, params, param_reg, stmts, regi, lines, pathb_ret)
-        stmts.concat(move_marks(mir_moved_operands(rhs), types, locals, params)) if $borrow
+        if $borrow
+          mir_move_copies(stmts, from, mir_moved_operands(rhs), types, locals, params, drop_inside)
+          # The value is complete: the obligations inside the place are owed from here.
+          drop_ids.call(place).each { |id| stmts << "(drop-live #{id.inspect})" }
+        end
       elsif ln.start_with?("SETFLAG")
         m = ln.match(/^SETFLAG df(\d+) = (!?)df?(\d*);?$/)
         if m
@@ -2356,7 +2655,39 @@ functions.each do |fn|
         end
       elsif ln.start_with?("DROP")
         m = ln.match(/^DROP (.+?)( SHALLOW)?( IF df(\d+))?;?$/)
-        if m
+        ids = m && $borrow ? drop_ids.call(m[1].strip) : []
+        if !ids.empty?
+          # The drop of a local's value is the consumption of its obligations. A drop flag's DROP
+          # consumes them on the paths where they are live: mrustc clears the flag where it moved
+          # the value, which the checker sees as the move. What the glue does first that the checker
+          # must see still happens: a RefCell guard's flag update, and a Vec<&T> letting go of its
+          # references (MonomirStd.before_drop).
+          sty = place_type(m[1].strip, types, locals, params)
+          glue = sty && types.key?(sty) ? types[sty][:drop] : nil
+          if glue
+            g = pb_sym(glue)
+            kind = MonomirStd.guard_call(g)
+            if kind || MonomirStd.kept_entry(g)
+              if m[4]
+                r = regi; regi += 1
+                stmts << "(let %#{r} bool (load bool $\"df#{m[4]}\"))"
+              end
+              before = stmts.size
+              addr, regi = place_addr(m[1].strip, types, locals, params, param_reg, stmts, regi)
+              regi = MonomirStd.before_drop(g, addr, stmts, regi)
+              low = kind && MonomirStd.lower_guard(kind, g, nil, [addr], regi, types)
+              if low
+                regi = low[1]
+                stmts.concat(low[0])
+              end
+              if m[4]
+                added = stmts[before..-1] || []
+                stmts[before..-1] = ["(if %#{r} (then #{added.join(' ')}))"]
+              end
+            end
+          end
+          ids.each { |id| stmts << "(#{m[4] ? 'drop-state-if-live' : 'drop-state'} #{id.inspect})" }
+        elsif m
           slot = m[1].strip; flag = m[4]
           # A call of the drop glue, or for a RefCell guard (--borrow) the glue's effect on the flag.
           call_glue = lambda do |glue, addr|
@@ -2371,6 +2702,7 @@ functions.each do |fn|
             glue = sty && types.key?(sty) ? types[sty][:drop] : nil
             if glue
               addr, regi2 = place_addr(slot, types, locals, params, param_reg, stmts, regi)
+              regi2 = MonomirStd.before_drop(pb_sym(glue), addr, stmts, regi2) if $borrow
               regi = regi2
               stmts << call_glue.call(glue, addr)
             end
@@ -2383,6 +2715,7 @@ functions.each do |fn|
               stmts << "(let %#{r} bool (load bool $\"df#{flag}\"))"
               before = stmts.size
               addr, regi = place_addr(slot, types, locals, params, param_reg, stmts, regi)
+              regi = MonomirStd.before_drop(pb_sym(glue), addr, stmts, regi) if $borrow
               stmts << call_glue.call(glue, addr)
               added = stmts[before..-1] || []
               stmts[before..-1] = ["(if %#{r} (then #{added.join(' ')}))"]
@@ -2478,6 +2811,7 @@ functions.each do |fn|
         raw_args = args_str.empty? ? [] : split_top(args_str)
         raw_args = raw_args.map(&:strip).reject(&:empty?)
         call_moves = raw_args if $borrow
+        call_dest = dest if $borrow
         arg_vals = []
         raw_args.each_with_index do |a, ai|
           at = place_type(a, types, locals, params)
@@ -2522,6 +2856,16 @@ functions.each do |fn|
               addr = v
             else
               addr, regi = place_addr(a, types, locals, params, param_reg, stmts, regi)
+            end
+            fe = $borrow && program_item?(fexpr.to_s) && MonomirStd.fat_elem(at || "&str", types)
+            if fe
+              # A program function takes a slice's two words (see its parameters).
+              stmts << "(let %#{regi} (ptr #{fe}) (load (ptr #{fe}) #{addr}))"
+              stmts << "(let %#{regi + 1} (ptr unsigned_long) (offset #{addr} 8))"
+              stmts << "(let %#{regi + 2} unsigned_long (load unsigned_long %#{regi + 1}))"
+              arg_vals << ["%#{regi}", at] << ["%#{regi + 2}", "usize"]
+              regi += 3
+              next
             end
             arg_vals << ["(byval #{apt} #{addr})", at || "&str"]
           else
@@ -3287,6 +3631,14 @@ functions.each do |fn|
           low, regi = MonomirStd.lower(std_kind, dest_addr, arg_vals.map(&:first), regi)
           stmts.concat(low)
           stmts << "(goto #{retblk.inspect})"
+        elsif $borrow && MonomirStd.kept(pb_sym(fexpr))
+          # A standard library call whose result or argument keeps a pointer (scripts/monomir-std.rb,
+          # KEPT): the call, then the stores of the pointers kept.
+          sret = dest_agg ? "(sret #{rust_type_to_pathb(dest == "RETURN" ? ret : dest_ty, types)} #{dest_addr})" : nil
+          low, kept_ptr, regi = MonomirStd.lower_kept(pb_sym(fexpr), sret, arg_vals.map(&:first), ret_void || dest_agg ? nil : dest_pt, regi)
+          stmts.concat(low)
+          store_dest.call(kept_ptr) if kept_ptr && !ret_void
+          stmts << "(goto #{retblk.inspect})"
         else
           fname = fexpr
           if $extern_map && $extern_map[pb_sym(fname)]
@@ -3296,7 +3648,16 @@ functions.each do |fn|
           argstr = arg_vals.map(&:first).join(' ')
           dest_sz = dest == "RETURN" ? type_size_align(ret, types)[0] : (dest_ty ? type_size_align(dest_ty, types)[0] : 0)
           dest_big = dest_agg && dest_sz > 16
-          if dest == "RETURN"
+          fat_dest = $borrow && dest_agg && program_item?(pb_sym(fname)) && MonomirStd.fat_elem(dest == "RETURN" ? ret : dest_ty, types)
+          if fat_dest
+            # A program function returns a slice's pointer (see $fat_ret). Its length is not tracked.
+            stmts << "(let %#{regi} (ptr #{fat_dest}) (call (ptr #{fat_dest}) #{callee_code} #{argstr}))"
+            stmts << "(store (ptr #{fat_dest}) #{dest_addr} %#{regi})"
+            stmts << "(let %#{regi + 1} (ptr unsigned_long) (offset #{dest_addr} 8))"
+            stmts << "(store unsigned_long %#{regi + 1} (const unsigned_long 0))"
+            regi += 2
+            stmts << "(goto #{retblk.inspect})"
+          elsif dest == "RETURN"
             if $big_ret
               dpt = rust_type_to_pathb(ret, types)
               stmts << "(eval (call void #{callee_code} $\"retval\" #{argstr}))"
@@ -3332,6 +3693,10 @@ functions.each do |fn|
           rsz, _ = type_size_align($cur_ret, types)
           stmts << "(copy #{rsz} %0 $\"retval\")"
           stmts << "(return)"
+        elsif $fat_ret
+          stmts << "(let %#{regi} (ptr #{$fat_ret}) (load (ptr #{$fat_ret}) $\"retval\"))"
+          stmts << "(return %#{regi})"
+          regi += 1
         elsif $agg_ret
           rsz, _ = type_size_align($cur_ret, types)
           stmts << "(copy #{rsz} %0 $\"retval\")"
@@ -3497,10 +3862,12 @@ functions.each do |fn|
       else
         # skip
       end
-      # A call moves its arguments after reading them, before its goto.
+      # A call moves its arguments after reading them, before its goto. Its result is complete there,
+      # and owes the drops of its obligations.
       if call_moves
         at = ((term_start || stmts.size)...stmts.size).find { |i| stmts[i].start_with?("(goto ") } || stmts.size
-        stmts.insert(at, *move_marks(call_moves, types, locals, params))
+        stmts.insert(at, *(move_marks(call_moves, types, locals, params) +
+                           drop_ids.call(call_dest).map { |id| "(drop-live #{id.inspect})" }))
         call_moves = nil
       end
     end
@@ -3515,7 +3882,7 @@ functions.each do |fn|
 
   func_text = []
   func_text << "(function #{name.inspect}"
-  func_text << "  (ret #{pathb_ret})"
+  func_text << "  (ret #{$fat_ret ? "(ptr #{$fat_ret})" : pathb_ret})"
   func_text << "  (params #{param_lines.join(' ')})"
   # Weak: the dump repeats std functions that also live in mrustc's gcc-built
   # rlib objects (linked for the functions the dump lacks); the strong
@@ -3524,6 +3891,15 @@ functions.each do |fn|
   func_text << "  (weak)"
   slot_lines.each { |s| func_text << "  #{s}" }
   ($lit_slots || []).each { |s| func_text << "  #{s}" }
+  # A value with an `impl Drop` is a deep obligation: its drop may use the references it holds, so
+  # they must still be valid there (rustc's E0597 for a Drop type that outlives a borrowed local).
+  # A standard library type's drop here frees memory of scalars only (scripts/monomir-std.rb).
+  drops.each do |n, units|
+    units.each do |id, off, ty|
+      deep = ($drop_impls || []).include?(bin_type_path(ty)) ? " deep" : ""
+      func_text << "  (drop-obligation #{id.inspect} #{rust_type_to_pathb(ty, types)} #{local_place_text(n, off)}#{deep})"
+    end
+  end
   if $borrow
     # Storage that no MIR statement starts (the result, drop flags, the translator's own
     # temporaries) lives for the whole call. Parameter spill slots are named after their parameter.
@@ -3531,10 +3907,12 @@ functions.each do |fn|
     stmts.each { |st| declared[$1] = true if st =~ /^\(decl \$"([^"]+)"/ }
     params.each_index { |i| declared["arg#{i}"] = true }
     param_reg.each_value { |r| func_text << "  (decl %#{r} param)" if r }
+    fat_len_reg.each_value { |r| func_text << "  (decl %#{r} param)" }
     # A shared reference parameter: the function cannot write through it (UnsafeCell aside).
     params.each_with_index do |t, i|
       r = param_reg[i]
-      func_text << "  (readonly %#{r})" if r && t.strip =~ /^&(?!mut |move )/ && rust_type_to_pathb(t, types).start_with?("(ptr ")
+      thin = rust_type_to_pathb(t, types).start_with?("(ptr ") || fat_len_reg[i]
+      func_text << "  (readonly %#{r})" if r && t.strip =~ /^&(?!mut |move )/ && thin
     end
     (slot_lines + ($lit_slots || [])).each do |sl|
       n = sl[/^\(slot "([^"]+)"/, 1]
@@ -3548,48 +3926,12 @@ end
 
 
 if $borrow
-  # (borrow-layout (struct "T") SIZE ALIGN (field "fN" OFF TYPE)...) for each struct the functions
-  # name, from the dump's type records, so the checker can track their fields. A type with
-  # overlapping fields (an enum's variants) or a field the checker cannot describe gets none.
-  prim = {"bool"=>1, "char"=>1, "signed_char"=>1, "unsigned_char"=>1, "short"=>2, "unsigned_short"=>2,
-          "int"=>4, "unsigned_int"=>4, "long"=>8, "unsigned_long"=>8, "long_long"=>8,
-          "unsigned_long_long"=>8, "float"=>4, "double"=>8}
-  records = MonomirStd::LAYOUTS.dup
-  describe = nil
-  field_ok = lambda do |pt|
-    return [prim[pt], prim[pt]] if prim[pt]
-    return [8, 8] if pt.start_with?("(ptr ")
-    m = pt.match(/^\(struct "(.*)"\)$/)
-    return nil unless m && describe.call(m[1])
-    t = types[m[1]]
-    [t[:size], t[:align]]
-  end
-  describe = lambda do |name|
-    return records[name] != false if records.key?(name)
-    records[name] = MonomirStd.layout(name, types) || false
-    return true if records[name]
-    t = types[name]
-    return false unless t && !t[:tag] && t[:size] > 0 && t[:size] <= 4096 && t[:align] > 0 && t[:size] % t[:align] == 0
-    fields = []
-    ranges = []
-    t[:fields].each_with_index do |f, i|
-      fsz, _ = type_size_align(f[:type], types)
-      next if fsz == 0
-      pt = rust_type_to_pathb(f[:type], types)
-      sa = field_ok.call(pt)
-      return false unless sa && sa[0] == fsz && f[:off] % sa[1] == 0 && sa[1] <= t[:align] && f[:off] + fsz <= t[:size]
-      return false if ranges.any? { |o, n| f[:off] < o + n && o < f[:off] + fsz }
-      ranges << [f[:off], fsz]
-      fields << "(field \"f#{i}\" #{f[:off]} #{pt})"
-    end
-    records[name] = "(borrow-layout (struct #{name.inspect}) #{t[:size]} #{t[:align]} #{fields.join(' ')})"
-    true
-  end
   # Trusted summaries of the standard library functions the program calls (scripts/monomir-std.rb).
   text = lines.join("\n")
   std_lines = text.scan(/&"([^"]+)"/).flatten.uniq.map { |n| MonomirStd.summary(n, types) }.compact
   used = (text + "\n" + std_lines.join("\n")).scan(/\(struct "([^"]+)"\)/).flatten.uniq
-  used.each { |n| describe.call(n) }
+  used.each { |n| borrow_layout?(n, types) }
+  records = $layout_records
   laid_out = records.select { |n, r| r && (used.include?(n) || !MonomirStd::LAYOUTS.key?(n)) }
   layout_lines = laid_out.values + MonomirStd.interior_forms(laid_out.keys) + std_lines
   lines.insert(1, *layout_lines) unless layout_lines.empty?

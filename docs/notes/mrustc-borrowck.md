@@ -19,7 +19,7 @@ The pipeline is:
    `-Z disable-mir-opt` also turns off the inlining and optimisation after monomorphisation, which
    ran regardless and could delete a borrow whose result is unused. Without the variable and the
    flag, mrustc's output is unchanged. `-Z dump-hir` also writes the crate's HIR, for its
-   `impl Copy` items (below).
+   `impl Copy` items, and `-Z dump-ast` the expanded AST, for its explicit `&mut` arguments (below).
 2. **`scripts/monomir-to-pathb.rb --borrow`**, which writes checker input instead of code:
    - Only the program's own functions (`bin#` paths) get bodies. Standard library functions stay
      external. Those in `scripts/monomir-std.rb` get trusted summaries (below); a call to any other
@@ -35,20 +35,50 @@ The pipeline is:
      included) become `(borrow (ptr T) "Ln" shared|exclusive PLACE)`. A borrow through a deref is a
      plain address and carries the loans of the pointer it derefs, so a reborrow has no loan of its own.
    - A `&mut` of such a place is `two-phase` instead of `exclusive` when its local is assigned only
-     there and its one other mention is as the first argument of a `CALL`: the shape of an autoref'd
-     method receiver. The checker treats it as shared until the call and exclusive from there
-     (pathb-borrowck.md, "Two-phase loans"). MIR has lost the autoref marker. A `&mut` variable does
-     not match, since mrustc passes it as a reborrow `&mut (*varN)`, but an explicit `&mut x` first
-     argument does.
+     there and its one other mention is as the first argument of a `CALL` to a path: the shape of an
+     autoref'd method receiver and of an overloaded `+=`'s left side, rustc's two-phase borrows. The
+     checker treats it as shared until the call and exclusive from there (pathb-borrowck.md,
+     "Two-phase loans"). A `&mut` variable does not match, since mrustc passes it as a reborrow
+     `&mut (*varN)`. An explicit `&mut x` first argument or receiver matches too, and the MIR and the
+     final HIR (where method calls are already paths with their autorefs) cannot tell it from an
+     autoref. The expanded AST (`--ast`) still can: the functions it calls with a written `&mut` as
+     first argument are collected by name (a `&mut` elsewhere in an expression names every function
+     called on its line), and a call whose mangled callee holds one of those names gets no two-phase
+     borrow. Without `--ast`, none is two-phase.
    - A move of a local place of a non-Copy type (a use, an aggregate's operand, or a call argument)
-     is followed by `(eval (move-value T PLACE))` for each scalar of the place, after the statement
-     that reads it (pathb-borrowck.md, "Explicit value moves and copies"). The checker then rejects
+     is marked after the statement that reads it (pathb-borrowck.md, "Explicit value moves and
+     copies"). The `copy` that an ASSIGN reads an aggregate with becomes `(move N DST SRC)`, which
+     moves its bytes and its drop obligations to DST; a call's by-value argument is followed by
+     `(move N SRC)`; a scalar (a `&mut`) by `(eval (move-value T PLACE))`. The checker then rejects
      a move with a live loan of the place (E0505). The dump prints a move and a copy alike, so the
      translator decides: a type moves if it has drop glue, is a `&mut`, or is one of the program's
      types with no `impl Copy` in the HIR (`--hir`); tuples and arrays follow their elements. A type
      that holds an `UnsafeCell` (`Cell`, `RefCell`) moves too, since it cannot be Copy. Other
-     types count as Copy, which can miss a move but not report a false one. Enum fields, moves
-     through a deref or out of an enum variant, and fat pointers get no marks.
+     types count as Copy, which can miss a move but not report a false one. Enums move as bytes,
+     tag and payload, and a move out of a variant (`m@0 .0`) as the payload's bytes. Fat pointers
+     get no marks. A move through a deref is not marked: Rust allows one only out of a Box, and a
+     Box of a non-scalar is refused (below), while a Box of a scalar holds a Copy value.
+   - A local or by-value parameter whose type has drop glue gets `(drop-obligation ID T PLACE)`
+     facts (pathb-borrowck.md, "Explicit drop-state contracts"): one for a standard library type
+     with drop glue or a program type with an `impl Drop` (the HIR's), and for a program struct or a
+     tuple without one, one per field with drop glue (`var0.1`), since mrustc moves and drops those
+     separately. A program type with an `impl Drop` is `deep`: its drop may use the references the
+     value holds (rustc's E0597 for a Drop type that outlives a borrowed local). The value is
+     registered (`drop-live`) after the ASSIGN or CALL that writes it whole, and a by-value
+     parameter at entry. mrustc elaborates drops itself: a moved value has no DROP, and one moved on
+     some paths is dropped under a drop flag (`DROP var0 IF df0`). `DROP` of a place holding
+     obligations becomes `drop-state` for each, under a flag `drop-state-if-live`, which consumes
+     the paths where the value is still live; the checker does not correlate the flag with them, so
+     this trusts mrustc's flags. The checker then rejects a use after the drop, a drop after a move,
+     a drop with a live loan of the value, and a return or storage end that leaves one owed. A value
+     that is moved out of in part is refused when it has an `impl Drop` (E0509, which mrustc does not
+     check), since its move stays a `copy` of part of the obligation.
+   - Enums get no obligation. They have no layout, and mrustc's drop elaboration does not drop a
+     match scrutinee that one arm moves out of, on any arm (`match o { Some(v) if c => take(v), _ =>
+     0 }` leaks `v` when `c` is false), so an obligation would report mrustc's leak. A DROP of an
+     enum stays a call of its drop glue, which has no summary (the program's enums' glue gets no
+     body), so it is refused; a program that moves its enums out is checked. A value without a
+     layout (a struct with an enum field) gets none either, and its DROPs stay drop glue calls.
    - A `&T` parameter gets `(readonly %N)`, which keeps summary inference to read-only modes. The
      signature's `&` against `&mut` is the information the checker would otherwise not have.
    - `(borrow-layout ...)` records for the structs the functions use come from the dump's `type`
@@ -71,11 +101,14 @@ may throw:
   `IndexMut::index_mut`, whose result is a returned alias at offset 0 of the Vec, shared or exclusive.
   The elements are on the heap, which the checker does not track, so a reference to one is modelled
   as one into the Vec itself, with the Vec's loan: the loan rustc gives it too. Drop glue is a `write`
-  of the Vec, which conflicts with any loan of it still live.
+  of the Vec, which conflicts with any loan of it still live; a local Vec's drop is its obligation's
+  `drop-state` instead, which conflicts the same way.
 - **`Box<T>`**: `new` and drop glue. The translator treats a Box as holding its value in its own place:
   mrustc's `*b.0 .0 .0` is the Box's address, so `&*b` is a loan of `b`, as in rustc.
 - **`Range<T>`** `into_iter` and `next`, and **`Option<T>`** `unwrap`, `is_some`, `is_none` (`for i in
   0..n`). An Option of a scalar holds no pointer; it gets a layout of one byte array.
+- **`mem::drop` and `mem::forget`** of a struct take it by value and keep nothing. The value is
+  moved into the call, so the caller owes no drop of it.
 - **Formatting**. `fmt::rt::Argument::new_display` (and `new_debug`, `new_lower_hex` and the other
   specs) and `fmt::Arguments::new_v1` and `new_const` keep the references they are given, which a
   summary cannot say. The translator replaces each call with the stores of those references into the
@@ -86,10 +119,44 @@ may throw:
   mrustc ends the storage of format_args!'s array of `Argument`s before the Arguments that points to
   it is used; the translator keeps that array's storage to the end of the function.
 
-Containers are covered only for primitive scalar elements: such an element holds no reference, so a
-Vec or Box of one keeps no borrow and its drop reads only its own place. A Vec of references, `vec![]`
-(`Box<[T]>`), slices (`&[T]` is a two-word value, which a summary cannot return), iterators,
-`String`, and a user `impl Display` (it calls `Formatter` methods) have no summaries and are refused.
+The summaries above cover primitive scalar elements: such an element holds no reference, so a Vec
+or Box of one keeps no borrow and its drop reads only its own place. A summary keeps no pointer, so
+views and containers of references are table entries with *keeps* (`KEPT` in monomir-std.rb): the
+call gets a summary for its accesses, and the translator follows it with stores of the pointers its
+result or an argument keeps, read before the call (a call that writes its argument forgets the
+pointers in it).
+
+- **Slices and `&str`** are two words, the address of the first element and the length, with a
+  layout of a pointer and an `unsigned_long`. The pointer carries the loans; the length is a scalar.
+  The elements are modelled by the first, as a Vec's are by the Vec: indexing a slice is the
+  slice's own pointer. A slice of a Vec points at the Vec, of an array at the array, with the loan of
+  the `&` it is made from. A program function's slice parameter is passed as its two words, so its
+  pointer is a parameter that summary inference describes (`(read int) (value unsigned_long)`), and a
+  function returning a slice returns its pointer, inferred as a returned alias. A slice of an array
+  of references would lose all but the first element's pointer, so its pointer is unknown, and a use
+  is refused.
+- **`Vec<T>`** `as_slice`, `as_mut_slice`, `Deref`, `DerefMut`, `<&Vec<T>>::into_iter`; **`[T]`**
+  `len`, `is_empty`, `iter`, `first`, `last`, `<&[T]>::into_iter`; **`slice::Iter<T>`** `into_iter`
+  and `next`, whose `Option<&T>` (one pointer) is the iterator's pointer; `Option<&T>` `unwrap`,
+  `is_some`, `is_none`. The Iter holds the slice's pointer, so it keeps the slice's loans.
+- **`Vec<&T>`** keeps the references pushed into it, at offset 8 of the Vec. Each push joins the new
+  reference with the ones there, so every element's loans stay live while the Vec is used, as
+  rustc's one lifetime for the element type does. `new`, `push`, `pop`, `len`, `is_empty`, `clear`,
+  `truncate` and `Index::index` also read what the Vec holds (a byval-deep read of it), so a use of
+  the Vec after an element's referent is gone is an error (E0597). Its drop glue does not: Vec's Drop
+  is `#[may_dangle]`, so the references are cleared first. A write of one element would replace the
+  joined references, so `index_mut`, `as_mut_slice` and `iter_mut` of a `Vec<&T>` have no entries.
+- **`String`**: `new`, `push_str`, `push`, `clear`, `len`, `is_empty`, `capacity`, `clone`, `as_str`
+  and `Deref` (a `&str` into the String, like a Vec's slice), drop glue, `String::from(&str)` and
+  `str::to_string`, and `str::len`. A string literal's bytes are static: passing them to a program
+  function reads external memory, which the checker allows as it allows a load through an external
+  pointer (pathb-borrowck.md, "Closed call-effect contracts").
+
+`vec![]` (`Box<[T]>`), subslices (`&v[1..]`), mutable iterators, containers of `&mut T` or of
+structs, and a user `impl Display` (its `fmt` calls `Formatter::write_fmt` and the `?` operator's
+`Try` impls) have no entries and are refused. A program function given a `&Vec<&T>` can read its
+length without using the references in it, so a dangling element is found only by the caller's own
+uses of the Vec.
 
 ### Interior mutability
 
@@ -129,24 +196,28 @@ mrustc also rejects some programs itself, and the driver reports those as errors
 ## Results
 
 `tests/mrustc-borrow/cases` has one program per rule, each with rustc 1.99's verdict. The suite
-checks this pipeline's verdict, and compares rustc's when one is installed. 49 of the 52 cases agree
+checks this pipeline's verdict, and compares rustc's when one is installed. 78 of the 82 cases agree
 with rustc:
 
 | Verdict | Cases |
 | --- | --- |
-| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes, Cell set/get through two shared references, `&self` and `&Cell` functions that write a Cell, RefCell borrow_mut and borrow through `&self` methods, a Ref and a RefMut at once (runtime-checked) |
-| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502); with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec; with cells, E0505 a Cell moved and a RefCell moved while borrowed, E0506 a Cell assigned while borrowed, E0502 Cell::get_mut while borrowed, E0597 a Ref or RefMut guard that outlives its RefCell and a Ref's `&T` that outlives the guard |
+| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`, `v.push(v.len())`) and overloaded `+=` (`c += c.get()`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes; with drops, a Vec moved on one branch (a drop flag), a field of a struct moved on one branch, a struct with a Drop impl and a write to its field, the same struct holding a dangling reference without the impl, reassigning a live Vec, `mem::forget` and `mem::drop`, a Vec moved into and out of an enum variant; with cells, Cell set/get through two shared references, `&self` and `&Cell` functions that write a Cell, RefCell borrow_mut and borrow through `&self` methods, a Ref and a RefMut at once (runtime-checked); slices of a Vec and of an array (`iter`, `for x in &v`, `for x in s`, indexing, `first`, `as_mut_slice`, functions taking and returning `&[i32]`), a `Vec<&i32>` pushed, indexed, iterated and popped, then its referent assigned after its last use, `String` and `&str` (literals, `push_str`, `as_str`, a function taking `&str`) |
+| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502, also for `+=`); E0502 for an explicit `&mut c` first argument, receiver, or `AddAssign::add_assign(&mut c, ..)`, which are not two-phase; with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec; with drops, E0597 a reference into a dropped Box and a struct with a Drop impl that outlives a borrowed local, E0505 a conditional move and a `drop(v)` while borrowed, a whole-enum move and a move out of a variant while borrowed; with cells, E0505 a Cell moved and a RefCell moved while borrowed, E0506 a Cell assigned while borrowed, E0502 Cell::get_mut while borrowed, E0597 a Ref or RefMut guard that outlives its RefCell and a Ref's `&T` that outlives the guard; with slices and containers of references, E0502 a push while iterating the Vec, while a slice returned by a function is live, and to a String while its `as_str` is live, E0506 an assignment to a referent held by a `Vec<&i32>` (pushed first of two) and inside a loop over it, E0597 a slice that outlives its Vec and a `Vec<&i32>` used after a referent's scope |
 | Different | below |
 
 The differences are the known gaps:
 
-- **An explicit `&mut x` first argument is two-phase too** (`set(&mut c, c.get())`, E0502), so it is
-  accepted. rustc makes only autoref borrows two-phase, and the MIR does not say which this was. The
-  program only reads `c` before the call, so the borrow is still not violated.
-- **A Vec of references** is refused: its functions have summaries only for scalar elements.
+- **A callee also called with an explicit `&mut`** gets no two-phase receivers anywhere in the
+  program, since calls are matched to the AST only by name: `C::set(&mut c, 2); c.set(c.get())` is
+  rejected (`gap_two_phase_same_name`). This only rejects more.
+- **mrustc evaluates an index before IndexMut's `&mut v`**, where rustc takes the borrow first (it is
+  not two-phase), so `v[v.len() - 1] = 7` (E0502) is accepted (`gap_index_mut_order`). The index
+  only reads `v` before the borrow, so the program is still memory-safe.
 - **A `&mut` from `RefMut::deref_mut` kept past its guard** (E0597) is accepted. It has the RefCell's
   loan, not one of the guard, so it stays within the RefCell's borrow and cannot dangle, but RefCell's
   runtime check no longer covers it.
+- **A move out of a field of a struct with a Drop impl** (E0509) is refused rather than rejected.
+  mrustc does not check the rule, and the checker sees a part of a drop obligation copied.
 
 With lifetimes erased, the translator cannot say that `pick<'a>(a: &'a i32, b: &'a i32) -> &'a i32`
 returns a borrow of either argument. Summary inference finds it instead: a summary may list several
@@ -157,8 +228,13 @@ borrows one of two fields of its `&mut` argument. A write through a reference to
 is a weak update of both. In `err_loop_store` the checker rejects the use of the kept borrow after the
 next iteration ends it, where rustc reports the next iteration's `&mut x`.
 
+A drop of a value whose glue the checker must see still has that effect before the obligation is
+consumed: a RefCell guard updates its flag through the reference it keeps, and a `Vec<&T>` lets go of
+its references first (Vec's Drop is `#[may_dangle]`).
+
 Generic functions are checked only as the instances the program uses, after monomorphisation.
-Standard library calls outside the table above are refused for lack of summaries.
+Standard library calls outside the tables above are refused for lack of summaries. A drop of an enum
+is refused (above).
 
 ## How this compares with other implementations
 
@@ -168,7 +244,8 @@ As of October 2026:
   next checker, Polonius alpha (location-sensitive), was enabled on nightly in August 2026. Full
   Polonius remains future work. This route follows the same model as NLL on a lower level IR:
   storage ends, loans, and liveness-based loan ends. Its input is monomorphised and has lost lifetimes
-  and the autoref marker, so two-phase borrows come from the shape of the MIR.
+  and the autoref marker, so two-phase borrows come from the shape of the MIR and the AST's explicit
+  `&mut` arguments.
 - **gccrs** lowers to its own borrow-checker IR (BIR), generates Polonius facts from it, and runs the
   Polonius library. That is the same arrangement as here: a frontend's IR, then a separate checker.
   It reached GCC 15 in 2025.
@@ -180,7 +257,10 @@ As of October 2026:
 
 ## Next steps
 
-- Moves: drop obligations for types with drop glue, so a moved value is not dropped and an unmoved
-  one is; moves of enums and out of enum variants.
-- More standard library summaries: slices and iterators need fat-pointer results, `String` and
-  containers of references need summaries that keep borrows.
+- Drops of enums: a layout for the variant a path holds, and a fix (or a refusal) for mrustc's
+  missing drop of a partly moved match scrutinee.
+- Reborrows through a deref carry no loan of their own, so two `&mut s.x` made through one `&mut S`
+  parameter are accepted (rustc E0499). A loan per reborrow, as a child of the pointer's loans
+  (pathb-borrowck.md, "Parent/child reborrows"), would catch it.
+- More standard library entries: subslices, `vec![]`, mutable iterators, containers of `&mut T` and of
+  structs, and `impl Display` (`Formatter::write_fmt` and the `Try` impls of `?`).

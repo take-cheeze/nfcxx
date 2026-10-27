@@ -23,7 +23,7 @@ The initial fact vocabulary is already accepted by the QBE emitter as metadata:
 (decl %0 ref)           reference parameter; caller-owned storage
 (decl $"tmp" temp)       a compiler temporary's storage starts, initially uninitialized
 (scope-end $"x")         local storage lifetime ends
-(rref-arg $"x")          C++ rvalue-reference argument; requires future move contracts
+(rref-arg $"x")          C++ rvalue-reference argument; a plain reference argument, not a move
 ```
 
 The C++ frontend also prints facts for storage that no declaration names:
@@ -163,7 +163,7 @@ to the source pointer, preserving runtime code generation.
 ## Two-phase loans
 
 `two-phase` is a third borrow kind, Rust's two-phase borrow of an autoref'd method receiver
-(`c.set(c.get() + 1)`):
+(`c.set(c.get() + 1)`) or an overloaded compound assignment's left side (`c += c.get()`):
 
 ```text
 (let %0 (ptr int) (borrow (ptr int) "a" two-phase $"x"))
@@ -274,13 +274,25 @@ versus move from the source language's rules, including Rust's `Copy` trait; the
 prove that a type is copyable. Scalar representations in tests can model consuming handles and
 are not claims that moving a Rust integer makes it unusable. Transfers currently require
 scalar/pointer values in direct locals or constant-offset fields.
-Whole-aggregate value transfers, moves through arbitrary aliases, drops, and ownership effects
-of calls remain unsupported. The mrustc route emits `move-value` for Rust moves, one per scalar of the
-moved place ([mrustc-borrowck.md](mrustc-borrowck.md)); the C++ frontend emits neither form.
+An aggregate moves as bytes:
 
-C++ `rref-arg` is still refused: an rvalue-reference argument alone does not authorize treating the
-source as dead. Ordinary C++ moved-from objects can remain usable; their contracts need separate
-modeling before a frontend can emit a consuming transfer.
+```text
+(move 24 $"w" $"v")   ; v's bytes and pointers go to w, as for copy; v's become moved
+(move 24 $"t")        ; t's bytes moved out to storage the function does not see (a by-value argument)
+```
+
+The source must be a local place reached without a loan. Like `move-value`, the move conflicts with
+every live loan of it, and later reads fail until a store reinitializes it. Uninitialized bytes
+(padding, an enum's other variant) are carried as `copy` carries them. Drop obligations inside the
+source become vacant, and one the range covers only in part is refused. The destination's are written:
+overwriting a live one is an error, and each needs a new `drop-live`. Moves through arbitrary aliases
+and ownership effects of calls remain unsupported. The mrustc route emits `move` for Rust moves of
+aggregates and `move-value` for scalars ([mrustc-borrowck.md](mrustc-borrowck.md)); the C++ frontend
+emits neither form.
+
+C++ `rref-arg` is accepted as a plain reference argument: an rvalue-reference argument alone does not
+authorize treating the source as dead. Ordinary C++ moved-from objects remain usable and are still
+destroyed (see "C++ destructors"); a consuming transfer would need its own contract.
 
 ## Field ranges and partial moves
 
@@ -325,7 +337,10 @@ but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
 layouts, dynamic offsets outside local arrays (see [Array indexing](#array-indexing)), out-of-bounds
-constant accesses, external pointer projections, and accesses outside a loan's range. Aggregate value loads and moves remain refused; aggregate copies are described below. Without semantic metadata,
+constant accesses, projections of pointers of unknown provenance, and accesses outside a loan's range. A constant
+offset or a dynamic index from an external pointer is external memory: C++ pointer arithmetic stays inside the
+object it started in, which is not this frame's (no local address is ever stored into external memory), and
+accesses to external memory are not tracked (`index/external_*.ir`). Aggregate value loads and moves remain refused; aggregate copies are described below. Without semantic metadata,
 whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
 widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
@@ -342,7 +357,7 @@ provenance at the new offset; other pointer values in the destination range beco
 - External memory reads as initialized bytes holding no known pointers. Copying a local address
   into external memory is refused. Copying one into argument memory under a verified summary is
   `contract-escape`.
-- Unknown or aliased places, dynamic indices, and drop-obligated storage are refused.
+- Unknown or aliased places, dynamic indices, and drop-obligated storage other than a C++ object are refused.
 
 A `byval` parameter's register is the address of the callee's own copy of the argument. The
 checker models that copy as a synthetic local slot `*%N`: initialized, alive until
@@ -383,7 +398,7 @@ is derived from a loan of such a slot. Ranged pointers have these rules:
   range conflict with it, but it initializes nothing. So `for (int &x : a) x = 0;` does not make
   `a` initialized. Initializing an array element by element needs constant indices.
 - A pointer store through one, a borrow or reborrow from one, and a store into drop-obligated
-  storage are refused. A non-pointer store through one makes pointer values held in the range unknown.
+  storage other than a C++ object are refused. A non-pointer store through one makes pointer values held in the range unknown.
 - At a CFG join, different offsets from one array base widen to that base's ranged pointer. A
   pointer advanced in a loop, such as the iterators of a range-based `for`, therefore converges.
 
@@ -391,8 +406,8 @@ Comparing pointers (`eq`, `ne`, `lt.u`, `le.u`, `gt.u`, `ge.u`) is allowed and y
 `(bounds IDX N)` evaluates its operands. The checker assumes a dynamic index stays inside its
 array: it proves temporal safety, not bounds. Path B's runtime `bounds` checks cover subscripts of
 arrays of known length, but not pointers advanced by other arithmetic. Pointer arithmetic on
-anything other than a local array is refused. That includes arguments, so a callee that indexes its
-pointer argument gets no inferred summary.
+anything other than a local array or external memory is refused. That includes argument regions, so a callee
+that indexes its pointer argument gets no inferred summary.
 
 The underlying model tracks **physical byte initialization**. Without semantic metadata,
 whole-object loans conservatively require all bytes initialized, including padding. Ordinary field
@@ -421,7 +436,8 @@ This excludes packed layouts and overlapping empty subobjects for now.
 A slot using a known layout must match its size and provide sufficient alignment. Known aggregate
 borrows must identify the root object or a declared nested subobject of the requested type at the
 correct offset. An arbitrary same-size byte range cannot claim a different struct's initialization
-mask. Layout validation runs before analysis and before code-generation pruning, including for
+mask. A root slot without a layout of its own (a Rust enum, whose variants overlap) has only untyped
+bytes, so a known aggregate may be borrowed at any offset inside it: a variant's payload. Layout validation runs before analysis and before code-generation pruning, including for
 unused descriptors.
 
 Whole-aggregate borrow and reborrow creation checks only declared field bytes, recursively ignoring
@@ -474,7 +490,8 @@ an exception, so the checker handles it like this:
   summary is closed, so it writes only that object. The unwind therefore needs no state of its own. This
   is the one assumption the model rests on, and the summaries it relies on are the trusted ones.
 - A call is refused while a drop obligation is `live`, because the unwind would have to discharge it,
-  and no frame does so for an explicit obligation.
+  and no frame does so for an explicit obligation. A C++ object obligation is the exception: EDG's frames
+  destroy it (see "C++ destructors").
 - Summary inference verifies each candidate as `may-throw`, so a throwing body is not a contract
   violation, and then writes `(nothrow)` for a body that calls no throwing callee. Self-recursion does
   not make a function throw. A function that calls a `may-throw` callee is inferred `may-throw`.
@@ -526,7 +543,10 @@ outer handler reached only through the rethrow of an inner `catch (...)`).
 
 Drop-state forms describe an ownership protocol for declared local values. They are **checking
 facts**, not destructor instructions: the producer must supply any real cleanup and runtime guard
-code separately. Neither frontend emits these facts yet. The bounded call contracts below can
+code separately. The mrustc route emits them for Rust values with drop glue
+([mrustc-borrowck.md](mrustc-borrowck.md)). The bounded call contracts below can
+code separately. The C++ frontend emits them, with an `object` obligation, for objects with a destructor
+(see "C++ destructors" below); the mrustc route does not yet. The bounded call contracts below can
 connect actual calls to checking effects; they do not prove general destructor, deallocation, or
 unwind behavior.
 
@@ -544,6 +564,9 @@ local or constant-offset field place. Scalar/pointer values and aggregates with 
 layouts are supported. Obligations cannot overlap; nested destructor/field cleanup requires a
 future hierarchical contract. These annotations assert a non-bitwise-copyable owner policy;
 integer examples model consuming handles rather than Rust integer types implementing `Drop`.
+`(drop-obligation "x" T PLACE deep)` is a value whose cleanup may use what its pointers reach (a
+Rust `Drop` impl): consuming it also reads through them, as a `byval-deep` argument is read, so a
+pointer into ended storage is an error there and the loans it holds stay live until the cleanup.
 
 The protocol tracks five states:
 
@@ -561,7 +584,9 @@ can be registered without field writes, while still requiring live storage. Repe
 a live value is an error. Reinitialization after a move or cleanup requires a new registration.
 
 A whole-value overwrite of a live owner is an error until its prior value is consumed. Field
-mutation preserves the enclosing live obligation. Exact typed moves clear the source obligation;
+mutation preserves the enclosing live obligation, including a typed store whose type is not the
+obligation's (the field of a one-field struct). Exact typed moves and `move`s of a range holding it
+clear the source obligation;
 partial or reinterpreted moves of that owner are refused. Explicit bitwise copies of a live owner
 require a copy contract and are refused. A non-owning aggregate can instead declare separate,
 disjoint field obligations, allowing one field to move while siblings still require cleanup.
@@ -586,6 +611,58 @@ construction. Explicit `unreachable`/abort paths do not require cleanup; excepti
 remain unsupported. The marker asserts that the matching real cleanup or runtime guard exists;
 the checker does not generate or verify that code. The QBE emitter and oracle accept these facts
 as validated no-ops, and a native integer test verifies marker erasure preserves generated code.
+
+## C++ destructors
+
+With `NFCXX_PATHB_BORROW=1` the C++ frontend gives each local or temporary whose complete-object
+destructor EDG's lowering calls an obligation of type `object`, which takes the whole slot:
+
+```text
+(drop-obligation "tmp.2" object $"tmp.2")
+(drop-live "tmp.2")
+(eval (call void &"_ZN1SC1Ei" $"tmp.2" (const int 5)))
+...
+(eval (call void &"_ZN1SD1Ev" $"tmp.2"))
+(drop-state "tmp.2")
+```
+
+- `(drop-state ID)` follows every call of the object's complete-object destructor (`D1`) whose `this`
+  is the whole local: the calls the lowering makes at a block end, `return`, `break`, `continue` and
+  `goto`, at the end of a temporary's full expression, and an explicit `s.~S()`.
+- `(drop-live ID)` registers the object. A declared local, and a range-based `for`'s variable, is
+  registered right after its `(decl)`. A temporary is registered right before the call that makes it: its
+  complete-object constructor, or a function that returns a class through a first parameter (the
+  lowering's form for a class with a non-trivial destructor). Whether a slot gets a destructor call is
+  known only at the end of the function, so the frontend keeps a registration only for slots that do.
+
+The checker treats an object obligation as a C++ object's lifetime, not as Rust ownership:
+
+- Registration and the object's state are independent of its bytes. A member may stay uninitialized,
+  no semantic layout is needed, and writes, aggregate copies, weak stores and dynamic-index stores into a
+  live object do not change its state. Registering a live object is refused.
+- `drop-state` ends the object as an exclusive access, so a loan of it still live there is
+  `loan-conflict`. A destructor of a never-registered object, such as a temporary made on one branch of
+  `?:`, whose destructor EDG guards with a flag the checker does not correlate, is refused. A second
+  destructor is `double-drop`.
+- After the destructor, the bytes read as dropped until the storage ends: a read through any pointer to
+  the object is `use-after-drop`. A write is refused, because placement new could make a new object there
+  and the checker cannot tell that from a store. A temporary made again in a loop reuses its storage: the
+  new registration invalidates pointers to the previous object as a scope end does.
+- A storage end or return with the object still live is `missing-drop`.
+- A C++ move is not an ownership transfer. `rref-arg` is accepted as a plain reference argument: the
+  callee's summary says what it does to the source, which stays live and is still destroyed. A
+  `move-value` of an object obligation is refused.
+- A throwing call with a live object is accepted: EDG's region table holds the object while it is
+  live, and the unwind runs its destructor. At a throw into a handler of the same function, a temporary
+  whose storage spans the function (its `decl` is not in the try body) is refused while it is live, since
+  the checker cannot tell whether the unwind destroyed it.
+
+The point of the facts is storage that outlives its object. EDG gives many temporaries function-wide
+storage, so `const int *q = S(5).p(); return *q;` read initialized live bytes and was accepted before;
+it is now `use-after-drop`. A destructor whose summary only reads (`~S() {}`) no longer hides it.
+Destructor calls are checked through their summaries as before, so a class without a semantic layout
+still has no inferred destructor summary and stays refused. Arrays of objects (`__vec_delete`),
+base and member subobjects, and objects reached through pointers get no obligation.
 
 ## Closed call-effect contracts
 
@@ -620,7 +697,12 @@ module is checked against its own summary (see below).
 
 Read effects may have several possible known local targets, all of which are checked. So may mutation,
 as a weak update of each (see "Refusals and limits"). Initialization and consumption require one known
-place. Read/read aliases are allowed; arguments
+place. An argument that points only into external memory (a global, or a pointer parameter of a function
+checked without a summary, or a Rust string literal's static bytes) is accepted for `read`, `write` and `init`, as a load or store through it would be:
+that memory is not tracked and is not the caller's storage, so it overlaps no local argument, and `noescape`
+keeps argument pointers out of it. A returned alias into it is external memory. Under a verified summary it is
+`contract-not-closed`. `consume` and an argument that may be external or local are still refused
+(`calls/external_*.ir`). Read/read aliases are allowed; arguments
 whose ranges overlap and include mutation are refused before applying postconditions. Summaries do
 not prescribe ordering inside a callee, so an initializer cannot silently make a same-call reader
 safe. More permissive alias/ordering contracts remain future work.
@@ -875,6 +957,32 @@ Exit status is 0 for supported local checks passing, 1 for a detected lifetime/i
 error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics identify functions and
 slots, and name the source line of the statement when the IR has `loc` statements.
 
+With `--emitted-only` the checker analyzes only the functions the QBE emitter keeps (its `prune`): external
+definitions, `(constructor)`/`(destructor)` functions and alias targets, and whatever they refer to by `&` or
+`@`, transitively, including through global initializers. A `(weak)` (inline, template) or `(static)` definition
+nothing reaches is not emitted, so the checked code is the emitted code: another translation unit that needs a
+weak definition has its own copy, checked with that unit. The many unused library instantiations of a hosted
+C++ unit then no longer refuse it (`tests/pathb-borrow/emitted`). It is opt-in because a source language may
+require more: Rust rejects a borrow error in a function nothing calls, and the Rust translator marks every
+function `(weak)`.
+
+`scripts/pathb-borrowck-tally.sh` lowers a corpus (by default the C++ programs under `tests/`) and counts the
+verdicts and first refusal messages in four modes: plain, with `--infer-loan-ends --infer-summaries`, with the
+runtime and libc effects files too, and with `--emitted-only` on top. On 139 lowered programs, before and
+after accepting external projections and external call arguments (and adding `--emitted-only`):
+
+| mode | accepted | errors | refused |
+| --- | --- | --- | --- |
+| plain | 35 → 38 | 11 → 11 | 93 → 90 |
+| inferred | 70 → 72 | 13 → 13 | 56 → 54 |
+| inferred, effects files | 74 → 76 | 13 → 13 | 52 → 50 |
+| inferred, effects files, `--emitted-only` | — → 78 | — → 13 | — → 48 |
+
+Every error stayed the same error. Counted with each function checked on its own, refused functions in the
+inferred mode fell from 8416 to 6152, and to 759 among emitted functions. The leading program refusal is still
+a call without a contract: mostly a module function that gets no summary, because a parameter points to a
+struct with no layout record (`std::string`, `void *`), it touches globals, or its body is refused.
+
 `(set %N OPERAND)`, which lowers `?:`, `&&` and `||`, reassigns a register. A pointer register
 assigned on each branch carries the union of their provenance. `(null PTR)` has no provenance, so
 it adds nothing at a join, and a value that can only be null cannot be dereferenced.
@@ -900,17 +1008,17 @@ and `int128_return.cpp` cover the cases, the second with `__int128` passed and r
 the runtime helpers. The C++ cases `cpp/conditional_*.cpp` cover a
 pointer `?:`, an uninitialized branch value, and a branch pointer to an ended scope.
 
-Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
+Calls without a supported closed effect contract are refused. So are
 aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
 and external stores. Unknown instructions are
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
 
-Full Rust move semantics, C++ destructor interpretation, container invalidation, interior
-mutability beyond state-preserving writes ("Interior mutability") and cross-function region inference
-are not implemented. Exception handling is checked
+Full Rust move semantics, container invalidation, interior mutability beyond state-preserving writes
+("Interior mutability") and cross-function region inference are not implemented. Exception handling is checked
 through EDG's `try` protocol ("try and catch"), not through cleanup edges of its own.
-`rref-arg` does not mean that an ordinary C++ moved-from value is dead.
+`rref-arg` does not mean that an ordinary C++ moved-from value is dead. C++ destructors end objects
+only as described in "C++ destructors"; placement new and storage reuse by the program are refused.
 
 ## Rust frontend boundary
 
@@ -919,11 +1027,14 @@ runs mrustc, `scripts/monomir-to-pathb.rb --borrow`, and this checker with `--in
 `--infer-summaries`. [mrustc-borrowck.md](mrustc-borrowck.md) describes the facts it emits, the
 verdicts mrustc gives itself, and `tests/mrustc-borrow`, which records rustc's verdict for each
 case. Generic bodies are checked only as the instances a program uses. Moves of non-Copy places
-are `move-value`s; drop obligations for them are not emitted.
+are `move`s (aggregates) or `move-value`s (scalars), and values with drop glue are drop obligations
+whose MIR drops are `drop-state` facts, `drop-state-if-live` under a drop flag.
 
 `(readonly %N)` and `(interior-mutable ...)` are the facts only that translator emits. The first says
 that parameter `%N` is a pointer the function does not write through (a Rust `&T`), except for interior
-writes, and summary inference gives it read-only modes.
+writes, and summary inference gives it read-only modes. A slice or `&str` parameter is passed as two
+parameters, its pointer and its length, and a function returning one returns its pointer, so that
+summaries describe both as they do thin references.
 
 ## Tests
 
@@ -940,7 +1051,11 @@ moves, byte repairs, overlapping loans, projected reborrows, pointer-field prove
 reuse, and conservative padding checks. Semantic-layout fixtures verify field-only initialization,
 nested layouts, moved fields, raw padding reads, storage lifetimes, and malformed descriptor graphs.
 Drop-state fixtures check conditional flags, double consumption, missing cleanup, construction
-registration, field ownership, typed transfers, reconstruction, and live-loan conflicts.
+registration, field ownership, typed transfers, reconstruction, and live-loan conflicts;
+`drops/aggregate_move*` and `field_owner_move` cover `move` of an owner and of one field owner, a drop
+after the move, an unregistered destination, an overwrite, a live loan, a moved-out read, a
+conditional move, and a partial move; `deep_dangling` and `shallow_dangling` a held pointer to
+ended storage at the cleanup of a deep obligation and of a plain one.
 Call fixtures cover preconditions, aliasing, scalar signatures, initialization, ownership
 consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
 cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
@@ -981,7 +1096,15 @@ module's own summary overrides the file's. The emitter and oracle accept every s
 file, and the program runs natively.
 `contracts/raii.cpp` checks a local with a destructor, its exception-stack frames, and the
 destructor's inferred summary, and runs natively. A variant that uses the object through a pointer
-after its scope reports `use-after-scope`. The fixtures in `tests/pathb-borrow/eh` cover push and
+after its scope reports `use-after-scope`.
+`tests/pathb-borrow/destructors` lowers C++ with destructors and checks it with inferred summaries and
+loan ends: `raii_ok.cpp` (locals at exits, temporaries in a loop, a class result, a reference-bound
+temporary, a moved-from object, a caught throw) is accepted and runs natively; a pointer into a destroyed
+temporary, a loan live at a temporary's destruction, a read after an explicit destructor, a write after it,
+a conditional temporary, and a temporary live at a caught throw are reported or refused. Without the drop
+facts the dangling temporary is accepted, with identical QBE. The `drops/object_*.ir` fixtures and
+`throws/live_object_ok.ir` cover each rule of object obligations, and `tests/mruby/pathb-edge/object_drop_facts.ir`
+their erasure. The fixtures in `tests/pathb-borrow/eh` cover push and
 pop, frames left pushed on some path, a pop after the frame's scope, unknown entries, and
 scalar and escaping stores to globals.
 `contracts/const_alias.cpp` infers a shared summary for a `const int *` result. A variant that

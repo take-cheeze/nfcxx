@@ -27,6 +27,41 @@ for src in tests/pathb-borrow/cases/*.ir; do
     pass=$((pass + 1))
   fi
 done
+# --emitted-only checks the functions the QBE emitter keeps, in both loan modes (NAME.expect); without it every
+# function is checked (NAME.all.expect, else NAME.expect).
+for src in tests/pathb-borrow/emitted/*.ir; do
+  for options in "--emitted-only" "--emitted-only --infer-loan-ends" ""; do
+    expected=${src%.ir}.expect
+    [ -n "$options" ] || [ ! -f "${src%.ir}.all.expect" ] || expected=${src%.ir}.all.expect
+    want=$(head -1 "$expected")
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb $options "$src" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
+      echo "FAIL $src (${options:-all functions}): expected exit $want, got $rc"
+      cat "$tmp/out"
+      exit 1
+    fi
+    echo "ok   $src (${options:-all functions})"
+    pass=$((pass + 1))
+  done
+done
+# Lowered C++: EXIT and DIAG with --emitted-only (inferred summaries and loan ends), ALL the exit without it.
+for src in tests/pathb-borrow/emitted/*.cpp; do
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/source.ir" 2>/dev/null
+  for options in "--emitted-only" ""; do
+    want=$(sed -n 's,^// EXIT: ,,p' "$src"); pattern=$(sed -n 's,^// DIAG: ,,p' "$src")
+    [ -n "$options" ] || { want=$(sed -n 's,^// ALL: ,,p' "$src"); pattern=""; }
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb $options --infer-summaries --infer-loan-ends "$tmp/source.ir" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! grep -Fq -- "$pattern" "$tmp/out"; then
+      echo "FAIL $src (${options:-all functions}): expected exit $want, got $rc"
+      cat "$tmp/out"
+      exit 1
+    fi
+    echo "ok   $src (${options:-all functions})"
+    pass=$((pass + 1))
+  done
+done
 # Inference is opt-in: compare each fixture with exact expectations in both modes.
 for src in tests/pathb-borrow/inferred/*.ir; do
   for mode in explicit inferred; do
@@ -296,6 +331,42 @@ else
 fi
 echo "ok   exception-stack frames around a destructor, after-scope mutant, and native execution"
 pass=$((pass + 1))
+# C++ destructors: the frontend gives each object a destructor call ends a (drop-obligation ID object PLACE). Each
+# tests/pathb-borrow/destructors/*.cpp is checked with inferred summaries and loan ends; its // EXIT: and // OUT: lines
+# give the exit status and the output without the inferred summaries. The IR must stay emit-able.
+for src in tests/pathb-borrow/destructors/*.cpp; do
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/dtor.ir" 2>/dev/null
+  grep -Fq '(drop-obligation ' "$tmp/dtor.ir" || { echo "FAIL $src: no drop obligation"; exit 1; }
+  rc=0
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/dtor.ir" > "$tmp/out" 2>&1 || rc=$?
+  want=$(sed -n 's,^// EXIT: ,,p' "$src")
+  if [ "$rc" != "$want" ] || ! diff -u <(sed -n 's,^// OUT: ,,p' "$src") <(grep -v '^inferred: ' "$tmp/out"); then
+    echo "FAIL $src: expected exit $want, got $rc"; cat "$tmp/out"; exit 1
+  fi
+  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/dtor.ir" > "$tmp/dtor.qbe"
+  echo "ok   $src"
+  pass=$((pass + 1))
+done
+# Without the drop facts the dangling temporary goes unnoticed (its storage lasts for the whole function), and the QBE
+# is the same. The accepted program runs natively.
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/destructors/temporary_dangling.cpp > "$tmp/dtor.ir"
+perl -0pe 's/\s*\((drop-obligation|drop-live|drop-state) [^()\n]*\)//g' "$tmp/dtor.ir" > "$tmp/nodrop.ir"
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/nodrop.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL temporary_dangling.cpp without drop facts"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/dtor.ir" > "$tmp/dtor.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nodrop.ir" > "$tmp/nodrop.qbe"
+cmp -s "$tmp/dtor.qbe" "$tmp/nodrop.qbe" || { echo "FAIL drop facts change the QBE"; exit 1; }
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/destructors/raii_ok.cpp > "$tmp/dtor.ir"
+scripts/mrb scripts/pathb-qbe-emit.rb "$tmp/dtor.ir" > "$tmp/dtor.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/dtor.qbe" -o "$tmp/dtor.s"
+if [ -f "$edglib/libC.a" ]; then
+  cc "$tmp/dtor.s" -o "$tmp/dtor" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  "$tmp/dtor" || { echo "FAIL raii_ok.cpp runtime: expected 0"; exit 1; }
+else
+  echo "skip raii_ok.cpp native run: no $edglib/libC.a"
+fi
+echo "ok   destructor facts: unnoticed without them, unchanged QBE, and native execution"
+pass=$((pass + 1))
 # Runtime helpers for long double and __int128 are described by the trusted
 # scripts/pathb-runtime.effects; without it their calls are refused. An
 # uninitialized operand is found at the helper call. Every summary in the file
@@ -539,7 +610,7 @@ echo "ok   temporary facts for lowered C++ call arguments, mutant, and native ex
 pass=$((pass + 1))
 # Checking facts and value-transfer policy must not change native execution.
 # Loan erasure and replacing explicit transfers with loads must yield the same QBE.
-for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir tests/mruby/pathb-edge/move_facts.ir tests/mruby/pathb-edge/field_move_facts.ir tests/mruby/pathb-edge/drop_state_facts.ir; do
+for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir tests/mruby/pathb-edge/move_facts.ir tests/mruby/pathb-edge/field_move_facts.ir tests/mruby/pathb-edge/drop_state_facts.ir tests/mruby/pathb-edge/object_drop_facts.ir; do
 scripts/mrb scripts/pathb-borrowck.rb "$loan_ir" > "$tmp/loan-check"
 scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends "$loan_ir" > "$tmp/inferred-check"
 scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/loans.qbe"

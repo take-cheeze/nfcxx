@@ -1,2 +1,2 @@
-3
-refused: memory call arguments require known local provenance
+0
+ok: local lifetime checks passed (supported subset only)
