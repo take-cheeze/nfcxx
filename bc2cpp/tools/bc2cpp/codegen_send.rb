@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'branch_hints'
 require_relative 'bytecode_ir_containers'
 
 # CodeGen: compile_send and const/owner caches.
@@ -844,7 +845,7 @@ class CodeGen
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
           // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
             bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
@@ -884,9 +885,12 @@ class CodeGen
             } else\x20
         CPP
       end
+      # Both arms at once meet Arrays and Integers alike, so only a lone Integer arm is hinted.
+      shift_ok = "mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN"
+      shift_ok = BranchHints.likely(shift_ok) if array_arm.empty?
       return <<~CPP
           #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers inline; overflow to a bigint, a bigint receiver and other classes take NUMERIC_SLOW_PATH
-          if (mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN) {
+          if (#{shift_ok}) {
             mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
             if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
               r#{d} = #{recv};
@@ -912,7 +916,7 @@ class CodeGen
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
           // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+          if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
             bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
@@ -949,7 +953,7 @@ class CodeGen
                   end
       return <<~CPP
           // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
-          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}")}) {
             #{operation}
           } else {
             #{fallback.chomp}
@@ -965,7 +969,7 @@ class CodeGen
           {
           mrb_bool bc2cpp_shift_fast = FALSE;
           mrb_int bc2cpp_shift_result = 0;
-          if (mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})")}) {
             mrb_int bc2cpp_shift_value = mrb_fixnum(#{value});
             mrb_int bc2cpp_shift_width = mrb_fixnum(#{width});
             if (bc2cpp_shift_width == 0) {
@@ -998,7 +1002,7 @@ class CodeGen
               }
             }
           }
-          if (bc2cpp_shift_fast) {
+          if (#{BranchHints.likely('bc2cpp_shift_fast')}) {
             r#{d} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
           } else {
             #{fallback.chomp}
@@ -1013,7 +1017,7 @@ class CodeGen
       operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
       return <<~CPP
           // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
-          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})")}) {
             r#{d} = mrb_bool_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));
           } else {
             #{fallback.chomp}
@@ -1327,7 +1331,7 @@ class CodeGen
                                            closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                                              trace_insn: insn, trace_reg_offset: trace_reg_offset))
                    end
-        "#{note}  if (#{check}) {\n" \
+        "#{note}  if (#{BranchHints.likely(check)}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
           "    #{fallback}" \
@@ -1404,7 +1408,7 @@ class CodeGen
           guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
         end
         body = "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
-        "#{note}  if (#{check}) {\n" \
+        "#{note}  if (#{BranchHints.likely(check)}) {\n" \
           "#{body}" \
           "  } else {\n" \
           "    #{fallback}" \
@@ -1463,7 +1467,7 @@ class CodeGen
                               closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                                 trace_insn: insn, trace_reg_offset: trace_reg_offset))
       end
-      "#{note}  if (#{check}) {\n" \
+      "#{note}  if (#{BranchHints.likely(check)}) {\n" \
         "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
         "  } else {\n" \
         "    #{fallback}" \
