@@ -195,13 +195,21 @@ static struct obj *obj_find(uintptr_t a)
    down (a frame's slots are sorted at entry; frames nest, each callee below its caller, so the order holds across frames),
    and a stack of frames, each its slots' extent and where its slots start. Frames left by longjmp (EDG's exceptions) are
    popped by the next frame entry below them or by the return of a frame above them. */
-struct srec { uintptr_t lo, hi; };
+struct srec { uintptr_t lo, hi; int nopad; };   /* nopad: no padding byte after it, so hi may be another object's lo */
 struct sframe { uintptr_t lo, hi; size_t start; };
 static __thread struct srec *sstack;
 static __thread size_t sdepth, scap;
 static __thread struct sframe *frames;
 static __thread size_t fdepth, fcap;
 static __thread uintptr_t stk_lo, stk_hi;   /* this thread's stack, from pthread_getattr_np (0: not known yet) */
+/* The indices of the last records checks found, eight of them picked by address bits (loops alternate between a few
+   locals, such as two iterators). One is used while it is below the live depth and the address is above the stack
+   pointer (a record there belongs to a live frame); a record replaced by a later frame at the same index is a slot at
+   the same place, which is as good. Zero-initialized TLS reads as index 0, which the containment test rejects or which
+   is a real record. */
+#define SCACHE 8
+static __thread size_t c_si[SCACHE];
+static inline size_t *scache(uintptr_t a) { return &c_si[(a >> 3) & (SCACHE - 1)]; }
 static __thread int stk_known;
 
 /* The threads that run instrumented code, for the collector: the top of each one's stack and the lowest stack pointer it
@@ -270,7 +278,8 @@ static void *grow(void *old, size_t used, size_t *cap, size_t elt)
   return n;
 }
 
-/* __nfcxx_sp_frame(N, p1, size1, ..., pN, sizeN): the escaping slots of a function that was just entered. */
+/* __nfcxx_sp_frame(N, p1, size1, ..., pN, sizeN): the escaping slots of a function that was just entered. A size with
+   the top bit set is storage QBE lays out (by-value parameters), with no padding byte after it. */
 void __nfcxx_sp_frame(int n, ...)
 {
   va_list ap;
@@ -280,7 +289,9 @@ void __nfcxx_sp_frame(int n, ...)
   va_start(ap, n);
   for (int i = 0; i < n; i++) {
     uintptr_t a = va_arg(ap, uintptr_t), z = va_arg(ap, uintptr_t);
-    if (i < m) { r[i].lo = a; r[i].hi = a + z; }
+    int nopad = (int)(z >> 63);
+    z &= ~((uintptr_t)1 << 63);
+    if (i < m) { r[i].lo = a; r[i].hi = a + z; r[i].nopad = nopad; }
     if (a < lo) lo = a;
     if (a + z > hi) hi = a + z;
   }
@@ -318,6 +329,22 @@ static struct srec *srec_find(uintptr_t a, uintptr_t sp)
 {
   if (!stk_known) stack_bounds();
   if (a < sp || (stk_hi && a > stk_hi) || sdepth == 0) return NULL;   /* not in the live part of this thread's stack */
+  /* Most accesses are to the current frame or its callers': look at the top frames' own records first. */
+  for (size_t k = fdepth; k > 0 && k + 4 > fdepth; k--) {
+    struct sframe *f = &frames[k - 1];
+    if (a < f->lo || a > f->hi) continue;
+    size_t end = k == fdepth ? sdepth : frames[k].start;
+    /* the frame's first record (highest address first) with lo <= a, then the one ending at a */
+    size_t l = f->start, h = end;
+    while (l < h) {
+      size_t mid = l + (h - l) / 2;
+      if (sstack[mid].lo <= a) h = mid; else l = mid + 1;
+    }
+    if (l < end && a < sstack[l].hi) return &sstack[l];
+    for (size_t i = l; i < end && i < l + 2; i++)
+      if (sstack[i].hi == a && !sstack[i].nopad) return &sstack[i];
+    return NULL;   /* in this frame's extent but in none of its slots (a slot that does not escape, padding) */
+  }
   /* the first record (highest address first) with lo <= a */
   size_t l = 0, h = sdepth;
   while (l < h) {
@@ -327,7 +354,7 @@ static struct srec *srec_find(uintptr_t a, uintptr_t sp)
   if (l < sdepth && a < sstack[l].hi) return &sstack[l];
   /* one past the end: the record ending at a starts below a */
   for (size_t i = l; i < sdepth && i < l + 2; i++)
-    if (sstack[i].hi == a) return &sstack[i];
+    if (sstack[i].hi == a && !sstack[i].nopad) return &sstack[i];
   return NULL;
 }
 
@@ -338,10 +365,13 @@ void __nfcxx_sp_check(void *p, size_t n, const char *file, int line)
   uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
   if (a == 0) return;   /* null dereferences are the nonnull check's */
   if (c_gen == sp_gen && c_lo <= a && a < c_hi && n <= c_hi - a) return;
+  size_t ci = *scache(a);
+  if (ci < sdepth && a >= sp && sstack[ci].lo <= a && a < sstack[ci].hi && n <= sstack[ci].hi - a) return;
   struct srec *r = srec_find(a, sp);
   saw_sp(sp);
   if (r) {
     if (a >= r->hi || n > r->hi - a) sp_fail(K_OOB, p, file, line);
+    *scache(a) = (size_t)(r - sstack);
     return;
   }
   if (in_dead_stack(a, sp)) sp_fail(K_RETURN, p, file, line);
@@ -363,10 +393,15 @@ void *__nfcxx_sp_derive(void *base, void *res, const char *file, int line)
   uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
   if (b == 0 || b == r) return res;
   if (c_gen == sp_gen && c_lo <= b && b <= c_hi && c_lo <= r && r <= c_hi) return res;
+  size_t ci = *scache(b);
+  if (ci < sdepth && b >= sp && sstack[ci].lo <= b && (b < sstack[ci].hi || (b == sstack[ci].hi && !sstack[ci].nopad)) &&
+      sstack[ci].lo <= r && r <= sstack[ci].hi)
+    return res;
   struct srec *s = srec_find(b, sp);
   saw_sp(sp);
   if (s) {
     if (r < s->lo || r > s->hi) sp_fail(K_ARITH, res, file, line);
+    *scache(b) = (size_t)(s - sstack);
     return res;
   }
   if (in_dead_stack(b, sp)) sp_fail(K_RETURN, base, file, line);

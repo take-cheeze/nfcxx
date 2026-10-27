@@ -946,7 +946,8 @@ UB_KIND = { trap: 0, overflow: 1, divzero: 2, shift: 3, bounds: 4, null: 5, unre
 # One function body. Statements are emitted into body; registers and slots into allocs.
 class Fn
   attr_accessor :mod, :name, :ret_ty, :body, :allocs, :inits, :returns_twice, :dead, :regs, :slots, :nslot,
-                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf, :loc, :escaped, :slot_sizes
+                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf, :loc, :escaped, :slot_sizes,
+                :sp_safe, :cur_let, :sp_extra
 
   def initialize(mod, name, ret_ty)
     @mod = mod
@@ -973,6 +974,9 @@ class Fn
     @sret_buf = nil         # a function returning an aggregate in the C convention: the buffer it returns the address of
     @escaped = {}           # safe pointers: slots whose address is used other than as the address of a load or store
     @slot_sizes = {}        # IR slot name -> size in bytes
+    @sp_safe = {}           # safe pointers: registers that are in-bounds offsets of a slot, used only for accesses in it
+    @cur_let = nil          # the register the (let ...) being emitted assigns
+    @sp_extra = []          # [QBE temporary, size]: frame storage that is not a slot (by-value parameters, the C sret buffer)
     @no_escape = false
   end
 
@@ -1584,7 +1588,7 @@ end
 
 def r_bitcast(fn, x)
   pt = parse_type(x[1])
-  v = fn.opnd(x[2], "l")
+  v = $safe && fn.sp_safe[fn.cur_let] ? fn.addr_opnd(x[2]) : fn.opnd(x[2], "l")
   Val.new(v.t, "l", pt)
 end
 
@@ -1664,11 +1668,12 @@ end
 
 def r_offset(fn, x)
   raise BadIR, "offset form" unless x.length == 3
-  a = fn.opnd(x[1], "l")
+  safe = $safe && fn.sp_safe[fn.cur_let]   # an access-only pointer into a slot (sp_safe_regs)
+  a = safe ? fn.addr_opnd(x[1]) : fn.opnd(x[1], "l")
   n = as_int(x[2])
   t = fn.tmp
   fn.emit("#{t} =l add #{a.t}, #{n}")
-  if $safe
+  if $safe && !safe
     sz = sp_static_size(fn, x[1])
     t = sp_derive(fn, a.t, t) unless !sz.nil? && n >= 0 && n <= sz   # a member of a named object is in it
   end
@@ -1771,6 +1776,10 @@ def sp_where(fn)
   "l $__nfcxx_ubf#{idx}, w #{fn.loc[1]}"
 end
 
+# The check of an access of n bytes at addr. The runtime's per-thread cache of the last two objects checks found
+# (struct sp_tcache, lib/safeptr/nfcxx_safeptr.c: lo0 hi0 lo1 hi1 gen, eight bytes each) is tested inline: the access is
+# good when it lies in one of them and the cache's generation is the runtime's (__nfcxx_sp_gen); only a miss calls
+# __nfcxx_sp_check, which also fills the cache. The miss branch is the first successor, so QBE puts the call out of line.
 def sp_check(fn, addr, n)
   fn.emit("call $__nfcxx_sp_check(l #{addr}, l #{n}, #{sp_where(fn)})")
 end
@@ -1786,6 +1795,7 @@ end
 def sp_access(fn, op, n)
   return fn.opnd(op, "l") unless $safe
   return fn.addr_opnd(op) if sp_static_addr?(op)
+  return fn.opnd(op, "l") if reg?(op) && fn.sp_safe[op.byteslice(1, op.bytesize - 1).to_i]
   v = fn.opnd(op, "l")
   sp_check(fn, v.t, n.is_a?(Array) ? ty_size(n) : n)
   v
@@ -2022,7 +2032,9 @@ def s_let(fn, x)
   ty = parse_type(x[2])
   raise Refused, "register of aggregate type" if is_agg(ty)
   fn.declare_reg(n, ty)
+  fn.cur_let = n
   v = fn.rval(x[3], ty)
+  fn.cur_let = nil
   raise BadIR, "void value assigned to a register" if v.nil?
   if v.cls != fn.regs[n][1]
     raise Refused, "let %#{n}: value class #{v.cls}, register class #{fn.regs[n][1]}"
@@ -2041,7 +2053,10 @@ def s_store(fn, x)
   ty = parse_type(x[1])
   raise Refused, "store of an aggregate type" if is_agg(ty)
   addr = sp_access(fn, x[2], ty)
-  val = fn.opnd(x[3])
+  # EDG's exception runtime (libC.a, not instrumented) links the frames' EH stack entries through this global; publishing
+  # a slot there is not an escape to instrumented code (safe pointers: the slot needs no registration).
+  eh = $safe && x[2].is_a?(IRSym) && x[2].sig == "@" && x[2].name == SP_EH_ENTRY && sp_static_addr?(x[3])
+  val = eh ? fn.addr_opnd(x[3]) : fn.opnd(x[3])
   if ty[0] == "ptr" || ty[0] == "fn" || (ty[0] == "int" && ty[1] == 8)
     op = "storel"
     cls = "l"
@@ -2936,18 +2951,114 @@ def emit_string(mod, d)
   end
 end
 
+# Safe pointers: the registers of a function body that need no checks. A register qualifies when it is assigned once, by
+# (offset SLOT N), (offset R N) or (bitcast T R|SLOT) of a slot or of another such register, inside the slot, and every
+# use of it is the address of a load or store (or bit-field access) that fits in the slot from that offset. Such an
+# access is in bounds by construction, and the pointer goes nowhere else, so it does not make the slot escape either.
+# A register used in any other way (stored, passed, compared, assigned by set) disqualifies itself and the registers it
+# was derived from. The other root is a load of @"__curr_eh_stack_entry": the current frame's EH stack entry, a
+# structure of EDG's exception lowering that only compiler-generated code and the runtime touch (no bound is applied).
+SP_EH_ENTRY = "__curr_eh_stack_entry"
+
+def sp_safe_regs(fn, forms)
+  cand = {}     # register -> [offset, size of the object it points into]
+  parent = {}   # register -> the register it was derived from
+  bad = {}
+  acc = []      # [register, bytes] of each access through a candidate
+  regn = ->(op) { op.byteslice(1, op.bytesize - 1).to_i }
+  scan = nil
+  addr_use = lambda do |op, bytes|
+    if op.is_a?(String) && reg?(op)
+      acc << [regn.call(op), bytes]
+    else
+      scan.call(op)
+    end
+  end
+  derive = lambda do |n, base, off|
+    if base.is_a?(IRSym) && base.sig == "$" && fn.slot_sizes.key?(base.name)
+      cand[n] = [off, fn.slot_sizes[base.name]] if off >= 0 && off <= fn.slot_sizes[base.name]
+    elsif base.is_a?(String) && reg?(base) && cand.key?(regn.call(base))
+      b = regn.call(base)
+      o, size = cand[b]
+      if off >= 0 && o + off <= size
+        cand[n] = [o + off, size]
+        parent[n] = b
+      else
+        bad[b] = true
+      end
+    else
+      scan.call(base)
+    end
+  end
+  scan = lambda do |x|
+    if x.is_a?(String)
+      bad[regn.call(x)] = true if reg?(x)
+      return
+    end
+    return unless x.is_a?(Array)
+    h = head_of(x)
+    if h == "let" && x.length == 4 && reg?(x[1])
+      n = regn.call(x[1])
+      bad[n] = true if cand.key?(n) || parent.key?(n)   # assigned twice
+      rv = x[3]
+      rh = head_of(rv)
+      if rh == "offset" && rv.length == 3 && !as_int(rv[2]).nil?
+        derive.call(n, rv[1], as_int(rv[2]))
+      elsif rh == "bitcast" && rv.length == 3
+        derive.call(n, rv[2], 0)
+      elsif rh == "load" && rv.length == 3 && rv[2].is_a?(IRSym) && rv[2].sig == "@" && rv[2].name == SP_EH_ENTRY
+        cand[n] = [0, 1 << 40]
+      elsif (rh == "load" || rh == "load.v") && rv.length == 3
+        addr_use.call(rv[2], ty_size(parse_type(rv[1]))) rescue scan.call(rv)
+      elsif (rh == "bfload" || rh == "bfload.v") && rv.length == 6
+        addr_use.call(rv[3], as_int(rv[2]))
+      else
+        scan.call(rv)
+      end
+    elsif (h == "store" || h == "store.v") && x.length == 4
+      bytes = (ty_size(parse_type(x[1])) rescue nil)
+      bytes.nil? ? scan.call(x[2]) : addr_use.call(x[2], bytes)
+      scan.call(x[3])
+    elsif (h == "bfstore" || h == "bfstore.v") && x.length == 7
+      addr_use.call(x[3], as_int(x[2]))
+      scan.call(x[6])
+    elsif h == "set"
+      bad[regn.call(x[1])] = true if x[1].is_a?(String) && reg?(x[1])
+      scan.call(x[2])
+    else
+      x.each { |y| scan.call(y) }
+    end
+  end
+  forms.each { |f| scan.call(f) }
+  acc.each do |n, bytes|
+    next unless cand.key?(n)
+    o, size = cand[n]
+    bad[n] = true if bytes.nil? || o + bytes > size
+  end
+  changed = true
+  while changed   # a disqualified register's pointer escapes, and with it the one it came from
+    changed = false
+    parent.each { |n, b| (bad[b] = true; changed = true) if bad[n] && !bad[b] }
+  end
+  safe = {}
+  cand.each_key { |n| safe[n] = true unless bad[n] }
+  safe
+end
+
 # Safe pointers: register the escaping slots at entry, release them at each return (the SP_LEAVE lines of Fn#ret).
+# The storage QBE makes for a by-value aggregate parameter and the C sret buffer are not slots, but the function reaches
+# them through pointers (a by-value iterator's this), so they are registered with the slots. QBE lays them out with no
+# padding byte after them: their size goes with the top bit set (SP_NOPAD), and the runtime does not take the address
+# one past their end for theirs, since it may be the next object's start.
+SP_NOPAD = -(1 << 63)
 def sp_frame(fn, slot_pad)
   esc = fn.slots.keys.select { |s| fn.escaped[s] }
-  leave = esc.empty? ? nil : "\tcall $__nfcxx_sp_leave(l #{fn.slots[esc[0]][0]})"
+  objs = esc.map { |s| [fn.slots[s][0], fn.slot_sizes[s]] } + fn.sp_extra
+  leave = objs.empty? ? nil : "\tcall $__nfcxx_sp_leave(l #{objs[0][0]})"
   fn.body = fn.body.map { |l| l == "\t" + SP_LEAVE ? leave : l }.compact
-  return if esc.empty?
-  args = esc.map do |s|
-    i, padded = slot_pad[s]
-    fn.allocs[i] = padded
-    "l #{fn.slots[s][0]}, l #{fn.slot_sizes[s]}"
-  end
-  fn.inits << "\tcall $__nfcxx_sp_frame(w #{esc.length}, ..., #{args.join(", ")})"
+  return if objs.empty?
+  esc.each { |s| i, padded = slot_pad[s]; fn.allocs[i] = padded }
+  fn.inits << "\tcall $__nfcxx_sp_frame(w #{objs.length}, ..., #{objs.map { |q, n| "l #{q}, l #{n}" }.join(", ")})"
 end
 
 def emit_function(mod, f)
@@ -3027,6 +3138,7 @@ def emit_function(mod, f)
         raise Refused, "aggregate #{pstr(parse_type(p[2])[2])} returned by value: #{info.why}" if info.shape == "unsupported"
         # The C convention: no hidden parameter; the function fills a buffer of its own and returns its address.
         fn.allocs << "\t%sretbuf =l alloc#{info.align >= 16 ? 16 : 8} #{[info.size, 1].max}"
+        fn.sp_extra << ["%sretbuf", info.size + SP_NOPAD] if $safe && info.size > 0
         fn.inits << "\tstorel %sretbuf, %r#{n}"
         if info.shape != "empty"
           fn.sret_buf = "%sretbuf"
@@ -3047,9 +3159,11 @@ def emit_function(mod, f)
           if info.shape == "empty"
             fn.allocs << "\t%ebuf#{pi} =l alloc8 8"
             fn.inits << "\tstorel %ebuf#{pi}, %r#{n}"
+            fn.sp_extra << ["%ebuf#{pi}", 8 + SP_NOPAD] if $safe   # an empty class's this (8: the whole buffer)
           else
             qparams << "#{info.tn} %p#{pi}"
             param_stores << ["l", pi, n]
+            fn.sp_extra << ["%p#{pi}", info.size + SP_NOPAD] if $safe
           end
         end
       else
@@ -3070,6 +3184,7 @@ def emit_function(mod, f)
   param_stores.each do |cls, idx, n|
     fn.put("#{MEM_STORE[cls]} %p#{idx}, %r#{n}")
   end
+  fn.sp_safe = sp_safe_regs(fn, body_forms) if $safe
   fn.stmts(body_forms)
   unless fn.dead
     if ret == VOID
