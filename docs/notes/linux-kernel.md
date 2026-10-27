@@ -57,7 +57,9 @@ With `NFCXX_QBE_TRY="PATTERN ..."` on the gcc backend, nfcc hands each compile t
    `.exit.*`, `.meminit.*`, `.ref.*`, `.head.text`) to init code or to an undefined symbol that gcc's object makes only
    from init code (the kernel's modpost refuses lasting code that calls `__init` code; gcc's inlined `always_inline`
    helpers make none, cproc's out-of-line copies can). An object with `.head.text` (the kernel's `__head` code,
-   which runs identity-mapped and depends on how gcc addresses symbols) always stays. Otherwise the gcc object stays. Either way one line goes
+   which runs identity-mapped, before the kernel's page tables) is compiled with QBE's `-A` (`NFCXX_QBE_ABS=1`):
+   an address is an absolute 32-bit immediate and a load or store of a global is rip-relative, gcc's kernel model,
+   which `fixup_pointer()` expects. Otherwise the gcc object stays. Either way one line goes
    to `NFCXX_QBE_LOG`: `qbe SRC`, or `gcc SRC: reason` (the first error, or what differed).
 
 The kernel then has to boot. The log is the migration's to-do list: sorted by reason, it says which missing feature

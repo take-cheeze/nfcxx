@@ -209,6 +209,30 @@ particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cp
   make an undefined symbol of a declaration whose last use QBE dropped (`if (0 && ...)` under
   `#pragma GCC visibility`).
 
+- **Constants through locals** under `-p -V` (qbe.c `funcsccp`): sparse conditional constant propagation over a
+  function's temporaries and its stack slots whose address only loads and stores use, before the blocks are
+  written. A conditional jump whose condition is then the same constant on every way that reaches it becomes a
+  jump, and what only the other way reached is dead code as above -- the kernel's `copy_fpstate_to_sigframe()`
+  clears `ia32_fxstate` with `&= IS_ENABLED(CONFIG_IA32_EMULATION)` before the test that guards
+  `convert_from_fxsr()`, which this configuration does not have. A slot whose address is passed, stored or
+  computed with is not followed (volatile accesses are calls under `-V`), nor a function with ASan, a landing pad
+  or a setjmp; one in which a reachable condition stays undetermined is left as it is.
+
+- **Clones for constant arguments found that way**: a direct call of a static function (its body recorded under
+  `-p`) whose integer arguments are then constant goes to a clone `NAME.constN` with those parameters constant, as
+  for `always_inline` functions, kept only when the clone references a name the function does (`funcclonegain`)
+  -- the static `__fpu_restore_sig()`, whose `ia32_fxstate` is false at its one call, then no longer reaches
+  `convert_to_fxsr()`, and the function itself is pruned. Recursion is bounded, and a refused clone is not tried
+  again.
+
+- **Address clones of `static inline` functions with inline asm**: a call that passes the address of a static
+  object (`&x`, or an array) for a pointer parameter gets a clone in which the parameter is that address, so an
+  asm memory operand `"m"(*p)` names the object (`sym(%rip)`, absolute on the i386 targets) as gcc's inlined copy
+  does, not a dereference of the argument -- the kernel's `native_load_gdt(&startup_gdt_descr)` in `.head.text`,
+  which runs before the kernel's mapping. A clone of a function without a section of its own goes in its caller's
+  (the cache keys on it), and an asm thunk goes in its function's section, so lasting `.text` does not name
+  `__initdata`. An asm output of such a parameter keeps the call on the function.
+
 - **Flexible array member initializers** of a static object, the outermost struct's last member (the kernel's
   `init_mm.cpu_bitmap`): the object is sizeof the struct plus the array's initializers, byte for byte gcc's.
   Refused for an automatic object (gcc too) and for a compound literal.
