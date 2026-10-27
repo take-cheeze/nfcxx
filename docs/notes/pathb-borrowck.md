@@ -250,9 +250,21 @@ versus move from the source language's rules, including Rust's `Copy` trait; the
 prove that a type is copyable. Scalar representations in tests can model consuming handles and
 are not claims that moving a Rust integer makes it unusable. Transfers currently require
 scalar/pointer values in direct locals or constant-offset fields.
-Whole-aggregate value transfers, moves through arbitrary aliases, drops, and ownership effects
-of calls remain unsupported. The mrustc route emits `move-value` for Rust moves, one per scalar of the
-moved place ([mrustc-borrowck.md](mrustc-borrowck.md)); the C++ frontend emits neither form.
+An aggregate moves as bytes:
+
+```text
+(move 24 $"w" $"v")   ; v's bytes and pointers go to w, as for copy; v's become moved
+(move 24 $"t")        ; t's bytes moved out to storage the function does not see (a by-value argument)
+```
+
+The source must be a local place reached without a loan. Like `move-value`, the move conflicts with
+every live loan of it, and later reads fail until a store reinitializes it. Uninitialized bytes
+(padding, an enum's other variant) are carried as `copy` carries them. Drop obligations inside the
+source become vacant, and one the range covers only in part is refused. The destination's are written:
+overwriting a live one is an error, and each needs a new `drop-live`. Moves through arbitrary aliases
+and ownership effects of calls remain unsupported. The mrustc route emits `move` for Rust moves of
+aggregates and `move-value` for scalars ([mrustc-borrowck.md](mrustc-borrowck.md)); the C++ frontend
+emits neither form.
 
 C++ `rref-arg` is still refused: an rvalue-reference argument alone does not authorize treating the
 source as dead. Ordinary C++ moved-from objects can remain usable; their contracts need separate
@@ -397,7 +409,8 @@ This excludes packed layouts and overlapping empty subobjects for now.
 A slot using a known layout must match its size and provide sufficient alignment. Known aggregate
 borrows must identify the root object or a declared nested subobject of the requested type at the
 correct offset. An arbitrary same-size byte range cannot claim a different struct's initialization
-mask. Layout validation runs before analysis and before code-generation pruning, including for
+mask. A root slot without a layout of its own (a Rust enum, whose variants overlap) has only untyped
+bytes, so a known aggregate may be borrowed at any offset inside it: a variant's payload. Layout validation runs before analysis and before code-generation pruning, including for
 unused descriptors.
 
 Whole-aggregate borrow and reborrow creation checks only declared field bytes, recursively ignoring
@@ -502,7 +515,8 @@ outer handler reached only through the rethrow of an inner `catch (...)`).
 
 Drop-state forms describe an ownership protocol for declared local values. They are **checking
 facts**, not destructor instructions: the producer must supply any real cleanup and runtime guard
-code separately. Neither frontend emits these facts yet. The bounded call contracts below can
+code separately. The mrustc route emits them for Rust values with drop glue
+([mrustc-borrowck.md](mrustc-borrowck.md)). The bounded call contracts below can
 connect actual calls to checking effects; they do not prove general destructor, deallocation, or
 unwind behavior.
 
@@ -520,6 +534,9 @@ local or constant-offset field place. Scalar/pointer values and aggregates with 
 layouts are supported. Obligations cannot overlap; nested destructor/field cleanup requires a
 future hierarchical contract. These annotations assert a non-bitwise-copyable owner policy;
 integer examples model consuming handles rather than Rust integer types implementing `Drop`.
+`(drop-obligation "x" T PLACE deep)` is a value whose cleanup may use what its pointers reach (a
+Rust `Drop` impl): consuming it also reads through them, as a `byval-deep` argument is read, so a
+pointer into ended storage is an error there and the loans it holds stay live until the cleanup.
 
 The protocol tracks five states:
 
@@ -537,7 +554,9 @@ can be registered without field writes, while still requiring live storage. Repe
 a live value is an error. Reinitialization after a move or cleanup requires a new registration.
 
 A whole-value overwrite of a live owner is an error until its prior value is consumed. Field
-mutation preserves the enclosing live obligation. Exact typed moves clear the source obligation;
+mutation preserves the enclosing live obligation, including a typed store whose type is not the
+obligation's (the field of a one-field struct). Exact typed moves and `move`s of a range holding it
+clear the source obligation;
 partial or reinterpreted moves of that owner are refused. Explicit bitwise copies of a live owner
 require a copy contract and are refused. A non-owning aggregate can instead declare separate,
 disjoint field obligations, allowing one field to move while siblings still require cleanup.
@@ -894,7 +913,8 @@ runs mrustc, `scripts/monomir-to-pathb.rb --borrow`, and this checker with `--in
 `--infer-summaries`. [mrustc-borrowck.md](mrustc-borrowck.md) describes the facts it emits, the
 verdicts mrustc gives itself, and `tests/mrustc-borrow`, which records rustc's verdict for each
 case. Generic bodies are checked only as the instances a program uses. Moves of non-Copy places
-are `move-value`s; drop obligations for them are not emitted.
+are `move`s (aggregates) or `move-value`s (scalars), and values with drop glue are drop obligations
+whose MIR drops are `drop-state` facts, `drop-state-if-live` under a drop flag.
 
 `(readonly %N)` is the one fact only that translator emits: parameter `%N` is a pointer the function
 does not write through (a Rust `&T`). Summary inference gives it read-only modes.
@@ -914,7 +934,11 @@ moves, byte repairs, overlapping loans, projected reborrows, pointer-field prove
 reuse, and conservative padding checks. Semantic-layout fixtures verify field-only initialization,
 nested layouts, moved fields, raw padding reads, storage lifetimes, and malformed descriptor graphs.
 Drop-state fixtures check conditional flags, double consumption, missing cleanup, construction
-registration, field ownership, typed transfers, reconstruction, and live-loan conflicts.
+registration, field ownership, typed transfers, reconstruction, and live-loan conflicts;
+`drops/aggregate_move*` and `field_owner_move` cover `move` of an owner and of one field owner, a drop
+after the move, an unregistered destination, an overwrite, a live loan, a moved-out read, a
+conditional move, and a partial move; `deep_dangling` and `shallow_dangling` a held pointer to
+ended storage at the cleanup of a deep obligation and of a plain one.
 Call fixtures cover preconditions, aliasing, scalar signatures, initialization, ownership
 consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
 cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
