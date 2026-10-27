@@ -604,8 +604,11 @@ hosted_libs=()
 inst_opts=()
 case ${NFCXX_INSTANTIATE:-used} in
   auto) ;;
-  used) inst_opts=(--no_auto_instantiation -tused --c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
-                   --c_to_obj_option -Wl,--gc-sections) ;;
+  used)
+    inst_opts=(--no_auto_instantiation -tused)
+    # Mach-O: ld64 coalesces the weak definitions itself (and takes no --gc-sections)
+    [ "$(uname -s)" = Darwin ] || inst_opts+=(--c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
+                                              --c_to_obj_option -Wl,--gc-sections) ;;
   *) echo "nfcxx: NFCXX_INSTANTIATE is auto or used (got $NFCXX_INSTANTIATE)" >&2; exit 2 ;;
 esac
 if [ $freestanding = 1 ]; then
