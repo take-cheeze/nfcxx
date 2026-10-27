@@ -39,8 +39,8 @@ PTX modules with their cubins. The key covers the device unit the rewriter write
 options and the toolkit version macros, the SM, `NFCXX_CUDA_JIT` and the module budgets, the device front end
 (`cpfe`, `scripts/pathb-dump`, its base directory), `pathb-ptx-emit` and the ptxas version. A hit skips the device
 front end, the emitter and ptxas; the rewriter, the embed step and the host compile still run. On ggml-cuda (RTX 2060
-machine) mmvq.cu went from 249 s to 23 s (ptxas was 222 s of it), while binbcast.cu is almost all host compile (its
-`eccp` span about 700 s, the second pass for its kernel instances about 350 s, the device stages about 9 s). `NFCXX_CACHE_LOG` logs these lookups as `== F.cu device unit`. `tests/cuda/run.sh`
+machine) mmvq.cu went from 249 s to 23 s (ptxas was 222 s of it), while binbcast.cu is almost all host compile: two of about
+350 s each (the second pass, for its kernel instances, runs with the cache off), and about 8 s of device stages. `NFCXX_CACHE_LOG` logs these lookups as `== F.cu device unit`. `tests/cuda/run.sh`
 covers a miss, a hit whose program runs, and a changed kernel.
 
 With `NFCXX_CACHE_LOG=FILE` set as well, each lookup appends its key inputs (the bytes that are hashed, one block per compile headed by `== OUT (SRC)`), then `key KEY`, then `hit` or `miss`. Diff the input blocks of a miss against the last hit for the same output to see which input changed. The log variable is left out of the key, so logging never causes a miss.
