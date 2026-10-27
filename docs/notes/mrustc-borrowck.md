@@ -32,6 +32,12 @@ The pipeline is:
    - `&place` and `&mut place` of a local place reached without a deref (fields and enum variants
      included) become `(borrow (ptr T) "Ln" shared|exclusive PLACE)`. A borrow through a deref is a
      plain address and carries the loans of the pointer it derefs, so a reborrow has no loan of its own.
+   - A `&mut` of such a place is `two-phase` instead of `exclusive` when its local is assigned only
+     there and its one other mention is as the first argument of a `CALL`: the shape of an autoref'd
+     method receiver. The checker treats it as shared until the call and exclusive from there
+     (pathb-borrowck.md, "Two-phase loans"). MIR has lost the autoref marker. A `&mut` variable does
+     not match, since mrustc passes it as a reborrow `&mut (*varN)`, but an explicit `&mut x` first
+     argument does.
    - A `&T` parameter gets `(readonly %N)`, which keeps summary inference to read-only modes. The
      signature's `&` against `&mut` is the information the checker would otherwise not have.
    - `(borrow-layout ...)` records for the structs the functions use come from the dump's `type`
@@ -51,13 +57,13 @@ mrustc also rejects some programs itself, and the driver reports those as errors
 ## Results
 
 `tests/mrustc-borrow/cases` has one program per rule, each with rustc 1.99's verdict. The suite
-checks this pipeline's verdict, and compares rustc's when one is installed. 15 of the 20 cases agree
+checks this pipeline's verdict, and compares rustc's when one is installed. 19 of the 24 cases agree
 with rustc:
 
 | Verdict | Cases |
 | --- | --- |
-| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow |
-| Rejected, as by rustc | E0499 two `&mut`, E0502 (twice), E0506, E0597 dangling, E0381 and E0382 (mrustc), E0515 (mrustc) |
+| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`) |
+| Rejected, as by rustc | E0499 two `&mut`, E0502 (twice), E0506, E0597 dangling, E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502) |
 | Different | below |
 
 The differences are the known gaps:
@@ -65,8 +71,9 @@ The differences are the known gaps:
 - **Move while borrowed (E0505) is accepted.** The translator lowers a move as a copy, and mrustc's
   validation only sees the moved-from local itself, not the borrow's use. Explicit `move-value`
   forms (pathb-borrowck.md, "Explicit value moves and copies") are the next step.
-- **Two-phase borrows** (`c.set(c.get() + 1)`) give a false `loan-conflict`. rustc reserves the
-  receiver's `&mut` and activates it after the arguments. The checker takes the exclusive loan first.
+- **An explicit `&mut x` first argument is two-phase too** (`set(&mut c, c.get())`, E0502), so it is
+  accepted. rustc makes only autoref borrows two-phase, and the MIR does not say which this was. The
+  program only reads `c` before the call, so the borrow is still not violated.
 - **A result that may borrow from either of two arguments, or two fields** (`pick(&x, &y)`, NLL's
   "problem case 3", which rustc 1.99 accepts) is refused. A summary names one source range, and
   with lifetimes erased the translator cannot say that the result borrows from both.
@@ -86,7 +93,7 @@ As of October 2026:
   next checker, Polonius alpha (location-sensitive), was enabled on nightly in August 2026. Full
   Polonius remains future work. This route follows the same model as NLL on a lower level IR:
   storage ends, loans, and liveness-based loan ends. Its input is monomorphised and has lost lifetimes
-  and two-phase borrows.
+  and the autoref marker, so two-phase borrows come from the shape of the MIR.
 - **gccrs** lowers to its own borrow-checker IR (BIR), generates Polonius facts from it, and runs the
   Polonius library. That is the same arrangement as here: a frontend's IR, then a separate checker.
   It reached GCC 15 in 2025.
@@ -99,6 +106,5 @@ As of October 2026:
 ## Next steps
 
 - Moves: `move-value` for moved operands, then drop obligations for types with drop glue.
-- Two-phase borrows: a reserved state for the receiver's loan until the call.
 - Summaries for the standard library functions small programs use (formatting, `Vec`, `Box`).
 - Results that borrow from several sources, which needs region parameters in summaries.

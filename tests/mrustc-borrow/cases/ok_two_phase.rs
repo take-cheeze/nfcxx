@@ -1,7 +1,7 @@
 // rustc: ok
-// nfcxx: error
-// A false error: rustc's two-phase borrows let the receiver's exclusive borrow start after the
-// shared argument borrow ends. The checker takes the exclusive loan first.
+// nfcxx: ok
+// A two-phase borrow: the receiver's `&mut c` is reserved, acting as a shared borrow, while the
+// argument reads `c`, and becomes exclusive at the call, after the argument's borrow has ended.
 struct C {
     n: i32,
 }
