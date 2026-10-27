@@ -1442,7 +1442,9 @@ class CodeGen
       # the real class may differ from the trace (subclass, reassigned constant), with
       # an mrb_funcall fallback.
       owner = ivar_accessor_target.owner
-      check = "#{owner_class_ptr_expr(owner)} == mrb_obj_class(M, #{recv})"
+      check = if inline_reader_arm?(owner, name) then exact_class_check(owner, recv)
+              else "#{owner_class_ptr_expr(owner)} == mrb_obj_class(M, #{recv})"
+              end
       # ELEMENT_CLASS_SUPPORT: same tag as the TYPED branch.
       traced_note = via_element ? "inlined block element of Array<#{owner}>" : "receiver traced to #{owner}"
       ivar = name.chomp('=')
