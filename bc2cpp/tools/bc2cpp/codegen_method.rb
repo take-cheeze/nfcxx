@@ -291,6 +291,7 @@ class CodeGen
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
       out << errinfo_scope_line(irep)
+      out << core_body_fast_prologue(d) if d.core
       # ENTRY_GUARDED_SPECIALIZATION: the entry check; a miss falls through to the generic body below.
       out << "  if (#{entry_spec[:guard]}) return #{entry_spec[:call]}(M, #{(['self'] + arg_names).join(', ')});\n" if entry_spec&.fetch(:guard)
       # EXCEPTION_RETURN_SUPPORT: wrap the body in one try/catch only when a
@@ -817,6 +818,11 @@ class CodeGen
   # so drop_unused_registers on the snippet alone is sound (an inlined loop redeclares
   # its frame per loop, and the whole function would see each name more than once).
   # String and character literals are skipped; any other shape answers false.
+  # C that a core body runs first, ahead of its compiled instructions (TRANSPOSE_DIRECT adds one); '' by default.
+  def core_body_fast_prologue(_definition)
+    ''
+  end
+
   def single_block?(code)
     text = code.gsub(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/, '""').strip
     return false unless text.start_with?('{') && text.end_with?('}')
