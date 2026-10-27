@@ -16,6 +16,10 @@ module UniqueClassNames
     /mrb_const_set\s*\([^;]{0,200}/m,
     /mrb_define_(?:class|module)(?:_under)?(?:_id)?\s*\([^;]{0,200}/m
   ].freeze
+  NATIVE_MODULE_DEFINITION = /\Amrb_define_module\s*\(\s*\w+\s*,\s*"(\w+)"\s*\)\z/
+  NATIVE_MODULE_LOOKUP = /\Amrb_(?:define_module|module_get|class_get)\s*\(\s*\w+\s*,\s*"(\w+)"\s*\)\z/
+  # A parameter declaration (`RClass* rgss`), as a prototype lists it.
+  NATIVE_PARAMETER = /\A(?:(?:const|struct)\s+)?\w+\s*[*&]*\s*\w+\z/
   UNDER_DEFINITION = /\Amrb_define_(?:class|module)_under(?:_id)?\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*(?:"(\w+)"|MRB_SYM\((\w+)\))/
   FUNCTION_HEADER = /^(?:[\w:<>*&"]+[ \t]+)*[*&]?(\w+)\s*\(([^;{}()]*)\)\s*(?:const\s*)?\{/m
 
@@ -414,7 +418,9 @@ module UniqueClassNames
   # The module name `var` holds at `pos`: every assignment to it in the
   # enclosing function is `mrb_define_module(M, "P")`, or it is an RClass*
   # parameter every caller in `sources` passes such a variable to.
-  def native_module_binding(sources, source, pos, var, depth = 2)
+  # With +lookup+, `var = mrb_module_get(M, "X")` / `mrb_class_get(M, "X")` also names X (the caller must then
+  # check that X has one binding, at the top level), and a prototype of the function is not taken for a call.
+  def native_module_binding(sources, source, pos, var, depth = 2, lookup: false)
     header = nil
     source.to_enum(:scan, FUNCTION_HEADER).each do
       match = Regexp.last_match
@@ -430,7 +436,8 @@ module UniqueClassNames
     body = source[header.end(0)...body_end]
     rhs = body.scan(/(?<![\w>.])#{Regexp.escape(var)}\s*=(?!=)\s*([^;]+);/).flatten
     unless rhs.empty?
-      modules = rhs.map { |expr| expr.strip[/\Amrb_define_module\s*\(\s*\w+\s*,\s*"(\w+)"\s*\)\z/, 1] }
+      form = lookup ? NATIVE_MODULE_LOOKUP : NATIVE_MODULE_DEFINITION
+      modules = rhs.map { |expr| expr.strip[form, 1] }
       return modules.uniq.size == 1 ? modules.first : nil
     end
     params = header[2].split(',').map(&:strip)
@@ -444,10 +451,13 @@ module UniqueClassNames
         next if caller_source.equal?(source) && call.begin(0) == header.begin(1)
 
         args, = NativeExpressionDevirt.split_call_arguments(caller_source, call.end(0) - 1)
+        # A prototype (`void f(mrb_state* M, RClass* rgss);`) lists parameters, not arguments.
+        next if lookup && args&.all? { |a| a.strip.match?(NATIVE_PARAMETER) && a.match?(/[\s*&]/) }
+
         arg = args&.[](index)
         return nil unless arg&.match?(/\A\w+\z/)
 
-        callers << native_module_binding(sources, caller_source, call.begin(0), arg, depth - 1)
+        callers << native_module_binding(sources, caller_source, call.begin(0), arg, depth - 1, lookup: lookup)
       end
     end
     callers.uniq.size == 1 ? callers.first : nil

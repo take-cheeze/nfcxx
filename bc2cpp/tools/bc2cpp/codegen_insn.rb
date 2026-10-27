@@ -594,7 +594,7 @@ class CodeGen
         return "  r#{d} = mrb_fixnum_value(#{value});\n"
       end
 
-      if immutable_constant?(name) && constant_scope_register?(irep, idx, d)
+      if immutable_constant?(name) && constant_scope_register?(irep, idx, d - reg_offset)
         # CONST_BINDING_CACHE: a binding in the receiver's own table is the one mrb_const_get returns, and an
         # immutable one never changes; the receiver came from a constant that is never rebound, so it stays alive.
         return "  r#{d} = bc2cpp_mcnst_#{const_member_slot(name)}(M, r#{d});\n"
