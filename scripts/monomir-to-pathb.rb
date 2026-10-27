@@ -2659,7 +2659,33 @@ functions.each do |fn|
         if !ids.empty?
           # The drop of a local's value is the consumption of its obligations. A drop flag's DROP
           # consumes them on the paths where they are live: mrustc clears the flag where it moved
-          # the value, which the checker sees as the move.
+          # the value, which the checker sees as the move. What the glue does first that the checker
+          # must see still happens: a RefCell guard's flag update, and a Vec<&T> letting go of its
+          # references (MonomirStd.before_drop).
+          sty = place_type(m[1].strip, types, locals, params)
+          glue = sty && types.key?(sty) ? types[sty][:drop] : nil
+          if glue
+            g = pb_sym(glue)
+            kind = MonomirStd.guard_call(g)
+            if kind || MonomirStd.kept_entry(g)
+              if m[4]
+                r = regi; regi += 1
+                stmts << "(let %#{r} bool (load bool $\"df#{m[4]}\"))"
+              end
+              before = stmts.size
+              addr, regi = place_addr(m[1].strip, types, locals, params, param_reg, stmts, regi)
+              regi = MonomirStd.before_drop(g, addr, stmts, regi)
+              low = kind && MonomirStd.lower_guard(kind, g, nil, [addr], regi, types)
+              if low
+                regi = low[1]
+                stmts.concat(low[0])
+              end
+              if m[4]
+                added = stmts[before..-1] || []
+                stmts[before..-1] = ["(if %#{r} (then #{added.join(' ')}))"]
+              end
+            end
+          end
           ids.each { |id| stmts << "(#{m[4] ? 'drop-state-if-live' : 'drop-state'} #{id.inspect})" }
         elsif m
           slot = m[1].strip; flag = m[4]
