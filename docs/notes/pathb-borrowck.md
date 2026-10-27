@@ -155,6 +155,30 @@ copies so neither reactivating the parent nor reusing a static loan ID in a loop
 The default mode requires explicit loan ends. The QBE emitter and its oracle erase `reborrow`
 to the source pointer, preserving runtime code generation.
 
+## Two-phase loans
+
+`two-phase` is a third borrow kind, Rust's two-phase borrow of an autoref'd method receiver
+(`c.set(c.get() + 1)`):
+
+```text
+(let %0 (ptr int) (borrow (ptr int) "a" two-phase $"x"))
+(let %1 (ptr int) (borrow (ptr int) "b" shared $"x"))
+(let %2 int (load int %1))
+(loan-end "b")
+(store int %0 %2)
+(loan-end "a")
+```
+
+The loan is created *reserved*, and while reserved it is a shared loan: reads of the place and shared
+loans of it are allowed, writes and exclusive loans conflict. Its first use *activates* it: an access
+through its pointer or a child's, or a call argument that is the pointer or memory holding it. Copying,
+storing and loading the pointer do not. At activation every other active loan overlapping its range is
+a `loan-conflict`, as for an exclusive loan created there, and from then on it is exclusive. The phase
+is a per-path state: after a join where only one side activated the loan it counts as exclusive, and a
+later use re-checks activation. Each creation reserves it again. With `--infer-loan-ends`, a shared
+loan whose last use comes before the activation has expired by then, which is the Rust case. The QBE
+emitter erases it like the other kinds.
+
 ## Inferred loan ends (opt-in)
 
 ```sh
@@ -833,6 +857,9 @@ Call fixtures cover preconditions, aliasing, scalar signatures, initialization, 
 consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
 cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
 contracts, and inferred last-use release.
+Two-phase fixtures, `cases/loan_two_phase_*` and `inferred/two_phase_receiver`, cover reads while
+reserved, a shared loan live at activation, a write or an exclusive loan while reserved, and
+activation on one branch.
 Implicit-loan fixtures in `tests/pathb-borrow/inferred/implicit_*` cover last use, future
 conflicts, dangling results, and loops, in both loan modes.
 Summary-inference fixtures in `tests/pathb-borrow/summaries` cover each inferred effect,
