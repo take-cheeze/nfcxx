@@ -3,16 +3,19 @@
 # frozen_string_literal: true
 
 # CORE_UNSEEN_DEFINERS (tools/bc2cpp/core_defs.rb add_unseen_placeholders!): a name the program defines only on an
-# Array/Hash subclass (or a module the subclass includes) is still answered by mruby's own Ruby on every plain
-# Array/Hash, so MONO must not bind it to the program's definition.
+# Array/Hash subclass, a module the subclass includes or one constant's singleton (`def LIST.find_all`) is still
+# answered by mruby's own Ruby on every plain Array/Hash, so MONO must not bind it to the program's definition.
+# The owner call that dispatches such a name then names the singleton owner `LIST.singleton`, which
+# bc2cpp_owner_listed (tools/bc2cpp/symbol_cache.rb) matches against the object the constant holds.
 #
 #   generated code (needs a host mrbc)
 #     - with and without the core mrblib compiled, no call site binds `map`, `collect`, `reject`, `each_with_index`,
-#       `sort_by` or `each_pair` MONO to the subclass body, and the registry log flips each of them to POLY;
+#       `sort_by`, `each_pair` or `find_all` MONO to the program body, and the registry log flips each to POLY;
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - with the core mrblib compiled, as every build does, interpreted and compiled runs print the same for a plain
-#       Array/Hash and for the subclass receiver. The world without it lists no outside owner for a core gem's
-#       mrblib (BC2CPP_PROGRAM_CORE_MRBLIB_GEMS counts as program Ruby), so its owner-checked call would raise.
+#       Array/Hash, the subclass receiver and the constants with a singleton `find_all` (one nested in a module).
+#       The world without it lists no outside owner for a core gem's mrblib (BC2CPP_PROGRAM_CORE_MRBLIB_GEMS counts
+#       as program Ruby), so its owner-checked call would raise.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/core_definer_mono_check.rb
 
@@ -48,6 +51,12 @@ SRC = <<~'RUBY'
   class CmHash < Hash
     def each_pair; [:sub_each_pair]; end
   end
+  CM_LIST = [1, 2, 3]
+  def CM_LIST.find_all; [:singleton_find_all]; end
+  module CmMod
+    TABLE = { 1 => 2 }
+    def TABLE.find_all; [:nested_singleton_find_all]; end
+  end
   class CmUse
     def map_(a); a.map { |x| x * 2 }; end
     def collect_(a); a.collect { |x| x + 1 }; end
@@ -56,12 +65,13 @@ SRC = <<~'RUBY'
     def ewi(a); r = []; a.each_with_index { |x, i| r << [x, i] }; r; end
     def sort_by_(a); a.sort_by { |x| -x }; end
     def each_pair_(h); r = []; h.each_pair { |k, _v| r << k }; r; end
+    def find_all_(a); a.find_all { |x| x }; end
   end
 RUBY
 
-OWNERS = %w[CmMix CmList CmHash CmUse].freeze
+OWNERS = %w[CmMix CmList CmHash CmUse CM_LIST.singleton CmMod::TABLE.singleton].freeze
 SUBCLASS_ONLY = { 'map' => 'CmList', 'collect' => 'CmList', 'reject' => 'CmList', 'each_with_index' => 'CmList',
-                  'sort_by' => 'CmList', 'each_pair' => 'CmHash' }.freeze
+                  'sort_by' => 'CmList', 'each_pair' => 'CmHash', 'find_all' => 'CM_LIST.singleton' }.freeze
 
 dirs = { core: Dir.mktmpdir('bc2cpp-core-definer'), plain: Dir.mktmpdir('bc2cpp-core-definer-plain') }
 at_exit { dirs.each_value { |dir| FileUtils.remove_entry(dir) } }
@@ -73,9 +83,8 @@ dirs.each do |world, dir|
   check.call('no #error in the generated code', !code.include?('#error'))
   SUBCLASS_ONLY.each do |name, owner|
     check.call("no call site binds :#{name} MONO to #{owner}##{name}", !code.include?("MONO :#{name} -> #{owner}#"))
-    check.call(":#{name} is POLY in the registry (#{owner} and the core definer)",
-               err.match?(/^  POLY  :#{Regexp.escape(name)}  \(\d+ defs: [^)]*#{owner}/) &&
-                 err.match?(/^  FLIP :#{Regexp.escape(name)}$/))
+    check.call(":#{name} is POLY in the registry (#{owner} and the core definer's <native> placeholder)",
+               err.match?(/^  POLY  :#{Regexp.escape(name)}  \(\d+ defs: [^)]*#{Regexp.escape(owner)}[^)]*<native>\)/))
   end
 end
 
@@ -98,6 +107,10 @@ DRIVER = <<~'RUBY'
   end
   show.call(:each_pair_, { 1 => 2 })
   show.call(:each_pair_, CmHash.new)
+  show.call(:find_all_, [1, nil, 2])
+  show.call(:find_all_, CM_LIST)
+  show.call(:find_all_, CmMod::TABLE)
+  show.call(:find_all_, { 1 => nil })
   puts 'end'
 RUBY
 

@@ -449,12 +449,39 @@ module SymbolCache
       struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
+    // The singleton class of an object that is no class or module: the registry names it `Const.singleton` after the
+    // constant its `def Const.x` was written on (resolve_singleton_receiver), so it is listed when that constant holds
+    // the very object. The path is walked with mrb_const_defined_at first, so no const_missing runs.
+    static bool bc2cpp_owner_listed_object(mrb_state* M, mrb_value attached, const char* const* names) {
+      for (int k = 0; names[k]; ++k) {
+        size_t n = strlen(names[k]);
+        if (n <= 10 || strcmp(names[k] + n - 10, ".singleton") != 0) continue;
+        size_t end = n - 10;
+        mrb_value cur = mrb_obj_value(M->object_class);
+        bool found = true;
+        for (size_t pos = 0; pos < end;) {
+          size_t stop = pos;
+          while (stop < end && names[k][stop] != ':') ++stop;
+          mrb_sym id = mrb_intern(M, names[k] + pos, stop - pos);
+          if ((mrb_type(cur) != MRB_TT_CLASS && mrb_type(cur) != MRB_TT_MODULE) || !mrb_const_defined_at(M, cur, id)) {
+            found = false;
+            break;
+          }
+          cur = mrb_const_get(M, cur, id);
+          pos = stop + 2;
+        }
+        if (found && mrb_obj_eq(M, cur, attached)) return true;
+      }
+      return false;
+    }
     // Is `c` (a method's owner, an iclass already resolved to its module) one of `names`?
     static bool bc2cpp_owner_listed(mrb_state* M, struct RClass* c, const char* const* names) {
       bool singleton = false;
       if (c->tt == MRB_TT_SCLASS) {
         mrb_value attached = mrb_iv_get(M, mrb_obj_value(c), mrb_intern_lit(M, "__attached__"));
-        if (mrb_type(attached) != MRB_TT_CLASS && mrb_type(attached) != MRB_TT_MODULE) return false;
+        if (mrb_type(attached) != MRB_TT_CLASS && mrb_type(attached) != MRB_TT_MODULE) {
+          return bc2cpp_owner_listed_object(M, attached, names);
+        }
         c = mrb_class_ptr(attached);
         singleton = true;
       }
