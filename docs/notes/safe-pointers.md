@@ -49,7 +49,12 @@ more byte). So the address one past an object's end is never the start of anothe
 is the one with `lo <= p <= hi`, whichever object `p` is.
 
 A load or store whose address is a slot or a global by name (`$"x"`, `@"x"`) is not checked: its type is the object's
-own. An `offset` of such an address by a constant inside the object is not checked either.
+own. An `offset` of such an address by a constant inside the object is not checked either. Nor is an access through a
+register that a pre-pass over the function (`sp_safe_regs`) proves to be such an offset (or a `bitcast` of one), used
+for nothing but loads and stores that fit in the slot from there: the access is in bounds by construction, and since
+the pointer goes nowhere else, it does not make the slot escape. The same holds for pointers loaded from
+`@"__curr_eh_stack_entry"`, the EH stack entry of EDG's exception lowering, which only compiler-generated code and
+EDG's runtime touch; and a slot whose address is only stored there (the entry itself) is not registered.
 
 Memory in no object is not checked. That covers libc's data (`stdout`, `environ`, `getenv` results), thread-local
 objects, the stacks of uninstrumented code and memory from `mmap`: the program shares its address space with code built
@@ -68,7 +73,10 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
    - before a direct call of `memcpy`, `memmove`, `memset`, `memcmp` or `bcmp`: a check of each pointer argument with the
      length argument;
    - escaping slots: one byte of padding in their `alloc`, `call $__nfcxx_sp_frame(w N, ..., l SLOT, l SIZE, ...)` after
-     the allocs, `call $__nfcxx_sp_leave(l FIRST-SLOT)` before every `ret`;
+     the allocs, `call $__nfcxx_sp_leave(l FIRST-SLOT)` before every `ret`. The storage QBE keeps for a by-value
+     aggregate parameter (a by-value iterator's `this` points there), an empty class's buffer and the C sret buffer are
+     registered in the same call, with the top bit of the size set: QBE lays them out with no padding byte, so the
+     runtime never takes the address one past their end for them (it may be the next object's start);
    - defined globals and strings: `z 1` at the end of the data item, and a table plus a constructor that registers them;
    - every defined function: its address and signature hash in a second table of the same constructor
      (`__nfcxx_sp_funcs`); before every call through a pointer, `call $__nfcxx_sp_call(l CALLEE, l HASH, l FILE, w LINE)`.
@@ -98,7 +106,9 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
      the table must have the call's hash; a callee that is not in it but lies in a heap block, a global or a stack slot is
      data; any other callee (libc, libstdc++.so, `.c` inputs) is not checked.
    - Stack slots: per thread, an array sorted from the highest address down (each frame's slots are sorted at entry,
-     and frames nest), searched by bisection, and a stack of frames. An address between the thread's stack bottom
+     and frames nest), and a stack of frames. A lookup bisects the records of the top four frames whose extent holds the
+     address, else all of them, and eight per-thread cache entries (the index of the record last found, picked by
+     address bits) catch loops that alternate between a few locals. An address between the thread's stack bottom
      (`pthread_getattr_np`) and the current stack pointer is in a frame that returned.
    - A failure prints `FILE:LINE: safety error: WHAT (address P)` after flushing stdout, then calls `abort()`.
 
@@ -116,6 +126,8 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
   a function).
 - `clean_containers.cpp`, `clean_threads_eh.cpp` (`// EXPECT: 0`): vectors, strings, maps, exceptions through frames
   with escaping locals, deep recursion, `realloc`, four threads. Nothing is reported.
+- `clean_byval.cpp`: `std::sort` with by-value iterators and comparators, a by-value aggregate parameter (the unpadded
+  storage of by-value parameters next to each other).
 - `clean_calls.cpp`: virtual calls with this-adjusting thunks, function pointers, member function pointers,
   `std::function`, `qsort` callbacks, pointers to libc functions. `clean_churn.cpp`: two million 1 KiB blocks allocated
   and freed while a linked list stays live; the peak resident size must stay under 512 MiB (the collector gives the
@@ -139,12 +151,27 @@ Measured on one program (2M-element `std::vector<int>` sort and 20 passes over i
 | --- | --- |
 | `nfcxx` (qbe backend) | 1.0 s |
 | `nfcxx --backend=pathb` | 2.5 s |
-| `nfcxx -fsafe-pointers` | 37 s (30 s with phase 2) |
+| `nfcxx -fsafe-pointers` | 37 s after phase 1, 30 s after phase 2, 12.5 s after the speed round |
 
-That is about 15x over Path B, mostly the number of calls: every element access through an iterator is a call of the
-iterator's `operator*`, which registers its frame, plus a `derive` and a `check`. There is no inlining on Path B and no
-inline fast path for the checks yet; `callgrind` puts 43% in the stack bisection and 19% in `__nfcxx_sp_check`.
-Fil-C reports 1.5x to 4x, with an optimizing LLVM pipeline.
+At the end of phase 1 that was about 15x over Path B. The speed round (the first part of phase 4 in the plan below)
+took it to about 12.5 s, 5x, by profiling with `callgrind` and removing what it showed:
+
+| change | time |
+| --- | --- |
+| phase 2 (start of the round) | 30 s |
+| access-only offsets of slots, EH stack entries not registered (emitter) | 21 s |
+| by-value parameter storage registered (its misses fell through to the locked heap lookup) | 20 s |
+| eight-entry stack record cache | 15.5 s |
+| bisection inside the top frames instead of a linear scan | 12.5 s |
+
+Tried and dropped: an inline fast path in the emitted QBE (a two-entry per-thread cache tested before the call). It
+made the program 10% slower (21 s against 19 s on the same runtime): the test is about 20 instructions and a TLS load
+per access, and with stack entries dropped at every return its hit rate stayed low, so most accesses paid for both.
+
+What is left (`callgrind`, the small version of the program): `__nfcxx_sp_check` 33%, the stack lookup 32%,
+`__nfcxx_sp_frame` 16% (a third of it the insertion sort of frames with many escaping temporaries), mostly the number
+of calls: Path B has no inlining, so every iterator operation is a call with checks inside. Fil-C reports 1.5x to 4x,
+with an optimizing LLVM pipeline.
 
 ## Limits
 
@@ -184,4 +211,5 @@ Each of these is a false negative: a bad access that is not reported. None of th
 3. Capability pointers: a 16-byte `(pointer, object)` pair in the IR for `--freestanding` programs and `lib/`, which are
    compiled entirely from source, so the layout can change. `i2p` then gives a pointer with no object.
 4. Whole-program hosted mode: a C library (musl) and the C++ runtime built through Path B, so that nothing is unchecked.
-   Speed: inline fast paths for the checks in the emitted QBE, elision of checks that a dominating check covers.
+   Speed: the first round is done ("Cost"); next would be elision of checks that a dominating check covers, and
+   inlining on Path B itself, which would remove most of the calls the checks sit in.
