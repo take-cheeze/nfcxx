@@ -15,7 +15,7 @@ root=$PWD; work=$root/build/mruby-tool
 pin=831da26b9021de0369d17b71b5667e2941a1a32d   # mruby/mruby tag 4.0.0, same pin as tests/realworld/run_mruby.sh
 src=$work/src
 if [ -n "${MRUBY_CC:-}" ] && [ "$MRUBY_CC" != cc ]; then
-  MRUBY_CC= "$0" || exit 1                       # the host interpreter first (no-op when present)
+  env -u MRUBY_CC "$0" || exit 1                 # the host interpreter first (no-op when present); unset, not empty: the gems' ENV.fetch('MRUBY_CC', 'cc') would take "" as the compiler
   cc=$MRUBY_CC; tag=-nfcc
 else
   cc=cc; tag=
