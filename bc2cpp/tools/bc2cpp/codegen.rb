@@ -99,15 +99,15 @@ class CodeGen
                   native_name_sources = nil, included_modules = {}, prepended_modules = {},
                   unknown_mixins = Set.new, analysis_only: false, native_expression_devirt: {},
                   native_registered_expressions: {}, closed_world: nil, outside_ivar_names: nil,
-                  nil_operator_names: nil, outside_const_names: nil, native_ivar_scopes: {})
+                  nil_native_answers: nil, outside_const_names: nil, native_ivar_scopes: {})
     @report_only_text = ENV['BC2CPP_TYPE_CHECK_ONLY'] == '1' && ENV['BC2CPP_TYPE_CHECK_TEXT_PASSES'] != '0'
     @ireps = ireps
-    # NUMERIC_OPERAND_PROOF: ivar names spelled by sources outside the
-    # closed world, and operators they define on NilClass. nil means the scan did
-    # not run; the proofs that need them then prove nothing.
+    # NUMERIC_OPERAND_PROOF: ivar names spelled by sources outside the closed world, and what native code puts on
+    # nil's lookup path (NativeOwnerMap.nil_native_answers). nil means the scan did not run; the proofs that need
+    # them then prove nothing.
     @outside_ivar_names = outside_ivar_names
     @native_ivar_scopes = native_ivar_scopes
-    @nil_operator_names = nil_operator_names
+    @nil_native_answers = nil_native_answers
     @outside_const_names = outside_const_names
     # CLOSED_WORLD: the build's ClosedWorld (closed_world.rb); every bc2cpp run has one. It is nil only
     # while a core body compiles, in the analysis-only probe, and in unit fixtures.

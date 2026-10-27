@@ -1154,7 +1154,9 @@ if $PROGRAM_NAME == __FILE__
                              .select { |name, _| outside_ivars.include?(name) }.transform_values(&:sort)
     native_ivar_scopes = native_ivar_scopes.merge(ruby_scopes)
     warn "== outside Ruby ivar scopes: #{ruby_scopes.sort.to_h.inspect} =="
-  nil_operators = nil_class_operator_names(native_paths)
+  # NIL_NATIVE_ANSWERS: per native registration owner, not per file (a file defining nil.to_r and Rational#+).
+  nil_native = NativeOwnerMap.nil_native_answers(CodeGen::NATIVE_OWNER_MAP_CACHE[native_paths] ||= NativeOwnerMap.build(native_paths))
+  warn "== nil native answers: #{nil_native.reason || nil_native.names.select { |n| n.match?(/\A[^A-Za-z_]/) }.sort.join(' ')} =="
   outside_consts = IntegerConstants.native_defined_const_names(native_paths) |
                        IntegerConstants.foreign_const_names(foreign_ruby_srcs)
   warn ''
@@ -1267,7 +1269,7 @@ if $PROGRAM_NAME == __FILE__
                     native_registered_expressions: native_registered_expressions,
                     closed_world: closed_world, outside_ivar_names: outside_ivars,
                     native_ivar_scopes: native_ivar_scopes,
-                    nil_operator_names: nil_operators, outside_const_names: outside_consts)
+                    nil_native_answers: nil_native, outside_const_names: outside_consts)
   # DECLARED_RETURN_CHECK: a declaration with an unproven path aborts like RBS_SEED_CONTRADICTION; the
   # type check reports it (TC1010) with the signature diagnostics.
   DeclaredReturns.report(gen, sig_applied, abort_on_error: !ENV['BC2CPP_TYPE_FACTS'].to_s.then { |v| !v.empty? })

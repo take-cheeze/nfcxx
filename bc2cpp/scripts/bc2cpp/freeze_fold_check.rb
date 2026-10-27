@@ -151,7 +151,7 @@ method_code = lambda do |gate, name|
     world = ClosedWorld.new(ireps: ireps, registry: registry, class_decls: {}, walked: [], native_paths: native, ruby_paths: [])
     gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new,
                       Set.new, Set.new, {}, {}, {}, Set.new, closed_world: world, outside_const_names: Set.new,
-                      nil_operator_names: Set.new, outside_ivar_names: Set.new)
+                      nil_native_answers: NativeOwnerMap::NilAnswers.new(names: Set.new, modules: Set.new), outside_ivar_names: Set.new)
     method = registry.fetch(name).find { |d| d.owner == 'Probe' }
     gen.compile_method(method.irep).fetch(:code)
   end
