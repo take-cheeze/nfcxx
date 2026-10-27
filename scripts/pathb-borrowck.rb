@@ -303,7 +303,7 @@ class BorrowCallEffects
     end
     args = f[6].drop(1)
     args.each do |arg|
-      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval].include?(arg[0])
+      unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval byval-deep].include?(arg[0])
         raise bad, 'call argument effect form'
       end
       ty = arg[1]
@@ -591,7 +591,7 @@ class LocalLifetime
     end
     @params.each_with_index do |(reg, _name, pointer, pty), i|
       mode, ty = @summary[:args][i]
-      if mode == 'byval'
+      if mode == 'byval' || mode == 'byval-deep'
         # The parameter is the callee's own copy (the synthetic slot *%N).
         unless bh(pty) == 'byval' && same_type?(pty[1], ty)
           raise BadIR, 'function parameter disagrees with its effect contract'
@@ -1317,6 +1317,37 @@ class LocalLifetime
     end
   end
 
+  # A byval-deep argument: the callee reads what the pointers stored in ROOT[OFF, OFF + WIDTH) reach,
+  # transitively (formatting reads the values a fmt::Arguments refers to). Each pointer's referent is
+  # the range of its loan, or the rest of its slot. Its bytes are read as a copy would, carrying their
+  # states (the callee reads only the bytes its types define). A pointer of unknown provenance
+  # could reach a local, so it is refused; one into external memory reaches nothing tracked.
+  def read_through(root, off, width, state, seen)
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.keys.each do |key|
+      next unless key.start_with?(prefix)
+      parts = key.split(':')
+      next unless overlaps(off, width, parts[2].to_i, parts[3].to_i)
+      state[key].each do |v|
+        b = base_origin(v)
+        next if b == 'external' || b == 'eh'
+        if b.start_with?('ended:') || b.start_with?('expired:')
+          access(v, state, true)
+          next
+        end
+        a = address(v)
+        raise BorrowRefused, 'read-through argument holds a pointer of unknown provenance' unless a
+        record_loan_values([v])
+        name, poff, own = a
+        n = own ? @loans[own][3] + @loans[own][4] - poff : @slot_info[name][1] - poff
+        next if n <= 0 || seen.include?([name, poff, n])
+        seen << [name, poff, n]
+        access(v, state, true, nil, n, nil, true)
+        read_through(name, poff, n, state, seen)
+      end
+    end
+  end
+
   def scalar_abi_class(ty)
     return 's' if ty == 'float'
     return 'd' if ty == 'double'
@@ -1422,6 +1453,7 @@ class LocalLifetime
     resolved = []
     args.each_with_index do |arg, i|
       mode, ty = summary[:args][i]
+      deep = false
       if bh(arg) == 'sret'
         # (sret T PLACE): the caller's buffer for an aggregate result, which the callee initializes.
         raise BadIR, 'sret argument form' unless arg.length == 3
@@ -1430,12 +1462,13 @@ class LocalLifetime
       elsif bh(arg) == 'byval'
         # (byval T PLACE): the callee gets its own copy, a read of the caller's object.
         raise BadIR, 'byval argument form' unless arg.length == 3
-        unless mode == 'byval' && same_type?(arg[1], ty)
+        unless %w[byval byval-deep].include?(mode) && same_type?(arg[1], ty)
           raise BadIR, 'by-value call argument disagrees with its effect contract'
         end
         arg = arg[2]
+        deep = mode == 'byval-deep'
         mode = 'read'
-      elsif mode == 'byval'
+      elsif %w[byval byval-deep].include?(mode)
         raise BadIR, 'by-value contract argument passed by address'
       end
       origins = value(arg, state)
@@ -1471,7 +1504,7 @@ class LocalLifetime
         semantic_bytes(root, off, ty)
         [p, root, off, width, own]
       end
-      resolved << [mode, ty, places]
+      resolved << [mode, ty, places, deep]
     end
     # Summaries do not prescribe an evaluation order within the callee. Reject
     # overlapping mutation footprints before any postcondition can initialize,
@@ -1488,12 +1521,13 @@ class LocalLifetime
         end
       end
     end
-    resolved.each do |mode, ty, places|
+    resolved.each do |mode, ty, places, deep|
       places.each do |origin, root, off, width, own|
         case mode
         when 'read'
           access(origin, state, true, nil, width, ty)
           record_memory_loan_values(root, off, width, state)
+          read_through(root, off, width, state, []) if deep
         when 'write'
           # A mutation requires an existing initialized value and preserves its
           # ownership identity; its resulting pointer contents are unknown.

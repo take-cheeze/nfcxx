@@ -303,6 +303,14 @@ synthetic slot. Summary inference gives a `byval` parameter `(byval T)` when `T`
 layout, so `long double` and `__int128` by-value parameters, which have none, get no summary yet.
 All three validators accept the effect.
 
+`(byval-deep T)` is `byval` for a callee that also reads what the value's pointers reach, as Rust's
+`std::io::_print` reads the values a `fmt::Arguments` refers to. At the call, each pointer stored in
+the argument is followed, transitively: its referent (the range of its loan, or the rest of its slot)
+is read as a copy reads, carrying byte states, and its loans count as used there. A pointer to ended
+storage or through an ended loan is an error, and one of unknown provenance is refused. The callee
+still writes nothing and keeps nothing. Summary inference never chooses it; the mrustc translator
+emits it ([mrustc-borrowck.md](mrustc-borrowck.md)).
+
 ## Source locations
 
 With `NFCXX_IR_LOC=1` the frontend prints `(loc "FILE" LINE)` statements, and each diagnostic names the
@@ -848,7 +856,8 @@ uninitialized field and a dangling pointer field through struct copies, and `cpp
 check a by-value parameter's copy and a returned address of it.
 `contracts/byval.cpp` passes a struct by value through an inferred `(byval T)` summary, finds an
 uninitialized field in the caller's copy, and runs natively. The fixtures `calls/byval_*.ir` cover
-an uninitialized argument and a by-value contract passed by address.
+an uninitialized argument and a by-value contract passed by address, and `calls/byval_deep*.ir`
+a `byval-deep` argument whose stored reference stays borrowed until the call or dangles at it.
 `contracts/longdouble.cpp` checks `long double` and `__int128` arithmetic through the runtime
 summaries. It is refused without them and finds an uninitialized operand at the helper call. A
 module's own summary overrides the file's. The emitter and oracle accept every summary in the

@@ -586,7 +586,7 @@ class BorrowCallEffects
       end
       args = f[6].drop(1)
       args.each do |arg|
-        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval].include?(arg[0])
+        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval byval-deep].include?(arg[0])
           raise bad, 'call argument effect form'
         end
         ty = arg[1]

@@ -1,7 +1,8 @@
 #!/usr/bin/env ruby
 # monomir-to-pathb.rb: translate mrustc monomir (.mir) to Path B IR (.ir)
 # --borrow: input for scripts/pathb-borrowck.rb, not for code generation. Only the program's own
-# functions get bodies (standard library calls stay external), locals are not zero-filled, mrustc's
+# functions get bodies (standard library calls stay external, some with the trusted summaries of
+# scripts/monomir-std.rb), locals are not zero-filled, mrustc's
 # SCOPEEND statements (MRUSTC_MMIR_SCOPE_END=1) become decl/scope-end facts, and a borrow of a local
 # place becomes a shared or exclusive loan. See docs/notes/mrustc-borrowck.md.
 $borrow = !ARGV.delete("--borrow").nil?
@@ -10,6 +11,7 @@ input = ARGV[0]
 outpath = ARGV[1]
 src = File.read(input)
 $mir_src = src
+require_relative "monomir-std" if $borrow
 
 types = {}
 src.scan(/^type (.+?) \{\n(.*?)\n\}/m) do |name, body|
@@ -424,8 +426,15 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
   cur_ty = cur_ty.strip unless cur_ty.nil?
   addr = base
   addr_ty = cur_ty
+  # --borrow: a Box<T> of a scalar holds its value in its own place (scripts/monomir-std.rb). mrustc
+  # derefs a Box as `(*b.0 .0 .0)`, its pointer field, which is then the Box's own address.
+  boxed = $borrow && MonomirStd.box_scalar(cur_ty, types) ? [addr, MonomirStd.box_scalar(cur_ty, types)] : nil
   (p[:ops] || p[:wrappers]).each do |w|
-    if w[:k] == :deref
+    if w[:k] == :deref && boxed
+      addr, cur_ty = boxed
+      addr_ty = cur_ty
+      boxed = nil
+    elsif w[:k] == :deref
       inner, kind = type_deref_once(cur_ty || "", types)
       if inner.nil?
         r = regi; regi += 1
@@ -454,6 +463,9 @@ def place_addr(expr, types, locals, params, param_reg, stmts, regi, want_type = 
       addr, cur_ty, regi = apply_wrapper_addr(addr, cur_ty, w, types, locals, params, stmts, regi)
       addr_ty = cur_ty
     end
+    next if boxed && w[:k] == :field && w[:idx] == 0
+    inner = $borrow && MonomirStd.box_scalar(cur_ty, types)
+    boxed = inner ? [addr, inner] : nil
   end
   if want_type
     return [addr, addr_ty, regi]
@@ -757,6 +769,7 @@ functions = []
 src.scan(/^fn ([^\n]+?)\s*\{\n(.*?)\n\}/m) do |header, body|
   functions << {header: header.strip, body: body}
 end
+MonomirStd.scan(src) if $borrow
 $extern_map = {}
 src.scan(/^fn ([^\n]+?) = ([^\n]*?);\n/) do |header, linkage|
   functions << {header: header.strip, body: nil, linkage: linkage.strip}
@@ -1348,6 +1361,9 @@ def borrow_loan(expr, place, types, locals, params, stmts, regi)
   return nil unless ty
   ty = ty.strip
   off = 0
+  # A Box<T> of a scalar holds its value in its own place (scripts/monomir-std.rb), so `&*b`, which
+  # mrustc writes `&(*b.0 .0 .0)`, borrows the Box's own place.
+  boxed = MonomirStd.box_scalar(ty, types) ? [off, MonomirStd.box_scalar(ty, types)] : nil
   p[:ops].each do |w|
     case w[:k]
     when :field
@@ -1358,9 +1374,15 @@ def borrow_loan(expr, place, types, locals, params, stmts, regi)
       vf = types[ty] && types[ty][:fields][w[:idx]]
       return nil unless vf
       ty = vf[:type].strip
+    when :deref
+      return nil unless boxed
+      off, ty = boxed
     else
       return nil
     end
+    next if boxed && w[:k] == :field && w[:idx] == 0
+    inner = MonomirStd.box_scalar(ty, types)
+    boxed = inner ? [off, inner] : nil
   end
   sz, _ = type_size_align(ty, types)
   return nil if sz == 0
@@ -1408,7 +1430,7 @@ def mir_storage_starts(blocks, block_nums, locals)
     (blocks[b] || "").each_line do |ln|
       ln = ln.strip
       if ln.start_with?("SCOPEEND")
-        ln.sub(/;$/, "").split.drop(1).each { |v| live.delete(v) }
+        ln.sub(/;$/, "").split.drop(1).each { |v| live.delete(v) unless MonomirStd.keeps_storage?((locals.assoc(v) || [])[1]) }
       else
         root = mir_written_local(ln)
         live << root if root && !live.include?(root)
@@ -2106,6 +2128,7 @@ functions.each do |fn|
       end
       if ln.start_with?("SCOPEEND")
         ln.sub(/;$/, "").split.drop(1).each do |v|
+          next if live && MonomirStd.keeps_storage?((locals.assoc(v) || [])[1])
           live.delete(v) if live
           next if zst_locals[v]
           if live && term_line =~ /\b#{v}\b/
@@ -3091,6 +3114,11 @@ functions.each do |fn|
             end
           end
           stmts << "(goto #{retblk.inspect})"
+        elsif $borrow && dest_addr && (std_kind = MonomirStd.inline(pb_sym(fexpr)))
+          # A standard library constructor that keeps references (scripts/monomir-std.rb): its stores.
+          low, regi = MonomirStd.lower(std_kind, dest_addr, arg_vals.map(&:first), regi)
+          stmts.concat(low)
+          stmts << "(goto #{retblk.inspect})"
         else
           fname = fexpr
           if $extern_map && $extern_map[pb_sym(fname)]
@@ -3352,7 +3380,7 @@ if $borrow
   prim = {"bool"=>1, "char"=>1, "signed_char"=>1, "unsigned_char"=>1, "short"=>2, "unsigned_short"=>2,
           "int"=>4, "unsigned_int"=>4, "long"=>8, "unsigned_long"=>8, "long_long"=>8,
           "unsigned_long_long"=>8, "float"=>4, "double"=>8}
-  records = {}
+  records = MonomirStd::LAYOUTS.dup
   describe = nil
   field_ok = lambda do |pt|
     return [prim[pt], prim[pt]] if prim[pt]
@@ -3364,7 +3392,8 @@ if $borrow
   end
   describe = lambda do |name|
     return records[name] != false if records.key?(name)
-    records[name] = false
+    records[name] = MonomirStd.layout(name, types) || false
+    return true if records[name]
     t = types[name]
     return false unless t && !t[:tag] && t[:size] > 0 && t[:size] <= 4096 && t[:align] > 0 && t[:size] % t[:align] == 0
     fields = []
@@ -3382,8 +3411,12 @@ if $borrow
     records[name] = "(borrow-layout (struct #{name.inspect}) #{t[:size]} #{t[:align]} #{fields.join(' ')})"
     true
   end
-  lines.join("\n").scan(/\(struct "([^"]+)"\)/).flatten.uniq.each { |n| describe.call(n) }
-  layout_lines = records.values.select { |r| r }
+  # Trusted summaries of the standard library functions the program calls (scripts/monomir-std.rb).
+  text = lines.join("\n")
+  std_lines = text.scan(/&"([^"]+)"/).flatten.uniq.map { |n| MonomirStd.summary(n, types) }.compact
+  used = (text + "\n" + std_lines.join("\n")).scan(/\(struct "([^"]+)"\)/).flatten.uniq
+  used.each { |n| describe.call(n) }
+  layout_lines = records.select { |n, r| r && (used.include?(n) || !MonomirStd::LAYOUTS.key?(n)) }.values + std_lines
   lines.insert(1, *layout_lines) unless layout_lines.empty?
   File.write(outpath, lines.join("\n") + "\n") if outpath
   puts lines.join("\n") unless outpath
