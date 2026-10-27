@@ -134,12 +134,14 @@ module Bc2cppFixtureRuntime
   # next to a core fixture. `build_gems` ([name, dir] pairs) adds gems to the closed-world build, whose
   # src/ and mrblib/ then count as outside native and Ruby sources.
   # `drop_gems` (names) leaves gems out of that list while their sources stay in the scanned ones: a build that lacks them.
+  # `drop_native` (path fragments) leaves matching native sources out of the scanned ones too: a world without that code.
   # `core` compiles mruby's own mrblib (BC2CPP_CORE_OWNERS) in front of the fixture, as a build does.
   # `skip_unsupported: false` drops SKIP_UNSUPPORTED, so a method the compiler
   # refuses keeps its `#error` in the output instead of being dropped whole --
   # what a check that asserts on a refusal needs.
   def generate(source, dir, only_owners: nil, path: 'fixture.rb', extra: [],
-               native: [], foreign: [], build_gems: [], drop_gems: [], core: false, skip_unsupported: true, owner_variants: nil)
+               native: [], foreign: [], build_gems: [], drop_gems: [], drop_native: [], core: false, skip_unsupported: true,
+               owner_variants: nil)
     src = File.join(dir, path)
     FileUtils.mkdir_p(File.dirname(src))
     File.write(src, source)
@@ -159,6 +161,7 @@ module Bc2cppFixtureRuntime
       # closed world leaves those sources out: a native-direct arm never names an rgss:: symbol it cannot link.
       world = closed_world_native_srcs
       world = world.reject { |path| path.include?('/mruby-rgss/src/') } if core
+      world = world.reject { |path| drop_native.any? { |fragment| path.include?(fragment) } }
       natives = world + write_outside.call(native)
     env = bc2cpp_closed_world_probe_env(env.merge(
       'NATIVE_SRCS' => Shellwords.join(natives),

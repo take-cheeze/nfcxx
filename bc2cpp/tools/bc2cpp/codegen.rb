@@ -399,11 +399,14 @@ class CodeGen
   def foreign_written_ivar_facts
     @foreign_written_ivar_facts ||= begin
       saved = @numeric_ivar_disabled
+      saved_self_written = @numeric_self_written
       @numeric_ivar_disabled = nil
       names = numeric_ivar_poisoned_names
       rebound = numeric_self_rebound_ireps
-      reflective = @numeric_ivar_disabled
+      # A typed slot has no family scope here, so a self-scoped computed write still demotes every one.
+      reflective = @numeric_ivar_disabled || @numeric_self_written.each_value.first&.last
       @numeric_ivar_disabled = saved
+      @numeric_self_written = saved_self_written
       rebound.each { |label| names.merge(own_ivar_names(label)) }
       [names, reflective]
     end

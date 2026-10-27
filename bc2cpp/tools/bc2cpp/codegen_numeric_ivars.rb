@@ -61,6 +61,10 @@ class CodeGen
     build_numeric_families
     poisoned = numeric_ivar_poisoned_names
     rebound = numeric_self_rebound_ireps
+    # A computed write in a block run under another self could reach any object.
+    @numeric_self_written.each do |label, (_family, why)|
+      @numeric_ivar_disabled ||= "#{why} (rebound block)" if rebound.include?(label)
+    end
     return if @numeric_ivar_disabled
 
     @ireps.each_value do |irep|
@@ -152,17 +156,28 @@ class CodeGen
   end
 
   # Names no group may track; sets @numeric_ivar_disabled when reflection could
-  # write any ivar.
+  # write any ivar. A computed write on the implicit self reaches only its family
+  # (@numeric_self_written: label => [family, why]), so it fails that family instead.
   def numeric_ivar_poisoned_names
     names = Set.new(@outside_ivar_names - @native_ivar_scopes.keys)
+    @numeric_self_written = {}
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, idx|
         sym = insn.sym
         if sym && insn.op == :LOADSYM
           names << sym.delete_prefix('@') if sym.start_with?('@') && !sym.start_with?('@@')
-          @numeric_ivar_disabled = "LOADSYM #{sym}" if (NUMERIC_IVAR_NAMED_WRITES + NUMERIC_SELF_REBINDERS).include?(sym)
-        elsif sym && BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && NUMERIC_IVAR_NAMED_WRITES.include?(sym)
-          @numeric_ivar_disabled = "non-literal #{sym} in #{irep.label}" unless literal_ivar_argument?(irep, idx, insn)
+          if (NUMERIC_IVAR_NAMED_WRITES + NUMERIC_SELF_REBINDERS).include?(sym) && numeric_writer_definable?(sym)
+            @numeric_ivar_disabled = "LOADSYM #{sym}"
+          end
+        elsif sym && BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && NUMERIC_IVAR_NAMED_WRITES.include?(sym) &&
+              !literal_ivar_argument?(irep, idx, insn)
+          why = "non-literal #{sym} in #{irep.label}"
+          family = numeric_self_write_family(irep, insn)
+          if family
+            @numeric_self_written[irep.label] = [family, why]
+          else
+            @numeric_ivar_disabled = why
+          end
         end
         if insn.op == :STRING
           entry = irep.pool[insn.pool_index.to_i]
@@ -183,6 +198,7 @@ class CodeGen
     @ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, idx|
         next unless BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && NUMERIC_SELF_REBINDERS.include?(insn.sym)
+        next unless numeric_writer_definable?(insn.sym)
 
         @numeric_ivar_disabled = "rebinder #{insn.sym} without literal block in #{irep.label}" unless literal_block_argument?(irep, idx, insn)
         stack = Array(irep.reps).dup
@@ -195,6 +211,24 @@ class CodeGen
       end
     end
     out
+  end
+
+  # SELF_SCOPED_IVAR_WRITE: the family an implicit-self send in +irep+ writes into, or nil when self is not an
+  # instance of one known family (no families built yet, a class body, a singleton or a universal owner).
+  def numeric_self_write_family(irep, insn)
+    return nil unless @numeric_family_find && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+
+    owner = numeric_irep_owner[irep.label]&.owner
+    return nil if owner.nil? || owner.end_with?('.singleton') || owner.start_with?('<') ||
+                  NUMERIC_IVAR_UNIVERSAL_OWNERS.include?(owner)
+
+    numeric_family(owner)
+  end
+
+  # UNDEFINED_REBINDER: a rebinder no definition answers (`eval` in a build without mruby-eval) raises
+  # NoMethodError, or reaches a method_missing whose own sends this scan reads, so it rebinds nothing.
+  def numeric_writer_definable?(name)
+    @closed_world.nil? || !@registry.fetch(name, []).empty? || @closed_world.invisibly_definable?(name)
   end
 
   # SENDB whose block register is written by BLOCK/LAMBDA in the same irep.
@@ -222,7 +256,7 @@ class CodeGen
   end
 
   def fail_numeric_ivar_groups(poisoned)
-    wild = @numeric_wild_families
+    wild = @numeric_wild_families | @numeric_self_written.each_value.map(&:first)
     writers = Set.new
     @registry.each_value do |defs|
       defs.each do |d|
