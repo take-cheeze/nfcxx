@@ -277,7 +277,7 @@ cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DE
   # group. Each group is one PTX module: $base.groups/gNNNN.ptx and its kernels in groups.txt.
   # The images are the copy's .incbin files: with -c they are kept beside the copy, which the link re-reads (cu_prepare).
   t=$(trace_start)
-  "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --groups-dir="$groups" \
+  "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --int=gpu --groups-dir="$groups" \
     --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-60000} \
     ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
   trace_end "$t" "pathb-ptx-emit --emit: $(basename "$src") ($(ls "$groups"/g*.ptx | wc -l | tr -d ' ') groups)" cuda
