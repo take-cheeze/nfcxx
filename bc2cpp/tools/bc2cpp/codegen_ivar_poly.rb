@@ -162,14 +162,18 @@ class CodeGen
   # through here, so an embedded ivar never touches iv_tbl, where it reads nil.
   # `self_of_klass` means `recv` is self inside klass's own compiled body, whose
   # struct is always in this file. Returns nil when only dispatch can reach it.
-  def ivar_get_code(klass, recv, ivar, dst, self_of_klass: false)
+  # `irep_label` is the irep the read runs in, for SLOT_ASSURED (slot_read_assured?).
+  def ivar_get_code(klass, recv, ivar, dst, self_of_klass: false, irep_label: nil)
     type = ivar_embed_type(klass, ivar)
     return "#{dst} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"));" if type.nil?
     return nil if type == :unknown
 
     if self_of_klass
       field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
-      value = type == :value ? "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})" : "#{TYPE_OPS.fetch(type)[:box]}(#{field})"
+      value = if type != :value then "#{TYPE_OPS.fetch(type)[:box]}(#{field})"
+              elsif irep_label && slot_read_assured?(klass, ivar, irep_label) then field
+              else "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})"
+              end
       "#{dst} = #{value};"
     elsif embedded_accessor_linkable?(klass, ivar)
       "#{dst} = #{sanitize(klass)}_#{sanitize(ivar)}_impl(M, #{recv});"
