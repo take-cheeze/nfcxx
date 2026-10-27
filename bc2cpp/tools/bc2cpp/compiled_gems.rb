@@ -182,6 +182,13 @@ end
 
 # Sorted, so the list does not depend on the order the sources happen to be read in.
 BC2CPP_CORE_OWNERS = (bc2cpp_ruby_definition_owners + bc2cpp_c_definition_owners - %w[Object]).to_a.sort.freeze
+
+# OWNER_METHOD_REGISTRATION / REGISTRATION_SPLIT (codegen_emit.rb, emit_owner_registrations): [every owner a gem
+# registers, the core half of them]. Only the core and wired owners go in the core half.
+def bc2cpp_registration_owners(compiled_owners)
+  core = (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq
+  [(core + compiled_owners).uniq, core.to_set]
+end
 BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
 require 'prism'
