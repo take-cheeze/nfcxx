@@ -22,7 +22,7 @@ LIBM = %w[sqrt sin cos tan asin acos atan atan2 exp exp2 log log2 log10 pow
           floor ceil round trunc fmod fabs hypot cbrt sinh cosh tanh fmin fmax
           copysign ldexp frexp modf sqrtf sinf cosf powf fabsf floorf ceilf roundf
           fmodf expf logf]
-NOOP_INTRINSICS = %w[__nfcxx_fence __nfcxx_int3] # the x86 fence and int3 stubs of qbe-prep.rb (no CIL form)
+NOOP_INTRINSICS = %w[__nfcxx_fence __nfcxx_int3] # the x86 fence and int3 stubs of qbe-prep (no CIL form)
 NUMERIC_KINDS = %w[int8 int16 int32 int64 float32 float64]
 RUNTIME = "8.0.0"
 

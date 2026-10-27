@@ -16,10 +16,10 @@ for the vxsort sort.
 Before this work the QBE back end compiled 13 of the 34 (the rest hit cproc's "volatile store is not yet supported"
 or a missing builtin, one error per file).
 
-## What the QBE path needed (`scripts/qbe-prep.rb`)
+## What the QBE path needed (`scripts/qbe-prep`)
 
 - **Volatile stores.** cproc has no volatile stores. The qualifier is now dropped in EDG's output too, as the hand-written
-  C path already did (the file comment of `qbe-prep.rb` has the rule). Volatile block-scope locals keep their address
+  C path already did (the file comment of `qbe-prep` has the rule). Volatile block-scope locals keep their address
   taken, so QBE leaves them in memory. The stores that remain are plain and in program order on x86-64, which is what gcc
   emits for a volatile store there; `Volatile<T>::Store` in `env/volatile.h` relies on exactly that together with the
   fence below. On other targets the rule is wrong: a plain store has no release ordering on arm64, and the fence stub is
@@ -61,4 +61,4 @@ some `operator new`/`delete` and `__cxa_*` helpers. The C side needs minipal's m
 
 - The gcc backend on macOS (Apple clang, which compiles EDG's C there) rejects the `__sync_*` calls in
   `tests/cases/qbe_coreclr_gc_forms.cpp`: EDG passes a `volatile void *` to them. Linux gcc accepts it. The test is marked
-  `MACOS-XFAIL-gcc`. The QBE path is unaffected, because `qbe-prep.rb` rewrites those calls.
+  `MACOS-XFAIL-gcc`. The QBE path is unaffected, because `qbe-prep` rewrites those calls.

@@ -51,7 +51,7 @@ into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link 
 - **Exceptions work** on the QBE backend (`tests/cases/exceptions.cpp`): EDG lowers them to plain C plus its EH runtime
   in `libC.a`, so cproc/QBE never see anything special.
 - **Not supported by cproc** (so not by the QBE backend of Path A): `long double` ("long double is not yet supported"),
-  `volatile` stores in EDG-generated C are handled by `qbe-prep.rb`, which drops the qualifier (the plain store is
+  `volatile` stores in EDG-generated C are handled by `qbe-prep`, which drops the qualifier (the plain store is
   x86-64 only; `docs/notes/coreclr-gc.md`), see `tests/c/volatile_setjmp.c` for the locals rule, inline asm (only `__asm__ volatile("int $3")` is rewritten,
   `tests/cases/qbe_int3_break.cpp`). All work with `--backend=gcc`. Path B handles volatile itself
   (`tests/pathb-qbe/cases/volatile.cpp`, `docs/notes/pathb-stage3.md`) and still refuses `long double` and inline asm

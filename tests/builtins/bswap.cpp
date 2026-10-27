@@ -1,5 +1,5 @@
 // EXPECT: 0
-// __builtin_bswap16/32/64 on runtime values (cproc has none: scripts/qbe-prep.rb supplies helpers).
+// __builtin_bswap16/32/64 on runtime values (cproc has none: scripts/qbe-prep supplies helpers).
 #include <cstdint>
 int main() {
   int bad = 0;

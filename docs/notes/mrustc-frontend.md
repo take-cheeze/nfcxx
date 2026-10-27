@@ -16,7 +16,7 @@ through Path B IR; see [mrustc-monomir.md](mrustc-monomir.md) for coverage and r
 prog.rs --mrustc (-o prog)--> prog.c + prog_cmd.txt (mrustc's gcc command: the rlib objects and libraries)
 prog.c --cc -E -P -D__CPROC__ (no -undef)--> pp.c
 pp.c --scripts/mrustc-prep.rb--> prep.c, tail.s (helpers, asm-label trampolines), weak.txt (weak data symbols)
-prep.c --scripts/qbe-cc -c (cc -E -undef, qbe-prep.rb, cproc, QBE, as)--> X.o
+prep.c --scripts/qbe-cc -c (cc -E -undef, qbe-prep, cproc, QBE, as)--> X.o
 X.o --objcopy --weaken-symbols=weak.txt (when weak.txt is not empty)--> X.o
 tail.s --cc -c--> X.tail.o
 the program, and each crate of MRUSTC_NFCC_CRATES (cached as build/mrustc/nfcxx/CRATE.o)
@@ -56,11 +56,11 @@ list was found by rerunning, and a census of each construct sized what was left.
 | --- | --- | --- |
 | `_Atomic` qualifier (`<stdatomic.h>`) | from the typedefs | dropped, as `scripts/strip-atomic.py` does for libc++ |
 | `__extension__`, `__restrict`, `__restrict__` | in glibc's headers | dropped / the C99 `restrict`, which cproc reads |
-| `__mrustc_atomicloop{8,16,32,64}` (the prelude's fetch-op loop) | 4 lines | the same loop over the sized `__atomic_load_N` / `__atomic_compare_exchange_N`, which `qbe-prep.rb` declares |
+| `__mrustc_atomicloop{8,16,32,64}` (the prelude's fetch-op loop) | 4 lines | the same loop over the sized `__atomic_load_N` / `__atomic_compare_exchange_N`, which `qbe-prep` declares |
 | `extern T ZRG…(…)` then `asm("__rust_alloc");` (an asm label naming the symbol) | a few per crate | the label leaves the C; the tail defines the mangled name as `jmp LABEL@PLT` (weak) |
 | `extern T NAME asm("environ");` (a data object with a label, on one line) | 1 (std) | the name is replaced by the label throughout the file; the label leaves the declaration |
 | `#pragma pack(push, 1)` around a struct | 65 regions (libcore) | cproc ignores `#pragma`; the struct gets `__attribute__((packed))` after its keyword, which is the only place cproc reads it |
-| `__attribute__((__aligned__(16),))`, the trailing comma | 8 | dropped on attribute lines (`,)` also occurs in string literals); `qbe-prep.rb` also accepts the comma where it is left (a struct's closing line, `} __attribute__((__aligned__(128),));`) |
+| `__attribute__((__aligned__(16),))`, the trailing comma | 8 | dropped on attribute lines (`,)` also occurs in string literals); `qbe-prep` also accepts the comma where it is left (a struct's closing line, `} __attribute__((__aligned__(128),));`) |
 | `__attribute__((section(".init_array.N")))` on a data object (std's argv capture) | 1 | the attribute leaves the declaration; the tail places `.quad FUNC` in `.init_array.N` (`FUNC` from the initialiser) |
 | Placeholders for unimplemented intrinsics: `({ if (!"MSG") ; else __assert_fail (…); })` | 1434 (libcore) | `(!"MSG" ? (void)0 : __assert_fail (…))`, the same test; `__PRETTY_FUNCTION__` becomes `__func__` |
 | Atomic load, store, exchange, compare-exchange in statement expressions (`({ __auto_type … })`) | 425 (libcore: 315 CAS, 50 exchange, 30 store, 30 load) | an expression over the sized builtin of the pointee's width, with a cast where a value comes back. Pointers are 8 bytes and their values go through `(unsigned long)`. The 15 on `uint128_t` (a struct) use four helpers after its typedef, over the generic libatomic calls |
@@ -263,7 +263,7 @@ and with `--pipeline` the second too.
     address adds per alignment unit: 4096 instructions for each copy of mold's 2 KB `HyperLogLog`, whose chains of
     address temporaries were spilled. A test function with that value had a 34.9 KB frame (18.6 KB with `blit`, 14.5 KB
     with gcc), and rayon's recursion overflowed its 2 MiB worker stacks when this mold linked mrustc;
-  - `qbe-prep.rb`: the `__aligned__(N),` trailing comma on a struct's closing line;
+  - `qbe-prep`: the `__aligned__(N),` trailing comma on a struct's closing line;
   - `mrustc-nfcc.sh`, the link:
     - the native archives that build scripts make (blake3's assembly, zstd, mimalloc) were dropped. Since the
       crates call them through weak trampolines, the build ran and called address 0 (`--build-id` hashes with

@@ -84,7 +84,7 @@ particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cp
 
 - **Bit-counting built-ins** `__builtin_clz`, `ctz`, `popcount`, `parity`, `ffs` and their `l`/`ll` forms:
   constant-folded (the kernel's headers use them in constant expressions and `_Static_assert`s), otherwise lowered
-  branch-free to a population count by halves; clz and ctz of zero give the width. qbe-prep.rb no longer rewrites them.
+  branch-free to a population count by halves; clz and ctz of zero give the width. qbe-prep no longer rewrites them.
 
 - **Inline asm `p` operands and `%a`** (docs/notes/inline-asm.md), and symbol immediates with an offset (`&s.member`).
 
@@ -200,7 +200,7 @@ particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cp
   `ARCH_PAGE_TABLE_SYNC_MASK`), and so are `x && 0` (`x || 1` is 1): `dax_mapping()` is
   `mapping->host && IS_DAX(mapping->host)`, a `{ return 0; }` function then. What a local then carries
   (`dax = dax_mapping(mapping); if (dax) ...`) QBE folds, dropping the call it guards. A weak function is not folded (the link may take another definition), nor a
-  `noipa` one (qbe-prep.rb's `__nfcxx_keep(&x)`, whose call keeps a volatile local in memory).
+  `noipa` one (qbe-prep's `__nfcxx_keep(&x)`, whose call keeps a volatile local in memory).
 
 - **Dead code names nothing** under `-p`: a block cproc's own constant folding leaves unreachable is marked
   (`# nfcxx:dead` after its label) and what only it names is not referenced, as QBE drops the block -- a static

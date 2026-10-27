@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# qbe-prep port check (docs/notes/mruby-scripting.md, stage 3): scripts/qbe-prep.rb must give the same
+# qbe-prep port check (docs/notes/mruby-scripting.md, stage 3): scripts/qbe-prep (tools/qbe-prep, the C++ port of the
+# former scripts/qbe-prep.rb) must give the same
 # output C, the same assembly tail, the same stderr and the same exit status as the Python original, through its
 # oracle port tests/mruby/oracle/qbe-prep.rb (NFCXX_C_INPUT, which the original reads, is the --c-input argument of both) on
 #   1. every input scripts/qbe-cc really feeds it: the compiles of tests/cases, tests/c, tests/builtins and
-#      tests/lib (and tinyxml2, doctest, json, lua when build/realworld has them) run with the interpreter wrapped
-#      by tests/mruby/qbe-prep-tap.sh, which saves each preprocessed C file and the C-input flag;
+#      tests/lib (and tinyxml2, doctest, json, lua when build/realworld has them) run with qbe-prep replaced by
+#      tests/mruby/qbe-prep-tap.sh (NFCXX_QBE_PREP), which saves each preprocessed C file and the C-input flag;
 #   2. hand-written edge cases for each rewrite (aligned attributes, __bf16/_Float*, constructors,
 #      thread_local aliases, overflow builtins, volatile locals, alloca, atomics, float literals, tokenizer).
 # The comparison fails when it is vacuous: every corpus must have produced inputs, and every kind of rewrite must
 # occur in the Python output somewhere. Skipped without EDG/QBE (part 1) or an interpreter.
 #   MRB (an existing mruby executable)   QBE_PREP_CORPUS=<dir> (also compare the captures in <dir>, as written by
-#   the tap, e.g. from a tests/realworld/run_mruby.sh run with MRB=tests/mruby/qbe-prep-tap.sh)
+#   the tap, e.g. from a tests/realworld/run_mruby.sh run with NFCXX_QBE_PREP=tests/mruby/qbe-prep-tap.sh)
 cd "$(dirname "$0")/../.."
 root=$PWD; oracle=$root/tests/mruby/oracle/qbe-prep.rb
 real=${MRB:-$root/build/mruby-tool/bin/mruby}
-prep=$root/scripts/qbe-prep.rb
+prep=$root/scripts/qbe-prep
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0; total=0; changed=0; errors=0
 mkdir -p "$tmp/cmp" "$tmp/edge" "$tmp/tap" "$tmp/bin"; : >"$tmp/all.out"; : >"$tmp/all.tail"
@@ -33,10 +34,10 @@ cmp_one() {
   d=$tmp/cmp/$name; mkdir -p "$d"; rm -f "$d"/*
   if [ -n "$flag" ]; then
     mrb "$oracle" --c-input "$src" "$d/orc.out" "$d/orc.tail" 2>"$d/orc.err"; local prc=$?
-    mrb "$prep" --c-input "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
+    "$prep" --c-input "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
   else
     mrb "$oracle" "$src" "$d/orc.out" "$d/orc.tail" 2>"$d/orc.err"; local prc=$?
-    mrb "$prep" "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
+    "$prep" "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
   fi
   total=$((total + 1))
   local why=""
@@ -522,8 +523,8 @@ par() { while [ "$(jobs -r | wc -l)" -ge "$jobs_max" ]; do wait -n; done; "$@" &
 build() { "$@" >/dev/null 2>&1 || true; }   # the compile may fail (documented limits); qbe-prep ran first
 
 if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ]; then
-  # NFCXX_PREP_ALWAYS: every input must reach qbe-prep.rb (through the tap), or the counts below are meaningless.
-  export QBE_PREP_REAL_MRB=$real MRB=$root/tests/mruby/qbe-prep-tap.sh NFCXX_BACKEND=qbe NFCXX_PREP_ALWAYS=1
+  # NFCXX_PREP_ALWAYS: every input must reach qbe-prep (through the tap), or the counts below are meaningless.
+  export NFCXX_QBE_PREP=$root/tests/mruby/qbe-prep-tap.sh NFCXX_BACKEND=qbe NFCXX_PREP_ALWAYS=1
   tap_dir cases; n=0
   for f in "$root"/tests/cases/*.cpp; do par build "$root/nfcxx" "$f" -o "$tmp/bin/case$n"; n=$((n + 1)); done; wait
   corpus cases "$n"
@@ -572,7 +573,7 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
   if [ -n "${QBE_PREP_CORPUS:-}" ] && [ -d "$QBE_PREP_CORPUS" ]; then
     mkdir -p "$tmp/tap"; ln -s "$(cd "$QBE_PREP_CORPUS" && pwd)" "$tmp/tap/extra"; corpus extra 1
   fi
-  unset MRB QBE_PREP_REAL_MRB QBE_PREP_TAP NFCXX_BACKEND
+  unset NFCXX_QBE_PREP QBE_PREP_TAP NFCXX_BACKEND
 else
   echo "skip qbe-prep corpus: needs EDG and QBE (scripts/setup-edg.sh, scripts/setup-qbe.sh); only the edge cases ran"
 fi
@@ -597,8 +598,8 @@ void use_asm(void) { __asm__("call viaasm"); }
 static inline int ret_ptr_dead(int *p) { return *p; }
 int main(void) { static int local_static; return live_mid(1) + table[0](2) + (int)(long)mk(); }
 EOF
-dce() { mrb "$prep" --c-input --dce "$tmp/edge/dce.c" "$tmp/dce.out" "$tmp/dce.tail" 2>"$tmp/dce.err"; }
-mrb "$prep" --c-input "$tmp/edge/dce.c" "$tmp/dce0.out" "$tmp/dce0.tail" 2>/dev/null
+dce() { "$prep" --c-input --dce "$tmp/edge/dce.c" "$tmp/dce.out" "$tmp/dce.tail" 2>"$tmp/dce.err"; }
+"$prep" --c-input "$tmp/edge/dce.c" "$tmp/dce0.out" "$tmp/dce0.tail" 2>/dev/null
 if dce; then
   for kept in 'int live_leaf' 'int live_mid' 'int via_ptr' '*mk(void)' 'int viaasm' 'int usedattr(void) { return 5; }' 'int main(void)'; do
     grep -qF -e "$kept" "$tmp/dce.out" || { echo "FAIL qbe-prep --dce: dropped '$kept'"; fail=1; }

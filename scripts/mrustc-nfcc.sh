@@ -93,7 +93,7 @@ for crate in $crates; do
   [ -f "$c" ] || { echo "mrustc-nfcc: no lib$crate.rlib.c in $std" >&2; exit 1; }
   mkdir -p "$cache"
   if [ ! -f "$cache/$crate.o" ] || [ "$c" -nt "$cache/$crate.o" ] \
-     || [ "$root/scripts/mrustc-prep.rb" -nt "$cache/$crate.o" ] || [ "$root/scripts/qbe-prep.rb" -nt "$cache/$crate.o" ]; then
+     || [ "$root/scripts/mrustc-prep.rb" -nt "$cache/$crate.o" ] || [ "$root/tools/qbe-prep/qbe_prep.cpp" -nt "$cache/$crate.o" ]; then
     nfcxx_compile "$c" "$crate" "$cache"
   fi
   core_objs+=("$cache/$crate.o" "$cache/$crate.tail.o")

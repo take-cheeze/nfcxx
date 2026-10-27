@@ -36,7 +36,7 @@ stubs=$root/lib/sycl-ggml/stubs
 stamp=$outdir/obj/.inputs
 newest=$(find "$root/lib/sycl" "$root/lib/sycl-ggml" "$root/scripts/sycl-build.sh" "$root/scripts/pathb-spirv-emit.rb" \
   "$root/build/pathb/cmake/bin/cpfe" "$root/build/edg/bin/cpfe" "$root/build/cproc/cproc-qbe" "$root/build/qbe/qbe" \
-  "$root/scripts/qbe-cc" "$root/scripts/qbe-prep.rb" "$root/scripts/weak-symbols" "$root/tools/weak-symbols/weak_symbols.cpp" "$root/nfcxx" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+  "$root/scripts/qbe-cc" "$root/scripts/qbe-prep" "$root/tools/qbe-prep/qbe_prep.cpp" "$root/scripts/weak-symbols" "$root/tools/weak-symbols/weak_symbols.cpp" "$root/nfcxx" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
 touch -r "$newest" "$stamp"
 srcs=()
 for f in "$ggml_src"/*.cpp; do

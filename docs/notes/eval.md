@@ -122,7 +122,7 @@ position independent already (`-fPIC` is ignored by `scripts/qbe-cc`). C-only in
 object, which is why exceptions do not cross the boundary. Static constructors and destructors of globals in the
 prelude run on `dlopen` / `dlclose` (tested). Test: `tests/eval/probe*.{c,cpp}` via `tests/eval/run.sh`.
 
-QBE side: `scripts/qbe-prep.rb` maps `__builtin_memchr` to `memchr` (needed by `std::string::find` in the
+QBE side: `scripts/qbe-prep` maps `__builtin_memchr` to `memchr` (needed by `std::string::find` in the
 header, like the existing `memcpy`/`memcmp` mappings).
 
 ## Safety: there is no sandbox
