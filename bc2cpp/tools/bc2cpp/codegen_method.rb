@@ -20,6 +20,7 @@ class CodeGen
   INLINE_LOOP_PASSES = [
     InlineLoopPass.new(:recognize_times_regions, :emit_times_inline, :block_addr, false), # BLOCK_SUPPORT
     InlineLoopPass.new(:recognize_step_regions, :emit_step_inline, :block_addr, false), # STEP_LOOP_SUPPORT
+    InlineLoopPass.new(:recognize_kernel_loop_regions, :emit_kernel_loop_inline, :block_addr, false), # KERNEL_LOOP_INLINE
     InlineLoopPass.new(:recognize_each_regions, :emit_each_inline, :block_addr, true), # EACH_BLOCK_SUPPORT
     InlineLoopPass.new(:recognize_each_index_regions, :emit_each_index_inline, :block_addr, true), # EACH_INDEX_SUPPORT
     InlineLoopPass.new(:recognize_hash_each_regions, :emit_hash_each_inline, :block_addr, true), # HASH_EACH_SUPPORT
@@ -303,6 +304,7 @@ class CodeGen
       out << emit_register_initializers(irep.nregs, initial)
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
+      out << array_hash_fixnum_prologue(d)
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
         # allocate the struct before any embedded SETIV.

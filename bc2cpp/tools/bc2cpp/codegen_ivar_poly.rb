@@ -846,6 +846,7 @@ end
       "  if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {\n" \
       "    return bc2cpp_ary_entry(M, recv, mrb_integer(key));\n" \
       "  }\n" \
+      "#{integer_bit_aref_helper_arm}" \
       "  return bc2cpp_getidx_slow(M, recv, key);\n" \
       "}\n\n"
   end

@@ -236,8 +236,18 @@ class CodeGen
 
   # A tripwire, not a fallback: the recognizer's gate should make it unreachable,
   # and mrb_funcall cannot pass a block.
-  def inline_receiver_guard(predicate, recv_expr, expected)
-    "    if (!#{predicate}(#{recv_expr})) { #{inline_raise('TypeError', "expected #{expected}")} }\n"
+  # INLINE_NIL_RECEIVER: the gate also takes an ivar class hint, and an ivar no path assigned yet is
+  # nil, so nil runs the send's own NoMethodError (bc2cpp_nil_receiver) when nil answers `name` nowhere.
+  def inline_receiver_guard(predicate, recv_expr, expected, name: nil)
+    "    if (!#{predicate}(#{recv_expr})) { #{inline_nil_arm(recv_expr, name)}" \
+      "#{inline_raise('TypeError', "expected #{expected}")} }\n"
+  end
+
+  def inline_nil_arm(recv_expr, name)
+    return '' unless name && nil_unanswerable?(name)
+
+    "if (mrb_nil_p(#{recv_expr})) bc2cpp_nil_receiver_named(M, #{recv_expr}, \"#{name}\"); " \
+      "#{NomethodReviewed.nil_receiver_marker(name)} "
   end
 
   # SSENDB (a self-receiver call) iterates `self`, not a register.
@@ -300,7 +310,7 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each')
+    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each', name: 'each')
     out << "    for (mrb_int bc2cpp_each_i_#{addr} = 0; " \
            "bc2cpp_each_i_#{addr} < ary_size(#{recv_expr}); " \
            "++bc2cpp_each_i_#{addr}) {\n"
@@ -352,7 +362,7 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each_index')
+    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each_index', name: 'each_index')
     out << "    for (mrb_int bc2cpp_eachidx_i_#{addr} = 0; " \
            "bc2cpp_eachidx_i_#{addr} < ary_size(#{recv_expr}); " \
            "++bc2cpp_eachidx_i_#{addr}) {\n"
@@ -380,7 +390,8 @@ class CodeGen
     out = String.new
     out << "  {\n"
     out << "    if (!mrb_hash_p(#{recv_expr}) || mrb_obj_ptr(#{recv_expr})->c != M->hash_class) {\n"
-    out << "      #{inline_raise('TypeError', 'expected exact Hash receiver for inlined #each_value')}\n"
+    out << "      #{inline_nil_arm(recv_expr, 'each_value')}" \
+           "#{inline_raise('TypeError', 'expected exact Hash receiver for inlined #each_value')}\n"
     out << "    }\n"
     out << "    mrb_value bc2cpp_heval_values_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
     out << "    for (mrb_int bc2cpp_heval_i_#{addr} = 0; " \
@@ -420,7 +431,7 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each')
+    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each', name: 'each')
     out << "    mrb_value bc2cpp_heach_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
     out << "    mrb_value bc2cpp_heach_vals_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
     out << "    mrb_int bc2cpp_heach_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
@@ -454,7 +465,7 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each_key')
+    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each_key', name: 'each_key')
     out << "    mrb_value bc2cpp_ekey_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
     out << "    mrb_int bc2cpp_ekey_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
     out << "    for (mrb_int bc2cpp_ekey_i_#{addr} = 0; " \
@@ -601,7 +612,7 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
     out << "    mrb_value bc2cpp_collect_acc_#{addr} = mrb_ary_new(M);\n" if %w[map select reject filter_map].include?(meth)
     out << "    mrb_value bc2cpp_collect_found_#{addr} = mrb_nil_value();\n" if meth == 'find'
     # each_with_index has no final assignment to skip, but a `break` in its block still sets the flag.
@@ -685,7 +696,7 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
     out << "    mrb_bool bc2cpp_accum_broke_#{addr} = FALSE;\n"
     case meth
     when 'any?'
@@ -947,7 +958,7 @@ class CodeGen
     end_label = "Lbc2cpp_sym_end_#{region[:sym_addr]}"
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined &:#{sym}")
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined &:#{sym}", name: meth)
     case meth
     when 'map', 'select', 'reject'
       out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_ary_new(M);\n"
@@ -1108,7 +1119,7 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
     out << "    mrb_bool bc2cpp_sort_broke_#{addr} = FALSE;\n"
     out << "    mrb_int bc2cpp_sort_n_#{addr} = ary_size(#{recv_expr});\n"
     out << "    mrb_value bc2cpp_sort_keys_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_n_#{addr});\n"

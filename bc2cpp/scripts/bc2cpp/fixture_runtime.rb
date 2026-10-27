@@ -57,6 +57,21 @@ module Bc2cppFixtureRuntime
     build_dir('BC2CPP_MRUBY_FULL', 'libmruby.a')
   end
 
+  # The -D flags a full-core libmruby was built with (MRUBY_CFLAGS of its lib/libmruby.flags.mak). A gem's define,
+  # MRB_USE_BIGINT above all, decides which arms the generated code keeps: compiled without it, a bigint takes a
+  # helper's proven-dead fallback that the real build, which passes the gems' defines, never reaches.
+  def library_defines(build)
+    mak = File.join(build, 'lib', 'libmruby.flags.mak')
+    raise "#{mak} is missing: the fixture cannot match the defines #{build}/lib/libmruby.a was built with" unless File.exist?(mak)
+
+    cflags = File.read(mak)[/^MRUBY_CFLAGS = (.*)$/, 1]
+    raise "#{mak} has no MRUBY_CFLAGS line" unless cflags
+
+    # MRB_DEBUG only arms the headers' mrb_assert, which no fixture is built for: mrb_data_init's still fires on
+    # an anonymous subclass made before INSTANCE_TT_SETUP ran (self_new_leaf_check's SN_ANON).
+    Shellwords.split(cflags).grep(/\A-D/).uniq - ['-DMRB_DEBUG']
+  end
+
   def compiler?
     system('g++', '--version', out: File::NULL, err: File::NULL)
   end
@@ -311,6 +326,7 @@ module Bc2cppFixtureRuntime
     binary = File.join(dir, 'fixture')
     flags = %w[-std=c++17 -fexceptions -DMRB_USE_CXX_EXCEPTION -w]
     flags << '-DMRB_NO_GEMS' unless full
+    flags.concat(library_defines(build) - flags) if full
     flags.concat(Shellwords.split(ENV.fetch('BC2CPP_CXXFLAGS', '')))
     built = Bc2cppCxx.system(*flags, "-I#{dir}", "-I#{build}/include", "-I#{ROOT}/3rd/mruby/include",
                    "-I#{ROOT}/mruby-rgss/src", "-I#{ROOT}/include", File.join(dir, 'main.cpp'), lib, '-lm', '-o', binary)

@@ -211,42 +211,45 @@ class CodeGen
       # CLASS_EQQ lives in compile_eqq_direct: a stable constant receiver never reaches here
       # while the world proves `===`, and a rebound one takes the shared helper.
     when '!='
-      # NEQ_UNCONDITIONAL: `!=` is a hand-written bytecode RProc in class.c bob_init
-      # (`return !(self == other)`), registered via mrb_define_method_raw (hence that
-      # scan in extract_native_method_names). vm.c OP_EQ is identity, then a
-      # hardcoded false for Symbols, then numeric fast paths or SEND :==. mrb_equal
-      # (src/object.c) gives the same answer for every type (for a Symbol with the
-      # default `==`, mrb_func_basic_p skips dispatch and returns false), so
-      # `!mrb_equal(...)` needs no fallback.
-      arg = argv.first
-      generic = "r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));"
-      neq = "  // != -- native primitive, no lookup needed for any receiver (real\n" \
-            "  // bytecode is exactly `!(self == other)`, mrb_equal reproduces ==\n" \
-            "  // exactly for every type -- see compile_native_primitive_send's own\n" \
-            "  // NEQ_UNCONDITIONAL comment)\n"
-      return "#{neq}  #{generic}\n" unless integer_eq_native?
-
-      # NEQ_INTEGER_PAIR: see integer_eq_native?.
-      "#{neq}  // NEQ_INTEGER_PAIR -- two Integers compare by value, with no Integer#== send\n" \
-        "  if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
-        "    r#{d} = mrb_bool_value(mrb_integer(#{recv}) != mrb_integer(#{arg}));\n" \
-        "  } else {\n    #{generic}\n  }\n"
+      compile_neq_op_eq(d, recv, argv.first)
     else
       dynamic_dispatch_line(d, recv, name, argv)
     end
   end
 
-  # NEQ_INTEGER_PAIR soundness: mrb_equal on two non-identical Integers sends `==`, which
-  # finds numeric.c's int_equal in Integer's own table (a value compare) unless a Ruby
-  # Integer#==, a prepend on Integer or a dynamic `==` installer can answer first.
-  def integer_eq_native?
-    return @integer_eq_native if defined?(@integer_eq_native)
-
-    defs = @registry['==']
-    @integer_eq_native = !!(defs&.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
-                            defs.none? { |d| d.owner == 'Integer' } &&
-                            Array(@prepended_modules['Integer']).empty? &&
-                            !@unknown_mixins.include?('Integer') && eqq_name_unrebound?('=='))
+  # NEQ_OP_EQ: `!=` is class.c's bytecode RProc `!(self == other)` (bob_init, registered with
+  # mrb_define_method_raw, hence that scan in extract_native_method_names), so its answer is vm.c
+  # OP_EQ's: identity, false for a Symbol receiver, an Integer/Float pair compared in place even
+  # when Ruby redefines Integer#== or Float#==, and a `==` send for the rest. mrb_equal agrees on
+  # the rest but a bigint receiver, which it compares without the send.
+  def compile_neq_op_eq(d, recv, arg)
+    num = ->(lhs, rhs) { "mrb_bool_value(#{lhs}(#{recv}) != #{rhs}(#{arg}))" }
+    "  // NEQ_OP_EQ :!= -- OP_EQ negated, as class.c's `!(self == other)` runs it (codegen_native_send.rb)\n" \
+      "  if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
+      "    r#{d} = #{num.call('mrb_integer', 'mrb_integer')};\n" \
+      "  } else if (mrb_obj_eq(M, #{recv}, #{arg})) {\n" \
+      "    r#{d} = mrb_false_value();\n" \
+      "  } else if (mrb_symbol_p(#{recv})) {\n" \
+      "    r#{d} = mrb_true_value();\n" \
+      "  }\n" \
+      "#ifndef MRB_NO_FLOAT\n" \
+      "  else if (mrb_integer_p(#{recv}) && mrb_float_p(#{arg})) {\n" \
+      "    r#{d} = #{num.call('mrb_integer', 'mrb_float')};\n" \
+      "  } else if (mrb_float_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
+      "    r#{d} = #{num.call('mrb_float', 'mrb_integer')};\n" \
+      "  } else if (mrb_float_p(#{recv}) && mrb_float_p(#{arg})) {\n" \
+      "    r#{d} = #{num.call('mrb_float', 'mrb_float')};\n" \
+      "  }\n" \
+      "#endif\n" \
+      "#ifdef MRB_USE_BIGINT\n" \
+      "  else if (mrb_bigint_p(#{recv})) {\n" \
+      "    mrb_value bc2cpp_neq_arg = #{arg};\n" \
+      "    r#{d} = mrb_bool_value(!mrb_test(mrb_funcall_argv(M, #{recv}, mrb_intern_lit(M, \"==\"), 1, &bc2cpp_neq_arg)));\n" \
+      "  }\n" \
+      "#endif\n" \
+      "  else {\n" \
+      "    r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));\n" \
+      "  }\n"
   end
 
   # INTEGER_UNARY: an Integer runs Numeric#-@ (`0 - self`), Numeric#zero? (`self == 0`),

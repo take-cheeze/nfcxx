@@ -9,8 +9,8 @@
 #       _splice fast paths (tools/bc2cpp/codegen_emit.rb), which fall back to mrb_ary_push / _set / _splice;
 #     - NATIVE_CORE_DIRECT rotate!: an exact-Array arm calls the audited ary_rotate_bang mirror, the owner call
 #       stays the else;
-#     - NEQ_INTEGER_PAIR: `a != b` compares two Integers in place before mrb_equal, unless the program reopens
-#       Integer#== (mrb_equal would send it);
+#     - NEQ_OP_EQ: `a != b` compares two Integers in place before mrb_equal, as BasicObject#!= (`!(self == other)`
+#       through OP_EQ) does even in a program that reopens Integer#==;
 #     - POLY_INTEGER_TAG: a POLY_SMALL_N chain with an Integer arm reads an Integer receiver's class from its tag,
 #       and BC2CPP_POLY_INTEGER_TAG=0 keeps the mrb_obj_class read.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
@@ -114,12 +114,11 @@ check.call('rotate!(k) has an exact-Array arm calling the audited mirror, the ow
              rotate.match?(/\} else \{\n.*(?:bc2cpp_owner_call|mrb_funcall|bc2cpp_send)/m))
 check.call('rotate! with no argument rotates by one', code_of(code, 'AwBuf_rotate_one').include?('bc2cpp_ary_rotate_bang(M, r'))
 neq = code_of(code, 'AwBuf_neq')
-check.call('`!=` compares two Integers in place before mrb_equal',
-           neq.include?('NEQ_INTEGER_PAIR') &&
-             neq.match?(/if \(mrb_integer_p\((\w+)\) && mrb_integer_p\((\w+)\)\) \{\n\s*r\d+ = mrb_bool_value\(mrb_integer\(\1\) != mrb_integer\(\2\)\);\n\s*\} else \{\n\s*r\d+ = mrb_bool_value\(!mrb_equal\(M, \1, \2\)\);/))
+neq_pair = /NEQ_OP_EQ :!=.*\n\s*if \(mrb_integer_p\((\w+)\) && mrb_integer_p\((\w+)\)\) \{\n\s*r\d+ = mrb_bool_value\(mrb_integer\(\1\) != mrb_integer\(\2\)\);\n.*r\d+ = mrb_bool_value\(!mrb_equal\(M, \1, \2\)\);/m
+check.call('`!=` compares two Integers in place before mrb_equal', neq.match?(neq_pair))
 reopened, = generate_world(source: "class Integer\n  def ==(other); super; end\nend\n#{SRC}", owners: OWNERS | ['Integer'])
-check.call('a program that reopens Integer#== keeps `!=` on mrb_equal',
-           code_of(reopened, 'AwBuf_neq').include?('!mrb_equal(M, ') && !code_of(reopened, 'AwBuf_neq').include?('NEQ_INTEGER_PAIR'))
+check.call('a program that reopens Integer#== keeps the Integer-pair arm, as OP_EQ ignores Integer#==',
+           code_of(reopened, 'AwBuf_neq').match?(neq_pair))
 getidx = code[/static mrb_value bc2cpp_getidx_slow\(.*?\n\}\n/m].to_s
 check.call('the shared `[]` chain reads an Integer receiver\'s class from its tag, Integer arm first',
            getidx.include?('POLY_INTEGER_TAG :[]') &&
