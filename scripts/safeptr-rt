@@ -11,7 +11,10 @@ out=$dir/nfcxx_safeptr.o
 if [ ! -f "$out" ] || [ "$src" -nt "$out" ]; then
   mkdir -p "$dir"
   tmp=$(mktemp -d "$dir/.build.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
-  gcc -c -O2 -Wall -Wextra -fPIC -fno-builtin -pthread "$src" -o "$tmp/sp.o"
+  # -ftls-model=initial-exec: the checks read thread-local caches on every call; the general-dynamic model -fPIC picks
+  # would make each read a call of __tls_get_addr. The runtime is only linked into executables (Path B cannot link a
+  # -shared object: its code is not position-independent), where initial-exec is always valid.
+  gcc -c -O2 -Wall -Wextra -fPIC -ftls-model=initial-exec -fno-builtin -pthread "$src" -o "$tmp/sp.o"
   mv -f "$tmp/sp.o" "$out"   # atomic: concurrent builds each write their own copy
 fi
 printf '%s\n' "$out"
