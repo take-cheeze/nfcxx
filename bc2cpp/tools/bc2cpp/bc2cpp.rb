@@ -418,6 +418,19 @@ if $PROGRAM_NAME == __FILE__
   registry.delete_if { |_, defs| defs.empty? }
   CodeGen.core_hidden_defs = core_hidden_defs
   CodeGen.core_guarded = core_guarded
+  compiled_ruby = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
+  # Every linked core gem's mrblib too: outside_ruby leaves out the core gems a build compiles, which a world that
+  # does not compile them still runs.
+  linked_mrblib = build_gems.values.flat_map { |dir| Dir["#{dir}/mrblib/**/*.rb"] }.select { |path| CoreDefs.core_source?(path) }
+  unread_ruby = (Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) + outside_ruby + linked_mrblib)
+                .map { |path| File.expand_path(path) }.uniq
+  unseen_flipped = CoreDefs.add_unseen_placeholders!(
+    registry, ireps, core_all_defs, alias_sites,
+    foreign_method_names(unread_ruby.reject { |path| compiled_ruby.include?(path) }.sort)
+  )
+  warn "== Ruby definers outside the registry (#{unseen_flipped.size} flipped a MONO name to POLY) =="
+  unseen_flipped.sort.each { |n| warn "  FLIP :#{n}" }
+  warn ''
 
   warn '== whole-program method registry =='
   registry.sort.each do |name, defs|

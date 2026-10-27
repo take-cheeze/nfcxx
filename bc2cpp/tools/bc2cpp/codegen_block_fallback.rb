@@ -1107,6 +1107,15 @@ class CodeGen
                                                                                          stack_expr: stack_expr)
              end
     ctor, direct = stack_block_glue(region, rproc_var, ctor, direct) if direct && stack_expr && direct.include?(stack_expr)
+    owner_call = nil
+    unless direct
+      owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "mrb_obj_value(#{rproc_var})")
+      # STATIC_OWNER_ARMS may put compiled arms in front of this owner call; built over the frame, they take the
+      # stack block the way a direct call does, and the heap RProc is made only when the owner call runs.
+      if owner_call && stack_expr && !static_owner_arm_targets(region[:name], argv.size, true).empty?
+        ctor, owner_call = stack_block_glue(region, rproc_var, ctor, owner_call)
+      end
+    end
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), #{direct ? 'direct call with the block' : 'dynamic dispatch'}\n"
@@ -1130,7 +1139,6 @@ class CodeGen
         out << "#{indent}  r#{dest_reg} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, #{args});\n"
         out << "#{indent}} else\n"
       end
-      owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "mrb_obj_value(#{rproc_var})")
       out << if owner_call
                "#{indent}#{owner_call}\n"
              else
