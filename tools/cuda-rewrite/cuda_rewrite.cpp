@@ -1977,11 +1977,12 @@ std::vector<std::string> comma_declaration_type(const std::string &text, long i)
   return {};
 }
 
-// `__device__ const float a = -0.75f;`: a device constant of scalar type with a plain initializer. The emitter lowers
-// it (a const global with a scalar value); arrays, brace lists and non-scalar types are still refused.
+// `__device__ const float a = -0.75f;` or `static const __device__ int8_t t[4] = {0, 1, 2, 3};`: a device constant of
+// scalar type, or an array of them, with an initializer. The emitter lowers it as a const global, as it does llama.cpp's
+// tables (GGML_TABLE_BEGIN gives the same declaration through a macro); non-const and non-scalar types are refused.
 static bool scalar_device_const(const std::string &text) {
   size_t eq = text.find('=');
-  if (eq == std::string::npos || text.find('[') != std::string::npos || text.find('{') != std::string::npos) return false;
+  if (eq == std::string::npos) return false;
   std::string head = text.substr(0, eq);
   std::vector<std::string> words;
   std::string w;
