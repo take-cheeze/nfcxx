@@ -145,6 +145,7 @@ require_relative 'codegen_tuple_returns'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
+require_relative 'codegen_kernel_loop'
 require_relative 'codegen_resumable'
 require_relative 'codegen_block_fallback'
 require_relative 'codegen_yield_free'
@@ -160,6 +161,7 @@ require_relative 'codegen_arg_shapes'
 require_relative 'codegen_computed_send'
 require_relative 'codegen_block_core_direct'
 require_relative 'codegen_collect_direct'
+require_relative 'codegen_integer_bit_aref'
 require_relative 'codegen_guarded_block_inline'
 require_relative 'codegen_core_exact_direct'
 require_relative 'codegen_core_self_native'
@@ -1150,6 +1152,11 @@ if $PROGRAM_NAME == __FILE__
   end
   warn "== stable value constants (CONST_VALUE_CACHE): #{CodeGen.stable_value_constants.size} =="
   CodeGen.stable_value_constants.sort.each { |n| warn "  STABLE_VALUE #{n}" }
+  CodeGen.const_bindings = profile_call.call('ConstBindings.analyze') do
+    ConstBindings.analyze(ireps, root_label, native_paths, foreign_ruby_srcs, static: closed_world.constants_static?,
+                          included: included_modules, prepended: prepended_modules, unknown_mixins: unknown_mixins)
+  end
+  warn "== const bindings (CONST_BINDING_CACHE): #{CodeGen.const_bindings.size} =="
   # ENUMERATOR_MODEL: the `Enumerator` constant Kernel#to_enum reads, proven apart from StableClassConstants (mruby's
   # chain/lazy gems reopen the class, which that analysis counts as a second definition).
   if CodeGen.enumerator_model
@@ -1499,7 +1506,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/class.h>'
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
-  # mrb_protect_error for GETCONST's owner-scope-first lookup (core API, not the
+  # mrb_protect_error for the RESCUE_SUPPORT bodies (core API, not the
   # mruby-error gem).
   puts '#include <mruby/error.h>'
   # mruby/io.h is a mrbgem-only include path. The optional helper declaration
@@ -1531,6 +1538,10 @@ if $PROGRAM_NAME == __FILE__
     #define mrb_ary_shift bc2cpp_mrb_ary_shift
     #define mrb_hash_delete_key bc2cpp_mrb_hash_delete_key
   CPP
+  # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
+  if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
+    puts CodeGen.respond_to_phantom_runtime
+  end
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
   # call-site glue catches (mruby is built with MRB_USE_CXX_EXCEPTION). Always
   # emitted: a header-only struct with nothing to link.
@@ -1834,6 +1845,29 @@ if $PROGRAM_NAME == __FILE__
   # std::uncaught_exceptions(): the guard's "is an unwind in flight" test (see
   # the guard).
   puts '#include <exception>'
+  # KERNEL_LOOP_INLINE (codegen_kernel_loop.rb): an inlined Kernel#loop runs its body under its own mrb_jmpbuf.
+  # The guard puts M->jmp back on every way out of the loop. The rescue answers a StopIteration with its result,
+  # after popping the callinfo frames the raise left (as mrb_protect_error does); anything else, a break object
+  # included, is thrown on to the jmpbuf the loop found, untouched, as if the loop had not caught it.
+  puts <<~'KERNEL_LOOP'
+    struct bc2cpp_jmp_restore {
+      mrb_state* M;
+      struct mrb_jmpbuf* prev;
+      ~bc2cpp_jmp_restore() { M->jmp = prev; }
+    };
+    [[maybe_unused]] static mrb_value bc2cpp_loop_rescue(mrb_state* M, const Bc2cppVmMark& mark) {
+      M->jmp = mark.jmp;
+      mrb_value exc = M->exc ? mrb_obj_value(M->exc) : mrb_nil_value();
+      if (mrb_nil_p(exc) || mrb_break_p(exc) ||
+          !mrb_obj_is_kind_of(M, exc, mrb_class_get(M, "StopIteration"))) {
+        if (!M->jmp) { mrb_print_error(M); abort(); }
+        MRB_THROW(M->jmp);
+      }
+      bc2cpp_vm_restore(M, mark);
+      M->exc = NULL;
+      return mrb_funcall_argv(M, exc, mrb_intern_lit(M, "result"), 0, nullptr);
+    }
+  KERNEL_LOOP
   puts <<~'ENSURE_GUARD'
     template <class F>
     struct bc2cpp_ensure_guard {
