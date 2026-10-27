@@ -915,13 +915,15 @@ class CodeGen
   def self.respond_to_phantom_runtime
     <<~'CPP'
         #define BC2CPP_RESPOND_TO_PHANTOM 1
+        // Keyed by the symbol's number: mruby hashes a Symbol key as U32(mrb_fixnum(key)), and under 64-bit word
+        // boxing that drops the id (it sits above bit 32), so a Symbol-keyed table this size is one bucket.
         [[maybe_unused]] static mrb_value bc2cpp_phantom_table(mrb_state* M) {
           return mrb_iv_get(M, mrb_obj_value(M->kernel_module), mrb_intern_lit(M, "__bc2cpp_left_out__"));
         }
         [[maybe_unused]] static mrb_bool bc2cpp_phantom_responds(mrb_state* M, mrb_value obj, mrb_sym id) {
           mrb_value table = bc2cpp_phantom_table(M);
           if (!mrb_hash_p(table)) return FALSE;
-          mrb_value owners = mrb_hash_fetch(M, table, mrb_symbol_value(id), mrb_nil_value());
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_int_value(M, (mrb_int)id), mrb_nil_value());
           if (!mrb_array_p(owners)) return FALSE;
           for (mrb_int i = 0; i < RARRAY_LEN(owners); i++) {
             if (mrb_obj_is_kind_of(M, obj, mrb_class_ptr(RARRAY_PTR(owners)[i]))) return TRUE;
@@ -956,10 +958,10 @@ class CodeGen
             mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out__"), table);
             mrb_define_method(M, M->kernel_module, "respond_to?", bc2cpp_kernel_respond_to, MRB_ARGS_ARG(1, 1));
           }
-          mrb_value owners = mrb_hash_fetch(M, table, mrb_symbol_value(id), mrb_nil_value());
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_int_value(M, (mrb_int)id), mrb_nil_value());
           if (!mrb_array_p(owners)) {
             owners = mrb_ary_new(M);
-            mrb_hash_set(M, table, mrb_symbol_value(id), owners);
+            mrb_hash_set(M, table, mrb_int_value(M, (mrb_int)id), owners);
           }
           mrb_ary_push(M, owners, mrb_obj_value(owner));
         }
