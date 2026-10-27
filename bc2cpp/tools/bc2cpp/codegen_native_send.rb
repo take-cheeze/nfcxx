@@ -217,23 +217,36 @@ class CodeGen
       # hardcoded false for Symbols, then numeric fast paths or SEND :==. mrb_equal
       # (src/object.c) gives the same answer for every type (for a Symbol with the
       # default `==`, mrb_func_basic_p skips dispatch and returns false), so
-      # `!mrb_equal(...)` needs no fallback. NEQ_INTEGER_PAIR: OP_EQ compares two Integers
-      # in place, while mrb_equal sends Integer#== for a non-identical pair, so that pair is
-      # compared inline first.
+      # `!mrb_equal(...)` needs no fallback.
       arg = argv.first
-      "  // != -- native primitive, no lookup needed for any receiver (real\n" \
-      "  // bytecode is exactly `!(self == other)`, mrb_equal reproduces ==\n" \
-      "  // exactly for every type -- see compile_native_primitive_send's own\n" \
-      "  // NEQ_UNCONDITIONAL comment)\n" \
-      "  // NEQ_INTEGER_PAIR -- two Integers compare as OP_EQ does, with no Integer#== send\n" \
-      "  if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
-      "    r#{d} = mrb_bool_value(mrb_integer(#{recv}) != mrb_integer(#{arg}));\n" \
-      "  } else {\n" \
-      "    r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));\n" \
-      "  }\n"
+      generic = "r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));"
+      neq = "  // != -- native primitive, no lookup needed for any receiver (real\n" \
+            "  // bytecode is exactly `!(self == other)`, mrb_equal reproduces ==\n" \
+            "  // exactly for every type -- see compile_native_primitive_send's own\n" \
+            "  // NEQ_UNCONDITIONAL comment)\n"
+      return "#{neq}  #{generic}\n" unless integer_eq_native?
+
+      # NEQ_INTEGER_PAIR: see integer_eq_native?.
+      "#{neq}  // NEQ_INTEGER_PAIR -- two Integers compare by value, with no Integer#== send\n" \
+        "  if (mrb_integer_p(#{recv}) && mrb_integer_p(#{arg})) {\n" \
+        "    r#{d} = mrb_bool_value(mrb_integer(#{recv}) != mrb_integer(#{arg}));\n" \
+        "  } else {\n    #{generic}\n  }\n"
     else
       dynamic_dispatch_line(d, recv, name, argv)
     end
+  end
+
+  # NEQ_INTEGER_PAIR soundness: mrb_equal on two non-identical Integers sends `==`, which
+  # finds numeric.c's int_equal in Integer's own table (a value compare) unless a Ruby
+  # Integer#==, a prepend on Integer or a dynamic `==` installer can answer first.
+  def integer_eq_native?
+    return @integer_eq_native if defined?(@integer_eq_native)
+
+    defs = @registry['==']
+    @integer_eq_native = !!(defs&.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                            defs.none? { |d| d.owner == 'Integer' } &&
+                            Array(@prepended_modules['Integer']).empty? &&
+                            !@unknown_mixins.include?('Integer') && eqq_name_unrebound?('=='))
   end
 
   # INTEGER_UNARY: an Integer runs Numeric#-@ (`0 - self`), Numeric#zero? (`self == 0`),

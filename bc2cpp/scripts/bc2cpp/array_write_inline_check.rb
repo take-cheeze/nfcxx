@@ -9,7 +9,8 @@
 #       _splice fast paths (tools/bc2cpp/codegen_emit.rb), which fall back to mrb_ary_push / _set / _splice;
 #     - NATIVE_CORE_DIRECT rotate!: an exact-Array arm calls the audited ary_rotate_bang mirror, the owner call
 #       stays the else;
-#     - NEQ_INTEGER_PAIR: `a != b` compares two Integers in place before mrb_equal;
+#     - NEQ_INTEGER_PAIR: `a != b` compares two Integers in place before mrb_equal, unless the program reopens
+#       Integer#== (mrb_equal would send it);
 #     - POLY_INTEGER_TAG: a POLY_SMALL_N chain with an Integer arm reads an Integer receiver's class from its tag,
 #       and BC2CPP_POLY_INTEGER_TAG=0 keeps the mrb_obj_class read.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
@@ -83,10 +84,10 @@ def code_of(code, name)
   code.scan(/^(?:static )?mrb_value #{name}_impl\w*\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m).join
 end
 
-def generate_world(env = {})
+def generate_world(env = {}, source: SRC, owners: OWNERS)
   saved = env.keys.to_h { |k| [k, ENV.fetch(k, nil)] }
   env.each { |k, v| ENV[k] = v }
-  Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: OWNERS) }
+  Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(source, dir, core: true, only_owners: owners) }
 ensure
   saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
@@ -116,12 +117,15 @@ neq = code_of(code, 'AwBuf_neq')
 check.call('`!=` compares two Integers in place before mrb_equal',
            neq.include?('NEQ_INTEGER_PAIR') &&
              neq.match?(/if \(mrb_integer_p\((\w+)\) && mrb_integer_p\((\w+)\)\) \{\n\s*r\d+ = mrb_bool_value\(mrb_integer\(\1\) != mrb_integer\(\2\)\);\n\s*\} else \{\n\s*r\d+ = mrb_bool_value\(!mrb_equal\(M, \1, \2\)\);/))
+reopened, = generate_world(source: "class Integer\n  def ==(other); super; end\nend\n#{SRC}", owners: OWNERS | ['Integer'])
+check.call('a program that reopens Integer#== keeps `!=` on mrb_equal',
+           code_of(reopened, 'AwBuf_neq').include?('!mrb_equal(M, ') && !code_of(reopened, 'AwBuf_neq').include?('NEQ_INTEGER_PAIR'))
 getidx = code[/static mrb_value bc2cpp_getidx_slow\(.*?\n\}\n/m].to_s
 check.call('the shared `[]` chain reads an Integer receiver\'s class from its tag, Integer arm first',
            getidx.include?('POLY_INTEGER_TAG :[]') &&
              getidx.include?('struct RClass* bc2cpp_recv_class = mrb_integer_p(recv) ? M->integer_class : mrb_obj_class(M, recv);') &&
              getidx.match?(/if \(bc2cpp_owner_class_\d+\(M\) == bc2cpp_recv_class\) \{\n\s*r0 = Integer_\$5b\$5d_impl/))
-off, = generate_world('BC2CPP_POLY_INTEGER_TAG' => '0')
+off, = generate_world({ 'BC2CPP_POLY_INTEGER_TAG' => '0' })
 check.call('BC2CPP_POLY_INTEGER_TAG=0 keeps the mrb_obj_class read', !off.include?('POLY_INTEGER_TAG') &&
            off[/static mrb_value bc2cpp_getidx_slow\(.*?\n\}\n/m].to_s.include?('== mrb_obj_class(M, recv)'))
 
