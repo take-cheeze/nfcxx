@@ -42,6 +42,7 @@ require_relative 'outside_ruby_ivar_scopes'
 
 require_relative 'native_expression_devirt'
 require_relative 'branch_hints'
+require_relative 'tagged_fixnum'
 require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
@@ -1459,7 +1460,7 @@ if $PROGRAM_NAME == __FILE__
     unless skipped.empty?
       warn ''
       warn '== skipped (unsupported, left on the interpreter) =='
-      skipped.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
+      skipped.each { |m| warn "  #{m[:owner]}##{m[:name]}: #{m[:code][/^\s*#error (.*)$/, 1]}" }
     end
     skipped_entries = skipped.map { |m| m[:entry] }.compact
   end
@@ -1570,6 +1571,8 @@ if $PROGRAM_NAME == __FILE__
     #define BC2CPP_HOT_INLINE
     #endif
   CPP
+  # TAGGED_FIXNUM (tagged_fixnum.rb): the Fixnum pair test and the word-level arithmetic and compares.
+  print TaggedFixnum::PRELUDE
   # RESPOND_TO_PHANTOM (closed build): see CodeGen#respond_to_phantom_runtime.
   if ENV['BC2CPP_BUILD_NAME'] == 'closed' || !ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').empty?
     puts CodeGen.respond_to_phantom_runtime

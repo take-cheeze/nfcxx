@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'tagged_fixnum'
 require_relative 'bytecode_ir_containers'
 
 # CodeGen: compile_send and const/owner caches.
@@ -948,12 +949,11 @@ class CodeGen
                       }
                     CPP
                   else
-                    operator = { '&' => '&', '|' => '|', '^' => '^' }.fetch(name)
-                    "r#{d} = mrb_fixnum_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));"
+                    "r#{d} = #{TaggedFixnum.bitop(left, name, right)};"
                   end
       return <<~CPP
           // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
-          if (#{BranchHints.likely("mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}")}) {
+          if (#{BranchHints.likely("#{TaggedFixnum.pair(left, right)}#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}")}) {
             #{operation}
           } else {
             #{fallback.chomp}
@@ -1017,8 +1017,8 @@ class CodeGen
       operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
       return <<~CPP
           // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
-          if (#{BranchHints.likely("mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})")}) {
-            r#{d} = mrb_bool_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));
+          if (#{BranchHints.likely(TaggedFixnum.pair(left, right))}) {
+            r#{d} = mrb_bool_value(#{TaggedFixnum.compare(left, operator, right)});
           } else {
             #{fallback.chomp}
           }

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'tagged_fixnum'
 require_relative 'fixpoint'
 require_relative 'numeric_flow'
 require_relative 'bytecode_ir_regions'
@@ -130,6 +131,9 @@ class CodeGen
   # ancestors, no method_missing anywhere that could see nil, and no native
   # definition on NilClass (@nil_operator_names is the scanned set).
   def numeric_nil_raises?(sym)
+    # Not memoized for a core body, which compiles with the closed world withheld (see lexical_const_info).
+    return false if @closed_world.nil?
+
     @numeric_nil_raises ||= {}
     return @numeric_nil_raises[sym] if @numeric_nil_raises.key?(sym)
 
@@ -290,22 +294,13 @@ class CodeGen
     lines.sort
   end
 
-  # The Fixnum tier of every ADD/SUB/MUL-family arm: the result is
-  # stored as an immediate only when the C op did not overflow AND it is
-  # FIXABLE (mrb_int is wider than a fixnum under word boxing, and a 32-bit
-  # mrb_int leaves 31 bits), else mrb_num_* runs Integer#+ etc. and builds the
-  # bigint. The operands must be immediates, hence the callers' mrb_fixnum_p.
-  FIXNUM_TIER_OPS = { '+' => %w[mrb_int_add_overflow mrb_num_add], '-' => %w[mrb_int_sub_overflow mrb_num_sub],
-                      '*' => %w[mrb_int_mul_overflow mrb_num_mul] }.freeze
-
+  # The Fixnum tier of every ADD/SUB/MUL-family arm: the result is stored as an immediate only when it is
+  # FIXABLE, else mrb_num_* runs Integer#+ etc. and builds the heap Integer or bigint (TAGGED_FIXNUM,
+  # tagged_fixnum.rb). The operands must be immediates, hence the callers' Fixnum pair test.
   def fixnum_exact_tier(name, dest, rhs)
-    overflow, helper = FIXNUM_TIER_OPS.fetch(name)
     # Integer rhs is a bare literal; String rhs is either a register ref ("rN") or literal text.
     register = rhs.is_a?(String) && rhs.start_with?('r')
-    "{ mrb_int bc2cpp_z; " \
-      "if (#{BranchHints.unlikely("#{overflow}(mrb_fixnum(r#{dest}), #{register ? "mrb_fixnum(#{rhs})" : rhs}, &bc2cpp_z) || !FIXABLE(bc2cpp_z)")}) " \
-      "{ r#{dest} = #{helper}(M, r#{dest}, #{register ? rhs : "mrb_fixnum_value(#{rhs})"}); } " \
-      "else { r#{dest} = mrb_fixnum_value(bc2cpp_z); } }"
+    TaggedFixnum.tier(name, dest, register ? rhs : "mrb_fixnum_value(#{rhs})")
   end
 
   # The C++ that finishes an operator whose operands are both proven numeric, or

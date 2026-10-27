@@ -114,7 +114,8 @@ check.call('rotate!(k) has an exact-Array arm calling the audited mirror, the ow
              rotate.match?(/\} else \{\n.*(?:bc2cpp_owner_call|mrb_funcall|bc2cpp_send)/m))
 check.call('rotate! with no argument rotates by one', code_of(code, 'AwBuf_rotate_one').include?('bc2cpp_ary_rotate_bang(M, r'))
 neq = code_of(code, 'AwBuf_neq')
-neq_pair = /NEQ_OP_EQ :!=.*\n\s*if \(mrb_integer_p\((\w+)\) && mrb_integer_p\((\w+)\)\) \{\n\s*r\d+ = mrb_bool_value\(mrb_integer\(\1\) != mrb_integer\(\2\)\);\n.*r\d+ = mrb_bool_value\(!mrb_equal\(M, \1, \2\)\);/m
+# TAGGED_FIXNUM's Fixnum pair comes first, then any Integer pair.
+neq_pair = /NEQ_OP_EQ :!=.*\n\s*if \(BC2CPP_FIXNUM_PAIR_P\((\w+), (\w+)\)\) \{\n\s*r\d+ = mrb_bool_value\(BC2CPP_FIXNUM_WORD\(\1\) != BC2CPP_FIXNUM_WORD\(\2\)\);\n\s*\} else if \(mrb_integer_p\(\1\) && mrb_integer_p\(\2\)\) \{\n\s*r\d+ = mrb_bool_value\(mrb_integer\(\1\) != mrb_integer\(\2\)\);\n.*r\d+ = mrb_bool_value\(!mrb_equal\(M, \1, \2\)\);/m
 check.call('`!=` compares two Integers in place before mrb_equal', neq.match?(neq_pair))
 reopened, = generate_world(source: "class Integer\n  def ==(other); super; end\nend\n#{SRC}", owners: OWNERS | ['Integer'])
 check.call('a program that reopens Integer#== keeps the Integer-pair arm, as OP_EQ ignores Integer#==',

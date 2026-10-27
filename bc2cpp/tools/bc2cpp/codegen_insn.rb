@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'tagged_fixnum'
 
 # CodeGen: compile_insn and comparisons.
 
@@ -249,9 +250,12 @@ class CodeGen
                       else
                         ''
                       end
+        # HEAP_INTEGER_PAIR: OP_MATHI computes any Integer in place, whatever Integer#+ is (here, SUBI and *ILV).
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('+', d, lit)}
+          } else if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_num_add(M, r#{d}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -274,9 +278,13 @@ class CodeGen
                       else
                         ''
                       end
+        # HEAP_INTEGER_PAIR (here and in SUB/MUL): OP_MATH computes any Integer pair in place, a heap Integer
+        # included, whatever Integer#+ is; only the other shapes send.
         <<~CPP
-          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})")}) {
+          #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('+', d, "r#{s}")}
+          } else if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+            r#{d} = mrb_num_add(M, r#{d}, r#{s});
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) + mrb_integer(r#{s}));
@@ -310,6 +318,8 @@ class CodeGen
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('-', d, lit)}
+          } else if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_num_sub(M, r#{d}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -333,8 +343,10 @@ class CodeGen
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})")}) {
+          #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('-', d, "r#{s}")}
+          } else if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+            r#{d} = mrb_num_sub(M, r#{d}, r#{s});
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) - mrb_integer(r#{s}));
@@ -368,8 +380,10 @@ class CodeGen
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})")}) {
+          #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('*', d, "r#{s}")}
+          } else if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+            r#{d} = mrb_num_mul(M, r#{d}, r#{s});
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) * mrb_integer(r#{s}));
@@ -707,11 +721,12 @@ class CodeGen
           "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));\n"
         else
           # INTEGER_TAG_ELSE: an exact Array receiver's non-fixnum key runs the Array body directly.
+          # UNSIGNED_INDEX: the arm tests the fixnum tag only; a heap Integer key takes the else, which is `[]` itself.
           direct = integer_tag_else_array_call('[]', exact, "r#{d}", ["r#{s}"])
           by_name = direct ? "r#{d} = #{direct};" : index_else_statement(d, s)
           <<~CPP
-            #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
-              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+            #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_fixnum_p(r#{s})) {
+              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_fixnum(r#{s}));
             } else {
               #{by_name}
             }
@@ -876,6 +891,8 @@ class CodeGen
         <<~CPP
           if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('+', d, lit)}
+          } else if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_num_add(M, r#{d}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -892,6 +909,8 @@ class CodeGen
         <<~CPP
           if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('-', d, lit)}
+          } else if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_num_sub(M, r#{d}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -978,7 +997,7 @@ class CodeGen
        elsif zsuper_kind && d_reg
          compile_zsuper_native(zsuper_kind, d_reg)
        elsif zsuper_plan && d_reg
-         compile_zsuper_forward(zsuper_plan[:target_def], d_reg, zsuper_plan[:m])
+         compile_zsuper_forward(zsuper_plan, d_reg)
        elsif (call = d_reg && module_super_call(owner_def, irep, d_reg, n))
          call
        else
@@ -1050,7 +1069,7 @@ class CodeGen
     d = insn.reg
     s = insn.paren_reg
     if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-      return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));\n"
+      return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(#{TaggedFixnum.compare("r#{d}", sym, "r#{s}")});\n"
     end
 
     # OP_CMP's MRB_TT_INTEGER is the full Integer tag, and with floats all three
@@ -1085,8 +1104,13 @@ class CodeGen
     # EQ meets every type, so only the ordering operators hint their Integer pair.
     pair = "mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})"
     pair = BranchHints.likely(pair) unless op == :EQ
+    # TAGGED_FIXNUM: two Fixnums compare on their boxed words, ahead of the Integer pair whose tag test also
+    # accepts a heap Integer.
+    fixnum_pair = TaggedFixnum.pair("r#{d}", "r#{s}")
+    fixnum_pair = BranchHints.likely(fixnum_pair) unless op == :EQ
+    fixnum_arm = "if (#{fixnum_pair}) {\n  r#{d} = mrb_bool_value(#{TaggedFixnum.compare("r#{d}", sym, "r#{s}")});\n} else "
     numeric_dispatch = <<~CPP
-      if (#{pair}) {
+      #{op == :EQ ? '' : fixnum_arm}if (#{pair}) {
       #ifdef MRB_NO_FLOAT
         r#{d} = mrb_bool_value(#{no_float_accessor});
       #else
@@ -1111,7 +1135,7 @@ class CodeGen
       # INTEGER_PAIR_EQ: mrb_obj_eq on two Integers is their value equality, so testing the
       # pair ahead of identity gives OP_EQ's answer without the out-of-line mrb_obj_eq call.
       <<~CPP
-        if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+        #{fixnum_arm}if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
           r#{d} = mrb_bool_value(mrb_integer(r#{d}) == mrb_integer(r#{s}));
         } else if (mrb_obj_eq(M, r#{d}, r#{s})) {
           r#{d} = mrb_true_value();

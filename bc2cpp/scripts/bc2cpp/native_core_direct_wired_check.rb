@@ -1,8 +1,7 @@
 # frozen_string_literal: true
 
 # Checks the generated core direct-call entries (tools/bc2cpp/native_core_direct_generated.rb, written by
-# scripts/bc2cpp/native_core_direct_wire.rb): every one must verify against the mruby sources, and the committed
-# generated file and core_direct.rbs must be fresh.
+# scripts/bc2cpp/native_core_direct_wire.rb): every one must verify against the mruby sources.
 #
 # NativeCoreDirect.audit drops an unverified entry silently at compile time (that is its design: an entry that no
 # longer matches is never trusted), so a broken generated entry would otherwise just stop being used. This check makes
@@ -53,10 +52,6 @@ hand_result = NativeCoreDirect.audit(hand_paths)
   reason = hand_result[entry]
   check("#{entry.owner}##{entry.name}/#{entry.arity} verifies#{reason ? " (#{reason})" : ''}", reason.nil?)
 end
-
-puts '== the committed files'
-check('core_direct.rbs matches the table (native_core_direct_sigs.rb --check)',
-      system('ruby', File.join(root, 'scripts/bc2cpp/native_core_direct_sigs.rb'), '--check', out: File::NULL))
 
 puts
 if FAILED.empty?

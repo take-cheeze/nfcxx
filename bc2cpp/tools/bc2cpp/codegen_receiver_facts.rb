@@ -903,16 +903,11 @@ class CodeGen
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
-    # (5) ENTER is exactly m mandatory and nothing else (REQ:OPT:REST:POST:KEY:
-    # KDICT:BLOCK:NOBLOCK, src/codedump.c), so regs[1..m] is the whole argument
-    # list and there is no block parameter.
-    enter = irep.enter
-    return nil unless enter
-
-    em = enter.enter_fields
-    return nil unless em.length >= 7
-    return nil unless em[1..6].all?(&:zero?)
-    return nil unless em[0] == m
+    # (5) ENTER is mandatory and optional parameters only, m of them in all (REQ:OPT:REST:POST:KEY:KDICT:BLOCK:
+    # NOBLOCK, src/codedump.c), so regs[1..m] is the whole argument list, defaults already filled in, and there is
+    # no block parameter.
+    em = enter_shape(irep)
+    return nil unless em && em[0] + em[1] == m
 
     # (6) The same-named method on the registered superclass exists, is bytecode
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
@@ -925,14 +920,31 @@ class CodeGen
     target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
     return nil unless target_def && target_def.irep && compiles_clean?(target_def.irep)
 
-    { target_def: target_def, m: m }
+    # (7) The target takes m arguments: as many mandatory ones or fewer, the rest optional.
+    tm, topt = enter_shape(@ireps.fetch(target_def.irep))
+    return nil unless tm && tm <= m && m <= tm + topt
+
+    { target_def: target_def, m: m, target_mand: tm, target_opt: topt }
   end
 
-  # ZSUPER_GENERAL_SUPPORT: a direct `_impl` call forwarding r1..m (what ARGARY
-  # would have packed). `d_reg` is SUPER's destination.
-  def compile_zsuper_forward(target_def, d_reg, m)
-    args = (1..m).map { |i| ", r#{i}" }.join
-    "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args});\n"
+  # [mandatory, optional] when an irep's ENTER takes nothing else, else nil.
+  def enter_shape(irep)
+    em = irep.enter&.enter_fields
+    return nil unless em && em.length >= 7 && em[2..6].all?(&:zero?)
+
+    em[0, 2]
+  end
+
+  # ZSUPER_GENERAL_SUPPORT: a direct `_impl` call forwarding r1..m (what ARGARY would have packed). `d_reg` is
+  # SUPER's destination. A target with optionals is called as its entry wrapper calls it (OPTIONAL_ARG_SUPPORT):
+  # every optional slot, nil for those not passed, then how many were.
+  def compile_zsuper_forward(plan, d_reg)
+    args = (1..plan[:m]).map { |i| "r#{i}" }
+    if plan[:target_opt].positive?
+      args += Array.new(plan[:target_mand] + plan[:target_opt] - plan[:m], 'mrb_nil_value()')
+      args << (plan[:m] - plan[:target_mand]).to_s
+    end
+    "  r#{d_reg} = #{cpp_name(plan[:target_def].owner, plan[:target_def].name)}_impl(M, self#{args.map { |a| ", #{a}" }.join});\n"
   end
 
   # SUPER_NO_CALLER_BLOCK: may `super` here become a direct `_impl`

@@ -683,7 +683,7 @@ if ENV['MRBC']
   check.call('a recursive method proves itself: argument, `n - 1`, product and return',
              proven.call('NqBox#nq_fact'))
   check.call('Integer arithmetic past the fixnum range still proves, through the overflow-checked tier',
-             proven.call('NqBox#nq_edge') && chunk_of.call(code, 'NqBox#nq_edge').include?('mrb_int_mul_overflow') &&
+             proven.call('NqBox#nq_edge') && chunk_of.call(code, 'NqBox#nq_edge').include?('bc2cpp_fixnum_mul(') &&
                chunk_of.call(code, 'NqBox#nq_edge').include?('mrb_num_mul(M'))
   check.call('an ivar that is Integer or Float proves for both classes', proven.call('NqBox#nq_flt_use'))
   check.call('reading an ivar after a nil test on it proves (the test narrows the slot)', proven.call('NqBox#nq_guarded'))
