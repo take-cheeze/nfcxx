@@ -842,7 +842,7 @@ end
     "// GETIDX_INLINE_ARRAY -- exact Array and Fixnum index inline; other receivers take bc2cpp_getidx_slow.\n" \
       "static mrb_value bc2cpp_getidx_slow(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
       "#{body.gsub(/^(?=.)/, '  ')}}\n\n" \
-      "static inline mrb_value bc2cpp_getidx(mrb_state* M, mrb_value recv, mrb_value key) {\n" \
+      "BC2CPP_HOT_INLINE static inline mrb_value bc2cpp_getidx(mrb_state* M, mrb_value recv, mrb_value key) {\n" \
       "  if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {\n" \
       "    return bc2cpp_ary_entry(M, recv, mrb_integer(key));\n" \
       "  }\n" \

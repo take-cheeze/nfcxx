@@ -661,7 +661,7 @@ class CodeGen
                      emit_index_helpers(compiled).include?('bc2cpp_ary_entry(')
 
     <<~CPP
-      static inline mrb_value bc2cpp_ary_entry(mrb_state*, mrb_value ary, mrb_int n) {
+      BC2CPP_HOT_INLINE static inline mrb_value bc2cpp_ary_entry(mrb_state*, mrb_value ary, mrb_int n) {
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int len = ARY_LEN(a);
         if (n < 0) n += len;
@@ -679,7 +679,7 @@ class CodeGen
   # other case, frozen or out of range included, calls the library function, which raises or grows as before.
   ARY_WRITE_HELPERS = {
     'bc2cpp_ary_push' => <<~CPP,
-      static inline void bc2cpp_ary_push(mrb_state* M, mrb_value ary, mrb_value elem) {
+      BC2CPP_HOT_INLINE static inline void bc2cpp_ary_push(mrb_state* M, mrb_value ary, mrb_value elem) {
         struct RArray* a = mrb_ary_ptr(ary);
         if (!ARY_EMBED_P(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a) && a->as.heap.len < a->as.heap.aux.capa) {
           a->as.heap.ptr[a->as.heap.len++] = elem;
@@ -690,7 +690,7 @@ class CodeGen
       }
     CPP
     'bc2cpp_ary_set' => <<~CPP,
-      static inline void bc2cpp_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value val) {
+      BC2CPP_HOT_INLINE static inline void bc2cpp_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value val) {
         struct RArray* a = mrb_ary_ptr(ary);
         mrb_int len = ARY_LEN(a);
         mrb_int at = n < 0 ? n + len : n;
