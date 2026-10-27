@@ -34,23 +34,25 @@ module TaggedFixnum
     #define BC2CPP_FIXNUM_OR(a, b) bc2cpp_fixnum_word_value((a).w | (b).w)
     #define BC2CPP_FIXNUM_XOR(a, b) bc2cpp_fixnum_word_value(((a).w ^ (b).w) | 1)
     // (2a+1) + 2b = 2(a+b)+1, and likewise for -; true (result untouched) when a+b leaves the fixnum range.
+    // FIXNUM_TAG_BIT: the word is already odd, but the compiler loses that through the overflow builtin; the `| 1`
+    // restates it, so an immediate test on the result (the write barrier of an ivar store) folds away.
     static inline bool bc2cpp_fixnum_add(mrb_value a, mrb_value b, mrb_value& z) {
       intptr_t w;
       if (__builtin_add_overflow((intptr_t)a.w, (intptr_t)(b.w - 1), &w)) return true;
-      z.w = (uintptr_t)w;
+      z.w = (uintptr_t)w | 1;
       return false;
     }
     static inline bool bc2cpp_fixnum_sub(mrb_value a, mrb_value b, mrb_value& z) {
       intptr_t w;
       if (__builtin_sub_overflow((intptr_t)a.w, (intptr_t)(b.w - 1), &w)) return true;
-      z.w = (uintptr_t)w;
+      z.w = (uintptr_t)w | 1;
       return false;
     }
-    // 2a * b = 2ab is even, so the +1 cannot overflow.
+    // 2a * b = 2ab is even, so `| 1` is the +1 and cannot overflow (and states the tag bit, see FIXNUM_TAG_BIT).
     static inline bool bc2cpp_fixnum_mul(mrb_value a, mrb_value b, mrb_value& z) {
       intptr_t w;
       if (__builtin_mul_overflow((intptr_t)(a.w - 1), (intptr_t)b.w >> 1, &w)) return true;
-      z.w = (uintptr_t)w + 1;
+      z.w = (uintptr_t)w | 1;
       return false;
     }
     #else
