@@ -673,6 +673,10 @@ class CodeGen
   #   if (n < 0 || len <= n) return mrb_nil_value();
   #   return ARY_PTR(a)[n];
   #
+  # UNSIGNED_INDEX: the copy reads the embed flag once and tests 0 <= n < len as one unsigned compare. A negative n
+  # then counts from the end in unsigned arithmetic, which lands at or past len exactly when n < -len, so the result
+  # is mrb_ary_entry's for every n (docs/bc2cpp-unsigned-index.md).
+  #
   # Every emitted "mrb_ary_ref(M, ...)" becomes "bc2cpp_ary_entry(M, ...)"; the
   # real macro is `#define mrb_ary_ref(mrb, ary, n) mrb_ary_entry(ary, n)`
   # (mruby/array.h), so behavior is identical. It exists because mrb_ary_entry
@@ -688,10 +692,18 @@ class CodeGen
     <<~CPP
       BC2CPP_HOT_INLINE static inline mrb_value bc2cpp_ary_entry(mrb_state*, mrb_value ary, mrb_int n) {
         struct RArray* a = mrb_ary_ptr(ary);
-        mrb_int len = ARY_LEN(a);
-        if (n < 0) n += len;
-        if (#{BranchHints.unlikely('n < 0 || len <= n')}) return mrb_nil_value();
-        return ARY_PTR(a)[n];
+        const mrb_value* p;
+        mrb_uint len;
+        if (ARY_EMBED_P(a)) {
+          p = ARY_EMBED_PTR(a);
+          len = (mrb_uint)ARY_EMBED_LEN(a);
+        } else {
+          p = a->as.heap.ptr;
+          len = (mrb_uint)a->as.heap.len;
+        }
+        if (#{BranchHints.likely('(mrb_uint)n < len')}) return p[n];
+        mrb_uint from_end = (mrb_uint)n + len;
+        return from_end < len ? p[from_end] : mrb_nil_value();
       }
 
     CPP
@@ -701,7 +713,7 @@ class CodeGen
   # the ARRAY_PUSH, SETIDX and ARRAY_SLICE_WRITE arms; libmruby.a has no LTO, so those calls are never inlined. Each
   # takes only the case where the library body reduces to a store and a write barrier: ary_modify's frozen check
   # passes and there is no shared buffer to detach, and the store needs no growth, nil fill or element move. Every
-  # other case, frozen or out of range included, calls the library function, which raises or grows as before.
+  # other case, frozen, negative (UNSIGNED_INDEX) or out of range included, calls the library function, which raises or grows as before.
   ARY_WRITE_HELPERS = {
     'bc2cpp_ary_push' => <<~CPP,
       BC2CPP_HOT_INLINE static inline void bc2cpp_ary_push(mrb_state* M, mrb_value ary, mrb_value elem) {
@@ -717,10 +729,8 @@ class CodeGen
     'bc2cpp_ary_set' => <<~CPP,
       BC2CPP_HOT_INLINE static inline void bc2cpp_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value val) {
         struct RArray* a = mrb_ary_ptr(ary);
-        mrb_int len = ARY_LEN(a);
-        mrb_int at = n < 0 ? n + len : n;
-        if (mrb_likely(at >= 0 && at < len && !ARY_SHARED_P(a) && !mrb_frozen_p(a))) {
-          ARY_PTR(a)[at] = val;
+        if (mrb_likely((mrb_uint)n < (mrb_uint)ARY_LEN(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a))) {
+          ARY_PTR(a)[n] = val;
           mrb_field_write_barrier_value(M, (struct RBasic*)a, val);
           return;
         }
