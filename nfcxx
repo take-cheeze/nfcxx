@@ -302,10 +302,14 @@ ecp_arg() {  # ecp_arg ARG: ARG as eccp receives it (its paths absolute when ecc
     -I?*) printf -- '-I%s\n' "$(abs_path "${1#-I}")" ;;
     -L?*) printf -- '-L%s\n' "$(abs_path "${1#-L}")" ;;
     -Wl,*)   # a file named in a link option (-Wl,--version-script=FILE, -Wl,-T,FILE) is made absolute when it exists here
-      local res=-Wl p parts=()
+      local res=-Wl p parts=() prevp=
       IFS=, read -r -a parts <<< "${1#-Wl,}"
       for p in ${parts[@]+"${parts[@]}"}; do
+        # the operand of -soname (-h) is the name the library records, not a file, even when a file has that name here
+        case $prevp in -soname|--soname|-h) res+=",$p"; prevp=$p; continue ;; esac
+        prevp=$p
         case $p in
+          -soname=*|--soname=*) ;;
           # Files the link writes (CMake 4 passes -Wl,--dependency-file=CMakeFiles/T.dir/link.d): absolute when their
           # directory exists here, since they do not exist yet.
           --dependency-file=*|-Map=*|--Map=*)
@@ -590,6 +594,20 @@ source "$root/scripts/host-sys.sh"   # host_sys_includes, host_gnu_version (shar
 extra=()
 sys_inc=()
 hosted_libs=()
+# Template instantiation. Default (NFCXX_INSTANTIATE=used): each unit instantiates the templates it uses, as g++ does,
+# so the link recompiles nothing (libggml-sycl: 8 minutes in all, a 3 s link). The C output has the instances as weak
+# symbols in one .text, not as COMDAT groups, so the link would keep every unit's copy (libggml-sycl: 77 MB of code): each
+# function and object gets its own section, and the link drops the sections nothing reaches (--gc-sections), among them
+# the copies the link did not choose (24 MB). NFCXX_INSTANTIATE=auto: EDG's automatic instantiation, where the prelinker
+# assigns each instance a unit and recompiles that unit at link time, one unit per pass (libggml-sycl: 3087 instances in
+# 98 passes, a 33-minute link; 59 MB of code).
+inst_opts=()
+case ${NFCXX_INSTANTIATE:-used} in
+  auto) ;;
+  used) inst_opts=(--no_auto_instantiation -tused --c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
+                   --c_to_obj_option -Wl,--gc-sections) ;;
+  *) echo "nfcxx: NFCXX_INSTANTIATE is auto or used (got $NFCXX_INSTANTIATE)" >&2; exit 2 ;;
+esac
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
   [ -n "$gnu" ] || gnu=130000
@@ -943,7 +961,20 @@ fi
 t=$(trace_start)
 (
   [ -z "$eccp_dir" ] || cd "$eccp_dir"
-  "$eccp_bin" "$std" --"$dialect" --wdir / ${extra[@]+"${extra[@]}"} ${modopts[@]+"${modopts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} ${eh_unwind[@]+${eh_unwind[@]+"${eh_unwind[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
+  # A shared link: EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces eccp's link options (the C compile options), so the link
+  # options among them go there with -shared: -Wl,... (-soname, -rpath, --gc-sections), -fuse-ld=, -pthread, -rdynamic.
+  # Without them a library lost its SONAME and RUNPATH. (eccp splits the variable at spaces.)
+  if [ $shared = 1 ]; then
+    lk=(-shared) prev=
+    for a in ${picopts[@]+"${picopts[@]}"} ${eflist[@]+"${eflist[@]}"} ${inst_opts[@]+"${inst_opts[@]}"}; do
+      if [ "$prev" = --c_to_obj_option ]; then
+        case $a in -Wl,*|-fuse-ld=*|-pthread|-rdynamic) lk+=("$a") ;; esac
+      fi
+      prev=$a
+    done
+    export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS="${lk[*]}"
+  fi
+  "$eccp_bin" "$std" --"$dialect" --wdir / ${extra[@]+"${extra[@]}"} ${inst_opts[@]+"${inst_opts[@]}"} ${modopts[@]+"${modopts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} ${eh_unwind[@]+${eh_unwind[@]+"${eh_unwind[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
     ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pre_opts[@]+${pre_opts[@]+"${pre_opts[@]}"}} ${cuda_opts[@]+${cuda_opts[@]+"${cuda_opts[@]}"}} ${eflist[@]+${eflist[@]+"${eflist[@]}"}} ${shim[@]+${shim[@]+"${shim[@]}"}} ${vlart[@]+${vlart[@]+"${vlart[@]}"}} ${rtlib[@]+${rtlib[@]+"${rtlib[@]}"}} -o "$eccp_out"
 )
 trace_end "$t" "eccp (front end, C compile, link)" eccp
