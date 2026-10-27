@@ -529,15 +529,16 @@ source "$root/scripts/host-sys.sh"   # host_sys_includes, host_gnu_version (shar
 extra=()
 sys_inc=()
 hosted_libs=()
-# Template instantiation. Default: EDG's automatic instantiation, where the prelinker assigns each instance a unit and
-# recompiles that unit at link time (libggml-sycl: 3087 instances, a 33-minute link). NFCXX_INSTANTIATE=used: each unit
-# instantiates the templates it uses, as g++ does, so the link recompiles nothing (libggml-sycl: 8 minutes, a 3 s link).
-# The C output has the instances as weak symbols in one .text, not as COMDAT groups, so the link would keep every unit's
-# copy (libggml-sycl: 77 MB of code against 59 MB): each function and object gets its own section, and the link drops
-# the sections nothing reaches (--gc-sections), the copies the link did not choose among them.
+# Template instantiation. Default (NFCXX_INSTANTIATE=used): each unit instantiates the templates it uses, as g++ does,
+# so the link recompiles nothing (libggml-sycl: 8 minutes in all, a 3 s link). The C output has the instances as weak
+# symbols in one .text, not as COMDAT groups, so the link would keep every unit's copy (libggml-sycl: 77 MB of code): each
+# function and object gets its own section, and the link drops the sections nothing reaches (--gc-sections), among them
+# the copies the link did not choose (24 MB). NFCXX_INSTANTIATE=auto: EDG's automatic instantiation, where the prelinker
+# assigns each instance a unit and recompiles that unit at link time, one unit per pass (libggml-sycl: 3087 instances in
+# 98 passes, a 33-minute link; 59 MB of code).
 inst_opts=()
-case ${NFCXX_INSTANTIATE:-} in
-  "" | auto) ;;
+case ${NFCXX_INSTANTIATE:-used} in
+  auto) ;;
   used) inst_opts=(--no_auto_instantiation -tused --c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
                    --c_to_obj_option -Wl,--gc-sections) ;;
   *) echo "nfcxx: NFCXX_INSTANTIATE is auto or used (got $NFCXX_INSTANTIATE)" >&2; exit 2 ;;
