@@ -29,7 +29,7 @@ below, on the gcc backend.
 Opt-in: with `NFCXX_CACHE=DIR`, a `-c` compile of one C++ source with `-o OBJ` is kept under `DIR/objects/<key>`, and an identical
 compile later copies the object back with its `<stem>.ti` and `<stem>.ii` (the link reads those records beside the object). The key
 covers the command as given, the absolute output path (the prelinker records it in the `.ti`), the working directory, the source
-and each header the host preprocessor lists (hashed), every `NFCXX_*` variable, the driver and `scripts/`, the EDG and QBE binaries,
+and each header the host preprocessor lists (hashed), every `NFCXX_*` variable, the driver and `scripts/` (and `tools/weak-symbols`), the EDG and QBE binaries,
 and the host compilers' versions. Not cached: `.cu` (its device image is, below) and C inputs, `-E`, `-MD`, several sources in one command, and an `-o` without
 an extension. A header whose path has a space is not tracked, so its change would not invalidate the key. Test 15 of
 `tests/cxx-driver/run.sh` covers a hit that links, and a changed header.

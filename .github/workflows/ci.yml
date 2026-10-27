@@ -213,7 +213,7 @@ jobs:
             build/poly/${{ matrix.backend }}
             build/poly-lua/${{ matrix.backend }}
             build/poly-js/${{ matrix.backend }}
-          key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
+          key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
 
       # The Go library (scripts/setup-poly-go.sh: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
       - name: Restore the nfcpoly Go library
@@ -264,7 +264,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/test-bin
-          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
 
       - name: .NET 8 SDK (the CIL backend's test programs run with dotnet)
         if: matrix.dotnet
