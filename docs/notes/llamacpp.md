@@ -20,7 +20,7 @@ included, with the default FlashAttention types of llama.cpp's CMake: f16-f16 on
 `tests/test-backend-ops.cpp` against it, `-lcuda -lcublas -lcudart`: 214 objects, about 25 minutes at JOBS=2 under the
 8 GB cap (objects are kept in `build/llcu`, so a second run only links). `tests/llamacpp/cuda/run.sh` runs each op of
 `test-backend-ops test -b CUDA0` in its own process (a device fault aborts it) and checks it against its record. On the
-RTX 2060 (sm_75, CUDA 13.1): 105 ops pass every case, 5 fail, 19 have no cases.
+RTX 2060 (sm_75, CUDA 13.1): 107 ops pass every case, 3 fail, 19 have no cases.
 
 What it took (docs/notes/gpu.md, "Launch path", has the details):
 
@@ -49,11 +49,11 @@ What it took (docs/notes/gpu.md, "Launch path", has the details):
 
 Known failures (the KNOWN list of `run.sh`):
 
-1. **MUL_MAT**: f16 with n=4 and n=8 gives wrong values (mmvf's half accumulation; n=1..3, 5..7 pass), and the
-   mul_mat_q (mmq) kernel (`mul_mat_q<GGML_TYPE_Q4_0, 16, true>`, n > 8) makes an illegal memory access; **MUL_MAT_ID**
-   stops at the same kernel. Its "unspecified launch failure" before was quantize_mmq_q8_1's float-to-integer trap
-   (NaN for a block of zeros), now the GPU's conversion (docs/notes/gpu.md, "Float to integer").
-2. **CONV_2D, CONV_3D, FLASH_ATTN_EXT**: an illegal memory access, not looked at yet.
+1. **MUL_MAT**: wrong values for f16 with n=4 and n=8 (mmvf's half accumulation; n=1..3, 5..7 pass), q1_0, q2_0
+   and mxfp4, then a misaligned address; **MUL_MAT_ID** stops at a misaligned address. The mmq kernels run: their
+   "unspecified launch failure" was quantize_mmq_q8_1's float-to-integer trap and their illegal memory access the
+   `ldmatrix` address (docs/notes/gpu.md, "Float to integer" and "ldmatrix"), which also fixed CONV_2D and CONV_3D.
+2. **FLASH_ATTN_EXT**: NaN for f16 K and V with hsk=40, then an unspecified launch failure.
 
 ## Flags
 
