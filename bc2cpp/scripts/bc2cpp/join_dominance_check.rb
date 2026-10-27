@@ -494,7 +494,7 @@ if ENV['MRBC']
     check.call('a fresh `Foo.new` receiver keeps the unguarded exact-class call',
                body_of.call(code, 'JdProbe_fresh').include?('CLOSED_WORLD_EXACT_CLASS'))
     check.call('the guarded typed call is kept for the join, with its class check',
-               body_of.call(code, 'JdProbe_reassigned').match?(/TYPED :bar -> JdFoo#bar.*\n\s+if \(bc2cpp_owner_class_\d+\(M\) == mrb_obj_class\(M, r\d+\)\)/))
+               body_of.call(code, 'JdProbe_reassigned').match?(/TYPED :bar -> JdFoo#bar.*\n\s+if \((?:mrb_likely\()?bc2cpp_owner_class_\d+\(M\) == mrb_obj_class\(M, r\d+\)\)/))
   end
 
   puts '-- embedded ivar types (closed world)'

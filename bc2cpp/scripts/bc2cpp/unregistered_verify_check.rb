@@ -8,10 +8,13 @@
 #
 #   generated registration (needs a host mrbc)
 #     - a listed entry is not registered, an unlisted one is; the listed one goes to bc2cpp_left_out;
-#     - bc2cpp_left_out registers the stub only under #if defined(BC2CPP_UNREGISTERED_VERIFY);
+#     - bc2cpp_left_out registers the stub only under #if defined(BC2CPP_UNREGISTERED_VERIFY), and removes the
+#       definition otherwise;
 #     - BC2CPP_UNREGISTERED_EXTRA adds entries to the list;
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - without the define, a by-name call of the unregistered name raises NoMethodError, the kept one answers;
+#     - the host defines VFix#pruned first, as a gem's mrblib does;
+#     - without the define, bc2cpp_left_out removes that definition: a by-name call of the unregistered name raises
+#       NoMethodError, the kept one answers;
 #     - with it, the same call aborts with "unregistered method looked up by name: VFix#pruned";
 #     - with the RESPOND_TO_PHANTOM runtime, respond_to? (the Kernel method and the mrb_respond_to the generated
 #       code calls) answers true for the left-out entry on its class, a subclass and, for a singleton entry, the
@@ -73,8 +76,8 @@ suite.check('a listed entry goes to bc2cpp_left_out, with its singleton flag',
             listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "[^"]+", false\);$/) &&
             listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "[^"]+", true\);$/))
 left_out = listed[/static void bc2cpp_left_out\(.*?^}/m].to_s
-suite.check('bc2cpp_left_out registers the stub only in a verify build',
-            left_out.match?(/#if defined\(BC2CPP_UNREGISTERED_VERIFY\)\n[^#]*bc2cpp_unregistered_stub[^#]*#elif defined\(BC2CPP_RESPOND_TO_PHANTOM\)/m))
+suite.check('bc2cpp_left_out registers the stub only in a verify build, and removes the definition otherwise',
+            left_out.match?(/#if defined\(BC2CPP_UNREGISTERED_VERIFY\)\n[^#]*bc2cpp_unregistered_stub[^#]*#else\n[^#]*mrb_remove_method/m))
 extra = registration.call(extra: 'VFix#pruned,VFix.singleton#cpruned')
 suite.check('BC2CPP_UNREGISTERED_EXTRA leaves the entry unregistered', extra == listed)
 none = registration.call(unregistered: Set.new)
@@ -97,6 +100,7 @@ else
       static mrb_value vfix_kept(mrb_state*, mrb_value) { return mrb_fixnum_value(1); }
       static mrb_value vfix_pruned(mrb_state*, mrb_value) { return mrb_fixnum_value(2); }
       static mrb_value vfix_cpruned(mrb_state*, mrb_value) { return mrb_fixnum_value(3); }
+      static mrb_value vfix_mrblib_pruned(mrb_state*, mrb_value) { return mrb_fixnum_value(20); }
       #ifdef FIX_PHANTOM
       #{CodeGen.respond_to_phantom_runtime}
       #endif
@@ -110,6 +114,7 @@ else
         mrb_state* M = mrb_open();
         struct RClass* vfix = mrb_define_class(M, "VFix", M->object_class);
         struct RClass* sub = mrb_define_class(M, "VFixSub", vfix);
+        mrb_define_method(M, vfix, "pruned", vfix_mrblib_pruned, MRB_ARGS_NONE());
         bc2cpp_register_owner_methods(M);
         mrb_value o = mrb_obj_new(M, vfix, 0, nullptr);
         mrb_value s = mrb_obj_new(M, sub, 0, nullptr);
@@ -142,7 +147,7 @@ else
     suite.check('the verify host compiles', build.call(['-DBC2CPP_UNREGISTERED_VERIFY'], verify_exe))
     suite.check('the RESPOND_TO_PHANTOM host compiles', build.call(['-DFIX_PHANTOM'], phantom_exe))
     out, = Open3.capture2e(plain_exe)
-    suite.check('without the define the kept name answers and the unregistered one raises NoMethodError',
+    suite.check('without the define the kept name answers and the unregistered one, defined before, raises NoMethodError',
                 out.include?('kept=1') && out.include?('pruned=NoMethodError'))
     suite.check('without RESPOND_TO_PHANTOM respond_to? is false for a left-out entry',
                 out.include?('responds kept=1 pruned=0 sub_pruned=0 other=0 class_cpruned=0'))

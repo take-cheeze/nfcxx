@@ -487,9 +487,9 @@ class CodeGen
   #   - beg/end/excl are read once (Ranges are frozen by range_initialize);
   #   - `excl ? i < e : i <= e` instead of mrblib's `lim = end + 1`, which
   #     overflows at MRB_INT_MAX;
-  #   - the guard is mrb_range_p AND Integer beg/end: Float edges, the `succ`
-  #     path and endless ranges (an infinite loop) raise instead. The real excl
-  #     flag (mrb_range_excl_p) is used, never `begin == end`.
+  #   - RANGE_EACH_GUARD: the loop is the then-arm of mrb_range_p AND mrb_integer_p beg/end; any other Range
+  #     (String, Float or bigint edges, endless) falls through to the ordinary send (range_each_guarded_glue).
+  #     The real excl flag (mrb_range_excl_p) is used, never `begin == end`.
   # Returns the receiver; BREAK, RETURN_BLK, upvars and jumps as in
   # compile_block_body_insn.
   def emit_range_each_inline(region, irep, d)
@@ -505,13 +505,10 @@ class CodeGen
 
     out = String.new
     out << "  {\n"
-    out << inline_receiver_guard('mrb_range_p', recv, 'Range receiver for inlined #each')
-    out << "    mrb_value bc2cpp_range_b_#{addr} = mrb_range_beg(M, #{recv});\n"
-    out << "    mrb_value bc2cpp_range_e_#{addr} = mrb_range_end(M, #{recv});\n"
-    out << "    if (!mrb_integer_p(bc2cpp_range_b_#{addr}) || !mrb_integer_p(bc2cpp_range_e_#{addr})) { " \
-           "#{inline_raise('TypeError', 'non-Integer Range#each left to interpreter')} }\n"
-    out << "    mrb_int bc2cpp_range_a_#{addr} = mrb_integer(bc2cpp_range_b_#{addr});\n"
-    out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(bc2cpp_range_e_#{addr});\n"
+    out << "    if (!(mrb_range_p(#{recv}) && mrb_integer_p(mrb_range_beg(M, #{recv})) && " \
+           "mrb_integer_p(mrb_range_end(M, #{recv})))) goto #{range_each_send_label(region)};\n"
+    out << "    mrb_int bc2cpp_range_a_#{addr} = mrb_integer(mrb_range_beg(M, #{recv}));\n"
+    out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(mrb_range_end(M, #{recv}));\n"
     out << "    mrb_bool bc2cpp_range_x_#{addr} = mrb_range_excl_p(M, #{recv});\n"
     # The step is at the iteration label, not in the header, so an end at MRB_INT_MAX cannot
     # wrap; an end between the Fixnum and mrb_int ranges boxes through mrb_int_value.
@@ -526,9 +523,14 @@ class CodeGen
     out << "      ++bc2cpp_range_i_#{addr};\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
+    out << "    goto #{range_each_end_label(region)};\n"
     out << "  }\n"
     out
   end
+
+  # RANGE_EACH_GUARD: the label of the ordinary send a non-Integer Range takes, and the one past it.
+  def range_each_send_label(region) = "Lbc2cpp_range_send_#{region[:sendb_addr]}"
+  def range_each_end_label(region) = "Lbc2cpp_range_after_#{region[:sendb_addr]}"
 
   # RANGE_MAP_INLINE: the inlined loop for a recognize_range_map_regions region (nil if not clean):
   # emit_range_each_inline's counter loop carrying emit_collect_inline's map accumulator, `next` value and `break`

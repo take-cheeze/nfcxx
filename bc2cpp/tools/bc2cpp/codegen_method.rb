@@ -78,6 +78,8 @@ class CodeGen
         anchor = region[pass.anchor]
         next if claimed.include?(anchor) || claimed.include?(region[:sendb_addr])
         next if try_range && !rescue_try_inlinable?(region, anchor, try_range)
+        # RANGE_EACH_GUARD: the Range#each loop needs its send kept behind it, which only the guarded glue places.
+        next if pass.recognize == :recognize_range_each_regions && !guarded
 
         pre_start = @inline_nested_pre.length
         # GUARDED_BLOCK_INLINE: a second loop over the same block (another receiver class) keeps its own labels.
@@ -103,6 +105,10 @@ class CodeGen
         if guarded_klass
           guarded[:pending] << { region: region, inlined: inlined, klass: guarded_klass, anchor: anchor,
                                  pre: @inline_nested_pre[pre_start..].dup }
+          next
+        end
+        if pass.recognize == :recognize_range_each_regions
+          @inline_nested_pre.slice!(pre_start..) unless range_each_guarded_glue(region, irep, inlined, anchor, guarded)
           next
         end
 
@@ -197,7 +203,7 @@ class CodeGen
     supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) : mand
-    arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| n ? sanitize_c_ident(n) : "arg#{i + 1}" }
+    arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| c_param_name(n, i) }
     # NATIVE_ARG_TARGETS per-position types (see native_arg_types). Optional
     # positions are never retyped; the padding is explicit.
     arg_native_types = native_arg_types(d, mand) + Array.new(total_args - mand)
@@ -872,6 +878,17 @@ class CodeGen
       previous = line unless dead || line.strip.empty?
       dead
     end.join
+  end
+
+  # mrbc names an anonymous parameter by its sigil (`*`, `**`, `&`, and `...`'s three), which is no C identifier; the
+  # prefix keeps it apart from a Ruby parameter spelled `argN`.
+  ANONYMOUS_PARAM = /\A[*&]/
+
+  def c_param_name(name, index)
+    return "arg#{index + 1}" unless name
+    return "bc2cpp_anon_arg#{index + 1}" if name.match?(ANONYMOUS_PARAM)
+
+    sanitize_c_ident(name)
   end
 
   # R0 stays, unused or not: it is the line ParamTrace instruments (param_trace.rb REG0_RE).

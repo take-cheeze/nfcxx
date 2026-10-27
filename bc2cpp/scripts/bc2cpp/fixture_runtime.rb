@@ -67,9 +67,8 @@ module Bc2cppFixtureRuntime
     cflags = File.read(mak)[/^MRUBY_CFLAGS = (.*)$/, 1]
     raise "#{mak} has no MRUBY_CFLAGS line" unless cflags
 
-    # MRB_DEBUG only arms the headers' mrb_assert, which no fixture is built for: mrb_data_init's still fires on
-    # an anonymous subclass made before INSTANCE_TT_SETUP ran (self_new_leaf_check's SN_ANON).
-    Shellwords.split(cflags).grep(/\A-D/).uniq - ['-DMRB_DEBUG']
+    # MRB_DEBUG stays: it arms the headers' mrb_assert, mrb_data_init's type test among them.
+    Shellwords.split(cflags).grep(/\A-D/).uniq
   end
 
   def compiler?
