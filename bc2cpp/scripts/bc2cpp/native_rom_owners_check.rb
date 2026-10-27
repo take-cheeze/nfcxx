@@ -43,6 +43,11 @@ check.call('naming call resolves a boot helper', owner_of_source(table('x', nil,
 check.call('unknown source is refused', owner_of_source(table('x', nil, 'k', 'k = make_thing(mrb);')) == NativeRomOwners::UNKNOWN)
 check.call('a class defined under an outer class is refused',
            owner_of_source(table('x', nil, 'k', 'struct RClass *k = mrb_define_class_under_id(mrb, outer, MRB_SYM(In), mrb->object_class);')) == NativeRomOwners::UNKNOWN)
+check.call('a class defined under a resolved outer class is Outer::Name',
+           owner_of_source(table('x', nil, 'k', "struct RClass *o = mrb_define_class_id(mrb, MRB_SYM(Out), mrb->object_class);\n  " \
+                                                 'struct RClass *k = mrb_define_class_under_id(mrb, o, MRB_SYM(In), mrb->object_class);')) == 'Out::In')
+check.call('a class defined under Object is the top-level name',
+           owner_of_source(table('x', nil, 'k', 'struct RClass *k = mrb_define_class_under(mrb, mrb->object_class, "Top", mrb->object_class);')) == 'Top')
 check.call('entries are read with their function and name',
            NativeRomOwners.analyze(table('x', nil, 'k', 'k = mrb_define_class_id(mrb, MRB_SYM(T), mrb->object_class);'))[:tables]['x_rom_entries'][:entries] == [%w[fn_one to_s]])
 
@@ -52,6 +57,9 @@ if File.file?(numeric)
   check.call('numeric.c: integer_rom_entries is Integer', tables['integer_rom_entries'][:owner] == 'Integer')
   check.call('numeric.c: float_rom_entries is Float', tables['float_rom_entries'][:owner] == 'Float')
   check.call('numeric.c: numeric_rom_entries is Numeric', tables['numeric_rom_entries'][:owner] == 'Numeric')
+  socket = File.expand_path('../../3rd/mruby/mrbgems/mruby-socket/src/socket.c', __dir__)
+  options = File.file?(socket) && NativeRomOwners.analyze_file(socket)[:tables]['socket_option_rom_entries']
+  check.call('socket.c: socket_option_rom_entries is Socket::Option', options && options[:owner] == 'Socket::Option')
 else
   puts 'skip numeric.c (3rd/mruby not checked out)'
 end
