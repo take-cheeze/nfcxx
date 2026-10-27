@@ -65,8 +65,15 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
   SharedGeneration.arm_guard
   guarded = raises.call(SharedGeneration::Error) { ENV['ONLY_OWNERS'] }
   whole = raises.call(SharedGeneration::Error) { ENV.to_h }
+  # The one-name reads have their own fast path; each still refuses a unit key, the fetch default included.
+  fetched = raises.call(SharedGeneration::Error) { ENV.fetch('OUT_DIR', nil) }
+  defaulted = raises.call(SharedGeneration::Error) { ENV.fetch('BC2CPP_NO_SUCH_KEY', 'ONLY_OWNERS') }
+  probed = raises.call(SharedGeneration::Error) { ENV.key?('OTHER_OWNERS') }
+  plain = ENV.fetch('BC2CPP_NO_SUCH_KEY', 'x') == 'x' && !ENV.key?('BC2CPP_NO_SUCH_KEY') && ENV['BC2CPP_NO_SUCH_KEY'].nil?
   SharedGeneration::EnvGuard.armed = false
   check.call('a unit key read before the fork is a hard error', guarded)
+  check.call('through ENV.fetch and ENV.key? too', fetched && defaulted && probed)
+  check.call('while armed, other one-name reads answer as ENV does', plain)
   check.call('so is reading the whole environment before the fork', whole)
   check.call('other keys stay readable, and nothing is guarded after the fork', ENV.key?('PATH') && ENV['ONLY_OWNERS'].nil?)
   check.call('a common environment that holds a unit key is refused',

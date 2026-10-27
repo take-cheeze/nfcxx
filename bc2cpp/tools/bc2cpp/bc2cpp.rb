@@ -25,6 +25,7 @@ type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __F
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shared_generation'
+require_relative 'embed_init_guard'
 require_relative 'inframe_placement'
 
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
@@ -40,6 +41,7 @@ require_relative 'native_ivar_scopes'
 require_relative 'outside_ruby_ivar_scopes'
 
 require_relative 'native_expression_devirt'
+require_relative 'branch_hints'
 require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
@@ -849,13 +851,10 @@ if $PROGRAM_NAME == __FILE__
   # `analysis_only`); the inputs it is not given are never read by
   # compute_array_return_names.
   require_relative 'compiled_gems'
-  # BC2CPP_SELF_REGISTERING: BC2CPP_WIRED_EMBEDDINGS exists because a
-  # hand-written register.cxx may leave an embedding class's entry point
-  # uninstalled (it then runs interpreted against iv_tbl). A caller whose
-  # registration is generated from the same `embeds`/`compiled entry points`
-  # diagnostic (tools/optcarrot_probe/compiled_run.rb) cannot have that gap and
-  # sets this to skip the allowlist; drop_unsafe_embeddings' other checks still
-  # run.
+  # BC2CPP_SELF_REGISTERING: BC2CPP_WIRED_EMBEDDINGS names the project classes
+  # whose embedded layout has been traced end to end. A caller that compiles
+  # another program (tools/optcarrot_probe/compiled_run.rb) sets this to skip
+  # that allowlist; drop_unsafe_embeddings' other checks still run.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(File.expand_path('../..', __dir__)),
                                               native_name_sources)
@@ -1216,12 +1215,12 @@ if $PROGRAM_NAME == __FILE__
   # source 3 reads @ivar_layout), e.g. optcarrot's `@_pc =
   # peek16(RESET_VECTOR)` where peek16 is proven only through ivar reads.
   # Stratified like ARRAY_RETURN_IVAR_HINT: Level 0 = `ivar_layout` as computed
-  # above; Level 1 = FIXNUM_RETURN_PROOF from a probing CodeGen on Level 0
-  # (`analysis_only: :fixnum_return`), with every other table already final
+  # above; Level 1 = FIXNUM_RETURN_PROOF from a probing CodeGen that embeds no
+  # ivars (`analysis_only: :fixnum_return`), with every other table already final
   # (none of them take ivar_layout); Level 2 = IvarLayout.analyze with Level 1
   # available to trace_type's SEND arm, passed to the real CodeGen.
-  # Sound: Level 1 is the unchanged proof run on a subset of the final ivar
-  # facts (never more permissive). Level 2 only turns UNKNOWN SEND sites into
+  # Sound: Level 1 is the unchanged proof run with no embedded ivar facts, a
+  # subset of the final ones (never more permissive). Level 2 only turns UNKNOWN SEND sites into
   # :fixnum (guarded by MONO uniqueness), so it is a superset of Level 0. Not
   # iterated further, for the reasons given for ARRAY_RETURN_IVAR_HINT; the real
   # CodeGen recomputes FIXNUM_RETURN_PROOF against Level 2.
@@ -1429,6 +1428,12 @@ if $PROGRAM_NAME == __FILE__
   unless guard_failures.empty?
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
+  end
+  # EMBED_INIT_GUARD: an embedding owner this run emits must get the compiled #initialize that builds its storage.
+  embed_failures = EmbedInitGuard.failures(gen.embedding_initializers, compiled, only_owners)
+  unless embed_failures.empty?
+    abort "\n[bc2cpp] EMBED_INIT_GUARD: #{embed_failures.size} embedded ivar layout(s) without their storage:\n  " \
+          "#{embed_failures.join("\n  ")}"
   end
   # TC1005: index ops on a receiver no nil check dominates, collected while the methods compiled.
   if type_facts_path
@@ -2033,12 +2038,12 @@ if $PROGRAM_NAME == __FILE__
   gen.reserve_poly_table_slots(compiled)
   gen.reserve_numeric_slow_ruby_arm_slots
   print gen.emit_owner_class_cache
-  print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
-  # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method
-  # that compiles only when the closed world proves a fact a desktop build lacks. It guards such a
-  # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.
+  print gen.emit_direct_construct_accessors(compiled)
+  # OWNER_METHOD_REGISTRATION: every owner this gem compiles an entry for. No registration is written by hand.
+  print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS + compiled.map { |m| m[:owner] }).uniq)
+  # SKIPPED_ENTRY_MACROS: the entries this run refused (SKIP_UNSUPPORTED), e.g. a method that compiles only when the
+  # closed world proves a fact a desktop build lacks, as `#define BC2CPP_SKIPPED_<entry>` markers.
   print gen.emit_skipped_entry_macros(skipped_entries)
-  print gen.emit_unregistered_entry_macros(compiled)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
@@ -2148,6 +2153,7 @@ if $PROGRAM_NAME == __FILE__
   print numeric_slow_code
   print poly_tables_code
   compiled.each { |m| print m[:code] }
+  print gen.emit_gem_hooks
 
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.

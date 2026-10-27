@@ -269,14 +269,16 @@ class CodeGen
     # @ivar_layout or @fixnum_return_names (its predicate is trace_new_target, a
     # top-level function, plus proven_array_source).
     # FIXNUM_RETURN_IVAR_HINT (`analysis_only == :fixnum_return`): stop after
-    # FIXNUM_RETURN_PROOF instead. Its proof source 3 reads @ivar_layout, so
-    # drop_unsafe_embeddings runs first, or an ivar it would reject could leak a
-    # false proof. The ENTRY_ARG alternation is skipped; the final CodeGen runs it.
+    # FIXNUM_RETURN_PROOF instead. Its proof source 3 reads @ivar_layout, and an
+    # ivar the final CodeGen would not embed could leak a false proof, so the
+    # probe embeds nothing: a weaker layout only proves less, and the final
+    # CodeGen recomputes the proof against its own. That skips the embedding
+    # probes (compiles_clean? of every embedding #initialize and its callees).
+    # The ENTRY_ARG alternation is skipped; the final CodeGen runs it.
     if analysis_only == :fixnum_return
-      # Without the foreign-method scan this probe cannot prove a return, so embedding checks cannot help.
       return unless @foreign_method_names
 
-      @ivar_layout = drop_unsafe_embeddings(ivar_layout)
+      @ivar_layout = {}
       compute_fixnum_return_names
       return
     end
@@ -509,6 +511,15 @@ class CodeGen
   # The owner whose layout and struct hold `owner`'s ivars: its family root when EMBED_FAMILY folded it.
   def embed_storage_owner(owner)
     @embed_root_of&.[](owner) || owner
+  end
+
+  # EMBED_INIT_GUARD (embed_init_guard.rb): [owner, its #initialize irep label, the line that builds its storage] for
+  # every owner that embeds its ivars.
+  def embedding_initializers
+    @ivar_layout.keys.map do |owner|
+      init = @registry['initialize']&.find { |d| d.owner == owner }
+      [owner, init&.irep, "mrb_data_init(self, embedded, &#{type_var(owner)});"]
+    end
   end
 
   # Does code compiled for `owner` read ivars through DATA_PTR (its own layout or its folded family's)?

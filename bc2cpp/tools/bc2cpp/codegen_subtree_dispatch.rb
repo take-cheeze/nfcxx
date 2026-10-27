@@ -268,10 +268,6 @@ module SubtreeDispatchTables
         bc2cpp_vtbl_memo* memo;
       };
       [[gnu::noinline]] static int bc2cpp_vtbl_lookup(mrb_state* M, struct RClass* c, const bc2cpp_vtbl& t) {
-        if (bc2cpp_owner_class_state != M) {
-          bc2cpp_reset_owner_classes();
-          bc2cpp_owner_class_state = M;
-        }
         uintptr_t h = reinterpret_cast<uintptr_t>(c);
         bc2cpp_vtbl_memo& m = t.memo[((h >> 4) ^ (h >> 10)) & #{CodeGen::SUBTREE_TABLE_MEMO - 1}];
         if (m.c == c) return m.row;
