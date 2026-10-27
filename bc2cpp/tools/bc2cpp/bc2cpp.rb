@@ -162,6 +162,7 @@ require_relative 'codegen_computed_send'
 require_relative 'codegen_block_core_direct'
 require_relative 'codegen_collect_direct'
 require_relative 'codegen_integer_bit_aref'
+require_relative 'codegen_array_hash'
 require_relative 'codegen_guarded_block_inline'
 require_relative 'codegen_core_exact_direct'
 require_relative 'codegen_core_self_native'
@@ -2000,6 +2001,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_ary_write_helpers(compiled)
   print gen.emit_to_enum_helper(compiled)
   print gen.emit_collect_direct_helper(compiled)
+  print gen.emit_array_hash_helper(compiled)
   print gen.emit_bool_check_helper(compiled)
   print gen.emit_native_core_helpers(compiled)
   print gen.emit_numeric_proof_helpers(compiled)

@@ -254,9 +254,16 @@ class CodeGen
         mrb_value table = mrb_iv_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "__bc2cpp_core_interpreted__"));
         return mrb_exec_irep(M, self, mrb_proc_ptr(mrb_ary_ref(M, table, index)));
       }
+      // Every compiled Enumerable entry asks this, so `each` is interned once per state, not per call.
       [[maybe_unused]] static bool bc2cpp_core_each_is_builtin(mrb_state* M, mrb_value self) {
+        static mrb_state* each_state = nullptr;
+        static mrb_sym each_sym = 0;
+        if (each_state != M) {
+          each_sym = mrb_intern_lit(M, "each");
+          each_state = M;
+        }
         struct RClass* found = mrb_class(M, self);
-        mrb_method_search_vm(M, &found, mrb_intern_lit(M, "each"));
+        mrb_method_search_vm(M, &found, each_sym);
         return found == M->array_class || found == M->hash_class || found == M->range_class;
       }
       static bool bc2cpp_core_save_interpreted(mrb_state* M, struct RClass* c, bool singleton, const char* name, mrb_int index) {
