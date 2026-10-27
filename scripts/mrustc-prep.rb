@@ -1,6 +1,6 @@
 # Rewrite the C that mrustc's C backend emits so cproc accepts it, and keep what cproc would otherwise lose. Run on
 # the output of `cc -E -P -D__CPROC__` (not -undef: that makes glibc drop the GNU attributes). scripts/qbe-cc then
-# does the rest (qbe-prep.rb, cproc, QBE, assembling). scripts/mrustc-nfcc.sh does all of it. The forms rewritten,
+# does the rest (qbe-prep, cproc, QBE, assembling). scripts/mrustc-nfcc.sh does all of it. The forms rewritten,
 # the rest passes through unchanged:
 #
 #   * `_Atomic` qualifier (from <stdatomic.h>), `__extension__` and `__restrict` (the C99 spelling, which cproc reads).
@@ -8,7 +8,7 @@
 #     also occurs in string literals). A `#pragma pack(push, 1)` struct gets `packed` after its keyword (cproc ignores
 #     #pragma, and reads the attribute only there).
 #   * `__mrustc_atomicloop{8,16,32,64}`, mrustc's fetch-op loop (one prelude line each): the same loop over the sized
-#     `__atomic_load_N` and `__atomic_compare_exchange_N`, which qbe-prep.rb declares and libatomic provides.
+#     `__atomic_load_N` and `__atomic_compare_exchange_N`, which qbe-prep declares and libatomic provides.
 #   * Atomic loads, stores, exchanges and compare-exchanges in GNU statement expressions (`atomic_expr`): the same
 #     operation over the sized builtins, or over the generic libatomic calls for the 16-byte `uint128_t` (helpers
 #     after its typedef).
@@ -24,7 +24,7 @@
 #     and scripts/mrustc-nfcc.sh weakens them in the object (`objcopy --weaken-symbols`, which must be in the same
 #     object as the definition).
 #
-# The script uses no regular expressions, so it runs on the self-built mruby (scripts/mrb), as qbe-prep.rb does.
+# The script uses no regular expressions, so it runs on the self-built mruby (scripts/mrb), as qbe-prep does.
 # Usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt [asm.c]
 
 IDENT_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
@@ -63,7 +63,7 @@ end
 
 # mrustc's atomic loads, stores, exchanges and compare-exchanges on libcore's integer types are GNU statement
 # expressions over the generic __atomic builtins, with a temporary of the pointee type (see `atomic_expr`). Each
-# becomes an expression over the sized builtin of the same width, which cproc calls as a function (qbe-prep.rb
+# becomes an expression over the sized builtin of the same width, which cproc calls as a function (qbe-prep
 # declares it), with a cast to the pointee type where a value comes back.
 ATOMIC_HEAD = '({ __auto_type __atomic_'
 ATOMIC_SIZE = {
@@ -238,7 +238,7 @@ end
 # parenthesis in the line).
 WEAK_ATTR = '__attribute__((weak))'
 
-# The identifier at the end of `s`. `$` is part of mrustc's mangled names (a hash after it), as qbe-prep.rb's scanner has it.
+# The identifier at the end of `s`. `$` is part of mrustc's mangled names (a hash after it), as qbe-prep's scanner has it.
 def trailing_ident(s)
   i = s.bytesize
   i -= 1 while i > 0 && (IDENT_CHARS.index(s.byteslice(i - 1, 1)) || s.byteslice(i - 1, 1) == '$')
@@ -294,7 +294,7 @@ def replace_all(s, from, to)
 end
 
 # mrustc writes a trailing comma in an attribute list, `__attribute__((__aligned__(16),))`. GNU C allows it, but
-# qbe-prep.rb matches the aligned attribute only without the comma, and drops it otherwise, which changes the
+# qbe-prep matches the aligned attribute only without the comma, and drops it otherwise, which changes the
 # layout (cproc then fails the alignment assertion next to the struct). The comma is removed on attribute lines
 # only: `,)` also occurs in string literals.
 def drop_attribute_trailing_comma(line)

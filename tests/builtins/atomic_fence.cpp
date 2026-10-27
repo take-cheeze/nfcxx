@@ -1,5 +1,5 @@
 // EXPECT: 0
-// __atomic_thread_fence / __atomic_signal_fence (libstdc++ shared_ptr): cproc has no fences, so scripts/qbe-prep.rb
+// __atomic_thread_fence / __atomic_signal_fence (libstdc++ shared_ptr): cproc has no fences, so scripts/qbe-prep
 // calls a weak barrier stub from the assembly tail (mfence on x86-64, dmb ish on arm64).
 static int g_val = 5;
 int main() {

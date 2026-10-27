@@ -71,7 +71,7 @@ covers say so.
 | --- | --- | --- |
 | C++20 modules (`export module`, `import`; `docs/notes/modules.md`): interface units with classes, templates, inline functions and enums, chains of imports, one-command and `-c` routes with `--module-dir` | `tests/modules/run.sh` (both backends) | ci.yml |
 | Path A, gcc backend (`nfcxx --backend=gcc`: EDG's C through `gcc -O2 -fwrapv -fno-strict-aliasing`) | The 15 programs of `tests/cases` (`NFCXX_BACKEND=gcc tests/run.sh`); freestanding library (`tests/lib/run.sh`); builtin probes (`tests/builtins/run.sh`); C inputs (`tests/c/run.sh`); tinyxml2 (`tests/realworld/run.sh`); doctest on the hosted headers (`tests/realworld/run_doctest.sh`, gcc only) | ci.yml, realworld.yml |
-| Path A, qbe backend (the default: EDG's C -> `qbe-prep.rb` -> cproc -> QBE -> asm; `scripts/qbe-cc`) | Same `tests/cases`, `tests/lib`, `tests/builtins`, `tests/c`, tinyxml2 as above with `NFCXX_BACKEND=qbe` or the default; C++ exceptions (`tests/cases/exceptions.cpp`); signed overflow wraps (`tests/cases/signed_overflow_wraps.cpp`); Lua and mruby as C (`run_lua.sh`, `run_mruby.sh`); CoreCLR's workstation GC compiles, 34 translation units (`run_coreclr_gc.sh`, `docs/notes/coreclr-gc.md`) | ci.yml, realworld.yml |
+| Path A, qbe backend (the default: EDG's C -> `qbe-prep` -> cproc -> QBE -> asm; `scripts/qbe-cc`) | Same `tests/cases`, `tests/lib`, `tests/builtins`, `tests/c`, tinyxml2 as above with `NFCXX_BACKEND=qbe` or the default; C++ exceptions (`tests/cases/exceptions.cpp`); signed overflow wraps (`tests/cases/signed_overflow_wraps.cpp`); Lua and mruby as C (`run_lua.sh`, `run_mruby.sh`); CoreCLR's workstation GC compiles, 34 translation units (`run_coreclr_gc.sh`, `docs/notes/coreclr-gc.md`) | ci.yml, realworld.yml |
 | Path B (EDG lowered IL -> own IR -> QBE, `scripts/setup-pathb.sh`, `be/`, `scripts/pathb-qbe-emit.rb`) | IL goldens (`tests/pathb/run.sh`); IR goldens and node coverage (`tests/pathb-ir/run.sh`); IR -> QBE -> run, equal to `// EXPECT:` and to the gcc backend (`tests/pathb-qbe/run.sh`): arithmetic and control flow, `continue`, bool loads, `setjmp`, bit-fields (`cases/bitfield*.cpp`), VLAs including scope exit (`cases/vla*.cpp`), GNU statement expressions (`cases/stmtexpr*.cpp`), volatile (`cases/volatile.cpp`), thread-local objects (`cases/tls*.cpp`, `multi/tls_*`), dynamic initialization (`cases/dyn_*.cpp`, `multi/dyn_init`), C++ exceptions (`cases/eh_*.cpp`), `long double` (`cases/longdouble_*.cpp`, `multi/abi_ld`, `traps/longdouble_*`; `docs/notes/pathb-longdouble.md`), COMDAT/weak linkage (`multi/comdat`, `multi/weak_link`), checked operations that must abort with SIGABRT (`traps/`) | pathb.yml |
 | Path B, hosted (`NFCXX_PATH=b ./nfcxx`, `scripts/pathb-cc`, `scripts/host-sys.sh`; `docs/notes/pathb-hosted.md`) | Programs using the host C and C++ headers and libstdc++: hosted probes `tests/pathb-qbe/cases/{hosted_*,abi_struct,vararg_def,base_null}.cpp` and `multi/abi_c`, `tests/cases` through the driver (`NFCXX_PATH=b tests/run.sh`), tinyxml2 (exit 12); all in `tests/pathb-qbe/hosted.sh`. doctest builds and exits 2 as expected (no CI script; `pathb-hosted.md`, "long double"). Several translation units sharing libstdc++ templates: `tests/multi-tu/run.sh` (`docs/notes/multi-tu.md`, both backends) | pathb.yml (hosted.sh), ci.yml (multi-tu) |
 | EH shim (`lib/ehshim`, `scripts/ehshim`; `docs/notes/eh-shim.md`) | Exceptions thrown inside libstdc++ (`vector::at`, `std::stoi`, empty `std::function`, `string::_M_create`, `thread::join`, `promise`/`future`, `regex`) are caught by EDG-compiled handlers; `std::current_exception`, `exception_ptr`, `rethrow_exception`, `make_exception_ptr`, `throw_with_nested`; `new` failure on the gcc backend; plain `throw`s of a g++-built library caught by the program, the library's own handlers kept (`tests/ehshim/foreign`, also `NFCXX_EH_UNWIND=1`); `c10::Error` from libtorch (`tests/bundle/torch.sh`, by hand). Path A both backends, Path B: `tests/cases/eh_libstdcxx_throw.cpp`, `tests/cases/eh_exception_ptr.cpp` (all `tests/run.sh` modes and `tests/pathb-qbe/run.sh`), `tests/pathb-qbe/cases/hosted_eh_system.cpp`, and `tests/ehshim/run.sh` (output compared with host g++). `exception_ptr` needs the hooks of the patched `libC.a` (submodule `3rd/edg`); without them the test reports SKIP | ci.yml, pathb.yml |
@@ -161,7 +161,7 @@ refuses any other instruction, a register clobber or `goto` (`tests/mruby/pathb-
 
 **`volatile`**
 - Path A qbe: for EDG-generated C, cproc rejects stores to `volatile` objects ("volatile store is not yet supported").
-  `qbe-prep.rb` drops the qualifier only for hand-written `.c` inputs (`NFCXX_C_INPUT`) and keeps volatile locals in memory
+  `qbe-prep` drops the qualifier only for hand-written `.c` inputs (`NFCXX_C_INPUT`) and keeps volatile locals in memory
   (`tests/c/volatile_setjmp.c`; `realworld.md`, "C inputs"). Not covered: volatile function parameters and `for`
   declarations.
 - Path B: every volatile access is a call of a module-local helper, so volatile code is slow; not atomic, not a fence
@@ -177,7 +177,7 @@ the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap`
 
 **cproc / qbe backend, other**
 - `alignas(16) int x;` on a block-scope local becomes `__attribute__((aligned))`, which cproc rejects ("GNU attribute
-  'aligned' is not supported here"); the gcc backend accepts it. Two shapes from libstdc++ are rewritten by `qbe-prep.rb`
+  'aligned' is not supported here"); the gcc backend accepts it. Two shapes from libstdc++ are rewritten by `qbe-prep`
   (`realworld.md`). No test asserts the rejection; `tests/lib/new_launder.cpp` uses a union to avoid it
   (`freestanding.md`). Checked by hand with a one-line program on both backends.
 - `__builtin_trap` is unknown to cproc (`tests/builtins/trap_compile_only.cpp`, `XFAIL-qbe`); `freestanding.md`'s `panic` uses `abort`.
@@ -189,7 +189,7 @@ the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap`
 - qbe-compiled mruby uses the portable `switch` dispatch, not computed goto (`realworld.md`; `tests/realworld/run_mruby.sh`);
   so does QuickJS (`scripts/quickjs-cproc.patch`, `poly.md`).
 - `-D_GNU_SOURCE` plus `#include <stdlib.h>` or `<math.h>` used to fail on qbe with `declaration has no type specifier`.
-  glibc declares `strtof32x`, `acosf32x` and friends with `_Float32x` and `_Float64x`. `qbe-prep.rb` now maps `_Float32x` to
+  glibc declares `strtof32x`, `acosf32x` and friends with `_Float32x` and `_Float64x`. `qbe-prep` now maps `_Float32x` to
   `double`, `_Float64x` to `long double` and `_Float128x` to the 16-byte `_Float128` struct, and the `f32x`/`f64x`/`f128x`
   literal suffixes follow them. Regression case: `tests/cases/qbe_floatnx_gnu_source.cpp`.
 - QuickJS needed three more constructs that cproc rejects, patched in the throwaway checkout (`scripts/quickjs-cproc.patch`):

@@ -9,9 +9,9 @@
 #                compare, aggregates, the export quirk, UTF-8 and control bytes in names.
 #   r_*.ssa      hand-written IL that both refuse (exit 1).
 # Recipe for the real_ fixtures (done once, on this repo, with EDG, cproc and QBE built): C++ inputs go through
-# `nfcxx --emit-c`; hand-written C through qbe-cc's C-input path (-include defs.h, qbe-prep.rb --c-input). Then
+# `nfcxx --emit-c`; hand-written C through qbe-cc's C-input path (-include defs.h, qbe-prep --c-input). Then
 #   cc -E -P -undef -D__CPROC__ [-include defs.h] FILE > pp.c
-#   scripts/mrb scripts/qbe-prep.rb [--c-input] pp.c prep.c tail.s
+#   scripts/qbe-prep [--c-input] pp.c prep.c tail.s
 #   build/cproc/cproc-qbe < prep.c > out.ssa
 cd "$(dirname "$0")/../.."
 root=$PWD; here=$root/tests/mruby/qbe2cil; oracle=$root/tests/mruby/oracle

@@ -92,7 +92,7 @@ under it.
 Source lines: with `NFCXX_ASAN=1`, `qbe-cc` keeps the preprocessor's line markers (no `-P`), cproc records the location of each
 expression (`struct expr` `loc`) and emits `dbgloc N` before each check, and a `dbgfile` names the file of the function.
 QBE turns those into `.loc` lines, so libasan's report names `file:line` like the gcc backend. The line is the expression's
-start token, so a multi-line expression may name a line inside it; `qbe-prep.rb` skips the markers as comments.
+start token, so a multi-line expression may name a line inside it; `qbe-prep` skips the markers as comments.
 
 ## Use after return (qbe)
 

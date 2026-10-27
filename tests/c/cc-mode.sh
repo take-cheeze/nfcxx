@@ -567,7 +567,7 @@ EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" ksccp.c -o ksccp 2>/dev/null && { ./ksccp; [ $? = 42 ]; } &&
        ! nm ksccp | grep -q ' helper$'; then ok "kernel mode: constants through locals fold conditions and calls"
     else bad "kernel mode: constants through locals fold conditions and calls" "wrong result or the link failed"; fi
-    # __builtin_*_overflow lowered by cproc itself (no qbe-prep.rb in kernel mode): every type mix, against gcc's hash
+    # __builtin_*_overflow lowered by cproc itself (no qbe-prep in kernel mode): every type mix, against gcc's hash
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtins_overflow_matrix.c" -o kov 2>/dev/null && { ./kov; [ $? = 42 ]; }; then
       ok "kernel mode: overflow built-ins match gcc for every type mix"
     else bad "kernel mode: overflow built-ins match gcc for every type mix" "wrong results or the compile failed"; fi

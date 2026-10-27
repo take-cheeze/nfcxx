@@ -149,12 +149,12 @@ compile; where the change would cost gcc something it is selected with `__CPROC_
   (`DIRECT_DISPATCH` 0), as for mruby (`realworld.md`); the gcc back end keeps computed goto.
 - `<stdatomic.h>` and `_Atomic` (the JavaScript `Atomics` object; cproc: `_Atomic type qualifier is not yet supported`): with
   `__CPROC__`, `quickjs-c-atomics.h` maps the C11 operations to libatomic's sized functions (`__atomic_fetch_add_4`, ...), chosen
-  with `_Generic` by the size of the element; `qbe-prep.rb` declares them and the qbe link has `-latomic` already (`nm`: 36
+  with `_Generic` by the size of the element; `qbe-prep` declares them and the qbe link has `-latomic` already (`nm`: 36
   libatomic symbols in the qbe archive, none in the gcc one). The gcc back end inlines `<stdatomic.h>` as before.
 
 QuickJS is built **without `-D_GNU_SOURCE`**, which its CMakeLists defines but its sources do not need on Linux. With the macro,
 glibc's `<stdlib.h>` and `<math.h>` declare functions of the types `_Float32x` and `_Float64x` (`strtof32x`, `acosf32x`, ...);
-`qbe-prep.rb` drops the typedefs of those two names (it maps `_Float32` and `_Float64`), and cproc stops with `declaration has
+`qbe-prep` drops the typedefs of those two names (it maps `_Float32` and `_Float64`), and cproc stops with `declaration has
 no type specifier` on the first of them, in every file that includes either header. This is why every QuickJS file failed at
 once on the qbe back end with the flag. Checked by hand with a three-line C file (`#define _GNU_SOURCE`, `#include <stdlib.h>`):
 qbe fails, gcc and qbe without the define compile it (`docs/README.md`, "cproc / qbe backend, other").
@@ -616,7 +616,7 @@ None of these is covered by a test unless stated.
   - Under AddressSanitizer the Go-only host is clean on both back ends (`tests/poly/asan-go.sh`); valgrind needs the suppression
     file and is much weaker (below).
 - Not done: compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as `pathb-ptx-emit --embed` does for GPU
-  images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep.rb` handles it for C inputs only, which is
+  images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep` handles it for C inputs only, which is
   why mruby and Lua are patched).
 - `setup-poly.sh`, `setup-poly-lua.sh` and `setup-poly-js.sh` fetch mruby, Lua and QuickJS-NG from GitHub at their pins (mruby also
   needs `ruby` + `rake` once), like `setup-mruby.sh` and `run_lua.sh`; `setup-poly-astro.sh` fetches ko1/astro and needs `ruby` for

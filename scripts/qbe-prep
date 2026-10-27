@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# EDG's preprocessed C rewritten for cproc, and the assembly it cannot express (tools/qbe-prep, the C++ port of the
+# former scripts/qbe-prep.rb): scripts/qbe-prep [--c-input] [--macho] [--arm64] [--dce] PREPROCESSED_C REWRITTEN_C ASM_TAIL.
+# Builds build/qbe-prep on first use (scripts/tool-ensure.sh). NFCXX_QBE_PREP_RB=SCRIPT runs an mruby script with the
+# same arguments instead (tests/mruby: the oracle tests/mruby/oracle/qbe-prep.rb).
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [ -n "${NFCXX_QBE_PREP_RB:-}" ]; then exec "$root/scripts/mrb" "$NFCXX_QBE_PREP_RB" "$@"; fi
+. "$root/scripts/tool-ensure.sh"
+tool_ensure qbe-prep || exit $?
+exec "$root/build/qbe-prep" "$@"

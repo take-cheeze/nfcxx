@@ -11,7 +11,7 @@
 #      tests/pathb-ir (goldens), tests/mruby/pathb-edge (hand-written IR: constants, floats, data, every
 #      refusal and error path) and, when the Path B harness exists, the IR of tests/pathb-qbe/{cases,multi,
 #      traps} and tests/cases; plus --no-prune, stdin, usage errors and --append-weak.
-#   4. scripts/qbe-prep.rb (oracle tests/mruby/oracle/qbe-prep.rb): tests/mruby/qbe-prep.sh (its own header says what it compares).
+#   4. scripts/qbe-prep (tools/qbe-prep, the C++ port; oracle tests/mruby/oracle/qbe-prep.rb): tests/mruby/qbe-prep.sh (its own header says what it compares).
 #      tests/mruby/qbe-asm.sh: `nfcc -S` gives the same assembly with the scripts as with their oracle ports (tests/c, Lua, extra files).
 #   5. scripts/qbe2cil.rb (the Python oracle tests/mruby/oracle/qbe2cil.py): tests/mruby/qbe2cil.sh (the JSON fragment and the exit status over the QBE IL fixtures).
 #   6. scripts/pathb-cil-emit.rb (the Python oracle tests/mruby/oracle/pathb-cil-emit.py): tests/mruby/pathb-cil-emit.sh (the JSON fragment, stdout, stderr and status).
@@ -52,7 +52,7 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
     f=$root/tests/cases/$n.cpp
     if ! "$root/nfcxx" --emit-c "$f" >"$tmp/$n.c" 2>"$tmp/$n.err"; then report skip "weak-symbols $n: front end failed"; continue; fi
     cc -E -P -undef -D__CPROC__ "$tmp/$n.c" >"$tmp/$n.pp.c" 2>/dev/null
-    if ! "$mrb" "$root/scripts/qbe-prep.rb" "$tmp/$n.pp.c" "$tmp/$n.prep.c" "$tmp/$n.tail.s" 2>/dev/null ||
+    if ! "$root/scripts/qbe-prep" "$tmp/$n.pp.c" "$tmp/$n.prep.c" "$tmp/$n.tail.s" 2>/dev/null ||
        ! "$root/build/cproc/cproc-qbe" <"$tmp/$n.prep.c" >"$tmp/$n.ssa" 2>/dev/null ||
        ! "$root/build/qbe/qbe" "$tmp/$n.ssa" >"$tmp/$n.s" 2>/dev/null; then
       report skip "weak-symbols $n: QBE pipeline failed"; continue

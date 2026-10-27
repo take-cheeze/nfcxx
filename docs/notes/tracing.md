@@ -11,7 +11,7 @@
 | `host C++ headers` | driver | querying the host g++ for its include directories |
 | `cpfe --emit-c (front end)` | frontend | `--emit-c` only: the EDG front end alone |
 | `eccp (front end, C compile, link)` | eccp | the whole compile, including EDG's C compile and the link |
-| `cc -E (preprocess)`, `qbe-prep.rb (mruby, rewrite for cproc)`, `cproc (C to QBE IL)`, `qbe (IL to assembly)`, `weak-symbols`, `cc -c (assemble)` | qbe-backend | each step of `scripts/qbe-cc`, once per object file |
+| `cc -E (preprocess)`, `qbe-prep (rewrite for cproc)`, `cproc (C to QBE IL)`, `qbe (IL to assembly)`, `weak-symbols`, `cc -c (assemble)` | qbe-backend | each step of `scripts/qbe-cc`, once per object file |
 | `C input: <file>` | driver | one per `.c` input (they skip EDG; `docs/notes/realworld.md`, "C inputs") |
 | `cuda-rewrite (host copy): F.cu`, `cuda-rewrite (device unit): F.cu` | cuda | the rewriter's two passes over a `.cu` input |
 | `pathb-dump --ir (device front end): F.cu`, `pathb-ptx-emit --emit: F.cu (N groups)`, `ptxas: F.cu` | cuda | the device image: EDG to IR, IR to PTX modules, PTX to cubins (none on a device cache hit, see `docs/notes/cxx-driver.md`) |

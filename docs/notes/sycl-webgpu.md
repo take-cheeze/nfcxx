@@ -174,7 +174,7 @@ dispatch, and nfcxx is the default host compiler); `item` converting to both `id
 `item`); EDG not finding a conversion function *template* for `id == 5` (the conversion is now a mixin base); 1-D dispatches of
 more than 65535 groups (split into several, with a group offset uniform); heaps too small for the samples (256 MB to 768 MB);
 barriers rejected by WGSL's uniformity analysis (the closure moved to a uniform buffer, above); `std::sqrt(float)` and the other
-libstdc++ math wrappers calling `__builtin_sqrtf`, which the qbe back end could not compile (`scripts/qbe-prep.rb` maps the libm
+libstdc++ math wrappers calling `__builtin_sqrtf`, which the qbe back end could not compile (`scripts/qbe-prep` maps the libm
 builtins now, with its Python oracle); volatile accesses; user-defined reduction operators; atomic-mode accessors;
 `group::operator[]`, `sub_group::load`, event profiling.
 

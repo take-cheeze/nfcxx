@@ -12,7 +12,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cproc=${CPROC_QBE:-$root/build/cproc/cproc-qbe}
 qbe=${QBE:-$root/build/qbe/qbe}
 source "$(dirname "$0")/trace.sh"
-# NFCXX_QBE_PREP_RB, NFCXX_WEAK_SYMBOLS_RB: other copies of the two mruby scripts (tests/mruby/qbe-asm.sh runs the oracle ports).
+# NFCXX_QBE_PREP_RB, NFCXX_WEAK_SYMBOLS_RB: mruby scripts that scripts/qbe-prep and scripts/weak-symbols run instead of their
+# C++ tools (tests/mruby/qbe-asm.sh runs the oracle ports). NFCXX_QBE_PREP: another qbe-prep program (tests/mruby/qbe-prep-tap.sh).
 
 compile=0 asm=0 pic=0 out="" src="" cppflags=() asflags=()
 kcproc=() nofp=0 nounwind=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
@@ -65,9 +66,9 @@ if [ $compile = 0 ] && [ -n "${NFCXX_CIL:-}" ]; then
     ${keep[@]+"${keep[@]}"} "$@"
 fi
 if [ $compile = 0 ]; then
-  # The link. The sized __atomic_* calls qbe-prep.rb leaves in the C (for libstdc++'s std::atomic) are
+  # The link. The sized __atomic_* calls qbe-prep leaves in the C (for libstdc++'s std::atomic) are
   # libatomic functions; gcc inlines them, so only the QBE link adds the library. -lm: the fabs builtins
-  # qbe-prep.rb maps to fabs/fabsf (a C-only program does not pull libm in through libstdc++).
+  # qbe-prep maps to fabs/fabsf (a C-only program does not pull libm in through libstdc++).
   # libnfcxxld.a (be/nfcxx_ldrt.c) is the runtime of the helper calls cproc emits for long double and __float128.
   # Its __float128 to_chars wrappers need libstdc++; the archive member is only pulled in when a program calls a helper.
   # -fsanitize=address (NFCXX_ASAN=1): the program links libasan, whose preinit runs before main (docs/notes/asan.md)
@@ -150,36 +151,36 @@ if [ -n "$sretobj" ]; then
   "$(dirname "$0")/mrb" "$(dirname "$0")/strip-atomic.rb" < "$tmp/pp.c" > "$tmp/pp.at.c" && mv "$tmp/pp.at.c" "$tmp/pp.c"
 fi
 trace_end "$t" "cc -E (preprocess)" qbe-backend
-# cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.rb rewrites
+# cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep rewrites
 # just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after the weak directives (scripts/weak-symbols).
 # The C-input mode (hand-written C) is an argument: the mruby interpreter has no ENV.
 t=$(trace_start)
 prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
-# NFCXX_QBE_DCE=1: qbe-prep.rb drops the definitions of static functions nothing uses (what gcc does by not emitting them).
+# NFCXX_QBE_DCE=1: qbe-prep drops the definitions of static functions nothing uses (what gcc does by not emitting them).
 # cproc and QBE compile every one, so a file that includes a big header of static inline functions pays for all of them.
 # The assembly is smaller, not identical, so it is opt-in; scripts/weak-symbols gets only --c-input.
 prepdce=(); [ -z "${NFCXX_QBE_DCE:-}" ] || prepdce=(--dce)
-# Mach-O targets: qbe-prep.rb lists constructors in __mod_init_func with the "_" label prefix
+# Mach-O targets: qbe-prep lists constructors in __mod_init_func with the "_" label prefix
 macho=(); [ $macos = 1 ] && macho=(--macho)
 # The fence stub is mfence on x86-64 and dmb ish on arm64. The target is arm64 on an arm64 host and in the macOS cross
 # (NFCXX_MACOS_SYSROOT, from any host, where QBE gets -t arm64_apple).
 arm64=(); case "$(uname -m)" in arm64|aarch64) arm64=(--arm64) ;; esac
 [ -z "${NFCXX_MACOS_SYSROOT:-}" ] || arm64=(--arm64)
-# qbe-prep.rb changes only the forms named in its header, and all of them contain one of these tokens. With
+# qbe-prep changes only the forms named in its header, and all of them contain one of these tokens. With
 # none present (and no CR, which it would normalize), its output is its input and the tail is empty, so the
 # file goes through unchanged. Under mruby the scan costs minutes on a multi-MB file (unicode_name_fsm: 11 MB).
-# NFCXX_PREP_ALWAYS=1 runs qbe-prep.rb on every input (tests/mruby/qbe-prep.sh counts them through the tap).
+# NFCXX_PREP_ALWAYS=1 runs qbe-prep on every input (tests/mruby/qbe-prep.sh counts them through the tap).
 # NFCXX_QBE_KERNEL: no rewriting. The kernel's translation unit is exactly gcc's preprocessed source, so cproc either
 # compiles a construct itself or refuses it (and qbe-try keeps the gcc object); in particular volatile stays volatile
-# (cproc -V), where qbe-prep.rb would drop it.
+# (cproc -V), where qbe-prep would drop it.
 if [ -n "${NFCXX_QBE_KERNEL:-}" ] ||
    { [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|__sync_|volatile|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
      ! grep -q "$(printf '\r')" "$tmp/pp.c"; }; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
-  "$(dirname "$0")/mrb" "${NFCXX_QBE_PREP_RB:-$(dirname "$0")/qbe-prep.rb}" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${prepdce[@]+"${prepdce[@]}"} ${macho[@]+"${macho[@]}"} ${arm64[@]+"${arm64[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+  "${NFCXX_QBE_PREP:-$(dirname "$0")/qbe-prep}" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${prepdce[@]+"${prepdce[@]}"} ${macho[@]+"${macho[@]}"} ${arm64[@]+"${arm64[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
 fi
-trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
+trace_end "$t" "qbe-prep (rewrite for cproc)" qbe-backend
 t=$(trace_start)
 # macOS arm64: the aarch64-apple target (Apple's va_list, see scripts/cproc-apple-valist.patch); elsewhere the default.
 cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t aarch64-apple) ;; esac

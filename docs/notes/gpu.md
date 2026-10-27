@@ -163,7 +163,7 @@ builds, links and runs `mul2.cu`: the kernels run on the GPU and the program che
 
 NVIDIA `cuda-samples` `0_Introduction/vectorAdd`, unmodified, builds with `-I/usr/local/cuda/include/cccl` (for
 `<cuda/cmath>`) on the default qbe backend and on `--backend=gcc`, links with `-lcudart`, and prints "CPU and GPU answers
-match". On qbe, `scripts/qbe-prep.rb` maps `__builtin_fabsf` and `__builtin_fabs` (used by libcu++) to libm. Note that the
+match". On qbe, `scripts/qbe-prep` maps `__builtin_fabsf` and `__builtin_fabs` (used by libcu++) to libm. Note that the
 sample exits 0 even when its check fails: the check is its output line.
 
 Device unit (`tools/cuda-rewrite --device`): the top-level pieces of the source (preprocessor lines, declarations,

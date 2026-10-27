@@ -7,7 +7,7 @@
 # no files, no `os`, no `std`, no module loader, and no timers unless the host binds them.
 # QuickJS is compiled without -D_GNU_SOURCE (its CMakeLists defines it, but nothing in the sources needs it on Linux): the
 # macro makes glibc's <stdlib.h> and <math.h> declare functions of the types _Float32x and _Float64x, which cproc cannot
-# parse (qbe-prep.rb drops those typedefs, so cproc reports `declaration has no type specifier`).
+# parse (qbe-prep drops those typedefs, so cproc reports `declaration has no type specifier`).
 #   NFCXX_BACKEND=qbe|gcc   back end of the C compiler (default qbe); one build tree per back end
 #   FORCE=1                 rebuild even if the library is newer than this script and the patch
 # Needs QBE and cproc for the qbe back end (scripts/setup-qbe.sh), gcc for the gcc back end, and git, patch, flock and ar. The

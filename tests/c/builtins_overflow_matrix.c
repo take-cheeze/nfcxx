@@ -1,7 +1,7 @@
 // EXPECT: 42
 // __builtin_{add,sub,mul}_overflow for every mix of signed and unsigned char, short, int and long operands and results
 // (1536 combinations, 441 value pairs each): the results and flags hash to what gcc computes. Ordinary nfcc C goes
-// through qbe-prep.rb's lowering; tests/c/cc-mode.sh compiles this file in NFCXX_QBE_KERNEL mode too, where cproc
+// through qbe-prep's lowering; tests/c/cc-mode.sh compiles this file in NFCXX_QBE_KERNEL mode too, where cproc
 // lowers the builtins itself (qbe.c funcoverflow).
 static unsigned long long h = 1469598103934665603ull;
 static void mix(unsigned long long x) { h = (h ^ x) * 1099511628211ull; }

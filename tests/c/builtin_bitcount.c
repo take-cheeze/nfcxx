@@ -1,5 +1,5 @@
 // EXPECT: 42
-// The bit-counting built-ins (cproc's own, not qbe-prep.rb's helpers: the kernel's headers fold them in constant
+// The bit-counting built-ins (cproc's own, not qbe-prep's helpers: the kernel's headers fold them in constant
 // expressions), at run time and folded, for the int, long and long long forms. clz and ctz of zero are left out (GNU C
 // leaves them undefined).
 static const unsigned long long vals[] = {

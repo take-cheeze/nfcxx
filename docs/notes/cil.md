@@ -7,12 +7,12 @@ not a managed language: C pointers stay raw addresses in unmanaged memory, and t
 ## Pipeline
 
 ```
-C --cpp--> prep (qbe-prep.rb) --cproc--> QBE IL --qbe2cil.rb--> JSON fragment (.o) --cil-link.rb--> CIL text
+C --cpp--> prep (qbe-prep) --cproc--> QBE IL --qbe2cil.rb--> JSON fragment (.o) --cil-link.rb--> CIL text
    --ilasm--> x.dll  +  x.runtimeconfig.json  +  x (launcher: exec dotnet x.dll "$@")
 ```
 
 - `scripts/cil-cc` is the compiler wrapper: it sets `NFCXX_CIL=1` and runs `scripts/qbe-cc`, which does the
-  preprocessing, `qbe-prep.rb` and cproc as for the QBE backend. With `NFCXX_CIL` set it writes a fragment instead of
+  preprocessing, `qbe-prep` and cproc as for the QBE backend. With `NFCXX_CIL` set it writes a fragment instead of
   running QBE, and its link step is `cil-link.rb`.
 - `scripts/qbe2cil.rb` (a port of the former `qbe2cil.py`, see `docs/notes/mruby-scripting.md`) turns one translation unit's QBE IL into a fragment: the method bodies as CIL text, the
   functions, data, the calls with their signatures, and the global symbols the unit uses.
@@ -75,6 +75,6 @@ The expected values were checked by hand against C semantics before they were wr
 ## Relation to the other backends
 
 The QBE and gcc backends are unchanged except for the `qbe-cc` branch that selects the CIL path. The shared front-end
-steps (the preprocessing, `qbe-prep.rb`, cproc) are the same, so a C program that compiles for QBE reaches this backend
+steps (the preprocessing, `qbe-prep`, cproc) are the same, so a C program that compiles for QBE reaches this backend
 with the same IL. The output is not verified CIL (C's memory model is not the CLR's), so it runs only where the native
 memory it touches is valid: the same assumption as the QBE and gcc binaries.

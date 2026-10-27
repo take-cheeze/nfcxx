@@ -93,7 +93,7 @@ kernel patches the nop into a `jmp`, the jump lands on the stub, so the patched 
 
 A basic `__asm__("text");` at file scope (the kernel's `EXPORT_SYMBOL`, which writes a `.export_symbol` entry) goes to
 the side file as it is, after `.text` (the section an assembly file starts in) and marked to survive pruning. The
-kernel's uses switch sections themselves and switch back. Ordinary nfcc C still runs qbe-prep.rb, which refuses
+kernel's uses switch sections themselves and switch back. Ordinary nfcc C still runs qbe-prep, which refuses
 file-scope asm other than its `.globl`/`.set` forms; kernel mode does not run it.
 
 ## Refusals in dropped functions (`cproc -p`)
