@@ -1906,7 +1906,7 @@ class CodeGen
   def constant_scope_register?(irep, idx, reg)
     return false unless idx
 
-    writers = BytecodeIR.writers_reaching(irep, idx, reg)
+    writers = BytecodeIR.writers_reaching(irep, idx, reg) || adjacent_writer(irep, idx, reg)
     !!writers&.all? do |_j, w|
       case w.op
       when :OCLASS then true
@@ -1915,6 +1915,17 @@ class CodeGen
       else false
       end
     end
+  end
+
+  # The dataflow refuses a read inside a rescue range; the `A::B` chain there still reads a register the instruction
+  # just before wrote, when nothing else (no jump, no handler) enters between them.
+  def adjacent_writer(irep, idx, reg)
+    program = BytecodeIR.for(irep)
+    previous = idx.positive? && program.source_at(idx - 1)
+    return nil unless previous && previous.reg == reg && %i[GETCONST GETMCNST OCLASS].include?(previous.op)
+    return nil unless program.linear_corridor?(idx - 1, idx, include_handlers: true)
+
+    [[idx - 1, previous]]
   end
 
   # One GETMCNST cache per site of +name+; each keeps the receiver its value was read from.

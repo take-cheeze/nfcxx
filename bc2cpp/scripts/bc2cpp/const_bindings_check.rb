@@ -20,7 +20,18 @@ suite.require_mrbc!
 
 Dir.mktmpdir('const-bindings') do |dir|
   native = File.join(dir, 'native.c')
-  File.write(native, "void init(mrb_state* mrb) { mrb_define_const(mrb, mrb->object_class, \"NATIVE_W\", mrb_nil_value()); }\n")
+  File.write(native, <<~C)
+    void init(mrb_state* mrb) {
+      mrb_define_const(mrb, mrb->object_class, "NATIVE_W", mrb_nil_value());
+      RClass* nat = mrb_define_module(mrb, "Nat");
+      mrb_define_class_under(mrb, nat, "Panel", mrb->object_class);
+      mrb_define_class_under(mrb, mrb_module_get(mrb, "Nat"), "Hidden", mrb->object_class);
+      RClass* got = mrb_module_get(mrb, "Nat");
+      mrb_define_class_under(mrb, got, "Looked", mrb->object_class);
+      RClass* amb = mrb_module_get(mrb, "Twice");
+      mrb_define_class_under(mrb, amb, "Deep", mrb->object_class);
+    }
+  C
   suite.compile(<<~RUBY) do |ireps, root_label|
     W = 1
     NATIVE_W = 2
@@ -45,12 +56,33 @@ Dir.mktmpdir('const-bindings') do |dir|
       include C
     end
     MIXED = 3
+    module Nat
+      class Panel; end
+    end
+    module Other
+      class Panel; end
+      class Hidden; end
+      class Looked; end
+      class Deep; end
+    end
   RUBY
     bindings = ConstBindings.analyze(ireps, root_label, [native], [], static: true,
                                      included: { 'E' => ['C'] }, prepended: {}, unknown_mixins: Set.new)
     suite.check('a name assigned in three scopes has all three owners', bindings['W'] == ['', 'A', 'B'])
     suite.check('a class opened at two paths has both owners', bindings['Twice'] == %w[A B])
-    suite.check('a native-defined name is refused', !bindings.key?('NATIVE_W'))
+    suite.check('a native value constant is refused', !bindings.key?('NATIVE_W'))
+    suite.check('a native class at a named path is one more owner', bindings['Panel'] == %w[Nat Other])
+    suite.check('a native class under a scope it cannot name is refused', !bindings.key?('Hidden'))
+    suite.check('a module_get outer with one top-level binding names its scope', bindings['Looked'] == %w[Nat Other])
+    suite.check('a module_get outer without one top-level binding is refused', !bindings.key?('Deep'))
+    dynamic = File.join(dir, 'dynamic.c')
+    File.write(dynamic, <<~C)
+      void init(mrb_state* mrb, mrb_sym id) {
+        mrb_const_set(mrb, mrb_obj_value(mrb->object_class), id, mrb_nil_value());
+      }
+    C
+    suite.check('a native binding with a computed name refuses every name',
+                ConstBindings.analyze(ireps, root_label, [native, dynamic], [], static: true).empty?)
     suite.check('an assignment in a block body is refused', !bindings.key?('LOOPED'))
     suite.check('an owner included into a class is refused', !bindings.key?('MIXED'))
     unknown = ConstBindings.analyze(ireps, root_label, [native], [], static: true, unknown_mixins: Set['E'])
@@ -90,6 +122,11 @@ SOURCE = <<~RUBY
   class CbTop
     def w = W
     def member = CbOuter::CbA::W
+    def rescued
+      CbOuter::CbA::W
+    rescue NameError
+      :none
+    end
     def top = ::W
     def late = LATE
   end
@@ -101,6 +138,9 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   suite.check('a multi-binding read uses the guarded site cache', code.include?('bc2cpp_const_path_has(M, "CbOuter::CbA"'))
   suite.check('a scoped read of an immutable name uses the receiver cache', code.match?(/bc2cpp_mcnst_\d+\(M, r\d+\)/))
+  rescued = code[/^static mrb_value CbTop_rescued_impl_rescue_try\(mrb_state\* M.*?^}/m].to_s
+  suite.check('a scoped read inside a rescue range uses the receiver cache',
+              rescued.match?(/bc2cpp_mcnst_\d+\(M, r\d+\)/))
 
   build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
   if build.nil?
@@ -132,6 +172,8 @@ Dir.mktmpdir('bc2cpp-const-bindings') do |dir|
         mrb_value top = make(M, "CbTop");
         call(M, "member", top, "member");
         call(M, "member again", top, "member");
+        call(M, "rescued", top, "rescued");
+        call(M, "rescued again", top, "rescued");
         call(M, "top", top, "top");
       }
       static int scenario(mrb_state* M) {

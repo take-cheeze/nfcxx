@@ -7,6 +7,7 @@ require_relative 'scan_cache'
 require_relative 'unique_class_names'
 require_relative 'lexical_consts'
 require_relative 'integer_constants'
+require_relative 'native_expression_devirt'
 
 # CONST_SITE_CACHE: a GETCONST inside a namespaced owner resolves its lexical
 # scope chain on every execution -- one mrb_const_get per owner path segment,
@@ -226,8 +227,9 @@ end
 #   - every class/module statement for it opens a known path (UniqueClassNames.bytecode_class_paths);
 #   - every SETCONST of it has a known lexical scope (LexicalConsts) in a body that runs once: the root or a
 #     class/module body, with no backward branch; each path has one binding;
-#   - nothing else binds it: no SETMCNST, no native or foreign definition, no const_set/remove_const or string
-#     eval in the program (ClosedWorld#constants_static?, passed as +static+);
+#   - nothing else binds it: no SETMCNST, no native value constant, no foreign definition, no const_set/remove_const
+#     or string eval in the program (ClosedWorld#constants_static?, passed as +static+). A native class/module
+#     definition at a path native_class_owners can name is one more owner: it is made at gem init and never rebound;
 #   - an include cannot reorder its bindings: no owner is prepended or included anywhere but Object, at most one
 #     owner is mixed into Object (Kernel counts), and no mixin is unresolved.
 module ConstBindings
@@ -236,13 +238,19 @@ module ConstBindings
   def analyze(ireps, root_label, native_paths, foreign_paths, static:, included: {}, prepended: {}, unknown_mixins: [])
     return {} unless static && root_label && native_paths && foreign_paths && unknown_mixins.empty?
 
-    paths = Hash.new { |hash, name| hash[name] = [] }
-    refused = Set.new
+    native = native_class_owners(native_paths)
+    return {} unless native
+
+    classes = Hash.new { |hash, name| hash[name] = Set.new }
+    values = Hash.new { |hash, name| hash[name] = [] }
+    refused = native[:refused].dup
+    native[:classes].each { |name, owners| classes[name].merge(owners) }
+    native_outers = native[:classes].values.reduce(Set.new, :|) - ['']
     UniqueClassNames.bytecode_class_paths(ireps, root_label).each do |name, fulls|
       fulls.each do |full|
         next refused << name unless full.is_a?(String)
 
-        paths[name] << (full == name ? '' : full.delete_suffix("::#{name}"))
+        classes[name] << owner_of(full, name)
       end
     end
     once = run_once_bodies(ireps, root_label)
@@ -254,24 +262,82 @@ module ConstBindings
         key = insn.op == :SETCONST && sites[insn]
         next refused << name unless key && once.include?(label) && !looped
 
-        paths[name] << (key == name ? '' : key.delete_suffix("::#{name}"))
+        values[name] << owner_of(key, name)
       end
     end
-    outside = IntegerConstants.native_defined_const_names(native_paths) |
-              IntegerConstants.foreign_const_names(foreign_paths) |
-              StableClassConstants.native_class_module_names(native_paths)
+    outside = IntegerConstants.foreign_const_names(foreign_paths)
+    # A native outer scope (a module_get lookup included) is the one top-level binding of its name.
+    unnamed = native_outers.reject do |outer|
+      classes.fetch(outer, EMPTY_OWNERS) == Set[''] && values.fetch(outer, []).empty? && !refused.include?(outer) &&
+        !outside.include?(outer)
+    end
+    native[:classes].each { |name, owners| refused << name if owners.intersect?(unnamed) }
     # Kernel is mixed into Object natively, after the program's own includes.
     object_mixins = Array(included['Object']).to_set << 'Kernel'
     elsewhere = (included.reject { |owner, _| owner == 'Object' }.values + prepended.values).flatten.to_set
-    paths.each_with_object({}) do |(name, owners), out|
-      next if refused.include?(name) || outside.include?(name) || owners.uniq.size != owners.size
+    (classes.keys | values.keys).each_with_object({}) do |name, out|
+      assigned = values.fetch(name, [])
+      # A class statement reopens its path, a second assignment to one path rebinds it.
+      next if refused.include?(name) || outside.include?(name) || assigned.uniq.size != assigned.size
+      next if assigned.any? { |owner| classes.fetch(name, EMPTY_OWNERS).include?(owner) }
 
+      owners = classes.fetch(name, EMPTY_OWNERS).to_a | assigned
       mixed = owners.map { |owner| [owner, owner.split('::').last] }
       next if mixed.any? { |forms| forms.any? { |f| elsewhere.include?(f) } }
       next if mixed.count { |forms| forms.any? { |f| object_mixins.include?(f) } } > 1
 
       out[name] = owners.sort.freeze
     end
+  end
+
+  EMPTY_OWNERS = Set.new.freeze
+
+  def owner_of(full, name)
+    full == name ? '' : full.delete_suffix("::#{name}")
+  end
+
+  # The native bindings of bare names: classes maps a name to the owner paths of its class/module definitions
+  # (made at gem init, never rebound); refused holds every name a native source binds another way (a value
+  # constant, a definition under a scope it cannot name). Nil when a project source binds a name it cannot read;
+  # mruby's own C is trusted, as in UniqueClassNames.constant_rebinding_dynamic?.
+  def native_class_owners(native_paths)
+    files = Array(native_paths).select { |path| File.file?(path) }
+    sources = files.map { |path| File.read(path, encoding: 'UTF-8') }
+    classes = Hash.new { |hash, name| hash[name] = Set.new }
+    refused = Set.new
+    files.zip(sources).each do |path, source|
+      core = path.include?('/3rd/mruby/')
+      UniqueClassNames::BINDING_CALLS.each_with_index do |pattern, kind|
+        source.to_enum(:scan, pattern).each do
+          match = Regexp.last_match
+          segment = match[0]
+          args, = NativeExpressionDevirt.split_call_arguments(source, match.begin(0) + segment.index('('))
+          name = UniqueClassNames.binding_name(args&.[](UniqueClassNames.binding_name_index(segment, kind)))
+          unless name
+            next if core
+
+            literal = segment[/mrb_intern_(?:lit|cstr|static)\s*\(\s*\w+\s*,\s*"(\w+)"/, 1]
+            return nil unless literal
+
+            refused << literal
+            next
+          end
+          next refused << name unless kind == 2
+
+          under = segment.match(UniqueClassNames::UNDER_DEFINITION)
+          if segment.match?(/\Amrb_define_(?:class|module)_under/)
+            outer = under && (under[2] || under[3]) == name &&
+                    UniqueClassNames.native_module_binding(sources, source, match.begin(0), under[1], lookup: true)
+            next refused << name unless outer
+
+            classes[name] << outer
+          else
+            classes[name] << ''
+          end
+        end
+      end
+    end
+    { classes: classes, refused: refused }
   end
 
   # The root irep and the class/module bodies reached from it through bodies with no backward branch: each runs
