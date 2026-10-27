@@ -181,6 +181,44 @@ cc "$tmp/aliases.s" -o "$tmp/aliases"
 "$tmp/aliases" || { echo "FAIL $aliases runtime: expected 0"; exit 1; }
 echo "ok   implicit returned loans for lowered C++ calls, held-alias mutant, and native execution"
 pass=$((pass + 1))
+# A result that may point into either of two arguments, or two fields of one, gets a summary with two
+# sources and an implicit loan of each. A write to either source while the result is held is a conflict.
+two=tests/pathb-borrow/contracts/two_sources.cpp
+sed 's/^  bump(pick(&x, &y, 1));$/  int *p = pick(\&x, \&y, 1); y = 9; bump(p);/' "$two" > "$tmp/two_held_arg.cpp"
+sed 's/^  bump(either(&s, 0));$/  int *q = either(\&s, 0); s.b = 9; bump(q);/' "$two" > "$tmp/two_held_field.cpp"
+for name in two_sources two_held_arg two_held_field; do
+  src=$two
+  [ "$name" = two_sources ] || src=$tmp/$name.cpp
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/$name.ir"
+done
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/two_sources.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $two"; cat "$tmp/out"; exit 1; }
+grep -q '(from-arg 0 0 exclusive) (from-arg 1 0 exclusive)' "$tmp/out" || { echo "FAIL $two: two-argument summary"; cat "$tmp/out"; exit 1; }
+grep -q '(from-arg 0 0 exclusive) (from-arg 0 4 exclusive)' "$tmp/out" || { echo "FAIL $two: two-field summary"; cat "$tmp/out"; exit 1; }
+for mutant in 'two_held_arg:main: loan-conflict: y (&.*pick.*#1\.2)' 'two_held_field:main: loan-conflict: s\[4\.\.8\] (&.*either.*#2\.2)'; do
+  name=${mutant%%:*}
+  rc=0
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/$name.ir" > "$tmp/out" 2>&1 || rc=$?
+  if [ "$rc" != 1 ] || ! grep -q "${mutant#*:}" "$tmp/out"; then
+    echo "FAIL $two ($name): expected exit 1, got $rc"
+    cat "$tmp/out"
+    exit 1
+  fi
+done
+{ head -1 "$tmp/two_sources.ir"
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/two_sources.ir" | sed -n 's/^inferred: //p'
+  tail -n +2 "$tmp/two_sources.ir"; } > "$tmp/two_pasted.ir"
+scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends "$tmp/two_pasted.ir" > "$tmp/out"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/two_pasted.ir" > "$tmp/two_pasted-oracle.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/two_pasted.ir" > "$tmp/two_pasted.qbe"
+cmp "$tmp/two_pasted.qbe" "$tmp/two_pasted-oracle.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/two_sources.ir" > "$tmp/two_sources.qbe"
+cmp "$tmp/two_sources.qbe" "$tmp/two_pasted.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/two_sources.qbe" -o "$tmp/two_sources.s"
+cc "$tmp/two_sources.s" -o "$tmp/two_sources"
+"$tmp/two_sources" || { echo "FAIL $two runtime: expected 0"; exit 1; }
+echo "ok   two-source returned aliases for lowered C++ calls, held-source mutants, emitter validation, and native execution"
+pass=$((pass + 1))
 # The frontend's (borrow-layout ...) records let a reader of a padded struct be
 # summarized and checked. Without them the summary is not found, and the records
 # never change generated code. Structs a record cannot describe get none.
