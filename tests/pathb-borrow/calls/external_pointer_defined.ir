@@ -1,0 +1,11 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "read" (returns int) (nothrow) (noescape) (closed) (args (read int)))
+(function "read" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param)
+(let %1 int (load int %0))(return %1)
+)
+(function "test" (ret int) (params (param %9 "external" (ptr int)))
+(slot "x" int 4 4)
+
+(decl $"x" val) (store int $"x" (const int 7))(let %0 int (call int &"read" %9))(return %0)
+)

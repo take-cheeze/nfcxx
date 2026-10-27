@@ -122,10 +122,44 @@ may throw:
   mrustc ends the storage of format_args!'s array of `Argument`s before the Arguments that points to
   it is used; the translator keeps that array's storage to the end of the function.
 
-Containers are covered only for primitive scalar elements: such an element holds no reference, so a
-Vec or Box of one keeps no borrow and its drop reads only its own place. A Vec of references, `vec![]`
-(`Box<[T]>`), slices (`&[T]` is a two-word value, which a summary cannot return), iterators,
-`String`, and a user `impl Display` (it calls `Formatter` methods) have no summaries and are refused.
+The summaries above cover primitive scalar elements: such an element holds no reference, so a Vec
+or Box of one keeps no borrow and its drop reads only its own place. A summary keeps no pointer, so
+views and containers of references are table entries with *keeps* (`KEPT` in monomir-std.rb): the
+call gets a summary for its accesses, and the translator follows it with stores of the pointers its
+result or an argument keeps, read before the call (a call that writes its argument forgets the
+pointers in it).
+
+- **Slices and `&str`** are two words, the address of the first element and the length, with a
+  layout of a pointer and an `unsigned_long`. The pointer carries the loans; the length is a scalar.
+  The elements are modelled by the first, as a Vec's are by the Vec: indexing a slice is the
+  slice's own pointer. A slice of a Vec points at the Vec, of an array at the array, with the loan of
+  the `&` it is made from. A program function's slice parameter is passed as its two words, so its
+  pointer is a parameter that summary inference describes (`(read int) (value unsigned_long)`), and a
+  function returning a slice returns its pointer, inferred as a returned alias. A slice of an array
+  of references would lose all but the first element's pointer, so its pointer is unknown, and a use
+  is refused.
+- **`Vec<T>`** `as_slice`, `as_mut_slice`, `Deref`, `DerefMut`, `<&Vec<T>>::into_iter`; **`[T]`**
+  `len`, `is_empty`, `iter`, `first`, `last`, `<&[T]>::into_iter`; **`slice::Iter<T>`** `into_iter`
+  and `next`, whose `Option<&T>` (one pointer) is the iterator's pointer; `Option<&T>` `unwrap`,
+  `is_some`, `is_none`. The Iter holds the slice's pointer, so it keeps the slice's loans.
+- **`Vec<&T>`** keeps the references pushed into it, at offset 8 of the Vec. Each push joins the new
+  reference with the ones there, so every element's loans stay live while the Vec is used, as
+  rustc's one lifetime for the element type does. `new`, `push`, `pop`, `len`, `is_empty`, `clear`,
+  `truncate` and `Index::index` also read what the Vec holds (a byval-deep read of it), so a use of
+  the Vec after an element's referent is gone is an error (E0597). Its drop glue does not: Vec's Drop
+  is `#[may_dangle]`, so the references are cleared first. A write of one element would replace the
+  joined references, so `index_mut`, `as_mut_slice` and `iter_mut` of a `Vec<&T>` have no entries.
+- **`String`**: `new`, `push_str`, `push`, `clear`, `len`, `is_empty`, `capacity`, `clone`, `as_str`
+  and `Deref` (a `&str` into the String, like a Vec's slice), drop glue, `String::from(&str)` and
+  `str::to_string`, and `str::len`. A string literal's bytes are static: passing them to a program
+  function reads external memory, which the checker allows for a callee it verifies
+  (pathb-borrowck.md, "Closed call-effect contracts").
+
+`vec![]` (`Box<[T]>`), subslices (`&v[1..]`), mutable iterators, containers of `&mut T` or of
+structs, and a user `impl Display` (its `fmt` calls `Formatter::write_fmt` and the `?` operator's
+`Try` impls) have no entries and are refused. A program function given a `&Vec<&T>` can read its
+length without using the references in it, so a dangling element is found only by the caller's own
+uses of the Vec.
 
 ### Interior mutability
 
@@ -168,6 +202,7 @@ mrustc also rejects some programs itself, and the driver reports those as errors
 checks this pipeline's verdict, and compares rustc's when one is installed. 49 of the 52 cases agree
 checks this pipeline's verdict, and compares rustc's when one is installed. 44 of the 47 cases agree
 checks this pipeline's verdict, and compares rustc's when one is installed. 51 of the 54 cases agree
+checks this pipeline's verdict, and compares rustc's when one is installed. 48 of the 49 cases agree
 with rustc:
 
 | Verdict | Cases |
@@ -178,9 +213,11 @@ with rustc:
 | Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502, also for `+=`); E0502 for an explicit `&mut c` first argument, receiver, or `AddAssign::add_assign(&mut c, ..)`, which are not two-phase; with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec |
 | Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes; with drops, a Vec moved on one branch (a drop flag), a field of a struct moved on one branch, a struct with a Drop impl and a write to its field, the same struct holding a dangling reference without the impl, reassigning a live Vec, `mem::forget` and `mem::drop`, a Vec moved into and out of an enum variant |
 | Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502); with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec; with drops, E0597 a reference into a dropped Box and a struct with a Drop impl that outlives a borrowed local, E0505 a conditional move and a `drop(v)` while borrowed, a whole-enum move and a move out of a variant while borrowed |
+| Accepted, as by rustc | scoped `&mut` then `&`, NLL last use, repeated `&mut` calls, disjoint field borrows, loop-body locals, returned field reference, conditional return of a borrow, two-phase receiver (`c.set(c.get() + 1)`), move after the borrow's last use, Copy value passed while borrowed, a result borrowing from either of two arguments, NLL problem case 3 (either of two fields), a write through a reference to either of two locals, println!/eprintln! with format specs, Vec push/pop/len/index/index_mut over a range loop, Box reads and writes, slices of a Vec and of an array (`iter`, `for x in &v`, `for x in s`, indexing, `first`, `as_mut_slice`, functions taking and returning `&[i32]`), a `Vec<&i32>` pushed, indexed, iterated and popped, then its referent assigned after its last use, `String` and `&str` (literals, `push_str`, `as_str`, a function taking `&str`) |
+| Rejected, as by rustc | E0499 two `&mut`, E0499 a borrow kept across loop iterations, E0502 (twice), E0505 move while borrowed, E0506 (three times: a plain borrow, and a write to the second argument or the second field of a two-source result), E0597 dangling (twice, once through a two-source result), E0381 and E0382 (mrustc), E0515 (mrustc); with a two-phase receiver, a write to its place (E0506) or another `&mut` receiver (E0499) in the arguments, and a shared borrow live at the call (E0502); with std calls, E0502 push while an element is borrowed, `&mut v[0]` while `&v[1]` is live, println! while `&mut x` is live, E0506 a write through a borrowed Box and a held `format_args!`, E0597 an element reference that outlives its Vec; with slices and containers of references, E0502 a push while iterating the Vec, while a slice returned by a function is live, and to a String while its `as_str` is live, E0506 an assignment to a referent held by a `Vec<&i32>` (pushed first of two) and inside a loop over it, E0597 a slice that outlives its Vec and a `Vec<&i32>` used after a referent's scope |
 | Different | below |
 
-The differences are the known gaps:
+The difference is a known gap:
 
 - **A callee also called with an explicit `&mut`** gets no two-phase receivers anywhere in the
   program, since calls are matched to the AST only by name: `C::set(&mut c, 2); c.set(c.get())` is
@@ -194,6 +231,9 @@ The differences are the known gaps:
   runtime check no longer covers it.
 - **A move out of a field of a struct with a Drop impl** (E0509) is refused rather than rejected.
   mrustc does not check the rule, and the checker sees a part of a drop obligation copied.
+- **An explicit `&mut x` first argument is two-phase too** (`set(&mut c, c.get())`, E0502), so it is
+  accepted. rustc makes only autoref borrows two-phase, and the MIR does not say which this was. The
+  program only reads `c` before the call, so the borrow is still not violated.
 
 With lifetimes erased, the translator cannot say that `pick<'a>(a: &'a i32, b: &'a i32) -> &'a i32`
 returns a borrow of either argument. Summary inference finds it instead: a summary may list several
@@ -235,3 +275,7 @@ As of October 2026:
   missing drop of a partly moved match scrutinee.
 - More standard library summaries: slices and iterators need fat-pointer results, `String` and
   containers of references need summaries that keep borrows.
+- Moves: drop obligations for types with drop glue, so a moved value is not dropped and an unmoved
+  one is; moves of enums and out of enum variants.
+- More standard library entries: subslices, `vec![]`, mutable iterators, containers of `&mut T` and of
+  structs, and `impl Display` (`Formatter::write_fmt` and the `Try` impls of `?`).

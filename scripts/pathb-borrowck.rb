@@ -276,6 +276,12 @@ end
 # Keep this validator synchronized across the three standalone IR tools.
 class BorrowCallEffects
   attr_accessor :entries
+  # The functions the module defines, whose summaries are verified against their bodies.
+  attr_writer :defined
+
+  def defined?(name)
+    (@defined || {}).key?(name)
+  end
 
   def initialize(forms, layouts, bad, refused)
     @entries = {}
@@ -1770,6 +1776,13 @@ class LocalLifetime
         resolved << [mode, ty, []]
         next
       end
+      if mode == 'read' && !origins.empty? && origins.all? { |p| p == 'external' } && @call_effects.defined?(x[2].name)
+        # A defined callee is verified to read only through the argument, so passing it external memory,
+        # such as a Rust string literal's bytes, is the caller's own read of that memory.
+        origins.each { |p| access(p, state, true) }
+        resolved << [mode, ty, []]
+        next
+      end
       raise BorrowRefused, 'memory call arguments require known local provenance' if origins.empty? || origins.any? { |p| !address(p) }
       check_memory_argument_abi(arg)
       # A write argument that may name several places mutates one of them; init and consume need the one place.
@@ -2583,6 +2596,9 @@ begin
   call_effects = BorrowCallEffects.new(forms + extra, semantic_layouts, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
+  defined = {}
+  functions.each { |f| defined[bname(f[1])] = true }
+  call_effects.defined = defined
   # (abi-type "N" SIZE ALIGN ...) gives the size of a by-value aggregate parameter.
   abi_sizes = {}
   forms.each do |f|
