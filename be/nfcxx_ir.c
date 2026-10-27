@@ -5995,6 +5995,37 @@ static void ir_loc_again(a_statement_ptr s, int d)
   ir_loc_stmt(s, d);
 }
 
+static void ir_zero_object(ir_val dst, a_type_ptr t);
+
+/* A local of kind initk_zero, or with a partial dynamic initialization, is zeroed at its declaration, as c_gen_be.c's
+   start_initializer_assignments does. `half2 s[8] = {{0.0f, 0.0f}};` is one: IL lowering makes the constructor calls
+   of s[0], and the IL has no statement for s[1..7], which are value-initialized. An initialization that is still a
+   stmk_init statement after the declaration is lowered whole, zero tail included, by ir_stmt_init. */
+static int ir_init_follows(a_statement_ptr s, a_variable_ptr var)
+{
+  for (s = s->next; s != NULL; s = s->next)
+    if (s->kind == stmk_init && s->variant.dynamic_init != NULL && s->variant.dynamic_init->variable == var) return 1;
+  return 0;
+}
+
+static void ir_decl_zero(a_statement_ptr s)
+{
+  an_il_entity_list_entry_ptr entry;
+  for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
+    a_variable_ptr var;
+    an_init_kind kind;
+    an_initializer_ptr ini;
+    if (entry->entity.kind != iek_variable) continue;
+    var = (a_variable_ptr)entry->entity.ptr;
+    if (var_has_static_or_thread_storage_duration(var) || var->storage_class == sc_extern) continue;
+    get_variable_initializer(var, ir_cur_scope, &kind, &ini);
+    if ((kind == initk_zero ||
+         (kind == initk_dynamic && var->initializer.dynamic != NULL && var->initializer.dynamic->is_partially_initialized)) &&
+        !ir_init_follows(s, var))
+      ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
+  }
+}
+
 static void ir_stmt(a_statement_ptr s, int d)
 {
   ir_depth = d;
@@ -6209,9 +6240,11 @@ static void ir_stmt(a_statement_ptr s, int d)
       }
       return;
     case stmk_decl:
-      /* The declaration point. Storage is per function, so nothing is printed, except the borrow facts (flag only). */
+      /* The declaration point. Storage is per function, so nothing is printed, except the borrow facts (flag only)
+         and the zeroing of a local that its initialization does not cover all of (ir_decl_zero). */
       ir_note(1, stmk_decl, 1);
       ir_fact_decl(s, d);
+      ir_decl_zero(s);
       return;
     case stmk_set_vla_size: {
       /* The dimension of a VLA type is evaluated here, once, into its dimension variable. */

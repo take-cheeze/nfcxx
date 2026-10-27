@@ -32,6 +32,15 @@ const Node *at(const Node *n, size_t i) {
 
 size_t len(const Node *n) { return n && n->kind == Node::List ? n->items.size() : 0; }
 
+// A module-scope object's alignment: its type's, raised to the largest power of two up to 16 that its size reaches.
+// CUDA code reads small tables wider than their element (llama.cpp loads the int8_t kvalues tables as uint32_t), which
+// works under nvcc only because ptxas happens to place them aligned; with a string before one the load is misaligned.
+i128 data_align(i128 align, i128 size) {
+  i128 a = align;
+  while (a > 0 && a < 16 && a * 2 <= size) a *= 2;
+  return a;
+}
+
 // Ruby's `x.to_s` for a name: an atom's or a string's text, a symbol's name.
 std::string name_of(const Node *x) {
   if (!x) return "";
@@ -241,7 +250,7 @@ DataDecls collect_data_decls(const std::vector<Node> &forms, ModuleSymbols *syms
     d.kind = DataDecl::Shared;
     d.sym = ptx_sym(s.first);
     d.bytes = 0;
-    d.line = ".shared .align " + i128_text(s.second.align) + " .b8 " + d.sym + "[" + i128_text(s.second.size) + "];";
+    d.line = ".shared .align " + i128_text(data_align(s.second.align, s.second.size)) + " .b8 " + d.sym + "[" + i128_text(s.second.size) + "];";
     out.items.push_back(std::move(d));
   }
   for (const auto &g : globals.items) {
@@ -250,7 +259,7 @@ DataDecls collect_data_decls(const std::vector<Node> &forms, ModuleSymbols *syms
     d.sym = ptx_sym(g.first);
     d.bytes = 0;
     std::string init = g.second.lit ? " = " + *g.second.lit : "";
-    d.line = ".global .align " + i128_text(g.second.align) + " .b8 " + d.sym + "[" + i128_text(g.second.size) + "]" +
+    d.line = ".global .align " + i128_text(data_align(g.second.align, g.second.size)) + " .b8 " + d.sym + "[" + i128_text(g.second.size) + "]" +
              init + ";";
     out.items.push_back(std::move(d));
   }
@@ -261,7 +270,7 @@ DataDecls collect_data_decls(const std::vector<Node> &forms, ModuleSymbols *syms
     d.sym = ptx_sym(c.first);
     d.bytes = static_cast<size_t>(c.second.size);
     std::string dims = c.second.count ? "[" + i128_text(*c.second.count) + "]" : "";
-    d.line = ".const .align " + i128_text(c.second.align) + " ." + c.second.ptype + " " + d.sym + dims + " = " +
+    d.line = ".const .align " + i128_text(data_align(c.second.align, c.second.size)) + " ." + c.second.ptype + " " + d.sym + dims + " = " +
              c.second.lit + ";";
     out.items.push_back(std::move(d));
   }

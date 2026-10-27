@@ -58,7 +58,7 @@ const TblEntry BUILTIN_DEFS_TBL[] = {
   {"__umulhi", "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n"},
   {"__popc", "extern \"C\" unsigned __nfcxx_popc(unsigned);\nstatic inline int __popc(unsigned x) { return (int)__nfcxx_popc(x); }\n"},
   {"__popcll", "extern \"C\" unsigned __nfcxx_popc(unsigned);\nstatic inline int __popcll(unsigned long long x) { return (int)__nfcxx_popc((unsigned)x) + (int)__nfcxx_popc((unsigned)(x >> 32)); }\n"},
-  {"__byte_perm", "extern \"C\" unsigned __nfcxx_byte_perm(unsigned, unsigned, unsigned);\nstatic inline unsigned __byte_perm(unsigned x, unsigned y, unsigned s) { return __nfcxx_byte_perm(x, y, s); }\n"},
+  {"__byte_perm", "extern \"C\" unsigned __nfcxx_byte_perm(unsigned, unsigned, unsigned);\nstatic inline unsigned __byte_perm(unsigned x, unsigned y, unsigned s) { return __nfcxx_byte_perm(x, y, s & 0x7777u); }\n"},
   {"__vsub4", "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n"},
   {"__vcmpne4", "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n"},
   {"__trap", "static inline void __trap(void) { __builtin_trap(); }\n"},

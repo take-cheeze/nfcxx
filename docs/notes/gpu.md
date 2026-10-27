@@ -113,6 +113,14 @@ placeholders, and each device module is registered with the runtime.
   converting it always was mmq's illegal memory access).
 - **Half bits**: `__half_as_ushort`, `__ushort_as_half`, `__half_as_short` and `__short_as_half` read and write the
   half's bits. A cast between `__half` and an integer converts the value, as in `cuda_fp16.h`.
+- **Module-scope arrays** are aligned by their size, up to 16 (`.align` of `.global`, `.const` and `.shared` data).
+  llama.cpp reads its int8_t kvalues tables as uint32_t; nvcc declares them `.align 1` too and they happen to land
+  aligned, while here a string before one gave mxfp4's mmq a misaligned address (`intrinsics/table_align.cu`).
+- **`__byte_perm`** masks its selector with 0x7777, as nvcc does before `prmt`: bit 3 of a nibble would be `prmt`'s
+  sign replication, and llama.cpp's q1_0, q2_0 and FP4 lookups pass selectors with it set (`intrinsics/int.cu`).
+- **Partial aggregate initialization** of a local with constructors (`half2 s[8] = {{0.0f, 0.0f}}`): IL lowering
+  makes only the constructor calls of the first element, and Path B zeroes the variable at its declaration first, as
+  EDG's C back end does (`tests/pathb-qbe/cases/partial_init_ctor.cpp`).
 
 ## CUDA source (`.cu`)
 
