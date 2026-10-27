@@ -508,6 +508,15 @@ class CodeGen
     @embed_root_of&.[](owner) || owner
   end
 
+  # EMBED_INIT_GUARD (embed_init_guard.rb): [owner, its #initialize irep label, the line that builds its storage] for
+  # every owner that embeds its ivars.
+  def embedding_initializers
+    @ivar_layout.keys.map do |owner|
+      init = @registry['initialize']&.find { |d| d.owner == owner }
+      [owner, init&.irep, "mrb_data_init(self, embedded, &#{type_var(owner)});"]
+    end
+  end
+
   # Does code compiled for `owner` read ivars through DATA_PTR (its own layout or its folded family's)?
   def embeds_storage?(owner)
     @ivar_layout.key?(embed_storage_owner(owner))

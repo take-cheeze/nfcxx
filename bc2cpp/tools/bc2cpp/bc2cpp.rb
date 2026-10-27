@@ -25,6 +25,7 @@ type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __F
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shared_generation'
+require_relative 'embed_init_guard'
 require_relative 'inframe_placement'
 
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
@@ -1426,6 +1427,12 @@ if $PROGRAM_NAME == __FILE__
   unless guard_failures.empty?
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
+  end
+  # EMBED_INIT_GUARD: an embedding owner this run emits must get the compiled #initialize that builds its storage.
+  embed_failures = EmbedInitGuard.failures(gen.embedding_initializers, compiled, only_owners)
+  unless embed_failures.empty?
+    abort "\n[bc2cpp] EMBED_INIT_GUARD: #{embed_failures.size} embedded ivar layout(s) without their storage:\n  " \
+          "#{embed_failures.join("\n  ")}"
   end
   # TC1005: index ops on a receiver no nil check dominates, collected while the methods compiled.
   if type_facts_path
