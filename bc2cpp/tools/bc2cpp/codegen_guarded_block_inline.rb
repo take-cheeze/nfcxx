@@ -124,6 +124,23 @@ class CodeGen
     @guarded_inline_sites = saved
   end
 
+  # RANGE_EACH_GUARD: a Range#each region's glue. The receiver is proven a Range but its bounds are not proven
+  # Integers, so emit_range_each_inline's loop runs ahead of the ordinary BLOCK + SENDB, which every other Range
+  # (String, Float or bigint bounds) reaches through range_each_send_label and runs as the interpreter does.
+  # False when no instruction follows the send to carry the end label.
+  def range_each_guarded_glue(region, irep, inlined, anchor, guarded)
+    send_idx = irep.index_of_addr(region[:sendb_addr])
+    after = BytecodeIR.for(irep).source_at(send_idx + 1)
+    return false unless after
+
+    (@guarded_inline_done ||= Set.new) << [irep.label, region[:sendb_addr]]
+    guarded[:after][after.addr] = "#{guarded[:after][after.addr]}  #{range_each_end_label(region)}:;\n"
+    guarded[:at][anchor] = "#{guarded[:at][anchor]}  // RANGE_EACH_GUARD :each -- an Integer-bounded Range runs the " \
+                           "block body inline; any other Range takes the send below\n" \
+                           "#{inlined}  #{range_each_send_label(region)}:;\n"
+    true
+  end
+
   # The glue of a guarded region: the loop behind the class test, then a jump over the ordinary send. `after_at`
   # gets the label at the instruction after the SENDB.
   def guarded_inline_glue(region, irep, inlined, klass, after_at)

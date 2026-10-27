@@ -78,6 +78,8 @@ class CodeGen
         anchor = region[pass.anchor]
         next if claimed.include?(anchor) || claimed.include?(region[:sendb_addr])
         next if try_range && !rescue_try_inlinable?(region, anchor, try_range)
+        # RANGE_EACH_GUARD: the Range#each loop needs its send kept behind it, which only the guarded glue places.
+        next if pass.recognize == :recognize_range_each_regions && !guarded
 
         pre_start = @inline_nested_pre.length
         # GUARDED_BLOCK_INLINE: a second loop over the same block (another receiver class) keeps its own labels.
@@ -103,6 +105,10 @@ class CodeGen
         if guarded_klass
           guarded[:pending] << { region: region, inlined: inlined, klass: guarded_klass, anchor: anchor,
                                  pre: @inline_nested_pre[pre_start..].dup }
+          next
+        end
+        if pass.recognize == :recognize_range_each_regions
+          @inline_nested_pre.slice!(pre_start..) unless range_each_guarded_glue(region, irep, inlined, anchor, guarded)
           next
         end
 
