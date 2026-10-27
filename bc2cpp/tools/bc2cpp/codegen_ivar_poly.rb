@@ -325,9 +325,15 @@ class CodeGen
     inherited = poly_inherited(name, candidates)
     # INHERITED_GUARD: a subclass that inherits a candidate's def joins its
     # branch; the receiver's class is then read once instead of per compare.
-    hoist = inherited.values.any?(&:any?)
+    subclassed = inherited.values.any?(&:any?)
+    # POLY_INTEGER_TAG: an Integer's class is M->integer_class (mrb_class's MRB_TT_INTEGER case; an immediate has no
+    # singleton), so the tag test reads it without the mrb_obj_class call, and the Integer arm is tested first.
+    integer_tag = ENV['BC2CPP_POLY_INTEGER_TAG'] != '0' && candidates.any? { |t| t.owner == 'Integer' }
+    hoist = subclassed || integer_tag
     recv_class = hoist ? 'bc2cpp_recv_class' : "mrb_obj_class(M, #{recv})"
-    branches = candidates.map do |target|
+    class_read = integer_tag ? "mrb_integer_p(#{recv}) ? M->integer_class : mrb_obj_class(M, #{recv})" : "mrb_obj_class(M, #{recv})"
+    ordered = integer_tag ? candidates.partition { |t| t.owner == 'Integer' }.flatten : candidates
+    branches = ordered.map do |target|
       check = ([target.owner] + inherited[target.owner]).map do |owner|
         "#{owner_class_ptr_expr(owner)} == #{recv_class}"
       end.join(' || ')
@@ -356,8 +362,10 @@ class CodeGen
     return "#{diag}#{note}  #{chain}" unless hoist
 
     subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
-    "#{diag}#{note}  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n" \
-      "  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
+    guard_note = subclassed ? "  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n" : ''
+    tag_note = integer_tag ? "  // POLY_INTEGER_TAG :#{name} -- an Integer receiver's class is read from its tag\n" : ''
+    "#{diag}#{note}#{guard_note}#{tag_note}" \
+      "  {\n  struct RClass* #{recv_class} = #{class_read};\n  #{chain}  }\n"
   end
 
   # CHA_SELF: `self.name` in a method of class C reaches C or one of
@@ -801,7 +809,7 @@ end
     # The fast paths leave the assigned value in the register, the fallback whatever `[]=` returned (vm.c's OP_SETIDX).
     'setidx' => { params: 'mrb_value recv, mrb_value idx, mrb_value val', name: '[]=', argv: %w[idx val], fast: <<~CPP }
       if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(idx)) {
-        mrb_ary_set(M, recv, mrb_integer(idx), val);
+        bc2cpp_ary_set(M, recv, mrb_integer(idx), val);
         return val;
       } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
         mrb_hash_set(M, recv, idx, val);

@@ -828,7 +828,7 @@ class CodeGen
           // ARRAY_SLICE_WRITE :[]= -- exact Array and fixnum indices only; preserve coercion and overrides
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
               mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
-            mrb_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
+            bc2cpp_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
             r#{d} = #{replacement};
           } else {
             #{fallback.chomp}
@@ -845,7 +845,7 @@ class CodeGen
       return <<~CPP
           // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-            mrb_ary_push(M, #{recv}, #{value});
+            bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
             #{fallback.chomp}
@@ -879,7 +879,7 @@ class CodeGen
         array_arm = <<~CPP
             // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
             if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-              mrb_ary_push(M, #{recv}, #{value});
+              bc2cpp_ary_push(M, #{recv}, #{value});
               r#{d} = #{recv};
             } else\x20
         CPP
@@ -913,7 +913,7 @@ class CodeGen
       return <<~CPP
           // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-            mrb_ary_push(M, #{recv}, #{value});
+            bc2cpp_ary_push(M, #{recv}, #{value});
             r#{d} = #{recv};
           } else {
             #{fallback.chomp}
@@ -928,7 +928,12 @@ class CodeGen
                     <<~CPP.chomp
                       mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
                       mrb_int bc2cpp_mod_right = mrb_fixnum(#{right});
-                      if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
+                      // MOD_POW2_CONSTANT: floor modulo by a positive power of two is the low-bit
+                      // mask for either sign; the test folds away unless the divisor is a constant.
+                      if (__builtin_constant_p(bc2cpp_mod_right) && bc2cpp_mod_right > 0 &&
+                          (bc2cpp_mod_right & (bc2cpp_mod_right - 1)) == 0) {
+                        r#{d} = mrb_fixnum_value(bc2cpp_mod_left & (bc2cpp_mod_right - 1));
+                      } else if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
                         r#{d} = mrb_fixnum_value(0);
                       } else {
                         mrb_int bc2cpp_mod_value = bc2cpp_mod_left % bc2cpp_mod_right;

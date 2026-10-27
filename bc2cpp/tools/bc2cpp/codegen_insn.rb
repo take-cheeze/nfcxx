@@ -807,11 +807,11 @@ class CodeGen
       when 'Array'
         array_test = exact ? '' : "mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && "
         if exact && proven_index_operand?(irep, idx, unshift_proof_reg(idx_reg, reg_offset), owner_def)
-          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});\n  r#{d} = r#{val};\n"
+          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}bc2cpp_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});\n  r#{d} = r#{val};\n"
         else
           <<~CPP
             #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{idx_reg})) {
-              mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
+              bc2cpp_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
               r#{d} = r#{val};
             } else {
               #{integer_tag_else_by_name_set(exact, d, idx_reg, val)}
@@ -1100,8 +1100,12 @@ class CodeGen
     CPP
 
     if op == :EQ
+      # INTEGER_PAIR_EQ: mrb_obj_eq on two Integers is their value equality, so testing the
+      # pair ahead of identity gives OP_EQ's answer without the out-of-line mrb_obj_eq call.
       <<~CPP
-        if (mrb_obj_eq(M, r#{d}, r#{s})) {
+        if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+          r#{d} = mrb_bool_value(mrb_integer(r#{d}) == mrb_integer(r#{s}));
+        } else if (mrb_obj_eq(M, r#{d}, r#{s})) {
           r#{d} = mrb_true_value();
         } else if (mrb_symbol_p(r#{d})) {
           // OP_EQ: a symbol receiver that is not identical is unequal, no send.
