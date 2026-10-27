@@ -105,11 +105,17 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
    - Functions: an open-addressing table from address to signature hash, and a one-entry cache per thread. A callee in
      the table must have the call's hash; a callee that is not in it but lies in a heap block, a global or a stack slot is
      data; any other callee (libc, libstdc++.so, `.c` inputs) is not checked.
-   - Stack slots: per thread, an array sorted from the highest address down (each frame's slots are sorted at entry,
-     and frames nest), and a stack of frames. A lookup bisects the records of the top four frames whose extent holds the
-     address, else all of them, and eight per-thread cache entries (the index of the record last found, picked by
-     address bits) catch loops that alternate between a few locals. An address between the thread's stack bottom
-     (`pthread_getattr_np`) and the current stack pointer is in a frame that returned.
+   - Stack slots: per thread, the records of the live frames in registration order, and a stack of frames (frames nest,
+     so they are ordered by address). The common lookup is the stack's shadow: one 32-bit entry per 4-byte granule of
+     the thread's stack (a `MAP_NORESERVE` mapping, 8 MiB for an 8 MiB stack, only touched pages cost memory), written
+     with the record's index when a frame registers its slots and never cleared. A check reads the entry for its
+     address and takes the record when that record still holds the address; a stale entry (of a frame that returned)
+     fails that test, and the lookup falls back to bisecting the frames and scanning the one that holds the address.
+     An address between the thread's stack bottom (`pthread_getattr_np`) and the current stack pointer is in a frame
+     that returned.
+   - The checks' fast paths (the heap cache, the shadow) are leaf code; the slow paths are separate cold functions, so
+     the fast path saves no registers. The runtime is built with `-ftls-model=initial-exec`, and the state the fast paths
+     read is one thread-local block (`sp_hot`): each access is a load from `%fs`, not a call of `__tls_get_addr`.
    - A failure prints `FILE:LINE: safety error: WHAT (address P)` after flushing stdout, then calls `abort()`.
 
 ## Tests
@@ -151,7 +157,7 @@ Measured on one program (2M-element `std::vector<int>` sort and 20 passes over i
 | --- | --- |
 | `nfcxx` (qbe backend) | 1.0 s |
 | `nfcxx --backend=pathb` | 2.5 s |
-| `nfcxx -fsafe-pointers` | 37 s after phase 1, 30 s after phase 2, 12.5 s after the speed round |
+| `nfcxx -fsafe-pointers` | 37 s after phase 1, 30 s after phase 2, 12.5 s after the first speed round, 7 s after the second |
 
 At the end of phase 1 that was about 15x over Path B. The speed round (the first part of phase 4 in the plan below)
 took it to about 12.5 s, 5x, by profiling with `callgrind` and removing what it showed:
@@ -164,14 +170,26 @@ took it to about 12.5 s, 5x, by profiling with `callgrind` and removing what it 
 | eight-entry stack record cache | 15.5 s |
 | bisection inside the top frames instead of a linear scan | 12.5 s |
 
+A second round took it to about 7 s, 2.8x over Path B (`callgrind`: 2.08G instructions against 0.31G for the small
+version of the program):
+
+| change | time |
+| --- | --- |
+| start (after the first round) | 12.5 s |
+| the stack's shadow instead of bisecting the frames' records | 10 s |
+| fast paths apart from the slow paths (no register saves) | 8–9 s |
+| initial-exec TLS (no `__tls_get_addr` call per thread-local read) | 7.5 s |
+| no sort of the frames' records (only the rare fallback needed it) | 7.5 s |
+| the hot thread-local state in one block | 7 s |
+
 Tried and dropped: an inline fast path in the emitted QBE (a two-entry per-thread cache tested before the call). It
 made the program 10% slower (21 s against 19 s on the same runtime): the test is about 20 instructions and a TLS load
 per access, and with stack entries dropped at every return its hit rate stayed low, so most accesses paid for both.
 
-What is left (`callgrind`, the small version of the program): `__nfcxx_sp_check` 33%, the stack lookup 32%,
-`__nfcxx_sp_frame` 16% (a third of it the insertion sort of frames with many escaping temporaries), mostly the number
-of calls: Path B has no inlining, so every iterator operation is a call with checks inside. Fil-C reports 1.5x to 4x,
-with an optimizing LLVM pipeline.
+What is left (`callgrind`, the small version of the program): `__nfcxx_sp_check` 40% (its fast path is about 40
+instructions, run for every unproven access), `__nfcxx_sp_frame` 25% (the variadic argument walk and the shadow
+writes of frames with many escaping temporaries). It is mostly the number of calls: Path B has no inlining, so every
+iterator operation is a call with checks inside. Fil-C reports 1.5x to 4x, with an optimizing LLVM pipeline.
 
 ## Limits
 
@@ -211,5 +229,5 @@ Each of these is a false negative: a bad access that is not reported. None of th
 3. Capability pointers: a 16-byte `(pointer, object)` pair in the IR for `--freestanding` programs and `lib/`, which are
    compiled entirely from source, so the layout can change. `i2p` then gives a pointer with no object.
 4. Whole-program hosted mode: a C library (musl) and the C++ runtime built through Path B, so that nothing is unchecked.
-   Speed: the first round is done ("Cost"); next would be elision of checks that a dominating check covers, and
-   inlining on Path B itself, which would remove most of the calls the checks sit in.
+   Speed: two rounds are done ("Cost"); next would be elision of checks that a dominating check covers, and inlining
+   on Path B itself, which would remove most of the calls the checks sit in.

@@ -103,8 +103,25 @@ static size_t live_count, live_bytes;
 /* Bumped (under the lock) whenever an object dies or leaves the table. Each thread keeps the last live object it found,
    with the generation it found it in, and uses it without the lock while the generation is the same. */
 static volatile unsigned long sp_gen;
-static __thread uintptr_t c_lo, c_hi;
-static __thread unsigned long c_gen = ~0ul;
+/* The per-thread state the fast paths of the checks read, in one block: with initial-exec TLS each thread-local
+   variable costs a load of its offset, so one block needs one. The names below are its fields. */
+struct srec;
+static __thread struct {
+  uintptr_t c_lo, c_hi;
+  unsigned long c_gen;
+  struct srec *sstack;
+  size_t sdepth;
+  uintptr_t stk_lo, stk_hi;   /* this thread's stack, from pthread_getattr_np (0: not known yet) */
+  uint32_t *shadow;
+} sp_hot = { .c_gen = ~0ul };
+#define c_lo (sp_hot.c_lo)
+#define c_hi (sp_hot.c_hi)
+#define c_gen (sp_hot.c_gen)
+#define sstack (sp_hot.sstack)
+#define sdepth (sp_hot.sdepth)
+#define stk_lo (sp_hot.stk_lo)
+#define stk_hi (sp_hot.stk_hi)
+#define shadow (sp_hot.shadow)
 
 static void *sp_mmap(size_t n)
 {
@@ -191,17 +208,15 @@ static struct obj *obj_find(uintptr_t a)
   return past;
 }
 
-/* ---- stack objects: per thread, the escaping slots of the live instrumented frames, sorted by address from the highest
-   down (a frame's slots are sorted at entry; frames nest, each callee below its caller, so the order holds across frames),
-   and a stack of frames, each its slots' extent and where its slots start. Frames left by longjmp (EDG's exceptions) are
-   popped by the next frame entry below them or by the return of a frame above them. */
+/* ---- stack objects: per thread, the escaping slots of the live instrumented frames in registration order, and a stack
+   of frames, each its slots' extent and where its slots start. Frames nest, each callee below its caller, so the frames
+   are ordered by address from the highest down. Frames left by longjmp (EDG's exceptions) are popped by the next frame
+   entry below them or by the return of a frame above them. */
 struct srec { uintptr_t lo, hi; int nopad; };   /* nopad: no padding byte after it, so hi may be another object's lo */
 struct sframe { uintptr_t lo, hi; size_t start; };
-static __thread struct srec *sstack;
-static __thread size_t sdepth, scap;
+static __thread size_t scap;
 static __thread struct sframe *frames;
 static __thread size_t fdepth, fcap;
-static __thread uintptr_t stk_lo, stk_hi;   /* this thread's stack, from pthread_getattr_np (0: not known yet) */
 /* The indices of the last records checks found, eight of them picked by address bits (loops alternate between a few
    locals, such as two iterators). One is used while it is below the live depth and the address is above the stack
    pointer (a record there belongs to a live frame); a record replaced by a later frame at the same index is a slot at
@@ -211,6 +226,13 @@ static __thread uintptr_t stk_lo, stk_hi;   /* this thread's stack, from pthread
 static __thread size_t c_si[SCACHE];
 static inline size_t *scache(uintptr_t a) { return &c_si[(a >> 3) & (SCACHE - 1)]; }
 static __thread int stk_known;
+/* The stack's shadow (shadow, in sp_hot): per 4-byte granule of this thread's stack (QBE aligns every slot to at least
+   4), the index + 1 of the record last registered there, written at frame entry and never cleared. A check reads the
+   entry of its address and uses the record when it still holds the address (a stale entry, of a frame that returned,
+   fails that test and the lookup falls back to srec_find). NULL: no shadow (stack bounds unknown or too large, or the
+   thread is exiting). shadow_bytes: its size. */
+static __thread size_t shadow_bytes;
+#define SHADOW_MAX ((size_t)1 << 30)   /* stacks up to 1 GiB get a shadow */
 
 /* The threads that run instrumented code, for the collector: the top of each one's stack and the lowest stack pointer it
    was seen with (the stack between them is mapped). A thread leaves the list in a key destructor, before its stack is
@@ -236,6 +258,7 @@ static void thread_gone(void *v)
      lib_src/thread_dtor.c): they must not find the record. The destructor runs on the exiting thread, so me is its own. */
   me = NULL;
   munmap(t, sizeof *t);
+  if (shadow) { uint32_t *sh = shadow; shadow = NULL; munmap(sh, shadow_bytes); }
 }
 
 static void thread_key_init(void) { pthread_key_create(&thread_key, thread_gone); }
@@ -250,6 +273,10 @@ static void stack_bounds(void)
   if (pthread_attr_getstack(&at, &addr, &size) == 0) { stk_lo = (uintptr_t)addr; stk_hi = (uintptr_t)addr + size; }
   pthread_attr_destroy(&at);
   if (!stk_hi) return;
+  if (stk_hi - stk_lo <= SHADOW_MAX) {
+    shadow_bytes = (stk_hi - stk_lo) / 4 * sizeof *shadow;
+    shadow = sp_mmap(shadow_bytes);   /* MAP_NORESERVE: only the pages of the stack in use get memory */
+  }
   pthread_once(&thread_once, thread_key_init);
   struct sp_thread *t = sp_mmap(sizeof *t);
   t->hi = stk_hi;
@@ -303,10 +330,14 @@ void __nfcxx_sp_frame(int n, ...)
   if (fdepth == fcap) frames = grow(frames, fdepth, &fcap, sizeof *frames);
   frames[fdepth].lo = lo; frames[fdepth].hi = hi; frames[fdepth].start = sdepth;
   fdepth++;
-  for (int i = 1; i < m; i++)   /* insertion sort, highest address first */
-    for (int j = i; j > 0 && r[j].lo > r[j - 1].lo; j--) { struct srec t = r[j]; r[j] = r[j - 1]; r[j - 1] = t; }
   while (sdepth + m > scap) sstack = grow(sstack, sdepth, &scap, sizeof *sstack);
   memcpy(&sstack[sdepth], r, m * sizeof *r);
+  if (shadow)
+    for (int i = 0; i < m; i++) {
+      uintptr_t lo = r[i].lo, hi = r[i].hi;
+      if (lo < stk_lo || hi > stk_hi) continue;   /* a by-value parameter in a caller's area outside the stack: none */
+      for (uintptr_t g = (lo - stk_lo) >> 2; g <= (hi - 1 - stk_lo) >> 2 && hi > lo; g++) shadow[g] = (uint32_t)(sdepth + i + 1);
+    }
   sdepth += m;
 }
 
@@ -328,43 +359,58 @@ static int in_dead_stack(uintptr_t a, uintptr_t sp)
 static struct srec *srec_find(uintptr_t a, uintptr_t sp)
 {
   if (!stk_known) stack_bounds();
-  if (a < sp || (stk_hi && a > stk_hi) || sdepth == 0) return NULL;   /* not in the live part of this thread's stack */
-  /* Most accesses are to the current frame or its callers': look at the top frames' own records first. */
-  for (size_t k = fdepth; k > 0 && k + 4 > fdepth; k--) {
-    struct sframe *f = &frames[k - 1];
-    if (a < f->lo || a > f->hi) continue;
-    size_t end = k == fdepth ? sdepth : frames[k].start;
-    /* the frame's first record (highest address first) with lo <= a, then the one ending at a */
-    size_t l = f->start, h = end;
-    while (l < h) {
-      size_t mid = l + (h - l) / 2;
-      if (sstack[mid].lo <= a) h = mid; else l = mid + 1;
-    }
-    if (l < end && a < sstack[l].hi) return &sstack[l];
-    for (size_t i = l; i < end && i < l + 2; i++)
-      if (sstack[i].hi == a && !sstack[i].nopad) return &sstack[i];
-    return NULL;   /* in this frame's extent but in none of its slots (a slot that does not escape, padding) */
-  }
-  /* the first record (highest address first) with lo <= a */
-  size_t l = 0, h = sdepth;
+  if (a < sp || (stk_hi && a > stk_hi) || fdepth == 0) return NULL;   /* not in the live part of this thread's stack */
+  /* the innermost frame with lo <= a (frames go from the highest addresses down), if its extent holds a */
+  size_t l = 0, h = fdepth;
   while (l < h) {
     size_t mid = l + (h - l) / 2;
-    if (sstack[mid].lo <= a) h = mid; else l = mid + 1;
+    if (frames[mid].lo <= a) h = mid; else l = mid + 1;
   }
-  if (l < sdepth && a < sstack[l].hi) return &sstack[l];
-  /* one past the end: the record ending at a starts below a */
-  for (size_t i = l; i < sdepth && i < l + 2; i++)
-    if (sstack[i].hi == a && !sstack[i].nopad) return &sstack[i];
-  return NULL;
+  if (l == fdepth || a > frames[l].hi) return NULL;
+  size_t end = l + 1 == fdepth ? sdepth : frames[l + 1].start;
+  struct srec *past = NULL;
+  for (size_t i = frames[l].start; i < end; i++) {
+    if (sstack[i].lo <= a && a < sstack[i].hi) return &sstack[i];
+    if (sstack[i].hi == a && !sstack[i].nopad) past = &sstack[i];   /* one past its end */
+  }
+  return past;   /* NULL: in the frame's extent but in none of its slots (a slot that does not escape, padding) */
 }
 
-/* ---- the checks */
+/* ---- the checks. Each has a fast path (the per-thread heap cache, the stack's shadow) that returns without a call, and
+   a slow path in a function of its own: kept apart, the fast path saves no registers. sp is the caller's stack pointer
+   or lower: the frame of the check itself, which is above every frame that has returned. */
+static __attribute__((noinline, cold)) void check_slow(void *p, size_t n, const char *file, int line, uintptr_t sp);
+
+/* The current stack pointer: every live frame is at or above it. __builtin_frame_address(0) gives as much but makes the
+   function keep a frame pointer. */
+static inline uintptr_t cur_sp(void)
+{
+#if defined(__x86_64__)
+  uintptr_t sp;
+  __asm__("mov %%rsp, %0" : "=r"(sp));
+  return sp;
+#else
+  return (uintptr_t)__builtin_frame_address(0);
+#endif
+}
+static __attribute__((noinline, cold)) void *derive_slow(void *base, void *res, const char *file, int line, uintptr_t sp);
+
 void __nfcxx_sp_check(void *p, size_t n, const char *file, int line)
 {
   uintptr_t a = (uintptr_t)p;
-  uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+  uintptr_t sp = cur_sp();
   if (a == 0) return;   /* null dereferences are the nonnull check's */
   if (c_gen == sp_gen && c_lo <= a && a < c_hi && n <= c_hi - a) return;
+  if (shadow && a >= sp && a < stk_hi) {
+    uint32_t x = shadow[(a - stk_lo) >> 2];
+    if (x && x <= sdepth && sstack[x - 1].lo <= a && a < sstack[x - 1].hi && n <= sstack[x - 1].hi - a) return;
+  }
+  check_slow(p, n, file, line, sp);
+}
+
+static void check_slow(void *p, size_t n, const char *file, int line, uintptr_t sp)
+{
+  uintptr_t a = (uintptr_t)p;
   size_t ci = *scache(a);
   if (ci < sdepth && a >= sp && sstack[ci].lo <= a && a < sstack[ci].hi && n <= sstack[ci].hi - a) return;
   struct srec *r = srec_find(a, sp);
@@ -390,9 +436,20 @@ void __nfcxx_sp_check(void *p, size_t n, const char *file, int line)
 void *__nfcxx_sp_derive(void *base, void *res, const char *file, int line)
 {
   uintptr_t b = (uintptr_t)base, r = (uintptr_t)res;
-  uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+  uintptr_t sp = cur_sp();
   if (b == 0 || b == r) return res;
   if (c_gen == sp_gen && c_lo <= b && b <= c_hi && c_lo <= r && r <= c_hi) return res;
+  if (shadow && b >= sp && b < stk_hi) {
+    uint32_t x = shadow[(b - stk_lo) >> 2];
+    if (x && x <= sdepth && sstack[x - 1].lo <= b && b < sstack[x - 1].hi && sstack[x - 1].lo <= r && r <= sstack[x - 1].hi)
+      return res;
+  }
+  return derive_slow(base, res, file, line, sp);
+}
+
+static void *derive_slow(void *base, void *res, const char *file, int line, uintptr_t sp)
+{
+  uintptr_t b = (uintptr_t)base, r = (uintptr_t)res;
   size_t ci = *scache(b);
   if (ci < sdepth && b >= sp && sstack[ci].lo <= b && (b < sstack[ci].hi || (b == sstack[ci].hi && !sstack[ci].nopad)) &&
       sstack[ci].lo <= r && r <= sstack[ci].hi)
