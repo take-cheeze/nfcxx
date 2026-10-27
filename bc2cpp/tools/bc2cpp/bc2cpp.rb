@@ -1459,7 +1459,7 @@ if $PROGRAM_NAME == __FILE__
     unless skipped.empty?
       warn ''
       warn '== skipped (unsupported, left on the interpreter) =='
-      skipped.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
+      skipped.each { |m| warn "  #{m[:owner]}##{m[:name]}: #{m[:code][/^\s*#error (.*)$/, 1]}" }
     end
     skipped_entries = skipped.map { |m| m[:entry] }.compact
   end

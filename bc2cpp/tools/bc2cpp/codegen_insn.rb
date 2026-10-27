@@ -979,7 +979,7 @@ class CodeGen
        elsif zsuper_kind && d_reg
          compile_zsuper_native(zsuper_kind, d_reg)
        elsif zsuper_plan && d_reg
-         compile_zsuper_forward(zsuper_plan[:target_def], d_reg, zsuper_plan[:m])
+         compile_zsuper_forward(zsuper_plan, d_reg)
        elsif (call = d_reg && module_super_call(owner_def, irep, d_reg, n))
          call
        else
