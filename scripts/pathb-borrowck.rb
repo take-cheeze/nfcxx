@@ -1,6 +1,7 @@
 # Local lifetime analysis for annotated Path B IR. Run with scripts/mrb.
 # --infer-loan-ends enables conservative last-use inference; default uses explicit ends.
 # --effects FILE adds trusted call-effects forms for functions the module does not describe.
+# --emitted-only checks only the functions the QBE emitter keeps (emitted_functions).
 # Exit 0: supported local checks passed; 1: lifetime error; 2: malformed IR;
 # 3: unsupported analysis. This is not full Rust or C++ borrow checking.
 class BadIR < StandardError; end
@@ -276,13 +277,6 @@ end
 # Keep this validator synchronized across the three standalone IR tools.
 class BorrowCallEffects
   attr_accessor :entries
-  # The functions the module defines, whose summaries are verified against their bodies.
-  attr_writer :defined
-
-  def defined?(name)
-    (@defined || {}).key?(name)
-  end
-
   def initialize(forms, layouts, bad, refused)
     @entries = {}
     @layouts = layouts
@@ -866,6 +860,7 @@ class LocalLifetime
   def ranged(origin)
     base = base_origin(origin)
     return base if base.start_with?('expired:') || base.start_with?('ended:')
+    return base if base == 'external' # see project
     raise BorrowRefused, 'pointer arithmetic requires a local array object' unless array_range(base)
     pair = [base, nil]
     unless @view_ids.key?(pair)
@@ -894,6 +889,10 @@ class LocalLifetime
   def project(origin, offset)
     base = base_origin(origin)
     return base if base.start_with?('expired:') || base.start_with?('ended:')
+    # A place inside external memory is external memory: pointer arithmetic stays within the object it
+    # started in, which is not this frame's storage (no local address reaches external memory, see the
+    # stores), and accesses to external memory are not tracked.
+    return base if base == 'external'
     return origin if ranged?(origin)
     old = origin.start_with?('view:') ? @views[origin[5..-1].to_i][1] : 0
     raise BorrowRefused, 'projection requires known local pointer provenance' unless address(origin)
@@ -1776,11 +1775,13 @@ class LocalLifetime
         resolved << [mode, ty, []]
         next
       end
-      if mode == 'read' && !origins.empty? && origins.all? { |p| p == 'external' } && @call_effects.defined?(x[2].name)
-        # A defined callee is verified to read only through the argument, so passing it external memory,
-        # such as a Rust string literal's bytes, is the caller's own read of that memory.
-        origins.each { |p| access(p, state, true) }
-        resolved << [mode, ty, []]
+      if origins == ['external'] && mode != 'consume'
+        # External memory, as for a load or store through it: the checker tracks none of it, and it is not
+        # this frame's storage, so it overlaps no other argument's local place. The contract is noescape, so
+        # the callee stores no argument pointer into it. A returned alias into it is external memory.
+        check_memory_argument_abi(arg)
+        access('external', state, mode == 'read')
+        resolved << [mode, ty, [], deep, true]
         next
       end
       raise BorrowRefused, 'memory call arguments require known local provenance' if origins.empty? || origins.any? { |p| !address(p) }
@@ -1860,6 +1861,7 @@ class LocalLifetime
       # already holds): the result is that pointer, moved by the alias offset. It keeps the source's loans and
       # storage, so its uses need them live, as for a copy of the pointer.
       sources = resolved[a[:arg]][2]
+      next ['external'] if resolved[a[:arg]][4]
       raise BorrowRefused, 'returned alias requires a known source place' if sources.empty?
       sources.map { |src| project(src[0], a[:offset]) }
     end.uniq
@@ -2533,10 +2535,56 @@ class SummaryInference
   end
 end
 
+# The functions the QBE emitter keeps (prune in scripts/pathb-qbe-emit.rb): the module's external definitions,
+# (constructor)/(destructor) functions and alias targets, and what they refer to, transitively. A (weak) or (static)
+# definition nothing reaches is not emitted. Another translation unit that needs a weak (inline, template) definition
+# has its own copy, checked with that unit; the emitted program contains no other code.
+def emitted_functions(forms)
+  defs = {}
+  forms.each { |f| defs[bname(f[1])] = f if %w[function global].include?(bh(f)) && f[1].is_a?(IRStr) }
+  live = {}
+  work = []
+  defs.each do |name, f|
+    parts = f.drop(2)
+    linked = parts.none? { |p| %w[static extern].include?(bh(p)) || p == ['weak'] } # (weak attr) is an interface symbol
+    startup = bh(f) == 'function' && parts.any? { |p| %w[constructor destructor].include?(bh(p)) }
+    next unless linked || startup
+    live[name] = true
+    work << name
+  end
+  forms.each do |f|
+    next unless bh(f) == 'alias' && f[2].is_a?(IRStr)
+    t = bname(f[2])
+    next unless defs.key?(t) && !live.key?(t)
+    live[t] = true
+    work << t
+  end
+  refs = lambda do |x, out|
+    if x.is_a?(IRSym)
+      out << x.name if x.sig == '@' || x.sig == '&'
+    elsif x.is_a?(Array)
+      x.each { |y| refs.call(y, out) }
+    end
+  end
+  until work.empty?
+    out = []
+    refs.call(defs[work.pop], out)
+    out.each do |r|
+      # A long double function's own name is its x87 entry, which calls the __nfcxx_ldr_ function.
+      r = '__nfcxx_ldr_' + r if !defs.key?(r) && defs.key?('__nfcxx_ldr_' + r)
+      next unless defs.key?(r) && !live.key?(r)
+      live[r] = true
+      work << r
+    end
+  end
+  forms.select { |f| bh(f) == 'function' && (!f[1].is_a?(IRStr) || live.key?(bname(f[1]))) }
+end
+
 begin
   args = ARGV.dup
   infer = false
   summaries = false
+  emitted_only = false
   effect_files = []
   while args[0] && args[0].start_with?('--')
     option = args.shift
@@ -2547,12 +2595,14 @@ begin
       effect_files << args.shift
     elsif option == '--infer-summaries'
       summaries = true
+    elsif option == '--emitted-only'
+      emitted_only = true
     else
       raise BadIR, "unknown option #{option}"
     end
   end
   unless args.length == 1
-    raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] [--infer-summaries] [--effects FILE]... FILE.ir'
+    raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] [--infer-summaries] [--emitted-only] [--effects FILE]... FILE.ir'
   end
   forms = parse_forms(tokenize(File.read(args[0])))
   raise BadIR, 'missing ir-module' unless bh(forms[0]) == 'ir-module'
@@ -2594,11 +2644,8 @@ begin
     false
   end
   call_effects = BorrowCallEffects.new(forms + extra, semantic_layouts, BadIR, BorrowRefused)
-  functions = forms.select { |f| bh(f) == 'function' }
+  functions = emitted_only ? emitted_functions(forms) : forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
-  defined = {}
-  functions.each { |f| defined[bname(f[1])] = true }
-  call_effects.defined = defined
   # (abi-type "N" SIZE ALIGN ...) gives the size of a by-value aggregate parameter.
   abi_sizes = {}
   forms.each do |f|

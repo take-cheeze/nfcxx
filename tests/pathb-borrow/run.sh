@@ -27,6 +27,41 @@ for src in tests/pathb-borrow/cases/*.ir; do
     pass=$((pass + 1))
   fi
 done
+# --emitted-only checks the functions the QBE emitter keeps, in both loan modes (NAME.expect); without it every
+# function is checked (NAME.all.expect, else NAME.expect).
+for src in tests/pathb-borrow/emitted/*.ir; do
+  for options in "--emitted-only" "--emitted-only --infer-loan-ends" ""; do
+    expected=${src%.ir}.expect
+    [ -n "$options" ] || [ ! -f "${src%.ir}.all.expect" ] || expected=${src%.ir}.all.expect
+    want=$(head -1 "$expected")
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb $options "$src" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
+      echo "FAIL $src (${options:-all functions}): expected exit $want, got $rc"
+      cat "$tmp/out"
+      exit 1
+    fi
+    echo "ok   $src (${options:-all functions})"
+    pass=$((pass + 1))
+  done
+done
+# Lowered C++: EXIT and DIAG with --emitted-only (inferred summaries and loan ends), ALL the exit without it.
+for src in tests/pathb-borrow/emitted/*.cpp; do
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/source.ir" 2>/dev/null
+  for options in "--emitted-only" ""; do
+    want=$(sed -n 's,^// EXIT: ,,p' "$src"); pattern=$(sed -n 's,^// DIAG: ,,p' "$src")
+    [ -n "$options" ] || { want=$(sed -n 's,^// ALL: ,,p' "$src"); pattern=""; }
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb $options --infer-summaries --infer-loan-ends "$tmp/source.ir" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! grep -Fq -- "$pattern" "$tmp/out"; then
+      echo "FAIL $src (${options:-all functions}): expected exit $want, got $rc"
+      cat "$tmp/out"
+      exit 1
+    fi
+    echo "ok   $src (${options:-all functions})"
+    pass=$((pass + 1))
+  done
+done
 # Inference is opt-in: compare each fixture with exact expectations in both modes.
 for src in tests/pathb-borrow/inferred/*.ir; do
   for mode in explicit inferred; do

@@ -1,0 +1,7 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "pick" (returns (ptr int) (from-arg 0 4 exclusive)) (nothrow) (noescape) (closed) (args (write (array 2 int))))
+(function "test" (ret int) (params (param %0 "p" (ptr (array 2 int))))
+(decl %0 param)
+(let %1 (ptr int) (call (ptr int) &"pick" %0))
+(store int %1 (const int 2)) (let %2 int (load int %1))
+(return %2))
