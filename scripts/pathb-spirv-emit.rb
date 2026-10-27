@@ -978,6 +978,7 @@ class SpvModule
   attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
   attr_accessor :stack_bytes, :fns, :fns_wgs, :defs, :subgroup_used, :wgs, :wgs_total, :wgs_var
   attr_accessor :sg_size_var   # the SubgroupSize builtin input, once a function reads it
+  attr_accessor :no_div_trap   # --no-div-trap: a zero divisor (or INT_MIN / -1) divides by 1 instead of trapping
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -1867,7 +1868,13 @@ class SFn
     else
       c = res(170, @spv.t_bool, b, zero)
     end
-    trap_if(c, 1)
+    if @mod.no_div_trap
+      # the divisor is 1 where the division is undefined: the result is defined and meaningless, as a GPU's is (ggml-sycl
+      # computes `sequence % ne33` with ne33 = 0 when there is no mask, and never reads the result)
+      b = res(169, sty(ty), c, int_const_of(ty, 1), b)
+    else
+      trap_if(c, 1)
+    end
     # cdiv: the quotient; crem: the remainder (truncated toward zero, the sign of the dividend, as C has it)
     code = ty[2] ? (h == "cdiv" ? 135 : 138) : (h == "cdiv" ? 134 : 137)
     canon(res(code, sty(ty), a, b), ty)
@@ -2505,7 +2512,7 @@ class SpvModule
   end
 end
 
-def emit_module(src, kernel_cl = false)
+def emit_module(src, kernel_cl = false, no_div_trap = false)
   forms = parse_forms(tokenize(strip_comments(src)))
   mod = Mod.new
   sizes = {}
@@ -2558,6 +2565,7 @@ def emit_module(src, kernel_cl = false)
   end
   spv.glsl_id
   smod = SpvModule.new(spv, kernel_cl)
+  smod.no_div_trap = no_div_trap
   smod.irmod = mod
   smod.defs = mod.defs
   # the work-group statics live in the group's static local region (OpenCL-style modules; the Vulkan module keeps frames)
@@ -2691,20 +2699,23 @@ def main(argv)
   args = argv.dup
   manifest_path = nil
   kernel_cl = false
+  no_div_trap = false
   while args.length > 0 && args[0].start_with?("--")
     opt = args.shift
     if opt.start_with?("--manifest=")
       manifest_path = opt[11..-1]
     elsif opt == "--kernel-cl"
       kernel_cl = true
+    elsif opt == "--no-div-trap"
+      no_div_trap = true
     else
-      $stderr.write("usage: pathb-spirv-emit.rb [--kernel-cl] [--manifest=FILE] [FILE.ir | -] > out.spv\n")
+      $stderr.write("usage: pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--manifest=FILE] [FILE.ir | -] > out.spv\n")
       return 1
     end
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    words, manifest, _ = emit_module(src, kernel_cl)
+    words, manifest, _ = emit_module(src, kernel_cl, no_div_trap)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3
