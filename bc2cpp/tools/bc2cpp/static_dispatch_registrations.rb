@@ -55,6 +55,7 @@ require_relative 'symbol_cache'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_fragment_uses'
+require_relative 'static_dispatch_symbol_uses'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
@@ -69,6 +70,8 @@ module StaticDispatchRegistrations
   # dynamic reference -- which is how a list of provably-unreachable names
   # (`STATIC_DISPATCH_UNREGISTERED`) suddenly looked reachable.
   REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,[^;]*\);/m
+  # LEFT_OUT (codegen_emit.rb): what stands in for a left-out entry's registration, which looks nothing up.
+  LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);/m
   # A Ruby identifier, and -- because a generated C++ symbol may contain the
   # mangling's `$<hex>` escapes -- a generated one. Kept lowercase-initial and
   # `$`-accepting so `Game__Battle_enemy_active$3f` is recognized as the
@@ -100,7 +103,7 @@ module StaticDispatchRegistrations
   # Every C string literal in `src` that is not the name argument of a
   # registration call, with comments dropped first.
   def c_literals(src, exempt: Set.new)
-    body = src.gsub(REGISTRATION_CALL, '').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
+    body = src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
     table = nil
     body = body.sub(SYM_TABLE) { table = Regexp.last_match(1); '' }
     names = body.scan(STRING_LITERAL).map { |(s)| unescape(s) }
@@ -132,6 +135,8 @@ module StaticDispatchRegistrations
   # -DBC2CPP_*_DISPATCH / -DBC2CPP_HINT_VIOLATION_LOG builds dispatch there; with the registration gone that finds
   # the interpreted method instead, or the BC2CPP_UNREGISTERED_VERIFY stub.)
   NON_LOOKUP_HELPERS = %w[nomethod nomethod_raise guard_violation hint_violation nil_receiver].to_set.freeze
+  SYMBOL_VALUE_USE = /(?:mrb_symbol_value\(|==\s*)bc2cpp_sym\(M, (\d+)\)/
+  KEYWORD_TABLE = /mrb_sym bc2cpp_kw_table\w*\[\d+\] = \{([^}]*)\}/
 
   # The names in `src`'s symbol table none of whose uses is a dynamic lookup of a compiled owner's method: each use
   # is a NON_LOOKUP_HELPERS call or an EMBED_GUARD_FALLBACK one.
@@ -140,12 +145,19 @@ module StaticDispatchRegistrations
   # subclasses. The fallback runs only when the receiver's class is not exactly the owner; with no subclass
   # anywhere, such a receiver's method lookup never reaches the owner's method table, so it cannot need the owner's
   # registration -- it finds the name on its own class or raises NoMethodError, registered or not.
-  def lookup_free_names(src, subclassed)
+  #
+  # `symbol_values` (SYMBOL_USES holds): a symbol only made into a value (`mrb_symbol_value(bc2cpp_sym(M, i))`),
+  # compared (`== bc2cpp_sym(M, i)`) or listed as a keyword name looks nothing up either.
+  def lookup_free_names(src, subclassed, symbol_values: false)
     table = src[SYM_TABLE, 1] or return Set.new
     names = table.scan(STRING_LITERAL).map { |(s)| unescape(s) }
     uses = Hash.new(0)
     quiet = Hash.new(0)
     src.scan(/bc2cpp_sym\(M, (\d+)\)/) { |(i)| uses[i.to_i] += 1 }
+    if symbol_values
+      src.scan(SYMBOL_VALUE_USE) { |(i)| quiet[i.to_i] += 1 }
+      src.scan(KEYWORD_TABLE) { |(list)| list.scan(/bc2cpp_sym\(M, (\d+)\)/) { |(i)| quiet[i.to_i] += 1 } }
+    end
     SymbolCache.send_index_kinds(src).each do |kind, i|
       uses[i] += 1
       quiet[i] += 1 if NON_LOOKUP_HELPERS.include?(kind)
@@ -484,6 +496,9 @@ module StaticDispatchRegistrations
     end
     ireps, registry, superclass_of, struct_owners = closed_world(repo_root, mrbc)
     subclassed = subclassed_paths(repo_root, superclass_of)
+    # SYMBOL_USES (closed only): the Symbol literals that name a looked-up method, or nil (every one does).
+    symbol_lookups = closed_only ? StaticDispatchSymbolUses.lookups(ireps) : nil
+    send_ops = symbol_lookups ? SEND_OPS - [:LOADSYM] : SEND_OPS
 
     # Candidates: compiled entries still registered, plus ones already
     # unregistered by this mechanism (so re-running the proof after the
@@ -516,6 +531,7 @@ module StaticDispatchRegistrations
     end
 
     dynamic = Set.new(ALWAYS_DYNAMIC)
+    dynamic.merge(symbol_lookups) if symbol_lookups
     fragments = Set.new
     ireps.each_value do |irep|
       BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
@@ -530,7 +546,7 @@ module StaticDispatchRegistrations
       end
     end
     runs.each_value do |r|
-      dynamic.merge(c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed)))
+      dynamic.merge(c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?)))
              .merge(c_literals(r[:hand]))
     end
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
@@ -556,8 +572,8 @@ module StaticDispatchRegistrations
     sends = lambda do |irep, into|
       grew = false
       BytecodeIR.for(irep).each_source do |insn, _index|
-        name = if SEND_OPS.include?(insn.op) then insn.sym
-               else IMPLICIT_DISPATCH_NAMES[insn.op]
+        name = if send_ops.include?(insn.op) then insn.sym
+               elsif insn.op != :LOADSYM then IMPLICIT_DISPATCH_NAMES[insn.op]
                end
         grew = true if name && into.add?(name)
       end
@@ -577,7 +593,7 @@ module StaticDispatchRegistrations
       end
     end
 
-    load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden)
+    load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
     bytecode_blocks = runs.each_value.any? { |r| r[:gen].match?(BYTECODE_PROC) || r[:hand].match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
@@ -602,7 +618,7 @@ module StaticDispatchRegistrations
     end
 
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
-      closed_only: closed_only, suffix_bases: suffix_bases }
+      closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups }
   end
 
   LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
@@ -662,7 +678,7 @@ module StaticDispatchRegistrations
   #     Rect/Array), any engine instance method too.
   # Name-matched, never owner-matched, within each kind: coarse, but always a
   # superset. Returns [runnable method-body labels, every name they send].
-  def load_phase(ireps, body_of, method_of, overridden)
+  def load_phase(ireps, body_of, method_of, overridden, send_ops: SEND_OPS)
     by_name = Hash.new { |h, k| h[k] = [] }
     body_of.each { |label, (owner, name)| by_name[name] << [label, owner] }
     singleton = ->(owner) { owner.end_with?('.singleton') }
@@ -716,14 +732,14 @@ module StaticDispatchRegistrations
       end
       # An engine instance may exist at load after all: earlier filtering is
       # no longer sound, so fall back to the receiver-blind cascade entirely.
-      return load_phase_all_names(ireps, method_of, body_of) if engine_live
+      return load_phase_all_names(ireps, method_of, body_of, send_ops: send_ops) if engine_live
     end
     [bodies, names]
   end
 
   # The original, receiver-blind cascade -- the fallback the moment any
   # load-phase code may instantiate an engine class.
-  def load_phase_all_names(ireps, method_of, body_of)
+  def load_phase_all_names(ireps, method_of, body_of, send_ops: SEND_OPS)
     names = Set.new
     bodies = Set.new
     loop do
@@ -733,7 +749,7 @@ module StaticDispatchRegistrations
         next unless m.nil? || names.include?(body_of[m][1])
 
         bodies << m if m
-        BytecodeIR.for(irep).instructions_with_op(*SEND_OPS).each do |insn|
+        BytecodeIR.for(irep).instructions_with_op(*send_ops).each do |insn|
           name = insn.sym
           grew = true if name && names.add?(name)
         end
