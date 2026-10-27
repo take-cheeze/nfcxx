@@ -184,6 +184,30 @@ later use re-checks activation. Each creation reserves it again. With `--infer-l
 loan whose last use comes before the activation has expired by then, which is the Rust case. The QBE
 emitter erases it like the other kinds.
 
+## Interior mutability
+
+```text
+(borrow-layout (struct "UnsafeCell") 4 4 (field "value" 0 int))
+(borrow-layout (struct "Cell") 4 4 (field "value" 0 (struct "UnsafeCell")))
+(interior-mutable (struct "UnsafeCell"))
+```
+
+`(interior-mutable (struct "N"))` says that the bytes of every `N` object, at any depth of a slot's or
+argument region's layout, may be written through a shared loan: Rust's `UnsafeCell<T>`. `N` needs a
+semantic layout. A store, or a call's `write` argument, through a pointer whose own loan is shared is
+then accepted when its range lies in such bytes and the write leaves the checker's state unchanged.
+That is a scalar written over bytes that are initialized on every path and hold no pointer, outside any
+drop obligation. The checker performs the write on a copy of the state and compares. The access is then
+checked as a read: the storage must be live and the loan chain active, and an exclusive loan of the bytes
+conflicts with it, but other shared loans do not. Any other write through a shared loan is
+`write-through-shared-loan` as before, and a direct write to the place still conflicts with its loans.
+
+So nothing the checker concluded from a loan being shared stops holding. It tracks no scalar values, only
+initialization, pointer provenance, loans and drop states, and an accepted interior write changes none of
+them. A `read` summary verified against a body that writes a cell's bytes is therefore still exact for
+its callers, and `(readonly %N)` needs no exception. Only the mrustc translator emits the form
+([mrustc-borrowck.md](mrustc-borrowck.md), "Interior mutability"); the QBE emitters never see it.
+
 ## Inferred loan ends (opt-in)
 
 ```sh
@@ -883,7 +907,8 @@ refused. Escapes never establish initialization. Unannotated functions are refus
 silently checked using function-wide storage lifetimes.
 
 Full Rust move semantics, C++ destructor interpretation, container invalidation, interior
-mutability and cross-function region inference are not implemented. Exception handling is checked
+mutability beyond state-preserving writes ("Interior mutability") and cross-function region inference
+are not implemented. Exception handling is checked
 through EDG's `try` protocol ("try and catch"), not through cleanup edges of its own.
 `rref-arg` does not mean that an ordinary C++ moved-from value is dead.
 
@@ -896,8 +921,9 @@ verdicts mrustc gives itself, and `tests/mrustc-borrow`, which records rustc's v
 case. Generic bodies are checked only as the instances a program uses. Moves of non-Copy places
 are `move-value`s; drop obligations for them are not emitted.
 
-`(readonly %N)` is the one fact only that translator emits: parameter `%N` is a pointer the function
-does not write through (a Rust `&T`). Summary inference gives it read-only modes.
+`(readonly %N)` and `(interior-mutable ...)` are the facts only that translator emits. The first says
+that parameter `%N` is a pointer the function does not write through (a Rust `&T`), except for interior
+writes, and summary inference gives it read-only modes.
 
 ## Tests
 
@@ -922,6 +948,10 @@ contracts, and inferred last-use release.
 Two-phase fixtures, `cases/loan_two_phase_*` and `inferred/two_phase_receiver`, cover reads while
 reserved, a shared loan live at activation, a write or an exclusive loan while reserved, and
 activation on one branch.
+Interior-mutability fixtures in `tests/pathb-borrow/interior` cover a store and a `write` call through
+either of two shared loans, a write outside the cell's bytes or without the form, a stored pointer and a
+scalar over one, a direct write while borrowed, and a form without a layout;
+`summaries/interior_readonly` infers a `read` summary for a `readonly` parameter whose cell is written.
 Implicit-loan fixtures in `tests/pathb-borrow/inferred/implicit_*` cover last use, future
 conflicts, dangling results, and loops, in both loan modes.
 Two-source fixtures (`inferred/implicit_two_sources_*`, `returned/two_*`, `verify/alias_two_*`,

@@ -202,7 +202,7 @@ module MonomirStd
     end
     path = @paths && @paths[name]
     return nil unless path
-    SUMMARIES.each do |re, effects, result|
+    (SUMMARIES + CELL_SUMMARIES).each do |re, effects, result|
       m = re.match(path)
       next unless m
       return nil unless SCALARS.include?(m[:t])
@@ -240,5 +240,145 @@ module MonomirStd
       return "(call-effects #{name.inspect} (returns #{returns}) (nothrow) (noescape) (closed) (args #{args.join(' ')}))"
     end
     nil
+  end
+
+  # Interior mutability (docs/notes/mrustc-borrowck.md, "Interior mutability"). The bytes of an
+  # UnsafeCell<T> may be written through a shared reference. The translator marks each UnsafeCell type
+  # with an (interior-mutable ...) form, and the checker accepts a write through a shared loan into those
+  # bytes when it leaves the checker's state unchanged: a scalar over initialized bytes holding no pointer.
+  # So, as for containers, only a cell of a scalar is covered. Cell never hands out a reference into
+  # itself (get_mut takes &mut self); RefCell's guards do, and their dynamic check is the runtime's.
+  UNSAFE_CELL = /\AZRG2cE9core0_0_04cell10UnsafeCell/
+  CELL = 'core::cell::Cell<(?<t>\w+)>'
+  REFCELL = 'core::cell::RefCell<(?<t>\w+)>'
+
+  # Cell::set, replace and take write the cell through `&self`: a write argument the checker accepts
+  # through a shared loan, as above. RefCell::replace panics if the cell is borrowed (runtime-checked).
+  CELL_SUMMARIES = [
+    [/\A<#{CELL}>::new\z/, [:value], :init],
+    [/\A<#{CELL}>::get\z/, [:read], :scalar],
+    [/\A<#{CELL}>::set\z/, [:write, :value], :void],
+    [/\A<#{CELL}>::replace\z/, [:write, :value], :scalar],
+    [/\A<#{CELL}>::take\z/, [:write], :scalar],
+    [/\A<#{CELL}>::into_inner\z/, [:byval], :scalar],
+    [/\A<#{CELL}>::get_mut\z/, [:write], [:alias, 0, :exclusive]],
+    [/\A<#{REFCELL}>::new\z/, [:value], :init],
+    [/\A<#{REFCELL}>::replace\z/, [:write, :value], :scalar],
+    # A `&T` from a guard is modelled as a reference into the guard, with the loan of the guard that
+    # deref takes: the loan rustc gives it. The guard keeps the RefCell borrowed (GUARD_CALLS), so the
+    # reference cannot outlive either. Nothing writes through a `&T`, so the guard's bytes are only read.
+    [/\A<core::cell::Ref<(?<t>\w+)> as core::ops::deref::Deref>::deref\z/, [:read], [:alias, 0, :shared]],
+    [/\A<core::cell::RefMut<(?<t>\w+)> as core::ops::deref::Deref>::deref\z/, [:read], [:alias, 0, :shared]]
+  ].freeze
+
+  # The (interior-mutable ...) forms for the UnsafeCell types among NAMES, the structs given layouts.
+  def self.interior_forms(names)
+    names.select { |n| n.match?(UNSAFE_CELL) }.map { |n| "(interior-mutable (struct #{n.inspect}))" }
+  end
+
+  # Whether a value of TY holds an UnsafeCell. Such a type is never Copy (UnsafeCell is not), so a use of
+  # it is a move, though the standard library's Cell and RefCell have no drop glue.
+  def self.holds_unsafe_cell?(ty, types, depth = 0)
+    ty = ty.strip
+    return true if ty.match?(UNSAFE_CELL)
+    ty = ty[1...-1].split(";", 2)[0].strip if ty.start_with?("[") && ty.include?(";")
+    t = types[ty]
+    return false unless t && depth < 16
+    t[:fields].any? { |f| holds_unsafe_cell?(f[:type], types, depth + 1) }
+  end
+
+  # RefCell<T>::borrow and borrow_mut build a guard that keeps two references into the cell: to its value
+  # and to its borrow flag. As for fmt::Arguments, the call becomes the stores of those references into the
+  # guard, which the checker then tracks, so the guard keeps the RefCell borrowed while it is used. The flag
+  # update (the dynamic check) is a write of the flag through the shared reference. RefMut::deref_mut
+  # loads the value's reference back: a `&mut T` is written through, so it cannot point into the guard as
+  # the `&T` of deref does (CELL_SUMMARIES). It has the RefCell's loan, not one of the guard. The guard's
+  # drop glue reads and writes the flag through its reference, so a guard that outlives its RefCell is an
+  # error at its drop (E0597).
+  GUARD_CALLS = [
+    [/\A<#{REFCELL}>::borrow\z/, :borrow],
+    [/\A<#{REFCELL}>::borrow_mut\z/, :borrow_mut],
+    [/\A<core::cell::RefMut<(?<t>\w+)> as core::ops::deref::DerefMut>::deref_mut\z/, :deref],
+    [/\A<core::cell::Ref<(?<t>\w+)>>::#drop_glue\z/, :drop_ref],
+    [/\A<core::cell::RefMut<(?<t>\w+)>>::#drop_glue\z/, :drop_ref_mut]
+  ].freeze
+
+  # The kind of guard lowering for NAME, or nil.
+  def self.guard_call(name)
+    path = @paths && @paths[name]
+    return nil unless path && @sigs[name]
+    GUARD_CALLS.each do |re, kind|
+      m = re.match(path)
+      return SCALARS.include?(m[:t]) ? kind : nil if m
+    end
+    nil
+  end
+
+  # [offset, type] of the field of struct TY whose type matches RE, or nil.
+  def self.find_field(ty, re, types)
+    t = types[ty.strip]
+    f = t && t[:fields].find { |g| g[:type].strip.match?(re) }
+    f ? [f[:off], f[:type].strip] : nil
+  end
+
+  # A guard's layout: [offset of its NonNull (the value's reference), offset of its flag reference, the
+  # flag reference's Path B type], or nil.
+  def self.guard_fields(guard, types)
+    value = find_field(guard, /\AZRG3cE9core0_0_03ptr8non_null7NonNull/, types)
+    borrow = find_field(guard, /\AZRG2cE9core0_0_04cell(9BorrowRef|12BorrowRefMut)0g\z/, types)
+    return nil unless value && borrow
+    flag = find_field(borrow[1], /\A&/, types)
+    return nil unless flag && types[value[1]] && types[value[1]][:fields][0]
+    return nil unless types[value[1]][:fields][0][:off] == 0 && flag[0] == 0
+    [value[0], borrow[0] + flag[0], rust_type_to_pathb(flag[1], types)]
+  end
+
+  # Statements for a guard call to NAME of KIND: DEST is the guard's address for borrow and borrow_mut,
+  # ARGS the argument values. Returns [statements, next register, result value or nil], or nil when the
+  # types are not the ones expected.
+  def self.lower_guard(kind, name, dest, args, regi, types)
+    params, ret = @sigs[name]
+    out = []
+    reg = lambda do |ty, expr|
+      out << "(let %#{regi} #{ty} #{expr})"
+      regi += 1
+      "%#{regi - 1}"
+    end
+    at = ->(ty, base, off) { off == 0 ? base : reg.call(ty, "(offset #{base} #{off})") }
+    # The flag is the isize at the start of the cell's Cell<isize>: read it and write it back, changed.
+    update_flag = lambda do |flag, op|
+      old = reg.call('long', "(load long #{flag})")
+      out << "(store long #{flag} (#{op} long #{old} (const long 1)))"
+    end
+    case kind
+    when :borrow, :borrow_mut
+      return nil unless dest && params.length == 1 && params[0].strip =~ /\A&(.+)\z/
+      cell = $1.strip
+      value = find_field(cell, UNSAFE_CELL, types)
+      flag = find_field(cell, /\AZRG2cE9core0_0_04cell4Cell1g/, types)
+      fields = guard_fields(ret, types)
+      return nil unless value && flag && fields
+      vt = rust_type_to_pathb(types[value[1]] && types[value[1]][:fields][0] ? types[value[1]][:fields][0][:type] : 'u8', types)
+      fp = at.call(fields[2], args[0], flag[0])
+      update_flag.call(fp, kind == :borrow ? 'wadd' : 'wsub')
+      vp = at.call("(ptr #{vt})", args[0], value[0])
+      out << "(store (ptr #{vt}) #{at.call("(ptr (ptr #{vt}))", dest, fields[0])} #{vp})"
+      out << "(store #{fields[2]} #{at.call("(ptr #{fields[2]})", dest, fields[1])} #{fp})"
+      [out, regi, nil]
+    when :deref
+      return nil if dest || params.length != 1 || params[0].strip !~ /\A&(mut )?(.+)\z/
+      fields = guard_fields($2.strip, types)
+      return nil unless fields && ret.strip.start_with?('&')
+      rt = rust_type_to_pathb(ret, types)
+      result = reg.call(rt, "(load #{rt} #{at.call("(ptr #{rt})", args[0], fields[0])})")
+      [out, regi, result]
+    when :drop_ref, :drop_ref_mut
+      return nil unless params.length == 1 && params[0].strip =~ /\A&move (.+)\z/
+      fields = guard_fields($1.strip, types)
+      return nil unless fields
+      fp = reg.call(fields[2], "(load #{fields[2]} #{at.call("(ptr #{fields[2]})", args[0], fields[1])})")
+      update_flag.call(fp, kind == :drop_ref ? 'wsub' : 'wadd')
+      [out, regi, nil]
+    end
   end
 end

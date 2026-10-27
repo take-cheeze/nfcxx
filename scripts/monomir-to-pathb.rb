@@ -1469,7 +1469,7 @@ def copy_type?(ty, types)
   return copy_type?(ty[1...-1].split(";", 2)[0], types) if ty.start_with?("[") && ty.include?(";")
   t = types[ty]
   return true unless t && $copy_impls
-  return false if t[:drop]
+  return false if t[:drop] || MonomirStd.holds_unsafe_cell?(ty, types)
   return t[:fields].all? { |f| copy_type?(f[:type], types) } if ty.start_with?("ZRTT")
   path = bin_type_path(ty)
   path.nil? || $copy_impls.include?(path)
@@ -2358,13 +2358,21 @@ functions.each do |fn|
         m = ln.match(/^DROP (.+?)( SHALLOW)?( IF df(\d+))?;?$/)
         if m
           slot = m[1].strip; flag = m[4]
+          # A call of the drop glue, or for a RefCell guard (--borrow) the glue's effect on the flag.
+          call_glue = lambda do |glue, addr|
+            kind = $borrow && MonomirStd.guard_call(pb_sym(glue))
+            low = kind && MonomirStd.lower_guard(kind, pb_sym(glue), nil, [addr], regi, types)
+            next "(eval (call void &\"#{pb_sym(glue)}\" #{addr}))" unless low
+            regi = low[1]
+            low[0].join(' ')
+          end
           emit_drop = lambda do
             sty = place_type(slot, types, locals, params)
             glue = sty && types.key?(sty) ? types[sty][:drop] : nil
             if glue
               addr, regi2 = place_addr(slot, types, locals, params, param_reg, stmts, regi)
-              stmts << "(eval (call void &\"#{pb_sym(glue)}\" #{addr}))"
               regi = regi2
+              stmts << call_glue.call(glue, addr)
             end
           end
           if flag
@@ -2375,7 +2383,7 @@ functions.each do |fn|
               stmts << "(let %#{r} bool (load bool $\"df#{flag}\"))"
               before = stmts.size
               addr, regi = place_addr(slot, types, locals, params, param_reg, stmts, regi)
-              stmts << "(eval (call void &\"#{pb_sym(glue)}\" #{addr}))"
+              stmts << call_glue.call(glue, addr)
               added = stmts[before..-1] || []
               stmts[before..-1] = ["(if %#{r} (then #{added.join(' ')}))"]
             end
@@ -3267,6 +3275,13 @@ functions.each do |fn|
             end
           end
           stmts << "(goto #{retblk.inspect})"
+        elsif $borrow && (guard = MonomirStd.guard_call(pb_sym(fexpr))) &&
+              (low = MonomirStd.lower_guard(guard, pb_sym(fexpr), dest_addr, arg_vals.map(&:first), regi, types))
+          # RefCell's borrow guards (scripts/monomir-std.rb): the stores and loads of the references they keep.
+          stmts.concat(low[0])
+          regi = low[1]
+          store_dest.call(low[2]) if low[2]
+          stmts << "(goto #{retblk.inspect})"
         elsif $borrow && dest_addr && (std_kind = MonomirStd.inline(pb_sym(fexpr)))
           # A standard library constructor that keeps references (scripts/monomir-std.rb): its stores.
           low, regi = MonomirStd.lower(std_kind, dest_addr, arg_vals.map(&:first), regi)
@@ -3575,7 +3590,8 @@ if $borrow
   std_lines = text.scan(/&"([^"]+)"/).flatten.uniq.map { |n| MonomirStd.summary(n, types) }.compact
   used = (text + "\n" + std_lines.join("\n")).scan(/\(struct "([^"]+)"\)/).flatten.uniq
   used.each { |n| describe.call(n) }
-  layout_lines = records.select { |n, r| r && (used.include?(n) || !MonomirStd::LAYOUTS.key?(n)) }.values + std_lines
+  laid_out = records.select { |n, r| r && (used.include?(n) || !MonomirStd::LAYOUTS.key?(n)) }
+  layout_lines = laid_out.values + MonomirStd.interior_forms(laid_out.keys) + std_lines
   lines.insert(1, *layout_lines) unless layout_lines.empty?
   File.write(outpath, lines.join("\n") + "\n") if outpath
   puts lines.join("\n") unless outpath

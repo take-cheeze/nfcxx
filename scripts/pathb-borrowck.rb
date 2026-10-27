@@ -190,6 +190,26 @@ class BorrowLayouts
     k ? @resolved[k] : nil
   end
 
+  # The struct keys of (interior-mutable (struct "N")) forms: Rust's UnsafeCell<T>. Only the checker reads
+  # them (LocalLifetime#interior_write?); they are not part of the descriptors the emitters validate.
+  attr_writer :interior
+
+  def interior
+    @interior || []
+  end
+
+  # The byte offsets of a value of TY that lie in an interior-mutable object, at any depth.
+  def interior_bytes(ty)
+    return [] if interior.empty?
+    desc = begin
+      field_type(ty, [])
+    rescue @bad, @refused
+      nil
+    end
+    return [] unless desc
+    desc[:objects].flat_map { |off, k| interior.include?(k) ? (off...off + @resolved[k][:size]).to_a : [] }.uniq
+  end
+
   def field_type(ty, visiting)
     if ty.is_a?(String) && PRIMITIVES.key?(ty)
       n = PRIMITIVES[ty]
@@ -1271,6 +1291,26 @@ class LocalLifetime
     nil
   end
 
+  # Rust's interior mutability: the bytes of an UnsafeCell<T> ((interior-mutable ...) objects) may be written
+  # through a shared loan. Such a write, a store or a call's write argument at each of PLACES, is accepted only
+  # when the block, which performs it on a copy of STATE, leaves that state unchanged: a scalar written over
+  # initialized bytes that hold no pointer. What the checker concluded from the loan being shared then still
+  # holds, and the caller checks the write as a read. Any other write through a shared loan is an error as before.
+  def interior_write?(places, width, state)
+    return false if @layouts.interior.empty? || places.empty?
+    ok = places.all? do |p|
+      a = !ranged?(p) && address(p)
+      next false unless a && a[2] && @loans[a[2]][1] == 'shared'
+      next false if @drops.values.any? { |d| d[:root] == a[0] && overlaps(a[1], width, d[:off], d[:width]) }
+      bytes = (@interior_bytes ||= {})[a[0]] ||= @layouts.interior_bytes(@slot_info[a[0]][2])
+      (a[1]...a[1] + width).all? { |i| bytes.include?(i) }
+    end
+    return false unless ok
+    trial = state.dup
+    yield trial
+    trial == state
+  end
+
   # A two-phase loan (Rust's autoref `&mut` of a method receiver) is reserved when it is created and acts
   # as a shared loan until its first use, a deref or a call argument, which activates it: from then on it
   # is exclusive, and the loans of its place still live there conflict with it. On a path join that
@@ -1647,6 +1687,11 @@ class LocalLifetime
           record_memory_loan_values(root, off, width, state)
           read_through(root, off, width, state, []) if deep
         when 'write'
+          if interior_write?([origin], width, state) { |s| apply_call_output(root, off, width, ty, s, false, places.length > 1) }
+            access(origin, state, true, nil, width, ty)
+            record_memory_loan_values(root, off, width, state)
+            next
+          end
           # A mutation requires an existing initialized value and preserves its
           # ownership identity; its resulting pointer contents are unknown.
           access(origin, state, true, 'exclusive', width, ty)
@@ -1921,6 +1966,15 @@ class LocalLifetime
         return state
       end
       dest = value(x[2], state)
+      apply = lambda do |s|
+        next weak_store(dest, width, nil, s) if dest.length > 1
+        a = address(dest[0])
+        write_memory(a[0], a[1], width, s)
+      end
+      if !zero && bh(x[1]) != 'ptr' && interior_write?(dest, width, state, &apply)
+        dest.each { |p| access(p, state, true, nil, width) }
+        return state
+      end
       dest.each { |p| access(p, state, false, nil, width) }
       if dest == ['external'] || dest == ['eh']
         # External memory and the exception object are not tracked; only a local address can escape into them.
@@ -2384,6 +2438,11 @@ begin
     end
   end
   semantic_layouts = BorrowLayouts.new(forms, BadIR, BorrowRefused)
+  semantic_layouts.interior = forms.select { |f| bh(f) == 'interior-mutable' }.map do |f|
+    raise BadIR, 'interior-mutable form' unless f.length == 2 && bh(f[1]) == 'struct'
+    raise BadIR, 'interior-mutable struct needs a semantic layout' unless semantic_layouts.lookup(f[1])
+    semantic_layouts.key(f[1])
+  end
   # A file summary this module cannot state (its layouts are absent, say) is dropped rather than refusing the module:
   # a call the module makes to it is then refused at the call. A malformed file is still an error.
   extra = extra.select do |f|
