@@ -73,13 +73,22 @@ module CollectDirect
     ENV['BC2CPP_COLLECT_DIRECT'] != '0'
   end
 
-  # The arm's call, or nil to keep `arm[:impl]`.
+  # The arm's call, or nil to keep `arm[:impl]`. The helper always yields, so a nil block (`map(&nil)`, an absent
+  # `&blk` passed on) takes the compiled Enumerable#collect, whose `to_enum(:collect)` arm answers it.
   def block_core_collect_call(arm, d, recv, args)
     return nil unless collect_direct_enabled? && arm[:class] == 'Array' && args.size == 1
     return nil unless core_body_is?(arm[:target], 'Enumerable', 'collect') && array_each_core?
 
-    "r#{d} = bc2cpp_ary_collect(M, #{recv}, #{args.first});"
+    blk = args.first
+    helper = "bc2cpp_ary_collect(M, #{recv}, #{blk})"
+    return "r#{d} = #{helper};" if blk.match?(LITERAL_BLOCK_EXPR)
+
+    "r#{d} = mrb_nil_p(#{blk}) ? #{arm[:impl]}(M, #{recv}, #{blk}) : #{helper};"
   end
+
+  # The RProc a literal-block site builds (heap, stack or lazily heap-allocated), which is never nil. Any other
+  # block expression gets the nil test.
+  LITERAL_BLOCK_EXPR = /\A(?:mrb_obj_value\(bc2cpp_blk_proc_\d+\)|bc2cpp_blk_stack_\d+\.value\(\)|bc2cpp_blk_heap_\d+\(\))\z/
 
   def emit_collect_direct_helper(compiled)
     compiled.any? { |m| m[:code].include?('bc2cpp_ary_collect(') } ? HELPER : ''
