@@ -542,15 +542,11 @@ class CodeGen
       # "GETCONST R4 Integer": the VM resolves against the lexical scope chain
       # (mrb_vm_const_get), which compiled code does not have. A single lookup from
       # Object misses class-body and enclosing-module constants (`KIND_SKILL` in
-      # Game::EnemyAction, `Tone` in RGSS::Sprite): const_get_nohook (src/variable.c)
-      # stops before Object's table unless the search starts at Object. So try each
-      # scope of the owner's nesting innermost first ("RGSS::Sprite" ->
-      # [RGSS::Sprite, RGSS]), then Object (Module.nesting for defs nested where the
-      # owner name says).
-      # A failing mrb_const_get raises by longjmp, so it cannot be tried and then
-      # polled; bc2cpp_const_try (emit_const_lookup_helper) protects each attempt in
-      # mrb_protect_error. The final lookup, from Object, is unprotected: a constant
-      # still not found is a real error.
+      # Game::EnemyAction, `Tone` in RGSS::Sprite), so the owner's nesting stands in
+      # for the chain ("RGSS::Sprite" -> [RGSS::Sprite, RGSS], then Object), searched
+      # in the VM's order (emit_const_lookup_helper): every scope's own table first,
+      # then the innermost scope's ancestors. Reading an outer scope's constant before
+      # a superclass's matters: CbOuter::CbC < CbA reads CbOuter::W, not CbA::W.
       # A top-level def (owner "Object") needs just the one lookup.
       # Name: `\S+`, so a trailing "; R3:name" comment ("GETCONST R3 MAX_DIGITS\t;
       # R3:d") is not interned into the name.

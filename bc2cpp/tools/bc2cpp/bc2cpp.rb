@@ -1499,7 +1499,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/class.h>'
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
-  # mrb_protect_error for GETCONST's owner-scope-first lookup (core API, not the
+  # mrb_protect_error for the RESCUE_SUPPORT bodies (core API, not the
   # mruby-error gem).
   puts '#include <mruby/error.h>'
   # mruby/io.h is a mrbgem-only include path. The optional helper declaration

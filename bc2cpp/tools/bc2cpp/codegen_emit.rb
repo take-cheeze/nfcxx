@@ -701,56 +701,35 @@ class CodeGen
     CPP
   end
 
-  # GETCONST's owner-scope-first helper (see compile_insn). mrb_const_get raises
-  # via longjmp, so it cannot be tried then polled; mrb_protect_error
-  # (mruby/error.h) takes a C function pointer and a void* payload, hence
-  # LookupCtx/lookup_body as a static function. Emitted once, only when used.
+  # GETCONST's lexical lookup helpers (see compile_insn's GETCONST). Emitted once, only when used.
   def emit_const_lookup_helper
     return '' unless const_lookup_helper_used?
 
     <<~CPP
-      // Shared by every GETCONST site whose owner isn't Object -- tries one
-      // scope in the owner's own real lexical nesting chain and reports
-      // success via *ok rather than choosing a fallback itself, so the call
-      // site (compile_insn's own GETCONST case) can walk the whole chain,
-      // innermost scope first, the way real Ruby constant lookup does. See
-      // that comment for why this has to be mrb_protect_error-based rather
-      // than a simpler try/poll (a raw mrb_const_get failure longjmps
-      // straight past any code that would poll mrb->exc afterward).
-      struct Bc2cppConstLookupCtx { mrb_value scope; mrb_sym name; };
-      static mrb_value bc2cpp_const_lookup_body(mrb_state* M, void* ud) {
-        Bc2cppConstLookupCtx* ctx = (Bc2cppConstLookupCtx*)ud;
-        return mrb_const_get(M, ctx->scope, ctx->name);
-      }
-      static mrb_value bc2cpp_const_try(mrb_state* M, mrb_value scope, mrb_sym name, mrb_bool* ok) {
-        // A miss is the common case (most scopes in the chain do not define the
-        // name), and mrb_const_get reports one by raising NameError, which
-        // allocates an exception, its message and a backtrace before
-        // mrb_protect_error swallows it -- measured at ~70k allocations/s in the
-        // RPG2k map scene. Answer the miss without raising: walk the same
-        // ancestor chain const_get_nohook does (3rd/mruby/src/variable.c: the
-        // scope and its superclasses/included modules, skipping a prepended
-        // origin, stopping before Object) using the public defined_at test, and
-        // only call mrb_const_get once the name is known to be there. It also
-        // stops running a user const_missing on an intermediate scope, which
-        // Ruby's lexical lookup never does.
-        if (mrb_type(scope) == MRB_TT_CLASS || mrb_type(scope) == MRB_TT_MODULE || mrb_type(scope) == MRB_TT_SCLASS) {
-          for (struct RClass* c = mrb_class_ptr(scope); c;) {
-            if (!MRB_FLAG_TEST(c, MRB_FL_CLASS_IS_PREPENDED) && mrb_const_defined_at(M, mrb_obj_value(c), name)) {
-              *ok = TRUE;
-              return mrb_const_get(M, scope, name);
-            }
-            c = c->super;
-            if (c == M->object_class) break;
-          }
-          *ok = FALSE;
-          return mrb_nil_value();
+      // The order of mrb_vm_const_get (3rd/mruby/src/variable.c): the own table of each lexical scope, innermost
+      // first and Object last, then the ancestors of the innermost scope (const_get with skip). A miss is answered
+      // without raising until the end, where mrb_const_get runs const_missing on the innermost scope as the VM does.
+      static inline bool bc2cpp_const_own(mrb_state* M, mrb_value scope, mrb_sym name, mrb_value* out) {
+        if (!(mrb_class_p(scope) || mrb_module_p(scope) || mrb_sclass_p(scope)) || !mrb_iv_defined(M, scope, name)) {
+          return false;
         }
-        Bc2cppConstLookupCtx ctx{scope, name};
-        mrb_bool err = FALSE;
-        mrb_value result = mrb_protect_error(M, bc2cpp_const_lookup_body, &ctx, &err);
-        *ok = !err;
-        return result;
+        *out = mrb_iv_get(M, scope, name);
+        return true;
+      }
+      static mrb_value bc2cpp_const_inherited(mrb_state* M, mrb_value scope, mrb_sym name) {
+        if (mrb_class_p(scope) || mrb_module_p(scope) || mrb_sclass_p(scope)) {
+          struct RClass* base = mrb_class_ptr(scope);
+          struct RClass* c = base->super;
+          for (bool retried = false;; retried = true, c = M->object_class) {
+            for (; c; c = c->super) {
+              if (MRB_FLAG_TEST(c, MRB_FL_CLASS_IS_PREPENDED)) continue;
+              mrb_value v;
+              if (bc2cpp_const_own(M, mrb_obj_value(c->tt == MRB_TT_ICLASS ? c->c : c), name, &v)) return v;
+            }
+            if (retried || base->tt != MRB_TT_MODULE) break;
+          }
+        }
+        return mrb_const_get(M, scope, name);
       }
 
     CPP
