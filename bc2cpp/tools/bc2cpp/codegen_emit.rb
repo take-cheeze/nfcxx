@@ -162,7 +162,10 @@ class CodeGen
         }
       CPP
     end
-    # The stub also serves the hand-written registrations a HAND_REGISTRATION_GUARD wraps (any owner).
+    # LEFT_OUT: what stands in for an entry the build leaves out of the tables. A verify build registers the stub
+    # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
+    # from its cause; a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb). The hand-written registrations a
+    # HAND_REGISTRATION_GUARD wraps (any owner) call it too.
     if compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
@@ -176,6 +179,17 @@ class CodeGen
           abort();
         }
         #endif
+        [[maybe_unused]] static void bc2cpp_left_out(mrb_state* M, struct RClass* c, const char* name, mrb_bool singleton) {
+        #if defined(BC2CPP_UNREGISTERED_VERIFY)
+          if (singleton) mrb_define_class_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+          else mrb_define_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+        #elif defined(BC2CPP_RESPOND_TO_PHANTOM)
+          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
+          bc2cpp_phantom_add(M, owner, mrb_intern_cstr(M, name));
+        #else
+          (void)M; (void)c; (void)name; (void)singleton;
+        #endif
+        }
       CPP
     end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
@@ -197,11 +211,7 @@ class CodeGen
         end
         if unregistered.include?("#{owner}##{m[:name]}")
           out << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
-          # UNREGISTERED_VERIFY: a verify build registers a stub under the name, so a lookup the proof missed
-          # aborts naming the method instead of raising a NoMethodError far from its cause.
-          out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n" \
-                 "  #{singleton ? 'mrb_define_class_method' : 'mrb_define_method'}(M, #{var}, " \
-                 "#{c_string_literal(m[:name])}, bc2cpp_unregistered_stub, MRB_ARGS_ANY());\n#endif\n"
+          out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(m[:name])}, #{singleton});\n"
           next
         end
         names = [m[:name]]
@@ -708,56 +718,35 @@ class CodeGen
     CPP
   end
 
-  # GETCONST's owner-scope-first helper (see compile_insn). mrb_const_get raises
-  # via longjmp, so it cannot be tried then polled; mrb_protect_error
-  # (mruby/error.h) takes a C function pointer and a void* payload, hence
-  # LookupCtx/lookup_body as a static function. Emitted once, only when used.
+  # GETCONST's lexical lookup helpers (see compile_insn's GETCONST). Emitted once, only when used.
   def emit_const_lookup_helper
     return '' unless const_lookup_helper_used?
 
     <<~CPP
-      // Shared by every GETCONST site whose owner isn't Object -- tries one
-      // scope in the owner's own real lexical nesting chain and reports
-      // success via *ok rather than choosing a fallback itself, so the call
-      // site (compile_insn's own GETCONST case) can walk the whole chain,
-      // innermost scope first, the way real Ruby constant lookup does. See
-      // that comment for why this has to be mrb_protect_error-based rather
-      // than a simpler try/poll (a raw mrb_const_get failure longjmps
-      // straight past any code that would poll mrb->exc afterward).
-      struct Bc2cppConstLookupCtx { mrb_value scope; mrb_sym name; };
-      static mrb_value bc2cpp_const_lookup_body(mrb_state* M, void* ud) {
-        Bc2cppConstLookupCtx* ctx = (Bc2cppConstLookupCtx*)ud;
-        return mrb_const_get(M, ctx->scope, ctx->name);
-      }
-      static mrb_value bc2cpp_const_try(mrb_state* M, mrb_value scope, mrb_sym name, mrb_bool* ok) {
-        // A miss is the common case (most scopes in the chain do not define the
-        // name), and mrb_const_get reports one by raising NameError, which
-        // allocates an exception, its message and a backtrace before
-        // mrb_protect_error swallows it -- measured at ~70k allocations/s in the
-        // RPG2k map scene. Answer the miss without raising: walk the same
-        // ancestor chain const_get_nohook does (3rd/mruby/src/variable.c: the
-        // scope and its superclasses/included modules, skipping a prepended
-        // origin, stopping before Object) using the public defined_at test, and
-        // only call mrb_const_get once the name is known to be there. It also
-        // stops running a user const_missing on an intermediate scope, which
-        // Ruby's lexical lookup never does.
-        if (mrb_type(scope) == MRB_TT_CLASS || mrb_type(scope) == MRB_TT_MODULE || mrb_type(scope) == MRB_TT_SCLASS) {
-          for (struct RClass* c = mrb_class_ptr(scope); c;) {
-            if (!MRB_FLAG_TEST(c, MRB_FL_CLASS_IS_PREPENDED) && mrb_const_defined_at(M, mrb_obj_value(c), name)) {
-              *ok = TRUE;
-              return mrb_const_get(M, scope, name);
-            }
-            c = c->super;
-            if (c == M->object_class) break;
-          }
-          *ok = FALSE;
-          return mrb_nil_value();
+      // The order of mrb_vm_const_get (3rd/mruby/src/variable.c): the own table of each lexical scope, innermost
+      // first and Object last, then the ancestors of the innermost scope (const_get with skip). A miss is answered
+      // without raising until the end, where mrb_const_get runs const_missing on the innermost scope as the VM does.
+      static inline bool bc2cpp_const_own(mrb_state* M, mrb_value scope, mrb_sym name, mrb_value* out) {
+        if (!(mrb_class_p(scope) || mrb_module_p(scope) || mrb_sclass_p(scope)) || !mrb_iv_defined(M, scope, name)) {
+          return false;
         }
-        Bc2cppConstLookupCtx ctx{scope, name};
-        mrb_bool err = FALSE;
-        mrb_value result = mrb_protect_error(M, bc2cpp_const_lookup_body, &ctx, &err);
-        *ok = !err;
-        return result;
+        *out = mrb_iv_get(M, scope, name);
+        return true;
+      }
+      static mrb_value bc2cpp_const_inherited(mrb_state* M, mrb_value scope, mrb_sym name) {
+        if (mrb_class_p(scope) || mrb_module_p(scope) || mrb_sclass_p(scope)) {
+          struct RClass* base = mrb_class_ptr(scope);
+          struct RClass* c = base->super;
+          for (bool retried = false;; retried = true, c = M->object_class) {
+            for (; c; c = c->super) {
+              if (MRB_FLAG_TEST(c, MRB_FL_CLASS_IS_PREPENDED)) continue;
+              mrb_value v;
+              if (bc2cpp_const_own(M, mrb_obj_value(c->tt == MRB_TT_ICLASS ? c->c : c), name, &v)) return v;
+            }
+            if (retried || base->tt != MRB_TT_MODULE) break;
+          }
+        }
+        return mrb_const_get(M, scope, name);
       }
 
     CPP
@@ -922,6 +911,67 @@ class CodeGen
     else
       !core_only
     end
+  end
+
+  # RESPOND_TO_PHANTOM (closed build): the closed proof lets `respond_to?(:name)` take a Symbol that names a method
+  # the build leaves out of the tables (SYMBOL_USES, static_dispatch_symbol_uses.rb), so respond_to? must still answer
+  # true for it. bc2cpp_left_out (LEFT_OUT) records each left-out entry's class in one table shared by every compiled
+  # gem; mrb_respond_to (renamed below, for the generated code) and the Kernel#respond_to? it installs consult it when
+  # the method table says no. mruby's respond_to? ignores visibility and the closed world has no UNDEF, so "the
+  # receiver is a kind of an owner of the entry" is the whole answer.
+  def self.respond_to_phantom_runtime
+    <<~'CPP'
+        #define BC2CPP_RESPOND_TO_PHANTOM 1
+        [[maybe_unused]] static mrb_value bc2cpp_phantom_table(mrb_state* M) {
+          return mrb_iv_get(M, mrb_obj_value(M->kernel_module), mrb_intern_lit(M, "__bc2cpp_left_out__"));
+        }
+        [[maybe_unused]] static mrb_bool bc2cpp_phantom_responds(mrb_state* M, mrb_value obj, mrb_sym id) {
+          mrb_value table = bc2cpp_phantom_table(M);
+          if (!mrb_hash_p(table)) return FALSE;
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_symbol_value(id), mrb_nil_value());
+          if (!mrb_array_p(owners)) return FALSE;
+          for (mrb_int i = 0; i < RARRAY_LEN(owners); i++) {
+            if (mrb_obj_is_kind_of(M, obj, mrb_class_ptr(RARRAY_PTR(owners)[i]))) return TRUE;
+          }
+          return FALSE;
+        }
+        [[maybe_unused]] static inline mrb_bool bc2cpp_mrb_respond_to(mrb_state* M, mrb_value obj, mrb_sym id) {
+          return mrb_respond_to(M, obj, id) || bc2cpp_phantom_responds(M, obj, id);
+        }
+        // The first gem's install keeps mruby's own Kernel#respond_to? (kernel.c obj_respond_to) and answers with it,
+        // then with the table; a later gem only adds to the table.
+        static mrb_func_t bc2cpp_original_respond_to = nullptr;
+        [[maybe_unused]] static mrb_value bc2cpp_kernel_respond_to(mrb_state* M, mrb_value self) {
+          mrb_value answer = bc2cpp_original_respond_to(M, self);
+          if (mrb_test(answer)) return answer;
+          mrb_sym id;
+          mrb_bool priv = FALSE;
+          mrb_get_args(M, "n|b", &id, &priv);
+          return mrb_bool_value(bc2cpp_phantom_responds(M, self, id));
+        }
+        [[maybe_unused]] static void bc2cpp_phantom_add(mrb_state* M, struct RClass* owner, mrb_sym id) {
+          mrb_value kernel = mrb_obj_value(M->kernel_module);
+          mrb_value table = bc2cpp_phantom_table(M);
+          if (!mrb_hash_p(table)) {
+            struct RClass* k = M->kernel_module;
+            mrb_method_t m = mrb_method_search_vm(M, &k, mrb_intern_lit(M, "respond_to?"));
+            if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) {
+              mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: RESPOND_TO_PHANTOM: Kernel#respond_to? is not mruby's native");
+            }
+            bc2cpp_original_respond_to = MRB_METHOD_CFUNC(m);
+            table = mrb_hash_new(M);
+            mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out__"), table);
+            mrb_define_method(M, M->kernel_module, "respond_to?", bc2cpp_kernel_respond_to, MRB_ARGS_ARG(1, 1));
+          }
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_symbol_value(id), mrb_nil_value());
+          if (!mrb_array_p(owners)) {
+            owners = mrb_ary_new(M);
+            mrb_hash_set(M, table, mrb_symbol_value(id), owners);
+          }
+          mrb_ary_push(M, owners, mrb_obj_value(owner));
+        }
+        #define mrb_respond_to bc2cpp_mrb_respond_to
+    CPP
   end
 
   # HAND_REGISTRATION_GUARD: one `#define BC2CPP_UNREGISTERED_<entry> 1` per compiled entry this build leaves
