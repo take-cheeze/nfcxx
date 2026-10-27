@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# The .weak directives of EDG's generated C (tools/weak-symbols, the C++ port of the former scripts/weak-symbols.rb):
+# scripts/weak-symbols [--c-input] [--sym-prefix=P] [--marked=FILE] PREPROCESSED_C ASSEMBLY appends them to ASSEMBLY.
+# Builds build/weak-symbols on first use. Compiles run in parallel (one back end per object), so the build is serialized
+# by a lock directory, as the driver's ensure_tool does. NFCXX_WEAK_SYMBOLS_RB=SCRIPT runs an mruby script with the
+# same arguments instead (tests/mruby: the oracle tests/mruby/oracle/weak-symbols.rb).
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [ -n "${NFCXX_WEAK_SYMBOLS_RB:-}" ]; then exec "$root/scripts/mrb" "$NFCXX_WEAK_SYMBOLS_RB" "$@"; fi
+exe=$root/build/weak-symbols lock=$root/build/weak-symbols.lock waited=0
+if [ ! -x "$exe" ]; then
+  mkdir -p "$root/build"
+  until [ -x "$exe" ]; do
+    if mkdir "$lock" 2>/dev/null; then   # this run builds; the others wait for the binary
+      rc=0; [ -x "$exe" ] || ninja -C "$root/tools/weak-symbols" >&2 || rc=$?
+      rmdir "$lock"
+      [ $rc = 0 ] || exit $rc
+      break
+    fi
+    sleep 0.2; waited=$((waited + 1))
+    [ "$waited" -lt 3000 ] || { echo "weak-symbols: $lock is stuck (remove it if no build is running)" >&2; exit 1; }
+  done
+fi
+exec "$exe" "$@"

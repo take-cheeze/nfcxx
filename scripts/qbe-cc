@@ -151,13 +151,13 @@ if [ -n "$sretobj" ]; then
 fi
 trace_end "$t" "cc -E (preprocess)" qbe-backend
 # cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.rb rewrites
-# just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after weak-symbols.rb.
+# just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after the weak directives (scripts/weak-symbols).
 # The C-input mode (hand-written C) is an argument: the mruby interpreter has no ENV.
 t=$(trace_start)
 prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
 # NFCXX_QBE_DCE=1: qbe-prep.rb drops the definitions of static functions nothing uses (what gcc does by not emitting them).
 # cproc and QBE compile every one, so a file that includes a big header of static inline functions pays for all of them.
-# The assembly is smaller, not identical, so it is opt-in; weak-symbols.rb gets only --c-input.
+# The assembly is smaller, not identical, so it is opt-in; scripts/weak-symbols gets only --c-input.
 prepdce=(); [ -z "${NFCXX_QBE_DCE:-}" ] || prepdce=(--dce)
 # Mach-O targets: qbe-prep.rb lists constructors in __mod_init_func with the "_" label prefix
 macho=(); [ $macos = 1 ] && macho=(--macho)
@@ -239,14 +239,14 @@ symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
 # --marked: the inline-asm side file, where cproc already wrote the .weak of hand-written C's weak attribute
 marked=(); [ ${#asmarg[@]} -eq 0 ] || marked=(--marked="$tmp/asm.s")
-"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${marked[@]+"${marked[@]}"} "$tmp/prep.c" "$tmp/out.s"
+"$(dirname "$0")/weak-symbols" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${marked[@]+"${marked[@]}"} "$tmp/prep.c" "$tmp/out.s"
 # Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
 # __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
-# that text (weak-symbols.rb gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
+# that text (scripts/weak-symbols gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
 if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
   if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
      grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
-    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input ${marked[@]+"${marked[@]}"} "$tmp/pp.weak.c" "$tmp/out.s"
+    "$(dirname "$0")/weak-symbols" --c-input ${marked[@]+"${marked[@]}"} "$tmp/pp.weak.c" "$tmp/out.s"
   fi
 fi
 cat "$tmp/tail.s" >> "$tmp/out.s"
@@ -260,7 +260,7 @@ if grep -q '^#nfcxx:ifused ' "$tmp/out.s"; then
        drop { drop = 0; next }
        { print }' "$tmp/out.s" "$tmp/out.s" > "$tmp/out.used.s" && mv "$tmp/out.used.s" "$tmp/out.s"
 fi
-trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
+trace_end "$t" "weak-symbols" qbe-backend
 t=$(trace_start)
 if [ $asm = 1 ]; then
   if [ "$out" = - ]; then cat "$tmp/out.s"; else cp "$tmp/out.s" "${out:-${src%.c}.s}"; fi
