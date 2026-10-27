@@ -177,9 +177,46 @@ class CodeGen
               else "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})"
               end
       "#{dst} = #{value};"
+    elsif attr_reader_inline?(klass, ivar)
+      "#{dst} = #{embedded_reader_value(klass, ivar, recv)}; /* ATTR_READER_INLINE */"
     elsif embedded_accessor_linkable?(klass, ivar)
       "#{dst} = #{sanitize(klass)}_#{sanitize(ivar)}_impl(M, #{recv});"
     end
+  end
+
+  # ATTR_READER_INLINE: the synthesized reader's body (emit_ivar_accessor_pair) in place of the call to it, when
+  # this file emits both the reader and its struct. The body is the same expression, so it holds wherever the call
+  # did; the call was out of line whenever the reader landed in another shard (docs/bc2cpp-attr-reader-inline.md).
+  def attr_reader_inline?(klass, ivar)
+    return false if ENV['BC2CPP_ATTR_READER_INLINE'] == '0'
+    return false unless embedded_accessor?(klass, ivar)
+
+    !@only_owners || (@only_owners.include?(klass) && @only_owners.include?(embed_storage_owner(klass)))
+  end
+
+  # The value of embedded @ivar read from `recv`, an instance of `owner`'s struct family: the synthesized reader's
+  # whole body.
+  def embedded_reader_value(owner, ivar, recv)
+    type = embed_type(owner, ivar)
+    field = "((#{struct_name(owner)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
+    if type != :value then "#{TYPE_OPS.fetch(type)[:box]}(#{field})"
+    elsif slot_reader_assured?(owner, ivar) then field
+    else "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})"
+    end
+  end
+
+  # ATTR_READER_INLINE's guard: `cls == mrb_obj_class(M, recv)` with the object's own class pointer tested first.
+  # A heap object whose `c` is the real class `cls` has mrb_obj_class == cls, so the first test only skips the
+  # call; a singleton class or an immediate falls through to mrb_obj_class.
+  def exact_class_check(owner, recv)
+    cls = owner_class_ptr_expr(owner)
+    "(!mrb_immediate_p(#{recv}) && mrb_obj_ptr(#{recv})->c == #{cls}) || #{cls} == mrb_obj_class(M, #{recv})"
+  end
+
+  # Is the guarded call to `owner`'s `name` an ATTR_READER_INLINE read (so its guard takes exact_class_check)?
+  def inline_reader_arm?(owner, name)
+    type = !name.end_with?('=') && ivar_embed_type(owner, name)
+    type && type != :unknown && attr_reader_inline?(owner, name)
   end
 
   # IVAR_ACCESS's write half: the statement storing `src` into @ivar, or nil.
@@ -343,6 +380,10 @@ class CodeGen
       check = ([target.owner] + inherited[target.owner]).map do |owner|
         "#{owner_class_ptr_expr(owner)} == #{recv_class}"
       end.join(' || ')
+      if !hoist && inherited[target.owner].empty? && target.kind == :ivar_accessor && target.irep.nil? &&
+         inline_reader_arm?(target.owner, name)
+        check = exact_class_check(target.owner, recv)
+      end
       call = if target.kind == :ivar_accessor && target.irep.nil?
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c), or the
