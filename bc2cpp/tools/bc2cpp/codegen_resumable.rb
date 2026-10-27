@@ -268,6 +268,7 @@ class CodeGen
       "  R[0] = #{value};",
       "  F->state = #{state};",
       '  bc2cpp_step_guard.yielding = true;',
+      RESUMABLE_SPILL_MARK,
       '  mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));',
       '  return bc2cpp_frame_value;',
       "  Lbc2cpp_resume_#{state}:;",
@@ -349,8 +350,16 @@ class CodeGen
     |\br(?<reg>\d+)\b
   }mx
 
-  # The step function's opening: the frame, the registers as references into it, and the
-  # dispatch to the state saved by the last yield. Only register identifiers need slots.
+  # Placeholder in a yield site for the stores that copy local registers back into the frame.
+  RESUMABLE_SPILL_MARK = '  // RESUMABLE_SPILL'
+  # `&rN` outside literals and comments: a pointer to a register that may outlive the step.
+  RESUMABLE_REGISTER_ADDRESS = /(?<![&\w])&\s*r\d+\b/
+
+  # The step function's opening: the frame, the registers, and the dispatch to the state saved
+  # by the last yield. Only register identifiers need slots.
+  # RESUMABLE_LOCAL_REGISTERS: the registers are C++ locals, loaded on entry and stored back at each
+  # yield (docs/bc2cpp-resumable-locals.md). A body that takes a register's address keeps references
+  # into the frame, since that pointer must reach the same cell after a resume.
   def resumable_step_function(step_name, body)
     registers = Set[0]
     # Literal contents and comments cannot name frame registers. R[0] and R[1]
@@ -359,15 +368,20 @@ class CodeGen
       reg = Regexp.last_match[:reg]
       registers << reg.to_i if reg
     end
+    code_only = body.gsub(RESUMABLE_REGISTER_TOKENS) { |token| token.match?(/\Ar\d+\z/) ? token : ' ' }
     registers = registers.sort
     nregs = registers.size
+    locals = ENV['BC2CPP_RESUMABLE_LOCALS'] != '0' && !code_only.match?(RESUMABLE_REGISTER_ADDRESS)
+    spill = registers.each_with_index.map { |reg, slot| "R[#{slot + 2}] = r#{reg};" }.join(' ')
+    body = body.gsub(/^#{Regexp.escape(RESUMABLE_SPILL_MARK)}$/) { locals ? "  #{spill}" : '' }
     out = String.new
     out << "static mrb_value #{step_name}(mrb_state* M, mrb_value self, mrb_value bc2cpp_frame_value, mrb_value bc2cpp_resume) {\n"
     out << "  Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &bc2cpp_frame_value, #{nregs}, #{@resumable.slot_count});\n"
     out << "  mrb_value bc2cpp_regs_ary = bc2cpp_resume_regs(M, bc2cpp_frame_value);\n"
     out << "  mrb_value* R = F->regs;\n"
     out << "  Bc2cppStepGuard bc2cpp_step_guard(F);\n"
-    registers.each_with_index { |reg, slot| out << "  mrb_value& r#{reg} = R[#{slot + 2}];\n" }
+    out << "  // RESUMABLE_LOCAL_REGISTERS\n" if locals
+    registers.each_with_index { |reg, slot| out << "  mrb_value#{'&' unless locals} r#{reg} = R[#{slot + 2}];\n" }
     out << "  const mrb_int bc2cpp_state = F->state;\n"
     out << "  if (bc2cpp_state != 0) R[1] = bc2cpp_resume;\n"
     out << "  r0 = self;\n"
