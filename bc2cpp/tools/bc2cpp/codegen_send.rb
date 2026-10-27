@@ -928,7 +928,12 @@ class CodeGen
                     <<~CPP.chomp
                       mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
                       mrb_int bc2cpp_mod_right = mrb_fixnum(#{right});
-                      if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
+                      // MOD_POW2_CONSTANT: floor modulo by a positive power of two is the low-bit
+                      // mask for either sign; the test folds away unless the divisor is a constant.
+                      if (__builtin_constant_p(bc2cpp_mod_right) && bc2cpp_mod_right > 0 &&
+                          (bc2cpp_mod_right & (bc2cpp_mod_right - 1)) == 0) {
+                        r#{d} = mrb_fixnum_value(bc2cpp_mod_left & (bc2cpp_mod_right - 1));
+                      } else if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
                         r#{d} = mrb_fixnum_value(0);
                       } else {
                         mrb_int bc2cpp_mod_value = bc2cpp_mod_left % bc2cpp_mod_right;

@@ -1100,8 +1100,12 @@ class CodeGen
     CPP
 
     if op == :EQ
+      # INTEGER_PAIR_EQ: mrb_obj_eq on two Integers is their value equality, so testing the
+      # pair ahead of identity gives OP_EQ's answer without the out-of-line mrb_obj_eq call.
       <<~CPP
-        if (mrb_obj_eq(M, r#{d}, r#{s})) {
+        if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
+          r#{d} = mrb_bool_value(mrb_integer(r#{d}) == mrb_integer(r#{s}));
+        } else if (mrb_obj_eq(M, r#{d}, r#{s})) {
           r#{d} = mrb_true_value();
         } else if (mrb_symbol_p(r#{d})) {
           // OP_EQ: a symbol receiver that is not identical is unequal, no send.
