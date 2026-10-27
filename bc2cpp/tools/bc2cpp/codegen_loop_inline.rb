@@ -485,8 +485,9 @@ class CodeGen
   # mrblib/range.rb's integer fast path:
   #   - the element is the counter, boxed through FIXABLE (a bound past the Fixnum range);
   #   - beg/end/excl are read once (Ranges are frozen by range_initialize);
-  #   - `excl ? i < e : i <= e` instead of mrblib's `lim = end + 1`, which
-  #     overflows at MRB_INT_MAX;
+  #   - `excl ? i < e : i <= e` instead of mrblib's `lim = end + 1`;
+  #   - RANGE_EACH_INT_MAX: an inclusive end at MRB_INT_MAX takes the send: there `lim` is a bigint, which cmpnum
+  #     compares with a non-Fixnum Integer as doubles, so with a 64-bit mrb_int the interpreter stops short of it;
   #   - RANGE_EACH_GUARD: the loop is the then-arm of mrb_range_p AND mrb_integer_p beg/end; any other Range
   #     (String, Float or bigint edges, endless) falls through to the ordinary send (range_each_guarded_glue).
   #     The real excl flag (mrb_range_excl_p) is used, never `begin == end`.
@@ -510,6 +511,7 @@ class CodeGen
     out << "    mrb_int bc2cpp_range_a_#{addr} = mrb_integer(mrb_range_beg(M, #{recv}));\n"
     out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(mrb_range_end(M, #{recv}));\n"
     out << "    mrb_bool bc2cpp_range_x_#{addr} = mrb_range_excl_p(M, #{recv});\n"
+    out << "    if (!bc2cpp_range_x_#{addr} && bc2cpp_range_z_#{addr} == MRB_INT_MAX) goto #{range_each_send_label(region)};\n"
     # The step is at the iteration label, not in the header, so an end at MRB_INT_MAX cannot
     # wrap; an end between the Fixnum and mrb_int ranges boxes through mrb_int_value.
     out << "    for (mrb_int bc2cpp_range_i_#{addr} = bc2cpp_range_a_#{addr}; " \
