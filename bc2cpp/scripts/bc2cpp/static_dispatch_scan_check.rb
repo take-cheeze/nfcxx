@@ -13,6 +13,10 @@
 #   BYTECODE_PROC: what counts as generated C building a proc over a bytecode irep (which keeps every block of a
 #     registered compiled method runnable as bytecode).
 #   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources, nor the workflows.
+#   SYMBOL_USES (needs MRBC for its bytecode half): with the closed bytecode's every name-taking call (send,
+#     inject, to_enum, a `&` block, ...) on literals, only those literals name a looked-up method, and a generated
+#     symbol only made into a value, compared or listed as a keyword name is no lookup. A computed name to such a
+#     call, an UNDEF or a call that lists methods refuses. LEFT_OUT calls look nothing up.
 #   SUFFIX_BASES: `x=` / `x?` / `x!` follows a dynamic `x` only when `x` was read as text (a Ruby text scan, a naming
 #     macro's argument); an exact name from bytecode or a C literal keeps its own suffix only. A pool literal "=",
 #     "?" or "!" that may reach a built string (FRAGMENT_USES) puts the rule back for every name.
@@ -112,6 +116,26 @@ check('non-lookup: only nomethod / nil_receiver / hint_violation uses', free.inc
 check('non-lookup: a bc2cpp_send use is a lookup', !free.include?('sent'))
 check('non-lookup: a bc2cpp_sym(M, i) use is a lookup', !free.include?('symbol'))
 check('non-lookup: an owner call next to a guard violation is a lookup', !free.include?('mixed'))
+values = <<~'CPP'
+  static const char* const bc2cpp_sym_names[4] = {
+    "as_value",
+    "compared",
+    "keyword",
+    "called",
+  };
+  r1 = mrb_symbol_value(bc2cpp_sym(M, 0));
+  r2 = mrb_bool_value(mrb_symbol_p(r1) && mrb_symbol(r1) == bc2cpp_sym(M, 1));
+  mrb_sym bc2cpp_kw_table[1] = { bc2cpp_sym(M, 2) };
+  r3 = bc2cpp_funcall_argv(M, r0, bc2cpp_sym(M, 3), 0, nullptr);
+  r4 = mrb_symbol_value(bc2cpp_sym(M, 3));
+CPP
+quiet_values = S.lookup_free_names(values, {}, symbol_values: true)
+check('symbol uses: a symbol value, a comparison and a keyword name are no lookup',
+      quiet_values.include?('as_value') && quiet_values.include?('compared') && quiet_values.include?('keyword'))
+check('symbol uses: a by-name call of the symbol is one, beside a value use', !quiet_values.include?('called'))
+check('symbol uses: without SYMBOL_USES a symbol value is a lookup', S.lookup_free_names(values, {}).empty?)
+check('left out: a bc2cpp_left_out call is no name literal',
+      S.c_literals(%(bc2cpp_left_out(M, picture, "finish_zoom", false);\n mrb_funcall(M, v, "kept", 0);)) == ['kept'])
 
 # --- BYTECODE_PROC ---
 check('bytecode proc: mrb_proc_new / mrb_closure_new',
@@ -227,6 +251,48 @@ if ENV['MRBC']
     check('fragment uses: an element of a duped array handed out is one', escaping.include?('duped_elem_word'))
     check('fragment uses: an element of a frozen array only queried is no fragment',
           !escaping.include?('frozen_elem_word'))
+    # --- SYMBOL_USES ---
+    symbols = File.join(tmp, 'symbols.rb')
+    File.write(symbols, <<~'RUBY')
+      class FixSym
+        def keyed(h) = h[:hash_key_sym]
+        def probe(o) = o.respond_to?(:probed_sym)
+        def labelled(x) = x == :compared_sym
+        def summed(list) = list.reduce(0) { |s, e| s + e }
+        def mapped(list) = list.map(&:block_sym)
+        def forwarded(list, &blk) = list.each(&blk)
+        def enumerated = to_enum(:enum_sym)
+      end
+    RUBY
+    sym_ireps, = compile_ireps([symbols], 'static_dispatch_scan_check_sym', tmp, mrbc: ENV['MRBC'])
+    found = StaticDispatchSymbolUses.lookups(sym_ireps)
+    check('symbol uses: literal name-taking calls pass, and only their literals name a method',
+          found == Set['block_sym', 'enum_sym'])
+    refused = File.join(tmp, 'symbols_refused.rb')
+    File.write(refused, <<~'RUBY')
+      class FixSymRefused
+        def computed(o, name) = o.send(name)
+      end
+    RUBY
+    refused_ireps, = compile_ireps([refused], 'static_dispatch_scan_check_sym_refused', tmp, mrbc: ENV['MRBC'])
+    check('symbol uses: a computed name to send refuses', StaticDispatchSymbolUses.lookups(refused_ireps).nil?)
+    blockvar = File.join(tmp, 'symbols_block_var.rb')
+    File.write(blockvar, <<~'RUBY')
+      class FixSymBlockVar
+        def passed(list, name) = list.map(&name)
+      end
+    RUBY
+    blockvar_ireps, = compile_ireps([blockvar], 'static_dispatch_scan_check_sym_block', tmp, mrbc: ENV['MRBC'])
+    check('symbol uses: a block argument from a parameter refuses', StaticDispatchSymbolUses.lookups(blockvar_ireps).nil?)
+    listing = File.join(tmp, 'symbols_listing.rb')
+    File.write(listing, <<~'RUBY')
+      class FixSymListing
+        def listed(o) = o.methods.size
+      end
+    RUBY
+    listing_ireps, = compile_ireps([listing], 'static_dispatch_scan_check_sym_listing', tmp, mrbc: ENV['MRBC'])
+    check('symbol uses: a call that lists methods refuses', StaticDispatchSymbolUses.lookups(listing_ireps).nil?)
+
     suffixes = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, Set.new, S::SUFFIX_LITERAL)
     check('suffix: a "=" building a setter name reaches a built string', suffixes.include?('='))
     check('suffix: a compared "!" does not', !suffixes.include?('!'))

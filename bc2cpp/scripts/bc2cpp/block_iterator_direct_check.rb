@@ -28,6 +28,9 @@ require_relative 'fixture_runtime'
 
 # The fixture is checked against the shipped signature files of no program: they name engine classes it lacks.
 ENV['BC2CPP_SIG_DIRS'] = ''
+# The `loop { }` fixtures check the call to the compiled Kernel#loop; KERNEL_LOOP_INLINE would inline them instead
+# (scripts/bc2cpp/kernel_loop_check.rb covers that form).
+ENV['BC2CPP_KERNEL_LOOP'] = '0'
 
 failures = []
 check = lambda do |what, condition|
