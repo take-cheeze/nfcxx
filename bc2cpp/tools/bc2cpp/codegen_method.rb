@@ -303,6 +303,7 @@ class CodeGen
       out << emit_register_initializers(irep.nregs, initial)
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
+      out << array_hash_fixnum_prologue(d)
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
         # allocate the struct before any embedded SETIV.
