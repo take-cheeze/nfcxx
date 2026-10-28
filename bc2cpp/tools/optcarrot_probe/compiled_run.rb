@@ -142,19 +142,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     # method inside a compiled class happening to fit bc2cpp's supported
     # subset.
     'SKIP_UNSUPPORTED' => '1',
-    # BC2CPP_SELF_REGISTERING: bc2cpp.rb's own EMBED_WIRED allowlist
-    # (compiled_gems.rb's BC2CPP_WIRED_EMBEDDINGS) names only the project's
-    # classes. This file's own `emit_register` below installs every
-    # compiled method of any owner its own `embeds` diagnostic names (see
-    # that function's own comment), computed from the exact same
-    # diagnostic bc2cpp.rb itself prints, so "embeddable" and
-    # "installed" cannot drift apart. Setting this tells bc2cpp.rb's driver
-    # to skip that allowlist (nothing in this closed world is on it
-    # anyway -- it names only real-project classes) and let every ivar
-    # IvarLayout/drop_unsafe_embeddings themselves already proved safe
-    # actually embed, instead of silently falling back to the ordinary
-    # dynamic ivar table the way every Optcarrot::CPU/PPU field has,
-    # unconditionally, since this file was first written.
+    # BC2CPP_SELF_REGISTERING: this file's own `emit_register` below installs every compiled method of any
+    # owner its `embeds` diagnostic names (the same diagnostic bc2cpp.rb prints), so "embeddable" and
+    # "installed" cannot drift apart. It also lets embed families fold (CodeGen.engine_registrations stays nil).
     'BC2CPP_SELF_REGISTERING' => '1',
     # sig/bc2cpp describes RPG engine classes that the optcarrot program does not define (RBS_SIGNATURES would abort).
     'BC2CPP_SIG_DIRS' => '',

@@ -33,12 +33,12 @@ class CodeGen
     predicate ? "#{predicate}(#{expr})" : "mrb_type(#{expr}) == #{tag}"
   end
 
-  # EMBED_WIRED (compiled_gems.rb BC2CPP_WIRED_EMBEDDINGS): nil leaves embedding
-  # unrestricted (unit checks); the driver sets it for a real gem build.
+  # engine_registrations: set by the driver for an engine gem build, whose registrations wire each owner on its
+  # own (embed_family_foldable?); nil for self-registering worlds (fixtures, the optcarrot probe).
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in
   # storage order); nil proves nothing.
   class << self
-    attr_accessor :wired_embeddings, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
+    attr_accessor :engine_registrations, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
                   :integer_constant_values, :integer_constant_keys, :integer_constant_ranges, :constant_value_classes,
                   :module_names, :core_hidden_defs,
                   :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
@@ -63,7 +63,7 @@ class CodeGen
   # DataType<T> allocation in mruby-rgss/src/lib.cxx (alloc_obj asserts DATA_PTR is null first).
   # A compiled #initialize must not embed an ivar struct in those objects: mrb_data_init would
   # already occupy DATA_PTR before the first native load, so that assertion fails. Their ivars
-  # stay in iv_tbl, whatever BC2CPP_WIRED_EMBEDDINGS lists.
+  # stay in iv_tbl.
   NATIVE_DATA_OWNERS = %w[RGSS::Bitmap].freeze
 
   # box/check/unbox/err per specialized type proof. Ordinary embedded ivars use
@@ -202,8 +202,8 @@ class CodeGen
     @prepended_modules = prepended_modules
     @unknown_mixins = unknown_mixins
     # irep label -> Annotations::Annotation. Also the only trigger for
-    # NATIVE_ARG_TARGETS' native calling convention (never ArgTypes); read by
-    # native_arg_types for compile_method and compile_send.
+    # NATIVE_ARGS' declared Integer positions (never ArgTypes); read by
+    # native_arg_positions.
     @annotations = annotations
     # irep label -> {owner:, name:} for every leaf body. Native MethodDefs have no
     # body.
@@ -253,6 +253,8 @@ class CodeGen
     # fixnum_proof_entry_arg? refuses on nil, so the first
     # compute_fixnum_return_names pass has no circular seeding.
     @entry_arg_fixnum = nil
+    # NATIVE_ARGS: nil (every argument boxed) until the alternation below fixes it.
+    @native_arg_positions = nil
     # ARRAY_RETURN_PROOF: must exist (empty) before drop_unsafe_embeddings, for the
     # same reason as @fixnum_return_names: a recognizer's region is all-or-nothing
     # and otherwise falls back to the `#error`-free BLOCK_FALLBACK, so
@@ -308,6 +310,7 @@ class CodeGen
       compute_fixnum_return_names
       break if @entry_arg_fixnum == before_args && @fixnum_return_names == before_rets
     end
+    @native_arg_positions = native_arg_positions.freeze
     # DECLARED_RETURN_CHECK: every seeded declaration against the final sets.
     check_declared_returns
     # NUMERIC_OPERAND_PROOF reads the sets above; drop flows memoized by the
@@ -318,6 +321,12 @@ class CodeGen
 
   def const_lookup_helper_used?
     @const_lookup_helper_used
+  end
+
+  # NATIVE_ARGS, for the diagnostic: "Owner#name" => the retyped positions.
+  def native_arg_summary
+    (@native_arg_positions || []).group_by { |label, _| @owner_of[label] }
+                                 .to_h { |d, pairs| ["#{d.owner}##{d.name}", pairs.map(&:last).sort] }
   end
 
   # FIXNUM_RETURN_PROOF result, for the diagnostic.
@@ -493,8 +502,8 @@ class CodeGen
   def embed_family_foldable?(root, members)
     family = [root, *members]
     return false if family.any? { |owner| NATIVE_DATA_OWNERS.include?(owner) }
-    # Engine worlds (EMBED_WIRED) keep one layout per chain for now: their registrations wire each owner separately.
-    return false if self.class.wired_embeddings
+    # Engine worlds keep one layout per chain for now: their registrations wire each owner separately.
+    return false if self.class.engine_registrations
 
     @superclass_of.each_key.all? do |klass|
       next true unless strict_subclass?(klass, root)
@@ -542,7 +551,6 @@ class CodeGen
       next if NATIVE_DATA_OWNERS.include?(owner)
       next unless plain_object_ancestry?(owner)
 
-      next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
       init = @registry['initialize']&.find { |d| d.owner == owner }
       next unless init && compiles_clean?(init.irep)
@@ -742,18 +750,29 @@ class CodeGen
     sanitize("#{owner}_#{name}")
   end
 
-  # NATIVE_ARG_TARGETS' per-position types, shared by compile_method (signature)
-  # and compile_send (call-site unboxing) so they cannot disagree. Returns `mand`
-  # slots of :fixnum/:symbol or nil (plain mrb_value). Requires a real irep AND
-  # NATIVE_ARG_TARGETS membership; an annotation alone is not enough (see that
-  # constant).
+  # NATIVE_ARGS: per-position types, shared by compile_method (signature) and compile_send (call-site unboxing) so
+  # they cannot disagree. Returns `mand` slots of :fixnum or nil (plain mrb_value): a position is mrb_int when its
+  # declaration says Integer and ENTRY_ARG_CALLSITE_PROOF proved every call site passes a Fixnum there
+  # (native_arg_positions), so the entry wrapper's mrb_get_args("i") and a direct call's mrb_as_int never see
+  # anything else. Boxed until that proof is final.
   def native_arg_types(d, mand)
-    return Array.new(mand) unless d.irep && NATIVE_ARG_TARGETS.include?("#{d.owner}##{d.name}")
+    return Array.new(mand) unless d.irep && @native_arg_positions
 
-    ann = @annotations[d.irep]
-    return Array.new(mand) unless ann
+    Array.new(mand) { |i| @native_arg_positions.include?([d.irep, i + 1]) ? :fixnum : nil }
+  end
 
-    Array.new(mand) { |i| ann.args[i] }
+  # NATIVE_ARGS: the [irep label, position] pairs native_arg_types retypes, fixed once the ENTRY_ARG_CALLSITE_PROOF
+  # alternation has converged. A DIRECT_CONSTRUCT_TARGETS class's #initialize stays boxed: retyped, it would turn
+  # its direct construct path off (compile_send, NATIVE_ARG_TYPES_STAY_BOXED).
+  def native_arg_positions
+    return Set.new if ENV['BC2CPP_NATIVE_ARGS'] == '0' || @entry_arg_fixnum.nil?
+
+    @entry_arg_fixnum.select do |label, k|
+      d = @owner_of[label]
+      ann = @annotations[label]
+      d && ann && ann.args[k - 1] == :fixnum &&
+        !(d.name == 'initialize' && DIRECT_CONSTRUCT_TARGETS.include?(d.owner))
+    end.to_set
   end
 
   # C++ type for a native_arg_types slot: C_TYPE.fetch(t) or mrb_value. No

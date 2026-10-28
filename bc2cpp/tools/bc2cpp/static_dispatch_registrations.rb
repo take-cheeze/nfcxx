@@ -56,6 +56,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
+require_relative 'core_native_candidates'
 require_relative 'native_owner_map'
 
 module StaticDispatchRegistrations
@@ -271,22 +272,28 @@ module StaticDispatchRegistrations
       precise, ruby = ruby.partition { |p| p.end_with?('.rb') && p.start_with?(third) }
       precise |= core_compiled_mrblib_srcs(repo_root, BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
                  .map { |p| File.expand_path(p) }
-      ruby += core_bytecode_tokens(precise.sort, tokens, **core)
+      found = Set.new
+      ruby += core_bytecode_tokens(precise.sort, found, **core)
+      tokens.merge(found)
+      cite(found, 'core Ruby sends it to a receiver that may be an engine object')
     end
     (ruby + native).each do |path|
       src = File.read(path, encoding: 'BINARY')
+      found = Set.new
       if closed_only && native.include?(path)
-        native_name_tokens(src, tokens, naming, text_tokens: text)
-        next
+        native_name_tokens(src, found, naming, text_tokens: text)
+      else
+        src.scan(/[A-Za-z_][A-Za-z0-9_]*[?!=]?/) do |t|
+          base = t.chomp('=').chomp('?').chomp('!')
+          found << t << base
+          text << t << base
+        end
+        src.scan(/MRB_(?:Q?SYM)_([QBE])\((\w+)\)/) do |kind, name|
+          found << name + { 'Q' => '?', 'B' => '!', 'E' => '=' }.fetch(kind)
+        end
       end
-      src.scan(/[A-Za-z_][A-Za-z0-9_]*[?!=]?/) do |t|
-        base = t.chomp('=').chomp('?').chomp('!')
-        tokens << t << base
-        text << t << base
-      end
-      src.scan(/MRB_(?:Q?SYM)_([QBE])\((\w+)\)/) do |kind, name|
-        tokens << name + { 'Q' => '?', 'B' => '!', 'E' => '=' }.fetch(kind)
-      end
+      tokens.merge(found)
+      cite(found, "named in #{path.delete_prefix("#{File.expand_path(repo_root)}/")}")
     end
     tokens
   end
@@ -622,22 +629,34 @@ module StaticDispatchRegistrations
     end
 
     dynamic = Set.new(ALWAYS_DYNAMIC)
-    dynamic.merge(symbol_lookups) if symbol_lookups
+    cite(ALWAYS_DYNAMIC, 'always dynamic (ALWAYS_DYNAMIC)')
+    if symbol_lookups
+      dynamic.merge(symbol_lookups)
+      cite(symbol_lookups, 'a Symbol literal that may name a looked-up method (SYMBOL_USES)')
+    end
     fragments = Set.new
     ireps.each_value do |irep|
       BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
         up = method_of[irep.label]
-        dynamic << body_of[up][1] if up
+        next unless up
+
+        dynamic << body_of[up][1]
+        cite([body_of[up][1]], "super in #{body_of[up].join('#')}")
       end
       irep.pool.each do |s|
         next unless s.is_a?(String)
 
-        dynamic << s if s.match?(IDENT)
+        if s.match?(IDENT)
+          dynamic << s
+          cite([s], "a string literal in #{irep_site(irep, method_of, body_of)}")
+        end
         fragments << s if s.match?(FRAGMENT)
       end
     end
-    runs.each_value do |r|
-      dynamic.merge(c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?)))
+    runs.each do |gem, r|
+      literals = c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?))
+      dynamic.merge(literals)
+      cite(literals, "a C string literal in #{gem}'s generated code")
     end
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
     text = Set.new
@@ -665,7 +684,10 @@ module StaticDispatchRegistrations
         name = if send_ops.include?(insn.op) then insn.sym
                elsif insn.op != :LOADSYM then IMPLICIT_DISPATCH_NAMES[insn.op]
                end
-        grew = true if name && into.add?(name)
+        next unless name && into.add?(name)
+
+        grew = true
+        cite([name], "sent by #{irep_site(irep, method_of, body_of)}, which may run as bytecode")
       end
       grew
     end
@@ -685,6 +707,7 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
+    cite(load_names, 'sent while mrblib loads')
     bytecode_blocks = runs.each_value.any? { |r| r[:gen].match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
       m = method_of[label]
@@ -707,8 +730,32 @@ module StaticDispatchRegistrations
       suffix_bases = text if built.empty?
     end
 
+    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }) : nil
+
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
-      closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups }
+      closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups,
+      core_excluded: core_excluded }
+  end
+
+  # CORE_NATIVE_CANDIDATES (closed only): [the core ROM entries the closed build leaves out of its tables, the core
+  # run-time registrations it removes]. Every Ruby
+  # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`) -- and every
+  # native source, with the generated code.
+  def core_excluded(repo_root, mrbc, ireps, generated)
+    _ruby, native = outside_world_files(repo_root, closed_only: true)
+    third = "#{File.expand_path(repo_root)}/3rd/"
+    core_ruby = (Dir["#{third}mruby/mrblib/*.rb"] + Dir["#{third}mruby/mrbgems/*/mrblib/**/*.rb"] +
+                 BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{third}#{g}/mrblib/**/*.rb"] }).sort
+    all = ireps.dup
+    Dir.mktmpdir('bc2cpp_core_natives') do |tmp|
+      core_ruby.each_with_index do |path, i|
+        compile_ireps([path], "core_native_#{i}", tmp, mrbc: mrbc)[0].each { |label, irep| all["#{i}:#{label}"] = irep }
+      end
+    end
+    names, fragments = CoreNativeCandidates.reachable(all, native, generated)
+    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
+    [CoreNativeCandidates.candidates(entries, names, fragments),
+     CoreNativeCandidates.ram_candidates(NativeOwnerMap.build(native), names, fragments, entries)]
   end
 
   LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
@@ -877,6 +924,24 @@ module StaticDispatchRegistrations
     closed_only ? CLOSED_OWNER_RE : NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE
   end
 
+  # WHY (scripts/bc2cpp/dynamic_names_report.rb): when set, the first reason each name became dynamic, by name.
+  class << self
+    attr_accessor :why
+  end
+
+  def cite(names, reason)
+    return unless @why
+
+    names.each { |name| @why[name] ||= reason }
+  end
+
+  def irep_site(irep, method_of, body_of)
+    m = method_of[irep.label]
+    where = m ? body_of[m].join('#') : 'a class body or block at load'
+    file = irep.respond_to?(:file) && irep.file ? " (#{File.basename(irep.file.to_s)})" : ''
+    "#{where}#{file}"
+  end
+
   def eligible(analysis)
     re = owner_re(analysis[:closed_only])
     analysis[:registered].select do |m|
@@ -917,5 +982,15 @@ if $PROGRAM_NAME == __FILE__
     body = keys.empty? ? 'Set[].freeze' : "Set[\n#{keys.map { |k| "  #{k.inspect}," }.join("\n")}\n].freeze"
     File.write(path, src.sub(/^#{const} = Set\[.*?\]\.freeze$/m, "#{const} = #{body}"))
     warn "wrote #{keys.size} name(s) to #{path}"
+    if closed_only
+      path = File.join(__dir__, 'static_dispatch_core_excluded.rb')
+      src = File.read(path)
+      %w[STATIC_DISPATCH_CORE_EXCLUDED STATIC_DISPATCH_CORE_LEFT_OUT].zip(analysis[:core_excluded]) do |const, core|
+        body = core.empty? ? 'Set[].freeze' : "Set[\n#{core.map { |k| "  #{k.inspect}," }.join("\n")}\n].freeze"
+        src = src.sub(/^#{const} = Set\[.*?\]\.freeze$/m, "#{const} = #{body}")
+        warn "wrote #{core.size} #{const} entr(ies) to #{path}"
+      end
+      File.write(path, src)
+    end
   end
 end

@@ -855,11 +855,9 @@ if $PROGRAM_NAME == __FILE__
   # `analysis_only`); the inputs it is not given are never read by
   # compute_array_return_names.
   require_relative 'compiled_gems'
-  # BC2CPP_SELF_REGISTERING: BC2CPP_WIRED_EMBEDDINGS names the project classes
-  # whose embedded layout has been traced end to end. A caller that compiles
-  # another program (tools/optcarrot_probe/compiled_run.rb) sets this to skip
-  # that allowlist; drop_unsafe_embeddings' other checks still run.
-  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
+  # BC2CPP_SELF_REGISTERING: a caller that compiles another program and installs its own registrations
+  # (tools/optcarrot_probe/compiled_run.rb) sets it; an engine build registers each owner on its own.
+  CodeGen.engine_registrations = true unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(File.expand_path('../..', __dir__)),
                                               native_name_sources)
   warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
@@ -1130,7 +1128,7 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  # `annotations` also drives NATIVE_ARG_TARGETS.
+  # `annotations` also drives NATIVE_ARGS (native_arg_types).
   # FIXNUM_RETURN_PROOF / ENTRY_ARG_CALLSITE_PROOF: every identifier token of the
   # outside native and Ruby sources (see outside_world_tokens).
   outside_tokens = outside_world_tokens(native_paths + foreign_ruby_srcs)
@@ -1162,7 +1160,7 @@ if $PROGRAM_NAME == __FILE__
                        IntegerConstants.foreign_const_names(foreign_ruby_srcs)
   warn ''
   # BC2CPP_SELF_REGISTERING: same guard as for the probing CodeGen above.
-  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
+  CodeGen.engine_registrations = true unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   CodeGen.stable_class_constants = profile_call.call('StableClassConstants.analyze') do
     StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs, root_label) |
       StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
@@ -2197,6 +2195,10 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
   warn "== shared === helper (EQQ_DIRECT): #{gen.eqq_helper_site_count(compiled)} sites =="
+  warn ''
+  native_args = gen.native_arg_summary
+  warn "== native arguments (NATIVE_ARGS): #{native_args.size} methods =="
+  native_args.sort.each { |key, positions| warn "  NATIVE_ARG #{key} #{positions.join(',')}" }
   warn ''
   if CodeGen.subtree_facts
     subtree_sites = gen.subtree_site_counts(compiled)

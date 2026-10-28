@@ -14,7 +14,7 @@ class CodeGen
   # Proof sources (facts this file already relies on, not a general prover):
   #   1. A LOADI-family literal within the Fixnum range (see
   #      LOADI_FIXNUM_RANGE).
-  #   2. A NATIVE_ARG_TARGETS :fixnum mandatory argument not reassigned since
+  #   2. A NATIVE_ARGS :fixnum mandatory argument not reassigned since
   #      entry: the C++ parameter is an mrb_int (fixnum_proof_entry_arg?).
   #   3. A GETIV of an ivar embedded as :fixnum: an mrb_int struct field whose
   #      every write is guarded by mrb_integer_p.
@@ -343,7 +343,7 @@ class CodeGen
   end
 
   # Proof source 2: a mandatory argument register of THIS method's own irep whose
-  # NATIVE_ARG_TARGETS parameter is mrb_int (boxed by the preamble).
+  # NATIVE_ARGS parameter is mrb_int (boxed by the preamble).
   # `owner_def.irep == irep.label` is load-bearing: compile_insn also runs on a
   # BLOCK_FALLBACK child irep with the enclosing method's owner_def, and there
   # r1.. are block parameters. pure_mandatory_arity? likewise: with optionals the
@@ -368,7 +368,7 @@ class CodeGen
   # ENTRY_ARG_CALLSITE_PROOF (proof source 7): a mandatory argument register
   # holds a Fixnum on entry because EVERY call site that can reach the method
   # passes a proven Fixnum there (unlike source 2, which is the hand-vetted
-  # NATIVE_ARG_TARGETS retyping).
+  # NATIVE_ARGS retyping, which source 7 itself derives).
   #
   # The enumeration must be exhaustive: a wrong operand proof emits an unchecked
   # mrb_fixnum(), i.e. silent UB. Why it can be:
@@ -441,9 +441,9 @@ class CodeGen
   #   - Block parameters: filled by whatever the callee yields (each, times, a
   #     native mrb_yield), a different enumeration problem.
   #   - Trusting `# bc2cpp: (fixnum, ...)` alone: other consumers re-check at
-  #     runtime (mrb_integer_p guards, the NATIVE_ARG_TARGETS FFI TypeError);
+  #     runtime (mrb_integer_p guards);
   #     this proof has no check by design, so a wrong comment would be silent
-  #     UB. Use NATIVE_ARG_TARGETS after its per-entry review instead.
+  #     UB. NATIVE_ARGS retypes only positions this proof covers.
   # ---------------------------------------------------------------------------
 
   # Bound on the ENTRY_ARG_CALLSITE_PROOF <-> FIXNUM_RETURN_PROOF alternation.

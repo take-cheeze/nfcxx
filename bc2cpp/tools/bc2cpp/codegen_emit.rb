@@ -142,6 +142,8 @@ class CodeGen
     targets = (owners + copies.map { |m| m[:owner] }).uniq.select { |o| by_owner.key?(o) }
     accessors = left_out_accessors(compiled, unregistered)
     natives = left_out_natives(compiled, unregistered)
+    core_rom = left_out_core_rom
+    core_ram = left_out_core_ram
 
     # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
     # mrb_define_method_raw (src/class.c) only forces a singleton-class method
@@ -172,7 +174,8 @@ class CodeGen
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
     # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
     # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
-    if accessors.any? || natives.any? || compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
+    if [accessors, natives, core_rom, core_ram].any?(&:any?) ||
+       compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
         #include <stdio.h>
@@ -220,6 +223,13 @@ class CodeGen
     { 'core' => core_targets, 'program' => program_targets }.each do |part, part_targets|
       out << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
       emit_owner_registration_lines(out, part_targets, by_owner, unregistered)
+      if part == 'core' && core_rom.any?
+        # CORE_NATIVE_CANDIDATES: the build's tables already lack these entries; only a verify build stubs them.
+        out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
+        emit_left_out_native_lines(out, core_rom)
+        out << "#endif\n"
+      end
+      emit_left_out_native_lines(out, core_ram) if part == 'core'
       if part == 'program'
         emit_left_out_accessor_lines(out, accessors)
         emit_left_out_native_lines(out, natives)
@@ -295,6 +305,25 @@ class CodeGen
       end
       out << "    }\n  }\n"
     end
+  end
+
+  # CORE_NATIVE_CANDIDATES: [owner, name] of each core ROM entry the closed build leaves out of its tables
+  # (static_dispatch_core_excluded.rb). The core gem registers them; only a verify build has anything to register.
+  def left_out_core_rom
+    return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
+                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+
+    STATIC_DISPATCH_CORE_EXCLUDED.map { |key| key.split('#', 2) }.sort
+  end
+
+  # CORE_RAM_CANDIDATES: [owner, name] of each core run-time registration the closed build removes
+  # (STATIC_DISPATCH_CORE_LEFT_OUT), from the core gem's core half like a left-out native. A class the build does not
+  # define is skipped (bc2cpp_native_owner).
+  def left_out_core_ram
+    return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
+                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+
+    STATIC_DISPATCH_CORE_LEFT_OUT.map { |key| key.split('#', 2) }.sort
   end
 
   # LEFT_OUT_ACCESSORS: [owner, name] of each listed attr_* accessor of this gem's owners (ONLY_OWNERS) with no
@@ -1213,7 +1242,7 @@ class CodeGen
   end
 
   # `m[:arg_c_types]`: each mandatory position's C++ type (mrb_value, or
-  # mrb_int/mrb_sym for NATIVE_ARG_TARGETS). `self` is never retyped. Absent (an
+  # mrb_int for NATIVE_ARGS). `self` is never retyped. Absent (an
   # `#error` stub) means all mrb_value.
   def decl_line(m)
     arg_c_types = m[:arg_c_types] || Array.new(m[:arity], 'mrb_value')
