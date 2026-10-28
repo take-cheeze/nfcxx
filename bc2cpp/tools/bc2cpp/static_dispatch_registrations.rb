@@ -46,6 +46,7 @@
 # Nothing does that for an RPG2000/2003-internal class today, and a listed name
 # must stay free of dynamic references, or it ships a NoMethodError.
 require 'set'
+require 'strscan'
 require_relative 'bytecode_ir_ops'
 require 'tmpdir'
 require_relative 'compiled_gems'
@@ -254,8 +255,35 @@ module StaticDispatchRegistrations
     if closed_only
       ruby = ruby.reject { |p| p.start_with?(*OTHER_MAKER_GEMS.map { |g| "#{repo_root}/#{g}/" }) }
       native = native.reject { |p| p.start_with?(*OTHER_MAKER_GEMS.map { |g| "#{repo_root}/#{g}/" }) }
+      unlinked = closed_unlinked_dirs(repo_root)
+      # The closed world holds every mrblib file of these gems the closed build loads; one outside it is a file their
+      # mrbgem.rake swaps out there (mruby-rpg2k's scene/map_tts.rb, for mrblib_limited/map_tts_off.rb).
+      world_gems = %w[mruby-rpg2k mruby-lcf mruby-rgss].map { |g| "#{File.expand_path(repo_root)}/#{g}/mrblib/" }
+      ruby = ruby.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked, *world_gems) }
+      native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }
+      native << File.expand_path('scripts/bc2cpp/trace_host.cxx', repo_root)
     end
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
+  end
+
+  # CLOSED_LINKED_ONLY (closed only): the source trees the closed binary does not contain, as directory prefixes.
+  # Their Ruby never loads and their C never runs there, so a name they spell is no lookup in it:
+  #   - a core mruby-* gem outside the closed build's gem closure (bc2cpp_closed_core_gems: mruby-socket,
+  #     mruby-enum-lazy, mruby-complex, ...), and an external gem its rpg_maker_gems lines leave out
+  #     (mruby-onig-regexp);
+  #   - app/, the device firmwares and their tools: the closed binary is the libmruby above linked into
+  #     scripts/bc2cpp/trace_host.cxx (scripts/bc2cpp/trace_host.bash), which outside_world_files scans instead.
+  def closed_unlinked_dirs(repo_root)
+    root = File.expand_path(repo_root)
+    core = bc2cpp_closed_core_gems(root).to_set
+    lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, 'closed', root)
+    # Only mruby-* gems: the closure follows add_dependency lines, and a HAL gem is added by a rake's own Ruby
+    # (mruby-io's `spec.build.gem core: 'hal-posix-io'`), so hal-* stays scanned whatever the closure says.
+    dirs = Dir["#{root}/3rd/mruby/mrbgems/mruby-*/"].map { |d| File.basename(d) }.reject { |g| core.include?(g) }
+                                                    .map { |g| "#{root}/3rd/mruby/mrbgems/#{g}/" }
+    dirs += %w[mruby-marshal mruby-onig-regexp mruby-stringio].reject { |g| lines.key?(g) }
+                                                              .map { |g| "#{root}/3rd/#{g}/" }
+    dirs << "#{root}/app/"
   end
 
   # `core`: with closed_only, the closed world's {mrbc:, superclass_of:, struct_owners:} turns on CORE_BYTECODE_TOKENS
@@ -270,12 +298,21 @@ module StaticDispatchRegistrations
     if closed_only && core
       third = "#{File.expand_path(repo_root)}/3rd/"
       precise, ruby = ruby.partition { |p| p.end_with?('.rb') && p.start_with?(third) }
+      unlinked = closed_unlinked_dirs(repo_root)
       precise |= core_compiled_mrblib_srcs(repo_root, BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
-                 .map { |p| File.expand_path(p) }
+                 .map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }
       found = Set.new
-      ruby += core_bytecode_tokens(precise.sort, found, **core)
+      reflective = core_bytecode_tokens(precise.sort, found, **core)
       tokens.merge(found)
       cite(found, 'core Ruby sends it to a receiver that may be an engine object')
+      reflective.each do |path, names|
+        next ruby << path unless names
+
+        names = names.flat_map { |n| [n, n.chomp('=').chomp('?').chomp('!')] }.to_set
+        tokens.merge(names)
+        text.merge(names)
+        cite(names, "a symbol of #{path.delete_prefix("#{File.expand_path(repo_root)}/")}, which sends a computed name")
+      end
     end
     (ruby + native).each do |path|
       src = File.read(path, encoding: 'BINARY')
@@ -309,7 +346,10 @@ module StaticDispatchRegistrations
   # `super` follows self's rule. Every LOADSYM symbol, implicit-dispatch operator, identifier-shaped pool string
   # and name an ALIAS / UNDEF irep mentions counts whatever its receiver. A file that sends a reflective name
   # (CORE_REFLECTIVE_SENDS: computed sends, eval, instance_exec, define_method, ...) or defines method_missing /
-  # respond_to_missing? keeps the text rule; those are returned for it.
+  # respond_to_missing? loses the receiver rule: every symbol its bytecode holds counts, with every send, operator
+  # and identifier-shaped string as above. Its comments and local variable names do not -- they never become a
+  # symbol, and a name it sends that arrives from its caller (`__send__(@meth)`) is counted where the caller spells it.
+  # Returns { path => names } for those files, names nil (keep the text rule) for one that compiled to no irep.
   CORE_REFLECTIVE_SENDS = %w[
     send __send__ public_send method public_method instance_method singleton_method eval instance_eval
     instance_exec class_eval module_eval class_exec module_exec define_method define_singleton_method
@@ -332,16 +372,23 @@ module StaticDispatchRegistrations
     reflective = ireps.each_value.select { |irep| core_reflective?(irep) }.to_set { |irep| File.expand_path(irep.file.to_s) }
     reflective.merge(paths.reject { |p| ireps.each_value.any? { |irep| File.expand_path(irep.file.to_s) == p } })
     ancestry = engine_ancestry(superclass_of, struct_owners)
+    symbols = reflective.to_h { |path| [path, nil] }
     ireps.each_value do |irep|
-      next if reflective.include?(File.expand_path(irep.file.to_s))
-
+      file = File.expand_path(irep.file.to_s)
       up = irep.label
       up = parent[up] until up.nil? || body_of.key?(up)
       owner, name = up && body_of[up]
+      if reflective.include?(file)
+        names = (symbols[file] ||= Set.new)
+        names.merge(irep.syms.map(&:to_s))
+        core_irep_tokens(irep, names, true, name)
+        next
+      end
+
       self_may = owner ? core_self_may_be_engine?(owner, modules, ancestry) : false
       core_irep_tokens(irep, tokens, self_may, name)
     end
-    reflective.to_a.sort
+    symbols.sort.to_h
   end
 
   def core_reflective?(irep)
@@ -437,14 +484,37 @@ module StaticDispatchRegistrations
   # single_format_only loads mruby-rpg2k as its only maker gem), so their Ruby and C never run in it.
   OTHER_MAKER_GEMS = %w[mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs].freeze
 
+  # C_TOKEN: one C or C++ token of strip_c_comments, in the order it tries them. A number swallows its digit
+  # separators (`1'000`), so they open no character literal.
+  C_TOKEN = %r{
+    (?<comment>//[^\n]*|/\*.*?\*/) | (?<string>"(?:[^"\\\n]|\\.)*") | (?<char>'(?:[^'\\\n]|\\.)*') |
+    [0-9][0-9A-Za-z_.']* | [A-Za-z_][A-Za-z0-9_]* | [^"'/A-Za-z0-9_]+ | /
+  }mx
+
+  # `text` with every comment replaced by a space. Strings and character literals are kept whole, so `"/*"` stays a
+  # literal. Text the scan cannot read (an unterminated quote, a raw string R"(...)") is returned as it is: keeping
+  # a comment only adds names, which is the safe direction.
+  def strip_c_comments(text)
+    return text if text.match?(/\b(?:u8|[uUL])?R"/)
+
+    scan = StringScanner.new(text)
+    out = +''
+    until scan.eos?
+      return text unless scan.scan(C_TOKEN)
+
+      out << (scan[:comment] ? ' ' : scan.matched)
+    end
+    out
+  end
+
   # NATIVE_NAME_TOKENS (closed only): C reaches a method by name only through a string ("name" for
   # mrb_funcall, mrb_intern_lit, a name table), a presym macro (MRB_SYM(name), MRB_SYM_Q(name), ...) or a macro
   # that makes a name of its argument (naming_macros). A bare C identifier spelled like a method name (a local
   # `size`, a field `preview_map_id`) looks nothing up, so native files contribute only those.
-  # Comments are scanned too: a literal there only adds names, which is the safe direction.
+  # Comments are left out (strip_c_comments): a name in one (`/* "count" is "width" */`) is never compiled.
   # `text_tokens`: also receives a naming macro's arguments, which the macro may suffix itself (`#name "="`).
   def native_name_tokens(text, tokens, macros, text_tokens: nil)
-    text = blank_registration_names(text)
+    text = blank_registration_names(strip_c_comments(text))
     text.scan(STRING_LITERAL) { |(s)| tokens << unescape(s) }
     unless macros.empty?
       text.scan(/\b(?:#{macros.map { |m| Regexp.escape(m) }.join('|')})\s*\(([^()]*)\)/) do |(args)|
@@ -754,8 +824,11 @@ module StaticDispatchRegistrations
   def core_excluded(repo_root, mrbc, ireps, generated)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
+    # CLOSED_LINKED_ONLY: an unlinked gem's mrblib never loads there.
+    unlinked = closed_unlinked_dirs(repo_root)
     core_ruby = (Dir["#{third}mruby/mrblib/*.rb"] + Dir["#{third}mruby/mrbgems/*/mrblib/**/*.rb"] +
-                 BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{third}#{g}/mrblib/**/*.rb"] }).sort
+                 BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{third}#{g}/mrblib/**/*.rb"] })
+                .map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }.sort
     # Each file on its own, with the name of each method body (LIVE_CORE: a body counts once its name is reachable).
     core = Dir.mktmpdir('bc2cpp_core_natives') do |tmp|
       core_ruby.each_with_index.map do |path, i|
