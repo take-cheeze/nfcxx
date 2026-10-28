@@ -156,9 +156,17 @@ module MrblibStubs
 
   def read_manifests(paths) = paths.flat_map { |p| File.readlines(p, chomp: true) }.reject(&:empty?).to_set
 
-  # Writes `dst`, the stubbed copy of mrblib file `src`, from the compiled gems' manifests.
-  def write_stubbed(src, dst, manifests)
-    out, = rewrite(File.binread(src), read_manifests(manifests))
+  # Writes `dst`, the stubbed copy of mrblib file `src`, from the compiled gems' manifests. `plans`: the load plans
+  # (LoadCompile.read_plans) -- the statements and defs the compiled load takes are blanked first, so the stub rewrite
+  # sees the residual, and the file the load ends on sets the marker that turns the compiled load on.
+  def write_stubbed(src, dst, manifests, plans = {})
+    text = File.binread(src)
+    ranges, marker = plans[File.expand_path(src)]
+    if ranges
+      require_relative 'load_compile'
+      text = LoadCompile.apply(text, ranges, marker: marker)
+    end
+    out, = rewrite(text, read_manifests(manifests))
     File.binwrite(dst, out)
   end
 end
