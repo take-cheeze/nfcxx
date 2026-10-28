@@ -140,6 +140,7 @@ class CodeGen
     copies = module_function_copies(compiled)
     copies.each { |m| (by_owner[m[:owner]] ||= []) << m }
     targets = (owners + copies.map { |m| m[:owner] }).uniq.select { |o| by_owner.key?(o) }
+    accessors = left_out_accessors(compiled, unregistered)
 
     # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
     # mrb_define_method_raw (src/class.c) only forces a singleton-class method
@@ -170,7 +171,7 @@ class CodeGen
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
     # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
     # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
-    if compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
+    if accessors.any? || compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
         #include <stdio.h>
@@ -208,6 +209,7 @@ class CodeGen
     { 'core' => core_targets, 'program' => program_targets }.each do |part, part_targets|
       out << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
       emit_owner_registration_lines(out, part_targets, by_owner, unregistered)
+      emit_left_out_accessor_lines(out, accessors) if part == 'program'
       out << "}\n"
     end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
@@ -252,6 +254,34 @@ class CodeGen
         end
       end
     end
+  end
+
+  # The removal of each listed accessor (left_out_accessors), in the program half: its owner is a program class.
+  def emit_left_out_accessor_lines(out, accessors)
+    accessors.group_by(&:first).each do |owner, entries|
+      var = "bc2cpp_owner_acc_#{sanitize(owner)}"
+      out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      entries.each do |_, name|
+        out << "  // #{owner}##{name} (attr accessor) left unregistered: statically dispatched only (docs/adr/0203).\n"
+        out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{owner.end_with?('.singleton')});\n"
+      end
+    end
+  end
+
+  # LEFT_OUT_ACCESSORS: [owner, name] of each listed attr_* accessor of this gem's owners (ONLY_OWNERS) with no
+  # compiled entry. The registration proof lists one when nothing looks its name up (ACCESSOR_CANDIDATES), so it is
+  # removed like a left-out compiled entry.
+  def left_out_accessors(compiled, unregistered)
+    return [] unless @only_owners
+
+    entries = compiled.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    @registry.flat_map do |name, defs|
+      defs.filter_map do |d|
+        key = "#{d.owner}##{name}"
+        [d.owner, name] if d.kind == :ivar_accessor && !d.core && @only_owners.include?(d.owner) &&
+                           unregistered.include?(key) && !entries.include?(key)
+      end
+    end.uniq.sort
   end
 
   # DIRECT_CONSTRUCT_ACCESSORS (dispatch_targets.rb): `<Owner>_compiled_class()` for each listed owner whose

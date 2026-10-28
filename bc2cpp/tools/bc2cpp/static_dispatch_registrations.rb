@@ -519,6 +519,20 @@ module StaticDispatchRegistrations
       end
     end
 
+    # ACCESSOR_CANDIDATES: an attr_* accessor of an owner some compiled gem lists, with no compiled entry of its
+    # own. That gem's registration removes it when listed (CodeGen#left_out_accessors).
+    gem_of = BC2CPP_COMPILED_GEMS.select { |gem, _| GEMS.include?(gem) }
+                                 .flat_map { |gem, g| Array(g[:owners]).map { |owner| [owner, gem] } }.to_h
+    keys = candidates.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    registry.each do |name, defs|
+      defs.each do |d|
+        next unless d.kind == :ivar_accessor && !d.core && gem_of.key?(d.owner)
+        next unless keys.add?("#{d.owner}##{name}")
+
+        candidates << { owner: d.owner, name: name, entry: nil, gem: gem_of[d.owner], accessor: true }
+      end
+    end
+
     body_of = {} # method-body irep label => [owner, name]
     registry.each do |name, defs|
       defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep }
