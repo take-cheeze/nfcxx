@@ -85,8 +85,10 @@ c++ -std=gnu++17 -O1 -g -Wall \
   -DLV_CONF_INCLUDE_SIMPLE \
   -I"$mruby_inc" -I"$root/3rd/mruby/include" -I"$root/include" -I"$root/3rd/lvgl" \
   -c "$root/scripts/bc2cpp/trace_host.cxx" -o "$host_dir/trace_host.o"
+# --gc-sections: the closed libmruby.a is built with one section per function (build_config.rb
+# GC_SECTIONS), so the host keeps only what it reaches, as a device build does.
 c++ -o "$host_dir/trace_host" "$host_dir/trace_host.o" \
-  "$mruby_lib" "$host_dir/liblvgl.a" "$host_dir/libuni-algo.a" -lpthread -lm
+  "$mruby_lib" "$host_dir/liblvgl.a" "$host_dir/libuni-algo.a" -lpthread -lm -Wl,--gc-sections
 
 echo "built $host_dir/trace_host"
 
