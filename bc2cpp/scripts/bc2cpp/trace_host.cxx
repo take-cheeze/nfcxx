@@ -9,13 +9,16 @@
 //
 // Usage: trace_host GAME_DIR [FRAMES]
 // BC2CPP_HOST_MT_COUNT=1 prints the method-table size and exits before the game
-// starts.
+// starts. BC2CPP_HOST_MT_DUMP=1 prints every entry (Owner#name kind), sorted,
+// then the size, and exits the same way.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string>
 #include <vector>
 
 #include <lvgl.h>
@@ -24,6 +27,7 @@
 #include <mruby/class.h>
 #include <mruby/error.h>
 #include <mruby/gc.h>
+#include <mruby/proc.h>
 #include <mruby/string.h>
 #include <mruby/variable.h>
 
@@ -73,6 +77,50 @@ int count_class_entries(mrb_state* M, struct RBasic* obj, void* total) {
       obj->tt == MRB_TT_SCLASS) {
     mrb_mt_foreach(M, reinterpret_cast<struct RClass*>(obj), count_entry,
                    total);
+  }
+  return MRB_EACH_OBJ_OK;
+}
+
+// BC2CPP_HOST_MT_DUMP=1: the method-table entries that are left, one
+// "Owner#name kind" per line (kind is cfunc, bytecode or undef), sorted so two
+// runs diff. A singleton class is "Owner.singleton". scripts/bc2cpp/
+// host_sweep.bash logs it: the registered names are the list that keeps getting
+// shorter, so it is the one worth reading in a job log.
+std::string owner_name(mrb_state* M, struct RClass* c) {
+  if (c->tt == MRB_TT_SCLASS) {
+    const mrb_value attached =
+        mrb_obj_iv_get(M, reinterpret_cast<struct RObject*>(c),
+                       mrb_intern_lit(M, "__attached__"));
+    if (mrb_class_p(attached) || mrb_module_p(attached)) {
+      return std::string(mrb_class_name(M, mrb_class_ptr(attached))) +
+             ".singleton";
+    }
+    return "(object-singleton)";
+  }
+  const char* const name = mrb_class_name(M, c);
+  return name ? name : "(anonymous)";
+}
+
+struct MtDump {
+  std::vector<std::string>* rows;
+  std::string owner;
+};
+
+int dump_entry(mrb_state* M, mrb_sym sym, mrb_method_t m, void* p) {
+  MtDump* const dump = static_cast<MtDump*>(p);
+  const char* const kind = MRB_METHOD_UNDEF_P(m)   ? "undef"
+                           : MRB_METHOD_CFUNC_P(m) ? "cfunc"
+                                                   : "bytecode";
+  dump->rows->push_back(dump->owner + "#" + mrb_sym_name(M, sym) + " " + kind);
+  return 0;
+}
+
+int dump_class_entries(mrb_state* M, struct RBasic* obj, void* rows) {
+  if (obj->tt == MRB_TT_CLASS || obj->tt == MRB_TT_MODULE ||
+      obj->tt == MRB_TT_SCLASS) {
+    struct RClass* const c = reinterpret_cast<struct RClass*>(obj);
+    MtDump dump{static_cast<std::vector<std::string>*>(rows), owner_name(M, c)};
+    mrb_mt_foreach(M, c, dump_entry, &dump);
   }
   return MRB_EACH_OBJ_OK;
 }
@@ -188,6 +236,17 @@ int main(int argc, char** argv) {
     return 2;
   }
   rgss_set_display(M, disp);
+
+  if (const char* const dump = getenv("BC2CPP_HOST_MT_DUMP");
+      dump && strcmp(dump, "1") == 0) {
+    std::vector<std::string> rows;
+    mrb_objspace_each_objects(M, dump_class_entries, &rows);
+    std::sort(rows.begin(), rows.end());
+    for (const std::string& row : rows)
+      fprintf(stdout, "%s\n", row.c_str());
+    fprintf(stdout, "TRACE_HOST method_table_entries=%zu\n", rows.size());
+    return 0;
+  }
 
   if (const char* const count = getenv("BC2CPP_HOST_MT_COUNT");
       count && strcmp(count, "1") == 0) {
