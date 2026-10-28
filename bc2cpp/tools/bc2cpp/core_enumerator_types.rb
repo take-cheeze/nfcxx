@@ -17,6 +17,9 @@ require_relative 'class_world'
 # without typing the receiver. Arguments flow the same way: parameter i of a method named m is the union over every
 # send of `m`. Instance variables are keyed by name alone.
 #
+# A call with a literal block to a method whose every definition is a checked block-value declaration (sig/bc2cpp, BlockReturns:
+# `RGSS::Profiler.section`, `then`) has the class of the block's value; any other call that yields is TOP.
+#
 # A name whose parameters or result something outside the bytecode touches is TOP: a name a native spells or a looked-up
 # Symbol literal names (EXTERNAL_NAMES), an `initialize` (called by `new`: sends of `new` supply its arguments), any
 # method with a SUPER in it.
@@ -118,6 +121,11 @@ module CoreEnumeratorTypes
       mixins_of('Object')
     end
 
+    # Does a ROM table installed into several classes define +name+ on one of them?
+    def wild?(name)
+      @wild.include?(name)
+    end
+
     def module?(name)
       @modules.include?(name) && !CORE.key?(name)
     end
@@ -191,13 +199,14 @@ module CoreEnumeratorTypes
   # method_of (irep label => enclosing method body label) and parent. +external+ is the names something outside the
   # bytecode may call (see the header), +ivar_external+ the ivar names a native may set.
   class Typer
-    def initialize(group:, hierarchy:, external:, external_owners:, ivar_external:, foreign:)
+    def initialize(group:, hierarchy:, external:, external_owners:, ivar_external:, foreign:, block_returns: {})
       @group = group
       @hier = hierarchy
       @external = external
       @external_owners = external_owners
       @ivar_external = ivar_external
       @foreign = foreign
+      @block_returns = block_returns
       @vals = {}
       @why = {}
       @reads = Hash.new { |h, k| h[k] = Set.new }
@@ -299,6 +308,7 @@ module CoreEnumeratorTypes
       when :ret then ret_value(key)
       when :retdef then retdef_value(key)
       when :const then const_value(key)
+      when :blkval then block_value(key)
       else top('unknown node')
       end
     end
@@ -426,6 +436,7 @@ module CoreEnumeratorTypes
       when :GETUPVAR then upvar_read(irep, w, reader)
       when :GETCONST, :GETMCNST then const_value_of(irep, index, w, reader)
       when :SEND, :SEND0, :SSEND, :SSEND0 then call_value(irep, index, w, reader)
+      when :SENDB, :SSENDB then block_call_value(irep, index, w, reader)
       else top("writer #{op}#{":#{w.sym}" if w.sym}")
       end
     end
@@ -645,6 +656,43 @@ module CoreEnumeratorTypes
 
       above = chain.drop(chain.index(from) ? chain.index(from) + 1 : 0)
       above.include?(to)
+    end
+
+    # A call with a literal block. When every definition of the name is a checked declaration of one shape, the result is
+    # the block's value (:block_value) or the receiver (:self); the checks (BlockReturns, TC1010) abort the build when a
+    # body or a native contradicts one. Anything else that takes a block may return anything.
+    def block_call_value(irep, index, w, reader)
+      name = w.sym.to_s
+      entries = @block_returns[name]
+      return top("a call of #{name} with a block") unless entries && w.plain_fixed_argc? && !@hier.wild?(name)
+
+      owners = @hier.definers.select { |_owner, names| names.include?(name) }.keys
+      # A module_function's instance copy ('RGSS::Profiler') is registered with the singleton's ('RGSS::Profiler.singleton').
+      declared = owners.all? { |o| entries.any? { |e| [e.owner, e.owner.delete_suffix('.singleton')].include?(o) && e.args == w.argc } }
+      return top("a call of #{name} with a block that is not a checked declaration") unless declared && !owners.empty?
+      return top("#{name} has an engine definition no declaration covers") if @defs_by_name[name].any? { |d| d.owner == '<native>' }
+
+      kinds = entries.map(&:kind).uniq
+      label = IrBlockOperands.literal_block_label(irep, index)
+      if kinds == [:block_value] && label
+        val([:blkval, label], reader)
+      elsif kinds == [:self]
+        BytecodeIR::Ops::SELF_SEND_FAMILY.include?(w.op) ? val([:self, irep.label], reader) : val([:site, irep.label, index, w.reg], reader)
+      else
+        top("a call of #{name} with a block that is not a checked declaration")
+      end
+    end
+
+    # What a block gives its caller: the value it ends with and the value of a `break` in it.
+    def block_value(key)
+      irep = irep_of(key[1])
+      acc = EMPTY
+      BytecodeIR.for(irep).each_source do |insn, idx|
+        next unless %i[RETURN BREAK].include?(insn.op)
+
+        acc = CoreEnumeratorTypes.union(acc, val([:site, irep.label, idx, insn.reg], key))
+      end
+      acc
     end
 
     # The result of a send, by name.

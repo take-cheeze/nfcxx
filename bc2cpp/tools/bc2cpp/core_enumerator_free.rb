@@ -33,6 +33,11 @@ require_relative 'native_owner_map'
 # The proof holds only when every one is accounted for; the unproven ones are returned with file and line so the result
 # says what an engine rewrite would have to change. Nothing here is a heuristic: a value the model cannot type is TOP, and a
 # site with a TOP receiver is unproven.
+#
+# Premises, the ones the closed-list proof makes anyway (docs/bc2cpp-unregistered-methods.md): the Ruby the binary runs is the
+# world's own (the sealed host refuses --script), natives look a method up only by a name they spell, and every lookup by
+# Symbol takes a literal (StaticDispatchSymbolUses). So a parameter that no send, `new`, `super`, native, Symbol or VM call
+# supplies receives nothing, and a receiver read from it is the empty set, which passes: that code does not run.
 module CoreEnumeratorFree
   ENUM_CONSTANTS = %w[Enumerator Generator Yielder Lazy Chain Producer].to_set.freeze
   CREATE_SENDS = %w[to_enum enum_for].to_set.freeze
@@ -460,8 +465,9 @@ module CoreEnumeratorFree
   #   native_creators / native_problems   native_creators's result
   #   native_aliases  [[owner, new, old]] native aliases
   #   native_spelled  name => the native files that spell it, outside table entries and registrations
+  #   block_returns   method name => [BlockReturns::Entry] of the checked `{ ... } -> T` declarations (sig/bc2cpp)
   Inputs = Struct.new(:engine, :core, :hierarchy, :foreign, :external, :external_owners, :ivar_external, :symbol_lookups,
-                      :native_creators, :native_problems, :native_aliases, :native_spelled, keyword_init: true)
+                      :native_creators, :native_problems, :native_aliases, :native_spelled, :block_returns, keyword_init: true)
 
   # The proof. Returns a Result; +unproven+ names every site and condition it could not account for.
   def prove(inputs)
@@ -594,7 +600,7 @@ module CoreEnumeratorFree
     if group.engine
       CoreEnumeratorTypes::Typer.new(group: group, hierarchy: inputs.hierarchy, external: inputs.external,
                                      external_owners: inputs.external_owners, ivar_external: inputs.ivar_external,
-                                     foreign: inputs.foreign)
+                                     foreign: inputs.foreign, block_returns: inputs.block_returns)
     else
       CoreEnumeratorTypes::Typer.new(group: group, hierarchy: inputs.hierarchy, external: ALL, external_owners: ALL,
                                      ivar_external: ALL, foreign: ALL)
@@ -713,8 +719,8 @@ module CoreEnumeratorFree
   # also :path); +entries+ and +map+ are CoreNativeCandidates.entries and NativeOwnerMap of the native sources. The three
   # lambdas are StaticDispatchRegistrations' own: +strip+ blanks C comments, +tokens+ is native_name_tokens, +entry_name+
   # the regexp that blanks a table entry's defining name. +implicit_names+ are the methods the VM calls itself (to_s, ==, each
-  # of a `for`, an operator opcode's name), whose parameters no send in the bytecode accounts for.
-  def inputs(engine:, core:, native:, entries:, map:, symbol_lookups:, strip:, tokens:, entry_name:, implicit_names:)
+  # of a `for`, an operator opcode's name), whose parameters no send in the bytecode accounts for. +block_returns+ is Inputs'.
+  def inputs(engine:, core:, native:, entries:, map:, symbol_lookups:, strip:, tokens:, entry_name:, implicit_names:, block_returns: {})
     tuples = [engine.fetch(:tuple)] + core.map { |c| c.fetch(:tuple) }
     engine_group = Group.new(ireps: engine.fetch(:ireps), registry: engine.fetch(:tuple)[0], engine: true,
                              alias_sites: engine.fetch(:tuple)[12])
@@ -795,6 +801,6 @@ module CoreEnumeratorFree
     Inputs.new(engine: engine_group, core: core_groups, hierarchy: hierarchy, foreign: foreign, external: external,
                external_owners: external_owners, ivar_external: ivar_strings, symbol_lookups: symbol_lookups,
                native_creators: creators, native_problems: problems, native_aliases: map.aliases.map { |o, n, old| [o, n, old] },
-               native_spelled: spelled_in)
+               native_spelled: spelled_in, block_returns: block_returns)
   end
 end

@@ -191,18 +191,18 @@ def with_world(suite, engine:, core: {}, native: nil)
   end
 end
 
-def inputs_of(world, symbol_names = nil)
+def inputs_of(world, symbol_names = nil, block_returns: {})
   sdr = StaticDispatchRegistrations
   lookups = StaticDispatchSymbolUses.lookups(world[:engine][:ireps])
   EF.inputs(engine: world[:engine], core: world[:core], native: world[:native], entries: world[:entries],
             map: NativeOwnerMap.build([]), symbol_lookups: symbol_names || lookups, strip: sdr.method(:strip_c_comments),
             tokens: ->(text, found) { sdr.native_name_tokens(text, found, []) }, entry_name: CoreNativeCandidates::ENTRY_NAME,
-            implicit_names: StaticDispatchRegistrations::ALWAYS_DYNAMIC | IMPLICIT_DISPATCH_NAMES.values)
+            implicit_names: StaticDispatchRegistrations::ALWAYS_DYNAMIC | IMPLICIT_DISPATCH_NAMES.values, block_returns: block_returns)
 end
 
 # The proof of a world.
-def prove(suite, engine:, core: {}, native: nil)
-  with_world(suite, engine: engine, core: core, native: native) { |world| EF.prove(inputs_of(world)) }
+def prove(suite, engine:, core: {}, native: nil, block_returns: {})
+  with_world(suite, engine: engine, core: core, native: native) { |world| EF.prove(inputs_of(world, block_returns: block_returns)) }
 end
 
 def creators(result)
@@ -379,6 +379,35 @@ suite.check('native text that spells a creator name refuses the proof',
             !native_spells.holds && native_spells.unproven.any? { |u| u.why.include?('native text spells the creator name each') })
 suite.check('the native creator\'s own to_enum call is not a spelling', base.holds)
 
+# --- a call with a block whose result is the block's value -------------------------------------------------------------
+timed = <<~'RUBY'
+  class Route
+    def each
+      1
+    end
+  end
+
+  module Timed
+    def self.measure(label)
+      yield
+    end
+  end
+
+  class A
+    def run
+      Timed.measure('route') { Route.new }.each
+    end
+  end
+RUBY
+declared = { 'measure' => [BlockReturns::Entry.new(owner: 'Timed.singleton', name: 'measure', kind: :block_value, args: 1, arity: 0, native: false)] }
+suite.check('a checked block-value declaration types the call by its block (Timed.measure { Route.new }.each)',
+            prove(suite, engine: timed + DRIVER, native: INDEX_C, block_returns: declared).holds)
+suite.check('without the declaration the call may return anything',
+            !prove(suite, engine: timed + DRIVER, native: INDEX_C).holds)
+suite.check('and the block\'s own value counts (a block that ends in an Array)',
+            !prove(suite, engine: timed.sub('{ Route.new }.each', '{ [1] }.each') + DRIVER, native: INDEX_C,
+                                                    block_returns: declared).holds)
+
 # --- the hook into the closed-list proof ---------------------------------------------------------------------------------
 reasons = {
   'Enumerator#each' => "#{CoreMethods::ENUMERATOR_REASON} (Fiber machinery)",
@@ -391,7 +420,7 @@ sdr = StaticDispatchRegistrations
 released = ->(engine) do
   with_world(suite, engine: engine, native: INDEX_C) do |w|
     sdr.enumerator_free_keys(reasons, w[:core], w[:engine][:ireps], w[:native], w[:entries], NativeOwnerMap.build([]), w[:engine][:tuple],
-                             StaticDispatchSymbolUses.lookups(w[:engine][:ireps]))
+                             StaticDispatchSymbolUses.lookups(w[:engine][:ireps]), File.expand_path('../..', __dir__))
   end
 end
 suite.check("a holding proof lists the identifier-named methods of the group, and the alias of to_enum (#{released.call(engine_ok).sort.join(', ')})",
