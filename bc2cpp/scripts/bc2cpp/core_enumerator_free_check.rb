@@ -423,8 +423,8 @@ released = ->(engine) do
                              StaticDispatchSymbolUses.lookups(w[:engine][:ireps]), File.expand_path('../..', __dir__))
   end
 end
-suite.check("a holding proof lists the identifier-named methods of the group, and the alias of to_enum (#{released.call(engine_ok).sort.join(', ')})",
-            released.call(engine_ok).sort == %w[Enumerable#zip Enumerator#each Kernel#enum_for Kernel#to_enum])
+suite.check("a holding proof lists the methods of the group (an operator too), and the alias of to_enum (#{released.call(engine_ok).sort.join(', ')})",
+            released.call(engine_ok).sort == %w[Enumerable#zip Enumerator#each Enumerator::Yielder#<< Kernel#enum_for Kernel#to_enum])
 suite.check('a failing one lists none, and keeps the result for the report',
             released.call(cases.fetch('a literal Array receiver').first + DRIVER).empty? && !sdr.enumerator_free.holds)
 
