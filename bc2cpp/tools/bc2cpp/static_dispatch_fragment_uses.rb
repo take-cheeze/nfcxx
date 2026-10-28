@@ -10,8 +10,9 @@ require_relative 'irep_arity'
 #
 # The plain fragment rule (static_dispatch_registrations.rb, rule 4) counts every pool literal of two or more
 # identifier characters, so one `"state"` anywhere keeps every `state*` / `*state` method registered. A literal can
-# only end up inside another string if its value reaches something that builds or keeps strings: a concatenation,
-# a store, a return, a block capture, an argument the trace cannot follow. A literal whose every load is only
+# only end up inside another string if its value reaches something that builds or keeps strings: a concatenation
+# whose result goes on (it is followed like the literal), a store, a return, a block capture, an argument the trace
+# cannot follow. A literal whose every load is only
 # compared (`==`, `when`, `start_with?`), used as a key into a native lookup (`h["state"]`, `key?`), tested for
 # truth or printed cannot. Each STRING / FSTRING / SYMBOL load is followed forward (IrSymbolFlow.value_reads, MOVE
 # copies included); an argument of a closed-world method is followed into that method's parameter. Anything else,
@@ -126,7 +127,7 @@ module StaticDispatchFragmentUses
       elsif %i[ARRAY HASH ARYPUSH HASHADD].include?(insn.op)
         container_escapes?(irep, use, insn.reg, ctx, depth + 1)
       elsif insn.op == :STRCAT
-        !concat_poisoned?(irep, use, insn.reg)
+        !concat_poisoned?(irep, use, insn.reg) && escapes?(irep, use, insn.reg, ctx, depth + 1)
       elsif insn.op == :RETURN
         result_escapes?(irep, ctx, depth + 1)
       else
