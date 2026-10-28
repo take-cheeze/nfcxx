@@ -410,8 +410,8 @@ class CodeGen
         # pads positionals itself. Relaxing the arity test must not widen the
         # positional arm past the classes it can express.
         arity_ok &&= !mandatory_optional_and_keyword_arity?(init_irep) if arity_ok
-        # NATIVE_ARG_TYPES_STAY_BOXED: an #initialize in NATIVE_ARG_TARGETS with
-        # an ArgTypes annotation has its `_impl` narrowed to mrb_int/mrb_float
+        # NATIVE_ARG_TYPES_STAY_BOXED: an #initialize with NATIVE_ARGS positions
+        # has its `_impl` narrowed to mrb_int
         # parameters (compile_method's signature, via native_arg_types), and the
         # UNBOXING lives in the entry wrapper's `mrb_get_args("i")`, not in the
         # `_impl`. A direct call bypasses that wrapper, so passing the mrb_value
@@ -1631,12 +1631,12 @@ class CodeGen
   # The argument list of a direct `_impl` call to `target` and the note naming
   # any unboxed positions.
   def direct_call_args(target, argv, impl)
-    # NATIVE_ARG_TARGETS call-site half: the callee's `_impl` takes mrb_int/mrb_sym
+    # NATIVE_ARGS call-site half: the callee's `_impl` takes mrb_int/mrb_sym
     # for retyped positions (C++ has no implicit conversion from mrb_value), so
     # call_argv unboxes them here with mrb_as_int/mrb_obj_to_sym, the coercions
     # mrb_get_args "i"/"n" use in the entry wrapper (same TypeError). It wraps
     # whatever expression argv holds (e.g. `-weapon_sp_cost`).
-    # native_arg_types is asked for t_mand positions only; NATIVE_ARG_TARGETS never
+    # native_arg_types is asked for t_mand positions only; NATIVE_ARGS never
     # names optional-arg methods.
     t_irep = @ireps.fetch(target.irep)
     t_mand = mandatory_arity(t_irep)

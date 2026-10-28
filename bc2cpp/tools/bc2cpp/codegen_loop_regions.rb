@@ -755,7 +755,7 @@ class CodeGen
   # register reaches a proof. Addresses are unchanged. `owner_def` stays the
   # enclosing method's (the block shares its self), and
   # fixnum_proof_entry_arg?'s `owner_def.irep == irep.label` guard keeps the
-  # method's NATIVE_ARG_TARGETS types off the block's parameters.
+  # method's NATIVE_ARGS types off the block's parameters.
   # Block-specific opcodes:
   #   - RETURN/RETNIL/RETFALSE/RETTRUE: the block's yielded value (`next` is
   #     RETNIL); for #times, a goto to this iteration's end label.

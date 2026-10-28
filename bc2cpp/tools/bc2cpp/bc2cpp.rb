@@ -1130,7 +1130,7 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  # `annotations` also drives NATIVE_ARG_TARGETS.
+  # `annotations` also drives NATIVE_ARGS (native_arg_types).
   # FIXNUM_RETURN_PROOF / ENTRY_ARG_CALLSITE_PROOF: every identifier token of the
   # outside native and Ruby sources (see outside_world_tokens).
   outside_tokens = outside_world_tokens(native_paths + foreign_ruby_srcs)
@@ -2182,6 +2182,10 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
   warn "== shared === helper (EQQ_DIRECT): #{gen.eqq_helper_site_count(compiled)} sites =="
+  warn ''
+  native_args = gen.native_arg_summary
+  warn "== native arguments (NATIVE_ARGS): #{native_args.size} methods =="
+  native_args.sort.each { |key, positions| warn "  NATIVE_ARG #{key} #{positions.join(',')}" }
   warn ''
   if CodeGen.subtree_facts
     subtree_sites = gen.subtree_site_counts(compiled)

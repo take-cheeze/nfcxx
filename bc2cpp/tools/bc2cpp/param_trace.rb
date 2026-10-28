@@ -22,7 +22,7 @@ require_relative 'block_yielders'
 # whose header the compiled-method table (or a `bc2cpp_bargN` block parameter) explains is covered:
 #
 #   * a method's required, optional (only when the call supplied it), rest and keyword parameters;
-#     a NATIVE_ARG_TARGETS parameter (mrb_int/mrb_sym/mrb_bool) is boxed for the count;
+#     a NATIVE_ARGS parameter (mrb_int) is boxed for the count;
 #   * the positional parameters of a block that has its own `_impl` (BLOCK_FALLBACK, lambda, proc);
 #   * the receiver of a singleton method (`def self.x`, `def Owner.x`, the defs of a `class << self`), as a
 #     `self` site (kind `self`). Its runtime class is the class object itself, not its metaclass, so the
@@ -63,7 +63,7 @@ module ParamTrace
   # and the proven facts per positional index, as strings "kind=value".
   #   argtypes  ArgTypes (call-site :fixnum/:symbol)         classarg  ClassArgTypes (call-site class)
   #   entryfix  ENTRY_ARG_CALLSITE_PROOF                      numeric   entry_arg_numeric mask
-  #   pool      CLASS_POOLS argument pool                     annot     NATIVE_ARG_TARGETS annotation
+  #   pool      CLASS_POOLS argument pool                     annot     NATIVE_ARGS annotation
   def method_infos(compiled, ireps:, registry:, arg_types:, class_arg_types:, annotations:, gen:)
     entry_fix = gen.instance_variable_get(:@entry_arg_fixnum)
     numeric = gen.instance_variable_get(:@entry_arg_numeric) || {}
