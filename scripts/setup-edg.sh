@@ -60,7 +60,9 @@ if [ "$(uname -s)" = Darwin ] || [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
     export NFCXX_MACOS_SYSROOT=${NFCXX_MACOS_SYSROOT:-$root/tests/macos-sysroot/include}
   fi
   cd "$src"
-  EDG_BASE=$base cmake --preset "$preset" ${cmake_extra[@]+"${cmake_extra[@]}"} -B "$out" >/dev/null
+  # The macOS target's runtime keeps its exception handling state global (its front end has no __thread); the cross build
+  # runs on a Linux host, where lib_src's CMake would otherwise make it thread-local (lib_src/config.h, NFCXX_EH_TLS).
+  EDG_BASE=$base cmake --preset "$preset" ${cmake_extra[@]+"${cmake_extra[@]}"} -DNFCXX_EH_NO_TLS=ON -B "$out" >/dev/null
   if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
     cat >> "$out/src/includes/cmake_defines.h" <<'DEFS'
 
