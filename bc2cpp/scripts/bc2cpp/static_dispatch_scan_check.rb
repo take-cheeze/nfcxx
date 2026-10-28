@@ -29,9 +29,10 @@
 #     file with a reflective send keeps the text rule. engine_ancestry follows superclasses, mruby's native
 #     exception chain included, and gives up (:all) on any other native superclass.
 #   FRAGMENT_USES (needs MRBC; skipped without it): a pool literal stays a fragment only when a load of it may reach
-#     a built string -- a concatenation without a non-name character, a store, a return a caller passes on, an
-#     argument of a method the trace does not know. Comparing it, a native hash key, a constant list only tested
-#     for membership and a part of a message with a space or a colon do not.
+#     a built string that goes on somewhere -- a concatenation without a non-name character whose result escapes
+#     (a send, an interned Symbol), a store, a return a caller passes on, an argument of a method the trace does not
+#     know. Comparing it, a native hash key, a constant list only tested for membership, a part of a message with a
+#     space or a colon and a part of a string only printed or compared do not.
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
@@ -210,6 +211,10 @@ if ENV['MRBC']
           "#{x}: #{kind}"
         end
         def built(x) = respond_to?("#{x}_built_suffix")
+        def built_logged(x) = puts("#{x}_logged_suffix")
+        def built_compared(x) = "#{x}_compared_suffix" == 'other'
+        def built_sent(o, x) = o.send("#{x}_sent_suffix")
+        def built_interned(h, x) = h[:"#{x}_interned_suffix"]
         def setter_name(x) = respond_to?("#{x}=")
         def bang_char(c) = c == '!'
         def stored = @word = 'stored_word'
@@ -244,6 +249,10 @@ if ENV['MRBC']
           !escaping.include?('list_member') && !escaping.include?('other_member'))
     check('fragment uses: a part of a message with a non-name character is no fragment', !escaping.include?('message_word'))
     check('fragment uses: a part of a name reaching respond_to? is one', escaping.include?('_built_suffix'))
+    check('fragment uses: a part of a string only printed or compared is no fragment',
+          !escaping.include?('_logged_suffix') && !escaping.include?('_compared_suffix'))
+    check('fragment uses: a part of a string reaching send, or interned, is one',
+          escaping.include?('_sent_suffix') && escaping.include?('_interned_suffix'))
     check('fragment uses: a stored literal is one', escaping.include?('stored_word'))
     check('fragment uses: an argument of an unknown method is one', escaping.include?('handed_word'))
     check('fragment uses: a returned literal concatenated by a caller is one', escaping.include?('returned_word'))
