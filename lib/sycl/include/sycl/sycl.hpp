@@ -471,9 +471,13 @@ template <class T> inline T shift_group_right(sub_group sg, T x, unsigned delta 
 }
 template <class T> inline T permute_group_by_xor(sub_group, T x, unsigned mask) { return detail::sg_shuffle_xor(x, mask); }
 // butterfly over the n lanes: after the xor steps n/2, ..., 2, 1 every lane holds the whole sum (op commutative, as SYCL requires)
-template <class T, class Op> inline T reduce_over_group(sub_group sg, T x, Op op) {
-  for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
+// the butterfly over n lanes on scalars: no sub_group object (a struct copy per call on the device)
+template <class T, class Op> inline T reduce_lanes(unsigned n, T x, Op op) {
+  for (unsigned m = n / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
   return x;
+}
+template <class T, class Op> inline T reduce_over_group(sub_group sg, T x, Op op) {
+  return reduce_lanes((unsigned)sg.get_local_linear_range(), x, op);
 }
 // Hillis-Steele: after the steps 1, 2, 4, ..., n/2 lane k holds the combination of lanes 0..k
 template <class T, class Op> inline T inclusive_scan_over_group(sub_group sg, T x, Op op) {
@@ -2024,7 +2028,7 @@ template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_gro
 template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, Op op) {
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
   const size_t w = detail::sg_size();
-  T s = reduce_over_group(sub_group(lid, n), x, op);
+  T s = reduce_lanes((unsigned)w, x, op);   // the butterfly over the sub-group, on scalars: no sub_group object per call
   const size_t nsg = (n + w - 1) / w;
   if (lid % w == 0) *detail::scratch_slot<T, D>(lid / w) = s;
   group_barrier(g);
