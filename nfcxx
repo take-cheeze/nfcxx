@@ -59,6 +59,11 @@ source "$root/scripts/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcxx" "$@" 
 set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
+# The exception handling state is per thread when the EDG runtime was built so (lib_src's RUNTIME_EH_TLS, Linux targets;
+# scripts/setup-edg.sh then writes the eh-tls marker): --nfcxx_eh_thread_local makes the generated code declare it
+# __thread too. A program whose threads run code with destructors or try blocks (ggml's CPU worker pool) shared one
+# stack of EH entries before.
+eh_tls=(); [ ! -f "$edg/../eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 
 source "$root/scripts/host-sys.sh"   # host_dialect, host_clang_version, host_sys_includes, host_gnu_version
 sanitize=""
@@ -669,7 +674,7 @@ if [ $emit_c = 1 ]; then
   for x in ${files[@]+${files[@]+"${files[@]}"}}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+${inc[@]+"${inc[@]}"}}) ;; esac; done
   t=$(trace_start)
   posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)   # as the macOS base
-  (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${gnu_opts[@]+"${gnu_opts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} \
+  (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${eh_tls[@]+"${eh_tls[@]}"} ${gnu_opts[@]+"${gnu_opts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} \
       ${inc[@]+"${inc[@]}"} --gen_c_file_name="$tmp/out.c" "$f")
   trace_end "$t" "cpfe --emit-c (front end)" frontend
   cat "$tmp/out.c"
@@ -830,11 +835,11 @@ keep_static=(--c_to_obj_option -fkeep-static-functions)
 # lib_src/throw.c). gcc: the frames need unwind tables (-fexceptions) and the declarations of
 # lib/ehshim/nfcxx_eh_unwind.h, which the C compiler reads first. qbe: cproc lowers the cleanups to landing pads (qbe.c,
 # ehcleanupobj); the unwinder flag comes from the link (scripts/qbe-cc).
-eh_unwind=()
+eh_unwind=(${eh_tls[@]+"${eh_tls[@]}"})
 if [ "${NFCXX_EH_UNWIND:-}" = 1 ] && [ "$backend" = gcc ]; then
-  eh_unwind=(--nfcxx_eh_unwind --c_to_obj_option -fexceptions --c_to_obj_option -include --c_to_obj_option "$root/lib/ehshim/nfcxx_eh_unwind.h")
+  eh_unwind+=(--nfcxx_eh_unwind --c_to_obj_option -fexceptions --c_to_obj_option -include --c_to_obj_option "$root/lib/ehshim/nfcxx_eh_unwind.h")
 elif [ "${NFCXX_EH_UNWIND:-}" = 1 ] && [ "$backend" = qbe ]; then
-  eh_unwind=(--nfcxx_eh_unwind)
+  eh_unwind+=(--nfcxx_eh_unwind)
 fi
 for f in ${files[@]+${files[@]+"${files[@]}"}}; do
   case $f in

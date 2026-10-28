@@ -3,14 +3,14 @@
     (bytes 0 16 @"const")))
 (global "_ZZN1TD1EvEs" (const (array 16 (const char))) 16 1 (weak) (init
     (bytes 0 16 @"const.1")))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "st" (struct "T") 8 4 (static) (thread) (init (zero 0 8)))
 (global "plain" int 4 4 (thread) (init
     (scalar 0 int (const int 77))))
 (global "computed" int 4 4 (thread) (init (zero 0 4)))
 (global "ref" (ptr int) 8 8 (thread) (init (zero 0 8)))
 (global "inl" (struct "T") 8 4 (weak) (thread) (init (zero 0 8)))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
 (global "__dso_handle" (ptr void) 8 8 (extern))
 (global "bad" int 4 4 (static) (init (zero 0 4)))
 (global "_ZZ7fnlocalILi5EERivE1x" int 4 4 (weak) (thread) (init (zero 0 4)))

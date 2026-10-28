@@ -79,10 +79,10 @@
 (x87-thunk icall "I2S0" 2 0)
 (x87-thunk entry "_ZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_" weak 4 0)
 (x87-thunk entry "_ZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_" weak 4 0)
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "_ZTVSt9exception" (const (array 5 (const long))) 40 8 (extern))
 (global "_ZTVSt9bad_alloc" (const (array 5 (const long))) 40 8 (extern))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
 (global "_ZTVSt20bad_array_new_length" (const (array 5 (const long))) 40 8 (extern))
 (global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
@@ -209,8 +209,8 @@
 (global "_ZTISt17bad_function_call" (const (struct "__si_class_type_info")) 24 8 (extern))
 (global "_ZTISt9bad_alloc" (const (struct "__si_class_type_info")) 24 8 (extern))
 (global "_ZTISt8bad_cast" (const (struct "__si_class_type_info")) 24 8 (extern))
-(global "__caught_object_address" (ptr void) 8 8 (extern))
-(global "__catch_clause_number" int 4 4 (extern))
+(global "__caught_object_address" (ptr void) 8 8 (thread) (extern))
+(global "__catch_clause_number" int 4 4 (thread) (extern))
 (global "_ZZNSt5dequeIiSaIiEE17_S_check_init_lenEmRKS0_Es" (const (array 48 (const char))) 48 1 (weak) (init
     (bytes 0 48 @"const.35")))
 (global "_ZZNKSt5dequeIiSaIiEE14_M_range_checkEmEs" (const (array 72 (const char))) 72 1 (weak) (init

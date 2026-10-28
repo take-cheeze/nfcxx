@@ -82,6 +82,7 @@ DEFS
   fi
   cd "$out"
   ninja bin/cpfe bin/edg_prelink lib/libC.a
+  rm -f "$out/eh-tls"   # macOS: the runtime's EH state is not thread-local (lib_src/config.h, RUNTIME_EH_TLS)
   echo "EDG built: $out/bin/eccp"
   exit 0
 fi
@@ -136,4 +137,8 @@ case "$(uname -m)" in
 esac
 cd "$out"
 ninja bin/cpfe bin/edg_prelink lib/libC.a
+# eh-tls: the runtime defines its exception handling state thread-local (lib_src/config.h, RUNTIME_EH_TLS), so the driver
+# passes --nfcxx_eh_thread_local to the front end and the generated code declares it the same way.
+# (grep -c reads to the end: with -q, readelf could die of SIGPIPE and pipefail would fail the test)
+if [ "$(readelf -sW lib/libC.a 2>/dev/null | grep -c ' TLS .* __curr_eh_stack_entry$')" -gt 0 ]; then : > "$out/eh-tls"; else rm -f "$out/eh-tls"; fi
 echo "EDG built: $out/bin/eccp"

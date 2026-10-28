@@ -120,6 +120,7 @@ EDG's `std::bad_alloc::what()` is `""`, libstdc++'s is `"std::bad_alloc"`.
 | `tests/pathb-qbe/cases/hosted_new.cpp` | `new` of a huge size (EDG's `operator new` through the new link order), compared with the gcc backend since the link order change |
 | `tests/eval/host.cpp` | a libstdc++ exception inside an nfceval snippet, caught by the snippet or returned as `RuntimeError` |
 | `tests/ehshim/run.sh` | programs that cproc or Path B cannot compile (`<future>`, `<regex>`; `__atomic_test_and_set`): `future_promise.cpp`, `regex_error.cpp` on the gcc backend; `exception_ptr_fuzz.cpp` (random mixes of throws, nested handlers, `throw;`, stored pointers) on gcc, qbe and Path B. Each backend's output and exit code must equal the same program built by the host g++ |
+| `tests/ehshim/eh_threads.cpp` | eight threads at once each constructing objects with destructors and throwing and catching `std::runtime_error` and `int` in a loop, `std::uncaught_exceptions` in between, then output flushed at exit; gcc, qbe and Path B |
 | `tests/ehshim/foreign` (in `tests/ehshim/run.sh`) | a library built by g++ that throws with plain `throw`, called by a program built by nfcxx (gcc, qbe, and gcc with `NFCXX_EH_UNWIND=1`): `std::runtime_error`, a class derived from it caught exactly and as `std::exception`, `int`, `const char*`, `catch (...)` and `throw;`, `exception_ptr`, `throw;` inside the library, the library's own handlers inside the program's try block and beyond a frame of the program, a second thread, each object destroyed once; output equal to the all-g++ build |
 | `tests/bundle/torch.sh` | `c10::Error` from libc10 (a bad `reshape`, a CUDA tensor without a GPU), by hand |
 
@@ -133,8 +134,18 @@ EDG's `std::bad_alloc::what()` is `""`, libstdc++'s is `"std::bad_alloc"`.
   `NFCXX_EH_UNWIND=1` the unwinder runs those destructors too.
 - A frame of EDG-compiled code between a gcc-compiled throw and a gcc-compiled handler (a callback the library calls inside its try
   block) must not have objects with destructors: libstdc++'s unwinder leaves it without popping its entry on EDG's stack.
-- EDG's EH stack and throw stack are process globals (not thread-local): exceptions are only safe in one thread at a time. A task
-  that throws in a `std::async` thread is not supported.
+- EDG's EH state (the stack of EH entries the generated code pushes, `__curr_eh_stack_entry` and its neighbours, and the
+  runtime's throw in progress and exception memory) is thread-local on Linux targets: the runtime defines it `__thread`
+  (`lib_src/config.h`, `RUNTIME_EH_TLS`), and the front end declares it so under `--nfcxx_eh_thread_local`, which the driver and
+  `scripts/pathb-dump` pass when `scripts/setup-edg.sh` found the runtime built that way (its `eh-tls` marker). Before, it was one
+  global: threads running code with destructors or try blocks at the same time pushed and popped each other's entries (ggml's CPU
+  worker threads left a dead one, and libstdc++'s exit-time flush crashed in `std::uncaught_exceptions`). macOS keeps the
+  global (its front end has no `__thread`): exceptions there are safe in one thread at a time, and a task that throws in a
+  `std::async` thread is not supported. An object compiled before this change does not link with the new runtime (`bad
+  value`: a plain reference to a TLS symbol), so build directories need a rebuild. Thread-local, the runtime's initial
+  exception memory block is 256 bytes instead of 8 KB (`EH_INITIAL_MEM_BLOCK_SIZE`; more is allocated and freed as
+  needed): a shared object built by QBE reaches its TLS with the initial-exec model, and when it is loaded with `dlopen`
+  that TLS comes from the few hundred bytes glibc reserves (`nfcxx -shared`, tests/eval).
 - Shared objects loaded by a program (`nfcxx -shared`, nfceval snippets) get the shim from the executable, which must be linked by
   `nfcxx` and export its symbols (`-rdynamic`, as nfceval requires); the shared object itself is built without the shim
   (`tests/eval/host.cpp`). A shared object loaded by a program that was not built this way aborts as before.

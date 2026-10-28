@@ -500,10 +500,10 @@ as fast as with `<math.h>` (0.22 s against 0.45 s on gcc, 0.24 s against 0.54 s 
 `Sync`: the call that makes a function hot waits for the compile and then runs the new code. `Async`: the engine starts the
 driver as a **child process** and goes on; the calls it serves afterwards look at the process now and then, and a call after it
 has ended picks the code up. At most `TierOptions::jobs` (2) run at once, the others wait. There is no compile thread, and the
-reason is not taste: EDG's exception runtime keeps one global stack of try blocks (`lib_src/throw.c` of the front end; the
+reason was not taste: EDG's exception runtime kept one global stack of try blocks (`lib_src/throw.c` of the front end; the
 interpreter pushes on it all the time, to run destructors when a script error unwinds), so a second thread running C++ code with
-destructors while the engine runs would corrupt it (`__curr_eh_stack_entry` is a plain global in `3rd/edg/lib_src/eh.h`; that is from reading
-the source: no thread was run to watch it fail). A State that is destroyed with compiles running kills them. A failed compile
+destructors while the engine ran would have corrupted it. On Linux that state is thread-local now (docs/notes/eh-shim.md, "Limits");
+a compile thread would be possible there, macOS still has the global. A State that is destroyed with compiles running kills them. A failed compile
 (no driver, the driver exits non-zero, a timeout, a bad `dlopen`) is `tier_failed` and nothing else: the function stays
 interpreted.
 

@@ -1,5 +1,5 @@
 (ir-module "fold_empty_sfinae.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "_ZN1A5valueE" (const int) 4 4 (weak) (init
     (scalar 0 int (const int 0))))
 (global "_ZNSt17integral_constantIbLb1EE5valueE" (const bool) 1 1 (weak) (init

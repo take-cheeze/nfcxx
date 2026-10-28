@@ -19,7 +19,9 @@ dir=${NFCXX_CUDA_CUB_DIR:-$root/build/cuda-cub}/$backend
 out=$dir/libnfcxx_cub.a
 stale=0
 [ -f "$out" ] || stale=1
-for dep in "$src" "$root/lib/cuda/nfcxx_cuda.h" "$root/build/cuda-rewrite" "$root/build/pathb-ptx-emit" "$0"; do
+# EDG's runtime too: an EDG rebuild can change what the generated code expects of it (the thread-local EH state).
+for dep in "$src" "$root/lib/cuda/nfcxx_cuda.h" "$root/build/cuda-rewrite" "$root/build/pathb-ptx-emit" \
+           "${EDG_BUILD:-$root/build/edg}/lib/libC.a" "$0"; do
   [ $stale = 1 ] || [ ! -e "$dep" ] || [ ! "$dep" -nt "$out" ] || stale=1
 done
 if [ $stale = 1 ]; then

@@ -77,7 +77,7 @@
     (addr 16 long @"_ZTI2D2" 0)))
 (global "_ZTT2D2" (const (array 1 (const (ptr (const long))))) 8 8 (weak) (init
     (addr 0 (ptr (const long)) @"_ZTV2D2" 24)))
-(global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (thread) (extern))
 (data "const" (const (array 3 (const char))) (string "1D\000"))
 (data "const.1" (const (array 4 (const char))) (string "2VB\000"))
 (data "const.2" (const (array 3 (const char))) (string "1V\000"))
