@@ -1,4 +1,3 @@
 suite	id	route	expected	reason
-libcxx	vector-empty	qbe	compile-rejected	qbe rejects the compile (nightly run 39850440749, routes (qbe))
 libstdcxx	pair-ref-assign	qbe	compile-rejected	qbe rejects the compile (nightly run 39850440749, routes (qbe))
 libstdcxx	pair-object	qbe	compile-rejected	qbe rejects the compile (nightly run 39850440749, routes (qbe))
