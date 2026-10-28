@@ -9,6 +9,7 @@
 # Hosted by default, like the driver: the host g++'s C++ library include directories and GNU version
 # (scripts/host-sys.sh; NFCXX_CXX, NFCXX_SYS_INCLUDES). --freestanding or PATHB_HOSTED=0 gives the old harness
 # (only EDG's include_c++, no C library headers).
+# --gnu-version=N (or --gnu_version=N) sets the GNU version of the front end, as nfcxx does; it overrides the host's.
 # NFCXX_PATHB_STATS=1 prints per-node-kind lowered/unsupported counts to stderr (--ir only).
 # --target=linux_riscv32 (or --target NAME): the sizes and predefined macros of an EDG target (EDG's own tables; the
 # IR's (layout ...) header carries them), with plain char signed. linux_riscv32 is ILP32, the data model of Emscripten's
@@ -36,7 +37,9 @@ while [ $i -lt ${#args[@]} ]; do
     -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
+    --gnu-version=*|--gnu_version=*) user_opts+=("--gnu_version=${arg#*=}") ;;   # as nfcxx: after the host's GNU version
     -Wno-narrowing) user_opts+=(--diag_warning=narrowing_conversion) ;;   # as nfcxx: a narrowing is a warning
+    --dialect=*) ;;                                          # clang's dialect is not modelled: the harness is EDG's g++ mode
     -W*) ;;                                                  # other warnings do not change the object code
     *) files+=("$arg") ;;
   esac

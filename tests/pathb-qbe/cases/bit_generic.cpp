@@ -1,7 +1,8 @@
 // GCC 14's type-generic bit built-ins, which <bit> calls (countl_zero and friends, through libstdc++'s headers): clzg and
 // ctzg take an optional fallback for 0, popcountg and parityg count bits; each width is the argument's type, including
 // unsigned __int128 (the helpers of be/nfcxx_ldrt.c count over both halves). Without the lowering they became calls of
-// an undefined `clzg`. Expected output: none; the exit status is the number of wrong results. // EXPECT: 0
+// an undefined `clzg`. Expected output: none; the exit status is the number of wrong results.
+// EXPECT: 0
 // NFCXX-FLAGS: --gnu-version=140000
 int check_bits() {
   int bad = 0;

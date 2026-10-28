@@ -58,6 +58,8 @@ expect_of() { sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$1" | head -1; }
 # `// STD: c++14` in a probe selects the language standard (default c++23), for pathb-dump and for the gcc backend.
 # C++ exceptions: dynamic exception specifications exist only before C++17.
 std_of() { sed -n 's,^// STD: *\(c++[0-9]*\).*,-std=\1,p' "$1" | head -1; }
+# `// NFCXX-FLAGS: --gnu-version=140000` (bit_generic: GCC 14 builtins) is passed on to pathb-dump, as nfcxx gets it.
+flags_of() { sed -n 's,^// NFCXX-FLAGS: *,,p' "$1" | head -1; }
 
 # check_asm <source> <asm>: the "// ASM-COUNT: FUNCTION PREFIX N" lines of a probe. The assembly of FUNCTION must
 # contain exactly N call instructions whose callee starts with PREFIX. Volatile accesses are calls of helper
@@ -89,8 +91,8 @@ check_asm() {
 
 # run_one <file> <mode: exit|trap>. Prints one table line and updates the counters.
 run_one() {
-  local f=$1 mode=$2 n name ir ssa s obj exe want got gcc_rc rc msg std
-  std=$(std_of "$f")
+  local f=$1 mode=$2 n name ir ssa s obj exe want got gcc_rc rc msg std flags
+  std=$(std_of "$f"); flags=$(flags_of "$f")
   total=$((total + 1))
   n=$(basename "$f" .cpp); name=${f#tests/}
   ir=$tmp/$n.ir; ssa=$tmp/$n.ssa; s=$tmp/$n.s; obj=$tmp/$n.o; exe=$tmp/$n.exe
@@ -98,15 +100,15 @@ run_one() {
   # docs/notes/ubsan.md): signed overflow is checked and a failing check reports its place on stderr before it aborts.
   san=$(sed -n 's#^// \(TRAP-\)\{0,1\}SANITIZE: *\([a-z,-]*\).*#\2#p' "$f" | head -1)
   if [ -n "$san" ]; then
-    NFCXX_IR_SANITIZE=$san scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    NFCXX_IR_SANITIZE=$san scripts/pathb-dump --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   elif [ "$mode" = trap ] && ! grep -q '^// TRAP-IR: default' "$f"; then
     # (`// TRAP-IR: default` keeps the wrapping arithmetic: a checked 64-bit signed multiply, which the lowering of a
     # variable-length array contains, is refused in trap mode.)
-    NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   else
-    scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    scripts/pathb-dump --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   fi
   "$mrb" "$emit" "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
