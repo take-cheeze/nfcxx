@@ -33,12 +33,12 @@ class CodeGen
     predicate ? "#{predicate}(#{expr})" : "mrb_type(#{expr}) == #{tag}"
   end
 
-  # EMBED_WIRED (compiled_gems.rb BC2CPP_WIRED_EMBEDDINGS): nil leaves embedding
-  # unrestricted (unit checks); the driver sets it for a real gem build.
+  # engine_registrations: set by the driver for an engine gem build, whose registrations wire each owner on its
+  # own (embed_family_foldable?); nil for self-registering worlds (fixtures, the optcarrot probe).
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in
   # storage order); nil proves nothing.
   class << self
-    attr_accessor :wired_embeddings, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
+    attr_accessor :engine_registrations, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
                   :integer_constant_values, :integer_constant_keys, :integer_constant_ranges, :constant_value_classes,
                   :module_names, :core_hidden_defs,
                   :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
@@ -63,7 +63,7 @@ class CodeGen
   # DataType<T> allocation in mruby-rgss/src/lib.cxx (alloc_obj asserts DATA_PTR is null first).
   # A compiled #initialize must not embed an ivar struct in those objects: mrb_data_init would
   # already occupy DATA_PTR before the first native load, so that assertion fails. Their ivars
-  # stay in iv_tbl, whatever BC2CPP_WIRED_EMBEDDINGS lists.
+  # stay in iv_tbl.
   NATIVE_DATA_OWNERS = %w[RGSS::Bitmap].freeze
 
   # box/check/unbox/err per specialized type proof. Ordinary embedded ivars use
@@ -493,8 +493,8 @@ class CodeGen
   def embed_family_foldable?(root, members)
     family = [root, *members]
     return false if family.any? { |owner| NATIVE_DATA_OWNERS.include?(owner) }
-    # Engine worlds (EMBED_WIRED) keep one layout per chain for now: their registrations wire each owner separately.
-    return false if self.class.wired_embeddings
+    # Engine worlds keep one layout per chain for now: their registrations wire each owner separately.
+    return false if self.class.engine_registrations
 
     @superclass_of.each_key.all? do |klass|
       next true unless strict_subclass?(klass, root)
@@ -540,8 +540,8 @@ class CodeGen
       end
       next if inherited_layout
       next if NATIVE_DATA_OWNERS.include?(owner)
+      next unless plain_object_ancestry?(owner)
 
-      next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
       init = @registry['initialize']&.find { |d| d.owner == owner }
       next unless init && compiles_clean?(init.irep)
@@ -677,6 +677,22 @@ class CodeGen
   # accessor (positional storage, nothing to synthesize).
   def synthesizable_accessor_only?(owner, name)
     (@registry[name] || []).select { |d| d.owner == owner }.all? { |d| d.kind == :ivar_accessor }
+  end
+
+  # An embedding owner's instances must be plain objects: mrb_data_init on an Exception, Array, Struct or other
+  # built-in instance overwrites the fields that type keeps. So every superclass up to Object is a class the
+  # program defines with a superclass the registry knows; one defined in C, or computed (`Struct.new`), refuses.
+  def plain_object_ancestry?(klass)
+    seen = Set.new
+    loop do
+      return false unless seen.add?(klass)
+
+      superclass = @superclass_of[klass]
+      return true if superclass == :none || %w[Object BasicObject].include?(superclass)
+      return false unless superclass.is_a?(String) && @superclass_of.key?(superclass)
+
+      klass = superclass
+    end
   end
 
   def strict_subclass?(klass, ancestor)

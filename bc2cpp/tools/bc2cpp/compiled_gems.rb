@@ -10,47 +10,6 @@
 # codegen step reading the other's output (that would be a circular Rake
 # dependency; only the final link needs both).
 #
-# EMBED_WIRED: the classes whose embedded-ivar layout is actually wired at
-# runtime. Its instances use MRB_TT_DATA, and #initialize must be compiled so
-# it allocates the slot payload. Interpreted methods and native accessors can
-# still read and write the same slots through mruby's ivar APIs.
-#
-# bc2cpp.rb's driver generates that registration itself (OWNER_METHOD_
-# REGISTRATION, emit_owner_registrations) for every entry of these classes in
-# `compiled` -- by compile_all's #error partition, exactly the entries that
-# compile clean -- so the equivalence holds by construction.
-# The generated bc2cpp_gem_init calls it once, right after bc2cpp_set_instance_tts.
-BC2CPP_WIRED_EMBEDDINGS = %w[
-  Game::Screen Game::ChipSet Game::Switches RPG2k::Scene::VehicleWorld
-  LCF::EventCommand LCF::MoveCommand Game::Interpreter Game::Transition Game::Map
-  Game::State RPG2k RPG2k::Scene::Map::LRUBitmapCache Game::Timer LCF::Tree
-  RPG2k::Window
-  RPG2k::Scene::Map Game::Battle Game::Battle.singleton RPG2k::Scene::Battle
-  RPG2k3::Scene::Battle Game::Actor Game::Party Game::Party.singleton
-  Game::Actors Game::Shop Game::Enemy Game::Troop Game::EnemyAi
-  Game::TextReveal Game::MessageConfig Game::NumberInput
-  Game::States.singleton Game::Message.singleton Game::ChipsetLayout.singleton
-  Game::EventPage.singleton Game::BattlePage.singleton Game::State.singleton
-  RPG2k::Scene::Base RPG2k::Scene::ChipsetEditor RPG2k::Scene::DebugMenu
-  RPG2k::Scene::EquipMenu RPG2k::Scene::GameOver RPG2k::Scene::ItemMenu
-  RPG2k::Scene::MapViewer RPG2k::Scene::Menu RPG2k::Scene::Order
-  RPG2k::Scene::SaveLoad RPG2k::Scene::SkillMenu RPG2k::Scene::StatusMenu
-  RPG2k::Scene::Title
-  LCF::Sections LCF::Array1D LCF::Array2D LCF::File
-  RGSS::ErrorReport::Tee RGSS::Bitmap Array
-  RGSS.singleton RGSS::ErrorReport.singleton RGSS::Input.singleton
-  RGSS::Audio.singleton RGSS::Graphics.singleton
-  # docs/adr/0215: the mruby-rpg2k record classes that replaced Structs.
-  RPG2k::Scene::Map::MapEventState RPG2k::Scene::Map::MessageState
-  RPG2k::Scene::Map::ShopState RPG2k::Scene::Map::ShopQuantity
-  Game::Interpreter::NameInputRequest Game::Interpreter::InnRequest
-  Game::Interpreter::ShopRequest Game::Interpreter::BattleRequest
-  Game::Interpreter::KeyInputRequest Game::Interpreter::KeyInputAccepted
-  Game::Interpreter::DiagnosticPosition Game::CommonEvent::CommonEventRecord
-  Game::Message::Segment Game::Message::SpeedMarker Game::Message::PauseMarker
-  Game::Message::ScanResult
-].freeze
-
 # mruby's own Ruby that joins the closed world as compiled input --
 # 3rd/mruby/mrblib/*.rb plus the mrblib of these gems, in interpreter load order
 # (core mrblib, then gems). A class is spread over several gems' mrblib, so the
@@ -184,9 +143,11 @@ end
 BC2CPP_CORE_OWNERS = (bc2cpp_ruby_definition_owners + bc2cpp_c_definition_owners - %w[Object]).to_a.sort.freeze
 
 # OWNER_METHOD_REGISTRATION / REGISTRATION_SPLIT (codegen_emit.rb, emit_owner_registrations): [every owner a gem
-# registers, the core half of them]. Only the core and wired owners go in the core half.
+# registers, the core half of them]. Only core owners go in the core half: it must resolve no program class, and an
+# engine gem runs both halves back to back in its gem_init, so where an embedding program class registers in it
+# changes nothing.
 def bc2cpp_registration_owners(compiled_owners)
-  core = (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq
+  core = BC2CPP_CORE_OWNERS
   [(core + compiled_owners).uniq, core.to_set]
 end
 BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
@@ -243,7 +204,7 @@ BC2CPP_COMPILED_GEMS = {
     #   diagnostic's `== ivar embedding ==`
     #   section prints IvarLayout's raw proposal, before that filter -- trust the
     #   "classes needing MRB_SET_INSTANCE_TT" section instead.
-    # - Every statically named ivar on a wired owner uses an mrb_value slot;
+    # - Every statically named ivar on an embedding owner uses an mrb_value slot;
     #   dynamic names keep the ordinary iv_tbl fallback.
     # - A Struct's members are positional (mruby-struct), never iv_tbl, so
     #   Game::Battle::Combatant has nothing to embed. Its `half_sp_cost?`/

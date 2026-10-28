@@ -1722,8 +1722,6 @@ STATIC_DISPATCH_UNREGISTERED_CLOSED = Set[
   "LCF::SaveTyped::Picture#save_zoom",
   "LCF::SaveTyped::Picture#save_zoom=",
   "LCF::SaveTyped::Record#rows",
-  "LCF::SaveTyped::Record#save_link",
-  "LCF::SaveTyped::Record#save_put",
   "LCF::SaveTyped::Save#check!",
   "LCF::SaveTyped::Save#save_actors",
   "LCF::SaveTyped::Save#save_actors=",
