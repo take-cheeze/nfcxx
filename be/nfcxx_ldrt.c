@@ -54,6 +54,29 @@ void __nfcxx_i128_shl(void *d, const void *a, long n) { i128_check_count(n); i12
 void __nfcxx_i128_shr_s(void *d, const void *a, long n) { i128_check_count(n); i128_wr(d, (u128)((s128)i128_rd(a) >> n)); }
 void __nfcxx_i128_shr_u(void *d, const void *a, long n) { i128_check_count(n); i128_wr(d, i128_rd(a) >> n); }
 
+/* GCC's type-generic bit built-ins on a 128-bit value (__builtin_clzg and friends): clz and ctz give 128 for 0 (the
+   caller takes the fallback there), popcount and parity count the bits of both halves */
+int __nfcxx_i128_clz(const void *a)
+{
+  u128 v = i128_rd(a);
+  unsigned long hi = (unsigned long)(v >> 64), lo = (unsigned long)v;
+  if (hi) return __builtin_clzl(hi);
+  if (lo) return 64 + __builtin_clzl(lo);
+  return 128;
+}
+int __nfcxx_i128_ctz(const void *a)
+{
+  u128 v = i128_rd(a);
+  unsigned long hi = (unsigned long)(v >> 64), lo = (unsigned long)v;
+  if (lo) return __builtin_ctzl(lo);
+  if (hi) return 64 + __builtin_ctzl(hi);
+  return 128;
+}
+int __nfcxx_i128_popcount(const void *a)
+{
+  u128 v = i128_rd(a);
+  return __builtin_popcountl((unsigned long)(v >> 64)) + __builtin_popcountl((unsigned long)v);
+}
 /* the count of a shift given as a 128-bit value: -1 when it does not fit a long (the count check then aborts) */
 long __nfcxx_i128_count(const void *a)
 {
