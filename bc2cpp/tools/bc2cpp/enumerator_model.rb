@@ -32,7 +32,7 @@ module EnumeratorModel
   end
 
   # [the module Kernel alias triple, the construction chain's names]. The chain is to_enum and its alias, the `new`
-  # the body sends to Enumerator, then the presyms Class#new's bytecode sends (class.c `new_syms`).
+  # the body sends to Enumerator, then the names Class#new sends (class.c `class_new_instance`).
   def self.source_construction
     kernel = source_text(MRUBY_ENUMERATOR_RB)[/^module Kernel\n(.*?)^end$/m, 1] or
       raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: no `module Kernel`"
@@ -40,12 +40,15 @@ module EnumeratorModel
     alias_match = kernel.match(/^  alias (\w+) (\w+)$/) or raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: no Kernel alias"
     raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: the alias is not to_enum" unless alias_match[2] == 'to_enum'
 
-    presyms = source_text(MRUBY_CLASS_C).match(
-      /^MRB_PRESYM_DEFINE_VAR_AND_INITER\(new_syms, \d+, MRB_SYM\((\w+)\), MRB_SYM\((\w+)\)\)$/
-    ) or raise "bc2cpp: #{MRUBY_CLASS_C}: no Class#new presyms"
+    # Class#new is a cfunc (`class_new_instance`): the names it sends are its two mrb_funcall_send calls, and it makes no
+    # other call.
+    new_body = source_text(MRUBY_CLASS_C)[/^class_new_instance\(.*?^}$/m] or raise "bc2cpp: #{MRUBY_CLASS_C}: no Class#new function"
+    presyms = new_body.scan(/\bmrb_funcall_send\(mrb, \w+, MRB_SYM\((\w+)\)/).flatten
+    raise "bc2cpp: #{MRUBY_CLASS_C}: Class#new does not send allocate, then initialize" unless
+      presyms == %w[allocate initialize] && new_body.scan(/\bmrb_funcall\w*\(/).size == 2
     body_sends = to_enum_def.scan(/\b[A-Z]\w*\.(\w+)/).flatten.uniq
     [['Kernel', alias_match[1], alias_match[2]].freeze,
-     ['to_enum', alias_match[1], *body_sends, presyms[1], presyms[2]].freeze]
+     ['to_enum', alias_match[1], *body_sends, *presyms].freeze]
   end
 
   # Names the direct construction relies on: a definition of any of them outside mruby's own Ruby (or a second one inside)

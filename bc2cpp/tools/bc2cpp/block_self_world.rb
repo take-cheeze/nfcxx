@@ -71,6 +71,11 @@ module BlockSelfWorld
   # name), exactly the send symbol.rb used to make. It is held to the same proof, computed_send's, instead of the
   # blanket native rule: the Symbols are the ones the program passes as blocks, and none may be a rebinder.
   NATIVE_SYMBOL_PROC_FILE = '3rd/mruby/src/symbol.c'.freeze
+  # Hash#to_proc's native body spells `to_proc` once, as the name it registers (a definition, not a send), and sends a
+  # fixed `[]` to its Hash: no computed name and no block. That one registration line is cut before the native scan, so
+  # the rest of the file is held to the blanket rule.
+  NATIVE_HASH_PROC_FILE = '3rd/mruby/mrbgems/mruby-hash-ext/src/hash_ext.c'.freeze
+  NATIVE_HASH_PROC_ENTRY = /MRB_MT_ENTRY\(hash_to_proc,\s*MRB_SYM\(to_proc\),\s*MRB_ARGS_NONE\(\)\)/
   # mruby's API headers declare these functions; a declaration runs nothing.
   NATIVE_DECLARATION_DIRS = %w[3rd/mruby/include/].freeze
   NATIVE_SELF_RUNNERS = /\bmrb_(?:yield_with_class|yield_cont|obj_instance_eval|mod_module_eval|exec_irep|vm_run|vm_exec|top_run)\b/
@@ -534,6 +539,7 @@ module BlockSelfWorld
         end
 
         text = File.read(path, encoding: 'BINARY').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
+        text = text.sub(NATIVE_HASH_PROC_ENTRY, '') if rel == NATIVE_HASH_PROC_FILE
         if (m = text.match(NATIVE_SELF_RUNNERS))
           @failures << "#{rel}: runs a Proc under a self it chooses (#{m[0]})"
         elsif (m = text.match(NATIVE_NAME_SPELLING))
