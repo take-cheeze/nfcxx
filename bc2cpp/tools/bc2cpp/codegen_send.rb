@@ -1799,6 +1799,17 @@ class CodeGen
     "bc2cpp_class_is(M, #{recv}, #{cls})"
   end
 
+  # OWNER_CALL_DIRECT (owner_call_direct.rb): each owner-class getter call the code tests a receiver against, to its
+  # owner.
+  def owner_class_slots
+    (@owner_class_cache || {}).to_h { |owner, slot| ["bc2cpp_owner_class_#{slot[:index]}(M)", owner] }
+  end
+
+  # OWNER_CALL_DIRECT: every class some program class inherits from.
+  def program_superclasses
+    @superclass_of.values.grep(String).to_set
+  end
+
   # The cache getter itself, for a table that stores it (POLY_TABLE).
   def owner_class_fn_name(owner)
     @owner_class_cache ||= {}

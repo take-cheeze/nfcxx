@@ -8,8 +8,12 @@
 #     (naming_macros: `#param`, a presym macro of the parameter, or a call passing it on to another such macro).
 #     A bare C identifier names nothing.
 #   NON_LOOKUP_HELPERS: a generated symbol whose every use is bc2cpp_nomethod(_raise), bc2cpp_guard_violation,
-#     bc2cpp_hint_violation or bc2cpp_nil_receiver is no dynamic lookup; any bc2cpp_send, owner call or
+#     bc2cpp_hint_violation or bc2cpp_nil_receiver is no dynamic lookup; any bc2cpp_send, uncovered owner call or
 #     bc2cpp_sym(M, i) use keeps it one.
+#   OWNER_CALL_GUARDED: an owner call covering every engine owner it lists is no lookup either: none listed, or each
+#     one tested by the exact-class chain the call is the else of and not subclassed, or carried as a direct entry
+#     (OWNER_CALL_DIRECT). An untested listed owner, or a subclassed tested one without its entry, keeps it one.
+#     The subclass scan reads a native define call's superclass from its last argument, not its own name.
 #   BYTECODE_PROC: what counts as generated C building a proc over a bytecode irep (which keeps every block of a
 #     registered compiled method runnable as bytecode).
 #   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources, nor the workflows.
@@ -26,12 +30,19 @@
 #   CORE_BYTECODE_TOKENS (needs MRBC; skipped without it): core Ruby read as bytecode names a method only through a
 #     send whose receiver may be an engine object (self in a module, Object or Kernel method; any unknown value), a
 #     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
-#     file with a reflective send keeps the text rule. engine_ancestry follows superclasses, mruby's native
-#     exception chain included, and gives up (:all) on any other native superclass.
+#     file with a reflective send counts every symbol of its bytecode, never a comment word or a local variable.
+#     engine_ancestry follows superclasses, mruby's native exception chain included, and gives up (:all) on any
+#     other native superclass.
+#   CLOSED_LINKED_ONLY: the closed scan reads no core mruby-* gem outside the closed build's gem closure (HAL gems
+#     stay), no external gem it leaves out, no engine mrblib file its rake swaps out and no app/ source; it reads
+#     the closed host, scripts/bc2cpp/trace_host.cxx.
+#   NATIVE_COMMENTS: a literal in a C comment names nothing; text the comment scan cannot read is kept whole.
 #   FRAGMENT_USES (needs MRBC; skipped without it): a pool literal stays a fragment only when a load of it may reach
-#     a built string -- a concatenation without a non-name character, a store, a return a caller passes on, an
-#     argument of a method the trace does not know. Comparing it, a native hash key, a constant list only tested
-#     for membership and a part of a message with a space or a colon do not.
+#     a built string that goes on somewhere -- a concatenation without a non-name character whose result escapes
+#     (a send, an interned Symbol), a store, a return a caller passes on, an argument of a method the trace does not
+#     know. Comparing it, a native hash key, a constant list only tested for membership, a part of a message with a
+#     space or a colon and a part of a string only printed or compared do not. IDENT_USES asks the same of an
+#     identifier-shaped literal, an exact name.
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
@@ -108,13 +119,73 @@ gen = <<~'CPP'
   r4 = bc2cpp_send(M, r0, 1, 0);
   r5 = mrb_funcall_id(M, r0, bc2cpp_sym(M, 2), 0);
   r6 = bc2cpp_guard_violation(M, r0, 3, "site", 0);
-  r7 = bc2cpp_owner_call(M, r0, 3, 2, BC2CPP_OWNERS(0), mrb_nil_value(), 0);
+  r7 = bc2cpp_owner_call(M, r0, 3, 2, BC2CPP_OWNERS("Game::Actor"), mrb_nil_value(), 0);
 CPP
 free = S.lookup_free_names(gen, {})
 check('non-lookup: only nomethod / nil_receiver / hint_violation uses', free.include?('quiet'))
 check('non-lookup: a bc2cpp_send use is a lookup', !free.include?('sent'))
 check('non-lookup: a bc2cpp_sym(M, i) use is a lookup', !free.include?('symbol'))
 check('non-lookup: an owner call next to a guard violation is a lookup', !free.include?('mixed'))
+
+# --- OWNER_CALL_GUARDED ---
+owner_gen = <<~'CPP'
+  static const char* const bc2cpp_sym_names[6] = {
+    "core_only",
+    "chained",
+    "subclassed",
+    "direct",
+    "unguarded",
+    "other_recv",
+  };
+  static inline struct RClass* bc2cpp_owner_class_1(mrb_state* M) {
+    struct RClass* c = bc2cpp_owner_class_slots[1];
+    if (!c) {
+      static const char* const path[] = {"Game", "Party"};
+  r1 = bc2cpp_owner_call(M, r0, 0, 2, BC2CPP_OWNERS("Array"), mrb_nil_value(), 0);
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r2 = Game__Party_chained_impl(M, r0);
+  } else if (bc2cpp_class_is(M, r0, rgss::native_bitmap_class())) {
+    r2 = rgss::bitmap_chained_direct(M, r0);
+  } else {
+    BC2CPP_COLD_ARM r2 = bc2cpp_owner_call(M, r0, 1, 2, BC2CPP_OWNERS("Array", "Game::Party", "RGSS::Bitmap"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r3 = Game__Party_subclassed_impl(M, r0);
+  } else {
+    r3 = bc2cpp_owner_call(M, r0, 2, 2, BC2CPP_OWNERS("Game::Party"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r4 = Game__Party_direct_impl(M, r0);
+  } else {
+    r4 = bc2cpp_owner_call(M, r0, 3, 2, BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT("Game::Party", Game__Party_direct, MRB_ARGS_REQ(0), MRB_METHOD_PUBLIC_FL) BC2CPP_OWNER_DIRECT("Game::Actor", Game__Actor_direct, MRB_ARGS_REQ(0), MRB_METHOD_PUBLIC_FL), "Game::Actor", "Game::Party"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r5 = Game__Party_unguarded_impl(M, r0);
+  } else {
+    r5 = bc2cpp_owner_call(M, r0, 4, 2, BC2CPP_OWNERS("Game::Actor", "Game::Party"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r9, bc2cpp_owner_class_1(M))) {
+    r6 = Game__Party_other_recv_impl(M, r9);
+  } else {
+    r6 = bc2cpp_owner_call(M, r0, 5, 2, BC2CPP_OWNERS("Game::Party"), mrb_nil_value(), 0);
+  }
+CPP
+owner_free = S.lookup_free_names(owner_gen, %w[Bitmap])
+check('owner call: listing no engine owner looks nothing up', owner_free.include?('core_only'))
+check('owner call: the else of a chain testing every listed engine owner looks nothing up',
+      S.lookup_free_names(owner_gen, []).include?('chained'))
+check('owner call: a tested owner something subclasses is still looked up', !owner_free.include?('chained'))
+check('owner call: a subclassed tested owner is looked up without its entry',
+      !S.lookup_free_names(owner_gen, %w[Party]).include?('subclassed'))
+check('owner call: direct entries cover their owners, tested and subclassed or not',
+      S.lookup_free_names(owner_gen, %w[Party]).include?('direct'))
+check('owner call: a listed owner neither tested nor direct is looked up', !owner_free.include?('unguarded'))
+check('owner call: a chain testing another receiver covers nothing', !S.lookup_free_names(owner_gen, []).include?('other_recv'))
+supers = S.define_class_superclasses('mrb_define_class_under(M, m, "Bitmap", M->object_class); ' \
+                                     'mrb_define_class(M, "X", mrb_class_get(M, "Base, too"));')
+check('subclass scan: a define call\'s superclass is its last argument, not its own name',
+      supers == ['M->object_class', 'mrb_class_get(M, "Base, too")'] &&
+      supers.map { |a| a.match?(S::BUILTIN_SUPERCLASS) } == [true, false])
 values = <<~'CPP'
   static const char* const bc2cpp_sym_names[4] = {
     "as_value",
@@ -150,6 +221,32 @@ check('the full scan still reads them', open_ruby.any? { |p| p.start_with?("#{ro
 check('closed scan reads no workflow', ruby.none? { |p| p.start_with?("#{root}/.github/") })
 check('the full scan reads the workflows', open_ruby.any? { |p| p.start_with?("#{root}/.github/") })
 
+# --- CLOSED_LINKED_ONLY ---
+unlinked = S.closed_unlinked_dirs(root)
+check('linked only: a core gem outside the closure, an external gem the build leaves out, app/',
+      %W[#{root}/3rd/mruby/mrbgems/mruby-socket/ #{root}/3rd/mruby/mrbgems/mruby-enum-lazy/
+         #{root}/3rd/mruby-onig-regexp/ #{root}/app/].all? { |d| unlinked.include?(d) })
+check('linked only: a linked core gem, a HAL gem and a linked external gem stay',
+      %W[#{root}/3rd/mruby/mrbgems/mruby-io/ #{root}/3rd/mruby/mrbgems/hal-posix-io/
+         #{root}/3rd/mruby-stringio/].none? { |d| unlinked.include?(d) })
+check('linked only: an unlinked gem\'s mrblib and a swapped-out engine file are not read',
+      ruby.none? { |p| p.include?('/mruby-enum-lazy/') || p.end_with?('/scene/map_tts.rb') } &&
+      open_ruby.any? { |p| p.end_with?('/scene/map_tts.rb') })
+check('linked only: the closed host is read, the device apps are not',
+      natives.include?("#{root}/scripts/bc2cpp/trace_host.cxx") && natives.none? { |p| p.start_with?("#{root}/app/") })
+
+# --- NATIVE_COMMENTS ---
+commented = %(int n = 1'000; /* "in_block" */ f("keep//this", '"'); // "in_line"\nmrb_funcall(M, v, "real", 0);\n)
+stripped = S.strip_c_comments(commented)
+check('comments: block and line comments go, strings and a quote character stay',
+      !stripped.include?('in_block') && !stripped.include?('in_line') && stripped.include?('"keep//this"') &&
+      stripped.include?(%('"')) && stripped.include?('"real"'))
+check('comments: unreadable text is kept as it is',
+      S.strip_c_comments(%{f("open\n/* "x" */}).include?('x') && S.strip_c_comments(%{R"(/* "y" */)"}).include?('y'))
+comment_tokens = Set.new
+S.native_name_tokens(commented, comment_tokens, [])
+check('comments: a literal in a comment names nothing', comment_tokens == Set['keep//this', 'real'])
+
 # --- engine_ancestry ---
 check('ancestry: engine classes only reach Object',
       S.engine_ancestry({ 'Game::A' => 'Game::B', 'Game::B' => :none }, []) == Set['Object', 'BasicObject'])
@@ -184,7 +281,15 @@ if ENV['MRBC']
       end
     RUBY
     reflective = File.join(tmp, 'reflective.rb')
-    File.write(reflective, "class FixRefl\n  def r(m) = __send__(m, reflective_local_word)\nend\n")
+    File.write(reflective, <<~'RUBY')
+      class FixRefl
+        # comment_word_only
+        def r(m)
+          local_name_only = m
+          __send__(local_name_only, reflective_send_name, :reflective_symbol)
+        end
+      end
+    RUBY
     tokens = Set.new
     text = S.core_bytecode_tokens([plain, reflective], tokens, mrbc: ENV['MRBC'], superclass_of: {})
     check('core: self in a module method counts', tokens.include?('mixin_self_send'))
@@ -195,7 +300,12 @@ if ENV['MRBC']
     check('core: an unknown receiver counts', tokens.include?('unknown_recv_send'))
     check('core: symbols and identifier strings count',
           tokens.include?('symbol_literal') && tokens.include?('string_literal_name'))
-    check('core: a reflective file keeps the text rule', text == [reflective] && !tokens.include?('reflective_local_word'))
+    names = text[reflective]
+    check('core: a reflective file loses the receiver rule, not its symbols',
+          text.keys == [reflective] && names&.include?('reflective_send_name') &&
+          names.include?('reflective_symbol') && !tokens.include?('reflective_send_name'))
+    check('core: a reflective file names no comment word or local variable',
+          names && !names.include?('comment_word_only') && !names.include?('local_name_only'))
 
     # --- FRAGMENT_USES ---
     fragments = File.join(tmp, 'fragments.rb')
@@ -210,6 +320,10 @@ if ENV['MRBC']
           "#{x}: #{kind}"
         end
         def built(x) = respond_to?("#{x}_built_suffix")
+        def built_logged(x) = puts("#{x}_logged_suffix")
+        def built_compared(x) = "#{x}_compared_suffix" == 'other'
+        def built_sent(o, x) = o.send("#{x}_sent_suffix")
+        def built_interned(h, x) = h[:"#{x}_interned_suffix"]
         def setter_name(x) = respond_to?("#{x}=")
         def bang_char(c) = c == '!'
         def stored = @word = 'stored_word'
@@ -244,12 +358,21 @@ if ENV['MRBC']
           !escaping.include?('list_member') && !escaping.include?('other_member'))
     check('fragment uses: a part of a message with a non-name character is no fragment', !escaping.include?('message_word'))
     check('fragment uses: a part of a name reaching respond_to? is one', escaping.include?('_built_suffix'))
+    check('fragment uses: a part of a string only printed or compared is no fragment',
+          !escaping.include?('_logged_suffix') && !escaping.include?('_compared_suffix'))
+    check('fragment uses: a part of a string reaching send, or interned, is one',
+          escaping.include?('_sent_suffix') && escaping.include?('_interned_suffix'))
     check('fragment uses: a stored literal is one', escaping.include?('stored_word'))
     check('fragment uses: an argument of an unknown method is one', escaping.include?('handed_word'))
     check('fragment uses: a returned literal concatenated by a caller is one', escaping.include?('returned_word'))
     check('fragment uses: an element of a duped array handed out is one', escaping.include?('duped_elem_word'))
     check('fragment uses: an element of a frozen array only queried is no fragment',
           !escaping.include?('frozen_elem_word'))
+    # IDENT_USES: the same question for an exact name; the closed proof asks it only once SYMBOL_USES holds.
+    names = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, Set.new, S::IDENT)
+    check('ident uses: a compared or hash-key name is no lookup, a stored or handed-out one is',
+          !names.include?('compared_word') && !names.include?('hash_key_word') &&
+          names.include?('stored_word') && names.include?('handed_word'))
     # --- SYMBOL_USES ---
     symbols = File.join(tmp, 'symbols.rb')
     File.write(symbols, <<~'RUBY')

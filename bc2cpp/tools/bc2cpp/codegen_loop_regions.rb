@@ -906,7 +906,7 @@ class CodeGen
       if level.zero?
         "  r#{upvar_idx} = r#{insn.reg.to_i + offset};\n"
       elsif (vname = inline_host_upvar_name(level, upvar_idx))
-        "  *#{vname} = r#{insn.reg.to_i + offset};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg.to_i + offset});\n"
+        "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = r#{insn.reg.to_i + offset};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg.to_i + offset});\n"
       else
         "  #error unhandled opcode SETUPVAR -- not in this prototype's supported subset\n"
       end
