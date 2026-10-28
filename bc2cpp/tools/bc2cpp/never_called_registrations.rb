@@ -68,7 +68,6 @@ module NeverCalledRegistrations
         'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
         'SKIP_UNSUPPORTED' => '1',
         StaticDispatchLists::PATH_ENV => lists_path,
-        StaticDispatchLists::DIGEST_ENV => nil,
       }
       units = gem_names.map do |gem_name|
         dir = FileUtils.mkdir_p(File.join(tmp, gem_name)).first

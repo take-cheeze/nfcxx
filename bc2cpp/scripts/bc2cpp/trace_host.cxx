@@ -8,6 +8,7 @@
 // normally so the BC2CPP_TRACE_TYPES atexit dump runs.
 //
 // Usage: trace_host GAME_DIR [FRAMES]
+// BC2CPP_HOST_MT_COUNT=1 prints the method-table size and exits before the game starts.
 
 #include <cstdint>
 #include <cstdio>
@@ -19,7 +20,9 @@
 #include <lvgl.h>
 #include <mruby.h>
 #include <mruby/array.h>
+#include <mruby/class.h>
 #include <mruby/error.h>
+#include <mruby/gc.h>
 #include <mruby/string.h>
 #include <mruby/variable.h>
 
@@ -51,6 +54,21 @@ void delay_ms(uint32_t ms) {
 // flush acknowledged or it stops rendering.
 void flush_cb(lv_display_t* disp, const lv_area_t*, uint8_t*) {
   lv_display_flush_ready(disp);
+}
+
+// BC2CPP_HOST_MT_COUNT=1: the number of method-table entries of every class, module and singleton class once the
+// gems are initialised. scripts/bc2cpp/host_sweep.bash holds it to scripts/bc2cpp/method_table_threshold.txt, so a
+// growth of the table is a deliberate edit, not a silent drift now that the lists behind it are computed.
+int count_entry(mrb_state*, mrb_sym, mrb_method_t, void* total) {
+  ++*static_cast<long*>(total);
+  return 0;
+}
+
+int count_class_entries(mrb_state* M, struct RBasic* obj, void* total) {
+  if (obj->tt == MRB_TT_CLASS || obj->tt == MRB_TT_MODULE || obj->tt == MRB_TT_SCLASS) {
+    mrb_mt_foreach(M, reinterpret_cast<struct RClass*>(obj), count_entry, total);
+  }
+  return MRB_EACH_OBJ_OK;
 }
 
 void set_const(mrb_state* M, const char* name, mrb_value v) {
@@ -164,6 +182,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   rgss_set_display(M, disp);
+
+  if (const char* const count = getenv("BC2CPP_HOST_MT_COUNT"); count && strcmp(count, "1") == 0) {
+    long total = 0;
+    mrb_objspace_each_objects(M, count_class_entries, &total);
+    fprintf(stdout, "TRACE_HOST method_table_entries=%ld\n", total);
+    return 0;
+  }
 
   set_const(M, "GAME_DIR", mrb_str_new_cstr(M, game_dir));
   set_const(M, "RTP_DIR", mrb_str_new_cstr(M, ""));

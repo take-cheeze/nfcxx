@@ -1136,7 +1136,7 @@ module StaticDispatchRegistrations
     files.concat([File.join(root, 'build_config.rb'), File.join(root, 'scripts/bc2cpp/trace_host.cxx')])
     files.concat(Dir["#{root}/sig/**/*.rbs"])
     sha = Digest::SHA256.new
-    sha << "ruby #{RUBY_VERSION}\nlists-format 1\n"
+    sha << "lists-format 1\n"
     files.map { |p| File.expand_path(p) }.uniq.sort.each do |path|
       next unless File.file?(path)
 
@@ -1163,6 +1163,20 @@ module StaticDispatchRegistrations
                                    core_left_out: closed[:core_excluded][1].to_set.freeze, digest: digest)
   end
 
+  def read_lists(path)
+    return nil unless File.file?(path)
+
+    StaticDispatchLists.parse(File.read(path))
+  rescue StaticDispatchLists::Missing, JSON::ParserError
+    nil
+  end
+
+  # Whether `dir` holds the lists for this tree's inputs.
+  def current?(repo_root, dir)
+    lists = read_lists(File.join(dir, 'static_dispatch_lists.json'))
+    !lists.nil? && lists.digest == inputs_digest(repo_root)
+  end
+
   def same_lists?(a, b)
     StaticDispatchLists::KEYS.all? { |key| a.public_send(key) == b.public_send(key) }
   end
@@ -1175,16 +1189,9 @@ module StaticDispatchRegistrations
     FileUtils.mkdir_p(dir)
     digest = inputs_digest(repo_root)
     out = File.join(dir, 'static_dispatch_lists.json')
-    if File.file?(out)
-      cached = begin
-        StaticDispatchLists.parse(File.read(out))
-      rescue StaticDispatchLists::Missing, JSON::ParserError
-        nil
-      end
-      if cached&.digest == digest
-        log.puts "static dispatch lists: #{out} is current (#{digest[0, 12]})"
-        return cached
-      end
+    if (cached = read_lists(out)) && cached.digest == digest
+      log.puts "static dispatch lists: #{out} is current (#{digest[0, 12]})"
+      return cached
     end
 
     lists = StaticDispatchLists::EMPTY
@@ -1214,13 +1221,23 @@ end
 
 if $PROGRAM_NAME == __FILE__
   repo_root = File.expand_path('../..', __dir__)
-  mrbc = ENV['MRBC'] || 'mrbc'
   args = ARGV.dup
-  dir = nil
-  dir = args.slice!(args.index('--emit'), 2).last if args.include?('--emit')
-  abort "usage: MRBC=<host mrbc> ruby #{$PROGRAM_NAME} --emit DIR" if dir.nil? || !args.empty?
+  take = ->(flag) { args.include?(flag) ? args.slice!(args.index(flag), 2).last : nil }
+  emit_dir = take.call('--emit')
+  check_dir = take.call('--check')
+  digest_only = !args.delete('--digest').nil?
+  abort "usage: [MRBC=<host mrbc>] ruby #{$PROGRAM_NAME} --emit DIR | --check DIR | --digest" unless args.empty?
 
-  lists = StaticDispatchRegistrations.emit(repo_root, mrbc, dir)
-  warn "open #{lists.open.size}, closed #{lists.closed.size}, core ROM #{lists.core_excluded.size}, " \
-       "core run-time #{lists.core_left_out.size}"
+  if digest_only
+    puts StaticDispatchRegistrations.inputs_digest(repo_root)
+  elsif check_dir
+    # Exit 0 when DIR holds the lists for this tree: the cheap test that lets a caller skip building a host mrbc.
+    exit(StaticDispatchRegistrations.current?(repo_root, check_dir) ? 0 : 1)
+  elsif emit_dir
+    lists = StaticDispatchRegistrations.emit(repo_root, ENV['MRBC'] || 'mrbc', emit_dir)
+    warn "open #{lists.open.size}, closed #{lists.closed.size}, core ROM #{lists.core_excluded.size}, " \
+         "core run-time #{lists.core_left_out.size}"
+  else
+    abort "usage: [MRBC=<host mrbc>] ruby #{$PROGRAM_NAME} --emit DIR | --check DIR | --digest"
+  end
 end

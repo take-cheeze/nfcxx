@@ -9,15 +9,14 @@
 #   core_excluded  core ROM method-table entries the closed build leaves out at compile time (MtClass#name)
 #   core_left_out  core run-time registrations the closed build removes (Owner#name)
 #
-# The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs; a
-# consumer that was told the digest it expects (BC2CPP_STATIC_DISPATCH_DIGEST) refuses a file computed from other
-# inputs. 'none' stands for empty lists: the proof's own first pass, and fixtures that are not the engine.
+# The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs, which
+# verify_current! compares with the tree. 'none' stands for empty lists: the proof's own first pass, and fixtures
+# that are not the engine.
 require 'json'
 require 'set'
 
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
-  DIGEST_ENV = 'BC2CPP_STATIC_DISPATCH_DIGEST'
   KEYS = %w[open closed core_excluded core_left_out].freeze
 
   class Missing < StandardError; end
@@ -62,13 +61,7 @@ module StaticDispatchLists
     @cache[path] ||= begin
       raise Missing, "#{PATH_ENV}=#{path} does not exist" unless File.file?(path)
 
-      lists = parse(File.read(path))
-      want = env[DIGEST_ENV]
-      if want && !want.empty? && want != lists.digest
-        raise Missing, "#{path} was computed for inputs #{lists.digest}, not #{want}; run the proof again"
-      end
-
-      lists
+      parse(File.read(path))
     end
   end
 
