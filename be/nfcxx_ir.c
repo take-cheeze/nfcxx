@@ -1685,6 +1685,7 @@ static ir_val ir_gap(a_type_ptr t, const char *what, int cls, int kind)
 
 static void ir_stmt(a_statement_ptr s, int d);
 static void ir_stmt_init(a_statement_ptr s, int d);
+static void ir_decl_zero_init(a_statement_ptr s, int d);
 static int ir_ends_in_return(a_statement_ptr body);
 static ir_val ir_rval(an_expr_node_ptr e);
 
@@ -6241,6 +6242,7 @@ static void ir_stmt(a_statement_ptr s, int d)
       /* The declaration point. Storage is per function, so nothing is printed, except the borrow facts (flag only). */
       ir_note(1, stmk_decl, 1);
       ir_fact_decl(s, d);
+      ir_decl_zero_init(s, d);
       return;
     case stmk_set_vla_size: {
       /* The dimension of a VLA type is evaluated here, once, into its dimension variable. */
@@ -6282,6 +6284,33 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_line(d, ir_fmt("(unsupported stmt %s)",
                         nfcxx_stmk_name(s->kind) != NULL ? nfcxx_stmk_name(s->kind) : "?"));
       return;
+  }
+}
+
+/* A local whose initialization is zero (initk_zero) is zeroed at its declaration: EDG records that on the variable, with
+   no stmk_init. It is the part of a brace initializer that names no value, when the elements are of a class whose default
+   constructor is trivial: `H a[4] = {{1, 2}}` constructs a[0] and zeroes a[1..3] (the C generator writes `= {{{0}}}` on
+   the declaration). ggml-sycl's fattn-vec.hpp: `sycl::half2 Q_reg[ncols][(D/2)/nthreads_KQ] = {{{0.0f, 0.0f}}}`; without
+   the zeroes the kernel read its stack's earlier contents (NaN when they were NaN bits). */
+static void ir_decl_zero_init(a_statement_ptr s, int d)
+{
+  an_il_entity_list_entry_ptr entry;
+  for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
+    a_variable_ptr var;
+    an_init_kind kind;
+    an_initializer_ptr ini;
+    ir_tmp_scope tmps;
+    ir_val dst;
+    if (entry->entity.kind != iek_variable) continue;
+    var = (a_variable_ptr)entry->entity.ptr;
+    if (var->storage_class == sc_static || var->storage_class == sc_extern || var->is_vla) continue;
+    get_variable_initializer(var, NULL, &kind, &ini);
+    if (kind != initk_zero) continue;
+    ir_tmp_begin(&tmps);
+    dst = ir_var_addr(var, var->type, ir_is_volatile(var->type));
+    ir_zero_object(dst, var->type);
+    ir_tmp_flush(&tmps, d);
+    ir_tmp_end(&tmps, d);
   }
 }
 
