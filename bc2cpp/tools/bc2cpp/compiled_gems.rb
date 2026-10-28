@@ -766,7 +766,22 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     'BC2CPP_STATIC_DISPATCH_LISTS' => ENV['BC2CPP_STATIC_DISPATCH_LISTS']
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
+  env['BC2CPP_LOAD_WORLD'] = bc2cpp_load_world(spec) if ENV.fetch('BC2CPP_LOAD_COMPILE', 'defs') != 'off'
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
+end
+
+# LOAD_COMPILE: {out_symbol => mrblib files} of the compiled gems in `spec`'s build whose base gem recorded its sources
+# (bc2cpp_stub_mrblib), as JSON: the program a load plan splits. A gem that left them out takes no part.
+def bc2cpp_load_world(spec)
+  require 'json'
+  world = spec.build.gems.each_with_object({}) do |gem, all|
+    compiled = BC2CPP_COMPILED_GEMS["#{gem.name}-compiled"] or next
+    next unless spec.build.gems.any? { |g| g.name == "#{gem.name}-compiled" }
+
+    files = gem.instance_variable_get(:@bc2cpp_mrblib_sources) or next
+    all[compiled[:out_symbol]] = files.map { |f| File.expand_path(f) }
+  end
+  JSON.generate(world)
 end
 
 # BC2CPP_SHARDS (docs/bc2cpp-shards.md): translation units per compiled gem, default 4 (the CI runners' cores). A
@@ -886,6 +901,7 @@ module Bc2cppCompiledGemGeneration
       end
       # An empty manifest: phase 1's mrblib keeps every body (MRBLIB_STUBS).
       File.write(MrblibStubs.manifest_path(env.fetch('OUT_DIR'), symbol), '')
+      File.write(File.join(env.fetch('OUT_DIR'), "#{symbol}_load.json"), '{}')
       @done[generated] = true
     end
   end

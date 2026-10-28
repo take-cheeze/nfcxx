@@ -240,7 +240,42 @@ class CodeGen
     out << "  bc2cpp_register_core_owner_methods(M);\n"
     out << "  bc2cpp_register_program_owner_methods(M);\n"
     out << "}\n\n"
+    out << emit_registration_presyms(out)
     out
+  end
+
+  PRESYM_OPERATORS = {
+    '!' => 'not', '%' => 'mod', '&' => 'and', '*' => 'mul', '+' => 'add', '-' => 'sub', '/' => 'div', '<' => 'lt',
+    '>' => 'gt', '^' => 'xor', '`' => 'tick', '|' => 'or', '~' => 'neg', '!=' => 'neq', '!~' => 'nmatch',
+    '&&' => 'andand', '**' => 'pow', '+@' => 'plus', '-@' => 'minus', '<<' => 'lshift', '<=' => 'le', '==' => 'eq',
+    '=~' => 'match', '>=' => 'ge', '>>' => 'rshift', '[]' => 'aref', '||' => 'oror', '<=>' => 'cmp', '===' => 'eqq',
+    '[]=' => 'aset'
+  }.freeze
+
+  # The presym macro for method name `name`, or nil when mruby's presym table has no spelling for it.
+  def presym_macro(name)
+    case name
+    when /\A[A-Za-z_][A-Za-z0-9_]*\z/ then "MRB_SYM(#{name})"
+    when /\A([A-Za-z_][A-Za-z0-9_]*)([?!=])\z/ then "MRB_SYM_#{{ '?' => 'Q', '!' => 'B', '=' => 'E' }.fetch($2)}(#{$1})"
+    else (op = PRESYM_OPERATORS[name]) && "MRB_OPSYM(#{op})"
+    end
+  end
+
+  # LOAD_COMPILE: a registration interns its method name by string. The name was a presym while the mrblib had
+  # the `def`, and a name that is not one costs a miss in mruby's 256-bucket symbol table (a walk over every symbol
+  # when two entries of a bucket are 255 apart), thousands of times in a boot once the def has left the mrblib.
+  # This table is never used; the presym scan reads it from the preprocessed source, so the names stay presyms.
+  # Only for a build whose rake pipeline scans the generated source for presyms and drops defs (the plan's
+  # BC2CPP_LOAD_WORLD): a probe built against a fixed presym table has no id for a name only the table spells.
+  def emit_registration_presyms(code)
+    return '' unless ENV['BC2CPP_LOAD_WORLD'] && ENV.fetch('BC2CPP_LOAD_COMPILE', 'defs') != 'off'
+
+    names = code.scan(/\b(?:bc2cpp_left_out|mrb_define_\w+|bc2cpp_define_private_class_method|bc2cpp_core_save_interpreted)\(M, \w+, "((?:\\x[0-9a-f]{2})+)"/)
+                .map { |(hex)| hex.scan(/\\x(\h\h)/).flatten.map { |h| h.to_i(16).chr }.join }
+    macros = names.uniq.sort.filter_map { |name| presym_macro(name) }
+    return '' if macros.empty?
+
+    "[[maybe_unused]] static const mrb_sym bc2cpp_registration_presyms[] = {\n  #{macros.join(",\n  ")}\n};\n\n"
   end
 
   def emit_owner_registration_lines(out, targets, by_owner, unregistered)
@@ -412,8 +447,11 @@ class CodeGen
   # the gem's mrblib loaded. Final drops the ids, constants and class pointers cached for this VM, so a later VM
   # at a reused address never sees them. Init clears the constant and class slots too (VM_CACHE_LIFETIME): their
   # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
-  def emit_gem_hooks
-    <<~CPP
+  # LOAD_COMPILE: `load_symbol` names the generated class-body loader (load_compile.rb), which runs before anything
+  # else here: the registrations below look up the classes it opens.
+  def emit_gem_hooks(load_symbol: nil)
+    load_call = load_symbol ? "  bc2cpp_load_#{load_symbol}(M);\n" : ''
+    <<~CPP.sub("{\n  bc2cpp_reset_const_site_cache", "{\n#{load_call}  bc2cpp_reset_const_site_cache")
       [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
         bc2cpp_reset_const_site_cache();
         bc2cpp_reset_owner_classes();
