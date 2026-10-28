@@ -151,6 +151,11 @@ module SymbolCache
 
   # [helper, index] for each of those calls: helper is the name after `bc2cpp_` (`send`, `nomethod`, ...).
   def send_index_kinds(code)
+    send_sites(code).map { |kind, _recv, idx| [kind, idx] }
+  end
+
+  # [helper, receiver text, index] for each of those calls.
+  def send_sites(code)
     code = code.b
     found = []
     pos = 0
@@ -160,7 +165,7 @@ module SymbolCache
       recv_end = expression_end(code, head_end)
       match = recv_end && SEND_INDEX.match(code, recv_end)
       idx = match && match[1]
-      found << [kind, idx.to_i] if idx
+      found << [kind, code[head_end...recv_end].strip, idx.to_i] if idx
       pos = head_end
     end
     found

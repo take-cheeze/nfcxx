@@ -983,7 +983,9 @@ module StaticDispatchRegistrations
     loop do
       lookup = CorePrivateRuby::Lookup.new(private_keys.to_set { |key| key.split('#', 2).last }, owners, defines,
                                            kept.to_set { |key| key.split('#', 2).last })
-      names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, lookup: lookup, strip: strip)
+      names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, lookup: lookup, strip: strip,
+                                                        strip_generated: CorePrivateRuby.method(:strip_generated),
+                                                        exact_impls: true)
       rejected = private_keys.reject { |key| unreachable.call(key, names, fragments) }
       if rejected.empty?
         # `def Enumerator.produce` inside `class Enumerator` is registered under Enumerator::Enumerator.singleton, a path
