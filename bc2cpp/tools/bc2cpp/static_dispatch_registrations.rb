@@ -635,6 +635,11 @@ module StaticDispatchRegistrations
       cite(symbol_lookups, 'a Symbol literal that may name a looked-up method (SYMBOL_USES)')
     end
     fragments = Set.new
+    # IDENT_USES (closed only): an identifier-shaped literal names a looked-up method only when it may leave pure
+    # uses, the FRAGMENT_USES question for an exact name (decided below, once `outside` is known). Only sound once
+    # SYMBOL_USES has proven every lookup in the closed bytecode takes a literal: a compared literal could otherwise
+    # be the name a computed `send(x)` ends up looking up (`send(x) if x == "name"`).
+    literal_sites = Hash.new { |h, k| h[k] = [] }
     ireps.each_value do |irep|
       BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
         up = method_of[irep.label]
@@ -646,10 +651,7 @@ module StaticDispatchRegistrations
       irep.pool.each do |s|
         next unless s.is_a?(String)
 
-        if s.match?(IDENT)
-          dynamic << s
-          cite([s], "a string literal in #{irep_site(irep, method_of, body_of)}")
-        end
+        literal_sites[s] << irep if s.match?(IDENT)
         fragments << s if s.match?(FRAGMENT)
       end
     end
@@ -662,6 +664,14 @@ module StaticDispatchRegistrations
     text = Set.new
     outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text)
     dynamic.merge(outside)
+    looked_up = literal_sites.keys.to_set
+    looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups
+    literal_sites.each do |s, sites|
+      next unless looked_up.include?(s)
+
+      dynamic << s
+      cite([s], "a string literal in #{irep_site(sites.first, method_of, body_of)}")
+    end
 
     # Which bytecode can run. No method body -- compiled or not -- runs as
     # bytecode except after a dynamic lookup of its own name: a direct C++ call

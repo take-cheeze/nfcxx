@@ -32,7 +32,8 @@
 #     a built string that goes on somewhere -- a concatenation without a non-name character whose result escapes
 #     (a send, an interned Symbol), a store, a return a caller passes on, an argument of a method the trace does not
 #     know. Comparing it, a native hash key, a constant list only tested for membership, a part of a message with a
-#     space or a colon and a part of a string only printed or compared do not.
+#     space or a colon and a part of a string only printed or compared do not. IDENT_USES asks the same of an
+#     identifier-shaped literal, an exact name.
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
@@ -259,6 +260,11 @@ if ENV['MRBC']
     check('fragment uses: an element of a duped array handed out is one', escaping.include?('duped_elem_word'))
     check('fragment uses: an element of a frozen array only queried is no fragment',
           !escaping.include?('frozen_elem_word'))
+    # IDENT_USES: the same question for an exact name; the closed proof asks it only once SYMBOL_USES holds.
+    names = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, Set.new, S::IDENT)
+    check('ident uses: a compared or hash-key name is no lookup, a stored or handed-out one is',
+          !names.include?('compared_word') && !names.include?('hash_key_word') &&
+          names.include?('stored_word') && names.include?('handed_word'))
     # --- SYMBOL_USES ---
     symbols = File.join(tmp, 'symbols.rb')
     File.write(symbols, <<~'RUBY')
