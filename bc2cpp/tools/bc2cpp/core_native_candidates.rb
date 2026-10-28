@@ -71,17 +71,19 @@ module CoreNativeCandidates
 
   # The receiver-blind reachable names (see the header), and the pool fragments. `ireps` (the engine's) all count;
   # `core` is one { ireps:, body_of: } per core Ruby file, body_of mapping a method body's irep label to its name.
-  def reachable(ireps, native_paths, generated, core: [])
+  # +lookup+ reads one irep (lookup_names, or CorePrivateRuby::Lookup); +strip+ blanks the native text it should not read.
+  def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil)
     names = Set.new(StaticDispatchRegistrations::ALWAYS_DYNAMIC)
     fragments = Set.new
-    ireps.each_value { |irep| lookup_names(irep, nil, names, fragments) }
+    ireps.each_value { |irep| lookup.call(irep, nil, names, fragments) }
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
     native_paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
+      text = strip.call(text) if strip
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
     generated.each { |src| src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) } }
-    live_core(core, generated, names, fragments)
+    live_core(core, generated, names, fragments, lookup: lookup)
     [names, fragments]
   end
 
@@ -116,7 +118,7 @@ module CoreNativeCandidates
   # LIVE_CORE (see the header): the core files' root and class bodies always count; a method body, with the blocks it
   # makes, once its name is in `names` or compiled code calls an `_impl` of that name directly. Fragments are read from
   # every body, live or not: a built name is the costly kind to miss.
-  def live_core(core, generated, names, fragments)
+  def live_core(core, generated, names, fragments, lookup: method(:lookup_names))
     impls = Set.new
     # `$` is the mangling's escape (`Array_include$3f_impl`).
     generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
@@ -128,10 +130,10 @@ module CoreNativeCandidates
         up = label
         up = parent[up] until up.nil? || file[:body_of].key?(up)
         own = up && file[:body_of][up]
-        if own then pending[own] << irep else lookup_names(irep, nil, names, fragments) end
+        if own then pending[own] << irep else lookup.call(irep, nil, names, fragments) end
       end
     end
-    pending.each_value { |reps| reps.each { |irep| lookup_names(irep, nil, Set.new, fragments) } }
+    pending.each_value { |reps| reps.each { |irep| lookup.call(irep, nil, Set.new, fragments) } }
     # A direct call reaches the body without a lookup: `<Owner>_<name>_impl` (CodeGen#sanitize mangling).
     called = pending.keys.select { |name| impls.any? { |t| t.end_with?("_#{mangle(name)}_impl") || t.include?("_#{mangle(name)}_block_fallback") } }
     names.merge(called)
@@ -140,7 +142,7 @@ module CoreNativeCandidates
       pending.each do |own, reps|
         next unless names.include?(own)
 
-        reps.each { |irep| lookup_names(irep, own, names, fragments) }
+        reps.each { |irep| lookup.call(irep, own, names, fragments) }
         pending.delete(own)
         grew = true
       end

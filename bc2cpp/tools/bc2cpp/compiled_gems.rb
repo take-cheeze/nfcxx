@@ -235,7 +235,9 @@ BC2CPP_COMPILED_GEMS = {
     #   name only, and `add_dependency 'mruby-rgss'` runs the reopening before
     #   the compiled override is installed -- the same reasoning as StringIO in
     #   mruby-lcf-compiled.
-    owners: bc2cpp_gem_owners('mruby-rgss', reopened: %w[Array]),
+    # - NameError and NoMethodError are reopened by mruby-rgss/mrblib/error_init.rb, which holds the two #initialize
+    #   bodies of mruby's 10error.rb (excluded from the compiled core Ruby) so a compiled body replaces them.
+    owners: bc2cpp_gem_owners('mruby-rgss', reopened: %w[Array NameError NoMethodError]),
     out_symbol: 'rgss_compiled',
     native_namespaces: %w[RGSS],
   },
