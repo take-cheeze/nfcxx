@@ -749,20 +749,23 @@ module StaticDispatchRegistrations
 
   # CORE_NATIVE_CANDIDATES (closed only): [the core ROM entries the closed build leaves out of its tables, the core
   # run-time registrations it removes]. Every Ruby
-  # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`) -- and every
-  # native source, with the generated code.
+  # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`), whose method
+  # bodies count while their names are reachable (LIVE_CORE) -- and every native source, with the generated code.
   def core_excluded(repo_root, mrbc, ireps, generated)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core_ruby = (Dir["#{third}mruby/mrblib/*.rb"] + Dir["#{third}mruby/mrbgems/*/mrblib/**/*.rb"] +
                  BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{third}#{g}/mrblib/**/*.rb"] }).sort
-    all = ireps.dup
-    Dir.mktmpdir('bc2cpp_core_natives') do |tmp|
-      core_ruby.each_with_index do |path, i|
-        compile_ireps([path], "core_native_#{i}", tmp, mrbc: mrbc)[0].each { |label, irep| all["#{i}:#{label}"] = irep }
+    # Each file on its own, with the name of each method body (LIVE_CORE: a body counts once its name is reachable).
+    core = Dir.mktmpdir('bc2cpp_core_natives') do |tmp|
+      core_ruby.each_with_index.map do |path, i|
+        file_ireps, root = compile_ireps([path], "core_native_#{i}", tmp, mrbc: mrbc)
+        body_of = {}
+        build_registry(file_ireps, root)[0].each { |name, defs| defs.each { |d| body_of[d.irep] = name if d.irep } }
+        { ireps: file_ireps, body_of: body_of }
       end
     end
-    names, fragments = CoreNativeCandidates.reachable(all, native, generated)
+    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core)
     entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
     [CoreNativeCandidates.candidates(entries, names, fragments),
      CoreNativeCandidates.ram_candidates(NativeOwnerMap.build(native), names, fragments, entries)]
