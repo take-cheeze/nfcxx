@@ -63,6 +63,12 @@ class Fn : public FnCtx {
   void rval(const Node &x, const std::string &dest, const Ty &dty);
   void call_value(const Node &x, const std::string &dest, const Ty &ty);
   void call_site(const Node &x, const std::string &dest, const Ty *ty);
+  // --inline=device: whether the callee's body is compiled at its calls (not a kernel, no struct or bool parameter, no
+  // printf in its body).
+  bool inline_ok(const Fn *callee) const;
+  // The body of the callee at the call x, with this function's state for its own registers, slots and labels; its
+  // returns write dest (the call's register, or "" for a statement) and branch to the end of the inlined body.
+  void inline_call(Fn *callee, const Node &x, const std::string &dest);
   void printf_call(const Node &x, const std::string &dest, const Ty &ty);
   AggShape aggregate(const Node &t) const;
   long long alloc_frame(long long size, long long align);
@@ -85,6 +91,8 @@ class Fn : public FnCtx {
   bool setup_done_ = false;
   long long frame_ = 0;                // the frame's size in bytes (the slots, the printf buffers)
   long long frame_align_ = 8;          // the frame's alignment (the largest slot alignment, at least 8)
+  bool sp_set_ = false;                // the frame pointer is set up (compile): the frame is declared even when it is empty
+  std::map<std::string, Ty> slot_types_;  // slot name => its type (the slot form's TYPE)
   std::vector<long long> agg_off_;     // per parameter: the frame offset of its byval copy (or of the sret object)
   int ncall_ = 0;                      // the calls of module functions (their parameter names)
   std::vector<const Node *> body_;     // the statements (the forms that are not the header)
@@ -92,8 +100,14 @@ class Fn : public FnCtx {
   // [continue label (empty for a switch), break label] of the enclosing loops and switches, innermost last
   std::vector<std::pair<std::string, std::string>> loops_;
   std::map<std::string, std::string> named_labels_;  // the IR labels => their PTX labels
+  int inline_depth_ = 0;                             // the inlined bodies being compiled (their calls inline too, to a depth)
+  std::string inline_dest_;                          // the register of the inlined call's value ("" for a statement)
+  std::string inline_end_;                           // the label after the inlined body
+  std::optional<Ty> inline_ret_;                     // the inlined function's return type
   // The registers whose value is the address of a function of the module ((let %N T (bitcast T &"f"))): the
   // constructor argument of __cxa_vec_ctor, which is called directly (the emitter has no indirect calls).
   std::map<std::string, std::string> fn_values_;
   void vec_ctor(const Node &x);
+  // --promote=slots: the slots of body (with their types) that live in registers, and their registers in promoted.
+  void promote_slots(const std::vector<const Node *> &body, const std::map<std::string, Ty> &types);
 };

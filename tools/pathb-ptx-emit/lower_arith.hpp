@@ -37,6 +37,16 @@ extern bool g_f2i_convert;
 // `sequence % ne33` with ne33 == 0 when there is no mask, and does not use the result).
 extern bool g_int_gpu;
 
+// --inline=device (the .cu device path): a call of a function of the module is compiled into the caller, its body at the
+// call (Fn::inline_call), as nvcc inlines the __device__ helpers of a kernel. A callee the inliner does not take (a
+// struct argument, a bool, a printf, a call inside the inlined body) is still a call.
+extern bool g_inline_device;
+
+// --promote=slots (the default; --promote=off turns it off): a frame slot whose every use is a whole load or store of its
+// scalar type (a 4- or 8-byte integer, a pointer, a float) lives in a register (Fn::promote_slots); the frame keeps its
+// bytes, the accesses are movs.
+extern bool g_promote_slots;
+
 // Ruby's Float#to_s (shortest round-trip digits; fixed notation for decimal exponents -3..16, else d.ddde+XX).
 std::string ruby_float_s(double d);
 
@@ -47,6 +57,7 @@ class FnCtx {
   std::map<std::string, int> count = {{"p", 0}, {"r", 0}, {"rd", 0}, {"f", 0}, {"fd", 0}, {"h", 0}};
   int nlab = 0;
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
+  std::map<std::string, RegInfo> promoted;      // slot name => the register its scalar lives in (--promote=slots)
   std::string sp = "%sp";                       // the PTX register holding the frame's generic address
   const ModuleSymbols *mod = nullptr;           // the module's data symbols (the @name operands), null when none
   // The module's functions by PTX name: true for a kernel (the `&name` operands are the functions' addresses), null when none.
@@ -75,6 +86,8 @@ class FnCtx {
   // The Ruby's rval branches for the memory forms: load, load.v, bitcast (to a pointer), offset and index. Returns false
   // when h is not one of them.
   bool memory(const std::string &h, const Node &x, const std::string &dest, const Ty &dty);
+  // The register of a promoted slot, when addr is the slot's operand ($name); null otherwise.
+  const RegInfo *promoted_slot(const Node &addr) const;
   // The Ruby's stmt branches for store and store.v. Returns false when h is not one of them.
   bool store_stmt(const std::string &h, const Node &s);
   // The @name operand: its address through cvta (the Ruby's operand for the module's data symbols).

@@ -38,7 +38,8 @@ echo "mul2 on the PTX interpreter: ok"
 # Mutant 1: a wrong multiplier. Mutant 2: the bounds check against 2000, so threads 1000..1023 write
 # into the guard ints. Each must fail the interpreter or the check.
 sed 's/mul.lo.s32 \(%r[0-9]*\), \(%r[0-9]*\), 2;/mul.lo.s32 \1, \2, 3;/' "$out/mul2.ptx" > "$out/mul3.ptx"
-sed 's/setp.lt.s32 %p0, %r5, %r6;/setp.lt.s32 %p0, %r5, 2000;/' "$out/mul2.ptx" > "$out/nobounds.ptx"
+# (the registers are whatever the emitter numbered them: promotion changes the numbers, so match any pair)
+sed 's/setp.lt.s32 %p0, \(%r[0-9]*\), \(%r[0-9]*\);/setp.lt.s32 %p0, \1, 2000;/' "$out/mul2.ptx" > "$out/nobounds.ptx"
 for m in mul3 nobounds; do
   status=0
   "$out/ptxi" "$out/$m.ptx" "${launch[@]}" > "$out/$m.out" || status=$?
@@ -50,7 +51,8 @@ for m in mul3 nobounds; do
 done
 
 # An instruction the interpreter does not model is refused before it runs (exit 3).
-sed 's/ld.s32 %r6, \[%rd6\];/ld.s32 %r6, [%rd6];\n  bar.sync 0;/' "$out/mul2.ptx" > "$out/barrier.ptx"
+# (the first load of the kernel, whatever its registers are: promotion changes the numbers)
+sed '0,/ld.s32 %r[0-9]*, \[%rd[0-9]*\];/s//&\n  bar.sync 0;/' "$out/mul2.ptx" > "$out/barrier.ptx"
 status=0
 "$out/ptxi" "$out/barrier.ptx" "${launch[@]}" > /dev/null 2>&1 || status=$?
 [ "$status" -eq 3 ] || { echo "barrier: expected exit 3, got $status" >&2; exit 1; }
@@ -80,7 +82,7 @@ check_helper() {
 check_helper "$out/helper.out"
 echo "helper_kernel (calls .func square_plus_one, which calls square) on the PTX interpreter: ok"
 
-sed 's/add\.s32 %r3, %r2, 1;/add.s32 %r3, %r2, 2;/' "$out/helper.ptx" > "$out/helper_mut.ptx"
+sed '/^\.func .*square_plus_one(/,/^}/ s/add\.s32 \(%r[0-9]*\), \(%r[0-9]*\), 1;/add.s32 \1, \2, 2;/' "$out/helper.ptx" > "$out/helper_mut.ptx"
 status=0
 "$out/ptxi" "$out/helper_mut.ptx" "${hlaunch[@]}" > "$out/helper_mut.out" || status=$?
 if [ "$status" -eq 0 ] && check_helper "$out/helper_mut.out"; then
@@ -90,7 +92,7 @@ fi
 echo "helper mutant caught (interpreter exit $status)"
 
 # A call of a function the module does not define is refused (exit 3).
-sed 's/call (%r13), square_plus_one, /call (%r13), no_such_function, /' "$out/helper.ptx" > "$out/helper_nocallee.ptx"
+sed 's/call (\(%r[0-9]*\)), square_plus_one, /call (\1), no_such_function, /' "$out/helper.ptx" > "$out/helper_nocallee.ptx"
 status=0
 "$out/ptxi" "$out/helper_nocallee.ptx" "${hlaunch[@]}" > /dev/null 2>&1 || status=$?
 [ "$status" -eq 3 ] || { echo "undefined callee: expected exit 3, got $status" >&2; exit 1; }

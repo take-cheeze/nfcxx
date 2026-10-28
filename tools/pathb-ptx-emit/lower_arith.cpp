@@ -267,6 +267,8 @@ void FnCtx::int_convert(const std::string &dest, const Ty &ty, const std::string
 
 bool g_f2i_convert = false;
 bool g_int_gpu = false;
+bool g_inline_device = false;
+bool g_promote_slots = true;
 
 void FnCtx::float_to_int(const std::string &dest, const Ty &ty, const std::string &a0, const Ty &aty) {
   if (!(ty.kind == "int" && !ty.is_bool && (ty.size == 1 || ty.size == 2 || ty.size == 4 || ty.size == 8)))

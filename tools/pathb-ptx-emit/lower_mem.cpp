@@ -14,11 +14,21 @@ const Node &at(const Node &x, size_t i) {
 
 }  // namespace
 
+const RegInfo *FnCtx::promoted_slot(const Node &addr) const {
+  if (!(addr.kind == Node::Sym && addr.sig == '$')) return nullptr;
+  auto it = promoted.find(addr.text);
+  return it == promoted.end() ? nullptr : &it->second;
+}
+
 bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest, const Ty &dty) {
   const Ty ptr{"ptr", -1, false, false};
   if (h == "load") {
     Ty ty = parse_type(&at(x, 1));
     expect(dty, ty);
+    if (const RegInfo *p = promoted_slot(at(x, 2))) {
+      emit("mov." + ptx_type(ty) + " " + dest + ", " + p->ptx + ";");
+      return true;
+    }
     Operand addr = operand(at(x, 2));
     if (ty.kind == "int" && ty.is_bool) {
       std::string b = fresh("r");
@@ -96,6 +106,12 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
 bool FnCtx::store_stmt(const std::string &h, const Node &s) {
   if (h == "store") {
     Ty ty = parse_type(&at(s, 1));
+    if (const RegInfo *p = promoted_slot(at(s, 2))) {
+      Operand val = operand(at(s, 3));
+      expect(ty, val.ty);
+      emit("mov." + ptx_type(ty) + " " + p->ptx + ", " + reg_of(val.text, ty) + ";");
+      return true;
+    }
     Operand addr = operand(at(s, 2));
     Operand val = operand(at(s, 3));
     if (ty.kind == "int" && ty.is_bool) {
