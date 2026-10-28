@@ -15,14 +15,17 @@ require_relative 'class_world'
 # proven safe. Calls are resolved by NAME, not by receiver: the result of `x.m` is the union over every definition of
 # `m` in the world, and TOP when a core or native one exists. That is coarser than a receiver-typed lookup and sound
 # without typing the receiver. Arguments flow the same way: parameter i of a method named m is the union over every
-# send of `m`. Instance variables are keyed by name alone.
+# send of `m` whose argument count the definition takes. An instance variable is keyed by its name and the family of the
+# class that holds it (a class and its engine subclasses; a module or Object method may touch any family's). `new` and
+# `initialize` are tracked per class: the arguments of the `new` sites that can build it (the receiver's class set) and of
+# the `super` calls below it.
 #
-# A call with a literal block to a method whose every definition is a checked block-value declaration (sig/bc2cpp, BlockReturns:
-# `RGSS::Profiler.section`, `then`) has the class of the block's value; any other call that yields is TOP.
+# A call with a literal block to a method whose every definition is a checked block-value declaration (sig/bc2cpp,
+# BlockReturns: `RGSS::Profiler.section`, `then`) has the class of the block's value; any other call that yields is TOP.
 #
-# A name whose parameters or result something outside the bytecode touches is TOP: a name a native spells or a looked-up
-# Symbol literal names (EXTERNAL_NAMES), an `initialize` (called by `new`: sends of `new` supply its arguments), any
-# method with a SUPER in it.
+# A name something outside the bytecode calls has TOP parameters: a name a native spells, a looked-up Symbol literal, a
+# method the VM calls itself (`==`, `to_s`, `each` of a `for`), and an `initialize` of a class a native names. A method with
+# a `super` also takes the arguments of the `super` sites of its name.
 module CoreEnumeratorTypes
   TOP = :top
   EMPTY = Set.new.freeze
