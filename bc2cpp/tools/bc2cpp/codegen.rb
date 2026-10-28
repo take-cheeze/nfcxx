@@ -540,6 +540,7 @@ class CodeGen
       end
       next if inherited_layout
       next if NATIVE_DATA_OWNERS.include?(owner)
+      next unless plain_object_ancestry?(owner)
 
       next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
@@ -677,6 +678,22 @@ class CodeGen
   # accessor (positional storage, nothing to synthesize).
   def synthesizable_accessor_only?(owner, name)
     (@registry[name] || []).select { |d| d.owner == owner }.all? { |d| d.kind == :ivar_accessor }
+  end
+
+  # An embedding owner's instances must be plain objects: mrb_data_init on an Exception, Array, Struct or other
+  # built-in instance overwrites the fields that type keeps. So every superclass up to Object is a class the
+  # program defines with a superclass the registry knows; one defined in C, or computed (`Struct.new`), refuses.
+  def plain_object_ancestry?(klass)
+    seen = Set.new
+    loop do
+      return false unless seen.add?(klass)
+
+      superclass = @superclass_of[klass]
+      return true if superclass == :none || %w[Object BasicObject].include?(superclass)
+      return false unless superclass.is_a?(String) && @superclass_of.key?(superclass)
+
+      klass = superclass
+    end
   end
 
   def strict_subclass?(klass, ancestor)
