@@ -94,20 +94,6 @@ if [ "${METHOD_TABLE:-check}" = check ]; then
   else
     echo "method table: $entries entries (at the recorded threshold)"
   fi
-
-  # METHOD_TABLE_DUMP: the registered names that are left. The unregistered lists are long and growing; this is the
-  # list that keeps getting shorter, so it is the one to read here. It goes to LOG_DIR/method-table.txt too, sorted,
-  # so two runs diff. Informational: a failed dump does not fail the sweep.
-  table="$logs/method-table.txt"
-  if BC2CPP_HOST_MT_DUMP=1 "$host" "$game" 1 2> /dev/null | grep -v '^TRACE_HOST' > "$table" && [ -s "$table" ]; then
-    echo "registered method names left: $(wc -l < "$table") ($(grep -c ' bytecode$' "$table") bytecode), per owner:"
-    awk '{ split($1, a, "#"); n[a[1]]++ } END { for (o in n) printf "%6d %s\n", n[o], o }' "$table" | sort -rn | head -25
-    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::group::Registered method names ($(wc -l < "$table"), Owner#name kind)"
-    cat "$table"
-    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::endgroup::"
-  else
-    echo "method table: could not dump the registered names"
-  fi
 fi
 
 map() {
