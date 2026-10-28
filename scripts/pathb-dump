@@ -39,6 +39,7 @@ while [ $i -lt ${#args[@]} ]; do
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
     --gnu-version=*|--gnu_version=*) user_opts+=("--gnu_version=${arg#*=}") ;;   # as nfcxx: after the host's GNU version
     -Wno-narrowing) user_opts+=(--diag_warning=narrowing_conversion) ;;   # as nfcxx: a narrowing is a warning
+    --dialect=*) ;;                                          # clang's dialect is not modelled: the harness is EDG's g++ mode
     -W*) ;;                                                  # other warnings do not change the object code
     *) files+=("$arg") ;;
   esac
