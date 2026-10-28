@@ -45,13 +45,16 @@
 # a literal or fragment (read from a game file, then `send`) would be missed.
 # Nothing does that for an RPG2000/2003-internal class today, and a listed name
 # must stay free of dynamic references, or it ships a NoMethodError.
+require 'digest'
+require 'fileutils'
+require 'json'
 require 'set'
 require 'strscan'
 require_relative 'bytecode_ir_ops'
 require 'tmpdir'
 require_relative 'compiled_gems'
 require_relative 'never_called_registrations'
-require_relative 'static_dispatch_unregistered'
+require_relative 'static_dispatch_lists'
 require_relative 'symbol_cache'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
@@ -635,14 +638,18 @@ module StaticDispatchRegistrations
 
   # Runs bc2cpp.rb for each compiled gem and the closed-world parse; returns
   # everything eligibility needs.
-  # unregistered: what the build being proven leaves out (default: its own lists). The probe generates with
+  # lists: the lists the probe generates with (StaticDispatchLists, at lists_path): the previous pass's output, or
+  # empty. unregistered: what the build being proven leaves out (default: its own list). The probe generates with
   # BC2CPP_BUILD_NAME=closed, so both lists are missing from its registrations whichever build is proven.
-  def analyze(repo_root, mrbc, unregistered: nil, closed_only: false)
-    both = STATIC_DISPATCH_UNREGISTERED | STATIC_DISPATCH_UNREGISTERED_CLOSED
-    unregistered ||= closed_only ? both : STATIC_DISPATCH_UNREGISTERED
+  def analyze(repo_root, mrbc, lists: StaticDispatchLists::EMPTY, lists_path: 'none', unregistered: nil,
+              closed_only: false)
+    both = lists.open | lists.closed
+    unregistered ||= closed_only ? both : lists.open
     absent = both | unregistered
-    # Every gem, from one shared analysis.
-    fresh = NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc)
+    # Every gem, from one shared analysis. The generation depends only on the lists, so the open and the closed
+    # analysis of a pass share it.
+    fresh = ((@fresh_generation ||= {})[StaticDispatchLists.dump(lists)] ||=
+               NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc, lists_path: lists_path))
     runs = GEMS.to_h do |gem|
       out, err = fresh.fetch(gem)
       [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
@@ -1036,47 +1043,112 @@ module StaticDispatchRegistrations
                        analysis[:suffix_bases] || analysis[:dynamic])
     end
   end
+
+  # EMIT_DIGEST: a digest of everything the proof reads, so an emitted file is reused only for the tree it was
+  # computed from (and a consumer that is told the digest refuses any other). The file lists are the proof's own:
+  # both scans' outside sources, the closed world, the core Ruby, the gem rakes and build_config.rb the closure is
+  # derived from, and the generator and proof sources.
+  def inputs_digest(repo_root)
+    root = File.expand_path(repo_root)
+    files = []
+    [false, true].each do |closed_only|
+      files.concat(closed_world_mrblib_srcs(root, core_gems: nil))
+      ruby, native = outside_world_files(root, closed_only: closed_only)
+      files.concat(ruby).concat(native)
+    end
+    files.concat(closed_world_mrblib_srcs(root, core_gems: :canonical))
+    files.concat(Dir["#{root}/3rd/mruby/mrblib/*.rb"] + Dir["#{root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"])
+    files.concat(BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{root}/3rd/#{g}/mrblib/**/*.rb"] })
+    files.concat(Dir["#{root}/3rd/mruby/mrbgems/*/mrbgem.rake"] + Dir["#{root}/mruby-*/mrbgem.rake"])
+    files.concat(Dir["#{root}/tools/bc2cpp/**/*.rb"] + Dir["#{root}/tools/bc2cpp/**/*.{rbs,erb}"])
+    files.concat([File.join(root, 'build_config.rb'), File.join(root, 'scripts/bc2cpp/trace_host.cxx')])
+    files.concat(Dir["#{root}/sig/**/*.rbs"])
+    sha = Digest::SHA256.new
+    sha << "ruby #{RUBY_VERSION}\nlists-format 1\n"
+    files.map { |p| File.expand_path(p) }.uniq.sort.each do |path|
+      next unless File.file?(path)
+
+      sha << path.delete_prefix("#{root}/") << "\0" << Digest::SHA256.file(path).hexdigest << "\n"
+    end
+    sha.hexdigest
+  end
+
+  # One pass of the proof given the lists the probe generated with (`lists`, written at `lists_path`): what it
+  # proves unregistered, as the next lists. The closed list holds everything the open one does (a closed build
+  # drops the open names too), which the closed analysis rediscovers from its wider scan; a name the open
+  # analysis proves and the closed one does not would be a contradiction, so it stops the run.
+  def pass(repo_root, mrbc, lists, lists_path, digest)
+    names = ->(analysis) { eligible(analysis).to_set { |m| "#{m[:owner]}##{m[:name]}" } }
+    closed = analyze(repo_root, mrbc, lists: lists, lists_path: lists_path, closed_only: true)
+    open = analyze(repo_root, mrbc, lists: lists, lists_path: lists_path, closed_only: false)
+    closed_names = names.call(closed)
+    open_names = names.call(open)
+    missing = open_names - closed_names
+    abort "closed list does not contain #{missing.size} name(s) the full scan proves: #{missing.first(5).join(', ')}" unless missing.empty?
+
+    StaticDispatchLists::Lists.new(open: open_names.freeze, closed: closed_names.freeze,
+                                   core_excluded: closed[:core_excluded][0].to_set.freeze,
+                                   core_left_out: closed[:core_excluded][1].to_set.freeze, digest: digest)
+  end
+
+  def same_lists?(a, b)
+    StaticDispatchLists::KEYS.all? { |key| a.public_send(key) == b.public_send(key) }
+  end
+
+  # EMIT: the lists for this tree, in `dir`/static_dispatch_lists.json. A file already there for the same inputs is
+  # reused. Otherwise the proof runs from empty lists and repeats with its own output until a pass proves exactly
+  # what it generated with: each pass is sound only for the generation it read, so a list that has not reached that
+  # fixed point is not written. `max_passes` bounds a proof that oscillates, which is an error, never a result.
+  def emit(repo_root, mrbc, dir, max_passes: 8, log: $stderr)
+    FileUtils.mkdir_p(dir)
+    digest = inputs_digest(repo_root)
+    out = File.join(dir, 'static_dispatch_lists.json')
+    if File.file?(out)
+      cached = begin
+        StaticDispatchLists.parse(File.read(out))
+      rescue StaticDispatchLists::Missing, JSON::ParserError
+        nil
+      end
+      if cached&.digest == digest
+        log.puts "static dispatch lists: #{out} is current (#{digest[0, 12]})"
+        return cached
+      end
+    end
+
+    lists = StaticDispatchLists::EMPTY
+    lists_path = 'none'
+    passes = 0
+    loop do
+      passes += 1
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      nxt = pass(repo_root, mrbc, lists, lists_path, digest)
+      log.puts format('static dispatch lists: pass %<n>d, open %<o>d closed %<c>d core ROM %<r>d core run-time %<t>d (%<s>.0fs)',
+                      n: passes, o: nxt.open.size, c: nxt.closed.size, r: nxt.core_excluded.size,
+                      t: nxt.core_left_out.size, s: Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
+      if same_lists?(nxt, lists)
+        File.write("#{out}.tmp", StaticDispatchLists.dump(nxt))
+        File.rename("#{out}.tmp", out)
+        log.puts "static dispatch lists: wrote #{out} (#{digest[0, 12]})"
+        return nxt
+      end
+      abort "static dispatch lists: no fixed point after #{max_passes} passes" if passes >= max_passes
+
+      lists = nxt
+      lists_path = File.join(dir, "pass#{passes}.json")
+      File.write(lists_path, StaticDispatchLists.dump(lists))
+    end
+  end
 end
 
 if $PROGRAM_NAME == __FILE__
   repo_root = File.expand_path('../..', __dir__)
   mrbc = ENV['MRBC'] || 'mrbc'
-  # --closed-only: the list only the closed build uses(see static_dispatch_unregistered_closed.rb).
-  closed_only = ARGV.include?('--closed-only')
-  # analyze counts both lists' entries as candidates although the probe (BC2CPP_BUILD_NAME=closed) leaves them out;
-  # otherwise a re-run drops them and "proves" a smaller list than the committed one.
-  analysis = StaticDispatchRegistrations.analyze(repo_root, mrbc, closed_only: closed_only)
-  list = StaticDispatchRegistrations.eligible(analysis)
-  warn "registered compiled entries: #{analysis[:registered].size}, statically-dispatched-only: #{list.size}"
-  list.sort_by { |m| [m[:owner], m[:name]] }.each { |m| puts "#{m[:owner]}##{m[:name]}\t#{m[:entry]}\t#{m[:gem]}" }
+  args = ARGV.dup
+  dir = nil
+  dir = args.slice!(args.index('--emit'), 2).last if args.include?('--emit')
+  abort "usage: MRBC=<host mrbc> ruby #{$PROGRAM_NAME} --emit DIR" if dir.nil? || !args.empty?
 
-  if ARGV.include?('--write')
-    keys = list.map { |m| "#{m[:owner]}##{m[:name]}" }.uniq.sort
-    # Dropping scan sources can only make names eligible, never fewer, so the
-    # closed list must contain everything the full scan proves right now. Compare
-    # against a fresh full-scan run, not the committed list, which can be stale.
-    if closed_only
-      full_keys = StaticDispatchRegistrations.eligible(StaticDispatchRegistrations.analyze(repo_root, mrbc))
-                                             .map { |m| "#{m[:owner]}##{m[:name]}" }.to_set
-      missing = full_keys - keys
-      abort "closed-only list does not contain #{missing.size} name(s) the full scan proves" unless missing.empty?
-    end
-    const, file = closed_only ? %w[STATIC_DISPATCH_UNREGISTERED_CLOSED static_dispatch_unregistered_closed.rb]
-                              : %w[STATIC_DISPATCH_UNREGISTERED static_dispatch_unregistered.rb]
-    path = File.join(__dir__, file)
-    src = File.read(path)
-    body = keys.empty? ? 'Set[].freeze' : "Set[\n#{keys.map { |k| "  #{k.inspect}," }.join("\n")}\n].freeze"
-    File.write(path, src.sub(/^#{const} = Set\[.*?\]\.freeze$/m, "#{const} = #{body}"))
-    warn "wrote #{keys.size} name(s) to #{path}"
-    if closed_only
-      path = File.join(__dir__, 'static_dispatch_core_excluded.rb')
-      src = File.read(path)
-      %w[STATIC_DISPATCH_CORE_EXCLUDED STATIC_DISPATCH_CORE_LEFT_OUT].zip(analysis[:core_excluded]) do |const, core|
-        body = core.empty? ? 'Set[].freeze' : "Set[\n#{core.map { |k| "  #{k.inspect}," }.join("\n")}\n].freeze"
-        src = src.sub(/^#{const} = Set\[.*?\]\.freeze$/m, "#{const} = #{body}")
-        warn "wrote #{core.size} #{const} entr(ies) to #{path}"
-      end
-      File.write(path, src)
-    end
-  end
+  lists = StaticDispatchRegistrations.emit(repo_root, mrbc, dir)
+  warn "open #{lists.open.size}, closed #{lists.closed.size}, core ROM #{lists.core_excluded.size}, " \
+       "core run-time #{lists.core_left_out.size}"
 end

@@ -134,7 +134,7 @@ class CodeGen
   # BC2CPP_UNREGISTERED_EXTRA ("Owner#name,..."): more entries to leave unregistered, for a check fixture that has
   # no place in the committed lists (scripts/bc2cpp/unregistered_verify_check.rb).
   def emit_owner_registrations(compiled, owners, core_owners: owners,
-                               unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']) |
+                               unregistered: static_dispatch_lists.for_build(ENV['BC2CPP_BUILD_NAME']) |
                                              ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set)
     by_owner = compiled.group_by { |m| m[:owner] }
     copies = module_function_copies(compiled)
@@ -307,23 +307,31 @@ class CodeGen
     end
   end
 
+  # The proof's output for this run (static_dispatch_lists.rb). A real gem build has to be given it: running without
+  # would register every name, or none, and ship a method table the proof was never run for. A fixture or a probe
+  # (any other OUT_SYMBOL) has no engine names to leave out.
+  def static_dispatch_lists
+    real = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == ENV['OUT_SYMBOL'] }
+    StaticDispatchLists.current(required: real)
+  end
+
   # CORE_NATIVE_CANDIDATES: [owner, name] of each core ROM entry the closed build leaves out of its tables
-  # (static_dispatch_core_excluded.rb). The core gem registers them; only a verify build has anything to register.
+  # (StaticDispatchLists#core_excluded). The core gem registers them; only a verify build has anything to register.
   def left_out_core_rom
     return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
                      ENV['BC2CPP_BUILD_NAME'] == 'closed'
 
-    STATIC_DISPATCH_CORE_EXCLUDED.map { |key| key.split('#', 2) }.sort
+    static_dispatch_lists.core_excluded.map { |key| key.split('#', 2) }.sort
   end
 
   # CORE_RAM_CANDIDATES: [owner, name] of each core run-time registration the closed build removes
-  # (STATIC_DISPATCH_CORE_LEFT_OUT), from the core gem's core half like a left-out native. A class the build does not
+  # (StaticDispatchLists#core_left_out), from the core gem's core half like a left-out native. A class the build does not
   # define is skipped (bc2cpp_native_owner).
   def left_out_core_ram
     return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
                      ENV['BC2CPP_BUILD_NAME'] == 'closed'
 
-    STATIC_DISPATCH_CORE_LEFT_OUT.map { |key| key.split('#', 2) }.sort
+    static_dispatch_lists.core_left_out.map { |key| key.split('#', 2) }.sort
   end
 
   # LEFT_OUT_ACCESSORS: [owner, name] of each listed attr_* accessor of this gem's owners (ONLY_OWNERS) with no
@@ -1225,7 +1233,7 @@ class CodeGen
     compiled.each do |m|
       out << "#{decl_line(m)};\n"
       # The entry wrapper stays static: only this gem's registration calls it. An entry the build leaves out of the
-      # tables (static_dispatch_unregistered_for) is reached only by direct `_impl` calls, so it can go unused.
+      # tables (StaticDispatchLists#for_build) is reached only by direct `_impl` calls, so it can go unused.
       out << "[[maybe_unused]] static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"
     end
     out << "\n"

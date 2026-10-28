@@ -2,11 +2,11 @@
 # frozen_string_literal: true
 
 # DYNAMIC_NAMES_REPORT: why each registered entry of the closed build (compiled engine methods, attr accessors,
-# RGSS natives) stays in the method table. The closed-list proof (tools/bc2cpp/static_dispatch_registrations.rb
-# --closed-only) keeps an entry whose name some lookup may reach; this prints, per entry, the first source that made
+# RGSS natives) stays in the method table. The closed-list proof (tools/bc2cpp/static_dispatch_registrations.rb) keeps an entry whose name some lookup may reach; this prints, per entry, the first source that made
 # its name dynamic, and a summary of the sources that keep the most entries.
 #
-# Usage: MRBC=path/to/mrbc BC2CPP_FULL_BUILD_DIR=dir ruby scripts/bc2cpp/dynamic_names_report.rb [--entries]
+# Usage: MRBC=path/to/mrbc BC2CPP_STATIC_DISPATCH_LISTS=<scripts/bc2cpp/static_dispatch_lists.bash output> \
+#        ruby scripts/bc2cpp/dynamic_names_report.rb [--entries]
 
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
@@ -14,7 +14,10 @@ require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 sdr = StaticDispatchRegistrations
 root = File.expand_path('../..', __dir__)
 sdr.why = {}
-analysis = sdr.analyze(root, ENV.fetch('MRBC', 'mrbc'), closed_only: true)
+# The report is of the state the build is in, so it reads the lists the build was given.
+lists = StaticDispatchLists.current(required: true)
+analysis = sdr.analyze(root, ENV.fetch('MRBC', 'mrbc'), lists: lists, lists_path: ENV.fetch(StaticDispatchLists::PATH_ENV),
+                                                         closed_only: true)
 why = sdr.why
 eligible = sdr.eligible(analysis).to_set { |m| [m[:owner], m[:name]] }
 re = sdr.owner_re(true)

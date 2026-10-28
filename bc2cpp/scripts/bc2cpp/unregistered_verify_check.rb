@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# UNREGISTERED_VERIFY: an entry static_dispatch_unregistered*.rb leaves unregistered gets no method-table entry, and
+# UNREGISTERED_VERIFY: an entry the static dispatch lists leave unregistered gets no method-table entry, and
 # a build with -DBC2CPP_UNREGISTERED_VERIFY (BC2CPP_UNREGISTERED_VERIFY=1, build_config.rb) registers a stub under
 # its name instead, so a by-name lookup the proof missed aborts naming the method (codegen_emit.rb,
 # emit_owner_registrations, LEFT_OUT). RESPOND_TO_PHANTOM: a closed build keeps respond_to? true for it.
@@ -33,6 +33,8 @@ require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
 ENV['BC2CPP_SIG_DIRS'] = ''
+# The fixture names a real gem's OUT_SYMBOL (LEFT_OUT_NATIVES keys on it) but none of the engine's lists apply to it.
+ENV['BC2CPP_STATIC_DISPATCH_LISTS'] = 'none'
 suite = FixtureCheck.new('unregistered_verify_check')
 suite.require_mrbc!
 
