@@ -2,4 +2,4 @@
 # have. scripts/bc2cpp/host_sweep.bash fails above it and says when to lower it. A rise is a deliberate edit:
 # the static dispatch lists are computed from the sources (docs/bc2cpp-unregistered-methods.md), so this file is
 # where a table that grew shows up.
-1300
+1285
