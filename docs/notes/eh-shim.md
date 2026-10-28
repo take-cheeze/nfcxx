@@ -142,7 +142,10 @@ EDG's `std::bad_alloc::what()` is `""`, libstdc++'s is `"std::bad_alloc"`.
   worker threads left a dead one, and libstdc++'s exit-time flush crashed in `std::uncaught_exceptions`). macOS keeps the
   global (its front end has no `__thread`): exceptions there are safe in one thread at a time, and a task that throws in a
   `std::async` thread is not supported. An object compiled before this change does not link with the new runtime (`bad
-  value`: a plain reference to a TLS symbol), so build directories need a rebuild.
+  value`: a plain reference to a TLS symbol), so build directories need a rebuild. Thread-local, the runtime's initial
+  exception memory block is 256 bytes instead of 8 KB (`EH_INITIAL_MEM_BLOCK_SIZE`; more is allocated and freed as
+  needed): a shared object built by QBE reaches its TLS with the initial-exec model, and when it is loaded with `dlopen`
+  that TLS comes from the few hundred bytes glibc reserves (`nfcxx -shared`, tests/eval).
 - Shared objects loaded by a program (`nfcxx -shared`, nfceval snippets) get the shim from the executable, which must be linked by
   `nfcxx` and export its symbols (`-rdynamic`, as nfceval requires); the shared object itself is built without the shim
   (`tests/eval/host.cpp`). A shared object loaded by a program that was not built this way aborts as before.
