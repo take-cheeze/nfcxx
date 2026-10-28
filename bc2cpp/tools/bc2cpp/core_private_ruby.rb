@@ -18,7 +18,8 @@ require_relative 'core_defs'
 #     Symbol (a LOADSYM spells it), `super`, an alias or undef, or a name built at run time. These are what
 #     CoreNativeCandidates.lookup_names already counts, so the rule here is that scan with the explicit-receiver
 #     sends of a candidate name left out.
-# A few native spellings of these names are no lookup (NOT_LOOKUPS).
+# A few native spellings of these names are no lookup (NOT_LOOKUPS), and neither are the generated code's explicit-
+# receiver ones (strip_generated).
 module CorePrivateRuby
   # Native text that spells a name without looking a method up by it:
   #   - the class-of-an-IO search of mrb_io_puts_direct, whose result is used only when it is io_puts_method;
@@ -30,6 +31,19 @@ module CorePrivateRuby
     /OPERATOR_SYMBOL\("`"\s*,\s*"tick"\)/,
     /"p"(?=MRB_STRINGIZE)/
   ].freeze
+
+  # EXPLICIT_RECEIVER_LITERALS: how the generated C++ spells the name of a send with an explicit receiver. The code
+  # generator writes the receiver of a self send as `self` and any other as the register `rN` (compile_send's
+  # `recv`), so a call whose receiver is a register is the C++ of an OP_SEND, which the VM refuses a private method
+  # (the engine ireps' own sends are read the same way, see Lookup). The helpers are the ones that call by name:
+  # bc2cpp_io_puts and bc2cpp_funcall_argv (the symbol is an argument) and the by-name sends of symbol_cache.rb
+  # (the symbol is an index).
+  REGISTER = /\Ar\d+\z/
+  EXPLICIT_SYMBOL_CALL = /\b(?:bc2cpp_io_puts|bc2cpp_funcall_argv)\(M, r\d+, bc2cpp_sym\(M, (\d+)\)/
+  EXPLICIT_INDEX_CALLS = %w[send owner_call owner_call_argv].freeze
+  # The failure reports (symbol_cache.rb, bc2cpp.rb) print through `$stderr.puts`: a local symbol, a respond_to? and a
+  # funcall on the receiver `err`, nothing else.
+  STDERR_REPORT = /(\b(\w+_id) = )mrb_intern_lit\(M, "\w+"\)(;\n\s*if \(mrb_respond_to\(M, err, \2\)\) mrb_funcall_id\(M, err, \2,)/
 
   # The scan CoreNativeCandidates.lookup_names makes, minus the candidates that scan finds only as a DEF's own name
   # or as the name of a send that cannot reach a private method. A send that can is the implicit-self one of a
@@ -120,6 +134,32 @@ module CorePrivateRuby
       end
       false
     end
+  end
+
+  # The generated source +src+ as the private-name scan reads it: comments dropped (a POLY_DIAG line quotes the name it
+  # decided on), the name of a method it defines dropped (a definition looks nothing up), and the literal of each EXPLICIT_RECEIVER_LITERALS spelling blanked when every use of that spelling
+  # is one. A symbol-table name is blanked by index: the table holds one row per use kind, and a row any other call
+  # uses (an implicit-self send, a symbol value, a computed send) stays.
+  def strip_generated(src)
+    src = StaticDispatchRegistrations.strip_c_comments(src)
+    src = src.gsub(StaticDispatchRegistrations::REGISTRATION_CALL, '').gsub(StaticDispatchRegistrations::LEFT_OUT_CALL, '')
+    src = src.gsub(STDERR_REPORT) { "#{Regexp.last_match(1)}\"\"#{Regexp.last_match(3)}" }
+    span = src.match(StaticDispatchRegistrations::SYM_TABLE)&.offset(1) or return src
+
+    explicit = Hash.new(0)
+    uses = Hash.new(0)
+    src.scan(/bc2cpp_sym\(M, (\d+)\)/) { |(i)| uses[i.to_i] += 1 }
+    src.scan(EXPLICIT_SYMBOL_CALL) { |(i)| explicit[i.to_i] += 1 }
+    SymbolCache.send_sites(src).each do |kind, recv, i|
+      uses[i] += 1
+      explicit[i] += 1 if EXPLICIT_INDEX_CALLS.include?(kind) && recv.match?(REGISTER)
+    end
+    index = -1
+    table = src[span[0]...span[1]].gsub(StaticDispatchRegistrations::STRING_LITERAL) do |literal|
+      index += 1
+      explicit[index].positive? && explicit[index] == uses[index] ? '""' : literal
+    end
+    src[0...span[0]] + table + src[span[1]..]
   end
 
   # Blanks the NOT_LOOKUPS of native text.
