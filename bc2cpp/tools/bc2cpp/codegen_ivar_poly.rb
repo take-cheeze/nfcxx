@@ -211,7 +211,7 @@ class CodeGen
   def ivar_set_code(klass, recv, ivar, src, self_of_klass: false, dst: nil, indent: '  ')
     type = ivar_embed_type(klass, ivar)
     tail = dst ? "\n#{indent}#{dst} = #{src};" : ''
-    return "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{src});#{tail}" if type.nil?
+    return "bc2cpp_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{src});#{tail}" if type.nil?
     return nil if type == :unknown
 
     if self_of_klass
@@ -223,8 +223,9 @@ class CodeGen
       frozen = embedded_store_frozen_check(recv)
       if type == :value
         field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
-        return "#{"#{indent}#{frozen}\n" if frozen}#{indent}#{field} = #{src};\n#{indent}mrb_field_write_barrier_value(M, " \
-               "(struct RBasic*)mrb_obj_ptr(#{recv}), #{src});#{tail}"
+        # GC_KEEP_OVERWRITTEN: the value this store replaces may be held only by a register of the caller.
+        return "#{"#{indent}#{frozen}\n" if frozen}#{indent}bc2cpp_keep_old(M, #{field});\n#{indent}#{field} = #{src};\n" \
+               "#{indent}mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(#{recv}), #{src});#{tail}"
       end
 
       ops = TYPE_OPS.fetch(type)
@@ -837,7 +838,7 @@ end
         bc2cpp_ary_set(M, recv, mrb_integer(idx), val);
         return val;
       } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
-        mrb_hash_set(M, recv, idx, val);
+        bc2cpp_hash_aset(M, recv, idx, val);
         return val;
       }
     CPP
