@@ -32,6 +32,7 @@ require_relative 'inframe_placement'
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
 require_relative 'mrblib_stubs'
+require_relative 'load_compile'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
@@ -2308,14 +2309,23 @@ if $PROGRAM_NAME == __FILE__
     print m[:code]
   end
   print ShardOutput::HOOKS_MARK if shards > 1
-  print gen.emit_gem_hooks
+  # LOAD_COMPILE (load_compile.rb): the class and module bodies of this gem's mrblib, as code gem_init runs first.
+  stub_keys = MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies)
+  load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys)
+  load_symbol = nil
+  if load_plan&.marker
+    print load_plan.code
+    load_symbol = symbol
+  end
+  LoadCompile.write_plan(LoadCompile.plan_path(out_dir, symbol), load_plan)
+  print gen.emit_gem_hooks(load_symbol: load_symbol)
 
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.
   File.write(File.join(out_dir, "#{symbol}_decls.h"), gen.emit_decls_header(compiled))
   # MRBLIB_STUBS: the bodies the engine gems' closed-build mrblib may ship empty (mrblib_stubs.rb). Always written.
   File.write(MrblibStubs.manifest_path(out_dir, symbol),
-             MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies).sort.map { |key| "#{key}\n" }.join)
+             stub_keys.sort.map { |key| "#{key}\n" }.join)
   # BC2CPP_ENTRY: the host-callable entry header (codegen_entry_header.rb), beside the declarations and, when
   # BC2CPP_ENTRY_INCLUDE_DIR names it, in the build's include directory, where every host's `__has_include` finds it.
   entry_header = gen.emit_entry_header(compiled, symbol)
