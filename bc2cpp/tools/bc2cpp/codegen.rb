@@ -120,9 +120,8 @@ class CodeGen
     # (foreign_method_names). nil: compute_fixnum_return_names proves nothing
     # rather than use an incomplete poison set.
     @foreign_method_names = foreign_method_names
-    # ZSUPER_NATIVE_SUPPORT: name -> NATIVE_SRCS files registering it
-    # (extract_native_method_sources). nil: zsuper_native_kind declines every
-    # site.
+    # NATIVE_NAME_SOURCES: name -> NATIVE_SRCS files registering it
+    # (extract_native_method_sources). nil: the analyses that need it decline.
     @native_name_sources = native_name_sources
     # NATIVE_EXPRESSION_DEVIRT: single-expression implementations of zero-argument
     # C methods; only the allowlisted subset in native_expression_devirt.rb.
