@@ -17,6 +17,7 @@ require 'fileutils'
 require_relative 'compiled_gems'
 require_relative 'shared_generation'
 require_relative 'closed_world_env'
+require_relative 'static_dispatch_lists'
 
 module NeverCalledRegistrations
   SAFE_UNREGISTER_OWNER_RE = /\A(?:Game|RPG2k3?|LCF)(?:::|\z)/
@@ -37,7 +38,9 @@ module NeverCalledRegistrations
 
   # run_bc2cpp_full for several gems: { gem_name => [stdout, stderr] }. The runs differ only in which owners they
   # emit, so they share one analysis: what each returns is what its own run returns.
-  def run_bc2cpp_full_many(gem_names, repo_root, mrbc)
+  # lists_path: the static dispatch lists the probe generates with (static_dispatch_lists.rb): the proof feeds each
+  # pass the previous pass's output, and 'none' is the first pass.
+  def run_bc2cpp_full_many(gem_names, repo_root, mrbc, lists_path: 'none')
     return {} if gem_names.empty?
 
     gem_names.each do |gem_name|
@@ -64,6 +67,7 @@ module NeverCalledRegistrations
         'NATIVE_SRCS' => Shellwords.join(native_srcs),
         'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
         'SKIP_UNSUPPORTED' => '1',
+        StaticDispatchLists::PATH_ENV => lists_path,
       }
       units = gem_names.map do |gem_name|
         dir = FileUtils.mkdir_p(File.join(tmp, gem_name)).first
