@@ -1602,7 +1602,16 @@ class device {
 #endif
     return 1;
   }
-  unsigned long info_of(info::device::global_mem_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
+  // the GPU's memory is the driver's total (OpenCL and Level Zero); the value the host learns from it decides how much
+  // llama.cpp fits (common_params_fit), so a placeholder here makes a large model "not fit" and the fit step throws
+  unsigned long info_of(info::device::global_mem_size *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().global_mem();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().global_mem();
+#endif
+    return is_gpu() ? (1ul << 28) : (1ul << 32);
+  }
   unsigned long info_of(info::device::global_mem_cache_size *) const { return 1ul << 20; }
   unsigned info_of(info::device::mem_base_addr_align *) const { return 1024; }
   friend bool operator==(const device &, const device &) { return true; }   // one device in this subset

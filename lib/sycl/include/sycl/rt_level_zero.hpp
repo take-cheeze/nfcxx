@@ -254,6 +254,7 @@ class ze_rt {
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
   unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
+  unsigned long long global_mem() const { return global_mem_; }
 
  private:
   ze_rt() {
@@ -320,6 +321,14 @@ class ze_rt {
     max_wi_[1] = cp.maxGroupSizeY;
     max_wi_[2] = cp.maxGroupSizeZ;
     local_mem_ = cp.maxSharedLocalMemory;
+    // the device's memory: the sum of its memory modules (the total ggml-sycl and llama.cpp size their use from)
+    uint32_t nmem = 0;
+    check(zeDeviceGetMemoryProperties(dev_, &nmem, nullptr), "zeDeviceGetMemoryProperties");
+    std::vector<ze_device_memory_properties_t> mems(nmem);
+    for (auto &m : mems) m.stype = ZE_STRUCTURE_TYPE_DEVICE_MEMORY_PROPERTIES;
+    if (nmem) check(zeDeviceGetMemoryProperties(dev_, &nmem, mems.data()), "zeDeviceGetMemoryProperties");
+    global_mem_ = 0;
+    for (uint32_t i = 0; i < nmem; i++) global_mem_ += mems[i].totalSize;
     ze_device_module_properties_t mp = {};
     mp.stype = ZE_STRUCTURE_TYPE_DEVICE_MODULE_PROPERTIES;
     check(zeDeviceGetModuleProperties(dev_, &mp), "zeDeviceGetModuleProperties");
@@ -489,6 +498,7 @@ class ze_rt {
   ze_command_list_handle_t imm_ = nullptr;
   std::string device_name_;
   uint32_t compute_units_ = 0;
+  uint64_t global_mem_ = 0;
   uint32_t max_wg_ = 0;
   uint32_t max_wi_[3] = {0, 0, 0};
   uint32_t local_mem_ = 0;
