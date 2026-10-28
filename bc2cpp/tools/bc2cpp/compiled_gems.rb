@@ -1,5 +1,6 @@
 # Single source of truth for every bc2cpp-generated gem's owners (derived from its
-# base gem's mrblib: bc2cpp_gem_owners) and OUT_SYMBOL, plus the shared source sets below (closed_world_mrblib_srcs,
+# base gem's mrblib: bc2cpp_gem_owners) and OUT_SYMBOL -- the table itself is
+# compiled_gems.yml, whose comments hold the per-gem design rules -- plus the shared source sets below (closed_world_mrblib_srcs,
 # core_native_srcs, ...). Every *-compiled mrbgem.rake requires this file, so
 # no gem hand-copies another's list: a drifted copy fails silently, with two
 # gems reaching different MONO/POLY conclusions for the same name.
@@ -156,102 +157,24 @@ require 'prism'
 require_relative '../rgss_tts_config'
 require_relative 'mrblib_stubs'
 require_relative 'gem_owners'
+require_relative 'compiled_gems_config'
 
 # GEM_OWNERS: a compiled gem's owners are every engine owner with a plain def in its base gem's mrblib (every
 # variant: a build that leaves a file out only has fewer defs), and the core classes the gem reopens.
-def bc2cpp_gem_owners(base_gem, reopened: [])
-  GemOwners.owners(Dir[File.expand_path("../../#{base_gem}/mrblib*/**/*.rb", __dir__)].sort, reopened: reopened)
+def bc2cpp_gem_owners(base_gem)
+  GemOwners.owners(Dir[File.expand_path("../../#{base_gem}/mrblib*/**/*.rb", __dir__)].sort)
 end
 
-# `native_namespaces`: the namespaces whose native (C/C++) registrations this gem's registration removes when the
-# closed list leaves them out (NATIVE_CANDIDATES, static_dispatch_registrations.rb).
-BC2CPP_COMPILED_GEMS = {
-  'mruby-lcf-compiled' => {
-    # Owners are emission targets: every method of theirs that compiles clean is
-    # emitted and registered; the rest (blocks, rescue, super, non-mandatory
-    # arity, method_missing) stay interpreted. What each class compiles is in the
-    # generated diagnostic (`== compiled entry points ==`), not listed here.
-    #
-    # Embedding is decided by bc2cpp.rb's drop_unsafe_embeddings, never here.
-    # Plain native attr readers/writers can be replaced by direct slot accessors.
-    # #initialize is always private in mruby, so it registers with
-    # mrb_define_private_method.
-    #
-    # LCF::File#[]/#[]= dispatch on @root dynamically (an LCF::Sections or a
-    # schema-typed instance, never a real Array/Hash), so no devirtualization of
-    # @root is involved and subclass identity does not matter.
-    #
-    # StringIO is reopened, not defined, by this project (mruby-lcf/mrblib/lcf.rb
-    # adds #ungetbyte). Its POLY collision with native IO#ungetbyte is by bare
-    # name only, which the registry already treats as POLY. Load order is safe:
-    # mruby-stringio loads before mruby-lcf, and `add_dependency 'mruby-lcf'` runs
-    # the reopening before this gem installs the compiled override. #ungetbyte
-    # touches no ivar.
-    owners: bc2cpp_gem_owners('mruby-lcf', reopened: %w[StringIO]),
-    out_symbol: 'lcf_compiled',
-    native_namespaces: %w[LCF],
-  },
-  'mruby-rpg2k-compiled' => {
-    # Same rules as the mruby-lcf-compiled entry above. Points that are easy to
-    # get wrong about the owners:
-    #
-    # - `.singleton` owners are the `def self.x`/`class << self` methods of a
-    #   class or module; they register
-    #   with mrb_define_class_method and never embed (class ivars live on a
-    #   different object than any instance's iv_tbl).
-    # - A compiled `#initialize` is required to allocate the RData payload. The
-    #   diagnostic's `== ivar embedding ==`
-    #   section prints IvarLayout's raw proposal, before that filter -- trust the
-    #   "classes needing MRB_SET_INSTANCE_TT" section instead.
-    # - Every statically named ivar on an embedding owner uses an mrb_value slot;
-    #   dynamic names keep the ordinary iv_tbl fallback.
-    # - A Struct's members are positional (mruby-struct), never iv_tbl, so
-    #   Game::Battle::Combatant has nothing to embed. Its `half_sp_cost?`/
-    #   `member?` sanitize to the same C name as the Struct-native writers, but
-    #   those have irep nil and are never emitted, so no collision.
-    # - A POLY name in the registry only stops other call sites devirtualizing
-    #   into it; it never blocks registering the owner's own method.
-    #
-    # A module_function module owns its singleton too (GemOwners): compile_all
-    # emits the shared bodies as the module's entries, which register on the module
-    # and, when the body never observes self, on its singleton class too
-    # (MODULE_FUNCTION_COPY).
-    owners: bc2cpp_gem_owners('mruby-rpg2k'),
-    out_symbol: 'rpg2k_compiled',
-    native_namespaces: %w[Game RPG2k RPG2k3],
-  },
-  'mruby-rgss-compiled' => {
-    # Same rules as above. Notes specific to RGSS:
-    #
-    # - RGSS::Window runs `alias_method :_rgss1_initialize, :initialize`; that is
-    #   an SSEND, not OP_ALIAS, so the aliased name never enters the registry
-    #   under any owner. A call to an alias_method-defined name therefore always
-    #   stays ordinary dispatch (safe, just never devirtualized).
-    # - RGSS::Graphics.singleton#brightness_sprite is private and compiles. mruby
-    #   has no private class-method registration, so the generated
-    #   bc2cpp_define_private_class_method installs it.
-    # - Array is reopened by mruby-rgss/mrblib/array_include.rb (an index-loop
-    #   #include?). Its POLY collision with native Module#include? is by bare
-    #   name only, and `add_dependency 'mruby-rgss'` runs the reopening before
-    #   the compiled override is installed -- the same reasoning as StringIO in
-    #   mruby-lcf-compiled.
-    owners: bc2cpp_gem_owners('mruby-rgss', reopened: %w[Array]),
-    out_symbol: 'rgss_compiled',
-    native_namespaces: %w[RGSS],
-  },
-  'mruby-core-compiled' => {
-    # mruby's own Ruby (BC2CPP_CORE_MRBLIB_GEMS) compiled by the same
-    # pipeline. Every eligible method (CoreMethods: not Fiber-naming, lambda-building,
-    # conditional, shadowed or refused; the root-context guard covers the block-taking ones) is
-    # emitted, and registered through the
-    # generated bc2cpp_register_owner_methods
-    # after the core gems that define the bytecode it replaces. Array and
-    # StringIO are also engine owners: each gem emits the definitions of its own
-    # source files (CodeGen#emit_unit_allows?).
-    owners: BC2CPP_CORE_OWNERS,
-    out_symbol: 'core_compiled',
-  },
-}.freeze
+# COMPILED_GEMS_CONFIG: the per-gem table lives in compiled_gems.yml (validated by compiled_gems_config.rb); only the
+# derived owners are computed here, from the source the config names. (Whether a base gem exists is
+# scripts/bc2cpp/compiled_gems_config_check.rb's job: a copy of tools/bc2cpp outside the repository has no gems.)
+BC2CPP_COMPILED_GEMS_CONFIG = Bc2cppCompiledGemsConfig.load.freeze
+BC2CPP_COMPILED_GEMS = BC2CPP_COMPILED_GEMS_CONFIG.to_h do |entry|
+  owners = entry.owners_from == Bc2cppCompiledGemsConfig::CORE ? BC2CPP_CORE_OWNERS : bc2cpp_gem_owners(entry.owners_from)
+  gem = { owners: owners, out_symbol: entry.out_symbol }
+  gem[:native_namespaces] = entry.native_namespaces if entry.native_namespaces
+  [entry.name, gem]
+end.freeze
 
 # mruby's own core (3rd/mruby/src/*.c) and every core mrbgem active in the
 # real build, as closed-world NATIVE_SRCS input alongside mruby-rgss/src/

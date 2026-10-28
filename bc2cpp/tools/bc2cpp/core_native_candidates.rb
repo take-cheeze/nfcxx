@@ -71,17 +71,25 @@ module CoreNativeCandidates
 
   # The receiver-blind reachable names (see the header), and the pool fragments. `ireps` (the engine's) all count;
   # `core` is one { ireps:, body_of: } per core Ruby file, body_of mapping a method body's irep label to its name.
-  def reachable(ireps, native_paths, generated, core: [])
+  # +lookup+ reads one irep (lookup_names, or CorePrivateRuby::Lookup); +strip+ blanks the native text it should not
+  # read, +strip_generated+ the generated source's literals (the `_impl` calls it makes are read from the whole of it),
+  # +exact_impls+ how live_core reads a direct `_impl` call.
+  def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
+                exact_impls: false)
     names = Set.new(StaticDispatchRegistrations::ALWAYS_DYNAMIC)
     fragments = Set.new
-    ireps.each_value { |irep| lookup_names(irep, nil, names, fragments) }
+    ireps.each_value { |irep| lookup.call(irep, nil, names, fragments) }
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
     native_paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
+      text = strip.call(text) if strip
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
-    generated.each { |src| src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) } }
-    live_core(core, generated, names, fragments)
+    generated.each do |src|
+      src = strip_generated.call(src) if strip_generated
+      src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) }
+    end
+    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls)
     [names, fragments]
   end
 
@@ -116,7 +124,13 @@ module CoreNativeCandidates
   # LIVE_CORE (see the header): the core files' root and class bodies always count; a method body, with the blocks it
   # makes, once its name is in `names` or compiled code calls an `_impl` of that name directly. Fragments are read from
   # every body, live or not: a built name is the costly kind to miss.
-  def live_core(core, generated, names, fragments)
+  #
+  # exact_impls (the private-name proof): a direct `_impl` call makes live the body of the owner it names and no more,
+  # and does not make the name reachable. The `_impl` is named for the owner that defines the body (CodeGen#cpp_name:
+  # `Kernel_print_impl`), so `RGSS__ErrorReport__Tee_print_impl` calls Tee#print and `IO_singleton_open_impl` calls
+  # IO.open, neither a lookup of `print` or `open` nor a call of Kernel's. A body whose owner the file does not give
+  # (`owner_of`) is read by name alone, as without the flag.
+  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false)
     impls = Set.new
     # `$` is the mangling's escape (`Array_include$3f_impl`).
     generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
@@ -128,24 +142,44 @@ module CoreNativeCandidates
         up = label
         up = parent[up] until up.nil? || file[:body_of].key?(up)
         own = up && file[:body_of][up]
-        if own then pending[own] << irep else lookup_names(irep, nil, names, fragments) end
+        if own then pending[own] << [irep, file[:owner_of]&.dig(up)] else lookup.call(irep, nil, names, fragments) end
       end
     end
-    pending.each_value { |reps| reps.each { |irep| lookup_names(irep, nil, Set.new, fragments) } }
+    pending.each_value { |bodies| bodies.each { |irep, _owner| lookup.call(irep, nil, Set.new, fragments) } }
     # A direct call reaches the body without a lookup: `<Owner>_<name>_impl` (CodeGen#sanitize mangling).
-    called = pending.keys.select { |name| impls.any? { |t| t.end_with?("_#{mangle(name)}_impl") || t.include?("_#{mangle(name)}_block_fallback") } }
-    names.merge(called)
+    by_name = ->(name) { impls.any? { |t| t.end_with?("_#{mangle(name)}_impl") || t.include?("_#{mangle(name)}_block_fallback") } }
+    if exact_impls
+      pending.each do |name, bodies|
+        bodies.reject! do |irep, owner|
+          if owner.nil?
+            names << name if by_name.call(name)
+            next false
+          end
+          next false unless impls.any? { |t| t.start_with?("#{cpp_name(owner, name)}_") }
+
+          lookup.call(irep, name, names, fragments)
+          true
+        end
+      end
+    else
+      names.merge(pending.keys.select(&by_name))
+    end
     loop do
       grew = false
-      pending.each do |own, reps|
+      pending.each do |own, bodies|
         next unless names.include?(own)
 
-        reps.each { |irep| lookup_names(irep, own, names, fragments) }
+        bodies.each { |irep, _owner| lookup.call(irep, own, names, fragments) }
         pending.delete(own)
         grew = true
       end
       break unless grew
     end
+  end
+
+  # CodeGen#cpp_name.
+  def cpp_name(owner, name)
+    "#{owner}_#{name}".gsub(/[^a-zA-Z0-9_]/) { |c| ':.'.include?(c) ? '_' : format('$%02x', c.ord) }
   end
 
   # CodeGen#sanitize, for a method name (no `::` or `.` in it).

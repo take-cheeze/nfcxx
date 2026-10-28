@@ -61,6 +61,8 @@ require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
 require_relative 'owner_call_direct'
+require_relative 'core_private_ruby'
+require_relative 'core_methods'
 require_relative 'core_native_candidates'
 require_relative 'native_owner_map'
 
@@ -890,7 +892,7 @@ module StaticDispatchRegistrations
       suffix_bases = text if built.empty?
     end
 
-    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }) : nil
+    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }, registry, superclass_of) : nil
 
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
       closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups,
@@ -901,7 +903,7 @@ module StaticDispatchRegistrations
   # run-time registrations it removes]. Every Ruby
   # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`), whose method
   # bodies count while their names are reachable (LIVE_CORE) -- and every native source, with the generated code.
-  def core_excluded(repo_root, mrbc, ireps, generated)
+  def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     # CLOSED_LINKED_ONLY: an unlinked gem's mrblib never loads there.
@@ -914,14 +916,98 @@ module StaticDispatchRegistrations
       core_ruby.each_with_index.map do |path, i|
         file_ireps, root = compile_ireps([path], "core_native_#{i}", tmp, mrbc: mrbc)
         body_of = {}
-        build_registry(file_ireps, root)[0].each { |name, defs| defs.each { |d| body_of[d.irep] = name if d.irep } }
-        { ireps: file_ireps, body_of: body_of }
+        owner_of = {}
+        registry, superclass_of = build_registry(file_ireps, root)
+        registry.each do |name, defs|
+          defs.each do |d|
+            body_of[d.irep] = name if d.irep
+            owner_of[d.irep] = d.owner if d.irep
+          end
+        end
+        { ireps: file_ireps, body_of: body_of, owner_of: owner_of, registry: registry, superclass_of: superclass_of }
       end
     end
     names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core)
     entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
+    map = NativeOwnerMap.build(native)
+    private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of)
     [CoreNativeCandidates.candidates(entries, names, fragments),
-     CoreNativeCandidates.ram_candidates(NativeOwnerMap.build(native), names, fragments, entries)]
+     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby).uniq.sort]
+  end
+
+  # CORE_PRIVATE_RUBY (core_private_ruby.rb): "Owner#name" of each Ruby-defined core method the build keeps as bytecode
+  # that no lookup can reach -- a `private def` (reached by implicit-self sends and lookups by name only), or a
+  # method CoreMethods leaves interpreted whatever the name (mruby-enumerator's Fiber machinery, a lambda builder, a
+  # refused one). The removed private methods' bodies stop counting as code that can run, so the scan is run again
+  # without a private candidate the end of it rejects.
+  def private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of)
+    registries = core.map { |file| file[:registry] } << engine_registry
+    count = Hash.new(0)
+    registries.each { |reg| reg.each { |name, defs| defs.each { |d| count["#{d.owner}##{name}"] += 1 if d.irep || d.kind } } }
+    strip = CorePrivateRuby.method(:strip_not_lookups)
+    blind, = CoreNativeCandidates.reachable(ireps, native, generated, core: core, strip: strip)
+    refused = CoreMethods.load_refused
+    shape = /\A(?:[a-z_][A-Za-z0-9_]*[?!=]?|`)\z/
+    usable = lambda do |key|
+      name = key.split('#', 2).last
+      name.match?(shape) && (count[key] == 1 || !blind.include?(name))
+    end
+    private_keys = core.flat_map { |file| CorePrivateRuby.private_defs(file[:ireps], file[:owner_of]).keys }.uniq.select(&usable)
+    kept = core.flat_map do |file|
+      conditional = CoreDefs.conditional_def_labels(file[:ireps])
+      file[:registry].flat_map do |name, defs|
+        defs.filter_map do |d|
+          next unless d.irep && CoreDefs.core_source?(file[:ireps].fetch(d.irep).file)
+
+          key = "#{d.owner}##{name}"
+          key if CoreMethods.exclusion_reason(d, file[:ireps], refused, conditional)
+        end
+      end
+    end.uniq.select(&usable)
+    return [] if private_keys.empty? && kept.empty?
+
+    defined = Set.new
+    registries.each { |reg| reg.each { |name, defs| defs.each { |d| defined << "#{d.owner}##{name}" } } }
+    map.registrations.each { |owner, name, _fn| defined << "#{owner}##{name}" if owner.is_a?(String) && name }
+    entries.each { |e| defined << "#{e[:mt_class]}##{e[:name]}" if e[:name] }
+    superclass = core.map { |file| file[:superclass_of] }.inject({}) { |all, h| all.merge(h) }.merge(engine_superclass_of)
+    owners = {}.compare_by_identity
+    core.each { |file| owners.merge!(enclosing_owners(file[:ireps], file[:owner_of])) }
+    owners.merge!(enclosing_owners(ireps, engine_registry.values.flatten.select(&:irep).to_h { |d| [d.irep, d.owner] }))
+    defines = CorePrivateRuby.defines_proc(defined, superclass)
+    # The backtick is no identifier (dynamic_name? refuses any), but `%x{}` is its only syntax: an implicit-self send.
+    unreachable = lambda do |key, names, fragments|
+      name = key.split('#', 2).last
+      name == '`' ? !names.include?(name) : !dynamic_name?(name, names, fragments)
+    end
+    loop do
+      lookup = CorePrivateRuby::Lookup.new(private_keys.to_set { |key| key.split('#', 2).last }, owners, defines,
+                                           kept.to_set { |key| key.split('#', 2).last })
+      names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, lookup: lookup, strip: strip,
+                                                        strip_generated: CorePrivateRuby.method(:strip_generated),
+                                                        exact_impls: true)
+      rejected = private_keys.reject { |key| unreachable.call(key, names, fragments) }
+      if rejected.empty?
+        # `def Enumerator.produce` inside `class Enumerator` is registered under Enumerator::Enumerator.singleton, a path
+        # the run-time removal does not find (bc2cpp_native_owner looks each segment up in the one before it).
+        keys = private_keys + kept.select { |key| unreachable.call(key, names, fragments) }
+        return keys.map { |key| key.sub(/\b([A-Z]\w*)::\1\b/, '\\1') }.uniq.sort
+      end
+
+      private_keys -= rejected
+    end
+  end
+
+  # label => owner of the method each irep of +ireps+ belongs to (the method body itself, or the nearest one around a
+  # block); absent for the root, class bodies and the blocks made directly in them.
+  def enclosing_owners(ireps, owner_of)
+    parent = {}
+    ireps.each_value { |irep| irep.reps.each { |c| parent[c] = irep.label } }
+    ireps.each_with_object({}.compare_by_identity) do |(label, irep), out|
+      up = label
+      up = parent[up] until up.nil? || owner_of.key?(up)
+      out[irep] = owner_of[up] if up
+    end
   end
 
   LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP

@@ -73,11 +73,14 @@ module CoreDefs
       next if site[:new] == site[:old] || shadowed_pairs.include?(old_key)
 
       old_defs = defs[old_key]
-      next unless old_defs && old_defs.size == 1 && old_defs.first.irep && old_defs.first.core
+      # `alias filter select` after `alias select find_all`: `select` is itself an alias, so the copy
+      # is registered under the def it chains back to (Enumerable#filter).
+      root = out.keys.find { |k| k[0] == site[:owner] && out[k].include?(site[:old]) } unless old_defs&.size == 1
+      next unless root || (old_defs && old_defs.size == 1 && old_defs.first.irep && old_defs.first.core)
       next if defs.key?([site[:owner], site[:new]])
       next if sites.count { |other| other[:owner] == site[:owner] && other[:new] == site[:new] } > 1
 
-      out[old_key] << site[:new]
+      out[root || old_key] << site[:new]
     end
   end
 

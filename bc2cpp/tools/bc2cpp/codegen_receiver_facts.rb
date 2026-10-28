@@ -848,6 +848,9 @@ class CodeGen
 
     target = module_super_target(owner_def)
     return nil unless target
+    # Both direct calls pass the positionals only; see super_target.
+    shape = enter_shape(@ireps.fetch(target.irep))
+    return nil if shape && shape[1].positive?
 
     t_irep = @ireps.fetch(target.irep)
     block = super_block_arg(owner_def, irep)
@@ -1141,6 +1144,10 @@ class CodeGen
     target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
     return nil unless target_def && target_def.irep
     return nil unless compiles_clean?(target_def.irep)
+    # The direct call passes the positionals only; an `_impl` with optionals also takes bc2cpp_given_opt. Such a
+    # target is reached through the by-name super (super_lookup_call) instead.
+    shape = enter_shape(@ireps.fetch(target_def.irep))
+    return nil if shape && shape[1].positive?
 
     target_def
   end

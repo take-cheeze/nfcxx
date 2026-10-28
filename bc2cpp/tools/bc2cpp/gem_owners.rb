@@ -2,22 +2,23 @@
 
 # GEM_OWNERS: the owners each compiled gem compiles, read from its base gem's mrblib instead of a hand list. An owner
 # is the lexical owner of a plain `def` (`Owner`, or `Owner.singleton` for `def self.` and `class << self`), as the
-# registry spells it; a module whose body calls `module_function` also owns `Mod.singleton`, the copies. Only engine
-# owners count, plus the core classes a gem lists as reopened: an engine file's def on any other core class (Object)
-# belongs to the core's code, which calls it on every kind of value.
+# registry spells it; a module whose body calls `module_function` also owns `Mod.singleton`, the copies. Every owner
+# the mrblib reopens counts (StringIO, Array, NameError, ...) except the universal ones (UNIVERSAL): an engine file's
+# def on Object or Kernel belongs to the core's code, which calls it on every kind of value.
 require 'prism'
 require 'set'
 
 module GemOwners
   ENGINE_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\.singleton\z|\z)/
+  UNIVERSAL = %w[BasicObject Object Kernel Module Class].freeze
 
   module_function
 
-  # The sorted owners of the defs in `paths`, engine ones and those in `reopened`.
-  def owners(paths, reopened: [])
+  # The sorted owners of the defs in `paths`, but for the universal ones (and their singletons).
+  def owners(paths)
     finder = Finder.new
     paths.each { |path| Prism.parse_file(path).value.accept(finder) }
-    finder.owners.select { |o| o.match?(ENGINE_RE) || reopened.include?(o) }.sort
+    finder.owners.reject { |o| UNIVERSAL.include?(o.delete_suffix('.singleton')) }.sort
   end
 
   class Finder < Prism::Visitor

@@ -48,17 +48,15 @@ class CodeGen
                            'mrb_get_args(M, "i|ii", &x, &y, &z); return table_get_impl(M, self, x, y, z); }',
                            'rgss_table_aref_impl(mrb_state* M, mrb_value self, mrb_int x, mrb_int y, mrb_int z) ' \
                            '{ return table_get_impl(M, self, x, y, z); }'] },
-      # `proc[x]` is mrb_funcall(proc, "[]", x) once `[]` is found on Proc (call_proc): mrb_funcall_with_method skips
-      # the lookup and nothing else (src/vm.c's funcall_with_block_m). A cfunc-backed proc (a compiled block) cannot run
-      # OP_CALL from a compiled frame, so it is yielded to, as bc2cpp_funcall_argv does.
-      'Proc' => { file: 'src/proc.c', gem: nil, mt: nil, test: 'mrb_proc_p(recv)',
+      # `proc[x]` is mrb_funcall(proc, "[]", x) once `[]` is found on Proc (proc_call, a cfunc): mrb_funcall_with_method skips
+      # the lookup and nothing else (src/vm.c's funcall_with_block_m). A cfunc-backed proc (a compiled block) is still
+      # yielded to directly, as bc2cpp_funcall_argv does.
+      'Proc' => { file: 'src/proc.c', gem: nil, mt: 'proc_call', test: 'mrb_proc_p(recv)',
                   call: '(MRB_PROC_CFUNC_P(mrb_proc_ptr(recv)) && mrb_obj_ptr(recv)->c == M->proc_class) ? ' \
                          'bc2cpp_yield_argv(M, recv, 1, &bc2cpp_key) : mrb_proc_aref_impl(M, recv, 1, &bc2cpp_key)',
                   decl: ['mrb_value mrb_proc_aref_impl(mrb_state*, mrb_value, mrb_int, const mrb_value*)'],
-                  needs: ['MRB_METHOD_FROM_PROC(m, &call_proc); mrb_define_method_raw(mrb, pc, MRB_SYM(call), m); ' \
-                          'mrb_define_method_raw(mrb, pc, MRB_OPSYM(aref), m);',
-                          'mrb_proc_aref_impl(mrb_state *mrb, mrb_value proc, mrb_int argc, const mrb_value *argv) { ' \
-                          'mrb_method_t m; MRB_METHOD_FROM_PROC(m, &call_proc); ' \
+                  needs: ['mrb_proc_aref_impl(mrb_state *mrb, mrb_value proc, mrb_int argc, const mrb_value *argv) { ' \
+                          'mrb_method_t m; MRB_METHOD_FROM_FUNC(m, proc_call); ' \
                           'return mrb_funcall_with_method(mrb, proc, MRB_OPSYM(aref), &m, mrb->proc_class, argc, argv, ' \
                           'mrb_nil_value()); }'],
                   also: { 'src/vm.c' => ['return funcall_with_block_m(mrb, self, mid, argc, argv, blk, NULL, NULL);',

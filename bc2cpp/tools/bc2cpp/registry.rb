@@ -398,6 +398,9 @@ def build_registry(ireps, root_label)
           end
         end
         register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == :SSEND
+        if name == 'alias_method' && insn.op == :SSEND && CoreDefs.core_source?(irep.file) && (found = AliasSites.site(irep, idx))
+          alias_sites << { owner: namespace || 'Object', new: found.new_name, old: found.old_name, irep: label }
+        end
         if %w[include prepend].include?(name)
           # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M` in this
           # body (walk only recurses into CLASS/MODULE/SCLASS bodies, so `namespace` is
