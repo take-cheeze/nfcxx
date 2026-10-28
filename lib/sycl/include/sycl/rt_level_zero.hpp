@@ -191,6 +191,14 @@ class ze_rt {
       uint64_t slab_groups = (uint64_t)cnt * inner;
       uint64_t slab_stack = slab_groups * inv_group * stack_bytes;
       uint64_t region = alloc(slab_stack + slab_groups * stride);
+      // NFCXX_SYCL_POISON=BYTE (debugging): the stacks and the local memory start filled with BYTE, so a read of memory the
+      // kernel never wrote gives the same value on every run
+      if (const char *pz = std::getenv("NFCXX_SYCL_POISON")) {
+        const char *part = std::getenv("NFCXX_SYCL_POISON_PART");   // stack or local: only that part
+        int byte = (int)std::strtol(pz, nullptr, 0);
+        if (!part || std::strcmp(part, "local") != 0) std::memset(at(region), byte, slab_stack);
+        if (!part || std::strcmp(part, "stack") != 0) std::memset(at(region + slab_stack), byte, slab_groups * stride);
+      }
       ze_push p{};
       p.closure = closure_addr();
       p.statics = mod.statics;
