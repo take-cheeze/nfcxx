@@ -3,6 +3,7 @@
 // unsigned __int128 (the helpers of be/nfcxx_ldrt.c count over both halves). Without the lowering they became calls of
 // an undefined `clzg`. Expected output: none; the exit status is the number of wrong results.
 // EXPECT: 0
+// GCC-SKIP: the host gcc (13) has no __builtin_clzg; the Path B exit status is checked against EXPECT only
 // NFCXX-FLAGS: --gnu-version=140000
 int check_bits() {
   int bad = 0;
