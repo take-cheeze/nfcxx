@@ -268,7 +268,7 @@ class CodeGen
   # Only for a build whose rake pipeline scans the generated source for presyms and drops defs (the plan's
   # BC2CPP_LOAD_WORLD): a probe built against a fixed presym table has no id for a name only the table spells.
   def emit_registration_presyms(code)
-    return '' unless ENV['BC2CPP_LOAD_WORLD'] && ENV.fetch('BC2CPP_LOAD_COMPILE', 'defs') != 'off'
+    return '' unless ENV['BC2CPP_LOAD_WORLD'] && ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') != 'off'
 
     names = code.scan(/\b(?:bc2cpp_left_out|mrb_define_\w+|bc2cpp_define_private_class_method|bc2cpp_core_save_interpreted)\(M, \w+, "((?:\\x[0-9a-f]{2})+)"/)
                 .map { |(hex)| hex.scan(/\\x(\h\h)/).flatten.map { |h| h.to_i(16).chr }.join }
