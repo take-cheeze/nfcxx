@@ -54,6 +54,14 @@ for a in "$@"; do
     *) args+=("$a") ;;
   esac
 done
+# 5. EDG writes a file-scope `static __thread` object as a tentative definition, then again with its initializer. GCC 15
+#    (its default C23 mode) rejects that redefinition; gnu17, which the C of EDG's output is written for, takes it. The
+#    standard is set here unless the caller gave one.
+if [ $compile = 1 ]; then
+  has_std=0
+  for a in ${args[@]+"${args[@]}"}; do case $a in -std=*) has_std=1 ;; esac; done
+  [ $has_std = 1 ] || args=(-std=gnu17 ${args[@]+"${args[@]}"})
+fi
 # The output of a `-c ... -o FILE` compile is FILE; without -o, gcc writes the basename.o.
 prev=""
 for a in "$@"; do

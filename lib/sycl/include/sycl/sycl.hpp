@@ -442,6 +442,20 @@ template <int D = 1> class nd_item {
   size_t get_global_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr_[i] + gl_[i]; return l; }
   size_t get_local_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * lr_[i] + lo_[i]; return l; }
   sub_group get_sub_group() const { return sub_group(get_local_linear_id(), lr_.size()); }
+#ifdef __NFCXX_SYCL_DEVICE__
+  // The device's work-item indices, filled in place (no id or range temporaries: each one is a frame slot of the kernel).
+  // SYCL dimension d is the device's component 2 - d (see device_gid).
+  void device_fill() {
+    for (int d = 0; d < D; d++) {
+      const int c = 2 - d;
+      gl_[d] = c == 0 ? __nfcxx_sycl_gid_x() : c == 1 ? __nfcxx_sycl_gid_y() : __nfcxx_sycl_gid_z();
+      lo_[d] = c == 0 ? __nfcxx_sycl_lid_x() : c == 1 ? __nfcxx_sycl_lid_y() : __nfcxx_sycl_lid_z();
+      grp_[d] = c == 0 ? __nfcxx_sycl_group_x() : c == 1 ? __nfcxx_sycl_group_y() : __nfcxx_sycl_group_z();
+      gr_[d] = c == 0 ? __nfcxx_sycl_grange_x() : c == 1 ? __nfcxx_sycl_grange_y() : __nfcxx_sycl_grange_z();
+      lr_[d] = c == 0 ? __nfcxx_sycl_lrange_x() : c == 1 ? __nfcxx_sycl_lrange_y() : __nfcxx_sycl_lrange_z();
+    }
+  }
+#endif
   void barrier(access::fence_space = access::fence_space::global_and_local) const {
 #ifdef __NFCXX_SYCL_DEVICE__
     __nfcxx_sycl_barrier();
@@ -471,12 +485,16 @@ template <class T> inline T shift_group_right(sub_group sg, T x, unsigned delta 
 }
 template <class T> inline T permute_group_by_xor(sub_group, T x, unsigned mask) { return detail::sg_shuffle_xor(x, mask); }
 // butterfly over the n lanes: after the xor steps n/2, ..., 2, 1 every lane holds the whole sum (op commutative, as SYCL requires)
-template <class T, class Op> inline T reduce_over_group(sub_group sg, T x, Op op) {
-  for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
+// the butterfly over n lanes on scalars: no sub_group object (a struct copy per call on the device)
+template <class T, class Op> inline T reduce_lanes(unsigned n, T x, Op op) {
+  for (unsigned m = n / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
   return x;
 }
+template <class T, class Op> inline T reduce_over_group(const sub_group &sg, T x, Op op) {
+  return reduce_lanes((unsigned)sg.get_local_linear_range(), x, op);
+}
 // Hillis-Steele: after the steps 1, 2, 4, ..., n/2 lane k holds the combination of lanes 0..k
-template <class T, class Op> inline T inclusive_scan_over_group(sub_group sg, T x, Op op) {
+template <class T, class Op> inline T inclusive_scan_over_group(const sub_group &sg, T x, Op op) {
   unsigned lane = (unsigned)sg.get_local_linear_id();
   for (unsigned d = 1; d < sg.get_local_linear_range(); d <<= 1) {
     T y = shift_group_right(sg, x, d);
@@ -484,17 +502,17 @@ template <class T, class Op> inline T inclusive_scan_over_group(sub_group sg, T 
   }
   return x;
 }
-inline bool any_of_group(sub_group sg, bool p) {
+inline bool any_of_group(const sub_group &sg, bool p) {
   unsigned r = p ? 1u : 0u;
   for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r |= detail::sg_shuffle_xor(r, m);
   return r != 0;
 }
-inline bool all_of_group(sub_group sg, bool p) {
+inline bool all_of_group(const sub_group &sg, bool p) {
   unsigned r = p ? 1u : 0u;
   for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r &= detail::sg_shuffle_xor(r, m);
   return r != 0;
 }
-inline bool none_of_group(sub_group sg, bool p) { return !any_of_group(sg, p); }
+inline bool none_of_group(const sub_group &sg, bool p) { return !any_of_group(sg, p); }
 inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {
 #ifdef __NFCXX_SYCL_DEVICE__
   __nfcxx_sycl_sg_barrier();
@@ -1295,7 +1313,9 @@ template <int D, class F> void __nfcxx_sycl_entry_range() {
 }
 template <int D, class F> void __nfcxx_sycl_entry_nd() {
   const F *f = (const F *)__nfcxx_sycl_closure();
-  (*f)(nd_item<D>(device_gid<D>(), device_lid<D>(), device_group<D>(), device_global_range<D>(), device_local_range<D>()));
+  nd_item<D> it;
+  it.device_fill();
+  (*f)(it);
 }
 template <class F> void __nfcxx_sycl_entry_single() {
   const F *f = (const F *)__nfcxx_sycl_closure();
@@ -1602,7 +1622,16 @@ class device {
 #endif
     return 1;
   }
-  unsigned long info_of(info::device::global_mem_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
+  // the GPU's memory is the driver's total (OpenCL and Level Zero); the value the host learns from it decides how much
+  // llama.cpp fits (common_params_fit), so a placeholder here makes a large model "not fit" and the fit step throws
+  unsigned long info_of(info::device::global_mem_size *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().global_mem();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().global_mem();
+#endif
+    return is_gpu() ? (1ul << 28) : (1ul << 32);
+  }
   unsigned long info_of(info::device::global_mem_cache_size *) const { return 1ul << 20; }
   unsigned info_of(info::device::mem_base_addr_align *) const { return 1024; }
   friend bool operator==(const device &, const device &) { return true; }   // one device in this subset
@@ -2001,24 +2030,41 @@ template <class T, int D> inline T *scratch_slot(size_t lid) {
 
 template <int D> inline bool group<D>::leader() const { return detail::group_lid<D>() == 0; }
 // lane k holds the combination of lanes 0..k-1 (lane 0 the identity)
-template <class T, class Op> inline T exclusive_scan_over_group(sub_group sg, T x, Op op) {
+template <class T, class Op> inline T exclusive_scan_over_group(const sub_group &sg, T x, Op op) {
   T e = shift_group_right(sg, inclusive_scan_over_group(sg, x, op), 1);
   return sg.get_local_linear_id() == 0 ? detail::red_identity<detail::op_kind<Op>::value, T>() : e;
 }
-template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_group sg, T x, V init, Op op) {
+template <class T, class V, class Op> inline T exclusive_scan_over_group(const sub_group &sg, T x, V init, Op op) {
   return op((T)init, exclusive_scan_over_group(sg, x, op));
 }
 
-template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, Op op) {
+// Two stages, as a GPU does it: the lanes of each sub-group reduce by butterfly (log2 of the sub-group size steps), the
+// first lane of each sub-group stores the partial, and every work-item combines the partials (one per sub-group, at most
+// the group size over the sub-group size). A group of 256 work-items does 16 partial reads per work-item, not 256.
+template <int D, class T, class Op> inline T reduce_over_group(const group<D> &g, T x, Op op) {
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
+#if !defined(__NFCXX_SYCL_DEVICE__) || defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)
+  const size_t w = detail::sg_size();
+  T s = reduce_lanes((unsigned)w, x, op);   // the butterfly over the sub-group, on scalars: no sub_group object per call
+  const size_t nsg = (n + w - 1) / w;
+  if (lid % w == 0) *detail::scratch_slot<T, D>(lid / w) = s;
+  group_barrier(g);
+  T r = *detail::scratch_slot<T, D>(0);
+  for (size_t i = 1; i < nsg; i++) r = op(r, *detail::scratch_slot<T, D>(i));
+  group_barrier(g);
+  return r;
+#else
+  // the WebGPU and Vulkan device compilers refuse the sub-group exchanges in this function (sycl-build exit 3), so the device
+  // reads every work-item's slot; the host and the OpenCL and Level Zero devices keep the two stages above
   *detail::scratch_slot<T, D>(lid) = x;
   group_barrier(g);
   T r = *detail::scratch_slot<T, D>(0);
   for (size_t i = 1; i < n; i++) r = op(r, *detail::scratch_slot<T, D>(i));
   group_barrier(g);
   return r;
+#endif
 }
-template <int D, class T, class V, class Op> inline T reduce_over_group(group<D> g, T x, V init, Op op) { return op((T)init, reduce_over_group(g, x, op)); }
+template <int D, class T, class V, class Op> inline T reduce_over_group(const group<D> &g, T x, V init, Op op) { return op((T)init, reduce_over_group(g, x, op)); }
 template <int D, class T> inline T group_broadcast(group<D> g, T x, id<D> from) {
   size_t lid = detail::group_lid<D>();
   if (lid == detail::linear<D>(from, g.get_local_range())) *detail::scratch_slot<T, D>(0) = x;
@@ -2049,9 +2095,9 @@ template <int D, class T, class V, class Op> inline T exclusive_scan_over_group(
 template <int D, class T, class Op> inline T exclusive_scan_over_group(group<D> g, T x, Op op) {
   return exclusive_scan_over_group(g, x, detail::red_identity<detail::op_kind<Op>::value, T>(), op);
 }
-template <int D> inline bool any_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) != 0; }
-template <int D> inline bool all_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, minimum<int>()) != 0; }
-template <int D> inline bool none_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) == 0; }
+template <int D> inline bool any_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) != 0; }
+template <int D> inline bool all_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, minimum<int>()) != 0; }
+template <int D> inline bool none_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) == 0; }
 template <int D, class Ptr, class Op> inline auto joint_reduce(group<D> g, Ptr first, Ptr last, Op op) {
   using T = typename std::remove_cv<typename std::remove_reference<decltype(*first)>::type>::type;
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();

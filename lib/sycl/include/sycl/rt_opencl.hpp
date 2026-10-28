@@ -306,6 +306,7 @@ class cl_rt {
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof compute_units_, &compute_units_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof max_wi_, max_wi_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof local_mem_, &local_mem_, nullptr);
+    clGetDeviceInfo(dev_, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof global_mem_, &global_mem_, nullptr);
     cl_device_fp_config half_cfg = 0;
     clGetDeviceInfo(dev_, CL_DEVICE_HALF_FP_CONFIG, sizeof half_cfg, &half_cfg, nullptr);
     has_fp16_ = half_cfg != 0;
@@ -405,6 +406,7 @@ class cl_rt {
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
   unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
+  unsigned long long global_mem() const { return global_mem_; }
 
  private:
   // the USM entry points of cl_intel_unified_shared_memory (the ICD loader resolves them per platform)
@@ -421,6 +423,7 @@ class cl_rt {
   cl_command_queue queue_ = nullptr;
   std::string device_name_;
   cl_uint compute_units_ = 0;
+  cl_ulong global_mem_ = 0;
   size_t max_wg_ = 0;
   size_t max_wi_[3] = {0, 0, 0};
   cl_ulong local_mem_ = 0;
