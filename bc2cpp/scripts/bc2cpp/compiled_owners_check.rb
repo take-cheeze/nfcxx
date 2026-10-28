@@ -61,7 +61,7 @@ RUBY
 Dir.mktmpdir('compiled-owners') do |dir|
   path = File.join(dir, 'fixture.rb')
   File.write(path, SOURCE)
-  owners = GemOwners.owners([path], reopened: %w[Array])
+  owners = GemOwners.owners([path])
   suite.check("the registry's owner spelling (#{owners.join(', ')})",
               owners == %w[Array Game::Scene::Map Game::Scene::Map.singleton Game::Util Game::Util.singleton RGSS])
 end

@@ -159,8 +159,8 @@ require_relative 'gem_owners'
 
 # GEM_OWNERS: a compiled gem's owners are every engine owner with a plain def in its base gem's mrblib (every
 # variant: a build that leaves a file out only has fewer defs), and the core classes the gem reopens.
-def bc2cpp_gem_owners(base_gem, reopened: [])
-  GemOwners.owners(Dir[File.expand_path("../../#{base_gem}/mrblib*/**/*.rb", __dir__)].sort, reopened: reopened)
+def bc2cpp_gem_owners(base_gem)
+  GemOwners.owners(Dir[File.expand_path("../../#{base_gem}/mrblib*/**/*.rb", __dir__)].sort)
 end
 
 # `native_namespaces`: the namespaces whose native (C/C++) registrations this gem's registration removes when the
@@ -187,7 +187,7 @@ BC2CPP_COMPILED_GEMS = {
     # mruby-stringio loads before mruby-lcf, and `add_dependency 'mruby-lcf'` runs
     # the reopening before this gem installs the compiled override. #ungetbyte
     # touches no ivar.
-    owners: bc2cpp_gem_owners('mruby-lcf', reopened: %w[StringIO]),
+    owners: bc2cpp_gem_owners('mruby-lcf'),
     out_symbol: 'lcf_compiled',
     native_namespaces: %w[LCF],
   },
@@ -237,7 +237,7 @@ BC2CPP_COMPILED_GEMS = {
     #   mruby-lcf-compiled.
     # - NameError and NoMethodError are reopened by mruby-rgss/mrblib/error_init.rb, which holds the two #initialize
     #   bodies of mruby's 10error.rb (excluded from the compiled core Ruby) so a compiled body replaces them.
-    owners: bc2cpp_gem_owners('mruby-rgss', reopened: %w[Array NameError NoMethodError]),
+    owners: bc2cpp_gem_owners('mruby-rgss'),
     out_symbol: 'rgss_compiled',
     native_namespaces: %w[RGSS],
   },
