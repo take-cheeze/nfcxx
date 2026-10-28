@@ -194,6 +194,7 @@ require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 # Last: its compile_method and compile_insn prepends must be outermost.
 require_relative 'codegen_stack_tuples'
+require_relative 'owner_call_direct'
 
 if $PROGRAM_NAME == __FILE__
   InFramePlacement.refuse_if_requested!
@@ -2188,10 +2189,15 @@ if $PROGRAM_NAME == __FILE__
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
+  # OWNER_CALL_DIRECT (owner_call_direct.rb): an owner call its listed owners' entries complete carries them.
+  owner_call_direct = OwnerCallDirect.entries(compiled + gen.module_function_copies(compiled), registration_owners)
+  owner_class_slots = gen.owner_class_slots
+  program_superclasses = gen.program_superclasses
   # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to

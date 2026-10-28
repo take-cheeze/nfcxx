@@ -60,6 +60,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
+require_relative 'owner_call_direct'
 require_relative 'core_native_candidates'
 require_relative 'native_owner_map'
 
@@ -74,7 +75,7 @@ module StaticDispatchRegistrations
   # `#enemy_active?`). `\w+` stops at the first `$`, so those registrations read
   # back as a truncated name that matched no owner and counted as an extra
   # dynamic reference -- which is how a list of provably-unreachable names
-  # (`STATIC_DISPATCH_UNREGISTERED`) suddenly looked reachable.
+  # (the open static dispatch list) suddenly looked reachable.
   REGISTRATION_CALL = /(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(\s*M\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,[^;]*\);/m
   # LEFT_OUT (codegen_emit.rb): what stands in for a left-out entry's registration, which looks nothing up.
   LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);/m
@@ -175,7 +176,45 @@ module StaticDispatchRegistrations
 
       quiet[i] += 1
     end
+    guarded_owner_calls(src, subclassed).each { |i| quiet[i] += 1 }
     quiet.select { |i, n| n == uses[i] }.keys.to_set { |i| names[i] }
+  end
+
+  # OWNER_CALL_GUARDED: `bc2cpp_owner_call` (symbol_cache.rb) runs only a method its one lookup finds on a listed
+  # owner and raises a closed-world violation for any other definer, so it needs no registration but its listed
+  # owners'. When it is the final else of an exact-class guard chain on the same receiver (POLY_SMALL_N,
+  # MONO_EMBED_GUARD, the RGSS native-direct arms), a listed owner the chain tests is a class (bc2cpp_class_is never
+  # holds for a module) whose own instances took their arm; with nothing subclassing it, no other receiver's lookup
+  # passes through its method table. A listed owner the call carries a direct entry for (OWNER_CALL_DIRECT,
+  # owner_call_direct.rb) needs no table entry either: the call walks the receiver's ancestors itself and answers
+  # with that entry where the lookup would have found it. A call so covering every listed owner of the closed
+  # world's (CLOSED_OWNER_RE, a superset of the open list's) looks up nothing either list may drop: the symbol index
+  # of each.
+  OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?\w+ = bc2cpp_owner_call(?:_argv)?\(M, (\w+), (\d+), \d+, BC2CPP_OWNERS(?:_D)?\((.*)$/
+  OWNER_DIRECT = /BC2CPP_OWNER_DIRECT\("((?:[^"\\]|\\.)*)"/
+
+  def guarded_owner_calls(src, subclassed)
+    slots = {}
+    src.scan(/bc2cpp_owner_class_(\d+)\(mrb_state\* M\) \{\n[^\n]*\n[^\n]*\n\s*static const char\* const path\[\] = \{([^}]*)\}/) do |n, path|
+      slots["bc2cpp_owner_class_#{n}(M)"] = path.scan(STRING_LITERAL).map { |(s)| unescape(s) }.join('::')
+    end
+    lines = src.lines
+    found = []
+    lines.each_with_index do |line, at|
+      site = OWNER_CALL_SITE.match(line) or next
+      recv, idx, rest = site.captures
+      guarded = (at.positive? && lines[at - 1].strip == '} else {' && OwnerCallDirect.guard_chain_classes(lines, at - 1, recv, slots)) || Set.new
+      direct = rest.scan(OWNER_DIRECT).to_set { |(o)| unescape(o) }
+      # The rest of the line holds no other string literal: registers, the block, the trailing comment.
+      owners = rest.scan(STRING_LITERAL).map { |(s)| unescape(s) }.grep(CLOSED_OWNER_RE)
+      covered = owners.all? do |o|
+        direct.include?(o) || (guarded.include?(o) && !o.end_with?('.singleton') && !subclassed?(o, subclassed))
+      end
+      next unless covered
+
+      found << idx.to_i
+    end
+    found
   end
 
   # Every class path something could subclass, conservatively: each
@@ -183,12 +222,14 @@ module StaticDispatchRegistrations
   # inside `Class.new(`, or anywhere in an `mrb_define_class*` call, in any
   # scanned source. A written path may be relative, so an owner counts as
   # subclassed when it equals one or ends with `::` plus one (`< Base` inside
-  # `RPG2k::Scene` blocks every `...::Base`).
-  def subclassed_paths(repo_root, superclass_of)
+  # `RPG2k::Scene` blocks every `...::Base`). closed_only: the closed binary's sources only, as outside_world_files
+  # reads them (the check scripts' `Class.new(klass)` fixtures are linked into no build). A whole-line Ruby comment
+  # is no code (`# ... Array<Game::Actor>` named a superclass).
+  def subclassed_paths(repo_root, superclass_of, closed_only: false)
     found = superclass_of.values.grep(String).to_set
-    ruby, native = outside_world_files(repo_root)
+    ruby, native = outside_world_files(repo_root, closed_only: closed_only)
     (closed_world_mrblib_srcs(repo_root, core_gems: nil) + ruby).each do |f|
-      text = File.read(f, encoding: 'BINARY')
+      text = File.read(f, encoding: 'BINARY').gsub(/^[ \t]*#[^\n]*/, '')
       text.scan(/(?:<\s*|Class\.new\(\s*)(?:::)?((?:[A-Z]\w*::)*[A-Z]\w*)/) { |(n)| found << n }
       # A superclass the scan cannot name (`Class.new(klass)`) could be any.
       found << ANY_CLASS if text.match?(/Class\.new\(\s*[a-z_@$]/)
@@ -197,11 +238,14 @@ module StaticDispatchRegistrations
       text = File.read(f, encoding: 'BINARY')
       next unless text.match?(DEFINE_CLASS)
 
-      # Native code names a Ruby superclass by string (`mrb_class_get(M,
-      # "Foo")`), possibly far from the define call: any capitalized string
-      # literal in a file that defines classes counts, as does every
-      # capitalized identifier in the define call itself.
-      text.scan(/#{DEFINE_CLASS}[^;]*/) { |call| call.scan(/\b([A-Z]\w*)\b/) { |(n)| found << n } }
+      # A define call's superclass is its last argument: every capitalized name in it counts. One that is no
+      # builtin class (BUILTIN_SUPERCLASS) may hold a superclass named by string (`mrb_class_get(M, "Foo")`) far
+      # from the call, so then any capitalized string literal in the file counts. The define call's own class name
+      # is not a superclass.
+      supers = define_class_superclasses(text)
+      supers.each { |arg| arg.scan(/\b([A-Z]\w*)\b/) { |(n)| found << n } }
+      next if supers.all? { |arg| arg.match?(BUILTIN_SUPERCLASS) }
+
       text.scan(/"([A-Z]\w*(?:::[A-Z]\w*)*)"/) { |(n)| found << n }
     end
     found
@@ -209,6 +253,35 @@ module StaticDispatchRegistrations
 
   ANY_CLASS = :any
   DEFINE_CLASS = /\bmrb_define_class(?:_under)?(?:_id)?\(/
+  # A superclass argument that is a builtin class: a field of mrb_state (`M->object_class`, `mrb->eStandardError_class`)
+  # or one of mruby's builtin-exception macros (E_STANDARD_ERROR, ...).
+  BUILTIN_SUPERCLASS = /\A(?:(?:M|mrb)->\w+_class|E_[A-Z_]+)\z/
+
+  # The last argument of every DEFINE_CLASS call in `text`, stripped (nil-free; an unbalanced call yields "").
+  def define_class_superclasses(text)
+    supers = []
+    pos = 0
+    while (m = DEFINE_CLASS.match(text, pos))
+      i = m.end(0)
+      depth = 1
+      arg_start = i
+      while i < text.length && depth.positive?
+        case text[i]
+        when '"', "'"
+          q = text[i]
+          i += 1
+          i += text[i] == '\\' ? 2 : 1 while i < text.length && text[i] != q
+        when '(' then depth += 1
+        when ')' then depth -= 1
+        when ',' then arg_start = i + 1 if depth == 1
+        end
+        i += 1
+      end
+      supers << (depth.zero? ? text[arg_start...(i - 1)].strip : '')
+      pos = m.end(0)
+    end
+    supers
+  end
 
   def subclassed?(owner, paths)
     paths.include?(ANY_CLASS) || paths.any? { |p| owner == p || owner.end_with?("::#{p}") }
@@ -655,7 +728,7 @@ module StaticDispatchRegistrations
       [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
     end
     ireps, registry, superclass_of, struct_owners = closed_world(repo_root, mrbc)
-    subclassed = subclassed_paths(repo_root, superclass_of)
+    subclassed = subclassed_paths(repo_root, superclass_of, closed_only: closed_only)
     # SYMBOL_USES (closed only): the Symbol literals that name a looked-up method, or nil (every one does).
     symbol_lookups = closed_only ? StaticDispatchSymbolUses.lookups(ireps) : nil
     send_ops = symbol_lookups ? SEND_OPS - [:LOADSYM] : SEND_OPS
@@ -1008,10 +1081,9 @@ module StaticDispatchRegistrations
 
   # Registered compiled entries (owner/name/entry/gem) no runtime lookup can
   # ever reach.
-  # CLOSED_OWNER_RE: the owners the closed list may unregister -- the engine's own (Game, RPG2k, RPG2k3, LCF), RGSS,
-  # and the singletons of those modules themselves (`Game.singleton`). Reopened core classes (Array, StringIO, ...)
-  # stay out: the core's own code calls their methods on values of every kind.
-  CLOSED_OWNER_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\.singleton\z|\z)/
+  # CLOSED_OWNER_RE (owner_call_direct.rb, whose emitter completes owner calls over the same owners): the owners the
+  # closed list may unregister.
+  CLOSED_OWNER_RE = OwnerCallDirect::CLOSED_OWNER_RE
 
   def owner_re(closed_only)
     closed_only ? CLOSED_OWNER_RE : NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE
