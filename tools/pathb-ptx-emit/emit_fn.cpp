@@ -47,6 +47,38 @@ const Entry *find_entry(const Entry *table, size_t n, const std::string &key) {
   return nullptr;
 }
 
+// Whether a slot of type slot can live in a register with the value of an access of type t: a 4- or 8-byte integer
+// (not a bool), a pointer or a float, the same type on both sides.
+bool register_slot_type(const Ty &t) {
+  if (t.kind == "ptr") return true;
+  if (t.kind == "int") return !t.is_bool && (t.size == 4 || t.size == 8);
+  if (t.kind == "float") return t.size == 4 || t.size == 8;
+  return false;
+}
+
+// The slot operands ($name) in x, and those that are the whole address of a load or store of the slot's type.
+void count_slot_uses(const Node &x, std::map<std::string, int> &all, std::map<std::string, int> &whole,
+                     const std::map<std::string, Ty> &types) {
+  if (x.kind == Node::Sym && x.sig == '$') all[x.text]++;
+  std::string h = head_of(x);
+  if ((h == "load" || h == "store") && x.items.size() >= 3) {
+    const Node &addr = x.items[2];
+    auto it = addr.kind == Node::Sym && addr.sig == '$' ? types.find(addr.text) : types.end();
+    if (it != types.end()) {
+      try {
+        Ty t = parse_type(&x.items[1]);
+        if (t.kind == it->second.kind && t.size == it->second.size && t.is_bool == it->second.is_bool) whole[addr.text]++;
+      } catch (const Refused &) {
+        // not the slot's type: the access stays a use of the address, and the slot is not promoted
+      }
+    }
+  }
+  for (const Node &c : x.items) count_slot_uses(c, all, whole, types);
+}
+
+// The inlined bodies nested in one another (--inline=device): a call past this depth stays a call.
+constexpr int kMaxInlineDepth = 4;
+
 // A special register name of the GPU (tid.x, ctaid.y, ...): the Ruby's special_register?.
 bool special_register(const std::string &name) {
   size_t dot = name.find('.');
@@ -243,6 +275,14 @@ void Fn::setup() {
         align = size;
       }
       slots[f.items[1].text] = static_cast<int>(alloc_frame(size, align));
+      if (g_promote_slots) {
+        // a slot of another type (an aggregate, say) is not a candidate, and its uses are not read as its type
+        try {
+          Ty t = parse_type(&f.items[2]);
+          if (register_slot_type(t)) slot_types_[f.items[1].text] = t;
+        } catch (const Refused &) {
+        }
+      }
     } else {
       body_.push_back(&f);
     }
@@ -255,7 +295,9 @@ void Fn::compile() {
   setup();
   bool printf_in_body = false;
   for (const Node *s : body_) printf_in_body = printf_in_body || contains_printf(*s);
-  if (frame_ > 0 || printf_in_body) {
+  // With --inline=device an inlined call takes its frame in this one (inline_call), so the frame pointer is set up for it.
+  sp_set_ = frame_ > 0 || printf_in_body || g_inline_device;
+  if (sp_set_) {
     sp = fresh("rd");
     prologue_.push_back("mov.u64 " + sp + ", __local_depot" + std::to_string(index_) + ";");
     prologue_.push_back("cvta.local.u64 " + sp + ", " + sp + ";");
@@ -286,6 +328,7 @@ void Fn::compile() {
       prologue_.push_back("ld.param." + ptx_type(ty) + " " + r + ", [" + pk + "];");
     }
   }
+  promote_slots(body_, slot_types_);
   for (const Node *s : body_) stmt(*s);
   if (body_.empty() || head_of(*body_.back()) != "return") emit_return();
 }
@@ -341,9 +384,9 @@ std::string Fn::text() const {
   if (count_of("f") > 0) out.push_back("  .reg .f32 %f<" + std::to_string(count_of("f")) + ">;");
   if (count_of("h") > 0) out.push_back("  .reg .b16 %h<" + std::to_string(count_of("h")) + ">;");
   if (count_of("fd") > 0) out.push_back("  .reg .f64 %fd<" + std::to_string(count_of("fd")) + ">;");
-  if (frame_ > 0) {
+  if (frame_ > 0 || sp_set_) {
     out.push_back("  .local .align " + std::to_string(frame_align_) + " .b8 __local_depot" + std::to_string(index_) + "[" +
-                  std::to_string(frame_) + "];");
+                  std::to_string(frame_ > 0 ? frame_ : 8) + "];");
   }
   for (const std::string &s : prologue_) out.push_back("  " + s);
   for (const std::string &s : lines) out.push_back(s);
@@ -542,7 +585,18 @@ void Fn::stmt(const Node &s) {
       emit("@" + q + " trap;");
     }
   } else if (h == "return") {
-    if (!ret) {
+    if (inline_depth_ > 0) {
+      // a return of an inlined body: the value is the call's register, and the code after the call comes next
+      if (inline_ret_) {
+        if (s.items.size() != 2) throw Refused("return without a value in an inlined function");
+        Operand v = operand(at(s, 1));
+        expect(*inline_ret_, v.ty);
+        if (!inline_dest_.empty()) emit("mov." + ret_bits(*inline_ret_) + " " + inline_dest_ + ", " + reg_of(v.text, v.ty) + ";");
+      } else if (s.items.size() > 1) {
+        throw Refused("return with a value in a void function");
+      }
+      emit("bra " + inline_end_ + ";");
+    } else if (!ret) {
       if (s.items.size() > 1) throw Refused("return with a value in a void function");
       emit_return();
     } else {
@@ -861,6 +915,10 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     expect(*ty, *callee->ret);
   }
   if (callee->sret && head_of(args[0]) != "sret") throw BadIR("call of " + cname + " without its sret argument");
+  if (g_inline_device && inline_depth_ < kMaxInlineDepth && inline_ok(callee)) {
+    inline_call(callee, x, dest);
+    return;
+  }
   int nc = ++ncall_;
   std::string c = "$call" + std::to_string(nc);
   emit("{");
@@ -928,6 +986,86 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
 // lowering of `T a[N];` when T's default constructor does something, as llama.cpp's mma tiles of half2 do). The count and
 // the element size are constants, the constructor is a function of the module, and the destructor is null (device code
 // has no exceptions to unwind): one direct call of the constructor per element, at ARRAY + i * SIZE.
+bool Fn::inline_ok(const Fn *callee) const {
+  if (callee->kernel || callee->sret) return false;
+  for (size_t k = 0; k < callee->params.size(); k++) {
+    if (callee->agg_params[k]) return false;
+    if (callee->params[k].kind == "int" && callee->params[k].is_bool) return false;
+  }
+  const Node *form = callee->form_.get();
+  std::unique_ptr<Node> loaded;
+  if (!form) {
+    loaded = callee->load_();
+    form = loaded.get();
+  }
+  for (const Node &f : form->items)
+    if (contains_printf(f)) return false;
+  return true;
+}
+
+void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
+  // The callee's body is read from its form here, since a callee compiled before this one has released its own.
+  const Node *form = callee->form_.get();
+  std::unique_ptr<Node> loaded;
+  if (!form) {
+    loaded = callee->load_();
+    form = loaded.get();
+  }
+  std::vector<const Node *> body;
+  for (size_t i = 2; i < form->items.size(); i++) {
+    std::string h = head_of(form->items[i]);
+    if (h != "ret" && h != "params" && h != "static" && h != "weak" && h != "slot") body.push_back(&form->items[i]);
+  }
+  // Each parameter is a register holding the argument, an operand of this function (the callee's registers are its own).
+  std::map<std::string, RegInfo> callee_regs;
+  std::vector<Node> args = tail(x, 3);
+  for (size_t k = 0; k < args.size(); k++) {
+    Operand o = operand(args[k]);
+    expect(callee->params[k], o.ty);
+    callee_regs["%" + std::to_string(k)] = RegInfo{reg_of(o.text, o.ty), callee->params[k]};
+  }
+  // The callee's frame is part of this one: its slots are rebased to the frame made here for the call.
+  const int base = callee->frame_ > 0 ? static_cast<int>(alloc_frame(callee->frame_, callee->frame_align_)) : 0;
+  std::map<std::string, int> callee_slots;
+  for (const auto &[name, off] : callee->slots) callee_slots[name] = off + base;
+  // This function's registers, slots and labels are set aside while the body is compiled.
+  std::map<std::string, RegInfo> caller_regs = std::exchange(regs, std::move(callee_regs));
+  std::map<std::string, int> caller_slots = std::exchange(slots, std::move(callee_slots));
+  std::map<std::string, RegInfo> caller_promoted = std::exchange(promoted, {});
+  promote_slots(body, callee->slot_types_);
+  std::map<std::string, std::string> caller_labels = std::exchange(named_labels_, {});
+  std::vector<std::pair<std::string, std::string>> caller_loops = std::exchange(loops_, {});
+  std::map<std::string, std::string> caller_fn_values = std::exchange(fn_values_, {});
+  std::string caller_dest = std::exchange(inline_dest_, dest);
+  std::string caller_end = std::exchange(inline_end_, new_label());
+  std::optional<Ty> caller_ret = std::exchange(inline_ret_, callee->ret);
+  inline_depth_++;
+  for (const Node *s : body) stmt(*s);
+  inline_depth_--;
+  label(inline_end_);
+  regs = std::move(caller_regs);
+  slots = std::move(caller_slots);
+  promoted = std::move(caller_promoted);
+  named_labels_ = std::move(caller_labels);
+  loops_ = std::move(caller_loops);
+  fn_values_ = std::move(caller_fn_values);
+  inline_dest_ = std::move(caller_dest);
+  inline_end_ = std::move(caller_end);
+  inline_ret_ = caller_ret;
+}
+
+void Fn::promote_slots(const std::vector<const Node *> &body, const std::map<std::string, Ty> &types) {
+  promoted.clear();
+  if (!g_promote_slots) return;
+  std::map<std::string, int> all, whole;
+  for (const Node *s : body) count_slot_uses(*s, all, whole, types);
+  for (const auto &[name, ty] : types) {
+    // every use of the slot is a whole load or store of its type: no address is taken, nothing is a part of it
+    if (!register_slot_type(ty) || whole[name] == 0 || all[name] != whole[name]) continue;
+    promoted[name] = RegInfo{fresh(reg_class(ty)), ty};
+  }
+}
+
 void Fn::vec_ctor(const Node &x) {
   if (x.items.size() != 8) throw Refused("__cxa_vec_ctor takes (array, count, size, constructor, destructor)");
   auto constant = [&](const Node &c, const char *what) {

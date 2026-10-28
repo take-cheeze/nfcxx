@@ -260,6 +260,8 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
   {
     printf 'nfcxx-cu-device-1\nsm %s ext %s\nopts:' "$sm" "$ext"; printf ' %q' "$@"
     printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-60000}"
+    printf 'inline %s\n' "${NFCXX_INLINE_DEVICE:-0}"
+    printf 'promote %s\n' "${NFCXX_PROMOTE_SLOTS:-1}"
     cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
     cache_sha < "$root/scripts/pathb-dump"; cache_sha < "$root/scripts/host-sys.sh"
     for f in "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" "$root/build/pathb-ptx-emit"; do
@@ -282,7 +284,12 @@ cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DE
   # group. Each group is one PTX module: $base.groups/gNNNN.ptx and its kernels in groups.txt.
   # The images are the copy's .incbin files: with -c they are kept beside the copy, which the link re-reads (cu_prepare).
   t=$(trace_start)
-  "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --int=gpu --groups-dir="$groups" \
+  # NFCXX_INLINE_DEVICE=1: the device functions a kernel calls are compiled into it (pathb-ptx-emit --inline=device).
+  local inl=()
+  if [ "${NFCXX_INLINE_DEVICE:-0}" = 1 ]; then inl=(--inline=device); fi
+  # The scalar frame slots live in registers (pathb-ptx-emit's default); NFCXX_PROMOTE_SLOTS=0 keeps them in the frame.
+  if [ "${NFCXX_PROMOTE_SLOTS:-1}" = 0 ]; then inl+=(--promote=off); fi
+  "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --int=gpu ${inl[@]+"${inl[@]}"} --groups-dir="$groups" \
     --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-60000} \
     ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
   trace_end "$t" "pathb-ptx-emit --emit: $(basename "$src") ($(ls "$groups"/g*.ptx | wc -l | tr -d ' ') groups)" cuda

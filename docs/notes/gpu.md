@@ -122,6 +122,15 @@ placeholders, and each device module is registered with the runtime.
   (`pathb-ptx-emit --int=gpu`, which the driver passes): plain `div`/`rem` (an unspecified value) and `shl`/`shr` (the
   count clamped to the width), as nvcc emits them, not the IR's checks that trap. llama.cpp's flash_attn_ext_vec takes
   `sequence % ne33` with ne33 == 0 when there is no mask and does not use the result (`intrinsics/int_gpu.cu`).
+- **Frame slots in registers** (`pathb-ptx-emit --promote=slots`, the default; `NFCXX_PROMOTE_SLOTS=0` turns it off): a
+  scalar local whose every use is a whole load or store of its type (a 4- or 8-byte integer, a pointer, a float) is a
+  register, not a frame slot. llama.cpp's mul_mat_vec_q goes from 117 to 71 registers per thread and about 45% faster
+  per launch, with its local loads and stores down 60-70%. Narrower integers and aggregates stay in the frame.
+- **Device helpers inlined** (`pathb-ptx-emit --inline=device`, opt-in: `NFCXX_INLINE_DEVICE=1`): a call of a module
+  function with no struct or bool parameter and no printf is compiled at the call, up to four levels deep
+  (`intrinsics/inline_device.cu`). On its own it did not speed up llama.cpp's kernels (the local-memory traffic stayed);
+  promotion is what makes the difference. Inlined kernels of llama.cpp's flash attention need `NFCXX_CUDA_MAX_PTX_LINES`
+  above the 60000 default.
 - **Partial aggregate initialization** of a local with constructors (`half2 s[8] = {{0.0f, 0.0f}}`): IL lowering
   makes only the constructor calls of the first element, and Path B zeroes the variable at its declaration first, as
   EDG's C back end does (`tests/pathb-qbe/cases/partial_init_ctor.cpp`).
