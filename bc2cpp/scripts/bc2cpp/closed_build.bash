@@ -50,10 +50,16 @@ rake_closed() {
 # Phase 1 builds the presym list the native return-kind table's analysis needs (analysis_headers.rb). That list only
 # needs every source to preprocess, so the compiled gems' outputs are empty stubs here (BC2CPP_STUB_GENERATION in
 # tools/bc2cpp/compiled_gems.rb) rather than a full bc2cpp run whose code phase 2 throws away.
-BC2CPP_STUB_GENERATION=1 rake_closed "$build_dir/closed/presym"
+# No lists yet, and none are needed: nothing here compiles core C or generates a registration.
+BC2CPP_STATIC_DISPATCH_LISTS=none BC2CPP_STUB_GENERATION=1 rake_closed "$build_dir/closed/presym"
 ruby "$root/scripts/bc2cpp/analysis_headers.rb" "$build_dir/closed"
 ruby "$root/scripts/bc2cpp/native_fn_kinds.rb" "$build_dir/closed" > "$build_dir/closed/analysis/fn-kinds.tsv"
 echo "wrote $build_dir/closed/analysis/fn-kinds.tsv"
+
+# STATIC_DISPATCH_LISTS: the names the closed build leaves out of its method tables are computed from this tree
+# (docs/bc2cpp-unregistered-methods.md), once the host mrbc exists. A file for the same sources is reused.
+BC2CPP_STATIC_DISPATCH_LISTS="$("$root/scripts/bc2cpp/static_dispatch_lists.bash" "$build_dir")"
+export BC2CPP_STATIC_DISPATCH_LISTS
 
 # Phase 2 regenerates the code with the table. rake does not track the variable, so
 # the generated sources are removed and rake writes them again; their objects follow.

@@ -762,7 +762,10 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     'SKIP_UNSUPPORTED' => '1',
     # BC2CPP_ENTRY: <symbol>_entry.h also goes to the build's include directory (the include path every host of this
     # libmruby already has), so `#include <bc2cpp_entry.hxx>` finds it with `__has_include`.
-    'BC2CPP_ENTRY_INCLUDE_DIR' => "#{spec.build.build_dir}/include"
+    'BC2CPP_ENTRY_INCLUDE_DIR' => "#{spec.build.build_dir}/include",
+    # STATIC_DISPATCH_LISTS: the proof's output for this tree (scripts/bc2cpp/static_dispatch_lists.bash). Passed on
+    # whatever it is, so an unset one reaches bc2cpp.rb as unset and stops the generation there.
+    'BC2CPP_STATIC_DISPATCH_LISTS' => ENV['BC2CPP_STATIC_DISPATCH_LISTS']
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
   env['BC2CPP_LOAD_WORLD'] = bc2cpp_load_world(spec) if ENV.fetch('BC2CPP_LOAD_COMPILE', 'defs') != 'off'
@@ -800,6 +803,9 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   FileUtils.mkdir_p(spec.build_dir)
   File.write(stamp, "#{shards}\n") unless File.exist?(stamp) && File.read(stamp) == "#{shards}\n"
   Rake::Task[generated].enhance([stamp])
+  # A changed list regenerates too: the registrations it drops are in the generated file.
+  lists = ENV['BC2CPP_STATIC_DISPATCH_LISTS']
+  Rake::Task[generated].enhance([lists]) if lists && lists != 'none' && File.file?(lists)
   symbol = File.basename(generated).delete_suffix('_gen.cpp')
   (1...shards).each do |index|
     src = ShardOutput.shard_path(spec.build_dir, symbol, index)

@@ -7,10 +7,13 @@
 # The host is built once (the first scenario, through trace_host.bash) and every later run calls it directly:
 # rebuilding it per map costs about 40 times what the 150-frame run does. Maps run JOBS at a time.
 #
+# It also holds the closed build's method table to scripts/bc2cpp/method_table_threshold.txt.
+#
 # Usage: scripts/bc2cpp/host_sweep.bash BUILD_DIR [GAME_DIR] [LOG_DIR]
 #   GAME_DIR  default data/Nepheshel206beta/Nepheshel206Rbeta (scripts/download/nepheshel.bash); copied, since
 #             saving writes into it.
 #   JOBS      maps run at once (default nproc).
+#   METHOD_TABLE  'skip' leaves out the method-table size check (a verify build).
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -70,6 +73,28 @@ if ! ls "$game" | grep -qi '^save'; then
   failed=1
 fi
 run load BC2CPP_HOST_FRAMES=900 BC2CPP_HOST_CONTINUE=1 BC2CPP_HOST_KEYS="$(taps 30 900 15)"
+
+# METHOD_TABLE_THRESHOLD: the closed build's method table may not grow past the recorded size. The lists behind it
+# are computed from the sources now, so this is what shows a table that grew (a name the proof could no longer
+# drop) instead of a diff in a committed list. Raising it is a deliberate edit of method_table_threshold.txt; a
+# smaller table asks for the file to be lowered so the gain stays recorded. METHOD_TABLE=skip leaves it out: a
+# verify build (BC2CPP_UNREGISTERED_VERIFY) registers a stub under every name the lists drop, so its table is larger.
+if [ "${METHOD_TABLE:-check}" = check ]; then
+  threshold_file="$root/scripts/bc2cpp/method_table_threshold.txt"
+  threshold=$(grep -E '^[0-9]+$' "$threshold_file" | head -1)
+  entries=$(BC2CPP_HOST_MT_COUNT=1 "$host" "$game" 1 2> /dev/null | sed -n 's/^TRACE_HOST method_table_entries=//p')
+  if [ -z "$threshold" ] || [ -z "$entries" ]; then
+    echo "method table: could not read the size ($entries) or the threshold ($threshold)"
+    failed=1
+  elif [ "$entries" -gt "$threshold" ]; then
+    echo "method table: $entries entries, over the recorded $threshold (scripts/bc2cpp/method_table_threshold.txt)"
+    failed=1
+  elif [ "$entries" -lt "$threshold" ]; then
+    echo "method table: $entries entries, under the recorded $threshold; lower scripts/bc2cpp/method_table_threshold.txt to $entries"
+  else
+    echo "method table: $entries entries (at the recorded threshold)"
+  fi
+fi
 
 map() {
   local id=$1 log=$logs/map-$1.log

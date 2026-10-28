@@ -50,6 +50,8 @@ module NomethodReviewedProbe
         'SKIP_UNSUPPORTED' => '1',
         'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_COLLECTION_EXPORTS' => '1',
         'BC2CPP_BUILD_GEMS' => Shellwords.join(closed_gems(root).map { |n, d| "#{n}=#{d}" }),
+        # The review is of NoMethod sites, which no registration the static dispatch lists drop creates or removes.
+        'BC2CPP_STATIC_DISPATCH_LISTS' => 'none',
       }
       world = closed_world_mrblib_srcs(root, core_gems: :canonical)
       Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), '--annotated', *world)

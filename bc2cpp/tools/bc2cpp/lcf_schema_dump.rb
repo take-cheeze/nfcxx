@@ -2,7 +2,7 @@
 
 # Prints the resolved LCF schema as JSON on stdout, for LcfSchemaOracle.
 # Loaded under CRuby only: schema.rb is plain data plus two
-# edition-dependent defaults that lcf.rb defines, so nothing here reflects on the running program.
+# edition-dependent Symbol defaults that lcf.rb resolves, so nothing here reflects on the running program.
 #
 # Usage: ruby lcf_schema_dump.rb path/to/mruby-lcf/mrblib [--roots]
 #   --roots prints { "LCF::Database" => "DATABASE", ... } instead: which schema constant each file class
@@ -24,11 +24,12 @@ def describe(fields, path, out)
     next unless field.is_a?(Hash) && field[:name]
 
     default = field[:default]
+    default = LCF.edition_default(default) if default.is_a?(Symbol)
     default = default.call if default.respond_to?(:call)
     node = "#{path}/#{field[:name]}"
     out << { path: node, id: id, name: field[:name].to_s, type: field[:type].to_s, has_default: field.key?(:default),
              default_class: field.key?(:default) ? default.class.to_s : nil, order: field[:order]&.map(&:to_s),
-             enums: field[:enums]&.keys, computed_default: field[:default].respond_to?(:call),
+             enums: field[:enums]&.keys, computed_default: field[:default].respond_to?(:call) || field[:default].is_a?(Symbol),
              has_elements: field.key?(:elements) }
     describe(field[:elements], node, out) if field[:elements]
   end
