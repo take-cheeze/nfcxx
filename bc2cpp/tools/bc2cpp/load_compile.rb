@@ -9,7 +9,8 @@
 #   residual   the mrblib the gem still loads as bytecode: every statement the compiler does not take, in the source
 #              order and on the original lines, so a backtrace still names the right line. It runs first.
 #   compiled   a generated function that the compiled gem's gem_init runs next, before it installs its compiled
-#              methods. It opens each body, in source order, and runs the statements the residual left out.
+#              methods. It opens each body, in source order, and runs the statements the residual left out: a byte
+#              program of those statements and one decoder (CLASS_PROGRAM), not a C++ call per statement.
 #
 # Moving a statement from before a residual statement to after it is sound when the residual one cannot observe it,
 # so a residual statement that reads a constant makes that constant's statement residual too (promotion), and so does
@@ -29,7 +30,7 @@ require_relative 'class_body_scan'
 module LoadCompile
   module_function
 
-  Item = Struct.new(:stmt, :role, :orig_role, :child, :def_key, :def_name, :dropped, :promoted, keyword_init: true)
+  Item = Struct.new(:stmt, :role, :orig_role, :child, :def_key, :def_name, :dropped, :promoted, :ordered, keyword_init: true)
   UBody = Struct.new(:body, :items, :parent, :header_simple, :forced, :skeleton, :name, :id, keyword_init: true)
   Result = Struct.new(:code, :ranges, :last_file, :marker, :stats, :bodies, :dropped, keyword_init: true)
 
@@ -169,8 +170,64 @@ module LoadCompile
     end
   end
 
+  # The method names a compiled send or alias defines or reads when it runs: `attr_writer :a` defines `a=`,
+  # `alias_method :b, :a` defines b and reads a. Visibility sends only read.
+  def taken_names(node)
+    return [node.new_name.unescaped, node.old_name.unescaped] if node.is_a?(Prism::AliasMethodNode)
+
+    given = (node.arguments&.arguments || []).filter_map { |a| a.unescaped if a.is_a?(Prism::SymbolNode) || a.is_a?(Prism::StringNode) }
+    case node.name.to_s
+    when 'attr', 'attr_reader' then given
+    when 'attr_writer' then given.map { |n| "#{n}=" }
+    when 'attr_accessor' then given.flat_map { |n| [n, "#{n}="] }
+    else given
+    end
+  end
+
+  # ORDER: the compiled load runs after every residual statement and the compiled gem installs the dropped defs after
+  # the load, so a compiled send or alias keeps the source order only against the defs that come before it and that it
+  # does not define over. A def of the same owner and name that comes later in the source (`alias_method :old, :sort!`
+  # above a redefined `def sort!`: the alias must hold the method that existed then) keeps the statement residual, in
+  # its place among the residual defs. A def that comes earlier, with a statement that defines the same name
+  # (`def a; end` then `attr_reader :a`), is kept too (`order_pins`), or the compiled gem would install it over the
+  # statement's. Sources are walked in the world's order: gems in order, files in order, statements in order.
+  def order!(roots)
+    seq = 0
+    defs = Hash.new { |h, k| h[k] = [] }
+    sends = []
+    roots.each do |root|
+      each_ubody(root) do |ub|
+        owner = ub.body.path.empty? ? 'Object' : ub.body.path
+        ub.items.each do |item|
+          seq += 1
+          defs[item.def_key] << seq if item.role == :def && item.def_key
+          sends << [owner, item, seq] if %i[send alias].include?(item.role)
+        end
+      end
+    end
+    sends.each do |owner, item, at|
+      keys = taken_names(item.stmt.node).map { |n| "#{owner}##{n}" }
+      next unless keys.any? { |k| defs[k].any? { |d| d > at } }
+
+      item.role = :residual
+      item.ordered = true
+    end
+    @order_pins = Set.new
+    sends.each do |owner, item, at|
+      next if item.ordered || !%w[attr attr_reader attr_writer attr_accessor alias_method].include?(item.stmt.node.is_a?(Prism::AliasMethodNode) ? 'alias_method' : item.stmt.node.name.to_s)
+
+      taken_names(item.stmt.node).each do |n|
+        key = "#{owner}##{n}"
+        @order_pins << key if defs[key].any? { |d| d < at }
+      end
+    end
+  end
+
+  def order_pins = @order_pins || Set.new
+
   # Fix the roles that must stay residual, over every root of the world (all gems), until nothing changes.
   def promote!(roots)
+    order!(roots)
     needed = Set.new
     seed = lambda do |ub|
       # The header of a body whose text may stay (it has a def, a residual statement or a header the compiler cannot
@@ -216,7 +273,8 @@ module LoadCompile
 
   # Symbols a compiled statement names as methods, by name only: they must exist when it runs.
   def pinned_names(roots)
-    names = Set.new
+    # A hook must exist when the statement it observes runs (HOOK_DEFS).
+    names = Set.new(HOOK_DEFS)
     roots.each do |root|
       each_ubody(root) do |ub|
         ub.items.each do |item|
@@ -243,7 +301,8 @@ module LoadCompile
         ub.items.each do |item|
           next unless item.role == :def
 
-          item.dropped = !item.def_key.nil? && drop_keys.include?(item.def_key) && !pinned.include?(item.def_name)
+          item.dropped = !item.def_key.nil? && drop_keys.include?(item.def_key) && !pinned.include?(item.def_name) &&
+                         !order_pins.include?(item.def_key)
         end
       end
     end
@@ -332,7 +391,9 @@ module LoadCompile
     SPLAT = 13
     PATH = 14
     TOP = 15
-    MIN_NODES = 4
+    CALL = 16
+    # A call's arguments are decoded into one array of this size.
+    MAX_CALL_ARGS = 8
 
     def initialize(strings)
       @strings = strings
@@ -340,7 +401,9 @@ module LoadCompile
 
     def data?(node)
       case node
-      when Prism::IntegerNode, Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SymbolNode,
+      # The decoder reads an Integer as a 32-bit zigzag varint.
+      when Prism::IntegerNode then ClassBodyScan::Pure::INT_RANGE.cover?(node.value)
+      when Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SymbolNode,
            Prism::ConstantReadNode then true
       when Prism::StringNode then !ClassBodyScan::Pure.heredoc?(node)
       when Prism::ConstantPathNode then node.parent.nil? || data?(node.parent)
@@ -348,20 +411,18 @@ module LoadCompile
       when Prism::ArrayNode then node.elements.all? { |e| e.is_a?(Prism::SplatNode) ? e.expression && data?(e.expression) : data?(e) }
       when Prism::HashNode then node.elements.all? { |e| e.is_a?(Prism::AssocNode) && data?(e.key) && data?(e.value) }
       when Prism::RangeNode then (node.left.nil? || data?(node.left)) && (node.right.nil? || data?(node.right))
-      when Prism::CallNode then node.name == :freeze && node.arguments.nil? && node.block.nil? && node.receiver && data?(node.receiver)
+      when Prism::CallNode then freeze_call?(node) || call?(node)
       else false
       end
     end
 
-    # Worth a blob: a container (or a frozen one) of at least MIN_NODES nodes.
-    def blob_root?(node)
-      return false unless node.is_a?(Prism::ArrayNode) || node.is_a?(Prism::HashNode) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::RangeNode)
+    def freeze_call?(node) = node.name == :freeze && node.arguments.nil? && node.block.nil? && node.receiver && data?(node.receiver)
 
-      data?(node) && count(node) >= MIN_NODES
-    end
-
-    def count(node)
-      1 + node.compact_child_nodes.sum { |c| count(c) }
+    # CALL_TAG: any other pure call (`Color.new(1, 2, 3, 4)`, `OTHER.merge(...)`): receiver, name, arguments in order,
+    # sent as the VM's OP_SEND would (ClassBodyScan::Pure.pure_call? has ruled out a block, a splat and a keyword).
+    def call?(node)
+      args = node.arguments&.arguments || []
+      ClassBodyScan::Pure.pure_call?(node) && args.size <= MAX_CALL_ARGS && data?(node.receiver) && args.all? { |a| data?(a) }
     end
 
     # The bytes of `node`.
@@ -409,8 +470,17 @@ module LoadCompile
         node.left ? encode(node.left, out) : out << NIL
         node.right ? encode(node.right, out) : out << NIL
       when Prism::CallNode
-        out << FREEZE
-        encode(node.receiver, out)
+        if freeze_call?(node)
+          out << FREEZE
+          encode(node.receiver, out)
+        else
+          args = node.arguments&.arguments || []
+          out << CALL
+          encode(node.receiver, out)
+          varint(index(node.name.to_s), out)
+          varint(args.size, out)
+          args.each { |a| encode(a, out) }
+        end
       else raise "LoadCompile: no blob encoding for #{node.class}"
       end
       out
@@ -432,13 +502,12 @@ module LoadCompile
     end
   end
 
-  # The pure-expression emitter. Appends C++ statements to `lines` and returns the C++ name of the value.
+  # The pure-expression emitter of the statements the program does not fold (legacy). Appends C++ statements to `lines` and returns the C++ name of the value.
   class Expr
-    def initialize(lines, counter, scope, blob = nil)
+    def initialize(lines, counter, scope)
       @lines = lines
       @counter = counter
       @scope = scope
-      @blob = blob
     end
 
     # The C++ expression of a node that is one call or immediate (no statements), or nil.
@@ -461,7 +530,6 @@ module LoadCompile
       if (expr = simple(node))
         return expr.start_with?('mrb_nil', 'mrb_true', 'mrb_false', 'mrb_fixnum', 'mrb_symbol_value') ? expr : temp(expr)
       end
-      return blob(node) if @blob&.blob_root?(node)
 
       case node
       when Prism::ConstantPathNode
@@ -477,14 +545,6 @@ module LoadCompile
       when Prism::CallNode then call(node)
       else raise "LoadCompile: no emitter for #{node.class}"
       end
-    end
-
-    def blob(node)
-      bytes = @blob.encode(node)
-      name = "t#{@counter[0] += 1}"
-      @lines << "mrb_value #{name};"
-      @lines << "{ static const unsigned char blob[] = {#{bytes.join(',')}}; const unsigned char* p = blob; #{name} = bc2cpp_ld_decode(M, &#{@scope}, &p); }"
-      name
     end
 
     def temp(expr)
@@ -537,39 +597,187 @@ module LoadCompile
     end
   end
 
-  # C++ of one body: a function that runs its compiled statements with `c` as the class. Returns the function name.
-  def emit_body(ub, ctx)
-    fn = "bc2cpp_ld_#{ctx[:count] += 1}"
-    lines = []
-    counter = [0]
-    lines << "static void #{fn}(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c) {"
-    lines << '  [[maybe_unused]] const bc2cpp_ld_scope here = {c, up};'
-    lines << '  [[maybe_unused]] const int ai = mrb_gc_arena_save(M);'
-    ub.items.each do |item|
-      stmt = item.stmt
-      where = "#{File.basename(stmt.file)}:#{stmt.line}"
-      body = []
-      case item.role
-      when :nested then emit_nested(item, ctx, body, counter)
-      when :send then emit_send(item, body, counter, ctx)
-      when :alias then emit_alias(item, body)
-      when :const, :ivar
-        before = body.size
-        v = Expr.new(body, counter, 'here', Blob.new(ctx[:strings])).emit(stmt.node.value)
-        allocated = body.size > before
-        helper = item.role == :const ? 'bc2cpp_ld_const_set' : 'bc2cpp_ld_ivar_set'
-        body << "#{helper}(M, c, #{cstr(stmt.node.name.to_s)}, #{v});"
-        # An immediate allocates nothing, so there is nothing to give back.
-        body << 'mrb_gc_arena_restore(M, ai);' if allocated
-      else next
+  # ---- the program -------------------------------------------------------------------------------------------
+
+  # CLASS_PROGRAM: the structure statements of the bodies, in source order, as bytes that one decoder
+  # (bc2cpp_ld_run, DECODER) runs. A call per statement was most of the load's code; a statement is a few bytes now.
+  # The low 3 bits of an op byte are the op:
+  #   0 END      leave this body
+  #   1 CLASS    name, then flags (bits 3-4: base 0 the body's own class, 1 Object, 2 an expression; bit 5: a
+  #              superclass expression follows), the base and the superclass, then the body's ops
+  #   2 MODULE   the same without a superclass
+  #   3 SCLASS   `class << self` (bits 3-7 zero), or FN (bit 3 set): a statement kept as C++ (hooks, below)
+  #   4 CONST    a run: its length, then a name and a value each, set in order (the engine's tables are runs)
+  #   5 IVAR     name, value
+  #   6 SEND     verb, argument count, then that many values: a send to the body's class (include, alias_method, ...)
+  #   7 SENDN    the same with Symbol arguments given as names alone (attr_*, private :a, ...)
+  # A name or a verb is an index into the string pool, a value is a Blob.
+  OP_END = 0
+  OP_CLASS = 1
+  OP_MODULE = 2
+  OP_SCLASS = 3
+  OP_CONST = 4
+  OP_IVAR = 5
+  OP_SEND = 6
+  OP_SENDN = 7
+  FN_FLAG = 8
+  # Sends are decoded into one array of this size.
+  MAX_SEND_ARGS = 64
+
+  # HOOKS: a def with one of these names runs when a statement the program folds is executed (a class with a
+  # superclass, an include, an attr or an alias), and it must already exist then. The statements such a world's
+  # defs could observe stay C++ statements of their own (`legacy?`), the defs are never dropped, and the hook sees
+  # the same state as before. No engine class defines one today.
+  HOOK_DEFS = %w[inherited included extended prepended append_features prepend_features extend_object method_added
+                 singleton_method_added method_removed singleton_method_removed].freeze
+  MIXIN_HOOKS = { 'include' => %w[included append_features], 'extend' => %w[extended extend_object],
+                  'prepend' => %w[prepended prepend_features] }.freeze
+
+  def hook_defs(roots)
+    names = Set.new
+    roots.each { |root| each_ubody(root) { |ub| ub.items.each { |i| names << i.def_name if i.role == :def && HOOK_DEFS.include?(i.def_name) } } }
+    names
+  end
+
+  # Whether the program must not fold this statement: it can run a hook the world defines.
+  def legacy?(item, ctx)
+    hooks = ctx[:hooks]
+    node = item.stmt.node
+    # A value the byte code has no tag for (a call with more than Blob::MAX_CALL_ARGS arguments).
+    return !Blob.new({}).data?(node.value) if %i[const ivar].include?(item.role)
+    return true if item.role == :send && send_args(node).size > MAX_SEND_ARGS
+    return false if hooks.empty?
+
+    case item.role
+    when :nested then node.is_a?(Prism::ClassNode) && !node.superclass.nil? && hooks.include?('inherited')
+    when :alias then hooks.any? { |h| h.end_with?('method_added') }
+    when :send
+      verb = node.name.to_s
+      if MIXIN_HOOKS.key?(verb) then MIXIN_HOOKS.fetch(verb).any? { |h| hooks.include?(h) }
+      else hooks.any? { |h| h.end_with?('method_added') }
       end
-      lines << "  { // #{where}"
-      body.each { |l| lines << "    #{l}" }
-      lines << '  }'
+    else false
     end
+  end
+
+  def send_args(node) = node.arguments&.arguments || []
+
+  # The bytes of the statements of `ub`, appended to `out`.
+  def program(ub, ctx, out)
+    blob = Blob.new(ctx[:strings])
+    run = []
+    flush = lambda do
+      next if run.empty?
+
+      out << OP_CONST
+      blob.varint(run.size, out)
+      run.each do |it|
+        blob.varint(blob.index(it.stmt.node.name.to_s), out)
+        blob.encode(it.stmt.node.value, out)
+      end
+      run.clear
+    end
+    ub.items.each do |item|
+      # What emits nothing (a def, a mode, a residual statement) does not end a run of constants.
+      next if %i[def mode residual].include?(item.role)
+
+      legacy = legacy?(item, ctx)
+      if item.role == :const && !legacy
+        run << item
+        next
+      end
+      flush.call
+      if legacy
+        out << (OP_SCLASS | FN_FLAG)
+        blob.varint(legacy_fn(item, ctx), out)
+        next
+      end
+      node = item.stmt.node
+      case item.role
+      when :nested then program_nested(item, ctx, blob, out)
+      when :ivar
+        out << OP_IVAR
+        blob.varint(blob.index(node.name.to_s), out)
+        blob.encode(node.value, out)
+      when :alias
+        out << OP_SENDN
+        blob.varint(blob.index('alias_method'), out)
+        blob.varint(2, out)
+        [node.new_name, node.old_name].each { |n| blob.varint(blob.index(n.unescaped), out) }
+      when :send then program_send(node, blob, out, ctx)
+      end
+    end
+    flush.call
+    out << OP_END
+  end
+
+  def program_nested(item, ctx, blob, out)
+    node = item.stmt.node
+    child = item.child
+    if node.is_a?(Prism::SingletonClassNode)
+      out << OP_SCLASS
+    else
+      path = node.constant_path
+      base = if path.is_a?(Prism::ConstantReadNode) then 0
+             elsif path.parent then 2
+             else 1
+             end
+      superclass = node.is_a?(Prism::ClassNode) && child.header_simple && node.superclass
+      out << ((node.is_a?(Prism::ClassNode) ? OP_CLASS : OP_MODULE) | (base << 3) | (superclass ? 0x20 : 0))
+      blob.varint(blob.index(path.name.to_s), out)
+      blob.encode(path.parent, out) if base == 2
+      blob.encode(node.superclass, out) if superclass
+    end
+    program(child, ctx, out)
+  end
+
+  def program_send(node, blob, out, ctx)
+    given = send_args(node)
+    ctx[:max_send] = [ctx[:max_send], given.size].max
+    names = !given.empty? && given.all? { |a| a.is_a?(Prism::SymbolNode) }
+    out << (names ? OP_SENDN : OP_SEND)
+    blob.varint(blob.index(node.name.to_s), out)
+    blob.varint(given.size, out)
+    given.each do |a|
+      if names then blob.varint(blob.index(a.unescaped), out)
+      elsif a.is_a?(Prism::StringNode)
+        # `private "x"`: a new unfrozen String, whatever the file's magic comment says.
+        out << Blob::STR
+        blob.varint(blob.index(a.unescaped), out)
+      else blob.encode(a, out)
+      end
+    end
+  end
+
+  # ---- legacy statements -------------------------------------------------------------------------------------
+
+  # A statement the program does not fold, as C++ of its own: a function the program's FN op calls with the body's
+  # scope and class. A class statement runs its body's program through bc2cpp_ld_run. These are the statements a
+  # hook could observe and the ones with a shape the bytes have no room for (a send of more than MAX_SEND_ARGS
+  # arguments, a call of more than MAX_CALL_ARGS): none in the engine today.
+  def legacy_fn(item, ctx)
+    # Reserved first: a class statement's body can hold statements of its own that are C++ too.
+    index = ctx[:legacy].size
+    ctx[:legacy] << nil
+    fn = "bc2cpp_ld_fn#{index}"
+    body = []
+    counter = [0]
+    case item.role
+    when :nested then emit_nested(item, ctx, body, counter)
+    when :send then emit_send(item, body, counter, ctx)
+    when :alias then emit_alias(item, body)
+    when :const, :ivar
+      value = Expr.new(body, counter, 'here').emit(item.stmt.node.value)
+      body << "#{item.role == :const ? 'mrb_const_set' : 'mrb_iv_set'}(M, mrb_obj_value(c), #{sym(item.stmt.node.name)}, #{value});"
+      body << 'mrb_gc_arena_restore(M, ai);'
+    end
+    lines = ["static void #{fn}(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c) {",
+             '  [[maybe_unused]] const bc2cpp_ld_scope here = {c, up};',
+             '  [[maybe_unused]] const int ai = mrb_gc_arena_save(M);']
+    body.each { |l| lines << "  #{l}" }
     lines << '}'
-    ctx[:fns] << lines.join("\n")
-    fn
+    ctx[:legacy][index] = lines.join("\n")
+    index
   end
 
   def emit_nested(item, ctx, body, counter)
@@ -580,7 +788,7 @@ module LoadCompile
       body << 'struct RClass* c2 = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));'
     else
       path = node.constant_path
-      ex = Expr.new(body, counter, 'here', Blob.new(ctx[:strings]))
+      ex = Expr.new(body, counter, 'here')
       base = if path.is_a?(Prism::ConstantReadNode) then 'mrb_obj_value(c)'
              elsif path.parent then ex.emit(path.parent)
              else 'mrb_obj_value(M->object_class)'
@@ -594,24 +802,18 @@ module LoadCompile
         body << "struct RClass* c2 = mrb_vm_define_module(M, #{base}, #{name});"
       end
     end
-    fn = emit_body(child, ctx)
-    body << "#{fn}(M, &here, c2);"
+    sub = []
+    program(child, ctx, sub)
+    name = "bc2cpp_ld_sub#{ctx[:subs].size}"
+    ctx[:subs] << "static const unsigned char #{name}[] = {#{sub.join(',')}};"
+    body << "bc2cpp_ld_run(M, &here, c2, #{name});"
     body << 'mrb_gc_arena_restore(M, ai);'
   end
 
   def emit_send(item, body, counter, ctx)
     node = item.stmt.node
-    given = node.arguments&.arguments || []
-    if !given.empty? && given.size <= 16 && given.all? { |a| a.is_a?(Prism::SymbolNode) }
-      # attr_*, private :a, alias_method :a, :b ...: the names are data, one call runs them.
-      names = given.map { |a| cstr(a.unescaped) }.join(', ')
-      body << "static const char* const names[] = {#{names}};"
-      body << "bc2cpp_ld_send_names(M, c, #{cstr(node.name.to_s)}, names, #{given.size});"
-      body << 'mrb_gc_arena_restore(M, ai);'
-      return
-    end
-    ex = Expr.new(body, counter, 'here', Blob.new(ctx[:strings]))
-    args = (node.arguments&.arguments || []).map do |a|
+    ex = Expr.new(body, counter, 'here')
+    args = send_args(node).map do |a|
       case a
       when Prism::SymbolNode then ex.temp("mrb_symbol_value(#{sym(a.unescaped)})")
       when Prism::StringNode then ex.temp("mrb_str_new(M, #{cstr(a.unescaped)}, #{a.unescaped.bytesize})")
@@ -652,22 +854,10 @@ module LoadCompile
       *out = mrb_iv_get(M, scope, name);
       return true;
     }
-    static void bc2cpp_ld_const_set(mrb_state* M, struct RClass* c, const char* name, mrb_value v) {
-      mrb_const_set(M, mrb_obj_value(c), mrb_intern_static(M, name, strlen(name)), v);
-    }
-    static void bc2cpp_ld_ivar_set(mrb_state* M, struct RClass* c, const char* name, mrb_value v) {
-      mrb_iv_set(M, mrb_obj_value(c), mrb_intern_static(M, name, strlen(name)), v);
-    }
     static mrb_value bc2cpp_ld_str(mrb_state* M, const char* s, size_t n, bool frozen) {
       mrb_value v = mrb_str_new(M, s, n);
       if (frozen) mrb_obj_freeze(M, v);
       return v;
-    }
-    // `obj.<verb>(:a, :b, ...)` with Symbol arguments, as an SSEND with self as the receiver: attr_*, private :a, ...
-    static void bc2cpp_ld_send_names(mrb_state* M, struct RClass* c, const char* verb, const char* const* names, int n) {
-      mrb_value av[16];
-      for (int i = 0; i < n; ++i) av[i] = mrb_symbol_value(mrb_intern_static(M, names[i], strlen(names[i])));
-      mrb_funcall_argv(M, mrb_obj_value(c), mrb_intern_static(M, verb, strlen(verb)), n, av);
     }
     static mrb_value bc2cpp_ld_const(mrb_state* M, const bc2cpp_ld_scope* scope, mrb_sym name) {
       mrb_value v;
@@ -708,7 +898,8 @@ module LoadCompile
       case 1: return mrb_true_value();
       case 2: return mrb_false_value();
       case 3: {
-        unsigned z = bc2cpp_ld_varint(p);
+        // 64 bits: the zigzag of -2**31 is 2**32 - 1, and z + 1 wraps in an unsigned.
+        const unsigned long long z = bc2cpp_ld_varint(p);
         return mrb_int_value(M, (z & 1) ? -(mrb_int)((z + 1) >> 1) : (mrb_int)(z >> 1));
       }
       case 4: {
@@ -764,7 +955,76 @@ module LoadCompile
         mrb_value base = bc2cpp_ld_decode(M, scope, p);
         return mrb_const_get(M, base, bc2cpp_ld_sym(M, bc2cpp_ld_varint(p)));
       }
+      case 16: {
+        // The receiver, the name, then the arguments, in that order.
+        mrb_value recv = bc2cpp_ld_decode(M, scope, p);
+        const mrb_sym name = bc2cpp_ld_sym(M, bc2cpp_ld_varint(p));
+        const unsigned n = bc2cpp_ld_varint(p);
+        mrb_value av[@MAX_CALL_ARGS@];
+        for (unsigned i = 0; i < n; ++i) av[i] = bc2cpp_ld_decode(M, scope, p);
+        return mrb_funcall_argv(M, recv, name, n, av);
+      }
       default: return mrb_const_get(M, mrb_obj_value(M->object_class), bc2cpp_ld_sym(M, bc2cpp_ld_varint(p)));
+      }
+    }
+    // CLASS_PROGRAM (tools/bc2cpp/load_compile.rb, program): the statements of one body, from `p` to its END, with
+    // `c` as the class and `up` as the scopes outside it; returns the byte after the END. What each statement does is
+    // what the VM does for it (mrb_vm_define_class/module, SETCONST, a send with the class as receiver), one at a
+    // time with the arena given back after each, so an exception or a GC sees the state the bytecode would leave.
+    static const unsigned char* bc2cpp_ld_run(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c, const unsigned char* p) {
+      const bc2cpp_ld_scope here = {c, up};
+      const int ai = mrb_gc_arena_save(M);
+      for (;;) {
+        const unsigned char b = *p++;
+        switch (b & 7) {
+        case 0: return p;
+        case 1: case 2: {
+          const mrb_sym name = bc2cpp_ld_sym(M, bc2cpp_ld_varint(&p));
+          const unsigned base_kind = (b >> 3) & 3;
+          mrb_value base = base_kind == 0 ? mrb_obj_value(c) : base_kind == 1 ? mrb_obj_value(M->object_class) : bc2cpp_ld_decode(M, &here, &p);
+          struct RClass* c2;
+          if ((b & 7) == 1) {
+            mrb_value super = (b & 0x20) ? bc2cpp_ld_decode(M, &here, &p) : mrb_nil_value();
+            c2 = mrb_vm_define_class(M, base, super, name);
+          } else {
+            c2 = mrb_vm_define_module(M, base, name);
+          }
+          p = bc2cpp_ld_run(M, &here, c2, p);
+          break;
+        }
+        case 3:
+    #ifdef BC2CPP_LD_FNS
+          if (b & 8) {
+            bc2cpp_ld_fn(M, up, c, bc2cpp_ld_varint(&p));
+            break;
+          }
+    #endif
+          p = bc2cpp_ld_run(M, &here, mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))), p);
+          break;
+        case 4:
+          for (unsigned n = bc2cpp_ld_varint(&p); n > 0; --n) {
+            const mrb_sym name = bc2cpp_ld_sym(M, bc2cpp_ld_varint(&p));
+            mrb_const_set(M, mrb_obj_value(c), name, bc2cpp_ld_decode(M, &here, &p));
+            mrb_gc_arena_restore(M, ai);
+          }
+          break;
+        case 5: {
+          const mrb_sym name = bc2cpp_ld_sym(M, bc2cpp_ld_varint(&p));
+          mrb_iv_set(M, mrb_obj_value(c), name, bc2cpp_ld_decode(M, &here, &p));
+          break;
+        }
+        default: {
+          const mrb_sym verb = bc2cpp_ld_sym(M, bc2cpp_ld_varint(&p));
+          const unsigned n = bc2cpp_ld_varint(&p);
+          mrb_value av[@MAX_SEND_ARGS@];
+          for (unsigned i = 0; i < n; ++i) {
+            av[i] = (b & 7) == 7 ? mrb_symbol_value(bc2cpp_ld_sym(M, bc2cpp_ld_varint(&p))) : bc2cpp_ld_decode(M, &here, &p);
+          }
+          mrb_funcall_argv(M, mrb_obj_value(c), verb, n, av);
+          break;
+        }
+        }
+        mrb_gc_arena_restore(M, ai);
       }
     }
   CPP
@@ -783,18 +1043,35 @@ module LoadCompile
     mine = roots.fetch(gem)
     files = world.fetch(gem)
     ranges = files.zip(mine).to_h { |file, root| [file, ranges_for(root)] }
-    ctx = { count: 0, fns: [], strings: {} }
-    entries = mine.map { |root| emit_body(root, ctx) }
+    ctx = { legacy: [], subs: [], strings: {}, hooks: hook_defs(all), max_send: 1 }
+    prog = []
+    # One program for the gem: the files' top-level statements in load order (each ends with its own END).
+    mine.each do |root|
+      program(root, ctx, prog)
+      prog.pop
+    end
+    prog << OP_END
     marker = "#{MARKER_PREFIX}#{symbol}"
     code = String.new(PRELUDE)
+    unless ctx[:legacy].empty?
+      code << "#define BC2CPP_LD_FNS 1\n"
+      code << "static void bc2cpp_ld_fn(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c, unsigned i);\n"
+    end
     code << string_pool(ctx[:strings])
-    code << DECODER
-    code << ctx[:fns].join("\n\n") << "\n\n"
+    code << DECODER.gsub('@MAX_SEND_ARGS@', ctx[:max_send].to_s).gsub('@MAX_CALL_ARGS@', Blob::MAX_CALL_ARGS.to_s)
+    code << ctx[:subs].join("\n") << "\n" unless ctx[:subs].empty?
+    code << ctx[:legacy].join("\n\n") << "\n\n" unless ctx[:legacy].empty?
+    unless ctx[:legacy].empty?
+      code << "static void bc2cpp_ld_fn(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c, unsigned i) {\n"
+      code << "  static void (* const fns[])(mrb_state*, const bc2cpp_ld_scope*, struct RClass*) = {#{ctx[:legacy].each_index.map { |i| "bc2cpp_ld_fn#{i}" }.join(', ')}};\n"
+      code << "  fns[i](M, up, c);\n}\n"
+    end
+    code << "static const unsigned char bc2cpp_ld_prog[] = {#{prog.join(',')}};\n"
     code << "static void bc2cpp_load_#{symbol}(mrb_state* M) {\n"
     code << "  // Only when the residual mrblib is what loaded: the full mrblib has done all of this.\n"
     code << "  if (!mrb_test(mrb_gv_get(M, #{sym(marker)}))) return;\n"
     code << "  const bc2cpp_ld_scope top = {M->object_class, nullptr};\n"
-    entries.each { |fn| code << "  #{fn}(M, &top, M->object_class);\n" }
+    code << "  bc2cpp_ld_run(M, &top, M->object_class, bc2cpp_ld_prog);\n"
     code << "}\n"
     # Defs only: nothing for the load to do, so no function and no marker.
     return Result.new(code: '', ranges: ranges, last_file: files.last, marker: nil, stats: stats(mine), bodies: mine,
@@ -823,7 +1100,9 @@ module LoadCompile
     offsets = [0]
     ordered.each { |str| offsets << offsets.last + str.bytesize + 1 }
     pool = ordered.empty? ? '""' : ordered.map { |str| "#{cstr(str)[0...-1]}\\000\"" }.join("\n  ")
-    "static const char bc2cpp_ld_pool[] =\n  #{pool};\nstatic const unsigned bc2cpp_ld_off[] = {#{offsets.join(', ')}};\n"
+    # 16 bits while the pool is smaller than that (the engine's are some 10 KB).
+    type = offsets.last < 2**16 ? 'unsigned short' : 'unsigned'
+    "static const char bc2cpp_ld_pool[] =\n  #{pool};\nstatic const #{type} bc2cpp_ld_off[] = {#{offsets.join(', ')}};\n"
   end
 
   def stats(roots)
@@ -848,10 +1127,10 @@ module LoadCompile
   def plan_path(out_dir, symbol) = File.join(out_dir, "#{symbol}_load.json")
 
   # BC2CPP_LOAD_COMPILE: `off` (no plan), `defs` (the residual drops the defs the stub proof lets go and nothing else:
-  # no load code, no marker) or `all` (statements compiled too). BC2CPP_LOAD_WORLD: {out_symbol => the gem's mrblib
+  # no load code, no marker) or `all` (the default: statements compiled too). BC2CPP_LOAD_WORLD: {out_symbol => the gem's mrblib
   # files, as the build loads them}; one build's compiled gems analyse the same world. Nil when off or no world.
   def plan_for_env(env, symbol:, drop_keys:)
-    mode = env.fetch('BC2CPP_LOAD_COMPILE', 'defs')
+    mode = env.fetch('BC2CPP_LOAD_COMPILE', 'all')
     raise "BC2CPP_LOAD_COMPILE: #{mode.inspect} is not off, defs or all" unless %w[off defs all].include?(mode)
     return nil if mode == 'off' || !env['BC2CPP_LOAD_WORLD']
 

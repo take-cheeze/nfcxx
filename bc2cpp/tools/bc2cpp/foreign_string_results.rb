@@ -12,7 +12,7 @@ module ForeignStringResults
     'mrbgems/mruby-complex/mrblib/complex.rb' => %w[inspect to_s 33f49419f99ed0094e0024b7ca280ad902986e04aa4ff2163d33aaa0f3f8f59f],
     'mrbgems/mruby-enum-chain/mrblib/chain.rb' => ['inspect', 'a46e4264354951cd19e3ed861dfbfb2b9ad20b9e58b5259cf6d80422a4ec3247'],
     'mrbgems/mruby-enumerator/mrblib/enumerator.rb' => ['inspect', 'da54cc883fb56a855c3a76625501182873aa8c43bbbf787ec8dd7958d72b622b'],
-    'mrbgems/mruby-io/mrblib/file.rb' => ['inspect', 'ffba94809b744837046b94304067e3f1ad1e555650a2507d56825556f795f5f3'],
+    'mrbgems/mruby-io/mrblib/file.rb' => ['inspect', '032de8f73926513294a9ea8f6e5cdbeaf11489377290298b2a902aeb3bf00cac'],
     'mrbgems/mruby-rational/mrblib/rational.rb' => %w[inspect to_s 0f773e69e017c487bd9f6a504b2db13226b50a6d8444bf86c1700a0c82810db7],
     'mrbgems/mruby-socket/mrblib/socket.rb' => ['inspect', '4b5b8edf257e496c42a834249cc0cf180bcffe49928eba9068e33867b32bedcf']
   }.freeze

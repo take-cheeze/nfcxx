@@ -62,6 +62,7 @@ require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
 require_relative 'owner_call_direct'
 require_relative 'core_private_ruby'
+require_relative 'core_enumerator_free'
 require_relative 'core_methods'
 require_relative 'core_native_candidates'
 require_relative 'native_owner_map'
@@ -302,8 +303,8 @@ module StaticDispatchRegistrations
       # The engine's own Ruby. Core mrblib stays an outside source here (its sends
       # and names are dynamic references: outside_world_tokens), as before it was compiled.
       ireps, root = compile_ireps(closed_world_mrblib_srcs(repo_root, core_gems: nil), 'static_dispatch_probe', tmp)
-      registry, superclass_of, _, _, _, _, struct_members = build_registry(ireps, root)
-      [ireps, registry, superclass_of, struct_members.keys]
+      tuple = build_registry(ireps, root)
+      [ireps, tuple[0], tuple[1], tuple[6].keys, tuple]
     end
   end
 
@@ -729,7 +730,7 @@ module StaticDispatchRegistrations
       out, err = fresh.fetch(gem)
       [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
     end
-    ireps, registry, superclass_of, struct_owners = closed_world(repo_root, mrbc)
+    ireps, registry, superclass_of, struct_owners, engine_tuple = closed_world(repo_root, mrbc)
     subclassed = subclassed_paths(repo_root, superclass_of, closed_only: closed_only)
     # SYMBOL_USES (closed only): the Symbol literals that name a looked-up method, or nil (every one does).
     symbol_lookups = closed_only ? StaticDispatchSymbolUses.lookups(ireps) : nil
@@ -892,7 +893,8 @@ module StaticDispatchRegistrations
       suffix_bases = text if built.empty?
     end
 
-    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }, registry, superclass_of) : nil
+    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }, registry, superclass_of,
+                                                engine_tuple, symbol_lookups) : nil
 
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
       closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups,
@@ -903,36 +905,45 @@ module StaticDispatchRegistrations
   # run-time registrations it removes]. Every Ruby
   # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`), whose method
   # bodies count while their names are reachable (LIVE_CORE) -- and every native source, with the generated code.
-  def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of)
+  def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of, engine_tuple, symbol_lookups)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
+    third = "#{File.expand_path(repo_root)}/3rd/"
+    core = core_files(repo_root, mrbc)
+    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core)
+    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
+    map = NativeOwnerMap.build(native)
+    private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
+                                           engine_tuple, symbol_lookups, repo_root)
+    [CoreNativeCandidates.candidates(entries, names, fragments),
+     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby).uniq.sort]
+  end
+
+  # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body
+  # (LIVE_CORE: a body counts once its name is reachable) and build_registry's tuple.
+  def core_files(repo_root, mrbc)
     third = "#{File.expand_path(repo_root)}/3rd/"
     # CLOSED_LINKED_ONLY: an unlinked gem's mrblib never loads there.
     unlinked = closed_unlinked_dirs(repo_root)
     core_ruby = (Dir["#{third}mruby/mrblib/*.rb"] + Dir["#{third}mruby/mrbgems/*/mrblib/**/*.rb"] +
                  BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{third}#{g}/mrblib/**/*.rb"] })
                 .map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }.sort
-    # Each file on its own, with the name of each method body (LIVE_CORE: a body counts once its name is reachable).
-    core = Dir.mktmpdir('bc2cpp_core_natives') do |tmp|
+    Dir.mktmpdir('bc2cpp_core_natives') do |tmp|
       core_ruby.each_with_index.map do |path, i|
         file_ireps, root = compile_ireps([path], "core_native_#{i}", tmp, mrbc: mrbc)
         body_of = {}
         owner_of = {}
-        registry, superclass_of = build_registry(file_ireps, root)
+        tuple = build_registry(file_ireps, root)
+        registry, superclass_of = tuple
         registry.each do |name, defs|
           defs.each do |d|
             body_of[d.irep] = name if d.irep
             owner_of[d.irep] = d.owner if d.irep
           end
         end
-        { ireps: file_ireps, body_of: body_of, owner_of: owner_of, registry: registry, superclass_of: superclass_of }
+        { ireps: file_ireps, body_of: body_of, owner_of: owner_of, registry: registry, superclass_of: superclass_of, tuple: tuple,
+          path: path }
       end
     end
-    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core)
-    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
-    map = NativeOwnerMap.build(native)
-    private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of)
-    [CoreNativeCandidates.candidates(entries, names, fragments),
-     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby).uniq.sort]
   end
 
   # CORE_PRIVATE_RUBY (core_private_ruby.rb): "Owner#name" of each Ruby-defined core method the build keeps as bytecode
@@ -940,7 +951,8 @@ module StaticDispatchRegistrations
   # method CoreMethods leaves interpreted whatever the name (mruby-enumerator's Fiber machinery, a lambda builder, a
   # refused one). The removed private methods' bodies stop counting as code that can run, so the scan is run again
   # without a private candidate the end of it rejects.
-  def private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of)
+  def private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of, engine_tuple,
+                              symbol_lookups, repo_root)
     registries = core.map { |file| file[:registry] } << engine_registry
     count = Hash.new(0)
     registries.each { |reg| reg.each { |name, defs| defs.each { |d| count["#{d.owner}##{name}"] += 1 if d.irep || d.kind } } }
@@ -953,18 +965,23 @@ module StaticDispatchRegistrations
       name.match?(shape) && (count[key] == 1 || !blind.include?(name))
     end
     private_keys = core.flat_map { |file| CorePrivateRuby.private_defs(file[:ireps], file[:owner_of]).keys }.uniq.select(&usable)
-    kept = core.flat_map do |file|
+    reasons = {}
+    core.each do |file|
       conditional = CoreDefs.conditional_def_labels(file[:ireps])
-      file[:registry].flat_map do |name, defs|
-        defs.filter_map do |d|
+      file[:registry].each do |name, defs|
+        defs.each do |d|
           next unless d.irep && CoreDefs.core_source?(file[:ireps].fetch(d.irep).file)
 
-          key = "#{d.owner}##{name}"
-          key if CoreMethods.exclusion_reason(d, file[:ireps], refused, conditional)
+          reason = CoreMethods.exclusion_reason(d, file[:ireps], refused, conditional)
+          reasons["#{d.owner}##{name}"] ||= reason if reason
         end
       end
-    end.uniq.select(&usable)
-    return [] if private_keys.empty? && kept.empty?
+    end
+    # ENUMERATOR_FREE: the mruby-enumerator methods are released by CoreEnumeratorFree's proof, not by their names (`each`,
+    # `zip` and `initialize` are spelled everywhere).
+    enumerator_keys = enumerator_free_keys(reasons, core, ireps, native, entries, map, engine_tuple, symbol_lookups, repo_root)
+    kept = reasons.keys.select(&usable)
+    return [] if private_keys.empty? && kept.empty? && enumerator_keys.empty?
 
     defined = Set.new
     registries.each { |reg| reg.each { |name, defs| defs.each { |d| defined << "#{d.owner}##{name}" } } }
@@ -983,17 +1000,66 @@ module StaticDispatchRegistrations
     loop do
       lookup = CorePrivateRuby::Lookup.new(private_keys.to_set { |key| key.split('#', 2).last }, owners, defines,
                                            kept.to_set { |key| key.split('#', 2).last })
-      names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, lookup: lookup, strip: strip)
+      names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, lookup: lookup, strip: strip,
+                                                        strip_generated: CorePrivateRuby.method(:strip_generated),
+                                                        exact_impls: true)
       rejected = private_keys.reject { |key| unreachable.call(key, names, fragments) }
       if rejected.empty?
         # `def Enumerator.produce` inside `class Enumerator` is registered under Enumerator::Enumerator.singleton, a path
         # the run-time removal does not find (bc2cpp_native_owner looks each segment up in the one before it).
-        keys = private_keys + kept.select { |key| unreachable.call(key, names, fragments) }
+        keys = private_keys + kept.select { |key| unreachable.call(key, names, fragments) } + enumerator_keys
         return keys.map { |key| key.sub(/\b([A-Z]\w*)::\1\b/, '\\1') }.uniq.sort
       end
 
       private_keys -= rejected
     end
+  end
+
+  # The "Owner#name" keys of the mruby-enumerator methods the build keeps as bytecode, when CoreEnumeratorFree proves that no
+  # Enumerator is ever made; none otherwise. +reasons+ maps each kept core method to why it stays interpreted. The result of
+  # the proof is kept in @enumerator_free (the report and the check read it).
+  def enumerator_free_keys(reasons, core, ireps, native, entries, map, engine_tuple, symbol_lookups, repo_root)
+    # Operators too (`Yielder#<<`): the proof is no name scan, so an operator is released as an identifier is.
+    keys = reasons.select { |_key, why| why.start_with?(CoreMethods::ENUMERATOR_REASON) }.keys
+    @enumerator_free = nil
+    return [] if keys.empty?
+
+    @enumerator_free = enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root)
+    return [] unless @enumerator_free.holds
+
+    # `alias enum_for to_enum` is a second table entry of the same body.
+    aliases = core.select { |file| file[:path].to_s.match?(CoreEnumeratorFree::GROUP_FILE) }
+                  .flat_map { |file| file[:tuple][12] }
+                  .filter_map { |site| "#{site[:owner]}##{site[:new]}" if keys.include?("#{site[:owner]}##{site[:old]}") }
+    keys + aliases
+  end
+
+  # CoreEnumeratorFree's proof over the build's world (see enumerator_free_keys).
+  def enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root)
+    macros = naming_macros(native)
+    inputs = CoreEnumeratorFree.inputs(
+      engine: { ireps: ireps, tuple: engine_tuple }, core: core, native: native, entries: CoreNativeCandidates.entries(native),
+      map: map, symbol_lookups: symbol_lookups, strip: method(:strip_c_comments),
+      tokens: ->(text, found) { native_name_tokens(text, found, macros) }, entry_name: CoreNativeCandidates::ENTRY_NAME,
+      implicit_names: ALWAYS_DYNAMIC | IMPLICIT_DISPATCH_NAMES.values, block_returns: declared_block_returns(repo_root)
+    )
+    CoreEnumeratorFree.prove(inputs)
+  end
+
+  # BLOCK_RETURNS: the `[T] ... { ... -> T } -> T` and `-> self` declarations of the signature files, by method name. Each is
+  # checked against every definition when the compiled gems are generated, and a false one aborts that run.
+  def declared_block_returns(repo_root)
+    require_relative 'bc2cpp'
+    loaded = RbsSignatures.load(RbsSignatures.dirs_from_env(repo_root), display_root: repo_root)
+    BlockReturns.from_signatures(loaded).reject(&:problem).group_by(&:name)
+  end
+
+  # The proof alone, for scripts/bc2cpp/core_enumerator_free_report.rb.
+  def enumerator_free_result(repo_root, mrbc)
+    ireps, _registry, _superclass_of, _owners, tuple = closed_world(repo_root, mrbc)
+    _ruby, native = outside_world_files(repo_root, closed_only: true)
+    enumerator_free_proof(core_files(repo_root, mrbc), ireps, native, NativeOwnerMap.build(native), tuple,
+                          StaticDispatchSymbolUses.lookups(ireps), repo_root)
   end
 
   # label => owner of the method each irep of +ireps+ belongs to (the method body itself, or the nearest one around a
@@ -1175,6 +1241,8 @@ module StaticDispatchRegistrations
 
   # WHY (scripts/bc2cpp/dynamic_names_report.rb): when set, the first reason each name became dynamic, by name.
   class << self
+    # The CoreEnumeratorFree::Result of the last core_excluded run (nil when it had nothing to prove).
+    attr_reader :enumerator_free
     attr_accessor :why
   end
 

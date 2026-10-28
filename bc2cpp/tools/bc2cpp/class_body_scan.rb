@@ -164,8 +164,10 @@ module ClassBodyScan
   # A value with no run-time input that the compiler can rebuild: nothing is evaluated, only allocated.
   def literal?(node)
     case node
-    when Prism::IntegerNode, Prism::FloatNode, Prism::StringNode, Prism::SymbolNode, Prism::NilNode,
-         Prism::TrueNode, Prism::FalseNode then true
+    # An Integer outside the 32-bit range is a bignum on the targets whose mrb_int is 32 bits wide and stays in the
+    # irep's literal pool (LCF::INT32_WRAP); the compiled load builds only what every target builds the same way.
+    when Prism::IntegerNode then Pure::INT_RANGE.cover?(node.value)
+    when Prism::FloatNode, Prism::StringNode, Prism::SymbolNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode then true
     when Prism::ParenthesesNode then node.body.nil? || (node.body.body.size == 1 && literal?(node.body.body.first))
     when Prism::ArrayNode then node.elements.all? { |e| literal?(e) }
     when Prism::HashNode then node.elements.all? { |e| e.is_a?(Prism::AssocNode) && literal?(e.key) && literal?(e.value) }

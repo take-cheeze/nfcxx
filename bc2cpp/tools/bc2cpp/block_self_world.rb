@@ -67,6 +67,15 @@ module BlockSelfWorld
     3rd/mruby/mrbgems/mruby-class-ext/src/class.c 3rd/mruby/mrbgems/mruby-metaprog/src/metaprog.c
     3rd/mruby/mrbgems/mruby-method/src/method.c 3rd/mruby/mrbgems/mruby-fiber/src/fiber.c
   ].freeze
+  # Symbol#to_proc's native body: it passes the block it is called with to the Symbol it closes over (a computed
+  # name), exactly the send symbol.rb used to make. It is held to the same proof, computed_send's, instead of the
+  # blanket native rule: the Symbols are the ones the program passes as blocks, and none may be a rebinder.
+  NATIVE_SYMBOL_PROC_FILE = '3rd/mruby/src/symbol.c'.freeze
+  # Hash#to_proc's native body spells `to_proc` once, as the name it registers (a definition, not a send), and sends a
+  # fixed `[]` to its Hash: no computed name and no block. That one registration line is cut before the native scan, so
+  # the rest of the file is held to the blanket rule.
+  NATIVE_HASH_PROC_FILE = '3rd/mruby/mrbgems/mruby-hash-ext/src/hash_ext.c'.freeze
+  NATIVE_HASH_PROC_ENTRY = /MRB_MT_ENTRY\(hash_to_proc,\s*MRB_SYM\(to_proc\),\s*MRB_ARGS_NONE\(\)\)/
   # mruby's API headers declare these functions; a declaration runs nothing.
   NATIVE_DECLARATION_DIRS = %w[3rd/mruby/include/].freeze
   NATIVE_SELF_RUNNERS = /\bmrb_(?:yield_with_class|yield_cont|obj_instance_eval|mod_module_eval|exec_irep|vm_run|vm_exec|top_run)\b/
@@ -508,12 +517,29 @@ module BlockSelfWorld
       end
     end
 
+    # The native Symbol#to_proc sends each Symbol the program passes as a block (symbol_block_names) to its first
+    # argument with the call's block; that is a computed-name send, proven when no such Symbol is a rebinder.
+    def scan_symbol_proc_native
+      names = symbol_block_names
+      if names == :unknown
+        @failures << "#{NATIVE_SYMBOL_PROC_FILE}: Symbol#to_proc sends a name it cannot prove"
+      elsif (bad = names & (INDIRECT_NAMES | REBIND_NAMES | FACTORY_SENDS.keys)).any?
+        @failures << "#{NATIVE_SYMBOL_PROC_FILE}: Symbol#to_proc sends a rebinder or computed-name sender (:#{bad.to_a.sort.join(', :')})"
+      end
+    end
+
     def scan_natives
       @native_paths.each do |path|
         rel = relative(File.expand_path(path))
         next if NATIVE_REBINDER_FILES.include?(rel) || NATIVE_DECLARATION_DIRS.any? { |dir| rel.start_with?(dir) }
 
+        if rel == NATIVE_SYMBOL_PROC_FILE
+          scan_symbol_proc_native
+          next
+        end
+
         text = File.read(path, encoding: 'BINARY').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
+        text = text.sub(NATIVE_HASH_PROC_ENTRY, '') if rel == NATIVE_HASH_PROC_FILE
         if (m = text.match(NATIVE_SELF_RUNNERS))
           @failures << "#{rel}: runs a Proc under a self it chooses (#{m[0]})"
         elsif (m = text.match(NATIVE_NAME_SPELLING))

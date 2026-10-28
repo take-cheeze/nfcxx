@@ -22,6 +22,9 @@ module CoreMethods
   # definition (bc2cpp.rb CORE_VISIBILITY).
   OPERATOR_NAMES = %w[+ - * / % ** & | ^ ~ << >> < <= > >= == != === <=> =~ !~ ! [] []= -@ +@ zero?].freeze
 
+  # The exclusion_reason of mruby-enumerator's methods; CoreEnumeratorFree decides whether the build may leave them out.
+  ENUMERATOR_REASON = 'mruby-enumerator'
+
   module_function
 
   # Admits an Enumerator method by its body alone, not by name: the body must come from
@@ -77,7 +80,7 @@ module CoreMethods
     irep = ireps.fetch(definition.irep)
     return 'refused (core_refused.txt)' if refused.include?(CoreMethods.key(definition))
     return 'conditional def' if conditional.include?(definition.irep)
-    return 'mruby-enumerator (Fiber machinery)' if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps)
+    return "#{ENUMERATOR_REASON} (Fiber machinery)" if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps)
     return 'builds a lambda' if CoreDefs.builds_lambda?(irep, ireps)
 
     'names Fiber' if CoreDefs.references_fiber?(irep, ireps)

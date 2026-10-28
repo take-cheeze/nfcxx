@@ -4,7 +4,7 @@
 # Core method facts declared in sig/bc2cpp. Host only, a few seconds:
 # 1. each fact file loads, and its loader rejects the malformed shapes it exists to keep out;
 # 2. the facts read from the RBS match the real 3rd/mruby sources (skipped, with a SKIP line, when the submodule is
-#    not checked out): the native registrations' owners and arities, the mrblib bodies, the Proc call_proc entries;
+#    not checked out): the native registrations' owners and arities, the mrblib bodies, the Proc proc_call entries;
 # 3. RbsSignatures does not read the fact files as program signatures;
 # 4. the hierarchy helpers the generator's ancestor tables come from.
 #
@@ -190,14 +190,13 @@ check.call('block iterators: Enumerable#select stays untyped (its elements are n
   check.call("block iterators: Hash declares each Enumerable entry it overrides (#{overridden.join(', ')})",
              overridden.all? { |name| CoreBlockIteratorSigs.results.fetch('Hash', {}).key?(name) })
 
-  proc_init = File.binread(File.join(MRUBY, 'src/proc.c'))[/^mrb_init_proc\(mrb_state \*mrb\)\n\{\n.*?^\}\n/m].to_s
+  proc_src = File.binread(File.join(MRUBY, 'src/proc.c'))
   proc_ext = File.binread(File.join(MRUBY, 'mrbgems/mruby-proc-ext/mrblib/proc.rb'))
   proc_ext_class = proc_ext[/^class Proc\n(.*?)^end\n/m, 1].to_s
   CoreFactSigs.proc_call_names.each do |name|
-    raw = proc_init.include?('MRB_METHOD_FROM_PROC(m, &call_proc);') &&
-          proc_init.match?(/mrb_define_method_raw\(mrb, pc, #{sym_patterns(name)}, m\);/)
+    raw = proc_src.match?(/MRB_MT_ENTRY\(proc_call,\s*#{sym_patterns(name)},/)
     ruby = proc_ext_class.match?(/^  def #{Regexp.escape(name)}\(\*args\)\n    call\(\*args\)\n  end\n/)
-    check.call("Proc calls: Proc##{name} is call_proc (src/proc.c) or `call(*args)` (mruby-proc-ext)", raw ^ ruby)
+    check.call("Proc calls: Proc##{name} is proc_call (src/proc.c) or `call(*args)` (mruby-proc-ext)", raw ^ ruby)
   end
 elsif ARGV.include?('--require-mruby')
   check.call('3rd/mruby is checked out (--require-mruby)', false)

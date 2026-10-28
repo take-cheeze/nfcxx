@@ -49,6 +49,14 @@ FILE_A = <<~'RUBY'
     LIST = %w[a b].freeze
     MAP = { a: 1, 'b' => [2, 3], 4 => (1..3) }.freeze
     EMPTY = [].freeze
+    # Integers: the 32-bit edges and a negative go through the constant table's varint; one outside the range stays
+    # bytecode (a bignum on a 32-bit mrb_int target) -- LCF::INT32_WRAP read through a truncated varint was
+    # 2147483648, and every negative number read from a file came out 2**31 - 3 instead of -3.
+    NEG = -3
+    EDGE_HI = 2147483647
+    EDGE_LO = -2147483648
+    WRAP = 0x1_0000_0000
+    SIGN_BIT = 0x8000_0000
     BIG = VERSION * 10 + 2
     TOP_MARK = ::Top::MARK + 1
     OBJ = Object.new.freeze
@@ -109,6 +117,15 @@ FILE_A = <<~'RUBY'
       def <=>(other) = a <=> other.a
     end
 
+    # ORDER: an alias holds the method that existed when it ran, and a def above an attr is overridden by it.
+    class Redef
+      def run = 1
+      alias_method :old_run, :run
+      def run = old_run + 1
+      def val = 5
+      attr_reader :val
+    end
+
     class Regd
       def self.tag(name) = (@tags ||= []) << name
       tag :one
@@ -137,7 +154,7 @@ RUBY
 # different mechanism (the equivalence adds them back public).
 DROP = %w[Object#helper_top Cb::Mixin#mixed Cb::Mixin#other_mixed Cb::Util.singleton#shout Cb::Base#initialize
           Cb::Base#helper Cb::Child#work Cb::Child#free_one Cb::Child.singleton#build Cb::WithStruct#<=>
-          Cb::Child#open_again].freeze
+          Cb::Child#open_again Cb::Redef#run Cb::Redef#val].freeze
 
 DUMP = <<~'RUBY'
   $bc2cpp_out = []
@@ -182,7 +199,10 @@ DUMP = <<~'RUBY'
   end
   seen = {}
   %w[Top Top2 Free Cb].each { |n| bc2cpp_walk(Object.const_get(n), seen) }
-  $bc2cpp_out << "top-level helper_top: #{Object.instance_methods(false).include?(:helper_top) || Object.private_instance_methods(false).include?(:helper_top)}"
+  if Object.const_defined?(:Cb)
+    $bc2cpp_out << "redef #{Cb::Redef.new.run} #{Cb::Redef.new.val.inspect}"
+    $bc2cpp_out << "top-level helper_top: #{Object.instance_methods(false).include?(:helper_top) || Object.private_instance_methods(false).include?(:helper_top)}"
+  end
   $bc2cpp_out.join("\n")
 RUBY
 
@@ -226,6 +246,119 @@ def graph_facts_check(suite, files, interpreted)
               facts['Cb::Mixin'] && facts.values.any? { |h| !h['exact'] })
 end
 
+Failed = Struct.new(:success?)
+
+# One fixture three ways (interpreted; residual + compiled load + the dropped defs added back; ungated: the full
+# mrblib and the load, which must be a no-op). Returns [status of the run, {label => lines}].
+def equivalence(suite, dir, build, symbol, result, files, residual, class_names)
+  work = File.join(dir, "eq_#{symbol}")
+  FileUtils.mkdir_p(work)
+  snippet = result.dropped.map do |d|
+    case d[:kind]
+    when :sclass then "class << #{d[:owner].delete_suffix('.singleton')}\n#{d[:source]}\nend\n"
+    when :module then "module #{d[:owner]}\n#{d[:source]}\nend\n"
+    when :class then "class #{d[:owner]}\n#{d[:source]}\nend\n"
+    else "#{d[:source]}\n"
+    end
+  end.join
+  File.write(File.join(work, 'load_gen.cpp'), result.code)
+  File.write(File.join(work, 'dump.rb'), DUMP.sub('%w[Top Top2 Free Cb]', "%w[#{class_names}]"))
+  File.write(File.join(work, 'snippet.rb'), snippet)
+  res_paths = files.map { |f| File.join(work, "#{File.basename(f)}.res.rb") }
+  files.zip(res_paths) { |f, out| File.write(out, residual.fetch(f)) }
+  File.write(File.join(work, 'main.cpp'), <<~CPP)
+    #include <mruby.h>
+    #include <mruby/compile.h>
+    #include <mruby/string.h>
+    #include <cstdio>
+    #include <fstream>
+    #include <iterator>
+    #include <string>
+    #include "load_gen.cpp"
+    static std::string slurp(const char* path) {
+      std::ifstream in(path, std::ios::binary);
+      return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    static mrb_value run(mrb_state* M, const std::string& code) {
+      mrb_value v = mrb_load_nstring(M, code.data(), code.size());
+      if (M->exc) { mrb_print_error(M); std::exit(2); }
+      return v;
+    }
+    static void emit(const char* label, mrb_state* M, const std::string& dump) {
+      mrb_value s = run(M, dump);
+      std::printf("== %s\\n%.*s\\n", label, (int)RSTRING_LEN(s), RSTRING_PTR(s));
+    }
+    int main(int, char** argv) {
+      std::string dump = slurp(argv[1]), snippet = slurp(argv[2]);
+      std::string a = slurp(argv[3]), b = slurp(argv[4]), ra = slurp(argv[5]), rb = slurp(argv[6]);
+      { mrb_state* M = mrb_open(); run(M, a); run(M, b); emit("interpreted", M, dump); mrb_close(M); }
+      { mrb_state* M = mrb_open(); run(M, ra); run(M, rb); bc2cpp_load_#{symbol}(M); run(M, snippet); emit("compiled", M, dump); mrb_close(M); }
+      { mrb_state* M = mrb_open(); run(M, a); run(M, b); bc2cpp_load_#{symbol}(M); emit("ungated", M, dump); mrb_close(M); }
+      return 0;
+    }
+  CPP
+  flags = %w[-std=c++17 -fexceptions -DMRB_USE_CXX_EXCEPTION -w] + Bc2cppFixtureRuntime.library_defines(build)
+  binary = File.join(work, 'fixture')
+  built = Bc2cppCxx.system(*flags, "-I#{work}", "-I#{build}/include", "-I#{ROOT_DIR}/3rd/mruby/include",
+                           File.join(work, 'main.cpp'), "#{build}/lib/libmruby.a", '-lm', '-o', binary)
+  suite.check("the #{symbol} fixture builds", built)
+  return [Failed.new(false), {}] unless built
+
+  out, status = Open3.capture2e(binary, File.join(work, 'dump.rb'), File.join(work, 'snippet.rb'), files[0], files[1],
+                                res_paths[0], res_paths[1])
+  suite.check("the #{symbol} fixture runs", status.success?)
+  puts out.lines.last(20).join unless status.success?
+  [status, Bc2cppFixtureRuntime.sections(out)]
+end
+
+HOOK_FILE_A = <<~'RUBY'
+  module Hk
+    LOG = []
+    module Tracked
+      def self.included(base) = LOG << "included #{base}"
+      def self.extended(base) = LOG << "extended #{base}"
+    end
+    class Base
+      def self.inherited(sub) = LOG << "inherited #{sub}"
+    end
+    class Kid < Base
+      include Tracked
+      extend Tracked
+      attr_accessor :a, :b
+      def go = 1
+    end
+    class Late < Kid; end
+  end
+RUBY
+
+# Statements the bytes have no room for: a call of 9 arguments (Blob::MAX_CALL_ARGS is 8), a send of 70 names.
+HOOK_FILE_B = <<~RUBY
+  module Hk
+    class Kid
+      NINE = [].push(1, 2, 3, 4, 5, 6, 7, 8, 9)
+      attr_reader #{(1..70).map { |i| ":w#{i}" }.join(', ')}
+      include Comparable
+    end
+    class Other < Base; end
+  end
+RUBY
+
+# HOOK_WORLD: a world that defines `inherited`, `included` and `extended`. The statements those hooks observe (a class
+# with a superclass, include and extend) are C++ statements of their own, the hook defs are never dropped, and the
+# order of what the hooks log is the interpreted one. `attr_*` has no hook here (no `method_added`), so it folds.
+def hook_world(dir)
+  paths = { 'fha.rb' => HOOK_FILE_A, 'fhb.rb' => HOOK_FILE_B }.to_h do |name, text|
+    path = File.join(dir, name)
+    File.write(path, text)
+    [path, text]
+  end
+  files = paths.keys
+  drop = %w[Hk::Kid#go Hk::Base.singleton#inherited Hk::Tracked.singleton#included].to_set
+  result = LoadCompile.plan({ 'h' => files }, gem: 'h', drop_keys: drop, symbol: 'fh')
+  residual = files.to_h { |f| [f, LoadCompile.apply(paths[f], result.ranges.fetch(f), marker: f == result.last_file ? result.marker : nil)] }
+  { result: result, files: files, residual: residual, paths: paths }
+end
+
 # One root over several files' scans (load order): what ClassWorld.build reads.
 def merge_roots(scans)
   root = scans.first
@@ -244,6 +377,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   residual = files.to_h { |f| [f, LoadCompile.apply(paths[f], result.ranges.fetch(f), marker: f == result.last_file ? result.marker : nil)] }
   res_a = residual[files[0]]
   res_b = residual[files[1]]
+  hk = hook_world(dir)
 
   def_keys = lambda do |text|
     names = []
@@ -276,10 +410,16 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   suite.check('every residual compiles with mrbc', compiles)
   original_defs = files.flat_map { |f| def_keys.call(paths[f]) }
   kept_defs = files.flat_map { |f| def_keys.call(residual[f]) }
-  dropped = DROP.select { |k| original_defs.include?(k) } - ['Cb::Base#helper', 'Cb::Child#free_one']
+  dropped = DROP.select { |k| original_defs.include?(k) } - ['Cb::Base#helper', 'Cb::Child#free_one', 'Cb::Redef#run', 'Cb::Redef#val']
   suite.check('the residual has exactly the defs that were not dropped', (original_defs - kept_defs).sort == dropped.sort)
   suite.check('a def a compiled statement names stays (protected :helper, alias_method)',
               kept_defs.include?('Cb::Base#helper') && kept_defs.include?('Cb::Child#free_one'))
+  suite.check('ORDER: an alias above a redefinition stays residual, and a def above an attr that redefines it stays',
+              res_a.include?('alias_method :old_run, :run') && kept_defs.count('Cb::Redef#run') == 2 &&
+              kept_defs.include?('Cb::Redef#val') && res_a.include?('attr_reader :val') == false)
+  suite.check('an Integer outside 32 bits stays residual; the edges and a negative are compiled',
+              res_a.include?('WRAP = 0x1_0000_0000') && res_a.include?('SIGN_BIT = 0x8000_0000') &&
+              !res_a.include?('NEG = -3') && !res_a.include?('EDGE_HI') && !res_a.include?('EDGE_LO'))
   suite.check('a residual statement that reads a constant keeps that constant in the residual (promotion)',
               res_a.include?('BASE_N = 5') && res_a.include?('TABLE = (0..BASE_N)') && !res_a.include?('PI = 3.25'))
   suite.check('an attr under `private` stays residual, in its place; a bare mode stays',
@@ -293,6 +433,20 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   suite.check('a superclass the residual names keeps its class (class Child < Base)', res_a.match?(/^\s*class Base\n/))
   suite.check('the marker closes the last file only', res_b.end_with?("#{result.marker} = true\n") && !res_a.include?(result.marker))
 
+  # CLASS_PROGRAM: the structure folds to bytes and one decoder; only what a hook or a shape forbids is C++ per statement.
+  suite.check('the program folds the structure: no per-statement class, send or constant code in the fixture load',
+              result.code.scan('mrb_intern_static(M, "').size == 1 && !result.code.include?('#define BC2CPP_LD_FNS') &&
+              result.code.scan('static const unsigned char bc2cpp_ld_prog[]').size == 1)
+  hk_code = hk[:result].code
+  hk_res = hk[:residual].values.join
+  suite.check('hooks: a class with a superclass, include and extend stay C++ statements (inherited, included, extended defined); ' \
+              'a send of more than 64 names and a call of 9 arguments too; attr_* and the module fold',
+              hk_code.scan(/^static void bc2cpp_ld_fn\d+/).size == 8 && hk_code.include?('#define BC2CPP_LD_FNS') &&
+              hk_code.include?('mrb_vm_define_class(M, mrb_obj_value(c)') && !hk_code.include?('"attr_accessor"') &&
+              hk_code.scan('"attr_reader"').size == 1)
+  suite.check('hooks: the hook defs are never dropped (the compiled load runs them)',
+              hk_res.include?('def self.inherited') && hk_res.include?('def self.included') && hk_res.include?('def go') == false)
+
   syntax = lambda do |code, label|
     build = Bc2cppFixtureRuntime.full_or_build
     next true unless build
@@ -303,83 +457,40 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     system('g++', *flags, "-I#{build}/include", "-I#{ROOT_DIR}/3rd/mruby/include", src, out: File::NULL, err: File::NULL)
   end
   suite.check('the generated C++ compiles', syntax.call(result.code, 'fixture'))
+  suite.check('the hook world\'s generated C++ compiles', syntax.call(hk_code, 'hook'))
 
   # --- equivalence -----------------------------------------------------------------------------------------
   build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
   if build.nil?
     puts '  SKIP load equivalence: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake and g++)'
   else
-    snippet = result.dropped.map do |d|
-      case d[:kind]
-      when :sclass then "class << #{d[:owner].delete_suffix('.singleton')}\n#{d[:source]}\nend\n"
-      when :module then "module #{d[:owner]}\n#{d[:source]}\nend\n"
-      when :class then "class #{d[:owner]}\n#{d[:source]}\nend\n"
-      else "#{d[:source]}\n"
-      end
-    end.join
-    File.write(File.join(dir, 'load_gen.cpp'), result.code)
-    File.write(File.join(dir, 'dump.rb'), DUMP)
-    File.write(File.join(dir, 'snippet.rb'), snippet)
-    res_paths = files.map { |f| File.join(dir, "#{File.basename(f)}.res.rb") }
-    File.write(File.join(dir, 'main.cpp'), <<~CPP)
-      #include <mruby.h>
-      #include <mruby/compile.h>
-      #include <mruby/string.h>
-      #include <cstdio>
-      #include <fstream>
-      #include <iterator>
-      #include <string>
-      #include "load_gen.cpp"
-      static std::string slurp(const char* path) {
-        std::ifstream in(path, std::ios::binary);
-        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-      }
-      static mrb_value run(mrb_state* M, const std::string& code) {
-        mrb_value v = mrb_load_nstring(M, code.data(), code.size());
-        if (M->exc) { mrb_print_error(M); std::exit(2); }
-        return v;
-      }
-      static void emit(const char* label, mrb_state* M, const std::string& dump) {
-        mrb_value s = run(M, dump);
-        std::printf("== %s\\n%.*s\\n", label, (int)RSTRING_LEN(s), RSTRING_PTR(s));
-      }
-      int main(int, char** argv) {
-        std::string dump = slurp(argv[1]), snippet = slurp(argv[4]);
-        std::string a = slurp(argv[2]), b = slurp(argv[3]), ra = slurp(argv[5]), rb = slurp(argv[6]);
-        { mrb_state* M = mrb_open(); run(M, a); run(M, b); emit("interpreted", M, dump); mrb_close(M); }
-        { mrb_state* M = mrb_open(); run(M, ra); run(M, rb); bc2cpp_load_fx(M); run(M, snippet); emit("compiled", M, dump); mrb_close(M); }
-        { mrb_state* M = mrb_open(); run(M, a); run(M, b); bc2cpp_load_fx(M); emit("ungated", M, dump); mrb_close(M); }
-        return 0;
-      }
-    CPP
-    flags = %w[-std=c++17 -fexceptions -DMRB_USE_CXX_EXCEPTION -w] + Bc2cppFixtureRuntime.library_defines(build)
-    binary = File.join(dir, 'fixture')
-    built = Bc2cppCxx.system(*flags, "-I#{dir}", "-I#{build}/include", "-I#{ROOT_DIR}/3rd/mruby/include",
-                             File.join(dir, 'main.cpp'), "#{build}/lib/libmruby.a", '-lm', '-o', binary)
-    suite.check('the fixture builds', built)
-    if built
-      out, status = Open3.capture2e(binary, File.join(dir, 'dump.rb'), files[0], files[1], File.join(dir, 'snippet.rb'),
-                                    res_paths[0], res_paths[1])
-      suite.check('the fixture runs', status.success?)
-      puts out.lines.last(20).join unless status.success?
-      sections = Bc2cppFixtureRuntime.sections(out)
-      interpreted = sections['interpreted'].to_a
-      compiled = sections['compiled'].to_a
-      ungated = sections['ungated'].to_a
-      File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'interpreted.txt'), interpreted.join("\n")) if ENV['BC2CPP_KEEP_DIR']
-      File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'compiled.txt'), compiled.join("\n")) if ENV['BC2CPP_KEEP_DIR']
-      suite.check('the dump saw the fixture (classes, constants, methods)',
-                  status.success? && interpreted.size > 60 && interpreted.any? { |l| l.include?('const BIG=32') })
-      unless compiled == interpreted
-        puts (interpreted - compiled).first(8).map { |l| "    only interpreted: #{l}" }
-        puts (compiled - interpreted).first(8).map { |l| "    only compiled:    #{l}" }
-      end
-      suite.check('residual + compiled load gives the interpreted classes, ancestors, constants and methods',
-                  !interpreted.empty? && compiled == interpreted)
-      graph_facts_check(suite, files, interpreted)
-      suite.check('a load without the residual marker is a no-op (the full mrblib is not loaded twice)',
-                  !interpreted.empty? && ungated == interpreted)
+    status, sections = equivalence(suite, dir, build, 'fx', result, files, residual, 'Top Top2 Free Cb')
+    interpreted = sections['interpreted'].to_a
+    compiled = sections['compiled'].to_a
+    ungated = sections['ungated'].to_a
+    File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'interpreted.txt'), interpreted.join("\n")) if ENV['BC2CPP_KEEP_DIR']
+    File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'compiled.txt'), compiled.join("\n")) if ENV['BC2CPP_KEEP_DIR']
+    suite.check('the dump saw the fixture (classes, constants, methods)',
+                status.success? && interpreted.size > 60 && interpreted.any? { |l| l.include?('const BIG=32') })
+    suite.check('residual + compiled load gives the interpreted classes, ancestors, constants and methods',
+                !interpreted.empty? && compiled == interpreted)
+    graph_facts_check(suite, files, interpreted)
+    suite.check('a load without the residual marker is a no-op (the full mrblib is not loaded twice)',
+                !interpreted.empty? && ungated == interpreted)
+
+    # Hooks and statements the bytes have no room for stay C++ statements of their own, in their place.
+    hk_status, hk_sections = equivalence(suite, dir, build, 'fh', hk[:result], hk[:files], hk[:residual], 'Hk')
+    hk_i = hk_sections['interpreted'].to_a
+    hk_c = hk_sections['compiled'].to_a
+    unless hk_c == hk_i
+      puts (hk_i - hk_c).first(8).map { |l| "    only interpreted: #{l}" }
+      puts (hk_c - hk_i).first(8).map { |l| "    only compiled:    #{l}" }
     end
+    suite.check('hook world: residual + compiled load gives the interpreted graph, hook log (order) and constants',
+                hk_status.success? && hk_i.size > 10 && hk_c == hk_i && hk_i.any? { |l| l.include?('inherited') && l.include?('included') })
+    suite.check('hook world: the hook log holds each event once, in source order',
+                hk_i.any? { |l| l.start_with?('  const LOG=') && l.index('inherited Hk::Kid') && l.index('included Hk::Kid') && l.index('extended Hk::Kid') &&
+                                 l.index('inherited Hk::Kid') < l.index('included Hk::Kid') && l.index('included Hk::Kid') < l.index('extended Hk::Kid') })
   end
 
   # defs mode: no compiled load runs, so no body may be deleted, and no code or marker is produced.
@@ -403,6 +514,22 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
       keys
     end.to_set
   end
+  # STAYS_BYTECODE: the statements of the engine's class bodies the compiled load leaves to the residual mrblib. A new
+  # one is a decision (compile it, fold it to data, or list it here with the reason), not something a refactor adds.
+  stays = {
+    'LCF::Schema::COMMON_EVENT' => 'read by the DATABASE hash below, which is residual',
+    'LCF::Schema::DATABASE' => 'nested hash holding the `elements:` lambdas (a lambda is bytecode)',
+    'LCF::Schema::MAP_UNIT' => 'the same, with lambdas',
+    'RGSS::Audio::EXTS' => 'read by EXT_SPELLINGS, which is residual',
+    'RGSS::Audio::EXT_SPELLINGS' => 'built by an `each` block',
+    'Game::State::SYSTEM_SFX_SAVE_FIELD' => 'built by an `each_with_object` block',
+    'LCF::INT32_MASK' => 'a bignum on a 32-bit mrb_int target: an irep literal',
+    'LCF::INT32_SIGN_BIT' => 'the same',
+    'LCF::INT32_WRAP' => 'the same',
+    'Array.alias_method sort!' => 'ORDER: holds the core sort!, a def of the same name follows',
+    'RGSS::Window.alias_method initialize' => 'ORDER: holds the native initialize, a def of the same name follows'
+  }
+  found = []
   gems.each do |gem, fs|
     r = LoadCompile.plan(gems, gem: gem, drop_keys: all_keys.fetch(gem), symbol: gem.delete_prefix('mruby-'))
     out_dir = File.join(dir, gem)
@@ -420,6 +547,16 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
       original_all.concat(def_keys.call(text.force_encoding(Encoding::UTF_8)))
       kept_all.concat(def_keys.call(res.dup.force_encoding(Encoding::UTF_8)))
     end
+    r.bodies.each do |root|
+      LoadCompile.each_ubody(root) do |ub|
+        ub.items.each do |i|
+          next unless i.role == :residual
+
+          node = i.stmt.node
+          found << (node.respond_to?(:name) && node.is_a?(Prism::ConstantWriteNode) ? "#{ub.body.path}::#{node.name}" : "#{ub.body.path}.#{node.is_a?(Prism::AliasMethodNode) ? 'alias' : node.name} #{LoadCompile.taken_names(node).last}")
+        end
+      end
+    end
     suite.check("#{gem}: every residual compiles with mrbc and keeps its line count", ok)
     pinned_kept = (original_all - kept_all).size
     suite.check("#{gem}: the residual lost the dropped defs and no other (#{pinned_kept} of #{original_all.size})",
@@ -430,6 +567,8 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
          "#{s[:defs_dropped]} defs dropped, #{s[:defs_kept]} kept, #{s[:promoted].to_i} constants promoted, " \
          "#{s[:role_residual]} residual statements"
   end
+  puts "    unlisted: #{found.sort - stays.keys}, missing: #{stays.keys.sort - found}" unless found.sort == stays.keys.sort
+  suite.check("the statements that stay bytecode are the #{stays.size} listed", found.sort == stays.keys.sort)
   # The engine's class graph from source: how much of it is exact (tools/bc2cpp/class_world.rb).
   engine = ClassWorld.build(gems.values.map { |fs| ClassBodyScan.scan(fs) })
   sum = ClassWorld.summary(engine)
