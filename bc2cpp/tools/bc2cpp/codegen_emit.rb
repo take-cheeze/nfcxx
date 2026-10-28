@@ -601,7 +601,8 @@ class CodeGen
         if NULLABLE_TYPES.include?(type)
           "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}, arg);\n"
         elsif type == :value
-          "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
+          "  bc2cpp_keep_old(M, ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)});\n" \
+            "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
             "  mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(self), arg);\n"
         else
           "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = #{ops[:unbox]}(arg);\n"
@@ -852,6 +853,7 @@ class CodeGen
       BC2CPP_HOT_INLINE static inline void bc2cpp_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value val) {
         struct RArray* a = mrb_ary_ptr(ary);
         if (mrb_likely((mrb_uint)n < (mrb_uint)ARY_LEN(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a))) {
+          bc2cpp_keep_old(M, ARY_PTR(a)[n]);
           ARY_PTR(a)[n] = val;
           mrb_field_write_barrier_value(M, (struct RBasic*)a, val);
           return;
@@ -869,6 +871,7 @@ class CodeGen
             mrb_array_p(rpl) && RARRAY_LEN(rpl) == len && RARRAY_PTR(rpl) != ARY_PTR(a))) {
           mrb_value* dst = ARY_PTR(a) + head;
           const mrb_value* src = RARRAY_PTR(rpl);
+          bc2cpp_keep_old_range(M, ary, head, len);
           for (mrb_int i = 0; i < len; i++) dst[i] = src[i];
           mrb_write_barrier(M, (struct RBasic*)a);
           return;

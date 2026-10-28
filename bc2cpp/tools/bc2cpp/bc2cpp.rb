@@ -1596,6 +1596,82 @@ if $PROGRAM_NAME == __FILE__
     #define mrb_ary_shift bc2cpp_mrb_ary_shift
     #define mrb_hash_delete_key bc2cpp_mrb_hash_delete_key
   CPP
+  # GC_KEEP_OVERWRITTEN: the same hole from the other side. A compiled register that read a slot (an ivar, a global,
+  # an element) still holds the value after the slot is overwritten or emptied, and by then that register is the only
+  # thing referencing it: `r = @a; @a = []; r` (Interpreter#take_move_route_requests) returns an Array nothing else
+  # holds, and the next GC step in the caller's loop sweeps it. The VM keeps the old value in a stack slot the
+  # collector scans. Every store compiled code makes into an existing slot therefore roots the value it replaces, in
+  # the arena, before it is unlinked (an immediate costs one tag test). That covers the stores the generator emits;
+  # a store a bytecode method or a core native makes by name (a VM SETIV, Hash#clear) is not seen here.
+  # BC2CPP_GC_KEEP_OVERWRITTEN=0 builds without it: scripts/bc2cpp/gc_root_check.rb proves the check fails then.
+  if ENV['BC2CPP_GC_KEEP_OVERWRITTEN'] == '0'
+    puts <<~'CPP'
+      #define BC2CPP_NO_GC_KEEP_OVERWRITTEN 1
+      static inline void bc2cpp_keep_old(mrb_state*, mrb_value) {}
+      static inline void bc2cpp_keep_old_range(mrb_state*, mrb_value, mrb_int, mrb_int) {}
+    CPP
+  else
+    puts <<~'CPP'
+      static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) {
+        if (!mrb_immediate_p(old)) mrb_gc_protect(M, old);
+      }
+      // The elements ary[head, len) an Array store is about to drop, with mrb_ary_splice's own clamping.
+      static inline void bc2cpp_keep_old_range(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len) {
+        if (!mrb_array_p(ary)) return;
+        mrb_int alen = RARRAY_LEN(ary);
+        if (head < 0) head += alen;
+        if (head < 0 || head >= alen || len <= 0) return;
+        if (len > alen - head) len = alen - head;
+        const mrb_value* p = RARRAY_PTR(ary) + head;
+        for (mrb_int i = 0; i < len; i++) bc2cpp_keep_old(M, p[i]);
+      }
+    CPP
+  end
+  puts <<~'CPP'
+    // Stores that look the old value up first. mrb_hash_fetch, not mrb_hash_get: a default proc must not run.
+    static inline void bc2cpp_iv_set(mrb_state* M, mrb_value obj, mrb_sym id, mrb_value v) {
+    #ifndef BC2CPP_NO_GC_KEEP_OVERWRITTEN
+      bc2cpp_keep_old(M, mrb_iv_get(M, obj, id));
+    #endif
+      mrb_iv_set(M, obj, id, v);
+    }
+    static inline void bc2cpp_gv_set(mrb_state* M, mrb_sym id, mrb_value v) {
+    #ifndef BC2CPP_NO_GC_KEEP_OVERWRITTEN
+      bc2cpp_keep_old(M, mrb_gv_get(M, id));
+    #endif
+      mrb_gv_set(M, id, v);
+    }
+    static inline void bc2cpp_hash_aset(mrb_state* M, mrb_value h, mrb_value k, mrb_value v) {
+    #ifndef BC2CPP_NO_GC_KEEP_OVERWRITTEN
+      if (mrb_hash_size(M, h) > 0) bc2cpp_keep_old(M, mrb_hash_fetch(M, h, k, mrb_nil_value()));
+    #endif
+      mrb_hash_set(M, h, k, v);
+    }
+    // mrb_ary_set without the root, for stores that only move values around inside a fresh temporary.
+    static inline void bc2cpp_raw_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value v) { mrb_ary_set(M, ary, n, v); }
+    static inline void bc2cpp_mrb_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value v) {
+      bc2cpp_keep_old(M, mrb_ary_entry(ary, n));
+      mrb_ary_set(M, ary, n, v);
+    }
+    static inline mrb_value bc2cpp_mrb_ary_splice(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len, mrb_value rpl) {
+      bc2cpp_keep_old_range(M, ary, head, len);
+      return mrb_ary_splice(M, ary, head, len, rpl);
+    }
+    static inline mrb_value bc2cpp_mrb_ary_clear(mrb_state* M, mrb_value ary) {
+      bc2cpp_keep_old_range(M, ary, 0, RARRAY_LEN(ary));
+      return mrb_ary_clear(M, ary);
+    }
+    static inline void bc2cpp_mrb_ary_replace(mrb_state* M, mrb_value ary, mrb_value other) {
+      bc2cpp_keep_old_range(M, ary, 0, RARRAY_LEN(ary));
+      mrb_ary_replace(M, ary, other);
+    }
+    #ifndef BC2CPP_NO_GC_KEEP_OVERWRITTEN
+    #define mrb_ary_set bc2cpp_mrb_ary_set
+    #define mrb_ary_splice bc2cpp_mrb_ary_splice
+    #define mrb_ary_clear bc2cpp_mrb_ary_clear
+    #define mrb_ary_replace bc2cpp_mrb_ary_replace
+    #endif
+  CPP
   # HOT_INLINE: the per-element Array helpers (bc2cpp_ary_entry/push/set, bc2cpp_getidx's front) are a few
   # instructions, but GCC's -O3 inliner drops them from large callers and pays a call per element. -Os builds
   # (the flash-bound boards) keep the compiler's choice. See docs/bc2cpp-hot-inline.md.

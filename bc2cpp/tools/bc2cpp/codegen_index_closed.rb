@@ -73,7 +73,7 @@ class CodeGen
                            'return mrb_ary_aset2_impl(mrb, self, vs[0], vs[1]); }',
                            "mrb_value\nmrb_ary_aset2_impl(mrb_state *mrb, mrb_value self, mrb_value v1, mrb_value v2)\n{"] },
       'Hash' => { file: 'src/hash.c', gem: nil, mt: 'mrb_hash_aset', test: 'mrb_hash_p(recv)',
-                  stmt: 'mrb_hash_set(M, recv, %<idx>s, %<val>s)', result: '%<val>s',
+                  stmt: 'bc2cpp_hash_aset(M, recv, %<idx>s, %<val>s)', result: '%<val>s',
                   needs: ['mrb_hash_aset(mrb_state *mrb, mrb_value self) { mrb_int argc = mrb_get_argc(mrb); ' \
                           'if (argc != 2) { mrb_argnum_error(mrb, argc, 2, 2); } ' \
                           'const mrb_value *argv = mrb_get_argv(mrb); mrb_value key = argv[0]; mrb_value val = argv[1]; ' \

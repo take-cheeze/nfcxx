@@ -95,7 +95,7 @@ class CodeGen
         if insn.op == :GETUPVAR
           "  r#{insn.reg} = *#{vname};\n"
         else
-          "  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
+          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
@@ -840,11 +840,11 @@ class CodeGen
         end
       when 'Hash'
         if exact
-          "#{INDEX_EXACT_NOTE}mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});\n  r#{d} = r#{val};\n"
+          "#{INDEX_EXACT_NOTE}bc2cpp_hash_aset(M, r#{d}, r#{idx_reg}, r#{val});\n  r#{d} = r#{val};\n"
         else
           <<~CPP
             if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-              mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
+              bc2cpp_hash_aset(M, r#{d}, r#{idx_reg}, r#{val});
               r#{d} = r#{val};
             } else {
               #{index_set_else_statement(d, idx_reg, val)}
@@ -869,7 +869,7 @@ class CodeGen
       # register). vm.c: `mrb_gv_set(mrb, irep->syms[b], regs[a])`.
       s = insn.regs.first
       name = insn.global_name
-      "  mrb_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
+      "  bc2cpp_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
     when :STOP
       ''
     when :NOP
