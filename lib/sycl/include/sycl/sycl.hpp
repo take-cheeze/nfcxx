@@ -2018,12 +2018,18 @@ template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_gro
   return op((T)init, exclusive_scan_over_group(sg, x, op));
 }
 
+// Two stages, as a GPU does it: the lanes of each sub-group reduce by butterfly (log2 of the sub-group size steps), the
+// first lane of each sub-group stores the partial, and every work-item combines the partials (one per sub-group, at most
+// the group size over the sub-group size). A group of 256 work-items does 16 partial reads per work-item, not 256.
 template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, Op op) {
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
-  *detail::scratch_slot<T, D>(lid) = x;
+  const size_t w = detail::sg_size();
+  T s = reduce_over_group(sub_group(lid, n), x, op);
+  const size_t nsg = (n + w - 1) / w;
+  if (lid % w == 0) *detail::scratch_slot<T, D>(lid / w) = s;
   group_barrier(g);
   T r = *detail::scratch_slot<T, D>(0);
-  for (size_t i = 1; i < n; i++) r = op(r, *detail::scratch_slot<T, D>(i));
+  for (size_t i = 1; i < nsg; i++) r = op(r, *detail::scratch_slot<T, D>(i));
   group_barrier(g);
   return r;
 }
