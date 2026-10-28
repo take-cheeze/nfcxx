@@ -26,6 +26,24 @@ __device__ int table_sum(int seed) {
   return t[0] + t[1] + t[2] + t[3];
 }
 
+struct Pair {
+  int a;
+  float b;
+};
+
+// a struct result (sret) and a struct argument (byval): the callee's changes to its copy stay in the copy
+__device__ __forceinline__ Pair make_pair(int x) {
+  Pair p;
+  p.a = x;
+  p.b = x * 0.5f;
+  return p;
+}
+
+__device__ __forceinline__ int bump_copy(Pair p) {
+  p.a += 1;
+  return p.a + (int)p.b;
+}
+
 __device__ __forceinline__ int warp_sum(int v) {
   for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
   return v;
@@ -37,13 +55,15 @@ __global__ void k(int *o, const int *in) {
   bump(&o[i], 7);
   o[32 + i] = (int)sum_to(in[i]) + table_sum(in[i]);
   o[64 + i] = warp_sum(in[i]);
+  Pair p = make_pair(in[i]);
+  o[96 + i] = bump_copy(p) + p.a;
 }
 
 static int host_pick(int x) { return x < 0 ? -x : (x > 100 ? 100 : x * 2); }
 
 int main() {
   const int n = 32;
-  int h_in[n], h[96], want = 0;
+  int h_in[n], h[128], want = 0;
   for (int i = 0; i < n; i++) h_in[i] = (i * 37) % 211 - 60;
   int *d_in, *d_o;
   cudaMalloc(&d_in, sizeof h_in);
@@ -62,6 +82,8 @@ int main() {
     if (h[i] != e0) want++;
     if (h[32 + i] != e1) want++;
     if (h[64 + i] != warp) want++;
+    int bc = (x + 1) + (int)(x * 0.5f) + x;  // bump_copy(make_pair(x)) + p.a, the copy's bump not seen by p.a
+    if (h[96 + i] != bc) want++;
   }
   printf("inline_device: %s, %d mismatches\n", cudaGetErrorString(err), want);
   cudaFree(d_in);

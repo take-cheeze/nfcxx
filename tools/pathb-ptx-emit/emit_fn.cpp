@@ -987,11 +987,9 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
 // the element size are constants, the constructor is a function of the module, and the destructor is null (device code
 // has no exceptions to unwind): one direct call of the constructor per element, at ARRAY + i * SIZE.
 bool Fn::inline_ok(const Fn *callee) const {
-  if (callee->kernel || callee->sret) return false;
-  for (size_t k = 0; k < callee->params.size(); k++) {
-    if (callee->agg_params[k]) return false;
+  if (callee->kernel) return false;
+  for (size_t k = 0; k < callee->params.size(); k++)
     if (callee->params[k].kind == "int" && callee->params[k].is_bool) return false;
-  }
   const Node *form = callee->form_.get();
   std::unique_ptr<Node> loaded;
   if (!form) {
@@ -1016,16 +1014,36 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
     std::string h = head_of(form->items[i]);
     if (h != "ret" && h != "params" && h != "static" && h != "weak" && h != "slot") body.push_back(&form->items[i]);
   }
-  // Each parameter is a register holding the argument, an operand of this function (the callee's registers are its own).
+  // The callee's frame is part of this one: its slots are rebased to the frame made here for the call.
+  const int base = callee->frame_ > 0 ? static_cast<int>(alloc_frame(callee->frame_, callee->frame_align_)) : 0;
+  // The parameters are registers of the callee's own. A scalar is the argument's register. A struct passed by value is
+  // copied into the callee's frame, as a call copies it into its parameter (its bytes are the callee's to change). The
+  // sret result is the object the caller gives: the callee writes it where the call would have, so its register is it.
   std::map<std::string, RegInfo> callee_regs;
   std::vector<Node> args = tail(x, 3);
   for (size_t k = 0; k < args.size(); k++) {
-    Operand o = operand(args[k]);
-    expect(callee->params[k], o.ty);
-    callee_regs["%" + std::to_string(k)] = RegInfo{reg_of(o.text, o.ty), callee->params[k]};
+    if (callee->sret && k == 0) {
+      Operand o = operand(at(args[k], 2));
+      callee_regs["%0"] = RegInfo{reg_of(o.text, o.ty), Ty{"ptr", -1, false, false}};
+    } else if (callee->agg_params[k]) {
+      const AggShape &sh = *callee->agg_params[k];
+      Operand o = operand(at(args[k], 2));
+      const std::string src = reg_of(o.text, o.ty);
+      const long long at_off = base + callee->agg_off_[k];
+      for (auto [off, w] : agg_pieces(sh.size, sh.align)) {
+        std::string t = fresh(piece_reg(w));
+        emit("ld." + piece_load(w) + " " + t + ", [" + src + "+" + std::to_string(off) + "];");
+        emit("st." + piece_store(w) + " [" + sp + "+" + std::to_string(at_off + off) + "], " + t + ";");
+      }
+      std::string r = fresh("rd");
+      emit("add.u64 " + r + ", " + sp + ", " + std::to_string(at_off) + ";");
+      callee_regs["%" + std::to_string(k)] = RegInfo{r, callee->params[k]};
+    } else {
+      Operand o = operand(args[k]);
+      expect(callee->params[k], o.ty);
+      callee_regs["%" + std::to_string(k)] = RegInfo{reg_of(o.text, o.ty), callee->params[k]};
+    }
   }
-  // The callee's frame is part of this one: its slots are rebased to the frame made here for the call.
-  const int base = callee->frame_ > 0 ? static_cast<int>(alloc_frame(callee->frame_, callee->frame_align_)) : 0;
   std::map<std::string, int> callee_slots;
   for (const auto &[name, off] : callee->slots) callee_slots[name] = off + base;
   // This function's registers, slots and labels are set aside while the body is compiled.
