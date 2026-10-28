@@ -724,7 +724,7 @@ class CodeGen
   # winner is not a single statically known bytecode method, which keeps the
   # `#error`.
   #
-  # Soundness differs from SUPER_TARGETS in one way that makes this stricter,
+  # Soundness differs from super_target's direct call in one way that makes this stricter,
   # not looser: OP_SUPER always forwards the current method's block, so the
   # target is called WITH this frame's block (super_block_arg), never with the
   # nil a compiled `_impl` has no way to invent. `super` with no block in
@@ -939,7 +939,7 @@ class CodeGen
 
     # (6) The same-named method on the registered superclass exists, is bytecode
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
-    # unobservable (no caller grep needed, unlike SUPER_TARGETS).
+    # unobservable (no caller scan needed, unlike SUPER_NO_CALLER_BLOCK).
     # super_reaches_superclass? rules out an included module in between.
     superclass = @superclass_of[owner_def.owner]
     return nil unless superclass.is_a?(String)
@@ -979,8 +979,7 @@ class CodeGen
   # call with NO block?
   #
   # A compiled `_impl` has no block parameter, so OP_SUPER's forwarded block
-  # would be dropped -- correct only when no caller ever passes one. It is derived here instead of from a
-  # hand-vetted allowlist (SUPER_TARGETS) re-checked by hand on every entry: a block reaches a method
+  # would be dropped -- correct only when no caller ever passes one. It is derived: a block reaches a method
   # only through a block-carrying send (SENDB/SSENDB, or `&expr` beside a plain
   # one), so if NO instruction in the build sends `name` with a block to a
   # receiver that can be an instance of this owner (or a subclass), none can
@@ -996,8 +995,6 @@ class CodeGen
     return false if ENV['BC2CPP_SUPER_DIRECT'] == '0'
 
     key = "#{owner_def.owner}##{owner_def.name}"
-    return true if SUPER_TARGETS.include?(key)
-
     # A whole-program memo like block_carrying_callers_of's, stored only once call facts can answer.
     return no_caller_passes_block?(owner_def) unless call_facts_enabled?
 
@@ -1130,7 +1127,7 @@ class CodeGen
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
-    # (3) The `n=*` splat shape, not SUPER_TARGETS' fixed `n=N`.
+    # (3) The `n=*` splat shape, not the fixed `n=N` super_target takes.
     return nil unless super_insn.pure_splat?
 
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)

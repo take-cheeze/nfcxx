@@ -982,9 +982,8 @@ class CodeGen
     when :SUPER
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
       # self as receiver and N args in R(a+1)..R(a+N), plus one register forwarding
-      # the current block. super_target applies the allowlist and calls the target
-      # with NO block (correct only where SUPER_TARGETS proves no caller passes
-      # one); module_super_call resolves the same call through an included
+      # the current block. super_target calls the target with NO block (correct
+      # only where SUPER_NO_CALLER_BLOCK proves no caller passes one); module_super_call resolves the same call through an included
       # module and forwards this frame's block, as OP_SUPER does.
        target_def = super_target(owner_def)
        d_reg = insn.reg

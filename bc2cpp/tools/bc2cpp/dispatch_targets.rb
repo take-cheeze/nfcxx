@@ -303,51 +303,6 @@ NATIVE_ARG_TARGETS = Set[
   'RPG2k::Scene::Battle#refresh_battle_list_arrows',
 ].freeze
 
-# SUPER_SUPPORT: human-vetted "Owner#name" allowlist for compiling
-# `super`/`super(...)`, because soundness depends on whole-program facts
-# compile_insn cannot re-derive per site:
-#   - Block forwarding: OP_SUPER always forwards the current method's block
-#     (vm.c L_SENDB_SYM; OP_SUPER is not in the SET_NIL_VALUE(regs[new_bidx])
-#     list), but a compiled `_impl` has no block parameter, so the forwarded
-#     block is nil. That is correct only if no caller of the listed method
-#     ever passes a block. Re-check this for every new entry.
-#   - No include/prepend between the caller and the superclass: OP_SUPER
-#     follows CI_TARGET_CLASS(ci - 1)->super, which passes through an ICLASS
-#     per included module, so a module's same-named method would win over
-#     "jump to @superclass_of". Now also checked mechanically.
-#   - The target must compile clean (super_target gates on compiles_clean?).
-# Supported shapes: `super parent` (SUPER n=1 into RPG2k::Scene::Base#
-# initialize) and bare `super` in a zero-parameter method (SUPER n=0).
-# Not here: `super` into a native method (RGSS::Bitmap::LoadError#initialize,
-# Object#method_missing/#respond_to_missing? on LCF::Sections/Array1D/File):
-# there is no bytecode `_impl` to call; see ZSUPER_NATIVE_TARGETS for those.
-# A zsuper in a method with parameters (`ARGARY` + `SUPER n=*`) is the other
-# shape, not matched by the `n=(\d+)` parse.
-SUPER_TARGETS = Set[
-  'RPG2k::Scene::Battle#initialize',
-  'RPG2k::Scene::DebugMenu#initialize',
-  'RPG2k::Scene::ItemMenu#initialize',
-  'RPG2k::Scene::Menu#initialize',
-  'RPG2k::Scene::ChipsetEditor#initialize',
-  'RPG2k::Scene::EquipMenu#initialize',
-  'RPG2k::Scene::GameOver#initialize',
-  'RPG2k::Scene::MapViewer#initialize',
-  'RPG2k::Scene::Order#initialize',
-  'RPG2k::Scene::SkillMenu#initialize',
-  'RPG2k::Scene::StatusMenu#initialize',
-  'RPG2k::Scene::Title#initialize',
-  'RPG2k3::Scene::Battle#update',
-  'RPG2k3::Scene::Battle#drive_battle_command',
-  'RPG2k3::Scene::Battle#enter_command_phase',
-  'RPG2k3::Scene::Battle#open_battle_options',
-  'RPG2k3::Scene::Battle#advance_actor',
-  'RPG2k3::Scene::Battle#prev_commandable_actor_index',
-  'RPG2k::Scene::Map#initialize',
-  'RPG2k::Scene::SaveLoad#initialize',
-  'RPG2k3::Scene::Battle#finish_round_animation',
-
-].freeze
-
 # ---------------------------------------------------------------------------
 # ZSUPER_NATIVE_SUPPORT: a bare `super` in a method WITH parameters, reaching a
 # native mruby method. mrbc's codegen_zsuper emits:
