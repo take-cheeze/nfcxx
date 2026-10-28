@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a SYCL program (lib/sycl, docs/notes/sycl-webgpu.md) for the host CPU or for WebGPU.
 #
-#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan|opencl|level-zero] [--keep-ir] [--ndebug] [-I dir] [-D mac] [--cxx=CMD]
+#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan|opencl|level-zero] [--keep-ir] [--ndebug] [--no-div-trap] [-I dir] [-D mac] [--cxx=CMD]
 #                         [-L dir] [-l lib] [-Wl,...] [-rpath dir] prog.cpp -o prog
 #
 # WebGPU (the default): a device pass compiles prog.cpp with -D__NFCXX_SYCL_DEVICE__ through the Path B front end
@@ -16,6 +16,8 @@
 # (obj.o.cl.spv, obj.o.man) and the object registers it, so objects linked into one program or one -shared library each
 # bring their kernels (lib/sycl/include/sycl/rt_image.hpp). Link the objects with the host compiler (nfcxx a.o b.o).
 # -shared and -rdynamic go to the host link like the other link flags.
+# --no-div-trap: the SPIR-V emitter divides by 1 where a division is undefined (a zero divisor, INT_MIN / -1) instead of
+# trapping, as a GPU gives a meaningless value there (ggml-sycl divides by a dimension of an absent mask, ne33 = 0).
 # --ndebug: -DNDEBUG on the device pass only (the host pass keeps its asserts). For a TU that reaches ggml.h's assert() from a
 # device-side function: the device pass refuses the call to the host __assert_fail, and the device has no assert to lower it to.
 # --cxx=CMD: the host compiler (default: $CXX; else nfcxx for WebGPU when built, else g++). The closure types' mangling and
@@ -25,13 +27,14 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/scripts/oneapi-env.sh"   # the oneAPI runtime libraries and OPENCL_INCLUDE, for the tools and compilers run below
-cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; ndebug=; opts=(); link=(); hostopts=(); std=c++17
+cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; ndebug=; opts=(); link=(); hostopts=(); std=c++17; emitopts=()
 while [ $# -gt 0 ]; do
   case $1 in
     --cpu) mode=cpu ;;
     --backend=*) backend=${1#--backend=}; case $backend in webgpu|vulkan|opencl|level-zero) ;; *) echo "sycl-build: --backend must be webgpu, vulkan, opencl or level-zero" >&2; exit 2 ;; esac ;;
     --keep-ir) keep=1 ;;
     --ndebug) ndebug=-DNDEBUG ;;
+    --no-div-trap) emitopts+=(--no-div-trap) ;;   # SPIR-V: a zero divisor divides by 1 instead of trapping (as a GPU's)
     --cxx=*) cxx=${1#--cxx=} ;;
     -std=*) std=${1#-std=} ;;
     -o) out=$2; shift ;;
@@ -77,10 +80,10 @@ absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 rc=0
 # the SPIR-V emitter: scripts/spirv-emit (NFCXX_SPIRV_EMITTER picks the Ruby script, its C++ port, or both compared)
 if [ $backend = vulkan ]; then
-  "$root/scripts/spirv-emit" --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
+  "$root/scripts/spirv-emit" ${emitopts[@]+"${emitopts[@]}"} --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
 elif [ $backend = opencl ] || [ $backend = level-zero ]; then
   # the Kernel-capability module (OpenCL 2.2): one kernel per entry point, the push block as its argument (OpenCL and Level Zero)
-  "$root/scripts/spirv-emit" --kernel-cl --manifest="$absout.man" "$absout.dev.ir" > "$absout.cl.spv" || rc=$?
+  "$root/scripts/spirv-emit" --kernel-cl ${emitopts[@]+"${emitopts[@]}"} --manifest="$absout.man" "$absout.dev.ir" > "$absout.cl.spv" || rc=$?
 else
   "$root/scripts/mrb" "$root/scripts/pathb-wgsl-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.wgsl" || rc=$?
 fi
