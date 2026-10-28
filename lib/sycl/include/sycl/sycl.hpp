@@ -2027,6 +2027,7 @@ template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_gro
 // the group size over the sub-group size). A group of 256 work-items does 16 partial reads per work-item, not 256.
 template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, Op op) {
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
+#if !defined(__NFCXX_SYCL_DEVICE__) || defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)
   const size_t w = detail::sg_size();
   T s = reduce_lanes((unsigned)w, x, op);   // the butterfly over the sub-group, on scalars: no sub_group object per call
   const size_t nsg = (n + w - 1) / w;
@@ -2036,6 +2037,16 @@ template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, 
   for (size_t i = 1; i < nsg; i++) r = op(r, *detail::scratch_slot<T, D>(i));
   group_barrier(g);
   return r;
+#else
+  // the WebGPU and Vulkan device compilers refuse the sub-group exchanges in this function (sycl-build exit 3), so the device
+  // reads every work-item's slot; the host and the OpenCL and Level Zero devices keep the two stages above
+  *detail::scratch_slot<T, D>(lid) = x;
+  group_barrier(g);
+  T r = *detail::scratch_slot<T, D>(0);
+  for (size_t i = 1; i < n; i++) r = op(r, *detail::scratch_slot<T, D>(i));
+  group_barrier(g);
+  return r;
+#endif
 }
 template <int D, class T, class V, class Op> inline T reduce_over_group(group<D> g, T x, V init, Op op) { return op((T)init, reduce_over_group(g, x, op)); }
 template <int D, class T> inline T group_broadcast(group<D> g, T x, id<D> from) {
