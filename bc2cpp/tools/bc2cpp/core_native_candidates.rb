@@ -31,7 +31,7 @@ require_relative 'diagnostics'
 module CoreNativeCandidates
   TABLE_CLASS = /^[ \t]*#[ \t]*define[ \t]+MRB_MT_CLASS[ \t]+(\w+)[ \t]*$/
   TABLE_END = /^[ \t]*#[ \t]*undef[ \t]+MRB_MT_CLASS\b/
-  ENTRY = /MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*MRB_(SYM|SYM_Q|SYM_B|SYM_E|OPSYM)\s*\(\s*(\w+)\s*\)/
+  ENTRY = /MRB_MT_ENTRY\s*\(\s*(\w+)\s*,\s*MRB_(SYM|SYM_Q|SYM_B|SYM_E|OPSYM)\s*\(\s*(\w+)\s*\)/
   SUFFIX = { 'SYM' => '', 'SYM_Q' => '?', 'SYM_B' => '!', 'SYM_E' => '=' }.freeze
   # A table entry's name operand defines the name; it is blanked before the source is scanned for lookups.
   ENTRY_NAME = /(MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*)(MRB_\w*SYM\w*\s*\(\s*\w+\s*\))/
@@ -39,7 +39,7 @@ module CoreNativeCandidates
 
   module_function
 
-  # Every table entry of `paths`: { mt_class:, kind:, cname:, name:, installed: } with `installed` the class the
+  # Every table entry of `paths`: { mt_class:, kind:, cname:, name:, fn:, installed: } with `installed` the class the
   # table's MRB_MT_INIT_ROM installs it into (NativeRomOwners), or nil when that is not MRB_MT_CLASS's own class.
   def entries(paths)
     paths.flat_map do |path|
@@ -59,9 +59,9 @@ module CoreNativeCandidates
         end
         next unless mt_class
 
-        line.scan(ENTRY) do |kind, cname|
+        line.scan(ENTRY) do |fn, kind, cname|
           name = kind == 'OPSYM' ? nil : cname + SUFFIX.fetch(kind)
-          out << { mt_class: mt_class, kind: kind, cname: cname, name: name, path: path,
+          out << { mt_class: mt_class, kind: kind, cname: cname, name: name, fn: fn, path: path,
                    installed: owners[table] == mt_class ? mt_class : nil }
         end
       end

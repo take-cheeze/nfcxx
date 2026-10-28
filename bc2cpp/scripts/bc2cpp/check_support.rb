@@ -5,6 +5,9 @@ require 'tmpdir'
 # Each compilation keeps its own source and output directory: fixture constants and core-method replacements
 # must never leak into another fixture's closed world.
 class FixtureCheck
+  # The host mrbc fixtures compile with (set by require_mrbc!).
+  attr_reader :mrbc
+
   def initialize(name)
     @name = name
     @checks = 0
