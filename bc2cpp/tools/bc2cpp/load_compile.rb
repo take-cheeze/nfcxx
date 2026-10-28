@@ -29,7 +29,7 @@ require_relative 'class_body_scan'
 module LoadCompile
   module_function
 
-  Item = Struct.new(:stmt, :role, :orig_role, :child, :def_key, :def_name, :dropped, :promoted, keyword_init: true)
+  Item = Struct.new(:stmt, :role, :orig_role, :child, :def_key, :def_name, :dropped, :promoted, :ordered, keyword_init: true)
   UBody = Struct.new(:body, :items, :parent, :header_simple, :forced, :skeleton, :name, :id, keyword_init: true)
   Result = Struct.new(:code, :ranges, :last_file, :marker, :stats, :bodies, :dropped, keyword_init: true)
 
@@ -169,8 +169,64 @@ module LoadCompile
     end
   end
 
+  # The method names a compiled send or alias defines or reads when it runs: `attr_writer :a` defines `a=`,
+  # `alias_method :b, :a` defines b and reads a. Visibility sends only read.
+  def taken_names(node)
+    return [node.new_name.unescaped, node.old_name.unescaped] if node.is_a?(Prism::AliasMethodNode)
+
+    given = (node.arguments&.arguments || []).filter_map { |a| a.unescaped if a.is_a?(Prism::SymbolNode) || a.is_a?(Prism::StringNode) }
+    case node.name.to_s
+    when 'attr', 'attr_reader' then given
+    when 'attr_writer' then given.map { |n| "#{n}=" }
+    when 'attr_accessor' then given.flat_map { |n| [n, "#{n}="] }
+    else given
+    end
+  end
+
+  # ORDER: the compiled load runs after every residual statement and the compiled gem installs the dropped defs after
+  # the load, so a compiled send or alias keeps the source order only against the defs that come before it and that it
+  # does not define over. A def of the same owner and name that comes later in the source (`alias_method :old, :sort!`
+  # above a redefined `def sort!`: the alias must hold the method that existed then) keeps the statement residual, in
+  # its place among the residual defs. A def that comes earlier, with a statement that defines the same name
+  # (`def a; end` then `attr_reader :a`), is kept too (`order_pins`), or the compiled gem would install it over the
+  # statement's. Sources are walked in the world's order: gems in order, files in order, statements in order.
+  def order!(roots)
+    seq = 0
+    defs = Hash.new { |h, k| h[k] = [] }
+    sends = []
+    roots.each do |root|
+      each_ubody(root) do |ub|
+        owner = ub.body.path.empty? ? 'Object' : ub.body.path
+        ub.items.each do |item|
+          seq += 1
+          defs[item.def_key] << seq if item.role == :def && item.def_key
+          sends << [owner, item, seq] if %i[send alias].include?(item.role)
+        end
+      end
+    end
+    sends.each do |owner, item, at|
+      keys = taken_names(item.stmt.node).map { |n| "#{owner}##{n}" }
+      next unless keys.any? { |k| defs[k].any? { |d| d > at } }
+
+      item.role = :residual
+      item.ordered = true
+    end
+    @order_pins = Set.new
+    sends.each do |owner, item, at|
+      next if item.ordered || !%w[attr attr_reader attr_writer attr_accessor alias_method].include?(item.stmt.node.is_a?(Prism::AliasMethodNode) ? 'alias_method' : item.stmt.node.name.to_s)
+
+      taken_names(item.stmt.node).each do |n|
+        key = "#{owner}##{n}"
+        @order_pins << key if defs[key].any? { |d| d < at }
+      end
+    end
+  end
+
+  def order_pins = @order_pins || Set.new
+
   # Fix the roles that must stay residual, over every root of the world (all gems), until nothing changes.
   def promote!(roots)
+    order!(roots)
     needed = Set.new
     seed = lambda do |ub|
       # The header of a body whose text may stay (it has a def, a residual statement or a header the compiler cannot
@@ -243,7 +299,8 @@ module LoadCompile
         ub.items.each do |item|
           next unless item.role == :def
 
-          item.dropped = !item.def_key.nil? && drop_keys.include?(item.def_key) && !pinned.include?(item.def_name)
+          item.dropped = !item.def_key.nil? && drop_keys.include?(item.def_key) && !pinned.include?(item.def_name) &&
+                         !order_pins.include?(item.def_key)
         end
       end
     end
@@ -340,7 +397,9 @@ module LoadCompile
 
     def data?(node)
       case node
-      when Prism::IntegerNode, Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SymbolNode,
+      # The decoder reads an Integer as a 32-bit zigzag varint.
+      when Prism::IntegerNode then ClassBodyScan::Pure::INT_RANGE.cover?(node.value)
+      when Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SymbolNode,
            Prism::ConstantReadNode then true
       when Prism::StringNode then !ClassBodyScan::Pure.heredoc?(node)
       when Prism::ConstantPathNode then node.parent.nil? || data?(node.parent)
@@ -545,8 +604,37 @@ module LoadCompile
     lines << "static void #{fn}(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c) {"
     lines << '  [[maybe_unused]] const bc2cpp_ld_scope here = {c, up};'
     lines << '  [[maybe_unused]] const int ai = mrb_gc_arena_save(M);'
+    blob = Blob.new(ctx[:strings])
+    # CONST_TABLE: a run of constants whose values are data is one table and one decoder call, not a call per
+    # constant (the engine's opcode and id tables are some 900 of these: a call costs ten times what a name and a
+    # tag cost). Only adjacent statements join, so the order of everything else is unchanged.
+    run = []
+    flush = lambda do
+      next if run.empty?
+
+      bytes = run.flat_map do |it|
+        [].tap do |out|
+          blob.varint(blob.index(it.stmt.node.name.to_s), out)
+          blob.encode(it.stmt.node.value, out)
+        end
+      end
+      first = run.first.stmt
+      lines << "  { // #{File.basename(first.file)}:#{first.line} (#{run.size} constants)"
+      lines << "    static const unsigned char tab[] = {#{bytes.join(',')}};"
+      lines << "    bc2cpp_ld_consts(M, &here, c, tab, #{run.size});"
+      lines << '  }'
+      run.clear
+    end
     ub.items.each do |item|
       stmt = item.stmt
+      if item.role == :const && blob.data?(stmt.node.value)
+        run << item
+        next
+      end
+      # What emits nothing (a def, a mode, a residual statement) does not end the run.
+      next if %i[def mode residual].include?(item.role)
+
+      flush.call
       where = "#{File.basename(stmt.file)}:#{stmt.line}"
       body = []
       case item.role
@@ -567,6 +655,7 @@ module LoadCompile
       body.each { |l| lines << "    #{l}" }
       lines << '  }'
     end
+    flush.call
     lines << '}'
     ctx[:fns] << lines.join("\n")
     fn
@@ -708,7 +797,8 @@ module LoadCompile
       case 1: return mrb_true_value();
       case 2: return mrb_false_value();
       case 3: {
-        unsigned z = bc2cpp_ld_varint(p);
+        // 64 bits: the zigzag of -2**31 is 2**32 - 1, and z + 1 wraps in an unsigned.
+        const unsigned long long z = bc2cpp_ld_varint(p);
         return mrb_int_value(M, (z & 1) ? -(mrb_int)((z + 1) >> 1) : (mrb_int)(z >> 1));
       }
       case 4: {
@@ -765,6 +855,16 @@ module LoadCompile
         return mrb_const_get(M, base, bc2cpp_ld_sym(M, bc2cpp_ld_varint(p)));
       }
       default: return mrb_const_get(M, mrb_obj_value(M->object_class), bc2cpp_ld_sym(M, bc2cpp_ld_varint(p)));
+      }
+    }
+    // CONST_TABLE: `n` constants of the scope `c`, each a name (pool index) and a value, set in order as the VM's
+    // SETCONST would, with the arena given back after each.
+    static void bc2cpp_ld_consts(mrb_state* M, const bc2cpp_ld_scope* scope, struct RClass* c, const unsigned char* p, unsigned n) {
+      const int ai = mrb_gc_arena_save(M);
+      for (unsigned i = 0; i < n; ++i) {
+        const mrb_sym name = bc2cpp_ld_sym(M, bc2cpp_ld_varint(&p));
+        mrb_const_set(M, mrb_obj_value(c), name, bc2cpp_ld_decode(M, scope, &p));
+        mrb_gc_arena_restore(M, ai);
       }
     }
   CPP
@@ -848,10 +948,10 @@ module LoadCompile
   def plan_path(out_dir, symbol) = File.join(out_dir, "#{symbol}_load.json")
 
   # BC2CPP_LOAD_COMPILE: `off` (no plan), `defs` (the residual drops the defs the stub proof lets go and nothing else:
-  # no load code, no marker) or `all` (statements compiled too). BC2CPP_LOAD_WORLD: {out_symbol => the gem's mrblib
+  # no load code, no marker) or `all` (the default: statements compiled too). BC2CPP_LOAD_WORLD: {out_symbol => the gem's mrblib
   # files, as the build loads them}; one build's compiled gems analyse the same world. Nil when off or no world.
   def plan_for_env(env, symbol:, drop_keys:)
-    mode = env.fetch('BC2CPP_LOAD_COMPILE', 'defs')
+    mode = env.fetch('BC2CPP_LOAD_COMPILE', 'all')
     raise "BC2CPP_LOAD_COMPILE: #{mode.inspect} is not off, defs or all" unless %w[off defs all].include?(mode)
     return nil if mode == 'off' || !env['BC2CPP_LOAD_WORLD']
 

@@ -49,6 +49,14 @@ FILE_A = <<~'RUBY'
     LIST = %w[a b].freeze
     MAP = { a: 1, 'b' => [2, 3], 4 => (1..3) }.freeze
     EMPTY = [].freeze
+    # Integers: the 32-bit edges and a negative go through the constant table's varint; one outside the range stays
+    # bytecode (a bignum on a 32-bit mrb_int target) -- LCF::INT32_WRAP read through a truncated varint was
+    # 2147483648, and every negative number read from a file came out 2**31 - 3 instead of -3.
+    NEG = -3
+    EDGE_HI = 2147483647
+    EDGE_LO = -2147483648
+    WRAP = 0x1_0000_0000
+    SIGN_BIT = 0x8000_0000
     BIG = VERSION * 10 + 2
     TOP_MARK = ::Top::MARK + 1
     OBJ = Object.new.freeze
@@ -109,6 +117,15 @@ FILE_A = <<~'RUBY'
       def <=>(other) = a <=> other.a
     end
 
+    # ORDER: an alias holds the method that existed when it ran, and a def above an attr is overridden by it.
+    class Redef
+      def run = 1
+      alias_method :old_run, :run
+      def run = old_run + 1
+      def val = 5
+      attr_reader :val
+    end
+
     class Regd
       def self.tag(name) = (@tags ||= []) << name
       tag :one
@@ -137,7 +154,7 @@ RUBY
 # different mechanism (the equivalence adds them back public).
 DROP = %w[Object#helper_top Cb::Mixin#mixed Cb::Mixin#other_mixed Cb::Util.singleton#shout Cb::Base#initialize
           Cb::Base#helper Cb::Child#work Cb::Child#free_one Cb::Child.singleton#build Cb::WithStruct#<=>
-          Cb::Child#open_again].freeze
+          Cb::Child#open_again Cb::Redef#run Cb::Redef#val].freeze
 
 DUMP = <<~'RUBY'
   $bc2cpp_out = []
@@ -182,6 +199,7 @@ DUMP = <<~'RUBY'
   end
   seen = {}
   %w[Top Top2 Free Cb].each { |n| bc2cpp_walk(Object.const_get(n), seen) }
+  $bc2cpp_out << "redef #{Cb::Redef.new.run} #{Cb::Redef.new.val.inspect}"
   $bc2cpp_out << "top-level helper_top: #{Object.instance_methods(false).include?(:helper_top) || Object.private_instance_methods(false).include?(:helper_top)}"
   $bc2cpp_out.join("\n")
 RUBY
@@ -276,10 +294,16 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   suite.check('every residual compiles with mrbc', compiles)
   original_defs = files.flat_map { |f| def_keys.call(paths[f]) }
   kept_defs = files.flat_map { |f| def_keys.call(residual[f]) }
-  dropped = DROP.select { |k| original_defs.include?(k) } - ['Cb::Base#helper', 'Cb::Child#free_one']
+  dropped = DROP.select { |k| original_defs.include?(k) } - ['Cb::Base#helper', 'Cb::Child#free_one', 'Cb::Redef#run', 'Cb::Redef#val']
   suite.check('the residual has exactly the defs that were not dropped', (original_defs - kept_defs).sort == dropped.sort)
   suite.check('a def a compiled statement names stays (protected :helper, alias_method)',
               kept_defs.include?('Cb::Base#helper') && kept_defs.include?('Cb::Child#free_one'))
+  suite.check('ORDER: an alias above a redefinition stays residual, and a def above an attr that redefines it stays',
+              res_a.include?('alias_method :old_run, :run') && kept_defs.count('Cb::Redef#run') == 2 &&
+              kept_defs.include?('Cb::Redef#val') && res_a.include?('attr_reader :val') == false)
+  suite.check('an Integer outside 32 bits stays residual; the edges and a negative are compiled',
+              res_a.include?('WRAP = 0x1_0000_0000') && res_a.include?('SIGN_BIT = 0x8000_0000') &&
+              !res_a.include?('NEG = -3') && !res_a.include?('EDGE_HI') && !res_a.include?('EDGE_LO'))
   suite.check('a residual statement that reads a constant keeps that constant in the residual (promotion)',
               res_a.include?('BASE_N = 5') && res_a.include?('TABLE = (0..BASE_N)') && !res_a.include?('PI = 3.25'))
   suite.check('an attr under `private` stays residual, in its place; a bare mode stays',
@@ -403,6 +427,22 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
       keys
     end.to_set
   end
+  # STAYS_BYTECODE: the statements of the engine's class bodies the compiled load leaves to the residual mrblib. A new
+  # one is a decision (compile it, fold it to data, or list it here with the reason), not something a refactor adds.
+  stays = {
+    'LCF::Schema::COMMON_EVENT' => 'read by the DATABASE hash below, which is residual',
+    'LCF::Schema::DATABASE' => 'nested hash holding the `elements:` lambdas (a lambda is bytecode)',
+    'LCF::Schema::MAP_UNIT' => 'the same, with lambdas',
+    'RGSS::Audio::EXTS' => 'read by EXT_SPELLINGS, which is residual',
+    'RGSS::Audio::EXT_SPELLINGS' => 'built by an `each` block',
+    'Game::State::SYSTEM_SFX_SAVE_FIELD' => 'built by an `each_with_object` block',
+    'LCF::INT32_MASK' => 'a bignum on a 32-bit mrb_int target: an irep literal',
+    'LCF::INT32_SIGN_BIT' => 'the same',
+    'LCF::INT32_WRAP' => 'the same',
+    'Array.alias_method sort!' => 'ORDER: holds the core sort!, a def of the same name follows',
+    'RGSS::Window.alias_method initialize' => 'ORDER: holds the native initialize, a def of the same name follows'
+  }
+  found = []
   gems.each do |gem, fs|
     r = LoadCompile.plan(gems, gem: gem, drop_keys: all_keys.fetch(gem), symbol: gem.delete_prefix('mruby-'))
     out_dir = File.join(dir, gem)
@@ -420,6 +460,16 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
       original_all.concat(def_keys.call(text.force_encoding(Encoding::UTF_8)))
       kept_all.concat(def_keys.call(res.dup.force_encoding(Encoding::UTF_8)))
     end
+    r.bodies.each do |root|
+      LoadCompile.each_ubody(root) do |ub|
+        ub.items.each do |i|
+          next unless i.role == :residual
+
+          node = i.stmt.node
+          found << (node.respond_to?(:name) && node.is_a?(Prism::ConstantWriteNode) ? "#{ub.body.path}::#{node.name}" : "#{ub.body.path}.#{node.is_a?(Prism::AliasMethodNode) ? 'alias' : node.name} #{LoadCompile.taken_names(node).last}")
+        end
+      end
+    end
     suite.check("#{gem}: every residual compiles with mrbc and keeps its line count", ok)
     pinned_kept = (original_all - kept_all).size
     suite.check("#{gem}: the residual lost the dropped defs and no other (#{pinned_kept} of #{original_all.size})",
@@ -430,6 +480,8 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
          "#{s[:defs_dropped]} defs dropped, #{s[:defs_kept]} kept, #{s[:promoted].to_i} constants promoted, " \
          "#{s[:role_residual]} residual statements"
   end
+  puts "    unlisted: #{found.sort - stays.keys}, missing: #{stays.keys.sort - found}" unless found.sort == stays.keys.sort
+  suite.check("the statements that stay bytecode are the #{stays.size} listed", found.sort == stays.keys.sort)
   # The engine's class graph from source: how much of it is exact (tools/bc2cpp/class_world.rb).
   engine = ClassWorld.build(gems.values.map { |fs| ClassBodyScan.scan(fs) })
   sum = ClassWorld.summary(engine)
