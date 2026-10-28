@@ -194,6 +194,8 @@ BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 require 'prism'
 require_relative '../rgss_tts_config'
 
+# `native_namespaces`: the namespaces whose native (C/C++) registrations this gem's registration removes when the
+# closed list leaves them out (NATIVE_CANDIDATES, static_dispatch_registrations.rb).
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
     # Owners are emission targets: every method of theirs that compiles clean is
@@ -226,6 +228,7 @@ BC2CPP_COMPILED_GEMS = {
                LCF::SaveTyped::MapEvent LCF::SaveTyped::EventExecState LCF::SaveTyped::CommonEvent
                LCF::SaveTyped::Bgm LCF::SaveTyped::Se LCF::SaveTyped::MoveRoute LCF::SaveTyped::EventExecFrame],
     out_symbol: 'lcf_compiled',
+    native_namespaces: %w[LCF],
   },
   'mruby-rpg2k-compiled' => {
     # Same rules as the mruby-lcf-compiled entry above. Points that are easy to
@@ -292,6 +295,7 @@ BC2CPP_COMPILED_GEMS = {
                Game::Message::Segment Game::Message::SpeedMarker Game::Message::PauseMarker
                Game::Message::ScanResult Game::MoveCommand RPG2k.singleton],
     out_symbol: 'rpg2k_compiled',
+    native_namespaces: %w[Game RPG2k RPG2k3],
   },
   'mruby-rgss-compiled' => {
     # Same rules as above. Notes specific to RGSS:
@@ -313,6 +317,7 @@ BC2CPP_COMPILED_GEMS = {
                RGSS::Graphics.singleton RGSS::Font.singleton RGSS::ErrorReport::Tee Array
                RGSS::Font RGSS::HashArchive RGSS::Bitmap::LoadError],
     out_symbol: 'rgss_compiled',
+    native_namespaces: %w[RGSS],
   },
   'mruby-core-compiled' => {
     # mruby's own Ruby (BC2CPP_CORE_MRBLIB_GEMS) compiled by the same
@@ -956,4 +961,10 @@ module Bc2cppCompiledGemGeneration
       @done[generated] = true
     end
   end
+end
+
+# The compiled gem whose registration removes `owner`'s left-out native methods, or nil (NATIVE_CANDIDATES).
+def bc2cpp_native_strip_gem(owner)
+  top = owner.delete_suffix('.singleton').split('::').first
+  BC2CPP_COMPILED_GEMS.find { |_name, gem| Array(gem[:native_namespaces]).include?(top) }&.first
 end
