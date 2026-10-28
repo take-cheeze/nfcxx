@@ -197,35 +197,6 @@ DIRECT_CONSTRUCT_TARGETS = DispatchTargetSources.direct_construct_targets
 # load time.
 DIRECT_CONSTRUCT_ACCESSOR_TARGETS = DispatchTargetSources.direct_construct_accessor_targets(DIRECT_CONSTRUCT_TARGETS)
 
-# NATIVE_ARG_TARGETS (the Set after sanitize_c_ident below): human-vetted
-# "Owner#name" allowlist that moves a compiled method's mandatory argument
-# from mrb_value to a native mrb_int/mrb_sym parameter. A position is retyped
-# only when BOTH the method is listed AND its own `# bc2cpp: (fixnum, ...)`
-# annotation (never ArgTypes inference) names fixnum/symbol there. Annotations
-# alone would be sound (a wrong one raises TypeError), but the native entry
-# unboxes with mrb_get_args("i")/mrb_as_int, which raise on nil, so each entry
-# must meet this bar:
-#   - no nil-guard on the annotated position (`id.nil? || ...`, `x && x > 0`):
-#     such a body tolerates nil today and would start raising
-#     (Game::Actor#knows_skill?/#learn_skill, Game::EnemyAi#enemy and
-#     RPG2k::Scene::Base#value_font_color are excluded for this);
-#   - either the position already raises on a non-Integer (unguarded
-#     arithmetic/comparison, so only the exception class changes), or every
-#     real caller was traced to a provably Integer/Symbol value (needed for
-#     "assign-only" bodies like `@x = x`);
-#   - the method compiles clean with pure mandatory arity; otherwise there is
-#     no `_impl` to retype and the entry is moot. Check the generated BODY,
-#     not just the signature: the `_impl` signature is printed even when the
-#     body is all `#error` lines;
-#   - the class is not in DIRECT_CONSTRUCT_TARGETS, whose construct path
-#     passes mrb_value arguments to `#initialize` and would desync from a
-#     retyped signature.
-# Unresolved nil paths were excluded rather than guessed (Game::State#
-# initialize: SAVE_MOVABLE map_id/x/y have no schema default; Game::Interpreter
-# #apply: `when 0 then val` returns operand_value unguarded;
-# Game::Interpreter#resume_battle: battle.result may still be nil in
-# leave_battle_event_phase).
-#
 # CPP_RESERVED_WORDS: a Ruby parameter name can be a C++ keyword
 # (RPG2k::Scene::Map#page_field(name, default)). Not a full keyword table,
 # just plausible names; every arg_names entry goes through sanitize_c_ident.
@@ -242,66 +213,6 @@ CPP_RESERVED_WORDS = Set[
 def sanitize_c_ident(name)
   CPP_RESERVED_WORDS.include?(name) ? "#{name}_" : name
 end
-
-NATIVE_ARG_TARGETS = Set[
-  'Game::Actor#gain_exp',
-  'Game::Actor#change_level_by',
-  'Game::Actor#change_mp',
-  'Game::Actor#exp_for_level',
-  'Game::Actor#free_two_handed_slot',
-  'Game::Actor#slot_cursed?',
-  'Game::Actor#base_param_limit',
-  'Game::Actor#unequip',
-  'Game::Actor#base_stats',
-  'Game::Actor#change_param',
-  'Game::Actor#change_class',
-  'Game::Actor#battle_row=',
-  'Game::Map#in_bounds?',
-  'Game::Map#substitute_tile',
-  'Game::Map#set_tile',
-  'Game::Map#tile',
-  'Game::Transition#half',
-  'Game::Transition#block_count_through',
-  'Game::Screen#tint_to',
-  'Game::Screen#restore_tint',
-  'Game::Screen#shake',
-  'Game::Screen#flash',
-  'Game::Screen#approach',
-  'Game::State#set_screen_transition',
-  'Game::Interpreter#character_ref',
-  'Game::Interpreter#trunc_div',
-  'Game::Interpreter#skip_to',
-  'Game::Interpreter#find_choice_option',
-  'Game::Interpreter#do_control_vars_range_variable',
-  'Game::Interpreter#vehicle_operand',
-  'Game::Interpreter#screen_operand',
-  'Game::Interpreter#queue_level_up_messages',
-  'Game::Interpreter#trunc_mod',
-  'LCF::EventCommand#initialize',
-  'LCF::MoveCommand#initialize',
-  'RPG2k::Scene::SaveLoad#move_selection',
-  'RPG2k::Scene::Title#move_selection',
-  'RPG2k::Scene::ItemMenu#move_item_cursor',
-  'RPG2k::Scene::ItemMenu#move_teleport_cursor',
-  'RPG2k::Scene::Order#move_cursor',
-  'RPG2k::Scene::Map::LRUBitmapCache#initialize',
-  'RPG2k::Scene::SaveLoad#draw_slot_label',
-  'RPG2k::Scene::Base#draw_stat_segment',
-  'RPG2k::Scene::Base#sticky_list_top',
-  'RPG2k::Scene::SaveLoad#build_arrow_sprite',
-  'RPG2k::Scene::Menu#wait_term_for',
-  'RPG2k::Scene::Menu#enter_actor_selection',
-  'RPG2k::Scene::VehicleWorld#initialize',
-  'RPG2k::Scene::Battle#battler_z',
-  'RPG2k::Scene::Battle#actor_sprite_z',
-  'RPG2k::Scene::Battle#battle_grid_position',
-  'RPG2k::Scene::Battle#move_battle_target_cursor',
-  'RPG2k::Scene::Battle#move_battle_list_index',
-  'RPG2k::Scene::Battle#battle_skill_unavailable?',
-  'RPG2k::Scene::Battle#draw_gauge_system2',
-  'RPG2k::Scene::Battle#draw_number_system2',
-  'RPG2k::Scene::Battle#refresh_battle_list_arrows',
-].freeze
 
 # Call-site devirtualization: is THIS receiver provably an instance of one
 # exact class? Unlike monomorphic_target this can resolve a POLY name.
