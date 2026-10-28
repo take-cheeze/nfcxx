@@ -490,11 +490,11 @@ template <class T, class Op> inline T reduce_lanes(unsigned n, T x, Op op) {
   for (unsigned m = n / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
   return x;
 }
-template <class T, class Op> inline T reduce_over_group(sub_group sg, T x, Op op) {
+template <class T, class Op> inline T reduce_over_group(const sub_group &sg, T x, Op op) {
   return reduce_lanes((unsigned)sg.get_local_linear_range(), x, op);
 }
 // Hillis-Steele: after the steps 1, 2, 4, ..., n/2 lane k holds the combination of lanes 0..k
-template <class T, class Op> inline T inclusive_scan_over_group(sub_group sg, T x, Op op) {
+template <class T, class Op> inline T inclusive_scan_over_group(const sub_group &sg, T x, Op op) {
   unsigned lane = (unsigned)sg.get_local_linear_id();
   for (unsigned d = 1; d < sg.get_local_linear_range(); d <<= 1) {
     T y = shift_group_right(sg, x, d);
@@ -502,17 +502,17 @@ template <class T, class Op> inline T inclusive_scan_over_group(sub_group sg, T 
   }
   return x;
 }
-inline bool any_of_group(sub_group sg, bool p) {
+inline bool any_of_group(const sub_group &sg, bool p) {
   unsigned r = p ? 1u : 0u;
   for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r |= detail::sg_shuffle_xor(r, m);
   return r != 0;
 }
-inline bool all_of_group(sub_group sg, bool p) {
+inline bool all_of_group(const sub_group &sg, bool p) {
   unsigned r = p ? 1u : 0u;
   for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r &= detail::sg_shuffle_xor(r, m);
   return r != 0;
 }
-inline bool none_of_group(sub_group sg, bool p) { return !any_of_group(sg, p); }
+inline bool none_of_group(const sub_group &sg, bool p) { return !any_of_group(sg, p); }
 inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {
 #ifdef __NFCXX_SYCL_DEVICE__
   __nfcxx_sycl_sg_barrier();
@@ -2030,18 +2030,18 @@ template <class T, int D> inline T *scratch_slot(size_t lid) {
 
 template <int D> inline bool group<D>::leader() const { return detail::group_lid<D>() == 0; }
 // lane k holds the combination of lanes 0..k-1 (lane 0 the identity)
-template <class T, class Op> inline T exclusive_scan_over_group(sub_group sg, T x, Op op) {
+template <class T, class Op> inline T exclusive_scan_over_group(const sub_group &sg, T x, Op op) {
   T e = shift_group_right(sg, inclusive_scan_over_group(sg, x, op), 1);
   return sg.get_local_linear_id() == 0 ? detail::red_identity<detail::op_kind<Op>::value, T>() : e;
 }
-template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_group sg, T x, V init, Op op) {
+template <class T, class V, class Op> inline T exclusive_scan_over_group(const sub_group &sg, T x, V init, Op op) {
   return op((T)init, exclusive_scan_over_group(sg, x, op));
 }
 
 // Two stages, as a GPU does it: the lanes of each sub-group reduce by butterfly (log2 of the sub-group size steps), the
 // first lane of each sub-group stores the partial, and every work-item combines the partials (one per sub-group, at most
 // the group size over the sub-group size). A group of 256 work-items does 16 partial reads per work-item, not 256.
-template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, Op op) {
+template <int D, class T, class Op> inline T reduce_over_group(const group<D> &g, T x, Op op) {
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
   const size_t w = detail::sg_size();
   T s = reduce_lanes((unsigned)w, x, op);   // the butterfly over the sub-group, on scalars: no sub_group object per call
@@ -2053,7 +2053,7 @@ template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, 
   group_barrier(g);
   return r;
 }
-template <int D, class T, class V, class Op> inline T reduce_over_group(group<D> g, T x, V init, Op op) { return op((T)init, reduce_over_group(g, x, op)); }
+template <int D, class T, class V, class Op> inline T reduce_over_group(const group<D> &g, T x, V init, Op op) { return op((T)init, reduce_over_group(g, x, op)); }
 template <int D, class T> inline T group_broadcast(group<D> g, T x, id<D> from) {
   size_t lid = detail::group_lid<D>();
   if (lid == detail::linear<D>(from, g.get_local_range())) *detail::scratch_slot<T, D>(0) = x;
@@ -2084,9 +2084,9 @@ template <int D, class T, class V, class Op> inline T exclusive_scan_over_group(
 template <int D, class T, class Op> inline T exclusive_scan_over_group(group<D> g, T x, Op op) {
   return exclusive_scan_over_group(g, x, detail::red_identity<detail::op_kind<Op>::value, T>(), op);
 }
-template <int D> inline bool any_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) != 0; }
-template <int D> inline bool all_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, minimum<int>()) != 0; }
-template <int D> inline bool none_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) == 0; }
+template <int D> inline bool any_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) != 0; }
+template <int D> inline bool all_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, minimum<int>()) != 0; }
+template <int D> inline bool none_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) == 0; }
 template <int D, class Ptr, class Op> inline auto joint_reduce(group<D> g, Ptr first, Ptr last, Op op) {
   using T = typename std::remove_cv<typename std::remove_reference<decltype(*first)>::type>::type;
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
