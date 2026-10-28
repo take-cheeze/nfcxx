@@ -66,6 +66,7 @@ class Spv {
   uint32_t t_int(int bits);
   uint32_t t_float(int bits);
   uint32_t t_vec3();
+  uint32_t t_vec(uint32_t elem, uint32_t n);
   uint32_t builtin_vec_t();
   uint32_t t_ptr(uint32_t sc, uint32_t elem);
   uint32_t t_fn(uint32_t ret, const std::vector<uint32_t> &params);

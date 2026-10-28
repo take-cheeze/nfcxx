@@ -25,7 +25,7 @@ namespace {
 // memo tags (the Ruby's symbols)
 enum Tag : int64_t {
   M_VOID = 1, M_BOOL, M_INT, M_FLOAT, M_VEC3, M_VEC3_64, M_PTR, M_FN, M_STRUCT, M_CINT, M_CFLOAT, M_CFBITS, M_CBOOL, M_SPEC,
-  M_WGSIZE, M_BUILTIN, M_PUSH, M_PRIVATE, M_ARRAY, M_WGSVAR, M_BUILTIN_U32
+  M_WGSIZE, M_BUILTIN, M_PUSH, M_PRIVATE, M_ARRAY, M_WGSVAR, M_BUILTIN_U32, M_VEC_N
 };
 
 // GLSL.std.450 -> OpenCL.std (the Ruby's OPENCL_OF_GLSL) and the OpenCL.std-only codes (OPENCL_ONLY)
@@ -122,6 +122,13 @@ uint32_t Spv::builtin_vec_t() {
   uint32_t e = t_int(64);
   decl({23, i, e, 3});
   return put({M_VEC3_64}, i);
+}
+
+uint32_t Spv::t_vec(uint32_t elem, uint32_t n) {
+  if (auto *p = find({M_VEC_N, elem, n})) return *p;
+  uint32_t i = id();
+  decl({23, i, elem, n});
+  return put({M_VEC_N, elem, n}, i);
 }
 
 uint32_t Spv::t_ptr(uint32_t sc, uint32_t elem) {
