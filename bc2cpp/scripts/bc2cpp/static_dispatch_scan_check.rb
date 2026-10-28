@@ -8,8 +8,12 @@
 #     (naming_macros: `#param`, a presym macro of the parameter, or a call passing it on to another such macro).
 #     A bare C identifier names nothing.
 #   NON_LOOKUP_HELPERS: a generated symbol whose every use is bc2cpp_nomethod(_raise), bc2cpp_guard_violation,
-#     bc2cpp_hint_violation or bc2cpp_nil_receiver is no dynamic lookup; any bc2cpp_send, owner call or
+#     bc2cpp_hint_violation or bc2cpp_nil_receiver is no dynamic lookup; any bc2cpp_send, uncovered owner call or
 #     bc2cpp_sym(M, i) use keeps it one.
+#   OWNER_CALL_GUARDED: an owner call covering every engine owner it lists is no lookup either: none listed, or each
+#     one tested by the exact-class chain the call is the else of and not subclassed, or carried as a direct entry
+#     (OWNER_CALL_DIRECT). An untested listed owner, or a subclassed tested one without its entry, keeps it one.
+#     The subclass scan reads a native define call's superclass from its last argument, not its own name.
 #   BYTECODE_PROC: what counts as generated C building a proc over a bytecode irep (which keeps every block of a
 #     registered compiled method runnable as bytecode).
 #   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources, nor the workflows.
@@ -108,13 +112,73 @@ gen = <<~'CPP'
   r4 = bc2cpp_send(M, r0, 1, 0);
   r5 = mrb_funcall_id(M, r0, bc2cpp_sym(M, 2), 0);
   r6 = bc2cpp_guard_violation(M, r0, 3, "site", 0);
-  r7 = bc2cpp_owner_call(M, r0, 3, 2, BC2CPP_OWNERS(0), mrb_nil_value(), 0);
+  r7 = bc2cpp_owner_call(M, r0, 3, 2, BC2CPP_OWNERS("Game::Actor"), mrb_nil_value(), 0);
 CPP
 free = S.lookup_free_names(gen, {})
 check('non-lookup: only nomethod / nil_receiver / hint_violation uses', free.include?('quiet'))
 check('non-lookup: a bc2cpp_send use is a lookup', !free.include?('sent'))
 check('non-lookup: a bc2cpp_sym(M, i) use is a lookup', !free.include?('symbol'))
 check('non-lookup: an owner call next to a guard violation is a lookup', !free.include?('mixed'))
+
+# --- OWNER_CALL_GUARDED ---
+owner_gen = <<~'CPP'
+  static const char* const bc2cpp_sym_names[6] = {
+    "core_only",
+    "chained",
+    "subclassed",
+    "direct",
+    "unguarded",
+    "other_recv",
+  };
+  static inline struct RClass* bc2cpp_owner_class_1(mrb_state* M) {
+    struct RClass* c = bc2cpp_owner_class_slots[1];
+    if (!c) {
+      static const char* const path[] = {"Game", "Party"};
+  r1 = bc2cpp_owner_call(M, r0, 0, 2, BC2CPP_OWNERS("Array"), mrb_nil_value(), 0);
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r2 = Game__Party_chained_impl(M, r0);
+  } else if (bc2cpp_class_is(M, r0, rgss::native_bitmap_class())) {
+    r2 = rgss::bitmap_chained_direct(M, r0);
+  } else {
+    BC2CPP_COLD_ARM r2 = bc2cpp_owner_call(M, r0, 1, 2, BC2CPP_OWNERS("Array", "Game::Party", "RGSS::Bitmap"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r3 = Game__Party_subclassed_impl(M, r0);
+  } else {
+    r3 = bc2cpp_owner_call(M, r0, 2, 2, BC2CPP_OWNERS("Game::Party"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r4 = Game__Party_direct_impl(M, r0);
+  } else {
+    r4 = bc2cpp_owner_call(M, r0, 3, 2, BC2CPP_OWNERS_D(BC2CPP_OWNER_DIRECT("Game::Party", Game__Party_direct, MRB_ARGS_REQ(0), MRB_METHOD_PUBLIC_FL) BC2CPP_OWNER_DIRECT("Game::Actor", Game__Actor_direct, MRB_ARGS_REQ(0), MRB_METHOD_PUBLIC_FL), "Game::Actor", "Game::Party"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r0, bc2cpp_owner_class_1(M))) {
+    r5 = Game__Party_unguarded_impl(M, r0);
+  } else {
+    r5 = bc2cpp_owner_call(M, r0, 4, 2, BC2CPP_OWNERS("Game::Actor", "Game::Party"), mrb_nil_value(), 0);
+  }
+  if (bc2cpp_class_is(M, r9, bc2cpp_owner_class_1(M))) {
+    r6 = Game__Party_other_recv_impl(M, r9);
+  } else {
+    r6 = bc2cpp_owner_call(M, r0, 5, 2, BC2CPP_OWNERS("Game::Party"), mrb_nil_value(), 0);
+  }
+CPP
+owner_free = S.lookup_free_names(owner_gen, %w[Bitmap])
+check('owner call: listing no engine owner looks nothing up', owner_free.include?('core_only'))
+check('owner call: the else of a chain testing every listed engine owner looks nothing up',
+      S.lookup_free_names(owner_gen, []).include?('chained'))
+check('owner call: a tested owner something subclasses is still looked up', !owner_free.include?('chained'))
+check('owner call: a subclassed tested owner is looked up without its entry',
+      !S.lookup_free_names(owner_gen, %w[Party]).include?('subclassed'))
+check('owner call: direct entries cover their owners, tested and subclassed or not',
+      S.lookup_free_names(owner_gen, %w[Party]).include?('direct'))
+check('owner call: a listed owner neither tested nor direct is looked up', !owner_free.include?('unguarded'))
+check('owner call: a chain testing another receiver covers nothing', !S.lookup_free_names(owner_gen, []).include?('other_recv'))
+supers = S.define_class_superclasses('mrb_define_class_under(M, m, "Bitmap", M->object_class); ' \
+                                     'mrb_define_class(M, "X", mrb_class_get(M, "Base, too"));')
+check('subclass scan: a define call\'s superclass is its last argument, not its own name',
+      supers == ['M->object_class', 'mrb_class_get(M, "Base, too")'] &&
+      supers.map { |a| a.match?(S::BUILTIN_SUPERCLASS) } == [true, false])
 values = <<~'CPP'
   static const char* const bc2cpp_sym_names[4] = {
     "as_value",

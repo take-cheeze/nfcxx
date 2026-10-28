@@ -399,8 +399,24 @@ module SymbolCache
     #if !defined(MRB_NO_METHOD_CACHE) && !defined(BC2CPP_NO_OWNER_ICACHE)
     #define BC2CPP_OWNER_ICACHE 1
     #endif
+    // OWNER_CALL_DIRECT (owner_call_direct.rb): a listed owner's compiled entry, called without a method-table lookup
+    // (owner path, the entry wrapper, the flags its registration gives it: aspec and visibility), and a call's rows
+    // with each owner's class in `state` (null: not defined there).
+    struct bc2cpp_owner_direct {
+      const char* owner;
+      mrb_func_t func;
+      uint32_t flags;
+    };
+    struct bc2cpp_owner_directs {
+      const bc2cpp_owner_direct* rows;
+      int count;
+      unsigned epoch;
+      mrb_state* state;
+      struct RClass** cls;
+    };
     struct bc2cpp_owner_set {
       const char* const* names;
+      bc2cpp_owner_directs* direct;
       unsigned epoch;
       mrb_state* state;
       int seen_count;
@@ -439,7 +455,10 @@ module SymbolCache
       return true;
     }
     #endif
-    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, 0, nullptr, 0, {} }; return s; }())
+    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, nullptr, 0, nullptr, 0, {} }; return s; }())
+    // OWNER_CALL_DIRECT: DIRECTS is a run of BC2CPP_OWNER_DIRECT(owner, entry, aspec, visibility), no commas between.
+    #define BC2CPP_OWNER_DIRECT(owner, fn, aspec, vis) { owner, fn, (uint32_t)(aspec) | (uint32_t)(vis) },
+    #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d, 0, nullptr, 0, {} }; return s; }())
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
@@ -499,6 +518,48 @@ module SymbolCache
       }
       return false;
     }
+    // OWNER_CALL_DIRECT: the class or module at "A::B" (".singleton": its singleton class), or null when a segment is
+    // not defined; walked with mrb_const_defined_at first, so no const_missing runs.
+    static struct RClass* bc2cpp_owner_direct_class(mrb_state* M, const char* path) {
+      size_t end = strlen(path);
+      bool singleton = end > 10 && strcmp(path + end - 10, ".singleton") == 0;
+      if (singleton) end -= 10;
+      mrb_value cur = mrb_obj_value(M->object_class);
+      for (size_t pos = 0; pos < end;) {
+        size_t stop = pos;
+        while (stop < end && path[stop] != ':') ++stop;
+        mrb_sym id = mrb_intern(M, path + pos, stop - pos);
+        if ((mrb_type(cur) != MRB_TT_CLASS && mrb_type(cur) != MRB_TT_MODULE) || !mrb_const_defined_at(M, cur, id)) return nullptr;
+        cur = mrb_const_get(M, cur, id);
+        pos = stop + 2;
+      }
+      if (mrb_type(cur) != MRB_TT_CLASS && mrb_type(cur) != MRB_TT_MODULE) return nullptr;
+      return singleton ? mrb_class_ptr(mrb_singleton_class(M, cur)) : mrb_class_ptr(cur);
+    }
+    // OWNER_CALL_DIRECT: what mruby's lookup would find if every direct owner's entry were registered. The receiver's
+    // ancestors are walked in lookup order up to where the table lookup found the name (`*c`; the whole chain when it
+    // found none): the first direct owner met there answers with its entry, as its registration would have. A
+    // prepended class keeps the table lookup (its origin reorders the chain; the closed world prepends into none).
+    static void bc2cpp_owner_direct_pick(mrb_state* M, bc2cpp_owner_directs& t, struct RClass* klass, mrb_method_t* m, struct RClass** c) {
+      if (t.epoch != bc2cpp_owner_epoch || t.state != M) {
+        for (int d = 0; d < t.count; ++d) t.cls[d] = bc2cpp_owner_direct_class(M, t.rows[d].owner);
+        t.epoch = bc2cpp_owner_epoch;
+        t.state = M;
+      }
+      struct RClass* found = MRB_METHOD_UNDEF_P(*m) ? nullptr : *c;
+      for (struct RClass* k = klass; k; k = k->super) {
+        if (MRB_FLAG_TEST(k, MRB_FL_CLASS_IS_PREPENDED)) return;
+        struct RClass* o = k->tt == MRB_TT_ICLASS ? k->c : k;
+        for (int d = 0; d < t.count; ++d) {
+          if (t.cls[d] != o) continue;
+          MRB_METHOD_FROM_FUNC(*m, t.rows[d].func);
+          m->flags |= t.rows[d].flags;
+          *c = k;
+          return;
+        }
+        if (k == found) return;
+      }
+    }
     // The argv form: a splat site passes the Array's own items, as mrb_funcall_with_block would (both reach vm.c's
     // funcall_with_block_m, whose funcall_args_capture copies them and packs a long list as OP_SEND does).
     static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, const mrb_value* argv) {
@@ -514,6 +575,7 @@ module SymbolCache
     #endif
       struct RClass* c = klass;
       mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      if (s.direct) bc2cpp_owner_direct_pick(M, *s.direct, klass, &m, &c);
       if (MRB_METHOD_UNDEF_P(m)) {
         if (mrb_nil_p(blk)) bc2cpp_funcall_argv(M, recv, mid, argc, argv);
         else mrb_funcall_with_block(M, recv, mid, argc, argv, blk);
