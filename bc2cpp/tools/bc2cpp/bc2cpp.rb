@@ -353,7 +353,7 @@ if $PROGRAM_NAME == __FILE__
       end
     end
     warn ''
-    # ZSUPER_NATIVE_SUPPORT: the flat name set is derived from the per-name source
+    # NATIVE_NAME_SOURCES: the flat name set is derived from the per-name source
     # map, so NATIVE_SRCS is read once and the two agree.
     native_name_sources = extract_native_method_sources(native_paths)
     native_names = native_name_sources.keys.to_set
@@ -2043,9 +2043,8 @@ if $PROGRAM_NAME == __FILE__
   puts '#ifdef MRB_USE_BIGINT'
   puts 'extern "C" mrb_value mrb_bint_new_str(mrb_state*, const char*, mrb_int, mrb_int);'
   puts '#endif'
-  # ZSUPER_NATIVE_SUPPORT: same internal.h situation (see ZSUPER_NATIVE_TARGETS).
-  # Declared as internal.h does, `mrb_noreturn` included, so g++ treats the
-  # following RETURN as unreachable.
+  # SUPER_LOOKUP's no-method path: same internal.h situation. Declared as internal.h does, `mrb_noreturn`
+  # included, so g++ treats what follows as unreachable.
   puts 'extern "C" mrb_noreturn void mrb_method_missing(mrb_state*, mrb_sym, mrb_value, mrb_value);'
   # SUPER_LOOKUP (codegen_receiver_facts.rb, super_lookup_call): OP_SUPER's lookup, from the superclass of the
   # class the method is defined on (its origin when prepended), then the call mrb_funcall would make once found.
