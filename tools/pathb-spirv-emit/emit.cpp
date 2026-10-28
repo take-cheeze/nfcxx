@@ -1373,6 +1373,17 @@ struct SFn {
   }
 
   void copy_bytes(uint32_t d, uint32_t src, int64_t n) {
+    if (!wgs_mode && n % 16 == 0 && n <= 256) {
+      // 16-byte blocks at constant offsets, one vector load and one store each: the words of a block were a send apiece
+      uint32_t vt = spv->t_vec(t32(), 4);
+      for (int64_t off = 0; off < n; off += 16) {
+        uint32_t sp = res(120, {spv->t_ptr(psb_sc(), vt), res(IADD, {t64(), src, spv->c_u64(off)})});
+        uint32_t v = res(61, {vt, sp, 2, 4});
+        uint32_t dp = res(120, {spv->t_ptr(psb_sc(), vt), res(IADD, {t64(), d, spv->c_u64(off)})});
+        ins({62, dp, v, 2, 4});
+      }
+      return;
+    }
     const Ty t = n % 4 == 0 ? U32 : U8;
     counted_loop(n, n % 4 == 0 ? 4 : 1, [&](uint32_t off) {
       uint32_t v = mem_load(res(IADD, {t64(), src, off}), t);
