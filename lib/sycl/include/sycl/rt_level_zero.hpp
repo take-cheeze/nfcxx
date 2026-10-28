@@ -24,6 +24,7 @@
 #include <level_zero/ze_api.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +49,30 @@ struct ze_push {
 static_assert(sizeof(ze_push) == 112, "push block layout");
 constexpr uint64_t ze_push_at = 4352;   // the push block's offset in the control block (ctl_)
 constexpr uint64_t ze_closure_at = 256;
+
+// NFCXX_SYCL_STATS=1: the dispatches, launches, waits on the device and the buffers copied between host and device, and the
+// time of each kernel's launches, printed at exit (where a model's time goes; see the launch measurements in the PR)
+struct ze_stats {
+  uint64_t dispatches = 0, launches = 0, up_n = 0, up_bytes = 0, down_n = 0, down_bytes = 0;
+  double ns_wait = 0, ns_dispatch = 0, ns_launch = 0;
+  std::map<std::string, std::pair<uint64_t, double>> per_kernel;   // closure type => (launches, ns in the launch call)
+  ~ze_stats() {
+    if (!std::getenv("NFCXX_SYCL_STATS")) return;
+    std::vector<std::pair<double, std::string>> top;
+    for (auto &kv : per_kernel) top.push_back({kv.second.second, kv.first});
+    std::sort(top.rbegin(), top.rend());
+    for (size_t i = 0; i < top.size() && i < 12; i++) {
+      auto &e = per_kernel[top[i].second];
+      std::fprintf(stderr, "sycl stats: %8.3f s %6llu launches  %s\n", e.second / 1e9, (unsigned long long)e.first,
+                   top[i].second.substr(0, 110).c_str());
+    }
+    std::fprintf(stderr, "sycl stats: %llu dispatches, %llu launches, %.3f s waiting on the device, %.3f s in dispatch; "
+                 "%llu buffers (%.1f MB) copied to the device, %llu (%.1f MB) to the host\n",
+                 (unsigned long long)dispatches, (unsigned long long)launches, ns_wait / 1e9, ns_dispatch / 1e9,
+                 (unsigned long long)up_n, up_bytes / 1048576.0, (unsigned long long)down_n, down_bytes / 1048576.0);
+  }
+};
+inline ze_stats &stats() { static ze_stats s; return s; }
 
 class ze_rt {
  public:
@@ -129,6 +154,12 @@ class ze_rt {
                    (int)images_.modules.size(), (int)images_.kernel_count());
       std::exit(3);
     }
+    stats().dispatches++;
+    auto t_dispatch = std::chrono::steady_clock::now();
+    struct dispatch_timer {
+      std::chrono::steady_clock::time_point t;
+      ~dispatch_timer() { stats().ns_dispatch += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t).count(); }
+    } dispatch_timer_{t_dispatch};
     if (closure_bytes != it->closure_size && it->closure_size) {
       std::fprintf(stderr, "sycl: the closure of %s is %u bytes on the host but %u in the device pass (build with the same "
                    "compiler on both sides)\n", key.c_str(), closure_bytes, it->closure_size);
@@ -224,9 +255,18 @@ class ze_rt {
       ngs[sd] = cnt;
       for (int e = sd + 1; e < 3; e++) ngs[e] = 1;
       ze_group_count_t gc = {ngs[0], ngs[1], ngs[2]};
+      stats().launches++;
+      auto t_launch = std::chrono::steady_clock::now();
       check(zeCommandListAppendLaunchKernel(imm_, k, &gc, nullptr, 0, nullptr), "zeCommandListAppendLaunchKernel");
+      double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t_launch).count();
+      stats().ns_launch += ns;
+      auto &pk = stats().per_kernel[key];
+      pk.first++;
+      pk.second += ns;
       check(zeCommandListAppendBarrier(imm_, nullptr, 0, nullptr), "zeCommandListAppendBarrier");
+      auto t_wait = std::chrono::steady_clock::now();
       check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+      stats().ns_wait += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t_wait).count();
       release(region);
       check_flag();
     }
@@ -240,6 +280,7 @@ class ze_rt {
   void sync_up(buffer_state *s, int mode) {
     if (s->dev == 0) return;
     if ((mode & 1) && !s->dev_valid && s->host_valid) {
+      stats().up_n++; stats().up_bytes += s->bytes;
       write(s->dev, s->host, s->bytes);
       s->dev_valid = true;
     }
@@ -247,6 +288,7 @@ class ze_rt {
 
   void sync_down(buffer_state *s) {
     if (s->dev == 0 || s->host_valid) return;
+    stats().down_n++; stats().down_bytes += s->bytes;
     read(s->dev, s->host, s->bytes);
     s->host_valid = true;
   }
