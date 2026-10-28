@@ -2048,6 +2048,21 @@ if $PROGRAM_NAME == __FILE__
   # Declared as internal.h does, `mrb_noreturn` included, so g++ treats the
   # following RETURN as unreachable.
   puts 'extern "C" mrb_noreturn void mrb_method_missing(mrb_state*, mrb_sym, mrb_value, mrb_value);'
+  # SUPER_LOOKUP (codegen_receiver_facts.rb, super_lookup_call): OP_SUPER's lookup, from the superclass of the
+  # class the method is defined on (its origin when prepended), then the call mrb_funcall would make once found.
+  # No method there is NoMethodError through method_missing, as prepare_missing does.
+  puts 'extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);'
+  puts <<~CPP
+    [[maybe_unused]] static mrb_value bc2cpp_super_call(mrb_state* M, mrb_value self, struct RClass* owner, mrb_sym mid,
+                                                        mrb_int argc, const mrb_value* argv, mrb_value blk) {
+      struct RClass* c = owner;
+      MRB_CLASS_ORIGIN(c);
+      c = c->super;
+      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
+      return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk);
+    }
+  CPP
   # PROFILER_SECTION_SUPPORT: emit_profiler_section_inline calls the native
   # profiling primitives directly (profiler_section_begin/_end, frame_begin/
   # _end) instead of building an RProc for RGSS::Profiler.section/frame and
