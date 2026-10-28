@@ -24,6 +24,7 @@ require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/load_compile'
 require_relative '../../tools/bc2cpp/class_world'
+require_relative '../../tools/bc2cpp/pure_eval'
 
 suite = FixtureCheck.new('class_body_check')
 suite.require_mrbc!
@@ -64,7 +65,34 @@ FILE_A = <<~'RUBY'
     LIST_A = (0..3).map { |i| i * 2 }.freeze
     DERIVED = LIST_A + [1]
     BASE_N = 5
-    TABLE = (0..BASE_N).map { |i| i }
+    TABLE = (0..BASE_N).map { |i| i.itself }
+
+    # PURE_CONST_EVAL: computed constants that are data at build time. CRuby computes them, the load builds the value.
+    SFX = (0..3).each_with_object({}) { |slot, h| h[slot] = 91 + slot }.freeze
+    NAMES = ['', '.ogg', 'wav'].freeze
+    SPELLINGS = begin
+      list = []
+      NAMES.each do |e|
+        list << e
+        up = e.upcase
+        list << up unless up == e
+      end
+      list.freeze
+    end
+    HALVES = [1, 2, 3].map { |x| x / 2.0 }.freeze
+    SQUARES = (1..3).map { |i| i.to_s + 'x' }
+    # ... and the ones that are not: a Float float32 does not hold, an Integer past 32 bits, a method that is not on the
+    # list, a constant outside the body, a read that could change, an unfrozen String reached twice.
+    THIRDS = [1, 2].map { |x| x / 3.0 }.freeze
+    BIGS = [1].map { |x| x << 40 }.freeze
+    IDS = [1].map { |x| x.itself }.freeze
+    OUTER = %w[a].map { |s| s + Cb::VERSION.to_s }.freeze
+    LOOSE = %w[p q]
+    LOOSE_UP = LOOSE.map { |s| s.upcase }.freeze
+    PAIR = begin
+      s = 'x'.dup
+      [s, s]
+    end
 
     module Mixin
       def mixed = 1
@@ -131,6 +159,17 @@ FILE_A = <<~'RUBY'
       tag :one
       TAGGED = 5
     end
+
+    # DEAD_VISIBILITY: the build leaves `gone` and `gone_too` out of its method tables (UNREGISTERED), so nothing sees
+    # their visibility and the statements naming only them are not run. `kept_one` is registered: its statement stays.
+    class Dead
+      def gone = 1
+      def gone_too = 2
+      def kept_one = 3
+      private :gone, :gone_too
+      protected :gone
+      private :kept_one
+    end
   end
 RUBY
 
@@ -154,7 +193,9 @@ RUBY
 # different mechanism (the equivalence adds them back public).
 DROP = %w[Object#helper_top Cb::Mixin#mixed Cb::Mixin#other_mixed Cb::Util.singleton#shout Cb::Base#initialize
           Cb::Base#helper Cb::Child#work Cb::Child#free_one Cb::Child.singleton#build Cb::WithStruct#<=>
-          Cb::Child#open_again Cb::Redef#run Cb::Redef#val].freeze
+          Cb::Child#open_again Cb::Redef#run Cb::Redef#val Cb::Dead#gone Cb::Dead#gone_too Cb::Dead#kept_one].freeze
+# What the build leaves out of its tables (the registration removes these after the load).
+UNREGISTERED = %w[Cb::Dead#gone Cb::Dead#gone_too].to_set.freeze
 
 DUMP = <<~'RUBY'
   $bc2cpp_out = []
@@ -266,6 +307,11 @@ def equivalence(suite, dir, build, symbol, result, files, residual, class_names)
   File.write(File.join(work, 'snippet.rb'), snippet)
   res_paths = files.map { |f| File.join(work, "#{File.basename(f)}.res.rb") }
   files.zip(res_paths) { |f, out| File.write(out, residual.fetch(f)) }
+  # What the compiled gem's registration does to a def the build leaves out of its tables: it is removed, in every run.
+  removals = result.dropped.select { |d| UNREGISTERED.include?(d[:key]) }.map do |d|
+    "class #{d[:owner]}; remove_method :#{d[:key].split('#', 2).last}; end\n"
+  end.join
+  File.write(File.join(work, 'removals.rb'), removals)
   File.write(File.join(work, 'main.cpp'), <<~CPP)
     #include <mruby.h>
     #include <mruby/compile.h>
@@ -289,11 +335,11 @@ def equivalence(suite, dir, build, symbol, result, files, residual, class_names)
       std::printf("== %s\\n%.*s\\n", label, (int)RSTRING_LEN(s), RSTRING_PTR(s));
     }
     int main(int, char** argv) {
-      std::string dump = slurp(argv[1]), snippet = slurp(argv[2]);
+      std::string dump = slurp(argv[1]), snippet = slurp(argv[2]), removals = slurp(argv[7]);
       std::string a = slurp(argv[3]), b = slurp(argv[4]), ra = slurp(argv[5]), rb = slurp(argv[6]);
-      { mrb_state* M = mrb_open(); run(M, a); run(M, b); emit("interpreted", M, dump); mrb_close(M); }
-      { mrb_state* M = mrb_open(); run(M, ra); run(M, rb); bc2cpp_load_#{symbol}(M); run(M, snippet); emit("compiled", M, dump); mrb_close(M); }
-      { mrb_state* M = mrb_open(); run(M, a); run(M, b); bc2cpp_load_#{symbol}(M); emit("ungated", M, dump); mrb_close(M); }
+      { mrb_state* M = mrb_open(); run(M, a); run(M, b); run(M, removals); emit("interpreted", M, dump); mrb_close(M); }
+      { mrb_state* M = mrb_open(); run(M, ra); run(M, rb); bc2cpp_load_#{symbol}(M); run(M, snippet); run(M, removals); emit("compiled", M, dump); mrb_close(M); }
+      { mrb_state* M = mrb_open(); run(M, a); run(M, b); bc2cpp_load_#{symbol}(M); run(M, removals); emit("ungated", M, dump); mrb_close(M); }
       return 0;
     }
   CPP
@@ -305,7 +351,7 @@ def equivalence(suite, dir, build, symbol, result, files, residual, class_names)
   return [Failed.new(false), {}] unless built
 
   out, status = Open3.capture2e(binary, File.join(work, 'dump.rb'), File.join(work, 'snippet.rb'), files[0], files[1],
-                                res_paths[0], res_paths[1])
+                                res_paths[0], res_paths[1], File.join(work, 'removals.rb'))
   suite.check("the #{symbol} fixture runs", status.success?)
   puts out.lines.last(20).join unless status.success?
   [status, Bc2cppFixtureRuntime.sections(out)]
@@ -359,6 +405,63 @@ def hook_world(dir)
   { result: result, files: files, residual: residual, paths: paths }
 end
 
+# PURE_CONST_EVAL against the mruby runtime: every folded constant, computed by mruby from the same source (the constants
+# it read, then the statement, in a module of its own), described by PureEval::CANONICAL in both VMs. `folded`:
+# [[owner, name, [value, source], magic]]. Returns the lines that differ.
+def pure_eval_differences(dir, build, label, folded)
+  runner = pure_eval_runner(dir, build)
+  return nil unless runner
+
+  eval(PureEval::CANONICAL, TOPLEVEL_BINDING)
+  bad = []
+  folded.each_with_index do |(owner, name, (value, source), magic), i|
+    script = File.join(dir, "pe_#{label}_#{i}.rb")
+    File.write(script, "#{magic ? "# frozen_string_literal: true\n" : ''}#{PureEval::CANONICAL}\nmodule Pf\n#{source}\nend\nPf.const_get(:#{name})\nbc2cpp_canonical(Pf.const_get(:#{name}))\n")
+    out, status = Open3.capture2e(runner, script)
+    want = TOPLEVEL_BINDING.receiver.send(:bc2cpp_canonical, value)
+    bad << "#{owner}::#{name}: mruby #{out.strip[0, 160]} vs CRuby #{want[0, 160]}" unless status.success? && out.strip == want
+  end
+  bad
+end
+
+def pure_eval_runner(dir, build)
+  binary = File.join(dir, 'pe_runner')
+  return binary if File.exist?(binary)
+
+  src = File.join(dir, 'pe_runner.cpp')
+  File.write(src, <<~CPP)
+    #include <mruby.h>
+    #include <mruby/compile.h>
+    #include <mruby/string.h>
+    #include <cstdio>
+    #include <fstream>
+    #include <iterator>
+    #include <string>
+    int main(int, char** argv) {
+      std::ifstream in(argv[1], std::ios::binary);
+      std::string code((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      mrb_state* M = mrb_open();
+      mrb_value v = mrb_load_nstring(M, code.data(), code.size());
+      if (M->exc) { mrb_print_error(M); return 2; }
+      std::printf("%.*s\\n", (int)RSTRING_LEN(v), RSTRING_PTR(v));
+      return 0;
+    }
+  CPP
+  flags = %w[-std=c++17 -fexceptions -DMRB_USE_CXX_EXCEPTION -w] + Bc2cppFixtureRuntime.library_defines(build)
+  Bc2cppCxx.system(*flags, "-I#{build}/include", "-I#{ROOT_DIR}/3rd/mruby/include", src, "#{build}/lib/libmruby.a", '-lm', '-o', binary) ? binary : nil
+end
+
+# [[owner, name, fold, magic]] of the constants the load plan folded.
+def folded_constants(bodies)
+  out = []
+  bodies.each do |root|
+    LoadCompile.each_ubody(root) do |ub|
+      ub.items.each { |i| out << [ub.body.path, i.stmt.node.name.to_s, i.fold, LoadCompile.magic?(i.stmt.file)] if i.fold }
+    end
+  end
+  out
+end
+
 # One root over several files' scans (load order): what ClassWorld.build reads.
 def merge_roots(scans)
   root = scans.first
@@ -373,7 +476,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     [path, text]
   end
   files = paths.keys
-  result = LoadCompile.plan({ 'g' => files }, gem: 'g', drop_keys: DROP.to_set, symbol: 'fx')
+  result = LoadCompile.plan({ 'g' => files }, gem: 'g', drop_keys: DROP.to_set, symbol: 'fx', unregistered: UNREGISTERED)
   residual = files.to_h { |f| [f, LoadCompile.apply(paths[f], result.ranges.fetch(f), marker: f == result.last_file ? result.marker : nil)] }
   res_a = residual[files[0]]
   res_b = residual[files[1]]
@@ -410,7 +513,8 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   suite.check('every residual compiles with mrbc', compiles)
   original_defs = files.flat_map { |f| def_keys.call(paths[f]) }
   kept_defs = files.flat_map { |f| def_keys.call(residual[f]) }
-  dropped = DROP.select { |k| original_defs.include?(k) } - ['Cb::Base#helper', 'Cb::Child#free_one', 'Cb::Redef#run', 'Cb::Redef#val']
+  dropped = DROP.select { |k| original_defs.include?(k) } - ['Cb::Base#helper', 'Cb::Child#free_one', 'Cb::Redef#run', 'Cb::Redef#val',
+                                                              'Cb::Dead#kept_one']
   suite.check('the residual has exactly the defs that were not dropped', (original_defs - kept_defs).sort == dropped.sort)
   suite.check('a def a compiled statement names stays (protected :helper, alias_method)',
               kept_defs.include?('Cb::Base#helper') && kept_defs.include?('Cb::Child#free_one'))
@@ -447,6 +551,20 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   suite.check('hooks: the hook defs are never dropped (the compiled load runs them)',
               hk_res.include?('def self.inherited') && hk_res.include?('def self.included') && hk_res.include?('def go') == false)
 
+  suite.check('DEAD_VISIBILITY: a visibility send whose every name is left out of the tables is not run and frees its defs; one that names a registered def stays',
+              !res_a.include?('private :gone') && !res_a.include?('protected :gone') && !res_a.include?('def gone') &&
+              !res_a.include?('def gone_too') && res_a.include?('def kept_one') && !res_a.include?('private :kept_one') &&
+              result.stats[:role_dead] == 2)
+  mixed = LoadCompile.plan({ 'g' => files }, gem: 'g', drop_keys: DROP.to_set, symbol: 'fx', unregistered: Set['Cb::Dead#gone'])
+  mixed_a = LoadCompile.apply(paths[files[0]], mixed.ranges.fetch(files[0]))
+  suite.check('DEAD_VISIBILITY: a send naming one registered def is run (and pins its defs); only the all-left-out one is dead',
+              mixed.stats[:role_dead] == 1 && mixed_a.include?('def gone = 1') && mixed_a.include?('def gone_too = 2'))
+  fx_folded = folded_constants(result.bodies)
+  suite.check('PURE_CONST_EVAL: computed constants that are data at build time fold; the others stay in the residual',
+              fx_folded.map { |_, n, _| n }.sort == %w[HALVES LIST_A SFX SPELLINGS SQUARES] &&
+              %w[THIRDS BIGS IDS OUTER LOOSE_UP PAIR].all? { |n| res_a.include?("#{n} =") } &&
+              %w[SFX SPELLINGS HALVES SQUARES LIST_A].none? { |n| res_a.include?("#{n} =") })
+
   syntax = lambda do |code, label|
     build = Bc2cppFixtureRuntime.full_or_build
     next true unless build
@@ -477,6 +595,11 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     graph_facts_check(suite, files, interpreted)
     suite.check('a load without the residual marker is a no-op (the full mrblib is not loaded twice)',
                 !interpreted.empty? && ungated == interpreted)
+
+    diff = pure_eval_differences(dir, build, 'fx', fx_folded)
+    puts diff.first(6).map { |l| "    folded: #{l}" } if diff && !diff.empty?
+    suite.check("PURE_CONST_EVAL: the #{fx_folded.size} folded constants equal what mruby computes (class, frozen state, order, content)",
+                diff && diff.empty? && fx_folded.size == 5)
 
     # Hooks and statements the bytes have no room for stay C++ statements of their own, in their place.
     hk_status, hk_sections = equivalence(suite, dir, build, 'fh', hk[:result], hk[:files], hk[:residual], 'Hk')
@@ -520,9 +643,6 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     'LCF::Schema::COMMON_EVENT' => 'read by the DATABASE hash below, which is residual',
     'LCF::Schema::DATABASE' => 'nested hash holding the `elements:` lambdas (a lambda is bytecode)',
     'LCF::Schema::MAP_UNIT' => 'the same, with lambdas',
-    'RGSS::Audio::EXTS' => 'read by EXT_SPELLINGS, which is residual',
-    'RGSS::Audio::EXT_SPELLINGS' => 'built by an `each` block',
-    'Game::State::SYSTEM_SFX_SAVE_FIELD' => 'built by an `each_with_object` block',
     'LCF::INT32_MASK' => 'a bignum on a 32-bit mrb_int target: an irep literal',
     'LCF::INT32_SIGN_BIT' => 'the same',
     'LCF::INT32_WRAP' => 'the same',
@@ -530,6 +650,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     'RGSS::Window.alias_method initialize' => 'ORDER: holds the native initialize, a def of the same name follows'
   }
   found = []
+  real_folded = []
   gems.each do |gem, fs|
     r = LoadCompile.plan(gems, gem: gem, drop_keys: all_keys.fetch(gem), symbol: gem.delete_prefix('mruby-'))
     out_dir = File.join(dir, gem)
@@ -557,6 +678,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
         end
       end
     end
+    real_folded.concat(folded_constants(r.bodies))
     suite.check("#{gem}: every residual compiles with mrbc and keeps its line count", ok)
     pinned_kept = (original_all - kept_all).size
     suite.check("#{gem}: the residual lost the dropped defs and no other (#{pinned_kept} of #{original_all.size})",
@@ -566,6 +688,12 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     puts "    #{gem}: #{s[:bodies]} bodies (#{s[:deleted_bodies]} deleted, #{s[:skeleton_bodies]} kept as skeleton), " \
          "#{s[:defs_dropped]} defs dropped, #{s[:defs_kept]} kept, #{s[:promoted].to_i} constants promoted, " \
          "#{s[:role_residual]} residual statements"
+  end
+  if build
+    diff = pure_eval_differences(dir, build, 'real', real_folded)
+    puts diff.first(6).map { |l| "    folded: #{l}" } if diff && !diff.empty?
+    suite.check("PURE_CONST_EVAL: the engine's #{real_folded.size} folded constants (#{real_folded.map { |_, n, _| n }.sort.join(', ')}) equal what mruby computes",
+                diff && diff.empty? && real_folded.map { |_, n, _| n }.sort == %w[EXT_SPELLINGS SYSTEM_SFX_SAVE_FIELD])
   end
   puts "    unlisted: #{found.sort - stays.keys}, missing: #{stays.keys.sort - found}" unless found.sort == stays.keys.sort
   suite.check("the statements that stay bytecode are the #{stays.size} listed", found.sort == stays.keys.sort)

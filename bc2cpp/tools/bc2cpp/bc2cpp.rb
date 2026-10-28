@@ -2311,7 +2311,7 @@ if $PROGRAM_NAME == __FILE__
   print ShardOutput::HOOKS_MARK if shards > 1
   # LOAD_COMPILE (load_compile.rb): the class and module bodies of this gem's mrblib, as code gem_init runs first.
   stub_keys = MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies)
-  load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys)
+  load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys, unregistered: gen.unregistered_keys)
   load_symbol = nil
   if load_plan&.marker
     print load_plan.code
