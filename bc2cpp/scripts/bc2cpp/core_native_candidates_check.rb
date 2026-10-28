@@ -9,7 +9,10 @@
 #     - a table installed into another class than MRB_MT_CLASS, or into two classes, is no candidate's;
 #   reachable
 #     - an irep symbol, an identifier pool string, a native literal or presym use, a generated literal all count;
-#     - a table entry's or registration's own name operand does not;
+#     - a table entry's or registration's own name operand does not, nor a name only a DEF names;
+#     - LIVE_CORE: a core method body's sends count once its name is reachable (an operator opcode reaches its
+#       operator), or compiled code calls its `_impl`;
+#       an irep with an ALIAS keeps every symbol;
 #   candidates
 #     - an operator name, a name some table of the class keeps, an ALWAYS_DYNAMIC or fragment-built name stay;
 #   header
@@ -17,14 +20,16 @@
 #   ram_candidates
 #     - an unreachable run-time registration is listed; a reachable one, or one a ROM entry shares, is not.
 #
-# Usage: ruby scripts/bc2cpp/core_native_candidates_check.rb
+# Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_native_candidates_check.rb
 
 require 'set'
 require 'tmpdir'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
+require_relative '../../tools/bc2cpp/bc2cpp'
 
 suite = FixtureCheck.new('core_native_candidates_check')
+suite.require_mrbc!
 
 NATIVE = <<~'C'
   #define MRB_MT_CLASS Widget
@@ -38,6 +43,11 @@ NATIVE = <<~'C'
     MRB_MT_ENTRY(w_shared, MRB_SYM(shared), MRB_ARGS_NONE())
     MRB_MT_ENTRY(w_built_x, MRB_SYM(built_x), MRB_ARGS_NONE())
     MRB_MT_ENTRY(w_inspect, MRB_SYM(inspect), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_live, MRB_SYM(live_send), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_dead, MRB_SYM(dead_send), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_impl, MRB_SYM(impl_send), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_alias, MRB_SYM(alias_old), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_def, MRB_SYM(defined_only), MRB_ARGS_NONE())
   };
   static const mrb_mt_entry widget_class_rom_entries[] = {
     MRB_MT_ENTRY(w_shared_s, MRB_SYM(shared), MRB_ARGS_NONE())
@@ -66,8 +76,47 @@ NATIVE = <<~'C'
   }
 C
 
-FakeIrep = Struct.new(:syms, :pool)
-IREPS = { 'a' => FakeIrep.new(%i[from_ruby], ['built_', 'string_name']) }.freeze
+# The engine: every irep counts. `defined_only` is only defined.
+ENGINE = <<~'RUBY'
+  class Thing
+    def go
+      from_ruby
+      @names = ['string_name', 'built_']
+      @sum = @a + @b
+      used
+    end
+
+    def defined_only; end
+  end
+RUBY
+
+# A core file: `used` is sent by the engine, `unused` by nothing, `direct?` only called through its `_impl`, `+` by
+# the engine's ADD opcode.
+CORE = <<~'RUBY'
+  class Widget
+    def used
+      live_send
+    end
+
+    def unused
+      dead_send
+    end
+
+    def direct?
+      impl_send
+    end
+
+    def +(other)
+      op_send
+    end
+  end
+
+  class Gadget
+    alias alias_new alias_old
+  end
+RUBY
+
+GENERATED = ['f("literal")', 'v = Widget_direct$3f_impl(M, self);'].freeze
 
 Dir.mktmpdir('core-native') do |dir|
   path = File.join(dir, 'widget.c')
@@ -80,16 +129,28 @@ Dir.mktmpdir('core-native') do |dir|
               keys['Widget#spin'] == 'Widget' && entries.count { |e| e[:name] == 'shared' && e[:installed].nil? } == 1 &&
               keys['Gadget#two'].nil?)
 
-  names, fragments = CoreNativeCandidates.reachable(IREPS, [path], ['f("literal")'])
+  engine = suite.compile(ENGINE) { |ireps, _root| ireps }
+  core = suite.compile(CORE) do |ireps, root|
+    body_of = {}
+    build_registry(ireps, root)[0].each { |name, defs| defs.each { |d| body_of[d.irep] = name if d.irep } }
+    [{ ireps: ireps, body_of: body_of }]
+  end
+  names, fragments = CoreNativeCandidates.reachable(engine, [path], GENERATED, core: core)
   suite.check('irep symbols, pool identifiers, native lookups and generated literals count',
-              %w[from_ruby string_name called literal].all? { |n| names.include?(n) })
-  suite.check("an entry's or registration's own name operand does not",
-              !names.include?('spin') && !names.include?('lonely') && !names.include?('two'))
+              %w[from_ruby string_name called literal used].all? { |n| names.include?(n) })
+  suite.check("an entry's or registration's own name operand does not, nor a name only a DEF names",
+              !names.include?('spin') && !names.include?('lonely') && !names.include?('two') &&
+              !names.include?('defined_only'))
+  suite.check("a core body's sends count once its name is reachable or its _impl is called, not before",
+              names.include?('live_send') && names.include?('impl_send') && names.include?('op_send') &&
+              !names.include?('dead_send') &&
+              !names.include?('unused'))
+  suite.check("an alias keeps the name it looks up", names.include?('alias_old'))
 
   listed = CoreNativeCandidates.candidates(entries, names, fragments)
   suite.check("only unreachable entries of their own class's tables are listed (#{listed.join(', ')})",
-              listed == %w[Widget#empty? Widget#size= Widget#spin])
-  header = CoreNativeCandidates.header(listed, entries)
+              listed == %w[Widget#dead_send Widget#defined_only Widget#empty? Widget#size= Widget#spin])
+  header = CoreNativeCandidates.header(%w[Widget#empty? Widget#size= Widget#spin], entries)
   suite.check('the header names each listed entry by its presym C name',
               header.lines.grep(/\A#define/).sort ==
                 ["#define MRB_MT_EXCLUDE_Widget_SYM_E__size 1\n", "#define MRB_MT_EXCLUDE_Widget_SYM_Q__empty 1\n",
