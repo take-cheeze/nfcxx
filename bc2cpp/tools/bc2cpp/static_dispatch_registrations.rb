@@ -56,6 +56,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
+require_relative 'core_native_candidates'
 require_relative 'native_owner_map'
 
 module StaticDispatchRegistrations
@@ -729,8 +730,32 @@ module StaticDispatchRegistrations
       suffix_bases = text if built.empty?
     end
 
+    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }) : nil
+
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
-      closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups }
+      closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups,
+      core_excluded: core_excluded }
+  end
+
+  # CORE_NATIVE_CANDIDATES (closed only): [the core ROM entries the closed build leaves out of its tables, the core
+  # run-time registrations it removes]. Every Ruby
+  # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`) -- and every
+  # native source, with the generated code.
+  def core_excluded(repo_root, mrbc, ireps, generated)
+    _ruby, native = outside_world_files(repo_root, closed_only: true)
+    third = "#{File.expand_path(repo_root)}/3rd/"
+    core_ruby = (Dir["#{third}mruby/mrblib/*.rb"] + Dir["#{third}mruby/mrbgems/*/mrblib/**/*.rb"] +
+                 BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{third}#{g}/mrblib/**/*.rb"] }).sort
+    all = ireps.dup
+    Dir.mktmpdir('bc2cpp_core_natives') do |tmp|
+      core_ruby.each_with_index do |path, i|
+        compile_ireps([path], "core_native_#{i}", tmp, mrbc: mrbc)[0].each { |label, irep| all["#{i}:#{label}"] = irep }
+      end
+    end
+    names, fragments = CoreNativeCandidates.reachable(all, native, generated)
+    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
+    [CoreNativeCandidates.candidates(entries, names, fragments),
+     CoreNativeCandidates.ram_candidates(NativeOwnerMap.build(native), names, fragments, entries)]
   end
 
   LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
@@ -957,5 +982,15 @@ if $PROGRAM_NAME == __FILE__
     body = keys.empty? ? 'Set[].freeze' : "Set[\n#{keys.map { |k| "  #{k.inspect}," }.join("\n")}\n].freeze"
     File.write(path, src.sub(/^#{const} = Set\[.*?\]\.freeze$/m, "#{const} = #{body}"))
     warn "wrote #{keys.size} name(s) to #{path}"
+    if closed_only
+      path = File.join(__dir__, 'static_dispatch_core_excluded.rb')
+      src = File.read(path)
+      %w[STATIC_DISPATCH_CORE_EXCLUDED STATIC_DISPATCH_CORE_LEFT_OUT].zip(analysis[:core_excluded]) do |const, core|
+        body = core.empty? ? 'Set[].freeze' : "Set[\n#{core.map { |k| "  #{k.inspect}," }.join("\n")}\n].freeze"
+        src = src.sub(/^#{const} = Set\[.*?\]\.freeze$/m, "#{const} = #{body}")
+        warn "wrote #{core.size} #{const} entr(ies) to #{path}"
+      end
+      File.write(path, src)
+    end
   end
 end
