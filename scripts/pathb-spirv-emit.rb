@@ -785,6 +785,10 @@ class Spv
     memo([:vec3]) { i = id; decl([23, i, t_int(32), 3]); i }
   end
 
+  def t_vec(elem, n)
+    memo([:vec, elem, n]) { i = id; decl([23, i, elem, n]); i }
+  end
+
   # the type of a work-item builtin: a vector of uint in Vulkan; of size_t in OpenCL (a uint vector crashes Intel's
   # compiler, which takes the builtins as size_t: see docs/notes/gpu.md)
   def builtin_vec_t
@@ -2373,6 +2377,17 @@ class SFn
   end
 
   def copy_bytes(d, src, n)
+    if !@wgs_mode && n % 16 == 0 && n <= 256
+      # 16-byte blocks at constant offsets, one vector load and one store each (the C++ emitter does the same)
+      vt = @spv.t_vec(@spv.t_int(32), 4)
+      (0...n).step(16) do |off|
+        sp = res(120, @spv.t_ptr(psb_sc, vt), res(IADD, @spv.t_int(64), src, @spv.c_u64(off)))
+        v = res(61, vt, sp, 2, 4)
+        dp = res(120, @spv.t_ptr(psb_sc, vt), res(IADD, @spv.t_int(64), d, @spv.c_u64(off)))
+        ins([62, dp, v, 2, 4])
+      end
+      return
+    end
     if n % 4 == 0
       counted_loop(n, 4) do |off|
         v = mem_load(res(IADD, @spv.t_int(64), src, off), ["int", 4, false, false])
