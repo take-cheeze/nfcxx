@@ -98,6 +98,8 @@ module CollectDirect
       int ai = mrb_gc_arena_save(M);
       for (mrb_int i = 0; i < ARY_LEN(mrb_ary_ptr(self)); ++i) {
         mrb_value v = ARY_PTR(mrb_ary_ptr(self))[i];
+        // The block gets v as a C pointer, not on the VM stack, and may unlink it from self by name (ELEMENT_READ_ROOTS).
+        bc2cpp_keep(M, v);
         mrb_value r = entry ? entry(M, env, false, 1, &v) : mrb_yield_argv(M, blk, 1, &v);
         struct RArray* a = mrb_ary_ptr(acc);
         if (!ARY_EMBED_P(a) && a->as.heap.len < a->as.heap.aux.capa) {

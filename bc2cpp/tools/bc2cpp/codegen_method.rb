@@ -565,6 +565,8 @@ class CodeGen
              else
                (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
              end
+      # Without the flow pass there is no liveness to narrow the roots, so every element read is rooted.
+      text += ElementReadRoots.keep_text(insn) if !flow_bodies && ElementReadRoots.element_read?(insn)
       if arm_prune_drop && arm_prune.include?(idx)
         # A flow body keeps its '' slot until the decision below, so the pass never sees a dropped text.
         arm_texts[idx] = [jump_label, text]
@@ -597,6 +599,8 @@ class CodeGen
       unless (@clean_probe || @report_only_text) && !@runtime_installed_names && flow_bodies.none? { |text| text.include?('#error') }
         flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured, handlers: flow_handlers)
       end
+      # ELEMENT_READ_ROOTS runs on the final texts, so the liveness it reads is the one the emitted code has.
+      flow_bodies = ElementReadRoots.apply(irep, flow_bodies, flow_captured, handlers: flow_handlers)
       flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
     end
     @resumable.flat = false if @resumable
