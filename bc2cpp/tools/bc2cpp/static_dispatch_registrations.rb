@@ -713,7 +713,8 @@ module StaticDispatchRegistrations
 
   LITERAL_OPS = %i[LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE STRING STRCAT ARRAY ARRAY2 ARYCAT ARYPUSH ARYDUP
                    HASH HASHADD HASHCAT RANGE_INC RANGE_EXC SYMBOL LAMBDA BLOCK METHOD INTERN].freeze
-  INSTANTIATING = %w[new allocate dup clone load _load marshal_load].freeze
+  # Not dup or clone: they copy an object that already exists, so the first engine instance comes from one of these.
+  INSTANTIATING = %w[new allocate load _load marshal_load].freeze
   ENGINE_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\z)/
 
   # The receiver kind of every instruction of `irep` that sends (nil for the rest): [:const, Name] | :core (a
@@ -792,8 +793,12 @@ module StaticDispatchRegistrations
       irep = ireps.fetch(label)
       recvs = receiver_kinds(irep)
       m = method_of[label]
+      # A core method's self is a core object: an engine instance there (a subclass of the core class) would have
+      # set engine_live where it was made.
       self_kind = if m.nil? then :class
-                  else singleton.call(body_of[m][0]) ? :class : :instance
+                  elsif singleton.call(body_of[m][0]) then :class
+                  elsif core.call(body_of[m][0]) then :core
+                  else :instance
                   end
       irep.each_with_op(*(SEND_OPS - [:LOADSYM])) do |insn, idx|
         name = insn.sym

@@ -193,6 +193,7 @@ BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
 require 'prism'
 require_relative '../rgss_tts_config'
+require_relative 'mrblib_stubs'
 
 # `native_namespaces`: the namespaces whose native (C/C++) registrations this gem's registration removes when the
 # closed list leaves them out (NATIVE_CANDIDATES, static_dispatch_registrations.rb).
@@ -958,6 +959,8 @@ module Bc2cppCompiledGemGeneration
         FileUtils.mkdir_p(File.dirname(path))
         File.write(path, STUB)
       end
+      # An empty manifest: phase 1's mrblib keeps every body (MRBLIB_STUBS).
+      File.write(MrblibStubs.manifest_path(env.fetch('OUT_DIR'), symbol), '')
       @done[generated] = true
     end
   end
