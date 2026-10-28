@@ -95,7 +95,7 @@ class CodeGen
         if insn.op == :GETUPVAR
           "  r#{insn.reg} = *#{vname};\n"
         else
-          "  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
+          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
@@ -840,11 +840,11 @@ class CodeGen
         end
       when 'Hash'
         if exact
-          "#{INDEX_EXACT_NOTE}mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});\n  r#{d} = r#{val};\n"
+          "#{INDEX_EXACT_NOTE}bc2cpp_hash_aset(M, r#{d}, r#{idx_reg}, r#{val});\n  r#{d} = r#{val};\n"
         else
           <<~CPP
             if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-              mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
+              bc2cpp_hash_aset(M, r#{d}, r#{idx_reg}, r#{val});
               r#{d} = r#{val};
             } else {
               #{index_set_else_statement(d, idx_reg, val)}
@@ -869,7 +869,7 @@ class CodeGen
       # register). vm.c: `mrb_gv_set(mrb, irep->syms[b], regs[a])`.
       s = insn.regs.first
       name = insn.global_name
-      "  mrb_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
+      "  bc2cpp_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
     when :STOP
       ''
     when :NOP
@@ -983,20 +983,21 @@ class CodeGen
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
       # self as receiver and N args in R(a+1)..R(a+N), plus one register forwarding
       # the current block. super_target calls the target with NO block (correct
-      # only where SUPER_NO_CALLER_BLOCK proves no caller passes one); module_super_call resolves the same call through an included
-      # module and forwards this frame's block, as OP_SUPER does.
+      # only where SUPER_NO_CALLER_BLOCK proves no caller passes one);
+      # module_super_call resolves the same call through an included module and
+      # forwards this frame's block, as OP_SUPER does.
        target_def = super_target(owner_def)
        d_reg = insn.reg
        n = insn.plain_fixed_argc? ? insn.argc : nil
-       zsuper_kind = reg_offset.zero? ? zsuper_native_kind(owner_def, irep, idx) : nil
-       zsuper_plan = reg_offset.zero? && zsuper_kind.nil? ? zsuper_forward_plan(owner_def, irep, idx) : nil
+       zsuper_plan = reg_offset.zero? ? zsuper_forward_plan(owner_def, irep, idx) : nil
+       zsuper_lookup = reg_offset.zero? && zsuper_plan.nil? ? zsuper_lookup_plan(owner_def, irep, idx) : nil
        if target_def && d_reg && n
          args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
          "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
-       elsif zsuper_kind && d_reg
-         compile_zsuper_native(zsuper_kind, d_reg)
        elsif zsuper_plan && d_reg
          compile_zsuper_forward(zsuper_plan, d_reg)
+       elsif zsuper_lookup && d_reg
+         compile_zsuper_lookup(zsuper_lookup, d_reg)
        elsif (call = d_reg && module_super_call(owner_def, irep, d_reg, n))
          call
        elsif (call = d_reg && super_lookup_call(owner_def, irep, idx, d_reg, n))
@@ -1005,56 +1006,20 @@ class CodeGen
          "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
        end
      when :ARGARY
-      # ZSUPER_NATIVE_SUPPORT: the array this ARGARY builds is only read by the next
-      # `SUPER ... n=*` (zsuper_native_kind checks the adjacency and registers), and
-      # both translations use the original registers instead, so it is not built.
-      # OP_ARGARY has no other observable effect (see ZSUPER_NATIVE_TARGETS). Any
-      # other ARGARY keeps `#error`.
-      if reg_offset.zero? && zsuper_native_kind(owner_def, irep, idx)
-        "  // #{insn.raw.strip} (zsuper argument array not built -- consumed by the SUPER below)\n"
-      elsif reg_offset.zero? && zsuper_forward_plan(owner_def, irep, idx)
-        # ZSUPER_GENERAL_SUPPORT: same dead-array suppression for the general zsuper
-        # pair, whose SUPER arm calls the superclass `_impl` with the original
-        # registers.
+      # The array this ARGARY builds is only read by the next `SUPER ... n=*` (both plans check the adjacency and
+      # registers), and both translations use the original registers instead, so it is not built. OP_ARGARY has
+      # no other observable effect. Any other ARGARY keeps `#error`.
+      if reg_offset.zero? && zsuper_forward_plan(owner_def, irep, idx)
+        # ZSUPER_GENERAL_SUPPORT: the SUPER arm calls the superclass `_impl` with the original registers.
         "  // #{insn.raw.strip} (zsuper argument array not built -- forwarded to the superclass _impl below)\n"
+      elsif reg_offset.zero? && zsuper_lookup_plan(owner_def, irep, idx)
+        # ZSUPER_LOOKUP: the SUPER arm builds the same list for the looked-up method.
+        "  // #{insn.raw.strip} (zsuper argument array built by the SUPER below)\n"
       else
         "  #error unhandled opcode ARGARY -- not in this prototype's supported subset\n"
       end
     else
       "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
-    end
-  end
-
-  # ZSUPER_NATIVE_SUPPORT: replacement body for a recognized ARGARY + `SUPER
-  # n=*` pair (`d_reg` is SUPER's destination). See ZSUPER_NATIVE_TARGETS and
-  # zsuper_native_kind.
-  def compile_zsuper_native(kind, d_reg)
-    case kind
-    when :kernel_respond_to_missing
-      # Kernel#respond_to_missing? is src/kernel.c's mrb_false:
-      # `return mrb_false_value();`.
-      "  // super -> Kernel#respond_to_missing? (3rd/mruby/src/kernel.c's own `mrb_false`: " \
-        "unconditionally false, reads neither self nor arguments)\n" \
-        "  r#{d_reg} = mrb_false_value();\n"
-    when :basic_object_method_missing
-      # BasicObject#method_missing is mrb_obj_missing (src/class.c), which reads its
-      # arguments via mrb_get_args off mrb->c->ci and cannot be called directly;
-      # its values are computed here and passed to mrb_method_missing.
-      # The ARGARY spec is `1:1:0:0` with lv=0: vm.c builds `[r1, *r2]`, so "n*!"
-      # gives name = r1 and args = r2, read from the live registers (a reassignment
-      # before `super` is forwarded as the interpreter would).
-      # The mrb_array_p guard is vm.c's OP_ARGARY `r != 0` branch (`if
-      # (mrb_array_p(stack[m1])) { ... }`, else len 0: an empty forwarded list), and
-      # keeps RARRAY_LEN/PTR off a non-Array.
-      # `self` = r0 (OP_SUPER reads regs[0]).
-      # mrb_method_missing is mrb_noreturn, so nothing follows and d_reg is left
-      # unassigned; the next RETURN is unreachable (as after RAISEIF's raise).
-      "  // super -> BasicObject#method_missing (3rd/mruby/src/class.c's own `mrb_obj_missing`, " \
-        "reproduced via the `mrb_method_missing` it tail-calls -- always raises NoMethodError)\n" \
-        "  mrb_method_missing(M, mrb_obj_to_sym(M, r1), self,\n" \
-        "                     mrb_array_p(r2)\n" \
-        "                       ? mrb_ary_new_from_values(M, ary_size(r2), ary_items(r2))\n" \
-        "                       : mrb_ary_new(M));\n"
     end
   end
 

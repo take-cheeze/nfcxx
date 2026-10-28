@@ -1170,10 +1170,12 @@ class CodeGen
     out << "        if (bc2cpp_sort_c_#{addr} == -2) { #{inline_raise('ArgumentError', 'sort_by comparison failed')} }\n"
     out << "        if (bc2cpp_sort_c_#{addr} == 0) { bc2cpp_sort_c_#{addr} = (mrb_integer(bc2cpp_sort_ib_#{addr}) < mrb_integer(bc2cpp_sort_ia_#{addr})) ? -1 : 1; }\n"
     out << "        if (bc2cpp_sort_c_#{addr} >= 0) break;\n"
-    out << "        mrb_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_pa_#{addr});\n"
+    # The pairs array is this loop's own temporary and every value it holds is moved, never dropped: no
+    # GC_KEEP_OVERWRITTEN root needed.
+    out << "        bc2cpp_raw_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_pa_#{addr});\n"
     out << "        --bc2cpp_sort_b_#{addr};\n"
     out << "      }\n"
-    out << "      mrb_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_tmp_#{addr});\n"
+    out << "      bc2cpp_raw_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_tmp_#{addr});\n"
     out << "    }\n"
     out << "    r#{dest_reg} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
     out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
