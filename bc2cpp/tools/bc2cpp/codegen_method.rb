@@ -204,7 +204,7 @@ class CodeGen
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) : mand
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| c_param_name(n, i) }
-    # NATIVE_ARG_TARGETS per-position types (see native_arg_types). Optional
+    # NATIVE_ARGS per-position types (see native_arg_types). Optional
     # positions are never retyped; the padding is explicit.
     arg_native_types = native_arg_types(d, mand) + Array.new(total_args - mand)
 
@@ -729,7 +729,7 @@ class CodeGen
       out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
     else
       # Each local's type must match what its mrb_get_args format character writes:
-      # 'o' writes an mrb_value, 'i'/'n' (NATIVE_ARG_TARGETS) an mrb_int*/mrb_sym*
+      # 'o' writes an mrb_value, 'i' (NATIVE_ARGS) an mrb_int*/mrb_sym*
       # (src/class.c mrb_get_args). One declaration per argument, since types can
       # differ.
       # OPTIONAL_ARG_SUPPORT: optional positions start as mrb_nil_value(): `|` leaves
