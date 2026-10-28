@@ -689,7 +689,7 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     'BC2CPP_STATIC_DISPATCH_LISTS' => ENV['BC2CPP_STATIC_DISPATCH_LISTS']
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
-  env['BC2CPP_LOAD_WORLD'] = bc2cpp_load_world(spec) if ENV.fetch('BC2CPP_LOAD_COMPILE', 'defs') != 'off'
+  env['BC2CPP_LOAD_WORLD'] = bc2cpp_load_world(spec) if ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') != 'off'
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
 end
 
