@@ -185,6 +185,7 @@ Dir.mktmpdir do |dir|
   check.call('the closed world may rebind, through enumerator.rb:322 only',
              w.failures.size == 1 && w.why.start_with?('3rd/mruby/mrbgems/mruby-enumerator/mrblib/enumerator.rb:322:'))
   check.call("Symbol#to_proc's send (native, symbol.c) is proven", w.failures.none? { |f| f.include?('symbol.c') })
+  check.call("Hash#to_proc's native (hash_ext.c) is no rebinder or computed sender", w.failures.none? { |f| f.include?('hash_ext.c') })
   site_lines = w.sites.map { |label, idx, name, _| "#{File.basename(ireps[label].file)}:#{ireps[label].instructions[idx].lineno} #{name}" }
   puts "    sites: #{site_lines.join(', ')}"
   check.call('the literal rebinder sites are the enumerator instance_eval blocks and Fiber.new',
