@@ -30,8 +30,13 @@
 #   CORE_BYTECODE_TOKENS (needs MRBC; skipped without it): core Ruby read as bytecode names a method only through a
 #     send whose receiver may be an engine object (self in a module, Object or Kernel method; any unknown value), a
 #     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
-#     file with a reflective send keeps the text rule. engine_ancestry follows superclasses, mruby's native
-#     exception chain included, and gives up (:all) on any other native superclass.
+#     file with a reflective send counts every symbol of its bytecode, never a comment word or a local variable.
+#     engine_ancestry follows superclasses, mruby's native exception chain included, and gives up (:all) on any
+#     other native superclass.
+#   CLOSED_LINKED_ONLY: the closed scan reads no core mruby-* gem outside the closed build's gem closure (HAL gems
+#     stay), no external gem it leaves out, no engine mrblib file its rake swaps out and no app/ source; it reads
+#     the closed host, scripts/bc2cpp/trace_host.cxx.
+#   NATIVE_COMMENTS: a literal in a C comment names nothing; text the comment scan cannot read is kept whole.
 #   FRAGMENT_USES (needs MRBC; skipped without it): a pool literal stays a fragment only when a load of it may reach
 #     a built string that goes on somewhere -- a concatenation without a non-name character whose result escapes
 #     (a send, an interned Symbol), a store, a return a caller passes on, an argument of a method the trace does not
@@ -216,6 +221,32 @@ check('the full scan still reads them', open_ruby.any? { |p| p.start_with?("#{ro
 check('closed scan reads no workflow', ruby.none? { |p| p.start_with?("#{root}/.github/") })
 check('the full scan reads the workflows', open_ruby.any? { |p| p.start_with?("#{root}/.github/") })
 
+# --- CLOSED_LINKED_ONLY ---
+unlinked = S.closed_unlinked_dirs(root)
+check('linked only: a core gem outside the closure, an external gem the build leaves out, app/',
+      %W[#{root}/3rd/mruby/mrbgems/mruby-socket/ #{root}/3rd/mruby/mrbgems/mruby-enum-lazy/
+         #{root}/3rd/mruby-onig-regexp/ #{root}/app/].all? { |d| unlinked.include?(d) })
+check('linked only: a linked core gem, a HAL gem and a linked external gem stay',
+      %W[#{root}/3rd/mruby/mrbgems/mruby-io/ #{root}/3rd/mruby/mrbgems/hal-posix-io/
+         #{root}/3rd/mruby-stringio/].none? { |d| unlinked.include?(d) })
+check('linked only: an unlinked gem\'s mrblib and a swapped-out engine file are not read',
+      ruby.none? { |p| p.include?('/mruby-enum-lazy/') || p.end_with?('/scene/map_tts.rb') } &&
+      open_ruby.any? { |p| p.end_with?('/scene/map_tts.rb') })
+check('linked only: the closed host is read, the device apps are not',
+      natives.include?("#{root}/scripts/bc2cpp/trace_host.cxx") && natives.none? { |p| p.start_with?("#{root}/app/") })
+
+# --- NATIVE_COMMENTS ---
+commented = %(int n = 1'000; /* "in_block" */ f("keep//this", '"'); // "in_line"\nmrb_funcall(M, v, "real", 0);\n)
+stripped = S.strip_c_comments(commented)
+check('comments: block and line comments go, strings and a quote character stay',
+      !stripped.include?('in_block') && !stripped.include?('in_line') && stripped.include?('"keep//this"') &&
+      stripped.include?(%('"')) && stripped.include?('"real"'))
+check('comments: unreadable text is kept as it is',
+      S.strip_c_comments(%{f("open\n/* "x" */}).include?('x') && S.strip_c_comments(%{R"(/* "y" */)"}).include?('y'))
+comment_tokens = Set.new
+S.native_name_tokens(commented, comment_tokens, [])
+check('comments: a literal in a comment names nothing', comment_tokens == Set['keep//this', 'real'])
+
 # --- engine_ancestry ---
 check('ancestry: engine classes only reach Object',
       S.engine_ancestry({ 'Game::A' => 'Game::B', 'Game::B' => :none }, []) == Set['Object', 'BasicObject'])
@@ -250,7 +281,15 @@ if ENV['MRBC']
       end
     RUBY
     reflective = File.join(tmp, 'reflective.rb')
-    File.write(reflective, "class FixRefl\n  def r(m) = __send__(m, reflective_local_word)\nend\n")
+    File.write(reflective, <<~'RUBY')
+      class FixRefl
+        # comment_word_only
+        def r(m)
+          local_name_only = m
+          __send__(local_name_only, reflective_send_name, :reflective_symbol)
+        end
+      end
+    RUBY
     tokens = Set.new
     text = S.core_bytecode_tokens([plain, reflective], tokens, mrbc: ENV['MRBC'], superclass_of: {})
     check('core: self in a module method counts', tokens.include?('mixin_self_send'))
@@ -261,7 +300,12 @@ if ENV['MRBC']
     check('core: an unknown receiver counts', tokens.include?('unknown_recv_send'))
     check('core: symbols and identifier strings count',
           tokens.include?('symbol_literal') && tokens.include?('string_literal_name'))
-    check('core: a reflective file keeps the text rule', text == [reflective] && !tokens.include?('reflective_local_word'))
+    names = text[reflective]
+    check('core: a reflective file loses the receiver rule, not its symbols',
+          text.keys == [reflective] && names&.include?('reflective_send_name') &&
+          names.include?('reflective_symbol') && !tokens.include?('reflective_send_name'))
+    check('core: a reflective file names no comment word or local variable',
+          names && !names.include?('comment_word_only') && !names.include?('local_name_only'))
 
     # --- FRAGMENT_USES ---
     fragments = File.join(tmp, 'fragments.rb')
