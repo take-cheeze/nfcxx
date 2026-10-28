@@ -442,6 +442,20 @@ template <int D = 1> class nd_item {
   size_t get_global_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr_[i] + gl_[i]; return l; }
   size_t get_local_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * lr_[i] + lo_[i]; return l; }
   sub_group get_sub_group() const { return sub_group(get_local_linear_id(), lr_.size()); }
+#ifdef __NFCXX_SYCL_DEVICE__
+  // The device's work-item indices, filled in place (no id or range temporaries: each one is a frame slot of the kernel).
+  // SYCL dimension d is the device's component 2 - d (see device_gid).
+  void device_fill() {
+    for (int d = 0; d < D; d++) {
+      const int c = 2 - d;
+      gl_[d] = c == 0 ? __nfcxx_sycl_gid_x() : c == 1 ? __nfcxx_sycl_gid_y() : __nfcxx_sycl_gid_z();
+      lo_[d] = c == 0 ? __nfcxx_sycl_lid_x() : c == 1 ? __nfcxx_sycl_lid_y() : __nfcxx_sycl_lid_z();
+      grp_[d] = c == 0 ? __nfcxx_sycl_group_x() : c == 1 ? __nfcxx_sycl_group_y() : __nfcxx_sycl_group_z();
+      gr_[d] = c == 0 ? __nfcxx_sycl_grange_x() : c == 1 ? __nfcxx_sycl_grange_y() : __nfcxx_sycl_grange_z();
+      lr_[d] = c == 0 ? __nfcxx_sycl_lrange_x() : c == 1 ? __nfcxx_sycl_lrange_y() : __nfcxx_sycl_lrange_z();
+    }
+  }
+#endif
   void barrier(access::fence_space = access::fence_space::global_and_local) const {
 #ifdef __NFCXX_SYCL_DEVICE__
     __nfcxx_sycl_barrier();
@@ -1299,7 +1313,9 @@ template <int D, class F> void __nfcxx_sycl_entry_range() {
 }
 template <int D, class F> void __nfcxx_sycl_entry_nd() {
   const F *f = (const F *)__nfcxx_sycl_closure();
-  (*f)(nd_item<D>(device_gid<D>(), device_lid<D>(), device_group<D>(), device_global_range<D>(), device_local_range<D>()));
+  nd_item<D> it;
+  it.device_fill();
+  (*f)(it);
 }
 template <class F> void __nfcxx_sycl_entry_single() {
   const F *f = (const F *)__nfcxx_sycl_closure();
