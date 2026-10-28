@@ -12,6 +12,7 @@
 # `MRBC=... ruby tools/bc2cpp/static_dispatch_registrations.rb --write`.
 require 'set'
 require_relative 'static_dispatch_unregistered_closed'
+require_relative 'static_dispatch_core_excluded'
 
 STATIC_DISPATCH_UNREGISTERED = Set[
   "Game::Actor#db_exp_param",
