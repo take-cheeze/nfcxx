@@ -8,6 +8,8 @@
 #   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow,
 #                                 `continue`, bool loads, unreachable code. A probe with a `// GCC: undefined` line
 #                                 relies on a case C++ leaves undefined: only EXPECT is checked, gcc is not compared.
+#                                 A probe with a `// GCC-SKIP: reason` line uses something the host gcc lacks (its reason is
+#                                 printed): only EXPECT is checked, gcc is not compared.
 #                                 volatile.cpp and tls.cpp: volatile accesses and thread-local objects (a second pthread).
 #                                 A probe may carry `// ASM-COUNT: FUNCTION PREFIX N` lines: the assembly of FUNCTION must
 #                                 call exactly N functions whose name starts with PREFIX (check_asm below);
@@ -150,12 +152,16 @@ run_one() {
   want=$(expect_of "$f")
   if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
   gcc_rc=n/a
-  if grep -q '^// GCC: undefined' "$f"; then
+  skip=$(sed -n 's,^// GCC-SKIP: *,,p' "$f" | head -1)
+  if [ -n "$skip" ] || grep -q '^// GCC: undefined' "$f"; then
     # The program relies on a case C++ leaves undefined (a bool holding 2): gcc is not compared.
     if [ $((got & 255)) -ne $((want & 255)) ]; then
       failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc not compared)"); return
     fi
-    match=$((match + 1)); lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared: undefined in C++)"); return
+    match=$((match + 1))
+    if [ -n "$skip" ]; then lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared: $skip)")
+    else lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared: undefined in C++)"); fi
+    return
   fi
   if NFCXX_BACKEND=gcc ./nfcxx $std "$f" -o "$tmp/$n.gcc" > /dev/null 2> "$tmp/$n.gccerr"; then
     sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/$n.gcc" "$tmp/$n.gcc.stdout"; gcc_rc=$?
