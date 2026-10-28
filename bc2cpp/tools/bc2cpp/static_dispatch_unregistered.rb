@@ -240,7 +240,6 @@ STATIC_DISPATCH_UNREGISTERED = Set[
   "Game::Troop#build_member",
   "Game::Variables#clear_dirty",
   "LCF::Array2D#same_schema?",
-  "LCF::File#build_root",
   "LCF::File#terminate_root?",
   "LCF::MapUnit#terminate_root?",
   "LCF::SaveTyped::Bgm#save_balance",
