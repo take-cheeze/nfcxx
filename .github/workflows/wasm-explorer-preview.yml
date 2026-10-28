@@ -87,7 +87,7 @@ jobs:
       WRANGLER: wrangler@4.148.0
     steps:
       - name: Download the site
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: github-pages
           path: artifact
