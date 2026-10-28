@@ -1019,7 +1019,8 @@ module StaticDispatchRegistrations
   # Enumerator is ever made; none otherwise. +reasons+ maps each kept core method to why it stays interpreted. The result of
   # the proof is kept in @enumerator_free (the report and the check read it).
   def enumerator_free_keys(reasons, core, ireps, native, entries, map, engine_tuple, symbol_lookups, repo_root)
-    keys = reasons.select { |key, why| why.start_with?(CoreMethods::ENUMERATOR_REASON) && key.split('#', 2).last.match?(/\A[a-z_][A-Za-z0-9_]*[?!=]?\z/) }.keys
+    # Operators too (`Yielder#<<`): the proof is no name scan, so an operator is released as an identifier is.
+    keys = reasons.select { |_key, why| why.start_with?(CoreMethods::ENUMERATOR_REASON) }.keys
     @enumerator_free = nil
     return [] if keys.empty?
 
