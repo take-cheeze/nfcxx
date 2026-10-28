@@ -724,7 +724,7 @@ class CodeGen
   # winner is not a single statically known bytecode method, which keeps the
   # `#error`.
   #
-  # Soundness differs from SUPER_TARGETS in one way that makes this stricter,
+  # Soundness differs from super_target's direct call in one way that makes this stricter,
   # not looser: OP_SUPER always forwards the current method's block, so the
   # target is called WITH this frame's block (super_block_arg), never with the
   # nil a compiled `_impl` has no way to invent. `super` with no block in
@@ -887,6 +887,56 @@ class CodeGen
       "  }\n"
   end
 
+  # ZSUPER_LOOKUP: a bare `super` (`ARGARY R(a+1) m1:r:m2:kd (lv)` + `SUPER R(a) n=*`) no direct rule calls --
+  # a C method such as Kernel#respond_to_missing?, or one found only at run time -- is looked up and called as
+  # SUPER_LOOKUP does, with the arguments OP_ARGARY would pack: with lv=0 they are this frame's registers, r1..rm1,
+  # the rest Array's elements (r(m1+1), when it is one, as OP_ARGARY tests), then the m2 post arguments. Keyword
+  # arguments (kd) decline. The block is the frame's own (super_block_arg), else nil under SUPER_NO_CALLER_BLOCK.
+  # `idx` may name either half; both give the same answer, so the ARGARY arm and the SUPER arm cannot emit half a
+  # translation. BC2CPP_SUPER_LOOKUP=0 keeps the `#error`.
+  def zsuper_lookup_plan(owner_def, irep, idx)
+    return nil unless owner_def && irep && idx && ENV.fetch('BC2CPP_SUPER_LOOKUP', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
+
+    program = BytecodeIR.for(irep)
+    argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
+    return nil if argary_idx.negative?
+
+    argary = program.source_at(argary_idx)
+    super_insn = program.source_at(argary_idx + 1)
+    return nil unless argary&.op == :ARGARY && super_insn&.op == :SUPER && super_insn.pure_splat?
+    return nil unless argary.reg && super_insn.reg && argary.reg.to_i == super_insn.reg.to_i + 1
+
+    spec = argary.argary_spec
+    return nil unless spec && spec.size == 4 && argary.paren_int.to_i.zero?
+
+    m1, rest, m2, kd = spec
+    return nil unless kd.zero?
+
+    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    return nil unless block
+
+    { m1: m1, rest: rest.positive?, m2: m2, block: block, owner: owner_def.owner, name: owner_def.name }
+  end
+
+  # ZSUPER_LOOKUP: SUPER's half (`d_reg` is its destination), with the argument list built as OP_ARGARY builds it.
+  def compile_zsuper_lookup(plan, d_reg)
+    pre = (1..plan[:m1]).map { |i| "r#{i}" }
+    post = (1..plan[:m2]).map { |i| "r#{plan[:m1] + (plan[:rest] ? 1 : 0) + i}" }
+    out = +"  {\n"
+    out << "    mrb_value bc2cpp_zsuper_args = mrb_ary_new_capa(M, #{plan[:m1] + plan[:m2]});\n"
+    pre.each { |r| out << "    mrb_ary_push(M, bc2cpp_zsuper_args, #{r});\n" }
+    if plan[:rest]
+      rest = "r#{plan[:m1] + 1}"
+      out << "    if (mrb_array_p(#{rest})) mrb_ary_concat(M, bc2cpp_zsuper_args, #{rest});\n"
+    end
+    post.each { |r| out << "    mrb_ary_push(M, bc2cpp_zsuper_args, #{r});\n" }
+    out << "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(plan[:owner])}, " \
+           "mrb_intern_lit(M, #{plan[:name].inspect}), RARRAY_LEN(bc2cpp_zsuper_args), " \
+           "RARRAY_PTR(bc2cpp_zsuper_args), #{plan[:block]});\n"
+    out << "  }\n"
+  end
+
   # ZSUPER_GENERAL_SUPPORT: a bare `super` forwarding the current
   # method's arguments to a COMPILED superclass method. codegen_zsuper emits:
   #
@@ -895,7 +945,7 @@ class CodeGen
   #
   # OP_ARGARY with lv==0 copies regs + 1, so the forwarded arguments are r1..rm1
   # and the call is `Super#name_impl(M, self, r1, ..., rm1)`. `idx` may name
-  # either half; both resolve to the same answer (as in zsuper_native_kind).
+  # either half; both resolve to the same answer (as in zsuper_lookup_plan).
   # Every fact is re-checked per site from the bytecode:
   def zsuper_forward_plan(owner_def, irep, idx)
     return nil unless owner_def && irep && idx
@@ -939,7 +989,7 @@ class CodeGen
 
     # (6) The same-named method on the registered superclass exists, is bytecode
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
-    # unobservable (no caller grep needed, unlike SUPER_TARGETS).
+    # unobservable (no caller scan needed, unlike SUPER_NO_CALLER_BLOCK).
     # super_reaches_superclass? rules out an included module in between.
     superclass = @superclass_of[owner_def.owner]
     return nil unless superclass.is_a?(String)
@@ -979,8 +1029,7 @@ class CodeGen
   # call with NO block?
   #
   # A compiled `_impl` has no block parameter, so OP_SUPER's forwarded block
-  # would be dropped -- correct only when no caller ever passes one. It is derived here instead of from a
-  # hand-vetted allowlist (SUPER_TARGETS) re-checked by hand on every entry: a block reaches a method
+  # would be dropped -- correct only when no caller ever passes one. It is derived: a block reaches a method
   # only through a block-carrying send (SENDB/SSENDB, or `&expr` beside a plain
   # one), so if NO instruction in the build sends `name` with a block to a
   # receiver that can be an instance of this owner (or a subclass), none can
@@ -996,8 +1045,6 @@ class CodeGen
     return false if ENV['BC2CPP_SUPER_DIRECT'] == '0'
 
     key = "#{owner_def.owner}##{owner_def.name}"
-    return true if SUPER_TARGETS.include?(key)
-
     # A whole-program memo like block_carrying_callers_of's, stored only once call facts can answer.
     return no_caller_passes_block?(owner_def) unless call_facts_enabled?
 
@@ -1096,69 +1143,5 @@ class CodeGen
     return nil unless compiles_clean?(target_def.irep)
 
     target_def
-  end
-
-  # ZSUPER_NATIVE_SUPPORT: which native method (a ZSUPER_NATIVE_SHAPES kind)
-  # the ARGARY + `SUPER n=*` pair at `idx` reaches; nil keeps `#error`. `idx`
-  # may be either half; both give the same answer so the two arms cannot emit
-  # half a translation. Everything here is re-checked per site;
-  # ZSUPER_NATIVE_TARGETS holds only the non-derivable remainder.
-  def zsuper_native_kind(owner_def, irep, idx)
-    return nil unless owner_def && irep && idx
-
-    kind = ZSUPER_NATIVE_TARGETS["#{owner_def.owner}##{owner_def.name}"]
-    return nil unless kind
-
-    shape = ZSUPER_NATIVE_SHAPES.fetch(kind)
-    # (1) Pin the name off the MethodDef, not the allowlist key.
-    return nil unless owner_def.name == shape[:name]
-
-    # (2) The adjacent pair codegen_zsuper emits (`SUPER R(a)` + `ARGARY R(a+1)`;
-    # OP_SUPER reads the packed argument from regs[a+1]). `idx - 1` must not go
-    # negative: Ruby would index from the end of the list.
-    argary_idx = BytecodeIR.for(irep).source_at(idx)&.op == :ARGARY ? idx : idx - 1
-    return nil if argary_idx.negative?
-
-    argary = BytecodeIR.for(irep).source_at(argary_idx)
-    super_insn = BytecodeIR.for(irep).source_at(argary_idx + 1)
-    return nil unless argary && super_insn
-    # Strict adjacency: an interposed EXT declines.
-    return nil unless argary.op == :ARGARY && super_insn.op == :SUPER
-
-    argary_dest = argary.reg
-    super_dest = super_insn.reg
-    return nil unless argary_dest && super_dest
-    return nil unless argary_dest.to_i == super_dest.to_i + 1
-
-    # (3) The `n=*` splat shape, not SUPER_TARGETS' fixed `n=N`.
-    return nil unless super_insn.pure_splat?
-
-    # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
-    # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.
-    return nil unless argary.argary_spec&.join(':') == shape[:argary]
-    return nil unless argary.paren_int == 0
-
-    # (5) The superclass is the implicit Object (:none means a CLASS with no
-    # superclass expression, not "unrecognized").
-    return nil unless @superclass_of[owner_def.owner] == :none
-
-    # (6) Nothing can intercept the name before the native target: every
-    # registered definition belongs to a real CLASS in @superclass_of (so modules,
-    # `.singleton` owners and unresolved classes refuse) that is not one of the
-    # chain classes. Such a class cannot sit between the owner and Object, since
-    # (5) made Object the owner's superclass. `<native>` is checked in (7).
-    return nil unless @registry[owner_def.name].all? { |d|
-      d.owner == '<native>' ||
-        (@superclass_of.key?(d.owner) && !ZSUPER_NATIVE_BLOCKED_OWNERS.include?(d.owner))
-    }
-
-    # (7) NATIVE_SRCS has exactly the one definition being reproduced; a second
-    # could be an override in the chain. A missing map (scan not run) declines.
-    return nil unless @native_name_sources
-
-    srcs = @native_name_sources[owner_def.name] || []
-    return nil unless srcs.size == 1 && srcs.first.end_with?(shape[:native_src])
-
-    kind
   end
 end

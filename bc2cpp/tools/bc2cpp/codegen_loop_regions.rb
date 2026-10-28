@@ -572,7 +572,7 @@ class CodeGen
   end
 
   # INTERP_UNLOCK: Game::Interpreter#range returns a Range on every path (`a..b`
-  # or `1..0`). A single exact Owner#name allowlist (SUPER_TARGETS style), so a
+  # or `1..0`). A single exact Owner#name list, so a
   # `range` method elsewhere never matches and a non-Range change to #range
   # must update this.
   RANGE_RETURN_METHODS = Set['Game::Interpreter#range'].freeze

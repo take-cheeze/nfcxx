@@ -59,8 +59,8 @@ CORE_ARRAY_RETURN_METHODS = NativeCoreResultSigs.fresh_array_names
 
 # CORE_ARRAY_CHAIN: vetted bytecode overrides, by exact Owner#name (a bare name
 # here would defeat core_array_return?). mruby-rgss/mrblib/array_sort.rb
-# redefines Array#sort; both of its paths return `_rgss_native_sort` (mruby's
-# Array#sort, `self.dup.sort!`), and Enumerable#sort returns an Array too.
+# redefines Array#sort; both of its paths return `dup._rgss_native_sort!` (mruby's
+# C sort! on a copy), and Enumerable#sort returns an Array too.
 VETTED_ARRAY_RETURN_OVERRIDES = Set['Array#sort'].freeze
 
 # CORE_ARRAY_CHAIN: does `name`'s fresh-Array claim hold against this

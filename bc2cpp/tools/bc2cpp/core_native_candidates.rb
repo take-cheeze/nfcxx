@@ -7,8 +7,11 @@
 # The engine proof (StaticDispatchRegistrations.analyze) reads core Ruby only for sends that may reach an engine
 # object. A core method is reached through core receivers too, so the rule here is receiver-blind and coarser: a
 # name is reachable when any of these spell it --
-#   - a symbol any irep of the program uses (engine, core, external and foreign mrblib: a send, a def, a LOADSYM, an
-#     ivar or constant name alike), or an identifier-shaped pool string;
+#   - a symbol an instruction of the program may look up (a send, a LOADSYM, an alias or undef, a key, ...; the
+#     operand of a DEF, which defines its name, does not), or an identifier-shaped pool string. The engine's ireps all
+#     count. A core, external or foreign mrblib method body counts only while its own name is reachable (LIVE_CORE),
+#     to a fixpoint: nothing runs a Ruby-defined core method but a lookup of its name, or a direct `_impl` call from
+#     compiled code, which is read as one. Root and class bodies, and blocks made in them, always count;
 #   - a name the native sources look up (native_name_tokens: string literals, presym macros, naming macros), except
 #     the name operand of a table entry or registration call, which defines it;
 #   - a string literal of the generated code;
@@ -21,6 +24,9 @@
 require 'set'
 require 'tmpdir'
 require_relative 'native_rom_owners'
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
+require_relative 'diagnostics'
 
 module CoreNativeCandidates
   TABLE_CLASS = /^[ \t]*#[ \t]*define[ \t]+MRB_MT_CLASS[ \t]+(\w+)[ \t]*$/
@@ -63,26 +69,88 @@ module CoreNativeCandidates
     end
   end
 
-  # The receiver-blind reachable names (see the header), and the pool fragments.
-  def reachable(ireps, native_paths, generated)
+  # The receiver-blind reachable names (see the header), and the pool fragments. `ireps` (the engine's) all count;
+  # `core` is one { ireps:, body_of: } per core Ruby file, body_of mapping a method body's irep label to its name.
+  def reachable(ireps, native_paths, generated, core: [])
     names = Set.new(StaticDispatchRegistrations::ALWAYS_DYNAMIC)
     fragments = Set.new
-    ireps.each_value do |irep|
-      irep.syms.each { |s| names << s.to_s }
-      irep.pool.each do |s|
-        next unless s.is_a?(String)
-
-        names << s if s.match?(StaticDispatchRegistrations::IDENT)
-        fragments << s if s.match?(StaticDispatchRegistrations::FRAGMENT)
-      end
-    end
+    ireps.each_value { |irep| lookup_names(irep, nil, names, fragments) }
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
     native_paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
     generated.each { |src| src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) } }
+    live_core(core, generated, names, fragments)
     [names, fragments]
+  end
+
+  # DEF, TDEF and SDEF name the method they define; no lookup reads that operand.
+  DEF_OPS = %i[DEF TDEF SDEF].freeze
+
+  # Adds what `irep` may look up to `names` and its fragment-shaped pool strings to `fragments`: every symbol of the
+  # irep except one only a DEF names, since that operand defines the method. `own` is the name of the method whose
+  # body this is: SUPER looks it up again in the ancestors, as an operator opcode does its operator. An irep with an ALIAS keeps every symbol: the disassembly
+  # that decodes operands shows the alias's old name, the one looked up, as the new one.
+  def lookup_names(irep, own, names, fragments)
+    syms = irep.syms.map(&:to_s)
+    defined = Set.new
+    used = Set.new
+    aliased = false
+    BytecodeIR.for(irep).each_source do |insn, _index|
+      aliased ||= insn.op == :ALIAS
+      names << own if own && insn.op == :SUPER
+      # An operator opcode sends its name without a symbol operand (a Ruby-defined `+` runs from ADD).
+      names << IMPLICIT_DISPATCH_NAMES[insn.op] if IMPLICIT_DISPATCH_NAMES.key?(insn.op)
+      (DEF_OPS.include?(insn.op) ? defined : used) << insn.sym.to_s if insn.sym
+    end
+    names.merge(aliased ? syms : syms.reject { |s| defined.include?(s) && !used.include?(s) })
+    irep.pool.each do |s|
+      next unless s.is_a?(String)
+
+      names << s if s.match?(StaticDispatchRegistrations::IDENT)
+      fragments << s if s.match?(StaticDispatchRegistrations::FRAGMENT)
+    end
+  end
+
+  # LIVE_CORE (see the header): the core files' root and class bodies always count; a method body, with the blocks it
+  # makes, once its name is in `names` or compiled code calls an `_impl` of that name directly. Fragments are read from
+  # every body, live or not: a built name is the costly kind to miss.
+  def live_core(core, generated, names, fragments)
+    impls = Set.new
+    # `$` is the mangling's escape (`Array_include$3f_impl`).
+    generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
+    pending = Hash.new { |h, k| h[k] = [] }
+    core.each do |file|
+      parent = {}
+      file[:ireps].each_value { |irep| irep.reps.each { |c| parent[c] = irep.label } }
+      file[:ireps].each do |label, irep|
+        up = label
+        up = parent[up] until up.nil? || file[:body_of].key?(up)
+        own = up && file[:body_of][up]
+        if own then pending[own] << irep else lookup_names(irep, nil, names, fragments) end
+      end
+    end
+    pending.each_value { |reps| reps.each { |irep| lookup_names(irep, nil, Set.new, fragments) } }
+    # A direct call reaches the body without a lookup: `<Owner>_<name>_impl` (CodeGen#sanitize mangling).
+    called = pending.keys.select { |name| impls.any? { |t| t.end_with?("_#{mangle(name)}_impl") || t.include?("_#{mangle(name)}_block_fallback") } }
+    names.merge(called)
+    loop do
+      grew = false
+      pending.each do |own, reps|
+        next unless names.include?(own)
+
+        reps.each { |irep| lookup_names(irep, own, names, fragments) }
+        pending.delete(own)
+        grew = true
+      end
+      break unless grew
+    end
+  end
+
+  # CodeGen#sanitize, for a method name (no `::` or `.` in it).
+  def mangle(name)
+    name.gsub(/[^a-zA-Z0-9_]/) { |c| format('$%02x', c.ord) }
   end
 
   # The listed keys, "MtClass#name" sorted: every entry of the key a candidate, its name unreachable.

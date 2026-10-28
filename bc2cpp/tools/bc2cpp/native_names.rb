@@ -455,10 +455,10 @@ def extract_native_method_names(src_paths)
   end
 end
 
-# ZSUPER_NATIVE_SUPPORT: like extract_native_method_names, but keeps which
+# NATIVE_NAME_SOURCES: like extract_native_method_names, but keeps which
 # source file contributed each name. The registry wants the flat set, but
-# ZSUPER_NATIVE_TARGETS must know whether the `<native>` definition of a name is
-# the one mruby-core function being reproduced or some other gem's. Each path
+# several analyses must know whether the `<native>` definition of a name is
+# mruby core's or some other gem's. Each path
 # is still read once; the driver derives the flat set from this map.
 def extract_native_method_sources(src_paths)
   sources = Hash.new { |h, k| h[k] = [] }
