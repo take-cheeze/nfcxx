@@ -133,9 +133,7 @@ class CodeGen
   # interpreted fallback to read iv_tbl.
   # BC2CPP_UNREGISTERED_EXTRA ("Owner#name,..."): more entries to leave unregistered, for a check fixture that has
   # no place in the committed lists (scripts/bc2cpp/unregistered_verify_check.rb).
-  def emit_owner_registrations(compiled, owners, core_owners: owners,
-                               unregistered: static_dispatch_lists.for_build(ENV['BC2CPP_BUILD_NAME']) |
-                                             ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set)
+  def emit_owner_registrations(compiled, owners, core_owners: owners, unregistered: unregistered_keys)
     by_owner = compiled.group_by { |m| m[:owner] }
     copies = module_function_copies(compiled)
     copies.each { |m| (by_owner[m[:owner]] ||= []) << m }
@@ -340,6 +338,12 @@ class CodeGen
       end
       out << "    }\n  }\n"
     end
+  end
+
+  # The Owner#name keys this build leaves out of its method tables: what emit_owner_registrations skips, and what
+  # LoadCompile.mark_dead! reads to drop the visibility statements that name them.
+  def unregistered_keys
+    static_dispatch_lists.for_build(ENV['BC2CPP_BUILD_NAME']) | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
   end
 
   # The proof's output for this run (static_dispatch_lists.rb). A real gem build has to be given it: running without

@@ -26,11 +26,12 @@ require 'json'
 require 'prism'
 require 'set'
 require_relative 'class_body_scan'
+require_relative 'pure_eval'
 
 module LoadCompile
   module_function
 
-  Item = Struct.new(:stmt, :role, :orig_role, :child, :def_key, :def_name, :dropped, :promoted, :ordered, keyword_init: true)
+  Item = Struct.new(:stmt, :role, :orig_role, :child, :def_key, :def_name, :dropped, :promoted, :ordered, :fold, :fold_why, keyword_init: true)
   UBody = Struct.new(:body, :items, :parent, :header_simple, :forced, :skeleton, :name, :id, keyword_init: true)
   Result = Struct.new(:code, :ranges, :last_file, :marker, :stats, :bodies, :dropped, keyword_init: true)
 
@@ -52,19 +53,32 @@ module LoadCompile
     ub = UBody.new(body: body, items: [], parent: parent, forced: false, skeleton: false, name: body.name)
     ub.header_simple = header_simple?(body)
     mode = :public
-    body.statements.each do |stmt|
+    body.statements.each_with_index do |stmt, index|
       role, mode = role_of(stmt, mode)
+      fold = nil
+      # PURE_CONST_EVAL: a computed constant that is data at build time is a constant of the program.
+      if role == :residual && stmt.category == :const_computed
+        value, why, source = PureEval.fold(body.statements, index, magic: magic?(stmt.file))
+        fold = [value, source] unless why
+        role = :const unless why
+      end
       # A header whose class cannot be named (`class foo::Bar`) cannot be reopened by the compiled load: it and
       # everything in it stays as written.
       role = :residual if role == :nested && !openable?(stmt.child)
       orig_role = role
       role = :residual if !statements && %i[send alias const ivar].include?(role)
-      item = Item.new(stmt: stmt, role: role, orig_role: orig_role)
+      item = Item.new(stmt: stmt, role: role, orig_role: orig_role, fold: fold)
       item.child = ubody(stmt.child, ub, statements) if role == :nested
       annotate_def(item, ub)
       ub.items << item
     end
     ub
+  end
+
+  # Whether the file starts with `# frozen_string_literal: true` (a folded String is frozen iff the source's was).
+  def magic?(file)
+    @magic ||= {}
+    @magic.fetch(file) { @magic[file] = File.foreach(file).first(5).any? { |l| l.match?(/\A#\s*frozen_string_literal:\s*true/) } }
   end
 
   def openable?(body)
@@ -225,6 +239,43 @@ module LoadCompile
 
   def order_pins = @order_pins || Set.new
 
+  VISIBILITY_SENDS = { 'private' => :instance, 'public' => :instance, 'protected' => :instance,
+                       'private_class_method' => :singleton, 'public_class_method' => :singleton }.freeze
+
+  # DEAD_VISIBILITY: `private :x` on a def the compiled gem leaves out of its method tables. Registration removes that
+  # def right after the load (`bc2cpp_left_out`), and nothing looks up a method that is not in a table, so the statement
+  # acts on something that is gone before anyone can see its visibility: it is not run by anyone, and the def it named
+  # is free to leave the mrblib (it was kept only so that this statement found it). Only a visibility send whose every
+  # name is such a def (the proof listed it in `unregistered`, the stub proof lets its body go, and the world has
+  # exactly one def of that name in that owner) qualifies. `module_function :x` and `alias_method` leave a copy behind,
+  # so they are not dead.
+  def mark_dead!(mine, all, drop_keys, unregistered)
+    return if unregistered.empty?
+
+    count = Hash.new(0)
+    all.each { |root| each_ubody(root) { |ub| ub.items.each { |i| count[i.def_key] += 1 if i.role == :def && i.def_key } } }
+    mine.each do |root|
+      each_ubody(root) do |ub|
+        owner = ub.body.path.empty? ? 'Object' : ub.body.path
+        ub.items.each do |item|
+          next unless item.role == :send
+
+          node = item.stmt.node
+          kind = VISIBILITY_SENDS[node.name.to_s] or next
+          args = node.arguments&.arguments || []
+          next if args.empty? || !args.all? { |a| a.is_a?(Prism::SymbolNode) || a.is_a?(Prism::StringNode) }
+
+          scope = kind == :singleton ? "#{owner}.singleton" : owner
+          dead = args.all? do |a|
+            key = "#{scope}##{a.unescaped}"
+            unregistered.include?(key) && drop_keys.include?(key) && count[key] == 1
+          end
+          item.role = :dead if dead
+        end
+      end
+    end
+  end
+
   # Fix the roles that must stay residual, over every root of the world (all gems), until nothing changes.
   def promote!(roots)
     order!(roots)
@@ -280,6 +331,8 @@ module LoadCompile
         ub.items.each do |item|
           # By the statement's own form, not by who runs it: a residual `private :x` needs x as much as a compiled one.
           next unless %i[send alias].include?(item.orig_role)
+          # A dead statement is not run by anyone.
+          next if item.role == :dead
 
           node = item.stmt.node
           if node.is_a?(Prism::AliasMethodNode)
@@ -331,7 +384,7 @@ module LoadCompile
       when :nested
         if item.child.skeleton then ranges_for(item.child, out) else out << range end
       when :def then out << range if item.dropped
-      when :send, :alias, :const, :ivar then out << range
+      when :send, :alias, :const, :ivar, :dead then out << range
       end
     end
     out
@@ -482,6 +535,40 @@ module LoadCompile
           args.each { |a| encode(a, out) }
         end
       else raise "LoadCompile: no blob encoding for #{node.class}"
+      end
+      out
+    end
+
+    # The bytes of a Ruby value PureEval computed (and `PureEval.value_ok?` passed), in the tags above. A frozen
+    # container is its bytes under FREEZE; a String carries its own frozen state (STR, FSTR).
+    def encode_value(value, out = [])
+      freeze = value.frozen? && (value.is_a?(Array) || value.is_a?(Hash))
+      out << FREEZE if freeze
+      case value
+      when nil then out << NIL
+      when true then out << TRUE
+      when false then out << FALSE
+      when Integer then out << INT
+                        varint(zigzag(value), out)
+      when Float then out << FLOAT
+                      out.concat([value].pack('E').bytes)
+      when Symbol then out << SYM
+                       varint(index(value.to_s), out)
+      when String then out << (value.frozen? ? FSTR : STR)
+                       varint(index(value), out)
+      when Array
+        out << ARRAY
+        varint(value.size, out)
+        value.each { |e| encode_value(e, out) }
+      when Hash
+        out << HASH
+        varint(value.size, out)
+        value.each { |k, v| encode_value(k, out) && encode_value(v, out) }
+      when Range
+        out << RANGE << (value.exclude_end? ? 1 : 0)
+        value.begin.nil? ? out << NIL : encode_value(value.begin, out)
+        value.end.nil? ? out << NIL : encode_value(value.end, out)
+      else raise "LoadCompile: no blob encoding for #{value.class}"
       end
       out
     end
@@ -644,7 +731,7 @@ module LoadCompile
     hooks = ctx[:hooks]
     node = item.stmt.node
     # A value the byte code has no tag for (a call with more than Blob::MAX_CALL_ARGS arguments).
-    return !Blob.new({}).data?(node.value) if %i[const ivar].include?(item.role)
+    return !item.fold && !Blob.new({}).data?(node.value) if %i[const ivar].include?(item.role)
     return true if item.role == :send && send_args(node).size > MAX_SEND_ARGS
     return false if hooks.empty?
 
@@ -673,13 +760,13 @@ module LoadCompile
       blob.varint(run.size, out)
       run.each do |it|
         blob.varint(blob.index(it.stmt.node.name.to_s), out)
-        blob.encode(it.stmt.node.value, out)
+        it.fold ? blob.encode_value(it.fold.first, out) : blob.encode(it.stmt.node.value, out)
       end
       run.clear
     end
     ub.items.each do |item|
       # What emits nothing (a def, a mode, a residual statement) does not end a run of constants.
-      next if %i[def mode residual].include?(item.role)
+      next if %i[def mode residual dead].include?(item.role)
 
       legacy = legacy?(item, ctx)
       if item.role == :const && !legacy
@@ -1034,10 +1121,11 @@ module LoadCompile
   #   gem:       the gem whose output this is
   #   drop_keys: Owner#name keys of this gem's defs the stub proof lets go (MrblibStubs.stubbable)
   #   symbol:    the compiled gem's out_symbol (names the function and the marker)
-  def plan(world, gem:, drop_keys:, symbol:, statements: true)
+  def plan(world, gem:, drop_keys:, symbol:, statements: true, unregistered: Set.new)
     roots = world.transform_values { |files| files.map { |f| build_root(f, statements: statements) } }
     all = roots.values.flatten
     promote!(all)
+    mark_dead!(roots.fetch(gem), all, drop_keys, unregistered) if statements
     pinned = pinned_names(all)
     decide!(roots.fetch(gem), drop_keys, pinned, stay: !statements)
     mine = roots.fetch(gem)
@@ -1129,7 +1217,7 @@ module LoadCompile
   # BC2CPP_LOAD_COMPILE: `off` (no plan), `defs` (the residual drops the defs the stub proof lets go and nothing else:
   # no load code, no marker) or `all` (the default: statements compiled too). BC2CPP_LOAD_WORLD: {out_symbol => the gem's mrblib
   # files, as the build loads them}; one build's compiled gems analyse the same world. Nil when off or no world.
-  def plan_for_env(env, symbol:, drop_keys:)
+  def plan_for_env(env, symbol:, drop_keys:, unregistered: Set.new)
     mode = env.fetch('BC2CPP_LOAD_COMPILE', 'all')
     raise "BC2CPP_LOAD_COMPILE: #{mode.inspect} is not off, defs or all" unless %w[off defs all].include?(mode)
     return nil if mode == 'off' || !env['BC2CPP_LOAD_WORLD']
@@ -1137,7 +1225,7 @@ module LoadCompile
     world = JSON.parse(env['BC2CPP_LOAD_WORLD'])
     return nil unless world.key?(symbol)
 
-    plan(world, gem: symbol, drop_keys: drop_keys, symbol: symbol, statements: mode == 'all')
+    plan(world, gem: symbol, drop_keys: drop_keys, symbol: symbol, statements: mode == 'all', unregistered: unregistered)
   end
 
   def write_plan(path, result)
