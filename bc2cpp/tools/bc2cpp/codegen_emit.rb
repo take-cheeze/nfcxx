@@ -1242,7 +1242,7 @@ class CodeGen
   end
 
   # `m[:arg_c_types]`: each mandatory position's C++ type (mrb_value, or
-  # mrb_int/mrb_sym for NATIVE_ARG_TARGETS). `self` is never retyped. Absent (an
+  # mrb_int for NATIVE_ARGS). `self` is never retyped. Absent (an
   # `#error` stub) means all mrb_value.
   def decl_line(m)
     arg_c_types = m[:arg_c_types] || Array.new(m[:arity], 'mrb_value')

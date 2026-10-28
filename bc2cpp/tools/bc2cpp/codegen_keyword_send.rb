@@ -444,7 +444,7 @@ class CodeGen
   # The marker stays KEYWORD_HASH_POSITIONAL (a dynamic bind).
   # KEYWORD_HASH_DEVIRT_SUPPORT: once packed it is an ordinary positional send of
   # `total = n + 1` arguments, so MONO (monomorphic_target plus arity in [mand,
-  # mand + opt], ONLY_OWNERS, no NATIVE_ARG_TARGETS positions; optional padding
+  # mand + opt], ONLY_OWNERS, no NATIVE_ARGS positions; optional padding
   # as in compile_keyword_call) and then POLY_SMALL_N (compile_poly_small_n with
   # the Hash appended) apply. TYPED is not attempted (no trace context here).
   # Marked KEYWORD_HASH_DEVIRT.

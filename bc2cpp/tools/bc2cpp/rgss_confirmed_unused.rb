@@ -17,7 +17,7 @@
 #    or, weighted lower, general RGSS knowledge): a getter whose setter is
 #    used is still API (`self.zoom_x += 1`, `src_rect.set(...)`,
 #    `autotiles[i] = bitmap` -- there is no `autotiles=`).
-# 4. The owner is in BC2CPP_WIRED_EMBEDDINGS: the generated
+# 4. The owner's entries are compiled: the generated
 #    bc2cpp_register_owner_methods reinstalls every compiled entry, so
 #    deleting its hand registration is a no-op.
 #

@@ -1,5 +1,5 @@
-# Single source of truth for every bc2cpp-generated gem's owners and
-# OUT_SYMBOL, plus the shared source sets below (closed_world_mrblib_srcs,
+# Single source of truth for every bc2cpp-generated gem's owners (derived from its
+# base gem's mrblib: bc2cpp_gem_owners) and OUT_SYMBOL, plus the shared source sets below (closed_world_mrblib_srcs,
 # core_native_srcs, ...). Every *-compiled mrbgem.rake requires this file, so
 # no gem hand-copies another's list: a drifted copy fails silently, with two
 # gems reaching different MONO/POLY conclusions for the same name.
@@ -10,47 +10,6 @@
 # codegen step reading the other's output (that would be a circular Rake
 # dependency; only the final link needs both).
 #
-# EMBED_WIRED: the classes whose embedded-ivar layout is actually wired at
-# runtime. Its instances use MRB_TT_DATA, and #initialize must be compiled so
-# it allocates the slot payload. Interpreted methods and native accessors can
-# still read and write the same slots through mruby's ivar APIs.
-#
-# bc2cpp.rb's driver generates that registration itself (OWNER_METHOD_
-# REGISTRATION, emit_owner_registrations) for every entry of these classes in
-# `compiled` -- by compile_all's #error partition, exactly the entries that
-# compile clean -- so the equivalence holds by construction.
-# The generated bc2cpp_gem_init calls it once, right after bc2cpp_set_instance_tts.
-BC2CPP_WIRED_EMBEDDINGS = %w[
-  Game::Screen Game::ChipSet Game::Switches RPG2k::Scene::VehicleWorld
-  LCF::EventCommand LCF::MoveCommand Game::Interpreter Game::Transition Game::Map
-  Game::State RPG2k RPG2k::Scene::Map::LRUBitmapCache Game::Timer LCF::Tree
-  RPG2k::Window
-  RPG2k::Scene::Map Game::Battle Game::Battle.singleton RPG2k::Scene::Battle
-  RPG2k3::Scene::Battle Game::Actor Game::Party Game::Party.singleton
-  Game::Actors Game::Shop Game::Enemy Game::Troop Game::EnemyAi
-  Game::TextReveal Game::MessageConfig Game::NumberInput
-  Game::States.singleton Game::Message.singleton Game::ChipsetLayout.singleton
-  Game::EventPage.singleton Game::BattlePage.singleton Game::State.singleton
-  RPG2k::Scene::Base RPG2k::Scene::ChipsetEditor RPG2k::Scene::DebugMenu
-  RPG2k::Scene::EquipMenu RPG2k::Scene::GameOver RPG2k::Scene::ItemMenu
-  RPG2k::Scene::MapViewer RPG2k::Scene::Menu RPG2k::Scene::Order
-  RPG2k::Scene::SaveLoad RPG2k::Scene::SkillMenu RPG2k::Scene::StatusMenu
-  RPG2k::Scene::Title
-  LCF::Sections LCF::Array1D LCF::Array2D LCF::File
-  RGSS::ErrorReport::Tee RGSS::Bitmap Array
-  RGSS.singleton RGSS::ErrorReport.singleton RGSS::Input.singleton
-  RGSS::Audio.singleton RGSS::Graphics.singleton
-  # docs/adr/0215: the mruby-rpg2k record classes that replaced Structs.
-  RPG2k::Scene::Map::MapEventState RPG2k::Scene::Map::MessageState
-  RPG2k::Scene::Map::ShopState RPG2k::Scene::Map::ShopQuantity
-  Game::Interpreter::NameInputRequest Game::Interpreter::InnRequest
-  Game::Interpreter::ShopRequest Game::Interpreter::BattleRequest
-  Game::Interpreter::KeyInputRequest Game::Interpreter::KeyInputAccepted
-  Game::Interpreter::DiagnosticPosition Game::CommonEvent::CommonEventRecord
-  Game::Message::Segment Game::Message::SpeedMarker Game::Message::PauseMarker
-  Game::Message::ScanResult
-].freeze
-
 # mruby's own Ruby that joins the closed world as compiled input --
 # 3rd/mruby/mrblib/*.rb plus the mrblib of these gems, in interpreter load order
 # (core mrblib, then gems). A class is spread over several gems' mrblib, so the
@@ -184,9 +143,11 @@ end
 BC2CPP_CORE_OWNERS = (bc2cpp_ruby_definition_owners + bc2cpp_c_definition_owners - %w[Object]).to_a.sort.freeze
 
 # OWNER_METHOD_REGISTRATION / REGISTRATION_SPLIT (codegen_emit.rb, emit_owner_registrations): [every owner a gem
-# registers, the core half of them]. Only the core and wired owners go in the core half.
+# registers, the core half of them]. Only core owners go in the core half: it must resolve no program class, and an
+# engine gem runs both halves back to back in its gem_init, so where an embedding program class registers in it
+# changes nothing.
 def bc2cpp_registration_owners(compiled_owners)
-  core = (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq
+  core = BC2CPP_CORE_OWNERS
   [(core + compiled_owners).uniq, core.to_set]
 end
 BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
@@ -194,6 +155,13 @@ BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 require 'prism'
 require_relative '../rgss_tts_config'
 require_relative 'mrblib_stubs'
+require_relative 'gem_owners'
+
+# GEM_OWNERS: a compiled gem's owners are every engine owner with a plain def in its base gem's mrblib (every
+# variant: a build that leaves a file out only has fewer defs), and the core classes the gem reopens.
+def bc2cpp_gem_owners(base_gem, reopened: [])
+  GemOwners.owners(Dir[File.expand_path("../../#{base_gem}/mrblib*/**/*.rb", __dir__)].sort, reopened: reopened)
+end
 
 # `native_namespaces`: the namespaces whose native (C/C++) registrations this gem's registration removes when the
 # closed list leaves them out (NATIVE_CANDIDATES, static_dispatch_registrations.rb).
@@ -219,21 +187,13 @@ BC2CPP_COMPILED_GEMS = {
     # mruby-stringio loads before mruby-lcf, and `add_dependency 'mruby-lcf'` runs
     # the reopening before this gem installs the compiled override. #ungetbyte
     # touches no ivar.
-    owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
-               LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections
-               LCF::Array1D LCF::Array2D LCF.singleton StringIO
-               # docs/adr/0400: the typed save records (mruby-lcf/gen_save_typed_accessors.rb).
-               LCF::SaveTyped.singleton LCF::SaveTyped::Record LCF::SaveTyped::Save LCF::SaveTyped::Title
-               LCF::SaveTyped::System LCF::SaveTyped::Screen LCF::SaveTyped::Picture LCF::SaveTyped::PartyLocation
-               LCF::SaveTyped::Movable LCF::SaveTyped::PartyActor LCF::SaveTyped::Inventory LCF::SaveTyped::Target
-               LCF::SaveTyped::MapEvent LCF::SaveTyped::EventExecState LCF::SaveTyped::CommonEvent
-               LCF::SaveTyped::Bgm LCF::SaveTyped::Se LCF::SaveTyped::MoveRoute LCF::SaveTyped::EventExecFrame],
+    owners: bc2cpp_gem_owners('mruby-lcf', reopened: %w[StringIO]),
     out_symbol: 'lcf_compiled',
     native_namespaces: %w[LCF],
   },
   'mruby-rpg2k-compiled' => {
     # Same rules as the mruby-lcf-compiled entry above. Points that are easy to
-    # get wrong when adding an owner here:
+    # get wrong about the owners:
     #
     # - `.singleton` owners are the `def self.x`/`class << self` methods of a
     #   class or module; they register
@@ -243,7 +203,7 @@ BC2CPP_COMPILED_GEMS = {
     #   diagnostic's `== ivar embedding ==`
     #   section prints IvarLayout's raw proposal, before that filter -- trust the
     #   "classes needing MRB_SET_INSTANCE_TT" section instead.
-    # - Every statically named ivar on a wired owner uses an mrb_value slot;
+    # - Every statically named ivar on an embedding owner uses an mrb_value slot;
     #   dynamic names keep the ordinary iv_tbl fallback.
     # - A Struct's members are positional (mruby-struct), never iv_tbl, so
     #   Game::Battle::Combatant has nothing to embed. Its `half_sp_cost?`/
@@ -252,49 +212,11 @@ BC2CPP_COMPILED_GEMS = {
     # - A POLY name in the registry only stops other call sites devirtualizing
     #   into it; it never blocks registering the owner's own method.
     #
-    # `LCF.singleton` selects the module_function copies: compile_all emits their
-    # shared bodies as LCF entries, which register on LCF and, when the body never
-    # observes self, on LCF's singleton class too (MODULE_FUNCTION_COPY).
-    owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
-               Game::Transition Game::Actor Game::Party
-               RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
-               RPG2k::Scene::SkillMenu RPG2k::Scene::DebugMenu
-               RPG2k::Scene::EquipMenu RPG2k::Scene::Menu Game::State
-               RPG2k::Scene::StatusMenu Game::MoveRoute
-               RPG2k::Scene::ChipsetEditor RPG2k::Scene::Base
-               Game::Character RPG2k::Scene::SaveLoad RPG2k::Scene::Order
-               Game::Shop Game::Map Game::EnemyAi Game::ChipSet
-               Game::Timer Game::Switches Game::Variables
-               RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
-               RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
-               Game::NumberInput RPG2k::Scene::GameOver Game::Actors
-               Game::Rng Game::Weather Game::Troop Game::Vehicle
-               Game::Enemy RPG2k3::Scene::Battle Game::MessageConfig
-               Game::Interpreter RPG2k::Scene::Map RPG2k::Scene::Battle
-               Game.singleton Game::States.singleton Game::States::BattleText.singleton
-               Game::ChipsetLayout.singleton Game::EventGraphic.singleton
-               Game::Battle.singleton Game::Transition.singleton
-               Game::State.singleton Game::LegacyLsd.singleton Game::Party.singleton
-               Game::Picture.singleton Game::Character.singleton
-               Game::ChipSet.singleton RPG2k::Scene::Map.singleton
-               Game::Battle::Combatant RPG2k
-               Game::MoveType.singleton Game::MapAccess.singleton
-               Game::Parallax.singleton Game::MessagePalette.singleton
-               Game::MapBgm.singleton Game::BattlePage.singleton
-               Game::WindowCursor.singleton Game::Message.singleton
-               Game::EventPage.singleton Game::CharSet.singleton
-               Game::Backdrop.singleton RPG2k::Scene.singleton
-               Game::CommonEvent.singleton Game::MoveRoute.singleton
-               RPG2k::Scene::Map::LRUBitmapCache
-               # docs/adr/0215: the record classes that replaced Structs.
-               RPG2k::Scene::Map::MapEventState RPG2k::Scene::Map::MessageState
-               RPG2k::Scene::Map::ShopState RPG2k::Scene::Map::ShopQuantity
-               Game::Interpreter::NameInputRequest Game::Interpreter::InnRequest
-               Game::Interpreter::ShopRequest Game::Interpreter::BattleRequest
-               Game::Interpreter::KeyInputRequest Game::Interpreter::KeyInputAccepted
-               Game::Interpreter::DiagnosticPosition Game::CommonEvent::CommonEventRecord
-               Game::Message::Segment Game::Message::SpeedMarker Game::Message::PauseMarker
-               Game::Message::ScanResult Game::MoveCommand RPG2k.singleton],
+    # A module_function module owns its singleton too (GemOwners): compile_all
+    # emits the shared bodies as the module's entries, which register on the module
+    # and, when the body never observes self, on its singleton class too
+    # (MODULE_FUNCTION_COPY).
+    owners: bc2cpp_gem_owners('mruby-rpg2k'),
     out_symbol: 'rpg2k_compiled',
     native_namespaces: %w[Game RPG2k RPG2k3],
   },
@@ -313,10 +235,7 @@ BC2CPP_COMPILED_GEMS = {
     #   name only, and `add_dependency 'mruby-rgss'` runs the reopening before
     #   the compiled override is installed -- the same reasoning as StringIO in
     #   mruby-lcf-compiled.
-    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap RGSS::Bitmap.singleton
-               RGSS.singleton RGSS::Audio.singleton RGSS::Input.singleton RGSS::ErrorReport.singleton
-               RGSS::Graphics.singleton RGSS::Font.singleton RGSS::ErrorReport::Tee Array
-               RGSS::Font RGSS::HashArchive RGSS::Bitmap::LoadError],
+    owners: bc2cpp_gem_owners('mruby-rgss', reopened: %w[Array]),
     out_symbol: 'rgss_compiled',
     native_namespaces: %w[RGSS],
   },

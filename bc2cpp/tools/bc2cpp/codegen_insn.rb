@@ -1000,6 +1000,8 @@ class CodeGen
          compile_zsuper_forward(zsuper_plan, d_reg)
        elsif (call = d_reg && module_super_call(owner_def, irep, d_reg, n))
          call
+       elsif (call = d_reg && super_lookup_call(owner_def, irep, idx, d_reg, n))
+         call
        else
          "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
        end

@@ -859,6 +859,34 @@ class CodeGen
     "  r#{d_reg} = #{cpp_name(target.owner, target.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
   end
 
+  # SUPER_LOOKUP: `SUPER Rd n=N` whose target no rule above calls directly (a C method such as
+  # Exception#initialize, or one found only at run time) is looked up as OP_SUPER does, from the
+  # superclass of the class the method is defined on (bc2cpp_super_call), and called with the arguments in
+  # R(d+1)..R(d+N). The block register must be the frame's own block, moved there just before (a literal
+  # `super(x) { }` builds another): passed on when the method takes one, else nil, which needs
+  # SUPER_NO_CALLER_BLOCK, as OP_SUPER would forward a caller's block the compiled body never sees.
+  # BC2CPP_SUPER_LOOKUP=0 keeps the `#error`.
+  def super_lookup_call(owner_def, irep, idx, d_reg, n)
+    return nil unless n && owner_def && irep && idx && ENV.fetch('BC2CPP_SUPER_LOOKUP', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
+
+    mand, opt = enter_shape(irep)
+    move = idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
+    return nil unless mand && move && move.op == :MOVE &&
+                      move.regs.first(2) == [d_reg.to_i + n.to_i + 1, mand + opt + 1]
+
+    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    return nil unless block
+
+    args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+    argv = args.empty? ? 'nullptr' : 'bc2cpp_super_argv'
+    "  {\n" \
+      "#{args.empty? ? '' : "    mrb_value bc2cpp_super_argv[] = {#{args.join(', ')}};\n"}" \
+      "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(owner_def.owner)}, " \
+      "mrb_intern_lit(M, #{owner_def.name.inspect}), #{n}, #{argv}, #{block});\n" \
+      "  }\n"
+  end
+
   # ZSUPER_GENERAL_SUPPORT: a bare `super` forwarding the current
   # method's arguments to a COMPILED superclass method. codegen_zsuper emits:
   #

@@ -548,7 +548,6 @@ STATIC_DISPATCH_UNREGISTERED = Set[
   "LCF::SaveTyped::Picture#save_use_transparent_color=",
   "LCF::SaveTyped::Picture#save_zoom",
   "LCF::SaveTyped::Picture#save_zoom=",
-  "LCF::SaveTyped::Record#save_link",
   "LCF::SaveTyped::Save#save_actors",
   "LCF::SaveTyped::Save#save_actors=",
   "LCF::SaveTyped::Save#save_airship=",
