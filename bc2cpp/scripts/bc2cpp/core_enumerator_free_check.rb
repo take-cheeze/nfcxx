@@ -379,6 +379,54 @@ suite.check('native text that spells a creator name refuses the proof',
             !native_spells.holds && native_spells.unproven.any? { |u| u.why.include?('native text spells the creator name each') })
 suite.check('the native creator\'s own to_enum call is not a spelling', base.holds)
 
+# --- a native send of a creator name that passes a block the native builds (enum.c's inject and entries) ----------------
+# The native's own `each` send with a cfunc proc it made itself never creates an Enumerator; the spelling is a send with a
+# literal block. A send whose block the native did not build, or built on some path only, or sent without a block, stays
+# a spelling.
+def each_native(body)
+  <<~C
+    static mrb_value
+    nat_each_i(mrb_state *mrb, mrb_value self)
+    {
+      return mrb_nil_value();
+    }
+
+    static mrb_value
+    nat_entries(mrb_state *mrb, mrb_value self)
+    {
+      mrb_value ary = mrb_ary_new(mrb);
+    #{body}
+      return ary;
+    }
+  C
+end
+SEND_EACH = 'mrb_funcall_with_block(mrb, self, MRB_SYM(each), 0, NULL, mrb_obj_value(%s));'
+own_block = "    struct RProc *blk = mrb_proc_new_cfunc_with_env(mrb, nat_each_i, 1, &ary);\n    #{format(SEND_EACH, 'blk')}"
+split = "    struct RProc *p;\n    p = mrb_proc_new_cfunc_with_env(mrb, nat_each_i, 1, &ary);\n    #{format(SEND_EACH, 'p')}"
+inner = "    if (mrb_test(self)) {\n      struct RProc *blk = mrb_proc_new_cfunc_with_env(mrb, nat_each_i, 1, &ary);\n      #{format(SEND_EACH, 'blk')}\n    }"
+native_each = {
+  'a block the native builds before the send (enum.c entries)' => [own_block, true],
+  'an assignment split from its declaration (enum.c inject)' => [split, true],
+  'the send and the block in one inner block' => [inner, true],
+  'a block the caller gives (mrb_get_args "&")' => ["    mrb_value blk = mrb_nil_value();\n    mrb_get_args(mrb, \"&\", &blk);\n    #{format(SEND_EACH, 'blk')}", false],
+  'a block that is NULL' => ["    struct RProc *blk = NULL;\n    #{format(SEND_EACH, 'blk')}", false],
+  'a block assigned again after it is built' => ["#{own_block}\n    blk = NULL;", false],
+  'a block built on one path only' => ["    struct RProc *blk;\n    if (mrb_test(self)) {\n      blk = mrb_proc_new_cfunc_with_env(mrb, nat_each_i, 1, &ary);\n    }\n    #{format(SEND_EACH, 'blk')}", false],
+  'a send without a block (mrb_funcall_id)' => ['    mrb_funcall_id(mrb, self, MRB_SYM(each), 0, NULL);', false],
+  'a spelling in a string' => ['    mrb_funcall(mrb, self, "each", 0);', false],
+  'a block built by the native but passed as nil' => ["    mrb_funcall_with_block(mrb, self, MRB_SYM(each), 0, NULL, mrb_nil_value());", false]
+}
+native_each.each do |label, (body, accepted)|
+  result = prove(suite, engine: "class Quiet\nend\n", native: INDEX_C + each_native(body))
+  spelled = result.unproven.any? { |u| u.name == 'each' && u.file.to_s.end_with?('native.c') }
+  suite.check("native `each` with #{label} is #{accepted ? 'settled by its block' : 'unproven'}",
+              accepted ? result.holds : (!result.holds && spelled))
+end
+
+always_each = prove(suite, engine: "class Odd\n  def each\n    to_enum(:each)\n  end\nend\n", native: INDEX_C + each_native(own_block))
+suite.check('a native block send of a name that makes an Enumerator for any call is unproven',
+            !always_each.holds && always_each.unproven.any? { |u| u.name == 'each' && u.file.to_s.end_with?('native.c') && u.why.include?('any call') })
+
 # --- a call with a block whose result is the block's value -------------------------------------------------------------
 timed = <<~'RUBY'
   class Route
