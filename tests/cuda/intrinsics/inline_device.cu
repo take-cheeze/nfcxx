@@ -39,6 +39,9 @@ __device__ __forceinline__ Pair make_pair(int x) {
   return p;
 }
 
+// reads its struct only: the inlined body reads the caller's struct, and writes nothing else
+__device__ __forceinline__ int sum_pair(Pair p) { return p.a + (int)p.b; }
+
 __device__ __forceinline__ int bump_copy(Pair p) {
   p.a += 1;
   return p.a + (int)p.b;
@@ -57,13 +60,14 @@ __global__ void k(int *o, const int *in) {
   o[64 + i] = warp_sum(in[i]);
   Pair p = make_pair(in[i]);
   o[96 + i] = bump_copy(p) + p.a;
+  o[128 + i] = sum_pair(p) * 3;
 }
 
 static int host_pick(int x) { return x < 0 ? -x : (x > 100 ? 100 : x * 2); }
 
 int main() {
   const int n = 32;
-  int h_in[n], h[128], want = 0;
+  int h_in[n], h[160], want = 0;
   for (int i = 0; i < n; i++) h_in[i] = (i * 37) % 211 - 60;
   int *d_in, *d_o;
   cudaMalloc(&d_in, sizeof h_in);
@@ -84,6 +88,7 @@ int main() {
     if (h[64 + i] != warp) want++;
     int bc = (x + 1) + (int)(x * 0.5f) + x;  // bump_copy(make_pair(x)) + p.a, the copy's bump not seen by p.a
     if (h[96 + i] != bc) want++;
+    if (h[128 + i] != 3 * (x + (int)(x * 0.5f))) want++;
   }
   printf("inline_device: %s, %d mismatches\n", cudaGetErrorString(err), want);
   cudaFree(d_in);
