@@ -41,6 +41,19 @@ module CoreMethods
       !CoreDefs.touches_block?(body, ireps) && !CoreDefs.references_fiber?(body, ireps)
   end
 
+  # The mruby-enumerator #initialize methods that take a block to keep it (Enumerator, Enumerator::Generator and
+  # Enumerator::Yielder). They store the block or hand it to Generator.new and never call it, and they name no Fiber
+  # and build no lambda, so the block guard (guarded_labels) covers them as it covers any core block method.
+  ENUMERATOR_INITIALIZERS = %w[Enumerator Enumerator::Generator Enumerator::Yielder].freeze
+
+  def enumerator_initializer?(definition, ireps)
+    return false unless definition && definition.name == 'initialize' && ENUMERATOR_INITIALIZERS.include?(definition.owner)
+
+    body = definition.irep && ireps[definition.irep]
+    body && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb') &&
+      !CoreDefs.references_fiber?(body, ireps) && !CoreDefs.builds_lambda?(body, ireps)
+  end
+
   # The listed "Owner#name" keys of core_refused.txt. Raises on a line that is not one entry.
   def load_refused(path = DEFAULT_PATH)
     File.readlines(path, chomp: true).each_with_index.with_object(Set.new) do |(line, i), set|
@@ -80,7 +93,8 @@ module CoreMethods
     irep = ireps.fetch(definition.irep)
     return 'refused (core_refused.txt)' if refused.include?(CoreMethods.key(definition))
     return 'conditional def' if conditional.include?(definition.irep)
-    return "#{ENUMERATOR_REASON} (Fiber machinery)" if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps)
+    return "#{ENUMERATOR_REASON} (Fiber machinery)" if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps) &&
+                                                         !enumerator_initializer?(definition, ireps)
     return 'builds a lambda' if CoreDefs.builds_lambda?(irep, ireps)
 
     'names Fiber' if CoreDefs.references_fiber?(irep, ireps)
