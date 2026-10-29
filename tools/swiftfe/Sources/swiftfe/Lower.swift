@@ -2802,6 +2802,7 @@ final class Lowerer {
   /// expected result. Arguments that need a type are lowered last, once it is known.
   private func bindGeneric(
     _ names: [String],
+    _ requirements: [SameTypeRequirement],
     explicit: [Ty],
     params: [GenericParam],
     result: TypeSyntax?,
@@ -2828,6 +2829,7 @@ final class Lowerer {
     if let result, let expected, names.contains(where: { bindings[$0] == nil }) {
       try unify(result, expected, names, &bindings, call)
     }
+    inferFromRequirements(names, requirements, &bindings)
     for name in names where bindings[name] == nil {
       throw error("generic parameter '\(name)' could not be inferred", call)
     }
@@ -2837,6 +2839,30 @@ final class Lowerer {
       inputs[i] = ArgInput(label: argNodes[i].label?.text, value: value, node: argNodes[i])
     }
     return (names.map { bindings[$0]! }, inputs.compactMap { $0 })
+  }
+
+  /// Binds a type parameter that a same-type requirement fixes, as `T` in `where T == Int`
+  /// is when no argument or expected type mentions it. A requirement whose other side does
+  /// not resolve yet is skipped; the instance check reports it once the arguments are known.
+  private func inferFromRequirements(
+    _ names: [String],
+    _ requirements: [SameTypeRequirement],
+    _ bindings: inout [String: Ty]
+  ) {
+    var changed = true
+    while changed {
+      changed = false
+      for r in requirements {
+        for (side, other) in [(r.left, r.right), (r.right, r.left)] {
+          guard isTypeParameter(side, names), let id = side.as(IdentifierTypeSyntax.self),
+            bindings[id.name.text] == nil
+          else { continue }
+          guard let ty = try? inEnv(bindings, { try resolveType(other) }) else { continue }
+          bindings[id.name.text] = ty
+          changed = true
+        }
+      }
+    }
   }
 
   /// A call through a generic name: a generic function, or the memberwise
@@ -2852,7 +2878,8 @@ final class Lowerer {
       if !explicit.isEmpty { try checkArity(name, g.names, explicit, node) }
       let params = g.decl.signature.parameterClause.parameters.map { GenericParam(label: nil, type: $0.type) }
       let (types, args) = try bindGeneric(
-        g.names, explicit: explicit, params: params, result: g.decl.signature.returnClause?.type, expected: expected, call)
+        g.names, g.requirements, explicit: explicit, params: params, result: g.decl.signature.returnClause?.type,
+        expected: expected, call)
       let f = try instantiateFunction(name, types, node)
       let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
       return Expr(kind: .call(f, values), ty: f.ret, owned: true)
@@ -2860,11 +2887,11 @@ final class Lowerer {
     if let g = genericStructs[name] {
       if let i = genericInitializer(g.decl.memberBlock, call) {
         let params = initializerParams(i)
-        let (types, args) = try bindGeneric(g.names, explicit: explicit, params: params, result: nil, expected: nil, call)
+        let (types, args) = try bindGeneric(g.names, g.requirements, explicit: explicit, params: params, result: nil, expected: nil, call)
         let s = try instantiateStruct(name, types, node)
         return try callInstanceInitializer(s.name, s.initializers, .structure(s.name), owned: true, args, call)
       }
-      let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
+      let (types, args) = try bindGeneric(g.names, g.requirements, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
       let s = try instantiateStruct(name, types, node)
       let values = try matchArguments(s.name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
       return Expr(kind: .structLit(s, values), ty: .structure(s.name), owned: true)
@@ -2872,11 +2899,11 @@ final class Lowerer {
     if let g = genericClasses[name] {
       if let i = genericInitializer(g.decl.memberBlock, call) {
         let params = initializerParams(i)
-        let (types, args) = try bindGeneric(g.names, explicit: explicit, params: params, result: nil, expected: nil, call)
+        let (types, args) = try bindGeneric(g.names, g.requirements, explicit: explicit, params: params, result: nil, expected: nil, call)
         let c = try instantiateClass(name, types, node)
         return try callInstanceInitializer(c.name, c.initializers, .cls(c.name), owned: true, args, call)
       }
-      let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
+      let (types, args) = try bindGeneric(g.names, g.requirements, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
       let c = try instantiateClass(name, types, node)
       let values = try matchArguments(c.name, c.fields.map { (Optional($0.name), $0.ty) }, args, call)
       return Expr(kind: .construct(c, values), ty: .cls(c.name), owned: true)
@@ -2942,7 +2969,7 @@ final class Lowerer {
       throw error("type '\(name)' has no member '\(caseName)'", member)
     }
     if let call {
-      let (types, args) = try bindGeneric(g.names, explicit: explicit ?? [], params: payload, result: nil, expected: nil, call)
+      let (types, args) = try bindGeneric(g.names, g.requirements, explicit: explicit ?? [], params: payload, result: nil, expected: nil, call)
       let info = try instantiateEnum(name, types, member)
       guard let c = info.cases.first(where: { $0.name == caseName }) else {
         throw error("type '\(info.name)' has no member '\(caseName)'", member)
