@@ -25,6 +25,10 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
   if (h == "load") {
     Ty ty = parse_type(&at(x, 1));
     expect(dty, ty);
+    if (at(x, 2).kind == Node::Sym && at(x, 2).sig == '$' && const_slots.count(at(x, 2).text)) {
+      emit("mov." + ptx_type(ty) + " " + dest + ", " + imm(ty, const_slots.at(at(x, 2).text)) + ";");
+      return true;
+    }
     if (const RegInfo *p = promoted_slot(at(x, 2))) {
       emit("mov." + ptx_type(ty) + " " + dest + ", " + p->ptx + ";");
       return true;

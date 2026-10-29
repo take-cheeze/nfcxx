@@ -4,6 +4,8 @@
 #include "emit_fn.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <utility>
@@ -75,6 +77,38 @@ void count_slot_uses(const Node &x, std::map<std::string, int> &all, std::map<st
   }
   for (const Node &c : x.items) count_slot_uses(c, all, whole, types);
 }
+
+// (load T $name): a load of the named slot.
+bool is_load_of(const Node &x, const std::string &name) {
+  return head_of(x) == "load" && x.items.size() == 3 && x.items[2].kind == Node::Sym && x.items[2].sig == '$' &&
+         x.items[2].text == name;
+}
+
+// (const T N) with an integer N (and T an integer type): its value.
+bool is_const_int(const Node &x, long long *v) {
+  if (head_of(x) != "const" || x.items.size() != 3 || x.items[1].kind != Node::Atom) return false;
+  *v = static_cast<long long>(as_int(&x.items[2]));
+  return true;
+}
+
+// Whether an unrolled body x leaves the copies as they are: no return, goto or label; no break or continue outside the
+// loops and switches it contains; the counter is only read (a load), never stored or addressed; no name in atoms (the
+// registers of the test, which the copies do not compute).
+bool unroll_safe(const Node &x, const std::string &name, const std::vector<std::string> &atoms, int depth) {
+  std::string h = head_of(x);
+  if (h == "return" || h == "goto" || h == "label") return false;
+  if ((h == "break" || h == "continue") && depth == 0) return false;
+  if (is_load_of(x, name)) return true;
+  if (x.kind == Node::Sym && x.sig == '$' && x.text == name) return false;
+  if (x.kind == Node::Atom && std::find(atoms.begin(), atoms.end(), x.text) != atoms.end()) return false;
+  int d = depth + (h == "loop" || h == "switch" ? 1 : 0);
+  for (const Node &c : x.items)
+    if (!unroll_safe(c, name, atoms, d)) return false;
+  return true;
+}
+
+// The trip count of an unrolled loop is at most this; a longer one stays a loop.
+constexpr size_t kMaxUnroll = 32;
 
 // The inlined bodies nested in one another (--inline=device): a call past this depth stays a call.
 constexpr int kMaxInlineDepth = 4;
@@ -398,8 +432,19 @@ std::string Fn::text() const {
 
 void Fn::stmt(const Node &s) {
   std::string h = head_of(s);
+  const bool unroll = std::exchange(unroll_next_, false);
   if (h == "block") {
-    for (size_t i = 1; i < s.items.size(); i++) stmt(s.items[i]);
+    bool pending = unroll;  // the marker is for the first loop of this block
+    for (size_t i = 1; i < s.items.size(); i++) {
+      if (pending && head_of(s.items[i]) == "store" && i + 1 < s.items.size() && head_of(s.items[i + 1]) == "loop") {
+        stmt(s.items[i]);
+        if (!unroll_loop(s.items[i], s.items[i + 1])) stmt(s.items[i + 1]);
+        pending = false;
+        i++;
+        continue;
+      }
+      stmt(s.items[i]);
+    }
   } else if (h == "let") {
     const Node &v = at(s, 3);
     if (head_of(v) == "bitcast" && v.items.size() == 3 && v.items[2].kind == Node::Sym && v.items[2].sig == '&')
@@ -609,7 +654,13 @@ void Fn::stmt(const Node &s) {
   } else if (h == "eval") {
     // an expression statement: only a call, whose value is discarded
     if (!(s.items.size() == 2 && head_of(at(s, 1)) == "call")) throw Refused("eval of " + form_text(at(s, 1)));
-    call_site(at(s, 1), "", nullptr);
+    const Node &callee = at(at(s, 1), 2);
+    if (callee.kind == Node::Sym && callee.text == "__nfcxx_unroll") {
+      // the marker of a #pragma unroll (the rewrite): the statement after it is the loop it is for
+      unroll_next_ = g_unroll_loops;
+    } else {
+      call_site(at(s, 1), "", nullptr);
+    }
   } else if (store_stmt(h, s)) {
     // store and store.v (lower_mem.cpp)
   } else {
@@ -1050,6 +1101,7 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   std::map<std::string, RegInfo> caller_regs = std::exchange(regs, std::move(callee_regs));
   std::map<std::string, int> caller_slots = std::exchange(slots, std::move(callee_slots));
   std::map<std::string, RegInfo> caller_promoted = std::exchange(promoted, {});
+  std::map<std::string, long long> caller_const = std::exchange(const_slots, {});
   promote_slots(body, callee->slot_types_);
   std::map<std::string, std::string> caller_labels = std::exchange(named_labels_, {});
   std::vector<std::pair<std::string, std::string>> caller_loops = std::exchange(loops_, {});
@@ -1064,6 +1116,7 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   regs = std::move(caller_regs);
   slots = std::move(caller_slots);
   promoted = std::move(caller_promoted);
+  const_slots = std::move(caller_const);
   named_labels_ = std::move(caller_labels);
   loops_ = std::move(caller_loops);
   fn_values_ = std::move(caller_fn_values);
@@ -1082,6 +1135,87 @@ void Fn::promote_slots(const std::vector<const Node *> &body, const std::map<std
     if (!register_slot_type(ty) || whole[name] == 0 || all[name] != whole[name]) continue;
     promoted[name] = RegInfo{fresh(reg_class(ty)), ty};
   }
+}
+
+// --unroll=loops: why a loop marked by #pragma unroll is left a loop (NFCXX_UNROLL_LOG=1 prints it to stderr).
+static bool unroll_reject(const char *why, const Node &init) {
+  if (std::getenv("NFCXX_UNROLL_LOG"))
+    std::fprintf(stderr, "unroll: %s (counter %s)\n", why,
+                 init.items.size() > 2 ? init.items[2].text.c_str() : "?");
+  return false;
+}
+
+bool Fn::unroll_loop(const Node &init, const Node &loop) {
+  // init: store T $name START; loop: body (the test: let c = load $name; let t = lt.s T c N; if t (then) (else (break)),
+  // then the body) and step (let c = load; let n = wadd c INC; store $name n), as the front end lowers a for statement.
+  if (head_of(init) != "store" || init.items.size() != 4 || init.items[2].kind != Node::Sym || init.items[2].sig != '$')
+    return unroll_reject("init is not a store of a counter slot", init);
+  if (parse_type(&init.items[1]).kind != "int") return unroll_reject("counter is not an int", init);
+  long long start = 0;
+  if (!is_const_int(init.items[3], &start)) return unroll_reject("start is not a constant", init);
+  const std::string name = init.items[2].text;
+  const Node *body_f = nullptr, *step_f = nullptr;
+  for (size_t i = 1; i < loop.items.size(); i++) {
+    if (!body_f && head_of(loop.items[i]) == "body") body_f = &loop.items[i];
+    if (!step_f && head_of(loop.items[i]) == "step") step_f = &loop.items[i];
+  }
+  if (!body_f || !step_f) return unroll_reject("no body or step form", init);
+  const Node &b = *body_f, &st = *step_f;
+  if (b.items.size() < 4 || st.items.size() != 4) return unroll_reject("body is too short", init);
+  const Node &l1 = b.items[1], &l2 = b.items[2], &iff = b.items[3];
+  if (!(head_of(l1) == "let" && l1.items.size() == 4 && is_load_of(l1.items[3], name))) return unroll_reject("step is not four items", init);
+  const Node &cmp = l2.items.size() == 4 ? l2.items[3] : l2;
+  if (!(head_of(l2) == "let" && l2.items.size() == 4 && head_of(cmp) == "lt.s" && cmp.items.size() == 4 &&
+        cmp.items[2].kind == Node::Atom && cmp.items[2].text == l1.items[1].text))
+    return unroll_reject("test does not load the counter", init);
+  long long bound = 0;
+  if (!is_const_int(cmp.items[3], &bound)) return unroll_reject("test is not lt.s of the loaded counter", init);
+  if (!(head_of(iff) == "if" && iff.items.size() == 4 && iff.items[1].kind == Node::Atom &&
+        iff.items[1].text == l2.items[1].text && head_of(iff.items[3]) == "else" && iff.items[3].items.size() == 2 &&
+        head_of(iff.items[3].items[1]) == "break"))
+    return unroll_reject("bound is not a constant", init);
+  const Node &ld = st.items[1], &add = st.items[2], &sto = st.items[3];
+  if (!(head_of(ld) == "let" && ld.items.size() == 4 && is_load_of(ld.items[3], name))) return unroll_reject("if-break test form", init);
+  const Node &w = add.items.size() == 4 ? add.items[3] : add;
+  if (!(head_of(add) == "let" && add.items.size() == 4 && head_of(w) == "wadd" && w.items.size() == 4 &&
+        w.items[2].kind == Node::Atom && w.items[2].text == ld.items[1].text))
+    return unroll_reject("step does not load the counter", init);
+  long long inc = 0;
+  if (!is_const_int(w.items[3], &inc) || inc <= 0) return unroll_reject("step is not a constant wadd", init);
+  if (!(head_of(sto) == "store" && sto.items.size() == 4 && sto.items[2].kind == Node::Sym && sto.items[2].sig == '$' &&
+        sto.items[2].text == name && sto.items[3].kind == Node::Atom && sto.items[3].text == add.items[1].text))
+    return unroll_reject("increment is not a positive constant", init);
+  // the copies run the body's statements after the test: the test's registers are not used there
+  const std::vector<std::string> atoms = {l1.items[1].text, l2.items[1].text};
+  for (size_t i = 4; i < b.items.size(); i++)
+    if (!unroll_safe(b.items[i], name, atoms, 0)) return unroll_reject("step store form", init);
+  std::vector<long long> values;
+  for (long long v = start; v < bound; v += inc) {
+    if (values.size() == kMaxUnroll) return unroll_reject("body statement is not unrolling-safe", init);
+    values.push_back(v);
+  }
+  // nothing is emitted before the checks above: the loop is either unrolled here or left for the caller
+  for (long long v : values) {
+    const_slots[name] = v;
+    for (size_t i = 4; i < b.items.size(); i++) stmt(b.items[i]);
+  }
+  const_slots.erase(name);
+  // the counter ends at the value the loop leaves it with (the uses after the loop read the slot)
+  long long fin = start + static_cast<long long>(values.size()) * inc;
+  Node atom_const;
+  atom_const.kind = Node::Atom;
+  atom_const.text = "const";
+  Node atom_str;
+  atom_str.kind = Node::Atom;
+  atom_str.text = std::to_string(fin);
+  Node value;
+  value.kind = Node::List;
+  value.items = {atom_const, init.items[3].items[1], atom_str};
+  Node last;
+  last.kind = Node::List;
+  last.items = {init.items[0], init.items[1], init.items[2], value};
+  stmt(last);
+  return true;
 }
 
 void Fn::vec_ctor(const Node &x) {
