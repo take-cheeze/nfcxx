@@ -12,28 +12,13 @@ require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/class_body_scan'
 require_relative '../../tools/bc2cpp/class_world'
+require_relative '../../tools/bc2cpp/class_world_gate'
 
 ROOT = File.expand_path('../..', __dir__)
 MRUBY = "#{ROOT}/3rd/mruby"
 
-# The gem mrblib roots of the closed build, in load order: [name, files]. The engine's own roots are the ones
-# the compiled gems cover; the core ones are mruby's.
-def closed_roots
-  core = bc2cpp_closed_core_gems(ROOT).map { |g| File.basename(g) }
-  roots = [['core:mrblib', Dir["#{MRUBY}/mrblib/*.rb"].sort.reject { |p| p.end_with?('/10error.rb') }]]
-  BC2CPP_CORE_MRBLIB_GEMS.each do |gem|
-    next unless core.include?(gem)
-
-    files = Dir["#{MRUBY}/mrbgems/#{gem}/mrblib/**/*.rb"].sort.reject { |p| p.end_with?('mruby-io/mrblib/kernel.rb') }
-    roots << ["core:#{gem}", files] unless files.empty?
-  end
-  roots << ['ext:mruby-stringio', Dir["#{ROOT}/3rd/mruby-stringio/mrblib/**/*.rb"].sort]
-  rpg2k = Dir["#{ROOT}/mruby-rpg2k/mrblib/**/*.rb"].reject { |p| p.end_with?('scene/map_tts.rb') }.sort
-  roots << ['engine:mruby-rpg2k', rpg2k + ["#{ROOT}/mruby-rpg2k/mrblib_limited/map_tts_off.rb"]]
-  roots << ['engine:mruby-lcf', Dir["#{ROOT}/mruby-lcf/mrblib/*.rb"].sort]
-  roots << ['engine:mruby-rgss', Dir["#{ROOT}/mruby-rgss/mrblib/*.rb"].sort]
-  roots.reject { |_, files| files.empty? }
-end
+# The gem mrblib roots of the closed build, in load order (tools/bc2cpp/class_world_gate.rb).
+def closed_roots = ClassWorldGate.closed_roots(ROOT)
 
 CATEGORIES = %i[declarative def const_literal const_pure class_ivar const_computed dsl_call proc runtime control other].freeze
 

@@ -321,6 +321,8 @@ class CodeGen
     else
       out << "      r#{param_reg} = #{entry};\n"
     end
+    bound = region[:spread] ? (0...region[:spread]).map { |k| param_reg + k } : [param_reg]
+    out << ElementReadRoots.loop_keep(body, bound)
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -628,6 +630,7 @@ class CodeGen
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{addr});\n"
     out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{addr});\n" if meth == 'each_with_index'
+    out << ElementReadRoots.loop_keep(body, [param_reg])
     out << body
     out << "      #{iter_label}:;\n"
     case meth
@@ -725,6 +728,7 @@ class CodeGen
     else
       out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
     end
+    out << ElementReadRoots.loop_keep(body, [is_fold ? param2_reg : param_reg])
     out << body
     out << "      #{iter_label}:;\n"
     case meth
@@ -980,6 +984,8 @@ class CodeGen
            "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"
     out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
            "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
+    # The element is used after the by-name call on it, so it is rooted for the whole call (ELEMENT_READ_ROOTS).
+    out << "      bc2cpp_keep(M, bc2cpp_sym_e_#{region[:sym_addr]});\n"
     if meth == 'each'
       out << "      #{sym_call_line(sym, "bc2cpp_sym_e_#{region[:sym_addr]}")}\n"
     else
@@ -1131,6 +1137,7 @@ class CodeGen
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
+    out << ElementReadRoots.loop_keep(body, [param_reg])
     out << body
     out << "      #{iter_label}:;\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_keys_#{addr}, #{result_var});\n"

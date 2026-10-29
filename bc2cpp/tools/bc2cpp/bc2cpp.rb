@@ -36,6 +36,7 @@ require_relative 'load_compile'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
+require_relative 'element_read_roots'
 require_relative 'registry'
 require_relative 'native_return_classes'
 require_relative 'lint_crosscheck'
@@ -1609,11 +1610,16 @@ if $PROGRAM_NAME == __FILE__
   if ENV['BC2CPP_GC_KEEP_OVERWRITTEN'] == '0'
     puts <<~'CPP'
       #define BC2CPP_NO_GC_KEEP_OVERWRITTEN 1
+      static inline void bc2cpp_keep(mrb_state*, mrb_value) {}
       static inline void bc2cpp_keep_old(mrb_state*, mrb_value) {}
       static inline void bc2cpp_keep_old_range(mrb_state*, mrb_value, mrb_int, mrb_int) {}
     CPP
   else
     puts <<~'CPP'
+      // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
+      static inline void bc2cpp_keep(mrb_state* M, mrb_value v) {
+        if (!mrb_immediate_p(v)) mrb_gc_protect(M, v);
+      }
       static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) {
         if (!mrb_immediate_p(old)) mrb_gc_protect(M, old);
       }
