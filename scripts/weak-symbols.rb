@@ -1,4 +1,5 @@
-# Emit `.weak` directives for functions and data objects that EDG marks __attribute__((__weak__)).
+# Emit `.weak` directives for functions and data objects that EDG marks __attribute__((__weak__)), defined in the
+# assembly or only referenced by it (a weak reference).
 #
 # EDG puts COMDAT functions (inline and template instantiations) in every translation unit that
 # uses them (and COMDAT data: variable templates, static data members of templates, local statics of inline
@@ -138,6 +139,27 @@ def chunk_around(text, w)
   [b, e]
 end
 
+# Whether the __attribute__ at position a has a group that names weak (hand-written C: __attribute__((weak)); EDG's
+# __weak__ is found on its own).
+def attribute_weak?(text, a)
+  i = text.index("(", a)
+  return false if i.nil?
+  depth = 0
+  j = i
+  while j < text.size
+    c = text[j]
+    if c == "("
+      depth += 1
+    elsif c == ")"
+      depth -= 1
+      break if depth == 0
+    end
+    j += 1
+  end
+  group = text[i, j - i + 1]
+  has_word?(group, "weak") || has_word?(group, "__weak__")
+end
+
 # Declarations and definitions are delimited by ; { } at top level; each chunk that mentions __weak__
 # names the function or object it declares. A function is the first identifier followed by "(". An object
 # (COMDAT data: variable templates, static data members of templates, local statics of inline functions,
@@ -150,8 +172,14 @@ end
 def weak_names(text, extern_inline)
   names = {}
   pos = 0
+  nw = text.index("__weak__", 0)       # the next EDG spelling
+  na = text.index("__attribute__", 0)  # the next attribute group, which may be hand-written C's __attribute__((weak))
   while true
-    w = text.index("__weak__", pos)
+    # An attribute group counts when it names weak or __weak__.
+    while na && !attribute_weak?(text, na)
+      na = text.index("__attribute__", na + 13)
+    end
+    w = (nw && na) ? (nw < na ? nw : na) : (nw || na)
     break if w.nil?
     b, e = chunk_around(text, w)
     s = strip_attributes(text[b, e - b])
@@ -164,6 +192,8 @@ def weak_names(text, extern_inline)
       identifiers(s).each { |x| names[x] = true }
     end
     pos = e + 1
+    nw = text.index("__weak__", pos) if nw && nw < pos
+    na = text.index("__attribute__", pos) if na && na < pos
   end
   if extern_inline
     pos = 0
@@ -201,8 +231,30 @@ extern_inline = true
 # _Z5f). The directive line names the label the assembly defines, so the names are looked up with the prefix. Empty elsewhere.
 SYM_PREFIX_OPT = "--sym-prefix="
 prefix = ""
+# The symbols the assembly names anywhere (operands included): the words of [A-Za-z_.$][\w.$]*.
+def asm_words(asm)
+  words = {}
+  i = 0
+  n = asm.size
+  while i < n
+    c = asm[i]
+    if ident_start?(c) || c == "." || c == "$"
+      j = i + 1
+      j += 1 while j < n && (word_char?(asm[j]) || asm[j] == "." || asm[j] == "$")
+      words[asm[i, j - i]] = true
+      i = j
+    elsif word_char?(c)
+      i += 1 while i < n && word_char?(asm[i])   # a number: its letters are not a name
+    else
+      i += 1
+    end
+  end
+  words
+end
+
 # Mach-O (the prefixed mode): the Apple assembler rejects ".weak", and a weak definition is ".weak_definition".
 weak_directive = ".weak "
+weak_ref_directive = ".weak "
 args = ARGV.dup
 while args.first && args.first[0, 2] == "--"
   opt = args.shift
@@ -211,6 +263,7 @@ while args.first && args.first[0, 2] == "--"
   elsif opt[0, SYM_PREFIX_OPT.size] == SYM_PREFIX_OPT
     prefix = opt[SYM_PREFIX_OPT.size, opt.size - SYM_PREFIX_OPT.size]
     weak_directive = ".weak_definition "
+    weak_ref_directive = ".weak_reference "
   end
 end
 c_path, asm_path = args
@@ -218,8 +271,14 @@ text = File.open(c_path, "rb") { |f| f.read }
 asm = File.open(asm_path, "rb") { |f| f.read }
 defs = defined_labels(asm)
 weak = weak_names(text, extern_inline).map { |n| prefix + n }.select { |n| defs[n] }.sort
-unless weak.empty?
+# A name declared __weak__ that the assembly uses but does not define is a weak reference, as gcc makes it: the link
+# leaves it 0 when no object defines it. EDG's thread_local wrapper calls its _ZTHx initializer only when the address is
+# not 0, and a variable without dynamic initialization has none. Only the attribute counts: the extern inline functions
+# that weak_names adds are defined in another object (libstdc++), and a weak reference would not pull one from an archive.
+words = asm_words(asm)
+refs = weak_names(text, false).map { |n| prefix + n }.select { |n| !defs[n] && words[n] }.sort
+unless weak.empty? && refs.empty?
   File.open(asm_path, "ab") do |f|
-    f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join)
+    f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join + refs.map { |n| "#{weak_ref_directive}#{n}\n" }.join)
   end
 end

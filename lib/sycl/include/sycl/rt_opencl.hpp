@@ -55,17 +55,20 @@ class cl_rt {
   }
 
   // ---- heap (the same allocator as rt_vulkan.hpp)
-  uint64_t alloc(uint64_t bytes) {
+  // align: a power of two; the address (not only the offset) is a multiple of it. A block's skipped head stays free.
+  uint64_t alloc(uint64_t bytes, uint64_t align = 16) {
     bytes = bytes ? (bytes + 15) & ~uint64_t(15) : 16;
+    if (align < 16) align = 16;
     for (auto it = free_.begin(); it != free_.end(); ++it) {
-      if (it->second >= bytes) {
-        uint64_t off = it->first;
-        uint64_t left = it->second - bytes;
-        free_.erase(it);
-        if (left) free_[off + bytes] = left;
-        used_[off] = bytes;
-        return dev_base_ + off;
-      }
+      const uint64_t start = it->first, size = it->second;
+      const uint64_t off = ((dev_base_ + start + align - 1) & ~(align - 1)) - dev_base_;
+      if (off - start + bytes > size) continue;
+      const uint64_t left = start + size - (off + bytes);
+      free_.erase(it);
+      if (off > start) free_[start] = off - start;
+      if (left) free_[off + bytes] = left;
+      used_[off] = bytes;
+      return dev_base_ + off;
     }
     fail("out of device memory (the heap is " + std::to_string(heap_size_ >> 20) + " MB; the stacks of a dispatch take "
          "invocations times stack bytes)");
@@ -415,11 +418,13 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
   cl_rt::get().dispatch(key, closure, closure_bytes, g, l, lmem, bufs, n, modes);
 }
 inline void backend_wait() {}
+// A USM allocation starts at a multiple of the device's mem_base_addr_align (1024 bits), at least: ggml takes its buffers'
+// bases to be aligned to the buffer type's 128 bytes, as DPC++'s allocations are.
+constexpr unsigned usm_align = 128;
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
-  (void)align;
   (void)kind;
   cl_rt &r = cl_rt::get();
-  return (void *)r.at(r.alloc(bytes));
+  return (void *)r.at(r.alloc(bytes, align > usm_align ? align : usm_align));
 }
 inline void backend_usm_free(void *p) {
   cl_rt &r = cl_rt::get();
