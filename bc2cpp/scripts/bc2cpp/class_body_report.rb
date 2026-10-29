@@ -71,7 +71,10 @@ end
 def handled_ops
   text = File.read("#{ROOT}/tools/bc2cpp/codegen_insn.rb")
   body = text[/def compile_insn_op.*?\n  end\n/m] || text
-  body.scan(/^    when ((?::\w+(?:,\s*)?)+)/).flatten.flat_map { |l| l.scan(/:(\w+)/).flatten }.map(&:to_sym).to_set
+  ops = body.scan(/^    when ((?::\w+(?:,\s*)?)+)/).flatten.flat_map { |l| l.scan(/:(\w+)/).flatten }.map(&:to_sym).to_set
+  # `when /^LOADI/` (the integer immediates) is a regex branch, not a symbol list, so it is spelled out here.
+  ops.merge(%i[LOADI LOADI8 LOADI16 LOADI32 LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7]) if body.include?('when /^LOADI/')
+  ops
 end
 
 LOAD_ONLY = %i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF METHOD ALIAS UNDEF TCLASS OCLASS].freeze
@@ -186,9 +189,10 @@ def tag_report(roots, scans, omit)
           mname = insn.sym.to_s
           body = ireps.fetch(child)
           ops = body.instructions.map { |i| i.op }
-          compilable = ops.all? { |op| handled.include?(op) }
+          blocking_ops = ops.reject { |op| handled.include?(op) }.uniq
+          compilable = blocking_ops.empty?
           key = "#{owner}##{mname}"
-          methods << { owner: owner, name: mname, compilable: compilable, omittable: omit.include?(key),
+          methods << { owner: owner, name: mname, compilable: compilable, blocking: blocking_ops, omittable: omit.include?(key),
                        direct: world.facts.dig(owner, 'exact') ? true : false, root: name }
         end
       end
@@ -199,6 +203,10 @@ def tag_report(roots, scans, omit)
   consts.sort_by { |_, n| -n }.each { |k, n| puts format('  %-9s %6d', k, n) }
   puts "  not compiled (first 12 of #{unknown_consts.size}):"
   unknown_consts.first(12).each { |c| puts "    #{c}" }
+  blocking = Hash.new(0)
+  methods.each { |m| m[:blocking].each { |op| blocking[op] += 1 } }
+  puts "\nOpcodes that keep a method body from compiling (bodies containing each):"
+  blocking.sort_by { |_, n| -n }.first(12).each { |op, n| puts format('  %-10s %6d', op, n) }
   puts "\nMethod bodies in class bodies (compilable, omittable, direct):"
   tally = methods.group_by { |m| [m[:compilable], m[:omittable], m[:direct]] }
   [[true, true, true], [true, true, false], [true, false, true], [true, false, false], [false, true, false], [false, false, true], [false, false, false], [false, true, true]].each do |key|
