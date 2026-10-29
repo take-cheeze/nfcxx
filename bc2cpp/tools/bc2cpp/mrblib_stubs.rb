@@ -10,6 +10,8 @@
 # ScriptError, which a `rescue => e` does not catch. See docs/bc2cpp-mrblib-stubs.md.
 require 'prism'
 require 'set'
+require_relative 'bytecode_ir_classes'
+require_relative 'class_world'
 
 module MrblibStubs
   module_function
@@ -22,7 +24,7 @@ module MrblibStubs
   # The Owner#name keys of `compiled` (this run's entries) whose bodies can be stubbed. `all_defs`: every bytecode
   # definition, the core ones the generation's registry no longer holds included. The load phase reads it: a method
   # body missing from it would count as code that runs at load.
-  def stubbable(compiled, ireps, registry, all_defs = registry)
+  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil)
     require_relative 'static_dispatch_registrations'
     body_of = {}
     all_defs.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
@@ -39,6 +41,7 @@ module MrblibStubs
     load_bodies, = StaticDispatchRegistrations.load_phase(ireps, body_of, method_of, overridden)
     copied = [registry, all_defs].flat_map { |r| r.values.flatten.filter_map(&:copy_irep) }.to_set
     copied_names = copied_names(ireps)
+    copy_sites = copy_sites(ireps, parent)
     defs_of = Hash.new { |h, k| h[k] = [] }
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
     compiled.reject { |m| m[:guard] }.filter_map do |m|
@@ -48,11 +51,87 @@ module MrblibStubs
 
       d = defs.first
       next if d.irep.nil? || d.kind || d.installer || d.copy_irep
-      next if load_bodies.include?(d.irep) || copied.include?(d.irep) || copied_names.include?(m[:name])
+      next if load_bodies.include?(d.irep) || copied.include?(d.irep)
+      next if copied_names.include?(m[:name]) && copy_source?(d.owner, m[:name], copy_sites[m[:name]], world)
 
       key
     end.to_set
   end
+
+  # COPY SITES. A copy by name takes its source from the receiver's method lookup. A site in a class body whose
+  # receiver is that body's own class R (`self`) copies from R's ancestors: so a def whose owner is not one of them
+  # cannot be the copied method. Every other site (a method or block, a singleton class, the top level, a receiver
+  # other than self, `method`, `define_method`) may copy from anywhere: :unknown.
+  COPY_FROM_SELF = %w[alias_method module_function instance_method].freeze
+  # The names the receiver rule decides. Staged: the rule is general, but only these names are decided by it until the
+  # other copied names (a def of `x`, `push`, `sort!`, ...) are reviewed; every other name keeps the name-based keep.
+  RECEIVER_RULE_NAMES = %w[initialize].freeze
+
+  # A rep is an Irep, or its label (the parent map below reads both).
+  def rep_label(rep) = rep.respond_to?(:label) ? rep.label : rep
+
+  # { label => class path of the irep when it is a class or module body whose path bytecode states, else nil }.
+  # A body whose opener's outer scope is not a known namespace has no path, and neither do its nested bodies.
+  def class_body_paths(ireps, parent)
+    paths = {}
+    stack = ireps.keys.reject { |l| parent.key?(l) }.map { |l| [l, nil] }
+    until stack.empty?
+      label, ns = stack.pop
+      irep = ireps.fetch(label)
+      openers = BytecodeIR.class_bodies(irep, :CLASS, :MODULE)
+      body_labels = openers.values.map { |child| rep_label(child) }.to_set
+      openers.each do |idx, child|
+        path = ns == :unknown ? nil : BytecodeIR.class_body_path(irep, idx, ns)
+        paths[rep_label(child)] = path
+        stack << [rep_label(child), path || :unknown]
+      end
+      irep.reps.each do |child|
+        next if body_labels.include?(rep_label(child))
+
+        stack << [rep_label(child), :unknown]
+      end
+    end
+    paths
+  end
+
+  # { name => [class path String or :unknown, ...] }: the receiver of every site that may copy `name`.
+  def copy_sites(ireps, parent)
+    paths = class_body_paths(ireps, parent)
+    sites = Hash.new { |h, k| h[k] = [] }
+    ireps.each do |label, irep|
+      own = paths[label] || :unknown
+      ir = BytecodeIR.for(irep)
+      ir.instructions_with_op(:ALIAS).each do |insn|
+        old = insn.first_of(:name)&.value
+        sites[old.to_s] << own if old
+      end
+      copies = ir.instructions_with_op(*BytecodeIR::Ops::SEND).select { |insn| COPYING_SENDS.include?(insn.sym.to_s) }
+      next if copies.empty?
+
+      self_copy = own != :unknown && copies.all? do |insn|
+        BytecodeIR::Ops::SELF_SEND.include?(insn.op) && COPY_FROM_SELF.include?(insn.sym.to_s)
+      end
+      ir.instructions_with_op(:LOADSYM).each { |insn| sites[insn.sym.to_s] << (self_copy ? own : :unknown) }
+    end
+    sites
+  end
+
+  # Whether a copy at one of +sites+ (the copy_sites entries of a name) may take the def of +owner+ as its source.
+  # Without a class world, or for a site whose class is not exact, every copy may. Otherwise: only a site whose
+  # class's ancestors (ClassWorld.ancestors, every ancestor of an exact class exact too) include +owner+.
+  def copy_source?(owner, name, sites, world)
+    return true if world.nil? || sites.nil? || sites.empty? || !RECEIVER_RULE_NAMES.include?(name)
+
+    sites.any? do |site|
+      next true if site == :unknown || world.facts[site].nil? || !world.facts[site]['exact']
+
+      ClassWorld.ancestors(site, world.classes, {}).include?(owner)
+    end
+  end
+
+  # The class world of a build: the engine gems' mrblib as the load world names them (BC2CPP_LOAD_WORLD, JSON
+  # {gem symbol => [files]}), in that order. Nil without a load world (the rule then keeps every copied name).
+  def class_world_from_env(env) = ClassWorld.from_load_world(env['BC2CPP_LOAD_WORLD'])
 
   # By name, whatever the owner: the source of every `alias`, and every Symbol an irep that sends a COPYING_SENDS
   # name loads.

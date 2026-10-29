@@ -61,6 +61,14 @@ module ClassWorld
   # a subclass of anything.
   World = Struct.new(:classes, :unknown_sites, :subclass_unknown, :facts, keyword_init: true)
 
+  # The class world of a build from its load world (BC2CPP_LOAD_WORLD, JSON {gem symbol => [mrblib files]}), the
+  # gems in that order. Nil without one. Shared by the stub proof and the load plan, so both read one graph.
+  def from_load_world(json)
+    return nil unless json
+
+    build(JSON.parse(json).values.map { |files| ClassBodyScan.scan(files) })
+  end
+
   # `roots`: [ClassBodyScan root, ...] in load order.
   def build(roots)
     defined = Set.new(NATIVE.keys)
