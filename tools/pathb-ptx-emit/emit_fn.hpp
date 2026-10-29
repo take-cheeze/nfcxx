@@ -66,6 +66,10 @@ class Fn : public FnCtx {
   // --inline=device: whether the callee's body is compiled at its calls (not a kernel, no struct or bool parameter, no
   // printf in its body).
   bool inline_ok(const Fn *callee) const;
+  // Whether x writes memory only through the function's own slots, directly or in the module functions it calls (to a
+  // depth). body_writes_only_slots: the same for a whole function body.
+  bool writes_only_slots(const Node &x, int depth) const;
+  bool body_writes_only_slots(const Fn *f, int depth) const;
   // The body of the callee at the call x, with this function's state for its own registers, slots and labels; its
   // returns write dest (the call's register, or "" for a statement) and branch to the end of the inlined body.
   void inline_call(Fn *callee, const Node &x, const std::string &dest);
