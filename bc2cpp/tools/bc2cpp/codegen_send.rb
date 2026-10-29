@@ -3,6 +3,7 @@
 require_relative 'branch_hints'
 require_relative 'tagged_fixnum'
 require_relative 'bytecode_ir_containers'
+require_relative 'class_world_gate'
 
 # CodeGen: compile_send and const/owner caches.
 require_relative 'strict_hints'
@@ -1135,6 +1136,7 @@ class CodeGen
     typed = false
     via_element = false
     inherited_typed = false
+    class_world_typed = false
     exact_class_dispatch = false
     user_receiver_union = false
     exact_via_record = false
@@ -1246,6 +1248,16 @@ class CodeGen
           typed_guard_class = known_class
         end
       end
+      # CLASS_WORLD_TYPED: the closed-world lookup above found no compiled body (or refused the class). A receiver the
+      # class graph states exactly (ClassWorldGate) gets the one Ruby definition its ancestors reach, behind the same
+      # runtime class guard as TYPED, instead of the owner call. Any other class keeps the owner call.
+      if target.nil? && !ivar_accessor_target && (cw_target = class_world_exact_target(name, known_class)) &&
+         direct_callable?(cw_target, n)
+        target = cw_target
+        typed = true
+        class_world_typed = true
+        typed_guard_class = known_class
+      end
     end
     if !self_implicit && !via_element && !exact_class_dispatch && irep && (idx || trace_idx)
       union_plan = exact_flow_user_union_plan(irep, idx || trace_idx,
@@ -1314,8 +1326,14 @@ class CodeGen
         end
 
         # ELEMENT_CLASS_SUPPORT: the tag records which fact proved the receiver.
-        kind = inherited_typed ? 'CLOSED_WORLD_TYPED_INHERITED' : (via_element ? 'ELEMENT' : 'TYPED')
-        traced_note = if inherited_typed
+        kind = if class_world_typed then 'CLASS_WORLD_TYPED'
+               elsif inherited_typed then 'CLOSED_WORLD_TYPED_INHERITED'
+               else via_element ? 'ELEMENT' : 'TYPED'
+               end
+        traced_note = if class_world_typed
+                        "receiver traced to #{check_owner}, exact in the class graph (ClassWorldGate); ancestor " \
+                          "lookup reaches #{target.owner}##{target.name}"
+                      elsif inherited_typed
                         "receiver traced to #{check_owner}; closed-world lookup proves inherited #{target.owner}##{target.name}"
                       elsif via_element
                         "inlined block element of Array<#{target.owner}>"
@@ -1733,6 +1751,35 @@ class CodeGen
     irep = @ireps.fetch(definition.irep)
     pure_mandatory_or_optional_arity?(irep) && compiles_clean?(definition.irep) &&
       n.between?(mandatory_arity(irep), mandatory_arity(irep) + optional_arity(irep))
+  end
+
+  # CLASS_WORLD_EXACT_TARGET: the Ruby definition an exact receiver class's lookup reaches, read from the class graph
+  # (ClassWorldGate) and its ancestor order. Nil unless the gate answers for the class and every definition of the name
+  # sits on one of those ancestors, is a single public compiled body in a class (not a module), and nothing on the
+  # chain is a prepend, an unknown mixin, or a name installed at run time. Any other receiver keeps the owner call.
+  # BC2CPP_CLASS_WORLD_DIRECT=0 turns it off.
+  def class_world_exact_target(name, receiver_class)
+    return nil unless ClassWorldGate.enabled?
+
+    world = ClassWorldGate.world
+    ancestors = ClassWorldGate.exact_ancestors(receiver_class, world)
+    return nil unless ancestors
+    return nil if devirt_blocked_name?(name)
+
+    installed = symbol_installed_names
+    return nil unless installed && !installed.include?(name)
+    return nil if ancestors.any? { |a| @unknown_mixins.include?(a) || !Array(@prepended_modules[a]).empty? }
+
+    defs = @registry.fetch(name, [])
+    return nil if defs.empty? || !defs.all? { |definition| ancestors.include?(definition.owner) }
+
+    holder = ancestors.find { |a| defs.any? { |definition| definition.owner == a } }
+    return nil if world.facts[holder]['kind'] != 'class'
+
+    here = defs.select { |definition| definition.owner == holder }
+    return nil unless here.one? && here.first.irep && here.first.visibility == :public
+
+    here.first
   end
 
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
