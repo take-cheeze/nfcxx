@@ -1,20 +1,21 @@
 diff --git a/src/vm.c b/src/vm.c
-index 7b6936e..feafae4 100644
+index 7b6936e..9d58e2e 100644
 --- a/src/vm.c
 +++ b/src/vm.c
-@@ -1742,6 +1742,46 @@ hash_new_from_regs(mrb_state *mrb, mrb_int argc, mrb_int idx)
+@@ -1742,6 +1742,49 @@ hash_new_from_regs(mrb_state *mrb, mrb_int argc, mrb_int idx)
   *       when not using switch-based dispatch. It also manages the callinfo
   *       stack (`ci`) for tracking method/block calls.
   */
-+/* LOCAL VM-START COUNTER (uncommitted). Counts each bytecode body the VM starts, keyed by irep and kind.
-+   Off unless BC2CPP_VMCNT_OUT is set; dumped to that file at exit. */
++/* VM-start counter (measurement only). Compiled in with -DBC2CPP_VM_START_COUNTER; off by default, so a normal
++   build has no counter code and no extra includes. Rows go to the file named by BC2CPP_VMCNT_OUT at exit. */
++#ifdef BC2CPP_VM_START_COUNTER
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
 +struct vmcnt_entry { const void *irep; int kind; long count; char *name; };
 +#define VMCNT_SLOTS 65536
 +static struct vmcnt_entry vmcnt_tab[VMCNT_SLOTS];
-+static int vmcnt_state; /* 0 unknown, 1 on, 2 off */
++static int vmcnt_registered;
 +static const char *vmcnt_kind_name[] = {"", "C_entry", "SEND", "CALL", "BLKCALL", "EXEC"};
 +static void vmcnt_dump(void) {
 +  const char *path = getenv("BC2CPP_VMCNT_OUT");
@@ -26,14 +27,13 @@ index 7b6936e..feafae4 100644
 +  }
 +  fclose(f);
 +}
-+static void vmcnt_hit(mrb_state *mrb, const struct RProc *proc, mrb_sym mid, struct RClass *klass, const mrb_irep *irep, int kind) {
-+  if (vmcnt_state == 0) {
-+    vmcnt_state = getenv("BC2CPP_VMCNT_OUT") ? 1 : 2;
-+    if (vmcnt_state == 1) atexit(vmcnt_dump);
++static void vmcnt_hit(mrb_state *mrb, mrb_sym mid, struct RClass *klass, const mrb_irep *irep, int kind) {
++  if (!vmcnt_registered) {
++    vmcnt_registered = 1;
++    atexit(vmcnt_dump);
 +  }
-+  if (vmcnt_state != 1) return;
 +  unsigned long h = ((unsigned long)irep >> 3) * 31u + (unsigned long)kind;
-+  for (int i = 0; ; i++) {
++  for (int i = 0; i < VMCNT_SLOTS; i++) {
 +    struct vmcnt_entry *e = &vmcnt_tab[(h + i) % VMCNT_SLOTS];
 +    if (!e->irep) {
 +      char buf[512];
@@ -42,50 +42,53 @@ index 7b6936e..feafae4 100644
 +      e->irep = irep; e->kind = kind; e->count = 0; e->name = strdup(buf);
 +    }
 +    if (e->irep == irep && e->kind == kind) { e->count++; return; }
-+    if (i > VMCNT_SLOTS) return;
 +  }
 +}
++#define VMCNT_HIT(mrb, mid, klass, irep, kind) vmcnt_hit(mrb, mid, klass, irep, kind)
++#else
++#define VMCNT_HIT(mrb, mid, klass, irep, kind) ((void)0)
++#endif
 +
  MRB_API mrb_value
  mrb_vm_exec(mrb_state *mrb, const struct RProc *begin_proc, const mrb_code *iseq)
  {
-@@ -1770,6 +1810,7 @@ mrb_vm_exec(mrb_state *mrb, const struct RProc *begin_proc, const mrb_code *iseq
+@@ -1770,6 +1813,7 @@ mrb_vm_exec(mrb_state *mrb, const struct RProc *begin_proc, const mrb_code *iseq
    mrb_callinfo *ci = mrb->c->ci;
    CI_PROC_SET(ci, begin_proc);
    ci->pc = iseq;
-+  vmcnt_hit(mrb, begin_proc, 0, NULL, irep, 1);
++  VMCNT_HIT(mrb, 0, NULL, irep, 1);
  
  RETRY_TRY_BLOCK:
  
-@@ -2410,6 +2451,7 @@ RETRY_TRY_BLOCK:
+@@ -2410,6 +2454,7 @@ RETRY_TRY_BLOCK:
            /* setup environment for calling method */
            irep = p->body.irep;
            stack_extend(mrb, (irep->nregs < 4) ? 4 : irep->nregs);
-+          vmcnt_hit(mrb, p, mid, CI_TARGET_CLASS(ci), irep, 2);
++          VMCNT_HIT(mrb, mid, CI_TARGET_CLASS(ci), irep, 2);
            ci->pc = irep->iseq;
            JUMP;
          }
-@@ -2493,6 +2535,7 @@ RETRY_TRY_BLOCK:
+@@ -2493,6 +2538,7 @@ RETRY_TRY_BLOCK:
          if (MRB_PROC_ENV_P(p)) {
            regs[0] = MRB_PROC_ENV(p)->stack[0];
          }
-+        vmcnt_hit(mrb, p, ci->mid, MRB_PROC_TARGET_CLASS(p), irep, 3);
++        VMCNT_HIT(mrb, ci->mid, MRB_PROC_TARGET_CLASS(p), irep, 3);
          ci->pc = irep->iseq;
        }
        JUMP;
-@@ -2546,6 +2589,7 @@ RETRY_TRY_BLOCK:
+@@ -2546,6 +2592,7 @@ RETRY_TRY_BLOCK:
          if (MRB_PROC_ENV_P(p)) {
            regs[0] = MRB_PROC_ENV(p)->stack[0];
          }
-+        vmcnt_hit(mrb, p, ci->mid, MRB_PROC_TARGET_CLASS(p), irep, 4);
++        VMCNT_HIT(mrb, ci->mid, MRB_PROC_TARGET_CLASS(p), irep, 4);
          ci->pc = irep->iseq;
        }
        JUMP;
-@@ -3601,6 +3645,7 @@ RETRY_TRY_BLOCK:
+@@ -3601,6 +3648,7 @@ RETRY_TRY_BLOCK:
        irep = p->body.irep;
        stack_extend(mrb, irep->nregs);
        stack_clear(regs+1, irep->nregs-1);
-+      vmcnt_hit(mrb, p, 0, c, irep, 5);
++      VMCNT_HIT(mrb, 0, c, irep, 5);
        ci->pc = irep->iseq;
        JUMP;
      }
