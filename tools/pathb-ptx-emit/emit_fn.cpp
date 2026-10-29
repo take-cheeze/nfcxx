@@ -110,8 +110,6 @@ bool unroll_safe(const Node &x, const std::string &name, const std::vector<std::
 // The trip count of an unrolled loop is at most this; a longer one stays a loop.
 constexpr size_t kMaxUnroll = 32;
 
-||||||| fc17c084
-=======
 // The register atoms (%N) of x, not counting the names its lets define.
 void count_reg_atoms(const Node &x, std::map<std::string, int> &uses) {
   if (x.kind == Node::Atom && !x.text.empty() && x.text[0] == '%') uses[x.text]++;
