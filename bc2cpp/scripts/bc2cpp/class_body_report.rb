@@ -8,6 +8,8 @@
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/class_body_report.rb [--blockers] [--bytecode] [--world[=FILE]]
 # --world: the class graph facts (tools/bc2cpp/class_world.rb): how much is exact, and as JSON in FILE.
+require 'json'
+require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/class_body_scan'
@@ -69,7 +71,10 @@ end
 def handled_ops
   text = File.read("#{ROOT}/tools/bc2cpp/codegen_insn.rb")
   body = text[/def compile_insn_op.*?\n  end\n/m] || text
-  body.scan(/^    when ((?::\w+(?:,\s*)?)+)/).flatten.flat_map { |l| l.scan(/:(\w+)/).flatten }.map(&:to_sym).to_set
+  ops = body.scan(/^    when ((?::\w+(?:,\s*)?)+)/).flatten.flat_map { |l| l.scan(/:(\w+)/).flatten }.map(&:to_sym).to_set
+  # `when /^LOADI/` (the integer immediates) is a regex branch, not a symbol list, so it is spelled out here.
+  ops.merge(%i[LOADI LOADI8 LOADI16 LOADI32 LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7]) if body.include?('when /^LOADI/')
+  ops
 end
 
 LOAD_ONLY = %i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF METHOD ALIAS UNDEF TCLASS OCLASS].freeze
@@ -131,11 +136,103 @@ def bytecode_report(roots)
   end
 end
 
+# --tags: each SETCONST in the load phase tagged by the source of its value (int and literal values are the
+# const_literal shape class_body_scan compiles; alias, computed and unknown keep the statement), and each method body
+# of a class body tagged compilable (every opcode has a compile_insn case), omittable (its Owner#name is in the leave-out
+# lists named by BC2CPP_OMIT_LISTS) and direct (its owner is exact in the class graph). Tags are per body or per
+# SETCONST and approximate the compiler's own decisions; they are for the leave-out and direct-call work, not codegen.
+SETCONST_INT = %i[LOADI LOADI8 LOADI16 LOADI32 LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7].freeze
+SETCONST_LITERAL = %i[LOADL LOADNIL LOADTRUE LOADFALSE STRING SYMBOL].freeze
+SETCONST_ALIAS = %i[GETCONST GETMCNST].freeze
+
+def const_source_kind(sources)
+  return 'unknown' if sources.nil? || sources.empty?
+
+  kinds = sources.map do |src|
+    if SETCONST_INT.include?(src.op) then 'int'
+    elsif SETCONST_LITERAL.include?(src.op) then 'literal'
+    elsif SETCONST_ALIAS.include?(src.op) then 'alias'
+    else 'computed'
+    end
+  end
+  kinds.uniq.size == 1 ? kinds.first : 'mixed'
+end
+
+def tag_report(roots, scans, omit)
+  mrbc = ENV['MRBC'] || 'mrbc'
+  handled = handled_ops
+  world = ClassWorld.build(scans.values)
+  consts = Hash.new(0)
+  unknown_consts = []
+  methods = []
+  Dir.mktmpdir do |tmp|
+    roots.each do |name, files|
+      ireps, root = compile_ireps(files, name.tr(':-', '__'), tmp, mrbc: mrbc)
+      walk = lambda do |label, owner|
+        irep = ireps.fetch(label)
+        irep.each_with_op(:SETCONST) do |insn, idx|
+          reg = insn.regs.last
+          kind = const_source_kind(reg ? reaching_sources(irep, idx, reg) : nil)
+          consts[kind] += 1
+          unknown_consts << "#{name} #{owner || 'Object'}::#{insn.const_name}" unless %w[int literal].include?(kind)
+        end
+        BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).each do |idx, child|
+          next unless child
+
+          path = BytecodeIR.class_body_path(irep, idx, owner)
+          walk.call(child, path || owner)
+        end
+        irep.each_with_op(:TDEF, :METHOD) do |insn, _|
+          child = irep.reps[insn.op == :TDEF ? insn.def_child_index : insn.block_index]
+          next unless child && owner
+
+          mname = insn.sym.to_s
+          body = ireps.fetch(child)
+          ops = body.instructions.map { |i| i.op }
+          blocking_ops = ops.reject { |op| handled.include?(op) }.uniq
+          compilable = blocking_ops.empty?
+          key = "#{owner}##{mname}"
+          methods << { owner: owner, name: mname, compilable: compilable, blocking: blocking_ops, omittable: omit.include?(key),
+                       direct: world.facts.dig(owner, 'exact') ? true : false, root: name }
+        end
+      end
+      walk.call(root, nil)
+    end
+  end
+  puts "\nSETCONST by value source (int and literal are compiled by class_body_scan's const_literal):"
+  consts.sort_by { |_, n| -n }.each { |k, n| puts format('  %-9s %6d', k, n) }
+  puts "  not compiled (first 12 of #{unknown_consts.size}):"
+  unknown_consts.first(12).each { |c| puts "    #{c}" }
+  blocking = Hash.new(0)
+  methods.each { |m| m[:blocking].each { |op| blocking[op] += 1 } }
+  puts "\nOpcodes that keep a method body from compiling (bodies containing each):"
+  blocking.sort_by { |_, n| -n }.first(12).each { |op, n| puts format('  %-10s %6d', op, n) }
+  puts "\nMethod bodies in class bodies (compilable, omittable, direct):"
+  tally = methods.group_by { |m| [m[:compilable], m[:omittable], m[:direct]] }
+  [[true, true, true], [true, true, false], [true, false, true], [true, false, false], [false, true, false], [false, false, true], [false, false, false], [false, true, true]].each do |key|
+    puts format('  compilable=%-5s omittable=%-5s direct=%-5s %6d', *key, (tally[key] || []).size)
+  end
+  if (out = ENV['BC2CPP_TAGS_OUT'])
+    File.write(out, (['owner\tname\tcompilable\tomittable\tdirect\troot'] +
+                     methods.map { |m| [m[:owner], m[:name], m[:compilable], m[:omittable], m[:direct], m[:root]].join("\t") }).join("\n") + "\n")
+    puts "  wrote #{out} (#{methods.size} method bodies)"
+  end
+end
+
+OMIT_LIST_PATH = ENV['BC2CPP_OMIT_LISTS']
+OMIT = if OMIT_LIST_PATH && File.exist?(OMIT_LIST_PATH)
+         lists = JSON.parse(File.read(OMIT_LIST_PATH))
+         (lists['open'] + lists['closed'] + lists['core_excluded'] + lists['core_left_out']).to_set
+       else
+         Set.new
+       end
+
 args = ARGV.dup
 roots = closed_roots
 scans = statement_table(roots)
 blockers(scans) if args.empty? || args.include?('--blockers')
 bytecode_report(roots) if args.empty? || args.include?('--bytecode')
+tag_report(roots, scans, OMIT) if args.include?('--tags')
 if (flag = args.find { |a| a.start_with?('--world') })
   world = ClassWorld.build(scans.values)
   File.write(flag.split('=', 2)[1], ClassWorld.to_json(world)) if flag.include?('=')
