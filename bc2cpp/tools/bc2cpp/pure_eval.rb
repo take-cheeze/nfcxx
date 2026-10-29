@@ -183,7 +183,7 @@ module PureEval
   def value_ok?(value, seen = {}.compare_by_identity)
     case value
     when nil, true, false, Symbol then nil
-    when Integer then ClassBodyScan::Pure::INT_RANGE.cover?(value) ? nil : 'an Integer outside 32 bits'
+    when Integer then nil
     when Float
       value.finite? && [value].pack('e').unpack1('e') == value ? nil : 'a Float that float32 does not hold exactly'
     when String

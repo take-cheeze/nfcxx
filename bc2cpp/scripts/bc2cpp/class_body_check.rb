@@ -523,8 +523,8 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   suite.check('ORDER: an alias above a redefinition stays residual, and a def above an attr that redefines it stays',
               res_a.include?('alias_method :old_run, :run') && kept_defs.count('Cb::Redef#run') == 2 &&
               kept_defs.include?('Cb::Redef#val') && res_a.include?('attr_reader :val') == false)
-  suite.check('an Integer outside 32 bits stays residual; the edges and a negative are compiled',
-              res_a.include?('WRAP = 0x1_0000_0000') && res_a.include?('SIGN_BIT = 0x8000_0000') &&
+  suite.check('an Integer outside 32 bits is compiled too (built from its text at load); the edges and a negative are compiled',
+              !res_a.include?('WRAP = 0x1_0000_0000') && !res_a.include?('SIGN_BIT = 0x8000_0000') &&
               !res_a.include?('NEG = -3') && !res_a.include?('EDGE_HI') && !res_a.include?('EDGE_LO'))
   suite.check('a residual statement that reads a constant keeps that constant in the residual (promotion)',
               res_a.include?('BASE_N = 5') && res_a.include?('TABLE = (0..BASE_N)') && !res_a.include?('PI = 3.25'))
@@ -563,9 +563,9 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
               mixed.stats[:role_dead] == 1 && mixed_a.include?('def gone = 1') && mixed_a.include?('def gone_too = 2'))
   fx_folded = folded_constants(result.bodies)
   suite.check('PURE_CONST_EVAL: computed constants that are data at build time fold; the others stay in the residual',
-              fx_folded.map { |_, n, _| n }.sort == %w[HALVES LIST_A SFX SPELLINGS SQUARES] &&
-              %w[THIRDS BIGS IDS OUTER LOOSE_UP PAIR].all? { |n| res_a.include?("#{n} =") } &&
-              %w[SFX SPELLINGS HALVES SQUARES LIST_A].none? { |n| res_a.include?("#{n} =") })
+              fx_folded.map { |_, n, _| n }.sort == %w[BIGS HALVES LIST_A SFX SPELLINGS SQUARES] &&
+              %w[THIRDS IDS OUTER LOOSE_UP PAIR].all? { |n| res_a.include?("#{n} =") } &&
+              %w[SFX SPELLINGS HALVES SQUARES LIST_A BIGS].none? { |n| res_a.include?("#{n} =") })
 
   syntax = lambda do |code, label|
     build = Bc2cppFixtureRuntime.full_or_build
@@ -645,9 +645,6 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     'LCF::Schema::COMMON_EVENT' => 'read by the DATABASE hash below, which is residual',
     'LCF::Schema::DATABASE' => 'nested hash holding the `elements:` lambdas (a lambda is bytecode)',
     'LCF::Schema::MAP_UNIT' => 'the same, with lambdas',
-    'LCF::INT32_MASK' => 'a bignum on a 32-bit mrb_int target: an irep literal',
-    'LCF::INT32_SIGN_BIT' => 'the same',
-    'LCF::INT32_WRAP' => 'the same',
     'Array.alias_method sort!' => 'ORDER: holds the core sort!, a def of the same name follows',
     'RGSS::Window.alias_method initialize' => 'ORDER: holds the native initialize, a def of the same name follows'
   }
