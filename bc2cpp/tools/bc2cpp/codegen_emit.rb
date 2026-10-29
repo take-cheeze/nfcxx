@@ -342,8 +342,13 @@ class CodeGen
 
   # The Owner#name keys this build leaves out of its method tables: what emit_owner_registrations skips, and what
   # LoadCompile.mark_dead! reads to drop the visibility statements that name them.
+  # The closed build also skips the compiled bodies of core_left_out: the enumerator-free proof removes those names from
+  # the table, and a compiled body under one of them is as unreachable as the interpreted def it replaces.
   def unregistered_keys
-    static_dispatch_lists.for_build(ENV['BC2CPP_BUILD_NAME']) | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
+    lists = static_dispatch_lists
+    keys = lists.for_build(ENV['BC2CPP_BUILD_NAME'])
+    keys |= lists.core_left_out if ENV['BC2CPP_BUILD_NAME'] == 'closed'
+    keys | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
   end
 
   # The proof's output for this run (static_dispatch_lists.rb). A real gem build has to be given it: running without
