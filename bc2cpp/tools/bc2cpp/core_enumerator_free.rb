@@ -425,6 +425,59 @@ module CoreEnumeratorFree
   # `if (mrb_get_args(mrb, "|o&", &obj, &blk) == 0 && mrb_nil_p(blk))`: no argument and no block.
   NOARG_BLOCKLESS_C = /mrb_get_args\(\s*mrb\s*,\s*"\|o&"\s*,\s*&\w+\s*,\s*&\w+\s*\)\s*==\s*0\s*&&\s*mrb_nil_p\(\s*\w+\s*\)\s*\)/
 
+  # A native send of +name+ that always passes a block the native builds itself: `mrb_funcall_with_block(mrb, self,
+  # MRB_SYM(each), 0, NULL, mrb_obj_value(blk))` where `blk` is assigned exactly once in the same function, from
+  # mrb_proc_new_cfunc_with_env (a fresh cfunc proc, never nil), in the block the send is in, before it, and no goto or
+  # switch in that function could jump over the assignment. Such a send is the same as a Ruby send with a literal block:
+  # a :blockless creator does not make an Enumerator when a block is given, and an :always one is refused by the caller.
+  # Every spelling of +name+ in +text+ (comments and registrations already blanked) must be such a send, or nil is
+  # returned and the spelling stays a spelling. Returns [[line, function]] of the sends.
+  NATIVE_FUNCTION_START = /^(?:static\s+)?(?:MRB_API\s+)?mrb_value\s+(\w+)\s*\(/
+
+  def native_own_block_sends(text, name)
+    total = text.scan(/\b#{Regexp.escape(name)}\b/).size
+    return nil if total.zero?
+
+    starts = []
+    text.scan(NATIVE_FUNCTION_START) { starts << Regexp.last_match.begin(0) }
+    sends = []
+    text.scan(/mrb_funcall_with_block\(\s*mrb\s*,\s*\w+\s*,\s*MRB_SYM\(\s*#{Regexp.escape(name)}\s*\)\s*,\s*\w+\s*,\s*\w+\s*,\s*mrb_obj_value\(\s*(\w+)\s*\)\s*\)/) do |(var)|
+      at = Regexp.last_match.begin(0)
+      fn_start = starts.select { |s| s <= at }.last or return nil
+      fn_end = starts.find { |s| s > at } || text.size
+      body = text[fn_start...fn_end].gsub(/"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/) { |m| m.gsub(/[^\n]/, ' ') }
+      rel = at - fn_start
+      assigns = []
+      body.scan(/(?<![\w.>&])#{Regexp.escape(var)}\s*=(?!=)/) { assigns << Regexp.last_match }
+      return nil unless assigns.size == 1 && !body.match?(/&\s*#{Regexp.escape(var)}\b/)
+
+      assign = assigns.first
+      return nil unless body[assign.end(0)..].match?(/\A\s*mrb_proc_new_cfunc_with_env\s*\(/)
+      return nil if body.match?(/\b(?:goto|switch|case)\b/)
+
+      a = assign.begin(0)
+      depth = 0
+      min = Float::INFINITY
+      depth_at_assign = nil
+      body.each_char.with_index do |c, i|
+        depth_at_assign = depth if i == a
+        break if i == rel
+
+        depth += 1 if c == '{'
+        depth -= 1 if c == '}'
+        min = depth if i > a && depth < min
+      end
+      return nil unless depth_at_assign && a < rel && depth == depth_at_assign && min >= depth_at_assign
+
+      line = text[0...at].count("\n") + 1
+      fn = text[fn_start..].match(NATIVE_FUNCTION_START)[1]
+      sends << [line, fn]
+    end
+    return nil unless sends.size == total
+
+    sends
+  end
+
   # The natives that call to_enum: [Creator list, problems]. +entries+ are CoreNativeCandidates.entries, +registrations+
   # NativeOwnerMap's [owner, name, function] triples, +strip+ blanks the C comments. A function that is registered
   # nowhere (its name cannot be told) or an Enumerator named in native text is a problem: the proof does not hold.
@@ -465,9 +518,12 @@ module CoreEnumeratorFree
   #   native_creators / native_problems   native_creators's result
   #   native_aliases  [[owner, new, old]] native aliases
   #   native_spelled  name => the native files that spell it, outside table entries and registrations
+  #   native_block_sends  name => [[file, [[line, function]]]] of the native sends of it that always pass a block the native
+  #                   builds (native_own_block_sends); a spelling in such a file is no spelling of its own
   #   block_returns   method name => [BlockReturns::Entry] of the checked `{ ... } -> T` declarations (sig/bc2cpp)
   Inputs = Struct.new(:engine, :core, :hierarchy, :foreign, :external, :external_owners, :ivar_external, :symbol_lookups,
-                      :native_creators, :native_problems, :native_aliases, :native_spelled, :block_returns, keyword_init: true)
+                      :native_creators, :native_problems, :native_aliases, :native_spelled, :block_returns, :native_block_sends,
+                      keyword_init: true)
 
   # The proof. Returns a Result; +unproven+ names every site and condition it could not account for.
   def prove(inputs)
@@ -492,6 +548,20 @@ module CoreEnumeratorFree
 
     proven = Hash.new(0)
     log = []
+    inputs.native_block_sends.each do |name, files|
+      next unless names.include?(name) && !inputs.native_spelled.key?(name)
+
+      files.each do |path, sends|
+        sends.each do |line, fn|
+          if always.include?(name)
+            unproven << Unproven.new(file: path, line: line, where: fn, name: name, why: 'a creator that builds one for any call')
+          else
+            proven[:given] += 1
+            log << SiteLog.new(name: name, file: path, line: line, where: fn, verdict: :block, engine: false, classes: nil)
+          end
+        end
+      end
+    end
     groups.each do |g|
       typer = nil # built when the first site of the group needs a receiver
       names.each do |n|
@@ -779,12 +849,16 @@ module CoreEnumeratorFree
                                                    computed: map.computed.to_set, wild: wild.to_set, native_classes: native_classes)
 
     spelled_in = Hash.new { |h, k| h[k] = [] }
+    block_sent = Hash.new { |h, k| h[k] = [] }
     native.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(entry_name) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text = NOT_CALLS.inject(text) { |t, re| t.gsub(re) { |m| ' ' * m.size } }
       found = Set.new
       tokens.call(text, found)
-      found.each { |name| spelled_in[name] << path }
+      found.each do |name|
+        sends = native_own_block_sends(strip.call(text), name)
+        if sends then block_sent[name] << [path, sends] else spelled_in[name] << path end
+      end
     end
     spelled = spelled_in.keys.to_set
     ivar_strings = Set.new
@@ -801,6 +875,6 @@ module CoreEnumeratorFree
     Inputs.new(engine: engine_group, core: core_groups, hierarchy: hierarchy, foreign: foreign, external: external,
                external_owners: external_owners, ivar_external: ivar_strings, symbol_lookups: symbol_lookups,
                native_creators: creators, native_problems: problems, native_aliases: map.aliases.map { |o, n, old| [o, n, old] },
-               native_spelled: spelled_in, block_returns: block_returns)
+               native_spelled: spelled_in, block_returns: block_returns, native_block_sends: block_sent)
   end
 end
