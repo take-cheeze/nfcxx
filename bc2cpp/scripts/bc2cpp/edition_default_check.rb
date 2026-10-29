@@ -22,7 +22,7 @@ MRBLIB = File.expand_path('../../mruby-lcf/mrblib', __dir__)
 LCF_TEXT = File.read(File.join(MRBLIB, 'lcf.rb'), encoding: 'UTF-8')
 SCHEMA_TEXT = File.read(File.join(MRBLIB, 'schema.rb'), encoding: 'UTF-8')
 LINES = LCF_TEXT.lines
-FIRST = LINES.index { |l| l.start_with?('  def edition_default kind') }
+FIRST = LINES.index { |l| l.start_with?('  def self.edition_default kind') }
 LAST = FIRST && (FIRST...LINES.size).find { |i| LINES[i] == "  end\n" }
 suite.check('lcf.rb defines LCF.edition_default', !FIRST.nil? && !LAST.nil?)
 suite.check('no schema default is a lambda, and the two edition ones are Symbols',
@@ -39,11 +39,10 @@ HELPER = LINES[FIRST..LAST].join
 SOURCE = <<~RUBY
   module LCF
     MODE = 2000
-    def level_max; MODE == 2003 ? 99 : 50 end
-    def exp_default; MODE == 2003 ? 300 : 30 end
+    def self.level_max; MODE == 2003 ? 99 : 50 end
+    def self.exp_default; MODE == 2003 ? 300 : 30 end
 
   #{HELPER.gsub("\n", "\n  ")}
-    module_function :level_max, :exp_default, :edition_default
   end
 
   # LCF.to_rb's default step, as it reads a schema entry.
@@ -66,7 +65,7 @@ OWNERS = ['LCF', 'LCF.singleton', 'EdReader'].freeze
 Dir.mktmpdir('bc2cpp-edition-default') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   suite.check('the helper and the reader compile',
-              code.include?('mrb_value LCF_edition_default_impl(mrb_state* M') &&
+              code.include?('mrb_value LCF_singleton_edition_default_impl(mrb_state* M') &&
               code.include?('mrb_value EdReader_default_of_impl(mrb_state* M'))
 
   build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
