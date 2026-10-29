@@ -518,9 +518,10 @@ class ze_rt {
     check(zeKernelSetGroupSize(kern, l[0], l[1], l[2]), "zeKernelSetGroupSize");
     // the kernel's only argument is the push block in the control block; the heap (stacks, the closure's USM pointers,
     // the statics) is reached through pointers, so the driver is told to keep the shared allocations resident
-    check(zeKernelSetIndirectAccess(kern, ZE_KERNEL_INDIRECT_ACCESS_FLAG_SHARED | ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST |
-                                              ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE),
-          "zeKernelSetIndirectAccess");
+    if (!std::getenv("NFCXX_EXP_NO_INDIRECT"))
+      check(zeKernelSetIndirectAccess(kern, ZE_KERNEL_INDIRECT_ACCESS_FLAG_SHARED | ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST |
+                                                ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE),
+            "zeKernelSetIndirectAccess");
     if (subgroup_size) {
       // the kernel must be compiled for the sub-group size it asks for (its SubgroupSize execution mode)
       ze_kernel_properties_t kp = {};
