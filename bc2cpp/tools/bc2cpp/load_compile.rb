@@ -27,6 +27,7 @@ require 'prism'
 require 'set'
 require_relative 'class_body_scan'
 require_relative 'pure_eval'
+require_relative 'class_world'
 
 module LoadCompile
   module_function
@@ -322,10 +323,14 @@ module LoadCompile
   # installs later. attr_*, include and the like define or extend; they need nothing in place.
   NEEDS_EXISTING = %w[private public protected module_function private_class_method public_class_method alias_method].freeze
 
-  # Symbols a compiled statement names as methods, by name only: they must exist when it runs.
-  def pinned_names(roots)
+  # Symbols a compiled statement names as methods, by name only: they must exist when it runs. With a class graph
+  # (`graph`), the source of an alias copy (`alias new old`, `alias_method :new, :old`) pins only the defs of the
+  # ancestors of the body it sits in (`sites`, by name: each body's Owner, or :unknown); the new name still pins by
+  # name. Without a graph every named symbol pins by name, as before.
+  def pinned_names(roots, graph = nil)
     # A hook must exist when the statement it observes runs (HOOK_DEFS).
     names = Set.new(HOOK_DEFS)
+    sites = Hash.new { |h, k| h[k] = [] }
     roots.each do |root|
       each_ubody(root) do |ub|
         ub.items.each do |item|
@@ -335,26 +340,49 @@ module LoadCompile
           next if item.role == :dead
 
           node = item.stmt.node
+          body = %i[class module].include?(ub.body.kind) && !ub.body.path.end_with?('.singleton') ? ub.body.path : :unknown
           if node.is_a?(Prism::AliasMethodNode)
-            names << node.new_name.unescaped << node.old_name.unescaped
+            names << node.new_name.unescaped
+            receiver_rule_name?(node.old_name.unescaped, graph) ? sites[node.old_name.unescaped] << body : names << node.old_name.unescaped
           elsif NEEDS_EXISTING.include?(node.name.to_s)
-            (node.arguments&.arguments || []).each do |arg|
-              names << arg.unescaped if arg.is_a?(Prism::SymbolNode) || arg.is_a?(Prism::StringNode)
+            args = (node.arguments&.arguments || []).select { |arg| arg.is_a?(Prism::SymbolNode) || arg.is_a?(Prism::StringNode) }
+            if node.name.to_s == 'alias_method' && args.size == 2 && receiver_rule_name?(args[1].unescaped, graph)
+              names << args[0].unescaped
+              sites[args[1].unescaped] << body
+            else
+              args.each { |arg| names << arg.unescaped }
             end
           end
         end
       end
     end
-    names
+    [names, sites]
   end
 
-  def decide!(roots, drop_keys, pinned, stay: false)
+  # The copy source of an alias is decided by the class graph only for the staged names (MrblibStubs::RECEIVER_RULE_NAMES).
+  def receiver_rule_name?(name, graph) = !graph.nil? && MrblibStubs::RECEIVER_RULE_NAMES.include?(name)
+
+  # Whether the copy sites of a name (pinned_names' sites) may take the def of `def_key` as their source.
+  def copy_pinned?(def_key, name, sites, graph)
+    list = sites[name]
+    return false if list.nil? || list.empty?
+
+    owner = def_key.split('#', 2).first
+    list.any? do |site|
+      next true if site == :unknown || graph.facts[site].nil? || !graph.facts[site]['exact']
+
+      ClassWorld.ancestors(site, graph.classes, {}).include?(owner)
+    end
+  end
+
+  def decide!(roots, drop_keys, pinned, stay: false, sites: {}, graph: nil)
     roots.each do |root|
       each_ubody(root) do |ub|
         ub.items.each do |item|
           next unless item.role == :def
 
-          item.dropped = !item.def_key.nil? && drop_keys.include?(item.def_key) && !pinned.include?(item.def_name) &&
+          pinned_here = pinned.include?(item.def_name) || (graph && item.def_key && copy_pinned?(item.def_key, item.def_name, sites, graph))
+          item.dropped = !item.def_key.nil? && drop_keys.include?(item.def_key) && !pinned_here &&
                          !order_pins.include?(item.def_key)
         end
       end
@@ -1121,13 +1149,13 @@ module LoadCompile
   #   gem:       the gem whose output this is
   #   drop_keys: Owner#name keys of this gem's defs the stub proof lets go (MrblibStubs.stubbable)
   #   symbol:    the compiled gem's out_symbol (names the function and the marker)
-  def plan(world, gem:, drop_keys:, symbol:, statements: true, unregistered: Set.new)
+  def plan(world, gem:, drop_keys:, symbol:, statements: true, unregistered: Set.new, graph: nil)
     roots = world.transform_values { |files| files.map { |f| build_root(f, statements: statements) } }
     all = roots.values.flatten
     promote!(all)
     mark_dead!(roots.fetch(gem), all, drop_keys, unregistered) if statements
-    pinned = pinned_names(all)
-    decide!(roots.fetch(gem), drop_keys, pinned, stay: !statements)
+    pinned, sites = pinned_names(all, graph)
+    decide!(roots.fetch(gem), drop_keys, pinned, stay: !statements, sites: sites, graph: graph)
     mine = roots.fetch(gem)
     files = world.fetch(gem)
     ranges = files.zip(mine).to_h { |file, root| [file, ranges_for(root)] }
@@ -1225,7 +1253,8 @@ module LoadCompile
     world = JSON.parse(env['BC2CPP_LOAD_WORLD'])
     return nil unless world.key?(symbol)
 
-    plan(world, gem: symbol, drop_keys: drop_keys, symbol: symbol, statements: mode == 'all', unregistered: unregistered)
+    plan(world, gem: symbol, drop_keys: drop_keys, symbol: symbol, statements: mode == 'all', unregistered: unregistered,
+         graph: ClassWorld.from_load_world(env['BC2CPP_LOAD_WORLD']))
   end
 
   def write_plan(path, result)
