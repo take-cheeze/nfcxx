@@ -96,6 +96,8 @@ int main(int argc, char **argv) {
       g_unroll_loops = true;
     } else if (a == "--unroll=off") {
       g_unroll_loops = false;
+    } else if (a == "--struct-slots=off") {
+      g_struct_slots = false;
     } else if (a.rfind("--sm=", 0) == 0) {
       sm = "sm_" + a.substr(5);
     } else if (a.rfind("--kernel=", 0) == 0) {

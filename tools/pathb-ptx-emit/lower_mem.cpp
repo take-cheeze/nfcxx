@@ -20,6 +20,50 @@ const RegInfo *FnCtx::promoted_slot(const Node &addr) const {
   return it == promoted.end() ? nullptr : &it->second;
 }
 
+// The move that copies a value of type ty between two registers. A narrow integer's register holds its canonical 32-bit
+// value, so it moves as 32 bits.
+static std::string field_mov(const Ty &ty) { return reg_class(ty) == "r" ? "mov.u32" : "mov." + ptx_type(ty); }
+
+std::string FnCtx::token_value(const Node &x) const {
+  if (x.kind == Node::Sym && x.sig == '$')
+    return sra_slots.count(x.text) ? "@" + std::to_string(sra_scope) + ":" + x.text + "+0" : "";
+  if (x.kind == Node::Atom) {
+    auto it = regs.find(x.text);
+    if (it != regs.end() && !it->second.ptx.empty() && it->second.ptx[0] == '@') return it->second.ptx;
+  }
+  return "";
+}
+
+std::string FnCtx::token_rhs(const Node &v) const {
+  if (v.kind != Node::List || v.items.empty() || v.items[0].kind != Node::Atom) return "";
+  const std::string &h = v.items[0].text;
+  if (h == "bitcast" && v.items.size() == 3) return token_value(v.items[2]);
+  if (h == "offset" && v.items.size() == 3) {
+    std::string base = token_value(v.items[1]);
+    if (base.empty()) return "";
+    size_t plus = base.rfind('+');
+    long long off = std::stoll(base.substr(plus + 1)) + static_cast<long long>(as_int(&v.items[2]));
+    return base.substr(0, plus + 1) + std::to_string(off);
+  }
+  if (h == "load" && v.items.size() == 3 && v.items[2].kind == Node::Sym && v.items[2].sig == '$' &&
+      carrier_slots.count(v.items[2].text)) {
+    auto it = carrier_val.find(v.items[2].text);
+    if (it == carrier_val.end()) throw BadIR("pointer slot " + v.items[2].text + " is loaded before it is stored");
+    return it->second;
+  }
+  return "";
+}
+
+const RegInfo *FnCtx::sra_field(const Node &addr, const Ty &ty) const {
+  std::string t = token_value(addr);
+  if (t.empty()) return nullptr;
+  size_t plus = t.rfind('+');
+  std::string key = t.substr(0, plus) + "|" + t.substr(plus + 1) + "|" + ptx_type(ty);
+  auto it = sra_fields.find(key);
+  if (it == sra_fields.end()) throw BadIR("access through " + t + " has no field register (" + ptx_type(ty) + ")");
+  return &it->second;
+}
+
 bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest, const Ty &dty) {
   const Ty ptr{"ptr", -1, false, false};
   if (h == "load") {
@@ -27,6 +71,10 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
     expect(dty, ty);
     if (at(x, 2).kind == Node::Sym && at(x, 2).sig == '$' && const_slots.count(at(x, 2).text)) {
       emit("mov." + ptx_type(ty) + " " + dest + ", " + imm(ty, const_slots.at(at(x, 2).text)) + ";");
+      return true;
+    }
+    if (const RegInfo *f = sra_field(at(x, 2), ty)) {
+      emit(field_mov(ty) + " " + dest + ", " + f->ptx + ";");
       return true;
     }
     if (const RegInfo *p = promoted_slot(at(x, 2))) {
@@ -110,6 +158,18 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
 bool FnCtx::store_stmt(const std::string &h, const Node &s) {
   if (h == "store") {
     Ty ty = parse_type(&at(s, 1));
+    if (at(s, 2).kind == Node::Sym && at(s, 2).sig == '$' && carrier_slots.count(at(s, 2).text)) {
+      std::string v = token_value(at(s, 3));
+      if (v.empty()) throw Refused("a pointer slot holds an address that is not an alias");
+      carrier_val[at(s, 2).text] = v;
+      return true;
+    }
+    if (const RegInfo *f = sra_field(at(s, 2), ty)) {
+      Operand val = operand(at(s, 3));
+      expect(ty, val.ty);
+      emit(field_mov(ty) + " " + f->ptx + ", " + reg_of(val.text, ty) + ";");
+      return true;
+    }
     if (const RegInfo *p = promoted_slot(at(s, 2))) {
       Operand val = operand(at(s, 3));
       expect(ty, val.ty);
