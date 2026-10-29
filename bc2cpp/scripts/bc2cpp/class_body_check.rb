@@ -488,7 +488,9 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
       case node
       when Prism::ClassNode, Prism::ModuleNode
         name = node.constant_path.slice.delete_prefix('::')
-        inner = node.constant_path.slice.start_with?('::') || owner.empty? ? name : "#{owner}::#{name}"
+        # A `A::B` header names its constant from Object (PATH_FORM rewrites headers that way inside a scope that
+        # still encloses them), so its owner is the path itself; no engine header is written that way unrewritten.
+        inner = node.constant_path.slice.start_with?('::') || node.constant_path.is_a?(Prism::ConstantPathNode) || owner.empty? ? name : "#{owner}::#{name}"
         node.body&.compact_child_nodes&.each { |c| walk.call(c, inner) }
       when Prism::StatementsNode then node.body.each { |c| walk.call(c, owner) }
       when Prism::SingletonClassNode then node.body&.compact_child_nodes&.each { |c| walk.call(c, "#{owner}.singleton") }

@@ -373,6 +373,222 @@ module LoadCompile
                   ub.items.any? { |i| (i.role == :def && !i.dropped) || i.role == :residual }
   end
 
+  # ---- path form ---------------------------------------------------------------------------------------------
+  #
+  # A nesting header that has no kept text of its own (no def and no residual statement) is in the residual only as
+  # the lexical scope of the kept bodies under it. Once the constant it names exists (an earlier residual header
+  # created it, of the same kind), the header adds nothing but a lookup scope, so it can go and each kept body under
+  # it is written with its full path (`class Outer::Inner`, a constant path from Object). Dropping a scope changes
+  # the lookups made from the bodies under it, so a header is removed only when, for every kept body under it:
+  #
+  #   - its kept text (its defs and residual statements) and its superclass name no constant that a removed scope
+  #     defines. The constants a body defines are counted world-wide: nested bodies and class-level constant writes
+  #     of every body of that path in every file, in every gem (`table_names`), so a compiled write counts too;
+  #   - the first segment of its full path is not a constant of a scope that still encloses it (the path is looked
+  #     up from where the header now stands);
+  #   - its header is a plain name (`class Inner`, not `class a::Inner`).
+  #
+  # Also off, for the whole world, when a call reads or writes constants by name (const_set, eval, binding, ...) or
+  # a class variable is used: those find a scope some other way. A failing body un-removes its outermost removed
+  # scope; the set only shrinks, so the fixpoint ends. The first residual header of a constant is never removed (a
+  # removal needs an earlier one), so every constant a removed header named still exists when the residual runs.
+  #
+  # A header that stays keeps its text, and a body under a removed header with a name that is not plain stays
+  # nested (no rewrite): that is a header with `::` in its name, whose lookup this does not model.
+  REFLECTION_CALLS = %w[const_set const_get const_defined? class_eval module_eval class_exec module_exec instance_eval
+                        instance_exec eval binding const_missing class_variable_get class_variable_set nesting].freeze
+  CONST_WRITES = /\AConstant(?:Write|OrWrite|AndWrite|OperatorWrite|Target)Node\z/.freeze
+
+  # Set by path_form! for the gem being planned; empty otherwise, so ranges_for changes nothing in `defs` mode.
+  def path_form_sets = [@removed || Set.new.compare_by_identity, @path_form || Set.new.compare_by_identity]
+
+  def path_form!(mine, all, enabled: true)
+    @removed = Set.new.compare_by_identity
+    @path_form = Set.new.compare_by_identity
+    return unless enabled && !reflective_world?(all)
+
+    names = table_names(all)
+    plain = plain_scopes(all)
+    created = {}
+    candidates = Set.new.compare_by_identity
+    each_residual_body(mine) do |ub, _ancestors|
+      candidates << ub if removable_shape?(ub) && created_before?(ub, created)
+      created[ub.body.path] ||= ub.body.kind if %i[class module].include?(ub.body.kind)
+    end
+    @removed = candidates
+    loop do
+      failed = path_form_failures(mine, names, plain)
+      break if failed.empty?
+
+      failed.each { |ub| @removed.delete(ub) }
+    end
+    @path_form = Set.new.compare_by_identity
+    each_residual_body(mine) { |ub, ancestors| @path_form << ub if !@removed.include?(ub) && ancestors.any? { |a| @removed.include?(a) } }
+  end
+
+  # The header is `class Name` or `module Name` with no superclass, and no text of its own in the residual.
+  def removable_shape?(ub)
+    node = ub.body.node
+    return false if kept_text?(ub) || !ub.header_simple || !plain_header?(ub)
+
+    node.is_a?(Prism::ModuleNode) || (node.is_a?(Prism::ClassNode) && node.superclass.nil?)
+  end
+
+  # Its constant is created already, with the same kind, and so is every scope that holds it.
+  def created_before?(ub, created)
+    parts = ub.body.path.split('::')
+    created[ub.body.path] == ub.body.kind && (1...parts.size).all? { |n| created.key?(parts[0...n].join('::')) }
+  end
+
+  def kept_text?(ub) = ub.items.any? { |i| (i.role == :def && !i.dropped) || i.role == :residual }
+
+  def plain_header?(ub)
+    node = ub.body.node
+    (node.is_a?(Prism::ClassNode) || node.is_a?(Prism::ModuleNode)) && node.constant_path.is_a?(Prism::ConstantReadNode)
+  end
+
+  # Every body whose header runs in the residual, outer first, with the bodies that enclose it (outermost first).
+  def each_residual_body(roots, &block)
+    roots.each { |root| root.items.each { |item| visit_residual(item.child, [], &block) if item.child } }
+  end
+
+  def visit_residual(ub, ancestors, &block)
+    return unless ub.skeleton
+
+    block.call(ub, ancestors)
+    inner = ancestors + [ub]
+    ub.items.each { |item| visit_residual(item.child, inner, &block) if item.child }
+  end
+
+  # The bodies to un-remove: a kept body under removed scopes whose lookups would change.
+  def path_form_failures(mine, names, plain)
+    failed = Set.new.compare_by_identity
+    each_residual_body(mine) do |ub, ancestors|
+      lost = ancestors.select { |a| @removed.include?(a) }
+      next if lost.empty? || @removed.include?(ub)
+
+      outer = lost.first
+      # The lookups of a path-form body run through the ancestors of its innermost scope: those must be the same
+      # with or without the removed scopes, so every scope around it must be plain (no superclass, no include).
+      unless plain_header?(ub) && ancestors.all? { |a| plain[a.body.path] }
+        failed << outer
+        next
+      end
+      first = ub.body.path.split('::').first
+      remaining = ancestors.reject { |a| @removed.include?(a) }
+      if remaining.any? { |a| first_segment_conflict?(first, names[a.body.path]) }
+        failed << outer
+        next
+      end
+      refs = Set.new
+      ub.items.each { |i| refs.merge(const_refs(i.stmt.node)) if (i.role == :def && !i.dropped) || i.role == :residual }
+      node = ub.body.node
+      refs.merge(const_refs(node.superclass)) if node.is_a?(Prism::ClassNode) && node.superclass
+      lost_names = Set.new(lost.flat_map { |a| names[a.body.path].to_a })
+      failed << outer if cref_conflict?(refs, lost_names)
+    end
+    failed.to_a
+  end
+
+  # A reference named in the kept text under a removed scope is one the scope's constants would answer.
+  def cref_conflict?(refs, lost_names) = refs.intersect?(lost_names)
+
+  # The path's first segment is looked up from where the rewritten header stands: a constant of a scope that still
+  # encloses the body would answer it instead of Object.
+  def first_segment_conflict?(first, scope_names) = scope_names.include?(first)
+
+  # Whether every body of a path is a plain scope: a module, or a class with no superclass, and no include or prepend
+  # in it (those put constants in the ancestors that a lookup from the scope reaches).
+  def plain_scopes(all)
+    plain = Hash.new(true)
+    all.each do |root|
+      each_ubody(root) do |ub|
+        node = ub.body.node
+        ok = node.is_a?(Prism::ModuleNode) || (node.is_a?(Prism::ClassNode) && node.superclass.nil?)
+        ok &&= ub.items.none? { |i| i.stmt.node.is_a?(Prism::CallNode) && %w[include prepend].include?(i.stmt.node.name.to_s) }
+        plain[ub.body.path] &&= ok
+      end
+    end
+    plain
+  end
+
+  # The constant names a body path defines: nested bodies (their last name), class-level constant writes.
+  def table_names(all)
+    names = Hash.new { |h, k| h[k] = Set.new }
+    all.each do |root|
+      each_ubody(root) do |ub|
+        ub.items.each do |item|
+          if item.child
+            names[ub.body.path] << item.child.body.name.to_s.split('::').last
+          else
+            node = item.stmt.node
+            names[ub.body.path] << node.constant_path.slice.split('::').last if node.is_a?(Prism::ClassNode) || node.is_a?(Prism::ModuleNode)
+            const_writes(node, names[ub.body.path])
+          end
+        end
+      end
+    end
+    names
+  end
+
+  def const_writes(node, into)
+    return into if node.nil? || node.is_a?(Prism::DefNode)
+
+    into << node.name.to_s if node.class.name.split('::').last.match?(CONST_WRITES)
+    node.compact_child_nodes.each { |c| const_writes(c, into) }
+    into
+  end
+
+  # Names a node reads by lexical lookup: a constant read, the first segment of a constant path (`A::B` looks A up),
+  # and the constants an operator write reads.
+  def const_refs(node, into = Set.new)
+    return into if node.nil?
+
+    case node
+    when Prism::ConstantReadNode then into << node.name.to_s
+    when Prism::ConstantPathNode
+      first = node
+      first = first.parent while first.is_a?(Prism::ConstantPathNode) && first.parent
+      into << first.name.to_s if first.is_a?(Prism::ConstantReadNode)
+    when Prism::ConstantOrWriteNode, Prism::ConstantAndWriteNode, Prism::ConstantOperatorWriteNode
+      into << node.name.to_s
+    end
+    node.compact_child_nodes.each { |c| const_refs(c, into) }
+    into
+  end
+
+  def reflective_world?(all)
+    all.any? do |root|
+      found = false
+      each_ubody(root) do |ub|
+        ub.items.each { |item| found ||= reflective?(item.stmt.node) }
+      end
+      found
+    end
+  end
+
+  def reflective?(node)
+    return false if node.nil?
+    return true if node.class.name.split('::').last.start_with?('ClassVariable')
+    return true if node.is_a?(Prism::CallNode) && REFLECTION_CALLS.include?(node.name.to_s)
+
+    node.compact_child_nodes.any? { |c| reflective?(c) }
+  end
+
+  # The header of a removed body is blanked (its `class`/`module` and name, and its `end`). A kept body under a removed
+  # one has its name replaced by its full path.
+  def header_ranges(ub, out)
+    removed, path_form = path_form_sets
+    node = ub.body.node
+    if removed.include?(ub)
+      out << [node.location.start_offset, node.constant_path.location.end_offset]
+      out << [node.end_keyword_loc.start_offset, node.end_keyword_loc.end_offset]
+    elsif path_form.include?(ub)
+      name = node.constant_path.location
+      out << [name.start_offset, name.end_offset, ub.body.path]
+    end
+  end
+
   # ---- residual text -----------------------------------------------------------------------------------------
 
   # Byte ranges of the statements the compiled load takes.
@@ -382,7 +598,10 @@ module LoadCompile
       range = [loc.start_offset, loc.end_offset]
       case item.role
       when :nested
-        if item.child.skeleton then ranges_for(item.child, out) else out << range end
+        if item.child.skeleton
+          header_ranges(item.child, out)
+          ranges_for(item.child, out)
+        else out << range end
       when :def then out << range if item.dropped
       when :send, :alias, :const, :ivar, :dead then out << range
       end
@@ -390,11 +609,13 @@ module LoadCompile
     out
   end
 
-  # `text` with the byte `ranges` blanked, newlines kept, so every kept line number is unchanged.
+  # `text` with the byte `ranges` blanked, newlines kept, so every kept line number is unchanged. A range with a third
+  # element is replaced by that text instead (a header written with its full path, PATH_FORM); the ranges do not
+  # overlap, so applying them from the last one back leaves every earlier offset where it was.
   def blank(text, ranges)
     out = text.b
-    ranges.sort.each do |s, e|
-      out[s...e] = out.byteslice(s...e).gsub(/[^\n]/n, ' '.b)
+    ranges.sort_by(&:first).reverse_each do |s, e, replacement|
+      out[s...e] = replacement ? replacement.b : out.byteslice(s...e).gsub(/[^\n]/n, ' '.b)
     end
     out
   end
@@ -1128,6 +1349,7 @@ module LoadCompile
     mark_dead!(roots.fetch(gem), all, drop_keys, unregistered) if statements
     pinned = pinned_names(all)
     decide!(roots.fetch(gem), drop_keys, pinned, stay: !statements)
+    path_form!(roots.fetch(gem), all, enabled: statements)
     mine = roots.fetch(gem)
     files = world.fetch(gem)
     ranges = files.zip(mine).to_h { |file, root| [file, ranges_for(root)] }
