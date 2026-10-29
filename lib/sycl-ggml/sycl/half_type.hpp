@@ -16,6 +16,8 @@
 
 namespace sycl {
 
+namespace ext::oneapi { class bfloat16; }
+
 class half {
  public:
   // The default constructor is trivial (no member initialiser): an array of half (vec<half, N>'s storage) is then
@@ -24,6 +26,10 @@ class half {
   // (half()) still zeroes the bits.
   half() = default;
   half(float f) : bits_(from_float(f)) {}
+  // from sycl::ext::oneapi::bfloat16 (sycl.hpp) through float: `half h = bf;` is two user conversions otherwise
+  // (dmmv.cpp's convert_bf16 assigns a bfloat16 to a half). A template, so the bfloat16 type is complete when it is used.
+  template <class B, std::enable_if_t<std::is_same_v<B, ext::oneapi::bfloat16>, int> = 0>
+  half(B b) : bits_(from_float(static_cast<float>(b))) {}
   operator float() const { return to_float(bits_); }
   uint16_t bits() const { return bits_; }
   static half from_bits(uint16_t b) { half h; h.bits_ = b; return h; }

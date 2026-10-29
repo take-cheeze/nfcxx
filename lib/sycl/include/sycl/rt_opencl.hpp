@@ -159,30 +159,27 @@ class cl_rt {
     // the group's local region: the user's local memory, the 1024-byte scratch tail, then the work-group statics (manifest L)
     uint64_t stride = (uint64_t(lmem) + 1024 + static_local + 15) & ~uint64_t(15);
     // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
-    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd); the
-    // dimensions above sd must be a single invocation, so the slab's invocations are contiguous in the emitter's linear
-    // index. The emitter numbers stacks and local memory over the whole grid (the slab offset ox/oy/oz is in that
+    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd), with
+    // every group below sd and one group of each dimension above it: consecutive groups in the linear group index (x
+    // fastest). The emitter numbers stacks and local memory over the whole grid, group by group (the slab offset ox/oy/oz is in that
     // index), so each slab's bases are biased by the slab's first index and the region holds just the slab.
     uint64_t stack_total = invocations * stack_bytes;
     uint64_t room = largest_free();
     int sd = 0;
     for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
-    bool sliceable = true;
-    for (int e = sd + 1; e < 3; e++) if (l[e] != 1) sliceable = false;
     uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
     uint64_t per_group = inv_group * stack_bytes + stride;
     // the groups in the dimensions below d: one group along d takes them all
     auto below = [&](int d) { uint64_t b = 1; for (int e = 0; e < d; e++) b *= ng[e]; return b; };
     // when even one group along sd does not fit (with all the groups below it), the slab moves to the next dimension
-    // inward; the dimensions above it then run one group per launch, so they must be one invocation wide (l == 1) for the
-    // slab to stay contiguous in the linear index
+    // inward; the dimensions above it then run one group per launch
     if (stack_total + groups * stride > room)
-      while (sliceable && sd > 0 && l[sd] == 1 && below(sd) * per_group > room) sd--;
+      while (sd > 0 && below(sd) * per_group > room) sd--;
     uint64_t inner = below(sd);
     uint64_t outer = 1;   // the groups of the dimensions above sd, one per launch
     for (int e = sd + 1; e < 3; e++) outer *= ng[e];
     uint32_t per_launch = ng[sd];   // groups along sd in one launch
-    if (stack_total + groups * stride > room && sliceable) {
+    if (stack_total + groups * stride > room) {
       uint64_t fit = room / (inner * per_group);
       per_launch = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
     }
