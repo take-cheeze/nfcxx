@@ -32,6 +32,8 @@ SOURCE = <<~RUBY
       @cur = "cur" + "x"
       # Built here, so the funcall that ran #new has already dropped its arena entries: the slot is the only owner.
       $gcr_slot = ["g0" + "x", "g1" + "x"]
+      # A proc block: Array#map hands each element to it directly (no VM stack), and it clears the Array by name.
+      @clear_blk = proc { |e| $gcr_slot.send(:clear); churn; e.inspect }
     end
 
     # A full collection, then enough allocation that a freed cell is handed out again and stays referenced.
@@ -108,6 +110,80 @@ SOURCE = <<~RUBY
       r.inspect
     end
 
+    # By name: `send` dispatches at run time to the core native, which does not root the element it unlinks.
+    # The compiled read of the element is what keeps it alive across that call (ELEMENT_READ_ROOTS).
+    def ary_clear_by_name
+      a = @cells
+      r = a[0]
+      a.send(:clear)
+      churn
+      r.inspect
+    end
+
+    def ary_store_by_name
+      a = @cells
+      r = a[1]
+      a.send(:[]=, 1, nil)
+      churn
+      r.inspect
+    end
+
+    def hash_clear_by_name
+      h = @table
+      r = h[:a]
+      h.send(:clear)
+      churn
+      r.inspect
+    end
+
+    # An inlined loop over the live Array: each iteration's element is used after a by-name call that clears the Array.
+    def each_clear_by_name
+      a = @cells
+      seen = []
+      a.each do |e|
+        a.send(:clear)
+        churn
+        seen << e
+      end
+      seen.inspect
+    end
+
+    # The element is an argument: the callee holds it in a C local, and the caller no longer uses it after the call.
+    def take_and_clear(x)
+      @cells.send(:clear)
+      churn
+      x.inspect
+    end
+
+    def arg_clear_by_name
+      r = @cells[0]
+      take_and_clear(r)
+    end
+
+    def map_proc_clear
+      $gcr_slot = @cells
+      mapped = $gcr_slot.map(&@clear_blk)
+      mapped.inspect
+    end
+
+    def map_clear_by_name
+      a = @cells
+      mapped = a.map do |e|
+        a.send(:clear)
+        churn
+        e.inspect
+      end
+      mapped.inspect
+    end
+
+    def hash_store_by_name
+      h = @table
+      r = h[:a]
+      h.send(:[]=, :a, 1)
+      churn
+      r.inspect
+    end
+
     def attr_overwrite
       r = cur
       self.cur = nil
@@ -119,7 +195,8 @@ RUBY
 
 OWNERS = %w[GcRoot].freeze
 CASES = %w[ivar_return ivar_local gvar_overwrite ary_overwrite hash_overwrite ary_clear ary_replace
-           attr_overwrite].freeze
+           attr_overwrite ary_clear_by_name ary_store_by_name hash_clear_by_name hash_store_by_name
+           each_clear_by_name map_clear_by_name map_proc_clear arg_clear_by_name].freeze
 
 SCENARIO = <<~CPP
   static int scenario(mrb_state* M) {
@@ -154,6 +231,8 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
               code.include?('bc2cpp_gv_set(M,') && code.include?('bc2cpp_keep_old(M, ARY_PTR(a)[n]);') &&
               code.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)DATA_PTR(self))->ivar_cur);'))
   suite.check('a Hash store looks the old value up first', code.include?('bc2cpp_hash_aset(M,'))
+  suite.check('an element read is rooted where a by-name call may unlink it',
+              code.match?(/bc2cpp_ary_entry\(M, r\d+, 0\);.*?bc2cpp_keep\(M, r\d+\);/m))
 
   if build.nil?
     puts '  SKIP gc root behaviour: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake and g++)'

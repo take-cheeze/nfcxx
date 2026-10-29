@@ -8,13 +8,16 @@
 # This is a fact file, not an input to code generation: nothing in bc2cpp reads it yet. scripts/bc2cpp/class_body_check.rb
 # compares it with the graph the interpreted load builds, so the day a dispatch decision consumes it, "exact" is
 # something a test has already held to. A class is exact when every statement of every body that opens it, and of
-# every ancestor's, is one this file models. Anything else (a DSL call, `extend self`, a `Class.new` with a computed
-# superclass, `X.include(Y)` inside a method) makes it unknown, with the reason named, and unknown spreads to the
+# every ancestor's, is one this file models. A computed constant PureEval folds to data is modeled as a constant (the
+# same decision LoadCompile makes); a superclass that is a C-defined core class (NATIVE) is known. Anything else (a DSL
+# call, `extend self`, a `Class.new` with a computed superclass, `X.include(Y)` inside a method, a lambda constant) makes
+# it unknown, with the reason named, and unknown spreads to the
 # classes that inherit from it.
 require 'json'
 require 'prism'
 require 'set'
 require_relative 'class_body_scan'
+require_relative 'pure_eval'
 
 module ClassWorld
   module_function
@@ -40,6 +43,9 @@ module ClassWorld
     'Proc' => [%w[Proc Object Kernel BasicObject], :class],
     'Exception' => [%w[Exception Object Kernel BasicObject], :class],
     'StandardError' => [%w[StandardError Exception Object Kernel BasicObject], :class],
+    # mrb_init_exception (3rd/mruby/src/error.c) defines it under StandardError in every build; it is C-defined, so
+    # its chain is fixed. scripts/bc2cpp/class_world_check.rb reads error.c to hold this entry to that.
+    'RuntimeError' => [%w[RuntimeError StandardError Exception Object Kernel BasicObject], :class],
     'Enumerator' => [%w[Enumerator Enumerable Object Kernel BasicObject], :class]
   }.freeze
   CLASS_CREATORS = %w[Class Struct Module Data].freeze
@@ -98,9 +104,16 @@ module ClassWorld
     when :class, :module then target, entry = open_body(body, world, defined)
     when :sclass then target = [target, :sclass]
     end
-    body.statements.each do |stmt|
-      # A statement the compiler does not take keeps this body (and `class << self` inside it) as bytecode.
-      entry[:blockers] << stmt.label if entry && !ClassBodyScan::COMPILABLE.include?(stmt.category)
+    body.statements.each_with_index do |stmt, index|
+      # A statement the compiler does not take keeps this body (and `class << self` inside it) as bytecode, unless
+      # PureEval folds it: a computed constant that is data at build time is compiled as a constant (LoadCompile).
+      if entry && !ClassBodyScan::COMPILABLE.include?(stmt.category)
+        if (folded = folded_constant(body, index))
+          entry[:folded] << folded
+        else
+          entry[:blockers] << stmt.label
+        end
+      end
       case stmt.category
       when :declarative then declarative(stmt, body, scope, world, defined, target)
       when :const_computed, :const_pure, :dsl_call then creator(stmt, scope, world, defined)
@@ -108,6 +121,19 @@ module ClassWorld
       walk_body(stmt.child, world, defined, target, entry) if stmt.child
     end
   end
+
+  # The label of statement `index` of `body` when it is a computed constant PureEval folds (the same decision as
+  # LoadCompile's, with the same `frozen_string_literal` reading), else nil. A folded value is data, so it cannot
+  # change the class graph; the statement is then static like a literal constant.
+  def folded_constant(body, index)
+    stmt = body.statements[index]
+    return nil unless stmt.category == :const_computed
+
+    _value, why, _source = PureEval.fold(body.statements, index, magic: frozen_magic?(stmt.file))
+    why.nil? ? stmt.label : nil
+  end
+
+  def frozen_magic?(file) = File.foreach(file).first(5).any? { |l| l.match?(/\A#\s*frozen_string_literal:\s*true/) }
 
   # Opens (creating on first sight) the class or module `body` is; returns [Fact, this body's entry].
   def open_body(body, world, defined)
@@ -126,7 +152,7 @@ module ClassWorld
                       reasons: reasons, created_by: :body)
       world.classes[body.path] = fact
     end
-    entry = { file: body.file, line: body.line, blockers: [] }
+    entry = { file: body.file, line: body.line, blockers: [], folded: [] }
     fact.bodies << entry
     [fact, entry]
   end
@@ -230,7 +256,9 @@ module ClassWorld
         'final' => fact.kind == :module ? nil : final?(name, classes, anonymous, world),
         'reopened' => reopened?(fact),
         'created_by' => fact.created_by.to_s,
-        'bodies' => fact.bodies.map { |b| { 'file' => b[:file], 'line' => b[:line], 'evaluated' => b[:evaluated].to_s, 'blockers' => b[:blockers] } },
+        'bodies' => fact.bodies.map do |b|
+          { 'file' => b[:file], 'line' => b[:line], 'evaluated' => b[:evaluated].to_s, 'blockers' => b[:blockers], 'folded' => b[:folded] }
+        end,
         'reasons' => fact.reasons.uniq
       }
     end
