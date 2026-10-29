@@ -110,6 +110,44 @@ bool unroll_safe(const Node &x, const std::string &name, const std::vector<std::
 // The trip count of an unrolled loop is at most this; a longer one stays a loop.
 constexpr size_t kMaxUnroll = 32;
 
+||||||| fc17c084
+=======
+// The register atoms (%N) of x, not counting the names its lets define.
+void count_reg_atoms(const Node &x, std::map<std::string, int> &uses) {
+  if (x.kind == Node::Atom && !x.text.empty() && x.text[0] == '%') uses[x.text]++;
+  bool let = head_of(x) == "let";
+  for (size_t i = 0; i < x.items.size(); i++)
+    if (!(let && i == 1)) count_reg_atoms(x.items[i], uses);
+}
+
+// The loads whose address is a register, and the offset lets: (let X (ptr T) (offset BASE K)) gives offset_of[X] = BASE.
+void count_addr_uses(const Node &x, std::map<std::string, int> &loads, std::map<std::string, std::string> &offset_of) {
+  std::string h = head_of(x);
+  if (h == "load" && x.items.size() == 3 && x.items[2].kind == Node::Atom) loads[x.items[2].text]++;
+  if (h == "let" && x.items.size() == 4 && head_of(x.items[3]) == "offset" && x.items[3].items.size() == 3 &&
+      x.items[3].items[1].kind == Node::Atom)
+    offset_of[x.items[1].text] = x.items[3].items[1].text;
+  for (const Node &c : x.items) count_addr_uses(c, loads, offset_of);
+}
+
+// Whether the body only reads through register reg: every use of it is a load's address or the base of an offset whose
+// result is itself only a load's address.
+bool reads_only(const std::vector<const Node *> &body, const std::string &reg) {
+  std::map<std::string, int> uses, loads;
+  std::map<std::string, std::string> offset_of;
+  for (const Node *s : body) {
+    count_reg_atoms(*s, uses);
+    count_addr_uses(*s, loads, offset_of);
+  }
+  int offsets = 0;
+  for (const auto &[x, base] : offset_of) {
+    if (base != reg) continue;
+    if (uses[x] != loads[x]) return false;
+    offsets++;
+  }
+  return uses[reg] == loads[reg] + offsets;
+}
+
 // The inlined bodies nested in one another (--inline=device): a call past this depth stays a call.
 constexpr int kMaxInlineDepth = 4;
 
@@ -1052,6 +1090,37 @@ bool Fn::inline_ok(const Fn *callee) const {
   return true;
 }
 
+bool Fn::writes_only_slots(const Node &x, int depth) const {
+  std::string h = head_of(x);
+  if (h == "copy" || h == "store.v" || h == "ptx-asm") return false;
+  if (h == "store" && !(x.items.size() == 4 && x.items[2].kind == Node::Sym && x.items[2].sig == '$')) return false;
+  if (h == "call") {
+    const Node &sym = at(x, 2);
+    if (depth == 0 || !module_fns || !(sym.kind == Node::Sym && sym.sig == '&')) return false;
+    auto it = module_fns->find(sym.text);
+    if (it == module_fns->end() || it->second->kernel) return false;
+    if (!body_writes_only_slots(it->second, depth - 1)) return false;
+  }
+  for (const Node &c : x.items)
+    if (!writes_only_slots(c, depth)) return false;
+  return true;
+}
+
+bool Fn::body_writes_only_slots(const Fn *f, int depth) const {
+  const Node *form = f->form_.get();
+  std::unique_ptr<Node> loaded;
+  if (!form) {
+    loaded = f->load_();
+    form = loaded.get();
+  }
+  for (size_t i = 2; i < form->items.size(); i++) {
+    std::string h = head_of(form->items[i]);
+    if (h == "ret" || h == "params" || h == "static" || h == "weak" || h == "slot") continue;
+    if (!writes_only_slots(form->items[i], depth)) return false;
+  }
+  return true;
+}
+
 void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   // The callee's body is read from its form here, since a callee compiled before this one has released its own.
   const Node *form = callee->form_.get();
@@ -1067,6 +1136,8 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   }
   // The callee's frame is part of this one: its slots are rebased to the frame made here for the call.
   const int base = callee->frame_ > 0 ? static_cast<int>(alloc_frame(callee->frame_, callee->frame_align_)) : 0;
+  bool pure = true;
+  for (const Node *s : body) pure = pure && writes_only_slots(*s, 6);
   // The parameters are registers of the callee's own. A scalar is the argument's register. A struct passed by value is
   // copied into the callee's frame, as a call copies it into its parameter (its bytes are the callee's to change). The
   // sret result is the object the caller gives: the callee writes it where the call would have, so its register is it.
@@ -1076,6 +1147,10 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
     if (callee->sret && k == 0) {
       Operand o = operand(at(args[k], 2));
       callee_regs["%0"] = RegInfo{reg_of(o.text, o.ty), Ty{"ptr", -1, false, false}};
+    } else if (callee->agg_params[k] && pure && reads_only(body, "%" + std::to_string(k))) {
+      // read-only, in a body that writes nothing else: the struct is read where the caller has it, with no copy
+      Operand o = operand(at(args[k], 2));
+      callee_regs["%" + std::to_string(k)] = RegInfo{reg_of(o.text, o.ty), callee->params[k]};
     } else if (callee->agg_params[k]) {
       const AggShape &sh = *callee->agg_params[k];
       Operand o = operand(at(args[k], 2));

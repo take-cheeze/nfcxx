@@ -37,7 +37,7 @@ extern bool g_f2i_convert;
 // `sequence % ne33` with ne33 == 0 when there is no mask, and does not use the result).
 extern bool g_int_gpu;
 
-// --inline=device (the .cu device path): a call of a function of the module is compiled into the caller, its body at the
+// --inline=device (the default; --inline=off turns it off): a call of a function of the module is compiled into the caller, its body at the
 // call (Fn::inline_call), as nvcc inlines the __device__ helpers of a kernel. A callee the inliner does not take (a
 // struct argument, a bool, a printf, a call inside the inlined body) is still a call.
 extern bool g_inline_device;

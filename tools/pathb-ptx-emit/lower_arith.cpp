@@ -267,7 +267,7 @@ void FnCtx::int_convert(const std::string &dest, const Ty &ty, const std::string
 
 bool g_f2i_convert = false;
 bool g_int_gpu = false;
-bool g_inline_device = false;
+bool g_inline_device = true;
 bool g_promote_slots = true;
 bool g_unroll_loops = true;
 

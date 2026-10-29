@@ -86,6 +86,8 @@ int main(int argc, char **argv) {
       g_int_gpu = true;
     } else if (a == "--inline=device") {
       g_inline_device = true;
+    } else if (a == "--inline=off") {
+      g_inline_device = false;
     } else if (a == "--promote=slots") {
       g_promote_slots = true;
     } else if (a == "--promote=off") {
@@ -115,13 +117,13 @@ int main(int argc, char **argv) {
     } else if (a == "--emit") {
       emit = true;
     } else if (a.size() > 1 && a[0] == '-' && a[1] == '-') {
-      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--int=gpu] [--inline=device] [--promote=slots|off] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
+      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--int=gpu] [--inline=device|off] [--promote=slots|off] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
       return 1;
     } else if (!have_file) {
       file = a;
       have_file = true;
     } else {
-      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--int=gpu] [--inline=device] [--promote=slots|off] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
+      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--f2i=convert] [--int=gpu] [--inline=device|off] [--promote=slots|off] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
       return 1;
     }
   }
