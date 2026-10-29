@@ -40,6 +40,28 @@ FIXTURE = <<~'RUBY'
   end
 RUBY
 
+# Self receivers: Final (no subclass, exact) inherits Base#tick; Child has a subclass (Sub), so it is not final;
+# Mix is a module; Final.singleton is a singleton class; Base and Final are exact, Child is exact but not final.
+SELF_FIXTURE = <<~'RUBY'
+  class Base
+    def tick; end
+  end
+
+  class Final < Base
+    def run; tick; end
+  end
+
+  class Child < Base
+    def go; end
+  end
+
+  class Sub < Child; end
+
+  module Mix
+    def m; end
+  end
+RUBY
+
 def fixture_world
   Dir.mktmpdir('class_world_gate') do |dir|
     path = File.join(dir, 'fixture.rb')
@@ -101,6 +123,52 @@ with_world(world) do
   ensure
     ENV['BC2CPP_CLASS_WORLD_DIRECT'] = previous
   end
+end
+
+# Self receivers: the predicate, the finder for an implicit-self send, and the mutation of the subclass rule.
+self_world = Dir.mktmpdir('class_world_gate_self') do |dir|
+  path = File.join(dir, 'self.rb')
+  File.write(path, SELF_FIXTURE)
+  ClassWorld.build([ClassBodyScan.scan([path])])
+end
+tick_def = Def.new(owner: 'Base', name: 'tick', irep: 7, visibility: :public, kind: :method)
+tick_registry = { 'tick' => [tick_def] }
+final_owner = Struct.new(:owner, :irep, keyword_init: true)
+
+with_world(self_world) do
+  suite.check('self accept: Final (final, exact) is a self-exact class', ClassWorldGate.self_exact?('Final', self_world))
+  suite.check('self refuse: Child has a subclass, so it is not final', !ClassWorldGate.self_exact?('Child', self_world))
+  suite.check('self refuse: a module is not a self class', !ClassWorldGate.self_exact?('Mix', self_world))
+  suite.check('self refuse: a singleton owner is not a self class', !ClassWorldGate.self_exact?('Final.singleton', self_world))
+  suite.check('self refuse: an unknown owner is not a self class', !ClassWorldGate.self_exact?('Nope', self_world))
+
+  gen = codegen_with(tick_registry)
+  own_irep = { 7 => ['Final'] }
+  gen.define_singleton_method(:class_world_irep_owners) { |irep| own_irep.fetch(irep, []) }
+  suite.check('self accept: implicit-self tick in Final reaches Base#tick (the direct form)',
+              gen.send(:class_world_self_target, 'tick', final_owner.new(owner: 'Final', irep: 7))&.owner == 'Base')
+  suite.check('self refuse: implicit-self call in non-final Child keeps the owner call',
+              gen.send(:class_world_self_target, 'tick', final_owner.new(owner: 'Child', irep: 7)).nil?)
+  shared = codegen_with(tick_registry)
+  shared_owners = { 7 => %w[Final Other] }
+  shared.define_singleton_method(:class_world_irep_owners) { |irep| shared_owners.fetch(irep, []) }
+  suite.check('self refuse: a body another owner also holds (an alias copy) keeps the owner call',
+              shared.send(:class_world_self_target, 'tick', final_owner.new(owner: 'Final', irep: 7)).nil?)
+  suite.check('self refuse: an instance_eval-rebound self keeps the owner call',
+              begin
+                rebound = codegen_with(tick_registry)
+                rebound.define_singleton_method(:class_world_irep_owners) { |irep| own_irep.fetch(irep, []) }
+                rebound.instance_variable_set(:@self_class_unknown, true)
+                rebound.send(:class_world_self_target, 'tick', final_owner.new(owner: 'Final', irep: 7)).nil?
+              end)
+
+  # Mutation: the subclass rule removed (final: false). The non-final Child must then be accepted, so the refusal above
+  # is what the final rule decides and not an accident of the fixture.
+  suite.check('mutation: without the final rule, Child would be accepted (the refusal is the final rule)',
+              ClassWorldGate.self_exact?('Child', self_world, final: false))
+  suite.check('mutation: without the final rule the module and singleton are still refused',
+              !ClassWorldGate.self_exact?('Mix', self_world, final: false) &&
+              !ClassWorldGate.self_exact?('Final.singleton', self_world, final: false))
 end
 
 closed = ClassWorldGate.world

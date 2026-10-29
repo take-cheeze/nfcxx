@@ -66,5 +66,15 @@ module ClassWorldGate
     exact_receiver?(klass, world) ? world.facts[klass]['ancestors'] : nil
   end
 
+  # Self proof: an instance method of `owner` runs with self an instance of exactly `owner` when `owner` is a class the
+  # graph states exactly and (final) no class inherits from it. A module, a singleton class and an unknown owner are
+  # refused. `final: false` drops the subclass rule and is only for the check's mutation test.
+  def self_exact?(owner, world = self.world, final: true)
+    return false unless exact_receiver?(owner, world) && owner.is_a?(String) && !owner.end_with?('.singleton')
+
+    fact = world.facts[owner]
+    fact['kind'] == 'class' && (!final || fact['final'] == true)
+  end
+
   def enabled? = ENV['BC2CPP_CLASS_WORLD_DIRECT'] != '0'
 end
