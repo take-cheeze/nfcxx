@@ -2215,6 +2215,11 @@ class SFn
     when "let"
       ty = parse_type(s[2])
       v, vty = rval(s[3], ty)
+      # a register defined once and never set is a value (SSA), not a variable: the driver keeps it in a register
+      if @ssa_regs && @ssa_regs.include?(s[1].to_s) && ty[0] != "void"
+        @regs[s[1]] = [:val, v, ty]
+        return
+      end
       r = @regs[s[1]]
       if r.nil?
         vv = var_decl(sty(ty))
@@ -2453,7 +2458,23 @@ class SFn
 
   # ---- the function
 
+  # the registers a body defines exactly once (a let) and never sets: those are values
+  def collect_regs(x, lets, sets)
+    return unless x.is_a?(Array)
+    h = head_of(x)
+    if h == "let" && x[1].is_a?(String)
+      lets[x[1]] = (lets[x[1]] || 0) + 1
+    elsif h == "set" && x[1].is_a?(String)
+      sets[x[1]] = true
+    end
+    x.each { |y| collect_regs(y, lets, sets) }
+  end
+
   def compile
+    lets = {}
+    sets = {}
+    @body.each { |b| collect_regs(b, lets, sets) }
+    @ssa_regs = lets.select { |k, n| n == 1 && !sets[k] }.keys
     ret_t = @ret ? sty(@ret) : @spv.t_void
     @ptypes.each { |t| @param_ids << @spv.id }
     @ptypes.each_with_index { |t, k| @regs["%#{k}"] = [:val, @param_ids[k], t] }

@@ -24,6 +24,7 @@
 #include <level_zero/ze_api.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +49,30 @@ struct ze_push {
 static_assert(sizeof(ze_push) == 112, "push block layout");
 constexpr uint64_t ze_push_at = 4352;   // the push block's offset in the control block (ctl_)
 constexpr uint64_t ze_closure_at = 256;
+
+// NFCXX_SYCL_STATS=1: the dispatches, launches, waits on the device and the buffers copied between host and device, printed
+// at exit (the profile of the runtime: where the time of a model's tokens goes)
+struct ze_stats {
+  uint64_t dispatches = 0, launches = 0, up_n = 0, up_bytes = 0, down_n = 0, down_bytes = 0;
+  double ns_wait = 0, ns_dispatch = 0, ns_launch = 0;
+  std::map<std::string, std::pair<uint64_t, double>> per_kernel;   // entry => (launches, ns in the append call)
+  ~ze_stats() {
+    if (!std::getenv("NFCXX_SYCL_STATS")) return;
+    std::vector<std::pair<double, std::string>> top;
+    for (auto &kv : per_kernel) top.push_back({kv.second.second, kv.first});
+    std::sort(top.rbegin(), top.rend());
+    for (size_t i = 0; i < top.size() && i < 12; i++) {
+      auto &e = per_kernel[top[i].second];
+      std::fprintf(stderr, "sycl stats:   %8.3f s  %6llu launches  %s\n", e.second / 1e9, (unsigned long long)e.first,
+                   top[i].second.substr(0, 110).c_str());
+    }
+    std::fprintf(stderr, "sycl stats: %llu dispatches, %llu launches, %.3f s waiting on the device, %.3f s in dispatch; "
+                 "%llu buffers (%.1f MB) copied to the device, %llu (%.1f MB) to the host\n",
+                 (unsigned long long)dispatches, (unsigned long long)launches, ns_wait / 1e9, ns_dispatch / 1e9,
+                 (unsigned long long)up_n, up_bytes / 1048576.0, (unsigned long long)down_n, down_bytes / 1048576.0);
+  }
+};
+inline ze_stats &stats() { static ze_stats s; return s; }
 
 class ze_rt {
  public:
@@ -122,6 +147,9 @@ class ze_rt {
   // ---- dispatch
   void dispatch(const std::string &key, const void *closure, unsigned closure_bytes, const unsigned *g, const unsigned *l,
                 unsigned lmem, buffer_state **bufs, int nbufs, const int *modes) {
+    stats().dispatches++;
+    auto t_dispatch = std::chrono::steady_clock::now();
+    struct dispatch_timer { std::chrono::steady_clock::time_point t; ~dispatch_timer() { stats().ns_dispatch += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t).count(); } } dispatch_timer_{t_dispatch};
     const image_kernel *it = images_.find(key);
     if (!it && load_images()) it = images_.find(key);
     if (!it) {
@@ -224,9 +252,18 @@ class ze_rt {
       ngs[sd] = cnt;
       for (int e = sd + 1; e < 3; e++) ngs[e] = 1;
       ze_group_count_t gc = {ngs[0], ngs[1], ngs[2]};
+      stats().launches++;
+      auto t_launch = std::chrono::steady_clock::now();
       check(zeCommandListAppendLaunchKernel(imm_, k, &gc, nullptr, 0, nullptr), "zeCommandListAppendLaunchKernel");
+      double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t_launch).count();
+      stats().ns_launch += ns;
+      auto &pk = stats().per_kernel[key];
+      pk.first++;
+      pk.second += ns;
       check(zeCommandListAppendBarrier(imm_, nullptr, 0, nullptr), "zeCommandListAppendBarrier");
+      auto t_wait = std::chrono::steady_clock::now();
       check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+      stats().ns_wait += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t_wait).count();
       release(region);
       check_flag();
     }
@@ -240,6 +277,7 @@ class ze_rt {
   void sync_up(buffer_state *s, int mode) {
     if (s->dev == 0) return;
     if ((mode & 1) && !s->dev_valid && s->host_valid) {
+      stats().up_n++; stats().up_bytes += s->bytes;
       write(s->dev, s->host, s->bytes);
       s->dev_valid = true;
     }
@@ -247,6 +285,7 @@ class ze_rt {
 
   void sync_down(buffer_state *s) {
     if (s->dev == 0 || s->host_valid) return;
+    stats().down_n++; stats().down_bytes += s->bytes;
     read(s->dev, s->host, s->bytes);
     s->host_valid = true;
   }
@@ -254,6 +293,7 @@ class ze_rt {
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
   unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
+  unsigned long long global_mem() const { return global_mem_; }
 
  private:
   ze_rt() {
@@ -320,6 +360,14 @@ class ze_rt {
     max_wi_[1] = cp.maxGroupSizeY;
     max_wi_[2] = cp.maxGroupSizeZ;
     local_mem_ = cp.maxSharedLocalMemory;
+    // the device's memory: the sum of its memory modules (the total ggml-sycl and llama.cpp size their use from)
+    uint32_t nmem = 0;
+    check(zeDeviceGetMemoryProperties(dev_, &nmem, nullptr), "zeDeviceGetMemoryProperties");
+    std::vector<ze_device_memory_properties_t> mems(nmem);
+    for (auto &m : mems) m.stype = ZE_STRUCTURE_TYPE_DEVICE_MEMORY_PROPERTIES;
+    if (nmem) check(zeDeviceGetMemoryProperties(dev_, &nmem, mems.data()), "zeDeviceGetMemoryProperties");
+    global_mem_ = 0;
+    for (uint32_t i = 0; i < nmem; i++) global_mem_ += mems[i].totalSize;
     ze_device_module_properties_t mp = {};
     mp.stype = ZE_STRUCTURE_TYPE_DEVICE_MODULE_PROPERTIES;
     check(zeDeviceGetModuleProperties(dev_, &mp), "zeDeviceGetModuleProperties");
@@ -489,6 +537,7 @@ class ze_rt {
   ze_command_list_handle_t imm_ = nullptr;
   std::string device_name_;
   uint32_t compute_units_ = 0;
+  uint64_t global_mem_ = 0;
   uint32_t max_wg_ = 0;
   uint32_t max_wi_[3] = {0, 0, 0};
   uint32_t local_mem_ = 0;

@@ -3179,6 +3179,71 @@ static ir_val ir_bit_builtin(an_expr_node_ptr e, int kind, int bits)
   return ir_mk_value(ir_cv(ir_valtext(e->type), r), e->type);
 }
 
+/* GCC 14's type-generic bit built-ins (<bit>'s countl_zero and friends call them): __builtin_clzg(x [, fallback]),
+   __builtin_ctzg(x [, fallback]), __builtin_popcountg(x), __builtin_parityg(x). The width is the argument's type; the
+   fallback is the result for x == 0 (without one, the value for 0 is unspecified). A narrow type is zero-extended into
+   32 bits and its leading zeros are counted from there. Returns 1 when NAME is one of them and its lowering is in *out. */
+static int ir_bit_generic(an_expr_node_ptr e, const char *name, ir_val *out)
+{
+  static const struct { const char *name; int kind; } tab[] = {
+    { "clzg", 2 }, { "ctzg", 3 }, { "popcountg", 1 }, { "parityg", 5 },
+  };
+  an_expr_node_ptr arg = ir_operand(e, 1), fb = ir_operand(e, 2);
+  int kind = 0, bits, w, i;
+  const char *ut;
+  ir_val a;
+  char *x, *r;
+  for (i = 0; i < (int)(sizeof tab / sizeof tab[0]); i++) if (strcmp(name, tab[i].name) == 0) kind = tab[i].kind;
+  if (kind == 0) return 0;
+  if (arg == NULL || !ir_is_integer(arg->type)) {
+    *out = ir_gap(e->type, "generic bit operation (argument)", 0, (int)eok_call);
+    return 1;
+  }
+  if (ir_is_i128(arg->type)) {
+    /* a 128-bit value: the helpers of be/nfcxx_ldrt.c count over both halves; clz and ctz give 128 for 0 */
+    ir_val v = ir_rval(arg);
+    char *r128;
+    if (kind == 1) r128 = ir_i128_ret("int", "popcount", v.s);
+    else if (kind == 5) r128 = ir_o2("and", "int", ir_i128_ret("int", "popcount", v.s), ir_k("int", 1));
+    else if (kind == 2) r128 = ir_i128_ret("int", "clz", v.s);
+    else r128 = ir_i128_ret("int", "ctz", v.s);
+    if (fb != NULL && (kind == 2 || kind == 3)) {
+      ir_val f = ir_rval(fb);
+      char *iszero = ir_o2("xor", "int", ir_i128_ret("int", "nz", v.s), ir_k("int", 1));
+      r128 = ir_o2("wadd", "int", r128, ir_o2("wmul", "int", ir_o2("wsub", "int", ir_cv("int", f.s), r128), iszero));
+    }
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_cv(ir_valtext(e->type), r128), e->type);
+    return 1;
+  }
+  if (!ir_is_integer(arg->type)) {
+    *out = ir_gap(e->type, "generic bit operation (argument)", 0, (int)eok_call);
+    return 1;
+  }
+  bits = (int)(ir_size_of(arg->type) * 8);
+  w = bits > 32 ? 64 : 32;
+  ut = w == 64 ? "unsigned_long" : "unsigned_int";
+  a = ir_rval(arg);
+  x = ir_cv(ut, a.s);
+  if (bits < w) x = ir_o2("and", ut, x, ir_k(ut, (1ULL << bits) - 1));
+  switch (kind) {
+    case 1: r = ir_bi_popcount(ut, w, x); break;
+    case 5: r = ir_o2("and", ut, ir_bi_popcount(ut, w, x), ir_k(ut, 1)); break;
+    case 2: r = ir_o2("wsub", ut, ir_bi_clz(ut, w, x), ir_k(ut, (unsigned long long)(w - bits))); break;
+    default: r = ir_bi_ctz(ut, w, x); break;
+  }
+  if (fb != NULL && (kind == 2 || kind == 3)) {
+    /* x == 0 gives the fallback: r + (fallback - r) * (x == 0) */
+    ir_val f = ir_rval(fb);
+    char *fv = ir_cv(ut, f.s);
+    char *iszero = ir_o2("xor", ut, ir_cv(ut, ir_let("bool", ir_fmt("(ne %s %s %s)", ut, x, ir_k(ut, 0)))), ir_k(ut, 1));
+    r = ir_o2("wadd", ut, r, ir_o2("wmul", ut, ir_o2("wsub", ut, fv, r), iszero));
+  }
+  ir_note(0, eok_call, 1);
+  *out = ir_mk_value(ir_cv(ir_valtext(e->type), r), e->type);
+  return 1;
+}
+
 /* The floating-point classification and comparison built-ins (<cmath>'s isnan, isinf, isfinite, isnormal, signbit, fpclassify,
    isgreater ...): 1 when NAME is one and its lowering is in *out. x - x is 0 for a finite x and NaN for an infinity or a NaN,
    which tells them apart without bit tricks; the comparisons are the ordered ones QBE has (false when unordered), which is
@@ -3754,6 +3819,7 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     *out = ir_bit_builtin(e, kind, bits);
     return 1;
   }
+  if (ir_bit_generic(e, name, out)) return 1;
   if (ir_float_builtin(e, name, out)) return 1;
   if (strcmp(name, "expect") == 0 || strcmp(name, "expect_with_probability") == 0) {
     ir_val a = ir_rval(arg);
