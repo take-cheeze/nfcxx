@@ -345,6 +345,7 @@ void Fn::setup() {
         align = size;
       }
       slots[f.items[1].text] = static_cast<int>(alloc_frame(size, align));
+      slot_sizes_[f.items[1].text] = size;
       if (g_promote_slots) {
         // a slot of another type (an aggregate, say) is not a candidate, and its uses are not read as its type
         try {
@@ -398,6 +399,7 @@ void Fn::compile() {
       prologue_.push_back("ld.param." + ptx_type(ty) + " " + r + ", [" + pk + "];");
     }
   }
+  plan_struct_slots();
   promote_slots(body_, slot_types_);
   for (const Node *s : body_) stmt(*s);
   if (body_.empty() || head_of(*body_.back()) != "return") emit_return();
@@ -486,6 +488,10 @@ void Fn::stmt(const Node &s) {
     if (head_of(v) == "bitcast" && v.items.size() == 3 && v.items[2].kind == Node::Sym && v.items[2].sig == '&')
       fn_values_[at(s, 1).text] = v.items[2].text;
     Ty ty = parse_type(&at(s, 2));
+    if (std::string tok = token_rhs(at(s, 3)); !tok.empty()) {
+      regs[at(s, 1).text] = RegInfo{tok, ty};
+      return;
+    }
     std::string dest = ir_reg(at(s, 1).text, ty);
     rval(at(s, 3), dest, ty);
     canon(dest, ty);
@@ -656,6 +662,7 @@ void Fn::stmt(const Node &s) {
     emit("@" + q + " trap;");
   } else if (h == "nonnull") {
     // (nonnull P): a null pointer traps (pathb-stage2 section 4). A null constant always traps.
+    if (!token_value(at(s, 1)).empty()) return;  // an alias is the address of a slot
     Operand p = operand(at(s, 1));
     if (p.ty.kind != "ptr") throw Refused("nonnull of " + form_text(at(s, 1)));
     if (p.text == "0") {
@@ -1006,6 +1013,8 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     inline_call(callee, x, dest);
     return;
   }
+  for (const Node &a : args)
+    if (!token_value(a).empty()) throw BadIR("call of " + cname + " with a struct address, but it is not inlined");
   int nc = ++ncall_;
   std::string c = "$call" + std::to_string(nc);
   emit("{");
@@ -1140,8 +1149,14 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   // copied into the callee's frame, as a call copies it into its parameter (its bytes are the callee's to change). The
   // sret result is the object the caller gives: the callee writes it where the call would have, so its register is it.
   std::map<std::string, RegInfo> callee_regs;
+  std::set<std::string> token_params;  // the parameters that are alias tokens (a struct slot's address)
   std::vector<Node> args = tail(x, 3);
   for (size_t k = 0; k < args.size(); k++) {
+    if (std::string tok = token_value(args[k]); !tok.empty()) {
+      callee_regs["%" + std::to_string(k)] = RegInfo{tok, callee->params[k]};
+      token_params.insert("%" + std::to_string(k));
+      continue;
+    }
     if (callee->sret && k == 0) {
       Operand o = operand(at(args[k], 2));
       callee_regs["%0"] = RegInfo{reg_of(o.text, o.ty), Ty{"ptr", -1, false, false}};
@@ -1175,6 +1190,14 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   std::map<std::string, int> caller_slots = std::exchange(slots, std::move(callee_slots));
   std::map<std::string, RegInfo> caller_promoted = std::exchange(promoted, {});
   std::map<std::string, long long> caller_const = std::exchange(const_slots, {});
+  // The callee's pointer slots that carry an alias token stay as they are, and its struct slots are its own (not
+  // promoted here): this function's struct slots are not visible to the callee's names.
+  AliasFields callee_alias;
+  scan_aliases(body, {}, token_params, inline_depth_ + 1, callee_alias);
+  if (!callee_alias.ok) throw BadIR("inlined " + callee->name() + " takes a struct address outside the alias forms");
+  std::set<std::string> caller_sra = std::exchange(sra_slots, {});
+  std::set<std::string> caller_carriers = std::exchange(carrier_slots, callee_alias.carriers);
+  std::map<std::string, std::string> caller_carrier_val = std::exchange(carrier_val, {});
   promote_slots(body, callee->slot_types_);
   std::map<std::string, std::string> caller_labels = std::exchange(named_labels_, {});
   std::vector<std::pair<std::string, std::string>> caller_loops = std::exchange(loops_, {});
@@ -1196,6 +1219,9 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   inline_dest_ = std::move(caller_dest);
   inline_end_ = std::move(caller_end);
   inline_ret_ = caller_ret;
+  sra_slots = std::move(caller_sra);
+  carrier_slots = std::move(caller_carriers);
+  carrier_val = std::move(caller_carrier_val);
 }
 
 void Fn::promote_slots(const std::vector<const Node *> &body, const std::map<std::string, Ty> &types) {
@@ -1205,6 +1231,7 @@ void Fn::promote_slots(const std::vector<const Node *> &body, const std::map<std
   for (const Node *s : body) count_slot_uses(*s, all, whole, types);
   for (const auto &[name, ty] : types) {
     // every use of the slot is a whole load or store of its type: no address is taken, nothing is a part of it
+    if (carrier_slots.count(name)) continue;
     if (!register_slot_type(ty) || whole[name] == 0 || all[name] != whole[name]) continue;
     promoted[name] = RegInfo{fresh(reg_class(ty)), ty};
   }
@@ -1289,6 +1316,205 @@ bool Fn::unroll_loop(const Node &init, const Node &loop) {
   last.items = {init.items[0], init.items[1], init.items[2], value};
   stmt(last);
   return true;
+}
+
+std::vector<const Node *> Fn::body_forms(const Fn *f, std::unique_ptr<Node> &holder) const {
+  const Node *form = f->form_.get();
+  if (!form) {
+    holder = f->load_();
+    form = holder.get();
+  }
+  std::vector<const Node *> body;
+  for (size_t i = 2; i < form->items.size(); i++) {
+    std::string h = head_of(form->items[i]);
+    if (h != "ret" && h != "params" && h != "static" && h != "weak" && h != "slot") body.push_back(&form->items[i]);
+  }
+  return body;
+}
+
+// A use the alias scan does not take: the struct stays in memory.
+static void sra_fail(AliasFields &out, int) { out.ok = false; }
+
+void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std::string> &seed_slots,
+                      const std::set<std::string> &seed_regs, int depth, AliasFields &out) const {
+  std::map<std::string, long long> reg_off;      // an alias register => the offset of the object it points to
+  std::map<std::string, long long> carrier_off;  // a pointer slot holding an alias => that offset
+  for (const std::string &r : seed_regs) reg_off[r] = 0;
+  auto alias_of = [&](const Node &x, long long &off) {
+    if (x.kind == Node::Sym && x.sig == '$' && seed_slots.count(x.text)) {
+      off = 0;
+      return true;
+    }
+    if (x.kind == Node::Atom && reg_off.count(x.text)) {
+      off = reg_off[x.text];
+      return true;
+    }
+    return false;
+  };
+  auto carrier = [&](const Node &x) { return x.kind == Node::Sym && x.sig == '$' && carrier_off.count(x.text) > 0; };
+  std::function<bool(const Node &)> mentions = [&](const Node &x) {
+    long long o = 0;
+    if (alias_of(x, o) || carrier(x)) return true;
+    for (const Node &c : x.items)
+      if (mentions(c)) return true;
+    return false;
+  };
+  auto add_field = [&](long long off, const Node &type_node) {
+    Ty t = parse_type(&type_node);
+    bool ok = t.kind == "ptr" || (t.kind == "int" && !t.is_bool && (t.size == 1 || t.size == 2 || t.size == 4 || t.size == 8)) ||
+              (t.kind == "float" && (t.size == 4 || t.size == 8));
+    if (!ok) {
+      sra_fail(out, __LINE__);
+      return;
+    }
+    out.fields[{off, ptx_type(t)}] = t;
+  };
+  std::function<void(const Node &)> call_uses;
+  call_uses = [&](const Node &c) {
+    std::vector<std::pair<size_t, long long>> aliased;  // the argument index, the offset of the alias
+    for (size_t i = 3; i < c.items.size(); i++) {
+      long long o = 0;
+      if (alias_of(c.items[i], o)) {
+        aliased.push_back({i - 3, o});
+      } else if (mentions(c.items[i])) {
+        sra_fail(out, __LINE__);
+        return;
+      }
+    }
+    if (aliased.empty()) return;
+    const Node &sym = at(c, 2);
+    if (!module_fns || depth >= kMaxInlineDepth || !(sym.kind == Node::Sym && sym.sig == '&')) {
+      sra_fail(out, __LINE__);
+      return;
+    }
+    auto found = module_fns->find(sym.text);
+    if (found == module_fns->end()) {
+      sra_fail(out, __LINE__);
+      return;
+    }
+    Fn *cf = found->second;
+    cf->setup();
+    if (cf->kernel || cf->params.size() != c.items.size() - 3 || !inline_ok(cf)) {
+      sra_fail(out, __LINE__);
+      return;
+    }
+    for (const auto &[i, o] : aliased) {
+      std::unique_ptr<Node> holder;
+      std::vector<const Node *> cbody = body_forms(cf, holder);
+      AliasFields sub;
+      scan_aliases(cbody, {}, {"%" + std::to_string(i)}, depth + 1, sub);
+      if (!sub.ok) {
+        sra_fail(out, __LINE__);
+        return;
+      }
+      for (const auto &[key, ty] : sub.fields) out.fields[{key.first + o, key.second}] = ty;
+    }
+  };
+  std::function<void(const Node &)> visit;
+  visit = [&](const Node &x) {
+    if (!out.ok) return;
+    std::string h = head_of(x);
+    long long o = 0;
+    if (h == "let" && x.items.size() == 4) {
+      const Node &rhs = x.items[3];
+      std::string rh = head_of(rhs);
+      if (rh == "bitcast" && rhs.items.size() == 3 && alias_of(rhs.items[2], o)) {
+        reg_off[x.items[1].text] = o;
+      } else if (rh == "offset" && rhs.items.size() == 3 && alias_of(rhs.items[1], o)) {
+        reg_off[x.items[1].text] = o + static_cast<long long>(as_int(&rhs.items[2]));
+      } else if (rh == "load" && rhs.items.size() == 3 && carrier(rhs.items[2])) {
+        reg_off[x.items[1].text] = carrier_off[rhs.items[2].text];
+      } else if (rh == "load" && rhs.items.size() == 3 && alias_of(rhs.items[2], o)) {
+        add_field(o, rhs.items[1]);
+      } else if (rh == "call") {
+        call_uses(rhs);
+      } else if (mentions(rhs)) {
+        sra_fail(out, __LINE__);
+      }
+      return;
+    }
+    if (h == "store" && x.items.size() == 4) {
+      const Node &addr = x.items[2], &val = x.items[3];
+      long long vo = 0;
+      bool val_alias = alias_of(val, vo);
+      if (addr.kind == Node::Sym && addr.sig == '$' && !seed_slots.count(addr.text)) {
+        if (!val_alias) {
+          if (carrier(addr) || mentions(val)) sra_fail(out, __LINE__);
+          return;
+        }
+        if (parse_type(&x.items[1]).kind != "ptr") {
+          sra_fail(out, __LINE__);
+          return;
+        }
+        carrier_off[addr.text] = vo;
+        out.carriers.insert(addr.text);
+        return;
+      }
+      if (alias_of(addr, o)) {
+        if (val_alias || mentions(val)) {
+          sra_fail(out, __LINE__);
+          return;
+        }
+        add_field(o, x.items[1]);
+        return;
+      }
+      if (val_alias || mentions(addr) || mentions(val)) sra_fail(out, __LINE__);
+      return;
+    }
+    if (h == "eval" && x.items.size() == 2 && head_of(x.items[1]) == "call") {
+      call_uses(x.items[1]);
+      return;
+    }
+    if (h == "nonnull" && x.items.size() == 2) return;
+    if (x.kind != Node::List) {
+      if (mentions(x)) sra_fail(out, __LINE__);
+      return;
+    }
+    for (const Node &c : x.items) visit(c);
+  };
+  try {
+    for (const Node *s : body) visit(*s);
+  } catch (const Refused &e) {
+    sra_fail(out, __LINE__);
+  }
+}
+
+void Fn::plan_struct_slots() {
+  static int scopes = 0;  // each function's compile is a scope: its tokens never name another function's slots
+  sra_scope = ++scopes;
+  sra_slots.clear();
+  carrier_slots.clear();
+  sra_fields.clear();
+  carrier_val.clear();
+  if (!g_struct_slots) return;
+  // The candidates: the slots that are not scalars (a scalar is a register already, see promote_slots).
+  std::map<std::string, AliasFields> found;
+  std::set<std::string> all_carriers;
+  for (const auto &[name, size] : slot_sizes_) {
+    if (slot_types_.count(name) || size <= 0 || size > 32) continue;
+    AliasFields res;
+    scan_aliases(body_, {name}, {}, 0, res);
+    if (!res.ok || res.fields.empty()) continue;
+    found[name] = res;
+    all_carriers.insert(res.carriers.begin(), res.carriers.end());
+  }
+  for (const auto &[name, res] : found) {
+    // a pointer slot that holds an address is not a struct slot itself
+    if (all_carriers.count(name)) continue;
+    long long end = 0;
+    bool fits = true;
+    for (const auto &[key, ty] : res.fields) {
+      long long off = key.first, sz = type_size(ty);
+      if (off < end || off + sz > slot_sizes_.at(name)) fits = false;
+      end = off + sz;
+    }
+    if (!fits) continue;
+    sra_slots.insert(name);
+    carrier_slots.insert(res.carriers.begin(), res.carriers.end());
+    std::string base = "@" + std::to_string(sra_scope) + ":" + name;
+    for (const auto &[key, ty] : res.fields)
+      sra_fields[base + "|" + std::to_string(key.first) + "|" + key.second] = RegInfo{fresh(reg_class(ty)), ty};
+  }
 }
 
 void Fn::vec_ctor(const Node &x) {

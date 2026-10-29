@@ -25,6 +25,14 @@ struct AggShape {
 // Throws BadIR when a form is malformed.
 std::map<std::string, AggShape> abi_shapes(const std::vector<Node> &forms);
 
+// What the uses of an alias do (Fn::scan_aliases): the fields it reaches (offset and PTX type => type), the pointer slots
+// that hold it, and whether every use is one the pass takes (ok).
+struct AliasFields {
+  bool ok = true;
+  std::map<std::pair<long long, std::string>, Ty> fields;
+  std::set<std::string> carriers;
+};
+
 class Fn : public FnCtx {
  public:
   // name is the function's IR name; index is its position among the module's functions (the frame's name,
@@ -97,6 +105,7 @@ class Fn : public FnCtx {
   long long frame_align_ = 8;          // the frame's alignment (the largest slot alignment, at least 8)
   bool sp_set_ = false;                // the frame pointer is set up (compile): the frame is declared even when it is empty
   std::map<std::string, Ty> slot_types_;  // slot name => its type (the slot form's TYPE)
+  std::map<std::string, long long> slot_sizes_;  // slot name => its size in bytes
   std::vector<long long> agg_off_;     // per parameter: the frame offset of its byval copy (or of the sret object)
   int ncall_ = 0;                      // the calls of module functions (their parameter names)
   std::vector<const Node *> body_;     // the statements (the forms that are not the header)
@@ -118,4 +127,13 @@ class Fn : public FnCtx {
   // count is a constant (the shape the front end gives a for loop). False, with nothing emitted, when it is not.
   bool unroll_loop(const Node &init, const Node &loop);
   bool unroll_next_ = false;  // the statement that follows a __nfcxx_unroll() marker (--unroll=loops)
+  // --struct-slots: the struct slots of this function whose fields live in registers (sra_slots, sra_fields), and the
+  // pointer slots that carry their addresses (carrier_slots).
+  void plan_struct_slots();
+  // The uses of the aliases (the slots of seed_slots, or the registers of seed_regs, at offset 0) in body: the fields
+  // they reach, the pointer slots they are stored in, and ok when every use is one of the forms the pass takes.
+  void scan_aliases(const std::vector<const Node *> &body, const std::set<std::string> &seed_slots,
+                    const std::set<std::string> &seed_regs, int depth, AliasFields &out) const;
+  // The body of a function's form (its statements, without the header), read from f's form or a fresh load into holder.
+  std::vector<const Node *> body_forms(const Fn *f, std::unique_ptr<Node> &holder) const;
 };

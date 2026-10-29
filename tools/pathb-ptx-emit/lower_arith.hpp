@@ -7,6 +7,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,10 @@ extern bool g_promote_slots;
 // compiled once per iteration, the counter a constant in each copy (Fn::unroll_loop). Opt-in until it is measured.
 extern bool g_unroll_loops;
 
+// --struct-slots (default; --struct-slots=off turns it off): a struct slot whose every use is a field access, possibly
+// through the address of the slot handed to an inlined function, has a register per field (Fn::plan_struct_slots).
+extern bool g_struct_slots;
+
 // Ruby's Float#to_s (shortest round-trip digits; fixed notation for decimal exponents -3..16, else d.ddde+XX).
 std::string ruby_float_s(double d);
 
@@ -63,6 +68,20 @@ class FnCtx {
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
   std::map<std::string, RegInfo> promoted;      // slot name => the register its scalar lives in (--promote=slots)
   std::map<std::string, long long> const_slots; // slot name => its value in an unrolled copy of a loop (Fn::unroll_loop)
+  // Struct slots in registers (--struct-slots): sra_slots are the slots whose fields are registers (sra_fields, keyed
+  // "@SCOPE:SLOT|OFF|PTX"); a pointer slot that holds the address of one is a carrier (carrier_slots, its value in
+  // carrier_val). An alias token "@SCOPE:SLOT+OFF" names an address in one of those slots: it is a value with no register.
+  std::set<std::string> sra_slots;
+  int sra_scope = 0;
+  std::map<std::string, RegInfo> sra_fields;
+  std::set<std::string> carrier_slots;
+  std::map<std::string, std::string> carrier_val;
+  // The alias token of x (a slot in sra_slots, or a register holding a token), or "" when x is not one.
+  std::string token_value(const Node &x) const;
+  // The alias token of a let's value (the address of a field, a copy of a token, a load of a carrier), or "".
+  std::string token_rhs(const Node &v) const;
+  // The field register that an access of type ty through addr reaches, or null when addr is not an alias token.
+  const RegInfo *sra_field(const Node &addr, const Ty &ty) const;
   std::string sp = "%sp";                       // the PTX register holding the frame's generic address
   const ModuleSymbols *mod = nullptr;           // the module's data symbols (the @name operands), null when none
   // The module's functions by PTX name: true for a kernel (the `&name` operands are the functions' addresses), null when none.
