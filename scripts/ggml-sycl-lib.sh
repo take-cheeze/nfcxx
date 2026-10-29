@@ -57,7 +57,9 @@ one() {
   s=$(date +%s)
   # --no-div-trap: ggml divides by a mask dimension that is 0 when there is no mask (fattn-vec.hpp: sequence % ne33) and
   # never reads the result; a GPU gives a meaningless value there, the checked division of the device code would trap
-  if "$root/scripts/sycl-build.sh" --backend="$backend" -c -fPIC --ndebug --no-div-trap --diag_warning=narrowing_conversion \
+  # -Wno-error=template-body: GCC 15 makes a local that shadows a template parameter an error (fattn-common.hpp declares
+  # `sycl::range<1> warp_size` in templates taking `int warp_size`); the host compile is gcc, so it is downgraded to a warning
+  if "$root/scripts/sycl-build.sh" --backend="$backend" -c -fPIC --ndebug --no-div-trap --diag_warning=narrowing_conversion -Wno-error=template-body \
       -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SCHED_MAX_COPIES=4 \
       -DGGML_SYCL_DNNL=0 -DGGML_SYCL_F16 -DGGML_SYCL_HAS_BF16 -DGGML_SYCL_DMMV_HAS_BF16 -DGGML_SYCL_HOST_MEM_FALLBACK -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -Dggml_sycl_EXPORTS \
       -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
