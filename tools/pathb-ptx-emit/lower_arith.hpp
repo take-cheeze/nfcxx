@@ -47,6 +47,10 @@ extern bool g_inline_device;
 // bytes, the accesses are movs.
 extern bool g_promote_slots;
 
+// --unroll=loops (the default; --unroll=off turns it off): a loop that a `#pragma unroll` marks (the rewrite's __nfcxx_unroll() call) with a constant trip count is
+// compiled once per iteration, the counter a constant in each copy (Fn::unroll_loop). Opt-in until it is measured.
+extern bool g_unroll_loops;
+
 // Ruby's Float#to_s (shortest round-trip digits; fixed notation for decimal exponents -3..16, else d.ddde+XX).
 std::string ruby_float_s(double d);
 
@@ -58,6 +62,7 @@ class FnCtx {
   int nlab = 0;
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
   std::map<std::string, RegInfo> promoted;      // slot name => the register its scalar lives in (--promote=slots)
+  std::map<std::string, long long> const_slots; // slot name => its value in an unrolled copy of a loop (Fn::unroll_loop)
   std::string sp = "%sp";                       // the PTX register holding the frame's generic address
   const ModuleSymbols *mod = nullptr;           // the module's data symbols (the @name operands), null when none
   // The module's functions by PTX name: true for a kernel (the `&name` operands are the functions' addresses), null when none.

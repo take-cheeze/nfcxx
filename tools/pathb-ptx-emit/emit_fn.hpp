@@ -114,4 +114,8 @@ class Fn : public FnCtx {
   void vec_ctor(const Node &x);
   // --promote=slots: the slots of body (with their types) that live in registers, and their registers in promoted.
   void promote_slots(const std::vector<const Node *> &body, const std::map<std::string, Ty> &types);
+  // --unroll=loops: the loop after the init store `store T $name START` is compiled once per iteration when its trip
+  // count is a constant (the shape the front end gives a for loop). False, with nothing emitted, when it is not.
+  bool unroll_loop(const Node &init, const Node &loop);
+  bool unroll_next_ = false;  // the statement that follows a __nfcxx_unroll() marker (--unroll=loops)
 };

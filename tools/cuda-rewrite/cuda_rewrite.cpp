@@ -5145,6 +5145,44 @@ std::string instance_targs(const std::string &text, long pos, const std::string 
   return substitute(out, outer.names, inst, outer.has_pack, outer.pack);
 }
 
+// `#pragma unroll [N]` in front of a `for`, in the device unit: the pragma line becomes a call of __nfcxx_unroll(), which
+// pathb-ptx-emit reads as the request to unroll that loop (Fn::unroll_loop). EDG does not know the pragma and drops it
+// (3rd/edg src/preproc.c: an unrecognized pragma is ignored). A pragma in front of anything but a `for` is dropped.
+std::string unroll_markers(const std::string &text) {
+  auto blank = [](const std::string &l) { return l.find_first_not_of(" \t\r") == std::string::npos; };
+  auto trimmed = [](const std::string &l) {
+    size_t a = l.find_first_not_of(" \t\r");
+    return a == std::string::npos ? std::string() : l.substr(a);
+  };
+  std::vector<std::string> lines;
+  for (size_t p = 0; p <= text.size();) {
+    size_t e = text.find('\n', p);
+    if (e == std::string::npos) e = text.size();
+    lines.push_back(text.substr(p, e - p));
+    p = e + 1;
+  }
+  for (size_t i = 0; i < lines.size(); i++) {
+    std::string t = trimmed(lines[i]);
+    if (t.empty() || t[0] != '#') continue;
+    std::string d = trimmed(t.substr(1));
+    if (d.compare(0, 6, "pragma") != 0) continue;
+    std::string rest = trimmed(d.substr(6));
+    if (rest.compare(0, 6, "unroll") != 0) continue;
+    if (rest.size() > 6 && rest[6] != ' ' && rest[6] != '\t' && rest[6] != '\r') continue;
+    size_t j = i + 1;
+    while (j < lines.size() && blank(lines[j])) j++;
+    bool before_for = j < lines.size() && trimmed(lines[j]).compare(0, 3, "for") == 0 &&
+                      (trimmed(lines[j]).size() == 3 || !ident_c((unsigned char)trimmed(lines[j])[3]));
+    lines[i] = before_for ? lines[i].substr(0, lines[i].find('#')) + "__nfcxx_unroll();" : std::string();
+  }
+  std::string out;
+  for (size_t i = 0; i < lines.size(); i++) {
+    if (i) out += "\n";
+    out += lines[i];
+  }
+  return out;
+}
+
 std::pair<std::string, std::vector<std::string>> device_tu(const std::string &text) {
   std::vector<DevPiece> pieces;
   for (const auto &u : flatten_linkage(text, [&]() {
@@ -5623,7 +5661,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   std::vector<std::string> uniq;
   for (const auto &k : kernels)
     if (std::find(uniq.begin(), uniq.end(), k) == uniq.end()) uniq.push_back(k);
-  return {out, uniq};
+  return {unroll_markers(out), uniq};
 }
 
 // Ruby rewrite_is_same_v (line 2824): std::is_same_v<A, B> is read through the struct form std::is_same<A, B>::value.
