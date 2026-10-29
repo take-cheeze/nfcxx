@@ -259,8 +259,8 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
   local dev=$1 sm=$2 ptxas=$3 ext=$4 f; shift 4
   {
     printf 'nfcxx-cu-device-1\nsm %s ext %s\nopts:' "$sm" "$ext"; printf ' %q' "$@"
-    printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-60000}"
-    printf 'inline %s\n' "${NFCXX_INLINE_DEVICE:-0}"
+    printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-400000}"
+    printf 'inline %s\n' "${NFCXX_INLINE_DEVICE:-1}"
     printf 'promote %s\n' "${NFCXX_PROMOTE_SLOTS:-1}"
     cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
     cache_sha < "$root/scripts/pathb-dump"; cache_sha < "$root/scripts/host-sys.sh"
@@ -284,13 +284,13 @@ cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DE
   # group. Each group is one PTX module: $base.groups/gNNNN.ptx and its kernels in groups.txt.
   # The images are the copy's .incbin files: with -c they are kept beside the copy, which the link re-reads (cu_prepare).
   t=$(trace_start)
-  # NFCXX_INLINE_DEVICE=1: the device functions a kernel calls are compiled into it (pathb-ptx-emit --inline=device).
+  # The device functions a kernel calls are compiled into it (pathb-ptx-emit's default); NFCXX_INLINE_DEVICE=0 keeps the calls.
   local inl=()
-  if [ "${NFCXX_INLINE_DEVICE:-0}" = 1 ]; then inl=(--inline=device); fi
+  if [ "${NFCXX_INLINE_DEVICE:-1}" = 0 ]; then inl=(--inline=off); fi
   # The scalar frame slots live in registers (pathb-ptx-emit's default); NFCXX_PROMOTE_SLOTS=0 keeps them in the frame.
   if [ "${NFCXX_PROMOTE_SLOTS:-1}" = 0 ]; then inl+=(--promote=off); fi
   "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --int=gpu ${inl[@]+"${inl[@]}"} --groups-dir="$groups" \
-    --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-60000} \
+    --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-400000} \
     ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
   trace_end "$t" "pathb-ptx-emit --emit: $(basename "$src") ($(ls "$groups"/g*.ptx | wc -l | tr -d ' ') groups)" cuda
   # NFCXX_CUDA_JIT=1 (EXT ptx): the image of each group is its PTX text, loaded by the runtime's JIT (cudaLibraryLoadData);
