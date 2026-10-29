@@ -16,6 +16,7 @@ typedef unsigned long size_t;
 #define __forceinline__
 #define __align__(n) __attribute__((aligned(n)))
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void __nfcxx_unroll(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
 // Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.

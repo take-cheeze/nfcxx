@@ -47,7 +47,7 @@ extern bool g_inline_device;
 // bytes, the accesses are movs.
 extern bool g_promote_slots;
 
-// --unroll=loops: a loop that a `#pragma unroll` marks (the rewrite's __nfcxx_unroll() call) with a constant trip count is
+// --unroll=loops (the default; --unroll=off turns it off): a loop that a `#pragma unroll` marks (the rewrite's __nfcxx_unroll() call) with a constant trip count is
 // compiled once per iteration, the counter a constant in each copy (Fn::unroll_loop). Opt-in until it is measured.
 extern bool g_unroll_loops;
 
