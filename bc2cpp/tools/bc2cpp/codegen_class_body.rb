@@ -36,7 +36,9 @@ class CodeGen
     end
 
     texts = +''
-    owner_def = Struct.new(:owner, :core, :irep).new(owner, false, irep)
+    # A class body is not a method, so it has no name; the send paths that read one (super, module_super_target) are not
+    # in CLASS_BODY_OPS, and lexical_module_function_self_target finds nothing under a nil name.
+    owner_def = Struct.new(:owner, :core, :name, :irep).new(owner, false, nil, irep)
     lines = +''
     program.each_source do |insn, idx|
       next if paired_exec.include?(idx) && insn.op == :EXEC
