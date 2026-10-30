@@ -7,9 +7,12 @@
 # body and names the opcodes.
 
 class CodeGen
+  # The sends (SEND, SEND0, SSEND, SSEND0) are out: a send in a body calls owner-call helpers that the gem emits only for
+  # its compiled methods, so a body with one does not build (core_compiled_gen.cpp: `include` in Object). Restore them
+  # once the helpers are emitted for the units.
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
-                       SEND0 SSEND0 SSEND GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND]).freeze
+                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC]).freeze
 
   # The mruby entry points a class unit calls (vm.c; the same declarations load_compile.rb's PRELUDE makes).
   CLASS_UNIT_DECLS = <<~CPP
@@ -63,7 +66,7 @@ class CodeGen
     fn = "bc2cpp_class_body_#{sanitize(owner)}"
     code = +"#{CLASS_UNIT_DECLS}static mrb_value #{fn}(mrb_state* M) {\n"
     code << "  mrb_value self = #{body_self_expr(owner)};\n"
-    code << emit_register_initializers(irep.nregs, [])
+    code << emit_register_initializers(body_register_count(program, irep), [])
     code << lines
     code << "}\n"
     [texts + code, nil]
@@ -161,6 +164,13 @@ class CodeGen
 
     previous = program.source_at(idx - 1)
     previous&.op == :LOADNIL && previous.reg == insn.reg + 1
+  end
+
+  # The registers the body's function declares: the irep's, and any a body instruction names beyond them (an omitted
+  # TDEF writes its register directly).
+  def body_register_count(program, irep)
+    named = program.each_source.filter_map { |insn, _| insn.reg&.to_i&.succ }
+    [irep.nregs, *named].max
   end
 
   def omitted_def?(insn, owner, omitted)
