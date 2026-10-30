@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# CLASS_BODY_EMIT_GEM (tools/bc2cpp/codegen_class_body.rb, BC2CPP_CLASS_BODY_EMIT=1): the top-level class and module
+# CLASS_BODY_EMIT_GEM (tools/bc2cpp/codegen_class_body.rb, on unless BC2CPP_CLASS_BODY_EMIT=0): the top-level class and module
 # units of a gem's root body. A class with a nil superclass and a module compile to a function that creates the class
 # the way vm.c does and calls the body; a class with a named superclass, or a path opened twice, is left out. gem_init
 # calls the units after the owner-class reset and before the registrations. Needs MRBC and g++; without MRBC it prints

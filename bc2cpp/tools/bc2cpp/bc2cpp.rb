@@ -2164,10 +2164,11 @@ if $PROGRAM_NAME == __FILE__
     Shellwords.split(ENV['OTHER_DECLS_HEADER']).each { |path| puts "#include \"#{path}\"" }
   end
   puts ''
-  # CLASS_BODY_EMIT_GEM (BC2CPP_CLASS_BODY_EMIT=1): the top-level class bodies that compile are emitted as functions and
-  # called from gem_init (emit_gem_hooks). Compiled here, before the owner-class cache and the helpers are printed, so
-  # the owners and helpers they use are declared. Off by default: the VM still runs those bodies too (a duplicate run).
-  class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '1' ? gen.compile_top_class_units(ireps.fetch(root_label)) : []
+  # CLASS_BODY_EMIT_GEM: the top-level class bodies that compile are emitted as functions and called from gem_init
+  # (emit_gem_hooks). Compiled here, before the owner-class cache and the helpers are printed, so the owners and helpers
+  # they use are declared. On by default; BC2CPP_CLASS_BODY_EMIT=0 turns it off. The VM still runs those bodies too
+  # (a duplicate run) until the residual mrblib drops them.
+  class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '0' ? [] : gen.compile_top_class_units(ireps.fetch(root_label))
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_ary_write_helpers(compiled)

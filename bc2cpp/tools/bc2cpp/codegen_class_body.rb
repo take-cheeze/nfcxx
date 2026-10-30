@@ -117,7 +117,7 @@ class CodeGen
     [compiled[:code], line]
   end
 
-  # CLASS_BODY_EMIT_GEM (BC2CPP_CLASS_BODY_EMIT=1): the top-level class and module units of a gem's root body, as
+  # CLASS_BODY_EMIT_GEM (on unless BC2CPP_CLASS_BODY_EMIT=0): the top-level class and module units of a gem's root body, as
   # [{ path:, code: }]. A unit is the CLASS or MODULE and its compiled body; the function it adds creates the class the
   # way vm.c's OP_CLASS and OP_MODULE do with the Object base and a nil superclass, then calls the body. A unit whose
   # superclass is not a literal nil, whose path is opened twice, or whose body refuses is left out: the VM still runs it.
