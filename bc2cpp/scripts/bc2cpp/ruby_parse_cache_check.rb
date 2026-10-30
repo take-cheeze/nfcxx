@@ -14,6 +14,8 @@ require_relative '../../tools/bc2cpp/ruby_parse_cache'
 require_relative '../../tools/bc2cpp/foreign_definers'
 require_relative '../../tools/bc2cpp/native_names'
 require_relative '../../tools/bc2cpp/closed_world'
+require_relative '../../tools/bc2cpp/codegen_class_body'
+require_relative '../../tools/bc2cpp/codegen_class_fold'
 
 failures = []
 check = lambda do |what, condition|
@@ -145,6 +147,28 @@ Dir.mktmpdir do |tmp|
   check.call('the other path keeps its own tree', RubyParseCache.parse_file(two).equal?(other) && calls == 3)
 
   check.call('a parse that gives errors keeps them', RubyParseCache.parse("def (\n", 'broken.rb').errors.any?)
+end
+
+puts '-- class constant folds share source parses'
+Dir.mktmpdir do |tmp|
+  path = File.join(tmp, 'folds.rb')
+  File.write(path, "module Outer; class A; X = [1].map { |i| i + 1 }; end; class B; Y = 3; end; end\n")
+  gen = CodeGen.allocate
+  RubyParseCache.clear
+  calls = 0
+  first = gen.source_statements(path, 'Outer::A')
+  second = gen.source_statements(path, 'Outer::A')
+  other = gen.source_statements(path, 'Outer::B')
+  check.call('fold candidates and different owners parse their shared file once', calls == 1)
+  check.call('repeated folds share nodes and keep the requested owner',
+             first.first.node.equal?(second.first.node) && first.first.node.name == :X && other.first.node.name == :Y)
+  check.call('an absent owner stays absent without reparsing', gen.source_statements(path, 'Missing').nil? && calls == 1)
+  File.write(path, "module Outer; class A; Z = 4; end; end\n")
+  check.call('the same generator sees rewritten fold sources', gen.source_statements(path, 'Outer::A').first.node.name == :Z && calls == 2)
+  File.write(path, "class A; X = 1; end; class A; Y = 2; end\n")
+  check.call('reopened owners remain ambiguous', gen.source_statements(path, 'A').nil?)
+  File.delete(path)
+  check.call('a removed source has no fold statements', gen.source_statements(path, 'A').nil?)
 end
 
 puts '-- sharing leaves the caller and the tree usable'
