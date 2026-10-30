@@ -77,6 +77,10 @@ class CodeGen
       elsif insn.op == :TDEF && omitted_def?(insn, owner, omitted)
         lines << "  // #{owner}##{insn.sym} omitted: statically dispatched only (no registration)\n"
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+      elsif %i[TDEF SDEF].include?(insn.op) && left_out_method?(insn, irep)
+        # The method is left out of the tables (statically dispatched only), so the unit registers nothing for it.
+        lines << "  // #{insn.sym} left out of the method tables: statically dispatched only (no registration)\n"
+        lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
       elsif %i[TDEF SDEF].include?(insn.op)
         registration = class_body_registration(insn, irep, owner)
         return [nil, [insn.op]] unless registration
@@ -217,6 +221,15 @@ class CodeGen
   # registration also makes (emit_owner_registration_lines), and the gem registers it again after the units run. Nil
   # when the build has no compiled entry for the method, or the method is left out of the tables, or the call is one
   # this emitter does not make (a private singleton method, or an SDEF inside a `class << self` body).
+  # A def whose method the build leaves out of its tables (unregistered_keys), by the owner and name the compiled entry
+  # carries. Its registration is skipped, and nothing the unit does depends on it.
+  def left_out_method?(insn, irep)
+    compiled = @compiled_methods&.[](irep.reps[insn.def_child_index])
+    return false unless compiled
+
+    unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
+  end
+
   def class_body_registration(insn, irep, owner)
     child = irep.reps[insn.def_child_index]
     compiled = child && @compiled_methods&.[](child)

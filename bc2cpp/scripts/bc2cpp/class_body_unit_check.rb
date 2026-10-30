@@ -173,4 +173,23 @@ suite.compile(FROZEN) do |ireps, root|
               code.include?('left to the VM') && code.include?('r1 = mrb_obj_freeze(M, r1);') && !code.include?('owner_call'))
 end
 
+suite.compile(DEFS) do |ireps, root|
+  body = ireps.values.find { |irep| BytecodeIR.for(irep).each_source.any? { |insn, _| insn.op == :TDEF } }
+  registry = build_registry(ireps, root)[0]
+  gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  gen.compiled_methods = BytecodeIR.for(body).each_source.filter_map do |insn, _|
+    next unless %i[TDEF SDEF].include?(insn.op)
+
+    label = body.reps[insn.def_child_index]
+    method = gen.compile_method(label)
+    [label, method.merge(label: label)] if method
+  end.to_h
+  gen.define_singleton_method(:unregistered_keys) { Set['Router.singleton#make', 'Router#route'] }
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  suite.check('a def the tables leave out is skipped, not a refusal of its body',
+              units.any? && code.include?('left out of the method tables') && !code.include?('mrb_define_class_method(M, mrb_class_ptr(self), "') &&
+              !code.include?('mrb_define_method(M, mrb_class_ptr(self), "'))
+end
+
 suite.finish!
