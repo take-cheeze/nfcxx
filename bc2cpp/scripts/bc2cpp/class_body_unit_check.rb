@@ -157,4 +157,20 @@ suite.compile(INHERITED) do |ireps, root|
   suite.check('an alias of a method the body does not register is refused', gen.compile_top_class_units(ireps.fetch(root)).empty?)
 end
 
+FROZEN = <<~'RUBY'
+  class Router
+    attr_reader :x
+    LIMIT = [1, 2].freeze
+    MAX = 3
+  end
+RUBY
+
+suite.compile(FROZEN) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  suite.check('a self send is left to the VM and a literal freeze is a direct freeze',
+              code.include?('left to the VM') && code.include?('r1 = mrb_obj_freeze(M, r1);') && !code.include?('owner_call'))
+end
+
 suite.finish!

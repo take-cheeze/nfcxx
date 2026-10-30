@@ -32,7 +32,8 @@ class CodeGen
     bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     paired_exec = bodies.keys.to_set { |idx| idx + 1 }
     unsupported = program.each_source.reject do |insn, idx|
-      %i[TDEF SDEF ALIAS].include?(insn.op) || (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
+      %i[TDEF SDEF ALIAS SSEND SSEND0].include?(insn.op) || literal_freeze?(program, idx) ||
+      (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
@@ -73,6 +74,11 @@ class CodeGen
         registered << insn.sym.to_s if insn.op == :TDEF
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+      elsif %i[SSEND SSEND0].include?(insn.op)
+        # A self send (attr_accessor, include, private, ...) is left to the VM: the residual bytecode still runs the body.
+        lines << "  // #{insn.sym} (self send) left to the VM\n"
+      elsif literal_freeze?(program, idx)
+        lines << "  r#{insn.reg} = mrb_obj_freeze(M, r#{insn.reg});\n"
       elsif insn.op == :ALIAS
         line = class_body_alias(insn, registered)
         return [nil, [:ALIAS]] unless line
@@ -228,6 +234,17 @@ class CodeGen
 
     "  mrb_alias_method(M, mrb_class_ptr(self), mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), " \
       "mrb_intern_cstr(M, #{c_string_literal(old)}));\n"
+  end
+
+  # `[...].freeze` or `{...}.freeze` on the literal the previous instruction built, the shape of a frozen constant. The
+  # freeze is the Object method only when no one redefined it, which a literal's own freeze cannot be (the literal is
+  # built here), so it is emitted as mrb_obj_freeze instead of a send through the owner-call helpers.
+  def literal_freeze?(program, idx)
+    insn = program.source_at(idx)
+    return false unless insn&.op == :SEND0 && insn.sym.to_s == 'freeze'
+
+    previous = program.source_at(idx - 1)
+    %i[ARRAY HASH].include?(previous&.op) && previous.reg == insn.reg
   end
 
   def omitted_def?(insn, owner, omitted)
