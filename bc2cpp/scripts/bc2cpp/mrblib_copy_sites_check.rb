@@ -50,7 +50,7 @@ CASES = [
 CASES.each do |label, owner, sites, expected|
   suite.check(label, MrblibStubs.copy_source?(owner, 'initialize', sites, WORLD) == expected)
 end
-suite.check('refuse: a name outside the staged set is kept (name-based)', MrblibStubs.copy_source?('Game::Actor', 'x', ['RGSS::Window'], WORLD) == true)
+suite.check('refuse: a copied name is decided by the class graph too (any name, not only initialize)', MrblibStubs.copy_source?('Game::Actor', 'x', ['RGSS::Window'], WORLD) == false)
 suite.check('refuse: without a class world every copy may take the def', MrblibStubs.copy_source?('Game::Actor', 'initialize', ['RGSS::Window'], nil) == true)
 
 # The load plan's pin of a copy source (LoadCompile.copy_pinned?): the same rule with the def_key of the def.

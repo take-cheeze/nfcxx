@@ -360,7 +360,7 @@ module LoadCompile
   end
 
   # The copy source of an alias is decided by the class graph only for the staged names (MrblibStubs::RECEIVER_RULE_NAMES).
-  def receiver_rule_name?(name, graph) = !graph.nil? && MrblibStubs::RECEIVER_RULE_NAMES.include?(name)
+  def receiver_rule_name?(name, graph) = !graph.nil? && MrblibStubs.receiver_rule_name?(name)
 
   # Whether the copy sites of a name (pinned_names' sites) may take the def of `def_key` as their source.
   def copy_pinned?(def_key, name, sites, graph)

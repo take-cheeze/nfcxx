@@ -81,9 +81,12 @@ module MrblibStubs
   # cannot be the copied method. Every other site (a method or block, a singleton class, the top level, a receiver
   # other than self, `method`, `define_method`) may copy from anywhere: :unknown.
   COPY_FROM_SELF = %w[alias_method module_function instance_method].freeze
-  # The names the receiver rule decides. Staged: the rule is general, but only these names are decided by it until the
-  # other copied names (a def of `x`, `push`, `sort!`, ...) are reviewed; every other name keeps the name-based keep.
-  RECEIVER_RULE_NAMES = %w[initialize].freeze
+  # The names the receiver rule decides: nil, every copied name. A copy takes the def of an ancestor of the class it runs in
+  # only, so a def of an unrelated class (`RPG2k#push` next to `alias append push` in Array) is not its source.
+  RECEIVER_RULE_NAMES = nil
+
+  # Whether the receiver rule decides a copied +name+ (load_compile.rb asks the same question).
+  def receiver_rule_name?(name) = RECEIVER_RULE_NAMES.nil? || RECEIVER_RULE_NAMES.include?(name)
 
   # A rep is an Irep, or its label (the parent map below reads both).
   def rep_label(rep) = rep.respond_to?(:label) ? rep.label : rep
@@ -138,7 +141,7 @@ module MrblibStubs
   # Without a class world, or for a site whose class is not exact, every copy may. Otherwise: only a site whose
   # class's ancestors (ClassWorld.ancestors, every ancestor of an exact class exact too) include +owner+.
   def copy_source?(owner, name, sites, world)
-    return true if world.nil? || sites.nil? || sites.empty? || !RECEIVER_RULE_NAMES.include?(name)
+    return true if world.nil? || sites.nil? || sites.empty? || !receiver_rule_name?(name)
 
     sites.any? do |site|
       next true if site == :unknown || world.facts[site].nil? || !world.facts[site]['exact']
