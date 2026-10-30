@@ -602,11 +602,12 @@ class CodeGen
       flow_handlers = { regions: recognize_rescue_regions(irep).map { |r| r.slice(:begin_addr, :end_addr, :except_addr) },
                         glue_reads: rescue_glue_reads }
       # Reports and eligibility observe #error, not register cleanup. Keep error-bearing and audited texts on the regular pass.
-      unless (@clean_probe || @report_only_text) && !@runtime_installed_names && flow_bodies.none? { |text| text.include?('#error') }
+      eligibility_only = @clean_probe && !@runtime_installed_names && flow_bodies.none? { |text| text.include?('#error') }
+      unless eligibility_only || (@report_only_text && !@runtime_installed_names && flow_bodies.none? { |text| text.include?('#error') })
         flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured, handlers: flow_handlers)
       end
-      # ELEMENT_READ_ROOTS runs on the final texts, so the liveness it reads is the one the emitted code has.
-      flow_bodies = ElementReadRoots.apply(irep, flow_bodies, flow_captured, handlers: flow_handlers)
+      # Probe text is never executed; GC rooting cannot change an error-free eligibility answer.
+      flow_bodies = ElementReadRoots.apply(irep, flow_bodies, flow_captured, handlers: flow_handlers) unless eligibility_only && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0'
       flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
     end
     @resumable.flat = false if @resumable
@@ -634,7 +635,7 @@ class CodeGen
     end
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
-    out = drop_dead_statements(drop_unused_registers(out)) unless @resumable || (@report_only_text && !@runtime_installed_names)
+    out = drop_dead_statements(drop_unused_registers(out)) unless @resumable || ((@report_only_text || (@clean_probe && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0')) && !@runtime_installed_names)
     out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
