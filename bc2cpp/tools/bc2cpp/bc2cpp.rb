@@ -2170,6 +2170,7 @@ if $PROGRAM_NAME == __FILE__
   # (a duplicate run) until the residual mrblib drops them.
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
   class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '0' ? [] : gen.compile_top_class_units(ireps.fetch(root_label))
+  class_units = gen.owned_class_units(class_units, only_owners)
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_ary_write_helpers(compiled)

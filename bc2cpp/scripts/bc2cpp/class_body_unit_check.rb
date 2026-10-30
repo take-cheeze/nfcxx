@@ -220,4 +220,17 @@ suite.compile(NAMED_SUPER) do |ireps, root|
               code.include?('mrb_vm_define_class(M, (mrb_nil_p(r') && code.include?('"Problem"'))
 end
 
+# A gem's gem_init runs only the units of the owners it emits (owned_class_units), so core never runs RPG2k's body.
+suite.compile(UNITS) do |ireps, root|
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  suite.check('a run for every owner keeps every unit', gen.owned_class_units(units, nil).map { |u| u[:path] }.sort == %w[Mod Router])
+  suite.check('an owner nested under a unit path keeps that unit',
+              gen.owned_class_units(units, ['Router::Inner']).map { |u| u[:path] } == %w[Router])
+  suite.check('a singleton owner keeps its class unit', gen.owned_class_units(units, ['Router.singleton']).map { |u| u[:path] } == %w[Router])
+  suite.check('a gem whose owners are elsewhere gets no unit of this class', gen.owned_class_units(units, ['Other']).empty?)
+  suite.check('a name that only shares a prefix is not an owner of the unit',
+              gen.owned_class_units(units, ['RouterX']).empty?)
+end
+
 suite.finish!

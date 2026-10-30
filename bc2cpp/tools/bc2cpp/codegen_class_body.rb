@@ -234,6 +234,18 @@ class CodeGen
     previous&.op == :LOADNIL && previous.reg == insn.reg + 1
   end
 
+  # The units a gem's gem_init runs are the ones of the owners that gem emits (ONLY_OWNERS). Every gem's TU would otherwise
+  # run every unit, so core's gem_init ran RPG2k's body before mruby-rgss had defined RGSS (uninitialized constant RGSS
+  # at boot). A unit is kept when an owner is its path or nests under it. nil only_owners is the one run for every owner.
+  def owned_class_units(units, only_owners)
+    return units unless only_owners
+
+    units.select do |unit|
+      path = unit[:path]
+      only_owners.any? { |owner| owner == path || owner.start_with?("#{path}::", "#{path}.") }
+    end
+  end
+
   # FREE_LAMBDA: a lambda whose body reads nothing from its creating frame (no self, no upvar, no block, no nested
   # closure) is built as a free RProc (mrb_proc_new_cfunc, no env) over a standalone cfunc. The ops below are the ones
   # that read self, the frame's upvars or block, or create a closure over them. Nil when the lambda is not free.
