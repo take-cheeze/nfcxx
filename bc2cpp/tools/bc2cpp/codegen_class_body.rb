@@ -11,12 +11,12 @@ class CodeGen
   # entry the gem already emits for the method. Set before compile_top_class_units.
   attr_writer :compiled_methods
 
-  # The sends (SEND, SEND0, SSEND, SSEND0) are out: a send in a body calls owner-call helpers that the gem emits only for
-  # its compiled methods, so a body with one does not build (core_compiled_gen.cpp: `include` in Object). Restore them
-  # once the helpers are emitted for the units.
+  # The explicit-receiver sends (SEND, SEND0) are in: a unit's send is a plain mrb_funcall (see compile_class_body). The
+  # self sends (SSEND, SSEND0) are left to the VM, since a self send in a body calls owner-call helpers the gem emits only
+  # for its compiled methods.
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
-                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND]).freeze
+                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
 
   # The mruby entry points a class unit calls (vm.c; the same declarations load_compile.rb's PRELUDE makes).
   CLASS_UNIT_DECLS = <<~CPP
@@ -47,6 +47,7 @@ class CodeGen
     unsupported = program.each_source.reject do |insn, idx|
       folded_away.include?(idx) || %i[TDEF SDEF ALIAS SSEND SSEND0 TCLASS METHOD DEF].include?(insn.op) || literal_freeze?(program, idx) ||
       (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) || (%i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)) ||
+      (insn.op == :SCLASS && !bodies.key?(idx) && self_singleton_open?(program, idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx)) || (insn.op == :LAMBDA && free_lambda_irep(insn, irep))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
@@ -95,12 +96,19 @@ class CodeGen
       elsif %i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)
         # A class or module with an empty body has no EXEC: it is only created (vm.c OP_CLASS / OP_MODULE), as a unit does.
         lines << class_unit_define(insn)
+      elsif insn.op == :SCLASS && !bodies.key?(idx)
+        # A `class << self` with no EXEC: its defs follow on the register, which is the singleton class (vm.c OP_SCLASS).
+        lines << class_unit_define(insn)
       elsif insn.op == :TCLASS
         # The target class of a class body is the body's own class: the self of this function.
         lines << "  r#{insn.reg} = self;\n"
       elsif insn.op == :METHOD
         # The proc a `def` installs; the DEF after it registers the method, so nothing is written here.
         lines << "  // proc for the def that follows (R#{insn.reg})\n"
+      elsif insn.op == :DEF && left_out_def?(program, idx, irep)
+        # Left out of the tables (statically dispatched only), as a TDEF of an omitted key is: nothing registers.
+        lines << "  // #{insn.sym} left out of the method tables: statically dispatched only (no registration)\n"
+        lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}));\n"
       elsif insn.op == :DEF
         registration = class_def_registration(insn, program, idx, irep)
         return [nil, [:DEF]] unless registration
@@ -142,6 +150,14 @@ class CodeGen
   # The qualified name of a class unit's child body. A singleton body (`class << self`) is the body's own owner with
   # `.singleton` appended, and only when its SCLASS takes self from the LOADSELF just before it; any other singleton
   # target refuses the body.
+  # A SCLASS on self with no EXEC after it (`class << self` whose defs the compiler emits inline): the unit makes the
+  # singleton class of the register and the DEFs after it register on that class.
+  def self_singleton_open?(program, idx)
+    insn = program.source_at(idx)
+    previous = program.source_at(idx - 1)
+    previous&.op == :LOADSELF && previous.reg == insn.reg
+  end
+
   def child_body_path(program, irep, idx, owner)
     insn = program.source_at(idx)
     if insn.op == :SCLASS
@@ -305,14 +321,24 @@ class CodeGen
     unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
   end
 
+  # The body of the `def` a DEF installs: the child of the METHOD built into R[a+1] just before it. Nil when there is none.
+  def def_method_child(insn, program, idx, irep)
+    method = (idx - 1).downto(idx - 4).map { |j| program.source_at(j) }.find { |m| m&.op == :METHOD && m.reg == insn.reg + 1 }
+    method && irep.reps[method.block_index]
+  end
+
+  # A DEF whose method the build leaves out of its tables (unregistered_keys), by the owner and name its compiled entry carries.
+  def left_out_def?(program, idx, irep)
+    insn = program.source_at(idx)
+    compiled = @compiled_methods&.[](def_method_child(insn, program, idx, irep))
+    compiled ? unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}") : false
+  end
+
   # The call that registers a `def` a class body makes through DEF (not TDEF): the class is R[a] (set by TCLASS), the method
   # is the proc METHOD built into R[a+1] just before. Its compiled entry is the one TDEF uses. Nil when the proc, its entry
   # or its visibility is not one this emitter makes, or the method is left out of the tables (then nothing registers).
   def class_def_registration(insn, program, idx, irep)
-    method = (idx - 1).downto(idx - 4).map { |j| program.source_at(j) }.find { |m| m&.op == :METHOD && m.reg == insn.reg + 1 }
-    return nil unless method
-
-    child = irep.reps[method.block_index]
+    child = def_method_child(insn, program, idx, irep)
     compiled = child && @compiled_methods&.[](child)
     return nil unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
     return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
