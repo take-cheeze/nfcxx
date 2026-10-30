@@ -60,4 +60,29 @@ suite.compile(WITH_DEF) do |ireps, _root|
   suite.check('a class body with a def is refused whole', code.nil? && refused.include?(:TDEF))
 end
 
+# An omitted def (named by BC2CPP_UNREGISTERED_EXTRA, as the build's leave-out lists would name it) compiles as its
+# register write; the body compiles with g++ accepted, and the same body without the omission is still refused.
+previous = ENV['BC2CPP_UNREGISTERED_EXTRA']
+begin
+  ENV['BC2CPP_UNREGISTERED_EXTRA'] = 'Router#route'
+  suite.compile(WITH_DEF) do |ireps, _root|
+    body = class_body_of(ireps)
+    gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+    code, refused = gen.compile_class_body(body, 'Router')
+    suite.check('an omitted def compiles as a register write, not a refusal',
+                code && refused.nil? && code.include?('statically dispatched only') &&
+                code.include?('mrb_symbol_value(mrb_intern_cstr(M, "route"))'))
+    unit = +"#{%w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h].map { |h| "#include <#{h}>\n" }.join}#{gen.emit_owner_class_cache}#{code}"
+    path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_omit_#{$$}.cc")
+    File.write(path, unit)
+    out, status = Open3.capture2e('g++', '-std=c++17', '-fsyntax-only', '-w', "-I#{ROOT}/3rd/mruby/include",
+                                  "-I#{ENV.fetch('BC2CPP_BUILD_INCLUDE', ROOT + '/build-closed-bc2cpp/closed/include')}", path)
+    suite.check('the body with an omitted def compiles with the mruby headers', status.success?)
+    puts "    g++: #{out.lines.first(3).join.strip}" unless status.success?
+    File.delete(path)
+  end
+ensure
+  ENV['BC2CPP_UNREGISTERED_EXTRA'] = previous
+end
+
 suite.finish!
