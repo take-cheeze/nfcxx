@@ -5,7 +5,9 @@
 # class-body driver (CodeGen#compile_class_body) would compile it. A refusal names the opcodes that refuse it, so the
 # list says what to support next. Read-only; needs MRBC (host mrbc) and prints the list to stdout.
 #
-#   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/class_body_compile_list.rb [--refused]
+#   MRBC=path/to/host/mrbc BC2CPP_STATIC_DISPATCH_LISTS=build/bc2cpp/static_dispatch_lists.json \
+#     BC2CPP_BUILD_NAME=closed ruby scripts/bc2cpp/class_body_compile_list.rb [--refused]
+#   The lists are the build's omittable set: without them every TDEF is refused, with them the omitted defs are skipped.
 
 require 'set'
 require 'tmpdir'
