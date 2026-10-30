@@ -601,7 +601,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     diff = pure_eval_differences(dir, build, 'fx', fx_folded)
     puts diff.first(6).map { |l| "    folded: #{l}" } if diff && !diff.empty?
     suite.check("PURE_CONST_EVAL: the #{fx_folded.size} folded constants equal what mruby computes (class, frozen state, order, content)",
-                diff && diff.empty? && fx_folded.size == 5)
+                diff && diff.empty? && fx_folded.size == 6)
 
     # Hooks and statements the bytes have no room for stay C++ statements of their own, in their place.
     hk_status, hk_sections = equivalence(suite, dir, build, 'fh', hk[:result], hk[:files], hk[:residual], 'Hk')
