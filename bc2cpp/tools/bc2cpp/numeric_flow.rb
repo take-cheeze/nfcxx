@@ -439,6 +439,7 @@ module NumericFlow
       c = new(irep, oracle, opaque, nregs, slots, slot_of, facts, nregs + slots.size + nregs, writes)
       c.elide_load_copies = ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] != '0'
       c.elide_result_copies = ENV['BC2CPP_NUMERIC_RESULT_COPY_ELISION'] != '0'
+      c.elide_read_copies = ENV['BC2CPP_NUMERIC_READ_COPY_ELISION'] != '0'
       c.elem_base = nregs + slots.size
       # CLASS_NARROWING: a third block of nregs entries after the provenance, one per register, naming the
       # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
@@ -465,13 +466,14 @@ module NumericFlow
     # Where the element block starts; nil for a ctx built from a Hash, whose layout has no element block.
     attr_accessor :elem_base
     attr_accessor :load_readers, :widened_slots
-    attr_accessor :elide_result_copies
+    attr_accessor :elide_result_copies, :elide_read_copies
     attr_writer :elide_load_copies
 
     def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
       StrictKeySet.coerce(opaque)
       @elide_load_copies = false
       @elide_result_copies = false
+      @elide_read_copies = false
       @irep = irep
       @oracle = oracle
       @opaque = opaque
@@ -867,10 +869,10 @@ module NumericFlow
       return out
     end
 
-    out = state.dup
     oracle = c.oracle
     irep = c.irep
     if kind == K_CALL
+      out = state.dup
       # A block result needs its own proof: `break` replaces the callee's answer.
       call = step.call
       mask = if call == C_SEND
@@ -898,6 +900,17 @@ module NumericFlow
       return out
     end
 
+    if c.elide_read_copies
+      if kind == K_GETIV
+        slot = c.slot_of[step.ivar]
+        provenance = slot && !c.opq[a] ? slot - nregs + 1 : 0
+        return copy_reg_write(state, a, slot ? state[slot] : OTHER, c, provenance)
+      elsif kind == K_RESCUE
+        return step.b < nregs ? copy_reg_write(state, step.b, OTHER, c) : state
+      end
+    end
+
+    out = state.dup
     case kind
     when K_LOADI
       set_reg(out, a, INT, c)
@@ -1005,9 +1018,9 @@ module NumericFlow
   end
 
   # Equal class masks alone are insufficient: rewriting a value still invalidates aliases and tests.
-  def copy_reg_write(state, r, mask, c)
+  def copy_reg_write(state, r, mask, c, provenance = 0)
     value = c.opq[r] ? OTHER : mask
-    if unchanged_reg_write?(state, r, value, c)
+    if unchanged_reg_write?(state, r, value, c, provenance)
       writes = c.writes
       writes[r] = (writes[r] || 0) | value if writes
       return state
@@ -1015,11 +1028,12 @@ module NumericFlow
 
     out = state.dup
     set_reg(out, r, mask, c)
+    out[c.pb + r] = provenance unless provenance.zero?
     out
   end
 
-  def unchanged_reg_write?(state, r, value, c)
-    return false unless state[r].eql?(value) && state[c.pb + r].eql?(0)
+  def unchanged_reg_write?(state, r, value, c, provenance = 0)
+    return false unless state[r].eql?(value) && state[c.pb + r].eql?(provenance)
     return false if c.elem_base && !state[c.elem_base + r].eql?(ELEM_UNKNOWN)
     return false if c.tb && !state[c.tb + r].eql?(0)
 

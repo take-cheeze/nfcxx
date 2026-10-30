@@ -35,7 +35,7 @@ end
 SRC = <<~'RUBY'
   class EfBase
     def initialize(a)
-      @a = a
+      @a = [a][0]
       @shared = :base
     end
     def a; @a; end
@@ -77,10 +77,14 @@ def code_of(code, name)
   code.scan(/^(?:static )?mrb_value #{name}_impl\w*\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m).join
 end
 
-def generate_world(env = {})
+def generate_world(env = {}, directory: nil)
   saved = env.keys.to_h { |k| [k, ENV.fetch(k, nil)] }
   env.each { |k, v| ENV[k] = v }
-  Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: OWNERS) }
+  if directory
+    Bc2cppFixtureRuntime.generate(SRC, directory, core: true, only_owners: OWNERS)
+  else
+    Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: OWNERS) }
+  end
 ensure
   saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
@@ -102,7 +106,10 @@ check.call('a subclass method reads its own and the base\'s ivars as struct fiel
 check.call('a subclass that works before super keeps its family out of the struct storage',
            !code.include?('struct EfLateBase_ivars') && !code.include?('struct EfLate_ivars'))
 check.call('no #error in the generated code', !code.include?('#error'))
-off, = generate_world('BC2CPP_EMBED_FAMILIES' => '0')
+full_probe, full_probe_err = generate_world({ 'BC2CPP_PROBE_TEXT_CLEANUP' => '0' }, directory: baseline_dir)
+check.call('full probe root analysis and text cleanup preserve emitted C++ and embedding decisions',
+           full_probe == code && full_probe_err == baseline_err)
+off, = generate_world({ 'BC2CPP_EMBED_FAMILIES' => '0' })
 check.call('BC2CPP_EMBED_FAMILIES=0: the family is refused', !off.include?('struct EfBase_ivars'))
 
 DRIVER = <<~'RUBY'
