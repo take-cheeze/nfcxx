@@ -137,6 +137,7 @@ def build_registry(ireps, root_label)
   # way), or absent (unrecognized superclass expression, never guessed). Only
   # CLASS populates it; modules have no superclass.
   superclass_of = {}
+  pending_superclasses = []
   # ANCESTOR_MIXINS_SUPPORT: class name -> modules its own body `include`s, in
   # source order, plus the parallel `prepend` table. `super` soundness needs to
   # know that no included module sits between the caller and its superclass
@@ -268,10 +269,17 @@ def build_registry(ireps, root_label)
         if insn.op == :CLASS
           superclass_reg = reg + 1
           resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
-          superclass_of[opener_name] = resolved if resolved
           outer_nil = resolve_superclass_ref(irep, idx, reg, nil) == :none
-          class_decls[opener_name] << { super: resolved, outer_nil: outer_nil,
-                                        outer_qualified: !outer_qualified.nil? }
+          decl = { super: resolved, outer_nil: outer_nil, outer_qualified: !outer_qualified.nil? }
+          class_decls[opener_name] << decl
+          # A bare constant in a namespace names the innermost enclosing one that defines it, or the top level (Ruby's
+          # lexical lookup). Which one is known only once the walk has seen every definition, so it is settled after it.
+          raw = namespace && resolve_superclass_ref(irep, idx, superclass_reg, nil)
+          if raw.is_a?(String) && !raw.include?('::')
+            pending_superclasses << [opener_name, raw, namespace, decl]
+          elsif resolved
+            superclass_of[opener_name] = resolved
+          end
         end
         enter_body.call(idx, opener_name, opener_ivar_owner)
       when :SCLASS
@@ -589,9 +597,24 @@ def build_registry(ireps, root_label)
       d.irep = nil
     end
   end
+  settle_superclass_names(pending_superclasses, superclass_of, class_decls, module_names)
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
    struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites, declared_modules,
    alias_sites]
+end
+
+# The superclass of a class whose superclass is a bare constant written inside a namespace: the first of the
+# namespace's enclosing names (innermost first) that the program defines as a class or module, else the top-level name.
+# A name nothing defines keeps the top-level reading, which is what Ruby resolves it to when no nested definition exists.
+def settle_superclass_names(pending, superclass_of, class_decls, module_names)
+  defined = module_names | class_decls.keys.to_set | superclass_of.keys.to_set
+  pending.each do |opener, name, namespace, decl|
+    parts = namespace.split('::')
+    candidates = (parts.size.downto(1).map { |n| "#{parts.first(n).join('::')}::#{name}" } + [name])
+    settled = candidates.find { |c| defined.include?(c) } || name
+    superclass_of[opener] = settled
+    decl[:super] = settled
+  end
 end
 
 # SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back

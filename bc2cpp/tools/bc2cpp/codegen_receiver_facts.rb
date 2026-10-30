@@ -1143,8 +1143,37 @@ class CodeGen
 
     target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
     return super_target_refused(owner_def, "no #{superclass}##{owner_def.name} definition with a body") unless target_def && target_def.irep
-    return super_target_refused(owner_def, "#{superclass}##{owner_def.name} does not compile clean") unless compiles_clean?(target_def.irep)
+    unless super_target_clean?(target_def.irep)
+      return super_target_refused(owner_def, "#{superclass}##{owner_def.name} does not compile clean#{unclean_note(target_def.irep)}")
+    end
     target_def
+  end
+
+  # The target's body compiles. Inside a cleanliness probe of that same body (a mutual call that reaches the super),
+  # compiles_clean? answers false, so the body is compiled once more and its text checked for #error. A body already
+  # being checked that way is not clean (a recursion guard).
+  def super_target_clean?(label)
+    return compiles_clean?(label) unless @probing&.include?(label)
+
+    @text_checking ||= Set.new
+    return false if @text_checking.include?(label)
+
+    begin
+      @text_checking << label
+      text = compile_method(label)&.to_h&.dig(:code).to_s
+      !text.empty? && !text.match?(/^\s*#error/)
+    ensure
+      @text_checking.delete(label)
+    end
+  end
+
+  # BC2CPP_SUPER_LOG only: the first #error of the target's compiled text, or that it was still being probed.
+  def unclean_note(label)
+    return '' unless ENV['BC2CPP_SUPER_LOG'] && !ENV['BC2CPP_SUPER_LOG'].empty?
+    return ' (in a probe cycle)' if @probing&.include?(label)
+
+    error = compile_method(label)&.to_h&.dig(:code).to_s[/^\s*#error.*$/]
+    error ? " (#{error.strip})" : ' (no #error)'
   end
 
   # BC2CPP_SUPER_LOG: why a super falls back to the by-name lookup (the target is not direct).
