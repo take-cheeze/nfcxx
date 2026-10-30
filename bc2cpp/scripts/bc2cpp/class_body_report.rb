@@ -158,6 +158,16 @@ def const_source_kind(sources)
   kinds.uniq.size == 1 ? kinds.first : 'mixed'
 end
 
+# Whether the method compiler produces C++ for method `mname` of `owner` (its body is irep `child`).
+def method_compiles?(gen, registry, owner, mname, child)
+  d = (registry[mname] || []).find { |x| x.owner == owner && x.irep == child }
+  return false unless d
+
+  !gen.compile_method(child).nil?
+rescue StandardError
+  false
+end
+
 def tag_report(roots, scans, omit)
   mrbc = ENV['MRBC'] || 'mrbc'
   handled = handled_ops
@@ -168,6 +178,8 @@ def tag_report(roots, scans, omit)
   Dir.mktmpdir do |tmp|
     roots.each do |name, files|
       ireps, root = compile_ireps(files, name.tr(':-', '__'), tmp, mrbc: mrbc)
+      registry = build_registry(ireps, root)[0]
+      gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
       walk = lambda do |label, owner|
         irep = ireps.fetch(label)
         irep.each_with_op(:SETCONST) do |insn, idx|
@@ -179,18 +191,22 @@ def tag_report(roots, scans, omit)
         BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).each do |idx, child|
           next unless child
 
-          path = BytecodeIR.class_body_path(irep, idx, owner)
+          # A `class << self` body is `Owner.singleton` (CodeGen#child_body_path), not the class name.
+          path = gen.child_body_path(BytecodeIR.for(irep), irep, idx, owner) || owner
           walk.call(child, path || owner)
         end
-        irep.each_with_op(:TDEF, :METHOD) do |insn, _|
-          child = irep.reps[insn.op == :TDEF ? insn.def_child_index : insn.block_index]
+        # TDEF only: METHOD is `R[a] = lambda(Irep[b])` (vm.c), a block or lambda value, not a method definition.
+        irep.each_with_op(:TDEF) do |insn, _|
+          child = irep.reps[insn.def_child_index]
           next unless child && owner
 
           mname = insn.sym.to_s
           body = ireps.fetch(child)
           ops = body.instructions.map { |i| i.op }
           blocking_ops = ops.reject { |op| handled.include?(op) }.uniq
-          compilable = blocking_ops.empty?
+          # compilable: the method compiler (CodeGen#compile_method) produces C++ for the method. The opcode list above
+          # is only the compile_insn view (block, send-with-block and rescue are emitted by other codegen files).
+          compilable = method_compiles?(gen, registry, owner, mname, child)
           key = "#{owner}##{mname}"
           methods << { owner: owner, name: mname, compilable: compilable, blocking: blocking_ops, omittable: omit.include?(key),
                        direct: world.facts.dig(owner, 'exact') ? true : false, root: name }
