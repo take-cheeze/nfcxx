@@ -247,31 +247,18 @@ suite.compile(UNITS) do |ireps, root|
               gen.owned_class_units(units, ['RouterX']).empty?)
 end
 
-# An explicit-receiver send with no arguments (SEND0) is a plain mrb_funcall in a unit, and the unit still compiles.
+# An explicit-receiver send with no arguments (SEND0) refuses its body: a unit's plain mrb_funcall would be a dynamic
+# lookup by name, which keeps that name in the method table. A `freeze` on the register is still a direct call.
 SENDS = <<~'RUBY'
   class Router
     N = "ab".length
-    R = (1..2).to_a
   end
 RUBY
 
 suite.compile(SENDS) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  units = gen.compile_top_class_units(ireps.fetch(root))
-  code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
-  suite.check('a body with an explicit-receiver send with no arguments compiles, as a plain mrb_funcall',
-              units.map { |unit| unit[:path] } == %w[Router] && code.include?('mrb_funcall(M, r1, "length", 0);'))
-  headers = %w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h]
-  unit = +"#{headers.map { |h| "#include <#{h}>\n" }.join}#{TaggedFixnum::PRELUDE}#{gen.emit_owner_class_cache}"
-  unit << units.map { |u| u[:code] }.join
-  path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_sends_#{$$}.cc")
-  File.write(path, unit)
-  out, status = Open3.capture2e('g++', '-std=c++17', '-fsyntax-only', '-w',
-                                "-I#{ROOT}/3rd/mruby/include",
-                                "-I#{ENV.fetch('BC2CPP_BUILD_INCLUDE', "#{ROOT}/build-closed-bc2cpp/closed/include")}", path)
-  suite.check('the emitted unit with the sends compiles with the mruby headers', status.success?)
-  puts "    g++: #{out.lines.first(3).join.strip}" unless status.success?
-  File.delete(path)
+  suite.check('a body with an explicit-receiver send with no arguments is refused, not a dynamic call',
+              gen.compile_top_class_units(ireps.fetch(root)).empty?)
 end
 
 suite.finish!

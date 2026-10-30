@@ -13,8 +13,8 @@
 require 'open3'
 
 ROOT = File.expand_path('../..', __dir__)
-MIN_COMPILED = 248
-KNOWN_LEFT = %w[ALIAS TDEF].freeze
+MIN_COMPILED = 241
+KNOWN_LEFT = %w[SEND0 ALIAS TDEF].freeze
 MADE_COMPILABLE = %w[BLOCK SENDB CLASS DEF METHOD TCLASS SSEND SSEND0 SEND SCLASS LAMBDA].freeze
 
 if ENV['MRBC'].to_s.empty? || ENV['BC2CPP_STATIC_DISPATCH_LISTS'].to_s.empty?

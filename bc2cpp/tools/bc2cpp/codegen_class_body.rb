@@ -11,12 +11,13 @@ class CodeGen
   # entry the gem already emits for the method. Set before compile_top_class_units.
   attr_writer :compiled_methods
 
-  # The explicit-receiver sends (SEND, SEND0) are in: a unit's send is a plain mrb_funcall (see compile_class_body). The
-  # self sends (SSEND, SSEND0) are left to the VM, since a self send in a body calls owner-call helpers the gem emits only
-  # for its compiled methods.
+  # SEND is in: a unit's send is a plain mrb_funcall (see compile_class_body). SEND0 is out, with the sends that are not
+  # `freeze`: its plain mrb_funcall is a dynamic lookup by name, which keeps that name in the method table. The self sends
+  # (SSEND, SSEND0) are left to the VM, since a self send in a body calls owner-call helpers the gem emits only for its
+  # compiled methods.
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
-                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
+                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND]).freeze
 
   # The mruby entry points a class unit calls (vm.c; the same declarations load_compile.rb's PRELUDE makes).
   CLASS_UNIT_DECLS = <<~CPP
