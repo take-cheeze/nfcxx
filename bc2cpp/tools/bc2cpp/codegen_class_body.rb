@@ -41,8 +41,11 @@ class CodeGen
     omitted = unregistered_keys
     bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     paired_exec = bodies.keys.to_set { |idx| idx + 1 }
+    # A constant a block builds is the folded value (codegen_class_fold.rb): its statement's instructions are skipped.
+    folds = folded_class_constants(program, irep, owner)
+    folded_away = folds.values.flat_map { |fold| fold[:skip] }.to_set
     unsupported = program.each_source.reject do |insn, idx|
-      %i[TDEF SDEF ALIAS SSEND SSEND0].include?(insn.op) || literal_freeze?(program, idx) ||
+      folded_away.include?(idx) || %i[TDEF SDEF ALIAS SSEND SSEND0].include?(insn.op) || literal_freeze?(program, idx) ||
       (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
@@ -62,8 +65,9 @@ class CodeGen
     # when the unit runs, and the gem's own registrations come after the units).
     registered = Set.new
     program.each_source do |insn, idx|
-      next if paired_exec.include?(idx) && insn.op == :EXEC
+      next if paired_exec.include?(idx) && insn.op == :EXEC || folded_away.include?(idx)
 
+      lines << folds[idx][:code] if folds.key?(idx)
       if bodies.key?(idx)
         child_path = child_body_path(program, irep, idx, owner)
         return [nil, [:UNRESOLVED_CLASS_PATH]] unless child_path
@@ -274,3 +278,5 @@ class CodeGen
     insn.op == :TDEF && omitted.include?("#{owner}##{insn.sym}")
   end
 end
+
+require_relative 'codegen_class_fold'
