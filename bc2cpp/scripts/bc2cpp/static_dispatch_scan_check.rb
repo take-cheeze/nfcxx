@@ -57,6 +57,54 @@ def check(label, ok)
   $failures += 1 unless ok
 end
 
+# --- NATIVE_CANDIDATES ---
+Dir.mktmpdir('native-candidate-inventory') do |dir|
+  path = File.join(dir, 'bindings.cxx')
+  File.write(path, <<~'C')
+    void install(mrb_state* M) {
+      RClass* rgss = mrb_define_module(M, "RGSS");
+      RClass* c = mrb_define_class_under(M, rgss, "NativeInventory", M->object_class);
+      mrb_define_method(M, c, "lambda_body", [](mrb_state* M, mrb_value self) {
+        mrb_int a, b;
+        mrb_get_args(M, "ii", &a, &b);
+        return mrb_funcall(M, self, "looked_up_in_body", 0);
+      }, MRB_ARGS_REQ(2));
+      mrb_define_method(M, c, "template_body", component_get<Color, &Color::red>, MRB_ARGS_NONE());
+      mrb_define_method(M, c, "template_setter", component_set<Color, &Color::red, 0, 255>, MRB_ARGS_REQ(1));
+      mrb_define_method(M, c, "selected_body", select_function(), MRB_ARGS_NONE());
+      mrb_define_method(M, c, "ruby_override", component_get<Color, &Color::red>, MRB_ARGS_NONE());
+      mrb_define_method(M, c, "already_listed", component_get<Color, &Color::red>, MRB_ARGS_NONE());
+      mrb_define_method(M, c, "aliased_source", f, MRB_ARGS_NONE());
+      mrb_define_method(M, c, "aliased_copy", f, MRB_ARGS_NONE());
+      mrb_define_alias(M, c, "aliased_copy", "aliased_source");
+      mrb_define_method_raw(M, c, MRB_SYM(raw_body), method);
+      RClass* computed = mrb_define_class_under(M, rgss, "ComputedInventory", M->object_class);
+      mrb_define_method(M, computed, computed_name, f, MRB_ARGS_NONE());
+      mrb_define_method(M, computed, "fixed_in_computed_owner", f, MRB_ARGS_NONE());
+      mrb_define_method(M, unknown_owner, "unknown_owner_body", f, MRB_ARGS_NONE());
+    }
+  C
+  previous_outside_files = S.method(:outside_world_files)
+  begin
+    S.define_singleton_method(:outside_world_files) { |_root, **_options| [[], [path]] }
+    registry = { 'ruby_override' => [Struct.new(:owner).new('RGSS::NativeInventory')] }
+    listed = [{ owner: 'RGSS::NativeInventory', name: 'already_listed' }]
+    candidates = S.native_candidates(dir, registry, listed)
+    check('native candidates need a fixed owner and name, not a named C function',
+          candidates.map { |m| [m[:owner], m[:name]] }.sort ==
+            %w[lambda_body selected_body template_body template_setter].map { |name| ['RGSS::NativeInventory', name] })
+    check('new native candidates retain namespace ownership and native status',
+          candidates.all? { |m| m[:gem] == 'mruby-rgss-compiled' && m[:native] && m[:entry].nil? })
+    tokens = Set.new
+    S.native_name_tokens(File.read(path), tokens, [])
+    check('a lookup inside an inline native body still keeps its name reachable', tokens.include?('looked_up_in_body'))
+    check('lambda and template registration names alone do not become lookups',
+          !tokens.include?('lambda_body') && !tokens.include?('template_body') && !tokens.include?('template_setter'))
+  ensure
+    S.define_singleton_method(:outside_world_files, previous_outside_files)
+  end
+end
+
 # --- NATIVE_NAME_TOKENS ---
 native = <<~'C'
   static mrb_value f(mrb_state* M, mrb_value self) {

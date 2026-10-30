@@ -613,14 +613,14 @@ module StaticDispatchRegistrations
   # owner's compiled gem (bc2cpp_native_strip_gem) removes when listed. Not ROM method-table entries
   # (MRB_MT_ENTRY), whose runtime removal adds a RAM tombstone. A key is left out when Ruby defines the name on that
   # owner too (bc2cpp_left_out would remove the Ruby method), when a native alias or undef names it there, when the
-  # owner has a computed-name registration, or when it is already a candidate.
+  # owner has a computed-name registration, or when it is already a candidate. Pruning needs the registration's
+  # owner and name, not a statically named C function: lambda and template bodies still install a fixed key.
   def native_candidates(repo_root, registry, candidates)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     map = NativeOwnerMap.build(native)
     keys = candidates.to_set { |m| "#{m[:owner]}##{m[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
-    map.registrations.each { |owner, name, fn| blocked << "#{owner}##{name}" if fn.nil? }
     map.registrations.filter_map do |owner, name, _fn|
       next unless owner.is_a?(String) && name && !map.computed.include?(owner)
 
