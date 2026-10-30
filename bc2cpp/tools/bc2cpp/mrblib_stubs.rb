@@ -20,6 +20,8 @@ module MrblibStubs
   # Sends that copy a method object while mrblib loads, or take one: a copy keeps the stubbed body after the compiled
   # registration replaced the original.
   COPYING_SENDS = %w[alias_method define_method instance_method method module_function].freeze
+  # The visibilities bc2cpp_register_owner_methods registers (codegen_emit.rb emit_owner_registration_lines).
+  REGISTERED_VISIBILITY = %i[public private].freeze
 
   # BC2CPP_STUB_LOG=<file>: why a compiled method's body is kept in the residual (one line per kept method).
   def stub_keep_reason(m, key, defs, load_bodies, copied, copied_names, copy_sites, world)
@@ -66,9 +68,16 @@ module MrblibStubs
     copy_sites = copy_sites(ireps, parent)
     defs_of = Hash.new { |h, k| h[k] = [] }
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
+    all_of = Hash.new { |h, k| h[k] = [] }
+    all_defs.each { |name, defs| defs.each { |d| all_of["#{d.owner}##{name}"] << d } }
     compiled.filter_map do |m|
       key = "#{m[:owner]}##{m[:name]}"
-      reason = stub_keep_reason(m, key, defs_of[key], load_bodies, copied, copied_names, copy_sites, world)
+      defs = defs_of[key]
+      # CORE_VISIBILITY: a core def whose name a native shares, or an operator name, is no registry definition, yet it
+      # is compiled and registered (bc2cpp_register_owner_methods), so the registration replaces its one bytecode def
+      # at gem_init just as a registry def's is. Judge that def. Any other visibility is not registered that way.
+      defs = all_of[key] if defs.empty? && REGISTERED_VISIBILITY.include?(m[:visibility])
+      reason = stub_keep_reason(m, key, defs, load_bodies, copied, copied_names, copy_sites, world)
       next key if reason.nil?
 
       stub_keep_log(key, reason)
