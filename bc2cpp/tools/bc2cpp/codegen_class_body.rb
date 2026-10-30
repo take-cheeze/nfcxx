@@ -16,7 +16,7 @@ class CodeGen
   # once the helpers are emitted for the units.
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
-                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC]).freeze
+                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND]).freeze
 
   # The mruby entry points a class unit calls (vm.c; the same declarations load_compile.rb's PRELUDE makes).
   CLASS_UNIT_DECLS = <<~CPP
@@ -26,7 +26,17 @@ class CodeGen
 
   # [C++ text, nil] for a compiled body (its children's functions first), or [nil, refusing opcodes]. `owner` is the
   # body's class path. A TDEF of an omitted key (unregistered_keys) is its register write alone.
+  # A checked send (codegen_checked_send.rb) names a helper the gem does not define, so a unit's sends keep the plain
+  # mrb_funcall the generator starts from. @class_body_unit is set only while a unit compiles.
   def compile_class_body(irep, owner)
+    was_unit = @class_body_unit
+    @class_body_unit = true
+    compile_class_body_unit(irep, owner)
+  ensure
+    @class_body_unit = was_unit
+  end
+
+  def compile_class_body_unit(irep, owner)
     program = BytecodeIR.for(irep)
     omitted = unregistered_keys
     bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
