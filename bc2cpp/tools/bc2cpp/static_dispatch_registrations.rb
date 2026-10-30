@@ -1334,8 +1334,8 @@ module StaticDispatchRegistrations
   end
 
   # EMIT: the lists for this tree, in `dir`/static_dispatch_lists.json. A file already there for the same inputs is
-  # reused. Otherwise the proof runs from empty lists and repeats with its own output until a pass proves exactly
-  # what it generated with: each pass is sound only for the generation it read, so a list that has not reached that
+  # reused. Otherwise the proof runs from the last lists written there (or empty lists) and repeats with its own output
+  # until a pass proves exactly what it generated with: each pass is sound only for the generation it read, so a list that has not reached that
   # fixed point is not written. `max_passes` bounds a proof that oscillates, which is an error, never a result.
   def emit(repo_root, mrbc, dir, max_passes: 8, log: $stderr)
     FileUtils.mkdir_p(dir)
@@ -1346,8 +1346,13 @@ module StaticDispatchRegistrations
       return cached
     end
 
-    lists = StaticDispatchLists::EMPTY
-    lists_path = 'none'
+    # The last run's lists are the first pass's input, whatever tree they came from: a pass is accepted only when it
+    # proves exactly its own input, so a stale seed costs passes, never soundness. An unchanged proof then settles in
+    # one pass instead of two.
+    seed = read_lists(out)
+    lists = seed || StaticDispatchLists::EMPTY
+    lists_path = seed ? out : 'none'
+    log.puts "static dispatch lists: seeded from #{out} (#{seed.digest[0, 12]})" if seed
     passes = 0
     loop do
       passes += 1

@@ -12,6 +12,7 @@
 #   BC2CPP_LISTS_DIR  where the lists go (default BUILD_DIR/bc2cpp). CI points two builds of one job at the same
 #                   directory, so the second finds the first's file current.
 #
+# BC2CPP_LISTS_REUSE=1 skips the proof and reuses the lists in lists_dir (local iteration only; CI computes its own).
 # Needs what closed_build.bash needs (ruby with prism, rake, a C compiler, bison, gperf); everything but the path
 # goes to stderr, so the command substitution above holds only the path.
 set -euo pipefail
@@ -21,6 +22,14 @@ mkdir -p "$build_dir"
 build_dir="$(cd "$build_dir" && pwd)"
 lists_dir="${BC2CPP_LISTS_DIR:-$build_dir/bc2cpp}"
 lists="$lists_dir/static_dispatch_lists.json"
+
+# BC2CPP_LISTS_REUSE=1 (local iteration only): the lists already in lists_dir are used whatever tree they came from,
+# so no proof runs. CI always computes its own (its lists job), so a CI run never sets this.
+if [ "${BC2CPP_LISTS_REUSE:-}" = 1 ] && [ -f "$lists" ]; then
+  echo "static dispatch lists: reusing $lists without checking it against the tree (BC2CPP_LISTS_REUSE=1)" >&2
+  echo "$lists"
+  exit 0
+fi
 
 if ruby "$root/tools/bc2cpp/static_dispatch_registrations.rb" --check "$lists_dir"; then
   echo "static dispatch lists: $lists is current" >&2

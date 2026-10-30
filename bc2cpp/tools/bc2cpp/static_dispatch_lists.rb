@@ -68,8 +68,10 @@ module StaticDispatchLists
   # A file computed from other sources than the tree being built is stale: refuse it, whatever the build would
   # otherwise do with it. 'none' has no digest to compare. Loads the proof only here, so a consumer that does not
   # check (a generator run, which trusts its caller) does not pay for it.
+  # BC2CPP_LISTS_REUSE=1 (local iteration only, see static_dispatch_lists.bash) takes the lists as they are.
   def verify_current!(lists, repo_root)
     return if lists.equal?(EMPTY)
+    return if ENV['BC2CPP_LISTS_REUSE'] == '1'
 
     require_relative 'static_dispatch_registrations'
     now = StaticDispatchRegistrations.inputs_digest(repo_root)

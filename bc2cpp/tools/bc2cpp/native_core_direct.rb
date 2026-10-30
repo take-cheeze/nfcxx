@@ -532,7 +532,7 @@ module NativeCoreDirect
     Entry.new(name: 'bytes', owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: 'bc2cpp_str_bytes(M, recv)', helper: 'bc2cpp_str_bytes',
               apis: [],
-              checks: [['mrb_str_bytes', <<~C, :exact]])
+              checks: [['mrb_str_bytes', <<~C, :exact]]),
                 struct RString *s = mrb_str_ptr(str);
                 mrb_value a = mrb_ary_new_capa(mrb, RSTR_LEN(s));
                 unsigned char *p = (unsigned char*)(RSTR_PTR(s)), *pend = p + RSTR_LEN(s);

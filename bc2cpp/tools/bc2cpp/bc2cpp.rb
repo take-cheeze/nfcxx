@@ -160,6 +160,7 @@ require_relative 'codegen_block_fallback'
 require_relative 'codegen_yield_free'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
+require_relative 'codegen_class_body'
 require_relative 'codegen_sealed_int16'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
@@ -2163,6 +2164,19 @@ if $PROGRAM_NAME == __FILE__
     Shellwords.split(ENV['OTHER_DECLS_HEADER']).each { |path| puts "#include \"#{path}\"" }
   end
   puts ''
+  # CLASS_BODY_EMIT_GEM: the top-level class bodies that compile are emitted as functions and called from gem_init
+  # (emit_gem_hooks). Compiled here, before the owner-class cache and the helpers are printed, so the owners and helpers
+  # they use are declared. On by default; BC2CPP_CLASS_BODY_EMIT=0 turns it off. The VM still runs those bodies too
+  # (a duplicate run) until the residual mrblib drops them.
+  gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
+  class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '0' ? [] : gen.compile_top_class_units(ireps.fetch(root_label))
+  class_units = gen.owned_class_units(class_units, only_owners)
+  # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
+  # units of other gems' owners that owned_class_units drops).
+  if (dump_dir = ENV['BC2CPP_DUMP_UNITS']) && !dump_dir.empty?
+    FileUtils.mkdir_p(dump_dir)
+    File.write(File.join(dump_dir, 'emitted.txt'), "#{symbol} owners=#{only_owners.inspect}\n#{class_units.map { |u| u[:path] }.join("\n")}\n", mode: 'a')
+  end
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_ary_write_helpers(compiled)
@@ -2300,7 +2314,8 @@ if $PROGRAM_NAME == __FILE__
   poly_tables_code = gen.emit_poly_tables(compiled)
   # A constant helper is emitted only when the printed text calls it: a body compiled and then discarded
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first.
-  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, poly_tables_code, *compiled.map { |m| m[:code] }].join
+  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, poly_tables_code, *compiled.map { |m| m[:code] },
+          *class_units.map { |unit| unit[:code] }].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print SymbolCache.emit(symbol_table)
@@ -2310,6 +2325,7 @@ if $PROGRAM_NAME == __FILE__
   print eqq_helper_code
   print numeric_slow_code
   print poly_tables_code
+  class_units.each { |unit| print unit[:code] }
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
     print m[:code]
@@ -2325,7 +2341,7 @@ if $PROGRAM_NAME == __FILE__
     load_symbol = symbol
   end
   LoadCompile.write_plan(LoadCompile.plan_path(out_dir, symbol), load_plan)
-  print gen.emit_gem_hooks(load_symbol: load_symbol)
+  print gen.emit_gem_hooks(load_symbol: load_symbol, class_units: class_units)
 
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.

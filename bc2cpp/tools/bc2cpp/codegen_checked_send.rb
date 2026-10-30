@@ -36,6 +36,7 @@ module CheckedSend
   def checked_send_level(insn, kwargs)
     irep = kwargs[:irep]
     idx = kwargs[:idx]
+    return nil if @class_body_unit
     return nil unless irep && idx && insn.sym && kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil?
     return nil if insn.positional_splat? || insn.keyword_arguments?
 
