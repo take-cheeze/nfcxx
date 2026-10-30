@@ -53,7 +53,8 @@ const Entry *find_entry(const Entry *table, size_t n, const std::string &key) {
 // (not a bool), a pointer or a float, the same type on both sides.
 bool register_slot_type(const Ty &t) {
   if (t.kind == "ptr") return true;
-  if (t.kind == "int") return !t.is_bool && (t.size == 4 || t.size == 8);
+  // a narrow integer is held as its canonical 32-bit value (every operation canonicalizes its result)
+  if (t.kind == "int") return !t.is_bool && (t.size == 1 || t.size == 2 || t.size == 4 || t.size == 8);
   if (t.kind == "float") return t.size == 4 || t.size == 8;
   return false;
 }
