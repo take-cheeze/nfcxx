@@ -1,11 +1,12 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# SUPER_LOOKUP (super_lookup_call): `super(args)` into a method no direct rule calls -- here C methods,
-# Exception#initialize and Array#initialize -- is looked up from the superclass at run time and called with the
-# arguments and no block (no caller passes one). A literal block (`super(n) { }`) keeps the `#error`. The check
-# reads the generated calls and runs the constructors interpreted and compiled. Needs MRBC and a full-core
-# libmruby (BC2CPP_MRUBY_FULL, or rake and a C++ compiler).
+# SUPER_LOOKUP (super_lookup_call): `super(args)` into a method no direct rule calls -- here Array#initialize -- is
+# looked up from the superclass at run time and called with the arguments and no block (no caller passes one). A
+# literal block (`super(n) { }`) keeps the `#error`. Exception#initialize is not in this set: its super writes the
+# message directly (EXCEPTION_INIT, exception_init_check.rb). The check reads the generated calls and runs the
+# constructors interpreted and compiled. Needs MRBC and a full-core libmruby (BC2CPP_MRUBY_FULL, or rake and a C++
+# compiler).
 ENV['BC2CPP_SIG_DIRS'] = ''
 
 require 'tmpdir'
@@ -42,10 +43,11 @@ OWNERS = %w[SlErr SlArr SlLit].freeze
 
 Dir.mktmpdir('bc2cpp-super-lookup') do |dir|
   code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
-  suite.check('super into a C method compiles to the run-time lookup',
+  suite.check('super into Array#initialize compiles to the run-time lookup, Exception#initialize does not',
               code.include?('mrb_value SlErr_initialize_impl(mrb_state* M') &&
               code.include?('mrb_value SlArr_initialize_impl(mrb_state* M') &&
-              code.scan(/bc2cpp_super_call\(M, self, /).size == 2)
+              code.include?('bc2cpp_exc_init(M, self, ') &&
+              code.scan(/bc2cpp_super_call\(M, self, /).size == 1)
   suite.check('the arguments are passed in order', code.include?('bc2cpp_super_argv[] = {r4, r5};'))
   suite.check('a literal block keeps the #error', !code.include?('mrb_value SlLit_initialize_impl(mrb_state* M'))
 
