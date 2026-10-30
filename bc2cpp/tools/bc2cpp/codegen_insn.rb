@@ -870,6 +870,17 @@ class CodeGen
       s = insn.regs.first
       name = insn.global_name
       "  bc2cpp_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
+    when :SETCONST
+      # vm.c OP_SETCONST: mrb_const_set on MRB_PROC_TARGET_CLASS(ci->proc), the class the body defines (Object when none).
+      # A constant write is only legal in a class body, so the owner is that body's class; it is named by the same
+      # cached class pointer the send path uses (owner_class_ptr_expr). Nothing is known about the owner: the
+      # #error keeps the build from silently writing to the wrong class.
+      name = insn.const_name
+      if name.nil? || owner_def.nil? || owner_def.owner.nil?
+        "  #error SETCONST: the target class is unknown here\n"
+      else
+        "  mrb_const_set(M, mrb_obj_value(#{owner_class_ptr_expr(owner_def.owner)}), mrb_intern_cstr(M, \"#{name}\"), r#{insn.regs.last});\n"
+      end
     when :STOP
       ''
     when :NOP
