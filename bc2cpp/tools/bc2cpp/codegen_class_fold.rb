@@ -5,7 +5,7 @@
 # source; the unit writes the folded value where the statement's SETCONST reads its register, and skips the statement's
 # instructions. A constant that does not fold leaves its body refused, as before.
 
-require 'prism'
+require_relative 'ruby_parse_cache'
 require 'set'
 require_relative 'pure_eval'
 
@@ -66,7 +66,7 @@ class CodeGen
   def source_statements(file, owner)
     return nil unless file && File.file?(file)
 
-    node = find_path(Prism.parse_file(file).value.statements, owner.split('::'))
+    node = find_path(RubyParseCache.parse_file(file).value.statements, owner.split('::'))
     return nil unless node
 
     node.body.body.map { |statement| FoldStatement.new(statement) }
