@@ -346,6 +346,7 @@ void Fn::setup() {
       }
       slots[f.items[1].text] = static_cast<int>(alloc_frame(size, align));
       slot_sizes_[f.items[1].text] = size;
+      slot_aligns_[f.items[1].text] = align;
       if (g_promote_slots) {
         // a slot of another type (an aggregate, say) is not a candidate, and its uses are not read as its type
         try {
@@ -514,10 +515,24 @@ void Fn::stmt(const Node &s) {
     Operand sr_ = operand(at(s, 3));
     std::string dr = reg_of(d.text, d.ty);
     std::string sr = reg_of(sr_.text, sr_.ty);
-    for (long long off = 0; off < n; off++) {
-      std::string t = fresh("r");
-      emit("ld.u8 " + t + ", [" + sr + "+" + std::to_string(off) + "];");
-      emit("st.u8 [" + dr + "+" + std::to_string(off) + "], " + t + ";");
+    // Between two frame slots the alignments are known (the frame keeps each offset aligned to its slot's alignment),
+    // so the copy moves words of the widest size that divides the length and both alignments. Through a pointer the
+    // alignment is not known: bytes.
+    long long wa = 1, wb = 1;
+    if (at(s, 2).kind == Node::Sym && at(s, 2).sig == '$' && at(s, 3).kind == Node::Sym && at(s, 3).sig == '$') {
+      auto ia = slot_aligns_.find(at(s, 2).text), ib = slot_aligns_.find(at(s, 3).text);
+      if (ia != slot_aligns_.end() && ib != slot_aligns_.end()) {
+        wa = ia->second;
+        wb = ib->second;
+      }
+    }
+    auto fits = [&](long long c) { return n % c == 0 && wa >= c && wa % c == 0 && wb >= c && wb % c == 0; };
+    long long w = fits(8) ? 8 : fits(4) ? 4 : fits(2) ? 2 : 1;
+    for (long long off = 0; off < n; off += w) {
+      std::string t = fresh(piece_reg(static_cast<int>(w)));  // the register that holds a word of this size
+      const std::string ty = "u" + std::to_string(w * 8);
+      emit("ld." + ty + " " + t + ", [" + sr + "+" + std::to_string(off) + "];");
+      emit("st." + ty + " [" + dr + "+" + std::to_string(off) + "], " + t + ";");
     }
   } else if (h == "if") {
     Operand c = operand(at(s, 1));
@@ -1142,7 +1157,15 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
     if (h != "ret" && h != "params" && h != "static" && h != "weak" && h != "slot") body.push_back(&form->items[i]);
   }
   // The callee's frame is part of this one: its slots are rebased to the frame made here for the call.
-  const int base = callee->frame_ > 0 ? static_cast<int>(alloc_frame(callee->frame_, callee->frame_align_)) : 0;
+  // One frame region per callee in this function: inlined bodies never overlap in time (no recursion, and a body's locals
+  // are dead when its code ends), so the later calls of the callee use the region the first one made.
+  int base = 0;
+  if (auto it = inline_base_.find(callee); it != inline_base_.end()) {
+    base = it->second;
+  } else if (callee->frame_ > 0) {
+    base = static_cast<int>(alloc_frame(callee->frame_, callee->frame_align_));
+    inline_base_[callee] = base;
+  }
   bool pure = true;
   for (const Node *s : body) pure = pure && writes_only_slots(*s, 6);
   // The parameters are registers of the callee's own. A scalar is the argument's register. A struct passed by value is
@@ -1188,6 +1211,8 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   // This function's registers, slots and labels are set aside while the body is compiled.
   std::map<std::string, RegInfo> caller_regs = std::exchange(regs, std::move(callee_regs));
   std::map<std::string, int> caller_slots = std::exchange(slots, std::move(callee_slots));
+  // the callee's slots have the callee's alignments (a copy between them uses those, not the caller's of the same name)
+  std::map<std::string, long long> caller_aligns = std::exchange(slot_aligns_, callee->slot_aligns_);
   std::map<std::string, RegInfo> caller_promoted = std::exchange(promoted, {});
   std::map<std::string, long long> caller_const = std::exchange(const_slots, {});
   // The callee's pointer slots that carry an alias token stay as they are, and its struct slots are its own (not
@@ -1211,6 +1236,7 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   label(inline_end_);
   regs = std::move(caller_regs);
   slots = std::move(caller_slots);
+  slot_aligns_ = std::move(caller_aligns);
   promoted = std::move(caller_promoted);
   const_slots = std::move(caller_const);
   named_labels_ = std::move(caller_labels);
@@ -1245,63 +1271,102 @@ static bool unroll_reject(const char *why, const Node &init) {
   return false;
 }
 
-bool Fn::unroll_loop(const Node &init, const Node &loop) {
+// The unroll of a loop, shared by Fn::unroll_loop and the struct-slot analysis (which must see the same copies): the
+// counter slot, the values it takes and the statements of each copy. unroll_plan returns "" and fills p when the loop is
+// unrolled, else why it is not.
+struct UnrollPlan {
+  std::string name;
+  long long start = 0, bound = 0, inc = 0;
+  std::vector<const Node *> body;  // the statements of each copy (after the test)
+  std::vector<long long> values;   // the counter's value in each copy
+};
+
+// Whether the counter indexes an array in the body: a bounds check of a register loaded from the counter. Only those loops
+// are unrolled: the copies are what make a per-thread array's elements constant (the rest only grow the code).
+static bool indexes_array(const std::vector<const Node *> &body, const std::string &counter) {
+  std::set<std::string> loaded;  // the registers loaded from the counter
+  std::function<void(const Node &)> find_loads = [&](const Node &x) {
+    if (head_of(x) == "let" && x.items.size() == 4 && head_of(x.items[3]) == "load" && x.items[3].items.size() == 3 &&
+        x.items[3].items[2].kind == Node::Sym && x.items[3].items[2].text == counter)
+      loaded.insert(x.items[1].text);
+    for (const Node &c : x.items) find_loads(c);
+  };
+  for (const Node *s : body) find_loads(*s);
+  bool found = false;
+  std::function<void(const Node &)> find_bounds = [&](const Node &x) {
+    if (head_of(x) == "bounds" && x.items.size() >= 2 && x.items[1].kind == Node::Atom && loaded.count(x.items[1].text))
+      found = true;
+    for (const Node &c : x.items) find_bounds(c);
+  };
+  for (const Node *s : body) find_bounds(*s);
+  return found;
+}
+
+std::string unroll_plan(const Node &init, const Node &loop, UnrollPlan &p) {
   // init: store T $name START; loop: body (the test: let c = load $name; let t = lt.s T c N; if t (then) (else (break)),
   // then the body) and step (let c = load; let n = wadd c INC; store $name n), as the front end lowers a for statement.
   if (head_of(init) != "store" || init.items.size() != 4 || init.items[2].kind != Node::Sym || init.items[2].sig != '$')
-    return unroll_reject("init is not a store of a counter slot", init);
-  if (parse_type(&init.items[1]).kind != "int") return unroll_reject("counter is not an int", init);
-  long long start = 0;
-  if (!is_const_int(init.items[3], &start)) return unroll_reject("start is not a constant", init);
-  const std::string name = init.items[2].text;
+    return "init is not a store of a counter slot";
+  if (parse_type(&init.items[1]).kind != "int") return "counter is not an int";
+  if (!is_const_int(init.items[3], &p.start)) return "start is not a constant";
+  p.name = init.items[2].text;
+  const std::string &name = p.name;
   const Node *body_f = nullptr, *step_f = nullptr;
   for (size_t i = 1; i < loop.items.size(); i++) {
     if (!body_f && head_of(loop.items[i]) == "body") body_f = &loop.items[i];
     if (!step_f && head_of(loop.items[i]) == "step") step_f = &loop.items[i];
   }
-  if (!body_f || !step_f) return unroll_reject("no body or step form", init);
+  if (!body_f || !step_f) return "no body or step form";
   const Node &b = *body_f, &st = *step_f;
-  if (b.items.size() < 4 || st.items.size() != 4) return unroll_reject("body is too short", init);
+  if (b.items.size() < 4 || st.items.size() != 4) return "body is too short";
   const Node &l1 = b.items[1], &l2 = b.items[2], &iff = b.items[3];
-  if (!(head_of(l1) == "let" && l1.items.size() == 4 && is_load_of(l1.items[3], name))) return unroll_reject("step is not four items", init);
+  if (!(head_of(l1) == "let" && l1.items.size() == 4 && is_load_of(l1.items[3], name))) return "step is not four items";
   const Node &cmp = l2.items.size() == 4 ? l2.items[3] : l2;
   if (!(head_of(l2) == "let" && l2.items.size() == 4 && head_of(cmp) == "lt.s" && cmp.items.size() == 4 &&
         cmp.items[2].kind == Node::Atom && cmp.items[2].text == l1.items[1].text))
-    return unroll_reject("test does not load the counter", init);
-  long long bound = 0;
-  if (!is_const_int(cmp.items[3], &bound)) return unroll_reject("test is not lt.s of the loaded counter", init);
+    return "test does not load the counter";
+  if (!is_const_int(cmp.items[3], &p.bound)) return "test is not lt.s of the loaded counter";
   if (!(head_of(iff) == "if" && iff.items.size() == 4 && iff.items[1].kind == Node::Atom &&
         iff.items[1].text == l2.items[1].text && head_of(iff.items[3]) == "else" && iff.items[3].items.size() == 2 &&
         head_of(iff.items[3].items[1]) == "break"))
-    return unroll_reject("bound is not a constant", init);
+    return "bound is not a constant";
   const Node &ld = st.items[1], &add = st.items[2], &sto = st.items[3];
-  if (!(head_of(ld) == "let" && ld.items.size() == 4 && is_load_of(ld.items[3], name))) return unroll_reject("if-break test form", init);
+  if (!(head_of(ld) == "let" && ld.items.size() == 4 && is_load_of(ld.items[3], name))) return "if-break test form";
   const Node &w = add.items.size() == 4 ? add.items[3] : add;
   if (!(head_of(add) == "let" && add.items.size() == 4 && head_of(w) == "wadd" && w.items.size() == 4 &&
         w.items[2].kind == Node::Atom && w.items[2].text == ld.items[1].text))
-    return unroll_reject("step does not load the counter", init);
-  long long inc = 0;
-  if (!is_const_int(w.items[3], &inc) || inc <= 0) return unroll_reject("step is not a constant wadd", init);
+    return "step does not load the counter";
+  if (!is_const_int(w.items[3], &p.inc) || p.inc <= 0) return "step is not a constant wadd";
   if (!(head_of(sto) == "store" && sto.items.size() == 4 && sto.items[2].kind == Node::Sym && sto.items[2].sig == '$' &&
         sto.items[2].text == name && sto.items[3].kind == Node::Atom && sto.items[3].text == add.items[1].text))
-    return unroll_reject("increment is not a positive constant", init);
+    return "increment is not a positive constant";
   // the copies run the body's statements after the test: the test's registers are not used there
   const std::vector<std::string> atoms = {l1.items[1].text, l2.items[1].text};
-  for (size_t i = 4; i < b.items.size(); i++)
-    if (!unroll_safe(b.items[i], name, atoms, 0)) return unroll_reject("step store form", init);
-  std::vector<long long> values;
-  for (long long v = start; v < bound; v += inc) {
-    if (values.size() == kMaxUnroll) return unroll_reject("body statement is not unrolling-safe", init);
-    values.push_back(v);
+  p.body.clear();
+  for (size_t i = 4; i < b.items.size(); i++) {
+    if (!unroll_safe(b.items[i], name, atoms, 0)) return "step store form";
+    p.body.push_back(&b.items[i]);
   }
+  if (!indexes_array(p.body, name)) return "the counter does not index an array";
+  p.values.clear();
+  for (long long v = p.start; v < p.bound; v += p.inc) {
+    if (p.values.size() == kMaxUnroll) return "body statement is not unrolling-safe";
+    p.values.push_back(v);
+  }
+  return "";
+}
+
+bool Fn::unroll_loop(const Node &init, const Node &loop) {
+  UnrollPlan p;
+  if (std::string why = unroll_plan(init, loop, p); !why.empty()) return unroll_reject(why.c_str(), init);
   // nothing is emitted before the checks above: the loop is either unrolled here or left for the caller
-  for (long long v : values) {
-    const_slots[name] = v;
-    for (size_t i = 4; i < b.items.size(); i++) stmt(b.items[i]);
+  for (long long v : p.values) {
+    const_slots[p.name] = v;
+    for (const Node *s : p.body) stmt(*s);
   }
-  const_slots.erase(name);
+  const_slots.erase(p.name);
   // the counter ends at the value the loop leaves it with (the uses after the loop read the slot)
-  long long fin = start + static_cast<long long>(values.size()) * inc;
+  long long fin = p.start + static_cast<long long>(p.values.size()) * p.inc;
   Node atom_const;
   atom_const.kind = Node::Atom;
   atom_const.text = "const";
@@ -1338,6 +1403,9 @@ static void sra_fail(AliasFields &out, int) { out.ok = false; }
 void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std::string> &seed_slots,
                       const std::set<std::string> &seed_regs, int depth, AliasFields &out) const {
   std::map<std::string, long long> reg_off;      // an alias register => the offset of the object it points to
+  // The counter slots of the unrolled copies being visited (their value), and the registers that hold a counter's value.
+  std::map<std::string, long long> const_slot, const_reg;
+  bool unroll_pending = false;  // a __nfcxx_unroll() marker was the last statement (the next statement is its loop)
   std::map<std::string, long long> carrier_off;  // a pointer slot holding an alias => that offset
   for (const std::string &r : seed_regs) reg_off[r] = 0;
   auto alias_of = [&](const Node &x, long long &off) {
@@ -1415,9 +1483,45 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
     if (!out.ok) return;
     std::string h = head_of(x);
     long long o = 0;
+    // a statement takes the marker that came before it, as Fn::stmt does
+    const bool marked = std::exchange(unroll_pending, false);
+    if (h == "eval" && x.items.size() == 2 && head_of(x.items[1]) == "call" && at(x.items[1], 2).kind == Node::Sym &&
+        at(x.items[1], 2).text == "__nfcxx_unroll") {
+      unroll_pending = g_unroll_loops;
+      return;
+    }
+    if (h == "block") {
+      bool pending = marked;  // the marker is for the first loop of this block
+      for (size_t i = 1; i < x.items.size(); i++) {
+        if (pending && head_of(x.items[i]) == "store" && i + 1 < x.items.size() && head_of(x.items[i + 1]) == "loop") {
+          visit(x.items[i]);
+          UnrollPlan p;
+          if (unroll_plan(x.items[i], x.items[i + 1], p).empty()) {
+            // the copies: the counter is a constant in each, so its element indexes are constants too
+            for (long long v : p.values) {
+              const_slot[p.name] = v;
+              for (const Node *s : p.body) visit(*s);
+            }
+            const_slot.erase(p.name);
+          } else {
+            visit(x.items[i + 1]);
+          }
+          pending = false;
+          i++;
+          continue;
+        }
+        visit(x.items[i]);
+      }
+      return;
+    }
     if (h == "let" && x.items.size() == 4) {
       const Node &rhs = x.items[3];
       std::string rh = head_of(rhs);
+      if (rh == "load" && rhs.items.size() == 3 && rhs.items[2].kind == Node::Sym && rhs.items[2].sig == '$' &&
+          const_slot.count(rhs.items[2].text)) {
+        const_reg[x.items[1].text] = const_slot[rhs.items[2].text];
+        return;
+      }
       if (rh == "bitcast" && rhs.items.size() == 3 && alias_of(rhs.items[2], o)) {
         reg_off[x.items[1].text] = o;
       } else if (rh == "offset" && rhs.items.size() == 3 && alias_of(rhs.items[1], o)) {
@@ -1426,6 +1530,10 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
         reg_off[x.items[1].text] = carrier_off[rhs.items[2].text];
       } else if (rh == "load" && rhs.items.size() == 3 && alias_of(rhs.items[2], o)) {
         add_field(o, rhs.items[1]);
+      } else if (rh == "index" && rhs.items.size() == 4 && alias_of(rhs.items[1], o) && rhs.items[2].kind == Node::Atom &&
+                 const_reg.count(rhs.items[2].text)) {
+        // an element of the object, at a constant index (an unrolled copy)
+        reg_off[x.items[1].text] = o + const_reg[rhs.items[2].text] * static_cast<long long>(as_int(&rhs.items[3]));
       } else if (rh == "call") {
         call_uses(rhs);
       } else if (mentions(rhs)) {

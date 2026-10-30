@@ -106,6 +106,7 @@ class Fn : public FnCtx {
   bool sp_set_ = false;                // the frame pointer is set up (compile): the frame is declared even when it is empty
   std::map<std::string, Ty> slot_types_;  // slot name => its type (the slot form's TYPE)
   std::map<std::string, long long> slot_sizes_;  // slot name => its size in bytes
+  std::map<std::string, long long> slot_aligns_;  // slot name => its alignment (the frame keeps the offset aligned to it)
   std::vector<long long> agg_off_;     // per parameter: the frame offset of its byval copy (or of the sret object)
   int ncall_ = 0;                      // the calls of module functions (their parameter names)
   std::vector<const Node *> body_;     // the statements (the forms that are not the header)
@@ -113,6 +114,7 @@ class Fn : public FnCtx {
   // [continue label (empty for a switch), break label] of the enclosing loops and switches, innermost last
   std::vector<std::pair<std::string, std::string>> loops_;
   std::map<std::string, std::string> named_labels_;  // the IR labels => their PTX labels
+  std::map<const Fn *, int> inline_base_;  // the callee => its frame region in this function (inline_call shares it)
   int inline_depth_ = 0;                             // the inlined bodies being compiled (their calls inline too, to a depth)
   std::string inline_dest_;                          // the register of the inlined call's value ("" for a statement)
   std::string inline_end_;                           // the label after the inlined body

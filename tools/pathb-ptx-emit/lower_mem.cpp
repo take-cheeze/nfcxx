@@ -45,6 +45,16 @@ std::string FnCtx::token_rhs(const Node &v) const {
     long long off = std::stoll(base.substr(plus + 1)) + static_cast<long long>(as_int(&v.items[2]));
     return base.substr(0, plus + 1) + std::to_string(off);
   }
+  if (h == "index" && v.items.size() == 4) {
+    // an element of an object at a constant index (the index is a counter of an unrolled copy)
+    std::string base = token_value(v.items[1]);
+    if (base.empty() || v.items[2].kind != Node::Atom || !regs.count(v.items[2].text)) return "";
+    auto c = const_regs.find(regs.at(v.items[2].text).ptx);
+    if (c == const_regs.end()) return "";
+    size_t plus = base.rfind('+');
+    long long off = std::stoll(base.substr(plus + 1)) + c->second * static_cast<long long>(as_int(&v.items[3]));
+    return base.substr(0, plus + 1) + std::to_string(off);
+  }
   if (h == "load" && v.items.size() == 3 && v.items[2].kind == Node::Sym && v.items[2].sig == '$' &&
       carrier_slots.count(v.items[2].text)) {
     auto it = carrier_val.find(v.items[2].text);
@@ -71,6 +81,7 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
     expect(dty, ty);
     if (at(x, 2).kind == Node::Sym && at(x, 2).sig == '$' && const_slots.count(at(x, 2).text)) {
       emit("mov." + ptx_type(ty) + " " + dest + ", " + imm(ty, const_slots.at(at(x, 2).text)) + ";");
+      const_regs[dest] = const_slots.at(at(x, 2).text);
       return true;
     }
     if (const RegInfo *f = sra_field(at(x, 2), ty)) {

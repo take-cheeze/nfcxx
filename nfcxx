@@ -259,7 +259,7 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
   local dev=$1 sm=$2 ptxas=$3 ext=$4 f; shift 4
   {
     printf 'nfcxx-cu-device-1\nsm %s ext %s\nopts:' "$sm" "$ext"; printf ' %q' "$@"
-    printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-400000}"
+    printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-600000}"
     printf 'inline %s\n' "${NFCXX_INLINE_DEVICE:-1}"
     printf 'promote %s\n' "${NFCXX_PROMOTE_SLOTS:-1}"
     printf 'unroll %s\n' "${NFCXX_UNROLL:-1}"
@@ -296,7 +296,7 @@ cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DE
   # The struct locals whose fields are registers (pathb-ptx-emit's default); NFCXX_STRUCT_SLOTS=0 keeps them in memory.
   if [ "${NFCXX_STRUCT_SLOTS:-1}" = 0 ]; then inl+=(--struct-slots=off); fi
   "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --int=gpu ${inl[@]+"${inl[@]}"} --groups-dir="$groups" \
-    --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-400000} \
+    --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-600000} \
     ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
   trace_end "$t" "pathb-ptx-emit --emit: $(basename "$src") ($(ls "$groups"/g*.ptx | wc -l | tr -d ' ') groups)" cuda
   # NFCXX_CUDA_JIT=1 (EXT ptx): the image of each group is its PTX text, loaded by the runtime's JIT (cudaLibraryLoadData);
