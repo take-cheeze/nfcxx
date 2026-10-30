@@ -138,6 +138,27 @@ class ze_rt {
     if (addr < dev_base_ || addr - dev_base_ >= heap_size_) fail("device address outside the heap");
     return host_ + (addr - dev_base_);
   }
+  // Large allocations (model weights) get their own shared block instead of a range of the heap: the driver makes every
+  // shared allocation resident at each launch (zeKernelSetIndirectAccess), and that cost grows with the heap's size.
+  void *alloc_separate(uint64_t bytes) {
+    ze_device_mem_alloc_desc_t dmem = {};
+    dmem.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC;
+    ze_host_mem_alloc_desc_t hmem = {};
+    hmem.stype = ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC;
+    void *p = nullptr;
+    if (zeMemAllocShared(ctx_, &dmem, &hmem, bytes, 64, dev_, &p) != ZE_RESULT_SUCCESS || !p) return nullptr;
+    separate_[p] = bytes;
+    return p;
+  }
+  bool is_separate(const void *p) const { return separate_.count(const_cast<void *>(p)) != 0; }
+  void free_separate(void *p) {
+    separate_.erase(p);
+    zeMemFree(ctx_, p);
+  }
+  static uint64_t separate_min() {
+    static const uint64_t m = (std::getenv("NFCXX_SYCL_SEPARATE_MB") ? std::strtoull(std::getenv("NFCXX_SYCL_SEPARATE_MB"), nullptr, 10) : 0) << 20;
+    return m;
+  }
   bool in_heap(const void *p) const {
     uintptr_t a = (uintptr_t)p;
     return a >= (uintptr_t)host_ && a - (uintptr_t)host_ < heap_size_;
@@ -546,6 +567,7 @@ class ze_rt {
   uint32_t local_mem_ = 0;
   bool has_fp16_ = false;
   uint8_t *host_ = nullptr;
+  std::map<void *, uint64_t> separate_;
   uint8_t *ctl_ = nullptr;   // the flag, the captured state and the push block (see Memory above)
   uint64_t dev_base_ = 0;
   uint64_t heap_size_ = 0;
@@ -586,15 +608,19 @@ inline void backend_wait() {}
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
   (void)kind;
   ze_rt &r = ze_rt::get();
+  if (bytes >= ze_rt::separate_min() && ze_rt::separate_min() > 0) {
+    if (void *p = r.alloc_separate(bytes)) return p;
+  }
   return (void *)r.at(r.alloc(bytes, align));
 }
 inline void backend_usm_free(void *p) {
   ze_rt &r = ze_rt::get();
-  if (r.in_heap(p)) r.release(r.dev_of(p));
+  if (r.is_separate(p)) r.free_separate(p);
+  else if (r.in_heap(p)) r.release(r.dev_of(p));
 }
 inline void backend_memcpy(void *dst, const void *src, unsigned long n) { std::memmove(dst, src, n); }
 inline void backend_memset(void *p, int v, unsigned long n) { std::memset(p, v, n); }
-inline bool backend_is_usm(const void *p) { return ze_rt::get().in_heap(p); }
+inline bool backend_is_usm(const void *p) { return ze_rt::get().in_heap(p) || ze_rt::get().is_separate(p); }
 
 }  // namespace detail
 }  // namespace sycl
