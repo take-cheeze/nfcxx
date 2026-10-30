@@ -4,7 +4,7 @@
 # CLASS_BODY_LEFT_OPS: a guard on the class-body driver's coverage. It runs class_body_compile_list.rb over the closed
 # roots and asserts that (a) at least MIN_COMPILED of the class bodies compile, and (b) every op that still refuses a body
 # is one of the known remaining ops, and none of the ops made compilable (BLOCK, SENDB, CLASS, DEF, METHOD, TCLASS,
-# SSEND, SSEND0, SEND, SETCONST-folded constants) refuses again. Needs MRBC and the static dispatch lists
+# SSEND, SSEND0, SEND, LAMBDA, SETCONST-folded constants) refuses again. Needs MRBC and the static dispatch lists
 # (BC2CPP_STATIC_DISPATCH_LISTS); without them it prints SKIP and exits 0.
 #
 #   MRBC=path/to/host/mrbc BC2CPP_STATIC_DISPATCH_LISTS=build/bc2cpp/static_dispatch_lists.json \
@@ -13,9 +13,9 @@
 require 'open3'
 
 ROOT = File.expand_path('../..', __dir__)
-MIN_COMPILED = 238
-KNOWN_LEFT = %w[SEND0 ALIAS SCLASS LAMBDA TDEF].freeze
-MADE_COMPILABLE = %w[BLOCK SENDB CLASS DEF METHOD TCLASS SSEND SSEND0 SEND].freeze
+MIN_COMPILED = 240
+KNOWN_LEFT = %w[SEND0 ALIAS SCLASS TDEF].freeze
+MADE_COMPILABLE = %w[BLOCK SENDB CLASS DEF METHOD TCLASS SSEND SSEND0 SEND LAMBDA].freeze
 
 if ENV['MRBC'].to_s.empty? || ENV['BC2CPP_STATIC_DISPATCH_LISTS'].to_s.empty?
   puts 'class_body_left_ops_check: SKIP (needs MRBC and BC2CPP_STATIC_DISPATCH_LISTS)'

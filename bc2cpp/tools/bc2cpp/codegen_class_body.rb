@@ -47,7 +47,7 @@ class CodeGen
     unsupported = program.each_source.reject do |insn, idx|
       folded_away.include?(idx) || %i[TDEF SDEF ALIAS SSEND SSEND0 TCLASS METHOD DEF].include?(insn.op) || literal_freeze?(program, idx) ||
       (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) || (%i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)) ||
-        (insn.op == :EXEC && paired_exec.include?(idx))
+        (insn.op == :EXEC && paired_exec.include?(idx)) || (insn.op == :LAMBDA && free_lambda_irep(insn, irep))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
     # SETCONST writes to the body's target class; in a singleton body that is the singleton class, which the owner
@@ -117,6 +117,12 @@ class CodeGen
         return [nil, [:ALIAS]] unless line
 
         lines << line
+      elsif insn.op == :LAMBDA
+        fn_code, glue = class_free_lambda(insn, irep, owner, owner_def, idx)
+        return [nil, [:LAMBDA]] unless glue
+
+        texts << fn_code
+        lines << glue
       else
         lines << compile_insn(insn, irep, owner_def, idx)
       end
@@ -226,6 +232,41 @@ class CodeGen
 
     previous = program.source_at(idx - 1)
     previous&.op == :LOADNIL && previous.reg == insn.reg + 1
+  end
+
+  # FREE_LAMBDA: a lambda whose body reads nothing from its creating frame (no self, no upvar, no block, no nested
+  # closure) is built as a free RProc (mrb_proc_new_cfunc, no env) over a standalone cfunc. The ops below are the ones
+  # that read self, the frame's upvars or block, or create a closure over them. Nil when the lambda is not free.
+  FREE_LAMBDA_FRAME_OPS = %i[LOADSELF RETSELF SSEND SSEND0 SSENDB SENDB SUPER BLOCK LAMBDA METHOD EXEC SCLASS TCLASS GETIV SETIV
+                             GETCV SETCV GETUPVAR SETUPVAR BLKPUSH BLKCALL CLASS MODULE DEF TDEF SDEF ALIAS].freeze
+
+  def free_lambda_irep(insn, irep)
+    label = irep.reps[insn.block_index.to_i]
+    child = label && @ireps[label]
+    return nil unless child && lambda_fallback_safe?(child)
+    return nil if BytecodeIR.for(child).op?(*FREE_LAMBDA_FRAME_OPS) || block_self_rebound?(label)
+    # self is R0 of the body (a `self` expression is a MOVE from R0, not a LOADSELF), and the body never writes R0.
+    return nil if BytecodeIR.for(child).each_source.any? { |insn, _| insn.regs.include?(0) }
+
+    upvars = block_upvar_needs(child)
+    upvars&.empty? ? child : nil
+  end
+
+  # The standalone function of a free lambda and the statement that builds its RProc. Nil when the body does not
+  # compile standalone; the caller then refuses the whole body.
+  def class_free_lambda(insn, irep, owner, owner_def, idx)
+    child = free_lambda_irep(insn, irep)
+    return nil unless child
+
+    region = { block_addr: idx, dest_reg: insn.reg, block_irep: child, kind: 'lambda_fallback', upvars: [], call_sites: [],
+               free: true }
+    fn_name, fn_code = emit_proc_fallback_fn(region, owner_def, "bc2cpp_class_lambda_#{sanitize(owner)}")
+    return nil unless fn_code
+
+    # A lambda checks its arity (vm.c: a lambda's RProc is strict).
+    glue = "  {\n    struct RProc* bc2cpp_free_lambda = mrb_proc_new_cfunc(M, #{fn_name});\n" \
+           "    bc2cpp_free_lambda->flags |= MRB_PROC_STRICT;\n    r#{insn.reg} = mrb_obj_value(bc2cpp_free_lambda);\n  }\n"
+    [fn_code, glue]
   end
 
   # The registers the body's function declares: the irep's, and any a body instruction names beyond them (an omitted

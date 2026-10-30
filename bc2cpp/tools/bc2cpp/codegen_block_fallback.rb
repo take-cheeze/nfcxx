@@ -882,6 +882,10 @@ class CodeGen
     if region[:self_source] == :receiver
       out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_recv_self) {\n"
       out << "  mrb_value bc2cpp_captured_self = bc2cpp_recv_self;\n"
+    elsif region[:free]
+      # FREE_LAMBDA (codegen_class_body.rb): the proc has no env, so nothing is read from it; the body reads no self.
+      out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_passed_self) {\n"
+      out << "  mrb_value bc2cpp_captured_self = bc2cpp_passed_self;\n"
     else
       out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_passed_self) {\n"
       # BLOCK_SELF_WORLD: the body runs under the captured self; a rebinder passing another one is a
