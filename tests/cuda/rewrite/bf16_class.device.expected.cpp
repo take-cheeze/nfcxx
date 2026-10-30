@@ -18,6 +18,8 @@ typedef unsigned long size_t;
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_unroll(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
+extern "C" unsigned int __nfcxx_float_bits(float);
+extern "C" float __nfcxx_bits_float(unsigned int);
 extern "C" void *__nfcxx_dynshared_addr(void);
 // Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.
 extern "C" int printf(const char *, ...);
@@ -36,8 +38,8 @@ extern "C" unsigned __nfcxx_nctaid_y(void);
 extern "C" unsigned __nfcxx_nctaid_z(void);
 #ifndef __NFCXX_BF16_CORE
 #define __NFCXX_BF16_CORE
-static inline unsigned short __nfcxx_float2bf16_bits(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }
-static inline float __nfcxx_bf16_bits2float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }
+static inline unsigned short __nfcxx_float2bf16_bits(float f) { unsigned x = __nfcxx_float_bits(f); if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }
+static inline float __nfcxx_bf16_bits2float(unsigned short b) { unsigned u = (unsigned)b << 16; return __nfcxx_bits_float(u); }
 struct __nfcxx_bfloat16 { unsigned short x; __host__ __device__ __nfcxx_bfloat16() = default; __host__ __device__ __nfcxx_bfloat16(float f) { x = __nfcxx_float2bf16_bits(f); } __host__ __device__ operator float() const { return __nfcxx_bf16_bits2float(x); } };
 typedef __nfcxx_bfloat16 nv_bfloat16;
 typedef __nfcxx_bfloat16 __nv_bfloat16;

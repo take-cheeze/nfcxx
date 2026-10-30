@@ -52,6 +52,10 @@ extern bool g_promote_slots;
 // compiled once per iteration, the counter a constant in each copy (Fn::unroll_loop). Opt-in until it is measured.
 extern bool g_unroll_loops;
 
+// LOCAL_TRACE=1 (attribution only, off by default): each frame load and store is marked in the PTX as a comment with the slot
+// its address came from.
+extern bool g_local_trace;
+
 // --struct-slots (default; --struct-slots=off turns it off): a struct slot whose every use is a field access, possibly
 // through the address of the slot handed to an inlined function, has a register per field (Fn::plan_struct_slots).
 extern bool g_struct_slots;
@@ -68,6 +72,8 @@ class FnCtx {
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
   std::map<std::string, RegInfo> promoted;      // slot name => the register its scalar lives in (--promote=slots)
   std::map<std::string, long long> const_slots; // slot name => its value in an unrolled copy of a loop (Fn::unroll_loop)
+  std::map<std::string, std::string> frame_origin;  // register => the frame slot its address is (LOCAL_TRACE)
+  std::string trace_scope;  // the inlined function whose body is being compiled (LOCAL_TRACE): the owner of a slot name
   std::map<std::string, long long> const_regs;  // register => the constant it was loaded with (a counter in an unrolled copy)
   // Struct slots in registers (--struct-slots): sra_slots are the slots whose fields are registers (sra_fields, keyed
   // "@SCOPE:SLOT|OFF|PTX"); a pointer slot that holds the address of one is a carrier (carrier_slots, its value in

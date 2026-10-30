@@ -67,6 +67,20 @@ bool FnCtx::call(const Node &x, const std::string &dest, const Ty &dty) {
     emit("mov.u32 " + dest + ", %" + reg->value + ";");
     return true;
   }
+  if (name == "__nfcxx_float_bits" || name == "__nfcxx_bits_float") {
+    // the bit pattern of a value of the other type: one register move (no memory, unlike a union or a pointer cast)
+    if (x.items.size() != 4) throw Refused(name + " takes one value");
+    Operand v = operand(at(x, 3));
+    if (name == "__nfcxx_float_bits") {
+      if (!(v.ty.kind == "float" && v.ty.size == 4) || !(ty.kind == "int" && ty.size == 4))
+        throw Refused(name + " takes a float and returns a 32-bit integer");
+    } else {
+      if (!(v.ty.kind == "int" && v.ty.size == 4) || !(ty.kind == "float" && ty.size == 4))
+        throw Refused(name + " takes a 32-bit integer and returns a float");
+    }
+    emit("mov.b32 " + dest + ", " + reg_of(v.text, v.ty) + ";");
+    return true;
+  }
   if (find_str(WARP_SHUFFLES, WARP_SHUFFLES_N, name) || find_str(WARP_VOTES, WARP_VOTES_N, name) ||
       find_atomic(name) || name == "__nfcxx_reduce_add_sync") {
     device_builtin(name, x, dest, ty);
