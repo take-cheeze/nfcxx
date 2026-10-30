@@ -382,9 +382,17 @@ class CodeGen
     self.class.core_aliases.any? { |(key_owner, _), names| key_owner == owner && names.include?(name) }
   end
 
+  # An alias copies the method `old` names when the unit runs. That is a native (C) method, which mruby's own init defines
+  # before any gem_init runs, or a method this body registers earlier. A Ruby method the gem registers after the units
+  # is not there yet, so it is refused: the registry lists it (a def with a body).
+  # True when no definition of +name+ anywhere in the registry has a body: the name is a native method.
+  def native_before_units?(name)
+    @registry.fetch(name, []).none? { |definition| definition.irep }
+  end
+
   def class_body_alias(insn, registered)
     old = insn.first_of(:name)&.value.to_s
-    return nil unless registered.include?(old)
+    return nil unless registered.include?(old) || native_before_units?(old)
 
     "  mrb_alias_method(M, mrb_class_ptr(self), mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), " \
       "mrb_intern_cstr(M, #{c_string_literal(old)}));\n"

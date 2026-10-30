@@ -158,7 +158,28 @@ suite.compile(INHERITED) do |ireps, root|
   # closed: false drops every alias site, so the unit decides each alias itself.
   AliasSites.settle(registry, ireps, closed: false, method_trusted: false)
   gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('an alias of a method the body does not register is refused', gen.compile_top_class_units(ireps.fetch(root)).empty?)
+  code = gen.compile_top_class_units(ireps.fetch(root)).find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  suite.check('an alias of a native method is copied in the unit: the native exists before any gem_init runs',
+              code.match?(/mrb_alias_method\(M, mrb_class_ptr\(self\), mrb_intern_cstr\(M, "(\\x[0-9a-f]{2})+"\), mrb_intern_cstr\(M, "(\\x[0-9a-f]{2})+"\)\);/))
+end
+
+# A Ruby method the gem registers after the units is not there when a unit runs, so an alias of it is refused.
+RUBY_OLD = <<~'RUBY'
+  class Base
+    def helper
+    end
+  end
+  class Router < Base
+    alias again helper
+  end
+RUBY
+
+suite.compile(RUBY_OLD) do |ireps, root|
+  registry = build_registry(ireps, root)[0]
+  AliasSites.settle(registry, ireps, closed: false, method_trusted: false)
+  gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  suite.check('an alias of a Ruby method is refused, since the gem registers that method after the units',
+              gen.compile_top_class_units(ireps.fetch(root)).find { |unit| unit[:path] == 'Router' }.nil?)
 end
 
 # An alias the settled registry defines is handled by the bytecode IR: the body compiles with no alias call in the unit.
