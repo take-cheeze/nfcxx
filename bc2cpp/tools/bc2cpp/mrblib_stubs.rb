@@ -21,6 +21,28 @@ module MrblibStubs
   # registration replaced the original.
   COPYING_SENDS = %w[alias_method define_method instance_method method module_function].freeze
 
+  # BC2CPP_STUB_LOG=<file>: why a compiled method's body is kept in the residual (one line per kept method).
+  def stub_keep_reason(m, key, defs, load_bodies, copied, copied_names, copy_sites, world)
+    return 'guarded' if m[:guard]
+    return "defs=#{defs.size}" unless defs.size == 1
+
+    d = defs.first
+    return 'native or attr or installer' if d.irep.nil? || d.kind || d.installer
+    return 'copied source' if d.copy_irep
+    return 'runs at load' if load_bodies.include?(d.irep)
+    return 'loaded copy' if copied.include?(d.irep)
+    return 'copy by name' if copied_names.include?(m[:name]) && copy_source?(d.owner, m[:name], copy_sites[m[:name]], world)
+
+    nil
+  end
+
+  def stub_keep_log(key, reason)
+    path = ENV['BC2CPP_STUB_LOG']
+    return if path.nil? || path.empty?
+
+    File.write(path, "#{reason}\t#{key}\n", mode: 'a')
+  end
+
   # The Owner#name keys of `compiled` (this run's entries) whose bodies can be stubbed. `all_defs`: every bytecode
   # definition, the core ones the generation's registry no longer holds included. The load phase reads it: a method
   # body missing from it would count as code that runs at load.
@@ -44,17 +66,13 @@ module MrblibStubs
     copy_sites = copy_sites(ireps, parent)
     defs_of = Hash.new { |h, k| h[k] = [] }
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
-    compiled.reject { |m| m[:guard] }.filter_map do |m|
+    compiled.filter_map do |m|
       key = "#{m[:owner]}##{m[:name]}"
-      defs = defs_of[key]
-      next unless defs.size == 1
+      reason = stub_keep_reason(m, key, defs_of[key], load_bodies, copied, copied_names, copy_sites, world)
+      next key if reason.nil?
 
-      d = defs.first
-      next if d.irep.nil? || d.kind || d.installer || d.copy_irep
-      next if load_bodies.include?(d.irep) || copied.include?(d.irep)
-      next if copied_names.include?(m[:name]) && copy_source?(d.owner, m[:name], copy_sites[m[:name]], world)
-
-      key
+      stub_keep_log(key, reason)
+      nil
     end.to_set
   end
 
