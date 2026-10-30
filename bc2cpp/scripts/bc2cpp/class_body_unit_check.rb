@@ -135,6 +135,7 @@ RUBY
 suite.compile(ALIASED) do |ireps, root|
   body = ireps.values.find { |irep| BytecodeIR.for(irep).each_source.any? { |insn, _| insn.op == :TDEF } }
   registry = build_registry(ireps, root)[0]
+  AliasSites.settle(registry, ireps, closed: false, method_trusted: false)
   gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   gen.compiled_methods = BytecodeIR.for(body).each_source.filter_map do |insn, _|
     next unless insn.op == :TDEF
@@ -153,8 +154,21 @@ suite.compile(ALIASED) do |ireps, root|
 end
 
 suite.compile(INHERITED) do |ireps, root|
-  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  registry = build_registry(ireps, root)[0]
+  # closed: false drops every alias site, so the unit decides each alias itself.
+  AliasSites.settle(registry, ireps, closed: false, method_trusted: false)
+  gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   suite.check('an alias of a method the body does not register is refused', gen.compile_top_class_units(ireps.fetch(root)).empty?)
+end
+
+# An alias the settled registry defines is handled by the bytecode IR: the body compiles with no alias call in the unit.
+suite.compile(INHERITED) do |ireps, root|
+  registry = build_registry(ireps, root)[0]
+  AliasSites.settle(registry, ireps, closed: true, method_trusted: true)
+  gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code = gen.compile_top_class_units(ireps.fetch(root)).find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  suite.check('an alias the registry settles is skipped in the unit, not refused',
+              code.include?('alias handled by the bytecode IR') && !code.include?('mrb_alias_method('))
 end
 
 FROZEN = <<~'RUBY'

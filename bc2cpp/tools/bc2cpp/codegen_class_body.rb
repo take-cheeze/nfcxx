@@ -112,6 +112,9 @@ class CodeGen
         lines << "  // #{insn.sym} (self send) left to the VM\n"
       elsif literal_freeze?(program, idx)
         lines << "  r#{insn.reg} = mrb_obj_freeze(M, r#{insn.reg});\n"
+      elsif insn.op == :ALIAS && alias_handled_by_ir?(irep, idx, owner)
+        # The registry defines the new name (AliasSites) and the gem registers it; the VM residual still runs the alias.
+        lines << "  // #{insn.sym} alias handled by the bytecode IR\n"
       elsif insn.op == :ALIAS
         line = class_body_alias(insn, registered)
         return [nil, [:ALIAS]] unless line
@@ -341,6 +344,17 @@ class CodeGen
   # The call an `alias NEW OLD` in a class body makes (vm.c OP_ALIAS: mrb_alias_method(target, NEW, OLD)). It runs after
   # the body registered OLD, so OLD exists. Nil when OLD is not a method this body has registered (an inherited, native
   # or omitted method): the unit could not find it.
+  # An ALIAS the bytecode IR handles: a settled registry definition (AliasSites.settle), or a core alias the static routing
+  # map sends to its target (CoreDefs.alias_map). Such an alias needs no unit code: a settled one's old name may not
+  # exist yet when the unit runs (the gem's registrations come after the units), and the VM residual still runs both.
+  def alias_handled_by_ir?(irep, idx, owner)
+    return true if AliasSites.settled?(@registry, irep.label, idx)
+    return false unless CoreDefs.core_source?(irep.file) && self.class.core_aliases
+
+    name = BytecodeIR.for(irep).source_at(idx).sym
+    self.class.core_aliases.any? { |(key_owner, _), names| key_owner == owner && names.include?(name) }
+  end
+
   def class_body_alias(insn, registered)
     old = insn.first_of(:name)&.value.to_s
     return nil unless registered.include?(old)

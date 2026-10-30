@@ -25,7 +25,16 @@ refusals = Hash.new(0)
 Dir.mktmpdir do |tmp|
   ClassWorldGate.closed_roots(ROOT).each do |name, files|
     ireps, root = compile_ireps(files, name.tr(':-', '__'), tmp, mrbc: mrbc)
-    registry = build_registry(ireps, root)[0]
+    built = build_registry(ireps, root)
+    registry = built[0]
+    # The same order as bc2cpp.rb: core shadowing and the core alias map first, then the closed world settles the alias sites.
+    core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
+    core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
+                                  .to_set { |d| [d.owner, d.name] }
+    registry.each_value { |defs| defs.reject! { |d| d.irep && core_shadowed.include?(d.irep) } }
+    registry.each_value { |defs| defs.each { |d| d.core = true if d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) } }
+    CodeGen.core_aliases = CoreDefs.alias_map(built[12], registry, ireps, core_shadowed_pairs)
+    AliasSites.settle(registry, ireps, closed: true, method_trusted: true)
     gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
     # The build hands the units every compiled method (bc2cpp.rb); here each TDEF and SDEF body is compiled alone.
     gen.compiled_methods = ireps.each_value.flat_map do |irep|
