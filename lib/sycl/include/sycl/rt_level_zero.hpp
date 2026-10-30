@@ -156,7 +156,7 @@ class ze_rt {
     zeMemFree(ctx_, p);
   }
   static uint64_t separate_min() {
-    static const uint64_t m = (std::getenv("NFCXX_SYCL_SEPARATE_MB") ? std::strtoull(std::getenv("NFCXX_SYCL_SEPARATE_MB"), nullptr, 10) : 0) << 20;
+    static const uint64_t m = (std::getenv("NFCXX_SYCL_SEPARATE_MB") ? std::strtoull(std::getenv("NFCXX_SYCL_SEPARATE_MB"), nullptr, 10) : 64) << 20;   // 0 keeps every allocation in the heap
     return m;
   }
   bool in_heap(const void *p) const {
