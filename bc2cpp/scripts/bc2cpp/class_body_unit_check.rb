@@ -215,8 +215,9 @@ end
 
 suite.compile(NAMED_SUPER) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('a nested class with a named superclass refuses its body (the superclass may not exist yet)',
-              gen.compile_top_class_units(ireps.fetch(root)).empty?)
+  code = gen.compile_top_class_units(ireps.fetch(root)).find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  suite.check('a nested class with a named superclass is created with that superclass',
+              code.include?('mrb_vm_define_class(M, (mrb_nil_p(r') && code.include?('"Problem"'))
 end
 
 suite.finish!
