@@ -270,15 +270,28 @@ end
 
 # An explicit-receiver send with no arguments (SEND0) refuses its body: a unit's plain mrb_funcall would be a dynamic
 # lookup by name, which keeps that name in the method table. A `freeze` on the register is still a direct call.
-SENDS = <<~'RUBY'
+LITERAL_LENGTH = <<~'RUBY'
   class Router
     N = "ab".length
   end
 RUBY
 
-suite.compile(SENDS) do |ireps, root|
+RANGE_TO_A = <<~'RUBY'
+  class Router
+    R = (1..2).to_a
+  end
+RUBY
+
+# A `length` on a String literal compiles (the exact-core arm calls the native row); a SEND0 with no known target refuses.
+suite.compile(LITERAL_LENGTH) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('a body with an explicit-receiver send with no arguments is refused, not a dynamic call',
+  suite.check('a length on a String literal compiles in the unit',
+              gen.compile_top_class_units(ireps.fetch(root)).map { |unit| unit[:path] } == %w[Router])
+end
+
+suite.compile(RANGE_TO_A) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  suite.check('an explicit-receiver send with no known target refuses its body, not a dynamic call',
               gen.compile_top_class_units(ireps.fetch(root)).empty?)
 end
 

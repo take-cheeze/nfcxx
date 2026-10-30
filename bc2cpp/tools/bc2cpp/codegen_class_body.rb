@@ -49,7 +49,8 @@ class CodeGen
       folded_away.include?(idx) || %i[TDEF SDEF ALIAS SSEND SSEND0 TCLASS METHOD DEF].include?(insn.op) || literal_freeze?(program, idx) ||
       (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) || (%i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)) ||
       (insn.op == :SCLASS && !bodies.key?(idx) && self_singleton_open?(program, idx)) ||
-        (insn.op == :EXEC && paired_exec.include?(idx)) || (insn.op == :LAMBDA && free_lambda_irep(insn, irep))
+        (insn.op == :EXEC && paired_exec.include?(idx)) || (insn.op == :LAMBDA && free_lambda_irep(insn, irep)) ||
+        literal_native_send?(program, idx)
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
     # SETCONST writes to the body's target class; in a singleton body that is the singleton class, which the owner
@@ -396,6 +397,17 @@ class CodeGen
 
     "  mrb_alias_method(M, mrb_class_ptr(self), mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), " \
       "mrb_intern_cstr(M, #{c_string_literal(old)}));\n"
+  end
+
+  # A SEND0 `length` on the register a String literal was just built into, when NativeCoreDirect has the String#length row:
+  # the receiver's class is known, so the exact-core arm calls the native with no dynamic lookup.
+  def literal_native_send?(program, idx)
+    insn = program.source_at(idx)
+    return false unless insn.op == :SEND0 && insn.sym.to_s == 'length'
+
+    previous = program.source_at(idx - 1)
+    previous&.op == :STRING && previous.reg == insn.reg &&
+      NativeCoreDirect::ENTRIES.any? { |entry| entry.name == 'length' && entry.owner == 'String' && entry.arity.zero? }
   end
 
   # A `freeze` with no arguments on the register a body holds, emitted as mrb_obj_freeze (Object#freeze) rather than a
