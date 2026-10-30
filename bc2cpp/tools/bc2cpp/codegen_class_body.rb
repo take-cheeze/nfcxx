@@ -399,8 +399,8 @@ class CodeGen
       "mrb_intern_cstr(M, #{c_string_literal(old)}));\n"
   end
 
-  # A SEND0 on the register a literal was just built into, whose class the literal fixes: `length` on a String literal
-  # (the NativeCoreDirect row) and `to_a` on a Range literal (the compiled core body).
+  # A SEND0 `to_a` on the register a Range literal was just built into: the literal fixes the receiver's class, so the
+  # send can take the compiled core body (Range#to_a).
   def literal_native_send?(program, idx)
     insn = program.source_at(idx)
     return false unless insn.op == :SEND0
@@ -409,8 +409,6 @@ class CodeGen
     return false unless previous && previous.reg == insn.reg
 
     case insn.sym.to_s
-    when 'length'
-      previous.op == :STRING && NativeCoreDirect::ENTRIES.any? { |entry| entry.name == 'length' && entry.owner == 'String' && entry.arity.zero? }
     when 'to_a'
       # Range#to_a is a core body (its super resolves through Enumerable); the receiver's class is known from the literal.
       previous.op == :RANGE_INC

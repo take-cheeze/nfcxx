@@ -282,11 +282,12 @@ RANGE_TO_A = <<~'RUBY'
   end
 RUBY
 
-# A `length` on a String literal compiles (the exact-core arm calls the native row).
+# A `length` on a String literal has no public API for the character count (RSTRING_CHAR_LEN is string.c's own
+# macro), so there is no native row for it: its body refuses.
 suite.compile(LITERAL_LENGTH) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('a length on a String literal compiles in the unit',
-              gen.compile_top_class_units(ireps.fetch(root)).map { |unit| unit[:path] } == %w[Router])
+  suite.check('a length on a String literal refuses its body (no public API for the character count)',
+              gen.compile_top_class_units(ireps.fetch(root)).empty?)
 end
 
 suite.compile(RANGE_TO_A) do |ireps, root|

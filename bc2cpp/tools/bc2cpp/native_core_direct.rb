@@ -542,13 +542,6 @@ module NativeCoreDirect
                 }
                 return a;
               C
-    # mrb_str_size: the character count of the receiver (RSTRING_CHAR_LEN), registered for `length` (string.c).
-    Entry.new(name: 'length', owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: 'mrb_int_value(M, RSTRING_CHAR_LEN(recv))', apis: [],
-              checks: [['mrb_str_size', <<~C, :exact]]),
-                mrb_int len = RSTRING_CHAR_LEN(self);
-                return mrb_int_value(mrb, len);
-              C
   ].freeze
 
   # KERNEL_DIRECT: natives every object inherits, sent with an implicit
