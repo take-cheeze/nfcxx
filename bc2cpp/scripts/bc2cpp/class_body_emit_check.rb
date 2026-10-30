@@ -1,0 +1,63 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# CLASS_BODY_EMIT prototype (tools/bc2cpp/codegen_class_body.rb): a class body made only of constant writes compiles to
+# one C++ function whose text names the body's class and compiles with the mruby headers; a body with a def is refused
+# whole and names the opcode that refused it. Needs MRBC and g++; without MRBC it prints SKIP and exits 0.
+#
+#   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/class_body_emit_check.rb
+
+require 'open3'
+require 'set'
+require_relative 'check_support'
+require_relative '../../tools/bc2cpp/bc2cpp'
+
+ROOT = File.expand_path('../..', __dir__)
+suite = FixtureCheck.new('class_body_emit_check')
+suite.require_mrbc!
+
+CONSTS = <<~'RUBY'
+  class Router
+    LIMIT = 3
+    MAX = 99
+  end
+RUBY
+
+WITH_DEF = <<~'RUBY'
+  class Router
+    LIMIT = 3
+    def route(x) = x + LIMIT
+  end
+RUBY
+
+# The class body irep of the fixture: the one holding SETCONST (the root has none).
+def class_body_of(ireps)
+  ireps.values.find { |irep| BytecodeIR.for(irep).each_source.any? { |insn, _| insn.op == :SETCONST } }
+end
+
+suite.compile(CONSTS) do |ireps, _root|
+  body = class_body_of(ireps)
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code, refused = gen.compile_class_body(body, 'Router')
+  suite.check('a constant-only class body compiles', code && refused.nil?)
+  suite.check('it names the class and writes both constants',
+              code.to_s.include?('mrb_obj_value(bc2cpp_owner_class_0(M))') &&
+              code.to_s.include?('mrb_intern_cstr(M, "LIMIT")') && code.to_s.include?('mrb_intern_cstr(M, "MAX")'))
+  unit = +"#{%w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h].map { |h| "#include <#{h}>\n" }.join}#{gen.emit_owner_class_cache}#{code}"
+  path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_emit_#{$$}.cc")
+  File.write(path, unit)
+  out, status = Open3.capture2e('g++', '-std=c++17', '-fsyntax-only', '-w',
+                                "-I#{ROOT}/3rd/mruby/include", "-I#{ENV.fetch('BC2CPP_BUILD_INCLUDE', ROOT + '/build-closed-bc2cpp/closed/include')}", path)
+  suite.check('the emitted class body compiles with the mruby headers', status.success?)
+  puts "    g++: #{out.lines.first(3).join.strip}" unless status.success?
+  File.delete(path)
+end
+
+suite.compile(WITH_DEF) do |ireps, _root|
+  body = class_body_of(ireps)
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code, refused = gen.compile_class_body(body, 'Router')
+  suite.check('a class body with a def is refused whole', code.nil? && refused.include?(:TDEF))
+end
+
+suite.finish!
