@@ -114,4 +114,48 @@ suite.compile(NESTED) do |ireps, _root|
   File.delete(path)
 end
 
+# A singleton body (`class << self`) is a unit too: SCLASS takes self from the LOADSELF before it and EXEC runs the
+# body on the singleton class. A body with a statement compiles (an empty one has no EXEC, so it is not a unit);
+# one that writes a constant is refused for now.
+SINGLETON = <<~RUBY
+  class Outer
+    class << self
+      nil
+    end
+  end
+RUBY
+
+suite.compile(SINGLETON) do |ireps, _root|
+  outer = ireps.values.find { |irep| BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).any? }
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code, refused = gen.compile_class_body(outer, 'Outer')
+  suite.check('a class with a singleton body compiles as one unit', code && refused.nil? &&
+              code.include?('mrb_singleton_class(M, r'))
+  unit = +"#{%w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h].map { |h| "#include <#{h}>\n" }.join}#{gen.emit_owner_class_cache}#{code}"
+  path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_singleton_#{$$}.cc")
+  File.write(path, unit)
+  out, status = Open3.capture2e('g++', '-std=c++17', '-fsyntax-only', '-w', "-I#{ROOT}/3rd/mruby/include",
+                                "-I#{ENV.fetch('BC2CPP_BUILD_INCLUDE', ROOT + '/build-closed-bc2cpp/closed/include')}", path)
+  suite.check('the singleton unit compiles with the mruby headers', status.success?)
+  puts "    g++: #{out.lines.first(3).join.strip}" unless status.success?
+  File.delete(path)
+end
+
+SINGLETON_CONST = <<~RUBY
+  class Outer
+    class << self
+      MAX = 9
+    end
+  end
+RUBY
+
+suite.compile(SINGLETON_CONST) do |ireps, _root|
+  outer = ireps.values.find { |irep| BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).any? }
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  nested = BytecodeIR.class_bodies(outer, :CLASS, :MODULE, :SCLASS).values.first
+  child = BytecodeIR.class_bodies(outer, :CLASS, :MODULE, :SCLASS).keys.first
+  _, refused_child = gen.compile_class_body(ireps.fetch(nested), 'Outer.singleton')
+  suite.check('a singleton body that writes a constant is refused', refused_child == [:SETCONST_IN_SINGLETON])
+end
+
 suite.finish!

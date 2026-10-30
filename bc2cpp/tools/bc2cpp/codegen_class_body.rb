@@ -22,13 +22,18 @@ class CodeGen
   def compile_class_body(irep, owner)
     program = BytecodeIR.for(irep)
     omitted = unregistered_keys
-    bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE)
+    bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     paired_exec = bodies.keys.to_set { |idx| idx + 1 }
     unsupported = program.each_source.reject do |insn, idx|
-      omitted_def?(insn, owner, omitted) || (%i[CLASS MODULE].include?(insn.op) && bodies.key?(idx)) ||
+      omitted_def?(insn, owner, omitted) || (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
+    # SETCONST writes to the body's target class; in a singleton body that is the singleton class, which the owner
+    # name does not name, so such a body is refused until the emitter names it.
+    if owner.end_with?('.singleton') && program.each_source.any? { |insn, _| insn.op == :SETCONST }
+      return [nil, [:SETCONST_IN_SINGLETON]]
+    end
 
     texts = +''
     owner_def = Struct.new(:owner, :core, :irep).new(owner, false, irep)
@@ -37,7 +42,7 @@ class CodeGen
       next if paired_exec.include?(idx) && insn.op == :EXEC
 
       if bodies.key?(idx)
-        child_path = BytecodeIR.class_body_path(irep, idx, owner)
+        child_path = child_body_path(program, irep, idx, owner)
         return [nil, [:UNRESOLVED_CLASS_PATH]] unless child_path
 
         child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path)
@@ -55,17 +60,43 @@ class CodeGen
     end
     fn = "bc2cpp_class_body_#{sanitize(owner)}"
     code = +"#{CLASS_UNIT_DECLS}static mrb_value #{fn}(mrb_state* M) {\n"
-    code << "  mrb_value self = mrb_obj_value(#{owner_class_ptr_expr(owner)});\n"
+    code << "  mrb_value self = #{body_self_expr(owner)};\n"
     code << emit_register_initializers(irep.nregs, [])
     code << lines
     code << "}\n"
     [texts + code, nil]
   end
 
-  # The class or module a CLASS/MODULE opcode creates in its base register, as vm.c's OP_CLASS and OP_MODULE do.
+  # The qualified name of a class unit's child body. A singleton body (`class << self`) is the body's own owner with
+  # `.singleton` appended, and only when its SCLASS takes self from the LOADSELF just before it; any other singleton
+  # target refuses the body.
+  def child_body_path(program, irep, idx, owner)
+    insn = program.source_at(idx)
+    if insn.op == :SCLASS
+      previous = program.source_at(idx - 1)
+      return nil unless previous&.op == :LOADSELF && previous.reg == insn.reg
+
+      return "#{owner}.singleton"
+    end
+    BytecodeIR.class_body_path(irep, idx, owner)
+  end
+
+  # The value a body's function starts with: its class, or the singleton class of its base class for a `.singleton` owner.
+  def body_self_expr(owner)
+    if owner.end_with?('.singleton')
+      "mrb_singleton_class(M, mrb_obj_value(#{owner_class_ptr_expr(owner.delete_suffix('.singleton'))}))"
+    else
+      "mrb_obj_value(#{owner_class_ptr_expr(owner)})"
+    end
+  end
+
+  # The class or module a CLASS/MODULE opcode creates in its base register, as vm.c's OP_CLASS and OP_MODULE do; an
+  # SCLASS turns its register into the singleton class (vm.c OP_SCLASS).
   def class_unit_define(insn)
     reg = insn.reg
-    if insn.op == :CLASS
+    if insn.op == :SCLASS
+      "  r#{reg} = mrb_singleton_class(M, r#{reg});\n"
+    elsif insn.op == :CLASS
       "  r#{reg} = mrb_obj_value(mrb_vm_define_class(M, r#{reg}, r#{reg + 1}, mrb_intern_cstr(M, \"#{insn.sym}\")));\n"
     else
       "  r#{reg} = mrb_obj_value(mrb_vm_define_module(M, r#{reg}, mrb_intern_cstr(M, \"#{insn.sym}\")));\n"
