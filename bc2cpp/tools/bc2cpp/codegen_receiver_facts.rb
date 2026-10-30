@@ -1133,22 +1133,25 @@ class CodeGen
   # is re-derived by super_reaches_superclass?. Owner-relative, so a POLY name
   # still resolves, as real `super` does.
   def super_target(owner_def)
-    return nil unless super_direct_call_allowed?(owner_def)
+    return super_target_refused(owner_def, 'a caller may pass a block') unless super_direct_call_allowed?(owner_def)
 
     superclass = @superclass_of[owner_def.owner]
-    return nil unless superclass.is_a?(String)
+    return super_target_refused(owner_def, 'no known superclass') unless superclass.is_a?(String)
     # ANCESTOR_MIXINS_SUPPORT: re-derived every time; see
     # super_reaches_superclass?.
-    return nil unless super_reaches_superclass?(owner_def)
+    return super_target_refused(owner_def, 'the superclass is not reached by the ancestry') unless super_reaches_superclass?(owner_def)
 
     target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
-    return nil unless target_def && target_def.irep
-    return nil unless compiles_clean?(target_def.irep)
-    # The direct call passes the positionals only; an `_impl` with optionals also takes bc2cpp_given_opt. Such a
-    # target is reached through the by-name super (super_lookup_call) instead.
-    shape = enter_shape(@ireps.fetch(target_def.irep))
-    return nil if shape && shape[1].positive?
-
+    return super_target_refused(owner_def, "no #{superclass}##{owner_def.name} definition with a body") unless target_def && target_def.irep
+    return super_target_refused(owner_def, "#{superclass}##{owner_def.name} does not compile clean") unless compiles_clean?(target_def.irep)
     target_def
   end
+
+  # BC2CPP_SUPER_LOG: why a super falls back to the by-name lookup (the target is not direct).
+  def super_target_refused(owner_def, reason)
+    path = ENV['BC2CPP_SUPER_LOG']
+    File.write(path, "refused\t#{owner_def.owner}##{owner_def.name}\t#{reason}\n", mode: 'a') if path && !path.empty?
+    nil
+  end
+
 end
