@@ -6,7 +6,8 @@
 
 class CodeGen
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
-                       LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST]).freeze
+                       LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
+                       SEND0 SSEND0 SSEND GETCONST ARRAY HASH]).freeze
 
   # [C++ text, nil] for a compiled body, or [nil, unsupported opcodes]. `owner` is the body's class path (Ruby name).
   # A TDEF of an omitted key (unregistered_keys: the build's leave-out lists) defines nothing the build keeps, so it is
