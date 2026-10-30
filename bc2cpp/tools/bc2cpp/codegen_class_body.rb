@@ -45,7 +45,7 @@ class CodeGen
     folds = folded_class_constants(program, irep, owner)
     folded_away = folds.values.flat_map { |fold| fold[:skip] }.to_set
     unsupported = program.each_source.reject do |insn, idx|
-      folded_away.include?(idx) || %i[TDEF SDEF ALIAS SSEND SSEND0].include?(insn.op) || literal_freeze?(program, idx) ||
+      folded_away.include?(idx) || %i[TDEF SDEF ALIAS SSEND SSEND0 TCLASS METHOD DEF].include?(insn.op) || literal_freeze?(program, idx) ||
       (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
@@ -92,6 +92,18 @@ class CodeGen
         registered << insn.sym.to_s if insn.op == :TDEF
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+      elsif insn.op == :TCLASS
+        # The target class of a class body is the body's own class: the self of this function.
+        lines << "  r#{insn.reg} = self;\n"
+      elsif insn.op == :METHOD
+        # The proc a `def` installs; the DEF after it registers the method, so nothing is written here.
+        lines << "  // proc for the def that follows (R#{insn.reg})\n"
+      elsif insn.op == :DEF
+        registration = class_def_registration(insn, program, idx, irep)
+        return [nil, [:DEF]] unless registration
+
+        lines << registration
+        lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}));\n"
       elsif %i[SSEND SSEND0].include?(insn.op)
         # A self send (attr_accessor, include, private, ...) is left to the VM: the residual bytecode still runs the body.
         lines << "  // #{insn.sym} (self send) left to the VM\n"
@@ -232,6 +244,24 @@ class CodeGen
     return false unless compiled
 
     unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
+  end
+
+  # The call that registers a `def` a class body makes through DEF (not TDEF): the class is R[a] (set by TCLASS), the method
+  # is the proc METHOD built into R[a+1] just before. Its compiled entry is the one TDEF uses. Nil when the proc, its entry
+  # or its visibility is not one this emitter makes, or the method is left out of the tables (then nothing registers).
+  def class_def_registration(insn, program, idx, irep)
+    method = (idx - 1).downto(idx - 4).map { |j| program.source_at(j) }.find { |m| m&.op == :METHOD && m.reg == insn.reg + 1 }
+    return nil unless method
+
+    child = irep.reps[method.block_index]
+    compiled = child && @compiled_methods&.[](child)
+    return nil unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
+    return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
+
+    define = { public: 'mrb_define_method', private: 'mrb_define_private_method' }[compiled[:visibility]]
+    return nil unless define
+
+    "  #{define}(M, mrb_class_ptr(r#{insn.reg}), #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});\n"
   end
 
   def class_body_registration(insn, irep, owner)

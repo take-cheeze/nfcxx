@@ -30,8 +30,10 @@ Dir.mktmpdir do |tmp|
     # The build hands the units every compiled method (bc2cpp.rb); here each TDEF and SDEF body is compiled alone.
     gen.compiled_methods = ireps.each_value.flat_map do |irep|
       BytecodeIR.for(irep).each_source.filter_map do |insn, _|
-        next unless %i[TDEF SDEF].include?(insn.op) && insn.def_child_index
-        label = irep.reps[insn.def_child_index]
+        next unless %i[TDEF SDEF METHOD].include?(insn.op)
+        child = insn.op == :METHOD ? insn.block_index : insn.def_child_index
+        next unless child
+        label = irep.reps[child]
         method = gen.compile_method(label)
         [label, method.merge(label: label)] if method
       end
