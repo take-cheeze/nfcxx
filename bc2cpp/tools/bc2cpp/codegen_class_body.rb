@@ -7,6 +7,10 @@
 # body and names the opcodes.
 
 class CodeGen
+  # The build's compiled methods (compile_all's hashes), keyed by irep label: a body's TDEF and SDEF register the
+  # entry the gem already emits for the method. Set before compile_top_class_units.
+  attr_writer :compiled_methods
+
   # The sends (SEND, SEND0, SSEND, SSEND0) are out: a send in a body calls owner-call helpers that the gem emits only for
   # its compiled methods, so a body with one does not build (core_compiled_gen.cpp: `include` in Object). Restore them
   # once the helpers are emitted for the units.
@@ -28,7 +32,7 @@ class CodeGen
     bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     paired_exec = bodies.keys.to_set { |idx| idx + 1 }
     unsupported = program.each_source.reject do |insn, idx|
-      omitted_def?(insn, owner, omitted) || (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
+      %i[TDEF SDEF].include?(insn.op) || (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
@@ -58,6 +62,12 @@ class CodeGen
         lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}(M);\n"
       elsif insn.op == :TDEF && omitted_def?(insn, owner, omitted)
         lines << "  // #{owner}##{insn.sym} omitted: statically dispatched only (no registration)\n"
+        lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+      elsif %i[TDEF SDEF].include?(insn.op)
+        registration = class_body_registration(insn, irep, owner)
+        return [nil, [insn.op]] unless registration
+
+        lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
       else
         lines << compile_insn(insn, irep, owner_def, idx)
@@ -171,6 +181,29 @@ class CodeGen
   def body_register_count(program, irep)
     named = program.each_source.filter_map { |insn, _| insn.reg&.to_i&.succ }
     [irep.nregs, *named].max
+  end
+
+  # The call that registers a kept method a class body defines: a TDEF defines on the body's class (self), an SDEF on its
+  # singleton class. The entry is the gem's compiled method for the same irep, so the body makes the call the gem's own
+  # registration also makes (emit_owner_registration_lines), and the gem registers it again after the units run. Nil
+  # when the build has no compiled entry for the method, or the method is left out of the tables, or the call is one
+  # this emitter does not make (a private singleton method, or an SDEF inside a `class << self` body).
+  def class_body_registration(insn, irep, owner)
+    child = irep.reps[insn.def_child_index]
+    compiled = child && @compiled_methods&.[](child)
+    return nil unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
+    return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
+
+    call = if insn.op == :SDEF
+             return nil if owner.end_with?('.singleton') || compiled[:visibility] != :public
+
+             'mrb_define_class_method'
+           else
+             { public: 'mrb_define_method', private: 'mrb_define_private_method' }[compiled[:visibility]]
+           end
+    return nil unless call
+
+    "  #{call}(M, mrb_class_ptr(self), #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});\n"
   end
 
   def omitted_def?(insn, owner, omitted)

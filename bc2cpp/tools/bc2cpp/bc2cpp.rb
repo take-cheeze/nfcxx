@@ -2168,6 +2168,7 @@ if $PROGRAM_NAME == __FILE__
   # (emit_gem_hooks). Compiled here, before the owner-class cache and the helpers are printed, so the owners and helpers
   # they use are declared. On by default; BC2CPP_CLASS_BODY_EMIT=0 turns it off. The VM still runs those bodies too
   # (a duplicate run) until the residual mrblib drops them.
+  gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
   class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '0' ? [] : gen.compile_top_class_units(ireps.fetch(root_label))
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)

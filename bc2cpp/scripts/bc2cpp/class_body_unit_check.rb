@@ -79,4 +79,42 @@ suite.compile(TWICE) do |ireps, root|
   suite.check('a path opened twice gets no unit', gen.compile_top_class_units(ireps.fetch(root)).empty?)
 end
 
+DEFS = <<~'RUBY'
+  class Router
+    def route(x)
+      x
+    end
+
+    def self.make
+      1
+    end
+  end
+RUBY
+
+suite.compile(DEFS) do |ireps, root|
+  body = ireps.values.find { |irep| BytecodeIR.for(irep).each_source.any? { |insn, _| insn.op == :TDEF } }
+  registry = build_registry(ireps, root)[0]
+  bare = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  refused = bare.compile_top_class_units(ireps.fetch(root))
+  suite.check('a body with kept defs and no compiled entry is refused', refused.empty?)
+
+  gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  compiled = BytecodeIR.for(body).each_source.filter_map do |insn, _|
+    next unless %i[TDEF SDEF].include?(insn.op)
+
+    label = body.reps[insn.def_child_index]
+    method = gen.compile_method(label)
+    [label, method.merge(label: label)] if method
+  end.to_h
+  gen.compiled_methods = compiled
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  suite.check('the kept instance method is registered on the body class',
+              code.match?(/mrb_define_method\(M, mrb_class_ptr\(self\), "(\\x[0-9a-f]{2})+", \w+, MRB_ARGS_REQ\(1\)\);/))
+  suite.check('the singleton method is registered on the body singleton class',
+              code.match?(/mrb_define_class_method\(M, mrb_class_ptr\(self\), "(\\x[0-9a-f]{2})+", \w+, MRB_ARGS_NONE\(\)\);/))
+  suite.check('each def leaves its symbol in its register, as the VM does',
+              code.include?('mrb_symbol_value(mrb_intern_cstr(M, "route"))') && code.include?('mrb_symbol_value(mrb_intern_cstr(M, "make"))'))
+end
+
 suite.finish!
