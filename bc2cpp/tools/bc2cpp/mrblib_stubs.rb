@@ -157,10 +157,52 @@ module MrblibStubs
     ireps.each_value.each_with_object(Set.new) do |irep, names|
       ir = BytecodeIR.for(irep)
       ir.instructions_with_op(:ALIAS).each { |insn| (old = insn.first_of(:name)&.value) && names << old.to_s }
-      next unless ir.instructions_with_op(*BytecodeIR::Ops::SEND).any? { |insn| COPYING_SENDS.include?(insn.sym.to_s) }
+      sends = copying_sends(ir)
+      next if sends.empty?
 
-      ir.instructions_with_op(:LOADSYM).each { |insn| names << insn.sym.to_s }
+      # The names the copying sends take, when each argument is pinned to one symbol literal. Otherwise every symbol
+      # literal of the body counts (the conservative reading this used to take everywhere).
+      literal = copy_argument_names(ir, sends)
+      if literal
+        names.merge(literal)
+      else
+        ir.instructions_with_op(:LOADSYM).each { |insn| names << insn.sym.to_s }
+      end
     end
+  end
+
+  # [index, insn] of each send in +ir+ whose method is a copying one (COPYING_SENDS).
+  def copying_sends(ir)
+    found = []
+    ir.each_source do |insn, idx|
+      found << [idx, insn] if BytecodeIR::Ops::SEND.include?(insn.op) && COPYING_SENDS.include?(insn.sym.to_s)
+    end
+    found
+  end
+
+  # The symbols the copying sends take, from the symbol literals loaded into their argument registers. Nil unless every
+  # argument register has exactly one mention in the body (the send's own uses aside), and that mention is a LOADSYM
+  # before the send: then the register holds that symbol on every path that reaches the send, so no other literal can
+  # be the argument. A splat, a keyword argument or any other use of the register makes it nil.
+  def copy_argument_names(ir, sends)
+    mentions = Hash.new { |h, k| h[k] = [] }
+    ir.each_source { |insn, idx| insn.regs.each { |reg| mentions[reg] << idx } }
+    names = Set.new
+    sends.each do |send_idx, send|
+      return nil if send.positional_splat? || send.keyword_arguments? || send.argc.nil?
+
+      (1..send.argc.to_i).each do |k|
+        reg = send.reg.to_i + k
+        uses = mentions[reg] - [send_idx]
+        return nil unless uses.size == 1 && uses.first < send_idx
+
+        writer = ir.source_at(uses.first)
+        return nil unless writer.op == :LOADSYM && writer.reg == reg
+
+        names << writer.sym.to_s
+      end
+    end
+    names
   end
 
   # `src` with the body of every def whose lexical Owner#name is in `keys` replaced by STUB_BODY. Only defs directly

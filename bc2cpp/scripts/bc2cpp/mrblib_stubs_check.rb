@@ -102,6 +102,52 @@ suite.compile(SOURCE) do |ireps, root|
               MrblibStubs.stubbable(COMPILED, ireps, filtered, registry).include?('Game::Plain#copy'))
 end
 
+# A copy takes the symbol literals in its argument registers, not every symbol literal of the body: an attr_reader
+# name or a def of another name in the same class body stays stubbable. A copy whose argument is not a literal keeps
+# every symbol literal of the body (the conservative reading).
+COPY_SOURCE = <<~'RUBY'
+  class Pane
+    def x
+      1
+    end
+
+    attr_reader :y
+
+    def a
+      2
+    end
+
+    alias_method :b, :a
+  end
+
+  class Dynamic
+    def x
+      1
+    end
+
+    def a
+      2
+    end
+
+    name = :b
+    alias_method name, :a
+  end
+RUBY
+
+COPY_COMPILED = [
+  { owner: 'Pane', name: 'x' }, { owner: 'Pane', name: 'a' },
+  { owner: 'Dynamic', name: 'x' }, { owner: 'Dynamic', name: 'a' }
+].freeze
+
+suite.compile(COPY_SOURCE) do |ireps, root|
+  registry = build_registry(ireps, root)[0]
+  stub = MrblibStubs.stubbable(COPY_COMPILED, ireps, registry)
+  suite.check('a literal copy keeps only the copied def, not an unrelated symbol of the body',
+              stub.include?('Pane#x') && !stub.include?('Pane#a'))
+  suite.check('a copy whose argument is not a literal keeps every symbol literal of the body (a def named by one stays)',
+              !stub.include?('Dynamic#a') && stub.include?('Dynamic#x'))
+end
+
 REWRITE = <<~'RUBY'
   module Game
     class Scene::Map
