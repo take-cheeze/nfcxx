@@ -68,6 +68,7 @@ class FnCtx {
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
   std::map<std::string, RegInfo> promoted;      // slot name => the register its scalar lives in (--promote=slots)
   std::map<std::string, long long> const_slots; // slot name => its value in an unrolled copy of a loop (Fn::unroll_loop)
+  std::map<std::string, long long> const_regs;  // register => the constant it was loaded with (a counter in an unrolled copy)
   // Struct slots in registers (--struct-slots): sra_slots are the slots whose fields are registers (sra_fields, keyed
   // "@SCOPE:SLOT|OFF|PTX"); a pointer slot that holds the address of one is a carrier (carrier_slots, its value in
   // carrier_val). An alias token "@SCOPE:SLOT+OFF" names an address in one of those slots: it is a value with no register.
