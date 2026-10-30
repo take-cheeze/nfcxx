@@ -18,6 +18,8 @@ typedef unsigned long size_t;
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_unroll(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
+extern "C" unsigned int __nfcxx_float_bits(float);
+extern "C" float __nfcxx_bits_float(unsigned int);
 extern "C" void *__nfcxx_dynshared_addr(void);
 // Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.
 extern "C" int printf(const char *, ...);

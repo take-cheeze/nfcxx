@@ -82,6 +82,7 @@ Operand FnCtx::operand(const Node &x) {
     if (it == slots.end()) throw BadIR("slot " + x.text + " is not declared");
     std::string t = fresh("rd");
     emit("add.u64 " + t + ", " + sp + ", " + std::to_string(it->second) + ";");
+    if (g_local_trace) frame_origin[t] = (trace_scope.empty() ? "" : trace_scope + ":") + x.text;
     return {t, Ty{"ptr", -1, false, false}};
   }
   if (x.kind == Node::Sym && x.sig == '@') return module_operand(x);
@@ -270,6 +271,7 @@ bool g_int_gpu = false;
 bool g_inline_device = true;
 bool g_promote_slots = true;
 bool g_unroll_loops = true;
+bool g_local_trace = std::getenv("LOCAL_TRACE") != nullptr;
 bool g_struct_slots = true;
 
 void FnCtx::float_to_int(const std::string &dest, const Ty &ty, const std::string &a0, const Ty &aty) {

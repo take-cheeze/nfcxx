@@ -93,12 +93,15 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
       return true;
     }
     Operand addr = operand(at(x, 2));
+    if (g_local_trace && frame_origin.count(reg_of(addr.text, addr.ty))) emit("// frame " + frame_origin[reg_of(addr.text, addr.ty)] + " load");
     if (ty.kind == "int" && ty.is_bool) {
       std::string b = fresh("r");
       emit("ld.u8 " + b + ", [" + reg_of(addr.text, addr.ty) + "];");
       emit("setp.ne.u32 " + dest + ", " + b + ", 0;");
     } else {
-      emit("ld." + mem_type(ty) + " " + dest + ", [" + reg_of(addr.text, addr.ty) + "];");
+      std::string areg = reg_of(addr.text, addr.ty);
+      if (g_local_trace && frame_origin.count(areg)) emit("// frame " + frame_origin[areg] + " load");
+      emit("ld." + mem_type(ty) + " " + dest + ", [" + areg + "];");
     }
     return true;
   }
@@ -127,7 +130,9 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
     Operand base = operand(at(x, 1));
     i128 n = as_int(&at(x, 2));
     if (base.ty.kind != "ptr") throw Refused("offset of a non-pointer");
-    emit("add.s64 " + dest + ", " + reg_of(base.text, base.ty) + ", " + i128_text(n) + ";");
+    std::string breg0 = reg_of(base.text, base.ty);
+    emit("add.s64 " + dest + ", " + breg0 + ", " + i128_text(n) + ";");
+    if (g_local_trace && frame_origin.count(breg0)) frame_origin[dest] = frame_origin[breg0];
     return true;
   }
   if (h == "index") {
@@ -144,6 +149,7 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
       emit("mul.lo.s64 " + off + ", " + ireg + ", " + i128_text(size) + ";");
     }
     emit("add.s64 " + dest + ", " + breg + ", " + off + ";");
+    if (g_local_trace && frame_origin.count(breg)) frame_origin[dest] = frame_origin[breg];
     return true;
   }
   if (h == "pdiff") {
@@ -197,6 +203,7 @@ bool FnCtx::store_stmt(const std::string &h, const Node &s) {
       emit("st.u8 [" + reg_of(addr.text, addr.ty) + "], " + b + ";");
     } else {
       std::string areg = reg_of(addr.text, addr.ty);
+      if (g_local_trace && frame_origin.count(areg)) emit("// frame " + frame_origin[areg] + " store");
       emit("st." + mem_type(ty) + " [" + areg + "], " + reg_of(val.text, ty) + ";");
     }
     return true;
