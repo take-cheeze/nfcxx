@@ -89,7 +89,7 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
       return true;
     }
     if (const RegInfo *p = promoted_slot(at(x, 2))) {
-      emit("mov." + ptx_type(ty) + " " + dest + ", " + p->ptx + ";");
+      emit(field_mov(ty) + " " + dest + ", " + p->ptx + ";");
       return true;
     }
     Operand addr = operand(at(x, 2));
@@ -190,7 +190,7 @@ bool FnCtx::store_stmt(const std::string &h, const Node &s) {
     if (const RegInfo *p = promoted_slot(at(s, 2))) {
       Operand val = operand(at(s, 3));
       expect(ty, val.ty);
-      emit("mov." + ptx_type(ty) + " " + p->ptx + ", " + reg_of(val.text, ty) + ";");
+      emit(field_mov(ty) + " " + p->ptx + ", " + reg_of(val.text, ty) + ";");
       return true;
     }
     Operand addr = operand(at(s, 2));
