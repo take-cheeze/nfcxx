@@ -9,7 +9,7 @@
 class CodeGen
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
-                       SEND0 SSEND0 SSEND GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV]).freeze
+                       SEND0 SSEND0 SSEND GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST]).freeze
 
   # The mruby entry points a class unit calls (vm.c; the same declarations load_compile.rb's PRELUDE makes).
   CLASS_UNIT_DECLS = <<~CPP
@@ -31,7 +31,7 @@ class CodeGen
     return [nil, unsupported] unless unsupported.empty?
 
     texts = +''
-    owner_def = Struct.new(:owner, :core).new(owner, false)
+    owner_def = Struct.new(:owner, :core, :irep).new(owner, false, irep)
     lines = +''
     program.each_source do |insn, idx|
       next if paired_exec.include?(idx) && insn.op == :EXEC
