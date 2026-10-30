@@ -518,6 +518,70 @@ check.call('subsequent growth copies the shared edge without modifying it',
            NF.join_state(shared_edge, [FLT, FLT, 0, 4], 2, true) == [INT | FLT, FLT, 0, 0] &&
            shared_edge == [INT, FLT, 0, 3])
 
+puts '-- unchanged ivar and rescue reads (host)'
+read_ops = [insn(0, :GETIV, "R1\t@n"), insn(0, :GETIV, "R1\t@missing"), insn(0, :RESCUE, "R0\tR1")]
+read_ops.each do |instruction|
+  provenance = instruction.op == :GETIV && instruction.ivar == 'n' ? 1 : 0
+  input = clean_load.dup
+  input[1] = provenance == 1 ? INT : OTHER
+  input[10] = provenance
+  input.freeze
+  context = load_context.call(writes = {})
+  context.elide_read_copies = true
+  actual = NF.transfer(0, instruction, input, context)
+  check.call("#{instruction.args}: an unchanged read shares its frozen input and records writes",
+             actual.equal?(input) && writes == { 1 => input[1] })
+end
+read_step = NF.decode_step(read_ops.first)
+read_input = clean_load.dup
+read_input[10] = 1
+read_input.freeze
+read_allocations = [false, true].map do |share|
+  context = load_context.call({})
+  context.elide_read_copies = share
+  50.times { NF.step_transfer(0, read_ops.first, read_step, read_input, context) }
+  before_allocations = GC.stat(:total_allocated_objects)
+  1_000.times { NF.step_transfer(0, read_ops.first, read_step, read_input, context) }
+  GC.stat(:total_allocated_objects) - before_allocations
+end
+check.call('unchanged read sharing removes the per-transfer state Array allocation',
+           read_allocations[0] >= 1_000 && read_allocations[1] < 20)
+read_random = Random.new(20261031)
+read_matches = 1_000.times.all? do
+  instruction = read_ops.sample(random: read_random)
+  input = clean_load.dup
+  input[1] = [INT, FLT, OTHER, 1 << 250, -1].sample(random: read_random)
+  input[4] = [INT, FLT, OTHER, 1 << 250].sample(random: read_random)
+  4.times do |register|
+    input[5 + register] = [INT, NF::ELEM_UNKNOWN].sample(random: read_random)
+    input[9 + register] = read_random.rand(7)
+    input[13 + register] = read_random.rand(2)
+  end
+  input.freeze
+  opaque = read_random.rand(2).zero? ? Set.new : Set[1]
+  answers = [false, true].map do |share|
+    context = load_context.call(writes = {}, opaque)
+    context.elide_read_copies = share
+    [NF.transfer(0, instruction, input, context), writes]
+  end
+  answers[0] == answers[1]
+end
+check.call('1,000 read transfers preserve slot provenance, aliases, elements, class tests and captured writes', read_matches)
+previous_read_elision = ENV['BC2CPP_NUMERIC_READ_COPY_ELISION']
+begin
+  cases.each do |name, body, opaque, factory|
+    answers = %w[0 1].map do |mode|
+      ENV['BC2CPP_NUMERIC_READ_COPY_ELISION'] = mode
+      oracle = factory.call
+      writes = {}
+      [NF.states(body, oracle, opaque, writes), writes, oracle.log]
+    end
+    check.call("#{name}: read sharing preserves every state, write and oracle call", answers[0] == answers[1])
+  end
+ensure
+  previous_read_elision ? ENV['BC2CPP_NUMERIC_READ_COPY_ELISION'] = previous_read_elision : ENV.delete('BC2CPP_NUMERIC_READ_COPY_ELISION')
+end
+
 if failures.empty?
   puts 'bc2cpp numeric flow speed check: PASS'
 else
