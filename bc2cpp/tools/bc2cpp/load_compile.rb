@@ -694,6 +694,8 @@ module LoadCompile
     PATH = 14
     TOP = 15
     CALL = 16
+    # An Integer past the 32-bit range: its decimal text in the string pool, parsed at load (mruby-bigint).
+    BIG = 17
     # A call's arguments are decoded into one array of this size.
     MAX_CALL_ARGS = 8
 
@@ -703,8 +705,7 @@ module LoadCompile
 
     def data?(node)
       case node
-      # The decoder reads an Integer as a 32-bit zigzag varint.
-      when Prism::IntegerNode then ClassBodyScan::Pure::INT_RANGE.cover?(node.value)
+      when Prism::IntegerNode then true
       when Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SymbolNode,
            Prism::ConstantReadNode then true
       when Prism::StringNode then !ClassBodyScan::Pure.heredoc?(node)
@@ -733,8 +734,14 @@ module LoadCompile
       when Prism::NilNode then out << NIL
       when Prism::TrueNode then out << TRUE
       when Prism::FalseNode then out << FALSE
-      when Prism::IntegerNode then out << INT
-                                   varint(zigzag(node.value), out)
+      when Prism::IntegerNode
+        if ClassBodyScan::Pure::INT_RANGE.cover?(node.value)
+          out << INT
+          varint(zigzag(node.value), out)
+        else
+          out << BIG
+          varint(index(node.value.to_s), out)
+        end
       when Prism::FloatNode then out << FLOAT
                                  out.concat([node.value].pack('E').bytes)
       when Prism::SymbolNode then out << SYM
@@ -797,8 +804,14 @@ module LoadCompile
       when nil then out << NIL
       when true then out << TRUE
       when false then out << FALSE
-      when Integer then out << INT
-                        varint(zigzag(value), out)
+      when Integer
+        if ClassBodyScan::Pure::INT_RANGE.cover?(value)
+          out << INT
+          varint(zigzag(value), out)
+        else
+          out << BIG
+          varint(index(value.to_s), out)
+        end
       when Float then out << FLOAT
                       out.concat([value].pack('E').bytes)
       when Symbol then out << SYM
@@ -1245,6 +1258,12 @@ module LoadCompile
         return mrb_float_value(M, d);
       }
       case 5: return mrb_symbol_value(bc2cpp_ld_sym(M, bc2cpp_ld_varint(p)));
+      case 17: {
+        // An Integer past 32 bits: its decimal text, parsed as the VM's integer parse does (mruby-bigint).
+        unsigned i = bc2cpp_ld_varint(p);
+        mrb_value text = bc2cpp_ld_str(M, bc2cpp_ld_pool + bc2cpp_ld_off[i], bc2cpp_ld_off[i + 1] - bc2cpp_ld_off[i] - 1, false);
+        return mrb_str_to_integer(M, text, 10, 1);
+      }
       case 6: case 7: {
         unsigned i = bc2cpp_ld_varint(p);
         return bc2cpp_ld_str(M, bc2cpp_ld_pool + bc2cpp_ld_off[i], bc2cpp_ld_off[i + 1] - bc2cpp_ld_off[i] - 1, tag == 7);

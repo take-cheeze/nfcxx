@@ -116,10 +116,10 @@ schema = world_of(schema: SCHEMA_LAMBDA).facts['LCF::Schema']
 check.call('a constant holding a lambda is not folded, so its module stays unknown',
            !schema['exact'] && blockers_of(schema) == ['const_computed(TABLE)'] && folded_of(schema).empty?)
 
-# 4. An Integer outside 32 bits is refused by PureEval (a bignum on 32-bit targets): the module stays unknown.
+# 4. An Integer outside 32 bits folds too: it is built from its decimal text at load, so the module is exact.
 lcf = world_of(lcf: WIDE_INT).facts['LCF']
-check.call('an Integer outside 32 bits is not folded, so its module stays unknown',
-           !lcf['exact'] && blockers_of(lcf) == ['const_computed(MASK)'])
+check.call('an Integer outside 32 bits is folded, so its module stays exact',
+           lcf['exact'] && blockers_of(lcf).empty?)
 
 # 5. RuntimeError as a superclass: a known core class, exact when nothing reopens it with a DSL call.
 load_error = world_of(load_error: LOAD_ERROR).facts['RGSS::Bitmap::LoadError']
@@ -149,8 +149,8 @@ game = real.('mruby-rpg2k/mrblib/game/lsd_io.rb')
 check.call('real Game::State: its SYSTEM_SFX_SAVE_FIELD folds, no blocker',
            blockers_of(game['Game::State']).empty? && folded_of(game['Game::State']) == ['const_computed(SYSTEM_SFX_SAVE_FIELD)'])
 lcf_real = real.('mruby-lcf/mrblib/lcf.rb')
-check.call('real LCF: its three INT32 constants stay blockers',
-           blockers_of(lcf_real['LCF']) == %w[const_computed(INT32_MASK) const_computed(INT32_SIGN_BIT) const_computed(INT32_WRAP)])
+check.call('real LCF: its three INT32 constants are no longer blockers',
+           blockers_of(lcf_real['LCF']).none? { |b| b.include?('INT32') })
 schema_real = real.('mruby-lcf/mrblib/schema.rb')
 check.call('real LCF::Schema: DATABASE and MAP_UNIT (lambdas) stay blockers',
            blockers_of(schema_real['LCF::Schema']) == %w[const_computed(DATABASE) const_computed(MAP_UNIT)])
