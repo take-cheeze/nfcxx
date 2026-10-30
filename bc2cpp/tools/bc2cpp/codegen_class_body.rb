@@ -50,8 +50,10 @@ class CodeGen
     dir = ENV['BC2CPP_DUMP_UNITS']
     return if dir.nil? || dir.empty?
 
-    FileUtils.mkdir_p(dir)
-    base = File.join(dir, sanitize(owner))
+    # One directory per gem run (OUT_SYMBOL), so the probe runs (never_called_probe) do not overwrite the shipped gems' files.
+    run_dir = File.join(dir, ENV.fetch('OUT_SYMBOL', 'unnamed_run'))
+    FileUtils.mkdir_p(run_dir)
+    base = File.join(run_dir, sanitize(owner))
     if code
       File.write("#{base}.cpp", code)
       File.delete("#{base}.refused") if File.exist?("#{base}.refused")

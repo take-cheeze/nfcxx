@@ -1002,18 +1002,29 @@ class CodeGen
        n = insn.plain_fixed_argc? ? insn.argc : nil
        zsuper_plan = reg_offset.zero? ? zsuper_forward_plan(owner_def, irep, idx) : nil
        zsuper_lookup = reg_offset.zero? && zsuper_plan.nil? ? zsuper_lookup_plan(owner_def, irep, idx) : nil
-       if target_def && d_reg && n
+       if target_def && d_reg && n && super_arity_ok?(target_def, n)
+         note_super_site(:direct, owner_def, irep, idx)
          args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
-         "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
+         # An optional target's `_impl` takes every optional and the given count (direct_call_args pads them).
+         impl = "#{cpp_name(target_def.owner, target_def.name)}_impl"
+         args, = direct_call_args(target_def, args, impl)
+         "  r#{d_reg} = #{impl}(M, self#{args.map { |x| ", #{x}" }.join});\n"
        elsif zsuper_plan && d_reg
+         note_super_site(:zsuper_forward, owner_def, irep, idx)
          compile_zsuper_forward(zsuper_plan, d_reg)
        elsif zsuper_lookup && d_reg
+         note_super_site(:zsuper_lookup, owner_def, irep, idx)
          compile_zsuper_lookup(zsuper_lookup, d_reg)
+       elsif (call = d_reg && native_exception_initialize(owner_def, irep, d_reg, n))
+         call
        elsif (call = d_reg && module_super_call(owner_def, irep, d_reg, n))
+         note_super_site(:module, owner_def, irep, idx)
          call
        elsif (call = d_reg && super_lookup_call(owner_def, irep, idx, d_reg, n))
+         note_super_site(:by_name, owner_def, irep, idx)
          call
        else
+         note_super_site(:unhandled, owner_def, irep, idx)
          "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
        end
      when :ARGARY
@@ -1170,5 +1181,22 @@ class CodeGen
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{dest_reg}", call_arguments: [argument])
     send.lines.map { |line| "  #{line}" }.join
+  end
+
+  # A direct super call passes the argument count the target accepts: mandatory positionals, then up to its optionals.
+  def super_arity_ok?(target_def, n)
+    shape = enter_shape(@ireps.fetch(target_def.irep))
+    return true unless shape
+
+    mand, opt = shape
+    n.to_i.between?(mand, mand + opt)
+  end
+
+  # BC2CPP_SUPER_LOG=<file>: one line per SUPER site compiled, with the path that took it (SUPER fallback breakdown).
+  def note_super_site(kind, owner_def, irep, idx)
+    path = ENV['BC2CPP_SUPER_LOG']
+    return if path.nil? || path.empty?
+
+    File.write(path, "#{kind}\t#{owner_def&.owner}##{owner_def&.name}\t#{irep&.file}\t#{idx}\n", mode: 'a')
   end
 end

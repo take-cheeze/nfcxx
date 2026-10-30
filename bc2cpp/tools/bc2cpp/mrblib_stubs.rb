@@ -21,6 +21,28 @@ module MrblibStubs
   # registration replaced the original.
   COPYING_SENDS = %w[alias_method define_method instance_method method module_function].freeze
 
+  # BC2CPP_STUB_LOG=<file>: why a compiled method's body is kept in the residual (one line per kept method).
+  def stub_keep_reason(m, key, defs, load_bodies, copied, copied_names, copy_sites, world)
+    return 'guarded' if m[:guard]
+    return "defs=#{defs.size}" unless defs.size == 1
+
+    d = defs.first
+    return 'native or attr or installer' if d.irep.nil? || d.kind || d.installer
+    return 'copied source' if d.copy_irep
+    return 'runs at load' if load_bodies.include?(d.irep)
+    return 'loaded copy' if copied.include?(d.irep)
+    return 'copy by name' if copied_names.include?(m[:name]) && copy_source?(d.owner, m[:name], copy_sites[m[:name]], world)
+
+    nil
+  end
+
+  def stub_keep_log(key, reason)
+    path = ENV['BC2CPP_STUB_LOG']
+    return if path.nil? || path.empty?
+
+    File.write(path, "#{reason}\t#{key}\n", mode: 'a')
+  end
+
   # The Owner#name keys of `compiled` (this run's entries) whose bodies can be stubbed. `all_defs`: every bytecode
   # definition, the core ones the generation's registry no longer holds included. The load phase reads it: a method
   # body missing from it would count as code that runs at load.
@@ -44,17 +66,13 @@ module MrblibStubs
     copy_sites = copy_sites(ireps, parent)
     defs_of = Hash.new { |h, k| h[k] = [] }
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
-    compiled.reject { |m| m[:guard] }.filter_map do |m|
+    compiled.filter_map do |m|
       key = "#{m[:owner]}##{m[:name]}"
-      defs = defs_of[key]
-      next unless defs.size == 1
+      reason = stub_keep_reason(m, key, defs_of[key], load_bodies, copied, copied_names, copy_sites, world)
+      next key if reason.nil?
 
-      d = defs.first
-      next if d.irep.nil? || d.kind || d.installer || d.copy_irep
-      next if load_bodies.include?(d.irep) || copied.include?(d.irep)
-      next if copied_names.include?(m[:name]) && copy_source?(d.owner, m[:name], copy_sites[m[:name]], world)
-
-      key
+      stub_keep_log(key, reason)
+      nil
     end.to_set
   end
 
@@ -63,9 +81,12 @@ module MrblibStubs
   # cannot be the copied method. Every other site (a method or block, a singleton class, the top level, a receiver
   # other than self, `method`, `define_method`) may copy from anywhere: :unknown.
   COPY_FROM_SELF = %w[alias_method module_function instance_method].freeze
-  # The names the receiver rule decides. Staged: the rule is general, but only these names are decided by it until the
-  # other copied names (a def of `x`, `push`, `sort!`, ...) are reviewed; every other name keeps the name-based keep.
-  RECEIVER_RULE_NAMES = %w[initialize].freeze
+  # The names the receiver rule decides: nil, every copied name. A copy takes the def of an ancestor of the class it runs in
+  # only, so a def of an unrelated class (`RPG2k#push` next to `alias append push` in Array) is not its source.
+  RECEIVER_RULE_NAMES = nil
+
+  # Whether the receiver rule decides a copied +name+ (load_compile.rb asks the same question).
+  def receiver_rule_name?(name) = RECEIVER_RULE_NAMES.nil? || RECEIVER_RULE_NAMES.include?(name)
 
   # A rep is an Irep, or its label (the parent map below reads both).
   def rep_label(rep) = rep.respond_to?(:label) ? rep.label : rep
@@ -120,7 +141,7 @@ module MrblibStubs
   # Without a class world, or for a site whose class is not exact, every copy may. Otherwise: only a site whose
   # class's ancestors (ClassWorld.ancestors, every ancestor of an exact class exact too) include +owner+.
   def copy_source?(owner, name, sites, world)
-    return true if world.nil? || sites.nil? || sites.empty? || !RECEIVER_RULE_NAMES.include?(name)
+    return true if world.nil? || sites.nil? || sites.empty? || !receiver_rule_name?(name)
 
     sites.any? do |site|
       next true if site == :unknown || world.facts[site].nil? || !world.facts[site]['exact']
@@ -139,10 +160,52 @@ module MrblibStubs
     ireps.each_value.each_with_object(Set.new) do |irep, names|
       ir = BytecodeIR.for(irep)
       ir.instructions_with_op(:ALIAS).each { |insn| (old = insn.first_of(:name)&.value) && names << old.to_s }
-      next unless ir.instructions_with_op(*BytecodeIR::Ops::SEND).any? { |insn| COPYING_SENDS.include?(insn.sym.to_s) }
+      sends = copying_sends(ir)
+      next if sends.empty?
 
-      ir.instructions_with_op(:LOADSYM).each { |insn| names << insn.sym.to_s }
+      # The names the copying sends take, when each argument is pinned to one symbol literal. Otherwise every symbol
+      # literal of the body counts (the conservative reading this used to take everywhere).
+      literal = copy_argument_names(ir, sends)
+      if literal
+        names.merge(literal)
+      else
+        ir.instructions_with_op(:LOADSYM).each { |insn| names << insn.sym.to_s }
+      end
     end
+  end
+
+  # [index, insn] of each send in +ir+ whose method is a copying one (COPYING_SENDS).
+  def copying_sends(ir)
+    found = []
+    ir.each_source do |insn, idx|
+      found << [idx, insn] if BytecodeIR::Ops::SEND.include?(insn.op) && COPYING_SENDS.include?(insn.sym.to_s)
+    end
+    found
+  end
+
+  # The symbols the copying sends take, from the symbol literals loaded into their argument registers. Nil unless every
+  # argument register has exactly one mention in the body (the send's own uses aside), and that mention is a LOADSYM
+  # before the send: then the register holds that symbol on every path that reaches the send, so no other literal can
+  # be the argument. A splat, a keyword argument or any other use of the register makes it nil.
+  def copy_argument_names(ir, sends)
+    mentions = Hash.new { |h, k| h[k] = [] }
+    ir.each_source { |insn, idx| insn.regs.each { |reg| mentions[reg] << idx } }
+    names = Set.new
+    sends.each do |send_idx, send|
+      return nil if send.positional_splat? || send.keyword_arguments? || send.argc.nil?
+
+      (1..send.argc.to_i).each do |k|
+        reg = send.reg.to_i + k
+        uses = mentions[reg] - [send_idx]
+        return nil unless uses.size == 1 && uses.first < send_idx
+
+        writer = ir.source_at(uses.first)
+        return nil unless writer.op == :LOADSYM && writer.reg == reg
+
+        names << writer.sym.to_s
+      end
+    end
+    names
   end
 
   # `src` with the body of every def whose lexical Owner#name is in `keys` replaced by STUB_BODY. Only defs directly
