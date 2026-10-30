@@ -45,11 +45,11 @@ class CodeGen
     statements = source_statements(irep.file, owner)
     return nil unless statements
 
-    # The window between two SETCONSTs is one statement only when every statement before it is a constant write too: then
-    # the ordinal of this SETCONST is the statement's own index. Anything else could hide a send in the skipped window.
+    # The instructions between this SETCONST and the one before it are this statement's only when the statement before it
+    # is a constant write (or it is the first statement): then nothing else in the source lies in the skipped window.
     index = statements.index { |s| s.node.is_a?(Prism::ConstantWriteNode) && s.node.name.to_s == name }
-    return nil unless index && index == ordinal
-    return nil unless statements[0...index].all? { |s| s.node.is_a?(Prism::ConstantWriteNode) }
+    return nil unless index
+    return nil unless index.zero? || statements[index - 1].node.is_a?(Prism::ConstantWriteNode)
     return nil unless statements.count { |s| s.node.is_a?(Prism::ConstantWriteNode) && s.node.name.to_s == name } == 1
 
     value, why, = PureEval.fold(statements, index)
