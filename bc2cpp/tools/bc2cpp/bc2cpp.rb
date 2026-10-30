@@ -2171,6 +2171,12 @@ if $PROGRAM_NAME == __FILE__
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
   class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '0' ? [] : gen.compile_top_class_units(ireps.fetch(root_label))
   class_units = gen.owned_class_units(class_units, only_owners)
+  # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
+  # units of other gems' owners that owned_class_units drops).
+  if (dump_dir = ENV['BC2CPP_DUMP_UNITS']) && !dump_dir.empty?
+    FileUtils.mkdir_p(dump_dir)
+    File.write(File.join(dump_dir, 'emitted.txt'), "#{symbol} owners=#{only_owners.inspect}\n#{class_units.map { |u| u[:path] }.join("\n")}\n", mode: 'a')
+  end
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_ary_write_helpers(compiled)

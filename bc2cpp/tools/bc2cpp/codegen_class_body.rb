@@ -6,6 +6,8 @@
 # plus SETCONST, a CLASS/MODULE unit whose child compiles, and a TDEF of an omitted key; anything else refuses the whole
 # body and names the opcodes.
 
+require 'fileutils'
+
 class CodeGen
   # The build's compiled methods (compile_all's hashes), keyed by irep label: a body's TDEF and SDEF register the
   # entry the gem already emits for the method. Set before compile_top_class_units.
@@ -31,10 +33,32 @@ class CodeGen
   # mrb_funcall the generator starts from. @class_body_unit is set only while a unit compiles.
   def compile_class_body(irep, owner)
     was_unit = @class_body_unit
+    outer_notes = @class_body_notes
     @class_body_unit = true
-    compile_class_body_unit(irep, owner)
+    @class_body_notes = []
+    code, refused = compile_class_body_unit(irep, owner)
+    dump_class_unit(owner, code, refused, @class_body_notes)
+    [code, refused]
   ensure
     @class_body_unit = was_unit
+    @class_body_notes = outer_notes
+  end
+
+  # BC2CPP_DUMP_UNITS=<dir>: each body the driver tries, as <owner>.cpp (its unit text) or <owner>.refused (the opcodes
+  # that refuse it). A nested body is tried once per enclosing unit, so the last attempt for an owner is the one kept.
+  def dump_class_unit(owner, code, refused, notes = [])
+    dir = ENV['BC2CPP_DUMP_UNITS']
+    return if dir.nil? || dir.empty?
+
+    FileUtils.mkdir_p(dir)
+    base = File.join(dir, sanitize(owner))
+    if code
+      File.write("#{base}.cpp", code)
+      File.delete("#{base}.refused") if File.exist?("#{base}.refused")
+    else
+      File.write("#{base}.refused", "#{Array(refused).map(&:to_s).sort.join(' ')}\n#{notes.map { |n| "  #{n}\n" }.join}")
+      File.delete("#{base}.cpp") if File.exist?("#{base}.cpp")
+    end
   end
 
   def compile_class_body_unit(irep, owner)
@@ -354,19 +378,33 @@ class CodeGen
   def class_body_registration(insn, irep, owner)
     child = irep.reps[insn.def_child_index]
     compiled = child && @compiled_methods&.[](child)
-    return nil unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
+    return class_body_refusal(insn, compiled, child) unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
     return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
 
     call = if insn.op == :SDEF
-             return nil if owner.end_with?('.singleton') || compiled[:visibility] != :public
+             return class_body_refusal(insn, compiled, child, 'singleton def in a singleton body or not public') if owner.end_with?('.singleton') || compiled[:visibility] != :public
 
              'mrb_define_class_method'
            else
              { public: 'mrb_define_method', private: 'mrb_define_private_method' }[compiled[:visibility]]
            end
-    return nil unless call
+    return class_body_refusal(insn, compiled, child, "visibility #{compiled[:visibility].inspect}") unless call
 
     "  #{call}(M, mrb_class_ptr(self), #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});\n"
+  end
+
+  # Why a TDEF or SDEF of a unit registers nothing (nil): the method's compiled entry is missing or refused, with the
+  # `#error` line its refusal wrote. Recorded for BC2CPP_DUMP_UNITS.
+  def class_body_refusal(insn, compiled, child, reason = nil)
+    reason ||= if compiled.nil?
+                 "no compiled method for irep #{child.inspect}"
+               elsif compiled[:guard]
+                 "guarded entry #{compiled[:guard].inspect}"
+               else
+                 compiled[:code].to_s[/^#error.*$/] || "no entry or aspec (#{compiled.keys.sort.join(' ')})"
+               end
+    (@class_body_notes ||= []) << "#{insn.op} #{insn.sym}: #{reason}"
+    nil
   end
 
   # The call an `alias NEW OLD` in a class body makes (vm.c OP_ALIAS: mrb_alias_method(target, NEW, OLD)). It runs after
