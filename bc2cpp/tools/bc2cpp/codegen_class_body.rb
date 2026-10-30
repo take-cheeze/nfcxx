@@ -120,10 +120,14 @@ class CodeGen
     reg = insn.reg
     if insn.op == :SCLASS
       "  r#{reg} = mrb_singleton_class(M, r#{reg});\n"
-    elsif insn.op == :CLASS
-      "  r#{reg} = mrb_obj_value(mrb_vm_define_class(M, r#{reg}, r#{reg + 1}, mrb_intern_cstr(M, \"#{insn.sym}\")));\n"
     else
-      "  r#{reg} = mrb_obj_value(mrb_vm_define_module(M, r#{reg}, mrb_intern_cstr(M, \"#{insn.sym}\")));\n"
+      # vm.c (OP_CLASS, OP_MODULE): a nil base is the body's target class, which is this body's self.
+      base = "(mrb_nil_p(r#{reg}) ? self : r#{reg})"
+      if insn.op == :CLASS
+        "  r#{reg} = mrb_obj_value(mrb_vm_define_class(M, #{base}, r#{reg + 1}, mrb_intern_cstr(M, \"#{insn.sym}\")));\n"
+      else
+        "  r#{reg} = mrb_obj_value(mrb_vm_define_module(M, #{base}, mrb_intern_cstr(M, \"#{insn.sym}\")));\n"
+      end
     end
   end
 

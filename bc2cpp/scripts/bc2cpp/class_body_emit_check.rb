@@ -102,7 +102,7 @@ suite.compile(NESTED) do |ireps, _root|
   code, refused = gen.compile_class_body(outer, 'Outer')
   suite.check('a class with a nested class compiles as one unit', code && refused.nil?)
   suite.check('the unit creates the nested class and calls its function',
-              code.to_s.include?('mrb_vm_define_class(M, r') && code.to_s.include?('mrb_intern_cstr(M, "Inner")') &&
+              code.to_s.include?('mrb_vm_define_class(M, (mrb_nil_p(r') && code.to_s.include?('mrb_intern_cstr(M, "Inner")') &&
               code.to_s.scan('static mrb_value bc2cpp_class_body_').size == 2)
   unit = +"#{%w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h].map { |h| "#include <#{h}>\n" }.join}#{gen.emit_owner_class_cache}#{code}"
   path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_nested_#{$$}.cc")
