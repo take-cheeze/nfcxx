@@ -135,8 +135,20 @@ class ze_rt {
     }
   }
   uint8_t *at(uint64_t addr) const {
+    if (dheap_) fail("host access to the device-only heap (NFCXX_SYCL_DEVICE_HEAP)");
     if (addr < dev_base_ || addr - dev_base_ >= heap_size_) fail("device address outside the heap");
     return host_ + (addr - dev_base_);
+  }
+  // NFCXX_SYCL_DEVICE_HEAP=1: the heap is device-only memory (zeMemAllocDevice). Host code reaches it through copy and fill
+  // commands on the immediate list, and kernels get its device addresses directly.
+  bool device_heap() const { return dheap_; }
+  void copy_mem(void *dst, const void *src, uint64_t n) {
+    check(zeCommandListAppendMemoryCopy(imm_, dst, src, n, nullptr, 0, nullptr), "zeCommandListAppendMemoryCopy");
+    check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+  }
+  void fill_mem(void *dst, uint8_t v, uint64_t n) {
+    check(zeCommandListAppendMemoryFill(imm_, dst, &v, 1, n, nullptr, 0, nullptr), "zeCommandListAppendMemoryFill");
+    check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
   }
   // Large allocations (model weights) get their own shared block instead of a range of the heap: the driver makes every
   // shared allocation resident at each launch (zeKernelSetIndirectAccess), and that cost grows with the heap's size.
@@ -161,9 +173,13 @@ class ze_rt {
   }
   bool in_heap(const void *p) const {
     uintptr_t a = (uintptr_t)p;
-    return a >= (uintptr_t)host_ && a - (uintptr_t)host_ < heap_size_;
+    uintptr_t base = dheap_ ? (uintptr_t)dev_base_ : (uintptr_t)host_;
+    return a >= base && a - base < heap_size_;
   }
-  uint64_t dev_of(const void *p) const { return dev_base_ + ((uintptr_t)p - (uintptr_t)host_); }
+  uint64_t dev_of(const void *p) const {
+    uintptr_t base = dheap_ ? (uintptr_t)dev_base_ : (uintptr_t)host_;
+    return dev_base_ + ((uintptr_t)p - base);
+  }
 
   // ---- dispatch
   void dispatch(const std::string &key, const void *closure, unsigned closure_bytes, const unsigned *g, const unsigned *l,
@@ -245,7 +261,7 @@ class ze_rt {
       uint64_t region = alloc(slab_stack + slab_groups * stride);
       // NFCXX_SYCL_POISON=BYTE (debugging): the stacks and the local memory start filled with BYTE, so a read of memory the
       // kernel never wrote gives the same value on every run
-      if (const char *pz = std::getenv("NFCXX_SYCL_POISON")) {
+      if (const char *pz = dheap_ ? nullptr : std::getenv("NFCXX_SYCL_POISON")) {
         const char *part = std::getenv("NFCXX_SYCL_POISON_PART");   // stack or local: only that part
         int byte = (int)std::strtol(pz, nullptr, 0);
         if (!part || std::strcmp(part, "local") != 0) std::memset(at(region), byte, slab_stack);
@@ -257,7 +273,7 @@ class ze_rt {
       p.stack = region - first_group * inv_group * stack_bytes;   // biased: the slab's first invocation is at region
       p.local = region + slab_stack - first_group * stride;
       p.flag = (uint64_t)(uintptr_t)ctl_;
-      p.hlo = (uint64_t)(uintptr_t)host_;
+      p.hlo = dev_base_;
       p.hsize = heap_size_;
       p.dbase = dev_base_;
       p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
@@ -295,8 +311,14 @@ class ze_rt {
   }
 
   // ---- buffer copies (the heap is shared memory: a copy is a memcpy, but the device copy is written by kernels)
-  void write(uint64_t addr, const void *src, uint64_t n) { std::memcpy(at(addr), src, n); }
-  void read(uint64_t addr, void *dst, uint64_t n) { std::memcpy(dst, at(addr), n); }
+  void write(uint64_t addr, const void *src, uint64_t n) {
+    if (dheap_) copy_mem((void *)addr, src, n);
+    else std::memcpy(at(addr), src, n);
+  }
+  void read(uint64_t addr, void *dst, uint64_t n) {
+    if (dheap_) copy_mem(dst, (const void *)addr, n);
+    else std::memcpy(dst, at(addr), n);
+  }
 
   void sync_up(buffer_state *s, int mode) {
     if (s->dev == 0) return;
@@ -433,9 +455,11 @@ class ze_rt {
     ze_host_mem_alloc_desc_t hmem = {};
     hmem.stype = ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC;
     // the device may refuse a large shared allocation: halve the request until one fits (64 MB at least)
+    dheap_ = std::getenv("NFCXX_SYCL_DEVICE_HEAP") != nullptr;
     void *p = nullptr;
     for (;;) {
-      ze_result_t r = zeMemAllocShared(ctx_, &dmem, &hmem, heap_size_, 16, dev_, &p);
+      ze_result_t r = dheap_ ? zeMemAllocDevice(ctx_, &dmem, heap_size_, 16, dev_, &p)
+                             : zeMemAllocShared(ctx_, &dmem, &hmem, heap_size_, 16, dev_, &p);
       if (r == ZE_RESULT_SUCCESS && p) break;
       if (heap_size_ <= (64ull << 20)) {
         char buf[32];
@@ -444,10 +468,16 @@ class ze_rt {
       }
       heap_size_ /= 2;
     }
-    host_ = (uint8_t *)p;
-    dev_base_ = (uint64_t)(uintptr_t)host_;   // shared USM: the device sees the host address
+    host_ = dheap_ ? nullptr : (uint8_t *)p;
+    dev_base_ = (uint64_t)(uintptr_t)p;   // shared USM: the device sees the host address; device-only: the device address
     free_[8192] = heap_size_ - 8192;
-    std::memset(host_, 0, 8192);
+    if (dheap_) {
+      uint8_t zero = 0;
+      check(zeCommandListAppendMemoryFill(imm_, p, &zero, 1, 8192, nullptr, 0, nullptr), "zeCommandListAppendMemoryFill");
+      check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+    } else {
+      std::memset(host_, 0, 8192);
+    }
     // the control block: host memory the device reads and writes over the bus, so touching it moves nothing
     void *c = nullptr;
     check(zeMemAllocHost(ctx_, &hmem, 8192, 64, &c), "zeMemAllocHost of the control block");
@@ -539,9 +569,10 @@ class ze_rt {
     check(zeKernelSetGroupSize(kern, l[0], l[1], l[2]), "zeKernelSetGroupSize");
     // the kernel's only argument is the push block in the control block; the heap (stacks, the closure's USM pointers,
     // the statics) is reached through pointers, so the driver is told to keep the shared allocations resident
-    check(zeKernelSetIndirectAccess(kern, ZE_KERNEL_INDIRECT_ACCESS_FLAG_SHARED | ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST |
-                                              ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE),
-          "zeKernelSetIndirectAccess");
+    // SHARED stays in the device-only mode too: the shared blocks (control and host-visible allocations) are few
+    const ze_kernel_indirect_access_flags_t iflags =
+        ZE_KERNEL_INDIRECT_ACCESS_FLAG_SHARED | ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST | ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE;
+    check(zeKernelSetIndirectAccess(kern, iflags), "zeKernelSetIndirectAccess");
     if (subgroup_size) {
       // the kernel must be compiled for the sub-group size it asks for (its SubgroupSize execution mode)
       ze_kernel_properties_t kp = {};
@@ -567,6 +598,7 @@ class ze_rt {
   uint32_t local_mem_ = 0;
   bool has_fp16_ = false;
   uint8_t *host_ = nullptr;
+  bool dheap_ = false;
   std::map<void *, uint64_t> separate_;
   uint8_t *ctl_ = nullptr;   // the flag, the captured state and the push block (see Memory above)
   uint64_t dev_base_ = 0;
@@ -606,20 +638,32 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
 }
 inline void backend_wait() {}
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
-  (void)kind;
   ze_rt &r = ze_rt::get();
-  if (bytes >= ze_rt::separate_min() && ze_rt::separate_min() > 0) {
+  // device-only heap: shared and host allocations must stay host-visible, so they are separate shared blocks
+  if (r.device_heap() && kind != 0) {
     if (void *p = r.alloc_separate(bytes)) return p;
   }
-  return (void *)r.at(r.alloc(bytes, align));
+  if (!r.device_heap() && bytes >= ze_rt::separate_min() && ze_rt::separate_min() > 0) {
+    if (void *p = r.alloc_separate(bytes)) return p;
+  }
+  uint64_t a = r.alloc(bytes, align);   // a device address
+  return r.device_heap() ? (void *)a : (void *)r.at(a);
 }
 inline void backend_usm_free(void *p) {
   ze_rt &r = ze_rt::get();
   if (r.is_separate(p)) r.free_separate(p);
   else if (r.in_heap(p)) r.release(r.dev_of(p));
 }
-inline void backend_memcpy(void *dst, const void *src, unsigned long n) { std::memmove(dst, src, n); }
-inline void backend_memset(void *p, int v, unsigned long n) { std::memset(p, v, n); }
+inline void backend_memcpy(void *dst, const void *src, unsigned long n) {
+  ze_rt &r = ze_rt::get();
+  if (r.device_heap() && (r.in_heap(dst) || r.in_heap(src))) r.copy_mem(dst, src, n);
+  else std::memmove(dst, src, n);
+}
+inline void backend_memset(void *p, int v, unsigned long n) {
+  ze_rt &r = ze_rt::get();
+  if (r.device_heap() && r.in_heap(p)) r.fill_mem(p, (uint8_t)v, n);
+  else std::memset(p, v, n);
+}
 inline bool backend_is_usm(const void *p) { return ze_rt::get().in_heap(p) || ze_rt::get().is_separate(p); }
 
 }  // namespace detail
