@@ -1228,6 +1228,7 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   std::vector<std::pair<std::string, std::string>> caller_loops = std::exchange(loops_, {});
   std::map<std::string, std::string> caller_fn_values = std::exchange(fn_values_, {});
   std::string caller_dest = std::exchange(inline_dest_, dest);
+  std::string caller_scope = std::exchange(trace_scope, callee->name());
   std::string caller_end = std::exchange(inline_end_, new_label());
   std::optional<Ty> caller_ret = std::exchange(inline_ret_, callee->ret);
   inline_depth_++;
@@ -1245,6 +1246,7 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   inline_dest_ = std::move(caller_dest);
   inline_end_ = std::move(caller_end);
   inline_ret_ = caller_ret;
+  trace_scope = std::move(caller_scope);
   sra_slots = std::move(caller_sra);
   carrier_slots = std::move(caller_carriers);
   carrier_val = std::move(caller_carrier_val);
