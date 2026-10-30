@@ -25,7 +25,17 @@ refusals = Hash.new(0)
 Dir.mktmpdir do |tmp|
   ClassWorldGate.closed_roots(ROOT).each do |name, files|
     ireps, root = compile_ireps(files, name.tr(':-', '__'), tmp, mrbc: mrbc)
-    gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+    registry = build_registry(ireps, root)[0]
+    gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+    # The build hands the units every compiled method (bc2cpp.rb); here each TDEF and SDEF body is compiled alone.
+    gen.compiled_methods = ireps.each_value.flat_map do |irep|
+      BytecodeIR.for(irep).each_source.filter_map do |insn, _|
+        next unless %i[TDEF SDEF].include?(insn.op) && insn.def_child_index
+        label = irep.reps[insn.def_child_index]
+        method = gen.compile_method(label)
+        [label, method.merge(label: label)] if method
+      end
+    end.to_h
     walk = lambda do |label, namespace|
       irep = ireps.fetch(label)
       BytecodeIR.class_bodies(irep, :CLASS, :MODULE).each do |idx, child_label|
