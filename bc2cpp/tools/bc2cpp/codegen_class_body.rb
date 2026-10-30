@@ -46,7 +46,7 @@ class CodeGen
     folded_away = folds.values.flat_map { |fold| fold[:skip] }.to_set
     unsupported = program.each_source.reject do |insn, idx|
       folded_away.include?(idx) || %i[TDEF SDEF ALIAS SSEND SSEND0 TCLASS METHOD DEF].include?(insn.op) || literal_freeze?(program, idx) ||
-      (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
+      (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) || (%i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
@@ -92,6 +92,9 @@ class CodeGen
         registered << insn.sym.to_s if insn.op == :TDEF
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+      elsif %i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)
+        # A class or module with an empty body has no EXEC: it is only created (vm.c OP_CLASS / OP_MODULE), as a unit does.
+        lines << class_unit_define(insn)
       elsif insn.op == :TCLASS
         # The target class of a class body is the body's own class: the self of this function.
         lines << "  r#{insn.reg} = self;\n"

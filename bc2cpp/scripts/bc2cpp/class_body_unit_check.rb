@@ -192,4 +192,19 @@ suite.compile(DEFS) do |ireps, root|
               !code.include?('mrb_define_method(M, mrb_class_ptr(self), "'))
 end
 
+EMPTY_NESTED = <<~'RUBY'
+  class Router
+    class Problem < StandardError; end
+    LIMIT = 3
+  end
+RUBY
+
+suite.compile(EMPTY_NESTED) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  suite.check('an empty nested class is created with its superclass, and the body compiles',
+              code.include?('mrb_vm_define_class(M, (mrb_nil_p(r') && code.include?('"Problem"') && code.include?('bc2cpp_class_body_Router'))
+end
+
 suite.finish!
