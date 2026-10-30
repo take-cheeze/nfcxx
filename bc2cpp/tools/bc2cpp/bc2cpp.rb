@@ -2164,6 +2164,10 @@ if $PROGRAM_NAME == __FILE__
     Shellwords.split(ENV['OTHER_DECLS_HEADER']).each { |path| puts "#include \"#{path}\"" }
   end
   puts ''
+  # CLASS_BODY_EMIT_GEM (BC2CPP_CLASS_BODY_EMIT=1): the top-level class bodies that compile are emitted as functions and
+  # called from gem_init (emit_gem_hooks). Compiled here, before the owner-class cache and the helpers are printed, so
+  # the owners and helpers they use are declared. Off by default: the VM still runs those bodies too (a duplicate run).
+  class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '1' ? gen.compile_top_class_units(ireps.fetch(root_label)) : []
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_ary_write_helpers(compiled)
@@ -2301,7 +2305,8 @@ if $PROGRAM_NAME == __FILE__
   poly_tables_code = gen.emit_poly_tables(compiled)
   # A constant helper is emitted only when the printed text calls it: a body compiled and then discarded
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first.
-  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, poly_tables_code, *compiled.map { |m| m[:code] }].join
+  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, poly_tables_code, *compiled.map { |m| m[:code] },
+          *class_units.map { |unit| unit[:code] }].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print SymbolCache.emit(symbol_table)
@@ -2311,6 +2316,7 @@ if $PROGRAM_NAME == __FILE__
   print eqq_helper_code
   print numeric_slow_code
   print poly_tables_code
+  class_units.each { |unit| print unit[:code] }
   compiled.each do |m|
     print ShardOutput.unit_mark(m[:owner]) if shards > 1
     print m[:code]
@@ -2326,7 +2332,7 @@ if $PROGRAM_NAME == __FILE__
     load_symbol = symbol
   end
   LoadCompile.write_plan(LoadCompile.plan_path(out_dir, symbol), load_plan)
-  print gen.emit_gem_hooks(load_symbol: load_symbol)
+  print gen.emit_gem_hooks(load_symbol: load_symbol, class_units: class_units)
 
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.

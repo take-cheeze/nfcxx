@@ -458,9 +458,12 @@ class CodeGen
   # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
   # LOAD_COMPILE: `load_symbol` names the generated class-body loader (load_compile.rb), which runs before anything
   # else here: the registrations below look up the classes it opens.
-  def emit_gem_hooks(load_symbol: nil)
+  # CLASS_BODY_EMIT_GEM: `class_units` (compile_top_class_units) are the top-level class bodies the compiled gem runs
+  # itself, after the owner-class slots are reset and before the registrations below.
+  def emit_gem_hooks(load_symbol: nil, class_units: [])
     load_call = load_symbol ? "  bc2cpp_load_#{load_symbol}(M);\n" : ''
-    <<~CPP.sub("{\n  bc2cpp_reset_const_site_cache", "{\n#{load_call}  bc2cpp_reset_const_site_cache")
+    unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{sanitize(unit[:path])}(M);\n" }.join
+    hooks = <<~CPP.sub("{\n  bc2cpp_reset_const_site_cache", "{\n#{load_call}  bc2cpp_reset_const_site_cache")
       [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
         bc2cpp_reset_const_site_cache();
         bc2cpp_reset_owner_classes();
@@ -475,6 +478,7 @@ class CodeGen
         bc2cpp_reset_direct_construct_classes();
       }
     CPP
+    hooks.sub("  bc2cpp_reset_owner_classes();\n  bc2cpp_set_instance_tts", "  bc2cpp_reset_owner_classes();\n#{unit_calls}  bc2cpp_set_instance_tts")
   end
 
   # CORE_BLOCK_GUARD: the run-time half of core_block_guard. The bytecode of

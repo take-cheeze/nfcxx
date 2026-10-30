@@ -117,6 +117,50 @@ class CodeGen
     [compiled[:code], line]
   end
 
+  # CLASS_BODY_EMIT_GEM (BC2CPP_CLASS_BODY_EMIT=1): the top-level class and module units of a gem's root body, as
+  # [{ path:, code: }]. A unit is the CLASS or MODULE and its compiled body; the function it adds creates the class the
+  # way vm.c's OP_CLASS and OP_MODULE do with the Object base and a nil superclass, then calls the body. A unit whose
+  # superclass is not a literal nil, whose path is opened twice, or whose body refuses is left out: the VM still runs it.
+  def compile_top_class_units(root_irep)
+    program = BytecodeIR.for(root_irep)
+    units = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
+      insn = program.source_at(idx)
+      path = BytecodeIR.class_body_path(root_irep, idx, nil)
+      next nil unless path && top_unit_super_nil?(program, idx, insn)
+
+      code, _refused = compile_class_body(@ireps.fetch(child), path)
+      next nil unless code
+
+      { path: path, insn: insn, code: code }
+    end
+    counts = units.map { |unit| unit[:path] }.tally
+    units.select { |unit| counts[unit[:path]] == 1 }.map do |unit|
+      { path: unit[:path], code: top_class_unit_code(unit[:insn], unit[:path], unit[:code]) }
+    end
+  end
+
+  # The function that creates a top-level unit's class and calls its body function (compile_class_body names it).
+  def top_class_unit_code(insn, path, body_code)
+    base = 'mrb_obj_value(M->object_class)'
+    sym = "mrb_intern_cstr(M, \"#{insn.sym}\")"
+    define = if insn.op == :MODULE
+               "(void)mrb_vm_define_module(M, #{base}, #{sym});"
+             else
+               "(void)mrb_vm_define_class(M, #{base}, mrb_nil_value(), #{sym});"
+             end
+    "#{body_code}static void bc2cpp_top_unit_#{sanitize(path)}(mrb_state* M) {\n" \
+      "  #{define}\n  (void)bc2cpp_class_body_#{sanitize(path)}(M);\n}\n"
+  end
+
+  # A CLASS takes its superclass from the register after its base; only a LOADNIL there is a nil superclass the unit
+  # can pass as is. A MODULE has none.
+  def top_unit_super_nil?(program, idx, insn)
+    return true if insn.op == :MODULE
+
+    previous = program.source_at(idx - 1)
+    previous&.op == :LOADNIL && previous.reg == insn.reg + 1
+  end
+
   def omitted_def?(insn, owner, omitted)
     insn.op == :TDEF && omitted.include?("#{owner}##{insn.sym}")
   end
