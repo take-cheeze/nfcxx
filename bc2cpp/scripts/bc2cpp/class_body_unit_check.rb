@@ -194,8 +194,14 @@ end
 
 EMPTY_NESTED = <<~'RUBY'
   class Router
-    class Problem < StandardError; end
+    class Problem; end
     LIMIT = 3
+  end
+RUBY
+
+NAMED_SUPER = <<~'RUBY'
+  class Router
+    class Problem < StandardError; end
   end
 RUBY
 
@@ -203,8 +209,14 @@ suite.compile(EMPTY_NESTED) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
   code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
-  suite.check('an empty nested class is created with its superclass, and the body compiles',
+  suite.check('an empty nested class with no superclass is created, and the body compiles',
               code.include?('mrb_vm_define_class(M, (mrb_nil_p(r') && code.include?('"Problem"') && code.include?('bc2cpp_class_body_Router'))
+end
+
+suite.compile(NAMED_SUPER) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  suite.check('a nested class with a named superclass refuses its body (the superclass may not exist yet)',
+              gen.compile_top_class_units(ireps.fetch(root)).empty?)
 end
 
 suite.finish!

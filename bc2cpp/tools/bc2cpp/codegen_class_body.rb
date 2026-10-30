@@ -66,6 +66,9 @@ class CodeGen
     registered = Set.new
     program.each_source do |insn, idx|
       next if paired_exec.include?(idx) && insn.op == :EXEC || folded_away.include?(idx)
+      # A class a unit creates takes a nil superclass: a named one (`class Map < Base`) is evaluated when the unit runs, at
+      # gem_init, possibly before the gem that defines it has loaded (the boot failure: uninitialized constant RGSS).
+      return [nil, [:CLASS]] if insn.op == :CLASS && !top_unit_super_nil?(program, idx, insn)
 
       lines << folds[idx][:code] if folds.key?(idx)
       if bodies.key?(idx)
