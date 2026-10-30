@@ -103,6 +103,20 @@ class CodeGen
     end
   end
 
+  # A kept method a class body defines (its TDEF), compiled by the method compiler: its C++ and the call that registers
+  # its entry, as emit_owner_registration_lines makes for a method. [code, define_line] or nil when the method does not
+  # compile or has a visibility the registration call does not cover.
+  def class_body_method_registration(owner, child_label)
+    compiled = compile_method(child_label)
+    return nil if compiled.nil? || compiled[:unsupported]
+
+    define = { public: 'mrb_define_method', private: 'mrb_define_private_method' }[compiled[:visibility]]
+    return nil unless define
+
+    line = "  #{define}(M, bc2cpp_owner_reg, #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});\n"
+    [compiled[:code], line]
+  end
+
   def omitted_def?(insn, owner, omitted)
     insn.op == :TDEF && omitted.include?("#{owner}##{insn.sym}")
   end
