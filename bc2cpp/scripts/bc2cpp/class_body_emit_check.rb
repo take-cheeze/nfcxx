@@ -85,4 +85,33 @@ ensure
   ENV['BC2CPP_UNREGISTERED_EXTRA'] = previous
 end
 
+# A nested class is one unit: CLASS plus its EXEC create the class the VM way and call the child's compiled function.
+# The parent's text carries the child's function first, and the whole unit compiles with g++.
+NESTED = <<~RUBY
+  class Outer
+    LIMIT = 3
+    class Inner
+      MAX = 9
+    end
+  end
+RUBY
+
+suite.compile(NESTED) do |ireps, _root|
+  outer = ireps.values.find { |irep| BytecodeIR.class_bodies(irep, :CLASS, :MODULE).any? }
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code, refused = gen.compile_class_body(outer, 'Outer')
+  suite.check('a class with a nested class compiles as one unit', code && refused.nil?)
+  suite.check('the unit creates the nested class and calls its function',
+              code.to_s.include?('mrb_vm_define_class(M, r') && code.to_s.include?('mrb_intern_cstr(M, "Inner")') &&
+              code.to_s.scan('static mrb_value bc2cpp_class_body_').size == 2)
+  unit = +"#{%w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h].map { |h| "#include <#{h}>\n" }.join}#{gen.emit_owner_class_cache}#{code}"
+  path = File.join(ENV.fetch('TMPDIR', '/tmp'), "class_body_nested_#{$$}.cc")
+  File.write(path, unit)
+  out, status = Open3.capture2e('g++', '-std=c++17', '-fsyntax-only', '-w', "-I#{ROOT}/3rd/mruby/include",
+                                "-I#{ENV.fetch('BC2CPP_BUILD_INCLUDE', ROOT + '/build-closed-bc2cpp/closed/include')}", path)
+  suite.check('the nested class unit compiles with the mruby headers', status.success?)
+  puts "    g++: #{out.lines.first(3).join.strip}" unless status.success?
+  File.delete(path)
+end
+
 suite.finish!
