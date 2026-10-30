@@ -282,7 +282,7 @@ RANGE_TO_A = <<~'RUBY'
   end
 RUBY
 
-# A `length` on a String literal compiles (the exact-core arm calls the native row); a SEND0 with no known target refuses.
+# A `length` on a String literal compiles (the exact-core arm calls the native row).
 suite.compile(LITERAL_LENGTH) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   suite.check('a length on a String literal compiles in the unit',
@@ -291,8 +291,10 @@ end
 
 suite.compile(RANGE_TO_A) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('an explicit-receiver send with no known target refuses its body, not a dynamic call',
-              gen.compile_top_class_units(ireps.fetch(root)).empty?)
+  # The fixture has no core sources, so Range#to_a has no compiled body here and the send keeps mrb_funcall; the closed
+  # build (core registered) takes the direct call.
+  suite.check('a Range literal to_a compiles in the unit (direct when the core body is registered)',
+              gen.compile_top_class_units(ireps.fetch(root)).map { |unit| unit[:path] } == %w[Router])
 end
 
 suite.finish!

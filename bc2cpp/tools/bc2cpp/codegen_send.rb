@@ -1223,6 +1223,9 @@ class CodeGen
     end
     if target.nil? && !self_implicit && known_class
       candidate = core_targets(@registry[name])&.find { |md| md.owner == known_class }
+      # A core Ruby method whose name a native also defines is hidden from the registry (core_hidden_defs), so the
+      # class's own compiled body is found here instead, when exactly one body names this class and this name.
+      candidate ||= hidden_core_candidate(known_class, name)
       # The same two guards as MONO: the class-exact candidate must compile clean
       # and fit the call's argument count.
       if direct_callable?(candidate, n)
@@ -1759,6 +1762,14 @@ class CodeGen
   # order (signature, compile, count) is part of the contract: compiles_clean? compiles the callee, so
   # it must not run for a signature the direct call cannot express. Natives and attr_* (no irep) are not
   # callable this way; the ivar-accessor and native-direct paths have their own gates.
+  # The one hidden core body (core_hidden_defs, by owner and name) with an irep, or nil when there is not exactly one.
+  def hidden_core_candidate(owner, name)
+    return nil if @compiling_core
+
+    defs = Array(block_core_index[[owner, name]]).select(&:irep)
+    defs.one? ? defs.first : nil
+  end
+
   def direct_callable?(definition, n)
     return false unless definition&.irep
 

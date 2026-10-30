@@ -399,15 +399,24 @@ class CodeGen
       "mrb_intern_cstr(M, #{c_string_literal(old)}));\n"
   end
 
-  # A SEND0 `length` on the register a String literal was just built into, when NativeCoreDirect has the String#length row:
-  # the receiver's class is known, so the exact-core arm calls the native with no dynamic lookup.
+  # A SEND0 on the register a literal was just built into, whose class the literal fixes: `length` on a String literal
+  # (the NativeCoreDirect row) and `to_a` on a Range literal (the compiled core body).
   def literal_native_send?(program, idx)
     insn = program.source_at(idx)
-    return false unless insn.op == :SEND0 && insn.sym.to_s == 'length'
+    return false unless insn.op == :SEND0
 
     previous = program.source_at(idx - 1)
-    previous&.op == :STRING && previous.reg == insn.reg &&
-      NativeCoreDirect::ENTRIES.any? { |entry| entry.name == 'length' && entry.owner == 'String' && entry.arity.zero? }
+    return false unless previous && previous.reg == insn.reg
+
+    case insn.sym.to_s
+    when 'length'
+      previous.op == :STRING && NativeCoreDirect::ENTRIES.any? { |entry| entry.name == 'length' && entry.owner == 'String' && entry.arity.zero? }
+    when 'to_a'
+      # Range#to_a is a core body (its super resolves through Enumerable); the receiver's class is known from the literal.
+      previous.op == :RANGE_INC
+    else
+      false
+    end
   end
 
   # A `freeze` with no arguments on the register a body holds, emitted as mrb_obj_freeze (Object#freeze) rather than a
