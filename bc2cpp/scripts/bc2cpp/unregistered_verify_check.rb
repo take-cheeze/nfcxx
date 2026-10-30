@@ -62,7 +62,7 @@ ENTRIES = [
 OWNERS = %w[VFix VFix.singleton].freeze
 
 # LEFT_OUT_NATIVES: native registrations, as NativeOwnerMap would report two of RGSS::VNat's.
-NATIVES = Struct.new(:registrations).new([['RGSS::VNat', 'gone', 'vnat_gone'], ['RGSS::VNat', 'kept_native', 'vnat_kept']])
+NATIVES = Struct.new(:registrations).new([['RGSS::VNat', 'gone', nil], ['RGSS::VNat', 'kept_native', 'vnat_kept']])
 
 registration = lambda do |unregistered: nil, extra: nil|
   previous = ENV['BC2CPP_UNREGISTERED_EXTRA']
