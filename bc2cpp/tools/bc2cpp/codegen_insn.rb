@@ -1015,6 +1015,8 @@ class CodeGen
        elsif zsuper_lookup && d_reg
          note_super_site(:zsuper_lookup, owner_def, irep, idx)
          compile_zsuper_lookup(zsuper_lookup, d_reg)
+       elsif (call = d_reg && native_exception_initialize(owner_def, irep, d_reg, n))
+         call
        elsif (call = d_reg && module_super_call(owner_def, irep, d_reg, n))
          note_super_site(:module, owner_def, irep, idx)
          call

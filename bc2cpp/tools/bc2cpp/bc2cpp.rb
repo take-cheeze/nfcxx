@@ -142,6 +142,7 @@ require_relative 'codegen_checked_send'
 require_relative 'lexical_consts'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_numeric_slow'
+require_relative 'codegen_exception_init'
 require_relative 'codegen_numeric_slow_zero'
 require_relative 'codegen_index_closed'
 require_relative 'codegen_integer_tag_else'
@@ -2289,6 +2290,8 @@ if $PROGRAM_NAME == __FILE__
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
   # NUMERIC_SLOW_PATH: the by-name calls of the numeric arms' else live here once per helper.
   numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled), symbol_table)
+  # EXCEPTION_INIT: the file-scope declaration and helper of a `super` that reaches Exception#initialize.
+  exception_init_code = gen.emit_exception_init_helpers(compiled)
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
@@ -2314,7 +2317,7 @@ if $PROGRAM_NAME == __FILE__
   poly_tables_code = gen.emit_poly_tables(compiled)
   # A constant helper is emitted only when the printed text calls it: a body compiled and then discarded
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first.
-  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, poly_tables_code, *compiled.map { |m| m[:code] },
+  used = [index_helpers_code, eqq_helper_code, numeric_slow_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
           *class_units.map { |unit| unit[:code] }].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
@@ -2324,6 +2327,7 @@ if $PROGRAM_NAME == __FILE__
   print index_helpers_code
   print eqq_helper_code
   print numeric_slow_code
+  print exception_init_code
   print poly_tables_code
   class_units.each { |unit| print unit[:code] }
   compiled.each do |m|
