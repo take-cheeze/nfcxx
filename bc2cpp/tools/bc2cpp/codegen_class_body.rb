@@ -296,15 +296,11 @@ class CodeGen
       "mrb_intern_cstr(M, #{c_string_literal(old)}));\n"
   end
 
-  # `[...].freeze`, `{...}.freeze`, `"...".freeze` or an array concatenation's freeze, on the value the previous instruction built. The
-  # freeze is the Object method only when no one redefined it, which a literal's own freeze cannot be (the literal is
-  # built here), so it is emitted as mrb_obj_freeze instead of a send through the owner-call helpers.
+  # A `freeze` with no arguments on the register a body holds, emitted as mrb_obj_freeze (Object#freeze) rather than a
+  # send. Not checked for a user redefinition of freeze on the receiver: the direct call bypasses one.
   def literal_freeze?(program, idx)
     insn = program.source_at(idx)
-    return false unless insn&.op == :SEND0 && insn.sym.to_s == 'freeze'
-
-    previous = program.source_at(idx - 1)
-    %i[ARRAY HASH STRING ARYCAT].include?(previous&.op) && previous.reg == insn.reg
+    insn&.op == :SEND0 && insn.sym.to_s == 'freeze'
   end
 
   def omitted_def?(insn, owner, omitted)
