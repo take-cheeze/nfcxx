@@ -172,6 +172,9 @@ class CodeGen
     # exclusive with `has_blk`.
     needs_blk_param = yields_block_param?(irep, block_fallback_regions)
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
+    # OPTIONAL_REST: optionals with a rest parameter (see optional_rest_arg_table); the rest is taken below.
+    opt_rest = !mandatory_ok && opt_jmp_targets.nil? && (rest_table = optional_rest_arg_table(irep))
+    opt, opt_jmp_addrs, opt_jmp_targets = rest_table if opt_rest
     # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: tried whenever
     # mandatory_ok is false, whether or not the optional table resolved (the
     # KEY_P/KARG scan is whole-irep).
@@ -191,7 +194,7 @@ class CodeGen
     # method_missing(name, *args, &block)`); both are exclusive with
     # mandatory_ok/opt_jmp_targets/kw_table, whose predicates require rest and
     # block to be zero.
-    has_rest = (mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)
+    has_rest = opt_rest || ((mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep))
     has_blk = (mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep)
     # CORE_BLOCK_OPT: optionals and `&blk` together (`any?(pattern = NONE, &block)`). The
     # block sits after the optionals (OP_ENTER blk_pos), so it is the same extra
@@ -714,11 +717,16 @@ class CodeGen
       # Array the interpreter puts in the rest register.
       mand_names = arg_names.first(mand)
       rest_name = arg_names.last
+      # OPTIONAL_REST: the optionals sit between the mandatory and the rest registers; `|` leaves an omitted one nil.
+      opt_names = opt.positive? ? arg_names[mand, opt] : []
       mand_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      opt_names.each { |a| out << "  mrb_value #{a} = mrb_nil_value();\n" }
       out << "  const mrb_value* bc2cpp_rest_ptr;\n"
       out << "  mrb_int bc2cpp_rest_len;\n"
-      fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join + '*'
-      ptrs = (mand_names.map { |a| "&#{a}" } + ['&bc2cpp_rest_ptr', '&bc2cpp_rest_len']).join(', ')
+      fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join
+      fmt += '|' + 'o' * opt if opt_names.any?
+      fmt += '*'
+      ptrs = (mand_names.map { |a| "&#{a}" } + opt_names.map { |a| "&#{a}" } + ['&bc2cpp_rest_ptr', '&bc2cpp_rest_len']).join(', ')
       # REST_BLOCK_COMBINED_SUPPORT: `*` and `&` combine in one mrb_get_args call.
       if has_blk
         out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
@@ -728,8 +736,15 @@ class CodeGen
       out << "  bc2cpp_check_argc(M, #{mand}, -1);\n"
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       out << "  mrb_value #{rest_name} = mrb_ary_new_from_values(M, bc2cpp_rest_len, bc2cpp_rest_ptr);\n"
-      call_args = mand_names + [rest_name]
+      call_args = mand_names + opt_names + [rest_name]
       call_args << 'bc2cpp_blk' if has_blk
+      if opt_names.any?
+        # The count of optionals this call supplied, as OP_ENTER reads it (argc - mandatory, clamped to 0..opt).
+        out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
+        out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
+        out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
+        call_args << 'bc2cpp_given_opt'
+      end
       out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
     else
       # Each local's type must match what its mrb_get_args format character writes:

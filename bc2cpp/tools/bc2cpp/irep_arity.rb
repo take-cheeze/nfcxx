@@ -319,6 +319,21 @@ def optional_arg_table(irep)
   [opt, jmps.map(&:addr), jmps.map { |i| i.jmp_addr }]
 end
 
+# OPTIONAL_REST: the optional jump table of `def f(a, b = 1, *rest)` (ENTER n:o:r:0:0:0:0:0). compile_method asks for it
+# only; optional_arg_table keeps refusing a rest, since its direct-call callers do not pass one.
+def optional_rest_arg_table(irep)
+  enter = irep.enter
+  return nil unless enter
+
+  _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
+  return nil unless opt.positive? && rest.positive? && mand2.zero? && kw.zero? && kwrest.zero? && block.zero?
+
+  jmps = instruction_run(irep, irep.enter_index + 1, opt + 1)
+  return nil unless jmps && jmps.all? { |i| i.op == :JMP }
+
+  [opt, jmps.map(&:addr), jmps.map(&:jmp_addr)]
+end
+
 # CORE_BLOCK_OPT: optional_arg_table for `def f(a, b = 1, &blk)` (ENTER n:o:0:0:0:0:1:0):
 # the same jump table with the block field set. Only compile_method asks for it, so no
 # direct call is built for such a method (pure_mandatory_or_optional_arity? refuses it).
