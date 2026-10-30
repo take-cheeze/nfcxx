@@ -32,7 +32,7 @@ class CodeGen
     bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     paired_exec = bodies.keys.to_set { |idx| idx + 1 }
     unsupported = program.each_source.reject do |insn, idx|
-      %i[TDEF SDEF].include?(insn.op) || (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
+      %i[TDEF SDEF ALIAS].include?(insn.op) || (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx))
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
@@ -47,6 +47,9 @@ class CodeGen
     # in CLASS_BODY_OPS, and lexical_module_function_self_target finds nothing under a nil name.
     owner_def = Struct.new(:owner, :core, :name, :irep).new(owner, false, nil, irep)
     lines = +''
+    # The instance methods this body has registered so far: an alias may name only one of them (its old name must exist
+    # when the unit runs, and the gem's own registrations come after the units).
+    registered = Set.new
     program.each_source do |insn, idx|
       next if paired_exec.include?(idx) && insn.op == :EXEC
 
@@ -67,8 +70,14 @@ class CodeGen
         registration = class_body_registration(insn, irep, owner)
         return [nil, [insn.op]] unless registration
 
+        registered << insn.sym.to_s if insn.op == :TDEF
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+      elsif insn.op == :ALIAS
+        line = class_body_alias(insn, registered)
+        return [nil, [:ALIAS]] unless line
+
+        lines << line
       else
         lines << compile_insn(insn, irep, owner_def, idx)
       end
@@ -204,6 +213,17 @@ class CodeGen
     return nil unless call
 
     "  #{call}(M, mrb_class_ptr(self), #{c_string_literal(compiled[:name])}, #{compiled[:entry]}, #{compiled[:aspec]});\n"
+  end
+
+  # The call an `alias NEW OLD` in a class body makes (vm.c OP_ALIAS: mrb_alias_method(target, NEW, OLD)). It runs after
+  # the body registered OLD, so OLD exists. Nil when OLD is not a method this body has registered (an inherited, native
+  # or omitted method): the unit could not find it.
+  def class_body_alias(insn, registered)
+    old = insn.first_of(:name)&.value.to_s
+    return nil unless registered.include?(old)
+
+    "  mrb_alias_method(M, mrb_class_ptr(self), mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), " \
+      "mrb_intern_cstr(M, #{c_string_literal(old)}));\n"
   end
 
   def omitted_def?(insn, owner, omitted)

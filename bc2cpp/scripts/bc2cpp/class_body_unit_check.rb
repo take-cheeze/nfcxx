@@ -117,4 +117,44 @@ suite.compile(DEFS) do |ireps, root|
               code.include?('mrb_symbol_value(mrb_intern_cstr(M, "route"))') && code.include?('mrb_symbol_value(mrb_intern_cstr(M, "make"))'))
 end
 
+ALIASED = <<~'RUBY'
+  class Router
+    def route(x)
+      x
+    end
+    alias path route
+  end
+RUBY
+
+INHERITED = <<~'RUBY'
+  class Router
+    alias append push
+  end
+RUBY
+
+suite.compile(ALIASED) do |ireps, root|
+  body = ireps.values.find { |irep| BytecodeIR.for(irep).each_source.any? { |insn, _| insn.op == :TDEF } }
+  registry = build_registry(ireps, root)[0]
+  gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  gen.compiled_methods = BytecodeIR.for(body).each_source.filter_map do |insn, _|
+    next unless insn.op == :TDEF
+
+    label = body.reps[insn.def_child_index]
+    method = gen.compile_method(label)
+    [label, method.merge(label: label)] if method
+  end.to_h
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
+  alias_line = code.index('mrb_alias_method(M, mrb_class_ptr(self), ')
+  define_line = code.index('mrb_define_method(M, mrb_class_ptr(self), ')
+  suite.check('an alias of a method the body registered earlier is a call after that registration',
+              alias_line && define_line && alias_line > define_line &&
+              code.match?(/mrb_alias_method\(M, mrb_class_ptr\(self\), mrb_intern_cstr\(M, "(\\x[0-9a-f]{2})+"\), mrb_intern_cstr\(M, "(\\x[0-9a-f]{2})+"\)\);/))
+end
+
+suite.compile(INHERITED) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  suite.check('an alias of a method the body does not register is refused', gen.compile_top_class_units(ireps.fetch(root)).empty?)
+end
+
 suite.finish!
