@@ -74,7 +74,7 @@ class CodeGen
       (%i[CLASS MODULE SCLASS].include?(insn.op) && bodies.key?(idx)) || (%i[CLASS MODULE].include?(insn.op) && !bodies.key?(idx)) ||
       (insn.op == :SCLASS && !bodies.key?(idx) && self_singleton_open?(program, idx)) ||
         (insn.op == :EXEC && paired_exec.include?(idx)) || (insn.op == :LAMBDA && free_lambda_irep(insn, irep)) ||
-        literal_native_send?(program, idx)
+        literal_native_send?(program, irep, idx)
     end.map { |insn, _| insn.op }.uniq - CLASS_BODY_OPS
     return [nil, unsupported] unless unsupported.empty?
     # SETCONST writes to the body's target class; in a singleton body that is the singleton class, which the owner
@@ -144,6 +144,8 @@ class CodeGen
       elsif %i[SSEND SSEND0].include?(insn.op)
         # A self send (attr_accessor, include, private, ...) is left to the VM: the residual bytecode still runs the body.
         lines << "  // #{insn.sym} (self send) left to the VM\n"
+      elsif literal_length_send?(program, irep, idx)
+        lines << literal_length_line(program, irep, idx)
       elsif literal_freeze?(program, idx)
         lines << "  r#{insn.reg} = mrb_obj_freeze(M, r#{insn.reg});\n"
       elsif insn.op == :ALIAS && alias_handled_by_ir?(irep, idx, owner)
@@ -439,7 +441,7 @@ class CodeGen
 
   # A SEND0 `to_a` on the register a Range literal was just built into: the literal fixes the receiver's class, so the
   # send can take the compiled core body (Range#to_a).
-  def literal_native_send?(program, idx)
+  def literal_native_send?(program, irep, idx)
     insn = program.source_at(idx)
     return false unless insn.op == :SEND0
 
@@ -450,9 +452,40 @@ class CodeGen
     when 'to_a'
       # Range#to_a is a core body (its super resolves through Enumerable); the receiver's class is known from the literal.
       previous.op == :RANGE_INC
+    when 'length', 'size'
+      !literal_string_counts(previous, irep).nil?
     else
       false
     end
+  end
+
+  # A `length` or `size` SEND0 on the String literal just built into its register: folded to the literal's count.
+  def literal_length_send?(program, irep, idx)
+    insn = program.source_at(idx)
+    %w[length size].include?(insn.sym.to_s) && literal_native_send?(program, irep, idx)
+  end
+
+  # [byte count, character count] of a STRING literal, or nil when it is not a String pool entry or its bytes are not
+  # valid UTF-8 (then no character count is taken). The two counts are what RSTRING_CHAR_LEN gives with and without
+  # MRB_UTF8_STRING; the C arm is chosen by the preprocessor, so the fold follows the build's own setting.
+  def literal_string_counts(insn, irep)
+    return nil unless insn&.op == :STRING
+
+    entry = irep.pool[insn.pool_index.to_i]
+    return nil unless entry.is_a?(String)
+
+    utf8 = entry.dup.force_encoding(Encoding::UTF_8)
+    return nil unless utf8.valid_encoding?
+
+    [entry.b.bytesize, utf8.length]
+  end
+
+  # The fold's C text: the literal's count as the result register, under MRB_UTF8_STRING or not.
+  def literal_length_line(program, irep, idx)
+    insn = program.source_at(idx)
+    bytes, chars = literal_string_counts(program.source_at(idx - 1), irep)
+    "#ifdef MRB_UTF8_STRING\n  r#{insn.reg} = mrb_int_value(M, #{chars});\n" \
+      "#else\n  r#{insn.reg} = mrb_int_value(M, #{bytes});\n#endif\n"
   end
 
   # A `freeze` with no arguments on the register a body holds, emitted as mrb_obj_freeze (Object#freeze) rather than a

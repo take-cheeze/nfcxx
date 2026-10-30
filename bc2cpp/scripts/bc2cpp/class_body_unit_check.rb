@@ -282,12 +282,28 @@ RANGE_TO_A = <<~'RUBY'
   end
 RUBY
 
-# A `length` on a String literal has no public API for the character count (RSTRING_CHAR_LEN is string.c's own
-# macro), so there is no native row for it: its body refuses.
+# A `length` on a String literal folds to the literal's count: the byte count without MRB_UTF8_STRING, the character
+# count with it (the preprocessor picks the arm). "ab" is two of both, so the fold is checked on a non-ASCII literal too.
+LITERAL_LENGTH_UTF8 = <<~'RUBY'
+  class Router
+    N = "あb".length
+  end
+RUBY
+
 suite.compile(LITERAL_LENGTH) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('a length on a String literal refuses its body (no public API for the character count)',
-              gen.compile_top_class_units(ireps.fetch(root)).empty?)
+  units = gen.compile_top_class_units(ireps.fetch(root))
+  suite.check('a length on a String literal folds into the unit (no dynamic send)',
+              units.map { |unit| unit[:path] } == %w[Router] && units.first[:code].include?('mrb_int_value(M, 2);') &&
+              !units.first[:code].include?('"length"'))
+end
+
+suite.compile(LITERAL_LENGTH_UTF8) do |ireps, root|
+  gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code = gen.compile_top_class_units(ireps.fetch(root)).first&.dig(:code).to_s
+  suite.check('a length on a non-ASCII literal folds to both the byte and the character count',
+              code.include?('#ifdef MRB_UTF8_STRING') && code.include?('mrb_int_value(M, 2);') &&
+              code.include?('mrb_int_value(M, 4);'))
 end
 
 suite.compile(RANGE_TO_A) do |ireps, root|
