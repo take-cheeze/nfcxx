@@ -86,14 +86,14 @@ listed = registration.call(unregistered: Set['VFix#pruned', 'VFix#[]', 'VFix.sin
 suite.check('an unlisted entry is registered', listed.include?('vfix_kept, MRB_ARGS_NONE())'))
 suite.check('a listed entry is not registered', !listed.include?('vfix_pruned') && !listed.include?('vfix_cpruned'))
 suite.check('a listed operator entry goes to bc2cpp_left_out with its name',
-            listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "\[\]", false\);$/))
+            listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "\\x5b\\x5d", false\);$/))
 suite.check('a listed entry goes to bc2cpp_left_out, with its singleton flag',
             listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "[^"]+", false\);$/) &&
             listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "[^"]+", true\);$/))
 left_out = listed[/static void bc2cpp_left_out\(.*?^}/m].to_s
 suite.check('bc2cpp_left_out registers the stub only in a verify build, and removes the definition otherwise',
             left_out.match?(/#if defined\(BC2CPP_UNREGISTERED_VERIFY\)\n[^#]*bc2cpp_unregistered_stub[^#]*#else\n[^#]*mrb_remove_method/m))
-extra = registration.call(extra: 'VFix#pruned,VFix.singleton#cpruned,RGSS::VNat#gone')
+extra = registration.call(extra: 'VFix#pruned,VFix#[],VFix.singleton#cpruned,RGSS::VNat#gone')
 suite.check('BC2CPP_UNREGISTERED_EXTRA leaves the entry unregistered', extra == listed)
 none = registration.call(unregistered: Set.new)
 suite.check('with nothing listed there is no stub', !none.include?('bc2cpp_unregistered_stub'))

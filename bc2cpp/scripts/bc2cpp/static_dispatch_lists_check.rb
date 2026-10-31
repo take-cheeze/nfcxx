@@ -134,7 +134,7 @@ rom = [{ mt_class: 'Array', kind: 'OPSYM', cname: 'aref', name: '[]', fn: 'mrb_a
 suite.check('a proven operator is a ROM candidate, an unproven dynamic name is not',
             cnc.candidates(rom, Set['freeze'], Set.new, { '[]' => true }) == ['Array#[]'])
 suite.check('without the verdict no operator is a ROM candidate',
-            cnc.candidates(rom, Set.new, Set.new, {}) == [])
+            cnc.candidates(rom, Set['freeze'], Set.new, {}) == [])
 
 SOURCE = <<~'RUBY'
   class VFix
