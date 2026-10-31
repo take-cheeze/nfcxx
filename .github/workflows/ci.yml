@@ -70,6 +70,8 @@ jobs:
               tests/cxx-driver/run.sh
               tests/determinism/run.sh
               tests/float-to-int/run.sh
+          - name: --cosmo routing (stand-in cosmocc; the real one runs when installed)
+            run: tests/cosmo/run.sh
           - name: real-world tinyxml2, nlohmann/json, and {fmt}
             run: |
               tests/realworld/run.sh
