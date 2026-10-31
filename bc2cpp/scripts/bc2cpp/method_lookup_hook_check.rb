@@ -45,6 +45,12 @@ Dir.mktmpdir('method-lookup-hook') do |dir|
     static struct RClass *expected_start, *expected_owner;
     static mrb_value answer(mrb_state *mrb, mrb_value self) { return mrb_fixnum_value(42); }
     #ifdef MRB_USE_METHOD_LOOKUP_HOOK
+    static unsigned startup_core, startup_gems;
+    static void startup_observe(mrb_state *mrb, struct RClass *start, struct RClass *owner,
+                                mrb_sym mid, const mrb_method_t *method) {
+      if (mrb->bootstrapping) startup_core++;
+      else startup_gems++;
+    }
     static void observe(mrb_state *mrb, struct RClass *start, struct RClass *owner,
                         mrb_sym mid, const mrb_method_t *method) {
       if (mid != target) return;
@@ -102,6 +108,10 @@ Dir.mktmpdir('method-lookup-hook') do |dir|
       assert(MRB_METHOD_UNDEF_P(method));
       #ifdef MRB_USE_METHOD_LOOKUP_HOOK
       assert(misses == 2);
+      mrb_state *early = mrb_open_with_method_lookup_hook(startup_observe);
+      assert(early && !early->exc && early->method_lookup_hook == startup_observe);
+      assert(startup_core > 0);
+      mrb_close(early);
       mrb_state *other = mrb_open();
       assert(other && other->method_lookup_hook == NULL);
       mrb_close(other);
