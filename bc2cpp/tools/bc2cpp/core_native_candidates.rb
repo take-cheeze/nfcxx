@@ -98,15 +98,18 @@ module CoreNativeCandidates
 
   # Adds what `irep` may look up to `names` and its fragment-shaped pool strings to `fragments`: every symbol of the
   # irep except one only a DEF names, since that operand defines the method. `own` is the name of the method whose
-  # body this is: SUPER looks it up again in the ancestors, as an operator opcode does its operator. An irep with an ALIAS keeps every symbol: the disassembly
-  # that decodes operands shows the alias's old name, the one looked up, as the new one.
+  # body this is: SUPER looks it up again in the ancestors, as an operator opcode does its operator. Both ALIAS
+  # operands count; an unresolved alias operand keeps every symbol conservatively.
   def lookup_names(irep, own, names, fragments)
     syms = irep.syms.map(&:to_s)
     defined = Set.new
     used = Set.new
     aliased = false
     BytecodeIR.for(irep).each_source do |insn, _index|
-      aliased ||= insn.op == :ALIAS
+      if insn.op == :ALIAS
+        original = insn.first_of(:name)&.value
+        if original then used << original.to_s else aliased = true end
+      end
       names << own if own && insn.op == :SUPER
       # An operator opcode sends its name without a symbol operand (a Ruby-defined `+` runs from ADD).
       names << IMPLICIT_DISPATCH_NAMES[insn.op] if IMPLICIT_DISPATCH_NAMES.key?(insn.op)
