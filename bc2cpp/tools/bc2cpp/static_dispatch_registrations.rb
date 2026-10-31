@@ -66,9 +66,14 @@ require_relative 'core_enumerator_free'
 require_relative 'core_methods'
 require_relative 'core_native_candidates'
 require_relative 'native_owner_map'
+require_relative 'index_closed_planner'
+require_relative 'closed_world'
+require_relative 'alias_sites'
+require_relative 'define_method_sites'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
+
   # Ops::SEND plus LOADSYM, whose symbol operand is read as a method name.
   SEND_OPS = (BytecodeIR::Ops::SEND | %i[LOADSYM]).freeze
   NAME_ARG = %r{:([\w+\-*/<>=!?\[\]&|^~%@]+)}
@@ -100,6 +105,134 @@ module StaticDispatchRegistrations
   ].to_set.freeze
 
   module_function
+
+  # INDEX_PROVEN_NAMES: operator names the INDEX_CLOSED planner verdict admits
+  # despite failing IDENT (see dynamic_name?). The verdict must come from the
+  # same closure the generator uses: a name the generator still dispatches
+  # by-name while the proof unregisters it would ship a NoMethodError.
+  # BC2CPP_INDEX_ELIMINATE=0 keeps every operator dynamic, as before.
+  INDEX_PROVEN_NAMES = %w[[] []=].freeze
+
+  def index_eliminate?
+    ENV['BC2CPP_INDEX_ELIMINATE'] != '0'
+  end
+
+  # The planner verdict for INDEX_PROVEN_NAMES over the closed world: name =>
+  # true when every class that can answer it is covered by a native arm or a
+  # direct Ruby chain (so no runtime lookup can reach it). Refusals admit
+  # nothing; the names stay dynamic, as before. The verdict is computed once
+  # per analyze from the same inputs both the open and the closed analysis
+  # share, so the two fixpoints admit (and run) exactly the same names.
+  def index_proven(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
+    return {} unless index_eliminate?
+
+    planner = index_planner(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
+    return {} unless planner
+
+    INDEX_PROVEN_NAMES.to_h { |name| [name, !planner.plan(name).nil?] }
+  end
+
+  # A planner over the closed world the proof already holds: the engine's
+  # ireps and registry, the native sources the generator scans, and a
+  # ClosedWorld over the same inputs the generator's own front end assembles
+  # (build_registry's class tables, the closed build's gem closure). nil when
+  # the world itself refuses (global refusal, method_missing, non-exact
+  # instances): nothing is proven then.
+  def index_planner(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
+    root = File.expand_path(repo_root)
+    gems = NomethodReviewedProbe.closed_gems(root)
+    native_paths, _ruby_paths = bc2cpp_closed_world_outside_srcs('closed', gems, root)
+    native_sources = extract_native_method_sources(native_paths)
+    engine_ireps = ireps.reject { |label, irep| label != engine_tuple[1] && CoreDefs.core_source?(irep.file) }
+    engine_registry = registry.transform_values { |defs| defs.reject(&:core) }.reject { |_, defs| defs.empty? }
+    world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry,
+                            class_decls: engine_tuple[7], walked: engine_tuple[8] & engine_ireps.keys,
+                            native_paths: native_paths,
+                            ruby_paths: bc2cpp_closed_world_outside_srcs('closed', gems, root).last,
+                            module_names: engine_tuple[11])
+    return nil unless world.global_refusal.nil? && world.exact_instances_singleton_free? &&
+                      world.method_missing_classes.empty?
+
+    struct_members = engine_tuple[6]
+    IndexClosedPlanner.new(
+      answers: CallFacts::Answers.new(
+        CallFacts::World.new(closed_world: world, registry: engine_registry, superclass_of: superclass_of,
+                             included: engine_tuple[3], prepended: engine_tuple[4],
+                             unknown_mixins: engine_tuple[5], native_sources: native_sources,
+                             installed: index_installed_names(engine_ireps, engine_registry, world),
+                             instance_installed: index_installed_names(engine_ireps, engine_registry, world,
+                                                                       skip_class_object: true),
+                             compiled_core: ->(name) { {} })),
+      registry: engine_registry,
+      superclass_of: superclass_of,
+      struct_members: struct_members,
+      source: index_planner_source(native_sources),
+      gems: new_to_set(gems),
+      world: world,
+      enabled: true,
+      blocked_name: ->(_name) { false }
+    )
+  end
+
+  # The installed-name sets CallFacts needs: method names the closed world
+  # aliases, defines by Symbol or undefines (nil when some installer's names
+  # are not literal). CodeGen#collect_installed_names, over the engine's own
+  # ireps: mruby's own Ruby only renames core methods, never the engine's.
+  def index_installed_names(ireps, registry, world, skip_class_object: false)
+    names = Set.new
+    children = ireps.values.flat_map(&:reps).compact.to_set
+    installer_sends = %w[alias_method define_method undef_method remove_method].freeze
+    ireps.each do |label, irep|
+      next if children.include?(label) && CoreDefs.core_source?(irep.file)
+
+      scoped = skip_class_object && world.class_object_body?(label)
+      BytecodeIR.for(irep).each_source do |insn, idx|
+        case insn.op
+        when :ALIAS, :UNDEF
+          next if insn.op == :ALIAS && AliasSites.settled?(registry, label, idx)
+
+          names << insn.sym unless scoped
+        when :LOADSYM
+          return nil if installer_sends.include?(insn.sym)
+        when :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB
+          next unless installer_sends.include?(insn.sym)
+          next if insn.sym == 'define_method' && DefineMethodSites.settled?(registry, irep, idx, ireps)
+          next if insn.sym == 'alias_method' && AliasSites.settled?(registry, label, idx)
+
+          syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
+          return nil unless syms && !syms.empty?
+
+          names.merge(syms) unless scoped && BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+        end
+      end
+    end
+    names
+  end
+
+  # The whitespace-stripped source text the arm verification reads, by the
+  # same roots the generator resolves: a repo path for `mruby-...`, the mruby
+  # tree (found from its src/array.c) otherwise.
+  def index_planner_source(native_sources)
+    flat = nil
+    mroot = nil
+    lambda do |relative|
+      flat ||= native_sources.each_value.flat_map(&:to_a)
+      path = if relative.start_with?('mruby-')
+               flat.find { |p| p.end_with?("/#{relative}") }
+             else
+               mroot ||= flat.find { |p| p.end_with?('/src/array.c') }&.delete_suffix('/src/array.c') || false
+               mroot && File.join(mroot, relative)
+             end
+      next unless path && File.file?(path)
+
+      @index_planner_sources ||= {}
+      @index_planner_sources[path] ||= File.read(path, encoding: 'UTF-8').gsub(%r{/\*.*?\*/}m, '').gsub(/\s+/, '')
+    end
+  end
+
+  def new_to_set(gems)
+    gems.keys.to_set
+  end
 
   def unescape(s)
     s.gsub(/\\x(\h{2})|\\([0-7]{1,3})|\\(.)/m) do
@@ -720,10 +853,15 @@ module StaticDispatchRegistrations
   # empty. unregistered: what the build being proven leaves out (default: its own list). The probe generates with
   # BC2CPP_BUILD_NAME=closed, so both lists are missing from its registrations whichever build is proven.
   def analyze(repo_root, mrbc, lists: StaticDispatchLists::EMPTY, lists_path: 'none', unregistered: nil,
-              closed_only: false)
+              closed_only: false, force: Set.new)
     both = lists.open | lists.closed
     unregistered ||= closed_only ? both : lists.open
     absent = both | unregistered
+    # Method bodies the closed fixpoint ran: the open fixpoint runs them too,
+    # so a cascade the closed side sees (a proven body running its callees)
+    # cannot leave the open side behind and break the open-superset invariant.
+    # Closed-world only; the closed analysis always passes none.
+    ran = Set.new
     # Every gem, from one shared analysis. The generation depends only on the lists, so the open and the closed
     # analysis of a pass share it.
     fresh = ((@fresh_generation ||= {})[StaticDispatchLists.dump(lists)] ||=
@@ -733,6 +871,9 @@ module StaticDispatchRegistrations
       [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
     end
     ireps, registry, superclass_of, struct_owners, engine_tuple = closed_world(repo_root, mrbc)
+    # INDEX_CLOSED verdict for `[]` / `[]=`: shared by the open and the closed
+    # analysis, so both fixpoints admit (and run) exactly the same names.
+    proven = index_proven(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
     subclassed = subclassed_paths(repo_root, superclass_of, closed_only: closed_only)
     # SYMBOL_USES (closed only): the Symbol literals that name a looked-up method, or nil (every one does).
     symbol_lookups = closed_only ? StaticDispatchSymbolUses.lookups(ireps) : nil
@@ -879,10 +1020,12 @@ module StaticDispatchRegistrations
       next true if m.nil?
 
       owner, name = body_of[m]
-      if overridden.include?("#{owner}##{name}")
+      key = "#{owner}##{name}"
+      if overridden.include?(key) && !proven[name] && !force.include?(key)
         bytecode_blocks && label != m ? true : load_bodies.include?(m)
       else
-        dynamic.include?(name)
+        ran << key if dynamic.include?(name) || proven[name] || force.include?(key)
+        dynamic.include?(name) || proven[name] || force.include?(key)
       end
     end)
 
@@ -896,10 +1039,10 @@ module StaticDispatchRegistrations
     end
 
     core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }, registry, superclass_of,
-                                                engine_tuple, symbol_lookups) : nil
+                                                engine_tuple, symbol_lookups, proven) : nil
 
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
-      closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups,
+      closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups, proven: proven, ran: ran,
       core_excluded: core_excluded }
   end
 
@@ -907,19 +1050,21 @@ module StaticDispatchRegistrations
   # run-time registrations it removes]. Every Ruby
   # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`), whose method
   # bodies count while their names are reachable (LIVE_CORE) -- and every native source, with the generated code.
-  def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of, engine_tuple, symbol_lookups)
+  def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of, engine_tuple, symbol_lookups,
+                    proven = {})
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
     names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core,
                                                       diagnostic_literals: !symbol_lookups.nil?)
-    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
+    entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") },
+                                                   operator_names: !proven.empty?)
     map = NativeOwnerMap.build(native)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
                                            engine_tuple, symbol_lookups, repo_root)
-    ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries)
-    [CoreNativeCandidates.candidates(entries, names, fragments),
-     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby + ruby).uniq.sort]
+    ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries, proven)
+    [CoreNativeCandidates.candidates(entries, names, fragments, proven),
+     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort]
   end
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body
@@ -1265,10 +1410,12 @@ module StaticDispatchRegistrations
 
   def eligible(analysis)
     re = owner_re(analysis[:closed_only])
+    proven = analysis[:proven] || {}
     analysis[:registered].select do |m|
       m[:owner].match?(re) &&
-        !dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments],
-                       analysis[:suffix_bases] || analysis[:dynamic])
+        (proven[m[:name]] ||
+          !dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments],
+                         analysis[:suffix_bases] || analysis[:dynamic]))
     end
   end
 
@@ -1308,7 +1455,7 @@ module StaticDispatchRegistrations
   def pass(repo_root, mrbc, lists, lists_path, digest)
     names = ->(analysis) { eligible(analysis).to_set { |m| "#{m[:owner]}##{m[:name]}" } }
     closed = analyze(repo_root, mrbc, lists: lists, lists_path: lists_path, closed_only: true)
-    open = analyze(repo_root, mrbc, lists: lists, lists_path: lists_path, closed_only: false)
+    open = analyze(repo_root, mrbc, lists: lists, lists_path: lists_path, closed_only: false, force: closed[:ran])
     closed_names = names.call(closed)
     open_names = names.call(open)
     missing = open_names - closed_names

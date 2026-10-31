@@ -57,6 +57,7 @@ RUBY
 ENTRIES = [
   { owner: 'VFix', name: 'kept', entry: 'vfix_kept', aspec: 'MRB_ARGS_NONE()', visibility: :public },
   { owner: 'VFix', name: 'pruned', entry: 'vfix_pruned', aspec: 'MRB_ARGS_NONE()', visibility: :public },
+  { owner: 'VFix', name: '[]', entry: 'vfix_aref', aspec: 'MRB_ARGS_REQ(1)', visibility: :public },
   { owner: 'VFix.singleton', name: 'cpruned', entry: 'vfix_cpruned', aspec: 'MRB_ARGS_NONE()', visibility: :public }
 ].freeze
 OWNERS = %w[VFix VFix.singleton].freeze
@@ -81,9 +82,11 @@ ensure
   ENV['OUT_SYMBOL'] = previous_symbol
 end
 
-listed = registration.call(unregistered: Set['VFix#pruned', 'VFix.singleton#cpruned', 'RGSS::VNat#gone'])
+listed = registration.call(unregistered: Set['VFix#pruned', 'VFix#[]', 'VFix.singleton#cpruned', 'RGSS::VNat#gone'])
 suite.check('an unlisted entry is registered', listed.include?('vfix_kept, MRB_ARGS_NONE())'))
 suite.check('a listed entry is not registered', !listed.include?('vfix_pruned') && !listed.include?('vfix_cpruned'))
+suite.check('a listed operator entry goes to bc2cpp_left_out with its name',
+            listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "\[\]", false\);$/))
 suite.check('a listed entry goes to bc2cpp_left_out, with its singleton flag',
             listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "[^"]+", false\);$/) &&
             listed.match?(/^\s*bc2cpp_left_out\(M, \w+, "[^"]+", true\);$/))
