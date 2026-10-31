@@ -22,6 +22,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     -o) out=$2; shift ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
+    -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
     -I?*|-D?*|-U?*|-std=c++*|--freestanding) opts+=("$1") ;;
     -*) ;;   # other compiler flags (-O2, -Wall, ...) do not apply
     *) src=$1 ;;
@@ -47,4 +48,8 @@ fi
 # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
 "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s"
 if [ -n "${PATHB_KEEP:-}" ]; then mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$tmp/$n.ssa" "$tmp/$n.s" "$PATHB_KEEP/"; fi
-cc -c -o "$out" "$tmp/$n.s"
+if [ -n "${NFCXX_GCC:-}" ]; then
+  as -o "$out" "$tmp/$n.s"   # cosmocc does not take assembly input; the QBE output is x86_64 ELF, as gcc-cc does (--cosmo)
+else
+  cc -c -o "$out" "$tmp/$n.s"
+fi
