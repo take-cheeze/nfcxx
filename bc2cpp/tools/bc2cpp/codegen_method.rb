@@ -1000,15 +1000,15 @@ class CodeGen
       prologue: "  if (mrb_unlikely(M->c != M->root_c)) return bc2cpp_core_interpreted(M, self, #{index});\n" }
   end
 
-  # GUARD_FIBER_FREE (BC2CPP_GUARD_FIBER_FREE=1): the Fiber half of CORE_BLOCK_GUARD, for a guarded method no
+  # GUARD_FIBER_FREE (on unless BC2CPP_GUARD_FIBER_FREE=0): the Fiber half of CORE_BLOCK_GUARD, for a guarded method no
   # Fiber.new body can reach. The test `M->c != M->root_c` can only be true while a Fiber other than the root is
   # current, and a method outside YieldReach#fiber_crossable never runs then (every call made under a Fiber body is
   # in that transitive set). Such a method needs neither its entry hand-off nor its saved bytecode: with no guard,
   # MrblibStubs keeps no bytecode for it (stub_keep_reason's `guarded`). Only in a sound world, and never for an
   # Enumerable method, whose guard also tests `each` (a test that is not about Fibers and stays as it is).
-  # Off by default, so a build without the flag emits what it always did.
+  # On by default; BC2CPP_GUARD_FIBER_FREE=0 turns it off, and then the build emits what it did before the flag.
   def guard_fiber_free?(label, d)
-    return false unless ENV['BC2CPP_GUARD_FIBER_FREE'] == '1'
+    return false if ENV['BC2CPP_GUARD_FIBER_FREE'] == '0'
     return false if d.owner == 'Enumerable' || @yield_reach.nil?
 
     # fiber_crossable runs the analysis, which sets sound?; the query order matters.
