@@ -188,18 +188,19 @@ module MrblibStubs
     true
   end
 
-# The class world of a build: the engine gems' mrblib as the load world names them (BC2CPP_LOAD_WORLD, JSON
-# {gem symbol => [files]}), plus the core mrblib the program loads (FOREIGN_RUBY_SRCS): a copy's site may be a core
-# class (IO, say) whose facts only the core files give. Nil without a load world (the rule then keeps every copied name).
-# Only the stub decision reads this world: codegen and LoadCompile keep the load world alone.
-def class_world_from_env(env)
-  return nil unless env['BC2CPP_LOAD_WORLD']
+  # The class world of a build: the engine gems' mrblib as the load world names them (BC2CPP_LOAD_WORLD, JSON
+  # {gem symbol => [files]}), plus the core mrblib the program loads (FOREIGN_RUBY_SRCS) and this generation's own
+  # Ruby sources (own_srcs). A core class of the program (IO, say) is in own_srcs and not in FOREIGN_RUBY_SRCS, and a
+  # copy's site may be such a class. Nil without a load world (the rule then keeps every copied name).
+  # Only the stub decision reads this world: codegen and LoadCompile keep the load world alone.
+  def class_world_from_env(env, own_srcs = [])
+    return nil unless env['BC2CPP_LOAD_WORLD']
 
-  world = JSON.parse(env['BC2CPP_LOAD_WORLD'])
-  core = Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', ''))
-  world['core'] = core.map { |f| File.expand_path(f) } unless core.empty?
-  ClassWorld.from_load_world(JSON.generate(world))
-end
+    world = JSON.parse(env['BC2CPP_LOAD_WORLD'])
+    core = Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', '')) + own_srcs.select { |f| f.end_with?('.rb') }
+    world['core'] = core.map { |f| File.expand_path(f) }.uniq unless core.empty?
+    ClassWorld.from_load_world(JSON.generate(world))
+  end
 
   # By name, whatever the owner: the source of every `alias`, and every Symbol an irep that sends a COPYING_SENDS
   # name loads.
