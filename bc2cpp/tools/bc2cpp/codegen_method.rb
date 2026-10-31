@@ -654,7 +654,7 @@ class CodeGen
     @runtime_installed_names = nil
     if @resumable
       out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}", arg_names, @resumable, needs_blk_param || has_blk,
-                                      optional: @resumable.optional.to_i)
+                                      optional: @resumable.optional.to_i, rest: has_rest)
       first_error = @resumable.reasons.first || out[/^\s*#error (.*)$/, 1]
       first_error = 'a block call that is neither an inlined step/upto/downto loop nor a plain block function' if first_error&.match?(/unhandled opcode (BLOCK|SENDB|SSENDB)/)
       if first_error && (@resumable_warned ||= Set.new).add?(label)

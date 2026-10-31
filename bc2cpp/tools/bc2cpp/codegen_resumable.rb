@@ -162,9 +162,15 @@ class CodeGen
     # enter_fields: required, optional, rest, post, keyword, keyword rest, block. Required positional arguments are
     # copied into the frame when the call starts (resumable_entry_function); the others are not supported yet.
     fields = (irep.enter ? irep.enter.enter_fields.map(&:to_i) : []) + [0] * 7
-    return 'takes a rest, post or keyword argument' if fields[2..5].any?(&:positive?)
-    # OPTIONAL_ARGS: only the shape optional_arg_table recognises (a jump table of JMPs after ENTER, no block).
-    return 'takes optional arguments in a shape the step cannot enter' if fields[1].positive? && optional_arg_table(irep)[1].nil?
+    return 'takes a post or keyword argument' if fields[3..5].any?(&:positive?)
+    # OPTIONAL_ARGS: only the shape optional_arg_table recognises (a jump table of JMPs after ENTER, no block). With a
+    # rest argument the table is optional_rest_arg_table's (REST_ARGS).
+    if fields[1].positive?
+      table = fields[2].positive? ? optional_rest_arg_table(irep) : optional_arg_table(irep)
+      return 'takes optional arguments in a shape the step cannot enter' unless table && table[1]
+    end
+    # REST_ARGS: a rest argument the wrapper builds into an Array (rest_only_arity? is the shape it recognises).
+    return 'takes a rest argument in a shape the step cannot enter' if fields[2].positive? && fields[1].zero? && !rest_only_arity?(irep)
     return 'has a rescue or ensure handler' unless irep.catch_handlers.empty?
 
     nil
@@ -454,7 +460,7 @@ class CodeGen
   # `_impl`, the function the registered entry calls: hands a VM-called invocation to the
   # bytecode driver and steps to completion when called from C (where Fiber.yield could
   # not have worked in the bytecode either).
-  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0)
+  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false)
     thunk = "#{step_name}_thunk"
     if arg_names.empty? && !blk
       # No arguments: the frame starts empty, and the driver's first step creates it.
@@ -503,6 +509,8 @@ if blk
   fill << "F->regs[#{block_reg_slot}] = bc2cpp_blk;" if block_reg_slot
 end
 optional_head = optional.positive? ? "    F->state = -(bc2cpp_given_opt + 1);\n" : ''
+# REST_ARGS: the wrapper checked the count and built the rest Array, so the impl checks nothing.
+argc_check = rest ? '' : "bc2cpp_check_argc(M, #{req}, #{n});\n  "
 head = <<~CPP
   static mrb_value #{thunk}(mrb_state* M, mrb_value) {
     mrb_value self, frame, resume;
@@ -510,14 +518,13 @@ head = <<~CPP
     return #{step_name}(M, self, frame, resume);
   }
   mrb_value #{impl_name}(mrb_state* M, mrb_value self, #{params}) {
-    bc2cpp_check_argc(M, #{req}, #{n});
-    bc2cpp_resumable_init(M);
+  #{argc_check}bc2cpp_resumable_init(M);
     mrb_value frame = mrb_nil_value();
     Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
 CPP
 tail = <<~CPP
     mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
-    if (bc2cpp_resumable_exec_ok(M, #{optional.positive? ? 'mrb_get_argc(M)' : n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);
+    if (bc2cpp_resumable_exec_ok(M, #{optional.positive? || rest ? 'mrb_get_argc(M)' : n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);
     mrb_value resume = mrb_nil_value();
     for (;;) {
       mrb_value result = #{step_name}(M, self, frame, resume);
