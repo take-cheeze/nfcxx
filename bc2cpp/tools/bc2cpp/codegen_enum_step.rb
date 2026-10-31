@@ -69,7 +69,7 @@ module EnumStep
     def driver_name = driver_method || DRIVER_METHOD
 
     # The driver's C++ string constant, named after the step, or after the method for a form with no C step.
-    def src_name = c_step ? "#{c_step.delete_suffix('_step')}_driver_src" : "bc2cpp_#{owner.downcase}_#{method_name}_driver_src"
+    def src_name = c_step ? "#{c_step.delete_suffix('_step')}_driver_src" : "bc2cpp_#{EnumStep.slug(owner.downcase)}_#{EnumStep.slug(method_name)}_driver_src"
 
     # The arguments after the registration's index that bc2cpp_enum_step_save takes for this form.
     def save_args = [c_step || 'nullptr', c_open || 'nullptr', src_name, *(driver_method ? ["\"#{driver_name}\""] : [])].join(', ')
@@ -92,17 +92,56 @@ module EnumStep
     %w[Hash each_value] => Form.new('Hash', nil, nil, generated('mrblib/hash.rb', 'Hash', 'each_value', '__bc2cpp_each_value_driver'), nil, true, 'each_value', '__bc2cpp_each_value_driver')
   }.freeze
 
+  # Where each guarded core method's body is defined, by irep label: [file, def line]. bc2cpp sets it with the guard set
+  # (CodeGen.core_guarded), before the stub pass and the emission read the forms. Nil: no generated forms.
+  class << self
+    attr_reader :sources
+
+    def sources=(value)
+      @default_forms = {}
+      @sources = value
+    end
+  end
+
   module_function
 
   def enabled?
     ENV[FLAG] != '0'
   end
 
-  # The step form of a guarded entry, or nil: keyed by its owner and method. Instance methods only.
+  # A name as a C identifier part: ? and ! and = spelled out, anything else non-alphanumeric as _.
+  def slug(name)
+    name.gsub(/[^A-Za-z0-9_]/) { |c| { '?' => '_p', '!' => '_b', '=' => '_e' }.fetch(c, '_') }
+  end
+
+  # The driver a generated form of +name+ is saved as. each's is DRIVER_METHOD, so the owners' drivers keep their names.
+  def default_driver_name(name) = "__bc2cpp_#{slug(name)}_driver"
+
+  # The step form of a guarded entry, or nil: keyed by its owner and method, or else generated from its body. Instance
+  # methods only.
   def form_for(entry, singleton)
     return nil unless enabled? && !singleton && !entry[:guard].nil?
 
-    FORMS[[entry[:owner], entry[:name]]]
+    FORMS[[entry[:owner], entry[:name]]] || default_form(entry)
+  end
+
+  # The generated form of a guarded method with no FORMS entry: its driver is the body's own def (EnumDriverGen), read
+  # from the file and line the compiler saw. Nil when there is no source for it or the body cannot be rewritten
+  # (EnumDriverGen::Refused): such a body keeps its saved bytecode.
+  def default_form(entry)
+    file, line = sources&.[](entry[:label])
+    return nil unless file && line
+
+    @default_forms ||= {}
+    return @default_forms[entry[:label]] if @default_forms.key?(entry[:label])
+
+    @default_forms[entry[:label]] = begin
+      driver_name = default_driver_name(entry[:name])
+      text = EnumDriverGen.driver_source(file, entry[:owner], entry[:name], driver_name, line: line)
+      Form.new(entry[:owner], nil, nil, text, nil, true, entry[:name], driver_name)
+    rescue EnumDriverGen::Refused
+      nil
+    end
   end
 
   # Whether the entry's saved body may leave the binary under the flag: its form covers that body (Form#stubs_body).
@@ -116,7 +155,7 @@ module EnumStep
   def helpers(compiled)
     return '' unless enabled?
 
-    used = FORMS.values.select { |form| compiled.any? { |entry| form_for(entry, false).equal?(form) } }
+    used = compiled.filter_map { |entry| form_for(entry, false) }.uniq { |form| [form.owner, form.method_name] }
     return '' if used.empty?
 
     <<~CPP + used.map { |form| form_text(form) }.join

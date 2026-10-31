@@ -16,35 +16,45 @@ module EnumDriverGen
 
   module_function
 
-  # The driver source for +method+ of +owner+ in +mrblib_path+, named +driver_method+, as a class reopening +owner+.
-  def driver_source(mrblib_path, owner, method, driver_method)
+  # The driver source for +method+ of +owner+ in +mrblib_path+, named +driver_method+, reopening +owner+. With +line+, the
+  # def must start on that line (the body the compiler saw, when the file has more than one def of the method).
+  def driver_source(mrblib_path, owner, method, driver_method, line: nil)
     source = File.read(mrblib_path, encoding: 'UTF-8')
-    def_node = find_def(Prism.parse(source).value, owner, method) or raise Refused, "no def #{owner}##{method} in #{mrblib_path}"
+    found = find_def(Prism.parse(source).value, owner, method, line) or raise Refused, "no def #{owner}##{method} in #{mrblib_path}"
+    def_node, keyword = found
     check_rewritable(def_node, source)
     text = rewrite(source, def_node, driver_method)
     <<~RUBY
-      class #{owner}
+      #{keyword} #{owner}
       #{indent(text).rstrip}
         private :#{driver_method}
       end
     RUBY
   end
 
-  # The DefNode of +owner+#+method+ among the top-level class bodies of +node+ (no nesting: the owners here are top-level).
-  def find_def(node, owner, method)
+  # The [DefNode, 'class' | 'module'] of +owner+#+method+ among the top-level bodies of +node+ (no nesting). The owner is
+  # matched by its constant path as written ("Enumerable", "Game::Actors"), and the def by its start line when given.
+  def find_def(node, owner, method, line = nil)
     found = nil
     walk(node) do |n|
-      next unless n.is_a?(Prism::ClassNode) && n.constant_path.is_a?(Prism::ConstantReadNode) && n.constant_path.name.to_s == owner
+      next unless n.is_a?(Prism::ClassNode) || n.is_a?(Prism::ModuleNode)
+      next unless n.constant_path.location.slice == owner
+
       n.body&.body&.each do |stmt|
-        found = stmt if stmt.is_a?(Prism::DefNode) && stmt.name.to_s == method
+        next unless stmt.is_a?(Prism::DefNode) && stmt.name.to_s == method
+        next if line && stmt.location.start_line != line
+
+        found = [stmt, n.is_a?(Prism::ModuleNode) ? 'module' : 'class']
       end
     end
     found
   end
 
   def check_rewritable(def_node, source)
-    raise Refused, 'no &block parameter' unless def_node.parameters&.block
+    block = def_node.parameters&.block
+    raise Refused, 'no named &block parameter' unless block&.name
 
+    block_name = block.name.to_s
     walk(def_node) do |n|
       case n
       when Prism::DefNode
@@ -53,18 +63,21 @@ module EnumDriverGen
         raise Refused, 'super'
       when Prism::CallNode
         raise Refused, "#{n.name} reads the frame" if n.receiver.nil? && FRAME_CALLS.include?(n.name.to_s)
+      when Prism::LocalVariableWriteNode
+        raise Refused, "#{block_name} is reassigned" if n.name.to_s == block_name
       end
     end
   end
 
-  # The def's text with each yield made a block call, under the driver's name.
+  # The def's text with each yield made a call on its &block parameter, under the driver's name.
   def rewrite(source, def_node, driver_method)
+    block_name = def_node.parameters.block.name.to_s
     edits = []
     walk(def_node) do |n|
       next unless n.is_a?(Prism::YieldNode)
 
       args = n.arguments ? source.byteslice(n.arguments.location.start_offset, n.arguments.location.length) : ''
-      edits << [n.location.start_offset, n.location.end_offset, args.empty? ? 'block.call' : "block.call(#{args})"]
+      edits << [n.location.start_offset, n.location.end_offset, args.empty? ? "#{block_name}.call" : "#{block_name}.call(#{args})"]
     end
     text = source.byteslice(def_node.location.start_offset, def_node.location.length).dup
     base = def_node.location.start_offset
@@ -75,7 +88,11 @@ module EnumDriverGen
     column = def_node.location.start_column
     lines = text.lines
     lines = [lines.first] + lines.drop(1).map { |line| line.sub(/\A {0,#{column}}/, '') }
-    lines.join.sub(/\Adef #{def_node.name}\b/) { "def #{driver_method}" }
+    # The name is followed by its parameters, a space or the end of the line; \b would not match after ? or !.
+    text = lines.join.sub(/\Adef #{Regexp.escape(def_node.name.to_s)}(?=[\s(;]|\z)/) { "def #{driver_method}" }
+    raise Refused, "the def of #{def_node.name} was not renamed" unless text.start_with?("def #{driver_method}")
+
+    text
   end
 
   def indent(text) = text.lines.map { |line| line.strip.empty? ? "\n" : "  #{line}" }.join
