@@ -59,7 +59,7 @@ class CodeGen
                           'mrb_method_t m; MRB_METHOD_FROM_FUNC(m, proc_call); ' \
                           'return mrb_funcall_with_method(mrb, proc, MRB_OPSYM(aref), &m, mrb->proc_class, argc, argv, ' \
                           'mrb_nil_value()); }'],
-                  also: { 'src/vm.c' => ['return funcall_with_block_m(mrb, self, mid, argc, argv, blk, NULL, NULL);',
+                  also: { 'src/vm.c' => ['return funcall_with_block_m(mrb, self, mid, argc, argv, NULL, FALSE, blk, m, owner);',
                                          'if (fixed) { m = *fixed; ci->u.target_class = fixed_owner; } else { ' \
                                          'm = mrb_vm_find_method(mrb, ci->u.target_class, &ci->u.target_class, mid); }'] } }
     },
