@@ -169,7 +169,8 @@ check.call('flag set: Range#each registers through bc2cpp_enum_step_save with it
 check.call('flag set: the Range driver is emitted, with no C step',
            on_code.include?('def __bc2cpp_each_driver(') && !on_code.include?('bc2cpp_range_each_step'))
 check.call('flag set: Range#each no longer saves its own body', !on_code.match?(PLAIN_SAVE))
-check.call('flag set: Array#each keeps its step under the per-owner form', on_code.match?(ARRAY_STEP_SAVE))
+# Array#each takes the resumable variant (RESUMABLE_DUAL, enum_step_array_check.rb), not the per-owner step form.
+check.call('flag set: Array#each has no per-owner enum-step save', !on_code.match?(ARRAY_STEP_SAVE))
 check.call('flag set: the generated code has no #error', !on_code.include?('#error'))
 check.call('flag unset: no step text is emitted',
            !off_code.include?('bc2cpp_enum_step') && !off_code.include?('bc2cpp_range_each_step') && !off_code.include?('bc2cpp_each_step'))

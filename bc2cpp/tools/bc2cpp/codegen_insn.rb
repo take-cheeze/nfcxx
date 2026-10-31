@@ -70,6 +70,12 @@ class CodeGen
     if @resumable && (resumable_code = resumable_intercept(insn, irep, owner_def, idx, reg_offset))
       return resumable_code
     end
+    # RESUMABLE_DUAL: the variant's `recv[i]` dispatches by name, as vm.c's OP_GETIDX does for a subclass's own []
+    # (the shared index helper picks its arms from program-wide facts, which the variant does not use).
+    if @rsm_variant && insn.op == :GETIDX
+      d, s = insn.regs.first(2)
+      return "r#{unshift_proof_reg(d, reg_offset)} = mrb_funcall(M, r#{unshift_proof_reg(d, reg_offset)}, \"[]\", 1, r#{unshift_proof_reg(s, reg_offset)});\n"
+    end
     # SEALED_INT16 (sealed_int16_locals.rb): a proven int16 array's instructions go to its std::vector.
     if (sealed = sealed_int16_action(irep, idx))
       return sealed_int16_code(sealed, insn)

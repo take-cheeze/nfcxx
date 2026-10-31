@@ -6,7 +6,8 @@
 # an Array suspends through VM frames only. Unset, the generated code is what it was: Array#each's own saved bytecode.
 #
 #   generated code (needs a host mrbc)
-#     - flag set: Array#each registers through bc2cpp_enum_step_save and no longer saves its own body;
+#     - flag set: Array#each has no enum-step save and no saved body: its guard calls a resumable variant (RESUMABLE_DUAL,
+#       codegen_method.rb), so no Ruby driver is compiled at run time;
 #     - flag unset: no step text, and Array#each keeps its own saved body.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - the interpreted run (mruby's own Array#each, Fiber-based through mruby-enumerator) and the compiled run (the
@@ -183,8 +184,10 @@ off_dir = File.join(dir, 'off')
 FileUtils.mkdir_p([on_dir, off_dir])
 on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
-check.call('flag set: Array#each registers through bc2cpp_enum_step_save', on_code.match?(STEP_SAVE))
-check.call('flag set: the step function is emitted', on_code.include?('static mrb_value bc2cpp_each_step('))
+check.call('flag set: Array#each has no enum-step save', !on_code.match?(STEP_SAVE))
+check.call('flag set: the guard calls the resumable variant with the entry block',
+           on_code.include?('return Array_each_rsm_impl(M, self, bc2cpp_entry_block(M));'))
+check.call('flag set: the resumable variant step is emitted', on_code.include?('static mrb_value Array_each_rsm_step('))
 check.call('flag set: Array#each no longer saves its own body', !on_code.match?(PLAIN_SAVE))
 check.call('flag unset: no step text is emitted', !off_code.include?('bc2cpp_each_step') && !off_code.include?('bc2cpp_enum_step'))
 check.call('flag unset: Array#each keeps its own saved body', off_code.match?(PLAIN_SAVE))
@@ -219,7 +222,7 @@ else
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run is interpreted without the step', mode_line.call(interpreted)&.end_with?('step=false'))
-  check.call('the compiled run registers the step on Array', mode_line.call(compiled)&.end_with?('step=true'))
+  check.call('the compiled run installs no runtime-compiled driver on Array', mode_line.call(compiled)&.end_with?('step=false'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled
