@@ -2344,7 +2344,11 @@ if $PROGRAM_NAME == __FILE__
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   # LOAD_COMPILE (load_compile.rb): the class and module bodies of this gem's mrblib, as code gem_init runs first.
-  stub_keys = MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies,
+  # CORE_LEFT_OUT_STUBS: a core method the closed build removes at gem_init (CodeGen#left_out_core_ram) has no compiled
+  # registration to replace its body, but the removal leaves that body's bytecode in the binary. It is judged like a
+  # compiled entry, so its body is stubbed too: the bytecode goes, and a call that somehow reached it would raise.
+  left_out_entries = gen.left_out_core_ram.map { |owner, name| { owner: owner, name: name, visibility: :public } }
+  stub_keys = MrblibStubs.stubbable(compiled + left_out_entries, ireps, registry, CodeGen.block_self_bodies,
                                     world: MrblibStubs.class_world_from_env(ENV, srcs),
                                     copy_context: MrblibStubs.copy_context(ENV, srcs, out_dir))
   load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys, unregistered: gen.unregistered_keys)

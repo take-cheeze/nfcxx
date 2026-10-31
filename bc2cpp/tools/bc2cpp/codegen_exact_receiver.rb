@@ -55,6 +55,7 @@ class CodeGen
   # (core_body_exact_enabled?). The proof is checked at the site like every core-body proof.
   # Only the method's own irep counts: a block can be run with a rebound self (instance_exec, define_method).
   def core_self_exact_class(irep, owner_def)
+    return nil if @rsm_variant
     return nil unless ENV['BC2CPP_CORE_SELF_EXACT'] != '0' && owner_def && irep && !@self_class_unknown
     return nil unless owner_def.core && CORE_BODY_EXACT_TESTS.key?(owner_def.owner) && irep.equal?(@ireps[owner_def.irep])
     return nil unless core_class_subclass_free?(owner_def.owner)
@@ -63,6 +64,10 @@ class CodeGen
   end
 
   def core_body_exact_enabled?
+    # RESUMABLE_DUAL: the Fiber variant of a core body dispatches its receiver's methods like the interpreter, so a
+    # subclass that overrides one of them (EnumStepSub#length) is run, not refused.
+    return false if @rsm_variant
+
     ENV['BC2CPP_CORE_BODY_EXACT'] != '0' && @closed_world.nil? && NomethodReviewed.guard_violation_enabled? &&
       @core_program_world&.exact_instances_singleton_free?
   end
@@ -72,6 +77,8 @@ class CodeGen
   # 'Array' | 'Hash' when GETIDX/GETIDX0/SETIDX's receiver register is exactly that class, so its
   # fast path needs no class test.
   def index_exact_class(irep, idx, reg)
+    return nil if @rsm_variant # RESUMABLE_DUAL: the variant's `self[i]` dispatches, so a subclass's [] runs
+
     klass = irep && idx && reg && exact_core_value_class(irep, idx, reg)
     %w[Array Hash].include?(klass) ? klass : nil
   end

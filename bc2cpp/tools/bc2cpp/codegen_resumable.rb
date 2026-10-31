@@ -135,6 +135,7 @@ class CodeGen
   # nil if the method is not a Fiber.new root, a reason String if it is one but cannot be
   # compiled resumable, else a ResumablePlan. Memoized; a pure function of the program.
   def resumable_plan(label)
+    return build_resumable_plan(label) if @rsm_variant # RESUMABLE_DUAL: a variant does not need a Fiber root
     @resumable_plans ||= {}
     return @resumable_plans[label] if @resumable_plans.key?(label)
 
@@ -146,7 +147,7 @@ class CodeGen
   end
 
   def build_resumable_plan(label)
-    return nil unless @fiber_roots&.include?(label)
+    return nil unless @fiber_roots&.include?(label) || @rsm_variant
 
     d = @owner_of[label]
     irep = @ireps[label]
@@ -460,7 +461,8 @@ class CodeGen
   # `_impl`, the function the registered entry calls: hands a VM-called invocation to the
   # bytecode driver and steps to completion when called from C (where Fiber.yield could
   # not have worked in the bytecode either).
-  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false)
+  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false,
+                               always_exec: false)
     thunk = "#{step_name}_thunk"
     if arg_names.empty? && !blk
       # No arguments: the frame starts empty, and the driver's first step creates it.
@@ -524,7 +526,7 @@ head = <<~CPP
 CPP
 tail = <<~CPP
     mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
-    if (bc2cpp_resumable_exec_ok(M, #{optional.positive? || rest ? 'mrb_get_argc(M)' : n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);
+    #{always_exec ? "return bc2cpp_resumable_exec(M, self, #{thunk}, frame);" : "if (bc2cpp_resumable_exec_ok(M, #{optional.positive? || rest ? 'mrb_get_argc(M)' : n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);"}
     mrb_value resume = mrb_nil_value();
     for (;;) {
       mrb_value result = #{step_name}(M, self, frame, resume);
@@ -694,6 +696,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
       // first step takes it (Bc2cppResumable.take_initial). The arguments are already in the frame.
       M->c->ci->stack[1] = mrb_obj_value(mrb_proc_new_cfunc(M, thunk));
       M->c->ci->n = 0;
+      // A call from C can carry an empty keyword hash (`**kwd` in __enumerator_block_call); the driver takes none.
+      M->c->ci->nk = 0;
       bc2cpp_resumable_handoff(M, frame);
       return mrb_exec_irep(M, self, MRB_METHOD_PROC(m));
     }
