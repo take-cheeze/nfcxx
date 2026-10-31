@@ -189,6 +189,29 @@ int main(int argc, char** argv) {
   }
   rgss_set_display(M, disp);
 
+  if (getenv("BC2CPP_HOST_OMITTED_DEPS")) {
+    bool present = false;
+    for (const char* name : {"Marshal", "Struct", "Random"}) {
+      if (mrb_const_defined_at(M, mrb_obj_value(M->object_class),
+                               mrb_intern_cstr(M, name))) {
+        fprintf(stderr, "TRACE_HOST omitted dependency present: %s\n", name);
+        present = true;
+      }
+    }
+    for (const char* name : {"Integer", "Float", "String", "Array", "Hash"}) {
+      if (mrb_respond_to(M, mrb_obj_value(M->top_self),
+                         mrb_intern_cstr(M, name))) {
+        fprintf(stderr, "TRACE_HOST omitted Kernel factory present: %s\n",
+                name);
+        present = true;
+      }
+    }
+    if (!present)
+      fprintf(stdout, "TRACE_HOST omitted dependencies absent\n");
+    mrb_close(M);
+    return present ? 1 : 0;
+  }
+
   if (const char* const count = getenv("BC2CPP_HOST_MT_COUNT");
       count && strcmp(count, "1") == 0) {
     long total = 0;

@@ -79,6 +79,10 @@ run load BC2CPP_HOST_FRAMES=900 BC2CPP_HOST_CONTINUE=1 BC2CPP_HOST_KEYS="$(taps 
 # drop) instead of a diff in a committed list. Raising it is a deliberate edit of method_table_threshold.txt; a
 # smaller table asks for the file to be lowered so the gain stays recorded. METHOD_TABLE=skip leaves it out: a
 # verify build (BC2CPP_UNREGISTERED_VERIFY) registers a stub under every name the lists drop, so its table is larger.
+if ! BC2CPP_HOST_OMITTED_DEPS=1 "$host" "$game" 1 > "$logs/omitted-dependencies.log" 2>&1; then
+  cat "$logs/omitted-dependencies.log"
+  failed=1
+fi
 if [ "${METHOD_TABLE:-check}" = check ]; then
   threshold_file="$root/scripts/bc2cpp/method_table_threshold.txt"
   threshold=$(grep -E '^[0-9]+$' "$threshold_file" | head -1)
