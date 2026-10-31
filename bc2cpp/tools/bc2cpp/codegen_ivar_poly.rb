@@ -416,11 +416,16 @@ class CodeGen
 
     hierarchy = @closed_world.class_hierarchy(self_owner)
     return [nil, :opaque_hierarchy] unless hierarchy
-    return [nil, :unsafe_name] unless @closed_world.inherited_lookup_safe?(name, self_owner)
+    # OWNER_NATIVE_CHAIN: a name the name-level proof refuses may still pass the owner proof (BC2CPP_OWNER_NATIVE_READ=1).
+    # That proof places each native definer of the name off the lookup path, so the native placeholder below no longer
+    # refuses it.
+    name_safe = @closed_world.inherited_lookup_safe?(name, self_owner)
+    owner_proof = !name_safe && cha_owner_native_proof?(name, self_owner, hierarchy)
+    return [nil, :unsafe_name] unless name_safe || owner_proof
 
     installed = symbol_installed_names
     return [nil, :installed_name] if installed.nil? || installed.include?(name)
-    return [nil, :native_definition] if @registry.fetch(name, []).any? { |d| d.owner == '<native>' }
+    return [nil, :native_definition] if !owner_proof && @registry.fetch(name, []).any? { |d| d.owner == '<native>' }
     return [nil, :method_missing] unless @closed_world.self_method_missing_free?(self_owner)
 
     default, known = closed_world_lookup_target(name, self_owner, Set.new, self_call: true)
