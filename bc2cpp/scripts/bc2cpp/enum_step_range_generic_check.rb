@@ -111,7 +111,7 @@ end
 RUBY
 
 PLAIN_SAVE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+\)/
-STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+, bc2cpp_range_each_step, bc2cpp_range_each_open, bc2cpp_range_each_driver_src\)/
+STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+, nullptr, nullptr, bc2cpp_range_each_driver_src, \"__bc2cpp_each_driver\"\)/
 
 def generate_with(flag, dir)
   saved = ENV['BC2CPP_ENUM_STEP']
@@ -276,9 +276,9 @@ on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
 on_kept = kept_reasons(on_dir)
 off_kept = kept_reasons(off_dir)
-check.call('flag set: Range#each registers through bc2cpp_enum_step_save with the Range step and open', on_code.match?(STEP_SAVE))
-check.call('flag set: the Range step calls succ and <=> from C (mrb_funcall)',
-           on_code.include?('mrb_funcall(M, cur, "succ", 0)') && on_code.include?('mrb_funcall(M, cur, "<=>", 1, last)'))
+check.call('flag set: Range#each registers through bc2cpp_enum_step_save with its generated driver', on_code.match?(STEP_SAVE))
+check.call('flag set: the Range driver calls succ and <=> by dispatch, as the body does',
+           on_code.include?('val = val.succ') && on_code.include?('(val <=> last)'))
 check.call('flag set: the driver keeps no fallback to the body (no __bc2cpp_each_plain)', !on_code.include?('__bc2cpp_each_plain'))
 check.call('flag set: the stub rule no longer keeps Range#each as guarded (only the copy by name is left)',
            !on_kept.include?(['guarded', 'Range#each']) && on_kept.include?(['copy by name', 'Range#each']))

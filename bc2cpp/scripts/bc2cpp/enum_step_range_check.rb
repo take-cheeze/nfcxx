@@ -8,7 +8,7 @@
 # what it was: Range#each's own saved bytecode.
 #
 #   generated code (needs a host mrbc)
-#     - flag set: Range#each registers through bc2cpp_enum_step_save with the Range step and open, and no longer saves
+#     - flag set: Range#each registers through bc2cpp_enum_step_save with its generated driver, and no longer saves
 #       its own body; Array#each keeps its step (the per-owner form);
 #     - flag unset: no step text, and Range#each keeps its own saved body.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
@@ -51,7 +51,7 @@ PROBE = <<~'RUBY'
 RUBY
 
 # The step's registration and the saved-body registration for Range#each, as the generated text spells them.
-STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+, bc2cpp_range_each_step, bc2cpp_range_each_open, bc2cpp_range_each_driver_src\)/
+STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+, nullptr, nullptr, bc2cpp_range_each_driver_src, \"__bc2cpp_each_driver\"\)/
 PLAIN_SAVE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+\)/
 ARRAY_STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Array, false, "\\x65\\x61\\x63\\x68", \d+, bc2cpp_each_step, nullptr, bc2cpp_each_driver_src\)/
 
@@ -165,9 +165,9 @@ off_dir = File.join(dir, 'off')
 FileUtils.mkdir_p([on_dir, off_dir])
 on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
-check.call('flag set: Range#each registers through bc2cpp_enum_step_save with the Range step and open', on_code.match?(STEP_SAVE))
-check.call('flag set: the Range step and open are emitted',
-           on_code.include?('static mrb_value bc2cpp_range_each_step(') && on_code.include?('static mrb_value bc2cpp_range_each_open('))
+check.call('flag set: Range#each registers through bc2cpp_enum_step_save with its generated driver', on_code.match?(STEP_SAVE))
+check.call('flag set: the Range driver is emitted, with no C step',
+           on_code.include?('def __bc2cpp_each_driver(') && !on_code.include?('bc2cpp_range_each_step'))
 check.call('flag set: Range#each no longer saves its own body', !on_code.match?(PLAIN_SAVE))
 check.call('flag set: Array#each keeps its step under the per-owner form', on_code.match?(ARRAY_STEP_SAVE))
 check.call('flag set: the generated code has no #error', !on_code.include?('#error'))
