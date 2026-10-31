@@ -916,8 +916,9 @@ module StaticDispatchRegistrations
     map = NativeOwnerMap.build(native)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
                                            engine_tuple, symbol_lookups, repo_root)
+    ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries)
     [CoreNativeCandidates.candidates(entries, names, fragments),
-     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby).uniq.sort]
+     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby + ruby).uniq.sort]
   end
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body

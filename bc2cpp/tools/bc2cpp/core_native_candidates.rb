@@ -200,6 +200,27 @@ module CoreNativeCandidates
     end.sort
   end
 
+  # Core Ruby definitions, compiled or interpreted, whose names no lookup or direct compiled call reaches.
+  # ROM-shared keys stay: omitting a Ruby override must not replace a readonly entry with a RAM tombstone.
+  def ruby_candidates(core, names, fragments, entries)
+    rom = entries.to_set { |entry| "#{entry[:mt_class]}##{entry[:name]}" }
+    core.flat_map do |file|
+      file.fetch(:registry).flat_map do |name, definitions|
+        next [] unless name.match?(NAME) && !StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+
+        definitions.filter_map do |definition|
+          owner = definition.owner
+          next unless definition.irep && owner.is_a?(String) && owner.match?(/\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/)
+          # A per-file registry can repeat an explicit singleton receiver; do not guess its runtime owner.
+          next if owner.match?(/\b([A-Z]\w*)::\1\b/)
+
+          key = "#{owner}##{name}"
+          key unless rom.include?(key.sub('.singleton#', '#'))
+        end
+      end
+    end.uniq.sort
+  end
+
   # CORE_RAM_CANDIDATES: the core registrations made at run time (mrb_define_method and the other defining calls,
   # NativeOwnerMap), as "Owner#name" sorted, that the core gem removes like a left-out native. The same reachability
   # rule; a registration with a computed name, a native alias or undef of the key, or a ROM entry of the same class and

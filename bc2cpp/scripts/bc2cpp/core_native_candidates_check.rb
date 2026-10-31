@@ -20,6 +20,9 @@
 #   ram_candidates
 #     - an unreachable run-time registration or native alias is listed; a reachable one, or one a ROM entry shares, is not;
 #     - an alias source still counts as a lookup; computed owners/names and fragment-built alias names stay.
+#   ruby_candidates
+#     - unreachable Ruby definitions, including singletons, are candidates;
+#     - lookups, direct compiled calls, aliases, fragments and ROM-shared keys keep their definitions.
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_native_candidates_check.rb
 
@@ -98,6 +101,8 @@ ENGINE = <<~'RUBY'
       @sum = @a + @b
       used
       used_alias
+      @receiver.public_lookup
+      send(:reflected)
     end
 
     def defined_only; end
@@ -120,12 +125,23 @@ CORE = <<~'RUBY'
       impl_send
     end
 
+    def public_lookup
+      public_dependency
+    end
+
+    def generated_public; end
+
+    def reflected; end
+    def built_public; end
+    def defined_only; end
+
     def +(other)
       op_send
     end
   end
 
   class Gadget
+    def self.unused_singleton; end
     def defined_beside_alias
       alias_body_send
     end
@@ -143,7 +159,12 @@ CORE = <<~'RUBY'
   end
 RUBY
 
-GENERATED = ['f("literal")', 'v = Widget_direct$3f_impl(M, self);'].freeze
+GENERATED = ['f("literal")', 'v = Widget_direct$3f_impl(M, self);', <<~'CPP'].freeze
+  static const char* const bc2cpp_sym_names[1] = {
+    "generated_public",
+  };
+  bc2cpp_funcall_argv(M, r1, bc2cpp_sym(M, 0), 0, nullptr);
+CPP
 
 Dir.mktmpdir('core-native') do |dir|
   path = File.join(dir, 'widget.c')
@@ -159,8 +180,9 @@ Dir.mktmpdir('core-native') do |dir|
   engine = suite.compile(ENGINE) { |ireps, _root| ireps }
   core = suite.compile(CORE) do |ireps, root|
     body_of = {}
-    build_registry(ireps, root)[0].each { |name, defs| defs.each { |d| body_of[d.irep] = name if d.irep } }
-    [{ ireps: ireps, body_of: body_of }]
+    registry = build_registry(ireps, root)[0]
+    registry.each { |name, defs| defs.each { |d| body_of[d.irep] = name if d.irep } }
+    [{ ireps: ireps, body_of: body_of, registry: registry }]
   end
   names, fragments = CoreNativeCandidates.reachable(engine, [path], GENERATED, core: core)
   suite.check('irep symbols, pool identifiers, native lookups and generated literals count',
@@ -201,6 +223,21 @@ Dir.mktmpdir('core-native') do |dir|
               ram == %w[Widget#chain_tail Widget#id_alias Widget#lonely Widget#unused_alias])
   suite.check('an alias source and an intermediate alias still count as native lookups',
               names.include?('called') && names.include?('chain_source'))
+  ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries)
+  suite.check("unreachable core Ruby definitions, including singletons, are candidates (#{ruby.join(', ')})",
+              ruby == %w[Gadget#defined_beside_alias Gadget.singleton#unused_singleton Widget#unused])
+  suite.check('an explicit public send still reaches its core body', names.include?('public_dependency'))
+  private_names, = CoreNativeCandidates.reachable(engine, [path], GENERATED, core: core,
+                                                  strip_generated: CorePrivateRuby.method(:strip_generated))
+  suite.check('public pruning keeps generated explicit-receiver lookups exempted only by the private proof',
+              names.include?('generated_public') && !private_names.include?('generated_public'))
+  unsupported = [{ registry: {
+    'opaque' => [MethodDef.new(owner: '<dynamic>', name: 'opaque', irep: 'body')],
+    'repeated' => [MethodDef.new(owner: 'Widget::Widget.singleton', name: 'repeated', irep: 'body')],
+    'accessor' => [MethodDef.new(owner: 'Widget', name: 'accessor', kind: :ivar_accessor)]
+  } }]
+  suite.check('unknown or repeated owners and non-Ruby definitions are not Ruby-removal candidates',
+              CoreNativeCandidates.ruby_candidates(unsupported, Set.new, Set.new, []).empty?)
 end
 
 suite.finish!
