@@ -8,7 +8,8 @@
 # call itself. The step holds its cursor in a heap array, [next, done, ...]; it returns the element, or sets done and
 # returns nil. The cursor's other slots are the owner's own (Range keeps its stop there).
 #
-# Read once, when bc2cpp generates code: EnumStep.enabled?. Unset, nothing here is emitted and the output is unchanged.
+# Read once, when bc2cpp generates code: EnumStep.enabled?. On by default; BC2CPP_ENUM_STEP=0 turns it off, and then
+# nothing here is emitted and the output is unchanged.
 # Only the owners in FORMS take part; every other guarded core method keeps its saved bytecode.
 module EnumStep
   FLAG = 'BC2CPP_ENUM_STEP'
@@ -248,7 +249,7 @@ module EnumStep
   module_function
 
   def enabled?
-    ENV[FLAG] == '1'
+    ENV[FLAG] != '0'
   end
 
   # The step form of an entry's #each, or nil. Instance methods only, and only an each with a guard (a block-taking one).
@@ -265,7 +266,7 @@ module EnumStep
   end
 
   # The C++ text the generated unit needs when an owner's #each is guarded: the generic save helper, then each used
-  # form's step, open and driver source. Empty otherwise, so an unset flag adds no line.
+  # form's step, open and driver source. Empty otherwise, so a flag at 0 adds no line.
   def helpers(compiled)
     return '' unless enabled?
 

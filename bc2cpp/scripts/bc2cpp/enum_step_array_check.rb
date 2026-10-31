@@ -46,7 +46,7 @@ PLAIN_SAVE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Array, false, "\
 
 def generate_with(flag, dir)
   saved = ENV['BC2CPP_ENUM_STEP']
-  flag ? ENV['BC2CPP_ENUM_STEP'] = '1' : ENV.delete('BC2CPP_ENUM_STEP')
+  flag ? ENV['BC2CPP_ENUM_STEP'] = '1' : ENV['BC2CPP_ENUM_STEP'] = '0'
   Bc2cppFixtureRuntime.generate(PROBE, dir, core: true, only_owners: %w[Array])
 ensure
   saved ? ENV['BC2CPP_ENUM_STEP'] = saved : ENV.delete('BC2CPP_ENUM_STEP')
