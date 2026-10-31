@@ -40,9 +40,9 @@ BC2CPP_FAIL_FAST_TYPE = false
 # Same, from 3rd/<name>/mrblib. mruby-marshal has no mrblib.
 BC2CPP_EXTERNAL_MRBLIB_GEMS = %w[mruby-stringio mruby-onig-regexp].freeze
 # The gem set the canonical (script, coverage report) world assumes: the closed build's,
-# which has neither mruby-dir nor the Onigmo regexp gem (build_config.rb).
+# which has no Dir, Onigmo regexp or Struct gem (build_config.rb).
 BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS -
-                              %w[mruby-dir mruby-onig-regexp]).freeze
+                              %w[mruby-dir mruby-onig-regexp mruby-struct]).freeze
 # The classes core sources define methods on: the owners mruby-core-compiled
 # emits, except Object (mruby-rpg2k/mrblib/main.rb defines engine methods on it
 # that no compiled gem emits, so an Object owner would claim them). A class
@@ -387,6 +387,8 @@ end
 # (bc2cpp, which the caller sets). Any shape not listed raises, so a misread condition cannot select gems silently.
 def bc2cpp_rpg_maker_pred(node, name, locals)
   case node
+  when Prism::TrueNode then true
+  when Prism::FalseNode then false
   when Prism::ParenthesesNode
     bc2cpp_rpg_maker_pred(node.body.body.first, name, locals)
   when Prism::AndNode
@@ -417,7 +419,9 @@ def bc2cpp_rpg_maker_gem_lines(text, name, root)
   defn = bc2cpp_find_def(Prism.parse(text).value, :rpg_maker_gems)
   raise "bc2cpp: no rpg_maker_gems definition in #{BC2CPP_BUILD_CONFIG}" unless defn
 
-  locals = {}
+  locals = (defn.parameters&.keywords || []).filter_map do |parameter|
+    [parameter.name, parameter.value] if parameter.is_a?(Prism::OptionalKeywordParameterNode)
+  end.to_h
   (defn.body&.body || []).each { |s| locals[s.name] = s.value if s.is_a?(Prism::LocalVariableWriteNode) }
   locals[:bc2cpp] = false
   out = {}
@@ -502,18 +506,18 @@ def bc2cpp_gem_closure(roots, root, extra = {})
 end
 
 # mruby-core-compiled names its deps in two loops, not literal add_dependency lines. Both loops must be present,
-# so a rewritten loop raises here rather than drifting from this mirror. dir and onig count only if the build has them.
+# so a rewritten loop raises here rather than drifting from this mirror. Optional gems count only if the build has them.
 def bc2cpp_core_compiled_edges(root, build_names)
   text = File.read(File.join(root, 'mruby-core-compiled/mrbgem.rake'), encoding: 'UTF-8')
   literal = text[/%w\[([^\]]+)\]\.each \{ \|gem_name\| add_dependency gem_name \}/, 1]
   raise 'bc2cpp: mruby-core-compiled/mrbgem.rake lost its add_dependency loop' unless literal
   unless text.include?('(BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).each do |gem_name|') &&
-         text.include?('next if %w[mruby-dir mruby-onig-regexp].include?(gem_name) && spec.build.gems.none?')
+         text.include?('next if %w[mruby-dir mruby-onig-regexp mruby-struct].include?(gem_name) && spec.build.gems.none?')
     raise 'bc2cpp: mruby-core-compiled/mrbgem.rake lost its mrblib loop'
   end
 
   literal.split + (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).reject do |gem|
-    %w[mruby-dir mruby-onig-regexp].include?(gem) && !build_names.include?(gem)
+    %w[mruby-dir mruby-onig-regexp mruby-struct].include?(gem) && !build_names.include?(gem)
   end
 end
 
