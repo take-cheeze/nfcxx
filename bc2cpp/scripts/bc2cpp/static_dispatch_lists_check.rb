@@ -20,6 +20,7 @@
 
 require 'json'
 require 'set'
+require 'stringio'
 require 'tmpdir'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/bc2cpp'
@@ -70,6 +71,39 @@ Dir.mktmpdir('static_dispatch_lists') do |dir|
   suite.check('a file for this tree is current', StaticDispatchRegistrations.current?(ROOT, dir))
   LISTS.reset!
   suite.check('and verify_current! accepts it', LISTS.verify_current!(LISTS.current(env: { LISTS::PATH_ENV => File.join(dir, 'static_dispatch_lists.json') }), ROOT).nil?)
+end
+
+# A restored prefix cache is only a seed. Its omissions must be replaced by the proof's fixed point.
+sdr = StaticDispatchRegistrations
+saved = %i[inputs_digest pass].to_h { |name| [name, sdr.method(name)] }
+begin
+  sdr.define_singleton_method(:inputs_digest) { |_| 'current-inputs' }
+  Dir.mktmpdir('static_dispatch_seed') do |dir|
+    path = File.join(dir, 'static_dispatch_lists.json')
+    stale = LISTS::Lists.new(open: Set.new, closed: Set['Old#unsafe'], core_excluded: Set.new,
+                            core_left_out: Set.new, digest: 'old-inputs')
+    proven = LISTS::Lists.new(open: Set.new, closed: Set.new, core_excluded: Set.new,
+                             core_left_out: Set.new, digest: 'current-inputs')
+    File.write(path, LISTS.dump(stale))
+    seen = []
+    sdr.define_singleton_method(:pass) do |_, _, input, _, _|
+      seen << input.closed.dup
+      suite.check('the old digest is not relabelled before convergence', LISTS.parse(File.read(path)).digest == 'old-inputs')
+      proven
+    end
+    result = sdr.emit(ROOT, 'fixture-mrbc', dir, log: StringIO.new)
+    suite.check('unsafe stale omissions are re-proved and removed', seen == [Set['Old#unsafe'], Set.new] && result.closed.empty?)
+    suite.check('only the fresh fixed point is published', LISTS.parse(File.read(path)).to_h == proven.to_h)
+    File.write(path, LISTS.dump(LISTS::Lists.new(**proven.to_h, digest: 'old-inputs')))
+    seen.clear
+    sdr.emit(ROOT, 'fixture-mrbc', dir, log: StringIO.new)
+    suite.check('an unchanged stale seed settles in one proof pass', seen == [Set.new])
+    seen.clear
+    sdr.emit(ROOT, 'fixture-mrbc', dir, log: StringIO.new)
+    suite.check('a current exact hit needs no proof passes', seen.empty?)
+  end
+ensure
+  saved.each { |name, method| sdr.define_singleton_method(name, method) }
 end
 
 SOURCE = <<~'RUBY'
