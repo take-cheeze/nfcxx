@@ -12,7 +12,7 @@
 #     - a table entry's or registration's own name operand does not, nor a name only a DEF names;
 #     - LIVE_CORE: a core method body's sends count once its name is reachable (an operator opcode reaches its
 #       operator), or compiled code calls its `_impl`;
-#       an irep with an ALIAS keeps every symbol;
+#       an ALIAS keeps both names without making unrelated definitions live;
 #   candidates
 #     - an operator name, a name some table of the class keeps, an ALWAYS_DYNAMIC or fragment-built name stay;
 #   header
@@ -49,6 +49,8 @@ NATIVE = <<~'C'
     MRB_MT_ENTRY(w_impl, MRB_SYM(impl_send), MRB_ARGS_NONE())
     MRB_MT_ENTRY(w_alias, MRB_SYM(alias_old), MRB_ARGS_NONE())
     MRB_MT_ENTRY(w_def, MRB_SYM(defined_only), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_alias_def, MRB_SYM(defined_beside_alias), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_alias_body, MRB_SYM(alias_body_send), MRB_ARGS_NONE())
   };
   static const mrb_mt_entry widget_class_rom_entries[] = {
     MRB_MT_ENTRY(w_shared_s, MRB_SYM(shared), MRB_ARGS_NONE())
@@ -124,7 +126,20 @@ CORE = <<~'RUBY'
   end
 
   class Gadget
+    def defined_beside_alias
+      alias_body_send
+    end
+
+    def alias_old
+      alias_source_send
+    end
+
+    def [](key)
+      alias_operator_source_send
+    end
+
     alias alias_new alias_old
+    alias alias_index []
   end
 RUBY
 
@@ -157,11 +172,25 @@ Dir.mktmpdir('core-native') do |dir|
               names.include?('live_send') && names.include?('impl_send') && names.include?('op_send') &&
               !names.include?('dead_send') &&
               !names.include?('unused'))
-  suite.check("an alias keeps the name it looks up", names.include?('alias_old'))
+  suite.check('an alias keeps both names and makes its source body live',
+              %w[alias_old alias_new alias_source_send alias_index [] alias_operator_source_send].all? { |name| names.include?(name) })
+  suite.check('an alias does not make unrelated definitions or their bodies live',
+              !names.include?('defined_beside_alias') && !names.include?('alias_body_send'))
+  body = core[0][:ireps].values.find { |irep| irep.instructions.any? { |insn| insn.op == :ALIAS } }
+  unresolved = Irep.new(**body.to_h.merge(instructions: body.instructions.map do |insn|
+    next insn unless insn.op == :ALIAS
+
+    insn.dup.tap { |copy| copy.typed = insn.typed.reject { |operand| operand.kind == :name } }
+  end))
+  conservative = Set.new
+  CoreNativeCandidates.lookup_names(unresolved, nil, conservative, Set.new)
+  suite.check('an unresolved alias operand conservatively keeps every symbol',
+              body.syms.all? { |name| conservative.include?(name.to_s) })
 
   listed = CoreNativeCandidates.candidates(entries, names, fragments)
   suite.check("only unreachable entries of their own class's tables are listed (#{listed.join(', ')})",
-              listed == %w[Widget#dead_send Widget#defined_only Widget#empty? Widget#size= Widget#spin])
+              listed == %w[Widget#alias_body_send Widget#dead_send Widget#defined_beside_alias Widget#defined_only
+                           Widget#empty? Widget#size= Widget#spin])
   header = CoreNativeCandidates.header(%w[Widget#empty? Widget#size= Widget#spin], entries)
   suite.check('the header names each listed entry by its presym C name',
               header.lines.grep(/\A#define/).sort ==
