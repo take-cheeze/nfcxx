@@ -8,7 +8,7 @@
 # what it was: Range#each's own saved bytecode.
 #
 #   generated code (needs a host mrbc)
-#     - flag set: Range#each registers through bc2cpp_enum_step_save with the Range step and open, and no longer saves
+#     - flag set: Range#each registers through bc2cpp_enum_step_save with its generated driver, and no longer saves
 #       its own body; Array#each keeps its step (the per-owner form);
 #     - flag unset: no step text, and Range#each keeps its own saved body.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
@@ -51,7 +51,7 @@ PROBE = <<~'RUBY'
 RUBY
 
 # The step's registration and the saved-body registration for Range#each, as the generated text spells them.
-STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+, bc2cpp_range_each_step, bc2cpp_range_each_open, bc2cpp_range_each_driver_src\)/
+STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+, nullptr, nullptr, bc2cpp_range_each_driver_src, \"__bc2cpp_each_driver\"\)/
 PLAIN_SAVE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Range, false, "\\x65\\x61\\x63\\x68", \d+\)/
 ARRAY_STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Array, false, "\\x65\\x61\\x63\\x68", \d+, bc2cpp_each_step, nullptr, bc2cpp_each_driver_src\)/
 
@@ -78,7 +78,7 @@ DRIVER = <<~'RUBY'
     "StopIteration result=#{s.result.inspect}"
   end
 
-  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} step=#{Range.private_instance_methods.include?(:__bc2cpp_each_step)}"
+  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} driver=#{Range.private_instance_methods.include?(:__bc2cpp_each_driver)}"
 
   show('ordinary next') { e = (1..3).each; [e.next, e.next, e.next] }
   show('ordinary end') { e = (1..3).each; 3.times { e.next }; stop_of(e) }
@@ -165,9 +165,9 @@ off_dir = File.join(dir, 'off')
 FileUtils.mkdir_p([on_dir, off_dir])
 on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
-check.call('flag set: Range#each registers through bc2cpp_enum_step_save with the Range step and open', on_code.match?(STEP_SAVE))
-check.call('flag set: the Range step and open are emitted',
-           on_code.include?('static mrb_value bc2cpp_range_each_step(') && on_code.include?('static mrb_value bc2cpp_range_each_open('))
+check.call('flag set: Range#each registers through bc2cpp_enum_step_save with its generated driver', on_code.match?(STEP_SAVE))
+check.call('flag set: the Range driver is emitted, with no C step',
+           on_code.include?('def __bc2cpp_each_driver(') && !on_code.include?('bc2cpp_range_each_step'))
 check.call('flag set: Range#each no longer saves its own body', !on_code.match?(PLAIN_SAVE))
 check.call('flag set: Array#each keeps its step under the per-owner form', on_code.match?(ARRAY_STEP_SAVE))
 check.call('flag set: the generated code has no #error', !on_code.include?('#error'))
@@ -179,7 +179,7 @@ build = Bc2cppFixtureRuntime.full_or_build
 if build.nil?
   puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
 else
-  puts '-- fixtures on real mruby: Fiber-based (interpreted) and step-based (compiled)'
+  puts '-- fixtures on real mruby: Fiber-based (interpreted) and driver-based (compiled)'
   body = <<~CPP
     static int scenario(mrb_state* M) {
       std::fflush(stdout);
@@ -203,8 +203,8 @@ else
   mode_line = ->(lines) { lines&.find { |line| line.start_with?('mode: ') } }
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-  check.call('the interpreted run is interpreted without the step', mode_line.call(interpreted)&.end_with?('step=false'))
-  check.call('the compiled run registers the step on Range', mode_line.call(compiled)&.end_with?('step=true'))
+  check.call('the interpreted run is interpreted without the driver', mode_line.call(interpreted)&.end_with?('driver=false'))
+  check.call('the compiled run registers the driver on Range', mode_line.call(compiled)&.end_with?('driver=true'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled

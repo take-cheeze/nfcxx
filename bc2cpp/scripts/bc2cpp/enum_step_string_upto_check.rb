@@ -42,7 +42,7 @@ PROBE = <<~'RUBY'
 RUBY
 
 # The driver's registration and the saved-body registration for String#upto, as the generated text spells them.
-STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_String, false, "\\x75\\x70\\x74\\x6f", \d+, nullptr, nullptr, bc2cpp_upto_driver_src, "__bc2cpp_upto_driver"\)/
+STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_String, false, "\\x75\\x70\\x74\\x6f", \d+, nullptr, nullptr, bc2cpp_string_upto_driver_src, "__bc2cpp_upto_driver"\)/
 PLAIN_SAVE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_String, false, "\\x75\\x70\\x74\\x6f", \d+\)/
 
 def generate_with(flag, dir)

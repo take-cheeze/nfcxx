@@ -434,6 +434,10 @@ if $PROGRAM_NAME == __FILE__
   registry.delete_if { |_, defs| defs.empty? }
   CodeGen.core_hidden_defs = core_hidden_defs
   CodeGen.core_guarded = core_guarded
+  EnumStep.sources = core_guarded.to_h do |label|
+    irep = ireps.fetch(label)
+    [label, [File.expand_path(irep.file.to_s), irep.enter&.lineno]]
+  end
   compiled_ruby = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
   # Every linked core gem's mrblib too: outside_ruby leaves out the core gems a build compiles, which a world that
   # does not compile them still runs.
