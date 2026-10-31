@@ -8,8 +8,10 @@
 # loading copies its method (module_function, alias, COPYING_SENDS), when the guard keeps the interpreted method
 # (CORE_BLOCK_GUARD), or when its Owner#name is not exactly one plain `def`. A stub that runs anyway raises
 # ScriptError, which a `rescue => e` does not catch. See docs/bc2cpp-mrblib-stubs.md.
+require 'json'
 require 'prism'
 require 'set'
+require 'shellwords'
 require_relative 'bytecode_ir_classes'
 require_relative 'class_world'
 
@@ -152,16 +154,53 @@ module MrblibStubs
   def copy_source?(owner, name, sites, world)
     return true if world.nil? || sites.nil? || sites.empty? || !receiver_rule_name?(name)
 
+    class_owner = class_owner?(owner, world)
     sites.any? do |site|
-      next true if site == :unknown || world.facts[site].nil? || !world.facts[site]['exact']
+      next true if site == :unknown || world.facts[site].nil?
+      # A class is an ancestor only through a superclass link, and a run-time include adds modules, never a superclass:
+      # for a class owner the static superclass chain is enough.
+      next true unless (class_owner && superclass_chain_known?(site, world)) || world.facts[site]['exact']
 
       ClassWorld.ancestors(site, world.classes, {}).include?(owner)
     end
   end
 
+  # Whether +owner+ is a plain class (not a module, not a singleton class) in the class world.
+  def class_owner?(owner, world)
+    fact = world.facts[owner]
+    !fact.nil? && fact['kind'] == 'class' && !owner.include?('.singleton')
+  end
+
+  # Whether every class on +name+'s superclass chain is known: its bodies are static, its only reasons are run-time
+  # includes (`include at run time`: they add modules, not superclasses), and its superclass is in the world too.
+  def superclass_chain_known?(name, world)
+    seen = Set.new
+    until name.nil?
+      return false unless seen.add?(name)
+
+      fact = world.facts[name]
+      return false unless fact && fact['kind'] == 'class'
+      return false unless fact['bodies'].all? { |b| b['evaluated'] == 'static' }
+      return false unless fact['reasons'].all? { |r| r.start_with?('include at run time') }
+
+      name = fact['superclass']
+    end
+    true
+  end
+
   # The class world of a build: the engine gems' mrblib as the load world names them (BC2CPP_LOAD_WORLD, JSON
-  # {gem symbol => [files]}), in that order. Nil without a load world (the rule then keeps every copied name).
-  def class_world_from_env(env) = ClassWorld.from_load_world(env['BC2CPP_LOAD_WORLD'])
+  # {gem symbol => [files]}), plus the core mrblib the program loads (FOREIGN_RUBY_SRCS) and this generation's own
+  # Ruby sources (own_srcs). A core class of the program (IO, say) is in own_srcs and not in FOREIGN_RUBY_SRCS, and a
+  # copy's site may be such a class. Nil without a load world (the rule then keeps every copied name).
+  # Only the stub decision reads this world: codegen and LoadCompile keep the load world alone.
+  def class_world_from_env(env, own_srcs = [])
+    return nil unless env['BC2CPP_LOAD_WORLD']
+
+    world = JSON.parse(env['BC2CPP_LOAD_WORLD'])
+    core = Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', '')) + own_srcs.select { |f| f.end_with?('.rb') }
+    world['core'] = core.map { |f| File.expand_path(f) }.uniq unless core.empty?
+    ClassWorld.from_load_world(JSON.generate(world))
+  end
 
   # By name, whatever the owner: the source of every `alias`, and every Symbol an irep that sends a COPYING_SENDS
   # name loads.
