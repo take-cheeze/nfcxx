@@ -692,7 +692,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
     diff = pure_eval_differences(dir, build, 'real', real_folded)
     puts diff.first(6).map { |l| "    folded: #{l}" } if diff && !diff.empty?
     suite.check("PURE_CONST_EVAL: the engine's #{real_folded.size} folded constants (#{real_folded.map { |_, n, _| n }.sort.join(', ')}) equal what mruby computes",
-                diff && diff.empty? && real_folded.map { |_, n, _| n }.sort == %w[EXT_SPELLINGS SYSTEM_SFX_SAVE_FIELD])
+                diff && diff.empty? && real_folded.empty?)
   end
   puts "    unlisted: #{found.sort - stays.keys}, missing: #{stays.keys.sort - found}" unless found.sort == stays.keys.sort
   suite.check("the statements that stay bytecode are the #{stays.size} listed", found.sort == stays.keys.sort)

@@ -146,8 +146,8 @@ check.call('RuntimeError is defined by mruby core under StandardError (3rd/mruby
 # 8. The five classes from the report, read from their own mrblib files.
 real = ->(path) { ClassWorld.build([ClassBodyScan.scan([File.join(ROOT, path)])]).facts }
 game = real.('mruby-rpg2k/mrblib/game/lsd_io.rb')
-check.call('real Game::State: its SYSTEM_SFX_SAVE_FIELD folds, no blocker',
-           blockers_of(game['Game::State']).empty? && folded_of(game['Game::State']) == ['const_computed(SYSTEM_SFX_SAVE_FIELD)'])
+check.call('real Game::State: its SYSTEM_SFX_SAVE_FIELD is a literal table, no blocker, nothing to fold',
+           blockers_of(game['Game::State']).empty? && folded_of(game['Game::State']).empty?)
 lcf_real = real.('mruby-lcf/mrblib/lcf.rb')
 check.call('real LCF: its three INT32 constants are no longer blockers',
            blockers_of(lcf_real['LCF']).none? { |b| b.include?('INT32') })
@@ -155,8 +155,8 @@ schema_real = real.('mruby-lcf/mrblib/schema.rb')
 check.call('real LCF::Schema: DATABASE and MAP_UNIT (lambdas) stay blockers',
            blockers_of(schema_real['LCF::Schema']) == %w[const_computed(DATABASE) const_computed(MAP_UNIT)])
 rgss = real.('mruby-rgss/mrblib/lib.rb')
-check.call('real RGSS::Audio: EXT_SPELLINGS folds, no blocker',
-           blockers_of(rgss['RGSS::Audio']).empty? && folded_of(rgss['RGSS::Audio']) == ['const_computed(EXT_SPELLINGS)'])
+check.call('real RGSS::Audio: EXT_SPELLINGS is a literal list, no blocker, nothing to fold',
+           blockers_of(rgss['RGSS::Audio']).empty? && folded_of(rgss['RGSS::Audio']).empty?)
 check.call('real RGSS::Bitmap::LoadError: superclass RuntimeError, no reason',
            rgss['RGSS::Bitmap::LoadError']['superclass'] == 'RuntimeError' && rgss['RGSS::Bitmap::LoadError']['reasons'].empty?)
 
