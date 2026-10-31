@@ -653,7 +653,7 @@ if [ $cosmo = 1 ]; then
   # front end needs it too. __has_feature is clang's: libc++'s __config uses it, and cosmo's gcc does not define it.
   cflags+=(-D__COSMOPOLITAN__ -D__COSMOCC__ -D__FATCOSMOCC__)
   # Path B only: its front end reads libc++, whose __config uses __has_feature (clang's; cosmo's gcc does not define it)
-  [ $backend = pathb ] && cflags+=('-D__has_feature(x)=0' -include "$cosmo_root/include/libc/integral/normalize.inc")
+  [ $backend = pathb ] && cflags+=('-D__has_feature(x)=0' -include "$cosmo_root/include/libc/integral/normalize.inc" -include "$root/lib/cosmo/libcxx_traits.h")
 fi
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
@@ -862,9 +862,10 @@ if [ $backend = pathb ]; then
     # cosmocc's fat link (an aarch64 companion per input) is not used: the x86_64 driver links the objects with cosmo's
     # startup code (ape.o, crt.o), linker script and libraries, as cosmocc's x86_64 link does (bin/cosmocc).
     cosmo_lib=$cosmo_root/x86_64-linux-cosmo/lib
+    cosmo_libc=$("$root/scripts/cosmo-libc.sh")   # EDG's runtime for cosmo (libC.a, built from the host member list)
     # The ELF is then fixed up (zip sections: tools/cosmo/fixupobj.c) and packaged as APE, as cosmocc's link does.
     cosmo_elf=$ptmp/cosmo.elf
-    "$cosmo_root/bin/x86_64-linux-cosmo-g++" -nostartfiles -nodefaultlibs -static -Wl,-T,"$cosmo_lib/ape.lds" -L"$cosmo_lib" -o "$cosmo_elf" ${sprt[@]+"${sprt[@]}"} "$cosmo_lib/ape.o" "$cosmo_lib/crt.o" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lcxx -lc -lcosmo -lm
+    "$cosmo_root/bin/x86_64-linux-cosmo-g++" -nostartfiles -nodefaultlibs -static -Wl,-T,"$cosmo_lib/ape.lds" -L"$cosmo_lib" -o "$cosmo_elf" ${sprt[@]+"${sprt[@]}"} "$cosmo_lib/ape.o" "$cosmo_lib/crt.o" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"$cosmo_libc" -lC -lcxx -lc -lcosmo -lm
     "$cosmo_root/bin/fixupobj" "$cosmo_elf" && "$cosmo_root/bin/apelink" -V -1 -l "$cosmo_root/bin/ape-x86_64.elf" -o "$out" "$cosmo_elf"
   else
   cc ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
