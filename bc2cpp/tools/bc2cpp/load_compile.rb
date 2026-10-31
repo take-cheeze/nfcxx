@@ -941,7 +941,7 @@ module LoadCompile
     def call(node)
       recv = emit(node.receiver)
       args = (node.arguments&.arguments || []).map { |a| emit(a) }
-      if @tableless.include?(node.name.to_s) && (helper = LoadCompile.tableless_call(node.name.to_s, recv, args))
+      if @tableless.include?(node.name.to_s) && (helper = tableless_call(node.name.to_s, recv, args))
         return temp(helper)
       end
 
