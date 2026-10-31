@@ -240,4 +240,55 @@ Dir.mktmpdir('core-native') do |dir|
               CoreNativeCandidates.ruby_candidates(unsupported, Set.new, Set.new, []).empty?)
 end
 
+Dir.mktmpdir('math-diagnostics') do |dir|
+  path = File.join(dir, 'mruby-math', 'src', 'math.c')
+  FileUtils.mkdir_p(File.dirname(path))
+  source = <<~'C'
+    static void domain_error(mrb_state *mrb, const char *func) {
+      struct RClass *math = mrb_module_get_id(mrb, MRB_SYM(Math));
+      struct RClass *domainerror = mrb_class_get_under_id(mrb, math, MRB_SYM(DomainError));
+      mrb_raisef(mrb, domainerror, "Numerical argument is out of domain - %s", func);
+    }
+    static mrb_value math_acos(mrb_state *mrb, mrb_value self) {
+      domain_error(mrb, "acos");
+    }
+    void init(mrb_state *mrb) {
+      struct RClass *math = mrb_define_module_id(mrb, MRB_SYM(Math));
+      mrb_define_module_function_id(mrb, math, MRB_SYM(acos), math_acos, MRB_ARGS_REQ(1));
+    }
+  C
+  scan = lambda do |text, enabled: true, ireps: {}, generated: []|
+    File.write(path, text)
+    CoreNativeCandidates.reachable(ireps, [path], generated, diagnostic_literals: enabled)[0]
+  end
+  suite.check('without the literal-lookup guarantee diagnostic labels stay', scan.call(source, enabled: false).include?('acos'))
+  names = scan.call(source)
+  suite.check('a verified diagnostic label does not retain a Math entry', !names.include?('acos'))
+  suite.check('both module-function entries become removable',
+              CoreNativeCandidates.ram_candidates(NativeOwnerMap.build([path]), names, Set.new, []) ==
+                %w[Math#acos Math.singleton#acos])
+  live = suite.compile('Math.acos(1.0)') { |ireps, _root| ireps }
+  suite.check('an actual Ruby call still retains the Math entry', scan.call(source, ireps: live).include?('acos'))
+  suite.check('an actual native lookup still counts',
+              scan.call(source + 'void use(mrb_state *mrb) { mrb_funcall_id(mrb, value, MRB_SYM(acos), 0); }').include?('acos'))
+  suite.check('generated lookup literals still count', scan.call(source, generated: ['f("acos")']).include?('acos'))
+  unsafe = {
+    'changed helper body' => source.sub('mrb_raisef(mrb, domainerror,', 'mrb_funcall(mrb, value, func, 0); mrb_raisef(mrb, domainerror,'),
+    'escaping function reference' => source + 'void *callback = &domain_error;',
+    'nonliteral call' => source + 'void use(mrb_state *mrb) { domain_error(mrb, label); }',
+    'shadowing macro' => "#define mrb_raisef other_function\n" + source,
+    'spliced macro' => "#define mrb_rai\\\nsef other_function\n" + source,
+    'spliced comment' => "// continued comment \\\n" + source,
+    'alternative directive' => "%:define mrb_raisef other_function\n" + source,
+    'scoped call' => source + 'void use(mrb_state *mrb) { other.domain_error(mrb, "other"); }'
+  }
+  unsafe.each do |why, text|
+    suite.check("#{why} disables diagnostic exemptions", scan.call(text).include?('acos'))
+  end
+  other = File.join(dir, 'other.c')
+  File.write(other, source)
+  suite.check('an identically named helper outside mruby-math is not exempted',
+              CoreNativeCandidates.reachable({}, [other], [], diagnostic_literals: true)[0].include?('acos'))
+end
+
 suite.finish!

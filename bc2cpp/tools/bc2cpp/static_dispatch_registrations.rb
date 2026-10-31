@@ -911,7 +911,8 @@ module StaticDispatchRegistrations
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
-    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core)
+    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core,
+                                                      diagnostic_literals: !symbol_lookups.nil?)
     entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
     map = NativeOwnerMap.build(native)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
