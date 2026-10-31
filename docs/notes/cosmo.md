@@ -57,10 +57,18 @@ The output is not yet an APE binary (see "Not done").
 - `pathb-dump` takes `-include FILE` (EDG's `--preinclude`).
 - The gcc backend path is unchanged: `tests/cosmo/run.sh` passes with the real cosmocc (APE output).
 
+- **APE output:** the link writes an ELF, runs cosmo's `fixupobj` on it (release `bin/fixupobj`), and packages it
+  with `apelink`. `hello.cpp` gives an APE binary that runs.
+- **EDG runtime:** `scripts/cosmo-libc.sh` builds `libC.a` for cosmo from the host archive's members (lib_src compiled
+  by `eccp` with cosmo's gcc and headers). `decode.o` is left out (`__cxa_demangle`, for the prelinker). `eh_util.o` stays,
+  with its duplicate `std::` handler symbols weakened so libc++abi provides them.
+- **libc++ traits:** `lib/cosmo/libcxx_traits.h` supplies the clang-only type traits and `__type_pack_element` that
+  cosmo's libc++ uses; it is pre-included for C++ (C++ only, guarded by `__cplusplus`).
+- **Tested:** `tests/cosmo/rtest.cpp` (exceptions thrown and caught, `new[]`, `std::vector`, `std::string`, `std::runtime_error`)
+  builds with `NFCXX_PATH=b ./nfcxx --cosmo` and runs as an APE binary.
+
 ### Not done
 
-- **APE output.** The Path B link produces an ELF. Cosmo's APE packaging (`apelink`) needs the zip section fixed up by
-  `fixupobj` (cosmo's `tool/build/fixupobj.c`, which is written against cosmo's own libc), so that is the next step.
-- **libC.a.** The EDG runtime is still the host build; it links here, but cosmo's C++ runtime behavior (exceptions,
-  `operator new`) is not tested. `tests/pathb-qbe/hosted.sh` has not been run with `--cosmo`.
-- **Coverage.** Only the hello-world program is tested.
+- **Test coverage.** `tests/pathb-qbe/hosted.sh` has not been run with `--cosmo`, and `tests/cosmo/rtest.cpp` is not yet
+  part of CI.
+- **Traits.** The trait shims cover what the runtime test needs; other libc++ features may need more of them.
