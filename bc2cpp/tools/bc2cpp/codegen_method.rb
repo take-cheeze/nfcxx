@@ -229,7 +229,9 @@ class CodeGen
 
     resumable = nil
     fiber_guarded = false
-    if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label)
+    # RECEIVER_ROOTS: a fiber root that yields to its block takes the resumable form too (its entry is the same body).
+    yielding_root = @fiber_roots&.include?(label) && BytecodeIR.for(irep).instructions_with_op(:BLKCALL).any?
+    if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
       # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
       # outright -- unless it is a Fiber.new root that qualifies as a resumable step
@@ -659,7 +661,8 @@ class CodeGen
     @resumable = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    guard = core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded)
+    # A resumable entry handles a Fiber itself (its frame and driver), so it has no guard and saves no body.
+    guard = resumable ? nil : (core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded))
     out << guard[:prologue] if guard
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"

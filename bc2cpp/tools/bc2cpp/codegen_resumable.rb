@@ -121,6 +121,12 @@ class CodeGen
     BytecodeIR.for(seed_irep).instructions_with_op(:SSEND, :SSEND0, :SSENDB).filter_map(&:sym)
   end
 
+  # Names of the methods a `Fiber.new { ... }` block body calls on an explicit receiver: candidates for roots whose owner
+  # the body does not prove (RECEIVER_ROOTS, codegen_block_fallback.rb).
+  def fiber_receiver_call_names(seed_irep)
+    BytecodeIR.for(seed_irep).instructions_with_op(:SEND, :SEND0, :SENDB).filter_map(&:sym)
+  end
+
   ResumablePlan = Struct.new(:label, :helpers)
 
   # nil if the method is not a Fiber.new root, a reason String if it is one but cannot be
