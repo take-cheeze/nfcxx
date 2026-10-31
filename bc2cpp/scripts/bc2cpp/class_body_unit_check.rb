@@ -79,6 +79,21 @@ suite.compile(TWICE) do |ireps, root|
   suite.check('a path opened twice gets no unit', gen.compile_top_class_units(ireps.fetch(root)).empty?)
 end
 
+# A constant built by a no-argument send: GETCONST Object then SEND0 :new, as core Enumerable's `NONE = Object.new`.
+SEND0 = <<~'RUBY'
+  module Sent
+    NONE = Object.new
+  end
+RUBY
+
+suite.compile(SEND0) do |ireps, root|
+  gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
+  code = gen.compile_top_class_units(ireps.fetch(root)).find { |unit| unit[:path] == 'Sent' }.to_h[:code].to_s
+  suite.check('a no-argument send compiles as the same plain funcall a send makes',
+              code.match?(/mrb_funcall\(M, r\d+, "new", 0\)/))
+  suite.check('the no-argument send sets the constant it built', code.include?('mrb_const_set('))
+end
+
 DEFS = <<~'RUBY'
   class Router
     def route(x)
