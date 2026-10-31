@@ -76,10 +76,15 @@ c++ -std=gnu++17 -O1 -g -c $uni_defs -I"$root/3rd/uni-algo/include" \
   "$root/3rd/uni-algo/src/data.cpp" -o "$host_dir/uni-algo/data.o"
 ar rcs "$host_dir/libuni-algo.a" "$host_dir/uni-algo/data.o"
 
+lookup_defs=()
+if [ "${BC2CPP_METHOD_LOOKUP_HOOK:-0}" = 1 ]; then
+  lookup_defs=(-DMRB_USE_METHOD_LOOKUP_HOOK)
+fi
+
 # Driver. The defines are the closed target's (build_config.rb `closed`):
 # C++ exception mode, debug, and the string/heap/khash caps; MRB_USE_BIGINT is
 # the bigint gem both sides carry. Layout-relevant ones must match libmruby.a.
-c++ -std=gnu++17 -O1 -g -Wall \
+c++ -std=gnu++17 -O1 -g -Wall "${lookup_defs[@]}" \
   -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG -DMRB_USE_BIGINT \
   -DMRB_STR_LENGTH_MAX=0 -DMRB_HEAP_PAGE_SIZE=256 -DKHASH_INITIAL_SIZE=16 \
   -DLV_CONF_INCLUDE_SIMPLE \
