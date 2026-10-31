@@ -5,7 +5,7 @@ the BSDs. `nfcxx --cosmo` compiles with `cosmocc` as the C compiler instead of t
 path with a different compiler, so the first step is C; C++ comes after.
 
 ```
-scripts/setup-cosmo.sh                      # fetches cosmocc into build/cosmocc (COSMOCC_SHA256 pins the zip)
+scripts/setup-cosmo.sh                      # fetches cosmocc 4.0.2 (GitHub release) into build/cosmocc; sha256-checked
 ./nfcxx --cosmo hello.c -o hello.com        # --backend=gcc is implied; NFCXX_COSMOCC=path overrides build/cosmocc
 tests/cosmo/run.sh
 ```
@@ -16,8 +16,8 @@ tests/cosmo/run.sh
 | --- | --- |
 | `--cosmo` option, `NFCXX_GCC` set to cosmocc, refusals (qbe backend, missing cosmocc) | done |
 | The C compile and the link run cosmocc (`tests/cosmo/run.sh`, with a stand-in cosmocc that logs and runs gcc) | done |
-| `scripts/setup-cosmo.sh` (fetch the release zip, optional sha256) | written, not run: cosmo.zip is unreachable from the development sandbox |
-| A real cosmocc build of a C program and its run | not yet verified; `tests/cosmo/run.sh` runs it when cosmocc is present |
+| `scripts/setup-cosmo.sh` (fetch cosmocc 4.0.2 from the GitHub release, sha256-checked) | done; cosmo.zip is not used because the CI runners and the sandbox could not reach it |
+| A real cosmocc build of a C program and its run | done locally with cosmocc 4.0.2 (GCC 14.1): `tests/cosmo/run.sh` passes and the output is an APE binary (`MZqF` header) |
 | C++ (`.cpp`) | not started (see below) |
 
 ## What the driver changes
