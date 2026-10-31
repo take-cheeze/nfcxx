@@ -80,7 +80,7 @@ module MrblibStubs
         next unless owner && "#{owner}##{name}".match?(pattern)
 
         insn = ireps[caller]&.instructions&.[](idx)
-        warn "[load-trace] #{owner}##{name} <- #{caller}:#{idx} line=#{insn&.lineno} op=#{insn&.op}"
+        warn "[load-trace] #{owner}##{name} <- #{caller}:#{idx} #{ireps[caller]&.file}:#{insn&.lineno} op=#{insn&.op}"
       end
     end
     copied = [registry, all_defs].flat_map { |r| r.values.flatten.filter_map(&:copy_irep) }.to_set
