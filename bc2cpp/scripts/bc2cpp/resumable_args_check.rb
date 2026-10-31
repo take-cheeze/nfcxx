@@ -37,7 +37,13 @@ end
 SRC = <<~'RUBY'
   class RaClock
     def start(base, step)
-      @fiber = Fiber.new { run(base, step) }
+      @base = base
+      @step = step
+      boot
+    end
+
+    def boot
+      @fiber = Fiber.new { run(@base, @step) }
     end
 
     def run(base, step)
