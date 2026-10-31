@@ -37,6 +37,8 @@ while [ $i -lt ${#args[@]} ]; do
     -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
+    -include) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: -include needs a file" >&2; exit 2; }
+              user_opts+=(--preinclude "$(abs_path "${args[$i]}")") ;;   # as nfcxx: EDG's --preinclude (cosmo's c.inc)
     --gnu-version=*|--gnu_version=*) user_opts+=("--gnu_version=${arg#*=}") ;;   # as nfcxx: after the host's GNU version
     -Wno-narrowing) user_opts+=(--diag_warning=narrowing_conversion) ;;   # as nfcxx: a narrowing is a warning
     --dialect=*) ;;                                          # clang's dialect is not modelled: the harness is EDG's g++ mode
