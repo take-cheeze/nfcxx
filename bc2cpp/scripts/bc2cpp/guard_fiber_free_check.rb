@@ -14,6 +14,8 @@
 #
 # Flag at 0: every guard is emitted and saved, as before. Flag on (the default, unset or 1): only
 # the two unreached methods lose their guard, their saved bytecode and their stub (their bodies are no longer kept).
+# ENUM_STEP is pinned to 0 here: its generated drivers replace the saved bodies of guarded methods by default, which is
+# a separate concern (enum_step_default_drivers_check.rb). This fixture checks guard placement and stubs alone.
 #
 # Each run is a bc2cpp.rb run over the fixture with the closed-world probe environment; the generated C++ is on its
 # stdout (--annotated), the stub manifest is OUT_DIR/<symbol>_stubs.txt. Needs MRBC (a host mrbc); SKIPs without it.
@@ -106,7 +108,7 @@ def run_fixture(mrbc, flag)
     FileUtils.mkdir_p(out)
     env = bc2cpp_closed_world_probe_env({ 'MRBC' => mrbc, 'OUT_SYMBOL' => 'guard_fiber_free', 'OUT_DIR' => out,
                                           'SKIP_UNSUPPORTED' => '1', 'BC2CPP_SELF_REGISTERING' => '1',
-                                          'BC2CPP_SIG_DIRS' => '', 'BC2CPP_GUARD_FIBER_FREE' => flag })
+                                          'BC2CPP_SIG_DIRS' => '', 'BC2CPP_GUARD_FIBER_FREE' => flag, 'BC2CPP_ENUM_STEP' => '0' })
     stdout, stderr, status = Open3.capture3(env, RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated',
                                             core, user, chdir: ROOT)
     abort "bc2cpp.rb failed:\n#{stderr[-3000..] || stderr}" unless status.success?
