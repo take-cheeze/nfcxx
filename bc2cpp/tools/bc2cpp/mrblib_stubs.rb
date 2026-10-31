@@ -12,6 +12,7 @@ require 'prism'
 require 'set'
 require_relative 'bytecode_ir_classes'
 require_relative 'class_world'
+require_relative 'codegen_enum_step'
 
 module MrblibStubs
   module_function
@@ -25,7 +26,8 @@ module MrblibStubs
 
   # BC2CPP_STUB_LOG=<file>: why a compiled method's body is kept in the residual (one line per kept method).
   def stub_keep_reason(m, key, defs, load_bodies, copied, copied_names, copy_sites, world)
-    return 'guarded' if m[:guard]
+    # A guarded body is the fallback of the Fiber path. Under ENUM_STEP only a form that covers it lets it go.
+    return 'guarded' if m[:guard] && !EnumStep.stubs_body?(m, m[:owner].end_with?('.singleton'))
     return "defs=#{defs.size}" unless defs.size == 1
 
     d = defs.first

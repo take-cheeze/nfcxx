@@ -35,27 +35,26 @@ module EnumStep
     end
   RUBY
 
-  # The driver of Range#each. The cases the step does not cover (see bc2cpp_range_each_open) run the body, kept by the
-  # alias `__bc2cpp_each_plain`: this source runs while `each` is still mrblib's body, before the compiled entry is defined.
-  # It yields with block.call, as the body does.
+  # The driver of Range#each. The open returns the state; a range the body hands to String#upto or
+  # String#__upto_endless is a [method, receiver, args] triple, and the driver makes that call itself: a Ruby call, so
+  # the block's Fiber.yield has VM frames only. Every other range is stepped, and the body is not kept.
   RANGE_DRIVER = <<~'RUBY'
     class Range
       def __bc2cpp_each_driver(&block)
         return to_enum(:each) unless block
 
         st = __bc2cpp_each_open
-        return __bc2cpp_each_plain(&block) unless st
+        return st[1].__send__(st[0], *st[2], &block) if st[0]
 
         while true
           v = __bc2cpp_each_step(st)
-          break if st[1]
+          break if st[6]
 
           block.call(v)
         end
         self
       end
-      alias __bc2cpp_each_plain each
-      private :__bc2cpp_each_driver, :__bc2cpp_each_plain
+      private :__bc2cpp_each_driver
     end
   RUBY
 
@@ -79,58 +78,161 @@ module EnumStep
     }
   CPP
 
-  # The C++ of Range's step. The open decides, once per call, whether the step covers the range: it returns the cursor
-  # [next, done, stop] for an Integer begin with an Integer end (exclusive, or inclusive below MRB_INT_MAX, whose stop
-  # is end + 1) or a nil end, and nil for anything else (String, Float or bignum bounds, an inclusive end at
-  # MRB_INT_MAX). mrblib's own loops are the same comparisons, so the cursor is an Integer throughout.
+  # The C++ of Range's step, for every range mruby's body covers (docs/bc2cpp-enum-step.md, "Range generic"). The open
+  # makes the body's own dispatch, in its order: begin, end, then kind_of?/nil?/respond_to? on the bounds, the Integer
+  # bounds' exclude_end? (and end + 1), the String upto call, and `(val <=> last) > 0`. The step makes the loop's: `<=>`,
+  # `<` on its result, the yield, `succ` after the block, and the final `exclude_end?` and `== 0` check. Each dispatch is
+  # where the body makes it, so the calls a user succ or <=> sees are the body's.
   RANGE_C = <<~'CPP'
-    // The cursor of the step form of Range#each: [next, done, stop], stop nil for an endless range. nil when the step
-    // does not cover the range; the driver then runs the saved body. begin and end are read as mrblib reads them.
-    [[maybe_unused]] static mrb_value bc2cpp_range_each_open(mrb_state* M, mrb_value self) {
-      mrb_value beg = mrb_funcall(M, self, "begin", 0);
-      mrb_value end = mrb_funcall(M, self, "end", 0);
-      if (!mrb_integer_p(beg)) return mrb_nil_value();
-      mrb_value stop = mrb_nil_value();
-      if (!mrb_nil_p(end)) {
-        if (!mrb_integer_p(end)) return mrb_nil_value();
-        bool excl = mrb_test(mrb_funcall(M, self, "exclude_end?", 0));
-        if (excl) {
-          stop = end;
-        } else if (mrb_integer(end) < MRB_INT_MAX) {
-          stop = mrb_int_value(M, mrb_integer(end) + 1);
-        } else {
-          return mrb_nil_value();
-        }
-      }
-      mrb_value st = mrb_ary_new_capa(M, 3);
-      mrb_ary_push(M, st, beg);
+    // The state of the step form of Range#each: [delegate, cursor, last, kind, phase, str_each, done]. A stepped state has
+    // nil delegate. Other states hold [method, receiver, args] for the driver's call to String#upto or __upto_endless.
+    enum : mrb_int {
+      bc2cpp_rg_cur = 1, bc2cpp_rg_last, bc2cpp_rg_kind, bc2cpp_rg_phase, bc2cpp_rg_str_each, bc2cpp_rg_done,
+      bc2cpp_rg_int = 0, bc2cpp_rg_endless, bc2cpp_rg_generic,
+      bc2cpp_rg_check = 0, bc2cpp_rg_advance, bc2cpp_rg_final, bc2cpp_rg_end
+    };
+    [[maybe_unused]] static bool bc2cpp_rg_is(mrb_state* M, mrb_value v, struct RClass* c) {
+      return mrb_test(mrb_funcall(M, v, "kind_of?", 1, mrb_obj_value(c)));
+    }
+    [[maybe_unused]] static bool bc2cpp_rg_nil(mrb_state* M, mrb_value v) {
+      return mrb_test(mrb_funcall(M, v, "nil?", 0));
+    }
+    [[maybe_unused]] static bool bc2cpp_rg_responds(mrb_state* M, mrb_value v, const char* name) {
+      return mrb_test(mrb_funcall(M, v, "respond_to?", 1, mrb_symbol_value(mrb_intern_cstr(M, name))));
+    }
+    // a < b and a > b: native when both are Integers (as the VM's OP_LT and OP_GT are), else dispatched on a.
+    [[maybe_unused]] static bool bc2cpp_rg_lt(mrb_state* M, mrb_value a, mrb_value b) {
+      if (mrb_integer_p(a) && mrb_integer_p(b)) return mrb_integer(a) < mrb_integer(b);
+      return mrb_test(mrb_funcall(M, a, "<", 1, b));
+    }
+    [[maybe_unused]] static bool bc2cpp_rg_gt(mrb_state* M, mrb_value a, mrb_value b) {
+      if (mrb_integer_p(a) && mrb_integer_p(b)) return mrb_integer(a) > mrb_integer(b);
+      return mrb_test(mrb_funcall(M, a, ">", 1, b));
+    }
+    [[maybe_unused]] static bool bc2cpp_rg_eq0(mrb_state* M, mrb_value c) {
+      if (mrb_integer_p(c)) return mrb_integer(c) == 0;
+      return mrb_test(mrb_funcall(M, c, "==", 1, mrb_fixnum_value(0)));
+    }
+    // v + 1 as `i += 1` makes it: native below MRB_INT_MAX, Integer#+ above (a Bignum).
+    [[maybe_unused]] static mrb_value bc2cpp_rg_inc(mrb_state* M, mrb_value v) {
+      if (mrb_integer_p(v) && mrb_integer(v) < MRB_INT_MAX) return mrb_int_value(M, mrb_integer(v) + 1);
+      return mrb_funcall(M, v, "+", 1, mrb_fixnum_value(1));
+    }
+    [[maybe_unused]] static mrb_value bc2cpp_rg_state(mrb_state* M, mrb_value cur, mrb_value last, mrb_int kind,
+                                                      bool str_each) {
+      mrb_value st = mrb_ary_new_capa(M, 7);
+      mrb_ary_push(M, st, mrb_nil_value());
+      mrb_ary_push(M, st, cur);
+      mrb_ary_push(M, st, last);
+      mrb_ary_push(M, st, mrb_fixnum_value(kind));
+      mrb_ary_push(M, st, mrb_fixnum_value(bc2cpp_rg_check));
+      mrb_ary_push(M, st, mrb_bool_value(str_each));
       mrb_ary_push(M, st, mrb_false_value());
-      mrb_ary_push(M, st, stop);
       return st;
     }
-    // Returns the value at the cursor and advances it, or sets done and returns nil. Values past the Fixnum range are
-    // boxed with mrb_int_value (word boxing has a smaller Fixnum range than mrb_int). An endless cursor past MRB_INT_MAX
-    // is a bignum and goes on through Integer#+, as mrblib's `i += 1` does.
+    [[maybe_unused]] static mrb_value bc2cpp_rg_delegate(mrb_state* M, const char* name, mrb_value recv, mrb_value args) {
+      mrb_value st = mrb_ary_new_capa(M, 3);
+      mrb_ary_push(M, st, mrb_symbol_value(mrb_intern_cstr(M, name)));
+      mrb_ary_push(M, st, recv);
+      mrb_ary_push(M, st, args);
+      return st;
+    }
+    [[maybe_unused]] static mrb_value bc2cpp_range_each_open(mrb_state* M, mrb_value self) {
+      mrb_value val = mrb_funcall(M, self, "begin", 0);
+      mrb_gc_protect(M, val);
+      mrb_value last = mrb_funcall(M, self, "end", 0);
+      mrb_gc_protect(M, last);
+      if (bc2cpp_rg_is(M, val, M->integer_class) && bc2cpp_rg_nil(M, last)) {
+        return bc2cpp_rg_state(M, val, mrb_nil_value(), bc2cpp_rg_endless, false);
+      }
+      bool str_each = false;
+      if (bc2cpp_rg_is(M, val, M->string_class) && bc2cpp_rg_nil(M, last)) {
+        if (bc2cpp_rg_responds(M, val, "__upto_endless")) {
+          return bc2cpp_rg_delegate(M, "__upto_endless", val, mrb_ary_new(M));
+        }
+        str_each = true;
+      }
+      if (bc2cpp_rg_is(M, val, M->integer_class) && bc2cpp_rg_is(M, last, M->integer_class)) {
+        mrb_value lim = last;
+        if (!mrb_test(mrb_funcall(M, self, "exclude_end?", 0))) lim = bc2cpp_rg_inc(M, last);
+        mrb_gc_protect(M, lim);
+        return bc2cpp_rg_state(M, val, lim, bc2cpp_rg_int, false);
+      }
+      if (bc2cpp_rg_is(M, val, M->string_class) && bc2cpp_rg_is(M, last, M->string_class)) {
+        if (bc2cpp_rg_responds(M, val, "upto")) {
+          mrb_value args = mrb_ary_new_capa(M, 2);
+          mrb_ary_push(M, args, last);
+          mrb_ary_push(M, args, mrb_bool_value(mrb_test(mrb_funcall(M, self, "exclude_end?", 0))));
+          return bc2cpp_rg_delegate(M, "upto", val, args);
+        }
+        str_each = true;
+      }
+      // E_TYPE_ERROR names `mrb`, and this function's state is `M`.
+      if (!bc2cpp_rg_responds(M, val, "succ")) mrb_raise(M, mrb_exc_get_id(M, MRB_ERROR_SYM(TypeError)), "can't iterate");
+      mrb_value st = bc2cpp_rg_state(M, val, last, bc2cpp_rg_generic, str_each);
+      // `return self if (val <=> last) > 0`: nothing is yielded, so the state is done.
+      if (bc2cpp_rg_gt(M, mrb_funcall(M, val, "<=>", 1, last), mrb_fixnum_value(0))) {
+        mrb_ary_set(M, st, bc2cpp_rg_done, mrb_true_value());
+      }
+      return st;
+    }
+    // Returns the value to yield, or sets done and returns nil. The block runs between two steps, so the body's order holds:
+    // the advance (`i += 1`, or `val = val.succ`) follows the block's return.
     [[maybe_unused]] static mrb_value bc2cpp_range_each_step(mrb_state* M, mrb_value self) {
       mrb_value st = mrb_nil_value();
       mrb_get_args(M, "o", &st);
-      mrb_value cur = mrb_ary_ref(M, st, 0);
-      mrb_value stop = mrb_ary_ref(M, st, 2);
-      if (!mrb_nil_p(stop) && mrb_integer(cur) >= mrb_integer(stop)) {
-        mrb_ary_set(M, st, 1, mrb_true_value());
+      if (mrb_test(mrb_ary_ref(M, st, bc2cpp_rg_done))) return mrb_nil_value();
+      mrb_value cur = mrb_ary_ref(M, st, bc2cpp_rg_cur);
+      mrb_value last = mrb_ary_ref(M, st, bc2cpp_rg_last);
+      mrb_int kind = mrb_integer(mrb_ary_ref(M, st, bc2cpp_rg_kind));
+      mrb_int phase = mrb_integer(mrb_ary_ref(M, st, bc2cpp_rg_phase));
+      if (kind != bc2cpp_rg_generic) {
+        if (phase == bc2cpp_rg_advance) cur = bc2cpp_rg_inc(M, cur);
+        if (kind == bc2cpp_rg_int && !bc2cpp_rg_lt(M, cur, last)) {
+          mrb_ary_set(M, st, bc2cpp_rg_done, mrb_true_value());
+          return mrb_nil_value();
+        }
+        mrb_ary_set(M, st, bc2cpp_rg_cur, cur);
+        mrb_ary_set(M, st, bc2cpp_rg_phase, mrb_fixnum_value(bc2cpp_rg_advance));
+        return cur;
+      }
+      if (phase == bc2cpp_rg_end) {
+        mrb_ary_set(M, st, bc2cpp_rg_done, mrb_true_value());
         return mrb_nil_value();
       }
-      mrb_value next = (mrb_integer_p(cur) && mrb_integer(cur) < MRB_INT_MAX)
-                         ? mrb_int_value(M, mrb_integer(cur) + 1)
-                         : mrb_funcall(M, cur, "+", 1, mrb_fixnum_value(1));
-      mrb_ary_set(M, st, 0, next);
-      return cur;
+      if (phase == bc2cpp_rg_advance) {
+        cur = mrb_funcall(M, cur, "succ", 0);
+        mrb_ary_set(M, st, bc2cpp_rg_cur, cur);
+        phase = bc2cpp_rg_check;
+        // `break if val.size > last.size` for a String range without String#upto.
+        if (mrb_test(mrb_ary_ref(M, st, bc2cpp_rg_str_each))) {
+          mrb_value size = mrb_funcall(M, cur, "size", 0);
+          mrb_value last_size = mrb_funcall(M, last, "size", 0);
+          if (bc2cpp_rg_gt(M, size, last_size)) phase = bc2cpp_rg_final;
+        }
+      }
+      if (phase == bc2cpp_rg_check) {
+        // while (val <=> last) < 0: yield val.
+        if (bc2cpp_rg_lt(M, mrb_funcall(M, cur, "<=>", 1, last), mrb_fixnum_value(0))) {
+          mrb_ary_set(M, st, bc2cpp_rg_phase, mrb_fixnum_value(bc2cpp_rg_advance));
+          return cur;
+        }
+      }
+      // block.call(val) if !exclude_end? && (val <=> last) == 0
+      if (!mrb_test(mrb_funcall(M, self, "exclude_end?", 0)) &&
+          bc2cpp_rg_eq0(M, mrb_funcall(M, cur, "<=>", 1, last))) {
+        mrb_ary_set(M, st, bc2cpp_rg_phase, mrb_fixnum_value(bc2cpp_rg_end));
+        return cur;
+      }
+      mrb_ary_set(M, st, bc2cpp_rg_done, mrb_true_value());
+      return mrb_nil_value();
     }
   CPP
 
   # One step form per owner. c_step is the C step (a method of the owner); c_open the C function that opens the cursor,
-  # nil when the driver takes no open; driver the Ruby source of the driver; c the C++ the form needs.
-  Form = Struct.new(:owner, :c_step, :c_open, :driver, :c) do
+  # nil when the driver takes no open; driver the Ruby source of the driver; c the C++ the form needs. stubs_body: the
+  # step covers every case the saved body covers, so under the flag the body is emptied (MrblibStubs, bc2cpp_stub_top_mrblib).
+  Form = Struct.new(:owner, :c_step, :c_open, :driver, :c, :stubs_body) do
     # The driver's C++ string constant, named after the step.
     def src_name = "#{c_step.delete_suffix('_step')}_driver_src"
 
@@ -139,8 +241,8 @@ module EnumStep
   end
 
   FORMS = {
-    'Array' => Form.new('Array', 'bc2cpp_each_step', nil, ARRAY_DRIVER, ARRAY_C),
-    'Range' => Form.new('Range', 'bc2cpp_range_each_step', 'bc2cpp_range_each_open', RANGE_DRIVER, RANGE_C)
+    'Array' => Form.new('Array', 'bc2cpp_each_step', nil, ARRAY_DRIVER, ARRAY_C, false),
+    'Range' => Form.new('Range', 'bc2cpp_range_each_step', 'bc2cpp_range_each_open', RANGE_DRIVER, RANGE_C, true)
   }.freeze
 
   module_function
@@ -154,6 +256,12 @@ module EnumStep
     return nil unless enabled? && !singleton && entry[:name] == 'each' && !entry[:guard].nil?
 
     FORMS[entry[:owner]]
+  end
+
+  # Whether the entry's saved body may leave the binary under the flag: its form covers that body (Form#stubs_body).
+  def stubs_body?(entry, singleton)
+    form = form_for(entry, singleton)
+    !form.nil? && form.stubs_body
   end
 
   # The C++ text the generated unit needs when an owner's #each is guarded: the generic save helper, then each used

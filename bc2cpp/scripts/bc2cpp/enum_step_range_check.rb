@@ -3,8 +3,8 @@
 
 # ENUM_STEP for Range#each (tools/bc2cpp/codegen_enum_step.rb, docs/bc2cpp-enum-step.md): with BC2CPP_ENUM_STEP=1 the saved
 # body of a compiled Range#each under a Fiber is a shared driver that calls a compiled step per element, so
-# Enumerator#next over an Integer range suspends through VM frames only. The cases the step does not cover (a String, Float
-# or bignum bound, an inclusive end at MRB_INT_MAX) run mruby's own body through the driver. Unset, the generated code is
+# Enumerator#next over an Integer range suspends through VM frames only. The other cases (a String, Float or bignum bound,
+# an inclusive end at MRB_INT_MAX) are stepped too, by scripts/bc2cpp/enum_step_range_generic_check.rb. Unset, the generated code is
 # what it was: Range#each's own saved bytecode.
 #
 #   generated code (needs a host mrbc)
