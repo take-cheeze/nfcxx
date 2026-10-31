@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# OWNER_NATIVE_CHAIN (tools/bc2cpp/codegen_owner_native_chain.rb): with BC2CPP_OWNER_NATIVE_READ=1, CHA_SELF's name gate
+# OWNER_NATIVE_CHAIN (tools/bc2cpp/codegen_owner_native_chain.rb): on by default (BC2CPP_OWNER_NATIVE_READ=0 turns it off), CHA_SELF's name gate
 # asks whether each outside definer of `read` (IO#read, StringIO#read, Dir#read) is off the lookup path of `self` and its
 # descendants, instead of refusing the name for having any outside definer.
 #
@@ -88,7 +88,7 @@ Dir.mktmpdir('bc2cpp-owner-native-chain') do |dir|
   suite.check('flag on, a StringIO superclass on the path: the self-send stays by name',
               !stringio.include?('CLOSED_WORLD_SELF :read') && stringio.include?('owner-call: read'))
 
-  off_code = generate_with_flag(SOURCE, File.join(dir, 'off'), nil)
+  off_code = generate_with_flag(SOURCE, File.join(dir, 'off'), '0')
   off_record = body_of(off_code, 'OnRec_table')
   suite.check('flag off: the record\'s read self-send keeps its owner call (the name-level gate)',
               !off_record.include?('CLOSED_WORLD_SELF :read') && off_record.include?('owner-call: read'))

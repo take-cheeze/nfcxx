@@ -12,7 +12,7 @@
 #   Enumerable#fiber_free_enum            an Enumerable method: its guard also tests `each`, so it keeps the guard whatever
 #                                         the Fiber reach says
 #
-# Flag off (and BC2CPP_GUARD_FIBER_FREE set to anything but 1): every guard is emitted and saved, as before. Flag on: only
+# Flag at 0: every guard is emitted and saved, as before. Flag on (the default, unset or 1): only
 # the two unreached methods lose their guard, their saved bytecode and their stub (their bodies are no longer kept).
 #
 # Each run is a bc2cpp.rb run over the fixture with the closed-world probe environment; the generated C++ is on its
@@ -138,24 +138,24 @@ end
 def saves(code) = code.scan('bc2cpp_core_save_interpreted(M, ').size
 
 mrbc = ENV['MRBC']
-off = run_fixture(mrbc, nil)
-on = run_fixture(mrbc, '1')
-zero = run_fixture(mrbc, '0')
+off = run_fixture(mrbc, '0')
+on = run_fixture(mrbc, nil)
+one = run_fixture(mrbc, '1')
 
-puts '  flag unset: every guard emitted and saved'
+puts '  BC2CPP_GUARD_FIBER_FREE=0: every guard emitted and saved'
 (FREE + GUARDED).each do |key|
   e = entry_of(off[:code], key)
-  suite.check("#{key} keeps its entry hand-off and saved bytecode with the flag unset",
+  suite.check("#{key} keeps its entry hand-off and saved bytecode with the flag at 0",
               e[:registered] && e[:prologue] && e[:saved])
 end
-suite.check('the flag unset keeps every stub out (each guarded body keeps its bytecode)',
+suite.check('the flag at 0 keeps every stub out (each guarded body keeps its bytecode)',
             (FREE + GUARDED).none? { |key| off[:stubs].include?(key) })
 
-puts '  BC2CPP_GUARD_FIBER_FREE=0 is the same as unset'
-suite.check('a flag value other than 1 changes nothing (saved count and stubs)',
-            saves(zero[:code]) == saves(off[:code]) && zero[:stubs] == off[:stubs])
+puts '  BC2CPP_GUARD_FIBER_FREE unset is the same as =1 (on by default)'
+suite.check('unset and 1 give the same saved count and stubs',
+            saves(one[:code]) == saves(on[:code]) && one[:stubs] == on[:stubs])
 
-puts '  BC2CPP_GUARD_FIBER_FREE=1'
+puts '  BC2CPP_GUARD_FIBER_FREE unset (on)'
 FREE.each do |key|
   e = entry_of(on[:code], key)
   suite.check("#{key} is not reached from the Fiber body: no entry hand-off, no saved bytecode",
@@ -169,7 +169,7 @@ GUARDED.each do |key|
 end
 suite.check('the Enumerable guard still tests that each is the builtin one',
             entry_of(on[:code], 'Enumerable#fiber_free_enum')[:body].include?('bc2cpp_core_each_is_builtin(M, self)'))
-suite.check('two fewer saved-bytecode registrations than with the flag unset',
+suite.check('two fewer saved-bytecode registrations than with the flag at 0',
             saves(on[:code]) == saves(off[:code]) - FREE.size)
 
 suite.finish!

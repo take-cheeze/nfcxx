@@ -3,14 +3,14 @@
 require_relative 'native_owner_map'
 require_relative 'core_hierarchy_sigs'
 
-# CodeGen: OWNER_NATIVE_CHAIN (BC2CPP_OWNER_NATIVE_READ=1). CHA_SELF's name gate (inherited_lookup_safe?) refuses a
+# CodeGen: OWNER_NATIVE_CHAIN (on unless BC2CPP_OWNER_NATIVE_READ=0). CHA_SELF's name gate (inherited_lookup_safe?) refuses a
 # name any outside source defines, even when no class on the receiver's lookup path is one of those definers. This
 # gate asks instead whether each owner-listed outside definer (outside_owner_call_owners) sits on that path. The proof
 # and the cases it refuses: docs/bc2cpp-owner-native-chain.md.
 class CodeGen
-  # Off unless BC2CPP_OWNER_NATIVE_READ=1: then the gate is inherited_lookup_safe? alone, as before.
+  # On unless BC2CPP_OWNER_NATIVE_READ=0: then the gate is inherited_lookup_safe? alone, as before.
   def owner_native_chain_enabled?
-    ENV['BC2CPP_OWNER_NATIVE_READ'] == '1'
+    ENV['BC2CPP_OWNER_NATIVE_READ'] != '0'
   end
 
   # The owner proof for CHA_SELF, asked only when inherited_lookup_safe? refuses the name: false with the flag off.
