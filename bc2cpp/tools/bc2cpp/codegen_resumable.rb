@@ -146,7 +146,6 @@ class CodeGen
   end
 
   def resumable_shape_problem(irep, d)
-    return 'is a core method' if d.core
     return 'takes arguments or a block' unless irep.enter.nil? || irep.enter.enter_fields.all?(&:zero?)
     return 'has a rescue or ensure handler' unless irep.catch_handlers.empty?
 
