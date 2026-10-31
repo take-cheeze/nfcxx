@@ -15,6 +15,9 @@ class ResumableCtx
   attr_accessor :nregs, :register_slots
   # BLOCK: the method takes a block (kept in the frame's block slot). block_slot is that slot's R index.
   attr_accessor :block, :block_slot
+  # OPTIONAL_ARGS: how many optional positional arguments the method takes (its jump table is the glue at the first
+  # JMP, which switches on bc2cpp_given_opt). 0 for a method without optional arguments.
+  attr_accessor :optional
 
   def initialize(label, helpers)
     @label = label
@@ -159,7 +162,9 @@ class CodeGen
     # enter_fields: required, optional, rest, post, keyword, keyword rest, block. Required positional arguments are
     # copied into the frame when the call starts (resumable_entry_function); the others are not supported yet.
     fields = (irep.enter ? irep.enter.enter_fields.map(&:to_i) : []) + [0] * 7
-    return 'takes an optional, rest, post or keyword argument' if fields[1..5].any?(&:positive?)
+    return 'takes a rest, post or keyword argument' if fields[2..5].any?(&:positive?)
+    # OPTIONAL_ARGS: only the shape optional_arg_table recognises (a jump table of JMPs after ENTER, no block).
+    return 'takes optional arguments in a shape the step cannot enter' if fields[1].positive? && optional_arg_table(irep)[1].nil?
     return 'has a rescue or ensure handler' unless irep.catch_handlers.empty?
 
     nil
@@ -433,9 +438,13 @@ class CodeGen
     registers.each_with_index { |reg, slot| out << "  mrb_value#{'&' unless locals} r#{reg} = R[#{slot + 2}];\n" }
     out << "  [[maybe_unused]] mrb_value bc2cpp_blk = R[#{block_slot}];\n" if block_slot
     out << "  const mrb_int bc2cpp_state = F->state;\n"
+    # OPTIONAL_ARGS: a call that starts stores -(given + 1) in the frame state (the entry does). The body's jump-table
+    # glue switches on bc2cpp_given_opt, and the resume switch is skipped for that start.
+    optional = @resumable.optional.to_i.positive?
+    out << "  const mrb_int bc2cpp_given_opt = bc2cpp_state < 0 ? -bc2cpp_state - 1 : 0;\n" if optional
     out << "  if (bc2cpp_state != 0) R[1] = bc2cpp_resume;\n"
     out << "  r0 = self;\n"
-    out << "  switch (bc2cpp_state) {\n    case 0: break;\n"
+    out << (optional ? "  if (bc2cpp_state >= 0) switch (bc2cpp_state) {\n    case 0: break;\n" : "  switch (bc2cpp_state) {\n    case 0: break;\n")
     @resumable.states.each { |n| out << "    case #{n}: goto Lbc2cpp_resume_#{n};\n" }
     out << "    default: bc2cpp_resume_bad_state(M);\n  }\n"
     out << body
@@ -445,7 +454,7 @@ class CodeGen
   # `_impl`, the function the registered entry calls: hands a VM-called invocation to the
   # bytecode driver and steps to completion when called from C (where Fiber.yield could
   # not have worked in the bytecode either).
-  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false)
+  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0)
     thunk = "#{step_name}_thunk"
     if arg_names.empty? && !blk
       # No arguments: the frame starts empty, and the driver's first step creates it.
@@ -474,7 +483,13 @@ class CodeGen
     # handed to the driver, whose first step takes it instead of creating an empty one. The argument registers are
     # r1..rN; a register the body never reads has no slot and is not copied.
 n = arg_names.size
-params = (arg_names.map { |a| "mrb_value #{a}" } + (blk ? ['mrb_value bc2cpp_blk'] : [])).join(', ')
+# OPTIONAL_ARGS: the last `optional` names are optional. The entry takes every positional argument (an omitted one is
+# nil, and the body's default-value code sets it), and records how many optionals the call gave in the frame state.
+req = n - optional
+# The registered wrapper computes the given count (mrb_get_argc - required, clamped) and passes it last, as for any method
+# with optionals (codegen_method.rb, arg_params).
+params = (arg_names.map { |a| "mrb_value #{a}" } + (blk ? ['mrb_value bc2cpp_blk'] : []) +
+          (optional.positive? ? ['mrb_int bc2cpp_given_opt'] : [])).join(', ')
 # Each argument's slot in the frame; a register the body never reads has none and is not copied.
 fill = arg_names.each_with_index.filter_map do |a, idx|
   slot = ctx.register_slots[idx + 1]
@@ -487,6 +502,7 @@ if blk
   fill += ['mrb_iv_set(M, frame, mrb_intern_lit(M, "__block__"), bc2cpp_blk);', "F->regs[#{ctx.block_slot}] = bc2cpp_blk;"]
   fill << "F->regs[#{block_reg_slot}] = bc2cpp_blk;" if block_reg_slot
 end
+optional_head = optional.positive? ? "    F->state = -(bc2cpp_given_opt + 1);\n" : ''
 head = <<~CPP
   static mrb_value #{thunk}(mrb_state* M, mrb_value) {
     mrb_value self, frame, resume;
@@ -494,14 +510,14 @@ head = <<~CPP
     return #{step_name}(M, self, frame, resume);
   }
   mrb_value #{impl_name}(mrb_state* M, mrb_value self, #{params}) {
-    bc2cpp_check_argc(M, #{n}, #{n});
+    bc2cpp_check_argc(M, #{req}, #{n});
     bc2cpp_resumable_init(M);
     mrb_value frame = mrb_nil_value();
     Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
 CPP
 tail = <<~CPP
     mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
-    if (bc2cpp_resumable_exec_ok(M, #{n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);
+    if (bc2cpp_resumable_exec_ok(M, #{optional.positive? ? 'mrb_get_argc(M)' : n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);
     mrb_value resume = mrb_nil_value();
     for (;;) {
       mrb_value result = #{step_name}(M, self, frame, resume);
@@ -510,9 +526,9 @@ tail = <<~CPP
       resume = bc2cpp_resumable_resume_from_c(M, frame);
     }
   }
-  // #{owner_name}: entry of a resumable method with #{n} required argument#{'s' unless n == 1} (RESUMABLE_ENTRY)
+  // #{owner_name}: entry of a resumable method with #{req} required argument#{'s' unless req == 1}#{", #{optional} optional" if optional.positive?} (RESUMABLE_ENTRY)
 CPP
-head + fill.map { |line| "  #{line}\n" }.join + tail
+head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
   end
 
   # The run-time half, emitted once per generated file that has a resumable method.

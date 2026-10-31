@@ -9,7 +9,7 @@
 #   generated code (needs a host mrbc)
 #     - the entry takes the arguments as mrb_values and fills the frame before the driver runs;
 #     - the driver takes the handed-off frame on its first step;
-#     - a method with an optional argument is still refused, and stays interpreted.
+#     - a method with a rest argument is still refused, and stays interpreted (optional arguments: resumable_optional_check.rb).
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same, with two fiber roots taking arguments in turn and GC.start
 #       between resumes, so each call's frame must keep its own arguments.
@@ -85,7 +85,7 @@ check.call('the entry hands the frame to the driver', code.include?('bc2cpp_resu
 check.call('the driver takes the handed-off frame on its first step', code.include?('mrb_define_module_function(M, mod, "take_initial"'))
 check.call('the entry fills the argument registers of the frame', code.match?(/F->regs\[\d+\] = \w+;/))
 check.call('no #error in the generated code', !code.include?('#error'))
-check.call('an optional argument is still refused', !code.include?('RaClock_maybe_step('))
+check.call('a method that no fiber root reaches (maybe) gets no step function', !code.include?('RaClock_maybe_step('))
 
 DRIVER = <<~'RUBY'
   a = RaClock.new
