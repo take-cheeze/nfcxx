@@ -39,17 +39,28 @@ tests/cosmo/run.sh
   `--bundle-libs` and the CUDA paths depend on dynamic loading or shared libraries and will not work with `--cosmo`.
 - **Other platforms.** Only Linux x86_64 is the development host here. The APE output is not run on macOS or Windows yet.
 
-## Path B (`NFCXX_PATH=b --cosmo`), in progress
+## Path B (`NFCXX_PATH=b --cosmo`), hello world links and runs
 
-- **Done:** `--cosmo` with `NFCXX_PATH=b` selects Path B. `pathb-cc` assembles with cosmocc (`NFCXX_GCC`), the Path B
-  link uses cosmocc and `-lC -lc++ -lm` (no glibc-only libraries), and `pathb-ldrt` builds `libnfcxxld.a` with cosmocc
-  into `build/pathb-ldrt-cosmo`. The C++ headers are cosmo's libc++ (`include/third_party/libcxx`) and its C library
-  (`include`), named in `NFCXX_SYS_INCLUDES`, because `cosmoc++` prints no include list for `host_sys_includes`.
-  Predefines `__COSMOPOLITAN__`, `__COSMOCC__`, `__FATCOSMOCC__` are added, and the GNU version is cosmo's GCC 14.1.0 (140100).
-- **Blocked:** EDG cannot parse cosmo's libc++ and libc headers. Errors: `__has_feature`/`__has_builtin` in constant
-  expressions (`__config`), `bool32` and `libcesque` in `libc/calls/calls.h` (defined by cosmo's `libc/c.inc` and
-  `libc/cxx.inc`, which cosmo's own build includes), and the libc++ namespace macros. `NFCXX_DIALECT=clang` does not fix it.
-  The next step is either EDG support for those builtins plus the cosmo `.inc` headers, or a smaller libc++ config.
-- **Not done:** EDG's `libC.a` and the EH shim still come from the host build, so the link would not work even when
-  the headers parse. `lib/ehshim` is written against libstdc++'s exception layout (static_asserts on its size).
-- Host Path B and the gcc backend are unchanged (regression-checked).
+`NFCXX_PATH=b ./nfcxx --cosmo hello.cpp -o hello` builds a static x86_64 ELF with cosmo's libc++ and runs it (`pathb host ok`).
+The output is not yet an APE binary (see "Not done").
+
+- **Front end:** cosmo's libc++ (`include/third_party/libcxx`) and C library (`include`) are named in `NFCXX_SYS_INCLUDES`,
+  because `cosmoc++` prints no include list. Predefines `__COSMOPOLITAN__`, `__COSMOCC__`, `__FATCOSMOCC__` are added, and
+  the GNU version is cosmo's GCC 14.1.0 (140100). Path B also gets cosmo's own forced include `libc/integral/normalize.inc`
+  (what cosmo's build force-includes; it defines `libcesque`, `bool32`, `__static_yoink`) and `-D__has_feature(x)=0`, which
+  libc++'s `__config` needs. Found with the fork of the EDG investigation; no EDG source change was needed.
+- **Assembly:** cosmocc does not take `.s` input, so `pathb-cc` assembles the QBE output with the host `as` (as `gcc-cc`).
+- **Link:** the x86_64 cosmo driver links with cosmo's `ape.lds`, `ape.o`, `crt.o` and `-lC -lcxx -lc -lcosmo -lm`
+  (the fat `cosmocc` link wants an aarch64 companion per object, which Path B does not produce). The EH shim is left out
+  under `--cosmo`: it interoperates with libstdc++.so, and cosmo links libc++ only.
+- **Runtime:** `pathb-ldrt` builds `libnfcxxld.a` with cosmocc (`build/pathb-ldrt-cosmo`).
+- `pathb-dump` takes `-include FILE` (EDG's `--preinclude`).
+- The gcc backend path is unchanged: `tests/cosmo/run.sh` passes with the real cosmocc (APE output).
+
+### Not done
+
+- **APE output.** The Path B link produces an ELF. Cosmo's APE packaging (`apelink`) needs the zip section fixed up by
+  `fixupobj` (cosmo's `tool/build/fixupobj.c`, which is written against cosmo's own libc), so that is the next step.
+- **libC.a.** The EDG runtime is still the host build; it links here, but cosmo's C++ runtime behavior (exceptions,
+  `operator new`) is not tested. `tests/pathb-qbe/hosted.sh` has not been run with `--cosmo`.
+- **Coverage.** Only the hello-world program is tested.

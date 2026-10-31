@@ -647,8 +647,13 @@ if [ $cosmo = 1 ]; then
   export NFCXX_GCC=$cosmo_bin
   # cosmoc++ is a wrapper that prints no include list, so the directories are named here: libc++ first, then the C library.
   export NFCXX_SYS_INCLUDES=$cosmo_root/include/third_party/libcxx:$cosmo_root/include
-  [ -n "${gnu:-}" ] || gnu=$("$cosmo_root/bin/x86_64-linux-cosmo-g++" -dumpfullversion | awk -F. '{ printf "%d%02d%02d\n", $1, $2, $3 }')
+  gver=$cosmo_root/bin/x86_64-linux-cosmo-g++; [ -x "$gver" ] || gver=$cosmo_bin
+  [ -n "${gnu:-}" ] || gnu=$({ "$gver" -dumpfullversion 2>/dev/null || true; } | awk -F. '{ printf "%d%02d%02d\n", $1, $2, $3 }')
+  # cosmo's own build force-includes libc/integral/normalize.inc (libcesque, bool32, __static_yoink, the c.inc macros); the
+  # front end needs it too. __has_feature is clang's: libc++'s __config uses it, and cosmo's gcc does not define it.
   cflags+=(-D__COSMOPOLITAN__ -D__COSMOCC__ -D__FATCOSMOCC__)
+  # Path B only: its front end reads libc++, whose __config uses __has_feature (clang's; cosmo's gcc does not define it)
+  [ $backend = pathb ] && cflags+=('-D__has_feature(x)=0' -include "$cosmo_root/include/libc/integral/normalize.inc")
 fi
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
@@ -759,7 +764,8 @@ if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncp
   t=$(trace_start)
   s=$("$root/scripts/ehshim") || s=""
   trace_end "$t" "EH shim" driver
-  [ -z "$s" ] || shim=("$s")
+  # cosmo: the shim interoperates with libstdc++.so (its type_info vtables and __cxa layout); cosmo links libc++ only
+  [ $cosmo = 1 ] || { [ -z "$s" ] || shim=("$s"); }
   # macOS and Linux aarch64: the thunks that pass the result of the library's class-returning functions in x8 (scripts/sret.sh)
   sret_obj=$("$root/scripts/sret.sh"); [ -z "$sret_obj" ] || shim+=("$sret_obj")
   rtlib=(-lC)
@@ -853,7 +859,10 @@ if [ $backend = pathb ]; then
   sprt=(); [ $safeptr = 0 ] || [ $compile_only = 1 ] || sprt=("$("$root/scripts/safeptr-rt")" -pthread)   # first: its malloc wins
   if [ $cosmo = 1 ]; then
     # cosmo: cosmocc links, its libc++ comes with the C++ driver, and the glibc-only libraries are not there
-    "$NFCXX_GCC" ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lc++ -lm
+    # cosmocc's fat link (an aarch64 companion per input) is not used: the x86_64 driver links the objects with cosmo's
+    # startup code (ape.o, crt.o), linker script and libraries, as cosmocc's x86_64 link does (bin/cosmocc).
+    cosmo_lib=$cosmo_root/x86_64-linux-cosmo/lib
+    "$cosmo_root/bin/x86_64-linux-cosmo-g++" -nostartfiles -nodefaultlibs -static -Wl,-T,"$cosmo_lib/ape.lds" -L"$cosmo_lib" -o "$out" ${sprt[@]+"${sprt[@]}"} "$cosmo_lib/ape.o" "$cosmo_lib/crt.o" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lcxx -lc -lcosmo -lm
   else
   cc ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   fi
