@@ -4,4 +4,4 @@
 # where a table that grew shows up.
 # 1142: the Array#each resumable variant (RESUMABLE_DUAL) makes the closed build define the Bc2cppResumable driver module
 # and its Frame class at gem init (codegen_emit.rb, bc2cpp_resumable_init). Those are four method entries the variant needs.
-1142
+1116

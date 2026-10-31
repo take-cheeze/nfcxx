@@ -50,7 +50,7 @@ baseline_dir = Dir.mktmpdir('bc2cpp-resumable-receiver')
 at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
 code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS)
-check.call('Array#each_index compiles as a resumable step function', code.include?('static mrb_value Array_each_index_step(mrb_state* M'))
+check.call('Array#each_index compiles as a resumable step function (its variant)', code.include?('static mrb_value Array_each_index_rsm_step(mrb_state* M'))
 check.call('the entry takes the block', code.match?(/^mrb_value Array_each_index_impl\(mrb_state\* M, mrb_value self, mrb_value bc2cpp_blk\) \{/))
 check.call('no #error in the generated code', !code.include?('#error'))
 

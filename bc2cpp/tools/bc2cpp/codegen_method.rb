@@ -678,7 +678,7 @@ class CodeGen
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     # A resumable entry handles a Fiber itself (its frame and driver), so it has no guard and saves no body.
     guard = resumable ? nil : (core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded))
-    out << guard[:prologue] if guard
+    out << guard[:prologue] if guard && guard[:prologue]
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"
     elsif arg_names.empty? && (needs_blk_param || has_blk)
@@ -855,10 +855,11 @@ class CodeGen
     aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     # DECLARED_RETURN_GUARD: a runtime-checked return declaration checks every value the body returns.
+    out = insert_rsm_guard(out, impl_name, guard) if guard&.[](:rsm_impl)
     out = declared_return_guard_wrap(label, out, impl_name)
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
-      code: "#{@rsm_variant ? '' : rsm_variant_code(label)}#{out}", visibility: d.visibility, guard: guard&.fetch(:index),
+      code: "#{@rsm_variant ? '' : rsm_variant_without_duplicates(label, out)}#{out}", visibility: d.visibility, guard: guard&.fetch(:index),
       resumable: !resumable.nil? || (!@rsm_variant && !rsm_variant_code(label).empty?) }
   end
 
@@ -1049,8 +1050,8 @@ class CodeGen
                   else
                     'M->c != M->root_c'
                   end
-      return { index: nil,
-               prologue: "  if (mrb_unlikely(#{condition})) return #{rsm_impl_name(d)}(M, self, bc2cpp_entry_block(M));\n" }
+      # The guard goes before the wrapper's call to the fast body, where its arguments are extracted (rsm_guard_line).
+      return { index: nil, prologue: nil, rsm_impl: rsm_impl_name(d), rsm_cond: condition }
     end
 
     index = (@core_guard_index[label] ||= @core_guard_index.size)
@@ -1069,7 +1070,14 @@ class CodeGen
   # RESUMABLE_DUAL: the direct-yield core methods that get a resumable variant beside their fast body. Array#each is the
   # first: it yields in its own loop, and its block is an explicit `&block` parameter.
   RSM_SUFFIX = '_rsm'
-  RESUMABLE_DUAL = %w[Array#each].freeze
+  RESUMABLE_DUAL = %w[
+    Array#each Array#delete_if Array#each_index Array#fetch Array#find Array#sort_by
+    Array#to_h Array#uniq Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map
+    Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject
+    Enumerable#sort Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Float#step
+    Hash#delete Hash#delete_if Hash#fetch Hash#reject Hash#select Integer#downto
+    Integer#step Integer#times Integer#upto String#each_char String#each_line String#upto
+  ].freeze
 
   def rsm_dual?(label, d)
     return false unless EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}") &&
@@ -1081,10 +1089,36 @@ class CodeGen
 
   def rsm_impl_name(d) = "#{cpp_name(d.owner, d.name)}#{RSM_SUFFIX}_impl"
 
+  # RESUMABLE_DUAL: the guard, placed before the wrapper's call to the fast body. The variant takes that call's arguments,
+  # so the guard passes them on; a call from a fiber runs the variant instead of the fast body.
+  def insert_rsm_guard(out, impl_name, guard)
+    call = out.match(/^  return #{Regexp.escape(impl_name)}\((?<args>[^\n]*)\);\n/)
+    return out unless call
+
+    line = "  if (mrb_unlikely(#{guard[:rsm_cond]})) return #{guard[:rsm_impl]}(#{call[:args]});\n"
+    out.sub(call[0]) { "#{line}#{call[0]}" }
+  end
+
   # The variant's code (its step, its entry and the helpers it uses), or '' when the method cannot take the resumable
   # form. The variant's registered wrapper is cut off, as entry specialization cuts its own.
   def rsm_variant_code(label)
     @rsm_variants&.[](label) || ''
+  end
+
+  # The variant's own helpers (block fallbacks, direct entries) are compiled from the same blocks as the fast body's, under
+  # the same names. A helper the fast body also defines is renamed in the variant (`_rsm`), so each name is defined once
+  # and the variant still calls its own copy. Names are whole C identifiers.
+  RSM_FUNCTION_DEF = /^(?:\[\[maybe_unused\]\] )?(?:static )?[\w:* ]+?\b(\w+)\(.*\) \{$/
+  def rsm_variant_without_duplicates(label, out)
+    code = rsm_variant_code(label)
+    return code if code.empty?
+
+    defined_here = code.scan(RSM_FUNCTION_DEF).flatten.to_set
+    defined_outside = out.scan(RSM_FUNCTION_DEF).flatten.to_set
+    collisions = defined_here & defined_outside
+    return code if collisions.empty?
+
+    collisions.reduce(code) { |text, name| text.gsub(/\b#{Regexp.escape(name)}\b/, "#{name}#{RSM_SUFFIX}") }
   end
 
   def compile_rsm_variant(label, d)
