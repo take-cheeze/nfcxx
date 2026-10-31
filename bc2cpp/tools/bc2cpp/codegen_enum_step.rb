@@ -282,6 +282,56 @@ module EnumStep
       end
     RUBY
 
+    # The drivers of Integer#times, #upto and #downto: the body's loop, each yield made a block call. Ruby drivers, as
+    # the String#upto driver is (the block call is a Ruby frame, so a Fiber.yield in the block has only VM frames).
+    INTEGER_TIMES_DRIVER = <<~'RUBY'
+      class Integer
+        def __bc2cpp_times_driver(&block)
+          return to_enum(:times) unless block
+
+          i = 0
+          while i < self
+            block.call(i)
+            i += 1
+          end
+          self
+        end
+        private :__bc2cpp_times_driver
+      end
+    RUBY
+
+    INTEGER_UPTO_DRIVER = <<~'RUBY'
+      class Integer
+        def __bc2cpp_upto_driver(num, &block)
+          return to_enum(:upto, num) unless block
+
+          i = self.to_i
+          while i <= num
+            block.call(i)
+            i += 1
+          end
+          self
+        end
+        private :__bc2cpp_upto_driver
+      end
+    RUBY
+
+    INTEGER_DOWNTO_DRIVER = <<~'RUBY'
+      class Integer
+        def __bc2cpp_downto_driver(num, &block)
+          return to_enum(:downto, num) unless block
+
+          i = self.to_i
+          while i >= num
+            block.call(i)
+            i -= 1
+          end
+          self
+        end
+        private :__bc2cpp_downto_driver
+      end
+    RUBY
+
   # One step form per owner. c_step is the C step (a method of the owner); c_open the C function that opens the cursor,
   # nil when the driver takes no open; driver the Ruby source of the driver; c the C++ the form needs. stubs_body: the
   # step covers every case the saved body covers, so under the flag the body is emptied (MrblibStubs, bc2cpp_stub_top_mrblib).
@@ -292,7 +342,7 @@ module EnumStep
     def driver_name = driver_method || DRIVER_METHOD
 
     # The driver's C++ string constant, named after the step, or after the method for a form with no C step.
-    def src_name = c_step ? "#{c_step.delete_suffix('_step')}_driver_src" : "bc2cpp_#{method_name}_driver_src"
+    def src_name = c_step ? "#{c_step.delete_suffix('_step')}_driver_src" : "bc2cpp_#{owner.downcase}_#{method_name}_driver_src"
 
     # The arguments after the registration's index that bc2cpp_enum_step_save takes for this form.
     def save_args = [c_step || 'nullptr', c_open || 'nullptr', src_name, *(driver_method ? ["\"#{driver_name}\""] : [])].join(', ')
@@ -301,7 +351,10 @@ module EnumStep
   FORMS = {
     %w[Array each] => Form.new('Array', 'bc2cpp_each_step', nil, ARRAY_DRIVER, ARRAY_C, false),
     %w[Range each] => Form.new('Range', 'bc2cpp_range_each_step', 'bc2cpp_range_each_open', RANGE_DRIVER, RANGE_C, true),
-    %w[String upto] => Form.new('String', nil, nil, STRING_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver')
+    %w[String upto] => Form.new('String', nil, nil, STRING_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver'),
+    %w[Integer times] => Form.new('Integer', nil, nil, INTEGER_TIMES_DRIVER, nil, true, 'times', '__bc2cpp_times_driver'),
+    %w[Integer upto] => Form.new('Integer', nil, nil, INTEGER_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver'),
+    %w[Integer downto] => Form.new('Integer', nil, nil, INTEGER_DOWNTO_DRIVER, nil, true, 'downto', '__bc2cpp_downto_driver')
   }.freeze
 
   module_function
