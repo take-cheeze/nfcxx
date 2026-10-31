@@ -51,9 +51,9 @@ module MrblibStubs
   # The Owner#name keys of `compiled` (this run's entries) whose bodies can be stubbed. `all_defs`: every bytecode
   # definition, the core ones the generation's registry no longer holds included. The load phase reads it: a method
   # body missing from it would count as code that runs at load.
-  # copy_ireps: the ireps a copy may come from. Each generation compiles only its own sources, so the closed build passes
-  # every Ruby source here: a copy in another gem is then a site too, not a missing one (which would keep the body).
-  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil, copy_ireps: ireps)
+  # copy_context: the copy names and sites of every Ruby source the closed build loads (copy_context below), so a copy in
+  # another gem is a site too, not a missing one (which would keep the body). Nil: this generation's own ireps stand.
+  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil, copy_context: nil)
     require_relative 'static_dispatch_registrations'
     body_of = {}
     all_defs.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
@@ -68,8 +68,8 @@ module MrblibStubs
     overridden = body_of.each_value.map { |owner, name| "#{owner}##{name}" }.to_set
     load_bodies, = StaticDispatchRegistrations.load_phase(ireps, body_of, method_of, overridden)
     copied = [registry, all_defs].flat_map { |r| r.values.flatten.filter_map(&:copy_irep) }.to_set
-    copied_names = copied_names(copy_ireps)
-    copy_sites = copy_sites(copy_ireps, parent_map(copy_ireps))
+    copied_names, copy_sites = copy_context ? [copy_context[:names], copy_context[:sites]]
+                                            : [copied_names(ireps), copy_sites(ireps, parent)]
     defs_of = Hash.new { |h, k| h[k] = [] }
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
     all_of = Hash.new { |h, k| h[k] = [] }
@@ -174,19 +174,26 @@ module MrblibStubs
     end
   end
 
-  # The ireps the copy sites are read from: those of every Ruby source the closed world loads (the load world's files,
-  # FOREIGN_RUBY_SRCS and this generation's own), so a copy in another gem is seen. Without a load world, this
-  # generation's own ireps stand.
-  def copy_context_ireps(env, own_ireps, own_srcs, out_dir)
-    return own_ireps unless env['BC2CPP_LOAD_WORLD']
+  # The copy names and sites of every Ruby source the closed world loads: the load world's files, FOREIGN_RUBY_SRCS and
+  # this generation's own. Each file is compiled alone: mrbc with several files parses the later ones in a state the
+  # earlier ones leave (mruby-io's `(...)` in kernel.rb breaks the next file's parse). A copy's site is read from its own
+  # file's class nesting, so the per-file sites merge. Nil without a load world.
+  def copy_context(env, own_srcs, out_dir)
+    return nil unless env['BC2CPP_LOAD_WORLD']
 
     world_files = JSON.parse(env['BC2CPP_LOAD_WORLD']).values.flatten
     files = (world_files + Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', '')) + own_srcs.select { |f| f.end_with?('.rb') })
             .map { |f| File.expand_path(f) }.uniq
     copy_dir = File.join(out_dir, 'copy_context')
     FileUtils.mkdir_p(copy_dir)
-    ireps, = compile_ireps(files, 'copy_context', copy_dir)
-    ireps
+    names = Set.new
+    sites = {}
+    files.each do |file|
+      ireps, = compile_ireps([file], 'copy_context', copy_dir)
+      names.merge(copied_names(ireps))
+      copy_sites(ireps, parent_map(ireps)).each { |name, found| (sites[name] ||= []).concat(found) }
+    end
+    { names: names, sites: sites }
   end
 
   # Whether +owner+ is a plain class (not a module, not a singleton class) in the class world.
