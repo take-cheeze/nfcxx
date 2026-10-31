@@ -36,7 +36,7 @@ extern "C" unsigned __nfcxx_ntid_z(void);
 extern "C" unsigned __nfcxx_nctaid_x(void);
 extern "C" unsigned __nfcxx_nctaid_y(void);
 extern "C" unsigned __nfcxx_nctaid_z(void);
-struct float2 { float x, y; };
+struct __align__(8) float2 { float x, y; };
 static inline float2 make_float2(float x, float y) { float2 r = {x, y}; return r; }
 
 extern "C" float __nfcxx_expf(float);

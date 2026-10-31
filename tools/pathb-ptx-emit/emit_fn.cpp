@@ -497,6 +497,17 @@ void Fn::stmt(const Node &s) {
     std::string dest = ir_reg(at(s, 1).text, ty);
     rval(at(s, 3), dest, ty);
     canon(dest, ty);
+    // a pointer to a struct: the struct's alignment (from the module's aggregate table) is the object's
+    if (head_of(at(s, 2)) == "ptr" && at(s, 2).items.size() == 2) {
+      const Node &pointee = at(s, 2).items[1];
+      if (head_of(pointee) == "const" || head_of(pointee) == "struct") {
+        try {
+          ptr_align[dest] = aggregate(pointee).align;
+        } catch (const Refused &) {
+          // not a struct (or not in the table): no alignment is known
+        }
+      }
+    }
   } else if (h == "set") {
     auto it = regs.find(at(s, 1).text);
     if (it == regs.end()) throw BadIR("set of " + at(s, 1).text + " before its let");
@@ -519,14 +530,16 @@ void Fn::stmt(const Node &s) {
     // Between two frame slots the alignments are known (the frame keeps each offset aligned to its slot's alignment),
     // so the copy moves words of the widest size that divides the length and both alignments. Through a pointer the
     // alignment is not known: bytes.
-    long long wa = 1, wb = 1;
-    if (at(s, 2).kind == Node::Sym && at(s, 2).sig == '$' && at(s, 3).kind == Node::Sym && at(s, 3).sig == '$') {
-      auto ia = slot_aligns_.find(at(s, 2).text), ib = slot_aligns_.find(at(s, 3).text);
-      if (ia != slot_aligns_.end() && ib != slot_aligns_.end()) {
-        wa = ia->second;
-        wb = ib->second;
+    // the alignment of each side: a frame slot's, or a pointer's (its pointee struct's, from the type); bytes otherwise
+    auto side_align = [&](const Node &x, const std::string &reg) -> long long {
+      if (x.kind == Node::Sym && x.sig == '$') {
+        auto it = slot_aligns_.find(x.text);
+        return it != slot_aligns_.end() ? it->second : 1;
       }
-    }
+      auto it = ptr_align.find(reg);
+      return it != ptr_align.end() ? it->second : 1;
+    };
+    long long wa = side_align(at(s, 2), dr), wb = side_align(at(s, 3), sr);
     auto fits = [&](long long c) { return n % c == 0 && wa >= c && wa % c == 0 && wb >= c && wb % c == 0; };
     long long w = fits(8) ? 8 : fits(4) ? 4 : fits(2) ? 2 : 1;
     for (long long off = 0; off < n; off += w) {
