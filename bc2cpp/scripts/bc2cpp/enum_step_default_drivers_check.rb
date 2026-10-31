@@ -43,7 +43,7 @@ COLLECT_B_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Array, false, "[^"]
 INTEGER_STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Integer, false, "[^"]*", \d+, nullptr, nullptr, bc2cpp_integer_step_driver_src, "__bc2cpp_step_driver"\)/
 # Hash#< has no &block, so the generator refuses it and it keeps its saved bytecode (\x3c is "<").
 HASH_LT_PLAIN = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Hash, false, "\\x3c", \d+\)/
-PLAIN_EACH_SLICE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Enumerable, false, "[^"]*", \d+\)/
+PLAIN_EACH_SLICE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Enumerable, false, "\\x65\\x61\\x63\\x68\\x5f\\x73\\x6c\\x69\\x63\\x65", \d+\)/
 
 PROBE = <<~'RUBY'
   class EnumStepDefaultProbe
