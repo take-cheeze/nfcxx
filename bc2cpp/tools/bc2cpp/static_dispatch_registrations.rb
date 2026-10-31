@@ -638,7 +638,9 @@ module StaticDispatchRegistrations
   # defining NativeOwnerMap::FAMILIES) defines its name, it looks nothing up, so that one argument -- a string literal
   # or a presym operand -- is blanked before native_name_tokens reads the file. Every other occurrence of the name
   # still counts, an alias's old name included.
-  DEFINING_FAMILIES = NativeOwnerMap::FAMILIES.select { |family, spec| family.start_with?('define_') && spec[:fn] }
+  DEFINING_FAMILIES = NativeOwnerMap::FAMILIES.select do |family, spec|
+    family.start_with?('define_') && (spec[:fn] || spec[:alias_of])
+  end
   REGISTRATION_NAME_ARG = /\A(?:"(?:[^"\\]|\\.)*"|MRB_(?:Q?SYM|OPSYM)(?:_[QBE])?\(\s*\w+\s*\))\z/
 
   def blank_registration_names(text)
