@@ -78,7 +78,7 @@ DRIVER = <<~'RUBY'
     "StopIteration result=#{s.result.inspect}"
   end
 
-  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} step=#{Range.private_instance_methods.include?(:__bc2cpp_each_step)}"
+  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} driver=#{Range.private_instance_methods.include?(:__bc2cpp_each_driver)}"
 
   show('ordinary next') { e = (1..3).each; [e.next, e.next, e.next] }
   show('ordinary end') { e = (1..3).each; 3.times { e.next }; stop_of(e) }
@@ -179,7 +179,7 @@ build = Bc2cppFixtureRuntime.full_or_build
 if build.nil?
   puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
 else
-  puts '-- fixtures on real mruby: Fiber-based (interpreted) and step-based (compiled)'
+  puts '-- fixtures on real mruby: Fiber-based (interpreted) and driver-based (compiled)'
   body = <<~CPP
     static int scenario(mrb_state* M) {
       std::fflush(stdout);
@@ -203,8 +203,8 @@ else
   mode_line = ->(lines) { lines&.find { |line| line.start_with?('mode: ') } }
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-  check.call('the interpreted run is interpreted without the step', mode_line.call(interpreted)&.end_with?('step=false'))
-  check.call('the compiled run registers the step on Range', mode_line.call(compiled)&.end_with?('step=true'))
+  check.call('the interpreted run is interpreted without the driver', mode_line.call(interpreted)&.end_with?('driver=false'))
+  check.call('the compiled run registers the driver on Range', mode_line.call(compiled)&.end_with?('driver=true'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled

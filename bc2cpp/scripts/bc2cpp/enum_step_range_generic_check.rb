@@ -2,22 +2,21 @@
 # frozen_string_literal: true
 
 # ENUM_STEP for every case of Range#each (tools/bc2cpp/codegen_enum_step.rb, docs/bc2cpp-enum-step.md, "Range generic").
-# With BC2CPP_ENUM_STEP=1 the step form covers the generic path (the receiver's succ and <=>, called from C), the String
-# and bignum cases and the endless String case, so the driver keeps no fallback to mruby's body. The closed build then
-# drops that body from its mrblib (bc2cpp_stub_top_mrblib). A user succ or <=> that calls Fiber.yield raises FiberError
-# under the step (fiber_check_cfunc: a C frame is on the fiber's stack); the body let the Fiber.yield through, so those
-# two scenarios are compared with their own expected lines, not with the body's.
+# With BC2CPP_ENUM_STEP=1 the generated driver covers the generic path (the receiver's succ and <=>, called by dispatch
+# from Ruby), the String and bignum cases and the endless String case, so the driver keeps no fallback to mruby's body.
+# The closed build then drops that body from its mrblib (bc2cpp_stub_top_mrblib). A user succ or <=> that calls
+# Fiber.yield suspends the fiber in both runs: the driver's calls are Ruby frames, so fiber_check_cfunc finds no C frame.
 #
 #   generated code (needs a host mrbc)
-#     - flag set: the Range step calls succ and <=> from C, the driver has no body fallback, and the core manifest lists
+#     - flag set: the Range driver calls succ and <=> by dispatch, the driver has no body fallback, and the core manifest lists
 #       Range#each (its body may leave the binary);
 #     - flag unset: the manifest does not list Range#each, and Range#each keeps its own saved body;
 #     - the top-level mrblib copy of range.rb, with only Range#each emptied, compiles and keeps the other defs.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - the interpreted run (mruby's body, Fiber-based through mruby-enumerator) and the compiled run (the step, flag set)
+#     - the interpreted run (mruby's body, Fiber-based through mruby-enumerator) and the compiled run (the driver, flag set)
 #       print the same over the scenarios, including the calls a user succ, <=> and exclude_end? see, in order;
 #     - the compiled driver calls no body (no __bc2cpp_each_plain);
-#     - a user succ or <=> that calls Fiber.yield raises FiberError in the compiled run.
+#     - a user succ or <=> that calls Fiber.yield suspends the fiber in the compiled run too, as in the body.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] [BC2CPP_TOOL=path/to/bc2cpp.rb] \
 #          ruby scripts/bc2cpp/enum_step_range_generic_check.rb
@@ -148,7 +147,7 @@ DRIVER = <<~'RUBY'
     "StopIteration result=#{s.result.inspect}"
   end
 
-  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} plain=#{Range.private_instance_methods.include?(:__bc2cpp_each_plain)} step=#{Range.private_instance_methods.include?(:__bc2cpp_each_step)}"
+  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} plain=#{Range.private_instance_methods.include?(:__bc2cpp_each_plain)} driver=#{Range.private_instance_methods.include?(:__bc2cpp_each_driver)}"
 
   show('string excl') { e = ('a'...'e').each; [e.next, e.next, e.next, e.next, stop_of(e)] }
   show('string incl') { e = ('a'..'c').each; [e.next, e.next, e.next, stop_of(e)] }
@@ -253,16 +252,9 @@ EXPECTED = {
   'dispatch log subclass generic' => '[[:cmp, 1], [:cmp, 1], [:cmp, 1], [:yield, 1], [:succ, 1], [:cmp, 2], :excl]',
   'dispatch log subclass integer' => '[:excl, [:yield, 1], [:yield, 2]]',
   'dispatch log float end' => '[[:yield, 1], [:yield, 2], :excl]',
-  'string without upto' => '["a", "b", "c", "StopIteration result=\"a\"...\"d\""]'
-}.freeze
-
-# A user succ or <=> that suspends the fiber. The body (interpreted) lets the Fiber.yield through; the step cannot (a C
-# frame is on the stack), so the compiled run must raise FiberError, and the interpreted run keeps the body's value.
-SUSPENDING = {
-  'succ yields' => { interpreted: '[1, [:inside_succ, 1]]',
-                     compiled: 'raised FiberError: can\'t cross C function boundary' },
-  'cmp yields' => { interpreted: '[1, [:inside_cmp, 2]]',
-                    compiled: 'raised FiberError: can\'t cross C function boundary' }
+  'string without upto' => '["a", "b", "c", "StopIteration result=\"a\"...\"d\""]',
+  'succ yields' => '[1, [:inside_succ, 1]]',
+  'cmp yields' => '[1, [:inside_cmp, 2]]'
 }.freeze
 
 dir = Dir.mktmpdir('bc2cpp-enum-step-range-generic')
@@ -308,7 +300,7 @@ build = Bc2cppFixtureRuntime.full_or_build
 if build.nil?
   puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
 else
-  puts '-- fixtures on real mruby: Fiber-based (interpreted) and step-based (compiled)'
+  puts '-- fixtures on real mruby: Fiber-based (interpreted) and driver-based (compiled)'
   body = <<~CPP
     static int scenario(mrb_state* M) {
       std::fflush(stdout);
@@ -330,30 +322,22 @@ else
   interpreted = sections['interpreted']
   compiled = sections['compiled']
   mode_line = ->(lines) { lines&.find { |line| line.start_with?('mode: ') } }
-  same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') || SUSPENDING.key?(line.split(': ', 2).first) } }
+  same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run is interpreted without the step or a body alias',
-             mode_line.call(interpreted)&.end_with?('step=false') && mode_line.call(interpreted)&.include?('plain=false'))
-  check.call('the compiled run registers the step on Range', mode_line.call(compiled)&.end_with?('step=true'))
+             mode_line.call(interpreted)&.end_with?('driver=false') && mode_line.call(interpreted)&.include?('plain=false'))
+  check.call('the compiled run registers the driver on Range', mode_line.call(compiled)&.end_with?('driver=true'))
   check.call('the compiled run keeps no body alias (the step covers every case)', mode_line.call(compiled)&.include?('plain=false'))
-  check.call('interpreted and compiled runs print the same (suspending succ and <=> excepted)',
+  check.call('interpreted and compiled runs print the same (succ and <=> that yield included)',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled
     same.call(interpreted).zip(same.call(compiled)).reject { |a, b| a == b }.first(10)
                           .each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
     values = interpreted.filter_map { |line| line.split(': ', 2) if line.include?(': ') }.to_h
-    compiled_values = compiled.filter_map { |line| line.split(': ', 2) if line.include?(': ') }.to_h
     EXPECTED.each do |label, expected|
       ok = values[label] == expected
       puts "    #{label}: expected #{expected}, got #{values[label]}" unless ok
       check.call("#{label} (Ruby's own result): #{expected}", ok)
-    end
-    SUSPENDING.each do |label, want|
-      check.call("#{label}: the body lets the Fiber.yield through (interpreted): #{want[:interpreted]}",
-                 values[label] == want[:interpreted])
-      ok = compiled_values[label] == want[:compiled]
-      puts "    #{label}: expected #{want[:compiled]}, got #{compiled_values[label]}" unless ok
-      check.call("#{label}: the step raises FiberError, not a hang or a silent value (#{want[:compiled]})", ok)
     end
   end
   puts output.lines.last(30).join unless built && interpreted && compiled
