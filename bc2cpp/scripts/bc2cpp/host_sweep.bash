@@ -37,10 +37,12 @@ run() { # name, then env assignments
   local name=$1 a frames=600
   shift
   for a in "$@"; do case $a in BC2CPP_HOST_FRAMES=*) frames=${a#*=} ;; esac; done
+  local survey=()
+  if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/$name.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/$name.vm.tsv"); fi
   if [ -x "$host" ] && [ -n "${built:-}" ]; then
-    env "$@" BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" "$frames" > "$logs/$name.log" 2>&1
+    env "${survey[@]}" "$@" BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" "$frames" > "$logs/$name.log" 2>&1
   else
-    env "$@" "$root/scripts/bc2cpp/trace_host.bash" "$build" "$game" > "$logs/$name.log" 2>&1
+    env "${survey[@]}" "$@" "$root/scripts/bc2cpp/trace_host.bash" "$build" "$game" > "$logs/$name.log" 2>&1
   fi
   local rc=$?
   built=1
@@ -102,7 +104,9 @@ fi
 
 map() {
   local id=$1 log=$logs/map-$1.log
-  env BC2CPP_HOST_FRAMES=150 BC2CPP_HOST_PREVIEW_MAP="$id" BC2CPP_HOST_KEYS="$MAP_TAPS" \
+  local survey=()
+  if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/map-$id.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/map-$id.vm.tsv"); fi
+  env "${survey[@]}" BC2CPP_HOST_FRAMES=150 BC2CPP_HOST_PREVIEW_MAP="$id" BC2CPP_HOST_KEYS="$MAP_TAPS" \
     BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" 150 > "$log" 2>&1
   local rc=$?
   if [ "$rc" -ne 0 ] || grep -q -E "$bad_re" "$log"; then
@@ -112,7 +116,7 @@ map() {
   fi
 }
 export -f map
-export host game logs bad_re
+export host game logs bad_re LOOKUP_SURVEY
 MAP_TAPS=$(taps 20 150 12)
 export MAP_TAPS
 total=$(ls "$game"/Map*.lmu | wc -l)

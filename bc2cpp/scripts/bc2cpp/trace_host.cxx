@@ -34,6 +34,10 @@
 // etc.).
 extern "C" void rgss_set_display(mrb_state* M, lv_display_t* display);
 
+#ifdef MRB_USE_METHOD_LOOKUP_HOOK
+#include "method_lookup_survey.hxx"
+#endif
+
 namespace {
 
 #ifdef MRB_USE_METHOD_LOOKUP_HOOK
@@ -219,12 +223,39 @@ int main(int argc, char** argv) {
                          LV_DISPLAY_RENDER_MODE_FULL);
   lv_display_set_flush_cb(disp, flush_cb);
 
+  const char* survey_path = getenv("BC2CPP_HOST_LOOKUP_SURVEY");
+#ifdef MRB_USE_METHOD_LOOKUP_HOOK
+  if (survey_path) {
+    lookup_survey::output_path = survey_path;
+    if (atexit(lookup_survey::dump) != 0) {
+      fprintf(stderr, "TRACE_HOST cannot register lookup survey dump\n");
+      return 2;
+    }
+  }
+  mrb_state* const M =
+      survey_path ? mrb_open_with_method_lookup_hook(lookup_survey::observe)
+                  : mrb_open();
+#else
+  if (survey_path) {
+    fprintf(stderr, "TRACE_HOST survey requires BC2CPP_METHOD_LOOKUP_HOOK=1\n");
+    return 2;
+  }
   mrb_state* const M = mrb_open();
+#endif
   if (!M) {
     fprintf(stderr, "TRACE_HOST mrb_open failed\n");
     return 2;
   }
+#ifdef MRB_USE_METHOD_LOOKUP_HOOK
+  if (survey_path)
+    lookup_survey::snapshot(M);
+#endif
   const char* const lookup_path = getenv("BC2CPP_HOST_LOOKUPS");
+  if (lookup_path && survey_path) {
+    fprintf(stderr,
+            "TRACE_HOST choose raw lookup logging or the aggregate survey\n");
+    return 2;
+  }
   if (lookup_path) {
 #ifdef MRB_USE_METHOD_LOOKUP_HOOK
     lookup_log = fopen(lookup_path, "w");
