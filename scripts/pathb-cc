@@ -47,4 +47,4 @@ fi
 # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
 "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s"
 if [ -n "${PATHB_KEEP:-}" ]; then mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$tmp/$n.ssa" "$tmp/$n.s" "$PATHB_KEEP/"; fi
-cc -c -o "$out" "$tmp/$n.s"
+${NFCXX_GCC:-cc} -c -o "$out" "$tmp/$n.s"   # NFCXX_GCC: cosmocc with --cosmo (the QBE assembly is ELF)

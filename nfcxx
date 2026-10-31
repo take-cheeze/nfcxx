@@ -633,6 +633,23 @@ case ${NFCXX_INSTANTIATE:-used} in
                                               --c_to_obj_option -Wl,--gc-sections) ;;
   *) echo "nfcxx: NFCXX_INSTANTIATE is auto or used (got $NFCXX_INSTANTIATE)" >&2; exit 2 ;;
 esac
+# --cosmo (docs/notes/cosmo.md): cosmocc is the C compiler (NFCXX_GCC: gcc-cc runs it, pathb-cc assembles with it), and
+# its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with NFCXX_PATH=b.
+if [ $cosmo = 1 ]; then
+  [ "${NFCXX_PATH:-}" != b ] || backend=pathb
+  if [ $backend != pathb ]; then
+    [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc or NFCXX_PATH=b" >&2; exit 2; }
+    backend=gcc
+  fi
+  cosmo_bin=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
+  [ -x "$cosmo_bin" ] || { echo "nfcxx: $cosmo_bin is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" >&2; exit 2; }
+  cosmo_root=$(cd "$(dirname "$cosmo_bin")/.." && pwd)
+  export NFCXX_GCC=$cosmo_bin
+  # cosmoc++ is a wrapper that prints no include list, so the directories are named here: libc++ first, then the C library.
+  export NFCXX_SYS_INCLUDES=$cosmo_root/include/third_party/libcxx:$cosmo_root/include
+  [ -n "${gnu:-}" ] || gnu=$("$cosmo_root/bin/x86_64-linux-cosmo-g++" -dumpfullversion | awk -F. '{ printf "%d%02d%02d\n", $1, $2, $3 }')
+  cflags+=(-D__COSMOPOLITAN__ -D__COSMOCC__ -D__FATCOSMOCC__)
+fi
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
   [ -n "$gnu" ] || gnu=130000
@@ -720,13 +737,6 @@ if [ $safeptr = 1 ]; then
 fi
 [ "${NFCXX_PATH:-}" != b ] || backend=pathb   # NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md)
 [ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
-if [ $cosmo = 1 ]; then
-  # --cosmo: cosmocc is the C compiler (gcc-cc runs it as NFCXX_GCC), so the backend is gcc (docs/notes/cosmo.md)
-  [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc" >&2; exit 2; }
-  backend=gcc
-  export NFCXX_GCC=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
-  [ -x "$NFCXX_GCC" ] || { echo "nfcxx: $NFCXX_GCC is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" >&2; exit 2; }
-fi
 case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
@@ -841,7 +851,12 @@ if [ $backend = pathb ]; then
   # libnfcxxld.a: the long double helpers and nothing else (scripts/pathb-ldrt, docs/notes/pathb-longdouble.md)
   ldrt=$("$root/scripts/pathb-ldrt")
   sprt=(); [ $safeptr = 0 ] || [ $compile_only = 1 ] || sprt=("$("$root/scripts/safeptr-rt")" -pthread)   # first: its malloc wins
+  if [ $cosmo = 1 ]; then
+    # cosmo: cosmocc links, its libc++ comes with the C++ driver, and the glibc-only libraries are not there
+    "$NFCXX_GCC" ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lc++ -lm
+  else
   cc ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  fi
   trace_end "$t" "link" pathb
   exit 0
 fi

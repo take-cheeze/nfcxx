@@ -38,3 +38,18 @@ tests/cosmo/run.sh
 - **Runtime-loaded features.** APE binaries are static. `lib/poly` (Ruby, Lua, Python, JS, Go), `lib/ffi`, `lib/eval`,
   `--bundle-libs` and the CUDA paths depend on dynamic loading or shared libraries and will not work with `--cosmo`.
 - **Other platforms.** Only Linux x86_64 is the development host here. The APE output is not run on macOS or Windows yet.
+
+## Path B (`NFCXX_PATH=b --cosmo`), in progress
+
+- **Done:** `--cosmo` with `NFCXX_PATH=b` selects Path B. `pathb-cc` assembles with cosmocc (`NFCXX_GCC`), the Path B
+  link uses cosmocc and `-lC -lc++ -lm` (no glibc-only libraries), and `pathb-ldrt` builds `libnfcxxld.a` with cosmocc
+  into `build/pathb-ldrt-cosmo`. The C++ headers are cosmo's libc++ (`include/third_party/libcxx`) and its C library
+  (`include`), named in `NFCXX_SYS_INCLUDES`, because `cosmoc++` prints no include list for `host_sys_includes`.
+  Predefines `__COSMOPOLITAN__`, `__COSMOCC__`, `__FATCOSMOCC__` are added, and the GNU version is cosmo's GCC 14.1.0 (140100).
+- **Blocked:** EDG cannot parse cosmo's libc++ and libc headers. Errors: `__has_feature`/`__has_builtin` in constant
+  expressions (`__config`), `bool32` and `libcesque` in `libc/calls/calls.h` (defined by cosmo's `libc/c.inc` and
+  `libc/cxx.inc`, which cosmo's own build includes), and the libc++ namespace macros. `NFCXX_DIALECT=clang` does not fix it.
+  The next step is either EDG support for those builtins plus the cosmo `.inc` headers, or a smaller libc++ config.
+- **Not done:** EDG's `libC.a` and the EH shim still come from the host build, so the link would not work even when
+  the headers parse. `lib/ehshim` is written against libstdc++'s exception layout (static_asserts on its size).
+- Host Path B and the gcc backend are unchanged (regression-checked).
