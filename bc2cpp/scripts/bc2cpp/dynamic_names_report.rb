@@ -6,9 +6,20 @@
 # its name dynamic, and a summary of the sources that keep the most entries.
 #
 # Usage: MRBC=path/to/mrbc BC2CPP_STATIC_DISPATCH_LISTS=<scripts/bc2cpp/static_dispatch_lists.bash output> \
-#        ruby scripts/bc2cpp/dynamic_names_report.rb [--entries]
+#        ruby scripts/bc2cpp/dynamic_names_report.rb [--entries] [--entries-out PATH]
 
 require 'set'
+require 'optparse'
+
+options = { entries: false, entries_out: nil }
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: #{$PROGRAM_NAME} [--entries] [--entries-out PATH]"
+  opts.on('--entries', 'Print entry rows instead of the summary') { options[:entries] = true }
+  opts.on('--entries-out PATH', 'Also write entry rows from this analysis to PATH') { |path| options[:entries_out] = path }
+end
+parser.parse!
+abort "unexpected arguments: #{ARGV.join(' ')}" unless ARGV.empty?
+
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
 sdr = StaticDispatchRegistrations
@@ -40,7 +51,10 @@ reason = lambda do |name|
 end
 
 rows = kept.map { |m| [m[:owner], m[:name], reason.call(m[:name])] }.sort
-if ARGV.include?('--entries')
+if options[:entries_out]
+  File.write(options[:entries_out], rows.map { |row| row.join("\t") + "\n" }.join)
+end
+if options[:entries]
   rows.each { |row| puts row.join("\t") }
 else
   # A source's kind: the reason without the name that varies per site.
