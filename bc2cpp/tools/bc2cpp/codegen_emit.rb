@@ -304,9 +304,9 @@ class CodeGen
         defines = names.map { |name| "#{fn}(M, #{var}, #{c_string_literal(name)}, #{m[:entry]}, #{m[:aspec]});" }
         # CORE_BLOCK_GUARD: the bytecode must be saved before it is replaced.
         if m[:guard]
-          save = if EnumStep.each_entry?(m, singleton)
-                   # ENUM_STEP: Array#each's slot holds the shared driver, not its own body.
-                   "bc2cpp_enum_step_save(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]})"
+          save = if (form = EnumStep.form_for(m, singleton))
+                   # ENUM_STEP: the owner's #each slot holds the shared driver, not its own body.
+                   "bc2cpp_enum_step_save(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]}, #{form.save_args})"
                  else
                    "bc2cpp_core_save_interpreted(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]})"
                  end

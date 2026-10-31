@@ -41,7 +41,7 @@ PROBE = <<~'RUBY'
 RUBY
 
 # The step's registration and the saved-body registration for Array#each, as the generated text spells them.
-STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Array, false, "\\x65\\x61\\x63\\x68", \d+\)/
+STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Array, false, "\\x65\\x61\\x63\\x68", \d+, bc2cpp_each_step, nullptr, bc2cpp_each_driver_src\)/
 PLAIN_SAVE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Array, false, "\\x65\\x61\\x63\\x68", \d+\)/
 
 def generate_with(flag, dir)
