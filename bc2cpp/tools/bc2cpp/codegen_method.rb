@@ -1071,12 +1071,7 @@ class CodeGen
   # first: it yields in its own loop, and its block is an explicit `&block` parameter.
   RSM_SUFFIX = '_rsm'
   RESUMABLE_DUAL = %w[
-    Array#each Array#delete_if Array#each_index Array#fetch Array#find Array#sort_by
-    Array#to_h Array#uniq Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map
-    Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject
-    Enumerable#sort Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Float#step
-    Hash#delete Hash#delete_if Hash#fetch Hash#reject Hash#select Integer#downto
-    Integer#step Integer#times Integer#upto String#each_char String#each_line String#upto
+    Array#each Array#each_index Integer#times Integer#upto Integer#downto
   ].freeze
 
   def rsm_dual?(label, d)
