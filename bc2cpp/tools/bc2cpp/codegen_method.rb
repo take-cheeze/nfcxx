@@ -1067,11 +1067,16 @@ class CodeGen
       prologue: "  if (mrb_unlikely(#{condition})) return bc2cpp_core_interpreted(M, self, #{index});\n" }
   end
 
-  # RESUMABLE_DUAL: the direct-yield core methods that get a resumable variant beside their fast body. Array#each is the
-  # first: it yields in its own loop, and its block is an explicit `&block` parameter.
+  # RESUMABLE_DUAL: the direct-yield core iterators that get a resumable variant beside their fast body, so a Fiber
+  # reaches them without a saved bytecode driver. Each is listed only once scripts/bc2cpp/resumable_variants_check.rb
+  # runs it both ways (inside a Fiber and plainly) with the same output. Methods whose block is called from an inner
+  # block (Enumerable#collect, #inject, #max ...) stay on their drivers: the step cannot suspend through that block.
   RSM_SUFFIX = '_rsm'
   RESUMABLE_DUAL = %w[
-    Array#each Array#each_index Integer#times Integer#upto Integer#downto
+    Array#collect! Array#delete_if Array#each Array#each_index
+    Array#reject! Array#select! Enumerable#sort Hash#delete
+    Hash#each Integer#downto Integer#times Integer#upto
+    Range#each String#each_char StringIO#each
   ].freeze
 
   def rsm_dual?(label, d)
@@ -1103,7 +1108,7 @@ class CodeGen
   # The variant's own helpers (block fallbacks, direct entries) are compiled from the same blocks as the fast body's, under
   # the same names. A helper the fast body also defines is renamed in the variant (`_rsm`), so each name is defined once
   # and the variant still calls its own copy. Names are whole C identifiers.
-  RSM_FUNCTION_DEF = /^(?:\[\[maybe_unused\]\] )?(?:static )?[\w:* ]+?\b(\w+)\(.*\) \{$/
+  RSM_FUNCTION_DEF = /^(?:\[\[maybe_unused\]\] )?(?:static )?[\w:*$ ]+?([\w$]+)\(.*\) \{$/
   def rsm_variant_without_duplicates(label, out)
     code = rsm_variant_code(label)
     return code if code.empty?

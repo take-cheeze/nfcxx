@@ -250,6 +250,7 @@ class CodeGen
 
       resumable_block_site(insn)
     when :SEND, :SEND0
+      return resumable_block_call_intercept(insn, irep, d, idx, reg_offset) if block_call_site?(insn, idx, reg_offset)
       return nil unless insn.sym == 'yield' && idx
 
       dest = insn.reg - reg_offset
@@ -285,10 +286,9 @@ class CodeGen
   # A `yield` (BLKCALL R n argc) of the method's own block: the step returns a frame whose arguments are the yielded
   # values, and the driver calls the block with them (Bc2cppResumable.drive); the block's value is the resume value.
   # The block runs from the driver's VM frame, so a Fiber.yield inside it has only VM frames to cross.
-  def resumable_block_site(insn)
+  def resumable_block_site(insn, argc: insn.uint_operand.to_i)
     return resumable_not_flat_error('yield') unless @resumable.flat
 
-    argc = insn.uint_operand.to_i
     state = @resumable.new_state
     dest = insn.reg
     values = (1..argc).map { |i| "r#{dest.to_i + i}" }
@@ -304,6 +304,36 @@ class CodeGen
       '  return bc2cpp_frame_value;',
       "  Lbc2cpp_resume_#{state}:;",
       "  r#{dest} = R[1];",
+      ''
+    ].join("\n")
+  end
+
+  # `block.call(a, ...)` on the method's own block (a SEND of :call with fixed arguments, in the step's own body): Proc#call
+  # is a C function, so the block would run under a C frame that Fiber.yield cannot cross. The site suspends the step as
+  # a `yield` does, when the receiver is the entry block at run time; any other receiver takes the ordinary send.
+  # Identity is tested at run time, so no alias of the block register needs tracking.
+  def block_call_site?(insn, idx, reg_offset)
+    return false unless insn.op == :SEND && insn.sym == 'call' && idx && @resumable&.block && @resumable.flat
+    return false if @resumable_plain || reg_offset != 0
+
+    insn.plain_fixed_argc?
+  end
+
+  def resumable_block_call_intercept(insn, irep, d, idx, reg_offset)
+    dest = insn.reg
+    suspend = resumable_block_site(insn, argc: insn.argc)
+    plain = begin
+      @resumable_plain = true
+      compile_insn_op(insn, irep, d, idx, reg_offset)
+    ensure
+      @resumable_plain = false
+    end
+    [
+      "  if (mrb_obj_eq(M, r#{dest}, bc2cpp_blk) && !mrb_nil_p(bc2cpp_blk)) {",
+      suspend.rstrip,
+      '  } else {',
+      plain.rstrip,
+      '  }',
       ''
     ].join("\n")
   end

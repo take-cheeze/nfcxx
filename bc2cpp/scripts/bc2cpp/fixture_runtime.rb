@@ -303,6 +303,7 @@ module Bc2cppFixtureRuntime
         if (M->exc) { mrb_print_error(M); return 2; }
         compiled = with_compiled;
         if (with_compiled) {
+          bc2cpp_gem_init(M);
           bc2cpp_set_instance_tts(M);
       #{regs}
         }
