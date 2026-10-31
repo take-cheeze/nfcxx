@@ -8,6 +8,7 @@
 # loading copies its method (module_function, alias, COPYING_SENDS), when the guard keeps the interpreted method
 # (CORE_BLOCK_GUARD), or when its Owner#name is not exactly one plain `def`. A stub that runs anyway raises
 # ScriptError, which a `rescue => e` does not catch. See docs/bc2cpp-mrblib-stubs.md.
+require 'fileutils'
 require 'json'
 require 'prism'
 require 'set'
@@ -50,12 +51,13 @@ module MrblibStubs
   # The Owner#name keys of `compiled` (this run's entries) whose bodies can be stubbed. `all_defs`: every bytecode
   # definition, the core ones the generation's registry no longer holds included. The load phase reads it: a method
   # body missing from it would count as code that runs at load.
-  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil)
+  # copy_ireps: the ireps a copy may come from. Each generation compiles only its own sources, so the closed build passes
+  # every Ruby source here: a copy in another gem is then a site too, not a missing one (which would keep the body).
+  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil, copy_ireps: ireps)
     require_relative 'static_dispatch_registrations'
     body_of = {}
     all_defs.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
-    parent = {}
-    ireps.each_value { |irep| irep.reps.each { |c| parent[c.respond_to?(:label) ? c.label : c] = irep.label } }
+    parent = parent_map(ireps)
     method_of = ireps.keys.to_h do |label|
       up = label
       up = parent[up] until up.nil? || body_of.key?(up)
@@ -66,8 +68,8 @@ module MrblibStubs
     overridden = body_of.each_value.map { |owner, name| "#{owner}##{name}" }.to_set
     load_bodies, = StaticDispatchRegistrations.load_phase(ireps, body_of, method_of, overridden)
     copied = [registry, all_defs].flat_map { |r| r.values.flatten.filter_map(&:copy_irep) }.to_set
-    copied_names = copied_names(ireps)
-    copy_sites = copy_sites(ireps, parent)
+    copied_names = copied_names(copy_ireps)
+    copy_sites = copy_sites(copy_ireps, parent_map(copy_ireps))
     defs_of = Hash.new { |h, k| h[k] = [] }
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
     all_of = Hash.new { |h, k| h[k] = [] }
@@ -85,6 +87,13 @@ module MrblibStubs
       stub_keep_log(key, reason)
       nil
     end.to_set
+  end
+
+  # { label => its parent label }: every rep of an irep points back to it.
+  def parent_map(ireps)
+    parent = {}
+    ireps.each_value { |irep| irep.reps.each { |c| parent[c.respond_to?(:label) ? c.label : c] = irep.label } }
+    parent
   end
 
   # COPY SITES. A copy by name takes its source from the receiver's method lookup. A site in a class body whose
@@ -165,6 +174,21 @@ module MrblibStubs
     end
   end
 
+  # The ireps the copy sites are read from: those of every Ruby source the closed world loads (the load world's files,
+  # FOREIGN_RUBY_SRCS and this generation's own), so a copy in another gem is seen. Without a load world, this
+  # generation's own ireps stand.
+  def copy_context_ireps(env, own_ireps, own_srcs, out_dir)
+    return own_ireps unless env['BC2CPP_LOAD_WORLD']
+  
+    world_files = JSON.parse(env['BC2CPP_LOAD_WORLD']).values.flatten
+    files = (world_files + Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', '')) + own_srcs.select { |f| f.end_with?('.rb') })
+            .map { |f| File.expand_path(f) }.uniq
+    copy_dir = File.join(out_dir, 'copy_context')
+    FileUtils.mkdir_p(copy_dir)
+    ireps, = compile_ireps(files, 'copy_context', copy_dir)
+    ireps
+  end
+  
   # Whether +owner+ is a plain class (not a module, not a singleton class) in the class world.
   def class_owner?(owner, world)
     fact = world.facts[owner]
