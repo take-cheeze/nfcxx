@@ -179,7 +179,7 @@ module MrblibStubs
   # generation's own ireps stand.
   def copy_context_ireps(env, own_ireps, own_srcs, out_dir)
     return own_ireps unless env['BC2CPP_LOAD_WORLD']
-  
+
     world_files = JSON.parse(env['BC2CPP_LOAD_WORLD']).values.flatten
     files = (world_files + Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', '')) + own_srcs.select { |f| f.end_with?('.rb') })
             .map { |f| File.expand_path(f) }.uniq
@@ -188,7 +188,7 @@ module MrblibStubs
     ireps, = compile_ireps(files, 'copy_context', copy_dir)
     ireps
   end
-  
+
   # Whether +owner+ is a plain class (not a module, not a singleton class) in the class world.
   def class_owner?(owner, world)
     fact = world.facts[owner]
