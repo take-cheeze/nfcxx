@@ -230,20 +230,78 @@ module EnumStep
     }
   CPP
 
+    # The driver of String#upto: the body's three branches (single character, all-digit edges, the succ loop), each
+    # yield made a block call. It has no C step: a Ruby driver makes the block call itself, so Fiber.yield in the block
+    # has only VM frames between resume and yield, as the Range driver does.
+    STRING_UPTO_DRIVER = <<~'RUBY'
+      class String
+        def __bc2cpp_upto_driver(max, exclusive=false, &block)
+          return to_enum(:upto, max, exclusive) unless block
+          raise TypeError, "no implicit conversion of #{max.class} into String" unless max.kind_of? String
+
+          len = self.length
+          maxlen = max.length
+          # single character
+          if len == 1 and maxlen == 1
+            c = self.ord
+            e = max.ord
+            while c <= e
+              break if exclusive and c == e
+              block.call(c.chr(__ENCODING__))
+              c += 1
+            end
+            return self
+          end
+          # both edges are all digits
+          bi = self.to_i(10)
+          ei = max.to_i(10)
+          if (bi > 0 or bi == "0"*len) and (ei > 0 or ei == "0"*maxlen)
+            while bi <= ei
+              break if exclusive and bi == ei
+              s = bi.to_s
+              s = s.rjust(len, "0") if s.length < len
+              block.call(s)
+              bi += 1
+            end
+            return self
+          end
+          bs = self
+          while true
+            n = (bs <=> max)
+            break if n > 0
+            break if exclusive and n == 0
+            block.call(bs)
+            break if n == 0
+            bsiz = bs.size
+            break if bsiz > max.size || bsiz == 0
+            bs = bs.succ
+          end
+          self
+        end
+        private :__bc2cpp_upto_driver
+      end
+    RUBY
+
   # One step form per owner. c_step is the C step (a method of the owner); c_open the C function that opens the cursor,
   # nil when the driver takes no open; driver the Ruby source of the driver; c the C++ the form needs. stubs_body: the
   # step covers every case the saved body covers, so under the flag the body is emptied (MrblibStubs, bc2cpp_stub_top_mrblib).
-  Form = Struct.new(:owner, :c_step, :c_open, :driver, :c, :stubs_body) do
-    # The driver's C++ string constant, named after the step.
-    def src_name = "#{c_step.delete_suffix('_step')}_driver_src"
+  # name: the method the form replaces (each, unless given); driver_method: the driver's name, saved as the body.
+  Form = Struct.new(:owner, :c_step, :c_open, :driver, :c, :stubs_body, :name, :driver_method) do
+    def method_name = name || 'each'
+
+    def driver_name = driver_method || DRIVER_METHOD
+
+    # The driver's C++ string constant, named after the step, or after the method for a form with no C step.
+    def src_name = c_step ? "#{c_step.delete_suffix('_step')}_driver_src" : "bc2cpp_#{method_name}_driver_src"
 
     # The arguments after the registration's index that bc2cpp_enum_step_save takes for this form.
-    def save_args = "#{c_step}, #{c_open || 'nullptr'}, #{src_name}"
+    def save_args = [c_step || 'nullptr', c_open || 'nullptr', src_name, *(driver_method ? ["\"#{driver_name}\""] : [])].join(', ')
   end
 
   FORMS = {
-    'Array' => Form.new('Array', 'bc2cpp_each_step', nil, ARRAY_DRIVER, ARRAY_C, false),
-    'Range' => Form.new('Range', 'bc2cpp_range_each_step', 'bc2cpp_range_each_open', RANGE_DRIVER, RANGE_C, true)
+    %w[Array each] => Form.new('Array', 'bc2cpp_each_step', nil, ARRAY_DRIVER, ARRAY_C, false),
+    %w[Range each] => Form.new('Range', 'bc2cpp_range_each_step', 'bc2cpp_range_each_open', RANGE_DRIVER, RANGE_C, true),
+    %w[String upto] => Form.new('String', nil, nil, STRING_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver')
   }.freeze
 
   module_function
@@ -252,11 +310,11 @@ module EnumStep
     ENV[FLAG] != '0'
   end
 
-  # The step form of an entry's #each, or nil. Instance methods only, and only an each with a guard (a block-taking one).
+  # The step form of a guarded entry, or nil: keyed by its owner and method. Instance methods only.
   def form_for(entry, singleton)
-    return nil unless enabled? && !singleton && entry[:name] == 'each' && !entry[:guard].nil?
+    return nil unless enabled? && !singleton && !entry[:guard].nil?
 
-    FORMS[entry[:owner]]
+    FORMS[[entry[:owner], entry[:name]]]
   end
 
   # Whether the entry's saved body may leave the binary under the flag: its form covers that body (Form#stubs_body).
@@ -278,12 +336,13 @@ module EnumStep
       // The first registration of a body still in bytecode loads the owner's driver, which takes the body's place in
       // the saved table; a second registration finds the compiled entry and the driver already saved.
       [[maybe_unused]] static bool bc2cpp_enum_step_save(mrb_state* M, struct RClass* c, bool singleton, const char* name,
-                                                         mrb_int index, mrb_func_t step, mrb_func_t open, const char* driver_src) {
+                                                         mrb_int index, mrb_func_t step, mrb_func_t open, const char* driver_src,
+                                                         const char* driver_name = "#{DRIVER_METHOD}") {
         struct RClass* target = singleton ? mrb_singleton_class_ptr(M, mrb_obj_value(c)) : c;
         struct RClass* found = target;
         mrb_method_t m = mrb_method_search_vm(M, &found, mrb_intern_cstr(M, name));
         if (found == target && !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_PROC_P(m) && !MRB_PROC_CFUNC_P(MRB_METHOD_PROC(m))) {
-          mrb_define_private_method(M, c, "#{STEP_METHOD}", step, MRB_ARGS_REQ(1));
+          if (step) mrb_define_private_method(M, c, "#{STEP_METHOD}", step, MRB_ARGS_REQ(1));
           if (open) mrb_define_private_method(M, c, "#{OPEN_METHOD}", open, MRB_ARGS_NONE());
           mrb_load_string(M, driver_src);
           if (M->exc) {
@@ -292,7 +351,7 @@ module EnumStep
             return false;
           }
         }
-        return bc2cpp_core_save_interpreted(M, c, singleton, "#{DRIVER_METHOD}", index);
+        return bc2cpp_core_save_interpreted(M, c, singleton, driver_name, index);
       }
 
     CPP
