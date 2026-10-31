@@ -1076,7 +1076,7 @@ class CodeGen
     Array#collect! Array#delete_if Array#each Array#each_index
     Array#reject! Array#select! Enumerable#sort Hash#delete
     Hash#each Integer#downto Integer#times Integer#upto
-    Range#each String#each_char StringIO#each
+    String#each_char StringIO#each
   ].freeze
 
   def rsm_dual?(label, d)

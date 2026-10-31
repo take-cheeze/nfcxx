@@ -86,6 +86,7 @@ SCENARIOS = [
   ['Hash#reject!', 'h = { a: 1, b: 2 }; h.reject! { |k, v| Fiber.yield k; false }', 'h = { a: 1, b: 2 }; h.reject! { |k, v| false }'],
   ['Hash#select!', 'h = { a: 1, b: 2 }; h.select! { |k, v| Fiber.yield k; true }', 'h = { a: 1, b: 2 }; h.select! { |k, v| true }'],
   ['Range#each', '(1..2).each { |x| Fiber.yield x }', '(1..2).each { |x| x }'],
+  ['Range#each', %q{('a'..'c').each { |x| Fiber.yield x }}, %q{('a'..'c').each { |x| x }}],
   ['StringIO#each', 'require "stringio"; StringIO.new("a\\nb").each { |l| Fiber.yield l }', 'require "stringio"; StringIO.new("a\\nb").each { |l| l }']
 ].freeze
 
@@ -93,7 +94,7 @@ EXPECTED_LABELS = %w[
   Array#collect! Array#delete_if Array#each Array#each_index
   Array#reject! Array#select! Enumerable#sort Hash#delete
   Hash#each Integer#downto Integer#times Integer#upto
-  Range#each String#each_char StringIO#each
+  String#each_char StringIO#each
 ].freeze
 
 # The closed-world probe: every listed method is called from a Fiber body, so each is guarded and gets its variant.
