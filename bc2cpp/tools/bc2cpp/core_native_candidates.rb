@@ -36,8 +36,33 @@ module CoreNativeCandidates
   # A table entry's name operand defines the name; it is blanked before the source is scanned for lookups.
   ENTRY_NAME = /(MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*)(MRB_\w*SYM\w*\s*\(\s*\w+\s*\))/
   NAME = /\A[a-z_][A-Za-z0-9_]*[?!=]?\z/
+  DOMAIN_ERROR = /\bstatic\s+void\s+domain_error\s*\(\s*mrb_state\s*\*\s*mrb\s*,\s*const\s+char\s*\*\s*func\s*\)\s*\{([^{}]*)\}/m
+  DOMAIN_ERROR_BODY = <<~'C'.gsub(/\s+/, '').freeze
+    struct RClass *math = mrb_module_get_id(mrb, MRB_SYM(Math));
+    struct RClass *domainerror = mrb_class_get_under_id(mrb, math, MRB_SYM(DomainError));
+    mrb_raisef(mrb, domainerror, "Numerical argument is out of domain - %s", func);
+  C
+  DOMAIN_ERROR_CALL = /\bdomain_error\s*\(\s*mrb\s*,\s*("(?:[^"\\\n]|\\.)*")\s*\)/
 
   module_function
+
+  # A diagnostic label is not a lookup when the helper only formats an exception and no computed lookup
+  # can consume the resulting message. Unknown bodies, macros or escaping references retain every literal.
+  def strip_diagnostic_literals(text)
+    return text if text.match?(/\\[\r\n]|%:|\?\?/)
+    clean = StaticDispatchRegistrations.strip_c_comments(text)
+    return text if clean.match?(/^\s*#\s*(?:define|undef)\s+(?:domain_error|mrb_raisef|mrb_module_get_id|mrb_class_get_under_id)\b/)
+    definitions = clean.to_enum(:scan, DOMAIN_ERROR).map { Regexp.last_match }
+    return text unless definitions.size == 1 && definitions[0][1].gsub(/\s+/, '') == DOMAIN_ERROR_BODY
+
+    calls = clean.to_enum(:scan, DOMAIN_ERROR_CALL).map { Regexp.last_match }
+    return text unless clean.scan(/\bdomain_error\b/).size == calls.size + 1
+    return text if calls.any? { |call| clean[0...call.begin(0)].rstrip.end_with?('.', ':', '>') }
+
+    out = clean.dup
+    calls.each { |call| out[call.begin(1)...call.end(1)] = ' ' * (call.end(1) - call.begin(1)) }
+    out
+  end
 
   # Every table entry of `paths`: { mt_class:, kind:, cname:, name:, fn:, installed: } with `installed` the class the
   # table's MRB_MT_INIT_ROM installs it into (NativeRomOwners), or nil when that is not MRB_MT_CLASS's own class.
@@ -73,9 +98,10 @@ module CoreNativeCandidates
   # `core` is one { ireps:, body_of: } per core Ruby file, body_of mapping a method body's irep label to its name.
   # +lookup+ reads one irep (lookup_names, or CorePrivateRuby::Lookup); +strip+ blanks the native text it should not
   # read, +strip_generated+ the generated source's literals (the `_impl` calls it makes are read from the whole of it),
-  # +exact_impls+ how live_core reads a direct `_impl` call.
+  # +exact_impls+ how live_core reads a direct `_impl` call. +diagnostic_literals+ requires the closed-world
+  # literal-lookup proof, so an exception message cannot supply a computed method name.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
-                exact_impls: false)
+                exact_impls: false, diagnostic_literals: false)
     names = Set.new(StaticDispatchRegistrations::ALWAYS_DYNAMIC)
     fragments = Set.new
     ireps.each_value { |irep| lookup.call(irep, nil, names, fragments) }
@@ -83,6 +109,7 @@ module CoreNativeCandidates
     native_paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text = strip.call(text) if strip
+      text = strip_diagnostic_literals(text) if diagnostic_literals && path.end_with?('/mruby-math/src/math.c')
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
     generated.each do |src|
