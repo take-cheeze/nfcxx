@@ -72,6 +72,9 @@ class FnCtx {
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
   std::map<std::string, RegInfo> promoted;      // slot name => the register its scalar lives in (--promote=slots)
   std::map<std::string, long long> const_slots; // slot name => its value in an unrolled copy of a loop (Fn::unroll_loop)
+  // register => the alignment of the object a pointer register points to (its pointer type names a struct); a copy from or
+  // to it can use words of that alignment
+  std::map<std::string, long long> ptr_align;
   std::map<std::string, std::string> frame_origin;  // register => the frame slot its address is (LOCAL_TRACE)
   std::string trace_scope;  // the inlined function whose body is being compiled (LOCAL_TRACE): the owner of a slot name
   std::map<std::string, long long> const_regs;  // register => the constant it was loaded with (a counter in an unrolled copy)
