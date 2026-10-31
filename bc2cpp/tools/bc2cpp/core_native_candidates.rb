@@ -200,13 +200,14 @@ module CoreNativeCandidates
   # CORE_RAM_CANDIDATES: the core registrations made at run time (mrb_define_method and the other defining calls,
   # NativeOwnerMap), as "Owner#name" sorted, that the core gem removes like a left-out native. The same reachability
   # rule; a registration with a computed name, a native alias or undef of the key, or a ROM entry of the same class and
-  # name keeps it (the removal would take the ROM one, leaving a tombstone).
+  # name keeps it (the removal would take the ROM one, leaving a tombstone). Native aliases are candidates separately
+  # when their new names are unreachable; the source names still count as lookups.
   def ram_candidates(map, names, fragments, entries)
     rom = entries.to_set { |e| "#{e[:mt_class]}##{e[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
     map.registrations.each { |owner, name, fn| blocked << "#{owner}##{name}" if fn.nil? }
-    map.registrations.filter_map do |owner, name, _fn|
+    registrations = map.registrations.filter_map do |owner, name, _fn|
       next unless owner.is_a?(String) && name&.match?(NAME) && !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
       next if map.computed.include?(owner)
 
@@ -215,7 +216,20 @@ module CoreNativeCandidates
       next if StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       key
-    end.uniq.sort
+    end
+    # An alias copies its source entry during native initialization. Removing an unreachable alias afterward
+    # does not remove that source; its name still counts as a native lookup.
+    aliases = map.aliases.filter_map do |owner, name, original|
+      next unless original && owner.is_a?(String) && name&.match?(NAME) && !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
+      next if map.computed.include?(owner)
+
+      key = "#{owner}##{name}"
+      next if rom.include?(key.sub('.singleton#', '#'))
+      next if StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+
+      key
+    end
+    (registrations + aliases).uniq.sort
   end
 
   # The exclusion header's text for `keys` (MRB_MT_EXCLUDE_HEADER, include/mruby/class.h).

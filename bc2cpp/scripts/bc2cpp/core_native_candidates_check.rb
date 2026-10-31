@@ -18,7 +18,8 @@
 #   header
 #     - one MRB_MT_EXCLUDE_<Class>_<presym C name> 1 per listed entry;
 #   ram_candidates
-#     - an unreachable run-time registration is listed; a reachable one, or one a ROM entry shares, is not.
+#     - an unreachable run-time registration or native alias is listed; a reachable one, or one a ROM entry shares, is not;
+#     - an alias source still counts as a lookup; computed owners/names and fragment-built alias names stay.
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_native_candidates_check.rb
 
@@ -73,6 +74,16 @@ NATIVE = <<~'C'
     mrb_define_method(mrb, w, "lonely", w_spin, MRB_ARGS_NONE());
     mrb_define_method(mrb, w, "spin", w_spin, MRB_ARGS_NONE());
     mrb_define_method(mrb, w, "string_name", w_spin, MRB_ARGS_NONE());
+    mrb_define_alias(mrb, w, "unused_alias", "called");
+    mrb_define_alias_id(mrb, w, MRB_SYM(id_alias), MRB_SYM(called));
+    mrb_define_alias(mrb, w, "used_alias", "called");
+    mrb_define_alias(mrb, w, "chain_source", "called");
+    mrb_define_alias(mrb, w, "chain_tail", "chain_source");
+    mrb_define_alias(mrb, w, "spin", "called");
+    mrb_define_alias(mrb, w, "built_alias", "called");
+    mrb_define_alias(mrb, w, "opaque_alias", runtime_name);
+    mrb_define_alias(mrb, g, "computed_owner_alias", "called");
+    mrb_define_method(mrb, g, runtime_name, w_spin, MRB_ARGS_NONE());
   }
 C
 
@@ -84,6 +95,7 @@ ENGINE = <<~'RUBY'
       @names = ['string_name', 'built_']
       @sum = @a + @b
       used
+      used_alias
     end
 
     def defined_only; end
@@ -156,8 +168,10 @@ Dir.mktmpdir('core-native') do |dir|
                 ["#define MRB_MT_EXCLUDE_Widget_SYM_E__size 1\n", "#define MRB_MT_EXCLUDE_Widget_SYM_Q__empty 1\n",
                  "#define MRB_MT_EXCLUDE_Widget_SYM__spin 1\n"])
   ram = CoreNativeCandidates.ram_candidates(NativeOwnerMap.build([path]), names, fragments, entries)
-  suite.check("run-time registrations: only the unreachable one no ROM entry shares (#{ram.join(', ')})",
-              ram == %w[Widget#lonely])
+  suite.check("run-time registrations and aliases: only unreachable keys no ROM entry shares (#{ram.join(', ')})",
+              ram == %w[Widget#chain_tail Widget#id_alias Widget#lonely Widget#unused_alias])
+  suite.check('an alias source and an intermediate alias still count as native lookups',
+              names.include?('called') && names.include?('chain_source'))
 end
 
 suite.finish!

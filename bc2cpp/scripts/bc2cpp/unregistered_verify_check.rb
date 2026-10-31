@@ -108,8 +108,8 @@ end
 ENV['OUT_SYMBOL'] = outside
 suite.check('another namespace\'s gem leaves the native alone', !other_gem.include?('bc2cpp_native_owner(M, path'))
 
-# REGISTRATION_NAME_EXEMPTION: a registration's own name argument is no lookup; the same name elsewhere, and both
-# names of an alias, are.
+# REGISTRATION_NAME_EXEMPTION: a registration's own name argument is no lookup; the same name elsewhere and an
+# alias's source name are.
 tokens = Set.new
 StaticDispatchRegistrations.native_name_tokens(<<~'C', tokens, [])
   mrb_define_method(M, c, "only_defined", f, MRB_ARGS_NONE());
@@ -117,10 +117,14 @@ StaticDispatchRegistrations.native_name_tokens(<<~'C', tokens, [])
   mrb_define_method(M, c, "defined_and_called", f, MRB_ARGS_NONE());
   mrb_funcall(M, v, "defined_and_called", 0);
   mrb_define_alias(M, c, "alias_new", "alias_old");
+  mrb_define_alias_id(M, c, MRB_SYM(alias_id_new), MRB_SYM(alias_id_old));
+  mrb_funcall(M, v, "alias_id_new", 0);
 C
 suite.check('a registration\'s own name is no lookup', !tokens.include?('only_defined') && !tokens.include?('only_defined_id'))
-suite.check('the same name elsewhere, and an alias\'s names, still are',
-            tokens.include?('defined_and_called') && tokens.include?('alias_new') && tokens.include?('alias_old'))
+suite.check('an alias defines its new name and looks its source name up',
+            !tokens.include?('alias_new') && tokens.include?('alias_old') && tokens.include?('alias_id_old'))
+suite.check('the same name elsewhere still counts, including a lookup of an alias',
+            tokens.include?('defined_and_called') && tokens.include?('alias_id_new'))
 
 full = Bc2cppFixtureRuntime.full_or_build
 if full.nil?
@@ -151,15 +155,20 @@ else
         int direct = mrb_respond_to(M, o, mrb_intern_cstr(M, name)) ? 1 : 0;
         return (mrb_test(r) ? 1 : 0) == direct ? direct : -1;
       }
-      int main() {
+      int main(int argc, char**) {
         mrb_state* M = mrb_open();
         struct RClass* vfix = mrb_define_class(M, "VFix", M->object_class);
         struct RClass* sub = mrb_define_class(M, "VFixSub", vfix);
         mrb_define_method(M, vfix, "pruned", vfix_mrblib_pruned, MRB_ARGS_NONE());
         struct RClass* vnat = mrb_define_class_under(M, mrb_define_module(M, "RGSS"), "VNat", M->object_class);
-        mrb_define_method(M, vnat, "gone", vnat_gone, MRB_ARGS_NONE());
+        mrb_define_method(M, vnat, "alias_source", vnat_gone, MRB_ARGS_NONE());
+        mrb_define_alias(M, vnat, "gone", "alias_source");
         mrb_define_method(M, vnat, "kept_native", vnat_kept, MRB_ARGS_NONE());
         bc2cpp_register_owner_methods(M);
+        if (argc > 1) {
+          mrb_funcall(M, mrb_obj_new(M, vnat, 0, nullptr), "gone", 0);
+          return 1;
+        }
         mrb_value o = mrb_obj_new(M, vfix, 0, nullptr);
         mrb_value s = mrb_obj_new(M, sub, 0, nullptr);
         std::printf("responds kept=%d pruned=%d sub_pruned=%d other=%d class_cpruned=%d sub_class_cpruned=%d "
@@ -180,6 +189,7 @@ else
         if (M->exc) { std::printf("gone=%s\\n", mrb_obj_classname(M, mrb_obj_value(M->exc))); M->exc = nullptr; }
         else std::printf("gone=answered\\n");
         std::printf("kept_native=%d\\n", (int)mrb_integer(mrb_funcall(M, n, "kept_native", 0)));
+        std::printf("alias_source=%d\\n", (int)mrb_integer(mrb_funcall(M, n, "alias_source", 0)));
         mrb_close(M);
         return 0;
       }
@@ -200,9 +210,9 @@ else
     out, = Open3.capture2e(plain_exe)
     suite.check('without the define the kept name answers and the unregistered one, defined before, raises NoMethodError',
                 out.include?('kept=1') && out.include?('pruned=NoMethodError'))
-    suite.check('a listed native is removed, an unlisted one stays',
+    suite.check('a listed native alias is removed, its source and an unlisted native stay',
                 out.include?('gone=NoMethodError') && out.include?('kept_native=31') &&
-                out.include?('native responds gone=0 kept_native=1'))
+                out.include?('alias_source=30') && out.include?('native responds gone=0 kept_native=1'))
     suite.check('without RESPOND_TO_PHANTOM respond_to? is false for a left-out entry',
                 out.include?('responds kept=1 pruned=0 sub_pruned=0 other=0 class_cpruned=0'))
     out, = Open3.capture2e(phantom_exe)
@@ -216,6 +226,9 @@ else
     out, status = Open3.capture2e(verify_exe)
     suite.check('with the define the unregistered name aborts naming the method',
                 status.signaled? && out.include?('unregistered method looked up by name: VFix#pruned'))
+    out, status = Open3.capture2e(verify_exe, 'native-alias')
+    suite.check('with the define a removed native alias aborts naming the alias',
+                status.signaled? && out.include?('unregistered method looked up by name: RGSS::VNat#gone'))
   end
 end
 
