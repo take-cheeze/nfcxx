@@ -291,6 +291,8 @@ class CodeGen
       # said how many registers it uses(resumable_step_function).
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'is initialize') if d.name == 'initialize'
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'reads its block') if needs_blk_param || has_blk
+      # RESUMABLE_ARGS: the frame takes each argument as an mrb_value, so a native argument stays a refusal.
+      return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'takes a native argument') if arg_native_types.compact.any?
 
       @resumable = ResumableCtx.new(label, resumable.helpers)
       step_body_start = out.length
@@ -647,7 +649,7 @@ class CodeGen
     end
     @runtime_installed_names = nil
     if @resumable
-      out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}")
+      out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}", arg_names, @resumable)
       first_error = @resumable.reasons.first || out[/^\s*#error (.*)$/, 1]
       first_error = 'a block call that is neither an inlined step/upto/downto loop nor a plain block function' if first_error&.match?(/unhandled opcode (BLOCK|SENDB|SSENDB)/)
       if first_error && (@resumable_warned ||= Set.new).add?(label)

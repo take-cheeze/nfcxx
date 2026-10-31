@@ -11,6 +11,8 @@ require_relative 'bytecode_ir_resumable'
 class ResumableCtx
   attr_reader :label, :helpers, :states, :reasons
   attr_accessor :flat, :helper_stack, :sites
+  # Set when the step function is emitted: the frame's register count, and each register's index in the frame (R[index]).
+  attr_accessor :nregs, :register_slots
 
   def initialize(label, helpers)
     @label = label
@@ -146,7 +148,10 @@ class CodeGen
   end
 
   def resumable_shape_problem(irep, d)
-    return 'takes arguments or a block' unless irep.enter.nil? || irep.enter.enter_fields.all?(&:zero?)
+    # enter_fields: required, optional, rest, post, keyword, keyword rest, block. Required positional arguments are
+    # copied into the frame when the call starts (resumable_entry_function); the others are not supported yet.
+    fields = (irep.enter ? irep.enter.enter_fields.map(&:to_i) : []) + [0] * 7
+    return 'takes an optional, rest, post, keyword or block argument' if fields[1..6].any?(&:positive?)
     return 'has a rescue or ensure handler' unless irep.catch_handlers.empty?
 
     nil
@@ -370,6 +375,8 @@ class CodeGen
     code_only = body.gsub(RESUMABLE_REGISTER_TOKENS) { |token| token.match?(/\Ar\d+\z/) ? token : ' ' }
     registers = registers.sort
     nregs = registers.size
+    @resumable.nregs = nregs
+    @resumable.register_slots = registers.each_with_index.to_h { |reg, slot| [reg, slot + 2] }
     locals = ENV['BC2CPP_RESUMABLE_LOCALS'] != '0' && !code_only.match?(RESUMABLE_REGISTER_ADDRESS)
     spill = registers.each_with_index.map { |reg, slot| "R[#{slot + 2}] = r#{reg};" }.join(' ')
     body = body.gsub(/^#{Regexp.escape(RESUMABLE_SPILL_MARK)}$/) { locals ? "  #{spill}" : '' }
@@ -394,28 +401,67 @@ class CodeGen
   # `_impl`, the function the registered entry calls: hands a VM-called invocation to the
   # bytecode driver and steps to completion when called from C (where Fiber.yield could
   # not have worked in the bytecode either).
-  def resumable_entry_function(impl_name, step_name, owner_name)
+  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil)
     thunk = "#{step_name}_thunk"
-    <<~CPP
-      static mrb_value #{thunk}(mrb_state* M, mrb_value) {
-        mrb_value self, frame, resume;
-        mrb_get_args(M, "ooo", &self, &frame, &resume);
-        return #{step_name}(M, self, frame, resume);
-      }
-      mrb_value #{impl_name}(mrb_state* M, mrb_value self) {
-        bc2cpp_check_argc(M, 0, 0);
-        bc2cpp_resumable_init(M);
-        if (bc2cpp_resumable_exec_ok(M)) return bc2cpp_resumable_exec(M, self, #{thunk});
-        mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
-        for (;;) {
-          mrb_value result = #{step_name}(M, self, frame, resume);
-          if (!bc2cpp_resume_frame_p(M, result)) return result;
-          frame = result;
-          resume = bc2cpp_resumable_yield_from_c(M, frame);
+    if arg_names.empty?
+      # No arguments: the frame starts empty, and the driver's first step creates it.
+      return <<~CPP
+        static mrb_value #{thunk}(mrb_state* M, mrb_value) {
+          mrb_value self, frame, resume;
+          mrb_get_args(M, "ooo", &self, &frame, &resume);
+          return #{step_name}(M, self, frame, resume);
         }
-      }
-      // #{owner_name}: entry of a resumable method (RESUMABLE_ENTRY)
-    CPP
+        mrb_value #{impl_name}(mrb_state* M, mrb_value self) {
+          bc2cpp_check_argc(M, 0, 0);
+          bc2cpp_resumable_init(M);
+          if (bc2cpp_resumable_exec_ok(M, 0)) return bc2cpp_resumable_exec(M, self, #{thunk}, mrb_nil_value());
+          mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
+          for (;;) {
+            mrb_value result = #{step_name}(M, self, frame, resume);
+            if (!bc2cpp_resume_frame_p(M, result)) return result;
+            frame = result;
+            resume = bc2cpp_resumable_yield_from_c(M, frame);
+          }
+        }
+        // #{owner_name}: entry of a resumable method (RESUMABLE_ENTRY)
+      CPP
+    end
+    # Required arguments: the frame is created here, with each argument in the register the body reads it from, and
+    # handed to the driver, whose first step takes it instead of creating an empty one. The argument registers are
+    # r1..rN; a register the body never reads has no slot and is not copied.
+n = arg_names.size
+params = arg_names.map { |a| "mrb_value #{a}" }.join(', ')
+# Each argument's slot in the frame; a register the body never reads has none and is not copied.
+fill = arg_names.each_with_index.filter_map do |a, idx|
+  slot = ctx.register_slots[idx + 1]
+  "F->regs[#{slot}] = #{a};" if slot
+end
+head = <<~CPP
+  static mrb_value #{thunk}(mrb_state* M, mrb_value) {
+    mrb_value self, frame, resume;
+    mrb_get_args(M, "ooo", &self, &frame, &resume);
+    return #{step_name}(M, self, frame, resume);
+  }
+  mrb_value #{impl_name}(mrb_state* M, mrb_value self, #{params}) {
+    bc2cpp_check_argc(M, #{n}, #{n});
+    bc2cpp_resumable_init(M);
+    mrb_value frame = mrb_nil_value();
+    Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
+CPP
+tail = <<~CPP
+    mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
+    if (bc2cpp_resumable_exec_ok(M, #{n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);
+    mrb_value resume = mrb_nil_value();
+    for (;;) {
+      mrb_value result = #{step_name}(M, self, frame, resume);
+      if (!bc2cpp_resume_frame_p(M, result)) return result;
+      frame = result;
+      resume = bc2cpp_resumable_yield_from_c(M, frame);
+    }
+  }
+  // #{owner_name}: entry of a resumable method with #{n} required argument#{'s' unless n == 1} (RESUMABLE_ENTRY)
+CPP
+head + fill.map { |line| "  #{line}\n" }.join + tail
   end
 
   # The run-time half, emitted once per generated file that has a resumable method.
@@ -430,7 +476,7 @@ class CodeGen
   RESUMABLE_DRIVER_RB = <<~'RUBY'
     module ::Bc2cppResumable
       def drive(&step)
-        f = step.call(self, nil, nil)
+        f = step.call(self, ::Bc2cppResumable.take_initial, nil)
         while ::Bc2cppResumable::Frame === f
           f = step.call(self, f, ::Fiber.yield(f.value))
         end
@@ -510,6 +556,7 @@ class CodeGen
       Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(self);
       return f ? f->regs[0] : mrb_nil_value();
     }
+    static mrb_value bc2cpp_resumable_take_initial(mrb_state* M, mrb_value self);
     static void bc2cpp_resumable_init(mrb_state* M) {
       if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "Bc2cppResumable"))) return;
       static const uint8_t driver[] = {
@@ -519,26 +566,48 @@ class CodeGen
       struct RClass* frame = mrb_define_class_under(M, mod, "Frame", M->object_class);
       MRB_SET_INSTANCE_TT(frame, MRB_TT_DATA);
       mrb_define_method(M, frame, "value", bc2cpp_resume_frame_value, MRB_ARGS_NONE());
+      mrb_define_module_function(M, mod, "take_initial", bc2cpp_resumable_take_initial, MRB_ARGS_NONE());
       mrb_load_irep(M, driver);
       if (M->exc) mrb_exc_raise(M, mrb_obj_value(M->exc));
     }
     // Called from the VM straight (no C frame between the caller and this entry), with no
     // arguments: the only situation in which the bytecode driver can Fiber.yield.
-    static bool bc2cpp_resumable_exec_ok(mrb_state* M) {
+    static bool bc2cpp_resumable_exec_ok(mrb_state* M, mrb_int argc) {
       mrb_callinfo* ci = M->c->ci;
-      return ci->cci == 0 && ci->n == 0 && ci->nk == 0;
+      return ci->cci == 0 && ci->n == argc && ci->nk == 0;
+    }
+    // The frame of a call with arguments, parked for the driver's first step (Bc2cppResumable.take_initial). It is
+    // set just before the driver runs and cleared as soon as the driver returns, so no other call sees it.
+    static void bc2cpp_resumable_handoff(mrb_state* M, mrb_value frame) {
+      struct RClass* mod = mrb_module_get(M, "Bc2cppResumable");
+      mrb_iv_set(M, mrb_obj_value(mod), mrb_intern_lit(M, "__handoff__"), frame);
+    }
+    static mrb_value bc2cpp_resumable_take_initial(mrb_state* M, mrb_value self) {
+      mrb_sym sym = mrb_intern_lit(M, "__handoff__");
+      mrb_value frame = mrb_iv_get(M, self, sym);
+      mrb_iv_set(M, self, sym, mrb_nil_value());
+      return frame;
     }
     // exec_irep leaves the block slot (stack[1] for a call without arguments) to the new
     // frame, whose `&step` parameter is the cfunc proc that runs the step function.
-    static mrb_value bc2cpp_resumable_exec(mrb_state* M, mrb_value self, mrb_func_t thunk) {
+    static mrb_value bc2cpp_resumable_exec(mrb_state* M, mrb_value self, mrb_func_t thunk, mrb_value frame) {
       struct RClass* mod = mrb_module_get(M, "Bc2cppResumable");
       struct RClass* found = mod;
       mrb_method_t m = mrb_method_search_vm(M, &found, mrb_intern_lit(M, "drive"));
       if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_PROC_P(m)) {
         mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: Bc2cppResumable#drive is missing");
       }
+      // The driver takes no positional arguments: it is entered as a call with none, so the block sits in slot 1, and
+      // the caller's own argument count is put back afterwards. The arguments are already in the frame.
+      mrb_int argc = M->c->ci->n;
+      ptrdiff_t idx = M->c->ci - M->c->cibase;
       M->c->ci->stack[1] = mrb_obj_value(mrb_proc_new_cfunc(M, thunk));
-      return mrb_exec_irep(M, self, MRB_METHOD_PROC(m));
+      M->c->ci->n = 0;
+      bc2cpp_resumable_handoff(M, frame);
+      mrb_value result = mrb_exec_irep(M, self, MRB_METHOD_PROC(m));
+      bc2cpp_resumable_handoff(M, mrb_nil_value());
+      M->c->cibase[idx].n = argc;
+      return result;
     }
     // A step of a method called from C yielded: hand it to the real Fiber.yield, which raises
     // the FiberError the interpreted method would have raised.
