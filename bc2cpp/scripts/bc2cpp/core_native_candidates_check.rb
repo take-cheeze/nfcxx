@@ -12,13 +12,17 @@
 #     - a table entry's or registration's own name operand does not, nor a name only a DEF names;
 #     - LIVE_CORE: a core method body's sends count once its name is reachable (an operator opcode reaches its
 #       operator), or compiled code calls its `_impl`;
-#       an irep with an ALIAS keeps every symbol;
+#       an ALIAS keeps both names without making unrelated definitions live;
 #   candidates
 #     - an operator name, a name some table of the class keeps, an ALWAYS_DYNAMIC or fragment-built name stay;
 #   header
 #     - one MRB_MT_EXCLUDE_<Class>_<presym C name> 1 per listed entry;
 #   ram_candidates
-#     - an unreachable run-time registration is listed; a reachable one, or one a ROM entry shares, is not.
+#     - an unreachable run-time registration or native alias is listed; a reachable one, or one a ROM entry shares, is not;
+#     - an alias source still counts as a lookup; computed owners/names and fragment-built alias names stay.
+#   ruby_candidates
+#     - unreachable Ruby definitions, including singletons, are candidates;
+#     - lookups, direct compiled calls, aliases, fragments and ROM-shared keys keep their definitions.
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_native_candidates_check.rb
 
@@ -48,6 +52,8 @@ NATIVE = <<~'C'
     MRB_MT_ENTRY(w_impl, MRB_SYM(impl_send), MRB_ARGS_NONE())
     MRB_MT_ENTRY(w_alias, MRB_SYM(alias_old), MRB_ARGS_NONE())
     MRB_MT_ENTRY(w_def, MRB_SYM(defined_only), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_alias_def, MRB_SYM(defined_beside_alias), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(w_alias_body, MRB_SYM(alias_body_send), MRB_ARGS_NONE())
   };
   static const mrb_mt_entry widget_class_rom_entries[] = {
     MRB_MT_ENTRY(w_shared_s, MRB_SYM(shared), MRB_ARGS_NONE())
@@ -73,6 +79,16 @@ NATIVE = <<~'C'
     mrb_define_method(mrb, w, "lonely", w_spin, MRB_ARGS_NONE());
     mrb_define_method(mrb, w, "spin", w_spin, MRB_ARGS_NONE());
     mrb_define_method(mrb, w, "string_name", w_spin, MRB_ARGS_NONE());
+    mrb_define_alias(mrb, w, "unused_alias", "called");
+    mrb_define_alias_id(mrb, w, MRB_SYM(id_alias), MRB_SYM(called));
+    mrb_define_alias(mrb, w, "used_alias", "called");
+    mrb_define_alias(mrb, w, "chain_source", "called");
+    mrb_define_alias(mrb, w, "chain_tail", "chain_source");
+    mrb_define_alias(mrb, w, "spin", "called");
+    mrb_define_alias(mrb, w, "built_alias", "called");
+    mrb_define_alias(mrb, w, "opaque_alias", runtime_name);
+    mrb_define_alias(mrb, g, "computed_owner_alias", "called");
+    mrb_define_method(mrb, g, runtime_name, w_spin, MRB_ARGS_NONE());
   }
 C
 
@@ -84,6 +100,9 @@ ENGINE = <<~'RUBY'
       @names = ['string_name', 'built_']
       @sum = @a + @b
       used
+      used_alias
+      @receiver.public_lookup
+      send(:reflected)
     end
 
     def defined_only; end
@@ -106,17 +125,46 @@ CORE = <<~'RUBY'
       impl_send
     end
 
+    def public_lookup
+      public_dependency
+    end
+
+    def generated_public; end
+
+    def reflected; end
+    def built_public; end
+    def defined_only; end
+
     def +(other)
       op_send
     end
   end
 
   class Gadget
+    def self.unused_singleton; end
+    def defined_beside_alias
+      alias_body_send
+    end
+
+    def alias_old
+      alias_source_send
+    end
+
+    def [](key)
+      alias_operator_source_send
+    end
+
     alias alias_new alias_old
+    alias alias_index []
   end
 RUBY
 
-GENERATED = ['f("literal")', 'v = Widget_direct$3f_impl(M, self);'].freeze
+GENERATED = ['f("literal")', 'v = Widget_direct$3f_impl(M, self);', <<~'CPP'].freeze
+  static const char* const bc2cpp_sym_names[1] = {
+    "generated_public",
+  };
+  bc2cpp_funcall_argv(M, r1, bc2cpp_sym(M, 0), 0, nullptr);
+CPP
 
 Dir.mktmpdir('core-native') do |dir|
   path = File.join(dir, 'widget.c')
@@ -132,8 +180,9 @@ Dir.mktmpdir('core-native') do |dir|
   engine = suite.compile(ENGINE) { |ireps, _root| ireps }
   core = suite.compile(CORE) do |ireps, root|
     body_of = {}
-    build_registry(ireps, root)[0].each { |name, defs| defs.each { |d| body_of[d.irep] = name if d.irep } }
-    [{ ireps: ireps, body_of: body_of }]
+    registry = build_registry(ireps, root)[0]
+    registry.each { |name, defs| defs.each { |d| body_of[d.irep] = name if d.irep } }
+    [{ ireps: ireps, body_of: body_of, registry: registry }]
   end
   names, fragments = CoreNativeCandidates.reachable(engine, [path], GENERATED, core: core)
   suite.check('irep symbols, pool identifiers, native lookups and generated literals count',
@@ -145,19 +194,101 @@ Dir.mktmpdir('core-native') do |dir|
               names.include?('live_send') && names.include?('impl_send') && names.include?('op_send') &&
               !names.include?('dead_send') &&
               !names.include?('unused'))
-  suite.check("an alias keeps the name it looks up", names.include?('alias_old'))
+  suite.check('an alias keeps both names and makes its source body live',
+              %w[alias_old alias_new alias_source_send alias_index [] alias_operator_source_send].all? { |name| names.include?(name) })
+  suite.check('an alias does not make unrelated definitions or their bodies live',
+              !names.include?('defined_beside_alias') && !names.include?('alias_body_send'))
+  body = core[0][:ireps].values.find { |irep| irep.instructions.any? { |insn| insn.op == :ALIAS } }
+  unresolved = Irep.new(**body.to_h.merge(instructions: body.instructions.map do |insn|
+    next insn unless insn.op == :ALIAS
+
+    insn.dup.tap { |copy| copy.typed = insn.typed.reject { |operand| operand.kind == :name } }
+  end))
+  conservative = Set.new
+  CoreNativeCandidates.lookup_names(unresolved, nil, conservative, Set.new)
+  suite.check('an unresolved alias operand conservatively keeps every symbol',
+              body.syms.all? { |name| conservative.include?(name.to_s) })
 
   listed = CoreNativeCandidates.candidates(entries, names, fragments)
   suite.check("only unreachable entries of their own class's tables are listed (#{listed.join(', ')})",
-              listed == %w[Widget#dead_send Widget#defined_only Widget#empty? Widget#size= Widget#spin])
+              listed == %w[Widget#alias_body_send Widget#dead_send Widget#defined_beside_alias Widget#defined_only
+                           Widget#empty? Widget#size= Widget#spin])
   header = CoreNativeCandidates.header(%w[Widget#empty? Widget#size= Widget#spin], entries)
   suite.check('the header names each listed entry by its presym C name',
               header.lines.grep(/\A#define/).sort ==
                 ["#define MRB_MT_EXCLUDE_Widget_SYM_E__size 1\n", "#define MRB_MT_EXCLUDE_Widget_SYM_Q__empty 1\n",
                  "#define MRB_MT_EXCLUDE_Widget_SYM__spin 1\n"])
   ram = CoreNativeCandidates.ram_candidates(NativeOwnerMap.build([path]), names, fragments, entries)
-  suite.check("run-time registrations: only the unreachable one no ROM entry shares (#{ram.join(', ')})",
-              ram == %w[Widget#lonely])
+  suite.check("run-time registrations and aliases: only unreachable keys no ROM entry shares (#{ram.join(', ')})",
+              ram == %w[Widget#chain_tail Widget#id_alias Widget#lonely Widget#unused_alias])
+  suite.check('an alias source and an intermediate alias still count as native lookups',
+              names.include?('called') && names.include?('chain_source'))
+  ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries)
+  suite.check("unreachable core Ruby definitions, including singletons, are candidates (#{ruby.join(', ')})",
+              ruby == %w[Gadget#defined_beside_alias Gadget.singleton#unused_singleton Widget#unused])
+  suite.check('an explicit public send still reaches its core body', names.include?('public_dependency'))
+  private_names, = CoreNativeCandidates.reachable(engine, [path], GENERATED, core: core,
+                                                  strip_generated: CorePrivateRuby.method(:strip_generated))
+  suite.check('public pruning keeps generated explicit-receiver lookups exempted only by the private proof',
+              names.include?('generated_public') && !private_names.include?('generated_public'))
+  unsupported = [{ registry: {
+    'opaque' => [MethodDef.new(owner: '<dynamic>', name: 'opaque', irep: 'body')],
+    'repeated' => [MethodDef.new(owner: 'Widget::Widget.singleton', name: 'repeated', irep: 'body')],
+    'accessor' => [MethodDef.new(owner: 'Widget', name: 'accessor', kind: :ivar_accessor)]
+  } }]
+  suite.check('unknown or repeated owners and non-Ruby definitions are not Ruby-removal candidates',
+              CoreNativeCandidates.ruby_candidates(unsupported, Set.new, Set.new, []).empty?)
+end
+
+Dir.mktmpdir('math-diagnostics') do |dir|
+  path = File.join(dir, 'mruby-math', 'src', 'math.c')
+  FileUtils.mkdir_p(File.dirname(path))
+  source = <<~'C'
+    static void domain_error(mrb_state *mrb, const char *func) {
+      struct RClass *math = mrb_module_get_id(mrb, MRB_SYM(Math));
+      struct RClass *domainerror = mrb_class_get_under_id(mrb, math, MRB_SYM(DomainError));
+      mrb_raisef(mrb, domainerror, "Numerical argument is out of domain - %s", func);
+    }
+    static mrb_value math_acos(mrb_state *mrb, mrb_value self) {
+      domain_error(mrb, "acos");
+    }
+    void init(mrb_state *mrb) {
+      struct RClass *math = mrb_define_module_id(mrb, MRB_SYM(Math));
+      mrb_define_module_function_id(mrb, math, MRB_SYM(acos), math_acos, MRB_ARGS_REQ(1));
+    }
+  C
+  scan = lambda do |text, enabled: true, ireps: {}, generated: []|
+    File.write(path, text)
+    CoreNativeCandidates.reachable(ireps, [path], generated, diagnostic_literals: enabled)[0]
+  end
+  suite.check('without the literal-lookup guarantee diagnostic labels stay', scan.call(source, enabled: false).include?('acos'))
+  names = scan.call(source)
+  suite.check('a verified diagnostic label does not retain a Math entry', !names.include?('acos'))
+  suite.check('both module-function entries become removable',
+              CoreNativeCandidates.ram_candidates(NativeOwnerMap.build([path]), names, Set.new, []) ==
+                %w[Math#acos Math.singleton#acos])
+  live = suite.compile('Math.acos(1.0)') { |ireps, _root| ireps }
+  suite.check('an actual Ruby call still retains the Math entry', scan.call(source, ireps: live).include?('acos'))
+  suite.check('an actual native lookup still counts',
+              scan.call(source + 'void use(mrb_state *mrb) { mrb_funcall_id(mrb, value, MRB_SYM(acos), 0); }').include?('acos'))
+  suite.check('generated lookup literals still count', scan.call(source, generated: ['f("acos")']).include?('acos'))
+  unsafe = {
+    'changed helper body' => source.sub('mrb_raisef(mrb, domainerror,', 'mrb_funcall(mrb, value, func, 0); mrb_raisef(mrb, domainerror,'),
+    'escaping function reference' => source + 'void *callback = &domain_error;',
+    'nonliteral call' => source + 'void use(mrb_state *mrb) { domain_error(mrb, label); }',
+    'shadowing macro' => "#define mrb_raisef other_function\n" + source,
+    'spliced macro' => "#define mrb_rai\\\nsef other_function\n" + source,
+    'spliced comment' => "// continued comment \\\n" + source,
+    'alternative directive' => "%:define mrb_raisef other_function\n" + source,
+    'scoped call' => source + 'void use(mrb_state *mrb) { other.domain_error(mrb, "other"); }'
+  }
+  unsafe.each do |why, text|
+    suite.check("#{why} disables diagnostic exemptions", scan.call(text).include?('acos'))
+  end
+  other = File.join(dir, 'other.c')
+  File.write(other, source)
+  suite.check('an identically named helper outside mruby-math is not exempted',
+              CoreNativeCandidates.reachable({}, [other], [], diagnostic_literals: true)[0].include?('acos'))
 end
 
 suite.finish!

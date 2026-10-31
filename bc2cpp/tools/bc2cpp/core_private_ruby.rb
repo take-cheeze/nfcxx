@@ -52,8 +52,7 @@ module CorePrivateRuby
   class Lookup
     DEF_OPS = %i[DEF TDEF SDEF].freeze
 
-    # +candidates+ are the private names; +defined_only+ are other names whose DEF in a body that also holds an ALIAS
-    # is no use (lookup_names keeps every symbol of such a body). Their explicit sends count.
+    # +candidates+ are the private names; +defined_only+ are other core definitions whose explicit sends still count.
     def initialize(candidates, owners, defines, defined_only = Set.new)
       @candidates = candidates
       @defined_only = defined_only

@@ -638,7 +638,9 @@ module StaticDispatchRegistrations
   # defining NativeOwnerMap::FAMILIES) defines its name, it looks nothing up, so that one argument -- a string literal
   # or a presym operand -- is blanked before native_name_tokens reads the file. Every other occurrence of the name
   # still counts, an alias's old name included.
-  DEFINING_FAMILIES = NativeOwnerMap::FAMILIES.select { |family, spec| family.start_with?('define_') && spec[:fn] }
+  DEFINING_FAMILIES = NativeOwnerMap::FAMILIES.select do |family, spec|
+    family.start_with?('define_') && (spec[:fn] || spec[:alias_of])
+  end
   REGISTRATION_NAME_ARG = /\A(?:"(?:[^"\\]|\\.)*"|MRB_(?:Q?SYM|OPSYM)(?:_[QBE])?\(\s*\w+\s*\))\z/
 
   def blank_registration_names(text)
@@ -909,13 +911,15 @@ module StaticDispatchRegistrations
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
-    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core)
+    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core,
+                                                      diagnostic_literals: !symbol_lookups.nil?)
     entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") })
     map = NativeOwnerMap.build(native)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
                                            engine_tuple, symbol_lookups, repo_root)
+    ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries)
     [CoreNativeCandidates.candidates(entries, names, fragments),
-     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby).uniq.sort]
+     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries) + private_ruby + ruby).uniq.sort]
   end
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body

@@ -347,8 +347,8 @@ class CodeGen
 
   # The Owner#name keys this build leaves out of its method tables: what emit_owner_registrations skips, and what
   # LoadCompile.mark_dead! reads to drop the visibility statements that name them.
-  # The closed build also skips the compiled bodies of core_left_out: the enumerator-free proof removes those names from
-  # the table, and a compiled body under one of them is as unreachable as the interpreted def it replaces.
+  # Closed builds also omit core_left_out definitions from class/load code. C++ implementations remain available
+  # to direct calls; omitting a registration does not itself omit the generated function.
   def unregistered_keys
     lists = static_dispatch_lists
     keys = lists.for_build(ENV['BC2CPP_BUILD_NAME'])

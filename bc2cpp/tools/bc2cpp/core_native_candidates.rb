@@ -36,8 +36,33 @@ module CoreNativeCandidates
   # A table entry's name operand defines the name; it is blanked before the source is scanned for lookups.
   ENTRY_NAME = /(MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*)(MRB_\w*SYM\w*\s*\(\s*\w+\s*\))/
   NAME = /\A[a-z_][A-Za-z0-9_]*[?!=]?\z/
+  DOMAIN_ERROR = /\bstatic\s+void\s+domain_error\s*\(\s*mrb_state\s*\*\s*mrb\s*,\s*const\s+char\s*\*\s*func\s*\)\s*\{([^{}]*)\}/m
+  DOMAIN_ERROR_BODY = <<~'C'.gsub(/\s+/, '').freeze
+    struct RClass *math = mrb_module_get_id(mrb, MRB_SYM(Math));
+    struct RClass *domainerror = mrb_class_get_under_id(mrb, math, MRB_SYM(DomainError));
+    mrb_raisef(mrb, domainerror, "Numerical argument is out of domain - %s", func);
+  C
+  DOMAIN_ERROR_CALL = /\bdomain_error\s*\(\s*mrb\s*,\s*("(?:[^"\\\n]|\\.)*")\s*\)/
 
   module_function
+
+  # A diagnostic label is not a lookup when the helper only formats an exception and no computed lookup
+  # can consume the resulting message. Unknown bodies, macros or escaping references retain every literal.
+  def strip_diagnostic_literals(text)
+    return text if text.match?(/\\[\r\n]|%:|\?\?/)
+    clean = StaticDispatchRegistrations.strip_c_comments(text)
+    return text if clean.match?(/^\s*#\s*(?:define|undef)\s+(?:domain_error|mrb_raisef|mrb_module_get_id|mrb_class_get_under_id)\b/)
+    definitions = clean.to_enum(:scan, DOMAIN_ERROR).map { Regexp.last_match }
+    return text unless definitions.size == 1 && definitions[0][1].gsub(/\s+/, '') == DOMAIN_ERROR_BODY
+
+    calls = clean.to_enum(:scan, DOMAIN_ERROR_CALL).map { Regexp.last_match }
+    return text unless clean.scan(/\bdomain_error\b/).size == calls.size + 1
+    return text if calls.any? { |call| clean[0...call.begin(0)].rstrip.end_with?('.', ':', '>') }
+
+    out = clean.dup
+    calls.each { |call| out[call.begin(1)...call.end(1)] = ' ' * (call.end(1) - call.begin(1)) }
+    out
+  end
 
   # Every table entry of `paths`: { mt_class:, kind:, cname:, name:, fn:, installed: } with `installed` the class the
   # table's MRB_MT_INIT_ROM installs it into (NativeRomOwners), or nil when that is not MRB_MT_CLASS's own class.
@@ -73,9 +98,10 @@ module CoreNativeCandidates
   # `core` is one { ireps:, body_of: } per core Ruby file, body_of mapping a method body's irep label to its name.
   # +lookup+ reads one irep (lookup_names, or CorePrivateRuby::Lookup); +strip+ blanks the native text it should not
   # read, +strip_generated+ the generated source's literals (the `_impl` calls it makes are read from the whole of it),
-  # +exact_impls+ how live_core reads a direct `_impl` call.
+  # +exact_impls+ how live_core reads a direct `_impl` call. +diagnostic_literals+ requires the closed-world
+  # literal-lookup proof, so an exception message cannot supply a computed method name.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
-                exact_impls: false)
+                exact_impls: false, diagnostic_literals: false)
     names = Set.new(StaticDispatchRegistrations::ALWAYS_DYNAMIC)
     fragments = Set.new
     ireps.each_value { |irep| lookup.call(irep, nil, names, fragments) }
@@ -83,6 +109,7 @@ module CoreNativeCandidates
     native_paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text = strip.call(text) if strip
+      text = strip_diagnostic_literals(text) if diagnostic_literals && path.end_with?('/mruby-math/src/math.c')
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
     generated.each do |src|
@@ -98,15 +125,18 @@ module CoreNativeCandidates
 
   # Adds what `irep` may look up to `names` and its fragment-shaped pool strings to `fragments`: every symbol of the
   # irep except one only a DEF names, since that operand defines the method. `own` is the name of the method whose
-  # body this is: SUPER looks it up again in the ancestors, as an operator opcode does its operator. An irep with an ALIAS keeps every symbol: the disassembly
-  # that decodes operands shows the alias's old name, the one looked up, as the new one.
+  # body this is: SUPER looks it up again in the ancestors, as an operator opcode does its operator. Both ALIAS
+  # operands count; an unresolved alias operand keeps every symbol conservatively.
   def lookup_names(irep, own, names, fragments)
     syms = irep.syms.map(&:to_s)
     defined = Set.new
     used = Set.new
     aliased = false
     BytecodeIR.for(irep).each_source do |insn, _index|
-      aliased ||= insn.op == :ALIAS
+      if insn.op == :ALIAS
+        original = insn.first_of(:name)&.value
+        if original then used << original.to_s else aliased = true end
+      end
       names << own if own && insn.op == :SUPER
       # An operator opcode sends its name without a symbol operand (a Ruby-defined `+` runs from ADD).
       names << IMPLICIT_DISPATCH_NAMES[insn.op] if IMPLICIT_DISPATCH_NAMES.key?(insn.op)
@@ -197,16 +227,38 @@ module CoreNativeCandidates
     end.sort
   end
 
+  # Core Ruby definitions, compiled or interpreted, whose names no lookup or direct compiled call reaches.
+  # ROM-shared keys stay: omitting a Ruby override must not replace a readonly entry with a RAM tombstone.
+  def ruby_candidates(core, names, fragments, entries)
+    rom = entries.to_set { |entry| "#{entry[:mt_class]}##{entry[:name]}" }
+    core.flat_map do |file|
+      file.fetch(:registry).flat_map do |name, definitions|
+        next [] unless name.match?(NAME) && !StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+
+        definitions.filter_map do |definition|
+          owner = definition.owner
+          next unless definition.irep && owner.is_a?(String) && owner.match?(/\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/)
+          # A per-file registry can repeat an explicit singleton receiver; do not guess its runtime owner.
+          next if owner.match?(/\b([A-Z]\w*)::\1\b/)
+
+          key = "#{owner}##{name}"
+          key unless rom.include?(key.sub('.singleton#', '#'))
+        end
+      end
+    end.uniq.sort
+  end
+
   # CORE_RAM_CANDIDATES: the core registrations made at run time (mrb_define_method and the other defining calls,
   # NativeOwnerMap), as "Owner#name" sorted, that the core gem removes like a left-out native. The same reachability
   # rule; a registration with a computed name, a native alias or undef of the key, or a ROM entry of the same class and
-  # name keeps it (the removal would take the ROM one, leaving a tombstone).
+  # name keeps it (the removal would take the ROM one, leaving a tombstone). Native aliases are candidates separately
+  # when their new names are unreachable; the source names still count as lookups.
   def ram_candidates(map, names, fragments, entries)
     rom = entries.to_set { |e| "#{e[:mt_class]}##{e[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
     map.registrations.each { |owner, name, fn| blocked << "#{owner}##{name}" if fn.nil? }
-    map.registrations.filter_map do |owner, name, _fn|
+    registrations = map.registrations.filter_map do |owner, name, _fn|
       next unless owner.is_a?(String) && name&.match?(NAME) && !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
       next if map.computed.include?(owner)
 
@@ -215,7 +267,20 @@ module CoreNativeCandidates
       next if StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       key
-    end.uniq.sort
+    end
+    # An alias copies its source entry during native initialization. Removing an unreachable alias afterward
+    # does not remove that source; its name still counts as a native lookup.
+    aliases = map.aliases.filter_map do |owner, name, original|
+      next unless original && owner.is_a?(String) && name&.match?(NAME) && !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
+      next if map.computed.include?(owner)
+
+      key = "#{owner}##{name}"
+      next if rom.include?(key.sub('.singleton#', '#'))
+      next if StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+
+      key
+    end
+    (registrations + aliases).uniq.sort
   end
 
   # The exclusion header's text for `keys` (MRB_MT_EXCLUDE_HEADER, include/mruby/class.h).
