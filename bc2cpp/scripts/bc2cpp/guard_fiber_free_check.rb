@@ -7,13 +7,16 @@
 # reads) and a user file whose Fiber body reaches some of its methods:
 #
 #   fiber_free_fill, fiber_unused_block   not reached from the Fiber body (called from a method nothing calls, or not at all)
-#   fiber_reached_each                    called directly by the Fiber body (reached)
+#   fiber_reached_each                    called directly by the Fiber body (reached): a resumable step function
+#                                         (it yields in its own loop, so the Fiber body is its receiver root). Resumable
+#                                         entries keep no guard and no saved bytecode, at either flag value.
 #   fiber_dyn_target                      reached through a computed send with a spelled name (crossable_dynamic_targets)
 #   Enumerable#fiber_free_enum            an Enumerable method: its guard also tests `each`, so it keeps the guard whatever
 #                                         the Fiber reach says
 #
-# Flag at 0: every guard is emitted and saved, as before. Flag on (the default, unset or 1): only
-# the two unreached methods lose their guard, their saved bytecode and their stub (their bodies are no longer kept).
+# Flag at 0: every guard is emitted and saved, as before (resumable entries excepted: they never carry a guard).
+# Flag on (the default, unset or 1): only the two unreached methods lose their guard, their saved bytecode and their
+# stub (their bodies are no longer kept).
 # ENUM_STEP is pinned to 0 here: its generated drivers replace the saved bodies of guarded methods by default, which is
 # a separate concern (enum_step_default_drivers_check.rb). This fixture checks guard placement and stubs alone.
 #
@@ -93,7 +96,10 @@ USER_RB = <<~'RUBY'
 RUBY
 
 FREE = %w[Array#fiber_free_fill Array#fiber_unused_block].freeze
-GUARDED = %w[Array#fiber_reached_each Array#fiber_dyn_target Enumerable#fiber_free_enum].freeze
+GUARDED = %w[Array#fiber_dyn_target Enumerable#fiber_free_enum].freeze
+# Reached and yielding in its own loop: compiled as a resumable step (codegen_method.rb, yielding_root), so no guard,
+# no saved bytecode, and its body is stubbed whatever the flag.
+RESUMABLE = %w[Array#fiber_reached_each].freeze
 
 # One bc2cpp.rb run over the fixture. +flag+ is the value of BC2CPP_GUARD_FIBER_FREE (nil: unset).
 # Returns { code: the generated C++ (stdout), stubs: Set of Owner#name kept out of the residual }.
@@ -152,6 +158,11 @@ puts '  BC2CPP_GUARD_FIBER_FREE=0: every guard emitted and saved'
 end
 suite.check('the flag at 0 keeps every stub out (each guarded body keeps its bytecode)',
             (FREE + GUARDED).none? { |key| off[:stubs].include?(key) })
+RESUMABLE.each do |key|
+  e = entry_of(off[:code], key)
+  suite.check("#{key} is a resumable step at flag 0: no guard, no saved bytecode, stubbed",
+              e[:registered] && !e[:prologue] && !e[:saved] && off[:stubs].include?(key))
+end
 
 puts '  BC2CPP_GUARD_FIBER_FREE unset is the same as =1 (on by default)'
 suite.check('unset and 1 give the same saved count and stubs',
@@ -168,6 +179,11 @@ GUARDED.each do |key|
   e = entry_of(on[:code], key)
   suite.check("#{key} stays guarded: entry hand-off and saved bytecode kept", e[:registered] && e[:prologue] && e[:saved])
   suite.check("#{key} keeps its bytecode (not stubbed)", !on[:stubs].include?(key))
+end
+RESUMABLE.each do |key|
+  e = entry_of(on[:code], key)
+  suite.check("#{key} is a resumable step: no entry hand-off, no saved bytecode", e[:registered] && !e[:prologue] && !e[:saved])
+  suite.check("#{key} keeps no bytecode (stubbed)", on[:stubs].include?(key))
 end
 suite.check('the Enumerable guard still tests that each is the builtin one',
             entry_of(on[:code], 'Enumerable#fiber_free_enum')[:body].include?('bc2cpp_core_each_is_builtin(M, self)'))

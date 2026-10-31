@@ -229,7 +229,9 @@ class CodeGen
 
     resumable = nil
     fiber_guarded = false
-    if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label)
+    # RECEIVER_ROOTS: a fiber root that yields to its block takes the resumable form too (its entry is the same body).
+    yielding_root = @fiber_roots&.include?(label) && BytecodeIR.for(irep).instructions_with_op(:BLKCALL).any?
+    if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
       # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
       # outright -- unless it is a Fiber.new root that qualifies as a resumable step
@@ -290,9 +292,13 @@ class CodeGen
       # RESUMABLE_ENTRY: the frame, registers and dispatch open the function once the body has
       # said how many registers it uses(resumable_step_function).
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'is initialize') if d.name == 'initialize'
-      return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'reads its block') if needs_blk_param || has_blk
+      # RESUMABLE_ARGS: the frame takes each argument as an mrb_value, so a native argument stays a refusal.
+      return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'takes a native argument') if arg_native_types.compact.any?
 
       @resumable = ResumableCtx.new(label, resumable.helpers)
+      @resumable.block = needs_blk_param || has_blk
+      # OPTIONAL_ARGS: the optional count, when the jump table is recognised (the shape check refuses the rest).
+      @resumable.optional = opt_jmp_targets ? opt : 0
       step_body_start = out.length
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
@@ -647,7 +653,8 @@ class CodeGen
     end
     @runtime_installed_names = nil
     if @resumable
-      out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}")
+      out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}", arg_names, @resumable, needs_blk_param || has_blk,
+                                      optional: @resumable.optional.to_i, rest: has_rest)
       first_error = @resumable.reasons.first || out[/^\s*#error (.*)$/, 1]
       first_error = 'a block call that is neither an inlined step/upto/downto loop nor a plain block function' if first_error&.match?(/unhandled opcode (BLOCK|SENDB|SSENDB)/)
       if first_error && (@resumable_warned ||= Set.new).add?(label)
@@ -657,7 +664,8 @@ class CodeGen
     @resumable = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    guard = core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded)
+    # A resumable entry handles a Fiber itself (its frame and driver), so it has no guard and saves no body.
+    guard = resumable ? nil : (core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded))
     out << guard[:prologue] if guard
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"

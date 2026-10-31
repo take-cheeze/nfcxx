@@ -248,6 +248,15 @@ class CodeGen
         root = by_owner_name[[owner, name]]
         @fiber_roots << root if root
       end
+      # RECEIVER_ROOTS: a call on another receiver (`arr.each_index { ... }`) names a method whose owner the fiber body
+      # does not prove, so every definition of that name is a candidate root. Compiling a root that is not reached is
+      # harmless: its entry runs the same body, and only a suspension through it needs the resumable form.
+      # Guarded core methods are not registry definitions (bc2cpp.rb moves them to core_hidden_defs), so both are searched.
+      hidden = self.class.core_hidden_defs || []
+      fiber_receiver_call_names(seed_irep).each do |name|
+        candidates = (@registry[name] || []) + hidden.select { |d| d.name == name }
+        candidates.each { |d| @fiber_roots << d.irep if d.irep }
+      end
     end
 
     reachable = Set.new
