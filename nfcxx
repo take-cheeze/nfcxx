@@ -52,6 +52,8 @@
 #                  predefined macros) instead of the build host: linux_aarch64, linux_armv7, linux_riscv64, linux_riscv32,
 #                  linux_i686, win64 (MinGW's macros when MinGW is installed at setup; docs/notes/freestanding.md, "Windows"), win32. The generated C is for that target, so the
 #                  host cc must not compile it: give it to a cross compiler. docs/notes/freestanding.md, "Targets".
+#   --cosmo: build with cosmocc (Cosmopolitan libc, APE output) as the C compiler. Implies --backend=gcc. cosmocc is
+#                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
 source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
@@ -70,7 +72,7 @@ sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
-asan=0; backend_explicit=0; asanopts=(); safeptr=0
+asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
 dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
@@ -171,6 +173,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
 ensure_tool() {
   local dir=$1 out=$2 lock=$2.lock waited=0
   [ -x "$out" ] && return 0
+  mkdir -p "$(dirname "$out")"   # a fresh checkout has no build/: the lock mkdir would fail and every run would wait
   while ! mkdir "$lock" 2>/dev/null; do
     [ -x "$out" ] && return 0
     sleep 0.2; waited=$((waited + 1))
@@ -437,6 +440,7 @@ while [ $# -gt 0 ]; do
     --dialect=*) dialect=${1#--dialect=} ;;
     --gnu-version=*) gnu=${1#--gnu-version=} ;;
     --freestanding) freestanding=1 ;;
+    --cosmo) cosmo=1 ;;
     --target=*) target=${1#--target=} ;;
     --trace=*) trace=${1#--trace=} ;;
     --module-dir=*) moddir=${1#--module-dir=} ;;
@@ -716,6 +720,13 @@ if [ $safeptr = 1 ]; then
 fi
 [ "${NFCXX_PATH:-}" != b ] || backend=pathb   # NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md)
 [ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
+if [ $cosmo = 1 ]; then
+  # --cosmo: cosmocc is the C compiler (gcc-cc runs it as NFCXX_GCC), so the backend is gcc (docs/notes/cosmo.md)
+  [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc" >&2; exit 2; }
+  backend=gcc
+  export NFCXX_GCC=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
+  [ -x "$NFCXX_GCC" ] || { echo "nfcxx: $NFCXX_GCC is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" >&2; exit 2; }
+fi
 case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
@@ -786,7 +797,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     if [ $backend != gcc ]; then
       NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     else
-      gcc -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
+      "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     fi
     trace_end "$t" "C input: $c" cinput
     cobjs+=("$o")
@@ -804,7 +815,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
     if [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
-    else gcc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
+    else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
   fi

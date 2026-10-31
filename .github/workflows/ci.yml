@@ -70,6 +70,12 @@ jobs:
               tests/cxx-driver/run.sh
               tests/determinism/run.sh
               tests/float-to-int/run.sh
+          - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
+            env:
+              COSMOCC_SHA256: ${{ vars.COSMOCC_SHA256 }}
+            run: |
+              scripts/setup-cosmo.sh
+              tests/cosmo/run.sh
           - name: real-world tinyxml2, nlohmann/json, and {fmt}
             run: |
               tests/realworld/run.sh
