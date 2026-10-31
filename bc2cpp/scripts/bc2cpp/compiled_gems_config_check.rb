@@ -98,4 +98,35 @@ suite.check('BC2CPP_COMPILED_GEMS owners come from the named source', repo.all? 
   got[:owners] == want && !want.empty? && got[:out_symbol] == entry.out_symbol && got[:native_namespaces] == entry.native_namespaces
 end)
 
+text = bc2cpp_build_config_text
+%w[closed psp wio maix].each do |name|
+  gems = bc2cpp_rpg_maker_gem_lines(text, name, ROOT)
+  suite.check("#{name} omits Marshal, Kernel extensions and Random",
+              (%w[mruby-marshal mruby-kernel-ext mruby-random] & gems.keys).empty?)
+end
+%w[host emscripten android].each do |name|
+  gems = bc2cpp_rpg_maker_gem_lines(text, name, ROOT)
+  suite.check("#{name} retains game-script dependencies",
+              (%w[mruby-marshal mruby-kernel-ext mruby-random] - gems.keys).empty?)
+end
+suite.check('keyword defaults are read for multi-format dependency selection',
+            bc2cpp_rpg_maker_gem_lines(text, 'host', ROOT).key?('mruby-mvjs') &&
+              !bc2cpp_rpg_maker_gem_lines(text.sub('include_mvjs: true)', 'include_mvjs: false)'), 'host', ROOT).key?('mruby-mvjs'))
+core = bc2cpp_closed_core_gems(ROOT)
+suite.check('the compiled-core closure does not pull Struct or dropped helpers back in',
+            (%w[mruby-struct mruby-kernel-ext mruby-random] & core).empty?)
+suite.check('metaprogramming stays for the RGSS tilemap probe', core.include?('mruby-metaprog'))
+suite.check('canonical compiled sources exclude the absent Struct gem',
+            closed_world_mrblib_srcs(ROOT).none? { |path| path.include?('/mruby-struct/') })
+suite.check('compiled core includes Struct only when the build actually supplies it',
+            !bc2cpp_core_compiled_edges(ROOT, []).include?('mruby-struct') &&
+              bc2cpp_core_compiled_edges(ROOT, ['mruby-struct']).include?('mruby-struct'))
+suite.check('RGSS declares Marshal for its tests, not its runtime',
+            !bc2cpp_rake_dependencies(File.join(ROOT, 'mruby-rgss'), ROOT).include?('mruby-marshal') &&
+              File.read(File.join(ROOT, 'mruby-rgss/mrbgem.rake')).include?("add_test_dependency 'mruby-marshal'"))
+suite.check('XP declares its own Marshal runtime dependency',
+            bc2cpp_rake_dependencies(File.join(ROOT, 'mruby-rpgxp'), ROOT).include?('mruby-marshal'))
+suite.check('RPG2k-only sources do not call omitted APIs',
+            system(RbConfig.ruby, File.join(ROOT, 'scripts/wio/dropped_gems_check.rb'), '--rpg2k'))
+
 suite.finish!
