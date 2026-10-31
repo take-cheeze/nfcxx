@@ -332,6 +332,61 @@ module EnumStep
       end
     RUBY
 
+    # The drivers of Hash#each, #each_key and #each_value: the body's snapshot of keys and values and its index loop, each
+    # block call made from Ruby (the snapshot is the same array the body makes, so a block cannot reach it).
+    HASH_EACH_DRIVER = <<~'RUBY'
+      class Hash
+        def __bc2cpp_each_driver(&block)
+          return to_enum(:each) unless block
+
+          keys = self.keys
+          vals = self.values
+          len = self.size
+          i = 0
+          while i < len
+            block.call([keys[i], vals[i]])
+            i += 1
+          end
+          self
+        end
+        private :__bc2cpp_each_driver
+      end
+    RUBY
+
+    HASH_EACH_KEY_DRIVER = <<~'RUBY'
+      class Hash
+        def __bc2cpp_each_key_driver(&block)
+          return to_enum(:each_key) unless block
+
+          keys = self.keys
+          i = 0
+          while i < keys.size
+            block.call(keys[i])
+            i += 1
+          end
+          self
+        end
+        private :__bc2cpp_each_key_driver
+      end
+    RUBY
+
+    HASH_EACH_VALUE_DRIVER = <<~'RUBY'
+      class Hash
+        def __bc2cpp_each_value_driver(&block)
+          return to_enum(:each_value) unless block
+
+          vals = self.values
+          i = 0
+          while i < vals.size
+            block.call(vals[i])
+            i += 1
+          end
+          self
+        end
+        private :__bc2cpp_each_value_driver
+      end
+    RUBY
+
   # One step form per owner. c_step is the C step (a method of the owner); c_open the C function that opens the cursor,
   # nil when the driver takes no open; driver the Ruby source of the driver; c the C++ the form needs. stubs_body: the
   # step covers every case the saved body covers, so under the flag the body is emptied (MrblibStubs, bc2cpp_stub_top_mrblib).
@@ -354,7 +409,10 @@ module EnumStep
     %w[String upto] => Form.new('String', nil, nil, STRING_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver'),
     %w[Integer times] => Form.new('Integer', nil, nil, INTEGER_TIMES_DRIVER, nil, true, 'times', '__bc2cpp_times_driver'),
     %w[Integer upto] => Form.new('Integer', nil, nil, INTEGER_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver'),
-    %w[Integer downto] => Form.new('Integer', nil, nil, INTEGER_DOWNTO_DRIVER, nil, true, 'downto', '__bc2cpp_downto_driver')
+    %w[Integer downto] => Form.new('Integer', nil, nil, INTEGER_DOWNTO_DRIVER, nil, true, 'downto', '__bc2cpp_downto_driver'),
+    %w[Hash each] => Form.new('Hash', nil, nil, HASH_EACH_DRIVER, nil, true, 'each', '__bc2cpp_each_driver'),
+    %w[Hash each_key] => Form.new('Hash', nil, nil, HASH_EACH_KEY_DRIVER, nil, true, 'each_key', '__bc2cpp_each_key_driver'),
+    %w[Hash each_value] => Form.new('Hash', nil, nil, HASH_EACH_VALUE_DRIVER, nil, true, 'each_value', '__bc2cpp_each_value_driver')
   }.freeze
 
   module_function
