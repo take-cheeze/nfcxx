@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'enum_driver_gen'
+
 # ENUM_STEP (docs/bc2cpp-enum-step.md): the step form of an owner's #each for external iteration.
 #
 # A compiled core #each under a Fiber (CORE_BLOCK_GUARD) hands over to mruby's own Ruby body, which is saved bytecode,
@@ -12,6 +14,7 @@
 # nothing here is emitted and the output is unchanged.
 # Only the owners in FORMS take part; every other guarded core method keeps its saved bytecode.
 module EnumStep
+  MRUBY_ROOT = File.expand_path('../../3rd/mruby', __dir__)
   FLAG = 'BC2CPP_ENUM_STEP'
   DRIVER_METHOD = '__bc2cpp_each_driver'
   STEP_METHOD = '__bc2cpp_each_step'
@@ -230,163 +233,6 @@ module EnumStep
     }
   CPP
 
-    # The driver of String#upto: the body's three branches (single character, all-digit edges, the succ loop), each
-    # yield made a block call. It has no C step: a Ruby driver makes the block call itself, so Fiber.yield in the block
-    # has only VM frames between resume and yield, as the Range driver does.
-    STRING_UPTO_DRIVER = <<~'RUBY'
-      class String
-        def __bc2cpp_upto_driver(max, exclusive=false, &block)
-          return to_enum(:upto, max, exclusive) unless block
-          raise TypeError, "no implicit conversion of #{max.class} into String" unless max.kind_of? String
-
-          len = self.length
-          maxlen = max.length
-          # single character
-          if len == 1 and maxlen == 1
-            c = self.ord
-            e = max.ord
-            while c <= e
-              break if exclusive and c == e
-              block.call(c.chr(__ENCODING__))
-              c += 1
-            end
-            return self
-          end
-          # both edges are all digits
-          bi = self.to_i(10)
-          ei = max.to_i(10)
-          if (bi > 0 or bi == "0"*len) and (ei > 0 or ei == "0"*maxlen)
-            while bi <= ei
-              break if exclusive and bi == ei
-              s = bi.to_s
-              s = s.rjust(len, "0") if s.length < len
-              block.call(s)
-              bi += 1
-            end
-            return self
-          end
-          bs = self
-          while true
-            n = (bs <=> max)
-            break if n > 0
-            break if exclusive and n == 0
-            block.call(bs)
-            break if n == 0
-            bsiz = bs.size
-            break if bsiz > max.size || bsiz == 0
-            bs = bs.succ
-          end
-          self
-        end
-        private :__bc2cpp_upto_driver
-      end
-    RUBY
-
-    # The drivers of Integer#times, #upto and #downto: the body's loop, each yield made a block call. Ruby drivers, as
-    # the String#upto driver is (the block call is a Ruby frame, so a Fiber.yield in the block has only VM frames).
-    INTEGER_TIMES_DRIVER = <<~'RUBY'
-      class Integer
-        def __bc2cpp_times_driver(&block)
-          return to_enum(:times) unless block
-
-          i = 0
-          while i < self
-            block.call(i)
-            i += 1
-          end
-          self
-        end
-        private :__bc2cpp_times_driver
-      end
-    RUBY
-
-    INTEGER_UPTO_DRIVER = <<~'RUBY'
-      class Integer
-        def __bc2cpp_upto_driver(num, &block)
-          return to_enum(:upto, num) unless block
-
-          i = self.to_i
-          while i <= num
-            block.call(i)
-            i += 1
-          end
-          self
-        end
-        private :__bc2cpp_upto_driver
-      end
-    RUBY
-
-    INTEGER_DOWNTO_DRIVER = <<~'RUBY'
-      class Integer
-        def __bc2cpp_downto_driver(num, &block)
-          return to_enum(:downto, num) unless block
-
-          i = self.to_i
-          while i >= num
-            block.call(i)
-            i -= 1
-          end
-          self
-        end
-        private :__bc2cpp_downto_driver
-      end
-    RUBY
-
-    # The drivers of Hash#each, #each_key and #each_value: the body's snapshot of keys and values and its index loop, each
-    # block call made from Ruby (the snapshot is the same array the body makes, so a block cannot reach it).
-    HASH_EACH_DRIVER = <<~'RUBY'
-      class Hash
-        def __bc2cpp_each_driver(&block)
-          return to_enum(:each) unless block
-
-          keys = self.keys
-          vals = self.values
-          len = self.size
-          i = 0
-          while i < len
-            block.call([keys[i], vals[i]])
-            i += 1
-          end
-          self
-        end
-        private :__bc2cpp_each_driver
-      end
-    RUBY
-
-    HASH_EACH_KEY_DRIVER = <<~'RUBY'
-      class Hash
-        def __bc2cpp_each_key_driver(&block)
-          return to_enum(:each_key) unless block
-
-          keys = self.keys
-          i = 0
-          while i < keys.size
-            block.call(keys[i])
-            i += 1
-          end
-          self
-        end
-        private :__bc2cpp_each_key_driver
-      end
-    RUBY
-
-    HASH_EACH_VALUE_DRIVER = <<~'RUBY'
-      class Hash
-        def __bc2cpp_each_value_driver(&block)
-          return to_enum(:each_value) unless block
-
-          vals = self.values
-          i = 0
-          while i < vals.size
-            block.call(vals[i])
-            i += 1
-          end
-          self
-        end
-        private :__bc2cpp_each_value_driver
-      end
-    RUBY
-
   # One step form per owner. c_step is the C step (a method of the owner); c_open the C function that opens the cursor,
   # nil when the driver takes no open; driver the Ruby source of the driver; c the C++ the form needs. stubs_body: the
   # step covers every case the saved body covers, so under the flag the body is emptied (MrblibStubs, bc2cpp_stub_top_mrblib).
@@ -403,16 +249,21 @@ module EnumStep
     def save_args = [c_step || 'nullptr', c_open || 'nullptr', src_name, *(driver_method ? ["\"#{driver_name}\""] : [])].join(', ')
   end
 
+  # A driver generated from the body it replaces (EnumDriverGen): the body's own source, read when the form is used.
+  def self.generated(rel, owner, method, driver)
+    -> { EnumDriverGen.driver_source(File.join(MRUBY_ROOT, rel), owner, method, driver) }
+  end
+
   FORMS = {
     %w[Array each] => Form.new('Array', 'bc2cpp_each_step', nil, ARRAY_DRIVER, ARRAY_C, false),
     %w[Range each] => Form.new('Range', 'bc2cpp_range_each_step', 'bc2cpp_range_each_open', RANGE_DRIVER, RANGE_C, true),
-    %w[String upto] => Form.new('String', nil, nil, STRING_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver'),
-    %w[Integer times] => Form.new('Integer', nil, nil, INTEGER_TIMES_DRIVER, nil, true, 'times', '__bc2cpp_times_driver'),
-    %w[Integer upto] => Form.new('Integer', nil, nil, INTEGER_UPTO_DRIVER, nil, true, 'upto', '__bc2cpp_upto_driver'),
-    %w[Integer downto] => Form.new('Integer', nil, nil, INTEGER_DOWNTO_DRIVER, nil, true, 'downto', '__bc2cpp_downto_driver'),
-    %w[Hash each] => Form.new('Hash', nil, nil, HASH_EACH_DRIVER, nil, true, 'each', '__bc2cpp_each_driver'),
-    %w[Hash each_key] => Form.new('Hash', nil, nil, HASH_EACH_KEY_DRIVER, nil, true, 'each_key', '__bc2cpp_each_key_driver'),
-    %w[Hash each_value] => Form.new('Hash', nil, nil, HASH_EACH_VALUE_DRIVER, nil, true, 'each_value', '__bc2cpp_each_value_driver')
+    %w[String upto] => Form.new('String', nil, nil, generated('mrbgems/mruby-string-ext/mrblib/string.rb', 'String', 'upto', '__bc2cpp_upto_driver'), nil, true, 'upto', '__bc2cpp_upto_driver'),
+    %w[Integer times] => Form.new('Integer', nil, nil, generated('mrblib/numeric.rb', 'Integer', 'times', '__bc2cpp_times_driver'), nil, true, 'times', '__bc2cpp_times_driver'),
+    %w[Integer upto] => Form.new('Integer', nil, nil, generated('mrblib/numeric.rb', 'Integer', 'upto', '__bc2cpp_upto_driver'), nil, true, 'upto', '__bc2cpp_upto_driver'),
+    %w[Integer downto] => Form.new('Integer', nil, nil, generated('mrblib/numeric.rb', 'Integer', 'downto', '__bc2cpp_downto_driver'), nil, true, 'downto', '__bc2cpp_downto_driver'),
+    %w[Hash each] => Form.new('Hash', nil, nil, generated('mrblib/hash.rb', 'Hash', 'each', '__bc2cpp_each_driver'), nil, true, 'each', '__bc2cpp_each_driver'),
+    %w[Hash each_key] => Form.new('Hash', nil, nil, generated('mrblib/hash.rb', 'Hash', 'each_key', '__bc2cpp_each_key_driver'), nil, true, 'each_key', '__bc2cpp_each_key_driver'),
+    %w[Hash each_value] => Form.new('Hash', nil, nil, generated('mrblib/hash.rb', 'Hash', 'each_value', '__bc2cpp_each_value_driver'), nil, true, 'each_value', '__bc2cpp_each_value_driver')
   }.freeze
 
   module_function
@@ -472,7 +323,7 @@ module EnumStep
     <<~CPP
       #{form.c}
       static const char* const #{form.src_name} = R"RUBY(
-      #{form.driver}
+      #{form.driver.respond_to?(:call) ? form.driver.call : form.driver}
       )RUBY";
 
     CPP
