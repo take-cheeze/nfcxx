@@ -4,15 +4,17 @@
 # the owner's own method, with the same parameters and statements, renamed, and each `yield` made a block call on the
 # method's &block. Generated from the source the body is compiled from, a driver cannot drift from its body.
 #
-# Refused, so the body is kept rather than rewritten inexactly: a body that asks for its block some other way (block_given?,
-# super, a def that yields to an outer method), and one without an &block parameter, whose yield the rewrite needs.
+# Refused, so the body is kept rather than rewritten inexactly: a body that asks for its block some other way (super, a
+# def that yields to an outer method, a reassigned block), and one without an &block parameter, whose yield the rewrite
+# needs. block_given? is exact in a driver that takes the block as a parameter: it becomes a test of that parameter.
 require 'prism'
 
 module EnumDriverGen
   class Refused < StandardError; end
 
-  # Calls that read the method's block or frame, and so change meaning once the body is a driver.
-  FRAME_CALLS = %w[block_given? binding __method__].freeze
+  # Calls that read the method's frame, and so change meaning once the body is a driver. block_given? is not one of
+  # them: the driver's own &block parameter answers it (rewrite).
+  FRAME_CALLS = %w[binding __method__].freeze
 
   module_function
 
@@ -63,21 +65,25 @@ module EnumDriverGen
         raise Refused, 'super'
       when Prism::CallNode
         raise Refused, "#{n.name} reads the frame" if n.receiver.nil? && FRAME_CALLS.include?(n.name.to_s)
+        raise Refused, 'block_given? with arguments' if n.receiver.nil? && n.name.to_s == 'block_given?' && n.arguments
       when Prism::LocalVariableWriteNode
         raise Refused, "#{block_name} is reassigned" if n.name.to_s == block_name
       end
     end
   end
 
-  # The def's text with each yield made a call on its &block parameter, under the driver's name.
+  # The def's text with each yield made a call on its &block parameter, and each block_given? a test of it, under the
+  # driver's name.
   def rewrite(source, def_node, driver_method)
     block_name = def_node.parameters.block.name.to_s
     edits = []
     walk(def_node) do |n|
-      next unless n.is_a?(Prism::YieldNode)
-
-      args = n.arguments ? source.byteslice(n.arguments.location.start_offset, n.arguments.location.length) : ''
-      edits << [n.location.start_offset, n.location.end_offset, args.empty? ? "#{block_name}.call" : "#{block_name}.call(#{args})"]
+      if n.is_a?(Prism::YieldNode)
+        args = n.arguments ? source.byteslice(n.arguments.location.start_offset, n.arguments.location.length) : ''
+        edits << [n.location.start_offset, n.location.end_offset, args.empty? ? "#{block_name}.call" : "#{block_name}.call(#{args})"]
+      elsif n.is_a?(Prism::CallNode) && n.receiver.nil? && n.name.to_s == 'block_given?'
+        edits << [n.location.start_offset, n.location.end_offset, "(!#{block_name}.nil?)"]
+      end
     end
     text = source.byteslice(def_node.location.start_offset, def_node.location.length).dup
     base = def_node.location.start_offset

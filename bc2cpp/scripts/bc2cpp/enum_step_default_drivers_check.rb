@@ -41,6 +41,8 @@ OWNERS = %w[Enumerable Array Hash String Integer Float Range Enumerator].freeze
 EACH_SLICE_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Enumerable, false, "[^"]*", \d+, nullptr, nullptr, bc2cpp_enumerable_each_slice_driver_src, "__bc2cpp_each_slice_driver"\)/
 COLLECT_B_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Array, false, "[^"]*", \d+, nullptr, nullptr, bc2cpp_array_collect_b_driver_src, "__bc2cpp_collect_b_driver"\)/
 INTEGER_STEP_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Integer, false, "[^"]*", \d+, nullptr, nullptr, bc2cpp_integer_step_driver_src, "__bc2cpp_step_driver"\)/
+# Hash#transform_values reads block_given?, which the generator rewrites as a test of its &block parameter.
+TRANSFORM_SAVE = /bc2cpp_enum_step_save\(M, bc2cpp_owner_reg_Hash, false, "[^"]*", \d+, nullptr, nullptr, bc2cpp_hash_transform_values_driver_src, "__bc2cpp_transform_values_driver"\)/
 # Hash#< has no &block, so the generator refuses it and it keeps its saved bytecode (\x3c is "<").
 HASH_LT_PLAIN = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Hash, false, "\\x3c", \d+\)/
 PLAIN_EACH_SLICE = /bc2cpp_core_save_interpreted\(M, bc2cpp_owner_reg_Enumerable, false, "\\x65\\x61\\x63\\x68\\x5f\\x73\\x6c\\x69\\x63\\x65", \d+\)/
@@ -113,6 +115,11 @@ puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} drivers=#{Enumerabl
   show('float step') { 1.0.step(2.0, 0.5).to_a }
   show('step break') { 1.step(9, 2) { |i| break i if i > 4 } }
   show('fiber yield in step') { f = Fiber.new { 1.step(5, 2) { |i| Fiber.yield i }; :done }; [f.resume, f.resume, f.resume, f.resume] }
+  show("transform_values") { { a: 1, b: 2 }.transform_values { |v| v * 10 }.to_a }
+  show("transform_values enumerator") { { a: 1 }.transform_values.to_a }
+  show("transform_values fiber") { f = Fiber.new { { a: 1, b: 2 }.transform_values { |v| Fiber.yield v; v }; :done }; [f.resume, f.resume, f.resume] }
+  show("transform_values! ") { h = { a: 1, b: 2 }; h.transform_values! { |v| v + 1 }; h.to_a }
+  show("transform_values! enumerator") { { a: 1 }.transform_values!.to_a }
   puts 'end'
 RUBY
 
@@ -152,7 +159,12 @@ EXPECTED = {
   "integer step enumerator" => '[1, 4, 7]',
   "float step" => '[1.0, 1.5, 2.0]',
   "step break" => '5',
-  "fiber yield in step" => '[1, 3, 5, :done]'
+  "fiber yield in step" => '[1, 3, 5, :done]',
+  "transform_values" => '[[:a, 10], [:b, 20]]',
+  "transform_values enumerator" => '[1]',
+  "transform_values fiber" => '[1, 2, :done]',
+  "transform_values! " => '[[:a, 2], [:b, 3]]',
+  "transform_values! enumerator" => '[1]'
 }.freeze
 
 dir = Dir.mktmpdir('bc2cpp-enum-step-default')
@@ -169,6 +181,7 @@ check.call('flag set: Array#collect! registers through bc2cpp_enum_step_save wit
 check.call('flag set: Integer#step registers through bc2cpp_enum_step_save with its generated driver', on_code.match?(INTEGER_STEP_SAVE))
 check.call('flag set: Enumerable#each_slice no longer saves its own body', !on_code.match?(PLAIN_EACH_SLICE))
 check.call('flag set: Hash#< (refused by the generator) keeps its saved bytecode', on_code.match?(HASH_LT_PLAIN))
+check.call('flag set: Hash#transform_values, which reads block_given?, registers with its generated driver', on_code.match?(TRANSFORM_SAVE))
 check.call('flag set: the generated code has no #error', !on_code.include?('#error'))
 check.call('flag at 0: no generated driver text is emitted', !off_code.include?('__bc2cpp_each_slice_driver') && !off_code.include?('__bc2cpp_collect_b_driver'))
 check.call('flag at 0: Enumerable#each_slice keeps its own saved body', off_code.match?(PLAIN_EACH_SLICE))
