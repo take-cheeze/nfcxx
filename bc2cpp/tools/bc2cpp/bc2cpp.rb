@@ -155,6 +155,7 @@ require_relative 'codegen_fixnum_ranges'
 require_relative 'codegen_tuple_returns'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
+require_relative 'codegen_sort_array_cmp'
 require_relative 'codegen_step_loop'
 require_relative 'codegen_kernel_loop'
 require_relative 'codegen_resumable'
@@ -2189,6 +2190,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_bool_check_helper(compiled)
   print gen.emit_native_core_helpers(compiled)
   print gen.emit_numeric_proof_helpers(compiled)
+  print gen.emit_sort_array_cmp_helper(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
