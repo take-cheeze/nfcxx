@@ -1,18 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# ENUM_STEP for String#upto (tools/bc2cpp/codegen_enum_step.rb, docs/bc2cpp-enum-step.md): with the flag on, the saved
-# body of a guarded String#upto under a Fiber is a Ruby driver (STRING_UPTO_DRIVER) that makes the block call itself,
-# so a Fiber.yield in the block, or Enumerator#next over the upto, suspends through VM frames only. Flag at 0, the
-# generated code is what it was: String#upto's own saved bytecode.
-#
-#   generated code (needs a host mrbc)
-#     - flag set: String#upto registers through bc2cpp_enum_step_save with the driver, and no longer saves its own body;
-#     - flag at 0: no driver text, and String#upto keeps its own saved body.
-#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - the interpreted run (mruby's own String#upto, Fiber-based) and the compiled run (the driver, flag set) print the
-#       same over the digit, single-character and succ branches, exclusive ends, breaks, raises, a TypeError, an
-#       enumerator, a Fiber.yield in the block and a blockless upto under a Fiber.
+# String#upto uses a resumable variant under ENUM_STEP, and keeps its saved body with the flag disabled.
+# Compare its numeric, character and successor branches, optional exclusive end, block control flow,
+# Enumerator#next and Fiber suspension against interpreted mruby and Ruby's expected results.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/enum_step_string_upto_check.rb
 
@@ -122,8 +113,8 @@ off_dir = File.join(dir, 'off')
 FileUtils.mkdir_p([on_dir, off_dir])
 on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
-check.call('flag set: String#upto registers through bc2cpp_enum_step_save with the driver', on_code.match?(STEP_SAVE))
-check.call('flag set: the driver source is emitted', on_code.include?('def __bc2cpp_upto_driver('))
+check.call('flag set: String#upto has a resumable variant', on_code.include?('String_upto_rsm_impl('))
+check.call('flag set: no per-method driver is emitted', !on_code.match?(STEP_SAVE) && !on_code.include?('def __bc2cpp_upto_driver('))
 check.call('flag set: String#upto no longer saves its own body', !on_code.match?(PLAIN_SAVE))
 check.call('flag at 0: no driver text is emitted', !off_code.include?('__bc2cpp_upto_driver'))
 check.call('flag at 0: String#upto keeps its own saved body', off_code.match?(PLAIN_SAVE))
@@ -133,12 +124,11 @@ build = Bc2cppFixtureRuntime.full_or_build
 if build.nil?
   puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
 else
-  puts '-- fixtures on real mruby: Fiber-based (interpreted) and driver-based (compiled)'
+  puts '-- fixtures on real mruby: interpreted and resumable variant'
   body = <<~CPP
     static int scenario(mrb_state* M) {
       std::fflush(stdout);
-      // The registrations a gem's init makes, which save String#upto's body (the driver, under ENUM_STEP) before the
-      // compiled entry replaces it. run() would register the entries plainly, leaving no saved body to fall back to.
+      // Register through the gem path so the flag-disabled fallback is saved before replacement.
       mrb_gv_set(M, mrb_intern_lit(M, "$bc2cpp_compiled"), mrb_bool_value(compiled));
       if (compiled) bc2cpp_register_owner_methods(M);
       const char* src = R"ENUMSTEP(#{DRIVER})ENUMSTEP";
@@ -157,7 +147,7 @@ else
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run has no driver', mode_line.call(interpreted)&.end_with?('driver=false'))
-  check.call('the compiled run registers the driver on String', mode_line.call(compiled)&.end_with?('driver=true'))
+  check.call('the compiled run needs no driver on String', mode_line.call(compiled)&.end_with?('driver=false'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled
