@@ -28,7 +28,7 @@ cp -r "$src" "$game"
 host=$build/trace-host/trace_host
 # What a run must never print: a left-out entry reached (verify build), a violated proof or hint, a stubbed
 # body run, or a method lookup that failed.
-bad_re='UNREGISTERED_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only Fiber|missing native continuation'
+bad_re='UNREGISTERED_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only|missing native continuation'
 failed=0
 
 taps() { local out="" f; for ((f = $1; f <= $2; f += $3)); do out+="$f:C,"; done; echo "${out%,}"; }
