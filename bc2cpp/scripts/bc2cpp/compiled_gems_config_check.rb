@@ -115,6 +115,10 @@ suite.check('keyword defaults are read for multi-format dependency selection',
 core = bc2cpp_closed_core_gems(ROOT)
 suite.check('the compiled-core closure does not pull Struct or dropped helpers back in',
             (%w[mruby-struct mruby-kernel-ext mruby-random] & core).empty?)
+suite.check('the closed runtime omits the source compiler and eval',
+            (%w[mruby-compiler mruby-eval] & core).empty?)
+suite.check('the maix source-evaluating smoke still includes its compiler',
+            bc2cpp_rpg_maker_gem_lines(text, 'maix', ROOT).key?('mruby-compiler'))
 suite.check('metaprogramming stays for the RGSS tilemap probe', core.include?('mruby-metaprog'))
 suite.check('canonical compiled sources exclude the absent Struct gem',
             closed_world_mrblib_srcs(ROOT).none? { |path| path.include?('/mruby-struct/') })

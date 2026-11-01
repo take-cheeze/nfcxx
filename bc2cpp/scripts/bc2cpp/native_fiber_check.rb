@@ -112,6 +112,10 @@ source << <<~'RUBY_SOURCE'
     f = proc { |a, b = 1, *rest, key: 2, &block| }
     [f.arity, f.parameters]
   end
+  if respond_to?(:native_only_reject_bytecode, true)
+    show('NATIVE_ONLY root') { native_only_reject_bytecode }
+    show('NATIVE_ONLY fiber') { Fiber.new { native_only_reject_bytecode }.resume }
+  end
   puts 'end'
   puts "REGISTRATION #{native_fiber_compiled?}" if respond_to?(:native_fiber_compiled?, true)
   puts "AUDIT #{native_fiber_counts.inspect}" if respond_to?(:native_fiber_counts, true)
@@ -154,17 +158,28 @@ File.write(File.join(probe, 'src/probe.cxx'), "#include #{File.join(generated, '
   #include <mruby.h>
   #include <mruby/array.h>
   #include <mruby/irep.h>
+  #include <mruby/opcode.h>
   #include <cstdlib>
   static mrb_int native_steps, bytecode_steps;
   static void audit(mrb_state* mrb, const mrb_irep* irep, const mrb_code* pc, mrb_value* regs) {
-    if (mrb->c != mrb->root_c) {
-      if (irep->native) native_steps++;
-      else bytecode_steps++;
-    }
+    if (irep->native) native_steps++;
+    else bytecode_steps++;
   }
   static mrb_value counts(mrb_state* mrb, mrb_value self) {
     mrb_value values[] = {mrb_int_value(mrb, native_steps), mrb_int_value(mrb, bytecode_steps)};
     return mrb_ary_new_from_values(mrb, 2, values);
+  }
+  static mrb_value reject_bytecode(mrb_state* mrb, mrb_value) {
+    static const mrb_code rejected_program[] = {OP_STOP};
+    mrb_irep* irep = mrb_add_irep(mrb);
+    irep->iseq = rejected_program;
+    irep->ilen = sizeof(rejected_program);
+    irep->nlocals = 1;
+    irep->nregs = 4;
+    irep->flags |= MRB_ISEQ_NO_FREE;
+    RProc* proc = mrb_proc_new(mrb, irep);
+    mrb_irep_decref(mrb, irep);
+    return mrb_top_run(mrb, proc, mrb_top_self(mrb), 0);
   }
   static mrb_value compiled_method(mrb_state* mrb, mrb_value self) {
     struct RClass* found = mrb->array_class;
@@ -178,6 +193,7 @@ File.write(File.join(probe, 'src/probe.cxx'), "#include #{File.join(generated, '
       bc2cpp_register_owner_methods(mrb);
     }
     mrb->code_fetch_hook = audit;
+    mrb_define_method(mrb, mrb->object_class, "native_only_reject_bytecode", reject_bytecode, MRB_ARGS_NONE());
     mrb_define_method(mrb, mrb->object_class, "native_fiber_compiled?", compiled_method, MRB_ARGS_NONE());
     mrb_define_method(mrb, mrb->object_class, "native_fiber_counts", counts, MRB_ARGS_NONE());
   }
@@ -188,7 +204,9 @@ File.write(config, <<~RUBY_CONFIG)
   require #{File.join(root, 'tools/bc2cpp/native_vm_build.rb').dump}
   MRuby::Build.new('host') do |conf|
     toolchain :gcc
-    conf.gembox 'full-core'
+    %w[stdlib stdlib-ext stdlib-io math].each { |box| conf.gembox box }
+    conf.gem core: 'mruby-metaprog'
+    conf.gem core: 'mruby-method'
     conf.gem #{File.join(root, '3rd/mruby-stringio').dump}
     conf.gem #{probe.dump}
     conf.cxx.flags << '-std=gnu++17'
@@ -197,29 +215,56 @@ File.write(config, <<~RUBY_CONFIG)
     enable_cxx_exception
     enable_debug
     [conf.cc, conf.cxx].each { |tool| tool.defines << 'MRB_USE_DEBUG_HOOK' }
-    NativeVM.configure(conf)
+    NativeVM.configure(conf, native_only: true)
   end
 RUBY_CONFIG
 # The probe includes freshly generated compiler output on every run.
 FileUtils.rm_f(Dir[File.join(work, 'host/mrbgems/native-fiber-probe/src/probe.{o,d}')])
-env = { 'MRUBY_CONFIG' => config, 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
+build_env = { 'MRUBY_CONFIG' => config, 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
 puts '-- build native continuations and a native-only Fiber runtime'
-output, status = Open3.capture2e(env, 'rake', '-m', '-j8', 'all', chdir: File.join(root, '3rd/mruby'))
+output, status = Open3.capture2e(build_env, 'rake', '-m', '-j8', 'all', chdir: File.join(root, '3rd/mruby'))
 File.write(File.join(work, 'build.log'), output)
 abort output.lines.last(35).join unless status.success?
 expected, expected_status = Open3.capture2e(File.join(reference, 'bin/mruby'), program)
 File.write(File.join(work, 'interpreted.log'), expected)
 abort "interpreted fixture failed:\n#{expected}" unless expected_status.success?
+main = File.join(work, 'native_main.cxx')
+File.write(main, <<~'CPP')
+  #include <mruby.h>
+  int main() {
+    mrb_state* mrb = mrb_open();
+    if (!mrb) return 1;
+    if (mrb->exc) { mrb_print_error(mrb); mrb_close(mrb); return 1; }
+    mrb_close(mrb);
+    return 0;
+  }
+CPP
+host = File.join(work, 'host')
+binary = File.join(work, 'native-main')
+flags = %w[-std=c++17 -fexceptions] + Bc2cppFixtureRuntime.library_defines(host)
+abort 'native-only test host failed to link' unless Bc2cppCxx.system(*flags, "-I#{host}/include", "-I#{root}/3rd/mruby/include",
+                                                                  main, "#{host}/lib/libmruby.a", '-lm', '-o', binary)
+symbols, symbol_status = Open3.capture2e('nm', '-g', '--defined-only', "#{host}/lib/libmruby.a")
+abort symbols unless symbol_status.success?
+forbidden = symbols.lines.grep(/\b(?:mrb_(?:parse_\w+|generate_code|load_(?:n?string\w*|file\w*|irep\w*|exec)|read_irep\w*|dump_irep\w*|codedump\w*))$/)
+abort "native-only archive retains compiler/bytecode APIs:\n#{forbidden.join}" unless forbidden.empty?
+preprocessed = File.read(File.join(host, 'src/vm-cxx.pi'))
+abort 'native-only VM retains bytecode decoding' if preprocessed.match?(/\boptable\b|L_OP_EXT[123]_BODY|pc\s*=\s*ci->pc\s*\+\s*1/)
+puts '  native-only archive omits source compilation, binary loaders/dumpers and instruction decoding'
 [false, true].each do |optimized|
   env = { 'NATIVE_PROBE_COMPILED' => optimized ? '1' : nil }
-  actual, status = Open3.capture2e(env, File.join(work, 'host/bin/mruby'), '-e', '')
+  actual, status = Open3.capture2e(env, binary)
   File.write(File.join(work, optimized ? 'optimized.log' : 'native.log'), actual)
   abort "native fixture failed:\n#{actual}" unless status.success?
   audit = actual[/^AUDIT \[(\d+), (\d+)\]$/, 0]
   abort 'native execution audit is missing' unless audit
   abort "unexpected audit: #{audit}" unless audit.match?(/\[[1-9]\d*, 0\]/)
   abort 'compiled wrapper registration was not exercised' unless actual.include?("REGISTRATION #{optimized}\n")
-  actual = actual.lines.reject { |line| line.start_with?('AUDIT ', 'REGISTRATION ') }.join
+  %w[root fiber].each do |context|
+    required = "NATIVE_ONLY #{context}: raised RuntimeError: bytecode execution in a native-only runtime\n"
+    abort "bytecode was not rejected in #{context}: #{actual}" unless actual.include?(required)
+  end
+  actual = actual.lines.reject { |line| line.start_with?('AUDIT ', 'REGISTRATION ', 'NATIVE_ONLY ') }.join
   unless actual == expected
     expected.lines.zip(actual.lines).reject { |a, b| a == b }.first(12).each { |a, b| warn "interpreted: #{a}native: #{b}" }
     abort "native Fiber behavior differs from interpreted mruby (optimized=#{optimized})"
@@ -233,5 +278,27 @@ abort 'no generated programs to audit' if files.empty?
 retained = files.select { |file| File.read(file).match?(/^static const mrb_code \w+_iseq_/) }
 abort "retained instruction arrays: #{retained.join(', ')}" unless retained.empty?
 puts "  #{scenarios.size * 2} iterator scenarios plus nested calls, ensure, closures, catch/throw and Enumerator match"
-puts '  no bytecode instruction executed inside any Fiber'
+puts '  no bytecode instruction executed in root or Fiber contexts; injected bytecode rejected in both'
+strict_config = File.read(config)
+[false, true].each do |native_only|
+  File.write(config, strict_config.sub('native_only: true', "native_only: #{native_only}"))
+  output, status = Open3.capture2e(build_env, 'rake', '-m', '-j8', 'all', chdir: File.join(root, '3rd/mruby'))
+  File.write(File.join(work, "mode-#{native_only}.log"), output)
+  abort "runtime mode rebuild failed:\n#{output.lines.last(35).join}" unless status.success?
+  symbols, status = Open3.capture2e('nm', '-g', '--defined-only', "#{host}/lib/libmruby.a")
+  abort symbols unless status.success?
+  loaders = symbols.match?(/\bT mrb_load_irep$/)
+  abort "stale binary loader objects after native_only=#{native_only}" unless loaders == !native_only
+  decoded = File.read(File.join(host, 'src/vm-cxx.pi')).include?('L_OP_EXT1_BODY:')
+  abort "stale instruction decoder after native_only=#{native_only}" unless decoded == !native_only
+end
+puts '  switching mixed/native-only modes rebuilds loaders and decoding without stale archive members'
+begin
+  File.write(config, strict_config.sub("conf.gem core: 'mruby-method'", "conf.gem core: 'mruby-method'\n  conf.gem core: 'mruby-compiler'"))
+  output, status = Open3.capture2e(build_env, 'rake', '-P', chdir: File.join(root, '3rd/mruby'))
+  abort 'a native-only runtime accepted the source compiler' if status.success? || !output.include?('native-only runtime cannot include mruby-compiler')
+ensure
+  File.write(config, strict_config)
+end
+puts '  native-only configuration rejects a source compiler gem'
 puts 'bc2cpp native Fiber check: PASS'
