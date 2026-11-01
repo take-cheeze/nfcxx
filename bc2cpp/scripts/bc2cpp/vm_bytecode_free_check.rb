@@ -13,6 +13,8 @@ puts '== vm/bytecode free check =='
 
 # Run the comprehensive native fiber check
 env = ENV.to_h
+# CI also runs native_fiber_check directly in parallel.
+env['BC2CPP_NATIVE_BUILD_DIR'] ||= File.join(ROOT, 'build-vm-bytecode-free')
 output, status = Open3.capture2e(env, 'ruby', File.join(ROOT, 'scripts/bc2cpp/native_fiber_check.rb'), chdir: ROOT)
 File.write('/tmp/vm_bytecode_free_check.log', output)
 STDOUT.puts output

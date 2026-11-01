@@ -222,7 +222,9 @@ RUBY_CONFIG
 FileUtils.rm_f(Dir[File.join(work, 'host/mrbgems/native-fiber-probe/src/probe.{o,d}')])
 build_env = { 'MRUBY_CONFIG' => config, 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
 puts '-- build native continuations and a native-only Fiber runtime'
-output, status = Open3.capture2e(build_env, 'rake', '-m', '-j8', 'all', chdir: File.join(root, '3rd/mruby'))
+# Without binary gems, `all` does not request the flags used to link an external main.
+flags_target = File.join(work, 'host/lib/libmruby.flags.mak')
+output, status = Open3.capture2e(build_env, 'rake', '-m', '-j8', 'all', flags_target, chdir: File.join(root, '3rd/mruby'))
 File.write(File.join(work, 'build.log'), output)
 abort output.lines.last(35).join unless status.success?
 expected, expected_status = Open3.capture2e(File.join(reference, 'bin/mruby'), program)
