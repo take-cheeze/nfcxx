@@ -291,7 +291,7 @@ Failed = Struct.new(:success?)
 
 # One fixture three ways (interpreted; residual + compiled load + the dropped defs added back; ungated: the full
 # mrblib and the load, which must be a no-op). Returns [status of the run, {label => lines}].
-def equivalence(suite, dir, build, symbol, result, files, residual, class_names)
+def equivalence(suite, dir, build, symbol, result, files, residual, class_names, dump: DUMP)
   work = File.join(dir, "eq_#{symbol}")
   FileUtils.mkdir_p(work)
   snippet = result.dropped.map do |d|
@@ -303,7 +303,7 @@ def equivalence(suite, dir, build, symbol, result, files, residual, class_names)
     end
   end.join
   File.write(File.join(work, 'load_gen.cpp'), result.code)
-  File.write(File.join(work, 'dump.rb'), DUMP.sub('%w[Top Top2 Free Cb]', "%w[#{class_names}]"))
+  File.write(File.join(work, 'dump.rb'), dump.sub('%w[Top Top2 Free Cb]', "%w[#{class_names}]"))
   File.write(File.join(work, 'snippet.rb'), snippet)
   res_paths = files.map { |f| File.join(work, "#{File.basename(f)}.res.rb") }
   files.zip(res_paths) { |f, out| File.write(out, residual.fetch(f)) }
@@ -645,6 +645,108 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
               defs.marker.nil? && defs.code.empty? && defs.stats[:deleted_bodies].to_i.zero? &&
               %w[module\ Cb class\ Free].all? { |h| defs_a.include?(h) })
 
+  # Lazy literal data must survive its creating load frame and resolve constants when called.
+  lazy_sources = [<<~'RUBY', <<~'RUBY']
+    module Lazy
+      BASE = {shared: 7}
+      ONE = -> { 1 }
+      ANOTHER_ONE = -> { 1 }
+      DELAYED = -> { [BASE, FUTURE, {nested: ['text', 0x1_0000_0000]}] }
+      module Nested
+        LABEL = :inner
+        TABLE = {elements: ->() { [LABEL, BASE] }}
+      end
+      class Parent
+        TAG = :parent
+      end
+      class Child < Parent
+        THUNK = -> { [TAG, BASE] }
+      end
+    end
+  RUBY
+    module Lazy
+      FUTURE = :late
+    end
+  RUBY
+  lazy_files = lazy_sources.each_with_index.map do |source, i|
+    File.join(dir, "lazy#{i}.rb").tap { |f| File.write(f, source) }
+  end
+  lazy_plan = LoadCompile.plan({'g' => lazy_files}, gem: 'g', drop_keys: Set.new, symbol: 'lazy')
+  lazy_residual = lazy_files.to_h do |f|
+    [f, LoadCompile.apply(File.read(f), lazy_plan.ranges.fetch(f), marker: f == lazy_plan.last_file ? lazy_plan.marker : nil)]
+  end
+  suite.check('literal-data lambdas and their enclosing constants leave no residual statements',
+              lazy_plan.stats[:role_residual].to_i.zero? && lazy_residual.values.none? { |text| text.include?('->') })
+  lazy_dump = <<~'RUBY'
+    delayed = Lazy::DELAYED
+    nested = Lazy::Nested::TABLE[:elements]
+    inherited = Lazy::Child::THUNK
+    shared = Lazy::BASE
+    GC.start
+    first = delayed.call
+    first[2][:nested] << :changed
+    second = delayed.call
+    rejected = false
+    begin
+      delayed.call(1)
+    rescue ArgumentError
+      rejected = true
+    end
+    results = [second, !first.equal?(second), first[0].equal?(shared), nested.call,
+               inherited.call, delayed.lambda?, rejected, Lazy::ONE.eql?(Lazy::ANOTHER_ONE),
+               {Lazy::ONE => 1, Lazy::ANOTHER_ONE => 2}.size]
+    Lazy.const_set(:FUTURE, :changed)
+    results << delayed.call[1]
+    Object.send(:remove_const, :Lazy)
+    GC.start
+    results << nested.call
+    results.inspect
+  RUBY
+  if build
+    lazy_status, lazy_sections = equivalence(suite, dir, build, 'lazy', lazy_plan, lazy_files, lazy_residual, '', dump: lazy_dump)
+    suite.check('native lazy data matches bytecode after GC, repeated calls, lexical lookup and constant changes',
+                lazy_status.success? && lazy_sections['compiled'] == lazy_sections['interpreted'] &&
+                lazy_sections['compiled'] == lazy_sections['ungated'] && !lazy_sections['compiled'].to_a.empty?)
+  end
+  {
+    'parameter' => '->(x) { x }', 'self' => '-> { self }', 'local' => '-> { captured }',
+    'call' => '-> { Object.new }', 'assignment' => '-> { x = 1; x }',
+    'non-data sibling' => '[-> { 1 }, Object.new]',
+    'nested closure' => '-> { -> { 1 } }', 'safe navigation' => '-> { nil&.freeze }',
+    'frozen string identity' => "-> { 'shared' }"
+  }.each do |label, source|
+    file = File.join(dir, 'unsupported_lazy.rb')
+    prefix = label == 'frozen string identity' ? "# frozen_string_literal: true\n" : ''
+    File.write(file, "#{prefix}module Unsupported; captured = 1; TABLE = #{source}; end")
+    unsupported = LoadCompile.plan({'g' => [file]}, gem: 'g', drop_keys: Set.new, symbol: 'unsupported')
+    suite.check("a lambda needing #{label} stays residual", unsupported.stats[:role_residual].to_i.positive?)
+  end
+
+  if build
+    schema_files = ["#{ROOT_DIR}/mruby-lcf/mrblib/schema.rb", File.join(dir, 'empty_schema.rb')]
+    File.write(schema_files.last, '')
+    schema_plan = LoadCompile.plan({'g' => schema_files}, gem: 'g', drop_keys: Set.new, symbol: 'schema')
+    schema_residual = schema_files.to_h do |f|
+      [f, LoadCompile.apply(File.read(f), schema_plan.ranges.fetch(f), marker: f == schema_plan.last_file ? schema_plan.marker : nil)]
+    end
+    schema_dump = <<~'RUBY'
+      def schema_value(value)
+        case value
+        when Hash then value.map { |k, v| [schema_value(k), schema_value(v)] }
+        when Array then value.map { |v| schema_value(v) }
+        when Proc then schema_value(value.call)
+        else value
+        end
+      end
+      GC.start
+      schema_value(LCF::Schema.constants.sort.map { |name| [name, LCF::Schema.const_get(name)] }).inspect
+    RUBY
+    schema_status, schema_sections = equivalence(suite, dir, build, 'schema', schema_plan, schema_files, schema_residual, '', dump: schema_dump)
+    suite.check('all real schema constants and lazy tables match the interpreted load',
+                schema_status.success? && schema_sections['compiled'] == schema_sections['interpreted'] &&
+                schema_sections['compiled'] == schema_sections['ungated'] && !schema_sections['compiled'].to_a.empty?)
+  end
+
   # --- the real gems ----------------------------------------------------------------------------------------
   gems = {
     'mruby-lcf' => Dir["#{ROOT_DIR}/mruby-lcf/mrblib/*.rb"].sort,
@@ -661,11 +763,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   end
   # STAYS_BYTECODE: the statements of the engine's class bodies the compiled load leaves to the residual mrblib. A new
   # one is a decision (compile it, fold it to data, or list it here with the reason), not something a refactor adds.
-  stays = {
-    'LCF::Schema::COMMON_EVENT' => 'read by the DATABASE hash below, which is residual',
-    'LCF::Schema::DATABASE' => 'nested hash holding the `elements:` lambdas (a lambda is bytecode)',
-    'LCF::Schema::MAP_UNIT' => 'the same, with lambdas'
-  }
+  stays = {}
   found = []
   real_folded = []
   gems.each do |gem, fs|

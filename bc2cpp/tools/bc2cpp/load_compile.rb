@@ -706,10 +706,12 @@ module LoadCompile
     CALL = 16
     # An Integer past the 32-bit range: its decimal text in the string pool, parsed at load (mruby-bigint).
     BIG = 17
+    LAZY = 18
     # A call's arguments are decoded into one array of this size.
     MAX_CALL_ARGS = 8
 
-    def initialize(strings, tableless: Set.new)
+    def initialize(strings, tableless: Set.new, lazy_entries: [])
+      @lazy_entries = lazy_entries
       @strings = strings
       @tableless = tableless
     end
@@ -725,6 +727,7 @@ module LoadCompile
       when Prism::ArrayNode then node.elements.all? { |e| e.is_a?(Prism::SplatNode) ? e.expression && data?(e.expression) : data?(e) }
       when Prism::HashNode then node.elements.all? { |e| e.is_a?(Prism::AssocNode) && data?(e.key) && data?(e.value) }
       when Prism::RangeNode then (node.left.nil? || data?(node.left)) && (node.right.nil? || data?(node.right))
+      when Prism::LambdaNode then ClassBodyScan::Pure.literal_lambda?(node)
       when Prism::CallNode then freeze_call?(node) || call?(node)
       else false
       end
@@ -795,6 +798,13 @@ module LoadCompile
         out << RANGE << (node.exclude_end? ? 1 : 0)
         node.left ? encode(node.left, out) : out << NIL
         node.right ? encode(node.right, out) : out << NIL
+      when Prism::LambdaNode
+        payload = encode(node.body.body.first)
+        out << LAZY
+        varint(@lazy_entries.size, out)
+        @lazy_entries << "bc2cpp_ld_lazy#{@lazy_entries.size}"
+        varint(payload.size, out)
+        out.concat(payload)
       when Prism::CallNode
         if freeze_call?(node)
           out << FREEZE
@@ -1056,7 +1066,7 @@ module LoadCompile
 
   # The bytes of the statements of `ub`, appended to `out`.
   def program(ub, ctx, out)
-    blob = Blob.new(ctx[:strings], tableless: ctx[:tableless])
+    blob = Blob.new(ctx[:strings], tableless: ctx[:tableless], lazy_entries: ctx[:lazy_entries])
     run = []
     flush = lambda do
       next if run.empty?
@@ -1296,6 +1306,7 @@ module LoadCompile
     #include <mruby/class.h>
     #include <mruby/hash.h>
     #include <mruby/presym.h>
+    #include <mruby/proc.h>
     #include <mruby/range.h>
     #include <mruby/string.h>
     #include <mruby/variable.h>
@@ -1356,6 +1367,20 @@ module LoadCompile
         if (!(b & 0x80)) return v;
       }
     }
+    static mrb_value bc2cpp_ld_decode(mrb_state*, const bc2cpp_ld_scope*, const unsigned char**);
+    // Rebuild the captured lexical chain on the stack; no frame pointer outlives the call that created the Proc.
+    static mrb_value bc2cpp_ld_lazy_scopes(mrb_state* M, const unsigned char* p, mrb_value scopes,
+                                          mrb_int i, const bc2cpp_ld_scope* up) {
+      if (i < 0) return bc2cpp_ld_decode(M, up, &p);
+      const bc2cpp_ld_scope here = {mrb_class_ptr(mrb_ary_ref(M, scopes, i)), up};
+      return bc2cpp_ld_lazy_scopes(M, p, scopes, i - 1, &here);
+    }
+    static mrb_value bc2cpp_ld_lazy(mrb_state* M, mrb_value) {
+      mrb_get_args(M, "");
+      const unsigned char* p = static_cast<const unsigned char*>(mrb_cptr(mrb_proc_cfunc_env_get(M, 0)));
+      mrb_value scopes = mrb_proc_cfunc_env_get(M, 1);
+      return bc2cpp_ld_lazy_scopes(M, p, scopes, RARRAY_LEN(scopes) - 1, nullptr);
+    }
     // DATA_BLOB (tools/bc2cpp/load_compile.rb, Blob): the value a literal table's bytes spell, built as the VM's
     // OP_ARRAY, OP_HASH and OP_RANGE would, in the same order.
     static mrb_value bc2cpp_ld_decode(mrb_state* M, const bc2cpp_ld_scope* scope, const unsigned char** p) {
@@ -1376,6 +1401,17 @@ module LoadCompile
         return mrb_float_value(M, d);
       }
       case 5: return mrb_symbol_value(bc2cpp_ld_sym(M, bc2cpp_ld_varint(p)));
+      case 18: {
+        const unsigned entry = bc2cpp_ld_varint(p);
+        const unsigned n = bc2cpp_ld_varint(p);
+        mrb_value scopes = mrb_ary_new(M);
+        for (const bc2cpp_ld_scope* s = scope; s; s = s->up) mrb_ary_push(M, scopes, mrb_obj_value(s->klass));
+        mrb_value env[] = {mrb_cptr_value(M, const_cast<unsigned char*>(*p)), scopes};
+        struct RProc* proc = mrb_proc_new_cfunc_with_env(M, bc2cpp_ld_lazy_fns[entry], 2, env);
+        proc->flags |= MRB_PROC_STRICT | MRB_PROC_NOARG;
+        *p += n;
+        return mrb_obj_value(proc);
+      }
       case 17: {
         // An Integer past 32 bits: its decimal text, parsed as the VM's integer parse does (mruby-bigint).
         unsigned i = bc2cpp_ld_varint(p);
@@ -1549,7 +1585,7 @@ module LoadCompile
     files = world.fetch(gem)
     ranges = files.zip(mine).to_h { |file, root| [file, ranges_for(root)] }
     ctx = { legacy: [], subs: [], strings: {}, hooks: hook_defs(all), max_send: 1, register: early,
-            tableless: tableless_sends(unregistered) }
+            tableless: tableless_sends(unregistered), lazy_entries: [] }
     prog = []
     # One program for the gem: the files' top-level statements in load order (each ends with its own END).
     mine.each do |root|
@@ -1565,6 +1601,13 @@ module LoadCompile
       code << "static void bc2cpp_ld_fn(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c, unsigned i);\n"
     end
     code << string_pool(ctx[:strings])
+    code << "static mrb_value bc2cpp_ld_lazy(mrb_state*, mrb_value);\n"
+    # mruby compares native Procs by function pointer, so each source lambda needs a distinct entry.
+    ctx[:lazy_entries].each do |fn|
+      code << "static mrb_value #{fn}(mrb_state* M, mrb_value self) { return bc2cpp_ld_lazy(M, self); }\n"
+    end
+    entries = ctx[:lazy_entries].empty? ? ['nullptr'] : ctx[:lazy_entries]
+    code << "static const mrb_func_t bc2cpp_ld_lazy_fns[] = {#{entries.join(', ')}};\n"
     code << DECODER.gsub('@MAX_SEND_ARGS@', ctx[:max_send].to_s).gsub('@MAX_CALL_ARGS@', Blob::MAX_CALL_ARGS.to_s)
     code << ctx[:subs].join("\n") << "\n" unless ctx[:subs].empty?
     code << ctx[:legacy].join("\n\n") << "\n\n" unless ctx[:legacy].empty?

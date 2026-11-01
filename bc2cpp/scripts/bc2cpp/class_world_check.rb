@@ -4,8 +4,7 @@
 # Checks tools/bc2cpp/class_world.rb on what makes a class exact:
 #   folded   a computed constant PureEval folds (data built from literals) is static, as LoadCompile compiles it; it is
 #            listed under `folded` and is not a blocker
-#   refused  a computed constant that is not data (a lambda) or an Integer outside 32 bits stays a blocker, and its
-#            module stays unknown
+#   lazy     literal-data lambdas are native data factories and leave no class-body blocker
 #   core     RuntimeError is C-defined under StandardError (3rd/mruby/src/error.c): a class under it is exact when its
 #            own bodies are, and a DSL call that reopens RuntimeError makes it and its subclasses unknown
 #   real     the five classes the report listed as unknown, read from their mrblib files: what each one blocks on
@@ -111,10 +110,14 @@ audio = world_of(audio: RGSS_AUDIO).facts['RGSS::Audio']
 check.call('a module whose computed constant folds to Strings is exact', audio['exact'])
 check.call('its folded constant is listed as folded', folded_of(audio) == ['const_computed(SPELLINGS)'])
 
-# 3. A constant that holds a lambda is not data and is not folded: its module stays unknown.
+# 3. A literal-data lambda can be constructed natively without executing its body.
 schema = world_of(schema: SCHEMA_LAMBDA).facts['LCF::Schema']
-check.call('a constant holding a lambda is not folded, so its module stays unknown',
-           !schema['exact'] && blockers_of(schema) == ['const_computed(TABLE)'] && folded_of(schema).empty?)
+check.call('a literal-data lambda leaves its module exact without eager folding',
+           schema['exact'] && blockers_of(schema).empty? && folded_of(schema).empty?)
+
+unsafe = world_of(unsafe: "module Unsafe; TABLE = -> { Object.new }; end").facts['Unsafe']
+check.call('an executable lambda still leaves its module unknown',
+           !unsafe['exact'] && blockers_of(unsafe) == ['const_computed(TABLE)'])
 
 # 4. An Integer outside 32 bits folds too: it is built from its decimal text at load, so the module is exact.
 lcf = world_of(lcf: WIDE_INT).facts['LCF']
@@ -152,8 +155,8 @@ lcf_real = real.('mruby-lcf/mrblib/lcf.rb')
 check.call('real LCF: its three INT32 constants are no longer blockers',
            blockers_of(lcf_real['LCF']).none? { |b| b.include?('INT32') })
 schema_real = real.('mruby-lcf/mrblib/schema.rb')
-check.call('real LCF::Schema: DATABASE and MAP_UNIT (lambdas) stay blockers',
-           blockers_of(schema_real['LCF::Schema']) == %w[const_computed(DATABASE) const_computed(MAP_UNIT)])
+check.call('real LCF::Schema: lazy literal data leaves no class-body blockers',
+           blockers_of(schema_real['LCF::Schema']).empty? && schema_real['LCF::Schema']['exact'])
 rgss = real.('mruby-rgss/mrblib/lib.rb')
 check.call('real RGSS::Audio: EXT_SPELLINGS is a literal list, no blocker, nothing to fold',
            blockers_of(rgss['RGSS::Audio']).empty? && folded_of(rgss['RGSS::Audio']).empty?)
