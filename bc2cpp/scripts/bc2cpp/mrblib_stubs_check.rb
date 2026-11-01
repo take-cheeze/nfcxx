@@ -88,7 +88,7 @@ COMPILED = [
 
 suite.compile(SOURCE) do |ireps, root|
   registry = build_registry(ireps, root)[0]
-  stub = MrblibStubs.stubbable(COMPILED, ireps, registry)
+  stub, = MrblibStubs.stubbable(COMPILED, ireps, registry)
   suite.check('a plain compiled def is stubbable, though load-time code copies core objects (also self in a core method)',
               stub.include?('Game::Plain#run') && stub.include?('Game::Plain#copy'))
   suite.check('a body that runs while mrblib loads is not', !stub.include?('Game::Plain.singleton#boot'))
@@ -99,15 +99,15 @@ suite.compile(SOURCE) do |ireps, root|
   # The generation's registry no longer holds core defs it keeps interpreted: their bodies are still method bodies.
   filtered = registry.transform_values { |defs| defs.reject { |d| d.owner == 'Hash' } }
   suite.check('a core body the registry dropped runs only when called',
-              MrblibStubs.stubbable(COMPILED, ireps, filtered, registry).include?('Game::Plain#copy'))
+              MrblibStubs.stubbable(COMPILED, ireps, filtered, registry).first.include?('Game::Plain#copy'))
   # CORE_VISIBILITY: a compiled, registered entry with no registry def (its name a native shares) is judged by its one
   # bytecode def. A visibility the registration does not install keeps the body.
   no_run = registry.transform_values { |defs| defs.reject { |d| d.owner == 'Game::Plain' && d.name == 'run' } }
   hidden = ->(visibility) { [{ owner: 'Game::Plain', name: 'run', visibility: visibility }] }
   suite.check('a registered core def with no registry def is judged by its one bytecode def',
-              MrblibStubs.stubbable(hidden.(:public), ireps, no_run, registry).include?('Game::Plain#run'))
+              MrblibStubs.stubbable(hidden.(:public), ireps, no_run, registry).first.include?('Game::Plain#run'))
   suite.check('a def registration does not install keeps its body',
-              !MrblibStubs.stubbable(hidden.(:protected), ireps, no_run, registry).include?('Game::Plain#run'))
+              !MrblibStubs.stubbable(hidden.(:protected), ireps, no_run, registry).first.include?('Game::Plain#run'))
 end
 
 # A copy takes the symbol literals in its argument registers, not every symbol literal of the body: an attr_reader
@@ -149,7 +149,7 @@ COPY_COMPILED = [
 
 suite.compile(COPY_SOURCE) do |ireps, root|
   registry = build_registry(ireps, root)[0]
-  stub = MrblibStubs.stubbable(COPY_COMPILED, ireps, registry)
+  stub, = MrblibStubs.stubbable(COPY_COMPILED, ireps, registry)
   suite.check('a literal copy keeps only the copied def, not an unrelated symbol of the body',
               stub.include?('Pane#x') && !stub.include?('Pane#a'))
   suite.check('a copy whose argument is not a literal keeps every symbol literal of the body (a def named by one stays)',
