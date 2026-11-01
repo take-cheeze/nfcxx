@@ -644,9 +644,7 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   stays = {
     'LCF::Schema::COMMON_EVENT' => 'read by the DATABASE hash below, which is residual',
     'LCF::Schema::DATABASE' => 'nested hash holding the `elements:` lambdas (a lambda is bytecode)',
-    'LCF::Schema::MAP_UNIT' => 'the same, with lambdas',
-    'Array.alias_method sort!' => 'ORDER: holds the core sort!, a def of the same name follows',
-    'RGSS::Window.alias_method initialize' => 'ORDER: holds the native initialize, a def of the same name follows'
+    'LCF::Schema::MAP_UNIT' => 'the same, with lambdas'
   }
   found = []
   real_folded = []

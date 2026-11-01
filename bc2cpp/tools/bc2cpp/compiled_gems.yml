@@ -71,10 +71,8 @@ gems:
   mruby-rgss-compiled:
     # Same rules as above. Notes specific to RGSS:
     #
-    # - RGSS::Window runs `alias_method :_rgss1_initialize, :initialize`; that is
-    #   an SSEND, not OP_ALIAS, so the aliased name never enters the registry
-    #   under any owner. A call to an alias_method-defined name therefore always
-    #   stays ordinary dispatch (safe, just never devirtualized).
+    # - Native initialization captures RGSS::Window#_rgss1_initialize before
+    #   mrblib installs the Ruby geometry wrapper.
     # - RGSS::Graphics.singleton#brightness_sprite is private and compiles. mruby
     #   has no private class-method registration, so the generated
     #   bc2cpp_define_private_class_method installs it.
