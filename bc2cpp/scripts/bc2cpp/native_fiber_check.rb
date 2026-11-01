@@ -104,6 +104,10 @@ source << <<~'RUBY_SOURCE'
     e = NativeFiberSource.new.lazy.map { |x| x * 2 }.select { |x| x > 2 }.to_enum
     [e.next, e.next]
   end
+  show('instruction-looking string data') do
+    ['static const mrb_code pretend_iseq_0[2] = {0x00,0x00};',
+     'MRB_IREP_STATIC,pretend_iseq_0,']
+  end
   show('arity and parameters') do
     f = proc { |a, b = 1, *rest, key: 2, &block| }
     [f.arity, f.parameters]
@@ -226,7 +230,7 @@ abort "interpreted fixture failed:\n#{expected}" unless expected_status.success?
 end
 files = Dir[File.join(work, 'host/{mrblib,mrbgems}/**/*.c')]
 abort 'no generated programs to audit' if files.empty?
-retained = files.select { |file| File.read(file).match?(/static const mrb_code \w+_iseq_/) }
+retained = files.select { |file| File.read(file).match?(/^static const mrb_code \w+_iseq_/) }
 abort "retained instruction arrays: #{retained.join(', ')}" unless retained.empty?
 puts "  #{scenarios.size * 2} iterator scenarios plus nested calls, ensure, closures, catch/throw and Enumerator match"
 puts '  no bytecode instruction executed inside any Fiber'

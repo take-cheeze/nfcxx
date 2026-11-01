@@ -49,10 +49,11 @@ module NativeVM
     verify_schema!
     FileUtils.mkdir_p(dir)
     programs = []
-    source = source.gsub(/static const mrb_code (\w+)_iseq_(\d+)\[\d+\] = \{([^}]+)\};/m) do
+    # Only declarations can be rewritten; instruction-looking Ruby string data must remain opaque.
+    source = source.gsub(/^static const mrb_code (\w+)_iseq_(\d+)\[\d+\] = \{([^}]+)\};/m) do
       name, number, data = Regexp.last_match.captures
       symbol = "#{name}_irep_#{number}"
-      metadata = source.match(/static const mrb_irep #{Regexp.escape(symbol)} = \{\s*(\d+),(\d+),(\d+),.*?\n  (\d+),(\d+),(\d+),(\d+),0\s*\n\};/m)
+      metadata = source.match(/^static const mrb_irep #{Regexp.escape(symbol)} = \{\s*(\d+),(\d+),(\d+),.*?\n  (\d+),(\d+),(\d+),(\d+),0\s*\n\};/m)
       raise "missing native metadata for #{symbol}" unless metadata
 
       catches = metadata[3].to_i
@@ -73,9 +74,9 @@ module NativeVM
     programs.each do |program|
       symbol = program.fetch('symbol')
       native = symbol.sub('_irep_', '_native_')
-      source = source.sub(/(static const mrb_irep #{Regexp.escape(symbol)} = \{.*?\n  \d+,\d+,\d+,\d+,0)(\s*\n\};)/m) { "#{Regexp.last_match(1)},&#{native}#{Regexp.last_match(2)}" }
+      source = source.sub(/(^static const mrb_irep #{Regexp.escape(symbol)} = \{.*?\n  \d+,\d+,\d+,\d+,0)(\s*\n\};)/m) { "#{Regexp.last_match(1)},&#{native}#{Regexp.last_match(2)}" }
     end
-    source = source.gsub(/MRB_IREP_STATIC,\w+_iseq_\d+,/, 'MRB_IREP_STATIC,(const mrb_code*)(uintptr_t)1,')
+    source = source.gsub(/^  MRB_IREP_STATIC,\w+_iseq_\d+,/, '  MRB_IREP_STATIC,(const mrb_code*)(uintptr_t)1,')
     key = programs.find { |program| program['symbol'].end_with?('_irep_0') }.fetch('symbol')
     path = File.join(dir, "#{key}.json")
     temp = "#{path}.#{Process.pid}.tmp"
