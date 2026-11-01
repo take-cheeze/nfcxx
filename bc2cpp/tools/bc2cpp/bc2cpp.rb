@@ -2224,7 +2224,10 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_instance_tt_setup(compiled)
   print gen.emit_core_guard_helpers(compiled)
   # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed.
-  gen.prepare_index_helpers(compiled)
+  # helper_codes, not compiled: a helper only the load names must be built
+  # before reserve_poly_table_slots too (building allocates OWNER_CLASS_CACHE
+  # slots), not when emit_index_helpers below re-runs the prepare.
+  gen.prepare_index_helpers(helper_codes)
   gen.reserve_poly_table_slots(compiled)
   gen.reserve_numeric_slow_ruby_arm_slots
   print gen.emit_owner_class_cache

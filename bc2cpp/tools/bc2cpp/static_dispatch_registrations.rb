@@ -129,7 +129,29 @@ module StaticDispatchRegistrations
     planner = index_planner(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
     return {} unless planner
 
-    INDEX_PROVEN_NAMES.to_h { |name| [name, !planner.plan(name).nil?] }
+    INDEX_PROVEN_NAMES.to_h { |name| [name, !planner.plan(name).nil? && index_send_shaped?(ireps, name)] }
+  end
+
+  # INDEX_SEND_SHAPE: the planner proves which classes can answer the name,
+  # but the generator only devirtualizes the helper shapes -- `[]` with one
+  # argument (the GETIDX/GETIDX0 opcodes and the loader's tableless routes),
+  # `[]=` with two (`a[i] = v`, OP_SETIDX and the loader's routes). A generic
+  # OP_SEND of the name (two indices, a splat, a block, an explicit `.[]`)
+  # has no devirtualization: with the name out of the tables its by-name
+  # fallback raises NoMethodError. Refuse the name while the closed world's
+  # bytecode holds such a send, so a regression fails safe (tables intact)
+  # instead of shipping the raise. The loader's own routes are downstream of
+  # the same sources (LoadCompile.tableless_call handles exactly the helper
+  # arities), so engine sources without such sends have no other path to one.
+  def index_send_shaped?(ireps, name)
+    ireps.each_value do |irep|
+      BytecodeIR.for(irep).each_source do |insn, _|
+        next unless BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && insn.sym.to_s == name
+
+        return false
+      end
+    end
+    true
   end
 
   # A planner over the closed world the proof already holds: the engine's

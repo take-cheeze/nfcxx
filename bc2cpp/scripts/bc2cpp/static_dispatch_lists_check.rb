@@ -126,6 +126,35 @@ suite.check('without the verdict operators stay dynamic', none == Set['Game::Var
 partial = sdr.eligible(analysis.call({ '[]' => true, '[]=' => false })).to_set { |m| "#{m[:owner]}##{m[:name]}" }
 suite.check('a refused operator stays dynamic', partial == Set['Game::Variables#[]', 'Game::Variables#kept'])
 
+# INDEX_SEND_SHAPE (tools/bc2cpp/static_dispatch_registrations.rb): a generic
+# OP_SEND of the name refuses the verdict even when the planner proves its
+# classes, while helper-shaped sends (GETIDX for 1-argument `[]`) pass.
+SHAPED_SOURCE = <<~'RUBY'
+  class VShape
+    def register_index(s, i)
+      s[i]
+    end
+    def literal_index(s)
+      s[0]
+    end
+    def two_indices(s)
+      s[0, 1]
+    end
+    def store(s, v)
+      s[0] = v
+    end
+  end
+RUBY
+suite.check('a generic two-argument `[]` send refuses the shape gate, helper-shaped sends pass',
+            (begin
+              shaped = nil
+              suite.compile(SHAPED_SOURCE) do |ireps, _root|
+                shaped = [StaticDispatchRegistrations.index_send_shaped?(ireps, '[]'),
+                          StaticDispatchRegistrations.index_send_shaped?(ireps, '[]=')]
+              end
+              shaped == [false, true]
+            end))
+
 # CORE_NATIVE_CANDIDATES: the same verdict admits proven operators to the ROM
 # and RAM candidate lists.
 cnc = CoreNativeCandidates
