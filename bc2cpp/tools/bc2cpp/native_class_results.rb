@@ -28,7 +28,8 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
     'mruby-rgss/src/lib.cxx' => %w[664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e 24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c
                                  0dc8534bc7cabd36a10818deedd7559a61691dee1bf23d5e05febf11e3ca202e
-                                 105657191ab86f45ba563ddf8e5818c1cb5a912d7cfce02c7b6ffe32a2a5f12b]
+                                 105657191ab86f45ba563ddf8e5818c1cb5a912d7cfce02c7b6ffe32a2a5f12b
+                                 eda898bc7ee051089bbba85bdb74f7cd4f892966c8df49a687ea7f7c9d570eb0]
   }.freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
   FACTS = {
