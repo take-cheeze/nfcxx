@@ -127,6 +127,9 @@ module MrblibStubs
       elsif reason == 'runs at load' && early && (spec = early_register(m, key, defs, root_sites))
         spec[:sites].each { |site| register[site] << spec[:def] }
         key
+      elsif reason == 'copy by name' && early && (spec = early_register_copy(m, key, defs, copy_sites[m[:name]], ireps))
+        spec[:sites].each { |site| register[site] << spec[:def] }
+        key
       else
         stub_keep_log(key, reason)
         nil
@@ -135,8 +138,28 @@ module MrblibStubs
     [dropped, register]
   end
 
-  # The register spec of a compiled method the load runs: { sites: [[file, line], ...], def: {...} }, or nil when it
-  # has no entry to install or the load reaches it from no class-body statement.
+  # EARLY_REGISTER for `copy by name`: a copying send (an `alias`, or a send naming a COPYING_SENDS method) takes the
+  # source's method object when it runs. When every copy site is in this generation's own sources, the compiled method
+  # can be installed just before it; the planner keeps the def if a site is not a statement it compiles.
+  def early_register_copy(m, key, defs, sites, ireps)
+    return nil unless m[:entry] && m[:aspec] && REGISTERED_VISIBILITY.include?(m[:visibility])
+    return nil unless defs.size == 1
+
+    d = defs.first
+    return nil if d.irep.nil? || d.kind || d.installer || d.copy_irep
+    return nil if sites.nil? || sites.empty?
+    # Only the defining class body guarantees that the owner exists and the source-order check covers its def.
+    return nil unless sites.all? { |owner, _file, _line| owner == m[:owner] }
+
+    own = ireps.each_value.filter_map(&:file).to_set
+    positions = sites.map { |_owner, file, line| [file, line] }
+    return nil unless positions.all? { |file, line| line && own.include?(file) }
+
+    { sites: positions.uniq, def: { def_key: key, owner: m[:owner], name: m[:name], entry: m[:entry],
+                                    aspec: m[:aspec], visibility: m[:visibility] } }
+  end
+
+  # The register spec of a compiled method reached from a class-body statement, or nil without such a site.
   def early_register(m, key, defs, root_sites)
     return nil unless m[:entry] && m[:aspec] && REGISTERED_VISIBILITY.include?(m[:visibility])
     return nil unless defs.size == 1
@@ -197,7 +220,7 @@ module MrblibStubs
     paths
   end
 
-  # { name => [class path String or :unknown, ...] }: the receiver of every site that may copy `name`.
+  # { name => [[class path String or :unknown, file, line], ...] }: every site that may copy `name`.
   def copy_sites(ireps, parent)
     paths = class_body_paths(ireps, parent)
     sites = Hash.new { |h, k| h[k] = [] }
@@ -206,7 +229,7 @@ module MrblibStubs
       ir = BytecodeIR.for(irep)
       ir.instructions_with_op(:ALIAS).each do |insn|
         old = insn.first_of(:name)&.value
-        sites[old.to_s] << own if old
+        sites[old.to_s] << [own, irep.file, insn.lineno] if old
       end
       copies = ir.instructions_with_op(*BytecodeIR::Ops::SEND).select { |insn| COPYING_SENDS.include?(insn.sym.to_s) }
       next if copies.empty?
@@ -214,7 +237,9 @@ module MrblibStubs
       self_copy = own != :unknown && copies.all? do |insn|
         BytecodeIR::Ops::SELF_SEND.include?(insn.op) && COPY_FROM_SELF.include?(insn.sym.to_s)
       end
-      ir.instructions_with_op(:LOADSYM).each { |insn| sites[insn.sym.to_s] << (self_copy ? own : :unknown) }
+      ir.instructions_with_op(:LOADSYM).each do |insn|
+        sites[insn.sym.to_s] << [(self_copy ? own : :unknown), irep.file, insn.lineno]
+      end
     end
     sites
   end
@@ -226,7 +251,7 @@ module MrblibStubs
     return true if world.nil? || sites.nil? || sites.empty? || !receiver_rule_name?(name)
 
     class_owner = class_owner?(owner, world)
-    sites.any? do |site|
+    sites.any? do |site, _file, _line|
       next true if site == :unknown || world.facts[site].nil?
       # A class is an ancestor only through a superclass link, and a run-time include adds modules, never a superclass:
       # for a class owner the static superclass chain is enough.

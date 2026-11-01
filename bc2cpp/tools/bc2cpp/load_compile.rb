@@ -206,7 +206,7 @@ module LoadCompile
   # its place among the residual defs. A def that comes earlier, with a statement that defines the same name
   # (`def a; end` then `attr_reader :a`), is kept too (`order_pins`), or the compiled gem would install it over the
   # statement's. Sources are walked in the world's order: gems in order, files in order, statements in order.
-  def order!(roots)
+  def order!(roots, register: {})
     seq = 0
     defs = Hash.new { |h, k| h[k] = [] }
     sends = []
@@ -231,8 +231,12 @@ module LoadCompile
     sends.each do |owner, item, at|
       next if item.ordered || !%w[attr attr_reader attr_writer attr_accessor alias_method].include?(item.stmt.node.is_a?(Prism::AliasMethodNode) ? 'alias_method' : item.stmt.node.name.to_s)
 
-      taken_names(item.stmt.node).each do |n|
+      installed = register.fetch([item.stmt.file, item.stmt.node.location.start_line], []).map { |spec| spec[:def_key] }.to_set
+      taken_names(item.stmt.node).each_with_index do |n, index|
         key = "#{owner}##{n}"
+        next if index == 1 && installed.include?(key) &&
+                (item.stmt.node.is_a?(Prism::AliasMethodNode) || item.stmt.node.name == :alias_method)
+
         @order_pins << key if defs[key].any? { |d| d < at }
       end
     end
@@ -278,8 +282,8 @@ module LoadCompile
   end
 
   # Fix the roles that must stay residual, over every root of the world (all gems), until nothing changes.
-  def promote!(roots)
-    order!(roots)
+  def promote!(roots, register: {})
+    order!(roots, register: register)
     needed = Set.new
     seed = lambda do |ub|
       # The header of a body whose text may stay (it has a def, a residual statement or a header the compiler cannot
@@ -327,7 +331,7 @@ module LoadCompile
   # (`graph`), the source of an alias copy (`alias new old`, `alias_method :new, :old`) pins only the defs of the
   # ancestors of the body it sits in (`sites`, by name: each body's Owner, or :unknown); the new name still pins by
   # name. Without a graph every named symbol pins by name, as before.
-  def pinned_names(roots, graph = nil)
+  def pinned_names(roots, graph = nil, register: {})
     # A hook must exist when the statement it observes runs (HOOK_DEFS).
     names = Set.new(HOOK_DEFS)
     sites = Hash.new { |h, k| h[k] = [] }
@@ -340,17 +344,23 @@ module LoadCompile
           next if item.role == :dead
 
           node = item.stmt.node
+          installed = register.fetch([item.stmt.file, node.location.start_line], []).map { |spec| spec[:name] }.to_set
           body = %i[class module].include?(ub.body.kind) && !ub.body.path.end_with?('.singleton') ? ub.body.path : :unknown
           if node.is_a?(Prism::AliasMethodNode)
             names << node.new_name.unescaped
-            receiver_rule_name?(node.old_name.unescaped, graph) ? sites[node.old_name.unescaped] << body : names << node.old_name.unescaped
+            unless installed.include?(node.old_name.unescaped)
+              receiver_rule_name?(node.old_name.unescaped, graph) ? sites[node.old_name.unescaped] << body : names << node.old_name.unescaped
+            end
           elsif NEEDS_EXISTING.include?(node.name.to_s)
             args = (node.arguments&.arguments || []).select { |arg| arg.is_a?(Prism::SymbolNode) || arg.is_a?(Prism::StringNode) }
             if node.name.to_s == 'alias_method' && args.size == 2 && receiver_rule_name?(args[1].unescaped, graph)
               names << args[0].unescaped
-              sites[args[1].unescaped] << body
+              sites[args[1].unescaped] << body unless installed.include?(args[1].unescaped)
             else
-              args.each { |arg| names << arg.unescaped }
+              args.each_with_index do |arg, index|
+                copied = node.name.to_s == 'module_function' || (node.name.to_s == 'alias_method' && index == 1 && args.size == 2)
+                names << arg.unescaped unless copied && installed.include?(arg.unescaped)
+              end
             end
           end
         end
@@ -1455,9 +1465,10 @@ module LoadCompile
     build = lambda do |keys|
       roots = world.transform_values { |files| files.map { |f| build_root(f, statements: statements) } }
       all = roots.values.flatten
-      promote!(all)
+      active_register = register.transform_values { |specs| specs.select { |spec| keys.include?(spec[:def_key]) } }
+      promote!(all, register: active_register)
       mark_dead!(roots.fetch(gem), all, keys, unregistered) if statements
-      pinned, sites = pinned_names(all, graph)
+      pinned, sites = pinned_names(all, graph, register: active_register)
       decide!(roots.fetch(gem), keys, pinned, stay: !statements, sites: sites, graph: graph)
       path_form!(roots.fetch(gem), all, enabled: statements)
       [roots, all]
@@ -1466,9 +1477,13 @@ module LoadCompile
     # EARLY_REGISTER: a method is installed at the class-body statement the load runs it from. A use this program
     # does not compile (a residual statement, or another gem's body) keeps its def: narrow and plan again.
     early = early_registers(roots.fetch(gem), register)
-    unregistered_early = register.values.flatten.map { |s| s[:def_key] }.to_set -
-                         early.values.flatten.map { |s| s[:def_key] }.to_set
-    if unregistered_early.any? && (drop_keys - unregistered_early) != drop_keys
+    loop do
+      unregistered_early = register.each_with_object(Set.new) do |(site, specs), missing|
+        installed = early.fetch(site, []).map { |s| s[:def_key] }.to_set
+        specs.each { |spec| missing << spec[:def_key] unless installed.include?(spec[:def_key]) }
+      end
+      break if (drop_keys & unregistered_early).empty?
+
       drop_keys -= unregistered_early
       roots, all = build.call(drop_keys)
       early = early_registers(roots.fetch(gem), register)
