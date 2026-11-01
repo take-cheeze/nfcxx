@@ -1060,6 +1060,14 @@ module LoadCompile
       run.clear
     end
     ub.items.each do |item|
+      # EARLY_REGISTER: install a method this statement runs, just before it.
+      if (specs = ctx[:register][[item.stmt.file, item.stmt.node.location.start_line]])
+        flush.call
+        specs.each do |spec|
+          out << (OP_SCLASS | FN_FLAG)
+          blob.varint(register_fn(spec, ctx), out)
+        end
+      end
       # What emits nothing (a def, a mode, a residual statement) does not end a run of constants.
       next if %i[def mode residual dead].include?(item.role)
 
@@ -1137,6 +1145,59 @@ module LoadCompile
   # scope and class. A class statement runs its body's program through bc2cpp_ld_run. These are the statements a
   # hook could observe and the ones with a shape the bytes have no room for (a send of more than MAX_SEND_ARGS
   # arguments, a call of more than MAX_CALL_ARGS): none in the engine today.
+  # EARLY_REGISTER: a compiled method the class program installs itself, at the class-body statement the load runs
+  # it from, so it exists before that statement and the compiled gem's own registrations (which run after the load).
+  # The owner is resolved by its absolute path: the statement need not be in the owner's own body.
+  def register_fn(spec, ctx)
+    index = ctx[:legacy].size
+    ctx[:legacy] << nil
+    owner = spec[:owner].delete_suffix('.singleton')
+    path = owner.split('::')
+    target = spec[:owner].end_with?('.singleton') ? 'mrb_singleton_class(M, mrb_obj_value(oc))' : 'oc'
+    define = { public: 'mrb_define_method', private: 'mrb_define_private_method' }.fetch(spec[:visibility], 'mrb_define_method')
+    ctx[:legacy][index] = <<~CPP.chomp
+      static void bc2cpp_ld_fn#{index}(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c) {
+        (void)up; (void)c;
+        static const char* const path[] = {#{path.map { |p| cstr(p) }.join(', ')}};
+        struct RClass* oc = bc2cpp_ld_owner(M, path, #{path.size});
+        #{define}(M, #{target}, #{cstr(spec[:name])}, #{spec[:entry]}, #{spec[:aspec]});
+      }
+    CPP
+    index
+  end
+
+  # The owner-class lookup a register step uses: a class or module by its absolute path.
+  LD_OWNER = <<~'CPP'
+    static struct RClass* bc2cpp_ld_owner(mrb_state* M, const char* const* path, int n) {
+      mrb_value v = mrb_obj_value(M->object_class);
+      for (int i = 0; i < n; ++i) v = mrb_const_get(M, v, mrb_intern_cstr(M, path[i]));
+      return mrb_class_ptr(v);
+    }
+  CPP
+
+  # The register specs whose use site is a statement this program compiles, and whose def was dropped.
+  def early_registers(roots, register)
+    return {} if register.empty?
+
+    at = {}
+    dropped = Set.new
+    roots.each do |root|
+      each_ubody(root) do |ub|
+        ub.items.each do |i|
+          at[[i.stmt.file, i.stmt.node.location.start_line]] = i
+          dropped << i.def_key if i.role == :def && i.dropped && i.def_key
+        end
+      end
+    end
+    register.each_with_object({}) do |(site, specs), out|
+      item = at[site]
+      next unless item && %i[nested const ivar send alias].include?(item.role)
+
+      keep = specs.select { |s| dropped.include?(s[:def_key]) }
+      out[site] = keep unless keep.empty?
+    end
+  end
+
   def legacy_fn(item, ctx)
     # Reserved first: a class statement's body can hold statements of its own that are C++ too.
     index = ctx[:legacy].size
@@ -1446,18 +1507,33 @@ module LoadCompile
   #   gem:       the gem whose output this is
   #   drop_keys: Owner#name keys of this gem's defs the stub proof lets go (MrblibStubs.stubbable)
   #   symbol:    the compiled gem's out_symbol (names the function and the marker)
-  def plan(world, gem:, drop_keys:, symbol:, statements: true, unregistered: Set.new, graph: nil)
-    roots = world.transform_values { |files| files.map { |f| build_root(f, statements: statements) } }
-    all = roots.values.flatten
-    promote!(all)
-    mark_dead!(roots.fetch(gem), all, drop_keys, unregistered) if statements
-    pinned, sites = pinned_names(all, graph)
-    decide!(roots.fetch(gem), drop_keys, pinned, stay: !statements, sites: sites, graph: graph)
-    path_form!(roots.fetch(gem), all, enabled: statements)
+  def plan(world, gem:, drop_keys:, symbol:, statements: true, unregistered: Set.new, graph: nil, register: {})
+    drop_keys = drop_keys.to_set
+    build = lambda do |keys|
+      roots = world.transform_values { |files| files.map { |f| build_root(f, statements: statements) } }
+      all = roots.values.flatten
+      promote!(all)
+      mark_dead!(roots.fetch(gem), all, keys, unregistered) if statements
+      pinned, sites = pinned_names(all, graph)
+      decide!(roots.fetch(gem), keys, pinned, stay: !statements, sites: sites, graph: graph)
+      path_form!(roots.fetch(gem), all, enabled: statements)
+      [roots, all]
+    end
+    roots, all = build.call(drop_keys)
+    # EARLY_REGISTER: a method is installed at the class-body statement the load runs it from. A use this program
+    # does not compile (a residual statement, or another gem's body) keeps its def: narrow and plan again.
+    early = early_registers(roots.fetch(gem), register)
+    unregistered_early = register.values.flatten.map { |s| s[:def_key] }.to_set -
+                         early.values.flatten.map { |s| s[:def_key] }.to_set
+    if unregistered_early.any? && (drop_keys - unregistered_early) != drop_keys
+      drop_keys -= unregistered_early
+      roots, all = build.call(drop_keys)
+      early = early_registers(roots.fetch(gem), register)
+    end
     mine = roots.fetch(gem)
     files = world.fetch(gem)
     ranges = files.zip(mine).to_h { |file, root| [file, ranges_for(root)] }
-    ctx = { legacy: [], subs: [], strings: {}, hooks: hook_defs(all), max_send: 1,
+    ctx = { legacy: [], subs: [], strings: {}, hooks: hook_defs(all), max_send: 1, register: early,
             tableless: tableless_sends(unregistered) }
     prog = []
     # One program for the gem: the files' top-level statements in load order (each ends with its own END).
@@ -1468,6 +1544,7 @@ module LoadCompile
     prog << OP_END
     marker = "#{MARKER_PREFIX}#{symbol}"
     code = String.new(PRELUDE)
+    code << LD_OWNER unless early.empty?
     unless ctx[:legacy].empty?
       code << "#define BC2CPP_LD_FNS 1\n"
       code << "static void bc2cpp_ld_fn(mrb_state* M, const bc2cpp_ld_scope* up, struct RClass* c, unsigned i);\n"
@@ -1544,7 +1621,7 @@ module LoadCompile
   # BC2CPP_LOAD_COMPILE: `off` (no plan), `defs` (the residual drops the defs the stub proof lets go and nothing else:
   # no load code, no marker) or `all` (the default: statements compiled too). BC2CPP_LOAD_WORLD: {out_symbol => the gem's mrblib
   # files, as the build loads them}; one build's compiled gems analyse the same world. Nil when off or no world.
-  def plan_for_env(env, symbol:, drop_keys:, unregistered: Set.new)
+  def plan_for_env(env, symbol:, drop_keys:, unregistered: Set.new, register: {})
     mode = env.fetch('BC2CPP_LOAD_COMPILE', 'all')
     raise "BC2CPP_LOAD_COMPILE: #{mode.inspect} is not off, defs or all" unless %w[off defs all].include?(mode)
     return nil if mode == 'off' || !env['BC2CPP_LOAD_WORLD']
@@ -1553,7 +1630,7 @@ module LoadCompile
     return nil unless world.key?(symbol)
 
     plan(world, gem: symbol, drop_keys: drop_keys, symbol: symbol, statements: mode == 'all', unregistered: unregistered,
-         graph: ClassWorld.from_load_world(env['BC2CPP_LOAD_WORLD']))
+         graph: ClassWorld.from_load_world(env['BC2CPP_LOAD_WORLD']), register: register)
   end
 
   def write_plan(path, result)
