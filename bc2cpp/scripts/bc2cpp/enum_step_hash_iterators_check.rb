@@ -7,7 +7,8 @@
 # it was: each iterator's own saved bytecode. Hash#each_pair is an alias copy of each and keeps its own body.
 #
 #   generated code (needs a host mrbc)
-#     - flag set: each of the three registers through bc2cpp_enum_step_save with its driver, and no longer saves its body;
+#     - flag set: each_key and each_value register through bc2cpp_enum_step_save with their drivers; each has a resumable
+#       variant (RESUMABLE_DUAL) and no driver;
 #     - flag at 0: no driver text, and each keeps its own saved body.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - the interpreted run (mruby's own iterators) and the compiled run (the drivers, flag set) print the same over
@@ -81,7 +82,7 @@ DRIVER = <<~'RUBY'
     "StopIteration result=#{s.result.class}"
   end
 
-  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} drivers=#{Hash.private_instance_methods.include?(:__bc2cpp_each_driver)}"
+  puts "mode: #{$bc2cpp_compiled ? 'compiled' : 'interpreted'} drivers=#{Hash.private_instance_methods.include?(:__bc2cpp_each_key_driver)}"
 
   h = { a: 1, b: 2 }
   show('each pairs') { acc = []; h.each { |k, v| acc << [k, v] }; acc }
@@ -131,7 +132,7 @@ off_dir = File.join(dir, 'off')
 FileUtils.mkdir_p([on_dir, off_dir])
 on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
-check.call('flag set: Hash#each registers through bc2cpp_enum_step_save with its driver', on_code.match?(EACH_SAVE))
+check.call('flag set: Hash#each has no enum-step save: its guard calls a resumable variant', !on_code.match?(EACH_SAVE) && on_code.include?('Hash_each_rsm_impl('))
 check.call('flag set: Hash#each_key registers through bc2cpp_enum_step_save with its driver', on_code.match?(EACH_KEY_SAVE))
 check.call('flag set: Hash#each_value registers through bc2cpp_enum_step_save with its driver', on_code.match?(EACH_VALUE_SAVE))
 check.call('flag set: no iterator saves its own body', !on_code.match?(PLAIN_EACH) && !on_code.match?(PLAIN_EACH_KEY) && !on_code.match?(PLAIN_EACH_VALUE))

@@ -2,6 +2,5 @@
 # have. scripts/bc2cpp/host_sweep.bash fails above it and says when to lower it. A rise is a deliberate edit:
 # the static dispatch lists are computed from the sources (docs/bc2cpp-unregistered-methods.md), so this file is
 # where a table that grew shows up.
-# 1142: the Array#each resumable variant (RESUMABLE_DUAL) makes the closed build define the Bc2cppResumable driver module
-# and its Frame class at gem init (codegen_emit.rb, bc2cpp_resumable_init). Those are four method entries the variant needs.
-1142
+
+1126

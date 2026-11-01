@@ -185,8 +185,8 @@ FileUtils.mkdir_p([on_dir, off_dir])
 on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
 check.call('flag set: Array#each has no enum-step save', !on_code.match?(STEP_SAVE))
-check.call('flag set: the guard calls the resumable variant with the entry block',
-           on_code.include?('return Array_each_rsm_impl(M, self, bc2cpp_entry_block(M));'))
+check.call('flag set: the guard calls the resumable variant with the call arguments',
+           on_code.match?(/if \(mrb_unlikely\(.*\)\) return Array_each_rsm_impl\(M, self, bc2cpp_blk\);/))
 check.call('flag set: the resumable variant step is emitted', on_code.include?('static mrb_value Array_each_rsm_step('))
 check.call('flag set: Array#each no longer saves its own body', !on_code.match?(PLAIN_SAVE))
 check.call('flag unset: no step text is emitted', !off_code.include?('bc2cpp_each_step') && !off_code.include?('bc2cpp_enum_step'))
