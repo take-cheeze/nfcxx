@@ -15,6 +15,8 @@ puts '== vm/bytecode free check =='
 env = ENV.to_h
 output, status = Open3.capture2e(env, 'ruby', File.join(ROOT, 'scripts/bc2cpp/native_fiber_check.rb'), chdir: ROOT)
 File.write('/tmp/vm_bytecode_free_check.log', output)
+STDOUT.puts output
+STDOUT.flush
 unless status.success?
   abort "native_fiber_check failed:\n#{output.lines.last(40).join}"
 end
