@@ -136,9 +136,9 @@ off_dir = File.join(dir, 'off')
 FileUtils.mkdir_p([on_dir, off_dir])
 on_code, on_err = generate_with(true, on_dir)
 off_code, = generate_with(false, off_dir)
-check.call('flag set: Integer#times registers through bc2cpp_enum_step_save with its driver', on_code.match?(TIMES_SAVE))
-check.call('flag set: Integer#upto registers through bc2cpp_enum_step_save with its driver', on_code.match?(UPTO_SAVE))
-check.call('flag set: Integer#downto registers through bc2cpp_enum_step_save with its driver', on_code.match?(DOWNTO_SAVE))
+check.call('flag set: Integer#times has no enum-step save (its resumable variant replaces the driver)', !on_code.match?(TIMES_SAVE))
+check.call('flag set: Integer#upto has no enum-step save (its resumable variant replaces the driver)', !on_code.match?(UPTO_SAVE))
+check.call('flag set: Integer#downto has no enum-step save (its resumable variant replaces the driver)', !on_code.match?(DOWNTO_SAVE))
 check.call('flag set: no loop saves its own body', !on_code.match?(PLAIN_TIMES) && !on_code.match?(PLAIN_UPTO) && !on_code.match?(PLAIN_DOWNTO))
 check.call('flag at 0: no driver text is emitted', !off_code.include?('__bc2cpp_times_driver') && !off_code.include?('__bc2cpp_downto_driver'))
 check.call('flag at 0: each loop keeps its own saved body', off_code.match?(PLAIN_TIMES) && off_code.match?(PLAIN_UPTO) && off_code.match?(PLAIN_DOWNTO))
@@ -172,7 +172,7 @@ else
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run has no drivers', mode_line.call(interpreted)&.end_with?('drivers=false'))
-  check.call('the compiled run registers the drivers on Integer', mode_line.call(compiled)&.end_with?('drivers=true'))
+  check.call('the compiled run installs no runtime-compiled driver on Integer', mode_line.call(compiled)&.end_with?('drivers=false'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled

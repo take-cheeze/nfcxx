@@ -1083,9 +1083,17 @@ module StaticDispatchRegistrations
   # Not dup or clone: they copy an object that already exists, so the first engine instance comes from one of these.
   INSTANTIATING = %w[new allocate load _load marshal_load].freeze
   ENGINE_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\z)/
+  # The method name an arithmetic or comparison instruction stands for: a receiver that is not a number runs it as
+  # this send.
+  ARITH_OP_SYMBOLS = { ADD: '+', SUB: '-', MUL: '*', DIV: '/', EQ: '==', LT: '<', LE: '<=', GT: '>', GE: '>=' }.freeze
+  # NON_CLASS_OPERATORS: binary operators the closed world defines natively in mruby core only, which answer a
+  # number, a boolean, an Array or a String -- never a class or module. A receiver they build cannot be the
+  # class/module a singleton method is called on (:non_class in load_phase).
+  NON_CLASS_OPERATORS = %w[| & ^ + - * / % ** << >> <=> == != < <= > >=].to_set.freeze
 
   # The receiver kind of every instruction of `irep` that sends (nil for the rest): [:const, Name] | :core (a
-  # literal) | :self | :unknown. The kind is the one every definition reaching the receiver register agrees on
+  # literal) | :self | [:operator, op] (a binary operator's result) | :unknown. The kind is the one every definition
+  # reaching the receiver register agrees on
   # A register a nested block writes (SETUPVAR) is opaque to that query,
   # so its send is :unknown rather than the kind of the local write.
   def receiver_kinds(irep)
@@ -1118,7 +1126,11 @@ module StaticDispatchRegistrations
     case insn.op
     when :GETCONST, :GETMCNST then [:const, insn.const_name.to_s]
     when :LOADSELF then :self
-    else BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || LITERAL_OPS.include?(insn.op) ? :core : :unknown
+    else
+      return [:operator, ARITH_OP_SYMBOLS[insn.op]] if ARITH_OP_SYMBOLS.key?(insn.op)
+      return [:operator, insn.sym.to_s] if SEND_OPS.include?(insn.op) && NON_CLASS_OPERATORS.include?(insn.sym.to_s)
+
+      BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || LITERAL_OPS.include?(insn.op) ? :core : :unknown
     end
   end
 
@@ -1177,6 +1189,9 @@ module StaticDispatchRegistrations
         names << name
         recv = recvs[idx]
         recv = self_kind if recv == :self
+        # A value built by a binary operator with no bytecode definition in the world comes from a native core
+        # operator, which answers no class or module: an engine singleton method cannot be its target.
+        recv = :non_class if recv.is_a?(Array) && recv[0] == :operator && by_name[recv[1]].empty?
         if INSTANTIATING.include?(name) &&
            (recv == :unknown || recv == :instance || (recv.is_a?(Array) && instance_owners.include?(recv[1])))
           engine_live = true
@@ -1185,6 +1200,7 @@ module StaticDispatchRegistrations
           case recv
           when :class, Array then singleton.call(owner) || core.call(owner)
           when :core then core.call(owner)
+          when :non_class then !singleton.call(owner)
           when :instance then !singleton.call(owner)
           else singleton.call(owner) || core.call(owner) || (engine_live && engine_instance.call(owner))
           end

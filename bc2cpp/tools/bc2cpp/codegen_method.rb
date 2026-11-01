@@ -137,6 +137,15 @@ class CodeGen
         @core_program_world = nil
       end
     end
+    # RESUMABLE_DUAL: a direct-yield core method is also compiled as a resumable step (a variant under _rsm). The
+    # guard inside a Fiber calls the variant rather than saved bytecode, so the method keeps no saved body and no
+    # enum-step driver. The variant is compiled first, so the guard can name it.
+    if !@rsm_variant && rsm_dual?(label, d)
+      budget = @ir_inline_remaining
+      @rsm_variants ||= {}
+      @rsm_variants[label] = compile_rsm_variant(label, d)
+      @ir_inline_remaining = budget
+    end
     @compiling_core = d.core ? true : false
     enter = irep.enter
     mand = enter ? enter.enter_fields.first : 0
@@ -231,13 +240,15 @@ class CodeGen
     fiber_guarded = false
     # RECEIVER_ROOTS: a fiber root that yields to its block takes the resumable form too (its entry is the same body).
     yielding_root = @fiber_roots&.include?(label) && BytecodeIR.for(irep).instructions_with_op(:BLKCALL).any?
-    if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root
+    # RESUMABLE_DUAL: a method with a variant keeps the fast body, and its guard calls the variant.
+    dual = !@rsm_variant && !rsm_variant_code(label).empty?
+    if !dual && (calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root || @rsm_variant)
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
       # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
       # outright -- unless it is a Fiber.new root that qualifies as a resumable step
       # function, or its own body cannot suspend, in which
       # case it compiles behind a run-time hand-off.
-      plan = resumable_plan(label)
+      plan = @rsm_variant ? build_resumable_plan(label) : resumable_plan(label)
       if plan.is_a?(ResumablePlan)
         resumable = plan
       elsif fiber_body_guard?(label, d)
@@ -286,7 +297,7 @@ class CodeGen
       arg_params << "mrb_value #{kwarg_param_name(kw[:name])}"
       arg_params << "mrb_int #{kw_given_param_name(kw[:name])}" unless kw[:required]
     end
-    step_name = "#{cpp_name(d.owner, d.name)}_step"
+    step_name = "#{cpp_name(d.owner, d.name)}#{@entry_spec_suffix}_step"
     step_body_start = nil
     if resumable
       # RESUMABLE_ENTRY: the frame, registers and dispatch open the function once the body has
@@ -654,7 +665,8 @@ class CodeGen
     @runtime_installed_names = nil
     if @resumable
       out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}", arg_names, @resumable, needs_blk_param || has_blk,
-                                      optional: @resumable.optional.to_i, rest: has_rest)
+                                      optional: @resumable.optional.to_i, rest: has_rest,
+                                      always_exec: @rsm_variant ? true : false)
       first_error = @resumable.reasons.first || out[/^\s*#error (.*)$/, 1]
       first_error = 'a block call that is neither an inlined step/upto/downto loop nor a plain block function' if first_error&.match?(/unhandled opcode (BLOCK|SENDB|SSENDB)/)
       if first_error && (@resumable_warned ||= Set.new).add?(label)
@@ -666,7 +678,7 @@ class CodeGen
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     # A resumable entry handles a Fiber itself (its frame and driver), so it has no guard and saves no body.
     guard = resumable ? nil : (core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded))
-    out << guard[:prologue] if guard
+    out << guard[:prologue] if guard && guard[:prologue]
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"
     elsif arg_names.empty? && (needs_blk_param || has_blk)
@@ -843,10 +855,12 @@ class CodeGen
     aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     # DECLARED_RETURN_GUARD: a runtime-checked return declaration checks every value the body returns.
+    out = insert_rsm_guard(out, impl_name, guard) if guard&.[](:rsm_impl)
     out = declared_return_guard_wrap(label, out, impl_name)
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
-      code: out, visibility: d.visibility, guard: guard&.fetch(:index), resumable: !resumable.nil? }
+      code: "#{@rsm_variant ? '' : rsm_variant_without_duplicates(label, out)}#{out}", visibility: d.visibility, guard: guard&.fetch(:index),
+      resumable: !resumable.nil? || (!@rsm_variant && !rsm_variant_code(label).empty?) }
   end
 
   # Generated register references are literal r<N> identifiers. Counting comments
@@ -1028,6 +1042,18 @@ class CodeGen
     return nil unless d.core && self.class.core_guarded&.include?(label)
     return nil if guard_fiber_free?(label, d)
 
+    rsm = rsm_variant_code(label)
+    unless rsm.empty?
+      # RESUMABLE_DUAL: the same condition, calling the resumable variant with the entry's block. No saved body: index nil.
+      condition = if core_body_relaxable?(label)
+                    '(M->c != M->root_c && !bc2cpp_block_yield_free(bc2cpp_entry_block(M)))'
+                  else
+                    'M->c != M->root_c'
+                  end
+      # The guard goes before the wrapper's call to the fast body, where its arguments are extracted (rsm_guard_line).
+      return { index: nil, prologue: nil, rsm_impl: rsm_impl_name(d), rsm_cond: condition }
+    end
+
     index = (@core_guard_index[label] ||= @core_guard_index.size)
     # YIELD_REACH: a body that cannot suspend a Fiber on its own stays compiled under one
     # while the block it runs is provably yield-free too (checked per call, by its env flag).
@@ -1039,6 +1065,85 @@ class CodeGen
     condition += ' || !bc2cpp_core_each_is_builtin(M, self)' if d.owner == 'Enumerable'
     { index: index,
       prologue: "  if (mrb_unlikely(#{condition})) return bc2cpp_core_interpreted(M, self, #{index});\n" }
+  end
+
+  # RESUMABLE_DUAL: the direct-yield core iterators that get a resumable variant beside their fast body, so a Fiber
+  # reaches them without a saved bytecode driver. Each is listed only once scripts/bc2cpp/resumable_variants_check.rb
+  # runs it both ways (inside a Fiber and plainly) with the same output. Methods whose block is called from an inner
+  # block (Enumerable#collect, #inject, #max ...) stay on their drivers: the step cannot suspend through that block.
+  RSM_SUFFIX = '_rsm'
+  RESUMABLE_DUAL = %w[
+    Array#collect! Array#delete_if Array#each Array#each_index Array#fetch
+    Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
+    Hash#each Integer#downto Integer#times Integer#upto
+    String#each_char String#upto StringIO#each
+  ].freeze
+
+  def rsm_dual?(label, d)
+    return false unless EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}") &&
+                        self.class.core_guarded&.include?(label)
+
+    # Only where the guard itself is emitted: a method no Fiber can cross keeps no guard, so it needs no variant.
+    !guard_fiber_free?(label, d)
+  end
+
+  def rsm_impl_name(d) = "#{cpp_name(d.owner, d.name)}#{RSM_SUFFIX}_impl"
+
+  # RESUMABLE_DUAL: the guard, placed before the wrapper's call to the fast body. The variant takes that call's arguments,
+  # so the guard passes them on; a call from a fiber runs the variant instead of the fast body.
+  def insert_rsm_guard(out, impl_name, guard)
+    call = out.match(/^  return #{Regexp.escape(impl_name)}\((?<args>[^\n]*)\);\n/)
+    return out unless call
+
+    line = "  if (mrb_unlikely(#{guard[:rsm_cond]})) return #{guard[:rsm_impl]}(#{call[:args]});\n"
+    out.sub(call[0]) { "#{line}#{call[0]}" }
+  end
+
+  # The variant's code (its step, its entry and the helpers it uses), or '' when the method cannot take the resumable
+  # form. The variant's registered wrapper is cut off, as entry specialization cuts its own.
+  def rsm_variant_code(label)
+    @rsm_variants&.[](label) || ''
+  end
+
+  # The variant's own helpers (block fallbacks, direct entries) are compiled from the same blocks as the fast body's, under
+  # the same names. A helper the fast body also defines is renamed in the variant (`_rsm`), so each name is defined once
+  # and the variant still calls its own copy. Names are whole C identifiers.
+  RSM_FUNCTION_DEF = /^(?:\[\[maybe_unused\]\] )?(?:static )?[\w:*$ ]+?([\w$]+)\(.*\) \{$/
+  def rsm_variant_without_duplicates(label, out)
+    code = rsm_variant_code(label)
+    return code if code.empty?
+
+    defined_here = code.scan(RSM_FUNCTION_DEF).flatten.to_set
+    defined_outside = out.scan(RSM_FUNCTION_DEF).flatten.to_set
+    collisions = defined_here & defined_outside
+    return code if collisions.empty?
+
+    collisions.reduce(code) { |text, name| text.gsub(/\b#{Regexp.escape(name)}\b/, "#{name}#{RSM_SUFFIX}") }
+  end
+
+  def compile_rsm_variant(label, d)
+    saved = [@rsm_variant, @entry_spec_suffix, @core_program_world]
+    @rsm_variant = true
+    @entry_spec_suffix = RSM_SUFFIX
+    # The program-wide facts a core body binds statically (its owner of length, [] ...) are withheld: the variant
+    # dispatches the receiver's methods by name, as the interpreter does, so a subclass's own definition is run.
+    @core_program_world = nil
+    begin
+      result = compile_method(label)
+    ensure
+      @rsm_variant, @entry_spec_suffix, @core_program_world = saved
+    end
+    return '' if result[:unsupported] || result[:code].include?('#error') || !result[:resumable]
+
+    entry = "static mrb_value #{cpp_name(d.owner, d.name)}(mrb_state* M, mrb_value self) {\n"
+    cut = result[:code].rindex(entry)
+    return '' unless cut
+
+    code = result[:code][0...cut]
+    impl = rsm_impl_name(d)
+    return '' unless code.sub!(/^mrb_value #{Regexp.escape(impl)}\(/, "[[maybe_unused]] static mrb_value #{impl}(")
+
+    code
   end
 
   # OPTIONAL_ARG_SUPPORT: the switch replacing ENTER's jump table (see

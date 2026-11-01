@@ -2297,7 +2297,9 @@ if $PROGRAM_NAME == __FILE__
   # bc2cpp_send too), ahead of every function that calls them.
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
   # NUMERIC_SLOW_PATH: the by-name calls of the numeric arms' else live here once per helper.
-  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled), symbol_table)
+  # The helper scans read the text of every unit printed below, class bodies included: a class body's `a | b` (a
+  # constant fold of a numeric arm) calls the slow helper too.
+  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled + class_units), symbol_table)
   # EXCEPTION_INIT: the file-scope declaration and helper of a `super` that reaches Exception#initialize.
   exception_init_code = gen.emit_exception_init_helpers(compiled)
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
@@ -2306,7 +2308,7 @@ if $PROGRAM_NAME == __FILE__
   warn "== index helpers closed (INDEX_CLOSED, ADR 0365): #{gen.index_closed_summary(compiled)} =="
   warn "== integer-tag else (INTEGER_TAG_ELSE, ADR 0394): #{gen.integer_tag_else_summary} ==" if gen.integer_tag_else_enabled?
   warn ''
-  eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
+  eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled + class_units), symbol_table)
   warn "== shared === helper (EQQ_DIRECT): #{gen.eqq_helper_site_count(compiled)} sites =="
   warn ''
   native_args = gen.native_arg_summary
@@ -2344,7 +2346,11 @@ if $PROGRAM_NAME == __FILE__
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   # LOAD_COMPILE (load_compile.rb): the class and module bodies of this gem's mrblib, as code gem_init runs first.
-  stub_keys, load_register = MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies,
+  # CORE_LEFT_OUT_STUBS: a core method the closed build removes at gem_init (CodeGen#left_out_core_ram) has no compiled
+  # registration to replace its body, but the removal leaves that body's bytecode in the binary. It is judged like a
+  # compiled entry, so its body is stubbed too: the bytecode goes, and a call that somehow reached it would raise.
+  left_out_entries = gen.left_out_core_ram.map { |owner, name| { owner: owner, name: name, visibility: :public } }
+  stub_keys, load_register = MrblibStubs.stubbable(compiled + left_out_entries, ireps, registry, CodeGen.block_self_bodies,
                                                    world: MrblibStubs.class_world_from_env(ENV, srcs),
                                                    copy_context: MrblibStubs.copy_context(ENV, srcs, out_dir),
                                                    early: ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') == 'all' && !ENV['BC2CPP_LOAD_WORLD'].to_s.empty?)

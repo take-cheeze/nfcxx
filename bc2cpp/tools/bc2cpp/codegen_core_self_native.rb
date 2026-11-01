@@ -19,6 +19,9 @@ require_relative 'call_facts'
 module CoreSelfNative
   # BC2CPP_CORE_SELF_NATIVE=0 keeps the by-name self call.
   def core_self_native_enabled?
+    # RESUMABLE_DUAL: a variant (the Fiber form of a core body) dispatches its implicit-self calls by name.
+    return false if @rsm_variant
+
     ENV['BC2CPP_CORE_SELF_NATIVE'] != '0'
   end
 
