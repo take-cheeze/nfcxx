@@ -55,7 +55,9 @@ module MrblibStubs
   # body missing from it would count as code that runs at load.
   # copy_context: the copy names and sites of every Ruby source the closed build loads (copy_context below), so a copy in
   # another gem is a site too, not a missing one (which would keep the body). Nil: this generation's own ireps stand.
-  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil, copy_context: nil)
+  # `early`: the load compile is on (`all` with a world), so a def kept only because the load runs it can leave the
+  # mrblib and be installed by the class program instead (EARLY_REGISTER).
+  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil, copy_context: nil, early: false)
     require_relative 'static_dispatch_registrations'
     body_of = {}
     all_defs.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
@@ -68,7 +70,19 @@ module MrblibStubs
     # Every plain engine def counts as overridden, a superset of the registered ones: load_phase only reads it to
     # decide which classes' instances matter, so more owners can only keep more bodies.
     overridden = body_of.each_value.map { |owner, name| "#{owner}##{name}" }.to_set
-    load_bodies, = StaticDispatchRegistrations.load_phase(ireps, body_of, method_of, overridden)
+    load_bodies, _load_names, load_calls = StaticDispatchRegistrations.load_phase(ireps, body_of, method_of, overridden)
+    # BC2CPP_LOAD_TRACE=<regexp>: the load-phase edge that first reaches each matching Owner#name, so a def kept
+    # because it "runs at load" can be traced to the caller and instruction that runs it.
+    if (trace = ENV['BC2CPP_LOAD_TRACE']) && !trace.empty?
+      pattern = Regexp.new(trace)
+      load_calls.each do |caller, idx, callee|
+        owner, name = body_of[callee]
+        next unless owner && "#{owner}##{name}".match?(pattern)
+
+        insn = ireps[caller]&.instructions&.[](idx)
+        warn "[load-trace] #{owner}##{name} <- #{caller}:#{idx} #{ireps[caller]&.file}:#{insn&.lineno} op=#{insn&.op}"
+      end
+    end
     copied = [registry, all_defs].flat_map { |r| r.values.flatten.filter_map(&:copy_irep) }.to_set
     copied_names, copy_sites = copy_context ? [copy_context[:names], copy_context[:sites]]
                                             : [copied_names(ireps), copy_sites(ireps, parent)]
@@ -76,7 +90,31 @@ module MrblibStubs
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
     all_of = Hash.new { |h, k| h[k] = [] }
     all_defs.each { |name, defs| defs.each { |d| all_of["#{d.owner}##{name}"] << d } }
-    compiled.filter_map do |m|
+    # EARLY_REGISTER: a def kept only because the load runs it can still leave the mrblib when the class program
+    # installs the compiled method itself, before the class-body statement that runs it. `register` maps that
+    # statement's [file, line] to the methods to install there; the planner emits them only for a statement it
+    # compiles (see LoadCompile.plan).
+    parents = Hash.new { |h, k| h[k] = [] }
+    load_calls.each { |caller, idx, callee| parents[callee] << [caller, idx] }
+    root_sites = lambda do |callee|
+      sites = []
+      seen = Set.new
+      stack = parents[callee].dup
+      until stack.empty?
+        caller, idx = stack.pop
+        next unless seen.add?([caller, idx])
+
+        if method_of[caller].nil?
+          insn = ireps[caller]&.instructions&.[](idx)
+          sites << [ireps[caller].file, insn.lineno] if insn&.lineno
+        else
+          stack.concat(parents[caller])
+        end
+      end
+      sites.uniq
+    end
+    register = Hash.new { |h, k| h[k] = [] }
+    dropped = compiled.filter_map do |m|
       key = "#{m[:owner]}##{m[:name]}"
       defs = defs_of[key]
       # CORE_VISIBILITY: a core def whose name a native shares, or an operator name, is no registry definition, yet it
@@ -84,11 +122,33 @@ module MrblibStubs
       # at gem_init just as a registry def's is. Judge that def. Any other visibility is not registered that way.
       defs = all_of[key] if defs.empty? && REGISTERED_VISIBILITY.include?(m[:visibility])
       reason = stub_keep_reason(m, key, defs, load_bodies, copied, copied_names, copy_sites, world)
-      next key if reason.nil?
-
-      stub_keep_log(key, reason)
-      nil
+      if reason.nil?
+        key
+      elsif reason == 'runs at load' && early && (spec = early_register(m, key, defs, root_sites))
+        spec[:sites].each { |site| register[site] << spec[:def] }
+        key
+      else
+        stub_keep_log(key, reason)
+        nil
+      end
     end.to_set
+    [dropped, register]
+  end
+
+  # The register spec of a compiled method the load runs: { sites: [[file, line], ...], def: {...} }, or nil when it
+  # has no entry to install or the load reaches it from no class-body statement.
+  def early_register(m, key, defs, root_sites)
+    return nil unless m[:entry] && m[:aspec] && REGISTERED_VISIBILITY.include?(m[:visibility])
+    return nil unless defs.size == 1
+
+    d = defs.first
+    return nil if d.irep.nil? || d.kind || d.installer || d.copy_irep
+
+    sites = root_sites.call(d.irep)
+    return nil if sites.empty?
+
+    { sites: sites, def: { def_key: key, owner: m[:owner], name: m[:name], entry: m[:entry],
+                           aspec: m[:aspec], visibility: m[:visibility] } }
   end
 
   # { label => its parent label }: every rep of an irep points back to it.

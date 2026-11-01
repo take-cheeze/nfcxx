@@ -1165,6 +1165,9 @@ module StaticDispatchRegistrations
     runnable = ireps.keys.select { |l| method_of[l].nil? }.to_set
     bodies = Set.new
     names = Set.new
+    # Every edge the walk follows: [caller label, instruction index, callee label]. EARLY_REGISTER walks these back
+    # to the class-body statement that runs a method at load, to install the method before it.
+    calls = []
     engine_live = false
     queue = runnable.to_a
     until queue.empty?
@@ -1203,6 +1206,7 @@ module StaticDispatchRegistrations
           end
         end
         targets.each do |l, _o|
+          calls << [label, idx, l]
           next unless bodies.add?(l)
 
           irep_of_method[l].each { |k| queue << k if runnable.add?(k) }
@@ -1212,7 +1216,7 @@ module StaticDispatchRegistrations
       # no longer sound, so fall back to the receiver-blind cascade entirely.
       return load_phase_all_names(ireps, method_of, body_of, send_ops: send_ops) if engine_live
     end
-    [bodies, names]
+    [bodies, names, calls]
   end
 
   # The original, receiver-blind cascade -- the fallback the moment any
@@ -1234,7 +1238,7 @@ module StaticDispatchRegistrations
       end
       break unless grew
     end
-    [bodies, names]
+    [bodies, names, []]
   end
 
   # SUFFIX_BASES: `x=` / `x?` / `x!` counts as dynamic when its base `x` is in `suffix_bases` (default: every
