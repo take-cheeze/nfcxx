@@ -218,6 +218,8 @@ module ClassBodyScan
     INT_RANGE = (-2**31..2**31 - 1)
 
     def pure?(node)
+      return lambda_value?(node) if ClassBodyScan.block_inside?(node)
+
       case node
       when Prism::IntegerNode then true
       when Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SymbolNode then true
@@ -229,6 +231,32 @@ module ClassBodyScan
       when Prism::HashNode then node.elements.all? { |e| e.is_a?(Prism::AssocNode) && pure?(e.key) && pure?(e.value) }
       when Prism::RangeNode then (node.left.nil? || pure?(node.left)) && (node.right.nil? || pure?(node.right))
       when Prism::CallNode then pure_call?(node)
+      else false
+      end
+    end
+
+    # Lazy data has no frame reads or executable calls. Frozen string literals stay bytecode because the VM
+    # shares their identity across calls; the data decoder normally allocates a new String.
+    def literal_lambda?(node)
+      parameters = node.parameters
+      no_args = parameters.nil? || (parameters.is_a?(Prism::BlockParametersNode) && parameters.parameters.nil? && parameters.locals.empty?)
+      no_args && node.locals.empty? && node.body.is_a?(Prism::StatementsNode) &&
+        node.body.body.size == 1 && !ClassBodyScan.block_inside?(node.body) && lambda_value?(node.body.body.first)
+    end
+
+    def lambda_value?(node)
+      case node
+      when Prism::IntegerNode, Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
+           Prism::SymbolNode, Prism::ConstantReadNode then true
+      when Prism::StringNode then !heredoc?(node) && !node.frozen?
+      when Prism::ConstantPathNode then node.parent.nil? || lambda_value?(node.parent)
+      when Prism::ParenthesesNode then node.body.is_a?(Prism::StatementsNode) && node.body.body.size == 1 && lambda_value?(node.body.body.first)
+      when Prism::ArrayNode then node.elements.all? { |e| lambda_value?(e) }
+      when Prism::HashNode then node.elements.all? { |e| e.is_a?(Prism::AssocNode) && lambda_value?(e.key) && lambda_value?(e.value) }
+      when Prism::RangeNode then (node.left.nil? || lambda_value?(node.left)) && (node.right.nil? || lambda_value?(node.right))
+      when Prism::LambdaNode then literal_lambda?(node)
+      when Prism::CallNode
+        node.name == :freeze && !node.safe_navigation? && node.arguments.nil? && node.block.nil? && node.receiver && lambda_value?(node.receiver)
       else false
       end
     end
