@@ -2180,8 +2180,22 @@ if $PROGRAM_NAME == __FILE__
     File.write(File.join(dump_dir, 'emitted.txt'), "#{symbol} owners=#{only_owners.inspect}\n#{class_units.map { |u| u[:path] }.join("\n")}\n", mode: 'a')
   end
   print gen.emit_structs
-  print gen.emit_ary_entry_helper(compiled)
-  print gen.emit_ary_write_helpers(compiled)
+  # LOAD_COMPILE (load_compile.rb): plan the class-body load now, before the helpers below are printed. The loader
+  # routes tableless []/[]= sends through the shared index helpers, so force on the ones only the load names: the
+  # load then links the same strong definitions instead of its own weak declarations
+  # (BC2CPP_INDEX_HELPERS_DEFINED skips those), so the call has one candidate. helper_codes is what the helper
+  # emitters scan: compiled entries plus the load, so a helper only the load names is still built and emitted,
+  # with the ary helpers its body calls.
+  stub_keys = MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies,
+                                    world: MrblibStubs.class_world_from_env(ENV))
+  load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys, unregistered: gen.unregistered_keys)
+  load_code = load_plan&.marker ? load_plan.code : ''
+  load_code.scan(/bc2cpp_(getidx|setidx|getidx0)\(M,/).flatten.to_set.each do |kind|
+    gen.index_helper_code(kind) if CodeGen::INDEX_HELPERS.key?(kind)
+  end
+  helper_codes = load_code.empty? ? compiled : compiled + [{ code: load_code }]
+  print gen.emit_ary_entry_helper(helper_codes)
+  print gen.emit_ary_write_helpers(helper_codes)
   print gen.emit_to_enum_helper(compiled)
   print gen.emit_collect_direct_helper(compiled)
   print gen.emit_transpose_direct_helper(compiled)
@@ -2287,8 +2301,9 @@ if $PROGRAM_NAME == __FILE__
     warn "== review scope: engine owners; #{outside} listed site(s) outside the reviewed program ==" if outside.positive?
   end
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
-  # bc2cpp_send too), ahead of every function that calls them.
-  index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
+  # bc2cpp_send too), ahead of every function that calls them, and ahead of
+  # the class-body load code below, which names them too.
+  index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(helper_codes), symbol_table)
   # NUMERIC_SLOW_PATH: the by-name calls of the numeric arms' else live here once per helper.
   numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled), symbol_table)
   # EXCEPTION_INIT: the file-scope declaration and helper of a `super` that reaches Exception#initialize.
@@ -2317,7 +2332,8 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   poly_tables_code = gen.emit_poly_tables(compiled)
   # A constant helper is emitted only when the printed text calls it: a body compiled and then discarded
-  # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first.
+  # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first. The load
+  # code holds no constants, so `used` stays what the compiled entries name.
   used = [index_helpers_code, eqq_helper_code, numeric_slow_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
           *class_units.map { |unit| unit[:code] }].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
@@ -2337,12 +2353,11 @@ if $PROGRAM_NAME == __FILE__
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   # LOAD_COMPILE (load_compile.rb): the class and module bodies of this gem's mrblib, as code gem_init runs first.
-  stub_keys = MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies,
-                                    world: MrblibStubs.class_world_from_env(ENV))
-  load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys, unregistered: gen.unregistered_keys)
+  # Planned above (the load may force index helpers on); emitted here, after the helpers define them, with the weak
+  # declarations skipped (BC2CPP_INDEX_HELPERS_DEFINED): the TU already defines the helpers ahead of it.
   load_symbol = nil
-  if load_plan&.marker
-    print load_plan.code
+  unless load_code.empty?
+    print "#define BC2CPP_INDEX_HELPERS_DEFINED 1\n#{load_code}"
     load_symbol = symbol
   end
   LoadCompile.write_plan(LoadCompile.plan_path(out_dir, symbol), load_plan)

@@ -858,6 +858,17 @@ module LoadCompile
     end
   end
 
+  # LOADER_TABLELESS_SEND (the decoder's case-16 twin): a tableless operator (`[]` one key, `[]=` index and value)
+  # the residual program kept as a send decodes through the shared index helper, never by name; anything else stays
+  # a by-name send (only the names the tables keep reach it). Module-level, so the module-level send emitters
+  # (emit_send) call it directly and the Expr methods below call it on their receiver.
+  def tableless_call(name, recv, args)
+    case [name, args.size]
+    when ['[]', 1] then "bc2cpp_getidx(M, #{recv}, #{args.first})"
+    when ['[]=', 2] then "(bc2cpp_setidx(M, #{recv}, #{args[0]}, #{args[1]}), #{args[1]})"
+    end
+  end
+
   # The pure-expression emitter of the statements the program does not fold (legacy). Appends C++ statements to `lines` and returns the C++ name of the value.
   class Expr
     def initialize(lines, counter, scope, tableless: Set.new)
@@ -948,15 +959,8 @@ module LoadCompile
       temp("mrb_funcall_argv(M, #{recv}, #{LoadCompile.sym(node.name)}, #{args.size}, #{argv(args)})")
     end
 
-    # LOADER_TABLELESS_SEND (the decoder's case 16 twin): a tableless operator (`[]` one key, `[]=` index and value)
-    # the residual program kept as a send decodes through the shared index helper, never by name; anything else stays
-    # a by-name send (only the names the tables keep reach it).
-    def tableless_call(name, recv, args)
-      case [name, args.size]
-      when ['[]', 1] then "bc2cpp_getidx(M, #{recv}, #{args.first})"
-      when ['[]=', 2] then "(bc2cpp_setidx(M, #{recv}, #{args[0]}, #{args[1]}), #{args[1]})"
-      end
-    end
+    # LOADER_TABLELESS_SEND (LoadCompile.tableless_call above): the same helper, on the receiver.
+    def tableless_call(name, recv, args) = LoadCompile.tableless_call(name, recv, args)
 
     # A named array: a compound literal is not C++.
     def argv(args)
@@ -1226,12 +1230,15 @@ module LoadCompile
     #include <mruby/variable.h>
     extern "C" struct RClass* mrb_vm_define_class(mrb_state*, mrb_value, mrb_value, mrb_sym);
     extern "C" struct RClass* mrb_vm_define_module(mrb_state*, mrb_value, mrb_sym);
-    // LOADER_TABLELESS_SEND: the shared index helpers (codegen_ivar_poly.rb) the case-16 decoder calls for `[]`/`[]=`.
-    // Weak: the class-body checks link the decoder standalone, without the gem TU that defines them; the real builds
-    // resolve the strong definitions. A null check is unnecessary: no check build leaves a `[]`/`[]=` send in loader
-    // data without also linking a gem TU (LoadCompile's call? keeps them out of data there too).
+    // LOADER_TABLELESS_SEND: the case-16 decoder calls the shared index helpers (codegen_ivar_poly.rb) for
+    // `[]`/`[]=`. A real gem TU defines BC2CPP_INDEX_HELPERS_DEFINED ahead of this code (bc2cpp.rb prints the
+    // helpers before the load, and forces their emission when only the load names them), so these declarations are
+    // skipped there: a second declaration of the same signature would make every call ambiguous. The class-body
+    // checks compile this code standalone, without the gem TU, and link the weak symbols.
+#ifndef BC2CPP_INDEX_HELPERS_DEFINED
     __attribute__((weak)) mrb_value bc2cpp_getidx(mrb_state*, mrb_value, mrb_value);
     __attribute__((weak)) mrb_value bc2cpp_setidx(mrb_state*, mrb_value, mrb_value, mrb_value);
+#endif
     struct bc2cpp_ld_scope {
       struct RClass* klass;
       const bc2cpp_ld_scope* up;

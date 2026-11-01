@@ -573,10 +573,12 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
               !LoadCompile::Blob.new({}, tableless: Set['[]', '[]=']).data?(bracket_node))
   tableless_code = LoadCompile.plan({ 'g' => files }, gem: 'g', drop_keys: DROP.to_set, symbol: 'fx',
                                      unregistered: Set['Cb::Dead#gone', 'Cb::Hash#[]', 'Cb::Hash#[]=']).code
-  suite.check('the decoder routes a tableless `[]`/`[]=` through the index helpers and refuses other arities by name',
+  suite.check('the decoder routes a tableless `[]`/`[]=` through the index helpers and refuses other arities by name, ' \
+              'with weak declarations that a gem TU skips (BC2CPP_INDEX_HELPERS_DEFINED)',
               tableless_code.include?('return bc2cpp_getidx(M, recv, av[0])') &&
               tableless_code.include?('bc2cpp_setidx(M, recv, av[0], av[1])') &&
-              tableless_code.include?('tableless loader send'))
+              tableless_code.include?('tableless loader send') &&
+              tableless_code.include?('#ifndef BC2CPP_INDEX_HELPERS_DEFINED'))
   suite.check('only `[]`/`[]=`-shaped keys become tableless sends',
               LoadCompile.tableless_sends(Set['Cb::Dead#gone', 'Cb::Hash#[]', 'Hash#[]=']) == Set['[]', '[]='])
   fx_folded = folded_constants(result.bodies)
