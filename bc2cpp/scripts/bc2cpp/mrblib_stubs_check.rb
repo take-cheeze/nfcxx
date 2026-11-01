@@ -156,6 +156,48 @@ suite.compile(COPY_SOURCE) do |ireps, root|
               !stub.include?('Dynamic#a') && stub.include?('Dynamic#x'))
 end
 
+# Every copy site must install the compiled source; a residual or foreign site keeps the bytecode body.
+suite.compile(COPY_SOURCE) do |ireps, root, directory|
+  registry = build_registry(ireps, root)[0]
+  compiled = [{ owner: 'Pane', name: 'a', entry: 'Pane_a', aspec: 'MRB_ARGS_NONE()', visibility: :public }]
+  key = 'Pane#a'
+  file = File.join(directory, 'fixture.rb')
+  line = COPY_SOURCE.lines.index { |text| text.include?('alias_method :b') } + 1
+  context = { names: Set['a'], sites: { 'a' => [['Pane', file, line]] } }
+  stub, register = MrblibStubs.stubbable(compiled, ireps, registry, copy_context: context, early: true)
+  suite.check('a local named copy schedules its compiled source before the copy statement',
+              stub.include?(key) && register[[file, line]]&.first&.fetch(:entry) == 'Pane_a')
+  suite.check('without load compilation a named copy keeps its source',
+              !MrblibStubs.stubbable(compiled, ireps, registry, copy_context: context).first.include?(key))
+  [nil, :protected].each do |visibility|
+    hidden = compiled.map { |m| m.merge(visibility: visibility) }
+    suite.check("a named copy keeps an entry with visibility #{visibility.inspect}",
+                !MrblibStubs.stubbable(hidden, ireps, registry, copy_context: context, early: true).first.include?(key))
+  end
+  [:unknown, 'Other'].each do |owner|
+    unsafe = { names: Set['a'], sites: { 'a' => [[owner, file, line]] } }
+    suite.check('a copy outside the defining class body keeps its source',
+                !MrblibStubs.stubbable(compiled, ireps, registry, copy_context: unsafe, early: true).first.include?(key))
+  end
+  [[file, nil], ['foreign.rb', line]].each do |site_file, site_line|
+    unsafe = { names: Set['a'], sites: { 'a' => [['Pane', file, line], ['Pane', site_file, site_line]] } }
+    suite.check('a foreign or unlocated copy keeps its source even with a local copy',
+                !MrblibStubs.stubbable(compiled, ireps, registry, copy_context: unsafe, early: true).first.include?(key))
+  end
+  actual_stub, = MrblibStubs.stubbable(compiled, ireps, registry, early: true)
+  sites = MrblibStubs.copy_sites(ireps, MrblibStubs.parent_map(ireps))
+  suite.check('bytecode copy sites retain their owner and source position',
+              sites.fetch('a').include?(['Pane', file, line]))
+  suite.check('a second class copying the same name conservatively keeps the source', !actual_stub.include?(key))
+  plan = LoadCompile.plan({ 'g' => [file] }, gem: 'g', drop_keys: stub, symbol: 'fx', register: register)
+  suite.check('the load program installs the compiled source for a local named copy',
+              plan[:code].include?('Pane_a'))
+  partial = register.merge([file, 9999] => register.fetch([file, line]))
+  plan = LoadCompile.plan({ 'g' => [file] }, gem: 'g', drop_keys: stub, symbol: 'fx', register: partial)
+  suite.check('one compiled copy site cannot hide another site the load program cannot compile',
+              !plan[:code].include?('Pane_a') && !plan.dropped.any? { |d| d[:key] == key })
+end
+
 REWRITE = <<~'RUBY'
   module Game
     class Scene::Map
