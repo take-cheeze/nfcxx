@@ -37,6 +37,21 @@ SCENARIOS = [
   ['Array#delete_if', '[1, 2, 3].delete_if { |x| Fiber.yield x; x == 2 }', '[1, 2, 3].delete_if { |x| x == 2 }'],
   ['Array#each_index', '[1, 2].each_index { |x| Fiber.yield x }', '[1, 2].each_index { |x| x }'],
   ['Array#fetch', '[1, 2].fetch(0) { |i| Fiber.yield i; 7 }', '[1, 2].fetch(0) { |i| 7 }'],
+  ['Array#fetch', '[1, 2].fetch(9) { |i| Fiber.yield i; 7 }', '[1, 2].fetch(9) { |i| 7 }'],
+  ['Array#fetch', '[1, 2].fetch(9, 8)', '[1, 2].fetch(9, 8)'],
+  ['Array#fetch', '[1, 2].fetch(-1)', '[1, 2].fetch(-1)'],
+  ['Array#fetch', '[1, 2].fetch(9)', '[1, 2].fetch(9)'],
+  ['Array#fetch', '[1, 2].fetch(9, 8) { |i| Fiber.yield i; 7 }', '[1, 2].fetch(9, 8) { |i| 7 }'],
+  ['Hash#fetch', '{ a: 1 }.fetch(:a)', '{ a: 1 }.fetch(:a)'],
+  ['Hash#fetch', '{ a: 1 }.fetch(:zz, 8)', '{ a: 1 }.fetch(:zz, 8)'],
+  ['Hash#fetch', '{ a: 1 }.fetch(:zz)', '{ a: 1 }.fetch(:zz)'],
+  ['Hash#fetch', '{ a: 1 }.fetch(:zz, 8) { |k| Fiber.yield k; 7 }', '{ a: 1 }.fetch(:zz, 8) { |k| 7 }'],
+  ['String#upto', %q{'07'.upto('10', true) { |c| Fiber.yield c }}, %q{'07'.upto('10', true) { |c| c }}],
+  ['String#upto', %q{'az'.upto('bc', false) { |c| Fiber.yield c }}, %q{'az'.upto('bc', false) { |c| c }}],
+  ['Array#fetch', '[1].fetch(9) { |i| Fiber.yield i; break :stopped }', '[1].fetch(9) { |i| break :stopped }'],
+  ['Array#fetch', '[1].fetch(9) { |i| Fiber.yield i; raise TypeError, "fetch" }', '[1].fetch(9) { |i| raise TypeError, "fetch" }'],
+  ['Hash#fetch', '{}.fetch(:zz) { |k| Fiber.yield k; break :stopped }', '{}.fetch(:zz) { |k| break :stopped }'],
+  ['Hash#fetch', '{}.fetch(:zz) { |k| Fiber.yield k; raise TypeError, "fetch" }', '{}.fetch(:zz) { |k| raise TypeError, "fetch" }'],
   ['Array#find', '[1, 2].find { |x| Fiber.yield x; x == 2 }', '[1, 2].find { |x| x == 2 }'],
   ['Array#sort_by', '[2, 1].sort_by { |x| Fiber.yield x; x }', '[2, 1].sort_by { |x| x }'],
   ['Array#to_h', '[[1, 2], [3, 4]].to_h { |x| Fiber.yield x; [x[0], x[1]] }', '[[1, 2], [3, 4]].to_h { |x| [x[0], x[1]] }'],
@@ -91,10 +106,10 @@ SCENARIOS = [
 ].freeze
 
 EXPECTED_LABELS = %w[
-  Array#collect! Array#delete_if Array#each Array#each_index
-  Array#reject! Array#select! Enumerable#sort Hash#delete
+  Array#collect! Array#delete_if Array#each Array#each_index Array#fetch
+  Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
   Hash#each Integer#downto Integer#times Integer#upto
-  String#each_char StringIO#each
+  String#each_char String#upto StringIO#each
 ].freeze
 
 # The closed-world probe: every listed method is called from a Fiber body, so each is guarded and gets its variant.
@@ -153,6 +168,9 @@ EXPECTED = EXPECTED_LABELS
 expected_names = EXPECTED.map { |label| label.sub('#', '_').gsub('!', '$21').gsub('?', '$3f') }
 check.call("exactly the default list gets a variant (#{variants.size} of #{SCENARIOS.size} scenarios)", (expected_names - variants).empty? && (variants - expected_names).empty?)
 check.call('no #error in the generated code', !code.include?('#error'))
+%w[array_fetch hash_fetch string_upto].each do |method|
+  check.call("#{method} needs no per-method driver", !code.include?("bc2cpp_#{method}_driver_src"))
+end
 
 if ENV['CC_GENERATED_ONLY'] == '1'
   puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'

@@ -1073,10 +1073,10 @@ class CodeGen
   # block (Enumerable#collect, #inject, #max ...) stay on their drivers: the step cannot suspend through that block.
   RSM_SUFFIX = '_rsm'
   RESUMABLE_DUAL = %w[
-    Array#collect! Array#delete_if Array#each Array#each_index
-    Array#reject! Array#select! Enumerable#sort Hash#delete
+    Array#collect! Array#delete_if Array#each Array#each_index Array#fetch
+    Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
     Hash#each Integer#downto Integer#times Integer#upto
-    String#each_char StringIO#each
+    String#each_char String#upto StringIO#each
   ].freeze
 
   def rsm_dual?(label, d)

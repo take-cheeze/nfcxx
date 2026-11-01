@@ -160,14 +160,19 @@ class CodeGen
   end
 
   def resumable_shape_problem(irep, d)
-    # enter_fields: required, optional, rest, post, keyword, keyword rest, block. Required positional arguments are
-    # copied into the frame when the call starts (resumable_entry_function); the others are not supported yet.
+    # enter_fields: required, optional, rest, post, keyword, keyword rest, block.
+    # The entry copies positional arguments and the block into the frame.
     fields = (irep.enter ? irep.enter.enter_fields.map(&:to_i) : []) + [0] * 7
     return 'takes a post or keyword argument' if fields[3..5].any?(&:positive?)
-    # OPTIONAL_ARGS: only the shape optional_arg_table recognises (a jump table of JMPs after ENTER, no block). With a
-    # rest argument the table is optional_rest_arg_table's (REST_ARGS).
+    # The step must use the same optional jump table as compile_method, including an explicit block parameter.
     if fields[1].positive?
-      table = fields[2].positive? ? optional_rest_arg_table(irep) : optional_arg_table(irep)
+      table = if fields[2].positive?
+                optional_rest_arg_table(irep)
+              elsif fields[6].positive?
+                optional_block_arg_table(irep)
+              else
+                optional_arg_table(irep)
+              end
       return 'takes optional arguments in a shape the step cannot enter' unless table && table[1]
     end
     # REST_ARGS: a rest argument the wrapper builds into an Array (rest_only_arity? is the shape it recognises).
