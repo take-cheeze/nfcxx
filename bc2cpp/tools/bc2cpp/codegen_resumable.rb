@@ -579,6 +579,16 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
   def emit_resumable_helpers(compiled)
     return '' unless compiled.any? { |m| m[:resumable] }
 
+    if (dir = ENV['BC2CPP_NATIVE_VM_DIR'])
+      require_relative 'native_vm'
+      native = NativeVM.compile(RESUMABLE_DRIVER_RB, 'bc2cpp_resumable_native', mrbc: MRBC, dir: dir)
+      helpers = RESUMABLE_HELPERS_CPP.sub(/^[ \t]*static const uint8_t driver\[\] = \{.*?^[ \t]*\};\n/m, '')
+      raise 'native resumable driver still contains bytecode' if helpers.include?('@DRIVER@')
+
+      helpers = helpers.sub('mrb_load_irep(M, driver);', 'bc2cpp_resumable_native_init_syms(M); mrb_load_proc(M, bc2cpp_resumable_native);')
+      return "#{native}\n#{helpers}\n"
+    end
+
     "#{RESUMABLE_HELPERS_CPP.sub('@DRIVER@') { resumable_driver_bytes }}\n"
   end
 

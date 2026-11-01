@@ -158,7 +158,7 @@ module EnumStep
     used = compiled.filter_map { |entry| form_for(entry, false) }.uniq { |form| [form.owner, form.method_name] }
     return '' if used.empty?
 
-    <<~CPP + used.map { |form| form_text(form) }.join
+    text = <<~CPP + used.map { |form| form_text(form) }.join
       // ENUM_STEP -- the step form of an owner's #each (tools/bc2cpp/codegen_enum_step.rb, docs/bc2cpp-enum-step.md).
       // The first registration of a body still in bytecode loads the owner's driver, which takes the body's place in
       // the saved table; a second registration finds the compiled entry and the driver already saved.
@@ -182,9 +182,22 @@ module EnumStep
       }
 
     CPP
+    return text unless ENV['BC2CPP_NATIVE_VM_DIR']
+
+    text.sub('const char* driver_src', 'void (*driver_src)(mrb_state*)')
+        .sub('mrb_load_string(M, driver_src);', 'driver_src(M);')
+        .sub("mrb_print_error(M);\n      M->exc = nullptr;\n      return false;", 'mrb_exc_raise(M, mrb_obj_value(M->exc));')
   end
 
   def form_text(form)
+    if (dir = ENV['BC2CPP_NATIVE_VM_DIR'])
+      require_relative 'native_vm'
+      name = "#{form.src_name}_native"
+      source = form.driver.respond_to?(:call) ? form.driver.call : form.driver
+      native = NativeVM.compile(source, name, mrbc: MRBC, dir: dir)
+      return "#{form.c}\n#{native}\nstatic void #{form.src_name}(mrb_state* M) { #{name}_init_syms(M); mrb_load_proc(M, #{name}); }\n"
+    end
+
     <<~CPP
       #{form.c}
       static const char* const #{form.src_name} = R"RUBY(
