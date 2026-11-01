@@ -66,7 +66,11 @@ module CoreNativeCandidates
 
   # Every table entry of `paths`: { mt_class:, kind:, cname:, name:, fn:, installed: } with `installed` the class the
   # table's MRB_MT_INIT_ROM installs it into (NativeRomOwners), or nil when that is not MRB_MT_CLASS's own class.
-  def entries(paths)
+  # An operator name is never a candidate: the VM sends those from opcodes the scan does not name. `operator_names`
+  # names the two index operators (MRB_OPSYM(aref/aset)) for the INDEX_CLOSED proof, whose planner verdict covers
+  # every class that can answer them; every other operator stays unnamed.
+  OPERATOR_NAMES = { 'aref' => '[]', 'aset' => '[]=' }.freeze
+  def entries(paths, operator_names: false)
     paths.flat_map do |path|
       text = File.binread(path).force_encoding(Encoding::UTF_8).scrub
       next [] unless text.include?('MRB_MT_ENTRY')
@@ -85,7 +89,7 @@ module CoreNativeCandidates
         next unless mt_class
 
         line.scan(ENTRY) do |fn, kind, cname|
-          name = kind == 'OPSYM' ? nil : cname + SUFFIX.fetch(kind)
+          name = kind == 'OPSYM' ? (operator_names ? OPERATOR_NAMES[cname] : nil) : cname + SUFFIX.fetch(kind)
           out << { mt_class: mt_class, kind: kind, cname: cname, name: name, fn: fn, path: path,
                    installed: owners[table] == mt_class ? mt_class : nil }
         end
@@ -218,10 +222,10 @@ module CoreNativeCandidates
   end
 
   # The listed keys, "MtClass#name" sorted: every entry of the key a candidate, its name unreachable.
-  def candidates(entries, names, fragments)
+  def candidates(entries, names, fragments, proven = {})
     entries.group_by { |e| [e[:mt_class], e[:name]] }.filter_map do |(mt_class, name), group|
-      next unless name&.match?(NAME) && group.all? { |e| e[:installed] }
-      next if StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+      next unless (name&.match?(NAME) || proven[name]) && group.all? { |e| e[:installed] }
+      next if !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       "#{mt_class}##{name}"
     end.sort
@@ -229,11 +233,12 @@ module CoreNativeCandidates
 
   # Core Ruby definitions, compiled or interpreted, whose names no lookup or direct compiled call reaches.
   # ROM-shared keys stay: omitting a Ruby override must not replace a readonly entry with a RAM tombstone.
-  def ruby_candidates(core, names, fragments, entries)
+  def ruby_candidates(core, names, fragments, entries, proven = {})
     rom = entries.to_set { |entry| "#{entry[:mt_class]}##{entry[:name]}" }
     core.flat_map do |file|
       file.fetch(:registry).flat_map do |name, definitions|
-        next [] unless name.match?(NAME) && !StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+        next [] unless (name.match?(NAME) || proven[name]) &&
+                       (proven[name] || !StaticDispatchRegistrations.dynamic_name?(name, names, fragments))
 
         definitions.filter_map do |definition|
           owner = definition.owner
@@ -253,30 +258,37 @@ module CoreNativeCandidates
   # rule; a registration with a computed name, a native alias or undef of the key, or a ROM entry of the same class and
   # name keeps it (the removal would take the ROM one, leaving a tombstone). Native aliases are candidates separately
   # when their new names are unreachable; the source names still count as lookups.
-  def ram_candidates(map, names, fragments, entries)
+  def ram_candidates(map, names, fragments, entries, proven = {})
     rom = entries.to_set { |e| "#{e[:mt_class]}##{e[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
     map.registrations.each { |owner, name, fn| blocked << "#{owner}##{name}" if fn.nil? }
     registrations = map.registrations.filter_map do |owner, name, _fn|
-      next unless owner.is_a?(String) && name&.match?(NAME) && !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
+      next unless owner.is_a?(String) && (name&.match?(NAME) || proven[name]) &&
+                  !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
       next if map.computed.include?(owner)
 
       key = "#{owner}##{name}"
-      next if blocked.include?(key) || rom.include?(key.sub('.singleton#', '#'))
-      next if StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+      # A proven operator's singleton registration is independent of the
+      # instance ROM entry the planner also excludes: the class-method table
+      # the header does not touch. Only an exact ROM twin still blocks.
+      rom_key = proven[name] ? key : key.sub('.singleton#', '#')
+      next if blocked.include?(key) || rom.include?(rom_key)
+      next if !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       key
     end
     # An alias copies its source entry during native initialization. Removing an unreachable alias afterward
     # does not remove that source; its name still counts as a native lookup.
     aliases = map.aliases.filter_map do |owner, name, original|
-      next unless original && owner.is_a?(String) && name&.match?(NAME) && !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
+      next unless original && owner.is_a?(String) && (name&.match?(NAME) || proven[name]) &&
+                  !owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE)
       next if map.computed.include?(owner)
 
       key = "#{owner}##{name}"
-      next if rom.include?(key.sub('.singleton#', '#'))
-      next if StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+      rom_key = proven[name] ? key : key.sub('.singleton#', '#')
+      next if rom.include?(rom_key)
+      next if !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       key
     end

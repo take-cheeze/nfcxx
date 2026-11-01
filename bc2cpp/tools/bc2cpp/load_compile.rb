@@ -699,8 +699,9 @@ module LoadCompile
     # A call's arguments are decoded into one array of this size.
     MAX_CALL_ARGS = 8
 
-    def initialize(strings)
+    def initialize(strings, tableless: Set.new)
       @strings = strings
+      @tableless = tableless
     end
 
     def data?(node)
@@ -723,8 +724,14 @@ module LoadCompile
 
     # CALL_TAG: any other pure call (`Color.new(1, 2, 3, 4)`, `OTHER.merge(...)`): receiver, name, arguments in order,
     # sent as the VM's OP_SEND would (ClassBodyScan::Pure.pure_call? has ruled out a block, a splat and a keyword).
+    # LOADER_TABLELESS_SEND: a call the decoder sends by name (case 16, mrb_funcall_argv) only when its method stays in
+    # the tables. A tableless name (`[]` the method-table elimination unregisters) would raise NoMethodError at gem-init
+    # load, aborting the init before the instance-type setup runs. Such a call is not loader data; the compiled class
+    # body evaluates it through the proven index dispatch instead.
     def call?(node)
       args = node.arguments&.arguments || []
+      return false if @tableless.include?(node.name.to_s)
+
       ClassBodyScan::Pure.pure_call?(node) && args.size <= MAX_CALL_ARGS && data?(node.receiver) && args.all? { |a| data?(a) }
     end
 
@@ -851,12 +858,24 @@ module LoadCompile
     end
   end
 
+  # LOADER_TABLELESS_SEND (the decoder's case-16 twin): a tableless operator (`[]` one key, `[]=` index and value)
+  # the residual program kept as a send decodes through the shared index helper, never by name; anything else stays
+  # a by-name send (only the names the tables keep reach it). Module-level, so the module-level send emitters
+  # (emit_send) call it directly and the Expr methods below call it on their receiver.
+  def tableless_call(name, recv, args)
+    case [name, args.size]
+    when ['[]', 1] then "bc2cpp_getidx(M, #{recv}, #{args.first})"
+    when ['[]=', 2] then "(bc2cpp_setidx(M, #{recv}, #{args[0]}, #{args[1]}), #{args[1]})"
+    end
+  end
+
   # The pure-expression emitter of the statements the program does not fold (legacy). Appends C++ statements to `lines` and returns the C++ name of the value.
   class Expr
-    def initialize(lines, counter, scope)
+    def initialize(lines, counter, scope, tableless: Set.new)
       @lines = lines
       @counter = counter
       @scope = scope
+      @tableless = tableless
     end
 
     # The C++ expression of a node that is one call or immediate (no statements), or nil.
@@ -933,8 +952,15 @@ module LoadCompile
     def call(node)
       recv = emit(node.receiver)
       args = (node.arguments&.arguments || []).map { |a| emit(a) }
+      if @tableless.include?(node.name.to_s) && (helper = tableless_call(node.name.to_s, recv, args))
+        return temp(helper)
+      end
+
       temp("mrb_funcall_argv(M, #{recv}, #{LoadCompile.sym(node.name)}, #{args.size}, #{argv(args)})")
     end
+
+    # LOADER_TABLELESS_SEND (LoadCompile.tableless_call above): the same helper, on the receiver.
+    def tableless_call(name, recv, args) = LoadCompile.tableless_call(name, recv, args)
 
     # A named array: a compound literal is not C++.
     def argv(args)
@@ -988,12 +1014,19 @@ module LoadCompile
     names
   end
 
+  # Method names the loader must never send by name: the proof unregisters them from the method tables (`[]`/`[]=`
+  # the INDEX_CLOSED verdict admits), so a loader send would raise NoMethodError. Only `[]`/`[]=`-shaped keys enter the
+  # set; the helpers reproduce `[]` with one key and `[]=` with index and value.
+  def tableless_sends(unregistered)
+    unregistered.filter_map { |key| key.split('#', 2).last if key.end_with?('#[]', '#[]=') }.to_set
+  end
+
   # Whether the program must not fold this statement: it can run a hook the world defines.
   def legacy?(item, ctx)
     hooks = ctx[:hooks]
     node = item.stmt.node
     # A value the byte code has no tag for (a call with more than Blob::MAX_CALL_ARGS arguments).
-    return !item.fold && !Blob.new({}).data?(node.value) if %i[const ivar].include?(item.role)
+    return !item.fold && !Blob.new({}, tableless: ctx[:tableless]).data?(node.value) if %i[const ivar].include?(item.role)
     return true if item.role == :send && send_args(node).size > MAX_SEND_ARGS
     return false if hooks.empty?
 
@@ -1013,7 +1046,7 @@ module LoadCompile
 
   # The bytes of the statements of `ub`, appended to `out`.
   def program(ub, ctx, out)
-    blob = Blob.new(ctx[:strings])
+    blob = Blob.new(ctx[:strings], tableless: ctx[:tableless])
     run = []
     flush = lambda do
       next if run.empty?
@@ -1177,7 +1210,7 @@ module LoadCompile
     when :send then emit_send(item, body, counter, ctx)
     when :alias then emit_alias(item, body)
     when :const, :ivar
-      value = Expr.new(body, counter, 'here').emit(item.stmt.node.value)
+      value = Expr.new(body, counter, 'here', tableless: ctx[:tableless]).emit(item.stmt.node.value)
       body << "#{item.role == :const ? 'mrb_const_set' : 'mrb_iv_set'}(M, mrb_obj_value(c), #{sym(item.stmt.node.name)}, #{value});"
       body << 'mrb_gc_arena_restore(M, ai);'
     end
@@ -1198,7 +1231,7 @@ module LoadCompile
       body << 'struct RClass* c2 = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));'
     else
       path = node.constant_path
-      ex = Expr.new(body, counter, 'here')
+      ex = Expr.new(body, counter, 'here', tableless: ctx[:tableless])
       base = if path.is_a?(Prism::ConstantReadNode) then 'mrb_obj_value(c)'
              elsif path.parent then ex.emit(path.parent)
              else 'mrb_obj_value(M->object_class)'
@@ -1222,7 +1255,7 @@ module LoadCompile
 
   def emit_send(item, body, counter, ctx)
     node = item.stmt.node
-    ex = Expr.new(body, counter, 'here')
+    ex = Expr.new(body, counter, 'here', tableless: ctx[:tableless])
     args = send_args(node).map do |a|
       case a
       when Prism::SymbolNode then ex.temp("mrb_symbol_value(#{sym(a.unescaped)})")
@@ -1230,7 +1263,11 @@ module LoadCompile
       else ex.emit(a)
       end
     end
-    body << "mrb_funcall_argv(M, mrb_obj_value(c), #{sym(node.name)}, #{args.size}, #{ex.argv(args)});"
+    if ctx[:tableless].include?(node.name.to_s) && (helper = tableless_call(node.name.to_s, 'mrb_obj_value(c)', args))
+      body << "#{helper};"
+    else
+      body << "mrb_funcall_argv(M, mrb_obj_value(c), #{sym(node.name)}, #{args.size}, #{ex.argv(args)});"
+    end
     body << 'mrb_gc_arena_restore(M, ai);'
   end
 
@@ -1248,11 +1285,21 @@ module LoadCompile
     #include <mruby/array.h>
     #include <mruby/class.h>
     #include <mruby/hash.h>
+    #include <mruby/presym.h>
     #include <mruby/range.h>
     #include <mruby/string.h>
     #include <mruby/variable.h>
     extern "C" struct RClass* mrb_vm_define_class(mrb_state*, mrb_value, mrb_value, mrb_sym);
     extern "C" struct RClass* mrb_vm_define_module(mrb_state*, mrb_value, mrb_sym);
+    // LOADER_TABLELESS_SEND: the case-16 decoder calls the shared index helpers (codegen_ivar_poly.rb) for
+    // `[]`/`[]=`. A real gem TU defines BC2CPP_INDEX_HELPERS_DEFINED ahead of this code (bc2cpp.rb prints the
+    // helpers before the load, and forces their emission when only the load names them), so these declarations are
+    // skipped there: a second declaration of the same signature would make every call ambiguous. The class-body
+    // checks compile this code standalone, without the gem TU, and link the weak symbols.
+#ifndef BC2CPP_INDEX_HELPERS_DEFINED
+    __attribute__((weak)) mrb_value bc2cpp_getidx(mrb_state*, mrb_value, mrb_value);
+    __attribute__((weak)) mrb_value bc2cpp_setidx(mrb_state*, mrb_value, mrb_value, mrb_value);
+#endif
     struct bc2cpp_ld_scope {
       struct RClass* klass;
       const bc2cpp_ld_scope* up;
@@ -1378,6 +1425,16 @@ module LoadCompile
         const unsigned n = bc2cpp_ld_varint(p);
         mrb_value av[@MAX_CALL_ARGS@];
         for (unsigned i = 0; i < n; ++i) av[i] = bc2cpp_ld_decode(M, scope, p);
+        // LOADER_TABLELESS_SEND: `[]`/`[]=` never stay loader data (LoadCompile's call?), but the decoder keeps the
+        // shape for data the check builds never folded: route the supported arities through the shared index helpers
+        // (table-independent), exactly as the compiled send does. Anything else is a build bug: fail loudly instead of
+        // raising NoMethodError at gem-init load and aborting the init halfway.
+        if (name == MRB_OPSYM(aref) && n == 1) return bc2cpp_getidx(M, recv, av[0]);
+        if (name == MRB_OPSYM(aset) && n == 2) { bc2cpp_setidx(M, recv, av[0], av[1]); return av[1]; }
+        if (name == MRB_OPSYM(aref) || name == MRB_OPSYM(aset)) {
+          mrb_state *mrb = M; // E_NOMETHOD_ERROR names the state `mrb`
+          mrb_raisef(M, E_NOMETHOD_ERROR, "tableless loader send '%n' with %d arguments", name, (int)n);
+        }
         return mrb_funcall_argv(M, recv, name, n, av);
       }
       default: return mrb_const_get(M, mrb_obj_value(M->object_class), bc2cpp_ld_sym(M, bc2cpp_ld_varint(p)));
@@ -1476,7 +1533,8 @@ module LoadCompile
     mine = roots.fetch(gem)
     files = world.fetch(gem)
     ranges = files.zip(mine).to_h { |file, root| [file, ranges_for(root)] }
-    ctx = { legacy: [], subs: [], strings: {}, hooks: hook_defs(all), max_send: 1, register: early }
+    ctx = { legacy: [], subs: [], strings: {}, hooks: hook_defs(all), max_send: 1, register: early,
+            tableless: tableless_sends(unregistered) }
     prog = []
     # One program for the gem: the files' top-level statements in load order (each ends with its own END).
     mine.each do |root|

@@ -560,7 +560,27 @@ Dir.mktmpdir('bc2cpp-class-body') do |dir|
   mixed = LoadCompile.plan({ 'g' => files }, gem: 'g', drop_keys: DROP.to_set, symbol: 'fx', unregistered: Set['Cb::Dead#gone'])
   mixed_a = LoadCompile.apply(paths[files[0]], mixed.ranges.fetch(files[0]))
   suite.check('DEAD_VISIBILITY: a send naming one registered def is run (and pins its defs); only the all-left-out one is dead',
-              mixed.stats[:role_dead] == 1 && mixed_a.include?('def gone = 1') && mixed_a.include?('def gone_too = 2'))
+              mixed.stats[:role_dead] == 1 && mixed_a.include?('def gone = 1') && mixed_a.include?('def gone_too = 2')
+  )
+  # LOADER_TABLELESS_SEND: a `[]` send in a constant initializer is loader data while the tables keep it, but a
+  # compiled statement once the proof unregisters it (a loader case-16 would raise NoMethodError at gem-init load,
+  # aborting the init before the instance-type setup runs). The decoder and the legacy emitters route the supported
+  # arities through the shared index helpers instead of by name.
+  bracket_node = Prism.parse('X = DIR_BIT[2]').value.statements.body.first.value
+  suite.check('a tableless `[]` send is not loader data (a compiled class body evaluates it through the index helpers)',
+              LoadCompile::Blob.new({}).data?(bracket_node) &&
+              !LoadCompile::Blob.new({}, tableless: Set['[]']).data?(bracket_node) &&
+              !LoadCompile::Blob.new({}, tableless: Set['[]', '[]=']).data?(bracket_node))
+  tableless_code = LoadCompile.plan({ 'g' => files }, gem: 'g', drop_keys: DROP.to_set, symbol: 'fx',
+                                     unregistered: Set['Cb::Dead#gone', 'Cb::Hash#[]', 'Cb::Hash#[]=']).code
+  suite.check('the decoder routes a tableless `[]`/`[]=` through the index helpers and refuses other arities by name, ' \
+              'with weak declarations that a gem TU skips (BC2CPP_INDEX_HELPERS_DEFINED)',
+              tableless_code.include?('return bc2cpp_getidx(M, recv, av[0])') &&
+              tableless_code.include?('bc2cpp_setidx(M, recv, av[0], av[1])') &&
+              tableless_code.include?('tableless loader send') &&
+              tableless_code.include?('#ifndef BC2CPP_INDEX_HELPERS_DEFINED'))
+  suite.check('only `[]`/`[]=`-shaped keys become tableless sends',
+              LoadCompile.tableless_sends(Set['Cb::Dead#gone', 'Cb::Hash#[]', 'Hash#[]=']) == Set['[]', '[]='])
   fx_folded = folded_constants(result.bodies)
   suite.check('PURE_CONST_EVAL: computed constants that are data at build time fold; the others stay in the residual',
               fx_folded.map { |_, n, _| n }.sort == %w[BIGS HALVES LIST_A SFX SPELLINGS SQUARES] &&

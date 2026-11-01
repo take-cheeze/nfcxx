@@ -106,6 +106,65 @@ ensure
   saved.each { |name, method| sdr.define_singleton_method(name, method) }
 end
 
+# INDEX_CLOSED admission (tools/bc2cpp/index_closed_planner.rb): a planner-proven
+# `[]` / `[]=` passes eligible() despite failing IDENT, while an unproven
+# operator and an unproven identifier do not. `proven` is the per-name verdict
+# analyze() computes; here it is stubbed to pin the gate mechanics.
+analysis = lambda do |proven|
+  { registered: [{ owner: 'Game::Variables', name: '[]', entry: 'e1' },
+                 { owner: 'Game::Variables', name: '[]=', entry: 'e2' },
+                 { owner: 'Game::Variables', name: 'kept', entry: 'e3' },
+                 { owner: 'Game::Variables', name: 'dropped', entry: 'e4' }],
+    closed_only: true, dynamic: Set['dropped'], fragments: Set.new,
+    suffix_bases: nil, symbol_lookups: nil, proven: proven }
+end
+full = sdr.eligible(analysis.call({ '[]' => true, '[]=' => true })).to_set { |m| "#{m[:owner]}##{m[:name]}" }
+suite.check('a proven operator passes eligible() despite failing IDENT',
+            full == Set['Game::Variables#[]', 'Game::Variables#[]=', 'Game::Variables#kept'])
+none = sdr.eligible(analysis.call({})).to_set { |m| "#{m[:owner]}##{m[:name]}" }
+suite.check('without the verdict operators stay dynamic', none == Set['Game::Variables#kept'])
+partial = sdr.eligible(analysis.call({ '[]' => true, '[]=' => false })).to_set { |m| "#{m[:owner]}##{m[:name]}" }
+suite.check('a refused operator stays dynamic', partial == Set['Game::Variables#[]', 'Game::Variables#kept'])
+
+# INDEX_SEND_SHAPE (tools/bc2cpp/static_dispatch_registrations.rb): a generic
+# OP_SEND of the name refuses the verdict even when the planner proves its
+# classes, while helper-shaped sends (GETIDX for 1-argument `[]`) pass.
+SHAPED_SOURCE = <<~'RUBY'
+  class VShape
+    def register_index(s, i)
+      s[i]
+    end
+    def literal_index(s)
+      s[0]
+    end
+    def two_indices(s)
+      s[0, 1]
+    end
+    def store(s, v)
+      s[0] = v
+    end
+  end
+RUBY
+suite.check('a generic two-argument `[]` send refuses the shape gate, helper-shaped sends pass',
+            (begin
+              shaped = nil
+              suite.compile(SHAPED_SOURCE) do |ireps, _root|
+                shaped = [StaticDispatchRegistrations.index_send_shaped?(ireps, '[]'),
+                          StaticDispatchRegistrations.index_send_shaped?(ireps, '[]=')]
+              end
+              shaped == [false, true]
+            end))
+
+# CORE_NATIVE_CANDIDATES: the same verdict admits proven operators to the ROM
+# and RAM candidate lists.
+cnc = CoreNativeCandidates
+rom = [{ mt_class: 'Array', kind: 'OPSYM', cname: 'aref', name: '[]', fn: 'mrb_ary_aget', path: 'p', installed: 'Array' },
+       { mt_class: 'Array', kind: 'SYM', cname: 'freeze', name: 'freeze', fn: 'f', path: 'p', installed: 'Array' }]
+suite.check('a proven operator is a ROM candidate, an unproven dynamic name is not',
+            cnc.candidates(rom, Set['freeze'], Set.new, { '[]' => true }) == ['Array#[]'])
+suite.check('without the verdict no operator is a ROM candidate',
+            cnc.candidates(rom, Set['freeze'], Set.new, {}) == [])
+
 SOURCE = <<~'RUBY'
   class VFix
     def kept = 1
