@@ -304,7 +304,12 @@ class CodeGen
         defines = names.map { |name| "#{fn}(M, #{var}, #{c_string_literal(name)}, #{m[:entry]}, #{m[:aspec]});" }
         # CORE_BLOCK_GUARD: the bytecode must be saved before it is replaced.
         if m[:guard]
-          save = "bc2cpp_core_save_interpreted(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]})"
+          save = if (form = EnumStep.form_for(m, singleton))
+                   # ENUM_STEP: the owner's #each slot holds the shared driver, not its own body.
+                   "bc2cpp_enum_step_save(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]}, #{form.save_args})"
+                 else
+                   "bc2cpp_core_save_interpreted(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]})"
+                 end
           out << "  if (#{save}) { #{defines.join(' ')} }\n"
         else
           defines.each { |define| out << "  #{define}\n" }
@@ -490,7 +495,7 @@ class CodeGen
   def emit_core_guard_helpers(compiled)
     return '' unless compiled.any? { |m| m[:guard] }
 
-    <<~CPP
+    <<~CPP + EnumStep.helpers(compiled)
       // CORE_BLOCK_GUARD -- see core_block_guard in codegen_method.rb.
       #include <stdio.h>
       extern "C" mrb_value mrb_exec_irep(mrb_state*, mrb_value, const struct RProc*);

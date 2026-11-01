@@ -1173,7 +1173,8 @@ class CodeGen
     out << "        mrb_value bc2cpp_sort_ia_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pa_#{addr}, 1);\n"
     out << "        mrb_value bc2cpp_sort_kb_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
     out << "        mrb_value bc2cpp_sort_ib_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
-    out << "        mrb_int bc2cpp_sort_c_#{addr} = mrb_cmp(M, bc2cpp_sort_kb_#{addr}, bc2cpp_sort_ka_#{addr});\n"
+    comparison = sort_array_cmp_direct? ? 'bc2cpp_sort_key_cmp' : 'mrb_cmp'
+    out << "        mrb_int bc2cpp_sort_c_#{addr} = #{comparison}(M, bc2cpp_sort_kb_#{addr}, bc2cpp_sort_ka_#{addr});\n"
     out << "        if (bc2cpp_sort_c_#{addr} == -2) { #{inline_raise('ArgumentError', 'sort_by comparison failed')} }\n"
     out << "        if (bc2cpp_sort_c_#{addr} == 0) { bc2cpp_sort_c_#{addr} = (mrb_integer(bc2cpp_sort_ib_#{addr}) < mrb_integer(bc2cpp_sort_ia_#{addr})) ? -1 : 1; }\n"
     out << "        if (bc2cpp_sort_c_#{addr} >= 0) break;\n"

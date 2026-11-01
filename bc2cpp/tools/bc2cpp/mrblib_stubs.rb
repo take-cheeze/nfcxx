@@ -8,10 +8,14 @@
 # loading copies its method (module_function, alias, COPYING_SENDS), when the guard keeps the interpreted method
 # (CORE_BLOCK_GUARD), or when its Owner#name is not exactly one plain `def`. A stub that runs anyway raises
 # ScriptError, which a `rescue => e` does not catch. See docs/bc2cpp-mrblib-stubs.md.
+require 'fileutils'
+require 'json'
 require 'prism'
 require 'set'
+require 'shellwords'
 require_relative 'bytecode_ir_classes'
 require_relative 'class_world'
+require_relative 'codegen_enum_step'
 
 module MrblibStubs
   module_function
@@ -25,7 +29,8 @@ module MrblibStubs
 
   # BC2CPP_STUB_LOG=<file>: why a compiled method's body is kept in the residual (one line per kept method).
   def stub_keep_reason(m, key, defs, load_bodies, copied, copied_names, copy_sites, world)
-    return 'guarded' if m[:guard]
+    # A guarded body is the fallback of the Fiber path. Under ENUM_STEP only a form that covers it lets it go.
+    return 'guarded' if m[:guard] && !EnumStep.stubs_body?(m, m[:owner].end_with?('.singleton'))
     return "defs=#{defs.size}" unless defs.size == 1
 
     d = defs.first
@@ -48,12 +53,13 @@ module MrblibStubs
   # The Owner#name keys of `compiled` (this run's entries) whose bodies can be stubbed. `all_defs`: every bytecode
   # definition, the core ones the generation's registry no longer holds included. The load phase reads it: a method
   # body missing from it would count as code that runs at load.
-  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil)
+  # copy_context: the copy names and sites of every Ruby source the closed build loads (copy_context below), so a copy in
+  # another gem is a site too, not a missing one (which would keep the body). Nil: this generation's own ireps stand.
+  def stubbable(compiled, ireps, registry, all_defs = registry, world: nil, copy_context: nil)
     require_relative 'static_dispatch_registrations'
     body_of = {}
     all_defs.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
-    parent = {}
-    ireps.each_value { |irep| irep.reps.each { |c| parent[c.respond_to?(:label) ? c.label : c] = irep.label } }
+    parent = parent_map(ireps)
     method_of = ireps.keys.to_h do |label|
       up = label
       up = parent[up] until up.nil? || body_of.key?(up)
@@ -64,8 +70,8 @@ module MrblibStubs
     overridden = body_of.each_value.map { |owner, name| "#{owner}##{name}" }.to_set
     load_bodies, = StaticDispatchRegistrations.load_phase(ireps, body_of, method_of, overridden)
     copied = [registry, all_defs].flat_map { |r| r.values.flatten.filter_map(&:copy_irep) }.to_set
-    copied_names = copied_names(ireps)
-    copy_sites = copy_sites(ireps, parent)
+    copied_names, copy_sites = copy_context ? [copy_context[:names], copy_context[:sites]]
+                                            : [copied_names(ireps), copy_sites(ireps, parent)]
     defs_of = Hash.new { |h, k| h[k] = [] }
     registry.each { |name, defs| defs.each { |d| defs_of["#{d.owner}##{name}"] << d } }
     all_of = Hash.new { |h, k| h[k] = [] }
@@ -83,6 +89,13 @@ module MrblibStubs
       stub_keep_log(key, reason)
       nil
     end.to_set
+  end
+
+  # { label => its parent label }: every rep of an irep points back to it.
+  def parent_map(ireps)
+    parent = {}
+    ireps.each_value { |irep| irep.reps.each { |c| parent[c.respond_to?(:label) ? c.label : c] = irep.label } }
+    parent
   end
 
   # COPY SITES. A copy by name takes its source from the receiver's method lookup. A site in a class body whose
@@ -152,16 +165,75 @@ module MrblibStubs
   def copy_source?(owner, name, sites, world)
     return true if world.nil? || sites.nil? || sites.empty? || !receiver_rule_name?(name)
 
+    class_owner = class_owner?(owner, world)
     sites.any? do |site|
-      next true if site == :unknown || world.facts[site].nil? || !world.facts[site]['exact']
+      next true if site == :unknown || world.facts[site].nil?
+      # A class is an ancestor only through a superclass link, and a run-time include adds modules, never a superclass:
+      # for a class owner the static superclass chain is enough.
+      next true unless (class_owner && superclass_chain_known?(site, world)) || world.facts[site]['exact']
 
       ClassWorld.ancestors(site, world.classes, {}).include?(owner)
     end
   end
 
+  # The copy names and sites of every Ruby source the closed world loads: the load world's files, FOREIGN_RUBY_SRCS and
+  # this generation's own. Each file is compiled alone: mrbc with several files parses the later ones in a state the
+  # earlier ones leave (mruby-io's `(...)` in kernel.rb breaks the next file's parse). A copy's site is read from its own
+  # file's class nesting, so the per-file sites merge. Nil without a load world.
+  def copy_context(env, own_srcs, out_dir)
+    return nil unless env['BC2CPP_LOAD_WORLD']
+
+    world_files = JSON.parse(env['BC2CPP_LOAD_WORLD']).values.flatten
+    files = (world_files + Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', '')) + own_srcs.select { |f| f.end_with?('.rb') })
+            .map { |f| File.expand_path(f) }.uniq
+    copy_dir = File.join(out_dir, 'copy_context')
+    FileUtils.mkdir_p(copy_dir)
+    names = Set.new
+    sites = {}
+    files.each do |file|
+      ireps, = compile_ireps([file], 'copy_context', copy_dir)
+      names.merge(copied_names(ireps))
+      copy_sites(ireps, parent_map(ireps)).each { |name, found| (sites[name] ||= []).concat(found) }
+    end
+    { names: names, sites: sites }
+  end
+
+  # Whether +owner+ is a plain class (not a module, not a singleton class) in the class world.
+  def class_owner?(owner, world)
+    fact = world.facts[owner]
+    !fact.nil? && fact['kind'] == 'class' && !owner.include?('.singleton')
+  end
+
+  # Whether every class on +name+'s superclass chain is known: its bodies are static, its only reasons are run-time
+  # includes (`include at run time`: they add modules, not superclasses), and its superclass is in the world too.
+  def superclass_chain_known?(name, world)
+    seen = Set.new
+    until name.nil?
+      return false unless seen.add?(name)
+
+      fact = world.facts[name]
+      return false unless fact && fact['kind'] == 'class'
+      return false unless fact['bodies'].all? { |b| b['evaluated'] == 'static' }
+      return false unless fact['reasons'].all? { |r| r.start_with?('include at run time') }
+
+      name = fact['superclass']
+    end
+    true
+  end
+
   # The class world of a build: the engine gems' mrblib as the load world names them (BC2CPP_LOAD_WORLD, JSON
-  # {gem symbol => [files]}), in that order. Nil without a load world (the rule then keeps every copied name).
-  def class_world_from_env(env) = ClassWorld.from_load_world(env['BC2CPP_LOAD_WORLD'])
+  # {gem symbol => [files]}), plus the core mrblib the program loads (FOREIGN_RUBY_SRCS) and this generation's own
+  # Ruby sources (own_srcs). A core class of the program (IO, say) is in own_srcs and not in FOREIGN_RUBY_SRCS, and a
+  # copy's site may be such a class. Nil without a load world (the rule then keeps every copied name).
+  # Only the stub decision reads this world: codegen and LoadCompile keep the load world alone.
+  def class_world_from_env(env, own_srcs = [])
+    return nil unless env['BC2CPP_LOAD_WORLD']
+
+    world = JSON.parse(env['BC2CPP_LOAD_WORLD'])
+    core = Shellwords.split(env.fetch('FOREIGN_RUBY_SRCS', '')) + own_srcs.select { |f| f.end_with?('.rb') }
+    world['core'] = core.map { |f| File.expand_path(f) }.uniq unless core.empty?
+    ClassWorld.from_load_world(JSON.generate(world))
+  end
 
   # By name, whatever the owner: the source of every `alias`, and every Symbol an irep that sends a COPYING_SENDS
   # name loads.

@@ -155,9 +155,11 @@ require_relative 'codegen_fixnum_ranges'
 require_relative 'codegen_tuple_returns'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
+require_relative 'codegen_sort_array_cmp'
 require_relative 'codegen_step_loop'
 require_relative 'codegen_kernel_loop'
 require_relative 'codegen_resumable'
+require_relative 'codegen_enum_step'
 require_relative 'codegen_block_fallback'
 require_relative 'codegen_yield_free'
 require_relative 'codegen_runtime_def'
@@ -432,6 +434,10 @@ if $PROGRAM_NAME == __FILE__
   registry.delete_if { |_, defs| defs.empty? }
   CodeGen.core_hidden_defs = core_hidden_defs
   CodeGen.core_guarded = core_guarded
+  EnumStep.sources = core_guarded.to_h do |label|
+    irep = ireps.fetch(label)
+    [label, [File.expand_path(irep.file.to_s), irep.enter&.lineno]]
+  end
   compiled_ruby = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
   # Every linked core gem's mrblib too: outside_ruby leaves out the core gems a build compiles, which a world that
   # does not compile them still runs.
@@ -2186,8 +2192,13 @@ if $PROGRAM_NAME == __FILE__
   # (BC2CPP_INDEX_HELPERS_DEFINED skips those), so the call has one candidate. helper_codes is what the helper
   # emitters scan: compiled entries plus the load, so a helper only the load names is still built and emitted,
   # with the ary helpers its body calls.
-  stub_keys = MrblibStubs.stubbable(compiled, ireps, registry, CodeGen.block_self_bodies,
-                                    world: MrblibStubs.class_world_from_env(ENV))
+  # CORE_LEFT_OUT_STUBS: a core method the closed build removes at gem_init (CodeGen#left_out_core_ram) has no compiled
+  # registration to replace its body, but the removal leaves that body's bytecode in the binary. It is judged like a
+  # compiled entry, so its body is stubbed too: the bytecode goes, and a call that somehow reached it would raise.
+  left_out_entries = gen.left_out_core_ram.map { |owner, name| { owner: owner, name: name, visibility: :public } }
+  stub_keys = MrblibStubs.stubbable(compiled + left_out_entries, ireps, registry, CodeGen.block_self_bodies,
+                                    world: MrblibStubs.class_world_from_env(ENV, srcs),
+                                    copy_context: MrblibStubs.copy_context(ENV, srcs, out_dir))
   load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys, unregistered: gen.unregistered_keys)
   load_code = load_plan&.marker ? load_plan.code : ''
   load_code.scan(/bc2cpp_(getidx|setidx|getidx0)\(M,/).flatten.to_set.each do |kind|
@@ -2203,6 +2214,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_bool_check_helper(compiled)
   print gen.emit_native_core_helpers(compiled)
   print gen.emit_numeric_proof_helpers(compiled)
+  print gen.emit_sort_array_cmp_helper(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
