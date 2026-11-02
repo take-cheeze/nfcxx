@@ -76,6 +76,7 @@ def check_goldens(files)
   files.each do |f|
     ssa_texts(f).each do |text|
       totals[:functions] += 1
+      install_module(read_forms(text))
       orig = PathbEgraph.parse_fn(read_forms(text).first)
       begin
         out, st = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first))
@@ -187,6 +188,7 @@ def check_case(f)
   main = ssa_texts(f).find { |t| t.start_with?('(ssa-function "main"') }
   raise Fail, "no converted main" unless main
 
+  install_module(read_forms(main))
   orig = PathbEgraph.parse_fn(read_forms(main).first)
   opt, = PathbEgraph.optimize_fn(orig)
   # The same function under a tight budget (cut short by iterations and by nodes): still correct.
