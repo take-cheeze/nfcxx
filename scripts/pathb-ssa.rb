@@ -747,6 +747,69 @@ def float_to_int(x, t)
   canon(v, t)
 end
 
+# The globals of the module being interpreted (install_module). A global is an object at an address above the slots.
+# Its initial cells come from its initialiser. A global with no definition here (extern), a thread-local one, or an
+# initialiser the interpreter does not model (bytes, bitfield, a function address) is unsupported: any access raises.
+GLOBAL_TABLE = Struct.new(:addr, :init, :unsupported).new({}, [], {})
+
+# The value of a literal operand of an initialiser: a constant of an integer or float type, or a null pointer.
+def literal(v, type)
+  return 0 if head(v) == "null"
+  raise Unsupported, "initialiser #{sx(v)}" unless head(v) == "const"
+
+  if float_type?(v[1])
+    round_float(Float(v[2]), v[1])
+  else
+    canon(int_lit(v[2]), v[1])
+  end
+end
+
+def install_module(forms)
+  GLOBAL_TABLE.addr.clear
+  GLOBAL_TABLE.init.clear
+  GLOBAL_TABLE.unsupported.clear
+  gs = forms.select { |g| head(g) == "global" }
+  top = 1 << 32
+  gs.each do |g|
+    size = int_lit(g[3])
+    align = [int_lit(g[4]), 1].max
+    top = (top + align - 1) / align * align
+    GLOBAL_TABLE.addr[g[1].raw] = top
+    top += size
+  end
+  gs.each do |g|
+    name = g[1].raw
+    base = GLOBAL_TABLE.addr[name]
+    begin
+    init = g.find { |x| head(x) == "init" }
+    flags = g.map { |x| x.is_a?(Array) ? head(x) : x }
+    if init.nil? || flags.include?("extern") || flags.include?("thread") || init.size == 1
+      GLOBAL_TABLE.unsupported[name] = true
+      next
+    end
+    init[1..].each do |item|
+      case head(item)
+      when "zero" then nil
+      when "scalar"
+        off, type, v = item[1..]
+        GLOBAL_TABLE.init << [base + int_lit(off), sx(strip_const(type)), literal(v, type)]
+      when "addr"
+        off, type, target, add = item[1..]
+        if target.is_a?(Ref) && target.sigil == "@" && GLOBAL_TABLE.addr.key?(target.raw)
+          GLOBAL_TABLE.init << [base + int_lit(off), sx(strip_const(type)), GLOBAL_TABLE.addr[target.raw] + int_lit(add)]
+        else
+          GLOBAL_TABLE.unsupported[name] = true
+        end
+      else
+        GLOBAL_TABLE.unsupported[name] = true
+      end
+    end
+    rescue Unsupported, ArgumentError, TypeError, NoMethodError
+      GLOBAL_TABLE.unsupported[name] = true
+    end
+  end
+end
+
 class Machine
   BIN = { "wadd" => :+, "wsub" => :-, "wmul" => :*, "and" => :&, "or" => :|, "xor" => :^ }.freeze
   CMP = { "lt.s" => :<, "lt.u" => :<, "le.s" => :<=, "le.u" => :<=, "eq" => :==, "ne" => :!=,
@@ -756,6 +819,7 @@ class Machine
   def initialize(fn, args)
     @env = {}
     @cells = {}     # address => [type, value]: a scalar object at an address (no byte-level aliasing)
+    GLOBAL_TABLE.init.each { |a, t, v| @cells[a] = [t, v] }
     @addr = {}      # slot key => address of the slot's object
     @slot_type = {} # slot key => its type
     layout_slots(fn)
@@ -831,6 +895,11 @@ end
   # The address an address operand names: a slot, or a pointer value.
   def addr_of(x)
     return val(x) unless x.is_a?(Ref)
+    if x.sigil == "@"
+      raise Unsupported, "global #{x.raw}" if GLOBAL_TABLE.unsupported.key?(x.raw)
+
+      return GLOBAL_TABLE.addr.fetch(x.raw) { raise Unsupported, "global #{x.raw}" }
+    end
     raise Unsupported, "address #{sx(x)}" unless x.sigil == "$"
 
     @addr.fetch("$#{x.raw}") { raise Unsupported, "slot #{x.raw}" }
@@ -1003,6 +1072,7 @@ def main(argv)
   file = argv.last or abort "usage: pathb-ssa.rb [--check | --run N...] FILE.ir"
 
   forms = read_forms(File.read(file))
+  install_module(forms)
   converted = 0
   functions = 0
   promoted_total = 0
