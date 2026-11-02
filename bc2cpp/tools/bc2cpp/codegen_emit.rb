@@ -349,8 +349,8 @@ class CodeGen
   # LoadCompile.mark_dead! reads to drop the visibility statements that name them.
   # Closed builds also omit core_left_out definitions from class/load code. C++ implementations remain available
   # to direct calls; omitting a registration does not itself omit the generated function.
-  def unregistered_keys
-    lists = static_dispatch_lists
+  def unregistered_keys(lists: nil)
+    lists ||= static_dispatch_lists
     keys = lists.for_build(ENV['BC2CPP_BUILD_NAME'])
     keys |= lists.core_left_out if ENV['BC2CPP_BUILD_NAME'] == 'closed'
     keys | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
@@ -1170,7 +1170,7 @@ class CodeGen
   # exactly when an `owners:` list names it, and SDEF defs now carry an irep so
   # they are in @owner_of (see build_registry). compile_send's
   # `@only_owners.include?` guard works the same way.
-  def compile_all(only_owners: nil, other_owners: nil)
+  def compile_all(only_owners: nil, other_owners: nil, live_labels: nil)
     @only_owners = only_owners
     @other_owners = other_owners
     # SYM_DEVIRT: sym_call_target probes callees with compiles_clean?, whose
@@ -1187,6 +1187,7 @@ class CodeGen
       end
       leaves |= copied
     end
+    leaves.select! { |label| live_labels.include?(label) } if live_labels
     leaves.map { |label| compile_method(label) }
   end
 
