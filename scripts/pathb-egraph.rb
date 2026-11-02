@@ -290,6 +290,8 @@ module PathbEgraph
       @subst = {}      # a dropped let => the operand that replaces it (global; registers are unique)
       @fresh = 0
       @stats = Hash.new(0)
+      @read_slots = {}  # slot keys that some instruction reads or takes the address of (see dead_stores)
+      fn.blocks.each_value { |blk| blk[:instrs].each { |i| collect_slot_reads(i, @read_slots) } }
     end
 
     def run
@@ -330,11 +332,19 @@ module PathbEgraph
       @checked = {}    # register => true when its let is a checked operation with a node (CHECKED_OPS)
       @out = []
       @cap = nil
+      @mem = {}        # slot key => { type:, cls:, from: } the value the slot holds here (see "Memory")
+      dead = dead_stores(blk[:instrs])
+      @stats[:stores_removed] += dead.size
       blk[:phis].each { |ph| @rc[ph.name] = leaf(ph.name) }
-      blk[:instrs].each { |i| classify(i) if head(i) == "let" }
+      blk[:instrs].each do |i|
+        memory_step(i)
+        classify(i) if head(i) == "let"
+      end
       saturate
       @memo_best = {}
-      blk[:instrs].each do |ins|
+      blk[:instrs].each_with_index do |ins, idx|
+        next if dead[idx]
+
         unless head(ins) == "let"
           @out << subst_deep(ins)
           next
@@ -358,6 +368,9 @@ module PathbEgraph
     # operation becomes a node, anything else (loads, calls, checked ops) is an opaque class of its own.
     def classify(ins)
       r, t, rv = ins[1], ins[2], ins[3]
+      k = plain_slot_load(rv)
+      return classify_slot_load(r, t, k) if k
+
       c = nil
       if reg?(rv)
         c = operand_class(rv)
@@ -748,6 +761,141 @@ module PathbEgraph
       end
     end
 
+    # ---- memory: the slots of a block (docs/notes/pathb-egraph.md, "Memory") ---------------------------------------
+
+    # Operators that read or compute but never write memory; a `let` of one of them keeps the memory state.
+    MEMORY_FREE = (PURE_OPS + %w[bitcast bfload cshl cshr cdiv crem pdiff fconv cf2i p2i i2p lt.f le.f fadd fsub fmul
+                                fdiv fneg i2f u2f]).freeze
+    # Operators that read memory (a silent instruction neither reads nor writes it).
+    READS_MEMORY = %w[load load.v bfload bfload.v call vaarg].freeze
+
+    # The slot key of a plain load `(load T $"x")`, or nil.
+    def plain_slot_load(rv) = head(rv) == "load" ? slot_key(rv[2]) : nil
+
+    # True when x contains an operator that may write memory. Type forms carry no operations.
+    def memory_write?(x)
+      return false unless x.is_a?(Array)
+
+      h = head(x)
+      return false if TYPE_HEADS.include?(h)
+      return true if h && !MEMORY_FREE.include?(h)
+
+      x.any? { |y| memory_write?(y) }
+    end
+
+    # True when a `$"x"` of x is not the address of a plain load or store: the slot's address escapes, and a later
+    # write through a pointer may change it.
+    def address_taken?(x)
+      case x
+      when Ref then x.sigil == "$"
+      when Array
+        return false if plain_slot_load(x)
+
+        x.any? { |y| address_taken?(y) }
+      else false
+      end
+    end
+
+    # True when a statement or `let` may write memory other than by a plain store to a slot, or takes a slot's
+    # address (an address-taking form ends the memory state). Any statement that is not a `let`, a store, a `set`,
+    # `nonnull` or `bounds` is conservatively such a write (copies, evals, volatile and bit-field stores, barriers).
+    def clobbers?(ins)
+      case head(ins)
+      when "let" then memory_write?(ins[3]) || address_taken?(ins[3])
+      when "store"
+        return true unless slot_key(ins[2])
+
+        memory_write?(ins[3]) || address_taken?(ins[3])
+      when "set" then memory_write?(ins[2]) || address_taken?(ins[2])
+      when "nonnull", "bounds" then address_taken?(ins[1..])
+      else true
+      end
+    end
+
+    # True when an instruction contains a read of memory (a load of any kind, a call).
+    def reads_memory?(x)
+      return false unless x.is_a?(Array)
+      return true if READS_MEMORY.include?(head(x))
+
+      x.any? { |y| reads_memory?(y) }
+    end
+
+    # Runs before the instruction's own value is classified: a write that may touch any slot forgets every
+    # remembered value, and a plain store records the value its slot now holds.
+    def memory_step(ins)
+      forget_memory if clobbers?(ins)
+      note_store(ins) if head(ins) == "store" && slot_key(ins[2])
+    end
+
+    def forget_memory = (@mem = {})
+
+    # The slot holds the stored value. The value is remembered as a class only when it is a register or a constant
+    # of the store's type; any other value (an expression) leaves the slot's value unknown.
+    def note_store(ins)
+      t, v = ins[1], ins[3]
+      cls = nil
+      if reg?(v) || const_operand?(v)
+        c = operand_class(v)
+        cls = c if sx(cty(c)) == sx(t)
+      end
+      @mem[slot_key(ins[2])] = { type: t, cls: cls, from: :store }
+    end
+
+    # A plain load of a slot. When the slot's value is known here with the same type, the load has that value:
+    # it shares the class, and no let is emitted for it (ensure_let substitutes the register). Otherwise the load
+    # is an opaque value, and the slot holds it from now on.
+    def classify_slot_load(r, t, k)
+      seen = @mem[k]
+      if seen && seen[:cls] && sx(seen[:type]) == sx(t)
+        @rc[r] = seen[:cls]
+        @stats[seen[:from] == :store ? :stores_forwarded : :loads_merged] += 1
+      else
+        c = new_node("opaque", t, r, [])
+        @opaque[r] = true
+        @rc[r] = c
+        @mem[k] = { type: t, cls: c, from: :load }
+      end
+    end
+
+    # The stores that are dead: a plain store to a slot that no instruction of the function reads, followed in the
+    # block by another store to that slot, with no instruction in between that reads memory or may write it. The
+    # stored value must be a register or a constant, so the store cannot trap and nothing else depends on it.
+    # Returns { index of the statement => true }.
+    def dead_stores(instrs)
+      dead = {}
+      pending = {}   # slot key => index of a removable store with no read after it
+      instrs.each_with_index do |ins, idx|
+        unless !clobbers?(ins) && !reads_memory?(ins)
+          pending.clear
+          next
+        end
+        next unless head(ins) == "store" && slot_key(ins[2])
+
+        k = slot_key(ins[2])
+        next if @read_slots.include?(k)
+
+        dead[pending[k]] = true if pending.key?(k)
+        pending.delete(k)
+        pending[k] = idx if reg?(ins[3]) || const_operand?(ins[3])
+      end
+      dead
+    end
+
+    # Slot keys that some instruction of the function reads or takes the address of: any `$"x"` except the address
+    # of a plain store.
+    def collect_slot_reads(x, out)
+      case x
+      when Ref then out[slot_key(x)] = true if x.sigil == "$"
+      when Array
+        if head(x) == "store" && slot_key(x[2])
+          collect_slot_reads(x[3], out)
+        else
+          x.each { |y| collect_slot_reads(y, out) }
+        end
+      end
+      out
+    end
+
     # ---- extraction and emission -------------------------------------------------------------------------------
 
     def ensure_let(r, c)
@@ -1079,7 +1227,9 @@ def egraph_cli(argv)
          "#{st[:iterations]} iterations, saturated #{st[:saturated]} blocks, cut by iterations #{st[:cut_iters]}, " \
          "cut by nodes #{st[:cut_nodes]}, folded #{st[:condbr_folded]} condbr and #{st[:switch_folded]} switch, " \
          "removed #{st[:blocks_removed]} blocks, #{st[:phis_replaced]} phis replaced, #{st[:phis_removed]} dead phis, " \
-         "common subexpressions across blocks #{st[:cse]}"
+         "common subexpressions across blocks #{st[:cse]}, " \
+         "loads merged #{st[:loads_merged]}, " \
+         "stores forwarded #{st[:stores_forwarded]}, dead stores removed #{st[:stores_removed]}"
   end
   0
 rescue Fail, Unsupported => e
