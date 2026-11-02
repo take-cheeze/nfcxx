@@ -126,17 +126,16 @@ def check_goldens(files)
   failures.empty?
 end
 
-# The interpreter of pathb-ssa.rb does not model a call, a volatile access or the address of a slot. The cases
-# that test memory use them, so this subclass models them for the cases only: `&"observe"` reads and writes
-# nothing, `&"clobber"` writes 77 into the slot that its pointer argument names, `(addr $"x")` and
-# `(bitcast T $"x")` are the slot's address, `load.v` and `store.v` act as `load` and `store`. A pointer is the
-# quoted slot name.
+# The interpreter of pathb-ssa.rb does not model a call or a volatile access. The cases that test memory use them, so
+# this subclass models them for the cases only: `&"observe"` reads and writes nothing, `&"clobber"` writes 77 into the
+# slot whose address its pointer argument is, and `load.v` and `store.v` act as `load` and `store`. Addresses and
+# memory are the base interpreter's (slots are objects at addresses; see layout_slots).
 class CaseMachine < PathbEgraph::CheckedMachine
   private
 
   def exec(s)
     case head(s)
-    when "store", "store.v" then @mem[slot_name(s[2])] = val(s[3])
+    when "store.v" then super(["store", *s[1..]])
     when "eval" then call(s[1])
     else super
     end
@@ -144,14 +143,11 @@ class CaseMachine < PathbEgraph::CheckedMachine
 
   def eval_rv(f)
     case head(f)
-    when "load", "load.v" then @mem[slot_name(f[2])]
-    when "addr", "bitcast" then slot_name(f[-1])
+    when "load.v" then super(["load", *f[1..]])
     when "call" then call(f)
     else super
     end
   end
-
-  def slot_name(x) = x.is_a?(Ref) ? x.raw : val(x)
 
   def call(f)
     raise Unsupported, "call of #{sx(f[2])}" unless f[2].is_a?(Ref) && f[2].sigil == "&"
@@ -159,7 +155,9 @@ class CaseMachine < PathbEgraph::CheckedMachine
     case f[2].raw
     when '"observe"' then 0
     when '"clobber"'
-      @mem[slot_name(f[3])] = 77
+      a = addr_of(f[3])
+      key = slot_at(a) or raise Unsupported, "clobber of an address that is not a slot"
+      store_cell(@slot_type[key], a, canon(77, @slot_type[key]))
       0
     else raise Unsupported, "call of #{f[2].raw}"
     end

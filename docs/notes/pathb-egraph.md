@@ -267,8 +267,9 @@ relations, so the uses that remain stay dominated.
   switch operands are not constants); 1453 blocks removed; 65 phis replaced; 21 dead phis removed.
 - Budget: 22534 blocks saturated, 0 cut by iterations, 0 cut by nodes; 70295 input e-nodes and 6375 added; 27630
   rule rounds in total.
-- Interpreter on goldens: 43 functions run (215 random runs each side, all equal); the other 6556 use pointers,
-  calls, floats or other constructs the interpreter does not model.
+- Interpreter on goldens: 66 functions run (330 random runs each side, all equal); the other 6533 use calls,
+  aggregates passed by value, `static`, `weak` or `barrier` statements, or other constructs the interpreter does not model.
+  Slots and pointers into them are modelled (see the interpreter's memory in pathb-ssa.rb).
 - New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 2 after. It has a repeated `wadd` in one block,
   a commutative duplicate, `x*1`, `x+0`, `x-x`, `x&-1`, `x^0`, `x*0`, `eq` of two equal sums, a `+3 +4` chain and
   an `iconv` identity; the branch on the now-constant comparison folds to its true arm and the false arm is removed.

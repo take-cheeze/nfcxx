@@ -34,7 +34,7 @@ listing the slots that were removed. Slots that stay in memory keep their `(slot
 - **Uninitialized reads** of a promoted slot or variable yield zero (`(const T 0)`, `(null T)` for pointers). The IR
   leaves them unspecified (stage 2, item 7), so zero is one allowed choice. Float zero is printed as `0`, which the
   e-graph and the interpreter read as a float literal of that type.
-- **Structured interpretation is partial.** `--run` interprets integer and float code; `goto`, calls and pointers report
+- **Structured interpretation is partial.** `--run` interprets integer, float and scalar pointer code (objects at addresses; `offset`, `index`, `addr`, `bounds`, `nonnull`); `goto`, calls, by-value aggregates and `static`/`weak` report
   `structured=unsupported`. A `case` or `default` marker is interpreted only at block level in the switch body (inside
   nested `block`s); a marker inside an `if` or a loop reports `structured=unsupported`, while the SSA form converts it.
 
