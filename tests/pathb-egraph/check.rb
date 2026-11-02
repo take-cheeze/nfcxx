@@ -74,9 +74,11 @@ def check_goldens(files)
   totals = Hash.new(0)
   failures = []
   files.each do |f|
+    # The whole module's functions and globals: a call in one function reaches the others.
+    module_forms = ssa_texts(f).flat_map { |t| read_forms(t) } + read_forms(File.read(f)).select { |g| head(g) == "global" }
     ssa_texts(f).each do |text|
       totals[:functions] += 1
-      install_module(read_forms(text))
+      install_module(module_forms)
       orig = PathbEgraph.parse_fn(read_forms(text).first)
       begin
         out, st = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first))
@@ -160,7 +162,7 @@ class CaseMachine < PathbEgraph::CheckedMachine
       key = slot_at(a) or raise Unsupported, "clobber of an address that is not a slot"
       store_cell(@slot_type[key], a, canon(77, @slot_type[key]))
       0
-    else raise Unsupported, "call of #{f[2].raw}"
+    else call_fn(f)
     end
   end
 end
@@ -171,7 +173,8 @@ def interpret(efn, args)
   CaseMachine.new(fn, args).run_ssa(efn.blocks).to_s
 rescue Trap
   "trap"
-rescue Unsupported
+rescue Unsupported => e
+  warn "unsupported: #{e.message}" if ENV["CHECK_DEBUG"]
   :unsupported
 end
 
@@ -188,7 +191,8 @@ def check_case(f)
   main = ssa_texts(f).find { |t| t.start_with?('(ssa-function "main"') }
   raise Fail, "no converted main" unless main
 
-  install_module(read_forms(main))
+  globals = read_forms(File.read(f)).select { |g| head(g) == "global" }
+  install_module(ssa_texts(f).flat_map { |t| read_forms(t) } + globals)
   orig = PathbEgraph.parse_fn(read_forms(main).first)
   opt, = PathbEgraph.optimize_fn(orig)
   # The same function under a tight budget (cut short by iterations and by nodes): still correct.
