@@ -5,6 +5,7 @@ require 'fileutils'
 require 'zlib'
 require 'open3'
 require 'tmpdir'
+require 'set'
 require_relative 'insn_decoder'
 
 # AOT continuations for bodies whose Ruby frame semantics must survive suspension.
@@ -102,17 +103,43 @@ module NativeVM
     File.write(File.join(dir, 'builtins.json'), JSON.generate(programs))
   end
 
-  def dispatch(dir, output)
+  def referenced_ids(paths)
+    raise 'native VM has no preprocessed input inventory' if paths.empty?
+
+    ids = Set.new
+    paths.each do |path|
+      File.foreach(path) do |line|
+        # transform emits these declarations on one line; quoted Ruby pool data starts with a quote.
+        if (match = line.match(/^\s*(?:static|inline) const struct mrb_native_irep [\w$]+ = \{(\d+)u,/))
+          ids << match[1].to_i
+        end
+      end
+    end
+    ids
+  end
+
+  def dispatch(dir, output, active_ids: nil)
     programs = Dir[File.join(dir, '*.json')].sort.flat_map { |path| JSON.parse(File.read(path)) }
     raise 'native VM has no programs' if programs.empty?
 
     ids = {}
-    text = +"switch (irep->native->id) {\n"
     programs.each do |program|
       id, symbol = program.values_at('id', 'symbol')
       raise "native id collision: #{symbol} and #{ids[id]}" if ids.key?(id)
 
       ids[id] = symbol
+    end
+    if active_ids
+      missing = active_ids - ids.keys.to_set
+      raise "native VM lacks descriptors for active IDs: #{missing.to_a.sort.join(', ')}" unless missing.empty?
+
+      builtins = File.join(dir, 'builtins.json')
+      retained = active_ids | (File.file?(builtins) ? JSON.parse(File.read(builtins)).to_set { |program| program.fetch('id') } : Set.new)
+      programs = programs.select { |program| retained.include?(program.fetch('id')) }
+    end
+    text = +"switch (irep->native->id) {\n"
+    programs.each do |program|
+      id = program.fetch('id')
       text << "case #{id}u:\n  switch (mrb_irep_pc_offset(irep, ci->pc)) {\n"
       program.fetch('instructions').each do |start, after, op, args|
         text << "  case #{start}: ci->pc = mrb_irep_pc(irep, #{after}); insn = OP_#{op}; "

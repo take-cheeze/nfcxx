@@ -62,8 +62,13 @@ module NativeVM
     end
     update = "native-vm:update:#{build.name}"
     Rake::Task.define_task(update) do
-      Rake::Task[build.presym.list_path].invoke
-      NativeVM.dispatch(dir, header)
+      presym = Rake::Task[build.presym.list_path]
+      presym.invoke
+      active_ids = if ENV['BC2CPP_MAIN_AST']
+                     paths = presym.prerequisites.select { |path| File.extname(path) == build.exts.presym_preprocessed }
+                     NativeVM.referenced_ids(paths)
+                   end
+      NativeVM.dispatch(dir, header, active_ids: active_ids)
     end
     Rake::FileTask.define_task(header => update)
     %w[vm vm-cxx].each do |name|

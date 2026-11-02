@@ -1421,6 +1421,17 @@ if $PROGRAM_NAME == __FILE__
   warn '== constructor pools (CONSTRUCTOR_POOLS) =='
   gen.constructor_pool_report.each { |l| warn l }
   warn ''
+  main_reach = nil
+  if (main_ast = ENV['BC2CPP_MAIN_AST']) && !type_check_only
+    require_relative 'main_reachability'
+    definitions = CodeGen.block_self_bodies.merge(registry) { |_name, original, settled| (original + settled).uniq }
+    main_reach = MainReachability.analyze(ireps, definitions, MainRoots.read(main_ast), native_paths: native_paths || [],
+                                         prunable_keys: gen.unregistered_keys(lists: StaticDispatchLists.current))
+    warn "== main-root reachability: #{main_reach.labels.size}/#{ireps.size} instruction sequences retained =="
+    main_reach.refusals.each { |reason| warn "  retain all: #{reason}" }
+    main_reach.notes.each { |reason| warn "  retain named roots: #{reason}" }
+    main_reach.dead_keys.sort.each { |key| warn "  unreachable: #{key}" }
+  end
   # SHARED_GENERATION: everything above is the same for every unit; each continues from here in its own fork.
   if shared_units
     SharedGeneration.fork_units(shared_units, shared_prefix, shared_stderr, [symbol, out_dir])
@@ -1434,13 +1445,14 @@ if $PROGRAM_NAME == __FILE__
   # OTHER_DECLS_HEADER); see compile_send.
   other_owners = ENV['OTHER_OWNERS']&.split(',')
   compiled = profile_call.call('CodeGen.compile_all') do
-    gen.compile_all(only_owners: only_owners, other_owners: other_owners)
+    gen.compile_all(only_owners: only_owners, other_owners: other_owners, live_labels: main_reach&.labels)
   end
   compiled += gen.emit_synthesized_accessors(only_owners: only_owners)
   profile_phase.call('compile all methods')
   # DECLARED_RETURN_GUARD: the analysis trusted every runtime-checked declaration; abort unless this
   # run compiled each one it owns with its guard (before SKIP_UNSUPPORTED could leave one interpreted and unchecked).
-  guard_failures = DeclaredReturns.guard_failures(gen.declared_return_hints, compiled, only_owners, other_owners)
+  live_hints = gen.declared_return_hints.reject { |entry| main_reach&.dead_keys&.include?(entry.key) }
+  guard_failures = DeclaredReturns.guard_failures(live_hints, compiled, only_owners, other_owners)
   unless guard_failures.empty?
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
@@ -2196,7 +2208,8 @@ if $PROGRAM_NAME == __FILE__
   # registration to replace its body, but the removal leaves that body's bytecode in the binary. It is judged like a
   # compiled entry, so its body is stubbed too: the bytecode goes, and a call that somehow reached it would raise.
   left_out_entries = gen.left_out_core_ram.map { |owner, name| { owner: owner, name: name, visibility: :public } }
-  stub_keys, load_register = MrblibStubs.stubbable(compiled + left_out_entries, ireps, registry, CodeGen.block_self_bodies,
+  dead_entries = main_reach ? main_reach.dead_keys.map { |key| owner, name = key.split('#', 2); { owner: owner, name: name, visibility: :public } } : []
+  stub_keys, load_register = MrblibStubs.stubbable(compiled + left_out_entries + dead_entries, ireps, registry, CodeGen.block_self_bodies,
                                                    world: MrblibStubs.class_world_from_env(ENV, srcs),
                                                    copy_context: MrblibStubs.copy_context(ENV, srcs, out_dir),
                                                    early: ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') == 'all' && !ENV['BC2CPP_LOAD_WORLD'].to_s.empty?)
