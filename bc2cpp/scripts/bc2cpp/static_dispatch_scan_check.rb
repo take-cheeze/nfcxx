@@ -254,6 +254,12 @@ check('symbol uses: a by-name call of the symbol is one, beside a value use', !q
 check('symbol uses: without SYMBOL_USES a symbol value is a lookup', S.lookup_free_names(values, {}).empty?)
 check('left out: a bc2cpp_left_out call is no name literal',
       S.c_literals(%(bc2cpp_left_out(M, picture, "finish_zoom", false);\n mrb_funcall(M, v, "kept", 0);)) == ['kept'])
+# POOL_STRING_VALUE: a pure pool value is no literal; an impure one and a folded constant's value still are.
+pool_src = %(r1 = bc2cpp_pool_str(M, "x");\n r2 = bc2cpp_pool_str(M, "send_me");\n r3 = mrb_str_new_cstr(M, "x");)
+check('pool value: a pure pool string is no literal, a folded value still is',
+      S.c_literals(pool_src, pool_pure: Set['x']) == ['send_me', 'x'])
+check('pool value: without a pure verdict every value is a literal',
+      S.c_literals(pool_src) == ['x', 'send_me', 'x'])
 
 # --- BYTECODE_PROC ---
 check('bytecode proc: mrb_proc_new / mrb_closure_new',

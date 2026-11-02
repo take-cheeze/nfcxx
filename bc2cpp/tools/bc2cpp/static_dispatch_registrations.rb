@@ -268,8 +268,10 @@ module StaticDispatchRegistrations
 
   # Every C string literal in `src` that is not the name argument of a
   # registration call, with comments dropped first.
-  def c_literals(src, exempt: Set.new)
+  def c_literals(src, exempt: Set.new, pool_pure: Set.new)
     body = src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
+    # A pool string's value only; the same text as a folded constant (mrb_str_new_cstr) is still scanned.
+    body = body.gsub(POOL_STRING_VALUE) { pool_pure.include?(unescape(Regexp.last_match(1))) ? '' : Regexp.last_match(0) }
     table = nil
     body = body.sub(SYM_TABLE) { table = Regexp.last_match(1); '' }
     names = body.scan(STRING_LITERAL).map { |(s)| unescape(s) }
@@ -277,6 +279,8 @@ module StaticDispatchRegistrations
   end
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
+  # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant.
+  POOL_STRING_VALUE = /bc2cpp_pool_str\(M, "((?:[^"\\\n]|\\.)*)"\)/
   # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`
   # or the index argument of `bc2cpp_send(M, recv, <index>, ...)`.
   SYM_TABLE = /bc2cpp_sym_names\[\d+\] = \{\n(.*?)^\};/m
@@ -975,11 +979,6 @@ module StaticDispatchRegistrations
         fragments << s if s.match?(FRAGMENT)
       end
     end
-    runs.each do |gem, r|
-      literals = c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?))
-      dynamic.merge(literals)
-      cite(literals, "a C string literal in #{gem}'s generated code")
-    end
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
     text = Set.new
     outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text)
@@ -991,6 +990,15 @@ module StaticDispatchRegistrations
 
       dynamic << s
       cite([s], "a string literal in #{irep_site(sites.first, method_of, body_of)}")
+    end
+    # POOL_STRING_VALUES (closed only): an identifier-shaped pool string whose uses were proven pure above. Its
+    # generated `bc2cpp_pool_str` value is the same string, so the generated-code scan may skip that value only.
+    pool_pure = symbol_lookups ? literal_sites.keys.to_set - looked_up : Set.new
+    runs.each do |gem, r|
+      literals = c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?),
+                                     pool_pure: pool_pure)
+      dynamic.merge(literals)
+      cite(literals, "a C string literal in #{gem}'s generated code")
     end
 
     # Which bytecode can run. No method body -- compiled or not -- runs as

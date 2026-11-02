@@ -180,7 +180,7 @@ class CodeGen
         # the object OP_FSTRING returns. The bytes are escaped one by one, so the length is exact.
         "  r#{d} = mrb_frozen_literal(M, #{c_string_literal(entry)}, #{entry.bytesize});\n"
       elsif entry.is_a?(String)
-        "  r#{d} = mrb_str_new_cstr(M, #{c_string_literal(entry)});\n"
+        "  r#{d} = bc2cpp_pool_str(M, #{c_string_literal(entry)});\n"
       else
         "  #error STRING references a non-string pool entry (#{entry[:type]}) -- not in this prototype's supported subset\n"
       end
