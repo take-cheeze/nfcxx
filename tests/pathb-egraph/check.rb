@@ -8,7 +8,8 @@
 #   ruby tests/pathb-egraph/check.rb cases FILE.ir...     every file's `main` is optimized and verified; with a .args
 #                                                          file it is also run in the interpreter, original against
 #                                                          optimized, on the .args inputs (expected values checked)
-#                                                          and on 50 random inputs
+#                                                          and on 50 random inputs; a .lets file gives the
+#                                                          expected number of lets after optimization
 #
 # Exit status 1 on any failure.
 
@@ -94,6 +95,7 @@ def check_goldens(files)
         failures << "#{File.basename(f)}: constant branch left" if constant_branches(out).positive?
         totals[:branches_before] += branch_count(orig)
         totals[:branches_after] += branch_count(out)
+        totals[:cse] += st[:cse]
         # The cut-short output (a small budget) is verified too.
         tight, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first), iters: 2, nodes: 20)
         PathbEgraph.verify(tight)
@@ -114,6 +116,7 @@ def check_goldens(files)
   puts "     control: branches (condbr, switch) #{totals[:branches_before]} -> #{totals[:branches_after]}, folded " \
        "#{totals[:condbr_folded]} condbr and #{totals[:switch_folded]} switch, removed " \
        "#{totals[:blocks_removed]} blocks, #{totals[:phis_replaced]} phis replaced, #{totals[:phis_removed]} dead phis"
+  puts "     common subexpressions across blocks merged: #{totals[:cse]}"
   failures.each { |m| puts "FAIL golden #{m}" }
   failures.empty?
 end
@@ -164,7 +167,13 @@ def check_case(f)
   end
   errors << "lets grew from #{before[0]} to #{after[0]}" if after[0] > before[0]
   errors << "a constant branch is left" if constant_branches(opt).positive?
-  errors << "no let removed (the redundancy case must shrink)" if f.include?("pathb-egraph/cases") && after[0] >= before[0]
+  errors << "no let removed (the redundancy case must shrink)" if File.basename(f) == "redundant.ir" && after[0] >= before[0]
+  # A `.lets` file holds the hand-derived number of lets after optimization.
+  lets_file = f.sub(/\.ir\z/, ".lets")
+  if File.exist?(lets_file)
+    want_lets = Integer(File.read(lets_file).strip, 10)
+    errors << "lets after optimization: want #{want_lets}, got #{after[0]}" unless after[0] == want_lets
+  end
   status = errors.empty? ? "ok  " : "FAIL"
   puts "#{status} cases #{File.basename(f)}: lets #{before[0]} -> #{after[0]} (pure #{before[1]} -> #{after[1]}), " \
        "#{runs} interpreted runs equal, #{unsupported} unsupported"

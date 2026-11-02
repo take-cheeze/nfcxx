@@ -20,9 +20,10 @@ Options: `--iters N` (saturation rounds per block, default 8), `--nodes N` (e-no
 3. **Saturate** the block's e-graph with the rewrite rules, within the budget.
 4. **Extract and emit** each `let` in order: the cheapest form of its class whose operands are available here. The
    `let` keeps its name when its own form is emitted; intermediate values get fresh names `%gN`.
-5. Apply the replacements globally (a dropped register is replaced by a register or a constant that dominates it),
-   fold the control flow (below), remove pure `let`s without uses (the same rule as the converter's cleanup), and
-   verify the result.
+5. **Common subexpressions across blocks** (below): a pure `let` identical to one in a dominating block takes that
+   block's register.
+6. Apply the replacements globally (a dropped register is replaced by a register or a constant that dominates it),
+   fold the control flow (below), remove pure `let`s without uses (the same rule as the converter's cleanup), and verify the result.
 
 ## The e-graph
 
@@ -40,10 +41,34 @@ Options: `--iters N` (saturation rounds per block, default 8), `--nodes N` (e-no
   itself (`x + 0 = x` with `x` opaque): the merged expression is equal to it, so the class stays one value.
 - **Scope.** An e-graph exists for one block; equalities are not carried into other blocks. A class is emitted in a
   block only from registers and constants that are available there: a register of a dominating block, a register
-  already emitted in this block, or a constant. Nothing is moved across blocks (no code motion).
+  already emitted in this block, or a constant. Nothing is moved across blocks (no code motion); equal values in
+  dominating blocks are shared by the separate pass in "Common subexpressions across blocks".
 - **Pure operators** are the whitelist `PURE_OPS` of `pathb-ssa.rb` minus `load`, `const`, `null`: `iconv`,
   `wadd`, `wsub`, `wmul`, `wneg`, the comparisons, `and`, `or`, `xor`, `not`, `index`, `offset`. Operators without a
   rule (`wneg`, `not`, `index`, `offset`) are hash-consed and never folded.
+
+## Common subexpressions across blocks
+
+`cse_dominator` runs after every block has been emitted and before the replacements are applied. It walks the
+dominator tree in preorder with a scoped table keyed by `[type, right-hand side]`, where the right-hand side is the
+operator with its literals and its operands after the substitution so far:
+
+- On entering a block, each pure `let` whose key is already in the table is removed, and its register is replaced by
+  the register that the table holds. Otherwise its key and register are added to the table.
+- On leaving a block, the keys that block added are removed, so a sibling subtree never sees them.
+
+A table entry comes from a block that dominates the one it is used in (or an earlier `let` of the same block), so
+the replacement is available at every use, including phi arguments (a use at the end of a predecessor is dominated
+too). Keys are exact: operator, type and operands are compared as written, with no commutative reordering (the
+e-graph inside a block already handles that). Only the whitelist `PURE_OPS` minus `load`, `const` and `null` is
+keyed. Loads, checked operations (`cdiv`, `crem`, `cshl`, `cshr`, bounds, `cf2i`), calls, and everything else are
+never keys, so they are never merged or moved. A phi is never a replacement. The operands of a key are already
+resolved, so chains of merges are followed in one pass.
+
+Test cases (`tests/pathb-egraph/cases/`): `gvn_dominating.ir` (a `wadd` of the entry block reused in the then arm:
+4 lets -> 3), `gvn_siblings.ir` (the same `wmul` in both arms: neither dominates, 4 -> 4), and `gvn_checked_div.ir`
+(a repeated `cdiv` in a dominated arm: not merged, 3 -> 3). Their `.lets` files hold the hand-derived let counts.
+Disabling the scope pop makes the sibling case fail the verifier.
 
 ## Rewrite rules
 
@@ -162,8 +187,14 @@ relations, so the uses that remain stay dominated.
 
 ## Not done
 
-- **Across blocks.** No common-subexpression elimination between a dominating block and a dominated one, and no code
-  motion. Only constants and registers replaced by a dominator reach a block.
+- **Across blocks, code motion.** The pass only reuses a dominating definition; nothing is hoisted or sunk, so an
+  operation computed on two sibling paths stays computed twice, and a loop-invariant operation is not moved out.
+  No partial redundancy elimination.
+- **Known failure (not from this pass).** `switch` is not a terminator of the e-graph reader (`TERMINATORS` in
+  `pathb-egraph.rb`), so the golden functions `bitfield2.ir` (`swE3Neg`), `float_neg_switch.ir` (`classify`), `vla.ir`
+  (`in_switch`) and `vla_scope.ir` (`sw`) fail with "block without a terminator", and so do the `switch_*` cases of
+  `tests/pathb-ssa/cases`; the same failure occurs without this pass. `run.sh` therefore exits 1 until the switch
+  handling is fixed.
 - **Memory.** Every `load` is opaque: two loads of the same slot with no store between are not merged, and no
   store-to-load forwarding is done. Stores, calls and volatile accesses are never moved or merged.
 - **Constants.** Only decimal literals are constants in the e-graph (`const_value`), so a hex literal such as `0x1` is
