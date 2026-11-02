@@ -22,11 +22,6 @@ cd "$src"
 if [ ! -f build/gcc/CMakeCache.txt ]; then
   edg-exec -- cmake --preset linux-gcc-debug
 fi
-# The recorded EDG expectations are for test programs that declare EH state as
-# plain globals, which is what a non-thread-local runtime links against. The
-# Linux nfcxx runtime is thread-local by default; keep the EDG test runtime
-# non-thread-local so recorded run-test options stay valid.
-edg-exec -- cmake -DNFCXX_EH_NO_TLS=ON build/gcc
 edg-exec -- cmake --build build/gcc --target cpfe edg_prelink edg_decode edg_munch libedgrt.a
 touch build/gcc/upstream-build-complete
 before=$(find tests/runs -maxdepth 1 -type d -name '20*' | sort | tail -1)
