@@ -38,8 +38,9 @@ dump="${BC2CPP_TRACE_TYPES_OUT:-$host_dir/param_trace.tsv}"
 mruby_lib="$build_dir/closed/lib/libmruby.a"
 mruby_inc="$build_dir/closed/include"
 jobs="$(nproc)"
+cxx="${CXX:-c++}"
 
-for tool in c++ cc ar nproc; do
+for tool in "$cxx" cc ar nproc; do
   command -v "$tool" >/dev/null 2>&1 || { echo "error: '$tool' not found on PATH" >&2; exit 1; }
 done
 for f in "$mruby_lib" "$mruby_inc/mrbconf.h" "$root/3rd/lvgl/lvgl.h" \
@@ -72,7 +73,7 @@ ar rcs "$host_dir/liblvgl.a" "$host_dir"/lvgl/*.o
 # gives mruby-rgss and mruby-lcf, so the tables the headers expose are present.
 uni_defs="-DUNI_ALGO_DISABLE_CASE -DUNI_ALGO_DISABLE_PROP -DUNI_ALGO_DISABLE_SCRIPT -DUNI_ALGO_DISABLE_SEGMENT_GRAPHEME -DUNI_ALGO_DISABLE_SEGMENT_WORD"
 # shellcheck disable=SC2086
-c++ -std=gnu++17 -O1 -g -c $uni_defs -I"$root/3rd/uni-algo/include" \
+"$cxx" -std=gnu++17 -O1 -g -c $uni_defs -I"$root/3rd/uni-algo/include" \
   "$root/3rd/uni-algo/src/data.cpp" -o "$host_dir/uni-algo/data.o"
 ar rcs "$host_dir/libuni-algo.a" "$host_dir/uni-algo/data.o"
 
@@ -86,7 +87,7 @@ fi
 # Driver. The defines are the closed target's (build_config.rb `closed`):
 # C++ exception mode, debug, and the string/heap/khash caps; MRB_USE_BIGINT is
 # the bigint gem both sides carry. Layout-relevant ones must match libmruby.a.
-c++ -std=gnu++17 -O1 -g -Wall "${lookup_defs[@]}" \
+"$cxx" -std=gnu++17 -O1 -g -Wall "${lookup_defs[@]}" \
   -DMRB_ENABLE_CXX_EXCEPTION -DMRB_DEBUG -DMRB_USE_BIGINT \
   -DMRB_STR_LENGTH_MAX=0 -DMRB_HEAP_PAGE_SIZE=256 -DKHASH_INITIAL_SIZE=16 \
   -DLV_CONF_INCLUDE_SIMPLE \
@@ -94,7 +95,7 @@ c++ -std=gnu++17 -O1 -g -Wall "${lookup_defs[@]}" \
   -c "$root/scripts/bc2cpp/trace_host.cxx" -o "$host_dir/trace_host.o"
 # --gc-sections: the closed libmruby.a is built with one section per function (build_config.rb
 # GC_SECTIONS), so the host keeps only what it reaches, as a device build does.
-c++ "${lookup_link[@]}" -o "$host_dir/trace_host" "$host_dir/trace_host.o" \
+"$cxx" "${lookup_link[@]}" -o "$host_dir/trace_host" "$host_dir/trace_host.o" \
   "$mruby_lib" "$host_dir/liblvgl.a" "$host_dir/libuni-algo.a" -lpthread -lm -Wl,--gc-sections
 
 echo "built $host_dir/trace_host"

@@ -111,8 +111,6 @@ map() {
   local rc=$?
   if [ "$rc" -ne 0 ] || grep -q -E "$bad_re" "$log"; then
     echo "$id rc=$rc"
-  else
-    rm -f "$log"
   fi
 }
 export -f map

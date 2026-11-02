@@ -8,6 +8,7 @@ require_relative '../../tools/bc2cpp/native_vm'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/initializer_tables'
 require_relative '../../tools/bc2cpp/native_inventory'
+require 'rake'
 
 # The fixture defines its own program rather than the engine's signature classes.
 ENV['BC2CPP_SIG_DIRS'] = ''
@@ -286,6 +287,34 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
   abort 'fixture preprocessing failed' unless system('gcc', '-E', '-P', '-dD', '-MMD', '-MF', depfile, native_source, '-o', pi)
   NativeInventory.export([{ 'source' => native_source, 'preprocessed' => pi, 'depfile' => depfile }], inventory_path)
   inventory = NativeInventory.read(inventory_path)
+  build_dir = File.join(dir, 'closed')
+  FileUtils.mkdir_p(build_dir)
+  gem_name = BC2CPP_COMPILED_GEMS.keys.first
+  gem_dir = File.join(root, gem_name)
+  registration = File.join(gem_dir, 'src/register.cxx')
+  shard = File.join(build_dir, 'example_gen_shard1.cpp')
+  File.write(shard, '// modeled Ruby')
+  selected_pi = File.join(build_dir, 'selected.pi')
+  Rake::FileTask.define_task(selected_pi => [native_source]) do
+    abort 'fixture preprocessing failed' unless system('gcc', '-E', '-P', '-dD', '-MD', '-MF', "#{selected_pi}.inventory.d", native_source, '-o', selected_pi)
+  end
+  excluded = [registration, shard].map.with_index do |source, index|
+    path = File.join(build_dir, "excluded#{index}.pi")
+    Rake::FileTask.define_task(path => [source]) { raise 'modeled Ruby unit was preprocessed' }
+    path
+  end
+  list = File.join(build_dir, 'presym')
+  Rake::FileTask.define_task(list => [selected_pi, *excluded])
+  compiler = Struct.new(:preprocess_options).new('-E')
+  gem = Struct.new(:name, :dir, :compilers).new(gem_name, gem_dir, [])
+  build = Struct.new(:build_dir, :presym, :exts, :compilers, :gems).new(
+    build_dir, Struct.new(:list_path).new(list), Struct.new(:presym_preprocessed).new('.pi'), [compiler], [gem]
+  )
+  build_inventory = File.join(dir, 'build-inventory.json')
+  NativeInventory.export_build(build, build_inventory)
+  check.call('build inventory excludes compiled registration wrappers and generated Ruby shards',
+             NativeInventory.read(build_inventory).fetch('units').map { |unit| unit.fetch('source') } == [native_source])
+  check.call('inventory export restores compiler preprocessing options', compiler.preprocess_options == '-E')
   native_names = inventory.fetch('units').first.fetch('names')
   check.call('preprocessed inventory retains active calls and presym-tag names', %w[qr9z_runtime qr9z_tag].all? { |name| native_names.include?(name) })
   check.call('disabled compiler code, macro definitions and ROM destinations are not lookup roots',
@@ -295,8 +324,15 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
   unlinked = File.join(dir, 'unlinked.c')
   File.write(unlinked, 'void unused() { mrb_funcall(0, 0, "qr9z_unlinked", 0); }')
   saved_inventory = ENV['BC2CPP_NATIVE_INVENTORY']
+  saved_main = ENV['BC2CPP_MAIN_AST']
   begin
     ENV['BC2CPP_NATIVE_INVENTORY'] = inventory_path
+    build_ast.call
+    ENV['BC2CPP_MAIN_AST'] = ast
+    generated = File.join(dir, 'profile_gen.cpp')
+    Rake::FileTask.define_task(native_source => [generated])
+    Rake::FileTask.define_task(generated => bc2cpp_main_prerequisites) { File.write(generated, '// generated') }.invoke
+    check.call('profile generation avoids reverse edges through native registration sources', File.file?(generated))
     selected_roots = MainRoots::Result.new(names: Set.new, functions: Set.new, refusals: [], native_paths: Set.new)
     selected = MainReachability.analyze(alias_ireps, alias_defs, selected_roots, native_paths: [native_source, unlinked],
                                          prunable_keys: alias_keys, seed_named: false, trace: true)
@@ -307,6 +343,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
                selected.reasons.fetch('qr9z_runtime').any? { |reason| reason[:kind] == 'native_preprocessed' && reason[:source] == native_source })
   ensure
     saved_inventory ? ENV['BC2CPP_NATIVE_INVENTORY'] = saved_inventory : ENV.delete('BC2CPP_NATIVE_INVENTORY')
+    saved_main ? ENV['BC2CPP_MAIN_AST'] = saved_main : ENV.delete('BC2CPP_MAIN_AST')
   end
   File.write(native_source, File.read(native_source) + "\n// changed\n")
   stale_inventory = false

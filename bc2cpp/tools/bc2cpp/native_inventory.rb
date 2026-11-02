@@ -82,8 +82,11 @@ module NativeInventory
         wrapper = File.basename(source).match?(/-cxx\.cxx\z/)
         # Generated Ruby/codegen units are modeled by their Ruby IR, not a second scan of their definition data.
         generated = File.expand_path(source).start_with?(File.expand_path(build.build_dir) + '/')
-        ruby_unit = File.basename(source).match?(/\A(?:mrblib\.c|gem_init\.c|\w+_gen(?:_\d+)?\.cpp)\z/)
-        next if generated && ruby_unit && !wrapper
+        ruby_unit = File.basename(source).match?(/\A(?:mrblib\.c|gem_init\.c|\w+_gen(?:_(?:\d+|shard\d+))?\.cpp)\z/)
+        registration = build.gems.any? do |gem|
+          BC2CPP_COMPILED_GEMS.key?(gem.name) && File.expand_path(source) == File.join(gem.dir, 'src/register.cxx')
+        end
+        next if registration || (generated && ruby_unit && !wrapper)
 
         task.invoke
         task.execute

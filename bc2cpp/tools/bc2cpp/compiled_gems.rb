@@ -253,10 +253,13 @@ def bc2cpp_main_prerequisites
 
   require_relative 'main_roots'
   MainRoots.read(path)
-  paths = [path, *JSON.parse(File.read(path)).fetch('dependencies').keys]
+  # Native inputs may already depend on generated gems in Rake's graph.
+  # The manifests validate their hashes without adding those reverse edges.
+  paths = [path]
   if (inventory = ENV['BC2CPP_NATIVE_INVENTORY'])
     require_relative 'native_inventory'
-    paths += [inventory, *NativeInventory.read(inventory).fetch('dependencies').keys]
+    NativeInventory.read(inventory)
+    paths << inventory
   end
   paths
 end

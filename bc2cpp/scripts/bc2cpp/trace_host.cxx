@@ -122,6 +122,13 @@ void set_const(mrb_state* M, const char* name, mrb_value v) {
   mrb_const_set(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, name), v);
 }
 
+bool kernel_factory_present(mrb_state* M, const char* name) {
+  if (!mrb_respond_to(M, mrb_obj_value(M->top_self), mrb_intern_cstr(M, name)))
+    return false;
+  fprintf(stderr, "TRACE_HOST omitted Kernel factory present: %s\n", name);
+  return true;
+}
+
 // Prints the pending Ruby exception (class and message) to stderr and clears
 // it. Returns true when it was a SystemExit, which is a normal end of the game.
 bool report_exception(mrb_state* M, const char* where) {
@@ -296,14 +303,13 @@ int main(int argc, char** argv) {
         present = true;
       }
     }
-    for (const char* name : {"Integer", "Float", "String", "Array", "Hash"}) {
-      if (mrb_respond_to(M, mrb_obj_value(M->top_self),
-                         mrb_intern_cstr(M, name))) {
-        fprintf(stderr, "TRACE_HOST omitted Kernel factory present: %s\n",
-                name);
-        present = true;
-      }
-    }
+    // Literal callers keep the finite probe names visible to main-root
+    // analysis.
+    present |= kernel_factory_present(M, "Integer");
+    present |= kernel_factory_present(M, "Float");
+    present |= kernel_factory_present(M, "String");
+    present |= kernel_factory_present(M, "Array");
+    present |= kernel_factory_present(M, "Hash");
     if (!present)
       fprintf(stdout, "TRACE_HOST omitted dependencies absent\n");
     mrb_close(M);
