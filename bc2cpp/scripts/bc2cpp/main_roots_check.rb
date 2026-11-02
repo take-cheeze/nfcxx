@@ -6,6 +6,8 @@ require_relative '../../tools/bc2cpp/main_roots'
 require_relative '../../tools/bc2cpp/main_reachability'
 require_relative '../../tools/bc2cpp/native_vm'
 require_relative '../../tools/bc2cpp/bc2cpp'
+require_relative '../../tools/bc2cpp/initializer_tables'
+require_relative '../../tools/bc2cpp/native_inventory'
 
 # The fixture defines its own program rather than the engine's signature classes.
 ENV['BC2CPP_SIG_DIRS'] = ''
@@ -27,6 +29,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
     extern "C" int mrb_funcall(void*, int, const char*, int);
     extern void install(void (*)());
     extern int MainRootProbe_qr9z_direct_impl(void*, int);
+    const char* diagnostic_label = "qr9z_label";
   CPP
   File.write(host, <<~CPP)
     #include "host.h"
@@ -50,6 +53,12 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
              %w[qr9z_entry qr9z_other qr9z_callback qr9z_boot].all? { |name| roots.names.include?(name) })
   check.call('an unused native function contributes no Ruby roots', !roots.names.include?('qr9z_unused'))
   check.call('finite conditional names are resolved', roots.refusals.empty?)
+  strict_ast = File.join(dir, 'strict-main.json')
+  abort 'strict host AST generation failed' unless system(RbConfig.ruby, File.join(root, 'scripts/bc2cpp/main_ast.rb'), host, strict_ast, '--lookup-names-only')
+  strict_roots = MainRoots.read(strict_ast)
+  check.call('lookup-only AST roots preserve calls while excluding unrelated string data',
+             strict_roots.names.include?('qr9z_entry') && strict_roots.names.include?('qr9z_boot') &&
+             roots.names.include?('qr9z_label') && !strict_roots.names.include?('qr9z_label'))
 
   source = <<~RUBY_SOURCE
     class MainRootProbe
@@ -198,6 +207,115 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
     original_unregistered ? ENV['BC2CPP_UNREGISTERED_EXTRA'] = original_unregistered : ENV.delete('BC2CPP_UNREGISTERED_EXTRA')
     original_report ? ENV['BC2CPP_MAIN_REPORT'] = original_report : ENV.delete('BC2CPP_MAIN_REPORT')
   end
+
+  ctor_source = <<~RUBY_SOURCE
+    module Game
+      class CtorLeaf
+        def initialize(value); @value = value; end
+        def value; @value; end
+      end
+      class CtorChild < CtorLeaf; end
+      module CtorFactory
+        def self.make(value); CtorLeaf.new(value); end
+        def self.child(value); CtorChild.new(value); end
+      end
+    end
+  RUBY_SOURCE
+  ctor_dir = File.join(dir, 'constructors')
+  _ctor_code, ctor_err = Bc2cppFixtureRuntime.generate(ctor_source, ctor_dir, core: true, drop_native: ['/mruby-rgss/src/'])
+  ctor_keys = InitializerTables.proven([{ err: ctor_err }])
+  check.call('all construction sites, including an inherited initializer, prove a tableless entry', ctor_keys.include?('Game::CtorLeaf#initialize'))
+  check.call('missing unit evidence refuses the initializer proof', InitializerTables.proven([{ err: '' }]).empty?)
+  bad_source = ctor_source + "\nmodule Game::CtorFactory; def self.bad; Game::CtorLeaf.new; end; end\n"
+  _bad_code, bad_err = Bc2cppFixtureRuntime.generate(bad_source, File.join(dir, 'bad-constructors'), core: true, drop_native: ['/mruby-rgss/src/'])
+  check.call('a wrong-arity new still requires the named initializer', !InitializerTables.proven([{ err: bad_err }]).include?('Game::CtorLeaf#initialize'))
+  dynamic_source = ctor_source + "\nmodule Game::CtorFactory; def self.dynamic(object, name); object.send(name); end; end\n"
+  _dynamic, dynamic_err = Bc2cppFixtureRuntime.generate(dynamic_source, File.join(dir, 'dynamic-constructors'), core: true, drop_native: ['/mruby-rgss/src/'])
+  check.call('an unbounded reflective call refuses initializer table omission', InitializerTables.proven([{ err: dynamic_err }]).empty?)
+  super_source = ctor_source + "\nclass Game::CtorOverride < Game::CtorLeaf; def initialize(value); super(value); end; end\n"
+  _super_code, super_err = Bc2cppFixtureRuntime.generate(super_source, File.join(dir, 'super-constructors'), core: true, drop_native: ['/mruby-rgss/src/'])
+  check.call('an unproven super route preserves its parent initializer', !InitializerTables.proven([{ err: super_err }]).include?('Game::CtorLeaf#initialize'))
+  _load_code, load_err = Bc2cppFixtureRuntime.generate(ctor_source + "\nGame::CtorFactory.make(1)\n", File.join(dir, 'load-constructors'), core: true, drop_native: ['/mruby-rgss/src/'])
+  check.call('a constructor caller that runs during load preserves the initializer', !InitializerTables.proven([{ err: load_err }]).include?('Game::CtorLeaf#initialize'))
+  _foreign_code, foreign_err = Bc2cppFixtureRuntime.generate(ctor_source, File.join(dir, 'foreign-constructors'), core: true,
+                                                            foreign: [['ctor_foreign.rb', 'module ForeignCtor; def self.make(klass, value); klass.new(value); end; end']],
+                                                            drop_native: ['/mruby-rgss/src/'])
+  check.call('an unmodeled foreign constructor refuses initializer omission', InitializerTables.proven([{ err: foreign_err }]).empty?)
+  saved_extra = ENV['BC2CPP_UNREGISTERED_EXTRA']
+  begin
+    ENV['BC2CPP_UNREGISTERED_EXTRA'] = ctor_keys.to_a.join(',')
+    omitted_dir = File.join(dir, 'omitted-constructors')
+    _omitted, omitted_err = Bc2cppFixtureRuntime.generate(ctor_source, omitted_dir, core: true, drop_native: ['/mruby-rgss/src/'])
+    ctor_built, ctor_output = Bc2cppFixtureRuntime.run(omitted_dir, omitted_err, ['Game::CtorLeaf', 'Game::CtorFactory.singleton'], <<~CPP, build: Bc2cppFixtureRuntime.full_or_build, full: true)
+      static int scenario(mrb_state* M) {
+        if (compiled) bc2cpp_register_owner_methods(M);
+        mrb_value game = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "Game"));
+        mrb_value factory = mrb_const_get(M, game, mrb_intern_lit(M, "CtorFactory"));
+        for (const char* name : {"make", "child"}) {
+          mrb_value object = mrb_funcall(M, factory, name, 1, mrb_int_value(M, 47));
+          if (M->exc) return 1;
+          call(M, "constructed", object, "value");
+        }
+        struct RClass* leaf = mrb_class_ptr(mrb_const_get(M, game, mrb_intern_lit(M, "CtorLeaf")));
+        struct RClass* definer = leaf;
+        mrb_method_search_vm(M, &definer, mrb_intern_lit(M, "initialize"));
+        return M->exc || (compiled ? definer == leaf : definer != leaf) ? 1 : 0;
+      }
+    CPP
+    warn ctor_output unless ctor_built
+    check.call('direct and inherited construction work with the initializer physically absent from its table',
+               ctor_built && ctor_output.scan('constructed => 47').size == 4)
+  ensure
+    saved_extra ? ENV['BC2CPP_UNREGISTERED_EXTRA'] = saved_extra : ENV.delete('BC2CPP_UNREGISTERED_EXTRA')
+  end
+
+  native_source = File.join(dir, 'selected.c')
+  pi = File.join(dir, 'selected.pi')
+  depfile = File.join(dir, 'selected.d')
+  inventory_path = File.join(dir, 'native-inventory.json')
+  File.write(native_source, <<~'C')
+    #define MRB_NATIVE_ONLY 1
+    #define MRB_SYM(name) <@! #name !@>
+    #define UNUSED_LOOKUP mrb_funcall(0, 0, "qr9z_macro", 0)
+    #ifndef MRB_NATIVE_ONLY
+    void compiler() { mrb_funcall(0, 0, "qr9z_compiler", 0); }
+    #endif
+    const mrb_mt_entry methods[] = {{0, MRB_SYM(qr9z_definition), 0}};
+    void runtime() { mrb_funcall(0, 0, "qr9z_runtime", 0); mrb_funcall_id(0, 0, MRB_SYM(qr9z_tag), 0); }
+  C
+  abort 'fixture preprocessing failed' unless system('gcc', '-E', '-P', '-dD', '-MMD', '-MF', depfile, native_source, '-o', pi)
+  NativeInventory.export([{ 'source' => native_source, 'preprocessed' => pi, 'depfile' => depfile }], inventory_path)
+  inventory = NativeInventory.read(inventory_path)
+  native_names = inventory.fetch('units').first.fetch('names')
+  check.call('preprocessed inventory retains active calls and presym-tag names', %w[qr9z_runtime qr9z_tag].all? { |name| native_names.include?(name) })
+  check.call('disabled compiler code, macro definitions and ROM destinations are not lookup roots',
+             %w[qr9z_compiler qr9z_macro qr9z_definition].none? { |name| native_names.include?(name) })
+  dynamic_table = 'const mrb_mt_entry rows[] = {{factory(), <@! "qr9z_dynamic_table" !@>, 0}};'
+  check.call('unrecognized executable table initializers remain conservative input', NativeInventory.clean(dynamic_table).include?('qr9z_dynamic_table'))
+  unlinked = File.join(dir, 'unlinked.c')
+  File.write(unlinked, 'void unused() { mrb_funcall(0, 0, "qr9z_unlinked", 0); }')
+  saved_inventory = ENV['BC2CPP_NATIVE_INVENTORY']
+  begin
+    ENV['BC2CPP_NATIVE_INVENTORY'] = inventory_path
+    selected_roots = MainRoots::Result.new(names: Set.new, functions: Set.new, refusals: [], native_paths: Set.new)
+    selected = MainReachability.analyze(alias_ireps, alias_defs, selected_roots, native_paths: [native_source, unlinked],
+                                         prunable_keys: alias_keys, seed_named: false, trace: true)
+    check.call('reachability consumes selected preprocessing instead of raw or unlinked branches',
+               selected.refusals.empty? && selected.names.include?('qr9z_runtime') &&
+               !selected.names.include?('qr9z_compiler') && !selected.names.include?('qr9z_unlinked'))
+    check.call('preprocessed retention evidence records its selected source',
+               selected.reasons.fetch('qr9z_runtime').any? { |reason| reason[:kind] == 'native_preprocessed' && reason[:source] == native_source })
+  ensure
+    saved_inventory ? ENV['BC2CPP_NATIVE_INVENTORY'] = saved_inventory : ENV.delete('BC2CPP_NATIVE_INVENTORY')
+  end
+  File.write(native_source, File.read(native_source) + "\n// changed\n")
+  stale_inventory = false
+  begin
+    NativeInventory.read(inventory_path)
+  rescue RuntimeError => e
+    stale_inventory = e.message.include?('stale preprocessed native inventory')
+  end
+  check.call('source changes invalidate the preprocessed inventory', stale_inventory)
 
   native = File.join(dir, 'native.cpp')
   File.write(native, <<~CPP)

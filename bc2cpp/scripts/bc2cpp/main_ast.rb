@@ -9,11 +9,15 @@ require 'tmpdir'
 require_relative '../../tools/bc2cpp/main_roots'
 
 main, output, *flags = ARGV
-abort 'usage: ruby scripts/bc2cpp/main_ast.rb MAIN OUTPUT [--unit NATIVE_SOURCE]... [-- CLANG_FLAGS...]' unless main && output
+abort 'usage: ruby scripts/bc2cpp/main_ast.rb MAIN OUTPUT [--lookup-names-only] [--unit NATIVE_SOURCE]... [-- CLANG_FLAGS...]' unless main && output
 units = []
-while flags.first == '--unit'
-  flags.shift
-  units << File.realpath(flags.shift || abort('--unit requires a source path'))
+lookup_names_only = false
+while %w[--unit --lookup-names-only].include?(flags.first)
+  if flags.shift == '--lookup-names-only'
+    lookup_names_only = true
+  else
+    units << File.realpath(flags.shift || abort('--unit requires a source path'))
+  end
 end
 flags.shift if flags.first == '--'
 main = File.realpath(main)
@@ -35,7 +39,8 @@ if host_cxx
 
   target = machine.strip
 end
-expected_command = { 'clang' => clang, 'host_cxx' => host_cxx, 'target' => target, 'flags' => flags, 'sources' => [main, *units] }
+expected_command = { 'clang' => clang, 'host_cxx' => host_cxx, 'target' => target, 'flags' => flags,
+                     'sources' => [main, *units], 'lookup_names_only' => lookup_names_only }
 tools = [File.realpath(__FILE__), File.realpath(File.join(__dir__, '../../tools/bc2cpp/main_roots.rb')), clang, host_cxx].compact
 tool_digests = tools.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
 if File.file?(output)
@@ -88,7 +93,7 @@ Dir.mktmpdir('bc2cpp-main-ast') do |dir|
                 .scan(/(?:\\.|[^\s])+/).map { |path| File.realpath(path.gsub(/\\(.)/, '\1')) }
     File.unlink(astfile)
   end
-  roots = MainRoots.analyze(ast)
+  roots = MainRoots.analyze(ast, literal_roots: !lookup_names_only)
   tool_digests.each do |path, digest|
     abort "AST exporter changed while running: #{path}" unless Digest::SHA256.file(path).hexdigest == digest
   end

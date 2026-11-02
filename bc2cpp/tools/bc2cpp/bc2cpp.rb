@@ -1421,6 +1421,8 @@ if $PROGRAM_NAME == __FILE__
   warn '== constructor pools (CONSTRUCTOR_POOLS) =='
   gen.constructor_pool_report.each { |l| warn l }
   warn ''
+  require_relative 'initializer_tables'
+  gen.initializer_table_plan unless type_check_only
   main_reach = nil
   if (main_ast = ENV['BC2CPP_MAIN_AST']) && !type_check_only
     require_relative 'main_reachability'
@@ -2213,6 +2215,7 @@ if $PROGRAM_NAME == __FILE__
                                                    world: MrblibStubs.class_world_from_env(ENV, srcs),
                                                    copy_context: MrblibStubs.copy_context(ENV, srcs, out_dir),
                                                    early: ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') == 'all' && !ENV['BC2CPP_LOAD_WORLD'].to_s.empty?)
+  warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, stub_keys))
   load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys, unregistered: gen.unregistered_keys,
                                        register: load_register)
   load_code = load_plan&.marker ? load_plan.code : ''
@@ -2260,6 +2263,7 @@ if $PROGRAM_NAME == __FILE__
     FileUtils.mkdir_p(report_dir)
     report = { format: 1, symbol: symbol, build_name: ENV['BC2CPP_BUILD_NAME'], host_manifest: File.expand_path(main_ast),
                host_digest: Digest::SHA256.file(main_ast).hexdigest, omission_digest: StaticDispatchLists.current.digest,
+               native_inventory: ENV['BC2CPP_NATIVE_INVENTORY'],
                entries: entries, unresolved: evidence.notes, refusals: evidence.refusals,
                notice: 'Unreached entries are diagnostic candidates, not an omission proof.' }
     File.write(File.join(report_dir, "#{symbol}_named_reachability.json"), JSON.pretty_generate(report) + "\n")

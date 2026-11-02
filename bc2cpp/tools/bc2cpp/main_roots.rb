@@ -41,7 +41,7 @@ module MainRoots
                refusals: roots.fetch('refusals'), native_paths: data.fetch('native_paths', []).to_set)
   end
 
-  def analyze(ast)
+  def analyze(ast, literal_roots: true)
     functions = Hash.new { |h, k| h[k] = [] }
     variables = {}
     parameters = Hash.new { |h, k| h[k] = [] }
@@ -150,7 +150,7 @@ module MainRoots
           queue.concat(functions.keys)
         end
       end
-      if node['kind'] == 'StringLiteral' && (value = c_string(node.fetch('value')))
+      if literal_roots && node['kind'] == 'StringLiteral' && (value = c_string(node.fetch('value')))
         names << value
         names << value.partition("\0").first
       end

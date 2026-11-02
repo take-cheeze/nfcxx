@@ -39,6 +39,10 @@ module NativeVM
     end
     NativeVM.builtins(dir)
     build.instance_variable_set(:@native_vm_dir, dir)
+    Rake::Task.define_task("bc2cpp:native-inventory:#{build.name}") do
+      require_relative 'native_inventory'
+      NativeInventory.export_build(build, File.join(build.build_dir, 'bc2cpp_native_inventory.json'))
+    end
     # Recreate archives so members from an earlier gem set cannot retain bytecode or compiler entry points.
     if native_only
       [build.libmruby_static, build.libmruby_core_static].each do |archive|

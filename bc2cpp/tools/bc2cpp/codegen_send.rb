@@ -476,7 +476,7 @@ class CodeGen
                       "reassigned or intercepted, so the class identity guard is omitted.\n" :
                       "  // The class identity guard preserves ordinary dispatch if the constant was rebound.\n")].join
             if stable_constructor
-              return "#{note}" \
+              return "#{note}  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{init_def.owner}\n" \
                      "  r#{d} = bc2cpp_direct_alloc(M, #{accessor});\n" \
                      "  #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n"
             end

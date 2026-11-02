@@ -69,6 +69,7 @@ require_relative 'native_owner_map'
 require_relative 'index_closed_planner'
 require_relative 'closed_world'
 require_relative 'alias_sites'
+require_relative 'initializer_tables'
 require_relative 'define_method_sites'
 
 module StaticDispatchRegistrations
@@ -290,7 +291,7 @@ module StaticDispatchRegistrations
   }x
 
   # A proc over a bytecode irep (mrb_proc_new, mrb_closure_new), as opposed to mrb_proc_new_cfunc*.
-  BYTECODE_PROC = /\bmrb_(?:proc_new|closure_new)\s*\(/
+  BYTECODE_PROC = InitializerTables::BYTECODE_PROC
 
   # NON_LOOKUP_HELPERS: the generated helpers whose use of a name finds no compiled method. Each is the else arm of
   # a proof (symbol_cache.rb): bc2cpp_guard_violation and bc2cpp_hint_violation raise without dispatching;
@@ -890,8 +891,9 @@ module StaticDispatchRegistrations
                NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc, lists_path: lists_path))
     runs = GEMS.to_h do |gem|
       out, err = fresh.fetch(gem)
-      [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
+      [gem, { gen: out, err: err, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
     end
+    initializers_proven = InitializerTables.proven(runs.values)
     ireps, registry, superclass_of, struct_owners, engine_tuple = closed_world(repo_root, mrbc)
     # INDEX_CLOSED verdict for `[]` / `[]=`: shared by the open and the closed
     # analysis, so both fixpoints admit (and run) exactly the same names.
@@ -1043,7 +1045,7 @@ module StaticDispatchRegistrations
 
       owner, name = body_of[m]
       key = "#{owner}##{name}"
-      if overridden.include?(key) && !proven[name] && !force.include?(key)
+      if (overridden.include?(key) || initializers_proven.include?(key)) && !proven[name] && !force.include?(key)
         bytecode_blocks && label != m ? true : load_bodies.include?(m)
       else
         ran << key if dynamic.include?(name) || proven[name] || force.include?(key)
@@ -1065,7 +1067,7 @@ module StaticDispatchRegistrations
 
     { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
       closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups, proven: proven, ran: ran,
-      core_excluded: core_excluded }
+      core_excluded: core_excluded, initializers_proven: closed_only ? initializers_proven : Set.new }
   end
 
   # CORE_NATIVE_CANDIDATES (closed only): [the core ROM entries the closed build leaves out of its tables, the core
@@ -1456,7 +1458,7 @@ module StaticDispatchRegistrations
     proven = analysis[:proven] || {}
     analysis[:registered].select do |m|
       m[:owner].match?(re) &&
-        (proven[m[:name]] ||
+        ((analysis[:initializers_proven] || Set.new).include?("#{m[:owner]}##{m[:name]}") || proven[m[:name]] ||
           !dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments],
                          analysis[:suffix_bases] || analysis[:dynamic]))
     end
