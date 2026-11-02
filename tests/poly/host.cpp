@@ -1932,6 +1932,7 @@ outer:
   CHECK(go_child_status("guarded") == 0);  // the same panic inside nfc.Go: reported, and the child ran on
   {
     const int bare = go_child_status("afterfunc");  // not contained: the process ends with the runtime's fatal panic
+    if (!(bare == 2 || bare == 128 + SIGABRT)) std::printf("  afterfunc child status: %d (expected 2 or %d)\n", bare, 128 + SIGABRT);
     CHECK(bare == 2 || bare == 128 + SIGABRT);
   }
 
@@ -2239,7 +2240,11 @@ static int go_child(const std::string& mode) {
   else if (mode == "method") c.eval_void("go", "var p Pn\ngo p.M(\"method\")" + sleep);
   else if (mode == "variadic") c.eval_void("go", "go vboom(1, 2)" + sleep);
   else if (mode == "nested") c.eval_void("go", "go func() { go func() { panic(\"inner\") }() }()" + sleep);
-  else if (mode == "afterfunc") c.eval_void("go", "time.AfterFunc(0, func() { panic(\"not a go statement\") })" + sleep);
+  // The only mode whose outcome is a fatal exit: the process ends as soon as the timer's goroutine panics, so a long bound costs
+  // nothing when the runtime is prompt. A short bound made this check depend on the goroutine being scheduled within 300 ms, which
+  // a loaded CI runner does not guarantee; the other modes are not affected, since their outcome is the process going on.
+  else if (mode == "afterfunc")
+    c.eval_void("go", "time.AfterFunc(0, func() { panic(\"not a go statement\") })\ntime.Sleep(20 * time.Second)");
   return 0;
 }
 #endif
