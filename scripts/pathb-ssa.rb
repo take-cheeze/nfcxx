@@ -1,0 +1,807 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# Path B SSA (docs/notes/pathb-ssa.md). Converts every function of a stage 2 IR module (tests/pathb-ir/*.ir) to an
+# SSA control-flow graph. Structured control flow becomes basic blocks. A scalar slot whose address is never taken,
+# and a register assigned with `set`, become SSA values; `phi` joins are placed on the iterated dominance frontier
+# (Cytron et al.). Stores and loads of promoted slots disappear; the other slots stay in memory.
+#
+#   scripts/pathb-ssa.rb FILE.ir              print the module with its functions in SSA form
+#   scripts/pathb-ssa.rb --check FILE.ir      verify only; summary on stderr (exit 1 on a failed check)
+#   scripts/pathb-ssa.rb --run N... FILE.ir   run `main` on integer arguments, in the structured IR and in the
+#                                             SSA form, and print both results (`structured=unsupported` when the
+#                                             structured interpreter does not model a construct, e.g. goto)
+#
+# Every converted function is verified: each name is defined once, each use is dominated by its definition, and
+# each phi has exactly one argument per predecessor. A function with a switch is left as it was (stderr says so).
+
+Ref = Struct.new(:sigil, :raw)   # $"x", @"x", &"f": raw is the quoted name, quotes included
+Str = Struct.new(:raw)           # a quoted string token, quotes included
+Fn = Struct.new(:name, :ret, :params, :slots, :body)
+Blk = Struct.new(:instrs, :term)
+Phi = Struct.new(:var, :name, :type, :inc)
+Unsupported = Class.new(StandardError)
+Fail = Class.new(StandardError)
+Trap = Class.new(StandardError)
+
+SETJMP_NAMES = ['"_setjmp"', '"setjmp"', '"sigsetjmp"', '"__sigsetjmp"'].freeze
+AGG_HEADS = %w[struct union array fn].freeze
+# Operations that cannot trap or have effects: a `let` of one with no use is removed.
+PURE_OPS = %w[const null load iconv wadd wsub wmul wneg lt.s lt.u le.s le.u eq ne and or xor not index offset].freeze
+
+# ---- reader and printer ---------------------------------------------------------------------------------------------
+
+def quoted_end(s, i)
+  j = i + 1
+  while j < s.size
+    return j if s[j] == '"'
+
+    j += s[j] == "\\" ? 2 : 1
+  end
+  raise Fail, "unterminated string at #{i}"
+end
+
+def tokenize(s)
+  toks = []
+  i = 0
+  while i < s.size
+    c = s[i]
+    if c =~ /\s/
+      i += 1
+    elsif c == "(" || c == ")"
+      toks << c
+      i += 1
+    elsif c == '"'
+      j = quoted_end(s, i)
+      toks << Str.new(s[i..j])
+      i = j + 1
+    elsif "$@&".include?(c) && s[i + 1] == '"'
+      j = quoted_end(s, i + 1)
+      toks << Ref.new(c, s[(i + 1)..j])
+      i = j + 1
+    else
+      j = i
+      j += 1 while j < s.size && s[j] !~ /[\s()"]/
+      toks << s[i...j]
+      i = j
+    end
+  end
+  toks
+end
+
+def read_forms(text)
+  stack = [[]]
+  tokenize(text).each do |t|
+    case t
+    when "(" then stack.push([])
+    when ")"
+      raise Fail, "unbalanced parentheses" if stack.size < 2
+
+      done = stack.pop
+      stack.last << done
+    else stack.last << t
+    end
+  end
+  raise Fail, "unbalanced parentheses" unless stack.size == 1
+
+  stack[0]
+end
+
+def sx(x)
+  case x
+  when Array then "(#{x.map { |y| sx(y) }.join(' ')})"
+  when Ref then x.sigil + x.raw
+  when Str then x.raw
+  else x.to_s
+  end
+end
+
+def head(x) = x.is_a?(Array) && x[0].is_a?(String) ? x[0] : nil
+def reg?(x) = x.is_a?(String) && x.start_with?("%")
+def slot_key(a) = a.is_a?(Ref) && a.sigil == "$" ? "$#{a.raw}" : nil
+def scalar_type?(t) = !(AGG_HEADS.include?(head(t)) || t == "long_double" || t == "void")
+def succs(term) = term[0] == "br" ? [term[1]] : (term[0] == "condbr" ? [term[2], term[3]] : [])
+
+def clause(s, name)
+  c = s.find { |x| head(x) == name }
+  c ? c[1..] : []
+end
+
+def fn_of(form)
+  Fn.new(form[1], form.find { |x| head(x) == "ret" }, form.find { |x| head(x) == "params" },
+         form.select { |x| head(x) == "slot" }, form[2..].reject { |x| %w[ret params slot].include?(head(x)) })
+end
+
+# ---- structured IR to basic blocks ----------------------------------------------------------------------------------
+
+class Cfg
+  attr_reader :blocks
+
+  def initialize
+    @blocks = []
+    @labels = {}
+    @loops = []
+  end
+
+  def build(body, void)
+    entry = new_block
+    cur = lower_list(body, entry)
+    set_term(cur, void ? ["ret"] : ["unreachable"]) if @blocks[cur].term.nil?
+    @blocks.each { |b| b.term ||= ["unreachable"] }
+    self
+  end
+
+  private
+
+  def new_block
+    @blocks << Blk.new([], nil)
+    @blocks.size - 1
+  end
+
+  def set_term(b, t)
+    raise Fail, "B#{b} terminated twice" if @blocks[b].term
+
+    @blocks[b].term = t
+  end
+
+  def lower_list(stmts, cur)
+    stmts.each { |s| cur = lower_stmt(s, cur) }
+    cur
+  end
+
+  def label_block(name) = (@labels[name] ||= new_block)
+
+  # Every case returns the block where control continues; that block is always open. After a jump the
+  # continuation is a fresh block with no predecessor, which the converter drops.
+  def lower_stmt(s, cur)
+    case head(s)
+    when "block" then lower_list(s[1..], cur)
+    when "if"
+      t = new_block
+      e = new_block
+      j = new_block
+      set_term(cur, ["condbr", s[1], t, e])
+      set_term(lower_list(clause(s, "then"), t), ["br", j])
+      set_term(lower_list(clause(s, "else"), e), ["br", j])
+      j
+    when "loop"
+      h = new_block
+      cont = new_block
+      done = new_block
+      set_term(cur, ["br", h])
+      @loops.push([done, cont])
+      set_term(lower_list(clause(s, "body"), h), ["br", cont])
+      set_term(lower_list(clause(s, "step"), cont), ["br", h])
+      @loops.pop
+      done
+    when "break" then set_term(cur, ["br", @loops.last[0]]) && new_block
+    when "continue" then set_term(cur, ["br", @loops.last[1]]) && new_block
+    when "return" then set_term(cur, ["ret", *s[1..]]) && new_block
+    when "unreachable" then set_term(cur, ["unreachable"]) && new_block
+    when "goto" then set_term(cur, ["br", label_block(s[1].raw)]) && new_block
+    when "label"
+      l = label_block(s[1].raw)
+      set_term(cur, ["br", l])
+      l
+    when "switch" then raise Unsupported, "switch (its fallthrough arms are not converted yet)"
+    else
+      @blocks[cur].instrs << s
+      cur
+    end
+  end
+end
+
+# ---- SSA construction -----------------------------------------------------------------------------------------------
+
+# Scalar slots that are used only as the address of a load or store of their own type. Returns "$name" => type.
+def promotable_slots(fn)
+  types = fn.slots.to_h { |s| ["$#{s[1].raw}", s[2]] }
+  bad = {}
+  twice = fn.body.map { |s| scan_slot_uses(s, types, bad) }.any?
+  return {} if twice
+
+  types.select { |k, t| !bad[k] && scalar_type?(t) }
+end
+
+# Marks slots used any other way; returns true when the code calls a function that returns twice.
+def scan_slot_uses(x, types, bad)
+  if x.is_a?(Ref)
+    return x.sigil == "&" && SETJMP_NAMES.include?(x.raw)
+  end
+  return false unless x.is_a?(Array)
+
+  h = head(x)
+  twice = false
+  x.each_with_index do |y, i|
+    if y.is_a?(Ref) && y.sigil == "$"
+      key = "$#{y.raw}"
+      ok = (h == "load" || h == "store") && i == 2 && types[key] && x[1] == types[key]
+      bad[key] = true unless ok
+    else
+      twice ||= scan_slot_uses(y, types, bad)
+    end
+  end
+  twice
+end
+
+def pure_rv?(rv) = rv.is_a?(String) || (rv.is_a?(Array) && PURE_OPS.include?(head(rv)))
+
+def zero_of(t) = head(t) == "ptr" ? ["null", t] : ["const", t, "0"]
+
+class Converter
+  attr_reader :out, :rpo, :promoted, :mut
+
+  def initialize(fn)
+    @fn = fn
+    @void = fn.ret[1] == "void"
+    @promoted = promotable_slots(fn)
+    @cfg = Cfg.new.build(fn.body, @void).blocks
+    @types = {}   # variable => IR type (promoted slots and registers assigned with set)
+    @mut = {}     # register => true when some set assigns it
+    @subst = {}   # register bound to a promoted load => operand
+    @stacks = Hash.new { |h, k| h[k] = [] }
+    @fresh = 0
+  end
+
+  def run
+    reachable_order
+    dominators
+    collect_vars
+    place_phis
+    @types.each_key { |v| @stacks[v] = [zero_of(@types[v])] }
+    rename(0)
+    simplify
+    verify
+    self
+  end
+
+  def render
+    lines = ["(ssa-function #{sx(@fn.name)}", "  #{sx(@fn.ret)}", "  #{sx(@fn.params)}"]
+    @fn.slots.each { |s| lines << "  #{sx(s)}" unless @promoted.key?("$#{s[1].raw}") }
+    lines << "  (ssa-promoted #{@promoted.keys.map { |k| k[1..] }.join(' ')})"
+    @rpo.sort.each do |b|
+      blk = @out[b]
+      lines << "  (bb #{b}"
+      blk[:phis].each { |ph| lines << "    (phi #{ph.name} #{sx(ph.type)} #{ph.inc.keys.sort.map { |p| sx([p, ph.inc[p]]) }.join(' ')})" }
+      blk[:instrs].each { |i| lines << "    #{sx(i)}" }
+      lines << "    #{sx(blk[:term])})"
+    end
+    lines << ")"
+    lines.join("\n")
+  end
+
+  private
+
+  def reachable_order
+    seen = {}
+    post = []
+    stack = [[0, false]]
+    until stack.empty?
+      b, expanded = stack.pop
+      if expanded
+        post << b
+        next
+      end
+      next if seen[b]
+
+      seen[b] = true
+      stack.push([b, true])
+      succs(@cfg[b].term).reverse_each { |s| stack.push([s, false]) unless seen[s] }
+    end
+    @rpo = post.reverse
+    @rpo_idx = @rpo.each_with_index.to_h
+  end
+
+  # Cooper, Harvey and Kennedy's iterative dominators, dominance frontiers and the dominator tree.
+  def dominators
+    @preds = Hash.new { |h, k| h[k] = [] }
+    @rpo.each { |b| succs(@cfg[b].term).uniq.each { |s| @preds[s] << b } }
+    @idom = { 0 => 0 }
+    changed = true
+    while changed
+      changed = false
+      @rpo.drop(1).each do |b|
+        new_idom = nil
+        @preds[b].each do |p|
+          next unless @idom.key?(p)
+
+          new_idom = new_idom.nil? ? p : intersect(p, new_idom)
+        end
+        next if @idom[b] == new_idom
+
+        @idom[b] = new_idom
+        changed = true
+      end
+    end
+    @df = Hash.new { |h, k| h[k] = [] }
+    @rpo.each do |b|
+      next if @preds[b].size < 2
+
+      @preds[b].each do |p|
+        runner = p
+        while runner != @idom[b]
+          @df[runner] << b unless @df[runner].include?(b)
+          runner = @idom[runner]
+        end
+      end
+    end
+    @children = Hash.new { |h, k| h[k] = [] }
+    @rpo.drop(1).each { |b| @children[@idom[b]] << b }
+  end
+
+  def intersect(a, b)
+    while a != b
+      a = @idom[a] while @rpo_idx[a] > @rpo_idx[b]
+      b = @idom[b] while @rpo_idx[b] > @rpo_idx[a]
+    end
+    a
+  end
+
+  def dominates?(a, b)
+    loop do
+      return true if a == b
+      return false if b == 0
+
+      b = @idom[b]
+    end
+  end
+
+  def collect_vars
+    instrs = @rpo.flat_map { |b| @cfg[b].instrs }
+    instrs.each { |i| @mut[i[1]] = true if head(i) == "set" }
+    instrs.each { |i| @types[i[1]] = i[2] if head(i) == "let" && @mut[i[1]] }
+    @mut.each_key { |r| raise Unsupported, "register #{r} is assigned but never declared" unless @types.key?(r) }
+    @promoted.each { |k, t| @types[k] = t }
+  end
+
+  def def_sites
+    sites = Hash.new { |h, k| h[k] = [] }
+    @rpo.each do |b|
+      @cfg[b].instrs.each do |i|
+        case head(i)
+        when "let" then sites[i[1]] << b if @mut[i[1]]
+        when "set" then sites[i[1]] << b
+        when "store"
+          k = slot_key(i[2])
+          sites[k] << b if k && @promoted.key?(k)
+        end
+      end
+    end
+    sites
+  end
+
+  def place_phis
+    sites = def_sites
+    @phis = Hash.new { |h, k| h[k] = {} }
+    @types.each_key do |v|
+      defs = (sites[v] + [0]).uniq
+      work = defs.dup
+      placed = {}
+      until work.empty?
+        x = work.pop
+        @df[x].each do |y|
+          next if placed[y]
+
+          placed[y] = true
+          @phis[y][v] = Phi.new(v, nil, @types[v], {})
+          work << y unless defs.include?(y)
+        end
+      end
+    end
+  end
+
+  def fresh = "%s#{@fresh += 1}"
+  def cur(v) = @stacks[v].last
+
+  def push(v, val, pushed)
+    @stacks[v].push(val)
+    pushed << v
+  end
+
+  # Operands: a register that is a variable is replaced by its current value; a load result by what it loaded.
+  def rw(x)
+    case x
+    when Array then x.map { |y| rw(y) }
+    when String
+      return x unless x.start_with?("%")
+      return cur(x) if @mut[x]
+
+      @subst.fetch(x, x)
+    else x
+    end
+  end
+
+  def promoted_load(rv)
+    return nil unless head(rv) == "load"
+
+    k = slot_key(rv[2])
+    @promoted.key?(k) ? k : nil
+  end
+
+  def rename(b)
+    pushed = []
+    @phis[b].each_value do |ph|
+      ph.name = fresh
+      push(ph.var, ph.name, pushed)
+    end
+    instrs = []
+    @cfg[b].instrs.each { |i| visit(i, instrs, pushed) }
+    term = terminator(@cfg[b].term)
+    @out ||= {}
+    @out[b] = { phis: @phis[b].values, instrs: instrs, term: term }
+    succs(term).each { |s| @phis[s].each_value { |ph| ph.inc[b] = cur(ph.var) } }
+    @children[b].each { |c| rename(c) }
+    pushed.each { |v| @stacks[v].pop }
+  end
+
+  def visit(i, out, pushed)
+    case head(i)
+    when "let"
+      reg, t, rv = i[1], i[2], i[3]
+      src = promoted_load(rv)
+      if @mut[reg]
+        if src
+          push(reg, cur(src), pushed)
+        else
+          name = fresh
+          out << ["let", name, t, rw(rv)]
+          push(reg, name, pushed)
+        end
+      elsif src
+        @subst[reg] = cur(src)
+      else
+        out << ["let", reg, t, rw(rv)]
+      end
+    when "set" then push(i[1], rw(i[2]), pushed)
+    when "store"
+      k = slot_key(i[2])
+      if k && @promoted.key?(k)
+        push(k, rw(i[3]), pushed)
+      else
+        out << rw(i)
+      end
+    else out << rw(i)
+    end
+  end
+
+  def terminator(t)
+    case t[0]
+    when "condbr" then ["condbr", rw(t[1]), t[2], t[3]]
+    when "ret" then t.size > 1 ? ["ret", rw(t[1])] : ["ret"]
+    else t
+    end
+  end
+
+  # Replaces phis whose arguments are all one value (or themselves), then drops phis nothing uses.
+  def simplify
+    repl = {}
+    loop do
+      changed = false
+      @out.each_value do |blk|
+        blk[:phis].reject! do |ph|
+          others = ph.inc.values.map { |v| resolve(v, repl) }.reject { |v| v == ph.name }
+          next false if others.empty? || others.map { |v| sx(v) }.uniq.size != 1
+
+          repl[ph.name] = others.first
+          changed = true
+        end
+      end
+      break unless changed
+    end
+    @out.each_value do |blk|
+      blk[:instrs] = blk[:instrs].map { |i| map_atoms(i, repl) }
+      blk[:term] = map_atoms(blk[:term], repl)
+      blk[:phis].each { |ph| ph.inc.transform_values! { |v| map_atoms(v, repl) } }
+    end
+    loop do
+      uses = Hash.new(0)
+      @out.each_value do |blk|
+        blk[:instrs].each { |i| count_atoms(head(i) == "let" ? i[2..] : i[1..], uses) }
+        count_atoms(blk[:term], uses)
+        blk[:phis].each { |ph| ph.inc.each_value { |v| count_atoms(v, uses) } }
+      end
+      removed = false
+      @out.each_value do |blk|
+        blk[:phis].reject! do |ph|
+          next false unless uses[ph.name].zero?
+
+          removed = true
+        end
+        blk[:instrs].reject! do |i|
+          next false unless head(i) == "let" && uses[i[1]].zero? && pure_rv?(i[3])
+
+          removed = true
+        end
+      end
+      break unless removed
+    end
+  end
+
+  def resolve(a, repl)
+    return a unless a.is_a?(String) && repl.key?(a)
+
+    resolve(repl[a], repl)
+  end
+
+  def map_atoms(x, repl)
+    case x
+    when Array then x.map { |y| map_atoms(y, repl) }
+    when String then reg?(x) ? resolve(x, repl) : x
+    else x
+    end
+  end
+
+  def count_atoms(x, uses)
+    case x
+    when Array then x.each { |y| count_atoms(y, uses) }
+    when String then uses[x] += 1 if reg?(x)
+    end
+  end
+
+  def atoms(x, out = [])
+    case x
+    when Array then x.each { |y| atoms(y, out) }
+    when String then out << x if reg?(x)
+    end
+    out
+  end
+
+  # Verification: single definitions, dominance of every use, and phi arguments per predecessor.
+  def verify
+    params = @fn.params[1..].filter_map { |p| p[1] if p.is_a?(Array) && reg?(p[1]) }
+    defs = {}
+    define = lambda do |name, b, idx|
+      raise Fail, "#{name} is defined twice" if defs.key?(name)
+
+      defs[name] = [b, idx]
+    end
+    @rpo.each do |b|
+      @out[b][:phis].each { |ph| define.(ph.name, b, -1) }
+      @out[b][:instrs].each_with_index { |i, k| define.(i[1], b, k) if head(i) == "let" }
+    end
+    check = lambda do |a, b, k|
+      next if params.include?(a)
+      raise Fail, "#{a} is used in B#{b} but never defined" unless defs.key?(a)
+
+      db, di = defs[a]
+      ok = db == b ? di < k : dominates?(db, b)
+      raise Fail, "#{a} (defined in B#{db}) does not dominate its use in B#{b}" unless ok
+    end
+    @rpo.each do |b|
+      blk = @out[b]
+      blk[:phis].each do |ph|
+        unless ph.inc.keys.sort == @preds[b].sort
+          raise Fail, "phi #{ph.name} in B#{b}: arguments from #{ph.inc.keys.sort}, predecessors #{@preds[b].sort}"
+        end
+        ph.inc.each { |p, v| atoms(v).each { |a| check.(a, p, Float::INFINITY) } }
+      end
+      blk[:instrs].each_with_index do |i, k|
+        uses = head(i) == "let" ? i[2..] : i[1..]
+        atoms(uses).each { |a| check.(a, b, k) }
+      end
+      atoms(blk[:term][1..]).each { |a| check.(a, b, blk[:instrs].size) }
+    end
+  end
+end
+
+# ---- interpreter (differential check) -------------------------------------------------------------------------------
+
+INT_TYPES = {
+  "bool" => [1, false], "char" => [8, true], "signed_char" => [8, true], "unsigned_char" => [8, false],
+  "short" => [16, true], "unsigned_short" => [16, false], "int" => [32, true], "unsigned_int" => [32, false],
+  "long" => [64, true], "long_long" => [64, true], "unsigned_long" => [64, false],
+  "unsigned_long_long" => [64, false]
+}.freeze
+
+def int_info(t)
+  return [64, false] if head(t) == "ptr"
+
+  INT_TYPES.fetch(t) { raise Unsupported, "type #{sx(t)} in the interpreter" }
+end
+
+def canon(v, t)
+  w, signed = int_info(t)
+  return(v.zero? ? 0 : 1) if t == "bool"
+
+  m = v & ((1 << w) - 1)
+  signed && m >= (1 << (w - 1)) ? m - (1 << w) : m
+end
+
+class Machine
+  BIN = { "wadd" => :+, "wsub" => :-, "wmul" => :*, "and" => :&, "or" => :|, "xor" => :^ }.freeze
+  CMP = { "lt.s" => :<, "lt.u" => :<, "le.s" => :<=, "le.u" => :<=, "eq" => :==, "ne" => :!= }.freeze
+
+  def initialize(fn, args)
+    @env = {}
+    @mem = Hash.new(0)
+    raise Unsupported, "main takes only plain parameters" unless fn.params[1..].all? { |p| head(p) == "param" }
+
+    params = fn.params[1..]
+    raise Unsupported, "main takes #{params.size} arguments" unless params.size == args.size
+
+    params.zip(args).each { |p, a| @env[p[1]] = canon(a, p[3]) }
+  end
+
+  def run_structured(body)
+    catch(:ret) do
+      exec_list(body)
+      nil
+    end
+  end
+
+  def run_ssa(out)
+    b = 0
+    prev = nil
+    steps = 0
+    loop do
+      raise Unsupported, "step limit" if (steps += 1) > 1_000_000
+
+      blk = out.fetch(b)
+      blk[:phis].map { |ph| [ph.name, val(ph.inc.fetch(prev))] }.each { |n, v| @env[n] = v }
+      blk[:instrs].each { |i| exec(i) }
+      t = blk[:term]
+      case t[0]
+      when "br" then prev, b = b, t[1]
+      when "condbr"
+        c = val(t[1]) != 0
+        prev = b
+        b = c ? t[2] : t[3]
+      when "ret" then return t.size > 1 ? val(t[1]) : nil
+      when "unreachable" then raise Trap, "unreachable"
+      end
+    end
+  end
+
+  private
+
+  def exec_list(stmts) = stmts.each { |s| exec(s) }
+
+  def exec(s)
+    case head(s)
+    when "let" then @env[s[1]] = val(s[3])
+    when "set" then @env[s[1]] = val(s[2])
+    when "store"
+      raise Unsupported, "store through #{sx(s[2])}" unless slot_key(s[2])
+
+      @mem[s[2].raw] = val(s[3])
+    when "block" then exec_list(s[1..])
+    when "if" then exec_list(val(s[1]) != 0 ? clause(s, "then") : clause(s, "else"))
+    when "loop"
+      catch(:brk) do
+        loop do
+          catch(:cont) { exec_list(clause(s, "body")) }
+          exec_list(clause(s, "step"))
+        end
+      end
+    when "break" then throw :brk
+    when "continue" then throw :cont
+    when "return" then throw :ret, (s.size > 1 ? val(s[1]) : nil)
+    when "unreachable" then raise Trap, "unreachable"
+    else raise Unsupported, "statement #{head(s) || sx(s)}"
+    end
+  end
+
+  def val(x)
+    case x
+    when String
+      @env.fetch(x) { raise Unsupported, "unbound #{x}" }
+    when Array
+      case head(x)
+      when "const"
+        raise Unsupported, "constant #{sx(x)}" unless x[2] =~ /\A-?\d+\z/
+
+        canon(x[2].to_i, x[1])
+      when "null" then 0
+      else eval_rv(x)
+      end
+    else raise Unsupported, sx(x)
+    end
+  end
+
+  def eval_rv(f)
+    case head(f)
+    when "load"
+      raise Unsupported, "load through #{sx(f[2])}" unless slot_key(f[2])
+
+      @mem[f[2].raw]
+    when "iconv" then canon(val(f[2]), f[1])
+    when *BIN.keys then canon(val(f[2]).send(BIN[head(f)], val(f[3])), f[1])
+    when *CMP.keys then val(f[2]).send(CMP[head(f)], val(f[3])) ? 1 : 0
+    when "cdiv", "crem"
+      a = val(f[2])
+      b = val(f[3])
+      raise Trap, "division by zero" if b.zero?
+
+      w, signed = int_info(f[1])
+      raise Trap, "overflow" if signed && a == -(1 << (w - 1)) && b == -1
+
+      q = a.abs / b.abs
+      q = -q if (a.negative? ^ b.negative?)
+      head(f) == "cdiv" ? canon(q, f[1]) : canon(a - q * b, f[1])
+    else raise Unsupported, "operator #{head(f) || sx(f)}"
+    end
+  end
+end
+
+# ---- driver ---------------------------------------------------------------------------------------------------------
+
+def main(argv)
+  mode = :print
+  run_args = []
+  if argv.first == "--check"
+    mode = :check
+    argv.shift
+  elsif argv.first == "--run"
+    mode = :run
+    argv.shift
+    run_args = argv[0..-2].map { |a| Integer(a, 10) }
+    argv = argv[-1..]
+  end
+  file = argv.last or abort "usage: pathb-ssa.rb [--check | --run N...] FILE.ir"
+
+  forms = read_forms(File.read(file))
+  converted = 0
+  functions = 0
+  promoted_total = 0
+  main_fn = nil
+  main_out = nil
+  output = []
+  forms.each do |form|
+    unless head(form) == "function"
+      output << sx(form)
+      next
+    end
+    functions += 1
+    fn = fn_of(form)
+    begin
+      conv = Converter.new(fn).run
+    rescue Unsupported => e
+      warn "pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted"
+      output << sx(form)
+      next
+    rescue Fail => e
+      warn "pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}"
+      exit 1
+    end
+    converted += 1
+    promoted_total += conv.promoted.size
+    if fn.name.raw == '"main"'
+      main_fn = fn
+      main_out = conv.out
+    end
+    output << conv.render
+  end
+
+  case mode
+  when :check
+    warn "pathb-ssa: #{functions} functions, #{converted} converted, #{promoted_total} slots promoted"
+  when :run
+    raise Fail, "no main function" unless main_fn
+
+    structured = begin
+      Machine.new(main_fn, run_args).run_structured(main_fn.body)
+    rescue Unsupported
+      "unsupported"
+    rescue Trap
+      "trap"
+    end
+    ssa = begin
+      Machine.new(main_fn, run_args).run_ssa(main_out)
+    rescue Trap
+      "trap"
+    end
+    puts "structured=#{structured} ssa=#{ssa}"
+    exit 1 if structured != "unsupported" && structured != ssa
+  else
+    puts output
+  end
+  0
+rescue Unsupported => e
+  warn "pathb-ssa: #{e.message}"
+  exit 2
+rescue Fail => e
+  warn "pathb-ssa: #{e.message}"
+  exit 1
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

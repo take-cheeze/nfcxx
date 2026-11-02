@@ -1,0 +1,18 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int 4 4)
+  (slot "i" int 4 4)
+  (store int $"n" %0)
+  (store int $"i" (const int 0))
+  (block
+    (label "again")
+    (let %1 int (load int $"i"))
+    (let %2 int (wadd int %1 (const int 1)))
+    (store int $"i" %2)
+    (let %3 int (load int $"n"))
+    (let %4 bool (lt.s int %2 %3))
+    (if %4 (then (goto "again")) (else))
+    (let %5 int (load int $"i"))
+    (return %5)))
