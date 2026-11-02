@@ -8,7 +8,8 @@
 #   ruby tests/pathb-egraph/check.rb cases FILE.ir...     every file's `main` is optimized and verified; with a .args
 #                                                          file it is also run in the interpreter, original against
 #                                                          optimized, on the .args inputs (expected values checked)
-#                                                          and on 50 random inputs
+#                                                          and on 50 random inputs; a FILE.lets next to it holds
+#                                                          the number of lets the optimized form must have
 #
 # Exit status 1 on any failure.
 
@@ -145,7 +146,12 @@ def check_case(f)
     end
   end
   errors << "lets grew from #{before[0]} to #{after[0]}" if after[0] > before[0]
-  errors << "no let removed (the redundancy case must shrink)" if f.include?("pathb-egraph/cases") && after[0] >= before[0]
+  errors << "no let removed (the redundancy case must shrink)" if File.basename(f) == "redundant.ir" && after[0] >= before[0]
+  lets_file = f.sub(/\.ir\z/, ".lets")
+  if File.exist?(lets_file)
+    want = Integer(File.read(lets_file).strip, 10)
+    errors << "#{after[0]} lets after optimization, want #{want}" unless after[0] == want
+  end
   status = errors.empty? ? "ok  " : "FAIL"
   puts "#{status} cases #{File.basename(f)}: lets #{before[0]} -> #{after[0]} (pure #{before[1]} -> #{after[1]}), " \
        "#{runs} interpreted runs equal, #{unsupported} unsupported"

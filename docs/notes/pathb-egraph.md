@@ -33,8 +33,9 @@ Options: `--iters N` (saturation rounds per block, default 8), `--nodes N` (e-no
   register, so identities in this block see it (the redundancy case relies on this: a `wmul x 0` in the entry block
   makes the `+ 0` after the join disappear).
 - **Opaque.** Anything not in the whitelist is an opaque class of its own: calls, stores, `load` (every load is
-  opaque; no memory state is tracked), checked operations (`cdiv`, `crem`, bounds checks), `cshl`/`cshr`, `bfload`,
-  `fconv`, float operations, `static`/`barrier` statements. An opaque class is never merged with another opaque class
+  opaque; no memory state is tracked), checked operations outside `CHECKED_OPS` (bounds checks, `cf2i`), `bfload`,
+  `fconv`, float operations, `static`/`barrier` statements. The checked operators `cdiv crem cshl cshr` are not opaque:
+  see [Checked operators](#checked-operators-shifts-and-division). An opaque class is never merged with another opaque class
   and never with a class of a different value. Its only merges are identities whose result is the opaque value
   itself (`x + 0 = x` with `x` opaque): the merged expression is equal to it, so the class stays one value.
 - **Scope.** An e-graph exists for one block; equalities are not carried into other blocks. A class is emitted in a
@@ -62,7 +63,9 @@ beyond the listed identities).
 | `eq x x = 1`, `ne x x = 0` for integer operands | constant | integers equal themselves |
 | Reassociation `(x + c1) + c2 = x + (c1+c2)`, `x - c = x + (-c)` | `wadd` with one constant | wrapping addition mod 2^w is associative and commutative, and `-c` is the wrapped negation, so the sums agree bit for bit |
 
-**Floats.** No float rule is applied: float operations (`fadd`, `fmul`, `lt.f`, ...) are not in the whitelist, so
+**Floats.** The interpreter does not model floats (`val` raises on a float constant, and `fadd` and the other float
+operators are unsupported in `pathb-ssa.rb`), so a float fold could not be checked, and none is made. The float
+operators are opaque, and their constants are not constants of the e-graph. No float rule is applied: float operations (`fadd`, `fmul`, `lt.f`, ...) are not in the whitelist, so
 they are opaque. A float identity would have to hold for every value, including the sign of zero and NaN (`x+0` is
 not `x` for `x = -0.0`, `x*0` is not 0 for infinities or NaN); none is needed here, so none is applied.
 
@@ -70,7 +73,50 @@ not `x` for `x = -0.0`, `x*0` is not 0 for infinities or NaN); none is needed he
 but no identity or folding is applied to pointer values.
 
 **Not folded:** `wneg` (the interpreter does not model it, so its folding could not be checked), `not` (its
-semantics is not in the interpreter), division and remainder (they trap; the whitelist excludes them).
+semantics is not in the interpreter). Division, remainder and shifts are checked operators with their own rules
+(below).
+
+## Checked operators: shifts and division
+
+`cdiv`, `crem`, `cshl` and `cshr` are the checked operators of `CHECKED_OPS` (`docs/notes/pathb-stage2.md` section 4).
+Each `let` of one with integer type `T` (not `bool`) and register or constant operands becomes a node whose literal
+operands include the site (the `let`'s register), so two checked lets are never merged by hash-consing: a trap is
+never moved to, or shared with, another place. A checked `let` that is neither folded nor available in its block is
+emitted as it was written (its operands are rewritten). Its node is never an extraction form for another class.
+Dead-code removal keeps it (`pure_rv?` is false for these operators).
+
+| Rule | Result | Bit-exactness |
+|---|---|---|
+| `cshl T A N` (or `cshr`) with `A`, `N` constants and `0 <= N < w(T)` | `canon(A << N, T)`, or `canon(A >> N, T)` | the IR's shift: `cshl` shifts the two's complement pattern and narrows to `T` (as the QBE emitter does); `cshr` is arithmetic for signed `T` (Ruby's `>>` on a negative integer is the arithmetic shift) and logical for unsigned `T` (a canonical unsigned value is never negative). Equal to the interpreter (`CheckedMachine`). |
+| `cshl`/`cshr` with `N` outside `[0, w(T))` | not folded | the operation traps; the `let` stays and is never removed |
+| `cshl T A 0`, `cshr T A 0` | `A` | the count is in range for every width, so no trap is possible; a shift by 0 leaves the bit pattern and the canonical value unchanged |
+| `cdiv T A B` with `A`, `B` constants, `B != 0`, and `B != -1` when `T` is signed | `canon(q, T)`, `q = |A| / |B|` with the sign negative iff the signs differ | the IR's division truncates toward zero; the divisor is nonzero and no `INT_MIN / -1` overflow is possible, so nothing traps; the same expression as the interpreter's `cdiv` |
+| `crem T A B` with the same constants | `canon(A - q*B, T)` with the same `q` | the IR's remainder takes the sign of the dividend, and `A - q*B` is the truncated remainder, the interpreter's formula; `|rem| < |B|` so it is in range |
+| `cdiv T A 1` | `A` | no trap (the divisor is neither 0 nor -1), and `A / 1 = A` for every value, including `INT_MIN` (the quotient does not overflow) |
+
+Not added, on purpose:
+
+- `cdiv T A -1` (`-A` for signed `T`): it wraps only for `A = INT_MIN`, where the IR traps; rewriting it to a negation
+  would delete that trap. `tests/pathb-egraph/cases/div_neg1.ir` keeps it.
+- Any rewrite of a division by a variable divisor, and `crem T A 1 = 0` (not needed by any case here).
+- Folds where the trap condition holds: `cdiv` by 0 or `INT_MIN / -1` with constant operands
+  (`div_zero_trap.ir`, `div_const_trap.ir`), and shifts with a count outside the width (`shift_trap.ir`). Those keep
+  the trap; `shift_trap_var.ir` keeps a variable-count shift that is also unused.
+- Shifts with a variable count and a variable operand: no rule. A count that becomes constant during saturation is
+  folded by `fold_checked`, since the node's kids are classes.
+
+**The interpreter.** `pathb-ssa.rb`'s `Machine` raises on `cshl` and `cshr`, so the differential check would skip
+every shift. `PathbEgraph.run` therefore uses `CheckedMachine`, a subclass in this file that adds them with the IR's
+semantics (trap unless `0 <= count < w`). `cdiv` and `crem` are the interpreter's own, which traps on a zero divisor
+and on `INT_MIN / -1`. The subclass belongs in `pathb-ssa.rb`; it is kept here only because that file is not
+changed by this pass.
+
+**Floats, not done.** `fadd fsub fmul fdiv fneg` never trap, but the rules that would be exact for them are few and
+none is applied: `x + 0` is not `x` for `x = -0.0`, `x * 1` and `x - x` fail for NaN and infinities, and
+`fneg(fneg(x)) = x` would need the IR to define `fneg` as a sign-bit flip that keeps a NaN's payload. Section 4 of
+`docs/notes/pathb-stage2.md` says only "IEEE binary", so that is not proved here and the identity is not added. The
+conversions (`i2f`, `u2f`, `fconv`, `cf2i`, `bitcast`) stay opaque: their rounding and their trap on NaN are not in
+the e-graph.
 
 ## Extraction
 
@@ -98,7 +144,15 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
   `--check`. A failure exits 1.
 - Differential: `tests/pathb-egraph/check.rb cases` runs each `tests/pathb-ssa/cases/*.ir` and
   `tests/pathb-egraph/cases/*.ir` with a `.args` file: the original, the optimized and the tight-budget form must
-  return the same values on the `.args` inputs (whose expected values are checked too) and on 50 random inputs.
+  return the same values on the `.args` inputs (whose expected values are checked too) and on 50 random inputs. An
+  expected value of `trap` is an outcome like any other: `PathbEgraph.run` returns `"trap"` when the interpreter
+  traps. A `FILE.lets` next to a case holds the number of lets the optimized form must have, so a fold is checked
+  as well as the traps that must stay.
+- The checked-operator cases: `shift_const.ir` (folds, and a shift that wraps), `shift_zero.ir` (`x << 0`, `x >> 0`),
+  `shift_trap.ir` (a constant out-of-range shift, unused, must still trap), `shift_trap_var.ir` (a variable-count
+  shift that traps for counts outside the width, unused), `div_const.ir` (constant division and remainder folded,
+  including unsigned, and `x / 1`), `div_neg1.ir` (`x / -1` kept, traps on `INT_MIN`), `div_const_trap.ir`
+  (`INT_MIN / -1` on constants kept) and `div_zero_trap.ir` (a remainder by zero kept).
 - `check.rb goldens` converts all 84 golden files (`tests/pathb-ir/*.ir`), optimizes each function, verifies the
   output, and runs the functions that the interpreter models (integer code without calls or pointers) on 5 random
   inputs each, original against optimized.
@@ -106,10 +160,10 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
 ## Numbers (goldens, 2026-11)
 
 - Goldens: 6595 functions converted and optimized. Four switch functions are left unconverted by the converter and
-  are not optimized. Every output verifies. Lets: 54878 before, 53203 after (pure lets 42369 -> 40694).
+  are not optimized. Every output verifies. Lets: 54878 before, 53201 after (pure lets 42369 -> 40693).
 - Budget: 22516 blocks saturated, 0 cut by iterations, 0 cut by nodes; 66178 input e-nodes and 6347 added; 27591
   rule rounds in total.
-- Interpreter on goldens: 30 functions run (150 random runs each side, all equal); the other 6565 use pointers,
+- Interpreter on goldens: 40 functions run (200 random runs each side, all equal); the other 6555 use pointers,
   calls, floats or other constructs the interpreter does not model.
 - New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 3 after. It has a repeated `wadd` in one block,
   a commutative duplicate, `x*1`, `x+0`, `x-x`, `x&-1`, `x^0`, `x*0`, `eq` of two equal sums, a `+3 +4` chain and
@@ -124,8 +178,12 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
   store-to-load forwarding is done. Stores, calls and volatile accesses are never moved or merged.
 - **Control flow.** A `condbr` on a constant keeps its dead arm; phis whose arguments became equal are not removed
   (the converter removes them only before this pass). Both would be a separate cleanup.
-- **Operators.** Float arithmetic, shifts, division, conversions to float and the bit-field operations have no rules.
-  `index`/`offset` are hash-consed but have no algebra.
+- **Operators.** Float arithmetic, conversions to float and the bit-field operations have no rules; shifts and
+  division have only the checked-operator rules above. `index`/`offset` are hash-consed but have no algebra.
+- **Float model.** The interpreter has no floats, so no float value is folded (see Floats above).
+- **Cost ties.** Extraction is by node count with ties going to the input form, and a bound register costs 0. So a
+  reassociation that makes a `let` redundant does not replace a value that is already emitted: in
+  `tests/pathb-egraph/cases/div_const.ir` the sum `((-6 + a) + 2147483647)` keeps two lets, not one.
 - **Cost model.** Node count only. No latency, register pressure or size of constants.
 - **No consumer.** The QBE, PTX, WebAssembly and WGSL emitters do not read this output yet (the same state as
   `pathb-ssa.rb`'s output).
