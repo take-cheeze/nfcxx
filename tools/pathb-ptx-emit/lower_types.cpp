@@ -96,6 +96,14 @@ i128 as_int(const Node *x) {
   return neg ? -v : v;
 }
 
+bool literal_int(const Node *x, i128 *out) {
+  if (!x) return false;
+  if (x->kind != Node::List || x->items.size() != 3 || x->items[0].kind != Node::Atom || x->items[0].text != "const")
+    return false;
+  *out = as_int(&x->items[2]);
+  return true;
+}
+
 i128 signed64(i128 n) {
   const i128 mask = (static_cast<i128>(1) << 64) - 1;
   n &= mask;

@@ -44,6 +44,8 @@ struct ByteInit {
 
 // The integer value of an atom (decimal, or hexadecimal with 0x, with an optional minus). Throws BadIR otherwise.
 i128 as_int(const Node *x);
+// Whether x is an integer literal, (const TYPE N), and its value in out.
+bool literal_int(const Node *x, i128 *out);
 // The signed 64-bit value with the bit pattern of n.
 i128 signed64(i128 n);
 // The decimal text of an integer.

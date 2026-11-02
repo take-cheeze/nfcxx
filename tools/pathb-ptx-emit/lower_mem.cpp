@@ -46,13 +46,18 @@ std::string FnCtx::token_rhs(const Node &v) const {
     return base.substr(0, plus + 1) + std::to_string(off);
   }
   if (h == "index" && v.items.size() == 4) {
-    // an element of an object at a constant index (the index is a counter of an unrolled copy)
+    // an element of an object at a constant index: a literal, or a counter of an unrolled copy
     std::string base = token_value(v.items[1]);
-    if (base.empty() || v.items[2].kind != Node::Atom || !regs.count(v.items[2].text)) return "";
-    auto c = const_regs.find(regs.at(v.items[2].text).ptx);
-    if (c == const_regs.end()) return "";
+    if (base.empty()) return "";
+    i128 k = 0;
+    if (!literal_int(&v.items[2], &k)) {
+      if (v.items[2].kind != Node::Atom || !regs.count(v.items[2].text)) return "";
+      auto c = const_regs.find(regs.at(v.items[2].text).ptx);
+      if (c == const_regs.end()) return "";
+      k = c->second;
+    }
     size_t plus = base.rfind('+');
-    long long off = std::stoll(base.substr(plus + 1)) + c->second * static_cast<long long>(as_int(&v.items[3]));
+    long long off = std::stoll(base.substr(plus + 1)) + static_cast<long long>(k) * static_cast<long long>(as_int(&v.items[3]));
     return base.substr(0, plus + 1) + std::to_string(off);
   }
   if (h == "load" && v.items.size() == 3 && v.items[2].kind == Node::Sym && v.items[2].sig == '$' &&
