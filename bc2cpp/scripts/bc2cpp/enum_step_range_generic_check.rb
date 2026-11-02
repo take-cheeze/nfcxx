@@ -326,7 +326,7 @@ else
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run is interpreted without the step or a body alias',
              mode_line.call(interpreted)&.end_with?('driver=false') && mode_line.call(interpreted)&.include?('plain=false'))
-  check.call('the compiled run registers the driver on Range', mode_line.call(compiled)&.end_with?('driver=true'))
+  check.call('the compiled run removes the temporary driver name on Range', mode_line.call(compiled)&.end_with?('driver=false'))
   check.call('the compiled run keeps no body alias (the step covers every case)', mode_line.call(compiled)&.include?('plain=false'))
   check.call('interpreted and compiled runs print the same (succ and <=> that yield included)',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))

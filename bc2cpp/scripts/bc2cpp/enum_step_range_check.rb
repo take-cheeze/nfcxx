@@ -205,7 +205,7 @@ else
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run is interpreted without the driver', mode_line.call(interpreted)&.end_with?('driver=false'))
-  check.call('the compiled run registers the driver on Range', mode_line.call(compiled)&.end_with?('driver=true'))
+  check.call('the compiled run removes the temporary driver name on Range', mode_line.call(compiled)&.end_with?('driver=false'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled

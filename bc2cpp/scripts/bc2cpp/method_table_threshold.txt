@@ -3,4 +3,4 @@
 # the static dispatch lists are computed from the sources (docs/bc2cpp-unregistered-methods.md), so this file is
 # where a table that grew shows up.
 
-1126
+1061

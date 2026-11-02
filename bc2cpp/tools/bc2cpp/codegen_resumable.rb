@@ -707,6 +707,15 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
       mrb_define_module_function(M, mod, "take_initial", bc2cpp_resumable_take_initial, MRB_ARGS_NONE());
       mrb_load_irep(M, driver);
       if (M->exc) mrb_exc_raise(M, mrb_obj_value(M->exc));
+      struct RClass* found = mod;
+      mrb_sym name = mrb_intern_lit(M, "drive");
+      mrb_method_t method = mrb_method_search_vm(M, &found, name);
+      if (found != mod || MRB_METHOD_UNDEF_P(method) || !MRB_METHOD_PROC_P(method)) {
+        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: Bc2cppResumable#drive is missing");
+      }
+      // Root the Proc before removing its temporary name; every compiled unit shares this module.
+      mrb_iv_set(M, mrb_obj_value(mod), mrb_intern_lit(M, "__driver__"), mrb_obj_value((struct RProc*)MRB_METHOD_PROC(method)));
+      mrb_remove_method(M, mod, name);
     }
     // Called from the VM straight (no C frame between the caller and this entry), with no
     // arguments: the only situation in which the bytecode driver can Fiber.yield.
@@ -730,10 +739,9 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     // frame, whose `&step` parameter is the cfunc proc that runs the step function.
     static mrb_value bc2cpp_resumable_exec(mrb_state* M, mrb_value self, mrb_func_t thunk, mrb_value frame) {
       struct RClass* mod = mrb_module_get(M, "Bc2cppResumable");
-      struct RClass* found = mod;
-      mrb_method_t m = mrb_method_search_vm(M, &found, mrb_intern_lit(M, "drive"));
-      if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_PROC_P(m)) {
-        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: Bc2cppResumable#drive is missing");
+      mrb_value driver = mrb_iv_get(M, mrb_obj_value(mod), mrb_intern_lit(M, "__driver__"));
+      if (!mrb_proc_p(driver)) {
+        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: saved resumable driver is missing");
       }
       // The driver takes no positional arguments: it is entered as a call with none, so the block sits in slot 1 and
       // the call's count is zero. exec_irep only pushes the driver's frame: the VM runs it after this function returns,
@@ -744,7 +752,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
       // A call from C can carry an empty keyword hash (`**kwd` in __enumerator_block_call); the driver takes none.
       M->c->ci->nk = 0;
       bc2cpp_resumable_handoff(M, frame);
-      return mrb_exec_irep(M, self, MRB_METHOD_PROC(m));
+      return mrb_exec_irep(M, self, mrb_proc_ptr(driver));
     }
     // A step of a method called from C yielded: hand it to the real Fiber.yield, which raises
     // the FiberError the interpreted method would have raised.

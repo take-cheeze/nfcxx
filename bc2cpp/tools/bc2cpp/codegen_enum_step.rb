@@ -160,8 +160,7 @@ module EnumStep
 
     text = <<~CPP + used.map { |form| form_text(form) }.join
       // ENUM_STEP -- the step form of an owner's #each (tools/bc2cpp/codegen_enum_step.rb, docs/bc2cpp-enum-step.md).
-      // The first registration of a body still in bytecode loads the owner's driver, which takes the body's place in
-      // the saved table; a second registration finds the compiled entry and the driver already saved.
+      // The saved Proc roots the driver independently of its temporary method-table entry.
       [[maybe_unused]] static bool bc2cpp_enum_step_save(mrb_state* M, struct RClass* c, bool singleton, const char* name,
                                                          mrb_int index, mrb_func_t step, mrb_func_t open, const char* driver_src,
                                                          const char* driver_name = "#{DRIVER_METHOD}") {
@@ -177,7 +176,13 @@ module EnumStep
             M->exc = nullptr;
             return false;
           }
+          if (!bc2cpp_core_save_interpreted(M, c, singleton, driver_name, index)) return false;
+          mrb_remove_method(M, target, mrb_intern_cstr(M, driver_name));
+          return true;
         }
+        // Re-registration reuses the rooted Proc after the temporary name has been removed.
+        mrb_value table = mrb_iv_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "__bc2cpp_core_interpreted__"));
+        if (!mrb_nil_p(table) && !mrb_nil_p(mrb_ary_ref(M, table, index))) return true;
         return bc2cpp_core_save_interpreted(M, c, singleton, driver_name, index);
       }
 
