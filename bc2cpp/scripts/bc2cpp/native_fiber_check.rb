@@ -187,10 +187,39 @@ File.write(File.join(probe, 'src/probe.cxx'), "#include #{File.join(generated, '
     return mrb_bool_value(!MRB_METHOD_UNDEF_P(method) &&
                          (!MRB_METHOD_PROC_P(method) || MRB_PROC_CFUNC_P(MRB_METHOD_PROC(method))));
   }
+  static void check_private_drivers(mrb_state* mrb) {
+    struct RClass* owners[] = {mrb->array_class, mrb->hash_class, mrb_module_get(mrb, "Enumerable"), mrb_module_get(mrb, "Bc2cppResumable")};
+    const char* names[] = {"__bc2cpp_find_driver", "__bc2cpp_select_driver", "__bc2cpp_collect_driver", "drive"};
+    for (int i = 0; i < 4; ++i) {
+      struct RClass* found = owners[i];
+      mrb_method_t method = mrb_method_search_vm(mrb, &found, mrb_intern_cstr(mrb, names[i]));
+      if (!MRB_METHOD_UNDEF_P(method)) {
+        fprintf(stderr, "temporary iterator driver retained: %s\n", names[i]);
+        std::abort();
+      }
+    }
+    mrb_value mod = mrb_obj_value(owners[3]);
+    if (!mrb_proc_p(mrb_iv_get(mrb, mod, mrb_intern_lit(mrb, "__driver__")))) {
+      fprintf(stderr, "saved resumable driver is missing\n");
+      std::abort();
+    }
+  }
   extern "C" void mrb_native_fiber_probe_gem_init(mrb_state* mrb) {
     if (std::getenv("NATIVE_PROBE_COMPILED")) {
       bc2cpp_gem_init(mrb);
+      check_private_drivers(mrb);
+      mrb_value table = mrb_iv_get(mrb, mrb_obj_value(mrb->object_class), mrb_intern_lit(mrb, "__bc2cpp_core_interpreted__"));
+      mrb_value saved = mrb_ary_dup(mrb, table);
+      mrb_gc_protect(mrb, saved);
+      mrb_full_gc(mrb);
       bc2cpp_register_owner_methods(mrb);
+      check_private_drivers(mrb);
+      for (mrb_int i = 0; i < RARRAY_LEN(saved); ++i) {
+        if (!mrb_obj_equal(mrb, mrb_ary_ref(mrb, saved, i), mrb_ary_ref(mrb, table, i))) {
+          fprintf(stderr, "iterator driver replaced during repeated registration\n");
+          std::abort();
+        }
+      }
     }
     mrb->code_fetch_hook = audit;
     mrb_define_method(mrb, mrb->object_class, "native_only_reject_bytecode", reject_bytecode, MRB_ARGS_NONE());

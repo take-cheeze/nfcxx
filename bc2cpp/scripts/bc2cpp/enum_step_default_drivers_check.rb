@@ -213,8 +213,8 @@ else
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run has no generated drivers', interpreted&.find { |l| l.start_with?('mode: ') }&.end_with?('drivers=false'))
-  check.call('the compiled run registers the generated drivers on Enumerable',
-             compiled&.find { |l| l.start_with?('mode: ') }&.end_with?('drivers=true'))
+  check.call('the compiled run removes temporary driver names on Enumerable',
+             compiled&.find { |l| l.start_with?('mode: ') }&.end_with?('drivers=false'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled

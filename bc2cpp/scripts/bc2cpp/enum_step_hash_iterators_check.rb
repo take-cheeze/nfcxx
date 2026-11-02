@@ -168,7 +168,7 @@ else
   same = ->(lines) { lines&.reject { |line| line.start_with?('mode: ') } }
   check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
   check.call('the interpreted run has no drivers', mode_line.call(interpreted)&.end_with?('drivers=false'))
-  check.call('the compiled run registers the drivers on Hash', mode_line.call(compiled)&.end_with?('drivers=true'))
+  check.call('the compiled run removes temporary driver names on Hash', mode_line.call(compiled)&.end_with?('drivers=false'))
   check.call('interpreted and compiled runs print the same',
              !interpreted.nil? && !compiled.nil? && same.call(interpreted) == same.call(compiled))
   if interpreted && compiled
