@@ -1,0 +1,10 @@
+(ir-module "f.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int 4 4)
+  (store int $"n" %0)
+  (let %1 float (fadd float (const float 16777216.0) (const float 1.0)))
+  (let %2 double (fconv double %1))
+  (let %3 int (cf2i int %2))
+  (return %3))
