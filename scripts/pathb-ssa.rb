@@ -751,6 +751,7 @@ end
 # Its initial cells come from its initialiser. A global with no definition here (extern), a thread-local one, or an
 # initialiser the interpreter does not model (bytes, bitfield, a function address) is unsupported: any access raises.
 GLOBAL_TABLE = Struct.new(:addr, :init, :unsupported).new({}, [], {})
+EH_TLS_GLOBALS = %w[__curr_eh_stack_entry __eh_curr_region __caught_object_address __catch_clause_number].map { |n| "\"#{n}\"" }.freeze
 
 # The value of a literal operand of an initialiser: a constant of an integer or float type, or a null pointer.
 def literal(v, type)
@@ -783,6 +784,13 @@ def install_module(forms)
     begin
     init = g.find { |x| head(x) == "init" }
     flags = g.map { |x| x.is_a?(Array) ? head(x) : x }
+    # The exception runtime's thread-local state (EDG's libC) starts at zero in a fresh process, as any thread-local
+    # object does. A run of the interpreter is a fresh process, so these four are zero-initialised. Their runtime
+    # functions (__throw, _setjmp, ...) are still unsupported.
+    if init.nil? && flags.include?("thread") && flags.include?("extern") && EH_TLS_GLOBALS.include?(name)
+      GLOBAL_TABLE.init << [base, sx(strip_const(g[2])), 0]
+      next
+    end
     if init.nil? || flags.include?("extern") || flags.include?("thread") || init.size == 1
       GLOBAL_TABLE.unsupported[name] = true
       next
