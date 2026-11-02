@@ -14,7 +14,7 @@
 # it unknown, with the reason named, and unknown spreads to the
 # classes that inherit from it.
 require 'json'
-require 'prism'
+require_relative 'ruby_parse_cache'
 require 'set'
 require_relative 'class_body_scan'
 require_relative 'pure_eval'
@@ -243,7 +243,7 @@ module ClassWorld
           node.compact_child_nodes.each { |c| visit.(c, scope, inside) }
         end
       end
-      visit.(Prism.parse(File.read(file)).value, '', false)
+      visit.(RubyParseCache.parse_file(file).value, '', false)
     end
   end
 

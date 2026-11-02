@@ -5,7 +5,7 @@ require_relative 'bytecode_ir_receivers'
 require_relative 'bytecode_ir_containers'
 require_relative 'native_constructor_sigs'
 require_relative 'compiled_gems'
-require 'prism'
+require_relative 'ruby_parse_cache'
 
 # Construct, native-argument and super devirtualization targets.
 
@@ -35,7 +35,7 @@ module DispatchTargetSources
 
     found = {}
     files.each do |file|
-      result = Prism.parse_file(file)
+      result = RubyParseCache.parse_file(file)
       raise "bc2cpp: #{file}: #{result.errors.first.message}" unless result.errors.empty?
 
       collect_initializers(result.value, nil, found)

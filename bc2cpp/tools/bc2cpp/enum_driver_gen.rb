@@ -7,7 +7,7 @@
 # Refused, so the body is kept rather than rewritten inexactly: a body that asks for its block some other way (super, a
 # def that yields to an outer method, a reassigned block), and one without an &block parameter, whose yield the rewrite
 # needs. block_given? is exact in a driver that takes the block as a parameter: it becomes a test of that parameter.
-require 'prism'
+require_relative 'ruby_parse_cache'
 
 module EnumDriverGen
   class Refused < StandardError; end
@@ -22,7 +22,7 @@ module EnumDriverGen
   # def must start on that line (the body the compiler saw, when the file has more than one def of the method).
   def driver_source(mrblib_path, owner, method, driver_method, line: nil)
     source = File.read(mrblib_path, encoding: 'UTF-8')
-    found = find_def(Prism.parse(source).value, owner, method, line) or raise Refused, "no def #{owner}##{method} in #{mrblib_path}"
+    found = find_def(RubyParseCache.parse(source, mrblib_path).value, owner, method, line) or raise Refused, "no def #{owner}##{method} in #{mrblib_path}"
     def_node, keyword = found
     check_rewritable(def_node, source)
     text = rewrite(source, def_node, driver_method)

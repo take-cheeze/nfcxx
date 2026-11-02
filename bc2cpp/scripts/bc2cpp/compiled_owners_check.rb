@@ -64,6 +64,32 @@ Dir.mktmpdir('compiled-owners') do |dir|
   owners = GemOwners.owners([path])
   suite.check("the registry's owner spelling (#{owners.join(', ')})",
               owners == %w[Array Game::Scene::Map Game::Scene::Map.singleton Game::Util Game::Util.singleton RGSS])
+
+  scans = 0
+  GemOwners::Finder.singleton_class.prepend(Module.new do
+    define_method(:new) do
+      scans += 1
+      super()
+    end
+  end)
+  File.write(path, "class FirstOwner; def call; end; end\n")
+  first = GemOwners.owners([path])
+  RubyParseCache.clear
+  suite.check('a disk hit reuses owner facts without another visitor',
+              first == ['FirstOwner'] && GemOwners.owners([path]) == first && scans == 1)
+  File.write(path, "class OtherOwner; def call; end; end\n")
+  suite.check('rewriting a source invalidates the owner facts', GemOwners.owners([path]) == ['OtherOwner'] && scans == 2)
+  extra = File.join(dir, 'extra.rb')
+  File.write(extra, "module AddedOwner; def call; end; end\n")
+  suite.check('the source set participates in the owner cache key', GemOwners.owners([path, extra]) == %w[AddedOwner OtherOwner])
+  File.delete(extra)
+  missing = begin
+    GemOwners.owners([path, extra])
+    false
+  rescue Errno::ENOENT
+    true
+  end
+  suite.check('a removed required source still raises', missing)
 end
 
 suite.require_mrbc!
