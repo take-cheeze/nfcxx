@@ -22,7 +22,7 @@
 
 Ref = Struct.new(:sigil, :raw)   # $"x", @"x", &"f": raw is the quoted name, quotes included
 Str = Struct.new(:raw)           # a quoted string token, quotes included
-Fn = Struct.new(:name, :ret, :params, :slots, :body)
+Fn = Struct.new(:name, :ret, :params, :slots, :body, :attrs)
 Blk = Struct.new(:instrs, :term)
 Phi = Struct.new(:var, :name, :type, :inc)
 Unsupported = Class.new(StandardError)
@@ -120,9 +120,14 @@ def clause(s, name)
   c ? c[1..] : []
 end
 
+# Linkage markers and constructor/destructor attributes follow the parameters; they have no runtime meaning in the body.
+FN_ATTR_HEADS = %w[static weak constructor destructor].freeze
+
 def fn_of(form)
   Fn.new(form[1], form.find { |x| head(x) == "ret" }, form.find { |x| head(x) == "params" },
-         form.select { |x| head(x) == "slot" }, form[2..].reject { |x| %w[ret params slot].include?(head(x)) })
+         form.select { |x| head(x) == "slot" },
+         form[2..].reject { |x| (%w[ret params slot] + FN_ATTR_HEADS).include?(head(x)) },
+         form[2..].select { |x| FN_ATTR_HEADS.include?(head(x)) })
 end
 
 # ---- structured IR to basic blocks ----------------------------------------------------------------------------------
@@ -323,6 +328,7 @@ class Converter
 
   def render
     lines = ["(ssa-function #{sx(@fn.name)}", "  #{sx(@fn.ret)}", "  #{sx(@fn.params)}"]
+    (@fn.attrs || []).each { |a| lines << "  #{sx(a)}" }
     @fn.slots.each { |s| lines << "  #{sx(s)}" unless @promoted.key?("$#{s[1].raw}") }
     lines << "  (ssa-promoted #{@promoted.keys.map { |k| k[1..] }.join(' ')})"
     @rpo.sort.each do |b|
