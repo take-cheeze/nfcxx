@@ -684,11 +684,18 @@ INT_TYPES = {
   "unsigned_long_long" => [64, false]
 }.freeze
 
+# A qualifier does not change a value: `(const T)` is T for the interpreter.
+def strip_const(t) = head(t) == "const" ? strip_const(t[1]) : t
+
 def int_info(t)
+  t = strip_const(t)
   return [64, false] if head(t) == "ptr"
 
   INT_TYPES.fetch(t) { raise Unsupported, "type #{sx(t)} in the interpreter" }
 end
+
+# A literal operand: an integer as read from the IR (a string) or already an Integer.
+def int_lit(x) = x.is_a?(Integer) ? x : Integer(x.to_s, 10)
 
 def canon(v, t)
   w, signed = int_info(t)
@@ -703,7 +710,7 @@ end
 # once. Overflow gives an infinity, as IEEE does. NaN payloads and the sign of a NaN are not modelled.
 FLOAT_TYPES = { "float" => 32, "double" => 64 }.freeze
 
-def float_type?(t) = t.is_a?(String) && FLOAT_TYPES.key?(t)
+def float_type?(t) = (t = strip_const(t)).is_a?(String) && FLOAT_TYPES.key?(t)
 
 def round_float(v, t)
   raise Unsupported, "float type #{sx(t)} in the interpreter" unless float_type?(t)
@@ -742,7 +749,10 @@ class Machine
 
   def initialize(fn, args)
     @env = {}
-    @mem = Hash.new(0)
+    @cells = {}     # address => [type, value]: a scalar object at an address (no byte-level aliasing)
+    @addr = {}      # slot key => address of the slot's object
+    @slot_type = {} # slot key => its type
+    layout_slots(fn)
     raise Unsupported, "main takes only plain parameters" unless fn.params[1..].all? { |p| head(p) == "param" }
 
     params = fn.params[1..]
@@ -788,6 +798,53 @@ class Machine
   private
 
   def exec_list(stmts) = stmts.each { |s| exec(s) }
+
+  # Each slot is an object at an address; the addresses are assigned in declaration order, aligned, from 4096.
+  def layout_slots(fn)
+    top = 4096
+    fn.slots.select { |s| head(s) == "slot" }.each do |s|
+      size, align = s[3] ? [int_lit(s[3]), [int_lit(s[4]), 1].max] : scalar_size(s[2])
+      top = (top + align - 1) / align * align
+      @addr["$#{s[1].raw}"] = top
+      @slot_type["$#{s[1].raw}"] = s[2]
+      top += size
+    end
+  end
+
+# Size and alignment of a scalar type of the LP64 layout (the slot headers of an optimized function carry none).
+def scalar_size(t)
+  t = strip_const(t)
+  return [8, 8] if head(t) == "ptr"
+
+  size = { "bool" => 1, "char" => 1, "signed_char" => 1, "unsigned_char" => 1, "short" => 2, "unsigned_short" => 2,
+           "int" => 4, "unsigned_int" => 4, "float" => 4, "long" => 8, "long_long" => 8, "unsigned_long" => 8,
+           "unsigned_long_long" => 8, "double" => 8 }[t] or raise Unsupported, "slot of type #{sx(t)}"
+  [size, size]
+end
+
+  # The address an address operand names: a slot, or a pointer value.
+  def addr_of(x)
+    return val(x) unless x.is_a?(Ref)
+    raise Unsupported, "address #{sx(x)}" unless x.sigil == "$"
+
+    @addr.fetch("$#{x.raw}") { raise Unsupported, "slot #{x.raw}" }
+  end
+
+  # A load reads the object at the address. An object never stored reads as zero. A load of another type than the
+  # object's (a type-punned access) is not modelled.
+  def load_cell(t, a)
+    return(float_type?(t) ? 0.0 : 0) unless @cells.key?(a)
+
+    type, v = @cells[a]
+    raise Unsupported, "a #{sx(t)} access of a #{sx(type)} object" unless sx(strip_const(type)) == sx(strip_const(t))
+
+    v
+  end
+
+  def store_cell(t, a, v) = @cells[a] = [sx(strip_const(t)), v]
+
+  # The slot whose object starts at the address, or nil.
+  def slot_at(a) = @addr.key(a)
 
   # The matching marker is found first; the body then runs from it, so statements after it fall through. A switch
   # with no matching marker and no default runs nothing. `break` leaves the switch (its catch is the innermost).
@@ -842,10 +899,12 @@ class Machine
     case head(s)
     when "let" then @env[s[1]] = val(s[3])
     when "set" then @env[s[1]] = val(s[2])
-    when "store"
-      raise Unsupported, "store through #{sx(s[2])}" unless slot_key(s[2])
-
-      @mem[s[2].raw] = val(s[3])
+    when "store" then store_cell(s[1], addr_of(s[2]), val(s[3]))
+    when "nonnull"
+      raise Trap, "null pointer" if val(s[1]).zero?
+    when "bounds"
+      i = val(s[1])
+      raise Trap, "index #{i} out of bounds" unless i >= 0 && i < int_lit(s[2])
     when "block" then exec_list(s[1..])
     when "if" then exec_list(val(s[1]) != 0 ? clause(s, "then") : clause(s, "else"))
     when "switch" then exec_switch(s)
@@ -888,10 +947,15 @@ class Machine
 
   def eval_rv(f)
     case head(f)
-    when "load"
-      raise Unsupported, "load through #{sx(f[2])}" unless slot_key(f[2])
+    when "load" then load_cell(f[1], addr_of(f[2]))
+    when "addr" then addr_of(f[1])
+    when "offset" then addr_of(f[1]) + int_lit(f[2])
+    when "index" then addr_of(f[1]) + val(f[2]) * int_lit(f[3])
+    when "bitcast"
+      # Only a pointer-to-pointer cast keeps the value; any other cast reinterprets bits, which is not modelled.
+      raise Unsupported, "bitcast to #{sx(f[1])}" unless head(f[1]) == "ptr" && (head(f[2]) == "ptr" || f[2].is_a?(Ref))
 
-      @mem[f[2].raw]
+      addr_of(f[2])
     when "iconv" then canon(val(f[2]), f[1])
     when *FBIN.keys then round_float(val(f[2]).send(FBIN[head(f)], val(f[3])), f[1])
     when "fneg" then -val(f[2])
