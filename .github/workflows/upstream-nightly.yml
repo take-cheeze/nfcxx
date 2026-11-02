@@ -327,7 +327,8 @@ jobs:
         with:
           suite: ${{ matrix.suite }}
       - name: Extended compile observations (no unreviewed execution)
-        timeout-minutes: 30
+        # pathb x microsoft-stl hit 30 minutes on 2026-11-01 (qbe took ~7 min); job ceiling is 90.
+        timeout-minutes: ${{ matrix.suite == 'microsoft-stl' && 60 || 30 }}
         env:
           SUITE: ${{ matrix.suite }}
           SURVEY_OUT: build/nightly/object-survey
