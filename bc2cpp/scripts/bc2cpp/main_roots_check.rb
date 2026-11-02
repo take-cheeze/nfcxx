@@ -5,6 +5,7 @@ require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/main_roots'
 require_relative '../../tools/bc2cpp/main_reachability'
 require_relative '../../tools/bc2cpp/native_vm'
+require_relative '../../tools/bc2cpp/bc2cpp'
 
 # The fixture defines its own program rather than the engine's signature classes.
 ENV['BC2CPP_SIG_DIRS'] = ''
@@ -87,6 +88,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
   RUBY_SOURCE
   original_env = ENV['BC2CPP_MAIN_AST']
   original_unregistered = ENV['BC2CPP_UNREGISTERED_EXTRA']
+  original_report = ENV['BC2CPP_MAIN_REPORT']
   begin
     # The fixture's internal methods stand in for checked, name-invisible entries.
     ENV['BC2CPP_UNREGISTERED_EXTRA'] = %w[qr9z_unused qr9z_dead_leaf qr9z_chain qr9z_leaf qr9z_direct]
@@ -94,6 +96,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
     ENV.delete('BC2CPP_MAIN_AST')
     full, = Bc2cppFixtureRuntime.generate(source, File.join(dir, 'full'), drop_native: ['/mruby-rgss/src/'])
     ENV['BC2CPP_MAIN_AST'] = ast
+    ENV['BC2CPP_MAIN_REPORT'] = File.join(dir, 'reports')
     pruned_dir = File.join(dir, 'pruned')
     pruned, diagnostics = Bc2cppFixtureRuntime.generate(source, pruned_dir, drop_native: ['/mruby-rgss/src/'])
     check.call('pruning runs before method emission', full.include?('MainRootProbe_qr9z_unused_impl') &&
@@ -107,6 +110,64 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
     manifest = File.read(File.join(pruned_dir, 'fixture_stubs.txt'))
     check.call('dead method bodies join the residual mrblib stub manifest', manifest.include?('MainRootProbe#qr9z_unused'))
     check.call('the census reports omitted methods', diagnostics.include?('unreachable: MainRootProbe#qr9z_unused'))
+    report = JSON.parse(File.read(File.join(ENV['BC2CPP_MAIN_REPORT'], 'fixture_named_reachability.json')))
+    entry = report.fetch('entries').find { |row| row['name'] == 'qr9z_entry' }
+    check.call('named reachability reports host evidence independently of mandatory table roots',
+               entry['bounded_name_reached'] && entry['reasons'].any? { |reason| reason['kind'] == 'host' })
+    named = report.fetch('entries').find { |row| row['name'] == 'qr9z_named' }
+    check.call('report-only candidates remain registered', !named['bounded_name_reached'] && !named['excluded'])
+    summary, summary_err, summary_status = Open3.capture3(RbConfig.ruby, File.join(root, 'scripts/bc2cpp/dynamic_names_report.rb'),
+                                                          '--main-report', File.join(ENV['BC2CPP_MAIN_REPORT'], 'fixture_named_reachability.json'))
+    check.call('the report summarizes retention reasons without rerunning generation',
+               summary_status.success? && summary_err.empty? && summary.include?('by primary retention reason'))
+
+    alias_dir = File.join(dir, 'alias-analysis')
+    FileUtils.mkdir_p(alias_dir)
+    alias_path = File.join(alias_dir, 'fixture.rb')
+    File.write(alias_path, source + "\nclass MainRootProbe; def qr9z_enum(payload); to_enum(:qr9z_entry, payload); end; end\n")
+    alias_ireps, alias_root = compile_ireps([alias_path], 'alias', alias_dir, mrbc: Bc2cppFixtureRuntime.mrbc)
+    alias_defs = build_registry(alias_ireps, alias_root).first
+    alias_roots = MainRoots::Result.new(names: Set['qr9z_alias'], functions: Set.new, refusals: [], native_paths: Set.new)
+    alias_keys = alias_defs.values.flatten.to_set { |d| "#{d.owner}##{d.name}" }
+    alias_result = MainReachability.analyze(alias_ireps, alias_defs, alias_roots, prunable_keys: alias_keys,
+                                            aliases: { ['MainRootProbe', 'qr9z_entry'] => ['qr9z_alias'] }, seed_named: false, trace: true)
+    check.call('an alias reaches its original body and transitive callees',
+               !alias_result.dead_keys.include?('MainRootProbe#qr9z_entry') && alias_result.names.include?('qr9z_leaf'))
+    check.call('transitive retention has Ruby source evidence',
+               alias_result.reasons.fetch('qr9z_leaf').any? { |reason| reason[:kind] == 'ruby' && reason[:source].include?('fixture.rb:') })
+    enum_roots = MainRoots::Result.new(names: Set['qr9z_enum'], functions: Set.new, refusals: [], native_paths: Set.new)
+    enum_result = MainReachability.analyze(alias_ireps, alias_defs, enum_roots, prunable_keys: alias_keys, seed_named: false)
+    check.call('to_enum resolves the method name independently of forwarded iterator arguments',
+               enum_result.refusals.empty? && enum_result.names.include?('qr9z_entry'))
+    alias_source = <<~RUBY_SOURCE
+      class MainRootProbe
+        def qr9z_entry = 7
+        alias qr9z_removed qr9z_entry
+        alias qr9z_kept qr9z_entry
+      end
+    RUBY_SOURCE
+    ENV['BC2CPP_UNREGISTERED_EXTRA'] = 'MainRootProbe#qr9z_removed'
+    alias_code, alias_diagnostics = Bc2cppFixtureRuntime.generate(alias_source, File.join(dir, 'alias-tables'),
+                                                                 path: '3rd/mruby/mrblib/alias_probe.rb', drop_native: ['/mruby-rgss/src/'])
+    check.call('a proven alias exclusion leaves the source and other alias registered',
+               StaticDispatchRegistrations.registrations(alias_code).select { |entry, _name| entry == 'MainRootProbe_qr9z_entry' }
+                                          .map(&:last).sort == %w[qr9z_entry qr9z_kept])
+    alias_built, alias_output = Bc2cppFixtureRuntime.run(File.join(dir, 'alias-tables'), alias_diagnostics, ['MainRootProbe'], <<~CPP, build: Bc2cppFixtureRuntime.full_or_build, full: true)
+      static int scenario(mrb_state* M) {
+        if (compiled) bc2cpp_register_owner_methods(M);
+        mrb_value object = mrb_obj_new(M, mrb_class_get(M, "MainRootProbe"), 0, nullptr);
+        call(M, "kept alias", object, "qr9z_kept");
+        struct RClass* owner = mrb_obj_class(M, object);
+        mrb_method_t method = mrb_method_search_vm(M, &owner, mrb_intern_lit(M, "qr9z_removed"));
+        bool found = !MRB_METHOD_UNDEF_P(method);
+        return M->exc || (compiled ? found : !found) ? 1 : 0;
+      }
+    CPP
+    warn alias_output unless alias_built && alias_output.scan('kept alias => 7').size == 2
+    check.call('the real method table removes only the proven alias and preserves calls through the retained alias',
+               alias_built && alias_output.scan('kept alias => 7').size == 2)
+    ENV['BC2CPP_UNREGISTERED_EXTRA'] = %w[qr9z_unused qr9z_dead_leaf qr9z_chain qr9z_leaf qr9z_direct]
+                                         .map { |name| "MainRootProbe##{name}" }.join(',')
     reference = Bc2cppFixtureRuntime.full_or_build
     abort 'main roots check requires a full-core reference runtime' unless reference
     built, output = Bc2cppFixtureRuntime.run(pruned_dir, diagnostics, ['MainRootProbe'], <<~CPP, build: reference, full: true)
@@ -135,6 +196,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
   ensure
     original_env ? ENV['BC2CPP_MAIN_AST'] = original_env : ENV.delete('BC2CPP_MAIN_AST')
     original_unregistered ? ENV['BC2CPP_UNREGISTERED_EXTRA'] = original_unregistered : ENV.delete('BC2CPP_UNREGISTERED_EXTRA')
+    original_report ? ENV['BC2CPP_MAIN_REPORT'] = original_report : ENV.delete('BC2CPP_MAIN_REPORT')
   end
 
   native = File.join(dir, 'native.cpp')
@@ -142,10 +204,15 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
     #include "host.h"
     static void qr9z_forward(const char* name) { mrb_funcall(0, 0, name, 0); }
     void qr9z_library_boot() { qr9z_forward("qr9z_forwarded"); }
+    namespace {
+      void qr9z_internal(const char* name) { mrb_funcall(0, 0, name, 0); }
+    }
+    void qr9z_internal_boot() { qr9z_internal("qr9z_internal_name"); }
   CPP
   build_ast.call([native])
   covered = MainRoots.read(ast)
   check.call('native helper parameters are bounded by their direct callers', covered.names.include?('qr9z_forwarded') && covered.refusals.empty?)
+  check.call('anonymous-namespace helpers also have finite internal callers', covered.names.include?('qr9z_internal_name') && covered.refusals.empty?)
   check.call('the manifest records analyzed native units', covered.native_paths.include?(File.realpath(native)))
 
   File.write(header, File.read(header) + "\n// changed\n")

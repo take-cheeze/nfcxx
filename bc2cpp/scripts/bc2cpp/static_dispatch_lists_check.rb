@@ -171,13 +171,15 @@ SOURCE = <<~'RUBY'
     def pruned = 2
     def closed_only = 3
     def core_only = 4
+    def rom_only = 5
   end
 RUBY
 ENTRIES = [
   { owner: 'VFix', name: 'kept', entry: 'vfix_kept', aspec: 'MRB_ARGS_NONE()', visibility: :public },
   { owner: 'VFix', name: 'pruned', entry: 'vfix_pruned', aspec: 'MRB_ARGS_NONE()', visibility: :public },
   { owner: 'VFix', name: 'closed_only', entry: 'vfix_closed_only', aspec: 'MRB_ARGS_NONE()', visibility: :public },
-  { owner: 'VFix', name: 'core_only', entry: 'vfix_core_only', aspec: 'MRB_ARGS_NONE()', visibility: :public }
+  { owner: 'VFix', name: 'core_only', entry: 'vfix_core_only', aspec: 'MRB_ARGS_NONE()', visibility: :public },
+  { owner: 'VFix', name: 'rom_only', entry: 'vfix_rom_only', aspec: 'MRB_ARGS_NONE()', visibility: :public }
 ].freeze
 
 # The registration code a generation emits with OUT_SYMBOL, BUILD_NAME and lists variable as given.
@@ -201,7 +203,7 @@ end
 Dir.mktmpdir('static_dispatch_lists') do |dir|
   path = File.join(dir, 'lists.json')
   File.write(path, LISTS.dump(LISTS::Lists.new(open: Set['VFix#pruned'], closed: Set['VFix#pruned', 'VFix#closed_only'],
-                                               core_excluded: Set.new, core_left_out: Set['VFix#core_only'], digest: 'x')))
+                                               core_excluded: Set['VFix#rom_only'], core_left_out: Set['VFix#core_only'], digest: 'x')))
   suite.check("a compiled gem's OUT_SYMBOL with no lists stops the generation, naming the command",
               (begin
                  generate.call(out_symbol: 'rgss_compiled')
@@ -216,10 +218,12 @@ Dir.mktmpdir('static_dispatch_lists') do |dir|
   suite.check("the closed build drops the closed set's names", !closed.include?('vfix_pruned') &&
                                                               !closed.include?('vfix_closed_only') && closed.include?('vfix_kept, MRB_ARGS_NONE())'))
   suite.check('the closed build also drops listed core Ruby entries', !closed.include?('vfix_core_only'))
+  suite.check('compiled replacements do not reinstall an excluded ROM name', !closed.include?('vfix_rom_only'))
   other = generate.call(out_symbol: 'rgss_compiled', build: 'other', lists_value: path)
   suite.check("another build drops only the open set's names", !other.include?('vfix_pruned') &&
                                                               other.include?('vfix_closed_only, MRB_ARGS_NONE())'))
   suite.check('other builds retain listed core Ruby entries', other.include?('vfix_core_only, MRB_ARGS_NONE())'))
+  suite.check('other builds retain the compiled replacement of a ROM name', other.include?('vfix_rom_only, MRB_ARGS_NONE())'))
   fixture = generate.call(out_symbol: 'a_fixture')
   suite.check('a fixture with no lists registers every entry and is not stopped',
               %w[vfix_kept vfix_pruned vfix_closed_only vfix_core_only].all? { |entry| fixture.include?("#{entry}, MRB_ARGS_NONE())") })

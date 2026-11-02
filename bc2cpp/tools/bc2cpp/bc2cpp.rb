@@ -1426,7 +1426,7 @@ if $PROGRAM_NAME == __FILE__
     require_relative 'main_reachability'
     definitions = CodeGen.block_self_bodies.merge(registry) { |_name, original, settled| (original + settled).uniq }
     main_reach = MainReachability.analyze(ireps, definitions, MainRoots.read(main_ast), native_paths: native_paths || [],
-                                         prunable_keys: gen.unregistered_keys(lists: StaticDispatchLists.current))
+                                         prunable_keys: gen.unregistered_keys(lists: StaticDispatchLists.current), aliases: CodeGen.core_aliases || {})
     warn "== main-root reachability: #{main_reach.labels.size}/#{ireps.size} instruction sequences retained =="
     main_reach.refusals.each { |reason| warn "  retain all: #{reason}" }
     main_reach.notes.each { |reason| warn "  retain named roots: #{reason}" }
@@ -2249,6 +2249,21 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_direct_construct_accessors(compiled)
   # OWNER_METHOD_REGISTRATION: every owner this gem compiles an entry for. No registration is written by hand.
   registration_owners, core_owners = bc2cpp_registration_owners(compiled.map { |m| m[:owner] })
+  if main_reach && (report_dir = ENV['BC2CPP_MAIN_REPORT'])
+    keys = definitions.values.flatten.to_set { |d| "#{d.owner}##{d.name}" }
+    evidence = MainReachability.analyze(ireps, definitions, MainRoots.read(main_ast), native_paths: native_paths || [],
+                                        prunable_keys: keys, aliases: CodeGen.core_aliases || {}, seed_named: false, trace: true)
+    entries = gen.named_registration_entries(compiled, registration_owners).map do |row|
+      why = evidence.reasons.fetch(row[:name], [])
+      row.merge(reasons: why, bounded_name_reached: evidence.names.include?(row[:name]))
+    end
+    FileUtils.mkdir_p(report_dir)
+    report = { format: 1, symbol: symbol, build_name: ENV['BC2CPP_BUILD_NAME'], host_manifest: File.expand_path(main_ast),
+               host_digest: Digest::SHA256.file(main_ast).hexdigest, omission_digest: StaticDispatchLists.current.digest,
+               entries: entries, unresolved: evidence.notes, refusals: evidence.refusals,
+               notice: 'Unreached entries are diagnostic candidates, not an omission proof.' }
+    File.write(File.join(report_dir, "#{symbol}_named_reachability.json"), JSON.pretty_generate(report) + "\n")
+  end
   print gen.emit_owner_registrations(compiled, registration_owners, core_owners: core_owners)
   # SKIPPED_ENTRY_MACROS: the entries this run refused (SKIP_UNSUPPORTED), e.g. a method that compiles only when the
   # closed world proves a fact a desktop build lacks, as `#define BC2CPP_SKIPPED_<entry>` markers.
