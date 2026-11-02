@@ -6,6 +6,8 @@
 
 require 'tmpdir'
 require 'fileutils'
+require 'open3'
+require 'rbconfig'
 require_relative '../../tools/bc2cpp/lint_crosscheck'
 
 ROOT_DIR = File.expand_path('../..', __dir__)
@@ -40,6 +42,55 @@ Dir.mktmpdir do |dir|
   check.call('an offence outside the baseline is new', run[:new_offences].any? { |o| o.cop == 'Dynamic/Send' })
   check.call('baseline entries missing from the tree are stale', !run[:stale].empty?)
 end
+
+probe = <<~'RUBY'
+  require 'tmpdir'
+  require 'fileutils'
+  require File.join(ARGV.fetch(0), 'tools/bc2cpp/lint_crosscheck')
+  $lint_scans = 0
+  Object.prepend(Module.new do
+    def closed_world_lint_run(**args)
+      $lint_scans += 1
+      super
+    end
+  end)
+  Dir.mktmpdir do |root|
+    FileUtils.ln_s(File.join(ARGV[0], 'tools'), File.join(root, 'tools'))
+    folder = File.join(root, 'scripts/rpg2k')
+    FileUtils.mkdir_p(folder)
+    FileUtils.cp(File.join(ARGV[0], 'scripts/rpg2k/closed_world_lint.rb'), folder)
+    baseline = File.join(folder, 'closed_world_lint_baseline.txt')
+    File.write(baseline, '')
+    sources = File.join(root, 'mruby-rpg2k/mrblib')
+    FileUtils.mkdir_p(sources)
+    path = File.join(sources, 'probe.rb')
+    File.write(path, "class Probe; def go(o, n); o.send(n); end; end\n")
+    analysis = Struct.new(:method_missing_files).new([])
+    first = LintCrosscheck.violations(root, analysis)
+    raise 'cold lint did not run' unless $lint_scans == 1 && first.any? { |line| line.include?('Dynamic/Send') }
+    RubyParseCache.clear
+    raise 'warm lint was recomputed' unless LintCrosscheck.violations(root, analysis) == first && $lint_scans == 1
+    File.write(path, "class Probe; def go; eval('1'); end; end\n")
+    changed = LintCrosscheck.violations(root, analysis)
+    raise 'source edit was hidden' unless $lint_scans == 2 && changed.any? { |line| line.include?('Dynamic/Eval') }
+    offence = closed_world_lint_run(root: root)[:offences].first
+    File.write(baseline, "1\t#{offence.cop}\t#{offence.file}\t#{offence.snippet}\n")
+    before = $lint_scans
+    raise 'baseline edit was hidden' unless LintCrosscheck.violations(root, analysis).empty? && $lint_scans == before + 1
+    before = $lint_scans
+    File.open(File.join(folder, 'closed_world_lint.rb'), 'a') { |file| file.puts '# scanner input changed' }
+    raise 'scanner edit was hidden' unless LintCrosscheck.violations(root, analysis).empty? && $lint_scans == before + 1
+    added = File.join(sources, 'added.rb')
+    File.write(added, "class Added; def go(o, n); o.send(n); end; end\n")
+    raise 'new file was hidden' unless LintCrosscheck.violations(root, analysis).any? { |line| line.include?('added.rb') }
+    File.delete(added)
+    raise 'removed file was hidden' unless LintCrosscheck.violations(root, analysis).empty?
+  end
+  puts 'lint report cache invalidation: PASS'
+RUBY
+output, status = Open3.capture2e(RbConfig.ruby, '-e', probe, ROOT_DIR)
+check.call('cached lint observes source, baseline and source-set changes', status.success? && output.include?('cache invalidation: PASS'))
+warn output unless status.success?
 
 if failures.empty?
   puts 'bc2cpp lint crosscheck check: PASS'

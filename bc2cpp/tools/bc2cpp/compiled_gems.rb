@@ -54,7 +54,7 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # mruby-rpg2k/mrblib/main.rb defines engine methods on it that no compiled gem emits, so an Object owner
 # would claim them. A class also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
-require 'prism'
+require_relative 'ruby_parse_cache'
 require_relative 'scan_cache'
 BC2CPP_OWNER_SOURCE_ROOT = File.expand_path('../../3rd', __dir__).freeze
 # mrb->X_class fields that core binds to a named class.
@@ -99,7 +99,7 @@ def bc2cpp_ruby_definition_owners
           node.compact_child_nodes.each { |child| walk.(child, scope, singleton) }
         end
       end
-      walk.(Prism.parse(File.read(path)).value, [], false)
+      walk.(RubyParseCache.parse_file(path).value, [], false)
     end
   end
   owners

@@ -22,7 +22,7 @@
 #
 # The statements are the direct children of a body; method bodies are not entered. Statement#node keeps the Prism
 # node for the emitter.
-require 'prism'
+require_relative 'ruby_parse_cache'
 require 'set'
 
 module ClassBodyScan
@@ -55,7 +55,7 @@ module ClassBodyScan
   def scan(paths)
     root = Body.new(kind: :root, path: '', file: paths.first, line: 1, statements: [], children: [])
     paths.each do |path|
-      result = Prism.parse(File.read(path), filepath: path)
+      result = RubyParseCache.parse_file(path)
       raise "#{path}: #{result.errors.map(&:message).join(', ')}" unless result.errors.empty?
 
       statements(result.value.statements, root, path)

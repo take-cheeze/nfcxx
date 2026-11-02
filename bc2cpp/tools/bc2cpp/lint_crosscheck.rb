@@ -4,6 +4,8 @@
 # ClosedWorld analysis scan the same Ruby by different means. A proof is only as trusted as the
 # agreement of the two, so a build that refuses to agree fails instead of shipping a closed form.
 # BC2CPP_LINT_CROSSCHECK=0 turns the check off.
+require_relative 'scan_cache'
+
 module LintCrosscheck
   LINT = 'scripts/rpg2k/closed_world_lint.rb'
 
@@ -22,7 +24,10 @@ module LintCrosscheck
     return ["#{LINT} is missing"] unless File.exist?(path)
 
     require path
-    run = closed_world_lint_run(root: repo_root)
+    files = GEMS.flat_map { |gem| Dir[File.join(repo_root, gem, 'mrblib', '**', '*.rb')] }.sort
+    run = ScanCache.fetch("lint_crosscheck.report.prism#{Prism::VERSION}", [path, BASELINE, *files]) do
+      closed_world_lint_run(root: repo_root)
+    end
     problems = run[:malformed].dup
     run[:new_offences].uniq(&:key).each { |o| problems << "#{o.file}:#{o.line}: #{o.cop}: not in the lint baseline" }
     run[:stale].each_key { |(cop, file, snippet)| problems << "#{file}: #{cop}: stale lint baseline entry (#{snippet})" }

@@ -5,8 +5,9 @@
 # registry spells it; a module whose body calls `module_function` also owns `Mod.singleton`, the copies. Every owner
 # the mrblib reopens counts (StringIO, Array, NameError, ...) except the universal ones (UNIVERSAL): an engine file's
 # def on Object or Kernel belongs to the core's code, which calls it on every kind of value.
-require 'prism'
+require_relative 'ruby_parse_cache'
 require 'set'
+require_relative 'scan_cache'
 
 module GemOwners
   ENGINE_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\.singleton\z|\z)/
@@ -16,9 +17,11 @@ module GemOwners
 
   # The sorted owners of the defs in `paths`, but for the universal ones (and their singletons).
   def owners(paths)
-    finder = Finder.new
-    paths.each { |path| Prism.parse_file(path).value.accept(finder) }
-    finder.owners.reject { |o| UNIVERSAL.include?(o.delete_suffix('.singleton')) }.sort
+    ScanCache.fetch("gem_owners.owners.prism#{Prism::VERSION}", paths) do
+      finder = Finder.new
+      paths.each { |path| RubyParseCache.parse_file(path).value.accept(finder) }
+      finder.owners.reject { |o| UNIVERSAL.include?(o.delete_suffix('.singleton')) }.sort
+    end
   end
 
   class Finder < Prism::Visitor

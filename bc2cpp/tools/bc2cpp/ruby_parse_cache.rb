@@ -2,10 +2,9 @@
 
 require 'prism'
 
-# One Prism parse per file text per generator process. The foreign-Ruby name scans parse the same
-# files again and again: foreign_method_names([path]) runs once per method name for every outside
-# Ruby path (ClosedWorld#outside_ruby_paths_defining), and ForeignDefiners parses the same files
-# again. Only the parse is shared; each caller still walks the tree itself.
+# One Prism parse per file text per generator process. Class-body, class-graph, owner, iterator-driver,
+# lint and foreign-Ruby scans share unchanged syntax. Only parsing is shared; each consumer still
+# derives its own facts and must not mutate the tree.
 #
 # An entry is kept per path, with the exact bytes it was parsed from. A lookup hits only when those
 # bytes are equal to the requested ones, so different text never gets another text's tree, and a
