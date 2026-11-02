@@ -24,6 +24,10 @@ module PathbEgraph
   # when its operands are pure values; it is never merged with another node of the same operator (each one keeps
   # its own site, see build_checked), and it is folded only where it cannot trap (fold_checked).
   CHECKED_OPS = %w[cdiv crem cshl cshr].freeze
+  # Float operations that cannot trap (fadd and the rest; cf2i traps on NaN and on overflow, so it stays opaque).
+  FLOAT_OPS = %w[fadd fsub fmul fdiv fneg fconv i2f u2f lt.f le.f].freeze
+  # A float literal as printed in the IR: an integer or a decimal, with an optional exponent.
+  FLOAT_LIT = /\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/
   KidRef = Struct.new(:i)                  # an operand of a node: the i-th class of its kids
   Node = Struct.new(:op, :ty, :args, :kids, :cls, :value)
   EFn = Struct.new(:name, :ret, :params, :header, :blocks)   # blocks: id => { phis:, instrs:, term: }
@@ -453,9 +457,25 @@ module PathbEgraph
       if rv[0] == "const" && rv.size == 3 && rv[1] == t && rv[2].is_a?(String) && rv[2].match?(/\A-?\d+\z/) &&
          (int_ty?(t) || ptr_ty?(t))
         [t, canon(rv[2].to_i, t)]
+      elsif rv[0] == "const" && rv.size == 3 && rv[1] == t && float_type?(t) && rv[2].is_a?(String) &&
+            rv[2].match?(FLOAT_LIT)
+        v = round_float(Float(rv[2]), t)
+        [t, v] if v.finite?
       elsif rv[0] == "null" && rv.size == 2 && rv[1] == t && ptr_ty?(t)
         [t, 0]
       end
+    end
+
+    # A float constant's text: the shortest that reads back to the same value of its type (a `float` is read back
+    # as single precision). Infinities have no text, so they are never constants.
+    def float_text(v, t)
+      return v.to_s if t == "double"
+
+      (1..9).each do |digits|
+        s = format("%.#{digits}g", v)
+        return s if round_float(Float(s), t) == v
+      end
+      format("%.9g", v)
     end
 
     def const_operand?(x)
@@ -466,7 +486,17 @@ module PathbEgraph
     def ptr_ty?(t) = t.is_a?(Array) && t[0] == "ptr"
 
     def const_op(t, v)
-      ptr_ty?(t) && v.zero? ? ["null", t] : ["const", t, v.to_s]
+      return ["null", t] if ptr_ty?(t) && v.zero?
+      return ["const", t, float_text(v, t)] if v.is_a?(Float)
+
+      ["const", t, v.to_s]
+    end
+
+    # Ruby hashes 0.0 and -0.0 alike, and IEEE does not: a float constant's key keeps the sign of a zero.
+    def const_key(v)
+      return v unless v.is_a?(Float)
+
+      [v, v.zero? ? (1.0 / v).negative? : v.negative?]
     end
 
     # ---- the e-graph: classes, nodes, hash-consing, union-find ---------------------------------------------------
@@ -493,7 +523,7 @@ module PathbEgraph
     # The class of a node, reusing an existing node with the same operator, type, operands and literals.
     def hashcons(op, ty, args, kids, value = nil)
       kids = kids.map { |k| find(k) }
-      key = op == "const" ? [op, sx(ty), value] : [op, sx(ty), args_key(args), kids]
+      key = op == "const" ? [op, sx(ty), const_key(value)] : [op, sx(ty), args_key(args), kids]
       return find(@nodes[@memo[key]].cls) if @memo.key?(key)
       return nil if @cap && @nodes.size >= @cap
 
@@ -557,7 +587,7 @@ module PathbEgraph
     end
 
     def node_key(nd)
-      nd.op == "const" ? [nd.op, sx(nd.ty), nd.value] : [nd.op, sx(nd.ty), args_key(nd.args), nd.kids.map { |k| find(k) }]
+      nd.op == "const" ? [nd.op, sx(nd.ty), const_key(nd.value)] : [nd.op, sx(nd.ty), args_key(nd.args), nd.kids.map { |k| find(k) }]
     end
 
     # ---- equality saturation -----------------------------------------------------------------------------------
@@ -611,6 +641,7 @@ module PathbEgraph
       vals = kids.map { |k| cval(k) }
       return nil if vals.empty? || vals.any?(&:nil?)
       return fold_checked(nd, vals) if CHECKED_OPS.include?(nd.op)
+      return fold_float(nd, vals, kids) if FLOAT_OPS.include?(nd.op) || (%w[eq ne].include?(nd.op) && float_type?(nd.args[0]))
 
       t = nd.ty
       case nd.op
@@ -673,6 +704,49 @@ module PathbEgraph
         q = a.abs / b.abs
         q = -q if a.negative? ^ b.negative?
         canon(nd.op == "cdiv" ? q : a - q * b, t)
+      end
+    end
+
+    # Float operations on constants, with the interpreter's semantics: a float result is rounded to its type after the
+    # operation, and the comparisons are IEEE's (NaN is unordered: lt.f, le.f, eq are false and ne is true). A result
+    # that is not finite is not folded, since an infinity has no constant text; i2f beyond 2**53 is not folded, since
+    # the interpreter does not model that conversion (see int_to_float).
+    def fold_float(nd, vals, kids)
+      t = nd.ty
+      case nd.op
+      when "fadd", "fsub", "fmul", "fdiv"
+        return nil unless vals.size == 2 && float_type?(t) && nd.args[0] == t && vals.all?(Float)
+
+        a, b = vals
+        r = round_float(a.send({ "fadd" => :+, "fsub" => :-, "fmul" => :*, "fdiv" => :/ }[nd.op], b), t)
+        r if r.finite?
+      when "fneg"
+        return nil unless vals.size == 1 && float_type?(t) && nd.args[0] == t && vals[0].is_a?(Float)
+
+        -vals[0]
+      when "fconv"
+        return nil unless vals.size == 1 && float_type?(t) && vals[0].is_a?(Float)
+
+        r = round_float(vals[0], t)
+        r if r.finite?
+      when "i2f", "u2f"
+        return nil unless vals.size == 1 && float_type?(t) && int_ty?(cty(kids[0])) && vals[0].is_a?(Integer)
+        return nil if vals[0].abs > 2**53
+
+        r = round_float(vals[0], t)
+        r if r.finite?
+      when "lt.f", "le.f", "eq", "ne"
+        ot = nd.args[0]
+        return nil unless vals.size == 2 && t == "bool" && float_type?(ot) && vals.all?(Float)
+
+        a, b = vals
+        res = case nd.op
+              when "lt.f" then a < b
+              when "le.f" then a <= b
+              when "eq" then a == b
+              else a != b
+              end
+        res ? 1 : 0
       end
     end
 

@@ -90,11 +90,14 @@ beyond the listed identities).
 | `eq x x = 1`, `ne x x = 0` for integer operands | constant | integers equal themselves |
 | Reassociation `(x + c1) + c2 = x + (c1+c2)`, `x - c = x + (-c)` | `wadd` with one constant | wrapping addition mod 2^w is associative and commutative, and `-c` is the wrapped negation, so the sums agree bit for bit |
 
-**Floats.** The interpreter does not model floats (`val` raises on a float constant, and `fadd` and the other float
-operators are unsupported in `pathb-ssa.rb`), so a float fold could not be checked, and none is made. The float
-operators are opaque, and their constants are not constants of the e-graph. No float rule is applied: float operations (`fadd`, `fmul`, `lt.f`, ...) are not in the whitelist, so
-they are opaque. A float identity would have to hold for every value, including the sign of zero and NaN (`x+0` is
-not `x` for `x = -0.0`, `x*0` is not 0 for infinities or NaN); none is needed here, so none is applied.
+**Floats.** The interpreter models IEEE binary64 (`double`, a Ruby Float) and binary32 (`float`, rounded to single
+precision after each operation; see `round_float` in `pathb-ssa.rb`). The e-graph folds `fadd fsub fmul fdiv` and `fneg`,
+`fconv` and `i2f`/`u2f` on constants, with the same rounding, and `lt.f`, `le.f`, `eq` and `ne` on float constants with
+IEEE comparisons (NaN is unordered). A float constant is a class of its own, and `0.0` and `-0.0` are different classes
+(a Ruby Hash treats them as one key, so `const_key` keeps the sign). Two results are not folded: an infinity or NaN,
+which has no constant text, and an `i2f` from an integer beyond 2**53, which the interpreter does not model. `cf2i`
+traps on NaN, infinities and out-of-range values, so it stays opaque, and it is never folded.
+No float identity is applied: `x + 0` is not `x` for `x = -0.0`, and `x * 0` is not 0 for infinities or NaN.
 
 **Pointers.** Pointer arithmetic (`wadd` on a pointer type) is commutative, and `index`/`offset` are hash-consed,
 but no identity or folding is applied to pointer values.
@@ -138,12 +141,11 @@ semantics (trap unless `0 <= count < w`). `cdiv` and `crem` are the interpreter'
 and on `INT_MIN / -1`. The subclass belongs in `pathb-ssa.rb`; it is kept here only because that file is not
 changed by this pass.
 
-**Floats, not done.** `fadd fsub fmul fdiv fneg` never trap, but the rules that would be exact for them are few and
-none is applied: `x + 0` is not `x` for `x = -0.0`, `x * 1` and `x - x` fail for NaN and infinities, and
-`fneg(fneg(x)) = x` would need the IR to define `fneg` as a sign-bit flip that keeps a NaN's payload. Section 4 of
-`docs/notes/pathb-stage2.md` says only "IEEE binary", so that is not proved here and the identity is not added. The
-conversions (`i2f`, `u2f`, `fconv`, `cf2i`, `bitcast`) stay opaque: their rounding and their trap on NaN are not in
-the e-graph.
+**Floats, not done.** The float identities are not added: `x + 0` is not `x` for `x = -0.0`, `x * 1` and `x - x` fail
+for NaN and infinities, and `fneg(fneg(x)) = x` would need the IR to define `fneg` as a sign-bit flip that keeps a NaN's
+payload. Section 4 of `docs/notes/pathb-stage2.md` says only "IEEE binary", so that is not proved here. `cf2i` stays
+opaque. The NaN payload and its sign are not modelled by the interpreter, so a result that depends on them is not
+checked.
 
 ## Memory
 
@@ -258,14 +260,14 @@ relations, so the uses that remain stay dominated.
 ## Numbers (goldens, 2026-11)
 
 - Goldens: 6599 functions converted and optimized, the four switch functions included. Every output verifies. Lets:
-  54985 before, 48739 after (pure lets 42455 -> 36329).
-- Common subexpressions across blocks: 3523 lets merged (see the section on that rule).
+  54984 before, 48725 after (pure lets 42583 -> 36444).
+- Common subexpressions across blocks: 3524 lets merged (see the section on that rule).
 - Memory: 312 loads merged, 268 stores forwarded, 0 dead stores removed (see the section on the memory rules).
-- Control flow: branches (`condbr` and `switch`) 4445 -> 3652; 771 `condbr` and no `switch` folded (the goldens'
-  switch operands are not constants); 1452 blocks removed; 65 phis replaced; 21 dead phis removed.
-- Budget: 22534 blocks saturated, 0 cut by iterations, 0 cut by nodes; 70163 input e-nodes and 6353 added; 27613
+- Control flow: branches (`condbr` and `switch`) 4445 -> 3651; 772 `condbr` and no `switch` folded (the goldens'
+  switch operands are not constants); 1453 blocks removed; 65 phis replaced; 21 dead phis removed.
+- Budget: 22534 blocks saturated, 0 cut by iterations, 0 cut by nodes; 70295 input e-nodes and 6375 added; 27630
   rule rounds in total.
-- Interpreter on goldens: 41 functions run (205 random runs each side, all equal); the other 6558 use pointers,
+- Interpreter on goldens: 43 functions run (215 random runs each side, all equal); the other 6556 use pointers,
   calls, floats or other constructs the interpreter does not model.
 - New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 2 after. It has a repeated `wadd` in one block,
   a commutative duplicate, `x*1`, `x+0`, `x-x`, `x&-1`, `x^0`, `x*0`, `eq` of two equal sums, a `+3 +4` chain and
@@ -290,9 +292,9 @@ relations, so the uses that remain stay dominated.
   not forwarded, and loads through pointers (other than slots) are never merged. Address-taking forms clear the state
   even though a pure address computation writes nothing; a finer rule would need the escape set of the function.
   (the converter removes them only before this pass). Both would be a separate cleanup.
-- **Operators.** Float arithmetic, conversions to float and the bit-field operations have no rules; shifts and
+- **Operators.** The bit-field operations have no rules; float operations fold on constants (see Floats); shifts and
   division have only the checked-operator rules above. `index`/`offset` are hash-consed but have no algebra.
-- **Float model.** The interpreter has no floats, so no float value is folded (see Floats above).
+- **Float model.** Binary32 and binary64 are modelled; NaN payloads are not (see Floats above).
 - **Cost ties.** Extraction is by node count with ties going to the input form, and a bound register costs 0. So a
   reassociation that makes a `let` redundant does not replace a value that is already emitted: in
   `tests/pathb-egraph/cases/div_const.ir` the sum `((-6 + a) + 2147483647)` keeps two lets, not one.

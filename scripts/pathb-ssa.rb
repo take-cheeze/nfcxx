@@ -32,7 +32,8 @@ Trap = Class.new(StandardError)
 SETJMP_NAMES = ['"_setjmp"', '"setjmp"', '"sigsetjmp"', '"__sigsetjmp"'].freeze
 AGG_HEADS = %w[struct union array fn].freeze
 # Operations that cannot trap or have effects: a `let` of one with no use is removed.
-PURE_OPS = %w[const null load iconv wadd wsub wmul wneg lt.s lt.u le.s le.u eq ne and or xor not index offset].freeze
+PURE_OPS = %w[const null load iconv wadd wsub wmul wneg lt.s lt.u le.s le.u eq ne and or xor not index offset
+              fadd fsub fmul fdiv fneg fconv i2f u2f lt.f le.f].freeze
 
 # ---- reader and printer ---------------------------------------------------------------------------------------------
 
@@ -697,9 +698,47 @@ def canon(v, t)
   signed && m >= (1 << (w - 1)) ? m - (1 << w) : m
 end
 
+# Floats. A `double` is a Ruby Float (IEEE binary64). A `float` is rounded to single precision after every operation,
+# which is exact for + - * / and conversions: a double has enough bits that rounding twice is the same as rounding
+# once. Overflow gives an infinity, as IEEE does. NaN payloads and the sign of a NaN are not modelled.
+FLOAT_TYPES = { "float" => 32, "double" => 64 }.freeze
+
+def float_type?(t) = t.is_a?(String) && FLOAT_TYPES.key?(t)
+
+def round_float(v, t)
+  raise Unsupported, "float type #{sx(t)} in the interpreter" unless float_type?(t)
+
+  f = v.to_f
+  t == "float" ? [f].pack("f").unpack1("f") : f
+end
+
+# An integer converted to a float is exact up to 2**53. Beyond that, rounding through a double before the float
+# is not the IEEE conversion, so it is not modelled.
+def int_to_float(a, t)
+  raise Unsupported, "integer to float beyond 2**53" if a.abs > 2**53
+
+  round_float(a, t)
+end
+
+# A float converted to an integer truncates toward zero. NaN, infinities and values outside the target type trap
+# (docs/notes/pathb-stage2.md, cf2i).
+def float_to_int(x, t)
+  raise Trap, "float to integer of NaN or infinity" if x.nan? || x.infinite?
+
+  v = x.truncate
+  w, signed = int_info(t)
+  lo = signed ? -(1 << (w - 1)) : 0
+  hi = signed ? (1 << (w - 1)) - 1 : (1 << w) - 1
+  raise Trap, "float to integer out of range" unless v.between?(lo, hi)
+
+  canon(v, t)
+end
+
 class Machine
   BIN = { "wadd" => :+, "wsub" => :-, "wmul" => :*, "and" => :&, "or" => :|, "xor" => :^ }.freeze
-  CMP = { "lt.s" => :<, "lt.u" => :<, "le.s" => :<=, "le.u" => :<=, "eq" => :==, "ne" => :!= }.freeze
+  CMP = { "lt.s" => :<, "lt.u" => :<, "le.s" => :<=, "le.u" => :<=, "eq" => :==, "ne" => :!=,
+          "lt.f" => :<, "le.f" => :<= }.freeze
+  FBIN = { "fadd" => :+, "fsub" => :-, "fmul" => :*, "fdiv" => :/ }.freeze
 
   def initialize(fn, args)
     @env = {}
@@ -709,7 +748,7 @@ class Machine
     params = fn.params[1..]
     raise Unsupported, "main takes #{params.size} arguments" unless params.size == args.size
 
-    params.zip(args).each { |p, a| @env[p[1]] = canon(a, p[3]) }
+    params.zip(args).each { |p, a| @env[p[1]] = float_type?(p[3]) ? round_float(a, p[3]) : canon(a, p[3]) }
   end
 
   def run_structured(body)
@@ -832,6 +871,11 @@ class Machine
     when Array
       case head(x)
       when "const"
+        if float_type?(x[1])
+          raise Unsupported, "float constant #{sx(x)}" unless x[2] =~ /\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/
+
+          return round_float(Float(x[2]), x[1])
+        end
         raise Unsupported, "constant #{sx(x)}" unless x[2] =~ /\A-?\d+\z/
 
         canon(x[2].to_i, x[1])
@@ -849,6 +893,11 @@ class Machine
 
       @mem[f[2].raw]
     when "iconv" then canon(val(f[2]), f[1])
+    when *FBIN.keys then round_float(val(f[2]).send(FBIN[head(f)], val(f[3])), f[1])
+    when "fneg" then -val(f[2])
+    when "i2f", "u2f" then int_to_float(val(f[2]), f[1])
+    when "cf2i" then float_to_int(val(f[2]), f[1])
+    when "fconv" then round_float(val(f[2]), f[1])
     when *BIN.keys then canon(val(f[2]).send(BIN[head(f)], val(f[3])), f[1])
     when *CMP.keys then val(f[2]).send(CMP[head(f)], val(f[3])) ? 1 : 0
     when "cdiv", "crem"
