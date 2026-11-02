@@ -131,7 +131,7 @@ end
 # nothing, `&"clobber"` writes 77 into the slot that its pointer argument names, `(addr $"x")` and
 # `(bitcast T $"x")` are the slot's address, `load.v` and `store.v` act as `load` and `store`. A pointer is the
 # quoted slot name.
-class CaseMachine < Machine
+class CaseMachine < PathbEgraph::CheckedMachine
   private
 
   def exec(s)

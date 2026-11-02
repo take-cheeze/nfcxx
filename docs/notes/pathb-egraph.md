@@ -257,21 +257,15 @@ relations, so the uses that remain stay dominated.
 
 ## Numbers (goldens, 2026-11)
 
-- Goldens: 6599 functions converted and optimized, the four switch functions included (their switch terminators
-  now parse). Every output verifies. Lets: 54985 before, 52865 after (pure lets 42455 -> 40453). Before the control
-  flow fold, the same run gave 54878 -> 53203 on the 6595 functions that then parsed; the four switch functions were
-  not counted.
-- Control flow on the goldens: branches (`condbr` and `switch`) 4445 -> 3653; 770 `condbr` and no `switch` folded (the
-  goldens' switch operands are not constants); 1451 blocks removed; 65 phis replaced; 21 dead phis removed.
-- Budget: 22534 blocks saturated, 0 cut by iterations, 0 cut by nodes; 66294 input e-nodes and 6353 added; 27613
+- Goldens: 6599 functions converted and optimized, the four switch functions included. Every output verifies. Lets:
+  54985 before, 48739 after (pure lets 42455 -> 36329).
+- Common subexpressions across blocks: 3523 lets merged (see the section on that rule).
+- Memory: 312 loads merged, 268 stores forwarded, 0 dead stores removed (see the section on the memory rules).
+- Control flow: branches (`condbr` and `switch`) 4445 -> 3652; 771 `condbr` and no `switch` folded (the goldens'
+  switch operands are not constants); 1452 blocks removed; 65 phis replaced; 21 dead phis removed.
+- Budget: 22534 blocks saturated, 0 cut by iterations, 0 cut by nodes; 70163 input e-nodes and 6353 added; 27613
   rule rounds in total.
-- Interpreter on goldens: 31 functions run (155 random runs each side, all equal); the other 6568 use pointers,
-- Goldens: 6599 functions converted and optimized. Every output verifies. Lets: 54878 before, 52602 after (pure lets
-  42369 -> 40093). Before the memory rules the e-graph gave 53203. The memory rules merge 312 loads and forward 268
-  stores (580 lets); 21 more pure lets become equal once their operands are merged. Dead stores removed: 0.
-- Budget: 22516 blocks saturated, 0 cut by iterations, 0 cut by nodes; 69777 input e-nodes (66178 before the memory
-  rules: the stored values are now classes) and 6347 added; 27591 rule rounds in total.
-- Interpreter on goldens: 30 functions run (150 random runs each side, all equal); the other 6565 use pointers,
+- Interpreter on goldens: 41 functions run (205 random runs each side, all equal); the other 6558 use pointers,
   calls, floats or other constructs the interpreter does not model.
 - New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 2 after. It has a repeated `wadd` in one block,
   a commutative duplicate, `x*1`, `x+0`, `x-x`, `x&-1`, `x^0`, `x*0`, `eq` of two equal sums, a `+3 +4` chain and
