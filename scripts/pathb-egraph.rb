@@ -20,6 +20,10 @@ module PathbEgraph
   TYPE_HEADS = %w[ptr struct union array fn].freeze
   # Ops that compute a value from their operands and may be evaluated in any order (no trap, no effect).
   COMMUTATIVE = %w[wadd wmul and or xor eq ne].freeze
+  # Checked operators: they may trap, so they are never removed while they can trap. A node of one is built only
+  # when its operands are pure values; it is never merged with another node of the same operator (each one keeps
+  # its own site, see build_checked), and it is folded only where it cannot trap (fold_checked).
+  CHECKED_OPS = %w[cdiv crem cshl cshr].freeze
   KidRef = Struct.new(:i)                  # an operand of a node: the i-th class of its kids
   Node = Struct.new(:op, :ty, :args, :kids, :cls, :value)
   EFn = Struct.new(:name, :ret, :params, :header, :blocks)   # blocks: id => { phis:, instrs:, term: }
@@ -235,10 +239,29 @@ module PathbEgraph
     [lines.join("\n"), stats]
   end
 
+  # The interpreter of pathb-ssa.rb, with the shifts added here: pathb-ssa.rb's Machine does not model cshl and
+  # cshr (docs/notes/pathb-stage2.md section 4). cshl and cshr trap unless 0 <= count < the bit width of the type;
+  # cshl shifts the two's complement pattern and wraps to the type, cshr is arithmetic for signed types and logical
+  # for unsigned ones (a canonical unsigned value is never negative, so Ruby's >> is the logical shift).
+  class CheckedMachine < Machine
+    private
+
+    def eval_rv(f)
+      return super unless %w[cshl cshr].include?(head(f))
+
+      w, = int_info(f[1])
+      a = val(f[2])
+      n = val(f[3])
+      raise Trap, "shift count #{n} of #{w} bits" unless n >= 0 && n < w
+
+      canon(head(f) == "cshl" ? a << n : a >> n, f[1])
+    end
+  end
+
   # Runs `main`-like function fn on integer arguments in the interpreter; returns the value or "trap".
   def self.run(efn, args)
     fn = Fn.new(efn.name, efn.ret, efn.params, efn.header, [])
-    Machine.new(fn, args).run_ssa(efn.blocks)
+    CheckedMachine.new(fn, args).run_ssa(efn.blocks)
   rescue Trap
     "trap"
   end
@@ -304,6 +327,7 @@ module PathbEgraph
       @bound = {}      # class => register that holds its value here (phis, parameters, emitted lets)
       @rc = {}         # register => class
       @opaque = {}     # register => true when its let is not a pure operation
+      @checked = {}    # register => true when its let is a checked operation with a node (CHECKED_OPS)
       @out = []
       @cap = nil
       blk[:phis].each { |ph| @rc[ph.name] = leaf(ph.name) }
@@ -317,7 +341,9 @@ module PathbEgraph
         end
         r, t, rv = ins[1], ins[2], ins[3]
         c = find(@rc[r])
-        if @opaque[r]
+        # A checked let that is neither folded nor available here is emitted as it was written: it stays where it
+        # is, and only its operands are rewritten.
+        if @opaque[r] || (@checked[r] && !@cval.key?(c) && !@bound.key?(c))
           @out << ["let", r, t, subst_deep(rv)]
           @bound[c] = r
         else
@@ -339,6 +365,8 @@ module PathbEgraph
         c = hashcons("const", cv[0], nil, [], cv[1])
       elsif rv.is_a?(Array) && PURE_OPS.include?(head(rv)) && !%w[load const null].include?(head(rv))
         c = build_node(t, rv)
+      elsif (c = build_checked(r, t, rv))
+        @checked[r] = true
       end
       unless c
         c = new_node("opaque", t, r, [])
@@ -361,6 +389,18 @@ module PathbEgraph
         end
       end
       hashcons(head(rv), t, args, kids)
+    end
+
+    # A node for a checked operation `(OP T A B)` on integer type T with register or constant operands. The site
+    # (the let's register) is part of the node's literal operands, so two checked lets never share a class by
+    # hash-consing: a trap is then never moved to, or shared with, another place. Returns nil when not applicable.
+    def build_checked(r, t, rv)
+      return nil unless rv.is_a?(Array) && CHECKED_OPS.include?(head(rv)) && rv.size == 4 && rv[1] == t
+      return nil unless int_ty?(t) && t != "bool"
+      return nil unless rv[2..3].all? { |x| reg?(x) || const_operand?(x) }
+
+      kids = rv[2..3].map { |x| operand_class(x) }
+      new_node(head(rv), t, [t, "site:#{r}"], kids)
     end
 
     def operand_class(x)
@@ -548,6 +588,7 @@ module PathbEgraph
       v = fold_value(nd, kids)
       merge_const(c, nd.ty, v) unless v.nil?
       identities(nd, c, kids)
+      checked_identities(nd, c, kids) if CHECKED_OPS.include?(nd.op)
       reassoc(nd, c, kids)
     end
 
@@ -556,6 +597,7 @@ module PathbEgraph
     def fold_value(nd, kids)
       vals = kids.map { |k| cval(k) }
       return nil if vals.empty? || vals.any?(&:nil?)
+      return fold_checked(nd, vals) if CHECKED_OPS.include?(nd.op)
 
       t = nd.ty
       case nd.op
@@ -594,6 +636,43 @@ module PathbEgraph
               else a != b
               end
         res ? 1 : 0
+      end
+    end
+
+    # The value of a checked node whose operands are constants, or nil when it may trap (then it is kept).
+    # cdiv and crem: the divisor is nonzero and, for a signed type, not -1 (INT_MIN / -1 traps); the value is the
+    # interpreter's: truncation toward zero, crem with the sign of the dividend (a - q*b). cshl and cshr: the count
+    # is in [0, bit width); cshl wraps to the type, cshr is arithmetic for signed and logical for unsigned types.
+    def fold_checked(nd, vals)
+      t = nd.ty
+      return nil unless vals.size == 2 && int_ty?(t) && t != "bool" && nd.args[0] == t
+
+      a, b = vals
+      w, signed = INT_TYPES[t]
+      case nd.op
+      when "cshl", "cshr"
+        return nil unless b >= 0 && b < w
+
+        canon(nd.op == "cshl" ? a << b : a >> b, t)
+      when "cdiv", "crem"
+        return nil if b.zero? || (signed && b == -1)
+
+        q = a.abs / b.abs
+        q = -q if a.negative? ^ b.negative?
+        canon(nd.op == "cdiv" ? q : a - q * b, t)
+      end
+    end
+
+    # Identities of checked nodes that cannot trap: x << 0 = x and x >> 0 = x (the count is in range), and x / 1 = x
+    # (the divisor is not zero and not -1). A division by a variable or by -1 is left alone.
+    def checked_identities(nd, c, kids)
+      t = nd.ty
+      return unless int_ty?(t) && t != "bool" && nd.args[0] == t
+
+      a, b = kids
+      case nd.op
+      when "cshl", "cshr" then forward(c, a, t) if cval(b) == 0
+      when "cdiv" then forward(c, a, t) if cval(b) == 1
       end
     end
 
@@ -694,7 +773,7 @@ module PathbEgraph
       bestc = [INF, nil]
       @members[c].each do |nid|
         nd = @nodes[nid]
-        next if nd.op == "opaque" || nd.op == "leaf"
+        next if nd.op == "opaque" || nd.op == "leaf" || CHECKED_OPS.include?(nd.op)
 
         total = 1
         nd.kids.each do |k|
