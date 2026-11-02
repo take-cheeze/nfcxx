@@ -20,8 +20,10 @@ Options: `--iters N` (saturation rounds per block, default 8), `--nodes N` (e-no
 3. **Saturate** the block's e-graph with the rewrite rules, within the budget.
 4. **Extract and emit** each `let` in order: the cheapest form of its class whose operands are available here. The
    `let` keeps its name when its own form is emitted; intermediate values get fresh names `%gN`.
-5. Apply the replacements globally (a dropped register is replaced by a register or a constant that dominates it),
-   remove pure `let`s without uses (the same rule as the converter's cleanup), and verify the result.
+5. **Common subexpressions across blocks** (below): a pure `let` identical to one in a dominating block takes that
+   block's register.
+6. Apply the replacements globally (a dropped register is replaced by a register or a constant that dominates it),
+   fold the control flow (below), remove pure `let`s without uses (the same rule as the converter's cleanup), and verify the result.
 
 ## The e-graph
 
@@ -32,17 +34,43 @@ Options: `--iters N` (saturation rounds per block, default 8), `--nodes N` (e-no
   If a dominating block replaced the register by a constant or another register, the leaf is that constant or
   register, so identities in this block see it (the redundancy case relies on this: a `wmul x 0` in the entry block
   makes the `+ 0` after the join disappear).
-- **Opaque.** Anything not in the whitelist is an opaque class of its own: calls, stores, `load` (every load is
-  opaque; no memory state is tracked), checked operations (`cdiv`, `crem`, bounds checks), `cshl`/`cshr`, `bfload`,
-  `fconv`, float operations, `static`/`barrier` statements. An opaque class is never merged with another opaque class
+- **Opaque.** Anything not in the whitelist is an opaque class of its own: calls, stores, loads (a load of a slot is also
+  opaque, but the memory rules below may merge it with an earlier value), checked operations outside `CHECKED_OPS` (bounds
+  checks, `cf2i`), `bfload`, `fconv`, float operations, `static`/`barrier` statements. The checked operators `cdiv crem
+  cshl cshr` are not opaque: see [Checked operators](#checked-operators-shifts-and-division). An opaque class is never
+  merged with another opaque class
   and never with a class of a different value. Its only merges are identities whose result is the opaque value
   itself (`x + 0 = x` with `x` opaque): the merged expression is equal to it, so the class stays one value.
 - **Scope.** An e-graph exists for one block; equalities are not carried into other blocks. A class is emitted in a
   block only from registers and constants that are available there: a register of a dominating block, a register
-  already emitted in this block, or a constant. Nothing is moved across blocks (no code motion).
+  already emitted in this block, or a constant. Nothing is moved across blocks (no code motion); equal values in
+  dominating blocks are shared by the separate pass in "Common subexpressions across blocks".
 - **Pure operators** are the whitelist `PURE_OPS` of `pathb-ssa.rb` minus `load`, `const`, `null`: `iconv`,
   `wadd`, `wsub`, `wmul`, `wneg`, the comparisons, `and`, `or`, `xor`, `not`, `index`, `offset`. Operators without a
   rule (`wneg`, `not`, `index`, `offset`) are hash-consed and never folded.
+
+## Common subexpressions across blocks
+
+`cse_dominator` runs after every block has been emitted and before the replacements are applied. It walks the
+dominator tree in preorder with a scoped table keyed by `[type, right-hand side]`, where the right-hand side is the
+operator with its literals and its operands after the substitution so far:
+
+- On entering a block, each pure `let` whose key is already in the table is removed, and its register is replaced by
+  the register that the table holds. Otherwise its key and register are added to the table.
+- On leaving a block, the keys that block added are removed, so a sibling subtree never sees them.
+
+A table entry comes from a block that dominates the one it is used in (or an earlier `let` of the same block), so
+the replacement is available at every use, including phi arguments (a use at the end of a predecessor is dominated
+too). Keys are exact: operator, type and operands are compared as written, with no commutative reordering (the
+e-graph inside a block already handles that). Only the whitelist `PURE_OPS` minus `load`, `const` and `null` is
+keyed. Loads, checked operations (`cdiv`, `crem`, `cshl`, `cshr`, bounds, `cf2i`), calls, and everything else are
+never keys, so they are never merged or moved. A phi is never a replacement. The operands of a key are already
+resolved, so chains of merges are followed in one pass.
+
+Test cases (`tests/pathb-egraph/cases/`): `gvn_dominating.ir` (a `wadd` of the entry block reused in the then arm:
+4 lets -> 3), `gvn_siblings.ir` (the same `wmul` in both arms: neither dominates, 4 -> 4), and `gvn_checked_div.ir`
+(a repeated `cdiv` in a dominated arm: not merged, 3 -> 3). Their `.lets` files hold the hand-derived let counts.
+Disabling the scope pop makes the sibling case fail the verifier.
 
 ## Rewrite rules
 
@@ -62,7 +90,9 @@ beyond the listed identities).
 | `eq x x = 1`, `ne x x = 0` for integer operands | constant | integers equal themselves |
 | Reassociation `(x + c1) + c2 = x + (c1+c2)`, `x - c = x + (-c)` | `wadd` with one constant | wrapping addition mod 2^w is associative and commutative, and `-c` is the wrapped negation, so the sums agree bit for bit |
 
-**Floats.** No float rule is applied: float operations (`fadd`, `fmul`, `lt.f`, ...) are not in the whitelist, so
+**Floats.** The interpreter does not model floats (`val` raises on a float constant, and `fadd` and the other float
+operators are unsupported in `pathb-ssa.rb`), so a float fold could not be checked, and none is made. The float
+operators are opaque, and their constants are not constants of the e-graph. No float rule is applied: float operations (`fadd`, `fmul`, `lt.f`, ...) are not in the whitelist, so
 they are opaque. A float identity would have to hold for every value, including the sign of zero and NaN (`x+0` is
 not `x` for `x = -0.0`, `x*0` is not 0 for infinities or NaN); none is needed here, so none is applied.
 
@@ -70,7 +100,84 @@ not `x` for `x = -0.0`, `x*0` is not 0 for infinities or NaN); none is needed he
 but no identity or folding is applied to pointer values.
 
 **Not folded:** `wneg` (the interpreter does not model it, so its folding could not be checked), `not` (its
-semantics is not in the interpreter), division and remainder (they trap; the whitelist excludes them).
+semantics is not in the interpreter). Division, remainder and shifts are checked operators with their own rules
+(below).
+
+## Checked operators: shifts and division
+
+`cdiv`, `crem`, `cshl` and `cshr` are the checked operators of `CHECKED_OPS` (`docs/notes/pathb-stage2.md` section 4).
+Each `let` of one with integer type `T` (not `bool`) and register or constant operands becomes a node whose literal
+operands include the site (the `let`'s register), so two checked lets are never merged by hash-consing: a trap is
+never moved to, or shared with, another place. A checked `let` that is neither folded nor available in its block is
+emitted as it was written (its operands are rewritten). Its node is never an extraction form for another class.
+Dead-code removal keeps it (`pure_rv?` is false for these operators).
+
+| Rule | Result | Bit-exactness |
+|---|---|---|
+| `cshl T A N` (or `cshr`) with `A`, `N` constants and `0 <= N < w(T)` | `canon(A << N, T)`, or `canon(A >> N, T)` | the IR's shift: `cshl` shifts the two's complement pattern and narrows to `T` (as the QBE emitter does); `cshr` is arithmetic for signed `T` (Ruby's `>>` on a negative integer is the arithmetic shift) and logical for unsigned `T` (a canonical unsigned value is never negative). Equal to the interpreter (`CheckedMachine`). |
+| `cshl`/`cshr` with `N` outside `[0, w(T))` | not folded | the operation traps; the `let` stays and is never removed |
+| `cshl T A 0`, `cshr T A 0` | `A` | the count is in range for every width, so no trap is possible; a shift by 0 leaves the bit pattern and the canonical value unchanged |
+| `cdiv T A B` with `A`, `B` constants, `B != 0`, and `B != -1` when `T` is signed | `canon(q, T)`, `q = |A| / |B|` with the sign negative iff the signs differ | the IR's division truncates toward zero; the divisor is nonzero and no `INT_MIN / -1` overflow is possible, so nothing traps; the same expression as the interpreter's `cdiv` |
+| `crem T A B` with the same constants | `canon(A - q*B, T)` with the same `q` | the IR's remainder takes the sign of the dividend, and `A - q*B` is the truncated remainder, the interpreter's formula; `|rem| < |B|` so it is in range |
+| `cdiv T A 1` | `A` | no trap (the divisor is neither 0 nor -1), and `A / 1 = A` for every value, including `INT_MIN` (the quotient does not overflow) |
+
+Not added, on purpose:
+
+- `cdiv T A -1` (`-A` for signed `T`): it wraps only for `A = INT_MIN`, where the IR traps; rewriting it to a negation
+  would delete that trap. `tests/pathb-egraph/cases/div_neg1.ir` keeps it.
+- Any rewrite of a division by a variable divisor, and `crem T A 1 = 0` (not needed by any case here).
+- Folds where the trap condition holds: `cdiv` by 0 or `INT_MIN / -1` with constant operands
+  (`div_zero_trap.ir`, `div_const_trap.ir`), and shifts with a count outside the width (`shift_trap.ir`). Those keep
+  the trap; `shift_trap_var.ir` keeps a variable-count shift that is also unused.
+- Shifts with a variable count and a variable operand: no rule. A count that becomes constant during saturation is
+  folded by `fold_checked`, since the node's kids are classes.
+
+**The interpreter.** `pathb-ssa.rb`'s `Machine` raises on `cshl` and `cshr`, so the differential check would skip
+every shift. `PathbEgraph.run` therefore uses `CheckedMachine`, a subclass in this file that adds them with the IR's
+semantics (trap unless `0 <= count < w`). `cdiv` and `crem` are the interpreter's own, which traps on a zero divisor
+and on `INT_MIN / -1`. The subclass belongs in `pathb-ssa.rb`; it is kept here only because that file is not
+changed by this pass.
+
+**Floats, not done.** `fadd fsub fmul fdiv fneg` never trap, but the rules that would be exact for them are few and
+none is applied: `x + 0` is not `x` for `x = -0.0`, `x * 1` and `x - x` fail for NaN and infinities, and
+`fneg(fneg(x)) = x` would need the IR to define `fneg` as a sign-bit flip that keeps a NaN's payload. Section 4 of
+`docs/notes/pathb-stage2.md` says only "IEEE binary", so that is not proved here and the identity is not added. The
+conversions (`i2f`, `u2f`, `fconv`, `cf2i`, `bitcast`) stay opaque: their rounding and their trap on NaN are not in
+the e-graph.
+
+## Memory
+
+The slots of a block (`$"x"`, the objects that `pathb-ssa.rb` keeps in memory) are tracked in program order within
+the block. The state is a map from a slot to the value it holds here: its type and its class (or unknown). It starts
+empty at every block, so nothing is carried into another block.
+
+- **Loads.** `(load T $"x")` with a remembered value of type `T` is the same value: the load shares the class and
+  no `let` is emitted for it (its uses get the register of the first load or of the stored value). Otherwise the
+  load is an opaque value and the slot now holds it. Loads of different slots are different objects, so they never
+  merge with each other.
+- **Store-to-load forwarding.** `(store T $"x" V)` records `V` (a register or a constant of type `T`). A later
+  `(load T $"x")` with no write in between yields `V`. The type must match: the store's type and the value's type are
+  both `T`. A store of an expression, or of another type, leaves the slot's value unknown.
+- **Barriers.** A write that may touch any slot forgets the whole state: a store through a pointer or to a non-slot
+  address, `copy`, `eval`, `bfstore`, `store.v`, `bfstore.v`, `barrier`, `fence`, `vastart`, `static`, any call,
+  `load.v`, `bfload.v`, `vaarg`, `alloca`, and any statement not in the list of memory-neutral forms. An
+  address-taking form also forgets it: any `$"x"` that is not the address of a plain load or store (`addr`,
+  `offset`, `bitcast`, `sret`, a call argument, the source or destination of `copy`). Plain loads and stores of
+  other slots keep the state, as do the pure operators and `bfload`.
+- **Volatile.** `load.v` and `store.v` are never merged, forwarded, removed or moved. They are barriers, so no
+  value is remembered across them.
+- **Dead stores.** A plain store to a slot is removed when no instruction of the function reads the slot or takes its
+  address, a later store to the same slot follows in the block with no read or write of memory between them, and
+  the stored value is a register or a constant (so the store cannot trap). The rule is implemented but fires on
+  no golden: no slot left in memory is written and never read or addressed (the converter promotes the scalar
+  ones that are only stored and loaded).
+- **Not moved.** No load or store changes its position; an opaque value is emitted where its `let` was.
+
+Cases: `tests/pathb-egraph/cases/memory_*.ir`, with expected values in `.args` and hand-derived instruction counts in
+`.counts` (`HEAD N` lines counted in the optimized `main`): duplicate loads, store-to-load forwarding (same type, and
+a different type that must not forward), a store across a call, volatile accesses, two slots that are kept, and a
+dead store. The interpreter runs these cases with a test-only extension (`CaseMachine` in `check.rb`) for the call,
+the slot's address and the volatile forms, which `pathb-ssa.rb`'s interpreter does not model.
 
 ## Extraction
 
@@ -89,6 +196,36 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
   `tests/pathb-egraph/check.rb` runs every case and every golden under a tight budget as well (`--iters 1 --nodes 4`
   and `--iters 2 --nodes 20`) and checks the results against the unoptimized form.
 
+## Control flow
+
+The terminators are `br`, `condbr`, `switch` (`(switch OP (case V B)... (default B))`, in memory
+`["switch", OP, [[V, B]...], D]`), `ret` and `unreachable`. A `switch` is never pure: it is a terminator, not a `let`,
+so no rule or dead-code removal touches it. Its operand is a register or a constant and is rewritten through the
+e-graph exactly like a `condbr` operand (through `@subst`).
+
+After the substitution, `fold_control` repeats these steps until none changes anything:
+
+1. **Constant branches.** A `condbr` on a constant becomes `br` to the true arm when the value is nonzero, else the
+   false arm. A `switch` on a constant becomes `br` to the first case whose value equals it, else the default. The
+   constant is canonical for its type (`canon`, as the interpreter's `val`), and the case values are canonical already
+   (the converter writes them so), so the comparison is exact. A constant is an integer, `bool` or pointer literal,
+   decimal or hexadecimal (`0x1`, the printer's form of many bool and unsigned constants), or `null`.
+2. **Unreachable blocks** are removed (reachability from the entry over the new terminators).
+3. **Phi arguments** of the edges that no longer exist are dropped. Each phi keeps one argument per predecessor, so
+   the phi arity equals the predecessor list (the verifier checks it).
+4. **Phis replaced.** A phi whose arguments are all one operand, self-references ignored, is replaced by that operand
+   (`@subst`). A phi with one predecessor left is replaced this way, and the replacement can make a branch constant,
+   which the next round folds.
+5. **Dead phis.** A phi with no use is removed. A phi used only by itself is kept (as in `pathb-ssa.rb`).
+
+The substitution is applied after each round, before the dead-phi count, so a use inside a replaced phi is not taken
+for a dead value. The input function is not changed: `block` returns copies of the phis, so the same parsed function
+can be optimized again (`check.rb` does so for the tight budget).
+
+Replacing a phi by its one operand is sound: that operand's definition dominates every predecessor that supplies it,
+so it dominates the phi's block, and every use of the phi is dominated by it. Removing an edge only adds dominance
+relations, so the uses that remain stay dominated.
+
 ## Verification
 
 - The output of every function is checked by the verifier of this file (its own copy of the checks of
@@ -99,33 +236,66 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
 - Differential: `tests/pathb-egraph/check.rb cases` runs each `tests/pathb-ssa/cases/*.ir` and
   `tests/pathb-egraph/cases/*.ir` with a `.args` file: the original, the optimized and the tight-budget form must
   return the same values on the `.args` inputs (whose expected values are checked too) and on 50 random inputs.
+  Every optimized form must also have no constant `condbr` or `switch` left.
+  traps. A `FILE.lets` next to a case holds the number of lets the optimized form must have, so a fold is checked
+  as well as the traps that must stay.
+- The checked-operator cases: `shift_const.ir` (folds, and a shift that wraps), `shift_zero.ir` (`x << 0`, `x >> 0`),
+  `shift_trap.ir` (a constant out-of-range shift, unused, must still trap), `shift_trap_var.ir` (a variable-count
+  shift that traps for counts outside the width, unused), `div_const.ir` (constant division and remainder folded,
+  including unsigned, and `x / 1`), `div_neg1.ir` (`x / -1` kept, traps on `INT_MIN`), `div_const_trap.ir`
+  (`INT_MIN / -1` on constants kept) and `div_zero_trap.ir` (a remainder by zero kept).
 - `check.rb goldens` converts all 84 golden files (`tests/pathb-ir/*.ir`), optimizes each function, verifies the
   output, and runs the functions that the interpreter models (integer code without calls or pointers) on 5 random
   inputs each, original against optimized.
+- New case `tests/pathb-egraph/cases/switch_loop.ir` (`switch_loop.args`, expectations derived by hand): a loop whose
+  first `switch` is on `i + 0` (the e-graph makes it `i`, so the switch stays and reads the induction variable), with
+  a `case` that `continue`s, a fall-off `default`, and a `break` in the cases; then a second `switch` on `i * 0`
+  (constant 0, folded to its case 0, and the other arm removed) and an `if` on `eq(i*0, 0)` (constant true, the else
+  arm removed). Per iteration `i`, the sum `s` gains 1 + 10000 + 5 + 2 = 10008 for `i = 0`, nothing for `i = 1`
+  (`continue`), 100 + 10000 + 5 + 2 = 10107 for `i = 2`, and 1000 + 10000 + 5 + 2 = 11007 for `i >= 3`, with no
+  iteration when `n <= 0`. So `n = 1` gives 10008, `n = 3` gives 20115, `n = 5` gives 42129 and `n = 60` gives 647514.
 
 ## Numbers (goldens, 2026-11)
 
-- Goldens: 6595 functions converted and optimized. Four switch functions are left unconverted by the converter and
-  are not optimized. Every output verifies. Lets: 54878 before, 53203 after (pure lets 42369 -> 40694).
-- Budget: 22516 blocks saturated, 0 cut by iterations, 0 cut by nodes; 66178 input e-nodes and 6347 added; 27591
+- Goldens: 6599 functions converted and optimized, the four switch functions included. Every output verifies. Lets:
+  54985 before, 48739 after (pure lets 42455 -> 36329).
+- Common subexpressions across blocks: 3523 lets merged (see the section on that rule).
+- Memory: 312 loads merged, 268 stores forwarded, 0 dead stores removed (see the section on the memory rules).
+- Control flow: branches (`condbr` and `switch`) 4445 -> 3652; 771 `condbr` and no `switch` folded (the goldens'
+  switch operands are not constants); 1452 blocks removed; 65 phis replaced; 21 dead phis removed.
+- Budget: 22534 blocks saturated, 0 cut by iterations, 0 cut by nodes; 70163 input e-nodes and 6353 added; 27613
   rule rounds in total.
-- Interpreter on goldens: 30 functions run (150 random runs each side, all equal); the other 6565 use pointers,
+- Interpreter on goldens: 41 functions run (205 random runs each side, all equal); the other 6558 use pointers,
   calls, floats or other constructs the interpreter does not model.
-- New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 3 after. It has a repeated `wadd` in one block,
+- New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 2 after. It has a repeated `wadd` in one block,
   a commutative duplicate, `x*1`, `x+0`, `x-x`, `x&-1`, `x^0`, `x*0`, `eq` of two equal sums, a `+3 +4` chain and
-  an `iconv` identity; the branch on the now-constant comparison is kept (see below).
+  an `iconv` identity; the branch on the now-constant comparison folds to its true arm and the false arm is removed.
+- New case `tests/pathb-egraph/cases/switch_loop.ir`: 4 lets before, 1 after (see Verification for the expectations).
 - `abi_struct.ir` (31 functions): 226 lets before, 216 after.
 
 ## Not done
 
-- **Across blocks.** No common-subexpression elimination between a dominating block and a dominated one, and no code
-  motion. Only constants and registers replaced by a dominator reach a block.
+- **Across blocks, code motion.** The pass only reuses a dominating definition; nothing is hoisted or sunk, so an
+  operation computed on two sibling paths stays computed twice, and a loop-invariant operation is not moved out.
+  No partial redundancy elimination.
+  `pathb-egraph.rb`), so the golden functions `bitfield2.ir` (`swE3Neg`), `float_neg_switch.ir` (`classify`), `vla.ir`
+  (`in_switch`) and `vla_scope.ir` (`sw`) fail with "block without a terminator", and so do the `switch_*` cases of
+  `tests/pathb-ssa/cases`; the same failure occurs without this pass. `run.sh` therefore exits 1 until the switch
+  handling is fixed.
 - **Memory.** Every `load` is opaque: two loads of the same slot with no store between are not merged, and no
   store-to-load forwarding is done. Stores, calls and volatile accesses are never moved or merged.
-- **Control flow.** A `condbr` on a constant keeps its dead arm; phis whose arguments became equal are not removed
+- **Constants.** Only decimal literals are constants in the e-graph (`const_value`), so a hex literal such as `0x1` is
+  motion. Only constants and registers replaced by a dominator reach a block.
+- **Memory across blocks.** The memory state starts empty in every block, so a value stored in a dominating block is
+  not forwarded, and loads through pointers (other than slots) are never merged. Address-taking forms clear the state
+  even though a pure address computation writes nothing; a finer rule would need the escape set of the function.
   (the converter removes them only before this pass). Both would be a separate cleanup.
-- **Operators.** Float arithmetic, shifts, division, conversions to float and the bit-field operations have no rules.
-  `index`/`offset` are hash-consed but have no algebra.
+- **Operators.** Float arithmetic, conversions to float and the bit-field operations have no rules; shifts and
+  division have only the checked-operator rules above. `index`/`offset` are hash-consed but have no algebra.
+- **Float model.** The interpreter has no floats, so no float value is folded (see Floats above).
+- **Cost ties.** Extraction is by node count with ties going to the input form, and a bound register costs 0. So a
+  reassociation that makes a `let` redundant does not replace a value that is already emitted: in
+  `tests/pathb-egraph/cases/div_const.ir` the sum `((-6 + a) + 2147483647)` keeps two lets, not one.
 - **Cost model.** Node count only. No latency, register pressure or size of constants.
 - **No consumer.** The QBE, PTX, WebAssembly and WGSL emitters do not read this output yet (the same state as
   `pathb-ssa.rb`'s output).

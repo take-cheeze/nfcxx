@@ -16,10 +16,14 @@ require_relative 'pathb-ssa'
 
 module PathbEgraph
   INF = Float::INFINITY
-  TERMINATORS = %w[br condbr ret unreachable].freeze
+  TERMINATORS = %w[br condbr switch ret unreachable].freeze
   TYPE_HEADS = %w[ptr struct union array fn].freeze
   # Ops that compute a value from their operands and may be evaluated in any order (no trap, no effect).
   COMMUTATIVE = %w[wadd wmul and or xor eq ne].freeze
+  # Checked operators: they may trap, so they are never removed while they can trap. A node of one is built only
+  # when its operands are pure values; it is never merged with another node of the same operator (each one keeps
+  # its own site, see build_checked), and it is folded only where it cannot trap (fold_checked).
+  CHECKED_OPS = %w[cdiv crem cshl cshr].freeze
   KidRef = Struct.new(:i)                  # an operand of a node: the i-th class of its kids
   Node = Struct.new(:op, :ty, :args, :kids, :cls, :value)
   EFn = Struct.new(:name, :ret, :params, :header, :blocks)   # blocks: id => { phis:, instrs:, term: }
@@ -57,12 +61,34 @@ module PathbEgraph
     { phis: phis, instrs: instrs, term: term }
   end
 
+  # In memory a switch is ["switch", OP, [[V, B]...], D] with V and B integers; the text has `(case V B)` markers
+  # and a final `(default B)`.
   def self.parse_term(x)
     case x[0]
     when "br" then ["br", Integer(x[1], 10)]
     when "condbr" then ["condbr", x[1], Integer(x[2], 10), Integer(x[3], 10)]
+    when "switch" then parse_switch(x)
     else x.dup
     end
+  end
+
+  def self.parse_switch(x)
+    cases = x[2...-1].map do |c|
+      raise Fail, "switch arm #{sx(c)}" unless head(c) == "case" && c.size == 3
+
+      [Integer(c[1], 10), Integer(c[2], 10)]
+    end
+    dflt = x[-1]
+    raise Fail, "switch without a default arm" unless head(dflt) == "default" && dflt.size == 2
+
+    ["switch", x[1], cases, Integer(dflt[1], 10)]
+  end
+
+  def self.term_sx(t)
+    return sx(t) unless t[0] == "switch"
+
+    arms = t[2].map { |v, b| "(case #{v} #{b})" } + ["(default #{t[3]})"]
+    "(switch #{sx(t[1])} #{arms.join(' ')})"
   end
 
   def self.render(fn)
@@ -76,7 +102,7 @@ module PathbEgraph
         lines << "    (phi #{ph.name} #{sx(ph.type)} #{incs})"
       end
       blk[:instrs].each { |i| lines << "    #{sx(i)}" }
-      lines << "    #{sx(blk[:term])})"
+      lines << "    #{term_sx(blk[:term])})"
     end
     lines << ")"
     lines.join("\n")
@@ -213,10 +239,29 @@ module PathbEgraph
     [lines.join("\n"), stats]
   end
 
+  # The interpreter of pathb-ssa.rb, with the shifts added here: pathb-ssa.rb's Machine does not model cshl and
+  # cshr (docs/notes/pathb-stage2.md section 4). cshl and cshr trap unless 0 <= count < the bit width of the type;
+  # cshl shifts the two's complement pattern and wraps to the type, cshr is arithmetic for signed types and logical
+  # for unsigned ones (a canonical unsigned value is never negative, so Ruby's >> is the logical shift).
+  class CheckedMachine < Machine
+    private
+
+    def eval_rv(f)
+      return super unless %w[cshl cshr].include?(head(f))
+
+      w, = int_info(f[1])
+      a = val(f[2])
+      n = val(f[3])
+      raise Trap, "shift count #{n} of #{w} bits" unless n >= 0 && n < w
+
+      canon(head(f) == "cshl" ? a << n : a >> n, f[1])
+    end
+  end
+
   # Runs `main`-like function fn on integer arguments in the interpreter; returns the value or "trap".
   def self.run(efn, args)
     fn = Fn.new(efn.name, efn.ret, efn.params, efn.header, [])
-    Machine.new(fn, args).run_ssa(efn.blocks)
+    CheckedMachine.new(fn, args).run_ssa(efn.blocks)
   rescue Trap
     "trap"
   end
@@ -245,6 +290,8 @@ module PathbEgraph
       @subst = {}      # a dropped let => the operand that replaces it (global; registers are unique)
       @fresh = 0
       @stats = Hash.new(0)
+      @read_slots = {}  # slot keys that some instruction reads or takes the address of (see dead_stores)
+      fn.blocks.each_value { |blk| blk[:instrs].each { |i| collect_slot_reads(i, @read_slots) } }
     end
 
     def run
@@ -253,11 +300,9 @@ module PathbEgraph
       # Reverse postorder: a dominator is processed before the blocks it dominates, so a register it replaced
       # is already known (see reg_class).
       PathbEgraph.reverse_postorder(@fn).each { |b| out[b] = block(@fn.blocks[b]) }
-      out.each_value do |blk|
-        blk[:phis].each { |ph| ph.inc.transform_values! { |v| subst_deep(v) } }
-        blk[:instrs] = blk[:instrs].map { |i| head(i) == "let" ? ["let", i[1], i[2], subst_deep(i[3])] : subst_deep(i) }
-        blk[:term] = subst_deep(blk[:term])
-      end
+      cse_dominator(out)
+      apply_subst(out)
+      fold_control(out)
       dce(out)
       efn = EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out)
       after = PathbEgraph.let_counts(efn)
@@ -284,33 +329,48 @@ module PathbEgraph
       @bound = {}      # class => register that holds its value here (phis, parameters, emitted lets)
       @rc = {}         # register => class
       @opaque = {}     # register => true when its let is not a pure operation
+      @checked = {}    # register => true when its let is a checked operation with a node (CHECKED_OPS)
       @out = []
       @cap = nil
+      @mem = {}        # slot key => { type:, cls:, from: } the value the slot holds here (see "Memory")
+      dead = dead_stores(blk[:instrs])
+      @stats[:stores_removed] += dead.size
       blk[:phis].each { |ph| @rc[ph.name] = leaf(ph.name) }
-      blk[:instrs].each { |i| classify(i) if head(i) == "let" }
+      blk[:instrs].each do |i|
+        memory_step(i)
+        classify(i) if head(i) == "let"
+      end
       saturate
       @memo_best = {}
-      blk[:instrs].each do |ins|
+      blk[:instrs].each_with_index do |ins, idx|
+        next if dead[idx]
+
         unless head(ins) == "let"
           @out << subst_deep(ins)
           next
         end
         r, t, rv = ins[1], ins[2], ins[3]
         c = find(@rc[r])
-        if @opaque[r]
+        # A checked let that is neither folded nor available here is emitted as it was written: it stays where it
+        # is, and only its operands are rewritten.
+        if @opaque[r] || (@checked[r] && !@cval.key?(c) && !@bound.key?(c))
           @out << ["let", r, t, subst_deep(rv)]
           @bound[c] = r
         else
           ensure_let(r, c)
         end
       end
-      { phis: blk[:phis], instrs: @out, term: blk[:term] }
+      # The phis are copies: the control-flow pass changes them, and the input function may be optimized again.
+      { phis: blk[:phis].map { |ph| Phi.new(ph.var, ph.name, ph.type, ph.inc.dup) }, instrs: @out, term: blk[:term] }
     end
 
     # Adds the let's value to the e-graph: a register copy shares its operand's class, a constant or a pure
     # operation becomes a node, anything else (loads, calls, checked ops) is an opaque class of its own.
     def classify(ins)
       r, t, rv = ins[1], ins[2], ins[3]
+      k = plain_slot_load(rv)
+      return classify_slot_load(r, t, k) if k
+
       c = nil
       if reg?(rv)
         c = operand_class(rv)
@@ -318,6 +378,8 @@ module PathbEgraph
         c = hashcons("const", cv[0], nil, [], cv[1])
       elsif rv.is_a?(Array) && PURE_OPS.include?(head(rv)) && !%w[load const null].include?(head(rv))
         c = build_node(t, rv)
+      elsif (c = build_checked(r, t, rv))
+        @checked[r] = true
       end
       unless c
         c = new_node("opaque", t, r, [])
@@ -340,6 +402,18 @@ module PathbEgraph
         end
       end
       hashcons(head(rv), t, args, kids)
+    end
+
+    # A node for a checked operation `(OP T A B)` on integer type T with register or constant operands. The site
+    # (the let's register) is part of the node's literal operands, so two checked lets never share a class by
+    # hash-consing: a trap is then never moved to, or shared with, another place. Returns nil when not applicable.
+    def build_checked(r, t, rv)
+      return nil unless rv.is_a?(Array) && CHECKED_OPS.include?(head(rv)) && rv.size == 4 && rv[1] == t
+      return nil unless int_ty?(t) && t != "bool"
+      return nil unless rv[2..3].all? { |x| reg?(x) || const_operand?(x) }
+
+      kids = rv[2..3].map { |x| operand_class(x) }
+      new_node(head(rv), t, [t, "site:#{r}"], kids)
     end
 
     def operand_class(x)
@@ -527,6 +601,7 @@ module PathbEgraph
       v = fold_value(nd, kids)
       merge_const(c, nd.ty, v) unless v.nil?
       identities(nd, c, kids)
+      checked_identities(nd, c, kids) if CHECKED_OPS.include?(nd.op)
       reassoc(nd, c, kids)
     end
 
@@ -535,6 +610,7 @@ module PathbEgraph
     def fold_value(nd, kids)
       vals = kids.map { |k| cval(k) }
       return nil if vals.empty? || vals.any?(&:nil?)
+      return fold_checked(nd, vals) if CHECKED_OPS.include?(nd.op)
 
       t = nd.ty
       case nd.op
@@ -573,6 +649,43 @@ module PathbEgraph
               else a != b
               end
         res ? 1 : 0
+      end
+    end
+
+    # The value of a checked node whose operands are constants, or nil when it may trap (then it is kept).
+    # cdiv and crem: the divisor is nonzero and, for a signed type, not -1 (INT_MIN / -1 traps); the value is the
+    # interpreter's: truncation toward zero, crem with the sign of the dividend (a - q*b). cshl and cshr: the count
+    # is in [0, bit width); cshl wraps to the type, cshr is arithmetic for signed and logical for unsigned types.
+    def fold_checked(nd, vals)
+      t = nd.ty
+      return nil unless vals.size == 2 && int_ty?(t) && t != "bool" && nd.args[0] == t
+
+      a, b = vals
+      w, signed = INT_TYPES[t]
+      case nd.op
+      when "cshl", "cshr"
+        return nil unless b >= 0 && b < w
+
+        canon(nd.op == "cshl" ? a << b : a >> b, t)
+      when "cdiv", "crem"
+        return nil if b.zero? || (signed && b == -1)
+
+        q = a.abs / b.abs
+        q = -q if a.negative? ^ b.negative?
+        canon(nd.op == "cdiv" ? q : a - q * b, t)
+      end
+    end
+
+    # Identities of checked nodes that cannot trap: x << 0 = x and x >> 0 = x (the count is in range), and x / 1 = x
+    # (the divisor is not zero and not -1). A division by a variable or by -1 is left alone.
+    def checked_identities(nd, c, kids)
+      t = nd.ty
+      return unless int_ty?(t) && t != "bool" && nd.args[0] == t
+
+      a, b = kids
+      case nd.op
+      when "cshl", "cshr" then forward(c, a, t) if cval(b) == 0
+      when "cdiv" then forward(c, a, t) if cval(b) == 1
       end
     end
 
@@ -648,6 +761,141 @@ module PathbEgraph
       end
     end
 
+    # ---- memory: the slots of a block (docs/notes/pathb-egraph.md, "Memory") ---------------------------------------
+
+    # Operators that read or compute but never write memory; a `let` of one of them keeps the memory state.
+    MEMORY_FREE = (PURE_OPS + %w[bitcast bfload cshl cshr cdiv crem pdiff fconv cf2i p2i i2p lt.f le.f fadd fsub fmul
+                                fdiv fneg i2f u2f]).freeze
+    # Operators that read memory (a silent instruction neither reads nor writes it).
+    READS_MEMORY = %w[load load.v bfload bfload.v call vaarg].freeze
+
+    # The slot key of a plain load `(load T $"x")`, or nil.
+    def plain_slot_load(rv) = head(rv) == "load" ? slot_key(rv[2]) : nil
+
+    # True when x contains an operator that may write memory. Type forms carry no operations.
+    def memory_write?(x)
+      return false unless x.is_a?(Array)
+
+      h = head(x)
+      return false if TYPE_HEADS.include?(h)
+      return true if h && !MEMORY_FREE.include?(h)
+
+      x.any? { |y| memory_write?(y) }
+    end
+
+    # True when a `$"x"` of x is not the address of a plain load or store: the slot's address escapes, and a later
+    # write through a pointer may change it.
+    def address_taken?(x)
+      case x
+      when Ref then x.sigil == "$"
+      when Array
+        return false if plain_slot_load(x)
+
+        x.any? { |y| address_taken?(y) }
+      else false
+      end
+    end
+
+    # True when a statement or `let` may write memory other than by a plain store to a slot, or takes a slot's
+    # address (an address-taking form ends the memory state). Any statement that is not a `let`, a store, a `set`,
+    # `nonnull` or `bounds` is conservatively such a write (copies, evals, volatile and bit-field stores, barriers).
+    def clobbers?(ins)
+      case head(ins)
+      when "let" then memory_write?(ins[3]) || address_taken?(ins[3])
+      when "store"
+        return true unless slot_key(ins[2])
+
+        memory_write?(ins[3]) || address_taken?(ins[3])
+      when "set" then memory_write?(ins[2]) || address_taken?(ins[2])
+      when "nonnull", "bounds" then address_taken?(ins[1..])
+      else true
+      end
+    end
+
+    # True when an instruction contains a read of memory (a load of any kind, a call).
+    def reads_memory?(x)
+      return false unless x.is_a?(Array)
+      return true if READS_MEMORY.include?(head(x))
+
+      x.any? { |y| reads_memory?(y) }
+    end
+
+    # Runs before the instruction's own value is classified: a write that may touch any slot forgets every
+    # remembered value, and a plain store records the value its slot now holds.
+    def memory_step(ins)
+      forget_memory if clobbers?(ins)
+      note_store(ins) if head(ins) == "store" && slot_key(ins[2])
+    end
+
+    def forget_memory = (@mem = {})
+
+    # The slot holds the stored value. The value is remembered as a class only when it is a register or a constant
+    # of the store's type; any other value (an expression) leaves the slot's value unknown.
+    def note_store(ins)
+      t, v = ins[1], ins[3]
+      cls = nil
+      if reg?(v) || const_operand?(v)
+        c = operand_class(v)
+        cls = c if sx(cty(c)) == sx(t)
+      end
+      @mem[slot_key(ins[2])] = { type: t, cls: cls, from: :store }
+    end
+
+    # A plain load of a slot. When the slot's value is known here with the same type, the load has that value:
+    # it shares the class, and no let is emitted for it (ensure_let substitutes the register). Otherwise the load
+    # is an opaque value, and the slot holds it from now on.
+    def classify_slot_load(r, t, k)
+      seen = @mem[k]
+      if seen && seen[:cls] && sx(seen[:type]) == sx(t)
+        @rc[r] = seen[:cls]
+        @stats[seen[:from] == :store ? :stores_forwarded : :loads_merged] += 1
+      else
+        c = new_node("opaque", t, r, [])
+        @opaque[r] = true
+        @rc[r] = c
+        @mem[k] = { type: t, cls: c, from: :load }
+      end
+    end
+
+    # The stores that are dead: a plain store to a slot that no instruction of the function reads, followed in the
+    # block by another store to that slot, with no instruction in between that reads memory or may write it. The
+    # stored value must be a register or a constant, so the store cannot trap and nothing else depends on it.
+    # Returns { index of the statement => true }.
+    def dead_stores(instrs)
+      dead = {}
+      pending = {}   # slot key => index of a removable store with no read after it
+      instrs.each_with_index do |ins, idx|
+        unless !clobbers?(ins) && !reads_memory?(ins)
+          pending.clear
+          next
+        end
+        next unless head(ins) == "store" && slot_key(ins[2])
+
+        k = slot_key(ins[2])
+        next if @read_slots.include?(k)
+
+        dead[pending[k]] = true if pending.key?(k)
+        pending.delete(k)
+        pending[k] = idx if reg?(ins[3]) || const_operand?(ins[3])
+      end
+      dead
+    end
+
+    # Slot keys that some instruction of the function reads or takes the address of: any `$"x"` except the address
+    # of a plain store.
+    def collect_slot_reads(x, out)
+      case x
+      when Ref then out[slot_key(x)] = true if x.sigil == "$"
+      when Array
+        if head(x) == "store" && slot_key(x[2])
+          collect_slot_reads(x[3], out)
+        else
+          x.each { |y| collect_slot_reads(y, out) }
+        end
+      end
+      out
+    end
+
     # ---- extraction and emission -------------------------------------------------------------------------------
 
     def ensure_let(r, c)
@@ -673,7 +921,7 @@ module PathbEgraph
       bestc = [INF, nil]
       @members[c].each do |nid|
         nd = @nodes[nid]
-        next if nd.op == "opaque" || nd.op == "leaf"
+        next if nd.op == "opaque" || nd.op == "leaf" || CHECKED_OPS.include?(nd.op)
 
         total = 1
         nd.kids.each do |k|
@@ -711,6 +959,54 @@ module PathbEgraph
         name = "%g#{@fresh}"
         return name unless @types.key?(name)
       end
+    end
+
+    # ---- common subexpressions across blocks (dominator tree) --------------------------------------------------
+
+    # A pure `let` whose right-hand side (after the substitution so far) and type equal those of a `let` of a block
+    # that dominates it is removed, and the later register takes the earlier one's value. The table of definitions
+    # is scoped by the dominator tree: a block's definitions are pushed when it is entered and popped when it is
+    # left, so the register found in the table is defined by a dominator of every use it replaces (a definition
+    # earlier in the same block also qualifies). Only the whitelist of pure operations is keyed: loads, constants,
+    # checked operations (division, shifts, bounds) and everything else are never merged. A phi is never a
+    # replacement, and no operation is moved. The substitution itself is applied by run.
+    def cse_dominator(out)
+      efn = EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out)
+      rpo = PathbEgraph.reverse_postorder(efn)
+      _preds, idom = PathbEgraph.idoms(efn, rpo)
+      children = Hash.new { |h, k| h[k] = [] }
+      rpo.drop(1).each { |b| children[idom[b]] << b }
+      table = {}      # [type, right-hand side] => register defined by a dominating let
+      pushed = {}     # block => keys it added to the table
+      stack = [[0, true]]
+      until stack.empty?
+        b, entering = stack.pop
+        unless entering
+          (pushed.delete(b) || []).each { |key| table.delete(key) }
+          next
+        end
+
+        keys = []
+        out[b][:instrs].each do |ins|
+          next unless head(ins) == "let" && cse_operation?(ins[3])
+
+          key = [ins[2], subst_deep(ins[3])]
+          if table.key?(key)
+            @subst[ins[1]] = table[key]
+            @stats[:cse] += 1
+          else
+            table[key] = ins[1]
+            keys << key
+          end
+        end
+        pushed[b] = keys
+        stack << [b, false]
+        children[b].each { |c| stack << [c, true] }
+      end
+    end
+
+    def cse_operation?(rv)
+      rv.is_a?(Array) && PURE_OPS.include?(head(rv)) && !%w[load const null].include?(head(rv))
     end
 
     # ---- substitution and dead code --------------------------------------------------------------------------
@@ -752,6 +1048,148 @@ module PathbEgraph
         break unless removed
       end
     end
+
+    # ---- control flow: constant branches, unreachable blocks, phis ----------------------------------------------
+
+    # Applies @subst (the replaced registers) to every phi argument, instruction and terminator.
+    def apply_subst(out)
+      out.each_value do |blk|
+        blk[:phis].each { |ph| ph.inc.transform_values! { |v| subst_deep(v) } }
+        blk[:instrs] = blk[:instrs].map { |i| head(i) == "let" ? ["let", i[1], i[2], subst_deep(i[3])] : subst_deep(i) }
+        blk[:term] = subst_deep(blk[:term])
+      end
+    end
+
+    # Each round: a condbr or switch on a constant becomes a br to the arm it selects; blocks no longer reachable
+    # are removed; phi arguments from removed edges are dropped; a phi whose arguments are all one operand (self
+    # references ignored) is replaced by it; a phi nothing uses is removed. Repeats until nothing changes, because a
+    # replaced phi can make a branch constant. Every edge removed takes its phi arguments with it, so each phi keeps
+    # exactly one argument per predecessor.
+    def fold_control(out)
+      loop do
+        changed = fold_branches(out)
+        changed |= remove_unreachable(out)
+        changed |= prune_phi_args(out)
+        changed |= replace_phis(out)
+        apply_subst(out)
+        changed |= remove_dead_phis(out)
+        break unless changed
+      end
+    end
+
+    # The value of a constant operand, canonical for its type (the interpreter's `val`), or nil for anything else.
+    # The literal may be decimal or hexadecimal (`0x1`, the printer's form of many bool and unsigned constants).
+    def const_int(op)
+      return nil unless op.is_a?(Array) && %w[const null].include?(head(op))
+      return 0 if op[0] == "null" && op.size == 2 && ptr_ty?(op[1])
+      return nil unless op[0] == "const" && op.size == 3 && (int_ty?(op[1]) || ptr_ty?(op[1]))
+
+      v = literal_int(op[2])
+      v.nil? ? nil : canon(v, op[1])
+    end
+
+    def literal_int(s)
+      return Integer(s, 10) if s.match?(/\A-?\d+\z/)
+      return nil unless s.match?(/\A-?0x\h+\z/i)
+
+      s.start_with?("-") ? -s.delete("-")[2..].hex : s[2..].hex
+    end
+
+    # The br that a constant condbr or switch selects: a condbr takes its true arm when the value is nonzero; a
+    # switch takes the first case equal to the value, else the default (the interpreter's rule).
+    def selected_br(term)
+      case term[0]
+      when "condbr"
+        c = const_int(term[1])
+        ["br", c.zero? ? term[3] : term[2]] unless c.nil?
+      when "switch"
+        c = const_int(term[1])
+        return nil if c.nil?
+
+        hit = term[2].find { |v, _| v == c }
+        ["br", hit ? hit[1] : term[3]]
+      end
+    end
+
+    def fold_branches(out)
+      changed = false
+      out.each_value do |blk|
+        br = selected_br(blk[:term])
+        next unless br
+
+        @stats[blk[:term][0] == "condbr" ? :condbr_folded : :switch_folded] += 1
+        blk[:term] = br
+        changed = true
+      end
+      changed
+    end
+
+    def remove_unreachable(out)
+      seen = { 0 => true }
+      stack = [0]
+      until stack.empty?
+        succs(out.fetch(stack.pop)[:term]).each do |s|
+          next if seen[s]
+
+          seen[s] = true
+          stack << s
+        end
+      end
+      dead = out.keys.reject { |b| seen[b] }
+      dead.each { |b| out.delete(b) }
+      @stats[:blocks_removed] += dead.size
+      dead.any?
+    end
+
+    # The phi arguments of a block are exactly its predecessors (a predecessor is a block with an edge to it).
+    def prune_phi_args(out)
+      preds = Hash.new { |h, k| h[k] = [] }
+      out.each { |b, blk| succs(blk[:term]).uniq.each { |s| preds[s] << b } }
+      changed = false
+      out.each do |b, blk|
+        blk[:phis].each do |ph|
+          before = ph.inc.size
+          ph.inc.select! { |p, _| preds[b].include?(p) }
+          changed ||= ph.inc.size != before
+        end
+      end
+      changed
+    end
+
+    def replace_phis(out)
+      changed = false
+      out.each_value do |blk|
+        blk[:phis].reject! do |ph|
+          others = ph.inc.values.map { |v| subst_deep(v) }.reject { |v| v == ph.name }
+          next false if others.empty? || others.map { |v| sx(v) }.uniq.size != 1
+
+          @subst[ph.name] = others.first
+          @stats[:phis_replaced] += 1
+          changed = true
+        end
+      end
+      changed
+    end
+
+    # A phi with no use is removed, as the converter's cleanup does; a phi used only by itself is kept.
+    def remove_dead_phis(out)
+      uses = Hash.new(0)
+      out.each_value do |blk|
+        blk[:phis].each { |ph| ph.inc.each_value { |v| count_regs(v, uses) } }
+        blk[:instrs].each { |i| count_regs(head(i) == "let" ? i[2..] : i[1..], uses) }
+        count_regs(blk[:term][1..], uses)
+      end
+      changed = false
+      out.each_value do |blk|
+        blk[:phis].reject! do |ph|
+          next false unless uses[ph.name].zero?
+
+          @stats[:phis_removed] += 1
+          changed = true
+        end
+      end
+      changed
+    end
   end
 end
 
@@ -787,7 +1225,11 @@ def egraph_cli(argv)
     warn "pathb-egraph: #{st[:functions]} functions, lets #{st[:lets_before]} -> #{st[:lets_after]} " \
          "(pure #{st[:pure_before]} -> #{st[:pure_after]}), e-nodes #{st[:enodes_input]} + #{st[:enodes_added]} added, " \
          "#{st[:iterations]} iterations, saturated #{st[:saturated]} blocks, cut by iterations #{st[:cut_iters]}, " \
-         "cut by nodes #{st[:cut_nodes]}"
+         "cut by nodes #{st[:cut_nodes]}, folded #{st[:condbr_folded]} condbr and #{st[:switch_folded]} switch, " \
+         "removed #{st[:blocks_removed]} blocks, #{st[:phis_replaced]} phis replaced, #{st[:phis_removed]} dead phis, " \
+         "common subexpressions across blocks #{st[:cse]}, " \
+         "loads merged #{st[:loads_merged]}, " \
+         "stores forwarded #{st[:stores_forwarded]}, dead stores removed #{st[:stores_removed]}"
   end
   0
 rescue Fail, Unsupported => e

@@ -1,0 +1,7 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" int))
+  (block
+    (let %1 int (cdiv int (const int -2147483648) (const int -1)))
+    (return %0)))
