@@ -1,0 +1,13 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int 4 4)
+  (slot "p" (ptr int) 8 8)
+  (store int $"n" %0)
+  (store (ptr int) $"p" (addr $"n"))
+  (block
+    (let %1 (ptr int) (load (ptr int) $"p"))
+    (store int %1 (const int 7))
+    (let %2 int (load int $"n"))
+    (return %2)))
