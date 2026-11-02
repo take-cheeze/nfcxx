@@ -1436,6 +1436,19 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
     return false;
   };
   auto carrier = [&](const Node &x) { return x.kind == Node::Sym && x.sig == '$' && carrier_off.count(x.text) > 0; };
+  // an index known at this point: a literal, or a counter of an unrolled copy
+  auto index_const = [&](const Node &x, long long &k) {
+    i128 v = 0;
+    if (literal_int(&x, &v)) {
+      k = static_cast<long long>(v);
+      return true;
+    }
+    if (x.kind == Node::Atom && const_reg.count(x.text)) {
+      k = const_reg[x.text];
+      return true;
+    }
+    return false;
+  };
   std::function<bool(const Node &)> mentions = [&](const Node &x) {
     long long o = 0;
     if (alias_of(x, o) || carrier(x)) return true;
@@ -1533,6 +1546,7 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
     if (h == "let" && x.items.size() == 4) {
       const Node &rhs = x.items[3];
       std::string rh = head_of(rhs);
+      long long k = 0;
       if (rh == "load" && rhs.items.size() == 3 && rhs.items[2].kind == Node::Sym && rhs.items[2].sig == '$' &&
           const_slot.count(rhs.items[2].text)) {
         const_reg[x.items[1].text] = const_slot[rhs.items[2].text];
@@ -1546,10 +1560,9 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
         reg_off[x.items[1].text] = carrier_off[rhs.items[2].text];
       } else if (rh == "load" && rhs.items.size() == 3 && alias_of(rhs.items[2], o)) {
         add_field(o, rhs.items[1]);
-      } else if (rh == "index" && rhs.items.size() == 4 && alias_of(rhs.items[1], o) && rhs.items[2].kind == Node::Atom &&
-                 const_reg.count(rhs.items[2].text)) {
-        // an element of the object, at a constant index (an unrolled copy)
-        reg_off[x.items[1].text] = o + const_reg[rhs.items[2].text] * static_cast<long long>(as_int(&rhs.items[3]));
+      } else if (rh == "index" && rhs.items.size() == 4 && alias_of(rhs.items[1], o) && index_const(rhs.items[2], k)) {
+        // an element of the object, at a constant index
+        reg_off[x.items[1].text] = o + k * static_cast<long long>(as_int(&rhs.items[3]));
       } else if (rh == "call") {
         call_uses(rhs);
       } else if (mentions(rhs)) {
