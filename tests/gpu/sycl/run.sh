@@ -5,7 +5,7 @@
 # over 50000 elements with the launcher of tests/gpu/spirv, and the SYCL source itself runs on the runtime. A mutant SYCL source (+ -> -) must fail; a 2-D range and a source
 # with no parallel_for are refused with exit 3. Needs the Path B harness, the SPIRV-Tools binaries (SPIRV_TOOLS_BIN or PATH),
 # OPENCL_INCLUDE and libOpenCL.so.1 and an OpenCL GPU; skips (exit 0) when one is missing. Step 5 runs the unchanged SYCL
-# source on the host runtime (lib/sycl/sycl/sycl.hpp) with the SPIR-V in NFCXX_SYCL_SPV.
+# source on the host runtime (lib/sycl/include/sycl/sycl.hpp) with the SPIR-V in NFCXX_SYCL_SPV.
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
@@ -57,9 +57,9 @@ else
   echo "mutant vecadd: caught"
 fi
 
-# 5. The SYCL source itself (vecadd.cpp, unchanged) builds against the host runtime (lib/sycl) and runs: the runtime loads the
+# 5. The SYCL source itself (vecadd.cpp, unchanged) builds against the host runtime (lib/sycl/include) and runs: the runtime loads the
 # SPIR-V named by NFCXX_SYCL_SPV and launches __nfcxx_sycl_k0 with the three accessors. The mutant SPIR-V must fail the host run.
-g++ -std=c++17 -O2 -Wall -I"$root/lib/sycl" -I"$clinc" vecadd.cpp -o "$out/host" -l:libOpenCL.so.1
+g++ -std=c++17 -O2 -Wall -I"$root/lib/sycl/include" -I"$clinc" vecadd.cpp -o "$out/host" -l:libOpenCL.so.1
 if NFCXX_SYCL_SPV="$out/vecadd.spv" "$out/host"; then echo "run sycl host: ok"; else echo "run sycl host: FAIL"; fail=1; fi
 if NFCXX_SYCL_SPV="$out/mut.spv" "$out/host" >/dev/null 2>&1; then
   echo "mutant sycl host: FAIL (not caught)"; fail=1
