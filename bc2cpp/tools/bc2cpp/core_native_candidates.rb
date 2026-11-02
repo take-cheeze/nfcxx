@@ -8,10 +8,11 @@
 # object. A core method is reached through core receivers too, so the rule here is receiver-blind and coarser: a
 # name is reachable when any of these spell it --
 #   - a symbol an instruction of the program may look up (a send, a LOADSYM, an alias or undef, a key, ...; the
-#     operand of a DEF, which defines its name, does not), or an identifier-shaped pool string. The engine's ireps all
+#     operand of a DEF or the destination of an ALIAS, which defines its name, does not), or an identifier-shaped pool string. The engine's ireps all
 #     count. A core, external or foreign mrblib method body counts only while its own name is reachable (LIVE_CORE),
 #     to a fixpoint: nothing runs a Ruby-defined core method but a lookup of its name, or a direct `_impl` call from
-#     compiled code, which is read as one. Root and class bodies, and blocks made in them, always count;
+#     compiled code. A direct implementation reference retains body dependencies without requiring its named slot.
+#     Root and class bodies, and blocks made in them, always count;
 #   - a name the native sources look up (native_name_tokens: string literals, presym macros, naming macros), except
 #     the name operand of a table entry or registration call, which defines it;
 #   - a string literal of the generated code;
@@ -129,8 +130,8 @@ module CoreNativeCandidates
 
   # Adds what `irep` may look up to `names` and its fragment-shaped pool strings to `fragments`: every symbol of the
   # irep except one only a DEF names, since that operand defines the method. `own` is the name of the method whose
-  # body this is: SUPER looks it up again in the ancestors, as an operator opcode does its operator. Both ALIAS
-  # operands count; an unresolved alias operand keeps every symbol conservatively.
+  # body this is: SUPER looks it up again in the ancestors, as an operator opcode does its operator. ALIAS looks up
+  # its source and defines its destination; an unresolved source keeps every symbol conservatively.
   def lookup_names(irep, own, names, fragments)
     syms = irep.syms.map(&:to_s)
     defined = Set.new
@@ -144,7 +145,7 @@ module CoreNativeCandidates
       names << own if own && insn.op == :SUPER
       # An operator opcode sends its name without a symbol operand (a Ruby-defined `+` runs from ADD).
       names << IMPLICIT_DISPATCH_NAMES[insn.op] if IMPLICIT_DISPATCH_NAMES.key?(insn.op)
-      (DEF_OPS.include?(insn.op) ? defined : used) << insn.sym.to_s if insn.sym
+      (DEF_OPS.include?(insn.op) || insn.op == :ALIAS ? defined : used) << insn.sym.to_s if insn.sym
     end
     names.merge(aliased ? syms : syms.reject { |s| defined.include?(s) && !used.include?(s) })
     irep.pool.each do |s|
@@ -231,11 +232,11 @@ module CoreNativeCandidates
     end.sort
   end
 
-  # Core Ruby definitions, compiled or interpreted, whose names no lookup or direct compiled call reaches.
+  # Core Ruby registrations, compiled or interpreted, whose names no lookup reaches.
   # ROM-shared keys stay: omitting a Ruby override must not replace a readonly entry with a RAM tombstone.
   def ruby_candidates(core, names, fragments, entries, proven = {})
     rom = entries.to_set { |entry| "#{entry[:mt_class]}##{entry[:name]}" }
-    core.flat_map do |file|
+    definitions = core.flat_map do |file|
       file.fetch(:registry).flat_map do |name, definitions|
         next [] unless (name.match?(NAME) || proven[name]) &&
                        (proven[name] || !StaticDispatchRegistrations.dynamic_name?(name, names, fragments))
@@ -250,7 +251,18 @@ module CoreNativeCandidates
           key unless rom.include?(key.sub('.singleton#', '#'))
         end
       end
-    end.uniq.sort
+    end
+    aliases = core.flat_map do |file|
+      Array(file[:tuple]&.[](12)).filter_map do |site|
+        owner, name = site.values_at(:owner, :new)
+        next unless owner.is_a?(String) && owner.match?(/\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/) && name&.match?(NAME)
+        next if owner.match?(/\b([A-Z]\w*)::\1\b/)
+
+        key = "#{owner}##{name}"
+        key unless rom.include?(key.sub('.singleton#', '#')) || StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+      end
+    end
+    (definitions + aliases).uniq.sort
   end
 
   # CORE_RAM_CANDIDATES: the core registrations made at run time (mrb_define_method and the other defining calls,

@@ -173,7 +173,10 @@ class CodeGen
     # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
     # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
     if [accessors, natives, core_rom, core_ram].any?(&:any?) ||
-       compiled.any? { |m| unregistered.include?("#{m[:owner]}##{m[:name]}") }
+       compiled.any? do |m|
+         names = [m[:name], *Array(self.class.core_aliases&.dig([m[:owner], m[:name]]))]
+         names.any? { |name| unregistered.include?("#{m[:owner]}##{name}") }
+       end
       out << <<~CPP
         #ifdef BC2CPP_UNREGISTERED_VERIFY
         #include <stdio.h>
@@ -242,6 +245,22 @@ class CodeGen
     out
   end
 
+  def named_registration_entries(compiled, owners)
+    copies = module_function_copies(compiled)
+    targets = (owners + copies.map { |m| m[:owner] }).to_set
+    excluded = unregistered_keys
+    (compiled + copies).flat_map do |m|
+      next [] unless targets.include?(m[:owner]) && %i[public private].include?(m[:visibility])
+
+      names = [m[:name]]
+      names += self.class.core_aliases&.dig([m[:owner], m[:name]]) || [] if @owner_of[m[:label]]&.core
+      names.map do |name|
+        { owner: m[:owner], name: name, implementation: m[:name],
+          excluded: excluded.include?("#{m[:owner]}##{m[:name]}") || excluded.include?("#{m[:owner]}##{name}") }
+      end
+    end.uniq { |row| [row[:owner], row[:name]] }
+  end
+
   PRESYM_OPERATORS = {
     '!' => 'not', '%' => 'mod', '&' => 'and', '*' => 'mul', '+' => 'add', '-' => 'sub', '/' => 'div', '<' => 'lt',
     '>' => 'gt', '^' => 'xor', '`' => 'tick', '|' => 'or', '~' => 'neg', '!=' => 'neq', '!~' => 'nmatch',
@@ -301,6 +320,8 @@ class CodeGen
         names = [m[:name]]
         # CORE_ALIASES: the same entry under the names the bytecode aliased it to.
         names += self.class.core_aliases&.dig([owner, m[:name]]) || [] if @owner_of[m[:label]]&.core
+        omitted, names = names.partition { |name| unregistered.include?("#{owner}##{name}") }
+        omitted.each { |name| out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
         defines = names.map { |name| "#{fn}(M, #{var}, #{c_string_literal(name)}, #{m[:entry]}, #{m[:aspec]});" }
         # CORE_BLOCK_GUARD: the bytecode must be saved before it is replaced.
         if m[:guard]
@@ -352,7 +373,7 @@ class CodeGen
   def unregistered_keys(lists: nil)
     lists ||= static_dispatch_lists
     keys = lists.for_build(ENV['BC2CPP_BUILD_NAME'])
-    keys |= lists.core_left_out if ENV['BC2CPP_BUILD_NAME'] == 'closed'
+    keys |= lists.core_left_out | lists.core_excluded if ENV['BC2CPP_BUILD_NAME'] == 'closed'
     keys | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
   end
 

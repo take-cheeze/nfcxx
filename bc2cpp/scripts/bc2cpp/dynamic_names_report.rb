@@ -10,15 +10,44 @@
 
 require 'set'
 require 'optparse'
+require 'json'
 
-options = { entries: false, entries_out: nil }
+options = { entries: false, entries_out: nil, main_report: nil }
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: #{$PROGRAM_NAME} [--entries] [--entries-out PATH]"
   opts.on('--entries', 'Print entry rows instead of the summary') { options[:entries] = true }
   opts.on('--entries-out PATH', 'Also write entry rows from this analysis to PATH') { |path| options[:entries_out] = path }
+  opts.on('--main-report PATH', 'Summarize a BC2CPP_MAIN_REPORT JSON file without rerunning generation') { |path| options[:main_report] = path }
 end
 parser.parse!
 abort "unexpected arguments: #{ARGV.join(' ')}" unless ARGV.empty?
+
+if options[:main_report]
+  data = JSON.parse(File.read(options[:main_report]))
+  entries = data.fetch('entries')
+  kept = entries.reject { |row| row.fetch('excluded') }
+  priority = %w[protocol host native_impl native lookup ruby copy]
+  explain = lambda do |row|
+    reasons = row.fetch('reasons')
+    first = reasons.min_by { |reason| priority.index(reason.fetch('kind')) || priority.size }
+    first ? [first.fetch('kind'), first.fetch('source')] : ['unresolved', 'no bounded-name evidence; retained conservatively']
+  end
+  rows = kept.map { |row| [row.fetch('owner'), row.fetch('name'), *explain.call(row)] }.sort
+  File.write(options[:entries_out], rows.map { |row| row.join("\t") + "\n" }.join) if options[:entries_out]
+  if options[:entries]
+    rows.each { |row| puts row.join("\t") }
+  else
+    puts "registered entries: #{kept.size} (excluded by omission proof: #{entries.size - kept.size})"
+    puts "bounded-name candidates: #{kept.count { |row| !row.fetch('bounded_name_reached') }}"
+    puts "unresolved forwarding sites: #{data.fetch('unresolved').size}; refusals: #{data.fetch('refusals').size}"
+    puts "\nby primary retention reason (each registered entry counted once):"
+    rows.group_by { |_, _, kind, _| kind }.sort_by { |kind, rows| [-rows.size, kind] }.each do |kind, group|
+      puts format('%6d  %s', group.size, kind)
+    end
+    puts "\n#{data.fetch('notice')}"
+  end
+  exit 0
+end
 
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 

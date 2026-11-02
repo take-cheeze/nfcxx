@@ -64,7 +64,7 @@ module MainRoots
           native_functions << node['name'] if native_unit
           children(node).select { |child| child['kind'] == 'ParmVarDecl' }.each_with_index do |param, index|
             variables[param['id']] = param
-            param['bc2cpp_local'] = node['storageClass'] == 'static'
+            param['bc2cpp_local'] = node['storageClass'] == 'static' || node['mangledName'].to_s.include?('GLOBAL__N_')
             parameters[node['name']] << [param, index]
           end
         end
@@ -111,7 +111,7 @@ module MainRoots
     queue = ['main', *native_functions, *explicit_functions]
     constructors_seeded = false
     indirect_seeded = false
-    visit = lambda do |node, bridge_callee = false|
+    visit = lambda do |node, bridge_callee = false, context = 'static initialization'|
       if node['kind'] == 'DeclRefExpr'
         declaration = node['referencedDecl'] || {}
         queue << declaration['name'] if FUNCTION_KINDS.include?(declaration['kind'])
@@ -140,7 +140,7 @@ module MainRoots
             reflected = values & REFLECTION
             refusals << "native call to reflective method #{reflected.to_a.sort.join(', ')}" unless reflected.empty?
           else
-            refusals << "unresolved method name passed to #{function}"
+            refusals << "unresolved method name passed to #{function} in #{context}"
           end
         elsif CONSTRUCTORS.include?(function)
           names << 'initialize'
@@ -155,7 +155,7 @@ module MainRoots
         names << value.partition("\0").first
       end
       children(node).each_with_index do |child, index|
-        visit.call(child, bridge_callee || (node['kind'] == 'CallExpr' && index.zero? && declaration && BRIDGES.include?(function)))
+        visit.call(child, bridge_callee || (node['kind'] == 'CallExpr' && index.zero? && declaration && BRIDGES.include?(function)), context)
       end
     end
     initializers.each { |node| visit.call(node) }
@@ -163,7 +163,7 @@ module MainRoots
       name = queue.pop
       next unless reached.add?(name)
 
-      functions[name].each { |definition| visit.call(definition) }
+      functions[name].each { |definition| visit.call(definition, false, name) }
     end
     Result.new(names: names, functions: reached, refusals: refusals.uniq, native_paths: Set.new)
   end
