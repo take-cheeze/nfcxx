@@ -78,6 +78,9 @@ def check_goldens(files)
         totals[:saturated] += st[:saturated]
         totals[:cut_iters] += st[:cut_iters]
         totals[:cut_nodes] += st[:cut_nodes]
+        totals[:loads_merged] += st[:loads_merged]
+        totals[:stores_forwarded] += st[:stores_forwarded]
+        totals[:stores_removed] += st[:stores_removed]
         # The cut-short output (a small budget) is verified too.
         tight, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first), iters: 2, nodes: 20)
         PathbEgraph.verify(tight)
@@ -96,15 +99,69 @@ def check_goldens(files)
   puts "     budget: e-nodes #{totals[:enodes_input]} input + #{totals[:enodes_added]} added, " \
        "#{totals[:iterations]} iterations; blocks saturated #{totals[:saturated]}, cut by iterations " \
        "#{totals[:cut_iters]}, cut by nodes #{totals[:cut_nodes]}"
+  puts "     memory: loads merged #{totals[:loads_merged]}, stores forwarded #{totals[:stores_forwarded]}, " \
+       "dead stores removed #{totals[:stores_removed]}"
   failures.each { |m| puts "FAIL golden #{m}" }
   failures.empty?
 end
 
+# The interpreter of pathb-ssa.rb does not model a call, a volatile access or the address of a slot. The cases
+# that test memory use them, so this subclass models them for the cases only: `&"observe"` reads and writes
+# nothing, `&"clobber"` writes 77 into the slot that its pointer argument names, `(addr $"x")` and
+# `(bitcast T $"x")` are the slot's address, `load.v` and `store.v` act as `load` and `store`. A pointer is the
+# quoted slot name.
+class CaseMachine < Machine
+  private
+
+  def exec(s)
+    case head(s)
+    when "store", "store.v" then @mem[slot_name(s[2])] = val(s[3])
+    when "eval" then call(s[1])
+    else super
+    end
+  end
+
+  def eval_rv(f)
+    case head(f)
+    when "load", "load.v" then @mem[slot_name(f[2])]
+    when "addr", "bitcast" then slot_name(f[-1])
+    when "call" then call(f)
+    else super
+    end
+  end
+
+  def slot_name(x) = x.is_a?(Ref) ? x.raw : val(x)
+
+  def call(f)
+    raise Unsupported, "call of #{sx(f[2])}" unless f[2].is_a?(Ref) && f[2].sigil == "&"
+
+    case f[2].raw
+    when '"observe"' then 0
+    when '"clobber"'
+      @mem[slot_name(f[3])] = 77
+      0
+    else raise Unsupported, "call of #{f[2].raw}"
+    end
+  end
+end
+
 # Result of running fn on args: the value, "trap", or :unsupported when the interpreter does not model it.
 def interpret(efn, args)
-  PathbEgraph.run(efn, args).to_s
+  fn = Fn.new(efn.name, efn.ret, efn.params, efn.header, [])
+  CaseMachine.new(fn, args).run_ssa(efn.blocks).to_s
+rescue Trap
+  "trap"
 rescue Unsupported
   :unsupported
+end
+
+# Number of nodes with each operator head in the statements and let right-hand sides of a function.
+def count_heads(x, seen)
+  return unless x.is_a?(Array)
+
+  seen[head(x)] += 1 if head(x)
+  x.each { |y| count_heads(y, seen) }
+  seen
 end
 
 def check_case(f)
@@ -145,7 +202,17 @@ def check_case(f)
     end
   end
   errors << "lets grew from #{before[0]} to #{after[0]}" if after[0] > before[0]
-  errors << "no let removed (the redundancy case must shrink)" if f.include?("pathb-egraph/cases") && after[0] >= before[0]
+  errors << "no let removed (the redundancy case must shrink)" if f.end_with?("pathb-egraph/cases/redundant.ir") &&
+                                                                  after[0] >= before[0]
+  # Hand-derived counts of the optimized `main`: "HEAD N" lines in FILE.counts (for example `load 2`).
+  counts_file = f.sub(/\.ir\z/, ".counts")
+  if File.exist?(counts_file)
+    seen = Hash.new(0)
+    opt.blocks.each_value { |blk| blk[:instrs].each { |i| count_heads(i, seen) } }
+    File.readlines(counts_file).map(&:split).reject(&:empty?).each do |op, n|
+      errors << "#{op}: expected #{n} in the optimized main, got #{seen[op]}" unless seen[op] == Integer(n, 10)
+    end
+  end
   status = errors.empty? ? "ok  " : "FAIL"
   puts "#{status} cases #{File.basename(f)}: lets #{before[0]} -> #{after[0]} (pure #{before[1]} -> #{after[1]}), " \
        "#{runs} interpreted runs equal, #{unsupported} unsupported"
@@ -154,7 +221,12 @@ def check_case(f)
 end
 
 def check_cases(files)
-  files.map { |f| check_case(f) }.all?
+  files.map do |f|
+    check_case(f)
+  rescue Fail, Unsupported => e
+    puts "FAIL cases #{File.basename(f)}: #{e.message}"
+    false
+  end.all?
 end
 
 mode, *files = ARGV

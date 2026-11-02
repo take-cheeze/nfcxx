@@ -32,9 +32,9 @@ Options: `--iters N` (saturation rounds per block, default 8), `--nodes N` (e-no
   If a dominating block replaced the register by a constant or another register, the leaf is that constant or
   register, so identities in this block see it (the redundancy case relies on this: a `wmul x 0` in the entry block
   makes the `+ 0` after the join disappear).
-- **Opaque.** Anything not in the whitelist is an opaque class of its own: calls, stores, `load` (every load is
-  opaque; no memory state is tracked), checked operations (`cdiv`, `crem`, bounds checks), `cshl`/`cshr`, `bfload`,
-  `fconv`, float operations, `static`/`barrier` statements. An opaque class is never merged with another opaque class
+- **Opaque.** Anything not in the whitelist is an opaque class of its own: calls, stores, loads (a load of a slot
+  is also opaque, but the memory rules below may merge it with an earlier value), checked operations (`cdiv`,
+  `crem`, bounds checks), `cshl`/`cshr`, `bfload`, `fconv`, float operations, `static`/`barrier` statements. An opaque class is never merged with another opaque class
   and never with a class of a different value. Its only merges are identities whose result is the opaque value
   itself (`x + 0 = x` with `x` opaque): the merged expression is equal to it, so the class stays one value.
 - **Scope.** An e-graph exists for one block; equalities are not carried into other blocks. A class is emitted in a
@@ -72,6 +72,40 @@ but no identity or folding is applied to pointer values.
 **Not folded:** `wneg` (the interpreter does not model it, so its folding could not be checked), `not` (its
 semantics is not in the interpreter), division and remainder (they trap; the whitelist excludes them).
 
+## Memory
+
+The slots of a block (`$"x"`, the objects that `pathb-ssa.rb` keeps in memory) are tracked in program order within
+the block. The state is a map from a slot to the value it holds here: its type and its class (or unknown). It starts
+empty at every block, so nothing is carried into another block.
+
+- **Loads.** `(load T $"x")` with a remembered value of type `T` is the same value: the load shares the class and
+  no `let` is emitted for it (its uses get the register of the first load or of the stored value). Otherwise the
+  load is an opaque value and the slot now holds it. Loads of different slots are different objects, so they never
+  merge with each other.
+- **Store-to-load forwarding.** `(store T $"x" V)` records `V` (a register or a constant of type `T`). A later
+  `(load T $"x")` with no write in between yields `V`. The type must match: the store's type and the value's type are
+  both `T`. A store of an expression, or of another type, leaves the slot's value unknown.
+- **Barriers.** A write that may touch any slot forgets the whole state: a store through a pointer or to a non-slot
+  address, `copy`, `eval`, `bfstore`, `store.v`, `bfstore.v`, `barrier`, `fence`, `vastart`, `static`, any call,
+  `load.v`, `bfload.v`, `vaarg`, `alloca`, and any statement not in the list of memory-neutral forms. An
+  address-taking form also forgets it: any `$"x"` that is not the address of a plain load or store (`addr`,
+  `offset`, `bitcast`, `sret`, a call argument, the source or destination of `copy`). Plain loads and stores of
+  other slots keep the state, as do the pure operators and `bfload`.
+- **Volatile.** `load.v` and `store.v` are never merged, forwarded, removed or moved. They are barriers, so no
+  value is remembered across them.
+- **Dead stores.** A plain store to a slot is removed when no instruction of the function reads the slot or takes its
+  address, a later store to the same slot follows in the block with no read or write of memory between them, and
+  the stored value is a register or a constant (so the store cannot trap). The rule is implemented but fires on
+  no golden: no slot left in memory is written and never read or addressed (the converter promotes the scalar
+  ones that are only stored and loaded).
+- **Not moved.** No load or store changes its position; an opaque value is emitted where its `let` was.
+
+Cases: `tests/pathb-egraph/cases/memory_*.ir`, with expected values in `.args` and hand-derived instruction counts in
+`.counts` (`HEAD N` lines counted in the optimized `main`): duplicate loads, store-to-load forwarding (same type, and
+a different type that must not forward), a store across a call, volatile accesses, two slots that are kept, and a
+dead store. The interpreter runs these cases with a test-only extension (`CaseMachine` in `check.rb`) for the call,
+the slot's address and the volatile forms, which `pathb-ssa.rb`'s interpreter does not model.
+
 ## Extraction
 
 The cost of a class is the smallest over its nodes of `1 + the costs of the operands`; a constant costs 0; a value
@@ -105,10 +139,11 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
 
 ## Numbers (goldens, 2026-11)
 
-- Goldens: 6595 functions converted and optimized. Four switch functions are left unconverted by the converter and
-  are not optimized. Every output verifies. Lets: 54878 before, 53203 after (pure lets 42369 -> 40694).
-- Budget: 22516 blocks saturated, 0 cut by iterations, 0 cut by nodes; 66178 input e-nodes and 6347 added; 27591
-  rule rounds in total.
+- Goldens: 6599 functions converted and optimized. Every output verifies. Lets: 54878 before, 52602 after (pure lets
+  42369 -> 40093). Before the memory rules the e-graph gave 53203. The memory rules merge 312 loads and forward 268
+  stores (580 lets); 21 more pure lets become equal once their operands are merged. Dead stores removed: 0.
+- Budget: 22516 blocks saturated, 0 cut by iterations, 0 cut by nodes; 69777 input e-nodes (66178 before the memory
+  rules: the stored values are now classes) and 6347 added; 27591 rule rounds in total.
 - Interpreter on goldens: 30 functions run (150 random runs each side, all equal); the other 6565 use pointers,
   calls, floats or other constructs the interpreter does not model.
 - New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 3 after. It has a repeated `wadd` in one block,
@@ -120,8 +155,9 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
 
 - **Across blocks.** No common-subexpression elimination between a dominating block and a dominated one, and no code
   motion. Only constants and registers replaced by a dominator reach a block.
-- **Memory.** Every `load` is opaque: two loads of the same slot with no store between are not merged, and no
-  store-to-load forwarding is done. Stores, calls and volatile accesses are never moved or merged.
+- **Memory across blocks.** The memory state starts empty in every block, so a value stored in a dominating block is
+  not forwarded, and loads through pointers (other than slots) are never merged. Address-taking forms clear the state
+  even though a pure address computation writes nothing; a finer rule would need the escape set of the function.
 - **Control flow.** A `condbr` on a constant keeps its dead arm; phis whose arguments became equal are not removed
   (the converter removes them only before this pass). Both would be a separate cleanup.
 - **Operators.** Float arithmetic, shifts, division, conversions to float and the bit-field operations have no rules.
