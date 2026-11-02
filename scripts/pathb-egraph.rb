@@ -16,7 +16,7 @@ require_relative 'pathb-ssa'
 
 module PathbEgraph
   INF = Float::INFINITY
-  TERMINATORS = %w[br condbr ret unreachable].freeze
+  TERMINATORS = %w[br condbr switch ret unreachable].freeze
   TYPE_HEADS = %w[ptr struct union array fn].freeze
   # Ops that compute a value from their operands and may be evaluated in any order (no trap, no effect).
   COMMUTATIVE = %w[wadd wmul and or xor eq ne].freeze
@@ -57,12 +57,34 @@ module PathbEgraph
     { phis: phis, instrs: instrs, term: term }
   end
 
+  # In memory a switch is ["switch", OP, [[V, B]...], D] with V and B integers; the text has `(case V B)` markers
+  # and a final `(default B)`.
   def self.parse_term(x)
     case x[0]
     when "br" then ["br", Integer(x[1], 10)]
     when "condbr" then ["condbr", x[1], Integer(x[2], 10), Integer(x[3], 10)]
+    when "switch" then parse_switch(x)
     else x.dup
     end
+  end
+
+  def self.parse_switch(x)
+    cases = x[2...-1].map do |c|
+      raise Fail, "switch arm #{sx(c)}" unless head(c) == "case" && c.size == 3
+
+      [Integer(c[1], 10), Integer(c[2], 10)]
+    end
+    dflt = x[-1]
+    raise Fail, "switch without a default arm" unless head(dflt) == "default" && dflt.size == 2
+
+    ["switch", x[1], cases, Integer(dflt[1], 10)]
+  end
+
+  def self.term_sx(t)
+    return sx(t) unless t[0] == "switch"
+
+    arms = t[2].map { |v, b| "(case #{v} #{b})" } + ["(default #{t[3]})"]
+    "(switch #{sx(t[1])} #{arms.join(' ')})"
   end
 
   def self.render(fn)
@@ -76,7 +98,7 @@ module PathbEgraph
         lines << "    (phi #{ph.name} #{sx(ph.type)} #{incs})"
       end
       blk[:instrs].each { |i| lines << "    #{sx(i)}" }
-      lines << "    #{sx(blk[:term])})"
+      lines << "    #{term_sx(blk[:term])})"
     end
     lines << ")"
     lines.join("\n")
@@ -253,11 +275,8 @@ module PathbEgraph
       # Reverse postorder: a dominator is processed before the blocks it dominates, so a register it replaced
       # is already known (see reg_class).
       PathbEgraph.reverse_postorder(@fn).each { |b| out[b] = block(@fn.blocks[b]) }
-      out.each_value do |blk|
-        blk[:phis].each { |ph| ph.inc.transform_values! { |v| subst_deep(v) } }
-        blk[:instrs] = blk[:instrs].map { |i| head(i) == "let" ? ["let", i[1], i[2], subst_deep(i[3])] : subst_deep(i) }
-        blk[:term] = subst_deep(blk[:term])
-      end
+      apply_subst(out)
+      fold_control(out)
       dce(out)
       efn = EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out)
       after = PathbEgraph.let_counts(efn)
@@ -304,7 +323,8 @@ module PathbEgraph
           ensure_let(r, c)
         end
       end
-      { phis: blk[:phis], instrs: @out, term: blk[:term] }
+      # The phis are copies: the control-flow pass changes them, and the input function may be optimized again.
+      { phis: blk[:phis].map { |ph| Phi.new(ph.var, ph.name, ph.type, ph.inc.dup) }, instrs: @out, term: blk[:term] }
     end
 
     # Adds the let's value to the e-graph: a register copy shares its operand's class, a constant or a pure
@@ -752,6 +772,148 @@ module PathbEgraph
         break unless removed
       end
     end
+
+    # ---- control flow: constant branches, unreachable blocks, phis ----------------------------------------------
+
+    # Applies @subst (the replaced registers) to every phi argument, instruction and terminator.
+    def apply_subst(out)
+      out.each_value do |blk|
+        blk[:phis].each { |ph| ph.inc.transform_values! { |v| subst_deep(v) } }
+        blk[:instrs] = blk[:instrs].map { |i| head(i) == "let" ? ["let", i[1], i[2], subst_deep(i[3])] : subst_deep(i) }
+        blk[:term] = subst_deep(blk[:term])
+      end
+    end
+
+    # Each round: a condbr or switch on a constant becomes a br to the arm it selects; blocks no longer reachable
+    # are removed; phi arguments from removed edges are dropped; a phi whose arguments are all one operand (self
+    # references ignored) is replaced by it; a phi nothing uses is removed. Repeats until nothing changes, because a
+    # replaced phi can make a branch constant. Every edge removed takes its phi arguments with it, so each phi keeps
+    # exactly one argument per predecessor.
+    def fold_control(out)
+      loop do
+        changed = fold_branches(out)
+        changed |= remove_unreachable(out)
+        changed |= prune_phi_args(out)
+        changed |= replace_phis(out)
+        apply_subst(out)
+        changed |= remove_dead_phis(out)
+        break unless changed
+      end
+    end
+
+    # The value of a constant operand, canonical for its type (the interpreter's `val`), or nil for anything else.
+    # The literal may be decimal or hexadecimal (`0x1`, the printer's form of many bool and unsigned constants).
+    def const_int(op)
+      return nil unless op.is_a?(Array) && %w[const null].include?(head(op))
+      return 0 if op[0] == "null" && op.size == 2 && ptr_ty?(op[1])
+      return nil unless op[0] == "const" && op.size == 3 && (int_ty?(op[1]) || ptr_ty?(op[1]))
+
+      v = literal_int(op[2])
+      v.nil? ? nil : canon(v, op[1])
+    end
+
+    def literal_int(s)
+      return Integer(s, 10) if s.match?(/\A-?\d+\z/)
+      return nil unless s.match?(/\A-?0x\h+\z/i)
+
+      s.start_with?("-") ? -s.delete("-")[2..].hex : s[2..].hex
+    end
+
+    # The br that a constant condbr or switch selects: a condbr takes its true arm when the value is nonzero; a
+    # switch takes the first case equal to the value, else the default (the interpreter's rule).
+    def selected_br(term)
+      case term[0]
+      when "condbr"
+        c = const_int(term[1])
+        ["br", c.zero? ? term[3] : term[2]] unless c.nil?
+      when "switch"
+        c = const_int(term[1])
+        return nil if c.nil?
+
+        hit = term[2].find { |v, _| v == c }
+        ["br", hit ? hit[1] : term[3]]
+      end
+    end
+
+    def fold_branches(out)
+      changed = false
+      out.each_value do |blk|
+        br = selected_br(blk[:term])
+        next unless br
+
+        @stats[blk[:term][0] == "condbr" ? :condbr_folded : :switch_folded] += 1
+        blk[:term] = br
+        changed = true
+      end
+      changed
+    end
+
+    def remove_unreachable(out)
+      seen = { 0 => true }
+      stack = [0]
+      until stack.empty?
+        succs(out.fetch(stack.pop)[:term]).each do |s|
+          next if seen[s]
+
+          seen[s] = true
+          stack << s
+        end
+      end
+      dead = out.keys.reject { |b| seen[b] }
+      dead.each { |b| out.delete(b) }
+      @stats[:blocks_removed] += dead.size
+      dead.any?
+    end
+
+    # The phi arguments of a block are exactly its predecessors (a predecessor is a block with an edge to it).
+    def prune_phi_args(out)
+      preds = Hash.new { |h, k| h[k] = [] }
+      out.each { |b, blk| succs(blk[:term]).uniq.each { |s| preds[s] << b } }
+      changed = false
+      out.each do |b, blk|
+        blk[:phis].each do |ph|
+          before = ph.inc.size
+          ph.inc.select! { |p, _| preds[b].include?(p) }
+          changed ||= ph.inc.size != before
+        end
+      end
+      changed
+    end
+
+    def replace_phis(out)
+      changed = false
+      out.each_value do |blk|
+        blk[:phis].reject! do |ph|
+          others = ph.inc.values.map { |v| subst_deep(v) }.reject { |v| v == ph.name }
+          next false if others.empty? || others.map { |v| sx(v) }.uniq.size != 1
+
+          @subst[ph.name] = others.first
+          @stats[:phis_replaced] += 1
+          changed = true
+        end
+      end
+      changed
+    end
+
+    # A phi with no use is removed, as the converter's cleanup does; a phi used only by itself is kept.
+    def remove_dead_phis(out)
+      uses = Hash.new(0)
+      out.each_value do |blk|
+        blk[:phis].each { |ph| ph.inc.each_value { |v| count_regs(v, uses) } }
+        blk[:instrs].each { |i| count_regs(head(i) == "let" ? i[2..] : i[1..], uses) }
+        count_regs(blk[:term][1..], uses)
+      end
+      changed = false
+      out.each_value do |blk|
+        blk[:phis].reject! do |ph|
+          next false unless uses[ph.name].zero?
+
+          @stats[:phis_removed] += 1
+          changed = true
+        end
+      end
+      changed
+    end
   end
 end
 
@@ -787,7 +949,8 @@ def egraph_cli(argv)
     warn "pathb-egraph: #{st[:functions]} functions, lets #{st[:lets_before]} -> #{st[:lets_after]} " \
          "(pure #{st[:pure_before]} -> #{st[:pure_after]}), e-nodes #{st[:enodes_input]} + #{st[:enodes_added]} added, " \
          "#{st[:iterations]} iterations, saturated #{st[:saturated]} blocks, cut by iterations #{st[:cut_iters]}, " \
-         "cut by nodes #{st[:cut_nodes]}"
+         "cut by nodes #{st[:cut_nodes]}, folded #{st[:condbr_folded]} condbr and #{st[:switch_folded]} switch, " \
+         "removed #{st[:blocks_removed]} blocks, #{st[:phis_replaced]} phis replaced, #{st[:phis_removed]} dead phis"
   end
   0
 rescue Fail, Unsupported => e

@@ -21,7 +21,8 @@ Options: `--iters N` (saturation rounds per block, default 8), `--nodes N` (e-no
 4. **Extract and emit** each `let` in order: the cheapest form of its class whose operands are available here. The
    `let` keeps its name when its own form is emitted; intermediate values get fresh names `%gN`.
 5. Apply the replacements globally (a dropped register is replaced by a register or a constant that dominates it),
-   remove pure `let`s without uses (the same rule as the converter's cleanup), and verify the result.
+   fold the control flow (below), remove pure `let`s without uses (the same rule as the converter's cleanup), and
+   verify the result.
 
 ## The e-graph
 
@@ -89,6 +90,36 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
   `tests/pathb-egraph/check.rb` runs every case and every golden under a tight budget as well (`--iters 1 --nodes 4`
   and `--iters 2 --nodes 20`) and checks the results against the unoptimized form.
 
+## Control flow
+
+The terminators are `br`, `condbr`, `switch` (`(switch OP (case V B)... (default B))`, in memory
+`["switch", OP, [[V, B]...], D]`), `ret` and `unreachable`. A `switch` is never pure: it is a terminator, not a `let`,
+so no rule or dead-code removal touches it. Its operand is a register or a constant and is rewritten through the
+e-graph exactly like a `condbr` operand (through `@subst`).
+
+After the substitution, `fold_control` repeats these steps until none changes anything:
+
+1. **Constant branches.** A `condbr` on a constant becomes `br` to the true arm when the value is nonzero, else the
+   false arm. A `switch` on a constant becomes `br` to the first case whose value equals it, else the default. The
+   constant is canonical for its type (`canon`, as the interpreter's `val`), and the case values are canonical already
+   (the converter writes them so), so the comparison is exact. A constant is an integer, `bool` or pointer literal,
+   decimal or hexadecimal (`0x1`, the printer's form of many bool and unsigned constants), or `null`.
+2. **Unreachable blocks** are removed (reachability from the entry over the new terminators).
+3. **Phi arguments** of the edges that no longer exist are dropped. Each phi keeps one argument per predecessor, so
+   the phi arity equals the predecessor list (the verifier checks it).
+4. **Phis replaced.** A phi whose arguments are all one operand, self-references ignored, is replaced by that operand
+   (`@subst`). A phi with one predecessor left is replaced this way, and the replacement can make a branch constant,
+   which the next round folds.
+5. **Dead phis.** A phi with no use is removed. A phi used only by itself is kept (as in `pathb-ssa.rb`).
+
+The substitution is applied after each round, before the dead-phi count, so a use inside a replaced phi is not taken
+for a dead value. The input function is not changed: `block` returns copies of the phis, so the same parsed function
+can be optimized again (`check.rb` does so for the tight budget).
+
+Replacing a phi by its one operand is sound: that operand's definition dominates every predecessor that supplies it,
+so it dominates the phi's block, and every use of the phi is dominated by it. Removing an edge only adds dominance
+relations, so the uses that remain stay dominated.
+
 ## Verification
 
 - The output of every function is checked by the verifier of this file (its own copy of the checks of
@@ -99,21 +130,34 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
 - Differential: `tests/pathb-egraph/check.rb cases` runs each `tests/pathb-ssa/cases/*.ir` and
   `tests/pathb-egraph/cases/*.ir` with a `.args` file: the original, the optimized and the tight-budget form must
   return the same values on the `.args` inputs (whose expected values are checked too) and on 50 random inputs.
+  Every optimized form must also have no constant `condbr` or `switch` left.
 - `check.rb goldens` converts all 84 golden files (`tests/pathb-ir/*.ir`), optimizes each function, verifies the
   output, and runs the functions that the interpreter models (integer code without calls or pointers) on 5 random
   inputs each, original against optimized.
+- New case `tests/pathb-egraph/cases/switch_loop.ir` (`switch_loop.args`, expectations derived by hand): a loop whose
+  first `switch` is on `i + 0` (the e-graph makes it `i`, so the switch stays and reads the induction variable), with
+  a `case` that `continue`s, a fall-off `default`, and a `break` in the cases; then a second `switch` on `i * 0`
+  (constant 0, folded to its case 0, and the other arm removed) and an `if` on `eq(i*0, 0)` (constant true, the else
+  arm removed). Per iteration `i`, the sum `s` gains 1 + 10000 + 5 + 2 = 10008 for `i = 0`, nothing for `i = 1`
+  (`continue`), 100 + 10000 + 5 + 2 = 10107 for `i = 2`, and 1000 + 10000 + 5 + 2 = 11007 for `i >= 3`, with no
+  iteration when `n <= 0`. So `n = 1` gives 10008, `n = 3` gives 20115, `n = 5` gives 42129 and `n = 60` gives 647514.
 
 ## Numbers (goldens, 2026-11)
 
-- Goldens: 6595 functions converted and optimized. Four switch functions are left unconverted by the converter and
-  are not optimized. Every output verifies. Lets: 54878 before, 53203 after (pure lets 42369 -> 40694).
-- Budget: 22516 blocks saturated, 0 cut by iterations, 0 cut by nodes; 66178 input e-nodes and 6347 added; 27591
+- Goldens: 6599 functions converted and optimized, the four switch functions included (their switch terminators
+  now parse). Every output verifies. Lets: 54985 before, 52865 after (pure lets 42455 -> 40453). Before the control
+  flow fold, the same run gave 54878 -> 53203 on the 6595 functions that then parsed; the four switch functions were
+  not counted.
+- Control flow on the goldens: branches (`condbr` and `switch`) 4445 -> 3653; 770 `condbr` and no `switch` folded (the
+  goldens' switch operands are not constants); 1451 blocks removed; 65 phis replaced; 21 dead phis removed.
+- Budget: 22534 blocks saturated, 0 cut by iterations, 0 cut by nodes; 66294 input e-nodes and 6353 added; 27613
   rule rounds in total.
-- Interpreter on goldens: 30 functions run (150 random runs each side, all equal); the other 6565 use pointers,
+- Interpreter on goldens: 31 functions run (155 random runs each side, all equal); the other 6568 use pointers,
   calls, floats or other constructs the interpreter does not model.
-- New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 3 after. It has a repeated `wadd` in one block,
+- New case `tests/pathb-egraph/cases/redundant.ir`: 18 lets before, 2 after. It has a repeated `wadd` in one block,
   a commutative duplicate, `x*1`, `x+0`, `x-x`, `x&-1`, `x^0`, `x*0`, `eq` of two equal sums, a `+3 +4` chain and
-  an `iconv` identity; the branch on the now-constant comparison is kept (see below).
+  an `iconv` identity; the branch on the now-constant comparison folds to its true arm and the false arm is removed.
+- New case `tests/pathb-egraph/cases/switch_loop.ir`: 4 lets before, 1 after (see Verification for the expectations).
 - `abi_struct.ir` (31 functions): 226 lets before, 216 after.
 
 ## Not done
@@ -122,8 +166,9 @@ unavailable register. Extraction is greedy per class: a DAG-optimal choice is no
   motion. Only constants and registers replaced by a dominator reach a block.
 - **Memory.** Every `load` is opaque: two loads of the same slot with no store between are not merged, and no
   store-to-load forwarding is done. Stores, calls and volatile accesses are never moved or merged.
-- **Control flow.** A `condbr` on a constant keeps its dead arm; phis whose arguments became equal are not removed
-  (the converter removes them only before this pass). Both would be a separate cleanup.
+- **Constants.** Only decimal literals are constants in the e-graph (`const_value`), so a hex literal such as `0x1` is
+  opaque there. It is folded only as a `condbr` or `switch` operand (`const_int`). Accepting hex in `const_value` as
+  well would be the same value, but it would change the e-graph's classes, so it is left for a separate step.
 - **Operators.** Float arithmetic, shifts, division, conversions to float and the bit-field operations have no rules.
   `index`/`offset` are hash-consed but have no algebra.
 - **Cost model.** Node count only. No latency, register pressure or size of constants.

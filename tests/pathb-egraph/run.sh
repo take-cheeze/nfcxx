@@ -5,7 +5,8 @@
 #  2. Cases: tests/pathb-ssa/cases/*.ir and tests/pathb-egraph/cases/*.ir are optimized and verified; with a .args
 #     file, `main` runs in the interpreter (original, optimized and small-budget forms) on the .args inputs and on 50
 #     random inputs, and the results must be equal (and equal to the expected values). The redundancy case must lose lets.
-#  3. The command line: `pathb-ssa.rb` output piped through `pathb-egraph.rb`, then `--check` on the result.
+#  3. The command line: `pathb-ssa.rb` output piped through `pathb-egraph.rb`, then `--check` on the result (the
+#     redundancy case, the switch-in-loop case, abi_struct and float_neg_switch, a golden with switch functions).
 cd "$(dirname "$0")/../.." || exit 1
 fail=0
 tmp=$(mktemp -d) || exit 1
@@ -14,7 +15,7 @@ trap 'rm -rf "$tmp"' EXIT
 ruby tests/pathb-egraph/check.rb goldens tests/pathb-ir/*.ir || fail=1
 ruby tests/pathb-egraph/check.rb cases tests/pathb-ssa/cases/*.ir tests/pathb-egraph/cases/*.ir || fail=1
 
-for f in tests/pathb-egraph/cases/redundant.ir tests/pathb-ir/abi_struct.ir; do
+for f in tests/pathb-egraph/cases/redundant.ir tests/pathb-egraph/cases/switch_loop.ir tests/pathb-ir/abi_struct.ir tests/pathb-ir/float_neg_switch.ir; do
   name=$(basename "$f" .ir)
   if ! ruby scripts/pathb-ssa.rb "$f" > "$tmp/$name.ssa" 2> "$tmp/$name.err"; then
     echo "FAIL cli pathb-ssa $f"; cat "$tmp/$name.err"; fail=1; continue

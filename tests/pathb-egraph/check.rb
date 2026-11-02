@@ -15,8 +15,8 @@
 require 'timeout'
 require_relative '../../scripts/pathb-egraph'
 
-# Converted SSA text of every function of an IR file that pathb-ssa.rb converts (switch functions are skipped, as
-# pathb-ssa.rb leaves them unconverted). Raises Fail when the converter's own verification fails.
+# Converted SSA text of every function of an IR file that pathb-ssa.rb converts (a function the converter cannot
+# model is skipped). Raises Fail when the converter's own verification fails.
 def ssa_texts(path)
   read_forms(File.read(path)).filter_map do |form|
     next unless head(form) == "function"
@@ -27,6 +27,17 @@ def ssa_texts(path)
       next
     end
     conv.render
+  end
+end
+
+# Number of condbr and switch terminators in a function.
+def branch_count(efn) = efn.blocks.values.count { |b| %w[condbr switch].include?(b[:term][0]) }
+
+# Number of condbr and switch terminators whose operand is still a constant. The pass folds all of them, so none
+# may remain in the optimized form.
+def constant_branches(efn)
+  efn.blocks.values.count do |b|
+    %w[condbr switch].include?(b[:term][0]) && %w[const null].include?(b[:term][1][0])
   end
 end
 
@@ -64,6 +75,7 @@ def check_goldens(files)
   files.each do |f|
     ssa_texts(f).each do |text|
       totals[:functions] += 1
+      orig = PathbEgraph.parse_fn(read_forms(text).first)
       begin
         out, st = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first))
         back = PathbEgraph.parse_fn(read_forms(PathbEgraph.render(out)).first)
@@ -78,24 +90,30 @@ def check_goldens(files)
         totals[:saturated] += st[:saturated]
         totals[:cut_iters] += st[:cut_iters]
         totals[:cut_nodes] += st[:cut_nodes]
+        %i[condbr_folded switch_folded blocks_removed phis_replaced phis_removed].each { |k| totals[k] += st[k] }
+        failures << "#{File.basename(f)}: constant branch left" if constant_branches(out).positive?
+        totals[:branches_before] += branch_count(orig)
+        totals[:branches_after] += branch_count(out)
         # The cut-short output (a small budget) is verified too.
         tight, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first), iters: 2, nodes: 20)
         PathbEgraph.verify(tight)
         # Where the interpreter runs the function (integer code), the optimized form returns the same values.
-        orig = PathbEgraph.parse_fn(read_forms(text).first)
         diff_random(orig, out, totals, failures, text)
       rescue Fail, Unsupported => e
         failures << "#{File.basename(f)} #{text[/\(ssa-function ("[^"]*")/, 1]}: #{e.message}"
       end
     end
   end
-  puts "ok   goldens: #{totals[:functions]} functions from #{files.size} files verified after optimization, " \
+  puts "#{failures.empty? ? 'ok  ' : 'FAIL'} goldens: #{totals[:functions]} functions from #{files.size} files verified after optimization, " \
        "lets #{totals[:lets_before]} -> #{totals[:lets_after]} (pure #{totals[:pure_before]} -> #{totals[:pure_after]})"
   puts "     interpreter: #{totals[:interp_functions]} golden functions run (#{totals[:interp_runs]} random " \
        "runs, original against optimized), #{totals[:interp_unsupported]} not modelled"
   puts "     budget: e-nodes #{totals[:enodes_input]} input + #{totals[:enodes_added]} added, " \
        "#{totals[:iterations]} iterations; blocks saturated #{totals[:saturated]}, cut by iterations " \
        "#{totals[:cut_iters]}, cut by nodes #{totals[:cut_nodes]}"
+  puts "     control: branches (condbr, switch) #{totals[:branches_before]} -> #{totals[:branches_after]}, folded " \
+       "#{totals[:condbr_folded]} condbr and #{totals[:switch_folded]} switch, removed " \
+       "#{totals[:blocks_removed]} blocks, #{totals[:phis_replaced]} phis replaced, #{totals[:phis_removed]} dead phis"
   failures.each { |m| puts "FAIL golden #{m}" }
   failures.empty?
 end
@@ -145,6 +163,7 @@ def check_case(f)
     end
   end
   errors << "lets grew from #{before[0]} to #{after[0]}" if after[0] > before[0]
+  errors << "a constant branch is left" if constant_branches(opt).positive?
   errors << "no let removed (the redundancy case must shrink)" if f.include?("pathb-egraph/cases") && after[0] >= before[0]
   status = errors.empty? ? "ok  " : "FAIL"
   puts "#{status} cases #{File.basename(f)}: lets #{before[0]} -> #{after[0]} (pure #{before[1]} -> #{after[1]}), " \
