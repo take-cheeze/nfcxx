@@ -13,7 +13,12 @@
 #                                             structured interpreter does not model a construct, e.g. goto)
 #
 # Every converted function is verified: each name is defined once, each use is dominated by its definition, and
-# each phi has exactly one argument per predecessor. A function with a switch is left as it was (stderr says so).
+# each phi has exactly one argument per predecessor. A function that the converter cannot model is left as it was
+# (stderr says so).
+#
+# A switch becomes a dispatch terminator `(switch OP (case V B)... (default B))`: V is an integer canonical for the
+# operand's type, and B is the block of a `case` or `default` marker. Fallthrough is a `br` from the block still open
+# before a marker. Without a default marker the default target is the block after the switch.
 
 Ref = Struct.new(:sigil, :raw)   # $"x", @"x", &"f": raw is the quoted name, quotes included
 Str = Struct.new(:raw)           # a quoted string token, quotes included
@@ -100,7 +105,14 @@ def head(x) = x.is_a?(Array) && x[0].is_a?(String) ? x[0] : nil
 def reg?(x) = x.is_a?(String) && x.start_with?("%")
 def slot_key(a) = a.is_a?(Ref) && a.sigil == "$" ? "$#{a.raw}" : nil
 def scalar_type?(t) = !(AGG_HEADS.include?(head(t)) || t == "long_double" || t == "void")
-def succs(term) = term[0] == "br" ? [term[1]] : (term[0] == "condbr" ? [term[2], term[3]] : [])
+def succs(term)
+  case term[0]
+  when "br" then [term[1]]
+  when "condbr" then [term[2], term[3]]
+  when "switch" then term[2].map { |_, b| b } + [term[3]]
+  else []
+  end
+end
 
 def clause(s, name)
   c = s.find { |x| head(x) == name }
@@ -120,7 +132,8 @@ class Cfg
   def initialize
     @blocks = []
     @labels = {}
-    @loops = []
+    @targets = []   # [break target, continue target or nil] for each enclosing loop and switch, innermost last
+    @switches = []  # { cases: [[value, block]], default: block or nil } for each enclosing switch
   end
 
   def build(body, void)
@@ -169,13 +182,29 @@ class Cfg
       cont = new_block
       done = new_block
       set_term(cur, ["br", h])
-      @loops.push([done, cont])
+      @targets.push([done, cont])
       set_term(lower_list(clause(s, "body"), h), ["br", cont])
       set_term(lower_list(clause(s, "step"), cont), ["br", h])
-      @loops.pop
+      @targets.pop
       done
-    when "break" then set_term(cur, ["br", @loops.last[0]]) && new_block
-    when "continue" then set_term(cur, ["br", @loops.last[1]]) && new_block
+    when "switch" then lower_switch(s, cur)
+    # A case or default marker ends the open block with a fallthrough edge; the marker's block is the new open block.
+    when "case", "default"
+      raise Unsupported, "#{head(s)} outside a switch" if @switches.empty?
+
+      b = new_block
+      set_term(cur, ["br", b])
+      sw = @switches.last
+      if head(s) == "case"
+        sw[:cases] << [case_value(s[1]), b]
+      else
+        raise Fail, "two default labels in one switch" if sw[:default]
+
+        sw[:default] = b
+      end
+      b
+    when "break" then set_term(cur, ["br", break_target]) && new_block
+    when "continue" then set_term(cur, ["br", continue_target]) && new_block
     when "return" then set_term(cur, ["ret", *s[1..]]) && new_block
     when "unreachable" then set_term(cur, ["unreachable"]) && new_block
     when "goto" then set_term(cur, ["br", label_block(s[1].raw)]) && new_block
@@ -183,11 +212,44 @@ class Cfg
       l = label_block(s[1].raw)
       set_term(cur, ["br", l])
       l
-    when "switch" then raise Unsupported, "switch (its fallthrough arms are not converted yet)"
     else
       @blocks[cur].instrs << s
       cur
     end
+  end
+
+  # The body's first statements form a block that no jump reaches (C skips them unless a marker follows). The
+  # dispatch goes in `cur` once the body is lowered; its default target is the exit when there is no default marker.
+  def lower_switch(s, cur)
+    done = new_block
+    sw = { cases: [], default: nil }
+    @switches.push(sw)
+    @targets.push([done, nil])
+    last = lower_list(clause(s, "body"), new_block)
+    set_term(last, ["br", done])
+    @targets.pop
+    @switches.pop
+    set_term(cur, ["switch", s[1], sw[:cases], sw[:default] || done])
+    done
+  end
+
+  def case_value(c)
+    raise Unsupported, "case label #{sx(c)}" unless head(c) == "const" && c[2].is_a?(String) && c[2] =~ /\A-?\d+\z/
+
+    c[2].to_i
+  end
+
+  def break_target
+    raise Unsupported, "break outside a loop or switch" if @targets.empty?
+
+    @targets.last[0]
+  end
+
+  def continue_target
+    t = @targets.reverse.find { |x| x[1] }
+    raise Unsupported, "continue outside a loop" unless t
+
+    t[1]
   end
 end
 
@@ -241,6 +303,9 @@ class Converter
     @subst = {}   # register bound to a promoted load => operand
     @stacks = Hash.new { |h, k| h[k] = [] }
     @fresh = 0
+    @reg_types = {}   # every parameter and register declared with let: the type a switch operand compares as
+    fn.params[1..].each { |p| @reg_types[p[1]] = p[3] if head(p) == "param" }
+    @cfg.each { |b| b.instrs.each { |i| @reg_types[i[1]] = i[2] if head(i) == "let" } }
   end
 
   def run
@@ -264,7 +329,7 @@ class Converter
       lines << "  (bb #{b}"
       blk[:phis].each { |ph| lines << "    (phi #{ph.name} #{sx(ph.type)} #{ph.inc.keys.sort.map { |p| sx([p, ph.inc[p]]) }.join(' ')})" }
       blk[:instrs].each { |i| lines << "    #{sx(i)}" }
-      lines << "    #{sx(blk[:term])})"
+      lines << "    #{term_text(blk[:term])})"
     end
     lines << ")"
     lines.join("\n")
@@ -468,8 +533,33 @@ class Converter
     case t[0]
     when "condbr" then ["condbr", rw(t[1]), t[2], t[3]]
     when "ret" then t.size > 1 ? ["ret", rw(t[1])] : ["ret"]
+    when "switch" then switch_term(t)
     else t
     end
+  end
+
+  # ["switch", OP, [[V, B]...], D] with each V canonical for the operand's integer type.
+  def switch_term(t)
+    ty = operand_type(t[1])
+    cases = t[2].map { |v, b| [canon(v, ty), b] }
+    dup = cases.map(&:first).tally.find { |_, n| n > 1 }
+    raise Fail, "duplicate case #{dup[0]} in a switch" if dup
+
+    ["switch", rw(t[1]), cases, t[3]]
+  end
+
+  def operand_type(op)
+    return op[1] if head(op) == "const"
+    raise Unsupported, "switch operand #{sx(op)}" unless reg?(op)
+
+    @reg_types.fetch(op) { raise Unsupported, "switch operand #{op} has no declared type" }
+  end
+
+  def term_text(t)
+    return sx(t) unless t[0] == "switch"
+
+    arms = t[2].map { |v, b| "(case #{v} #{b})" } + ["(default #{t[3]})"]
+    "(switch #{sx(t[1])} #{arms.join(' ')})"
   end
 
   # Replaces phis whose arguments are all one value (or themselves), then drops phis nothing uses.
@@ -646,6 +736,10 @@ class Machine
         c = val(t[1]) != 0
         prev = b
         b = c ? t[2] : t[3]
+      when "switch"
+        c = val(t[1])
+        hit = t[2].find { |v, _| v == c }
+        prev, b = b, (hit ? hit[1] : t[3])
       when "ret" then return t.size > 1 ? val(t[1]) : nil
       when "unreachable" then raise Trap, "unreachable"
       end
@@ -655,6 +749,55 @@ class Machine
   private
 
   def exec_list(stmts) = stmts.each { |s| exec(s) }
+
+  # The matching marker is found first; the body then runs from it, so statements after it fall through. A switch
+  # with no matching marker and no default runs nothing. `break` leaves the switch (its catch is the innermost).
+  def exec_switch(s)
+    v = val(s[1])
+    stmts = clause(s, "body")
+    markers = switch_markers(stmts)
+    hit = markers.find { |m| head(m) == "case" && val(m[1]) == v } || markers.find { |m| head(m) == "default" }
+    return unless hit
+
+    saved = [@hit, @entered]
+    @hit = hit
+    @entered = false
+    begin
+      catch(:brk) { exec_switch_body(stmts) }
+    ensure
+      @hit, @entered = saved
+    end
+  end
+
+  # Statements before the entry marker are skipped; blocks are entered so that a marker inside one is reached.
+  def exec_switch_body(stmts)
+    stmts.each do |st|
+      case head(st)
+      when "case", "default" then @entered ||= st.equal?(@hit)
+      when "block" then exec_switch_body(st[1..])
+      else exec(st) if @entered
+      end
+    end
+  end
+
+  # Markers are interpreted only at block level in the switch body (inside nested blocks, not in if or loop).
+  def switch_markers(stmts, out = [])
+    stmts.each do |st|
+      case head(st)
+      when "case", "default" then out << st
+      when "block" then switch_markers(st[1..], out)
+      else raise Unsupported, "case label inside #{head(st) || 'a statement'}" if contains_marker?(st)
+      end
+    end
+    out
+  end
+
+  def contains_marker?(x)
+    return false unless x.is_a?(Array) && head(x) != "switch"
+    return true if %w[case default].include?(head(x))
+
+    x.any? { |y| contains_marker?(y) }
+  end
 
   def exec(s)
     case head(s)
@@ -666,6 +809,7 @@ class Machine
       @mem[s[2].raw] = val(s[3])
     when "block" then exec_list(s[1..])
     when "if" then exec_list(val(s[1]) != 0 ? clause(s, "then") : clause(s, "else"))
+    when "switch" then exec_switch(s)
     when "loop"
       catch(:brk) do
         loop do

@@ -5,9 +5,16 @@ control-flow graphs. It reads the text form, so it needs no EDG build. Regressio
 
 ## What it does
 
-1. **Basic blocks.** `block`, `if`, `loop` (body/step), `break`, `continue`, `return`, `unreachable`, `goto` and
-   `label` become blocks with `br`, `condbr`, `ret` and `unreachable` terminators. Statements after a jump go to a
-   fresh block with no predecessor; unreachable blocks are dropped.
+1. **Basic blocks.** `block`, `if`, `loop` (body/step), `switch`, `break`, `continue`, `return`, `unreachable`, `goto`
+   and `label` become blocks with `br`, `condbr`, `switch`, `ret` and `unreachable` terminators. Statements after a
+   jump go to a fresh block with no predecessor; unreachable blocks are dropped.
+   - **Switch.** The dispatch terminator is `(switch OP (case V B)... (default B))`. `OP` is a register or a constant;
+     `V` is an integer canonical for the operand's integer type (`canon`), so the comparison is exact for `char`,
+     `unsigned_char` and so on. Each `(case ...)` or `(default)` marker starts a block: the block still open before it
+     falls through with a `br`. Statements before the first marker go to a block that nothing reaches. The default
+     target is the block after the switch when there is no default marker. `break` leaves the innermost loop or switch;
+     `continue` leaves the innermost loop. Markers may sit inside nested `block`s, `if` arms and loops (Duff's device);
+     the CFG handles any nesting.
 2. **Promotion.** A scalar slot (not aggregate, not `long double`) is promoted when every use is a load or store of its
    own type through the slot address. Any other use (`copy`, `addr`, `offset`, `sret`, `bfload`, `load.v`, a call
    argument) keeps it in memory. A register assigned with `set` is always a variable.
@@ -27,15 +34,16 @@ listing the slots that were removed. Slots that stay in memory keep their `(slot
 - **Uninitialized reads** of a promoted slot or variable yield zero (`(const T 0)`, `(null T)` for pointers). The IR
   leaves them unspecified (stage 2, item 7), so zero is one allowed choice. Float zero is printed as `0`; a consumer
   that needs a float literal must spell it.
-- **Switch** is not converted yet (fallthrough arms). Functions with a switch are left as they are and reported on
-  stderr; 4 of 6604 golden functions.
 - **Structured interpretation is partial.** `--run` interprets integer code only; `goto`, calls and pointers report
-  `structured=unsupported`.
+  `structured=unsupported`. A `case` or `default` marker is interpreted only at block level in the switch body (inside
+  nested `block`s); a marker inside an `if` or a loop reports `structured=unsupported`, while the SSA form converts it.
 
 ## Numbers (goldens, 2026-11)
 
-6604 functions in `tests/pathb-ir` and `tests/pathb-ssa/cases`: 6600 converted, 12495 slots promoted, every
-converted function verified.
+6610 functions in `tests/pathb-ir` and `tests/pathb-ssa/cases` (6604 before the switch cases were added, plus the six
+`switch_*` cases): all converted, 12520 slots promoted, every converted function verified. The four golden functions
+with a switch (`_Z8classifyi`, `_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg`,
+`_ZN31_INTERNAL_13_vla_scope_cpp_main2swEii`, `_ZN24_INTERNAL_7_vla_cpp_main9in_switchEii`) convert now.
 
 ## Not done
 

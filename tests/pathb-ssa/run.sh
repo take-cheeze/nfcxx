@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Path B SSA regression (docs/notes/pathb-ssa.md, scripts/pathb-ssa.rb).
 #  1. Every stage 2 golden (tests/pathb-ir/*.ir) is converted and verified: single definitions, dominance of every use,
-#     phi arguments per predecessor. Functions with a switch are reported as unconverted, not failures.
+#     phi arguments per predecessor. A function the converter cannot model is reported as unconverted, not a failure.
 #  2. Each tests/pathb-ssa/cases/NAME.ir runs `main` on the arguments of NAME.args ("ARGS => EXPECTED"): the SSA form
 #     must return EXPECTED, and so must the structured form unless the interpreter does not model it (goto).
 # No EDG build is needed: the goldens are the input.
@@ -10,7 +10,7 @@ fail=0
 for f in tests/pathb-ir/*.ir tests/pathb-ssa/cases/*.ir; do
   if ! out=$(ruby scripts/pathb-ssa.rb --check "$f" 2>&1); then echo "FAIL verify $f"; echo "$out"; fail=1; fi
 done
-echo "ok   verify: $(for f in tests/pathb-ir/*.ir tests/pathb-ssa/cases/*.ir; do ruby scripts/pathb-ssa.rb --check "$f" 2>&1; done | grep -v 'switch (its' | awk '{f+=$2; c+=$4; p+=$6} END {printf "%d functions, %d converted, %d slots promoted", f, c, p}')"
+echo "ok   verify: $(for f in tests/pathb-ir/*.ir tests/pathb-ssa/cases/*.ir; do ruby scripts/pathb-ssa.rb --check "$f" 2>&1; done | awk '{f+=$2; c+=$4; p+=$6} END {printf "%d functions, %d converted, %d slots promoted", f, c, p}')"
 for f in tests/pathb-ssa/cases/*.ir; do
   a=${f%.ir}.args
   [ -f "$a" ] || continue

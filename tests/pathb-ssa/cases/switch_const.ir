@@ -1,0 +1,23 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (slot "r" int 4 4)
+  (store int $"x" %0)
+  (store int $"r" (const int 0))
+  (switch (const int 2)
+    (body
+      (block
+        (case (const int 1))
+        (store int $"r" (const int 1))
+        (break)
+        (case (const int 2))
+        (store int $"r" (const int 22))
+        (break)
+        (default)
+        (store int $"r" (const int -5)))))
+  (let %1 int (load int $"x"))
+  (let %2 int (load int $"r"))
+  (let %3 int (wadd int %2 %1))
+  (return %3))
