@@ -55,8 +55,23 @@ module MainReachability
     definitions.values.flatten.each { |d| cite.call([d.name.to_s], 'copy', "#{d.owner}##{d.name}") if d.copy_irep }
     native_refusals = []
     fragments = Set.new
-    macros = StaticDispatchRegistrations.naming_macros(native_paths)
+    inventory = if ENV['BC2CPP_NATIVE_INVENTORY']
+                  require_relative 'native_inventory'
+                  NativeInventory.read(ENV['BC2CPP_NATIVE_INVENTORY'])
+                end
+    selected = inventory && inventory.fetch('units').to_h { |unit| [unit.fetch('source'), unit] }
+    macros = inventory ? [] : StaticDispatchRegistrations.naming_macros(native_paths)
     native_paths.each do |path|
+      unit = selected && selected[File.realpath(path)]
+      next if selected && !unit
+
+      if unit
+        text = NativeInventory.clean(File.binread(unit.fetch('preprocessed')))
+        native_impls.merge(unit.fetch('implementations'))
+        cite.call(unit.fetch('names'), 'native_preprocessed', unit.fetch('source'))
+        native_refusals.concat(unresolved_native_lookups(path, text)) unless roots.native_paths&.include?(File.realpath(path))
+        next
+      end
       text = File.binread(path).gsub(CoreNativeCandidates::ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text.scan(/[\w$]+_impl\b/) { |symbol| native_impls << symbol }
       native_names = Set.new

@@ -253,7 +253,12 @@ def bc2cpp_main_prerequisites
 
   require_relative 'main_roots'
   MainRoots.read(path)
-  [path, *JSON.parse(File.read(path)).fetch('dependencies').keys]
+  paths = [path, *JSON.parse(File.read(path)).fetch('dependencies').keys]
+  if (inventory = ENV['BC2CPP_NATIVE_INVENTORY'])
+    require_relative 'native_inventory'
+    paths += [inventory, *NativeInventory.read(inventory).fetch('dependencies').keys]
+  end
+  paths
 end
 
 # The whole-program mrblib source set every *-compiled mrbgem.rake feeds into
@@ -703,6 +708,7 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   env['BC2CPP_NATIVE_VM_DIR'] = spec.build.instance_variable_get(:@native_vm_dir)
   env['BC2CPP_MAIN_AST'] = ENV['BC2CPP_MAIN_AST'] if ENV['BC2CPP_MAIN_AST']
+  env['BC2CPP_NATIVE_INVENTORY'] = ENV['BC2CPP_NATIVE_INVENTORY'] if ENV['BC2CPP_NATIVE_INVENTORY']
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
   env['BC2CPP_LOAD_WORLD'] = bc2cpp_load_world(spec) if ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') != 'off'
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
@@ -740,7 +746,7 @@ def bc2cpp_compiled_gem_shards(spec, generated, prereqs)
   File.write(stamp, "#{shards}\n") unless File.exist?(stamp) && File.read(stamp) == "#{shards}\n"
   Rake::Task[generated].enhance([stamp])
   main_stamp = File.join(spec.build_dir, 'bc2cpp_main_roots')
-  main_mode = "#{ENV['BC2CPP_MAIN_AST']}\n"
+  main_mode = "#{ENV['BC2CPP_MAIN_AST']}\n#{ENV['BC2CPP_NATIVE_INVENTORY']}\n"
   File.write(main_stamp, main_mode) unless File.exist?(main_stamp) && File.read(main_stamp) == main_mode
   Rake::Task[generated].enhance([main_stamp, *bc2cpp_main_prerequisites])
   # A changed list regenerates too: the registrations it drops are in the generated file.

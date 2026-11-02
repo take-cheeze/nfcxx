@@ -26,7 +26,7 @@ if options[:main_report]
   data = JSON.parse(File.read(options[:main_report]))
   entries = data.fetch('entries')
   kept = entries.reject { |row| row.fetch('excluded') }
-  priority = %w[protocol host native_impl native lookup ruby copy]
+  priority = %w[protocol host native_impl native_preprocessed native lookup ruby copy]
   explain = lambda do |row|
     reasons = row.fetch('reasons')
     first = reasons.min_by { |reason| priority.index(reason.fetch('kind')) || priority.size }

@@ -69,6 +69,7 @@ module NeverCalledRegistrations
         'SKIP_UNSUPPORTED' => '1',
         # The omission proof must cover the full program, independently of a host-root emission profile.
         'BC2CPP_MAIN_AST' => nil,
+        'BC2CPP_NATIVE_INVENTORY' => nil,
         StaticDispatchLists::PATH_ENV => lists_path,
       }
       units = gem_names.map do |gem_name|
