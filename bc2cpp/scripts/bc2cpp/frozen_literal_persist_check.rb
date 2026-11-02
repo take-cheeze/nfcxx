@@ -10,7 +10,7 @@
 #   2. run: a file without the magic comment keeps the old fresh, unfrozen String, interpreted and compiled.
 #   3. a C++ driver opens two VMs in one process: each VM gets its own object, interleaved calls and collections keep
 #      it, a VM opened after another closed (possibly at its address) gets its own, and teardown does not crash.
-#   4. generation: BC2CPP_FROZEN_LITERALS=0 emits the old mrb_str_new_cstr path, and a file without the magic
+#   4. generation: BC2CPP_FROZEN_LITERALS=0 emits the old bc2cpp_pool_str path, and a file without the magic
 #      comment generates the same code with or without the switch.
 #
 # Usage: MRBC=path/to/host/mrbc BC2CPP_MRUBY_FULL=path/to/host/build ruby scripts/bc2cpp/frozen_literal_persist_check.rb
@@ -347,8 +347,8 @@ Dir.mktmpdir('frozen-literal-persist') do |dir|
     ENV['BC2CPP_FROZEN_LITERALS'] = previous
   end
   check.call('kill switch: magic file emits no mrb_frozen_literal', !off_code.include?('mrb_frozen_literal'))
-  check.call('kill switch: magic file emits the old mrb_str_new_cstr site',
-             off_code.include?('mrb_str_new_cstr(M, "\\x61\\x62\\x63")'))
+  check.call('kill switch: magic file emits the old pool-string site',
+             off_code.include?('bc2cpp_pool_str(M, "\\x61\\x62\\x63")'))
   check.call('kill switch: a file without the magic generates the same code', plain_off_code == plain_code)
 end
 
