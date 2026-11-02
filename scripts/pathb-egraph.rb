@@ -253,6 +253,7 @@ module PathbEgraph
       # Reverse postorder: a dominator is processed before the blocks it dominates, so a register it replaced
       # is already known (see reg_class).
       PathbEgraph.reverse_postorder(@fn).each { |b| out[b] = block(@fn.blocks[b]) }
+      cse_dominator(out)
       out.each_value do |blk|
         blk[:phis].each { |ph| ph.inc.transform_values! { |v| subst_deep(v) } }
         blk[:instrs] = blk[:instrs].map { |i| head(i) == "let" ? ["let", i[1], i[2], subst_deep(i[3])] : subst_deep(i) }
@@ -713,6 +714,54 @@ module PathbEgraph
       end
     end
 
+    # ---- common subexpressions across blocks (dominator tree) --------------------------------------------------
+
+    # A pure `let` whose right-hand side (after the substitution so far) and type equal those of a `let` of a block
+    # that dominates it is removed, and the later register takes the earlier one's value. The table of definitions
+    # is scoped by the dominator tree: a block's definitions are pushed when it is entered and popped when it is
+    # left, so the register found in the table is defined by a dominator of every use it replaces (a definition
+    # earlier in the same block also qualifies). Only the whitelist of pure operations is keyed: loads, constants,
+    # checked operations (division, shifts, bounds) and everything else are never merged. A phi is never a
+    # replacement, and no operation is moved. The substitution itself is applied by run.
+    def cse_dominator(out)
+      efn = EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out)
+      rpo = PathbEgraph.reverse_postorder(efn)
+      _preds, idom = PathbEgraph.idoms(efn, rpo)
+      children = Hash.new { |h, k| h[k] = [] }
+      rpo.drop(1).each { |b| children[idom[b]] << b }
+      table = {}      # [type, right-hand side] => register defined by a dominating let
+      pushed = {}     # block => keys it added to the table
+      stack = [[0, true]]
+      until stack.empty?
+        b, entering = stack.pop
+        unless entering
+          (pushed.delete(b) || []).each { |key| table.delete(key) }
+          next
+        end
+
+        keys = []
+        out[b][:instrs].each do |ins|
+          next unless head(ins) == "let" && cse_operation?(ins[3])
+
+          key = [ins[2], subst_deep(ins[3])]
+          if table.key?(key)
+            @subst[ins[1]] = table[key]
+            @stats[:cse] += 1
+          else
+            table[key] = ins[1]
+            keys << key
+          end
+        end
+        pushed[b] = keys
+        stack << [b, false]
+        children[b].each { |c| stack << [c, true] }
+      end
+    end
+
+    def cse_operation?(rv)
+      rv.is_a?(Array) && PURE_OPS.include?(head(rv)) && !%w[load const null].include?(head(rv))
+    end
+
     # ---- substitution and dead code --------------------------------------------------------------------------
 
     def subst_deep(x)
@@ -787,7 +836,7 @@ def egraph_cli(argv)
     warn "pathb-egraph: #{st[:functions]} functions, lets #{st[:lets_before]} -> #{st[:lets_after]} " \
          "(pure #{st[:pure_before]} -> #{st[:pure_after]}), e-nodes #{st[:enodes_input]} + #{st[:enodes_added]} added, " \
          "#{st[:iterations]} iterations, saturated #{st[:saturated]} blocks, cut by iterations #{st[:cut_iters]}, " \
-         "cut by nodes #{st[:cut_nodes]}"
+         "cut by nodes #{st[:cut_nodes]}, common subexpressions across blocks #{st[:cse]}"
   end
   0
 rescue Fail, Unsupported => e
