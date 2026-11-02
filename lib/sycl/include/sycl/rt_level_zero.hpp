@@ -139,7 +139,7 @@ class ze_rt {
     if (addr < dev_base_ || addr - dev_base_ >= heap_size_) fail("device address outside the heap");
     return host_ + (addr - dev_base_);
   }
-  // NFCXX_SYCL_DEVICE_HEAP=1: the heap is device-only memory (zeMemAllocDevice). Host code reaches it through copy and fill
+  // NFCXX_SYCL_DEVICE_HEAP=0 selects the shared heap; by default the heap is device-only memory (zeMemAllocDevice). Host code reaches it through copy and fill
   // commands on the immediate list, and kernels get its device addresses directly.
   bool device_heap() const { return dheap_; }
   void copy_mem(void *dst, const void *src, uint64_t n) {
@@ -454,8 +454,8 @@ class ze_rt {
     dmem.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC;
     ze_host_mem_alloc_desc_t hmem = {};
     hmem.stype = ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC;
-    // the device may refuse a large shared allocation: halve the request until one fits (64 MB at least)
-    dheap_ = std::getenv("NFCXX_SYCL_DEVICE_HEAP") != nullptr;
+    // the device may refuse a large allocation: halve the request until one fits (64 MB at least)
+    dheap_ = std::getenv("NFCXX_SYCL_DEVICE_HEAP") == nullptr || std::getenv("NFCXX_SYCL_DEVICE_HEAP")[0] != '0';
     void *p = nullptr;
     for (;;) {
       ze_result_t r = dheap_ ? zeMemAllocDevice(ctx_, &dmem, heap_size_, 16, dev_, &p)
