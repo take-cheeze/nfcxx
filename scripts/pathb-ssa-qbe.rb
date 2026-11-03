@@ -23,6 +23,8 @@ module Qbe
             "short" => "storeh", "unsigned_short" => "storeh", "int" => "storew", "unsigned_int" => "storew",
             "long" => "storel", "long_long" => "storel", "unsigned_long" => "storel", "unsigned_long_long" => "storel",
             "float" => "stores", "double" => "stored" }.freeze
+  # The std:: float typedefs whose objects are emitted as their bit patterns (storage only): the byte count of each.
+  FLOAT_STORAGE = { "std::float16_t" => 2, "std::float32_t" => 4, "std::float64_t" => 8 }.freeze
   SIZE = { "bool" => 1, "char" => 1, "signed_char" => 1, "unsigned_char" => 1, "short" => 2, "unsigned_short" => 2,
            "int" => 4, "unsigned_int" => 4, "long" => 8, "long_long" => 8, "unsigned_long" => 8,
            "unsigned_long_long" => 8, "float" => 4, "double" => 8 }.freeze
@@ -101,6 +103,76 @@ module Qbe
     Integer(s, 10)
   end
 
+  # The IEEE binary16 pattern of a decimal float literal (`(const std::float16_t 2.71875)`): the value nearest to it in
+  # half precision, ties to even. The literal's printed digits set the precision; the half value must agree with it to
+  # within the last printed digit, else the literal is refused. Infinities and NaN are not literals of this emitter.
+  def half_bits(lit)
+    text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    v = Float(text)
+    raise QbeUnsupported, "float16 literal #{text}" if v.nan? || v.infinite?
+
+    sig = text.sub(/[eE].*/, "").delete("-+.").sub(/\A0+/, "").length
+    sign = text.start_with?("-") ? 0x8000 : 0
+    a = v.abs
+    return sign if a.zero?
+
+    e = Math.log2(a).floor
+    e -= 1 while a < 2.0**e
+    e += 1 while a >= 2.0**(e + 1)
+    if e < -14
+      bits = sign | (a / 2.0**-24).round(half: :even)
+    else
+      m = (a / 2.0**(e - 10)).round(half: :even)
+      if m == 2048
+        m = 1024
+        e += 1
+      end
+      raise QbeUnsupported, "float16 literal #{text} overflows" if e > 15
+
+      bits = sign | ((e + 15) << 10) | (m - 1024)
+    end
+    decoded = half_value(bits)
+    # The half value must print, to the literal's significant digits, as the literal does.
+    same = format("%.#{sig - 1}e", decoded.abs) == format("%.#{sig - 1}e", a)
+    raise QbeUnsupported, "float16 literal #{text} is not a half value" unless same
+    bits
+  end
+
+  # The bit pattern of a float literal of n bytes (2 binary16, 4 binary32, 8 binary64): nearest value, ties to even,
+  # checked against the literal's printed significant digits as half_bits does. Refused where the literal is not that
+  # precision.
+  def float_bits(lit, n)
+    return half_bits(lit) if n == 2
+
+    text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    v = Float(text)
+    raise QbeUnsupported, "float literal #{text}" if v.nan? || v.infinite?
+
+    sig = text.sub(/[eE].*/, "").delete("-+.").sub(/\A0+/, "").length
+    if n == 4
+      packed = [v].pack("e")
+      back = packed.unpack1("e")
+      bits = packed.unpack1("L<")
+    else
+      packed = [v].pack("E")
+      back = v
+      bits = packed.unpack1("Q<")
+    end
+    same = sig.zero? || format("%.#{[sig - 1, 0].max}e", back.abs) == format("%.#{[sig - 1, 0].max}e", v.abs)
+    raise QbeUnsupported, "float literal #{text} is not of its type" unless same
+
+    bits
+  end
+
+  # The value of a binary16 pattern (for the check in half_bits).
+  def half_value(bits)
+    sign = bits & 0x8000 != 0 ? -1.0 : 1.0
+    ebits = (bits >> 10) & 31
+    mant = bits & 1023
+    mag = ebits.zero? ? mant * 2.0**-24 : (1024 + mant) * 2.0**(ebits - 25)
+    sign * mag
+  end
+
   # A constant of type t, wrapped to its QBE class (w: 32 bits, l: 64 bits), as the target computes it.
   def wrap_lit(v, t)
     bits = cls(t) == "w" ? 32 : 64
@@ -154,6 +226,12 @@ module Qbe
       when "zero" then next
       when "scalar"
         off, type, v = item[1..]
+        if (n = FLOAT_STORAGE[strip_const(type)])
+          # Storage only: the bit pattern of the literal, written as an integer of the same size (no arithmetic on it).
+          letter = { 2 => "h", 4 => "w", 8 => "l" }.fetch(n)
+          items << [int_lit(off), n, "#{letter} #{Qbe.float_bits(v, n)}"]
+          next
+        end
         return nil if FLOAT_TYPES.key?(strip_const(type))
 
         bytes = Qbe.size(type)
@@ -192,18 +270,16 @@ module Qbe
     attr_reader :lines
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
-    def initialize(form, globals = {})
+    def initialize(form, globals = {}, abi = {})
       @form = form
       @globals = globals
+      @abi = abi
       @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
-      all_params = form.find { |x| head(x) == "params" }.drop(1)
-      # Only a plain `param` is emitted. An sret or byval parameter is not dropped silently: a body that uses it would
-      # name a register nothing defines.
-      other = all_params.find { |p| head(p) != "param" }
-      raise QbeUnsupported, "#{head(other)} parameter" if other
-
-      @params = all_params
+      @params = form.find { |x| head(x) == "params" }.drop(1)
+      @sret = nil      # the AbiInfo of an aggregate result (the function returns its buffer, the C convention)
+      @alias = {}      # a register that names another value: the sret parameter names the result buffer
+      @empty_bufs = [] # the buffers of the empty by-value parameters (their registers name them)
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
@@ -240,17 +316,58 @@ module Qbe
     private
 
     def header
-      @params.each do |p|
-        @types[p[1]] = p[3]
-        @params_set[p[1]] = true
+      sig = []
+      @params.each_with_index do |p, i|
+        case head(p)
+        when "param"
+          if head(p[3]) == "byval"
+            info = aggregate_info(p[3][1], "passed")
+            @types[p[1]] = ["ptr", "void"]
+            if info.shape == "empty"
+              # An empty class is passed as nothing; the function sees the address of a buffer of its own.
+              @alias[p[1]] = "%ebuf#{i}"
+              @empty_bufs << "%ebuf#{i}"
+            else
+              # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
+              sig << "#{info.tn} %p#{p[1][1..]}"
+              @params_set[p[1]] = true
+            end
+          else
+            @types[p[1]] = p[3]
+            sig << "#{Qbe.cls(p[3])} %p#{p[1][1..]}"
+            @params_set[p[1]] = true
+          end
+        when "sret"
+          raise QbeUnsupported, "more than one sret parameter" if @sret
+          @sret = aggregate_info(p[2], "returned")
+          @alias[p[1]] = "%sretbuf"
+          @types[p[1]] = ["ptr", "void"]
+        else raise QbeUnsupported, "#{head(p)} parameter"
+        end
       end
-      ret = @ret[1] == "void" ? "" : "#{Qbe.cls(@ret[1])} "
-      sig = @params.map { |p| "#{Qbe.cls(p[3])} %p#{p[1][1..]}" }.join(", ")
-      @lines << "export function #{ret}$#{@name}(#{sig}) {"
+      ret = if @sret && @sret.shape != "empty" then "#{@sret.tn} "
+            elsif @sret || @ret[1] == "void" then ""
+            else "#{Qbe.cls(@ret[1])} "
+            end
+      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
     end
 
+    # The AbiInfo of an aggregate that is passed or returned by value: it must have an abi-type, and its class must be
+    # one this emitter passes (not an empty class, not an unsupported one).
+    def aggregate_info(tyform, what)
+      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct"
+
+      info = @abi[Qbe.name_of(tyform[1])]
+      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)} has no abi-type" if info.nil?
+      raise QbeUnsupported, "#{what} by value: #{info.why}" if info.shape == "unsupported"
+
+      info
+    end
+
     def allocs
+      @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
+      @empty_bufs.each { |name| @lines << "  #{name} =l alloc8 8" }
       @slots.each_with_index do |s, i|
         @slot["$#{s[1].raw}"] = "%o#{i}"
         # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
@@ -397,11 +514,15 @@ module Qbe
           end
           return "$#{Qbe.symbol(x.raw)}"
         end
+        # A function used as a value: its address is the function's symbol (the existing emitter does the same).
+        return "$#{Qbe.symbol(x.raw)}" if x.sigil == "&"
         raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
 
         @slot.fetch("$#{x.raw}") { raise QbeUnsupported, "slot #{x.raw}" }
       when String
         raise QbeUnsupported, "operand #{x}" unless x.start_with?("%")
+
+        return @alias[x] if @alias.key?(x)
 
         @params_set[x] ? "%p#{x[1..]}" : reg(x)
       when Array
@@ -458,13 +579,27 @@ module Qbe
       when "eval"
         raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
 
-        @lines << "  #{call_text(item[1])}"
+        sret, dest, sym, args = call_parts(item[1])
+        if sret.nil? || sret.shape == "empty"
+          @lines << "  call #{sym}(#{args.join(', ')})"
+        else
+          # The callee returns the aggregate in its own buffer; it is copied to the destination the caller named.
+          t = fresh
+          @lines << "  #{t} =#{sret.tn} call #{sym}(#{args.join(', ')})"
+          @lines << "  call $memmove(l #{dest}, l #{t}, l #{sret.size})"
+        end
       when "condbr"
         cond = op(item[1])
         jump_to(item[2])
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
-      when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
+      when "ret"
+        # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
+        if @sret
+          @lines << (@sret.shape == "empty" ? "  ret" : "  ret %sretbuf")
+        else
+          @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
+        end
       when "unreachable", "trap" then @lines << "  hlt"
       when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
@@ -515,9 +650,11 @@ module Qbe
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
       when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      when "bitcast" then bitcast_lines(dst, rv)
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
       when "index" then index_lines(dst, rv)
+      when "pdiff" then pdiff_lines(dst, t, rv)
       # A volatile load is an ordinary load in the emitted code: the loads of a block keep their order.
       when "load", "load.v" then @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
       when "const", "null", nil
@@ -674,6 +811,39 @@ module Qbe
       @lines << "  #{Qbe::BF_STORE[unit]} #{nw}, #{addr}"
     end
 
+    # `(bitcast (ptr T) P)`: a pointer reinterpreted as a pointer keeps its address (the interpreter's rule). Any other
+    # reinterpretation is refused: the interpreter does not model it either.
+    def bitcast_lines(dst, rv)
+      raise QbeUnsupported, "bitcast to #{sx(rv[1])}" unless head(strip_const(rv[1])) == "ptr"
+
+      src = rv[2]
+      src_type = src.is_a?(String) ? @types[src] : nil
+      pointer = src.is_a?(Ref) || (src_type && head(strip_const(src_type)) == "ptr") ||
+                (src.is_a?(Array) && %w[null addr].include?(head(src)))
+      raise QbeUnsupported, "bitcast of #{sx(src)}" unless pointer
+
+      @lines << "  #{dst} =l copy #{op(src)}"
+    end
+
+    # `(pdiff A B SIZE)`: (A - B) / SIZE, signed, in the 64-bit pointer difference type (docs/notes/pathb-stage2.md).
+    # A VLA element size is a register, which is not a constant here, so it is refused.
+    def pdiff_lines(dst, t, rv)
+      raise QbeUnsupported, "pdiff of type #{sx(t)}" unless Qbe.cls(t) == "l"
+
+      n = begin
+        Qbe.int_lit(rv[3])
+      rescue ArgumentError, TypeError
+        raise QbeUnsupported, "pdiff with a non-constant element size"
+      end
+      raise QbeUnsupported, "pdiff with element size 0" if n.zero?
+
+      a = op(rv[1])
+      b = op(rv[2])
+      d = fresh
+      @lines << "  #{d} =l sub #{a}, #{b}"
+      @lines << "  #{dst} =l div #{d}, #{n}"
+    end
+
     # `(nonnull P)`: a null pointer traps (code 5).
     def nonnull_lines(p)
       cond = fresh
@@ -750,12 +920,38 @@ module Qbe
 
     # A call `(call RET &"name" ARG...)`: a direct call of a C symbol. The module's functions are exported under their
     # names, and any other callee is linked as a C function. Each argument is passed with the class of its value.
-    def call_text(c)
+    # The parts of a call: the sret result (its AbiInfo and destination, or nil), the callee, and the arguments. A byval
+    # argument is passed as its aggregate type; an sret argument is the result, not an argument.
+    def call_parts(c)
       f = c[2]
-      raise QbeUnsupported, "indirect call #{sx(f)}" unless f.is_a?(Ref) && f.sigil == "&"
+      # The callee is a function (its symbol) or a pointer operand (an indirect call).
 
-      args = c[3..].map { |a| "#{arg_cls(a)} #{op(a)}" }
-      "call $#{Qbe.symbol(f.raw)}(#{args.join(', ')})"
+      sret = nil
+      dest = nil
+      args = []
+      c[3..].each do |a|
+        case head(a)
+        when "sret"
+          raise QbeUnsupported, "sret argument is not the first" unless args.empty? && sret.nil?
+
+          sret = aggregate_info(a[1], "returned")
+          dest = op(a[2])
+        when "byval"
+          info = aggregate_info(a[1], "passed")
+          # An empty class is passed as nothing (its argument is dropped, as the callee does not take it).
+          args << "#{info.tn} #{op(a[2])}" unless info.shape == "empty"
+        else args << "#{arg_cls(a)} #{op(a)}"
+        end
+      end
+      callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      [sret, dest, callee, args]
+    end
+
+    def call_text(c)
+      sret, _dest, sym, args = call_parts(c)
+      raise QbeUnsupported, "a call with an aggregate result used as a value" if sret
+
+      "call #{sym}(#{args.join(', ')})"
     end
 
     def arg_cls(a)
@@ -843,11 +1039,69 @@ module Qbe
     end
   end
 
+  AbiInfo = Struct.new(:tn, :size, :align, :shape, :why)
+  LEAF_BYTES = { "b" => 1, "h" => 2, "w" => 4, "l" => 8, "s" => 4, "d" => 8 }.freeze
+
+  def name_of(x) = x.is_a?(Ref) ? x.raw : x.to_s
+
+  # The QBE type declarations of the module's abi-type forms, and the AbiInfo of each by name. The shapes are those of
+  # scripts/pathb-qbe-emit.rb (declare_abi_type): the leaves of a struct, a memory class, an empty one, or an unsupported
+  # one (its reason is kept; a use of it is refused).
+  def abi_types(forms)
+    abi = {}
+    decls = []
+    forms.each do |f|
+      next unless head(f) == "abi-type"
+
+      name = name_of(f[1])
+      size = int_lit(f[2])
+      align = int_lit(f[3])
+      raise QbeUnsupported, "abi-type #{name}: alignment #{align}" unless [1, 2, 4, 8, 16].include?(align)
+
+      spec = f[4]
+      tn = ":ty#{abi.size}"
+      case head(spec)
+      when "memory"
+        decls << "type #{tn} = align #{align} { #{size} }"
+        abi[name] = AbiInfo.new(tn, size, align, "memory", nil)
+      when "empty"
+        abi[name] = AbiInfo.new(tn, size, align, "empty", nil)
+      when "unsupported"
+        abi[name] = AbiInfo.new(tn, size, align, "unsupported", name_of(spec[1]).delete('"'))
+      when "leaf"
+        parts = []
+        cur = 0
+        f.drop(4).each do |lf|
+          raise QbeUnsupported, "abi-type #{name}: bad leaf" unless head(lf) == "leaf" && lf.length == 3
+
+          off = int_lit(lf[1])
+          k = lf[2]
+          raise QbeUnsupported, "abi-type #{name}: leaf kind" unless k.is_a?(String) && LEAF_BYTES.key?(k)
+
+          ks = LEAF_BYTES[k]
+          raise QbeUnsupported, "abi-type #{name}: leaf at #{off} out of order" if off < cur
+          raise QbeUnsupported, "abi-type #{name}: member at #{off} is not aligned" if off % ks != 0
+
+          parts << "b #{off - cur}" if off > cur
+          parts << k
+          cur = off + ks
+        end
+        raise QbeUnsupported, "abi-type #{name}: leaves exceed the size" if cur > size
+
+        parts << "b #{size - cur}" if size > cur
+        decls << "type #{tn} = align #{align} { #{parts.join(", ")} }"
+        abi[name] = AbiInfo.new(tn, size, align, "leaves", nil)
+      else raise QbeUnsupported, "abi-type #{name}: unknown shape"
+      end
+    end
+    [abi, decls]
+  end
+
   # The data of the module's globals, then the functions. A global the emitter cannot model is left out, and a
   # reference to it raises QbeUnsupported where it is used.
   def module_il(forms)
     ctx = module_context(forms)
-    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs]).emit }
+    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
     (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
   end
@@ -858,20 +1112,22 @@ module Qbe
     gs = forms.select { |g| head(g) == "global" }
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
-    data = gs.filter_map do |g|
+    abi, type_decls = abi_types(forms)
+    global_decls = gs.filter_map do |g|
       d = global_data(g, by_name, state)
       d if d.is_a?(String)
     end
+    data = type_decls + global_decls
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
                 .to_h { |name, f| [name, { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }] }
-    { data: data, refs: refs }
+    { data: data, refs: refs, abi: abi }
   end
 
   # One function's text (its helper comments, then its body), against a context from module_context.
   def function_text(ctx, fn_form)
-    fn = Fn.new(fn_form, ctx[:refs]).emit
+    fn = Fn.new(fn_form, ctx[:refs], ctx[:abi]).emit
     helpers = fn.asm_helpers.map { |h| "# pathb-asm #{h}" }
     (helpers + [fn.lines.join("\n")]).join("\n\n")
   end
