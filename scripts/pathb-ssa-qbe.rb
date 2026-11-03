@@ -71,14 +71,73 @@ module Qbe
 
   def int_lit(s) = s.is_a?(Integer) ? s : Integer(s, 10)
 
+  # The QBE symbol of a quoted SSA name: letters, digits, `_` and `.` stay; any other byte is escaped.
+  def symbol(raw) = raw.delete('"').gsub(/[^A-Za-z0-9_.]/) { |c| "_x#{c.ord.to_s(16)}_" }
+
+  # The data of one global (install_module's rules, emitted as QBE data): zero bytes, integer and pointer scalars, and
+  # addresses of other module globals. A global with an extern or thread-local storage class, a float, a bitfield or
+  # any other initialiser is not emitted; a reference to it raises QbeUnsupported. Returns the data line or nil.
+  def global_data(g, by_name, state)
+    name = g[1].raw
+    if state.key?(name)
+      return state[name] == :busy ? nil : state[name]
+    end
+
+    state[name] = :busy
+    state[name] = build_data(g, by_name, state)
+  end
+
+  def build_data(g, by_name, state)
+    flags = g.map { |x| x.is_a?(Array) ? head(x) : x }
+    return nil if flags.include?("extern") || flags.include?("thread")
+
+    init = g.find { |x| head(x) == "init" } or return nil
+    size = int_lit(g[3])
+    align = [int_lit(g[4]), 1].max
+    items = []
+    init[1..].each do |item|
+      case head(item)
+      when "zero" then next
+      when "scalar"
+        off, type, v = item[1..]
+        return nil if FLOAT_TYPES.key?(strip_const(type))
+
+        bytes = Qbe.size(type)
+        letter = { 1 => "b", 2 => "h", 4 => "w", 8 => "l" }.fetch(bytes) { return nil }
+        items << [int_lit(off), bytes, "#{letter} #{literal(v, type)}"]
+      when "addr"
+        off, _type, target, add = item[1..]
+        return nil unless target.is_a?(Ref) && target.sigil == "@" && by_name.key?(target.raw)
+        # A global may point into itself; a longer cycle of addresses is left out (global_data returns nil for it).
+        return nil unless target.raw == g[1].raw || global_data(by_name[target.raw], by_name, state)
+
+        suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
+        items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
+      else return nil
+      end
+    end
+    parts = []
+    cur = 0
+    items.sort_by(&:first).each do |off, bytes, text|
+      parts << "z #{off - cur}" if off > cur
+      parts << text
+      cur = off + bytes
+    end
+    parts << "z #{size - cur}" if size > cur
+    parts = ["z #{size}"] if parts.empty?
+    "data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
+  end
+
   # One function. An SSA register %N is %vN, a parameter %k is %pk, and an object of a slot that was not promoted
   # is %o<i>, allocated on the stack at entry.
   class Fn
     attr_reader :lines
 
-    def initialize(form)
+    # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
+    def initialize(form, globals = {})
       @form = form
-      @name = form[1].raw.delete('"')
+      @globals = globals
+      @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
       @params = form.find { |x| head(x) == "params" }.drop(1).select { |p| head(p) == "param" }
       @slots = form.select { |x| head(x) == "slot" }
@@ -244,7 +303,12 @@ module Qbe
     def op(x)
       case x
       when Ref
-        raise QbeUnsupported, "global #{x.raw}" unless x.sigil == "$"
+        if x.sigil == "@"
+          raise QbeUnsupported, "global #{x.raw}" unless @globals[x.raw]
+
+          return "$#{Qbe.symbol(x.raw)}"
+        end
+        raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
 
         @slot.fetch("$#{x.raw}") { raise QbeUnsupported, "slot #{x.raw}" }
       when String
@@ -258,6 +322,7 @@ module Qbe
 
           Qbe.int_lit(x[2]).to_s
         when "null" then "0"
+        when "addr" then op(x[1])
         else
           # A nested expression: computed into a temporary, whose line is appended before the caller's line.
           raise QbeUnsupported, "operand #{sx(x)}" unless expression?(x)
@@ -284,6 +349,10 @@ module Qbe
       when "store" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
       when "br" then @lines << "  jmp @#{block_label(item[1])}"
       when "switch" then switch_lines(@cur, item)
+      when "eval"
+        raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
+
+        @lines << "  #{call_text(item[1])}"
       when "condbr" then @lines << "  jnz #{op(item[1])}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
       when "unreachable" then @lines << "  hlt"
@@ -304,6 +373,7 @@ module Qbe
         oc = Qbe.cls(rv[1])
         @lines << "  #{dst} =w #{Qbe::CMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when "iconv" then conv_lines(dst, t, rv[2])
+      when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
       when "load" then @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
       when "const", "null", nil
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
@@ -397,12 +467,43 @@ module Qbe
       end
     end
 
+    # A call `(call RET &"name" ARG...)`: a direct call of a C symbol. The module's functions are exported under their
+    # names, and any other callee is linked as a C function. Each argument is passed with the class of its value.
+    def call_text(c)
+      f = c[2]
+      raise QbeUnsupported, "indirect call #{sx(f)}" unless f.is_a?(Ref) && f.sigil == "&"
+
+      args = c[3..].map { |a| "#{arg_cls(a)} #{op(a)}" }
+      "call $#{Qbe.symbol(f.raw)}(#{args.join(', ')})"
+    end
+
+    def arg_cls(a)
+      case a
+      when Ref then "l"
+      when String then Qbe.cls(@types.fetch(a) { raise QbeUnsupported, "argument #{a} has no declared type" })
+      when Array
+        case head(a)
+        when "addr", "null" then "l"
+        when "const" then Qbe.cls(a[1])
+        else Qbe.cls(CMP_HEADS.include?(head(a)) ? "bool" : a[1])
+        end
+      else raise QbeUnsupported, "argument #{sx(a)}"
+      end
+    end
+
     def float_type?(t) = FLOAT_TYPES.key?(strip_const(t))
   end
 
-  # The QBE IL of every function of the module (its globals and other declarations are not emitted yet).
+  # The data of the module's globals, then the functions. A global the emitter cannot model is left out, and a
+  # reference to it raises QbeUnsupported where it is used.
   def module_il(forms)
-    forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f).emit.lines.join("\n") }.join("\n\n") + "\n"
+    gs = forms.select { |g| head(g) == "global" }
+    by_name = gs.to_h { |g| [g[1].raw, g] }
+    state = {}
+    data = gs.filter_map { |g| global_data(g, by_name, state) }
+    supported = gs.to_h { |g| [g[1].raw, true] }.select { |name, _| state[name].is_a?(String) }
+    fns = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, supported).emit.lines.join("\n") }
+    (data + fns).join("\n\n") + "\n"
   end
 end
 
