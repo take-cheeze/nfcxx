@@ -21,9 +21,31 @@ module CoreMixins
 
   Definer = Struct.new(:owner, :path, :body, :alias_only, keyword_init: true)
 
-  # Every def and alias of `name` in one Ruby source, with its enclosing
-  # class/module, by indentation (how mruby's core is formatted).
-  def self.definers_in(path, text, name)
+  # The lines of one Ruby source, each without its newline, and the class/module enclosing each by indentation (how
+  # mruby's core is formatted). Independent of the name definers_in looks for, so a caller asking for several names
+  # in the same source builds it once.
+  Layout = Struct.new(:lines, :chomped, :owners)
+
+  def self.layout(text)
+    lines = text.lines
+    chomped = Array.new(lines.size)
+    owners = Array.new(lines.size)
+    stack = []
+    lines.each_with_index do |raw, index|
+      line = raw.chomp
+      if (m = line.match(/\A(\s*)(?:class|module)\s+([A-Z][\w:]*)/))
+        stack << [m[1].size, m[2].split('::').last]
+      elsif (m = line.match(/\A(\s*)end\b/)) && stack.last && stack.last[0] == m[1].size
+        stack.pop
+      end
+      chomped[index] = line
+      owners[index] = stack.last ? stack.last[1] : '<top>'
+    end
+    Layout.new(lines, chomped, owners)
+  end
+
+  # Every def and alias of `name` in one Ruby source, with its enclosing class/module. +layout+ is layout(text).
+  def self.definers_in(path, text, name, layout = nil)
     # Every match below needs the literal name, so a source without it has no definer (and the three
     # per-name regexes are built once, not once per line).
     return [] unless text.include?(name)
@@ -32,16 +54,10 @@ module CoreMixins
     def_re = /\A(\s*)def\s+(self\.)?#{quoted}(?![\w?!=<>])/
     alias_re = /\A\s*alias(?:_method)?\b.*[\s:,(]#{quoted}(?![\w?!=<>])/
     define_re = /define_method\s*\(?\s*:#{quoted}(?![\w?!=<>])/
-    stack = []
-    lines = text.lines
-    lines.each_with_index.filter_map do |raw, index|
-      line = raw.chomp
-      if (m = line.match(/\A(\s*)(?:class|module)\s+([A-Z][\w:]*)/))
-        stack << [m[1].size, m[2].split('::').last]
-      elsif (m = line.match(/\A(\s*)end\b/)) && stack.last && stack.last[0] == m[1].size
-        stack.pop
-      end
-      owner = stack.last ? stack.last[1] : '<top>'
+    layout ||= self.layout(text)
+    lines = layout.lines
+    layout.chomped.each_with_index.filter_map do |line, index|
+      owner = layout.owners[index]
       if (m = line.match(def_re))
         stop = (index + 1...lines.size).find { |i| lines[i].match?(/\A#{m[1]}end\b/) } || lines.size - 1
         Definer.new(owner: m[2] ? "#{owner}.singleton" : owner, path: path,
