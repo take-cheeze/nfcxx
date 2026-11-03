@@ -205,6 +205,9 @@ module DynamicNames
     map
   end
 
+  # The ops analyze reads, as one list: splatting SEND_FAMILY (a Set) at each irep copies it twice.
+  ANALYZE_OPS = [:LOADSYM, :STRING, *BytecodeIR::Ops::SEND_FAMILY].freeze
+
   # [the names a program spells as a Symbol or String literal, whether any send turns a computed
   # value into a name].
   def self.analyze(ireps)
@@ -213,7 +216,7 @@ module DynamicNames
     computed = false
     ireps.each_value do |irep|
       program = BytecodeIR.for(irep)
-      program.each_with_op(:LOADSYM, :STRING, *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
+      program.each_with_op_in(ANALYZE_OPS) do |insn, idx|
         (probe_only?(irep, idx, insn) ? probes : stems) << insn.sym if insn.op == :LOADSYM && insn.sym
         if insn.op == :STRING
           entry = irep.pool[insn.pool_index.to_i]

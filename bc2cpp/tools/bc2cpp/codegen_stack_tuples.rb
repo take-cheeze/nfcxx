@@ -60,7 +60,7 @@ class CodeGen
     analyzer = escape_analyzer or return {}
     @stack_tuple_where = irep.label
     # A closure could read the frame's registers by pointer.
-    unless EscapeAnalysis.op_sites(irep, EscapeAnalysis::CLOSURE_OPS).empty?
+    unless EscapeAnalysis.op_sites(irep, EscapeAnalysis::CLOSURE_OP_LIST).empty?
       refuse(:closure_in_irep)
       return {}
     end
