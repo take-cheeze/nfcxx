@@ -28,6 +28,7 @@ require_relative 'shard_output'
 require_relative 'shared_generation'
 require_relative 'embed_init_guard'
 require_relative 'inframe_placement'
+require_relative 'file_identity'
 
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
@@ -205,6 +206,7 @@ require_relative 'owner_call_direct'
 
 if $PROGRAM_NAME == __FILE__
   InFramePlacement.refuse_if_requested!
+  FileIdentity.sources_fixed!
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
   # without it they are stripped from stdout, the only default.
   annotated = !ARGV.delete(ANNOTATED_FLAG).nil?

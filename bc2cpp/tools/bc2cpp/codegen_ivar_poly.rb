@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'reg_name'
 
 # CodeGen: POLY_SMALL_N chains, ivar access and outlined index helpers.
 
@@ -82,7 +83,7 @@ class CodeGen
 
       t_irep = @ireps.fetch(t.irep)
       next false unless poly_arity_fits?(t_irep, n, optional)
-      next false unless native_arg_types(t, mandatory_arity(t_irep)).compact.empty?
+      next false unless native_arg_types(t, mandatory_arity(t_irep)).all?(&:nil?)
 
       if @only_owners && !@only_owners.include?(t.owner)
         next false unless @other_owners&.include?(t.owner)
@@ -105,8 +106,8 @@ class CodeGen
   def poly_diagnostic(name, n, path, candidates, receiver: 'runtime_class', origin: nil)
     @poly_diagnostic_reason_cache ||= {}
     cache_key = [name, n, candidates.map(&:object_id)]
-    reasons = @poly_diagnostic_reason_cache[cache_key]
-    unless reasons
+    excluded = @poly_diagnostic_reason_cache[cache_key]
+    unless excluded
       defs = core_targets(@registry[name]) || []
       reasons = Hash.new(0)
       if devirt_blocked_name?(name)
@@ -133,7 +134,7 @@ class CodeGen
                      :unsupported_arity
                    elsif !poly_arity_fits?(@ireps.fetch(target.irep), n, true)
                      :arity
-                   elsif !native_arg_types(target, n).compact.empty?
+                   elsif !native_arg_types(target, n).all?(&:nil?)
                      :native_argument
                    elsif @only_owners && !@only_owners.include?(target.owner) && !@other_owners&.include?(target.owner)
                      :owner_not_emitted
@@ -143,9 +144,9 @@ class CodeGen
           reasons[reason] += 1
         end
       end
-      @poly_diagnostic_reason_cache[cache_key] = reasons
+      excluded = reasons.sort_by { |reason, _| reason.to_s }.map { |reason, count| "#{reason}=#{count}" }.join(',').freeze
+      @poly_diagnostic_reason_cache[cache_key] = excluded
     end
-    excluded = reasons.sort_by { |reason, _| reason.to_s }.map { |reason, count| "#{reason}=#{count}" }.join(',')
     "  // POLY_DIAG path=#{path} receiver=#{receiver} name=#{name.inspect} arity=#{n} candidates=#{candidates.size} " \
       "excluded=#{excluded.empty? ? 'none' : excluded}#{" origin=#{origin}" if origin}\n"
   end
@@ -297,11 +298,11 @@ class CodeGen
 
     installed = symbol_installed_names
     return [] if installed.nil? || installed.include?(name)
-    return [] unless Array(@prepended_modules[owner]).empty? && !@unknown_mixins.include?(owner)
+    return [] unless no_mixins?(@prepended_modules[owner]) && !@unknown_mixins.include?(owner)
     # A native def outside mruby's core (which only touches core classes) could
     # sit on a subclass; without the source map any native def declines.
-    natives = @native_name_sources ? @native_name_sources.fetch(name, []) : nil
-    native_owners = []
+    natives = @native_name_sources ? @native_name_sources.fetch(name) { [] } : nil
+    native_owners = nil
     if natives.nil?
       return [] if @registry.fetch(name, []).any? { |md| md.owner == '<native>' }
     elsif natives.any? { |path| !path.match?(%r{/3rd/mruby/(?:src|mrbgems)/}) }
@@ -311,19 +312,34 @@ class CodeGen
       return [] unless native_owners
     end
 
-    def_owners = @registry.fetch(name, []).map(&:owner).to_set | native_owners
-    @superclass_of.keys.sort.select do |klass|
-      next false unless strict_subclass?(klass, owner)
+    # Selected in hash order, then sorted: the predicate is pure, so this is the sorted-keys selection without
+    # sorting (or building a definition set for) every class when none qualifies.
+    def_owners = nil
+    found = nil
+    @superclass_of.each_key do |klass|
+      next unless strict_subclass?(klass, owner)
 
+      unless def_owners
+        def_owners = @registry.fetch(name, []).map(&:owner).to_set
+        def_owners.merge(native_owners) if native_owners
+      end
       k = klass
       k = @superclass_of[k] until k == owner || def_owners.include?(k) || class_has_mixins?(k)
-      k == owner
-    end.first(POLY_SMALL_N_INHERITED_MAX)
+      (found ||= []) << klass if k == owner
+    end
+    return [] unless found
+
+    found.sort!
+    found.size > POLY_SMALL_N_INHERITED_MAX ? found.first(POLY_SMALL_N_INHERITED_MAX) : found
   end
 
   def class_has_mixins?(klass)
-    !Array(@included_modules[klass]).empty? || !Array(@prepended_modules[klass]).empty? ||
-      @unknown_mixins.include?(klass)
+    !no_mixins?(@included_modules[klass]) || !no_mixins?(@prepended_modules[klass]) || @unknown_mixins.include?(klass)
+  end
+
+  # `Array(modules).empty?` without the Array(nil) it allocates.
+  def no_mixins?(modules)
+    modules.nil? || Array(modules).empty?
   end
 
   # INHERITED_GUARD's subclasses per candidate owner.
@@ -377,7 +393,7 @@ class CodeGen
              else
                impl = cpp_name(target.owner, target.name) + '_impl'
                call_argv, = direct_call_args(target, argv, impl)
-               "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+               "#{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
              end
       "if (#{check}) {\n    #{call}\n  } else "
     end

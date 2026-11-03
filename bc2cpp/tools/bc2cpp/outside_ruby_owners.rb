@@ -2,6 +2,7 @@
 
 require 'prism'
 require 'set'
+require_relative 'file_identity'
 require_relative 'ruby_parse_cache'
 
 # OUTSIDE_OWNER_CALL: the class or module each outside Ruby source (the build's mrblib, mruby's own
@@ -27,8 +28,7 @@ module OutsideRubyOwners
   module_function
 
   def scan(paths)
-    files = Array(paths).select { |path| File.file?(path) }
-    key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
+    files, key = FileIdentity.files_and_key(paths)
     @cache[key] ||= begin
       collector = Collector.new
       files.each do |path|

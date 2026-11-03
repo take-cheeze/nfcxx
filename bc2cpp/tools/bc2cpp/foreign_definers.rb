@@ -2,6 +2,7 @@
 
 require 'prism'
 require 'set'
+require_relative 'file_identity'
 require_relative 'ruby_parse_cache'
 require_relative 'outside_ruby_owners'
 
@@ -31,8 +32,7 @@ module ForeignDefiners
   # Memoized on file identity: a check that rewrites a fixture never sees stale text. The stat key
   # ([path, mtime, size] of every file) is compared with eql?, as the Hash key it replaces was.
   def scan(paths)
-    files = Array(paths).select { |path| File.file?(path) }
-    key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
+    files, key = FileIdentity.files_and_key(paths)
     hit = @cache[files]
     return hit[1] if hit && hit[0].eql?(key)
 

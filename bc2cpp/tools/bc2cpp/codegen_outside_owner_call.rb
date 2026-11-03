@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'native_owner_map'
+require_relative 'reg_name'
 require_relative 'outside_ruby_owners'
 
 # OUTSIDE_OWNER_CALL: the else of a closed-world guard chain that stayed a by-name send only
@@ -152,7 +153,7 @@ module OutsideOwnerCall
   # the name into its slot.
   def outside_owner_call_line(d, recv, name, argv, owners)
     list = owner_call_owner_list(owners)
-    line = "r#{d} = bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), " \
+    line = "#{RegName[d]} = bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), " \
            "#{@call_block_expr || 'mrb_nil_value()'}, #{argv.size}"
     argv.each { |arg| line << ', ' << arg.to_s }
     line << "); /* CLOSED_WORLD owner-call: #{name} */"

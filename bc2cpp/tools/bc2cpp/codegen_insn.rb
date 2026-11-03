@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'reg_name'
 require_relative 'tagged_fixnum'
 
 # CodeGen: compile_insn and comparisons.
@@ -74,7 +75,7 @@ class CodeGen
     # (the shared index helper picks its arms from program-wide facts, which the variant does not use).
     if @rsm_variant && insn.op == :GETIDX
       d, s = insn.regs.first(2)
-      return "r#{unshift_proof_reg(d, reg_offset)} = mrb_funcall(M, r#{unshift_proof_reg(d, reg_offset)}, \"[]\", 1, r#{unshift_proof_reg(s, reg_offset)});\n"
+      return "#{RegName[unshift_proof_reg(d, reg_offset)]} = mrb_funcall(M, #{RegName[unshift_proof_reg(d, reg_offset)]}, \"[]\", 1, #{RegName[unshift_proof_reg(s, reg_offset)]});\n"
     end
     # SEALED_INT16 (sealed_int16_locals.rb): a proven int16 array's instructions go to its std::vector.
     if (sealed = sealed_int16_action(irep, idx))
@@ -99,9 +100,9 @@ class CodeGen
       if @block_fallback_upvars&.include?(key)
         vname = upvar_var_name(*key)
         if insn.op == :GETUPVAR
-          "  r#{insn.reg} = *#{vname};\n"
+          "  #{RegName[insn.reg]} = *#{vname};\n"
         else
-          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
+          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = #{RegName[insn.reg]};\n  bc2cpp_upvar_root(M, #{vname}, #{RegName[insn.reg]});\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
@@ -111,45 +112,45 @@ class CodeGen
       # entry wrapper computed, named from `:sym` (kwarg_param_name).
       d = insn.reg
       sym = insn.sym_token
-      "  r#{d} = mrb_bool_value(#{kw_given_param_name(sym)});\n"
+      "  #{RegName[d]} = mrb_bool_value(#{kw_given_param_name(sym)});\n"
     when :KARG
       # KEYWORD_ARG_SUPPORT: the keyword's value, already an unpacked parameter. An
       # omitted optional one's default code overwrites the register after KEY_P's
       # JMPIF.
       d = insn.reg
       sym = insn.sym_token
-      "  r#{d} = #{kwarg_param_name(sym)};\n"
+      "  #{RegName[d]} = #{kwarg_param_name(sym)};\n"
     when :KEYEND
       # KEYWORD_ARG_SUPPORT: unknown keywords already raised ArgumentError in the
       # entry wrapper's mrb_kwargs (`rest: NULL`).
       "  // KEYEND: already enforced by the entry wrapper's own mrb_kwargs (rest: NULL)\n"
     when :MOVE
       d, s = insn.regs.first(2)
-      "  r#{d} = r#{s};\n"
+      "  #{RegName[d]} = #{RegName[s]};\n"
     when :LOADNIL
       d = insn.reg
-      "  r#{d} = mrb_nil_value();\n"
+      "  #{RegName[d]} = mrb_nil_value();\n"
     when :LOADFALSE
       d = insn.reg
-      "  r#{d} = mrb_false_value();\n"
+      "  #{RegName[d]} = mrb_false_value();\n"
     when :LOADTRUE
       d = insn.reg
-      "  r#{d} = mrb_true_value();\n"
+      "  #{RegName[d]} = mrb_true_value();\n"
     when :LOADSELF
       # "LOADSELF R2 (R0)": R[a] = self (vm.c). Emitted for `self.foo = ...`; r0 is
       # already `self`.
       d = insn.reg
-      "  r#{d} = self;\n"
+      "  #{RegName[d]} = self;\n"
     when :LOADSYM
       d = insn.reg
       name = insn.sym_token
-      "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, \"#{name}\"));\n"
+      "  #{RegName[d]} = mrb_symbol_value(mrb_intern_cstr(M, \"#{name}\"));\n"
     when /^LOADI/
       d = insn.reg
       # Small immediates print parenthesized ("R6\t(3)"); LOADI8/16/32 print bare
       # ("R1\t128").
       lit = insn.paren_value || BytecodeIR::OperandModel.imm_operand(insn)
-      "  r#{d} = mrb_fixnum_value(#{lit});\n"
+      "  #{RegName[d]} = mrb_fixnum_value(#{lit});\n"
     when :LOADL
       # "LOADL R5 L[0]": a pool literal (vm.c OP_LOADL). Only FLOAT is modelled:
       # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002")
@@ -160,12 +161,12 @@ class CodeGen
       entry = irep.pool.fetch(pidx)
       if entry.is_a?(Hash) && entry[:type] == :float
         lit = entry[:raw][/\.f\s*=\s*(.+)/, 1]
-        "  r#{d} = mrb_float_value(M, #{lit});\n"
+        "  #{RegName[d]} = mrb_float_value(M, #{lit});\n"
       elsif entry.is_a?(Hash) && entry[:type] == :bigint && entry[:digits].match?(/\A[0-9a-zA-Z]{1,255}\z/)
         # LOADL_BIGINT: rebuilt from its digits as OP_LOADL does, never
         # from a 64-bit C constant a 32-bit mrb_int target could not hold.
         "#ifdef MRB_USE_BIGINT\n" \
-          "  r#{d} = mrb_bint_new_str(M, \"#{entry[:digits]}\", #{entry[:digits].size}, #{entry[:base]});\n" \
+          "  #{RegName[d]} = mrb_bint_new_str(M, \"#{entry[:digits]}\", #{entry[:digits].size}, #{entry[:base]});\n" \
           "#else\n  #{inline_raise_exact('RangeError', 'integer overflow')}\n#endif\n"
       else
         kind = entry.is_a?(Hash) ? entry[:type] : :string
@@ -178,9 +179,9 @@ class CodeGen
       if entry.is_a?(String) && insn.frozen_literal && frozen_literals_enabled?
         # `# frozen_string_literal: true`: the VM's persistent frozen String for these bytes,
         # the object OP_FSTRING returns. The bytes are escaped one by one, so the length is exact.
-        "  r#{d} = mrb_frozen_literal(M, #{c_string_literal(entry)}, #{entry.bytesize});\n"
+        "  #{RegName[d]} = mrb_frozen_literal(M, #{c_string_literal(entry)}, #{entry.bytesize});\n"
       elsif entry.is_a?(String)
-        "  r#{d} = bc2cpp_pool_str(M, #{c_string_literal(entry)});\n"
+        "  #{RegName[d]} = bc2cpp_pool_str(M, #{c_string_literal(entry)});\n"
       else
         "  #error STRING references a non-string pool entry (#{entry[:type]}) -- not in this prototype's supported subset\n"
       end
@@ -195,7 +196,7 @@ class CodeGen
       sidx = insn.pool_index.to_i
       sentry = irep.pool.fetch(sidx)
       if sentry.is_a?(String)
-        "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(sentry)}));\n"
+        "  #{RegName[d]} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(sentry)}));\n"
       else
         "  #error SYMBOL references a non-string pool entry (#{sentry[:type]}) -- not in this prototype's supported subset\n"
       end
@@ -204,18 +205,18 @@ class CodeGen
       # mrb_intern_str(mrb, regs[a]); regs[a] = mrb_symbol_value(sym);`, an in-place
       # String -> Symbol conversion (`:"#{expr}"`). Unconditional, like STRCAT.
       d = insn.reg
-      "  r#{d} = mrb_ensure_string_type(M, r#{d});\n  r#{d} = mrb_symbol_value(mrb_intern_str(M, r#{d}));\n"
+      "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n  #{RegName[d]} = mrb_symbol_value(mrb_intern_str(M, #{RegName[d]}));\n"
     when :STRCAT
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).
       d = insn.reg
       s = insn.paren_reg
-      "  r#{d} = mrb_ensure_string_type(M, r#{d});\n  mrb_str_concat(M, r#{d}, r#{s});\n"
+      "  #{RegName[d]} = mrb_ensure_string_type(M, #{RegName[d]});\n  mrb_str_concat(M, #{RegName[d]}, #{RegName[s]});\n"
     when :GETIV
       d = insn.reg
       ivar = insn.ivar
       klass = self_class(owner_def)
-      code = ivar_get_code(klass, 'self', ivar, "r#{d}", self_of_klass: true, irep_label: irep&.label)
+      code = ivar_get_code(klass, 'self', ivar, "#{RegName[d]}", self_of_klass: true, irep_label: irep&.label)
       type = embed_type(klass, ivar) if klass
       if code.nil?
         "  #error GETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
@@ -229,7 +230,7 @@ class CodeGen
       # Not `$`-anchored: a trailing "; R1:name" comment (see IvarLayout.analyze).
       s = insn.regs.first
       klass = self_class(owner_def)
-      code = ivar_set_code(klass, 'self', ivar, "r#{s}", self_of_klass: true)
+      code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true)
       type = embed_type(klass, ivar) if klass
       if code.nil?
         "  #error SETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
@@ -251,7 +252,7 @@ class CodeGen
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: addition stays inside Fixnum.\n" \
                           "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
-                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n" \
+                          "    #{RegName[d]} = mrb_fixnum_value(mrb_fixnum(#{RegName[d]}) + #{lit});\n" \
                           "  } else {\n"
                       else
                         ''
@@ -260,8 +261,8 @@ class CodeGen
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('+', d, lit)}
-          } else if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_num_add(M, r#{d}, mrb_fixnum_value(#{lit}));
+          } else if (mrb_integer_p(#{RegName[d]})) {
+            #{RegName[d]} = mrb_num_add(M, #{RegName[d]}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -272,14 +273,14 @@ class CodeGen
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, "r#{s}")}\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, "#{RegName[s]}")}\n"
       else
         guarded = guarded_game_integer_pair(:ADD, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
                           "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
-                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n" \
+                          "    #{RegName[d]} = mrb_fixnum_value(mrb_fixnum(#{RegName[d]}) + mrb_fixnum(#{RegName[s]}));\n" \
                           "  } else {\n"
                       else
                         ''
@@ -289,15 +290,15 @@ class CodeGen
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('+', d, "r#{s}")}
-          } else if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
-            r#{d} = mrb_num_add(M, r#{d}, r#{s});
+          } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_num_add(M, #{RegName[d]}, #{RegName[s]});
           #ifndef MRB_NO_FLOAT
-          } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_float(r#{d}) + mrb_integer(r#{s}));
-          } else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_integer(r#{d}) + mrb_float(r#{s}));
-          } else if (mrb_float_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_float(r#{d}) + mrb_float(r#{s}));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) + mrb_integer(#{RegName[s]}));
+          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_integer(#{RegName[d]}) + mrb_float(#{RegName[s]}));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) + mrb_float(#{RegName[s]}));
           #endif
           } else {
             #{compile_operator_fallback('+', d, s, nil, irep, idx, owner_def, reg_offset)}
@@ -316,7 +317,7 @@ class CodeGen
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: subtraction stays inside Fixnum.\n" \
                           "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
-                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n" \
+                          "    #{RegName[d]} = mrb_fixnum_value(mrb_fixnum(#{RegName[d]}) - #{lit});\n" \
                           "  } else {\n"
                       else
                         ''
@@ -324,8 +325,8 @@ class CodeGen
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
             #{fixnum_exact_tier('-', d, lit)}
-          } else if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_num_sub(M, r#{d}, mrb_fixnum_value(#{lit}));
+          } else if (mrb_integer_p(#{RegName[d]})) {
+            #{RegName[d]} = mrb_num_sub(M, #{RegName[d]}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -336,14 +337,14 @@ class CodeGen
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, "r#{s}")}\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, "#{RegName[s]}")}\n"
       else
         guarded = guarded_game_integer_pair(:SUB, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
                           "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
-                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n" \
+                          "    #{RegName[d]} = mrb_fixnum_value(mrb_fixnum(#{RegName[d]}) - mrb_fixnum(#{RegName[s]}));\n" \
                           "  } else {\n"
                       else
                         ''
@@ -351,15 +352,15 @@ class CodeGen
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('-', d, "r#{s}")}
-          } else if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
-            r#{d} = mrb_num_sub(M, r#{d}, r#{s});
+          } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_num_sub(M, #{RegName[d]}, #{RegName[s]});
           #ifndef MRB_NO_FLOAT
-          } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_float(r#{d}) - mrb_integer(r#{s}));
-          } else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_integer(r#{d}) - mrb_float(r#{s}));
-          } else if (mrb_float_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_float(r#{d}) - mrb_float(r#{s}));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) - mrb_integer(#{RegName[s]}));
+          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_integer(#{RegName[d]}) - mrb_float(#{RegName[s]}));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) - mrb_float(#{RegName[s]}));
           #endif
           } else {
             #{compile_operator_fallback('-', d, s, nil, irep, idx, owner_def, reg_offset)}
@@ -373,14 +374,14 @@ class CodeGen
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('*', d, "r#{s}")}\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('*', d, "#{RegName[s]}")}\n"
       else
         guarded = guarded_game_integer_pair(:MUL, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: the product interval fits Fixnum.\n" \
                           "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
-                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n" \
+                          "    #{RegName[d]} = mrb_fixnum_value(mrb_fixnum(#{RegName[d]}) * mrb_fixnum(#{RegName[s]}));\n" \
                           "  } else {\n"
                       else
                         ''
@@ -388,15 +389,15 @@ class CodeGen
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('*', d, "r#{s}")}
-          } else if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
-            r#{d} = mrb_num_mul(M, r#{d}, r#{s});
+          } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_num_mul(M, #{RegName[d]}, #{RegName[s]});
           #ifndef MRB_NO_FLOAT
-          } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_float(r#{d}) * mrb_integer(r#{s}));
-          } else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_integer(r#{d}) * mrb_float(r#{s}));
-          } else if (mrb_float_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_float(r#{d}) * mrb_float(r#{s}));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) * mrb_integer(#{RegName[s]}));
+          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_integer(#{RegName[d]}) * mrb_float(#{RegName[s]}));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) * mrb_float(#{RegName[s]}));
           #endif
           } else {
             #{compile_operator_fallback('*', d, s, nil, irep, idx, owner_def, reg_offset)}
@@ -414,28 +415,28 @@ class CodeGen
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n"
+        "#{FIXNUM_PROOF_NOTE}  #{RegName[d]} = mrb_div_int_value(M, mrb_fixnum(#{RegName[d]}), mrb_fixnum(#{RegName[s]}));\n"
       else
         guarded = guarded_game_integer_pair(:DIV, irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
         guarded_arm = if guarded
                         "  // GUARDED_GAME_VARIABLE_RANGE: quotient fits Fixnum; helper preserves zero errors.\n" \
                           "  if (#{BranchHints.likely(guarded[:condition])}) {\n" \
-                          "    r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n" \
+                          "    #{RegName[d]} = mrb_div_int_value(M, mrb_fixnum(#{RegName[d]}), mrb_fixnum(#{RegName[s]}));\n" \
                           "  } else {\n"
                       else
                         ''
                       end
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely("mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})")}) {
-            r#{d} = mrb_div_int_value(M, mrb_integer(r#{d}), mrb_integer(r#{s}));
+            #{RegName[d]} = mrb_div_int_value(M, mrb_integer(#{RegName[d]}), mrb_integer(#{RegName[s]}));
           #ifndef MRB_NO_FLOAT
-          } else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(r#{d}), mrb_float(r#{s})));
-          } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), (mrb_float)mrb_integer(r#{s})));
-          } else if (mrb_float_p(r#{d}) && mrb_float_p(r#{s})) {
-            r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), mrb_float(r#{s})));
+          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(#{RegName[d]}), mrb_float(#{RegName[s]})));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_div_float(mrb_float(#{RegName[d]}), (mrb_float)mrb_integer(#{RegName[s]})));
+          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+            #{RegName[d]} = mrb_float_value(M, mrb_div_float(mrb_float(#{RegName[d]}), mrb_float(#{RegName[s]})));
           #endif
           } else {
             #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
@@ -478,7 +479,7 @@ class CodeGen
           if (mrb_nil_p(#{@blk_param_name})) {
             mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "unexpected yield");
           }
-          r#{d} = #{@blk_param_name};
+          #{RegName[d]} = #{@blk_param_name};
         CPP
       else
         "#error unhandled opcode BLKPUSH #{insn.args}\n"
@@ -504,21 +505,21 @@ class CodeGen
       d = insn.reg.to_i
       blkn = insn.uint_operand.to_i
       out = String.new
-      out << "  if (!mrb_proc_p(r#{d})) {\n"
-      out << "    mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"wrong type %T (expected Proc)\", r#{d});\n"
+      out << "  if (!mrb_proc_p(#{RegName[d]})) {\n"
+      out << "    mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"wrong type %T (expected Proc)\", #{RegName[d]});\n"
       out << "  }\n"
       if blkn.zero?
-        out << "  r#{d} = bc2cpp_yield_argv(M, r#{d}, 0, NULL);\n"
+        out << "  #{RegName[d]} = bc2cpp_yield_argv(M, #{RegName[d]}, 0, NULL);\n"
       else
         out << "  {\n"
-        out << "    mrb_value blkcall_args[] = { #{(1..blkn).map { |i| "r#{d + i}" }.join(', ')} };\n"
-        out << "    r#{d} = bc2cpp_yield_argv(M, r#{d}, #{blkn}, blkcall_args);\n"
+        out << "    mrb_value blkcall_args[] = { #{(1..blkn).map { |i| "#{RegName[d + i]}" }.join(', ')} };\n"
+        out << "    #{RegName[d]} = bc2cpp_yield_argv(M, #{RegName[d]}, #{blkn}, blkcall_args);\n"
         out << "  }\n"
       end
       out
     when :RETURN
       r = insn.no_operands? ? '0' : insn.reg
-      "  return r#{r};\n"
+      "  return #{RegName[r]};\n"
     when :RETNIL
       "  return mrb_nil_value();\n"
     when :RETFALSE
@@ -547,19 +548,19 @@ class CodeGen
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
-        "  if (!mrb_test(r#{reg})) goto L#{target};\n"
+        "  if (!mrb_test(#{RegName[reg]})) goto L#{target};\n"
     when :JMPIF
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
-        "  if (mrb_test(r#{reg})) goto L#{target};\n"
+        "  if (mrb_test(#{RegName[reg]})) goto L#{target};\n"
     when :JMPNIL
       # "JMPNIL R3 024": jump if exactly nil (vm.c), for nil-specific tests like
       # `x.nil? ? a : b`.
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
-        "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
+        "  if (mrb_nil_p(#{RegName[reg]})) goto L#{target};\n"
     when :GETCONST
       # "GETCONST R4 Integer": the VM resolves against the lexical scope chain
       # (mrb_vm_const_get), which compiled code does not have. A single lookup from
@@ -579,7 +580,7 @@ class CodeGen
       # StableClassConstants name (one poisons on CLASS/MODULE, the other requires
       # it).
       if (value = self.class.integer_constant_values&.[](name))
-        return "  r#{d} = mrb_fixnum_value(#{value});\n"
+        return "  #{RegName[d]} = mrb_fixnum_value(#{value});\n"
       end
 
       owner_path = lexical_scope_path(owner_def.owner)
@@ -588,13 +589,13 @@ class CodeGen
         # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
         # (lexical scope, name); it runs the ordinary lookup until it finds a
         # class/module (any value for CONST_VALUE_CACHE), then returns the stored value.
-        return "  r#{d} = bc2cpp_cconst_#{const_site_slot(owner_path, name, value: value_const)}(M);\n"
+        return "  #{RegName[d]} = bc2cpp_cconst_#{const_site_slot(owner_path, name, value: value_const)}(M);\n"
       end
       owners = self.class.const_bindings&.[](name)
       if owners && (owner_path == ['Object'] || owner_path.all? { |seg| immutable_constant?(seg) })
         # CONST_BINDING_CACHE: see tools/bc2cpp/const_site_cache.rb. Stored once every binding and the scopes the
         # lookup walks exist; the scopes' own names are never rebound.
-        return "  r#{d} = bc2cpp_cconst_#{const_site_slot(owner_path, name, paths: owners)}(M);\n"
+        return "  #{RegName[d]} = bc2cpp_cconst_#{const_site_slot(owner_path, name, paths: owners)}(M);\n"
       end
 
       const_lookup_block(d, name, owner_path)
@@ -602,7 +603,7 @@ class CodeGen
       # OCLASS_SUPPORT: "OCLASS R3" for `::Foo` (followed by GETMCNST); vm.c
       # `regs[a] = mrb_obj_value(mrb->object_class)`.
       d = insn.reg
-      "  r#{d} = mrb_obj_value(M->object_class);\n"
+      "  #{RegName[d]} = mrb_obj_value(M->object_class);\n"
     when :GETMCNST
       # "GETMCNST R6 (R6)::Sections": r<d> holds the owning module (from the chain,
       # e.g. GETCONST R2 LCF; GETMCNST R2 (R2)::Schema; GETMCNST R2 (R2)::DATABASE);
@@ -613,16 +614,16 @@ class CodeGen
       # still run (and raise if missing); only this value lookup is skipped. This is
       # the hot `case cmd.code when Cmd::X` shape.
       if (value = self.class.integer_constant_values&.[](name))
-        return "  r#{d} = mrb_fixnum_value(#{value});\n"
+        return "  #{RegName[d]} = mrb_fixnum_value(#{value});\n"
       end
 
       if immutable_constant?(name) && constant_scope_register?(irep, idx, d - reg_offset)
         # CONST_BINDING_CACHE: a binding in the receiver's own table is the one mrb_const_get returns, and an
         # immutable one never changes; the receiver came from a constant that is never rebound, so it stays alive.
-        return "  r#{d} = bc2cpp_mcnst_#{const_member_slot(name)}(M, r#{d});\n"
+        return "  #{RegName[d]} = bc2cpp_mcnst_#{const_member_slot(name)}(M, #{RegName[d]});\n"
       end
 
-      "  r#{d} = mrb_const_get(M, r#{d}, mrb_intern_cstr(M, \"#{name}\"));\n"
+      "  #{RegName[d]} = mrb_const_get(M, #{RegName[d]}, mrb_intern_cstr(M, \"#{name}\"));\n"
     when :HASH
       # "HASH R2 22": N key/value pairs from Rd, result into Rd (vm.c OP_HASH). All
       # pair registers are read before Rd is written.
@@ -631,8 +632,8 @@ class CodeGen
       out = String.new
       out << "  {\n"
       out << "    mrb_value h = mrb_hash_new_capa(M, #{n});\n"
-      n.times { |i| out << "    mrb_hash_set(M, h, r#{d + 2 * i}, r#{d + 2 * i + 1});\n" }
-      out << "    r#{d} = h;\n"
+      n.times { |i| out << "    mrb_hash_set(M, h, #{RegName[d + 2 * i]}, #{RegName[d + 2 * i + 1]});\n" }
+      out << "    #{RegName[d]} = h;\n"
       out << "  }\n"
       out
     when :ARRAY
@@ -651,12 +652,12 @@ class CodeGen
       src = three ? three[0].to_i : d
       n = three ? three[1].to_i : insn.uint_operand.to_i
       if n.zero?
-        "  r#{d} = mrb_ary_new(M);\n"
+        "  #{RegName[d]} = mrb_ary_new(M);\n"
       else
         out = String.new
         out << "  {\n"
-        out << "    mrb_value elems[] = { #{(0...n).map { |i| "r#{src + i}" }.join(', ')} };\n"
-        out << "    r#{d} = mrb_ary_new_from_values(M, #{n}, elems);\n"
+        out << "    mrb_value elems[] = { #{(0...n).map { |i| "#{RegName[src + i]}" }.join(', ')} };\n"
+        out << "    #{RegName[d]} = mrb_ary_new_from_values(M, #{n}, elems);\n"
         out << "  }\n"
         out
       end
@@ -669,7 +670,7 @@ class CodeGen
       d = insn.reg.to_i
       n = insn.uint_operand.to_i
       out = String.new
-      n.times { |i| out << "  mrb_ary_push(M, r#{d}, r#{d + i + 1});\n" }
+      n.times { |i| out << "  mrb_ary_push(M, #{RegName[d]}, #{RegName[d + i + 1]});\n" }
       out
     when :ARYCAT
       # "ARYCAT R3 (R4)" (codedump.c `"ARYCAT\tR%d\t(R%d)"`). vm.c OP_ARYCAT:
@@ -684,11 +685,11 @@ class CodeGen
       s = insn.paren_reg
       <<~CPP
         {
-          mrb_value bc2cpp_arycat_splat = mrb_ary_splat(M, r#{s});
-          if (mrb_nil_p(r#{d})) {
-            r#{d} = bc2cpp_arycat_splat;
+          mrb_value bc2cpp_arycat_splat = mrb_ary_splat(M, #{RegName[s]});
+          if (mrb_nil_p(#{RegName[d]})) {
+            #{RegName[d]} = bc2cpp_arycat_splat;
           } else {
-            mrb_ary_concat(M, r#{d}, bc2cpp_arycat_splat);
+            mrb_ary_concat(M, #{RegName[d]}, bc2cpp_arycat_splat);
           }
         }
       CPP
@@ -698,7 +699,7 @@ class CodeGen
       # mrb_ary_ref. This is `x, y, w, h = some_call(...)` destructuring.
       d, s = insn.regs.first(2)
       c = insn.src_and_literal&.last
-      "  r#{d} = mrb_array_p(r#{s}) ? bc2cpp_ary_entry(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
+      "  #{RegName[d]} = mrb_array_p(#{RegName[s]}) ? bc2cpp_ary_entry(M, #{RegName[s]}, #{c}) : (#{c} == 0 ? #{RegName[s]} : mrb_nil_value());\n"
     when :GETIDX
       # "GETIDX R2 (R3)": R[a] = R[a][R[a+1]] with a register index (vm.c).
       # Mirrors vm.c's fast paths: Array with an Integer index (mrb_ary_ref), Hash
@@ -722,17 +723,17 @@ class CodeGen
       index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
-        array_test = exact ? '' : "mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && "
+        array_test = exact ? '' : "mrb_array_p(#{RegName[d]}) && mrb_obj_ptr(#{RegName[d]})->c == M->array_class && "
         if exact && proven_index_operand?(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
-          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));\n"
+          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}#{RegName[d]} = bc2cpp_ary_entry(M, #{RegName[d]}, mrb_integer(#{RegName[s]}));\n"
         else
           # INTEGER_TAG_ELSE: an exact Array receiver's non-fixnum key runs the Array body directly.
           # UNSIGNED_INDEX: the arm tests the fixnum tag only; a heap Integer key takes the else, which is `[]` itself.
-          direct = integer_tag_else_array_call('[]', exact, "r#{d}", ["r#{s}"])
-          by_name = direct ? "r#{d} = #{direct};" : index_else_statement(d, s)
+          direct = integer_tag_else_array_call('[]', exact, "#{RegName[d]}", ["#{RegName[s]}"])
+          by_name = direct ? "#{RegName[d]} = #{direct};" : index_else_statement(d, s)
           <<~CPP
             #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_fixnum_p(r#{s})) {
-              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_fixnum(r#{s}));
+              #{RegName[d]} = bc2cpp_ary_entry(M, #{RegName[d]}, mrb_fixnum(#{RegName[s]}));
             } else {
               #{by_name}
             }
@@ -740,11 +741,11 @@ class CodeGen
         end
       when 'Hash'
         if exact
-          "#{INDEX_EXACT_NOTE}r#{d} = mrb_hash_get(M, r#{d}, r#{s});\n"
+          "#{INDEX_EXACT_NOTE}#{RegName[d]} = mrb_hash_get(M, #{RegName[d]}, #{RegName[s]});\n"
         else
           <<~CPP
-            if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-              r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+            if (mrb_hash_p(#{RegName[d]}) && mrb_obj_ptr(#{RegName[d]})->c == M->hash_class) {
+              #{RegName[d]} = mrb_hash_get(M, #{RegName[d]}, #{RegName[s]});
             } else {
               #{index_else_statement(d, s)}
             }
@@ -758,22 +759,22 @@ class CodeGen
           # INDEX_CHAIN: send the untyped `x[i]` fallback through the exact-class chain
           # (compile_poly_small_n), so program-defined `#[]` (Game::Variables,
           # LCF::Array1D, ...) is called directly; nil keeps the funcall.
-          tail = compile_poly_dispatch('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
-          tail = tail ? tail.gsub(/^/, '  ').lstrip : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
+          tail = compile_poly_dispatch('[]', d.to_i, "#{RegName[d]}", ["#{RegName[s]}"], 1)
+          tail = tail ? tail.gsub(/^/, '  ').lstrip : "#{RegName[d]} = mrb_funcall(M, #{RegName[d]}, \"[]\", 1, #{RegName[s]});"
           fallback = <<~CPP
-            if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
-              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
-            } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-              r#{d} = mrb_hash_get(M, r#{d}, r#{s});
-            } else if (mrb_string_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->string_class &&
-                       (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
-              r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
+            if (mrb_array_p(#{RegName[d]}) && mrb_obj_ptr(#{RegName[d]})->c == M->array_class && mrb_integer_p(#{RegName[s]})) {
+              #{RegName[d]} = bc2cpp_ary_entry(M, #{RegName[d]}, mrb_integer(#{RegName[s]}));
+            } else if (mrb_hash_p(#{RegName[d]}) && mrb_obj_ptr(#{RegName[d]})->c == M->hash_class) {
+              #{RegName[d]} = mrb_hash_get(M, #{RegName[d]}, #{RegName[s]});
+            } else if (mrb_string_p(#{RegName[d]}) && mrb_obj_ptr(#{RegName[d]})->c == M->string_class &&
+                       (mrb_integer_p(#{RegName[s]}) || mrb_string_p(#{RegName[s]}) || mrb_range_p(#{RegName[s]}))) {
+              #{RegName[d]} = mrb_str_aref(M, #{RegName[d]}, #{RegName[s]}, mrb_undef_value());
             } #{struct_read}else {
               #{tail}
             }
           CPP
         end
-        typed = compile_typed_index_send(irep, idx, owner_def, d, d, "r#{s}", reg_offset, index_class, fallback)
+        typed = compile_typed_index_send(irep, idx, owner_def, d, d, "#{RegName[s]}", reg_offset, index_class, fallback)
         generic = typed || fallback
         integer_bit_aref_site(irep, idx, unshift_proof_reg(d, reg_offset), owner_def, d, s, generic) || generic
       end
@@ -788,11 +789,11 @@ class CodeGen
       case index_class
       when 'Array'
         if exact
-          "#{INDEX_EXACT_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);\n"
+          "#{INDEX_EXACT_NOTE}#{RegName[d]} = bc2cpp_ary_entry(M, #{RegName[s]}, 0);\n"
         else
           <<~CPP
-            if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
-              r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
+            if (mrb_array_p(#{RegName[s]}) && mrb_obj_ptr(#{RegName[s]})->c == M->array_class) {
+              #{RegName[d]} = bc2cpp_ary_entry(M, #{RegName[s]}, 0);
             } else {
               #{index0_else_statement(d, s)}
             }
@@ -800,11 +801,11 @@ class CodeGen
         end
       when 'Hash'
         if exact
-          "#{INDEX_EXACT_NOTE}r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));\n"
+          "#{INDEX_EXACT_NOTE}#{RegName[d]} = mrb_hash_get(M, #{RegName[s]}, mrb_fixnum_value(0));\n"
         else
           <<~CPP
-            if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
-              r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
+            if (mrb_hash_p(#{RegName[s]}) && mrb_obj_ptr(#{RegName[s]})->c == M->hash_class) {
+              #{RegName[d]} = mrb_hash_get(M, #{RegName[s]}, mrb_fixnum_value(0));
             } else {
               #{index0_else_statement(d, s)}
             }
@@ -812,7 +813,7 @@ class CodeGen
         end
       else
         # OUTLINED_INDEX_OPS: the Array/Hash/funcall chain is bc2cpp_getidx0.
-        fallback = outlined_index_call('getidx0', "r#{d}", "r#{s}")
+        fallback = outlined_index_call('getidx0', "#{RegName[d]}", "#{RegName[s]}")
         typed = compile_typed_index_send(irep, idx, owner_def, d, s, 'mrb_fixnum_value(0)', reg_offset,
                                          index_class, fallback)
         typed || fallback
@@ -831,14 +832,14 @@ class CodeGen
       index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
-        array_test = exact ? '' : "mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && "
+        array_test = exact ? '' : "mrb_array_p(#{RegName[d]}) && mrb_obj_ptr(#{RegName[d]})->c == M->array_class && "
         if exact && proven_index_operand?(irep, idx, unshift_proof_reg(idx_reg, reg_offset), owner_def)
-          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}bc2cpp_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});\n  r#{d} = r#{val};\n"
+          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}bc2cpp_ary_set(M, #{RegName[d]}, mrb_integer(#{RegName[idx_reg]}), #{RegName[val]});\n  #{RegName[d]} = #{RegName[val]};\n"
         else
           <<~CPP
             #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{idx_reg})) {
-              bc2cpp_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
-              r#{d} = r#{val};
+              bc2cpp_ary_set(M, #{RegName[d]}, mrb_integer(#{RegName[idx_reg]}), #{RegName[val]});
+              #{RegName[d]} = #{RegName[val]};
             } else {
               #{integer_tag_else_by_name_set(exact, d, idx_reg, val)}
             }
@@ -846,12 +847,12 @@ class CodeGen
         end
       when 'Hash'
         if exact
-          "#{INDEX_EXACT_NOTE}bc2cpp_hash_aset(M, r#{d}, r#{idx_reg}, r#{val});\n  r#{d} = r#{val};\n"
+          "#{INDEX_EXACT_NOTE}bc2cpp_hash_aset(M, #{RegName[d]}, #{RegName[idx_reg]}, #{RegName[val]});\n  #{RegName[d]} = #{RegName[val]};\n"
         else
           <<~CPP
-            if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-              bc2cpp_hash_aset(M, r#{d}, r#{idx_reg}, r#{val});
-              r#{d} = r#{val};
+            if (mrb_hash_p(#{RegName[d]}) && mrb_obj_ptr(#{RegName[d]})->c == M->hash_class) {
+              bc2cpp_hash_aset(M, #{RegName[d]}, #{RegName[idx_reg]}, #{RegName[val]});
+              #{RegName[d]} = #{RegName[val]};
             } else {
               #{index_set_else_statement(d, idx_reg, val)}
             }
@@ -859,7 +860,7 @@ class CodeGen
         end
       else
         # OUTLINED_INDEX_OPS: the Array/Hash/funcall chain is bc2cpp_setidx.
-        fallback = outlined_index_call('setidx', "r#{d}", "r#{d}", "r#{idx_reg}", "r#{val}")
+        fallback = outlined_index_call('setidx', "#{RegName[d]}", "#{RegName[d]}", "#{RegName[idx_reg]}", "#{RegName[val]}")
         typed = compile_typed_index_write(irep, idx, owner_def, d, idx_reg, val, reg_offset, index_class, fallback)
         typed || fallback
       end
@@ -868,14 +869,14 @@ class CodeGen
       # `$`.
       d = insn.reg
       name = insn.global_name
-      "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
+      "  #{RegName[d]} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
     when :SETGV
       # "SETGV $stderr R4": operands are reversed relative to GETGV (codedump.c
       # `"SETGV\t\t%s\tR%d"`), so both are matched unanchored (one `$` token, one
       # register). vm.c: `mrb_gv_set(mrb, irep->syms[b], regs[a])`.
       s = insn.regs.first
       name = insn.global_name
-      "  bc2cpp_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
+      "  bc2cpp_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), #{RegName[s]});\n"
     when :SETCONST
       # vm.c OP_SETCONST: mrb_const_set on MRB_PROC_TARGET_CLASS(ci->proc), the class the body defines (Object when none).
       # A constant write is only legal in a class body, so the owner is that body's class; it is named by the same
@@ -885,7 +886,7 @@ class CodeGen
       if name.nil? || owner_def.nil? || owner_def.owner.nil?
         "  #error SETCONST: the target class is unknown here\n"
       else
-        "  mrb_const_set(M, mrb_obj_value(#{owner_class_ptr_expr(owner_def.owner)}), mrb_intern_cstr(M, \"#{name}\"), r#{insn.regs.last});\n"
+        "  mrb_const_set(M, mrb_obj_value(#{owner_class_ptr_expr(owner_def.owner)}), mrb_intern_cstr(M, \"#{name}\"), #{RegName[insn.regs.last]});\n"
       end
     when :STOP
       ''
@@ -906,10 +907,10 @@ class CodeGen
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
       else
         <<~CPP
-          if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{RegName[d]})")}) {
             #{fixnum_exact_tier('+', d, lit)}
-          } else if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_num_add(M, r#{d}, mrb_fixnum_value(#{lit}));
+          } else if (mrb_integer_p(#{RegName[d]})) {
+            #{RegName[d]} = mrb_num_add(M, #{RegName[d]}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -924,10 +925,10 @@ class CodeGen
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
       else
         <<~CPP
-          if (#{BranchHints.likely("mrb_fixnum_p(r#{d})")}) {
+          if (#{BranchHints.likely("mrb_fixnum_p(#{RegName[d]})")}) {
             #{fixnum_exact_tier('-', d, lit)}
-          } else if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_num_sub(M, r#{d}, mrb_fixnum_value(#{lit}));
+          } else if (mrb_integer_p(#{RegName[d]})) {
+            #{RegName[d]} = mrb_num_sub(M, #{RegName[d]}, mrb_fixnum_value(#{lit}));
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -937,11 +938,11 @@ class CodeGen
       # "RANGE_INC Ra": R[a] = mrb_range_new(mrb, regs[a], regs[a+1], FALSE) (vm.c);
       # both operands are read before r<a> is written.
       d = insn.reg.to_i
-      "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, FALSE);\n"
+      "  #{RegName[d]} = mrb_range_new(M, #{RegName[d]}, #{RegName[d + 1]}, FALSE);\n"
     when :RANGE_EXC
       # OP_RANGE_EXC: RANGE_INC with exclude_end TRUE (`a...b`).
       d = insn.reg.to_i
-      "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, TRUE);\n"
+      "  #{RegName[d]} = mrb_range_new(M, #{RegName[d]}, #{RegName[d + 1]}, TRUE);\n"
     when :RETURN_BLK
       # "RETURN_BLK Ra": vm.c starts with `if (!MRB_PROC_ENV_P(ci->proc) ||
       # MRB_PROC_STRICT_P(ci->proc)) goto NORMAL_RETURN;`. Reached from:
@@ -957,12 +958,12 @@ class CodeGen
       #     strict proc (Kernel#lambda) only returns from itself.
       r = insn.no_operands? ? '0' : insn.reg
       if @block_fallback_active && @block_ret_slot
-        "  if (bc2cpp_proc_strict_p(M)) throw bc2cpp_proc_exit{r#{r}};\n" \
-          "  bc2cpp_return_from_block(M, r#{r}, mrb_proc_cfunc_env_get(M, #{@block_ret_slot}));\n"
+        "  if (bc2cpp_proc_strict_p(M)) throw bc2cpp_proc_exit{#{RegName[r]}};\n" \
+          "  bc2cpp_return_from_block(M, #{RegName[r]}, mrb_proc_cfunc_env_get(M, #{@block_ret_slot}));\n"
       elsif @block_fallback_active
         "  #error RETURN_BLK in a block whose env carries no method token\n"
       else
-        "  return r#{r};\n"
+        "  return #{RegName[r]};\n"
       end
     when :BREAK
       # "BREAK Ra": vm.c starts with `if (MRB_PROC_STRICT_P(ci->proc)) goto
@@ -975,12 +976,12 @@ class CodeGen
       #     (its token, from this block's env) and only while that site is live.
       r = insn.no_operands? ? '0' : insn.reg
       if @block_fallback_active && @block_brk_slot
-        "  if (bc2cpp_proc_strict_p(M)) throw bc2cpp_proc_exit{r#{r}};\n" \
-          "  bc2cpp_break(M, r#{r}, mrb_proc_cfunc_env_get(M, #{@block_brk_slot}));\n"
+        "  if (bc2cpp_proc_strict_p(M)) throw bc2cpp_proc_exit{#{RegName[r]}};\n" \
+          "  bc2cpp_break(M, #{RegName[r]}, mrb_proc_cfunc_env_get(M, #{@block_brk_slot}));\n"
       elsif @block_fallback_active
         "  #error BREAK in a block whose env carries no call site token\n"
       else
-        "  return r#{r};\n"
+        "  return #{RegName[r]};\n"
       end
     when :RESCUE
       # "RESCUE Ra Rb": vm.c `R[b] = R[a].isa?(R[b])`. Ra holds the exception (only
@@ -988,14 +989,14 @@ class CodeGen
       # GETCONST/GETMCNST chain, so this is correct wherever it appears; not gated on
       # the recognizer (unlike EXCEPT).
       d, s = insn.regs
-      "  r#{s} = mrb_bool_value(mrb_obj_is_kind_of(M, r#{d}, mrb_class_ptr(r#{s})));\n"
+      "  #{RegName[s]} = mrb_bool_value(mrb_obj_is_kind_of(M, #{RegName[d]}, mrb_class_ptr(#{RegName[s]})));\n"
     when :RAISEIF
       # "RAISEIF Ra": re-raise Ra unless nil. In a recognized rescue it is reached
       # only on the non-matching path with the exception in Ra. vm.c's mrb_break_p
       # branch (a break unwinding through a block) does not apply: the leaf ireps
       # compiled here are def bodies, so Ra is nil or an exception.
       ra = insn.reg
-      "  if (!mrb_nil_p(r#{ra})) { mrb_exc_raise(M, r#{ra}); }\n"
+      "  if (!mrb_nil_p(#{RegName[ra]})) { mrb_exc_raise(M, #{RegName[ra]}); }\n"
     when :SUPER
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
       # self as receiver and N args in R(a+1)..R(a+N), plus one register forwarding
@@ -1010,11 +1011,11 @@ class CodeGen
        zsuper_lookup = reg_offset.zero? && zsuper_plan.nil? ? zsuper_lookup_plan(owner_def, irep, idx) : nil
        if target_def && d_reg && n && super_arity_ok?(target_def, n)
          note_super_site(:direct, owner_def, irep, idx)
-         args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+         args = (1..n.to_i).map { |i| "#{RegName[d_reg.to_i + i]}" }
          # An optional target's `_impl` takes every optional and the given count (direct_call_args pads them).
          impl = "#{cpp_name(target_def.owner, target_def.name)}_impl"
          args, = direct_call_args(target_def, args, impl)
-         "  r#{d_reg} = #{impl}(M, self#{args.map { |x| ", #{x}" }.join});\n"
+         "  #{RegName[d_reg]} = #{impl}(M, self#{args.map { |x| ", #{x}" }.join});\n"
        elsif zsuper_plan && d_reg
          note_super_site(:zsuper_forward, owner_def, irep, idx)
          compile_zsuper_forward(zsuper_plan, d_reg)
@@ -1066,7 +1067,7 @@ class CodeGen
     d = insn.reg
     s = insn.paren_reg
     if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-      return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(#{TaggedFixnum.compare("r#{d}", sym, "r#{s}")});\n"
+      return "#{FIXNUM_PROOF_NOTE}  #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare("#{RegName[d]}", sym, "#{RegName[s]}")});\n"
     end
 
     # OP_CMP's MRB_TT_INTEGER is the full Integer tag, and with floats all three
@@ -1083,7 +1084,7 @@ class CodeGen
       # CLOSED_WORLD_EQUALITY: with no Ruby == override, mrb_equal is the VM's
       # own equality helper. It keeps native class-specific equality behavior
       # while avoiding a generated Ruby-send fallback for unmatched receiver tags.
-      fallback = "r#{d} = mrb_bool_value(mrb_equal(M, r#{d}, r#{s}));\n"
+      fallback = "#{RegName[d]} = mrb_bool_value(mrb_equal(M, #{RegName[d]}, #{RegName[s]}));\n"
     else
       @suppress_native_expression_send = sym if op == :EQ
       begin
@@ -1096,31 +1097,31 @@ class CodeGen
     # forms and unmatched tags keep mruby's mrb_equal semantics in the fallback.
     fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == :EQ
 
-    integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
-    no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
+    integer_accessor = "mrb_integer(#{RegName[d]}) #{sym} mrb_integer(#{RegName[s]})"
+    no_float_accessor = "mrb_fixnum(#{RegName[d]}) #{sym} mrb_fixnum(#{RegName[s]})"
     # EQ meets every type, so only the ordering operators hint their Integer pair.
-    pair = "mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})"
+    pair = "mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})"
     pair = BranchHints.likely(pair) unless op == :EQ
     # TAGGED_FIXNUM: two Fixnums compare on their boxed words, ahead of the Integer pair whose tag test also
     # accepts a heap Integer.
-    fixnum_pair = TaggedFixnum.pair("r#{d}", "r#{s}")
+    fixnum_pair = TaggedFixnum.pair("#{RegName[d]}", "#{RegName[s]}")
     fixnum_pair = BranchHints.likely(fixnum_pair) unless op == :EQ
-    fixnum_arm = "if (#{fixnum_pair}) {\n  r#{d} = mrb_bool_value(#{TaggedFixnum.compare("r#{d}", sym, "r#{s}")});\n} else "
+    fixnum_arm = "if (#{fixnum_pair}) {\n  #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare("#{RegName[d]}", sym, "#{RegName[s]}")});\n} else "
     numeric_dispatch = <<~CPP
       #{op == :EQ ? '' : fixnum_arm}if (#{pair}) {
       #ifdef MRB_NO_FLOAT
-        r#{d} = mrb_bool_value(#{no_float_accessor});
+        #{RegName[d]} = mrb_bool_value(#{no_float_accessor});
       #else
-        r#{d} = mrb_bool_value(#{integer_accessor});
+        #{RegName[d]} = mrb_bool_value(#{integer_accessor});
       #endif
       }
       #ifndef MRB_NO_FLOAT
-      else if (mrb_integer_p(r#{d}) && mrb_float_p(r#{s})) {
-        r#{d} = mrb_bool_value(mrb_integer(r#{d}) #{sym} mrb_float(r#{s}));
-      } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
-        r#{d} = mrb_bool_value(mrb_float(r#{d}) #{sym} mrb_integer(r#{s}));
-      } else if (mrb_float_p(r#{d}) && mrb_float_p(r#{s})) {
-        r#{d} = mrb_bool_value(mrb_float(r#{d}) #{sym} mrb_float(r#{s}));
+      else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+        #{RegName[d]} = mrb_bool_value(mrb_integer(#{RegName[d]}) #{sym} mrb_float(#{RegName[s]}));
+      } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
+        #{RegName[d]} = mrb_bool_value(mrb_float(#{RegName[d]}) #{sym} mrb_integer(#{RegName[s]}));
+      } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
+        #{RegName[d]} = mrb_bool_value(mrb_float(#{RegName[d]}) #{sym} mrb_float(#{RegName[s]}));
       }
       #endif
       else {
@@ -1133,12 +1134,12 @@ class CodeGen
       # pair ahead of identity gives OP_EQ's answer without the out-of-line mrb_obj_eq call.
       <<~CPP
         #{fixnum_arm}if (mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})) {
-          r#{d} = mrb_bool_value(mrb_integer(r#{d}) == mrb_integer(r#{s}));
-        } else if (mrb_obj_eq(M, r#{d}, r#{s})) {
-          r#{d} = mrb_true_value();
-        } else if (mrb_symbol_p(r#{d})) {
+          #{RegName[d]} = mrb_bool_value(mrb_integer(#{RegName[d]}) == mrb_integer(#{RegName[s]}));
+        } else if (mrb_obj_eq(M, #{RegName[d]}, #{RegName[s]})) {
+          #{RegName[d]} = mrb_true_value();
+        } else if (mrb_symbol_p(#{RegName[d]})) {
           // OP_EQ: a symbol receiver that is not identical is unequal, no send.
-          r#{d} = mrb_false_value();
+          #{RegName[d]} = mrb_false_value();
         } else {
           // Numeric tag pair handling mirrors the pinned mruby OP_CMP.
           #{numeric_dispatch}
