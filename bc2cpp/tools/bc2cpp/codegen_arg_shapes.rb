@@ -100,11 +100,29 @@ module ArgShapeCalls
   # compile_method extracts `bc2cpp_blk` for a yield-only method: the
   # signature and the call sites must agree on this one predicate.
   def yields_block_param?(irep, regions = nil)
-    return false unless pure_mandatory_arity?(irep)
+    # OPTIONAL_REST_YIELD: an optional or rest signature with no `&blk` and a bare `yield` (BLKPUSH lv 0) also takes
+    # the block as its extra parameter; the wrapper extracts it with `&` after the rest, as the `&blk` form does.
+    return optional_rest_yield?(irep) unless pure_mandatory_arity?(irep)
     return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
     return true if block_given_modelled? && block_given_reads?(irep)
 
     (regions || recognize_block_fallback_regions(irep, blk_available: true)).any? { |region| region[:needs_blk] }
+  end
+
+  # OPTIONAL_REST_YIELD shape: optionals and/or a rest, no post, keyword or `&blk` parameter, and a bare `yield`.
+  # Only this shape gets the block extracted; any other non-mandatory signature keeps its `#error`.
+  def optional_rest_yield?(irep)
+    return false if ENV['BC2CPP_OPTIONAL_REST_YIELD'] == '0'
+
+    enter = irep.enter
+    return false unless enter
+
+    fields = enter.enter_fields.map(&:to_i)
+    mand, opt, rest, post, kw, kwrest, blk = fields
+    return false unless post.zero? && kw.zero? && kwrest.zero? && blk.zero?
+    return false unless opt.positive? || rest.positive?
+
+    BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' } && mand >= 0
   end
 
   # Whether the callee's `_impl` has a trailing `bc2cpp_blk` parameter.
