@@ -236,6 +236,7 @@ struct Module {
   std::map<std::string, std::unique_ptr<Fn>> fns;
   std::vector<std::string> order;      // the functions emitted, in the IR's order
   std::set<std::string> decls;         // intrinsic declarations used
+  std::vector<std::string> order_hint; // every function name of the IR, in order (the kernel names are matched to them)
   std::vector<std::string> globals;    // the data definitions
   bool uses_dynshared = false;
   bool uses_flag = false;              // the LDS word of __syncthreads_or
@@ -1506,6 +1507,7 @@ int run(const std::string &src, const std::vector<std::string> &kernels, bool f2
     }
   }
   // the functions: those the kernels reach (the kernels given, or every non-static function that no function calls)
+  for (const Node *f : fn_forms) m.order_hint.push_back(at(*f, 1).text);
   std::map<std::string, const Node *> by_name;
   std::map<std::string, std::vector<std::string>> callees;
   std::set<std::string> called, is_static;
@@ -1524,7 +1526,18 @@ int run(const std::string &src, const std::vector<std::string> &kernels, bool f2
     for (const std::string &c : cs) called.insert(c);
     callees[at(*f, 1).text] = cs;
   }
-  std::vector<std::string> roots = kernels;
+  // A listed kernel is named as the source names it (cuda-rewrite --kernels writes plain names); its IR name is the
+  // Itanium mangled name, matched as pathb-ptx-emit's module.cpp does: the name itself, or _Z<length><name>..., unique.
+  std::vector<std::string> roots;
+  for (const std::string &k : kernels) {
+    std::vector<std::string> hits;
+    for (const std::string &n : m.order_hint) {
+      if (n == k || n.rfind("_Z" + std::to_string(k.size()) + k, 0) == 0) hits.push_back(n);
+    }
+    if (hits.empty()) throw BadIR("no function named " + k + " in the IR");
+    if (hits.size() > 1) throw BadIR(std::to_string(hits.size()) + " functions named " + k + " in the IR");
+    roots.push_back(hits[0]);
+  }
   if (roots.empty())
     for (const Node *f : fn_forms) {
       std::string n = at(*f, 1).text;
