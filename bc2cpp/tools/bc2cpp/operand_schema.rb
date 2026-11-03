@@ -130,7 +130,21 @@ module OperandSchema
 
   # Parses +args+ into an Array of Operand, or nil when the text does not fit
   # the opcode's schema (an unknown opcode or a print form this table lacks).
+  # Synthetic instructions repeat the same few texts (`R2 :* n=1`), so each (op, text) is parsed once and its
+  # deeply frozen operands are shared, as the decoder shares its register operands.
+  PARSED = Hash.new { |cache, op| cache[op] = {} }
+
   def self.parse(op, args)
+    per_op = PARSED[op]
+    return per_op[args] if per_op.key?(args)
+
+    per_op[args] = parse_uncached(op, args)&.each do |operand|
+      operand.value.freeze
+      operand.freeze
+    end
+  end
+
+  def self.parse_uncached(op, args)
     text = strip_comment(args).strip
     tokens = text.split(/\s+/)
     schema = schema_for(op, tokens.length)

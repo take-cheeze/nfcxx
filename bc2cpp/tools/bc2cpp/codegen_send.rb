@@ -10,9 +10,16 @@ require_relative 'class_world_gate'
 require_relative 'strict_hints'
 
 class CodeGen
-  def compile_send(insn, self_implicit:, irep: nil, idx: nil, owner_def: nil,
-                   call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_receiver_reg: nil,
-                   trace_reg_offset: 0, typed_fallback: nil)
+  # SEND_OPTIONS_HASH: a site's options travel through the prepended compile_send layers as one positional Hash,
+  # which callers still write as keywords. A `**kwargs` layer copies it into a new Hash on every call, so the
+  # layers take it as `kwargs` and only read it; the keywords are checked once, here.
+  def compile_send(insn, kwargs)
+    compile_send_site(insn, **kwargs)
+  end
+
+  def compile_send_site(insn, self_implicit:, irep: nil, idx: nil, owner_def: nil,
+                        call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_receiver_reg: nil,
+                        trace_reg_offset: 0, typed_fallback: nil)
     # ELEMENT_CLASS_SUPPORT: consume the element hint before anything else
     # (including compiles_clean? probes that re-enter compile_method), so no other
     # call site can read it.

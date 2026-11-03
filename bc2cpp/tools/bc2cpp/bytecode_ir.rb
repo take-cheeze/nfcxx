@@ -129,20 +129,37 @@ module BytecodeIR
 
       @instruction_predecessors ||= {}
       @instruction_predecessors[include_handlers] ||= begin
-        # Plain Arrays, deduplicated once at the end: a Set kept each predecessor once in first-seen order, and
-        # uniq! keeps that order. The lists are small, so this beats a Set per instruction.
-        preds = Array.new(@instructions.length) { [] }
-        preds[0] << ENTRY unless preds.empty?
+        # A slot holds nil, one Integer, or (from the second distinct predecessor on) an Array in first-seen order.
+        # Most instructions have one predecessor, whose list is then a shared frozen singleton (SINGLE_PREDECESSOR).
+        preds = Array.new(@instructions.length)
+        add_predecessor(preds, 0, ENTRY) unless preds.empty?
         @instructions.each do |instruction|
-          instruction.successors.each { |successor| preds[successor] << instruction.index }
+          instruction.successors.each { |successor| add_predecessor(preds, successor, instruction.index) }
         end
-        handler_edges.each { |edge| preds[edge.target] << edge.src } if include_handlers
-        preds.each do |list|
-          list.uniq!
-          list.freeze
+        handler_edges.each { |edge| add_predecessor(preds, edge.target, edge.src) } if include_handlers
+        preds.map! do |slot|
+          case slot
+          when nil then EMPTY_INDICES
+          when Integer then SINGLE_PREDECESSOR[slot]
+          else slot.freeze
+          end
         end.freeze
       end
     end
+
+    SINGLE_PREDECESSOR = Hash.new { |cache, index| cache[index] = [index].freeze }
+
+    def add_predecessor(preds, target, src)
+      slot = preds[target]
+      if slot.nil?
+        preds[target] = src
+      elsif slot.is_a?(Integer)
+        preds[target] = [slot, src] unless slot == src
+      elsif !slot.include?(src)
+        slot << src
+      end
+    end
+    private :add_predecessor
 
     # [source, target] instruction-index pairs of the given jump ops located
     # before +limit+, or nil when a jump's target address is not an instruction.

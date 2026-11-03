@@ -647,7 +647,7 @@ module NativeExpressionDevirt
   end
 
   def symbol_name(symbol)
-    match = symbol.match(/\A#{MRB_SYM_TOKEN_RE}\z/)
+    match = symbol.match(/\A#{MRB_SYM_TOKEN_RE}\z/o)
     match && resolve_mrb_sym_token(match[1], match[2])
   end
 

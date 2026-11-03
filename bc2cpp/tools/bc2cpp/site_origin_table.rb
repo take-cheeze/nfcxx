@@ -40,7 +40,7 @@ module SiteOriginTable
   ROWS = {}
   INSN_TEXT = {}
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     code = super
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]

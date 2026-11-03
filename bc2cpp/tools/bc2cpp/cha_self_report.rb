@@ -15,7 +15,7 @@ module ChaSelfReport
 
   ROWS = {}
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     code = super
     owner_def = kwargs[:owner_def]
     irep = kwargs[:irep]

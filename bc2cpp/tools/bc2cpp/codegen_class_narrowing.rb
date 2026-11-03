@@ -432,7 +432,7 @@ end
 # that the subject's class is in the set the proof assumes on the edge it took, and raises a guard violation
 # otherwise. A wrong closed-world fact then fails at the test, not as a call into the wrong body.
 module ClassNarrowingGuard
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     code = super
     plan = class_narrowing_guard_plan(insn, kwargs) unless code.include?('#error')
     plan ? class_narrowing_guarded(code, insn, kwargs, plan) : code

@@ -7,6 +7,7 @@ require_relative 'native_constructor_sigs'
 require_relative 'compiled_gems'
 require_relative 'ruby_parse_cache'
 require_relative 'scan_cache'
+require_relative 'lexical_scopes'
 
 # Construct, native-argument and super devirtualization targets.
 
@@ -278,11 +279,11 @@ def lexically_resolve_construct_target(written, owner)
   return nil if written.nil? || written.empty?
   return nil if owner.nil?
 
-  nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
-  return nil if nesting.empty?
+  prefixes = LexicalScopes.prefixes(owner)
+  return nil if prefixes.empty?
 
-  nesting.length.downto(1) do |n|
-    candidate = "#{nesting.first(n).join('::')}::#{written}"
+  prefixes.each do |prefix|
+    candidate = LexicalScopes.qualify(prefix, written)
     return candidate if construct_resolution_known?(candidate)
   end
 
@@ -317,20 +318,40 @@ end
 # reaching the read (BytecodeIR.reaching_definitions) and accepted only when
 # each one traces to the same class. Never applied with `dominated:`: RETURN
 # proofs run their own reaching-definition walk (return_value_sources).
-def trace_new_target(irep, idx, reg, *rest, dominated: nil, guarded: false, **opts)
-  return trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, guarded: guarded, **opts) if dominated && !dominated.is_a?(JoinDominance)
+# The trace options are spelled out rather than splatted (`*rest, **opts`): a splat costs an Array and two Hashes
+# per call, and these three functions recurse once per receiver question.
+def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
+                     class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
+                     known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
+                     dominated: nil, canonical: true, guarded: false)
+  if dominated && !dominated.is_a?(JoinDominance)
+    return trace_new_target_walk(irep, idx, reg, ivar_classes, mand, arg_classes,
+                                 resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                                 registry: registry, container_constants: container_constants,
+                                 element_annotations: element_annotations, known_owners: known_owners,
+                                 capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                                 method_return_class: method_return_class, dominated: dominated,
+                                 canonical: canonical, guarded: guarded)
+  end
 
   # A guarded consumer re-checks the class at run time, so a join costs it a compare. The mode is an argument of
   # this trace only: a trace nested in it (a callback, a return proof) asks for its own mode.
-  if guarded
-    klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: nil, guarded: true, **opts)
-    return klass || trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: true)
-  end
-
-  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: JoinDominance.for(irep), guarded: false, **opts)
+  klass = trace_new_target_walk(irep, idx, reg, ivar_classes, mand, arg_classes,
+                                resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                                registry: registry, container_constants: container_constants,
+                                element_annotations: element_annotations, known_owners: known_owners,
+                                capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                                method_return_class: method_return_class,
+                                dominated: guarded ? nil : JoinDominance.for(irep), canonical: canonical,
+                                guarded: guarded)
   return klass if klass
 
-  trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: false)
+  trace_new_target_reaching(irep, idx, reg, ivar_classes, mand, arg_classes,
+                            resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                            registry: registry, container_constants: container_constants,
+                            element_annotations: element_annotations, known_owners: known_owners,
+                            capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                            method_return_class: method_return_class, canonical: canonical, guarded: guarded)
 end
 
 # JOIN_DOMINANCE: every hop of the walk must dominate the read it
@@ -354,37 +375,63 @@ class JoinDominance
 end
 
 # Queries being answered, so a value that flows into its own definition (a
-# loop-carried `x = x.foo`) fails instead of recursing.
+# loop-carried `x = x.foo`) fails instead of recursing. Keyed by irep label, then
+# by reaching_key's packed (idx, reg, resolving_new).
 module TraceReaching
-  IN_PROGRESS = Set.new
+  IN_PROGRESS = Hash.new { |table, label| table[label] = Set.new }
+  # mruby register numbers are 16-bit (irep->nregs), so the packing is injective.
+  REG_LIMIT = 0x1_0000
+
+  def self.key(idx, reg, resolving_new)
+    raise ArgumentError, "bc2cpp: register #{reg.inspect} out of range" unless reg.is_a?(Integer) && reg.between?(0, REG_LIMIT - 1)
+
+    (((idx * REG_LIMIT) + reg) * 2) + (resolving_new ? 1 : 0)
+  end
 end
 
-def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
+def trace_new_target_reaching(irep, idx, reg, ivar_classes, mand, arg_classes, resolving_new:, owner:, class_layout:,
+                              registry:, container_constants:, element_annotations:, known_owners:, capture_hints:,
+                              ret_class_proof:, method_return_class:, canonical:, guarded:)
   return nil unless idx&.positive? && reg
 
-  key = [irep.label, idx, reg, opts[:resolving_new] ? true : false]
-  return nil unless TraceReaching::IN_PROGRESS.add?(key)
+  in_progress = TraceReaching::IN_PROGRESS[irep.label]
+  key = TraceReaching.key(idx, reg, resolving_new)
+  return nil unless in_progress.add?(key)
 
   begin
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
     return nil if defs.nil? || defs.empty?
 
-    _ivar_classes, mand, arg_classes = rest
-    classes = defs.map do |definition|
-      if definition.entry?
-        # Register N is argument N for N <= mand; only an annotation names its class.
-        pos = definition.reg.to_i
-        (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)) || rest_entry_class(irep, pos)
-      else
-        # The definition's own walk continues past it into the join (a `.new` send walks its receiver), so an
-        # unguarded hop must dominate the read it feeds. A guarded consumer accepts the join-blind answer.
-        trace_new_target_walk(irep, definition.index + 1, definition.reg, *rest,
-                              dominated: guarded ? nil : JoinDominance.for(irep), guarded: guarded, **opts)
+    # Unanimity: the first definition's class when every one traces to it. Every definition is still traced, as
+    # the walks feed the shared memo tables.
+    first = nil
+    unanimous = true
+    defs.each_with_index do |definition, k|
+      klass = if definition.entry?
+                # Register N is argument N for N <= mand; only an annotation names its class.
+                pos = definition.reg.to_i
+                (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)) || rest_entry_class(irep, pos)
+              else
+                # The definition's own walk continues past it into the join (a `.new` send walks its receiver), so
+                # an unguarded hop must dominate the read it feeds. A guarded consumer accepts the join-blind answer.
+                trace_new_target_walk(irep, definition.index + 1, definition.reg, ivar_classes, mand, arg_classes,
+                                      resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                                      registry: registry, container_constants: container_constants,
+                                      element_annotations: element_annotations, known_owners: known_owners,
+                                      capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                                      method_return_class: method_return_class,
+                                      dominated: guarded ? nil : JoinDominance.for(irep), canonical: canonical,
+                                      guarded: guarded)
+              end
+      if k.zero?
+        first = klass
+      elsif klass != first
+        unanimous = false
       end
     end
-    classes.first if classes.first && classes.uniq.size == 1
+    first if unanimous
   ensure
-    TraceReaching::IN_PROGRESS.delete(key)
+    in_progress.delete(key)
   end
 end
 
@@ -465,7 +512,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # The trace can stop at a block's GETUPVAR before reaching the captured
       # container; the callsite hint is limited to annotated Hash arguments.
       recv_class ||= capture_hints&.dig(irep.label, captured_reg, :container_class) if captured_reg
-      recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if recv_class && known_owners
+      recv_class = resolve_owner_name_in(recv_class, owner, known_owners) if recv_class && known_owners
       arg_pos = arg_reg&.to_i
       if recv_class == 'Hash' && arg_pos && arg_pos.between?(1, mand) &&
          element_annotations[irep.label]&.arg_containers&.[](arg_pos - 1) == 'Hash'
@@ -531,7 +578,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
                                        ret_class_proof: ret_class_proof, method_return_class: method_return_class,
                                        dominated: dominated, canonical: canonical, guarded: guarded)
         return singleton_declared_return(registry, element_annotations, name) unless recv_class
-        recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
+        recv_class = resolve_owner_name_in(recv_class, owner, known_owners) if known_owners
 
         if element_annotations
           annotated = registry[name]&.find do |md|
@@ -591,7 +638,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
 
       ivar = insn.ivar
       klass = ivar_classes && ivar_classes[ivar]
-      return klass && known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
+      return klass && known_owners ? resolve_owner_name_in(klass, owner, known_owners) : klass
     when BytecodeIR::Receivers::UPVAR_READ
       return nil if resolving_new || !path.empty?
 
@@ -628,7 +675,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
       const_name = insn.const_name
-      written = ([const_name] + path).join('::')
+      written = path.empty? ? const_name : ([const_name] + path).join('::')
 
       # RELATIVE_CONST_UNDER_NEW (resolving_new): the `.new` receiver may be a
       # RELATIVE constant -- inside `module LCF`, `EventCommand.new` is
@@ -660,16 +707,16 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
           return written
         end
 
-        nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
-        hit = nesting.length.downto(1).filter_map do |n|
-          candidate = "#{nesting.first(n).join('::')}::#{written}"
-          candidate if known_owners&.include?(candidate) || construct_resolution_known?(candidate)
+        hit = nil
+        LexicalScopes.prefixes(owner).each do |prefix|
+          candidate = LexicalScopes.qualify(prefix, written)
+          hit ||= candidate if known_owners&.include?(candidate) || construct_resolution_known?(candidate)
         end
-        return hit.first unless hit.empty?
+        return hit if hit
         # UNIQUE_CLASS_NAME: a bare constant may be reachable through an
         # Object-included module (for example Bitmap -> RGSS::Bitmap). Resolve
         # only names already proven unique and reachable at this lexical site.
-        if path.empty? && hit.empty? && (unique = UniqueClassNames.resolve(const_name, owner)) &&
+        if path.empty? && (unique = UniqueClassNames.resolve(const_name, owner)) &&
            (known_owners&.include?(unique) || construct_resolution_known?(unique))
           return canonical ? unique : const_name
         end
@@ -702,9 +749,8 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
         # A bare reference (`STAT_NAMES.each`): lexical lookup innermost first against
         # `container_constants`; absent everywhere means nil.
         if owner
-          nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
-          nesting.length.downto(1) do |n|
-            candidate = "#{nesting.first(n).join('::')}::#{const_name}"
+          LexicalScopes.prefixes(owner).each do |prefix|
+            candidate = LexicalScopes.qualify(prefix, const_name)
             return container_constants[candidate] if container_constants.key?(candidate)
           end
         end
@@ -719,7 +765,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # an already-qualified `Game::Transition` resolves through that fallback.
       # Consumers also guard with `mrb_class_ptr(recv) == ...` at runtime, but this
       # does not rely on it.
-      written = ([const_name] + path).join('::')
+      written = path.empty? ? const_name : ([const_name] + path).join('::')
       resolved = lexically_resolve_construct_target(written, owner)
       return resolved if resolved
       # UNIQUE_CLASS_NAME: construct-target callers (canonical: false) key their

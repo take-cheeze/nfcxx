@@ -43,7 +43,7 @@ module ComputedSend
   TABLE_FREEZERS = [%w[Array freeze], %w[Hash freeze], %w[Object freeze], %w[Kernel freeze]].freeze
   DYNAMIC_ARM = /\b(?:bc2cpp_send|bc2cpp_funcall\w*|mrb_funcall\w*|bc2cpp_nomethod\w*|bc2cpp_guard_violation\w*|bc2cpp_hint_violation\w*)\(|#error/
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     computed_send_expansion(insn, kwargs) { super } || super
   end
 

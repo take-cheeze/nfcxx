@@ -196,11 +196,22 @@ def rest_only_block?(block_irep)
   enter && enter.enter_fields == [0, 0, 1, 0, 0, 0, 0, 0]
 end
 
+# MIXED_REST_BLOCK: `{ |x, *r| }` (ENTER m:0:1:0:0:0:0:0, m >= 1): the mandatory parameters and one rest. The fallback
+# body takes the m values and the rest Array as its parameters; the glue applies vm.c's autosplat (one Array argument
+# over several parameters) before it binds them, as the non-rest block does.
+def mixed_rest_block?(block_irep)
+  enter = block_irep.enter
+  return false unless enter
+
+  fields = enter.enter_fields.map(&:to_i)
+  fields.first.positive? && fields == [fields.first, 0, 1, 0, 0, 0, 0, 0]
+end
+
 # The irep-only half of the block-fallback gate (arity plus the unsafe-op
 # scan). The upvar-depth check lives in recognize_block_fallback_regions
 # (`available_upvars`), which knows what the enclosing level can supply.
 def block_fallback_safe?(block_irep)
-  return false unless pure_mandatory_arity?(block_irep) || rest_only_block?(block_irep)
+  return false unless pure_mandatory_arity?(block_irep) || rest_only_block?(block_irep) || mixed_rest_block?(block_irep)
 
   !BytecodeIR.for(block_irep).op?(*BLOCK_FALLBACK_UNSAFE_OPS)
 end
