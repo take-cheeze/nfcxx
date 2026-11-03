@@ -68,13 +68,15 @@ class CodeGen
     slot_assigned_below?(facts, owner, ivar) && !facts.names.include?(ivar)
   end
 
+  NO_SLOT_STACK = [].freeze
+
   def slot_assigned_below?(facts, klass, ivar)
     subtree = facts.subtrees[klass] or return false
     return false if @outside_ivar_names.include?(ivar)
 
     subtree.all? do |k|
       init, chain = facts.inits.fetch(k)
-      slot_assigns_on_exit?(init.irep, ivar, chain, [])
+      slot_assigns_on_exit?(init.irep, ivar, chain, NO_SLOT_STACK)
     end
   end
 
@@ -391,12 +393,12 @@ class CodeGen
   # `super` counts when its exact target assigns it. A raise is not a normal exit, so a handler starts from the
   # state before the instruction that raised.
   def slot_assigns_on_exit?(label, ivar, chain, stack)
-    key = [label, ivar, chain]
-    @slot_assigns ||= {}
-    return @slot_assigns[key] if @slot_assigns.key?(key)
+    # Keyed label -> ivar -> chain, so a hit builds no key Array.
+    memo = ((@slot_assigns ||= {})[label] ||= {})[ivar] ||= {}
+    return memo[chain] if memo.key?(chain)
     return false if stack.include?(label)
 
-    @slot_assigns[key] = slot_assigns_on_exit_uncached?(label, ivar, chain, stack + [label])
+    memo[chain] = slot_assigns_on_exit_uncached?(label, ivar, chain, stack + [label])
   end
 
   def slot_assigns_on_exit_uncached?(label, ivar, chain, stack)

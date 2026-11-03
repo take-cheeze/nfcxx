@@ -26,7 +26,7 @@ module InterfaceTableReport
     line
   end
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     outer = @itab_fallbacks
     @itab_fallbacks = []
     code = super

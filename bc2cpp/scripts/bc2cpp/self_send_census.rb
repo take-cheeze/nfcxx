@@ -57,7 +57,7 @@ module SelfSendCensus
   end
 
   module Hook
-    def compile_send(insn, **kwargs)
+    def compile_send(insn, kwargs)
       code = super
       irep = kwargs[:irep]
       idx = kwargs[:idx]

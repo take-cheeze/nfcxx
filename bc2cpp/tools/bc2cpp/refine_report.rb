@@ -34,7 +34,7 @@ module RefineReport
     line
   end
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     outer = @refine_fallbacks
     @refine_fallbacks = []
     code = super

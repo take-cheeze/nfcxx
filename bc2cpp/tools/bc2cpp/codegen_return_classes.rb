@@ -1171,7 +1171,9 @@ class CodeGen
 
   # Inside a NILABLE_RECEIVER non-nil arm the one receiver register the arm tested is not nil.
   def exact_flow_strip_nil(irep, idx, reg, mask)
-    @nonnil_receiver == [irep.label, idx, reg] ? mask & ~NumericFlow::NIL : mask
+    # `key == [irep.label, idx, reg]` without building the Array on every query.
+    key = @nonnil_receiver
+    key && key.size == 3 && key[0] == irep.label && key[1] == idx && key[2] == reg ? mask & ~NumericFlow::NIL : mask
   end
 
   def with_nonnil_receiver(key)

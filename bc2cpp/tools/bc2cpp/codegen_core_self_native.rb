@@ -27,7 +27,7 @@ module CoreSelfNative
 
   # The site being compiled when it is an implicit-self send (SSEND) on the method's register 0, so the
   # by-name line it may end in (a bare dispatch, or the else of a fast path) can be the cached native call.
-  def compile_send(insn, **kw)
+  def compile_send(insn, kw)
     site = kw[:self_implicit] && kw[:call_receiver].nil? && kw.fetch(:trace_reg_offset, 0).zero? &&
            %i[SSEND0 SSEND].include?(insn.op) ? [kw[:irep], kw[:owner_def]] : nil
     saved = @core_self_native_site
