@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'reg_name'
+
 # TAGGED_FIXNUM: the Fixnum arms of + - * and the ordering/equality compares work on the boxed word itself when the
 # boxing makes that exact (word boxing, fixnum = (n << 1) | 1, mrb_int as wide as the word); every other build keeps
 # the unbox/rebox form. The soundness argument per target is in docs/bc2cpp-tagged-fixnum.md.
@@ -90,7 +92,8 @@ module TaggedFixnum
   # (RESUMABLE_REGISTER_ADDRESS).
   def tier(name, dest, rhs)
     helper, slow = OPS.fetch(name)
-    "if (#{BranchHints.unlikely("#{helper}(r#{dest}, #{rhs}, r#{dest})")}) { r#{dest} = #{slow}(M, r#{dest}, #{rhs}); }"
+    reg = RegName[dest]
+    "if (#{BranchHints.unlikely("#{helper}(#{reg}, #{rhs}, #{reg})")}) { #{reg} = #{slow}(M, #{reg}, #{rhs}); }"
   end
 
   def pair(left, right)

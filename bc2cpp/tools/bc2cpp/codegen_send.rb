@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'reg_name'
 require_relative 'tagged_fixnum'
 require_relative 'bytecode_ir_containers'
 require_relative 'class_world_gate'
@@ -50,8 +51,8 @@ class CodeGen
     end
 
     n = insn.argc || 0
-    recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
-    argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
+    recv = call_receiver || (self_implicit ? 'self' : "#{RegName[d]}")
+    argv = call_arguments || (1..n).map { |k| "#{RegName[d.to_i + k]}" }
     new_proof_idx = idx || trace_idx
     new_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     # GUARD_VIOLATION: the original SEND whose own registers the proofs read; an inlined
@@ -87,11 +88,11 @@ class CodeGen
              "    mrb_value bc2cpp_exc_message = mrb_exc_ptr(#{recv})->mesg ? " \
              "mrb_obj_value(mrb_exc_ptr(#{recv})->mesg) : mrb_nil_value();\n" \
              "    if (!mrb_string_p(bc2cpp_exc_message)) {\n" \
-             "      r#{d} = mrb_str_new_cstr(M, mrb_obj_classname(M, #{recv}));\n" \
+             "      #{RegName[d]} = mrb_str_new_cstr(M, mrb_obj_classname(M, #{recv}));\n" \
              "    } else {\n" \
              "      struct RObject* bc2cpp_exc_message_obj = mrb_obj_ptr(bc2cpp_exc_message);\n" \
              "      if (!bc2cpp_exc_message_obj->c) bc2cpp_exc_message_obj->c = M->string_class;\n" \
-             "      r#{d} = bc2cpp_exc_message;\n" \
+             "      #{RegName[d]} = bc2cpp_exc_message;\n" \
              "    }\n" \
              "  }\n"
     end
@@ -105,7 +106,7 @@ class CodeGen
       return "  // IO_PUTS_MODEL: shared bc2cpp_io_puts; exact core IO#puts body, else dispatch by name.\n" \
              "  {\n" \
              "#{args_decl}" \
-             "    r#{d} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv});\n" \
+             "    #{RegName[d]} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv});\n" \
              "  }\n"
     end
 
@@ -155,7 +156,7 @@ class CodeGen
                  "Object#===/Symbol#== both confirmed native/unoverridden anywhere in this program's " \
                  "own whole-program registry -- sound unconditionally, no mrb_funcall fallback ever " \
                  "needed (see eqq_literal_devirt_safe?'s own comment).\n"
-          return "#{note}  r#{d} = mrb_bool_value(mrb_symbol_p(#{arg}) && " \
+          return "#{note}  #{RegName[d]} = mrb_bool_value(mrb_symbol_p(#{arg}) && " \
                  "mrb_symbol(#{arg}) == mrb_intern_cstr(M, \"#{literal[:name]}\"));\n"
         when :fixnum
           # Only an exactly-Integer `arg`: mrb_equal (object.c) does Integer<->Float
@@ -170,7 +171,7 @@ class CodeGen
                  "a Float/Bigint/other-typed arg falls back to real mrb_funcall (mrb_equal's own " \
                  "Integer<->Float/Bigint cross-type comparison, see this block's own top comment).\n"
           return "#{note}  if (mrb_fixnum_p(#{arg})) {\n" \
-                 "    r#{d} = mrb_bool_value(mrb_fixnum(#{arg}) == #{literal[:value]});\n" \
+                 "    #{RegName[d]} = mrb_bool_value(mrb_fixnum(#{arg}) == #{literal[:value]});\n" \
                  "  } else {\n" \
                  "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
                  "  }\n"
@@ -195,7 +196,7 @@ class CodeGen
              "  #else\n" \
              "  if (mrb_float_p(#{recv})) {\n" \
              "  #endif\n" \
-             "    r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
+             "    #{RegName[d]} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
              "  } else {\n" \
              "    #{fallback.chomp}\n" \
              "  }\n"
@@ -237,7 +238,7 @@ class CodeGen
           dims = argv.each_with_index.map { |arg, i| "bc2cpp_table_dim_#{d}_#{i}" }
           declarations = argv.zip(dims).map { |arg, local| "mrb_int #{local} = mrb_as_int(M, #{arg});" }
           padded_dims = dims + Array.new(3 - dims.size, '1')
-          call = "r#{d} = #{native[:fn]}(M, #{native[:class_fn]}(), #{n}, #{padded_dims.join(', ')});"
+          call = "#{RegName[d]} = #{native[:fn]}(M, #{native[:class_fn]}(), #{n}, #{padded_dims.join(', ')});"
           class_guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
           fallback = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
                        guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY').chomp
@@ -320,7 +321,7 @@ class CodeGen
                 "  //#{note_extra} #{native[:fn]}'s own parameters are native mrb_int/",
                 "mrb_float, not mrb_value (except :object, passed straight through), so this call site #{unbox_phrase}, ",
                 "and passes #{class_value} as the exact native class pointer.\n"].join
-        call = native_param_unbox_block(unbox_stmts, "r#{d} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n")
+        call = native_param_unbox_block(unbox_stmts, "#{RegName[d]} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n")
         return "#{note}  #{call}" unless guard
 
         # NATIVE_CONSTRUCT_SHAPE: an argument shape `fn` does not take (Bitmap's file-load form) is still
@@ -329,7 +330,7 @@ class CodeGen
         shape_fallback = lambda do |klass_expr|
           args = argv.empty? ? '0, NULL' : "#{n}, bc2cpp_new_args"
           decl = argv.empty? ? '' : "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} }; "
-          "{ #{decl}r#{d} = mrb_obj_new(M, #{klass_expr}, #{args}); }\n"
+          "{ #{decl}#{RegName[d]} = mrb_obj_new(M, #{klass_expr}, #{args}); }\n"
         end
         # GUARD_VIOLATION: the class test cannot fail; only the argument tags still can.
         if class_guard && new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
@@ -477,8 +478,8 @@ class CodeGen
                       "  // The class identity guard preserves ordinary dispatch if the constant was rebound.\n")].join
             if stable_constructor
               return "#{note}  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{init_def.owner}\n" \
-                     "  r#{d} = bc2cpp_direct_alloc(M, #{accessor});\n" \
-                     "  #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n"
+                     "  #{RegName[d]} = bc2cpp_direct_alloc(M, #{accessor});\n" \
+                     "  #{init_impl}(M, #{(["#{RegName[d]}"] + call_args).join(', ')});\n"
             end
 
             else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
@@ -488,8 +489,8 @@ class CodeGen
                        end
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
-                   "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-                   "    #{init_impl}(M, #{(["r#{d}"] + call_args).join(', ')});\n" \
+                   "    #{RegName[d]} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
+                   "    #{init_impl}(M, #{(["#{RegName[d]}"] + call_args).join(', ')});\n" \
                    "  } else {\n" \
                    "    #{else_arm}" \
                    "  }\n"
@@ -518,10 +519,10 @@ class CodeGen
                                   exact_constructor_chain?(known))
       if known && generic_constructor_safe
         construction = if argv.empty?
-                       "    r#{d} = mrb_obj_new(M, mrb_class_ptr(#{recv}), 0, NULL);\n"
+                       "    #{RegName[d]} = mrb_obj_new(M, mrb_class_ptr(#{recv}), 0, NULL);\n"
                        else
                          "    mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} };\n" +
-                           "    r#{d} = mrb_obj_new(M, mrb_class_ptr(#{recv}), #{n}, bc2cpp_new_args);\n"
+                           "    #{RegName[d]} = mrb_obj_new(M, mrb_class_ptr(#{recv}), #{n}, bc2cpp_new_args);\n"
                        end
         note = "  // MONO :new -> #{known}, generic direct object construction via mrb_obj_new; " +
                "standard Class#new/allocate lookup is proven and #initialize remains ordinary runtime dispatch.\n"
@@ -580,7 +581,7 @@ class CodeGen
           class_accessor = NATIVE_WRAPPER_CLASS_ACCESSORS.fetch(owner)
           helper = helpers.fetch(owner)
           "if (#{exact_class_guard("rgss::#{class_accessor}()", recv)}) {\n" \
-            "  r#{d} = rgss::#{helper}(M, #{recv});\n} else "
+            "  #{RegName[d]} = rgss::#{helper}(M, #{recv});\n} else "
         end.join
         fallback = with_native_arms_emitted(name, owners) do
           compile_poly_dispatch(name, d, recv, argv, n,
@@ -599,7 +600,7 @@ class CodeGen
       return <<~CPP
           // RGSS Bitmap#fill_rect -- exact runtime class proves the native wrapper target
           if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
-            r#{d} = rgss::bitmap_fill_rect_direct(M, #{recv},
+            #{RegName[d]} = rgss::bitmap_fill_rect_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{argv[4]});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -612,7 +613,7 @@ class CodeGen
       return <<~CPP
           // RGSS Bitmap#blt -- exact runtime class proves the native wrapper target
           if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
-            r#{d} = rgss::bitmap_blt_direct(M, #{recv},
+            #{RegName[d]} = rgss::bitmap_blt_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{opacity}, #{opacity_given});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -625,7 +626,7 @@ class CodeGen
       return <<~CPP
           // RGSS Bitmap#stretch_blt -- exact runtime class proves the native wrapper target
           if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
-            r#{d} = rgss::bitmap_stretch_blt_direct(M, #{recv},
+            #{RegName[d]} = rgss::bitmap_stretch_blt_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{opacity}, #{opacity_given});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -637,7 +638,7 @@ class CodeGen
           // RGSS Bitmap#draw_text -- exact runtime class proves the native wrapper target
           if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
             mrb_value bc2cpp_draw_text_args[] = { #{argv.join(', ')} };
-            r#{d} = rgss::bitmap_draw_text_direct(M, #{recv}, #{n}, bc2cpp_draw_text_args);
+            #{RegName[d]} = rgss::bitmap_draw_text_direct(M, #{recv}, #{n}, bc2cpp_draw_text_args);
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
@@ -647,7 +648,7 @@ class CodeGen
       return <<~CPP
           // RGSS Bitmap#copy_blt -- exact runtime class proves the native wrapper target
           if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
-            r#{d} = rgss::bitmap_copy_blt_direct(M, #{recv},
+            #{RegName[d]} = rgss::bitmap_copy_blt_direct(M, #{recv},
                 #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
@@ -658,7 +659,7 @@ class CodeGen
       return <<~CPP
           // RGSS Bitmap#text_size -- exact runtime class proves the native wrapper target
           if (#{exact_class_guard("rgss::native_bitmap_class()", recv)}) {
-            r#{d} = rgss::bitmap_text_size_direct(M, #{recv}, #{argv.first});
+            #{RegName[d]} = rgss::bitmap_text_size_direct(M, #{recv}, #{argv.first});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
@@ -684,7 +685,7 @@ class CodeGen
         return <<~CPP
             // RGSS Window##{name} -- frame-independent native body under exact class identity
             if (#{exact_class_guard("rgss::native_window_class()", recv)}) {
-              r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
+              #{RegName[d]} = rgss::#{direct}(M, #{recv}, #{argv.first});
             } else {
               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
             }
@@ -699,7 +700,7 @@ class CodeGen
         return <<~CPP
             // RGSS Sprite##{name} -- frame-independent native body under exact class identity
             if (#{exact_class_guard("rgss::native_sprite_class()", recv)}) {
-              r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
+              #{RegName[d]} = rgss::#{direct}(M, #{recv}, #{argv.first});
             } else {
               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
             }
@@ -713,7 +714,7 @@ class CodeGen
         return <<~CPP
             // RGSS Viewport#tone= -- frame-independent native body under exact class identity
             if (#{exact_class_guard("rgss::native_viewport_class()", recv)}) {
-              r#{d} = rgss::viewport_tone_set_direct(M, #{recv}, #{argv.first});
+              #{RegName[d]} = rgss::viewport_tone_set_direct(M, #{recv}, #{argv.first});
             } else {
               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
             }
@@ -727,7 +728,7 @@ class CodeGen
       return <<~CPP
           // RGSS Sprite#opacity= -- exact runtime class identity proves the native wrapper target
           if (#{exact_class_guard("rgss::native_sprite_class()", recv)}) {
-            r#{d} = rgss::sprite_opacity_set_direct(M, #{recv}, #{argv.first});
+            #{RegName[d]} = rgss::sprite_opacity_set_direct(M, #{recv}, #{argv.first});
           } else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
           }
@@ -746,7 +747,7 @@ class CodeGen
           keyword = i.zero? ? 'if' : 'else if'
           <<~CPP.chomp
             #{keyword} (#{exact_class_guard("rgss::#{class_fn}()", recv)}) {
-              r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
+              #{RegName[d]} = rgss::#{direct}(M, #{recv}, #{argv.first});
             }
           CPP
         end.join(' ')
@@ -802,15 +803,15 @@ class CodeGen
             }
             if (bc2cpp_slice_start < 0 || bc2cpp_slice_array_length < bc2cpp_slice_start ||
                 bc2cpp_slice_length < 0) {
-              r#{d} = mrb_nil_value();
+              #{RegName[d]} = mrb_nil_value();
             } else {
               if (bc2cpp_slice_length > bc2cpp_slice_array_length - bc2cpp_slice_start) {
                 bc2cpp_slice_length = bc2cpp_slice_array_length - bc2cpp_slice_start;
               }
               if (bc2cpp_slice_length == 0) {
-                r#{d} = mrb_ary_new(M);
+                #{RegName[d]} = mrb_ary_new(M);
               } else {
-                r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_length,
+                #{RegName[d]} = mrb_ary_new_from_values(M, bc2cpp_slice_length,
                     ary_items(#{recv}) + bc2cpp_slice_start);
               }
             }
@@ -832,7 +833,7 @@ class CodeGen
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
               mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
             bc2cpp_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
-            r#{d} = #{replacement};
+            #{RegName[d]} = #{replacement};
           } else {
             #{fallback.chomp}
           }
@@ -849,7 +850,7 @@ class CodeGen
           // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
           if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
             bc2cpp_ary_push(M, #{recv}, #{value});
-            r#{d} = #{recv};
+            #{RegName[d]} = #{recv};
           } else {
             #{fallback.chomp}
           }
@@ -883,7 +884,7 @@ class CodeGen
             // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
             if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
               bc2cpp_ary_push(M, #{recv}, #{value});
-              r#{d} = #{recv};
+              #{RegName[d]} = #{recv};
             } else\x20
         CPP
       end
@@ -895,9 +896,9 @@ class CodeGen
           if (#{shift_ok}) {
             mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
             if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
-              r#{d} = #{recv};
+              #{RegName[d]} = #{recv};
             } else if (mrb_num_shift(M, bc2cpp_shl_v, bc2cpp_shl_w, &bc2cpp_shl_out)) {
-              r#{d} = mrb_int_value(M, bc2cpp_shl_out);
+              #{RegName[d]} = mrb_int_value(M, bc2cpp_shl_out);
             } else {
               #{fallback}
             }
@@ -920,7 +921,7 @@ class CodeGen
           // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
           if (#{BranchHints.likely("mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class")}) {
             bc2cpp_ary_push(M, #{recv}, #{value});
-            r#{d} = #{recv};
+            #{RegName[d]} = #{recv};
           } else {
             #{fallback.chomp}
           }
@@ -938,19 +939,19 @@ class CodeGen
                       // mask for either sign; the test folds away unless the divisor is a constant.
                       if (__builtin_constant_p(bc2cpp_mod_right) && bc2cpp_mod_right > 0 &&
                           (bc2cpp_mod_right & (bc2cpp_mod_right - 1)) == 0) {
-                        r#{d} = mrb_fixnum_value(bc2cpp_mod_left & (bc2cpp_mod_right - 1));
+                        #{RegName[d]} = mrb_fixnum_value(bc2cpp_mod_left & (bc2cpp_mod_right - 1));
                       } else if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
-                        r#{d} = mrb_fixnum_value(0);
+                        #{RegName[d]} = mrb_fixnum_value(0);
                       } else {
                         mrb_int bc2cpp_mod_value = bc2cpp_mod_left % bc2cpp_mod_right;
                         if ((bc2cpp_mod_left < 0) != (bc2cpp_mod_right < 0) && bc2cpp_mod_value != 0) {
                           bc2cpp_mod_value += bc2cpp_mod_right;
                         }
-                        r#{d} = mrb_fixnum_value(bc2cpp_mod_value);
+                        #{RegName[d]} = mrb_fixnum_value(bc2cpp_mod_value);
                       }
                     CPP
                   else
-                    "r#{d} = #{TaggedFixnum.bitop(left, name, right)};"
+                    "#{RegName[d]} = #{TaggedFixnum.bitop(left, name, right)};"
                   end
       return <<~CPP
           // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
@@ -1004,7 +1005,7 @@ class CodeGen
             }
           }
           if (#{BranchHints.likely('bc2cpp_shift_fast')}) {
-            r#{d} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
+            #{RegName[d]} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
           } else {
             #{fallback.chomp}
           }
@@ -1019,7 +1020,7 @@ class CodeGen
       return <<~CPP
           // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
           if (#{BranchHints.likely(TaggedFixnum.pair(left, right))}) {
-            r#{d} = mrb_bool_value(#{TaggedFixnum.compare(left, operator, right)});
+            #{RegName[d]} = mrb_bool_value(#{TaggedFixnum.compare(left, operator, right)});
           } else {
             #{fallback.chomp}
           }
@@ -1038,7 +1039,7 @@ class CodeGen
             mrb_int bc2cpp_slice_len = mrb_fixnum(#{length});
             mrb_int bc2cpp_array_len = ary_size(bc2cpp_slice_receiver);
             if (bc2cpp_slice_len > bc2cpp_array_len) bc2cpp_slice_len = bc2cpp_array_len;
-            r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_len, ary_items(bc2cpp_slice_receiver));
+            #{RegName[d]} = mrb_ary_new_from_values(M, bc2cpp_slice_len, ary_items(bc2cpp_slice_receiver));
             mrb_ary_splice(M, bc2cpp_slice_receiver, 0, bc2cpp_slice_len, mrb_undef_value());
           } else {
             #{fallback.chomp}
@@ -1305,7 +1306,7 @@ class CodeGen
         if user_receiver_union
           note = "  // USER_RECEIVER_UNION :#{name} -> #{target.owner}##{target.name}, every exact receiver selects this body, " \
                  "direct C++ call with no class guard or fallback#{native_note}\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
         if exact_class_dispatch
           origin = if exact_via_record then 'record key holds only fresh'
@@ -1316,17 +1317,17 @@ class CodeGen
             note = "  // LCF_ROW_FLOW :#{name} -> #{target.owner}##{target.name} (the class flow proves the receiver is " \
                    "exactly #{typed_guard_class}#{lcf_nilable ? ' or nil' : ''}), closed-world lookup, direct C++ call " \
                    "with no class guard or mrb_funcall fallback#{native_note}\n"
-            call = "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+            call = "#{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
             return "#{note}  #{call}\n" unless lcf_nilable
 
             nil_args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
-            return "#{note}  if (mrb_nil_p(#{recv})) {\n    r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{nil_args});\n" \
+            return "#{note}  if (mrb_nil_p(#{recv})) {\n    #{RegName[d]} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{nil_args});\n" \
                    "  } else {\n    #{call}\n  }\n"
           end
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
                  "(#{origin} #{typed_guard_class}.new; stable class constant and standard constructor), " \
                  "closed-world lookup, direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         check_owner = typed_guard_class || target.owner
@@ -1336,7 +1337,7 @@ class CodeGen
         if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
           note = "  // EXACT_TYPED :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
                  "#{check_owner}), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         # ELEMENT_CLASS_SUPPORT: the tag records which fact proved the receiver.
@@ -1367,7 +1368,7 @@ class CodeGen
                                                              trace_insn: insn, trace_reg_offset: trace_reg_offset))
                    end
         "#{note}  if (#{BranchHints.likely(check)}) {\n" \
-          "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
+          "    #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
           "    #{fallback}" \
           "  }\n"
@@ -1375,12 +1376,12 @@ class CodeGen
         note = "  // MODULE_FUNCTION_SELF :#{name} -> #{target.owner}.singleton##{target.name} " \
                "(the compiled source body runs with its module object as self), direct C++ call " \
                "(no mrb_funcall, no runtime check)#{native_note}\n"
-        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       elsif lexical_self
         note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
                "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
                "no runtime check)#{native_note}\n"
-        note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        note + "  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       elsif embeds_storage?(target.owner)
         # MONO_EMBED_GUARD: MONO says nothing about method_missing: a class answering a
         # name via method_missing (LCF::Array1D/Array2D) adds no registry entry, so
@@ -1399,7 +1400,7 @@ class CodeGen
         if cw_site && cw_site[:self_owner] == target.owner && @closed_world.exact_class?(target.owner)
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self, exactly " \
                  "#{target.owner}: no subclass in the closed world), direct C++ call#{native_note}\n"
-          return note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return note + "  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         # CHA_SELF: the same for a class with subclasses, when none of them can
@@ -1411,7 +1412,7 @@ class CodeGen
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self in " \
                  "#{cw_site[:self_owner]}; class hierarchy analysis: no descendant defines or mixes in " \
                  "the name), direct C++ call#{native_note}\n"
-          return note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return note + "  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         # RECORD_HASH_PROOF: the receiver is a record key that only holds fresh instances of
@@ -1420,7 +1421,7 @@ class CodeGen
            record_hash_exact_class(irep, idx || trace_idx, unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)) == target.owner
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} (record key holds only " \
                  "fresh #{target.owner}.new), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         # The exact receiver proof establishes the same identity the payload guard checks.
@@ -1428,7 +1429,7 @@ class CodeGen
            exact_flow_class(irep, guard_proof_site, drawing_proof_reg) == target.owner
           note = "  // MONO_EXACT_FLOW :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
                  "#{target.owner}), direct C++ call with no class guard#{native_note}\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         check = exact_class_guard(owner_class_ptr_expr(target.owner), recv)
@@ -1442,7 +1443,7 @@ class CodeGen
         fallback = strict_hint_wrap('mono_embed', d, recv, name, argv, target.owner, hinted: hinted) do
           guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
         end
-        body = "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        body = "    #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         "#{note}  if (#{BranchHints.likely(check)}) {\n" \
           "#{body}" \
           "  } else {\n" \
@@ -1458,7 +1459,7 @@ class CodeGen
         # would run this owner's body instead of raising.
         miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
                                   trace_reg_offset)
-        note + miss + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        note + miss + "  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       end
     elsif lexical_self_ivar_accessor
       # LEXICAL_SELF_IVAR_ACCESSOR codegen: no guard, no fallback; IVAR_ACCESS picks
@@ -1531,7 +1532,7 @@ class CodeGen
           expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if exact_entry[:arity] == 1
           return "  // CLOSED_WORLD_NATIVE_EXACT :#{name} -> #{known_class} native body; " \
                  "fresh exact-class receiver, no dispatch fallback\n" \
-                 "  r#{d} = #{expression};\n"
+                 "  #{RegName[d]} = #{expression};\n"
         end
 
         union = !self_implicit && native_expression_union_code(name, d, recv, argv, irep, constant_site_idx, exact_reg)
@@ -2406,7 +2407,7 @@ class CodeGen
 
   # Every definition of the receiver register reaching the send is a LOADSELF of this irep.
   def receiver_loaded_self?(recv, irep, idx)
-    reg = recv[/\Ar(\d+)\z/, 1]&.to_i
+    reg = RegName.number(recv)
     return false unless reg && irep && idx
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, shared: true)

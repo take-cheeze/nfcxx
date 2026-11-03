@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'reg_name'
 
 # CodeGen: POLY_SMALL_N chains, ivar access and outlined index helpers.
 
@@ -377,7 +378,7 @@ class CodeGen
              else
                impl = cpp_name(target.owner, target.name) + '_impl'
                call_argv, = direct_call_args(target, argv, impl)
-               "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+               "#{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
              end
       "if (#{check}) {\n    #{call}\n  } else "
     end

@@ -2,6 +2,7 @@
 
 require 'strscan'
 require_relative 'bytecode_ir'
+require_relative 'reg_name'
 
 # CodeGen: compile_method and jump targets.
 
@@ -964,7 +965,7 @@ class CodeGen
     (0...nregs).map do |reg|
       next "  [[maybe_unused]] mrb_value r0 = self;\n" if reg.zero?
 
-      "  mrb_value r#{reg} = #{arguments[reg - 1] || 'mrb_nil_value()'};\n"
+      "  mrb_value #{RegName[reg]} = #{arguments[reg - 1] || 'mrb_nil_value()'};\n"
     end.join
   end
 
