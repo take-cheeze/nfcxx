@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'file_identity'
 require_relative 'irep'
 require_relative 'native_names'
 require_relative 'native_expression_devirt'
@@ -1336,18 +1337,24 @@ module NativeCoreDirect
 
   # { entry => nil | failure reason } for every ENTRIES row against `paths`.
   def audit(paths)
-    files = Array(paths).select { |path| File.file?(path) }
-    key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
+    files, key = FileIdentity.cached(:native_core_direct_audit, paths) { audit_key(paths) }
+    @audits.fetch(key) do
+      @audits.clear
+      @audits[key] = audit_files(files)
+    end
+  end
+
+  # [existing files among `paths`, the stat key of them and of the mruby headers the audit reads].
+  def audit_key(paths)
+    files, key = FileIdentity.files_and_key(paths)
+    key = key.dup
     include_dir = mruby_include_dir(files)
     AUDITED_HEADERS.each do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
       key << [path, stat && stat.mtime, stat && stat.size]
     end
-    @audits.fetch(key) do
-      @audits.clear
-      @audits[key] = audit_files(files)
-    end
+    [files, key]
   end
 
   def audit_files(files)
