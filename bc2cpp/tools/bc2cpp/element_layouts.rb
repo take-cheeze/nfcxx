@@ -54,7 +54,7 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       when :GETIV
         ivar = producer.insn.ivar
         ivar && ivar_element_hint(ctx[:owner], ivar, ctx)
-      when *BytecodeIR::Ops::SEND
+      when BytecodeIR::Ops::SEND
         send_element_class(irep, producer.index, producer.reg, producer.insn, ctx, depth)
       end
     end

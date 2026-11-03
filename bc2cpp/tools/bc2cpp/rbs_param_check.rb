@@ -394,7 +394,7 @@ module RbsParamCheck
       ivar_why(ctx, irep, insn.ivar, cls, depth)
     when :GETUPVAR
       upvar_why(ctx, irep, insn, cls)
-    when *BytecodeIR::Ops::SEND
+    when BytecodeIR::Ops::SEND
       name = insn.sym
       return new_why(ctx, irep, definition.index, cls) if name == 'new' &&
                                                           BytecodeIR::Ops::REGISTER_RECEIVER_SEND.include?(insn.op)

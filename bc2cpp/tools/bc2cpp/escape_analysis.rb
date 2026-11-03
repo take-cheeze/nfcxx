@@ -1003,7 +1003,7 @@ module EscapeAnalysis
       when :GETIDX0 then send_site(run, i, insn, s, '[]', recv: BytecodeIR::OperandModel.regs(insn)[1], args: [], dest: lead)
       when :SETIDX
         send_site(run, i, insn, s, '[]=', recv: lead, args: [lead.to_i + 1, lead.to_i + 2], dest: lead)
-      when *BytecodeIR::Ops::SEND then send_op(run, i, insn, s)
+      when BytecodeIR::Ops::SEND then send_op(run, i, insn, s)
       when :BLKCALL
         escape.call(:block_call_argument) if window.call(lead.to_i + 1, BytecodeIR::OperandModel.uint_operand(insn).to_i)
         run.uses << Use.new(index: i, kind: :call, name: 'call', reg: lead) if held.call(lead)
@@ -1035,7 +1035,7 @@ module EscapeAnalysis
         # A String operand is copied; anything else is converted by its own to_s.
         escape.call(:string_operand) if held.call(lead.to_i + 1) && run.value_class != 'String'
         s
-      when *CLOSURE_OPS then s - [lead]
+      when CLOSURE_OPS then s - [lead]
       when *WINDOW_OPS
         escape.call(:class_machinery) if window.call(lead, 2) || s.include?(0)
         s - [lead]

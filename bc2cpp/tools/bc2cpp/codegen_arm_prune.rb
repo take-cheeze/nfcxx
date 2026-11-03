@@ -113,7 +113,9 @@ class CodeGen
     end
     return arm_prune_refuse(:unresolved_graph) if unresolved
 
-    (0...size).to_set - reached
+    unreachable = Set.new
+    size.times { |i| unreachable << i unless reached.include?(i) }
+    unreachable
   end
 
   # Stage B's decision for the held-back texts +texts+ ({ index => text }): true when they may be dropped, and counted

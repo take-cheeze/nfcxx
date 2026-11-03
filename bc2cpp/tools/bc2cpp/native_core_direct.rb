@@ -1304,6 +1304,11 @@ module NativeCoreDirect
   ENTRIES = (HAND_ENTRIES + GENERATED_ENTRIES).freeze
   HELPERS = HAND_HELPERS.merge(GENERATED_HELPERS).freeze
 
+  # Every row audit_files judges, and the include headers their MRB_API and internal declarations live in.
+  AUDITED_ENTRIES = (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
+                     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES + OWNER_ARM_ENTRIES).freeze
+  AUDITED_HEADERS = AUDITED_ENTRIES.flat_map { |entry| entry.apis + Array(entry.internals) }.map(&:first).uniq.freeze
+
   @audits = {}
 
   module_function
@@ -1313,7 +1318,8 @@ module NativeCoreDirect
   end
 
   def mruby_include_dir(paths)
-    root = Array(paths).filter_map { |path| path[%r{\A(.+/3rd/mruby)/}, 1] }.first
+    root = nil
+    Array(paths).each { |path| break if (root = path[%r{\A(.+/3rd/mruby)/}, 1]) }
     dir = root && File.join(root, 'include')
     dir if dir && File.directory?(dir)
   end
@@ -1333,12 +1339,10 @@ module NativeCoreDirect
     files = Array(paths).select { |path| File.file?(path) }
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
-    headers = (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
-     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES + OWNER_ARM_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
-    key += headers.map(&:first).uniq.map do |header|
+    AUDITED_HEADERS.each do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
-      [path, stat && stat.mtime, stat && stat.size]
+      key << [path, stat && stat.mtime, stat && stat.size]
     end
     @audits.fetch(key) do
       @audits.clear
@@ -1349,8 +1353,7 @@ module NativeCoreDirect
   def audit_files(files)
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
-    (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
-     KERNEL_ANY_RECEIVER_ENTRIES + OWNER_SET_ENTRIES + OWNER_ARM_ENTRIES).to_h do |entry|
+    AUDITED_ENTRIES.to_h do |entry|
       [entry, audit_entry(entry, registrations, opaque_owners, include_dir)]
     end
   end

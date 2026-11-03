@@ -142,7 +142,7 @@ class CodeGen
                              owner: owner_def&.owner, class_layout: @class_layout, registry: @registry,
                              container_constants: @container_constants, element_annotations: @element_annotations,
                              known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-                             method_return_class: ->(method_name) { class_return_for_dispatch(method_name) },
+                             method_return_class: dispatch_return_class,
                              guarded: true)
     known && exact_new_receiver_class(irep, idx, reg, owner: owner_def&.owner, expected_class: known)
   end

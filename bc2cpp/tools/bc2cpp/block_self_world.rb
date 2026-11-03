@@ -178,7 +178,7 @@ module BlockSelfWorld
         when :DEF, :TDEF, :SDEF
           name = insn.op == :DEF ? insn.sym_token : insn.sym
           fail!(irep, insn, "defines the rebinder #{name} in Ruby") if REBIND_NAMES.include?(name)
-        when *SENDS
+        when SENDS
           scan_send(irep, idx, insn, ireps, parents, compiled)
         end
       end

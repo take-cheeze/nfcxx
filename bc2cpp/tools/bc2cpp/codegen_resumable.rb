@@ -83,7 +83,8 @@ class CodeGen
       dest = insn.reg
       return true if dest && fiber_const_receiver?(irep, idx, dest)
     end
-    nested_ireps(irep, fiber_bodies).any? { |child| deep_fiber_yield?(child, fiber_bodies, seen) }
+    each_nested_irep(irep, fiber_bodies) { |child| return true if deep_fiber_yield?(child, fiber_bodies, seen) }
+    false
   end
 
   # Every method name called anywhere in the irep tree (block bodies included, Fiber.new blocks not).
@@ -93,12 +94,15 @@ class CodeGen
     BytecodeIR.for(irep).instructions_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB).each do |insn|
       names << insn.sym if insn.sym
     end
-    nested_ireps(irep, fiber_bodies).each { |child| deep_called_names(child, fiber_bodies, names, seen) }
+    each_nested_irep(irep, fiber_bodies) { |child| deep_called_names(child, fiber_bodies, names, seen) }
     names
   end
 
-  def nested_ireps(irep, fiber_bodies)
-    (irep.reps || []).filter_map { |child| @ireps[child] if child && !fiber_bodies.include?(child) }
+  def each_nested_irep(irep, fiber_bodies)
+    irep.reps&.each do |child|
+      nested = child && !fiber_bodies.include?(child) && @ireps[child]
+      yield nested if nested
+    end
   end
 
   # Names of the methods that can reach Fiber.yield: a body that calls it, and, by name and

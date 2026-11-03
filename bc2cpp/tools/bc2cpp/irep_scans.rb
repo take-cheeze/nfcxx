@@ -22,6 +22,14 @@ module IrepScans
     Follow.new(reg)
   end
 
+  # `exhausted:` callbacks that close over nothing, so a hot walk need not build a closure per call. REACH_ENTRY
+  # marks "the top of the body was reached with this register" with a value no block result can equal (one frozen
+  # EntryReached per register); the caller then decides the entry case with its current locals.
+  EntryReached = Struct.new(:reg)
+  ENTRY_REACHED = Hash.new { |memo, reg| memo[reg] = EntryReached.new(reg).freeze }
+  REACH_ENTRY = ->(reg) { ENTRY_REACHED[reg] }
+  LAST_REG = ->(last) { last }
+
   # BytecodeIR::Program#walk_writers over this irep's instructions (options and
   # block protocol documented there).
   def walk_writers(from, reg, **options, &block)
@@ -33,10 +41,7 @@ module IrepScans
   # walk with nil. +use+ is the instruction the first hop feeds.
   def walk_dominating_writers(from, reg, use: from + 1, follow_moves: false, exhausted: nil, **options)
     read = use
-    entry = lambda do |last|
-      BytecodeIR.write_dominates?(self, BytecodeIR::ENTRY, read, last) ? exhausted&.call(last) : nil
-    end
-    walk_writers(from, reg, exhausted: entry, **options) do |insn, index, cur|
+    found = walk_writers(from, reg, exhausted: REACH_ENTRY, **options) do |insn, index, cur|
       next nil unless BytecodeIR.write_dominates?(self, index, read, cur)
 
       read = index
@@ -46,6 +51,9 @@ module IrepScans
         yield insn, index, cur
       end
     end
+    return found unless found.is_a?(EntryReached)
+
+    BytecodeIR.write_dominates?(self, BytecodeIR::ENTRY, read, found.reg) ? exhausted&.call(found.reg) : nil
   end
 
   # Index of the nearest instruction at or before +from+ whose leading register
