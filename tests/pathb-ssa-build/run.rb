@@ -63,13 +63,25 @@ Dir.mktmpdir("pathb-ssa-build-test") do |dir|
 end
 
 # 2. A function the emitter does not cover: status 3, the reason named, the assembly still written.
-partial_ir = File.join(ROOT, "tests/pathb-egraph/cases/memory_volatile.ir")
+partial_src = <<~IR
+  (ir-module "p.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+  (function "ld_id"
+    (ret int)
+    (params (param %0 "x" long_double))
+    (return (const int 0)))
+  (function "main"
+    (ret int)
+    (params (param %0 "n" int))
+    (return (wadd int %0 (const int 1))))
+IR
 Dir.mktmpdir("pathb-ssa-build-test") do |dir|
   asm_path = File.join(dir, "partial.s")
+  partial_ir = File.join(dir, "partial.ir")
+  File.write(partial_ir, partial_src)
   _, err, st = run_driver("-o", asm_path, partial_ir)
   asm = File.exist?(asm_path) ? File.read(asm_path) : ""
-  if st.exitstatus == 3 && err.include?("not emitted: main: operator load.v") && !asm.include?("\nmain:")
-    puts "ok   partial module: status 3, reason reported, function not emitted"
+  if st.exitstatus == 3 && err.include?("not emitted: ld_id: type long_double") && asm.include?("\nmain:") && !asm.include?("ld_id:")
+    puts "ok   partial module: status 3, reason reported, the other function emitted"
   else
     failures << "partial module: status #{st.exitstatus}, stderr #{err.inspect}, main emitted #{asm.include?("\nmain:")}"
   end
