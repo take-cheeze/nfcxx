@@ -668,6 +668,8 @@ module Qbe
       when "likely", "unlikely" then nil
       # (vastart ADDR): the va_list at ADDR starts reading the variadic arguments (the function has an ellipsis).
       when "vastart" then @lines << "  vastart #{op(item[1])}"
+      # An `unsupported` statement carries the lowering's reason, which is reported as the form itself (as pathb-qbe-emit.rb does).
+      when "unsupported" then raise QbeUnsupported, sx(item)
       else raise QbeUnsupported, "statement #{head(item) || sx(item)}"
       end
     end
