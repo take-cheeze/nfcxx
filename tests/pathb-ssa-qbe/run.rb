@@ -23,6 +23,7 @@ QBE = File.expand_path("../../build/qbe/qbe", __dir__)
 HARNESS_C = <<~C
   void observe() {}
   void clobber(int *p) { *p = 77; }
+  void __pathb_escape(void *p) { (void)p; }
 C
 
 # True when every `clobber` call in the function passes the address of an int slot.
