@@ -7,6 +7,10 @@ require_relative 'tagged_fixnum'
 # CodeGen: compile_insn and comparisons.
 
 class CodeGen
+  # `when /^LOADI/` without the objects Regexp#=== allocates per test. Ops are Symbols (Insn#op= interns a String)
+  # and hold no newline, so `^` only matches at the start; compile_insn_op reads no `$~`.
+  LOADI_PREFIX = ->(op) { op.is_a?(Symbol) && op.start_with?('LOADI') }
+
   # BC2CPP_FROZEN_LITERALS=0 compiles a frozen-literal STRING as the old fresh String.
   def frozen_literals_enabled?
     ENV['BC2CPP_FROZEN_LITERALS'] != '0'
@@ -148,7 +152,7 @@ class CodeGen
       d = insn.reg
       name = insn.sym_token
       "  #{RegName[d]} = mrb_symbol_value(mrb_intern_cstr(M, \"#{name}\"));\n"
-    when /^LOADI/
+    when LOADI_PREFIX
       d = insn.reg
       # Small immediates print parenthesized ("R6\t(3)"); LOADI8/16/32 print bare
       # ("R1\t128").
