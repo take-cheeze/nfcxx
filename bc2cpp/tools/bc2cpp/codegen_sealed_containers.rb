@@ -209,7 +209,7 @@ class CodeGen
 
       literal = program.container_literal(producer.index)
       return "#{producer.op}, not a Hash literal" unless literal&.kind == :hash
-      unless producer.index == idx - 1 && preds && preds[idx] == Set[idx - 1]
+      unless producer.index == idx - 1 && preds && preds[idx] == [idx - 1]
         return 'a Hash literal another instruction can see before it is stored'
       end
       return 'a Hash literal whose register is read after the store' unless sealed_hash_dead_after?(irep, idx, reg)

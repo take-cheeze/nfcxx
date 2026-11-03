@@ -112,7 +112,7 @@ module BytecodeIR
       preds = instruction_predecessors(include_handlers: true) or return nil
       k = start
       while k < @instructions.length && k < start + window
-        break unless preds[k] == Set[k - 1]
+        break unless preds[k] == [k - 1]
 
         yield @instructions[k].source, k
         k += 1

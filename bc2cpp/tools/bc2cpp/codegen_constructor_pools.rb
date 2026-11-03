@@ -489,7 +489,7 @@ class CodeGen
     return nil unless array.op == :ARRAY && array.typed.size == 2 && array.reg.to_i == insn.reg.to_i + 1
 
     preds = program.instruction_predecessors(include_handlers: true)
-    return nil unless preds && preds[idx] == Set[idx - 1]
+    return nil unless preds && preds[idx] == [idx - 1]
 
     count = array.typed[1].value.to_i
     count.positive? ? count : nil

@@ -112,7 +112,7 @@ module BytecodeIR
       @resolved
     end
 
-    # index -> Set of predecessor indices, with ENTRY for instruction 0's
+    # index -> frozen Array of predecessor indices (each once, first-seen order), with ENTRY for instruction 0's
     # method-entry edge. Nil when #resolved? is false. +include_handlers+ adds
     # the catch-handler edges (see #handler_edges) and is nil unless
     # #handlers_resolved? too.
@@ -122,13 +122,18 @@ module BytecodeIR
 
       @instruction_predecessors ||= {}
       @instruction_predecessors[include_handlers] ||= begin
-        preds = Array.new(@instructions.length) { Set.new }
+        # Plain Arrays, deduplicated once at the end: a Set kept each predecessor once in first-seen order, and
+        # uniq! keeps that order. The lists are small, so this beats a Set per instruction.
+        preds = Array.new(@instructions.length) { [] }
         preds[0] << ENTRY unless preds.empty?
         @instructions.each do |instruction|
           instruction.successors.each { |successor| preds[successor] << instruction.index }
         end
         handler_edges.each { |edge| preds[edge.target] << edge.src } if include_handlers
-        preds.each(&:freeze).freeze
+        preds.each do |list|
+          list.uniq!
+          list.freeze
+        end.freeze
       end
     end
 
