@@ -223,6 +223,10 @@ module NumericFlow
     ins = Array.new(n)
     outs = Array.new(n)
     ins[0] = entry
+    # The worklist pops the lowest reverse-postorder rank, so a block is revisited after its predecessors when the
+    # graph allows it. BC2CPP_NUMERIC_WORKLIST=fifo keeps the old first-in order for comparing the two.
+    fifo = ENV['BC2CPP_NUMERIC_WORKLIST'] == 'fifo'
+    rank = fifo ? nil : worklist_rank(n, succ, raises, context_edges)
     work = [0]
     queued = Array.new(n, false)
     queued[0] = true
@@ -249,7 +253,7 @@ module NumericFlow
           next if queued[target]
 
           queued[target] = true
-          work << target
+          enqueue_worklist(work, rank, target)
         end
       end
       next if outs[i] == out
@@ -271,10 +275,43 @@ module NumericFlow
         next if queued[s]
 
         queued[s] = true
-        work << s
+        enqueue_worklist(work, rank, s)
       end
     end
     ins
+  end
+
+  # Reverse-postorder rank of every instruction over the edges the worklist follows. Only the visit order depends on
+  # it, so an edge the flow drops (a noreturn call) may still count here. Unreached instructions rank last.
+  def worklist_rank(n, succ, raises, context_edges)
+    order = []
+    seen = Array.new(n, false)
+    stack = [[0, false]]
+    until stack.empty?
+      node, finished = stack.pop
+      if finished
+        order << node
+        next
+      end
+      next if seen[node]
+
+      seen[node] = true
+      stack << [node, true]
+      outs = context_edges&.key?(node) ? context_edges.fetch(node) : succ[node]
+      handlers = raises[node]
+      (handlers ? outs + handlers : outs).reverse_each { |s| stack << [s, false] unless seen[s] }
+    end
+    rank = Array.new(n, n)
+    order.reverse_each.with_index { |node, r| rank[node] = r }
+    rank
+  end
+
+  # Inserts +s+ into +work+ kept sorted by +rank+ (nil rank: plain append, the first-in order).
+  def enqueue_worklist(work, rank, s)
+    return work << s unless rank
+
+    pos = work.bsearch_index { |x| rank[x] > rank[s] } || work.size
+    work.insert(pos, s)
   end
 
   EMPTY = [].freeze
