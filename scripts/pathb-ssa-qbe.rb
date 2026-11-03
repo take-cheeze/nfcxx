@@ -331,10 +331,11 @@ module Qbe
     attr_reader :lines
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
-    def initialize(form, globals = {}, abi = {})
+    def initialize(form, globals = {}, abi = {}, link = {})
       @form = form
       @globals = globals
       @abi = abi
+      @link = link
       @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
       @params = form.find { |x| head(x) == "params" }.drop(1)
@@ -599,8 +600,16 @@ module Qbe
           end
           return "$#{Qbe.symbol(x.raw)}"
         end
-        # A function used as a value: its address is the function's symbol (the existing emitter does the same).
-        return "$#{Qbe.symbol(x.raw)}" if x.sigil == "&"
+# A function used as a value. A function this module defines is addressed by its symbol. Any other function
+# is loaded from a pointer cell (`pathb_got.NAME`, one data word the module defines), as scripts/pathb-qbe-emit.rb
+# does: `leaq f(%rip)` is a PC-relative reference that a PIE link rejects for a symbol of a shared library.
+if x.sigil == "&"
+  sym = Qbe.symbol(x.raw)
+  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym)
+  t = fresh
+  @lines << "  #{t} =l loadl $pathb_got.#{sym}"
+  return t
+end
         raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
 
         @slot.fetch("$#{x.raw}") { raise QbeUnsupported, "slot #{x.raw}" }
@@ -1368,7 +1377,7 @@ module Qbe
   # reference to it raises QbeUnsupported where it is used.
   def module_il(forms)
     ctx = module_context(forms)
-    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi]).emit }
+    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi], ctx[:link]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
     (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
   end
@@ -1514,7 +1523,28 @@ module Qbe
       name = d[1].raw
       refs[name] = { thread: false, weak: false, extern: false } if state[name].is_a?(String)
     end
-    { data: data, refs: refs, abi: abi }
+# The functions this module defines, and the external functions it takes the address of as a value (not a direct
+# call, which goes through the PLT): each gets one pointer cell, defined once here.
+funcs = forms.select { |f| head(f) == "ssa-function" }.map { |f| Qbe.symbol(f[1].raw) }
+cells = []
+collect = lambda do |x|
+  next unless x.is_a?(Array) || x.is_a?(Ref)
+  if x.is_a?(Ref)
+    if x.sigil == "&"
+      sym = Qbe.symbol(x.raw)
+      cells << sym unless funcs.include?(sym) || cells.include?(sym)
+    end
+    next
+  end
+  if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
+    x[3..].each { |a| collect.call(a) }
+  else
+    x.each { |y| collect.call(y) }
+  end
+end
+forms.select { |f| head(f) == "ssa-function" }.each { |f| collect.call(f) }
+data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
+{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells } }
   end
 
   # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's
@@ -1591,7 +1621,7 @@ module Qbe
 
   # One function's text (its helper comments, then its body), against a context from module_context.
   def function_text(ctx, fn_form)
-    fn = Fn.new(fn_form, ctx[:refs], ctx[:abi]).emit
+    fn = Fn.new(fn_form, ctx[:refs], ctx[:abi], ctx[:link]).emit
     helpers = fn.asm_helpers.map { |h| "# pathb-asm #{h}" }
     (helpers + [fn.lines.join("\n")]).join("\n\n")
   end
