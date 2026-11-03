@@ -319,7 +319,7 @@ def trace_new_target(irep, idx, reg, *rest, dominated: nil, guarded: false, **op
     return klass || trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: true)
   end
 
-  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: JoinDominance.new(irep), guarded: false, **opts)
+  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: JoinDominance.for(irep), guarded: false, **opts)
   return klass if klass
 
   trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: false)
@@ -329,6 +329,13 @@ end
 # feeds; a hop that does not ends the walk and trace_new_target_reaching then
 # accepts only a unanimous answer over the reaching definitions.
 class JoinDominance
+  # Stateless past its irep, so one per irep serves every trace (weakly held: a collected one is rebuilt).
+  @per_irep = ObjectSpace::WeakMap.new
+
+  def self.for(irep)
+    @per_irep[irep] ||= new(irep)
+  end
+
   def initialize(irep)
     @irep = irep
   end
@@ -364,7 +371,7 @@ def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
         # The definition's own walk continues past it into the join (a `.new` send walks its receiver), so an
         # unguarded hop must dominate the read it feeds. A guarded consumer accepts the join-blind answer.
         trace_new_target_walk(irep, definition.index + 1, definition.reg, *rest,
-                              dominated: guarded ? nil : JoinDominance.new(irep), guarded: guarded, **opts)
+                              dominated: guarded ? nil : JoinDominance.for(irep), guarded: guarded, **opts)
       end
     end
     classes.first if classes.first && classes.uniq.size == 1

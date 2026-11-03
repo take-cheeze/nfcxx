@@ -1678,7 +1678,8 @@ class CodeGen
     t_mand = mandatory_arity(t_irep)
     t_opt = optional_arity(t_irep)
     call_types = native_arg_types(target, t_mand)
-    call_argv = argv.each_with_index.map do |a, i|
+    call_argv = Array.new(argv.size) do |i|
+      a = argv[i]
       case call_types[i]
       when :fixnum then "mrb_as_int(M, #{a})"
       when :symbol then "mrb_obj_to_sym(M, #{a})"
@@ -1692,8 +1693,9 @@ class CodeGen
       call_argv += Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
       call_argv << (argv.size - t_mand).to_s
     end
-    native_positions = call_types.each_index.select { |i| call_types[i] }.map { |i| i + 1 }
-    native_note = native_positions.empty? ? '' : " (position#{'s' unless native_positions.one?} " \
+    native_positions = nil
+    call_types.each_with_index { |type, i| (native_positions ||= []) << i + 1 if type }
+    native_note = native_positions.nil? ? '' : " (position#{'s' unless native_positions.one?} " \
                                                   "#{native_positions.join(', ')} unboxed here to match " \
                                                   "#{impl}'s own native argument type)"
     [call_argv, native_note]
@@ -2353,14 +2355,17 @@ class CodeGen
   # ClosedWorld#answered_outside? for why a known class outside it keeps the dispatch.
   def strict_hint_wrap(family, d, recv, name, argv, owner, hinted: true, listed: nil)
     base = yield
-    return base unless hinted && strict_hint_fallback(family, d, recv, name, argv, owner)
+    strict = hinted && strict_hint_fallback(family, d, recv, name, argv, owner)
+    return base unless strict
     return base if listed && @closed_world.answered_outside?(name, listed)
 
     dispatch = dynamic_dispatch_line(d, recv, name, argv).chomp
-    pattern = %r{#{Regexp.escape(dispatch)}(?: /\* CLOSED_WORLD kept: \w+ \*/)?}
-    return base unless base.match?(pattern)
+    # The pattern matches wherever `dispatch` occurs (its suffix is optional).
+    return base unless base.include?(dispatch)
 
-    base.gsub(pattern) { strict_hint_line(d, recv, name, argv, family).chomp }
+    pattern = %r{#{Regexp.escape(dispatch)}(?: /\* CLOSED_WORLD kept: \w+ \*/)?}
+    strict = strict.chomp
+    base.gsub(pattern) { strict }
   end
 
   # Does a ClassLayout / annotation / element hint (what TYPED consults) name `owner` for this receiver?

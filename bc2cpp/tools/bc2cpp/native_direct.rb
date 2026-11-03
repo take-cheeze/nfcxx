@@ -29,11 +29,16 @@ module NativeDirect
   C_STRING_OR_CHAR = %r{"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|/\*.*?\*/|//[^\n]*}m
 
   @registrations = {}
+  # STRIP_COMMENTS_MEMO: { encoding => { text => stripped } }. The scans strip the same native file many times; the
+  # encoding level keeps a hit's result in the encoding a fresh gsub would give it.
+  @stripped = Hash.new { |table, encoding| table[encoding] = {} }
 
   module_function
 
+  # A fresh copy each call, as the gsub returned.
   def strip_comments(text)
-    text.gsub(C_STRING_OR_CHAR) { |tok| tok.start_with?('/') ? ' ' : tok }
+    table = @stripped[text.encoding]
+    (table[text] ||= text.gsub(C_STRING_OR_CHAR) { |tok| tok.start_with?('/') ? ' ' : tok }.freeze).dup
   end
 
   # { 'c_var' => 'RGSS::Rect' } for the classes and modules a file defines,
