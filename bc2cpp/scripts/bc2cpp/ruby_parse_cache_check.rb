@@ -17,6 +17,9 @@ require_relative '../../tools/bc2cpp/closed_world'
 require_relative '../../tools/bc2cpp/codegen_class_body'
 require_relative '../../tools/bc2cpp/codegen_class_fold'
 require_relative '../../tools/bc2cpp/class_world'
+require_relative '../../tools/bc2cpp/class_world_gate'
+require_relative '../../tools/bc2cpp/dispatch_targets'
+require_relative '../../tools/bc2cpp/native_constructor_sigs'
 require_relative '../../tools/bc2cpp/gem_owners'
 require_relative '../../tools/bc2cpp/enum_driver_gen'
 require_relative '../rpg2k/closed_world_lint'
@@ -272,6 +275,59 @@ Dir.mktmpdir do |tmp|
   fresh_world = world_class.new(paths)
   check.call('a new world scans current file contents', fresh_world.outside_ruby_definer_paths('replacement') == [one])
   check.call('a new world does not retain old definitions', fresh_world.outside_ruby_definer_paths('first').empty?)
+end
+
+puts '-- Prism readers kept in the scan cache (docs/bc2cpp-prism-reader-cache.md)'
+Dir.mktmpdir do |tmp|
+  saved_dir = ScanCache.directory_override
+  ScanCache.directory_override = File.join(tmp, 'cache')
+  begin
+    # Fixtures: a rewritten file gets new facts, and a regrouping of the same files is its own entry.
+    a = File.join(tmp, 'a.rb')
+    b = File.join(tmp, 'b.rb')
+    File.write(a, "class A\n  def initialize; end\nend\nmodule M; class N; def initialize(x); end; end; end\n")
+    File.write(b, "class B < A\n  include Comparable\n  X = [1, 2].map { |i| i * 2 }.freeze\nend\n")
+    computed = DispatchTargetSources.file_initializers(a)
+    RubyParseCache.clear
+    calls = 0
+    check.call('file_initializers: computed, then loaded with no parse',
+               computed == %w[A M::N] && DispatchTargetSources.file_initializers(a) == computed && calls.zero?)
+    File.write(a, "class C\n  def initialize; end\nend\n")
+    check.call('file_initializers: a rewritten file is scanned again', DispatchTargetSources.file_initializers(a) == %w[C])
+    File.write(a, "class A\n  def initialize; end\nend\n")
+    [[[a, b]], [[a], [b]], [[b], [a]]].each do |groups|
+      fresh = ScanCache.bypass { ClassWorld.build(groups.map { |files| ClassBodyScan.scan(files) }) }
+      cold = ClassWorld.build_files(groups)
+      RubyParseCache.clear
+      calls = 0
+      warm = ClassWorld.build_files(groups)
+      check.call("ClassWorld.build_files #{groups.map { |g| g.map { |f| File.basename(f) } }.inspect}: cold and warm " \
+                 'equal a fresh build, warm parses nothing', fresh == cold && fresh == warm && calls.zero?)
+    end
+
+    # The real readers: the cached facts equal freshly computed ones, and a warm read parses none of the files.
+    rpg2k_glob = 'mruby-rpg2k/mrblib/**/*.rb'
+    roots = ClassWorldGate.closed_roots(ROOT).map { |_, files| files }
+    rgss = Dir["#{ROOT}/mruby-rgss/mrblib/*.rb"].sort
+    rgss_names = rgss.flat_map { |path| File.read(path).scan(/^\s*class\s+(?:\w+::)*(\w+)/).flatten }.uniq
+    helpers = -> { rgss.product(rgss_names).map { |path, name| NativeConstructorSigs.ruby_initialize_helpers(path, name) } }
+    fresh = ScanCache.bypass do
+      [DispatchTargetSources.class_initializers(rpg2k_glob), ClassWorld.build(roots.map { |files| ClassBodyScan.scan(files) }),
+       helpers.call]
+    end
+    cold = [DispatchTargetSources.class_initializers(rpg2k_glob), ClassWorld.build_files(roots), helpers.call]
+    RubyParseCache.clear
+    calls = 0
+    warm = [DispatchTargetSources.class_initializers(rpg2k_glob), ClassWorld.build_files(roots), helpers.call]
+    check.call("#{roots.flatten.size} closed-build files: class_initializers, ClassWorld and the rgss initialize " \
+               'helpers from the cache equal a fresh scan', fresh == cold && fresh == warm)
+    check.call("the facts are not empty (#{fresh[0].size} initializers, #{fresh[1].facts.size} classes, " \
+               "#{fresh[2].compact.size} helper answers)",
+               !fresh[0].empty? && fresh[1].facts.size > ClassWorld::NATIVE.size && fresh[2].any?)
+    check.call('a warm read of those three readers calls Prism.parse for none of the files', calls.zero?)
+  ensure
+    ScanCache.directory_override = saved_dir
+  end
 end
 
 if failures.empty?
