@@ -933,23 +933,41 @@ class CodeGen
   # register copied onto itself. A line goes only after one that ends a statement or
   # opens or closes a block: never the body of an unbraced if, else or loop, nor the
   # only statement after a case label.
-  DEAD_LABEL = /\A *(L\w+):;\n\z/
-  SELF_COPY = /\A *(r\d+) = \1;\n\z/
-  STATEMENT_END = /[;{}]\s*\z/
+  # Each is matched at a line's start by a StringScanner, so it reads one line of `code` without a String for it; a
+  # line runs to its first "\n" (or the end of `code`), as String#each_line splits.
+  DEAD_LABEL = / *(L\w+):;\n/
+  SELF_COPY = / *(r\d+) = \1;\n/
+  # The line's last byte outside \s is one of `;{}`.
+  STATEMENT_END = /[^\n]*[;{}][\t\v\f\r ]*(?:\n|\z)/
   # What String#strip removes: a line of only these is blank.
-  BLANK_LINE = /\A[\x00\t\n\v\f\r ]*\z/
+  BLANK_LINE = /[\x00\t\v\f\r ]*(?:\n|\z)/
 
   def drop_dead_statements(code)
     labels = code.scan(/\bL\w+\b/).tally
-    previous = "{\n"
-    kept = String.new(capacity: code.bytesize, encoding: code.encoding)
-    code.each_line do |line|
-      dead = previous.match?(STATEMENT_END) &&
-             ((label = line[DEAD_LABEL, 1]) ? labels[label] == 1 : line.match?(SELF_COPY))
-      previous = line unless dead || line.match?(BLANK_LINE)
-      kept << line unless dead
+    scanner = StringScanner.new(code)
+    # The last kept non-blank line, starting as "{\n", ends a statement.
+    previous_ends = true
+    kept = nil
+    copied = 0
+    size = code.bytesize
+    start = 0
+    while start < size
+      line_end = (code.byteindex("\n", start) || (size - 1)) + 1
+      scanner.pos = start
+      dead = previous_ends &&
+             (scanner.match?(DEAD_LABEL) ? labels[scanner[1]] == 1 : scanner.match?(SELF_COPY))
+      if dead
+        kept ||= String.new(capacity: size, encoding: code.encoding)
+        kept << code.byteslice(copied, start - copied)
+        copied = line_end
+      elsif !scanner.match?(BLANK_LINE)
+        previous_ends = scanner.match?(STATEMENT_END)
+      end
+      start = line_end
     end
-    kept
+    return code unless kept
+
+    kept << code.byteslice(copied, size - copied)
   end
 
   # mrbc names an anonymous parameter by its sigil (`*`, `**`, `&`, and `...`'s three), which is no C identifier; the

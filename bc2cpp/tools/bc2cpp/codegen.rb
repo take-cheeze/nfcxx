@@ -771,10 +771,8 @@ class CodeGen
   # (native_arg_positions), so the entry wrapper's mrb_get_args("i") and a direct call's mrb_as_int never see
   # anything else. Boxed until that proof is final.
   def native_arg_types(d, mand)
-    return Array.new(mand) unless d.irep && @native_arg_positions
-
-    positions = native_arg_positions_by_label[d.irep]
-    return Array.new(mand) unless positions
+    positions = d.irep && @native_arg_positions && native_arg_positions_by_label[d.irep]
+    return BOXED_ARG_TYPES[mand] unless positions
 
     Array.new(mand) { |i| positions.include?(i + 1) ? :fixnum : nil }
   end
@@ -790,6 +788,9 @@ class CodeGen
     end
     @native_arg_positions_index
   end
+
+  # native_arg_types of a method with no retyped position: one frozen all-nil Array per length.
+  BOXED_ARG_TYPES = Hash.new { |types, mand| types[mand] = Array.new(mand).freeze }
 
   # NATIVE_ARGS: the [irep label, position] pairs native_arg_types retypes, fixed once the ENTRY_ARG_CALLSITE_PROOF
   # alternation has converged. A DIRECT_CONSTRUCT_TARGETS class's #initialize stays boxed: retyped, it would turn

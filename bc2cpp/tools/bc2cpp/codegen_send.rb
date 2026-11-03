@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'strscan'
 require_relative 'branch_hints'
 require_relative 'reg_name'
 require_relative 'tagged_fixnum'
@@ -1701,7 +1702,7 @@ class CodeGen
       call_argv << (argv.size - t_mand).to_s
     end
     native_positions = nil
-    call_types.each_with_index { |type, i| (native_positions ||= []) << i + 1 if type }
+    call_types.each_index { |i| (native_positions ||= []) << i + 1 if call_types[i] }
     native_note = native_positions.nil? ? '' : " (position#{'s' unless native_positions.one?} " \
                                                   "#{native_positions.join(', ')} unboxed here to match " \
                                                   "#{impl}'s own native argument type)"
@@ -2367,12 +2368,26 @@ class CodeGen
     return base if listed && @closed_world.answered_outside?(name, listed)
 
     dispatch = dynamic_dispatch_line(d, recv, name, argv).chomp
-    # The pattern matches wherever `dispatch` occurs (its suffix is optional).
     return base unless base.include?(dispatch)
 
-    pattern = %r{#{Regexp.escape(dispatch)}(?: /\* CLOSED_WORLD kept: \w+ \*/)?}
-    strict = strict.chomp
-    base.gsub(pattern) { strict }
+    strict_kept_replace(base, dispatch, strict.chomp)
+  end
+
+  STRICT_KEPT_SUFFIX = %r{ /\* CLOSED_WORLD kept: \w+ \*/}
+
+  # `base.gsub(/#{Regexp.escape(dispatch)}(?:STRICT_KEPT_SUFFIX)?/) { strict }` without building the pattern: each
+  # leftmost `dispatch`, with the kept marker right after it if there is one, becomes `strict`.
+  def strict_kept_replace(base, dispatch, strict)
+    out = String.new(capacity: base.bytesize + strict.bytesize, encoding: base.encoding)
+    scanner = StringScanner.new(base)
+    from = 0
+    while (at = base.byteindex(dispatch, from))
+      out << base.byteslice(from, at - from) << strict
+      scanner.pos = at + dispatch.bytesize
+      scanner.skip(STRICT_KEPT_SUFFIX)
+      from = scanner.pos
+    end
+    out << base.byteslice(from, base.bytesize - from)
   end
 
   # Does a ClassLayout / annotation / element hint (what TYPED consults) name `owner` for this receiver?

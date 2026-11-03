@@ -75,6 +75,9 @@ class CodeGen
     !traced && guarded_inline_receiver?(insn, klass)
   end
 
+  # The recognizers' layouts read only the instruction, so each is built once.
+  TIMES_LAYOUT = ->(insn) { 1 if insn.sym == 'times' && insn.argc_text == 'n=0' }
+
   # BLOCK_SUPPORT: inline `receiver.times { |i| BODY }` as a native
   # `for` loop instead of building a Proc. mrb_proc_new would build a Proc with
   # no captured environment, while blocks close over outer locals; inlined, the
@@ -90,8 +93,7 @@ class CodeGen
   # taking exactly one mandatory argument.
   def recognize_times_regions(irep)
     regions = []
-    layout = ->(insn) { 1 if insn.sym == 'times' && insn.argc_text == 'n=0' }
-    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: TIMES_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
       # TIMES_NO_PARAM_SUPPORT: `n.times { ... }` (no block parameter) is the same
       # loop; only the counter binding is dropped (emit_times_inline).
       next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
@@ -268,8 +270,11 @@ class CodeGen
   # that method's facts (block_fallback_receiver_class) instead of the registry alone.
   def proven_array_source(irep, idx, dest_reg, owner: nil)
     receiver_class = (->(pin_idx, pin) { block_fallback_receiver_class(irep, pin_idx, pin.reg, owner) } if owner)
-    proven_array_source_scan(irep, idx, dest_reg, @registry, ->(n) { annotated_array_return(n) },
-                             ->(n) { @array_return_names.include?(n) }, receiver_class: receiver_class)
+    # The two oracles read this CodeGen's facts when called, so one pair serves every scan.
+    @annotated_array_return_oracle ||= ->(n) { annotated_array_return(n) }
+    @array_return_proof_oracle ||= ->(n) { @array_return_names.include?(n) }
+    proven_array_source_scan(irep, idx, dest_reg, @registry, @annotated_array_return_oracle,
+                             @array_return_proof_oracle, receiver_class: receiver_class)
   end
 
   # GETIDX_STATIC_RECEIVER_SUPPORT: is this GETIDX/GETIDX0/SETIDX receiver
@@ -385,21 +390,23 @@ class CodeGen
   ACCUM_BLOCK_METHODS = %w[any? all? none? count index].freeze
   ACCUM_FOLD_METHODS = %w[reduce inject].freeze
 
+  ACCUM_KIND = lambda do |insn|
+    n = insn.argc_text.to_s[/n=(\d+)/, 1]&.to_i
+    if n == 0 && ACCUM_BLOCK_METHODS.include?(insn.sym)
+      :pred
+    elsif n == 1 && ACCUM_FOLD_METHODS.include?(insn.sym)
+      :fold
+    end
+  end
+  # `reduce(init)`: dest, init, block, so BLOCK is at dest+2 (`BLOCK R4` +
+  # `SENDB R2 :reduce n=1`).
+  ACCUM_BLOCK_OFFSETS = { pred: 1, fold: 2 }.freeze
+  ACCUM_LAYOUT = ->(insn) { ACCUM_BLOCK_OFFSETS[ACCUM_KIND.call(insn)] }
+
   def recognize_accum_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    accum_kind = lambda do |insn|
-      n = insn.argc_text.to_s[/n=(\d+)/, 1]&.to_i
-      if n == 0 && ACCUM_BLOCK_METHODS.include?(insn.sym)
-        :pred
-      elsif n == 1 && ACCUM_FOLD_METHODS.include?(insn.sym)
-        :fold
-      end
-    end
-    # `reduce(init)`: dest, init, block, so BLOCK is at dest+2 (`BLOCK R4` +
-    # `SENDB R2 :reduce n=1`).
-    layout = ->(insn) { { pred: 1, fold: 2 }[accum_kind.call(insn)] }
-    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
-      is_fold = accum_kind.call(insn) == :fold
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: ACCUM_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
+      is_fold = ACCUM_KIND.call(insn) == :fold
       want_arity = is_fold ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
       next if is_fold && !fold_init_not_symbol?(irep, idx, dest_reg.to_i + 1)
@@ -428,10 +435,11 @@ class CodeGen
     @array_native_index
   end
 
+  COLLECT_LAYOUT = ->(insn) { 1 if insn.argc_text == 'n=0' && COLLECT_BLOCK_METHODS.include?(insn.sym) }
+
   def recognize_collect_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    layout = ->(insn) { 1 if insn.argc_text == 'n=0' && COLLECT_BLOCK_METHODS.include?(insn.sym) }
-    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: COLLECT_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       want_arity = meth == 'each_with_index' ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
@@ -454,14 +462,15 @@ class CodeGen
   # nine, and each/any?/all?/none?/count are not declared in either table.
   SYM_BLOCK_METHODS = %w[each map select reject find any? all? none? count].freeze
 
+  SYM_LAYOUT = ->(insn) { 1 if insn.argc_text == 'n=0' && SYM_BLOCK_METHODS.include?(insn.sym) }
+
   def recognize_sym_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    layout = ->(insn) { 1 if insn.argc_text == 'n=0' && SYM_BLOCK_METHODS.include?(insn.sym) }
     # No BLOCK check needed: OP_SENDB takes its block from regs[bidx] (dest+1 for
     # n=0), which the LOADSYM just wrote (register match in each_call_site).
     # A keyword call also LOADSYMs its key symbols into later registers, but it is
     # always SEND/SSEND, never SENDB/SSENDB, so it cannot form a region here.
-    each_call_site(irep, prev_op: :LOADSYM, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, loadsym_insn, dest_reg|
+    each_call_site(irep, prev_op: :LOADSYM, send_ops: %i[SENDB SSENDB], layout: SYM_LAYOUT) do |insn, idx, loadsym_insn, dest_reg|
       sym_name = loadsym_insn.sym_token&.sub(/\A:/, '')
       next unless sym_name && !sym_name.empty?
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
@@ -629,16 +638,17 @@ class CodeGen
   # (RETURN_BLK, already a plain C++ return in every inline body) are fine.
   PROFILER_SECTION_NAMES = { 'section' => 1, 'frame' => 0 }.freeze
 
+  # The block proc register is the one AFTER the arguments (vm.c OP_SENDB):
+  # dest+1 for :frame (no arguments at all), dest+2 for :section, whose name
+  # is argument 0 and is written into dest+1 first.
+  PROFILER_SECTION_LAYOUT = lambda do |insn|
+    want_argc = PROFILER_SECTION_NAMES[insn.sym]
+    1 + want_argc if want_argc && insn.argc_text == "n=#{want_argc}"
+  end
+
   def recognize_profiler_section_regions(irep)
     regions = []
-    # The block proc register is the one AFTER the arguments (vm.c OP_SENDB):
-    # dest+1 for :frame (no arguments at all), dest+2 for :section, whose name
-    # is argument 0 and is written into dest+1 first.
-    layout = lambda do |insn|
-      want_argc = PROFILER_SECTION_NAMES[insn.sym]
-      1 + want_argc if want_argc && insn.argc_text == "n=#{want_argc}"
-    end
-    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: PROFILER_SECTION_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       next unless mandatory_arity(block_irep).zero? && pure_mandatory_arity?(block_irep)
       next if @closed_world && !profiler_native_lookup_safe?(meth)
@@ -731,10 +741,11 @@ class CodeGen
   # RBS states sort_by alone and has no "sort" category; a /\Asort/ name filter would widen silently if RBS gains one.
   SORT_BLOCK_METHODS = %w[sort_by].freeze
 
+  SORT_LAYOUT = ->(insn) { 1 if insn.argc_text == 'n=0' && SORT_BLOCK_METHODS.include?(insn.sym) }
+
   def recognize_sort_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
-    layout = ->(insn) { 1 if insn.argc_text == 'n=0' && SORT_BLOCK_METHODS.include?(insn.sym) }
-    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: SORT_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       want_arity = meth == 'sort' ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
