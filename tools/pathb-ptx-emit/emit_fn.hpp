@@ -31,8 +31,8 @@ struct AliasFields {
   bool ok = true;
   std::map<std::pair<long long, std::string>, Ty> fields;
   std::set<std::string> carriers;
-  // The offsets of 4-byte words that are field registers (copies move them, see Fn::copy_words): each needs a 4-byte field
-  std::set<long long> asm_offs;
+  // The (offset, width) of the words a copy moves (see Fn::copy_words): each needs a field of that width
+  std::set<std::pair<long long, long long>> word_offs;
 };
 
 class Fn : public FnCtx {

@@ -151,6 +151,13 @@ bool reads_only(const std::vector<const Node *> &body, const std::string &reg) {
 // The inlined bodies nested in one another (--inline=device): a call past this depth stays a call.
 constexpr int kMaxInlineDepth = 4;
 
+// The half-precision helpers (the __nfcxx_half and __nfcxx_half2 functions: constructors, conversions, operators) are
+// inlined at any depth: they sit under the flash kernel's call chain, past the depth limit, and their calls cost more than
+// their bodies in the static count (a call is a frame and an ABI move each time).
+bool always_inline(const std::string &name) {
+  return name.find("__nfcxx_half") != std::string::npos;
+}
+
 // A special register name of the GPU (tid.x, ctaid.y, ...): the Ruby's special_register?.
 bool special_register(const std::string &name) {
   size_t dot = name.find('.');
@@ -556,7 +563,9 @@ void Fn::stmt(const Node &s) {
       for (long long off = 0; off < n; off += w) {
         std::string t = fresh(piece_reg(static_cast<int>(w)));  // the register that holds a word of this size
         const std::string ty = "u" + std::to_string(w * 8);
+        if (g_local_trace && frame_origin.count(sr)) emit("// frame " + frame_origin[sr] + " load");
         emit("ld." + ty + " " + t + ", [" + sr + "+" + std::to_string(off) + "];");
+        if (g_local_trace && frame_origin.count(dr)) emit("// frame " + frame_origin[dr] + " store");
         emit("st." + ty + " [" + dr + "+" + std::to_string(off) + "], " + t + ";");
       }
     }
@@ -1050,7 +1059,7 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     expect(*ty, *callee->ret);
   }
   if (callee->sret && head_of(args[0]) != "sret") throw BadIR("call of " + cname + " without its sret argument");
-  if (g_inline_device && inline_depth_ < kMaxInlineDepth && inline_ok(callee)) {
+  if (g_inline_device && (inline_depth_ < kMaxInlineDepth || always_inline(cname)) && inline_ok(callee)) {
     inline_call(callee, x, dest);
     return;
   }
@@ -1258,7 +1267,10 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   const int caller_sra_scope = sra_scope;
   std::map<std::string, RegInfo> caller_fields = std::exchange(sra_fields, {});
   const std::set<std::string> kept_carriers = carrier_slots;
+  // planned at the depth the body is compiled at (the calls it makes are inlined or not as the emitter decides)
+  inline_depth_++;
   plan_struct_slots();
+  inline_depth_--;
   sra_fields.insert(caller_fields.begin(), caller_fields.end());
   carrier_slots.insert(kept_carriers.begin(), kept_carriers.end());
   std::map<std::string, std::string> caller_labels = std::exchange(named_labels_, {});
@@ -1441,6 +1453,11 @@ std::vector<const Node *> Fn::body_forms(const Fn *f, std::unique_ptr<Node> &hol
   return body;
 }
 
+// The width of the words a copy of n bytes moves, given the object's alignment: 4, or 0 when it does not divide.
+long long copy_word(long long n, long long typed) {
+  return n > 0 && n % 4 == 0 && typed >= 4 ? 4 : 0;
+}
+
 // A use the alias scan does not take: the struct stays in memory.
 static void sra_fail(AliasFields &out, int) { out.ok = false; }
 
@@ -1508,7 +1525,7 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
     }
     if (aliased.empty()) return;
     const Node &sym = at(c, 2);
-    if (!module_fns || depth >= kMaxInlineDepth || !(sym.kind == Node::Sym && sym.sig == '&')) {
+    if (!module_fns || (depth >= kMaxInlineDepth && !always_inline(sym.text)) || !(sym.kind == Node::Sym && sym.sig == '&')) {
       sra_fail(out, __LINE__);
       return;
     }
@@ -1533,7 +1550,7 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
         return;
       }
       for (const auto &[key, ty] : sub.fields) out.fields[{key.first + o, key.second}] = ty;
-      for (long long a : sub.asm_offs) out.asm_offs.insert(a + o);
+      for (const auto &[a, w] : sub.word_offs) out.word_offs.insert({a + o, w});
     }
   };
   std::function<void(const Node &)> visit;
@@ -1640,15 +1657,16 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
         if (mentions(x)) sra_fail(out, __LINE__);
         return;
       }
-      // the words need the object's alignment, which the IR gives as the copy's last item (4 or more)
+      // the words need the object's alignment, which the IR gives as the copy's last item
       const long long typed = x.items.size() > 4 ? static_cast<long long>(as_int(&x.items[4])) : 0;
-      if (n <= 0 || n % 4 != 0 || typed < 4) {
+      const long long w = copy_word(n, typed);
+      if (n <= 0 || w == 0) {
         sra_fail(out, __LINE__);
         return;
       }
-      for (long long k = 0; k < n; k += 4) {
-        if (ad) out.asm_offs.insert(od + k);
-        if (as) out.asm_offs.insert(os + k);
+      for (long long k = 0; k < n; k += w) {
+        if (ad) out.word_offs.insert({od + k, w});
+        if (as) out.word_offs.insert({os + k, w});
       }
       return;
     }
@@ -1679,7 +1697,7 @@ void Fn::plan_struct_slots() {
   for (const auto &[name, size] : slot_sizes_) {
     if (slot_types_.count(name) || size <= 0 || size > 32) continue;
     AliasFields res;
-    scan_aliases(body_, {name}, {}, 0, res);
+    scan_aliases(body_, {name}, {}, inline_depth_, res);
     if (!res.ok || res.fields.empty()) continue;
     found[name] = res;
     all_carriers.insert(res.carriers.begin(), res.carriers.end());
@@ -1696,18 +1714,18 @@ void Fn::plan_struct_slots() {
       end = off + sz;
     }
     // a word that only a copy moves gets a register of its own, unless a field overlaps it
-    for (long long a : res.asm_offs) {
+    for (const auto &[a, w] : res.word_offs) {
       bool have = false, overlap = false;
       for (const auto &[key, ty] : res.fields) {
-        if (key.first == a && type_size(ty) == 4) have = true;
-        else if (key.first < a + 4 && key.first + type_size(ty) > a) overlap = true;
+        if (key.first == a && type_size(ty) == w) have = true;
+        else if (key.first < a + w && key.first + type_size(ty) > a) overlap = true;
       }
-      if (!have && !overlap) res.fields[{a, "u32"}] = Ty{"int", 4, false, false};
+      if (!have && !overlap) res.fields[{a, "u32"}] = Ty{"int", w, false, false};
     }
-    // each word a copy or an asm operand moves is a field register the accesses already make: a 4-byte field
-    for (long long a : res.asm_offs) {
+    // each word a copy moves is a field register the accesses already make: a field of the word's width
+    for (const auto &[a, w] : res.word_offs) {
       bool have = false;
-      for (const auto &[key, ty] : res.fields) have = have || (key.first == a && type_size(ty) == 4);
+      for (const auto &[key, ty] : res.fields) have = have || (key.first == a && type_size(ty) == w);
       fits = fits && have;
     }
     if (!fits) continue;
@@ -1744,18 +1762,21 @@ void Fn::copy_words(long long n, const Node &dst, const Node &src, long long typ
     smem = reg_of(s.text, s.ty);
 
   }
-  for (long long k = 0; k < n; k += 4) {
+  const long long w = copy_word(n, typed);
+  for (long long k = 0; k < n; k += w) {
     const std::string off = std::to_string(k);
+    // a word of 2 bytes is a 16-bit access; the register holds it zero-extended (the fields keep canonical values)
+    const std::string ld = w == 4 ? "ld.b32 " : "ld.u16 ", st = w == 4 ? "st.b32 " : "st.u16 ";
     if (!td.empty() && !ts.empty()) {
-      emit("mov.b32 " + sra_word(td, k)->ptx + ", " + sra_word(ts, k)->ptx + ";");
+      emit("mov.b32 " + sra_word(td, k, w)->ptx + ", " + sra_word(ts, k, w)->ptx + ";");
     } else if (!td.empty()) {
       std::string t = fresh("r");
-      emit("ld.b32 " + t + ", [" + smem + "+" + off + "];");
-      emit("mov.b32 " + sra_word(td, k)->ptx + ", " + t + ";");
+      emit(ld + t + ", [" + smem + "+" + off + "];");
+      emit("mov.b32 " + sra_word(td, k, w)->ptx + ", " + t + ";");
     } else {
       std::string t = fresh("r");
-      emit("mov.b32 " + t + ", " + sra_word(ts, k)->ptx + ";");
-      emit("st.b32 [" + dmem + "+" + off + "], " + t + ";");
+      emit("mov.b32 " + t + ", " + sra_word(ts, k, w)->ptx + ";");
+      emit(st + "[" + dmem + "+" + off + "], " + t + ";");
     }
   }
 }
