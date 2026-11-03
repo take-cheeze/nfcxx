@@ -1,0 +1,107 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# Opt-in Path B driver (docs/notes/pathb-ssa-build.md): a Path B IR file (the `NFCXX_PATHB_MODE=ir` text, see
+# docs/notes/pathb-stage2.md) through the SSA converter (scripts/pathb-ssa.rb), the e-graph pass
+# (scripts/pathb-egraph.rb) and the QBE emitter (scripts/pathb-ssa-qbe.rb), then QBE (build/qbe/qbe) to assembly.
+# Nothing calls this by default; the default Path B flow does not use it.
+#
+#   scripts/pathb-ssa-build [-o OUT.s] [--no-opt] FILE.ir
+#
+# Each function is emitted on its own. A function outside the emitter's subset (QbeUnsupported) is not emitted: its
+# name and reason go to stderr, the rest of the module is still written, and the status is 3. Callers of a function
+# that was not emitted get an undefined symbol at link time, so status 3 output is not a complete program.
+#
+# Exit status: 0 every function emitted; 1 error (conversion, optimization, or QBE failed); 2 usage;
+# 3 some functions not emitted (listed on stderr; the assembly has the others).
+#
+# NFCXX_QBE overrides the QBE binary (default build/qbe/qbe under the repository root).
+
+require "open3"
+require "rbconfig"
+require "tmpdir"
+require_relative "pathb-egraph"
+require_relative "pathb-ssa-qbe"
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_PARTIAL = 3
+
+def usage_exit
+  warn "usage: pathb-ssa-build [-o OUT.s] [--no-opt] FILE.ir"
+  exit EXIT_USAGE
+end
+
+def error_exit(msg)
+  warn "pathb-ssa-build: #{msg}"
+  exit EXIT_ERROR
+end
+
+def qbe_binary
+  ENV.fetch("NFCXX_QBE") { File.expand_path("../build/qbe/qbe", __dir__) }
+end
+
+# The SSA text of the file, from scripts/pathb-ssa.rb. Its own stderr is passed through, so a function it cannot convert
+# is reported there.
+def convert(file)
+  out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path("pathb-ssa.rb", __dir__), file)
+  $stderr.write(err) unless err.empty?
+  error_exit("pathb-ssa.rb failed on #{file}") unless st.success?
+  out
+end
+
+# The assembly of the QBE IL text, or nil with the QBE error text in `err`.
+def assemble(il)
+  Dir.mktmpdir("pathb-ssa-build") do |dir|
+    path = File.join(dir, "module.qbe")
+    File.write(path, il)
+    asm, err, st = Open3.capture3(qbe_binary, path)
+    return [nil, err] unless st.success?
+
+    [asm, nil]
+  end
+end
+
+output = nil
+no_opt = false
+args = ARGV.dup
+usage_exit if args.empty?
+while args.first&.start_with?("-") && args.first != "-"
+  case args.shift
+  when "-o" then output = args.shift or usage_exit
+  when "--no-opt" then no_opt = true
+  else usage_exit
+  end
+end
+usage_exit unless args.size == 1
+
+file = args.first
+ssa = convert(file)
+globals = read_forms(ssa).select { |g| head(g) == "global" }
+text = no_opt ? ssa : PathbEgraph.optimize_module(ssa).first
+fns = read_forms(text).select { |f| head(f) == "ssa-function" }
+
+# The globals' data, emitted once: the emitter writes data for a module's globals together with its functions.
+data_text = Qbe.module_il(globals).strip
+skipped = []
+bodies = []
+fns.each do |fn|
+  name = fn[1].raw.delete('"')
+  full = Qbe.module_il(globals + [fn]).strip
+  bodies << (data_text.empty? ? full : full.delete_prefix(data_text).strip)
+rescue QbeUnsupported => e
+  skipped << [name, e.message]
+end
+
+il = ([data_text] + bodies).reject(&:empty?).join("\n\n") + "\n"
+asm, qbe_err = assemble(il)
+error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
+
+if output
+  File.write(output, asm)
+else
+  $stdout.write(asm)
+end
+skipped.each { |name, why| warn "pathb-ssa-build: not emitted: #{name}: #{why}" }
+exit(skipped.empty? ? EXIT_OK : EXIT_PARTIAL)
