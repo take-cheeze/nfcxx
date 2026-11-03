@@ -78,6 +78,23 @@ check.call('formatting caches belong to one generator', !other.owner_call_owner_
 end
 check.call('formatting cache remains bounded', formatting.instance_variable_get(:@owner_call_owner_lists).size == OutsideOwnerCall::OWNER_LIST_CACHE_MAX)
 
+puts '-- checked-send rewrite (host)'
+# CheckedSend#replace_call_head must rewrite exactly what gsub(/\bFROM/) did.
+heads = ['mrb_funcall(M, r1, "push",', 'bc2cpp_owner_call_named(M, self, "fé", 0,']
+pieces = heads + heads.map { |head| "_#{head}" } + heads.map { |head| "é#{head}" } +
+         ['mrb_funcall(M, r2, "push",', 'bc2cpp_owner_call_named(M, self, "fé", 1,', ' ', ';', '9', 'é']
+random = Random.new(3086)
+same = (0...2_000).all? do
+  code = Array.new(random.rand(0..6)) { pieces.sample(random: random) }.join
+  heads.all? do |head|
+    to = head.sub(/\A\w+/, 'X')
+    code.gsub(/\b#{Regexp.escape(head)}/) { to } == formatting.send(:replace_call_head, code, head, to)
+  end
+end
+check.call('checked-send rewrite matches the word-bounded regexp', same)
+plain = 'r1 = mrb_funcall(M, r2, "push", 0);'
+check.call('checked-send rewrite returns unmatched code itself', formatting.send(:replace_call_head, plain, heads.first, 'X').equal?(plain))
+
 SOURCE = <<~RUBY
   class Bag
     def initialize; @items = [1, 2]; end
