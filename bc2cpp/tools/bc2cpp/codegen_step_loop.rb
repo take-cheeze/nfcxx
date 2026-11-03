@@ -9,6 +9,11 @@ class CodeGen
     'downto' => { argc: 'n=1', block_offset: 2 }
   }.freeze
 
+  STEP_LAYOUT = lambda do |insn|
+    shape = STEP_LOOP_KINDS[insn.sym]
+    shape[:block_offset] if shape && insn.argc_text == shape[:argc]
+  end
+
   # Loop bounds and the step are held in `long long` so `i += step` cannot wrap a 32-bit
   # `mrb_int`; a literal is admitted only if it is a fixnum on every target.
   STEP_LOOP_LITERAL_MAX = 0x3fff_ffff
@@ -21,11 +26,7 @@ class CodeGen
   # (step_loop_operand). The emitter checks the proof, which needs the owner definition.
   def recognize_step_regions(irep)
     regions = []
-    layout = lambda do |insn|
-      shape = STEP_LOOP_KINDS[insn.sym]
-      shape[:block_offset] if shape && insn.argc_text == shape[:argc]
-    end
-    each_block_site(irep, send_ops: %i[SENDB], layout: layout) do |insn, sendb_idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %i[SENDB], layout: STEP_LAYOUT) do |insn, sendb_idx, block_insn, dest_reg, block_irep|
       next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
       next unless block_blk_needs(block_irep) == []
 

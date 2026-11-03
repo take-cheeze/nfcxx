@@ -76,27 +76,71 @@ module OwnerCallDirect
   def rewrite(code, entries, slots, subclassed)
     return code if entries.empty? || ENV['BC2CPP_OWNER_CALL_DIRECT'] == '0' || !code.include?('BC2CPP_OWNERS(')
 
-    lines = code.lines
-    changed = false
-    lines.each_with_index do |line, at|
-      next unless line.include?('BC2CPP_OWNERS(')
+    lines = Lines.new(code)
+    out = nil
+    copied = 0
+    from = 0
+    while (hit = code.byteindex('BC2CPP_OWNERS(', from))
+      at = lines.index_at(hit)
+      start = lines.line_start(at)
+      from = lines.line_end(at)
+      site = SITE.match(lines[at]) or next
 
-      lines[at] = line.sub(SITE) do
-        site = Regexp.last_match
-        head, recv, name, list = site.captures
-        owners = list.scan(STRING).flatten.grep(CLOSED_OWNER_RE)
-        guarded = (at.positive? && lines[at - 1].strip == '} else {' && guard_chain_classes(lines, at - 1, recv, slots)) || Set.new
-        direct = owners.reject { |o| guarded.include?(o) && !subclassed.include?(o) }.map { |o| entries[[o, name]] }
-        next site[0] if direct.empty? || direct.include?(nil) || direct.size > MAX
+      head, recv, name, list = site.captures
+      owners = list.scan(STRING).flatten.grep(CLOSED_OWNER_RE)
+      guarded = (at.positive? && lines[at - 1].strip == '} else {' && guard_chain_classes(lines, at - 1, recv, slots)) || NO_GUARD
+      direct = owners.reject { |o| guarded.include?(o) && !subclassed.include?(o) }.map { |o| entries[[o, name]] }
+      next if direct.empty? || direct.include?(nil) || direct.size > MAX
 
-        changed = true
-        rows = direct.map do |m|
-          "BC2CPP_OWNER_DIRECT(\"#{m[:owner]}\", #{m[:entry]}, #{m[:aspec]}, #{VISIBILITY.fetch(m[:visibility])})"
-        end
-        "#{head}BC2CPP_OWNERS_D(#{rows.join(' ')}, #{list})"
+      rows = direct.map do |m|
+        "BC2CPP_OWNER_DIRECT(\"#{m[:owner]}\", #{m[:entry]}, #{m[:aspec]}, #{VISIBILITY.fetch(m[:visibility])})"
       end
+      line = "#{site.pre_match}#{head}BC2CPP_OWNERS_D(#{rows.join(' ')}, #{list})#{site.post_match}"
+      lines.rewrite(at, line)
+      out ||= String.new(capacity: code.bytesize + 4096, encoding: code.encoding)
+      out << code.byteslice(copied, start - copied) << line
+      copied = from
     end
-    changed ? lines.join : code
+    return code unless out
+
+    out << code.byteslice(copied, code.bytesize - copied)
+  end
+
+  NO_GUARD = Set.new.freeze
+
+  # `code.lines` as rewrite sees it -- `lines[k]` is line k, or what rewrite replaced it with -- without a String per
+  # line: line starts are found only up to the last call site asked about, and a line is cut out when read.
+  class Lines
+    def initialize(code)
+      @code = code
+      @starts = [0]
+      @rewritten = {}
+    end
+
+    # The index of the line holding byte `pos`, which must not lie before a line asked about earlier.
+    def index_at(pos)
+      while @starts.last <= pos
+        newline = @code.byteindex("\n", @starts.last) or break
+        @starts << (newline + 1)
+      end
+      @starts.last > pos ? @starts.size - 2 : @starts.size - 1
+    end
+
+    def line_start(at)
+      @starts.fetch(at)
+    end
+
+    def line_end(at)
+      @starts[at + 1] || @code.bytesize
+    end
+
+    def [](at)
+      @rewritten[at] || @code.byteslice(line_start(at), line_end(at) - line_start(at))
+    end
+
+    def rewrite(at, line)
+      @rewritten[at] = line
+    end
   end
 
   # The classes the if/else-if chain ending in the `} else {` at `else_at` tests `recv` against exactly, or nil when

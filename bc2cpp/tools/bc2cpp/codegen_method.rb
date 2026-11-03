@@ -211,7 +211,8 @@ class CodeGen
     has_blk = opt_rest ? irep.enter.enter_fields[6].positive? : ((mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep))
     # OPTIONAL_REST keyword rest (`**kwd`): the keyword hash arrives in its own slot (MRB_ARGS_KEY(0, 1), the kdict bit), so
     # it is read from the callinfo, not from the positional arguments.
-    has_kwrest = opt_rest && irep.enter.enter_fields[5].positive?
+    kwrest_only = !mandatory_ok && !opt_jmp_targets && !kw_table && !opt_rest && keyword_rest_only_shape?(irep)
+    has_kwrest = (opt_rest && irep.enter.enter_fields[5].positive?) || kwrest_only
     # CORE_BLOCK_OPT: optionals and `&blk` together (`any?(pattern = NONE, &block)`). The
     # block sits after the optionals (OP_ENTER blk_pos), so it is the same extra
     # parameter, ahead of `bc2cpp_given_opt`.
@@ -219,7 +220,7 @@ class CodeGen
       opt, opt_jmp_addrs, opt_jmp_targets = blk_table
       has_blk = true
     end
-    supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk
+    supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk || kwrest_only
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) + (has_kwrest ? 1 : 0) : mand
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| c_param_name(n, i) }
@@ -741,6 +742,22 @@ class CodeGen
         kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
       end
       out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+    elsif kwrest_only
+      # KEYWORD_REST_ONLY: the positionals bind exactly; the keyword hash is the callinfo's keyword slot (read as the
+      # has_rest branch below does), or a fresh empty Hash when the call passed none.
+      mand_names = arg_names.first(mand)
+      kwrest_name = arg_names.last
+      mand_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      if mand.zero?
+        out << "  bc2cpp_check_argc(M, 0, 0);\n"
+      else
+        fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join
+        out << "  mrb_get_args(M, \"#{fmt}\", #{mand_names.map { |a| "&#{a}" }.join(', ')});\n"
+      end
+      out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
+      out << "  mrb_value #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
+      out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
+      out << "  return #{impl_name}(M, self, #{(mand_names + [kwrest_name]).join(', ')});\n"
     elsif has_rest
       # REST_ARG_SUPPORT: mrb_get_args `*` returns a pointer into the live VM stack,
       # so copy it into an Array (mrb_ary_new_from_values) right away, matching the
@@ -933,23 +950,41 @@ class CodeGen
   # register copied onto itself. A line goes only after one that ends a statement or
   # opens or closes a block: never the body of an unbraced if, else or loop, nor the
   # only statement after a case label.
-  DEAD_LABEL = /\A *(L\w+):;\n\z/
-  SELF_COPY = /\A *(r\d+) = \1;\n\z/
-  STATEMENT_END = /[;{}]\s*\z/
+  # Each is matched at a line's start by a StringScanner, so it reads one line of `code` without a String for it; a
+  # line runs to its first "\n" (or the end of `code`), as String#each_line splits.
+  DEAD_LABEL = / *(L\w+):;\n/
+  SELF_COPY = / *(r\d+) = \1;\n/
+  # The line's last byte outside \s is one of `;{}`.
+  STATEMENT_END = /[^\n]*[;{}][\t\v\f\r ]*(?:\n|\z)/
   # What String#strip removes: a line of only these is blank.
-  BLANK_LINE = /\A[\x00\t\n\v\f\r ]*\z/
+  BLANK_LINE = /[\x00\t\v\f\r ]*(?:\n|\z)/
 
   def drop_dead_statements(code)
     labels = code.scan(/\bL\w+\b/).tally
-    previous = "{\n"
-    kept = String.new(capacity: code.bytesize, encoding: code.encoding)
-    code.each_line do |line|
-      dead = previous.match?(STATEMENT_END) &&
-             ((label = line[DEAD_LABEL, 1]) ? labels[label] == 1 : line.match?(SELF_COPY))
-      previous = line unless dead || line.match?(BLANK_LINE)
-      kept << line unless dead
+    scanner = StringScanner.new(code)
+    # The last kept non-blank line, starting as "{\n", ends a statement.
+    previous_ends = true
+    kept = nil
+    copied = 0
+    size = code.bytesize
+    start = 0
+    while start < size
+      line_end = (code.byteindex("\n", start) || (size - 1)) + 1
+      scanner.pos = start
+      dead = previous_ends &&
+             (scanner.match?(DEAD_LABEL) ? labels[scanner[1]] == 1 : scanner.match?(SELF_COPY))
+      if dead
+        kept ||= String.new(capacity: size, encoding: code.encoding)
+        kept << code.byteslice(copied, start - copied)
+        copied = line_end
+      elsif !scanner.match?(BLANK_LINE)
+        previous_ends = scanner.match?(STATEMENT_END)
+      end
+      start = line_end
     end
-    kept
+    return code unless kept
+
+    kept << code.byteslice(copied, size - copied)
   end
 
   # mrbc names an anonymous parameter by its sigil (`*`, `**`, `&`, and `...`'s three), which is no C identifier; the
