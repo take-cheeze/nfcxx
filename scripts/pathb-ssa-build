@@ -220,6 +220,7 @@ while args.first&.start_with?("-") && args.first != "-"
 end
 usage_exit unless args.size == 1
 usage_exit if safe && output.nil?
+Qbe.safe = safe
 
 file = args.first
 ssa = convert(file, ld_trap)
