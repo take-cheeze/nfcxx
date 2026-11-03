@@ -312,17 +312,18 @@ class CodeGen
     end
 
     def_owners = @registry.fetch(name, []).map(&:owner).to_set | native_owners
-    mixed = lambda do |klass|
-      !Array(@included_modules[klass]).empty? || !Array(@prepended_modules[klass]).empty? ||
-        @unknown_mixins.include?(klass)
-    end
     @superclass_of.keys.sort.select do |klass|
       next false unless strict_subclass?(klass, owner)
 
       k = klass
-      k = @superclass_of[k] until k == owner || def_owners.include?(k) || mixed.call(k)
+      k = @superclass_of[k] until k == owner || def_owners.include?(k) || class_has_mixins?(k)
       k == owner
     end.first(POLY_SMALL_N_INHERITED_MAX)
+  end
+
+  def class_has_mixins?(klass)
+    !Array(@included_modules[klass]).empty? || !Array(@prepended_modules[klass]).empty? ||
+      @unknown_mixins.include?(klass)
   end
 
   # INHERITED_GUARD's subclasses per candidate owner.

@@ -375,7 +375,7 @@ class CodeGen
                      method_level ? @class_annotations[ir.label]&.args : nil, owner: d.owner,
                      class_layout: @class_layout, registry: @registry, container_constants: @container_constants,
                      ret_class_proof: ->(n, o) { class_return_for_self_call(n, o) },
-                     method_return_class: ->(n) { class_return_for_dispatch(n) }, dominated: dominated)
+                     method_return_class: dispatch_return_class, dominated: dominated)
   end
 
   # The C++ test that `var` has the declared kind (see declared_return_guard_statement). A :union is the members' tests
