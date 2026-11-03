@@ -39,6 +39,15 @@ module Qbe
   BF_LOAD = { 1 => "loadub", 2 => "loaduh", 4 => "loadw", 8 => "loadl" }.freeze
   BF_STORE = { 1 => "storeb", 2 => "storeh", 4 => "storew", 8 => "storel" }.freeze
 
+  # --safe (-fsafe-pointers, pathb-qbe-emit.rb's rules): set by the driver. module_has_data: the module defines a global
+  # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
+  # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
+  class << self
+    attr_accessor :safe, :module_has_data
+  end
+  self.safe = false
+  self.module_has_data = false
+
   module_function
 
   def float?(t) = FLOAT_TYPES.key?(unqual(t))
@@ -331,6 +340,7 @@ module Qbe
 
     def emit
       header
+      safe_refusal!
       allocs
       escape_slots if returns_twice?(@blocks)
       plan_phis
@@ -607,7 +617,11 @@ module Qbe
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
       # A volatile store is a call of its helper (QBE merges, forwards and drops plain volatile stores; a call is kept).
-      when "store" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
+      when "store"
+        v = op(item[3])
+        a = op(item[2])
+        safe_check(item[2], a, Qbe.size(item[1]))
+        @lines << "  #{Qbe.store_op(item[1])} #{v}, #{a}"
       when "store.v" then volatile_store_lines(item)
       # `(copy N DST SRC)`: N bytes from SRC to DST (the interpreter's copy_cells). QBE's blit copies a byte count.
       when "copy"
@@ -620,7 +634,12 @@ module Qbe
           raise QbeUnsupported, "copy of an address with no declared type #{a}" if t.nil?
           raise QbeUnsupported, "copy of the by-value aggregate #{a}" unless head(unqual(t)) == "ptr"
         end
-        @lines << "  blit #{op(item[3])}, #{op(item[2])}, #{Qbe.int_lit(item[1])}"
+        src = op(item[3])
+        dst = op(item[2])
+        n = Qbe.int_lit(item[1])
+        safe_check(item[2], dst, n)
+        safe_check(item[3], src, n)
+        @lines << "  blit #{src}, #{dst}, #{n}"
       when "br"
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
@@ -754,7 +773,15 @@ module Qbe
         @lines << "  #{dst} =l call $__pathb_rdtsc()"
       when "bitcast" then bitcast_lines(dst, rv)
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
-      when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
+      when "offset"
+        base = op(rv[1])
+        if Qbe.safe
+          sum = fresh
+          @lines << "  #{sum} =l add #{base}, #{Qbe.int_lit(rv[2])}"
+          @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, l 0, w 0)"
+        else
+          @lines << "  #{dst} =l add #{base}, #{Qbe.int_lit(rv[2])}"
+        end
       when "index" then index_lines(dst, rv)
       when "alloca" then alloca_lines(dst, rv)
       when "pdiff" then pdiff_lines(dst, t, rv)
@@ -762,12 +789,14 @@ module Qbe
       when "load.v" then volatile_load_lines(dst, rv)
       when "load"
         # A bool object holding another byte is read as true, and a load yields 0 or 1 (EDG's model): normalise the byte.
+        a = op(rv[2])
+        safe_check(rv[2], a, Qbe.size(rv[1]))
         if unqual(rv[1]) == "bool"
           raw = fresh
-          @lines << "  #{raw} =w loadub #{op(rv[2])}"
+          @lines << "  #{raw} =w loadub #{a}"
           @lines << "  #{dst} =w cnew #{raw}, 0"
         else
-          @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
+          @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{a}"
         end
       when "const", "null", nil
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
@@ -819,14 +848,46 @@ module Qbe
     end
 
     # A volatile load or store: a call of the module's helper for its operation (see Qbe.volatile_helpers).
+    # --safe: a function whose memory accesses could reach an object the safe-pointers runtime must have registered
+    # (a stack slot of this function, or a global or string of this module) is refused: its registration is slice 3.
+    def safe_refusal!
+      return unless Qbe.safe
+      return unless memory_access?(@blocks)
+      if !@slots.empty?
+        raise QbeUnsupported, "--safe: a stack slot needs its frame registration (slice 3)"
+      elsif Qbe.module_has_data
+        raise QbeUnsupported, "--safe: this module's globals and strings need their registration (slice 3)"
+      end
+    end
+
+    def memory_access?(x)
+      return false unless x.is_a?(Array)
+      return true if %w[load load.v store store.v copy index offset].include?(head(x))
+      x.any? { |y| memory_access?(y) }
+    end
+
     def volatile_load_lines(dst, rv)
       op_name = Qbe.load_op(rv[1])
-      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{op(rv[2])})"
+      a = op(rv[2])
+      safe_check(rv[2], a, Qbe.size(rv[1]))
+      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{a})"
     end
 
     def volatile_store_lines(item)
       op_name = Qbe.store_op(item[1])
-      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{op(item[2])}, #{Qbe.store_class(op_name)} #{op(item[3])})"
+      a = op(item[2])
+      v = op(item[3])
+      safe_check(item[2], a, Qbe.size(item[1]))
+      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{a}, #{Qbe.store_class(op_name)} #{v})"
+    end
+
+    # --safe (-fsafe-pointers): the check of an access of `bytes` bytes at `addr` (the text of the IR operand `x`), which
+    # the existing emitter makes before every load and store through a computed address. A static address (a slot, a
+    # global, an address-of) is not checked. The location is not in the SSA text, so a report has none ("?").
+    def safe_check(x, addr, bytes)
+      return unless Qbe.safe
+      return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
+      @lines << "  call $__nfcxx_sp_check(l #{addr}, l #{bytes}, l 0, w 0)"
     end
 
     # The unqualified type: const and volatile are access qualifiers, not part of the value's class.
@@ -848,7 +909,14 @@ module Qbe
       end
       scaled = fresh
       @lines << "  #{scaled} =l mul #{i}, #{Qbe.int_lit(rv[3])}"
-      @lines << "  #{dst} =l add #{base}, #{scaled}"
+      if Qbe.safe
+        # --safe: the derived address must stay in base's object (sp_derive in pathb-qbe-emit.rb).
+        sum = fresh
+        @lines << "  #{sum} =l add #{base}, #{scaled}"
+        @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, l 0, w 0)"
+      else
+        @lines << "  #{dst} =l add #{base}, #{scaled}"
+      end
     end
 
     # Bit-fields, with pathb-qbe-emit.rb's rules: `(bfload T UNIT ADDR BOFF WIDTH)` reads the whole UNIT-byte unit and
@@ -1315,6 +1383,7 @@ module Qbe
 
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
+    self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
     abi, type_decls = abi_types(forms)
