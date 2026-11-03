@@ -249,25 +249,11 @@ module NativeConstructorSigs
   def ruby_initialize(klass, sources, ruby)
     name = klass.split('::').last
     ruby.each do |path|
-      found = find_initialize(RubyParseCache.parse(File.read(path), path).value, name)
-      next unless found
+      helpers = ruby_initialize_helpers(path, name)
+      next unless helpers
+      return nil if helpers == :refused
 
-      params = found.parameters
-      return nil unless params && params.requireds.size == 1 && params.optionals.size <= 1 && params.rest.nil?
-
-      first = params.requireds.first.name
-      node = found.body&.body&.first
-      return nil unless found.body.body.size == 1 && node.is_a?(Prism::IfNode)
-
-      cond = node.predicate
-      return nil unless cond.is_a?(Prism::CallNode) && %i[kind_of? is_a?].include?(cond.name) &&
-                        cond.receiver.is_a?(Prism::LocalVariableReadNode) && cond.receiver.name == first &&
-                        cond.arguments&.arguments&.map(&:slice) == ['String']
-
-      string_helper = self_calls(node.statements).first
-      else_helper = self_calls(node.subsequent&.statements).first
-      return nil unless string_helper && else_helper
-
+      string_helper, else_helper = helpers
       string_body = registered_body(klass, string_helper, sources)
       else_body = registered_body(klass, else_helper, sources)
       string_overloads = string_body && c_overloads(string_body)
@@ -279,6 +265,34 @@ module NativeConstructorSigs
       return [string_overloads.first.merge(else: false), else_overloads.first.merge(else: true)]
     end
     nil
+  end
+
+  # The Ruby half of ruby_initialize for one file: [String helper, else helper] of the `def initialize` of the class
+  # named `name` in `path`, :refused when that initialize is not the String-dispatch form, nil when the file has none.
+  # It reads only that file, so the scan cache keeps it per file, class name and Prism version.
+  def ruby_initialize_helpers(path, name)
+    ScanCache.fetch("native_constructor_sigs.ruby_initialize.#{name}.prism#{Prism::VERSION}", [path], cache_absent: false) do
+      found = find_initialize(RubyParseCache.parse(File.read(path), path).value, name)
+      found && initialize_helpers(found)
+    end
+  end
+
+  def initialize_helpers(found)
+    params = found.parameters
+    return :refused unless params && params.requireds.size == 1 && params.optionals.size <= 1 && params.rest.nil?
+
+    first = params.requireds.first.name
+    node = found.body&.body&.first
+    return :refused unless found.body.body.size == 1 && node.is_a?(Prism::IfNode)
+
+    cond = node.predicate
+    return :refused unless cond.is_a?(Prism::CallNode) && %i[kind_of? is_a?].include?(cond.name) &&
+                           cond.receiver.is_a?(Prism::LocalVariableReadNode) && cond.receiver.name == first &&
+                           cond.arguments&.arguments&.map(&:slice) == ['String']
+
+    string_helper = self_calls(node.statements).first
+    else_helper = self_calls(node.subsequent&.statements).first
+    string_helper && else_helper ? [string_helper, else_helper] : :refused
   end
 
   def find_initialize(node, name, inside = false)

@@ -6,6 +6,7 @@ require_relative 'bytecode_ir_containers'
 require_relative 'native_constructor_sigs'
 require_relative 'compiled_gems'
 require_relative 'ruby_parse_cache'
+require_relative 'scan_cache'
 require_relative 'lexical_scopes'
 
 # Construct, native-argument and super devirtualization targets.
@@ -35,13 +36,19 @@ module DispatchTargetSources
     raise "bc2cpp: no Ruby sources match #{glob}" if files.empty?
 
     found = {}
-    files.each do |file|
+    files.each { |file| file_initializers(file).each { |name| found[name] = true } }
+    found
+  end
+
+  # One file's class_initializers names, in first-seen order. They depend on that file's bytes alone, so the scan
+  # cache keeps them per file (with the Prism version) and a warm run does not parse the file for this list.
+  def file_initializers(file)
+    ScanCache.fetch("dispatch_targets.class_initializers.prism#{Prism::VERSION}", [file], cache_absent: false) do
       result = RubyParseCache.parse_file(file)
       raise "bc2cpp: #{file}: #{result.errors.first.message}" unless result.errors.empty?
 
-      collect_initializers(result.value, nil, found)
+      collect_initializers(result.value, nil, {}).keys
     end
-    found
   end
 
   def collect_initializers(node, scope, found)
@@ -59,6 +66,7 @@ module DispatchTargetSources
     else
       node.compact_child_nodes.each { |child| collect_initializers(child, scope, found) }
     end
+    found
   end
 
   # DIRECT_CONSTRUCT_TARGETS: the non-singleton owners mruby-rpg2k-compiled emits (compiled_gems.rb) that
