@@ -110,6 +110,49 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_ini
           frozen_literal: frozen_literal, **rest)
   end
 
+  def defer_disassembly(decoder, name, values, next_pc)
+    @disassembly_decoder = decoder
+    @disassembly_name = name
+    @disassembly_values = values
+    @disassembly_next_pc = next_pc
+  end
+
+  def args
+    materialize_disassembly
+    self[:args]
+  end
+
+  def raw
+    materialize_disassembly
+    self[:raw]
+  end
+
+  def args=(text)
+    materialize_disassembly
+    self[:args] = text
+  end
+
+  def raw=(text)
+    materialize_disassembly
+    self[:raw] = text
+  end
+
+  def freeze
+    materialize_disassembly
+    super
+  end
+
+  private
+
+  def materialize_disassembly
+    return unless @disassembly_decoder
+
+    self[:args], self[:raw] = @disassembly_decoder.disassembly(self, @disassembly_name, @disassembly_values, @disassembly_next_pc)
+    @disassembly_decoder = @disassembly_name = @disassembly_values = @disassembly_next_pc = nil
+  end
+
+  public
+
   # An Insn for code the compiler synthesizes (no disassembly line behind it).
   def self.synthetic(op, args)
     new(lineno: 0, addr: 0, op: op, args: args, raw: "#{op} #{args}")
