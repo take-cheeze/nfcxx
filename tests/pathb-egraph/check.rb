@@ -76,9 +76,11 @@ def check_goldens(files)
   files.each do |f|
     # The whole module's functions and globals: a call in one function reaches the others.
     module_forms = ssa_texts(f).flat_map { |t| read_forms(t) } + read_forms(File.read(f)).select { |g| head(g) == "global" }
+    # The module's tables are the same for every function of the file: install them once (it is linear in the module,
+    # and a file of over a thousand functions made it quadratic).
+    install_module(module_forms)
     ssa_texts(f).each do |text|
       totals[:functions] += 1
-      install_module(module_forms)
       orig = PathbEgraph.parse_fn(read_forms(text).first)
       begin
         out, st = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first))
