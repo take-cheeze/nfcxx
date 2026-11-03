@@ -745,8 +745,24 @@ class CodeGen
     end
   end
 
+  DERIVED_NAME_CACHE_MAX = 4096
+
   def cpp_name(owner, name)
-    sanitize("#{owner}_#{name}")
+    @cpp_names ||= {}
+    names = @cpp_names[owner]
+    cached = names && names[name]
+    return cached if cached
+
+    result = sanitize("#{owner}_#{name}")
+    @cpp_name_count ||= 0
+    if @cpp_name_count < DERIVED_NAME_CACHE_MAX
+      # Probe rollback copies the outer Hash only, so replace rather than mutate a retained inner table.
+      next_names = names ? names.dup : {}
+      next_names[name] = result
+      @cpp_names[owner] = next_names.freeze
+      @cpp_name_count += 1
+    end
+    result
   end
 
   # NATIVE_ARGS: per-position types, shared by compile_method (signature) and compile_send (call-site unboxing) so
@@ -837,8 +853,18 @@ class CodeGen
     }.freeze
   end
 
+  # Hash String keys snapshot caller content; shared results are immutable and each name family has its own cache.
+  def cached_codegen_name(cache, key)
+    cached = cache[key]
+    return cached if cached
+
+    result = yield.freeze
+    cache[key] = result if cache.size < DERIVED_NAME_CACHE_MAX
+    result
+  end
+
   def ivar_field_name(name)
-    "ivar_#{sanitize(name)}"
+    cached_codegen_name(@ivar_field_names ||= {}, name) { "ivar_#{sanitize(name)}" }
   end
 
   # Lexical scope segments (innermost last) for a bare constant in a def body,
@@ -848,7 +874,9 @@ class CodeGen
   # constant named "Bitmap.singleton" in the unguarded scope-chain part of
   # GETCONST, a NameError at runtime. No effect on real constant paths.
   def lexical_scope_path(owner)
-    owner.sub(/\.singleton\z/, '').split('::')
+    cached_codegen_name(@lexical_scope_paths ||= {}, owner) do
+      owner.sub(/\.singleton\z/, '').split('::').each(&:freeze).freeze
+    end
   end
 
   # Names with exactly one definition in the whole program: static method

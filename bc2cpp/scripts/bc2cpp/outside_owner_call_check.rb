@@ -23,6 +23,7 @@
 
 require 'tmpdir'
 require_relative 'fixture_runtime'
+require_relative '../../tools/bc2cpp/bc2cpp'
 
 ENV['BC2CPP_SIG_DIRS'] ||= ''
 runtime = Bc2cppFixtureRuntime
@@ -32,6 +33,50 @@ check = lambda do |what, condition|
   failures << what unless condition
 end
 abort 'SKIP: set MRBC' unless ENV['MRBC']
+
+puts '-- owner-call formatting (host)'
+formatting = CodeGen.allocate
+owner_names = %w[Array Game::Bag Kernel.singleton].map(&:freeze).freeze
+formatting.define_singleton_method(:name_owner_set) { |_name| owner_names }
+[[], ['r2'], (1..CodeGen::FUNCALL_ARGC_MAX).map { |i| "r#{i}" }].each do |argv|
+  args = argv.map { |arg| ", #{arg}" }.join
+  list = owner_names.map { |owner| "\"#{owner}\"" }.join(', ')
+  expected = "r1 = bc2cpp_owner_call_named(M, r0, \"push\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), " \
+             "#{argv.size}#{args}); /* CLOSED_WORLD owner-call: push */"
+  check.call("#{argv.size} arguments: owner-call output is byte-identical", formatting.outside_owner_call_line(1, 'r0', 'push', argv, owner_names) == expected)
+  block_expected = expected.sub('mrb_nil_value()', 'block')
+  check.call("#{argv.size} arguments: block owner-call output is byte-identical", formatting.block_owner_call_line('r1', 'r0', 'push', argv, 'block') == block_expected)
+end
+check.call('block calls exceeding the funcall argument limit still refuse',
+           formatting.block_owner_call_line('r1', 'r0', 'push', Array.new(CodeGen::FUNCALL_ARGC_MAX + 1, 'r2'), 'block').nil?)
+list = owner_names.map { |owner| "\"#{owner}\"" }.join(', ')
+check.call('splat calls retain their argument-array expressions',
+           formatting.block_owner_call_argv_line('r1', 'r0', 'push', 'argc', 'argv', 'block') ==
+             "r1 = bc2cpp_owner_call_argv_named(M, r0, \"push\", 0, BC2CPP_OWNERS(#{list}), block, argc, argv); /* CLOSED_WORLD owner-call: push */")
+check.call('numeric helper formatting retains its output',
+           formatting.helper_owner_calls('mrb_funcall(M, recv, "push", 1, arg)') ==
+             "bc2cpp_owner_call_named(M, recv, \"push\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), 1, arg) /* CLOSED_WORLD owner-call: push */")
+cached = formatting.owner_call_owner_list(owner_names)
+check.call('deeply frozen lists reuse their frozen formatting', cached.frozen? && formatting.owner_call_owner_list(owner_names).equal?(cached))
+mutable_name = +'Array'
+mutable = [mutable_name].freeze
+formatting.owner_call_owner_list(mutable)
+mutable_name.replace('Hash')
+check.call('a shallow-frozen list never caches mutable names', formatting.owner_call_owner_list(mutable) == '"Hash"')
+mutable_list = ['Array']
+formatting.owner_call_owner_list(mutable_list)
+mutable_list << 'Hash'
+check.call('mutable lists are rendered again after mutation', formatting.owner_call_owner_list(mutable_list) == '"Array", "Hash"')
+snapshot_name = +'Array'
+snapshot = formatting.freeze_owner_call_owners([snapshot_name])
+snapshot_name.replace('Hash')
+check.call('owner decisions retain an immutable name snapshot', snapshot.frozen? && snapshot.first.frozen? && snapshot == ['Array'])
+other = CodeGen.allocate
+check.call('formatting caches belong to one generator', !other.owner_call_owner_list(owner_names).equal?(cached))
+(OutsideOwnerCall::OWNER_LIST_CACHE_MAX + 1).times do |i|
+  formatting.owner_call_owner_list(["Owner#{i}".freeze].freeze)
+end
+check.call('formatting cache remains bounded', formatting.instance_variable_get(:@owner_call_owner_lists).size == OutsideOwnerCall::OWNER_LIST_CACHE_MAX)
 
 SOURCE = <<~RUBY
   class Bag

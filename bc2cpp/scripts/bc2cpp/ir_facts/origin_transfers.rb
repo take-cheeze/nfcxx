@@ -275,6 +275,55 @@ ensure
   query_key_flag ? ENV['BC2CPP_IR_QUERY_KEYS'] = query_key_flag : ENV.delete('BC2CPP_IR_QUERY_KEYS')
 end
 
+scalar_key_flag = ENV['BC2CPP_IR_QUERY_KEYS']
+begin
+  key_answers = %w[0 1].map do |mode|
+    ENV['BC2CPP_IR_QUERY_KEYS'] = mode
+    p = program.call([insn(0, :LOADI_1, 'R1 (1)'), insn(2, :MOVE, 'R2 R1'), insn(4, :RETURN, 'R2')])
+    [nil, Set.new.freeze, Set[1].freeze, Set[2].freeze].product([0, 1, 3, 400], [false, true].repeated_permutation(4).to_a).flat_map do |opaque, budget, flags|
+      (-1..3).flat_map do |index|
+        [0, 1, 2, 5].map do |register|
+          opts = { opaque_regs: opaque, max_states: budget, follow_moves: flags[0],
+                   through_handlers: flags[1], origin_transfers: flags[2], raiseif_nil: flags[3], shared: true }
+          cached = p.reaching_definitions(index, register, **opts)
+          fresh = p.reaching_definitions(index, register, **opts, refusal: {})
+          raise 'policy key changed reaching definitions' unless cached == fresh
+
+          cached&.map(&:to_a)
+        end
+      end
+    end
+  end
+  check.call('scalar policy keys preserve flags, budgets, opaque sets, registers, invalid indices and cache saturation',
+             key_answers[0] == key_answers[1])
+  ENV['BC2CPP_IR_QUERY_KEYS'] = '1'
+  p = program.call([insn(0, :LOADI_1, 'R1 (1)'), insn(2, :RETURN, 'R1')])
+  BytecodeIR::DATAFLOW_CACHE_SIZE.times do |budget|
+    p.reaching_definitions(1, 1, max_states: budget, shared: true)
+  end
+  contexts = p.instance_variable_get(:@reaching_query_contexts)
+  before = contexts.size
+  p.reaching_definitions(1, 1, max_states: 9000, shared: true)
+  check.call('scalar policies stop growing when the shared answer cache is full',
+             contexts.size == before && before == BytecodeIR::DATAFLOW_CACHE_SIZE &&
+             p.instance_variable_get(:@reaching_definitions_cache).keys.all? { |key| key.is_a?(Integer) })
+  mixed = program.call([insn(0, :LOADI_1, 'R1 (1)'), insn(2, :MOVE, 'R2 R1'), insn(4, :RETURN, 'R2')])
+  mixed_answers = [{}, { follow_moves: nil }, { max_states: 400.0 }, { max_states: 401 }].all? do |opts|
+    cached = mixed.reaching_definitions(2, 2, **opts, shared: true)
+    cached == mixed.reaching_definitions(2, 2, **opts, refusal: {})
+  end
+  BytecodeIR::DATAFLOW_CACHE_SIZE.times do |budget|
+    mixed.reaching_definitions(2, 2, max_states: budget.even? ? budget : budget.to_f, shared: true)
+  end
+  mixed_keys = mixed.instance_variable_get(:@reaching_definitions_cache)
+  check.call('fallback Array keys coexist with scalar policy keys without collisions through saturation',
+             mixed_answers && mixed_keys.size == BytecodeIR::DATAFLOW_CACHE_SIZE &&
+             mixed_keys.keys.any? { |key| key.is_a?(Array) } && mixed_keys.keys.any? { |key| key.is_a?(Integer) } &&
+             mixed.reaching_definitions(2, 2, shared: true) == mixed.reaching_definitions(2, 2, refusal: {}))
+ensure
+  scalar_key_flag ? ENV['BC2CPP_IR_QUERY_KEYS'] = scalar_key_flag : ENV.delete('BC2CPP_IR_QUERY_KEYS')
+end
+
 # The Fixnum proof's audited lists are BytecodeIR's, not copies kept equal by a check.
 proof = File.read(File.expand_path('../../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
 check.call('FIXNUM_PROOF_STEP_OVER_OPS is WRITES_LEADING_REG_OPS itself',

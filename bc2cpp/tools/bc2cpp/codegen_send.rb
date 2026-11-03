@@ -1913,7 +1913,7 @@ class CodeGen
   def owner_class_fn_name(owner)
     @owner_class_cache ||= {}
     slot = (@owner_class_cache[owner] ||= { index: @owner_class_cache.size })
-    "bc2cpp_owner_class_#{slot[:index]}"
+    slot[:name] ||= "bc2cpp_owner_class_#{slot[:index]}".freeze
   end
 
   # File-scope cache emitted ahead of the compiled bodies. A static per owner,

@@ -116,15 +116,17 @@ module BytecodeIR
       @reaching_definitions_cache ||= {}
       @compact_dataflow_keys = ENV['BC2CPP_IR_QUERY_KEYS'] != '0' if @compact_dataflow_keys.nil?
       opaque_key = reaching_opaque_key(opaque_regs)
-      key = [index, reg, opaque_key, follow_moves, max_states,
-             through_handlers, origin_transfers, raiseif_nil]
-      unless @reaching_definitions_cache.key?(key)
-        key[1] = key[1].freeze if @compact_dataflow_keys
+      key = reaching_query_key(index, reg, opaque_key, follow_moves, max_states,
+                               through_handlers, origin_transfers, raiseif_nil)
+      unless key && @reaching_definitions_cache.key?(key)
         result = compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                              max_states: max_states, through_handlers: through_handlers,
-                                             origin_transfers: origin_transfers, raiseif_nil: raiseif_nil)
+                                             origin_transfers: origin_transfers, refusal: refusal,
+                                             raiseif_nil: raiseif_nil)
         return result if @reaching_definitions_cache.size >= DATAFLOW_CACHE_SIZE
 
+        key ||= reaching_query_key(index, reg, opaque_key, follow_moves, max_states,
+                                   through_handlers, origin_transfers, raiseif_nil, create: true)
         @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg, d.built).freeze }&.freeze
       end
       # Shared readers never mutate returned definitions; public callers keep fresh copies.
@@ -134,6 +136,36 @@ module BytecodeIR
       end
       @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg, d.built) }
     end
+
+    # Each retained policy gets an ID below the answer-cache cap. Instruction indices stay within the fixed
+    # body length, so (register * length + index, policy ID) has a collision-free Integer encoding.
+    def reaching_query_key(index, reg, opaque_key, follow_moves, max_states,
+                           through_handlers, origin_transfers, raiseif_nil, create: false)
+      unless @compact_dataflow_keys && index.is_a?(Integer) && index.between?(0, @instructions.length - 1) &&
+             reg.is_a?(Integer) && reg >= 0 && max_states.is_a?(Integer) &&
+             (follow_moves == true || follow_moves == false) &&
+             (through_handlers == true || through_handlers == false) &&
+             (origin_transfers == true || origin_transfers == false) &&
+             (raiseif_nil == true || raiseif_nil == false)
+        return [index, reg, opaque_key, follow_moves, max_states, through_handlers, origin_transfers, raiseif_nil]
+      end
+
+      flags = (follow_moves ? 1 : 0) | (through_handlers ? 2 : 0) |
+              (origin_transfers ? 4 : 0) | (raiseif_nil ? 8 : 0)
+      @reaching_query_contexts ||= {}
+      by_opaque = @reaching_query_contexts[max_states]
+      by_flags = by_opaque && by_opaque[opaque_key]
+      policy = by_flags && by_flags[flags]
+      unless policy
+        return nil unless create
+
+        by_opaque ||= (@reaching_query_contexts[max_states] = {})
+        by_flags ||= (by_opaque[opaque_key] = {})
+        policy = by_flags[flags] = @reaching_definitions_cache.size
+      end
+      (reg * @instructions.length + index) * DATAFLOW_CACHE_SIZE + policy
+    end
+    private :reaching_query_key
 
     # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable
     # strings. StrictKeySet is a Set subclass whose dev-time coercion already rejects non-Integer members, so a
