@@ -19,13 +19,23 @@
 # Control flow is structured: `if` is OpSelectionMerge and OpBranchConditional, and `loop` is an OpLoopMerge whose
 # continue block runs the step.
 #
-# Handled: block, let, set, store, if (with else), loop (with break and continue), return, eval (of a device intrinsic);
-# the expressions load, index, wadd, wsub, wmul, wneg, and, or, xor, not, the comparisons lt, le, gt, ge, eq, ne (int
-# with .s or .u, float with .f, and pointers; the IR's own signedness applies when there is no suffix), fadd, fsub,
-# fmul, fdiv, fneg (no contraction: SPIR-V does not fuse them without a decoration), iconv, fconv, i2f, u2f, const, null,
-# gpu, and the device intrinsics of pathb-ptx-emit.rb (DEVICE_INTRINSICS names).
-# Refused (exit 3): trap (OpKill is not a kernel exit), checked division and shifts, cf2i, bool in memory, 1- and 2-byte
-# integers, calls of module functions, switch, goto, static data, aggregates, and float constants that are not decimals.
+# A function that some other function calls is a device function: an OpFunction that is not an entry point, with the
+# IR's return type (a value, or void), called by OpFunctionCall. Recursion (a call cycle) is refused.
+#
+# Handled: block, let, set, store, if (with else), loop (with break and continue), switch (with case, default and
+# fallthrough; OpSwitch on a 32- or 64-bit integer; a goto from the switch to the label that follows it is a branch to the
+# switch's merge block), return (a value in a device function), eval (of a device intrinsic); the expressions load, index,
+# wadd, wsub, wmul, wneg, and, or, xor, not, the comparisons lt, le, gt, ge, eq, ne (int with .s or .u, float with .f, and
+# pointers; the IR's own signedness applies when there is no suffix), fadd, fsub, fmul, fdiv, fneg (no contraction: SPIR-V
+# does not fuse them without a decoration), iconv, fconv, i2f, u2f, const, null, gpu, calls of module functions, and the
+# device intrinsics of pathb-ptx-emit.rb (DEVICE_INTRINSICS names). The static objects (`global`) of an array of scalars
+# with an all-zero initializer: a `static` one is a Workgroup variable (uninitialized, as the PTX and AMD emitters leave
+# __shared__), any other is a CrossWorkgroup variable with the null initializer. `bitcast` between pointers, and a
+# pointer to Workgroup memory is only loaded from, stored to and indexed (it is not stored in memory or passed).
+# Refused (exit 3): trap and the checks that trap (nonnull, bounds): a SPIR-V kernel has no abort (OpKill is for fragment
+# shaders), checked division and shifts, cf2i, bool in memory, 1- and 2-byte integers, a goto other than the one above,
+# calls of other intrinsics (atomics, warp, barriers), initialized static data, aggregates, and float constants that are
+# not decimals.
 #
 # The emitted code is checked by running it (tests/gpu/spirv/run.sh); it is not compared byte for byte with a hand translation.
 
@@ -237,7 +247,14 @@ def tkey(t)
   return "bool" if t[0] == "int" && t[3]
   return "i#{t[1]}" if t[0] == "int"
   return "f#{t[1]}" if t[0] == "float"
+  return "arr(#{t[1]},#{tkey(t[2])})" if t[0] == "array"
   "p(#{tkey(t[1])})"
+end
+
+# A pointer type: ["ptr", pointee] is a CrossWorkgroup pointer; ["ptr", pointee, storage] is one in another storage class
+# (the Workgroup storage of a zero-initialized static). Such a pointer is only loaded from, stored to and indexed.
+def ptr_of(pointee, storage = "CrossWorkgroup")
+  storage == "CrossWorkgroup" ? ["ptr", pointee] : ["ptr", pointee, storage]
 end
 
 def type_size(t)
@@ -297,8 +314,12 @@ FLOAT_CMP = { "lt" => "OpFOrdLessThan", "le" => "OpFOrdLessThanEqual", "gt" => "
 
 class SpvModule
   attr_reader :caps, :decor, :decls, :iface
+  attr_accessor :fns   # the module's functions by name (SpvFn), for the calls
+  attr_reader :globals # the static objects by name: [variable id, pointer type of the variable's value]
 
   def initialize
+    @fns = {}
+    @globals = {}
     @n = 0
     @types = {}      # tkey (and "fp(...)" for Function pointers) => id
     @consts = {}     # "tkey text" => id
@@ -324,7 +345,7 @@ class SpvModule
   end
 
   def type_id(t)
-    key = tkey(t)
+    key = t[0] == "ptr" && t[2] ? "ps(#{t[2]} #{tkey(t[1])})" : tkey(t)
     return @types[key] if @types.key?(key)
     id = fresh("T")
     if t[0] == "void"
@@ -337,10 +358,12 @@ class SpvModule
     elsif t[0] == "float" && (t[1] == 4 || t[1] == 8)
       cap("Float64") if t[1] == 8
       decl(id, "OpTypeFloat #{t[1] * 8}")
+    elsif t[0] == "array"
+      decl(id, "OpTypeArray #{type_id(t[2])} #{constant(UINT, t[1].to_s)}")
     elsif t[0] == "ptr"
       raise Refused, "pointer to void" if t[1][0] == "void"
       pointee = type_id(t[1])
-      decl(id, "OpTypePointer CrossWorkgroup #{pointee}")
+      decl(id, "OpTypePointer #{t[2] || "CrossWorkgroup"} #{pointee}")
     else
       raise Refused, "type #{key} (1- and 2-byte integers and aggregates are not lowered yet)"
     end
@@ -358,9 +381,11 @@ class SpvModule
   end
 
   def function_type_id(ret, params)
+    key = "fn(#{tkey(ret)} #{params.map { |p| tkey(p) }.join(" ")})"
+    return @types[key] if @types.key?(key)
     id = fresh("T")
     decl(id, "OpTypeFunction #{type_id(ret)} #{params.map { |p| type_id(p) }.join(" ")}".rstrip)
-    id
+    @types[key] = id
   end
 
   # A constant of IR type t from its IR text: an integer (its bits), a bool (0 or 1) or a decimal float.
@@ -406,6 +431,34 @@ class SpvModule
     @iface << var
     @builtins[name] = [var, @vec3]
   end
+
+  # A static object: (global "name" (array N T) SIZE ALIGN [(static)] (init (zero 0 SIZE))). A zero-initialized static
+  # is a Workgroup variable (the __shared__ of the PTX and AMD emitters, which leave it uninitialized); any other object
+  # is a CrossWorkgroup variable whose initializer is the null constant. A non-zero initializer is refused.
+  def add_global(f)
+    name = f[1].to_s
+    raise Refused, "global #{name} of type #{form_text(f[2])}" unless head_of(f[2]) == "array" && f[2].length == 3
+    n = as_int(f[2][1].to_s)
+    elem = parse_type(f[2][2])
+    raise Refused, "global #{name} of element type #{tkey(elem)}" unless mem_type?(elem)
+    size = as_int(f[3].to_s)
+    raise BadIR, "global #{name}: #{n} elements of #{type_size(elem)} bytes are not #{size} bytes" unless n * type_size(elem) == size
+    init = f.drop(4).find { |x| head_of(x) == "init" }
+    raise Refused, "global #{name} without an initializer" if init.nil?
+    zero = init.length == 2 && head_of(init[1]) == "zero" && init[1].length == 3 &&
+           as_int(init[1][1].to_s) == 0 && as_int(init[1][2].to_s) == size
+    raise Refused, "global #{name} with an initializer that is not all zeros (static data is not lowered yet)" unless zero
+    static = f.drop(4).any? { |x| head_of(x) == "static" }
+    storage = static ? "Workgroup" : "CrossWorkgroup"
+    arr = ["array", n, elem]
+    var = fresh("G")
+    if static
+      decl(var, "OpVariable #{type_id(ptr_of(arr, storage))} Workgroup")
+    else
+      decl(var, "OpVariable #{type_id(ptr_of(arr))} CrossWorkgroup #{null_const(arr)}")
+    end
+    @globals[name] = [var, ptr_of(arr, storage)]
+  end
 end
 
 # ------------------------------------------------------------------ functions
@@ -429,21 +482,24 @@ def collect_sets(x, acc)
 end
 
 class SpvFn
-  attr_reader :name, :id, :form
+  attr_reader :name, :id, :form, :params, :ret
 
   def initialize(mod, form)
     @mod = mod
     @form = form
     @name = form[1].to_s
     @id = mod.fresh("F")
-    @params = []     # [id, IR type] of the parameters, in order
+    @ret = VOID      # the IR return type (a kernel returns void)
+    @params = []     # IR types of the parameters, in order
     @slots = {}      # slot name => [variable id, IR type]
     @regs = {}       # IR register "%N" => [id, IR type, true if a variable]
     @mutable = {}    # registers that a `set` assigns
     @body = []
     @vars = []       # OpVariable lines of the entry block, first in it
     @lines = []      # the entry label, then the rest of the body
-    @loops = []      # [continue label, break label] of the enclosing loops, innermost last
+    @loops = []      # [continue label, break label] of the enclosing loops and switches, innermost last
+    @cons = []       # [:switch, merge label name or nil] or [:other, nil] for each enclosing construct
+    @labels = {}     # the named labels (IR `label` and `goto`) => label ids
     @term = false    # the current block has its terminator
   end
 
@@ -479,7 +535,8 @@ class SpvFn
       next if i < 2
       h = head_of(f)
       if h == "ret"
-        raise Refused, "function #{@name} returns a value (kernels return void)" unless parse_type(f[1])[0] == "void"
+        @ret = parse_type(f[1])
+        raise Refused, "return type #{tkey(@ret)}" unless @ret[0] == "void" || mem_type?(@ret)
       elsif h == "params"
         f.drop(1).each_with_index do |p, k|
           raise Refused, "variadic function" if head_of(p) == "ellipsis"
@@ -529,6 +586,11 @@ class SpvFn
       id = @mod.fresh("v")
       emit("#{id} = OpLoad #{@mod.type_id(r[1])} #{r[0]}")
       return [id, r[1]]
+    end
+    if x.is_a?(IRSym) && x.sig == "@"
+      g = @mod.globals[x.name]
+      raise BadIR, "static object #{x.name} is not declared" if g.nil?
+      return g
     end
     h = head_of(x)
     case h
@@ -639,6 +701,17 @@ class SpvFn
     when "gpu"
       ty = parse_type(x[1])
       return builtin_component(x[2].to_s, ty)
+    when "bitcast"
+      # a pointer to a pointer: the same storage class (a static object's storage is kept)
+      ty = parse_type(x[1])
+      raise Refused, "bitcast to #{tkey(ty)}" unless ty[0] == "ptr" && mem_type?(ty[1])
+      a, aty = value(x[2])
+      raise BadIR, "bitcast of a #{tkey(aty)}" unless aty[0] == "ptr"
+      rty = ptr_of(ty[1], aty[2] || "CrossWorkgroup")
+      return [a, rty] if @mod.type_id(rty) == @mod.type_id(aty)
+      id = @mod.fresh("v")
+      emit("#{id} = OpBitcast #{@mod.type_id(rty)} #{a}")
+      [id, rty]
     when "call"
       ty = parse_type(x[1])
       callee = x[2]
@@ -647,10 +720,19 @@ class SpvFn
         raise Refused, "intrinsic #{name} takes no arguments" if x.length != 3
         return builtin_component(DEVICE_INTRINSICS[name], ty)
       end
-      raise Refused, "call of #{name || form_text(callee)} (calls of module functions are not lowered yet)"
+      if name && @mod.fns.key?(name)
+        return call_fn(@mod.fns[name], ty, x[3..-1])
+      end
+      raise Refused, "call of #{name || form_text(callee)} (an intrinsic other than the GPU indices is not lowered yet)"
     else
       raise Refused, "expression #{h || form_text(x)}"
     end
+  end
+
+  # A value that is stored in memory, passed or returned, or kept in a Function variable: a pointer to a static object's
+  # storage (Workgroup) cannot be, since memory and the signatures here hold CrossWorkgroup pointers.
+  def plain!(ty, what)
+    raise Refused, "#{what} of a pointer to #{ty[2]} memory (only loads, stores and indexing through it are lowered)" if ty[0] == "ptr" && ty[2]
   end
 
   # Two operands of type ty (x[2] and x[3] of the IR form).
@@ -684,6 +766,22 @@ class SpvFn
     [id, UINT]
   end
 
+  # A call of a module function: the arguments (each of its parameter's type), then OpFunctionCall; the result has the
+  # callee's return type (void for a void function, whose id is not used).
+  def call_fn(fn, ty, args)
+    raise BadIR, "call of #{fn.name} at type #{tkey(ty)}, which returns #{tkey(fn.ret)}" unless tkey(ty) == tkey(fn.ret)
+    raise BadIR, "call of #{fn.name} with #{args.length} arguments, expected #{fn.params.length}" unless args.length == fn.params.length
+    ids = args.each_with_index.map do |a, k|
+      v, vty = value(a)
+      check_type(vty, fn.params[k], "argument #{k} of #{fn.name}")
+      plain!(vty, "an argument")
+      v
+    end
+    id = @mod.fresh("v")
+    emit("#{id} = OpFunctionCall #{@mod.type_id(fn.ret)} #{fn.id} #{ids.join(" ")}".rstrip)
+    [id, fn.ret]
+  end
+
   # The variable of a register that a `set` assigns (created by its first `let`).
   def var_for(name, ty)
     r = @regs[name]
@@ -697,14 +795,94 @@ class SpvFn
   # ---- statements
 
   # The statements of a block, each after a terminator in a block of its own (it is unreachable, as the IR says).
+  # A switch followed by its label is lowered with that label as its merge block (see switch_stmt).
   def stmts(list)
-    list.each do |s|
+    i = 0
+    while i < list.length
+      s = list[i]
       begin_block(new_label) if @term
-      stmt(s)
+      if head_of(s) == "switch" && head_of(list[i + 1]) == "label"
+        switch_stmt(s, list[i + 1][1].to_s)
+        i += 2
+      else
+        stmt(s)
+        i += 1
+      end
     end
   end
 
+  # The block of a named label (created on first use, by a goto or by the label itself).
+  def named_label(name)
+    @labels[name] ||= new_label
+  end
+
+  # switch: the operand is compared with the cases by one OpSwitch (a compare chain would need a merge block per test,
+  # and SPIR-V gives a merge block to one header only). The arms are the case and default markers of the body, in order,
+  # and C's fallthrough runs from one arm into the next. break leaves to the merge block. A goto to the label after the
+  # switch (merge_name) is a branch to the merge block, the only exit of a switch that structured control flow allows.
+  def switch_stmt(s, merge_name)
+    body_f = s.drop(2).find { |f| head_of(f) == "body" }
+    raise BadIR, "switch without body" if body_f.nil?
+    v, vty = value(s[1])
+    raise Refused, "switch on a #{tkey(vty)}" unless word?(vty)
+    items = []
+    expand = lambda do |f|
+      if head_of(f) == "block"
+        f.drop(1).each { |g| expand.call(g) }
+      else
+        items << f
+      end
+    end
+    body_f.drop(1).each { |f| expand.call(f) }
+    lab_end = merge_name ? named_label(merge_name) : new_label
+    arm = {}         # item index => the label of a case or default marker
+    pairs = []       # [literal, label] for OpSwitch
+    default_lab = nil
+    items.each_with_index do |it, idx|
+      case head_of(it)
+      when "case"
+        c = it[1]
+        raise BadIR, "case without a constant" unless head_of(c) == "const"
+        cty = parse_type(c[1])
+        check_type(cty, vty, "case")
+        lit = as_int(c[2].to_s) & ((1 << (type_size(vty) * 8)) - 1)
+        raise Refused, "duplicate case #{lit}" if pairs.any? { |p| p[0] == lit }
+        arm[idx] = new_label
+        pairs << [lit, arm[idx]]
+      when "default"
+        raise Refused, "two default labels" if default_lab
+        default_lab = new_label
+        arm[idx] = default_lab
+      end
+    end
+    emit("OpSelectionMerge #{lab_end} None")
+    terminate("OpSwitch #{v} #{default_lab || lab_end}" + pairs.map { |lit, l| " #{lit} #{l}" }.join(""))
+    @cons.push([:switch, merge_name])
+    @loops.push(["", lab_end])
+    items.each_with_index do |it, idx|
+      if arm[idx]
+        jump(arm[idx])
+        begin_block(arm[idx])
+      else
+        begin_block(new_label) if @term
+        stmt(it)
+      end
+    end
+    jump(lab_end)
+    @loops.pop
+    @cons.pop
+    begin_block(lab_end)
+  end
+
+  # A statement. The innermost construct is on @cons (a switch, or another construct), for the goto check.
   def stmt(s)
+    return stmt_form(s) unless head_of(s) == "if" || head_of(s) == "loop"
+    @cons.push([:other, nil])
+    stmt_form(s)
+    @cons.pop
+  end
+
+  def stmt_form(s)
     h = head_of(s)
     case h
     when "block"
@@ -715,8 +893,11 @@ class SpvFn
       check_type(vty, ty, "let #{s[1]}")
       name = s[1].to_s
       if @mutable[name]
+        plain!(vty, "a mutable register")
         emit("OpStore #{var_for(name, ty)} #{v}")
       else
+        # a pointer keeps the storage class of its value (the IR type gives only the pointee)
+        ty = ptr_of(ty[1], vty[2]) if ty[0] == "ptr" && vty[0] == "ptr" && vty[2]
         @regs[name] = [v, ty, false]
       end
     when "set"
@@ -725,6 +906,7 @@ class SpvFn
       raise BadIR, "set of #{name} before its let" if r.nil? || !r[2]
       v, vty = value(s[2])
       check_type(vty, r[1], "set #{name}")
+      plain!(vty, "a mutable register")
       emit("OpStore #{r[0]} #{v}")
     when "store"
       ty = parse_type(s[1])
@@ -732,6 +914,7 @@ class SpvFn
       addr = address(s[2], ty)
       v, vty = value(s[3])
       check_type(vty, ty, "store")
+      plain!(vty, "a store")
       emit("OpStore #{addr} #{v}")
     when "if"
       cond, cty = value(s[1])
@@ -775,17 +958,40 @@ class SpvFn
       jump(head)
       @loops.pop
       begin_block(lab_end)
+    when "switch"
+      switch_stmt(s, nil)
+    when "label"
+      # a label that does not follow a switch (its gotos are refused unless they are the switch's own)
+      name = s[1].to_s
+      jump(named_label(name))
+      begin_block(named_label(name))
+    when "goto"
+      # only the goto of a switch arm (not in a nested if or loop) to the label after the switch: a branch to its merge
+      top = @cons[-1]
+      name = s[1].to_s
+      raise Refused, "goto #{name} (only a goto from a switch to the label after it is lowered)" unless top && top[0] == :switch && top[1] == name
+      terminate("OpBranch #{named_label(name)}")
     when "break"
-      raise Refused, "break outside a loop (switch is not lowered yet)" if @loops.empty?
+      raise BadIR, "break outside a loop or switch" if @loops.empty?
       terminate("OpBranch #{@loops[-1][1]}")
     when "continue"
-      raise BadIR, "continue outside a loop" if @loops.empty?
-      terminate("OpBranch #{@loops[-1][0]}")
+      # the innermost loop: a switch on the stack has no continue label
+      enclosing = @loops.reverse.find { |l| !l[0].empty? }
+      raise BadIR, "continue outside a loop" if enclosing.nil?
+      terminate("OpBranch #{enclosing[0]}")
     when "trap"
       raise Refused, "trap (a kernel has no abort: OpKill is for fragment shaders)"
     when "return"
-      raise Refused, "return with a value in kernel #{@name}" if s.length > 1
-      terminate("OpReturn")
+      if @ret[0] == "void"
+        raise BadIR, "return with a value in a void function #{@name}" if s.length > 1
+        terminate("OpReturn")
+      else
+        raise BadIR, "return without a value in #{@name}" unless s.length == 2
+        v, vty = value(s[1])
+        check_type(vty, @ret, "return of #{@name}")
+        plain!(vty, "a return")
+        terminate("OpReturnValue #{v}")
+      end
     when "eval"
       # an expression statement: only a device intrinsic, whose value is discarded
       raise Refused, "eval of #{form_text(s[1])}" unless s.length == 2 && head_of(s[1]) == "call"
@@ -797,11 +1003,11 @@ class SpvFn
 
   # ---- the function text
 
+  # The body (setup has run for every function, so a call can name any of them).
   def compile
-    setup
     @mutable = {}
     collect_sets(@body, []).each { |n| @mutable[n] = true }
-    @fty = @mod.function_type_id(VOID, @params)
+    @fty = @mod.function_type_id(@ret, @params)
     @param_lines = []
     @params.each_with_index do |ty, k|
       pid = @mod.fresh("P")
@@ -814,13 +1020,16 @@ class SpvFn
     jump_return
   end
 
+  # The end of the body: a void function returns; a value function that falls off its end is undefined in C++, so the
+  # block is OpUnreachable.
   def jump_return
-    terminate("OpReturn") unless @term
+    return if @term
+    terminate(@ret[0] == "void" ? "OpReturn" : "OpUnreachable")
   end
 
   # The lines of the function: the header, the parameters, the entry label, its variables, then the body.
   def text
-    out = ["#{@id} = OpFunction #{@mod.type_id(VOID)} None #{@fty}"]
+    out = ["#{@id} = OpFunction #{@mod.type_id(@ret)} None #{@fty}"]
     out.concat(@param_lines.map { |l| "  #{l}" })
     out << @lines[0]
     out.concat(@vars)
@@ -840,6 +1049,15 @@ def strip_comments(src)
   keep.join("\n")
 end
 
+# The depth-first walk of the call graph: a function that is reached again while it is still open is a recursive call.
+def visit_calls(name, calls, state)
+  raise Refused, "recursive call of #{name}" if state[name] == :open
+  return if state[name] == :done
+  state[name] = :open
+  calls[name].each { |c| visit_calls(c, calls, state) }
+  state[name] = :done
+end
+
 def emit_module(src)
   forms = parse_forms(tokenize(strip_comments(src)))
   mod = SpvModule.new
@@ -851,7 +1069,7 @@ def emit_module(src)
     elsif h == "function"
       fns << SpvFn.new(mod, f)
     elsif h == "global"
-      raise Refused, "global #{form_text(f[1])} (static data is not lowered yet)"
+      mod.add_global(f)
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end
@@ -859,16 +1077,23 @@ def emit_module(src)
   raise BadIR, "no function in the IR" if fns.empty?
   by_name = {}
   fns.each { |fn| by_name[fn.name] = fn }
-  fns.each do |fn|
-    callee = collect_calls(fn.form, []).find { |c| by_name.key?(c) }
-    raise Refused, "call of #{callee} (calls between functions are not lowered yet)" if callee
+  mod.fns = by_name
+  calls = {}   # function name => the module functions it calls
+  fns.each { |fn| calls[fn.name] = collect_calls(fn.form, []).select { |c| by_name.key?(c) }.uniq }
+  state = {}
+  calls.keys.each { |n| visit_calls(n, calls, state) }
+  called = calls.values.flatten.uniq
+  kernels = fns.reject { |fn| called.include?(fn.name) }
+  fns.each { |fn| fn.setup }
+  kernels.each do |fn|
+    raise Refused, "function #{fn.name} returns a value (kernels return void)" unless fn.ret[0] == "void"
   end
   fns.each { |fn| fn.compile }
   out = "; Generated by scripts/pathb-spirv-kernel-emit.rb from the Path B IR; do not edit.\n"
   mod.caps.each { |c| out << "OpCapability #{c}\n" }
   out << "OpMemoryModel Physical64 OpenCL\n"
   iface = mod.iface.map { |v| " #{v}" }.join("")
-  fns.each { |fn| out << "OpEntryPoint Kernel #{fn.id} \"#{fn.name}\"#{iface}\n" }
+  kernels.each { |fn| out << "OpEntryPoint Kernel #{fn.id} \"#{fn.name}\"#{iface}\n" }
   mod.decor.each { |d| out << "#{d}\n" }
   mod.decls.each { |d| out << "#{d}\n" }
   out << "\n"
