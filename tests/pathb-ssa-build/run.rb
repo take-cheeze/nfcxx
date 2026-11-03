@@ -95,10 +95,10 @@ else
   failures << "no arguments: status #{st.exitstatus}, want 2"
 end
 
-# 4. --safe is refused, not silently ignored (its checks are not emitted by this route).
+# 4. --safe needs -o: its runtime path goes to OUT.link beside the assembly (tests/pathb-ssa-build/safe covers the rest).
 _, err, st = run_driver("--safe", File.join(ROOT, "tests/pathb-ssa/cases/ternary_set.ir"))
-if st.exitstatus == 1 && err.include?("--safe is not implemented")
-  puts "ok   --safe: refused with a reason"
+if st.exitstatus == 2
+  puts "ok   --safe without -o: usage"
 else
   failures << "--safe: status #{st.exitstatus}, stderr #{err.inspect}"
 end
