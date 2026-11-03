@@ -75,6 +75,18 @@ the CUDA path is slow (227 ms a token for a 0.5B model; an nvcc build is far fas
 EDG-compiled code with destructors; libstdc++'s exit-time flush then calls EDG's `std::uncaught_exceptions` on a dead
 entry).
 
+## Vulkan backend
+
+`tests/llamacpp/vulkan/build.sh` builds ggml with the Vulkan backend (`ggml-vulkan*.cpp` and the core and CPU backend through
+the nfcxx driver, gcc backend). The shaders are GLSL, which glslc compiles to SPIR-V as in llama.cpp's own build. The shader
+generator `vulkan-shaders-gen` is built by nfcxx too, and the 155 generated sources (`mul_mm.comp.cpp` alone is 77 MB of SPIR-V
+byte arrays) compile as C++. The glslc extension probes are the ones of ggml-vulkan/CMakeLists.txt, judged by the message
+("extension not supported"), not the exit status. 182 objects, no driver change was needed.
+
+`tests/llamacpp/vulkan/run.sh` runs each op of `test-backend-ops` on Vulkan0 in its own process and checks it against the CPU.
+On the Radeon 8060S (RADV, gfx1151), 109 ops with cases pass every case: 12578 of 12578. 19 ops have no Vulkan cases (`0/0`).
+FLASH_ATTN_EXT (the largest) passes every case: 5332 of 5332. With that, every op with Vulkan cases passes all of them: 110 ops, 17910 cases.
+
 ## Flags
 
 llama.cpp's CMake gives `_GNU_SOURCE` on Linux (`ggml-cpu.c` needs it for `CPU_ZERO`). The test passes it, plus
