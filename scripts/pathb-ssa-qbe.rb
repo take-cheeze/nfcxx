@@ -116,9 +116,14 @@ module Qbe
     state[name] = build_data(g, by_name, state)
   end
 
+  def global_flags(g) = g.map { |x| x.is_a?(Array) ? head(x) : x }
+
+  # An extern global is declared elsewhere: nothing is emitted, and a reference to it is a reference to that symbol.
+  # Otherwise the data is emitted with the linkage of the existing emitter: thread-local when (thread), exported unless
+  # (static), and a `# pathb-weak` marker for (weak) (the driver writes the .weak directive; see scripts/pathb-ssa-build).
   def build_data(g, by_name, state)
-    flags = g.map { |x| x.is_a?(Array) ? head(x) : x }
-    return nil if flags.include?("extern") || flags.include?("thread")
+    flags = global_flags(g)
+    return :extern if flags.include?("extern")
 
     init = g.find { |x| head(x) == "init" } or return nil
     size = int_lit(g[3])
@@ -137,6 +142,8 @@ module Qbe
       when "addr"
         off, _type, target, add = item[1..]
         return nil unless target.is_a?(Ref) && target.sigil == "@" && by_name.key?(target.raw)
+        # The address of a thread-local object is not a link-time constant: it is left out.
+        return nil if global_flags(by_name[target.raw]).include?("thread")
         # A global may point into itself; a longer cycle of addresses is left out (global_data returns nil for it).
         return nil unless target.raw == g[1].raw || global_data(by_name[target.raw], by_name, state)
 
@@ -154,7 +161,9 @@ module Qbe
     end
     parts << "z #{size - cur}" if size > cur
     parts = ["z #{size}"] if parts.empty?
-    "data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
+    linkage = (flags.include?("thread") ? "thread " : "") + (flags.include?("static") ? "" : "export ")
+    marker = flags.include?("weak") ? "# pathb-weak #{symbol(g[1].raw)}\n" : ""
+    "#{marker}#{linkage}data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
   end
 
   # One function. An SSA register %N is %vN, a parameter %k is %pk, and an object of a slot that was not promoted
@@ -189,6 +198,10 @@ module Qbe
         @label = block_label(@cur)
         @lines << "@#{@label}"
         items = b[2..]
+        # A trap or unreachable ends the block in QBE (hlt): what follows it in the SSA block is dead, and QBE rejects an
+        # instruction after hlt, so the block is cut there.
+        halt = items.index { |it| %w[trap unreachable].include?(head(it)) }
+        items = items[0..halt] if halt
         items[0...-1].each { |item| item_lines(item) }
         pending_phi_operands(@cur)
         item_lines(items.last) if items.any?
@@ -343,8 +356,16 @@ module Qbe
       case x
       when Ref
         if x.sigil == "@"
-          raise QbeUnsupported, "global #{x.raw}" unless @globals[x.raw]
-
+          info = @globals.fetch(x.raw) { raise QbeUnsupported, "global #{x.raw}" }
+          # A weak undefined object is loaded through the GOT in the existing emitter; that is not modelled here.
+          raise QbeUnsupported, "weak reference to #{x.raw}" if info[:weak] && info[:extern]
+          # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
+          # existing emitter does it).
+          if info[:thread]
+            t = fresh
+            @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(x.raw)}"
+            return t
+          end
           return "$#{Qbe.symbol(x.raw)}"
         end
         raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
@@ -405,11 +426,29 @@ module Qbe
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
-      when "unreachable" then @lines << "  hlt"
+      when "unreachable", "trap" then @lines << "  hlt"
       when "nonnull" then nonnull_lines(item[1])
       when "bounds" then bounds_lines(item[1], item[2])
+      # A compiler barrier is a call of an empty helper; a fence a call of a helper that executes mfence. QBE has no
+      # fence instruction, so the driver (scripts/pathb-ssa-build) appends the helpers named by the marker comments.
+      when "barrier" then barrier_lines
+      when "fence" then fence_lines
       else raise QbeUnsupported, "statement #{head(item) || sx(item)}"
       end
+    end
+
+    # The helpers the assembly needs ("barrier", "fence"); module_il writes them as marker comments.
+    def asm_helpers = @asm_helpers ||= []
+    public :asm_helpers
+
+    def barrier_lines
+      asm_helpers << "barrier"
+      @lines << "  call $__pathb_barrier()"
+    end
+
+    def fence_lines
+      asm_helpers << "fence"
+      @lines << "  call $__pathb_fence()"
     end
 
     def let_lines(r, t, rv)
@@ -669,10 +708,17 @@ module Qbe
     gs = forms.select { |g| head(g) == "global" }
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
-    data = gs.filter_map { |g| global_data(g, by_name, state) }
-    supported = gs.to_h { |g| [g[1].raw, true] }.select { |name, _| state[name].is_a?(String) }
-    fns = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, supported).emit.lines.join("\n") }
-    (data + fns).join("\n\n") + "\n"
+    data = gs.filter_map do |g|
+      d = global_data(g, by_name, state)
+      d if d.is_a?(String)
+    end
+    # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
+    flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
+    refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
+                .to_h { |name, f| [name, { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }] }
+    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, refs).emit }
+    helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
+    (data + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
   end
 end
 
