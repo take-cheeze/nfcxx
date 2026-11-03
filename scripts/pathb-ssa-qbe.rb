@@ -60,7 +60,10 @@ module Qbe
     t = strip_const(t)
     return size(t[1]) if head(t) == "volatile"
     return 8 if head(t) == "ptr"
-    return size(t[1]) * int_lit(t[2]) if head(t) == "array"
+    if head(t) == "array"
+      # (array COUNT ELEM): a variable-length array's count is a register, which has no size here: refused.
+      return size(t[2]) * int_lit(t[1])
+    end
 
     SIZE.fetch(t) { raise QbeUnsupported, "object of type #{sx(t)}" }
   end
@@ -97,10 +100,14 @@ module Qbe
   # An integer literal: decimal, or hexadecimal with a 0x prefix (the reader keeps the spelling of a literal).
   def int_lit(s)
     return s if s.is_a?(Integer)
+    raise QbeUnsupported, "not an integer literal: #{s.inspect}" unless s.is_a?(String)
     return Integer(s, 16) if s.match?(/\A0[xX]/)
     return -Integer(s[1..], 16) if s.match?(/\A-0[xX]/)
 
     Integer(s, 10)
+  rescue ArgumentError, TypeError
+    # A register (a variable-length array's count or bound) or another non-literal has no value here: refused.
+    raise QbeUnsupported, "not an integer literal: #{s.inspect}"
   end
 
   # The IEEE binary16 pattern of a decimal float literal (`(const std::float16_t 2.71875)`): the value nearest to it in
@@ -237,8 +244,21 @@ module Qbe
         bytes = Qbe.size(type)
         letter = { 1 => "b", 2 => "h", 4 => "w", 8 => "l" }.fetch(bytes) { return nil }
         items << [int_lit(off), bytes, "#{letter} #{literal(v, type)}"]
+      when "bytes"
+        # (bytes OFF N @"NAME"): the first N bytes of a string literal, one item per byte at the same offsets.
+        off, n, target = item[1..]
+        src = target.is_a?(Ref) && target.sigil == "@" ? state[[:bytes, target.raw]] : nil
+        return nil unless src && int_lit(n) <= src.size
+
+        (0...int_lit(n)).each { |i| items << [int_lit(off) + i, 1, "b #{src[i]}"] }
       when "addr"
         off, _type, target, add = item[1..]
+        if target.is_a?(Ref) && target.sigil == "&"
+          # A function's address is its symbol, a link-time constant (as pathb-qbe-emit.rb writes it).
+          suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
+          items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
+          next
+        end
         return nil unless target.is_a?(Ref) && target.sigil == "@" && by_name.key?(target.raw)
         # The address of a thread-local object is not a link-time constant: it is left out.
         return nil if global_flags(by_name[target.raw]).include?("thread")
@@ -929,6 +949,7 @@ module Qbe
       sret = nil
       dest = nil
       args = []
+      nfixed = nil
       c[3..].each do |a|
         case head(a)
         when "sret"
@@ -940,8 +961,16 @@ module Qbe
           info = aggregate_info(a[1], "passed")
           # An empty class is passed as nothing (its argument is dropped, as the callee does not take it).
           args << "#{info.tn} #{op(a[2])}" unless info.shape == "empty"
+        when "variadic"
+          # (variadic N): the first N arguments are named; QBE takes "..." after them (as pathb-qbe-emit.rb does).
+          nfixed = Qbe.int_lit(a[1])
         else args << "#{arg_cls(a)} #{op(a)}"
         end
+      end
+      if nfixed
+        raise QbeUnsupported, "variadic call with #{nfixed} named arguments but #{args.size}" if nfixed > args.size
+
+        args.insert(nfixed, "...")
       end
       callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
       [sret, dest, callee, args]
@@ -1113,16 +1142,81 @@ module Qbe
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
     abi, type_decls = abi_types(forms)
+    # The bytes of string literals: a top-level (data NAME TYPE (string ...)) form, copied into an array by a
+    # (bytes OFF N @"NAME") initializer item. A string the emitter cannot express is left out, so a reference to it
+    # is refused where it is used.
+    strs = forms.select { |f| head(f) == "data" }
+    string_decls = strs.filter_map do |d|
+      by_name[d[1].raw] = d
+      bytes, decl = string_data(d)
+      state[[:bytes, d[1].raw]] = bytes
+      state[d[1].raw] = decl
+      decl
+    rescue QbeUnsupported
+      nil
+    end
     global_decls = gs.filter_map do |g|
       d = global_data(g, by_name, state)
       d if d.is_a?(String)
     end
-    data = type_decls + global_decls
+    data = type_decls + string_decls + global_decls
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
                 .to_h { |name, f| [name, { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }] }
+    strs.each do |d|
+      name = d[1].raw
+      refs[name] = { thread: false, weak: false, extern: false } if state[name].is_a?(String)
+    end
     { data: data, refs: refs, abi: abi }
+  end
+
+  # The bytes of a string literal and its data line: its bytes, then zeros up to the array's size (as the existing
+  # emitter writes them, pathb-qbe-emit.rb's emit_string). Only a char array is emitted.
+  def string_data(d)
+    name = d[1].raw
+    ty = d[2]
+    raise QbeUnsupported, "string #{name} is not a char array" unless head(strip_const(ty)) == "array"
+    raise QbeUnsupported, "string #{name} is a wide string" unless size(strip_const(ty)[2]) == 1
+
+    text = d[3]
+    raise QbeUnsupported, "string #{name} has no string data" unless head(text) == "string"
+
+    total = size(ty)
+    raw = string_bytes(text[1].raw)
+    raise QbeUnsupported, "string #{name} is longer than its array" if raw.size > total
+
+    bytes = raw + [0] * (total - raw.size)
+    body = bytes.empty? ? "z 0" : bytes.map { |b| "b #{b}" }.join(", ")
+    [bytes, "data $#{symbol(name)} = align 1 { #{body} }"]
+  end
+
+  # The bytes a quoted SSA string denotes: the escapes \\, \", \n, \t and \ooo (one to three octal digits).
+  # Anything else is refused.
+  def string_bytes(quoted)
+    s = quoted[1...-1].b
+    out = []
+    i = 0
+    while i < s.size
+      c = s[i]
+      if c != "\\"
+        out << c.ord
+        i += 1
+        next
+      end
+      nxt = s[i + 1]
+      raise QbeUnsupported, "string escape #{nxt.inspect}" if nxt.nil?
+
+      if nxt =~ /[0-7]/
+        digits = s[i + 1, 3][/\A[0-7]{1,3}/]
+        out << digits.to_i(8)
+        i += 1 + digits.size
+      else
+        out << { "\\" => 92, "\"" => 34, "n" => 10, "t" => 9 }.fetch(nxt) { raise QbeUnsupported, "string escape #{nxt.inspect}" }
+        i += 2
+      end
+    end
+    out
   end
 
   # One function's text (its helper comments, then its body), against a context from module_context.

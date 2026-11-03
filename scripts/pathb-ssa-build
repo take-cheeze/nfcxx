@@ -110,7 +110,7 @@ end
 def live_names(forms)
   defs = {}
   forms.each do |f|
-    defs[f[1].raw.delete('"')] = f if %w[function global].include?(head(f)) && f[1].is_a?(Str)
+    defs[f[1].raw.delete('"')] = f if %w[function global data].include?(head(f)) && f[1].is_a?(Str)
   end
   live = {}
   work = []
@@ -193,6 +193,8 @@ rescue QbeUnsupported => e
 end
 # The aggregate types (abi-type forms) every function and global is laid out and passed with.
 globals = read_forms(ssa).select { |f| head(f) == "abi-type" } + globals
+# The string literals: top-level data forms, which the SSA text does not carry.
+globals += read_forms(File.read(file)).select { |f| head(f) == "data" }
 text = no_opt ? ssa : PathbEgraph.optimize_module(ssa).first
 fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 # Pruning: a definition nothing reaches is left out, as pathb-qbe-emit.rb does (--no-prune keeps every one).

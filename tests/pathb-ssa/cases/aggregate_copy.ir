@@ -2,8 +2,8 @@
 (function "main"
   (ret int)
   (params (param %0 "n" int))
-  (slot "s" (array int 2) 8 4)
-  (slot "t" (array int 2) 8 4)
+  (slot "s" (array 2 int) 8 4)
+  (slot "t" (array 2 int) 8 4)
   (store int $"s" %0)
   (store int (offset $"s" 4) (wadd int %0 (const int 1)))
   (copy 8 $"t" $"s" 4)

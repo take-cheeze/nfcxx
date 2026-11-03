@@ -6,7 +6,7 @@
 (function "case_main"
   (ret long)
   (params (param %0 "n" long))
-  (slot "a" (array int 8) 32 4)
+  (slot "a" (array 8 int) 32 4)
   (slot "fp" (ptr void) 8 8)
   (let %ip (ptr int) (index (addr $"a") %0 4))
   (let %d1 long (pdiff %ip (addr $"a") 4))

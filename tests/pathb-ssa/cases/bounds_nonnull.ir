@@ -2,7 +2,7 @@
 (function "main"
   (ret int)
   (params (param %0 "i" int))
-  (slot "a" (array int 4) 16 4)
+  (slot "a" (array 4 int) 16 4)
   (nonnull (addr $"a"))
   (bounds %0 4)
   (store int (index (addr $"a") %0 4) (wadd int %0 (const int 10)))
