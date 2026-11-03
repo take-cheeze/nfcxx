@@ -8,7 +8,8 @@
 # `include_handlers:`, so a consumer proving something about exception flow
 # must ask for them explicitly.
 module BytecodeIR
-  Instruction = Struct.new(:index, :source, :successors, keyword_init: true) do
+  # Positional or keyword construction (no keyword_init): the per-instruction builders skip the keyword Hash.
+  Instruction = Struct.new(:index, :source, :successors) do
     def addr
       source.addr
     end
@@ -20,9 +21,9 @@ module BytecodeIR
 
   # A branch by instruction address: +src+ is the branching instruction, +target+
   # the address it names (not necessarily an instruction; see Program#resolved?).
-  BranchEdge = Struct.new(:src, :target, keyword_init: true)
+  BranchEdge = Struct.new(:src, :target)
 
-  BasicBlock = Struct.new(:id, :instructions, :successors, :predecessors, keyword_init: true)
+  BasicBlock = Struct.new(:id, :instructions, :successors, :predecessors)
 
   # Ops after which control never reaches the next instruction. RAISE and
   # RAISEIF are deliberately absent: a missing predecessor makes a proof wrong
@@ -33,6 +34,8 @@ module BytecodeIR
   # Predecessor id of the method-entry edge into instruction 0.
   ENTRY = -1
   BRANCH_OPS = %i[JMP JMPUW JMPIF JMPNOT JMPNIL].freeze
+  # The one frozen empty index list the queries hand out for "none".
+  EMPTY_INDICES = [].freeze
   # Conditional-branch kinds (Decoded#cond): which test of R(a) sends control to the branch target.
   COND_IF = 1 # JMPIF: R(a) truthy
   COND_NOT = 2 # JMPNOT: R(a) falsy
@@ -63,10 +66,14 @@ module BytecodeIR
       @source_size = Array(@source_list).length
       @nlocals = irep.nlocals&.to_i
       @catch_handlers = Array(irep.catch_handlers).freeze
-      @instructions = Array(irep.instructions).each_with_index.map do |source, index|
-        Instruction.new(index: index, source: source, successors: [])
+      sources = Array(irep.instructions)
+      @address_to_index = {}
+      # build_edges assigns every instruction its successors; the placeholder is never read.
+      @instructions = Array.new(sources.length) do |index|
+        source = sources[index]
+        @address_to_index[source.addr] = index
+        Instruction.new(index, source, EMPTY_INDICES)
       end
-      @address_to_index = @instructions.to_h { |instruction| [instruction.addr, instruction.index] }
       build_edges
       build_blocks
     end
@@ -162,7 +169,7 @@ module BytecodeIR
       @branch_edges ||= {}
       @branch_edges[jmpuw] ||= @instructions.filter_map do |instruction|
         target = jmpuw ? instruction.source.branch_target : instruction.source.jump_target
-        BranchEdge.new(src: instruction.addr, target: target).freeze if target
+        BranchEdge.new(instruction.addr, target).freeze if target
       end.freeze
     end
 
@@ -232,7 +239,7 @@ module BytecodeIR
             targets << table if table < @instructions.length
           end
         end
-        instruction.successors = targets.uniq.freeze
+        instruction.successors = targets.empty? ? EMPTY_INDICES : (targets.size > 1 ? targets.uniq : targets).freeze
       end
     end
 
@@ -253,15 +260,17 @@ module BytecodeIR
           leaders << instruction.index + 1
         end
       end
-      leaders = leaders.uniq.sort
-      ranges = leaders.each_with_index.map do |start, i|
-        [start, (leaders[i + 1] || @instructions.length) - 1]
-      end
-      owner = {}
-      @blocks = ranges.each_with_index.map do |(first, last), id|
-        members = (first..last).to_a
-        members.each { |index| owner[index] = id }
-        BasicBlock.new(id: id, instructions: members.freeze, successors: [], predecessors: [])
+      leaders.uniq!
+      leaders.sort!
+      # owner[index] is the id of the block holding instruction +index+.
+      owner = Array.new(@instructions.length)
+      @blocks = Array.new(leaders.length) do |id|
+        first = leaders[id]
+        last = (leaders[id + 1] || @instructions.length) - 1
+        count = last - first + 1
+        members = Array.new(count) { |k| first + k }
+        owner.fill(id, first, count)
+        BasicBlock.new(id, members.freeze, nil, [])
       end
       @blocks.each do |block|
         terminal = @instructions[block.instructions.last]

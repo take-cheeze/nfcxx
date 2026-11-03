@@ -25,7 +25,12 @@ module BytecodeIR
     end
 
     # Yields [source, index] for the same instructions, in program order.
-    def each_with_op(*ops)
+    def each_with_op(*ops, &block)
+      each_with_op_in(ops, &block)
+    end
+
+    # each_with_op over an op list the caller already holds (Irep#each_with_op), without a second splat Array.
+    def each_with_op_in(ops)
       indices_with_op(ops).each { |index| yield @instructions[index].source, index }
     end
 
@@ -176,24 +181,37 @@ module BytecodeIR
     # list never changes after loading; see #built_from?).
     # The sorted indices of the instructions whose op is one of +ops+. Callers ask with the same op lists over and
     # over (every SEND variant, ...), so each list is merged once.
+    # A single op (the common query) is answered by indices_by_op's own frozen list, uncached.
     def indices_with_op(ops)
+      by_op = indices_by_op
+      return by_op.fetch(ops[0], EMPTY_INDICES) if ops.size == 1
+
       (@indices_with_op ||= {})[ops] ||= begin
-        list = ops.uniq
-        indices = list.flat_map { |op| indices_by_op.fetch(op, []) }
-        indices.sort! if list.size > 1
-        indices.freeze
+        lists = ops.uniq.filter_map { |op| by_op[op] }
+        if lists.size > 1
+          lists.flatten.sort!.freeze
+        else
+          lists.first || EMPTY_INDICES
+        end
       end
     end
 
     def indices_by_op
-      @indices_by_op ||= @instructions.group_by(&:op).transform_values { |list| list.map(&:index).freeze }.freeze
+      @indices_by_op ||= begin
+        by_op = {}
+        @instructions.each { |instruction| (by_op[instruction.op] ||= []) << instruction.index }
+        by_op.each_value(&:freeze).freeze
+      end
     end
 
     def lead_indices
       @lead_indices ||= begin
-        by_reg = @instructions.group_by { |instruction| instruction.source.reg }
-        size = (by_reg.keys.compact.max || -1) + 1
-        Array.new(size) { |reg| by_reg.fetch(reg, []).map(&:index).freeze }
+        by_reg = []
+        @instructions.each do |instruction|
+          reg = instruction.source.reg
+          (by_reg[reg] ||= []) << instruction.index unless reg.nil?
+        end
+        by_reg.map! { |list| list ? list.freeze : EMPTY_INDICES }
       end.freeze
     end
   end
