@@ -103,7 +103,12 @@ check.call('sio: StringIO.open calls the compiled core class method at the root 
                code_of(code, m).match?(ELSE_SEND))
 end
 c, = generate_world(SRC + "class StringIO\n  def self.open(*a); yield :mine; end\nend\n")
-check.call('a program StringIO.open withdraws the core call', !code_of(c, 'sio').include?('StringIO_singleton_open_impl(M, '))
+# A program StringIO.open replaces the core definition, so the world has one StringIO_singleton_open_impl. When the
+# program method compiles, the call must target that single definition; when it is refused, there is no call at all.
+open_defs = c.scan(/^mrb_value StringIO_singleton_open_impl\(mrb_state\* M, mrb_value self, [^)]*\) \{/).size
+open_call = code_of(c, 'sio').include?('StringIO_singleton_open_impl(M, ')
+check.call('a program StringIO.open is the only StringIO.open: one compiled definition with the call, or no definition and no call',
+           (open_defs == 1 && open_call) || (open_defs.zero? && !open_call))
 c, = generate_world(SRC, { 'BC2CPP_BLOCK_CORE_DIRECT' => '0' })
 check.call('BC2CPP_BLOCK_CORE_DIRECT=0: no core class-method call', !code_of(c, 'sio').include?('StringIO_singleton_open_impl(M, '))
 
