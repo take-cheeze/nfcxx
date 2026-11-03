@@ -42,6 +42,25 @@ def qbe_binary
   ENV.fetch("NFCXX_QBE") { File.expand_path("../build/qbe/qbe", __dir__) }
 end
 
+# The helpers the emitter names in "# pathb-asm NAME" comments, appended to the assembly once each (the same text as
+# scripts/pathb-qbe-emit.rb's ASM_HELPERS, as weak functions). QBE has no fence, and a barrier is an empty call.
+ASM_HELPERS = {
+  "barrier" => ["\t.text", "\t.weak __pathb_barrier", "\t.type __pathb_barrier, @function", "__pathb_barrier:", "\tret",
+                "\t.size __pathb_barrier, .-__pathb_barrier"],
+  "fence" => ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tmfence", "\tret",
+              "\t.size __pathb_fence, .-__pathb_fence"],
+}.freeze
+
+# The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
+# `# pathb-asm NAME` appends that helper.
+def marker_asm(il)
+  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.map { |sym| ".weak #{sym}" }
+  helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map do |h|
+    ASM_HELPERS.fetch(h) { error_exit("no assembly helper for #{h}") }
+  end
+  (weak + helpers).map { |line| "#{line}\n" }.join
+end
+
 # The SSA text of the file, from scripts/pathb-ssa.rb. Its own stderr is passed through, so a function it cannot convert
 # is reported there.
 def convert(file)
@@ -68,9 +87,14 @@ no_opt = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
-  case args.shift
+  flag = args.shift
+  case flag
   when "-o" then output = args.shift or usage_exit
   when "--no-opt" then no_opt = true
+  when "--safe", "--long-double=trap"
+    # The existing emitter's -fsafe-pointers checks and long-double trap lowering are not implemented here: refuse, rather
+    # than produce output without them.
+    error_exit("the flag #{flag} is not implemented in the SSA route yet")
   else usage_exit
   end
 end
@@ -97,6 +121,7 @@ end
 il = ([data_text] + bodies).reject(&:empty?).join("\n\n") + "\n"
 asm, qbe_err = assemble(il)
 error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
+asm += marker_asm(il)
 
 if output
   File.write(output, asm)
