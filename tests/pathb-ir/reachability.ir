@@ -23,12 +23,12 @@
   (slot "tmp" (array 16 unsigned_char) 16 16)
   (slot "tmp.1" (array 16 unsigned_char) 16 16)
   (slot "tmp.2" (array 16 unsigned_char) 16 16)
-  (copy 16 $"tmp" %0)
+  (copy 16 $"tmp" %0 16)
   (let %2 (ptr unsigned_long) (offset $"tmp.1" 8))
   (store unsigned_long $"tmp.1" (const unsigned_long 9223372036854775808))
   (store unsigned_long %2 (const unsigned_long 16384))
   (eval (call void &"__nfcxx_ld_mul" $"tmp.2" $"tmp" $"tmp.1"))
-  (copy 16 %1 $"tmp.2")
+  (copy 16 %1 $"tmp.2" 16)
   (return))
 
 (function "_Z13unused_inlinePVi"
@@ -107,7 +107,7 @@
   (let %2 (ptr unsigned_long) (offset $"tmp.1" 8))
   (store unsigned_long $"tmp.1" (const unsigned_long 9223372036854775808))
   (store unsigned_long %2 (const unsigned_long 16383))
-  (copy 16 %1 $"tmp.1")
+  (copy 16 %1 $"tmp.1" 16)
   (return))
 
 (function "_ZN4Used1gEv"

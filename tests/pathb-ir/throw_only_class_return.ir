@@ -24,8 +24,8 @@
   (block
     (let %2 (ptr (const (struct "X"))) (bitcast (ptr (const (struct "X"))) %1))
     (eval (call void &"_ZNK1X3getEv" (sret (struct "I") $"tmp") %2))
-    (copy 4 $"tmp.1" $"tmp")
-    (copy 4 %0 $"tmp.1")
+    (copy 4 $"tmp.1" $"tmp" 4)
+    (copy 4 %0 $"tmp.1" 4)
     (return)))
 
 (function "main"
@@ -75,7 +75,7 @@
     (if %20
       (then
         (block
-          (copy 1 $"tmp.3" $"x")
+          (copy 1 $"tmp.3" $"x" 1)
           (eval (call void &"_Z1f1X" (sret (struct "I") $"tmp.2") (byval (struct "X") $"tmp.3")))))
       (else
         (let %21 int (load int @"__catch_clause_number"))
