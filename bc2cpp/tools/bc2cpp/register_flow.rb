@@ -345,11 +345,21 @@ class RegisterFlow
   def info_for(index)
     text = @texts[index]
     all = mention_mask(text)
-    match = CLEAN_DEF.match(text)
-    if match && !match[2].match?(/(?<![=!<>])=(?!=)|\b(?:goto|return|throw)\b/)
-      [match[1].to_i, mention_mask(match[2]), all]
-    else
+    return [nil, all, all] unless text.match?(CLEAN_DEF)
+
+    # CLEAN_DEF's two captures, read off its fixed shape: the digits after `  r`, then ` = ` and the expression up
+    # to the closing `;\n`.
+    reg = 0
+    at = 3
+    while (byte = text.getbyte(at)) != 32
+      reg = reg * 10 + byte - 48
+      at += 1
+    end
+    expression = text.byteslice(at + 3, text.bytesize - at - 5)
+    if expression.match?(/(?<![=!<>])=(?!=)|\b(?:goto|return|throw)\b/)
       [nil, all, all]
+    else
+      [reg, mention_mask(expression), all]
     end
   end
 
