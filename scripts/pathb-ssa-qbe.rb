@@ -111,6 +111,8 @@ module Qbe
   # A float literal of type t: the value is rounded to t as the interpreter rounds it, then written as an exact hex float
   # (QBE reads it with scanf). Infinities are written as inf; NaN is not a literal of the subset.
   def float_lit(t, text)
+    raise QbeUnsupported, "NaN literal" if text.to_s.match?(/nan/i)
+
     v = round_float(Float(text.to_s), strip_const(t))
     raise QbeUnsupported, "NaN literal" if v.nan?
 
@@ -195,7 +197,13 @@ module Qbe
       @globals = globals
       @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
-      @params = form.find { |x| head(x) == "params" }.drop(1).select { |p| head(p) == "param" }
+      all_params = form.find { |x| head(x) == "params" }.drop(1)
+      # Only a plain `param` is emitted. An sret or byval parameter is not dropped silently: a body that uses it would
+      # name a register nothing defines.
+      other = all_params.find { |p| head(p) != "param" }
+      raise QbeUnsupported, "#{head(other)} parameter" if other
+
+      @params = all_params
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
@@ -439,7 +447,8 @@ module Qbe
           next unless a.is_a?(String) && a.start_with?("%")
 
           t = @types[a]
-          raise QbeUnsupported, "copy of the by-value aggregate #{a}" unless t.nil? || head(strip_const(t)) == "ptr"
+          raise QbeUnsupported, "copy of an address with no declared type #{a}" if t.nil?
+          raise QbeUnsupported, "copy of the by-value aggregate #{a}" unless head(strip_const(t)) == "ptr"
         end
         @lines << "  blit #{op(item[3])}, #{op(item[2])}, #{Qbe.int_lit(item[1])}"
       when "br"
