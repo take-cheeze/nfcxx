@@ -192,18 +192,15 @@ module Qbe
     attr_reader :lines
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
-    def initialize(form, globals = {})
+    def initialize(form, globals = {}, abi = {})
       @form = form
       @globals = globals
+      @abi = abi
       @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
-      all_params = form.find { |x| head(x) == "params" }.drop(1)
-      # Only a plain `param` is emitted. An sret or byval parameter is not dropped silently: a body that uses it would
-      # name a register nothing defines.
-      other = all_params.find { |p| head(p) != "param" }
-      raise QbeUnsupported, "#{head(other)} parameter" if other
-
-      @params = all_params
+      @params = form.find { |x| head(x) == "params" }.drop(1)
+      @sret = nil      # the AbiInfo of an aggregate result (the function returns its buffer, the C convention)
+      @alias = {}      # a register that names another value: the sret parameter names the result buffer
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
@@ -240,17 +237,50 @@ module Qbe
     private
 
     def header
+      sig = []
       @params.each do |p|
-        @types[p[1]] = p[3]
-        @params_set[p[1]] = true
+        case head(p)
+        when "param"
+          if head(p[3]) == "byval"
+            # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
+            sig << "#{aggregate_info(p[3][1], "passed").tn} %p#{p[1][1..]}"
+            @types[p[1]] = ["ptr", "void"]
+          else
+            @types[p[1]] = p[3]
+            sig << "#{Qbe.cls(p[3])} %p#{p[1][1..]}"
+          end
+          @params_set[p[1]] = true
+        when "sret"
+          raise QbeUnsupported, "more than one sret parameter" if @sret
+          @sret = aggregate_info(p[2], "returned")
+          @alias[p[1]] = "%sretbuf"
+          @types[p[1]] = ["ptr", "void"]
+        else raise QbeUnsupported, "#{head(p)} parameter"
+        end
       end
-      ret = @ret[1] == "void" ? "" : "#{Qbe.cls(@ret[1])} "
-      sig = @params.map { |p| "#{Qbe.cls(p[3])} %p#{p[1][1..]}" }.join(", ")
-      @lines << "export function #{ret}$#{@name}(#{sig}) {"
+      ret = if @sret then "#{@sret.tn} "
+            elsif @ret[1] == "void" then ""
+            else "#{Qbe.cls(@ret[1])} "
+            end
+      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
     end
 
+    # The AbiInfo of an aggregate that is passed or returned by value: it must have an abi-type, and its class must be
+    # one this emitter passes (not an empty class, not an unsupported one).
+    def aggregate_info(tyform, what)
+      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct"
+
+      info = @abi[Qbe.name_of(tyform[1])]
+      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)} has no abi-type" if info.nil?
+      raise QbeUnsupported, "#{what} by value: #{info.why}" if info.shape == "unsupported"
+      raise QbeUnsupported, "#{what} by value: an empty class is not emitted" if info.shape == "empty"
+
+      info
+    end
+
     def allocs
+      @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
       @slots.each_with_index do |s, i|
         @slot["$#{s[1].raw}"] = "%o#{i}"
         # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
@@ -403,6 +433,8 @@ module Qbe
       when String
         raise QbeUnsupported, "operand #{x}" unless x.start_with?("%")
 
+        return @alias[x] if @alias.key?(x)
+
         @params_set[x] ? "%p#{x[1..]}" : reg(x)
       when Array
         case head(x)
@@ -458,13 +490,27 @@ module Qbe
       when "eval"
         raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
 
-        @lines << "  #{call_text(item[1])}"
+        sret, dest, sym, args = call_parts(item[1])
+        if sret.nil?
+          @lines << "  call #{sym}(#{args.join(', ')})"
+        else
+          # The callee returns the aggregate in its own buffer; it is copied to the destination the caller named.
+          t = fresh
+          @lines << "  #{t} =#{sret.tn} call #{sym}(#{args.join(', ')})"
+          @lines << "  call $memmove(l #{dest}, l #{t}, l #{sret.size})"
+        end
       when "condbr"
         cond = op(item[1])
         jump_to(item[2])
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
-      when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
+      when "ret"
+        # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
+        if @sret
+          @lines << "  ret %sretbuf"
+        else
+          @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
+        end
       when "unreachable", "trap" then @lines << "  hlt"
       when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
@@ -750,12 +796,36 @@ module Qbe
 
     # A call `(call RET &"name" ARG...)`: a direct call of a C symbol. The module's functions are exported under their
     # names, and any other callee is linked as a C function. Each argument is passed with the class of its value.
-    def call_text(c)
+    # The parts of a call: the sret result (its AbiInfo and destination, or nil), the callee, and the arguments. A byval
+    # argument is passed as its aggregate type; an sret argument is the result, not an argument.
+    def call_parts(c)
       f = c[2]
       raise QbeUnsupported, "indirect call #{sx(f)}" unless f.is_a?(Ref) && f.sigil == "&"
 
-      args = c[3..].map { |a| "#{arg_cls(a)} #{op(a)}" }
-      "call $#{Qbe.symbol(f.raw)}(#{args.join(', ')})"
+      sret = nil
+      dest = nil
+      args = []
+      c[3..].each do |a|
+        case head(a)
+        when "sret"
+          raise QbeUnsupported, "sret argument is not the first" unless args.empty? && sret.nil?
+
+          sret = aggregate_info(a[1], "returned")
+          dest = op(a[2])
+        when "byval"
+          info = aggregate_info(a[1], "passed")
+          args << "#{info.tn} #{op(a[2])}"
+        else args << "#{arg_cls(a)} #{op(a)}"
+        end
+      end
+      [sret, dest, "$#{Qbe.symbol(f.raw)}", args]
+    end
+
+    def call_text(c)
+      sret, _dest, sym, args = call_parts(c)
+      raise QbeUnsupported, "a call with an aggregate result used as a value" if sret
+
+      "call #{sym}(#{args.join(', ')})"
     end
 
     def arg_cls(a)
@@ -843,21 +913,81 @@ module Qbe
     end
   end
 
+  AbiInfo = Struct.new(:tn, :size, :align, :shape, :why)
+  LEAF_BYTES = { "b" => 1, "h" => 2, "w" => 4, "l" => 8, "s" => 4, "d" => 8 }.freeze
+
+  def name_of(x) = x.is_a?(Ref) ? x.raw : x.to_s
+
+  # The QBE type declarations of the module's abi-type forms, and the AbiInfo of each by name. The shapes are those of
+  # scripts/pathb-qbe-emit.rb (declare_abi_type): the leaves of a struct, a memory class, an empty one, or an unsupported
+  # one (its reason is kept; a use of it is refused).
+  def abi_types(forms)
+    abi = {}
+    decls = []
+    forms.each do |f|
+      next unless head(f) == "abi-type"
+
+      name = name_of(f[1])
+      size = int_lit(f[2])
+      align = int_lit(f[3])
+      raise QbeUnsupported, "abi-type #{name}: alignment #{align}" unless [1, 2, 4, 8, 16].include?(align)
+
+      spec = f[4]
+      tn = ":ty#{abi.size}"
+      case head(spec)
+      when "memory"
+        decls << "type #{tn} = align #{align} { #{size} }"
+        abi[name] = AbiInfo.new(tn, size, align, "memory", nil)
+      when "empty"
+        abi[name] = AbiInfo.new(tn, size, align, "empty", nil)
+      when "unsupported"
+        abi[name] = AbiInfo.new(tn, size, align, "unsupported", name_of(spec[1]).delete('"'))
+      when "leaf"
+        parts = []
+        cur = 0
+        f.drop(4).each do |lf|
+          raise QbeUnsupported, "abi-type #{name}: bad leaf" unless head(lf) == "leaf" && lf.length == 3
+
+          off = int_lit(lf[1])
+          k = lf[2]
+          raise QbeUnsupported, "abi-type #{name}: leaf kind" unless k.is_a?(String) && LEAF_BYTES.key?(k)
+
+          ks = LEAF_BYTES[k]
+          raise QbeUnsupported, "abi-type #{name}: leaf at #{off} out of order" if off < cur
+          raise QbeUnsupported, "abi-type #{name}: member at #{off} is not aligned" if off % ks != 0
+
+          parts << "b #{off - cur}" if off > cur
+          parts << k
+          cur = off + ks
+        end
+        raise QbeUnsupported, "abi-type #{name}: leaves exceed the size" if cur > size
+
+        parts << "b #{size - cur}" if size > cur
+        decls << "type #{tn} = align #{align} { #{parts.join(", ")} }"
+        abi[name] = AbiInfo.new(tn, size, align, "leaves", nil)
+      else raise QbeUnsupported, "abi-type #{name}: unknown shape"
+      end
+    end
+    [abi, decls]
+  end
+
   # The data of the module's globals, then the functions. A global the emitter cannot model is left out, and a
   # reference to it raises QbeUnsupported where it is used.
   def module_il(forms)
     gs = forms.select { |g| head(g) == "global" }
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
-    data = gs.filter_map do |g|
+    abi, type_decls = abi_types(forms)
+    global_decls = gs.filter_map do |g|
       d = global_data(g, by_name, state)
       d if d.is_a?(String)
     end
+    data = type_decls + global_decls
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
                 .to_h { |name, f| [name, { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }] }
-    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, refs).emit }
+    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, refs, abi).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
     (data + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
   end

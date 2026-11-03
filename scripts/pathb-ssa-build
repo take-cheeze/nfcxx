@@ -111,6 +111,8 @@ rescue QbeUnsupported => e
   skipped << [g[1].raw.delete('"'), "global: #{e.message}"]
   nil
 end
+# The aggregate types (abi-type forms) every function and global is laid out and passed with.
+globals = read_forms(ssa).select { |f| head(f) == "abi-type" } + globals
 text = no_opt ? ssa : PathbEgraph.optimize_module(ssa).first
 fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 
