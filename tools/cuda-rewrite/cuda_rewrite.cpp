@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <map>
@@ -3662,6 +3663,7 @@ std::string strip_launch_bounds(const std::string &s);
 std::string blank_comments(const std::string &s);
 std::string dynamic_shared_rewrite(const std::string &s);
 bool g_device_mode = false;  // Ruby $device
+bool g_hip_mode = false;     // --hip: included headers keep their text (no launch-bounds or dynamic-shared rewrite)
 
 // Ruby CondUnsupported (line 2179): a conditional the evaluator does not handle.
 struct CondUnsupported {
@@ -6446,7 +6448,7 @@ std::string expand_includes(const std::string &text, const std::string &dir, int
       // template kernels, which kernel_template would not match.
       std::string inc;
       if (!read_file(path, inc)) refuse("cannot read " + path);
-      inc = dynamic_shared_rewrite(strip_launch_bounds(g_device_mode ? blank_comments(inc) : inc));
+      if (!g_hip_mode) inc = dynamic_shared_rewrite(strip_launch_bounds(g_device_mode ? blank_comments(inc) : inc));
       out += "\n" + expand_includes(inc, dirname_of(path), depth + 1, seen) + "\n";
     }
     last = pc.en;
@@ -6573,7 +6575,7 @@ std::string device_decls() {
 
 // The command line of the Ruby script (line 3371): -I DIR, --device, --kernels=FILE, --edg-launches, FILE.cu.
 int usage() {
-  std::fprintf(stderr, "usage: cuda-rewrite [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
+  std::fprintf(stderr, "usage: cuda-rewrite [--device [--kernels=FILE] | --hip] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
   return 2;
 }
 
@@ -7239,8 +7241,129 @@ std::string expand_table_macros(const std::string &text) {
   return out;
 }
 
+// ---- HIP source (--hip, docs/notes/gpu.md "CUDA source to HIP") ---------------------------------------------------
+// The output is the file itself, with the CUDA names it uses renamed to HIP's: headers, and the runtime's identifiers
+// (cudaMalloc -> hipMalloc, cudaError_t -> hipError_t, cudaMemcpyHostToDevice -> hipMemcpyHostToDevice, ...). Kernels,
+// __device__ functions, threadIdx and the <<<grid, block>>> launch are HIP's own, so they are kept. Local quoted
+// includes are inlined, as in the host copy. Strings and comments are copied as they are.
+
+// The names whose HIP spelling is not "hip" + the CUDA name without "cuda".
+const std::map<std::string, std::string> &hip_name_exceptions() {
+  static const std::map<std::string, std::string> m = {
+      {"cudaDeviceProp", "hipDeviceProp_t"},
+      {"cudaDeviceAttr", "hipDeviceAttribute_t"},
+      {"cudaPointerAttributes", "hipPointerAttribute_t"},
+      {"cudaFuncCache", "hipFuncCache_t"},
+  };
+  return m;
+}
+
+// One line of the file: an include of a CUDA header becomes its HIP header (cuda_runtime.h and the like are one HIP
+// header); device_launch_parameters.h is dropped (HIP's runtime header declares what it did); other CUDA headers and
+// the NVIDIA-only libraries are refused.
+std::string hip_include_line(const std::string &line) {
+  std::string s = lstrip_str(line);
+  if (s.empty() || s[0] != '#') return line;
+  std::string rest = lstrip_str(s.substr(1));
+  if (rest.compare(0, 7, "include") != 0) return line;
+  std::string q = lstrip_str(rest.substr(7));
+  if (q.size() < 2 || (q[0] != '<' && q[0] != '"')) return line;
+  size_t e = q.find(q[0] == '<' ? '>' : '"', 1);
+  if (e == std::string::npos) return line;
+  std::string name = q.substr(1, e - 1);
+  if (name == "cuda_runtime.h" || name == "cuda_runtime_api.h" || name == "cuda.h") return "#include <hip/hip_runtime.h>";
+  if (name == "cuda_fp16.h") return "#include <hip/hip_fp16.h>";
+  if (name == "cuda_bf16.h") return "#include <hip/hip_bf16.h>";
+  if (name == "device_launch_parameters.h") return "";
+  static const char *const nvidia_only[] = {"cub/", "cooperative_groups", "mma.h", "cuda/", "thrust/", "nv", "cublas",
+                                            "cufft", "curand", "cudnn", "cusparse", "cusolver", "cuda"};
+  for (const char *p : nvidia_only)
+    if (name.compare(0, std::strlen(p), p) == 0) refuse("#include <" + name + ">: no HIP equivalent in the --hip output");
+  return line;
+}
+
+// One identifier of the file (w, followed by text[j..]): the HIP name, or w.
+std::string hip_identifier(const std::string &w, const std::string &text, size_t j) {
+  if (w == "__CUDA_ARCH__") refuse("__CUDA_ARCH__: hipcc does not define it (the device branch would silently change)");
+  if (w.compare(0, 6, "__cuda") == 0) refuse("internal CUDA name " + w);
+  if (w == "cuda" && text.compare(j, 2, "::") == 0) refuse("cuda:: (libcu++) has no HIP equivalent");
+  if (w.size() <= 4 || w.compare(0, 4, "cuda") != 0 || !(w[4] >= 'A' && w[4] <= 'Z')) return w;
+  auto it = hip_name_exceptions().find(w);
+  if (it != hip_name_exceptions().end()) return it->second;
+  return "hip" + w.substr(4);
+}
+
+std::string hip_source(const std::string &text) {
+  // The include lines, line by line.
+  std::string lines;
+  size_t start = 0;
+  while (start <= text.size()) {
+    size_t nl = text.find('\n', start);
+    std::string line = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+    std::string mapped = hip_include_line(line);
+    if (!(mapped.empty() && !line.empty())) lines += mapped;
+    if (nl == std::string::npos) break;
+    lines += "\n";
+    start = nl + 1;
+  }
+  // The identifiers, outside literals and comments.
+  std::string out;
+  size_t i = 0, n = lines.size();
+  while (i < n) {
+    long e = skip_literal(lines, (long)i);
+    if (e >= 0) {
+      out += lines.substr(i, (size_t)e - i);
+      i = (size_t)e;
+      continue;
+    }
+    unsigned char c = (unsigned char)lines[i];
+    if (ident_c(c)) {
+      size_t j = i;
+      while (j < n && ident_c((unsigned char)lines[j])) j++;
+      std::string w = lines.substr(i, j - i);
+      // A number (1.5f, 0x1p3) is copied whole: its letters are not identifiers.
+      out += (c >= '0' && c <= '9') ? w : hip_identifier(w, lines, j);
+      i = j;
+      continue;
+    }
+    out += (char)c;
+    i++;
+  }
+  return out;
+}
+
+// Does the text call cudaLaunchKernel (as a whole identifier)?
+bool calls_cuda_launch_kernel(const std::string &text) {
+  const std::string w = "cudaLaunchKernel";
+  for (size_t p = text.find(w); p != std::string::npos; p = text.find(w, p + 1))
+    if ((p == 0 || !ident_c((unsigned char)text[p - 1])) &&
+        (p + w.size() >= text.size() || !ident_c((unsigned char)text[p + w.size()])))
+      return true;
+  return false;
+}
+
+int emit_hip(const std::string &text, const std::string &path) {
+  g_hip_mode = true;
+  std::map<std::string, bool> seen;
+  std::string expanded = expand_includes(text, dirname_of(path), 0, seen);
+  std::string out = "// Generated by cuda-rewrite --hip (nfcxx) from " + path + "; hipcc compiles it as HIP source.\n";
+  // nvcc includes the runtime for every .cu file; hipcc needs its header for __global__, threadIdx and the launch.
+  out += "#include <hip/hip_runtime.h>\n";
+  // CUDA's cudaLaunchKernel takes a typed kernel pointer (its C++ API); HIP's takes const void*. This overload is the
+  // conversion, so the call in the source needs no change.
+  if (calls_cuda_launch_kernel(expanded))
+    out += "template <typename F>\n"
+           "inline hipError_t hipLaunchKernel(F *f, dim3 g, dim3 b, void **args, size_t shmem, hipStream_t s) {\n"
+           "  return hipLaunchKernel((const void *)f, g, b, args, shmem, s);\n"
+           "}\n";
+  out += hip_source(expanded);
+  std::fwrite(out.data(), 1, out.size(), stdout);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   bool device = false;
+  bool hip = false;
   bool has_kernels = false;
   std::string kernels_path;
   bool has_obfuscate = false;
@@ -7258,6 +7381,8 @@ int main(int argc, char **argv) {
     } else if (arg == "--device") {
       device = true;
       g_device_mode = true;
+    } else if (arg == "--hip") {
+      hip = true;
     } else if (arg == "--edg-launches") {
       g_edg_launches = true;
     } else if (arg.compare(0, 10, "--kernels=") == 0) {
@@ -7286,6 +7411,7 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "cuda-rewrite: cannot read %s\n", path.c_str());
     return 1;
   }
+  if (hip) return emit_hip(text, path);
   if (device) text = blank_comments(name_commented_params(text));
   text = dynamic_shared_rewrite(strip_launch_bounds(text));
   std::map<std::string, bool> seen;

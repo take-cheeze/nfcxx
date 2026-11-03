@@ -330,6 +330,39 @@ backend (ggml-cuda with `GGML_USE_HIP`). The host side needs HIP's headers throu
 `amd_hip_vector_types.h` (`using Native_vec_ = T __attribute__((ext_vector_type(n)))`: "attribute does not apply to any
 entity"; EDG says `__has_attribute(ext_vector_type)` but does not take it on an alias).
 
+## CUDA source to HIP (`nfcxx --emit-hip`)
+
+`nfcxx --emit-hip FILE.cu > FILE.hip.cpp` writes the `.cu` file as HIP source for AMD's `hipcc`, and builds nothing. The
+driver passes the `-I`, `-D` and `-U` options to `tools/cuda-rewrite --hip`, which does the work. The output is one
+`.cpp`: the file's local quoted includes are inlined, the CUDA runtime names become HIP's (`cudaMalloc` -> `hipMalloc`,
+`cudaError_t` -> `hipError_t`, `cudaMemcpyHostToDevice` -> `hipMemcpyHostToDevice`, ...), and the CUDA headers become
+`hip/hip_runtime.h`, `hip/hip_fp16.h` or `hip/hip_bf16.h` (`device_launch_parameters.h` is dropped). The kernels,
+`__device__` functions, `threadIdx` and the `<<<grid, block>>>` launches are kept: hipcc takes them as they are. Strings
+and comments are not changed. The name rule is "`cuda` + an uppercase letter" -> "`hip`" + the rest, with the exceptions
+`cudaDeviceProp`, `cudaDeviceAttr`, `cudaPointerAttributes` and `cudaFuncCache`. Two more changes: the output starts with
+`#include <hip/hip_runtime.h>` (nvcc includes the runtime for every `.cu`, hipcc needs it), and when the source calls
+`cudaLaunchKernel` with a typed kernel pointer, a template overload of `hipLaunchKernel` converts it to `const void *`
+(HIP has no typed overload).
+
+Refused (exit 3, no output): `__CUDA_ARCH__` (hipcc does not define it, so the device branch would silently change),
+`__cuda*` internal names, `cuda::` (libcu++), and the NVIDIA-only headers (`cub/`, `cooperative_groups`, `mma.h`,
+`thrust/`, `cublas`, `cufft`, `curand`, `cudnn`, `cusparse`, `cusolver`, `nv*`, other `cuda*` headers). The host copy and the
+device unit of the default path are not used, and the default driver and rewriter output are unchanged.
+
+Checked on the Radeon 8060S (gfx1151, ROCm 7.14): `tests/cuda/mul2.cu` emits, builds with
+`hipcc --offload-arch=gfx1151 -O2 FILE.hip.cpp -o out`, and prints "mul2: 1000 elements, 0 mismatches". So do
+`launch/addr_taken.cu` (typed kernel pointers through `cudaLaunchKernel`, "addr taken: 0 mismatches"), `launch/dynshared.cu`
+and `intrinsics/atomics.cu`. Of the 212 `.cu` files under `tests/cuda`, 161 emit and build with hipcc (`-c`), 14 are
+refused (the NVIDIA-only headers and `__CUDA_ARCH__`), and 37 emit but do not build. Most of those 37 are rewriter fixtures
+that are not standalone programs or are meant to be refused by nfcxx (`refuse_*`); the real gaps are NVIDIA intrinsics HIP
+does not define (`__dp4a`, `__vsub4`, `__nanosleep`, `__double2half`, `__hmax2` forms, `__trap`, `__cvta_generic_to_*`),
+`__nv_bfloat16`/`__nv_bfloat162` types, `cudaFuncGetAttributes`-style runtime calls with other signatures, and
+`cudaGraph*` instantiation.
+
+The emitted file is not the nfcxx build of the program: its device code is compiled by hipcc, not by the Path B pipeline,
+and no registration tail is needed. The device pass to `tools/pathb-amdgpu-emit` is still not wired into the `.cu` driver
+(see "AMD GPUs (ROCm)").
+
 ## WebGPU (Dawn) vs OpenCL on the Arc B60
 
 `tests/gpu/webgpu/` runs the same vector add through WebGPU and checks it. `vecadd.cpp` picks the Intel Vulkan adapter
