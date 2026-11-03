@@ -643,6 +643,20 @@ class CodeGen
       out << "    #{RegName[d]} = h;\n"
       out << "  }\n"
       out
+    when :HASHCAT
+      # "HASHCAT R3": merge the Hash in R(a+1) into the Hash in R(a), as vm.c OP_HASHCAT does: check that R[a] is a
+      # Hash, then mrb_hash_merge, which converts R[a+1] itself. Builds the Hash of `f(**h)` and `{**h, k: v}`.
+      d = insn.reg.to_i
+      "  mrb_ensure_hash_type(M, #{RegName[d]});\n  mrb_hash_merge(M, #{RegName[d]}, #{RegName[d + 1]});\n"
+    when :HASHADD
+      # "HASHADD R3 2": store the N key/value pairs from R(d+1) into the Hash in Rd, as vm.c OP_HASHADD does: check
+      # that Rd is a Hash, then mrb_hash_set per pair in order. Builds the literal part of `{**h, k: v}`.
+      d = insn.reg.to_i
+      n = insn.uint_operand.to_i
+      out = String.new
+      out << "  mrb_ensure_hash_type(M, #{RegName[d]});\n"
+      n.times { |i| out << "  mrb_hash_set(M, #{RegName[d]}, #{RegName[d + 1 + 2 * i]}, #{RegName[d + 2 + 2 * i]});\n" }
+      out
     when :ARRAY
       # "ARRAY R3 2": N registers from Rd into a new Array in Rd (vm.c
       # `mrb_ary_new_from_values(mrb, b, &regs[a])`). The registers are separate C++
