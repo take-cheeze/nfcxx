@@ -397,6 +397,8 @@ module Qbe
           end
           return "$#{Qbe.symbol(x.raw)}"
         end
+        # A function used as a value: its address is the function's symbol (the existing emitter does the same).
+        return "$#{Qbe.symbol(x.raw)}" if x.sigil == "&"
         raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
 
         @slot.fetch("$#{x.raw}") { raise QbeUnsupported, "slot #{x.raw}" }
@@ -518,6 +520,7 @@ module Qbe
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
       when "index" then index_lines(dst, rv)
+      when "pdiff" then pdiff_lines(dst, t, rv)
       # A volatile load is an ordinary load in the emitted code: the loads of a block keep their order.
       when "load", "load.v" then @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
       when "const", "null", nil
@@ -674,6 +677,25 @@ module Qbe
       @lines << "  #{Qbe::BF_STORE[unit]} #{nw}, #{addr}"
     end
 
+    # `(pdiff A B SIZE)`: (A - B) / SIZE, signed, in the 64-bit pointer difference type (docs/notes/pathb-stage2.md).
+    # A VLA element size is a register, which is not a constant here, so it is refused.
+    def pdiff_lines(dst, t, rv)
+      raise QbeUnsupported, "pdiff of type #{sx(t)}" unless Qbe.cls(t) == "l"
+
+      n = begin
+        Qbe.int_lit(rv[3])
+      rescue ArgumentError, TypeError
+        raise QbeUnsupported, "pdiff with a non-constant element size"
+      end
+      raise QbeUnsupported, "pdiff with element size 0" if n.zero?
+
+      a = op(rv[1])
+      b = op(rv[2])
+      d = fresh
+      @lines << "  #{d} =l sub #{a}, #{b}"
+      @lines << "  #{dst} =l div #{d}, #{n}"
+    end
+
     # `(nonnull P)`: a null pointer traps (code 5).
     def nonnull_lines(p)
       cond = fresh
@@ -752,10 +774,10 @@ module Qbe
     # names, and any other callee is linked as a C function. Each argument is passed with the class of its value.
     def call_text(c)
       f = c[2]
-      raise QbeUnsupported, "indirect call #{sx(f)}" unless f.is_a?(Ref) && f.sigil == "&"
-
+      # A call through a function pointer: the callee is an operand of pointer class (its value is the address).
+      callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
       args = c[3..].map { |a| "#{arg_cls(a)} #{op(a)}" }
-      "call $#{Qbe.symbol(f.raw)}(#{args.join(', ')})"
+      "call #{callee}(#{args.join(', ')})"
     end
 
     def arg_cls(a)
