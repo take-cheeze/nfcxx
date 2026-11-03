@@ -107,3 +107,4 @@ struct Mod {
 
 extern const char *const EH_RUNTIME_STATE[4];
 extern const char *const GLIBCXX_ASSERT_FAIL;
+extern const char *const DP4A_INT;   // dpct::dp4a<int, int, int>

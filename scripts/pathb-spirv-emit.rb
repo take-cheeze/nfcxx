@@ -156,6 +156,8 @@ end
 EH_RUNTIME_STATE = %w[__curr_eh_stack_entry __eh_curr_region __catch_clause_number __caught_object_address].freeze
 # libstdc++'s __glibcxx_assert_fail (the failing branch of std::array::operator[] and other _GLIBCXX_ASSERTIONS checks)
 GLIBCXX_ASSERT_FAIL = "_ZSt21__glibcxx_assert_failPKciS0_S0_".freeze
+# dpct::dp4a(int, int, int) (llama.cpp's SYCL helper, the signed 8-bit dot product): the packed dot product of the OpenCL module
+DP4A_INT = "_ZN4dpct4dp4aIiiiEEDaT_T0_T1_".freeze
 
 def head_of(x)
   x.is_a?(Array) && !x.empty? && x[0].is_a?(String) ? x[0] : nil
@@ -2126,6 +2128,15 @@ class SFn
       trap(5)
       check_dead_after_call
       return nil
+    end
+    # dpct::dp4a(int, int, int): c plus the dot product of the four signed bytes of a and b. The OpenCL module uses the packed
+    # integer dot product (OpSDot), which the Intel compiler also lowers to dp4a (see tools/pathb-spirv-emit/emit.cpp)
+    if name == DP4A_INT && @mod.kernel_cl
+      @spv.cap(6018)   # DotProductInput4x8BitPacked
+      @spv.cap(6019)   # DotProduct
+      @spv.ext("SPV_KHR_integer_dot_product")
+      dot = res(4450, @spv.t_int(32), operand(args[0])[0], operand(args[1])[0], 0)   # OpSDot, PackedVectorFormat4x8Bit
+      return [res(IADD, @spv.t_int(32), dot, operand(args[2])[0]), ["int", 4, true, false]]
     end
     callee_fn = @wgs_mode ? @mod.fns_wgs[name] : @mod.fns[name]
     raise Refused, "call of #{name}, which has no body in the device unit (a host function, or a declaration)" if callee_fn.nil?

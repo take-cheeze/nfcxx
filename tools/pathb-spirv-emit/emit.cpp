@@ -1111,6 +1111,18 @@ struct SFn {
       check_dead_after_call();
       return std::nullopt;
     }
+    // dpct::dp4a(int, int, int) (llama.cpp's SYCL helper for the 8-bit dot product): c plus the dot product of the four signed
+    // bytes of a and b. The OpenCL module uses the packed integer dot product, which the Intel compiler also lowers to dp4a;
+    // the scalar body is four byte extracts, four multiplies and four adds.
+    if (nm == DP4A_INT && mod->kernel_cl) {
+      spv->cap(6018);   // DotProductInput4x8BitPacked
+      spv->cap(6019);   // DotProduct
+      spv->ext("SPV_KHR_integer_dot_product");
+      uint32_t a = operand(*args.at(0)).id, b = operand(*args.at(1)).id;
+      uint32_t dot = res(4450, {t32(), a, b, 0});   // OpSDot, PackedVectorFormat4x8Bit
+      uint32_t c = operand(*args.at(2)).id;   // the same order as the Ruby emitter, so the modules match
+      return Opnd{res(IADD, {t32(), dot, c}), ty_int(4, true)};
+    }
     auto &table = wgs_mode ? mod->fns_wgs : mod->fns;
     auto it = table.find(nm);
     SFn *callee_fn = it == table.end() ? nullptr : it->second;

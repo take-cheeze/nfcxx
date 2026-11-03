@@ -11,6 +11,7 @@
 const char *const EH_RUNTIME_STATE[4] = {"__curr_eh_stack_entry", "__eh_curr_region", "__catch_clause_number",
                                          "__caught_object_address"};
 const char *const GLIBCXX_ASSERT_FAIL = "_ZSt21__glibcxx_assert_failPKciS0_S0_";
+const char *const DP4A_INT = "_ZN4dpct4dp4aIiiiEEDaT_T0_T1_";
 
 static bool eh_state(const std::string &n) {
   for (const char *e : EH_RUNTIME_STATE)
