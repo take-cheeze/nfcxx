@@ -1,0 +1,17 @@
+(ir-module "a.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "alloca_sum"
+  (ret int)
+  (params (param %0 "n" int))
+  (let %1 unsigned_long (iconv unsigned_long %0))
+  (let %2 (ptr void) (alloca %1))
+  (let %3 (ptr int) (bitcast (ptr int) %2))
+  (store int %3 (const int 7))
+  (let %4 int (load int %3))
+  (return %4))
+(function "volatile_id"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "v" int 4 4)
+  (store.v int $"v" %0)
+  (let %1 int (load.v int $"v"))
+  (return (wadd int %1 (const int 1))))

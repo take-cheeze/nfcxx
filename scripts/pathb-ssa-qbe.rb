@@ -41,12 +41,12 @@ module Qbe
 
   module_function
 
-  def float?(t) = FLOAT_TYPES.key?(strip_const(t))
+  def float?(t) = FLOAT_TYPES.key?(unqual(t))
 
   # The QBE class of a scalar type: w for 32-bit and narrower integers, l for 64-bit ones and pointers, s and d for
   # float and double.
   def cls(t)
-    t = strip_const(t)
+    t = unqual(t)
     return "l" if head(t) == "ptr"
     return "w" if INT_W.include?(t)
     return "l" if INT_L.include?(t)
@@ -57,7 +57,7 @@ module Qbe
   end
 
   def size(t)
-    t = strip_const(t)
+    t = unqual(t)
     return size(t[1]) if head(t) == "volatile"
     return 8 if head(t) == "ptr"
     if head(t) == "array"
@@ -69,21 +69,21 @@ module Qbe
   end
 
   def load_op(t)
-    t = strip_const(t)
+    t = unqual(t)
     return "loadl" if head(t) == "ptr"
 
     LOAD.fetch(t) { raise QbeUnsupported, "load of #{sx(t)}" }
   end
 
   def store_op(t)
-    t = strip_const(t)
+    t = unqual(t)
     return "storel" if head(t) == "ptr"
 
     STORE.fetch(t) { raise QbeUnsupported, "store of #{sx(t)}" }
   end
 
   def signed?(t)
-    t = strip_const(t)
+    t = unqual(t)
     return false if head(t) == "ptr"
 
     INT_TYPES.fetch(t) { raise QbeUnsupported, "type #{sx(t)}" }[1]
@@ -190,10 +190,11 @@ module Qbe
   # A float literal of type t: the value is rounded to t as the interpreter rounds it, then written as an exact hex float
   # (QBE reads it with scanf). Infinities are written as inf; NaN is not a literal of the subset.
   def float_lit(t, text)
-    raise QbeUnsupported, "NaN literal" if text.to_s.match?(/nan/i)
+    # NaN is the positive quiet NaN, as the emitter spells it (its sign and payload are not in the IR).
+    return "#{cls(t)}_nan" if text.to_s.match?(/nan/i)
 
-    v = round_float(Float(text.to_s), strip_const(t))
-    raise QbeUnsupported, "NaN literal" if v.nan?
+    v = round_float(Float(text.to_s), unqual(t))
+    return "#{cls(t)}_nan" if v.nan?
 
     body = v.infinite? ? (v.positive? ? "inf" : "-inf") : format("%a", v)
     "#{cls(t)}_#{body}"
@@ -246,13 +247,13 @@ module Qbe
         end
       when "scalar"
         off, type, v = item[1..]
-        if (n = FLOAT_STORAGE[strip_const(type)])
+        if (n = FLOAT_STORAGE[unqual(type)])
           # Storage only: the bit pattern of the literal, written as an integer of the same size (no arithmetic on it).
           letter = { 2 => "h", 4 => "w", 8 => "l" }.fetch(n)
           items << [int_lit(off), n, "#{letter} #{Qbe.float_bits(v, n)}"]
           next
         end
-        return nil if FLOAT_TYPES.key?(strip_const(type))
+        return nil if FLOAT_TYPES.key?(unqual(type))
 
         bytes = Qbe.size(type)
         letter = { 1 => "b", 2 => "h", 4 => "w", 8 => "l" }.fetch(bytes) { return nil }
@@ -548,7 +549,12 @@ module Qbe
         if x.sigil == "@"
           info = @globals.fetch(x.raw) { raise QbeUnsupported, "global #{x.raw}" }
           # A weak undefined object is loaded through the GOT in the existing emitter; that is not modelled here.
-          raise QbeUnsupported, "weak reference to #{x.raw}" if info[:weak] && info[:extern]
+          # A weak undefined object is read through the GOT (`copy extern`), so an absent definition reads as null.
+          if info[:weak] && info[:extern]
+            t = fresh
+            @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
+            return t
+          end
           # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
           # existing emitter does it).
           if info[:thread]
@@ -600,9 +606,9 @@ module Qbe
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
-      # A volatile store is emitted as an ordinary store: QBE does not reorder or drop a store, and the statements of a
-      # block keep their order.
-      when "store", "store.v" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
+      # A volatile store is a call of its helper (QBE merges, forwards and drops plain volatile stores; a call is kept).
+      when "store" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
+      when "store.v" then volatile_store_lines(item)
       # `(copy N DST SRC)`: N bytes from SRC to DST (the interpreter's copy_cells). QBE's blit copies a byte count.
       when "copy"
         # The addresses of a copy are pointers. A register holding a by-value aggregate (a byval parameter) is not one:
@@ -612,7 +618,7 @@ module Qbe
 
           t = @types[a]
           raise QbeUnsupported, "copy of an address with no declared type #{a}" if t.nil?
-          raise QbeUnsupported, "copy of the by-value aggregate #{a}" unless head(strip_const(t)) == "ptr"
+          raise QbeUnsupported, "copy of the by-value aggregate #{a}" unless head(unqual(t)) == "ptr"
         end
         @lines << "  blit #{op(item[3])}, #{op(item[2])}, #{Qbe.int_lit(item[1])}"
       when "br"
@@ -716,6 +722,8 @@ module Qbe
         oc = Qbe.cls(rv[1])
         @lines << "  #{dst} =w #{Qbe::FCMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when "iconv" then conv_lines(dst, t, rv[2])
+      # An integer to pointer conversion widens the integer as an iconv to a 64-bit type does (pathb-qbe-emit.rb's i2p).
+      when "i2p" then conv_lines(dst, t, rv[2])
       when "i2f", "u2f" then int_to_float_lines(dst, t, rv[2])
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
@@ -729,9 +737,9 @@ module Qbe
       # `(not T A)`: a bitwise complement of an integer, or a logical negation of a bool. The complement is narrowed to
       # the type's canonical form. Floats are not integers and are refused.
       when "not"
-        raise QbeUnsupported, "not on a floating type #{sx(t)}" if FLOAT_TYPES.key?(strip_const(t))
+        raise QbeUnsupported, "not on a floating type #{sx(t)}" if FLOAT_TYPES.key?(unqual(t))
 
-        if strip_const(t) == "bool"
+        if unqual(t) == "bool"
           @lines << "  #{dst} =w xor #{op(rv[2])}, 1"
         else
           raw = fresh
@@ -748,11 +756,13 @@ module Qbe
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
       when "index" then index_lines(dst, rv)
+      when "alloca" then alloca_lines(dst, rv)
       when "pdiff" then pdiff_lines(dst, t, rv)
-      # A volatile load is an ordinary load in the emitted code: the loads of a block keep their order.
-      when "load", "load.v"
+      # A volatile load is a call of its helper (see volatile_load_lines).
+      when "load.v" then volatile_load_lines(dst, rv)
+      when "load"
         # A bool object holding another byte is read as true, and a load yields 0 or 1 (EDG's model): normalise the byte.
-        if strip_const(rv[1]) == "bool"
+        if unqual(rv[1]) == "bool"
           raw = fresh
           @lines << "  #{raw} =w loadub #{op(rv[2])}"
           @lines << "  #{dst} =w cnew #{raw}, 0"
@@ -793,6 +803,34 @@ module Qbe
     # nonzero (it traps, or longjmps out in the test driver), so the operation after it is never reached with the
     # bad operands and no block is split. Codes: 1 division by zero, 2 signed overflow, 3 shift count out of range.
     def fresh = "%ck#{@temps += 1}"
+
+    # `(alloca N)`: N bytes of dynamic stack, 16-byte aligned, as pathb-qbe-emit.rb's r_alloca. A 32-bit size is widened.
+    def alloca_lines(dst, rv)
+      n = rv[1]
+      t = operand_type(n)
+      Qbe.signed?(t) # refuses a size that is not an integer
+      size = op(n)
+      if Qbe.cls(t) == "w"
+        wide = fresh
+        @lines << "  #{wide} =l extuw #{size}"
+        size = wide
+      end
+      @lines << "  #{dst} =l alloc16 #{size}"
+    end
+
+    # A volatile load or store: a call of the module's helper for its operation (see Qbe.volatile_helpers).
+    def volatile_load_lines(dst, rv)
+      op_name = Qbe.load_op(rv[1])
+      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{op(rv[2])})"
+    end
+
+    def volatile_store_lines(item)
+      op_name = Qbe.store_op(item[1])
+      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{op(item[2])}, #{Qbe.store_class(op_name)} #{op(item[3])})"
+    end
+
+    # The unqualified type: const and volatile are access qualifiers, not part of the value's class.
+    def unqual(t) = Qbe.unqual(t)
 
     # The class of an operand whose type is known: a constant, a declared register, or an expression's type.
     def operand_type(x) = expression?(x) ? Qbe.expr_type(x) : switch_operand_type(x)
@@ -916,11 +954,11 @@ module Qbe
     # `(bitcast (ptr T) P)`: a pointer reinterpreted as a pointer keeps its address (the interpreter's rule). Any other
     # reinterpretation is refused: the interpreter does not model it either.
     def bitcast_lines(dst, rv)
-      raise QbeUnsupported, "bitcast to #{sx(rv[1])}" unless head(strip_const(rv[1])) == "ptr"
+      raise QbeUnsupported, "bitcast to #{sx(rv[1])}" unless head(unqual(rv[1])) == "ptr"
 
       src = rv[2]
       src_type = src.is_a?(String) ? @types[src] : nil
-      pointer = src.is_a?(Ref) || (src_type && head(strip_const(src_type)) == "ptr") ||
+      pointer = src.is_a?(Ref) || (src_type && head(unqual(src_type)) == "ptr") ||
                 (src.is_a?(Array) && %w[null addr].include?(head(src)))
       raise QbeUnsupported, "bitcast of #{sx(src)}" unless pointer
 
@@ -1232,6 +1270,49 @@ module Qbe
 
   # The part of a module that every function shares: the data of its globals and the references a function may make
   # to them. Built once, so a driver that emits function by function does not redo the globals for each function.
+  # The volatile access helpers: one function per load and store operation. QBE has no volatile, so a volatile access is
+  # a call of one of these (a call is kept in order and neither merged nor removed), as pathb-qbe-emit.rb does.
+  VOLATILE_LOADS = %w[loadub loadsb loadsh loaduh loadsw loaduw loadl loads loadd].freeze
+  VOLATILE_STORES = %w[storeb storeh storew storel stores stored].freeze
+
+  # The type without its const and volatile qualifiers: they are access properties, not part of the value's class.
+  def unqual(t)
+    t = t[1] while head(t) == "const"
+    head(t) == "volatile" ? unqual(t[1]) : t
+  end
+
+  def volatile_name(kind, op_name) = "__pathb_v#{kind}_#{op_name}"
+
+  # The class of the value a store writes, for its volatile helper.
+  def store_class(op_name)
+    { "storel" => "l", "stores" => "s", "stored" => "d" }.fetch(op_name, "w")
+  end
+
+  # The helpers' text, emitted once in a module that has a volatile access.
+  def volatile_helpers
+    loads = VOLATILE_LOADS.flat_map do |op_name|
+      cls = { "loadl" => "l", "loads" => "s", "loadd" => "d" }.fetch(op_name, "w")
+      ["function #{cls} $#{volatile_name("ld", op_name)}(l %p) {", "@start", "\t%v =#{cls} #{op_name} %p",
+       "\tret %v", "}", ""]
+    end
+    stores = VOLATILE_STORES.flat_map do |op_name|
+      cls = store_class(op_name)
+      ["function $#{volatile_name("st", op_name)}(l %p, #{cls} %v) {", "@start", "\t#{op_name} %v, %p", "\tret", "}", ""]
+    end
+    (loads + stores).join("\n")
+  end
+
+  # Whether a module has a volatile access (a load.v or store.v, or a volatile type): then its helpers are emitted.
+  def uses_volatile?(forms)
+    walk = lambda do |x|
+      next false unless x.is_a?(Array)
+      next true if %w[load.v store.v volatile].include?(head(x))
+
+      x.any? { |y| walk.call(y) }
+    end
+    forms.any? { |f| walk.call(f) }
+  end
+
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
     by_name = gs.to_h { |g| [g[1].raw, g] }
@@ -1255,6 +1336,7 @@ module Qbe
       d if d.is_a?(String)
     end
     data = type_decls + string_decls + global_decls
+    data << volatile_helpers if uses_volatile?(forms)
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
@@ -1271,8 +1353,8 @@ module Qbe
   def string_data(d)
     name = d[1].raw
     ty = d[2]
-    raise QbeUnsupported, "string #{name} is not a char array" unless head(strip_const(ty)) == "array"
-    raise QbeUnsupported, "string #{name} is a wide string" unless size(strip_const(ty)[2]) == 1
+    raise QbeUnsupported, "string #{name} is not a char array" unless head(unqual(ty)) == "array"
+    raise QbeUnsupported, "string #{name} is a wide string" unless size(unqual(ty)[2]) == 1
 
     text = d[3]
     raise QbeUnsupported, "string #{name} has no string data" unless head(text) == "string"
