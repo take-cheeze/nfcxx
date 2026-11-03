@@ -13,11 +13,13 @@
 # call, `extend self`, a `Class.new` with a computed superclass, `X.include(Y)` inside a method, a lambda constant) makes
 # it unknown, with the reason named, and unknown spreads to the
 # classes that inherit from it.
+require 'digest'
 require 'json'
 require_relative 'ruby_parse_cache'
 require 'set'
 require_relative 'class_body_scan'
 require_relative 'pure_eval'
+require_relative 'scan_cache'
 
 module ClassWorld
   module_function
@@ -66,7 +68,17 @@ module ClassWorld
   def from_load_world(json)
     return nil unless json
 
-    build(JSON.parse(json).values.map { |files| ClassBodyScan.scan(files) })
+    build_files(JSON.parse(json).values)
+  end
+
+  # build over ClassBodyScan.scan of each group of files (`groups`: [[file, ...], ...] in load order), kept in the
+  # scan cache. The World holds only names, lines and labels, and is a function of the files' bytes, how they are
+  # grouped, the Prism version and the Ruby that PureEval folds under (docs/bc2cpp-prism-reader-cache.md).
+  def build_files(groups)
+    shape = Digest::SHA256.hexdigest(groups.map(&:size).join(','))[0, 16]
+    ScanCache.fetch("class_world.build.prism#{Prism::VERSION}.#{shape}", groups.flatten, cache_absent: false) do
+      build(groups.map { |files| ClassBodyScan.scan(files) })
+    end
   end
 
   # `roots`: [ClassBodyScan root, ...] in load order.
