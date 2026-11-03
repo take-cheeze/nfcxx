@@ -53,7 +53,7 @@ module ReceiverProofReport
                             'split' => 'Array', 'bytes' => 'Array', 'to_h' => 'Hash', 'to_s' => 'String',
                             'snap_to_bitmap' => 'RGSS::Bitmap' }.freeze
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     return super if @rp_force || !ReceiverProofReport.active?
 
     code = super
@@ -172,7 +172,7 @@ module ReceiverProofReport
       # The class bits are allocated here, so the parent's table (and nothing it emits) never changes.
       mask = classes.sum { |k| rp_class_bit(k) } | (with_nil ? NumericFlow::NIL : 0)
       @rp_force = { irep: irep.label, idx: site, reg: reg, mask: mask }
-      again = compile_send(insn, **kwargs)
+      again = compile_send(insn, kwargs)
       writer.write(Marshal.dump([ReceiverProofReport.by_name(again), again.scan(NOMETHOD).size - code.scan(NOMETHOD).size,
                                  again.scan(NIL_RECEIVER).size - code.scan(NIL_RECEIVER).size]))
       writer.close

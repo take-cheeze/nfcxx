@@ -93,11 +93,11 @@ class CodeGen
     reached = prog.forward_reachable(size.zero? ? [] : [0]) do |i, normal|
       insn = prog.source_at(i)
       goto = prog.decoded[i].goto
-      case insn.op
-      when :ENTER
+      op = insn.op
+      if op == :ENTER
         # ENTER may land on any branch target, not only on the IR's optional-argument JMP table (not used here).
         [i + 1, *entry_targets].select { |j| j < size }
-      when *BytecodeIR::CONDITIONAL_BRANCHES
+      elsif BytecodeIR::CONDITIONAL_BRANCHES.include?(op) # not `when *...`: that splat builds an Array per instruction
         outcome = decided_branch_outcome(insn, irep, owner_def, i, reg_offset)
         unresolved ||= goto.nil? && outcome != :not_taken
         case outcome
@@ -107,7 +107,7 @@ class CodeGen
         end
       else
         # JMP and JMPUW: the IR edge is the branch target; an unresolved target is refused, as it always was.
-        unresolved ||= goto.nil? && BytecodeIR::BRANCH_OPS.include?(insn.op)
+        unresolved ||= goto.nil? && BytecodeIR::BRANCH_OPS.include?(op)
         normal
       end
     end

@@ -302,11 +302,7 @@ module InsnDecoder
       text
     end
 
-    def argc_operand(value)
-      n = value & 0xf
-      nk = (value >> 4) & 0xf
-      Operand.new(:argc, [n == 15 ? nil : n, nk == 15 ? nil : nk, nk.zero?])
-    end
+    def argc_operand(value) = ARGC_OPERANDS[value]
 
     def validate_string_pool(index)
       entry = @rite.pool.fetch(index)
@@ -345,8 +341,18 @@ module InsnDecoder
     def pr(n) = PREG_OPERANDS[n]
     def i(n) = INT_OPERANDS[n]
     def fixed_lit(text) = FIXED_LITS.fetch(text)
-    def sym_op(index) = Operand.new(:sym, sym(index))
-    def name_op(index) = Operand.new(:name, sym(index))
+    SYM_OPERANDS = Hash.new { |cache, name| cache[name] = Operand.new(:sym, name).freeze }
+    NAME_OPERANDS = Hash.new { |cache, name| cache[name] = Operand.new(:name, name).freeze }
+    ADDR_OPERANDS = Hash.new { |cache, n| cache[n] = Operand.new(:addr, n).freeze }
+    ARGC_OPERANDS = Hash.new do |cache, value|
+      n = value & 0xf
+      nk = (value >> 4) & 0xf
+      cache[value] = Operand.new(:argc, [n == 15 ? nil : n, nk == 15 ? nil : nk, nk.zero?].freeze).freeze
+    end
+
+    def sym_op(index) = SYM_OPERANDS[sym(index)]
+    def name_op(index) = NAME_OPERANDS[sym(index)]
+    def addr_op(n) = ADDR_OPERANDS[n]
     def lit(text) = Operand.new(:plit, text)
 
     # Typed operands do not construct the diagnostic text.
@@ -385,10 +391,10 @@ module InsnDecoder
       when :GETIDX then [r(a), pr(a + 1)]
       when :GETIDX0 then [r(a), Operand.new(:idx0, b)]
       when :SETIDX then [r(a), pr(a + 1), pr(a + 2)]
-      when :JMP, :JMPUW then [Operand.new(:addr, next_pc + s16(a))]
+      when :JMP, :JMPUW then [addr_op(next_pc + s16(a))]
       when :JMPIF, :JMPNOT, :JMPNIL
         target = next_pc + s16(b)
-        [r(a), Operand.new(:addr, target)]
+        [r(a), addr_op(target)]
       when :SSEND, :SSENDB, :SEND, :SENDB
         operand = argc_operand(c)
         [r(a), sym_op(b), operand]

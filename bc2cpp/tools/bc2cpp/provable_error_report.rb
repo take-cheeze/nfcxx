@@ -41,7 +41,7 @@ module ProvableErrorReport
                 NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String', NumericFlow::NIL => 'NilClass',
                 NumericFlow::RNG => 'Range' }.freeze
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     code = super
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]

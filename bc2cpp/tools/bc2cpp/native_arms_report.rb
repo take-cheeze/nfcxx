@@ -33,7 +33,7 @@ module NativeArmsReport
     line
   end
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     outer = @arms_fallbacks
     @arms_fallbacks = []
     code = super

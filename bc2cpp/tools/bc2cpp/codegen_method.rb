@@ -68,13 +68,16 @@ class CodeGen
     run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, nil, try_range: try_range)
   end
 
+  NO_PASS_CONTEXT = [].freeze
+
   def run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, guarded, try_range: nil)
     ctx_ivar = @class_layout[d.owner]
     ctx_args = @class_annotations[irep.label]&.args
+    full_ctx = [d.owner, mand, ctx_ivar, ctx_args].freeze
     INLINE_LOOP_PASSES.each do |pass|
       next if try_range && !rescue_try_pass?(pass.recognize)
 
-      ctx = pass.context ? [d.owner, mand, ctx_ivar, ctx_args] : []
+      ctx = pass.context ? full_ctx : NO_PASS_CONTEXT
       send(pass.recognize, irep, *ctx).each do |region|
         anchor = region[pass.anchor]
         next if claimed.include?(anchor) || claimed.include?(region[:sendb_addr])
@@ -600,7 +603,7 @@ class CodeGen
         next
       end
       if flow_bodies
-        flow_labels[idx] = "#{flow_labels[idx]}#{jump_label}"
+        flow_labels[idx] += jump_label unless jump_label.empty?
         flow_bodies[idx] = text
       else
         out << jump_label << text

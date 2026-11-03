@@ -650,7 +650,10 @@ class CodeGen
     return nil if !runtime_def_fallback_kind?(region[:kind]) && block_self_rebound?(block_irep.label)
     mand = mandatory_arity(block_irep)
     rest_block = (region[:kind] || 'block_fallback') == 'block_fallback' && rest_only_block?(block_irep)
-    arg_names = (1..(rest_block ? 1 : mand)).map { |i| "bc2cpp_barg#{i}" }
+    # MIXED_REST_BLOCK: m values, then the rest Array as the last parameter (mixed_rest_unpack fills them).
+    mixed_rest = (region[:kind] || 'block_fallback') == 'block_fallback' && !rest_block && mixed_rest_block?(block_irep)
+    arg_count = rest_block ? 1 : (mixed_rest ? mand + 1 : mand)
+    arg_names = (1..arg_count).map { |i| "bc2cpp_barg#{i}" }
     # UPVAR_CAPTURE_SUPPORT: region[:upvars] comes from
     # recognize_block_fallback_regions, or from recognize_lambda_fallback_regions
     # for a frame-confined lambda (lambda_proc_frame_confined?). `|| []` is the
@@ -877,7 +880,8 @@ class CodeGen
     region[:direct_entry] = block_direct_entry?(region, kind, exits)
     region[:yield_free] = region[:direct_entry] && note_block_yield_free(region[:block_irep])
     if region[:direct_entry]
-      out << emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block)
+      out << emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block,
+                                     mixed_rest: mixed_rest)
       return [fn_name, out]
     end
 
@@ -939,6 +943,12 @@ class CodeGen
       if mand.zero?
         out << "  if (bc2cpp_proc_strict_p(M) && mrb_get_argc(M) != 0) mrb_argnum_error(M, mrb_get_argc(M), 0, 0);\n"
         out << call_impl.call("M, #{call_args}")
+      elsif mixed_rest
+        out << "  mrb_value* bc2cpp_argv;\n"
+        out << "  mrb_int bc2cpp_argc;\n"
+        out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
+        out << mixed_rest_unpack(arg_names, mand, 'bc2cpp_argc', 'bc2cpp_argv', strict: 'bc2cpp_proc_strict_p(M)')
+        out << call_impl.call("M, #{call_args}, #{arg_names.join(', ')}")
       else
         out << "  mrb_value* bc2cpp_argv;\n"
         out << "  mrb_int bc2cpp_argc;\n"
@@ -989,7 +999,28 @@ class CodeGen
   # (`bc2cpp_env->stack`, where mrb_proc_cfunc_env_get finds them for a cfunc frame), the
   # arguments are bound as OP_ENTER binds them for a non-strict proc, and a strict copy
   # (Kernel#lambda over the block) raises on any other count.
-  def emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block)
+  # MIXED_REST_BLOCK: binds `arg_names` for `{ |x, *r| }` from the yielded values (argc, argv), as vm.c does for a
+  # non-lambda block: one Array argument is spread over the parameters (only when the block takes more than one).
+  # A strict (lambda) block also rejects too few arguments; an extra one goes to the rest Array.
+  def mixed_rest_unpack(arg_names, mand, argc, argv, strict:)
+    values = arg_names[0...mand]
+    rest = arg_names[mand]
+    out = String.new
+    out << "  if (#{strict} && #{argc} < #{mand}) mrb_argnum_error(M, #{argc}, #{mand}, -1);\n"
+    out << "  mrb_value bc2cpp_mixed_vals = (#{argc} == 1 && mrb_array_p(#{argv}[0])) ? #{argv}[0] : " \
+           "mrb_ary_new_from_values(M, #{argc}, #{argv});\n"
+    out << "  mrb_int bc2cpp_mixed_len = RARRAY_LEN(bc2cpp_mixed_vals);\n"
+    values.each_with_index do |a, i|
+      out << "  mrb_value #{a} = bc2cpp_mixed_len > #{i} ? mrb_ary_ref(M, bc2cpp_mixed_vals, #{i}) : mrb_nil_value();\n"
+    end
+    out << "  mrb_value #{rest} = mrb_ary_new(M);\n"
+    out << "  for (mrb_int bc2cpp_k = #{mand}; bc2cpp_k < bc2cpp_mixed_len; bc2cpp_k++) " \
+           "mrb_ary_push(M, #{rest}, mrb_ary_ref(M, bc2cpp_mixed_vals, bc2cpp_k));\n"
+    out
+  end
+
+  def emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block,
+                              mixed_rest: false)
     out = String.new
     out << "static mrb_value #{fn_name}_direct(mrb_state* M, struct REnv* bc2cpp_env, bool bc2cpp_strict, " \
            "mrb_int bc2cpp_argc, const mrb_value* bc2cpp_argv) {\n"
@@ -1004,6 +1035,9 @@ class CodeGen
     call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
     if rest_block
       out << "  return #{impl_name}(M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv));\n"
+    elsif mixed_rest
+      out << mixed_rest_unpack(arg_names, mand, 'bc2cpp_argc', 'bc2cpp_argv', strict: 'bc2cpp_strict')
+      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
     elsif mand.zero?
       out << "  if (bc2cpp_strict && bc2cpp_argc != 0) mrb_argnum_error(M, bc2cpp_argc, 0, 0);\n"
       out << "  return #{impl_name}(M, #{call_args});\n"

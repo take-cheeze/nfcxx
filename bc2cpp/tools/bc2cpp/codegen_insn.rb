@@ -30,15 +30,19 @@ class CodeGen
   # registers and is undone with unshift_proof_reg wherever a register reaches a
   # proof rather than the output.
   #
-  # The instruction's source line is kept in @insn_source while it compiles, so a gate marker can name the line
-  # its site is written on (a gate marker's "file:line"). A nested compile (an inlined block body) sets its own and restores ours.
+  # The instruction's source file and line are kept in @insn_source_file/@insn_source_line while it compiles, so a
+  # gate marker can name the line its site is written on (a gate marker's "file:line"). A nested compile (an inlined
+  # block body) sets its own and restores ours.
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
-    saved = @insn_source
-    @insn_source = [irep&.file, insn.lineno]
+    saved_file = @insn_source_file
+    saved_line = @insn_source_line
+    @insn_source_file = irep&.file
+    @insn_source_line = insn.lineno
     code = compile_insn_op(insn, irep, owner_def, idx, reg_offset)
     CONST_READ_OPS.include?(insn.op) ? code + const_trace_marker(insn) : code
   ensure
-    @insn_source = saved
+    @insn_source_file = saved_file
+    @insn_source_line = saved_line
   end
 
   CONST_READ_OPS = %i[GETCONST GETMCNST].freeze
@@ -67,8 +71,7 @@ class CodeGen
   # "file:line" of the instruction being compiled; "?:0" when nothing names a source line (a synthetic instruction),
   # which no annotation can match, so such a site fails its gate.
   def insn_source_site
-    file, line = @insn_source
-    "#{file || '?'}:#{line || 0}"
+    "#{@insn_source_file || '?'}:#{@insn_source_line || 0}"
   end
 
   def compile_insn_op(insn, irep, owner_def, idx = nil, reg_offset = 0)

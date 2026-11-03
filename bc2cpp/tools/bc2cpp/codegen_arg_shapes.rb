@@ -121,8 +121,10 @@ module ArgShapeCalls
   # does not list core Ruby-level definitions(`sort` in Enumerable), so a
   # unique name proves no receiver class. The send is compiled again without
   # by-name MONO, leaving the guarded, typed and self resolutions.
-  def compile_send(*args, **kwargs)
-    saved = [@extended_callee_shapes, @extended_shape_used, @no_by_name_mono]
+  def compile_send(insn, kwargs)
+    saved_callee_shapes = @extended_callee_shapes
+    saved_shape_used = @extended_shape_used
+    saved_no_by_name_mono = @no_by_name_mono
     @extended_callee_shapes = true
     @extended_shape_used = false
     code = super
@@ -133,7 +135,9 @@ module ArgShapeCalls
     end
     code
   ensure
-    @extended_callee_shapes, @extended_shape_used, @no_by_name_mono = saved
+    @extended_callee_shapes = saved_callee_shapes
+    @extended_shape_used = saved_shape_used
+    @no_by_name_mono = saved_no_by_name_mono
   end
 
   def monomorphic_target(name)
@@ -256,15 +260,15 @@ module ArgShapeCalls
     @call_block_expr ? nil : super
   end
 
-  def compile_poly_small_n(*args, **kwargs)
+  def compile_poly_small_n(...)
     @call_block_expr ? nil : super
   end
 
-  def compile_poly_table(*args, **kwargs)
+  def compile_poly_table(...)
     @call_block_expr ? nil : super
   end
 
-  def compile_keywordless_call(**kwargs)
+  def compile_keywordless_call(...)
     @call_block_expr ? nil : super
   end
 
