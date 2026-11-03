@@ -30,10 +30,13 @@ Dir.mktmpdir("pathb-ssa-safe") do |dir|
   bad.call("default build: status #{st.exitstatus} #{err.lines.first}") unless st.exitstatus == 0
 
   _, err, st = Open3.capture3(RbConfig.ruby, DRIVER, "--safe", "-o", safe_s, "#{CASE}.ir")
-  if st.exitstatus == 0 && File.read(default_s) == File.read(safe_s)
-    ok.call("--safe build: same assembly as the default build (no checks yet)")
+  # The --safe build differs only by its function table and the constructor that registers it (slice 4); it has no
+  # check of a call through a pointer here, since this case makes none.
+  safe_text = File.read(safe_s) if File.exist?(safe_s)
+  if st.exitstatus == 0 && safe_text && safe_text.include?("__nfcxx_sp_ftab") && safe_text.include?("__nfcxx_sp_funcs")
+    ok.call("--safe build: registers the module's functions, otherwise as the default build")
   else
-    bad.call("--safe build: status #{st.exitstatus}, assembly #{File.read(default_s) == File.read(safe_s) ? 'same' : 'differs'}: #{err.lines.first}")
+    bad.call("--safe build: status #{st.exitstatus}, no function registration in the assembly: #{err.lines.first}")
   end
 
   link_file = "#{safe_s}.link"

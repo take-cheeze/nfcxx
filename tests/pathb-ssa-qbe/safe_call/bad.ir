@@ -1,0 +1,19 @@
+(ir-module "b.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "sub1"
+  (ret long)
+  (params (param %0 "x" long))
+  (return (wadd long %0 (const long 1))))
+(function "case_main"
+  (ret long)
+  (params (param %0 "n" long))
+  (slot "d" long 8 8)
+  (slot "fp" (ptr void) 8 8)
+  (let %c bool (eq long %0 (const long 0)))
+  (if %c
+    (then (store (ptr void) $"fp" &"sub1"))
+    (else
+      (let %bp (ptr void) (addr $"d"))
+      (store (ptr void) $"fp" %bp)))
+  (let %f (ptr void) (load (ptr void) $"fp"))
+  (let %r long (call long %f (const long 5)))
+  (return %r))
