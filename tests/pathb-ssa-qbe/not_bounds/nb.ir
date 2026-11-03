@@ -1,0 +1,10 @@
+(ir-module "vla_bounds.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "f"
+  (ret int)
+  (params (param %0 "n" int) (param %1 "i" int))
+  (let %2 int (not int %0))
+  (let %3 unsigned_long (iconv unsigned_long %1))
+  (let %4 unsigned_long (iconv unsigned_long %0))
+  (bounds %3 %4)
+  (let %5 int (iconv int %3))
+  (return (wadd int %2 %5)))

@@ -49,6 +49,8 @@ ASM_HELPERS = {
                 "\t.size __pathb_barrier, .-__pathb_barrier"],
   "fence" => ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tmfence", "\tret",
               "\t.size __pathb_fence, .-__pathb_fence"],
+  "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
+              "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
 }.freeze
 
 # The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and

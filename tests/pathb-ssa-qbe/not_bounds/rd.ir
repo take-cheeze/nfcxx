@@ -1,0 +1,9 @@
+(ir-module "rd.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "g"
+  (ret int)
+  (params (param %0 "x" int))
+  (eval (rdtsc))
+  (let %1 unsigned_long (rdtsc))
+  (let %2 bool (ne unsigned_long %1 (const unsigned_long 0)))
+  (let %3 int (iconv int %2))
+  (return %3))
