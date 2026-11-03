@@ -8,6 +8,7 @@
 require_relative 'ruby_parse_cache'
 require 'set'
 require_relative 'pure_eval'
+require_relative 'class_body_scan'
 
 class CodeGen
   # The instructions a folded statement may contain besides its block: what a constant statement is made of.
@@ -69,10 +70,19 @@ class CodeGen
     node = find_path(RubyParseCache.parse_file(file).value.statements, owner.split('::'))
     return nil unless node
 
-    node.body.body.map { |statement| FoldStatement.new(statement) }
+    node.body.body.map { |statement| FoldStatement.new(statement, scanned_category(statement, file)) }
   end
 
-  FoldStatement = Struct.new(:node)
+  # PureEval reads each statement's category (HARMLESS_BETWEEN). A direct statement gets the category ClassBodyScan
+  # records for its node. When it records none or several for it, the statement is :control, so PureEval never reads
+  # an unclassified statement as harmless.
+  def scanned_category(statement, file)
+    probe = ClassBodyScan::Body.new(kind: :class, path: '', file: file, line: 1, statements: [], children: [])
+    ClassBodyScan.statement(statement, probe, file)
+    probe.statements.size == 1 ? probe.statements.first.category : :control
+  end
+
+  FoldStatement = Struct.new(:node, :category)
 
   # The class or module node whose lexical path is `path`, searched through the nesting; nil or ambiguous -> nil.
   def find_path(statements, path, prefix = [])
