@@ -43,10 +43,13 @@ module Qbe
   # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
-    attr_accessor :safe, :module_has_data
+    attr_accessor :safe, :module_has_data, :sp_objects
   end
+  # The size of a frame object that QBE lays out with no padding byte after it (pathb-qbe-emit.rb's SP_NOPAD).
+  SP_NOPAD = -(1 << 63)
   self.safe = false
   self.module_has_data = false
+  self.sp_objects = []
 
   module_function
 
@@ -105,6 +108,9 @@ module Qbe
 
     x[1]
   end
+
+  # The frame's objects as QBE call arguments, `l TEMP, l SIZE, ...` (pathb-qbe-emit.rb's sp_frame).
+  def sp_pairs(objs) = objs.map { |q, n| "l #{q}, l #{n}" }.join(", ")
 
   # An integer literal: decimal, or hexadecimal with a 0x prefix (the reader keeps the spelling of a literal).
   def int_lit(s)
@@ -306,6 +312,10 @@ module Qbe
     end
     parts << "z #{size - cur}" if size > cur
     parts = ["z #{size}"] if parts.empty?
+    if Qbe.safe && !flags.include?("thread")
+      parts << "z 1"   # padding: see the safe-pointers section of docs/notes/safe-pointers.md
+      Qbe.sp_objects << [symbol(g[1].raw), size]
+    end
     linkage = (flags.include?("thread") ? "thread " : "") + (flags.include?("static") ? "" : "export ")
     marker = flags.include?("weak") ? "# pathb-weak #{symbol(g[1].raw)}\n" : ""
     "#{marker}#{linkage}data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
@@ -336,6 +346,7 @@ module Qbe
       @slot = {}
       @jumper = {}     # [target block, source block] => the emitted label whose jump reaches target
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
+      @sp_objs = []    # --safe: [temporary, size] of the frame objects this function registers
     end
 
     def emit
@@ -380,6 +391,7 @@ module Qbe
               # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
               sig << "#{info.tn} %p#{p[1][1..]}"
               @params_set[p[1]] = true
+              @sp_objs << ["%p#{p[1][1..]}", info.size + Qbe::SP_NOPAD] if Qbe.safe
             end
           else
             @types[p[1]] = p[3]
@@ -422,14 +434,24 @@ module Qbe
 
     def allocs
       @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
-      @empty_bufs.each { |name| @lines << "  #{name} =l alloc8 8" }
+      @sp_objs << ["%sretbuf", @sret.size + Qbe::SP_NOPAD] if @sret && @sret.size > 0 && Qbe.safe
+      @empty_bufs.each do |name|
+        @lines << "  #{name} =l alloc8 8"
+        @sp_objs << [name, 8 + Qbe::SP_NOPAD] if Qbe.safe
+      end
       @slots.each_with_index do |s, i|
         @slot["$#{s[1].raw}"] = "%o#{i}"
         # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
         size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
         align = s.size > 4 ? Qbe.int_lit(s[4]) : size
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
-        @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max}"
+        # --safe: a slot is registered, with one byte of padding after it (as the emitter pads an escaped slot).
+        pad = Qbe.safe ? 1 : 0
+        @sp_objs << ["%o#{i}", size] if Qbe.safe
+        @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max + pad}"
+      end
+      unless @sp_objs.empty?
+        @lines << "  call $__nfcxx_sp_frame(w #{@sp_objs.length}, ..., #{Qbe.sp_pairs(@sp_objs)})"
       end
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
     end
@@ -668,6 +690,8 @@ module Qbe
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret"
+        # --safe: the frame is released before the return (pathb-qbe-emit.rb's SP_LEAVE, with the first object).
+        @lines << "  call $__nfcxx_sp_leave(l #{@sp_objs.first[0]})" if Qbe.safe && !@sp_objs.empty?
         # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
         if @sret
           @lines << (@sret.shape == "empty" ? "  ret" : "  ret %sretbuf")
@@ -852,12 +876,21 @@ module Qbe
     # (a stack slot of this function, or a global or string of this module) is refused: its registration is slice 3.
     def safe_refusal!
       return unless Qbe.safe
-      return unless memory_access?(@blocks)
-      if !@slots.empty?
-        raise QbeUnsupported, "--safe: a stack slot needs its frame registration (slice 3)"
-      elsif Qbe.module_has_data
-        raise QbeUnsupported, "--safe: this module's globals and strings need their registration (slice 3)"
-      end
+      raise QbeUnsupported, "--safe: alloca needs its registration (not emitted yet)" if contains_head?(@blocks, %w[alloca])
+      raise QbeUnsupported, "--safe: a call through a pointer needs its check (slice 4)" if indirect_call?(@blocks)
+    end
+
+    def contains_head?(x, names)
+      return false unless x.is_a?(Array)
+      return true if names.include?(head(x))
+      x.any? { |y| contains_head?(y, names) }
+    end
+
+    # A call whose callee is not a function (a register or an expression): its check is slice 4.
+    def indirect_call?(x)
+      return false unless x.is_a?(Array)
+      return true if head(x) == "call" && !(x[2].is_a?(Ref) && x[2].sigil == "&")
+      x.any? { |y| indirect_call?(y) }
     end
 
     def memory_access?(x)
@@ -1384,6 +1417,7 @@ module Qbe
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
+    self.sp_objects = []
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
     abi, type_decls = abi_types(forms)
@@ -1406,6 +1440,7 @@ module Qbe
     end
     data = type_decls + string_decls + global_decls
     data << volatile_helpers if uses_volatile?(forms)
+    data.concat(sp_constructor) if Qbe.safe && !Qbe.sp_objects.empty?
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
@@ -1415,6 +1450,15 @@ module Qbe
       refs[name] = { thread: false, weak: false, extern: false } if state[name].is_a?(String)
     end
     { data: data, refs: refs, abi: abi }
+  end
+
+  # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's
+  # sp_globals_ctor, at priority 101 as the emitter does). The module's function table is slice 4.
+  def sp_constructor
+    rows = Qbe.sp_objects.map { |q, n| "l $#{q}, l #{n}" }.join(", ")
+    ["data $__nfcxx_sp_gtab = align 8 { #{rows} }",
+     "function $__nfcxx_sp_gctor() {\n@start\n\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{Qbe.sp_objects.length})\n\tret\n}",
+     "# pathb-startup .init_array 101 __nfcxx_sp_gctor"]
   end
 
   # The bytes of a string literal and its data line: its bytes, then zeros up to the array's size (as the existing
@@ -1433,7 +1477,12 @@ module Qbe
     raise QbeUnsupported, "string #{name} is longer than its array" if raw.size > total
 
     bytes = raw + [0] * (total - raw.size)
-    body = bytes.empty? ? "z 0" : bytes.map { |b| "b #{b}" }.join(", ")
+    parts = bytes.map { |b| "b #{b}" }
+    if Qbe.safe
+      parts << "z 1"   # padding; the string is registered with the safe-pointers constructor
+      Qbe.sp_objects << [symbol(name), total]
+    end
+    body = parts.empty? ? "z 0" : parts.join(", ")
     [bytes, "data $#{symbol(name)} = align 1 { #{body} }"]
   end
 

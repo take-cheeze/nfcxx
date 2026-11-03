@@ -1,0 +1,13 @@
+(ir-module "objects.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "g" (array int 4) 16 4 (static) (init (zero 0 16)))
+(function "poke_slot"
+  (ret void)
+  (params (param %0 "i" int))
+  (slot "a" (array int 4) 16 4)
+  (store int (index (addr $"a") %0 4) (const int 7))
+  (return))
+(function "poke_global"
+  (ret void)
+  (params (param %0 "i" int))
+  (store int (index (addr @"g") %0 4) (const int 7))
+  (return))
