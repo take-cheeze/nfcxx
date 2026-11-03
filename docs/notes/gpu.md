@@ -325,10 +325,23 @@ Strix Halo, ROCm 7.14) all 11 kernels give the launchers' expected results (veca
 nonnull, shared memory, the struct ABI, switch, atomics, warp shuffles and votes), and the mutants (vecadd add -> sub, the
 xor shuffle as an up shuffle, any as all) are caught.
 
-Not done: the `.cu` driver path for AMD (the device pass to this emitter and a HIP registration tail), and llama.cpp's HIP
-backend (ggml-cuda with `GGML_USE_HIP`). The host side needs HIP's headers through EDG first: `hip/hip_runtime.h` fails in
-`amd_hip_vector_types.h` (`using Native_vec_ = T __attribute__((ext_vector_type(n)))`: "attribute does not apply to any
-entity"; EDG says `__has_attribute(ext_vector_type)` but does not take it on an alias).
+The `.cu` path is the same driver with `NFCXX_CUDA_TARGET=amdgpu` (and `NFCXX_AMDGPU_ARCH=gfx1151`, `NFCXX_AMDGPU_CLANG`,
+`ROCM`): the device pass is `cu_amd_build` (nfcxx), the IR goes to `pathb-amdgpu-emit`, ROCm's clang makes the code object, and the
+registration tail of `pathb-ptx-emit --embed` embeds it as a cubin is. The host copy's CUDA runtime is `lib/hip/cuda_runtime.h`, a
+shim of the calls `lib/cuda/nfcxx_cuda.h` makes (a library is a HIP module, `cudaLaunchKernelExC` is `hipModuleLaunchKernel`); the
+driver puts it, and ROCm's include directory, on the rewriter's system paths. The occupancy, host-address launch and cooperative
+calls are declared and fail with `cudaErrorNotSupported` (not silently). `tests/cuda/amdgpu/run.sh` compiles `tests/cuda/mul2.cu`
+for gfx1151 and checks its 1000 results, and a mutant (the kernel times 3) must fail: both pass on the Radeon 8060S. The AMD
+device image is one module (no grouping yet), so a file whose kernels exceed one module is not split.
+
+The host compile needs EDG to accept HIP's headers: `hip/hip_runtime_api.h` has `using N = alignas(8) T[2];`, which GCC takes
+with a warning and EDG in g++ mode rejected. The fix (decl_spec.c: an attribute before any type specifier is a warning in GNU mode)
+is commit ddcc8a236 on a branch in the 3rd/edg repository, not yet pushed to take-cheeze/edg-compiler. Until the submodule
+records it, `tests/cuda/amdgpu/run.sh` fails to build with the default `build/edg` (EDG_BUILD=<a build of that commit> runs it).
+
+Not done: llama.cpp's HIP backend (ggml-cuda with `GGML_USE_HIP`). Its host code also needs clang-only features EDG's g++ mode
+lacks (`ext_vector_type` element access, a `vector_size` of 12 or 24 bytes in `amd_hip_ocp_types.h`, `half`/`bf16` overloads),
+and its device code wants wave64 on CDNA (the wave32 model here is RDNA's).
 
 ## WebGPU (Dawn) vs OpenCL on the Arc B60
 
