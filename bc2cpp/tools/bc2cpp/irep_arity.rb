@@ -174,6 +174,9 @@ end
 #     yield synchronously.
 #   - `each_line`: String#each_line (mrblib/string.rb) and IO/StringIO#each, which
 #     it aliases, only `block.call` while they run.
+#   - `bsearch`, `bsearch_index`: mruby-array-ext's mrblib (array.rb) calls
+#     `block.call` inside its loop and nothing stores it; `to_enum(:bsearch_index)`
+#     keeps the method name, not the block. No program definition uses either name.
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if
@@ -181,7 +184,7 @@ BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   _rgss_native_sort! loop each_char
   page_field section open new reduce inject each_with_object upto downto
   auto_battle_best_target cached_bitmap flat_map gsub gsub! scan zip each_value
-  sub sub! with_index step each_line
+  sub sub! with_index step each_line bsearch bsearch_index
 ].freeze
 
 # CORE_BLOCK_REST: `{ |*args| }` (ENTER 0:0:1:0:0:0:0:0), the shape of every Enumerable
