@@ -58,6 +58,9 @@ class CodeGen
     # monomorphic_target already checked compiles_clean?; fetch the irep for the
     # checks below.
     callee_irep = @ireps.fetch(target.irep)
+    # KEYWORD_REST_ONLY: a callee with only `**opts` takes the literal pairs as one fresh Hash (see keyword_rest_call).
+    return keyword_rest_call(target, callee_irep, d: d, recv: recv, n: n, argv: argv, kw_names: kw_names,
+                             kw_val_exprs: kw_val_exprs, lexical_self: lexical_self) if keyword_rest_only_shape?(callee_irep)
     kw_table = keyword_arg_table(callee_irep)
     return nil unless kw_table
     # KEYWORD_CALLSITE_OPTIONAL_POSITIONAL_SUPPORT: the callee's positional arity
@@ -134,6 +137,27 @@ class CodeGen
       else
         "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
       end
+    "#{note}  #{call}\n"
+  end
+
+  # KEYWORD_REST_ONLY: a keyword send to a callee whose only keyword parameter is `**opts`. The literal pairs become one
+  # fresh Hash, built after the positionals, and that Hash is the callee's last parameter. Only the exact positional
+  # count is taken (no optionals), and the same owner guard as compile_keyword_call applies.
+  def keyword_rest_call(target, callee_irep, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:, lexical_self:)
+    return nil unless n == mandatory_arity(callee_irep) && optional_arity(callee_irep).zero?
+    return nil if @only_owners && !@only_owners.include?(target.owner) && !@other_owners&.include?(target.owner)
+
+    impl = cpp_name(target.owner, target.name) + '_impl'
+    pairs = kw_names.each_with_index.map do |name, i|
+      "    mrb_hash_set(M, bc2cpp_kwrest, mrb_symbol_value(mrb_intern_cstr(M, #{name.inspect})), #{kw_val_exprs[i]});\n"
+    end.join
+    call = "{\n    mrb_value bc2cpp_kwrest = mrb_hash_new(M);\n#{pairs}" \
+           "    r#{d} = #{impl}(M, #{([recv] + argv + ['bc2cpp_kwrest']).join(', ')});\n  }"
+    note = if lexical_self
+             "  // LEXICAL_SELF keyword rest (see lexical_self_keyword_target), direct C++ call (no mrb_funcall)\n"
+           else
+             "  // MONO keyword rest -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
+           end
     "#{note}  #{call}\n"
   end
 

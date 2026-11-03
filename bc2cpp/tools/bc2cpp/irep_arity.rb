@@ -370,6 +370,17 @@ end
 # bytecode order and whether each is required (a lone `KARG R4 :c` with no
 # KEY_P) or optional (KEY_P/JMPIF guard). Returns [{name:, required:}], or nil
 # for unmodeled fields or a count mismatch with ENTER.
+# KEYWORD_REST_ONLY: `def m(a, **opts)` (ENTER m:0:0:0:0:0:1:0): mandatory positionals and one keyword rest, no
+# optionals, rest, named keywords, post or block. The keyword hash arrives in the callinfo's keyword slot, so the entry
+# reads it there, and a direct call passes it as one extra parameter.
+def keyword_rest_only_shape?(irep)
+  enter = irep.enter
+  return false unless enter
+
+  _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
+  kwrest.positive? && opt.zero? && rest.zero? && mand2.zero? && kw.zero? && block.zero?
+end
+
 def keyword_arg_table(irep)
   enter = irep.enter
   return nil unless enter
