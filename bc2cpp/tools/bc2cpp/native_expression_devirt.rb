@@ -327,6 +327,32 @@ module NativeExpressionDevirt
   # Both ROM scans read each source's map; the sources are the read_source strings, so identity keys it.
   CLASS_VARIABLE_MAPS = {}.compare_by_identity
 
+  # The body of the C function +name+ defined in +path+, from its opening brace to the matching close brace, or nil.
+  # NATIVE_FUNCTION_BODY: a native method's body is read to prove it takes no block. A missing or unbalanced body is
+  # nil, which a caller must treat as unproven.
+  def native_function_body(path, name)
+    return nil unless File.file?(path)
+
+    source = read_source(path)
+    header = source =~ /^(?=[^\s#])[^\n;]*?\b#{Regexp.escape(name)}\s*\([^;]*?\)\s*\{/m
+    return nil unless header
+
+    open_at = source.index('{', header)
+    depth = 0
+    index = open_at
+    while index < source.length
+      case source[index]
+      when '{'
+        depth += 1
+      when '}'
+        depth -= 1
+        return source[open_at..index] if depth.zero?
+      end
+      index += 1
+    end
+    nil
+  end
+
   # Class and module variables of a native source: C variable => {field:, class_name:}. The result is shared:
   # callers only read it.
   def class_variable_map(source)

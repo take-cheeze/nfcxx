@@ -4,10 +4,84 @@ require_relative 'ir_rbs_block_types'
 require_relative 'core_block_param_sigs'
 require_relative 'core_fact_sigs'
 require_relative 'block_capture_index'
+require_relative 'block_yielders'
 
 # CodeGen: blocks that stay procs, and fiber safety.
 
 class CodeGen
+  # SYNC_BY_DEFINITION: a name admitted to a captured-block fallback because every definition the closed world can
+  # dispatch to calls its block without keeping it. Keyed by name; each entry lists the core Ruby owners whose
+  # body was read (they call `block` only), and the native owners whose C body takes no block.
+  #   to_h: mruby-array-ext and mruby-enum-ext call `blk.call` inside their own `each`; mruby-hash-ext takes no block.
+  #   native Struct#to_h, nil.to_h (NilClass) and Data#to_h take no block (checked per function body below).
+  SYNC_BY_DEFINITION = {
+    'to_h' => { ruby_owners: %w[Array Enumerable Hash], native_owners: %w[Struct NilClass Data] }
+  }.freeze
+
+  # A block-taking send of +name+ whose block captures locals runs synchronously in every definition the closed world
+  # can dispatch to. Refused when the closed world is not whole (a global refusal, a computed or outside definer, a
+  # method_missing that is user code), when a native definer has no owner or a body that cannot be read, when a
+  # user definition has a block parameter (it could keep the block) or calls super (super forwards the frame's block).
+  def sync_by_definition?(name)
+    rule = SYNC_BY_DEFINITION[name]
+    return false unless rule
+    return false unless @closed_world && @closed_world.global_refusal.nil?
+    return false if @closed_world.unknown_def?(name) || @closed_world.unknown_definer?(name) ||
+                    @closed_world.invisibly_definable?(name)
+    # A user method_missing (a Ruby definition) could receive any name; BasicObject's native one only raises.
+    return false if (@registry['method_missing'] || []).any? { |d| d.irep && !d.core }
+    return false unless native_definers_sync?(name, rule[:native_owners])
+
+    # Core Ruby definitions of the name are checked by owner; a world with none of them has no body to read.
+    (@registry[name] || []).reject { |d| d.owner == '<native>' }.all? do |d|
+      next false unless d.kind.nil? && d.irep
+
+      if d.core
+        rule[:ruby_owners].include?(d.owner)
+      else
+        definition = @ireps.fetch(d.irep)
+        !BlockYielders.block_param?(definition) && !BytecodeIR.for(definition).op?(:SUPER)
+      end
+    end
+  end
+
+  # The scanner spells mrb->nil_class as `Nil` (capitalizing the field name); the class is NilClass.
+  def native_owner_name(owner)
+    owner == 'Nil' ? 'NilClass' : owner
+  end
+
+  # Every native definer of +name+ is attributed to one of +owners+, and each one's C function is read and takes no
+  # block. Attribution comes from NativeExpressionDevirt.class_registrations; an opaque entry with no owner, a missing
+  # body or an unattributed definition makes the answer no.
+  def native_definers_sync?(name, owners)
+    registrations, opaque = block_core_registrations
+    regs = registrations.fetch(name, [])
+    opaque_owners = opaque.fetch(name, []).map { |owner| native_owner_name(owner) }
+    return false if regs.empty? && opaque_owners.empty?
+    return false if opaque_owners.any? { |owner| owner.nil? || !owners.include?(owner) }
+    return false unless regs.all? { |entry| entry[:owner] && owners.include?(native_owner_name(entry[:owner][:class_name])) }
+
+    functions = regs.map { |entry| [entry[:path], entry[:function]] }
+    functions += native_define_functions(name)
+    return false if functions.empty?
+
+    functions.all? do |path, function|
+      body = path && function && NativeExpressionDevirt.native_function_body(path, function)
+      body && !body.match?(/mrb_yield|mrb_block|mrb_proc|mrb_block_given/)
+    end
+  end
+
+  # The C functions registered for +name+ through mrb_define_method_id in its native sources, as [path, function].
+  # Opaque registrations (Data#to_h) are found only this way, so the scan has to name every one of them.
+  def native_define_functions(name)
+    (@native_name_sources[name] || []).flat_map do |path|
+      source = File.file?(path) ? File.read(path) : ''
+      source.scan(/mrb_define_method_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\(#{Regexp.escape(name)}\)\s*,\s*(\w+)/).map do |(function)|
+        [path, function]
+      end
+    end
+  end
+
   # BLOCK_CFUNC_FALLBACK_SUPPORT: recognize BLOCK/SENDB(SSENDB) regions not
   # claimed by a named inliner (compile_method filters by `suppressed`). Any
   # method name qualifies; the gate is that the block BODY can run standalone
@@ -374,7 +448,8 @@ class CodeGen
       # every level in between passed this same gate (a forwarding outer site has a
       # non-empty capture set), so the whole frame chain is live while the inner
       # block runs.
-      synchronous = BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name) || block_proven_to_stay?(irep, idx)
+      synchronous = BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name) || block_proven_to_stay?(irep, idx) ||
+                    sync_by_definition?(name)
       next if upvars.any? && !synchronous
 
       # BLOCK_SEMANTICS: `new` is on the allowlist for Array.new only. Hash.new
