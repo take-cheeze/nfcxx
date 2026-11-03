@@ -2,6 +2,7 @@
 
 require_relative 'fixpoint'
 require_relative 'bytecode_ir_containers'
+require_relative 'lexical_scopes'
 
 # Step 6g-bis: element classes of Array and Hash ivars.
 
@@ -188,17 +189,19 @@ def traced_owner(irep, idx, reg, ctx)
 end
 
 def resolve_owner_name(name, ctx)
+  resolve_owner_name_in(name, ctx[:owner], ctx[:known_owners])
+end
+
+def resolve_owner_name_in(name, owner, known)
   return nil unless name
 
-  known = ctx[:known_owners]
   # Core containers are valid annotation targets without registry methods.
   return name if known.include?(name) || %w[Array Hash].include?(name)
   # Already qualified and unknown: no lexical search can help.
   return nil if name.include?('::')
 
-  nesting = ctx[:owner].to_s.sub(/\.singleton\z/, '').split('::')
-  nesting.length.downto(1) do |n|
-    candidate = "#{nesting.first(n).join('::')}::#{name}"
+  LexicalScopes.prefixes(owner).each do |prefix|
+    candidate = LexicalScopes.qualify(prefix, name)
     return candidate if known.include?(candidate)
   end
   nil

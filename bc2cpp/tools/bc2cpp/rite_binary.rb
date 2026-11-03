@@ -35,21 +35,35 @@ module RiteBinary
       @pos = pos
     end
 
-    def u8 = take(1).unpack1('C')
-    def u16 = take(2).unpack1('n')
-    def u32 = take(4).unpack1('N')
+    # Fixed-width fields unpack in place: no per-field byteslice.
+    def u8 = unpack_at(1, 'C')
+    def u16 = unpack_at(2, 'n')
+    def u32 = unpack_at(4, 'N')
 
     def take(len)
-      raise "bc2cpp: truncated RITE binary at #{@pos}+#{len}" if @pos + len > @bytes.bytesize
-
+      check(len)
       chunk = @bytes.byteslice(@pos, len)
       @pos += len
       chunk
     end
 
+    def unpack_at(len, format)
+      check(len)
+      value = @bytes.unpack1(format, offset: @pos)
+      @pos += len
+      value
+    end
+
     def skip(len)
-      take(len)
+      check(len)
+      @pos += len
       nil
+    end
+
+    private
+
+    def check(len)
+      raise "bc2cpp: truncated RITE binary at #{@pos}+#{len}" if @pos + len > @bytes.bytesize
     end
   end
 
@@ -110,9 +124,9 @@ module RiteBinary
 
   def self.parse_pool_entry(reader)
     case (tt = reader.u8)
-    when TT_INT32 then PoolEntry.new(:int32, reader.take(4).unpack1('l>'))
-    when TT_INT64 then PoolEntry.new(:int64, reader.take(8).unpack1('q>'))
-    when TT_FLOAT then PoolEntry.new(:float, reader.take(8).unpack1('E'))
+    when TT_INT32 then PoolEntry.new(:int32, reader.unpack_at(4, 'l>'))
+    when TT_INT64 then PoolEntry.new(:int64, reader.unpack_at(8, 'q>'))
+    when TT_FLOAT then PoolEntry.new(:float, reader.unpack_at(8, 'E'))
     when TT_BIGINT
       len = reader.u8
       PoolEntry.new(:bigint, reader.take(len + 1))
