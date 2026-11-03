@@ -42,8 +42,9 @@ module ClassWorldGate
     return @world if defined?(@world)
 
     @world = begin
-      scans = closed_roots(REPO_ROOT).map { |_, files| ClassBodyScan.scan(files) }
-      ClassWorld.build(scans)
+      ClassWorld.build_files(closed_roots(REPO_ROOT).map { |_, files| files })
+    rescue ScanCache::Error
+      raise
     rescue StandardError
       nil
     end
