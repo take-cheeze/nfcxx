@@ -54,6 +54,11 @@ ASM_HELPERS = {
   # An empty function whose argument (a slot's address) escapes: it keeps the slot in memory across a returns-twice call.
   "escape" => ["\t.text", "\t.weak __pathb_escape", "\t.type __pathb_escape, @function", "__pathb_escape:", "\tret",
                "\t.size __pathb_escape, .-__pathb_escape"],
+# `pathb_check(cond, code)` (the checked operations of the SSA route): an abort when cond is nonzero. It is weak, so a
+# test driver's own pathb_check overrides it.
+"check" => ["\t.text", "\t.weak pathb_check", "\t.type pathb_check, @function", "pathb_check:", "\ttestl %edi, %edi",
+            "\tje .Lpathb_check_ok", "\tsubq $8, %rsp", "\tcall abort", ".Lpathb_check_ok:", "\tret",
+            "\t.size pathb_check, .-pathb_check"],
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
 }.freeze

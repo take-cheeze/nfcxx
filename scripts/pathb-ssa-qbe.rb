@@ -739,6 +739,13 @@ module Qbe
       @slots.each_index { |i| @lines << "  call $__pathb_escape(l %o#{i})" }
     end
 
+# `pathb_check(cond, code)`: a check that traps when cond is nonzero. The module names the `check` helper, which
+# the driver appends (scripts/pathb-ssa-build): an abort, as scripts/pathb-qbe-emit.rb's shared abort block.
+    def check_call(cond, code)
+      asm_helpers << "check" unless asm_helpers.include?("check")
+      @lines << "  call $pathb_check(w #{cond}, w #{code})"
+    end
+
     def barrier_lines
       asm_helpers << "barrier"
       @lines << "  call $__pathb_barrier()"
@@ -1071,7 +1078,7 @@ module Qbe
     def nonnull_lines(p)
       cond = fresh
       @lines << "  #{cond} =w ceql #{op(p)}, 0"
-      @lines << "  call $pathb_check(w #{cond}, w 5)"
+      check_call(cond, 5)
     end
 
     # `(bounds I N)`: an index outside [0, N) traps (code 6). The unsigned comparison also rejects a negative index.
@@ -1093,7 +1100,7 @@ module Qbe
         end
       bad = fresh
       @lines << "  #{bad} =w cuge#{c} #{i}, #{bound}"
-      @lines << "  call $pathb_check(w #{bad}, w 6)"
+      check_call(bad, 6)
     end
 
     def checked_div_lines(dst, t, rv)
@@ -1105,7 +1112,7 @@ module Qbe
       b = op(rv[3])
       zero = fresh
       @lines << "  #{zero} =w ceq#{c} #{b}, 0"
-      @lines << "  call $pathb_check(w #{zero}, w 1)"
+      check_call(zero, 1)
       if signed
         lo = fresh
         minus_one = fresh
@@ -1113,7 +1120,7 @@ module Qbe
         @lines << "  #{lo} =w ceq#{c} #{a}, #{-(1 << (w - 1))}"
         @lines << "  #{minus_one} =w ceq#{c} #{b}, -1"
         @lines << "  #{both} =w and #{lo}, #{minus_one}"
-        @lines << "  call $pathb_check(w #{both}, w 2)"
+        check_call(both, 2)
       end
       name = head(rv) == "cdiv" ? (signed ? "div" : "udiv") : (signed ? "rem" : "urem")
       @lines << "  #{dst} =#{c} #{name} #{a}, #{b}"
@@ -1135,7 +1142,7 @@ module Qbe
       end
       bad = fresh
       @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
-      @lines << "  call $pathb_check(w #{bad}, w 3)"
+      check_call(bad, 3)
       if head(rv) == "cshl"
         shifted = fresh
         @lines << "  #{shifted} =#{c} shl #{a}, #{n}"
@@ -1294,7 +1301,7 @@ module Qbe
       @lines << "  #{ok} =w and #{tests[0]}, #{tests[1]}"
       bad = fresh
       @lines << "  #{bad} =w ceqw #{ok}, 0"
-      @lines << "  call $pathb_check(w #{bad}, w 4)"
+      check_call(bad, 4)
       @lines << "  #{dst} =#{Qbe.cls(t)} #{signed ? 'dtosi' : 'dtoui'} #{xv}"
     end
   end
