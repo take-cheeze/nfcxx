@@ -67,6 +67,22 @@ module NativeExpressionDevirt
     ASCII_VIEWS[source] ||= source.gsub(/[^\x00-\x7f]/, '?')
   end
 
+  # The scanners below read the ASCII view with `getbyte`, which returns an Integer where `[]` would
+  # allocate a one-character String per character. The view is ASCII, so byte and character indexes agree.
+  NEWLINE = "\n".ord
+  BACKSLASH = '\\'.ord
+  SLASH = '/'.ord
+  STAR = '*'.ord
+  DOUBLE_QUOTE = '"'.ord
+  SINGLE_QUOTE = "'".ord
+  COMMA = ','.ord
+  OPEN_PAREN = '('.ord
+  CLOSE_PAREN = ')'.ord
+  OPEN_BRACKET = '['.ord
+  CLOSE_BRACKET = ']'.ord
+  OPEN_BRACE = '{'.ord
+  CLOSE_BRACE = '}'.ord
+
   # `scan` for patterns that open with `(\w+)`, which Onigmo cannot search for
   # by a literal prefix: skip files lacking every literal the pattern needs.
   def scan_with(source, literals, pattern, &block)
@@ -138,7 +154,7 @@ module NativeExpressionDevirt
         registrations[name] << [nil, false]
       end
       needed = registrations.values.flatten(1).map(&:first).to_set
-      source.to_enum(:scan, /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/).each do
+      source.scan(/mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/) do
         function, state_arg, self_arg = Regexp.last_match.captures
         next unless needed.include?(function)
 
@@ -195,7 +211,7 @@ module NativeExpressionDevirt
       next unless File.file?(path)
 
       source = read_source(path)
-      source.to_enum(:scan, function_pattern).each do
+      source.scan(function_pattern) do
         function, state_arg, self_arg = Regexp.last_match.captures
         arities = arities_by_function.fetch(function, [])
         next if arities.empty?
@@ -534,14 +550,14 @@ module NativeExpressionDevirt
     entries = []
     tables = []
     table_pattern = /(?:static\s+)?const\s+mrb_mt_entry\s+(\w+)\s*\[\s*\]\s*=\s*\{/
-    source.to_enum(:scan, table_pattern).each do
+    source.scan(table_pattern) do
       table = Regexp.last_match(1)
       opening = Regexp.last_match.end(0) - 1
       _body, closing = brace_body(source, opening)
       tables << [opening, closing, table] if closing
     end
     table_index = 0
-    source.to_enum(:scan, /MRB_MT_ENTRY\s*\(/).each do
+    source.scan(/MRB_MT_ENTRY\s*\(/) do
       opening = Regexp.last_match.end(0) - 1
       position = opening
       arguments, = split_call_arguments(source, opening)
@@ -777,7 +793,7 @@ module NativeExpressionDevirt
     # makes the unguarded scan of every native source slow.
     return calls unless source.include?(macro)
 
-    source.to_enum(:scan, macro_call_pattern(macro)).each do
+    source.scan(macro_call_pattern(macro)) do
       opening = Regexp.last_match.end(0) - 1
       arguments, = split_call_arguments(source, opening)
       calls << arguments if arguments
@@ -793,29 +809,30 @@ module NativeExpressionDevirt
     escaped = false
     index = opening
     scanned = ascii_view(source)
-    while index < scanned.length
-      char = scanned[index]
+    length = scanned.bytesize
+    while index < length
+      char = scanned.getbyte(index)
       if quote
         if escaped
           escaped = false
-        elsif char == '\\'
+        elsif char == BACKSLASH
           escaped = true
         elsif char == quote
           quote = nil
         end
-      elsif char == '"' || char == "'"
+      elsif char == DOUBLE_QUOTE || char == SINGLE_QUOTE
         quote = char
-      elsif char == '(' || char == '[' || char == '{'
+      elsif char == OPEN_PAREN || char == OPEN_BRACKET || char == OPEN_BRACE
         depth += 1
-      elsif char == ')'
+      elsif char == CLOSE_PAREN
         depth -= 1
         if depth.zero?
           arguments << source[starts...index].strip
           return [arguments, index]
         end
-      elsif char == ']' || char == '}'
+      elsif char == CLOSE_BRACKET || char == CLOSE_BRACE
         depth -= 1
-      elsif char == ',' && depth == 1
+      elsif char == COMMA && depth == 1
         arguments << source[starts...index].strip
         starts = index + 1
       end
@@ -856,35 +873,36 @@ module NativeExpressionDevirt
     index = opening
     scanned = ascii_view(source)
 
-    while index < scanned.length
-      char = scanned[index]
-      following = scanned[index + 1]
+    length = scanned.bytesize
+    while index < length
+      char = scanned.getbyte(index)
+      following = scanned.getbyte(index + 1)
       if line_comment
-        line_comment = false if char == "\n"
+        line_comment = false if char == NEWLINE
       elsif block_comment
-        if char == '*' && following == '/'
+        if char == STAR && following == SLASH
           block_comment = false
           index += 1
         end
       elsif quote
         if escaped
           escaped = false
-        elsif char == '\\'
+        elsif char == BACKSLASH
           escaped = true
         elsif char == quote
           quote = nil
         end
-      elsif char == '/' && following == '/'
+      elsif char == SLASH && following == SLASH
         line_comment = true
         index += 1
-      elsif char == '/' && following == '*'
+      elsif char == SLASH && following == STAR
         block_comment = true
         index += 1
-      elsif char == '"' || char == "'"
+      elsif char == DOUBLE_QUOTE || char == SINGLE_QUOTE
         quote = char
-      elsif char == '{'
+      elsif char == OPEN_BRACE
         depth += 1
-      elsif char == '}'
+      elsif char == CLOSE_BRACE
         depth -= 1
         return [source[(opening + 1)...index], index] if depth.zero?
       end

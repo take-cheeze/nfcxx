@@ -180,4 +180,10 @@ compiled(suite, LITERAL_TABLE) do |ireps, _, _|
              IrSymbolFlow.value_reads(irep, idx, reg) == first)
 end
 
+# SDEF reads only its receiver register R[a] (vm.c OP_SDEF). The generic fallback reads every register from
+# R[a] up to nregs, which made a later def look like a reader of an earlier attr_* argument array.
+sdef_irep = Struct.new(:nregs).new(10)
+sdef_insn = Struct.new(:op, :regs).new(:SDEF, [1])
+check.call('SDEF reads only its receiver register', IrSymbolFlow.reads(sdef_irep, sdef_insn) == [1])
+
 suite.finish!
