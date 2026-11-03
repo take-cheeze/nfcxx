@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Path B compiler: one C++ file to an object file.
-#   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL (scripts/pathb-qbe-emit.rb) -> QBE -> assembler
-# i.e. scripts/pathb-dump --ir | scripts/mrb scripts/pathb-qbe-emit.rb | qbe | cc -c, the pipeline tests/pathb-qbe/run.sh
-# validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
+#   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL -> QBE -> assembler
+#   the QBE IL is the SSA route (scripts/pathb-ssa-build) by default; NFCXX_PATHB_EMITTER=mruby selects scripts/pathb-qbe-emit.rb
+#   (run by scripts/mrb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
+#   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
 # Usage: scripts/pathb-cc [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 #   PATHB_KEEP=dir   keep file.ir, file.ssa and file.s there
 #   NFCXX_SAFE_POINTERS=1  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
@@ -35,19 +36,40 @@ done
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 n=$(basename "${src%.*}")
 safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_IR_LOC=1; }
-"$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"
-rc=0
+if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
+else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
 ldopt=(); [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ldopt=(--long-double=trap)
-"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
-if [ $rc != 0 ]; then
-  echo "pathb-cc: $src: $(head -1 "$tmp/$n.emit")" >&2
-  [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
-  exit $rc
+# The emitter. The SSA route (scripts/pathb-ssa-build) is the default; NFCXX_PATHB_EMITTER=mruby selects the mruby
+# pathb-qbe-emit.rb, and NFCXX_PATHB_EMITTER=ssa forces the SSA route. A --safe build stays on the mruby emitter by
+# default, since the SSA route does not yet carry the source locations that -fsafe-pointers reports print.
+emitter=${NFCXX_PATHB_EMITTER:-}
+if [ -z "$emitter" ]; then if [ "${#safe[@]}" -gt 0 ]; then emitter=mruby; else emitter=ssa; fi; fi
+case $emitter in ssa|mruby) ;; *) echo "pathb-cc: NFCXX_PATHB_EMITTER must be ssa or mruby, not '$emitter'" >&2; exit 2 ;; esac
+rc=0; fallback=0
+if [ "$emitter" = ssa ]; then
+  NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  if [ $rc = 3 ]; then
+    # Some function is outside the SSA route's subset: the whole unit goes to the mruby emitter, not a partial object.
+    echo "pathb-cc: $src: the SSA route did not emit every function ($(grep -m1 'not emitted' "$tmp/$n.emit" || true)); using the mruby emitter for this unit" >&2
+    rc=0; fallback=1
+  elif [ $rc != 0 ]; then
+    echo "pathb-cc: $src: SSA route: $(head -1 "$tmp/$n.emit")" >&2
+    [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
+    exit $rc
+  fi
 fi
-"$qbe" "$tmp/$n.ssa" > "$tmp/$n.s"
-# QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
-"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s"
-if [ -n "${PATHB_KEEP:-}" ]; then mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$tmp/$n.ssa" "$tmp/$n.s" "$PATHB_KEEP/"; fi
+if [ "$emitter" = mruby ] || [ "$fallback" = 1 ]; then
+  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
+  if [ $rc != 0 ]; then
+    echo "pathb-cc: $src: $(head -1 "$tmp/$n.emit")" >&2
+    [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
+    exit $rc
+  fi
+  "$qbe" "$tmp/$n.ssa" > "$tmp/$n.s"
+  # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
+  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s"
+fi
+if [ -n "${PATHB_KEEP:-}" ]; then mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$tmp/$n.s" "$PATHB_KEEP/"; [ ! -f "$tmp/$n.ssa" ] || cp "$tmp/$n.ssa" "$PATHB_KEEP/"; fi
 if [ -n "${NFCXX_GCC:-}" ]; then
   as -o "$out" "$tmp/$n.s"   # cosmocc does not take assembly input; the QBE output is x86_64 ELF, as gcc-cc does (--cosmo)
 else
