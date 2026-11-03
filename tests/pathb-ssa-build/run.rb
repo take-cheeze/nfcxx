@@ -95,6 +95,26 @@ else
   failures << "no arguments: status #{st.exitstatus}, want 2"
 end
 
+# 4. --safe is refused, not silently ignored (its checks are not emitted by this route).
+_, err, st = run_driver("--safe", File.join(ROOT, "tests/pathb-ssa/cases/ternary_set.ir"))
+if st.exitstatus == 1 && err.include?("--safe is not implemented")
+  puts "ok   --safe: refused with a reason"
+else
+  failures << "--safe: status #{st.exitstatus}, stderr #{err.inspect}"
+end
+
+# 5. --long-double=trap: a function whose IR mentions long_double becomes an aborting stub (ud2), as pathb-qbe-emit.rb.
+Dir.mktmpdir("pathb-ssa-build-ld") do |dir|
+  asm_path = File.join(dir, "ld.s")
+  _, err, st = run_driver("--long-double=trap", "-o", asm_path, File.join(ROOT, "tests/mruby/pathb-edge/r_longdouble.ir"))
+  asm = File.exist?(asm_path) ? File.read(asm_path) : ""
+  if st.exitstatus == 0 && asm.include?("main:") && asm.include?("ud2")
+    puts "ok   --long-double=trap: the function is an aborting stub"
+  else
+    failures << "--long-double=trap: status #{st.exitstatus}, stderr #{err.inspect}, asm #{asm.inspect}"
+  end
+end
+
 failures.each { |m| puts "FAIL #{m}" }
 puts failures.empty? ? "ok   pathb-ssa-build tests" : "FAIL pathb-ssa-build tests: #{failures.size} failure(s)"
 exit(failures.empty? ? 0 : 1)
