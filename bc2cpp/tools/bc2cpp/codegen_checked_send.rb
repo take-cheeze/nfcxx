@@ -20,17 +20,48 @@ module CheckedSend
     return code unless level
 
     recv = kwargs[:self_implicit] ? 'self' : "r#{insn.reg}"
-    marker = level == :explicit ? 'bc2cpp_funcall_explicit' : 'bc2cpp_funcall_noarg'
-    code = code.gsub(/\bmrb_funcall\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(insn.sym)}",/) do
-      "#{marker}(M, #{recv}, \"#{insn.sym}\","
+    if code.include?('mrb_funcall(M, ')
+      head = "(M, #{recv}, \"#{insn.sym}\","
+      marker = level == :explicit ? 'bc2cpp_funcall_explicit' : 'bc2cpp_funcall_noarg'
+      code = replace_call_head(code, "mrb_funcall#{head}", "#{marker}#{head}")
     end
+    return code unless code.include?('bc2cpp_owner_call_named(M, ')
+
     # OUTSIDE_OWNER_CALL: the checked owner call takes the same level as an argument.
-    code.gsub(/\bbc2cpp_owner_call_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(insn.sym)}", 0,/) do
-      "bc2cpp_owner_call_named(M, #{recv}, \"#{insn.sym}\", #{level == :explicit ? 2 : 1},"
-    end
+    head = "bc2cpp_owner_call_named(M, #{recv}, \"#{insn.sym}\","
+    replace_call_head(code, "#{head} 0,", "#{head} #{level == :explicit ? 2 : 1},")
   end
 
   private
+
+  # Replaces each `from` that starts an identifier, like gsub(/\bfrom/) but without a per-site Regexp, MatchData or
+  # copy when nothing matches. A non-ASCII byte before a candidate defers to the Regexp, whose \b is Unicode-aware.
+  def replace_call_head(code, from, to)
+    pos = code.byteindex(from)
+    return code unless pos
+
+    out = nil
+    start = 0
+    while pos
+      prev = pos.zero? ? nil : code.getbyte(pos - 1)
+      return code.gsub(/\b#{Regexp.escape(from)}/) { to } if prev && prev >= 0x80
+
+      if prev && ascii_word_byte?(prev)
+        pos = code.byteindex(from, pos + 1)
+      else
+        (out ||= String.new(encoding: code.encoding)) << code.byteslice(start, pos - start) << to
+        start = pos + from.bytesize
+        pos = code.byteindex(from, start)
+      end
+    end
+    return code unless out
+
+    out << code.byteslice(start, code.bytesize - start)
+  end
+
+  def ascii_word_byte?(byte)
+    byte == 95 || (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+  end
 
   # :explicit, :noarg, or nil when this call keeps the plain mrb_funcall.
   def checked_send_level(insn, kwargs)
