@@ -220,19 +220,20 @@ module BytecodeIR
       guarded = through_handlers ? nil : dataflow_guarded_at
       live_at = live && live_flags
       scalar_seen = ENV['BC2CPP_IR_SCALAR_SEEN'] != '0'
-      # The seen table and work stack are scratch, emptied before each walk; a walk that starts while another
-      # holds them (none does today) gets its own.
+      # The seen table, work stack and definition set are scratch, emptied before each walk (the answer is a sorted
+      # copy of the set); a walk that starts while another holds them (none does today) gets its own.
       scratch = !@reaching_scratch_busy
       if scratch
         @reaching_scratch_busy = true
         seen = (@reaching_scratch_seen ||= {}).clear
         work = (@reaching_scratch_work ||= []).clear.push(index, reg)
+        defs = (@reaching_scratch_defs ||= Set.new).clear
       else
         seen = {}
         work = [index, reg]
+        defs = Set.new
       end
       states = 0
-      defs = Set.new
       until work.empty?
         r = work.pop
         i = work.pop

@@ -153,7 +153,19 @@ module ClassWorld
     why.nil? ? stmt.label : nil
   end
 
-  def frozen_magic?(file) = File.foreach(file).first(5).any? { |l| l.match?(/\A#\s*frozen_string_literal:\s*true/) }
+  FROZEN_MAGIC = /\A#\s*frozen_string_literal:\s*true/
+
+  # Whether one of the file's first five lines is a `frozen_string_literal: true` comment. Reads only up to the
+  # first matching line, never the rest of the file.
+  def frozen_magic?(file)
+    File.open(file) do |io|
+      5.times do
+        line = io.gets or return false
+        return true if line.match?(FROZEN_MAGIC)
+      end
+    end
+    false
+  end
 
   # Opens (creating on first sight) the class or module `body` is; returns [Fact, this body's entry].
   def open_body(body, world, defined)

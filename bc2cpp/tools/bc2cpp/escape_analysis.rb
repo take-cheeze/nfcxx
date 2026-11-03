@@ -37,10 +37,12 @@ module EscapeAnalysis
     ENV['BC2CPP_ESCAPE_ANALYSIS'] != '0'
   end
 
-  # [[instruction, index]] of the IR instructions whose op is one of +ops+, in program order.
+  # [[instruction, index]] of the IR instructions whose op is one of +ops+, in program order. Callers pass a frozen
+  # Array constant so no per-call op list is built; a Set is still accepted.
   def self.op_sites(irep, ops)
+    ops = ops.to_a unless ops.is_a?(Array)
     sites = []
-    BytecodeIR.for(irep).each_with_op(*ops) { |insn, index| sites << [insn, index] }
+    BytecodeIR.for(irep).each_with_op_in(ops) { |insn, index| sites << [insn, index] }
     sites
   end
 
@@ -220,6 +222,7 @@ module EscapeAnalysis
     :GT => '>', :GE => '>='
   }.freeze
   CLOSURE_OPS = Set[:BLOCK, :LAMBDA].freeze
+  CLOSURE_OP_LIST = CLOSURE_OPS.to_a.freeze
 
   # The callee side: ireps, every definition of a name and the native method names. +defs+ is
   # name => [MethodDef] as build_registry leaves it BEFORE core filtering (a core method the build keeps
@@ -265,6 +268,7 @@ module EscapeAnalysis
     REFLECTIVE_CONSTS = %w[ObjectSpace].freeze
     # Every op scan_definitions reads.
     SCANNED_OPS = (BytecodeIR::Ops::SEND | DEF_OPS | %i[GETCONST GETMCNST]).freeze
+    SCANNED_OP_LIST = SCANNED_OPS.to_a.freeze
 
     attr_reader :ireps, :aliases, :dynamic_sites, :reflective_sites
 
@@ -520,7 +524,7 @@ module EscapeAnalysis
         BytecodeIR::Tree.child_labels(irep, CLOSURE_OPS).each { |_, label| closure_bodies << label }
       end
       @ireps.each_value do |irep|
-        EscapeAnalysis.op_sites(irep, SCANNED_OPS).each do |insn, idx|
+        EscapeAnalysis.op_sites(irep, SCANNED_OP_LIST).each do |insn, idx|
           if (BytecodeIR::Ops::SEND.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)) ||
              (CONST_READS.include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
             @reflective_sites << [irep.label, idx]
