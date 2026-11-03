@@ -262,8 +262,8 @@
   (let %5 (ptr int) (offset $"p" 4))
   (store int %5 %4)
   (block
-    (copy 8 $"tmp" $"p")
-    (copy 8 %0 $"tmp")
+    (copy 8 $"tmp" $"p" 4)
+    (copy 8 %0 $"tmp" 4)
     (return)))
 
 (function "_ZN30_INTERNAL_12_stmtexpr_cpp_main3aggEi"
@@ -285,11 +285,11 @@
   (let %4 int (load int $"tmp"))
   (let %5 int (load int $"tmp.1"))
   (eval (call void &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4makeEii" (sret (struct "P") $"tmp.2") %4 %5))
-  (copy 8 $"q" $"tmp.2")
+  (copy 8 $"q" $"tmp.2" 4)
   (let %6 int (load int $"q"))
   (let %7 int (wadd int %6 (const int 10)))
   (store int $"q" %7)
-  (copy 8 $"p" $"q")
+  (copy 8 $"p" $"q" 4)
   (let %8 int (load int $"p"))
   (let %9 int (wmul int %8 (const int 100)))
   (let %10 (ptr int) (offset $"p" 4))

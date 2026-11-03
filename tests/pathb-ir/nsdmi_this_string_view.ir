@@ -133,7 +133,7 @@
   (nonnull %4)
   (let %5 (ptr (struct "Info")) (load (ptr (struct "Info")) $"tmp"))
   (nonnull %5)
-  (copy 16 %5 %4)
+  (copy 16 %5 %4 8)
   (let %6 (ptr (const (struct "Info"))) (load (ptr (const (struct "Info"))) $"tmp.1"))
   (nonnull %6)
   (let %7 (ptr unsigned_int) (offset %6 16))

@@ -54,7 +54,8 @@ const Entry *find_entry(const Entry *table, size_t n, const std::string &key) {
 bool register_slot_type(const Ty &t) {
   if (t.kind == "ptr") return true;
   // a narrow integer is held as its canonical 32-bit value (every operation canonicalizes its result)
-  if (t.kind == "int") return !t.is_bool && (t.size == 1 || t.size == 2 || t.size == 4 || t.size == 8);
+  // a bool is a 32-bit 0 or 1 in its register (a predicate where it is used; see FnCtx::memory and store_stmt)
+  if (t.kind == "int") return t.is_bool || t.size == 1 || t.size == 2 || t.size == 4 || t.size == 8;
   if (t.kind == "float") return t.size == 4 || t.size == 8;
   return false;
 }
@@ -523,30 +524,41 @@ void Fn::stmt(const Node &s) {
     // (copy BYTES DST SRC): the bytes of an aggregate, moved through generic addresses, one byte at a time (the IR's
     // copy does not give the alignment of the objects, and a wider access of a struct with alignment 2 is misaligned)
     long long n = static_cast<long long>(as_int(&at(s, 1)));
-    Operand d = operand(at(s, 2));
-    Operand sr_ = operand(at(s, 3));
-    std::string dr = reg_of(d.text, d.ty);
-    std::string sr = reg_of(sr_.text, sr_.ty);
-    // Between two frame slots the alignments are known (the frame keeps each offset aligned to its slot's alignment),
-    // so the copy moves words of the widest size that divides the length and both alignments. Through a pointer the
-    // alignment is not known: bytes.
-    // the alignment of each side: a frame slot's, or a pointer's (its pointee struct's, from the type); bytes otherwise
-    auto side_align = [&](const Node &x, const std::string &reg) -> long long {
-      if (x.kind == Node::Sym && x.sig == '$') {
-        auto it = slot_aligns_.find(x.text);
-        return it != slot_aligns_.end() ? it->second : 1;
+    if (!token_value(at(s, 2)).empty() || !token_value(at(s, 3)).empty()) {
+      // a struct slot in registers: the words move between its fields and memory (see FnCtx::copy_words)
+      copy_words(n, at(s, 2), at(s, 3), s.items.size() > 4 ? static_cast<long long>(as_int(&at(s, 4))) : 1);
+    } else {
+      Operand d = operand(at(s, 2));
+      Operand sr_ = operand(at(s, 3));
+      std::string dr = reg_of(d.text, d.ty);
+      std::string sr = reg_of(sr_.text, sr_.ty);
+      // Between two frame slots the alignments are known (the frame keeps each offset aligned to its slot's alignment),
+      // so the copy moves words of the widest size that divides the length and both alignments. Through a pointer the
+      // alignment is not known: bytes.
+      // the alignment of each side: a frame slot's, or a pointer's (its pointee struct's, from the type); bytes otherwise
+      auto side_align = [&](const Node &x, const std::string &reg) -> long long {
+        if (x.kind == Node::Sym && x.sig == '$') {
+          auto it = slot_aligns_.find(x.text);
+          return it != slot_aligns_.end() ? it->second : 1;
+        }
+        auto it = ptr_align.find(reg);
+        return it != ptr_align.end() ? it->second : 1;
+      };
+      long long wa = side_align(at(s, 2), dr), wb = side_align(at(s, 3), sr);
+    // the copy's aggregate type gives the alignment of both objects (the IR's last item; absent in older dumps)
+    if (s.items.size() > 4) {
+      const long long ta = static_cast<long long>(as_int(&at(s, 4)));
+      wa = std::max(wa, ta);
+      wb = std::max(wb, ta);
+    }
+      auto fits = [&](long long c) { return n % c == 0 && wa >= c && wa % c == 0 && wb >= c && wb % c == 0; };
+      long long w = fits(8) ? 8 : fits(4) ? 4 : fits(2) ? 2 : 1;
+      for (long long off = 0; off < n; off += w) {
+        std::string t = fresh(piece_reg(static_cast<int>(w)));  // the register that holds a word of this size
+        const std::string ty = "u" + std::to_string(w * 8);
+        emit("ld." + ty + " " + t + ", [" + sr + "+" + std::to_string(off) + "];");
+        emit("st." + ty + " [" + dr + "+" + std::to_string(off) + "], " + t + ";");
       }
-      auto it = ptr_align.find(reg);
-      return it != ptr_align.end() ? it->second : 1;
-    };
-    long long wa = side_align(at(s, 2), dr), wb = side_align(at(s, 3), sr);
-    auto fits = [&](long long c) { return n % c == 0 && wa >= c && wa % c == 0 && wb >= c && wb % c == 0; };
-    long long w = fits(8) ? 8 : fits(4) ? 4 : fits(2) ? 2 : 1;
-    for (long long off = 0; off < n; off += w) {
-      std::string t = fresh(piece_reg(static_cast<int>(w)));  // the register that holds a word of this size
-      const std::string ty = "u" + std::to_string(w * 8);
-      emit("ld." + ty + " " + t + ", [" + sr + "+" + std::to_string(off) + "];");
-      emit("st." + ty + " [" + dr + "+" + std::to_string(off) + "], " + t + ";");
     }
   } else if (h == "if") {
     Operand c = operand(at(s, 1));
@@ -1238,6 +1250,17 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   std::set<std::string> caller_carriers = std::exchange(carrier_slots, callee_alias.carriers);
   std::map<std::string, std::string> caller_carrier_val = std::exchange(carrier_val, {});
   promote_slots(body, callee->slot_types_);
+  // the callee's own struct slots live in registers too: planned as for its own compile (a fresh scope), with the caller's
+  // fields and carriers kept (the callee's aliases of the caller's tokens use them)
+  auto caller_sizes = std::exchange(slot_sizes_, callee->slot_sizes_);
+  auto caller_types = std::exchange(slot_types_, callee->slot_types_);
+  auto caller_body = std::exchange(body_, body);
+  const int caller_sra_scope = sra_scope;
+  std::map<std::string, RegInfo> caller_fields = std::exchange(sra_fields, {});
+  const std::set<std::string> kept_carriers = carrier_slots;
+  plan_struct_slots();
+  sra_fields.insert(caller_fields.begin(), caller_fields.end());
+  carrier_slots.insert(kept_carriers.begin(), kept_carriers.end());
   std::map<std::string, std::string> caller_labels = std::exchange(named_labels_, {});
   std::vector<std::pair<std::string, std::string>> caller_loops = std::exchange(loops_, {});
   std::map<std::string, std::string> caller_fn_values = std::exchange(fn_values_, {});
@@ -1264,6 +1287,11 @@ void Fn::inline_call(Fn *callee, const Node &x, const std::string &dest) {
   sra_slots = std::move(caller_sra);
   carrier_slots = std::move(caller_carriers);
   carrier_val = std::move(caller_carrier_val);
+  slot_sizes_ = std::move(caller_sizes);
+  slot_types_ = std::move(caller_types);
+  body_ = std::move(caller_body);
+  sra_scope = caller_sra_scope;
+  sra_fields = std::move(caller_fields);
 }
 
 void Fn::promote_slots(const std::vector<const Node *> &body, const std::map<std::string, Ty> &types) {
@@ -1275,7 +1303,7 @@ void Fn::promote_slots(const std::vector<const Node *> &body, const std::map<std
     // every use of the slot is a whole load or store of its type: no address is taken, nothing is a part of it
     if (carrier_slots.count(name)) continue;
     if (!register_slot_type(ty) || whole[name] == 0 || all[name] != whole[name]) continue;
-    promoted[name] = RegInfo{fresh(reg_class(ty)), ty};
+    promoted[name] = RegInfo{fresh(ty.kind == "int" && ty.is_bool ? "r" : reg_class(ty)), ty};
   }
 }
 
@@ -1505,6 +1533,7 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
         return;
       }
       for (const auto &[key, ty] : sub.fields) out.fields[{key.first + o, key.second}] = ty;
+      for (long long a : sub.asm_offs) out.asm_offs.insert(a + o);
     }
   };
   std::function<void(const Node &)> visit;
@@ -1603,6 +1632,26 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
       return;
     }
     if (h == "nonnull" && x.items.size() == 2) return;
+    if (h == "copy" && x.items.size() >= 4) {
+      // a copy of an alias moves its words through the field registers: each word needs a 4-byte field
+      long long n = static_cast<long long>(as_int(&x.items[1])), od = 0, os = 0;
+      const bool ad = alias_of(x.items[2], od), as = alias_of(x.items[3], os);
+      if (!ad && !as) {
+        if (mentions(x)) sra_fail(out, __LINE__);
+        return;
+      }
+      // the words need the object's alignment, which the IR gives as the copy's last item (4 or more)
+      const long long typed = x.items.size() > 4 ? static_cast<long long>(as_int(&x.items[4])) : 0;
+      if (n <= 0 || n % 4 != 0 || typed < 4) {
+        sra_fail(out, __LINE__);
+        return;
+      }
+      for (long long k = 0; k < n; k += 4) {
+        if (ad) out.asm_offs.insert(od + k);
+        if (as) out.asm_offs.insert(os + k);
+      }
+      return;
+    }
     if (x.kind != Node::List) {
       if (mentions(x)) sra_fail(out, __LINE__);
       return;
@@ -1635,7 +1684,8 @@ void Fn::plan_struct_slots() {
     found[name] = res;
     all_carriers.insert(res.carriers.begin(), res.carriers.end());
   }
-  for (const auto &[name, res] : found) {
+  for (const auto &[name, found_res] : found) {
+    AliasFields res = found_res;
     // a pointer slot that holds an address is not a struct slot itself
     if (all_carriers.count(name)) continue;
     long long end = 0;
@@ -1645,12 +1695,68 @@ void Fn::plan_struct_slots() {
       if (off < end || off + sz > slot_sizes_.at(name)) fits = false;
       end = off + sz;
     }
+    // a word that only a copy moves gets a register of its own, unless a field overlaps it
+    for (long long a : res.asm_offs) {
+      bool have = false, overlap = false;
+      for (const auto &[key, ty] : res.fields) {
+        if (key.first == a && type_size(ty) == 4) have = true;
+        else if (key.first < a + 4 && key.first + type_size(ty) > a) overlap = true;
+      }
+      if (!have && !overlap) res.fields[{a, "u32"}] = Ty{"int", 4, false, false};
+    }
+    // each word a copy or an asm operand moves is a field register the accesses already make: a 4-byte field
+    for (long long a : res.asm_offs) {
+      bool have = false;
+      for (const auto &[key, ty] : res.fields) have = have || (key.first == a && type_size(ty) == 4);
+      fits = fits && have;
+    }
     if (!fits) continue;
     sra_slots.insert(name);
     carrier_slots.insert(res.carriers.begin(), res.carriers.end());
     std::string base = "@" + std::to_string(sra_scope) + ":" + name;
     for (const auto &[key, ty] : res.fields)
       sra_fields[base + "|" + std::to_string(key.first) + "|" + key.second] = RegInfo{fresh(reg_class(ty)), ty};
+  }
+}
+
+void Fn::copy_words(long long n, const Node &dst, const Node &src, long long typed) {
+  const std::string td = token_value(dst), ts = token_value(src);
+  // the memory side is accessed a word at a time: its alignment must be 4 or more (the copy statement's rule)
+  auto align_of = [&](const Node &x, const std::string &reg) -> long long {
+    long long a = 1;
+    if (x.kind == Node::Sym && x.sig == '$') {
+      auto it = slot_aligns_.find(x.text);
+      a = it != slot_aligns_.end() ? it->second : 1;
+    } else {
+      auto it = ptr_align.find(reg);
+      a = it != ptr_align.end() ? it->second : 1;
+    }
+    return std::max(a, typed);  // the object's type gives its alignment too
+  };
+  std::string dmem, smem;
+  if (td.empty()) {
+    Operand d = operand(dst);
+    dmem = reg_of(d.text, d.ty);
+
+  }
+  if (ts.empty()) {
+    Operand s = operand(src);
+    smem = reg_of(s.text, s.ty);
+
+  }
+  for (long long k = 0; k < n; k += 4) {
+    const std::string off = std::to_string(k);
+    if (!td.empty() && !ts.empty()) {
+      emit("mov.b32 " + sra_word(td, k)->ptx + ", " + sra_word(ts, k)->ptx + ";");
+    } else if (!td.empty()) {
+      std::string t = fresh("r");
+      emit("ld.b32 " + t + ", [" + smem + "+" + off + "];");
+      emit("mov.b32 " + sra_word(td, k)->ptx + ", " + t + ";");
+    } else {
+      std::string t = fresh("r");
+      emit("mov.b32 " + t + ", " + sra_word(ts, k)->ptx + ";");
+      emit("st.b32 [" + dmem + "+" + off + "], " + t + ";");
+    }
   }
 }
 

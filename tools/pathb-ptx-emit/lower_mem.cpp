@@ -79,6 +79,16 @@ const RegInfo *FnCtx::sra_field(const Node &addr, const Ty &ty) const {
   return &it->second;
 }
 
+const RegInfo *FnCtx::sra_word(const std::string &tok, long long off) const {
+  size_t plus = tok.rfind('+');
+  const std::string key = tok.substr(0, plus) + "|" + std::to_string(std::stoll(tok.substr(plus + 1)) + off) + "|";
+  for (const char *ty : {"f32", "s32", "u32"}) {
+    auto it = sra_fields.find(key + ty);
+    if (it != sra_fields.end()) return &it->second;
+  }
+  throw BadIR("copy through " + tok + " has no 4-byte field register at " + std::to_string(off));
+}
+
 bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest, const Ty &dty) {
   const Ty ptr{"ptr", -1, false, false};
   if (h == "load") {
@@ -94,7 +104,8 @@ bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest,
       return true;
     }
     if (const RegInfo *p = promoted_slot(at(x, 2))) {
-      emit(field_mov(ty) + " " + dest + ", " + p->ptx + ";");
+      if (ty.kind == "int" && ty.is_bool) emit("setp.ne.u32 " + dest + ", " + p->ptx + ", 0;");
+      else emit(field_mov(ty) + " " + dest + ", " + p->ptx + ";");
       return true;
     }
     Operand addr = operand(at(x, 2));
@@ -195,7 +206,8 @@ bool FnCtx::store_stmt(const std::string &h, const Node &s) {
     if (const RegInfo *p = promoted_slot(at(s, 2))) {
       Operand val = operand(at(s, 3));
       expect(ty, val.ty);
-      emit(field_mov(ty) + " " + p->ptx + ", " + reg_of(val.text, ty) + ";");
+      if (ty.kind == "int" && ty.is_bool) emit("selp.u32 " + p->ptx + ", 1, 0, " + val.text + ";");
+      else emit(field_mov(ty) + " " + p->ptx + ", " + reg_of(val.text, ty) + ";");
       return true;
     }
     Operand addr = operand(at(s, 2));

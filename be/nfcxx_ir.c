@@ -830,9 +830,11 @@ static void ir_store(a_type_ptr t, const char *addr, const char *val, int vol)
   ir_emit(ir_fmt("(store%s %s %s %s)", vol ? ".v" : "", ir_valtext(t), addr, val));
 }
 
+/* (copy BYTES DST SRC ALIGN): the aggregate's alignment is the last item, so a reader can move the words of an object
+   of that type (both sides are objects of the type) instead of the bytes. */
 static void ir_copy(a_type_ptr t, const char *dst, const char *src)
 {
-  ir_emit(ir_fmt("(copy %llu %s %s)", ir_size_of(t), dst, src));
+  ir_emit(ir_fmt("(copy %llu %s %s %llu)", ir_size_of(t), dst, src, ir_align_of(t)));
 }
 
 /* A scalar loaded from an address. An aggregate is already its address. */

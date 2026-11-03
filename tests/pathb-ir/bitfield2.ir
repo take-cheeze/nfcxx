@@ -94,8 +94,8 @@
   (let %2 (ptr unsigned_int) (offset $"t" 4))
   (bfstore unsigned_int 4 %2 8 3 (const unsigned_int 5))
   (block
-    (copy 8 $"tmp" $"t")
-    (copy 8 %0 $"tmp")
+    (copy 8 $"tmp" $"t" 4)
+    (copy 8 %0 $"tmp" 4)
     (return)))
 
 (function "main"
@@ -603,7 +603,7 @@
   (loop
     (body
       (block
-        (copy 4 $"tmp.2" $"n")
+        (copy 4 $"tmp.2" $"n" 4)
         (let %216 int (call int &"_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg" (byval (struct "Neg") $"tmp.2")))
         (let %217 bool (eq int %216 (const int 10)))
         (let %218 bool (eq bool %217 (const bool 0)))
@@ -620,7 +620,7 @@
   (loop
     (body
       (block
-        (copy 4 $"tmp.3" $"n")
+        (copy 4 $"tmp.3" $"n" 4)
         (let %222 int (call int &"_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg" (byval (struct "Neg") $"tmp.3")))
         (let %223 bool (eq int %222 (const int 20)))
         (let %224 bool (eq bool %223 (const bool 0)))
@@ -773,7 +773,7 @@
       (let %288 bool (ne int (const int 0) (const int 0)))
       (if %288 (then) (else (break)))))
   (eval (call void &"_ZN31_INTERNAL_13_bitfield2_cpp_main2mkEv" (sret (struct "Tailpad") $"tmp.5")))
-  (copy 8 $"t" $"tmp.5")
+  (copy 8 $"t" $"tmp.5" 4)
   (loop
     (body
       (block

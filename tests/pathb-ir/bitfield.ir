@@ -1086,7 +1086,7 @@
   (loop
     (body
       (block
-        (copy 24 $"tmp" $"m")
+        (copy 24 $"tmp" $"m" 8)
         (let %443 int (call int &"_ZN30_INTERNAL_12_bitfield_cpp_main8by_valueE5Mixed" (byval (struct "Mixed") $"tmp")))
         (let %444 bool (eq int %443 (const int 1)))
         (let %445 bool (eq bool %444 (const bool 0)))
@@ -1582,7 +1582,7 @@
     (step
       (let %669 bool (ne int (const int 0) (const int 0)))
       (if %669 (then) (else (break)))))
-  (copy 4 $"q" $"p")
+  (copy 4 $"q" $"p" 4)
   (loop
     (body
       (block

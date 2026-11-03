@@ -31,6 +31,8 @@ struct AliasFields {
   bool ok = true;
   std::map<std::pair<long long, std::string>, Ty> fields;
   std::set<std::string> carriers;
+  // The offsets of 4-byte words that are field registers (copies move them, see Fn::copy_words): each needs a 4-byte field
+  std::set<long long> asm_offs;
 };
 
 class Fn : public FnCtx {
@@ -127,6 +129,8 @@ class Fn : public FnCtx {
   void promote_slots(const std::vector<const Node *> &body, const std::map<std::string, Ty> &types);
   // --unroll=loops: the loop after the init store `store T $name START` is compiled once per iteration when its trip
   // count is a constant (the shape the front end gives a for loop). False, with nothing emitted, when it is not.
+  // (copy N DST SRC) where one side is an alias token: the words move between field registers and memory.
+  void copy_words(long long n, const Node &dst, const Node &src, long long typed);
   bool unroll_loop(const Node &init, const Node &loop);
   bool unroll_next_ = false;  // the statement that follows a __nfcxx_unroll() marker (--unroll=loops)
   // --struct-slots: the struct slots of this function whose fields live in registers (sra_slots, sra_fields), and the

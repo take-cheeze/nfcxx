@@ -141,8 +141,8 @@
   (let %5 (ptr int) (offset $"r" 4))
   (store int %5 %4)
   (block
-    (copy 8 $"tmp" $"r")
-    (copy 8 %0 $"tmp")
+    (copy 8 $"tmp" $"r" 4)
+    (copy 8 %0 $"tmp" 4)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_llEll"
@@ -161,8 +161,8 @@
   (let %5 (ptr long) (offset $"r" 8))
   (store long %5 %4)
   (block
-    (copy 16 $"tmp" $"r")
-    (copy 16 %0 $"tmp")
+    (copy 16 $"tmp" $"r" 8)
+    (copy 16 %0 $"tmp" 8)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_ddEdd"
@@ -181,8 +181,8 @@
   (let %5 (ptr double) (offset $"r" 8))
   (store double %5 %4)
   (block
-    (copy 16 $"tmp" $"r")
-    (copy 16 %0 $"tmp")
+    (copy 16 $"tmp" $"r" 8)
+    (copy 16 %0 $"tmp" 8)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_ldEld"
@@ -201,8 +201,8 @@
   (let %5 (ptr double) (offset $"r" 8))
   (store double %5 %4)
   (block
-    (copy 16 $"tmp" $"r")
-    (copy 16 %0 $"tmp")
+    (copy 16 $"tmp" $"r" 8)
+    (copy 16 %0 $"tmp" 8)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_l3El"
@@ -224,8 +224,8 @@
   (let %8 (ptr long) (offset $"r" 16))
   (store long %8 %7)
   (block
-    (copy 24 $"tmp" $"r")
-    (copy 24 %0 $"tmp")
+    (copy 24 $"tmp" $"r" 8)
+    (copy 24 %0 $"tmp" 8)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_ffEff"
@@ -244,8 +244,8 @@
   (let %5 (ptr float) (offset $"r" 4))
   (store float %5 %4)
   (block
-    (copy 8 $"tmp" $"r")
-    (copy 8 %0 $"tmp")
+    (copy 8 $"tmp" $"r" 4)
+    (copy 8 %0 $"tmp" 4)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main6mk_padEil"
@@ -264,8 +264,8 @@
   (let %5 (ptr long) (offset $"r" 8))
   (store long %5 %4)
   (block
-    (copy 16 $"tmp" $"r")
-    (copy 16 %0 $"tmp")
+    (copy 16 $"tmp" $"r" 8)
+    (copy 16 %0 $"tmp" 8)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main6mk_oneEc"
@@ -279,8 +279,8 @@
   (let %2 char (load char $"c"))
   (store char $"r" %2)
   (block
-    (copy 1 $"tmp" $"r")
-    (copy 1 %0 $"tmp")
+    (copy 1 $"tmp" $"r" 1)
+    (copy 1 %0 $"tmp" 1)
     (return)))
 
 (function "_ZN32_INTERNAL_14_abi_struct_cpp_main7use_allE2II2LL2DD2LD2L32FF3Pad3Oneiiil"
@@ -372,8 +372,8 @@
   (let %10 (ptr double) (offset $"r" 8))
   (store double %10 %9)
   (block
-    (copy 16 $"tmp" $"r")
-    (copy 16 %0 $"tmp")
+    (copy 16 $"tmp" $"r" 8)
+    (copy 16 %0 $"tmp" 8)
     (return)))
 
 (function "main"
@@ -429,7 +429,7 @@
   (slot "s" (struct "DD") 16 8)
   (store int $"ok" (const int 0))
   (eval (call void &"div" (sret (struct "div_t") $"tmp") (const int 17) (const int 5)))
-  (copy 8 $"d" $"tmp")
+  (copy 8 $"d" $"tmp" 4)
   (let %0 int (load int $"d"))
   (let %1 bool (eq int %0 (const int 3)))
   (let %2 bool (const bool 0))
@@ -444,7 +444,7 @@
   (let %8 int (wadd int %7 %6))
   (store int $"ok" %8)
   (eval (call void &"ldiv" (sret (struct "ldiv_t") $"tmp.1") (const long -17) (const long 5)))
-  (copy 16 $"l" $"tmp.1")
+  (copy 16 $"l" $"tmp.1" 8)
   (let %9 long (load long $"l"))
   (let %10 bool (eq long %9 (const long -3)))
   (let %11 bool (const bool 0))
@@ -459,7 +459,7 @@
   (let %17 int (wadd int %16 %15))
   (store int $"ok" %17)
   (eval (call void &"lldiv" (sret (struct "lldiv_t") $"tmp.2") (const long_long 1099511627776) (const long_long 1000)))
-  (copy 16 $"ll" $"tmp.2")
+  (copy 16 $"ll" $"tmp.2" 8)
   (let %18 long_long (load long_long $"ll"))
   (let %19 bool (eq long_long %18 (const long_long 1099511627)))
   (let %20 bool (const bool 0))
@@ -560,29 +560,29 @@
   (let %84 int (wadd int %83 %82))
   (store int $"ok" %84)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_iiEii" (sret (struct "II") $"tmp.13") (const int 1) (const int 2)))
-  (copy 8 $"tmp.14" $"tmp.13")
+  (copy 8 $"tmp.14" $"tmp.13" 4)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_llEll" (sret (struct "LL") $"tmp.15") (const long 3) (const long 4)))
-  (copy 16 $"tmp.16" $"tmp.15")
+  (copy 16 $"tmp.16" $"tmp.15" 8)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_ddEdd" (sret (struct "DD") $"tmp.17") (const double 5.0) (const double 6.0)))
-  (copy 16 $"tmp.18" $"tmp.17")
+  (copy 16 $"tmp.18" $"tmp.17" 8)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_ldEld" (sret (struct "LD") $"tmp.19") (const long 7) (const double 8.0)))
-  (copy 16 $"tmp.20" $"tmp.19")
+  (copy 16 $"tmp.20" $"tmp.19" 8)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_l3El" (sret (struct "L3") $"tmp.21") (const long 1)))
-  (copy 24 $"tmp.22" $"tmp.21")
+  (copy 24 $"tmp.22" $"tmp.21" 8)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_ffEff" (sret (struct "FF") $"tmp.23") (const float 1.0) (const float 2.0)))
-  (copy 8 $"tmp.24" $"tmp.23")
+  (copy 8 $"tmp.24" $"tmp.23" 4)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main6mk_padEil" (sret (struct "Pad") $"tmp.25") (const int 10) (const long 11)))
-  (copy 16 $"tmp.26" $"tmp.25")
+  (copy 16 $"tmp.26" $"tmp.25" 8)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main6mk_oneEc" (sret (struct "One") $"tmp.27") (const char 12)))
-  (copy 1 $"tmp.28" $"tmp.27")
-  (copy 8 $"tmp.29" $"tmp.14")
-  (copy 16 $"tmp.30" $"tmp.16")
-  (copy 16 $"tmp.31" $"tmp.18")
-  (copy 16 $"tmp.32" $"tmp.20")
-  (copy 24 $"tmp.33" $"tmp.22")
-  (copy 8 $"tmp.34" $"tmp.24")
-  (copy 16 $"tmp.35" $"tmp.26")
-  (copy 1 $"tmp.36" $"tmp.28")
+  (copy 1 $"tmp.28" $"tmp.27" 1)
+  (copy 8 $"tmp.29" $"tmp.14" 4)
+  (copy 16 $"tmp.30" $"tmp.16" 8)
+  (copy 16 $"tmp.31" $"tmp.18" 8)
+  (copy 16 $"tmp.32" $"tmp.20" 8)
+  (copy 24 $"tmp.33" $"tmp.22" 8)
+  (copy 8 $"tmp.34" $"tmp.24" 4)
+  (copy 16 $"tmp.35" $"tmp.26" 8)
+  (copy 1 $"tmp.36" $"tmp.28" 1)
   (let %85 long (call long &"_ZN32_INTERNAL_14_abi_struct_cpp_main7use_allE2II2LL2DD2LD2L32FF3Pad3Oneiiil" (byval (struct "II") $"tmp.29") (byval (struct "LL") $"tmp.30") (byval (struct "DD") $"tmp.31") (byval (struct "LD") $"tmp.32") (byval (struct "L3") $"tmp.33") (byval (struct "FF") $"tmp.34") (byval (struct "Pad") $"tmp.35") (byval (struct "One") $"tmp.36") (const int 13) (const int 14) (const int 15) (const long 16)))
   (store long $"total" %85)
   (let %86 long (load long $"total"))
@@ -599,9 +599,9 @@
   (let %94 (ptr (fn (struct "DD") ((struct "DD") double))) (load (ptr (fn (struct "DD") ((struct "DD") double))) $"tmp.37"))
   (nonnull %94)
   (eval (call void &"_ZN32_INTERNAL_14_abi_struct_cpp_main5mk_ddEdd" (sret (struct "DD") $"tmp.39") (const double 1.0) (const double 2.0)))
-  (copy 16 $"tmp.40" $"tmp.39")
+  (copy 16 $"tmp.40" $"tmp.39" 8)
   (eval (call void %94 (sret (struct "DD") $"tmp.38") (byval (struct "DD") $"tmp.40") (const double 4.0)))
-  (copy 16 $"s" $"tmp.38")
+  (copy 16 $"s" $"tmp.38" 8)
   (let %95 double (load double $"s"))
   (let %96 bool (eq double %95 (const double 4.0)))
   (let %97 bool (const bool 0))
@@ -700,10 +700,10 @@
   (slot "tmp" (array 16 unsigned_char) 16 16)
   (slot "tmp.1" (array 16 unsigned_char) 16 16)
   (slot "tmp.2" (array 16 unsigned_char) 16 16)
-  (copy 16 $"tmp.1" %0)
-  (copy 16 $"tmp.2" $"tmp.1")
+  (copy 16 $"tmp.1" %0 16)
+  (copy 16 $"tmp.2" $"tmp.1" 16)
   (eval (call void &"__nfcxx_x87c_fabsl" (byval (struct "__nfcxx_ld") $"tmp.2") $"tmp"))
-  (copy 16 %1 $"tmp")
+  (copy 16 %1 $"tmp" 16)
   (return))
 
 (function "_ZSt3absDF16_"
@@ -748,9 +748,9 @@
   (weak)
   (slot "tmp" (array 16 unsigned_char) 16 16)
   (slot "tmp.1" (array 16 unsigned_char) 16 16)
-  (copy 16 $"tmp.1" %1)
+  (copy 16 $"tmp.1" %1 16)
   (eval (call void &"__nfcxx_f128w_fabsf128" (sret (struct "__nfcxx_f128") $"tmp") $"tmp.1"))
-  (copy 16 %0 $"tmp")
+  (copy 16 %0 $"tmp" 16)
   (return))
 
 (function "_ZSt3absDF16b"
@@ -791,11 +791,11 @@
     (let %7 long (load long $"tmp.1"))
     (let %8 long (load long $"tmp.2"))
     (eval (call void &"ldiv" (sret (struct "ldiv_t") $"tmp.3") %7 %8))
-    (copy 16 $"tmp.4" $"tmp.3")
+    (copy 16 $"tmp.4" $"tmp.3" 8)
     (block
       (let %9 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
       (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %9)
-      (copy 16 %0 $"tmp.4")
+      (copy 16 %0 $"tmp.4" 8)
       (return))))
 
 (function "_ZN9__gnu_cxx3divExx"
@@ -818,6 +818,6 @@
   (let %9 (ptr long_long) (offset $"__q" 8))
   (store long_long %9 %8)
   (block
-    (copy 16 $"tmp" $"__q")
-    (copy 16 %0 $"tmp")
+    (copy 16 $"tmp" $"__q" 8)
+    (copy 16 %0 $"tmp" 8)
     (return)))
