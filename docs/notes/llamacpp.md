@@ -85,7 +85,7 @@ byte arrays) compile as C++. The glslc extension probes are the ones of ggml-vul
 
 `tests/llamacpp/vulkan/run.sh` runs each op of `test-backend-ops` on Vulkan0 in its own process and checks it against the CPU.
 On the Radeon 8060S (RADV, gfx1151), 109 ops with cases pass every case: 12578 of 12578. 19 ops have no Vulkan cases (`0/0`).
-FLASH_ATTN_EXT (the largest, several thousand cases) has 4659 cases passing and none failing; its full run is recorded below.
+FLASH_ATTN_EXT (the largest) passes every case: 5332 of 5332. With that, every op with Vulkan cases passes all of them: 110 ops, 17910 cases.
 
 ## Flags
 
