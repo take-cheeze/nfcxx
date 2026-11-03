@@ -190,7 +190,7 @@
           (store (ptr (struct "PQ")) $"tmp.3" %30)
           (let %31 (ptr (struct "PQ")) (load (ptr (struct "PQ")) $"tmp.3"))
           (nonnull %31)
-          (copy 16 %31 @"tmp.3" 8)
+          (copy 16 %31 @"tmp.3")
           (eval (call void &"__throw"))))
       (else
         (let %32 int (load int @"__catch_clause_number"))
@@ -232,7 +232,7 @@
     (store unsigned_short @"__eh_curr_region" (const unsigned_short 1))
     (let %49 (ptr (struct "PQ")) (load (ptr (struct "PQ")) $"tmp.7"))
     (nonnull %49)
-    (copy 16 %49 @"tmp.4" 8)
+    (copy 16 %49 @"tmp.4")
     (store int $"tmp.5" (const int 0))
     (let %50 (ptr (struct "PQ")) (load (ptr (struct "PQ")) $"tmp.7"))
     (store (ptr (struct "PQ")) $"tmp.8" %50)

@@ -1024,7 +1024,7 @@
   (let %18 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
   (nonnull %18)
   (let %19 (ptr (union "_ZN8Derived2Ut_E")) (offset %18 40))
-  (copy 4 %19 @"tmp.6" 4)
+  (copy 4 %19 @"tmp.6")
   (let %20 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
   (nonnull %20)
   (let %21 (ptr int) (offset %20 44))
