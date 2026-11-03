@@ -159,6 +159,22 @@ check.call('successor lists are the instructions\' own',
            ep.successor_lists.each_with_index.all? { |s, k| s.equal?(ep.instruction_at(k).successors) })
 check.call('raise targets: per protected instruction, in handler order', ep.raise_targets == { 5 => [6, 7] })
 check.call('rescue-only: a rescue target that no ensure shares', ep.rescue_only_targets == Set[6])
+check.call('raise target cache and each target list are frozen',
+           ep.raise_targets.frozen? && ep.raise_targets.values.all?(&:frozen?))
+shared_handlers = [handlers[0], handlers[0],
+                   CatchHandler.new(type: :ensure, begin_addr: 16, end_addr: 19, target: 19),
+                   CatchHandler.new(type: :rescue, begin_addr: 16, end_addr: 19, target: 21),
+                   CatchHandler.new(type: :rescue, begin_addr: 19, end_addr: 19, target: 23),
+                   CatchHandler.new(type: :rescue, begin_addr: 16, end_addr: 19, target: 999)]
+shared = BytecodeIR::Program.new(Irep.new(label: 'shared', instructions: enter_body, catch_handlers: shared_handlers))
+check.call('duplicate targets retain first-seen order and unresolved targets are omitted',
+           shared.raise_targets == { 5 => [6, 7] } && !shared.handlers_resolved?)
+check.call('ensure excludes a shared rescue target; empty ranges add no target',
+           shared.rescue_only_targets == Set[7] && shared.rescue_only_targets.frozen?)
+empty = BytecodeIR::Program.new(Irep.new(label: 'empty', instructions: enter_body, catch_handlers: []))
+check.call('no handlers produce empty frozen caches',
+           empty.raise_targets == {} && empty.raise_targets.frozen? &&
+           empty.rescue_only_targets == Set.new && empty.rescue_only_targets.frozen?)
 check.call('successors_of merges the raise targets', ep.successors_of(5, include_handlers: true) == [6, 7])
 NF.states(enter_irep, LogOracle.new({ 1 => INT }, INT), Set.new)
 check.call('the flow runs on the shared facts', ep.numeric_flow_table&.supported)
