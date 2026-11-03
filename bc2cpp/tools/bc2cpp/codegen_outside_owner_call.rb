@@ -24,6 +24,7 @@ module OutsideOwnerCall
   # `update` (19 to 28 owners in the closed build): the call still checks the owner it finds, once per owner and
   # site (bc2cpp_owner_set keeps 32 seen owners).
   NAME_OWNER_SET_MAX = 32
+  OWNER_LIST_CACHE_MAX = 2048
 
   # NAME_OWNER_SET: the receiver of a send of `name` can only be an instance of a class that answers it
   # (anything else raises NoMethodError), and in the closed world every such class is named: the program's own Ruby
@@ -82,7 +83,7 @@ module OutsideOwnerCall
     if owners.empty? && (@registry[name] || []).none? { |definition| definition.owner == '<native>' }
       (@name_owner_empty ||= Set.new) << name
     end
-    owners.empty? || owners.size > NAME_OWNER_SET_MAX ? nil : owners
+    owners.empty? || owners.size > NAME_OWNER_SET_MAX ? nil : freeze_owner_call_owners(owners)
   end
 
   # The world whose definers the owner set names. A core body (`@closed_world` withheld, CodeGen#compile_method) runs
@@ -140,7 +141,7 @@ module OutsideOwnerCall
       owners = argc.to_i <= CodeGen::FUNCALL_ARGC_MAX && args.count(',') == argc.to_i && name_owner_set(name)
       next call[0] unless owners
 
-      list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
+      list = owner_call_owner_list(owners)
       "bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), #{argc}#{args}) " \
         "/* CLOSED_WORLD owner-call: #{name} */"
     end
@@ -150,10 +151,11 @@ module OutsideOwnerCall
   # OP_SEND check level CheckedSend fills in for a real SEND instruction (0 for any other site); SymbolCache turns
   # the name into its slot.
   def outside_owner_call_line(d, recv, name, argv, owners)
-    args = argv.map { |arg| ", #{arg}" }.join
-    list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
-    "r#{d} = bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), " \
-      "#{@call_block_expr || 'mrb_nil_value()'}, #{argv.size}#{args}); /* CLOSED_WORLD owner-call: #{name} */"
+    list = owner_call_owner_list(owners)
+    line = "r#{d} = bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), " \
+           "#{@call_block_expr || 'mrb_nil_value()'}, #{argv.size}"
+    argv.each { |arg| line << ', ' << arg.to_s }
+    line << "); /* CLOSED_WORLD owner-call: #{name} */"
   end
 
   # BLOCK_OWNER_CALL: a by-name block send (`mrb_funcall_with_block`) as the owner call with the block as `blk`, or
@@ -164,10 +166,10 @@ module OutsideOwnerCall
     owners = argv.size <= CodeGen::FUNCALL_ARGC_MAX && name_owner_set(name)
     return nil unless owners
 
-    args = argv.map { |arg| ", #{arg}" }.join
-    list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
-    "#{dest} = bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), #{blk}, " \
-      "#{argv.size}#{args}); /* CLOSED_WORLD owner-call: #{name} */"
+    list = owner_call_owner_list(owners)
+    line = "#{dest} = bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), #{blk}, #{argv.size}"
+    argv.each { |arg| line << ', ' << arg.to_s }
+    line << "); /* CLOSED_WORLD owner-call: #{name} */"
   end
 
   # BLOCK_OWNER_CALL over a splat: the args are an Array's items (`argc`, `argv` are C expressions), as the
@@ -176,9 +178,30 @@ module OutsideOwnerCall
     owners = name_owner_set(name)
     return nil unless owners
 
-    list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
+    list = owner_call_owner_list(owners)
     "#{dest} = bc2cpp_owner_call_argv_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), #{blk}, " \
       "#{argc}, #{argv}); /* CLOSED_WORLD owner-call: #{name} */"
+  end
+
+  # Only deeply frozen owner lists can keep formatting by identity; callers may still supply mutable lists.
+  def owner_call_owner_list(owners)
+    @owner_call_owner_lists ||= {}.compare_by_identity
+    cached = @owner_call_owner_lists[owners]
+    return cached if cached
+
+    list = +''
+    owners.each do |owner|
+      list << ', ' unless list.empty?
+      list << '"' << owner.to_s << '"'
+    end
+    if @owner_call_owner_lists.size < OWNER_LIST_CACHE_MAX && owners.frozen? && owners.all?(&:frozen?)
+      @owner_call_owner_lists[owners] = list.freeze
+    end
+    list
+  end
+
+  def freeze_owner_call_owners(owners)
+    owners.map! { |owner| owner.frozen? ? owner : owner.dup.freeze }.freeze
   end
 
   # The sorted owners of every outside definition of `name`, or nil when one cannot be named.
@@ -223,7 +246,7 @@ module OutsideOwnerCall
              core.names.fetch(name, Set.new) | core.wild
     return nil if owners.empty? || owners.any? { |owner| !owner.match?(OWNER_PATH) }
 
-    owners.to_a.sort
+    freeze_owner_call_owners(owners.to_a.sort)
   end
 
   # FACTORY_UNKNOWN_NAMES: native files whose registrations on a computed class only ever land on a class their own
