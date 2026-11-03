@@ -289,6 +289,47 @@ slabs on both (#342). The ggml-sycl rung tests (`tests/gpu/ggml/`, fill, diag, u
 
 Not done: the checked operations and calls between functions, and running through SYCL's own kernel bundles (OpenCL is used).
 
+## AMD GPUs (ROCm): `tools/pathb-amdgpu-emit`
+
+The AMD counterpart of `tools/pathb-ptx-emit`: it lowers the same Path B IR to LLVM IR for `amdgcn-amd-amdhsa`, and ROCm's
+clang makes the code object (`clang -target amdgcn-amd-amdhsa -mcpu=gfxNNNN -O2 -nogpulib x.ll -o x.hsaco`), which the HIP
+runtime loads with `hipModuleLoadData`. LLVM IR is a target-independent input there, so the emitter does no instruction
+selection or register allocation: it writes plain IR and leaves the optimization to clang `-O2`.
+
+```
+build/pathb-amdgpu-emit [--f2i=convert] [--kernel=NAME]... FILE.ir > FILE.ll    # exit 0, 1 bad IR, 3 refused
+```
+
+- Each IR register is an alloca (a `let` or `set` stores it, a use loads it); mem2reg makes the SSA form. Slots are private
+  allocas used through their flat address, as the PTX emitter uses `.local` through `cvta`. Every IR pointer is a flat pointer.
+- Data: string constants and initialized statics are constant memory (`addrspace(4)`), zero-initialized statics (`__shared__`)
+  are LDS (`addrspace(3)`), other objects are global memory, by the PTX emitter's classification. The dynamic shared memory is
+  the external zero-sized LDS array, as clang does for HIP's `extern __shared__`.
+- Kernels are `amdgpu_kernel` functions; a struct by value is a `byref` kernel argument copied into the frame. Device functions
+  are internal; a struct by value is passed by the caller's copy's address (the callee copies it), a struct result through the
+  sret address. The HIP runtime packs the launch's arguments by the code object's metadata.
+- `blockDim` and `gridDim` are the code-object-v5 implicit arguments (the group sizes at 12, 14, 16 and the block counts at 0, 4, 8).
+- The warp is the wave: gfx10 and later run 32 lanes (wave32), the CUDA warp size. The shuffles are `ds_bpermute` with the
+  lane PTX's `shfl.sync` takes (and the own value where PTX gives it: `down` past lane 31, `up` below 0); the votes are
+  `llvm.amdgcn.ballot`; `__syncthreads` is the workgroup barrier between release and acquire fences; `__syncthreads_or` ORs
+  through one LDS word. Atomics are agent-scope monotonic `atomicrmw` and `cmpxchg`.
+- The checked operations trap as in PTX (`llvm.trap`): division by zero and `MIN / -1`, shift counts out of range, `bounds`,
+  `nonnull`, and `cf2i` out of range (or, with `--f2i=convert`, the saturating conversion of the `.cu` path).
+- Refused: inline PTX (`ptx-asm`), `printf`, extern globals, indirect calls. A wave64-only GPU (gfx9: MI100, MI200, MI300) is not a
+  target: the code assumes the 32-lane warp.
+
+`tests/gpu/amd/run.sh` lowers the golden IR of the device tests (`tests/gpu/mul2.ir`, `tests/gpu/device/*.ir`), builds each
+code object, and runs it with the CUDA launchers of those tests, unchanged: `tests/gpu/amd/cuda_runtime.h` maps their CUDA
+runtime calls onto HIP (a library is a module, `cudaLaunchKernelExC` is `hipModuleLaunchKernel`). On a Radeon 8060S (gfx1151,
+Strix Halo, ROCm 7.14) all 11 kernels give the launchers' expected results (vecadd, helper calls, bool and local memory,
+nonnull, shared memory, the struct ABI, switch, atomics, warp shuffles and votes), and the mutants (vecadd add -> sub, the
+xor shuffle as an up shuffle, any as all) are caught.
+
+Not done: the `.cu` driver path for AMD (the device pass to this emitter and a HIP registration tail), and llama.cpp's HIP
+backend (ggml-cuda with `GGML_USE_HIP`). The host side needs HIP's headers through EDG first: `hip/hip_runtime.h` fails in
+`amd_hip_vector_types.h` (`using Native_vec_ = T __attribute__((ext_vector_type(n)))`: "attribute does not apply to any
+entity"; EDG says `__has_attribute(ext_vector_type)` but does not take it on an alias).
+
 ## WebGPU (Dawn) vs OpenCL on the Arc B60
 
 `tests/gpu/webgpu/` runs the same vector add through WebGPU and checks it. `vecadd.cpp` picks the Intel Vulkan adapter

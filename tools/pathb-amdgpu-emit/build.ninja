@@ -1,0 +1,24 @@
+# Builds build/pathb-amdgpu-emit (Path B IR to amdgcn LLVM IR; docs/notes/gpu.md, "AMD GPUs (ROCm)"). It shares the IR
+# reader and the type helpers of tools/pathb-ptx-emit. Run: ninja -C tools/pathb-amdgpu-emit.
+ninja_required_version = 1.7
+root = ../..
+ptx = ../pathb-ptx-emit
+
+rule cxx
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -MMD -MF $out.d -c $in -o $out
+  depfile = $out.d
+  deps = gcc
+  description = CXX $out
+
+rule link
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -o $out.tmp $in && mv -f $out.tmp $out
+  description = LINK $out
+
+build $root/build/pathb-amdgpu-emit.o/main.o: cxx main.cpp
+build $root/build/pathb-amdgpu-emit.o/ir.o: cxx $ptx/ir.cpp
+build $root/build/pathb-amdgpu-emit.o/lower_types.o: cxx $ptx/lower_types.cpp
+
+build $root/build/pathb-amdgpu-emit: link $root/build/pathb-amdgpu-emit.o/main.o $root/build/pathb-amdgpu-emit.o/ir.o $root/build/pathb-amdgpu-emit.o/lower_types.o
+
+build all: phony $root/build/pathb-amdgpu-emit
+default all
