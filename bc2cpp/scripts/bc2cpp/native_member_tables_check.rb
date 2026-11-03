@@ -8,10 +8,13 @@
 #   2. the untagged member is a program hint (RbsSignatures.load), the tagged one a native declaration; a fact-table
 #      member is skipped while a non-fact member of the same class is declared;
 #   3. NativeSigs.table_source writes the members under their markers and reads back as the same members, for the
-#      fixture and for every table of sig/bc2cpp/declarations.rbs.
+#      fixture and for every table of sig/bc2cpp/declarations.rbs;
+#   4. NativeSigs.decls, restricted from a parse of the kept text (kept_texts_of, the form the scan cache keeps),
+#      equals the whole file restricted to the table, comments included, for the fixture and every table.
 #
 # Usage: ruby scripts/bc2cpp/native_member_tables_check.rb
 
+require 'json'
 require 'rbs'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_sigs'
@@ -178,6 +181,33 @@ round = tables.to_h do |name|
 end
 check.call("each of the #{tables.size} tables reads back as exactly its own members: #{round.reject { |_, ok| ok }.keys.join(', ')}",
            round.values.all?)
+
+puts '== decls restricted from the kept text (the cached form)'
+# Every field a loader can read: names, types, overloads, annotations, members, and each node's comment (its marker).
+# Only locations are the text's.
+strip = lambda do |value|
+  case value
+  when Hash then value.reject { |k, _| k == 'location' }.transform_values { |v| strip.call(v) }
+  when Array then value.map { |v| strip.call(v) }
+  else value
+  end
+end
+comments = ->(node) { [node.comment&.string, *NativeSigs.members_of(node).map { |m| comments.call(m) }] }
+same = lambda do |here, whole|
+  here == whole && strip.call(JSON.parse(here.to_json)) == strip.call(JSON.parse(whole.to_json)) &&
+    here.map(&comments) == whole.map(&comments)
+end
+kept = NativeSigs.kept_texts_of(fixture, lines)
+check.call('the fixture tables restricted from their kept text equal the fixture restricted',
+           %w[fixture_native fixture_other core_class_tests].all? do |name|
+             same.call(NativeSigs.select_table(parse_text(kept.fetch(name)), name), NativeSigs.select_table(fixture, name))
+           end)
+check.call('a block keeps its own marker comment in the kept text',
+           NativeSigs.select_table(parse_text(kept.fetch('fixture_native')), 'fixture_native').first.comment&.string ==
+           "bc2cpp-native: fixture_native\n")
+differ = tables.reject { |name| same.call(NativeSigs.decls(NativeSigs.table(name)), NativeSigs.select_table(parsed, name)) }
+check.call("decls of each table equal the whole file restricted to it: #{differ.join(', ')}", differ.empty?)
+check.call('kept_texts names exactly the tables of the file', NativeSigs.kept_texts.keys.sort == tables.sort)
 
 puts
 if failures.empty?
