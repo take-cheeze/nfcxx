@@ -452,7 +452,15 @@ module Qbe
         # --safe: a slot is registered, with one byte of padding after it (as the emitter pads an escaped slot).
         pad = Qbe.safe ? 1 : 0
         @sp_objs << ["%o#{i}", size] if Qbe.safe
-        @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max + pad}"
+        if align > 16
+  # QBE's alloc has no alignment past 16: take the object from a 16-aligned block with align - 16 bytes spare,
+  # and round its address up (as pathb-qbe-emit.rb does for an over-aligned slot).
+  @lines << "  %o#{i}r =l alloc16 #{[size, 1].max + pad + align}"
+  @lines << "  %o#{i}a =l add %o#{i}r, #{align - 1}"
+  @lines << "  %o#{i} =l and %o#{i}a, #{-align}"
+else
+  @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max + pad}"
+end
       end
       unless @sp_objs.empty?
         @lines << "  call $__nfcxx_sp_frame(w #{@sp_objs.length}, ..., #{Qbe.sp_pairs(@sp_objs)})"
@@ -975,18 +983,20 @@ end
       bf_type!(ty)
       unit, boff, width = bf_args(rv, 6)
       uc = unit == 8 ? "l" : "w"
-      ub = unit * 8
+      # The field goes to the top of the register (32 or 64 bits), not of the storage unit: a 1- or 2-byte unit then
+      # sign-extends from its own top bit.
+      rb = uc == "l" ? 64 : 32
       t = fresh
       @lines << "  #{t} =#{uc} #{Qbe::BF_LOAD[unit]} #{op(rv[3])}"
-      if ub - boff - width > 0
+      if rb - boff - width > 0
         t2 = fresh
-        @lines << "  #{t2} =#{uc} shl #{t}, #{ub - boff - width}"
+        @lines << "  #{t2} =#{uc} shl #{t}, #{rb - boff - width}"
         t = t2
       end
       signed = Qbe.signed?(ty)
-      if ub - width > 0
+      if rb - width > 0
         t2 = fresh
-        @lines << "  #{t2} =#{uc} #{signed ? 'sar' : 'shr'} #{t}, #{ub - width}"
+        @lines << "  #{t2} =#{uc} #{signed ? 'sar' : 'shr'} #{t}, #{rb - width}"
         t = t2
       end
       tc = Qbe.cls(ty)
@@ -1016,13 +1026,15 @@ end
       end
       old = fresh
       @lines << "  #{old} =#{uc} #{Qbe::BF_LOAD[unit]} #{addr}"
-      if width < ub
+      # The value is cut to the field in the register width: a unit narrower than the register keeps high bits otherwise.
+      rb = uc == "l" ? 64 : 32
+      if width < rb
         t2 = fresh
-        @lines << "  #{t2} =#{uc} shl #{v}, #{ub - width}"
+        @lines << "  #{t2} =#{uc} shl #{v}, #{rb - width}"
         v = t2
-        if ub - width - boff > 0
+        if rb - width - boff > 0
           t3 = fresh
-          @lines << "  #{t3} =#{uc} shr #{v}, #{ub - width - boff}"
+          @lines << "  #{t3} =#{uc} shr #{v}, #{rb - width - boff}"
           v = t3
         end
       end
@@ -1033,8 +1045,8 @@ end
         if boff + width == ub
           # the field is the top of the unit: keep the low bits by a shift pair
           k1 = fresh
-          @lines << "  #{k1} =#{uc} shl #{old}, #{ub - boff}"
-          @lines << "  #{keep} =#{uc} shr #{k1}, #{ub - boff}"
+          @lines << "  #{k1} =#{uc} shl #{old}, #{rb - boff}"
+          @lines << "  #{keep} =#{uc} shr #{k1}, #{rb - boff}"
         elsif boff.zero?
           # the field is the bottom of the unit: keep the high bits by a shift pair
           k1 = fresh
