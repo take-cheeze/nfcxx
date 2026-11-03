@@ -1643,6 +1643,15 @@ class SFn
   end
 
   def heap_store(addr, t, v)
+    # The OpenCL module stores a byte or a halfword with its own width (see tools/pathb-spirv-emit/emit.cpp heap_store)
+    if @mod.kernel_cl && t[0] == "int" && !t[3] && (t[1] == 1 || t[1] == 2)
+      @spv.cap(t[1] == 1 ? 39 : 22)   # Int8, Int16
+      et = @spv.t_int(t[1] * 8)
+      p = res(120, @spv.t_ptr(psb_sc, et), addr)
+      vv = res(113, et, u32_of(v, t))   # OpUConvert: the low bits
+      ins([62, p, vv, 2, t[1]])
+      return
+    end
     if t[0] == "int" && (t[1] <= 2 || t[3])
       bits = t[3] ? 8 : t[1] * 8
       mask = (1 << bits) - 1
