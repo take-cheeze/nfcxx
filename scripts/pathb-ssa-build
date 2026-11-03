@@ -70,6 +70,48 @@ def convert(file)
   out
 end
 
+# The names a module keeps (pathb-qbe-emit.rb's prune rule): a linked definition (not static, not weak, not an
+# extern declaration) or a constructor or destructor is a root, and everything a live definition refers to with
+# a global (@) or function (&) name is live too. A definition nothing reaches is left out.
+def live_names(forms)
+  defs = {}
+  forms.each do |f|
+    defs[f[1].raw.delete('"')] = f if %w[function global].include?(head(f)) && f[1].is_a?(Str)
+  end
+  live = {}
+  work = []
+  defs.each do |name, f|
+    next unless linked_or_startup?(f)
+
+    live[name] = true
+    work << name
+  end
+  until work.empty?
+    refs = {}
+    collect_symbol_refs(defs[work.pop], refs)
+    refs.each_key do |r|
+      next if live.key?(r) || !defs.key?(r)
+
+      live[r] = true
+      work << r
+    end
+  end
+  live
+end
+
+def linked_or_startup?(f)
+  f.drop(2).any? { |p| %w[constructor destructor].include?(head(p)) } ||
+    f.drop(2).none? { |p| head(p) == "static" || head(p) == "extern" || (head(p) == "weak" && p.length == 1) }
+end
+
+def collect_symbol_refs(x, out)
+  if x.is_a?(Ref)
+    out[x.raw.delete('"')] = true if x.sigil == "@" || x.sigil == "&"
+  elsif x.is_a?(Array)
+    x.each { |y| collect_symbol_refs(y, out) }
+  end
+end
+
 # The assembly of the QBE IL text, or nil with the QBE error text in `err`.
 def assemble(il)
   Dir.mktmpdir("pathb-ssa-build") do |dir|
@@ -84,6 +126,7 @@ end
 
 output = nil
 no_opt = false
+no_prune = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -91,6 +134,7 @@ while args.first&.start_with?("-") && args.first != "-"
   case flag
   when "-o" then output = args.shift or usage_exit
   when "--no-opt" then no_opt = true
+  when "--no-prune" then no_prune = true
   when "--safe", "--long-double=trap"
     # The existing emitter's -fsafe-pointers checks and long-double trap lowering are not implemented here: refuse, rather
     # than produce output without them.
@@ -115,6 +159,12 @@ end
 globals = read_forms(ssa).select { |f| head(f) == "abi-type" } + globals
 text = no_opt ? ssa : PathbEgraph.optimize_module(ssa).first
 fns = read_forms(text).select { |f| head(f) == "ssa-function" }
+# Pruning: a definition nothing reaches is left out, as pathb-qbe-emit.rb does (--no-prune keeps every one).
+unless no_prune
+  live = live_names(read_forms(File.read(file)))
+  fns = fns.select { |f| live.key?(f[1].raw.delete('"')) }
+  globals = globals.select { |g| live.key?(g[1].raw.delete('"')) }
+end
 
 # The globals' data, emitted once: the emitter writes data for a module's globals together with its functions.
 ctx = Qbe.module_context(globals)
