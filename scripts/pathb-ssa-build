@@ -163,7 +163,8 @@ fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 unless no_prune
   live = live_names(read_forms(File.read(file)))
   fns = fns.select { |f| live.key?(f[1].raw.delete('"')) }
-  globals = globals.select { |g| live.key?(g[1].raw.delete('"')) }
+  # An abi-type is a layout every function may need, not a definition to prune: it is kept.
+  globals = globals.select { |g| head(g) == "abi-type" || live.key?(g[1].raw.delete('"')) }
 end
 
 # The globals' data, emitted once: the emitter writes data for a module's globals together with its functions.
