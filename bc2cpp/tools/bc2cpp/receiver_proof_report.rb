@@ -418,7 +418,7 @@ module ReceiverProofReport
 
     kinds = group.sites.filter_map do |gi, gx, gr|
       m = return_class_raw_mask(gi, gx, gr)
-      rp_producer_kind(gi, gx, gr.to_s) if m.nil? || m.anybits?(CodeGen::CLASS_POOL_UNSHIPPABLE)
+      rp_producer_kind(gi, gx, gr) if m.nil? || m.anybits?(CodeGen::CLASS_POOL_UNSHIPPABLE)
     end
     "dropped:#{kinds.uniq.sort.first(4).join(',')}"
   end

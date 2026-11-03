@@ -183,7 +183,7 @@ module ComputedSend
       out << "        break;\n      }\n"
     end
     out << "      default: break;\n      }\n    }\n    if (!#{ary}_done) {\n"
-    out << fallback.lines.map { |line| "    #{line}" }.join
+    out << indent_lines(fallback, '    ')
     out << "    }\n  }\n"
     shared[:emitted] = out if shared
     out
@@ -265,12 +265,12 @@ module ComputedSend
       out << "    case #{number}: {  // :#{name}/#{argc}\n"
       # Read before the call: a re-entrant call may refill the entry.
       (1..argc).each { |k| out << "      mrb_value #{ary}_a#{k} = #{ary}_argv[#{k - 1}];\n" }
-      out << code.lines.map { |line| "      #{line}" }.join
+      out << indent_lines(code, '      ')
       out << "      #{ary}_done = true;\n      break;\n    }\n"
     end
     out << "    default: break;\n    }\n    if (!#{ary}_done) {\n"
     fallback = "if (#{ary}_shared) r#{shared[:reg]} = mrb_ary_splat(M, #{src});\n#{fallback}"
-    out << fallback.lines.map { |line| "    #{line}" }.join
+    out << indent_lines(fallback, '    ')
     out << "    }\n  }\n"
     shared[:emitted] = out
     out
@@ -327,7 +327,7 @@ module ComputedSend
     out << "#{pad}switch (#{id} <= #{tab}_max ? #{tab}[#{id}] : 0) {\n"
     arms.each_with_index do |(name, code), i|
       out << "#{pad}case #{i + 1}: {  // :#{name}\n"
-      out << code.lines.map { |line| "#{pad}  #{line}" }.join
+      out << indent_lines(code, "#{pad}  ")
       out << "#{pad}  #{done} = true;\n#{pad}  break;\n#{pad}}\n"
     end
     out << "#{pad}default: break;\n#{pad}}\n"
@@ -379,7 +379,7 @@ module ComputedSend
     out << "    if (mrb_symbol_p(#{var})) {\n      mrb_sym #{var}_id = mrb_symbol(#{var});\n"
     out << computed_send_guarded_dispatch("#{var}_id", "#{var}_done", arms, '      ')
     out << "    }\n    if (!#{var}_done) {\n"
-    out << fallback.lines.map { |line| "    #{line}" }.join
+    out << indent_lines(fallback, '    ')
     out << "    }\n  }\n"
     out
   end
@@ -433,7 +433,7 @@ module ComputedSend
     out << "    if (mrb_symbol_p(#{var})) {\n      mrb_sym #{var}_id = mrb_symbol(#{var});\n"
     arms.each_with_index do |(name, code), i|
       out << "      #{i.zero? ? '' : 'else '}if (#{var}_id == mrb_intern_lit(M, \"#{name}\")) {\n"
-      out << code.lines.map { |line| "        #{line}" }.join
+      out << indent_lines(code, '        ')
       out << "      }\n"
     end
     out << "      else {\n        #{violation.chomp}\n      }\n    } else {\n"

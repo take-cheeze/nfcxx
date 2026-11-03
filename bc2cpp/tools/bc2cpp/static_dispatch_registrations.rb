@@ -609,7 +609,7 @@ module StaticDispatchRegistrations
         native_name_tokens(src, found, naming, text_tokens: text)
       else
         src.scan(/[A-Za-z_][A-Za-z0-9_]*[?!=]?/) do |t|
-          base = t.chomp('=').chomp('?').chomp('!')
+          base = ClosedWorld.token_stem(t)
           found << t << base
           text << t << base
         end

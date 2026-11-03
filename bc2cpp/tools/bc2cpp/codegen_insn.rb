@@ -1170,6 +1170,14 @@ class CodeGen
     "  // == -- generated from native registrations and C method bodies\n#{chain}{\n#{identity_dispatch}  }\n"
   end
 
+  # `text.lines.map { |line| "#{prefix}#{line}" }.join` without a String per line: /^/ matches at the start and after
+  # every newline except a final one, where String#lines splits. Empty text has no line to prefix.
+  def indent_lines(text, prefix)
+    return +'' if text.empty?
+
+    prefix.include?('\\') ? text.gsub(/^/) { prefix } : text.gsub(/^/, prefix)
+  end
+
   # Operator opcodes fall back to a one-argument send; reuse compile_send's
   # MONO/TYPED resolution. ADDI/SUBI pass the immediate as an expression rather
   # than borrowing a possibly live register.
@@ -1186,7 +1194,7 @@ class CodeGen
     send = compile_send(send_insn, self_implicit: false, irep: irep,
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{dest_reg}", call_arguments: [argument])
-    send.lines.map { |line| "  #{line}" }.join
+    indent_lines(send, '  ')
   end
 
   # A direct super call passes the argument count the target accepts: mandatory positionals, then up to its optionals.
