@@ -151,6 +151,13 @@ bool reads_only(const std::vector<const Node *> &body, const std::string &reg) {
 // The inlined bodies nested in one another (--inline=device): a call past this depth stays a call.
 constexpr int kMaxInlineDepth = 4;
 
+// The half-precision helpers (the __nfcxx_half and __nfcxx_half2 functions: constructors, conversions, operators) are
+// inlined at any depth: they sit under the flash kernel's call chain, past the depth limit, and their calls cost more than
+// their bodies in the static count (a call is a frame and an ABI move each time).
+bool always_inline(const std::string &name) {
+  return name.find("__nfcxx_half") != std::string::npos;
+}
+
 // A special register name of the GPU (tid.x, ctaid.y, ...): the Ruby's special_register?.
 bool special_register(const std::string &name) {
   size_t dot = name.find('.');
@@ -1052,7 +1059,7 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     expect(*ty, *callee->ret);
   }
   if (callee->sret && head_of(args[0]) != "sret") throw BadIR("call of " + cname + " without its sret argument");
-  if (g_inline_device && inline_depth_ < kMaxInlineDepth && inline_ok(callee)) {
+  if (g_inline_device && (inline_depth_ < kMaxInlineDepth || always_inline(cname)) && inline_ok(callee)) {
     inline_call(callee, x, dest);
     return;
   }
@@ -1518,7 +1525,7 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
     }
     if (aliased.empty()) return;
     const Node &sym = at(c, 2);
-    if (!module_fns || depth >= kMaxInlineDepth || !(sym.kind == Node::Sym && sym.sig == '&')) {
+    if (!module_fns || (depth >= kMaxInlineDepth && !always_inline(sym.text)) || !(sym.kind == Node::Sym && sym.sig == '&')) {
       sra_fail(out, __LINE__);
       return;
     }
