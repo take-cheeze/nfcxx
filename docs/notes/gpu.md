@@ -274,7 +274,17 @@ pointers; slots and `set` registers are Function variables; `if` and `loop` are 
 The work-item indices are Input builtins as `size_t` vectors: Intel's IGC segfaults on a `uint` vector for `LocalInvocationId`.
 It is separate from the Vulkan emitter (`pathb-spirv-emit.rb`): different memory model and built-ins.
 
-Refused (exit 3): trap, checked division and shifts, cf2i, bool in memory, 1- and 2-byte integers, and calls between functions.
+Lowered beyond the first kernels: `switch` (an `OpSwitch` on a 32- or 64-bit integer, with C fallthrough; a `goto` from the
+switch to the label after it is the merge block), calls between module functions (`OpFunctionCall`; a function that another
+calls is not an entry point, and a recursive call is refused), and static objects (`global`: a zero-initialized `static` is a
+Workgroup variable, uninitialized as in the PTX and AMD emitters; any other is a CrossWorkgroup variable with a null
+initializer; `bitcast` of `@"name"` and the loads, stores and indexing through it). `helper.ir` and `switch.ir` validate.
+
+Refused (exit 3): trap, the checks that trap (`nonnull`, `bounds`: a SPIR-V kernel has no abort, and the launchers expect a
+trap), checked division and shifts, cf2i, bool in memory, 1- and 2-byte integers, a `goto` other than to the label after its
+switch, calls of intrinsics other than the GPU indices (atomics, warp shuffles and votes, barriers), initialized static data,
+and aggregates. The barrier (`__nfcxx_syncthreads`) is not lowered yet either; `shared.ir` and `memory2.ir` stop on
+`bounds` and on bool slots, so static data alone unlocks no device test.
 
 `tests/gpu/spirv/run.sh` lowers `tests/gpu/device/vecadd.ir`, checks the golden, assembles and validates it (`spirv-as`,
 `spirv-val`; nixpkgs: `nix-build '<nixpkgs>' -A spirv-tools`), and runs it on the Arc B60 through OpenCL (`launch.c`,
@@ -287,7 +297,8 @@ slabs on both (#342). The ggml-sycl rung tests (`tests/gpu/ggml/`, fill, diag, u
 `docs/notes/ggml-sycl.md`. The runners need `spirv-as`/`spirv-val` (`SPIRV_TOOLS_BIN` or `PATH`) and the oneAPI runtime, which
 `scripts/oneapi-env.sh` sets up (#358).
 
-Not done: the checked operations and calls between functions, and running through SYCL's own kernel bundles (OpenCL is used).
+Not done: the checked operations (they need an abort SPIR-V kernels do not have), the intrinsics, and running through SYCL's own
+kernel bundles (OpenCL is used).
 
 ## AMD GPUs (ROCm): `tools/pathb-amdgpu-emit`
 
