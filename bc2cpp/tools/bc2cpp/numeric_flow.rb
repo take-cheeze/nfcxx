@@ -171,6 +171,7 @@ module NumericFlow
   #
   # Returns index -> state (an Array of masks, nil for an unreachable
   # instruction), or nil when the irep is not modelled. Incoming state arrays are read-only and may be shared.
+  # With +deltas+ (the default when sharing) the index -> state map is a States (see delta_worklist).
   # Slots follow the nregs real registers, in ivar_slots order. +writes+, when given, receives for
   # each register the union of every value any instruction stores into it (what
   # a block created earlier may see when it runs later).
@@ -181,7 +182,8 @@ module NumericFlow
   # (NumericFlow.table), keeps the run's facts in a Ctx with the oracle's optional methods looked up once, and joins
   # without allocating when nothing grows. It asks the
   # oracle the same questions, with the same arguments, in the same order as before; only its own bookkeeping changed.
-  def states(irep, oracle, opaque_regs, writes = nil, share_states: ENV['BC2CPP_NUMERIC_SHARE_STATES'] != '0')
+  def states(irep, oracle, opaque_regs, writes = nil, share_states: ENV['BC2CPP_NUMERIC_SHARE_STATES'] != '0',
+             deltas: ENV['BC2CPP_NUMERIC_STATE_DELTAS'] != '0')
     program = BytecodeIR.for(irep)
     return nil unless program.resolved?
     return nil if program.handlers? && !program.handlers_resolved?
@@ -230,6 +232,11 @@ module NumericFlow
     work = [0]
     queued = Array.new(n, false)
     queued[0] = true
+    if share_states && deltas
+      chain = context_edges ? chain_links(steps, succ, raises, context_edges) : table.chain
+      return delta_worklist(instructions, steps, c, ins, outs, work, queued, rank, raises, succ, chain)
+    end
+
     until work.empty?
       i = work.shift
       queued[i] = false
@@ -279,6 +286,223 @@ module NumericFlow
       end
     end
     ins
+  end
+
+  # NUMERIC_STATE_DELTAS: the worklist of #states, visiting, transferring, joining and asking the oracle exactly as
+  # it does, but the state entering a chain instruction (see chain_links) whose one incoming state was written into
+  # a scratch buffer is kept as VIRTUAL: the entries the previous instruction changed, logged against its own entry
+  # state. A transfer edits one of two scratch buffers instead of a new Array; any other stored state is materialized.
+  # Soundness: a VIRTUAL entry never changes (its only edge comes from s - 1, which is revisited only after ins[s - 1]
+  # changed, and #unvirtual materializes ins[s] before that), so its delta stays valid. See
+  # docs/bc2cpp-numeric-flow-state.md.
+  def delta_worklist(instructions, steps, c, ins, outs, work, queued, rank, raises, succ, chain)
+    oracle = c.oracle
+    irep = c.irep
+    context_edges = c.context_edges
+    pb = c.pb
+    size = ins[0].size
+    sa = Array.new(size)
+    sb = Array.new(size)
+    log = []
+    dpos = Array.new(ins.size)
+    # The scratch buffer holding the entry state of instruction +cursor+, valid for the next visit only.
+    cursor = -1
+    cursor_buf = nil
+    until work.empty?
+      i = work.shift
+      queued[i] = false
+      st = ins[i]
+      if st.equal?(VIRTUAL)
+        if cursor == i
+          st = cursor_buf
+        else
+          # A check may freeze states at the solver boundary; scratch buffers are then replaced, never written.
+          sa = Array.new(size) if sa.frozen?
+          st = replay_into(sa, i, ins, log, dpos)
+        end
+      end
+      cursor = -1
+      next unless st
+
+      insn = instructions[i].source
+      step = steps[i]
+      spare = st.equal?(sa) ? sb : sa
+      if spare.frozen?
+        spare = Array.new(size)
+        st.equal?(sa) ? sb = spare : sa = spare
+      end
+      c.spare = spare
+      out = step_transfer(i, insn, step, st, c)
+      c.spare = nil
+      if (handlers = raises[i])
+        edge = step_raise_state(step, st, out, c)
+        handlers.each do |target|
+          old = ins[target]
+          merged = join_state(old, edge, pb, true)
+          next if merged.equal?(old)
+
+          if old
+            unvirtual(target, old, ins, outs, log, dpos)
+          elsif merged.equal?(sa) || merged.equal?(sb)
+            # Later handler targets share this copy, as they share +edge+ itself.
+            merged = edge = materialize(merged)
+          end
+          ins[target] = merged
+          next if queued[target]
+
+          queued[target] = true
+          enqueue_worklist(work, rank, target)
+        end
+      end
+      next if outs[i] == out
+
+      targets = context_edges&.key?(i) ? context_edges.fetch(i) : succ[i]
+      # A call that never returns (`raise`) has no normal successor; its handler edges are above.
+      targets = EMPTY if c.noreturn && oracle.noreturn_call?(irep, i, insn)
+      scratch = out.equal?(sa) || out.equal?(sb)
+      if scratch && targets.size == 1 && chain[s = targets[0]] && ins[s].nil?
+        # Until #unvirtual stores it, the last out of i is the content of ins[s] (an earlier noreturn visit may have
+        # stored another).
+        outs[i] = nil
+        record_delta(log, dpos, i, st, out)
+        ins[s] = VIRTUAL
+        cursor = s
+        cursor_buf = out
+        queued[s] = true
+        enqueue_worklist(work, rank, s)
+        next
+      end
+
+      out = materialize(out) if scratch
+      outs[i] = out
+      targets.each do |s|
+        edge = step_refine_edge(step, i, s, out, c)
+        next unless edge
+
+        s = step_thread_class_test(steps, step, i, s, edge, c) if c.tb
+        old = ins[s]
+        raise "NumericFlow: a join reached the VIRTUAL state of #{s} in #{irep.label}" if old.equal?(VIRTUAL)
+
+        merged = join_state(old, edge, pb, true)
+        next if merged.equal?(old)
+
+        unvirtual(s, old, ins, outs, log, dpos) if old
+        ins[s] = merged
+        next if queued[s]
+
+        queued[s] = true
+        enqueue_worklist(work, rank, s)
+      end
+    end
+    States.new(ins, log, dpos)
+  end
+
+  # The marker of a state kept as a delta (see delta_worklist); never a state itself.
+  VIRTUAL = false
+
+  # ins[t] is about to change from +old+: a VIRTUAL ins[t + 1] is the out of t computed from +old+, so it becomes an
+  # Array now, and the last out of t (outs[t]) with it.
+  def unvirtual(t, old, ins, outs, log, dpos)
+    return unless ins[t + 1].equal?(VIRTUAL)
+
+    state = materialize(old)
+    apply_delta(state, log, dpos[t])
+    ins[t + 1] = state
+    outs[t] = state
+  end
+
+  # A new Array with +state+'s entries. Not #dup: that would share a buffer with a scratch the flow keeps writing.
+  def materialize(state)
+    copy = Array.new(state.size)
+    copy[0, state.size] = state
+    copy
+  end
+
+  # Logs where +out+ differs from +st+, the out and entry state of instruction +i+: a count, then position/value
+  # pairs. Revisits append a new record; dpos[i] names the latest.
+  def record_delta(log, dpos, i, st, out)
+    at = log.size
+    dpos[i] = at
+    log << 0
+    return if out.equal?(st)
+
+    k = 0
+    size = st.size
+    while k < size
+      v = out[k]
+      log << k << v unless v.equal?(st[k])
+      k += 1
+    end
+    log[at] = (log.size - at - 1) / 2
+  end
+
+  def apply_delta(state, log, at)
+    q = at + 1
+    last = q + 2 * log[at]
+    while q < last
+      state[log[q]] = log[q + 1]
+      q += 2
+    end
+    state
+  end
+
+  # Fills +dst+ with the entry state of VIRTUAL instruction +j+: the nearest Array (from +known+ when given, else ins)
+  # before it, then the deltas of the instructions in between.
+  def replay_into(dst, j, ins, log, dpos, known = nil)
+    k = j - 1
+    k -= 1 while ins[k].equal?(VIRTUAL) && !known&.[](k)
+    dst[0, dst.size] = known&.[](k) || ins[k]
+    while k < j
+      apply_delta(dst, log, dpos[k])
+      k += 1
+    end
+    dst
+  end
+
+  # The per-instruction states of a delta run (see delta_worklist): index -> state as #states returns it, VIRTUAL
+  # entries rebuilt on first read and kept. Array-like for its readers (#[], #each, #to_a / #to_ary, #==).
+  class States
+    include Enumerable
+
+    def initialize(ins, log, dpos)
+      @ins = ins
+      @log = log
+      @dpos = dpos
+      @built = nil
+    end
+
+    def size = @ins.size
+    alias length size
+
+    def [](index)
+      return to_a[index] unless index.is_a?(Integer)
+
+      index += @ins.size if index.negative?
+      state = @ins[index]
+      return state unless state.equal?(VIRTUAL)
+
+      built = (@built ||= Array.new(@ins.size))
+      built[index] ||= NumericFlow.replay_into(Array.new(@ins[0].size), index, @ins, @log, @dpos, built)
+    end
+
+    def each
+      return enum_for(:each) unless block_given?
+
+      @ins.size.times { |index| yield self[index] }
+      self
+    end
+
+    def to_a = Array.new(@ins.size) { |index| self[index] }
+    alias to_ary to_a
+
+    def ==(other)
+      return true if equal?(other)
+      return false unless other.respond_to?(:to_ary)
+
+      to_a == other.to_ary
+    end
+
+    def inspect = "#<NumericFlow::States #{to_a.inspect}>"
   end
 
   # Reverse-postorder rank of every instruction over the edges the worklist follows. Only the visit order depends on
@@ -391,7 +615,8 @@ module NumericFlow
   Step = Struct.new(:op, :kind, :call, :silent, :branch, :a, :b, :ivar, :goto, :sym, :result_write)
 
   # The flow's per-Program table: whether every op is modelled, and the Step of each instruction (nil when not).
-  Table = Struct.new(:supported, :steps, :load_readers)
+  # +chain+ is #chain_links over the program's own edges (a run with context edges derives its own).
+  Table = Struct.new(:supported, :steps, :load_readers, :chain)
 
   # NumericFlow's Step table for +program+, derived once from the program's facts and kept in the program's one
   # analysis slot (BytecodeIR::Program#numeric_flow_table). It holds bytecode facts only, never an oracle answer.
@@ -411,8 +636,32 @@ module NumericFlow
         (readers[step.b] ||= []) << step.a
       end
       readers.transform_values! { |registers| registers.uniq.freeze }
-      Table.new(supported, steps, readers.freeze).freeze
+      chain = (chain_links(steps, program.successor_lists, program.raise_targets, nil) if supported)
+      Table.new(supported, steps, readers.freeze, chain).freeze
     end
+  end
+
+  # NUMERIC_STATE_DELTAS: true at +s+ when the flow's only edge into +s+ is the unrefined fall-through from s - 1
+  # (no branch or RAISEIF there, so step_refine_edge and step_thread_class_test return it unchanged).
+  def chain_links(steps, succ, raises, context_edges)
+    n = steps.length
+    # 1 for the fall-through from the previous instruction, 2 for any other edge: only exactly 1 qualifies.
+    incoming = Array.new(n, 0)
+    k = 0
+    while k < n
+      targets = context_edges&.key?(k) ? context_edges.fetch(k) : succ[k]
+      targets.each { |s| incoming[s] += s == k + 1 ? 1 : 2 }
+      raises[k]&.each { |s| incoming[s] += 2 }
+      k += 1
+    end
+    chain = Array.new(n, false)
+    s = 1
+    while s < n
+      prev = steps[s - 1]
+      chain[s] = incoming[s] == 1 && prev.branch.nil? && prev.op != :RAISEIF
+      s += 1
+    end
+    chain.freeze
   end
 
   # JMPUW_PLAIN: with no catch handler in the irep, vm.c's OP_JMPUW never throws to an ensure and is exactly
@@ -504,7 +753,7 @@ module NumericFlow
     # The element block starts right after the ivar slots (one entry per register; see states).
     # Where the element block starts; nil for a ctx built from a Hash, whose layout has no element block.
     attr_accessor :elem_base
-    attr_accessor :load_readers, :widened_slots
+    attr_accessor :load_readers, :widened_slots, :spare
     attr_accessor :elide_result_copies, :elide_read_copies
     attr_writer :elide_load_copies
 
@@ -513,6 +762,7 @@ module NumericFlow
       @elide_load_copies = false
       @elide_result_copies = false
       @elide_read_copies = false
+      @spare = nil
       @irep = irep
       @oracle = oracle
       @opaque = opaque
@@ -860,7 +1110,7 @@ module NumericFlow
       # SETIDX writes no register but may call a user #[]=.
       return state unless step_silent_call?(step, state, c)
 
-      out = state.dup
+      out = fresh(state, c)
       refresh_slots(out, c)
       return out
     end
@@ -871,7 +1121,7 @@ module NumericFlow
       slot = c.slot_of[step.ivar]
       return state unless slot
 
-      out = state.dup
+      out = fresh(state, c)
       out[slot] = state[step.b]
       # Registers loaded from the old value no longer mirror the slot.
       clear_provenance(out, pb, nregs, slot - nregs + 1)
@@ -898,11 +1148,11 @@ module NumericFlow
       if c.elide_result_copies
         out = copy_reg_write(state, a, mask, c)
       else
-        out = state.dup
+        out = fresh(state, c)
         set_reg(out, a, mask, c)
       end
       if step_silent_call?(step, state, c)
-        out = out.dup if out.equal?(state)
+        out = fresh(out, c) if out.equal?(state)
         refresh_slots(out, c)
       end
       return out
@@ -911,7 +1161,7 @@ module NumericFlow
     oracle = c.oracle
     irep = c.irep
     if kind == K_CALL
-      out = state.dup
+      out = fresh(state, c)
       # A block result needs its own proof: `break` replaces the callee's answer.
       call = step.call
       mask = if call == C_SEND
@@ -949,7 +1199,7 @@ module NumericFlow
       end
     end
 
-    out = state.dup
+    out = fresh(state, c)
     case kind
     when K_LOADI
       set_reg(out, a, INT, c)
@@ -1056,6 +1306,17 @@ module NumericFlow
     end
   end
 
+  # The writable copy of +state+ a transfer edits: the run's spare scratch buffer when the delta flow lent one (see
+  # delta_worklist; at most one copy per transfer), else a new Array.
+  def fresh(state, c)
+    buf = c.spare
+    return state.dup unless buf
+
+    c.spare = nil
+    buf[0, buf.size] = state
+    buf
+  end
+
   # Equal class masks alone are insufficient: rewriting a value still invalidates aliases and tests.
   def copy_reg_write(state, r, mask, c, provenance = 0)
     value = c.opq[r] ? OTHER : mask
@@ -1065,7 +1326,7 @@ module NumericFlow
       return state
     end
 
-    out = state.dup
+    out = fresh(state, c)
     set_reg(out, r, mask, c)
     out[c.pb + r] = provenance unless provenance.zero?
     out
