@@ -58,7 +58,21 @@ def marker_asm(il)
   helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map do |h|
     ASM_HELPERS.fetch(h) { error_exit("no assembly helper for #{h}") }
   end
-  (weak + helpers).map { |line| "#{line}\n" }.join
+  # `# pathb-alias KIND NAME TARGET [weak]` (one per IR alias form, from scripts/pathb-qbe-emit.rb's append_weak): a
+  # global symbol NAME that is TARGET, typed by KIND (function, object or ifunc). QBE has no aliases, so this is the .set.
+  aliases = il.scan(/^# pathb-alias (\S+) (\S+) (\S+)( weak)?$/).flat_map do |kind, name, target, weak|
+    type = { "function" => "@function", "ifunc" => "@gnu_indirect_function", "object" => "@object" }.fetch(kind) do
+      error_exit("no symbol type for alias kind #{kind}")
+    end
+    ["\t#{weak ? '.weak' : '.globl'} #{name}", "\t.type #{name}, #{type}", "\t.set #{name}, #{target}"]
+  end
+  # `# pathb-startup SECTION PRIO SYM`: a (constructor)/(destructor) function's pointer in .init_array/.fini_array, as
+  # scripts/pathb-qbe-emit.rb's emit_startup_tables does (one entry per function; a priority P goes to SECTION.PPPPP).
+  startup = il.scan(/^# pathb-startup (\S+) (\d+) (\S+)$/).map do |sect, prio, sym|
+    sect = sect + format(".%05d", prio.to_i) if prio.to_i != 0
+    ["\t.section #{sect},\"aw\"", "\t.align 8", "\t.quad #{sym}"]
+  end
+  (weak + helpers + aliases + startup.flatten(1)).map { |line| "#{line}\n" }.join
 end
 
 # The SSA text of the file, from scripts/pathb-ssa.rb. Its own stderr is passed through, so a function it cannot convert
@@ -119,6 +133,16 @@ def live_names(forms)
 
     live[name] = true
     work << name
+  end
+  # An alias names a live symbol: its target (for an ifunc, the resolver) is kept, though nothing else refers to it.
+  forms.each do |f|
+    next unless head(f) == "alias"
+
+    target = (f[2].respond_to?(:raw) ? f[2].raw : f[2].to_s).delete('"')
+    next unless defs.key?(target) && !live.key?(target)
+
+    live[target] = true
+    work << target
   end
   until work.empty?
     refs = {}
@@ -182,6 +206,9 @@ usage_exit unless args.size == 1
 
 file = args.first
 ssa = convert(file, ld_trap)
+# The x87 ABI thunks (`(x87-thunk ...)` forms: long double through the x87 helpers) are not emitted by this route. A
+# function that reaches one would name a symbol the module does not define, so the module is refused (see below).
+x87_forms = read_forms(File.read(file)).select { |f| head(f) == "x87-thunk" }
 skipped = []
 # A global the emitter refuses is reported and left out, so it does not stop the functions that do not use it.
 globals = read_forms(ssa).select { |g| head(g) == "global" }.filter_map do |g|
@@ -216,7 +243,30 @@ rescue QbeUnsupported => e
   skipped << [name, e.message]
 end
 
-il = ([data_text] + bodies).reject(&:empty?).join("\n\n") + "\n"
+# The module's alias forms (IR: (alias NAME TARGET KIND [weak])), kept whatever the pruning: a resolver may be live
+# only through its alias. Each becomes a `# pathb-alias` marker that marker_asm turns into the assembly directives.
+name_of = ->(x) { (x.respond_to?(:raw) ? x.raw : x.to_s).delete('"') }
+alias_markers = read_forms(File.read(file)).select { |f| head(f) == "alias" }.map do |a|
+  weak = a[4] == "weak" ? " weak" : ""
+  "# pathb-alias #{a[3]} #{Qbe.symbol(name_of.call(a[1]))} #{Qbe.symbol(name_of.call(a[2]))}#{weak}"
+end
+
+# The (constructor [PRIO]) and (destructor [PRIO]) functions of the module: their pointers go in the start-up tables.
+startup_markers = read_forms(ssa).select { |f| head(f) == "ssa-function" }.flat_map do |f|
+  name = Qbe.symbol(name_of.call(f[1]))
+  f.drop(2).select { |p| %w[constructor destructor].include?(head(p)) }.map do |p|
+    sect = head(p) == "constructor" ? ".init_array" : ".fini_array"
+    prio = p.length > 1 ? Qbe.int_lit(p[1]) : 0
+    "# pathb-startup #{sect} #{prio} #{name}"
+  end
+end
+
+il = ([data_text] + bodies + alias_markers + startup_markers).reject(&:empty?).join("\n\n") + "\n"
+x87_names = x87_forms.map { |f| Qbe.symbol((f[2].respond_to?(:raw) ? f[2].raw : f[2].to_s).delete('"')) }
+if il.include?("$__nfcxx_x87") || x87_names.any? { |n| il.include?("$#{n}") }
+  warn "pathb-ssa-build: refused: #{File.basename(file)}: calls an x87 ABI thunk (not emitted by the SSA route yet)"
+  exit EXIT_PARTIAL
+end
 asm, qbe_err = assemble(il)
 error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
 asm += marker_asm(il)
