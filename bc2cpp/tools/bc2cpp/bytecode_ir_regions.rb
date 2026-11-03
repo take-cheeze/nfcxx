@@ -186,14 +186,24 @@ module BytecodeIR
       by_op = indices_by_op
       return by_op.fetch(ops[0], EMPTY_INDICES) if ops.size == 1
 
-      (@indices_with_op ||= {})[ops] ||= begin
-        lists = ops.uniq.filter_map { |op| by_op[op] }
-        if lists.size > 1
-          lists.flatten.sort!.freeze
+      (@indices_with_op ||= {})[ops] ||= merge_op_indices(ops, by_op)
+    end
+
+    # The per-op lists are disjoint, so a repeated op is skipped and one present op's list is answered as is.
+    def merge_op_indices(ops, by_op)
+      first = nil
+      merged = nil
+      ops.each_with_index do |op, k|
+        list = by_op[op]
+        next unless list && ops.index(op) == k
+
+        if first.nil?
+          first = list
         else
-          lists.first || EMPTY_INDICES
+          (merged ||= first.dup).concat(list)
         end
       end
+      merged ? merged.sort!.freeze : (first || EMPTY_INDICES)
     end
 
     def indices_by_op
