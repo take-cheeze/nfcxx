@@ -85,6 +85,26 @@ def tokenize(s)
   toks
 end
 
+# A literal the IR writes in a form Integer() or Float() does not read: a hex integer (the value of its type, as canon
+# gives it) and an infinity (1e999 is read by Float as the same value). NaN is left as written: Float() cannot read it.
+def normalise_literals(x)
+  return x unless x.is_a?(Array)
+
+  x = x.map { |y| normalise_literals(y) }
+  return x unless head(x) == "const" && x.size >= 3 && x[1].is_a?(String) && x[2].is_a?(String)
+
+  type, val = x[1], x[2]
+  if float_type?(type)
+    x[2] = "1e999" if val == "+Infinity"
+    x[2] = "-1e999" if val == "-Infinity"
+  elsif val.match?(/\A[-+]?0x\h+\z/) && INT_TYPES.key?(type)
+    x[2] = canon(Integer(val, 16), type).to_s
+  elsif val.match?(/\A[-+]?0x\h+\z/) && type == "bool"
+    x[2] = canon(Integer(val, 16), type).to_s
+  end
+  x
+end
+
 def read_forms(text)
   stack = [[]]
   tokenize(text).each do |t|
@@ -100,7 +120,7 @@ def read_forms(text)
   end
   raise Fail, "unbalanced parentheses" unless stack.size == 1
 
-  stack[0]
+  normalise_literals(stack[0])
 end
 
 def sx(x)

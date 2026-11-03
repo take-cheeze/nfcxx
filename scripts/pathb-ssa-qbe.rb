@@ -33,6 +33,9 @@ module Qbe
   FBIN = { "fadd" => "add", "fsub" => "sub", "fmul" => "mul", "fdiv" => "div" }.freeze
   FCMP = { "lt.f" => "clt", "le.f" => "cle" }.freeze
   CMP_HEADS = (CMP.keys + FCMP.keys).freeze
+  # The access of a bit-field's storage unit, by its size in bytes (pathb-qbe-emit.rb's BF_LOAD and BF_STORE).
+  BF_LOAD = { 1 => "loadub", 2 => "loaduh", 4 => "loadw", 8 => "loadl" }.freeze
+  BF_STORE = { 1 => "storeb", 2 => "storeh", 4 => "storew", 8 => "storel" }.freeze
 
   module_function
 
@@ -53,6 +56,7 @@ module Qbe
 
   def size(t)
     t = strip_const(t)
+    return size(t[1]) if head(t) == "volatile"
     return 8 if head(t) == "ptr"
     return size(t[1]) * int_lit(t[2]) if head(t) == "array"
 
@@ -88,11 +92,27 @@ module Qbe
     x[1]
   end
 
-  def int_lit(s) = s.is_a?(Integer) ? s : Integer(s, 10)
+  # An integer literal: decimal, or hexadecimal with a 0x prefix (the reader keeps the spelling of a literal).
+  def int_lit(s)
+    return s if s.is_a?(Integer)
+    return Integer(s, 16) if s.match?(/\A0[xX]/)
+    return -Integer(s[1..], 16) if s.match?(/\A-0[xX]/)
+
+    Integer(s, 10)
+  end
+
+  # A constant of type t, wrapped to its QBE class (w: 32 bits, l: 64 bits), as the target computes it.
+  def wrap_lit(v, t)
+    bits = cls(t) == "w" ? 32 : 64
+    v &= (1 << bits) - 1
+    v >= 1 << (bits - 1) ? v - (1 << bits) : v
+  end
 
   # A float literal of type t: the value is rounded to t as the interpreter rounds it, then written as an exact hex float
   # (QBE reads it with scanf). Infinities are written as inf; NaN is not a literal of the subset.
   def float_lit(t, text)
+    raise QbeUnsupported, "NaN literal" if text.to_s.match?(/nan/i)
+
     v = round_float(Float(text.to_s), strip_const(t))
     raise QbeUnsupported, "NaN literal" if v.nan?
 
@@ -116,9 +136,14 @@ module Qbe
     state[name] = build_data(g, by_name, state)
   end
 
+  def global_flags(g) = g.map { |x| x.is_a?(Array) ? head(x) : x }
+
+  # An extern global is declared elsewhere: nothing is emitted, and a reference to it is a reference to that symbol.
+  # Otherwise the data is emitted with the linkage of the existing emitter: thread-local when (thread), exported unless
+  # (static), and a `# pathb-weak` marker for (weak) (the driver writes the .weak directive; see scripts/pathb-ssa-build).
   def build_data(g, by_name, state)
-    flags = g.map { |x| x.is_a?(Array) ? head(x) : x }
-    return nil if flags.include?("extern") || flags.include?("thread")
+    flags = global_flags(g)
+    return :extern if flags.include?("extern")
 
     init = g.find { |x| head(x) == "init" } or return nil
     size = int_lit(g[3])
@@ -137,6 +162,8 @@ module Qbe
       when "addr"
         off, _type, target, add = item[1..]
         return nil unless target.is_a?(Ref) && target.sigil == "@" && by_name.key?(target.raw)
+        # The address of a thread-local object is not a link-time constant: it is left out.
+        return nil if global_flags(by_name[target.raw]).include?("thread")
         # A global may point into itself; a longer cycle of addresses is left out (global_data returns nil for it).
         return nil unless target.raw == g[1].raw || global_data(by_name[target.raw], by_name, state)
 
@@ -154,7 +181,9 @@ module Qbe
     end
     parts << "z #{size - cur}" if size > cur
     parts = ["z #{size}"] if parts.empty?
-    "data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
+    linkage = (flags.include?("thread") ? "thread " : "") + (flags.include?("static") ? "" : "export ")
+    marker = flags.include?("weak") ? "# pathb-weak #{symbol(g[1].raw)}\n" : ""
+    "#{marker}#{linkage}data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
   end
 
   # One function. An SSA register %N is %vN, a parameter %k is %pk, and an object of a slot that was not promoted
@@ -168,7 +197,13 @@ module Qbe
       @globals = globals
       @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
-      @params = form.find { |x| head(x) == "params" }.drop(1).select { |p| head(p) == "param" }
+      all_params = form.find { |x| head(x) == "params" }.drop(1)
+      # Only a plain `param` is emitted. An sret or byval parameter is not dropped silently: a body that uses it would
+      # name a register nothing defines.
+      other = all_params.find { |p| head(p) != "param" }
+      raise QbeUnsupported, "#{head(other)} parameter" if other
+
+      @params = all_params
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
@@ -189,6 +224,10 @@ module Qbe
         @label = block_label(@cur)
         @lines << "@#{@label}"
         items = b[2..]
+        # A trap or unreachable ends the block in QBE (hlt): what follows it in the SSA block is dead, and QBE rejects an
+        # instruction after hlt, so the block is cut there.
+        halt = items.index { |it| %w[trap unreachable].include?(head(it)) }
+        items = items[0..halt] if halt
         items[0...-1].each { |item| item_lines(item) }
         pending_phi_operands(@cur)
         item_lines(items.last) if items.any?
@@ -214,8 +253,11 @@ module Qbe
     def allocs
       @slots.each_with_index do |s, i|
         @slot["$#{s[1].raw}"] = "%o#{i}"
-        size = Qbe.size(s[2])
-        @lines << "  %o#{i} =l alloc#{size >= 8 ? 8 : size} #{size}"
+        # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
+        size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
+        align = s.size > 4 ? Qbe.int_lit(s[4]) : size
+        a = [16, 8, 4, 2].find { |k| align >= k } || 1
+        @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max}"
       end
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
     end
@@ -343,8 +385,16 @@ module Qbe
       case x
       when Ref
         if x.sigil == "@"
-          raise QbeUnsupported, "global #{x.raw}" unless @globals[x.raw]
-
+          info = @globals.fetch(x.raw) { raise QbeUnsupported, "global #{x.raw}" }
+          # A weak undefined object is loaded through the GOT in the existing emitter; that is not modelled here.
+          raise QbeUnsupported, "weak reference to #{x.raw}" if info[:weak] && info[:extern]
+          # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
+          # existing emitter does it).
+          if info[:thread]
+            t = fresh
+            @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(x.raw)}"
+            return t
+          end
           return "$#{Qbe.symbol(x.raw)}"
         end
         raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
@@ -359,7 +409,7 @@ module Qbe
         when "const"
           return Qbe.float_lit(x[1], x[2]) if float_type?(x[1])
 
-          Qbe.int_lit(x[2]).to_s
+          Qbe.wrap_lit(Qbe.int_lit(x[2]), x[1]).to_s
         when "null" then "0"
         when "addr" then op(x[1])
         when "addr" then op(x[1])
@@ -390,7 +440,17 @@ module Qbe
       # block keep their order.
       when "store", "store.v" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
       # `(copy N DST SRC)`: N bytes from SRC to DST (the interpreter's copy_cells). QBE's blit copies a byte count.
-      when "copy" then @lines << "  blit #{op(item[3])}, #{op(item[2])}, #{Qbe.int_lit(item[1])}"
+      when "copy"
+        # The addresses of a copy are pointers. A register holding a by-value aggregate (a byval parameter) is not one:
+        # that ABI case is refused, not emitted.
+        [item[2], item[3]].each do |a|
+          next unless a.is_a?(String) && a.start_with?("%")
+
+          t = @types[a]
+          raise QbeUnsupported, "copy of an address with no declared type #{a}" if t.nil?
+          raise QbeUnsupported, "copy of the by-value aggregate #{a}" unless head(strip_const(t)) == "ptr"
+        end
+        @lines << "  blit #{op(item[3])}, #{op(item[2])}, #{Qbe.int_lit(item[1])}"
       when "br"
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
@@ -405,11 +465,30 @@ module Qbe
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
-      when "unreachable" then @lines << "  hlt"
+      when "unreachable", "trap" then @lines << "  hlt"
+      when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
       when "bounds" then bounds_lines(item[1], item[2])
+      # A compiler barrier is a call of an empty helper; a fence a call of a helper that executes mfence. QBE has no
+      # fence instruction, so the driver (scripts/pathb-ssa-build) appends the helpers named by the marker comments.
+      when "barrier" then barrier_lines
+      when "fence" then fence_lines
       else raise QbeUnsupported, "statement #{head(item) || sx(item)}"
       end
+    end
+
+    # The helpers the assembly needs ("barrier", "fence"); module_il writes them as marker comments.
+    def asm_helpers = @asm_helpers ||= []
+    public :asm_helpers
+
+    def barrier_lines
+      asm_helpers << "barrier"
+      @lines << "  call $__pathb_barrier()"
+    end
+
+    def fence_lines
+      asm_helpers << "fence"
+      @lines << "  call $__pathb_fence()"
     end
 
     def let_lines(r, t, rv)
@@ -436,6 +515,7 @@ module Qbe
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
       when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
       when "index" then index_lines(dst, rv)
       # A volatile load is an ordinary load in the emitted code: the loads of a block keep their order.
@@ -492,6 +572,106 @@ module Qbe
       scaled = fresh
       @lines << "  #{scaled} =l mul #{i}, #{Qbe.int_lit(rv[3])}"
       @lines << "  #{dst} =l add #{base}, #{scaled}"
+    end
+
+    # Bit-fields, with pathb-qbe-emit.rb's rules: `(bfload T UNIT ADDR BOFF WIDTH)` reads the whole UNIT-byte unit and
+    # extracts WIDTH bits from bit BOFF (little-endian bit numbering), sign- or zero-extended to T. The extraction is a
+    # shift pair, never an `and` with a low mask. `(bfstore T UNIT ADDR BOFF WIDTH VALUE)` replaces those bits of the
+    # unit, leaves the others alone, and stores the whole unit back.
+    def bf_args(x, nargs)
+      raise QbeUnsupported, "#{head(x)} form" unless x.length == nargs
+
+      unit = Qbe.int_lit(x[2])
+      boff = Qbe.int_lit(x[4])
+      width = Qbe.int_lit(x[5])
+      raise QbeUnsupported, "#{head(x)} of a #{unit}-byte unit" unless Qbe::BF_LOAD.key?(unit)
+      raise QbeUnsupported, "#{head(x)}: bits #{boff}+#{width} outside the unit" if width < 1 || boff < 0 || boff + width > unit * 8
+
+      [unit, boff, width]
+    end
+
+    def bf_type!(ty)
+      raise QbeUnsupported, "bit-field of type #{sx(ty)}" unless Qbe::INT_W.include?(ty) || Qbe::INT_L.include?(ty)
+    end
+
+    def bfload_lines(dst, rv)
+      ty = rv[1]
+      bf_type!(ty)
+      unit, boff, width = bf_args(rv, 6)
+      uc = unit == 8 ? "l" : "w"
+      ub = unit * 8
+      t = fresh
+      @lines << "  #{t} =#{uc} #{Qbe::BF_LOAD[unit]} #{op(rv[3])}"
+      if ub - boff - width > 0
+        t2 = fresh
+        @lines << "  #{t2} =#{uc} shl #{t}, #{ub - boff - width}"
+        t = t2
+      end
+      signed = Qbe.signed?(ty)
+      if ub - width > 0
+        t2 = fresh
+        @lines << "  #{t2} =#{uc} #{signed ? 'sar' : 'shr'} #{t}, #{ub - width}"
+        t = t2
+      end
+      tc = Qbe.cls(ty)
+      if tc != uc
+        t2 = fresh
+        @lines << (tc == "l" ? "  #{t2} =l #{signed ? 'extsw' : 'extuw'} #{t}" : "  #{t2} =w copy #{t}")
+        t = t2
+      end
+      @lines << "  #{dst} =#{tc} copy #{t}"
+    end
+
+    def bfstore_lines(x)
+      ty = x[1]
+      bf_type!(ty)
+      unit, boff, width = bf_args(x, 7)
+      uc = unit == 8 ? "l" : "w"
+      ub = unit * 8
+      tc = Qbe.cls(ty)
+      raise QbeUnsupported, "bit-field store of a value of another class" unless Qbe.cls(operand_type(x[6])) == tc
+
+      addr = op(x[3])
+      v = op(x[6])
+      if tc != uc
+        t2 = fresh
+        @lines << (uc == "l" ? "  #{t2} =l extuw #{v}" : "  #{t2} =w copy #{v}")
+        v = t2
+      end
+      old = fresh
+      @lines << "  #{old} =#{uc} #{Qbe::BF_LOAD[unit]} #{addr}"
+      if width < ub
+        t2 = fresh
+        @lines << "  #{t2} =#{uc} shl #{v}, #{ub - width}"
+        v = t2
+        if ub - width - boff > 0
+          t3 = fresh
+          @lines << "  #{t3} =#{uc} shr #{v}, #{ub - width - boff}"
+          v = t3
+        end
+      end
+      clear = ((1 << ub) - 1) ^ (((1 << width) - 1) << boff)
+      nw = v
+      if clear != 0
+        keep = fresh
+        if boff + width == ub
+          # the field is the top of the unit: keep the low bits by a shift pair
+          k1 = fresh
+          @lines << "  #{k1} =#{uc} shl #{old}, #{ub - boff}"
+          @lines << "  #{keep} =#{uc} shr #{k1}, #{ub - boff}"
+        elsif boff.zero?
+          # the field is the bottom of the unit: keep the high bits by a shift pair
+          k1 = fresh
+          @lines << "  #{k1} =#{uc} shr #{old}, #{width}"
+          @lines << "  #{keep} =#{uc} shl #{k1}, #{width}"
+        else
+          signed_clear = uc == "w" && clear >= 1 << 31 ? clear - (1 << 32) : clear
+          @lines << "  #{keep} =#{uc} and #{old}, #{signed_clear}"
+        end
+        nw = fresh
+        @lines << "  #{nw} =#{uc} or #{keep}, #{v}"
+      end
+      @lines << "  #{Qbe::BF_STORE[unit]} #{nw}, #{addr}"
     end
 
     # `(nonnull P)`: a null pointer traps (code 5).
@@ -669,10 +849,17 @@ module Qbe
     gs = forms.select { |g| head(g) == "global" }
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
-    data = gs.filter_map { |g| global_data(g, by_name, state) }
-    supported = gs.to_h { |g| [g[1].raw, true] }.select { |name, _| state[name].is_a?(String) }
-    fns = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, supported).emit.lines.join("\n") }
-    (data + fns).join("\n\n") + "\n"
+    data = gs.filter_map do |g|
+      d = global_data(g, by_name, state)
+      d if d.is_a?(String)
+    end
+    # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
+    flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
+    refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
+                .to_h { |name, f| [name, { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }] }
+    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, refs).emit }
+    helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
+    (data + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
   end
 end
 
