@@ -204,12 +204,13 @@ module Qbe
       @jumper[[default, num]] = labels.last
     end
 
-    # The class and the value text of a switch operand's comparison.
+    # The type of an operand: a constant's or an expression's own type, or the declared type of a register.
     def switch_operand_type(x)
       return x[1] if x.is_a?(Array) && head(x) == "const"
       return "ptr" if x.is_a?(Array) && head(x) == "null"
+      return (CMP_HEADS.include?(head(x)) ? "bool" : x[1]) if expression?(x)
 
-      @types.fetch(x) { raise QbeUnsupported, "switch operand #{sx(x)} has no declared type" }
+      @types.fetch(x) { raise QbeUnsupported, "operand #{sx(x)} has no declared type" }
     end
 
     def switch_lines(num, item)
@@ -297,6 +298,8 @@ module Qbe
       when *Qbe::BIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
       when "wneg" then @lines << "  #{dst} =#{c} sub 0, #{op(rv[2])}"
+      when "cdiv", "crem" then checked_div_lines(dst, t, rv)
+      when "cshl", "cshr" then checked_shift_lines(dst, t, rv)
       when *Qbe::CMP.keys
         oc = Qbe.cls(rv[1])
         @lines << "  #{dst} =w #{Qbe::CMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
@@ -327,6 +330,70 @@ module Qbe
         @lines << "  #{dst} =w ext#{Qbe::EXT[t]} #{op(x)}"
       else
         @lines << "  #{dst} =#{dc} copy #{op(x)}"
+      end
+    end
+
+    # The checks of the interpreter (pathb-ssa.rb, Machine#eval_rv; pathb-egraph.rb, CheckedMachine for the shifts).
+    # Each check is a call `pathb_check(cond, code)` before the operation: the runtime does not return when cond is
+    # nonzero (it traps, or longjmps out in the test driver), so the operation after it is never reached with the
+    # bad operands and no block is split. Codes: 1 division by zero, 2 signed overflow, 3 shift count out of range.
+    def fresh = "%ck#{@temps += 1}"
+
+    def checked_div_lines(dst, t, rv)
+      raise QbeUnsupported, "#{head(rv)} of bool" if t == "bool"
+
+      c = Qbe.cls(t)
+      w, signed = int_info(t)
+      a = op(rv[2])
+      b = op(rv[3])
+      zero = fresh
+      @lines << "  #{zero} =w ceq#{c} #{b}, 0"
+      @lines << "  call $pathb_check(w #{zero}, w 1)"
+      if signed
+        lo = fresh
+        minus_one = fresh
+        both = fresh
+        @lines << "  #{lo} =w ceq#{c} #{a}, #{-(1 << (w - 1))}"
+        @lines << "  #{minus_one} =w ceq#{c} #{b}, -1"
+        @lines << "  #{both} =w and #{lo}, #{minus_one}"
+        @lines << "  call $pathb_check(w #{both}, w 2)"
+      end
+      name = head(rv) == "cdiv" ? (signed ? "div" : "udiv") : (signed ? "rem" : "urem")
+      @lines << "  #{dst} =#{c} #{name} #{a}, #{b}"
+    end
+
+    # The count must be in [0, w): an unsigned comparison of the count against w also rejects a negative count.
+    def checked_shift_lines(dst, t, rv)
+      raise QbeUnsupported, "#{head(rv)} of bool" if t == "bool"
+
+      c = Qbe.cls(t)
+      w, signed = int_info(t)
+      a = op(rv[2])
+      count_cls = Qbe.cls(switch_operand_type(rv[3]))
+      n = op(rv[3])
+      if count_cls == "l" && c == "w"
+        narrowed = fresh
+        @lines << "  #{narrowed} =w copy #{n}"
+        n = narrowed
+      end
+      bad = fresh
+      @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
+      @lines << "  call $pathb_check(w #{bad}, w 3)"
+      if head(rv) == "cshl"
+        shifted = fresh
+        @lines << "  #{shifted} =#{c} shl #{a}, #{n}"
+        canon_lines(dst, t, shifted)
+      else
+        @lines << "  #{dst} =#{c} #{signed ? 'sar' : 'shr'} #{a}, #{n}"
+      end
+    end
+
+    # The value of t in its low bits, sign- or zero-extended as the canonical form of t (a cshl wraps to the type).
+    def canon_lines(dst, t, src)
+      if Qbe::EXT.key?(t)
+        @lines << "  #{dst} =w ext#{Qbe::EXT[t]} #{src}"
+      else
+        @lines << "  #{dst} =#{Qbe.cls(t)} copy #{src}"
       end
     end
 

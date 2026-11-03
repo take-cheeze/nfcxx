@@ -24,10 +24,15 @@ def native_ok(fn_name, arity, inputs, ssa_text)
     return [:fail, "qbe: #{err.lines.first}"] unless st.success?
 
     params = Array.new(arity) { |i| "int a#{i}" }.join(", ")
-    names = Array.new(arity) { |i| "a#{i}" }.join(", ")
-    calls = inputs.map { |args| "  printf(\"%d\\n\", case_main(#{args.join(', ')}));" }.join("\n")
+    # Each input runs under setjmp: the emitted code calls pathb_check(cond, code), which longjmps out with the code
+    # when cond is nonzero, and that input prints "trap" (the interpreter's answer for it).
+    calls = inputs.map do |args|
+      "  if (setjmp(trap_buf)) printf(\"trap\\n\"); else printf(\"%d\\n\", case_main(#{args.join(', ')}));"
+    end.join("\n")
     driver = File.join(dir, "drv.c")
-    File.write(driver, "#include <stdio.h>\nint case_main(#{arity.zero? ? 'void' : params});\n" \
+    File.write(driver, "#include <stdio.h>\n#include <setjmp.h>\nstatic jmp_buf trap_buf;\n" \
+                       "void pathb_check(int cond, int code) { if (cond) longjmp(trap_buf, code); }\n" \
+                       "int case_main(#{arity.zero? ? 'void' : params});\n" \
                        "int main(void) {\n#{calls}\n  return 0;\n}\n")
     File.write(File.join(dir, "case.s"), asm)
     exe = File.join(dir, "prog")
@@ -35,7 +40,7 @@ def native_ok(fn_name, arity, inputs, ssa_text)
     return [:fail, "cc: #{err.lines.first}"] unless st.success?
 
     out, _, st = Open3.capture3(exe)
-    [st.success? ? :ok : :fail, out.split.map(&:to_i)]
+    [st.success? ? :ok : :fail, out.split.map { |t| t == "trap" ? t : t.to_i }]
   end
 end
 
@@ -59,13 +64,13 @@ files.sort.each do |f|
                  .reject(&:empty?)
     # The interpreter's answer for each input (a trap is not a value to compare).
     e = PathbEgraph.parse_fn(main)
+    # A trapping input is compared too: the interpreter's "trap" against the native longjmp.
     want = inputs.map do |args|
-      v = PathbEgraph.run(e, args)
-      v.is_a?(String) ? nil : v
+      PathbEgraph.run(e, args)
     rescue Unsupported
       raise QbeUnsupported, "the interpreter does not model it"
     end
-    keep = inputs.zip(want).reject { |_, w| w.nil? }
+    keep = inputs.zip(want)
     status, got = native_ok("main", arity, keep.map(&:first), opt_text)
     if status == :fail
       totals[:skipped_or_failed] += 1
