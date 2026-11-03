@@ -1059,8 +1059,9 @@ class ClosedWorld
 
   # The facts of each path in `paths`, in order: plain data (Hash, Array, Set, String, Symbol, true/false) with
   # no state and no ENV, so the result can be stored and loaded as it is.
+  # Each file's facts are stored on their own too, so a list with one new or changed file rescans only that file.
   def self.native_facts(paths)
-    Array(paths).map { |path| native_file_facts(path) }
+    Array(paths).map { |path| ScanCache.fetch('closed_world.native_file', [path]) { native_file_facts(path) } }
   end
 
   # The text a native file's identifiers come from: comments removed, and string literals that contain whitespace

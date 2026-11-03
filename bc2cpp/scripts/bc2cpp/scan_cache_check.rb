@@ -138,7 +138,20 @@ Dir.mktmpdir do |tmp|
     warm = [NativeExpressionDevirt.analyze(natives), NativeExpressionDevirt.analyze_exact_class_expressions(natives),
             outside_world_tokens(natives)]
     check.call('the scans return the same with the cache off, cold and warm', plain == cold && cold == warm)
-    check.call('the three scans were stored', Dir.children(File.join(tmp, 'real')).size == 3)
+    real_entries = ->(name) { Dir[File.join(tmp, 'real', "#{name}-*.bin")].size }
+    check.call('the three scans were stored',
+               %w[native_expression_devirt.analyze native_expression_devirt.exact_class outside_world_tokens].all? do |name|
+                 real_entries.call(name) == 1
+               end)
+    check.call('outside_world_tokens stores each file on its own too',
+               real_entries.call('outside_world_tokens.file') == natives.size)
+    extra = File.join(tmp, 'extra.c')
+    File.write(extra, "static mrb_value extra_token_only_here(mrb_state *mrb) { return mrb_nil_value(); }\n")
+    with_extra = outside_world_tokens(natives + [extra])
+    check.call('a list with one more file scans only that file, and the union is a single scan\'s',
+               real_entries.call('outside_world_tokens.file') == natives.size + 1 &&
+               with_extra.to_a == ScanCache.bypass { outside_world_tokens(natives + [extra]) }.to_a &&
+               with_extra.include?('extra_token_only_here'))
 
     puts '-- the stateful scans (ADR 0415): a closed world, the class registrations and the file registrations'
     # What a closed world over `decls` ends up holding from the native sources (the state the scan fills).
@@ -199,6 +212,8 @@ Dir.mktmpdir do |tmp|
                %w[closed_world.native native_expression_devirt.class_registrations native_direct.file_registrations].all? do |name|
                  stored.any? { |file| file.start_with?("#{name}-") }
                end)
+    check.call('the closed world stores each native file\'s facts on their own too',
+               stored.count { |file| file.start_with?('closed_world.native_file-') } == natives.size)
     other_decls = phase.call(stateful, decls: %w[Array Integer Rect])
     check.call('the closed world depends on the declared classes: a warm entry is not reused for another set',
                other_decls[0] == phase.call(nil, decls: %w[Array Integer Rect])[0] && other_decls[0] != warm[0])
