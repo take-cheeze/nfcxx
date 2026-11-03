@@ -5,8 +5,8 @@ require_relative 'operand_schema'
 
 # Decodes a RiteBinary irep's iseq bytes into the Insn stream bc2cpp's passes
 # consume. Typed operands come straight from the decoded operand values; the
-# `args`/`raw` text is synthesized in src/codedump.c's exact print format
-# because diagnostics and generated-code comments still show it.
+# `args`/`raw` text is synthesized on demand in src/codedump.c's exact print
+# format because diagnostics and generated-code comments still show it.
 module InsnDecoder
   # mruby/ops.h, in opcode order (OP_NOP == 0): the table must match the header
   # opcode for opcode, or every later operand decodes wrong.
@@ -164,6 +164,14 @@ module InsnDecoder
       @lines = {}
     end
 
+    def disassembly(insn, name, values, next_pc)
+      rest = text_body(name, values, next_pc)
+      printed = (name == :ARRAY2 ? :ARRAY : name).to_s
+      # codedump is line-oriented and replaces invalid UTF-8 in binary string literals.
+      first = "#{printed}#{sep_for(name, values)}#{rest}".scrub.split("\n", 2).first
+      [first.delete_prefix(printed).strip, (format('%5d %03d ', insn.lineno, insn.addr) + first).rstrip]
+    end
+
     def run
       insns = []
       file = nil
@@ -276,12 +284,25 @@ module InsnDecoder
       shown.any? ? "\t;#{shown.compact.join}" : ''
     end
 
-    def argc(value)
+    def argc_text(value)
       n = value & 0xf
       nk = (value >> 4) & 0xf
       text = "n=#{n == 15 ? '*' : n}"
       text += "|nk=#{nk == 15 ? '*' : nk}" if nk.positive?
-      [Operand.new(:argc, [n == 15 ? nil : n, nk == 15 ? nil : nk, nk.zero?]), text]
+      text
+    end
+
+    def argc_operand(value)
+      n = value & 0xf
+      nk = (value >> 4) & 0xf
+      Operand.new(:argc, [n == 15 ? nil : n, nk == 15 ? nil : nk, nk.zero?])
+    end
+
+    def validate_string_pool(index)
+      entry = @rite.pool.fetch(index)
+      raise "bc2cpp: pool #{index} is not a string" unless entry.kind == :str
+
+      entry
     end
 
     # The disassembly prints a pool string as a C string, so it stops at NUL.
@@ -308,97 +329,184 @@ module InsnDecoder
     def name_op(index) = Operand.new(:name, sym(index))
     def lit(text) = Operand.new(:plit, text)
 
-    # [operand text as codedump prints it, typed operands]; #build adds the
-    # op name and its tab padding.
+    # Typed operands do not construct the diagnostic text.
     # rubocop:disable Metrics/CyclomaticComplexity, Metrics/MethodLength
-    def body(name, v, next_pc)
+    def typed_operands(name, v, next_pc)
       a, b, c = v
       case name
       when :NOP, :CALL, :KEYEND, :RETSELF, :RETNIL, :RETTRUE, :RETFALSE, :STOP, :EXT1, :EXT2, :EXT3
-        ['', []]
-      when :MOVE, :RESCUE then ["R#{a}\tR#{b}#{lv_comment(a, b)}", [r(a), r(b)]]
-      when :LOADL then ["R#{a}\tL[#{b}]#{loadl_comment(b)}#{lv_comment(a)}", [r(a), Operand.new(:pool, b)]]
-      when :LOADI8 then ["R#{a}\t#{b}#{lv_comment(a)}", [r(a), i(b)]]
-      when :LOADINEG then ["R#{a}\t-#{b}#{lv_comment(a)}", [r(a), i(-b)]]
-      when :LOADI16 then ["R#{a}\t#{s16(b)}#{lv_comment(a)}", [r(a), i(s16(b))]]
+        []
+      when :MOVE, :RESCUE then [r(a), r(b)]
+      when :LOADL
+        @rite.pool.fetch(b)
+        [r(a), Operand.new(:pool, b)]
+      when :LOADI8 then [r(a), i(b)]
+      when :LOADINEG then [r(a), i(-b)]
+      when :LOADI16 then [r(a), i(s16(b))]
       when :LOADI32
         n = ((b << 16) + c) & 0xffff_ffff
         n -= 0x1_0000_0000 if n >= 0x8000_0000
-        ["R#{a}\t#{n}#{lv_comment(a)}", [r(a), i(n)]]
-      when :LOADI__1 then ["R#{a}\t(-1)#{lv_comment(a)}", [r(a), lit('-1')]]
+        [r(a), i(n)]
+      when :LOADI__1 then [r(a), lit('-1')]
       # A Symbol list, not a Regexp: a regexp `when` would stop the case from comparing by identity.
       when :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5, :LOADI_6, :LOADI_7
         digit = BytecodeIR::Ops::LOADI_SLOT_VALUE[name]
-        ["R#{a}\t(#{digit})#{lv_comment(a)}", [r(a), lit(digit.to_s)]]
-      when :LOADSYM then ["R#{a}\t:#{sym(b)}#{lv_comment(a)}", [r(a), sym_op(b)]]
-      when :LOADNIL then ["R#{a}\t(nil)#{lv_comment(a)}", [r(a), lit('nil')]]
-      when :LOADSELF then ["R#{a}\t(R0)#{lv_comment(a)}", [r(a), pr(0)]]
-      when :LOADTRUE then ["R#{a}\t(true)#{lv_comment(a)}", [r(a), lit('true')]]
-      when :LOADFALSE then ["R#{a}\t(false)#{lv_comment(a)}", [r(a), lit('false')]]
-      when :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST then ["R#{a}\t#{sym(b)}#{lv_comment(a)}", [r(a), name_op(b)]]
-      when :SETGV, :SETSV, :SETIV, :SETCV, :SETCONST then ["#{sym(b)}\tR#{a}#{lv_comment(a)}", [name_op(b), r(a)]]
-      when :GETMCNST then ["R#{a}\t(R#{a})::#{sym(b)}#{lv_comment(a)}", [r(a), Operand.new(:mcnst, [a, sym(b)])]]
+        [r(a), lit(digit.to_s)]
+      when :LOADSYM then [r(a), sym_op(b)]
+      when :LOADNIL then [r(a), lit('nil')]
+      when :LOADSELF then [r(a), pr(0)]
+      when :LOADTRUE then [r(a), lit('true')]
+      when :LOADFALSE then [r(a), lit('false')]
+      when :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST then [r(a), name_op(b)]
+      when :SETGV, :SETSV, :SETIV, :SETCV, :SETCONST then [name_op(b), r(a)]
+      when :GETMCNST then [r(a), Operand.new(:mcnst, [a, sym(b)])]
       when :SETMCNST
-        ["(R#{a + 1})::#{sym(b)}\tR#{a}#{lv_comment(a)}", [Operand.new(:mcnst, [a + 1, sym(b)]), r(a)]]
-      when :GETUPVAR, :SETUPVAR then ["R#{a}\t#{b}\t#{c}#{lv_comment(a)}", [r(a), i(b), i(c)]]
-      when :GETIDX then ["R#{a}\t(R#{a + 1})", [r(a), pr(a + 1)]]
-      when :GETIDX0 then ["R#{a}\tR#{b}[0]", [r(a), Operand.new(:idx0, b)]]
-      when :SETIDX then ["R#{a}\t(R#{a + 1})\t(R#{a + 2})", [r(a), pr(a + 1), pr(a + 2)]]
-      when :JMP, :JMPUW then [format('%03d', next_pc + s16(a)), [Operand.new(:addr, next_pc + s16(a))]]
+        [Operand.new(:mcnst, [a + 1, sym(b)]), r(a)]
+      when :GETUPVAR, :SETUPVAR then [r(a), i(b), i(c)]
+      when :GETIDX then [r(a), pr(a + 1)]
+      when :GETIDX0 then [r(a), Operand.new(:idx0, b)]
+      when :SETIDX then [r(a), pr(a + 1), pr(a + 2)]
+      when :JMP, :JMPUW then [Operand.new(:addr, next_pc + s16(a))]
       when :JMPIF, :JMPNOT, :JMPNIL
         target = next_pc + s16(b)
-        ["R#{a}\t#{format('%03d', target)}#{lv_comment(a)}", [r(a), Operand.new(:addr, target)]]
+        [r(a), Operand.new(:addr, target)]
       when :SSEND, :SSENDB, :SEND, :SENDB
-        operand, text = argc(c)
-        ["R#{a}\t:#{sym(b)}\t#{text}", [r(a), sym_op(b), operand]]
-      when :SSEND0, :SEND0 then ["R#{a}\t:#{sym(b)}", [r(a), sym_op(b)]]
-      when :BLKCALL then ["R#{a}\t#{b}", [r(a), i(b)]]
+        operand = argc_operand(c)
+        [r(a), sym_op(b), operand]
+      when :SSEND0, :SEND0 then [r(a), sym_op(b)]
+      when :BLKCALL then [r(a), i(b)]
       when :SUPER
-        operand, text = argc(b)
-        ["R#{a}\t#{text}", [r(a), operand]]
+        operand = argc_operand(b)
+        [r(a), operand]
       when :ARGARY, :BLKPUSH
         spec = [(b >> 11) & 0x3f, (b >> 10) & 1, (b >> 5) & 0x1f, (b >> 4) & 1]
-        ["R#{a}\t#{spec.join(':')} (#{b & 0xf})#{lv_comment(a)}",
-         [r(a), Operand.new(:spec, spec), lit((b & 0xf).to_s)]]
+        [r(a), Operand.new(:spec, spec), lit((b & 0xf).to_s)]
       when :ENTER
         enter = [(a >> 18) & 0x1f, (a >> 13) & 0x1f, (a >> 12) & 1, (a >> 7) & 0x1f,
                  (a >> 2) & 0x1f, (a >> 1) & 1, a & 1, (a >> 23) & 1]
         flags = "0x#{a.to_s(16)}"
-        ["#{enter.join(':')} (#{flags})", [Operand.new(:enter, enter), lit(flags)]]
-      when :KEY_P, :KARG then ["R#{a}\t:#{sym(b)}#{lv_comment(a)}", [r(a), sym_op(b)]]
+        [Operand.new(:enter, enter), lit(flags)]
+      when :KEY_P, :KARG then [r(a), sym_op(b)]
       when :RETURN, :RETURN_BLK, :BREAK, :OCLASS, :TCLASS, :INTERN, :EXCEPT, :RAISEIF
-        ["R#{a}\t#{lv_comment(a)}", [r(a)]]
-      when :LAMBDA, :BLOCK, :METHOD then ["R#{a}\tI[#{b}]", [r(a), Operand.new(:irep, b)]]
-      when :EXEC then ["R#{a}\tI[#{b}]#{lv_comment(a)}", [r(a), Operand.new(:irep, b)]]
-      when :RANGE_INC, :RANGE_EXC, :MATCHERR then ["R#{a}", [r(a)]]
-      when :DEF then ["R#{a}\t:#{sym(b)}\t(R#{a + 1})", [r(a), sym_op(b), pr(a + 1)]]
-      when :TDEF, :SDEF then ["R#{a}\t:#{sym(b)}\tI[#{c}]", [r(a), sym_op(b), Operand.new(:irep, c)]]
-      when :UNDEF then [":#{sym(a)}", [sym_op(a)]]
-      when :ALIAS then [":#{sym(a)}\t#{sym(b)}", [sym_op(a), name_op(b)]]
-      when :ADD, :SUB, :MUL, :DIV, :LT, :LE, :GT, :GE, :EQ then ["R#{a}\t(R#{a + 1})", [r(a), pr(a + 1)]]
-      when :ADDI, :SUBI, :ARRAY, :ARYPUSH, :HASH, :HASHADD then ["R#{a}\t#{b}#{lv_comment(a)}", [r(a), i(b)]]
-      when :ADDILV, :SUBILV then ["R#{a}\tR#{b}\t#{c}#{lv_comment(a)}", [r(a), r(b), i(c)]]
-      when :ARRAY2 then ["R#{a}\tR#{b}\t#{c}#{lv_comment(a, b)}", [r(a), r(b), i(c)]]
-      when :ARYCAT, :STRCAT, :HASHCAT then ["R#{a}\t(R#{a + 1})#{lv_comment(a)}", [r(a), pr(a + 1)]]
-      when :ARYSPLAT, :SCLASS then ["R#{a}#{lv_comment(a)}", [r(a)]]
-      when :AREF, :ASET then ["R#{a}\tR#{b}\t#{c}#{lv_comment(a, b)}", [r(a), r(b), i(c)]]
-      when :APOST then ["R#{a}\t#{b}\t#{c}#{lv_comment(a)}", [r(a), i(b), i(c)]]
-      when :SYMBOL then ["R#{a}\tL[#{b}]\t; #{pool_str(b)}#{lv_comment(a)}", [r(a), Operand.new(:pool, b)]]
+        [r(a)]
+      when :LAMBDA, :BLOCK, :METHOD then [r(a), Operand.new(:irep, b)]
+      when :EXEC then [r(a), Operand.new(:irep, b)]
+      when :RANGE_INC, :RANGE_EXC, :MATCHERR then [r(a)]
+      when :DEF then [r(a), sym_op(b), pr(a + 1)]
+      when :TDEF, :SDEF then [r(a), sym_op(b), Operand.new(:irep, c)]
+      when :UNDEF then [sym_op(a)]
+      when :ALIAS then [sym_op(a), name_op(b)]
+      when :ADD, :SUB, :MUL, :DIV, :LT, :LE, :GT, :GE, :EQ then [r(a), pr(a + 1)]
+      when :ADDI, :SUBI, :ARRAY, :ARYPUSH, :HASH, :HASHADD then [r(a), i(b)]
+      when :ADDILV, :SUBILV then [r(a), r(b), i(c)]
+      when :ARRAY2 then [r(a), r(b), i(c)]
+      when :ARYCAT, :STRCAT, :HASHCAT then [r(a), pr(a + 1)]
+      when :ARYSPLAT, :SCLASS then [r(a)]
+      when :AREF, :ASET then [r(a), r(b), i(c)]
+      when :APOST then [r(a), i(b), i(c)]
+      when :SYMBOL
+        validate_string_pool(b)
+        [r(a), Operand.new(:pool, b)]
+      when :STRING, :FSTRING
+        validate_string_pool(b)
+        [r(a), Operand.new(:pool, b)]
+      when :CLASS, :MODULE then [r(a), sym_op(b)]
+      when :ERR then err_operands(a)
+      when :DEBUG then [i(a), i(b), i(c)]
+      else raise "bc2cpp: no decoder for #{name}"
+      end
+    end
+
+    def text_body(name, v, next_pc)
+      a, b, c = v
+      case name
+      when :NOP, :CALL, :KEYEND, :RETSELF, :RETNIL, :RETTRUE, :RETFALSE, :STOP, :EXT1, :EXT2, :EXT3
+        ''
+      when :MOVE, :RESCUE then "R#{a}\tR#{b}#{lv_comment(a, b)}"
+      when :LOADL then "R#{a}\tL[#{b}]#{loadl_comment(b)}#{lv_comment(a)}"
+      when :LOADI8 then "R#{a}\t#{b}#{lv_comment(a)}"
+      when :LOADINEG then "R#{a}\t-#{b}#{lv_comment(a)}"
+      when :LOADI16 then "R#{a}\t#{s16(b)}#{lv_comment(a)}"
+      when :LOADI32
+        n = ((b << 16) + c) & 0xffff_ffff
+        n -= 0x1_0000_0000 if n >= 0x8000_0000
+        "R#{a}\t#{n}#{lv_comment(a)}"
+      when :LOADI__1 then "R#{a}\t(-1)#{lv_comment(a)}"
+      # A Symbol list, not a Regexp: a regexp `when` would stop the case from comparing by identity.
+      when :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5, :LOADI_6, :LOADI_7
+        digit = BytecodeIR::Ops::LOADI_SLOT_VALUE[name]
+        "R#{a}\t(#{digit})#{lv_comment(a)}"
+      when :LOADSYM then "R#{a}\t:#{sym(b)}#{lv_comment(a)}"
+      when :LOADNIL then "R#{a}\t(nil)#{lv_comment(a)}"
+      when :LOADSELF then "R#{a}\t(R0)#{lv_comment(a)}"
+      when :LOADTRUE then "R#{a}\t(true)#{lv_comment(a)}"
+      when :LOADFALSE then "R#{a}\t(false)#{lv_comment(a)}"
+      when :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST then "R#{a}\t#{sym(b)}#{lv_comment(a)}"
+      when :SETGV, :SETSV, :SETIV, :SETCV, :SETCONST then "#{sym(b)}\tR#{a}#{lv_comment(a)}"
+      when :GETMCNST then "R#{a}\t(R#{a})::#{sym(b)}#{lv_comment(a)}"
+      when :SETMCNST
+        "(R#{a + 1})::#{sym(b)}\tR#{a}#{lv_comment(a)}"
+      when :GETUPVAR, :SETUPVAR then "R#{a}\t#{b}\t#{c}#{lv_comment(a)}"
+      when :GETIDX then "R#{a}\t(R#{a + 1})"
+      when :GETIDX0 then "R#{a}\tR#{b}[0]"
+      when :SETIDX then "R#{a}\t(R#{a + 1})\t(R#{a + 2})"
+      when :JMP, :JMPUW then format('%03d', next_pc + s16(a))
+      when :JMPIF, :JMPNOT, :JMPNIL
+        target = next_pc + s16(b)
+        "R#{a}\t#{format('%03d', target)}#{lv_comment(a)}"
+      when :SSEND, :SSENDB, :SEND, :SENDB
+        text = argc_text(c)
+        "R#{a}\t:#{sym(b)}\t#{text}"
+      when :SSEND0, :SEND0 then "R#{a}\t:#{sym(b)}"
+      when :BLKCALL then "R#{a}\t#{b}"
+      when :SUPER
+        text = argc_text(b)
+        "R#{a}\t#{text}"
+      when :ARGARY, :BLKPUSH
+        spec = [(b >> 11) & 0x3f, (b >> 10) & 1, (b >> 5) & 0x1f, (b >> 4) & 1]
+        "R#{a}\t#{spec.join(':')} (#{b & 0xf})#{lv_comment(a)}"
+      when :ENTER
+        enter = [(a >> 18) & 0x1f, (a >> 13) & 0x1f, (a >> 12) & 1, (a >> 7) & 0x1f,
+                 (a >> 2) & 0x1f, (a >> 1) & 1, a & 1, (a >> 23) & 1]
+        flags = "0x#{a.to_s(16)}"
+        "#{enter.join(':')} (#{flags})"
+      when :KEY_P, :KARG then "R#{a}\t:#{sym(b)}#{lv_comment(a)}"
+      when :RETURN, :RETURN_BLK, :BREAK, :OCLASS, :TCLASS, :INTERN, :EXCEPT, :RAISEIF
+        "R#{a}\t#{lv_comment(a)}"
+      when :LAMBDA, :BLOCK, :METHOD then "R#{a}\tI[#{b}]"
+      when :EXEC then "R#{a}\tI[#{b}]#{lv_comment(a)}"
+      when :RANGE_INC, :RANGE_EXC, :MATCHERR then "R#{a}"
+      when :DEF then "R#{a}\t:#{sym(b)}\t(R#{a + 1})"
+      when :TDEF, :SDEF then "R#{a}\t:#{sym(b)}\tI[#{c}]"
+      when :UNDEF then ":#{sym(a)}"
+      when :ALIAS then ":#{sym(a)}\t#{sym(b)}"
+      when :ADD, :SUB, :MUL, :DIV, :LT, :LE, :GT, :GE, :EQ then "R#{a}\t(R#{a + 1})"
+      when :ADDI, :SUBI, :ARRAY, :ARYPUSH, :HASH, :HASHADD then "R#{a}\t#{b}#{lv_comment(a)}"
+      when :ADDILV, :SUBILV then "R#{a}\tR#{b}\t#{c}#{lv_comment(a)}"
+      when :ARRAY2 then "R#{a}\tR#{b}\t#{c}#{lv_comment(a, b)}"
+      when :ARYCAT, :STRCAT, :HASHCAT then "R#{a}\t(R#{a + 1})#{lv_comment(a)}"
+      when :ARYSPLAT, :SCLASS then "R#{a}#{lv_comment(a)}"
+      when :AREF, :ASET then "R#{a}\tR#{b}\t#{c}#{lv_comment(a, b)}"
+      when :APOST then "R#{a}\t#{b}\t#{c}#{lv_comment(a)}"
+      when :SYMBOL then "R#{a}\tL[#{b}]\t; #{pool_str(b)}#{lv_comment(a)}"
       when :STRING, :FSTRING
         str = pool_str(b)
-        ["R#{a}\tL[#{b}]#{str.empty? ? '' : "\t; #{str}"}#{lv_comment(a)}", [r(a), Operand.new(:pool, b)]]
-      when :CLASS, :MODULE then ["R#{a}\t:#{sym(b)}#{lv_comment(a)}", [r(a), sym_op(b)]]
-      when :ERR then err_body(a)
-      when :DEBUG then ["#{a}\t#{b}\t#{c}", [i(a), i(b), i(c)]]
+        "R#{a}\tL[#{b}]#{str.empty? ? '' : "\t; #{str}"}#{lv_comment(a)}"
+      when :CLASS, :MODULE then "R#{a}\t:#{sym(b)}#{lv_comment(a)}"
+      when :ERR then err_text(a)
+      when :DEBUG then "#{a}\t#{b}\t#{c}"
       else raise "bc2cpp: no decoder for #{name}"
       end
     end
     # rubocop:enable Metrics/CyclomaticComplexity, Metrics/MethodLength
 
     # ERR's operand is a free-form message, the one text-typed operand.
-    def err_body(index)
-      text = @rite.pool.fetch(index).kind == :str ? pool_str(index) : "L[#{index}]"
-      [text, OperandSchema.parse(:ERR, text.split("\n", 2).first.to_s) || [Operand.new(:rest, '')]]
+    def err_text(index)
+      @rite.pool.fetch(index).kind == :str ? pool_str(index) : "L[#{index}]"
+    end
+
+    def err_operands(index)
+      OperandSchema.parse(:ERR, err_text(index).split("\n", 2).first.to_s) || [Operand.new(:rest, '')]
     end
 
     # `ERR\tL[n]` (a non-string pool slot) is padded with one tab, not two.
@@ -409,22 +517,17 @@ module InsnDecoder
     end
 
     def build(name, values, next_pc, start, line_pc = start, debug_file = debug_file_at(line_pc))
-      rest, operands = body(name, values, next_pc)
+      operands = typed_operands(name, values, next_pc)
       op = name == :ARRAY2 ? :ARRAY : name
-      # FSTRING is a STRING load of a frozen, persistent object: one op name for every pass that
-      # reads String loads, with frozen_literal set for the passes that must not treat it as fresh.
+      # FSTRING has STRING's typed schema but denotes a frozen persistent object.
       frozen = name == :FSTRING
       op = :STRING if frozen
-      printed = frozen ? name.to_s : op.to_s
       lineno = line_at(line_pc, debug_file)
       raise "bc2cpp: no line info for #{op} at #{line_pc}" if lineno.negative?
 
-      # The disassembly is line-oriented: a pool string with a newline is cut there.
-      # scrub: a binary pool string (mruby-wolf's data.rb) is not valid UTF-8.
-      first = "#{printed}#{sep_for(name, values)}#{rest}".scrub.split("\n", 2).first
-      insn = Insn.new(lineno: lineno, addr: start, op: op, args: first.delete_prefix(printed).strip,
-                      raw: (format('%5d %03d ', lineno, start) + first).rstrip, frozen_literal: frozen)
+      insn = Insn.new(lineno: lineno, addr: start, op: op, frozen_literal: frozen)
       insn.typed = operands
+      insn.defer_disassembly(self, name, values.freeze, next_pc)
       insn
     end
   end
