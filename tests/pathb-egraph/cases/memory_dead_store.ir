@@ -2,7 +2,7 @@
 (function "main"
   (ret int)
   (params (param %0 "a" int))
-  (slot "s" (array int 2) 8 4)
+  (slot "s" (array 2 int) 8 4)
   (block
     (store int $"s" (const int 1))
     (store int $"s" %0)

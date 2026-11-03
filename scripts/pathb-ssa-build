@@ -63,11 +63,45 @@ end
 
 # The SSA text of the file, from scripts/pathb-ssa.rb. Its own stderr is passed through, so a function it cannot convert
 # is reported there.
-def convert(file)
+def convert_file(file)
   out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path("pathb-ssa.rb", __dir__), file)
   $stderr.write(err) unless err.empty?
   error_exit("pathb-ssa.rb failed on #{file}") unless st.success?
   out
+end
+
+# --long-double=trap (pathb-qbe-emit.rb's stub_long_double): a function whose IR mentions the scalar type long_double
+# becomes a stub that aborts when it runs (its linkage and start-up markers stay), and a global of that type is dropped.
+# The rule is applied to the IR before conversion, so a stub is converted like any other function.
+def mentions_long_double?(x)
+  return x.any? { |y| mentions_long_double?(y) } if x.is_a?(Array)
+
+  x.is_a?(String) && x == "long_double"
+end
+
+def stub_long_double(forms)
+  out = [forms[0]]
+  forms.drop(1).each do |f|
+    if head(f) == "function" && mentions_long_double?(f)
+      keep = f.drop(2).select { |p| %w[static weak constructor destructor].include?(head(p)) }
+      out << (["function", f[1], ["ret", "void"], ["params"]] + keep + [["unreachable"]])
+    elsif head(f) == "global" && mentions_long_double?(f)
+      next
+    else
+      out << f
+    end
+  end
+  out
+end
+
+def convert(file, ld_trap)
+  return convert_file(file) unless ld_trap
+
+  Dir.mktmpdir("pathb-ssa-build-ld") do |dir|
+    stubbed = File.join(dir, "stubbed.ir")
+    File.write(stubbed, stub_long_double(read_forms(File.read(file))).map { |f| sx(f) }.join("\n") + "\n")
+    convert_file(stubbed)
+  end
 end
 
 # The names a module keeps (pathb-qbe-emit.rb's prune rule): a linked definition (not static, not weak, not an
@@ -76,7 +110,7 @@ end
 def live_names(forms)
   defs = {}
   forms.each do |f|
-    defs[f[1].raw.delete('"')] = f if %w[function global].include?(head(f)) && f[1].is_a?(Str)
+    defs[f[1].raw.delete('"')] = f if %w[function global data].include?(head(f)) && f[1].is_a?(Str)
   end
   live = {}
   work = []
@@ -127,6 +161,7 @@ end
 output = nil
 no_opt = false
 no_prune = false
+ld_trap = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -135,17 +170,18 @@ while args.first&.start_with?("-") && args.first != "-"
   when "-o" then output = args.shift or usage_exit
   when "--no-opt" then no_opt = true
   when "--no-prune" then no_prune = true
-  when "--safe", "--long-double=trap"
-    # The existing emitter's -fsafe-pointers checks and long-double trap lowering are not implemented here: refuse, rather
-    # than produce output without them.
-    error_exit("the flag #{flag} is not implemented in the SSA route yet")
+  when "--long-double=trap" then ld_trap = true
+  when "--safe"
+    # The -fsafe-pointers checks (docs/notes/safe-pointers.md) need the safe-pointers runtime and a check at every access,
+    # which the SSA route does not emit yet: refuse, rather than produce output without them.
+    error_exit("the flag --safe is not implemented in the SSA route yet (docs/notes/safe-pointers.md)")
   else usage_exit
   end
 end
 usage_exit unless args.size == 1
 
 file = args.first
-ssa = convert(file)
+ssa = convert(file, ld_trap)
 skipped = []
 # A global the emitter refuses is reported and left out, so it does not stop the functions that do not use it.
 globals = read_forms(ssa).select { |g| head(g) == "global" }.filter_map do |g|
@@ -157,6 +193,8 @@ rescue QbeUnsupported => e
 end
 # The aggregate types (abi-type forms) every function and global is laid out and passed with.
 globals = read_forms(ssa).select { |f| head(f) == "abi-type" } + globals
+# The string literals: top-level data forms, which the SSA text does not carry.
+globals += read_forms(File.read(file)).select { |f| head(f) == "data" }
 text = no_opt ? ssa : PathbEgraph.optimize_module(ssa).first
 fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 # Pruning: a definition nothing reaches is left out, as pathb-qbe-emit.rb does (--no-prune keeps every one).
