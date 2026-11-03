@@ -373,35 +373,31 @@ def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
   end
 end
 
+# RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see IvarLayout.trace_type's RESCUE arm): `b`, the
+# SECOND token, is a write; `a` is a read, so RESCUE is a barrier only when it writes the followed register.
+TRACE_RESCUE_WRITE = ->(insn, cur) { BytecodeIR::Receivers::RESCUE.include?(insn.op) && insn.regs[1] == cur }
+# The constant path collected so far, root first; shared until the first segment is prepended.
+TRACE_EMPTY_PATH = [].freeze
+
 # `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
 # accept every hop, so no hop can skip past a join.
+# The walk closes over nothing (hoisted barrier, IrepScans::REACH_ENTRY, a shared empty path): it runs once per
+# receiver question, recursively (docs/bc2cpp-trace-walk-allocations.md).
 def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
                       known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
                       dominated: nil, canonical: true, guarded: false)
-  path = []
+  path = TRACE_EMPTY_PATH
   use = idx
   # GETCONST/GETMCNST are class-name evidence only while resolving a `.new`
   # receiver: `@position = POS_BOTTOM` is an Integer constant, not a class.
   # `resolving_new` becomes true right after a SEND :new (with an empty `path`),
   # or starts true for the `resolving_new:` caller.
-  # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see
-  # IvarLayout.trace_type's RESCUE arm): `b`, the SECOND token, is a write; `a` is
-  # a read, so RESCUE is skipped unless it writes the followed register.
-  rescue_write = ->(insn, cur) { BytecodeIR::Receivers::RESCUE.include?(insn.op) && insn.regs[1] == cur }
   # JMPIF/JMPNOT stay visible for CONTAINER_PHI_MERGE below; the rest of
   # LEAD_READ_ONLY only reads its register (see BytecodeIR::Receivers::SKIP_OPS).
   skip_ops = BytecodeIR::Receivers::SKIP_OPS
-  # Never written: an incoming argument (register N is argument N for N <=
-  # mand). Only a class annotation can name its class; pooling call sites is
-  # unsound for POLY names.
-  at_entry = lambda do |entry_reg|
-    next nil if dominated && !dominated.call(-1, use, entry_reg)
-
-    pos = entry_reg.to_i
-    (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)) || rest_entry_class(irep, pos)
-  end
-  irep.walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: rescue_write, exhausted: at_entry) do |insn, i, cur|
+  found = BytecodeIR.for(irep).walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: TRACE_RESCUE_WRITE,
+                                                          exhausted: IrepScans::REACH_ENTRY) do |insn, i, cur|
     if dominated && !BytecodeIR::Ops::LEAD_READ_ONLY.include?(insn.op)
       return nil unless dominated.call(i, use, cur)
 
@@ -446,15 +442,15 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # An unguarded alias must dominate this GETIDX: a join the alias skips would name the argument on one path
       # only. A guarded consumer keeps the join-blind alias, as its recv_class does.
       arg_reg = if guarded
-                  irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: ->(last) { last }, &alias_probe)
+                  irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: IrepScans::LAST_REG, &alias_probe)
                 else
                   irep.walk_dominating_writers(i - 1, recv_reg, use: i, follow_moves: true,
-                                               exhausted: ->(last) { last }, &alias_probe)
+                                               exhausted: IrepScans::LAST_REG, &alias_probe)
                 end
       # The trace can stop at a block's GETUPVAR before reaching the captured
       # container; the callsite hint is limited to annotated Hash arguments.
       recv_class ||= capture_hints&.dig(irep.label, captured_reg, :container_class) if captured_reg
-      recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
+      recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if recv_class && known_owners
       arg_pos = arg_reg&.to_i
       if recv_class == 'Hash' && arg_pos && arg_pos.between?(1, mand) &&
          element_annotations[irep.label]&.arg_containers&.[](arg_pos - 1) == 'Hash'
@@ -580,7 +576,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
 
       ivar = insn.ivar
       klass = ivar_classes && ivar_classes[ivar]
-      return known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
+      return klass && known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
     when BytecodeIR::Receivers::UPVAR_READ
       return nil if resolving_new || !path.empty?
 
@@ -611,6 +607,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # CONST_CONTAINER_SUPPORT: collecting a segment is harmless either way; what
       # happens with `path` is decided at GETCONST.
       # Not `$`-anchored: a trailing "; R6:name" comment would end up in the segment.
+      path = [] if path.frozen?
       path.unshift(insn.mcnst_name)
     when BytecodeIR::Receivers::CONST_READ
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
@@ -716,6 +713,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
         return unique
       end
 
+      path = [] if path.frozen?
       path.unshift(const_name)
       return path.join('::')
     when BytecodeIR::Receivers::COND_JUMP
@@ -748,6 +746,16 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
     end
     IrepScans::KEEP
   end
+  return found unless found.is_a?(IrepScans::EntryReached)
+
+  # Never written: an incoming argument (register N is argument N for N <=
+  # mand). Only a class annotation can name its class; pooling call sites is
+  # unsound for POLY names.
+  entry_reg = found.reg
+  return nil if dominated && !dominated.call(-1, use, entry_reg)
+
+  pos = entry_reg.to_i
+  (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)) || rest_entry_class(irep, pos)
 end
 
 def object_includes_rgss?

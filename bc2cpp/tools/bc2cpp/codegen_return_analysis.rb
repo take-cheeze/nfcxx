@@ -370,6 +370,11 @@ class CodeGen
     class_return_names[name]
   end
 
+  # class_return_for_dispatch as trace_new_target's `method_return_class:` callable, built once per CodeGen.
+  def dispatch_return_class
+    @dispatch_return_class ||= ->(name) { class_return_for_dispatch(name) }
+  end
+
   # RETCLASS_SELF_CALL_SUPPORT fixpoint. Every registry def of the name needs a
   # bytecode body (no native/attr_*); a POLY name is admitted when all of its
   # defs prove the same class, since a self-call may reach any.

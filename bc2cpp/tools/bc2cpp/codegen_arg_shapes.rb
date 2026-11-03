@@ -406,7 +406,7 @@ module ArgShapeCalls
 
       "    case #{k}: {\n" \
         "#{locals.each_with_index.map { |l, i| "      mrb_value #{l} = ary_items(#{ary})[#{i}];\n" }.join}" \
-        "#{code.lines.map { |line| "      #{line}" }.join}" \
+        "#{indent_lines(code, '      ')}" \
         "      break;\n    }\n"
     end
     return nil if arms.empty?

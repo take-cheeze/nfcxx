@@ -586,7 +586,9 @@ class CodeGen
                pending_splat = nil
                shared_send
              else
-               (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
+               inline_prefix = guarded_inline[:at][insn.addr]
+               own = glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
+               inline_prefix ? inline_prefix + own : own
              end
       # Without the flow pass there is no liveness to narrow the roots, so every element read is rooted.
       text += ElementReadRoots.keep_text(insn) if !flow_bodies && ElementReadRoots.element_read?(insn)
@@ -930,16 +932,20 @@ class CodeGen
   DEAD_LABEL = /\A *(L\w+):;\n\z/
   SELF_COPY = /\A *(r\d+) = \1;\n\z/
   STATEMENT_END = /[;{}]\s*\z/
+  # What String#strip removes: a line of only these is blank.
+  BLANK_LINE = /\A[\x00\t\n\v\f\r ]*\z/
 
   def drop_dead_statements(code)
     labels = code.scan(/\bL\w+\b/).tally
     previous = "{\n"
-    code.each_line.reject do |line|
+    kept = String.new(capacity: code.bytesize, encoding: code.encoding)
+    code.each_line do |line|
       dead = previous.match?(STATEMENT_END) &&
              ((label = line[DEAD_LABEL, 1]) ? labels[label] == 1 : line.match?(SELF_COPY))
-      previous = line unless dead || line.strip.empty?
-      dead
-    end.join
+      previous = line unless dead || line.match?(BLANK_LINE)
+      kept << line unless dead
+    end
+    kept
   end
 
   # mrbc names an anonymous parameter by its sigil (`*`, `**`, `&`, and `...`'s three), which is no C identifier; the
