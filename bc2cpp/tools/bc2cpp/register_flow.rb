@@ -28,6 +28,7 @@ class RegisterFlow
   COPY_READER_OPS = Set[:MOVE, :RETURN, :JMPIF, :JMPNOT, :JMPNIL, :SETIV, :SETGV, :SETCV, :SETCONST].freeze
   # Experimental, off by default: BC2CPP_REGISTER_FLOW_WINDOWS=1 also rewrites reads inside window consumers.
   WALK_BUDGET = 400
+  NO_EDGES = [].freeze
   CLEAN_DEF = /\A  r(\d+) = ([^;{}\n"]*);\n\z/
   MENTION = /\br(\d+)\b/
   # One register's patterns, built on first use: its name as a whole word, and the forms that write it.
@@ -222,13 +223,17 @@ class RegisterFlow
       @normal_succ[i] << i + 1 if @transparent[i] && i + 1 < count && !@normal_succ[i].include?(i + 1)
     end
     add_dispatch_edges if self.class.goto_model?
-    @handler_succ = Array.new(count) { [] }
+    # The edge lists are only read once built, so a method without handlers shares one empty list.
+    @handler_succ = Array.new(count, NO_EDGES)
     if @program.handlers?
       count.times do |i|
         @handler_succ[i] = @program.successors_of(i, include_handlers: true) - @program.successors_of(i)
       end
     end
-    @succ = Array.new(count) { |i| (@normal_succ[i] + @handler_succ[i]).uniq }
+    @succ = Array.new(count) do |i|
+      handler = @handler_succ[i]
+      handler.empty? ? @normal_succ[i].uniq : (@normal_succ[i] + handler).uniq
+    end
     @pred = Array.new(count) { [] }
     @succ.each_with_index { |targets, i| targets.each { |t| @pred[t] << i } }
     @pred[0] << BytecodeIR::ENTRY

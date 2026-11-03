@@ -1507,7 +1507,7 @@ class ClosedWorld
           sym = insn.sym_token
           child = def_method_body(irep, idx, insn)
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
-        when *SEND_OPS
+        when SEND_OPS
           scan_probe_send(irep, idx, insn) if PROBE_SENDS.include?(insn.sym)
           scan_send(irep, idx, insn)
         when :UNDEF
@@ -1578,7 +1578,7 @@ class ClosedWorld
       @singleton_opens << [irep, idx, insn]
     when :LOADSYM
       @singleton_makers << [irep.label, insn.sym_token] if SINGLETON_MAKERS.include?(insn.sym_token)
-    when *SEND_OPS
+    when SEND_OPS
       @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
     end
   end
@@ -1697,7 +1697,7 @@ class ClosedWorld
                  when *FREEZE_LITERAL_WRITERS then true
                  when :GETCONST then (constant = writer.const_name) && true
                  when :GETMCNST then (constant = writer.mcnst_name) && true
-                 when *BytecodeIR::Ops::SEND_PREFIX_OPS then fresh_builtin_result?(irep, index, writer)
+                 when BytecodeIR::Ops::SEND_PREFIX_OPS then fresh_builtin_result?(irep, index, writer)
                  end
                end
     return @freeze_possible = true unless harmless == true

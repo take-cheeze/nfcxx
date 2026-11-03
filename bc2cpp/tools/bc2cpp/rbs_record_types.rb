@@ -316,7 +316,7 @@ module RbsRecordTypes
     when :LOADTRUE then 'TrueClass'
     when :LOADFALSE then 'FalseClass'
     when :LOADNIL then 'NilClass'
-    when *BytecodeIR::Ops::RANGE_BUILD then 'Range'
+    when BytecodeIR::Ops::RANGE_BUILD then 'Range'
     when :LOADL
       entry = irep.pool[insn.pool_index]
       entry.is_a?(Hash) && entry[:type] == :float ? 'Float' : (entry.is_a?(Hash) ? 'Integer' : nil)

@@ -408,8 +408,8 @@ class CodeGen
     return false if slot_nested_labels(irep).any? { |l| @ireps[l] && BytecodeIR.for(@ireps[l]).op?(:RETURN_BLK) }
 
     gens = program.instructions.map { |instruction| slot_assigning?(instruction.source, label, ivar, chain, stack) }
-    raised_from = Hash.new { |h, k| h[k] = [] }
-    program.handler_edges.each { |edge| raised_from[edge.target] << edge.src }
+    raised_from = {}
+    program.handler_edges.each { |edge| (raised_from[edge.target] ||= []) << edge.src }
     count = program.instructions.length
     in_state = Array.new(count, true)
     out_state = Array.new(count, true)
@@ -418,9 +418,9 @@ class CodeGen
       changed = false
       program.instructions.each do |instruction|
         i = instruction.index
-        incoming = normal[i].map { |p| p == BytecodeIR::ENTRY ? false : out_state[p] }
-        incoming.concat(raised_from[i].map { |src| in_state[src] })
-        in_i = incoming.empty? || incoming.all?
+        raised = raised_from[i]
+        in_i = normal[i].all? { |p| p != BytecodeIR::ENTRY && out_state[p] } &&
+               (raised.nil? || raised.all? { |src| in_state[src] })
         out_i = in_i || gens[i]
         next if in_state[i] == in_i && out_state[i] == out_i
 
