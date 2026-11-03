@@ -17,26 +17,36 @@ module Qbe
   INT_L = %w[long long_long unsigned_long unsigned_long_long].freeze
   LOAD = { "bool" => "loadub", "char" => "loadsb", "signed_char" => "loadsb", "unsigned_char" => "loadub",
            "short" => "loadsh", "unsigned_short" => "loaduh", "int" => "loadsw", "unsigned_int" => "loaduw",
-           "long" => "loadl", "long_long" => "loadl", "unsigned_long" => "loadl", "unsigned_long_long" => "loadl" }.freeze
+           "long" => "loadl", "long_long" => "loadl", "unsigned_long" => "loadl", "unsigned_long_long" => "loadl",
+           "float" => "load", "double" => "load" }.freeze
   STORE = { "bool" => "storeb", "char" => "storeb", "signed_char" => "storeb", "unsigned_char" => "storeb",
             "short" => "storeh", "unsigned_short" => "storeh", "int" => "storew", "unsigned_int" => "storew",
-            "long" => "storel", "long_long" => "storel", "unsigned_long" => "storel", "unsigned_long_long" => "storel" }.freeze
+            "long" => "storel", "long_long" => "storel", "unsigned_long" => "storel", "unsigned_long_long" => "storel",
+            "float" => "stores", "double" => "stored" }.freeze
   SIZE = { "bool" => 1, "char" => 1, "signed_char" => 1, "unsigned_char" => 1, "short" => 2, "unsigned_short" => 2,
            "int" => 4, "unsigned_int" => 4, "long" => 8, "long_long" => 8, "unsigned_long" => 8,
-           "unsigned_long_long" => 8 }.freeze
+           "unsigned_long_long" => 8, "float" => 4, "double" => 8 }.freeze
   EXT = { "char" => "sb", "signed_char" => "sb", "unsigned_char" => "ub", "short" => "sh", "unsigned_short" => "uh" }.freeze
   BIN = { "wadd" => "add", "wsub" => "sub", "wmul" => "mul", "and" => "and", "or" => "or", "xor" => "xor" }.freeze
   CMP = { "eq" => "ceq", "ne" => "cne", "lt.s" => "cslt", "lt.u" => "cult", "le.s" => "csle", "le.u" => "cule" }.freeze
-  CMP_HEADS = CMP.keys.freeze
+  # Float operations: the comparisons are ordered (false on NaN), as the interpreter's < and <= are.
+  FBIN = { "fadd" => "add", "fsub" => "sub", "fmul" => "mul", "fdiv" => "div" }.freeze
+  FCMP = { "lt.f" => "clt", "le.f" => "cle" }.freeze
+  CMP_HEADS = (CMP.keys + FCMP.keys).freeze
 
   module_function
 
-  # The QBE class of an integer or pointer type: w for 32-bit and narrower integers, l for 64-bit ones and pointers.
+  def float?(t) = FLOAT_TYPES.key?(strip_const(t))
+
+  # The QBE class of a scalar type: w for 32-bit and narrower integers, l for 64-bit ones and pointers, s and d for
+  # float and double.
   def cls(t)
     t = strip_const(t)
     return "l" if head(t) == "ptr"
     return "w" if INT_W.include?(t)
     return "l" if INT_L.include?(t)
+    return "s" if t == "float"
+    return "d" if t == "double"
 
     raise QbeUnsupported, "type #{sx(t)}"
   end
@@ -44,6 +54,7 @@ module Qbe
   def size(t)
     t = strip_const(t)
     return 8 if head(t) == "ptr"
+    return size(t[1]) * int_lit(t[2]) if head(t) == "array"
 
     SIZE.fetch(t) { raise QbeUnsupported, "object of type #{sx(t)}" }
   end
@@ -69,16 +80,93 @@ module Qbe
     INT_TYPES.fetch(t) { raise QbeUnsupported, "type #{sx(t)}" }[1]
   end
 
+  # The type of an operator expression: a comparison is bool, an address is a pointer, and any other operator carries its type in its second element.
+  def expr_type(x)
+    return "bool" if CMP_HEADS.include?(head(x))
+    return ["ptr", "void"] if %w[addr index offset].include?(head(x))
+
+    x[1]
+  end
+
   def int_lit(s) = s.is_a?(Integer) ? s : Integer(s, 10)
+
+  # A float literal of type t: the value is rounded to t as the interpreter rounds it, then written as an exact hex float
+  # (QBE reads it with scanf). Infinities are written as inf; NaN is not a literal of the subset.
+  def float_lit(t, text)
+    v = round_float(Float(text.to_s), strip_const(t))
+    raise QbeUnsupported, "NaN literal" if v.nan?
+
+    body = v.infinite? ? (v.positive? ? "inf" : "-inf") : format("%a", v)
+    "#{cls(t)}_#{body}"
+  end
+
+  # The QBE symbol of a quoted SSA name: letters, digits, `_` and `.` stay; any other byte is escaped.
+  def symbol(raw) = raw.delete('"').gsub(/[^A-Za-z0-9_.]/) { |c| "_x#{c.ord.to_s(16)}_" }
+
+  # The data of one global (install_module's rules, emitted as QBE data): zero bytes, integer and pointer scalars, and
+  # addresses of other module globals. A global with an extern or thread-local storage class, a float, a bitfield or
+  # any other initialiser is not emitted; a reference to it raises QbeUnsupported. Returns the data line or nil.
+  def global_data(g, by_name, state)
+    name = g[1].raw
+    if state.key?(name)
+      return state[name] == :busy ? nil : state[name]
+    end
+
+    state[name] = :busy
+    state[name] = build_data(g, by_name, state)
+  end
+
+  def build_data(g, by_name, state)
+    flags = g.map { |x| x.is_a?(Array) ? head(x) : x }
+    return nil if flags.include?("extern") || flags.include?("thread")
+
+    init = g.find { |x| head(x) == "init" } or return nil
+    size = int_lit(g[3])
+    align = [int_lit(g[4]), 1].max
+    items = []
+    init[1..].each do |item|
+      case head(item)
+      when "zero" then next
+      when "scalar"
+        off, type, v = item[1..]
+        return nil if FLOAT_TYPES.key?(strip_const(type))
+
+        bytes = Qbe.size(type)
+        letter = { 1 => "b", 2 => "h", 4 => "w", 8 => "l" }.fetch(bytes) { return nil }
+        items << [int_lit(off), bytes, "#{letter} #{literal(v, type)}"]
+      when "addr"
+        off, _type, target, add = item[1..]
+        return nil unless target.is_a?(Ref) && target.sigil == "@" && by_name.key?(target.raw)
+        # A global may point into itself; a longer cycle of addresses is left out (global_data returns nil for it).
+        return nil unless target.raw == g[1].raw || global_data(by_name[target.raw], by_name, state)
+
+        suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
+        items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
+      else return nil
+      end
+    end
+    parts = []
+    cur = 0
+    items.sort_by(&:first).each do |off, bytes, text|
+      parts << "z #{off - cur}" if off > cur
+      parts << text
+      cur = off + bytes
+    end
+    parts << "z #{size - cur}" if size > cur
+    parts = ["z #{size}"] if parts.empty?
+    "data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
+  end
 
   # One function. An SSA register %N is %vN, a parameter %k is %pk, and an object of a slot that was not promoted
   # is %o<i>, allocated on the stack at entry.
   class Fn
     attr_reader :lines
 
-    def initialize(form)
+    # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
+    def initialize(form, globals = {})
       @form = form
-      @name = form[1].raw.delete('"')
+      @globals = globals
+      @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
       @params = form.find { |x| head(x) == "params" }.drop(1).select { |p| head(p) == "param" }
       @slots = form.select { |x| head(x) == "slot" }
@@ -88,21 +176,25 @@ module Qbe
       @types = {}
       @params_set = {}
       @slot = {}
+      @jumper = {}     # [target block, source block] => the emitted label whose jump reaches target
+      @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
     end
 
     def emit
       header
       allocs
-      plan_switches
+      plan_phis
       @blocks.each do |b|
         @cur = b[1].to_s
-        @lines << "@#{block_label(@cur)}"
+        @label = block_label(@cur)
+        @lines << "@#{@label}"
         items = b[2..]
         items[0...-1].each { |item| item_lines(item) }
         pending_phi_operands(@cur)
         item_lines(items.last) if items.any?
       end
       @lines << "}"
+      resolve_phi_predecessors
       self
     end
 
@@ -136,25 +228,23 @@ module Qbe
 
     def block_label(num) = "b#{num}"
 
-    # The label a phi of block @cur uses for its predecessor pred: the test block that jumps to @cur.
-    def jumper_label(pred)
-      @jumper.fetch([@cur, pred.to_s], block_label(pred))
-    end
-
-    # A switch is a chain of tests, one block per case after the first (the first test is in the switch's own block).
-    # QBE has no switch, so each test is `jnz` on an equality. A phi names the block that jumps to it, so for each
-    # target the label of the test block that jumps there is recorded in @jumper.
-    def plan_switches
-      @jumper = {}
+    # Checks that need no emission: a switch's targets may not repeat where a phi reads them, and a phi operand that is an
+    # expression is computed at the end of its predecessor, so the phi reads a temporary.
+    def plan_phis
       @phi_blocks = {}
-      @phi_expr = {}
       @blocks.each do |b|
         @phi_blocks[b[1].to_s] = true if b[2..].any? { |it| head(it) == "phi" }
       end
       @blocks.each do |b|
-        b[2..].each { |it| plan_switch(b[1].to_s, it) if head(it) == "switch" }
+        b[2..].each do |it|
+          next unless head(it) == "switch"
+
+          cases, default = switch_parts(it)
+          targets = cases.map(&:last) + [default]
+          dup = targets.find { |t| targets.count(t) > 1 }
+          raise QbeUnsupported, "switch edges to block #{dup} that has phi" if dup && @phi_blocks[dup]
+        end
       end
-      # A phi operand that is an expression is computed at the end of its predecessor, so the phi reads a temporary.
       @pending = Hash.new { |h, k| h[k] = [] }
       @blocks.each do |b|
         b[2..].each do |it|
@@ -169,6 +259,24 @@ module Qbe
           end
         end
       end
+    end
+
+    # A phi names its predecessors by block. The label that jumps to a block is known only once the predecessor is
+    # emitted (a split block may take the jump), so the phi carries a placeholder, resolved at the end.
+    def phi_placeholder(target, pred) = "@@J#{target}_#{pred}@@"
+
+    def resolve_phi_predecessors
+      @lines.map! do |l|
+        l.gsub(/@@J(\d+)_(\d+)@@/) do
+          key = [Regexp.last_match(1), Regexp.last_match(2)]
+          "@#{@jumper.fetch(key) { block_label(key[1]) }}"
+        end
+      end
+    end
+
+    # A jump from the current block to target: the phi of target names the label that jumps.
+    def jump_to(target)
+      @jumper[[target.to_s, @cur]] = @label
     end
 
     def expression?(v) = v.is_a?(Array) && !%w[const null].include?(head(v))
@@ -186,43 +294,28 @@ module Qbe
       [cases, default[1].to_s]
     end
 
-    # The labels of the test blocks of block num: the first is the block itself.
-    def test_labels(num, cases)
-      [block_label(num)] + (1...cases.size).map { |k| "#{block_label(num)}.s#{k}" }
-    end
-
-    def plan_switch(num, item)
-      cases, default = switch_parts(item)
-      targets = cases.map(&:last) + [default]
-      dup = targets.find { |t| targets.count(t) > 1 }
-      if dup && @phi_blocks[dup]
-        raise QbeUnsupported, "switch edges to block #{dup} that has phi"
-      end
-
-      labels = test_labels(num, cases)
-      cases.each_with_index { |(_, t), k| @jumper[[t, num]] = labels[k] }
-      @jumper[[default, num]] = labels.last
-    end
-
-    # The class and the value text of a switch operand's comparison.
+    # The type of an operand: a constant's or an expression's own type, or the declared type of a register.
     def switch_operand_type(x)
       return x[1] if x.is_a?(Array) && head(x) == "const"
       return "ptr" if x.is_a?(Array) && head(x) == "null"
+      return Qbe.expr_type(x) if expression?(x)
 
-      @types.fetch(x) { raise QbeUnsupported, "switch operand #{sx(x)} has no declared type" }
+      @types.fetch(x) { raise QbeUnsupported, "operand #{sx(x)} has no declared type" }
     end
 
-    def switch_lines(num, item)
+    # A switch is a chain of tests; the first is in the block where the switch is emitted, each later one in its own
+    # block. QBE has no switch, so each test is `jnz` on an equality. Each jump is recorded for the phi of its target.
+    def switch_lines(item)
       cases, default = switch_parts(item)
-      labels = test_labels(num, cases)
       if cases.empty?
+        jump_to(default)
         @lines << "  jmp @#{block_label(default)}"
         return
       end
       opnd = item[1]
-      if opnd.is_a?(Array) && !%w[const null].include?(head(opnd))
+      if expression?(opnd)
         # An operator in operand position: computed into a temporary first, in the switch's own block.
-        name = "%swop#{num}"
+        name = "%swop#{@cur}"
         let_lines(name, opnd[1], opnd)
         @types[name] = opnd[1]
         operand = reg(name)
@@ -230,12 +323,18 @@ module Qbe
         operand = op(opnd)
       end
       cls = Qbe.cls(switch_operand_type(opnd))
+      labels = [@label] + (1...cases.size).map { |k| "#{block_label(@cur)}.s#{k}" }
       cases.each_with_index do |(value, target), k|
-        cond = "%sw#{num}_#{k}"
+        cond = "%sw#{@cur}_#{k}"
         @lines << "  #{cond} =w ceq#{cls} #{operand}, #{Qbe.int_lit(value)}"
-        next_label = k + 1 < cases.size ? "@#{labels[k + 1]}" : "@#{block_label(default)}"
-        @lines << "  jnz #{cond}, @#{block_label(target)}, #{next_label}"
-        @lines << "@#{labels[k + 1]}" if k + 1 < cases.size
+        @jumper[[target, @cur]] = labels[k]
+        if k + 1 < cases.size
+          @lines << "  jnz #{cond}, @#{block_label(target)}, @#{labels[k + 1]}"
+          @lines << "@#{labels[k + 1]}"
+        else
+          @jumper[[default, @cur]] = labels[k]
+          @lines << "  jnz #{cond}, @#{block_label(target)}, @#{block_label(default)}"
+        end
       end
     end
 
@@ -243,7 +342,12 @@ module Qbe
     def op(x)
       case x
       when Ref
-        raise QbeUnsupported, "global #{x.raw}" unless x.sigil == "$"
+        if x.sigil == "@"
+          raise QbeUnsupported, "global #{x.raw}" unless @globals[x.raw]
+
+          return "$#{Qbe.symbol(x.raw)}"
+        end
+        raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
 
         @slot.fetch("$#{x.raw}") { raise QbeUnsupported, "slot #{x.raw}" }
       when String
@@ -253,16 +357,18 @@ module Qbe
       when Array
         case head(x)
         when "const"
-          raise QbeUnsupported, "float constant #{sx(x)}" if float_type?(x[1])
+          return Qbe.float_lit(x[1], x[2]) if float_type?(x[1])
 
           Qbe.int_lit(x[2]).to_s
         when "null" then "0"
+        when "addr" then op(x[1])
+        when "addr" then op(x[1])
         else
           # A nested expression: computed into a temporary, whose line is appended before the caller's line.
           raise QbeUnsupported, "operand #{sx(x)}" unless expression?(x)
 
           name = "%ne#{@temps += 1}"
-          t = CMP_HEADS.include?(head(x)) ? "bool" : x[1]
+          t = Qbe.expr_type(x)
           let_lines(name, t, x)
           @types[name] = t
           reg(name)
@@ -276,16 +382,28 @@ module Qbe
       when "phi"
         pairs = item[3..].map do |pred, v|
           text = expression?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
-          "@#{jumper_label(pred)} #{text}"
+          "#{phi_placeholder(@cur, pred)} #{text}"
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
       when "store" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
-      when "br" then @lines << "  jmp @#{block_label(item[1])}"
-      when "switch" then switch_lines(@cur, item)
-      when "condbr" then @lines << "  jnz #{op(item[1])}, @#{block_label(item[2])}, @#{block_label(item[3])}"
+      when "br"
+        jump_to(item[1])
+        @lines << "  jmp @#{block_label(item[1])}"
+      when "switch" then switch_lines(item)
+      when "eval"
+        raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
+
+        @lines << "  #{call_text(item[1])}"
+      when "condbr"
+        cond = op(item[1])
+        jump_to(item[2])
+        jump_to(item[3])
+        @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
       when "unreachable" then @lines << "  hlt"
+      when "nonnull" then nonnull_lines(item[1])
+      when "bounds" then bounds_lines(item[1], item[2])
       else raise QbeUnsupported, "statement #{head(item) || sx(item)}"
       end
     end
@@ -297,10 +415,25 @@ module Qbe
       when *Qbe::BIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
       when "wneg" then @lines << "  #{dst} =#{c} sub 0, #{op(rv[2])}"
+      when "cdiv", "crem" then checked_div_lines(dst, t, rv)
+      when "cshl", "cshr" then checked_shift_lines(dst, t, rv)
+      when *Qbe::FBIN.keys
+        @lines << "  #{dst} =#{c} #{Qbe::FBIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+      when "fneg" then @lines << "  #{dst} =#{c} neg #{op(rv[2])}"
       when *Qbe::CMP.keys
         oc = Qbe.cls(rv[1])
         @lines << "  #{dst} =w #{Qbe::CMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
+      when *Qbe::FCMP.keys
+        oc = Qbe.cls(rv[1])
+        @lines << "  #{dst} =w #{Qbe::FCMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when "iconv" then conv_lines(dst, t, rv[2])
+      when "i2f", "u2f" then int_to_float_lines(dst, t, rv[2])
+      when "fconv" then float_conv_lines(dst, t, rv[2])
+      when "cf2i" then float_to_int_lines(dst, t, rv[2])
+      when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
+      when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
+      when "index" then index_lines(dst, rv)
       when "load" then @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
       when "const", "null", nil
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
@@ -314,6 +447,7 @@ module Qbe
     def conv_lines(dst, t, x)
       src = x.is_a?(Array) && head(x) == "const" ? x[1] : @types[x]
       raise QbeUnsupported, "conversion of an untyped operand #{sx(x)}" unless src
+      raise QbeUnsupported, "float to integer by iconv" if float_type?(src)
 
       dc = Qbe.cls(t)
       sc = Qbe.cls(src)
@@ -330,12 +464,210 @@ module Qbe
       end
     end
 
-    def float_type?(t) = FLOAT_TYPES.key?(strip_const(t))
+    # The checks of the interpreter (pathb-ssa.rb, Machine#eval_rv; pathb-egraph.rb, CheckedMachine for the shifts).
+    # Each check is a call `pathb_check(cond, code)` before the operation: the runtime does not return when cond is
+    # nonzero (it traps, or longjmps out in the test driver), so the operation after it is never reached with the
+    # bad operands and no block is split. Codes: 1 division by zero, 2 signed overflow, 3 shift count out of range.
+    def fresh = "%ck#{@temps += 1}"
+
+    # The class of an operand whose type is known: a constant, a declared register, or an expression's type.
+    def operand_type(x) = expression?(x) ? Qbe.expr_type(x) : switch_operand_type(x)
+
+    # `(index BASE I SIZE)`: BASE plus I times SIZE. A 32-bit index is widened (signed or unsigned as its type) first.
+    def index_lines(dst, rv)
+      base = op(rv[1])
+      idx = rv[2]
+      signed = Qbe.signed?(operand_type(idx))
+      i = op(idx)
+      if Qbe.cls(operand_type(idx)) == "w"
+        wide = fresh
+        @lines << "  #{wide} =l #{signed ? 'extsw' : 'extuw'} #{i}"
+        i = wide
+      end
+      scaled = fresh
+      @lines << "  #{scaled} =l mul #{i}, #{Qbe.int_lit(rv[3])}"
+      @lines << "  #{dst} =l add #{base}, #{scaled}"
+    end
+
+    # `(nonnull P)`: a null pointer traps (code 5).
+    def nonnull_lines(p)
+      cond = fresh
+      @lines << "  #{cond} =w ceql #{op(p)}, 0"
+      @lines << "  call $pathb_check(w #{cond}, w 5)"
+    end
+
+    # `(bounds I N)`: an index outside [0, N) traps (code 6). The unsigned comparison also rejects a negative index.
+    def bounds_lines(idx, n)
+      c = Qbe.cls(operand_type(idx))
+      i = op(idx)
+      bad = fresh
+      @lines << "  #{bad} =w cuge#{c} #{i}, #{Qbe.int_lit(n)}"
+      @lines << "  call $pathb_check(w #{bad}, w 6)"
+    end
+
+    def checked_div_lines(dst, t, rv)
+      raise QbeUnsupported, "#{head(rv)} of bool" if t == "bool"
+
+      c = Qbe.cls(t)
+      w, signed = int_info(t)
+      a = op(rv[2])
+      b = op(rv[3])
+      zero = fresh
+      @lines << "  #{zero} =w ceq#{c} #{b}, 0"
+      @lines << "  call $pathb_check(w #{zero}, w 1)"
+      if signed
+        lo = fresh
+        minus_one = fresh
+        both = fresh
+        @lines << "  #{lo} =w ceq#{c} #{a}, #{-(1 << (w - 1))}"
+        @lines << "  #{minus_one} =w ceq#{c} #{b}, -1"
+        @lines << "  #{both} =w and #{lo}, #{minus_one}"
+        @lines << "  call $pathb_check(w #{both}, w 2)"
+      end
+      name = head(rv) == "cdiv" ? (signed ? "div" : "udiv") : (signed ? "rem" : "urem")
+      @lines << "  #{dst} =#{c} #{name} #{a}, #{b}"
+    end
+
+    # The count must be in [0, w): an unsigned comparison of the count against w also rejects a negative count.
+    def checked_shift_lines(dst, t, rv)
+      raise QbeUnsupported, "#{head(rv)} of bool" if t == "bool"
+
+      c = Qbe.cls(t)
+      w, signed = int_info(t)
+      a = op(rv[2])
+      count_cls = Qbe.cls(switch_operand_type(rv[3]))
+      n = op(rv[3])
+      if count_cls == "l" && c == "w"
+        narrowed = fresh
+        @lines << "  #{narrowed} =w copy #{n}"
+        n = narrowed
+      end
+      bad = fresh
+      @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
+      @lines << "  call $pathb_check(w #{bad}, w 3)"
+      if head(rv) == "cshl"
+        shifted = fresh
+        @lines << "  #{shifted} =#{c} shl #{a}, #{n}"
+        canon_lines(dst, t, shifted)
+      else
+        @lines << "  #{dst} =#{c} #{signed ? 'sar' : 'shr'} #{a}, #{n}"
+      end
+    end
+
+    # The value of t in its low bits, sign- or zero-extended as the canonical form of t (a cshl wraps to the type).
+    def canon_lines(dst, t, src)
+      if Qbe::EXT.key?(t)
+        @lines << "  #{dst} =w ext#{Qbe::EXT[t]} #{src}"
+      else
+        @lines << "  #{dst} =#{Qbe.cls(t)} copy #{src}"
+      end
+    end
+
+    # A call `(call RET &"name" ARG...)`: a direct call of a C symbol. The module's functions are exported under their
+    # names, and any other callee is linked as a C function. Each argument is passed with the class of its value.
+    def call_text(c)
+      f = c[2]
+      raise QbeUnsupported, "indirect call #{sx(f)}" unless f.is_a?(Ref) && f.sigil == "&"
+
+      args = c[3..].map { |a| "#{arg_cls(a)} #{op(a)}" }
+      "call $#{Qbe.symbol(f.raw)}(#{args.join(', ')})"
+    end
+
+    def arg_cls(a)
+      case a
+      when Ref then "l"
+      when String then Qbe.cls(@types.fetch(a) { raise QbeUnsupported, "argument #{a} has no declared type" })
+      when Array
+        case head(a)
+        when "addr", "null" then "l"
+        when "const" then Qbe.cls(a[1])
+        else Qbe.cls(Qbe.expr_type(a))
+        end
+      else raise QbeUnsupported, "argument #{sx(a)}"
+      end
+    end
+
+    def float_type?(t) = Qbe.float?(t)
+
+    # The type of an operand: a literal's own type, or the type of a register or an expression.
+    def source_type(x)
+      return x[1] if x.is_a?(Array) && head(x) == "const"
+      return switch_operand_type(x) if expression?(x) || x.is_a?(Array)
+
+      @types.fetch(x) { raise QbeUnsupported, "untyped operand #{sx(x)}" }
+    end
+
+    # An integer to a float: the IEEE conversion of the integer, rounded once to the target (as the interpreter's
+    # conversion of an integer up to 2**53 is). The conversion follows the signedness of the source type.
+    def int_to_float_lines(dst, t, x)
+      src = source_type(x)
+      raise QbeUnsupported, "integer to float of a float" if float_type?(src)
+
+      name = { ["w", true] => "swtof", ["w", false] => "uwtof", ["l", true] => "sltof", ["l", false] => "ultof" }
+             .fetch([Qbe.cls(src), Qbe.signed?(src)]) { raise QbeUnsupported, "integer to float of #{sx(src)}" }
+      @lines << "  #{dst} =#{Qbe.cls(t)} #{name} #{op(x)}"
+    end
+
+    # A float to a float of another precision: a rounding to single (truncd) or an exact widening (exts).
+    def float_conv_lines(dst, t, x)
+      src = source_type(x)
+      raise QbeUnsupported, "float conversion of an integer" unless float_type?(src)
+
+      if t == src
+        @lines << "  #{dst} =#{Qbe.cls(t)} copy #{op(x)}"
+      elsif t == "float"
+        @lines << "  #{dst} =s truncd #{op(x)}"
+      else
+        @lines << "  #{dst} =d exts #{op(x)}"
+      end
+    end
+
+    # A float to an integer, truncating toward zero. The interpreter traps on NaN, an infinity, or a value outside the
+    # target type. The check is an exact range test: the truncated value is in [lo, hi] exactly when x is in
+    # (lo - 1, hi + 1), and a float source is first widened to double so that the bounds are exact. The check is a
+    # call `pathb_check(cond, 4)` before the conversion, like the integer checks: the runtime does not return when the
+    # operand is bad, so no block is split.
+    def float_to_int_lines(dst, t, x)
+      src = source_type(x)
+      raise QbeUnsupported, "float to integer of #{sx(src)}" unless float_type?(src)
+      raise QbeUnsupported, "float to bool" if t == "bool"
+
+      w, signed = int_info(t)
+      xv = op(x)
+      if src == "float"
+        widened = fresh
+        @lines << "  #{widened} =d exts #{xv}"
+        xv = widened
+      end
+      lower = if signed && w == 64 then ["cged", -(2**63)]
+              elsif signed then ["cgtd", -(2**(w - 1)) - 1]
+              else ["cgtd", -1]
+              end
+      upper = ["cltd", signed ? 2**(w - 1) : 2**w]
+      tests = [lower, upper].map do |cmp, bound|
+        tmp = fresh
+        @lines << "  #{tmp} =w #{cmp} #{xv}, #{Qbe.float_lit('double', bound.to_f.to_s)}"
+        tmp
+      end
+      ok = fresh
+      @lines << "  #{ok} =w and #{tests[0]}, #{tests[1]}"
+      bad = fresh
+      @lines << "  #{bad} =w ceqw #{ok}, 0"
+      @lines << "  call $pathb_check(w #{bad}, w 4)"
+      @lines << "  #{dst} =#{Qbe.cls(t)} #{signed ? 'dtosi' : 'dtoui'} #{xv}"
+    end
   end
 
-  # The QBE IL of every function of the module (its globals and other declarations are not emitted yet).
+  # The data of the module's globals, then the functions. A global the emitter cannot model is left out, and a
+  # reference to it raises QbeUnsupported where it is used.
   def module_il(forms)
-    forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f).emit.lines.join("\n") }.join("\n\n") + "\n"
+    gs = forms.select { |g| head(g) == "global" }
+    by_name = gs.to_h { |g| [g[1].raw, g] }
+    state = {}
+    data = gs.filter_map { |g| global_data(g, by_name, state) }
+    supported = gs.to_h { |g| [g[1].raw, true] }.select { |name, _| state[name].is_a?(String) }
+    fns = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, supported).emit.lines.join("\n") }
+    (data + fns).join("\n\n") + "\n"
   end
 end
 
