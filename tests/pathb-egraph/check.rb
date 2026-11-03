@@ -261,8 +261,10 @@ def check_cases(files)
   end.all?
 end
 
-mode, *files = ARGV
-abort "usage: check.rb goldens|cases FILE.ir..." unless %w[goldens cases].include?(mode) && !files.empty?
+if $PROGRAM_NAME == __FILE__
+  mode, *files = ARGV
+  abort "usage: check.rb goldens|cases FILE.ir..." unless %w[goldens cases].include?(mode) && !files.empty?
 
-ok = mode == "goldens" ? check_goldens(files) : check_cases(files)
-exit(ok ? 0 : 1)
+  ok = mode == "goldens" ? check_goldens(files) : check_cases(files)
+  exit(ok ? 0 : 1)
+end
