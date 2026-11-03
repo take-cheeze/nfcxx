@@ -127,7 +127,8 @@ module BytecodeIR
 
         key ||= reaching_query_key(index, reg, opaque_key, follow_moves, max_states,
                                    through_handlers, origin_transfers, raiseif_nil, create: true)
-        @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg, d.built).freeze }&.freeze
+        # +result+ is this call's own fresh list, so it is frozen in place rather than copied.
+        @reaching_definitions_cache[key] = result&.each(&:freeze)&.freeze
       end
       # Shared readers never mutate returned definitions; public callers keep fresh copies.
       if shared
@@ -219,10 +220,19 @@ module BytecodeIR
       guarded = through_handlers ? nil : dataflow_guarded_at
       live_at = live && live_flags
       scalar_seen = ENV['BC2CPP_IR_SCALAR_SEEN'] != '0'
-      seen = {}
+      # The seen table and work stack are scratch, emptied before each walk; a walk that starts while another
+      # holds them (none does today) gets its own.
+      scratch = !@reaching_scratch_busy
+      if scratch
+        @reaching_scratch_busy = true
+        seen = (@reaching_scratch_seen ||= {}).clear
+        work = (@reaching_scratch_work ||= []).clear.push(index, reg)
+      else
+        seen = {}
+        work = [index, reg]
+      end
       states = 0
       defs = Set.new
-      work = [index, reg]
       until work.empty?
         r = work.pop
         i = work.pop
@@ -274,7 +284,7 @@ module BytecodeIR
           end
           # A handler-only edge may fire before the write completes.
           work.push(p, r) if all_preds && !preds[i].include?(p)
-          effect = origin_transfers ? origin_effect(insn, r) : effect_of(dataflow_effect_at(p), r)
+          effect = origin_transfers ? origin_effect(insn, r, index: p) : effect_of(dataflow_effect_at(p), r)
           case effect
           when :refuse then return refused(refusal, "unmodelled:#{insn.op}")
           when :refuse_enter_shape, :refuse_enter_temp
@@ -294,7 +304,12 @@ module BytecodeIR
           end
         end
       end
-      defs.sort_by { |d| [d.index, d.reg] }
+      # (index, reg) is unique within +defs+ (built follows from both), so this order matches sort_by [index, reg].
+      list = defs.to_a
+      list.sort! { |a, b| a.index == b.index ? a.reg <=> b.reg : a.index <=> b.index } if list.size > 1
+      list
+    ensure
+      @reaching_scratch_busy = false if scratch
     end
 
     private :compute_reaching_definitions
@@ -317,7 +332,7 @@ module BytecodeIR
       @write_dominates_cache ||= {}
       @compact_dataflow_keys = ENV['BC2CPP_IR_QUERY_KEYS'] != '0' if @compact_dataflow_keys.nil?
       opaque_key = reaching_opaque_key(opaque_regs)
-      key = [w, use, reg, opaque_key]
+      key = write_dominates_key(w, use, reg, opaque_key)
       unless @write_dominates_cache.key?(key)
         result = compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs)
         return result if @write_dominates_cache.size >= DATAFLOW_CACHE_SIZE
@@ -327,6 +342,26 @@ module BytecodeIR
       @write_dominates_cache[key]
     end
 
+    # An Integer key, as reaching_query_key builds: each distinct opaque key gets an ID below the cache cap, and
+    # (reg, use, w) of a fixed-length body encode without collision. Anything else keeps the Array key.
+    def write_dominates_key(w, use, reg, opaque_key)
+      length = @instructions.length
+      unless @compact_dataflow_keys && w.is_a?(Integer) && use.is_a?(Integer) && reg.is_a?(Integer) &&
+             w.between?(ENTRY, length - 1) && use.between?(0, length - 1) && reg >= 0
+        return [w, use, reg, opaque_key]
+      end
+
+      ids = (@write_dominates_opaque_ids ||= {})
+      opaque_id = ids[opaque_key]
+      unless opaque_id
+        return [w, use, reg, opaque_key] if ids.size >= DATAFLOW_CACHE_SIZE
+
+        opaque_id = ids[opaque_key] = ids.size
+      end
+      ((reg * length + use) * (length + 1) + w + 1) * DATAFLOW_CACHE_SIZE + opaque_id
+    end
+    private :write_dominates_key
+
     def compute_write_dominates?(w, use, reg, opaque_regs: nil)
       return false if opaque_regs&.include?(reg)
       return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
@@ -334,13 +369,13 @@ module BytecodeIR
       preds = instruction_predecessors(include_handlers: true) or return false
       low = [w, 0].max
       # The write itself must leave +reg+ holding its value on every path (a side write does not).
-      return false if w >= 0 && origin_effect(@instructions[w].source, reg, typed_enter: false) != :define
+      return false if w >= 0 && origin_effect(@instructions[w].source, reg, typed_enter: false, index: w) != :define
       ((w + 1)..use).each do |k|
         insn = @instructions[k].source
         return false unless k == use || dataflow_steps_over?(insn)
         # An exit's leading register is read, not written, and nothing falls through from it to +use+.
         return false if k != use && !BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) &&
-                        %i[callee_clobber define].include?(origin_effect(insn, reg, typed_enter: false))
+                        CLOBBER_OR_DEFINE.include?(origin_effect(insn, reg, typed_enter: false, index: k))
 
         preds[k].each do |p|
           return false if p == ENTRY ? w != ENTRY : (p < low || p > use)
@@ -350,6 +385,8 @@ module BytecodeIR
     end
 
     private :compute_write_dominates?
+
+    CLOBBER_OR_DEFINE = %i[callee_clobber define].freeze
 
     # Ops that can hand `self` to code that reads its ivars.
     SELF_EXPOSING_OPS = Set[:LOADSELF, :SSEND, :SSEND0, :SSENDB, :SUPER, :BLOCK, :LAMBDA, :METHOD, :EXEC, :SCLASS].freeze
@@ -469,7 +506,8 @@ module BytecodeIR
     # by its register layout (enter_origin_effect). With typed_enter: false (write_dominates?, shared with
     # codegen) ENTER answers as it did before the origin walk typed its slots: self and a required or optional
     # argument pass to the entry value, every other slot (and the packed R(1)) refuses.
-    def origin_effect(insn, reg, typed_enter: true)
+    # +index+, when given, is +insn+'s own index: its effect entry then comes from the walk's table.
+    def origin_effect(insn, reg, typed_enter: true, index: nil)
       case insn.op
       when :RESCUE
         second = insn.typed[1]
@@ -479,7 +517,7 @@ module BytecodeIR
         if typed_enter then enter_origin_effect(insn, reg)
         else enter_passes?(insn, reg) ? :pass : :refuse
         end
-      else dataflow_effect(insn, reg)
+      else index ? effect_of(dataflow_effect_at(index), reg) : dataflow_effect(insn, reg)
       end
     end
 
@@ -732,8 +770,14 @@ module BytecodeIR
 
   # Definitions reaching a read of +reg+ at +index+ in +irep+ with the irep's
   # own nested-block writes accounted for. See Program#reaching_definitions.
-  def self.reaching_definitions(irep, index, reg, **options)
-    self.for(irep).reaching_definitions(index, reg, opaque_regs: own_upvar_written_regs(irep), **options)
+  # The keywords are spelled out (Program#reaching_definitions' defaults) so a call allocates no options Hash.
+  def self.reaching_definitions(irep, index, reg, opaque_regs: own_upvar_written_regs(irep), follow_moves: true,
+                                max_states: DATAFLOW_MAX_STATES, through_handlers: false, origin_transfers: false,
+                                refusal: nil, raiseif_nil: false, shared: false)
+    self.for(irep).reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
+                                        max_states: max_states, through_handlers: through_handlers,
+                                        origin_transfers: origin_transfers, refusal: refusal,
+                                        raiseif_nil: raiseif_nil, shared: shared)
   end
 
   # The instruction writers of +reg+ that reach the read at +index+, as [index, instruction] pairs: one per join arm.

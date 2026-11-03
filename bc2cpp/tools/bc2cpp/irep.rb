@@ -38,7 +38,7 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
 
   # Yields `(insn, index)` for each instruction whose op is one of +ops+, in program order.
   def each_with_op(*ops, &block)
-    BytecodeIR.for(self).each_with_op(*ops, &block)
+    BytecodeIR.for(self).each_with_op_in(ops, &block)
   end
 
   # The ENTER instruction (nil for a bodyless zero-argument method).
@@ -108,6 +108,16 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_ini
   def initialize(lineno: nil, addr: nil, op: nil, args: nil, raw: nil, frozen_literal: nil, **rest)
     super(lineno: lineno, addr: addr, op: op.is_a?(String) ? op.intern : op, args: args, raw: raw,
           frozen_literal: frozen_literal, **rest)
+  end
+
+  # A decoded instruction (Symbol +op+), built without the keyword Hashes #initialize takes.
+  def self.decoded(lineno, addr, op, frozen_literal)
+    insn = allocate
+    insn[:lineno] = lineno
+    insn[:addr] = addr
+    insn[:op] = op
+    insn[:frozen_literal] = frozen_literal
+    insn
   end
 
   def defer_disassembly(decoder, name, values, next_pc)
