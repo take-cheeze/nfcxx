@@ -15,6 +15,9 @@ end
 # Whether every ENTER field from +start+ on is zero, read in place: these predicates run per call site, and a
 # `fields[start..]` slice is a new Array each time.
 def enter_fields_zero_from?(fields, start)
+  # A truncated field list is a decoder bug; answering true would claim a pure arity for it.
+  raise ArgumentError, "ENTER has #{fields.size} fields, expected at least #{start}" if start > fields.size
+
   index = start
   while index < fields.size
     return false unless fields[index].zero?
