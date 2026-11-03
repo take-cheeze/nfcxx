@@ -12,6 +12,7 @@ module NativeSigs
   MARKER = '# bc2cpp-native:'
   MARK_WORD = 'bc2cpp-native:'
   MARK_LINE = /^bc2cpp-native: (\S+)$/.freeze
+  MARKER_CACHE_CAP = 4096
 
   module_function
 
@@ -84,14 +85,18 @@ module NativeSigs
     end
   end
 
-  # The marker a node carries itself, or nil. Members and blocks both keep their comment.
-  # MARK_LINE needs this word on its line, so a comment without it cannot match; the test avoids the regex scan
-  # and its match string on every node of every walk.
+  # Only the node's own marker is cached: inherited membership depends on the caller's enclosing chain.
+  # Hash snapshots String keys, so edits to mutable RBS comments cannot change or stale an existing entry.
   def own_table(node)
     text = node.comment&.string
-    return nil unless text&.include?(MARK_WORD)
+    return nil unless text
 
-    text[MARK_LINE, 1]
+    cache = (@own_tables ||= {})
+    return cache[text] if cache.key?(text)
+
+    table = text[MARK_LINE, 1]&.freeze if text.include?(MARK_WORD)
+    cache[text] = table if cache.size < MARKER_CACHE_CAP
+    table
   end
 
   # The members of a block; a constant or type alias has none.
