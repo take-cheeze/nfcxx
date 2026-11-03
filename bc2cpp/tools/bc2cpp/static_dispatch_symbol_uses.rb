@@ -43,7 +43,9 @@ module StaticDispatchSymbolUses
 
   # The Symbol literals that name a looked-up method, or nil when some lookup may take a Symbol that is not one.
   # `ireps`: label => irep.
-  def lookups(ireps)
+  # `block_sites` (optional, name => [[irep label, send address]]) receives each block-literal Symbol's send, and
+  # `arg_names` the names a LOOKUP_SENDS argument names: covered_block_sites needs both to tell a block use apart.
+  def lookups(ireps, block_sites: nil, arg_names: nil)
     names = Set.new
     ireps.each_value do |irep|
       program = BytecodeIR.for(irep)
@@ -55,10 +57,19 @@ module StaticDispatchSymbolUses
         return nil if INTROSPECTION_SENDS.include?(insn.sym)
 
         if LOOKUP_SENDS.include?(insn.sym)
-          return nil unless literal_arguments(irep, program, ins.index, insn, names)
+          args = Set.new
+          return nil unless literal_arguments(irep, program, ins.index, insn, args)
+
+          names.merge(args)
+          arg_names&.merge(args)
         end
         next unless BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
-        return nil unless literal_block(irep, program, ins.index, insn, names)
+
+        block = Set.new
+        return nil unless literal_block(irep, program, ins.index, insn, block)
+
+        names.merge(block)
+        block.each { |name| (block_sites[name] ||= []) << [irep.content_digest, insn.addr] } if block_sites
       end
     end
     names

@@ -955,7 +955,7 @@ class CodeGen
   #   any?/all?/none?: boolean with early exit (all?/none? default true);
   #   count: tally of truthy results.
   # Live length and mrb_array_p guard as in emit_each_inline.
-  def emit_sym_inline(region, _irep, _d)
+  def emit_sym_inline(region, irep, _d)
     dest_reg = region[:dest_reg]
     recv_expr = inline_recv_expr(region)
     meth = region[:method_name]
@@ -979,6 +979,9 @@ class CodeGen
     when 'count'
       out << "    mrb_int bc2cpp_sym_acc_#{region[:sym_addr]} = 0;\n"
     end
+    # SYM_SITE: this loop is the block site of the bytecode send at sendb_addr, for the Symbol proof
+    # (static_dispatch_registrations.rb, covered_block_sites).
+    out << "    // SYM_SITE #{irep.content_digest} #{region[:sendb_addr]}\n"
     out << "    for (mrb_int bc2cpp_sym_i_#{region[:sym_addr]} = 0; " \
            "bc2cpp_sym_i_#{region[:sym_addr]} < ary_size(#{recv_expr}); " \
            "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"

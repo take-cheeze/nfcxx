@@ -357,6 +357,54 @@ module StaticDispatchRegistrations
   OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?(?:\w+ = )?bc2cpp_owner_call(?:_argv)?\(M, (\w+), (\d+), \d+, BC2CPP_OWNERS(?:_D)?\((.*)$/
   OWNER_DIRECT = /BC2CPP_OWNER_DIRECT\("((?:[^"\\]|\\.)*)"/
 
+  # SYM_SITE (codegen_loop_inline.rb emit_sym_inline): the marker of an inlined `&:sym` loop, `// SYM_SITE <irep label>
+  # <send address>`, and the loop body that follows it up to the loop's closing brace.
+  SYM_SITE_MARKER = %r{^[ \t]*// SYM_SITE (\S+) (\d+)[ \t]*$}
+  SYM_SITE_BY_NAME = /mrb_funcall|bc2cpp_send|bc2cpp_funcall|bc2cpp_nomethod|mrb_funcall_with_method|bc2cpp_owner_call_named/
+
+  # The block sites whose generated loop dispatches no name: no by-name call in the body, and every owner call in it
+  # covered (guarded_owner_calls). A site with no marker (a generic block call) is never covered. Returns a Hash of
+  # [irep content digest, send address] => how many covered loops carry it.
+  def covered_block_sites(gens, subclassed)
+    covered = Hash.new(0)
+    gens.each do |src|
+      found = guarded_owner_calls(src, subclassed).to_set
+      lines = src.lines
+      lines.each_with_index do |line, at|
+        marker = SYM_SITE_MARKER.match(line) or next
+        body = []
+        j = at + 1
+        while j < lines.size && !lines[j].match?(/\A    \}\s*\z/)
+          body << lines[j]
+          j += 1
+        end
+        next if j >= lines.size || body.empty?
+
+        text = body.join
+        next if text.match?(SYM_SITE_BY_NAME)
+        next unless text.scan(/bc2cpp_owner_call(?:_argv)?\(M, \w+, (\d+),/).flatten.map(&:to_i).all? { |i| found.include?(i) }
+
+        covered[[marker[1], marker[2].to_i]] += 1
+      end
+    end
+    covered
+  end
+
+  # SYMBOL_USES block exemption: a Symbol literal used only as a block argument names no method at its sites when
+  # every such site is a covered loop. Counts must match: each [digest, address] key is carried by as many covered
+  # loops as there are block sites with that key, so a generic site (no loop) keeps its name. A name also used as a
+  # LOOKUP_SENDS argument stays. Returns the names to drop from the Symbol lookups.
+  def covered_block_names(block_sites, arg_names, covered)
+    totals = Hash.new(0)
+    block_sites.each_value { |sites| sites.each { |site| totals[site] += 1 } }
+    block_sites.each_with_object(Set.new) do |(name, sites), out|
+      next if arg_names.include?(name)
+      next unless sites.all? { |site| covered[site] == totals[site] }
+
+      out << name
+    end
+  end
+
   def guarded_owner_calls(src, subclassed)
     slots = {}
     src.scan(/bc2cpp_owner_class_(\d+)\(mrb_state\* M\) \{\n[^\n]*\n[^\n]*\n\s*static const char\* const path\[\] = \{([^}]*)\}/) do |n, path|
@@ -905,7 +953,13 @@ module StaticDispatchRegistrations
     proven = index_proven(repo_root, mrbc, ireps, registry, superclass_of, engine_tuple)
     subclassed = subclassed_paths(repo_root, superclass_of, closed_only: closed_only)
     # SYMBOL_USES (closed only): the Symbol literals that name a looked-up method, or nil (every one does).
-    symbol_lookups = closed_only ? StaticDispatchSymbolUses.lookups(ireps) : nil
+    block_sites = {}
+    arg_names = Set.new
+    symbol_lookups = closed_only ? StaticDispatchSymbolUses.lookups(ireps, block_sites: block_sites, arg_names: arg_names) : nil
+    if symbol_lookups && closed_only
+      covered = covered_block_sites(runs.values.map { |r| r[:gen] }, subclassed)
+      symbol_lookups = symbol_lookups - covered_block_names(block_sites, arg_names, covered)
+    end
     send_ops = symbol_lookups ? SEND_OPS - [:LOADSYM] : SEND_OPS
 
     # Candidates: compiled entries still registered, plus ones already
