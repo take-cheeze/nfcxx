@@ -15,6 +15,10 @@ require_relative 'bytecode_ir'
 # frame, not this irep's registers, so its only `R` token is a same-frame read.
 # IvarLayout.trace_type also steps over RESCUE's read operand; its write is a barrier.
 TRACE_TYPE_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | [:RESCUE]).freeze
+# RESCUE is `R[b] = R[a].isa?(R[b])` (ops.h), printed `RESCUE\tR%d\tR%d`: the
+# write lands on the SECOND register. `a` is a read (skipped); `b` is a real
+# write and must stop the trace like the generic `else`.
+TRACE_TYPE_RESCUE_WRITE = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
 
 # ---------------------------------------------------------------------------
 # Step 6b: ivar embedding: which ivars can move out of iv_tbl into C struct
@@ -330,35 +334,9 @@ class IvarLayout
                             annotations = nil, registry = nil, integer_constants = nil, fixnum_return_names = nil,
                             trusted: false)
     use = idx
-    # RESCUE is `R[b] = R[a].isa?(R[b])` (ops.h), printed `RESCUE\tR%d\tR%d`: the
-    # write lands on the SECOND register. `a` is a read (skipped); `b` is a real
-    # write and must stop the trace like the generic `else`.
-    rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
-    at_entry = lambda do |last|
-      # Never written in this block: an incoming argument. Register N is argument N
-      # for N <= mand (as in CodeGen#compile_method). Use ArgTypes' whole-program
-      # inference if it has one; otherwise the value is opaque.
-      pos = last.to_i
-      if pos.between?(1, mand)
-        # An annotation is per-definition (keyed by irep), so it is trusted whether
-        # the name is MONO or POLY; tried first.
-        # EMBED_TYPE_SAFETY: only :fixnum and :symbol pass. Other tokens (:array) have
-        # no TYPE_OPS entry, and letting them through surfaced later as a KeyError in
-        # GETIV/SETIV codegen of an unrelated owner.
-        t = annotations && annotations[irep.label]&.args&.[](pos - 1)
-        next t if t == :fixnum || t == :symbol
-
-        t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
-        next t if t
-      end
-      UNKNOWN
-    end
-    entry_checked = lambda do |last|
-      type = at_entry.call(last)
-      type == UNKNOWN || trusted || BytecodeIR.write_dominates?(irep, BytecodeIR::ENTRY, use, last) ? type : JOIN_BREAK
-    end
-    irep.walk_writers(idx - 1, reg, skip_ops: TRACE_TYPE_SKIP_OPS, barrier: rescue_write, barrier_result: UNKNOWN,
-                                    exhausted: entry_checked) do |insn, i, cur|
+    found = BytecodeIR.for(irep).walk_writers(idx - 1, reg, skip_ops: TRACE_TYPE_SKIP_OPS,
+                                              barrier: TRACE_TYPE_RESCUE_WRITE, barrier_result: UNKNOWN,
+                                              exhausted: IrepScans::REACH_ENTRY) do |insn, i, cur|
       return JOIN_BREAK unless (trusted && i == idx - 1) || BytecodeIR.write_dominates?(irep, i, use, cur)
 
       use = i
@@ -433,6 +411,30 @@ class IvarLayout
         UNKNOWN
       end
     end
+    return found unless found.is_a?(IrepScans::EntryReached)
+
+    type = trace_type_entry(irep, found.reg, arg_types, mand, method_name, annotations)
+    type == UNKNOWN || trusted || BytecodeIR.write_dominates?(irep, BytecodeIR::ENTRY, use, found.reg) ? type : JOIN_BREAK
+  end
+
+  # Never written in this block: an incoming argument. Register N is argument N
+  # for N <= mand (as in CodeGen#compile_method). Use ArgTypes' whole-program
+  # inference if it has one; otherwise the value is opaque.
+  def self.trace_type_entry(irep, last, arg_types, mand, method_name, annotations)
+    pos = last.to_i
+    if pos.between?(1, mand)
+      # An annotation is per-definition (keyed by irep), so it is trusted whether
+      # the name is MONO or POLY; tried first.
+      # EMBED_TYPE_SAFETY: only :fixnum and :symbol pass. Other tokens (:array) have
+      # no TYPE_OPS entry, and letting them through surfaced later as a KeyError in
+      # GETIV/SETIV codegen of an unrelated owner.
+      t = annotations && annotations[irep.label]&.args&.[](pos - 1)
+      return t if t == :fixnum || t == :symbol
+
+      t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
+      return t if t
+    end
+    UNKNOWN
   end
 
   # Same guarantee as CodeGen#native_only_mono?, duplicated because that one

@@ -120,7 +120,7 @@ class CodeGen
                                    element_annotations: @element_annotations,
                                    known_owners: @known_owners,
                                    capture_hints: @block_hash_capture_hints,
-                                   method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
+                                   method_return_class: dispatch_return_class, guarded: true)
                  end
 
     # EQQ_DIRECT: a `===` receiver whose class the bytecode proves (a stable
@@ -673,7 +673,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
+        method_return_class: dispatch_return_class, guarded: true
       )
       if %w[openness= tone=].include?(name) &&
          (traced_class == 'RGSS::Window' ||
@@ -1162,7 +1162,7 @@ class CodeGen
                                       element_annotations: @element_annotations,
                                       known_owners: @known_owners,
                                       capture_hints: @block_hash_capture_hints,
-                                      method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
+                                      method_return_class: dispatch_return_class, guarded: true)
       exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
                                                             owner: owner_def&.owner,
                                                             expected_class: known_class)
@@ -2252,18 +2252,18 @@ class CodeGen
 
     instances, scoped, native_free, instance_scope = receiver_instance_scope(site, name)
     installed = instance_scope ? symbol_instance_installed_names : symbol_installed_names
-    refuse = lambda do |chain, arms = nil|
-      @closed_world.refusal(name, chain, site[:self_owner], installed, instances: instances, scoped: scoped,
-                                                                       native_free: native_free,
-                                                                       instance_scope: instance_scope,
-                                                                       singleton_arms: arms)
-    end
-    reason = argv.size > FUNCALL_ARGC_MAX ? :argc : refuse.call(listed)
+    reason = argv.size > FUNCALL_ARGC_MAX ? :argc : nil
+    reason ||= @closed_world.refusal(name, listed, site[:self_owner], installed, instances: instances, scoped: scoped,
+                                                                                 native_free: native_free,
+                                                                                 instance_scope: instance_scope)
     singleton_arms = nil
     singleton_branches = ''
     if reason == :singleton_definer && (arms = singleton_arm_branches(name, d, recv, argv))
       singleton_arms, singleton_branches = arms
-      reason = refuse.call(listed, singleton_arms)
+      reason = @closed_world.refusal(name, listed, site[:self_owner], installed, instances: instances, scoped: scoped,
+                                                                                native_free: native_free,
+                                                                                instance_scope: instance_scope,
+                                                                                singleton_arms: singleton_arms)
     end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
 
@@ -2375,7 +2375,7 @@ class CodeGen
                      cur_arg_classes, owner: owner_def&.owner, class_layout: @class_layout, registry: @registry,
                      container_constants: @container_constants, element_annotations: @element_annotations,
                      known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-                     method_return_class: ->(method_name) { class_return_for_dispatch(method_name) },
+                     method_return_class: dispatch_return_class,
                      guarded: true) == owner
   end
 

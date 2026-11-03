@@ -214,8 +214,9 @@ class CodeGen
     return nil if depth > FIXNUM_PROOF_MAX_DEPTH
 
     # An unaudited opcode or one inside a protected range refuses (see
-    # FIXNUM_PROOF_STEP_OVER_OPS).
-    unaudited = lambda do |insn, _cur|
+    # FIXNUM_PROOF_STEP_OVER_OPS). One barrier per irep: it reads fixnum_proof_ctx at call time, so a swapped ctx
+    # (FixnumBarrierShadow) is still the one consulted.
+    unaudited = (@game_range_barriers ||= {}.compare_by_identity)[irep] ||= lambda do |insn, _cur|
       !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)) ||
         fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
     end

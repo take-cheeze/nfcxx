@@ -44,9 +44,9 @@ class CodeGen
     end
   end
 
-  # Layout of a zero-argument `name` call whose block sits at dest+1.
+  # Layout of a zero-argument `name` call whose block sits at dest+1. One per name: the recognizers ask per irep.
   def named_layout(name)
-    ->(insn) { 1 if insn.sym == name && insn.argc_text == 'n=0' }
+    (@named_layouts ||= {})[name] ||= ->(insn) { 1 if insn.sym == name && insn.argc_text == 'n=0' }
   end
 
   # Is the region's receiver provably a +klass+ ('Array' or 'Hash')? An SSENDB
