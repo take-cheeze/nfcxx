@@ -377,13 +377,22 @@ end
 OUTSIDE_TOKEN_RE = /[A-Za-z_][A-Za-z_0-9]*[?!=]?/.freeze
 
 # A missing file is reported by SourceText, so a scan with one is not memoized.
+# Each file is also stored on its own: one changed or newly placed file then rescans only itself, where the
+# whole-list entry alone would rescan every token of every file. Merging the per-file Sets in path order keeps
+# the single scan's insertion order.
 def outside_world_tokens(paths)
   ScanCache.fetch('outside_world_tokens', Array(paths), cache_absent: false) do
     names = Set.new
-    Array(paths).each do |path|
-      src = SourceText.read(path, 'outside_world_tokens', binary: true) or next
-      src.scan(OUTSIDE_TOKEN_RE) { |t| names << t }
-    end
+    Array(paths).each { |path| names.merge(outside_file_tokens(path)) }
+    names
+  end
+end
+
+def outside_file_tokens(path)
+  ScanCache.fetch('outside_world_tokens.file', [path], cache_absent: false) do
+    names = Set.new
+    src = SourceText.read(path, 'outside_world_tokens', binary: true)
+    src&.scan(OUTSIDE_TOKEN_RE) { |t| names << t }
     names
   end
 end

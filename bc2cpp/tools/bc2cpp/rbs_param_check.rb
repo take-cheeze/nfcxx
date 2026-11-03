@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'prism'
 require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir_containers'
@@ -8,6 +9,7 @@ require_relative 'dynamic_names'
 require_relative 'native_names'
 require_relative 'closed_world'
 require_relative 'nil_narrowing'
+require_relative 'scan_cache'
 
 # RBS_CHECKED_PARAMS: a class parameter type in an RBS signature is a checked fact, not a seed.
 #
@@ -260,9 +262,18 @@ module RbsParamCheck
     Array(foreign_ruby_paths).each do |path|
       next if compiled_files.include?(path) || compiled_files.include?(File.expand_path(path))
 
-      foreign_ruby_names(File.binread(path)).each { |t| names << t << ClosedWorld.token_stem(t) }
+      foreign_ruby_file_names(path).each { |t| names << t << ClosedWorld.token_stem(t) }
     end
     names
+  end
+
+  # foreign_ruby_names of one file, distinct and in first-seen order, kept in the scan cache under the file's digest (and
+  # the Prism version that lexed it) so a warm run does not lex it. Dropping a repeat keeps the Set above in the same
+  # order: the first insert already put the name and its stem there.
+  def foreign_ruby_file_names(path)
+    ScanCache.fetch("rbs_param_check.foreign_ruby_names.prism#{Prism::VERSION}", [path], cache_absent: false) do
+      foreign_ruby_names(File.binread(path)).uniq
+    end
   end
 
   # The words of a foreign Ruby source that can name a method: every code token, and a string or symbol whose whole

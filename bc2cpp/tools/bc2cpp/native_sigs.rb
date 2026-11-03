@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'rbs_parse_memo'
+require_relative 'scan_cache'
 
 # NativeSigs: the built-in and RGSS method declarations, all in sig/bc2cpp/declarations.rbs. Each native table is a group
 # of declarations under a marker line directly above each one: `# bc2cpp-native: <table>`. A marker on a top-level block
@@ -56,8 +57,26 @@ module NativeSigs
   end
 
   # The declarations of one table, in file order: each top-level block restricted to the members whose table is it.
+  # They are restricted from a parse of the table's kept text (kept_texts_of), not of the whole file, so a run with a
+  # warm scan cache parses a few kilobytes. Only locations differ from restricting the whole file; no loader reads them.
   def decls(table)
-    select_table(parse, table_name(table))
+    name = table_name(table)
+    text = kept_texts[name] or return []
+
+    select_table(RbsParseMemo.decls("declarations.rbs##{name}", text), name)
+  end
+
+  # { table name => kept text } for every table of FILE. Kept in the scan cache under the file's digest and the rbs
+  # version that parsed it, so only a cold run parses the whole file.
+  def kept_texts
+    @kept_texts ||= begin
+      require 'rbs'
+      ScanCache.fetch("native_sigs.kept_texts.rbs#{RBS::VERSION}", [FILE], cache_absent: false) do
+        kept_texts_of(parse, File.readlines(FILE))
+      end
+    rescue LoadError
+      raise "bc2cpp: #{FILE} needs the rbs gem (gem install rbs)"
+    end
   end
 
   # select_table and source_text take the parsed declarations and the file's lines, so a fixture can use them too.
@@ -67,6 +86,38 @@ module NativeSigs
 
   def source_text(decls, lines, name)
     decls.map { |decl| source_of(decl, name, [], lines) }.join
+  end
+
+  # { name => text } for every table, in one walk: the lines of each declaration and member restrict keeps for it,
+  # verbatim with their comments and no added markers. Restricting a parse of that text gives what restricting `decls`
+  # gives: each kept node keeps its own and its enclosing blocks' comments, so table_of reads the same markers, and
+  # each dropped node is one restrict drops anyway.
+  def kept_texts_of(decls, lines)
+    out = {}
+    decls.each { |decl| node_texts(decl, [], lines).each { |name, text| (out[name] ||= +'') << text } }
+    out
+  end
+
+  # The kept text of `decl` for each table restrict(decl, name, enclosing) keeps any of.
+  def node_texts(decl, enclosing, lines)
+    members = members_of(decl)
+    if members.empty?
+      name = table_of(decl, enclosing)
+      return name ? { name => slice(lines, span_start(decl), decl.location.end_line) } : {}
+    end
+
+    chain = enclosing + [decl]
+    bodies = {}
+    members.each do |m|
+      if nested?(m)
+        node_texts(m, chain, lines).each { |name, text| (bodies[name] ||= +'') << text }
+      elsif (name = table_of(m, chain))
+        (bodies[name] ||= +'') << slice(lines, span_start(m), m.location.end_line)
+      end
+    end
+    header = slice(lines, span_start(decl), span_start(members.first) - 1)
+    footer = slice(lines, members.last.location.end_line + 1, decl.location.end_line)
+    bodies.transform_values { |body| header + body + footer }
   end
 
   # The source of every native declaration and member, each under its marker: the text a fixture gives the loader as a file.

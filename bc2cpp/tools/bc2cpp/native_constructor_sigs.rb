@@ -322,10 +322,8 @@ module NativeConstructorSigs
       next unless text.include?('mrb_define_method') && text.include?(needle)
 
       vars = nil
-      text.scan(/\bmrb_define_method\s*\(/) do
-        open = Regexp.last_match.end(0) - 1
-        args, = NativeOwnerMap.call_args(text, open)
-        next unless args && args.size >= 4 && args[2] == needle
+      define_method_calls(text).each do |open, args|
+        next unless args[2] == needle
 
         vars ||= class_vars(path, text)
         next unless vars[args[1]] == klass
@@ -339,6 +337,21 @@ module NativeConstructorSigs
       end
     end
     nil
+  end
+
+  # [open paren index, args] of each mrb_define_method call in a stripped text with at least four arguments, in
+  # text order. Every class and helper registered_body looks up reads the same few files, so they are split once.
+  def define_method_calls(text)
+    @define_method_calls ||= {}
+    @define_method_calls[text] ||= begin
+      calls = []
+      text.scan(/\bmrb_define_method\s*\(/) do
+        open = Regexp.last_match.end(0) - 1
+        args, = NativeOwnerMap.call_args(text, open)
+        calls << [open, args] if args && args.size >= 4
+      end
+      calls
+    end
   end
 
   # The comment-stripped text of a source file. Keyed by its bytes, so a changed file is never served stale text.

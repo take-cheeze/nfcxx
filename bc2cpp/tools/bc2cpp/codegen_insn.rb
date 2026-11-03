@@ -1030,6 +1030,9 @@ class CodeGen
        elsif (call = d_reg && super_lookup_call(owner_def, irep, idx, d_reg, n))
          note_super_site(:by_name, owner_def, irep, idx)
          call
+       elsif (call = d_reg && super_splat_call(owner_def, irep, idx, d_reg))
+         note_super_site(:splat, owner_def, irep, idx)
+         call
        else
          note_super_site(:unhandled, owner_def, irep, idx)
          "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
