@@ -406,6 +406,7 @@ class cl_rt {
   std::string device_name() const { return device_name_; }
   bool has_fp16() const { return has_fp16_; }
   unsigned compute_units() const { return compute_units_ ? compute_units_ : 1; }
+  unsigned max_work_group() const { return max_wg_ ? (unsigned)max_wg_ : 256; }
   unsigned long long global_mem() const { return global_mem_; }
 
  private:

@@ -1610,7 +1610,15 @@ class device {
   std::string info_of(info::device::driver_version *) const { return "0"; }
   std::string info_of(info::device::version *) const { return "SYCL 2020 subset"; }
   info::device_type info_of(info::device::device_type *) const { return is_gpu() ? info::device_type::gpu : info::device_type::cpu; }
-  size_t info_of(info::device::max_work_group_size *) const { return is_gpu() ? 256 : 1024; }
+  // the GPU's largest work-group is the driver's (the host learns it from the runtime; a device-side pass has no host runtime)
+  size_t info_of(info::device::max_work_group_size *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().max_work_group();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().max_work_group();
+#endif
+    return is_gpu() ? 256 : 1024;
+  }
   unsigned info_of(info::device::max_work_item_dimensions *) const { return 3; }
   // OpenCL and Level Zero: the device's count (the EUs of an Intel GPU, as DPC++ reports it; ggml-sycl divides it by 16
   // for its Xe cores, so 1 would give it none). Elsewhere 1.
