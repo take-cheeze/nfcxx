@@ -54,6 +54,7 @@ module Qbe
   def size(t)
     t = strip_const(t)
     return 8 if head(t) == "ptr"
+    return size(t[1]) * int_lit(t[2]) if head(t) == "array"
 
     SIZE.fetch(t) { raise QbeUnsupported, "object of type #{sx(t)}" }
   end
@@ -77,6 +78,14 @@ module Qbe
     return false if head(t) == "ptr"
 
     INT_TYPES.fetch(t) { raise QbeUnsupported, "type #{sx(t)}" }[1]
+  end
+
+  # The type of an operator expression: a comparison is bool, an address is a pointer, and any other operator carries its type in its second element.
+  def expr_type(x)
+    return "bool" if CMP_HEADS.include?(head(x))
+    return ["ptr", "void"] if %w[addr index offset].include?(head(x))
+
+    x[1]
   end
 
   def int_lit(s) = s.is_a?(Integer) ? s : Integer(s, 10)
@@ -289,7 +298,7 @@ module Qbe
     def switch_operand_type(x)
       return x[1] if x.is_a?(Array) && head(x) == "const"
       return "ptr" if x.is_a?(Array) && head(x) == "null"
-      return (CMP_HEADS.include?(head(x)) ? "bool" : x[1]) if expression?(x)
+      return Qbe.expr_type(x) if expression?(x)
 
       @types.fetch(x) { raise QbeUnsupported, "operand #{sx(x)} has no declared type" }
     end
@@ -353,12 +362,13 @@ module Qbe
           Qbe.int_lit(x[2]).to_s
         when "null" then "0"
         when "addr" then op(x[1])
+        when "addr" then op(x[1])
         else
           # A nested expression: computed into a temporary, whose line is appended before the caller's line.
           raise QbeUnsupported, "operand #{sx(x)}" unless expression?(x)
 
           name = "%ne#{@temps += 1}"
-          t = CMP_HEADS.include?(head(x)) ? "bool" : x[1]
+          t = Qbe.expr_type(x)
           let_lines(name, t, x)
           @types[name] = t
           reg(name)
@@ -392,6 +402,8 @@ module Qbe
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
       when "unreachable" then @lines << "  hlt"
+      when "nonnull" then nonnull_lines(item[1])
+      when "bounds" then bounds_lines(item[1], item[2])
       else raise QbeUnsupported, "statement #{head(item) || sx(item)}"
       end
     end
@@ -419,6 +431,9 @@ module Qbe
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
+      when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
+      when "index" then index_lines(dst, rv)
       when "load" then @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
       when "const", "null", nil
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
@@ -454,6 +469,41 @@ module Qbe
     # nonzero (it traps, or longjmps out in the test driver), so the operation after it is never reached with the
     # bad operands and no block is split. Codes: 1 division by zero, 2 signed overflow, 3 shift count out of range.
     def fresh = "%ck#{@temps += 1}"
+
+    # The class of an operand whose type is known: a constant, a declared register, or an expression's type.
+    def operand_type(x) = expression?(x) ? Qbe.expr_type(x) : switch_operand_type(x)
+
+    # `(index BASE I SIZE)`: BASE plus I times SIZE. A 32-bit index is widened (signed or unsigned as its type) first.
+    def index_lines(dst, rv)
+      base = op(rv[1])
+      idx = rv[2]
+      signed = Qbe.signed?(operand_type(idx))
+      i = op(idx)
+      if Qbe.cls(operand_type(idx)) == "w"
+        wide = fresh
+        @lines << "  #{wide} =l #{signed ? 'extsw' : 'extuw'} #{i}"
+        i = wide
+      end
+      scaled = fresh
+      @lines << "  #{scaled} =l mul #{i}, #{Qbe.int_lit(rv[3])}"
+      @lines << "  #{dst} =l add #{base}, #{scaled}"
+    end
+
+    # `(nonnull P)`: a null pointer traps (code 5).
+    def nonnull_lines(p)
+      cond = fresh
+      @lines << "  #{cond} =w ceql #{op(p)}, 0"
+      @lines << "  call $pathb_check(w #{cond}, w 5)"
+    end
+
+    # `(bounds I N)`: an index outside [0, N) traps (code 6). The unsigned comparison also rejects a negative index.
+    def bounds_lines(idx, n)
+      c = Qbe.cls(operand_type(idx))
+      i = op(idx)
+      bad = fresh
+      @lines << "  #{bad} =w cuge#{c} #{i}, #{Qbe.int_lit(n)}"
+      @lines << "  call $pathb_check(w #{bad}, w 6)"
+    end
 
     def checked_div_lines(dst, t, rv)
       raise QbeUnsupported, "#{head(rv)} of bool" if t == "bool"
@@ -531,7 +581,7 @@ module Qbe
         case head(a)
         when "addr", "null" then "l"
         when "const" then Qbe.cls(a[1])
-        else Qbe.cls(CMP_HEADS.include?(head(a)) ? "bool" : a[1])
+        else Qbe.cls(Qbe.expr_type(a))
         end
       else raise QbeUnsupported, "argument #{sx(a)}"
       end
