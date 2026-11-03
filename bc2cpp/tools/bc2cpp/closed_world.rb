@@ -1066,31 +1066,16 @@ class ClosedWorld
   # The text a native file's identifiers come from: comments removed, and string literals that contain whitespace
   # dropped (prose such as a help string naming "Game directory"). A class name passed to mrb_class_get or
   # mrb_const_get is a whitespace-free literal, so those are kept.
+  # An escape, or an unterminated literal or block comment, runs to the end of the text.
+  NATIVE_CODE_TEXT_SKIP = %r{//[^\n]*|/\*.*?(?:\*/|\z)|"(?:[^"\\]|\\.|\\\z)*(?:"|\z)|'(?:[^'\\]|\\.|\\\z)*(?:'|\z)}m
+
   def self.native_code_text(text)
-    out = +''
-    i = 0
-    while i < text.length
-      c = text[i]
-      nxt = text[i + 1]
-      if c == '/' && nxt == '/'
-        i = text.index("\n", i) || text.length
-      elsif c == '/' && nxt == '*'
-        close = text.index('*/', i + 2)
-        i = close ? close + 2 : text.length
-      elsif c == '"' || c == "'"
-        j = i + 1
-        while j < text.length && text[j] != c
-          j += text[j] == '\\' ? 2 : 1
-        end
-        lit = text[i..j] || ''
-        out << (lit.match?(/\s/) ? ' ' : lit)
-        i = j + 1
-      else
-        out << c
-        i += 1
+    text.gsub(NATIVE_CODE_TEXT_SKIP) do |tok|
+      if tok.start_with?('/') then ''
+      elsif tok.match?(/\s/) then ' '
+      else tok
       end
     end
-    out
   end
 
   def self.native_file_facts(path)
