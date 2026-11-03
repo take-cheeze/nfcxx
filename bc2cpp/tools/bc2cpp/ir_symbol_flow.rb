@@ -364,6 +364,8 @@ module IrSymbolFlow
          :RANGE_INC, :RANGE_EXC, :SETMCNST
       [a, a + 1]
     when :SETIDX then [a, a + 1, a + 2]
+    # SDEF reads only R[a] (vm.c OP_SDEF); the fallback below would count the higher registers as read too.
+    when :SDEF then [a]
     when :ARRAY, :ARRAY2 then element_regs(insn, 1)
     when :HASH then element_regs(insn, 2)
     when *BytecodeIR::Ops::SEND
