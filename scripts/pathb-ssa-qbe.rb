@@ -793,6 +793,16 @@ end
       dst = reg(r)
       c = Qbe.cls(t)
       case head(rv)
+      when "wadd", "wsub", "wmul"
+        # A wrapping sum, difference or product of a narrow type is wrapped to that type: the 32-bit register would
+        # keep the high bits, and a later comparison or overflow test of the value (the sign bit) would see them.
+        if Qbe::EXT.key?(t)
+          raw = fresh
+          @lines << "  #{raw} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+          canon_lines(dst, t, raw)
+        else
+          @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+        end
       when *Qbe::BIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
       when "wneg" then @lines << "  #{dst} =#{c} sub 0, #{op(rv[2])}"
