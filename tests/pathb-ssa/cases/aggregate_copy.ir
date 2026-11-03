@@ -1,0 +1,14 @@
+(ir-module "a.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "s" (array int 2) 8 4)
+  (slot "t" (array int 2) 8 4)
+  (store int $"s" %0)
+  (store int (offset $"s" 4) (wadd int %0 (const int 1)))
+  (copy 8 $"t" $"s" 4)
+  (block
+    (let %1 int (load int $"t"))
+    (let %2 int (load int (offset $"t" 4)))
+    (let %3 int (wadd int %1 %2))
+    (return %3)))
