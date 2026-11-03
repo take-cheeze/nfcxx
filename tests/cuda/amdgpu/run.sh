@@ -4,14 +4,15 @@
 # and ROCm's clang makes the code object. The program checks 1000 results against the host, so it fails if the kernel does
 # not run. A mutant (the kernel multiplies by 3) must fail. Needs ROCm (clang, HIP headers and runtime) and an AMD GPU,
 # and the EDG front end that accepts HIP's headers (docs/notes/gpu.md). Skips (exit 0) without them.
-# Env: NFCXX_AMDGPU_ARCH (default: the first GPU rocminfo lists), ROCM (default /opt/rocm).
+# Env: NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG (scripts/amdgpu-env.sh), ROCM (default /opt/rocm; the HIP headers and runtime).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 rocm=${ROCM:-/opt/rocm}
-arch=${NFCXX_AMDGPU_ARCH:-$("$rocm/bin/rocminfo" 2>/dev/null | awk '/Name: *gfx[0-9a-f]+ *$/ {print $2; exit}')}
-if [ ! -x "$rocm/llvm/bin/clang" ] || [ ! -f "$rocm/include/hip/hip_runtime_api.h" ] || [ ! -e "$rocm/lib/libamdhip64.so" ] || [ -z "$arch" ]; then
-  echo "SKIP: cuda amdgpu: needs ROCm (clang, HIP headers and runtime) and an AMD GPU"; exit 0
+. "$root/scripts/amdgpu-env.sh"
+arch=$(amdgpu_arch) || arch=""
+if ! amdgpu_clang > /dev/null || [ ! -f "$rocm/include/hip/hip_runtime_api.h" ] || [ ! -e "$rocm/lib/libamdhip64.so" ] || [ -z "$arch" ]; then
+  echo "SKIP: cuda amdgpu: needs a clang with the amdgcn target, the HIP headers and runtime, and an AMD GPU"; exit 0
 fi
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT

@@ -343,6 +343,23 @@ Not done: llama.cpp's HIP backend (ggml-cuda with `GGML_USE_HIP`). Its host code
 lacks (`ext_vector_type` element access, a `vector_size` of 12 or 24 bytes in `amd_hip_ocp_types.h`, `half`/`bf16` overloads),
 and its device code wants wave64 on CDNA (the wave32 model here is RDNA's).
 
+### Toolchain and coverage
+
+The AMD path needs no ROCm tool to build: `scripts/amdgpu-env.sh` finds the GPU's architecture from the kernel driver's topology
+(KFD: `gfx_target_version` 110501 is gfx1151), and the compiler is any clang with the amdgcn target. Upstream LLVM has it (Ubuntu's
+clang 21 compiles and links the device kernels of `tests/gpu/amd` unchanged), and ROCm's clang is the fallback. `rocminfo` and
+`hipcc` are not used. The HIP runtime (`libamdhip64`) and its headers are still needed to run a program. NFCXX_AMDGPU_ARCH and
+NFCXX_AMDGPU_CLANG override the choice.
+
+`lib/hip/cuda_fp16.h` and `lib/hip/cuda_bf16.h` give the CUDA half-precision headers on HIP's, with the CUDA names of the bfloat16
+types. `__align__` is in the runtime shim.
+
+`tests/cuda/amdgpu/sweep.sh` compiles every `.cu` file of the repository for the AMD target. Of 214 files, 155 build (the device
+code included), 23 are refused by design (inline PTX, indirect calls, device-wide CUB, ...), and 36 fail. The failures are
+mostly device-side: the rewriter's device prelude (shared with the NVIDIA path) lacks `__ushort_as_half` and `make_half2`, which
+the device unit needs and the host headers provide. The rest need CUB, cooperative groups or cuBLAS, which the AMD path does not
+have yet. A file that builds is not run: `tests/cuda/amdgpu/run.sh` runs `mul2.cu`, and the sweep only checks that the rest compile.
+
 ## WebGPU (Dawn) vs OpenCL on the Arc B60
 
 `tests/gpu/webgpu/` runs the same vector add through WebGPU and checks it. `vecadd.cpp` picks the Intel Vulkan adapter

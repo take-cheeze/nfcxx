@@ -270,9 +270,11 @@ cu_amd_build() {  # cu_amd_build SRC DEV COPY DEFINE...: the device image of NFC
   # makes the code object, and the registration tail embeds it in COPY as a cubin is. One module: the AMD emitter has no
   # grouping yet, so a large file is not split.
   local src=$1 dev=$2 copy=$3 k; shift 3
-  local arch=${NFCXX_AMDGPU_ARCH:-}
-  [ -n "$arch" ] || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu needs NFCXX_AMDGPU_ARCH (e.g. gfx1151)" >&2; exit 2; }
-  local clang=${NFCXX_AMDGPU_CLANG:-${ROCM:-/opt/rocm}/llvm/bin/clang}
+  # The architecture and the compiler: scripts/amdgpu-env.sh (no ROCm tool is needed; NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG override).
+  . "$root/scripts/amdgpu-env.sh"
+  local arch clang
+  arch=$(amdgpu_arch) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no AMD GPU found (set NFCXX_AMDGPU_ARCH, e.g. gfx1151)" >&2; exit 2; }
+  clang=$(amdgpu_clang) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no clang with the amdgcn target (set NFCXX_AMDGPU_CLANG)" >&2; exit 2; }
   ensure_tool "$root/tools/pathb-amdgpu-emit" "$root/build/pathb-amdgpu-emit" || exit 1
   NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }

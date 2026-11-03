@@ -16,6 +16,9 @@
 #include <hip/hip_runtime_api.h>
 #include <cstddef>
 
+// CUDA's alignment attribute (a declaration or a type takes it before the declarator).
+#define __align__(n) __attribute__((aligned(n)))
+
 typedef hipError_t cudaError_t;
 typedef hipStream_t cudaStream_t;
 typedef hipModule_t cudaLibrary_t;
