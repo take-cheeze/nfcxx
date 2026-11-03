@@ -596,7 +596,7 @@ module DeclaredConstants
         case insn.op
         when :GETCONST then name_value(insn.const_name, visiting)
         when :GETMCNST then name_value(insn.mcnst_name, visiting)
-        when *BytecodeIR::Ops::INT_ARITH then arithmetic(irep, j, insn, cur, visiting, depth)
+        when BytecodeIR::Ops::INT_ARITH then arithmetic(irep, j, insn, cur, visiting, depth)
         end
       end
     end

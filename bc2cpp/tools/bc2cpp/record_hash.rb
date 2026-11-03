@@ -198,7 +198,7 @@ module RecordHash
           name = insn.sym or next
 
           case insn.op
-          when *BytecodeIR::Ops::SEND then @sites[name] << [irep, i]
+          when BytecodeIR::Ops::SEND then @sites[name] << [irep, i]
           when :DEF, :SDEF, :TDEF then nil
           else @poisoned << name
           end
@@ -705,7 +705,7 @@ module RecordHash
     def read_span(insn, lead)
       case insn.op
       when :SEND0, :SSEND0 then lead
-      when *BytecodeIR::Ops::CALL
+      when BytecodeIR::Ops::CALL
         n = insn.argc
         nk = insn.argc_operand&.at(1)
         n && nk ? lead + n + 2 * nk + 1 : INF

@@ -478,10 +478,7 @@ class CodeGen
 
     insns = program.instructions
     out = Array.new(insns.length, true)
-    before = lambda do |i|
-      reached = preds[i].map { |p| p == BytecodeIR::ENTRY ? false : out[p] }
-      reached.empty? || reached.all?
-    end
+    before = ->(i) { preds[i].all? { |p| p != BytecodeIR::ENTRY && out[p] } }
     changed = true
     while changed
       changed = false

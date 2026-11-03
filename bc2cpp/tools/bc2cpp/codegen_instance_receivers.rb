@@ -27,7 +27,7 @@ class CodeGen
       classes << klass
       rest &= ~bit
     end
-    (@numeric_class_bits || {}).to_a.each do |klass, bit|
+    @numeric_class_bits&.each do |klass, bit|
       next unless rest.anybits?(bit)
       return nil unless instance_class?(klass)
 

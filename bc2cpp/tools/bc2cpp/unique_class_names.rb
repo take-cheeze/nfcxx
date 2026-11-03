@@ -307,7 +307,7 @@ module UniqueClassNames
   def constant_rebinding_insn?(insn)
     name = case insn.op
            when :LOADSYM then insn.sym_token.to_s
-           when *BytecodeIR::Ops::SEND then insn.sym.to_s
+           when BytecodeIR::Ops::SEND then insn.sym.to_s
            end
     return false unless name
 

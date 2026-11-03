@@ -135,7 +135,7 @@ module IrSymbolFlow
         when :SYMBOL, :STRING
           entry = irep.pool[insn.pool_index.to_i]
           index[:spelled] << entry if entry.is_a?(String)
-        when *BytecodeIR::Ops::SEND then index[:sends][insn.sym] << [label, instruction.index] if insn.sym
+        when BytecodeIR::Ops::SEND then index[:sends][insn.sym] << [label, instruction.index] if insn.sym
         end
       end
     end
@@ -354,7 +354,7 @@ module IrSymbolFlow
     regs = insn.regs.map(&:to_i)
     a = regs.first
     case insn.op
-    when *BytecodeIR::Ops::LOAD_PREFIX_OPS, :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST, :GETUPVAR, :STRING, :SYMBOL, :LAMBDA,
+    when BytecodeIR::Ops::LOAD_PREFIX_OPS, :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST, :GETUPVAR, :STRING, :SYMBOL, :LAMBDA,
          :BLOCK, :METHOD, :OCLASS, :TCLASS, :TDEF, :ENTER, :NOP, :STOP, :JMP, :JMPUW, :EXCEPT then []
     when :MOVE, :AREF, :GETIDX0 then regs.drop(1)
     when :RETURN, :RETURN_BLK, :BREAK, :JMPIF, :JMPNOT, :JMPNIL, :SETGV, :SETSV, :SETIV, :SETCV,
@@ -368,7 +368,7 @@ module IrSymbolFlow
     when :SDEF then [a]
     when :ARRAY, :ARRAY2 then element_regs(insn, 1)
     when :HASH then element_regs(insn, 2)
-    when *BytecodeIR::Ops::SEND
+    when BytecodeIR::Ops::SEND
       # R[a] (the receiver), then n arguments or one splat Array, then the block for the B forms.
       args = if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) then 0
              elsif insn.plain_fixed_argc? then insn.argc
@@ -552,7 +552,7 @@ module IrSymbolFlow
     case insn.op
     when :SETIDX then [setidx_value_reg(insn)]
     when :ASET then nil
-    when *BytecodeIR::Ops::SEND
+    when BytecodeIR::Ops::SEND
       return [] unless MUTATORS.include?(insn.sym) || OTHER_MUTATORS.include?(insn.sym)
       return nil if OTHER_MUTATORS.include?(insn.sym) || ctx.user_methods.include?(insn.sym)
       return nil unless insn.plain_fixed_argc?

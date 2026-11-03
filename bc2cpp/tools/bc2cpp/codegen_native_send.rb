@@ -156,18 +156,21 @@ class CodeGen
   # modules included or prepended into each. Any of them can answer the name before the native registration, so
   # the definition check must see the whole closure, not only the owners' own tables.
   def method_resolution_owners(owners)
+    # The queue is the unvisited tail of +reached+: both only ever grow by the same appends.
     reached = owners.dup
-    queue = owners.dup
-    until queue.empty?
-      owner = queue.shift
-      [@superclass_of[owner], *Array(@included_modules[owner]), *Array(@prepended_modules[owner])].each do |mod|
-        next unless mod.is_a?(String) && !reached.include?(mod)
-
-        reached << mod
-        queue << mod
-      end
+    i = 0
+    while i < reached.size
+      owner = reached[i]
+      i += 1
+      method_resolution_reach(reached, @superclass_of[owner])
+      @included_modules[owner]&.each { |mod| method_resolution_reach(reached, mod) }
+      @prepended_modules[owner]&.each { |mod| method_resolution_reach(reached, mod) }
     end
     reached
+  end
+
+  def method_resolution_reach(reached, mod)
+    reached << mod if mod.is_a?(String) && !reached.include?(mod)
   end
 
   # Classes whose instances are immediate values: a type-tag test is their whole class
