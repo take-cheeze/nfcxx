@@ -23,6 +23,8 @@ module LexicalConsts
   STRING_EVAL_SENDS = %w[class_eval module_eval instance_eval].freeze
   # The ops collect_definitions reads besides the sends: the class bodies and the constant writes.
   DEFINITION_OPS = %i[CLASS MODULE SETCONST SETMCNST].freeze
+  # collect_definitions' op list, built once rather than splatted (SEND_FAMILY is a Set) per irep.
+  DEFINITION_SCAN_OPS = [*DEFINITION_OPS, *BytecodeIR::Ops::SEND_FAMILY].freeze
   # The send-to-self ops (SSEND and its splat forms). Within SEND_FAMILY this is exactly the SS-prefixed ops.
   SELF_SEND_FAMILY = (BytecodeIR::Ops::SELF_SEND | %i[SSENDV SSENDVB]).freeze
 
@@ -138,7 +140,7 @@ module LexicalConsts
     def collect_definitions
       @ireps.each do |label, irep|
         scope = @scope.fetch(label, :unknown)
-        BytecodeIR.for(irep).each_with_op(*DEFINITION_OPS, *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
+        BytecodeIR.for(irep).each_with_op_in(DEFINITION_SCAN_OPS) do |insn, idx|
           case insn.op
           when :CLASS, :MODULE
             define(scope, insn.sym, klass: true)

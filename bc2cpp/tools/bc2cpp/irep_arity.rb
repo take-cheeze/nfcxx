@@ -9,8 +9,22 @@ def pure_mandatory_arity?(irep)
   enter = irep.enter
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
 
-  fields = enter.enter_fields
-  fields[1..].all?(&:zero?)
+  enter_fields_zero_from?(enter.enter_fields, 1)
+end
+
+# Whether every ENTER field from +start+ on is zero, read in place: these predicates run per call site, and a
+# `fields[start..]` slice is a new Array each time.
+def enter_fields_zero_from?(fields, start)
+  # A truncated field list is a decoder bug; answering true would claim a pure arity for it.
+  raise ArgumentError, "ENTER has #{fields.size} fields, expected at least #{start}" if start > fields.size
+
+  index = start
+  while index < fields.size
+    return false unless fields[index].zero?
+
+    index += 1
+  end
+  true
 end
 
 # ENTER's mandatory count (fields[0]), used by compile_send's MONO guard to
@@ -28,7 +42,7 @@ def optional_positionals_only?(irep)
   enter = irep.enter
   return true unless enter
 
-  enter.enter_fields[2..].all?(&:zero?)
+  enter_fields_zero_from?(enter.enter_fields, 2)
 end
 
 # Rest, keyword and block shapes for the call-site joins. Each one leaves the other kinds out: a join reads one slot
@@ -289,8 +303,7 @@ def pure_mandatory_or_optional_arity?(irep)
   enter = irep.enter
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
 
-  fields = enter.enter_fields
-  fields[2..].all?(&:zero?)
+  enter_fields_zero_from?(enter.enter_fields, 2)
 end
 
 # OPTIONAL_ARG_SUPPORT: models ENTER's optional field only. Returns

@@ -458,11 +458,14 @@ class CodeGen
     registers = Set[0]
     # Literal contents and comments cannot name frame registers. R[0] and R[1]
     # remain the yield/resume cells; ordinary registers have dense aliases.
-    body.scan(RESUMABLE_REGISTER_TOKENS) do
+    # One pass collects the registers and blanks every other token: only the `reg` alternative starts with `r`.
+    code_only = body.gsub(RESUMABLE_REGISTER_TOKENS) do |token|
       reg = Regexp.last_match[:reg]
-      registers << reg.to_i if reg
+      next ' ' unless reg
+
+      registers << reg.to_i
+      token
     end
-    code_only = body.gsub(RESUMABLE_REGISTER_TOKENS) { |token| token.match?(/\Ar\d+\z/) ? token : ' ' }
     registers = registers.sort
     # BLOCK_SLOT: a method with a block keeps it in the frame's last register (the block is the same for every call
     # of the step, so no spill), and the step reads it into bc2cpp_blk, which yield (BLKPUSH) reads.

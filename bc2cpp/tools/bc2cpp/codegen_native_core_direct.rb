@@ -157,7 +157,11 @@ module NativeCoreDirectFallback
     @native_name_sources.values.flatten.uniq.all? do |path|
       next true if path.end_with?('/src/class.c')
 
-      File.foreach(path, encoding: 'BINARY').all? do |line|
+      # A file that never spells BasicObject has no line to check, so only those files are split into lines.
+      text = File.binread(path)
+      next true unless text.include?('BasicObject')
+
+      text.each_line.all? do |line|
         !line.include?('BasicObject') || line.match?(NATIVE_BASIC_OBJECT_USE) || line.lstrip.start_with?('//', '/*', '*')
       end
     end

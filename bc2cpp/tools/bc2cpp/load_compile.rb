@@ -79,7 +79,7 @@ module LoadCompile
   # Whether the file starts with `# frozen_string_literal: true` (a folded String is frozen iff the source's was).
   def magic?(file)
     @magic ||= {}
-    @magic.fetch(file) { @magic[file] = File.foreach(file).first(5).any? { |l| l.match?(/\A#\s*frozen_string_literal:\s*true/) } }
+    @magic.fetch(file) { @magic[file] = ClassWorld.frozen_magic?(file) }
   end
 
   def openable?(body)
