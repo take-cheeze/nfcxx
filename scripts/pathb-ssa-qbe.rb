@@ -27,6 +27,7 @@ module Qbe
   EXT = { "char" => "sb", "signed_char" => "sb", "unsigned_char" => "ub", "short" => "sh", "unsigned_short" => "uh" }.freeze
   BIN = { "wadd" => "add", "wsub" => "sub", "wmul" => "mul", "and" => "and", "or" => "or", "xor" => "xor" }.freeze
   CMP = { "eq" => "ceq", "ne" => "cne", "lt.s" => "cslt", "lt.u" => "cult", "le.s" => "csle", "le.u" => "cule" }.freeze
+  CMP_HEADS = CMP.keys.freeze
 
   module_function
 
@@ -83,6 +84,7 @@ module Qbe
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
+      @temps = 0
       @types = {}
       @params_set = {}
       @slot = {}
@@ -91,9 +93,14 @@ module Qbe
     def emit
       header
       allocs
+      plan_switches
       @blocks.each do |b|
-        @lines << "@b#{b[1]}"
-        b[2..].each { |item| item_lines(item) }
+        @cur = b[1].to_s
+        @lines << "@#{block_label(@cur)}"
+        items = b[2..]
+        items[0...-1].each { |item| item_lines(item) }
+        pending_phi_operands(@cur)
+        item_lines(items.last) if items.any?
       end
       @lines << "}"
       self
@@ -127,6 +134,111 @@ module Qbe
 
     def reg(name) = "%v#{name[1..]}"
 
+    def block_label(num) = "b#{num}"
+
+    # The label a phi of block @cur uses for its predecessor pred: the test block that jumps to @cur.
+    def jumper_label(pred)
+      @jumper.fetch([@cur, pred.to_s], block_label(pred))
+    end
+
+    # A switch is a chain of tests, one block per case after the first (the first test is in the switch's own block).
+    # QBE has no switch, so each test is `jnz` on an equality. A phi names the block that jumps to it, so for each
+    # target the label of the test block that jumps there is recorded in @jumper.
+    def plan_switches
+      @jumper = {}
+      @phi_blocks = {}
+      @phi_expr = {}
+      @blocks.each do |b|
+        @phi_blocks[b[1].to_s] = true if b[2..].any? { |it| head(it) == "phi" }
+      end
+      @blocks.each do |b|
+        b[2..].each { |it| plan_switch(b[1].to_s, it) if head(it) == "switch" }
+      end
+      # A phi operand that is an expression is computed at the end of its predecessor, so the phi reads a temporary.
+      @pending = Hash.new { |h, k| h[k] = [] }
+      @blocks.each do |b|
+        b[2..].each do |it|
+          next unless head(it) == "phi"
+
+          it[3..].each do |pred, v|
+            next unless expression?(v)
+
+            name = "%pe#{it[1][1..]}_#{pred}"
+            @pending[pred.to_s] << [name, v]
+            @phi_expr[[b[1].to_s, pred.to_s, it[1]]] = name
+          end
+        end
+      end
+    end
+
+    def expression?(v) = v.is_a?(Array) && !%w[const null].include?(head(v))
+
+    def pending_phi_operands(num)
+      @pending.fetch(num, []).each do |name, v|
+        let_lines(name, v[1], v)
+        @types[name] = v[1]
+      end
+    end
+
+    def switch_parts(item)
+      cases = item[2..].select { |c| head(c) == "case" }.map { |c| [c[1], c[2].to_s] }
+      default = item[2..].find { |c| head(c) == "default" } or raise QbeUnsupported, "switch without a default"
+      [cases, default[1].to_s]
+    end
+
+    # The labels of the test blocks of block num: the first is the block itself.
+    def test_labels(num, cases)
+      [block_label(num)] + (1...cases.size).map { |k| "#{block_label(num)}.s#{k}" }
+    end
+
+    def plan_switch(num, item)
+      cases, default = switch_parts(item)
+      targets = cases.map(&:last) + [default]
+      dup = targets.find { |t| targets.count(t) > 1 }
+      if dup && @phi_blocks[dup]
+        raise QbeUnsupported, "switch edges to block #{dup} that has phi"
+      end
+
+      labels = test_labels(num, cases)
+      cases.each_with_index { |(_, t), k| @jumper[[t, num]] = labels[k] }
+      @jumper[[default, num]] = labels.last
+    end
+
+    # The class and the value text of a switch operand's comparison.
+    def switch_operand_type(x)
+      return x[1] if x.is_a?(Array) && head(x) == "const"
+      return "ptr" if x.is_a?(Array) && head(x) == "null"
+
+      @types.fetch(x) { raise QbeUnsupported, "switch operand #{sx(x)} has no declared type" }
+    end
+
+    def switch_lines(num, item)
+      cases, default = switch_parts(item)
+      labels = test_labels(num, cases)
+      if cases.empty?
+        @lines << "  jmp @#{block_label(default)}"
+        return
+      end
+      opnd = item[1]
+      if opnd.is_a?(Array) && !%w[const null].include?(head(opnd))
+        # An operator in operand position: computed into a temporary first, in the switch's own block.
+        name = "%swop#{num}"
+        let_lines(name, opnd[1], opnd)
+        @types[name] = opnd[1]
+        operand = reg(name)
+      else
+        operand = op(opnd)
+      end
+      cls = Qbe.cls(switch_operand_type(opnd))
+      cases.each_with_index do |(value, target), k|
+        cond = "%sw#{num}_#{k}"
+        @lines << "  #{cond} =w ceq#{cls} #{operand}, #{Qbe.int_lit(value)}"
+        next_label = k + 1 < cases.size ? "@#{labels[k + 1]}" : "@#{block_label(default)}"
+        @lines << "  jnz #{cond}, @#{block_label(target)}, #{next_label}"
+        @lines << "@#{labels[k + 1]}" if k + 1 < cases.size
+      end
+    end
+
     # An operand: a register, a parameter, an integer constant, null, or the address of an object.
     def op(x)
       case x
@@ -145,7 +257,15 @@ module Qbe
 
           Qbe.int_lit(x[2]).to_s
         when "null" then "0"
-        else raise QbeUnsupported, "operand #{sx(x)}"
+        else
+          # A nested expression: computed into a temporary, whose line is appended before the caller's line.
+          raise QbeUnsupported, "operand #{sx(x)}" unless expression?(x)
+
+          name = "%ne#{@temps += 1}"
+          t = CMP_HEADS.include?(head(x)) ? "bool" : x[1]
+          let_lines(name, t, x)
+          @types[name] = t
+          reg(name)
         end
       else raise QbeUnsupported, "operand #{sx(x)}"
       end
@@ -154,12 +274,16 @@ module Qbe
     def item_lines(item)
       case head(item)
       when "phi"
-        pairs = item[3..].map { |pred, v| "@b#{pred} #{op(v)}" }.join(", ")
+        pairs = item[3..].map do |pred, v|
+          text = expression?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
+          "@#{jumper_label(pred)} #{text}"
+        end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
       when "store" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
-      when "br" then @lines << "  jmp @b#{item[1]}"
-      when "condbr" then @lines << "  jnz #{op(item[1])}, @b#{item[2]}, @b#{item[3]}"
+      when "br" then @lines << "  jmp @#{block_label(item[1])}"
+      when "switch" then switch_lines(@cur, item)
+      when "condbr" then @lines << "  jnz #{op(item[1])}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret" then @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
       when "unreachable" then @lines << "  hlt"
       else raise QbeUnsupported, "statement #{head(item) || sx(item)}"

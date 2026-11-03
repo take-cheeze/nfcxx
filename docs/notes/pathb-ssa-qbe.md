@@ -19,25 +19,27 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
   conversions (`iconv`); `load` and `store` of scalar objects; `phi`, `br`, `condbr`, `ret`, `unreachable` (as `hlt`).
 - Objects: a slot that the converter did not promote is allocated on the stack at entry (`alloc4`/`alloc8`). Address
   operands are `$slot`; a parameter `%k` is `%pk`; a register `%N` is `%vN`.
+- `switch`: a chain of `jnz` tests (QBE has no switch). The first test is in the switch block; each later test has its
+  own block. A phi of a target names the test block that jumps to it.
+- Nested expressions (in operands, switch operands and phi operands) are computed into temporaries first, in the block
+  that uses them (a phi operand in its predecessor).
 - Not yet: checked operations (`cdiv`, `crem`, `cshl`, `cshr`, `cf2i`, bounds and nonnull checks, which need trap
-  helpers), `switch` (needs compare chains), floats and `double`, globals, calls to module functions, aggregates,
-  volatile accesses, and nested expression operands that the converter did not let-bind (seen in `switch_loop.ir`).
+  helpers), floats and `double`, globals, calls to module functions, aggregates, and volatile accesses.
 
 A function outside the subset raises `QbeUnsupported` and nothing is emitted for it, so a module with an unsupported
 function still emits the rest.
 
 ## Status
 
-`tests/pathb-ssa-qbe/run.rb` on the current cases: 11 match the interpreter, 0 mismatches, 23 skipped (checked
-operations, switch, floats, memory and setjmp cases that need the harness's `CaseMachine` or a global model, and
-the nested-operand case).
+`tests/pathb-ssa-qbe/run.rb` on the current cases: 17 match the interpreter, 0 mismatches, 17 skipped (checked
+operations, floats, memory and setjmp cases that need the harness's `CaseMachine` or a global model).
 
 The emitter uses the same naming and cls rules as the QBE it is tested against; a mismatch is a bug in the emitter,
 the optimizer, or the interpreter, and the runner reports which one by comparing against the interpreter.
 
 ## Next
 
-1. Switch as a compare chain, then the checked integer operations via the EDG runtime trap helpers.
+1. The checked integer operations (`cdiv`, `crem`, `cshl`, `cshr`) via the EDG runtime trap helpers.
 2. Globals and calls to module functions (the same install as the interpreter's `install_module`).
 3. Floats (`d`/`s` classes, `cf2i` as truncation with a range trap).
 4. Decide the wiring into `bin/nfcxx` (behind an option, Path B only).
