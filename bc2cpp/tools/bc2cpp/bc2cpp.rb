@@ -599,12 +599,15 @@ if $PROGRAM_NAME == __FILE__
   end
   warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
 
+  # outside_world_tokens: its readers below only call include?, so the first call's Set is reused rather than
+  # reloaded from ScanCache at each use.
+  outside_tokens = nil
   # RBS_CHECKED_PARAMS: a class parameter type is kept only when every caller is proven to pass it.
   if sig_applied
     param_outside = RbsParamCheck.outside_call_names(native_paths, foreign_ruby_srcs, ireps.values.to_set(&:file))
     # The `new` / `super` sites of each initialize, from a CodeGen built only that far.
     param_constructors = CodeGen.new(ireps, registry, {}, {}, {}, {}, superclass_of, {}, {}, {}, {}, Set.new,
-                                     foreign_methods, outside_world_tokens(native_paths + foreign_ruby_srcs),
+                                     foreign_methods, (outside_tokens ||= outside_world_tokens(native_paths + foreign_ruby_srcs)),
                                      native_name_sources, included_modules, prepended_modules, unknown_mixins,
                                      analysis_only: :constructor_sites, closed_world: closed_world,
                                      outside_ivar_names: outside_ivar_names(native_paths + foreign_ruby_srcs))
@@ -753,7 +756,7 @@ if $PROGRAM_NAME == __FILE__
   record_hash = profile_call.call('RecordHash.analyze') do
     RecordHash.analyze(ireps, registry, native_paths: native_paths, foreign_paths: foreign_ruby_srcs,
                                         closed_world: closed_world,
-                                        outside_tokens: outside_world_tokens(native_paths + foreign_ruby_srcs),
+                                        outside_tokens: (outside_tokens ||= outside_world_tokens(native_paths + foreign_ruby_srcs)),
                                         trusted: ->(irep, idx, reg) { proven_array_source_scan(irep, idx, reg, registry) == 'Array' })
   end
   RecordHash.table = record_hash.table
@@ -1145,7 +1148,7 @@ if $PROGRAM_NAME == __FILE__
   # `annotations` also drives NATIVE_ARGS (native_arg_types).
   # FIXNUM_RETURN_PROOF / ENTRY_ARG_CALLSITE_PROOF: every identifier token of the
   # outside native and Ruby sources (see outside_world_tokens).
-  outside_tokens = outside_world_tokens(native_paths + foreign_ruby_srcs)
+  outside_tokens ||= outside_world_tokens(native_paths + foreign_ruby_srcs)
   # NUMERIC_OPERAND_PROOF: the same two outside inputs, as ivar names they spell
   # and operators they define on NilClass.
   outside_ivars = outside_ivar_names(native_paths + foreign_ruby_srcs)
