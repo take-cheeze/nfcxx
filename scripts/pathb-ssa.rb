@@ -1001,6 +1001,14 @@ end
 
   def store_cell(t, a, v) = @cells[a] = [sx(strip_const(t)), v]
 
+  # Copies the n bytes at src to dst: the cells of the source range move (each keeps its type) and the destination
+  # range's cells are replaced; a destination cell with no source cell becomes zero.
+  def copy_cells(dst, src, n)
+    moved = @cells.select { |a, _| a >= src && a < src + n }
+    (dst...dst + n).each { |a| @cells.delete(a) }
+    moved.each { |a, c| @cells[dst + (a - src)] = c }
+  end
+
   # The slot whose object starts at the address, or nil.
   def slot_at(a) = @addr.key(a)
 
@@ -1058,6 +1066,7 @@ end
     when "let" then @env[s[1]] = val(s[3])
     when "set" then @env[s[1]] = val(s[2])
     when "store" then store_cell(s[1], addr_of(s[2]), val(s[3]))
+    when "copy" then copy_cells(addr_of(s[2]), addr_of(s[3]), int_lit(s[1]))
     when "nonnull"
       raise Trap, "null pointer" if val(s[1]).zero?
     when "bounds"
@@ -1100,6 +1109,7 @@ end
       when "null" then 0
       else eval_rv(x)
       end
+    when Ref then addr_of(x)
     else raise Unsupported, sx(x)
     end
   end
