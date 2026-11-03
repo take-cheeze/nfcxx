@@ -515,6 +515,7 @@ module Qbe
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
       when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      when "bitcast" then bitcast_lines(dst, rv)
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
       when "index" then index_lines(dst, rv)
@@ -672,6 +673,20 @@ module Qbe
         @lines << "  #{nw} =#{uc} or #{keep}, #{v}"
       end
       @lines << "  #{Qbe::BF_STORE[unit]} #{nw}, #{addr}"
+    end
+
+    # `(bitcast (ptr T) P)`: a pointer reinterpreted as a pointer keeps its address (the interpreter's rule). Any other
+    # reinterpretation is refused: the interpreter does not model it either.
+    def bitcast_lines(dst, rv)
+      raise QbeUnsupported, "bitcast to #{sx(rv[1])}" unless head(strip_const(rv[1])) == "ptr"
+
+      src = rv[2]
+      src_type = src.is_a?(String) ? @types[src] : nil
+      pointer = src.is_a?(Ref) || (src_type && head(strip_const(src_type)) == "ptr") ||
+                (src.is_a?(Array) && %w[null addr].include?(head(src)))
+      raise QbeUnsupported, "bitcast of #{sx(src)}" unless pointer
+
+      @lines << "  #{dst} =l copy #{op(src)}"
     end
 
     # `(nonnull P)`: a null pointer traps (code 5).
