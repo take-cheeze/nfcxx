@@ -869,6 +869,37 @@ class CodeGen
   # `super(x) { }` builds another): passed on when the method takes one, else nil, which needs
   # SUPER_NO_CALLER_BLOCK, as OP_SUPER would forward a caller's block the compiled body never sees.
   # BC2CPP_SUPER_LOOKUP=0 keeps the `#error`.
+  # SUPER_SPLAT: `super(a, *rest)` and `super(*rest)` (`SUPER Rd n=*`). The compiler packs the arguments into one Array
+  # in R(d+1) (ARRAY/LOADNIL then ARYCAT), and the block into R(d+2) with a MOVE just before. The superclass method is
+  # called with those elements, as zsuper_lookup does, through bc2cpp_super_call. Only this packed shape is taken: the
+  # Array must be the single definition of R(d+1) and come from an ARYCAT. The block follows super_lookup_call's rule.
+  # BC2CPP_SUPER_SPLAT=0 keeps the `#error`.
+  def super_splat_call(owner_def, irep, idx, d_reg)
+    return nil unless owner_def && irep && idx && d_reg && ENV.fetch('BC2CPP_SUPER_SPLAT', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
+
+    program = BytecodeIR.for(irep)
+    insn = program.source_at(idx)
+    return nil unless insn&.op == :SUPER && insn.pure_splat? && insn.reg.to_i == d_reg.to_i
+    return nil unless idx.positive?
+
+    move = program.source_at(idx - 1)
+    return nil unless move&.op == :MOVE && move.regs.first == d_reg.to_i + 2
+
+    arr = d_reg.to_i + 1
+    defs = BytecodeIR.reaching_definitions(irep, idx, arr, through_handlers: true, origin_transfers: true, shared: true)
+    return nil unless defs && defs.size == 1 && !defs.first.entry?
+
+    writer = program.source_at(defs.first.index)
+    return nil unless writer&.op == :ARYCAT && writer.reg.to_i == arr
+
+    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    return nil unless block
+
+    "  r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(owner_def.owner)}, " \
+      "mrb_intern_lit(M, #{owner_def.name.inspect}), RARRAY_LEN(r#{arr}), RARRAY_PTR(r#{arr}), #{block});\n"
+  end
+
   def super_lookup_call(owner_def, irep, idx, d_reg, n)
     return nil unless n && owner_def && irep && idx && ENV.fetch('BC2CPP_SUPER_LOOKUP', '1') == '1'
     return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
