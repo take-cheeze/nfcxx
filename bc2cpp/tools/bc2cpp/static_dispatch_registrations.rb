@@ -353,7 +353,8 @@ module StaticDispatchRegistrations
   # with that entry where the lookup would have found it. A call so covering every listed owner of the closed
   # world's (CLOSED_OWNER_RE, a superset of the open list's) looks up nothing either list may drop: the symbol index
   # of each.
-  OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?\w+ = bc2cpp_owner_call(?:_argv)?\(M, (\w+), (\d+), \d+, BC2CPP_OWNERS(?:_D)?\((.*)$/
+  # The result may be discarded (a `&:sym` loop's `each` call), which is the same owner call.
+  OWNER_CALL_SITE = /^[ \t]*(?:BC2CPP_COLD_ARM[ \t]+)?(?:\w+ = )?bc2cpp_owner_call(?:_argv)?\(M, (\w+), (\d+), \d+, BC2CPP_OWNERS(?:_D)?\((.*)$/
   OWNER_DIRECT = /BC2CPP_OWNER_DIRECT\("((?:[^"\\]|\\.)*)"/
 
   def guarded_owner_calls(src, subclassed)

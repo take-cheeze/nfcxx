@@ -25,7 +25,7 @@ module OwnerCallDirect
   # stay out: the core's own code calls their methods on values of every kind.
   CLOSED_OWNER_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\.singleton\z|\z)/
   # A call carries at most this many (each is a row of read-only data and a class slot).
-  MAX = 8
+  MAX = 32
   VISIBILITY = { public: 'MRB_METHOD_PUBLIC_FL', private: 'MRB_METHOD_PRIVATE_FL' }.freeze
   # `bc2cpp_owner_call_named(M, RECV, "name", LEVEL, BC2CPP_OWNERS(LIST)` before SymbolCache.rewrite numbers the name.
   SITE = /(\bbc2cpp_owner_call(?:_argv)?_named\(M, (.*?), "((?:[^"\\]|\\.)*)", \d+, )BC2CPP_OWNERS\(([^)]*)\)/
@@ -45,6 +45,30 @@ module OwnerCallDirect
 
       out[[m[:owner], m[:name]]] ||= m
     end
+  end
+
+  # NATIVE_DISPOSE: the RGSS registrations of `dispose` (mruby-rgss/src/lib.cxx, `mrb_define_method(M, <var>, "dispose",
+  # <body>, MRB_ARGS_NONE())`). Their bodies are internal to lib.cxx, so each is reached through the exported wrapper of
+  # the same body. scripts/bc2cpp/owner_call_direct_native_check.rb holds this table to the registrations.
+  NATIVE_DISPOSE = {
+    'obj_dispose' => 'rgss_obj_dispose_direct',
+    'tilemap_dispose' => 'rgss_tilemap_dispose_direct'
+  }.freeze
+  NATIVE_DISPOSE_OWNERS = {
+    'RGSS::Viewport' => 'obj_dispose', 'RGSS::Sprite' => 'obj_dispose', 'RGSS::Plane' => 'obj_dispose',
+    'RGSS::Window' => 'obj_dispose', 'RGSS::Bitmap' => 'obj_dispose', 'RGSS::Tilemap' => 'tilemap_dispose'
+  }.freeze
+
+  # The direct rows of the native `dispose` registrations, keyed like entries.
+  def native_entries
+    NATIVE_DISPOSE_OWNERS.to_h do |owner, body|
+      [[owner, 'dispose'], { owner: owner, entry: NATIVE_DISPOSE.fetch(body), aspec: 'MRB_ARGS_NONE()', visibility: :public }]
+    end
+  end
+
+  # Declarations of the wrappers native_entries names, for the generated code that carries their rows.
+  def native_prototypes
+    NATIVE_DISPOSE.values.map { |fn| "mrb_value #{fn}(mrb_state* M, mrb_value self);\n" }.join
   end
 
   # `code` with the owner set of each call the direct entries complete replaced by BC2CPP_OWNERS_D. `slots` maps an
