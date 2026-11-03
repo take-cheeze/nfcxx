@@ -79,14 +79,14 @@ const RegInfo *FnCtx::sra_field(const Node &addr, const Ty &ty) const {
   return &it->second;
 }
 
-const RegInfo *FnCtx::sra_word(const std::string &tok, long long off) const {
+const RegInfo *FnCtx::sra_word(const std::string &tok, long long off, long long w) const {
   size_t plus = tok.rfind('+');
   const std::string key = tok.substr(0, plus) + "|" + std::to_string(std::stoll(tok.substr(plus + 1)) + off) + "|";
   for (const char *ty : {"f32", "s32", "u32"}) {
     auto it = sra_fields.find(key + ty);
-    if (it != sra_fields.end()) return &it->second;
+    if (it != sra_fields.end() && type_size(it->second.ty) == w) return &it->second;
   }
-  throw BadIR("copy through " + tok + " has no 4-byte field register at " + std::to_string(off));
+  throw BadIR("copy through " + tok + " has no " + std::to_string(w) + "-byte field register at " + std::to_string(off));
 }
 
 bool FnCtx::memory(const std::string &h, const Node &x, const std::string &dest, const Ty &dty) {

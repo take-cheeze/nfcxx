@@ -93,7 +93,7 @@ class FnCtx {
   // The field register that an access of type ty through addr reaches, or null when addr is not an alias token.
   const RegInfo *sra_field(const Node &addr, const Ty &ty) const;
   // The 4-byte field register at byte off of an alias token (a copy moves a struct word by word through these).
-  const RegInfo *sra_word(const std::string &tok, long long off) const;
+  const RegInfo *sra_word(const std::string &tok, long long off, long long w) const;
   std::string sp = "%sp";                       // the PTX register holding the frame's generic address
   const ModuleSymbols *mod = nullptr;           // the module's data symbols (the @name operands), null when none
   // The module's functions by PTX name: true for a kernel (the `&name` operands are the functions' addresses), null when none.
