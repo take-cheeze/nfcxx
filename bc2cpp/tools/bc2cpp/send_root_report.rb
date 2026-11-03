@@ -14,7 +14,7 @@ module SendRootReport
   ROWS = {}
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     code = super
     # BC2CPP_POOL_DROP_REPORT loads this file for the pool report alone, which must not tag the generated text.
     return code unless ENV['BC2CPP_SEND_ROOT_REPORT'] && @closed_world && code.each_line.any? { |l| !l.lstrip.start_with?('//') && l.match?(BY_NAME) }

@@ -14,7 +14,7 @@ module CheckedSend
   EXPLICIT_OPS = %i[SEND SEND0].freeze
   IMPLICIT_OPS = %i[SSEND SSEND0].freeze
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     code = super
     level = checked_send_level(insn, kwargs)
     return code unless level

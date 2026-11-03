@@ -19,8 +19,9 @@ require_relative 'bytecode_ir'
 # built a Base. When the set is unknown or an initialize does not resolve to a direct call, an inheritable `self`
 # receiver now takes the by-name send, which is what Class#new does.
 module SelfNewConstruct
-  def compile_send(insn, **kwargs)
-    self_new_construct(insn, **kwargs) || super
+  def compile_send(insn, kwargs)
+    # The name test first: splatting the options into keywords copies them, and most sends are not `new`.
+    (insn.sym == 'new' && self_new_construct(insn, **kwargs)) || super
   end
 
   private

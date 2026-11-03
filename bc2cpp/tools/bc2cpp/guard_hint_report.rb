@@ -15,7 +15,7 @@ module GuardHintReport
 
   ROWS = {}
 
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     code = super
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]

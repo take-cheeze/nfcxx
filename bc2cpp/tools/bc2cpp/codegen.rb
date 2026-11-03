@@ -773,7 +773,22 @@ class CodeGen
   def native_arg_types(d, mand)
     return Array.new(mand) unless d.irep && @native_arg_positions
 
-    Array.new(mand) { |i| @native_arg_positions.include?([d.irep, i + 1]) ? :fixnum : nil }
+    positions = native_arg_positions_by_label[d.irep]
+    return Array.new(mand) unless positions
+
+    Array.new(mand) { |i| positions.include?(i + 1) ? :fixnum : nil }
+  end
+
+  # @native_arg_positions as label => Set of positions, rebuilt whenever that Set is replaced, so a lookup builds no
+  # [label, position] pair. Set membership keeps the pair Set's eql? semantics.
+  def native_arg_positions_by_label
+    unless @native_arg_positions_index_of.equal?(@native_arg_positions)
+      @native_arg_positions_index_of = @native_arg_positions
+      @native_arg_positions_index = @native_arg_positions.each_with_object({}) do |(label, k), index|
+        (index[label] ||= Set.new) << k
+      end
+    end
+    @native_arg_positions_index
   end
 
   # NATIVE_ARGS: the [irep label, position] pairs native_arg_types retypes, fixed once the ENTRY_ARG_CALLSITE_PROOF

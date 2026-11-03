@@ -239,12 +239,14 @@ class RegisterFlow
   # protects to its target), which liveness treats apart from normal flow.
   def build_edges
     count = @insns.length
-    @normal_succ = Array.new(count) { |i| @program.instruction_at(i).successors.dup }
+    # The edge lists are only read once built (add_dispatch_edges replaces a list), so the IR's own successor lists
+    # are shared until a fall-through edge is added, and a list too short to repeat an edge is its own `uniq`.
+    @normal_succ = Array.new(count) { |i| @program.instruction_at(i).successors }
     count.times do |i|
-      @normal_succ[i] << i + 1 if @transparent[i] && i + 1 < count && !@normal_succ[i].include?(i + 1)
+      @normal_succ[i] = @normal_succ[i].dup << (i + 1) if @transparent[i] && i + 1 < count && !@normal_succ[i].include?(i + 1)
     end
     add_dispatch_edges if self.class.goto_model?
-    # The edge lists are only read once built, so a method without handlers shares one empty list.
+    # A method without handlers shares one empty list.
     @handler_succ = Array.new(count, NO_EDGES)
     if @program.handlers?
       count.times do |i|
@@ -253,7 +255,12 @@ class RegisterFlow
     end
     @succ = Array.new(count) do |i|
       handler = @handler_succ[i]
-      handler.empty? ? @normal_succ[i].uniq : (@normal_succ[i] + handler).uniq
+      normal = @normal_succ[i]
+      if handler.empty?
+        normal.size < 2 ? normal : normal.uniq
+      else
+        (normal + handler).uniq
+      end
     end
     @pred = Array.new(count) { [] }
     @succ.each_with_index { |targets, i| targets.each { |t| @pred[t] << i } }

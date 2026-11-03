@@ -289,6 +289,7 @@ class CodeGen
   end
 
   POLY_SMALL_N_INHERITED_MAX = 16
+  NO_INHERITING_SUBCLASSES = [].freeze
 
   # INHERITED_GUARD: closed-world strict subclasses of `owner` whose instances'
   # lookup of `name` provably ends at `owner`'s own def: no class on the way
@@ -297,19 +298,19 @@ class CodeGen
     return index_closed_subclasses(owner) if @index_closed_build && name == @index_closed_build[:plan].name
 
     installed = symbol_installed_names
-    return [] if installed.nil? || installed.include?(name)
-    return [] unless no_mixins?(@prepended_modules[owner]) && !@unknown_mixins.include?(owner)
+    return NO_INHERITING_SUBCLASSES if installed.nil? || installed.include?(name)
+    return NO_INHERITING_SUBCLASSES unless no_mixins?(@prepended_modules[owner]) && !@unknown_mixins.include?(owner)
     # A native def outside mruby's core (which only touches core classes) could
     # sit on a subclass; without the source map any native def declines.
     natives = @native_name_sources ? @native_name_sources.fetch(name) { [] } : nil
     native_owners = nil
     if natives.nil?
-      return [] if @registry.fetch(name, []).any? { |md| md.owner == '<native>' }
+      return NO_INHERITING_SUBCLASSES if @registry.fetch(name, []).any? { |md| md.owner == '<native>' }
     elsif natives.any? { |path| !path.match?(%r{/3rd/mruby/(?:src|mrbgems)/}) }
       # The closed world names every class an outside definition of `name` lands on (OutsideOwnerCall: the native
       # owner map, outside and core Ruby); the walk stops at each, so none can sit between a subclass and `owner`.
       native_owners = @closed_world && outside_owner_call_owners(name)
-      return [] unless native_owners
+      return NO_INHERITING_SUBCLASSES unless native_owners
     end
 
     # Selected in hash order, then sorted: the predicate is pure, so this is the sorted-keys selection without
@@ -327,7 +328,7 @@ class CodeGen
       k = @superclass_of[k] until k == owner || def_owners.include?(k) || class_has_mixins?(k)
       (found ||= []) << klass if k == owner
     end
-    return [] unless found
+    return NO_INHERITING_SUBCLASSES unless found
 
     found.sort!
     found.size > POLY_SMALL_N_INHERITED_MAX ? found.first(POLY_SMALL_N_INHERITED_MAX) : found
@@ -381,9 +382,9 @@ class CodeGen
     class_read = integer_tag ? "mrb_integer_p(#{recv}) ? M->integer_class : #{obj_class_expr(recv)}" : obj_class_expr(recv)
     ordered = integer_tag ? candidates.partition { |t| t.owner == 'Integer' }.flatten : candidates
     branches = ordered.map do |target|
-      check = ([target.owner] + inherited[target.owner]).map do |owner|
-        hoist ? "#{owner_class_ptr_expr(owner)} == #{recv_class}" : exact_class_guard(owner_class_ptr_expr(owner), recv)
-      end.join(' || ')
+      # `([owner] + inherited).map { ... }.join(' || ')`, without the Arrays when nothing inherits.
+      check = poly_class_check(target.owner, hoist, recv_class, recv)
+      inherited[target.owner].each { |owner| check = "#{check} || #{poly_class_check(owner, hoist, recv_class, recv)}" }
       call = if target.kind == :ivar_accessor && target.irep.nil?
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c), or the
@@ -393,7 +394,8 @@ class CodeGen
              else
                impl = cpp_name(target.owner, target.name) + '_impl'
                call_argv, = direct_call_args(target, argv, impl)
-               "#{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+               args = call_argv.empty? ? recv : "#{recv}, #{call_argv.join(', ')}"
+               "#{RegName[d]} = #{impl}(M, #{args});"
              end
       "if (#{check}) {\n    #{call}\n  } else "
     end
@@ -401,18 +403,28 @@ class CodeGen
     diag = poly_diagnostic(name, n, 'chain', candidates)
     note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
            "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
-    listed = candidates.flat_map { |t| [t.owner] + inherited[t.owner] }
+    listed = []
+    candidates.each { |t| listed.push(t.owner).concat(inherited[t.owner]) }
     fallback = strict_hint_wrap('poly_small_n', d, recv, name, argv, nil, listed: listed) do
       guarded_fallback_line(d, recv, name, argv, listed, closed_world_site)
     end
     chain = "#{branches.join}{\n    #{BranchHints.cold_arm}#{fallback}  }\n"
     return "#{diag}#{note}  #{chain}" unless hoist
 
-    subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
-    guard_note = subclassed ? "  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n" : ''
+    guard_note = if subclassed
+                   subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
+                   "  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n"
+                 else
+                   ''
+                 end
     tag_note = integer_tag ? "  // POLY_INTEGER_TAG :#{name} -- an Integer receiver's class is read from its tag\n" : ''
     "#{diag}#{note}#{guard_note}#{tag_note}" \
       "  {\n  struct RClass* #{recv_class} = #{class_read};\n  #{chain}  }\n"
+  end
+
+  # One owner's class test in a POLY_SMALL_N branch.
+  def poly_class_check(owner, hoist, recv_class, recv)
+    hoist ? "#{owner_class_ptr_expr(owner)} == #{recv_class}" : exact_class_guard(owner_class_ptr_expr(owner), recv)
   end
 
   # CHA_SELF: `self.name` in a method of class C reaches C or one of

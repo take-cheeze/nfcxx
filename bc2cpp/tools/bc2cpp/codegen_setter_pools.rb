@@ -242,7 +242,7 @@ class CodeGen
 end
 
 module CheckedPoolReceiverSend
-  def compile_send(insn, **kwargs)
+  def compile_send(insn, kwargs)
     plan = checked_pool_plan(insn, kwargs)
     return super unless plan
 
