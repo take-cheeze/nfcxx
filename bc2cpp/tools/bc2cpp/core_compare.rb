@@ -28,8 +28,9 @@ module CoreCompare
 
     texts = ruby_paths.to_h { |path| [path, File.read(path, encoding: 'UTF-8')] }
     expected = OTHERS.map { |owner, file| [owner, file] }.sort
+    layouts = Hash.new { |memo, path| memo[path] = CoreMixins.layout(texts.fetch(path)) }
     OPS.each_with_object(Set.new) do |op, ok|
-      found = texts.flat_map { |path, text| CoreMixins.definers_in(path, text, op) }
+      found = texts.flat_map { |path, text| text.include?(op) ? CoreMixins.definers_in(path, text, op, layouts[path]) : [] }
       primary = found.select { |d| d.owner == 'Comparable' && CoreMixins.suffix?(d.path, FILE) && !d.alias_only }
       rest = found - primary
       next unless primary.one? && primary.first.body == body(op)
