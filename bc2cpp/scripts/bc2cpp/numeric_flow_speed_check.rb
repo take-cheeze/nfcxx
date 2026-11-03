@@ -642,6 +642,56 @@ ensure
   previous_read_elision ? ENV['BC2CPP_NUMERIC_READ_COPY_ELISION'] = previous_read_elision : ENV.delete('BC2CPP_NUMERIC_READ_COPY_ELISION')
 end
 
+puts '-- state deltas (host)'
+# NUMERIC_STATE_DELTAS (docs/bc2cpp-numeric-flow-state.md): counts the delta paths the fixtures reach.
+module DeltaPaths
+  COUNTS = Hash.new(0)
+
+  def unvirtual(t, old, ins, outs, log, dpos)
+    COUNTS[:unvirtual] += 1 if ins[t + 1].equal?(NF::VIRTUAL)
+    super
+  end
+
+  def replay_into(dst, j, ins, log, dpos, known = nil)
+    COUNTS[known ? :built : :replayed] += 1
+    super
+  end
+end
+NF.singleton_class.prepend(DeltaPaths)
+check.call('a straight run chains every instruction after the first',
+           NF.table(BytecodeIR.for(alias_loads)).chain == [false, true, true, true, true])
+check.call('branch successors and join points are not chained',
+           NF.table(BytecodeIR.for(split_irep)).chain == [false, false, true, false, false])
+cases.each do |name, body, opaque, factory|
+  delta_oracle = factory.call
+  copy_oracle = factory.call
+  delta_writes = {}
+  copy_writes = {}
+  delta = NF.states(body, delta_oracle, opaque, delta_writes, deltas: true)
+  copied = NF.states(body, copy_oracle, opaque, copy_writes, deltas: false)
+  check.call("#{name}: delta states, writes and oracle order match the copying worklist",
+             delta.is_a?(NF::States) && copied.is_a?(Array) && delta == copied && copied == delta &&
+             delta.to_a == copied && delta.size == copied.size && delta_writes == copy_writes &&
+             delta_oracle.log == copy_oracle.log)
+end
+check.call('the fixtures rematerialize a revisited chain state, replay a missed cursor and build read states',
+           DeltaPaths::COUNTS[:unvirtual].positive? && DeltaPaths::COUNTS[:replayed].positive? &&
+           DeltaPaths::COUNTS[:built].positive?)
+loads = NF.states(loads_body, loads_factory.call, Set.new)
+virtual = (0...loads.size).select { |k| loads.instance_variable_get(:@ins)[k].equal?(NF::VIRTUAL) }
+check.call('written straight-line states are kept as deltas and built once on read',
+           !virtual.empty? && virtual.all? { |k| loads[k].is_a?(Array) && loads[k].equal?(loads[k]) })
+check.call('negative indices, each and out-of-range reads behave like the Array',
+           loads[-1] == loads.to_a[-1] && loads.each.to_a == loads.to_a && loads[loads.size].nil?)
+previous_deltas = ENV['BC2CPP_NUMERIC_STATE_DELTAS']
+begin
+  ENV['BC2CPP_NUMERIC_STATE_DELTAS'] = '0'
+  check.call('BC2CPP_NUMERIC_STATE_DELTAS=0 restores the copied Array of states',
+             NF.states(loads_body, loads_factory.call, Set.new).instance_of?(Array))
+ensure
+  previous_deltas ? ENV['BC2CPP_NUMERIC_STATE_DELTAS'] = previous_deltas : ENV.delete('BC2CPP_NUMERIC_STATE_DELTAS')
+end
+
 if failures.empty?
   puts 'bc2cpp numeric flow speed check: PASS'
 else
