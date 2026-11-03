@@ -39,6 +39,22 @@ module Qbe
   BF_LOAD = { 1 => "loadub", 2 => "loaduh", 4 => "loadw", 8 => "loadl" }.freeze
   BF_STORE = { 1 => "storeb", 2 => "storeh", 4 => "storew", 8 => "storel" }.freeze
 
+  # --safe (-fsafe-pointers, pathb-qbe-emit.rb's rules): set by the driver. module_has_data: the module defines a global
+  # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
+  # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
+  class << self
+    attr_accessor :safe, :module_has_data, :sp_objects, :sp_funcs
+  end
+  # The size of a frame object that QBE lays out with no padding byte after it (pathb-qbe-emit.rb's SP_NOPAD).
+  SP_NOPAD = -(1 << 63)
+  # The library's block functions whose pointer arguments are range-checked at a call (pathb-qbe-emit.rb's SP_MEMFN):
+  # the argument indices, the length being argument 2.
+  SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }.freeze
+  self.safe = false
+  self.module_has_data = false
+  self.sp_objects = []
+  self.sp_funcs = []
+
   module_function
 
   def float?(t) = FLOAT_TYPES.key?(unqual(t))
@@ -96,6 +112,9 @@ module Qbe
 
     x[1]
   end
+
+  # The frame's objects as QBE call arguments, `l TEMP, l SIZE, ...` (pathb-qbe-emit.rb's sp_frame).
+  def sp_pairs(objs) = objs.map { |q, n| "l #{q}, l #{n}" }.join(", ")
 
   # An integer literal: decimal, or hexadecimal with a 0x prefix (the reader keeps the spelling of a literal).
   def int_lit(s)
@@ -297,6 +316,10 @@ module Qbe
     end
     parts << "z #{size - cur}" if size > cur
     parts = ["z #{size}"] if parts.empty?
+    if Qbe.safe && !flags.include?("thread")
+      parts << "z 1"   # padding: see the safe-pointers section of docs/notes/safe-pointers.md
+      Qbe.sp_objects << [symbol(g[1].raw), size]
+    end
     linkage = (flags.include?("thread") ? "thread " : "") + (flags.include?("static") ? "" : "export ")
     marker = flags.include?("weak") ? "# pathb-weak #{symbol(g[1].raw)}\n" : ""
     "#{marker}#{linkage}data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
@@ -308,10 +331,11 @@ module Qbe
     attr_reader :lines
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
-    def initialize(form, globals = {}, abi = {})
+    def initialize(form, globals = {}, abi = {}, link = {})
       @form = form
       @globals = globals
       @abi = abi
+      @link = link
       @name = Qbe.symbol(form[1].raw)
       @ret = form.find { |x| head(x) == "ret" }
       @params = form.find { |x| head(x) == "params" }.drop(1)
@@ -327,6 +351,7 @@ module Qbe
       @slot = {}
       @jumper = {}     # [target block, source block] => the emitted label whose jump reaches target
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
+      @sp_objs = []    # --safe: [temporary, size] of the frame objects this function registers
     end
 
     def emit
@@ -370,6 +395,7 @@ module Qbe
               # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
               sig << "#{info.tn} %p#{p[1][1..]}"
               @params_set[p[1]] = true
+              @sp_objs << ["%p#{p[1][1..]}", info.size + Qbe::SP_NOPAD] if Qbe.safe
             end
           else
             @types[p[1]] = p[3]
@@ -412,14 +438,32 @@ module Qbe
 
     def allocs
       @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
-      @empty_bufs.each { |name| @lines << "  #{name} =l alloc8 8" }
+      @sp_objs << ["%sretbuf", @sret.size + Qbe::SP_NOPAD] if @sret && @sret.size > 0 && Qbe.safe
+      @empty_bufs.each do |name|
+        @lines << "  #{name} =l alloc8 8"
+        @sp_objs << [name, 8 + Qbe::SP_NOPAD] if Qbe.safe
+      end
       @slots.each_with_index do |s, i|
         @slot["$#{s[1].raw}"] = "%o#{i}"
         # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
         size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
         align = s.size > 4 ? Qbe.int_lit(s[4]) : size
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
-        @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max}"
+        # --safe: a slot is registered, with one byte of padding after it (as the emitter pads an escaped slot).
+        pad = Qbe.safe ? 1 : 0
+        @sp_objs << ["%o#{i}", size] if Qbe.safe
+        if align > 16
+  # QBE's alloc has no alignment past 16: take the object from a 16-aligned block with align - 16 bytes spare,
+  # and round its address up (as pathb-qbe-emit.rb does for an over-aligned slot).
+  @lines << "  %o#{i}r =l alloc16 #{[size, 1].max + pad + align}"
+  @lines << "  %o#{i}a =l add %o#{i}r, #{align - 1}"
+  @lines << "  %o#{i} =l and %o#{i}a, #{-align}"
+else
+  @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max + pad}"
+end
+      end
+      unless @sp_objs.empty?
+        @lines << "  call $__nfcxx_sp_frame(w #{@sp_objs.length}, ..., #{Qbe.sp_pairs(@sp_objs)})"
       end
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
     end
@@ -429,6 +473,22 @@ module Qbe
     end
 
     def reg(name) = "%v#{name[1..]}"
+
+    # How often each SSA register (`%N`) appears in the function: a `let` names its register once, so 1 means unused.
+    def reg_uses
+      @reg_uses ||= begin
+        counts = Hash.new(0)
+        walk = lambda do |x|
+          if x.is_a?(String)
+            counts[x] += 1 if x.match?(/\A%\d+\z/)
+          elsif x.is_a?(Array)
+            x.each { |y| walk.call(y) }
+          end
+        end
+        walk.call(@form)
+        counts
+      end
+    end
 
     def block_label(num) = "b#{num}"
 
@@ -564,8 +624,16 @@ module Qbe
           end
           return "$#{Qbe.symbol(x.raw)}"
         end
-        # A function used as a value: its address is the function's symbol (the existing emitter does the same).
-        return "$#{Qbe.symbol(x.raw)}" if x.sigil == "&"
+# A function used as a value. A function this module defines is addressed by its symbol. Any other function
+# is loaded from a pointer cell (`pathb_got.NAME`, one data word the module defines), as scripts/pathb-qbe-emit.rb
+# does: `leaq f(%rip)` is a PC-relative reference that a PIE link rejects for a symbol of a shared library.
+if x.sigil == "&"
+  sym = Qbe.symbol(x.raw)
+  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym)
+  t = fresh
+  @lines << "  #{t} =l loadl $pathb_got.#{sym}"
+  return t
+end
         raise QbeUnsupported, "address #{x.raw}" unless x.sigil == "$"
 
         @slot.fetch("$#{x.raw}") { raise QbeUnsupported, "slot #{x.raw}" }
@@ -607,7 +675,11 @@ module Qbe
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
       when "let" then let_lines(item[1], item[2], item[3])
       # A volatile store is a call of its helper (QBE merges, forwards and drops plain volatile stores; a call is kept).
-      when "store" then @lines << "  #{Qbe.store_op(item[1])} #{op(item[3])}, #{op(item[2])}"
+      when "store"
+        v = op(item[3])
+        a = op(item[2])
+        safe_check(item[2], a, Qbe.size(item[1]))
+        @lines << "  #{Qbe.store_op(item[1])} #{v}, #{a}"
       when "store.v" then volatile_store_lines(item)
       # `(copy N DST SRC)`: N bytes from SRC to DST (the interpreter's copy_cells). QBE's blit copies a byte count.
       when "copy"
@@ -620,7 +692,12 @@ module Qbe
           raise QbeUnsupported, "copy of an address with no declared type #{a}" if t.nil?
           raise QbeUnsupported, "copy of the by-value aggregate #{a}" unless head(unqual(t)) == "ptr"
         end
-        @lines << "  blit #{op(item[3])}, #{op(item[2])}, #{Qbe.int_lit(item[1])}"
+        src = op(item[3])
+        dst = op(item[2])
+        n = Qbe.int_lit(item[1])
+        safe_check(item[2], dst, n)
+        safe_check(item[3], src, n)
+        @lines << "  blit #{src}, #{dst}, #{n}"
       when "br"
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
@@ -649,6 +726,8 @@ module Qbe
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret"
+        # --safe: the frame is released before the return (pathb-qbe-emit.rb's SP_LEAVE, with the first object).
+        @lines << "  call $__nfcxx_sp_leave(l #{@sp_objs.first[0]})" if Qbe.safe && !@sp_objs.empty?
         # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
         if @sret
           @lines << (@sret.shape == "empty" ? "  ret" : "  ret %sretbuf")
@@ -693,6 +772,13 @@ module Qbe
       @slots.each_index { |i| @lines << "  call $__pathb_escape(l %o#{i})" }
     end
 
+# `pathb_check(cond, code)`: a check that traps when cond is nonzero. The module names the `check` helper, which
+# the driver appends (scripts/pathb-ssa-build): an abort, as scripts/pathb-qbe-emit.rb's shared abort block.
+    def check_call(cond, code)
+      asm_helpers << "check" unless asm_helpers.include?("check")
+      @lines << "  call $pathb_check(w #{cond}, w #{code})"
+    end
+
     def barrier_lines
       asm_helpers << "barrier"
       @lines << "  call $__pathb_barrier()"
@@ -707,6 +793,16 @@ module Qbe
       dst = reg(r)
       c = Qbe.cls(t)
       case head(rv)
+      when "wadd", "wsub", "wmul"
+        # A wrapping sum, difference or product of a narrow type is wrapped to that type: the 32-bit register would
+        # keep the high bits, and a later comparison or overflow test of the value (the sign bit) would see them.
+        if Qbe::EXT.key?(t)
+          raw = fresh
+          @lines << "  #{raw} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+          canon_lines(dst, t, raw)
+        else
+          @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+        end
       when *Qbe::BIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
       when "wneg" then @lines << "  #{dst} =#{c} sub 0, #{op(rv[2])}"
@@ -727,12 +823,31 @@ module Qbe
       when "i2f", "u2f" then int_to_float_lines(dst, t, rv[2])
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
-      when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
+      when "call"
+        # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
+        if unqual(rv[1]) == "bool"
+          raw = fresh
+          @lines << "  #{raw} =w #{call_text(rv)}"
+          low = fresh
+          @lines << "  #{low} =w extub #{raw}"
+          @lines << "  #{dst} =w cnew #{low}, 0"
+        else
+          @lines << "  #{dst} =#{c} #{call_text(rv)}"
+        end
       # (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE reads w, l, s and d only.
       when "vaarg"
         raise QbeUnsupported, "vaarg of #{sx(rv[1])}" unless %w[w l s d].include?(Qbe.cls(rv[1]))
 
         @lines << "  #{dst} =#{c} vaarg #{op(rv[2])}"
+        # QBE drops a vaarg whose value is unused, and then the va_list does not advance: keep the read alive.
+        if reg_uses["%#{dst[2..]}"] <= 1
+          sink = "vasink_#{c}"
+          asm_helpers << sink unless asm_helpers.include?(sink)
+          @lines << "  call $__pathb_#{sink}(#{c} #{dst})"
+        end
+        # QBE does not know that vaarg writes the va_list: a load of it after this read would reuse an earlier load.
+        # The barrier call is a memory clobber for QBE.
+        barrier_lines
       when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
       # `(not T A)`: a bitwise complement of an integer, or a logical negation of a bool. The complement is narrowed to
       # the type's canonical form. Floats are not integers and are refused.
@@ -754,7 +869,15 @@ module Qbe
         @lines << "  #{dst} =l call $__pathb_rdtsc()"
       when "bitcast" then bitcast_lines(dst, rv)
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
-      when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
+      when "offset"
+        base = op(rv[1])
+        if Qbe.safe
+          sum = fresh
+          @lines << "  #{sum} =l add #{base}, #{Qbe.int_lit(rv[2])}"
+          @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, l 0, w 0)"
+        else
+          @lines << "  #{dst} =l add #{base}, #{Qbe.int_lit(rv[2])}"
+        end
       when "index" then index_lines(dst, rv)
       when "alloca" then alloca_lines(dst, rv)
       when "pdiff" then pdiff_lines(dst, t, rv)
@@ -762,12 +885,14 @@ module Qbe
       when "load.v" then volatile_load_lines(dst, rv)
       when "load"
         # A bool object holding another byte is read as true, and a load yields 0 or 1 (EDG's model): normalise the byte.
+        a = op(rv[2])
+        safe_check(rv[2], a, Qbe.size(rv[1]))
         if unqual(rv[1]) == "bool"
           raw = fresh
-          @lines << "  #{raw} =w loadub #{op(rv[2])}"
+          @lines << "  #{raw} =w loadub #{a}"
           @lines << "  #{dst} =w cnew #{raw}, 0"
         else
-          @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
+          @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{a}"
         end
       when "const", "null", nil
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
@@ -818,15 +943,35 @@ module Qbe
       @lines << "  #{dst} =l alloc16 #{size}"
     end
 
+    def memory_access?(x)
+      return false unless x.is_a?(Array)
+      return true if %w[load load.v store store.v copy index offset].include?(head(x))
+      x.any? { |y| memory_access?(y) }
+    end
+
     # A volatile load or store: a call of the module's helper for its operation (see Qbe.volatile_helpers).
     def volatile_load_lines(dst, rv)
       op_name = Qbe.load_op(rv[1])
-      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{op(rv[2])})"
+      a = op(rv[2])
+      safe_check(rv[2], a, Qbe.size(rv[1]))
+      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{a})"
     end
 
     def volatile_store_lines(item)
       op_name = Qbe.store_op(item[1])
-      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{op(item[2])}, #{Qbe.store_class(op_name)} #{op(item[3])})"
+      a = op(item[2])
+      v = op(item[3])
+      safe_check(item[2], a, Qbe.size(item[1]))
+      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{a}, #{Qbe.store_class(op_name)} #{v})"
+    end
+
+    # --safe (-fsafe-pointers): the check of an access of `bytes` bytes at `addr` (the text of the IR operand `x`), which
+    # the existing emitter makes before every load and store through a computed address. A static address (a slot, a
+    # global, an address-of) is not checked. The location is not in the SSA text, so a report has none ("?").
+    def safe_check(x, addr, bytes)
+      return unless Qbe.safe
+      return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
+      @lines << "  call $__nfcxx_sp_check(l #{addr}, l #{bytes}, l 0, w 0)"
     end
 
     # The unqualified type: const and volatile are access qualifiers, not part of the value's class.
@@ -848,7 +993,14 @@ module Qbe
       end
       scaled = fresh
       @lines << "  #{scaled} =l mul #{i}, #{Qbe.int_lit(rv[3])}"
-      @lines << "  #{dst} =l add #{base}, #{scaled}"
+      if Qbe.safe
+        # --safe: the derived address must stay in base's object (sp_derive in pathb-qbe-emit.rb).
+        sum = fresh
+        @lines << "  #{sum} =l add #{base}, #{scaled}"
+        @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, l 0, w 0)"
+      else
+        @lines << "  #{dst} =l add #{base}, #{scaled}"
+      end
     end
 
     # Bit-fields, with pathb-qbe-emit.rb's rules: `(bfload T UNIT ADDR BOFF WIDTH)` reads the whole UNIT-byte unit and
@@ -876,18 +1028,20 @@ module Qbe
       bf_type!(ty)
       unit, boff, width = bf_args(rv, 6)
       uc = unit == 8 ? "l" : "w"
-      ub = unit * 8
+      # The field goes to the top of the register (32 or 64 bits), not of the storage unit: a 1- or 2-byte unit then
+      # sign-extends from its own top bit.
+      rb = uc == "l" ? 64 : 32
       t = fresh
       @lines << "  #{t} =#{uc} #{Qbe::BF_LOAD[unit]} #{op(rv[3])}"
-      if ub - boff - width > 0
+      if rb - boff - width > 0
         t2 = fresh
-        @lines << "  #{t2} =#{uc} shl #{t}, #{ub - boff - width}"
+        @lines << "  #{t2} =#{uc} shl #{t}, #{rb - boff - width}"
         t = t2
       end
       signed = Qbe.signed?(ty)
-      if ub - width > 0
+      if rb - width > 0
         t2 = fresh
-        @lines << "  #{t2} =#{uc} #{signed ? 'sar' : 'shr'} #{t}, #{ub - width}"
+        @lines << "  #{t2} =#{uc} #{signed ? 'sar' : 'shr'} #{t}, #{rb - width}"
         t = t2
       end
       tc = Qbe.cls(ty)
@@ -917,13 +1071,15 @@ module Qbe
       end
       old = fresh
       @lines << "  #{old} =#{uc} #{Qbe::BF_LOAD[unit]} #{addr}"
-      if width < ub
+      # The value is cut to the field in the register width: a unit narrower than the register keeps high bits otherwise.
+      rb = uc == "l" ? 64 : 32
+      if width < rb
         t2 = fresh
-        @lines << "  #{t2} =#{uc} shl #{v}, #{ub - width}"
+        @lines << "  #{t2} =#{uc} shl #{v}, #{rb - width}"
         v = t2
-        if ub - width - boff > 0
+        if rb - width - boff > 0
           t3 = fresh
-          @lines << "  #{t3} =#{uc} shr #{v}, #{ub - width - boff}"
+          @lines << "  #{t3} =#{uc} shr #{v}, #{rb - width - boff}"
           v = t3
         end
       end
@@ -934,8 +1090,8 @@ module Qbe
         if boff + width == ub
           # the field is the top of the unit: keep the low bits by a shift pair
           k1 = fresh
-          @lines << "  #{k1} =#{uc} shl #{old}, #{ub - boff}"
-          @lines << "  #{keep} =#{uc} shr #{k1}, #{ub - boff}"
+          @lines << "  #{k1} =#{uc} shl #{old}, #{rb - boff}"
+          @lines << "  #{keep} =#{uc} shr #{k1}, #{rb - boff}"
         elsif boff.zero?
           # the field is the bottom of the unit: keep the high bits by a shift pair
           k1 = fresh
@@ -988,7 +1144,7 @@ module Qbe
     def nonnull_lines(p)
       cond = fresh
       @lines << "  #{cond} =w ceql #{op(p)}, 0"
-      @lines << "  call $pathb_check(w #{cond}, w 5)"
+      check_call(cond, 5)
     end
 
     # `(bounds I N)`: an index outside [0, N) traps (code 6). The unsigned comparison also rejects a negative index.
@@ -1010,7 +1166,7 @@ module Qbe
         end
       bad = fresh
       @lines << "  #{bad} =w cuge#{c} #{i}, #{bound}"
-      @lines << "  call $pathb_check(w #{bad}, w 6)"
+      check_call(bad, 6)
     end
 
     def checked_div_lines(dst, t, rv)
@@ -1022,7 +1178,7 @@ module Qbe
       b = op(rv[3])
       zero = fresh
       @lines << "  #{zero} =w ceq#{c} #{b}, 0"
-      @lines << "  call $pathb_check(w #{zero}, w 1)"
+      check_call(zero, 1)
       if signed
         lo = fresh
         minus_one = fresh
@@ -1030,7 +1186,7 @@ module Qbe
         @lines << "  #{lo} =w ceq#{c} #{a}, #{-(1 << (w - 1))}"
         @lines << "  #{minus_one} =w ceq#{c} #{b}, -1"
         @lines << "  #{both} =w and #{lo}, #{minus_one}"
-        @lines << "  call $pathb_check(w #{both}, w 2)"
+        check_call(both, 2)
       end
       name = head(rv) == "cdiv" ? (signed ? "div" : "udiv") : (signed ? "rem" : "urem")
       @lines << "  #{dst} =#{c} #{name} #{a}, #{b}"
@@ -1052,7 +1208,7 @@ module Qbe
       end
       bad = fresh
       @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
-      @lines << "  call $pathb_check(w #{bad}, w 3)"
+      check_call(bad, 3)
       if head(rv) == "cshl"
         shifted = fresh
         @lines << "  #{shifted} =#{c} shl #{a}, #{n}"
@@ -1106,7 +1262,22 @@ module Qbe
         args.insert(nfixed, "...")
       end
       callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      sp_call_checks(c, f, sret, callee, args) if Qbe.safe
       [sret, dest, callee, args]
+    end
+
+    # --safe (pathb-qbe-emit.rb's call rules): a call through a pointer is checked against the function's signature
+    # (__nfcxx_sp_call); a direct call of a block function (SP_MEMFN) checks its pointer arguments over the length.
+    def sp_call_checks(c, f, sret, callee, args)
+      if !(f.is_a?(Ref) && f.sigil == "&")
+        rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.cls(c[1]))
+        classes = args.map { |a| a.split(" ", 2)[0] }
+        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{Qbe.sp_sig(@abi, rcls, classes)}, l 0, w 0)"
+      elsif (name = f.raw.delete('"')) && Qbe::SP_MEMFN.key?(name) && args.length == 3 && args[2].start_with?("l ")
+        Qbe::SP_MEMFN[name].each do |i|
+          @lines << "  call $__nfcxx_sp_check(l #{args[i].split(" ", 2)[1]}, l #{args[2].split(" ", 2)[1]}, l 0, w 0)"
+        end
+      end
     end
 
     def call_text(c)
@@ -1196,7 +1367,7 @@ module Qbe
       @lines << "  #{ok} =w and #{tests[0]}, #{tests[1]}"
       bad = fresh
       @lines << "  #{bad} =w ceqw #{ok}, 0"
-      @lines << "  call $pathb_check(w #{bad}, w 4)"
+      check_call(bad, 4)
       @lines << "  #{dst} =#{Qbe.cls(t)} #{signed ? 'dtosi' : 'dtoui'} #{xv}"
     end
   end
@@ -1263,7 +1434,7 @@ module Qbe
   # reference to it raises QbeUnsupported where it is used.
   def module_il(forms)
     ctx = module_context(forms)
-    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi]).emit }
+    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi], ctx[:link]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
     (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
   end
@@ -1313,11 +1484,74 @@ module Qbe
     forms.any? { |f| walk.call(f) }
   end
 
+  # --safe: the signature hash of a function or of a call through a pointer (pathb-qbe-emit.rb's sp_sig): the return class
+  # and the parameter classes up to a "...", with an aggregate's ABI type replaced by its size and alignment, then FNV-1a.
+  def sp_sig(abi, rcls, classes)
+    canon = lambda do |c|
+      next c unless c.start_with?(":")
+
+      a = abi.values.find { |t| t.tn == c }
+      a.nil? ? c : "a#{a.size}.#{a.align}"
+    end
+    text = canon.call(rcls) + "("
+    classes.each do |c|
+      text += canon.call(c) + ","
+      break if c == "..."
+    end
+    h = 0x811c9dc5
+    text.each_byte { |b| h = ((h ^ b) * 0x01000193) & 0xffffffff }
+    h
+  end
+
+  # --safe: the return class and the parameter classes of a defined function (the header's rules, without emitting it).
+  def sp_entry_sig(form, abi)
+    ret = form.find { |x| head(x) == "ret" }
+    params = form.find { |x| head(x) == "params" }.drop(1)
+    sret = params.find { |p| head(p) == "sret" }
+    classes = []
+    params.each do |p|
+      case head(p)
+      when "param"
+        if head(p[3]) == "byval"
+          info = abi[name_of(p[3][1][1])]
+          raise QbeUnsupported, "by-value aggregate has no abi-type" if info.nil?
+
+          classes << info.tn unless info.shape == "empty"
+        else
+          classes << cls(p[3])
+        end
+      when "ellipsis" then classes << "..."
+      end
+    end
+    rcls = if sret
+             info = abi[name_of(sret[2][1])]
+             raise QbeUnsupported, "returned aggregate has no abi-type" if info.nil?
+
+             info.shape == "empty" ? "" : info.tn
+           elsif ret[1] == "void"
+             ""
+           else
+             cls(ret[1])
+           end
+    [rcls, classes]
+  end
+
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
+    self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
+    self.sp_objects = []
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
     abi, type_decls = abi_types(forms)
+    # --safe: every defined function, with its signature, for the checks of calls through pointers (pathb-qbe-emit.rb's
+    # mod.sp_funcs; a long double function's name starts with __nfcxx_ldr_ and is not registered).
+    self.sp_funcs = !safe ? [] : forms.select { |f| head(f) == "ssa-function" && !f[1].raw.delete('"').start_with?("__nfcxx_ldr_") }
+                                      .filter_map do |f|
+                                        # A function the emitter refuses is not emitted, so it needs no table row.
+                                        [symbol(f[1].raw), sp_sig(abi, *sp_entry_sig(f, abi))]
+                                      rescue QbeUnsupported
+                                        nil
+                                      end
     # The bytes of string literals: a top-level (data NAME TYPE (string ...)) form, copied into an array by a
     # (bytes OFF N @"NAME") initializer item. A string the emitter cannot express is left out, so a reference to it
     # is refused where it is used.
@@ -1337,6 +1571,7 @@ module Qbe
     end
     data = type_decls + string_decls + global_decls
     data << volatile_helpers if uses_volatile?(forms)
+    data.concat(sp_constructor) if Qbe.safe && !(Qbe.sp_objects.empty? && Qbe.sp_funcs.empty?)
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
@@ -1345,7 +1580,47 @@ module Qbe
       name = d[1].raw
       refs[name] = { thread: false, weak: false, extern: false } if state[name].is_a?(String)
     end
-    { data: data, refs: refs, abi: abi }
+# The functions this module defines, and the external functions it takes the address of as a value (not a direct
+# call, which goes through the PLT): each gets one pointer cell, defined once here.
+funcs = forms.select { |f| head(f) == "ssa-function" }.map { |f| Qbe.symbol(f[1].raw) }
+cells = []
+collect = lambda do |x|
+  next unless x.is_a?(Array) || x.is_a?(Ref)
+  if x.is_a?(Ref)
+    if x.sigil == "&"
+      sym = Qbe.symbol(x.raw)
+      cells << sym unless funcs.include?(sym) || cells.include?(sym)
+    end
+    next
+  end
+  if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
+    x[3..].each { |a| collect.call(a) }
+  else
+    x.each { |y| collect.call(y) }
+  end
+end
+forms.select { |f| head(f) == "ssa-function" }.each { |f| collect.call(f) }
+data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
+{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells } }
+  end
+
+  # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's
+  # sp_globals_ctor, at priority 101 as the emitter does). The module's function table is slice 4.
+  def sp_constructor
+    out = []
+    unless Qbe.sp_objects.empty?
+      rows = Qbe.sp_objects.map { |q, n| "l $#{q}, l #{n}" }.join(", ")
+      out << "data $__nfcxx_sp_gtab = align 8 { #{rows} }"
+    end
+    unless Qbe.sp_funcs.empty?
+      rows = Qbe.sp_funcs.map { |q, n| "l $#{q}, l #{n}" }.join(", ")
+      out << "data $__nfcxx_sp_ftab = align 8 { #{rows} }"
+    end
+    calls = []
+    calls << "\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{Qbe.sp_objects.length})" unless Qbe.sp_objects.empty?
+    calls << "\tcall $__nfcxx_sp_funcs(l $__nfcxx_sp_ftab, l #{Qbe.sp_funcs.length})" unless Qbe.sp_funcs.empty?
+    out << "function $__nfcxx_sp_gctor() {\n@start\n#{calls.join("\n")}\n\tret\n}"
+    out << "# pathb-startup .init_array 101 __nfcxx_sp_gctor"
   end
 
   # The bytes of a string literal and its data line: its bytes, then zeros up to the array's size (as the existing
@@ -1364,7 +1639,12 @@ module Qbe
     raise QbeUnsupported, "string #{name} is longer than its array" if raw.size > total
 
     bytes = raw + [0] * (total - raw.size)
-    body = bytes.empty? ? "z 0" : bytes.map { |b| "b #{b}" }.join(", ")
+    parts = bytes.map { |b| "b #{b}" }
+    if Qbe.safe
+      parts << "z 1"   # padding; the string is registered with the safe-pointers constructor
+      Qbe.sp_objects << [symbol(name), total]
+    end
+    body = parts.empty? ? "z 0" : parts.join(", ")
     [bytes, "data $#{symbol(name)} = align 1 { #{body} }"]
   end
 
@@ -1398,7 +1678,7 @@ module Qbe
 
   # One function's text (its helper comments, then its body), against a context from module_context.
   def function_text(ctx, fn_form)
-    fn = Fn.new(fn_form, ctx[:refs], ctx[:abi]).emit
+    fn = Fn.new(fn_form, ctx[:refs], ctx[:abi], ctx[:link]).emit
     helpers = fn.asm_helpers.map { |h| "# pathb-asm #{h}" }
     (helpers + [fn.lines.join("\n")]).join("\n\n")
   end
