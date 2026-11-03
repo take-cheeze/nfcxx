@@ -474,6 +474,22 @@ end
 
     def reg(name) = "%v#{name[1..]}"
 
+    # How often each SSA register (`%N`) appears in the function: a `let` names its register once, so 1 means unused.
+    def reg_uses
+      @reg_uses ||= begin
+        counts = Hash.new(0)
+        walk = lambda do |x|
+          if x.is_a?(String)
+            counts[x] += 1 if x.match?(/\A%\d+\z/)
+          elsif x.is_a?(Array)
+            x.each { |y| walk.call(y) }
+          end
+        end
+        walk.call(@form)
+        counts
+      end
+    end
+
     def block_label(num) = "b#{num}"
 
     # Checks that need no emission: a switch's targets may not repeat where a phi reads them, and a phi operand that is an
@@ -803,6 +819,15 @@ end
         raise QbeUnsupported, "vaarg of #{sx(rv[1])}" unless %w[w l s d].include?(Qbe.cls(rv[1]))
 
         @lines << "  #{dst} =#{c} vaarg #{op(rv[2])}"
+        # QBE drops a vaarg whose value is unused, and then the va_list does not advance: keep the read alive.
+        if reg_uses["%#{dst[2..]}"] <= 1
+          sink = "vasink_#{c}"
+          asm_helpers << sink unless asm_helpers.include?(sink)
+          @lines << "  call $__pathb_#{sink}(#{c} #{dst})"
+        end
+        # QBE does not know that vaarg writes the va_list: a load of it after this read would reuse an earlier load.
+        # The barrier call is a memory clobber for QBE.
+        barrier_lines
       when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
       # `(not T A)`: a bitwise complement of an integer, or a logical negation of a bool. The complement is narrowed to
       # the type's canonical form. Floats are not integers and are refused.

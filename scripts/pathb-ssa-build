@@ -61,6 +61,16 @@ ASM_HELPERS = {
             "\t.size pathb_check, .-pathb_check"],
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+  # `__pathb_vasink_CLS(v)`: takes the value of a va_arg that nothing else uses. QBE drops an unused vaarg, and the va_list
+  # would then not advance past that argument; passing the value to this empty function keeps the read.
+  "vasink_w" => ["\t.text", "\t.weak __pathb_vasink_w", "\t.type __pathb_vasink_w, @function", "__pathb_vasink_w:", "\tret",
+                 "\t.size __pathb_vasink_w, .-__pathb_vasink_w"],
+  "vasink_l" => ["\t.text", "\t.weak __pathb_vasink_l", "\t.type __pathb_vasink_l, @function", "__pathb_vasink_l:", "\tret",
+                 "\t.size __pathb_vasink_l, .-__pathb_vasink_l"],
+  "vasink_s" => ["\t.text", "\t.weak __pathb_vasink_s", "\t.type __pathb_vasink_s, @function", "__pathb_vasink_s:", "\tret",
+                 "\t.size __pathb_vasink_s, .-__pathb_vasink_s"],
+  "vasink_d" => ["\t.text", "\t.weak __pathb_vasink_d", "\t.type __pathb_vasink_d, @function", "__pathb_vasink_d:", "\tret",
+                 "\t.size __pathb_vasink_d, .-__pathb_vasink_d"],
 }.freeze
 
 # The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
