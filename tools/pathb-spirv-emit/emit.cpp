@@ -612,6 +612,17 @@ struct SFn {
   }
 
   void heap_store(uint32_t addr, const Ty &t, uint32_t v) {
+    // The OpenCL module stores a byte or a halfword with its own width: C++ makes neighbouring bytes separate memory
+    // locations, and the device orders its stores to them. The Vulkan module has no such store (it updates the word).
+    if (mod->kernel_cl && t.k == Ty::Int && !t.boolean && (t.size == 1 || t.size == 2)) {
+      if (t.size == 1) spv->cap(39);   // Int8
+      else spv->cap(22);               // Int16
+      uint32_t et = spv->t_int(t.size * 8);
+      uint32_t p = res(120, {spv->t_ptr(psb_sc(), et), addr});
+      uint32_t vv = res(113, {et, u32_of(v, t)});   // OpUConvert: the low bits
+      ins({62, p, vv, 2, t.size});
+      return;
+    }
     if (t.k == Ty::Int && (t.size <= 2 || t.boolean)) {
       int bits = t.boolean ? 8 : t.size * 8;
       int64_t mask = (1ll << bits) - 1;

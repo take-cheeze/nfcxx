@@ -19,7 +19,7 @@
   (slot "tmp" (struct "_Z3grpILi5EE") 1 1)
   (slot "tmp.1" (struct "_Z3grpILi5EE") 1 1)
   (block
-    (copy 1 $"tmp.1" $"tmp" 1)
+    (copy 1 $"tmp.1" $"tmp")
     (let %0 int (call int &"_Z7barrierILi5EEi3grpIXT_EEi" (byval (struct "_Z3grpILi5EE") $"tmp.1") (const int 5)))
     (let %1 int (call int &"_Z13size_of_firstii" (const int 1) (const int 4)))
     (let %2 int (wadd int %0 %1))

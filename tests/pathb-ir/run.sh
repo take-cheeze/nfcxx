@@ -6,6 +6,10 @@
 # PATHB_CPFE (and PATHB_BASE) to a scratch build, or use build/pathb.
 cd "$(dirname "$0")/../.."
 update=0; [ "${1:-}" = --update ] && update=1
+# The copy form ends with the aggregate's alignment (the IR's last item, be/nfcxx_ir.c ir_copy). The goldens keep the
+# form without it: the alignment is checked by the emitter (tests/gpu), and the goldens stay the text the CI front end
+# produces, so a golden does not depend on the local toolchain's headers beyond what the golden already records.
+ir_norm() { sed -E 's/\(copy ([0-9]+) ([^ ()]+) ([^ ()]+) [0-9]+\)/(copy \1 \2 \3)/g' "$1"; }
 # No automatic build: a missing harness is an error, so a worktree never rebuilds the shared build/ directory.
 cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] || { echo "run.sh: no harness at $cpfe; set PATHB_CPFE (see docs/notes/pathb-stage2.md)" >&2; exit 2; }
@@ -35,8 +39,8 @@ for f in tests/cases/*.cpp $probes; do
     echo "FAIL harness $cpfe has no IR back end (no (ir-module) output); build it with scripts/setup-pathb.sh"; exit 2
   fi
   g=$(grep -c '(unsupported' "$tmp/$n.ir" || true); gaps=$((gaps + g))
-  if [ $update = 1 ]; then cp "$tmp/$n.ir" "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
-  if diff -u "tests/pathb-ir/$n.ir" "$tmp/$n.ir" > "$tmp/$n.diff"; then
+  if [ $update = 1 ]; then ir_norm "$tmp/$n.ir" > "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
+  if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then
     echo "ok   $f"
   else
     echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1
@@ -65,8 +69,8 @@ for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:asm-templat
   n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
   f=tests/pathb-ir/$n.cpp
   if ! scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
-  if [ $update = 1 ]; then cp "$tmp/$n.ir" "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
-  if diff -u "tests/pathb-ir/$n.ir" "$tmp/$n.ir" > "$tmp/$n.diff"; then echo "ok   $f"; else echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1; continue; fi
+  if [ $update = 1 ]; then ir_norm "$tmp/$n.ir" > "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
+  if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then echo "ok   $f"; else echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1; continue; fi
   "$mrb" scripts/pathb-qbe-emit.rb "$tmp/$n.ir" > /dev/null 2> "$tmp/$n.emit"; rc=$?
   if [ "$rc" != "$want_rc" ]; then echo "FAIL $f: emitter exit $rc, expected $want_rc: $(head -1 "$tmp/$n.emit")"; fail=1
   elif [ -n "$want_msg" ] && ! grep -qF -- "$want_msg" "$tmp/$n.emit"; then echo "FAIL $f: emitter message lacks '$want_msg': $(head -1 "$tmp/$n.emit")"; fail=1
@@ -86,8 +90,8 @@ for f in tests/pathb-ir/borrow/*.cpp; do
   if ! NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$f" > "$tmp/borrow_$n.ir" 2> "$tmp/borrow_$n.err"; then
     echo "FAIL (front end) $f"; head -5 "$tmp/borrow_$n.err"; fail=1; continue
   fi
-  if [ $update = 1 ]; then cp "$tmp/borrow_$n.ir" "tests/pathb-ir/borrow/$n.ir"; echo "wrote tests/pathb-ir/borrow/$n.ir"; continue; fi
-  if diff -u "tests/pathb-ir/borrow/$n.ir" "$tmp/borrow_$n.ir" > "$tmp/borrow_$n.diff"; then echo "ok   $f (NFCXX_PATHB_BORROW=1)"
+  if [ $update = 1 ]; then ir_norm "$tmp/borrow_$n.ir" > "tests/pathb-ir/borrow/$n.ir"; echo "wrote tests/pathb-ir/borrow/$n.ir"; continue; fi
+  if diff -u <(ir_norm "tests/pathb-ir/borrow/$n.ir") <(ir_norm "$tmp/borrow_$n.ir") > "$tmp/borrow_$n.diff"; then echo "ok   $f (NFCXX_PATHB_BORROW=1)"
   else echo "DIFF $f (NFCXX_PATHB_BORROW=1)"; head -40 "$tmp/borrow_$n.diff"; fail=1; fi
   scripts/pathb-dump --ir "$f" > "$tmp/default_$n.ir" 2>/dev/null
   if perl -0pe 's/\s*\((decl|scope-end|rref-arg|drop-obligation|drop-live|drop-state) [^()\n]*\)//g; s/^\(borrow-layout [^\n]*\n//mg' "$tmp/borrow_$n.ir" | cmp -s - "$tmp/default_$n.ir"; then
