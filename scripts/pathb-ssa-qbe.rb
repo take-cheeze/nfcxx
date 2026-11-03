@@ -23,6 +23,8 @@ module Qbe
             "short" => "storeh", "unsigned_short" => "storeh", "int" => "storew", "unsigned_int" => "storew",
             "long" => "storel", "long_long" => "storel", "unsigned_long" => "storel", "unsigned_long_long" => "storel",
             "float" => "stores", "double" => "stored" }.freeze
+  # The std:: float typedefs whose objects are emitted as their bit patterns (storage only): the byte count of each.
+  FLOAT_STORAGE = { "std::float16_t" => 2, "std::float32_t" => 4, "std::float64_t" => 8 }.freeze
   SIZE = { "bool" => 1, "char" => 1, "signed_char" => 1, "unsigned_char" => 1, "short" => 2, "unsigned_short" => 2,
            "int" => 4, "unsigned_int" => 4, "long" => 8, "long_long" => 8, "unsigned_long" => 8,
            "unsigned_long_long" => 8, "float" => 4, "double" => 8 }.freeze
@@ -101,6 +103,76 @@ module Qbe
     Integer(s, 10)
   end
 
+  # The IEEE binary16 pattern of a decimal float literal (`(const std::float16_t 2.71875)`): the value nearest to it in
+  # half precision, ties to even. The literal's printed digits set the precision; the half value must agree with it to
+  # within the last printed digit, else the literal is refused. Infinities and NaN are not literals of this emitter.
+  def half_bits(lit)
+    text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    v = Float(text)
+    raise QbeUnsupported, "float16 literal #{text}" if v.nan? || v.infinite?
+
+    sig = text.sub(/[eE].*/, "").delete("-+.").sub(/\A0+/, "").length
+    sign = text.start_with?("-") ? 0x8000 : 0
+    a = v.abs
+    return sign if a.zero?
+
+    e = Math.log2(a).floor
+    e -= 1 while a < 2.0**e
+    e += 1 while a >= 2.0**(e + 1)
+    if e < -14
+      bits = sign | (a / 2.0**-24).round(half: :even)
+    else
+      m = (a / 2.0**(e - 10)).round(half: :even)
+      if m == 2048
+        m = 1024
+        e += 1
+      end
+      raise QbeUnsupported, "float16 literal #{text} overflows" if e > 15
+
+      bits = sign | ((e + 15) << 10) | (m - 1024)
+    end
+    decoded = half_value(bits)
+    # The half value must print, to the literal's significant digits, as the literal does.
+    same = format("%.#{sig - 1}e", decoded.abs) == format("%.#{sig - 1}e", a)
+    raise QbeUnsupported, "float16 literal #{text} is not a half value" unless same
+    bits
+  end
+
+  # The bit pattern of a float literal of n bytes (2 binary16, 4 binary32, 8 binary64): nearest value, ties to even,
+  # checked against the literal's printed significant digits as half_bits does. Refused where the literal is not that
+  # precision.
+  def float_bits(lit, n)
+    return half_bits(lit) if n == 2
+
+    text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    v = Float(text)
+    raise QbeUnsupported, "float literal #{text}" if v.nan? || v.infinite?
+
+    sig = text.sub(/[eE].*/, "").delete("-+.").sub(/\A0+/, "").length
+    if n == 4
+      packed = [v].pack("e")
+      back = packed.unpack1("e")
+      bits = packed.unpack1("L<")
+    else
+      packed = [v].pack("E")
+      back = v
+      bits = packed.unpack1("Q<")
+    end
+    same = sig.zero? || format("%.#{[sig - 1, 0].max}e", back.abs) == format("%.#{[sig - 1, 0].max}e", v.abs)
+    raise QbeUnsupported, "float literal #{text} is not of its type" unless same
+
+    bits
+  end
+
+  # The value of a binary16 pattern (for the check in half_bits).
+  def half_value(bits)
+    sign = bits & 0x8000 != 0 ? -1.0 : 1.0
+    ebits = (bits >> 10) & 31
+    mant = bits & 1023
+    mag = ebits.zero? ? mant * 2.0**-24 : (1024 + mant) * 2.0**(ebits - 25)
+    sign * mag
+  end
+
   # A constant of type t, wrapped to its QBE class (w: 32 bits, l: 64 bits), as the target computes it.
   def wrap_lit(v, t)
     bits = cls(t) == "w" ? 32 : 64
@@ -154,6 +226,12 @@ module Qbe
       when "zero" then next
       when "scalar"
         off, type, v = item[1..]
+        if (n = FLOAT_STORAGE[strip_const(type)])
+          # Storage only: the bit pattern of the literal, written as an integer of the same size (no arithmetic on it).
+          letter = { 2 => "h", 4 => "w", 8 => "l" }.fetch(n)
+          items << [int_lit(off), n, "#{letter} #{Qbe.float_bits(v, n)}"]
+          next
+        end
         return nil if FLOAT_TYPES.key?(strip_const(type))
 
         bytes = Qbe.size(type)
