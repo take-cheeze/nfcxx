@@ -2,6 +2,7 @@
 
 require_relative 'rite_binary'
 require_relative 'operand_schema'
+require_relative 'bytecode_ir_ops'
 
 # Decodes a RiteBinary irep's iseq bytes into the Insn stream bc2cpp's passes
 # consume. Typed operands come straight from the decoded operand values; the
@@ -55,12 +56,13 @@ module InsnDecoder
   # Operand byte widths of an instruction; EXT1 widens the first operand and
   # EXT2 the second, EXT3 both (ops.h FETCH_*_1/_2/_3). Only one-byte operands
   # widen, and a lone B operand is widened by EXT1 only.
-  OPERAND_SIZES = Hash.new do |cache, (format, ext)|
-    cache[[format, ext]] = compute_operand_sizes(format, ext).freeze
+  # ext -> format -> sizes: nested so a lookup builds no [format, ext] key.
+  OPERAND_SIZES = Hash.new do |by_ext, ext|
+    by_ext[ext] = Hash.new { |cache, format| cache[format] = compute_operand_sizes(format, ext).freeze }
   end
 
   def self.operand_sizes(format, ext)
-    OPERAND_SIZES[[format, ext]]
+    OPERAND_SIZES[ext][format]
   end
 
   def self.compute_operand_sizes(format, ext)
@@ -243,8 +245,10 @@ module InsnDecoder
       offset = 0
       table = []
       while offset < bytes.bytesize
-        delta, offset = packed_int(bytes, offset)
-        diff, offset = packed_int(bytes, offset)
+        delta = packed_int(bytes, offset)
+        offset = @packed_end
+        diff = packed_int(bytes, offset)
+        offset = @packed_end
         pos = (pos + delta) & 0xffff_ffff
         line = (line + diff) & 0xffff_ffff # uint32 arithmetic in debug.c
         table << [pos, line]
@@ -252,22 +256,28 @@ module InsnDecoder
       table
     end
 
+    # The value at +offset+; @packed_end is left at the byte after it (no [value, offset] pair per read).
     def packed_int(bytes, offset)
       n = 0
       shift = 0
-      loop do
+      # A plain loop: `break` out of a `loop` block allocates a throw object per read.
+      while true # rubocop:disable Style/InfiniteLoop
         byte = bytes.getbyte(offset)
         offset += 1
         n |= (byte & 0x7f) << shift
         shift += 7
         break unless shift < 32 && byte.anybits?(0x80)
       end
-      [n, offset]
+      @packed_end = offset
+      n
     end
+
+    # SymbolDump.call depends on the name's bytes only, so each distinct name is dumped once per process.
+    SYM_TEXT = {} # rubocop:disable Style/MutableConstant
 
     def sym(index)
       name = @syms.fetch(index) or raise "bc2cpp: null symbol #{index}"
-      SymbolDump.call(name)
+      SYM_TEXT[name] ||= -SymbolDump.call(name)
     end
 
     def s16(value) = value >= 0x8000 ? value - 0x1_0000 : value
@@ -322,9 +332,19 @@ module InsnDecoder
       end
     end
 
-    def r(n) = Operand.new(:reg, n)
-    def pr(n) = Operand.new(:preg, n)
-    def i(n) = Operand.new(:int, n)
+    # Register operands are immutable values; one frozen Operand per register number serves every instruction.
+    # Register, integer and fixed-literal operands are immutable values: one frozen Operand per value serves every
+    # instruction.
+    REG_OPERANDS = Hash.new { |cache, n| cache[n] = Operand.new(:reg, n).freeze }
+    PREG_OPERANDS = Hash.new { |cache, n| cache[n] = Operand.new(:preg, n).freeze }
+    INT_OPERANDS = Hash.new { |cache, n| cache[n] = Operand.new(:int, n).freeze }
+    FIXED_LITS = %w[-1 0 1 2 3 4 5 6 7 nil true false].to_h { |text| [text, Operand.new(:plit, text).freeze] }.freeze
+    LOADI_LITS = BytecodeIR::Ops::LOADI_SLOT_VALUE.transform_values { |digit| FIXED_LITS.fetch(digit.to_s) }.freeze
+
+    def r(n) = REG_OPERANDS[n]
+    def pr(n) = PREG_OPERANDS[n]
+    def i(n) = INT_OPERANDS[n]
+    def fixed_lit(text) = FIXED_LITS.fetch(text)
     def sym_op(index) = Operand.new(:sym, sym(index))
     def name_op(index) = Operand.new(:name, sym(index))
     def lit(text) = Operand.new(:plit, text)
@@ -347,16 +367,15 @@ module InsnDecoder
         n = ((b << 16) + c) & 0xffff_ffff
         n -= 0x1_0000_0000 if n >= 0x8000_0000
         [r(a), i(n)]
-      when :LOADI__1 then [r(a), lit('-1')]
+      when :LOADI__1 then [r(a), fixed_lit('-1')]
       # A Symbol list, not a Regexp: a regexp `when` would stop the case from comparing by identity.
       when :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5, :LOADI_6, :LOADI_7
-        digit = BytecodeIR::Ops::LOADI_SLOT_VALUE[name]
-        [r(a), lit(digit.to_s)]
+        [r(a), LOADI_LITS.fetch(name)]
       when :LOADSYM then [r(a), sym_op(b)]
-      when :LOADNIL then [r(a), lit('nil')]
+      when :LOADNIL then [r(a), fixed_lit('nil')]
       when :LOADSELF then [r(a), pr(0)]
-      when :LOADTRUE then [r(a), lit('true')]
-      when :LOADFALSE then [r(a), lit('false')]
+      when :LOADTRUE then [r(a), fixed_lit('true')]
+      when :LOADFALSE then [r(a), fixed_lit('false')]
       when :GETGV, :GETSV, :GETIV, :GETCV, :GETCONST then [r(a), name_op(b)]
       when :SETGV, :SETSV, :SETIV, :SETCV, :SETCONST then [name_op(b), r(a)]
       when :GETMCNST then [r(a), Operand.new(:mcnst, [a, sym(b)])]
@@ -525,7 +544,7 @@ module InsnDecoder
       lineno = line_at(line_pc, debug_file)
       raise "bc2cpp: no line info for #{op} at #{line_pc}" if lineno.negative?
 
-      insn = Insn.new(lineno: lineno, addr: start, op: op, frozen_literal: frozen)
+      insn = Insn.decoded(lineno, start, op, frozen)
       insn.typed = operands
       insn.defer_disassembly(self, name, values.freeze, next_pc)
       insn
