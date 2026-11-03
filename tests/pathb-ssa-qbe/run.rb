@@ -71,7 +71,7 @@ def native_ok(arity, inputs, il)
   end
 end
 
-files = ARGV.empty? ? Dir["tests/pathb-ssa/cases/*.ir"] + Dir["tests/pathb-egraph/cases/*.ir"] : ARGV
+files = ARGV.empty? ? Dir["tests/pathb-ssa/cases/*.ir"] + Dir["tests/pathb-egraph/cases/*.ir"] + Dir["tests/pathb-ssa-qbe/cases/*.ir"] : ARGV
 totals = Hash.new(0)
 files.sort.each do |f|
   args_file = f.sub(/\.ir\z/, ".args")
@@ -88,12 +88,23 @@ files.sort.each do |f|
   begin
     install_module(forms)
     arity = main.find { |x| head(x) == "params" }.size - 1
-    inputs = File.readlines(args_file).map { |l| l.split("=>").first.to_s.split.map { |t| Integer(t, 10) } }
-                 .reject(&:empty?)
+    lines = File.readlines(args_file).map(&:strip).reject(&:empty?)
+    inputs = lines.map { |l| l.split("=>").first.split.map { |t| Integer(t, 10) } }
+    # The `=> value` on each line: the expected answer, used where the interpreter does not model the function.
+    file_want = lines.map { |l| l.split("=>")[1]&.strip }
     # The interpreter's answer for each input: a value, "trap" (compared with the native longjmp), or unmodelled.
     orig = PathbEgraph.parse_fn(main)
     raw = inputs.map { |args| interpret(orig, args) }
-    want = raw.map { |r| r == "trap" ? "trap" : (r.is_a?(String) ? Integer(r, 10) : nil) }
+    want = raw.each_index.map do |i|
+      r = raw[i]
+      if r.is_a?(String)
+        r == "trap" ? "trap" : Integer(r, 10)
+      else
+        fw = file_want[i]
+        fw.nil? ? nil : (fw == "trap" ? "trap" : Integer(fw, 10))
+      end
+    end
+    from_file = raw.each_index.count { |i| !raw[i].is_a?(String) && !want[i].nil? }
     keep = inputs.zip(want).reject { |_, w| w.nil? }
     if keep.empty?
       totals[:unsupported] += 1
@@ -118,7 +129,8 @@ files.sort.each do |f|
     expected = keep.map(&:last)
     if got == expected
       totals[:ok] += 1
-      puts "ok   #{File.basename(f)}: #{got.inspect}"
+      note = from_file.positive? ? " (#{from_file} input(s) checked against the .args values: the interpreter does not model them)" : ""
+      puts "ok   #{File.basename(f)}: #{got.inspect}#{note}"
     else
       totals[:mismatch] += 1
       puts "FAIL #{File.basename(f)}: native #{got.inspect}, interpreter #{expected.inspect}"
