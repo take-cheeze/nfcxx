@@ -454,6 +454,7 @@ args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs t
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
+    --emit-hip) emit_hip=1 ;;   # the .cu input as HIP source on stdout (docs/notes/gpu.md, "CUDA source to HIP")
     --backend=*) backend=${1#--backend=}; backend_explicit=1 ;;
     --obfuscate-kernels) obfuscate=1 ;;
     -fsanitize=address) asan=1 ;;
@@ -523,6 +524,13 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+# --emit-hip: the .cu input as HIP source on stdout, for hipcc (tools/cuda-rewrite --hip). Nothing is compiled, and the
+# -I, -D and -U options go to the rewriter as they go to the host copy.
+if [ "${emit_hip:-0}" = 1 ]; then
+  [ ${#cu_inputs[@]} = 1 ] || { echo "nfcxx: --emit-hip takes one .cu file" >&2; exit 2; }
+  hip_opts=(); for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*|-D*|-U*) hip_opts+=("$f");; esac; done
+  exec "$root/build/cuda-rewrite" --hip ${hip_opts[@]+"${hip_opts[@]}"} "${cu_inputs[0]}"
+fi
 # SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
 # headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
 # do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.sh
