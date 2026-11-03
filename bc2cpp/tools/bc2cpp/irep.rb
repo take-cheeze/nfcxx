@@ -95,8 +95,7 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
 end
 # One decoded instruction. `args` is the disassembly's operand text, kept only
 # for diagnostics and comments; every pass reads the typed operands through
-# InsnOperands (see OperandSchema). Use named args/raw accessors for text;
-# their underlying Struct slots are lazy caches (docs/bc2cpp-lazy-disassembly.md).
+# InsnOperands (see OperandSchema).
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_init: true) do
   include InsnOperands
 
