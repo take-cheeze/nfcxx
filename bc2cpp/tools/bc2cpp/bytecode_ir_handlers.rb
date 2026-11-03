@@ -48,16 +48,34 @@ module BytecodeIR
     # BYTECODE_IR_FACTS: instruction index => the frozen, distinct handler targets it may raise into, in
     # handler declaration order; an index outside every range has no key. Frozen.
     def raise_targets
-      @raise_targets ||= handler_edges.group_by(&:src)
-                                      .transform_values { |edges| edges.map(&:target).uniq.freeze }.freeze
+      @raise_targets ||= begin
+        targets = {}
+        handler_edges.each do |edge|
+          (targets[edge.src] ||= []) << edge.target
+        end
+        targets.each_value do |list|
+          list.uniq!
+          list.freeze
+        end
+        targets.freeze
+      end
     end
 
     # BYTECODE_IR_FACTS: the handler targets entered only by a raise: a rescue target that is not also some ensure's
     # target (an ensure target is also reached by falling in). Frozen Set of instruction indices.
     def rescue_only_targets
       @rescue_only_targets ||= begin
-        by_kind = handler_edges.group_by(&:kind).transform_values { |edges| edges.map(&:target).to_set }
-        (by_kind.fetch(:rescue, Set.new) - by_kind.fetch(:ensure, Set.new)).freeze
+        # One small integer per target replaces per-kind edge groups and Sets.
+        kinds = {}
+        handler_edges.each do |edge|
+          bit = case edge.kind
+                when :rescue then 1
+                when :ensure then 2
+                else next
+                end
+          kinds[edge.target] = (kinds[edge.target] || 0) | bit
+        end
+        kinds.each_with_object(Set.new) { |(target, mask), targets| targets.add(target) if mask == 1 }.freeze
       end
     end
 
