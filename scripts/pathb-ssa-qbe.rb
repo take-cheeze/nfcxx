@@ -201,6 +201,7 @@ module Qbe
       @params = form.find { |x| head(x) == "params" }.drop(1)
       @sret = nil      # the AbiInfo of an aggregate result (the function returns its buffer, the C convention)
       @alias = {}      # a register that names another value: the sret parameter names the result buffer
+      @empty_bufs = [] # the buffers of the empty by-value parameters (their registers name them)
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
@@ -238,18 +239,26 @@ module Qbe
 
     def header
       sig = []
-      @params.each do |p|
+      @params.each_with_index do |p, i|
         case head(p)
         when "param"
           if head(p[3]) == "byval"
-            # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
-            sig << "#{aggregate_info(p[3][1], "passed").tn} %p#{p[1][1..]}"
+            info = aggregate_info(p[3][1], "passed")
             @types[p[1]] = ["ptr", "void"]
+            if info.shape == "empty"
+              # An empty class is passed as nothing; the function sees the address of a buffer of its own.
+              @alias[p[1]] = "%ebuf#{i}"
+              @empty_bufs << "%ebuf#{i}"
+            else
+              # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
+              sig << "#{info.tn} %p#{p[1][1..]}"
+              @params_set[p[1]] = true
+            end
           else
             @types[p[1]] = p[3]
             sig << "#{Qbe.cls(p[3])} %p#{p[1][1..]}"
+            @params_set[p[1]] = true
           end
-          @params_set[p[1]] = true
         when "sret"
           raise QbeUnsupported, "more than one sret parameter" if @sret
           @sret = aggregate_info(p[2], "returned")
@@ -258,8 +267,8 @@ module Qbe
         else raise QbeUnsupported, "#{head(p)} parameter"
         end
       end
-      ret = if @sret then "#{@sret.tn} "
-            elsif @ret[1] == "void" then ""
+      ret = if @sret && @sret.shape != "empty" then "#{@sret.tn} "
+            elsif @sret || @ret[1] == "void" then ""
             else "#{Qbe.cls(@ret[1])} "
             end
       @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
@@ -274,13 +283,13 @@ module Qbe
       info = @abi[Qbe.name_of(tyform[1])]
       raise QbeUnsupported, "#{what} aggregate #{sx(tyform)} has no abi-type" if info.nil?
       raise QbeUnsupported, "#{what} by value: #{info.why}" if info.shape == "unsupported"
-      raise QbeUnsupported, "#{what} by value: an empty class is not emitted" if info.shape == "empty"
 
       info
     end
 
     def allocs
       @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
+      @empty_bufs.each { |name| @lines << "  #{name} =l alloc8 8" }
       @slots.each_with_index do |s, i|
         @slot["$#{s[1].raw}"] = "%o#{i}"
         # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
@@ -491,7 +500,7 @@ module Qbe
         raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
 
         sret, dest, sym, args = call_parts(item[1])
-        if sret.nil?
+        if sret.nil? || sret.shape == "empty"
           @lines << "  call #{sym}(#{args.join(', ')})"
         else
           # The callee returns the aggregate in its own buffer; it is copied to the destination the caller named.
@@ -507,7 +516,7 @@ module Qbe
       when "ret"
         # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
         if @sret
-          @lines << "  ret %sretbuf"
+          @lines << (@sret.shape == "empty" ? "  ret" : "  ret %sretbuf")
         else
           @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
         end
@@ -814,7 +823,8 @@ module Qbe
           dest = op(a[2])
         when "byval"
           info = aggregate_info(a[1], "passed")
-          args << "#{info.tn} #{op(a[2])}"
+          # An empty class is passed as nothing (its argument is dropped, as the callee does not take it).
+          args << "#{info.tn} #{op(a[2])}" unless info.shape == "empty"
         else args << "#{arg_cls(a)} #{op(a)}"
         end
       end

@@ -4,6 +4,7 @@
 (abi-type "DD" 16 8 (leaf 0 d) (leaf 8 d))
 (abi-type "LD" 16 8 (leaf 0 l) (leaf 8 d))
 (abi-type "L3" 24 8 (memory))
+(abi-type "E" 1 1 (empty))
 (function "mk_ii"
   (ret void)
   (params (sret %0 (struct "II")) (param %1 "a" int) (param %2 "b" int))
@@ -61,6 +62,20 @@
   (ret long)
   (params (param %0 "v" (byval (struct "L3"))))
   (return (wadd long (load long (offset %0 16)) (load long %0))))
+(function "mk_e"
+  (ret void)
+  (params (sret %0 (struct "E")) (param %1 "k" int))
+  (return))
+(function "sum_e"
+  (ret int)
+  (params (param %0 "e" (byval (struct "E"))) (param %1 "k" int))
+  (return (wadd int %1 (const int 40))))
+(function "pass_e"
+  (ret int)
+  (params (param %0 "k" int))
+  (slot "t" (struct "E") 1 1)
+  (eval (call void &"mk_e" (sret (struct "E") $"t") %0))
+  (return (call int &"sum_e" (byval (struct "E") $"t") %0)))
 (function "pass_ii"
   (ret int)
   (params (param %0 "x" int) (param %1 "y" int))

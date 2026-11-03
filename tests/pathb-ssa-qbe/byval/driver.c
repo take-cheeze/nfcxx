@@ -7,6 +7,7 @@ struct LL { long a, b; };
 struct DD { double a, b; };
 struct LD { long a; double b; };
 struct L3 { long a, b, c; };
+struct E { };
 
 struct II mk_ii(int, int);
 struct LL mk_ll(long, long);
@@ -18,6 +19,9 @@ long sum_ll(struct LL, long);
 double sum_dd(struct DD, double);
 long sum_l3(struct L3);
 int pass_ii(int, int);
+struct E mk_e(int);
+int sum_e(struct E, int);
+int pass_e(int);
 
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s\n", #c); fails++; } } while (0)
@@ -43,6 +47,10 @@ int main(void)
   struct L3 t = mk_l3(5);
   CHECK(t.a == 5 && t.b == 6 && t.c == 7);
   CHECK(sum_l3(t) == 12);
+
+  struct E e = mk_e(2);
+  CHECK(sum_e(e, 5) == 45);
+  CHECK(pass_e(7) == 47);
 
   printf("%s\n", fails ? "FAIL" : "ok");
   return fails != 0;
