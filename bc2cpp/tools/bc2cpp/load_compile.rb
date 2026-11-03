@@ -43,6 +43,26 @@ module LoadCompile
   MARKER_PREFIX = '$__bc2cpp_residual_'
 
   # [UBody] for one file, in source order.
+  # INIT_EXPR: whether the compiled load can emit `node` as C++ (a value Expr has an emitter for); a value it cannot
+  # emit keeps its statement residual.
+  def init_emittable?(node)
+    return false if block_inside?(node)
+
+    Expr.new([], [0], 'here').emit(node)
+    true
+  rescue RuntimeError
+    false
+  end
+
+  # Whether a block (`{ }`, `do end`, `&blk`) is anywhere in `node`: Expr emits calls without their blocks, so such a
+  # value would be built with the block dropped.
+  def block_inside?(node)
+    return true if node.is_a?(Prism::BlockNode) || node.is_a?(Prism::BlockArgumentNode)
+    return true if node.is_a?(Prism::CallNode) && node.block
+
+    node.compact_child_nodes.any? { |child| block_inside?(child) }
+  end
+
   def build_root(path, statements: true)
     root = ClassBodyScan.scan([path])
     ubody(root, nil, statements)
@@ -62,6 +82,13 @@ module LoadCompile
         value, why, source = PureEval.fold(body.statements, index, magic: magic?(stmt.file))
         fold = [value, source] unless why
         role = :const unless why
+      end
+      # INIT_EXPR: a computed constant, or a global write, whose value the compiled load can emit (Expr) is set when
+      # the load runs, as OP_SETCONST and OP_SETGV set it. A value it cannot emit stays residual.
+      if role == :residual && %i[const_computed runtime].include?(stmt.category) && stmt.node.is_a?(Prism::ConstantWriteNode) && init_emittable?(stmt.node.value)
+        role = :const
+      elsif role == :residual && stmt.node.is_a?(Prism::GlobalVariableWriteNode) && !stmt.node.name.to_s.start_with?(MARKER_PREFIX) && init_emittable?(stmt.node.value)
+        role = :gvar
       end
       # A header whose class cannot be named (`class foo::Bar`) cannot be reopened by the compiled load: it and
       # everything in it stays as written.
@@ -1045,6 +1072,7 @@ module LoadCompile
   def legacy?(item, ctx)
     hooks = ctx[:hooks]
     node = item.stmt.node
+    return true if item.role == :gvar
     # A value the byte code has no tag for (a call with more than Blob::MAX_CALL_ARGS arguments).
     return !item.fold && !Blob.new({}, tableless: ctx[:tableless]).data?(node.value) if %i[const ivar].include?(item.role)
     return true if item.role == :send && send_args(node).size > MAX_SEND_ARGS
@@ -1229,6 +1257,10 @@ module LoadCompile
     when :nested then emit_nested(item, ctx, body, counter)
     when :send then emit_send(item, body, counter, ctx)
     when :alias then emit_alias(item, body)
+    when :gvar
+      value = Expr.new(body, counter, 'here', tableless: ctx[:tableless]).emit(item.stmt.node.value)
+      body << "mrb_gv_set(M, mrb_intern_cstr(M, \"#{item.stmt.node.name}\"), #{value});"
+      body << 'mrb_gc_arena_restore(M, ai);'
     when :const, :ivar
       value = Expr.new(body, counter, 'here', tableless: ctx[:tableless]).emit(item.stmt.node.value)
       body << "#{item.role == :const ? 'mrb_const_set' : 'mrb_iv_set'}(M, mrb_obj_value(c), #{sym(item.stmt.node.name)}, #{value});"

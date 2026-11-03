@@ -118,6 +118,35 @@ int count_class_entries(mrb_state* M, struct RBasic* obj, void* total) {
   return MRB_EACH_OBJ_OK;
 }
 
+// BC2CPP_HOST_MT_DUMP=1 (with BC2CPP_HOST_MT_COUNT=1): one line per
+// method-table entry, "TRACE_HOST_MT <class> <method> <native|bytecode|undef>",
+// the list the count sums. A singleton class is named by its attached object.
+struct MtDump {
+  mrb_state* M;
+  struct RClass* klass;
+};
+int dump_entry(mrb_state* M, mrb_sym sym, mrb_method_t m, void* data) {
+  auto* d = static_cast<MtDump*>(data);
+  const char* name = mrb_class_name(M, d->klass);
+  // The body kind: a C function (native or compiled), or a Ruby proc
+  // (bytecode).
+  const char* kind = MRB_METHOD_UNDEF_P(m)   ? "undef"
+                     : MRB_METHOD_CFUNC_P(m) ? "native"
+                                             : "bytecode";
+  fprintf(stdout, "TRACE_HOST_MT %s %s %s\n", name ? name : "(anonymous)",
+          mrb_sym_name(M, sym), kind);
+  return 0;
+}
+int dump_class_entries(mrb_state* M, struct RBasic* obj, void* data) {
+  if (obj->tt == MRB_TT_CLASS || obj->tt == MRB_TT_MODULE ||
+      obj->tt == MRB_TT_SCLASS) {
+    auto* d = static_cast<MtDump*>(data);
+    d->klass = reinterpret_cast<struct RClass*>(obj);
+    mrb_mt_foreach(M, d->klass, dump_entry, d);
+  }
+  return MRB_EACH_OBJ_OK;
+}
+
 void set_const(mrb_state* M, const char* name, mrb_value v) {
   mrb_const_set(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, name), v);
 }
@@ -320,6 +349,10 @@ int main(int argc, char** argv) {
       count && strcmp(count, "1") == 0) {
     long total = 0;
     mrb_objspace_each_objects(M, count_class_entries, &total);
+    if (getenv("BC2CPP_HOST_MT_DUMP")) {
+      MtDump dump{M, nullptr};
+      mrb_objspace_each_objects(M, dump_class_entries, &dump);
+    }
     fprintf(stdout, "TRACE_HOST method_table_entries=%ld\n", total);
     return 0;
   }
