@@ -43,13 +43,17 @@ module Qbe
   # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
-    attr_accessor :safe, :module_has_data, :sp_objects
+    attr_accessor :safe, :module_has_data, :sp_objects, :sp_funcs
   end
   # The size of a frame object that QBE lays out with no padding byte after it (pathb-qbe-emit.rb's SP_NOPAD).
   SP_NOPAD = -(1 << 63)
+  # The library's block functions whose pointer arguments are range-checked at a call (pathb-qbe-emit.rb's SP_MEMFN):
+  # the argument indices, the length being argument 2.
+  SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }.freeze
   self.safe = false
   self.module_has_data = false
   self.sp_objects = []
+  self.sp_funcs = []
 
   module_function
 
@@ -351,7 +355,6 @@ module Qbe
 
     def emit
       header
-      safe_refusal!
       allocs
       escape_slots if returns_twice?(@blocks)
       plan_phis
@@ -871,34 +874,13 @@ module Qbe
       @lines << "  #{dst} =l alloc16 #{size}"
     end
 
-    # A volatile load or store: a call of the module's helper for its operation (see Qbe.volatile_helpers).
-    # --safe: a function whose memory accesses could reach an object the safe-pointers runtime must have registered
-    # (a stack slot of this function, or a global or string of this module) is refused: its registration is slice 3.
-    def safe_refusal!
-      return unless Qbe.safe
-      raise QbeUnsupported, "--safe: alloca needs its registration (not emitted yet)" if contains_head?(@blocks, %w[alloca])
-      raise QbeUnsupported, "--safe: a call through a pointer needs its check (slice 4)" if indirect_call?(@blocks)
-    end
-
-    def contains_head?(x, names)
-      return false unless x.is_a?(Array)
-      return true if names.include?(head(x))
-      x.any? { |y| contains_head?(y, names) }
-    end
-
-    # A call whose callee is not a function (a register or an expression): its check is slice 4.
-    def indirect_call?(x)
-      return false unless x.is_a?(Array)
-      return true if head(x) == "call" && !(x[2].is_a?(Ref) && x[2].sigil == "&")
-      x.any? { |y| indirect_call?(y) }
-    end
-
     def memory_access?(x)
       return false unless x.is_a?(Array)
       return true if %w[load load.v store store.v copy index offset].include?(head(x))
       x.any? { |y| memory_access?(y) }
     end
 
+    # A volatile load or store: a call of the module's helper for its operation (see Qbe.volatile_helpers).
     def volatile_load_lines(dst, rv)
       op_name = Qbe.load_op(rv[1])
       a = op(rv[2])
@@ -1207,7 +1189,22 @@ module Qbe
         args.insert(nfixed, "...")
       end
       callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      sp_call_checks(c, f, sret, callee, args) if Qbe.safe
       [sret, dest, callee, args]
+    end
+
+    # --safe (pathb-qbe-emit.rb's call rules): a call through a pointer is checked against the function's signature
+    # (__nfcxx_sp_call); a direct call of a block function (SP_MEMFN) checks its pointer arguments over the length.
+    def sp_call_checks(c, f, sret, callee, args)
+      if !(f.is_a?(Ref) && f.sigil == "&")
+        rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.cls(c[1]))
+        classes = args.map { |a| a.split(" ", 2)[0] }
+        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{Qbe.sp_sig(@abi, rcls, classes)}, l 0, w 0)"
+      elsif (name = f.raw.delete('"')) && Qbe::SP_MEMFN.key?(name) && args.length == 3 && args[2].start_with?("l ")
+        Qbe::SP_MEMFN[name].each do |i|
+          @lines << "  call $__nfcxx_sp_check(l #{args[i].split(" ", 2)[1]}, l #{args[2].split(" ", 2)[1]}, l 0, w 0)"
+        end
+      end
     end
 
     def call_text(c)
@@ -1414,6 +1411,58 @@ module Qbe
     forms.any? { |f| walk.call(f) }
   end
 
+  # --safe: the signature hash of a function or of a call through a pointer (pathb-qbe-emit.rb's sp_sig): the return class
+  # and the parameter classes up to a "...", with an aggregate's ABI type replaced by its size and alignment, then FNV-1a.
+  def sp_sig(abi, rcls, classes)
+    canon = lambda do |c|
+      next c unless c.start_with?(":")
+
+      a = abi.values.find { |t| t.tn == c }
+      a.nil? ? c : "a#{a.size}.#{a.align}"
+    end
+    text = canon.call(rcls) + "("
+    classes.each do |c|
+      text += canon.call(c) + ","
+      break if c == "..."
+    end
+    h = 0x811c9dc5
+    text.each_byte { |b| h = ((h ^ b) * 0x01000193) & 0xffffffff }
+    h
+  end
+
+  # --safe: the return class and the parameter classes of a defined function (the header's rules, without emitting it).
+  def sp_entry_sig(form, abi)
+    ret = form.find { |x| head(x) == "ret" }
+    params = form.find { |x| head(x) == "params" }.drop(1)
+    sret = params.find { |p| head(p) == "sret" }
+    classes = []
+    params.each do |p|
+      case head(p)
+      when "param"
+        if head(p[3]) == "byval"
+          info = abi[name_of(p[3][1][1])]
+          raise QbeUnsupported, "by-value aggregate has no abi-type" if info.nil?
+
+          classes << info.tn unless info.shape == "empty"
+        else
+          classes << cls(p[3])
+        end
+      when "ellipsis" then classes << "..."
+      end
+    end
+    rcls = if sret
+             info = abi[name_of(sret[2][1])]
+             raise QbeUnsupported, "returned aggregate has no abi-type" if info.nil?
+
+             info.shape == "empty" ? "" : info.tn
+           elsif ret[1] == "void"
+             ""
+           else
+             cls(ret[1])
+           end
+    [rcls, classes]
+  end
+
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
@@ -1421,6 +1470,15 @@ module Qbe
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
     abi, type_decls = abi_types(forms)
+    # --safe: every defined function, with its signature, for the checks of calls through pointers (pathb-qbe-emit.rb's
+    # mod.sp_funcs; a long double function's name starts with __nfcxx_ldr_ and is not registered).
+    self.sp_funcs = !safe ? [] : forms.select { |f| head(f) == "ssa-function" && !f[1].raw.delete('"').start_with?("__nfcxx_ldr_") }
+                                      .filter_map do |f|
+                                        # A function the emitter refuses is not emitted, so it needs no table row.
+                                        [symbol(f[1].raw), sp_sig(abi, *sp_entry_sig(f, abi))]
+                                      rescue QbeUnsupported
+                                        nil
+                                      end
     # The bytes of string literals: a top-level (data NAME TYPE (string ...)) form, copied into an array by a
     # (bytes OFF N @"NAME") initializer item. A string the emitter cannot express is left out, so a reference to it
     # is refused where it is used.
@@ -1440,7 +1498,7 @@ module Qbe
     end
     data = type_decls + string_decls + global_decls
     data << volatile_helpers if uses_volatile?(forms)
-    data.concat(sp_constructor) if Qbe.safe && !Qbe.sp_objects.empty?
+    data.concat(sp_constructor) if Qbe.safe && !(Qbe.sp_objects.empty? && Qbe.sp_funcs.empty?)
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
@@ -1455,10 +1513,20 @@ module Qbe
   # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's
   # sp_globals_ctor, at priority 101 as the emitter does). The module's function table is slice 4.
   def sp_constructor
-    rows = Qbe.sp_objects.map { |q, n| "l $#{q}, l #{n}" }.join(", ")
-    ["data $__nfcxx_sp_gtab = align 8 { #{rows} }",
-     "function $__nfcxx_sp_gctor() {\n@start\n\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{Qbe.sp_objects.length})\n\tret\n}",
-     "# pathb-startup .init_array 101 __nfcxx_sp_gctor"]
+    out = []
+    unless Qbe.sp_objects.empty?
+      rows = Qbe.sp_objects.map { |q, n| "l $#{q}, l #{n}" }.join(", ")
+      out << "data $__nfcxx_sp_gtab = align 8 { #{rows} }"
+    end
+    unless Qbe.sp_funcs.empty?
+      rows = Qbe.sp_funcs.map { |q, n| "l $#{q}, l #{n}" }.join(", ")
+      out << "data $__nfcxx_sp_ftab = align 8 { #{rows} }"
+    end
+    calls = []
+    calls << "\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{Qbe.sp_objects.length})" unless Qbe.sp_objects.empty?
+    calls << "\tcall $__nfcxx_sp_funcs(l $__nfcxx_sp_ftab, l #{Qbe.sp_funcs.length})" unless Qbe.sp_funcs.empty?
+    out << "function $__nfcxx_sp_gctor() {\n@start\n#{calls.join("\n")}\n\tret\n}"
+    out << "# pathb-startup .init_array 101 __nfcxx_sp_gctor"
   end
 
   # The bytes of a string literal and its data line: its bytes, then zeros up to the array's size (as the existing
