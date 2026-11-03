@@ -1,0 +1,18 @@
+(ir-module "s.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "buf" (array 200 char) 200 8 (static) (init (zero 0 200)))
+(function "jump"
+  (ret void)
+  (params (param %0 "v" int))
+  (eval (call void &"longjmp" @"buf" %0))
+  (return))
+(function "main"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "a" int 4 4)
+  (store int $"a" (const int 1))
+  (block
+    (let %1 int (call int &"_setjmp" @"buf"))
+    (let %2 bool (eq int %1 (const int 0)))
+    (if %2 (then (store int $"a" (const int 10)) (eval (call void &"jump" %0))) (else))
+    (let %3 int (load int $"a"))
+    (return %3)))
