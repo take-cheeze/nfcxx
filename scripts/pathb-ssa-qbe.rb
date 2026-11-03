@@ -813,7 +813,17 @@ end
       when "i2f", "u2f" then int_to_float_lines(dst, t, rv[2])
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
-      when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
+      when "call"
+        # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
+        if unqual(rv[1]) == "bool"
+          raw = fresh
+          @lines << "  #{raw} =w #{call_text(rv)}"
+          low = fresh
+          @lines << "  #{low} =w extub #{raw}"
+          @lines << "  #{dst} =w cnew #{low}, 0"
+        else
+          @lines << "  #{dst} =#{c} #{call_text(rv)}"
+        end
       # (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE reads w, l, s and d only.
       when "vaarg"
         raise QbeUnsupported, "vaarg of #{sx(rv[1])}" unless %w[w l s d].include?(Qbe.cls(rv[1]))
