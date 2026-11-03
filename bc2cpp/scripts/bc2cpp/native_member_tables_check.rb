@@ -85,6 +85,40 @@ check.call('native? is true for the tagged member and false for the hand-owned o
            NativeSigs.native?(shared.members.first, [shared]) && !NativeSigs.native?(shared.members.last, [shared]))
 check.call('table_of a block is its own marker', NativeSigs.table_of(whole) == 'fixture_native')
 
+puts '== marker reuse and mutable comments'
+first_marker = NativeSigs.own_table(whole)
+check.call('repeated marker reads reuse a frozen name',
+           first_marker.frozen? && NativeSigs.own_table(whole).equal?(first_marker))
+mutable = parse_text("# bc2cpp-native: before\nclass Mutable\nend\n").first
+mutable.freeze
+mutable_text = mutable.comment.string
+check.call('a shallow-frozen node still reads its marker', NativeSigs.own_table(mutable) == 'before')
+mutable_text.replace("bc2cpp-native: after\n")
+check.call('editing a cached comment invalidates membership by content', NativeSigs.own_table(mutable) == 'after')
+mutable_text.replace("ordinary comment\n")
+check.call('removing the marker records a negative lookup',
+           NativeSigs.own_table(mutable).nil? && NativeSigs.instance_variable_get(:@own_tables).key?(mutable_text))
+mutable_text.replace("bc2cpp-native: restored\n")
+check.call('a cached negative comment does not stale a later marker', NativeSigs.own_table(mutable) == 'restored')
+check.call('one untagged node can inherit different enclosing markers',
+           NativeSigs.table_of(shared.members.last, [whole]) == 'fixture_native' &&
+           NativeSigs.table_of(shared.members.last, [by_name.fetch('OnlyOther')]) == 'fixture_other')
+
+saved_cache = NativeSigs.instance_variable_get(:@own_tables)
+begin
+  NativeSigs.instance_variable_set(:@own_tables, {})
+  comment = Struct.new(:string)
+  node = Struct.new(:comment)
+  (NativeSigs::MARKER_CACHE_CAP + 2).times do |index|
+    value = NativeSigs.own_table(node.new(comment.new("bc2cpp-native: table_#{index}\n")))
+    raise "marker lost at cache cap: #{index}" unless value == "table_#{index}"
+  end
+  check.call('a full marker cache keeps answering without retaining more comments',
+             NativeSigs.instance_variable_get(:@own_tables).size == NativeSigs::MARKER_CACHE_CAP)
+ensure
+  NativeSigs.instance_variable_set(:@own_tables, saved_cache)
+end
+
 puts '== decls: restriction'
 native = NativeSigs.select_table(fixture, 'fixture_native')
 other = NativeSigs.select_table(fixture, 'fixture_other')
