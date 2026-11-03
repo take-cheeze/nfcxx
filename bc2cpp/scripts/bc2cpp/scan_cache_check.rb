@@ -153,6 +153,50 @@ Dir.mktmpdir do |tmp|
                with_extra.to_a == ScanCache.bypass { outside_world_tokens(natives + [extra]) }.to_a &&
                with_extra.include?('extra_token_only_here'))
 
+    puts '-- NativeExpressionDevirt stores each file on its own too (DEVIRT_FILE_CACHE)'
+    devirt = NativeExpressionDevirt
+    # Each value as its inspect String, which shows every key and element in order (Marshal.dump would also tell
+    # apart object sharing, which loading an entry normalizes).
+    devirt_scans = lambda do |paths|
+      devirt::REGISTRATION_CACHE.clear
+      devirt::CLASS_METHOD_CACHE.clear
+      [devirt.analyze(paths), devirt.analyze_exact_class_expressions(paths), devirt.class_registrations(paths),
+       devirt.class_method_registrations(paths)].map(&:inspect)
+    end
+    devirt_file_scans = %i[scan_file_class_registrations scan_file_analyze_registrations scan_file_analyze_implementations
+                           scan_file_exact_class_implementations scan_file_class_method_registrations]
+    # The per-file scans `block` makes, by name.
+    counting = lambda do |&block|
+      counts = Hash.new(0)
+      originals = devirt_file_scans.to_h { |name| [name, devirt.method(name)] }
+      originals.each do |name, original|
+        devirt.define_singleton_method(name) do |*args|
+          counts[name] += 1
+          original.call(*args)
+        end
+      end
+      [block.call, counts]
+    ensure
+      originals.each { |name, original| devirt.define_singleton_method(name, original) }
+    end
+    devirt_scans.call(natives)
+    per_file = %w[class_registrations.file analyze.file class_method_registrations.file]
+    check.call('the class registrations, analyze and class-method scans store one entry per file',
+               per_file.all? { |name| real_entries.call("native_expression_devirt.#{name}") == natives.size })
+    bodies = ->(scan) { Dir[File.join(tmp, 'real', "native_expression_devirt.#{scan}.bodies.*-*.bin")].size }
+    check.call('the exact-class body scan stores one entry per file', bodies.call('exact_class') == natives.size)
+    check.call('the analyze body scan stores a file only once something it could define is registered',
+               bodies.call('analyze').between?(1, natives.size))
+    blank = File.join(tmp, 'blank.c')
+    File.write(blank, "/* no registrations */\nstatic mrb_value blank_value(mrb_state *mrb, mrb_value self) { return self; }\n")
+    with_blank, blank_counts = counting.call { devirt_scans.call(natives + [blank]) }
+    check.call('a list with one more file scans only that file, and equals the scans with the cache off',
+               blank_counts.values.uniq == [1] && blank_counts.size == devirt_file_scans.size &&
+               with_blank == ScanCache.bypass { devirt_scans.call(natives + [blank]) })
+    reordered, reordered_counts = counting.call { devirt_scans.call([blank] + natives) }
+    check.call('a new list of stored files (its whole-list entries miss) rescans no file, and equals the scans with the cache off',
+               reordered_counts.empty? && reordered == ScanCache.bypass { devirt_scans.call([blank] + natives) })
+
     puts '-- the stateful scans (ADR 0415): a closed world, the class registrations and the file registrations'
     # What a closed world over `decls` ends up holding from the native sources (the state the scan fills).
     state_names = %i[@native_code_tokens @native_tokens @native_other_literals @outside_names @outside_name_paths

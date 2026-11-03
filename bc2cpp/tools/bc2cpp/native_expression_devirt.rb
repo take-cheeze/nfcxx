@@ -97,6 +97,8 @@ module NativeExpressionDevirt
     ScanCache.fetch('native_expression_devirt.analyze', Array(paths)) { scan_analyze(paths) }
   end
 
+  # A source's bodies are read only for the functions registered so far (`needed`, which grows file by file), so
+  # each file's part is cached per needed set; see DEVIRT_FILE_CACHE.
   def scan_analyze(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     implementations = {}
@@ -104,66 +106,11 @@ module NativeExpressionDevirt
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = read_source(path)
-      macro_calls(source, 'MRB_MT_ENTRY').each do |arguments|
-        next unless arguments.length == 3
-
-        function, symbol, aspec = arguments
-        name = symbol_name(symbol)
-        registrations[name] << [function.strip, no_args?(aspec)] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
-      end
-      %w[
-        mrb_define_method_id mrb_define_private_method_id mrb_define_class_method_id
-        mrb_define_module_function_id mrb_define_singleton_method_id
-      ].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 5
-
-          symbol = arguments[2]
-          name = symbol_name(symbol)
-          registrations[name] << [arguments[3].strip, no_args?(arguments[4])] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
-        end
-      end
-      %w[
-        mrb_define_method mrb_define_private_method mrb_define_class_method
-        mrb_define_module_function mrb_define_singleton_method
-      ].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 5 && arguments[2].start_with?('"')
-
-          name = unescape_c_string(arguments[2][1...-1])
-          registrations[name] << [arguments[3].strip, no_args?(arguments[4])] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
-        end
-      end
-      macro_calls(source, 'mrb_define_method_raw').each do |arguments|
-        next unless arguments.length == 4
-
-        name = symbol_name(arguments[2])
-        registrations[name] << [nil, false] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
-      end
-      macro_calls(source, 'mrb_define_alias_id').each do |arguments|
-        next unless arguments.length == 4
-
-        name = symbol_name(arguments[2])
-        registrations[name] << [nil, false] if name
-      end
-      macro_calls(source, 'mrb_define_alias').each do |arguments|
-        next unless arguments.length == 4 && arguments[2].start_with?('"')
-
-        name = unescape_c_string(arguments[2][1...-1])
-        registrations[name] << [nil, false]
-      end
+      file_analyze_registrations(path).each { |name, entries| registrations[name].concat(entries) }
       needed = registrations.values.flatten(1).map(&:first).to_set
-      source.scan(/mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/) do
-        function, state_arg, self_arg = Regexp.last_match.captures
-        next unless needed.include?(function)
-
-        opening = Regexp.last_match.end(0) - 1
-        body, finish = brace_body(source, opening)
-        next unless body
-
+      file_analyze_implementations(path, needed).each do |function, expression|
         implementations[function] ||= []
-        implementations[function] << direct_return_expression(body, state_arg, self_arg)
+        implementations[function] << expression
       end
     end
 
@@ -181,6 +128,93 @@ module NativeExpressionDevirt
 
       result[name] = expressions.first
     end
+  end
+
+  def file_analyze_registrations(path)
+    ScanCache.fetch('native_expression_devirt.analyze.file', [path], cache_absent: false) do
+      scan_file_analyze_registrations(path).to_a
+    end
+  end
+
+  # [[function, expression]] in source order. `needed` is only asked about `\w+` captures, so those members are
+  # the whole of what the result depends on besides the source, and name the entry.
+  def file_analyze_implementations(path, needed)
+    wanted = needed.grep(/\A\w+\z/).sort
+    return [] if wanted.empty?
+
+    name = "native_expression_devirt.analyze.bodies.#{Digest::SHA256.hexdigest(wanted.join(','))}"
+    ScanCache.fetch(name, [path], cache_absent: false) do
+      scan_file_analyze_implementations(read_source(path), wanted.to_set)
+    end
+  end
+
+  def scan_file_analyze_implementations(source, needed)
+    implementations = []
+    source.scan(/mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/) do
+      function, state_arg, self_arg = Regexp.last_match.captures
+      next unless needed.include?(function)
+
+      opening = Regexp.last_match.end(0) - 1
+      body, = brace_body(source, opening)
+      next unless body
+
+      implementations << [function, direct_return_expression(body, state_arg, self_arg)]
+    end
+    implementations
+  end
+
+  def scan_file_analyze_registrations(path)
+    registrations = Hash.new { |hash, name| hash[name] = [] }
+    source = read_source(path)
+    macro_calls(source, 'MRB_MT_ENTRY').each do |arguments|
+      next unless arguments.length == 3
+
+      function, symbol, aspec = arguments
+      name = symbol_name(symbol)
+      registrations[name] << [function.strip, no_args?(aspec)] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
+    end
+    %w[
+      mrb_define_method_id mrb_define_private_method_id mrb_define_class_method_id
+      mrb_define_module_function_id mrb_define_singleton_method_id
+    ].each do |macro|
+      macro_calls(source, macro).each do |arguments|
+        next unless arguments.length == 5
+
+        symbol = arguments[2]
+        name = symbol_name(symbol)
+        registrations[name] << [arguments[3].strip, no_args?(arguments[4])] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
+      end
+    end
+    %w[
+      mrb_define_method mrb_define_private_method mrb_define_class_method
+      mrb_define_module_function mrb_define_singleton_method
+    ].each do |macro|
+      macro_calls(source, macro).each do |arguments|
+        next unless arguments.length == 5 && arguments[2].start_with?('"')
+
+        name = unescape_c_string(arguments[2][1...-1])
+        registrations[name] << [arguments[3].strip, no_args?(arguments[4])] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
+      end
+    end
+    macro_calls(source, 'mrb_define_method_raw').each do |arguments|
+      next unless arguments.length == 4
+
+      name = symbol_name(arguments[2])
+      registrations[name] << [nil, false] if WHOLE_RECEIVER_EXPRESSIONS.key?(name)
+    end
+    macro_calls(source, 'mrb_define_alias_id').each do |arguments|
+      next unless arguments.length == 4
+
+      name = symbol_name(arguments[2])
+      registrations[name] << [nil, false] if name
+    end
+    macro_calls(source, 'mrb_define_alias').each do |arguments|
+      next unless arguments.length == 4 && arguments[2].start_with?('"')
+
+      name = unescape_c_string(arguments[2][1...-1])
+      registrations[name] << [nil, false]
+    end
+    registrations
   end
 
   # Extract exact-class native expressions from ROM method tables. The
@@ -202,41 +236,19 @@ module NativeExpressionDevirt
     needed_arities = registrations.values.flatten(1).filter_map do |entry|
       [entry[:function], entry[:arity]] unless entry[:arity].nil?
     end.to_set
-    # No optional static/MRB_API prefix: only captures and match end are used,
-    # and a literal start lets the scan skip ahead.
-    function_pattern = /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
     arities_by_function = Hash.new { |hash, function| hash[function] = [] }
     needed_arities.each { |function, arity| arities_by_function[function] << arity }
+    file_inputs = public_api_header_paths(mruby_root)
+    # Each [function, arity] collects its own expressions, so the set of pairs, not their order, is what a source's
+    # part depends on.
+    needs = Digest::SHA256.hexdigest(Marshal.dump([needed_arities.to_a.sort, mruby_root]))
+    bodies = "native_expression_devirt.exact_class.bodies.#{needs}"
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = read_source(path)
-      source.scan(function_pattern) do
-        function, state_arg, self_arg = Regexp.last_match.captures
-        arities = arities_by_function.fetch(function, [])
-        next if arities.empty?
-
-        opening = Regexp.last_match.end(0) - 1
-        body, = brace_body(source, opening)
-        arities.each do |arity|
-          key = [function, arity]
-          expression = if arity.zero? && mruby_root && path.start_with?(File.join(mruby_root, '3rd/mruby') + '/') &&
-                          public_mrb_value_functions.include?(function) &&
-                          public_api_method_definition?(source, function, state_arg, self_arg) &&
-                          body && !frame_dependent_body?(body)
-                         "#{function}(M, recv)"
-                       elsif function == 'mrb_ary_push_m' && arity == 1
-                         exact_array_push_one_argument_expression(body, state_arg, self_arg) if body
-                       elsif function == 'mrb_ary_concat_m' && arity == 1
-                         exact_array_concat_one_argument_expression(body, state_arg, self_arg) if body
-                       elsif %w[mrb_ary_first mrb_ary_last].include?(function) && arity.zero?
-                         exact_array_no_argument_element_expression(body, state_arg, self_arg) if body
-                       else
-                         exact_class_return_expression(body, state_arg, self_arg, arity: arity) if body
-                       end
-          implementations[key] << expression
-        end
-      end
+      ScanCache.fetch(bodies, [path] + file_inputs, cache_absent: false) do
+        scan_file_exact_class_implementations(path, arities_by_function, mruby_root, public_mrb_value_functions)
+      end.each { |function, arity, expression| implementations[[function, arity]] << expression }
     end
 
     names = registrations.filter_map do |name, entries|
@@ -275,6 +287,43 @@ module NativeExpressionDevirt
       end
       result[name] = generated unless generated.empty?
     end.tap { |built| add_named_twin_calls(names, registrations, opaque_owners, built) }
+  end
+
+  # [[function, arity, expression]] of one source, in the order the matches and their arities come. Besides the
+  # source it reads the needed arities and the mruby root (both name the entry) and the public API headers (inputs of
+  # the entry); see DEVIRT_FILE_CACHE.
+  def scan_file_exact_class_implementations(path, arities_by_function, mruby_root, public_mrb_value_functions)
+    implementations = []
+    source = read_source(path)
+    # No optional static/MRB_API prefix: only captures and match end are used,
+    # and a literal start lets the scan skip ahead.
+    function_pattern = /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
+    source.scan(function_pattern) do
+      function, state_arg, self_arg = Regexp.last_match.captures
+      arities = arities_by_function.fetch(function, [])
+      next if arities.empty?
+
+      opening = Regexp.last_match.end(0) - 1
+      body, = brace_body(source, opening)
+      arities.each do |arity|
+        expression = if arity.zero? && mruby_root && path.start_with?(File.join(mruby_root, '3rd/mruby') + '/') &&
+                        public_mrb_value_functions.include?(function) &&
+                        public_api_method_definition?(source, function, state_arg, self_arg) &&
+                        body && !frame_dependent_body?(body)
+                       "#{function}(M, recv)"
+                     elsif function == 'mrb_ary_push_m' && arity == 1
+                       exact_array_push_one_argument_expression(body, state_arg, self_arg) if body
+                     elsif function == 'mrb_ary_concat_m' && arity == 1
+                       exact_array_concat_one_argument_expression(body, state_arg, self_arg) if body
+                     elsif %w[mrb_ary_first mrb_ary_last].include?(function) && arity.zero?
+                       exact_array_no_argument_element_expression(body, state_arg, self_arg) if body
+                     else
+                       exact_class_return_expression(body, state_arg, self_arg, arity: arity) if body
+                     end
+        implementations << [function, arity, expression]
+      end
+    end
+    implementations
   end
 
   REGISTRATION_CACHE = {}
@@ -372,6 +421,8 @@ module NativeExpressionDevirt
     class_variables
   end
 
+  # The union of each file's file_class_registrations, merged in path order: a name's entries and the maps' key
+  # order come out as one pass over all the files would leave them.
   def scan_class_registrations(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     opaque_owners = Hash.new { |hash, name| hash[name] = [] }
@@ -379,77 +430,95 @@ module NativeExpressionDevirt
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = read_source(path)
-      class_variables = class_variable_map(source)
-      tags = {}
-      source.scan(/MRB_SET_INSTANCE_TT\s*\(\s*(\w+)\s*,\s*(MRB_TT_\w+)\s*\)/) do |variable, tag|
-        tags[variable] = tag
+      file_registrations, file_opaque_owners = file_class_registrations(path)
+      file_registrations.each { |name, entries| registrations[name].concat(entries) }
+      file_opaque_owners.each { |name, owners| opaque_owners[name].concat(owners) }
+    end
+
+    [registrations, opaque_owners]
+  end
+
+  # DEVIRT_FILE_CACHE: one source's registrations read nothing but its own text, so the path and its digest key
+  # them completely (docs/bc2cpp-devirt-cache-allocations.md).
+  def file_class_registrations(path)
+    ScanCache.fetch('native_expression_devirt.class_registrations.file', [path], cache_absent: false) do
+      plain_registrations(*scan_file_class_registrations(path))
+    end
+  end
+
+  def scan_file_class_registrations(path)
+    registrations = Hash.new { |hash, name| hash[name] = [] }
+    opaque_owners = Hash.new { |hash, name| hash[name] = [] }
+
+    source = read_source(path)
+    class_variables = class_variable_map(source)
+    tags = {}
+    source.scan(/MRB_SET_INSTANCE_TT\s*\(\s*(\w+)\s*,\s*(MRB_TT_\w+)\s*\)/) do |variable, tag|
+      tags[variable] = tag
+    end
+    table_owners = {}
+    macro_calls(source, 'MRB_MT_INIT_ROM').each do |arguments|
+      next unless arguments.length == 3
+
+      _mrb, variable, table = arguments
+      class_info = class_variables[variable]
+      if class_info.nil? && (field = variable.match(/\Amrb->(\w+_class)\z/)&.[](1))
+        class_info = { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
-      table_owners = {}
-      macro_calls(source, 'MRB_MT_INIT_ROM').each do |arguments|
-        next unless arguments.length == 3
+      tag = tags[variable]
+      table_owners[table] ||= []
+      # Core mrbgems often attach ROM methods to an existing built-in via
+      # `mrb->array_class` without repeating the core's
+      # `MRB_SET_INSTANCE_TT` declaration in the gem source. Recover that
+      # closed set of tag values from the built-in class name; custom class
+      # owners still require a tag declaration in their own source.
+      resolved_tag = tag || (class_info && BUILTIN_CLASS_TAGS[class_info[:class_name]])
+      table_owners[table] << (class_info && class_info.merge(tag: resolved_tag))
+    end
 
-        _mrb, variable, table = arguments
-        class_info = class_variables[variable]
-        if class_info.nil? && (field = variable.match(/\Amrb->(\w+_class)\z/)&.[](1))
-          class_info = { field: field, class_name: field.sub(/_class\z/, '').capitalize }
-        end
-        tag = tags[variable]
-        table_owners[table] ||= []
-        # Core mrbgems often attach ROM methods to an existing built-in via
-        # `mrb->array_class` without repeating the core's
-        # `MRB_SET_INSTANCE_TT` declaration in the gem source. Recover that
-        # closed set of tag values from the built-in class name; custom class
-        # owners still require a tag declaration in their own source.
-        resolved_tag = tag || (class_info && BUILTIN_CLASS_TAGS[class_info[:class_name]])
-        table_owners[table] << (class_info && class_info.merge(tag: resolved_tag))
+    rom_entries(source).each do |table, arguments|
+      function, symbol, aspec = arguments
+      name = symbol_name(symbol)
+      next unless name
+
+      owners = Array(table_owners[table]).uniq
+      owner = owners.one? ? owners.first : nil
+      registrations[name] << { function: function.strip, arity: safe_arity(aspec, function.strip, name), owner: owner,
+                               aspec: aspec.strip, path: path }
+    end
+
+    # Singleton/class methods live on the class object's method table and
+    # cannot shadow the same name in an instance receiver's method lookup.
+    # Only instance registration forms belong in this ambiguity set.
+    %w[mrb_define_method_id mrb_define_private_method_id].each do |macro|
+      macro_calls(source, macro).each do |arguments|
+        next unless arguments.length == 5
+
+        name = symbol_name(arguments[2])
+        opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
       end
-
-      rom_entries(source).each do |table, arguments|
-        function, symbol, aspec = arguments
-        name = symbol_name(symbol)
-        next unless name
-
-        owners = Array(table_owners[table]).uniq
-        owner = owners.one? ? owners.first : nil
-        registrations[name] << { function: function.strip, arity: safe_arity(aspec, function.strip, name), owner: owner,
-                                 aspec: aspec.strip, path: path }
-      end
-
-      # Singleton/class methods live on the class object's method table and
-      # cannot shadow the same name in an instance receiver's method lookup.
-      # Only instance registration forms belong in this ambiguity set.
-      %w[mrb_define_method_id mrb_define_private_method_id].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 5
-
-          name = symbol_name(arguments[2])
-          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
-        end
-      end
-      %w[mrb_define_method mrb_define_private_method].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 5 && arguments[2].start_with?('"')
-
-          name = unescape_c_string(arguments[2][1...-1])
-          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
-        end
-      end
-      %w[mrb_define_method_raw mrb_define_alias_id].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 4
-
-          name = symbol_name(arguments[2])
-          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
-        end
-      end
-      macro_calls(source, 'mrb_define_alias').each do |arguments|
-        next unless arguments.length == 4 && arguments[2].start_with?('"')
+    end
+    %w[mrb_define_method mrb_define_private_method].each do |macro|
+      macro_calls(source, macro).each do |arguments|
+        next unless arguments.length == 5 && arguments[2].start_with?('"')
 
         name = unescape_c_string(arguments[2][1...-1])
         opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
       end
+    end
+    %w[mrb_define_method_raw mrb_define_alias_id].each do |macro|
+      macro_calls(source, macro).each do |arguments|
+        next unless arguments.length == 4
 
+        name = symbol_name(arguments[2])
+        opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
+      end
+    end
+    macro_calls(source, 'mrb_define_alias').each do |arguments|
+      next unless arguments.length == 4 && arguments[2].start_with?('"')
+
+      name = unescape_c_string(arguments[2][1...-1])
+      opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
     end
 
     [registrations, opaque_owners]
@@ -483,27 +552,41 @@ module NativeExpressionDevirt
   def scan_class_method_registrations(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     Array(paths).each do |path|
-      source = read_source(path)
-      next unless CLASS_METHOD_MACROS.any? { |macro| source.include?(macro) }
-
-      class_variables = class_variable_map(source)
-      CLASS_METHOD_MACROS.each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 5
-
-          name = if macro.end_with?('_id')
-                   symbol_name(arguments[2])
-                 elsif arguments[2].start_with?('"')
-                   unescape_c_string(arguments[2][1...-1])
-                 end
-          next unless name
-
-          registrations[name] << { owner: class_variables.dig(arguments[1], :class_name), function: arguments[3].strip,
-                                   path: path, macro: macro }
-        end
-      end
+      file_class_method_registrations(path).each { |name, entries| registrations[name].concat(entries) }
     end
     registrations.to_h
+  end
+
+  # One source's part, read from nothing but its text; see DEVIRT_FILE_CACHE. An absent path is not keyed, so
+  # read_source still raises for it.
+  def file_class_method_registrations(path)
+    ScanCache.fetch('native_expression_devirt.class_method_registrations.file', [path], cache_absent: false) do
+      scan_file_class_method_registrations(path)
+    end
+  end
+
+  def scan_file_class_method_registrations(path)
+    registrations = Hash.new { |hash, name| hash[name] = [] }
+    source = read_source(path)
+    return [] unless CLASS_METHOD_MACROS.any? { |macro| source.include?(macro) }
+
+    class_variables = class_variable_map(source)
+    CLASS_METHOD_MACROS.each do |macro|
+      macro_calls(source, macro).each do |arguments|
+        next unless arguments.length == 5
+
+        name = if macro.end_with?('_id')
+                 symbol_name(arguments[2])
+               elsif arguments[2].start_with?('"')
+                 unescape_c_string(arguments[2][1...-1])
+               end
+        next unless name
+
+        registrations[name] << { owner: class_variables.dig(arguments[1], :class_name), function: arguments[3].strip,
+                                 path: path, macro: macro }
+      end
+    end
+    registrations.to_a
   end
 
   # NAMED_TWIN_CALLS, applied to the per-class map the body scan above built.
