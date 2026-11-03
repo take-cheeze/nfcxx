@@ -14,6 +14,8 @@
 
 require_relative 'pathb-ssa'
 
+Machine.function_parser = ->(form) { PathbEgraph.parse_fn(form) }
+
 module PathbEgraph
   INF = Float::INFINITY
   TERMINATORS = %w[br condbr switch ret unreachable].freeze

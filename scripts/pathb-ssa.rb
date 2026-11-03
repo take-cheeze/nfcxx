@@ -28,6 +28,16 @@ Phi = Struct.new(:var, :name, :type, :inc)
 Unsupported = Class.new(StandardError)
 Fail = Class.new(StandardError)
 Trap = Class.new(StandardError)
+# A longjmp: the jump buffer's address and the value. The frame that holds the matching _setjmp resumes there.
+LongJump = Class.new(StandardError) do
+  attr_reader :buf, :value
+
+  def initialize(buf, value)
+    @buf = buf
+    @value = value
+    super("longjmp")
+  end
+end
 
 SETJMP_NAMES = ['"_setjmp"', '"setjmp"', '"sigsetjmp"', '"__sigsetjmp"'].freeze
 AGG_HEADS = %w[struct union array fn].freeze
@@ -751,6 +761,9 @@ end
 # Its initial cells come from its initialiser. A global with no definition here (extern), a thread-local one, or an
 # initialiser the interpreter does not model (bytes, bitfield, a function address) is unsupported: any access raises.
 GLOBAL_TABLE = Struct.new(:addr, :init, :unsupported).new({}, [], {})
+FUNCTION_FORMS = {}   # name (quoted) => ssa-function form of the module
+FUNCTION_BLOCKS = {}  # name => the blocks of that function, parsed on first call
+EH_TLS_GLOBALS = %w[__curr_eh_stack_entry __eh_curr_region __caught_object_address __catch_clause_number].map { |n| "\"#{n}\"" }.freeze
 
 # The value of a literal operand of an initialiser: a constant of an integer or float type, or a null pointer.
 def literal(v, type)
@@ -765,6 +778,9 @@ def literal(v, type)
 end
 
 def install_module(forms)
+  FUNCTION_FORMS.clear
+  FUNCTION_BLOCKS.clear
+  forms.each { |f| FUNCTION_FORMS[f[1].raw] = f if head(f) == "ssa-function" }
   GLOBAL_TABLE.addr.clear
   GLOBAL_TABLE.init.clear
   GLOBAL_TABLE.unsupported.clear
@@ -783,6 +799,13 @@ def install_module(forms)
     begin
     init = g.find { |x| head(x) == "init" }
     flags = g.map { |x| x.is_a?(Array) ? head(x) : x }
+    # The exception runtime's thread-local state (EDG's libC) starts at zero in a fresh process, as any thread-local
+    # object does. A run of the interpreter is a fresh process, so these four are zero-initialised. Their runtime
+    # functions (__throw, _setjmp, ...) are still unsupported.
+    if init.nil? && flags.include?("thread") && flags.include?("extern") && EH_TLS_GLOBALS.include?(name)
+      GLOBAL_TABLE.init << [base, sx(strip_const(g[2])), 0]
+      next
+    end
     if init.nil? || flags.include?("extern") || flags.include?("thread") || init.size == 1
       GLOBAL_TABLE.unsupported[name] = true
       next
@@ -811,15 +834,22 @@ def install_module(forms)
 end
 
 class Machine
+  class << self
+    # Parses an ssa-function form into an object with blocks (pathb-egraph sets it).
+    attr_accessor :function_parser
+  end
+
   BIN = { "wadd" => :+, "wsub" => :-, "wmul" => :*, "and" => :&, "or" => :|, "xor" => :^ }.freeze
   CMP = { "lt.s" => :<, "lt.u" => :<, "le.s" => :<=, "le.u" => :<=, "eq" => :==, "ne" => :!=,
           "lt.f" => :<, "le.f" => :<= }.freeze
   FBIN = { "fadd" => :+, "fsub" => :-, "fmul" => :*, "fdiv" => :/ }.freeze
 
-  def initialize(fn, args)
+  def initialize(fn, args, heap = nil)
     @env = {}
-    @cells = {}     # address => [type, value]: a scalar object at an address (no byte-level aliasing)
-    GLOBAL_TABLE.init.each { |a, t, v| @cells[a] = [t, v] }
+    @jmps = {}      # the _setjmp sites of this frame: jump buffer address => where to resume
+    @heap = heap || { cells: {}, next: 4096, depth: 0 }
+    @cells = @heap[:cells]  # address => [type, value]: a scalar object at an address (no byte-level aliasing)
+    GLOBAL_TABLE.init.each { |a, t, v| @cells[a] = [t, v] } unless heap
     @addr = {}      # slot key => address of the slot's object
     @slot_type = {} # slot key => its type
     layout_slots(fn)
@@ -842,12 +872,36 @@ class Machine
     b = 0
     prev = nil
     steps = 0
+    start = 0
     loop do
       raise Unsupported, "step limit" if (steps += 1) > 1_000_000
 
       blk = out.fetch(b)
-      blk[:phis].map { |ph| [ph.name, val(ph.inc.fetch(prev))] }.each { |n, v| @env[n] = v }
-      blk[:instrs].each { |i| exec(i) }
+      # A resumed block (start > 0) has its phis already evaluated; they are not evaluated again.
+      blk[:phis].map { |ph| [ph.name, val(ph.inc.fetch(prev))] }.each { |n, v| @env[n] = v } if start.zero?
+      begin
+        idx = start
+        while idx < blk[:instrs].size
+          ins = blk[:instrs][idx]
+          if setjmp_site?(ins)
+            @jmps[addr_of(ins[3][3])] = { name: ins[1], block: b, index: idx + 1 }
+            @env[ins[1]] = 0
+          else
+            exec(ins)
+          end
+          idx += 1
+        end
+      rescue LongJump => e
+        entry = @jmps[e.buf]
+        # No frame of this run holds a _setjmp for the buffer: the jump leaves the run, which is not modelled.
+        raise Unsupported, "longjmp to a buffer not set in this run" if entry.nil? && @heap[:depth].zero?
+        raise unless entry
+        @env[entry[:name]] = e.value.zero? ? 1 : e.value
+        b = entry[:block]
+        start = entry[:index]
+        next
+      end
+      start = 0
       t = blk[:term]
       case t[0]
       when "br" then prev, b = b, t[1]
@@ -864,14 +918,42 @@ class Machine
       end
     end
   end
-
   private
 
   def exec_list(stmts) = stmts.each { |s| exec(s) }
 
+  # The call of a _setjmp: `(let R int (call int &"_setjmp" BUF))`.
+  def setjmp_site?(ins)
+    head(ins) == "let" && head(ins[3]) == "call" && ins[3][2].is_a?(Ref) && ins[3][2].raw == '"_setjmp"'
+  end
+
+  # A call. A longjmp raises LongJump. A function of the module runs in a new frame that shares this run's heap.
+  # Any other callee is not modelled.
+  def call_fn(f)
+    raise Unsupported, "indirect call" unless f[2].is_a?(Ref) && f[2].sigil == "&"
+
+    name = f[2].raw
+    args = f[3..]
+    if %w["longjmp" "_longjmp" "siglongjmp"].include?(name)
+      raise LongJump.new(args[0].is_a?(Ref) ? addr_of(args[0]) : val(args[0]), val(args[1]))
+    end
+    form = FUNCTION_FORMS.fetch(name) { raise Unsupported, "call of #{name}" }
+    raise Unsupported, "call depth" if @heap[:depth] >= 200
+
+    fn = fn_of(form)
+    blocks = (FUNCTION_BLOCKS[name] ||= Machine.function_parser.call(form).blocks)
+    values = args.map { |a| a.is_a?(Ref) ? addr_of(a) : val(a) }
+    @heap[:depth] += 1
+    begin
+      Machine.new(fn, values, @heap).run_ssa(blocks)
+    ensure
+      @heap[:depth] -= 1
+    end
+  end
+
   # Each slot is an object at an address; the addresses are assigned in declaration order, aligned, from 4096.
   def layout_slots(fn)
-    top = 4096
+    top = @heap[:next]
     fn.slots.select { |s| head(s) == "slot" }.each do |s|
       size, align = s[3] ? [int_lit(s[3]), [int_lit(s[4]), 1].max] : scalar_size(s[2])
       top = (top + align - 1) / align * align
@@ -879,6 +961,7 @@ class Machine
       @slot_type["$#{s[1].raw}"] = s[2]
       top += size
     end
+    @heap[:next] = top
   end
 
 # Size and alignment of a scalar type of the LP64 layout (the slot headers of an optimized function carry none).
@@ -993,6 +1076,7 @@ end
     when "break" then throw :brk
     when "continue" then throw :cont
     when "return" then throw :ret, (s.size > 1 ? val(s[1]) : nil)
+    when "eval" then call_fn(s[1])
     when "unreachable" then raise Trap, "unreachable"
     else raise Unsupported, "statement #{head(s) || sx(s)}"
     end
@@ -1023,6 +1107,7 @@ end
   def eval_rv(f)
     case head(f)
     when "load" then load_cell(f[1], addr_of(f[2]))
+    when "call" then call_fn(f)
     when "addr" then addr_of(f[1])
     when "offset" then addr_of(f[1]) + int_lit(f[2])
     when "index" then addr_of(f[1]) + val(f[2]) * int_lit(f[3])
