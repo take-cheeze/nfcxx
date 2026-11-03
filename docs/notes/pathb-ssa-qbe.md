@@ -32,7 +32,10 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
 - Globals become QBE `data` with their initialisers (zero, integer and pointer scalars, addresses of module globals).
   Extern, thread-local and other initialisers are not emitted; a reference to one raises `QbeUnsupported`.
 - Calls: `(call RET &"name" ARG...)` is a direct call by name; module functions and libc (`_setjmp`, `longjmp`) alike.
-- Not yet: bounds and nonnull checks, aggregates, and volatile accesses (`load.v`/`store.v`).
+- `(nonnull P)` traps on a null pointer (code 5); `(bounds I N)` traps on an index outside [0, N) (code 6), with an
+  unsigned comparison so a negative index is caught too.
+- Addresses: `(addr $slot)`, `(offset P K)` and `(index P I SIZE)`; a slot of an array type is allocated at its full size.
+- Not yet: aggregates passed or copied by value, and volatile accesses (`load.v`/`store.v`).
 
 A function outside the subset raises `QbeUnsupported` and nothing is emitted for it, so a module with an unsupported
 function still emits the rest.
@@ -50,6 +53,5 @@ the optimizer, or the interpreter, and the runner reports which one by comparing
 
 ## Next
 
-1. Bounds and nonnull checks, with the same trap helper.
-2. Aggregates (by address) and volatile accesses.
-3. Decide the wiring into `bin/nfcxx` (behind an option, Path B only).
+1. Aggregates by value (copy) and volatile accesses.
+2. Decide the wiring into `bin/nfcxx` (behind an option, Path B only).
