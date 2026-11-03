@@ -331,6 +331,7 @@ module Qbe
     def emit
       header
       allocs
+      escape_slots if returns_twice?(@blocks)
       plan_phis
       @blocks.each do |b|
         @cur = b[1].to_s
@@ -389,6 +390,9 @@ module Qbe
             elsif @sret || @ret[1] == "void" then ""
             else "#{Qbe.cls(@ret[1])} "
             end
+      # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
+      # the .weak directive for the marker.
+      @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
       @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
     end
@@ -666,6 +670,23 @@ module Qbe
     def asm_helpers = @asm_helpers ||= []
     public :asm_helpers
 
+    # A function that calls one that returns twice (setjmp and its kin) keeps its slots in memory: QBE does not know
+    # that the function returns twice, and it would promote a slot to a temporary holding the value from the setjmp
+    # call. Passing each slot's address to an empty helper makes the address escape, as pathb-qbe-emit.rb does.
+    RETURNS_TWICE = %w[setjmp _setjmp sigsetjmp __sigsetjmp savectx vfork getcontext].freeze
+
+    def returns_twice?(x)
+      return false unless x.is_a?(Array)
+      return true if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&" && RETURNS_TWICE.include?(x[2].raw.delete('"'))
+
+      x.any? { |y| returns_twice?(y) }
+    end
+
+    def escape_slots
+      asm_helpers << "escape"
+      @slots.each_index { |i| @lines << "  call $__pathb_escape(l %o#{i})" }
+    end
+
     def barrier_lines
       asm_helpers << "barrier"
       @lines << "  call $__pathb_barrier()"
@@ -729,7 +750,15 @@ module Qbe
       when "index" then index_lines(dst, rv)
       when "pdiff" then pdiff_lines(dst, t, rv)
       # A volatile load is an ordinary load in the emitted code: the loads of a block keep their order.
-      when "load", "load.v" then @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
+      when "load", "load.v"
+        # A bool object holding another byte is read as true, and a load yields 0 or 1 (EDG's model): normalise the byte.
+        if strip_const(rv[1]) == "bool"
+          raw = fresh
+          @lines << "  #{raw} =w loadub #{op(rv[2])}"
+          @lines << "  #{dst} =w cnew #{raw}, 0"
+        else
+          @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{op(rv[2])}"
+        end
       when "const", "null", nil
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
         raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String)

@@ -49,6 +49,9 @@ ASM_HELPERS = {
                 "\t.size __pathb_barrier, .-__pathb_barrier"],
   "fence" => ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tmfence", "\tret",
               "\t.size __pathb_fence, .-__pathb_fence"],
+  # An empty function whose argument (a slot's address) escapes: it keeps the slot in memory across a returns-twice call.
+  "escape" => ["\t.text", "\t.weak __pathb_escape", "\t.type __pathb_escape, @function", "__pathb_escape:", "\tret",
+               "\t.size __pathb_escape, .-__pathb_escape"],
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
 }.freeze
