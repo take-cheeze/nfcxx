@@ -179,6 +179,50 @@ check.call('successors_of merges the raise targets', ep.successors_of(5, include
 NF.states(enter_irep, LogOracle.new({ 1 => INT }, INT), Set.new)
 check.call('the flow runs on the shared facts', ep.numeric_flow_table&.supported)
 
+puts '-- scalar DFS worklist ranks (host)'
+# Keep the pair-stack traversal as the ordering oracle: rank order controls later oracle calls.
+reference_rank = lambda do |n, succ, raises, context_edges|
+  order = []
+  seen = Array.new(n, false)
+  stack = [[0, false]]
+  until stack.empty?
+    node, finished = stack.pop
+    if finished
+      order << node
+      next
+    end
+    next if seen[node]
+
+    seen[node] = true
+    stack << [node, true]
+    outs = context_edges&.key?(node) ? context_edges.fetch(node) : succ[node]
+    handlers = raises[node]
+    (handlers ? outs + handlers : outs).reverse_each { |target| stack << [target, false] unless seen[target] }
+  end
+  rank = Array.new(n, n)
+  order.reverse_each.with_index { |node, r| rank[node] = r }
+  rank
+end
+random = Random.new(42)
+rank_cases = 512.times.map do |bits|
+  succ = Array.new(3) { |node| (0...3).select { |target| bits[3 * node + target] == 1 } }
+  [3, succ, {}, nil]
+end
+200.times do
+  n = random.rand(1..50)
+  edges = -> { Array.new(random.rand(0..4)) { random.rand(n) } }
+  succ = Array.new(n) { edges.call }
+  raises = (0...n).select { random.rand(3).zero? }.to_h { |node| [node, edges.call] }
+  contexts = (0...n).select { random.rand(3).zero? }.to_h { |node| [node, edges.call] }
+  rank_cases << [n, succ, raises, contexts]
+end
+chain_size = 2000
+rank_cases << [chain_size, Array.new(chain_size) { |node| node + 1 < chain_size ? [node + 1] : [] }, {}, nil]
+check.call('DFS ranks match pair-stack order on every three-node graph, random handler/context graphs and a deep chain',
+           rank_cases.all? { |args| NF.worklist_rank(*args) == reference_rank.call(*args) })
+check.call('instruction zero exit marker and unreachable ranks are distinct',
+           NF.worklist_rank(3, [[], [], []], {}, nil) == [0, 3, 3])
+
 puts '-- join_state (host)'
 old = [INT, FLT, 0, 3]
 check.call('no growth: the old state itself', NF.join_state(old, [INT, 0, 0, 3], 2).equal?(old))
