@@ -777,7 +777,8 @@ class CodeGen
       fmt += '*'
       ptrs = (mand_names.map { |a| "&#{a}" } + opt_names.map { |a| "&#{a}" } + ['&bc2cpp_rest_ptr', '&bc2cpp_rest_len']).join(', ')
       # REST_BLOCK_COMBINED_SUPPORT: `*` and `&` combine in one mrb_get_args call.
-      if has_blk
+      # OPTIONAL_REST_YIELD: a bare `yield` (needs_blk_param) extracts the block the same way.
+      if has_blk || needs_blk_param
         out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
         fmt += '&'
         ptrs += ', &bc2cpp_blk'
@@ -794,7 +795,7 @@ class CodeGen
       end
       call_args = mand_names + opt_names + [rest_name]
       call_args << kwrest_name if kwrest_name
-      call_args << 'bc2cpp_blk' if has_blk
+      call_args << 'bc2cpp_blk' if has_blk || needs_blk_param
       if opt_names.any?
         # The count of optionals this call supplied, as OP_ENTER reads it (argc - mandatory, clamped to 0..opt).
         out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
@@ -842,7 +843,7 @@ class CodeGen
         out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
         out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
-        out << "  return #{impl_name}(M, self, #{(has_blk ? arg_names + ['bc2cpp_blk'] : arg_names).join(', ')}, bc2cpp_given_opt);\n"
+        out << "  return #{impl_name}(M, self, #{((has_blk || needs_blk_param) ? arg_names + ['bc2cpp_blk'] : arg_names).join(', ')}, bc2cpp_given_opt);\n"
       else
         call_args = (needs_blk_param || has_blk) ? arg_names + ['bc2cpp_blk'] : arg_names
         out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
