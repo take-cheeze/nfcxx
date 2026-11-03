@@ -115,12 +115,12 @@ text = no_opt ? ssa : PathbEgraph.optimize_module(ssa).first
 fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 
 # The globals' data, emitted once: the emitter writes data for a module's globals together with its functions.
-data_text = Qbe.module_il(globals).strip
+ctx = Qbe.module_context(globals)
+data_text = ctx[:data].join("\n\n").strip
 bodies = []
 fns.each do |fn|
   name = fn[1].raw.delete('"')
-  full = Qbe.module_il(globals + [fn]).strip
-  bodies << (data_text.empty? ? full : full.delete_prefix(data_text).strip)
+  bodies << Qbe.function_text(ctx, fn).strip
 rescue QbeUnsupported => e
   skipped << [name, e.message]
 end

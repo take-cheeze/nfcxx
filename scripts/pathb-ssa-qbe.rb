@@ -846,6 +846,15 @@ module Qbe
   # The data of the module's globals, then the functions. A global the emitter cannot model is left out, and a
   # reference to it raises QbeUnsupported where it is used.
   def module_il(forms)
+    ctx = module_context(forms)
+    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs]).emit }
+    helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
+    (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
+  end
+
+  # The part of a module that every function shares: the data of its globals and the references a function may make
+  # to them. Built once, so a driver that emits function by function does not redo the globals for each function.
+  def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
@@ -857,9 +866,14 @@ module Qbe
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
                 .to_h { |name, f| [name, { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }] }
-    emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, refs).emit }
-    helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
-    (data + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
+    { data: data, refs: refs }
+  end
+
+  # One function's text (its helper comments, then its body), against a context from module_context.
+  def function_text(ctx, fn_form)
+    fn = Fn.new(fn_form, ctx[:refs]).emit
+    helpers = fn.asm_helpers.map { |h| "# pathb-asm #{h}" }
+    (helpers + [fn.lines.join("\n")]).join("\n\n")
   end
 end
 
