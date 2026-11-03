@@ -260,7 +260,7 @@ module RbsParamCheck
     Array(foreign_ruby_paths).each do |path|
       next if compiled_files.include?(path) || compiled_files.include?(File.expand_path(path))
 
-      foreign_ruby_names(File.binread(path)).each { |t| names << t << t.chomp('=').chomp('?').chomp('!') }
+      foreign_ruby_names(File.binread(path)).each { |t| names << t << ClosedWorld.token_stem(t) }
     end
     names
   end

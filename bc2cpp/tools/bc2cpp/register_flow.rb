@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require 'strscan'
 require_relative 'bytecode_ir_ops'
 
 # REGISTER_FLOW: copy propagation and dead register-write removal
@@ -146,7 +147,9 @@ class RegisterFlow
   private
 
   def mentions(text)
-    text.scan(MENTION).flatten.map(&:to_i)
+    regs = []
+    each_mention(text) { |reg| regs << reg }
+    regs
   end
 
   def mask_of(regs)
@@ -155,12 +158,30 @@ class RegisterFlow
 
   def mention_mask(text)
     mask = 0
-    text.scan(MENTION) { |(reg)| mask |= 1 << reg.to_i }
+    each_mention(text) { |reg| mask |= 1 << reg }
     mask
   end
 
+  # MENTION's register numbers in order, read from the digit bytes instead of as captured Strings. A match ends at a
+  # non-word byte, so resuming the scan there sees the same word boundaries String#scan does.
+  def each_mention(text)
+    scanner = StringScanner.new(text)
+    while scanner.skip_until(MENTION)
+      digit = scanner.pos - scanner.matched_size + 1
+      reg = 0
+      while digit < scanner.pos
+        reg = reg * 10 + text.getbyte(digit) - 48
+        digit += 1
+      end
+      yield reg
+    end
+  end
+
+  # A line that is neither blank nor a `//` comment once String#strip's whitespace (NUL included) is skipped.
+  OPAQUE_LINE = %r{^[\x00\t\v\f\r ]*(?!//)[^\x00\t\n\v\f\r ]}
+
   def transparent?(index)
-    @texts[index].each_line.all? { |line| line.strip.empty? || line.lstrip.start_with?('//') }
+    !@texts[index].match?(OPAQUE_LINE)
   end
 
   # nil when the pass may run, else why not.

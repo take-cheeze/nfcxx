@@ -1139,7 +1139,7 @@ class CodeGen
     indent = region[:needs_brk] ? '      ' : '    '
     out << "    Bc2cppVmMark bc2cpp_brk_mark = bc2cpp_vm_mark(M);\n    try {\n" if region[:needs_brk]
     if direct
-      out << direct.lines.map { |line| "#{indent}#{line}" }.join
+      out << indent_lines(direct, indent)
     else
       # BLOCK_SEMANTICS: `pr.call(x) { ... }` on a cfunc Proc cannot use Proc#call
       # (see bc2cpp_cfunc_proc_call_p); the block is dropped, as a cfunc proc
@@ -1303,7 +1303,7 @@ class CodeGen
     out << "    mrb_value #{blk} = r#{region[:blk_reg]};\n"
     out << "    if (!mrb_nil_p(#{blk}) && !mrb_proc_p(#{blk})) " \
            "#{blk} = mrb_type_convert(M, #{blk}, MRB_TT_PROC, mrb_intern_lit(M, \"to_proc\"));\n"
-    out << direct.lines.map { |line| "  #{line}" }.join
+    out << indent_lines(direct, '  ')
     out << "  }\n"
     out
   end

@@ -1378,13 +1378,19 @@ class ClosedWorld
     }
   end
 
+  # `tok.chomp('=').chomp('?').chomp('!')` for a token of the identifier scans here (`[A-Za-z_]\w*[?!=]?`), which
+  # ends in at most one of those; an unsuffixed token is returned as is, not copied.
+  def self.token_stem(tok)
+    tok.end_with?('=', '?', '!') ? tok.chop : tok
+  end
+
   def self.ruby_file_facts(path)
     text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
 
     tokens = Set.new
     text.scan(/[A-Za-z_]\w*[?!=]?/) do |tok|
       tokens << tok
-      tokens << tok.chomp('=').chomp('?').chomp('!')
+      tokens << ClosedWorld.token_stem(tok)
     end
 
     supers = text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/).map { |(sup)| sup.split('::').last }
@@ -1433,7 +1439,7 @@ class ClosedWorld
     tokens = (@ruby_tokens[path] = Set.new)
     text.scan(/[A-Za-z_]\w*[?!=]?/) do |tok|
       tokens << tok
-      tokens << tok.chomp('=').chomp('?').chomp('!')
+      tokens << ClosedWorld.token_stem(tok)
     end
   end
 
