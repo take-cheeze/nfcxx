@@ -553,7 +553,6 @@ module Qbe
           Qbe.wrap_lit(Qbe.int_lit(x[2]), x[1]).to_s
         when "null" then "0"
         when "addr" then op(x[1])
-        when "addr" then op(x[1])
         else
           # A nested expression: computed into a temporary, whose line is appended before the caller's line.
           raise QbeUnsupported, "operand #{sx(x)}" unless expression?(x)
@@ -597,6 +596,12 @@ module Qbe
         @lines << "  jmp @#{block_label(item[1])}"
       when "switch" then switch_lines(item)
       when "eval"
+        if head(item[1]) == "rdtsc"
+          # A time-stamp read whose value is discarded: the helper is called for its effect on nothing.
+          asm_helpers << "rdtsc"
+          @lines << "  call $__pathb_rdtsc()"
+          return
+        end
         raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
 
         sret, dest, sym, args = call_parts(item[1])
@@ -670,6 +675,24 @@ module Qbe
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
       when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      # `(not T A)`: a bitwise complement of an integer, or a logical negation of a bool. The complement is narrowed to
+      # the type's canonical form. Floats are not integers and are refused.
+      when "not"
+        raise QbeUnsupported, "not on a floating type #{sx(t)}" if FLOAT_TYPES.key?(strip_const(t))
+
+        if strip_const(t) == "bool"
+          @lines << "  #{dst} =w xor #{op(rv[2])}, 1"
+        else
+          raw = fresh
+          @lines << "  #{raw} =#{c} xor #{op(rv[2])}, -1"
+          canon_lines(dst, t, raw)
+        end
+      # `(p2i T P)`: a pointer's address as an integer of type T, truncated or kept as the type's canonical form.
+      when "p2i" then canon_lines(dst, t, op(rv[2]))
+      # `(rdtsc)`: the time-stamp counter, from the helper the driver appends.
+      when "rdtsc"
+        asm_helpers << "rdtsc"
+        @lines << "  #{dst} =l call $__pathb_rdtsc()"
       when "bitcast" then bitcast_lines(dst, rv)
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset" then @lines << "  #{dst} =l add #{op(rv[1])}, #{Qbe.int_lit(rv[2])}"
@@ -875,8 +898,21 @@ module Qbe
     def bounds_lines(idx, n)
       c = Qbe.cls(operand_type(idx))
       i = op(idx)
+      # The bound: a typed constant, or a register (a variable-length array's element count) of the index's class, so
+      # the unsigned comparison is of equal width.
+      bound =
+        if n.is_a?(Array) && head(n) == "const"
+          Qbe.int_lit(n[2]).to_s
+        elsif (n.is_a?(String) && n.start_with?("%")) || expression?(n)
+          nc = Qbe.cls(operand_type(n))
+          raise QbeUnsupported, "bounds of class #{nc} against an index of class #{c}" unless nc == c
+
+          op(n)
+        else
+          Qbe.int_lit(n).to_s
+        end
       bad = fresh
-      @lines << "  #{bad} =w cuge#{c} #{i}, #{Qbe.int_lit(n)}"
+      @lines << "  #{bad} =w cuge#{c} #{i}, #{bound}"
       @lines << "  call $pathb_check(w #{bad}, w 6)"
     end
 
