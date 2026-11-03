@@ -286,20 +286,22 @@ module NumericFlow
   def worklist_rank(n, succ, raises, context_edges)
     order = []
     seen = Array.new(n, false)
-    stack = [[0, false]]
+    # Instruction indices are nonnegative; their complements mark DFS exits without allocating pairs.
+    stack = [0]
     until stack.empty?
-      node, finished = stack.pop
-      if finished
-        order << node
+      node = stack.pop
+      if node.negative?
+        order << ~node
         next
       end
       next if seen[node]
 
       seen[node] = true
-      stack << [node, true]
+      stack << ~node
       outs = context_edges&.key?(node) ? context_edges.fetch(node) : succ[node]
       handlers = raises[node]
-      (handlers ? outs + handlers : outs).reverse_each { |s| stack << [s, false] unless seen[s] }
+      handlers&.reverse_each { |s| stack << s unless seen[s] }
+      outs.reverse_each { |s| stack << s unless seen[s] }
     end
     rank = Array.new(n, n)
     order.reverse_each.with_index { |node, r| rank[node] = r }
