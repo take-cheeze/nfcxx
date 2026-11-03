@@ -228,9 +228,22 @@ module Qbe
     size = int_lit(g[3])
     align = [int_lit(g[4]), 1].max
     items = []
+    bits = {}   # byte offset -> the bits that the bit-field items put in that byte
     init[1..].each do |item|
       case head(item)
       when "zero" then next
+      when "bitfield"
+        # (bitfield OFF UNIT BOFF WIDTH TYPE (const TYPE V)): WIDTH bits at bit BOFF of the unit at byte OFF, as
+        # pathb-qbe-emit.rb places them, collected per byte (a field's unit may overlap another field's).
+        off, _unit, boff, width, _type, val = item[1..]
+        return nil unless head(val) == "const"
+
+        width = int_lit(width)
+        v = int_lit(val[2]) & ((1 << width) - 1)
+        width.times do |i|
+          pos = int_lit(off) * 8 + int_lit(boff) + i
+          bits[pos / 8] = (bits[pos / 8] || 0) | (((v >> i) & 1) << (pos % 8))
+        end
       when "scalar"
         off, type, v = item[1..]
         if (n = FLOAT_STORAGE[strip_const(type)])
@@ -270,6 +283,10 @@ module Qbe
       else return nil
       end
     end
+    # A bit-field's byte is written only by bit-field items: a byte another item also writes is not modelled.
+    return nil if bits.keys.any? { |b| items.any? { |off, n, _| b >= off && b < off + n } }
+
+    bits.each { |b, v| items << [b, 1, "b #{v}"] }
     parts = []
     cur = 0
     items.sort_by(&:first).each do |off, bytes, text|
@@ -362,6 +379,9 @@ module Qbe
           @sret = aggregate_info(p[2], "returned")
           @alias[p[1]] = "%sretbuf"
           @types[p[1]] = ["ptr", "void"]
+        when "ellipsis"
+          # A variadic function: the `...` follows the named parameters (its arguments are read with vastart/vaarg).
+          sig << "..."
         else raise QbeUnsupported, "#{head(p)} parameter"
         end
       end
@@ -633,6 +653,11 @@ module Qbe
       # fence instruction, so the driver (scripts/pathb-ssa-build) appends the helpers named by the marker comments.
       when "barrier" then barrier_lines
       when "fence" then fence_lines
+      # A branch-likelihood hint (likely/unlikely) changes only the layout the optimiser would choose, never the
+      # meaning of the code; QBE has no such hint, so the hint emits nothing.
+      when "likely", "unlikely" then nil
+      # (vastart ADDR): the va_list at ADDR starts reading the variadic arguments (the function has an ellipsis).
+      when "vastart" then @lines << "  vastart #{op(item[1])}"
       else raise QbeUnsupported, "statement #{head(item) || sx(item)}"
       end
     end
@@ -674,6 +699,11 @@ module Qbe
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call" then @lines << "  #{dst} =#{c} #{call_text(rv)}"
+      # (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE reads w, l, s and d only.
+      when "vaarg"
+        raise QbeUnsupported, "vaarg of #{sx(rv[1])}" unless %w[w l s d].include?(Qbe.cls(rv[1]))
+
+        @lines << "  #{dst} =#{c} vaarg #{op(rv[2])}"
       when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
       # `(not T A)`: a bitwise complement of an integer, or a logical negation of a bool. The complement is narrowed to
       # the type's canonical form. Floats are not integers and are refused.
