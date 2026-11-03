@@ -2277,6 +2277,7 @@ if $PROGRAM_NAME == __FILE__
   symbol_table = SymbolCache::Table.new
   # OWNER_CALL_DIRECT (owner_call_direct.rb): an owner call its listed owners' entries complete carries them.
   owner_call_direct = OwnerCallDirect.entries(compiled + gen.module_function_copies(compiled), registration_owners)
+  owner_call_direct = owner_call_direct.merge(OwnerCallDirect.native_entries) if ENV['BC2CPP_OWNER_CALL_DIRECT'] != '0'
   owner_class_slots = gen.owner_class_slots
   program_superclasses = gen.program_superclasses
   # GUARD_VIOLATION: name the method a violation site sits in.
@@ -2389,6 +2390,7 @@ if $PROGRAM_NAME == __FILE__
           *class_units.map { |unit| unit[:code] }].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
+  print OwnerCallDirect.native_prototypes
   print SymbolCache.emit(symbol_table)
   print const_scope_code
   print const_site_cache_code

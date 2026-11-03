@@ -258,6 +258,14 @@ check('left out: a bc2cpp_left_out call is no name literal',
 pool_src = %(r1 = bc2cpp_pool_str(M, "x");\n r2 = bc2cpp_pool_str(M, "send_me");\n r3 = mrb_str_new_cstr(M, "x");)
 check('pool value: a pure pool string is no literal, a folded value still is',
       S.c_literals(pool_src, pool_pure: Set['x']) == ['send_me', 'x'])
+# covered_block_names: a block-only name is exempt when each of its sites is matched by covered loops, count for count.
+site = ['d1g3st', 22]
+check('block sites: a generic site (one loop for two sites) keeps the name',
+      !S.covered_block_names({ 'dispose' => [site, site] }, Set.new, { site => 1 }).include?('dispose'))
+check('block sites: every site covered, count for count, frees the name',
+      S.covered_block_names({ 'dispose' => [site, site] }, Set.new, { site => 2 }).include?('dispose'))
+check('block sites: a name also used as a lookup argument keeps its name',
+      !S.covered_block_names({ 'dispose' => [site] }, Set['dispose'], { site => 1 }).include?('dispose'))
 check('pool value: without a pure verdict every value is a literal',
       S.c_literals(pool_src) == ['x', 'send_me', 'x'])
 

@@ -16,6 +16,17 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
                    :catch_handlers, keyword_init: true) do
   include IrepScans
 
+  # A digest of the irep's own code (its locals, registers, pool, symbols and instructions), not its label or its
+  # children. mrbc compiles one method to the same code in every compile unit, so (digest, send address) names one
+  # bytecode send in the closed-list proof and in the generated code alike; labels are per compile.
+  def content_digest
+    @content_digest ||= begin
+      require 'digest'
+      code = [nlocals, nregs, pool, syms, instructions.map { |i| [i.op, i.args, i.raw] }]
+      Digest::SHA256.hexdigest(code.inspect)[0, 16]
+    end
+  end
+
   # label => Irep of the whole tree this irep belongs to (set by load_ireps);
   # an ivar, not a member, so Struct#==/hash/inspect never walk the cycle.
   attr_accessor :tree
