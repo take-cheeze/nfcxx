@@ -1484,6 +1484,8 @@ class LocalLifetime
   # new drop-live. (move N SRC) moves the value out to storage the function does not see, a by-value
   # call argument that the call has already read.
   def copy_memory(x, state, moving = false)
+    # (copy N DST SRC ALIGN): the alignment is the last item, not the source (the byte states do not depend on it)
+    x = x[0, 4] if x.length == 5
     n = constant_offset(x[1])
     raise BadIR, 'negative copy length' if n < 0
     src = value(x[-1], state)
@@ -2020,7 +2022,7 @@ class LocalLifetime
     @cur_loc = @locs[x.object_id]
     arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[3, 4], 'store'=>[4], 'return'=>[1,2],
-               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3], 'copy'=>[4], 'move'=>[3, 4], 'readonly'=>[2]}
+               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3], 'copy'=>[4, 5], 'move'=>[3, 4], 'readonly'=>[2]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
