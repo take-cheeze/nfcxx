@@ -39,10 +39,12 @@ class CodeGen
   # resolution, keyword/arity checks, `_impl` call), reused by compile_splat_send
   # for unrolled splat register lists. argv/kw_val_exprs are C++ expressions.
   def compile_keyword_call(name:, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:,
-                           self_implicit: false, owner_def: nil)
+                           self_implicit: false, owner_def: nil, constant_target: nil)
     # MONO only, no TYPED: the guard's else branch would need a dynamic keyword
     # dispatch, which mrb_funcall cannot express. MONO needs no guard.
-    target = monomorphic_target(name)
+    # CONSTANT_OBJECT_KEYWORD: a constant_target (constant_object_keyword_target) is the definition the receiver's
+    # class object reaches exactly, so it replaces the name-wide MONO lookup, which two definers defeat.
+    target = constant_target || monomorphic_target(name)
     # LEXICAL_SELF_KEYWORD_SUPPORT: a POLY name can still have one reachable
     # definition for an implicit-self send in a class with no subclasses (see
     # lexical_self_keyword_target). A certain, not traced, fact, so no guard or
@@ -212,9 +214,12 @@ class CodeGen
 
     recv = self_implicit ? 'self' : "r#{d}"
     argv = (1..n).map { |k| "r#{dest_reg + k}" }
+    constant_target = constant_object_keyword_target(name, irep: irep, idx: idx, d: dest_reg,
+                                                     owner_def: owner_def, self_implicit: self_implicit)
     direct = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv,
                                   kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" },
-                                  self_implicit: self_implicit, owner_def: owner_def)
+                                  self_implicit: self_implicit, owner_def: owner_def,
+                                  constant_target: constant_target)
     return direct if direct
 
     # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: for `:new`, compile_keyword_call always
@@ -245,6 +250,31 @@ class CodeGen
                                              argv: argv, kw_sym_regs: kw_sym_regs,
                                              kw_val_regs: kw_val_regs, kw_names: kw_names,
                                              self_implicit: self_implicit)
+  end
+
+  # CONSTANT_OBJECT_KEYWORD: the singleton definition a keyword send to a stable class/module constant reaches, or nil.
+  # The same proofs as constant_receiver_send_code: the receiver is the constant's class object (constant_object_owner
+  # for an explicit receiver; a module's own `def self.x` for implicit self, ClosedWorld#module_object_self?), the
+  # singleton lookup has one public plain `def` (constant_object_singleton_def), and no rebinding or devirtualization
+  # block applies. Instance receivers are not covered here.
+  def constant_object_keyword_target(name, irep:, idx:, d:, owner_def:, self_implicit:)
+    return nil unless @closed_world && irep && idx
+    return nil if devirt_blocked_name?(name) || constant_object_name_rebound?(name)
+
+    constant_owner = if self_implicit
+                       base = owner_def&.owner&.end_with?('.singleton') && owner_def.owner.delete_suffix('.singleton')
+                       base && @closed_world.module_object_self?(base) ? base : nil
+                     else
+                       constant_object_owner(irep, idx, d, owner_def&.owner)
+                     end
+    return nil unless constant_owner
+
+    candidate = constant_object_singleton_def(name, constant_owner)
+    return nil unless candidate&.irep && candidate.visibility == :public && candidate.kind.nil?
+    return nil unless constant_object_candidate_clean?(candidate.irep) && compiles_clean?(candidate.irep)
+    return nil unless !@only_owners || @only_owners.include?(candidate.owner) || @other_owners&.include?(candidate.owner)
+
+    candidate
   end
 
   # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: `Foo.new(a, b, k1: v1, k2: v2)` where Foo
