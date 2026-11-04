@@ -65,8 +65,10 @@ module NomethodReviewedProbe
     return false unless status.exitstatus == 1
 
     lines = stderr.lines.map(&:chomp)
-    listed = lines.rindex { |l| l.start_with?('== closed world proven-class miss sites: ') } or return false
-    first = lines.index { |l| REVIEW_ABORT.match?(l) } or return false
+    listed = lines.rindex { |l| l.start_with?('== closed world proven-class miss sites: ') }
+    return false unless listed
+    first = lines.index { |l| REVIEW_ABORT.match?(l) }
+    return false unless first
     return false if first < listed
 
     tail = lines[first..]

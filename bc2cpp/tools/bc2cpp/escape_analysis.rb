@@ -313,7 +313,8 @@ module EscapeAnalysis
 
       list = @defs.fetch(name, []).dup
       Array(@aliases.fetch(name, [])).each do |old|
-        more = defs_named(old, seen, class_aware: class_aware) or return nil
+        more = defs_named(old, seen, class_aware: class_aware)
+        return nil unless more
 
         list.concat(more)
       end
@@ -745,7 +746,8 @@ module EscapeAnalysis
     def compute_summary(mdef, position)
       return position[0] == :arg && mdef.name.end_with?('=') if mdef.irep.nil? && mdef.kind == :ivar_accessor
 
-      irep = body_irep(mdef) or return true
+      irep = body_irep(mdef)
+      return true unless irep
       case position[0]
       when :self then flow(irep, { 0 => { 0 => true } }, self_tracked: true).escapes?
       when :self_keep then flow(irep, { 0 => { 0 => true } }, self_tracked: true, returns: true).escapes?

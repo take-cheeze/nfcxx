@@ -168,7 +168,8 @@ module CoreEnumeratorFree
         out = Hash.new { |h, k| h[k] = [] }
         ireps.each do |label, irep|
           up = method_of[label]
-          d = up && body_of[up] or next
+          d = up && body_of[up]
+          next unless d
           BytecodeIR.for(irep).each_source { |insn, idx| out[d.name] << [irep, idx, insn] if insn.op == :SUPER }
         end
         out
@@ -362,7 +363,8 @@ module CoreEnumeratorFree
 
           g.each_irep_of_method(d.irep) do |sub|
             BytecodeIR.for(sub).each_source do |insn, idx|
-              why = creation(insn) or next
+              why = creation(insn)
+              next unless why
               mode = sub.label == d.irep && absent_only?(g, sub, idx) ? :blockless : :always
               add_creator(creators, g, d, mode, why, sub, idx, insn)
             end
@@ -394,7 +396,8 @@ module CoreEnumeratorFree
             next if given_only?(g, irep, idx)
 
             up = g.method_of[irep.label]
-            d = up && g.body_of[up] or next
+            d = up && g.body_of[up]
+            next unless d
             grew = true unless creators.key?([d.owner, d.name])
             add_creator(creators, g, d, :blockless, "forwards its block to #{n}", irep, idx, insn)
           end
@@ -409,7 +412,8 @@ module CoreEnumeratorFree
     grew = false
     groups.each do |g|
       g.alias_sites.each do |site|
-        c = creators[[site[:owner], site[:old]]] or next
+        c = creators[[site[:owner], site[:old]]]
+        next unless c
         next if creators.key?([site[:owner], site[:new]])
 
         creators[[site[:owner], site[:new]]] = Creator.new(owner: site[:owner], name: site[:new], mode: c.mode, noarg: c.noarg,
@@ -443,7 +447,8 @@ module CoreEnumeratorFree
     sends = []
     text.scan(/mrb_funcall_with_block\(\s*mrb\s*,\s*\w+\s*,\s*MRB_SYM\(\s*#{Regexp.escape(name)}\s*\)\s*,\s*\w+\s*,\s*\w+\s*,\s*mrb_obj_value\(\s*(\w+)\s*\)\s*\)/) do |(var)|
       at = Regexp.last_match.begin(0)
-      fn_start = starts.select { |s| s <= at }.last or return nil
+      fn_start = starts.select { |s| s <= at }.last
+      return nil unless fn_start
       fn_end = starts.find { |s| s > at } || text.size
       body = text[fn_start...fn_end].gsub(/"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/) { |m| m.gsub(/[^\n]/, ' ') }
       rel = at - fn_start
@@ -596,7 +601,8 @@ module CoreEnumeratorFree
     inputs.native_creators.each { |c| creators[[c.owner, c.name]] = c }
     # A native alias copies the function: the new name makes an Enumerator exactly when the old one does.
     inputs.native_aliases.each do |owner, new_name, old_name|
-      c = creators[[owner, old_name]] or next
+      c = creators[[owner, old_name]]
+      next unless c
       creators[[owner, new_name]] ||= Creator.new(owner: owner, name: new_name, mode: c.mode, noarg: c.noarg, why: "alias of #{old_name}",
                                                     explained: Set.new, group: nil)
     end
@@ -606,7 +612,8 @@ module CoreEnumeratorFree
   # A method of the group being released is reached only through the paths proven here (an Enumerator, a creator name's
   # callers), so the sites inside it are no new way in.
   def released?(group, irep)
-    up = group.method_of[irep.label] or return false
+    up = group.method_of[irep.label]
+    return false unless up
     d = group.body_of[up]
     d && group.ireps.fetch(up).file.to_s.match?(GROUP_FILE)
   end
@@ -698,7 +705,8 @@ module CoreEnumeratorFree
         next if irep.file.to_s.match?(GROUP_FILE)
 
         BytecodeIR.for(irep).each_source do |insn, _|
-          why = creation(insn) or next
+          why = creation(insn)
+          next unless why
           unproven << Unproven.new(file: irep.file.to_s, line: insn.lineno, where: 'load time', name: insn.sym.to_s, why: "a class body or the top level #{why}")
         end
       end
@@ -777,7 +785,8 @@ module CoreEnumeratorFree
           i += 1
         end
         args = text[start...(i - 1)].split(',').map(&:strip)
-        leaf = args.filter_map { |a| a[/\A"(\w+)"\z/, 1] || a[/\AMRB_SYM\((\w+)\)\z/, 1] }.first or next
+        leaf = args.filter_map { |a| a[/\A"(\w+)"\z/, 1] || a[/\AMRB_SYM\((\w+)\)\z/, 1] }.first
+        next unless leaf
         sup = NATIVE_SUPERS.find { |re, _| args.last.match?(re) }&.last
         out[leaf] = sup if sup || !out.key?(leaf)
       end

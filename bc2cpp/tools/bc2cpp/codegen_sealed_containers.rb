@@ -133,7 +133,8 @@ class CodeGen
     reg = BytecodeIR.for(irep).source_at(g).reg
     return false unless reg && !fixnum_proof_ctx(irep)[:upvars].include?(reg)
 
-    uses = FactoryFlow.uses(irep, g, reg) or return false
+    uses = FactoryFlow.uses(irep, g, reg)
+    return false unless uses
     program = BytecodeIR.for(irep)
     found = []
     ok = uses.all? do |use, r|

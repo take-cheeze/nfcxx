@@ -50,7 +50,8 @@ module NativeDirect
     defs = Hash.new { |h, k| h[k] = [] }
     text.scan(/RClass\s*\*\s*(\w+)\s*=\s*mrb_define_(module|class)(_under)?\s*\(([^;]*?)\)\s*;/m) do |var, _kind, under, args|
       parts = args.split(',').map(&:strip)
-      defs[var] << (under ? [:under, parts[1], parts[2][/"(\w+)"/, 1]] : [:top, parts[1][/"(\w+)"/, 1]])
+      # An unmatched optional group is nil on CRuby and "" on mruby's onig scan: either way, not matched.
+      defs[var] << (under && !under.empty? ? [:under, parts[1], parts[2][/"(\w+)"/, 1]] : [:top, parts[1][/"(\w+)"/, 1]])
     end
     text.scan(/(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |func, param|
       callers = text.scan(/\b#{Regexp.escape(func)}\s*\(\s*\w+\s*,\s*(\w+)\s*\)\s*;/).flatten

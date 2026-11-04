@@ -485,7 +485,8 @@ def bc2cpp_rake_dependencies(dir, root)
   raise "bc2cpp: #{rake} is missing; the closed-world gem closure is derived from it" unless File.file?(rake)
 
   File.read(rake, encoding: 'UTF-8').each_line.filter_map do |line|
-    match = line.match(/^\s*(?:spec\.)?add_dependency[ (]\s*['"](mruby-[\w-]+)['"]/) or next
+    match = line.match(/^\s*(?:spec\.)?add_dependency[ (]\s*['"](mruby-[\w-]+)['"]/)
+    next unless match
     if (cond = line[/\bif\s+Dir\.exist\?\s+"\#\{MRUBY_ROOT\}\/mrbgems\/([\w-]+)"/, 1])
       next unless File.directory?(File.join(root, '3rd/mruby/mrbgems', cond))
     elsif (excluded = line[/\bunless\s+%w\[([^\]]*)\]\.include\?\(build\.name\)/, 1])

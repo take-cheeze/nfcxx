@@ -147,14 +147,16 @@ module DynamicNames
   # every writer of the interned register is a STRCAT whose appended operand, or a STRING, is a literal not ending in `=`.
   def self.interned_setter?(irep, program, idx, insn)
     reg = insn.reg
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg) or return true
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg)
+    return true unless writers
     writers.empty? || writers.any? do |w|
       writer = program.source_at(w)
       case writer.op
       when :STRING then string_may_end_setter?(irep, writer)
       when :STRCAT
         paren = writer.paren_reg
-        piece = paren.nil? ? nil : BytecodeIR.reaching_writer_indices(irep, w, paren) or next true
+        piece = paren.nil? ? nil : BytecodeIR.reaching_writer_indices(irep, w, paren)
+        next true unless piece
         piece.empty? || piece.any? { |p| (s = program.source_at(p)).op != :STRING || string_may_end_setter?(irep, s) }
       else true
       end
@@ -171,7 +173,8 @@ module DynamicNames
   def self.name_value_used?(irep, idx, reg, parents, depth = 0)
     return true if reg.nil? || depth > 8
 
-    uses = FactoryFlow.uses(irep, idx, reg) or return true
+    uses = FactoryFlow.uses(irep, idx, reg)
+    return true unless uses
     program = BytecodeIR.for(irep)
     uses.any? do |use, used_reg|
       user = program.source_at(use)
@@ -247,7 +250,8 @@ module DynamicNames
   # `respond_to?(name)` / `respond_to?(name, include_all)` send.
   def self.probe_only?(irep, idx, insn)
     program = BytecodeIR.for(irep)
-    uses = FactoryFlow.uses(irep, idx, insn.reg) or return false
+    uses = FactoryFlow.uses(irep, idx, insn.reg)
+    return false unless uses
     uses = uses.reject { |use, reg| self_send_slot?(program.source_at(use), reg) }
     !uses.empty? && uses.all? do |use, reg|
       send = program.source_at(use)

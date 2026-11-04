@@ -474,7 +474,8 @@ class CodeGen
   # BytecodeIR::Program#ivar_assigned_before_exposure? with `super` modelled: it
   # assigns when +super_assigns+, and lets `self` out only unless +super_safe+.
   def numeric_assigned_before_exposure?(program, ivar, super_assigns, super_safe)
-    preds = program.instruction_predecessors(include_handlers: true) or return false
+    preds = program.instruction_predecessors(include_handlers: true)
+    return false unless preds
 
     insns = program.instructions
     out = Array.new(insns.length, true)

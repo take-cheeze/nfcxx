@@ -167,7 +167,8 @@ module ClassWorld
   def frozen_magic?(file)
     File.open(file) do |io|
       5.times do
-        line = io.gets or return false
+        line = io.gets
+        return false unless line
         return true if line.match?(FROZEN_MAGIC)
       end
     end

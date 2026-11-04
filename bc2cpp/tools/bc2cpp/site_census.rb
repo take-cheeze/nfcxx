@@ -137,7 +137,8 @@ module SiteCensus
     seen[[reg, to]] = true
     found = []
     (fn...to).each do |j|
-      m = lines[j].match(/^\s*(?:mrb_value )?#{reg} = (.*);\s*$/) or next
+      m = lines[j].match(/^\s*(?:mrb_value )?#{reg} = (.*);\s*$/)
+      next unless m
       rhs = m[1]
       if rhs =~ /\Ar\d+\z/
         found.concat(may_feed(lines, fn, j, rhs, params, seen, hops - 1))

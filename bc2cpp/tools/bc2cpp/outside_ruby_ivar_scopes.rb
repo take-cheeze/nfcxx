@@ -25,7 +25,8 @@ module OutsideRubyIvarScopes
     global = Set.new
     scoped = Hash.new { |h, k| h[k] = Set.new }
     Array(paths).each do |path|
-      src = SourceText.read(path, 'outside_ruby_ivar_scopes') or next
+      src = SourceText.read(path, 'outside_ruby_ivar_scopes')
+      next unless src
       file_global, file_scoped = scan_source(src, path)
       global.merge(file_global)
       file_scoped.each { |name, classes| scoped[name].merge(classes) }

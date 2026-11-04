@@ -109,7 +109,8 @@ module BytecodeIR
     # Yields [source, index] from +start+ while each instruction is entered only from the one before it (normal or
     # handler edges), at most +window+ of them; none when the edge set is unresolved.
     def straight_line(start, window)
-      preds = instruction_predecessors(include_handlers: true) or return nil
+      preds = instruction_predecessors(include_handlers: true)
+      return nil unless preds
       k = start
       while k < @instructions.length && k < start + window
         break unless preds[k] == [k - 1]

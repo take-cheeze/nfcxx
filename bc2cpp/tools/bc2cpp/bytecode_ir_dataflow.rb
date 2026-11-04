@@ -367,7 +367,8 @@ module BytecodeIR
       return false if opaque_regs&.include?(reg)
       return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
 
-      preds = instruction_predecessors(include_handlers: true) or return false
+      preds = instruction_predecessors(include_handlers: true)
+      return false unless preds
       low = [w, 0].max
       # The write itself must leave +reg+ holding its value on every path (a side write does not).
       return false if w >= 0 && origin_effect(@instructions[w].source, reg, typed_enter: false, index: w) != :define
@@ -397,7 +398,8 @@ module BytecodeIR
     # zeroed typed slot would otherwise read 0/false where the ivar reads nil.
     # A forward must-analysis over normal and handler edges.
     def ivar_assigned_before_exposure?(ivar)
-      preds = instruction_predecessors(include_handlers: true) or return false
+      preds = instruction_predecessors(include_handlers: true)
+      return false unless preds
 
       count = @instructions.length
       out = Array.new(count, true)
@@ -437,7 +439,8 @@ module BytecodeIR
     end
 
     def compute_unstored_ivar_reads(name)
-      normal = instruction_predecessors(include_handlers: false) or return nil
+      normal = instruction_predecessors(include_handlers: false)
+      return nil unless normal
       return nil unless handlers_resolved?
 
       raised_from = Hash.new { |h, k| h[k] = [] }
@@ -471,7 +474,8 @@ module BytecodeIR
     # which the block answers true (nil when the query refuses, so callers
     # cannot mistake a refusal for "no").
     def every_reaching_definition(index, reg, **options)
-      defs = reaching_definitions(index, reg, **options) or return nil
+      defs = reaching_definitions(index, reg, **options)
+      return nil unless defs
       defs.all? { |d| yield d }
     end
 

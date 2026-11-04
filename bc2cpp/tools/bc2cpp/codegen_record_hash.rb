@@ -18,9 +18,11 @@ class CodeGen
   def record_index_mask(irep, index, insn)
     return nil unless insn.op == :GETIDX && RecordHash.table && @closed_world && record_nilable_reads?
 
-    slots = RecordHash.read_slots(irep, index) or return nil
+    slots = RecordHash.read_slots(irep, index)
+    return nil unless slots
     mask = slots.reduce(0) do |acc, (name, key)|
-      info = RecordHash.table.dig(name, key) or return nil
+      info = RecordHash.table.dig(name, key)
+      return nil unless info
       classes = info[RecordHash.consumer_tier]
       # Reuse the per-writer constructor proof; missing/deleted keys still contribute nil.
       if classes&.include?(:unknown) && ENV['BC2CPP_RECORD_OBJECT_READS'] != '0'
@@ -76,7 +78,8 @@ class CodeGen
   end
 
   def compute_record_key_exact_class(name, key)
-    info = RecordHash.table.dig(name, key) or return nil
+    info = RecordHash.table.dig(name, key)
+    return nil unless info
     return nil if info[:nilable] || info[:writers].empty?
 
     classes = info[:writers].map { |irep, i, reg| record_writer_exact_class(irep, i, reg) }

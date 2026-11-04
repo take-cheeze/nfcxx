@@ -109,30 +109,36 @@ module TypeCheckReport
     owner, meth = r['owner'].to_s.split('#', 2)
     case r['source']
     when 'argument'
-      m = by_def[[owner, meth]]&.first or return nil
-      k = r['detail'].to_s[/\Aarg(\d+)\z/, 1]&.to_i or return nil
+      m = by_def[[owner, meth]]&.first
+      return nil unless m
+      k = r['detail'].to_s[/\Aarg(\d+)\z/, 1]&.to_i
+      return nil unless k
       return nil if r['why'].to_s == 'no_candidate:block_param'
 
-      p = m['params'][k - 1] or return nil
+      p = m['params'][k - 1]
+      return nil unless p
       return nil if p['type'] # already typed (declared or inferred elsewhere): the site is not blocked on this parameter
 
       { kind: 'param', key: "#{owner}##{meth} parameter #{k} (#{p['name']})", file: m['file'], line: m['line'], col: m['col'],
         sample: "#{owner}##{meth}(#{p['name']})" }
     when 'ivar'
       iv = "@#{r['detail'].to_s.delete_prefix('@')}"
-      i = ivar_at[[owner, iv]] or return nil
+      i = ivar_at[[owner, iv]]
+      return nil unless i
       return nil if i['type']
 
       { kind: 'ivar', key: "#{owner}##{iv}", file: i['file'], line: i['line'], col: i['col'], sample: "#{owner}##{iv}" }
     when 'call'
-      defs = by_name[r['detail']] or return nil
+      defs = by_name[r['detail']]
+      return nil unless defs
       return nil if defs.all? { |m| m['return']['type'] }
 
       first = defs.first
       { kind: 'return', key: "return of ##{r['detail']} (#{defs.size} definition#{'s' if defs.size > 1})",
         file: first['file'], line: first['line'], col: first['col'], sample: "##{r['detail']}" }
     when 'const'
-      c = const_at[r['detail']] or return nil
+      c = const_at[r['detail']]
+      return nil unless c
       return nil if c['type']
 
       { kind: 'const', key: "constant #{r['detail']}", file: c['file'], line: c['line'], col: c['col'], sample: r['detail'] }

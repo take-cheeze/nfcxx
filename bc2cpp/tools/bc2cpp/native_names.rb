@@ -21,7 +21,7 @@ require_relative 'ruby_parse_cache'
 PRESYM_RB = File.expand_path('../../3rd/mruby/lib/mruby/presym.rb', __dir__)
 raise "bc2cpp: #{PRESYM_RB} is missing; run `git submodule update --init 3rd/mruby`" unless File.file?(PRESYM_RB)
 
-require PRESYM_RB
+require_relative '../../3rd/mruby/lib/mruby/presym'
 OPSYM_TO_RUBY = MRuby::Presym::OPERATORS.to_h { |ruby, sym| [sym, ruby] }.freeze
 # A duplicate symbol value would make the inversion silently drop an operator.
 raise 'bc2cpp: mruby presym OPERATORS values are not unique' unless OPSYM_TO_RUBY.size == MRuby::Presym::OPERATORS.size
@@ -111,7 +111,8 @@ def foreign_method_names(paths)
   ScanCache.fetch('native_names.foreign_method_names', Array(paths), cache_absent: false) do
     names = Set.new
     Array(paths).each do |path|
-      src = SourceText.read(path, 'foreign_method_names') or next
+      src = SourceText.read(path, 'foreign_method_names')
+      next unless src
     parsed = RubyParseCache.parse(src, path)
     # The tree still recovers around an error and the regexes below cover the rest, but a
     # file that does not parse must not go unnoticed.
@@ -346,7 +347,8 @@ def foreign_method_owners(paths)
   scan = HiddenRubyOwnerScan.new
   global = false
   Array(paths).each do |path|
-    src = SourceText.read(path, 'foreign_method_owners') or next
+    src = SourceText.read(path, 'foreign_method_owners')
+    next unless src
     parsed = RubyParseCache.parse(src, path)
     if parsed.errors.empty?
       parsed.value.accept(scan)
@@ -409,7 +411,8 @@ def outside_ivar_names(paths)
   ScanCache.fetch('native_names.outside_ivar_names', Array(paths), cache_absent: false) do
     names = Set.new
     Array(paths).each do |path|
-      src = SourceText.read(path, 'outside_ivar_names', binary: true) or next
+      src = SourceText.read(path, 'outside_ivar_names', binary: true)
+      next unless src
       src.scan(/@([A-Za-z_][A-Za-z_0-9]*)/) { |(n)| names << n }
       src.scan(/MRB_IVSYM\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { |(n)| names << n }
     end
@@ -433,7 +436,8 @@ def extract_native_method_names(src_paths)
   # alternatives must come before bare SYM in the regex, or SYM matches first
   # and "_Q(empty)" is left unconsumed.
   Array(src_paths).each do |path|
-    src = SourceText.read(path, 'extract_native_method_names') or next
+    src = SourceText.read(path, 'extract_native_method_names')
+    next unless src
     # Multi-line call shapes match too; the regex ignores newlines between args.
     src.scan(/mrb_define_(?:method|class_method|module_function|private_method|singleton_method)\s*\(\s*\w+\s*,\s*#{NATIVE_OWNER_ARG_RE}\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
       names << unescape_c_string(name.first)
@@ -487,7 +491,8 @@ def extract_native_call_names(src_paths)
   ScanCache.fetch('native_names.extract_native_call_names', Array(src_paths), cache_absent: false) do
     names = Set.new
     Array(src_paths).each do |path|
-      src = SourceText.read(path, 'extract_native_call_names') or next
+      src = SourceText.read(path, 'extract_native_call_names')
+      next unless src
     src.scan(/mrb_funcall(?:_id|_argv|_with_block)?\s*\(.{0,200}?(?:"((?:[^"\\]|\\.)*)"|#{MRB_SYM_TOKEN_RE})/m) do |str, macro, sym|
       names << (str ? unescape_c_string(str) : resolve_mrb_sym_token(macro, sym))
     end

@@ -82,7 +82,8 @@ class RegisterFlow
   def self.captured_registers(irep)
     return Set.new if irep.reps.nil? || irep.reps.empty?
 
-    tree = irep.tree or return nil
+    tree = irep.tree
+    return nil unless tree
     found = Set.new
     collect_captured(tree, irep, found) ? found : nil
   end
@@ -217,7 +218,8 @@ class RegisterFlow
 
     glue = @handlers[:glue_reads]
     glue.each do |addr, regs|
-      index = @program.address_to_index[addr] or return false
+      index = @program.address_to_index[addr]
+      return false unless index
       mentioned = mentions(@texts[index])
       return false unless regs.all? { |reg| mentioned.include?(reg) }
     end
@@ -429,12 +431,14 @@ class RegisterFlow
 
   def propagate_copies
     @program.each_with_op(:MOVE) do |_insn, i|
-      match = /\A  r(\d+) = r(\d+);\n\z/.match(@texts[i]) or next
+      match = /\A  r(\d+) = r(\d+);\n\z/.match(@texts[i])
+      next unless match
       dest = match[1].to_i
       src = match[2].to_i
       next if dest == src || @pinned.include?(dest) || @pinned.include?(src)
 
-      readers = copy_readers(i, dest, src) or next
+      readers = copy_readers(i, dest, src)
+      next unless readers
       next unless readers.all? { |j| copy_available?(i, j, dest, src) }
 
       readers.each { |j| substitute(j, dest, src) }

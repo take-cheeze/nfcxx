@@ -179,20 +179,23 @@ module InsnOperands
 
   # `n=` / `nk=` as printed: digits, `*`, or nil when absent.
   def n_spec
-    spec = argc_operand or return nil
+    spec = argc_operand
+    return nil unless spec
 
     spec[0].nil? ? '*' : spec[0].to_s
   end
 
   def nk_spec
-    spec = argc_operand or return nil
+    spec = argc_operand
+    return nil unless spec
     return nil if spec[2]
 
     spec[1].nil? ? '*' : spec[1].to_s
   end
 
   def argc_text
-    spec = argc_operand or return nil
+    spec = argc_operand
+    return nil unless spec
 
     OperandSchema.argc_text(spec)
   end

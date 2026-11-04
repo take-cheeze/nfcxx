@@ -84,7 +84,8 @@ module OwnerCallDirect
       at = lines.index_at(hit)
       start = lines.line_start(at)
       from = lines.line_end(at)
-      site = SITE.match(lines[at]) or next
+      site = SITE.match(lines[at])
+      next unless site
 
       head, recv, name, list = site.captures
       owners = list.scan(STRING).flatten.grep(CLOSED_OWNER_RE)
@@ -120,7 +121,8 @@ module OwnerCallDirect
     # The index of the line holding byte `pos`, which must not lie before a line asked about earlier.
     def index_at(pos)
       while @starts.last <= pos
-        newline = @code.byteindex("\n", @starts.last) or break
+        newline = @code.byteindex("\n", @starts.last)
+        break unless newline
         @starts << (newline + 1)
       end
       @starts.last > pos ? @starts.size - 2 : @starts.size - 1

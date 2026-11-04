@@ -38,8 +38,10 @@ module IrBlockOperands
     insn = BytecodeIR.for(irep).source_at(index)
     return nil unless insn && BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
 
-    reg = block_register(insn) or return nil
-    defs = definitions(irep, index, reg) or return nil
+    reg = block_register(insn)
+    return nil unless reg
+    defs = definitions(irep, index, reg)
+    return nil unless defs
     labels = defs.map do |df|
       return nil if df.entry?
 
@@ -59,7 +61,8 @@ module IrBlockOperands
 
   # Name of the constant every definition of +reg+ reaching +index+ loads (GETCONST/GETMCNST of one name), or nil.
   def constant_name(irep, index, reg)
-    defs = definitions(irep, index, reg) or return nil
+    defs = definitions(irep, index, reg)
+    return nil unless defs
     names = defs.map do |df|
       return nil if df.entry?
 
@@ -73,7 +76,8 @@ module IrBlockOperands
 
   # Do all definitions reaching +index+ come from writers whose op satisfies the block? false when unprovable.
   def all_writers?(irep, index, reg)
-    defs = definitions(irep, index, reg) or return false
+    defs = definitions(irep, index, reg)
+    return false unless defs
     defs.all? { |df| !df.entry? && yield(BytecodeIR.for(irep).source_at(df.index)) }
   end
 

@@ -100,7 +100,8 @@ module BlockYieldTypes
     irep.reps.each do |label|
       next unless seen.add?(label)
 
-      child = ireps[label] or return 'has a nested block with no body'
+      child = ireps[label]
+      return 'has a nested block with no body' unless child
       return 'yields from a nested block' if BytecodeIR.for(child).instructions_with_op(:BLKCALL).any?
 
       why = nested_yield_why(child, ireps, seen)

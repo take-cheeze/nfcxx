@@ -329,7 +329,8 @@ module NativeBindingSplit
     problems = []
     facts.by_config.each do |config, data|
       forwarders.each do |f|
-        fdata = data['files'][f.file] or next
+        fdata = data['files'][f.file]
+        next unless fdata
         defined = fdata['exports'].any? { |e| e['name'] == f.direct_name }
         problems << "#{config}: rgss::#{f.direct_name} is not defined" unless defined
         expected = GuardEval.holds?(f.guard, config)
