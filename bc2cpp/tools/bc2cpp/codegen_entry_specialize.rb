@@ -113,10 +113,10 @@ class CodeGen
 
   # true, or why the method's calling convention is outside the first cut (pure required positionals only).
   def entry_specialization_eligibility(mandatory_ok:, opt:, has_rest:, has_blk:, needs_blk_param:, kw_table:, resumable:,
-                                       fiber_guarded:, needs_return_catch:, block_fallback_regions:)
+                                       needs_return_catch:, block_fallback_regions:)
     return 'optional, rest or keyword parameters' unless mandatory_ok && !opt.positive? && !has_rest && kw_table.nil?
     return 'takes or yields to a block' if has_blk || needs_blk_param
-    return 'Fiber-resumable or Fiber-guarded body' if resumable || fiber_guarded
+    return 'Fiber-resumable body' if resumable
     return 'block fallback regions' if needs_return_catch || !block_fallback_regions.empty?
 
     true

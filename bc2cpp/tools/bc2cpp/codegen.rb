@@ -214,7 +214,6 @@ class CodeGen
     end
     # CORE_VISIBILITY: compiled, but never a dispatch candidate.
     (self.class.core_hidden_defs || []).each { |d| @owner_of[d.irep] = d if d.irep }
-    @core_guard_index = {}
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
     @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.

@@ -249,7 +249,6 @@ class CodeGen
     end
 
     resumable = nil
-    fiber_guarded = false
     # RECEIVER_ROOTS: a fiber root that yields to its block takes the resumable form too (its entry is the same body).
     yielding_root = @fiber_roots&.include?(label) && BytecodeIR.for(irep).instructions_with_op(:BLKCALL).any?
     # RESUMABLE_DUAL: a method with a variant keeps the fast body, and its guard calls the variant.
@@ -261,29 +260,14 @@ class CodeGen
       # function, or its own body cannot suspend, in which
       # case it compiles behind a run-time hand-off.
       plan = @rsm_variant ? build_resumable_plan(label) : resumable_plan(label)
-      if plan.is_a?(ResumablePlan)
-        resumable = plan
-      elsif fiber_body_guard?(label, d)
-        fiber_guarded = true
-      else
-        reason = if plan.is_a?(String)
-                   warn "bc2cpp: resumable: #{d.owner}##{d.name} stays interpreted: #{plan}" if (@resumable_warned ||= Set.new).add?(label)
-                   "is a Fiber.new root that cannot be compiled resumable: #{plan}"
-                 else
-                   calls_fiber_yield?(irep) ? 'calls Fiber.yield directly' : 'is reachable from a Fiber.new block'
-                 end
-        code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n" \
-               "#error #{d.owner}##{d.name} #{reason} -- not in this prototype's supported subset\n\n"
-        return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-                 arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
-      end
+      resumable = plan if plan.is_a?(ResumablePlan)
     end
 
     # ENTRY_GUARDED_SPECIALIZATION: nil unless BC2CPP_SPECIALIZE names this method.
     entry_spec = entry_specialization(label, d, irep, arg_names, arg_native_types,
                                       entry_specialization_eligibility(mandatory_ok: mandatory_ok, opt: opt, has_rest: has_rest, has_blk: has_blk,
                                                                        needs_blk_param: needs_blk_param, kw_table: kw_table, resumable: resumable,
-                                                                       fiber_guarded: fiber_guarded, needs_return_catch: needs_return_catch,
+                                                                       needs_return_catch: needs_return_catch,
                                                                        block_fallback_regions: block_fallback_regions))
     out = String.new
     out << "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n"
@@ -690,9 +674,6 @@ class CodeGen
     @resumable = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    # A resumable entry handles a Fiber itself (its frame and driver), so it has no guard and saves no body.
-    guard = resumable ? nil : (core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded))
-    out << guard[:prologue] if guard && guard[:prologue]
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"
     elsif arg_names.empty? && (needs_blk_param || has_blk)
@@ -895,11 +876,10 @@ class CodeGen
     aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     # DECLARED_RETURN_GUARD: a runtime-checked return declaration checks every value the body returns.
-    out = insert_rsm_guard(out, impl_name, guard) if guard&.[](:rsm_impl)
     out = declared_return_guard_wrap(label, out, impl_name)
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
-      code: "#{@rsm_variant ? '' : rsm_variant_without_duplicates(label, out)}#{out}", visibility: d.visibility, guard: guard&.fetch(:index),
+      code: "#{@rsm_variant ? '' : rsm_variant_without_duplicates(label, out)}#{out}", visibility: d.visibility,
       resumable: !resumable.nil? || (!@rsm_variant && !rsm_variant_code(label).empty?) }
   end
 
@@ -1034,74 +1014,6 @@ class CodeGen
       unsupported: true, visibility: d.visibility }
   end
 
-  # CORE_BLOCK_GUARD: the entry of a core method that touches a block first
-  # checks whether a Fiber is running and, if so, lets the VM run the bytecode instead
-  # (bc2cpp_core_interpreted). A compiled frame under a block that calls Fiber.yield
-  # cannot be suspended, and a frame in the root context never is: a yield there is a
-  # FiberError with or without this frame. Direct `_impl` calls never take a block
-  # (pure_mandatory_or_optional_arity?), so the entry is the only way in with one.
-  # An Enumerable method also needs an `each` that the core defines, since a block
-  # captured by pointer must not outlive the frame (BLOCK_FALLBACK_UPVAR_SAFE_METHODS).
-  # Returns { index:, prologue: } or nil for an unguarded method.
-  # FIBER_BODY_GUARD: may this Fiber-reachable method compile behind a
-  # run-time hand-off instead of staying interpreted?
-  #
-  # Only when its OWN body cannot suspend. `core_body_relaxable?` is YieldReach
-  # answering exactly that, and it is the same question CORE_BLOCK_GUARD
-  # already asks of a core body before narrowing its guard condition (below). The
-  # yield that matters happens in the block the CALLER supplied, which is not
-  # running inside this frame -- and it is not proved yield-free, because it cannot
-  # be. That is what the hand-off is for.
-  #
-  # A method that calls Fiber.yield itself is never admitted: there the yield IS in
-  # its own frame, which no hand-off from its own entry can step around.
-  #
-  # Neither is a method that builds an Enumerator: mruby-enumerator runs a
-  # generator on a Fiber (CoreDefs.fiber_gem?), so that block's frame is below a
-  # fiber entry by construction, not by a caller. YieldReach marks only
-  # `Fiber.new` blocks as fiber bodies (scan_fiber_call), so `body_yield_free?`
-  # reads such a builder as yield-free when its block is not. That gap predates
-  # this guard -- nothing compiled it before -- and admitting one would put a
-  # compiled frame under a Fiber for real.
-  #
-  # BC2CPP_FIBER_BODY_GUARD=0 restores the blanket refusal.
-  def fiber_body_guard?(label, d = nil)
-    return false if ENV['BC2CPP_FIBER_BODY_GUARD'] == '0'
-    return false if d && calls_fiber_yield?(@ireps.fetch(label))
-    return false if @yield_reach&.builds_enumerator?(label)
-
-    core_body_relaxable?(label)
-  end
-
-  # The entry half, mirroring core_block_guard: with a Fiber other than the root
-  # live, run this method bytecode instead, so no compiled frame is left between
-  # the fiber entry and a yield in the caller block.
-  # No Fiber guard: the body compiles without a run-time hand-off to saved bytecode, which is not kept. A block call under
-  # a non-root Fiber runs compiled and fails if it reaches a yield across a C frame.
-  def fiber_body_guard_prologue(_label, _enabled)
-    nil
-  end
-
-  # GUARD_FIBER_FREE (on unless BC2CPP_GUARD_FIBER_FREE=0): the Fiber half of CORE_BLOCK_GUARD, for a guarded method no
-  # Fiber.new body can reach. The test `M->c != M->root_c` can only be true while a Fiber other than the root is
-  # current, and a method outside YieldReach#fiber_crossable never runs then (every call made under a Fiber body is
-  # in that transitive set). Such a method needs neither its entry hand-off nor its saved bytecode. Only in a sound world, and never for an
-  # Enumerable method, whose guard also tests `each` (a test that is not about Fibers and stays as it is).
-  # On by default; BC2CPP_GUARD_FIBER_FREE=0 turns it off, and then the build emits what it did before the flag.
-  def guard_fiber_free?(label, d)
-    return false if ENV['BC2CPP_GUARD_FIBER_FREE'] == '0'
-    return false if d.owner == 'Enumerable' || @yield_reach.nil?
-
-    # fiber_crossable runs the analysis, which sets sound?; the query order matters.
-    crossable = @yield_reach.fiber_crossable
-    @yield_reach.sound? && !crossable.include?(label)
-  end
-
-  # No core block guard: see fiber_body_guard_prologue.
-  def core_block_guard(_label, _d)
-    nil
-  end
-
   # RESUMABLE_DUAL: the direct-yield core iterators that get a resumable variant beside their fast body, so a Fiber
   # reaches them without a saved bytecode driver. Each is listed only once scripts/bc2cpp/resumable_variants_check.rb
   # runs it both ways (inside a Fiber and plainly) with the same output. Methods whose block is called from an inner
@@ -1115,23 +1027,10 @@ class CodeGen
   ].freeze
 
   def rsm_dual?(label, d)
-    return false unless EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}")
-
-    # Only where the guard itself is emitted: a method no Fiber can cross keeps no guard, so it needs no variant.
-    !guard_fiber_free?(label, d)
+    EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}")
   end
 
   def rsm_impl_name(d) = "#{cpp_name(d.owner, d.name)}#{RSM_SUFFIX}_impl"
-
-  # RESUMABLE_DUAL: the guard, placed before the wrapper's call to the fast body. The variant takes that call's arguments,
-  # so the guard passes them on; a call from a fiber runs the variant instead of the fast body.
-  def insert_rsm_guard(out, impl_name, guard)
-    call = out.match(/^  return #{Regexp.escape(impl_name)}\((?<args>[^\n]*)\);\n/)
-    return out unless call
-
-    line = "  if (mrb_unlikely(#{guard[:rsm_cond]})) return #{guard[:rsm_impl]}(#{call[:args]});\n"
-    out.sub(call[0]) { "#{line}#{call[0]}" }
-  end
 
   # The variant's code (its step, its entry and the helpers it uses), or '' when the method cannot take the resumable
   # form. The variant's registered wrapper is cut off, as entry specialization cuts its own.

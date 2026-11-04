@@ -429,10 +429,6 @@ class CodeGen
     names = params.split(',').map { |p| p.strip[/(\w+)\z/, 1] }
     guarded = "#{impl_name}_unguarded"
     out = code.sub(head) { "static inline mrb_value #{guarded}(#{params}) {" }
-    out = out.gsub(/return (bc2cpp_core_interpreted\(M, self, \d+\));/) do
-      "{ mrb_value bc2cpp_declared_ret = #{Regexp.last_match(1)};\n" \
-        "#{declared_return_guard_statement(entry, 'bc2cpp_declared_ret')}  return bc2cpp_declared_ret; }"
-    end
     out << "mrb_value #{impl_name}(#{params}) {\n" \
            "  mrb_value bc2cpp_declared_ret = #{guarded}(#{names.join(', ')});\n" \
            "#{declared_return_guard_statement(entry, 'bc2cpp_declared_ret')}" \
