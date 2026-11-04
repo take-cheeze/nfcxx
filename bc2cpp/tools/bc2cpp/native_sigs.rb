@@ -60,8 +60,10 @@ module NativeSigs
   # They are restricted from a parse of the table's kept text (kept_texts_of), not of the whole file, so a run with a
   # warm scan cache parses a few kilobytes. Only locations differ from restricting the whole file; no loader reads them.
   def decls(table)
+    # kept_texts before `name`: on a cold scan cache, mruby left `name` nil when it was assigned before that call.
+    kt = kept_texts
     name = table_name(table)
-    text = kept_texts[name]
+    text = kt[name]
     return [] unless text
 
     select_table(RbsParseMemo.decls("declarations.rbs##{name}", text), name)
