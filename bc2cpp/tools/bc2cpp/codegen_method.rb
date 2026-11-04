@@ -1084,6 +1084,8 @@ class CodeGen
   end
 
   def core_block_guard(label, d)
+    # No Fiber fallback: the compiled body runs inside a Fiber too, and no saved bytecode is kept for the guard.
+    return nil
     return nil unless d.core && self.class.core_guarded&.include?(label)
     return nil if guard_fiber_free?(label, d)
 
