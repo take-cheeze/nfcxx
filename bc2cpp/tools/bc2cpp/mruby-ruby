@@ -1,0 +1,7 @@
+#!/bin/sh
+# RbConfig.ruby under mruby: runs a bc2cpp tool with the mruby binary, through its baked source.
+#   BC2CPP_MRUBY  the mruby binary (default: 3rd/mruby/bin/mruby)
+here=$(cd "$(dirname "$0")" && pwd)
+BC2CPP_ROOT=$(cd "$here/../.." && pwd)
+export BC2CPP_ROOT
+exec "${BC2CPP_MRUBY:-$BC2CPP_ROOT/3rd/mruby/bin/mruby}" "$here/mruby_tool.rb" "$@"

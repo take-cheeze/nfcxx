@@ -185,11 +185,24 @@ module NativeSigs
 
   # A copy of +decl+ holding +members+, every other constructor argument (name, super_class, type_params, annotations,
   # location, comment) taken from +decl+.
+  # The constructor's keywords are listed, not read back by reflection: mruby's Method#parameters gives no names.
+  # These are the required keywords of each declaration's #initialize in the pinned RBS (4.0.0).
   def with_members(decl, members)
-    args = decl.class.instance_method(:initialize).parameters.to_h do |_kind, arg|
-      [arg, arg == :members ? members : decl.public_send(arg)]
+    case decl
+    when RBS::AST::Declarations::Class
+      RBS::AST::Declarations::Class.new(name: decl.name, type_params: decl.type_params, super_class: decl.super_class,
+                                        members: members, annotations: decl.annotations, location: decl.location,
+                                        comment: decl.comment)
+    when RBS::AST::Declarations::Module
+      RBS::AST::Declarations::Module.new(name: decl.name, type_params: decl.type_params, members: members,
+                                         self_types: decl.self_types, annotations: decl.annotations,
+                                         location: decl.location, comment: decl.comment)
+    when RBS::AST::Declarations::Interface
+      RBS::AST::Declarations::Interface.new(name: decl.name, type_params: decl.type_params, members: members,
+                                            annotations: decl.annotations, location: decl.location, comment: decl.comment)
+    else
+      raise ArgumentError, "bc2cpp: cannot restrict a #{decl.class} declaration"
     end
-    decl.class.new(**args)
   end
 
   # The text of +decl+ for table +name+, '' when nothing of it is of that table. A block with no members is written whole

@@ -59,7 +59,9 @@ module NativeExpressionDevirt
   # below quadratic. Every delimiter they look for is ASCII, so scan a copy with
   # each non-ASCII character replaced by one ASCII character: indexes agree and
   # the results are still sliced from the real source.
-  ASCII_VIEWS = {}.compare_by_identity
+  # Keyed by content: a view depends only on its source's text, so an equal source gets the same view. (mruby has no
+  # compare_by_identity; under CRuby this keeps one more copy of each source, the same values.)
+  ASCII_VIEWS = {}
 
   def ascii_view(source)
     return source if source.ascii_only?
