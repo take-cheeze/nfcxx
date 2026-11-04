@@ -361,6 +361,21 @@ def optional_rest_arg_table(irep)
   [opt, jmps.map(&:addr), jmps.map(&:jmp_addr)]
 end
 
+# OPTIONAL_KWREST: the optional jump table of `def f(a, b = 1, **kwd, &blk)` (ENTER n:o:0:0:0:1:b:0, block optional), as
+# [opt, addrs, targets, block?]. The keyword rest is read from the callinfo by the entry (compile_method), not by OP_ENTER.
+def optional_kwrest_arg_table(irep)
+  enter = irep.enter
+  return nil unless enter
+
+  _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
+  return nil unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest == 1 && block <= 1
+
+  jmps = instruction_run(irep, irep.enter_index + 1, opt + 1)
+  return nil unless jmps && jmps.all? { |i| i.op == :JMP }
+
+  [opt, jmps.map(&:addr), jmps.map(&:jmp_addr), block.positive?]
+end
+
 # CORE_BLOCK_OPT: optional_arg_table for `def f(a, b = 1, &blk)` (ENTER n:o:0:0:0:0:1:0):
 # the same jump table with the block field set. Only compile_method asks for it, so no
 # direct call is built for such a method (pure_mandatory_or_optional_arity? refuses it).

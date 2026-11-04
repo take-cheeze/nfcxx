@@ -220,6 +220,13 @@ class CodeGen
       opt, opt_jmp_addrs, opt_jmp_targets = blk_table
       has_blk = true
     end
+    # OPTIONAL_KWREST: `def f(a, b = 1, **kwd, &blk)` (IO.popen). The keyword rest is the last parameter, read from the
+    # callinfo's keyword slot by the wrapper below; the block is the same extra parameter as CORE_BLOCK_OPT.
+    if !mandatory_ok && !opt_jmp_targets && !kw_table && (kwrest_table = optional_kwrest_arg_table(irep))
+      opt, opt_jmp_addrs, opt_jmp_targets, kwrest_block = kwrest_table
+      has_kwrest = true
+      has_blk ||= kwrest_block
+    end
     supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk || kwrest_only
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) + (has_kwrest ? 1 : 0) : mand
@@ -812,18 +819,21 @@ class CodeGen
       # OPTIONAL_ARG_SUPPORT: optional positions start as mrb_nil_value(): `|` leaves
       # an omitted out-param untouched, and reading uninitialized memory would be UB
       # even though the default-value code overwrites it.
-      arg_names.each_with_index do |a, i|
+      # OPTIONAL_KWREST: the keyword rest is the last parameter but not a positional: it is read from the callinfo below.
+      pos_names = has_kwrest ? arg_names[0...-1] : arg_names
+      pos_names.each_with_index do |a, i|
         default = i >= mand ? ' = mrb_nil_value()' : ''
         out << "  #{native_c_type(arg_native_types[i])} #{a}#{default};\n"
       end
+      out << "  mrb_value #{arg_names.last} = mrb_nil_value();\n" if has_kwrest
       # 'i' is mrb_as_int, 'n' is mrb_obj_to_sym: the same coercions compile_send
       # applies at a devirtualized call site; keep them in lockstep. The `|` marker
       # goes at the mandatory/optional boundary.
-      fmt = arg_native_types.each_with_index.map do |t, i|
+      fmt = arg_native_types.first(pos_names.size).each_with_index.map do |t, i|
         ch = t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o')
         i == mand && opt.positive? ? "|#{ch}" : ch
       end.join
-      ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
+      ptrs = pos_names.map { |a| "&#{a}" }.join(', ')
       # BLKPUSH_YIELD_SUPPORT: mrb_get_args `&` is this call's block (src/class.c
       # `case '&':`), nil when none (plain `&`, not `&!`), appended to the same call.
       # Neither needs_blk_param nor has_blk methods have optionals.
@@ -836,6 +846,12 @@ class CodeGen
       # where mrb_get_args says `1..2`.
       out << "  bc2cpp_check_argc(M, #{mand}, #{mand + opt});\n" if opt.positive?
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
+      if has_kwrest
+        kwrest_name = arg_names.last
+        out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
+        out << "  #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
+        out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
+      end
       if opt.positive?
         # OPTIONAL_ARG_SUPPORT: mrb_get_argc(M) - mand is the quantity OP_ENTER uses to
         # pick the jump-table entry. The clamp to [0, opt] is a formality
