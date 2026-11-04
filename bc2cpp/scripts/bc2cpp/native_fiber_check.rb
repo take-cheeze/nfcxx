@@ -104,6 +104,8 @@ source << <<~'RUBY_SOURCE'
     e = NativeFiberSource.new.lazy.map { |x| x * 2 }.select { |x| x > 2 }.to_enum
     [e.next, e.next]
   end
+  show('range sum plain') { (1..3).sum }
+  show('range sum in fiber') { drain(Fiber.new { (1..3).sum }) }
   show('instruction-looking string data') do
     ['static const mrb_code pretend_iseq_0[2] = {0x00,0x00};',
      'MRB_IREP_STATIC,pretend_iseq_0,']
