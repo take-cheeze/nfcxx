@@ -43,16 +43,25 @@ done
 if "$nfcxx" -fsafe-pointers --freestanding tests/safeptr/cases/clean_containers.cpp -o "$tmp/x" 2>/dev/null; then bad driver "--freestanding accepted"; else ok "driver: --freestanding refused"; fi
 if "$nfcxx" -fsafe-pointers -fsanitize=address tests/safeptr/cases/clean_containers.cpp -o "$tmp/x" 2>/dev/null; then bad driver "-fsanitize=address accepted"; else ok "driver: -fsanitize=address refused"; fi
 
+# One program of the sweep: prints its result line ("ok", "FAIL" or "skip"). The cases are independent, so they run in parallel
+# (SAFEPTR_JOBS, default the number of cores); each has its own file names under $tmp.
+sweep_one() {
+  local f=$1 n std
+  n=$(echo "$f" | tr / _); std=$(sed -n 's,^// STD: *\(c++[0-9]*\).*,-std=\1,p' "$f" | head -1)
+  "$nfcxx" --backend=pathb $std "$f" -o "$tmp/$n.base" 2>/dev/null || { echo "skip $f (Path B does not build it)"; return 0; }
+  if ! "$nfcxx" -fsafe-pointers $std "$f" -o "$tmp/$n.safe" 2>"$tmp/$n.err"; then echo "FAIL $f: compile: $(grep -v warning "$tmp/$n.err" | head -2 | tr '\n' ' ')"; return 0; fi
+  (cd "$tmp" && timeout 20 "./$n.base" >"$n.bout" 2>/dev/null); local a=$?
+  (cd "$tmp" && timeout 120 "./$n.safe" >"$n.sout" 2>"$n.serr"); local b=$?
+  if [ $a != $b ] || ! cmp -s "$tmp/$n.bout" "$tmp/$n.sout"; then echo "FAIL $f: exit $a without the flag, $b with it: $(head -c 200 "$tmp/$n.serr")"; else echo "ok   $f"; fi
+  rm -f "$tmp/$n".*
+}
+
 if [ "${SAFEPTR_SWEEP:-0}" = 1 ]; then
-  for f in tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp; do
-    n=$(echo "$f" | tr / _); std=$(sed -n 's,^// STD: *\(c++[0-9]*\).*,-std=\1,p' "$f" | head -1)
-    "$nfcxx" --backend=pathb $std "$f" -o "$tmp/$n.base" 2>/dev/null || { echo "skip $f (Path B does not build it)"; continue; }
-    if ! "$nfcxx" -fsafe-pointers $std "$f" -o "$tmp/$n.safe" 2>"$tmp/err"; then bad "$f" "compile: $(grep -v warning "$tmp/err" | head -2 | tr '\n' ' ')"; continue; fi
-    (cd "$tmp" && timeout 20 "./$n.base" >"$n.bout" 2>/dev/null); a=$?
-    (cd "$tmp" && timeout 120 "./$n.safe" >"$n.sout" 2>"$n.serr"); b=$?
-    if [ $a != $b ] || ! cmp -s "$tmp/$n.bout" "$tmp/$n.sout"; then bad "$f" "exit $a without the flag, $b with it: $(head -c 200 "$tmp/$n.serr")"; else ok "$f"; fi
-    rm -f "$tmp/$n".*
-  done
+  export -f sweep_one; export nfcxx tmp
+  jobs=${SAFEPTR_JOBS:-$(nproc 2>/dev/null || echo 2)}
+  ls tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp | xargs -P "$jobs" -I{} bash -c 'sweep_one "$1"' _ {} > "$tmp/sweep.out"
+  cat "$tmp/sweep.out"
+  pass=$((pass + $(grep -c '^ok ' "$tmp/sweep.out"))); fail=$((fail + $(grep -c '^FAIL ' "$tmp/sweep.out")))
 fi
 
 echo "safeptr: $pass passed, $fail failed"

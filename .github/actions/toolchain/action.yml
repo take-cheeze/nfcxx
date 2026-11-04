@@ -21,7 +21,12 @@ runs:
   steps:
     - name: Install build tools
       shell: bash
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ${{ inputs.packages }}
+      # apt-get update exits non-zero when one source fails (the runner image has a Microsoft source that some runners are
+      # refused, 403). The Ubuntu lists are still fetched and the packages come from them, so the update's status is not
+      # a reason to stop: the install's status is.
+      run: |
+        sudo apt-get update || echo "apt-get update: a source failed (see above); installing from the lists that were fetched"
+        sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ${{ inputs.packages }}
 
     - name: Set up sccache
       uses: mozilla-actions/sccache-action@v0.0.11
