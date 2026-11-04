@@ -360,7 +360,19 @@ top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped
   switch whose arm falls into the next non-empty one. The structurizer that `pathb-stage2.md` section 2 asks for is
   needed for these.
 - A use of an extern global (`(extern)`, declared here and defined elsewhere), of a dynamically initialized one
-  (`(unsupported init ...)`), of a thread-local one, or of a function's address in a static initializer (`addr` to `&"f"`).
+  (`(unsupported init ...)`), of a thread-local one (without `--threads`; with it, see the threads section below), or of a
+  function's address in a static initializer (`addr` to `&"f"`), or of a thread-local's address in a static initializer.
+
+## Threads (`--threads`)
+
+With `--threads` the module is a thread of a shared memory: the memory is imported as `env.memory` (shared, its page count in
+the custom section `nfcxx.threads`, with the thread-local group's start and size), and these are exported: `__stack_pointer`
+(global 0) and `__tls_base` (global 1), which each thread's instance sets to its own stack and its own thread-local block,
+and `__nfcxx_init`, which applies the module's data once (the segments are passive). The atomic builtins (`__atomic_*` and
+`__sync_*`, 4 and 8 bytes) are wasm atomics, and a fence is `atomic.fence`. A thread-local object is in one contiguous group
+at the end of the static data; its address is `__tls_base` plus its offset in the group, and the main thread's block is the
+group itself. The host copies the group's initial image into each thread's block. Not yet: creating threads from inside the
+module (`pthread_create`), and a thread-local's address in a static initializer. `tests/wasm-threads` runs four workers.
   A declaration that nothing uses is not refused: it has no storage, and the QBE path drops it the same way.
 - Aggregate parameters, results and arguments (`byval`, `sret`), and aggregate values in registers.
 - Variadic calls.

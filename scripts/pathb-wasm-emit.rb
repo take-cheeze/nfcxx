@@ -378,6 +378,7 @@ class Module_
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
   attr_accessor :threads   # --threads: a shared memory, imported as env.memory, with the stack pointer exported (see emit_module)
   attr_accessor :init_type, :init_index   # --threads: __nfcxx_init, which applies the passive data once (see emit_module)
+  attr_accessor :tls_start, :tls_size     # --threads: the thread-local group, [tls_start, tls_start + tls_size) (see build_statics)
   attr_accessor :memory64   # the 64-bit memory (--memory64): memory addresses are i64 (see push_addr)
   attr_accessor :stack_fns   # --emscripten: the stack functions [name, type index, body] (see emscripten_stack_fns)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
@@ -452,6 +453,7 @@ end
 class StaticObj
   # refusal: the reason a use of the object is refused (no storage here: an extern or dynamic global), or nil
   attr_accessor :name, :size, :align, :init, :data, :bytes, :addr, :refusal
+  attr_accessor :tls   # a thread-local object (its refusal is cleared under --threads: see build_statics)
 
   def initialize(name, size, align, init, data)
     @name = name
@@ -462,6 +464,7 @@ class StaticObj
     @bytes = nil
     @addr = nil
     @refusal = nil
+    @tls = false
   end
 end
 
@@ -527,6 +530,7 @@ def parse_global(f)
   raise BadIR, "global #{name}: unknown INIT #{form_text(init)}" if h != "init" && h != "extern" && h != "unsupported"
   o = StaticObj.new(name, size, align, h == "init" ? init : nil, false)
   # no storage here: a use of the object is refused, and a declaration that nothing uses is not
+  o.tls = thread
   if thread
     o.refusal = "thread-local global #{name} (not lowered)"
   elsif h == "extern"
@@ -561,9 +565,18 @@ end
 # redzone is never shared with an object), so that the shadow of the data is whole granules.
 def layout_statics(objs, asan = false)
   pos = STATIC_BASE
+  # --threads: the thread-local objects are one group at the end, so that each thread's copy is a block of the same layout
+  # (build_statics finds the group's range in the layout)
+  objs = objs.reject(&:tls) + objs.select(&:tls)
+  seen_tls = false
   objs.each do |o|
     next unless o.refusal.nil?             # no storage for those
     al = asan && o.align < 8 ? 8 : o.align
+    if o.tls && !seen_tls
+      # the group starts on a 16-byte boundary: a block of the same layout keeps every object's alignment
+      pos = (pos + 15) / 16 * 16
+      seen_tls = true
+    end
     pos += ASAN_RZ if asan
     pos = (pos + al - 1) / al * al
     o.addr = pos
@@ -637,6 +650,9 @@ def static_contents(mod, o)
       add = as_int(it[4].to_s)
       raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
       raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
+      if target.sig != "&" && mod.static_obj(target.name).tls
+        raise Refused, "address of the thread-local #{target.name} in static data (not lowered)"
+      end
       value = target.sig == "&" ? mod.table_slot(target.name) : mod.static_addr(target.name)
       items << [off, $ptr_bytes, false, le_bytes(value + add, $ptr_bytes)]
     elsif h == "bytes"
@@ -706,6 +722,8 @@ end
 # The static objects of the module, with their addresses and contents, in the order of the forms.
 def build_statics(mod, objs, asan = false)
   mod.add_statics(objs)
+  # --threads: a thread-local object has storage (its block is each thread's copy); without it, a use is refused
+  objs.each { |o| o.refusal = nil if mod.threads && o.tls && o.refusal.to_s.start_with?("thread-local") }
   end_addr = layout_statics(objs, asan)
   # An object whose contents this emitter cannot lower (a type it does not have, such as the std::float16_t constants
   # of <numbers> that every C++ program declares) is refused where it is used, not here: most are never used. An object
@@ -723,6 +741,12 @@ def build_statics(mod, objs, asan = false)
       end
     end
     break unless refused
+  end
+  # the thread-local group: [tls_start, tls_start + tls_size), 16-aligned; the main thread's block is the group itself
+  tls = objs.select { |o| o.tls && o.refusal.nil? }
+  unless tls.empty?
+    mod.tls_start = tls.map(&:addr).min / 16 * 16
+    mod.tls_size = (tls.map { |o| o.addr + o.size }.max - mod.tls_start + 15) / 16 * 16
   end
   end_addr
 end
@@ -943,7 +967,7 @@ class Fn
     if op.is_a?(String) && op[0] == "%"
       e(0x20); leb_u(reg_info(op)[0])
     elsif op.is_a?(IRSym) && op.sig == "@"
-      ptr_const(@mod.static_addr(op.name))   # the address of the static object
+      push_static_addr(op.name)            # the address of the static object
     elsif op.is_a?(IRSym) && op.sig == "&"
       ptr_const(@mod.table_slot(op.name))    # a function's address: its slot in the table
     elsif op.is_a?(IRSym)
@@ -957,6 +981,19 @@ class Fn
       push_const(parse_type(op[1]), op[2])
     end
     t
+  end
+
+  # The address of a static object as a pointer. A thread-local object's address is its block's base (global 1, __tls_base,
+  # set per thread) plus its offset in the group: under --threads the main thread's base is the group itself.
+  def push_static_addr(name)
+    o = @mod.static_obj(name)
+    unless o.tls
+      ptr_const(o.addr)
+      return
+    end
+    e(0x23); leb_u(1)                      # global.get 1: __tls_base
+    e(0x41); leb_s(o.addr - @mod.tls_start); e(0x6a)   # i32.const offset; i32.add
+    e(0xad) if $ptr_bytes == 8             # i64.extend_i32_u (a pointer is an i64 under LP64)
   end
 
   # The wasm type of an operand, without pushing it.
@@ -2480,11 +2517,18 @@ def encode_module(mod, bodies)
   # static data) and global 2 is __heap_base (the top of the memory: the stack grows down from it, and a heap would
   # begin there and grow the memory with memory.grow), both immutable i32.
   gl = []
-  uleb(mod.emscripten ? 3 : (mod.asan ? 2 : 1), gl)
+  uleb(mod.emscripten ? 3 : (mod.asan ? 2 : (mod.threads ? 2 : 1)), gl)
   gl << VT[:i32] << 0x01
   gl << 0x41
   sleb(mod.stack_top, gl)
   gl << 0x0b
+  if mod.threads
+    # --threads: global 1, __tls_base, a mutable i32: the base of this thread's thread-local block (the main thread's is
+    # the group itself); each thread's instance sets it (see tests/wasm-threads)
+    gl << VT[:i32] << 0x01 << 0x41
+    sleb(mod.tls_start || 0, gl)
+    gl << 0x0b
+  end
   if mod.asan
     # asan: the allocator's state, a mutable i32 (see asan_malloc_body): the bump pointer starts at the heap's base
     [mod.heap_base].each do |init|
@@ -2507,13 +2551,17 @@ def encode_module(mod, bodies)
   ex = []
   nexp = (mod.import_memory ? 0 : 1) + bodies.length
   nexp += 5 + mod.stack_fns.length if mod.emscripten
-  nexp += 2 if mod.threads
+  nexp += 3 if mod.threads
   uleb(nexp, ex)
   if mod.threads
-    # --threads: each thread's instance sets its own stack pointer (global 0) before it runs (see tests/wasm-threads)
+    # --threads: each thread's instance sets its own stack pointer (global 0) and its thread-local base (global 1) before it
+    # runs (see tests/wasm-threads)
     name_bytes("__stack_pointer", ex)
     ex << 0x03
     uleb(0, ex)
+    name_bytes("__tls_base", ex)
+    ex << 0x03
+    uleb(1, ex)
     # and the host calls __nfcxx_init once, on the first instance, before any thread runs (the passive data is applied there)
     name_bytes("__nfcxx_init", ex)
     ex << 0x00
@@ -2624,10 +2672,11 @@ def encode_module(mod, bodies)
     section(11, dsec, out)
   end
   if mod.threads
-    # custom section "nfcxx.threads": the memory's page count (u32, little-endian), which the host needs to create the
-    # shared memory the module imports (a JS memory's limits are not readable from the module)
+    # custom section "nfcxx.threads": the memory's page count, then the thread-local group's start and size (u32,
+    # little-endian). The host needs them to create the shared memory the module imports (a JS memory's limits are not
+    # readable from the module) and each thread's block of the group.
     payload = name_bytes("nfcxx.threads", [])
-    [mod.pages].pack("V").each_byte { |b| payload << b }
+    [mod.pages, mod.tls_start || 0, mod.tls_size || 0].pack("V3").each_byte { |b| payload << b }
     section(0, payload, out)
   end
   out.concat(name_section(mod, bodies)) if $names

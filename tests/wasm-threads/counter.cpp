@@ -26,3 +26,13 @@ extern "C" void bump_shared(int n) {
 }
 
 extern "C" long long shared_addr() { return (long long)&shared_init; }
+
+// a thread-local: each thread has its own copy, starting at 5 (the module's initial image); the adds need no atomics
+thread_local int tl = 5;
+
+extern "C" int tl_bump(int n) {
+  for (int i = 0; i < n; i++) tl++;
+  return tl;
+}
+
+extern "C" int tl_get() { return tl; }
