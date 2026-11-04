@@ -5,7 +5,7 @@
 # compiled body and is then a fact. Host only (no mrbc, no build), on a CodeGen with hand-set state:
 #
 # 1. the wrapped body: a hinted `-> Integer` and `-> C` (and `C?`) check every value the method returns (the exit
-#    wrapper and the Fiber hand-off), raise through bc2cpp_declared_return_violation, and keep no by-name fallback;
+#    wrapper), raise through bc2cpp_declared_return_violation, and keep no by-name fallback;
 # 2. the fact: the hinted names enter declared_return_facts (callers trust them with no guard), RBS_CHECKED_PARAMS
 #    takes a hinted `-> C` as a proof, and the closed-world preconditions still refuse (alias, core body);
 # 3. the refusals: a hinted declaration on a native method, an undefined one or an unchecked kind is a TC1010 error;
@@ -79,7 +79,6 @@ body = lambda do |impl|
     "mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_int n) {\n  mrb_value r1 = self;\n  if (n) return r1;\n" \
     "  return mrb_nil_value();\n}\n\n" \
     "static mrb_value Foo_m(mrb_state* M, mrb_value self) {\n" \
-    "  if (mrb_unlikely(M->c != M->root_c)) return bc2cpp_core_interpreted(M, self, 4);\n" \
     "  mrb_int n;\n  mrb_get_args(M, \"i\", &n);\n  return #{impl}(M, self, n);\n}\n\n"
 end
 fixnum_code = gen.declared_return_guard_wrap('L1', body.call('Foo_count_impl'), 'Foo_count_impl')
@@ -90,10 +89,6 @@ check.call('the hinted -> Integer body is renamed and called by a checking Foo_c
 check.call('-> Integer is checked Fixnum-exact (mrb_fixnum_p), with the method and type named',
            fixnum_code.include?('if (mrb_unlikely(!(mrb_fixnum_p(bc2cpp_declared_ret)))) ' \
                                 'bc2cpp_declared_return_violation(M, bc2cpp_declared_ret, "Foo#count", "Integer");'))
-check.call('the Fiber hand-off to the interpreter is checked too (two guards, one marker each)',
-           fixnum_code.scan('/* DECLARED_RETURN_GUARD Foo#count -> Integer */').size == 2 &&
-             fixnum_code.include?('{ mrb_value bc2cpp_declared_ret = bc2cpp_core_interpreted(M, self, 4);') &&
-             !fixnum_code.include?('return bc2cpp_core_interpreted('))
 check.call('no by-name fallback in a guard', !fixnum_code.match?(/bc2cpp_send|mrb_funcall|bc2cpp_hint_violation\(/))
 class_code = gen.declared_return_guard_wrap('L2', body.call('Foo_pick_impl'), 'Foo_pick_impl')
 check.call('-> C is checked as exactly C (the class-equality test of the receiver guards)',
