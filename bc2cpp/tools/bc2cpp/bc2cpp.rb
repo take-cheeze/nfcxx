@@ -679,7 +679,11 @@ if $PROGRAM_NAME == __FILE__
   end
   # CONST_RESOLVE: the constant names the class-body compile resolves against. The bytecode IR's constant table alone (every
   # SETCONST binding, as BytecodeIR::ConstantFacts groups them). The desktop bytecode build evaluates the rest exactly.
-  CodeGen.known_const_names = constant_facts.groups.keys.map(&:to_s).to_set
+  # Class and module definitions bind their name too; the constant table records SETCONST bindings only.
+  defined_names = ireps.each_value.flat_map do |irep|
+    BytecodeIR.for(irep).each_source.filter_map { |insn, _| insn.sym.to_s if %i[CLASS MODULE].include?(insn.op) }
+  end
+  CodeGen.known_const_names = (constant_facts.groups.keys.map(&:to_s) | defined_names).to_set
   CodeGen.const_unresolved = []
   integer_constants =
     if closed_world.constants_static?
