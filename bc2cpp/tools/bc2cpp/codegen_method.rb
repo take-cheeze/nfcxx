@@ -1076,12 +1076,10 @@ class CodeGen
   # The entry half, mirroring core_block_guard: with a Fiber other than the root
   # live, run this method bytecode instead, so no compiled frame is left between
   # the fiber entry and a yield in the caller block.
-  def fiber_body_guard_prologue(label, enabled)
-    return nil unless enabled
-
-    index = (@core_guard_index[label] ||= @core_guard_index.size)
-    { index: index,
-      prologue: "  if (mrb_unlikely(M->c != M->root_c)) return bc2cpp_core_interpreted(M, self, #{index});\n" }
+  # No Fiber guard: the body compiles without a run-time hand-off to saved bytecode, which is not kept. A block call under
+  # a non-root Fiber runs compiled and fails if it reaches a yield across a C frame.
+  def fiber_body_guard_prologue(_label, _enabled)
+    nil
   end
 
   # GUARD_FIBER_FREE (on unless BC2CPP_GUARD_FIBER_FREE=0): the Fiber half of CORE_BLOCK_GUARD, for a guarded method no
@@ -1099,35 +1097,9 @@ class CodeGen
     @yield_reach.sound? && !crossable.include?(label)
   end
 
-  def core_block_guard(label, d)
-    # No Fiber fallback: the compiled body runs inside a Fiber too, and no saved bytecode is kept for the guard.
-    return nil
-    return nil unless d.core && self.class.core_guarded&.include?(label)
-    return nil if guard_fiber_free?(label, d)
-
-    rsm = rsm_variant_code(label)
-    unless rsm.empty?
-      # RESUMABLE_DUAL: the same condition, calling the resumable variant with the entry's block. No saved body: index nil.
-      condition = if core_body_relaxable?(label)
-                    '(M->c != M->root_c && !bc2cpp_block_yield_free(bc2cpp_entry_block(M)))'
-                  else
-                    'M->c != M->root_c'
-                  end
-      # The guard goes before the wrapper's call to the fast body, where its arguments are extracted (rsm_guard_line).
-      return { index: nil, prologue: nil, rsm_impl: rsm_impl_name(d), rsm_cond: condition }
-    end
-
-    index = (@core_guard_index[label] ||= @core_guard_index.size)
-    # YIELD_REACH: a body that cannot suspend a Fiber on its own stays compiled under one
-    # while the block it runs is provably yield-free too (checked per call, by its env flag).
-    condition = if core_body_relaxable?(label)
-                  '(M->c != M->root_c && !bc2cpp_block_yield_free(bc2cpp_entry_block(M)))'
-                else
-                  'M->c != M->root_c'
-                end
-    condition += ' || !bc2cpp_core_each_is_builtin(M, self)' if d.owner == 'Enumerable'
-    { index: index,
-      prologue: "  if (mrb_unlikely(#{condition})) return bc2cpp_core_interpreted(M, self, #{index});\n" }
+  # No core block guard: see fiber_body_guard_prologue.
+  def core_block_guard(_label, _d)
+    nil
   end
 
   # RESUMABLE_DUAL: the direct-yield core iterators that get a resumable variant beside their fast body, so a Fiber
