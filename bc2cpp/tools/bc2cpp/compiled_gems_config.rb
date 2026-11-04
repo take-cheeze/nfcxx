@@ -20,16 +20,20 @@ module Bc2cppCompiledGemsConfig
   SYMBOL = /\A[a-z_][a-z0-9_]*\z/
   NAMESPACE = /\A[A-Z]\w*(?:::[A-Z]\w*)*\z/
 
+  # The parse errors YAML.safe_load raises: Psych's (a subclass of Psych::Exception) under CRuby, the mruby subset's otherwise.
+  YAML_ERRORS = defined?(Psych::Exception) ? Psych::Exception : YAML::SyntaxError
+
   module_function
 
   # Returns [Entry] in file order. `gems_root`: when given, a base gem named by owners_from must exist under it.
   def load(path = PATH, gems_root: nil)
     raise Error, "#{path}: no such file" unless File.file?(path)
 
-    fail_dup_keys!(path, Psych.parse_file(path))
+    # Psych's node tree checks duplicate keys here; the mruby YAML subset checks them while it parses.
+    fail_dup_keys!(path, Psych.parse_file(path)) if defined?(Psych)
     data = YAML.safe_load_file(path)
     validate(data, path, gems_root)
-  rescue Psych::Exception => e
+  rescue YAML_ERRORS => e
     raise Error, "#{path}: #{e.message}"
   end
 
