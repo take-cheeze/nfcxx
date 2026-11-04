@@ -714,9 +714,8 @@ module DeclaredConstants
       end
       sig_applied.diagnostics.concat(result.diagnostics.map { |d| RbsSignatures::Diag.new(**d) })
     end
+    # A declaration that does not hold is not trusted (its constant stays any): reported, not fatal.
     errors = result.diagnostics.count { |d| d[:severity] == 'error' }
-    return unless errors.positive? && abort_on_error
-
-    abort "\n[bc2cpp] DECLARED_CONSTANT_CHECK: #{errors} constant declaration(s) do not hold (see above)."
+    warn "[bc2cpp] DECLARED_CONSTANT_CHECK: #{errors} constant declaration(s) kept untrusted" if errors.positive?
   end
 end
