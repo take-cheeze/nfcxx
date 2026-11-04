@@ -722,14 +722,26 @@ def static_contents(mod, o)
 end
 
 # The static objects of the module, with their addresses and contents, in the order of the forms.
+# The EH runtime's thread-local symbols (see build_statics).
+EH_RUNTIME_TLS = %w[__curr_eh_stack_entry __eh_curr_region].freeze
+
 def build_statics(mod, objs, asan = false)
   mod.add_statics(objs)
-  # A thread-local object has storage: under --threads it is the group of per-thread blocks (its copies); without it the
+# A thread-local object has storage: under --threads it is the group of per-thread blocks (its copies); without it the
   # module is one thread, so the object is an ordinary static (one copy, as the single thread's).
   objs.each do |o|
     next unless o.tls && o.refusal.to_s.start_with?("thread-local")
     o.refusal = nil
     o.tls = mod.threads
+  end
+  # The EH runtime's thread-locals (defined by the runtime, which this module does not link): without --threads they get
+  # zeroed storage, so the references to them lower. The module still refuses throw and catch, so the EH stack is never
+  # used by it; a module with a throw is refused where it throws.
+  objs.each do |o|
+    next unless !mod.threads && EH_RUNTIME_TLS.include?(o.name) && o.refusal.to_s.start_with?("extern global")
+    o.refusal = nil
+    o.init = ["init"]                      # no initializer items: all zero
+    o.tls = false
   end
   end_addr = layout_statics(objs, asan)
   # An object whose contents this emitter cannot lower (a type it does not have, such as the std::float16_t constants
