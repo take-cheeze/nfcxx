@@ -2365,8 +2365,10 @@ if $PROGRAM_NAME == __FILE__
   # A constant helper is emitted only when the printed text calls it: a body compiled and then discarded
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first. The load
   # code holds no constants, so `used` stays what the compiled entries name.
+  # TOP_LEVEL_STATEMENTS is compiled before the helper sets are chosen, so the helpers its statements use are emitted.
+  top_level_code = gen.compile_top_level_statements(ireps.fetch(root_label))
   used = [index_helpers_code, eqq_helper_code, numeric_slow_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
-          *class_units.map { |unit| unit[:code] }].join
+          *class_units.map { |unit| unit[:code] }, top_level_code].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print OwnerCallDirect.native_prototypes
@@ -2384,7 +2386,6 @@ if $PROGRAM_NAME == __FILE__
     print m[:code]
   end
   print ShardOutput::HOOKS_MARK if shards > 1
-  top_level_code = gen.compile_top_level_statements(ireps.fetch(root_label))
   print top_level_code
   print gen.emit_gem_hooks(class_units: class_units, top_level: !top_level_code.empty?)
   # CORE_CLASS_UNITS: the core's units are what mrb_init_mrblib runs when MRB_CORE_CLASS_UNITS is defined.

@@ -347,15 +347,13 @@ class CodeGen
       lines = +''
       @class_body_unit = true
       owner_def = Struct.new(:owner, :core, :name, :irep).new('Object', false, nil, root_irep)
-      (start...idx).each do |index|
+      (start..idx).each do |index|
         source = program.source_at(index)
         next unless source
 
         lines << compile_insn(source, root_irep, owner_def, index)
       end
-      target = insn.op == :SETCONST ? "mrb_const_set(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{insn.sym}\"), r#{insn.reg});" \
-                                    : "mrb_gv_set(M, mrb_intern_cstr(M, \"#{insn.sym}\"), r#{insn.reg});"
-      body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  #{target}\n  }\n"
+      body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  }\n"
       start = idx + 1
     end
     return '' if body.empty?
