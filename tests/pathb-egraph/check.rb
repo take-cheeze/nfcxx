@@ -42,6 +42,10 @@ def constant_branches(efn)
   end
 end
 
+# A run of the interpreter that takes longer than this is skipped (a golden loop can run for a long time on random input,
+# and each such run used to cost the full limit).
+INTERP_TIMEOUT = 0.25
+
 # Runs a golden function in the interpreter (when it models it: integer code without calls or pointers) on 5 random
 # inputs, original against optimized. A function the interpreter cannot run, or that runs too long, is skipped.
 def diff_random(orig, opt, totals, failures, text)
@@ -49,7 +53,7 @@ def diff_random(orig, opt, totals, failures, text)
   rng = Random.new(7)
   probe = Array.new(arity, 0)
   begin
-    Timeout.timeout(2) { PathbEgraph.run(orig, probe) }
+    Timeout.timeout(INTERP_TIMEOUT) { PathbEgraph.run(orig, probe) }
   rescue Unsupported, Timeout::Error
     totals[:interp_unsupported] += 1
     return
@@ -65,7 +69,7 @@ def diff_random(orig, opt, totals, failures, text)
 end
 
 def interpret_timed(efn, args)
-  Timeout.timeout(2) { PathbEgraph.run(efn, args).to_s }
+  Timeout.timeout(INTERP_TIMEOUT) { PathbEgraph.run(efn, args).to_s }
 rescue Unsupported, Timeout::Error => e
   e.class.name
 end
