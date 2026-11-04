@@ -523,6 +523,13 @@ end
             @lines << "  #{val} =#{cls} #{ld} #{v}"
           elsif o[:kind] == "in"
             cls = Qbe.cls(operand_type(o[:arg]))
+            if cls == "s" || cls == "d"
+              bits = fresh
+              @lines << "  #{bits} =#{cls == "s" ? "w" : "l"} cast #{v}"
+              v = bits
+              val = bits
+              cls = cls == "s" ? "w" : "l"
+            end
             raise QbeUnsupported, "asm-block input of class #{cls}" unless %w[w l].include?(cls)
           end
           if cls == "w"
@@ -1536,6 +1543,7 @@ end
   ASM_FIXED = { "a" => "rax", "b" => "rbx", "c" => "rcx", "d" => "rdx", "S" => "rsi", "D" => "rdi" }.freeze
   ASM_POOL = %w[rax rcx rdx rsi rdi r8 r9 r10 r12 r13 r14 r15 rbx].freeze
   ASM_SAVED = %w[rbx r12 r13 r14 r15].freeze
+  ASM_XMM = %w[xmm0 xmm1 xmm2 xmm3 xmm4 xmm5 xmm6 xmm7].freeze # caller-saved on SysV: the helper saves none
 
   # The helper for one general template: it reads each operand from the operand block (rdi, eight bytes an operand),
   # runs the template with the operands' registers, and writes the outputs back. ops are {kind:, code:, size:, arg:} in
@@ -1550,6 +1558,14 @@ end
 
       regs[i] = r
       used[r] = true
+    end
+    xfree = ASM_XMM.dup
+    ops.each_with_index do |o, i|
+      next unless o[:code] == "x"
+
+      raise QbeUnsupported, "asm: more SSE operands than registers" if xfree.empty?
+
+      regs[i] = xfree.shift
     end
     free = ASM_POOL.reject { |r| used[r] }
     ops.each_with_index do |o, i|
@@ -1588,6 +1604,8 @@ end
       o = ops[idx]
       body << if o[:code] == "m"
                 "(%#{regs[idx]})"
+              elsif o[:code] == "x"
+                "%#{regs[idx]}"
               else
                 size = { "b" => 1, "w" => 2, "k" => 4, "q" => 8 }.fetch(m[1]) { o[:size] }
                 slot = { 8 => 0, 4 => 1, 2 => 2, 1 => 3 }.fetch(size) { raise QbeUnsupported, "asm: operand size #{size}" }
@@ -1601,12 +1619,16 @@ end
     ASM_SAVED.each { |r| lines << "\tpushq %#{r}" }
     lines << "\tsubq $16, %rsp" << "\tmovq %rdi, -48(%rbp)" << "\tmovq -48(%rbp), %r11"
     ops.each_with_index do |o, i|
-      lines << "\tmovq #{8 * i}(%r11), %#{regs[i]}" if %w[in inout mem].include?(o[:kind])
+      if %w[in inout mem].include?(o[:kind])
+        lines << (o[:code] == "x" ? "\t#{o[:size] == 4 ? "movss" : "movsd"} #{8 * i}(%r11), %#{regs[i]}" : "\tmovq #{8 * i}(%r11), %#{regs[i]}")
+      end
     end
     lines << body.chomp
     lines << "\tmovq -48(%rbp), %r11"
     ops.each_with_index do |o, i|
-      lines << "\tmovq %#{regs[i]}, #{8 * i}(%r11)" if %w[out inout].include?(o[:kind])
+      next unless %w[out inout].include?(o[:kind])
+
+      lines << (o[:code] == "x" ? "\t#{o[:size] == 4 ? "movss" : "movsd"} %#{regs[i]}, #{8 * i}(%r11)" : "\tmovq %#{regs[i]}, #{8 * i}(%r11)")
     end
     lines << "\tleaq -#{8 * ASM_SAVED.size}(%rbp), %rsp"
     lines.concat(ASM_SAVED.reverse.map { |r| "\tpopq %#{r}" })

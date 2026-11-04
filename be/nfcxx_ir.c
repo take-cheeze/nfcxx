@@ -5912,6 +5912,7 @@ static int ir_asm_general_code(an_asm_operand_ptr op, char *code)
       case aoc_end_of_constraint: break;
       case aoc_reg_a: reg = 'a'; break;
       case aoc_reg_b: reg = 'b'; break;
+      case aoc_reg_sse: reg = 'x'; break;
       case aoc_reg_c: reg = 'c'; break;
       case aoc_reg_d: reg = 'd'; break;
       case aoc_reg_si: reg = 'S'; break;
@@ -5967,7 +5968,9 @@ static int ir_asm_general(an_asm_entry_ptr ae, int d)
     if (nops >= IR_ASM_OPS_MAX || ot == NULL || op->expression == NULL) { ok = 0; break; }
     if (!ir_asm_general_code(op, &code)) { ok = 0; break; }
     is_mem = code == 'm';
-    if (!is_mem && (!ir_asm_scalar(ot) || ir_is_bool(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
+    if (!is_mem && ir_is_float(ot) != (code == 'x')) { ok = 0; break; }
+    if (!is_mem && ir_is_float(ot) && ir_size_of(ot) != 4 && ir_size_of(ot) != 8) { ok = 0; break; }
+    if (!is_mem && !ir_is_float(ot) && (!ir_asm_scalar(ot) || ir_is_bool(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
                                                               ir_size_of(ot) != 4 && ir_size_of(ot) != 8))) { ok = 0; break; }
     if (((op->modifiers & aom_output) != 0 || is_mem) && !op->expression->is_lvalue) { ok = 0; break; }
   }
