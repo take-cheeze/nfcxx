@@ -693,6 +693,14 @@ module PathbEgraph
           end,
           t
         )
+      when "wneg"
+        return nil unless vals.size == 1 && int_ty?(t) && nd.args[0] == t
+
+        canon(-vals[0], t)
+      when "not"
+        return nil unless vals.size == 1 && int_ty?(t) && nd.args[0] == t
+
+        canon(t == "bool" ? (vals[0].zero? ? 1 : 0) : ~vals[0], t)
       when "iconv"
         return nil unless vals.size == 1 && int_ty?(t) && nd.args[0] == t && int_ty?(cty(kids[0]))
 
