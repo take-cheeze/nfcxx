@@ -9,6 +9,8 @@
 #   scripts/pathb-ssa-qbe.rb FILE.ssa > FILE.qbe      then:  build/qbe/qbe FILE.qbe > FILE.s
 #
 require_relative "pathb-ssa"
+require "base64"
+require "digest"
 
 QbeUnsupported = Class.new(StandardError)
 
@@ -496,6 +498,69 @@ end
       @loc = [file.delete_prefix('"').delete_suffix('"').gsub(/\\(.)/, '\1'), Qbe.int_lit(item[2])]
     end
 
+    # (asm-block "HEX" (opnd KIND "CODE" SIZE ARG)...): a general x86 template (be/nfcxx_ir.c). The operand block holds eight
+    # bytes per operand: an input's value (zero-extended to 64 bits), a memory operand's address. The helper
+    # (Qbe.asm_block) reads them, runs the template and writes the outputs back; they are stored to their addresses here.
+    def asm_block_lines(item)
+      ops = item[2..].map do |o|
+        raise QbeUnsupported, "asm-block: an operand that is not opnd" unless head(o) == "opnd"
+
+        { kind: o[1].to_s, code: o[2].raw.delete('"'), size: Qbe.int_lit(o[3]), arg: o[4] }
+      end
+      name, text = Qbe.asm_block(item[1].raw.delete('"'), ops)
+      (@link[:asm_texts] ||= {})[name] ||= text
+      blk = fresh
+      @lines << "  #{blk} =l alloc8 #{8 * [ops.size, 1].max}"
+      addrs = {}
+      ops.each_with_index do |o, i|
+        slot = fresh
+        @lines << "  #{slot} =l add #{blk}, #{8 * i}"
+        if %w[in inout mem].include?(o[:kind])
+          v = op(o[:arg])
+          val = v
+          cls = nil
+          if o[:kind] == "inout"
+            # The operand is read first: its current value, at its address (the statement passes the address).
+            ld = { 1 => "loadub", 2 => "loaduh", 4 => "loaduw", 8 => "loadl" }.fetch(o[:size]) do
+              raise QbeUnsupported, "asm-block operand of #{o[:size]} bytes"
+            end
+            cls = o[:size] == 8 ? "l" : "w"
+            val = fresh
+            @lines << "  #{val} =#{cls} #{ld} #{v}"
+          elsif o[:kind] == "in"
+            cls = Qbe.cls(operand_type(o[:arg]))
+            if cls == "s" || cls == "d"
+              bits = fresh
+              @lines << "  #{bits} =#{cls == "s" ? "w" : "l"} cast #{v}"
+              v = bits
+              val = bits
+              cls = cls == "s" ? "w" : "l"
+            end
+            raise QbeUnsupported, "asm-block input of class #{cls}" unless %w[w l].include?(cls)
+          end
+          if cls == "w"
+            ext = fresh
+            @lines << "  #{ext} =l extuw #{val}"
+            val = ext
+          end
+          @lines << "  storel #{val}, #{slot}"
+        end
+        addrs[i] = op(o[:arg]) if %w[out inout].include?(o[:kind])
+      end
+      @lines << "  call $#{name}(l #{blk})"
+      ops.each_with_index do |o, i|
+        next unless %w[out inout].include?(o[:kind])
+
+        slot = fresh
+        @lines << "  #{slot} =l add #{blk}, #{8 * i}"
+        load, store = { 1 => %w[loadub storeb], 2 => %w[loaduh storeh], 4 => %w[loaduw storew], 8 => %w[loadl storel] }
+                      .fetch(o[:size]) { raise QbeUnsupported, "asm-block output of #{o[:size]} bytes" }
+        t = fresh
+        @lines << "  #{t} =#{o[:size] == 8 ? "l" : "w"} #{load} #{slot}"
+        @lines << "  #{store} #{t}, #{addrs[i]}"
+      end
+    end
+
     def reg(name) = "%v#{name[1..]}"
 
     # How often each SSA register (`%N`) appears in the function: a `let` names its register once, so 1 means unused.
@@ -766,6 +831,8 @@ end
       # A compiler barrier is a call of an empty helper; a fence a call of a helper that executes mfence. QBE has no
       # fence instruction, so the driver (scripts/pathb-ssa-build) appends the helpers named by the marker comments.
       when "barrier" then barrier_lines
+      # (asm-block ...): a general x86 template (see asm_block_lines).
+      when "asm-block" then asm_block_lines(item)
       when "fence" then fence_lines
       # A branch-likelihood hint (likely/unlikely) changes only the layout the optimiser would choose, never the
       # meaning of the code; QBE has no such hint, so the hint emits nothing.
@@ -1470,11 +1537,121 @@ end
     end
   end
 
+  # ---- general x86 inline assembly (be/nfcxx_ir.c's asm-block) ----------------------------------------------------------
+  # The registers: each 64-bit name with its 32-, 16- and 8-bit names. r11 is the base of the operand block and rbp the
+  # frame of the helper, so neither is an operand's register; the helper saves every callee-saved register it uses.
+  ASM_REGS = {
+    "rax" => %w[rax eax ax al], "rbx" => %w[rbx ebx bx bl], "rcx" => %w[rcx ecx cx cl], "rdx" => %w[rdx edx dx dl],
+    "rsi" => %w[rsi esi si sil], "rdi" => %w[rdi edi di dil], "r8" => %w[r8 r8d r8w r8b], "r9" => %w[r9 r9d r9w r9b],
+    "r10" => %w[r10 r10d r10w r10b], "r12" => %w[r12 r12d r12w r12b], "r13" => %w[r13 r13d r13w r13b],
+    "r14" => %w[r14 r14d r14w r14b], "r15" => %w[r15 r15d r15w r15b]
+  }.freeze
+  ASM_FIXED = { "a" => "rax", "b" => "rbx", "c" => "rcx", "d" => "rdx", "S" => "rsi", "D" => "rdi" }.freeze
+  ASM_POOL = %w[rax rcx rdx rsi rdi r8 r9 r10 r12 r13 r14 r15 rbx].freeze
+  ASM_SAVED = %w[rbx r12 r13 r14 r15].freeze
+  ASM_XMM = %w[xmm0 xmm1 xmm2 xmm3 xmm4 xmm5 xmm6 xmm7].freeze # caller-saved on SysV: the helper saves none
+
+  # The helper for one general template: it reads each operand from the operand block (rdi, eight bytes an operand),
+  # runs the template with the operands' registers, and writes the outputs back. ops are {kind:, code:, size:, arg:} in
+  # gcc's order (kind: in, out, inout or mem; code: a register letter, a digit for a tied operand, or m). Returns
+  # [symbol, assembly text]. Raises QbeUnsupported for a template or an operand outside this helper.
+  def self.asm_block(hex, ops)
+    tpl = [hex].pack("H*")
+    regs = Array.new(ops.size)
+    used = {}
+    ops.each_with_index do |o, i|
+      next unless (r = ASM_FIXED[o[:code]])
+
+      regs[i] = r
+      used[r] = true
+    end
+    xfree = ASM_XMM.dup
+    ops.each_with_index do |o, i|
+      next unless o[:code] == "x"
+
+      raise QbeUnsupported, "asm: more SSE operands than registers" if xfree.empty?
+
+      regs[i] = xfree.shift
+    end
+    free = ASM_POOL.reject { |r| used[r] }
+    ops.each_with_index do |o, i|
+      next if regs[i] || o[:code].match?(/\A\d\z/)
+      raise QbeUnsupported, "asm: more operands than registers" if free.empty?
+
+      regs[i] = free.shift
+    end
+    ops.each_with_index do |o, i|
+      next unless o[:code].match?(/\A\d\z/)
+
+      src = o[:code].to_i
+      raise QbeUnsupported, "asm: a tied operand names operand #{src}" if src >= ops.size || src == i
+
+      regs[i] = regs[src]
+    end
+    body = +""
+    i = 0
+    while i < tpl.size
+      if tpl[i] != "%"
+        body << tpl[i]
+        i += 1
+        next
+      end
+      if tpl[i + 1] == "%"
+        body << "%"
+        i += 2
+        next
+      end
+      m = tpl[i..].match(/\A%([bwkq]?)(\d+)/)
+      raise QbeUnsupported, "asm template: a % that is not an operand (#{tpl[i, 3].inspect})" unless m
+
+      idx = m[2].to_i
+      raise QbeUnsupported, "asm template: operand #{idx} of #{ops.size}" if idx >= ops.size
+
+      o = ops[idx]
+      body << if o[:code] == "m"
+                "(%#{regs[idx]})"
+              elsif o[:code] == "x"
+                "%#{regs[idx]}"
+              else
+                size = { "b" => 1, "w" => 2, "k" => 4, "q" => 8 }.fetch(m[1]) { o[:size] }
+                slot = { 8 => 0, 4 => 1, 2 => 2, 1 => 3 }.fetch(size) { raise QbeUnsupported, "asm: operand size #{size}" }
+                "%#{ASM_REGS.fetch(regs[idx])[slot]}"
+              end
+      i += m[0].size
+    end
+    digest = Digest::SHA1.hexdigest("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}")[0, 12]
+    sym = "__pathb_asm_#{digest}"
+    lines = [".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:", "\tpushq %rbp", "\tmovq %rsp, %rbp"]
+    ASM_SAVED.each { |r| lines << "\tpushq %#{r}" }
+    lines << "\tsubq $16, %rsp" << "\tmovq %rdi, -48(%rbp)" << "\tmovq -48(%rbp), %r11"
+    ops.each_with_index do |o, i|
+      if %w[in inout mem].include?(o[:kind])
+        lines << (o[:code] == "x" ? "\t#{o[:size] == 4 ? "movss" : "movsd"} #{8 * i}(%r11), %#{regs[i]}" : "\tmovq #{8 * i}(%r11), %#{regs[i]}")
+      end
+    end
+    lines << body.chomp
+    lines << "\tmovq -48(%rbp), %r11"
+    ops.each_with_index do |o, i|
+      next unless %w[out inout].include?(o[:kind])
+
+      lines << (o[:code] == "x" ? "\t#{o[:size] == 4 ? "movss" : "movsd"} %#{regs[i]}, #{8 * i}(%r11)" : "\tmovq %#{regs[i]}, #{8 * i}(%r11)")
+    end
+    lines << "\tleaq -#{8 * ASM_SAVED.size}(%rbp), %rsp"
+    lines.concat(ASM_SAVED.reverse.map { |r| "\tpopq %#{r}" })
+    lines << "\tpopq %rbp" << "\tret" << ".size #{sym}, .-#{sym}"
+    [sym, lines.join("\n") + "\n"]
+  end
+
+  # The helpers of a module, as marker lines the driver turns into assembly (scripts/pathb-ssa-build's marker_asm).
+  def self.asm_text_markers(link)
+    (link[:asm_texts] || {}).values.map { |text| "# pathb-text #{Base64.strict_encode64(text)}" }.join("\n")
+  end
+
   def module_il(forms)
     ctx = module_context(forms)
     emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi], ctx[:link]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
-    (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") } + ubfile_data(ctx[:link])).join("\n\n") + "\n"
+    (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") } + ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])]).join("\n\n") + "\n"
   end
 
   # The part of a module that every function shares: the data of its globals and the references a function may make

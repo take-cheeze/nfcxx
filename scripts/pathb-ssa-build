@@ -17,6 +17,7 @@
 #
 # NFCXX_QBE overrides the QBE binary (default build/qbe/qbe under the repository root).
 
+require "base64"
 require "open3"
 require "rbconfig"
 require "tmpdir"
@@ -94,7 +95,8 @@ def marker_asm(il)
     sect = sect + format(".%05d", prio.to_i) if prio.to_i != 0
     ["\t.section #{sect},\"aw\"", "\t.align 8", "\t.quad #{sym}"]
   end
-  (weak + helpers + aliases + startup.flatten(1)).map { |line| "#{line}\n" }.join
+  texts = il.scan(/^# pathb-text (\S+)$/).flatten.uniq.map { |b| Base64.strict_decode64(b) }
+  (weak + helpers + aliases + startup.flatten(1)).map { |line| "#{line}\n" }.join + texts.join
 end
 
 # The SSA text of the file, from scripts/pathb-ssa.rb. Its own stderr is passed through, so a function it cannot convert
@@ -295,7 +297,7 @@ startup_markers = read_forms(ssa).select { |f| head(f) == "ssa-function" }.flat_
   end
 end
 
-il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + alias_markers + startup_markers).reject(&:empty?).join("\n\n") + "\n"
+il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + startup_markers).reject(&:empty?).join("\n\n") + "\n"
 x87_asm = x87_thunks_asm(x87_forms, il)
 thunk_refs = il.scan(/\$(__nfcxx_x87\w*)\(/).flatten.uniq
 missing = thunk_refs.reject { |s| x87_asm.include?("#{s}:") }

@@ -47,8 +47,8 @@ for f in tests/cases/*.cpp $probes; do
   fi
 done
 # Gap probe: tests/pathb-ir/gaps.cpp uses constructs the lowering handled late (VLA, statement
-# expressions, bit-fields) next to one it still does not handle (inline asm). Its golden shows the (unsupported ...) marker; the count must match.
-gap_expected=1   # inline asm; VLAs, statement expressions and bit-fields are lowered
+# expressions, bit-fields, inline asm) and must lower all of them. Its golden has no (unsupported ...) marker; the count must match.
+gap_expected=0   # inline asm is an (asm-block ...) now; VLAs, statement expressions and bit-fields are lowered
 if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir tests/pathb-ir/gaps.cpp > "$tmp/gaps.ir" 2> "$tmp/gaps.err"; then
   echo "FAIL (front end) tests/pathb-ir/gaps.cpp"; fail=1
 else
@@ -63,9 +63,9 @@ else
 fi
 # Built-ins and va_arg lowered without a library call (va_arg of long double is a helper call), and the inline asm cases the emitter must refuse by name.
 # Each has a golden; the emitter (scripts/pathb-qbe-emit.rb through scripts/mrb) must accept or refuse the IR as stated:
-#   builtins, vaarg_agg, vaarg_ld: accepted (exit 0)    asm_refuse: refused (exit 3) with the text shown
+#   builtins, vaarg_agg, vaarg_ld: accepted (exit 0)    asm_refuse: refused (exit 3) with the text shown (the asm-block statement)
 mrb=scripts/mrb
-for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:asm-template \"cpuid\""; do
+for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:refused: statement (asm-block"; do
   n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
   f=tests/pathb-ir/$n.cpp
   if ! scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
@@ -76,10 +76,10 @@ for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:asm-templat
   elif [ -n "$want_msg" ] && ! grep -qF -- "$want_msg" "$tmp/$n.emit"; then echo "FAIL $f: emitter message lacks '$want_msg': $(head -1 "$tmp/$n.emit")"; fail=1
   else echo "ok   $f (emitter exit $rc${want_msg:+, refused with '$want_msg'})"; fi
 done
-# asm_refuse: three statements stay unsupported markers (cpuid, lock; incl, a register clobber); mfence is a (fence); pause, rep nop are lowered
+# asm_refuse: the register clobber stays an unsupported marker (asm-clobbers); cpuid and lock; incl are (asm-block ...); mfence is a (fence); pause, rep nop are lowered
 if [ $update = 0 ]; then
   g=$(grep -c '(unsupported stmt' "tests/pathb-ir/asm_refuse.ir" || true)
-  [ "$g" = 3 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm markers)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 3"; fail=1; }
+  [ "$g" = 1 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm marker)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 1"; fail=1; }
 fi
 # Borrow facts (tier 0 of docs/notes/borrowck-plan.md, section 1.3): tests/pathb-ir/borrow/*.cpp are printed with
 # NFCXX_PATHB_BORROW=1 and compared with the golden of the same name. The flag only adds (decl ...), (scope-end ...),
