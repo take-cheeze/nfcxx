@@ -16,7 +16,7 @@
 # constant table from growing into one oversized compilation unit.
 
 ROOT = File.expand_path('../..', __dir__)
-BAKE_TERMINATOR = '__BC2CPP_BAKED_SOURCE__'
+CHUNK = 1000
 REQUIRE_RELATIVE = /\A(\s*)require_relative\s+(['"])([^'"]+)\2(.*)\n?\z/
 
 def baked_name(path)
@@ -40,7 +40,6 @@ def bake_file(path, sources, queue)
     line
   end
   body = lines.join.gsub(/__FILE__/, "'#{name}'")
-  abort "bake_sources: #{name} contains the terminator #{BAKE_TERMINATOR}" if body.include?(BAKE_TERMINATOR)
   sources[name] = body
 end
 
@@ -61,8 +60,12 @@ if $PROGRAM_NAME == __FILE__
   abort 'usage: bake_sources.rb ENTRY OUTPUT' unless output
 
   sources = bake(entry)
+  # Each body is a list of single-quoted chunks, escaping only `\` and `'`, joined at load. A heredoc would not do:
+  # mruby processes backslash escapes in `<<'EOS'` (CRuby does not), which halves every `\\` in the baked source.
+  # A single literal over a few thousand bytes is refused by mruby's parser, so the chunks stay short.
   File.write(output, sources.map do |name, body|
-    "MRubyRequire.bake('#{name}', <<'#{BAKE_TERMINATOR}')\n#{body}#{body.end_with?("\n") ? '' : "\n"}#{BAKE_TERMINATOR}\n"
+    chunks = body.scan(/.{1,#{CHUNK}}/m).map { |chunk| "'#{chunk.gsub('\\') { '\\\\' }.gsub("'") { "\\'" }}'" }
+    "MRubyRequire.bake('#{name}', [#{chunks.join(",\n")}].join)\n"
   end.join)
   warn "bake_sources: #{sources.size} files from #{entry}"
 end
