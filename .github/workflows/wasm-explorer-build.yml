@@ -36,6 +36,13 @@ jobs:
           ref: ${{ inputs.ref }}
           submodules: true
 
+      # The Swift toolchain (for the Swift examples, see below) is installed first: after the caches and the other
+      # toolchains below it has run the runner out of disk ("ENOSPC" while extracting it).
+      - name: Install Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+
       - name: Install the build tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ruby rake
 
@@ -133,11 +140,7 @@ jobs:
 
       # The Swift examples: the Swift front end (tools/swiftfe, the swiftfe workflow's toolchain) emits the C that the
       # explorer compiles, so it is built here; the build checks the examples against the stored output of swiftc.
-      - name: Install Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.0"
-
+      # The toolchain is installed in "Install Swift" near the top of the job, while the runner still has its full disk.
       - name: Build the Swift front end
         run: swift build -c release
         working-directory: tools/swiftfe
