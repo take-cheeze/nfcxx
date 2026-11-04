@@ -90,10 +90,13 @@ module OptcarrotSealedBuild
                                        'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '')]
   end
 
+  # BC2CPP_ENUM_STEP=0: the enum-step driver is compiled by mrb_load_string, and this sealed world excludes
+  # mruby-compiler, so the generated code would not link (docs/bc2cpp-enum-step.md, Known limits).
   def self.environment(gems)
     {
       'BC2CPP_BUILD_NAME' => 'optcarrot-probe',
-      'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" })
+      'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" }),
+      'BC2CPP_ENUM_STEP' => '0'
     }
   end
 end
