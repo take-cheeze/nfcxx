@@ -2212,7 +2212,9 @@ if $PROGRAM_NAME == __FILE__
   # compiled entry, so its body is stubbed too: the bytecode goes, and a call that somehow reached it would raise.
   left_out_entries = gen.left_out_core_ram.map { |owner, name| { owner: owner, name: name, visibility: :public } }
   dead_entries = main_reach ? main_reach.dead_keys.map { |key| owner, name = key.split('#', 2); { owner: owner, name: name, visibility: :public } } : []
-  stub_keys, load_register = MrblibStubs.stubbable(compiled + left_out_entries + dead_entries, ireps, registry, CodeGen.block_self_bodies,
+  # SKIP_STUBS: an entry SKIP_UNSUPPORTED dropped has no compiled body, so its bytecode body stays (never stubbed).
+  stub_candidates = (compiled + left_out_entries + dead_entries).reject { |m| skipped_entries.include?(m[:entry]) }
+  stub_keys, load_register = MrblibStubs.stubbable(stub_candidates, ireps, registry, CodeGen.block_self_bodies,
                                                    world: MrblibStubs.class_world_from_env(ENV, srcs),
                                                    copy_context: MrblibStubs.copy_context(ENV, srcs, out_dir),
                                                    early: ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') == 'all' && !ENV['BC2CPP_LOAD_WORLD'].to_s.empty?)
