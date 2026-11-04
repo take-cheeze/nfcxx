@@ -1721,7 +1721,10 @@ module LoadCompile
     world = JSON.parse(env['BC2CPP_LOAD_WORLD'])
     return nil unless world.key?(symbol)
 
-    plan(world, gem: symbol, drop_keys: drop_keys, symbol: symbol, statements: mode == 'all', unregistered: unregistered,
+    # CORE_DEFS_ONLY: the core ext files are planned for their definitions only. Moving their statements into the core
+    # load would run them after the gem's own Ruby reads them (see mruby-io's STDIN).
+    statements = mode == 'all' && symbol != 'core_compiled'
+    plan(world, gem: symbol, drop_keys: drop_keys, symbol: symbol, statements: statements, unregistered: unregistered,
          graph: ClassWorld.from_load_world(env['BC2CPP_LOAD_WORLD']), register: register)
   end
 

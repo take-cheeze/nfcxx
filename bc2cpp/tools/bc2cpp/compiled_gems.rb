@@ -728,6 +728,15 @@ def bc2cpp_load_world(spec)
     files = gem.instance_variable_get(:@bc2cpp_mrblib_sources) or next
     all[compiled[:out_symbol]] = files.map { |f| File.expand_path(f) }
   end
+  # CORE_WORLD: the core ext gems' mrblib is the core's world entry (planned in definitions-only mode, see plan_for_env).
+  core = BC2CPP_COMPILED_GEMS['mruby-core-compiled']
+  if core && spec.build.gems.any? { |g| g.name == 'mruby-core-compiled' }
+    ext = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).flat_map do |name|
+      gem = spec.build.gems.find { |g| g.name == name } or next []
+      (gem.instance_variable_get(:@bc2cpp_mrblib_sources) || []).map { |f| File.expand_path(f) }
+    end
+    world[core[:out_symbol]] = (world[core[:out_symbol]] || []) + ext unless ext.empty?
+  end
   JSON.generate(world)
 end
 
