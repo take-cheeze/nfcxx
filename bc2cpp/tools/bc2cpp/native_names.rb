@@ -21,7 +21,7 @@ require_relative 'ruby_parse_cache'
 PRESYM_RB = File.expand_path('../../3rd/mruby/lib/mruby/presym.rb', __dir__)
 raise "bc2cpp: #{PRESYM_RB} is missing; run `git submodule update --init 3rd/mruby`" unless File.file?(PRESYM_RB)
 
-require PRESYM_RB
+require_relative '../../3rd/mruby/lib/mruby/presym'
 OPSYM_TO_RUBY = MRuby::Presym::OPERATORS.to_h { |ruby, sym| [sym, ruby] }.freeze
 # A duplicate symbol value would make the inversion silently drop an operator.
 raise 'bc2cpp: mruby presym OPERATORS values are not unique' unless OPSYM_TO_RUBY.size == MRuby::Presym::OPERATORS.size

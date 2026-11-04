@@ -184,11 +184,11 @@ module NativeSigs
 
   # A copy of +decl+ holding +members+, every other constructor argument (name, super_class, type_params, annotations,
   # location, comment) taken from +decl+.
+  # The constructor's keywords are listed, not read back by reflection: mruby's Method#parameters gives no names.
+  # These are the required keywords of RBS::AST::Declarations::Class#initialize in the pinned RBS (4.0.0).
   def with_members(decl, members)
-    args = decl.class.instance_method(:initialize).parameters.to_h do |_kind, arg|
-      [arg, arg == :members ? members : decl.public_send(arg)]
-    end
-    decl.class.new(**args)
+    decl.class.new(name: decl.name, type_params: decl.type_params, super_class: decl.super_class, members: members,
+                   annotations: decl.annotations, location: decl.location, comment: decl.comment)
   end
 
   # The text of +decl+ for table +name+, '' when nothing of it is of that table. A block with no members is written whole
