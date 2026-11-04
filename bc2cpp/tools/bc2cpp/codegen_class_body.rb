@@ -114,7 +114,7 @@ class CodeGen
         texts << child_code
         lines << class_unit_define(insn)
         lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}#{@unit_tag}(M);\n"
-      elsif insn.op == :TDEF && omitted_def?(insn, owner, omitted)
+      elsif %i[TDEF SDEF].include?(insn.op) && omitted_def?(insn, owner, omitted)
         lines << "  // #{owner}##{insn.sym} omitted: statically dispatched only (no registration)\n"
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
       elsif %i[TDEF SDEF].include?(insn.op) && left_out_method?(insn, irep)
@@ -537,8 +537,11 @@ class CodeGen
     insn&.op == :SEND0 && insn.sym.to_s == 'freeze'
   end
 
+  # A definition the static dispatch proof omits is never called by name, so its unit registers nothing for it. A TDEF's
+  # key is Owner#name; an SDEF's is Owner.singleton#name (the lists' spelling).
   def omitted_def?(insn, owner, omitted)
-    insn.op == :TDEF && omitted.include?("#{owner}##{insn.sym}")
+    key = insn.op == :SDEF ? "#{owner}.singleton##{insn.sym}" : "#{owner}##{insn.sym}"
+    omitted.include?(key)
   end
 end
 

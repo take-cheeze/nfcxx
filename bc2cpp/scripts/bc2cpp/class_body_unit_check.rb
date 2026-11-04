@@ -240,7 +240,7 @@ suite.compile(DEFS) do |ireps, root|
   units = gen.compile_top_class_units(ireps.fetch(root))
   code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
   suite.check('a def the tables leave out is skipped, not a refusal of its body',
-              units.any? && code.include?('left out of the method tables') && !code.include?('mrb_define_class_method(M, mrb_class_ptr(self), "') &&
+              units.any? && (code.include?('left out of the method tables') || code.include?('statically dispatched only')) && !code.include?('mrb_define_class_method(M, mrb_class_ptr(self), "') &&
               !code.include?('mrb_define_method(M, mrb_class_ptr(self), "'))
 end
 
