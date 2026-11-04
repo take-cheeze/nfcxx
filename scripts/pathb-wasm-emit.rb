@@ -772,6 +772,8 @@ class Fn
     @labels = []             # the open structured constructs, innermost last: [:brk] [:loop] [:cont] [:if]
     @regs = {}               # "%N" => [wasm local index, wasm type, IR type]
     @slots = {}              # name => frame offset
+    @slot_sizes = {}         # name => size of the slot (a byval argument's copy is as big as its source)
+    @byval_tmp = {}          # the byval argument form (by identity) => frame offset of its copy in this frame
     @frame = 0
     @param_types = []        # wasm types of the parameters, in order
     @local_types = []        # wasm types of the locals after the parameters, in index order
@@ -816,8 +818,24 @@ class Fn
       elsif h == "params"
         f.drop(1).each_with_index do |p, k|
           raise Refused, "variadic function" if head_of(p) == "ellipsis"
+          if head_of(p) == "sret"
+            # (sret %N (struct ...)): the hidden pointer where the result is written; the function returns void
+            raise BadIR, "bad sret parameter #{form_text(p)}" unless p.length == 3
+            reg = p[1].to_s
+            raise BadIR, "parameter register #{reg} twice" if params.any? { |q| q[2] == reg }
+            params << [ptr_wtype, ["ptr", nil], reg]
+            next
+          end
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param"
           raise BadIR, "bad parameter #{form_text(p)}" unless p.length == 4
+          if head_of(p[3]) == "byval"
+            # (param %N "x" (byval (struct ...))): the address of the caller's copy (the caller makes it, see call)
+            raise Refused, "aggregate parameter in an asan module (not lowered)" if @asan
+            reg = p[1].to_s
+            raise BadIR, "parameter register #{reg} twice" if params.any? { |q| q[2] == reg }
+            params << [ptr_wtype, ["ptr", nil], reg]
+            next
+          end
           # the register is any %N (EDG numbers the parameters from %0, llvm-to-pathb.rb from %1); it is the
           # parameter's wasm local, k
           reg = p[1].to_s
@@ -846,6 +864,7 @@ class Fn
         else
           @frame = (@frame + align - 1) / align * align
           @slots[f[1].to_s] = @frame
+          @slot_sizes[f[1].to_s] = size
           @frame += size
         end
       else
@@ -856,6 +875,7 @@ class Fn
     layout_asan_slots(slot_list) if @asan
     @ret = ret
     @result = wtype(ret)
+    byval_scan(@form) unless @asan
     @frame = (@frame + 15) / 16 * 16
     @param_types = params.map { |p| p[0] }
     params.each_with_index { |p, k| @regs[p[2]] = [k, p[0], p[1]] }
@@ -914,6 +934,49 @@ class Fn
 
   def slot_offset(name)
     @slots.fetch(name) { raise Refused, "unknown slot $\"#{name}\"" }
+  end
+
+  # A byval argument is copied into a hidden slot of this frame (the callee owns the copy, so it may change it): each such
+  # argument of a call in the body gets its own slot, as big as its source slot, laid out with the others.
+  def byval_scan(x)
+    return unless x.is_a?(Array)
+    if head_of(x) == "call"
+      x.drop(3).each do |a|
+        next unless head_of(a) == "byval"
+        src = a[2]
+        raise Refused, "byval argument from something other than a slot (not lowered)" unless src.is_a?(IRSym) && src.sig == "$"
+        size = @slot_sizes.fetch(src.name) { raise Refused, "byval argument from an unknown slot #{src.name}" }
+        @frame = (@frame + 7) / 8 * 8
+        @byval_tmp[a.object_id] = @frame
+        @frame += size
+      end
+    end
+    x.each { |y| byval_scan(y) }
+  end
+
+  # An aggregate argument: sret passes the address where the result goes; byval copies the source into the call's hidden
+  # slot and passes that copy's address.
+  def push_aggregate_arg(a)
+    if head_of(a) == "sret"
+      push_op(a[2], ptr_wtype)
+      return
+    end
+    src = a[2]
+    off = @byval_tmp.fetch(a.object_id) { raise BadIR, "byval argument without its copy slot" }
+    size = @slot_sizes.fetch(src.name)
+    e(0x20); leb_u(@fp_local); e(0x41); leb_s(off); e(0x6a)   # memory.copy: destination (the copy)
+    push_addr(src)                                             # source
+    e(0x41); leb_s(size)                                       # length
+    e(0xfc, 0x0a, 0x00, 0x00)
+    push_slot_ptr(off)
+  end
+
+  # The pointer value of a frame offset (a pointer is an i64 under LP64, an i32 address otherwise).
+  def push_slot_ptr(off)
+    e(0x20); leb_u(@fp_local)
+    e(0x41); leb_s(off)
+    e(0x6a)                                # i32.add
+    e(0xad) if $ptr_bytes == 8             # i64.extend_i32_u
   end
 
   # asan: each slot is an object of its own, 8-byte aligned, with a redzone of ASAN_RZ bytes before it and after the last
@@ -1486,16 +1549,19 @@ class Fn
     callee = x[2]
     args = x.drop(3)
     raise Refused, "variadic call" if head_of(args[0]) == "variadic"
-    args.each do |a|
-      h = head_of(a)
-      raise Refused, "aggregate argument (#{h})" if h == "byval" || h == "sret"
+    # aggregates (byval, sret) go by address between the module's own functions: the module's convention, not the host's
+    aggregate = args.any? { |a| %w[byval sret].include?(head_of(a)) }
+    if aggregate
+      raise Refused, "aggregate argument in an asan or memory64 module (not lowered)" if @asan || @mod.memory64
+      direct = callee.is_a?(IRSym) && callee.sig == "&"
+      raise Refused, "aggregate argument to #{callee.name} (an import: the host's ABI does not pass aggregates this way)" if direct && !@mod.defines?(callee.name)
     end
     # --threads only: without a shared memory the atomics stay what they were (imports, as the Emscripten runtime may provide them)
     if @mod.threads && callee.is_a?(IRSym) && callee.sig == "&" && !@mod.defines?(callee.name) && atomic_builtin(callee.name)
       return atomic_call(callee.name, args)
     end
-    arg_types = args.map { |a| wtype(op_type(a)) }
-    args.each { |a| push_op(a) }
+    arg_types = args.map { |a| %w[byval sret].include?(head_of(a)) ? ptr_wtype : wtype(op_type(a)) }
+    args.each { |a| %w[byval sret].include?(head_of(a)) ? push_aggregate_arg(a) : push_op(a) }
     unless callee.is_a?(IRSym) && callee.sig == "&"
       # through a function pointer: its value is a slot of the table, and the call's types are the signature, which
       # call_indirect checks (a mismatch, or the null slot 0, traps)
