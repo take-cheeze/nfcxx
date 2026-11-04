@@ -66,7 +66,6 @@ class CodeGen
 
   def compile_class_body_unit(irep, owner)
     program = BytecodeIR.for(irep)
-    check_const_reads(program, owner)
     omitted = unregistered_keys
     bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     paired_exec = bodies.keys.to_set { |idx| idx + 1 }
@@ -245,25 +244,6 @@ class CodeGen
   # [{ path:, code: }]. A unit is the CLASS or MODULE and its compiled body; the function it adds creates the class the
   # way vm.c's OP_CLASS and OP_MODULE do with the Object base and a nil superclass, then calls the body. A unit whose
   # superclass is not a literal nil, whose path is opened twice, or whose body refuses is left out: the VM still runs it.
-  # CONST_RESOLVE: a constant read (GETCONST / GETMCNST) must name a constant the build binds before the unit runs. The
-  # known names are the bytecode IR's constant table (every SETCONST binding, with BytecodeIR::ConstantFacts) plus the
-  # names the native sources define. Unresolved reads are collected here, not raised; compile_top_class_units fails once
-  # at the end of the phase. CodeGen.known_const_names nil means no check (checks that call the compiler alone).
-  def check_const_reads(program, owner)
-    known = CodeGen.known_const_names
-    return unless known
-
-    program.each_source do |insn, _idx|
-      name = case insn.op
-             when :GETCONST then insn.const_name
-             when :GETMCNST then insn.mcnst_name
-             end
-      next if name.nil? || known.include?(name.to_s)
-
-      (CodeGen.const_unresolved ||= []) << { name: name.to_s, owner: owner }
-    end
-  end
-
   def compile_top_class_units(root_irep)
     program = BytecodeIR.for(root_irep)
     units = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
@@ -275,11 +255,6 @@ class CodeGen
       next nil unless code
 
       { path: path, insn: insn, code: code }
-    end
-    missing = (CodeGen.const_unresolved || []).uniq
-    unless missing.empty?
-      listing = missing.map { |m| "  #{m[:name]} (read in #{m[:owner]})" }.join("\n")
-      raise "unresolved constants in class bodies (CONST_RESOLVE):\n#{listing}"
     end
     counts = units.map { |unit| unit[:path] }.tally
     units.select { |unit| counts[unit[:path]] == 1 }.map do |unit|

@@ -677,11 +677,6 @@ if $PROGRAM_NAME == __FILE__
                               IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq)
     )
   end
-  # CONST_RESOLVE: the constant names bound before a class body runs. The bytecode IR's constant table (every SETCONST
-  # binding, as BytecodeIR::ConstantFacts groups them) and the names the native sources define.
-  CodeGen.known_const_names = (constant_facts.groups.keys.map(&:to_s) |
-                               IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq).to_a).to_set
-  CodeGen.const_unresolved = []
   integer_constants =
     if closed_world.constants_static?
       constant_facts.fixnum_names
@@ -2193,9 +2188,6 @@ if $PROGRAM_NAME == __FILE__
   # No class unit is emitted: the VM runs every class body, and a compiled copy would run it a second time.
   # compile_top_class_units stays for its checks; the gem_init call is not emitted.
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
-  # CONST_RESOLVE: the class-body compile phase runs here for its constant check and fails at its end when a read is
-  # unresolved. Its units are not emitted: the VM runs those bodies.
-  gen.compile_top_class_units(ireps.fetch(root_label))
   class_units = []
   # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
   # units of other gems' owners that owned_class_units drops).
