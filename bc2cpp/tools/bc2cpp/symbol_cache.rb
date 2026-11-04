@@ -259,7 +259,7 @@ module SymbolCache
       }
       #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? owner_call_source : ''}
       #{table.nomethod_used ? NOMETHOD : ''}
-      #{table.violation_used ? GUARD_VIOLATION : ''}#{table.hint_violation_used ? HINT_VIOLATION : ''}
+      #{GUARD_VIOLATION}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
     CPP
   end
