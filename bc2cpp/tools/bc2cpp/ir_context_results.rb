@@ -23,7 +23,9 @@ class IrContextResults
   # SEND and SSEND forms without a block argument (Ops::BLOCK_SEND removed).
   NO_BLOCK_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
-  Node = Struct.new(:key, :revision, :evaluation, :has_callees, :arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
+  # Splatted: a call with more than 14 arguments (the members and the keyword hash) makes mruby take the hash for a block.
+  NODE_FIELDS = %i[key revision evaluation has_callees arrays body receiver arguments keywords binding root mask states calls].freeze
+  Node = Struct.new(*NODE_FIELDS, keyword_init: true)
 
   class Oracle < CodeGen::ContextOracle
     attr_reader :calls
