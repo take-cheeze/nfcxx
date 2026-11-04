@@ -224,10 +224,10 @@ module PathbEgraph
 
   # ---- driver --------------------------------------------------------------------------------------------------
 
-  def self.optimize_fn(fn, iters: 8, nodes: 2000)
+  def self.optimize_fn(fn, iters: 8, nodes: 2000, passes: Optimizer::PASSES, check: false)
     verify(fn)
     opt = Optimizer.new(fn, iters: iters, nodes: nodes)
-    out = opt.run
+    out = opt.run(passes: passes, check: check)
     verify(out)
     [out, opt.stats]
   end
@@ -300,7 +300,11 @@ module PathbEgraph
       fn.blocks.each_value { |blk| blk[:instrs].each { |i| collect_slot_reads(i, @read_slots) } }
     end
 
-    def run
+    # The global passes that run after the per-block e-graphs, in this order. Each one takes the blocks and changes them
+    # in place. PathbEgraph.optimize_fn can run another list (passes:), and can verify the form after each pass (check:).
+    PASSES = %i[cse_dominator apply_subst fold_control dce].freeze
+
+    def run(passes: PASSES, check: false)
       before = PathbEgraph.let_counts(@fn)
       out = {}
       # Reverse postorder: a dominator is processed before the blocks it dominates, so a register it replaced
@@ -316,10 +320,13 @@ module PathbEgraph
         out[b] = block(@fn.blocks[b], inherited)
         @mem_out[b] = @mem
       end
-      cse_dominator(out)
-      apply_subst(out)
-      fold_control(out)
-      dce(out)
+      passes.each do |name|
+        lets = lets_of(out)
+        send(name, out)
+        # Lets a pass removed, per pass: the statistics say what each one does.
+        @stats[:"removed_#{name}"] += lets - lets_of(out)
+        verify_after(name, out) if check
+      end
       efn = EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out)
       after = PathbEgraph.let_counts(efn)
       @stats[:functions] += 1
@@ -332,6 +339,19 @@ module PathbEgraph
     end
 
     private
+
+    def lets_of(out) = PathbEgraph.let_counts(EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out))[0]
+
+    # The form after a pass must be well formed (PathbEgraph.verify). A failure names the pass that made it. cse_dominator
+    # only records its replacements (@subst), and the uses are rewritten by apply_subst: its output is not a form yet,
+    # so it is checked from apply_subst on.
+    def verify_after(name, out)
+      return if name == :cse_dominator
+
+      PathbEgraph.verify(EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out))
+    rescue Fail => e
+      raise Fail, "after pass #{name}: #{e.message}"
+    end
 
     # ---- per block ---------------------------------------------------------------------------------------------
 
