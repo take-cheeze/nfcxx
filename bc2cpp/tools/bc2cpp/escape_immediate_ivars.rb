@@ -84,7 +84,8 @@ module EscapeAnalysis
       found = []
       why = nil
       prog.instructions.each_with_index do |insn, i|
-        s = states[i] or next
+        s = states[i]
+        next unless s
 
         why ||= object_insn_check(frame, i, insn.source, s, self_frame, created, stores, found)
       end
@@ -264,7 +265,8 @@ module EscapeAnalysis
       insns.each do |insn|
         next if PASSES.include?(insn.op) || STORES_LEAD.key?(insn.op) || %i[SETIDX ARYPUSH HASHADD].include?(insn.op)
 
-        lead = insn.reg or next
+        lead = insn.reg
+        next unless lead
         writers[lead] << if IMMEDIATE_LOADS.include?(insn.op)
                            [:imm]
                          elsif insn.op == :MOVE

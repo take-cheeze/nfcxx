@@ -162,7 +162,8 @@ module BlockReturns
     irep.reps.each do |label|
       next unless seen.add?(label)
 
-      child = ireps[label] or return 'has a nested block with no body'
+      child = ireps[label]
+      return 'has a nested block with no body' unless child
       exit = BytecodeIR.for(child).instructions_with_op(:RETURN_BLK, :BREAK).first
       return "a nested block leaves with #{exit.op} at line #{exit.lineno}" if exit
 
@@ -293,7 +294,8 @@ module BlockReturns
     blk = nil
     pos = 0
     format.each_char do |c|
-      count = FORMAT_ARGS[c] or return "#{function}: mrb_get_args format #{format.inspect} is not modelled"
+      count = FORMAT_ARGS[c]
+      return "#{function}: mrb_get_args format #{format.inspect} is not modelled" unless count
       blk = pointers[pos] if c == '&'
       pos += count
     end
@@ -361,7 +363,8 @@ module BlockReturns
   end
 
   def reviewed?(entry, path, source, reviewed)
-    files = reviewed[entry.key] or return false
+    files = reviewed[entry.key]
+    return false unless files
     files.any? { |relative, digest| path.end_with?("/#{relative}") && Array(digest).include?(Digest::SHA256.hexdigest(source)) }
   end
 end

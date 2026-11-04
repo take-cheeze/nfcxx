@@ -104,7 +104,8 @@ module RbsRecordTypes
   end
 
   def ivar(out, owner, name, type, member, rel)
-    record = record_type(type) or return
+    record = record_type(type)
+    return unless record
 
     loc = loc_of(member, rel)
     fields = {}
@@ -356,8 +357,10 @@ module RbsRecordTypes
 
   # The guarded receiver hint of the GETIDX at +index+: the one class every record key it can read declares.
   def read_hint(irep, index)
-    table = hints or return nil
-    pairs = RecordHash.read_slots(irep, index) or return nil
+    table = hints
+    return nil unless table
+    pairs = RecordHash.read_slots(irep, index)
+    return nil unless pairs
     classes = pairs.map { |name, key| table.dig(name, key) }
     classes.first if classes.all? && classes.uniq.size == 1
   end
@@ -573,7 +576,8 @@ module RbsRecordTypes
       return escape("passed to #{insn.sym} with a block") if BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
       return escape("passed to #{insn.sym} past the scan depth") if @depth >= INTERPROC_DEPTH
 
-      world = @escape_world or return escape("passed to #{insn.sym} (no escape analysis world)")
+      world = @escape_world
+      return escape("passed to #{insn.sym} (no escape analysis world)") unless world
       @analyzer ||= EscapeAnalysis::Analyzer.new(world)
       callees = world.defs_named(insn.sym)
       return escape("passed to #{insn.sym}, whose definitions cannot be enumerated") if callees.nil?
@@ -673,7 +677,8 @@ module RbsRecordTypes
       return escape('store arity') unless plain_args?(insn, 2)
       return escape('stored as a value or key') if state.include?(lead + 1) || state.include?(lead + 2)
 
-      keys = RecordHash.literal_keys(irep, k, lead + 1, for_write: true) or return escape('non-literal key store')
+      keys = RecordHash.literal_keys(irep, k, lead + 1, for_write: true)
+      return escape('non-literal key store') unless keys
       @stores << [keys, irep, k, lead + 2]
       state.reject { |x| x >= lead }.to_set
     end

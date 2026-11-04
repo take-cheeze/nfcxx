@@ -256,7 +256,8 @@ module NativeAstReturns
       return @memo[name] if @memo.key?(name)
       return nil if @in_progress[name] # recursion: unknown, the caller's join is then nil (conservative)
 
-      fn = @fns[name] or return external_kind(name)
+      fn = @fns[name]
+      return external_kind(name) unless fn
       @in_progress[name] = true
       outer_narrowed = @narrowed
       outer_nonnil = @nonnil
@@ -548,7 +549,8 @@ module NativeAstReturns
         _cond, yes, no = expr['inner']
         join([value_kind(yes, body, seen), value_kind(no, body, seen)])
       when 'CallExpr'
-        callee = callee_name(expr) or return nil
+        callee = callee_name(expr)
+        return nil unless callee
         return CONTRACT_KINDS[callee] if CONTRACT_KINDS.key?(callee)
         return 'Class' if callee == 'mrb_obj_value' && real_class_call?(expr['inner'][1])
 
@@ -564,7 +566,8 @@ module NativeAstReturns
 
         field_kind(field, @nonnil.include?(member_key(expr)))
       when 'DeclRefExpr'
-        decl = expr['referencedDecl'] or return nil
+        decl = expr['referencedDecl']
+        return nil unless decl
         return 'String' if decl['kind'] == 'ParmVarDecl' && decl['name'] == 'self' && @narrowed.include?(SELF_GUARD)
         return 'self' if decl['kind'] == 'ParmVarDecl' && decl['name'] == 'self'
         return nil unless decl['kind'] == 'VarDecl'

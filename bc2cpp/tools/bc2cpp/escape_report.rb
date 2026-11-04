@@ -42,7 +42,8 @@ module EscapeReport
   end
 
   def self.write(path)
-    analyzer = codegen&.escape_analyzer or return
+    analyzer = codegen&.escape_analyzer
+    return unless analyzer
     world = analyzer.world
     ireps = world.ireps
     owner_of = owner_table(world)
@@ -51,7 +52,8 @@ module EscapeReport
       owner = owner_of[irep.label] || '?'
       origin = CoreDefs.core_source?(irep.file) ? 'core' : 'engine'
       BytecodeIR.for(irep).each_source do |insn, i|
-        kind = site_kind(irep, i, insn) or next
+        kind = site_kind(irep, i, insn)
+        next unless kind
         lexical = owner_of[irep.label]&.split('#', 2)&.first
         klass = constructed_class(codegen, world, irep, i, insn, lexical)
         verdict = analyzer.creation(irep, i, value_class: klass)

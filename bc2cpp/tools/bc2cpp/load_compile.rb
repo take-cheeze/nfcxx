@@ -293,7 +293,8 @@ module LoadCompile
           next unless item.role == :send
 
           node = item.stmt.node
-          kind = VISIBILITY_SENDS[node.name.to_s] or next
+          kind = VISIBILITY_SENDS[node.name.to_s]
+          next unless kind
           args = node.arguments&.arguments || []
           next if args.empty? || !args.all? { |a| a.is_a?(Prism::SymbolNode) || a.is_a?(Prism::StringNode) }
 

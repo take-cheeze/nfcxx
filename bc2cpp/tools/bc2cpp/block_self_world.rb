@@ -316,7 +316,8 @@ module BlockSelfWorld
 
     # The superclass operand every reaching definition agrees on, else :unknown.
     def class_statement_super(irep, idx, insn)
-      defs = BlockSelfWorld.definitions(irep, idx, (insn.reg + 1)) or return :unknown
+      defs = BlockSelfWorld.definitions(irep, idx, (insn.reg + 1))
+      return :unknown unless defs
       found = defs.map do |df|
         next :unknown if df.entry?
 

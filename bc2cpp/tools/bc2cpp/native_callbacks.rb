@@ -195,7 +195,8 @@ module NativeCallbacks
     loop do
       changed = false
       aliases.each do |new_name, old_name|
-        old = entries[old_name] or next
+        old = entries[old_name]
+        next unless old
         entry = (entries[new_name] ||= Entry.new(Set.new, Set.new, true))
         before = entry.callbacks.size
         entry.callbacks.merge(old.callbacks)

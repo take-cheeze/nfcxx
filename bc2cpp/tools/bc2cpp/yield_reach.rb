@@ -243,7 +243,8 @@ class YieldReach
 
   # A superclass operand every reaching definition agrees on, else :unknown.
   def superclass_operand(irep, idx, reg)
-    defs = IrBlockOperands.definitions(irep, idx, reg) or return :unknown
+    defs = IrBlockOperands.definitions(irep, idx, reg)
+    return :unknown unless defs
     sups = defs.map do |df|
       next :unknown if df.entry?
 
@@ -380,7 +381,8 @@ class YieldReach
   def non_proc_value?(irep, index, reg, depth = 0)
     return false if depth > 8
 
-    defs = IrBlockOperands.definitions(irep, index, reg) or return false
+    defs = IrBlockOperands.definitions(irep, index, reg)
+    return false unless defs
     defs.all? do |df|
       next false if df.entry?
 
@@ -400,7 +402,8 @@ class YieldReach
   end
 
   def non_proc_value_array?(irep, index, reg)
-    defs = IrBlockOperands.definitions(irep, index, reg) or return false
+    defs = IrBlockOperands.definitions(irep, index, reg)
+    return false unless defs
     defs.all? do |df|
       !df.entry? && BytecodeIR::Ops::ARRAY_ALLOC.include?(BytecodeIR.for(irep).source_at(df.index).op)
     end
@@ -766,7 +769,8 @@ class YieldReach
     return fallback ? stored_kinds(node, reg, seen || Set.new) : nil unless defs
 
     kinds = defs.flat_map do |df|
-      found = classify_definition(node, df, elem0, fallback, depth, seen) or return nil
+      found = classify_definition(node, df, elem0, fallback, depth, seen)
+      return nil unless found
       found
     end
     kinds.uniq
@@ -894,7 +898,8 @@ class YieldReach
   end
 
   def send_keeps?(node, program, insn, idx, &holds)
-    dest = insn.reg or return false
+    dest = insn.reg
+    return false unless dest
     pos = insn.positional_splat? ? 1 : insn.argc.to_i
     kw = !insn.keyword_arguments? ? 0 : (insn.keyword_splat? ? 1 : insn.keyword_argc.to_i * 2)
     return true if (1..(pos + kw)).any? { |k| may_hold?(node, program, idx, dest.to_i + k, &holds) }

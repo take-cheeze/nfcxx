@@ -88,7 +88,8 @@ module LoopInstallers
 
   # Every `define_method` SSENDB of the block tree rooted at +label+, as [irep label, index].
   def define_method_sends(label, ireps, found = [])
-    irep = ireps[label] or return found
+    irep = ireps[label]
+    return found unless irep
     irep.each_with_op(:SSENDB) do |insn, i|
       found << [label, i] if insn.sym == 'define_method'
     end
@@ -98,7 +99,8 @@ module LoopInstallers
 
   # Every attr_* send of the block tree rooted at +label+, as [irep label, index].
   def attr_sends(label, ireps, found = [])
-    irep = ireps[label] or return found
+    irep = ireps[label]
+    return found unless irep
     irep.each_with_op(:SSEND, :SSEND0) do |insn, i|
       found << [label, i] if ATTR_SENDS.include?(insn.sym)
     end

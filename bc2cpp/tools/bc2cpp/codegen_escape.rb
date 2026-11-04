@@ -22,7 +22,8 @@ class CodeGen
   # anything that reaches it, so the pointers it captures cannot outlive this frame. The by-name
   # allowlist (BLOCK_FALLBACK_UPVAR_SAFE_METHODS) is the other way in.
   def block_proven_to_stay?(irep, index)
-    analyzer = escape_analyzer or return false
+    analyzer = escape_analyzer
+    return false unless analyzer
 
     !analyzer.creation(irep, index).escapes?
   end

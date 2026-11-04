@@ -149,7 +149,8 @@ module ReceiverProofReport
 
   # The instance classes that answer +name+, [] when none, or :unbounded when nothing bounds the name.
   def rp_answerers(name)
-    set = call_facts_answers.members(name) or return :unbounded
+    set = call_facts_answers.members(name)
+    return :unbounded unless set
     set.select { |k| instance_class?(k) || CORE_BIT.value?(k) }.sort
   end
 

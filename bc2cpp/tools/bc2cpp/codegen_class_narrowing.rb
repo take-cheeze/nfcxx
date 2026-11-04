@@ -418,7 +418,8 @@ class CodeGen
     paths = @native_name_sources.values.flatten.uniq
     ScanCache.fetch("codegen_class_narrowing.native_subclass_defined.#{name}", paths) do
       paths.any? do |path|
-        text = SourceText.read(path, 'native_subclass_defined?') or next false
+        text = SourceText.read(path, 'native_subclass_defined?')
+        next false unless text
         text.scan(/\bmrb_(?:define_class\w*|class_new\w*)\s*\(([^;]*);/m).any? do |(call)|
           last = call.rpartition(',').last
           last.match?(token) || call.match?(/mrb_class_get\w*\s*\([^()]*#{token}/)

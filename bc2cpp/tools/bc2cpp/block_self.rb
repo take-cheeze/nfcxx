@@ -81,7 +81,8 @@ module BlockSelf
                            end
     end
     irep.reps.each do |child_label|
-      child = ireps[child_label] or return 'has a nested block with no body'
+      child = ireps[child_label]
+      return 'has a nested block with no body' unless child
       why = frame_why(child, ireps, frames + [[child, Set.new]], nil)
       return why if why
     end
@@ -117,7 +118,8 @@ module BlockSelf
 
   # The registers a COUNTED_WINDOW_OPS operator reads, or nil when its operands do not parse.
   def counted_window(insn)
-    a = insn.reg&.to_i or return nil
+    a = insn.reg&.to_i
+    return nil unless a
     count = insn.typed.find { |operand| operand.kind == :int }&.value
     case insn.op
     when :ARRAY

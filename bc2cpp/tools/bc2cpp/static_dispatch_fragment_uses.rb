@@ -271,7 +271,8 @@ module StaticDispatchFragmentUses
 
   # A send reading the value as its receiver or one of its arguments.
   def send_escapes?(irep, use, insn, reg, ctx, depth)
-    argc = send_argc(insn) or return true
+    argc = send_argc(insn)
+    return true unless argc
 
     call_escapes?(irep, use, insn.sym.to_s, insn.reg.to_i, argc, reg, BytecodeIR::Ops::SELF_SEND.include?(insn.op), ctx,
                   depth)

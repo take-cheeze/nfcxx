@@ -84,7 +84,8 @@ module StaticDispatchSymbolUses
     regs += (0...insn.keyword_argc.to_i).map { |k| insn.reg.to_i + argc + (2 * k) + 2 } if insn.keyword_arguments?
     regs << insn.reg.to_i if insn.sym == 'to_proc'
     regs.all? do |reg|
-      ops = writers(irep, program, index, reg) or next false
+      ops = writers(irep, program, index, reg)
+      next false unless ops
       next false unless ops.all? { |op, _| LITERAL_OPS.include?(op) }
 
       ops.each { |op, sym| names << sym if op == :LOADSYM }
@@ -97,7 +98,8 @@ module StaticDispatchSymbolUses
   def literal_block(irep, program, index, insn, names)
     argc = insn.positional_splat? ? 1 : (insn.argc_operand ? insn.argc.to_i : 0)
     kw = insn.keyword_arguments? ? 2 * insn.keyword_argc.to_i : (insn.keyword_splat? ? 1 : 0)
-    ops = writers(irep, program, index, insn.reg.to_i + argc + kw + 1) or return false
+    ops = writers(irep, program, index, insn.reg.to_i + argc + kw + 1)
+    return false unless ops
     ops.all? do |op, sym|
       names << sym if op == :LOADSYM
       BLOCK_OPS.include?(op) || op == :LOADSYM || op == :block

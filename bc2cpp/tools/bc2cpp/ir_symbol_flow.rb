@@ -53,7 +53,8 @@ module IrSymbolFlow
       next if index[:mcnst].include?(const) || index[:spelled].include?(const) # P2
 
       class_label = class_labels.first
-      writes = table_writes(ireps, index[:getconst][const]) or next # P2
+      writes = table_writes(ireps, index[:getconst][const])
+      next unless writes # P2
       writers = writes.map { |label, _| enclosing_method(label, parents, names) }.uniq
       next unless writers.size == 1 && writers.first && writers.first != class_label # P1
 
@@ -63,7 +64,8 @@ module IrSymbolFlow
       base = Ctx.new(ireps: ireps, parents: parents, params: {}, literal_consts: {}, user_methods: user_methods,
                      mutation_sites: {})
       base.literal_consts = literal_constants(base, index, class_label, const)
-      params = writer_params(base, index, names[writer], class_label, ireps[writer]) or next # P4
+      params = writer_params(base, index, names[writer], class_label, ireps[writer])
+      next unless params # P4
 
       class_ireps = [class_label] + inner_labels(ireps, class_label, parents)
       writer_ireps = [writer] + inner_labels(ireps, writer, parents)
@@ -84,7 +86,8 @@ module IrSymbolFlow
   # The constant a splat argument register holds at idx, when it is built only as `*TABLE[i]`: ARYCAT onto nil
   # of GETIDX of GETCONST. nil otherwise.
   def splat_table(irep, idx, reg)
-    defs = reaching(irep, idx, reg) or return nil
+    defs = reaching(irep, idx, reg)
+    return nil unless defs
     consts = defs.map do |d|
       return nil if d.entry?
 
@@ -92,11 +95,14 @@ module IrSymbolFlow
       next :nil if insn.op == :LOADNIL
       return nil unless insn.op == :ARYCAT
 
-      onto = reaching(irep, d.index, insn.reg) or return nil
+      onto = reaching(irep, d.index, insn.reg)
+      return nil unless onto
       return nil unless onto.all? { |o| !o.entry? && BytecodeIR.for(irep).source_at(o.index).op == :LOADNIL }
 
-      get = single_def(irep, d.index, insn.reg + 1, :GETIDX) or return nil
-      getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, :GETCONST) or return nil
+      get = single_def(irep, d.index, insn.reg + 1, :GETIDX)
+      return nil unless get
+      getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, :GETCONST)
+      return nil unless getc
       BytecodeIR.for(irep).source_at(getc).const_name or return nil
     end
     found = consts.reject { |c| c == :nil }.uniq
@@ -173,7 +179,8 @@ module IrSymbolFlow
   # P1/P2: the table SETIDX sites of every GETCONST of the constant, or nil when a value escapes.
   def table_writes(ireps, getconsts)
     getconsts.each_with_object([]) do |(label, idx), writes|
-      found = table_uses(ireps[label], idx) or return nil
+      found = table_uses(ireps[label], idx)
+      return nil unless found
       found.each { |n| writes << [label, n] }
     end.uniq
   end
@@ -183,7 +190,8 @@ module IrSymbolFlow
   # element a GETIDX reads from it may only be splatted (ARYCAT's source), which copies it.
   def table_uses(irep, idx)
     reg = BytecodeIR.for(irep).source_at(idx).reg
-    uses = reg && value_reads(irep, idx, reg) or return nil
+    uses = reg && value_reads(irep, idx, reg)
+    return nil unless uses
     uses.each_with_object([]) do |n, writes|
       insn = BytecodeIR.for(irep).source_at(n)
       return nil unless insn.reg == reg
@@ -197,7 +205,8 @@ module IrSymbolFlow
   end
 
   def element_reads_splat_only?(irep, idx, reg)
-    uses = value_reads(irep, idx, reg) or return false
+    uses = value_reads(irep, idx, reg)
+    return false unless uses
     uses.all? do |n|
       insn = BytecodeIR.for(irep).source_at(n)
       insn.op == :ARYCAT && insn.reg.to_i + 1 == reg.to_i
@@ -251,7 +260,8 @@ module IrSymbolFlow
   def value_reads_compute(irep, idx, reg)
     program = BytecodeIR.for(irep)
     return nil unless program.resolved? && program.handlers_resolved?
-    captured = captured_regs(irep) or return nil
+    captured = captured_regs(irep)
+    return nil unless captured
     return nil if captured.include?(reg)
 
     read_sets = if ENV['BC2CPP_SYMBOL_READS_CACHE'] != '0'
@@ -340,7 +350,8 @@ module IrSymbolFlow
 
   def collect_captures(tree, irep, depth, out)
     Array(irep.reps).each do |label|
-      child = tree[label] or next
+      child = tree[label]
+      next unless child
       BytecodeIR.for(child).each_with_op(:GETUPVAR) do |insn, _|
         index, level = insn.upvar_ref
         out << index if index && level == depth - 1
@@ -418,7 +429,8 @@ module IrSymbolFlow
     params = Hash.new { |h, k| h[k] = Set.new }
     calls.zip(insns).each do |(label, idx), insn|
       (1..arities.first).each do |k|
-        set = values_at(ctx, label, idx, insn.reg + k, Set.new) or return nil
+        set = values_at(ctx, label, idx, insn.reg + k, Set.new)
+        return nil unless set
         params[k].merge(set)
       end
     end
@@ -445,7 +457,8 @@ module IrSymbolFlow
     return EMPTY if visiting.include?(key)
 
     irep = ctx.ireps[label]
-    defs = reaching(irep, idx, reg) or return nil
+    defs = reaching(irep, idx, reg)
+    return nil unless defs
     visiting = visiting | [key]
     out = Set.new
     defs.each do |d|
@@ -454,7 +467,8 @@ module IrSymbolFlow
 
       out.merge(set)
     end
-    mutated = mutation_values(ctx, label, visiting) or return nil
+    mutated = mutation_values(ctx, label, visiting)
+    return nil unless mutated
     out.merge(mutated)
   end
 
@@ -480,7 +494,8 @@ module IrSymbolFlow
 
   def union(ctx, label, n, regs, visiting)
     regs.each_with_object(Set.new) do |r, out|
-      set = values_at(ctx, label, n, r, visiting) or return nil
+      set = values_at(ctx, label, n, r, visiting)
+      return nil unless set
       out.merge(set)
     end
   end
@@ -523,9 +538,11 @@ module IrSymbolFlow
     return EMPTY if visiting.include?(key)
 
     visiting = visiting | [key]
-    sites = mutation_sites(ctx, label) or return nil
+    sites = mutation_sites(ctx, label)
+    return nil unless sites
     sites.each_with_object(Set.new) do |(n, r), out|
-      set = values_at(ctx, label, n, r, visiting) or return nil
+      set = values_at(ctx, label, n, r, visiting)
+      return nil unless set
       out.merge(set)
     end
   end

@@ -319,7 +319,8 @@ module StaticDispatchRegistrations
   # `symbol_values` (SYMBOL_USES holds): a symbol only made into a value (`mrb_symbol_value(bc2cpp_sym(M, i))`),
   # compared (`== bc2cpp_sym(M, i)`) or listed as a keyword name looks nothing up either.
   def lookup_free_names(src, subclassed, symbol_values: false)
-    table = src[SYM_TABLE, 1] or return Set.new
+    table = src[SYM_TABLE, 1]
+    return Set.new unless table
     names = table.scan(STRING_LITERAL).map { |(s)| unescape(s) }
     uses = Hash.new(0)
     quiet = Hash.new(0)
@@ -739,7 +740,8 @@ module StaticDispatchRegistrations
         unless superclass_of.key?(sup)
           # A native class: only mruby's own exception chain (src/error.c) is known; `class E < StandardError`
           # inside a module reads back as "Mod::StandardError". Any other has ancestors this cannot see.
-          chain = native_superclass_chain(sup.split('::').last) or return :all
+          chain = native_superclass_chain(sup.split('::').last)
+          return :all unless chain
           found.merge(chain)
           break
         end

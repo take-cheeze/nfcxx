@@ -139,7 +139,8 @@ module RbsParamCheck
       ctx[:owner_of][label] ||= ctx[:self_of][up] if up
     end
     loaded.methods.each_value do |sig|
-      d = defs_by[[sig.owner, sig.name]] or next
+      d = defs_by[[sig.owner, sig.name]]
+      next unless d
       ctx[:sig_of][d.irep] = sig
       ctx[:def_of][d.irep] = d
     end
@@ -308,7 +309,8 @@ module RbsParamCheck
         table[label] = table[label].except(pos + 1).freeze if table[label]
       end
     end
-    ann = ctx[:class_annotations][label] or return
+    ann = ctx[:class_annotations][label]
+    return unless ann
     args = ann.args.dup
     args[pos] = nil
     ctx[:class_annotations][label] = ann.class.new(args: args)

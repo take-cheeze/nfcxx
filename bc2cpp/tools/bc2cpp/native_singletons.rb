@@ -35,7 +35,8 @@ module NativeSingletons
   def class_variables(text, param_owners = {})
     bindings = Hash.new { |hash, key| hash[key] = [] }
     text.scan(/(?:\b(?:struct\s+)?RClass\s*\*\s*)?\b(\w+)\s*=\s*(mrb_\w+)\s*\(([^;]*?)\)\s*;/m) do |var, function, args|
-      shape = function.match(CLASS_FUNCTION) or next
+      shape = function.match(CLASS_FUNCTION)
+      next unless shape
       parts = split_args(args)
       outer = shape[2] ? parts[1] : nil
       name_arg = shape[2] ? parts[2] : parts[1]
@@ -110,7 +111,8 @@ module NativeSingletons
       text.scan(STRING_LITERAL) { |(literal)| table[literal][:spellings] += 1 }
       text.scan(MRB_SYM_TOKEN_RE) { |macro, token| table[resolve_mrb_sym_token(macro, token)][:spellings] += 1 }
       text.scan(/\bmrb_define_(\w+)\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*(#{NAME_ARG})\s*,/) do |kind, var, arg, literal, macro, token|
-        where = REGISTRATIONS[kind] or next
+        where = REGISTRATIONS[kind]
+        next unless where
         name = literal || resolve_mrb_sym_token(macro, token)
         _ = arg
         owner = owners[var]

@@ -401,7 +401,8 @@ module IntegerConstants
     ScanCache.fetch('integer_constants.native_defined_const_names', Array(paths), cache_absent: false) do
       names = Set.new
       Array(paths).each do |path|
-      src = SourceText.read(path, 'IntegerConstants.native_defined_const_names') or next
+      src = SourceText.read(path, 'IntegerConstants.native_defined_const_names')
+      next unless src
       src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\([^;]{0,200}/m) do
         seg = Regexp.last_match(0)
         seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
@@ -458,7 +459,8 @@ module IntegerConstants
   def self.foreign_class_poison(paths, ir_paths)
     poisoned = Set.new
     Array(paths).each do |path|
-      src = SourceText.read(path, 'IntegerConstants.foreign_class_poison') or next
+      src = SourceText.read(path, 'IntegerConstants.foreign_class_poison')
+      next unless src
       ir_bound = ir_paths.include?(File.expand_path(path))
       src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=([^=~\n]*)$/) do |name, rhs|
         next if INTEGER_LITERAL_RHS.match?(rhs)
@@ -477,7 +479,8 @@ module IntegerConstants
     ScanCache.fetch('integer_constants.foreign_const_names', Array(paths), cache_absent: false) do
       names = Set.new
       Array(paths).each do |path|
-        src = SourceText.read(path, 'IntegerConstants.foreign_const_names') or next
+        src = SourceText.read(path, 'IntegerConstants.foreign_const_names')
+        next unless src
       src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
       # `class Foo` / `module Foo` bind a constant too (poison source 2).
       src.scan(/^\s*(?:class|module)\s+([A-Z][A-Za-z_0-9]*)/) { names << Regexp.last_match(1) }

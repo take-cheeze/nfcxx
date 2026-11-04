@@ -320,7 +320,8 @@ module UniqueClassNames
   def foreign_rebound_names(paths)
     names = Set.new
     Array(paths).each do |path|
-      src = SourceText.read(path, 'UniqueClassNames.foreign_rebound_names') or next
+      src = SourceText.read(path, 'UniqueClassNames.foreign_rebound_names')
+      next unless src
       src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
     end
     names
@@ -333,7 +334,8 @@ module UniqueClassNames
     top_level = {}
     nested = Set.new
     Array(paths).each do |path|
-      src = SourceText.read(path, 'UniqueClassNames.foreign_class_names') or next
+      src = SourceText.read(path, 'UniqueClassNames.foreign_class_names')
+      next unless src
       src.scan(/^(?:class|module)\s+([A-Z][A-Za-z_0-9]*)(?:\s*<\s*([A-Z][A-Za-z_0-9]*)\b)?/) do |name, sup|
         top_level[name] = top_level.key?(name) && top_level[name] != sup ? nil : sup # conflicting supers: unknown
       end

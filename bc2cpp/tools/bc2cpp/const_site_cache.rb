@@ -179,7 +179,8 @@ module StableClassConstants
     ScanCache.fetch('stable_class_constants.foreign_reassigned_names', Array(paths), cache_absent: false) do
       names = Set.new
       Array(paths).each do |path|
-        text = SourceText.read(path, 'StableClassConstants.foreign_reassigned_names') or next
+        text = SourceText.read(path, 'StableClassConstants.foreign_reassigned_names')
+        next unless text
         text.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
       end
       names
