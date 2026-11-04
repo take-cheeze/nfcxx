@@ -5895,9 +5895,126 @@ static int ir_asm_ptx(an_asm_entry_ptr ae, int d)
   return 1;
 }
 
+/* ---- General x86 inline assembly. A template that none of the classes above knows is printed as
+   (asm-block "HEX" (opnd KIND CODE SIZE ARG)...): the template in hex, so any byte can be in it, and each operand in gcc's
+   order (outputs first). KIND is in (an input), out (a "=" output), inout (a "+" operand) or mem (a memory operand: ARG is
+   its address; no copy in or out). CODE is the register constraint: r (any integer register), a b c d S D (that register),
+   or a digit (the operand tied to that one). SIZE is the operand's size in bytes (0 for mem). ARG is the value (in) or the
+   address (out, inout, mem). The SSA route emits a helper for the template (scripts/pathb-ssa-qbe.rb, asm_block_helper).
+   Returns 1 when it printed the statement, 0 when the statement is outside this form (the caller refuses it). */
+static int ir_asm_general_code(an_asm_operand_ptr op, char *code)
+{
+  an_asm_operand_constraint_ptr c;
+  char reg = 0, tie = 0;
+  int mem = 0;
+  for (c = op->constraints; c != NULL; c = c->next) {
+    switch (c->kind) {
+      case aoc_end_of_constraint: break;
+      case aoc_reg_a: reg = 'a'; break;
+      case aoc_reg_b: reg = 'b'; break;
+      case aoc_reg_c: reg = 'c'; break;
+      case aoc_reg_d: reg = 'd'; break;
+      case aoc_reg_si: reg = 'S'; break;
+      case aoc_reg_di: reg = 'D'; break;
+      case aoc_general: case aoc_any: case aoc_reg_integer: case aoc_reg_q: if (!reg) reg = 'r'; break;
+      case aoc_match_0: case aoc_match_1: case aoc_match_2: case aoc_match_3: case aoc_match_4:
+      case aoc_match_5: case aoc_match_6: case aoc_match_7: case aoc_match_8: case aoc_match_9:
+        tie = (char)('0' + ((int)c->kind - (int)aoc_match_0)); break;
+      case aoc_mem_any: case aoc_mem_load: case aoc_mem_offset: case aoc_mem_nonoffset: case aoc_mem_autoinc:
+      case aoc_mem_autodec: mem = 1; break;
+      case aoc_mod_earlyclobber: case aoc_mod_commutative_ops: case aoc_mod_ignore: case aoc_mod_ignore_char:
+      case aoc_mod_disparage_slightly: case aoc_mod_disparage_severely: break;
+      default: return 0; /* x87, flags, floating-point and immediate constraints are outside this form */
+    }
+  }
+  if (tie) *code = tie;
+  else if (reg) *code = reg;
+  else if (mem) *code = 'm';
+  else return 0;
+  return 1;
+}
+
+/* A growing string for the (asm-block ...) text. */
+typedef struct { char *s; size_t len, cap; } ir_sbuf;
+static void ir_sbuf_add(ir_sbuf *b, const char *s)
+{
+  size_t n = strlen(s);
+  if (b->len + n + 1 > b->cap) {
+    b->cap = (b->len + n + 1) * 2 + 64;
+    b->s = (char *)realloc(b->s, b->cap);
+  }
+  memcpy(b->s + b->len, s, n + 1);
+  b->len += n;
+}
+
+static int ir_asm_general(an_asm_entry_ptr ae, int d)
+{
+  an_asm_operand_ptr op;
+  const char *tx;
+  size_t n, k;
+  int nops = 0, ok = 1;
+  ir_sbuf b = { NULL, 0, 0 };
+  char *hex;
+  if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string || ae->is_asm_goto) return 0;
+  tx = ae->asm_string->variant.string.value;
+  n = (size_t)ae->asm_string->variant.string.length;
+  while (n > 0 && tx[n - 1] == '\0') n--; /* the length counts the terminator */
+  /* Validate every operand before anything is printed: a refusal must not leave statements behind. */
+  for (op = ae->operands; op != NULL && ok; op = op->next, nops++) {
+    char code;
+    a_type_ptr ot = op->expression != NULL ? op->expression->type : NULL;
+    int is_mem;
+    if (nops >= IR_ASM_OPS_MAX || ot == NULL || op->expression == NULL) { ok = 0; break; }
+    if (!ir_asm_general_code(op, &code)) { ok = 0; break; }
+    is_mem = code == 'm';
+    if (!is_mem && (!ir_asm_scalar(ot) || ir_is_bool(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
+                                                              ir_size_of(ot) != 4 && ir_size_of(ot) != 8))) { ok = 0; break; }
+    if (((op->modifiers & aom_output) != 0 || is_mem) && !op->expression->is_lvalue) { ok = 0; break; }
+  }
+  if (!ok) return 0;
+  hex = (char *)malloc(2 * n + 1);
+  for (k = 0; k < n; k++) sprintf(hex + 2 * k, "%02x", (unsigned char)tx[k]);
+  hex[2 * n] = '\0';
+  ir_sbuf_add(&b, "(asm-block \"");
+  ir_sbuf_add(&b, hex);
+  ir_sbuf_add(&b, "\"");
+  free(hex);
+  /* Evaluate the operands: their statements are printed before the (asm-block ...) form. */
+  for (op = ae->operands; op != NULL; op = op->next) {
+    char code, text[64];
+    int is_mem;
+    ir_val v;
+    const char *kind;
+    (void)ir_asm_general_code(op, &code);
+    is_mem = code == 'm';
+    if (is_mem) {
+      v = ir_lval(op->expression);
+      kind = "mem";
+    } else if ((op->modifiers & aom_output) != 0) {
+      v = ir_lval(op->expression);
+      kind = op->modifiers == aom_modify ? "inout" : "out";
+    } else {
+      v = ir_rval(op->expression);
+      kind = "in";
+    }
+    snprintf(text, sizeof text, " (opnd %s \"%c\" %d ", kind, code, is_mem ? 0 : (int)ir_size_of(op->expression->type));
+    ir_sbuf_add(&b, text);
+    ir_sbuf_add(&b, v.s);
+    ir_sbuf_add(&b, ")");
+  }
+  ir_sbuf_add(&b, ")");
+  ir_note(1, stmk_asm, 1);
+  ir_line(d, b.s);
+  free(b.s);
+  return 1;
+}
+
 static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
 {
   if (ir_asm_ptx(ae, d)) return;
+  /* A template no class knows: the general form (below). */
+  if (ae != NULL && ae->asm_string != NULL && ae->asm_string->kind == ck_string &&
+      ir_asm_class(ae->asm_string, ae->gnu_asm_form) == IR_ASM_NONE && ir_asm_general(ae, d)) return;
   const char *why = NULL;
   int cls = IR_ASM_NONE, mem = 0, nout = 0, nin = 0, idx = 0, got_a = 0, got_d = 0;
   a_named_register_list_ptr cl;
