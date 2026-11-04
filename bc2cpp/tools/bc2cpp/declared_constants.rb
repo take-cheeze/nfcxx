@@ -50,6 +50,7 @@ module DeclaredConstants
   def load(files, display_root, known_owners)
     return [] unless enabled? && files && !files.empty?
 
+    require 'pathname'
     require 'rbs'
     files.flat_map do |file|
       rel = display_root ? file.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : file

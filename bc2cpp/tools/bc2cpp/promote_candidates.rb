@@ -2,6 +2,7 @@
 
 require 'json'
 require 'pathname'
+require 'pathname'
 require 'rbs'
 require 'set'
 

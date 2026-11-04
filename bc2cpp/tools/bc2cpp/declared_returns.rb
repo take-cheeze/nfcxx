@@ -159,6 +159,7 @@ module DeclaredReturns
 
   # [owner, name] of the method declarations annotated %a{bc2cpp:hint} (owners as RbsSignatures keys them).
   def hinted_methods(files)
+    require 'pathname'
     require 'rbs'
     out = Set.new
     walk = lambda do |decls, scope|

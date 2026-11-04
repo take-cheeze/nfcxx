@@ -70,6 +70,7 @@ module NativeSigs
   # version that parsed it, so only a cold run parses the whole file.
   def kept_texts
     @kept_texts ||= begin
+      require 'pathname'
       require 'rbs'
       ScanCache.fetch("native_sigs.kept_texts.rbs#{RBS::VERSION}", [FILE], cache_absent: false) do
         kept_texts_of(parse, File.readlines(FILE))
@@ -129,6 +130,7 @@ module NativeSigs
   # Every top-level declaration of the file, parsed once per process.
   def parse
     @parse ||= begin
+      require 'pathname'
       require 'rbs'
       RbsParseMemo.decls('declarations.rbs', File.read(FILE))
     rescue LoadError

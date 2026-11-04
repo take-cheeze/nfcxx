@@ -87,6 +87,7 @@ module RbsSignatures
 
     out = Loaded.new(methods: {}, ivars: {}, diagnostics: [], files: files, supers: [])
     begin
+      require 'pathname'
       require 'rbs'
     rescue LoadError
       out.diagnostics << Diag.new(file: files.first, line: 1, col: 1, severity: 'error', code: 'TC1002',
