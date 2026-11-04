@@ -859,8 +859,6 @@ module Bc2cppCompiledGemGeneration
         FileUtils.mkdir_p(File.dirname(path))
         File.write(path, STUB)
       end
-      # An empty manifest: phase 1's mrblib keeps every body (MRBLIB_STUBS).
-      File.write(MrblibStubs.manifest_path(env.fetch('OUT_DIR'), symbol), '')
       File.write(File.join(env.fetch('OUT_DIR'), "#{symbol}_load.json"), '{}')
       @done[generated] = true
     end
