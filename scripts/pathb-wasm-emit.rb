@@ -376,6 +376,7 @@ class Module_
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
+  attr_accessor :threads   # --threads: a shared memory, imported as env.memory, with the stack pointer exported (see emit_module)
   attr_accessor :memory64   # the 64-bit memory (--memory64): memory addresses are i64 (see push_addr)
   attr_accessor :stack_fns   # --emscripten: the stack functions [name, type index, body] (see emscripten_stack_fns)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
@@ -484,6 +485,26 @@ ASAN_INVALID_FREE = 0x101
 ASAN_OUT_OF_MEMORY = 0x102   # malloc could not hold the request (its size is the report's address; see the host)
 HEAP_SIZE = 262144           # the heap: a fixed region of this many bytes, which malloc does not grow (no memory.grow)
 ALLOC_SIGS = { "malloc" => [[:i64], :i64], "free" => [[:i64], nil] }   # the allocator's signatures (params, result)
+# The atomic builtins (GCC's __atomic_* and __sync_*, with a 4- or 8-byte size suffix) and what each is: [kind, operation].
+# The read-modify-write operations' opcodes (the threads proposal, 0xfe prefix) are in ATOMIC_RMW: [i32, i64]. All of them
+# are sequentially consistent, so the memory order argument is not used.
+ATOMIC_BUILTINS = {
+  "__atomic_load_n" => [:load, nil], "__atomic_store_n" => [:store, nil],
+  "__atomic_exchange_n" => [:rmw, "xchg"], "__sync_lock_test_and_set" => [:rmw, "xchg"],
+  "__atomic_fetch_add" => [:rmw, "add"], "__sync_fetch_and_add" => [:rmw, "add"],
+  "__atomic_fetch_sub" => [:rmw, "sub"], "__sync_fetch_and_sub" => [:rmw, "sub"],
+  "__atomic_fetch_and" => [:rmw, "and"], "__sync_fetch_and_and" => [:rmw, "and"],
+  "__atomic_fetch_or" => [:rmw, "or"], "__sync_fetch_and_or" => [:rmw, "or"],
+  "__atomic_fetch_xor" => [:rmw, "xor"], "__sync_fetch_and_xor" => [:rmw, "xor"],
+  "__sync_val_compare_and_swap" => [:cas, nil],
+  # the sized forms GCC's front end lowers the builtins to: the value is returned, except compare_exchange, whose expected
+  # value is passed by address and set to the old value
+  "__atomic_load" => [:load, nil], "__atomic_store" => [:store, nil],
+  "__atomic_exchange" => [:rmw, "xchg"], "__atomic_compare_exchange" => [:cas_ptr, nil],
+}.freeze
+ATOMIC_FENCES = ["__atomic_thread_fence", "__sync_synchronize"].freeze
+ATOMIC_RMW = { "add" => [0x1e, 0x1f], "sub" => [0x25, 0x26], "and" => [0x2c, 0x2d], "or" => [0x33, 0x34],
+               "xor" => [0x3a, 0x3b], "xchg" => [0x41, 0x42] }.freeze
 
 # (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT): a defined global with its initializer. The TYPE is not needed:
 # the size and alignment come from BYTES and ALIGN. An extern declaration, a thread-local and a dynamic initializer are
@@ -824,6 +845,13 @@ class Fn
       @tmp32 = @next_local
       @local_types << :i32
       @next_local += 1
+    end
+    if @mod.threads
+      # --threads: two i32 scratch locals for a compare-and-swap whose expected value is passed by address
+      @atom_a = @next_local
+      @atom_b = @next_local + 1
+      @local_types << :i32 << :i32
+      @next_local += 2
     end
     @body = body_forms
     @body.each { |s| collect_lets(s) }
@@ -1423,6 +1451,10 @@ class Fn
       h = head_of(a)
       raise Refused, "aggregate argument (#{h})" if h == "byval" || h == "sret"
     end
+    # --threads only: without a shared memory the atomics stay what they were (imports, as the Emscripten runtime may provide them)
+    if @mod.threads && callee.is_a?(IRSym) && callee.sig == "&" && !@mod.defines?(callee.name) && atomic_builtin(callee.name)
+      return atomic_call(callee.name, args)
+    end
     arg_types = args.map { |a| wtype(op_type(a)) }
     args.each { |a| push_op(a) }
     unless callee.is_a?(IRSym) && callee.sig == "&"
@@ -1450,6 +1482,60 @@ class Fn
           end
     e(0x10); leb_u(idx)
     wtype(ret)
+  end
+
+  # An atomic builtin: [kind, operation, size] for NAME (a fence has no size), or nil.
+  def atomic_builtin(name)
+    return [:fence, nil, 0] if ATOMIC_FENCES.include?(name)
+    m = name.match(/\A(.+)_(\d+)\z/) or return nil
+    kind = ATOMIC_BUILTINS[m[1]] or return nil
+    [kind[0], kind[1], m[2].to_i]
+  end
+
+  # The atomic builtin NAME called with ARGS: its wasm atomic instruction, with the address first. The threads proposal
+  # needs a shared memory (--threads); the memory's alignment is the natural one (the instruction checks it). A
+  # read-modify-write or a compare-and-swap yields the old value, and a load the value; a store and a fence yield none.
+  def atomic_call(name, args)
+    kind, op, size = atomic_builtin(name)
+    if kind == :fence
+      raise Refused, "atomic fence (needs --threads: the module has one memory, a fence orders nothing)" unless @mod.threads
+      e(0xfe, 0x03, 0x00)                # atomic.fence
+      return nil
+    end
+    raise Refused, "atomic #{name} (needs --threads: the memory must be shared)" unless @mod.threads
+    raise Refused, "atomic #{name} of #{size} bytes (only 4 and 8)" unless [4, 8].include?(size)
+    wty = size == 8 ? :i64 : :i32
+    align = size == 8 ? 3 : 2
+    if kind == :cas_ptr
+      # (ptr, &expected, desired): load the expected value, compare-and-swap, store the old value back to expected, and the
+      # result is whether the old value was the expected one. Two i32 scratch locals hold the expected and the old value.
+      raise Refused, "atomic #{name} of 8 bytes (only the 4-byte form)" unless size == 4
+      push_addr(args[1]); e(0x28, 0x02, 0x00); e(0x21); leb_u(@atom_a)           # expected := *&expected
+      push_addr(args[0]); e(0x20); leb_u(@atom_a); push_op(args[2], :i32)
+      e(0xfe, 0x48, 0x02, 0x00)                                                  # i32.atomic.rmw.cmpxchg: the old value
+      e(0x21); leb_u(@atom_b)
+      push_addr(args[1]); e(0x20); leb_u(@atom_b); e(0x36, 0x02, 0x00)           # *&expected := old
+      e(0x20); leb_u(@atom_b); e(0x20); leb_u(@atom_a); e(0x46)                  # old == expected
+      return :i32
+    end
+    push_addr(args[0])                   # the address: an i32 memory address
+    case kind
+    when :load
+      e(0xfe, size == 8 ? 0x11 : 0x10)
+    when :store
+      push_op(args[1], wty)
+      e(0xfe, size == 8 ? 0x18 : 0x17)
+      e(align, 0x00); return nil
+    when :rmw
+      push_op(args[1], wty)
+      e(0xfe, ATOMIC_RMW.fetch(op)[size == 8 ? 1 : 0])
+    when :cas
+      push_op(args[1], wty)
+      push_op(args[2], wty)
+      e(0xfe, size == 8 ? 0x49 : 0x48)
+    end
+    e(align, 0x00)                       # the memory argument: the natural alignment, offset 0
+    wty
   end
 
   # ---- statements
@@ -1591,9 +1677,11 @@ class Fn
       @loc = "#{s[1]}:#{s[2]}"
     when "likely", "unlikely"
       # branch hints (docs/notes/ubsan.md): no code
-    when "barrier", "fence"
-      # a compiler barrier or a memory fence: the module has no shared memory and no atomics (one thread, one memory), and
-      # the statements keep their order, so there is no code to emit
+    when "barrier"
+      # a compiler barrier: the statements keep their order, so there is no code to emit
+    when "fence"
+      # a memory fence: with --threads it is atomic.fence; in the single-thread module (one memory) it orders nothing
+      e(0xfe, 0x03, 0x00) if @mod.threads
 
     when "unreachable", "trap"
       e(0x00)
@@ -2177,13 +2265,13 @@ end
 # is added only with a source that names both sides.
 EMSCRIPTEN_IMPORT_NAMES = {}
 
-USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [--memory64] [--names] [FILE.ir | -] > out.wasm\n"
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [--memory64] [--threads] [--names] [FILE.ir | -] > out.wasm\n"
 
 # --names: a "name" custom section that names the module's functions, so that an engine's stack trace (and a trap's)
 # names them rather than numbering them (the wasm explorer). Without it the module is the same as before.
 $names = false
 
-def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false)
+def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false, threads = false)
   forms = parse_forms(tokenize(src))
   # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
   # takes ILP32 only). The model is set before any type is read.
@@ -2247,7 +2335,8 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
   address_taken(forms).each_with_index { |nm, i| mod.table[nm] = i + 1 }
   mod.asan = asan
   mod.emscripten = emscripten
-  mod.import_memory = import_memory
+  mod.import_memory = import_memory || threads   # --threads: the shared memory is imported (every thread's instance gets it)
+  mod.threads = threads
   mod.memory64 = memory64
   mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
   mod.data_end = build_statics(mod, objs, asan)
@@ -2341,8 +2430,14 @@ def encode_module(mod, bodies)
       name_bytes("env", im)
       name_bytes("memory", im)
       im << 0x02                         # memory
-      im << 0x00                         # limits without a maximum: the host's memory may grow
-      uleb(mod.pages, im)                # the initial size: the pages the module's layout is built on
+      if mod.threads
+        im << 0x03                       # limits: shared, with a maximum (a shared memory has one)
+        uleb(mod.pages, im)              # minimum and maximum: the pages the layout is built on, fixed
+        uleb(mod.pages, im)
+      else
+        im << 0x00                       # limits without a maximum: the host's memory may grow
+        uleb(mod.pages, im)              # the initial size: the pages the module's layout is built on
+      end
     end
     section(2, im, out)
   end
@@ -2408,7 +2503,14 @@ def encode_module(mod, bodies)
   ex = []
   nexp = (mod.import_memory ? 0 : 1) + bodies.length
   nexp += 5 + mod.stack_fns.length if mod.emscripten
+  nexp += 1 if mod.threads
   uleb(nexp, ex)
+  if mod.threads
+    # --threads: each thread's instance sets its own stack pointer (global 0) before it runs (see tests/wasm-threads)
+    name_bytes("__stack_pointer", ex)
+    ex << 0x03
+    uleb(0, ex)
+  end
   unless mod.import_memory
     name_bytes("memory", ex)
     ex << 0x02
@@ -2489,6 +2591,13 @@ def encode_module(mod, bodies)
     end
     section(11, dsec, out)
   end
+  if mod.threads
+    # custom section "nfcxx.threads": the memory's page count (u32, little-endian), which the host needs to create the
+    # shared memory the module imports (a JS memory's limits are not readable from the module)
+    payload = name_bytes("nfcxx.threads", [])
+    [mod.pages].pack("V").each_byte { |b| payload << b }
+    section(0, payload, out)
+  end
   out.concat(name_section(mod, bodies)) if $names
   out
 end
@@ -2526,6 +2635,7 @@ def main(argv)
   emscripten = false
   import_memory = false
   memory64 = false
+  threads = false
   while !args.empty? && args.first.start_with?("--")
     flag = args.shift
     if flag == "--asan"
@@ -2536,6 +2646,8 @@ def main(argv)
       import_memory = true
     elsif flag == "--memory64"
       memory64 = true
+    elsif flag == "--threads"
+      threads = true
     elsif flag == "--names"
       $names = true
     else
@@ -2559,9 +2671,13 @@ def main(argv)
     $stderr.write("error: --emscripten-import-memory needs --emscripten\n")
     return 1
   end
+  if threads && (asan || emscripten || memory64)
+    $stderr.write("error: --threads is not combined with --asan, --emscripten or --memory64 (their runtime is single-threaded)\n")
+    return 1
+  end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src, asan, emscripten, import_memory, memory64)
+    bytes = emit_module(src, asan, emscripten, import_memory, memory64, threads)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3
