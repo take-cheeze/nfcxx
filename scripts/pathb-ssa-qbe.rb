@@ -1288,10 +1288,16 @@ end
     # --safe (pathb-qbe-emit.rb's call rules): a call through a pointer is checked against the function's signature
     # (__nfcxx_sp_call); a direct call of a block function (SP_MEMFN) checks its pointer arguments over the length.
     def sp_call_checks(c, f, sret, callee, args)
+      rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.cls(c[1]))
+      classes = args.map { |a| a.split(" ", 2)[0] }
+      sig = Qbe.sp_sig(@abi, rcls, classes)
+      # A call through a pointer that the converter has turned into a direct call (a function address stored in a
+      # promoted slot): the callee of the defined function it names must have this signature, or the call is wrong.
+      direct_entry = f.is_a?(Ref) && f.sigil == "&" && (Qbe.sp_funcs || []).find { |sym, _| sym == Qbe.symbol(f.raw) }
       if !(f.is_a?(Ref) && f.sigil == "&")
-        rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.cls(c[1]))
-        classes = args.map { |a| a.split(" ", 2)[0] }
-        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{Qbe.sp_sig(@abi, rcls, classes)}, #{sp_where})"
+        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{sig}, #{sp_where})"
+      elsif direct_entry && direct_entry[1] != sig
+        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{sig}, #{sp_where})"
       elsif (name = f.raw.delete('"')) && Qbe::SP_MEMFN.key?(name) && args.length == 3 && args[2].start_with?("l ")
         Qbe::SP_MEMFN[name].each do |i|
           @lines << "  call $__nfcxx_sp_check(l #{args[i].split(" ", 2)[1]}, l #{args[2].split(" ", 2)[1]}, #{sp_where})"
