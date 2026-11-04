@@ -408,7 +408,7 @@ class CodeGen
   def class_def_registration(insn, program, idx, irep)
     child = def_method_child(insn, program, idx, irep)
     compiled = child && @compiled_methods&.[](child)
-    return nil unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
+    return nil unless compiled && compiled[:entry] && compiled[:aspec]
     return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
 
     define = { public: 'mrb_define_method', private: 'mrb_define_private_method' }[compiled[:visibility]]
@@ -420,7 +420,9 @@ class CodeGen
   def class_body_registration(insn, irep, owner)
     child = irep.reps[insn.def_child_index]
     compiled = child && @compiled_methods&.[](child)
-    return class_body_refusal(insn, compiled, child) unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
+    # A guarded entry registers too: its Fiber fallback reads saved bytecode, which is absent for engine methods, so a
+    # block call under a non-root Fiber then fails (the cost of removing this blocker).
+    return class_body_refusal(insn, compiled, child) unless compiled && compiled[:entry] && compiled[:aspec]
     return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
 
     call = if insn.op == :SDEF
