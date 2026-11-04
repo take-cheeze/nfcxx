@@ -32,7 +32,7 @@ module BaseSection
     'mruby-compar-ext' => 'base_compar', 'mruby-random' => 'base_random', 'mruby-rgss' => 'base_rgss', 'mruby-rpg2k' => 'base_rpg',
     'mruby-sprintf' => 'base_sprintf', 'mruby-stringio' => 'base_stringio', 'mruby-symbol-ext' => 'base_symbol',
     'mruby-time' => 'base_time',
-    'mruby-wolf' => 'base_wolf'
+    'mruby-wolf' => 'base_wolf', 'mruby-require' => 'base_require'
   }.freeze
 
   def self.tag_of(gem)
