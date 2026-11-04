@@ -24,7 +24,8 @@ module NativeVM
 
   module_function
 
-  def configure(build, native_only: build.name == 'closed' && ENV.fetch('BC2CPP_NATIVE_ONLY', '1') != '0')
+  # The closed target is native-only with no override: bytecode cannot run in it, root or Fiber.
+  def configure(build, native_only: build.name == 'closed')
     dir = File.join(build.build_dir, 'native-vm')
     header = File.join(dir, 'dispatch.inc')
     FileUtils.mkdir_p(dir)
