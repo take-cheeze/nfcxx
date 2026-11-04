@@ -683,7 +683,9 @@ if $PROGRAM_NAME == __FILE__
   defined_names = ireps.each_value.flat_map do |irep|
     BytecodeIR.for(irep).each_source.filter_map { |insn, _| insn.sym.to_s if %i[CLASS MODULE].include?(insn.op) }
   end
-  CodeGen.known_const_names = (constant_facts.groups.keys.map(&:to_s) | defined_names).to_set
+  # Names the native sources define (mrb_define_class / mrb_define_const ...) are bindings too, imported the same way.
+  native_names = IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq)
+  CodeGen.known_const_names = (constant_facts.groups.keys.map(&:to_s) | defined_names | native_names.to_a).to_set
   CodeGen.const_unresolved = []
   integer_constants =
     if closed_world.constants_static?
