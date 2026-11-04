@@ -108,7 +108,7 @@ class CodeGen
         child_path = child_body_path(program, irep, idx, owner)
         return [nil, [:UNRESOLVED_CLASS_PATH]] unless child_path
 
-        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path)
+        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path, tag: @unit_tag)
         return [nil, child_refused] unless child_code
 
         texts << child_code
