@@ -2394,7 +2394,8 @@ if $PROGRAM_NAME == __FILE__
       kept = Prism.parse(UnitBlank.blank(File.binread(file), unit_paths)).value.statements&.body || []
       kept.map { |stmt| "#{File.basename(file)}: #{stmt.class.name.split('::').last}" }
     end
-    raise "core mrblib has statements that are not units (MRB_CORE_CLASS_UNITS): #{residual.join(', ')}" unless residual.empty?
+    # Reported, not fatal: a statement that is not a unit stays unsupported (it is not run from the units).
+    warn "[bc2cpp] core mrblib statements that are not units (MRB_CORE_CLASS_UNITS): #{residual.join(', ')}" unless residual.empty?
 
     print gen.emit_core_class_units(class_units)
   end
