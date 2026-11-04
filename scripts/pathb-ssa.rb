@@ -1159,6 +1159,9 @@ end
     when "iconv" then canon(val(f[2]), f[1])
     when *FBIN.keys then round_float(val(f[2]).send(FBIN[head(f)], val(f[3])), f[1])
     when "fneg" then -val(f[2])
+    # A wrapping negation, and `not`: a complement of an integer's bits, a logical negation of a bool (the emitter's rule).
+    when "wneg" then canon(-val(f[2]), f[1])
+    when "not" then f[1] == "bool" ? (val(f[2]).zero? ? 1 : 0) : canon(~val(f[2]), f[1])
     when "i2f", "u2f" then int_to_float(val(f[2]), f[1])
     when "cf2i" then float_to_int(val(f[2]), f[1])
     when "fconv" then round_float(val(f[2]), f[1])
