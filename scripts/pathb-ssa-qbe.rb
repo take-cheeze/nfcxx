@@ -512,14 +512,23 @@ end
         if %w[in inout mem].include?(o[:kind])
           v = op(o[:arg])
           val = v
-          if o[:kind] != "mem"
+          cls = nil
+          if o[:kind] == "inout"
+            # The operand is read first: its current value, at its address (the statement passes the address).
+            ld = { 1 => "loadub", 2 => "loaduh", 4 => "loaduw", 8 => "loadl" }.fetch(o[:size]) do
+              raise QbeUnsupported, "asm-block operand of #{o[:size]} bytes"
+            end
+            cls = o[:size] == 8 ? "l" : "w"
+            val = fresh
+            @lines << "  #{val} =#{cls} #{ld} #{v}"
+          elsif o[:kind] == "in"
             cls = Qbe.cls(operand_type(o[:arg]))
             raise QbeUnsupported, "asm-block input of class #{cls}" unless %w[w l].include?(cls)
-
-            if cls == "w"
-              val = fresh
-              @lines << "  #{val} =l extuw #{v}"
-            end
+          end
+          if cls == "w"
+            ext = fresh
+            @lines << "  #{ext} =l extuw #{val}"
+            val = ext
           end
           @lines << "  storel #{val}, #{slot}"
         end
@@ -809,6 +818,8 @@ end
       # A compiler barrier is a call of an empty helper; a fence a call of a helper that executes mfence. QBE has no
       # fence instruction, so the driver (scripts/pathb-ssa-build) appends the helpers named by the marker comments.
       when "barrier" then barrier_lines
+      # (asm-block ...): a general x86 template (see asm_block_lines).
+      when "asm-block" then asm_block_lines(item)
       when "fence" then fence_lines
       # A branch-likelihood hint (likely/unlikely) changes only the layout the optimiser would choose, never the
       # meaning of the code; QBE has no such hint, so the hint emits nothing.
@@ -931,8 +942,6 @@ end
         end
       # `(p2i T P)`: a pointer's address as an integer of type T, truncated or kept as the type's canonical form.
       when "p2i" then canon_lines(dst, t, op(rv[2]))
-      # (asm-block ...): a general x86 template (see asm_block_lines).
-      when "asm-block" then asm_block_lines(item)
       # `(rdtsc)`: the time-stamp counter, from the helper the driver appends.
       when "rdtsc"
         asm_helpers << "rdtsc"

@@ -10,7 +10,10 @@
   (ret unsigned_int)
   (params)
   (slot "a" unsigned_int 4 4)
-  (unsupported stmt asm-template "cpuid")
+  (slot "b" unsigned_int 4 4)
+  (slot "c" unsigned_int 4 4)
+  (slot "d" unsigned_int 4 4)
+  (asm-block "6370756964" (opnd out "a" 4 $"a") (opnd out "b" 4 $"b") (opnd out "c" 4 $"c") (opnd out "d" 4 $"d") (opnd in "a" 4 (const int 0)))
   (let %0 unsigned_int (load unsigned_int $"a"))
   (return %0))
 
@@ -19,7 +22,9 @@
   (params (param %0 "p" (ptr int)))
   (slot "p" (ptr int) 8 8)
   (store (ptr int) $"p" %0)
-  (unsupported stmt asm-template "lock; incl %0")
+  (let %1 (ptr int) (load (ptr int) $"p"))
+  (nonnull %1)
+  (asm-block "6c6f636b3b20696e636c202530" (opnd mem "m" 0 %1))
   (return))
 
 (function "_Z8pause_okv"

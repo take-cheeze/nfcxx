@@ -96,9 +96,10 @@
   (params (param %0 "x" int))
   (slot "x" int 4 4)
   (store int $"x" %0)
-  (unsupported stmt asm-template "cpuid")
   (let %1 int (load int $"x"))
-  (return %1))
+  (asm-block "6370756964" (opnd in "a" 4 %1))
+  (let %2 int (load int $"x"))
+  (return %2))
 
 (function "_Z4bitsP2BF"
   (ret int)
