@@ -39,11 +39,9 @@ safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_I
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
 else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
 ldopt=(); [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ldopt=(--long-double=trap)
-# The emitter. The SSA route (scripts/pathb-ssa-build) is the default; NFCXX_PATHB_EMITTER=mruby selects the mruby
-# pathb-qbe-emit.rb, and NFCXX_PATHB_EMITTER=ssa forces the SSA route. A --safe build stays on the mruby emitter by
-# default, since the SSA route does not yet carry the source locations that -fsafe-pointers reports print.
-emitter=${NFCXX_PATHB_EMITTER:-}
-if [ -z "$emitter" ]; then if [ "${#safe[@]}" -gt 0 ]; then emitter=mruby; else emitter=ssa; fi; fi
+# The emitter. The SSA route (scripts/pathb-ssa-build) is the default, --safe included (its checks carry the (loc ...)
+# locations the reports print); NFCXX_PATHB_EMITTER=mruby selects the mruby pathb-qbe-emit.rb.
+emitter=${NFCXX_PATHB_EMITTER:-ssa}
 case $emitter in ssa|mruby) ;; *) echo "pathb-cc: NFCXX_PATHB_EMITTER must be ssa or mruby, not '$emitter'" >&2; exit 2 ;; esac
 rc=0; fallback=0
 if [ "$emitter" = ssa ]; then

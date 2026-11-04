@@ -23,7 +23,7 @@
 Ref = Struct.new(:sigil, :raw)   # $"x", @"x", &"f": raw is the quoted name, quotes included
 Str = Struct.new(:raw)           # a quoted string token, quotes included
 Fn = Struct.new(:name, :ret, :params, :slots, :body, :attrs)
-Blk = Struct.new(:instrs, :term)
+Blk = Struct.new(:instrs, :term, :loc)  # loc: the (loc FILE LINE) statement the block's last instruction was given under
 Phi = Struct.new(:var, :name, :type, :inc)
 Unsupported = Class.new(StandardError)
 Fail = Class.new(StandardError)
@@ -248,8 +248,18 @@ class Cfg
       l = label_block(s[1].raw)
       set_term(cur, ["br", l])
       l
+    when "loc"
+      # A source location (NFCXX_IR_LOC=1): the statements after it are at that location. It is written into a block
+      # just before the first instruction that needs it (below), so each block says its own location.
+      @loc_now = s
+      cur
     else
-      @blocks[cur].instrs << s
+      blk = @blocks[cur]
+      if @loc_now && (blk.loc.nil? || blk.loc.object_id != @loc_now.object_id)
+        blk.instrs << @loc_now
+        blk.loc = @loc_now
+      end
+      blk.instrs << s
       cur
     end
   end

@@ -332,6 +332,8 @@ module Qbe
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
     def initialize(form, globals = {}, abi = {}, link = {})
+      @ubfiles = (link[:ubfiles] ||= {})
+      @loc = nil
       @form = form
       @globals = globals
       @abi = abi
@@ -361,6 +363,7 @@ module Qbe
       plan_phis
       @blocks.each do |b|
         @cur = b[1].to_s
+        @loc = nil
         @label = block_label(@cur)
         @lines << "@#{@label}"
         items = b[2..]
@@ -470,6 +473,21 @@ end
 
     def note_type(item)
       @types[item[1]] = item[2] if %w[let phi].include?(head(item))
+    end
+
+    # The location a failed check reports: the file (its data name, see Qbe.ubfile_data) and the line of the last
+    # (loc ...) statement before the check in its block, or 0 when there is none (pathb-qbe-emit.rb's sp_where).
+    def sp_where
+      return "l 0, w 0" if @loc.nil?
+
+      idx = (@ubfiles[@loc[0]] ||= @ubfiles.length)
+      "l $__nfcxx_ubf#{idx}, w #{@loc[1]}"
+    end
+
+    # A (loc FILE LINE) statement: the statements after it in the block are at that location.
+    def set_loc(item)
+      file = item[1].respond_to?(:raw) ? item[1].raw : item[1].to_s
+      @loc = [file.delete_prefix('"').delete_suffix('"').gsub(/\\(.)/, '\1'), Qbe.int_lit(item[2])]
     end
 
     def reg(name) = "%v#{name[1..]}"
@@ -735,6 +753,7 @@ end
           @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
         end
       when "unreachable", "trap" then @lines << "  hlt"
+      when "loc" then set_loc(item)
       when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
       when "bounds" then bounds_lines(item[1], item[2])
@@ -874,7 +893,7 @@ end
         if Qbe.safe
           sum = fresh
           @lines << "  #{sum} =l add #{base}, #{Qbe.int_lit(rv[2])}"
-          @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, l 0, w 0)"
+          @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
         else
           @lines << "  #{dst} =l add #{base}, #{Qbe.int_lit(rv[2])}"
         end
@@ -971,7 +990,7 @@ end
     def safe_check(x, addr, bytes)
       return unless Qbe.safe
       return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
-      @lines << "  call $__nfcxx_sp_check(l #{addr}, l #{bytes}, l 0, w 0)"
+      @lines << "  call $__nfcxx_sp_check(l #{addr}, l #{bytes}, #{sp_where})"
     end
 
     # The unqualified type: const and volatile are access qualifiers, not part of the value's class.
@@ -997,7 +1016,7 @@ end
         # --safe: the derived address must stay in base's object (sp_derive in pathb-qbe-emit.rb).
         sum = fresh
         @lines << "  #{sum} =l add #{base}, #{scaled}"
-        @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, l 0, w 0)"
+        @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
       else
         @lines << "  #{dst} =l add #{base}, #{scaled}"
       end
@@ -1269,13 +1288,19 @@ end
     # --safe (pathb-qbe-emit.rb's call rules): a call through a pointer is checked against the function's signature
     # (__nfcxx_sp_call); a direct call of a block function (SP_MEMFN) checks its pointer arguments over the length.
     def sp_call_checks(c, f, sret, callee, args)
+      rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.cls(c[1]))
+      classes = args.map { |a| a.split(" ", 2)[0] }
+      sig = Qbe.sp_sig(@abi, rcls, classes)
+      # A call through a pointer that the converter has turned into a direct call (a function address stored in a
+      # promoted slot): the callee of the defined function it names must have this signature, or the call is wrong.
+      direct_entry = f.is_a?(Ref) && f.sigil == "&" && (Qbe.sp_funcs || []).find { |sym, _| sym == Qbe.symbol(f.raw) }
       if !(f.is_a?(Ref) && f.sigil == "&")
-        rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.cls(c[1]))
-        classes = args.map { |a| a.split(" ", 2)[0] }
-        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{Qbe.sp_sig(@abi, rcls, classes)}, l 0, w 0)"
+        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{sig}, #{sp_where})"
+      elsif direct_entry && direct_entry[1] != sig
+        @lines << "  call $__nfcxx_sp_call(l #{callee}, l #{sig}, #{sp_where})"
       elsif (name = f.raw.delete('"')) && Qbe::SP_MEMFN.key?(name) && args.length == 3 && args[2].start_with?("l ")
         Qbe::SP_MEMFN[name].each do |i|
-          @lines << "  call $__nfcxx_sp_check(l #{args[i].split(" ", 2)[1]}, l #{args[2].split(" ", 2)[1]}, l 0, w 0)"
+          @lines << "  call $__nfcxx_sp_check(l #{args[i].split(" ", 2)[1]}, l #{args[2].split(" ", 2)[1]}, #{sp_where})"
         end
       end
     end
@@ -1432,11 +1457,18 @@ end
 
   # The data of the module's globals, then the functions. A global the emitter cannot model is left out, and a
   # reference to it raises QbeUnsupported where it is used.
+  # The file names of the checks' reports: one NUL-terminated byte array for each (pathb-qbe-emit.rb's data).
+  def ubfile_data(link)
+    (link[:ubfiles] || {}).map do |file, i|
+      "data $__nfcxx_ubf#{i} = { #{(file.bytes + [0]).map { |c| "b #{c}" }.join(", ")} }"
+    end
+  end
+
   def module_il(forms)
     ctx = module_context(forms)
     emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi], ctx[:link]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
-    (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") }).join("\n\n") + "\n"
+    (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") } + ubfile_data(ctx[:link])).join("\n\n") + "\n"
   end
 
   # The part of a module that every function shares: the data of its globals and the references a function may make
@@ -1601,7 +1633,7 @@ collect = lambda do |x|
 end
 forms.select { |f| head(f) == "ssa-function" }.each { |f| collect.call(f) }
 data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
-{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells } }
+{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, ubfiles: {} } }
   end
 
   # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's
