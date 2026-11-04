@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a Rust program with mrustc and compile the monomir output with nfcxx's monomir route
-# (monomir-to-pathb.rb -> pathb-qbe-emit.rb -> QBE; scripts/qbe-cc to link).
+# (monomir-to-pathb.rb -> pathb-ssa-build, the SSA route -> QBE; scripts/qbe-cc to link).
 # The program's own code and the monomorphised generics it uses go through QBE. The rest of the
 # standard library is the one mrustc built with gcc (its rlib objects), linked in unchanged.
 # This mirrors scripts/mrustc-nfcc.sh (the C route) with the same arguments and environment.
@@ -41,12 +41,11 @@ MRUSTC_TARGET_VER=${MRUSTC_TARGET_VER:-1.90} "$mrustc" "$src" -o "$tmp/prog" -L 
 [ -f "$tmp/prog.mir" ] || { echo "mrustc-monomir: mrustc wrote no mir" >&2; exit 1; }
 ruby "$root/scripts/monomir-to-pathb.rb" "$tmp/prog.mir" "$tmp/prog.ir" ||
   { echo "mrustc-monomir: monomir-to-pathb failed" >&2; exit 1; }
-"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" "$tmp/prog.ir" > "$tmp/prog.qbe" ||
-  { echo "mrustc-monomir: pathb-qbe-emit failed" >&2; exit 1; }
-sed -i 's/__DOLLAR__/$/g' "$tmp/prog.qbe"
-"$root/build/qbe/qbe" "$tmp/prog.qbe" -o "$tmp/prog.s" ||
-  { echo "mrustc-monomir: qbe failed" >&2; exit 1; }
-"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/prog.qbe" "$tmp/prog.s"
+# The SSA route (scripts/pathb-ssa-build: IR -> SSA -> QBE -> assembly). The names' placeholder is replaced in the IR, as
+# the QBE text was before.
+sed -i 's/__DOLLAR__/$/g' "$tmp/prog.ir"
+"$root/scripts/pathb-ssa-build" -o "$tmp/prog.s" "$tmp/prog.ir" ||
+  { echo "mrustc-monomir: pathb-ssa-build failed" >&2; exit 1; }
 as "$tmp/prog.s" -o "$tmp/prog.o" || { echo "mrustc-monomir: as failed" >&2; exit 1; }
 
 # mrustc records the exact crate dependencies in the dump, including non-std crates
