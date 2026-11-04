@@ -2,16 +2,16 @@
 
 # CLASS_BODY_SCAN: what the statements of a gem's class and module bodies are. A body is the code between
 # `class X` and its `end` (and a gem's top level, its root); the VM runs it once while the mrblib loads. Whether a
-# body can be compiled (LoadCompile) rests on its statements alone, so this file names the forms the compiler
+# body can be compiled rests on its statements alone, so this file names the forms the compiler
 # understands and sorts every other statement into the reason it blocks:
 #
 #   declarative       nested class/module/`class << self` bodies, include/extend/prepend of constants,
 #                     attr_*, alias/alias_method, private/public/protected/module_function, private_constant
-#   def               a method definition (compiled, stubbed or kept bytecode: LoadCompile decides by name)
+#   def               a method definition (compiled or kept bytecode)
 #   const_literal     `X = <literal>`: Integer, Float, String, Symbol, nil/true/false, and Array/Hash/Range of
 #                     those, with or without `.freeze`
 #   const_pure        `X = <pure expression>`: constants, literals and block-less calls on them (`A::B * 2`,
-#                     `Color.new(1, 2, 3, 4)`, `OTHER.merge(...)`): everything LoadCompile can evaluate in order
+#                     `Color.new(1, 2, 3, 4)`, `OTHER.merge(...)`): everything the class-body compiler can evaluate in order
 #   class_ivar        `@x = <pure expression>` in a class body
 #   const_computed    `X = <anything else>`
 #   dsl_call          any other call: a registration helper, define_method, `Foo.bar`
@@ -164,7 +164,7 @@ module ClassBodyScan
   # A value with no run-time input that the compiler can rebuild: nothing is evaluated, only allocated.
   def literal?(node)
     case node
-    # Any Integer: one outside the 32-bit range is built from its decimal text at load (BIG in load_compile.rb), as
+    # Any Integer: one outside the 32-bit range is built from its decimal text at load (BIG in the class-body loader), as
     # an Array is built from its elements, so no target keeps a bignum in the irep's literal pool.
     when Prism::IntegerNode then true
     when Prism::FloatNode, Prism::StringNode, Prism::SymbolNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode then true
@@ -203,10 +203,10 @@ module ClassBodyScan
 end
 
 module ClassBodyScan
-  # PURE_EXPRESSION: what LoadCompile evaluates at load time, in source order, with no frame of its own: literals,
+  # PURE_EXPRESSION: what the class-body compiler evaluates at load time, in source order, with no frame of its own: literals,
   # constants (looked up lexically), Array/Hash/Range of those, and block-less calls on them. A call may run any
   # code, but it takes no block or local, so it reads only what an earlier statement or gem defined, and the
-  # compiled load keeps the statements in order. This module is the one definition of "pure": LoadCompile's emitter
+  # compiled load keeps the statements in order. This module is the one definition of "pure": the class-body emitter's
   # raises on any node it does not accept, so the classification and the compiler cannot disagree.
   module Pure
     module_function

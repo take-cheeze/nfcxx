@@ -155,7 +155,6 @@ BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
 require 'prism'
 require_relative '../rgss_tts_config'
-require_relative 'mrblib_stubs'
 require_relative 'gem_owners'
 require_relative 'compiled_gems_config'
 
@@ -713,31 +712,7 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
   env['BC2CPP_MAIN_AST'] = ENV['BC2CPP_MAIN_AST'] if ENV['BC2CPP_MAIN_AST']
   env['BC2CPP_NATIVE_INVENTORY'] = ENV['BC2CPP_NATIVE_INVENTORY'] if ENV['BC2CPP_NATIVE_INVENTORY']
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
-  env['BC2CPP_LOAD_WORLD'] = bc2cpp_load_world(spec) if ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') != 'off'
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
-end
-
-# LOAD_COMPILE: {out_symbol => mrblib files} of the compiled gems in `spec`'s build whose base gem recorded its sources
-# (bc2cpp_stub_mrblib), as JSON: the program a load plan splits. A gem that left them out takes no part.
-def bc2cpp_load_world(spec)
-  require 'json'
-  world = spec.build.gems.each_with_object({}) do |gem, all|
-    compiled = BC2CPP_COMPILED_GEMS["#{gem.name}-compiled"] or next
-    next unless spec.build.gems.any? { |g| g.name == "#{gem.name}-compiled" }
-
-    files = gem.instance_variable_get(:@bc2cpp_mrblib_sources) or next
-    all[compiled[:out_symbol]] = files.map { |f| File.expand_path(f) }
-  end
-  # CORE_WORLD: the core ext gems' mrblib is the core's world entry (planned in definitions-only mode, see plan_for_env).
-  core = BC2CPP_COMPILED_GEMS['mruby-core-compiled']
-  if core && spec.build.gems.any? { |g| g.name == 'mruby-core-compiled' }
-    ext = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).flat_map do |name|
-      gem = spec.build.gems.find { |g| g.name == name } or next []
-      (gem.instance_variable_get(:@bc2cpp_mrblib_sources) || []).map { |f| File.expand_path(f) }
-    end
-    world[core[:out_symbol]] = (world[core[:out_symbol]] || []) + ext unless ext.empty?
-  end
-  JSON.generate(world)
 end
 
 # BC2CPP_SHARDS (docs/bc2cpp-shards.md): translation units per compiled gem, default 4 (the CI runners' cores). A
@@ -859,7 +834,6 @@ module Bc2cppCompiledGemGeneration
         FileUtils.mkdir_p(File.dirname(path))
         File.write(path, STUB)
       end
-      File.write(File.join(env.fetch('OUT_DIR'), "#{symbol}_load.json"), '{}')
       @done[generated] = true
     end
   end

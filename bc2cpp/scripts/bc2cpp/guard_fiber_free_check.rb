@@ -3,7 +3,7 @@
 
 # GUARD_FIBER_FREE (tools/bc2cpp/codegen_method.rb, guard_fiber_free?): the Fiber half of CORE_BLOCK_GUARD is dropped for
 # a guarded core method that no Fiber.new body reaches, and such a method then keeps no saved bytecode (its mrblib body is
-# stubbed, MrblibStubs). The fixture is a core-looking file (its path has /3rd/mruby/mrblib/, which CoreDefs.core_source?
+# stubbed). The fixture is a core-looking file (its path has /3rd/mruby/mrblib/, which CoreDefs.core_source?
 # reads) and a user file whose Fiber body reaches some of its methods:
 #
 #   fiber_free_fill, fiber_unused_block   not reached from the Fiber body (called from a method nothing calls, or not at all)

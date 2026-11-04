@@ -22,7 +22,7 @@ class CodeGen
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
                        GETCONST SETGV ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
 
-  # The mruby entry points a class unit calls (vm.c; the same declarations load_compile.rb's PRELUDE makes).
+  # The mruby entry points a class unit calls (vm.c; the same declarations the class-body prelude makes).
   CLASS_UNIT_DECLS = <<~CPP
     extern "C" struct RClass* mrb_vm_define_class(mrb_state*, mrb_value, mrb_value, mrb_sym);
     extern "C" struct RClass* mrb_vm_define_module(mrb_state*, mrb_value, mrb_sym);

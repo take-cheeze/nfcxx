@@ -142,7 +142,7 @@ module StaticDispatchRegistrations
   # fallback raises NoMethodError. Refuse the name while the closed world's
   # bytecode holds such a send, so a regression fails safe (tables intact)
   # instead of shipping the raise. The loader's own routes are downstream of
-  # the same sources (LoadCompile.tableless_call handles exactly the helper
+  # the same sources (the class-body loader's tableless sends handle exactly the helper
   # arities), so engine sources without such sends have no other path to one.
   def index_send_shaped?(ireps, name)
     ireps.each_value do |irep|

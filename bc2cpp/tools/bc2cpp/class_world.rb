@@ -5,11 +5,8 @@
 # order), its singleton class's chain, whether a subclass exists, whether more than one body opens it, and which of
 # those bodies a load can evaluate statically (ClassBodyScan's COMPILABLE statements) and which keep bytecode.
 #
-# This is a fact file, not an input to code generation: nothing in bc2cpp reads it yet. scripts/bc2cpp/class_body_check.rb
-# compares it with the graph the interpreted load builds, so the day a dispatch decision consumes it, "exact" is
-# something a test has already held to. A class is exact when every statement of every body that opens it, and of
-# every ancestor's, is one this file models. A computed constant PureEval folds to data is modeled as a constant (the
-# same decision LoadCompile makes); a superclass that is a C-defined core class (NATIVE) is known. Anything else (a DSL
+# This is a fact file, not an input to code generation: nothing in bc2cpp reads it yet. A class is exact when every statement of every body that opens it, and of
+# every ancestor's, is one this file models. A computed constant PureEval folds to data is modeled as a constant; a superclass that is a C-defined core class (NATIVE) is known. Anything else (a DSL
 # call, `extend self`, a `Class.new` with a computed superclass, `X.include(Y)` inside a method, a lambda constant) makes
 # it unknown, with the reason named, and unknown spreads to the
 # classes that inherit from it.
@@ -62,14 +59,6 @@ module ClassWorld
   # receiver is not a class this file can name. #subclass_unknown: true when a `Class.new(<computed>)` could have made
   # a subclass of anything.
   World = Struct.new(:classes, :unknown_sites, :subclass_unknown, :facts, keyword_init: true)
-
-  # The class world of a build from its load world (BC2CPP_LOAD_WORLD, JSON {gem symbol => [mrblib files]}), the
-  # gems in that order. Nil without one. Shared by the stub proof and the load plan, so both read one graph.
-  def from_load_world(json)
-    return nil unless json
-
-    build_files(JSON.parse(json).values)
-  end
 
   # build over ClassBodyScan.scan of each group of files (`groups`: [[file, ...], ...] in load order), kept in the
   # scan cache. The World holds only names, lines and labels, and is a function of the files' bytes, how they are
@@ -144,7 +133,7 @@ module ClassWorld
     end
     body.statements.each_with_index do |stmt, index|
       # A statement the compiler does not take keeps this body (and `class << self` inside it) as bytecode, unless
-      # PureEval folds it: a computed constant that is data at build time is compiled as a constant (LoadCompile).
+      # PureEval folds it: a computed constant that is data at build time is compiled as a constant .
       if entry && !ClassBodyScan::COMPILABLE.include?(stmt.category) && !alias_only_block?(stmt.node)
         if (folded = folded_constant(body, index))
           entry[:folded] << folded
@@ -161,7 +150,7 @@ module ClassWorld
   end
 
   # The label of statement `index` of `body` when it is a computed constant PureEval folds (the same decision as
-  # LoadCompile's, with the same `frozen_string_literal` reading), else nil. A folded value is data, so it cannot
+  # PureEval's, with the same `frozen_string_literal` reading), else nil. A folded value is data, so it cannot
   # change the class graph; the statement is then static like a literal constant.
   def folded_constant(body, index)
     stmt = body.statements[index]

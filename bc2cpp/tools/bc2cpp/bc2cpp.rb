@@ -32,8 +32,6 @@ require_relative 'file_identity'
 
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
-require_relative 'mrblib_stubs'
-require_relative 'load_compile'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
@@ -2201,23 +2199,8 @@ if $PROGRAM_NAME == __FILE__
     File.write(File.join(dump_dir, 'emitted.txt'), "#{symbol} owners=#{only_owners.inspect}\n#{class_units.map { |u| u[:path] }.join("\n")}\n", mode: 'a')
   end
   print gen.emit_structs
-  # LOAD_COMPILE (load_compile.rb): plan the class-body load now, before the helpers below are printed. The loader
-  # routes tableless []/[]= sends through the shared index helpers, so force on the ones only the load names: the
-  # load then links the same strong definitions instead of its own weak declarations
-  # (BC2CPP_INDEX_HELPERS_DEFINED skips those), so the call has one candidate. helper_codes is what the helper
-  # emitters scan: compiled entries plus the load, so a helper only the load names is still built and emitted,
-  # with the ary helpers its body calls.
-  # Method stubs are removed: no body is emptied, so no def is dropped from the residual mrblib.
-  stub_keys = Set.new
-  load_register = {}
-  warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, stub_keys))
-  load_plan = LoadCompile.plan_for_env(ENV, symbol: symbol, drop_keys: stub_keys, unregistered: gen.unregistered_keys,
-                                       register: load_register)
-  load_code = load_plan&.marker ? load_plan.code : ''
-  load_code.scan(/bc2cpp_(getidx|setidx|getidx0)\(M,/).flatten.to_set.each do |kind|
-    gen.index_helper_code(kind) if CodeGen::INDEX_HELPERS.key?(kind)
-  end
-  helper_codes = load_code.empty? ? compiled : compiled + [{ code: load_code }]
+  warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, Set.new))
+  helper_codes = compiled
   print gen.emit_ary_entry_helper(helper_codes)
   print gen.emit_ary_write_helpers(helper_codes)
   print gen.emit_to_enum_helper(compiled)
@@ -2400,17 +2383,7 @@ if $PROGRAM_NAME == __FILE__
     print m[:code]
   end
   print ShardOutput::HOOKS_MARK if shards > 1
-  # LOAD_COMPILE (load_compile.rb): the class and module bodies of this gem's mrblib, as code gem_init runs first.
-  # Planned above (the load may force index helpers on, and early-register needs the same stub keys); emitted here,
-  # after the helpers define them, with the weak declarations skipped
-  # (BC2CPP_INDEX_HELPERS_DEFINED): the TU already defines the helpers ahead of it.
-  load_symbol = nil
-  unless load_code.empty?
-    print "#define BC2CPP_INDEX_HELPERS_DEFINED 1\n#{load_code}"
-    load_symbol = symbol
-  end
-  LoadCompile.write_plan(LoadCompile.plan_path(out_dir, symbol), load_plan)
-  print gen.emit_gem_hooks(load_symbol: load_symbol, class_units: class_units)
+  print gen.emit_gem_hooks(class_units: class_units)
 
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.
