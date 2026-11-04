@@ -677,10 +677,9 @@ if $PROGRAM_NAME == __FILE__
                               IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq)
     )
   end
-  # CONST_RESOLVE: the constant names bound before a class body runs. The bytecode IR's constant table (every SETCONST
-  # binding, as BytecodeIR::ConstantFacts groups them) and the names the native sources define.
-  CodeGen.known_const_names = (constant_facts.groups.keys.map(&:to_s) |
-                               IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq).to_a).to_set
+  # CONST_RESOLVE: the constant names the class-body compile resolves against. The bytecode IR's constant table alone (every
+  # SETCONST binding, as BytecodeIR::ConstantFacts groups them). The desktop bytecode build evaluates the rest exactly.
+  CodeGen.known_const_names = constant_facts.groups.keys.map(&:to_s).to_set
   CodeGen.const_unresolved = []
   integer_constants =
     if closed_world.constants_static?
