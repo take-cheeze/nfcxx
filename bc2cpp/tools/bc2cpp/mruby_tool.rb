@@ -17,3 +17,4 @@ name = tool.start_with?("#{root}/") ? tool[(root.size + 1)..-1] : tool
 name = name[0...-3] if name.end_with?('.rb')
 $PROGRAM_NAME = name
 require name
+ExitHandlers.run
