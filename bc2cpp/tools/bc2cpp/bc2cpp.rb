@@ -2391,6 +2391,19 @@ if $PROGRAM_NAME == __FILE__
   end
   print ShardOutput::HOOKS_MARK if shards > 1
   print gen.emit_gem_hooks(class_units: class_units)
+  # CORE_CLASS_UNITS: the core's units are what mrb_init_mrblib runs when MRB_CORE_CLASS_UNITS is defined.
+  if symbol == 'core_compiled'
+    # CORE_CLASS_UNITS: with MRB_CORE_CLASS_UNITS the core mrblib is not loaded, so every top-level statement of it must be a unit.
+    require_relative 'unit_blank'
+    unit_paths = class_units.map { |unit| unit[:path] }.to_set
+    residual = Dir[File.expand_path('../../3rd/mruby/mrblib/*.rb', __dir__)].sort.flat_map do |file|
+      kept = Prism.parse(UnitBlank.blank(File.binread(file), unit_paths)).value.statements&.body || []
+      kept.map { |stmt| "#{File.basename(file)}: #{stmt.class.name.split('::').last}" }
+    end
+    raise "core mrblib has statements that are not units (MRB_CORE_CLASS_UNITS): #{residual.join(', ')}" unless residual.empty?
+
+    print gen.emit_core_class_units(class_units)
+  end
 
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.

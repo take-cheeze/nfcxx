@@ -443,6 +443,13 @@ class CodeGen
   # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
   # CLASS_BODY_EMIT_GEM: `class_units` (compile_top_class_units) are the top-level class bodies the compiled gem runs
   # itself, after the owner-class slots are reset and before the registrations below.
+  # CORE_CLASS_UNITS (mruby mrblib.rake, MRB_CORE_CLASS_UNITS): the function mrb_init_mrblib calls in place of the core
+  # mrblib load. It runs each core unit in file order; extern "C" because mrblib.c declares it in C.
+  def emit_core_class_units(class_units)
+    calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
+    "extern \"C\" void bc2cpp_core_class_units(mrb_state* M) {\n#{calls}}\n"
+  end
+
   def emit_gem_hooks(class_units: [])
     unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
     hooks = <<~CPP
