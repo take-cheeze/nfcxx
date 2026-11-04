@@ -43,7 +43,7 @@ class CodeGen
     attr_accessor :engine_registrations, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
                   :integer_constant_values, :integer_constant_keys, :integer_constant_ranges, :constant_value_classes,
                   :module_names, :core_hidden_defs,
-                  :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
+                  :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
                   :enumerator_model, :native_singleton_inputs,
                   :rbs_block_signatures
 

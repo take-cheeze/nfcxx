@@ -375,8 +375,7 @@ class CodeGen
   # receivers, other classes, blocks, dynamic sends resolved by name) whose execution may suspend the
   # Fiber above its frame. A core iterator with a run-time guard decides per call instead.
   def yield_reach_unsafe_methods(fiber_defs)
-    guarded = self.class.core_guarded || Set.new
-    @yield_reach.fiber_unsafe(fiber_defs.keys.reject { |label| guarded.include?(label) })
+    @yield_reach.fiber_unsafe(fiber_defs.keys)
   end
 
   # Every self-send name reachable from `irep`, including inside nested block

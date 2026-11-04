@@ -1115,8 +1115,7 @@ class CodeGen
   ].freeze
 
   def rsm_dual?(label, d)
-    return false unless EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}") &&
-                        self.class.core_guarded&.include?(label)
+    return false unless EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}")
 
     # Only where the guard itself is emitted: a method no Fiber can cross keeps no guard, so it needs no variant.
     !guard_fiber_free?(label, d)

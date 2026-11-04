@@ -14,7 +14,6 @@ class CodeGen
   def compiles_clean?(label)
     # CORE_BLOCK_GUARD: only the registered entry carries the guard, so no direct `_impl`
     # call may reach a guarded body.
-    return false if self.class.core_guarded&.include?(label)
     # RESUMABLE_ENTRY: `_impl` is the entry that hands over to the driver, not the body.
     return false if resumable_method?(label)
     return @clean_cache[label] if @clean_cache.key?(label)

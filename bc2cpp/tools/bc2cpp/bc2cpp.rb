@@ -415,7 +415,6 @@ if $PROGRAM_NAME == __FILE__
   # `core_hidden_defs`, without becoming candidates.
   # A guarded method is never a direct-call target either, so a
   # registry definition of it would only turn every `each`/`map`/`select` proof off.
-  core_guarded = CoreMethods.guarded_labels(registry.values.flatten, ireps)
   core_hidden_defs = []
   registry.each do |name, defs|
     next unless defs.any?(&:core)
@@ -424,14 +423,10 @@ if $PROGRAM_NAME == __FILE__
       core_hidden_defs.concat(defs.select(&:core))
       defs.reject!(&:core)
     else
-      guarded_defs = defs.select { |d| d.core && core_guarded.include?(d.irep) }
-      core_hidden_defs.concat(guarded_defs)
-      defs.reject! { |d| guarded_defs.include?(d) }
     end
   end
   registry.delete_if { |_, defs| defs.empty? }
   CodeGen.core_hidden_defs = core_hidden_defs
-  CodeGen.core_guarded = core_guarded
   compiled_ruby = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
   # Every linked core gem's mrblib too: outside_ruby leaves out the core gems a build compiles, which a world that
   # does not compile them still runs.

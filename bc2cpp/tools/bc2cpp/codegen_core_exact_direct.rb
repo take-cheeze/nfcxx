@@ -196,14 +196,9 @@ module CoreExactDirect
     target = block_core_target(klass, chain, name, arity, blockless: true)
     # An explicit-receiver call of a private method is a NoMethodError, not a call.
     return nil unless target && (target.visibility == :public || private_ok)
-    return nil if core_guarded_def?(target) && !core_body_relaxable?(target.irep)
     return nil if target.owner == 'Enumerable' && !core_each_builtin?(klass, chain)
 
     target
-  end
-
-  def core_guarded_def?(definition)
-    !!self.class.core_guarded&.include?(definition.irep)
   end
 
   # An Enumerable body runs `each` on its receiver: the entry checks it at run time

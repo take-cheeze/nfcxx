@@ -91,8 +91,7 @@ module NativeSingletonCall
   # BC2CPP_NSC_DEBUG only: which of compiles_clean?'s answers made the candidate unclean (the symbol keeps the
   # :candidate_not_compiled_clean prefix the debug output has always had).
   def constant_object_unclean_reason(label)
-    why = if self.class.core_guarded&.include?(label) then :core_guarded
-          elsif resumable_method?(label) then :resumable
+    why = if resumable_method?(label) then :resumable
           elsif @probing.include?(label) then :cycle
           elsif @constant_object_probe then :nested_probe
           elsif @clean_cache[label] == false then :error_marker

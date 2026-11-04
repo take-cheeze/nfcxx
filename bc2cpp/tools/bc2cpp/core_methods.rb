@@ -8,7 +8,7 @@ require_relative 'core_defs'
 # stay bytecode by decision: a definition a later one replaces, one a
 # conditional can skip, one that names the Fiber class or builds a lambda (CoreDefs),
 # A method that touches a block
-# compiles behind the Fiber guard (guarded_labels). An excluded definition is
+# compiles with no Fiber guard. An excluded definition is
 # dropped from the registry (bc2cpp.rb), so it is neither compiled nor a dispatch
 # target, and the interpreter's method answers it exactly as before.
 module CoreMethods
@@ -42,7 +42,7 @@ module CoreMethods
 
   # The mruby-enumerator #initialize methods that take a block to keep it (Enumerator, Enumerator::Generator and
   # Enumerator::Yielder). They store the block or hand it to Generator.new and never call it, and they name no Fiber
-  # and build no lambda, so the block guard (guarded_labels) covers them as it covers any core block method.
+  # and build no lambda, as any core block method is compiled with no Fiber guard.
   ENUMERATOR_INITIALIZERS = %w[Enumerator Enumerator::Generator Enumerator::Yielder].freeze
 
   def enumerator_initializer?(definition, ireps)
@@ -118,12 +118,6 @@ module CoreMethods
 
       "#{key} | #{reason} | #{shape_tags(ireps.fetch(d.irep), ireps).join(',')}"
     end.sort
-  end
-
-  # Irep labels of the compiled core methods whose entry is guarded (CORE_BLOCK_GUARD,
-  # CodeGen#core_block_guard): the ones that touch a block or are audited Enumerator wrappers.
-  def guarded_labels(defs, ireps)
-    defs.select { |d| d.irep && d.core && (CoreDefs.touches_block?(ireps.fetch(d.irep), ireps) || enumerator_wrapper?(d, ireps)) }.to_set(&:irep)
   end
 
 end

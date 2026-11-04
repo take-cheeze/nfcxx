@@ -795,8 +795,6 @@ class CodeGen
     # The direct call names this body's `_impl`, which SKIP_UNSUPPORTED drops when the body has a #error:
     # the caller then keeps its own #error (left interpreted) rather than calling a function not emitted.
     return false unless module_super_block_clean?(label)
-    return true unless self.class.core_guarded&.include?(label)
-
     core_body_relaxable?(label)
   end
 
