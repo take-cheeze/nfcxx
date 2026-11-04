@@ -144,7 +144,8 @@ module TypeFacts
   # ------------------------------------------------------------------------------------------------ methods
 
   def method_row(ctx, gen, d, reader, sites)
-    irep = ctx.ireps[d.irep] or return nil
+    irep = ctx.ireps[d.irep]
+    return nil unless irep
     return nil unless irep.file
 
     line, col = def_position(ctx, d, reader)
@@ -834,7 +835,8 @@ module TypeFacts
                'message' => "#{d.owner}##{d.name} #{where}: declared #{declared}, inferred #{inferred}" }
     end
     Array(ctx.contradictions).each do |owner, name, pos, declared, got|
-      d = (ctx.registry[name] || []).find { |x| x.owner == owner && x.irep } or next
+      d = (ctx.registry[name] || []).find { |x| x.owner == owner && x.irep }
+      next unless d
       slot = pos == :return ? 'return' : pos + 1
       add.call(d, slot, INT_TYPES.fetch(declared, declared), INT_TYPES.fetch(got, got), nil)
     end

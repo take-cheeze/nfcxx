@@ -90,13 +90,15 @@ module IvarCandidates
     end
 
     if NAME_DISPATCH.include?(sym)
-      dispatched = literal_names(irep, idx, insn, 1) or return ALL_NAMES
+      dispatched = literal_names(irep, idx, insn, 1)
+      return ALL_NAMES unless dispatched
       return REFLECTIVE_NAMES.include?(dispatched.first) ? ALL_NAMES : Set.new
     end
 
     # Each argument of NAME_READERS and ATTR_READERS is an ivar name (`:@x` or, for attr, `:x`).
     count = ATTR_READERS.include?(sym) ? insn.argc : 1
-    names = literal_names(irep, idx, insn, count) or return ALL_NAMES
+    names = literal_names(irep, idx, insn, count)
+    return ALL_NAMES unless names
     names.map { |name| name.delete_prefix('@') }.to_set
   end
 

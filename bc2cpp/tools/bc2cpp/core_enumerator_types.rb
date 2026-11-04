@@ -95,7 +95,8 @@ module CoreEnumeratorTypes
     # The first owner in lookup order that defines +name+ for +tag+: an owner String, nil (none: NoMethodError), or
     # :unknown (the graph or a registration is not fully known).
     def lookup(tag, name)
-      chain = ancestors(tag) or return :unknown
+      chain = ancestors(tag)
+      return :unknown unless chain
       chain.each do |owner|
         return :unknown if @computed.include?(owner)
         return owner if @definers.fetch(owner, EMPTY).include?(name)
@@ -176,8 +177,10 @@ module CoreEnumeratorTypes
         return (own + CORE.fetch(klass).first.drop(1) + mixins_of('Object')).uniq
       end
 
-      sup = superclass(klass) or return nil
-      parent = ancestors(sup) or return nil
+      sup = superclass(klass)
+      return nil unless sup
+      parent = ancestors(sup)
+      return nil unless parent
       (own + parent).uniq
     end
 
@@ -339,7 +342,10 @@ module CoreEnumeratorTypes
     def upvar_read(irep, w, reader)
       index, level = w.upvar_ref
       target = irep.label
-      (level + 1).times { target = @group.parent[target] or return top('GETUPVAR above the root') }
+      (level + 1).times do
+        target = @group.parent[target]
+        return top('GETUPVAR above the root') unless target
+      end
       val([:upvar, target, index], reader)
     end
 
@@ -383,7 +389,8 @@ module CoreEnumeratorTypes
 
     # Is the register at +index+ a copy (MOVE) of a variable some block writes? Following the copy is what the answer refuses.
     def captured_source?(irep, index, reg)
-      first = definitions(irep, index, reg, follow_moves: false) or return false
+      first = definitions(irep, index, reg, follow_moves: false)
+      return false unless first
       first.any? { |df| !df.entry? && BytecodeIR.for(irep).source_at(df.index).op == :MOVE }
     end
 

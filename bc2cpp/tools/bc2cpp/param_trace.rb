@@ -190,7 +190,8 @@ module ParamTrace
     ident = ElseTrace.ident(symbol)
     skipped = Hash.new(0)
     lines.each_with_index do |l, i|
-      m = HEADER_RE.match(l.chomp) or next
+      m = HEADER_RE.match(l.chomp)
+      next unless m
       fn = m[1]
       params = header_params(m[2])
       info = infos[fn]

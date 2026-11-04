@@ -38,7 +38,8 @@ module BytecodeIR
     # entry lands inside, so the run executes as written once +first+ has. A catch handler entering the run is a
     # predecessor only with +include_handlers+ (the normal-flow graph does not carry it).
     def linear_corridor?(first, last, include_handlers: false)
-      preds = instruction_predecessors(include_handlers: include_handlers) or return false
+      preds = instruction_predecessors(include_handlers: include_handlers)
+      return false unless preds
 
       ((first + 1)..last).all? { |target| preds[target].size == 1 && preds[target].include?(target - 1) }
     end

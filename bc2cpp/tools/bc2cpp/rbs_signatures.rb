@@ -273,7 +273,8 @@ module RbsSignatures
 
                [t.name.to_s.delete_prefix('::').to_sym]
              when RBS::Types::Optional
-               inner = value_classes_of(t.type) or return nil
+               inner = value_classes_of(t.type)
+               return nil unless inner
                inner.to_a + [:NilClass]
              when RBS::Types::Union
                members = t.types.map { |member| value_classes_of(member) }

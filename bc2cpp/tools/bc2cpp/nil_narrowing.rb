@@ -77,8 +77,10 @@ module NilNarrowing
 
   def compute(irep, nil_unanswerable, class_guard = nil)
     prog = BytecodeIR.for(irep)
-    all_preds = prog.instruction_predecessors(include_handlers: true) or return nil
-    normal_preds = prog.instruction_predecessors or return nil
+    all_preds = prog.instruction_predecessors(include_handlers: true)
+    return nil unless all_preds
+    normal_preds = prog.instruction_predecessors
+    return nil unless normal_preds
     # An edge that is both a normal successor and a handler edge is taken as a handler edge.
     raised = prog.handler_edges.to_set { |edge| [edge.src, edge.target] }
     states = Array.new(prog.instructions.length, :all)
@@ -192,7 +194,8 @@ module NilNarrowing
     call = BytecodeIR::OperandModel.send_call(send)
     return [] unless IS_A_NAMES.include?(call.name) && call.receiver == tested
 
-    klass = guard.is_a_class(env[:irep], p - 1) or return []
+    klass = guard.is_a_class(env[:irep], p - 1)
+    return [] unless klass
     before = env[:states][p - 1]
     return [] if before == :all
 

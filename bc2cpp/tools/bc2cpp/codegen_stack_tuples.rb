@@ -57,7 +57,8 @@ class CodeGen
   def stack_tuple_plan(irep)
     return {} unless stack_tuples_enabled?
 
-    analyzer = escape_analyzer or return {}
+    analyzer = escape_analyzer
+    return {} unless analyzer
     @stack_tuple_where = irep.label
     # A closure could read the frame's registers by pointer.
     unless EscapeAnalysis.op_sites(irep, EscapeAnalysis::CLOSURE_OP_LIST).empty?
@@ -135,7 +136,8 @@ class CodeGen
     state = @stack_tuple_state
     return nil unless state && idx && irep && state[:label] == irep.label
 
-    entry = state[:map][idx] or return nil
+    entry = state[:map][idx]
+    return nil unless entry
     # A shifted body names other registers, and a resumable body keeps its registers outside this C++ frame.
     if reg_offset != 0 || @resumable
       state[:bypassed] << idx

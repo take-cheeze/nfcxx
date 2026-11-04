@@ -149,7 +149,8 @@ module EnumeratorModel
       end
     end
     foreign_paths.each do |path|
-      text = SourceText.read(path, 'EnumeratorModel.constant_stable?') or return "unreadable #{path}"
+      text = SourceText.read(path, 'EnumeratorModel.constant_stable?')
+      return "unreadable #{path}" unless text
       return "dynamic constant mutation in #{path}" if text.match?(StableClassConstants::DYNAMIC_MUTATION)
     end
     return 'defined by a native source' if IntegerConstants.native_defined_const_names(native_paths).include?('Enumerator')

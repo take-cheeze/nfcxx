@@ -25,7 +25,8 @@ class CodeGen
 
   # The binding a self-call at +idx+ gives +callee+ (a MethodDef), or nil when no argument is a literal.
   def slot_call_binding(irep, idx, insn, callee)
-    body = @ireps[callee.irep] or return nil
+    body = @ireps[callee.irep]
+    return nil unless body
     enter = BytecodeIR.for(body).instructions.first&.source
     return nil unless enter&.op == :ENTER && insn.reg && insn.argc && !insn.keyword_splat?
 
@@ -56,13 +57,15 @@ class CodeGen
   end
 
   def slot_literal_truth(irep, idx, reg)
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg) or return nil
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg)
+    return nil unless writers
     truths = writers.map { |i| SLOT_LITERAL_TRUTH[BytecodeIR.for(irep).source_at(i).op] }
     truths.uniq.size == 1 ? truths.first : nil
   end
 
   def slot_literal_symbol(irep, idx, reg)
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg) or return nil
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg)
+    return nil unless writers
     syms = writers.map { |i| (w = BytecodeIR.for(irep).source_at(i)).op == :LOADSYM ? w.sym.to_s : nil }
     syms.uniq.size == 1 ? syms.first : nil
   end
@@ -117,7 +120,8 @@ class CodeGen
       truth = slot_bound_truth(program, binding, unwritten, live, i, insn.reg)
       next if truth.nil?
 
-      target = program.address_to_index[insn.branch_target] or next
+      target = program.address_to_index[insn.branch_target]
+      next unless target
       jumps = case insn.op
               when :JMPIF then truth == true
               when :JMPNOT then truth != true

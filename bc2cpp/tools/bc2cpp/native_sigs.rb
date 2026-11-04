@@ -61,7 +61,8 @@ module NativeSigs
   # warm scan cache parses a few kilobytes. Only locations differ from restricting the whole file; no loader reads them.
   def decls(table)
     name = table_name(table)
-    text = kept_texts[name] or return []
+    text = kept_texts[name]
+    return [] unless text
 
     select_table(RbsParseMemo.decls("declarations.rbs##{name}", text), name)
   end

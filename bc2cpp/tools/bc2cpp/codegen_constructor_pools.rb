@@ -586,7 +586,8 @@ class CodeGen
 
     lines = ["  SITES #{@constructor_pool_stats.sort.map { |k, v| "#{k}=#{v}" }.join(' ')}"]
     (@registry['initialize'] || []).each do |d|
-      status = @constructor_pool_status[d.irep] or next
+      status = @constructor_pool_status[d.irep]
+      next unless status
       if status == :ok
         lines << "  CTOR #{d.owner}#initialize pooled"
         @constructor_pool_candidates.each_key { |(label, k)| lines << "  CTORARG #{d.owner}#initialize arg#{k} #{constructor_arg_state(label, k)}" if label == d.irep }

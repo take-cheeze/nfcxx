@@ -56,14 +56,16 @@ class CodeGen
 
   # Can the GETIV of @ivar on `self` (an instance of +klass+) in +irep_label+ skip the undef test?
   def slot_read_assured?(klass, ivar, irep_label)
-    facts = slot_facts(klass) or return false
+    facts = slot_facts(klass)
+    return false unless facts
 
     slot_assigned_below?(facts, klass, ivar) && !facts.reach.include?(irep_label)
   end
 
   # The synthesized reader of @ivar on +owner+: no self-call during construction names it.
   def slot_reader_assured?(owner, ivar)
-    facts = slot_facts(owner) or return false
+    facts = slot_facts(owner)
+    return false unless facts
 
     slot_assigned_below?(facts, owner, ivar) && !facts.names.include?(ivar)
   end
@@ -71,7 +73,8 @@ class CodeGen
   NO_SLOT_STACK = [].freeze
 
   def slot_assigned_below?(facts, klass, ivar)
-    subtree = facts.subtrees[klass] or return false
+    subtree = facts.subtrees[klass]
+    return false unless subtree
     return false if @outside_ivar_names.include?(ivar)
 
     subtree.all? do |k|
@@ -275,7 +278,8 @@ class CodeGen
     native = defs.any? { |d| d.irep.nil? && d.kind != :ivar_accessor } || @closed_world.invisibly_definable?(name)
     chain.each_with_index do |(owner, sealed), i|
       if native && !sealed
-        extra = SLOT_ASSURED_NATIVE_SELF_CALLS[name] or return "native self-call #{name}"
+        extra = SLOT_ASSURED_NATIVE_SELF_CALLS[name]
+        return "native self-call #{name}" unless extra
         later = chain.drop(i).map(&:first)
         return SlotTarget.new(defs: defs.select { |d| d.irep && later.include?(d.owner) }, extra: extra, exact: false)
       end
@@ -300,8 +304,10 @@ class CodeGen
       next unless visited.add?([label, binding])
 
       reach << label
-      irep = @ireps[label] or return "#{label} has no bytecode"
-      live = slot_live_indices(irep, binding) or return "#{label}: control flow unresolved"
+      irep = @ireps[label]
+      return "#{label} has no bytecode" unless irep
+      live = slot_live_indices(irep, binding)
+      return "#{label}: control flow unresolved" unless live
       BytecodeIR.for(irep).each_source do |insn, idx|
         next unless live.include?(idx)
 
@@ -322,19 +328,22 @@ class CodeGen
       return "#{op} in #{irep.label} while binding and receiver are named" if
         slot_world_names?('binding') && slot_world_names?('receiver')
 
-      child = Array(irep.reps)[insn.block_index.to_i] or return "#{op} without a child in #{irep.label}"
+      child = Array(irep.reps)[insn.block_index.to_i]
+      return "#{op} without a child in #{irep.label}" unless child
       queue << [child, nil]
       return nil
     end
     if op == :SUPER
-      owner = numeric_irep_owner[irep.label] or return "super outside a method in #{irep.label}"
+      owner = numeric_irep_owner[irep.label]
+      return "super outside a method in #{irep.label}" unless owner
       return slot_reach_super(owner, chain, queue)
     end
     return nil unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(op)
 
     called = [insn.sym.to_s]
     if SLOT_ASSURED_NAMED_DISPATCH.include?(called.first)
-      symbols = slot_reach_symbol_args(irep, idx, insn) or return "#{called.first} with a computed name in #{irep.label}"
+      symbols = slot_reach_symbol_args(irep, idx, insn)
+      return "#{called.first} with a computed name in #{irep.label}" unless symbols
       called.concat(symbols)
     end
     first = true
@@ -379,7 +388,8 @@ class CodeGen
   def slot_reach_symbol_args(irep, idx, insn)
     return nil unless insn.reg && insn.argc&.positive?
 
-    writers = BytecodeIR.reaching_writer_indices(irep, idx, insn.reg + 1) or return nil
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, insn.reg + 1)
+    return nil unless writers
     program = BytecodeIR.for(irep)
     writers.map do |i|
       writer = program.source_at(i)
@@ -402,9 +412,11 @@ class CodeGen
   end
 
   def slot_assigns_on_exit_uncached?(label, ivar, chain, stack)
-    irep = @ireps[label] or return false
+    irep = @ireps[label]
+    return false unless irep
     program = BytecodeIR.for(irep)
-    normal = program.instruction_predecessors(include_handlers: false) or return false
+    normal = program.instruction_predecessors(include_handlers: false)
+    return false unless normal
     return false unless program.handlers_resolved?
     # A block's `return` leaves this method from inside a call.
     return false if slot_nested_labels(irep).any? { |l| @ireps[l] && BytecodeIR.for(@ireps[l]).op?(:RETURN_BLK) }

@@ -143,7 +143,8 @@ class CodeGen
       label = stack.pop
       next unless seen.add?(label)
 
-      irep = @ireps[label] or return true
+      irep = @ireps[label]
+      return true unless irep
       return true if BytecodeIR.for(irep).op?(:SUPER)
 
       stack.concat(Array(irep.reps))

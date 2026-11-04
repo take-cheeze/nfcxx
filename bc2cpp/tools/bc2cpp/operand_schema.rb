@@ -157,8 +157,10 @@ module OperandSchema
         tokens = tokens.first(i + 1)
         next
       end
-      token = tokens[i] or return nil
-      operand = parse_token(kind, token) or return nil
+      token = tokens[i]
+      return nil unless token
+      operand = parse_token(kind, token)
+      return nil unless operand
       operands << operand
     end
     return nil unless operands.length == schema.length && tokens.length == schema.length
@@ -188,7 +190,8 @@ module OperandSchema
   end
 
   def self.parse_argc(token)
-    m = token.match(/\An=(\d+|\*)(?:\|nk=(\d+|\*))?\z/) or return nil
+    m = token.match(/\An=(\d+|\*)(?:\|nk=(\d+|\*))?\z/)
+    return nil unless m
     n = m[1] == '*' ? nil : m[1].to_i
     nk = m[2].nil? ? 0 : (m[2] == '*' ? nil : m[2].to_i)
     Operand.new(:argc, [n, nk, m[2].nil?])

@@ -700,7 +700,8 @@ end
 # The one class +classify+ gives every producer of +reg+ at +idx+, VACUOUS when each is vacuous, else nil. +entry+
 # classifies the value the frame was entered with.
 def join_element_producers(irep, idx, reg, entry: nil)
-  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true) or return nil
+  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true)
+  return nil unless sources
   found = nil
   vacuous = false
   sources.each do |producer|

@@ -96,7 +96,8 @@ module FrozenTables
     end
 
     def name(bit)
-      shape = @by_bit[bit] or return nil
+      shape = @by_bit[bit]
+      return nil unless shape
       runs = shape.slots.map { |s| slot_name(s) }.chunk_while { |x, y| x == y }.map { |run| run.size > 1 ? "#{run.first}*#{run.size}" : run.first }
       "FROZEN:#{shape.array? ? 'Array' : 'Hash'}[#{runs.join(',')}]"
     end

@@ -90,7 +90,8 @@ module RecordHash
     calls = {}
     ireps.each_value do |irep|
       irep.each_with_op(:SETIV, :GETIV) do |insn, i|
-        name = insn.ivar or next
+        name = insn.ivar
+        next unless name
 
         (insn.op == :SETIV ? candidates[name][:sets] : candidates[name][:gets]) << [irep, i]
       end
@@ -129,7 +130,8 @@ module RecordHash
   # provably a literal Symbol. +for_write+ lets provably non-Symbol keys through: storing under one never
   # touches a Symbol key.
   def literal_keys(irep, idx, reg, for_write: false, depth: 0)
-    sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true) or return nil
+    sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true)
+    return nil unless sources
 
     keys = []
     sources.each do |d|
@@ -153,12 +155,14 @@ module RecordHash
   # The [slot name, key] pairs the GETIDX at +index+ reads, when its receiver is provably a record slot
   # (every reaching value is `@slot` or a call of its attr reader) and the key a literal Symbol; else nil.
   def read_slots(irep, index)
-    table = self.table or return nil
+    table = self.table
+    return nil unless table
     insn = BytecodeIR.for(irep).source_at(index)
     return nil unless insn&.op == :GETIDX
 
     recv, key = insn.regs
-    sources = BytecodeIR.producers(irep, index, recv, through_handlers: true) or return nil
+    sources = BytecodeIR.producers(irep, index, recv, through_handlers: true)
+    return nil unless sources
 
     names = sources.map do |d|
       writer = d.insn
@@ -168,14 +172,16 @@ module RecordHash
     end
     return nil if names.any? { |n| n.nil? || !table.key?(n) }
 
-    keys = literal_keys(irep, index, key) or return nil
+    keys = literal_keys(irep, index, key)
+    return nil unless keys
     names.uniq.product(keys)
   end
 
   # RECORD_HASH_PROOF read side for the Array block recognizers: is the GETIDX at +index+ a literal-key
   # read of a record key that always holds a non-nil Array?
   def array_read?(irep, index, tier: :strict)
-    slots = read_slots(irep, index) or return false
+    slots = read_slots(irep, index)
+    return false unless slots
     slots.all? { |name, key| (table[name][key] || {})[tier] == Set['Array'] }
   end
 
@@ -195,7 +201,8 @@ module RecordHash
       registry.each_value { |defs| defs.each { |d| @body_def[d.irep] = d if d.irep } }
       ireps.each_value do |irep|
         BytecodeIR.for(irep).each_source do |insn, i|
-          name = insn.sym or next
+          name = insn.sym
+          next unless name
 
           case insn.op
           when BytecodeIR::Ops::SEND then @sites[name] << [irep, i]
@@ -210,8 +217,10 @@ module RecordHash
     def positional(irep, reg, depth)
       return nil if depth >= POOL_DEPTH
 
-      d = admitted(irep) or return nil
-      enter = irep.enter or return nil
+      d = admitted(irep)
+      return nil unless d
+      enter = irep.enter
+      return nil unless enter
       fields = enter.enter_fields
       return nil unless ENTER_POSITIONAL_ONLY.call(fields) && reg.between?(1, fields[0])
 
@@ -224,7 +233,8 @@ module RecordHash
         n, nk = site_counts(site)
         return nil unless n == fields[0] && nk == 0
 
-        keys = RecordHash.literal_keys(site_irep, i, site.reg.to_i + reg, depth: depth + 1) or return nil
+        keys = RecordHash.literal_keys(site_irep, i, site.reg.to_i + reg, depth: depth + 1)
+        return nil unless keys
         pooled.concat(keys)
       end
       pooled.uniq
@@ -235,8 +245,10 @@ module RecordHash
     def keyword(irep, karg, depth)
       return nil if depth >= POOL_DEPTH
 
-      d = admitted(irep) or return nil
-      enter = irep.enter or return nil
+      d = admitted(irep)
+      return nil unless d
+      enter = irep.enter
+      return nil unless enter
       mand, opt, rest, post, kw, kdict, block, noblock = enter.enter_fields
       return nil unless kw.positive? && [opt, rest, post, kdict, block, noblock].all?(&:zero?)
 
@@ -252,12 +264,14 @@ module RecordHash
 
         base = site.reg.to_i + n + 1
         nk.times do |j|
-          key = RecordHash.literal_keys(site_irep, i, base + 2 * j) or return nil
+          key = RecordHash.literal_keys(site_irep, i, base + 2 * j)
+          return nil unless key
           return nil unless key.size == 1
 
           next unless key.first == karg.sym
 
-          value = RecordHash.literal_keys(site_irep, i, base + 2 * j + 1, depth: depth + 1) or return nil
+          value = RecordHash.literal_keys(site_irep, i, base + 2 * j + 1, depth: depth + 1)
+          return nil unless value
           pooled.concat(value)
         end
       end
@@ -275,7 +289,8 @@ module RecordHash
 
     # The MethodDef whose body is +irep+, when its every call can be enumerated.
     def admitted(irep)
-      d = @body_def[irep.label] or return nil
+      d = @body_def[irep.label]
+      return nil unless d
       name = d.name
       return nil unless (@registry[name] || []).size == 1 && d.kind.nil?
       return nil if @poisoned.include?(name) || @outside_tokens.include?(name)
@@ -352,7 +367,8 @@ module RecordHash
       program.each_with_op(:SSEND, :SSEND0) do |insn, i|
         next unless insn.sym.to_s.start_with?('attr')
 
-        n = insn.argc or next
+        n = insn.argc
+        next unless n
         ((i - n).clamp(0, i)...i).each { |k| positions << k if program.source_at(k).op == :LOADSYM }
       end
       positions
@@ -361,7 +377,8 @@ module RecordHash
     # The ivar named by the first argument of a reflective send, when literal.
     def literal_ivar_arg(irep, idx, insn)
       arg = (insn.reg + 1)
-      sources = BytecodeIR.producers(irep, idx, arg, through_handlers: true) or return nil
+      sources = BytecodeIR.producers(irep, idx, arg, through_handlers: true)
+      return nil unless sources
 
       names = sources.map do |d|
         next nil if d.entry?
@@ -452,9 +469,11 @@ module RecordHash
 
     # Alias scan from the literal: it may only be stored to this slot (or read/written by key).
     def literal_scan(irep, d)
-      literal = BytecodeIR.for(irep).container_literal(d) or return fail!('HASH without a pair count')
+      literal = BytecodeIR.for(irep).container_literal(d)
+      return fail!('HASH without a pair count') unless literal
       literal.key_regs.zip(literal.value_regs) do |key, value|
-        keys = RecordHash.literal_keys(irep, d, key) or return fail!('non-literal key in a Hash literal')
+        keys = RecordHash.literal_keys(irep, d, key)
+        return fail!('non-literal key in a Hash literal') unless keys
         @literal_pairs << [irep, d, keys, value.to_i]
       end
       alias_scan(irep, d, literal.base)
@@ -524,7 +543,8 @@ module RecordHash
       found = []
       walk = lambda do |node, depth|
         (node.reps || []).each do |label|
-          child = irep.tree[label] or next
+          child = irep.tree[label]
+          next unless child
           BytecodeIR.for(child).each_with_op(:GETUPVAR) do |insn, i|
             index, level = insn.upvar_ref
             found << [child, i] if index == reg && level == depth
@@ -614,9 +634,11 @@ module RecordHash
       return escape("#{insn.sym} arity") unless insn.argc == 1 && insn.argc_operand[1].to_i.zero?
       return escape("#{insn.sym} of the Hash itself") if state.include?(lead + 1)
 
-      pairs = adjacent_hash_pairs(irep, k, lead + 1) or return escape("#{insn.sym} argument is not a fresh Hash literal")
+      pairs = adjacent_hash_pairs(irep, k, lead + 1)
+      return escape("#{insn.sym} argument is not a fresh Hash literal") unless pairs
       pairs.each do |index, key, value|
-        keys = RecordHash.literal_keys(irep, index, key) or return escape("non-literal key in #{insn.sym}")
+        keys = RecordHash.literal_keys(irep, index, key)
+        return escape("non-literal key in #{insn.sym}") unless keys
         @stores << [keys, irep, index, value]
       end
       return nil unless scan_captures(irep, lead)
@@ -645,7 +667,8 @@ module RecordHash
           start = index
           pairs = literal.key_regs.zip(literal.value_regs).map { |key, value| [index, key, value.to_i] }
           chain.drop(1).each do |add_index, add|
-            count = add.uint_operand or return nil
+            count = add.uint_operand
+            return nil unless count
             count.times { |i| pairs << [add_index, reg + 1 + 2 * i, reg + 2 + 2 * i] }
           end
           chained = chain.map(&:first).to_set

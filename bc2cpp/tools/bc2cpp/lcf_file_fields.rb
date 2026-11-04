@@ -18,8 +18,10 @@ module LcfFileFields
 
   # True when `unit[key]` on an exact +file_class+ object is an Array or nil, by the schema.
   def array_field?(file_class, key, mrblib_dir = LcfSchemaOracle::LCF_SCHEMA_MRBLIB)
-    root = roots(mrblib_dir)[file_class] or return false
-    fact = facts(mrblib_dir)["#{root}/#{key}"] or return false
+    root = roots(mrblib_dir)[file_class]
+    return false unless root
+    fact = facts(mrblib_dir)["#{root}/#{key}"]
+    return false unless fact
 
     non_nil = fact.classes.to_a - ['NilClass']
     non_nil == ['Array']

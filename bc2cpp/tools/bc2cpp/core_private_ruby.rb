@@ -143,7 +143,8 @@ module CorePrivateRuby
     src = StaticDispatchRegistrations.strip_c_comments(src)
     src = src.gsub(StaticDispatchRegistrations::REGISTRATION_CALL, '').gsub(StaticDispatchRegistrations::LEFT_OUT_CALL, '')
     src = src.gsub(STDERR_REPORT) { "#{Regexp.last_match(1)}\"\"#{Regexp.last_match(3)}" }
-    span = src.match(StaticDispatchRegistrations::SYM_TABLE)&.offset(1) or return src
+    span = src.match(StaticDispatchRegistrations::SYM_TABLE)&.offset(1)
+    return src unless span
 
     explicit = Hash.new(0)
     uses = Hash.new(0)

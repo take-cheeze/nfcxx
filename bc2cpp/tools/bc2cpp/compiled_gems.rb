@@ -487,7 +487,8 @@ def bc2cpp_rake_dependencies(dir, root)
   raise "bc2cpp: #{rake} is missing; the closed-world gem closure is derived from it" unless File.file?(rake)
 
   File.read(rake, encoding: 'UTF-8').each_line.filter_map do |line|
-    match = line.match(/^\s*(?:spec\.)?add_dependency[ (]\s*['"](mruby-[\w-]+)['"]/) or next
+    match = line.match(/^\s*(?:spec\.)?add_dependency[ (]\s*['"](mruby-[\w-]+)['"]/)
+    next unless match
     if (cond = line[/\bif\s+Dir\.exist\?\s+"\#\{MRUBY_ROOT\}\/mrbgems\/([\w-]+)"/, 1])
       next unless File.directory?(File.join(root, '3rd/mruby/mrbgems', cond))
     elsif (excluded = line[/\bunless\s+%w\[([^\]]*)\]\.include\?\(build\.name\)/, 1])
@@ -722,10 +723,12 @@ end
 def bc2cpp_load_world(spec)
   require 'json'
   world = spec.build.gems.each_with_object({}) do |gem, all|
-    compiled = BC2CPP_COMPILED_GEMS["#{gem.name}-compiled"] or next
+    compiled = BC2CPP_COMPILED_GEMS["#{gem.name}-compiled"]
+    next unless compiled
     next unless spec.build.gems.any? { |g| g.name == "#{gem.name}-compiled" }
 
-    files = gem.instance_variable_get(:@bc2cpp_mrblib_sources) or next
+    files = gem.instance_variable_get(:@bc2cpp_mrblib_sources)
+    next unless files
     all[compiled[:out_symbol]] = files.map { |f| File.expand_path(f) }
   end
   JSON.generate(world)
