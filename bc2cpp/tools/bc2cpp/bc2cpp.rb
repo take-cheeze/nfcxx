@@ -2185,13 +2185,10 @@ if $PROGRAM_NAME == __FILE__
     Shellwords.split(ENV['OTHER_DECLS_HEADER']).each { |path| puts "#include \"#{path}\"" }
   end
   puts ''
-  # CLASS_BODY_EMIT_GEM: the top-level class bodies that compile are emitted as functions and called from gem_init
-  # (emit_gem_hooks). Compiled here, before the owner-class cache and the helpers are printed, so the owners and helpers
-  # they use are declared. On by default; BC2CPP_CLASS_BODY_EMIT=0 turns it off. The VM still runs those bodies too
-  # (a duplicate run) until the residual mrblib drops them.
+  # No class unit is emitted: the VM runs every class body, and a compiled copy would run it a second time.
+  # compile_top_class_units stays for its checks; the gem_init call is not emitted.
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
-  class_units = ENV['BC2CPP_CLASS_BODY_EMIT'] == '0' ? [] : gen.compile_top_class_units(ireps.fetch(root_label))
-  class_units = gen.owned_class_units(class_units, only_owners)
+  class_units = []
   # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
   # units of other gems' owners that owned_class_units drops).
   if (dump_dir = ENV['BC2CPP_DUMP_UNITS']) && !dump_dir.empty?
