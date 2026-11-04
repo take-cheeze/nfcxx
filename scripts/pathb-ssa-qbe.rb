@@ -1422,7 +1422,8 @@ end
 
     # A float to a float of another precision: a rounding to single (truncd) or an exact widening (exts).
     def float_conv_lines(dst, t, x)
-      src = source_type(x)
+      src = unqual(source_type(x))
+      t = unqual(t)
       raise QbeUnsupported, "float conversion of an integer" unless float_type?(src)
 
       if t == src
@@ -1662,9 +1663,11 @@ end
   VOLATILE_STORES = %w[storeb storeh storew storel stores stored].freeze
 
   # The type without its const and volatile qualifiers: they are access properties, not part of the value's class.
+  # _Float32x (ISO/IEC TS 18661-3) is an IEEE binary64 type: on x86-64 it is double, so it is emitted as one.
   def unqual(t)
     t = t[1] while head(t) == "const"
-    head(t) == "volatile" ? unqual(t[1]) : t
+    return unqual(t[1]) if head(t) == "volatile"
+    t == "_Float32x" ? "double" : t
   end
 
   def volatile_name(kind, op_name) = "__pathb_v#{kind}_#{op_name}"
@@ -1844,7 +1847,9 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
     name = d[1].raw
     ty = d[2]
     raise QbeUnsupported, "string #{name} is not a char array" unless head(unqual(ty)) == "array"
-    raise QbeUnsupported, "string #{name} is a wide string" unless size(unqual(ty)[2]) == 1
+    # A wide string (an array of 2- or 4-byte elements) carries its encoding in the bytes: the same rule, aligned to its element.
+    elem = size(unqual(ty)[2])
+    raise QbeUnsupported, "string #{name} has elements of #{elem} bytes" unless [1, 2, 4].include?(elem)
 
     text = d[3]
     raise QbeUnsupported, "string #{name} has no string data" unless head(text) == "string"
@@ -1860,7 +1865,7 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
       Qbe.sp_objects << [symbol(name), total]
     end
     body = parts.empty? ? "z 0" : parts.join(", ")
-    [bytes, "data $#{symbol(name)} = align 1 { #{body} }"]
+    [bytes, "data $#{symbol(name)} = align #{elem} { #{body} }"]
   end
 
   # The bytes a quoted SSA string denotes: the escapes \\, \", \n, \t and \ooo (one to three octal digits).
