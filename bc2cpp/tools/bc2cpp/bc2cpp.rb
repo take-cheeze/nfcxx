@@ -604,9 +604,9 @@ if $PROGRAM_NAME == __FILE__
                                        declared_returns: CodeGen.declared_returns)
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
-    if param_diags.any? { |d| d.severity == 'error' } && ENV['BC2CPP_TYPE_FACTS'].to_s.empty?
-      abort "\n[bc2cpp] RBS_CHECKED_PARAMS: #{param_diags.size} unproven parameter type(s) (see above)."
-    end
+    # An unproven parameter type is not trusted, so its argument stays `any` (an mrb_value): it is reported, not fatal.
+    unproven = param_diags.count { |d| d.severity == 'error' }
+    warn "[bc2cpp] RBS_CHECKED_PARAMS: #{unproven} unproven parameter type(s) kept as any" if unproven.positive?
   end
 
   # CLOSED_WORLD_VALUE_CONSTANT: a single class-constructor assignment is a
