@@ -374,7 +374,9 @@ module LoadCompile
           installed = register.fetch([item.stmt.file, node.location.start_line], []).map { |spec| spec[:name] }.to_set
           body = %i[class module].include?(ub.body.kind) && !ub.body.path.end_with?('.singleton') ? ub.body.path : :unknown
           if node.is_a?(Prism::AliasMethodNode)
-            names << node.new_name.unescaped
+            # ALIAS_NEW_SITE: the new name is defined in its own class, so only that class and its subclasses can see it
+            # (copy_pinned? asks the class graph). A global name would pin every def of that name in the program.
+            graph ? sites[node.new_name.unescaped] << body : names << node.new_name.unescaped
             unless installed.include?(node.old_name.unescaped)
               receiver_rule_name?(node.old_name.unescaped, graph) ? sites[node.old_name.unescaped] << body : names << node.old_name.unescaped
             end
