@@ -532,7 +532,8 @@ def parse_global(f)
   o = StaticObj.new(name, size, align, h == "init" ? init : nil, false)
   # no storage here: a use of the object is refused, and a declaration that nothing uses is not
   o.tls = thread
-  if thread
+  if thread && h != "extern"
+    # a thread-local with an initializer: build_statics lowers it (one copy, or a block per thread under --threads)
     o.refusal = "thread-local global #{name} (not lowered)"
   elsif h == "extern"
     o.refusal = "extern global #{name} (declared here, defined elsewhere: no storage in this module)"
@@ -723,8 +724,13 @@ end
 # The static objects of the module, with their addresses and contents, in the order of the forms.
 def build_statics(mod, objs, asan = false)
   mod.add_statics(objs)
-  # --threads: a thread-local object has storage (its block is each thread's copy); without it, a use is refused
-  objs.each { |o| o.refusal = nil if mod.threads && o.tls && o.refusal.to_s.start_with?("thread-local") }
+  # A thread-local object has storage: under --threads it is the group of per-thread blocks (its copies); without it the
+  # module is one thread, so the object is an ordinary static (one copy, as the single thread's).
+  objs.each do |o|
+    next unless o.tls && o.refusal.to_s.start_with?("thread-local")
+    o.refusal = nil
+    o.tls = mod.threads
+  end
   end_addr = layout_statics(objs, asan)
   # An object whose contents this emitter cannot lower (a type it does not have, such as the std::float16_t constants
   # of <numbers> that every C++ program declares) is refused where it is used, not here: most are never used. An object
