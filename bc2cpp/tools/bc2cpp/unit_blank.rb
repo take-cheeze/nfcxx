@@ -15,12 +15,43 @@ module UnitBlank
     File.readlines(manifest, chomp: true).reject(&:empty?).to_set
   end
 
+  # Core classes the closed build defines natively, so `Object.const_defined?(:X)` is true for them at load: a guarded
+  # class statement whose guard names one of these is constant-folded to its class statement (FOLDED_GUARD).
+  NATIVE_CORE = %w[Object Integer Float Numeric Array Hash Range String Symbol Comparable Enumerable Kernel].freeze
+
+  # The class or module a top-level statement opens, when it is one: a plain `class X ... end`, or
+  # `class X ... end if Object.const_defined?(:Y)` with Y a native core class (FOLDED_GUARD: the guard is true, so the
+  # statement is the class). nil for anything else.
+  def opened_class(stmt)
+    case stmt
+    when Prism::ClassNode, Prism::ModuleNode
+      stmt.constant_path.slice
+    when Prism::IfNode
+      return nil unless stmt.subsequent.nil? && stmt.statements&.body&.size == 1
+
+      body = stmt.statements.body.first
+      return nil unless body.is_a?(Prism::ClassNode) || body.is_a?(Prism::ModuleNode)
+      return nil unless guard_true?(stmt.predicate)
+
+      body.constant_path.slice
+    end
+  end
+
+  # `Object.const_defined?(:Y)` with Y a native core class.
+  def guard_true?(node)
+    return false unless node.is_a?(Prism::CallNode) && node.name == :const_defined? && node.arguments
+    return false unless node.receiver.is_a?(Prism::ConstantReadNode) && node.receiver.name == :Object
+
+    arg = node.arguments.arguments.first
+    arg.is_a?(Prism::SymbolNode) && NATIVE_CORE.include?(arg.unescaped)
+  end
+
   # The copy of +text+ without the top-level class and module statements named in +paths+.
   def blank(text, paths)
     root = Prism.parse(text).value
     spans = (root.statements&.body || []).filter_map do |stmt|
-      next unless stmt.is_a?(Prism::ClassNode) || stmt.is_a?(Prism::ModuleNode)
-      next unless paths.include?(stmt.constant_path.slice)
+      name = opened_class(stmt)
+      next unless name && paths.include?(name)
 
       [stmt.location.start_offset, stmt.location.end_offset]
     end
