@@ -2384,7 +2384,9 @@ if $PROGRAM_NAME == __FILE__
     print m[:code]
   end
   print ShardOutput::HOOKS_MARK if shards > 1
-  print gen.emit_gem_hooks(class_units: class_units)
+  top_level_code = gen.compile_top_level_statements(ireps.fetch(root_label))
+  print top_level_code
+  print gen.emit_gem_hooks(class_units: class_units, top_level: !top_level_code.empty?)
   # CORE_CLASS_UNITS: the core's units are what mrb_init_mrblib runs when MRB_CORE_CLASS_UNITS is defined.
   if symbol == 'core_compiled'
     # CORE_CLASS_UNITS: with MRB_CORE_CLASS_UNITS the core mrblib is not loaded, so every top-level statement of it must be a unit.

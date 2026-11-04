@@ -443,7 +443,7 @@ class CodeGen
     "extern \"C\" void bc2cpp_core_class_units(mrb_state* M) {\n#{calls}}\n"
   end
 
-  def emit_gem_hooks(class_units: [])
+  def emit_gem_hooks(class_units: [], top_level: false)
     unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
     hooks = <<~CPP
       [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
@@ -460,7 +460,7 @@ class CodeGen
         bc2cpp_reset_direct_construct_classes();
       }
     CPP
-    hooks.sub("  bc2cpp_reset_owner_classes();\n  bc2cpp_set_instance_tts", "  bc2cpp_reset_owner_classes();\n#{unit_calls}  bc2cpp_set_instance_tts")
+    hooks.sub("  bc2cpp_reset_owner_classes();\n  bc2cpp_set_instance_tts", "  bc2cpp_reset_owner_classes();\n#{unit_calls}#{top_level ? "  bc2cpp_top_level_statements(M);\n" : ''}  bc2cpp_set_instance_tts")
   end
 
 

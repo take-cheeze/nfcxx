@@ -329,6 +329,42 @@ class CodeGen
     end
   end
 
+  # TOP_LEVEL_STATEMENTS: the top-level constant and global writes of a gem's root body, compiled as C++ statements in one
+  # function that gem_init calls after the class units. A statement is the run of root instructions that ends in a
+  # SETCONST or SETGV, after the previous statement; a class statement (its EXEC) ends the run too. Self is the top-level
+  # object; a constant is set on Object, a global in the global table. Returns the function's C text, or '' for none.
+  def compile_top_level_statements(root_irep)
+    program = BytecodeIR.for(root_irep)
+    body = +''
+    start = 0
+    program.each_source do |insn, idx|
+      if insn.op == :EXEC
+        start = idx + 1
+        next
+      end
+      next unless %i[SETCONST SETGV].include?(insn.op)
+
+      lines = +''
+      @class_body_unit = true
+      owner_def = Struct.new(:owner, :core, :name, :irep).new('Object', false, nil, root_irep)
+      (start...idx).each do |index|
+        source = program.source_at(index)
+        next unless source
+
+        lines << compile_insn(source, root_irep, owner_def, index)
+      end
+      target = insn.op == :SETCONST ? "mrb_const_set(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{insn.sym}\"), r#{insn.reg});" \
+                                    : "mrb_gv_set(M, mrb_intern_cstr(M, \"#{insn.sym}\"), r#{insn.reg});"
+      body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  #{target}\n  }\n"
+      start = idx + 1
+    end
+    return '' if body.empty?
+
+    "static void bc2cpp_top_level_statements(mrb_state* M) {\n  mrb_value self = mrb_obj_value(M->top_self);\n#{body}}\n"
+  ensure
+    @class_body_unit = false
+  end
+
   # The units a gem's gem_init runs are the ones of the owners that gem emits (ONLY_OWNERS). Every gem's TU would otherwise
   # run every unit, so core's gem_init ran RPG2k's body before mruby-rgss had defined RGSS (uninitialized constant RGSS
   # at boot). A unit is kept when an owner is its path or nests under it. nil only_owners is the one run for every owner.
