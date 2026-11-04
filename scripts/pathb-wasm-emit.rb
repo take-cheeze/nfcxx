@@ -1591,6 +1591,10 @@ class Fn
       @loc = "#{s[1]}:#{s[2]}"
     when "likely", "unlikely"
       # branch hints (docs/notes/ubsan.md): no code
+    when "barrier", "fence"
+      # a compiler barrier or a memory fence: the module has no shared memory and no atomics (one thread, one memory), and
+      # the statements keep their order, so there is no code to emit
+
     when "unreachable", "trap"
       e(0x00)
     when "nonnull"
