@@ -295,7 +295,7 @@ startup_markers = read_forms(ssa).select { |f| head(f) == "ssa-function" }.flat_
   end
 end
 
-il = ([data_text] + bodies + alias_markers + startup_markers).reject(&:empty?).join("\n\n") + "\n"
+il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + alias_markers + startup_markers).reject(&:empty?).join("\n\n") + "\n"
 x87_asm = x87_thunks_asm(x87_forms, il)
 thunk_refs = il.scan(/\$(__nfcxx_x87\w*)\(/).flatten.uniq
 missing = thunk_refs.reject { |s| x87_asm.include?("#{s}:") }
