@@ -43,8 +43,8 @@ suite.compile(UNITS) do |ireps, root|
   gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
   paths = units.map { |unit| unit[:path] }
-  suite.check('the class with a nil superclass and the module compile; the named superclass is left out',
-              paths.sort == %w[Mod Router])
+  suite.check('the module, the nil-superclass class and the named-superclass class each compile to a unit',
+              paths.sort == %w[Mod Router Sub])
   router = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
   suite.check('a class unit creates the class over the Object base and calls its body',
               router.include?('static void bc2cpp_top_unit_Router_0(mrb_state* M)') &&
@@ -276,7 +276,7 @@ end
 suite.compile(UNITS) do |ireps, root|
   gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
-  suite.check('a run for every owner keeps every unit', gen.owned_class_units(units, nil).map { |u| u[:path] }.sort == %w[Mod Router])
+  suite.check('a run for every owner keeps every unit', gen.owned_class_units(units, nil).map { |u| u[:path] }.sort == %w[Mod Router Sub])
   suite.check('an owner nested under a unit path keeps that unit',
               gen.owned_class_units(units, ['Router::Inner']).map { |u| u[:path] } == %w[Router])
   suite.check('a singleton owner keeps its class unit', gen.owned_class_units(units, ['Router.singleton']).map { |u| u[:path] } == %w[Router])

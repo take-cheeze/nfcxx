@@ -274,16 +274,17 @@ class CodeGen
     candidates = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
       insn = program.source_at(idx)
       path = BytecodeIR.class_body_path(root_irep, idx, nil)
-      next nil unless path && top_unit_super_nil?(program, idx, insn)
+      superclass = path && top_unit_superclass(program, idx, insn)
+      next nil unless superclass
 
-      [insn, path, child]
+      [insn, path, child, superclass]
     end
     occurrences = Hash.new(0)
-    compiled = candidates.map do |insn, path, child|
+    compiled = candidates.map do |insn, path, child, superclass|
       tag = "_#{occurrences[path]}"
       occurrences[path] += 1
       code, _refused = compile_class_body(@ireps.fetch(child), path, tag: tag)
-      { path: path, insn: insn, code: code, tag: tag }
+      { path: path, insn: insn, code: code, tag: tag, superclass: superclass }
     end
     missing = (CodeGen.const_unresolved || []).uniq
     unless missing.empty?
@@ -295,30 +296,37 @@ class CodeGen
     refused_paths = compiled.reject { |unit| unit[:code] }.map { |unit| unit[:path] }.to_set
     compiled.select { |unit| unit[:code] && !refused_paths.include?(unit[:path]) }.map do |unit|
       { path: unit[:path], name: "#{sanitize(unit[:path])}#{unit[:tag]}",
-        code: top_class_unit_code(unit[:insn], unit[:path], unit[:code], unit[:tag]) }
+        code: top_class_unit_code(unit[:insn], unit[:path], unit[:code], unit[:tag], unit[:superclass]) }
     end
   end
 
   # The function that creates a top-level unit's class and calls its body function (compile_class_body names it).
-  def top_class_unit_code(insn, path, body_code, tag = '')
+  def top_class_unit_code(insn, path, body_code, tag = '', superclass = 'mrb_nil_value()')
     base = 'mrb_obj_value(M->object_class)'
     sym = "mrb_intern_cstr(M, \"#{insn.sym}\")"
     define = if insn.op == :MODULE
                "(void)mrb_vm_define_module(M, #{base}, #{sym});"
              else
-               "(void)mrb_vm_define_class(M, #{base}, mrb_nil_value(), #{sym});"
+               "(void)mrb_vm_define_class(M, #{base}, #{superclass}, #{sym});"
              end
     "#{body_code}static void bc2cpp_top_unit_#{sanitize(path)}#{tag}(mrb_state* M) {\n" \
       "  #{define}\n  (void)bc2cpp_class_body_#{sanitize(path)}#{tag}(M);\n}\n"
   end
 
-  # A CLASS takes its superclass from the register after its base; only a LOADNIL there is a nil superclass the unit
-  # can pass as is. A MODULE has none.
-  def top_unit_super_nil?(program, idx, insn)
-    return true if insn.op == :MODULE
+  # The superclass a top-level unit passes to mrb_vm_define_class, as a C expression, or nil when the unit cannot name it.
+  # A CLASS takes its superclass from the register after its base: a LOADNIL there is nil, and a GETCONST there is a
+  # constant read, which the unit reads from Object as the VM does. A MODULE has none.
+  def top_unit_superclass(program, idx, insn)
+    return 'mrb_nil_value()' if insn.op == :MODULE
 
     previous = program.source_at(idx - 1)
-    previous&.op == :LOADNIL && previous.reg == insn.reg + 1
+    return nil unless previous && previous.reg == insn.reg + 1
+
+    case previous.op
+    when :LOADNIL then 'mrb_nil_value()'
+    when :GETCONST
+      "mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{previous.const_name}\"))"
+    end
   end
 
   # The units a gem's gem_init runs are the ones of the owners that gem emits (ONLY_OWNERS). Every gem's TU would otherwise
