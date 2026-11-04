@@ -17,8 +17,8 @@
 # Flag at 0: every guard is emitted and saved, as before (resumable entries excepted: they never carry a guard).
 # Flag on (the default, unset or 1): only the two unreached methods lose their guard, their saved bytecode and their
 # stub (their bodies are no longer kept).
-# ENUM_STEP is pinned to 0 here: its generated drivers replace the saved bodies of guarded methods by default, which is
-# a separate concern (enum_step_default_drivers_check.rb). This fixture checks guard placement and stubs alone.
+# ENUM_STEP is pinned to 0 here: the flag also gates the resumable variants (RESUMABLE_DUAL), which change guard
+# placement. This fixture checks guard placement and stubs alone.
 #
 # Each run is a bc2cpp.rb run over the fixture with the closed-world probe environment; the generated C++ is on its
 # stdout (--annotated), the stub manifest is OUT_DIR/<symbol>_stubs.txt. Needs MRBC (a host mrbc); SKIPs without it.

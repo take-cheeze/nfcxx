@@ -142,8 +142,8 @@ class CodeGen
       end
     end
     # RESUMABLE_DUAL: a direct-yield core method is also compiled as a resumable step (a variant under _rsm). The
-    # guard inside a Fiber calls the variant rather than saved bytecode, so the method keeps no saved body and no
-    # enum-step driver. The variant is compiled first, so the guard can name it.
+    # guard inside a Fiber calls the variant rather than saved bytecode, so the method keeps no saved body. The
+    # variant is compiled first, so the guard can name it.
     if !@rsm_variant && rsm_dual?(label, d)
       budget = @ir_inline_remaining
       @rsm_variants ||= {}
