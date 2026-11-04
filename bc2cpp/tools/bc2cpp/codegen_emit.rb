@@ -444,7 +444,7 @@ class CodeGen
   # CLASS_BODY_EMIT_GEM: `class_units` (compile_top_class_units) are the top-level class bodies the compiled gem runs
   # itself, after the owner-class slots are reset and before the registrations below.
   def emit_gem_hooks(class_units: [])
-    unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{sanitize(unit[:path])}(M);\n" }.join
+    unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
     hooks = <<~CPP
       [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
         bc2cpp_reset_const_site_cache();

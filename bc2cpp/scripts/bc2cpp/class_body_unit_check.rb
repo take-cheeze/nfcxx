@@ -47,18 +47,18 @@ suite.compile(UNITS) do |ireps, root|
               paths.sort == %w[Mod Router])
   router = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
   suite.check('a class unit creates the class over the Object base and calls its body',
-              router.include?('static void bc2cpp_top_unit_Router(mrb_state* M)') &&
+              router.include?('static void bc2cpp_top_unit_Router_0(mrb_state* M)') &&
               router.include?('(void)mrb_vm_define_class(M, mrb_obj_value(M->object_class), mrb_nil_value(), mrb_intern_cstr(M, "Router"));') &&
-              router.include?('(void)bc2cpp_class_body_Router(M);'))
+              router.include?('(void)bc2cpp_class_body_Router_0(M);'))
   mod = units.find { |unit| unit[:path] == 'Mod' }.to_h[:code].to_s
   suite.check('a module unit creates the module and calls its body',
               mod.include?('(void)mrb_vm_define_module(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, "Mod"));') &&
-              mod.include?('(void)bc2cpp_class_body_Mod(M);'))
+              mod.include?('(void)bc2cpp_class_body_Mod_0(M);'))
   hooks = gen.emit_gem_hooks(class_units: units)
   suite.check('gem_init calls each unit after the owner-class reset and before the registrations',
-              hooks.index('bc2cpp_top_unit_Router(M);') > hooks.index('bc2cpp_reset_owner_classes();') &&
-              hooks.index('bc2cpp_top_unit_Router(M);') < hooks.index('bc2cpp_set_instance_tts(M);') &&
-              hooks.include?('bc2cpp_top_unit_Mod(M);'))
+              hooks.index('bc2cpp_top_unit_Router_0(M);') > hooks.index('bc2cpp_reset_owner_classes();') &&
+              hooks.index('bc2cpp_top_unit_Router_0(M);') < hooks.index('bc2cpp_set_instance_tts(M);') &&
+              hooks.include?('bc2cpp_top_unit_Mod_0(M);'))
   suite.check('no unit means no call', !gen.emit_gem_hooks(class_units: []).include?('bc2cpp_top_unit_'))
 
   headers = %w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h]
@@ -76,7 +76,9 @@ end
 
 suite.compile(TWICE) do |ireps, root|
   gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('a path opened twice gets no unit', gen.compile_top_class_units(ireps.fetch(root)).empty?)
+  twice = gen.compile_top_class_units(ireps.fetch(root))
+  suite.check('a path opened twice gets one unit per occurrence, each under its own name',
+              twice.map { |u| u[:name] }.sort == %w[Router_0 Router_1])
 end
 
 # A constant built by a no-argument send: GETCONST Object then SEND0 :new, as core Enumerable's `NONE = Object.new`.

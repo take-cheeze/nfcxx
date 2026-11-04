@@ -32,17 +32,22 @@ class CodeGen
   # body's class path. A TDEF of an omitted key (unregistered_keys) is its register write alone.
   # A checked send (codegen_checked_send.rb) names a helper the gem does not define, so a unit's sends keep the plain
   # mrb_funcall the generator starts from. @class_body_unit is set only while a unit compiles.
-  def compile_class_body(irep, owner)
+  # UNIT_TAG: a unit's function names carry its tag ("_<occurrence>" for a reopened top-level class), so each occurrence
+  # of one class path is its own function in the translation unit. Nested bodies inherit the tag of their unit.
+  def compile_class_body(irep, owner, tag: '')
     was_unit = @class_body_unit
     outer_notes = @class_body_notes
+    outer_tag = @unit_tag
     @class_body_unit = true
     @class_body_notes = []
+    @unit_tag = tag
     code, refused = compile_class_body_unit(irep, owner)
     dump_class_unit(owner, code, refused, @class_body_notes)
     [code, refused]
   ensure
     @class_body_unit = was_unit
     @class_body_notes = outer_notes
+    @unit_tag = outer_tag
   end
 
   # BC2CPP_DUMP_UNITS=<dir>: each body the driver tries, as <owner>.cpp (its unit text) or <owner>.refused (the opcodes
@@ -108,7 +113,7 @@ class CodeGen
 
         texts << child_code
         lines << class_unit_define(insn)
-        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}(M);\n"
+        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}#{@unit_tag}(M);\n"
       elsif insn.op == :TDEF && omitted_def?(insn, owner, omitted)
         lines << "  // #{owner}##{insn.sym} omitted: statically dispatched only (no registration)\n"
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
@@ -170,7 +175,7 @@ class CodeGen
         lines << compile_insn(insn, irep, owner_def, idx)
       end
     end
-    fn = "bc2cpp_class_body_#{sanitize(owner)}"
+    fn = "bc2cpp_class_body_#{sanitize(owner)}#{@unit_tag}"
     code = +"#{CLASS_UNIT_DECLS}static mrb_value #{fn}(mrb_state* M) {\n"
     code << "  mrb_value self = #{body_self_expr(owner)};\n"
     code << emit_register_initializers(body_register_count(program, irep), [])
@@ -266,29 +271,36 @@ class CodeGen
 
   def compile_top_class_units(root_irep)
     program = BytecodeIR.for(root_irep)
-    units = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
+    candidates = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
       insn = program.source_at(idx)
       path = BytecodeIR.class_body_path(root_irep, idx, nil)
       next nil unless path && top_unit_super_nil?(program, idx, insn)
 
-      code, _refused = compile_class_body(@ireps.fetch(child), path)
-      next nil unless code
-
-      { path: path, insn: insn, code: code }
+      [insn, path, child]
+    end
+    occurrences = Hash.new(0)
+    compiled = candidates.map do |insn, path, child|
+      tag = "_#{occurrences[path]}"
+      occurrences[path] += 1
+      code, _refused = compile_class_body(@ireps.fetch(child), path, tag: tag)
+      { path: path, insn: insn, code: code, tag: tag }
     end
     missing = (CodeGen.const_unresolved || []).uniq
     unless missing.empty?
       listing = missing.map { |m| "  #{m[:name]} (read in #{m[:owner]})" }.join("\n")
       raise "unresolved constants in class bodies (CONST_RESOLVE):\n#{listing}"
     end
-    counts = units.map { |unit| unit[:path] }.tally
-    units.select { |unit| counts[unit[:path]] == 1 }.map do |unit|
-      { path: unit[:path], code: top_class_unit_code(unit[:insn], unit[:path], unit[:code]) }
+    # A path is emitted only when every occurrence of it compiled: UNIT_BLANK removes all of that path's statements, so a
+    # refused occurrence would otherwise lose its body.
+    refused_paths = compiled.reject { |unit| unit[:code] }.map { |unit| unit[:path] }.to_set
+    compiled.select { |unit| unit[:code] && !refused_paths.include?(unit[:path]) }.map do |unit|
+      { path: unit[:path], name: "#{sanitize(unit[:path])}#{unit[:tag]}",
+        code: top_class_unit_code(unit[:insn], unit[:path], unit[:code], unit[:tag]) }
     end
   end
 
   # The function that creates a top-level unit's class and calls its body function (compile_class_body names it).
-  def top_class_unit_code(insn, path, body_code)
+  def top_class_unit_code(insn, path, body_code, tag = '')
     base = 'mrb_obj_value(M->object_class)'
     sym = "mrb_intern_cstr(M, \"#{insn.sym}\")"
     define = if insn.op == :MODULE
@@ -296,8 +308,8 @@ class CodeGen
              else
                "(void)mrb_vm_define_class(M, #{base}, mrb_nil_value(), #{sym});"
              end
-    "#{body_code}static void bc2cpp_top_unit_#{sanitize(path)}(mrb_state* M) {\n" \
-      "  #{define}\n  (void)bc2cpp_class_body_#{sanitize(path)}(M);\n}\n"
+    "#{body_code}static void bc2cpp_top_unit_#{sanitize(path)}#{tag}(mrb_state* M) {\n" \
+      "  #{define}\n  (void)bc2cpp_class_body_#{sanitize(path)}#{tag}(M);\n}\n"
   end
 
   # A CLASS takes its superclass from the register after its base; only a LOADNIL there is a nil superclass the unit
