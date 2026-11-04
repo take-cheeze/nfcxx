@@ -305,7 +305,17 @@ module PathbEgraph
       out = {}
       # Reverse postorder: a dominator is processed before the blocks it dominates, so a register it replaced
       # is already known (see reg_class).
-      PathbEgraph.reverse_postorder(@fn).each { |b| out[b] = block(@fn.blocks[b]) }
+      rpo = PathbEgraph.reverse_postorder(@fn)
+      preds, = PathbEgraph.idoms(@fn, rpo)
+      # A block with one predecessor starts with the memory the predecessor ends with: every path to it goes through
+      # that predecessor, and it comes before the block in reverse postorder. A block with two or more predecessors
+      # starts with nothing known (the paths may write different values).
+      @mem_out = {}
+      rpo.each do |b|
+        inherited = preds[b].size == 1 ? @mem_out[preds[b][0]] : nil
+        out[b] = block(@fn.blocks[b], inherited)
+        @mem_out[b] = @mem
+      end
       cse_dominator(out)
       apply_subst(out)
       fold_control(out)
@@ -325,7 +335,7 @@ module PathbEgraph
 
     # ---- per block ---------------------------------------------------------------------------------------------
 
-    def block(blk)
+    def block(blk, inherited = nil)
       @nodes = []
       @parent = []
       @cty = {}
@@ -338,7 +348,8 @@ module PathbEgraph
       @checked = {}    # register => true when its let is a checked operation with a node (CHECKED_OPS)
       @out = []
       @cap = nil
-      @mem = {}        # slot key => { type:, cls:, from: } the value the slot holds here (see "Memory")
+      @mem = {}        # slot key => { type:, cls:, from:, op: } the value the slot holds here (see "Memory")
+      inherit_memory(inherited) if inherited
       dead = dead_stores(blk[:instrs])
       @stats[:stores_removed] += dead.size
       blk[:phis].each { |ph| @rc[ph.name] = leaf(ph.name) }
@@ -905,6 +916,19 @@ module PathbEgraph
 
     def forget_memory = (@mem = {})
 
+    # The slots a predecessor leaves hold their values here too. The class of a value is a node of the predecessor's
+    # e-graph, so the value is re-resolved from its operand (a register of an earlier block is a leaf, see reg_class).
+    def inherit_memory(from)
+      from.each do |k, e|
+        cls = nil
+        if e[:op]
+          c = operand_class(e[:op])
+          cls = c if sx(cty(c)) == sx(e[:type])
+        end
+        @mem[k] = { type: e[:type], cls: cls, from: e[:from], op: e[:op] }
+      end
+    end
+
     # The slot holds the stored value. The value is remembered as a class only when it is a register or a constant
     # of the store's type; any other value (an expression) leaves the slot's value unknown.
     def note_store(ins)
@@ -914,7 +938,8 @@ module PathbEgraph
         c = operand_class(v)
         cls = c if sx(cty(c)) == sx(t)
       end
-      @mem[slot_key(ins[2])] = { type: t, cls: cls, from: :store }
+      op = reg?(v) || const_operand?(v) ? v : nil
+      @mem[slot_key(ins[2])] = { type: t, cls: cls, from: :store, op: op }
     end
 
     # A plain load of a slot. When the slot's value is known here with the same type, the load has that value:
@@ -929,7 +954,7 @@ module PathbEgraph
         c = new_node("opaque", t, r, [])
         @opaque[r] = true
         @rc[r] = c
-        @mem[k] = { type: t, cls: c, from: :load }
+        @mem[k] = { type: t, cls: c, from: :load, op: r }
       end
     end
 
