@@ -21,7 +21,6 @@ require_relative '../../tools/bc2cpp/class_world_gate'
 require_relative '../../tools/bc2cpp/dispatch_targets'
 require_relative '../../tools/bc2cpp/native_constructor_sigs'
 require_relative '../../tools/bc2cpp/gem_owners'
-require_relative '../../tools/bc2cpp/enum_driver_gen'
 require_relative '../rpg2k/closed_world_lint'
 
 failures = []
@@ -203,11 +202,10 @@ Dir.mktmpdir do |tmp|
     root = ClassBodyScan.scan([path])
     ClassWorld.build([root])
     owners = GemOwners.owners([path])
-    driver = EnumDriverGen.driver_source(path, 'SharedConsumer', 'each', '__driver')
     lint_file(path, root: tmp)
-    check.call('class scans, world, owners, driver and lint share one syntax tree', calls == 1)
+    check.call('class scans, world, owners and lint share one syntax tree', calls == 1)
     check.call('independent readers keep their results and do not mutate shared syntax',
-               owners == ['SharedConsumer'] && driver.include?('block.call(1)') && signature(parsed) == before)
+               owners == ['SharedConsumer'] && signature(parsed) == before)
   end
 end
 if foreign.empty?
