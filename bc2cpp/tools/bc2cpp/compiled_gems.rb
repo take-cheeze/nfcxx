@@ -151,7 +151,6 @@ def bc2cpp_registration_owners(compiled_owners)
   core = BC2CPP_CORE_OWNERS
   [(core + compiled_owners).uniq, core.to_set]
 end
-BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
 require 'prism'
 require_relative '../rgss_tts_config'

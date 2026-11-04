@@ -282,14 +282,12 @@ if $PROGRAM_NAME == __FILE__
   end
   CodeGen.core_aliases = CoreDefs.alias_map(alias_sites, registry, ireps, core_shadowed_pairs)
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
-  core_refused = CoreMethods.load_refused(CoreMethods::DEFAULT_PATH)
-  core_ineligible = CoreMethods.excluded_labels(registry, ireps, core_refused)
+  core_ineligible = CoreMethods.excluded_labels(registry, ireps)
   # An interpreted core replacement still intercepts inherited lookup.
   CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
   CodeGen.core_result_installed_names = CoreRubyResults.installed_names(ireps)
   # ENUMERATOR_MODEL: read before the core filtering below drops the interpreted Kernel#to_enum.
   CodeGen.enumerator_model = EnumeratorModel.analyze(registry, ireps, alias_sites)
-  core_stale_refusals = CoreMethods.stale(registry, ireps, core_refused)
   core_bytecode = registry.values.flatten.count { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
   core_all_defs = registry.values.flatten.select { |d| d.irep && d.core }
   # A core attr_* accessor or module_function copy has no body to compile: it stays the interpreter's.
@@ -463,7 +461,6 @@ if $PROGRAM_NAME == __FILE__
          "later definition, #{core_ineligible.size} kept interpreted (Fiber, lambda, mruby-enumerator, conditional, refused), " \
          "#{core_hidden_defs.size} compiled without being registry definitions (native or operator name) =="
     core_hidden_defs.map { |d| "#{d.owner}##{d.name}" }.sort.each { |k| warn "  HIDDEN #{k}" }
-    core_stale_refusals.each { |k| warn "  STALE #{k}" }
   end
 
   call_sites = profile_call.call('CallSiteIndex.build') { CallSiteIndex.build(ireps) }
@@ -1509,7 +1506,7 @@ if $PROGRAM_NAME == __FILE__
       key = "#{m[:owner]}##{m[:name]}"
       [key, m[:code][/^\s*#error (.*?) -- not in this/, 1].to_s.delete_prefix("#{key} ")]
     end
-    report = CoreMethods.interpreted_report(core_all_defs, ireps, core_refused, unsupported)
+    report = CoreMethods.interpreted_report(core_all_defs, ireps, unsupported)
     warn ''
     warn "== core-source methods left interpreted (#{report.size}) =="
     report.each { |l| warn "  #{l}" }
