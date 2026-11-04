@@ -2225,7 +2225,6 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_forward_decls(compiled)
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
-  print gen.emit_core_guard_helpers(compiled)
   # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed.
   # helper_codes, not compiled: a helper only the load names must be built
   # before reserve_poly_table_slots too (building allocates OWNER_CLASS_CACHE

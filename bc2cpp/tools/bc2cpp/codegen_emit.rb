@@ -288,13 +288,7 @@ class CodeGen
         omitted, names = names.partition { |name| unregistered.include?("#{owner}##{name}") }
         omitted.each { |name| out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
         defines = names.map { |name| "#{fn}(M, #{var}, #{c_string_literal(name)}, #{m[:entry]}, #{m[:aspec]});" }
-        # CORE_BLOCK_GUARD: the bytecode must be saved before it is replaced.
-        if m[:guard]
-          save = "bc2cpp_core_save_interpreted(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]})"
-          out << "  if (#{save}) { #{defines.join(' ')} }\n"
-        else
-          defines.each { |define| out << "  #{define}\n" }
-        end
+        defines.each { |define| out << "  #{define}\n" }
       end
     end
   end
@@ -470,64 +464,6 @@ class CodeGen
     hooks.sub("  bc2cpp_reset_owner_classes();\n  bc2cpp_set_instance_tts", "  bc2cpp_reset_owner_classes();\n#{unit_calls}  bc2cpp_set_instance_tts")
   end
 
-  # CORE_BLOCK_GUARD: the run-time half of core_block_guard. The bytecode of
-  # every guarded method is kept in a hidden ivar of Object (no `@`, so no reflection
-  # lists it), one slot per method index, and rooted by it for the state's lifetime.
-  # mrb_exec_irep, called by the entry while the VM is still in the cfunc's own
-  # frame, swaps that frame for the bytecode, as instance_exec does: no C frame is
-  # left between the caller and the method.
-  def emit_core_guard_helpers(compiled)
-    return '' unless compiled.any? { |m| m[:guard] }
-
-    <<~CPP
-      // CORE_BLOCK_GUARD -- see core_block_guard in codegen_method.rb.
-      #include <stdio.h>
-      extern "C" mrb_value mrb_exec_irep(mrb_state*, mrb_value, const struct RProc*);
-      extern "C" mrb_int mrb_ci_bidx(mrb_callinfo*);
-      // The block of the cfunc frame being entered (nil when none was given).
-      [[maybe_unused]] static mrb_value bc2cpp_entry_block(mrb_state* M) {
-        mrb_callinfo* ci = M->c->ci;
-        return ci->stack[mrb_ci_bidx(ci)];
-      }
-      static mrb_value bc2cpp_core_interpreted(mrb_state* M, mrb_value self, mrb_int index) {
-        mrb_value table = mrb_iv_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "__bc2cpp_core_interpreted__"));
-        return mrb_exec_irep(M, self, mrb_proc_ptr(mrb_ary_ref(M, table, index)));
-      }
-      // Every compiled Enumerable entry asks this, so `each` is interned once per state, not per call.
-      [[maybe_unused]] static bool bc2cpp_core_each_is_builtin(mrb_state* M, mrb_value self) {
-        static mrb_state* each_state = nullptr;
-        static mrb_sym each_sym = 0;
-        if (each_state != M) {
-          each_sym = mrb_intern_lit(M, "each");
-          each_state = M;
-        }
-        struct RClass* found = mrb_class(M, self);
-        mrb_method_search_vm(M, &found, each_sym);
-        return found == M->array_class || found == M->hash_class || found == M->range_class;
-      }
-      static bool bc2cpp_core_save_interpreted(mrb_state* M, struct RClass* c, bool singleton, const char* name, mrb_int index) {
-        struct RClass* target = singleton ? mrb_singleton_class_ptr(M, mrb_obj_value(c)) : c;
-        struct RClass* found = target;
-        mrb_method_t m = mrb_method_search_vm(M, &found, mrb_intern_cstr(M, name));
-        mrb_value object = mrb_obj_value(M->object_class);
-        mrb_sym key = mrb_intern_lit(M, "__bc2cpp_core_interpreted__");
-        mrb_value table = mrb_iv_get(M, object, key);
-        if (found == target && !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_PROC_P(m) && !MRB_PROC_CFUNC_P(MRB_METHOD_PROC(m))) {
-          if (mrb_nil_p(table)) {
-            table = mrb_ary_new(M);
-            mrb_iv_set(M, object, key, table);
-          }
-          mrb_ary_set(M, table, index, mrb_obj_value((struct RProc*)MRB_METHOD_PROC(m)));
-          return true;
-        }
-        // A second registration finds its own entry, which has its bytecode saved already.
-        if (found == target && !mrb_nil_p(table) && !mrb_nil_p(mrb_ary_ref(M, table, index))) return true;
-        fprintf(stderr, "[RPG2k] bc2cpp core: %s has no bytecode definition to fall back to; left as it is\\n", name);
-        return false;
-      }
-
-    CPP
-  end
 
   # INSTANCE_TT_SUBCLASSES: a class copies its superclass's instance type when it is created, so a subclass made
   # before the switch (`Class.new(C)` in a class body: a gem's mrblib loads before its compiled gem's init runs this)
