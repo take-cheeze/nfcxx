@@ -371,7 +371,8 @@ module StaticDispatchRegistrations
       found = guarded_owner_calls(src, subclassed).to_set
       lines = src.lines
       lines.each_with_index do |line, at|
-        marker = SYM_SITE_MARKER.match(line) or next
+        marker = SYM_SITE_MARKER.match(line)
+        next unless marker
         body = []
         j = at + 1
         while j < lines.size && !lines[j].match?(/\A    \}\s*\z/)
@@ -413,7 +414,8 @@ module StaticDispatchRegistrations
     lines = src.lines
     found = []
     lines.each_with_index do |line, at|
-      site = OWNER_CALL_SITE.match(line) or next
+      site = OWNER_CALL_SITE.match(line)
+      next unless site
       recv, idx, rest = site.captures
       guarded = (at.positive? && lines[at - 1].strip == '} else {' && OwnerCallDirect.guard_chain_classes(lines, at - 1, recv, slots)) || Set.new
       direct = rest.scan(OWNER_DIRECT).to_set { |(o)| unescape(o) }
@@ -855,9 +857,14 @@ module StaticDispatchRegistrations
   def blank_registration_names(text)
     out = nil
     text.scan(/\bmrb_(define_\w+)\s*\(/) do |(family)|
-      spec = DEFINING_FAMILIES[family] or next
-      spans = call_arg_spans(text, Regexp.last_match.end(0) - 1) or next
-      from, to = spans[spec[:name]] || next
+      spec = DEFINING_FAMILIES[family]
+      next unless spec
+      spans = call_arg_spans(text, Regexp.last_match.end(0) - 1)
+      next unless spans
+      span = spans[spec[:name]]
+      next unless span
+
+      from, to = span
       next unless text[from...to].strip.match?(REGISTRATION_NAME_ARG)
 
       (out ||= text.dup)[from...to] = ' ' * (to - from)
