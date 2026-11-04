@@ -377,6 +377,7 @@ class Module_
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
   attr_accessor :threads   # --threads: a shared memory, imported as env.memory, with the stack pointer exported (see emit_module)
+  attr_accessor :init_type, :init_index   # --threads: __nfcxx_init, which applies the passive data once (see emit_module)
   attr_accessor :memory64   # the 64-bit memory (--memory64): memory addresses are i64 (see push_addr)
   attr_accessor :stack_fns   # --emscripten: the stack functions [name, type index, body] (see emscripten_stack_fns)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
@@ -2339,6 +2340,7 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
   mod.threads = threads
   mod.memory64 = memory64
   mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
+  mod.init_type = mod.type_of([], nil) if threads       # __nfcxx_init: no params, no result
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
   mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
@@ -2359,6 +2361,7 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
   mod.check_index = mod.imports.length + order.length if asan
   mod.alloc_index = { "malloc" => mod.check_index + 1, "free" => mod.check_index + 2 } if asan
   mod.ctors_index = mod.imports.length + order.length + (asan ? 3 : 0) if emscripten
+  mod.init_index = mod.imports.length + order.length if threads
   mod.stack_fns = emscripten_stack_fns(mod) if emscripten   # after the ctors (the index of each is in encode_module)
   bodies = order.map do |nm|
     fn = Fn.new(mod, defs[nm])
@@ -2443,7 +2446,7 @@ def encode_module(mod, bodies)
   end
   # functions (asan: the check, then malloc and free, are the last ones; emscripten: then __wasm_call_ctors)
   fsec = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0), fsec)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 1 : 0), fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   if mod.asan
     uleb(mod.check_type, fsec)
@@ -2452,6 +2455,7 @@ def encode_module(mod, bodies)
   end
   uleb(mod.ctors_type, fsec) if mod.emscripten
   mod.stack_fns.each { |_, ti, _| uleb(ti, fsec) } if mod.emscripten
+  uleb(mod.init_type, fsec) if mod.threads
   section(3, fsec, out)
   # the function table: slot 0 empty, then the functions whose address is taken (Module_#table). emscripten: it is
   # exported under the name the glue looks for, empty when no address is taken.
@@ -2503,13 +2507,17 @@ def encode_module(mod, bodies)
   ex = []
   nexp = (mod.import_memory ? 0 : 1) + bodies.length
   nexp += 5 + mod.stack_fns.length if mod.emscripten
-  nexp += 1 if mod.threads
+  nexp += 2 if mod.threads
   uleb(nexp, ex)
   if mod.threads
     # --threads: each thread's instance sets its own stack pointer (global 0) before it runs (see tests/wasm-threads)
     name_bytes("__stack_pointer", ex)
     ex << 0x03
     uleb(0, ex)
+    # and the host calls __nfcxx_init once, on the first instance, before any thread runs (the passive data is applied there)
+    name_bytes("__nfcxx_init", ex)
+    ex << 0x00
+    uleb(mod.init_index, ex)
   end
   unless mod.import_memory
     name_bytes("memory", ex)
@@ -2554,11 +2562,31 @@ def encode_module(mod, bodies)
     mod.table.keys.each { |nm| uleb(table_function(mod, nm), el) }
     section(9, el, out)
   end
+  # datacount (--threads: memory.init and data.drop in __nfcxx_init need it; the section comes before the code)
+  if mod.threads
+    dc = []
+    uleb(mod.segments.length, dc)
+    section(12, dc, out)
+  end
   # code
   code = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0), code)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 1 : 0), code)
   bodies.each do |nm, fn|
     b = fn.encode
+    uleb(b.length, code)
+    b.each { |x| code << x }
+  end
+  if mod.threads
+    # __nfcxx_init: memory.init of each passive segment at its address (once, by the host), then data.drop of each
+    b = [0x00]                           # no locals
+    mod.segments.each_with_index do |(addr, bytes), i|
+      b << 0x41; sleb(addr, b)           # destination
+      b << 0x41; sleb(0, b)              # source offset
+      b << 0x41; sleb(bytes.length, b)   # length
+      b << 0xfc << 0x08; uleb(i, b); b << 0x00   # memory.init i 0
+    end
+    mod.segments.each_index { |i| b << 0xfc << 0x09; uleb(i, b) }   # data.drop i
+    b << 0x0b
     uleb(b.length, code)
     b.each { |x| code << x }
   end
@@ -2583,9 +2611,13 @@ def encode_module(mod, bodies)
     dsec = []
     uleb(mod.segments.length, dsec)
     mod.segments.each do |addr, bytes|
-      dsec << 0x00 << (mod.memory64 ? 0x42 : 0x41)   # active, memory 0: the offset is an i64.const or an i32.const
-      sleb(addr, dsec)
-      dsec << 0x0b
+      if mod.threads
+        dsec << 0x01                     # passive (--threads): applied once, by __nfcxx_init, not by every thread's instance
+      else
+        dsec << 0x00 << (mod.memory64 ? 0x42 : 0x41)   # active, memory 0: the offset is an i64.const or an i32.const
+        sleb(addr, dsec)
+        dsec << 0x0b
+      end
       uleb(bytes.length, dsec)
       bytes.each { |b| dsec << b }
     end

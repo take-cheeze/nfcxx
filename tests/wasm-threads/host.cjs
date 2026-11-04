@@ -40,6 +40,11 @@ if (isMainThread) {
   const words = new Int32Array(memory.buffer);
   const big = new BigInt64Array(memory.buffer);
 
+  // the first instance applies the module's data (__nfcxx_init); the thread instances do not
+  const first = instantiate(mod, memory);
+  first.exports.__nfcxx_init();
+  const sharedInit = Number(first.exports.shared_addr());
+
   let done = 0;
   const failures = [];
   for (let i = 0; i < n; i++) {
@@ -56,11 +61,13 @@ if (isMainThread) {
     const want32 = n * iters;
     const got32 = Atomics.load(words, counter32 / 4);
     const got64 = Number(Atomics.load(big, counter64 / 8));
-    let ok = failures.length === 0 && got32 === want32 && got64 === want32;
-    console.log(`threads: ${n} x ${iters}: counter32 ${got32}, counter64 ${got64} (want ${want32} each)`);
+    const gotShared = Atomics.load(words, sharedInit / 4);
+    let ok = failures.length === 0 && got32 === want32 && got64 === want32 && gotShared === 100 + want32;
+    console.log(`threads: ${n} x ${iters}: counter32 ${got32}, counter64 ${got64}, shared_init ${gotShared} ` +
+                `(want ${want32}, ${want32}, ${100 + want32})`);
 
     // single-thread checks on the same memory: load, store, exchange, compare-and-swap, fence
-    const inst = instantiate(mod, memory);
+    const inst = first;
     const ex = inst.exports;
     const check = (what, got, want) => {
       if (got !== want) { ok = false; console.log(`FAIL ${what}: got ${got}, want ${want}`); }
@@ -88,6 +95,7 @@ if (isMainThread) {
     inst.exports.__stack_pointer.value = sp;
     inst.exports.bump(BigInt(counter32), iters);
     inst.exports.bump64(BigInt(counter64), iters);
+    inst.exports.bump_shared(iters);
     parentPort.postMessage({ done: true });
   } catch (e) {
     parentPort.postMessage({ error: String(e) });

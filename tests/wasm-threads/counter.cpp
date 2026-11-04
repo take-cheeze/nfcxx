@@ -17,3 +17,12 @@ extern "C" int load(int *p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
 extern "C" void store(int *p, int v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
 
 extern "C" void fence() { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+
+// a static with an initializer: it is in the module's data, which __nfcxx_init applies once (not once per thread)
+int shared_init = 100;
+
+extern "C" void bump_shared(int n) {
+  for (int i = 0; i < n; i++) __atomic_fetch_add(&shared_init, 1, __ATOMIC_SEQ_CST);
+}
+
+extern "C" long long shared_addr() { return (long long)&shared_init; }
