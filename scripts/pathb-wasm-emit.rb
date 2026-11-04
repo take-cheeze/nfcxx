@@ -378,6 +378,7 @@ class Module_
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
   attr_accessor :threads   # --threads: a shared memory, imported as env.memory, with the stack pointer exported (see emit_module)
   attr_accessor :init_type, :init_index   # --threads: __nfcxx_init, which applies the passive data once (see emit_module)
+  attr_accessor :entry_type, :entry_index, :call_type   # --threads: __nfcxx_thread_entry(slot, arg) calls through the table
   attr_accessor :tls_start, :tls_size     # --threads: the thread-local group, [tls_start, tls_start + tls_size) (see build_statics)
   attr_accessor :memory64   # the 64-bit memory (--memory64): memory addresses are i64 (see push_addr)
   attr_accessor :stack_fns   # --emscripten: the stack functions [name, type index, body] (see emscripten_stack_fns)
@@ -2378,6 +2379,12 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
   mod.memory64 = memory64
   mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
   mod.init_type = mod.type_of([], nil) if threads       # __nfcxx_init: no params, no result
+  if threads
+    # __nfcxx_thread_entry(slot, arg): the start routine at table slot SLOT called with ARG (a void* -> void* routine)
+    mod.entry_type = mod.type_of([:i32, :i64], :i64)
+    mod.call_type = mod.type_of([:i64], :i64)
+    mod.indirect_calls = true                           # the table is declared and exported
+  end
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
   mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
@@ -2399,6 +2406,7 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
   mod.alloc_index = { "malloc" => mod.check_index + 1, "free" => mod.check_index + 2 } if asan
   mod.ctors_index = mod.imports.length + order.length + (asan ? 3 : 0) if emscripten
   mod.init_index = mod.imports.length + order.length if threads
+  mod.entry_index = mod.imports.length + order.length + 1 if threads
   mod.stack_fns = emscripten_stack_fns(mod) if emscripten   # after the ctors (the index of each is in encode_module)
   bodies = order.map do |nm|
     fn = Fn.new(mod, defs[nm])
@@ -2483,7 +2491,7 @@ def encode_module(mod, bodies)
   end
   # functions (asan: the check, then malloc and free, are the last ones; emscripten: then __wasm_call_ctors)
   fsec = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 1 : 0), fsec)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 2 : 0), fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   if mod.asan
     uleb(mod.check_type, fsec)
@@ -2493,6 +2501,7 @@ def encode_module(mod, bodies)
   uleb(mod.ctors_type, fsec) if mod.emscripten
   mod.stack_fns.each { |_, ti, _| uleb(ti, fsec) } if mod.emscripten
   uleb(mod.init_type, fsec) if mod.threads
+  uleb(mod.entry_type, fsec) if mod.threads
   section(3, fsec, out)
   # the function table: slot 0 empty, then the functions whose address is taken (Module_#table). emscripten: it is
   # exported under the name the glue looks for, empty when no address is taken.
@@ -2551,7 +2560,7 @@ def encode_module(mod, bodies)
   ex = []
   nexp = (mod.import_memory ? 0 : 1) + bodies.length
   nexp += 5 + mod.stack_fns.length if mod.emscripten
-  nexp += 3 if mod.threads
+  nexp += 5 if mod.threads
   uleb(nexp, ex)
   if mod.threads
     # --threads: each thread's instance sets its own stack pointer (global 0) and its thread-local base (global 1) before it
@@ -2566,6 +2575,13 @@ def encode_module(mod, bodies)
     name_bytes("__nfcxx_init", ex)
     ex << 0x00
     uleb(mod.init_index, ex)
+    # the table, for the host's thread start (call_indirect through it), and the entry that makes the call
+    name_bytes("__indirect_function_table", ex)
+    ex << 0x01
+    uleb(0, ex)
+    name_bytes("__nfcxx_thread_entry", ex)
+    ex << 0x00
+    uleb(mod.entry_index, ex)
   end
   unless mod.import_memory
     name_bytes("memory", ex)
@@ -2618,7 +2634,7 @@ def encode_module(mod, bodies)
   end
   # code
   code = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 1 : 0), code)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 2 : 0), code)
   bodies.each do |nm, fn|
     b = fn.encode
     uleb(b.length, code)
@@ -2634,6 +2650,14 @@ def encode_module(mod, bodies)
       b << 0xfc << 0x08; uleb(i, b); b << 0x00   # memory.init i 0
     end
     mod.segments.each_index { |i| b << 0xfc << 0x09; uleb(i, b) }   # data.drop i
+    b << 0x0b
+    uleb(b.length, code)
+    b.each { |x| code << x }
+    # __nfcxx_thread_entry(slot, arg): call_indirect of type (i64) -> i64 through the table at SLOT, with ARG
+    b = [0x00]                           # no locals
+    b << 0x20; uleb(1, b)                # local.get 1: arg
+    b << 0x20; uleb(0, b)                # local.get 0: slot (the table index, an i32)
+    b << 0x11; uleb(mod.call_type, b); b << 0x00   # call_indirect (type) table 0
     b << 0x0b
     uleb(b.length, code)
     b.each { |x| code << x }

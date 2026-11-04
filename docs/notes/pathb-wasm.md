@@ -371,8 +371,12 @@ the custom section `nfcxx.threads`, with the thread-local group's start and size
 and `__nfcxx_init`, which applies the module's data once (the segments are passive). The atomic builtins (`__atomic_*` and
 `__sync_*`, 4 and 8 bytes) are wasm atomics, and a fence is `atomic.fence`. A thread-local object is in one contiguous group
 at the end of the static data; its address is `__tls_base` plus its offset in the group, and the main thread's block is the
-group itself. The host copies the group's initial image into each thread's block. Not yet: creating threads from inside the
-module (`pthread_create`), and a thread-local's address in a static initializer. `tests/wasm-threads` runs four workers.
+group itself. The host copies the group's initial image into each thread's block. The module can create threads: `pthread_create`
+and `pthread_join` are imports from `env`, which the host serves (a pool of threads, each a worker over the same memory with
+its own stack and block; a join waits on a shared word the thread sets when it returns). The module's own start routine is
+called through the exported table by `__nfcxx_thread_entry(slot, arg)`. Not yet: a thread-local's address in a static
+initializer, and a pool larger than 8 threads (the host's `POOL`). `tests/wasm-threads` runs manual workers and module-created
+threads.
   A declaration that nothing uses is not refused: it has no storage, and the QBE path drops it the same way.
 - Aggregate parameters, results and arguments (`byval`, `sret`), and aggregate values in registers.
 - Variadic calls.

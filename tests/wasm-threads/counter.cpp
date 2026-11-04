@@ -36,3 +36,30 @@ extern "C" int tl_bump(int n) {
 }
 
 extern "C" int tl_get() { return tl; }
+
+// Threads created by the module: pthread_create and pthread_join are the host's (env imports); the host starts each thread
+// as an instance over the same memory, and joins wait for it to finish.
+extern "C" int pthread_create(unsigned long long *th, void *attr, void *(*start)(void *), void *arg);
+extern "C" int pthread_join(unsigned long long th, void **ret);
+
+int joined_shared = 0;
+
+extern "C" void *joined_worker(void *arg) {
+  long long v = (long long)arg;
+  for (int i = 0; i < 1000; i++) __atomic_fetch_add(&joined_shared, 1, __ATOMIC_SEQ_CST);
+  return (void *)(v * 10);
+}
+
+extern "C" int run_threads(int n) {
+  unsigned long long th[8];
+  for (int i = 0; i < n; i++) pthread_create(&th[i], 0, joined_worker, (void *)(long long)(i + 1));
+  int sum = 0;
+  for (int i = 0; i < n; i++) {
+    void *r = 0;
+    pthread_join(th[i], &r);
+    sum += (int)(long long)r;
+  }
+  return sum;
+}
+
+extern "C" int joined_get() { return __atomic_load_n(&joined_shared, __ATOMIC_SEQ_CST); }
