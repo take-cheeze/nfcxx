@@ -2266,6 +2266,12 @@ if $PROGRAM_NAME == __FILE__
     code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
+  # The class units' text takes the same passes as the compiled methods (a unit's helper calls are named the same way).
+  class_units = class_units.map do |unit|
+    code = unit[:code].gsub('@@SITE@@') { unit[:path].to_s.gsub(/["\\]/) { |c| "\\#{c}" } }
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
+    unit.merge(code: SymbolCache.rewrite(code, symbol_table))
+  end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
   # live in separate `.each`/`.sum` scans of the same code strings.
   kept = Hash.new(0)
