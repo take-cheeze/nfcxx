@@ -18,7 +18,7 @@ module Qbe
   LOAD = { "bool" => "loadub", "char" => "loadsb", "signed_char" => "loadsb", "unsigned_char" => "loadub",
            "short" => "loadsh", "unsigned_short" => "loaduh", "int" => "loadsw", "unsigned_int" => "loaduw",
            "long" => "loadl", "long_long" => "loadl", "unsigned_long" => "loadl", "unsigned_long_long" => "loadl",
-           "float" => "load", "double" => "load" }.freeze
+           "float" => "loads", "double" => "loadd" }.freeze
   STORE = { "bool" => "storeb", "char" => "storeb", "signed_char" => "storeb", "unsigned_char" => "storeb",
             "short" => "storeh", "unsigned_short" => "storeh", "int" => "storew", "unsigned_int" => "storew",
             "long" => "storel", "long_long" => "storel", "unsigned_long" => "storel", "unsigned_long_long" => "storel",
@@ -270,6 +270,12 @@ module Qbe
           # Storage only: the bit pattern of the literal, written as an integer of the same size (no arithmetic on it).
           letter = { 2 => "h", 4 => "w", 8 => "l" }.fetch(n)
           items << [int_lit(off), n, "#{letter} #{Qbe.float_bits(v, n)}"]
+          next
+        end
+        if (fsize = { "float" => 4, "double" => 8 }[unqual(type)])
+          # The same storage-only rule for the built-in floating types (a thread-local or volatile object of a double needs
+          # its initializer too): the bit pattern of the literal, no arithmetic.
+          items << [int_lit(off), fsize, "#{fsize == 4 ? "w" : "l"} #{Qbe.float_bits(v, fsize)}"]
           next
         end
         return nil if FLOAT_TYPES.key?(unqual(type))
