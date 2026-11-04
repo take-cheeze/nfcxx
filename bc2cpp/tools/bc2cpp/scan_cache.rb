@@ -147,7 +147,8 @@ module ScanCache
   def tools_digest
     @tools_digest ||= begin
       digest = Digest::SHA256.new
-      Dir[File.join(__dir__, '*.rb')].sort.each do |file|
+      Dir.entries(__dir__).select { |name| name.end_with?('.rb') }.sort.each do |name|
+        file = File.join(__dir__, name)
         digest << "#{File.basename(file)}\0"
         digest << Digest::SHA256.file(file).digest
       end

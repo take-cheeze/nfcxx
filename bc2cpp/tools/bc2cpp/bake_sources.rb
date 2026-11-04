@@ -39,7 +39,8 @@ def bake_file(path, sources, queue)
     end
     line
   end
-  body = lines.join.gsub(/__FILE__/, "'#{name}'")
+  # __dir__ is baked as the source's own directory, so a run from elsewhere resolves the same files.
+  body = lines.join.gsub(/__FILE__/, "'#{name}'").gsub(/\b__dir__\b/, "'#{File.dirname(path)}'")
   sources[name] = body
 end
 
