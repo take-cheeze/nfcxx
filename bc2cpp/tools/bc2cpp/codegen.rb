@@ -38,6 +38,8 @@ class CodeGen
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in
   # storage order); nil proves nothing.
   class << self
+    # CONST_RESOLVE (codegen_class_body.rb): the constant names bound before a class body runs, and the reads that have none.
+    attr_accessor :known_const_names, :const_unresolved
     attr_accessor :engine_registrations, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
                   :integer_constant_values, :integer_constant_keys, :integer_constant_ranges, :constant_value_classes,
                   :module_names, :core_hidden_defs,
