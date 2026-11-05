@@ -47,9 +47,9 @@ with a switch (`_Z8classifyi`, `_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg`,
 
 ## Not done
 
-- No emitter consumes the SSA yet. The QBE emitter (`scripts/pathb-qbe-emit.rb`) relies on QBE's own promotion, so
-  its output does not change. PTX, WebAssembly and WGSL emitters need structured control flow; they need a
-  structurizer first.
+- Only the opt-in SSA-to-QBE build reads the SSA (`scripts/pathb-ssa-qbe.rb`, via `scripts/pathb-ssa-build`). The flat QBE
+  emitter (`scripts/pathb-qbe-emit.rb`) relies on QBE's own promotion, so its output does not change. PTX, WebAssembly and
+  WGSL emitters need structured control flow; they need a structurizer first.
 - Dead phi cycles (a phi used only by itself) are kept.
 - Verification checks structure, not meaning. Meaning is checked only by `--run` on the hand-written cases in
   `tests/pathb-ssa/cases/`.
