@@ -11,7 +11,7 @@
 #   1  error: malformed IR text, or an IR format older than this emitter (rebuild the harness)
 #
 # The emitter never guesses. Anything it does not know is a refusal, never silently dropped. Checked IR operations
-# (cdiv, crem, cshl, cshr, cf2i, cadd, csub, cmul, cneg, bounds, nonnull, unreachable) become a compare and a branch
+# (cdiv, crem, cshl, cshr, wshl, cf2i, cadd, csub, cmul, cneg, bounds, nonnull, unreachable) become a compare and a branch
 # to one shared abort block that calls abort(). Registers are stack slots; QBE's own promotion turns them back into
 # SSA temporaries. Scalar sizes assume LP64 (int 4, long 8, pointers 8), which is what the x86-64 Linux target uses.
 #
@@ -1989,7 +1989,7 @@ RVAL = {
   "cadd" => r_cadd_like("add"), "csub" => r_cadd_like("sub"), "cmul" => r_cadd_like("mul"),
   "cneg" => ->(fn, x) { r_cneg(fn, x) },
   "cdiv" => r_divrem("div"), "crem" => r_divrem("rem"),
-  "cshl" => r_shift(true), "cshr" => r_shift(false),
+  "cshl" => r_shift(true), "cshr" => r_shift(false), "wshl" => r_shift(true),
   "fadd" => r_fbin("add"), "fsub" => r_fbin("sub"), "fmul" => r_fbin("mul"), "fdiv" => r_fbin("div"),
   "fneg" => ->(fn, x) { r_fneg(fn, x) },
   "and" => r_bitop("and"), "or" => r_bitop("or"), "xor" => r_bitop("xor"),

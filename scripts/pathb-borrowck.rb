@@ -2002,7 +2002,7 @@ class LocalLifetime
       # increment to scalar arithmetic and conversions on non-pointer values.
       # Scalar operations, integer and floating, and the conversions between them. The checked conversions (cf2i)
       # trap on NaN or an out-of-range value; a trap is not a memory access, so it is not modeled here.
-      allowed = %w[wadd wsub wmul wneg cadd csub cmul cdiv crem cshl cshr cneg and or xor not eq ne lt.s lt.u le.s le.u gt.s gt.u ge.s ge.u
+      allowed = %w[wadd wsub wmul wneg cadd csub cmul cdiv crem cshl cshr wshl cneg and or xor not eq ne lt.s lt.u le.s le.u gt.s gt.u ge.s ge.u
                    fadd fsub fmul fdiv fneg lt.f le.f gt.f ge.f iconv cf2i i2f u2f fconv]
       raise BorrowRefused, "expression #{bh(x)}" unless allowed.include?(bh(x))
       # Comparing addresses reads no memory and its result has no provenance.

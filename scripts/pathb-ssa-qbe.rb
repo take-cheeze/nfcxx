@@ -901,7 +901,7 @@ end
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
       when "wneg" then @lines << "  #{dst} =#{c} sub 0, #{op(rv[2])}"
       when "cdiv", "crem" then checked_div_lines(dst, t, rv)
-      when "cshl", "cshr" then checked_shift_lines(dst, t, rv)
+      when "cshl", "cshr", "wshl" then checked_shift_lines(dst, t, rv)
       when "cadd", "csub", "cmul", "cneg" then checked_arith_lines(dst, t, rv)
       when *Qbe::FBIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::FBIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
@@ -1443,7 +1443,7 @@ end
       bad = fresh
       @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
       check_call(bad, 3)
-      if head(rv) == "cshl"
+      if %w[cshl wshl].include?(head(rv))
         shifted = fresh
         @lines << "  #{shifted} =#{c} shl #{a}, #{n}"
         canon_lines(dst, t, shifted)

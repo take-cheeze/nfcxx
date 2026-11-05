@@ -877,7 +877,7 @@ class Function
       return il == 'int32' ? 'int32' : il
     end
     return divrem(e, head) if head == 'cdiv' || head == 'crem'
-    return shift(e, head == 'cshl') if head == 'cshl' || head == 'cshr'
+    return shift(e, head != 'cshr') if head == 'cshl' || head == 'cshr' || head == 'wshl'
     if head == 'pdiff'
       # (A - B) / SIZE in the pointer difference type (int64). A register SIZE (a VLA element) is zero-extended.
       a = expr(pyidx(e, 1))

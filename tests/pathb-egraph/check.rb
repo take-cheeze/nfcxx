@@ -282,6 +282,15 @@ def check_case(f)
       errors << "#{op}: expected #{n} in the optimized main, got #{seen[op]}" unless seen[op] == Integer(n, 10)
     end
   end
+  # The same counts under the weighted cost model: "HEAD N" lines in FILE.wcounts.
+  wcounts_file = f.sub(/\.ir\z/, ".wcounts")
+  if File.exist?(wcounts_file)
+    seen = Hash.new(0)
+    weighted.blocks.each_value { |blk| blk[:instrs].each { |i| count_heads(i, seen) } }
+    File.readlines(wcounts_file).map(&:split).reject(&:empty?).each do |op, n|
+      errors << "weighted #{op}: expected #{n} in the optimized main, got #{seen[op]}" unless seen[op] == Integer(n, 10)
+    end
+  end
   status = errors.empty? ? "ok  " : "FAIL"
   puts "#{status} cases #{File.basename(f)}: lets #{before[0]} -> #{after[0]} (pure #{before[1]} -> #{after[1]}), " \
        "#{runs} interpreted runs equal, #{unsupported} unsupported"
