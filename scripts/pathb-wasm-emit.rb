@@ -428,6 +428,13 @@ class Module_
     @defs.key?(name)
   end
 
+  # Whether the module defines NAME with a variadic parameter list (its ellipsis; see setup and call).
+  def variadic?(name)
+    f = @defs[name]
+    return false unless f
+    f.any? { |p| head_of(p) == "params" && p.drop(1).any? { |q| head_of(q) == "ellipsis" } }
+  end
+
   # The static objects of the module (defined globals and string data), by name. Each has its address (see
   # layout_statics); an object the module does not define is refused where it is used.
   def add_statics(objs)
@@ -810,6 +817,7 @@ class Fn
     @slot_sizes = {}         # name => size of the slot (a byval argument's copy is as big as its source)
     @byval_tmp = {}          # the byval argument form (by identity) => frame offset of its copy in this frame
     @frame = 0
+    @va_block = {}                  # the frame offset of each variadic call's argument block (see byval_scan)
     @param_types = []        # wasm types of the parameters, in order
     @local_types = []        # wasm types of the locals after the parameters, in index order
     @result = nil            # wasm type of the result, nil for void
@@ -852,7 +860,16 @@ class Fn
         ret = parse_type(f[1])
       elsif h == "params"
         f.drop(1).each_with_index do |p, k|
-          raise Refused, "variadic function" if head_of(p) == "ellipsis"
+          if head_of(p) == "ellipsis"
+            # the variadic arguments are in a block of the caller's frame (see call): its address is the last parameter.
+            # The va_list is the System V one with every argument in the overflow area (see vastart, vaarg).
+            raise Refused, "variadic function in an asan module (not lowered)" if @asan
+            raise Refused, "variadic function in an ILP32 module (not lowered)" unless $ptr_bytes == 8
+            raise BadIR, "ellipsis is not the last parameter" unless k == f.length - 2
+            @variadic = true
+            params << [ptr_wtype, ["ptr", nil], "%va.block"]
+            next
+          end
           if head_of(p) == "sret"
             # (sret %N (struct ...)): the hidden pointer where the result is written; the function returns void
             raise BadIR, "bad sret parameter #{form_text(p)}" unless p.length == 3
@@ -913,6 +930,7 @@ class Fn
     byval_scan(@form) unless @asan
     @frame = (@frame + 15) / 16 * 16
     @param_types = params.map { |p| p[0] }
+    @va_block_local = params.index { |p| p[2] == "%va.block" }   # the variadic arguments' block (see vastart)
     params.each_with_index { |p, k| @regs[p[2]] = [k, p[0], p[1]] }
     # locals after the parameters: the stack pointer on entry, this frame's base and a 64-bit scratch, then one local per
     # register declared by a let
@@ -939,6 +957,13 @@ class Fn
       @bf_addr = @next_local
       @local_types << :i32
       @next_local += 1
+    end
+    if uses_va?(@form)
+      # two pointer-width scratch locals: the va_list's address and the overflow area's pointer (see vastart, vaarg)
+      @va_tmp = @next_local
+      @va_p = @next_local + 1
+      @local_types << ptr_wtype << ptr_wtype
+      @next_local += 2
     end
     if uses_narrow_cf2i?(@form)
       # an i32 scratch for the value of a float conversion to a 1- or 2-byte integer (see cf2i_narrow)
@@ -987,6 +1012,13 @@ class Fn
   # argument of a call in the body gets its own slot, as big as its source slot, laid out with the others.
   def byval_scan(x)
     return unless x.is_a?(Array)
+    if head_of(x) == "call" && head_of(x[3]) == "variadic"
+      # the variadic arguments of a call: one 8-byte slot each (at least one, so the block is never empty)
+      nvar = x.length - 4 - as_int(x[3][1].to_s)
+      @frame = (@frame + 7) / 8 * 8
+      @va_block[x.object_id] = @frame
+      @frame += 8 * [nvar, 1].max
+    end
     if head_of(x) == "call"
       x.drop(3).each do |a|
         next unless head_of(a) == "byval"
@@ -1553,6 +1585,8 @@ class Fn
       call(x)
     when "bfload", "bfload.v"
       bfload(x)
+    when "vaarg"
+      vaarg(x)
     when "unsupported"
       raise Refused, unsupported_text(x)
     else
@@ -1599,7 +1633,13 @@ class Fn
     ret = parse_type(x[1])
     callee = x[2]
     args = x.drop(3)
-    raise Refused, "variadic call" if head_of(args[0]) == "variadic"
+    variadic = head_of(args[0]) == "variadic"
+    if variadic
+      # (variadic N): the first N arguments are the named ones; the rest go in the block (below)
+      nfixed = as_int(args[0][1].to_s)
+      vargs = args.drop(1 + nfixed)
+      args = args[1, nfixed]
+    end
     if callee.is_a?(IRSym) && callee.sig == "&" && @mod.null_funcs.include?(callee.name)
       e(0x00)                              # unreachable: a weak function that is not there
       return wtype(ret)
@@ -1611,12 +1651,39 @@ class Fn
       direct = callee.is_a?(IRSym) && callee.sig == "&"
       raise Refused, "aggregate argument to #{callee.name} (an import: the host's ABI does not pass aggregates this way)" if direct && !@mod.defines?(callee.name)
     end
+    if variadic
+      # a variadic call: the callee is a function the module defines with an ellipsis, and the arguments after the named
+      # ones are stored in the block of this frame (byval_scan reserved it); the block's address is the last argument
+      # (a call of an import or through a pointer stays refused: the host's ABI for variadic calls is not lowered)
+      raise Refused, "variadic call" unless callee.is_a?(IRSym) && callee.sig == "&" && @mod.defines?(callee.name) && @mod.variadic?(callee.name)
+      raise Refused, "variadic call in an asan or ILP32 module (not lowered)" if @asan || $ptr_bytes != 8
+      off = @va_block.fetch(x.object_id) { raise BadIR, "variadic call without its argument block" }
+      vargs.each_with_index do |a, i|
+        raise Refused, "variadic argument of aggregate type (not lowered)" if %w[byval sret].include?(head_of(a))
+        ty = op_type(a)
+        raise Refused, "variadic argument of #{ty[0]}" unless ty[0] == "int" || ty[0] == "ptr" || ty[0] == "float"
+        raise Refused, "variadic argument of #{type_size(ty)} bytes (an argument is 8 bytes here)" if type_size(ty) > 8
+        e(0x20); leb_u(@fp_local); e(0x41); leb_s(off + 8 * i); e(0x6a)   # the slot's address, in the memory's form
+        e(0xad) if @mod.memory64                                          # i64.extend_i32_u
+        push_op(a)
+        store_op(ty)
+      end
+      args = args + [:va_block]
+    end
     # --threads only: without a shared memory the atomics stay what they were (imports, as the Emscripten runtime may provide them)
     if @mod.threads && callee.is_a?(IRSym) && callee.sig == "&" && !@mod.defines?(callee.name) && atomic_builtin(callee.name)
       return atomic_call(callee.name, args)
     end
-    arg_types = args.map { |a| %w[byval sret].include?(head_of(a)) ? ptr_wtype : wtype(op_type(a)) }
-    args.each { |a| %w[byval sret].include?(head_of(a)) ? push_aggregate_arg(a) : push_op(a) }
+    arg_types = args.map { |a| a == :va_block || %w[byval sret].include?(head_of(a)) ? ptr_wtype : wtype(op_type(a)) }
+    args.each do |a|
+      if a == :va_block
+        push_slot_ptr(@va_block.fetch(x.object_id))
+      elsif %w[byval sret].include?(head_of(a))
+        push_aggregate_arg(a)
+      else
+        push_op(a)
+      end
+    end
     unless callee.is_a?(IRSym) && callee.sig == "&"
       # through a function pointer: its value is a slot of the table, and the call's types are the signature, which
       # call_indirect checks (a mismatch, or the null slot 0, traps)
@@ -1642,6 +1709,49 @@ class Fn
           end
     e(0x10); leb_u(idx)
     wtype(ret)
+  end
+
+  # ---- variadic functions. The va_list is the System V __va_list_tag (24 bytes): gp_offset (u32, at 0), fp_offset (u32,
+  # at 4), overflow_arg_area (a pointer, at 8) and reg_save_area (a pointer, at 16). A variadic function here takes its
+  # arguments only from the overflow area: vastart sets gp_offset and fp_offset to the end of the registers (48 and 176),
+  # so va_arg never reads a register save area. Each argument takes an 8-byte slot of the caller's block (see call).
+  def uses_va?(x)
+    return false unless x.is_a?(Array)
+    return true if %w[vastart vaarg].include?(head_of(x))
+    x.any? { |y| uses_va?(y) }
+  end
+
+  # The address of a field of the va_list (its address is in @va_tmp): an address in the memory's form (see push_addr).
+  def va_field(off)
+    e(0x20); leb_u(@va_tmp)
+    ptr_const(off); ptr_arith(:add) if off > 0
+    e(0xa7) if $ptr_bytes == 8 && !@mod.memory64   # i32.wrap_i64: the address form, as push_addr gives it
+  end
+
+  # (vastart ADDR): the va_list at ADDR starts reading the variadic arguments (the function has an ellipsis).
+  def vastart(s)
+    raise Refused, "va_start in a function without variable arguments" unless @variadic
+    push_op(s[1], ptr_wtype); e(0x21); leb_u(@va_tmp)
+    va_field(0); e(0x41); leb_s(48); e(0x36); memarg      # gp_offset: every register is used up
+    va_field(4); e(0x41); leb_s(176); e(0x36); memarg     # fp_offset: likewise
+    va_field(8); e(0x20); leb_u(@va_block_local); e($ptr_bytes == 8 ? 0x37 : 0x36); memarg   # overflow_arg_area: the block
+    va_field(16); ptr_const(0); e(0x37); memarg           # reg_save_area: none
+  end
+
+  # (vaarg T ADDR): the next argument of the va_list, read from the overflow area, which then moves on by 8 bytes.
+  def vaarg(x)
+    raise Refused, "va_arg without variable arguments" unless @variadic
+    ty = parse_type(x[1])
+    raise Refused, "va_arg of #{ty[0]}" unless ty[0] == "int" || ty[0] == "ptr" || ty[0] == "float"
+    raise Refused, "va_arg of #{type_size(ty)} bytes (an argument is 8 bytes here)" if type_size(ty) > 8
+    push_op(x[2], ptr_wtype); e(0x21); leb_u(@va_tmp)
+    va_field(8); e($ptr_bytes == 8 ? 0x29 : 0x28); memarg; e(0x21); leb_u(@va_p)   # p := the overflow area
+    e(0x20); leb_u(@va_p)
+    e(0xa7) if $ptr_bytes == 8 && !@mod.memory64
+    load_op(ty)                                            # the value, from the slot
+    va_field(8); e(0x20); leb_u(@va_p); ptr_const(8); ptr_arith(:add)
+    e($ptr_bytes == 8 ? 0x37 : 0x36); memarg              # the overflow area moves on: [value, address, p+8] -> [value]
+    wtype(ty)
   end
 
   # ---- bit-fields. A bit-field lives in a storage unit of 1, 2, 4 or 8 bytes at ADDR: bit BOFF of the unit, WIDTH bits. The
@@ -1824,6 +1934,8 @@ class Fn
       mem_addr(s[2], type_size(ty))
       push_op(s[3], wtype(ty))
       store_op(ty)
+    when "vastart"
+      vastart(s)
     when "copy"
       # the length is a constant, or a register (an unsigned_long: llvm-to-pathb.rb's memcpy of a run-time length)
       n = run_time_length?(s[1]) ? nil : as_int(s[1])
