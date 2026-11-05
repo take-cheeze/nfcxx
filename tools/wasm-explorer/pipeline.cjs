@@ -20,6 +20,8 @@ const root = path.resolve(__dirname, "..", "..");
 const pathbDump = path.join(root, "scripts", "pathb-dump");
 const mrb = path.join(root, "scripts", "mrb");
 const emitter = path.join(root, "scripts", "pathb-wasm-emit.rb");
+const flatOpt = path.join(root, "scripts", "pathb-flat-opt");
+const ruby = "ruby";
 const llvmToPathb = path.join(root, "scripts", "llvm-to-pathb.rb");
 // rustc and tinygo: RUSTC and TINYGO name them, else build/tinygo (scripts/setup-tinygo.sh) or the PATH. tinygo runs go.
 // A path in RUSTC or TINYGO is taken from the caller's directory (tinygo runs in the temporary one); a bare name is
@@ -210,6 +212,20 @@ async function compile(source, options = {}) {
         // the (loc ...) statements name the source file without the temporary directory, as the diagnostics do
         irText = Buffer.from(dumped.stdout.toString("utf8").split(dir + path.sep).join(""));
         frontStderr += dumped.stderr;
+        // the SSA route's optimizations (scripts/pathb-flat-opt) on the nfcxx front end's flat IR; a function the route
+        // refuses keeps its IR. Off unless NFCXX_EXPLORER_OPT=1: the dispatch form is larger than the flat IR for small
+        // functions (no relooper yet), so the default page shows the front end's IR.
+        if (step[0] === pathbDump && process.env.NFCXX_EXPLORER_OPT === "1") {
+          try {
+            const flatIr = path.join(dir, "front.ir");
+            fs.writeFileSync(flatIr, irText);
+            const optimized = await runStep("optimize", ruby, [flatOpt, flatIr], dir, root);
+            irText = optimized.stdout;
+            frontStderr += optimized.stderr;
+          } catch (e) {
+            return await failed(e);
+          }
+        }
       } catch (e) {
         if (fromSwiftC) e.noLines = true;
         return await failed(e);
