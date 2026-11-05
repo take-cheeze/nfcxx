@@ -1358,7 +1358,7 @@ def egraph_cli(argv)
     when "--nodes" then opts[:nodes] = Integer(argv.shift, 10)
     when "--cost"
       model = argv.shift.to_s.to_sym
-      abort "pathb-egraph: --cost nodes or weighted" unless Optimizer::COST_MODELS.include?(model)
+      abort "pathb-egraph: --cost nodes or weighted" unless PathbEgraph::Optimizer::COST_MODELS.include?(model)
       opts[:cost] = model
     else file = a
     end
