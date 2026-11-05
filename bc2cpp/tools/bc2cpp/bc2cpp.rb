@@ -2408,7 +2408,7 @@ if $PROGRAM_NAME == __FILE__
     # Reported, not fatal: a statement that is not a unit stays unsupported (it is not run from the units).
     warn "[bc2cpp] core mrblib statements that are not units (MRB_CORE_CLASS_UNITS): #{residual.join(', ')}" unless residual.empty?
 
-    print gen.emit_core_class_units(class_units)
+    print gen.emit_core_class_units(class_units.select { |unit| CoreDefs::INIT_SOURCE.match?(unit[:file].to_s) })
   end
 
   # This run's cross-TU declarations header, for other gems'

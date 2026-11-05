@@ -284,7 +284,7 @@ class CodeGen
       tag = "_#{occurrences[path]}"
       occurrences[path] += 1
       code, _refused = compile_class_body(@ireps.fetch(child), path, tag: tag)
-      { path: path, insn: insn, code: code, tag: tag, superclass: superclass }
+      { path: path, insn: insn, code: code, tag: tag, superclass: superclass, file: @ireps.fetch(child).file }
     end
     missing = (CodeGen.const_unresolved || []).uniq
     unless missing.empty?
@@ -295,7 +295,7 @@ class CodeGen
     # refused occurrence would otherwise lose its body.
     refused_paths = compiled.reject { |unit| unit[:code] }.map { |unit| unit[:path] }.to_set
     compiled.select { |unit| unit[:code] && !refused_paths.include?(unit[:path]) }.map do |unit|
-      { path: unit[:path], name: "#{sanitize(unit[:path])}#{unit[:tag]}",
+      { path: unit[:path], name: "#{sanitize(unit[:path])}#{unit[:tag]}", file: unit[:file],
         code: top_class_unit_code(unit[:insn], unit[:path], unit[:code], unit[:tag], unit[:superclass]) }
     end
   end
