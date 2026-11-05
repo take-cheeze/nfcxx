@@ -2139,8 +2139,8 @@ class Fn
   # selector picks the arm of its marker, control falls through the arms that follow, and break leaves the switch.
   # The lowering: a block E for the exit (the break target), one block per arm, nested so that arm k starts right after
   # the end of its block L_k; a compare chain that branches to an arm (br_if L_k), or to the default arm, or to E.
-  # An arm that is not empty must end in a jump (break, continue, return, unreachable, trap, goto), or be the last one:
-  # falling into the next arm is refused, as docs/notes/pathb-stage2.md section 2 asks.
+  # An arm that does not end in a jump falls into the next arm: the arms are laid out in order, after their blocks, so the
+  # statements of arm k are followed by those of arm k+1 (C's fallthrough).
   def switch_stmt(s)
     brk_label = @pending_brk
     @pending_brk = nil
@@ -2162,12 +2162,6 @@ class Fn
       else
         raise Refused, "statement before the first case label of a switch (not lowered)" if cur.nil?
         cur[1] << st
-      end
-    end
-    arms.each_with_index do |arm, k|
-      next if k == arms.length - 1
-      unless ends_list?(arm[1])
-        raise Refused, "switch fallthrough: the case arm with #{form_text(arm[1].last)} falls into the next arm (not lowered)"
       end
     end
     default_arm = nil
