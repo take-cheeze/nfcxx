@@ -118,6 +118,9 @@ def check_goldens(files)
         # The cut-short output (a small budget) is verified too.
         tight, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first), iters: 2, nodes: 20)
         PathbEgraph.verify(tight)
+        # and the weighted cost model's form is verified
+        weighted, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first), cost: :weighted)
+        PathbEgraph.verify(weighted)
         # Where the interpreter runs the function (integer code), the optimized form returns the same values.
         diff_random(orig, out, totals, failures, text)
       rescue Fail, Unsupported => e
@@ -210,6 +213,8 @@ def check_case(f)
   opt, = PathbEgraph.optimize_fn(orig)
   # The same function under a tight budget (cut short by iterations and by nodes): still correct.
   tight, = PathbEgraph.optimize_fn(orig, iters: 1, nodes: 4)
+  # The same function under the weighted cost model: a different choice of equal forms, still correct.
+  weighted, = PathbEgraph.optimize_fn(orig, cost: :weighted)
   before = PathbEgraph.let_counts(orig)
   after = PathbEgraph.let_counts(opt)
   errors = []
@@ -228,14 +233,16 @@ def check_case(f)
       a = interpret(orig, args)
       b = interpret(opt, args)
       c = interpret(tight, args)
-      if a == :unsupported || b == :unsupported || c == :unsupported
+      d = interpret(weighted, args)
+      if a == :unsupported || b == :unsupported || c == :unsupported || d == :unsupported
         unsupported += 1
-        errors << "#{args} is unsupported in one form only" unless a == b && a == c
+        errors << "#{args} is unsupported in one form only" unless a == b && a == c && a == d
         next
       end
       runs += 1
       errors << "#{args}: original #{a}, optimized #{b}" unless a == b
       errors << "#{args}: original #{a}, tight budget #{c}" unless a == c
+      errors << "#{args}: original #{a}, weighted cost #{d}" unless a == d
       errors << "#{args}: want #{want}, got #{a}" if want && a != want
     end
   end

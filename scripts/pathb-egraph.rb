@@ -7,7 +7,7 @@
 # value that is in scope. The output is the same SSA text, verified again: single definitions, dominance of every
 # use, phi arity.
 #
-#   scripts/pathb-egraph.rb [--iters N] [--nodes N] [--stats] FILE.ssa   optimized SSA on stdout (- reads stdin)
+#   scripts/pathb-egraph.rb [--iters N] [--nodes N] [--cost nodes|weighted] [--stats] FILE.ssa   optimized SSA on stdout (- reads stdin)
 #   scripts/pathb-egraph.rb --check FILE.ssa                             verify only (exit 1 on a failed check)
 #
 # Reuses the reader, printer, PURE_OPS, Phi and the interpreter (Machine) of pathb-ssa.rb.
@@ -224,9 +224,9 @@ module PathbEgraph
 
   # ---- driver --------------------------------------------------------------------------------------------------
 
-  def self.optimize_fn(fn, iters: 8, nodes: 2000, passes: Optimizer::PASSES, check: false)
+  def self.optimize_fn(fn, iters: 8, nodes: 2000, cost: :nodes, passes: Optimizer::PASSES, check: false)
     verify(fn)
-    opt = Optimizer.new(fn, iters: iters, nodes: nodes)
+    opt = Optimizer.new(fn, iters: iters, nodes: nodes, cost: cost)
     out = opt.run(passes: passes, check: check)
     verify(out)
     [out, opt.stats]
@@ -283,8 +283,16 @@ module PathbEgraph
   class Optimizer
     attr_reader :stats
 
-    def initialize(fn, iters:, nodes:)
+    # The cost model of extraction (docs/notes/pathb-egraph.md, "Cost model"): :nodes counts every operation as 1 and a
+    # constant as 0; :weighted charges the operations in WEIGHTS their weight, and a constant that does not fit a 12-bit
+    # immediate 1. Ties still go to the node created first, under either model.
+    COST_MODELS = %i[nodes weighted].freeze
+    WEIGHTS = { "wmul" => 3, "fmul" => 3, "fdiv" => 8 }.freeze
+
+    def initialize(fn, iters:, nodes:, cost: :nodes)
+      raise ArgumentError, "cost model #{cost.inspect} (one of #{COST_MODELS.join(', ')})" unless COST_MODELS.include?(cost)
       @fn = fn
+      @cost = cost
       @max_iters = iters
       @max_nodes = nodes
       @types = {}
@@ -1043,7 +1051,8 @@ module PathbEgraph
     # 0; an operation costs 1 plus its operands; an opaque value that is not yet bound is unavailable.
     def best(c)
       c = find(c)
-      return [0, nil] if @cval.key?(c) || @bound.key?(c)
+      return [const_cost(c), nil] if @cval.key?(c)
+      return [0, nil] if @bound.key?(c)
       return @memo_best[c] if @memo_best.key?(c)
 
       @memo_best[c] = [INF, nil]
@@ -1052,7 +1061,7 @@ module PathbEgraph
         nd = @nodes[nid]
         next if nd.op == "opaque" || nd.op == "leaf" || CHECKED_OPS.include?(nd.op)
 
-        total = 1
+        total = node_cost(nd)
         nd.kids.each do |k|
           kc, = best(k)
           if kc == INF
@@ -1064,6 +1073,17 @@ module PathbEgraph
         bestc = [total, nid] if total < bestc[0]
       end
       @memo_best[c] = bestc
+    end
+
+    # The cost of one operation (the node itself, not its operands) and of a constant, under the cost model.
+    def node_cost(nd)
+      @cost == :weighted ? WEIGHTS.fetch(nd.op, 1) : 1
+    end
+
+    def const_cost(c)
+      return 0 if @cost == :nodes
+      v = @cval[c]
+      v.is_a?(Integer) && v.abs < 4096 ? 0 : 1
     end
 
     def materialize(c, name = nil)
@@ -1336,10 +1356,14 @@ def egraph_cli(argv)
     when "--stats" then stats = true
     when "--iters" then opts[:iters] = Integer(argv.shift, 10)
     when "--nodes" then opts[:nodes] = Integer(argv.shift, 10)
+    when "--cost"
+      model = argv.shift.to_s.to_sym
+      abort "pathb-egraph: --cost nodes or weighted" unless Optimizer::COST_MODELS.include?(model)
+      opts[:cost] = model
     else file = a
     end
   end
-  abort "usage: pathb-egraph.rb [--check] [--stats] [--iters N] [--nodes N] FILE.ssa" unless file
+  abort "usage: pathb-egraph.rb [--check] [--stats] [--iters N] [--nodes N] [--cost nodes|weighted] FILE.ssa" unless file
 
   text = file == "-" ? $stdin.read : File.read(file)
   if check
