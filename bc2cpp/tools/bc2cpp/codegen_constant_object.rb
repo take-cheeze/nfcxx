@@ -94,7 +94,8 @@ class CodeGen
       # replacement. Anything else registered here, or a second core body, refuses.
       registered = @registry.fetch(name, []).select { |md| md.owner == singleton }
       if registered.any?
-        return nil unless defs.nil? && registered.one? && registered.first.core && registered.first.irep
+        return nil unless registered.one? && registered.first.core && registered.first.irep
+        return nil if defs && !(defs.one? && defs.first.irep == registered.first.irep)
 
         defs = registered
       end

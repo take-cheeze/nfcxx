@@ -245,7 +245,12 @@ module BlockCoreDirectFallback
   # outside definer, a dynamic installer.
   def block_core_target(klass, chain, name, arity, blockless: false)
     return block_core_refuse(klass, name, arity, 'a dynamic installer names it') if symbol_installed_names.nil? || symbol_installed_names.include?(name)
-    if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) }
+    # A program definition on the chain may replace the core one, so it refuses. A core definition is the target the walk
+    # below finds in block_core_index (its own registry entry, which the index also lists), for the collection receivers
+    # whose iterators the registry keeps (Array#each, Hash#each, Range#each). Kernel and String keep the refusal: their
+    # world proofs (a BasicObject subclass, a dynamic installer) withdraw the arm through it.
+    core_ok = %w[Array Hash Range].include?(klass)
+    if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) && !(core_ok && definition.core) }
       return block_core_refuse(klass, name, arity, 'a project definition on the chain')
     end
 
@@ -283,7 +288,10 @@ module BlockCoreDirectFallback
   def block_core_index
     @block_core_index ||= begin
       index = Hash.new { |hash, key| hash[key] = [] }
-      (self.class.core_hidden_defs || []).each do |definition|
+      # The hidden core definitions, and the core definitions the registry keeps (an Array or Range body that is a
+      # registry entry, not a native name): both are compiled core bodies a block call can reach.
+      core_defs = (self.class.core_hidden_defs || []) + @registry.each_value.flat_map { |defs| defs.select(&:core) }
+      core_defs.each do |definition|
         next unless definition.irep
 
         index[[definition.owner, definition.name]] << definition
