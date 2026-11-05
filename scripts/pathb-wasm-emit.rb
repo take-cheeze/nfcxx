@@ -811,7 +811,8 @@ class Fn
     @mod = mod
     @form = form
     @code = []
-    @labels = []             # the open structured constructs, innermost last: [:brk] [:loop] [:cont] [:if]
+    @labels = []             # the open structured constructs, innermost last: [:brk] [:loop] [:cont] [:if] [:named NAME]
+    @loop_names = {}         # a named loop's name => its id (break NAME, continue NAME)
     @regs = {}               # "%N" => [wasm local index, wasm type, IR type]
     @slots = {}              # name => frame offset
     @slot_sizes = {}         # name => size of the slot (a byval argument's copy is as big as its source)
@@ -1986,7 +1987,16 @@ class Fn
     h = head_of(s)
     case h
     when "block"
-      stmt_list(s.drop(1))
+      if s[1].is_a?(String)
+        # a labelled block: (block NAME stmts...), left by a jump to NAME (break NAME) at its end
+        @labels << [:named, s[1]]
+        e(0x02, 0x40)
+        stmt_list(s.drop(2))
+        e(0x0b)
+        @labels.pop
+      else
+        stmt_list(s.drop(1))
+      end
     when "let"
       info = reg_info(s[1])
       v = rval(s[3])
@@ -2040,12 +2050,15 @@ class Fn
     when "switch"
       switch_stmt(s)
     when "loop"
-      body = s[1]
-      step = s[2]
+      # (loop NAME (body ...) (step ...)): the name is optional; break NAME and continue NAME name this loop
+      off = s[1].is_a?(String) ? 1 : 0
+      body = s[1 + off]
+      step = s[2 + off]
       raise BadIR, "loop without body" unless head_of(body) == "body"
       raise BadIR, "loop without step" unless head_of(step) == "step"
       id = @loop_n
       @loop_n += 1
+      @loop_names[s[1]] = id if off == 1
       @brk[@pending_brk] = id if @pending_brk
       @pending_brk = nil
       cont = tail_label(body)
@@ -2066,9 +2079,25 @@ class Fn
       e(0x0b)
       @labels.pop
     when "break"
-      e(0x0c); leb_u(label_depth(:brk, nil))
+      if s[1].is_a?(String)
+        # break NAME: out of the labelled block NAME, or out of the loop NAME
+        if @labels.any? { |l| l[0] == :named && l[1] == s[1] }
+          e(0x0c); leb_u(label_depth(:named, s[1]))
+        elsif @loop_names.key?(s[1])
+          e(0x0c); leb_u(label_depth(:brk, @loop_names[s[1]]))
+        else
+          raise Refused, "break to the unknown label #{s[1]}"
+        end
+      else
+        e(0x0c); leb_u(label_depth(:brk, nil))
+      end
     when "continue"
-      e(0x0c); leb_u(label_depth(:cont, nil))
+      if s[1].is_a?(String)
+        raise Refused, "continue to the unknown loop #{s[1]}" unless @loop_names.key?(s[1])
+        e(0x0c); leb_u(label_depth(:cont, @loop_names[s[1]]))
+      else
+        e(0x0c); leb_u(label_depth(:cont, nil))
+      end
     when "goto"
       # the labels that end a loop body or follow a loop are the loop's continue and break; in a body of labels
       # (dispatch_body) a goto sets the segment to run and goes back to the dispatch; any other goto is refused
