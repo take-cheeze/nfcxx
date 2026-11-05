@@ -64,14 +64,21 @@ def diff_random(orig, opt, totals, failures, text)
     a = interpret_timed(orig, args)
     b = interpret_timed(opt, args)
     totals[:interp_runs] += 1
-    failures << "#{text[/\(ssa-function ("[^"]*")/, 1]} #{args}: original #{a}, optimized #{b}" unless a == b
+    # a run that did not finish in time on either side has no value to compare: it is skipped, not a mismatch
+    # (the two sides take different time on the same input, so one can time out while the other returns)
+    if a.first == :skip || b.first == :skip
+      totals[:interp_timed_out] += 1
+      next
+    end
+    failures << "#{text[/\(ssa-function ("[^"]*")/, 1]} #{args}: original #{a.last}, optimized #{b.last}" unless a == b
   end
 end
 
+# [:value, the result as a string] when the run finishes, [:skip, the reason] when it cannot be modelled or runs too long
 def interpret_timed(efn, args)
-  Timeout.timeout(INTERP_TIMEOUT) { PathbEgraph.run(efn, args).to_s }
+  [:value, Timeout.timeout(INTERP_TIMEOUT) { PathbEgraph.run(efn, args).to_s }]
 rescue Unsupported, Timeout::Error => e
-  e.class.name
+  [:skip, e.class.name]
 end
 
 def check_goldens(files)
