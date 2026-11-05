@@ -343,10 +343,10 @@ split the body into segments; a loop runs the segment that a local names, throug
 `switch` (`docs/notes/pathb-stage2.md`, section 2). The markers `(case (const T V))` and `(default)` may sit in blocks of
 the body; the body's statements are split into arms at them. The selector is compared with each case value in order by
 a compare chain: `br_if` to the arm, else `br` to the default arm, or out of the switch when there is none. The arms are
-blocks nested so that arm k starts right after the end of its block, and an arm falls into the next one. An arm that is
-not empty must end in a jump (`break`, `continue`, `return`, `unreachable`, `trap` or `goto`, also inside a block or in
-both branches of an `if`), or be the last arm; otherwise the emitter refuses the fallthrough. `break` inside a switch
-leaves it (its label stack entry is the switch's), and `continue` goes to the enclosing loop's step.
+blocks nested so that arm k starts right after the end of its block, and an arm falls into the next one: an arm that does
+not end in a jump (`break`, `continue`, `return`, `unreachable`, `trap` or `goto`) continues with the statements of the arm
+after it, as C does. `break` inside a switch leaves it (its label stack entry is the switch's), and `continue` goes to the
+enclosing loop's step.
 
 ## What is refused (the next steps)
 
@@ -356,9 +356,8 @@ names the function, and the source line of the statement when the IR has `(loc .
 refused only when the module uses it (an unused `std::float16_t` constant of a header does not stop the module). The
 top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped.
 
-- General `goto` and labels in a body that also has a `loop` or a `switch`, or a label inside a nested statement, and a
-  switch whose arm falls into the next non-empty one. The structurizer that `pathb-stage2.md` section 2 asks for is
-  needed for these.
+- General `goto` and labels in a body that also has a `loop` or a `switch`, or a label inside a nested statement. The
+  structurizer that `pathb-stage2.md` section 2 asks for is needed for these.
 - A use of an extern global (`(extern)`, declared here and defined elsewhere), of a dynamically initialized one
   (`(unsupported init ...)`), or of a thread-local one (without `--threads`; with it, see the threads section below). A
   function's address in a static initializer (`addr` to `&"f"`) is its table slot, and is lowered. A thread-local's address
@@ -422,7 +421,7 @@ no 32-bit libgcc is needed for these programs), and they agree with the LP64 one
 initializer, a struct with a pointer to another global, a string read through a pointer, an address with an addend, a
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
 (`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested
-switches on a long selector, and a return in each arm. `refuse_switch_fallthrough.cpp` and `refuse_global.cpp` check the
+switches on a long selector, and a return in each arm. `switch_fallthrough.cpp` checks an arm that falls into the next one, and `refuse_global.cpp` checks the
 two refusals, and `refuse_located.cpp` the function and line a refusal names (the suite dumps a `REFUSE` test with
 `NFCXX_IR_LOC=1`). `goto_dispatch.cpp` checks the dispatch lowering, `function_pointers.cpp` the function table, and `checked_arith.ir` (hand-written IR, emitted in the
 LP64 modes) checks the checked arithmetic at the edges of each width through `checked_arith.cjs`. Node instantiates a
