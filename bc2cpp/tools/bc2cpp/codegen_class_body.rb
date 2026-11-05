@@ -475,6 +475,12 @@ class CodeGen
     # A core definition a later definition replaces is not registered: the later one is (CORE_SHADOWED).
     return nil if child && CodeGen.shadowed_labels&.include?(child)
     compiled = child && @compiled_methods&.[](child)
+    # A bytecode def with no compiled body (a block-taking wrapper such as Array#sort) keeps the native method that
+    # already registers under the same owner and name: skipping it leaves that method, instead of refusing the whole
+    # class body and every other method in it.
+    if compiled.nil? && (@registry[insn.sym.to_s] || []).any? { |d| d.owner == owner && d.irep.nil? }
+      return nil
+    end
     # A guarded entry registers too: its Fiber fallback reads saved bytecode, which is absent for engine methods, so a
     # block call under a non-root Fiber then fails (the cost of removing this blocker).
     return class_body_refusal(insn, compiled, child) unless compiled && compiled[:entry] && compiled[:aspec]
