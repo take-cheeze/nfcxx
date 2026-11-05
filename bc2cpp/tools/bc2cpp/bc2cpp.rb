@@ -274,6 +274,7 @@ if $PROGRAM_NAME == __FILE__
   # emitted. Dropped before anything reads the registry.
   CodeGen.module_names = declared_modules
   core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
+  CodeGen.shadowed_labels = core_shadowed
   core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
                                 .to_set { |d| [d.owner, d.name] }
   registry.each_value { |defs| defs.reject! { |d| d.irep && core_shadowed.include?(d.irep) } }
@@ -2192,7 +2193,13 @@ if $PROGRAM_NAME == __FILE__
   gen.compiled_methods = compiled.to_h { |m| [m[:label], m] }
   # CLASS_UNITS: the top-level class and module bodies that compile are emitted as units and run from gem_init in place of
   # the VM's run (UNIT_BLANK removes them from the residual mrblib). The phase fails at its end on an unresolved constant.
-  class_units = gen.owned_class_units(gen.compile_top_class_units(ireps.fetch(root_label)), only_owners)
+  # A class this gem's own mrblib reopens is the gem's too, even when it compiles no method of it (mruby-rpg2k's
+  # `class Object; include RGSS; end`): the statements run only from this gem's units. The root holds every linked
+  # engine mrblib, so only this gem's own directory counts.
+  all_class_units = gen.compile_top_class_units(ireps.fetch(root_label))
+  own_mrblib = "/mruby-#{symbol.to_s.delete_suffix('_compiled')}/mrblib/"
+  own_reopened = all_class_units.select { |unit| unit[:file].to_s.include?(own_mrblib) }.map { |unit| unit[:path] }
+  class_units = gen.owned_class_units(all_class_units, only_owners && (only_owners + own_reopened))
   File.write(File.join(out_dir, "#{symbol}_units.txt"), class_units.map { |u| "#{u[:path]}\n" }.uniq.join)
   # BC2CPP_DUMP_UNITS: the units this gem emits (the dump of every attempt, in CodeGen#dump_class_unit, also has the
   # units of other gems' owners that owned_class_units drops).

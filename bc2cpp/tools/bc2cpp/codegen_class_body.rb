@@ -18,6 +18,7 @@ class CodeGen
   # then SEND0 :new), the one body the driver refused. The name such a call keeps in the method table is one the SEND
   # sites keep already. The self sends (SSEND, SSEND0) are left to the VM, since a self send in a body calls owner-call
   # helpers the gem emits only for its compiled methods.
+  CLASS_BODY_VISIBILITY_SENDS = %w[private public protected module_function private_class_method public_class_method].freeze
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
                        GETCONST SETGV ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
@@ -150,9 +151,19 @@ class CodeGen
 
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}));\n"
+      elsif %i[SSEND SSEND0].include?(insn.op) && CLASS_BODY_VISIBILITY_SENDS.include?(insn.sym.to_s)
+        # private/public/protected/module_function set visibility of defs the registration already sets, and a
+        # statically dispatched def has no method to set it on: nothing to run here.
+        lines << "  // #{insn.sym} (visibility) left to the method registrations\n"
       elsif %i[SSEND SSEND0].include?(insn.op)
-        # A self send (attr_accessor, include, private, ...) is left to the VM: the residual bytecode still runs the body.
-        lines << "  // #{insn.sym} (self send) left to the VM\n"
+        # A self send (include, extend, prepend, attr_accessor, ...) runs by name on the class being defined. The
+        # VM-free build has no residual bytecode to run it, so it is called here; a by-name call needs no owner-call
+        # helper, which the gem emits only for its compiled methods.
+        n = insn.op == :SSEND0 ? 0 : (insn.argc || 0)
+        args = (1..n).map { |k| "r#{insn.reg + k}" }
+        array = args.empty? ? 'nullptr' : "bc2cpp_ssend_args"
+        decl = args.empty? ? '' : "mrb_value bc2cpp_ssend_args[] = { #{args.join(', ')} }; "
+        lines << "  { #{decl}r#{insn.reg} = mrb_funcall_argv(M, self, mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), #{n}, #{array}); }\n"
       elsif literal_length_send?(program, irep, idx)
         lines << literal_length_line(program, irep, idx)
       elsif literal_freeze?(program, idx)
@@ -461,6 +472,8 @@ class CodeGen
 
   def class_body_registration(insn, irep, owner)
     child = irep.reps[insn.def_child_index]
+    # A core definition a later definition replaces is not registered: the later one is (CORE_SHADOWED).
+    return nil if child && CodeGen.shadowed_labels&.include?(child)
     compiled = child && @compiled_methods&.[](child)
     # A guarded entry registers too: its Fiber fallback reads saved bytecode, which is absent for engine methods, so a
     # block call under a non-root Fiber then fails (the cost of removing this blocker).
