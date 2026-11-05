@@ -149,6 +149,7 @@
       <select id="examples" aria-label="Example"></select>
       <select id="std" aria-label="Language standard" title="Language standard"></select>
       <select id="mode" aria-label="Emitter mode" title="Data model and emitter mode"></select>
+      <label class="check" id="optimize-label" title="Run the SSA route's optimizations (escape analysis, the e-graph, the dispatch loop) on the C and C++ IR before the emitter. Needs the local server."><input type="checkbox" id="optimize"> optimize</label>
       <button class="primary" id="compile">Compile</button>
       <label class="check"><input type="checkbox" id="auto" checked> auto</label>
       <button id="share" title="Copy a link that holds this source and these options">Copy link</button>
@@ -622,7 +623,15 @@
   // ---- options, compile, the link -----------------------------------------------------------------------------------
 
   function options() {
-    return { language: $("language").value, mode: $("mode").value, std: $("std").value };
+    return { language: $("language").value, mode: $("mode").value, std: $("std").value,
+      optimize: $("optimize").checked && !$("optimize").disabled };
+  }
+  // The optimize option is the local server's (the SSA route runs there), for C and C++ only.
+  function syncOptimize() {
+    const lang = $("language").value;
+    const box = $("optimize");
+    box.disabled = !state.live || (lang !== "c++" && lang !== "c");
+    $("optimize-label").style.opacity = box.disabled ? "0.5" : "";
   }
   const languageOf = (ex) => ex.language || "c++";
 
@@ -774,7 +783,7 @@
   function linkHash() {
     const o = options();
     return "src=" + encodeSource(source()) + "&lang=" + encodeURIComponent(o.language) + "&mode=" + o.mode
-      + (o.std ? "&std=" + o.std : "");
+      + (o.std ? "&std=" + o.std : "") + (o.optimize ? "&opt=1" : "");
   }
   function writeHash() {
     history.replaceState(null, "", "#" + linkHash());
@@ -790,7 +799,7 @@
         src = null;
       }
     }
-    return { src, lang: p.get("lang"), mode: p.get("mode"), std: p.get("std") };
+    return { src, lang: p.get("lang"), mode: p.get("mode"), std: p.get("std"), opt: p.get("opt") };
   }
 
   // ---- tabs --------------------------------------------------------------------------------------------------------
@@ -928,6 +937,7 @@
       mode.appendChild(o);
     }
     mode.value = lang.modes.includes(keepMode) ? keepMode : lang.modes[0];
+    syncOptimize();
   }
   const exampleFetches = {};   // id -> a promise of the example's source, fetched once
   const exampleTexts = {};     // id -> the example's source, once fetched
@@ -985,6 +995,7 @@
     fillBindings();
     const server = await detectServer();
     state.live = !!server.live;
+    syncOptimize();
     if (!state.live) {
       state.inBrowser = await detectInBrowser();
       $(state.inBrowser ? "inbrowser-note" : "static-note").hidden = false;
@@ -1002,6 +1013,7 @@
     fillLanguageOptions();
     if (h.mode && [...$("mode").options].some((o) => o.value === h.mode)) $("mode").value = h.mode;
     if (h.std && [...$("std").options].some((o) => o.value === h.std)) $("std").value = h.std;
+    $("optimize").checked = h.opt === "1";
 
     // The source: the link's, else the first example's (of the link's language, if it names one).
     const first = state.examples.find((e) => languageOf(e) === $("language").value) || state.examples[0];
@@ -1059,6 +1071,7 @@
   });
   $("std").addEventListener("change", compile);
   $("mode").addEventListener("change", compile);
+  $("optimize").addEventListener("change", compile);
   $("compile").addEventListener("click", compile);
   $("run").addEventListener("click", runMain);
   $("clear-console").addEventListener("click", () => {

@@ -30,12 +30,12 @@ read_forms(ssa_text).each do |form|
 
   begin
     out, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(form))
-    dispatch = PathbEgraph.dispatch_structurize(out)
+    dispatch = PathbEgraph.dispatch_structurize(PathbEgraph.merge_chains(out))
     next unless dispatch
 
     flat = PathbEgraph.flat_from_dispatch(dispatch)
     optimized[form[1]] = flat if flat
-  rescue PathbEgraph::Fail, PathbEgraph::Unsupported => e
+  rescue Fail, Unsupported => e
     warn "pathb-flat-opt: #{form[1]} keeps its flat IR (#{e.message})"
   end
 end
