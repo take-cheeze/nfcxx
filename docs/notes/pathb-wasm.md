@@ -360,8 +360,9 @@ top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped
   switch whose arm falls into the next non-empty one. The structurizer that `pathb-stage2.md` section 2 asks for is
   needed for these.
 - A use of an extern global (`(extern)`, declared here and defined elsewhere), of a dynamically initialized one
-  (`(unsupported init ...)`), of a thread-local one (without `--threads`; with it, see the threads section below), or of a
-  function's address in a static initializer (`addr` to `&"f"`), or of a thread-local's address in a static initializer.
+  (`(unsupported init ...)`), or of a thread-local one (without `--threads`; with it, see the threads section below). A
+  function's address in a static initializer (`addr` to `&"f"`) is its table slot, and is lowered. A thread-local's address
+  in a static initializer is refused under `--threads` (it differs per thread).
 
 ## Variable-length arrays
 
