@@ -307,6 +307,7 @@ module PathbEgraph
       @stats = Hash.new(0)
       @read_slots = {}  # slot keys that some instruction reads or takes the address of (see dead_stores)
       fn.blocks.each_value { |blk| blk[:instrs].each { |i| collect_slot_reads(i, @read_slots) } }
+      analyze_addresses
     end
 
     # The global passes that run after the per-block e-graphs, in this order. Each one takes the blocks and changes them
@@ -894,7 +895,7 @@ module PathbEgraph
     READS_MEMORY = %w[load load.v bfload bfload.v call vaarg].freeze
 
     # The slot key of a plain load `(load T $"x")`, or nil.
-    def plain_slot_load(rv) = head(rv) == "load" ? slot_key(rv[2]) : nil
+    def plain_slot_load(rv) = head(rv) == "load" ? mem_key(rv[2]) : nil
 
     # True when x contains an operator that may write memory. Type forms carry no operations.
     def memory_write?(x)
@@ -907,33 +908,152 @@ module PathbEgraph
       x.any? { |y| memory_write?(y) }
     end
 
-    # True when a `$"x"` of x is not the address of a plain load or store: the slot's address escapes, and a later
-    # write through a pointer may change it.
-    def address_taken?(x)
-      case x
-      when Ref then x.sigil == "$"
-      when Array
-        return false if plain_slot_load(x)
-
-        x.any? { |y| address_taken?(y) }
-      else false
-      end
-    end
-
-    # True when a statement or `let` may write memory other than by a plain store to a slot, or takes a slot's
-    # address (an address-taking form ends the memory state). Any statement that is not a `let`, a store, a `set`,
-    # `nonnull` or `bounds` is conservatively such a write (copies, evals, volatile and bit-field stores, barriers).
+    # True when a statement may write memory other than by a store to a known location (a call, a copy, a volatile or
+    # bit-field store, a store through an unknown pointer, a barrier). Any statement that is not a `let`, a store, a `set`,
+    # `nonnull` or `bounds` is conservatively such a write. An address computation writes nothing: whether the slot it
+    # names can be written through a pointer is decided by the escape analysis (analyze_addresses).
     def clobbers?(ins)
       case head(ins)
-      when "let" then memory_write?(ins[3]) || address_taken?(ins[3])
+      when "let" then memory_write?(ins[3])
       when "store"
         return true unless slot_key(ins[2])
 
-        memory_write?(ins[3]) || address_taken?(ins[3])
-      when "set" then memory_write?(ins[2]) || address_taken?(ins[2])
-      when "nonnull", "bounds" then address_taken?(ins[1..])
+        memory_write?(ins[3])
+      when "set" then memory_write?(ins[2])
+      when "nonnull", "bounds" then false
       else true
       end
+    end
+
+    # ---- addresses of the slots: derived pointers and escape analysis ---------------------------------------------
+    # A register is a derived address of a slot when its let is `(offset P K)`, `(index P I SIZE)` or `(bitcast T P)`
+    # with P a slot's address or another derived address. @roots maps the register to [slot key, byte offset], the
+    # offset nil when an index is not a constant. A slot escapes when its address, or a derived address, is used other
+    # than as the address of a load or store, as the base of a derivation, or as a nonnull check. Only an escaping slot
+    # can be written through a pointer, or by a call that receives its address; a slot that does not escape is written
+    # only by the stores that name it, and keeps its remembered values across calls and pointer writes.
+    DERIVE_BASE = { "offset" => 1, "index" => 1, "bitcast" => 2 }.freeze
+
+    def analyze_addresses
+      @roots = {}
+      @escaping = {}
+      @all_escape = @fn.blocks.each_value.any? { |b| b[:instrs].any? { |i| calls_setjmp?(i) } }
+      changed = true
+      while changed
+        changed = false
+        each_let do |r, rv|
+          next if @roots.key?(r)
+
+          base, delta = derivation(rv)
+          root = base && root_of(base)
+          next unless root
+
+          @roots[r] = [root[0], root[1] && delta ? root[1] + delta : nil]
+          changed = true
+        end
+      end
+      @fn.blocks.each_value do |blk|
+        blk[:instrs].each do |i|
+          case head(i)
+          when "let"
+            rv = i[3]
+            base, = derivation(rv)
+            if base && root_of(base)
+              escape_in(rv, rv[DERIVE_BASE[head(rv)]])
+            elsif head(rv) == "load"
+              escape_in(rv, rv[2])
+            else
+              escape_in(rv)
+            end
+          when "store" then escape_in(i, i[2])
+          when "nonnull" then escape_in(i, i[1])
+          else escape_in(i)
+          end
+        end
+        blk[:phis].each { |ph| ph.inc.each_value { |v| escape_in(v) } }
+        escape_in(blk[:term])
+      end
+    end
+
+    def each_let
+      @fn.blocks.each_value do |blk|
+        blk[:instrs].each { |i| yield i[1], i[3] if head(i) == "let" }
+      end
+    end
+
+    # The base operand and the byte offset of a derivation, or nil when rv is not one.
+    def derivation(rv)
+      return nil unless rv.is_a?(Array) && DERIVE_BASE.key?(head(rv))
+
+      case head(rv)
+      when "offset" then [rv[1], int_or_nil(rv[2])]
+      when "index"
+        i = rv[2].is_a?(Array) && head(rv[2]) == "const" ? int_or_nil(rv[2][2]) : nil
+        size = int_or_nil(rv[3])
+        [rv[1], i && size ? i * size : nil]
+      else [rv[2], 0]
+      end
+    end
+
+    def int_or_nil(x)
+      Integer(x.to_s, 10)
+    rescue ArgumentError
+      nil
+    end
+
+    # [slot key, offset] of an address operand: a slot's own address, or a derived address; nil otherwise.
+    def root_of(op)
+      return [slot_key(op), 0] if slot_key(op)
+
+      @roots[op] if reg?(op)
+    end
+
+    # Marks the slots that escape through the operands of x, other than the operand `allowed` (identity).
+    def escape_in(x, allowed = nil)
+      case x
+      when Array then x.each { |y| escape_in(y, allowed) }
+      when Ref
+        k = slot_key(x)
+        @escaping[k] = true if k && !x.equal?(allowed)
+      when String
+        if reg?(x) && @roots.key?(x) && !x.equal?(allowed)
+          @escaping[@roots[x][0]] = true
+        end
+      end
+    end
+
+    def calls_setjmp?(x)
+      return false unless x.is_a?(Array)
+      return true if x.any? { |y| y.is_a?(Ref) && y.sigil == "&" && SETJMP_NAMES.include?(y.raw) }
+
+      x.any? { |y| calls_setjmp?(y) }
+    end
+
+    # The memory location of an address operand: a slot's own address (its key), or a derived address with a known
+    # offset (the slot key and the offset). nil for an unknown location.
+    def mem_key(op)
+      return slot_key(op) if slot_key(op)
+      return nil unless reg?(op) && @roots[op] && @roots[op][1]
+
+      root, off = @roots[op]
+      off.zero? ? root : "#{root}\u0001#{off}"
+    end
+
+    # The slot an address operand names (its own key, or a derived address's), or nil.
+    def addr_root(op)
+      root_of(op)&.first
+    end
+
+    def root_key(k) = k.split("\u0001", 2).first
+
+    # A store through an address of slot `root` may overlap any other location of that slot: those are forgotten.
+    def kill_root(root, keep)
+      @mem.delete_if { |k, _| k != keep && root_key(k) == root }
+    end
+
+    # The slots that escape lose their remembered values (a call or a pointer write may write them).
+    def forget_escaping
+      @mem.delete_if { |k, _| @all_escape || @escaping.key?(root_key(k)) }
     end
 
     # True when an instruction contains a read of memory (a load of any kind, a call).
@@ -947,8 +1067,13 @@ module PathbEgraph
     # Runs before the instruction's own value is classified: a write that may touch any slot forgets every
     # remembered value, and a plain store records the value its slot now holds.
     def memory_step(ins)
-      forget_memory if clobbers?(ins)
-      note_store(ins) if head(ins) == "store" && slot_key(ins[2])
+      if head(ins) == "store" && (root = addr_root(ins[2]))
+        forget_escaping if memory_write?(ins[3])
+        kill_root(root, mem_key(ins[2]))
+        note_store(ins)
+        return
+      end
+      forget_escaping if clobbers?(ins)
     end
 
     def forget_memory = (@mem = {})
@@ -969,6 +1094,9 @@ module PathbEgraph
     # The slot holds the stored value. The value is remembered as a class only when it is a register or a constant
     # of the store's type; any other value (an expression) leaves the slot's value unknown.
     def note_store(ins)
+      k = mem_key(ins[2])
+      return unless k
+
       t, v = ins[1], ins[3]
       cls = nil
       if reg?(v) || const_operand?(v)
@@ -976,7 +1104,7 @@ module PathbEgraph
         cls = c if sx(cty(c)) == sx(t)
       end
       op = reg?(v) || const_operand?(v) ? v : nil
-      @mem[slot_key(ins[2])] = { type: t, cls: cls, from: :store, op: op }
+      @mem[k] = { type: t, cls: cls, from: :store, op: op }
     end
 
     # A plain load of a slot. When the slot's value is known here with the same type, the load has that value:
