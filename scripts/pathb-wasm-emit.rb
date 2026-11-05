@@ -532,7 +532,8 @@ def parse_global(f)
   o = StaticObj.new(name, size, align, h == "init" ? init : nil, false)
   # no storage here: a use of the object is refused, and a declaration that nothing uses is not
   o.tls = thread
-  if thread
+  if thread && h != "extern"
+    # a thread-local with an initializer: build_statics lowers it (one copy, or a block per thread under --threads)
     o.refusal = "thread-local global #{name} (not lowered)"
   elsif h == "extern"
     o.refusal = "extern global #{name} (declared here, defined elsewhere: no storage in this module)"
@@ -721,10 +722,27 @@ def static_contents(mod, o)
 end
 
 # The static objects of the module, with their addresses and contents, in the order of the forms.
+# The EH runtime's thread-local symbols (see build_statics).
+EH_RUNTIME_TLS = %w[__curr_eh_stack_entry __eh_curr_region].freeze
+
 def build_statics(mod, objs, asan = false)
   mod.add_statics(objs)
-  # --threads: a thread-local object has storage (its block is each thread's copy); without it, a use is refused
-  objs.each { |o| o.refusal = nil if mod.threads && o.tls && o.refusal.to_s.start_with?("thread-local") }
+# A thread-local object has storage: under --threads it is the group of per-thread blocks (its copies); without it the
+  # module is one thread, so the object is an ordinary static (one copy, as the single thread's).
+  objs.each do |o|
+    next unless o.tls && o.refusal.to_s.start_with?("thread-local")
+    o.refusal = nil
+    o.tls = mod.threads
+  end
+  # The EH runtime's thread-locals (defined by the runtime, which this module does not link): without --threads they get
+  # zeroed storage, so the references to them lower. The module still refuses throw and catch, so the EH stack is never
+  # used by it; a module with a throw is refused where it throws.
+  objs.each do |o|
+    next unless !mod.threads && EH_RUNTIME_TLS.include?(o.name) && o.refusal.to_s.start_with?("extern global")
+    o.refusal = nil
+    o.init = ["init"]                      # no initializer items: all zero
+    o.tls = false
+  end
   end_addr = layout_statics(objs, asan)
   # An object whose contents this emitter cannot lower (a type it does not have, such as the std::float16_t constants
   # of <numbers> that every C++ program declares) is refused where it is used, not here: most are never used. An object
