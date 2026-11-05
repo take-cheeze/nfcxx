@@ -283,14 +283,10 @@ relations, so the uses that remain stay dominated.
 - **Across blocks, code motion.** The pass only reuses a dominating definition; nothing is hoisted or sunk, so an
   operation computed on two sibling paths stays computed twice, and a loop-invariant operation is not moved out.
   No partial redundancy elimination.
-  `pathb-egraph.rb`), so the golden functions `bitfield2.ir` (`swE3Neg`), `float_neg_switch.ir` (`classify`), `vla.ir`
-  (`in_switch`) and `vla_scope.ir` (`sw`) fail with "block without a terminator", and so do the `switch_*` cases of
-  `tests/pathb-ssa/cases`; the same failure occurs without this pass. `run.sh` therefore exits 1 until the switch
-  handling is fixed.
-- **Memory.** Every `load` is opaque: two loads of the same slot with no store between are not merged, and no
-  store-to-load forwarding is done. Stores, calls and volatile accesses are never moved or merged.
-- **Constants.** Only decimal literals are constants in the e-graph (`const_value`), so a hex literal such as `0x1` is
-  motion. Only constants and registers replaced by a dominator reach a block.
+- **Memory within a block.** Loads and stores of a slot are merged and forwarded in program order (see Memory above).
+  Stores, calls and volatile accesses are never moved or merged.
+- **Constants.** Integer literals, decimal or hexadecimal (`0x` or `0X`, with an optional sign), are constants in the
+  e-graph (`const_value`). Only constants and registers replaced by a dominator reach a block.
 - **Memory across blocks.** The memory state starts empty in every block, so a value stored in a dominating block is
   not forwarded, and loads through pointers (other than slots) are never merged. Address-taking forms clear the state
   even though a pure address computation writes nothing; a finer rule would need the escape set of the function.
@@ -308,5 +304,5 @@ relations, so the uses that remain stay dominated.
   folds, but not yet a multiply-to-shift or a multiply-to-add rewrite, so the two models pick the same forms on the
   current goldens and cases. `tests/pathb-egraph/check.rb` runs the weighted model on every case and checks its results
   against the original, and verifies its output on every golden.
-- **No consumer.** The QBE, PTX, WebAssembly and WGSL emitters do not read this output yet (the same state as
-  `pathb-ssa.rb`'s output).
+- **Consumers.** The opt-in SSA-to-QBE build (`scripts/pathb-ssa-build`) reads this output. The PTX, WebAssembly and WGSL
+  emitters do not read it yet: they need structured control flow first (see `pathb-ssa.md`).
