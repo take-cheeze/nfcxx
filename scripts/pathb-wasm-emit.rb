@@ -1384,11 +1384,12 @@ class Fn
       end
       normalize(ty)
       w
-    when "cshl", "cshr"
+    when "cshl", "cshr", "wshl"
       ty = parse_type(x[1])
       raise Refused, "#{h} of a non-integer" unless ty[0] == "int"
       w = wtype(ty)
       bits = ty[1] * 8
+      left = h != "cshr"
       # the count, as an i64: a count at or above the width (a negative count reads as huge) traps
       push_i64(x[3], false)
       e(0x21); leb_u(@tmp64)
@@ -1400,9 +1401,9 @@ class Fn
       e(0x20); leb_u(@tmp64)
       e(0xa7) if w == :i32                 # the count as i32
       if w == :i32
-        e(h == "cshl" ? 0x74 : (ty[2] ? 0x75 : 0x76))
+        e(left ? 0x74 : (ty[2] ? 0x75 : 0x76))
       else
-        e(h == "cshl" ? 0x86 : (ty[2] ? 0x87 : 0x88))
+        e(left ? 0x86 : (ty[2] ? 0x87 : 0x88))
       end
       normalize(ty)
       w

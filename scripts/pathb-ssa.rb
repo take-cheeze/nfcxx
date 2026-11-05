@@ -1193,6 +1193,14 @@ end
       q = a.abs / b.abs
       q = -q if (a.negative? ^ b.negative?)
       head(f) == "cdiv" ? canon(q, f[1]) : canon(a - q * b, f[1])
+    when "wshl"
+      # A left shift of the two's complement pattern, wrapped to the type (no overflow check). A count that is negative
+      # or not below the bit width traps, as cshl's does.
+      w, = int_info(f[1])
+      n = val(f[3])
+      raise Trap, "shift count #{n} of #{w} bits" unless n >= 0 && n < w
+
+      canon(val(f[2]) << n, f[1])
     else raise Unsupported, "operator #{head(f) || sx(f)}"
     end
   end
