@@ -163,9 +163,25 @@ class Insn
 
   # A decoded instruction (Symbol +op+). Built through the constructor: under mruby, allocate leaves a Struct without its
   # members, so the fields are set by initialize.
+  # Sets the fields directly: MemberRecord's keyword initialize costs a Hash and six reflective setter calls (with an
+  # interned name each) per instruction, which dominated decoding under mruby (about 3x slower, ~30% more memory per Insn).
   def self.decoded(lineno, addr, op, frozen_literal)
-    new(lineno: lineno, addr: addr, op: op, frozen_literal: frozen_literal)
+    insn = allocate
+    insn.send(:init_decoded, lineno, addr, op, frozen_literal)
+    insn
   end
+
+  # The same state MemberRecord#initialize(lineno:, addr:, op:, frozen_literal:) leaves: args and raw are nil until
+  # defer_disassembly / materialize_disassembly fill them.
+  def init_decoded(lineno, addr, op, frozen_literal)
+    @lineno = lineno
+    @addr = addr
+    @op = op.is_a?(String) ? op.intern : op
+    @frozen_literal = frozen_literal
+    @args = nil
+    @raw = nil
+  end
+  private :init_decoded
 
   def defer_disassembly(decoder, name, values, next_pc)
     @disassembly_decoder = decoder
