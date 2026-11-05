@@ -965,6 +965,13 @@ class Fn
       @local_types << ptr_wtype << ptr_wtype
       @next_local += 2
     end
+    if uses_vla?(@form)
+      # a pointer-width and an i32 scratch for __vla_alloc and __vla_dealloc (see vla_call)
+      @vla_p = @next_local
+      @vla_sp = @next_local + 1
+      @local_types << ptr_wtype << :i32
+      @next_local += 2
+    end
     if uses_narrow_cf2i?(@form)
       # an i32 scratch for the value of a float conversion to a 1- or 2-byte integer (see cf2i_narrow)
       @cf2i_tmp = @next_local
@@ -1651,6 +1658,9 @@ class Fn
       direct = callee.is_a?(IRSym) && callee.sig == "&"
       raise Refused, "aggregate argument to #{callee.name} (an import: the host's ABI does not pass aggregates this way)" if direct && !@mod.defines?(callee.name)
     end
+    if callee.is_a?(IRSym) && callee.sig == "&" && VLA_CALLS.include?(callee.name) && !@mod.defines?(callee.name)
+      return vla_call(callee.name, args)
+    end
     if variadic
       # a variadic call: the callee is a function the module defines with an ellipsis, and the arguments after the named
       # ones are stored in the block of this frame (byval_scan reserved it); the block's address is the last argument
@@ -1709,6 +1719,64 @@ class Fn
           end
     e(0x10); leb_u(idx)
     wtype(ret)
+  end
+
+  # ---- variable-length arrays. EDG lowers a VLA to calls of __vla_alloc(slot, bytes), which stores the storage's address
+  # in the slot, and __vla_dealloc(slot) at the end of the scope. The storage is taken from the shadow stack, as alloca
+  # takes it: a header of 16 bytes holds the stack pointer before the allocation, and the block follows it. A dealloc of
+  # the block on top of the stack puts that pointer back; otherwise the block lives until the function returns (C's
+  # scopes nest, so the usual case is the top). A block that would reach the static data traps.
+  VLA_CALLS = %w[__vla_alloc __vla_dealloc].freeze
+
+  def uses_vla?(x)
+    return false unless x.is_a?(Array)
+    return true if head_of(x) == "call" && x[2].is_a?(IRSym) && VLA_CALLS.include?(x[2].name)
+    x.any? { |y| uses_vla?(y) }
+  end
+
+  def vla_call(name, args)
+    raise Refused, "variable-length array under --asan (the asan runtime keeps its own records)" if @asan
+    if name == "__vla_alloc"
+      raise Refused, "__vla_alloc with #{args.length} arguments" unless args.length == 2
+      # the slot's pointer, then the size (unsigned), which is kept in the 64-bit scratch
+      push_op(args[0], ptr_wtype); e(0x21); leb_u(@vla_p)
+      push_i64(args[1], false); e(0x21); leb_u(@tmp64)
+      # new := stack pointer - ((bytes + 31) & -16): the header and the block, aligned to 16
+      e(0x23); leb_u(0)
+      e(0x20); leb_u(@tmp64); e(0x42); leb_s(31); e(0x7c)      # i64.add
+      e(0x42); leb_s(-16); e(0x83)                             # i64.and
+      e(0xa7); e(0x6b)                                         # i32.wrap_i64, i32.sub
+      e(0x21); leb_u(@vla_sp)                                  # local.set the new stack pointer
+      # trap unless the block is above the static data and did not wrap below zero
+      e(0x20); leb_u(@vla_sp); e(0x41); leb_s(@mod.data_end); e(0x49)   # i32.lt_u
+      e(0x20); leb_u(@vla_sp); e(0x23); leb_u(0); e(0x4b)      # i32.gt_u: above the old pointer
+      e(0x72); e(0x04, 0x40); e(0x00); e(0x0b)                 # i32.or, if unreachable end
+      # the header holds the old stack pointer; the stack pointer moves to the header
+      e(0x20); leb_u(@vla_sp); e(0xad) if @mod.memory64
+      e(0x23); leb_u(0); e(0x36); memarg
+      e(0x20); leb_u(@vla_sp); e(0x24); leb_u(0)
+      # the slot receives the block, the new stack pointer plus the header
+      e(0x20); leb_u(@vla_p); e(0xa7) if $ptr_bytes == 8 && !@mod.memory64   # the address of the slot
+      e(0x20); leb_u(@vla_sp); e(0x41); leb_s(16); e(0x6a)                  # the block
+      e(0xad) if $ptr_bytes == 8                                            # i64.extend_i32_u: a pointer
+      e($ptr_bytes == 8 ? 0x37 : 0x36); memarg
+    else
+      raise Refused, "__vla_dealloc with #{args.length} arguments" unless args.length == 1
+      # the block is the slot's pointer; when it is the top of the stack, the stack pointer goes back to the old one
+      push_op(args[0], ptr_wtype); e(0x21); leb_u(@vla_p)
+      e(0x20); leb_u(@vla_p); e(0xa7) if $ptr_bytes == 8 && !@mod.memory64
+      e($ptr_bytes == 8 ? 0x29 : 0x28); memarg                              # the block's pointer
+      e(0xa7) if $ptr_bytes == 8                                            # i32.wrap_i64
+      e(0x41); leb_s(16); e(0x6b)                                           # the header
+      e(0x22); leb_u(@vla_sp)
+      e(0x23); leb_u(0); e(0x46)                                            # i32.eq the stack pointer
+      e(0x04, 0x40)
+      e(0x20); leb_u(@vla_sp); e(0xad) if @mod.memory64
+      e(0x28, 0x02, 0x00)                                                   # i32.load: the old stack pointer
+      e(0x24); leb_u(0)
+      e(0x0b)
+    end
+    nil
   end
 
   # ---- variadic functions. The va_list is the System V __va_list_tag (24 bytes): gp_offset (u32, at 0), fp_offset (u32,
@@ -2050,11 +2118,14 @@ class Fn
       bfstore(s)
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. The index is compared as unsigned, so a negative one traps too.
-      raise Refused, "bounds with a run-time limit" if s[2].is_a?(String) && s[2][0] == "%"
       push_i64(s[1], false)
       e(0x21); leb_u(@tmp64)
       e(0x20); leb_u(@tmp64)
-      e(0x42); leb_s(signed64(as_int(s[2])))
+      if s[2].is_a?(String) && s[2][0] == "%"
+        push_i64(s[2], false)              # a run-time limit (a variable-length array's bound)
+      else
+        e(0x42); leb_s(signed64(as_int(s[2])))
+      end
       e(0x5a)                              # i64.ge_u
       e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
     when "unsupported"
@@ -2731,6 +2802,9 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
   mod = Module_.new(defs)
   # A weak function the module declares, neither defines nor calls, is null: its address is 0 (weak code tests for it)
   mod.null_funcs = weak_null_functions(forms, defs)
+  # The EH cleanup of a VLA (EDG's __vla_dealloc_eh) has its address in static data, for the unwinder. A module here
+  # never throws (the throw is refused), so the cleanup is never reached: its slot is null, and a call of it traps.
+  mod.null_funcs |= address_taken(forms).select { |nm| VLA_EH_CLEANUPS.include?(nm) && !defs.key?(nm) }
   address_taken(forms).reject { |nm| mod.null_funcs.include?(nm) }.each_with_index { |nm, i| mod.table[nm] = i + 1 }
   mod.asan = asan
   mod.emscripten = emscripten
@@ -2780,6 +2854,9 @@ end
 # slots of the function table. Slot 0 stays empty, so a call through a null function pointer traps.
 # The weak functions the module declares (declare with weak) and does not define: their address is null, and a call of one
 # traps (there is no definition to call; the C library's is not in a wasm module).
+# The EH cleanup of a variable-length array: referenced by the unwinder's tables only (see emit_module).
+VLA_EH_CLEANUPS = %w[__vla_dealloc_eh].freeze
+
 def weak_null_functions(forms, defs)
   declared = forms.select { |f| head_of(f) == "declare" && f.drop(2).any? { |p| head_of(p) == "weak" } }.map { |f| f[1].to_s }
   declared.reject { |nm| defs.key?(nm) }.uniq

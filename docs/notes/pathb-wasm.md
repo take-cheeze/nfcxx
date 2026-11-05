@@ -363,6 +363,17 @@ top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped
   (`(unsupported init ...)`), of a thread-local one (without `--threads`; with it, see the threads section below), or of a
   function's address in a static initializer (`addr` to `&"f"`), or of a thread-local's address in a static initializer.
 
+## Variable-length arrays
+
+EDG lowers a VLA to `__vla_alloc(slot, bytes)` and `__vla_dealloc(slot)`, and the module lowers both inline, from the shadow
+stack, as `alloca` does: a 16-byte header holds the stack pointer before the allocation, and the block follows it. The
+slot receives the block. A dealloc of the block on top of the stack restores the stack pointer; otherwise the block lives
+until the function returns, which C's nested scopes do not produce. A block that would reach the static data traps. A
+`bounds` with a run-time limit is an unsigned compare with that limit. The EH cleanup `__vla_dealloc_eh` (its address is
+in static data for the unwinder) is a null slot: the module never throws, so the cleanup is never reached. Under `--asan`
+a VLA is refused (the asan runtime keeps its own records). `vla.cpp` and `vla_loop.cpp` cover one VLA and a loop of 4000
+that would not fit the stack without the release (`// ASAN-SKIP`).
+
 ## Variadic functions (LP64)
 
 A function the module defines with an ellipsis takes one more parameter at the end: the address of a block in the caller's
@@ -392,7 +403,7 @@ threads.
 - Aggregate parameters, results and arguments (`byval`, `sret`), and aggregate values in registers.
 - Variadic calls of anything but a function the module defines (an import such as `printf`: the host's ABI is not
   lowered), and variadic functions in the asan and ILP32 modes.
-- Bit-fields (`bfload`, `bfstore`), inline assembly, VLAs and exceptions, and the 16-byte types.
+- Inline assembly, exceptions, and the 16-byte types.
 - A jump to the label after a loop from outside that loop (only the jumps from inside it are handled).
 
 The IR's own `(unsupported ...)` markers are refused the same way, with the marker's text. Those come from the front end,
