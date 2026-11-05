@@ -2201,7 +2201,7 @@ if $PROGRAM_NAME == __FILE__
     File.write(File.join(dump_dir, 'emitted.txt'), "#{symbol} owners=#{only_owners.inspect}\n#{class_units.map { |u| u[:path] }.join("\n")}\n", mode: 'a')
   end
   print gen.emit_structs
-  warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, compiled.to_set { |m| "#{m[:owner]}##{m[:name]}" }))
+  warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
   helper_codes = compiled
   print gen.emit_ary_entry_helper(helper_codes)
   print gen.emit_ary_write_helpers(helper_codes)
