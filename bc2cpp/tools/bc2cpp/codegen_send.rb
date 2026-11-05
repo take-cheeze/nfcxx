@@ -55,6 +55,23 @@ class CodeGen
                                           name: name, d: d, owner_def: owner_def)
         return splat_result if splat_result
       end
+      # KEYWORD_SPLAT_EMPTY: `recv.m(a, **h)` with no literal keywords. The call is the plain n-positional send when
+      # h is empty; a non-empty h needs the keyword call convention, which is not implemented, so it raises at run time.
+      if insn.keyword_splat? && !insn.positional_splat? && !insn.argc.nil?
+        n = insn.argc
+        plain = Insn.new(lineno: insn.lineno, addr: insn.addr, op: insn.op,
+                         args: insn.args.sub(/n=#{n}\|nk=\*/, "n=#{n}"), raw: insn.raw,
+                         frozen_literal: insn.frozen_literal)
+        kw_reg = insn.reg + 1 + n
+        plain_code = compile_send_site(plain, self_implicit: self_implicit, irep: irep, idx: idx,
+                                       owner_def: owner_def, call_receiver: call_receiver,
+                                       call_arguments: call_arguments, trace_idx: trace_idx,
+                                       trace_receiver_reg: trace_receiver_reg, trace_reg_offset: trace_reg_offset,
+                                       typed_fallback: typed_fallback)
+        return "  if (!mrb_hash_p(r#{kw_reg}) || !mrb_hash_empty_p(M, r#{kw_reg})) " \
+               "mrb_raise(M, mrb_class_get(M, \"NotImplementedError\"), \"#{name}: keyword options are not supported\");\n" \
+               "#{plain_code}"
+      end
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{insn.argc_text}) -- not in this prototype's supported subset\n"
     end
 
