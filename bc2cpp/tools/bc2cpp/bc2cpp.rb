@@ -2220,6 +2220,9 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_forward_decls(compiled)
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
+  # TOP_LEVEL_STATEMENTS: compiled before any owner-class slot is numbered and printed, since a statement
+  # such as a constant set registers its owner's slot. Its helpers are chosen below, after this.
+  top_level_code = gen.compile_top_level_statements(ireps.fetch(root_label))
   # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed.
   # helper_codes, not compiled: a helper only the load names must be built
   # before reserve_poly_table_slots too (building allocates OWNER_CLASS_CACHE
@@ -2372,7 +2375,6 @@ if $PROGRAM_NAME == __FILE__
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first. The load
   # code holds no constants, so `used` stays what the compiled entries name.
   # TOP_LEVEL_STATEMENTS is compiled before the helper sets are chosen, so the helpers its statements use are emitted.
-  top_level_code = gen.compile_top_level_statements(ireps.fetch(root_label))
   used = [index_helpers_code, eqq_helper_code, numeric_slow_code, exception_init_code, poly_tables_code, *compiled.map { |m| m[:code] },
           *class_units.map { |unit| unit[:code] }, top_level_code].join
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
