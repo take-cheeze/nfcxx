@@ -23,7 +23,8 @@ module LintCrosscheck
     path = File.join(repo_root, LINT)
     return ["#{LINT} is missing"] unless File.exist?(path)
 
-    require path
+    # Under mruby the script is a baked source (bake_sources.rb EXTRA entries), loaded by its name.
+    defined?(MRubyRequire) ? require(LINT.delete_suffix('.rb')) : require(path)
     files = GEMS.flat_map { |gem| Dir[File.join(repo_root, gem, 'mrblib', '**', '*.rb')] }.sort
     run = ScanCache.fetch("lint_crosscheck.report.prism#{Prism::VERSION}", [path, BASELINE, *files]) do
       closed_world_lint_run(root: repo_root)
