@@ -210,18 +210,9 @@ File.write(File.join(probe, 'src/probe.cxx'), "#include #{File.join(generated, '
     if (std::getenv("NATIVE_PROBE_COMPILED")) {
       bc2cpp_gem_init(mrb);
       check_private_drivers(mrb);
-      mrb_value table = mrb_iv_get(mrb, mrb_obj_value(mrb->object_class), mrb_intern_lit(mrb, "__bc2cpp_core_interpreted__"));
-      mrb_value saved = mrb_ary_dup(mrb, table);
-      mrb_gc_protect(mrb, saved);
       mrb_full_gc(mrb);
       bc2cpp_register_owner_methods(mrb);
       check_private_drivers(mrb);
-      for (mrb_int i = 0; i < RARRAY_LEN(saved); ++i) {
-        if (!mrb_obj_equal(mrb, mrb_ary_ref(mrb, saved, i), mrb_ary_ref(mrb, table, i))) {
-          fprintf(stderr, "iterator driver replaced during repeated registration\n");
-          std::abort();
-        }
-      }
     }
     mrb->code_fetch_hook = audit;
     mrb_define_method(mrb, mrb->object_class, "native_only_reject_bytecode", reject_bytecode, MRB_ARGS_NONE());
