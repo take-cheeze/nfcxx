@@ -1761,7 +1761,7 @@ class SFn
     when "cdiv", "crem"
       ty = parse_type(x[1])
       [checked_div(h, ty, x[2], x[3]), ty]
-    when "cshl", "cshr"
+    when "cshl", "cshr", "wshl"
       ty = parse_type(x[1])
       [checked_shift(h, ty, x[2], x[3]), ty]
     when "and", "or", "xor"
@@ -1914,7 +1914,7 @@ class SFn
     elsif !wide?(ty) && wide?(cty)
       c = res(113, @spv.t_int(32), c)
     end
-    if h == "cshl"
+    if h == "cshl" || h == "wshl"
       canon(res(196, sty(ty), a, c), ty)
     else
       op = ty[2] ? 195 : 194

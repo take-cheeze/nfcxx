@@ -25,7 +25,7 @@ module PathbEgraph
   # Checked operators: they may trap, so they are never removed while they can trap. A node of one is built only
   # when its operands are pure values; it is never merged with another node of the same operator (each one keeps
   # its own site, see build_checked), and it is folded only where it cannot trap (fold_checked).
-  CHECKED_OPS = %w[cdiv crem cshl cshr].freeze
+  CHECKED_OPS = %w[cdiv crem cshl cshr wshl].freeze
   # Float operations that cannot trap (fadd and the rest; cf2i traps on NaN and on overflow, so it stays opaque).
   FLOAT_OPS = %w[fadd fsub fmul fdiv fneg fconv i2f u2f lt.f le.f].freeze
   # A float literal as printed in the IR: an integer or a decimal, with an optional exponent.
@@ -677,6 +677,7 @@ module PathbEgraph
       identities(nd, c, kids)
       checked_identities(nd, c, kids) if CHECKED_OPS.include?(nd.op)
       reassoc(nd, c, kids)
+      multiply_to_shift(nd, c, kids) if nd.op == "wmul"
     end
 
     # The value of a node whose operands are all constants, with the interpreter's semantics (canon wraps to the
@@ -746,10 +747,10 @@ module PathbEgraph
       a, b = vals
       w, signed = INT_TYPES[t]
       case nd.op
-      when "cshl", "cshr"
+      when "cshl", "cshr", "wshl"
         return nil unless b >= 0 && b < w
 
-        canon(nd.op == "cshl" ? a << b : a >> b, t)
+        canon(nd.op == "cshr" ? a >> b : a << b, t)
       when "cdiv", "crem"
         return nil if b.zero? || (signed && b == -1)
 
@@ -810,7 +811,7 @@ module PathbEgraph
 
       a, b = kids
       case nd.op
-      when "cshl", "cshr" then forward(c, a, t) if cval(b) == 0
+      when "cshl", "cshr", "wshl" then forward(c, a, t) if cval(b) == 0
       when "cdiv" then forward(c, a, t) if cval(b) == 1
       end
     end
@@ -890,7 +891,7 @@ module PathbEgraph
     # ---- memory: the slots of a block (docs/notes/pathb-egraph.md, "Memory") ---------------------------------------
 
     # Operators that read or compute but never write memory; a `let` of one of them keeps the memory state.
-    MEMORY_FREE = (PURE_OPS + %w[bitcast bfload cshl cshr cdiv crem pdiff fconv cf2i p2i i2p lt.f le.f fadd fsub fmul
+    MEMORY_FREE = (PURE_OPS + %w[bitcast bfload cshl cshr wshl cdiv crem pdiff fconv cf2i p2i i2p lt.f le.f fadd fsub fmul
                                 fdiv fneg i2f u2f]).freeze
     # Operators that read memory (a silent instruction neither reads nor writes it).
     READS_MEMORY = %w[load load.v bfload bfload.v call vaarg].freeze
@@ -1203,7 +1204,7 @@ module PathbEgraph
       bestc = [INF, nil]
       @members[c].each do |nid|
         nd = @nodes[nid]
-        next if nd.op == "opaque" || nd.op == "leaf" || CHECKED_OPS.include?(nd.op)
+        next if nd.op == "opaque" || nd.op == "leaf" || (CHECKED_OPS.include?(nd.op) && sited?(nd))
 
         total = node_cost(nd)
         nd.kids.each do |k|
@@ -1217,6 +1218,32 @@ module PathbEgraph
         bestc = [total, nid] if total < bestc[0]
       end
       @memo_best[c] = bestc
+    end
+
+    # A checked node made by build_checked carries its site (its let's register) and is never extracted: its trap stays
+    # where it was written. A site-free checked node (multiply_to_shift) has a constant count in range, so it cannot
+    # trap, and extraction may choose it.
+    def sited?(nd) = nd.args.any? { |a| a.is_a?(String) && a.start_with?("site:") }
+
+    # x * 2^k = x << k for a constant 2^k with 1 <= k <= w-2, wrapping in both. Only under the weighted cost model,
+    # where a multiply costs 3 (WEIGHTS) and a shift 1. The count is a constant of type int in range, so the new wshl
+    # cannot trap and has no site (see sited?).
+    def multiply_to_shift(nd, c, kids)
+      t = nd.ty
+      return unless @cost == :weighted && int_ty?(t) && t != "bool" && nd.args[0] == t
+
+      w, = INT_TYPES[t]
+      kids.each_with_index do |x, i|
+        v = cval(x)
+        next unless v.is_a?(Integer) && v.positive?
+
+        k = v.bit_length - 1
+        next unless v == (1 << k) && k >= 1 && k <= w - 2
+
+        n = const_class("int", k)
+        add_equal(c, hashcons("wshl", t, [t, KidRef.new(0), KidRef.new(1)], [kids[1 - i], n]))
+        return
+      end
     end
 
     # The cost of one operation (the node itself, not its operands) and of a constant, under the cost model.
