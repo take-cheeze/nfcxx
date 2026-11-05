@@ -9,7 +9,7 @@ name: Path B
 #   tests/pathb/run.sh       stage 1 IL goldens (tests/pathb/*.il)
 #   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
 #   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
-#   tests/pathb-egraph/run.sh  the e-graph pass (scripts/pathb-egraph.rb) over the goldens and cases, interpreted
+#   (tests/pathb-egraph/run.sh, the e-graph pass, runs in ci.yml so that build-and-test gates it)
 #   tests/wasm/run.sh        the wasm emitter (scripts/pathb-wasm-emit.rb): IR -> wasm, run under node, against EXPECT
 #   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
 #   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
