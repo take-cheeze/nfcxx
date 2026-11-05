@@ -1,0 +1,10 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" int) (param %1 "b" int))
+  (block
+    (let %2 int (cadd int %0 %1))
+    (let %3 int (csub int %2 %1))
+    (let %4 int (cmul int %3 (const int 3)))
+    (let %5 int (cneg int %4))
+    (return %5)))

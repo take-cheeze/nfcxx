@@ -25,6 +25,10 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
   that uses them (a phi operand in its predecessor).
 - Checked operations (`cdiv`, `crem`, `cshl`, `cshr`, `cf2i`): each check is a call `pathb_check(cond, code)` placed before
   the operation; codes 1 division by zero, 2 signed overflow, 3 shift count out of range, 4 float to integer out of range.
+  The checked add, subtract, multiply and negate (`cadd`, `csub`, `cmul`, `cneg`) check with code 2: a narrow type is
+  computed in 64 bits and range-checked; an 8-byte add or subtract uses the sign-bit identities; an 8-byte multiply divides
+  the product back by the operand (a divisor of 0 or -1 is replaced by 1, see `checked_arith_lines`), so it needs no runtime.
+  Unsigned checked forms are refused, as the flat emitter refuses them.
   The runtime must not return when `cond` is nonzero (it traps; the test driver longjmps out). No block is split. `bool`
   checked ops are not emitted.
 - Floats: `s` and `d` classes; float literals are rounded to their type and written as exact hex, so `-0.0` survives.
@@ -35,7 +39,9 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
 - `(nonnull P)` traps on a null pointer (code 5); `(bounds I N)` traps on an index outside [0, N) (code 6), with an
   unsigned comparison so a negative index is caught too.
 - Addresses: `(addr $slot)`, `(offset P K)` and `(index P I SIZE)`; a slot of an array type is allocated at its full size.
-- Not yet: aggregates passed or copied by value, and volatile accesses (`load.v`/`store.v`).
+- Volatile accesses (`load.v`/`store.v`) call the volatile helpers the module declares, as the flat emitter does.
+- Aggregates passed or returned by value are lowered when their `abi-type` has a shape the emitter knows; an unknown shape is
+  refused.
 
 A function outside the subset raises `QbeUnsupported` and nothing is emitted for it, so a module with an unsupported
 function still emits the rest.

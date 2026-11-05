@@ -44,14 +44,16 @@ def clobber_targets_int?(forms)
   end
 end
 
-def native_ok(arity, inputs, il)
+def native_ok(arity, inputs, il, ctypes = nil)
   Dir.mktmpdir("pathb-qbe") do |dir|
     qbe_file = File.join(dir, "case.qbe")
     File.write(qbe_file, il)
     asm, err, st = Open3.capture3(QBE, qbe_file)
     return [:fail, "qbe: #{err.lines.first}"] unless st.success?
 
-    params = Array.new(arity) { |i| "int a#{i}" }.join(", ")
+    # the parameters' C types: each is int unless the case says otherwise (long for the 64-bit cases)
+    ctypes ||= Array.new(arity, "int")
+    params = Array.new(arity) { |i| "#{ctypes[i]} a#{i}" }.join(", ")
     # Each input runs under setjmp: the emitted code calls pathb_check(cond, code), which longjmps out with the code
     # when cond is nonzero, and that input prints "trap" (the interpreter's answer for it).
     calls = inputs.map do |args|
@@ -89,6 +91,8 @@ files.sort.each do |f|
   begin
     install_module(forms)
     arity = main.find { |x| head(x) == "params" }.size - 1
+    # the C type of each parameter: long or int (the cases with a 64-bit parameter)
+    ctypes = main.find { |x| head(x) == "params" }.drop(1).map { |p| p[3] == "long" ? "long" : "int" }
     lines = File.readlines(args_file).map(&:strip).reject(&:empty?)
     inputs = lines.map { |l| l.split("=>").first.split.map { |t| Integer(t, 10) } }
     # The `=> value` on each line: the expected answer, used where the interpreter does not model the function.
@@ -121,7 +125,7 @@ files.sort.each do |f|
     opt_text, = PathbEgraph.optimize_module(ssa)
     optimized = read_forms(opt_text).reject { |g| head(g) == "global" }
     il = Qbe.module_il(optimized + globals).sub("$main(", "$case_main(")
-    status, got = native_ok(arity, keep.map(&:first), il)
+    status, got = native_ok(arity, keep.map(&:first), il, ctypes)
     if status == :fail
       totals[:skipped_or_failed] += 1
       puts "SKIP #{File.basename(f)}: #{got}"
