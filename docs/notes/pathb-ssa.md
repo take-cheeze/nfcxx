@@ -47,6 +47,12 @@ with a switch (`_Z8classifyi`, `_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg`,
 
 ## Not done
 
+- Control flow: `pathb-egraph.rb --dispatch` (`PathbEgraph.dispatch_structurize`) turns any function into one loop: a
+  dispatch block switches on a state slot to the block to run, every edge goes through a block that sets the state and
+  returns to the dispatch, and every register that crosses blocks, and every phi, is a slot. The result is valid SSA with
+  no phis, and it runs the same as the input (the goldens and the cases compare them). A function with an aggregate
+  value that crosses blocks is left as it is (its slot needs the struct layout). A relooper, which would give nested if
+  and loop structure, is not done.
 - Only the opt-in SSA-to-QBE build reads the SSA (`scripts/pathb-ssa-qbe.rb`, via `scripts/pathb-ssa-build`). The flat QBE
   emitter (`scripts/pathb-qbe-emit.rb`) relies on QBE's own promotion, so its output does not change. PTX, WebAssembly and
   WGSL emitters need structured control flow; they need a structurizer first.
