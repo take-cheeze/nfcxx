@@ -1,0 +1,12 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" int))
+  (slot "x" int 4 4)
+  (let %1 (ptr int) (offset $"x" 0))
+  (store int %1 %0)
+  (eval (call void &"clobber" (addr $"x")))
+  (block
+    (let %2 (ptr int) (offset $"x" 0))
+    (let %3 int (load int %2))
+    (return %3)))

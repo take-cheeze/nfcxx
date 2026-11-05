@@ -150,8 +150,17 @@ checked.
 ## Memory
 
 The slots of a block (`$"x"`, the objects that `pathb-ssa.rb` keeps in memory) are tracked in program order within
-the block. The state is a map from a slot to the value it holds here: its type and its class (or unknown). It starts
-empty at every block, so nothing is carried into another block.
+the block. The state is a map from a location to the value it holds here: its type and its class (or unknown). A
+location is a slot at a known byte offset: the slot itself, or a derived address (`(offset P K)`, `(index P I SIZE)` with
+a constant index, `(bitcast T P)`) of it. A block with one predecessor starts with the state the predecessor ends with;
+a block with several starts empty.
+
+**Escape analysis** (`analyze_addresses`). A slot escapes when its address, or a derived address, is used other than as
+the address of a load or store, as the base of a derivation, or as a nonnull check: an argument of a call, a stored
+value, a return value, a phi operand. A function that calls `setjmp` makes every slot escape. Only an escaping slot can be
+written through a pointer or by a call, so calls and unknown writes forget only the escaping slots: a local whose address
+never escapes keeps its remembered values across them. A store through a derived address of a slot forgets the other
+locations of that slot (they may overlap), and an index that is not constant forgets the whole slot and records nothing.
 
 - **Loads.** `(load T $"x")` with a remembered value of type `T` is the same value: the load shares the class and
   no `let` is emitted for it (its uses get the register of the first load or of the stored value). Otherwise the
@@ -285,6 +294,8 @@ relations, so the uses that remain stay dominated.
   No partial redundancy elimination.
 - **Memory within a block.** Loads and stores of a slot are merged and forwarded in program order (see Memory above).
   Stores, calls and volatile accesses are never moved or merged.
+- **Memory at merge points.** A block with several predecessors starts with nothing known. Keeping the values that every
+  predecessor agrees on (the same register) would forward across joins; not done.
 - **Constants.** Integer literals, decimal or hexadecimal (`0x` or `0X`, with an optional sign), are constants in the
   e-graph (`const_value`). Only constants and registers replaced by a dominator reach a block.
 - **Memory across blocks.** The memory state starts empty in every block, so a value stored in a dominating block is
