@@ -656,7 +656,8 @@ def static_contents(mod, o)
       ty = parse_type(it[2])
       target = it[3]
       add = as_int(it[4].to_s)
-      raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
+      # a pointer, or an integer as wide as one (a vtable's offset entries hold an address as a long)
+      raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" unless ty[0] == "ptr" || (ty[0] == "int" && ty[1] == $ptr_bytes)
       raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
       if target.sig != "&" && mod.static_obj(target.name).tls
         raise Refused, "address of the thread-local #{target.name} in static data (not lowered)"
@@ -932,6 +933,12 @@ class Fn
       @atom_b = @next_local + 1
       @local_types << :i32 << :i32
       @next_local += 2
+    end
+    if uses_bitfield?(@form)
+      # an i32 scratch for the address of a bit-field's storage unit (see bfload, bfstore)
+      @bf_addr = @next_local
+      @local_types << :i32
+      @next_local += 1
     end
     @body = body_forms
     @body.each { |s| collect_lets(s) }
@@ -1536,6 +1543,8 @@ class Fn
       wtype($scalars["long"])
     when "call"
       call(x)
+    when "bfload", "bfload.v"
+      bfload(x)
     when "unsupported"
       raise Refused, unsupported_text(x)
     else
@@ -1625,6 +1634,58 @@ class Fn
           end
     e(0x10); leb_u(idx)
     wtype(ret)
+  end
+
+  # ---- bit-fields. A bit-field lives in a storage unit of 1, 2, 4 or 8 bytes at ADDR: bit BOFF of the unit, WIDTH bits. The
+  # arithmetic is on the unit as an i64: loaded zero-extended, masked, and stored back at its own size.
+  def uses_bitfield?(x)
+    return false unless x.is_a?(Array)
+    return true if %w[bfload bfload.v bfstore bfstore.v].include?(head_of(x))
+    x.any? { |y| uses_bitfield?(y) }
+  end
+
+  def load_u64_op(size)
+    { 1 => 0x31, 2 => 0x33, 4 => 0x35, 8 => 0x29 }.fetch(size) { raise Refused, "bit-field unit of #{size} bytes" }
+  end
+
+  def store_u64_op(size)
+    { 1 => 0x3c, 2 => 0x3d, 4 => 0x3e, 8 => 0x37 }.fetch(size) { raise Refused, "bit-field unit of #{size} bytes" }
+  end
+
+  # (bfload T UNIT ADDR BOFF WIDTH): the bits, as T (sign-extended from WIDTH when T is signed)
+  def bfload(x)
+    ty = parse_type(x[1])
+    size = as_int(x[2].to_s)
+    addr, boff, width = x[3], as_int(x[4].to_s), as_int(x[5].to_s)
+    push_addr(addr)
+    e(0x21); leb_u(@bf_addr)
+    e(0x20); leb_u(@bf_addr); e(load_u64_op(size)); memarg
+    e(0x42); leb_s(boff); e(0x88)                         # i64.shr_u
+    e(0x42); leb_s(signed64((1 << width) - 1)); e(0x83)   # i64.and the mask
+    if ty[2] && width < 64
+      e(0x42); leb_s(64 - width); e(0x86)                 # i64.shl
+      e(0x42); leb_s(64 - width); e(0x87)                 # i64.shr_s: sign-extend
+    end
+    e(0xa7) if wtype(ty) == :i32                         # i32.wrap_i64
+    wtype(ty)
+  end
+
+  # (bfstore T UNIT ADDR BOFF WIDTH VALUE): the unit with its WIDTH bits at BOFF replaced by VALUE's, stored back
+  def bfstore(s)
+    size = as_int(s[2].to_s)
+    addr, boff, width, val = s[3], as_int(s[4].to_s), as_int(s[5].to_s), s[6]
+    mask = (1 << width) - 1
+    push_addr(addr)
+    e(0x21); leb_u(@bf_addr)
+    e(0x20); leb_u(@bf_addr)                             # the address the unit is stored at
+    e(0x20); leb_u(@bf_addr); e(load_u64_op(size)); memarg
+    e(0x42); leb_s(signed64(~(mask << boff))); e(0x83)    # i64.and: the unit without the field
+    w = push_op(val)
+    e(0xad) if w == :i32                                 # i64.extend_i32_u
+    e(0x42); leb_s(signed64(mask)); e(0x83)               # i64.and: the field's value
+    e(0x42); leb_s(boff); e(0x86)                         # i64.shl
+    e(0x84)                                              # i64.or
+    e(store_u64_op(size)); memarg
   end
 
   # An atomic builtin: [kind, operation, size] for NAME (a fence has no size), or nil.
@@ -1833,6 +1894,8 @@ class Fn
       push_op(s[1])
       e($ptr_bytes == 8 ? 0x50 : 0x45)     # i64.eqz (i32.eqz under ILP32)
       e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
+    when "bfstore", "bfstore.v"
+      bfstore(s)
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. The index is compared as unsigned, so a negative one traps too.
       raise Refused, "bounds with a run-time limit" if s[2].is_a?(String) && s[2][0] == "%"
