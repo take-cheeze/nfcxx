@@ -264,10 +264,11 @@ module PathbEgraph
     end
   end
 
-  # Runs `main`-like function fn on integer arguments in the interpreter; returns the value or "trap".
-  def self.run(efn, args)
+  # Runs `main`-like function fn on integer arguments in the interpreter; returns the value or "trap". budget: nil, or
+  # the step budget of the run (Machine#initialize); a run over it raises StepLimit (an Unsupported).
+  def self.run(efn, args, budget: nil)
     fn = Fn.new(efn.name, efn.ret, efn.params, efn.header, [])
-    CheckedMachine.new(fn, args).run_ssa(efn.blocks)
+    CheckedMachine.new(fn, args, nil, budget: budget).run_ssa(efn.blocks)
   rescue Trap
     "trap"
   end

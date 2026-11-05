@@ -13,7 +13,6 @@
 #
 # Exit status 1 on any failure.
 
-require 'timeout'
 require_relative '../../scripts/pathb-egraph'
 
 # Converted SSA text of every function of an IR file that pathb-ssa.rb converts (a function the converter cannot
@@ -42,19 +41,24 @@ def constant_branches(efn)
   end
 end
 
-# A run of the interpreter that takes longer than this is skipped (a golden loop can run for a long time on random input,
-# and each such run used to cost the full limit).
-INTERP_TIMEOUT = 0.25
+# A run of the interpreter that takes more steps than this is skipped (a golden loop can run for a long time on random
+# input). The budget counts steps of the interpreter (one per block entered and per instruction executed, see
+# Machine#initialize), not seconds, so a run is skipped or checked the same way on every machine. Measured on the
+# goldens (tests/pathb-ir/*.ir, every probe and random run of both sides): no run that finishes takes more than 2189
+# steps. The runs over 100000 steps all stop at a construct the interpreter does not model, after 1M or more steps.
+# 100000 is about 46 times the largest finished run and about what 0.25 s cost on the machine that measured it.
+INTERP_STEP_BUDGET = 100_000
 
 # Runs a golden function in the interpreter (when it models it: integer code without calls or pointers) on 5 random
-# inputs, original against optimized. A function the interpreter cannot run, or that runs too long, is skipped.
+# inputs, original against optimized. A function the interpreter cannot run, or that runs over the step budget, is
+# skipped.
 def diff_random(orig, opt, totals, failures, text)
   arity = orig.params[1..].size
   rng = Random.new(7)
   probe = Array.new(arity, 0)
   begin
-    Timeout.timeout(INTERP_TIMEOUT) { PathbEgraph.run(orig, probe) }
-  rescue Unsupported, Timeout::Error
+    PathbEgraph.run(orig, probe, budget: INTERP_STEP_BUDGET)
+  rescue Unsupported
     totals[:interp_unsupported] += 1
     return
   end
@@ -64,8 +68,8 @@ def diff_random(orig, opt, totals, failures, text)
     a = interpret_timed(orig, args)
     b = interpret_timed(opt, args)
     totals[:interp_runs] += 1
-    # a run that did not finish in time on either side has no value to compare: it is skipped, not a mismatch
-    # (the two sides take different time on the same input, so one can time out while the other returns)
+    # a run that is over the step budget on either side has no value to compare: it is skipped, not a mismatch
+    # (the two sides take different numbers of steps on the same input, so one can run over while the other returns)
     if a.first == :skip || b.first == :skip
       totals[:interp_timed_out] += 1
       next
@@ -74,10 +78,12 @@ def diff_random(orig, opt, totals, failures, text)
   end
 end
 
-# [:value, the result as a string] when the run finishes, [:skip, the reason] when it cannot be modelled or runs too long
+# [:value, the result as a string] when the run finishes, [:skip, the reason] when it cannot be modelled or runs over
+# the step budget (reason StepLimit)
 def interpret_timed(efn, args)
-  [:value, Timeout.timeout(INTERP_TIMEOUT) { PathbEgraph.run(efn, args).to_s }]
-rescue Unsupported, Timeout::Error => e
+  [:value, PathbEgraph.run(efn, args, budget: INTERP_STEP_BUDGET).to_s]
+rescue Unsupported => e
+  warn "step budget: #{e.message}" if ENV["CHECK_DEBUG"] && e.is_a?(StepLimit)
   [:skip, e.class.name]
 end
 

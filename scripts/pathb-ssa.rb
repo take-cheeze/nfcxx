@@ -26,6 +26,9 @@ Fn = Struct.new(:name, :ret, :params, :slots, :body, :attrs)
 Blk = Struct.new(:instrs, :term, :loc)  # loc: the (loc FILE LINE) statement the block's last instruction was given under
 Phi = Struct.new(:var, :name, :type, :inc)
 Unsupported = Class.new(StandardError)
+# A run that takes more steps than its budget (Machine#initialize). An Unsupported, so a caller that does not budget
+# a run sees the same outcome as for any other run it cannot model.
+StepLimit = Class.new(Unsupported)
 Fail = Class.new(StandardError)
 Trap = Class.new(StandardError)
 # A longjmp: the jump buffer's address and the value. The frame that holds the matching _setjmp resumes there.
@@ -874,10 +877,13 @@ class Machine
           "lt.f" => :<, "le.f" => :<= }.freeze
   FBIN = { "fadd" => :+, "fsub" => :-, "fmul" => :*, "fdiv" => :/ }.freeze
 
-  def initialize(fn, args, heap = nil)
+  # budget: nil, or the number of steps a run may take (one per block entered and one per instruction executed, all
+  # frames of the run together). Exceeding it raises StepLimit. Steps are counted in the heap, which the frames of a
+  # run share, so the count depends only on the program and its input, never on the machine's speed.
+  def initialize(fn, args, heap = nil, budget: nil)
     @env = {}
     @jmps = {}      # the _setjmp sites of this frame: jump buffer address => where to resume
-    @heap = heap || { cells: {}, next: 4096, depth: 0 }
+    @heap = heap || { cells: {}, next: 4096, depth: 0, steps: 0, budget: budget }
     @cells = @heap[:cells]  # address => [type, value]: a scalar object at an address (no byte-level aliasing)
     GLOBAL_TABLE.init.each { |a, t, v| @cells[a] = [t, v] } unless heap
     @addr = {}      # slot key => address of the slot's object
@@ -907,12 +913,14 @@ class Machine
       raise Unsupported, "step limit" if (steps += 1) > 1_000_000
 
       blk = out.fetch(b)
+      tick
       # A resumed block (start > 0) has its phis already evaluated; they are not evaluated again.
       blk[:phis].map { |ph| [ph.name, val(ph.inc.fetch(prev))] }.each { |n, v| @env[n] = v } if start.zero?
       begin
         idx = start
         while idx < blk[:instrs].size
           ins = blk[:instrs][idx]
+          tick
           if setjmp_site?(ins)
             @jmps[addr_of(ins[3][3])] = { name: ins[1], block: b, index: idx + 1 }
             @env[ins[1]] = 0
@@ -951,6 +959,13 @@ class Machine
   private
 
   def exec_list(stmts) = stmts.each { |s| exec(s) }
+
+  # Counts one step of the run's budget (see initialize).
+  def tick
+    h = @heap
+    h[:steps] += 1
+    raise StepLimit, "step budget #{h[:budget]} exhausted" if h[:budget] && h[:steps] > h[:budget]
+  end
 
   # The call of a _setjmp: `(let R int (call int &"_setjmp" BUF))`.
   def setjmp_site?(ins)
