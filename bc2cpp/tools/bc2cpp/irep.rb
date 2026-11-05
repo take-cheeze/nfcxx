@@ -12,9 +12,55 @@ require_relative 'bytecode_ir_containers'
 
 MRBC = ENV['MRBC'] || 'mrbc'
 
-Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file,
-                   :catch_handlers, keyword_init: true) do
+# The Struct-style surface of a record class: the members named by its MEMBERS constant, construction from one Hash of
+# them, [] / []=, members, to_h, and ==, eql?, hash and inspect over the members. A record keeps ivars beyond its members
+# (cached or deferred state), which mruby does not allow on a Struct instance, so the record classes are plain classes.
+module MemberRecord
+  def initialize(fields = {})
+    unknown = fields.keys - self.class::MEMBERS
+    raise ArgumentError, "bc2cpp: unknown #{self.class} member #{unknown.first.inspect}" unless unknown.empty?
+
+    self.class::MEMBERS.each { |key| public_send(:"#{key}=", fields[key]) }
+  end
+
+  def [](key)
+    raise NameError, "bc2cpp: no #{self.class} member #{key.inspect}" unless self.class::MEMBERS.include?(key)
+
+    public_send(key)
+  end
+
+  def []=(key, value)
+    raise NameError, "bc2cpp: no #{self.class} member #{key.inspect}" unless self.class::MEMBERS.include?(key)
+
+    public_send(:"#{key}=", value)
+  end
+
+  def members = self.class::MEMBERS
+
+  def to_h = members.to_h { |key| [key, self[key]] }
+
+  def ==(other)
+    other.instance_of?(self.class) && members.all? { |key| self[key] == other[key] }
+  end
+
+  def eql?(other)
+    other.instance_of?(self.class) && members.all? { |key| self[key].eql?(other[key]) }
+  end
+
+  def hash = [self.class, members.map { |key| self[key] }].hash
+
+  def inspect
+    "#<#{self.class} #{members.map { |key| "#{key}=#{self[key].inspect}" }.join(', ')}>"
+  end
+end
+
+class Irep
+  include MemberRecord
   include IrepScans
+
+  MEMBERS = %i[label nlocals nregs pool syms reps lv instructions file catch_handlers].freeze
+
+  attr_accessor(*MEMBERS)
 
   # A digest of the irep's own code (its locals, registers, pool, symbols and instructions), not its label or its
   # children. mrbc compiles one method to the same code in every compile unit, so (digest, send address) names one
@@ -96,28 +142,29 @@ end
 # One decoded instruction. `args` is the disassembly's operand text, kept only
 # for diagnostics and comments; every pass reads the typed operands through
 # InsnOperands (see OperandSchema).
-Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_init: true) do
+# One decoded instruction (Symbol +op+). A plain class rather than a Struct: under mruby a Struct instance cannot hold
+# instance variables, and the typed operands and deferred disassembly live in ivars. The members keep the Struct's
+# names and its [] / []= / to_h / members / == surface.
+class Insn
   include InsnOperands
+  include MemberRecord
+
+  MEMBERS = %i[lineno addr op args raw frozen_literal].freeze
+
+  attr_accessor :lineno, :addr, :frozen_literal
 
   # Hand-built test insns pass String ops; normalize to Symbol so every
   # consumer sees one type. Decoded insns already carry Symbols.
   def op=(name)
-    self[:op] = name.is_a?(String) ? name.intern : name
+    @op = name.is_a?(String) ? name.intern : name
   end
 
-  def initialize(lineno: nil, addr: nil, op: nil, args: nil, raw: nil, frozen_literal: nil, **rest)
-    super(lineno: lineno, addr: addr, op: op.is_a?(String) ? op.intern : op, args: args, raw: raw,
-          frozen_literal: frozen_literal, **rest)
-  end
+  attr_reader :op
 
-  # A decoded instruction (Symbol +op+), built without the keyword Hashes #initialize takes.
+  # A decoded instruction (Symbol +op+). Built through the constructor: under mruby, allocate leaves a Struct without its
+  # members, so the fields are set by initialize.
   def self.decoded(lineno, addr, op, frozen_literal)
-    insn = allocate
-    insn[:lineno] = lineno
-    insn[:addr] = addr
-    insn[:op] = op
-    insn[:frozen_literal] = frozen_literal
-    insn
+    new(lineno: lineno, addr: addr, op: op, frozen_literal: frozen_literal)
   end
 
   def defer_disassembly(decoder, name, values, next_pc)
@@ -129,22 +176,22 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_ini
 
   def args
     materialize_disassembly
-    self[:args]
+    @args
   end
 
   def raw
     materialize_disassembly
-    self[:raw]
+    @raw
   end
 
   def args=(text)
     materialize_disassembly
-    self[:args] = text
+    @args = text
   end
 
   def raw=(text)
     materialize_disassembly
-    self[:raw] = text
+    @raw = text
   end
 
   def freeze
@@ -157,7 +204,7 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_ini
   def materialize_disassembly
     return unless @disassembly_decoder
 
-    self[:args], self[:raw] = @disassembly_decoder.disassembly(self, @disassembly_name, @disassembly_values, @disassembly_next_pc)
+    @args, @raw = @disassembly_decoder.disassembly(self, @disassembly_name, @disassembly_values, @disassembly_next_pc)
     @disassembly_decoder = @disassembly_name = @disassembly_values = @disassembly_next_pc = nil
   end
 
