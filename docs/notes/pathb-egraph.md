@@ -285,8 +285,8 @@ relations, so the uses that remain stay dominated.
   No partial redundancy elimination.
 - **Memory within a block.** Loads and stores of a slot are merged and forwarded in program order (see Memory above).
   Stores, calls and volatile accesses are never moved or merged.
-- **Constants.** Only decimal literals are constants in the e-graph (`const_value`), so a hex literal such as `0x1` is
-  opaque. Only constants and registers replaced by a dominator reach a block.
+- **Constants.** Integer literals, decimal or hexadecimal (`0x` or `0X`, with an optional sign), are constants in the
+  e-graph (`const_value`). Only constants and registers replaced by a dominator reach a block.
 - **Memory across blocks.** The memory state starts empty in every block, so a value stored in a dominating block is
   not forwarded, and loads through pointers (other than slots) are never merged. Address-taking forms clear the state
   even though a pure address computation writes nothing; a finer rule would need the escape set of the function.
