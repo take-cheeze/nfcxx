@@ -44,6 +44,10 @@ def clobber_targets_int?(forms)
   end
 end
 
+# The C type of each IR scalar that a case's parameter may have (see main's ctypes in the case loop).
+C_TYPES = { "long" => "long", "long_long" => "long long", "unsigned_long" => "unsigned long",
+            "unsigned_int" => "unsigned int", "int" => "int" }.freeze
+
 def native_ok(arity, inputs, il, ctypes = nil)
   Dir.mktmpdir("pathb-qbe") do |dir|
     qbe_file = File.join(dir, "case.qbe")
@@ -91,8 +95,8 @@ files.sort.each do |f|
   begin
     install_module(forms)
     arity = main.find { |x| head(x) == "params" }.size - 1
-    # the C type of each parameter: long or int (the cases with a 64-bit parameter)
-    ctypes = main.find { |x| head(x) == "params" }.drop(1).map { |p| p[3] == "long" ? "long" : "int" }
+    # the C type of each parameter (the 64-bit and unsigned cases need theirs; anything else is int)
+    ctypes = main.find { |x| head(x) == "params" }.drop(1).map { |p| C_TYPES.fetch(p[3], "int") }
     lines = File.readlines(args_file).map(&:strip).reject(&:empty?)
     inputs = lines.map { |l| l.split("=>").first.split.map { |t| Integer(t, 10) } }
     # The `=> value` on each line: the expected answer, used where the interpreter does not model the function.

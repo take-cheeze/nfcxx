@@ -1,0 +1,10 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" unsigned_int) (param %1 "b" unsigned_int))
+  (block
+    (let %2 unsigned_int (cadd unsigned_int %0 %1))
+    (let %3 unsigned_int (csub unsigned_int %2 %1))
+    (let %4 unsigned_int (cmul unsigned_int %3 (const unsigned_int 3)))
+    (let %5 int (iconv int %4))
+    (return %5)))
