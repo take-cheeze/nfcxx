@@ -175,8 +175,6 @@ jobs:
               tests/wasm/run.sh
           - name: Path B stage 3 (IR to QBE translation validation)
             run: tests/pathb-qbe/run.sh
-          - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
-            run: tests/pathb-egraph/run.sh
           - name: Hosted Path B (NFCXX_PATH=b)
             run: tests/pathb-qbe/hosted.sh
           - name: C++11 and C++14 language feature probes (Path B)

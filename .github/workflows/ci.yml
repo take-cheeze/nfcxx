@@ -168,6 +168,11 @@ jobs:
             run: |
               tests/asan/run.sh
               ASAN_BACKEND=qbe tests/asan/run.sh
+          # Moved here from pathb.yml so that build-and-test gates it. The Path B harness comes from the cache that pathb.yml
+          # saves (same key), and is built here on a miss.
+          - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
+            pathb: true
+            run: tests/pathb-egraph/run.sh
     name: ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -271,6 +276,24 @@ jobs:
         with:
           path: build/test-bin
           key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+
+      # The Path B harness (scripts/setup-pathb.sh), keyed as pathb.yml keys it: its inputs are be/ and the script, and the EDG revision.
+      - name: Path B harness cache key
+        if: matrix.pathb
+        id: pathb-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        if: matrix.pathb
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: matrix.pathb && steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
 
       - name: .NET 8 SDK (the CIL backend's test programs run with dotnet)
         if: matrix.dotnet
