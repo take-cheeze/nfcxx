@@ -49,7 +49,7 @@ module RiteBinary
 
     def unpack_at(len, format)
       check(len)
-      value = @bytes.unpack1(format, offset: @pos)
+      value = @bytes.byteslice(@pos, len).unpack1(format)
       @pos += len
       value
     end
