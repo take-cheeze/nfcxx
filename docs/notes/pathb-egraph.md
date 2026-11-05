@@ -183,7 +183,9 @@ the slot's address and the volatile forms, which `pathb-ssa.rb`'s interpreter do
 
 ## Extraction
 
-The cost of a class is the smallest over its nodes of `1 + the costs of the operands`; a constant costs 0; a value
+The cost of a class is the smallest over its nodes of `the node's cost + the costs of the operands` (the node's cost is 1
+under the node-count model, see Cost model below); a constant costs 0 (1 under `weighted` when it does not fit an
+immediate); a value
 already in a register available here costs 0; an opaque value that is not bound yet is unavailable (infinite). Ties
 go to the node created first, which is the input form (rewritten forms come later), so an unchanged computation
 stays unchanged. The costs are computed for each `let` from the bindings at that point, so the choice never names an
@@ -299,6 +301,12 @@ relations, so the uses that remain stay dominated.
 - **Cost ties.** Extraction is by node count with ties going to the input form, and a bound register costs 0. So a
   reassociation that makes a `let` redundant does not replace a value that is already emitted: in
   `tests/pathb-egraph/cases/div_const.ir` the sum `((-6 + a) + 2147483647)` keeps two lets, not one.
-- **Cost model.** Node count only. No latency, register pressure or size of constants.
+- **Cost model.** Two models, chosen by `--cost` (`PathbEgraph.optimize_fn(cost:)`). `nodes` (the default) is the node
+  count above. `weighted` charges a multiply 3, a float multiply 3 and a float divide 8, and a constant that does not fit
+  a 12-bit immediate 1 (a constant that fits costs 0). Neither models latency or register pressure. A choice changes only
+  where equal forms with different weights are in the graph: the rules in this pass add equal forms for identities and
+  folds, but not yet a multiply-to-shift or a multiply-to-add rewrite, so the two models pick the same forms on the
+  current goldens and cases. `tests/pathb-egraph/check.rb` runs the weighted model on every case and checks its results
+  against the original, and verifies its output on every golden.
 - **No consumer.** The QBE, PTX, WebAssembly and WGSL emitters do not read this output yet (the same state as
   `pathb-ssa.rb`'s output).
