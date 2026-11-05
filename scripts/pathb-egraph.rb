@@ -495,9 +495,9 @@ module PathbEgraph
     def const_value(t, rv)
       return nil unless rv.is_a?(Array)
 
-      if rv[0] == "const" && rv.size == 3 && rv[1] == t && rv[2].is_a?(String) && rv[2].match?(/\A-?\d+\z/) &&
-         (int_ty?(t) || ptr_ty?(t))
-        [t, canon(rv[2].to_i, t)]
+      if rv[0] == "const" && rv.size == 3 && rv[1] == t && rv[2].is_a?(String) && (int_ty?(t) || ptr_ty?(t)) &&
+         (v = literal_int(rv[2]))
+        [t, canon(v, t)]
       elsif rv[0] == "const" && rv.size == 3 && rv[1] == t && float_type?(t) && rv[2].is_a?(String) &&
             rv[2].match?(FLOAT_LIT)
         v = round_float(Float(rv[2]), t)
