@@ -1503,6 +1503,42 @@ module PathbEgraph
       changed
     end
   end
+  # ---- block chains ----------------------------------------------------------------------------------------------
+  # A block whose only successor is a block that has no other predecessor and no phis is merged with it: the two are
+  # one block, the one the dispatch loop runs without a transition between them. The entry (block 0) is never merged
+  # into another block. Mutates fn.blocks and returns the function.
+  def self.merge_chains(fn)
+    blocks = fn.blocks
+    succs = lambda do |t|
+      case t[0]
+      when "br" then [t[1]]
+      when "condbr" then [t[2], t[3]]
+      when "switch" then t[2].map { |_, x| x } + [t[3]]
+      else []
+      end
+    end
+    loop do
+      preds = Hash.new { |h, k| h[k] = [] }
+      blocks.each { |id, b| succs.call(b[:term]).uniq.each { |s| preds[s] << id } }
+      merged = blocks.keys.sort.any? do |a|
+        term = blocks[a][:term]
+        next false unless term[0] == "br"
+        b = term[1]
+        next false if b == a || b == 0 || preds[b] != [a] || !blocks[b][:phis].empty?
+
+        blocks[a][:instrs] += blocks[b][:instrs]
+        blocks[a][:term] = blocks[b][:term]
+        blocks.each_value do |sb|
+          sb[:phis].each { |ph| ph.inc[a] = ph.inc.delete(b) if ph.inc.key?(b) }
+        end
+        blocks.delete(b)
+        true
+      end
+      break unless merged
+    end
+    fn
+  end
+
   # ---- the dispatch loop -----------------------------------------------------------------------------------------
   # The function as one loop. A dispatch block switches on a state slot to the block to run, and every edge goes through
   # a block that sets the state and returns to the dispatch (the unreachable block is the switch's default). A register
@@ -1539,6 +1575,9 @@ module PathbEgraph
     demoted = {}
     defs.each_key { |r| demoted[r] = true if phi_names.include?(r) || uses[r].any? { |u| u != defs[r] } }
     demoted.each_key { |r| dispatch_size(types[r]) }   # raises Unsupported for an aggregate
+    # every register, not only the crossing ones: the emitter takes scalars only, so an aggregate value (a struct
+    # local, which block merging can leave inside one block) refuses the function as before
+    types.each_value { |t| dispatch_size(t) }
 
     slot = ->(r) { "__dsp#{r[1..]}" }                     # the slot of register r
     slot_ref = ->(r) { "$\"#{slot.call(r)}\"" }
@@ -1679,12 +1718,42 @@ module PathbEgraph
       [F("(case (const int #{id}))"), *b[:instrs], *term.call(b[:term], sel_type)]
     end
     arms << F("(default)") << ["unreachable"]
-    header = dfn.header.reject { |x| %w[ssa-promoted ssa-function ret params].include?(head(x)) }
-    ["function", dfn.name, dfn.ret, dfn.params, *header,
-     ["block", F("(store int #{state} (const int 0))"),
-      ["loop", ["body", F("(let %dstate int (load int #{state}))"),
-                ["switch", "%dstate", ["body", ["block", *arms]]]],
-       ["step"]]]]
+    # The slots of the dispatch form (the registers that cross blocks, and the state) are locals of the function: a
+    # slot's stores and loads are sets and reads of its local. That is the same value (each register is defined before
+    # its uses, so a load reads the last store on every path), without the memory traffic of a frame in the memory, which
+    # made the form several times slower than the flat IR. The locals are declared before the loop, as lets.
+    locals = {}     # the slot's reference (a $"name" form) => the local's name
+    dispatch_slots = []   # the raw names of the dispatch slots (the function's own slots stay)
+    decls = []
+    dfn.header.each do |x|
+      next unless head(x) == "slot" && x[1].raw.start_with?('"__dsp')   # the dispatch's slots, not the function's own
+
+      name = x[1].raw[1..-2]                          # the name without its quotes
+      dispatch_slots << x[1].raw
+      reg = "%sl#{name[1..]}"                         # __dsp0 => %sl_dsp0
+      locals[F("$\"#{name}\"")] = reg
+      zero = head(x[2]) == "ptr" ? F("(null)") : F("(const #{sx(x[2])} 0)")
+      decls << ["let", reg, x[2], zero]
+    end
+    local_rewrite = lambda do |x|
+      return x unless x.is_a?(Array)
+      if head(x) == "load" && x.length == 3 && locals.key?(x[2])
+        locals[x[2]]
+      elsif head(x) == "store" && x.length == 4 && locals.key?(x[2])
+        ["set", locals[x[2]], local_rewrite.call(x[3])]
+      else
+        x.map { |y| local_rewrite.call(y) }
+      end
+    end
+    header = dfn.header.reject do |x|
+      %w[ssa-promoted ssa-function ret params].include?(head(x)) || (head(x) == "slot" && dispatch_slots.include?(x[1].raw))
+    end
+    state_local = locals.fetch(F("$\"__dsp_state\""))
+    body = ["block", *decls, F("(set #{state_local} (const int 0))"),
+            ["loop", ["body", F("(let %dstate int #{state_local})"),
+                      ["switch", "%dstate", ["body", ["block", *arms]]]],
+             ["step"]]]
+    ["function", dfn.name, dfn.ret, dfn.params, *header, local_rewrite.call(body)]
   end
 
   # The registers named in x (strings that start with %).
