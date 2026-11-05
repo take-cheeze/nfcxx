@@ -894,7 +894,7 @@ class Fn
     when "cdiv", "crem"
       ty = parse_type(x[1])
       checked_div(h, ty, x[2], x[3])
-    when "cshl", "cshr"
+    when "cshl", "cshr", "wshl"
       ty = parse_type(x[1])
       checked_shift(h, ty, x[2], x[3])
     when "and", "or", "xor"
@@ -999,7 +999,7 @@ class Fn
     trap(2)
     @ind -= 1
     emit("}")
-    canon("(#{a} #{h == 'cshl' ? '<<' : '>>'} #{cb})", ty)
+    canon("(#{a} #{h == 'cshr' ? '>>' : '<<'} #{cb})", ty)
   end
 
   # iconv: integer to integer, with sign- or zero-extension from the source and truncation to the target

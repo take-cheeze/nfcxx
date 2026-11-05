@@ -13,6 +13,7 @@
 require "open3"
 require "tmpdir"
 require_relative "pathb-egraph"
+require_relative "pathb-structure"
 
 text = ARGV.empty? ? $stdin.read : File.read(ARGV[0])
 forms = read_forms(text)
@@ -30,10 +31,16 @@ read_forms(ssa_text).each do |form|
 
   begin
     out, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(form))
-    dispatch = PathbEgraph.dispatch_structurize(PathbEgraph.merge_chains(out))
-    next unless dispatch
+    out = PathbEgraph.merge_chains(out)
+    # the structured form (labelled blocks and loops, scripts/pathb-structure.rb); a function it does not take is
+    # lowered from the dispatch loop, which takes any reducible graph. NFCXX_STRUCTURE=0 always takes the dispatch loop.
+    flat = PathbStructure.structure(out) if ENV["NFCXX_STRUCTURE"] != "0"
+    unless flat
+      dispatch = PathbEgraph.dispatch_structurize(out)
+      next unless dispatch
 
-    flat = PathbEgraph.flat_from_dispatch(dispatch)
+      flat = PathbEgraph.flat_from_dispatch(dispatch)
+    end
     optimized[form[1]] = flat if flat
   rescue Fail, Unsupported => e
     warn "pathb-flat-opt: #{form[1]} keeps its flat IR (#{e.message})"
