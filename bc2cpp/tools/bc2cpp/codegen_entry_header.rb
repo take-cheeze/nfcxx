@@ -57,6 +57,7 @@ module EntryHeader
     #ifndef BC2CPP_ENTRY_SUPPORT
     #define BC2CPP_ENTRY_SUPPORT 1
     #include <mruby/class.h>
+    #include <mruby/data.h>
     #include <mruby/error.h>
     #include <mruby/variable.h>
     // The class at `path` ("A::B"), or NULL when a segment is not a defined class or module. No raise.
@@ -169,6 +170,18 @@ class CodeGen
     end
 
     args = Array.new(e.argc) { |i| "argv[#{i}]" }
+    # An owner whose ivars are embedded (mrb_data_init in its compiled #initialize) needs a CDATA instance; a
+    # class whose instance type is not set yet would otherwise get a plain object (the guard below only sends
+    # a set MRB_TT_DATA class to mrb_obj_new).
+    embedded = embedding_classes.include?(e.owner)
+    # The class's instance type must be MRB_TT_DATA before a data object is allocated for it (gc.c's allocation check); the
+    # INSTANCE_TT_SETUP at gem init does not reach every embedding class, so the first construction sets it.
+    set_tt = embedded ? "  if (MRB_INSTANCE_TT(klass) != MRB_TT_DATA) MRB_SET_INSTANCE_TT(klass, MRB_TT_DATA);\n" : ''
+    alloc_expr = if embedded
+                   'mrb_obj_value(mrb_data_object_alloc(M, klass, NULL, NULL))'
+                 else
+                   'mrb_obj_value(mrb_obj_alloc(M, MRB_TT_OBJECT, klass))'
+                 end
     "// #{e.owner}.new: allocate as mrb_instance_alloc does and call #{m[:impl]} directly, else mrb_obj_new.\n" \
       "#define BC2CPP_ENTRY_#{cpp_name(e.owner, 'new')} 1\n" \
       "#{entry_plain_decl(m[:impl], e.argc)};\n" \
@@ -177,7 +190,8 @@ class CodeGen
       "  if (!klass || klass->tt != MRB_TT_CLASS || argc != #{e.argc} || MRB_UNDEF_ALLOCATOR_P(klass) ||\n" \
       "      (MRB_INSTANCE_TT(klass) != 0 && MRB_INSTANCE_TT(klass) != MRB_TT_OBJECT))\n" \
       "    return #{by_name};\n" \
-      "  mrb_value self = mrb_obj_value(mrb_obj_alloc(M, MRB_TT_OBJECT, klass));\n" \
+      "#{set_tt}" \
+      "  mrb_value self = #{alloc_expr};\n" \
       "  bc2cpp_entry_call(M, self, [&] { return #{m[:impl]}(#{(['M', 'self'] + args).join(', ')}); });\n" \
       "  return self;\n" \
       "}\n"
