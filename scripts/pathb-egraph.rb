@@ -1321,17 +1321,36 @@ module PathbEgraph
     end
 
     # A phi with no use is removed, as the converter's cleanup does; a phi used only by itself is kept.
+    # A phi is live when a live use reads it: a use by an instruction or a terminator, or by a live phi (its operand
+    # from a predecessor). A phi that is live only through a cycle of phis that nothing else reads is dead, and is removed.
     def remove_dead_phis(out)
-      uses = Hash.new(0)
+      by_name = {}
+      live = Hash.new(false)
+      work = []
       out.each_value do |blk|
-        blk[:phis].each { |ph| ph.inc.each_value { |v| count_regs(v, uses) } }
-        blk[:instrs].each { |i| count_regs(head(i) == "let" ? i[2..] : i[1..], uses) }
-        count_regs(blk[:term][1..], uses)
+        blk[:phis].each { |ph| by_name[ph.name] = ph }
+        blk[:instrs].each do |i|
+          regs = Hash.new(0)
+          count_regs(head(i) == "let" ? i[2..] : i[1..], regs)
+          regs.each_key { |r| work << r }
+        end
+        regs = Hash.new(0)
+        count_regs(blk[:term][1..], regs)
+        regs.each_key { |r| work << r }
+      end
+      until work.empty?
+        r = work.pop
+        next unless by_name.key?(r) && !live[r]
+
+        live[r] = true
+        regs = Hash.new(0)
+        by_name[r].inc.each_value { |v| count_regs(v, regs) }
+        regs.each_key { |x| work << x }
       end
       changed = false
       out.each_value do |blk|
         blk[:phis].reject! do |ph|
-          next false unless uses[ph.name].zero?
+          next false if live[ph.name]
 
           @stats[:phis_removed] += 1
           changed = true

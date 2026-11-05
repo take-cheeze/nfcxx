@@ -97,9 +97,9 @@ def normalise_literals(x)
   if float_type?(type)
     x[2] = "1e999" if val == "+Infinity"
     x[2] = "-1e999" if val == "-Infinity"
-  elsif val.match?(/\A[-+]?0x\h+\z/) && INT_TYPES.key?(type)
+  elsif val.match?(/\A[-+]?0[xX]\h+\z/) && INT_TYPES.key?(type)
     x[2] = canon(Integer(val, 16), type).to_s
-  elsif val.match?(/\A[-+]?0x\h+\z/) && type == "bool"
+  elsif val.match?(/\A[-+]?0[xX]\h+\z/) && type == "bool"
     x[2] = canon(Integer(val, 16), type).to_s
   end
   x
