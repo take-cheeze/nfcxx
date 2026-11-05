@@ -376,6 +376,7 @@ class Module_
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
+  attr_accessor :null_funcs   # the weak functions whose address is null (see weak_null_functions)
   attr_accessor :threads   # --threads: a shared memory, imported as env.memory, with the stack pointer exported (see emit_module)
   attr_accessor :init_type, :init_index   # --threads: __nfcxx_init, which applies the passive data once (see emit_module)
   attr_accessor :entry_type, :entry_index, :call_type   # --threads: __nfcxx_thread_entry(slot, arg) calls through the table
@@ -396,10 +397,12 @@ class Module_
     @import_index = {}           # name => function index
     @defined_index = {}          # name => function index (after the imports)
     @table = {}
+    @null_funcs = []             # weak functions the module declares and neither defines nor calls (see weak_null_functions)
   end
 
   # The value of the function address &"name": its slot in the table (address_taken found every one).
   def table_slot(name)
+    return 0 if @null_funcs.include?(name)   # a weak function that is not there: its address is null
     @table.fetch(name) { raise BadIR, "function address &\"#{name}\" not in the table" }
   end
 
@@ -455,6 +458,7 @@ class StaticObj
   # refusal: the reason a use of the object is refused (no storage here: an extern or dynamic global), or nil
   attr_accessor :name, :size, :align, :init, :data, :bytes, :addr, :refusal
   attr_accessor :tls   # a thread-local object (its refusal is cleared under --threads: see build_statics)
+  attr_accessor :weak, :weak_null   # an extern (weak) object: weak_null when undefined here, its address is 0 (see build_statics)
 
   def initialize(name, size, align, init, data)
     @name = name
@@ -522,6 +526,7 @@ def parse_global(f)
   align = as_int(f[4].to_s)
   raise BadIR, "global #{name}: alignment #{align} is not a power of two" unless align >= 1 && (align & (align - 1)) == 0
   rest = f.drop(5)
+  weak = rest.any? { |p| head_of(p) == "weak" }
   rest = rest.reject { |p| head_of(p) == "static" || head_of(p) == "weak" }
   thread = rest.any? { |p| head_of(p) == "thread" }
   rest = rest.reject { |p| head_of(p) == "thread" }
@@ -532,6 +537,7 @@ def parse_global(f)
   o = StaticObj.new(name, size, align, h == "init" ? init : nil, false)
   # no storage here: a use of the object is refused, and a declaration that nothing uses is not
   o.tls = thread
+  o.weak = weak
   if thread && h != "extern"
     # a thread-local with an initializer: build_statics lowers it (one copy, or a block per thread under --threads)
     o.refusal = "thread-local global #{name} (not lowered)"
@@ -572,7 +578,7 @@ def layout_statics(objs, asan = false)
   objs = objs.reject(&:tls) + objs.select(&:tls)
   seen_tls = false
   objs.each do |o|
-    next unless o.refusal.nil?             # no storage for those
+    next unless o.refusal.nil? && !o.weak_null   # no storage for those
     al = asan && o.align < 8 ? 8 : o.align
     if o.tls && !seen_tls
       # the group starts on a 16-byte boundary: a block of the same layout keeps every object's alignment
@@ -650,7 +656,8 @@ def static_contents(mod, o)
       ty = parse_type(it[2])
       target = it[3]
       add = as_int(it[4].to_s)
-      raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
+      # a pointer, or an integer as wide as one (a vtable's offset entries hold an address as a long)
+      raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" unless ty[0] == "ptr" || (ty[0] == "int" && ty[1] == $ptr_bytes)
       raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
       if target.sig != "&" && mod.static_obj(target.name).tls
         raise Refused, "address of the thread-local #{target.name} in static data (not lowered)"
@@ -742,6 +749,16 @@ def build_statics(mod, objs, asan = false)
     o.refusal = nil
     o.init = ["init"]                      # no initializer items: all zero
     o.tls = false
+  end
+  # An extern weak object that the module does not define is null: its address is 0 and it has no storage (a comparison
+  # of its address, as weak code does, is then a comparison with null).
+  objs.each do |o|
+    next unless o.weak && o.refusal.to_s.start_with?("extern global")
+    o.refusal = nil
+    o.weak_null = true
+    o.addr = 0
+    o.data = true
+    o.bytes = []
   end
   end_addr = layout_statics(objs, asan)
   # An object whose contents this emitter cannot lower (a type it does not have, such as the std::float16_t constants
@@ -916,6 +933,12 @@ class Fn
       @atom_b = @next_local + 1
       @local_types << :i32 << :i32
       @next_local += 2
+    end
+    if uses_bitfield?(@form)
+      # an i32 scratch for the address of a bit-field's storage unit (see bfload, bfstore)
+      @bf_addr = @next_local
+      @local_types << :i32
+      @next_local += 1
     end
     @body = body_forms
     @body.each { |s| collect_lets(s) }
@@ -1520,6 +1543,8 @@ class Fn
       wtype($scalars["long"])
     when "call"
       call(x)
+    when "bfload", "bfload.v"
+      bfload(x)
     when "unsupported"
       raise Refused, unsupported_text(x)
     else
@@ -1567,6 +1592,10 @@ class Fn
     callee = x[2]
     args = x.drop(3)
     raise Refused, "variadic call" if head_of(args[0]) == "variadic"
+    if callee.is_a?(IRSym) && callee.sig == "&" && @mod.null_funcs.include?(callee.name)
+      e(0x00)                              # unreachable: a weak function that is not there
+      return wtype(ret)
+    end
     # aggregates (byval, sret) go by address between the module's own functions: the module's convention, not the host's
     aggregate = args.any? { |a| %w[byval sret].include?(head_of(a)) }
     if aggregate
@@ -1605,6 +1634,58 @@ class Fn
           end
     e(0x10); leb_u(idx)
     wtype(ret)
+  end
+
+  # ---- bit-fields. A bit-field lives in a storage unit of 1, 2, 4 or 8 bytes at ADDR: bit BOFF of the unit, WIDTH bits. The
+  # arithmetic is on the unit as an i64: loaded zero-extended, masked, and stored back at its own size.
+  def uses_bitfield?(x)
+    return false unless x.is_a?(Array)
+    return true if %w[bfload bfload.v bfstore bfstore.v].include?(head_of(x))
+    x.any? { |y| uses_bitfield?(y) }
+  end
+
+  def load_u64_op(size)
+    { 1 => 0x31, 2 => 0x33, 4 => 0x35, 8 => 0x29 }.fetch(size) { raise Refused, "bit-field unit of #{size} bytes" }
+  end
+
+  def store_u64_op(size)
+    { 1 => 0x3c, 2 => 0x3d, 4 => 0x3e, 8 => 0x37 }.fetch(size) { raise Refused, "bit-field unit of #{size} bytes" }
+  end
+
+  # (bfload T UNIT ADDR BOFF WIDTH): the bits, as T (sign-extended from WIDTH when T is signed)
+  def bfload(x)
+    ty = parse_type(x[1])
+    size = as_int(x[2].to_s)
+    addr, boff, width = x[3], as_int(x[4].to_s), as_int(x[5].to_s)
+    push_addr(addr)
+    e(0x21); leb_u(@bf_addr)
+    e(0x20); leb_u(@bf_addr); e(load_u64_op(size)); memarg
+    e(0x42); leb_s(boff); e(0x88)                         # i64.shr_u
+    e(0x42); leb_s(signed64((1 << width) - 1)); e(0x83)   # i64.and the mask
+    if ty[2] && width < 64
+      e(0x42); leb_s(64 - width); e(0x86)                 # i64.shl
+      e(0x42); leb_s(64 - width); e(0x87)                 # i64.shr_s: sign-extend
+    end
+    e(0xa7) if wtype(ty) == :i32                         # i32.wrap_i64
+    wtype(ty)
+  end
+
+  # (bfstore T UNIT ADDR BOFF WIDTH VALUE): the unit with its WIDTH bits at BOFF replaced by VALUE's, stored back
+  def bfstore(s)
+    size = as_int(s[2].to_s)
+    addr, boff, width, val = s[3], as_int(s[4].to_s), as_int(s[5].to_s), s[6]
+    mask = (1 << width) - 1
+    push_addr(addr)
+    e(0x21); leb_u(@bf_addr)
+    e(0x20); leb_u(@bf_addr)                             # the address the unit is stored at
+    e(0x20); leb_u(@bf_addr); e(load_u64_op(size)); memarg
+    e(0x42); leb_s(signed64(~(mask << boff))); e(0x83)    # i64.and: the unit without the field
+    w = push_op(val)
+    e(0xad) if w == :i32                                 # i64.extend_i32_u
+    e(0x42); leb_s(signed64(mask)); e(0x83)               # i64.and: the field's value
+    e(0x42); leb_s(boff); e(0x86)                         # i64.shl
+    e(0x84)                                              # i64.or
+    e(store_u64_op(size)); memarg
   end
 
   # An atomic builtin: [kind, operation, size] for NAME (a fence has no size), or nil.
@@ -1813,6 +1894,8 @@ class Fn
       push_op(s[1])
       e($ptr_bytes == 8 ? 0x50 : 0x45)     # i64.eqz (i32.eqz under ILP32)
       e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
+    when "bfstore", "bfstore.v"
+      bfstore(s)
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. The index is compared as unsigned, so a negative one traps too.
       raise Refused, "bounds with a run-time limit" if s[2].is_a?(String) && s[2][0] == "%"
@@ -2394,8 +2477,42 @@ USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-m
 # names them rather than numbering them (the wasm explorer). Without it the module is the same as before.
 $names = false
 
+# (alias NAME TARGET KIND [weak]): a second name for a function or an object. The module refers to the target instead: every
+# reference to NAME (a call, an address, an access) is rewritten to TARGET, transitively, and the alias forms are dropped.
+def resolve_aliases(forms)
+  map = {}
+  forms.each do |f|
+    # an ifunc's value is what its resolver returns, not the resolver: not an alias, refused where it is used
+    next unless head_of(f) == "alias" && f[3].to_s != "ifunc"
+    map[f[1].to_s] = f[2].to_s
+  end
+  return forms if map.empty?
+  resolve = lambda do |nm|
+    seen = 0
+    while map.key?(nm)
+      nm = map[nm]
+      seen += 1
+      raise BadIR, "alias cycle through #{nm}" if seen > map.length
+    end
+    nm
+  end
+  rewrite = lambda do |x|
+    next unless x.is_a?(Array)
+    x.each_with_index do |y, i|
+      if y.is_a?(IRSym) && map.key?(y.name)
+        x[i] = IRSym.new(y.sig, resolve.call(y.name))
+      elsif y.is_a?(Array)
+        rewrite.call(y)
+      end
+    end
+  end
+  forms = forms.reject { |f| head_of(f) == "alias" && f[3].to_s != "ifunc" }
+  rewrite.call(forms)
+  forms
+end
+
 def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false, threads = false)
-  forms = parse_forms(tokenize(src))
+  forms = resolve_aliases(parse_forms(tokenize(src)))
   # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
   # takes ILP32 only). The model is set before any type is read.
   sizes = {}
@@ -2440,6 +2557,11 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
         o.refusal = "data #{f[1]}: #{e.message}"
         objs << o
       end
+    elsif h == "alias"
+      raise Refused, "alias #{f[1]} of kind #{f[3]} (an ifunc's value is its resolver's result: not lowered)"
+    elsif h == "declare"
+      # (declare "name" (weak)): a declaration only; a call of a function the module does not define is an import
+      next
     elsif h == "abi-type" || h == "x87-thunk" || h == "sycl-kernel-attr"
       # for the QBE emitter only: the C ABI shape of an aggregate passed or returned by value, and the assembly thunks of
       # long double calls. This emitter refuses such a parameter, result, argument or call where it is used (in the
@@ -2455,7 +2577,9 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
     end
   end
   mod = Module_.new(defs)
-  address_taken(forms).each_with_index { |nm, i| mod.table[nm] = i + 1 }
+  # A weak function the module declares, neither defines nor calls, is null: its address is 0 (weak code tests for it)
+  mod.null_funcs = weak_null_functions(forms, defs)
+  address_taken(forms).reject { |nm| mod.null_funcs.include?(nm) }.each_with_index { |nm, i| mod.table[nm] = i + 1 }
   mod.asan = asan
   mod.emscripten = emscripten
   mod.import_memory = import_memory || threads   # --threads: the shared memory is imported (every thread's instance gets it)
@@ -2502,6 +2626,13 @@ end
 
 # The functions whose address the IR takes (&"f" anywhere but as the callee of a call), in order of first use: the
 # slots of the function table. Slot 0 stays empty, so a call through a null function pointer traps.
+# The weak functions the module declares (declare with weak) and does not define: their address is null, and a call of one
+# traps (there is no definition to call; the C library's is not in a wasm module).
+def weak_null_functions(forms, defs)
+  declared = forms.select { |f| head_of(f) == "declare" && f.drop(2).any? { |p| head_of(p) == "weak" } }.map { |f| f[1].to_s }
+  declared.reject { |nm| defs.key?(nm) }.uniq
+end
+
 def address_taken(forms)
   names = []
   forms.each { |f| collect_addresses(f, names) }
