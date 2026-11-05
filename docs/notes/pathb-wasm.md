@@ -363,6 +363,17 @@ top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped
   (`(unsupported init ...)`), of a thread-local one (without `--threads`; with it, see the threads section below), or of a
   function's address in a static initializer (`addr` to `&"f"`), or of a thread-local's address in a static initializer.
 
+## Variadic functions (LP64)
+
+A function the module defines with an ellipsis takes one more parameter at the end: the address of a block in the caller's
+frame, where the caller stores the variadic arguments, one 8-byte slot each (the block has at least one slot). The
+`va_list` is the System V `__va_list_tag` with every argument in the overflow area: `vastart` writes gp_offset 48, fp_offset
+176, the block as overflow_arg_area and a null reg_save_area, and `vaarg` reads the slot at overflow_arg_area and moves it on
+by 8. So `va_copy` (a 24-byte copy) and `va_arg` need nothing else. Under ASan and under ILP32 (`--emscripten`) a variadic
+function is refused. A call of an import or through a pointer that is variadic stays refused: the host's ABI for those is not
+lowered. `tests/wasm/variadic_module.cpp` (`// LP64-ONLY`, skipped in the other modes) covers int, double, long and pointer
+arguments, a `va_copy`, and a variadic function that reads the arguments of another one's call.
+
 ## Threads (`--threads`)
 
 With `--threads` the module is a thread of a shared memory: the memory is imported as `env.memory` (shared, its page count in
@@ -379,9 +390,9 @@ initializer, and a pool larger than 8 threads (the host's `POOL`). `tests/wasm-t
 threads.
   A declaration that nothing uses is not refused: it has no storage, and the QBE path drops it the same way.
 - Aggregate parameters, results and arguments (`byval`, `sret`), and aggregate values in registers.
-- Variadic calls.
+- Variadic calls of anything but a function the module defines (an import such as `printf`: the host's ABI is not
+  lowered), and variadic functions in the asan and ILP32 modes.
 - Bit-fields (`bfload`, `bfstore`), inline assembly, VLAs and exceptions, and the 16-byte types.
-- `cf2i` to a type narrower than 32 bits: the range check for the narrow target is not lowered yet.
 - A jump to the label after a loop from outside that loop (only the jumps from inside it are handled).
 
 The IR's own `(unsupported ...)` markers are refused the same way, with the marker's text. Those come from the front end,
