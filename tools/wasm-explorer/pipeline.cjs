@@ -136,7 +136,7 @@ function runStep(stage, file, argv, dir, cwd = root, env = null) {
 }
 
 // Compiles source with options { language, std, mode }. Resolves with
-//   { ok: true, ir, wasm (base64), names, diagnostics, language, mode, std }   or
+//   { ok: true, ir, wasm (base64), names, diagnostics, language, mode, std, optimized }   or
 // (names: demangleNames; the module has a name section, for stack traces)
 //   { ok: false, stage, message, diagnostics, code }                    (stage: request, front-end, emit, or server)
 async function compile(source, options = {}) {
@@ -162,6 +162,7 @@ async function compile(source, options = {}) {
     let irText;
     let frontStderr = "";
     let fromSwiftC = false;   // the steps after swiftfe run on the C it wrote (see failed)
+    let optimized = false;    // the SSA route's optimizations ran on the IR (the page's "optimize" option)
     if (language === "ir") {
       irText = Buffer.from(stripIrComments(source));
     } else {
@@ -213,15 +214,18 @@ async function compile(source, options = {}) {
         irText = Buffer.from(dumped.stdout.toString("utf8").split(dir + path.sep).join(""));
         frontStderr += dumped.stderr;
         // the SSA route's optimizations (scripts/pathb-flat-opt) on the nfcxx front end's flat IR; a function the route
-        // refuses keeps its IR. Off unless NFCXX_EXPLORER_OPT=1: the dispatch form is larger than the flat IR for small
-        // functions (no relooper yet), so the default page shows the front end's IR.
-        if (step[0] === pathbDump && process.env.NFCXX_EXPLORER_OPT === "1") {
+        // refuses keeps its IR. The page's "optimize" option; by default off (the dispatch form is larger than the flat
+        // IR for small functions, see docs/notes/pathb-wasm.md), NFCXX_EXPLORER_OPT=1 makes it the default.
+        const optimize = options.optimize !== undefined ? options.optimize === true
+          : process.env.NFCXX_EXPLORER_OPT === "1";
+        if (step[0] === pathbDump && optimize) {
           try {
             const flatIr = path.join(dir, "front.ir");
             fs.writeFileSync(flatIr, irText);
-            const optimized = await runStep("optimize", ruby, [flatOpt, flatIr], dir, root);
-            irText = optimized.stdout;
-            frontStderr += optimized.stderr;
+            const flatOut = await runStep("optimize", ruby, [flatOpt, flatIr], dir, root);
+            irText = flatOut.stdout;
+            optimized = true;
+            frontStderr += flatOut.stderr;
           } catch (e) {
             return await failed(e);
           }
@@ -248,6 +252,7 @@ async function compile(source, options = {}) {
       language,
       mode,
       std,
+      optimized,
     };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

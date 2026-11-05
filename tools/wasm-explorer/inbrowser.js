@@ -127,7 +127,7 @@
       if (e.status !== 0) return failed("emit", e);
       // names: the server demangles the IR's names with c++filt (pipeline.cjs, demangleNames); there is none here
       return { ok: true, ir: irText, wasm: base64(e.stdout), names: {}, diagnostics: C.parseDiagnostics(frontStderr),
-        language, mode, std };
+        language, mode, std, optimized: false };   // the optimizations need ruby (the server only)
     };
   }
 

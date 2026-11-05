@@ -46,6 +46,9 @@
     if (options.std !== undefined && options.std !== "" && !lang.standards.includes(options.std)) {
       return `unknown standard for ${lang.title}: ${options.std}`;
     }
+    if (options.optimize !== undefined && typeof options.optimize !== "boolean") {
+      return "optimize must be true or false";
+    }
     return null;
   }
 
