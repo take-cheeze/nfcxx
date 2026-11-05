@@ -173,6 +173,7 @@ jobs:
               tests/pathb-ir/run.sh
               tests/pathb-borrow/run.sh
               tests/wasm/run.sh
+              NFCXX_WASM_OPT=1 tests/wasm/run.sh
           - name: Path B stage 3 (IR to QBE translation validation)
             run: tests/pathb-qbe/run.sh
           - name: Hosted Path B (NFCXX_PATH=b)

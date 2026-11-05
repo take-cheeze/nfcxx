@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# The optimizations of the SSA route, for a backend that takes flat IR (scripts/pathb-wasm-emit.rb): reads a flat IR module
+# (scripts/pathb-dump --ir) on stdin or from FILE and writes a flat IR module on stdout, in which every function the route
+# converts is replaced by its optimized form. A function is converted through scripts/pathb-ssa.rb (the SSA), the e-graph
+# (PathbEgraph.optimize_fn: escape analysis, memory, the rewrite rules) and the dispatch loop (flat_from_dispatch: one loop
+# around a switch, the structured form). A function the SSA route refuses keeps its flat IR, so the output is always a
+# valid module. Everything that is not a function (globals, declarations, the layout) is kept as it is.
+#
+#   scripts/pathb-dump --ir FILE.cpp | scripts/pathb-flat-opt > FILE.opt.ir
+#
+require "open3"
+require "tmpdir"
+require_relative "pathb-egraph"
+
+text = ARGV.empty? ? $stdin.read : File.read(ARGV[0])
+forms = read_forms(text)
+ssa_text = nil
+Dir.mktmpdir("pathb-flat-opt") do |dir|
+  ir = File.join(dir, "module.ir")
+  File.write(ir, text)
+  ssa_text, status = Open3.capture2("ruby", File.join(__dir__, "pathb-ssa.rb"), ir)
+  abort "pathb-flat-opt: the SSA conversion failed" unless status.success?
+end
+
+optimized = {}
+read_forms(ssa_text).each do |form|
+  next unless head(form) == "ssa-function"
+
+  begin
+    out, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(form))
+    dispatch = PathbEgraph.dispatch_structurize(out)
+    next unless dispatch
+
+    flat = PathbEgraph.flat_from_dispatch(dispatch)
+    optimized[form[1]] = flat if flat
+  rescue PathbEgraph::Fail, PathbEgraph::Unsupported => e
+    warn "pathb-flat-opt: #{form[1]} keeps its flat IR (#{e.message})"
+  end
+end
+
+forms.each do |form|
+  if head(form) == "function" && optimized.key?(form[1])
+    puts sx(optimized[form[1]])
+  else
+    puts sx(form)
+  end
+end

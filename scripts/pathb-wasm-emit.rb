@@ -1882,7 +1882,7 @@ class Fn
     push_op(operand)
     e(0xbb) if src[1] == 4              # f64.promote_f32: the bounds are compared in double, as in the IR
     e(0xaa)                              # i32.trunc_f64_s
-    e(0x22); leb_u(@cf2i_tmp)            # local.tee
+    e(0x21); leb_u(@cf2i_tmp)            # local.set (the value is read back below: exactly one value is left)
     if dst[2]
       lo, hi = -(1 << (dst[1] * 8 - 1)), (1 << (dst[1] * 8 - 1)) - 1
     else

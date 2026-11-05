@@ -84,7 +84,8 @@ for f in "$dir"/*.cpp; do
   # a refusal names the function and the source line (NFCXX_IR_LOC: the IR's (loc ...) statements); the test's
   # directory is left out of the line, so that a REFUSE text can name it as FILE:LINE
   loc=0; [ -n "$refuse" ] && loc=1
-  if ! NFCXX_IR_LOC=$loc "$root/scripts/pathb-dump" "${ir_args[@]}" "$f" > "$tmp/$n.ir" 2> "$tmp/$n.front"; then
+  # NFCXX_WASM_OPT=1: the functions go through the SSA route's optimizations (scripts/pathb-flat-opt) before the emitter
+  if NFCXX_IR_LOC=$loc "$root/scripts/pathb-dump" "${ir_args[@]}" "$f" 2> "$tmp/$n.front" | { if [ "${NFCXX_WASM_OPT:-0}" = 1 ]; then ruby "$root/scripts/pathb-flat-opt"; else cat; fi; } > "$tmp/$n.ir" && [ -s "$tmp/$n.ir" ]; then :; else
     echo "FAIL $n: front end: $(head -1 "$tmp/$n.front")"; fail=$((fail + 1)); continue
   fi
   if [ -n "$refuse" ]; then
