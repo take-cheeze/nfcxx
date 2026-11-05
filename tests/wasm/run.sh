@@ -22,6 +22,7 @@
 # 32-bit memory, which the default module wraps), so it runs under the mode and is skipped otherwise. The ASan and the
 # Emscripten modes are not combined with it.
 # checked_arith.ir (hand-written IR) is emitted in the LP64 modes and checked by checked_arith.cjs.
+# A test with "// ASAN-SKIP" is skipped in the asan mode (a construct the asan mode refuses).
 # A test with "// LP64-ONLY" is skipped in the emscripten (ILP32) and asan modes: variadic functions are lowered in LP64 only.
 # Skipped, not failed, without node (set NODE to a binary) or without the Path B harness (scripts/setup-pathb.sh).
 cd "$(dirname "$0")/../.."
@@ -55,6 +56,10 @@ for f in "$dir"/*.cpp; do
   kind=$(sed -n 's|^// ASAN: *\([a-z-]*\).*|\1|p' "$f" | head -1)
   if [ -n "$kind" ] && [ $asan = 0 ]; then
     echo "skip $n (// ASAN: $kind: needs NFCXX_WASM_ASAN=1)"; skip=$((skip + 1)); continue
+  fi
+  # a test that the asan mode refuses (a variable-length array: the asan runtime keeps its own records) is skipped there
+  if [ "$(grep -c '^// ASAN-SKIP' "$f")" -gt 0 ] && [ $asan = 1 ]; then
+    echo "skip $n (// ASAN-SKIP: the asan mode refuses it)"; skip=$((skip + 1)); continue
   fi
   # a test of the LP64 lowering (variadic functions: the ILP32 modes and the asan mode refuse them) is skipped there
   if [ "$(grep -c '^// LP64-ONLY' "$f")" -gt 0 ] && { [ $emscripten = 1 ] || [ $asan = 1 ]; }; then
