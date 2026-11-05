@@ -29,14 +29,22 @@
 
 ## Performance against egg
 
-Egg 0.11 with the same rule families (commutativity, identities, constant reassociation, constant folding), 8 iterations, 2,000 added nodes. 20 random functions per size.
+`tests/pathb-egraph/egg/run.sh OPS PROGRAMS SEED` runs both on the same random straight-line integer programs (the
+generator is `gen.rb`, the egg side `src/main.rs`, egg 0.11). The rules are the same families: commutativity, identities
+(x+0, x-0, x*1, x*0, x-x), constant reassociation and x-c = x+(-c), and constant folding at 32-bit wrapping. Each
+extracted program is evaluated on 260 input vectors and must equal the original's value (the run reports "all equal").
 
-| Size | Ours (Ruby, wall) | egg (Rust release) | Ratio |
+Measured with seed 7, 20 programs per size:
+
+| Size | Ours (the pass alone) | egg (add, saturate, extract) | Operations in the output: ours / egg |
 |---|---|---|---|
-| 50 operations | about 32 ms per function | 0.4 ms | about 80x |
-| 300 operations | about 92 ms per function | 1.4 ms | about 65x |
+| 50 operations | about 98 ms per function | about 0.5 to 0.8 ms | 9.6 / 9.4 |
+| 300 operations | about 130 ms per function | about 1.5 ms | 97.8 / 97.7 |
 
-E-node counts are close (about 208 vs 225 at size 50). Caveats: our pass does verification and rendering as well, egg's constant analysis is 64-bit where ours is 32-bit, and extracted programs were not checked for equivalence.
+The extracted programs are about the same size, so the difference is speed: about 200x at 50 operations and about 90x at
+300. Caveats: egg has no control flow, so only straight-line blocks are comparable; the timings are wall clock on one
+machine; the earlier figure of about 32 ms per function did not reproduce (the same code takes about 100 ms today, and
+the commit before the loop-invariant pass takes the same), and its cause is not known.
 
 ## Next candidates
 
