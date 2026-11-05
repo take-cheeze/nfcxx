@@ -902,6 +902,7 @@ end
       when "wneg" then @lines << "  #{dst} =#{c} sub 0, #{op(rv[2])}"
       when "cdiv", "crem" then checked_div_lines(dst, t, rv)
       when "cshl", "cshr" then checked_shift_lines(dst, t, rv)
+      when "cadd", "csub", "cmul", "cneg" then checked_arith_lines(dst, t, rv)
       when *Qbe::FBIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::FBIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
       when "fneg" then @lines << "  #{dst} =#{c} neg #{op(rv[2])}"
@@ -1284,6 +1285,95 @@ end
       end
       name = head(rv) == "cdiv" ? (signed ? "div" : "udiv") : (signed ? "rem" : "urem")
       @lines << "  #{dst} =#{c} #{name} #{a}, #{b}"
+    end
+
+    # Checked signed add, sub, mul and negate: the exact result must fit the type, else the check traps (code 2, signed
+    # overflow). A narrow type is computed in 64 bits and range-checked, then truncated; an 8-byte add or sub uses the
+    # sign-bit identities; an 8-byte multiply asks the runtime (__nfcxx_smul64_ovf, be/nfcxx_ldrt.c) since QBE has no
+    # 128-bit product. The IR emits these only for signed types, so an unsigned one is refused (as the flat emitter does).
+    def checked_arith_lines(dst, t, rv)
+      raise QbeUnsupported, "#{head(rv)} of bool" if t == "bool"
+
+      w, signed = int_info(t)
+      raise QbeUnsupported, "#{head(rv)} on unsigned #{sx(t)}" unless signed
+      a = head(rv) == "cneg" ? "0" : op(rv[2])
+      b = head(rv) == "cneg" ? op(rv[2]) : op(rv[3])
+      name = { "cadd" => "add", "csub" => "sub", "cneg" => "sub", "cmul" => "mul" }[head(rv)]
+      if w == 64
+        r = fresh
+        if name == "mul"
+          # The product, and the test that dividing it back by a gives b. A divisor of 0 or -1 would trap (the quotient
+          # overflows for -1), so those use 1 instead: 0 never overflows, and -1 overflows only for the minimum b.
+          @lines << "  #{r} =l mul #{a}, #{b}"
+          zero = fresh
+          minus_one = fresh
+          special = fresh
+          special_l = fresh
+          mask = fresh
+          divisor = fresh
+          masked = fresh
+          @lines << "  #{zero} =w ceql #{a}, 0"
+          @lines << "  #{minus_one} =w ceql #{a}, -1"
+          @lines << "  #{special} =w or #{zero}, #{minus_one}"
+          @lines << "  #{special_l} =l extuw #{special}"
+          @lines << "  #{mask} =l sub 0, #{special_l}"
+          @lines << "  #{masked} =l xor #{a}, 1"
+          @lines << "  #{masked} =l and #{masked}, #{mask}"
+          @lines << "  #{divisor} =l xor #{a}, #{masked}"
+          quotient = fresh
+          @lines << "  #{quotient} =l div #{r}, #{divisor}"
+          differs = fresh
+          @lines << "  #{differs} =w cnel #{quotient}, #{b}"
+          not_special = fresh
+          @lines << "  #{not_special} =w xor #{special}, 1"
+          general = fresh
+          @lines << "  #{general} =w and #{differs}, #{not_special}"
+          min_value = fresh
+          @lines << "  #{min_value} =l shl 1, 63"
+          min_b = fresh
+          @lines << "  #{min_b} =w ceql #{b}, #{min_value}"
+          at_minus_one = fresh
+          @lines << "  #{at_minus_one} =w and #{minus_one}, #{min_b}"
+          bad = fresh
+          @lines << "  #{bad} =w or #{general}, #{at_minus_one}"
+          check_call(bad, 2)
+        else
+          @lines << "  #{r} =l #{name} #{a}, #{b}"
+          # the overflow of a + b or a - b: the sign of the result differs from the sign the operands imply
+          x1 = fresh
+          x2 = fresh
+          x3 = fresh
+          if name == "add"
+            @lines << "  #{x1} =l xor #{a}, #{r}"
+            @lines << "  #{x2} =l xor #{b}, #{r}"
+          else
+            @lines << "  #{x1} =l xor #{a}, #{b}"
+            @lines << "  #{x2} =l xor #{a}, #{r}"
+          end
+          @lines << "  #{x3} =l and #{x1}, #{x2}"
+          bad = fresh
+          @lines << "  #{bad} =w csltl #{x3}, 0"
+          check_call(bad, 2)
+        end
+        @lines << "  #{dst} =l copy #{r}"
+      else
+        ea = fresh
+        eb = fresh
+        r = fresh
+        @lines << "  #{ea} =l extsw #{a}"
+        @lines << "  #{eb} =l extsw #{b}"
+        @lines << "  #{r} =l #{name} #{ea}, #{eb}"
+        lo = -(1 << (w - 1))
+        hi = (1 << (w - 1)) - 1
+        below = fresh
+        above = fresh
+        bad = fresh
+        @lines << "  #{below} =w csltl #{r}, #{lo}"
+        @lines << "  #{above} =w csgtl #{r}, #{hi}"
+        @lines << "  #{bad} =w or #{below}, #{above}"
+        check_call(bad, 2)
+        @lines << "  #{dst} =w copy #{r}"
+      end
     end
 
     # The count must be in [0, w): an unsigned comparison of the count against w also rejects a negative count.
