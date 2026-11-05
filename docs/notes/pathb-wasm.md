@@ -374,6 +374,15 @@ in static data for the unwinder) is a null slot: the module never throws, so the
 a VLA is refused (the asan runtime keeps its own records). `vla.cpp` and `vla_loop.cpp` cover one VLA and a loop of 4000
 that would not fit the stack without the release (`// ASAN-SKIP`).
 
+## The optimizations of the SSA route (`NFCXX_WASM_OPT=1`)
+
+The emitter reads flat IR, so by itself it gets none of the SSA route's optimizations. `scripts/pathb-flat-opt` makes them
+reach it: each function goes through the SSA conversion (`scripts/pathb-ssa.rb`), the e-graph (escape analysis, memory,
+the rewrite rules), and the dispatch loop (`PathbEgraph.dispatch_structurize`, then `flat_from_dispatch`), which is a loop
+around a switch: the structured flat IR the emitter takes. A function the SSA route refuses keeps its flat IR. The wasm
+suite runs in this mode too (`NFCXX_WASM_OPT=1 tests/wasm/run.sh`, also in CI), with the same expectations. The explorer
+does not use it yet.
+
 ## Variadic functions (LP64)
 
 A function the module defines with an ellipsis takes one more parameter at the end: the address of a block in the caller's

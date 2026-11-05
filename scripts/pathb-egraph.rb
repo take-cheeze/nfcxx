@@ -1629,6 +1629,64 @@ module PathbEgraph
     { "float" => 4, "double" => 8, "bool" => 1 }.fetch(t) { INT_TYPES.fetch(t) { raise Unsupported, "slot of type #{sx(t)}" }[0] / 8 }
   end
 
+  # The dispatch form as flat IR, the structured form a backend that takes flat IR lowers (scripts/pathb-wasm-emit.rb):
+  # one loop around a switch on the state slot. Each original block is an arm; a jump to a block stores its id in the state
+  # and continues the loop. The edge blocks of dispatch_structurize are not arms: a jump through one does its store and
+  # continues. Returns the function as a flat IR form, or nil when the form is not a dispatch form.
+  def self.flat_from_dispatch(dfn)
+    dispatch = dfn.blocks.keys.find do |id|
+      t = dfn.blocks[id][:term]
+      t[0] == "switch" && t[1] == "%dstate"
+    end
+    return nil unless dispatch
+
+    unreachable = dfn.blocks[dispatch][:term][3]
+    edge = lambda do |id|
+      b = dfn.blocks[id]
+      b && b[:term] == ["br", dispatch] && b[:instrs].all? { |i| head(i) == "store" }
+    end
+    types = {}
+    dfn.params[1..].each { |p| types[p[1]] = p[3] }
+    dfn.blocks.each_value do |b|
+      b[:instrs].each { |i| types[i[1]] = i[2] if head(i) == "let" }
+    end
+    state = "$\"__dsp_state\""
+    goto = lambda do |x|
+      if x == dispatch
+        [F("(continue)")]
+      elsif edge.call(x)
+        dfn.blocks[x][:instrs] + [F("(continue)")]
+      else
+        [F("(store int #{state} (const int #{x}))"), F("(continue)")]
+      end
+    end
+    term = lambda do |t, op_type|
+      case t[0]
+      when "br" then goto.call(t[1])
+      when "condbr"
+        [["if", t[1], ["then", *goto.call(t[2])], ["else", *goto.call(t[3])]]]
+      when "switch"
+        arms = t[2].flat_map { |v, x| [F("(case (const #{sx(op_type)} #{v}))"), *goto.call(x)] }
+        [["switch", t[1], ["body", ["block", *arms, F("(default)"), *goto.call(t[3])]]]]
+      when "ret" then [t[1] ? ["return", t[1]] : ["return"]]
+      when "unreachable" then [["unreachable"]]
+      else raise Unsupported, "terminator #{head(t)}"
+      end
+    end
+    arms = dfn.blocks.keys.reject { |id| id == dispatch || id == unreachable || edge.call(id) }.sort.flat_map do |id|
+      b = dfn.blocks[id]
+      sel_type = types.fetch(b[:term][1].is_a?(String) ? b[:term][1] : "", "int")
+      [F("(case (const int #{id}))"), *b[:instrs], *term.call(b[:term], sel_type)]
+    end
+    arms << F("(default)") << ["unreachable"]
+    header = dfn.header.reject { |x| %w[ssa-promoted ssa-function ret params].include?(head(x)) }
+    ["function", dfn.name, dfn.ret, dfn.params, *header,
+     ["block", F("(store int #{state} (const int 0))"),
+      ["loop", ["body", F("(let %dstate int (load int #{state}))"),
+                ["switch", "%dstate", ["body", ["block", *arms]]]],
+       ["step"]]]]
+  end
+
   # The registers named in x (strings that start with %).
   def self.regs_of(x)
     case x
