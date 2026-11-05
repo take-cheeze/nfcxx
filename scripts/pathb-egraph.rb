@@ -322,11 +322,11 @@ module PathbEgraph
       rpo = PathbEgraph.reverse_postorder(@fn)
       preds, = PathbEgraph.idoms(@fn, rpo)
       # A block with one predecessor starts with the memory the predecessor ends with: every path to it goes through
-      # that predecessor, and it comes before the block in reverse postorder. A block with two or more predecessors
-      # starts with nothing known (the paths may write different values).
+      # that predecessor, and it comes before the block in reverse postorder. A block with several predecessors starts
+      # with the locations that all of them hold the same register for (merged_memory).
       @mem_out = {}
       rpo.each do |b|
-        inherited = preds[b].size == 1 ? @mem_out[preds[b][0]] : nil
+        inherited = preds[b].size == 1 ? @mem_out[preds[b][0]] : merged_memory(preds[b])
         out[b] = block(@fn.blocks[b], inherited)
         @mem_out[b] = @mem
       end
@@ -1077,6 +1077,20 @@ module PathbEgraph
     end
 
     def forget_memory = (@mem = {})
+
+    # The memory that a block with several predecessors starts with: the locations that every predecessor holds, each
+    # with the same register and type. A register is defined once and dominates every use, so when all the predecessors
+    # hold the same register it dominates the block, and the value is the same on every path. A predecessor that is not
+    # processed yet (a back edge) gives nothing: the state is not known there.
+    def merged_memory(preds)
+      states = preds.map { |p| @mem_out[p] }
+      return nil if preds.empty? || states.any?(&:nil?)
+
+      first, *rest = states
+      first.select do |k, e|
+        e[:op] && rest.all? { |s| (f = s[k]) && f[:op] == e[:op] && sx(f[:type]) == sx(e[:type]) }
+      end
+    end
 
     # The slots a predecessor leaves hold their values here too. The class of a value is a node of the predecessor's
     # e-graph, so the value is re-resolved from its operand (a register of an earlier block is a leaf, see reg_class).

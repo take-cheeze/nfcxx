@@ -1,0 +1,12 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" int) (param %1 "c" int))
+  (slot "s" (array 2 int) 8 4)
+  (let %2 (ptr int) (offset $"s" 4))
+  (let %3 bool (lt.s int %1 (const int 1)))
+  (if %3
+    (then (store int %2 %0))
+    (else (store int %2 %0)))
+  (let %4 int (load int %2))
+  (return %4))

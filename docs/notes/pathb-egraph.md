@@ -153,7 +153,9 @@ The slots of a block (`$"x"`, the objects that `pathb-ssa.rb` keeps in memory) a
 the block. The state is a map from a location to the value it holds here: its type and its class (or unknown). A
 location is a slot at a known byte offset: the slot itself, or a derived address (`(offset P K)`, `(index P I SIZE)` with
 a constant index, `(bitcast T P)`) of it. A block with one predecessor starts with the state the predecessor ends with;
-a block with several starts empty.
+a block with several starts with the locations that every predecessor holds the same register for (`merged_memory`):
+a register is defined once and dominates its uses, so such a value is the same on every path. A predecessor not yet
+processed (a loop's back edge) gives nothing.
 
 **Escape analysis** (`analyze_addresses`). A slot escapes when its address, or a derived address, is used other than as
 the address of a load or store, as the base of a derivation, or as a nonnull check: an argument of a call, a stored
@@ -294,8 +296,6 @@ relations, so the uses that remain stay dominated.
   No partial redundancy elimination.
 - **Memory within a block.** Loads and stores of a slot are merged and forwarded in program order (see Memory above).
   Stores, calls and volatile accesses are never moved or merged.
-- **Memory at merge points.** A block with several predecessors starts with nothing known. Keeping the values that every
-  predecessor agrees on (the same register) would forward across joins; not done.
 - **Constants.** Integer literals, decimal or hexadecimal (`0x` or `0X`, with an optional sign), are constants in the
   e-graph (`const_value`). Only constants and registers replaced by a dominator reach a block.
 - **Memory across blocks.** The memory state starts empty in every block, so a value stored in a dominating block is
