@@ -17,7 +17,8 @@ class CodeGen
     return nil if devirt_blocked_name?(name) || constant_object_name_rebound?(name)
 
     candidate = constant_object_singleton_def(name, constant_owner)
-    return constant_object_core_block_code(name, n, d, recv, argv, constant_owner) if candidate.nil?
+    # A core candidate with a literal block takes the root-context form too: the direct call below carries no block.
+    return constant_object_core_block_code(name, n, d, recv, argv, constant_owner) if candidate.nil? || (@call_block_expr && candidate.core)
     return nil unless candidate&.visibility == :public
 
     singleton_owner = candidate.owner
@@ -87,10 +88,19 @@ class CodeGen
       singleton = "#{klass}.singleton"
       return nil if @unknown_mixins.include?(singleton) || !Array(@included_modules[singleton]).empty? ||
                     !Array(@prepended_modules[singleton]).empty?
-      return nil if @registry.fetch(name, []).any? { |md| md.owner == singleton } || outside_owners.include?(singleton)
+      defs = block_core_index[[singleton, name]]
+      # A registration on this singleton refuses the walk unless it is the one core definition the walk would call:
+      # a core body the registry keeps (IO.open in mruby-io's io.rb, not a native name) is that target, not a program's
+      # replacement. Anything else registered here, or a second core body, refuses.
+      registered = @registry.fetch(name, []).select { |md| md.owner == singleton }
+      if registered.any?
+        return nil unless defs.nil? && registered.one? && registered.first.core && registered.first.irep
+
+        defs = registered
+      end
+      return nil if outside_owners.include?(singleton)
 
       chain << singleton
-      defs = block_core_index[[singleton, name]]
       if defs
         return nil unless defs.one?
 
