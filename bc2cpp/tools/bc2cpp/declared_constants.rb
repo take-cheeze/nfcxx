@@ -228,6 +228,9 @@ module DeclaredConstants
       traced = trace_new_target(irep, idx, src, nil, 0, nil, registry: registry,
                                                              container_constants: container_constants)
       return nil if traced == entry.cls
+      # `"lit"` or `"lit".freeze`: a String literal is exactly String, and Object#freeze answers its receiver.
+      return nil if entry.cls == 'String' && literal_string_writer?(irep, idx, src)
+      return nil if frozen_class_source?(irep, idx, src, entry.cls, registry, container_constants)
 
       "the assigned value is #{traced ? "a #{traced}" : 'not a proven instance'}, not exactly #{entry.cls}"
     end
@@ -271,6 +274,37 @@ module DeclaredConstants
 
       index = writer_index
       reg = insn.reg
+    end
+  end
+
+  # The one value reaching +reg+ at +idx+ is a STRING literal write.
+  def literal_string_writer?(irep, idx, reg)
+    writers = BytecodeIR.writers_reaching(irep, idx, reg)
+    writers&.length == 1 && writers.first[1].op == :STRING
+  end
+
+  # Every value reaching +reg+ at +idx+ is a `freeze` (Object#freeze answers its receiver, no program `freeze`) of a
+  # value that traces to exactly +cls+ (`"lit".freeze` is a String). A write that is not such a freeze, or the frame
+  # entry, on any path refuses.
+  def frozen_class_source?(irep, idx, reg, cls, registry, container_constants)
+    # A program `freeze` refuses only when it is on the receiver's ancestor chain (Object, Kernel and BasicObject for every
+    # class; Comparable for String); a singleton's `freeze` cannot answer a String.
+    chain = [cls, *(cls == 'String' ? %w[Comparable] : []), 'Object', 'Kernel', 'BasicObject']
+    return false if (registry['freeze'] || []).any? { |d| d.irep && !d.core && chain.include?(d.owner) }
+
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
+    return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+    program = BytecodeIR.for(irep)
+    defs.all? do |d|
+      insn = program.source_at(d.index)
+      next false unless insn.op == :SEND0 && insn.sym == 'freeze'
+
+      # The receiver is a literal of the class (a STRING write for String) or a value that traces to it.
+      writers = BytecodeIR.writers_reaching(irep, d.index, insn.reg)
+      literal = writers&.length == 1 && writers.first[1].op == :STRING && cls == 'String'
+      literal || trace_new_target(irep, d.index, insn.reg, nil, 0, nil, registry: registry,
+                                                                        container_constants: container_constants) == cls
     end
   end
 
