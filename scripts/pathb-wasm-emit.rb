@@ -940,6 +940,12 @@ class Fn
       @local_types << :i32
       @next_local += 1
     end
+    if uses_narrow_cf2i?(@form)
+      # an i32 scratch for the value of a float conversion to a 1- or 2-byte integer (see cf2i_narrow)
+      @cf2i_tmp = @next_local
+      @local_types << :i32
+      @next_local += 1
+    end
     @body = body_forms
     @body.each { |s| collect_lets(s) }
     @type_index = @mod.type_of(@param_types, @result)
@@ -1492,9 +1498,11 @@ class Fn
     when "cf2i"
       dst = parse_type(x[1])
       raise Refused, "cf2i to a non-integer" unless dst[0] == "int"
-      raise Refused, "cf2i to #{dst[1]} bytes (the range check is not lowered yet)" if dst[1] < 4
       src = op_type(x[2])
       raise Refused, "cf2i from a non-float" unless float_type?(src)
+      if dst[1] < 4
+        return cf2i_narrow(dst, src, x[2])
+      end
       push_op(x[2])
       w = wtype(dst)
       if src[1] == 4
@@ -1686,6 +1694,38 @@ class Fn
     e(0x42); leb_s(boff); e(0x86)                         # i64.shl
     e(0x84)                                              # i64.or
     e(store_u64_op(size)); memarg
+  end
+
+  # (cf2i T X) to a 1- or 2-byte integer: the float is truncated toward zero, and the result must be in the integer's
+  # range, else the module traps (the IR's rule for cf2i: a NaN or a value that does not fit). The truncation is to i32,
+  # which traps on a NaN too, and any value outside i32 is outside the narrow range as well; the range test is then on the
+  # i32. A value in the range is the same as the one the 4-byte conversion gives.
+  def cf2i_narrow(dst, src, operand)
+    push_op(operand)
+    e(0xbb) if src[1] == 4              # f64.promote_f32: the bounds are compared in double, as in the IR
+    e(0xaa)                              # i32.trunc_f64_s
+    e(0x22); leb_u(@cf2i_tmp)            # local.tee
+    if dst[2]
+      lo, hi = -(1 << (dst[1] * 8 - 1)), (1 << (dst[1] * 8 - 1)) - 1
+    else
+      lo, hi = 0, (1 << (dst[1] * 8)) - 1
+    end
+    e(0x20); leb_u(@cf2i_tmp); e(0x41); leb_s(lo); e(0x48)     # the value < lo
+    e(0x20); leb_u(@cf2i_tmp); e(0x41); leb_s(hi); e(0x4a)     # the value > hi
+    e(0x72)                              # i32.or
+    e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
+    e(0x20); leb_u(@cf2i_tmp)
+    :i32
+  end
+
+  # Whether the IR x has a float conversion to a 1- or 2-byte integer (its scratch local is then allocated).
+  def uses_narrow_cf2i?(x)
+    return false unless x.is_a?(Array)
+    if head_of(x) == "cf2i"
+      t = parse_type(x[1])
+      return true if t[0] == "int" && t[1] < 4
+    end
+    x.any? { |y| uses_narrow_cf2i?(y) }
   end
 
   # An atomic builtin: [kind, operation, size] for NAME (a fence has no size), or nil.
