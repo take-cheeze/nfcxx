@@ -28,7 +28,8 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
   The checked add, subtract, multiply and negate (`cadd`, `csub`, `cmul`, `cneg`) check with code 2: a narrow type is
   computed in 64 bits and range-checked; an 8-byte add or subtract uses the sign-bit identities; an 8-byte multiply divides
   the product back by the operand (a divisor of 0 or -1 is replaced by 1, see `checked_arith_lines`), so it needs no runtime.
-  Unsigned checked forms are refused, as the flat emitter refuses them.
+  The unsigned forms check with unsigned comparisons: a narrow result must not exceed the type's maximum, an add wraps below an
+  operand, a subtract borrows, a multiply divides back, and a negate of a nonzero value overflows.
   The runtime must not return when `cond` is nonzero (it traps; the test driver longjmps out). No block is split. `bool`
   checked ops are not emitted.
 - Floats: `s` and `d` classes; float literals are rounded to their type and written as exact hex, so `-0.0` survives.

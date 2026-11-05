@@ -1295,10 +1295,10 @@ end
       raise QbeUnsupported, "#{head(rv)} of bool" if t == "bool"
 
       w, signed = int_info(t)
-      raise QbeUnsupported, "#{head(rv)} on unsigned #{sx(t)}" unless signed
       a = head(rv) == "cneg" ? "0" : op(rv[2])
       b = head(rv) == "cneg" ? op(rv[2]) : op(rv[3])
       name = { "cadd" => "add", "csub" => "sub", "cneg" => "sub", "cmul" => "mul" }[head(rv)]
+      return unsigned_checked_lines(dst, w, name, a, b) unless signed
       if w == 64
         r = fresh
         if name == "mul"
@@ -1317,8 +1317,9 @@ end
           @lines << "  #{special} =w or #{zero}, #{minus_one}"
           @lines << "  #{special_l} =l extuw #{special}"
           @lines << "  #{mask} =l sub 0, #{special_l}"
-          @lines << "  #{masked} =l xor #{a}, 1"
-          @lines << "  #{masked} =l and #{masked}, #{mask}"
+          flipped = fresh
+          @lines << "  #{flipped} =l xor #{a}, 1"
+          @lines << "  #{masked} =l and #{flipped}, #{mask}"
           @lines << "  #{divisor} =l xor #{a}, #{masked}"
           quotient = fresh
           @lines << "  #{quotient} =l div #{r}, #{divisor}"
@@ -1374,6 +1375,55 @@ end
         check_call(bad, 2)
         @lines << "  #{dst} =w copy #{r}"
       end
+    end
+
+    # Checked unsigned add, subtract, multiply and negate (a negate is 0 minus the operand). A narrow type is computed in
+    # 64 bits from zero-extended operands and must not exceed its maximum; the 64-bit forms test the wrapped result with
+    # unsigned comparisons (an add wraps below an operand, a subtract is a borrow, a multiply divides back).
+    def unsigned_checked_lines(dst, w, name, a, b)
+      if w < 64
+        ea = fresh
+        eb = fresh
+        r = fresh
+        @lines << "  #{ea} =l extuw #{a}"
+        @lines << "  #{eb} =l extuw #{b}"
+        @lines << "  #{r} =l #{name} #{ea}, #{eb}"
+        bad = fresh
+        @lines << "  #{bad} =w cugtl #{r}, #{(1 << w) - 1}"
+        check_call(bad, 2)
+        @lines << "  #{dst} =w copy #{r}"
+        return
+      end
+      r = fresh
+      @lines << "  #{r} =l #{name} #{a}, #{b}"
+      bad = fresh
+      case name
+      when "add" then @lines << "  #{bad} =w cultl #{r}, #{a}"        # the sum wrapped below a
+      when "sub" then @lines << "  #{bad} =w cultl #{a}, #{b}"        # a borrow: a < b
+      else
+        # a != 0 and r / a != b, with a divisor of 0 replaced by 1 (0 never overflows)
+        zero = fresh
+        mask = fresh
+        zero_l = fresh
+        divisor = fresh
+        masked = fresh
+        quotient = fresh
+        differs = fresh
+        @lines << "  #{zero} =w ceql #{a}, 0"
+        @lines << "  #{zero_l} =l extuw #{zero}"
+        @lines << "  #{mask} =l sub 0, #{zero_l}"
+        flipped = fresh
+        @lines << "  #{flipped} =l xor #{a}, 1"
+        @lines << "  #{masked} =l and #{flipped}, #{mask}"
+        @lines << "  #{divisor} =l xor #{a}, #{masked}"
+        @lines << "  #{quotient} =l udiv #{r}, #{divisor}"
+        @lines << "  #{differs} =w cnel #{quotient}, #{b}"
+        not_zero = fresh
+        @lines << "  #{not_zero} =w xor #{zero}, 1"
+        @lines << "  #{bad} =w and #{differs}, #{not_zero}"
+      end
+      check_call(bad, 2)
+      @lines << "  #{dst} =l copy #{r}"
     end
 
     # The count must be in [0, w): an unsigned comparison of the count against w also rejects a negative count.
