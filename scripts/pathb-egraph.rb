@@ -233,12 +233,13 @@ module PathbEgraph
   end
 
   # Optimizes every ssa-function of a module text; other forms are printed unchanged.
-  def self.optimize_module(text, **opts)
+  def self.optimize_module(text, dispatch: false, **opts)
     stats = Hash.new(0)
     lines = read_forms(text).map do |form|
       next sx(form) unless head(form) == "ssa-function"
 
       out, st = optimize_fn(parse_fn(form), **opts)
+      out = dispatch_structurize(out) if dispatch
       st.each { |k, v| stats[k] += v }
       render(out)
     end
@@ -1488,6 +1489,144 @@ module PathbEgraph
       changed
     end
   end
+  # ---- the dispatch loop -----------------------------------------------------------------------------------------
+  # The function as one loop. A dispatch block switches on a state slot to the block to run, and every edge goes through
+  # a block that sets the state and returns to the dispatch (the unreachable block is the switch's default). A register
+  # that crosses blocks, and every phi, becomes a slot: its value is stored where it is defined and loaded where it is
+  # used, so no block depends on another's dominance. The result has no phis and every use is local to its block, so it
+  # is valid SSA, and it runs the same as the input (the check compares them). A backend without arbitrary control flow
+  # lowers it as one loop with a switch. The block 0 stays the entry: its code runs once, and a jump back to it is an arm.
+  # Returns nil for a function this form does not take: a value that crosses blocks and is an aggregate (its slot would
+  # need the struct layout, which the e-graph does not have). Such a function is left as it is.
+  def self.dispatch_structurize(fn)
+    blocks = fn.blocks
+    defs = {}     # register => block that defines it (a parameter: block 0)
+    types = {}    # register => IR type
+    fn.params[1..].each { |p| defs[p[1]] = 0; types[p[1]] = p[3] }
+    blocks.each do |id, blk|
+      blk[:phis].each { |ph| defs[ph.name] = id; types[ph.name] = ph.type }
+      blk[:instrs].each do |i|
+        next unless head(i) == "let"
+
+        defs[i[1]] = id
+        types[i[1]] = i[2]
+      end
+    end
+    # the uses of each register, by block: a use in a phi's operand is a use in the predecessor it comes from
+    uses = Hash.new { |h, k| h[k] = [] }
+    blocks.each do |id, blk|
+      blk[:instrs].each { |i| regs_of(head(i) == "let" ? i[2..] : i[1..]).each { |r| uses[r] << id } }
+      regs_of(blk[:term][1..]).each { |r| uses[r] << id }
+    end
+    blocks.each do |id, blk|
+      blk[:phis].each { |ph| ph.inc.each { |pred, v| regs_of(v).each { |r| uses[r] << pred } } }
+    end
+    phi_names = blocks.values.flat_map { |b| b[:phis].map(&:name) }
+    demoted = {}
+    defs.each_key { |r| demoted[r] = true if phi_names.include?(r) || uses[r].any? { |u| u != defs[r] } }
+    demoted.each_key { |r| dispatch_size(types[r]) }   # raises Unsupported for an aggregate
+
+    slot = ->(r) { "__dsp#{r[1..]}" }                     # the slot of register r
+    slot_ref = ->(r) { "$\"#{slot.call(r)}\"" }
+    state = "$\"__dsp_state\""
+    dispatch = blocks.keys.max + 1
+    unreachable = dispatch + 1
+    next_id = unreachable + 1
+    counter = 0
+    fresh = -> { counter += 1; "%dsp#{counter}" }
+    edges = {}                                             # [from, to] => the block that sets the state for it
+
+    out = {}
+    blocks.each do |id, blk|
+      loads = {}                                           # register => the load that gives it here
+      rewrite = nil
+      rewrite = lambda do |x|
+        case x
+        when Array then x.map { |y| rewrite.call(y) }
+        when String
+          if reg?(x) && demoted[x] && defs[x] != id
+            loads[x] ||= begin
+              name = fresh.call
+              [F("(let #{name} #{sx(types[x])} (load #{sx(types[x])} #{slot_ref.call(x)}))"), name]
+            end
+            loads[x][1]
+          else
+            x
+          end
+        else x
+        end
+      end
+      body = []
+      blk[:instrs].each do |i|
+        ri = rewrite.call(i)
+        body << ri
+        if head(i) == "let" && demoted[i[1]]
+          body << F("(store #{sx(types[i[1]])} #{slot_ref.call(i[1])} #{i[1]})")
+        end
+      end
+      if id == 0
+        fn.params[1..].each do |p|
+          body.unshift(F("(store #{sx(p[3])} #{slot_ref.call(p[1])} #{p[1]})")) if demoted[p[1]]
+        end
+      end
+      blk[:phis].each do |ph|
+        body.unshift(F("(let #{ph.name} #{sx(ph.type)} (load #{sx(ph.type)} #{slot_ref.call(ph.name)}))"))
+      end
+      blocks.each_value do |succ|
+        succ[:phis].each do |ph|
+          next unless ph.inc.key?(id)
+
+          body << F("(store #{sx(ph.type)} #{slot_ref.call(ph.name)} #{sx(rewrite.call(ph.inc[id]))})")
+        end
+      end
+      term = rewrite.call(blk[:term])
+      target = lambda do |t|
+        edges[[id, t]] ||= next_id.tap { next_id += 1 }
+        edges[[id, t]]
+      end
+      term = case term[0]
+             when "br" then ["br", target.call(term[1])]
+             when "condbr" then ["condbr", term[1], target.call(term[2]), target.call(term[3])]
+             when "switch"
+               ["switch", term[1], term[2].map { |v, t| [v, target.call(t)] }, target.call(term[3])]
+             else term
+             end
+      out[id] = { phis: [], instrs: loads.values.map(&:first) + body, term: term }
+    end
+
+    # the dispatch, the unreachable default, and an edge block per edge: it sets the state and returns to the dispatch
+    out[dispatch] = { phis: [], instrs: [F("(let %dstate int (load int #{state}))")],
+                      term: ["switch", "%dstate", blocks.keys.sort.map { |k| [k, k] }, unreachable] }
+    out[unreachable] = { phis: [], instrs: [], term: ["unreachable"] }
+    edges.each do |(from, to), eb|
+      out[eb] = { phis: [], instrs: [F("(store int #{state} (const int #{to}))")], term: ["br", dispatch] }
+    end
+    header = fn.header + [F("(slot \"__dsp_state\" int 4 4)")] +
+             demoted.keys.map { |r| size = dispatch_size(types[r]); F("(slot \"#{slot.call(r)}\" #{sx(types[r])} #{size} #{size})") }
+    EFn.new(fn.name, fn.ret, fn.params, header, out)
+  rescue Unsupported
+    nil
+  end
+
+  # The size of a scalar slot of type t (the layout of INT_TYPES, pointers and the floating types).
+  def self.dispatch_size(t)
+    return 8 if head(t) == "ptr"
+
+    { "float" => 4, "double" => 8, "bool" => 1 }.fetch(t) { INT_TYPES.fetch(t) { raise Unsupported, "slot of type #{sx(t)}" }[0] / 8 }
+  end
+
+  # The registers named in x (strings that start with %).
+  def self.regs_of(x)
+    case x
+    when Array then x.flat_map { |y| regs_of(y) }
+    when String then reg?(x) ? [x] : []
+    else []
+    end
+  end
+
+  # One form read from SSA text: the parts of a rewritten function are built from text, so their objects are the reader's.
+  def self.F(text) = read_forms(text).first
+
 end
 
 # ---- command line ---------------------------------------------------------------------------------------------
@@ -1504,6 +1643,7 @@ def egraph_cli(argv)
     when "--stats" then stats = true
     when "--iters" then opts[:iters] = Integer(argv.shift, 10)
     when "--nodes" then opts[:nodes] = Integer(argv.shift, 10)
+    when "--dispatch" then opts[:dispatch] = true
     when "--cost"
       model = argv.shift.to_s.to_sym
       abort "pathb-egraph: --cost nodes or weighted" unless PathbEgraph::Optimizer::COST_MODELS.include?(model)
@@ -1511,7 +1651,7 @@ def egraph_cli(argv)
     else file = a
     end
   end
-  abort "usage: pathb-egraph.rb [--check] [--stats] [--iters N] [--nodes N] [--cost nodes|weighted] FILE.ssa" unless file
+  abort "usage: pathb-egraph.rb [--check] [--stats] [--iters N] [--nodes N] [--cost nodes|weighted] [--dispatch] FILE.ssa" unless file
 
   text = file == "-" ? $stdin.read : File.read(file)
   if check

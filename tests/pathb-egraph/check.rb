@@ -127,8 +127,14 @@ def check_goldens(files)
         # and the weighted cost model's form is verified
         weighted, = PathbEgraph.optimize_fn(PathbEgraph.parse_fn(read_forms(text).first), cost: :weighted)
         PathbEgraph.verify(weighted)
+        # and the dispatch loop of the optimized form is verified (it has no phis, and every use is local to its block)
+        disp = PathbEgraph.dispatch_structurize(out)
+        PathbEgraph.verify(disp) if disp
         # Where the interpreter runs the function (integer code), the optimized form returns the same values.
         diff_random(orig, out, totals, failures, text)
+        # the dispatch loop of the optimized form runs the same on the random inputs
+        disp = PathbEgraph.dispatch_structurize(out)
+        diff_random(orig, disp, Hash.new(0), failures, text) if disp
       rescue Fail, Unsupported => e
         failures << "#{File.basename(f)} #{text[/\(ssa-function ("[^"]*")/, 1]}: #{e.message}"
       end
@@ -221,6 +227,9 @@ def check_case(f)
   tight, = PathbEgraph.optimize_fn(orig, iters: 1, nodes: 4)
   # The same function under the weighted cost model: a different choice of equal forms, still correct.
   weighted, = PathbEgraph.optimize_fn(orig, cost: :weighted)
+  # The dispatch loop of the optimized form: one loop with a switch, the same results.
+  dispatch = PathbEgraph.dispatch_structurize(opt)
+  PathbEgraph.verify(dispatch) if dispatch
   before = PathbEgraph.let_counts(orig)
   after = PathbEgraph.let_counts(opt)
   errors = []
@@ -240,11 +249,13 @@ def check_case(f)
       b = interpret(opt, args)
       c = interpret(tight, args)
       d = interpret(weighted, args)
-      if a == :unsupported || b == :unsupported || c == :unsupported || d == :unsupported
+      e = dispatch && interpret(dispatch, args)
+      if a == :unsupported || b == :unsupported || c == :unsupported || d == :unsupported || e == :unsupported
         unsupported += 1
-        errors << "#{args} is unsupported in one form only" unless a == b && a == c && a == d
+        errors << "#{args} is unsupported in one form only" unless a == b && a == c && a == d && (e.nil? || a == e)
         next
       end
+      errors << "#{args}: original #{a}, dispatch loop #{e}" if e && a != e
       runs += 1
       errors << "#{args}: original #{a}, optimized #{b}" unless a == b
       errors << "#{args}: original #{a}, tight budget #{c}" unless a == c
