@@ -313,7 +313,7 @@ module PathbEgraph
 
     # The global passes that run after the per-block e-graphs, in this order. Each one takes the blocks and changes them
     # in place. PathbEgraph.optimize_fn can run another list (passes:), and can verify the form after each pass (check:).
-    PASSES = %i[cse_dominator apply_subst fold_control dce].freeze
+    PASSES = %i[cse_dominator apply_subst hoist_invariants fold_control dce].freeze
 
     def run(passes: PASSES, check: false)
       before = PathbEgraph.let_counts(@fn)
@@ -1295,6 +1295,76 @@ module PathbEgraph
         pushed[b] = keys
         stack << [b, false]
         children[b].each { |c| stack << [c, true] }
+      end
+    end
+
+    # Operations that hoisting may move: pure, and they cannot trap or read memory (division, shifts and the checked
+    # forms can, and load reads the memory), so running them on a path that would not have run them changes nothing.
+    HOISTABLE = %w[const null iconv wadd wsub wmul wneg lt.s lt.u le.s le.u eq ne and or xor not index offset
+                   fadd fsub fmul fdiv fneg fconv i2f u2f lt.f le.f].freeze
+
+    # Loop-invariant code motion: a hoistable let in a loop whose operands are all defined outside the loop moves to the
+    # loop's preheader (the one block outside the loop that is the header's only other predecessor, and ends in a br to
+    # the header). The preheader dominates the loop, so the operands still dominate the moved let, and the moved let runs
+    # once rather than once per iteration. Moved lets can make the next ones invariant, so the loop repeats until nothing
+    # moves. A loop with no preheader is left as it is.
+    def hoist_invariants(out)
+      efn = EFn.new(@fn.name, @fn.ret, @fn.params, @fn.header, out)
+      rpo = PathbEgraph.reverse_postorder(efn)
+      preds, idom = PathbEgraph.idoms(efn, rpo)
+      dominates = lambda do |a, b|
+        x = b
+        loop do
+          return true if x == a
+          return false if x == 0 || !idom.key?(x)
+
+          x = idom[x]
+        end
+      end
+      def_block = {}
+      out.each do |id, blk|
+        blk[:phis].each { |ph| def_block[ph.name] = id }
+        blk[:instrs].each { |ins| def_block[ins[1]] = id if head(ins) == "let" }
+      end
+      out.each_key do |h|
+        latches = (preds[h] || []).select { |p| dominates.call(h, p) }
+        next if latches.empty?
+
+        body = [h]
+        stack = latches.dup
+        until stack.empty?
+          b = stack.pop
+          next if body.include?(b)
+
+          body << b
+          stack.concat(preds[b] || [])
+        end
+        outside = (preds[h] || []).reject { |p| body.include?(p) }
+        next unless outside.size == 1
+
+        pre = outside[0]
+        next unless out[pre][:term][0] == "br" && out[pre][:term][1] == h
+
+        loop do
+          moved = false
+          body.sort.each do |b|
+            keep = []
+            out[b][:instrs].each do |ins|
+              movable = head(ins) == "let" && HOISTABLE.include?(head(ins[3])) &&
+                PathbEgraph.regs_of(ins[3]).all? { |r| !body.include?(def_block[r]) }
+              if movable
+                out[pre][:instrs] << ins
+                def_block[ins[1]] = pre
+                @stats[:hoisted] += 1
+                moved = true
+              else
+                keep << ins
+              end
+            end
+            out[b][:instrs] = keep
+          end
+          break unless moved
+        end
       end
     end
 
