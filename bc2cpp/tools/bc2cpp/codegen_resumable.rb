@@ -503,8 +503,7 @@ class CodeGen
   # `_impl`, the function the registered entry calls: hands a VM-called invocation to the
   # bytecode driver and steps to completion when called from C (where Fiber.yield could
   # not have worked in the bytecode either).
-  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false,
-                               always_exec: false)
+  def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false)
     thunk = "#{step_name}_thunk"
     if arg_names.empty? && !blk
       # No arguments: the frame starts empty, and the driver's first step creates it.
@@ -517,7 +516,6 @@ class CodeGen
         mrb_value #{impl_name}(mrb_state* M, mrb_value self) {
           bc2cpp_check_argc(M, 0, 0);
           bc2cpp_resumable_init(M);
-          if (bc2cpp_resumable_exec_ok(M, 0)) return bc2cpp_resumable_exec(M, self, #{thunk}, mrb_nil_value());
           mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
           for (;;) {
             mrb_value result = #{step_name}(M, self, frame, resume);
@@ -568,7 +566,6 @@ head = <<~CPP
 CPP
 tail = <<~CPP
     mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
-    #{always_exec ? "return bc2cpp_resumable_exec(M, self, #{thunk}, frame);" : "if (bc2cpp_resumable_exec_ok(M, #{optional.positive? || rest ? 'mrb_get_argc(M)' : n})) return bc2cpp_resumable_exec(M, self, #{thunk}, frame);"}
     mrb_value resume = mrb_nil_value();
     for (;;) {
       mrb_value result = #{step_name}(M, self, frame, resume);
@@ -586,43 +583,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
   def emit_resumable_helpers(compiled)
     return '' unless compiled.any? { |m| m[:resumable] }
 
-    if (dir = ENV['BC2CPP_NATIVE_VM_DIR'])
-      require_relative 'native_vm'
-      native = NativeVM.compile(RESUMABLE_DRIVER_RB, 'bc2cpp_resumable_native', mrbc: MRBC, dir: dir)
-      helpers = RESUMABLE_HELPERS_CPP.sub(/^[ \t]*static const uint8_t driver\[\] = \{.*?^[ \t]*\};\n/m, '')
-      raise 'native resumable driver still contains bytecode' if helpers.include?('@DRIVER@')
-
-      helpers = helpers.sub('mrb_load_irep(M, driver);', 'bc2cpp_resumable_native_init_syms(M); mrb_load_proc(M, bc2cpp_resumable_native);')
-      return "#{native}\n#{helpers}\n"
-    end
-
-    raise 'resumable continuation needs BC2CPP_NATIVE_VM_DIR (native continuation only)'
-
-  end
-
-  # Loaded from inside a running method, so the module and every constant it names are
-  # spelled from the top level: a bare `module` would nest in that method's class.
-  RESUMABLE_DRIVER_RB = <<~'RUBY'
-    module ::Bc2cppResumable
-      def drive(&step)
-        f = step.call(self, ::Bc2cppResumable.take_initial, nil)
-        while ::Bc2cppResumable::Frame === f
-          f = step.call(self, f, f.block_call? ? f.block.call(*f.value) : ::Fiber.yield(f.value))
-        end
-        f
-      end
-    end
-  RUBY
-
-  # The driver compiled by the same mrbc that compiled the program: the bytes of a C array.
-  def resumable_driver_bytes
-    require 'tmpdir'
-    Dir.mktmpdir('bc2cpp_driver') do |dir|
-      File.write(File.join(dir, 'driver.rb'), RESUMABLE_DRIVER_RB)
-      system(MRBC, '-Bbc2cpp_resumable_driver', '-o', File.join(dir, 'driver.c'), File.join(dir, 'driver.rb'),
-             exception: true)
-      File.read(File.join(dir, 'driver.c'))[/\{(.*)\};/m, 1].strip
-    end
+    "#{RESUMABLE_HELPERS_CPP}\n"
   end
 
   RESUMABLE_HELPERS_CPP = <<~'CPP'
@@ -700,67 +661,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     static mrb_value bc2cpp_block_args_from(mrb_state* M, std::initializer_list<mrb_value> values) {
       return mrb_ary_new_from_values(M, (mrb_int)values.size(), values.begin());
     }
-    static mrb_value bc2cpp_resumable_take_initial(mrb_state* M, mrb_value self);
     static void bc2cpp_resumable_init(mrb_state* M) {
       if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "Bc2cppResumable"))) return;
-      static const uint8_t driver[] = {
-    @DRIVER@
-      };
       struct RClass* mod = mrb_define_module(M, "Bc2cppResumable");
       struct RClass* frame = mrb_define_class_under(M, mod, "Frame", M->object_class);
       MRB_SET_INSTANCE_TT(frame, MRB_TT_DATA);
       mrb_define_method(M, frame, "value", bc2cpp_resume_frame_value, MRB_ARGS_NONE());
       mrb_define_method(M, frame, "block_call?", bc2cpp_resume_frame_block_call, MRB_ARGS_NONE());
       mrb_define_method(M, frame, "block", bc2cpp_resume_frame_block, MRB_ARGS_NONE());
-      mrb_define_module_function(M, mod, "take_initial", bc2cpp_resumable_take_initial, MRB_ARGS_NONE());
-      mrb_load_irep(M, driver);
-      if (M->exc) mrb_exc_raise(M, mrb_obj_value(M->exc));
-      struct RClass* found = mod;
-      mrb_sym name = mrb_intern_lit(M, "drive");
-      mrb_method_t method = mrb_method_search_vm(M, &found, name);
-      if (found != mod || MRB_METHOD_UNDEF_P(method) || !MRB_METHOD_PROC_P(method)) {
-        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: Bc2cppResumable#drive is missing");
-      }
-      // Root the Proc before removing its temporary name; every compiled unit shares this module.
-      mrb_iv_set(M, mrb_obj_value(mod), mrb_intern_lit(M, "__driver__"), mrb_obj_value((struct RProc*)MRB_METHOD_PROC(method)));
-      mrb_remove_method(M, mod, name);
-    }
-    // Called from the VM straight (no C frame between the caller and this entry), with no
-    // arguments: the only situation in which the bytecode driver can Fiber.yield.
-    static bool bc2cpp_resumable_exec_ok(mrb_state* M, mrb_int argc) {
-      mrb_callinfo* ci = M->c->ci;
-      return ci->cci == 0 && ci->n == argc && ci->nk == 0;
-    }
-    // The frame of a call with arguments, parked for the driver's first step (Bc2cppResumable.take_initial). It is
-    // set just before the driver runs and cleared as soon as the driver returns, so no other call sees it.
-    static void bc2cpp_resumable_handoff(mrb_state* M, mrb_value frame) {
-      struct RClass* mod = mrb_module_get(M, "Bc2cppResumable");
-      mrb_iv_set(M, mrb_obj_value(mod), mrb_intern_lit(M, "__handoff__"), frame);
-    }
-    static mrb_value bc2cpp_resumable_take_initial(mrb_state* M, mrb_value self) {
-      mrb_sym sym = mrb_intern_lit(M, "__handoff__");
-      mrb_value frame = mrb_iv_get(M, self, sym);
-      mrb_iv_set(M, self, sym, mrb_nil_value());
-      return frame;
-    }
-    // exec_irep leaves the block slot (stack[1] for a call without arguments) to the new
-    // frame, whose `&step` parameter is the cfunc proc that runs the step function.
-    static mrb_value bc2cpp_resumable_exec(mrb_state* M, mrb_value self, mrb_func_t thunk, mrb_value frame) {
-      struct RClass* mod = mrb_module_get(M, "Bc2cppResumable");
-      mrb_value driver = mrb_iv_get(M, mrb_obj_value(mod), mrb_intern_lit(M, "__driver__"));
-      if (!mrb_proc_p(driver)) {
-        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: saved resumable driver is missing");
-      }
-      // The driver takes no positional arguments: it is entered as a call with none, so the block sits in slot 1 and
-      // the call's count is zero. exec_irep only pushes the driver's frame: the VM runs it after this function returns,
-      // so the frame is left in place (the caller's count is not restored), and the handoff stays until the driver's
-      // first step takes it (Bc2cppResumable.take_initial). The arguments are already in the frame.
-      M->c->ci->stack[1] = mrb_obj_value(mrb_proc_new_cfunc(M, thunk));
-      M->c->ci->n = 0;
-      // A call from C can carry an empty keyword hash (`**kwd` in __enumerator_block_call); the driver takes none.
-      M->c->ci->nk = 0;
-      bc2cpp_resumable_handoff(M, frame);
-      return mrb_exec_irep(M, self, mrb_proc_ptr(driver));
     }
     // A step of a method called from C yielded: hand it to the real Fiber.yield, which raises
     // the FiberError the interpreted method would have raised.
