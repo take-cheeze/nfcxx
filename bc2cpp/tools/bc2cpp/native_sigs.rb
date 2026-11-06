@@ -86,6 +86,7 @@ module NativeSigs
   def kept_texts(file = FILE)
     @kept_texts ||= {}
     @kept_texts[file] ||= begin
+      require 'pathname'
       require 'rbs'
       ScanCache.fetch("native_sigs.kept_texts.#{File.basename(file)}.rbs#{RBS::VERSION}", [file], cache_absent: false) do
         kept_texts_of(parse(file), File.readlines(file))
@@ -147,6 +148,7 @@ module NativeSigs
   def parse(file = FILE)
     @parse ||= {}
     @parse[file] ||= begin
+      require 'pathname'
       require 'rbs'
       RbsParseMemo.decls(File.basename(file), File.read(file))
     rescue LoadError
