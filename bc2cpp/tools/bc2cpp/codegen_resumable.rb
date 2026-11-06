@@ -738,7 +738,8 @@ class CodeGen
           return #{step_name}(M, self, frame, resume);
         }
         mrb_value #{impl_name}(mrb_state* M, mrb_value self) {
-          bc2cpp_check_argc(M, 0, 0);
+          // An armed entry is reached from the runtime (a dispatcher, a CALL site, a Fiber body's start), which counted already.
+          if (!bc2cpp_prologue.expect) bc2cpp_check_argc(M, 0, 0);
           bc2cpp_resumable_init(M);
           mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
           if (bc2cpp_prologue_armed(M, #{c_string_literal(owner_name)}, self)) {
@@ -965,7 +966,6 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return false unless (region[:upvars] || []).empty? || block_step_upvars_ok?(region, owner_def)
     return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
     body = fiber_new_site?(region) && !fiber_body_target_id(region, owner_def)
-    return false if body && !(mandatory_arity(block).zero? && pure_mandatory_arity?(block))
     return false if (!body && tail_yield_block?(block)) || (body && BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK))
     return false if body && (region[:needs_brk] || region[:needs_ret])
     return false if BytecodeIR.for(block).op?(:BLKPUSH) && !region[:needs_blk] # a BLKPUSH is the method's block only when it is passed in
