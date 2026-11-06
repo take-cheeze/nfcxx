@@ -817,12 +817,20 @@ module Bc2cppCompiledGemGeneration
 
   def run_group(common, srcs, group, gems_root)
     bc2cpp = File.join(gems_root, 'tools/bc2cpp/bc2cpp.rb')
+    # BC2CPP_MRUBY_RUNNER (opt-in): the bc2cpp executable (host-libs/mruby-bc2cpp-runner) generates the code instead of
+    # CRuby running bc2cpp.rb. Its subprocesses go through BC2CPP_RUBY, which the caller sets to tools/bc2cpp/mruby-ruby.
+    runner = ENV['BC2CPP_MRUBY_RUNNER']
+    launcher = if runner && !runner.empty?
+                 "#{runner.shellescape} #{File.join(gems_root, 'host-libs/mruby-bc2cpp-runner/bc2cpp_main.rb').shellescape}"
+               else
+                 "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape}"
+               end
     group.each { |env, _, _| FileUtils.mkdir_p(env.fetch('OUT_DIR')) }
     return stub_group(group) if ENV['BC2CPP_STUB_GENERATION'] == '1'
 
     if group.size == 1
       env, _, generated = group.first
-      sh env.merge(gc_env), "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
+      sh env.merge(gc_env), "#{launcher} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
     else
       plan = "#{group.first[2]}.units.json"
       units = group.map do |env, _, generated|
@@ -830,7 +838,7 @@ module Bc2cppCompiledGemGeneration
       end
       File.write(plan, JSON.generate(units))
       sh common.merge(SharedGeneration::UNIT_KEYS.to_h { |k| [k, nil] }, gc_env),
-         "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{SharedGeneration::FLAG} #{plan.shellescape} " \
+         "#{launcher} #{SharedGeneration::FLAG} #{plan.shellescape} " \
          "#{srcs.map(&:shellescape).join(' ')}"
       FileUtils.rm_f([plan, *units.map { |unit| unit['err'] }])
     end
