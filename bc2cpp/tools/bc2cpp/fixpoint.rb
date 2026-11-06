@@ -24,7 +24,8 @@ module Fixpoint
     limit.times do
       return unless yield
     end
+    at = where ? "#{where.path}:#{where.lineno}" : "unknown location"
     raise NotConverged, "bc2cpp: #{analysis} did not reach a fixed point in #{limit} rounds " \
-                        "(#{where.path}:#{where.lineno}); its facts were still changing, so none of them are used"
+                        "(#{at}); its facts were still changing, so none of them are used"
   end
 end
