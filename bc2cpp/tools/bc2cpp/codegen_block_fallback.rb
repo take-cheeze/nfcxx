@@ -1245,6 +1245,13 @@ class CodeGen
                                               ret_token: ret_token, brk_token: brk_token,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
                                               yield_free: region[:yield_free])
+    # FIBER_BODY: `Fiber.new { prologue; m(args) }` is a C++ Fiber whose root frame runs the block and then the
+    # suspendable method `m` (tools/bc2cpp/runtime/bc2cpp_fiber.hxx), not an mruby Fiber over a cfunc proc.
+    if (fiber_id = fiber_body_target_id(region, owner_def))
+      @fiber_body_used = true
+      return "  // FIBER_BODY :new -- the body is the root frame of a C++ Fiber (#{fiber_id})\n  {\n#{ctor}" \
+             "    r#{dest_reg} = bc2cpp_fiber_new_body(M, mrb_obj_value(#{rproc_var}), #{c_string_literal(fiber_id)});\n  }\n"
+    end
     # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
     # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
     stack_expr = stack_block_expr(region)

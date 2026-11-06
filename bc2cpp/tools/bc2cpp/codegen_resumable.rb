@@ -517,6 +517,9 @@ class CodeGen
           bc2cpp_check_argc(M, 0, 0);
           bc2cpp_resumable_init(M);
           mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
+          if (bc2cpp_prologue_armed(#{c_string_literal(owner_name)})) {
+            return bc2cpp_prologue_park(bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+          }
           for (;;) {
             mrb_value result = #{step_name}(M, self, frame, resume);
             if (!bc2cpp_resume_frame_p(M, result)) return result;
@@ -566,6 +569,9 @@ head = <<~CPP
 CPP
 tail = <<~CPP
     mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
+    if (bc2cpp_prologue_armed(#{c_string_literal(owner_name)})) {
+      return bc2cpp_prologue_park(bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+    }
     mrb_value resume = mrb_nil_value();
     for (;;) {
       mrb_value result = #{step_name}(M, self, frame, resume);
@@ -579,11 +585,52 @@ CPP
 head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
   end
 
-  # The run-time half, emitted once per generated file that has a resumable method.
+  # The run-time half, emitted once per generated file that has a resumable method or a Fiber body.
   def emit_resumable_helpers(compiled)
-    return '' unless compiled.any? { |m| m[:resumable] }
+    return '' unless compiled.any? { |m| m[:resumable] } || @fiber_body_used
 
-    "#{RESUMABLE_HELPERS_CPP}\n"
+    "#{RESUMABLE_HELPERS_CPP}\n#{fiber_runtime_cpp}\n"
+  end
+
+  FIBER_RUNTIME_DIR = File.expand_path('runtime', __dir__)
+
+  # The C++ Fiber runtime (tools/bc2cpp/runtime): its text goes into the generated file, so a build needs no extra
+  # include path. bc2cpp_fiber.hxx is standalone; bc2cpp_fiber_methods.hxx uses the helpers just before it.
+  def fiber_runtime_cpp
+    %w[bc2cpp_fiber.hxx bc2cpp_fiber_methods.hxx].map do |name|
+      File.read(File.join(FIBER_RUNTIME_DIR, name)).gsub(/^#pragma once\n/, '')
+    end.join("\n")
+  end
+
+  # Ops a Fiber body's prologue may use before its tail call: they read the receiver's state and make constants, so
+  # none of them can reach a suspendable method.
+  FIBER_BODY_PLAIN_OPS = %i[ENTER GETIV MOVE LOADSELF LOADNIL LOADT LOADF LOADSYM].freeze
+
+  # `Fiber.new { prologue; m(args) }`: the block ends with a call on self to a suspendable method `m` of the
+  # enclosing method's owner and returns its value. The block's only call is that one, so the C++ Fiber can run the block
+  # with `m` armed (bc2cpp_prologue), let `m`'s entry park its frame instead of running it, and call that frame as
+  # the fiber's body. Returns the entry's id ("Owner#m"), or nil for any other shape (the site then keeps its old form).
+  def fiber_body_target_id(region, owner_def)
+    return nil unless owner_def && region[:name] == 'new' && !region[:self_implicit] && region[:n].to_i.zero?
+
+    parent = region[:parent_irep]
+    idx = parent && parent.index_of_addr(region[:sendb_addr])
+    return nil unless idx && fiber_const_receiver?(parent, idx, region[:dest_reg])
+
+    nodes = BytecodeIR.for(region[:block_irep]).instructions
+    send = nodes[-2]
+    ret = nodes[-1]
+    return nil unless ret&.op == :RETURN && %i[SSEND SSEND0].include?(send&.op) && send.source.reg == ret.source.reg
+    return nil unless nodes[0...-2].all? { |n| FIBER_BODY_PLAIN_OPS.include?(n.op) || n.op.to_s.start_with?('LOADI') }
+
+    name = send.source.sym
+    targets = (@registry[name] || []).select { |d| d.owner == owner_def.owner && d.irep }
+    return nil unless targets.size == 1
+
+    label = targets.first.irep
+    return nil unless @fiber_roots&.include?(label) && resumable_method?(label)
+
+    "#{targets.first.owner}##{name}"
   end
 
   RESUMABLE_HELPERS_CPP = <<~'CPP'

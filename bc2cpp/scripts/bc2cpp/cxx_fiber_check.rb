@@ -27,29 +27,29 @@ TEST = <<~'CPP'
   #include <stdio.h>
 
   // A body that yields 1, 2, 3 and then finishes with 99.
-  struct Count { Bc2cppFrame f; int state; };
-  static void count_step(mrb_state* M, Bc2cppFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+  struct Count { Bc2cppFiberFrame f; int state; };
+  static void count_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
     Count* c = (Count*)frame;
     if (c->state < 3) { out->kind = BC2CPP_STEP_YIELD; out->value = mrb_fixnum_value(++c->state); return; }
     out->kind = BC2CPP_STEP_DONE; out->value = mrb_fixnum_value(99);
   }
-  static Bc2cppFrame* count_new(mrb_state* M) {
+  static Bc2cppFiberFrame* count_new(mrb_state* M) {
     Count* c = (Count*)mrb_calloc(M, 1, sizeof(Count));
     c->f.step = count_step;
     return &c->f;
   }
 
   // A child that yields twice and returns the sum of what it was resumed with.
-  struct Child { Bc2cppFrame f; int state; mrb_int sum; };
-  static void child_step(mrb_state* M, Bc2cppFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+  struct Child { Bc2cppFiberFrame f; int state; mrb_int sum; };
+  static void child_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
     Child* c = (Child*)frame;
     if (c->state > 0) c->sum += mrb_fixnum(resume);
     if (c->state < 2) { out->kind = BC2CPP_STEP_YIELD; out->value = mrb_fixnum_value(10 + c->state++); return; }
     out->kind = BC2CPP_STEP_DONE; out->value = mrb_fixnum_value(c->sum);
   }
   // A parent that calls the child and then yields the child's result.
-  struct Parent { Bc2cppFrame f; int state; };
-  static void parent_step(mrb_state* M, Bc2cppFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+  struct Parent { Bc2cppFiberFrame f; int state; };
+  static void parent_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
     Parent* p = (Parent*)frame;
     if (p->state == 0) {
       p->state = 1;
@@ -63,16 +63,16 @@ TEST = <<~'CPP'
 
   // Array#each with a block that yields each element (the Enumerator#next shape): each's frame calls the block's
   // frame for every element; the block's frame yields the element and returns what it is resumed with.
-  struct Blk { Bc2cppFrame f; int state; mrb_value elem; };
-  static void blk_step(mrb_state* M, Bc2cppFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+  struct Blk { Bc2cppFiberFrame f; int state; mrb_value elem; };
+  static void blk_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
     Blk* b = (Blk*)frame;
     if (b->state == 0) { b->state = 1; out->kind = BC2CPP_STEP_YIELD; out->value = b->elem; return; }
     out->kind = BC2CPP_STEP_DONE; out->value = resume;
   }
-  static void blk_mark(mrb_state* M, Bc2cppFrame* frame) { mrb_gc_mark_value(M, ((Blk*)frame)->elem); }
-  struct Each { Bc2cppFrame f; int i; mrb_value ary; };
-  static void each_mark(mrb_state* M, Bc2cppFrame* frame) { mrb_gc_mark_value(M, ((Each*)frame)->ary); }
-  static void each_step(mrb_state* M, Bc2cppFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+  static void blk_mark(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value refs) { bc2cpp_fiber_ref(M, refs, ((Blk*)frame)->elem); }
+  struct Each { Bc2cppFiberFrame f; int i; mrb_value ary; };
+  static void each_mark(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value refs) { bc2cpp_fiber_ref(M, refs, ((Each*)frame)->ary); }
+  static void each_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
     Each* e = (Each*)frame;
     if (e->i < RARRAY_LEN(e->ary)) {
       Blk* b = (Blk*)mrb_calloc(M, 1, sizeof(Blk));
@@ -83,7 +83,7 @@ TEST = <<~'CPP'
     out->kind = BC2CPP_STEP_DONE; out->value = e->ary;
   }
 
-  static void boom_step(mrb_state* M, Bc2cppFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+  static void boom_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
     mrb_raise(M, mrb_class_get(M, "RuntimeError"), "boom");
   }
 
@@ -127,7 +127,7 @@ TEST = <<~'CPP'
       printf("each alive %d\n", (int)bc2cpp_fiber_alive_p(M, fib));
     }
     {
-      Bc2cppFrame* boom = (Bc2cppFrame*)mrb_calloc(M, 1, sizeof(Bc2cppFrame));
+      Bc2cppFiberFrame* boom = (Bc2cppFiberFrame*)mrb_calloc(M, 1, sizeof(Bc2cppFiberFrame));
       boom->step = boom_step;
       mrb_value fib = bc2cpp_fiber_new(M, boom);
       struct Run { static mrb_value call(mrb_state* M, void* p) { return bc2cpp_fiber_resume(M, *(mrb_value*)p, mrb_nil_value()); } };
@@ -137,7 +137,7 @@ TEST = <<~'CPP'
       show(M, "boom", mrb_funcall(M, exc, "message", 0));
     }
     {
-      mrb_value r = bc2cpp_run_to_completion(M, [&]{ Bc2cppFrame* f = (Bc2cppFrame*)mrb_calloc(M, 1, sizeof(Bc2cppFrame)); f->step = [](mrb_state*, Bc2cppFrame*, mrb_value, Bc2cppStepOut* o){ o->kind = BC2CPP_STEP_DONE; o->value = mrb_fixnum_value(7); }; return f; }(), mrb_nil_value());
+      mrb_value r = bc2cpp_run_to_completion(M, [&]{ Bc2cppFiberFrame* f = (Bc2cppFiberFrame*)mrb_calloc(M, 1, sizeof(Bc2cppFiberFrame)); f->step = [](mrb_state*, Bc2cppFiberFrame*, mrb_value, Bc2cppStepOut* o){ o->kind = BC2CPP_STEP_DONE; o->value = mrb_fixnum_value(7); }; return f; }(), mrb_nil_value());
       show(M, "to_completion", r);
       struct Y { static mrb_value call(mrb_state* M, void*) {
         return bc2cpp_run_to_completion(M, count_new(M), mrb_nil_value()); } };
@@ -151,6 +151,7 @@ TEST = <<~'CPP'
       mrb_gv_set(M, mrb_intern_lit(M, "$fib"), fib);
       show(M, "ruby", mrb_load_string(M, "a = [$fib.resume, $fib.resume(5), $fib.resume, $fib.resume]; a << $fib.alive?; a"));
       show(M, "ruby class", mrb_load_string(M, "$fib.class"));
+      show(M, "mruby fiber", mrb_load_string(M, "f = Fiber.new { Fiber.yield 1; 2 }; r = [f.resume, f.alive?, f.resume]; r << f.alive?; r"));
     }
     mrb_close(M);
     return 0;
@@ -179,7 +180,8 @@ EXPECTED = <<~OUT
   to_completion 7
   yield outside fiber raises 1
   ruby [1, 2, 3, 99, false]
-  ruby class Bc2cppFiber
+  ruby class Fiber
+  mruby fiber [1, true, 2, false]
 OUT
 
 Dir.mktmpdir('cxx_fiber') do |dir|
