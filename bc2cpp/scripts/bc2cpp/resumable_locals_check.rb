@@ -129,7 +129,7 @@ check.call("every yield (#{yields}) stores the registers back before returning",
 check.call('no #error in the generated code', !code.include?('#error'))
 block_step = step_function(code, 'RlBlock')
 check.call('a step function taking a register address keeps references into the frame',
-           block_step.match?(/mrb_cptr_value\(M, &r\d+\)/) && block_step.match?(/^  mrb_value& r\d+ = R\[\d+\];$/) &&
+           block_step.match?(/reinterpret_cast<uintptr_t>\(&r\d+\)/) && block_step.match?(/^  mrb_value& r\d+ = R\[\d+\];$/) &&
            !block_step.include?('RESUMABLE_LOCAL_REGISTERS'))
 ENV['BC2CPP_RESUMABLE_LOCALS'] = '0'
 off, = Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: OWNERS) }

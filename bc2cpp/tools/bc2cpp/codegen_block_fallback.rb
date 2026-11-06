@@ -1011,7 +1011,7 @@ class CodeGen
     # order emit_rproc_construction builds (both read upvar_regs).
     upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
       vname = upvar_var_name(l, b)
-      out << "  mrb_value* #{vname} = static_cast<mrb_value*>(mrb_cptr(mrb_proc_cfunc_env_get(M, #{i + 1})));\n"
+      out << "  mrb_value* #{vname} = reinterpret_cast<mrb_value*>(static_cast<uintptr_t>(mrb_integer(mrb_proc_cfunc_env_get(M, #{i + 1}))));\n"
       vname
     end
     # BLOCK_FALLBACK_YIELD_SUPPORT: the forwarded block is the last env slot, read
@@ -1129,7 +1129,7 @@ class CodeGen
     out << "  mrb_value bc2cpp_captured_self = bc2cpp_env->stack[0];\n"
     upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
       vname = upvar_var_name(l, b)
-      out << "  mrb_value* #{vname} = static_cast<mrb_value*>(mrb_cptr(bc2cpp_env->stack[#{i + 1}]));\n"
+      out << "  mrb_value* #{vname} = reinterpret_cast<mrb_value*>(static_cast<uintptr_t>(mrb_integer(bc2cpp_env->stack[#{i + 1}])));\n"
       vname
     end
     out << "  mrb_value bc2cpp_blk = bc2cpp_env->stack[#{upvar_regs.size + 1}];\n" if needs_blk
@@ -1189,11 +1189,11 @@ class CodeGen
     # nothing writes back through it, and the env keeps it GC-rooted.
     env_entries = ['self'] + upvar_regs.map do |(l, b)|
       if inline_offset
-        "mrb_cptr_value(M, &r#{l.zero? ? b + inline_offset : b})"
+        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&r#{l.zero? ? b + inline_offset : b})))"
       elsif l.zero?
-        "mrb_cptr_value(M, &r#{b})"
+        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&r#{b})))"
       else
-        "mrb_cptr_value(M, #{upvar_var_name(l - 1, b)})"
+        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(#{upvar_var_name(l - 1, b)})))"
       end
     end
     env_entries << 'bc2cpp_blk' if needs_blk
