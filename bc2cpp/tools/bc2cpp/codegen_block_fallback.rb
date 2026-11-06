@@ -1196,7 +1196,8 @@ class CodeGen
         "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(#{upvar_var_name(l - 1, b)})))"
       end
     end
-    env_entries << 'bc2cpp_blk' if needs_blk
+    # The block is copied to a heap RProc when it is frame-local (bc2cpp_env_block): this env is heap, and outlives the frame.
+    env_entries << 'bc2cpp_env_block(M, bc2cpp_blk)' if needs_blk
     env_entries << ret_token if ret_token
     env_entries << brk_token if brk_token
     if direct_entry

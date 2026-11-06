@@ -1951,6 +1951,21 @@ if $PROGRAM_NAME == __FILE__
       Bc2cppStackBlock& operator=(const Bc2cppStackBlock&) = delete;
       mrb_value value() { return mrb_obj_value(&proc); }
     };
+    // A frame-local block (a Bc2cppStackBlock, red) must not go into a heap env: the frame ends with the call, but the
+    // env can outlive it (the arena keeps the heap RProc that holds it), and mrb_gc_mark would read the dead frame. A
+    // frame-local block is copied to a heap RProc with the same entry and env values; a heap block is returned as is.
+    static mrb_value bc2cpp_env_block(mrb_state* M, mrb_value blk) {
+      if (mrb_type(blk) != MRB_TT_PROC) return blk;
+      const struct RProc* p = mrb_proc_ptr(blk);
+      if (p->gc_color != MRB_GC_RED) return blk;
+      const struct REnv* e = MRB_PROC_ENV(p);
+      struct RProc* copy = mrb_proc_new_cfunc_with_env(M, p->body.func, MRB_ENV_LEN(e), e->stack);
+      if (MRB_PROC_STRICT_P(p)) copy->flags |= MRB_PROC_STRICT;
+      mrb_value copy_v = mrb_obj_value(copy);
+      struct REnv* ce = MRB_PROC_ENV(copy);
+      for (mrb_int i = 0; i < MRB_ENV_LEN(ce); i++) ce->stack[i] = bc2cpp_env_block(M, ce->stack[i]);
+      return copy_v;
+    }
     // YIELD_REACH (ADR 0283): the last env slot of a direct-entry block says its body, and everything
     // it can call, provably never suspends a Fiber. A compiled core iterator running such a block
     // may then stay compiled under a Fiber (its frame cannot be crossed by a yield).

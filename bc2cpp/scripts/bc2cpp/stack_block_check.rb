@@ -52,6 +52,10 @@ SRC = <<~'RUBY'
     def stash; hold { |x| yield x }; end
     def hold(&b); @held = b; end
     def use_stash(a); stash { |x| x.to_s * 3 }; GC.start; [@held.call(a), @held.call(4)]; end
+    # A nested block that yields to the method's block, sent to Integer#times: its heap env holds the block, so the
+    # frame-local block the caller passes must be copied to the heap there (it must not outlive its frame).
+    def repeat(n); n.times { |k| yield k }; self; end
+    def use_repeat(a); r = []; repeat(a.size) { |k| r << k }; GC.start; r; end
   end
 
   class SbColl
@@ -95,6 +99,10 @@ check.call('use_stash: a nested block that yields to the method block and is kep
            code.include?('BC2CPP_SKIPPED_SbFx_stash ') && !code_of(code, 'use_stash').include?('Bc2cppStackBlock'))
 check.call('fwd: a block that yields to the frame block (needs_blk) keeps the heap RProc',
            !code_of(code, 'fwd').include?('Bc2cppStackBlock'))
+check.call('use_repeat: the frame-local block reaches repeat, and the heap env of its nested block gets a heap copy of it',
+           code_of(code, 'use_repeat').match?(/SbFx_repeat_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
+             code_of(code, 'repeat').include?('bc2cpp_env_block(M, bc2cpp_blk)') &&
+             !code_of(code, 'repeat').match?(/\{ self, bc2cpp_blk,/))
 off, = generate_world('BC2CPP_STACK_BLOCKS' => '0')
 check.call('BC2CPP_STACK_BLOCKS=0: every block is built on the heap',
            !off.include?('Bc2cppStackBlock bc2cpp_blk_stack_') && !off.include?('bc2cpp_blk_heap_'))
@@ -112,13 +120,13 @@ DRIVER = <<~'RUBY'
   coll = SbColl.new(1, 2, 3)
   inputs = [[1, 2, 3], [], [5], (1..30).to_a, { a: 1, b: 2 }, 1..4, coll, nil]
   inputs.each_with_index do |a, i|
-    %i[sum strs churn idx boom nested use_gen use_keep use_stash].each { |m| show.call("#{m}/#{i}") { fx.send(m, a) } }
+    %i[sum strs churn idx boom nested use_gen use_keep use_stash use_repeat].each { |m| show.call("#{m}/#{i}") { fx.send(m, a) } }
     show.call("fwd/#{i}") { r = []; fx.fwd(a) { |x| r << x }; r }
   end
   GC.start
   show.call('gc stress') do
     GC.stress = true if GC.respond_to?(:stress=)
-    r = [fx.sum([1, 2, 3]), fx.strs(%w[x y]), fx.idx([:p, :q]), fx.boom([1, 2, 3]), fx.use_gen([4, 5]), fx.use_keep([6]), fx.use_stash([7])]
+    r = [fx.sum([1, 2, 3]), fx.strs(%w[x y]), fx.idx([:p, :q]), fx.boom([1, 2, 3]), fx.use_gen([4, 5]), fx.use_keep([6]), fx.use_stash([7]), fx.use_repeat([8, 9])]
     GC.stress = false if GC.respond_to?(:stress=)
     r
   end
