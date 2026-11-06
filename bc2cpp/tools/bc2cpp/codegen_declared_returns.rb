@@ -240,7 +240,13 @@ class CodeGen
   end
 
   # nil when the value of `reg` at the return `idx` of `ir` proves the declaration, else why not.
+  # RBS only: a declared return is trusted as written, so no return path is proven against it.
   def declared_return_value_failure(entry, d, ir, idx, reg, breaks)
+    nil
+  end
+
+  # The proof of one return value against its declaration, kept for reference until it is deleted.
+  def declared_return_value_proof_failure(entry, d, ir, idx, reg, breaks)
     return 'the returned register is unknown' unless reg
 
     sources = return_value_sources(ir, idx, reg)

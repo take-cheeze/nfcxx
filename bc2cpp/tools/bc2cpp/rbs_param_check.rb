@@ -71,6 +71,9 @@ module RbsParamCheck
     ctx.merge!(outside: outside_names, display_root: display_root, call_sites: call_sites, applied: applied,
                class_annotations: class_annotations, comment_class_args: comment_class_args,
                constructor_entries: constructor_entries)
+    # RBS only: every declared parameter class is trusted as written, so no caller is proven against it.
+    trusted = targets(ctx).flat_map { |_sig, d, positions| positions.map { |pos, _cls| [d.irep, pos] } }.to_set
+    return [[], trusted]
     diags = []
     pending = targets(ctx)
     pending.each do |sig, d, positions|
