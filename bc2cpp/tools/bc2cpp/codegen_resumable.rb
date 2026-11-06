@@ -286,6 +286,12 @@ class CodeGen
       return nil unless fiber_const_receiver?(irep, idx, dest)
 
       resumable_yield_site(insn)
+    when :SUPER
+      resumable_super_site(insn, d, idx, reg_offset)
+    when :BREAK, :RETURN_BLK
+      return nil unless @resumable.flat && @resumable.upvars
+
+      resumable_unwind_site(insn)
     when :SSEND, :SSEND0
       return nil unless @fiber_yield_names.include?(insn.sym)
 
@@ -386,7 +392,8 @@ class CodeGen
 
   # +splat_reg+: the positional arguments are the Array in that register. With +name+ nil (a `send`) the method name is
   # the first argument. +kw+ is dyn_call_shape's keyword part.
-  def resumable_dyn_site(recv, dest, argc, block_value, prelude = '', name: nil, splat_reg: nil, kw: nil)
+  def resumable_dyn_site(recv, dest, argc, block_value, prelude = '', name: nil, splat_reg: nil, kw: nil, brk_site: nil,
+                         ret_guard: false, call_override: nil)
     state = @resumable.new_state
     setup = []
     if splat_reg
@@ -419,12 +426,31 @@ class CodeGen
       setup << '    mrb_value bc2cpp_dyn_kd = mrb_hash_new(M);'
       kw[:n].times { |i| setup << "    mrb_hash_set(M, bc2cpp_dyn_kd, r#{kw[:reg] + 2 * i}, r#{kw[:reg] + 2 * i + 1});" }
     end
+    call = "bc2cpp_dyn_call(M, #{recv}, #{name_expr}, #{argc_expr}, #{argv_expr}, #{kdict}, #{block_value})"
+    # A block that runs from C (the callee is not a registered suspendable method) breaks and returns by exception, as
+    # in any method: the site owns the break frame and, in a method step, a return frame (the step is DONE when it catches).
+    call = call_override if call_override
+    guarded = brk_site || ret_guard
     lines = [
       "  // RESUMABLE_DYN_CALL #{state}",
       '  {',
+      brk_site ? "    Bc2cppFrameGuard #{brk_site}(&bc2cpp_break_frames);" : nil,
+      ret_guard ? '    Bc2cppFrameGuard bc2cpp_ret_guard(&bc2cpp_return_frames);' : nil,
       prelude.to_s.rstrip,
       *setup,
-      "    Bc2cppDynResult bc2cpp_dyn = bc2cpp_dyn_call(M, #{recv}, #{name_expr}, #{argc_expr}, #{argv_expr}, #{kdict}, #{block_value});",
+      guarded ? '    Bc2cppDynResult bc2cpp_dyn = { nullptr, mrb_nil_value() };' : nil,
+      guarded ? '    Bc2cppVmMark bc2cpp_dyn_mark = bc2cpp_vm_mark(M);' : nil,
+      guarded ? '    try {' : nil,
+      guarded ? "      bc2cpp_dyn = #{call};" : "    Bc2cppDynResult bc2cpp_dyn = #{call};",
+      brk_site ? '    } catch (bc2cpp_block_break& bc2cpp_brk) {' : nil,
+      brk_site ? "      if (bc2cpp_brk.token != #{brk_site}.frame.token) throw;" : nil,
+      brk_site ? '      bc2cpp_vm_restore(M, bc2cpp_dyn_mark);' : nil,
+      brk_site ? '      bc2cpp_dyn = { nullptr, bc2cpp_brk.value };' : nil,
+      ret_guard ? '    } catch (bc2cpp_method_return& bc2cpp_ret) {' : nil,
+      ret_guard ? '      if (bc2cpp_ret.token != bc2cpp_ret_guard.frame.token) throw;' : nil,
+      ret_guard ? '      bc2cpp_vm_restore(M, bc2cpp_dyn_mark);' : nil,
+      ret_guard ? '      return bc2cpp_ret.value;' : nil,
+      guarded ? '    }' : nil,
       '    if (!bc2cpp_dyn.frame) {',
       "      r#{dest} = bc2cpp_dyn.value;",
       "      goto Lbc2cpp_dyn_done_#{state};",
@@ -451,6 +477,42 @@ class CodeGen
     recv = %i[SSEND SSENDB].include?(insn.op) ? 'self' : "r#{shape[:dest]}"
     block_value = %i[SENDB SSENDB].include?(insn.op) ? "r#{shape[:blk_reg]}" : 'mrb_nil_value()'
     resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, splat_reg: shape[:argv_reg], kw: shape[:kw])
+  end
+
+  # DYN_SUPER: `super(args)` in a method step. The block is the register after the arguments (OP_SUPER passes
+  # R(a+n+1)). A suspendable target parks and is CALLed; the lookup starts above the method's own class. Nil (the ordinary
+  # SUPER rules apply) for a shape it does not take.
+  def resumable_super_site(insn, d, idx, reg_offset)
+    return nil unless @resumable.flat && reg_offset.zero? && @resumable.upvars.nil? && d && insn.plain_fixed_argc?
+    return nil if d.owner.end_with?('.singleton')
+
+    n = insn.argc.to_i
+    dest = insn.reg
+    call = "bc2cpp_dyn_super(M, self, #{owner_class_ptr_expr(d.owner)}, mrb_intern_lit(M, #{d.name.inspect}), #{n}, bc2cpp_dyn_argv, " \
+           "r#{dest + n + 1})"
+    # With a name given the site passes r(d+1)..r(d+n) as the arguments; the call itself is replaced by the super lookup.
+    resumable_dyn_site('self', dest, n, "r#{dest + n + 1}", '', name: d.name, call_override: call)
+  end
+
+  # BLOCK_STEP_UNWIND: a `break` (BREAK) or `return` (RETURN_BLK) in a block step ends the frames above the one the building
+  # step named in the block's env; the fiber drops them and resumes (break) or finishes (return) that frame with the value.
+  def resumable_unwind_site(insn)
+    mode, key = insn.op == :BREAK ? [1, '__brk__'] : [2, '__ret__']
+    [
+      "  // RESUMABLE_UNWIND #{insn.op}",
+      "  {",
+      "    mrb_value bc2cpp_target = mrb_iv_get(M, bc2cpp_frame_value, mrb_intern_lit(M, \"#{key}\"));",
+      '    if (!mrb_data_p(bc2cpp_target)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "break from proc-closure");',
+      "    F->unwind_key = mrb_obj_ptr(bc2cpp_target);",
+      "    F->unwind_mode = #{mode};",
+      '  }',
+      "  R[0] = r#{insn.reg};",
+      '  bc2cpp_step_guard.yielding = true;',
+      '  mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));',
+      '  bc2cpp_resume_frame_set_call(M, bc2cpp_frame_value, false);',
+      '  return bc2cpp_frame_value;',
+      ''
+    ].join("\n")
   end
 
   def resumable_block_call_intercept(insn, irep, d, idx, reg_offset)
@@ -900,13 +962,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return false unless owner_def && ENV['BC2CPP_BLOCK_STEP'] != '0' && !@block_step_compile
 
     block = region[:block_irep]
-    return false if region[:needs_brk] || region[:needs_ret]
     return false unless (region[:upvars] || []).empty? || block_step_upvars_ok?(region, owner_def)
     return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
     body = fiber_new_site?(region) && !fiber_body_target_id(region, owner_def)
-    return false if (!body && tail_yield_block?(block)) || BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK)
+    return false if body && !(mandatory_arity(block).zero? && pure_mandatory_arity?(block))
+    return false if (!body && tail_yield_block?(block)) || (body && BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK))
+    return false if body && (region[:needs_brk] || region[:needs_ret])
     return false if BytecodeIR.for(block).op?(:BLKPUSH) && !region[:needs_blk] # a BLKPUSH is the method's block only when it is passed in
-    return false unless block_direct_entry?(region, region[:kind] || 'block_fallback', false)
+    return false unless block_direct_entry?(region.merge(needs_ret: false, needs_brk: false), region[:kind] || 'block_fallback', false)
 
     # A Fiber body is always a step: a Fiber over a compiled proc needs a frame to run, whether or not it ever suspends.
     return true if body
@@ -926,6 +989,28 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0) { |insn, _| yields ||= @fiber_yield_names&.include?(insn.sym) }
     end
     yields
+  end
+
+  # BLOCK_STEP_UNWIND: the targets a block's `return` and `break` name when its step runs as a frame of the fiber. A break
+  # ends the call that took the block, made by the step building it; a return ends the method, which is the building step's
+  # frame, or the target the building block step itself carries. Nil values when the builder is not a step.
+  def step_unwind_targets(region)
+    return nil unless region[:needs_ret] || region[:needs_brk]
+
+    ret = if !@resumable then 'mrb_nil_value()'
+          elsif @resumable.upvars then 'mrb_iv_get(M, bc2cpp_frame_value, mrb_intern_lit(M, "__ret__"))'
+          else 'bc2cpp_frame_value'
+          end
+    brk = @resumable ? 'bc2cpp_frame_value' : 'mrb_nil_value()'
+    [ret, brk]
+  end
+
+  # The tokens of a block that runs from C (see resumable_dyn_site): the call site's own frames.
+  def step_unwind_tokens(region, builder_is_method)
+    addr = region[:block_addr]
+    brk = region[:needs_brk] ? "bc2cpp_site_#{addr}" : nil
+    ret = region[:needs_ret] && builder_is_method
+    [brk, ret]
   end
 
   # BLOCK_STEP_UPVARS: a block step may read and write locals of the step that builds it. The site passes pointers to
@@ -1038,14 +1123,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     code = result[:code][0...cut]
     maker = "#{name}_step_maker"
     code << block_step_maker(block, "#{name}#{@entry_spec_suffix}_impl", "#{syn.owner}##{syn.name}", maker, region[:upvars] || [],
-                            region[:needs_blk])
+                            region[:needs_blk], region[:needs_ret] || region[:needs_brk])
     @block_steps[label] = { code: code, maker: maker }
   end
 
   # The frame maker the block's env carries: binds the yielded values as a non-strict block binds them, runs the
   # step's entry with its own id armed so the entry parks the frame (bc2cpp_prologue) instead of running it, and
   # returns that frame, or nullptr when the entry did not park (the caller then calls the block directly).
-  def block_step_maker(block, impl, id, maker, upvars = [], needs_blk = false)
+  def block_step_maker(block, impl, id, maker, upvars = [], needs_blk = false, unwind = false)
     mand = mandatory_arity(block)
     out = String.new
     out << "static Bc2cppFiberFrame* #{maker}(mrb_state* M, struct REnv* bc2cpp_env, mrb_int bc2cpp_argc, " \
@@ -1067,6 +1152,15 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     out << "  #{impl}(M, bc2cpp_self#{args.map { |a| ", #{a}" }.join});\n"
     out << "  bc2cpp_prologue.expect = nullptr;\n"
     out << "  Bc2cppFiberFrame* bc2cpp_made = bc2cpp_prologue.frame;\n  bc2cpp_prologue.frame = nullptr;\n"
+    if unwind
+      # BLOCK_STEP_UNWIND: the frames a `break` / `return` of the step ends, from the env, into the frame the step reads them from.
+      out << "  if (bc2cpp_made) {\n"
+      out << "    mrb_value bc2cpp_mf = ((Bc2cppMethodFrame*)bc2cpp_made)->frame;\n"
+      out << "    mrb_int bc2cpp_len = MRB_ENV_LEN(bc2cpp_env);\n"
+      out << "    mrb_iv_set(M, bc2cpp_mf, mrb_intern_lit(M, \"__brk__\"), bc2cpp_env->stack[bc2cpp_len - 4]);\n"
+      out << "    mrb_iv_set(M, bc2cpp_mf, mrb_intern_lit(M, \"__ret__\"), bc2cpp_env->stack[bc2cpp_len - 5]);\n"
+      out << "  }\n"
+    end
     unless upvars.empty?
       # BLOCK_STEP_UPVARS: the pointers to the builder's locals, from the env, into the slots the step reads them from.
       out << "  if (bc2cpp_made) {\n"
@@ -1151,12 +1245,17 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   end
 
   def resumable_dyn_block_glue(region, fn_name, dest_reg, maker, name: nil)
+    brk_site, ret_guard = step_unwind_tokens(region, @resumable.upvars.nil?)
+    ret_token = region[:needs_ret] ? (ret_guard ? 'mrb_int_value(M, bc2cpp_ret_guard.frame.token)' : 'mrb_int_value(M, 0)') : nil
+    brk_token = brk_site ? "mrb_int_value(M, #{brk_site}.frame.token)" : nil
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
-                                              region[:needs_blk] ? true : false,
-                                              direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
-                                              step_maker: maker)
+                                              region[:needs_blk] ? true : false, ret_token: ret_token, brk_token: brk_token,
+                                              direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil, yield_free: region[:yield_free],
+                                              step_maker: maker, unwind_targets: (maker ? step_unwind_targets(region) : nil))
+    (@step_ret_handled ||= Set.new) << [region[:parent_irep].label, region[:block_addr]] if ret_guard
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
-    resumable_dyn_site(recv, dest_reg, region[:n].to_i, "mrb_obj_value(#{rproc_var})", ctor, name: name)
+    resumable_dyn_site(recv, dest_reg, region[:n].to_i, "mrb_obj_value(#{rproc_var})", ctor, name: name,
+                                                                                         brk_site: brk_site, ret_guard: ret_guard)
   end
 
   # `recv.m(args, &blk)` in a step: the block is a proc already (a forwarded block), so only the call is dynamic.
@@ -1176,11 +1275,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # The glue of a top-level `m(args) { block }` site in a step, or nil to keep the ordinary glue. The block's proc is
   # built on the heap (nothing in it points into the step's frame: block_step_candidate? takes no captured locals).
   def resumable_block_call_glue(region, fn_name, dest_reg, owner_def)
-    return nil unless @resumable && owner_def && region[:direct_entry] && @block_fallback_depth.to_i.zero?
+    return nil unless @resumable && owner_def && @block_fallback_depth.to_i.zero?
+    return nil unless region[:direct_entry] || region[:needs_ret] || region[:needs_brk]
 
     maker = block_step_maker_for(region)
     # A tail-yield block has no step: the callee's frame adapter arms its yield (bc2cpp_tail_yield).
-    return nil unless (maker || tail_yield_block?(region[:block_irep])) && !fiber_new_site?(region)
+    # A block that cannot suspend but returns from the method has no step either; the dynamic site catches its return.
+    method_return = !maker && region[:needs_ret] && @resumable.upvars.nil?
+    return nil unless (maker || tail_yield_block?(region[:block_irep]) || method_return) && !fiber_new_site?(region)
     return resumable_dyn_block_glue(region, fn_name, dest_reg, maker) if DYN_SEND_NAMES.include?(region[:name]) && region[:n].to_i >= 1
 
     target = maker && region[:self_implicit] ? resumable_block_call_target(region[:name], owner_def) : nil
@@ -1189,10 +1291,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return resumable_dyn_block_glue(region, fn_name, dest_reg, maker, name: region[:name]) unless target
     return nil unless mandatory_arity(@ireps.fetch(target.irep)) == region[:n].to_i
 
+    # The block only runs as a step here (the callee's entry parks its frame and runs nothing), so its plain tokens are dead.
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false,
-                                              direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
-                                              step_maker: maker)
+                                              ret_token: region[:needs_ret] ? 'mrb_int_value(M, 0)' : nil,
+                                              brk_token: region[:needs_brk] ? 'mrb_int_value(M, 0)' : nil,
+                                              direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil, yield_free: region[:yield_free],
+                                              step_maker: maker, unwind_targets: step_unwind_targets(region))
+    (@step_ret_handled ||= Set.new) << [region[:parent_irep].label, region[:block_addr]] if region[:needs_ret] && @resumable.upvars.nil?
     args = (1..region[:n]).map { |k| "r#{dest_reg + k}" } + ["mrb_obj_value(#{rproc_var})"]
     state = @resumable.new_state
     lines = resumable_call_lines(state, region[:name], target, dest_reg, args)
@@ -1232,6 +1338,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       mrb_int nregs;
       mrb_value* regs;
       void* callee; // CALL_STEP: the frame this suspension asks the fiber to call (a Bc2cppFiberFrame*), or null
+      void* unwind_key; // UNWIND: the heap frame of the method frame a `break`/`return` ends
+      int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
       long long slots[1];
     };
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }

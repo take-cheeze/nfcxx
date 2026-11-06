@@ -164,25 +164,16 @@ SCENARIOS = [
 ].freeze
 SCENARIOS = SCENARIOS.select { |label, *| label == ENV['ONLY'] }.freeze if ENV['ONLY'] # debugging aid: one label
 
-# Fiber scenarios whose callee cannot be a step yet (the plain runs must still match). A scenario with `break` in its block
-# is a gap too. A gap that starts passing fails the check, so the list only shrinks.
+# Fiber scenarios whose callee cannot be a step yet (the plain runs must still match). A gap that starts passing fails the check, so the list only shrinks.
 KNOWN_GAPS = {
-  'Enumerable#all?' => 'returns from the block of an inner each',
-  'Enumerable#any?' => 'returns from the block of an inner each',
-  'Enumerable#detect' => 'returns from the block of an inner each',
-  'Enumerable#find_index' => 'returns from the block of an inner each',
-  'Enumerable#none?' => 'returns from the block of an inner each',
-  'Enumerable#max' => 'Range#max reaches it through super',
-  'Enumerable#min' => 'Range#min reaches it through super'
 }.freeze
-BREAK_GAP = /\bbreak\b/
 
 EXPECTED_LABELS = %w[
   Array#collect! Array#delete_if Array#each Array#each_index Array#fetch Array#find
   Array#reject! Array#select! Array#sort Enumerable#sort Hash#delete Hash#fetch
   Hash#each Integer#downto Integer#times Integer#upto
   String#each_char String#upto StringIO#each
-  Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
+  Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
 ].freeze
 
 # The probe class: one method per scenario builds the fiber whose body is the scenario, so every fiber body is compiled
@@ -272,15 +263,15 @@ else
         interpreted[idx * 2] = expected.call if expected
       end
       gap = lambda do |i|
-        label, fiber, = SCENARIOS[i / 2]
-        i.even? && (KNOWN_GAPS.key?(label) || fiber.match?(BREAK_GAP))
+        label, = SCENARIOS[i / 2]
+        i.even? && KNOWN_GAPS.key?(label)
       end
       pairs = interpreted.zip(compiled).each_with_index.reject { |(a, b), _| a == b }
       unexpected = pairs.reject { |_, i| gap.call(i) }
       unexpected.first(ENV.fetch('MISMATCH_SHOW', '12').to_i).each { |(a, b), _| puts "    interpreted: #{a}\n    compiled:    #{b}" }
       check.call("interpreted and compiled runs print the same over #{SCENARIOS.size * 2} scenarios", unexpected.empty?)
       gaps = pairs.select { |_, i| gap.call(i) }
-      puts "    known gaps: #{gaps.size} fiber scenarios (#{KNOWN_GAPS.keys.join(', ')}; scenarios with break)"
+      puts "    known gaps: #{gaps.size} fiber scenarios (#{KNOWN_GAPS.keys.join(', ')})"
       stale = (0...(SCENARIOS.size * 2)).select { |i| gap.call(i) && interpreted[i] == compiled[i] }
       check.call('every known gap still fails', stale.empty?) unless ENV['ONLY']
     end

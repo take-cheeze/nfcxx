@@ -21,17 +21,27 @@
 #include <string.h>
 #include <unordered_map>
 
-enum Bc2cppStepKind { BC2CPP_STEP_DONE, BC2CPP_STEP_YIELD, BC2CPP_STEP_CALL };
+enum Bc2cppStepKind {
+  BC2CPP_STEP_DONE,
+  BC2CPP_STEP_YIELD,
+  BC2CPP_STEP_CALL,
+  BC2CPP_STEP_UNWIND
+};
 
 struct Bc2cppFiberFrame;
 
 // What a step reports. DONE: `value` is the body's result. YIELD: `value` goes
 // to the resumer. CALL: `callee` is a new frame (allocated with mrb_malloc,
-// owned by the fiber from now on); its result is the next resume value.
+// owned by the fiber from now on); its result is the next resume value. UNWIND
+// (a `break` or `return` out of a block step): the frames above the frame whose
+// identity is `target` are dropped; with `to_return` that frame finishes with
+// `value` too, else it is resumed with `value` as its call's result.
 struct Bc2cppStepOut {
   Bc2cppStepKind kind;
   mrb_value value;
   Bc2cppFiberFrame* callee;
+  struct RBasic* target;
+  bool to_return;
 };
 
 typedef void (*Bc2cppStepFn)(mrb_state* M,
@@ -47,6 +57,9 @@ struct Bc2cppFiberFrame {
   Bc2cppFiberFrame* parent;
   void (*mark)(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value refs);
   void (*release)(mrb_state* M, Bc2cppFiberFrame* frame);
+  // The object an UNWIND names this frame by (a method frame's heap frame), or
+  // null when the frame cannot be a target.
+  struct RBasic* (*identity)(Bc2cppFiberFrame* frame);
 };
 
 struct Bc2cppFiber {
@@ -234,7 +247,8 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
   mrb_value resume = args->resume;
   for (;;) {
     Bc2cppFiberFrame* frame = fiber->top;
-    Bc2cppStepOut out = {BC2CPP_STEP_DONE, mrb_nil_value(), nullptr};
+    Bc2cppStepOut out = {BC2CPP_STEP_DONE, mrb_nil_value(), nullptr, nullptr,
+                         false};
     frame->step(M, frame, resume, &out);
     switch (out.kind) {
       case BC2CPP_STEP_YIELD:
@@ -246,6 +260,35 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
         fiber->top = out.callee;
         resume = mrb_nil_value();
         break;
+      case BC2CPP_STEP_UNWIND: {
+        Bc2cppFiberFrame* target = frame;
+        while (target && !(target->identity && target->identity(target) == out.target)) {
+          Bc2cppFiberFrame* up = target->parent;
+          if (target != frame) bc2cpp_frame_free(M, target);
+          target = up;
+        }
+        if (!target) {
+          fiber->top = nullptr;
+          bc2cpp_frame_free(M, frame);
+          mrb_raise(M, mrb_class_get(M, "RuntimeError"),
+                    "bc2cpp: break or return target is not on the fiber stack");
+        }
+        if (out.to_return) {
+          fiber->top = target->parent;
+          if (target != frame) bc2cpp_frame_free(M, target);
+          bc2cpp_frame_free(M, frame);
+          if (!fiber->top) {
+            args->yielded = false;
+            return out.value;
+          }
+          resume = out.value;
+        } else {
+          fiber->top = target;
+          bc2cpp_frame_free(M, frame);
+          resume = out.value;
+        }
+        break;
+      }
       case BC2CPP_STEP_DONE:
         fiber->top = frame->parent;
         bc2cpp_frame_free(M, frame);

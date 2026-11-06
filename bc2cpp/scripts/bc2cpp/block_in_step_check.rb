@@ -224,12 +224,75 @@ SRC5 = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[BiClock NbClock CcClock DyClock IbClock].freeze
+# RtClock: `return` from an inner block of a method step ends the method (the fiber unwinds to its frame).
+SRC6 = <<~'RUBY'
+  class RtClock
+    def start
+      @fiber = Fiber.new { run }
+    end
+
+    def run
+      a = rt_find(4) { |x| back = Fiber.yield x; back.to_i > 5 }
+      b = rt_find(2) { |x| Fiber.yield x; false }
+      [a, b]
+    end
+
+    def rt_find(n)
+      n.times { |k| return k if yield(k) }
+      nil
+    end
+
+    def go
+      @fiber.resume
+    end
+
+    def go_with(value)
+      @fiber.resume(value)
+    end
+
+    def fiber_alive
+      @fiber.alive?
+    end
+  end
+RUBY
+
+# BkClock: `break` out of the block a Fiber body step builds ends the call that took it.
+SRC7 = <<~'RUBY'
+  class BkClock
+    def start
+      @fiber = Fiber.new do
+        first = bk_each(3) { |x| back = Fiber.yield x; break :stopped if back == :stop; back }
+        second = bk_each(2) { |x| Fiber.yield x; x }
+        [first, second]
+      end
+    end
+
+    def bk_each(n)
+      out = []
+      n.times { |i| out << yield(i) }
+      out
+    end
+
+    def go
+      @fiber.resume
+    end
+
+    def go_with(value)
+      @fiber.resume(value)
+    end
+
+    def fiber_alive
+      @fiber.alive?
+    end
+  end
+RUBY
+
+OWNERS = %w[BiClock NbClock CcClock DyClock IbClock RtClock BkClock].freeze
 
 baseline_dir = Dir.mktmpdir('bc2cpp-block-in-step')
 at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2 + SRC3 + SRC4 + SRC5, baseline_dir, core: true, only_owners: OWNERS)
+code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2 + SRC3 + SRC4 + SRC5 + SRC6 + SRC7, baseline_dir, core: true, only_owners: OWNERS)
 check.call('run compiles as a resumable step function', code.include?('static mrb_value BiClock_run_step(mrb_state* M'))
 check.call('each_mark compiles as a resumable step function', code.include?('static mrb_value BiClock_each_mark_step(mrb_state* M'))
 check.call('the block compiles as a resumable step', code.match?(/static mrb_value BiClock_run__blk\d+_step\(mrb_state\* M/))
@@ -239,6 +302,8 @@ check.call('the block capturing locals compiles as a resumable step', code.match
 check.call('the send site is a dynamic call (RESUMABLE_DYN_CALL)', code.include?('// RESUMABLE_DYN_CALL'))
 check.call('dy_mark registers a dispatcher', code.include?('DyClock_dy_mark_impl_dyn'))
 check.call('the inner block of ib_each compiles as a resumable step', code.match?(/static mrb_value IbClock_ib_each__blk\d+_step\(mrb_state\* M/))
+check.call('the return of an inner block unwinds (RESUMABLE_UNWIND RETURN_BLK)', code.include?('RESUMABLE_UNWIND RETURN_BLK'))
+check.call('the break of a block unwinds (RESUMABLE_UNWIND BREAK)', code.include?('RESUMABLE_UNWIND BREAK'))
 check.call('no #error in the generated code', !code.include?('#error'))
 
 DRIVER = <<~'RUBY'
@@ -293,6 +358,28 @@ DRIVER = <<~'RUBY'
   o5 << e.go_with(3)
   o5 << e.fiber_alive
   p o5
+  f = RtClock.new
+  f.start
+  o6 = []
+  o6 << f.go
+  o6 << f.go_with(1)
+  GC.start
+  o6 << f.go_with(9)
+  o6 << f.go_with(0)
+  o6 << f.go_with(0)
+  o6 << f.fiber_alive
+  p o6
+  g = BkClock.new
+  g.start
+  o7 = []
+  o7 << g.go
+  o7 << g.go_with(1)
+  GC.start
+  o7 << g.go_with(:stop)
+  o7 << g.go_with(5)
+  o7 << g.go_with(6)
+  o7 << g.fiber_alive
+  p o7
   puts 'end'
 RUBY
 
@@ -328,6 +415,8 @@ else
                interpreted&.[](3) == '[0, 1, [[2, 3], 10], false]')
     check.call('a block that yields to its method\'s block suspends through it',
                interpreted&.[](4) == '[0, 1, 2, [2, 4, 6], false]')
+    check.call('a return from an inner block ends the method', interpreted&.[](5) == '[0, 1, 0, 1, [1, nil], false]')
+    check.call('a break out of a block ends the call that took it', interpreted&.[](6) == '[0, 1, 0, 1, [:stopped, [0, 1]], false]')
     check.call('a block nested in a Fiber body step yields through the callee', interpreted&.[](1) == '[:begin, 0, 1, [5, [11, 21]], false]')
     if interpreted && compiled
       interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }

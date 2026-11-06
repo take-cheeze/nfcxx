@@ -919,6 +919,23 @@ class CodeGen
       "  }\n"
   end
 
+  # SUPER_BLOCK_REGISTER: `SUPER Rd n=N` with the block in R(d+N+1), which is where OP_SUPER reads it (it is sent as
+  # OP_SENDB sends). Any plain fixed-argument super that no rule above takes is looked up from the superclass of the class
+  # the method is defined on and called with exactly those registers (bc2cpp_super_call). BC2CPP_SUPER_BLOCK_REGISTER=0
+  # keeps the `#error`.
+  def super_block_register_call(owner_def, d_reg, n)
+    return nil unless n && owner_def && ENV.fetch('BC2CPP_SUPER_BLOCK_REGISTER', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton')
+
+    args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+    argv = args.empty? ? 'nullptr' : 'bc2cpp_super_argv'
+    "  {\n" \
+      "#{args.empty? ? '' : "    mrb_value bc2cpp_super_argv[] = {#{args.join(', ')}};\n"}" \
+      "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(owner_def.owner)}, " \
+      "mrb_intern_lit(M, #{owner_def.name.inspect}), #{n}, #{argv}, r#{d_reg.to_i + n.to_i + 1});\n" \
+      "  }\n"
+  end
+
   # ZSUPER_LOOKUP: a bare `super` (`ARGARY R(a+1) m1:r:m2:kd (lv)` + `SUPER R(a) n=*`) no direct rule calls --
   # a C method such as Kernel#respond_to_missing?, or one found only at run time -- is looked up and called as
   # SUPER_LOOKUP does, with the arguments OP_ARGARY would pack: with lv=0 they are this frame's registers, r1..rm1,

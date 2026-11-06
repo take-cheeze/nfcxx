@@ -1280,7 +1280,7 @@ class CodeGen
   # last env slots.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
                               ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false, upvar_cells: nil,
-                              step_maker: nil)
+                              step_maker: nil, unwind_targets: nil)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -1310,12 +1310,23 @@ class CodeGen
     env_entries << ret_token if ret_token
     env_entries << brk_token if brk_token
     if direct_entry
+      # BLOCK_STEP_UNWIND: the frames a `return` / `break` of the block's step ends (it must name them to the fiber), just
+      # before the maker: return target, then break target.
+      env_entries.concat(unwind_targets) if step_maker && unwind_targets
       # BLOCK_STEP: the maker of the block's step frame sits just before the entry (the readers index from the end).
       env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{step_maker})))" if step_maker
       env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))"
       # The flag slot: YIELD_FREE (bit 0), the BLOCK_SELF_WORLD check (bit 1) and BLOCK_STEP (bit 2: the maker slot is
       # present), read by bc2cpp_block_thunk and the C++ Fiber's adapter.
-      env_entries << "mrb_int_value(M, #{(yield_free ? 1 : 0) | (block_self_check? ? 2 : 0) | (step_maker ? 4 : 0)})"
+      env_entries << "mrb_int_value(M, #{(yield_free ? 1 : 0) | (block_self_check? ? 2 : 0) | (step_maker ? 4 : 0) | (step_maker && unwind_targets ? 8 : 0)})"
+    end
+    # BLOCK_STEP_UNWIND: a block that returns or breaks has no direct entry (its plain body reads its tokens from a cfunc frame),
+    # so it stays an ordinary cfunc proc; the trailer marks it for the fiber's adapter with a magic flag word.
+    if !direct_entry && step_maker && unwind_targets
+      env_entries.concat(unwind_targets)
+      env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{step_maker})))"
+      env_entries << 'mrb_int_value(M, 0)'
+      env_entries << "mrb_int_value(M, #{BLOCK_STEP_MAGIC | 4 | 8})"
     end
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
     out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
@@ -1335,6 +1346,8 @@ class CodeGen
   # The Proc methods that run the proc (sig/bc2cpp/declarations.rbs#core_proc_calls; bc2cpp_cfunc_proc_call_p spells the same set,
   # which scripts/bc2cpp/core_facts_rbs_check.rb compares).
   PROC_CALL_NAMES = CoreFactSigs.proc_call_names
+  # The flag word of a step trailer on a block that is not a thunk (direct-entry) proc.
+  BLOCK_STEP_MAGIC = 0x5b2c0000
 
   def emit_block_fallback_glue(region, fn_name, inline_offset: nil, owner_def: nil)
     dest_reg = region[:dest_reg].to_i + (inline_offset || 0)
