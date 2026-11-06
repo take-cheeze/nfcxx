@@ -60,32 +60,19 @@ def quoted_end(s, i)
   raise Fail, "unterminated string at #{i}"
 end
 
+# The same tokens as a character loop: a parenthesis, a string, a $ @ or & prefixed string, or a run of other characters
+# (which stops before a quote). One scan: the loop tested every character with a regex, which dominated the run time.
+TOKEN_RE = /\(|\)|"(?:\\.|[^"\\])*"|[$@&]"(?:\\.|[^"\\])*"|[^\s()"]+/
 def tokenize(s)
-  toks = []
-  i = 0
-  while i < s.size
-    c = s[i]
-    if c =~ /\s/
-      i += 1
-    elsif c == "(" || c == ")"
-      toks << c
-      i += 1
-    elsif c == '"'
-      j = quoted_end(s, i)
-      toks << Str.new(s[i..j])
-      i = j + 1
-    elsif "$@&".include?(c) && s[i + 1] == '"'
-      j = quoted_end(s, i + 1)
-      toks << Ref.new(c, s[(i + 1)..j])
-      i = j + 1
+  s.scan(TOKEN_RE).map do |t|
+    if t.start_with?('"')
+      Str.new(t)
+    elsif t.length > 1 && t[1] == '"' && "$@&".include?(t[0])
+      Ref.new(t[0], t[1..])
     else
-      j = i
-      j += 1 while j < s.size && s[j] !~ /[\s()"]/
-      toks << s[i...j]
-      i = j
+      t
     end
   end
-  toks
 end
 
 # A literal the IR writes in a form Integer() or Float() does not read: a hex integer (the value of its type, as canon

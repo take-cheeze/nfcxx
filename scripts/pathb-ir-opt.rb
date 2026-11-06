@@ -2,7 +2,7 @@
 # scripts/pathb-dump --ir and writes the same IR with the passes applied; every back end that reads that text can run
 # them, and the device pass of scripts/sycl-build.sh does so when NFCXX_IR_OPT=inline is set.
 #
-# Usage: scripts/mrb scripts/pathb-ir-opt.rb [--inline] [--max-depth=N] [--report] [FILE.ir | -] > out.ir
+# Usage: ruby scripts/pathb-ir-opt.rb [--inline] [--max-depth=N] [--report] [FILE.ir | -] > out.ir
 #
 #   --inline     call inlining. A statement (let %D T (call T &"f" ARGS...)) or (eval (call T &"f" ARGS...)) of a function
 #                of the module is replaced by f's body. f's ids become fresh ids of the caller, its slots become caller
@@ -164,6 +164,22 @@ def call_statement(s)
   end
 end
 
+# The facts of a callee that every call site of it needs: its return, parameters, slots, statements and returned operand.
+# Computed once per callee (inline_pass keeps them while the callee is unchanged): a call site used to scan the whole callee.
+def callee_info(fn)
+  ret = fn.find { |f| head(f) == "ret" }
+  params = fn.find { |f| head(f) == "params" }.drop(1)
+  body = fn.drop(2)
+  slots = body.select { |f| head(f) == "slot" }
+  stmts = body.reject { |f| HEADER_HEADS.include?(head(f)) }
+  ret_op = nil
+  if stmts.length > 0 && head(stmts.last) == "return"
+    ret_op = stmts.last[1]
+    stmts = stmts[0...-1]
+  end
+  { ret: ret, rtext: show(ret[1]), params: params, slots: slots, stmts: stmts, ret_op: ret_op }
+end
+
 # Replaces one call statement by the callee's statements. Returns [hoisted slots, statements] or nil.
 def expand_call(s, fns, st)
   parts = call_statement(s)
@@ -173,16 +189,17 @@ def expand_call(s, fns, st)
   cname = unq(call[2])
   fn = fns[cname]
   return nil unless fn
-  reason = refusal(fn, cname)
+  # The reason depends only on the callee's form, so it is computed once per callee (inline_pass clears it when the callee changes).
+  reason = st[:rc].fetch(cname) { st[:rc][cname] = refusal(fn, cname) }
   if reason
     st[:refused][reason] = (st[:refused][reason] || 0) + 1
     return nil
   end
-  ret = fn.find { |f| head(f) == "ret" }
-  rtype = ret[1]
-  return nil unless show(call[1]) == show(rtype)
+  info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
+  rtype = info[:ret][1]
+  return nil unless show(call[1]) == info[:rtext]
   return nil if dest && rtype == "void"
-  params = fn.find { |f| head(f) == "params" }.drop(1)
+  params = info[:params]
   args = call.drop(3)
   return nil unless params.length == args.length
 
@@ -210,16 +227,11 @@ def expand_call(s, fns, st)
       map[p[1]] = args[i]
     end
   end
-  body = fn.drop(2)
-  slots = body.select { |f| head(f) == "slot" }
+  slots = info[:slots]
   slots.each { |sl| map["$#{sl[1]}"] = "$\"#{unq(sl[1])}.i#{k}\"" }
   hoisted = slots.map { |sl| ["slot", "\"#{unq(sl[1])}.i#{k}\""] + sl.drop(2) } + byval_slots
-  stmts = body.reject { |f| HEADER_HEADS.include?(head(f)) }
-  ret_op = nil
-  if stmts.length > 0 && head(stmts.last) == "return"
-    ret_op = stmts.last[1]
-    stmts = stmts[0...-1]
-  end
+  stmts = info[:stmts]
+  ret_op = info[:ret_op]
   return nil if dest && ret_op.nil?
   out = byval_pre + stmts.map { |x| subst(x, map, st) }
   out << ["let", dest, dtype, subst(ret_op, map, st)] if dest
@@ -271,18 +283,22 @@ def inline_pass(forms, max_depth, report)
   refused = {}
   inlined = 0
   counter = { k: 0 }
+  reasons = {}   # callee name -> refusal reason (nil: inlinable); see expand_call
+  infos = {}     # callee name -> callee_info; dropped with the reason when the callee changes
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
       name = unq(f[1])
-      st = { next: max_id(f) + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused }
+      st = { next: max_id(f) + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons, ic: infos }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
       round += st[:inlined]
       forms[i] = ["function", f[1]] + insert_slots(children, st[:hoist])
       fns[name] = forms[i]
+      reasons.delete(name)
+      infos.delete(name)
     end
     inlined += round
     break if round == 0
@@ -685,6 +701,13 @@ def sroa_function(children, counter)
   rw_list.call(out)
 end
 
+# A value name %N (a digit after the %). A byte test: the regex it replaces was run on every atom.
+def numbered_id?(a)
+  return false unless a.is_a?(String) && a.length > 1 && a.getbyte(0) == 37
+  d = a.getbyte(1)
+  d >= 48 && d <= 57
+end
+
 # Every value a function uses is defined in it (a parameter, or a let or phi). A rewrite that loses a definition is refused.
 def defined_values_ok?(children)
   defined = {}
@@ -692,7 +715,7 @@ def defined_values_ok?(children)
     defined[f[1]] = true if (head(f) == "let" || head(f) == "phi") && f[1].is_a?(String)
     defined[f[1]] = true if (head(f) == "param" || head(f) == "sret") && f[1].is_a?(String)
   end
-  atoms_flat(children).all? { |a| !(a.is_a?(String) && a.start_with?("%") && a.length > 1 && a[1] =~ /\d/) || defined[a] }
+  atoms_flat(children).all? { |a| !numbered_id?(a) || defined[a] }
 end
 
 # An index that a bounds check has proved to be 0 (`(bounds I 1)` traps unless 0 <= I < 1): (index B I S) is the address B. The
@@ -958,7 +981,7 @@ def sroa_pass(forms)
       if $sroa_debug
         dv = {}
         all_forms(new_children).each { |sf| dv[sf[1]] = true if (head(sf) == "let" || head(sf) == "param" || head(sf) == "sret") && sf[1].is_a?(String) }
-        miss = atoms_flat(new_children).find { |a| a.is_a?(String) && a.start_with?("%") && a.length > 1 && a[1] =~ /\d/ && !dv[a] }
+        miss = atoms_flat(new_children).find { |a| numbered_id?(a) && !dv[a] }
         $stderr.write("pathb-ir-opt: scalar replacement of #{$sroa_fn} refused: #{miss} would lose its definition\n")
       end
       f

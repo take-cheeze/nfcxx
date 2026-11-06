@@ -8,11 +8,11 @@ root=$(cd ../.. && pwd)
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 fail=0
-"$root/scripts/mrb" "$root/scripts/pathb-ir-opt.rb" --inline helper.ir > "$out/helper_inline.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline helper.ir > "$out/helper_inline.ir" || fail=1
 if diff -u helper_inline.golden.ir "$out/helper_inline.ir"; then echo "inline helper: ok"; else echo "inline helper: FAIL"; fail=1; fi
 if grep -q '(call int &"square"' "$out/helper_inline.ir"; then echo "inline helper: FAIL (square still called)"; fail=1; fi
 # The same file through the whole pipeline (inline, then scalar replacement with constant propagation and unrolling): the
 # golden tests/pathb-ir-opt/helper_sroa.golden.ir.
-"$root/scripts/mrb" "$root/scripts/pathb-ir-opt.rb" --inline --sroa helper.ir > "$out/helper_sroa.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa helper.ir > "$out/helper_sroa.ir" || fail=1
 if diff -u helper_sroa.golden.ir "$out/helper_sroa.ir"; then echo "inline+sroa helper: ok"; else echo "inline+sroa helper: FAIL"; fail=1; fi
 exit $fail
