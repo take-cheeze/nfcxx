@@ -84,6 +84,7 @@ check.call('the step reads the given count from a negative frame state',
            code.include?('const mrb_int bc2cpp_given_opt = bc2cpp_state < 0 ? -bc2cpp_state - 1 : 0;'))
 check.call('the jump-table glue switches on the given count inside the step',
            code[/static mrb_value OptClock_run_step\(.*?\n\}\n/m].to_s.include?('switch (bc2cpp_given_opt)'))
+check.call('the entry hands the frame to the driver', code.include?('bc2cpp_resumable_handoff(M, frame);'))
 check.call('no #error in the generated code', !code.include?('#error'))
 
 DRIVER = <<~'RUBY'

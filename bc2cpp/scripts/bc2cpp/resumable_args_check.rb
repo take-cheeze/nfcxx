@@ -81,6 +81,8 @@ code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true
 check.call('run compiles as a resumable step function', code.include?('static mrb_value RaClock_run_step(mrb_state* M'))
 check.call('the entry takes its two arguments as mrb_values',
            code.match?(/^mrb_value RaClock_run_impl\(mrb_state\* M, mrb_value self, mrb_value \w+, mrb_value \w+\) \{/))
+check.call('the entry hands the frame to the driver', code.include?('bc2cpp_resumable_handoff(M, frame);'))
+check.call('the driver takes the handed-off frame on its first step', code.include?('mrb_define_module_function(M, mod, "take_initial"'))
 check.call('the entry fills the argument registers of the frame', code.match?(/F->regs\[\d+\] = \w+;/))
 check.call('no #error in the generated code', !code.include?('#error'))
 check.call('a method that no fiber root reaches (maybe) gets no step function', !code.include?('RaClock_maybe_step('))
