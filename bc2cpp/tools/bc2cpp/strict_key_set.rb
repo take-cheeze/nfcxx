@@ -23,7 +23,15 @@ STRICT_KEYS = ENV['BC2CPP_STRICT_KEYS'] != '0'
 if STRICT_KEYS
   # Integer-element Set (opaque/upvar register sets). Every read and write
   # with a non-Integer member raises TypeError.
-  class StrictKeySet < Set
+  #
+  # This is a wrapper, not a Set subclass: mruby's Set is MRB_TT_SET, which
+  # cannot hold instance variables (mrb_iv_set raises "cannot set instance
+  # variable"), so `@key_type` cannot live on a Set subclass under mruby.
+  # The wrapper keeps the key type in its own ivar and delegates the set
+  # operations to a plain Set.
+  class StrictKeySet
+    include Enumerable
+
     # Validate +set+'s members and return it (dev) — a plain alias in
     # production, so call sites read identically in both modes.
     def self.coerce(set, key_type: Integer)
@@ -41,41 +49,111 @@ if STRICT_KEYS
 
     def initialize(enum = nil, key_type: Integer, &block)
       @key_type = key_type
-      super(enum, &block)
-      each { |member| self.class.check!(member, @key_type) }
+      @set = Set.new(enum, &block)
+      @set.each { |member| self.class.check!(member, @key_type) }
+    end
+
+    # dup and clone copy the wrapped set too, so a copy is independent of the original, as Set#dup is.
+    def initialize_copy(other)
+      super
+      @set = other.instance_variable_get(:@set).dup
+    end
+
+    def each(&block)
+      return enum_for(:each) unless block
+
+      @set.each(&block)
+      self
     end
 
     def add(member)
+      mutable!
       self.class.check!(member, @key_type)
-      super
+      @set.add(member)
+      self
     end
     alias << add
 
     def add?(member)
+      mutable!
       self.class.check!(member, @key_type)
-      super
+      @set.add?(member) ? self : nil
     end
 
     def include?(member)
       self.class.check!(member, @key_type)
-      super
+      @set.include?(member)
     end
     alias member? include?
     alias === include?
 
     def delete(member)
+      mutable!
       self.class.check!(member, @key_type)
-      super
+      @set.delete(member)
+      self
     end
 
     def merge(enum)
+      mutable!
       enum.each { |member| self.class.check!(member, @key_type) }
-      super
+      @set.merge(enum)
+      self
     end
 
     def |(other)
       other.each { |member| self.class.check!(member, @key_type) } if other.is_a?(Enumerable)
+      StrictKeySet.new(@set | other, key_type: @key_type)
+    end
+
+    # mruby's Set#add does not raise on a frozen set (CRuby's does), so the wrapper raises for both.
+    def mutable!
+      raise FrozenError, "can't modify frozen StrictKeySet: #{inspect}" if frozen?
+    end
+    private :mutable!
+
+    # Content equality, as Set has: callers key memo tables by these sets (the dominance snapshot memo), so two equal
+    # sets must hash and compare equal, and an identical set must find its entry again.
+    def ==(other)
+      @set == (other.is_a?(StrictKeySet) ? other.instance_variable_get(:@set) : other)
+    end
+    alias eql? ==
+
+    def hash
+      @set.hash
+    end
+
+    def size
+      @set.size
+    end
+    alias length size
+
+    def empty?
+      @set.empty?
+    end
+
+    def to_a
+      @set.to_a
+    end
+
+    def freeze
+      @set.freeze
+      self
+    end
+
+    def frozen?
+      @set.frozen?
+    end
+
+    # Any other Set method (count via Enumerable aside) is forwarded to the set.
+    def method_missing(name, *args, &block)
+      return @set.send(name, *args, &block) if @set.respond_to?(name)
+
       super
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @set.respond_to?(name, include_private) || super
     end
   end
 else

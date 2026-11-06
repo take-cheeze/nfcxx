@@ -169,9 +169,9 @@ module BytecodeIR
     private :reaching_query_key
 
     # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable
-    # strings. StrictKeySet is a Set subclass whose dev-time coercion already rejects non-Integer members, so a
-    # frozen one holds only Integers: is_a? admits it where instance_of? never did, which left the identity memo
-    # empty in dev and every repeated query sorting again.
+    # strings. StrictKeySet wraps a Set (a dev-time wrapper that already rejects non-Integer members), so a
+    # frozen one holds only Integers: the explicit StrictKeySet check admits it, which the identity memo needs in dev
+    # (a wrapper is not a Set), or every repeated query sorts again.
     EMPTY_OPAQUE_KEY = [].freeze
 
     def reaching_opaque_key(opaque_regs)
@@ -183,7 +183,7 @@ module BytecodeIR
       return @opaque_reg_keys[opaque_regs] if @opaque_reg_keys.key?(opaque_regs)
 
       key = opaque_regs.sort.freeze
-      if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && opaque_regs.is_a?(Set) && opaque_regs.frozen? &&
+      if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && (opaque_regs.is_a?(Set) || opaque_regs.is_a?(StrictKeySet)) && opaque_regs.frozen? &&
          opaque_regs.all? { |register| register.is_a?(Integer) }
         @opaque_reg_keys[opaque_regs] = key
       end
