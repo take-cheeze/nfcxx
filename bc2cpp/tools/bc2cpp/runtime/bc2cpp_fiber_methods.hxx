@@ -37,6 +37,15 @@ static void bc2cpp_method_frame_step(mrb_state* M,
       return;
     }
     m->frame = result;
+    // CALL_STEP: the step asked the fiber to call another frame; its result is
+    // the resume value of this step.
+    Bc2cppResumeFrame* suspended = (Bc2cppResumeFrame*)DATA_PTR(result);
+    if (suspended && suspended->callee) {
+      out->kind = BC2CPP_STEP_CALL;
+      out->callee = (Bc2cppFiberFrame*)suspended->callee;
+      suspended->callee = nullptr;
+      return;
+    }
     if (!mrb_test(bc2cpp_resume_frame_block_call(M, result))) {
       out->kind = BC2CPP_STEP_YIELD;
       out->value = bc2cpp_resume_frame_value(M, result);

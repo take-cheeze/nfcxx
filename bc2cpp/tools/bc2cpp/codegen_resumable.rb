@@ -210,7 +210,11 @@ class CodeGen
       next if helpers.key?(name)
 
       reason = resumable_helper_problem(name, d, stack)
-      return reason if reason
+      if reason
+        next if resumable_call_target(name, d)
+
+        return reason
+      end
 
       helper_label = @registry[name].first.irep
       helpers[name] = helper_label
@@ -269,7 +273,7 @@ class CodeGen
     when :SSEND, :SSEND0
       return nil unless @fiber_yield_names.include?(insn.sym)
 
-      resumable_helper_call(insn, irep, idx, reg_offset)
+      resumable_helper_call(insn, irep, d, idx, reg_offset)
     end
   end
 
@@ -374,13 +378,18 @@ class CodeGen
   # Inlines a yielding helper (wait_one_clock, ...) at its call site: its registers follow
   # the caller's in the frame, its `return` assigns the call's destination and jumps past
   # the body, and its jump labels are prefixed per site.
-  def resumable_helper_call(insn, irep, idx, reg_offset)
+  def resumable_helper_call(insn, irep, d, idx, reg_offset)
     name = insn.sym
     return resumable_not_flat_error("call to the yielding method #{name}") unless @resumable.flat
 
     label = @resumable.helpers[name]
-    return resumable_error("no inlinable helper #{name}") unless label
-    return resumable_error("helper #{name} called with arguments") unless insn.op == :SSEND0 || insn.argc == 0
+    unless label && (insn.op == :SSEND0 || insn.argc.zero?)
+      target = resumable_call_target(name, d)
+      return resumable_call_site(insn, target, reg_offset) if target
+
+      return resumable_error("no inlinable helper #{name}") unless label
+      return resumable_error("helper #{name} called with arguments")
+    end
 
     helper = @ireps.fetch(label)
     region = BytecodeIR::ResumableRegion.build(helper)
@@ -555,7 +564,7 @@ if blk
 end
 optional_head = optional.positive? ? "    F->state = -(bc2cpp_given_opt + 1);\n" : ''
 # REST_ARGS: the wrapper checked the count and built the rest Array, so the impl checks nothing.
-argc_check = rest || @block_step_compile ? '' : "bc2cpp_check_argc(M, #{req}, #{n});\n  "
+argc_check = ''
 head = <<~CPP
   static mrb_value #{thunk}(mrb_state* M, mrb_value) {
     mrb_value self, frame, resume;
@@ -836,6 +845,59 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     out
   end
 
+  # CALL_STEP: the definition a call on self to +name+ reaches, when its step can run as a frame of the fiber: one
+  # definition in the caller's owner, compiled as a resumable step. nil otherwise (the call is then refused).
+  def resumable_call_target(name, d)
+    defs = @registry[name]
+    return nil unless defs&.size == 1
+
+    target = defs.first
+    return nil unless target.irep && target.owner == d.owner && !target.core && @fiber_roots&.include?(target.irep)
+
+    @resumable_call_checking ||= Set.new
+    return target if @resumable_call_checking.include?(target.irep) # recursion: planned optimistically
+
+    @resumable_call_checking << target.irep
+    begin
+      resumable_method?(target.irep) ? target : nil
+    ensure
+      @resumable_call_checking.delete(target.irep)
+    end
+  end
+
+  # A call on self to a suspendable method with arguments: the step makes the callee's frame (its entry parks it when
+  # its own id is armed, as for a Fiber body) and suspends with it; the fiber CALLs the frame, and the callee's result
+  # is this step's resume value, which the site reads like the result of a Fiber.yield.
+  def resumable_call_site(insn, target, reg_offset)
+    return resumable_not_flat_error("call to the suspendable method #{insn.sym}") unless @resumable.flat
+
+    state = @resumable.new_state
+    dest = insn.reg - reg_offset
+    argc = insn.op == :SSEND0 ? 0 : insn.argc
+    args = (1..argc).map { |i| "r#{dest + i}" }
+    impl = "#{cpp_name(target.owner, target.name)}_impl"
+    id = "#{target.owner}##{target.name}"
+    [
+      "  // RESUMABLE_CALL #{state} #{insn.sym}",
+      '  bc2cpp_prologue.expect = ' + c_string_literal(id) + ';',
+      '  bc2cpp_prologue.frame = nullptr;',
+      "  #{impl}(M, self#{args.map { |a| ", #{a}" }.join});",
+      '  bc2cpp_prologue.expect = nullptr;',
+      '  F->callee = bc2cpp_prologue.frame;',
+      '  bc2cpp_prologue.frame = nullptr;',
+      "  F->state = #{state};",
+      '  bc2cpp_step_guard.yielding = true;',
+      RESUMABLE_SPILL_MARK,
+      '  R[0] = mrb_nil_value();',
+      '  mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));',
+      '  bc2cpp_resume_frame_set_call(M, bc2cpp_frame_value, false);',
+      '  return bc2cpp_frame_value;',
+      "  Lbc2cpp_resume_#{state}:;",
+      "  r#{dest} = R[1];",
+      ''
+    ].join("\n")
+  end
+
   # The Fiber.new site: the block's RProc and a C++ Fiber over it. A body that captures locals gets their current
   # values copied into a heap Array first (the block reads them through pointers into it), since the Fiber outlives
   # this frame.
@@ -866,6 +928,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
       mrb_int state;
       mrb_int nregs;
       mrb_value* regs;
+      void* callee; // CALL_STEP: the frame this suspension asks the fiber to call (a Bc2cppFiberFrame*), or null
       long long slots[1];
     };
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }

@@ -364,6 +364,21 @@ class CodeGen
     # are by name over every receiver, so an explicit-receiver call cannot hide one
     # (compute_fiber_yield_names).
     @fiber_yield_names = seeds.empty? ? Set.new : compute_fiber_yield_names(seeds.to_set)
+    # CALL_STEP: a method a root calls on self that can itself suspend is a root too (the root's step CALLs its step).
+    queue = @fiber_roots.to_a
+    until queue.empty?
+      label = queue.shift
+      irep = @ireps[label]
+      owner = irep_owner[label]
+      next unless irep && owner
+
+      BytecodeIR.for(irep).instructions_with_op(:SSEND, :SSEND0).each do |insn|
+        next unless insn.sym && @fiber_yield_names.include?(insn.sym)
+
+        target = by_owner_name[[owner, insn.sym]]
+        queue << target if target && @fiber_roots.add?(target)
+      end
+    end
     @fiber_unsafe_methods = reachable.select do |label|
       d = fiber_defs[label]
       d.nil? || @fiber_yield_names.include?(d.name)
