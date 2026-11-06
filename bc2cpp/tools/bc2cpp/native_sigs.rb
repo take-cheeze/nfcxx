@@ -136,10 +136,11 @@ module NativeSigs
     bodies.transform_values { |body| header + body + footer }
   end
 
-  # The source of every native declaration and member, each under its marker: the text a fixture gives the loader as a file.
-  def native_source
-    lines = File.readlines(FILE)
-    parse.flat_map { |decl| tables_in(decl).map { |name| source_of(decl, name, [], lines) } }.join
+  # The source of every native declaration and member of +file+, each under its marker: the text a fixture gives the
+  # loader as a file. Call it once per file in FILES: a table lives in exactly one of them.
+  def native_source(file = FILE)
+    lines = File.readlines(file)
+    parse(file).flat_map { |decl| tables_in(decl).map { |name| source_of(decl, name, [], lines) } }.join
   end
 
   # Every top-level declaration of the file, parsed once per process.
