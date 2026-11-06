@@ -541,7 +541,8 @@ def sroa_function(children, counter)
       db = base_of.call(s[2])
       sb = base_of.call(s[3])
       next unless db || sb
-      copies << [db, sb, s[1].to_i]
+      # the copy's ALIGN (its last item) is the object's alignment: a filler field may not be wider than it
+      copies << [db, sb, s[1].to_i, s.length >= 5 ? s[4].to_i : 1]
     end
   end
   copies.each do |db, sb, bytes|
@@ -569,7 +570,7 @@ def sroa_function(children, counter)
   # a copy out of the group must write every byte of the object: the bytes no access reads get filler fields. The group's
   # copy in (from memory) gives them their values, so they are defined; a group that is only written is refused above when
   # its fields overlap.
-  copies.each do |db, sb, bytes|
+  copies.each do |db, sb, bytes, align|
     next if db || !sb
     g = groups.find(sb[0])
     fs = group_fields[g]
@@ -593,7 +594,7 @@ def sroa_function(children, counter)
         nxt = occupied.find { |k| k > cursor } || limit
         nxt = limit if nxt > limit
         while cursor < nxt
-          chunk = [8, 4, 2, 1].find { |c| cursor % c == 0 && cursor + c <= nxt }
+          chunk = [8, 4, 2, 1].find { |c| c <= align && cursor % c == 0 && cursor + c <= nxt }
           fs[cursor] = { 8 => "unsigned_long", 4 => "unsigned_int", 2 => "unsigned_short", 1 => "unsigned_char" }[chunk]
           cursor += chunk
         end

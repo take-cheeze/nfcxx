@@ -15,4 +15,8 @@ if grep -q '(call int &"square"' "$out/helper_inline.ir"; then echo "inline help
 # golden tests/pathb-ir-opt/helper_sroa.golden.ir.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa helper.ir > "$out/helper_sroa.ir" || fail=1
 if diff -u helper_sroa.golden.ir "$out/helper_sroa.ir"; then echo "inline+sroa helper: ok"; else echo "inline+sroa helper: FAIL"; fail=1; fi
+# A 12-byte struct of alignment 4 (a uint3) copied out with a gap of 8 bytes at its start: the filler field must not be 8 bytes
+# wide (a 64-bit access to an object 4 mod 8 is misaligned on the GPU; the old pass gave one unsigned_long field).
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa align4_copy.ir > "$out/align4.ir" || fail=1
+if grep -q "unsigned_long" "$out/align4.ir"; then echo "align-4 filler: FAIL (an 8-byte field)"; fail=1; else echo "align-4 filler: ok"; fi
 exit $fail
