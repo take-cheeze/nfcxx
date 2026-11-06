@@ -175,6 +175,10 @@ class CodeGen
       elsif insn.op == :ALIAS && alias_handled_by_ir?(irep, idx, owner)
         # The registry defines the new name (AliasSites) and the gem registers it; the VM residual still runs the alias.
         lines << "  // #{insn.sym} alias handled by the bytecode IR\n"
+      elsif insn.op == :ALIAS && omitted_alias?(insn, owner, omitted)
+        # A name the build leaves out of the tables is statically dispatched only: no method is installed for it, and
+        # an old name left out of them does not exist when the unit runs (mrb_alias_method would raise NameError).
+        lines << "  // #{insn.sym} alias of a method left out of the tables: statically dispatched only (no registration)\n"
       elsif insn.op == :ALIAS
         line = class_body_alias(insn, registered)
         return [nil, [:ALIAS]] unless line
@@ -607,6 +611,12 @@ class CodeGen
   def omitted_def?(insn, owner, omitted)
     key = insn.op == :SDEF ? "#{owner}.singleton##{insn.sym}" : "#{owner}##{insn.sym}"
     omitted.include?(key)
+  end
+
+  # An `alias NEW OLD` naming a method the build leaves out of its tables, on either side (see class_body_alias).
+  def omitted_alias?(insn, owner, omitted)
+    old = insn.first_of(:name)&.value
+    omitted.include?("#{owner}##{insn.sym}") || (!old.nil? && omitted.include?("#{owner}##{old}"))
   end
 end
 
