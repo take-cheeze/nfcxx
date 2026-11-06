@@ -123,3 +123,36 @@ bytes each. The rest are the samples' own usage errors and deliberate bugs. The 
   links three TUs into one program and two of them into a `-shared` library, on both runtimes. Vulkan and WebGPU still
   load one image per program.
 - Work-group sizes above 256 are fine here (lavapipe allows 1024); the WebGPU path keeps its 256 limit.
+
+## Performance against a GLSL reference (Radeon 8060S, RADV)
+
+`NFCXX_SYCL_VK_TIMING=1` makes the runtime time each dispatch with two timestamp queries and print the mean GPU time at exit
+(`nfcxx vulkan: N dispatches, GPU time X ms per dispatch`). Without it the runtime is unchanged.
+
+The same kernel, `c[i] = a[i] + b[i]`, on the same GPU through RADV: a GLSL reference (glslc, SPIR-V 1.0 target vulkan1.2, local
+size 128) with a plain Vulkan harness that uses the runtime's memory type and one synchronous submit per launch, against the
+SYCL program lowered by `scripts/pathb-spirv-emit.rb`:
+
+| N | reference, per launch | nfcxx, per launch (wall) | nfcxx GPU time per dispatch |
+| --- | --- | --- | --- |
+| 2^16 | 0.020 ms | 0.132 ms | - |
+| 2^20 | 0.040 ms | 2.2 ms | 2.06 ms |
+| 2^24 | 0.91 ms (batched 0.87) | 32 to 34 ms | 10.7 ms x 3 slabs |
+
+The GPU time is the cost, not the host side. The emitted kernel has 17 functions and 23 calls per invocation, 263 stores and
+339 loads, and each call manages a frame; the reference has one function with two loads, an add and a store. The frame is 96
+bytes (`T` line of the manifest): mostly the 72-byte `nd_item` the SYCL lambda receives by reference, plus the index. At 2^24
+that is 1.6 GB of stack, larger than the 1 GB default heap (`NFCXX_SYCL_HEAP_MB`), so the grid runs in three slabs.
+
+What would shrink it: inlining the SYCL helper functions at the call (the PTX emitter's `--inline=device` does this for device
+helpers, `tools/pathb-ptx-emit/emit_fn.cpp`) and scalarizing the aggregate temporaries, so that a helper's `nd_item` is not a
+frame copy. Neither exists in `scripts/pathb-spirv-emit.rb` yet.
+
+The IR inliner (`NFCXX_IR_OPT=inline`, docs/notes/pathb-ir-passes.md) removes 21 of the 23 calls of the vecadd kernel and
+brings RADV's instruction count from 779 to 582; the GPU time is the same, since the 96-byte frame of the `nd_item` argument
+remains. Scalar replacement of that struct is the next pass.
+
+Submit slicing (`dispatch()` in `rt_vulkan.hpp`): a grid that is split because a dimension has more groups than the device takes
+(`maxComputeWorkGroupCount`, 2^32 - 1 on RADV) walks its submits with 64-bit counters. With 32-bit counters `ox += lim` wrapped
+below the slab's first group on RADV, the next submit ran groups of the previous slab, their stack index went negative, and the
+GPU wrote below the heap (a page fault, a ring reset, then VK_ERROR_OUT_OF_DEVICE_MEMORY from the submit). `slab_wide` covers it.

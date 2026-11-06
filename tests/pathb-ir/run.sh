@@ -6,10 +6,11 @@
 # PATHB_CPFE (and PATHB_BASE) to a scratch build, or use build/pathb.
 cd "$(dirname "$0")/../.."
 update=0; [ "${1:-}" = --update ] && update=1
+# A byval parameter carries its size and alignment (be/nfcxx_ir.c): the goldens keep the form without them, as for copy.
 # The copy form ends with the aggregate's alignment (the IR's last item, be/nfcxx_ir.c ir_copy). The goldens keep the
 # form without it: the alignment is checked by the emitter (tests/gpu), and the goldens stay the text the CI front end
 # produces, so a golden does not depend on the local toolchain's headers beyond what the golden already records.
-ir_norm() { sed -E 's/\(copy ([0-9]+) ([^ ()]+) ([^ ()]+) [0-9]+\)/(copy \1 \2 \3)/g' "$1"; }
+ir_norm() { sed -E -e 's/\(copy ([0-9]+) ([^ ()]+) ([^ ()]+) [0-9]+\)/(copy \1 \2 \3)/g' -e 's/\(byval (\(struct "[^"]*"\)|[a-z_ ]+) [0-9]+ [0-9]+\)/(byval \1)/g' "$1"; }
 # No automatic build: a missing harness is an error, so a worktree never rebuilds the shared build/ directory.
 cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] || { echo "run.sh: no harness at $cpfe; set PATHB_CPFE (see docs/notes/pathb-stage2.md)" >&2; exit 2; }

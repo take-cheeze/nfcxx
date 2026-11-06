@@ -265,6 +265,17 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   "$root/build/pathb-ptx-emit" --embed --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
   trace_end "$t" "pathb-ptx-emit --embed: $base.cu" cuda
 }
+ir_opt_device() {  # ir_opt_device IR: the IR passes of NFCXX_IR_OPT on the device IR in place (default inline,sroa; off turns them off)
+  local ir=$1 v=${NFCXX_IR_OPT-inline,sroa} p
+  if [ "$v" = off ] || [ -z "$v" ]; then return 0; fi
+  local o=(); for p in ${v//,/ }; do o+=("--$p"); done
+  # NFCXX_KEEP_DEVICE_IR=PATH: the device IR before the passes is copied to PATH.pre, after them to PATH.post
+  if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.pre"; fi
+  "$root/scripts/mrb" "$root/scripts/pathb-ir-opt.rb" "${o[@]}" "$ir" > "$ir.opt" && mv "$ir.opt" "$ir" \
+    || { echo "nfcxx: the IR passes failed on $ir (NFCXX_IR_OPT=off turns them off)" >&2; exit 2; }
+  if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.post"; fi
+  return 0
+}
 cu_amd_build() {  # cu_amd_build SRC DEV COPY DEFINE...: the device image of NFCXX_CUDA_TARGET=amdgpu (docs/notes/gpu.md, "AMD GPUs (ROCm)")
   # The kernels' IR (the same front end as the NVIDIA path) goes to amdgcn LLVM IR (tools/pathb-amdgpu-emit), ROCm's clang
   # makes the code object, and the registration tail embeds it in COPY as a cubin is. One module: the AMD emitter has no
@@ -278,6 +289,7 @@ cu_amd_build() {  # cu_amd_build SRC DEV COPY DEFINE...: the device image of NFC
   ensure_tool "$root/tools/pathb-amdgpu-emit" "$root/build/pathb-amdgpu-emit" || exit 1
   NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
+  ir_opt_device "$dev.ir"
   local kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
   "$root/build/pathb-amdgpu-emit" ${kopts[@]+"${kopts[@]}"} "$dev.ir" > "$dev.ll" || exit $?
   "$clang" -target amdgcn-amd-amdhsa -mcpu="$arch" -O2 -nogpulib "$dev.ll" -o "$dev.hsaco" || exit $?
@@ -292,6 +304,7 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
     printf 'promote %s\n' "${NFCXX_PROMOTE_SLOTS:-1}"
     printf 'unroll %s\n' "${NFCXX_UNROLL:-1}"
     printf 'struct-slots %s\n' "${NFCXX_STRUCT_SLOTS:-1}"
+    printf 'ir-opt %s\n' "${NFCXX_IR_OPT-inline,sroa}"; cache_sha < "$root/scripts/pathb-ir-opt.rb"
     cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
     cache_sha < "$root/scripts/pathb-dump"; cache_sha < "$root/scripts/host-sys.sh"
     for f in "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" "$root/build/pathb-ptx-emit"; do
@@ -306,6 +319,7 @@ cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DE
   t=$(trace_start)
   NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
+  ir_opt_device "$dev.ir"
   trace_end "$t" "pathb-dump --ir (device front end): $(basename "$src")" cuda
   # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
   local kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"

@@ -77,6 +77,27 @@ if [ "$mode" = cpu ]; then
 fi
 absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 "$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" ${diag[@]+"${diag[@]}"} "$src" > "$absout.dev.ir"
+# NFCXX_IR_OPT=inline (a comma list of passes): the IR-to-IR passes of scripts/pathb-ir-opt.rb before the device emitter
+# (docs/notes/pathb-ir-passes.md). Unset: the IR goes to the emitter as the front end wrote it.
+# Default: inline,sroa (the inliner, then scalar replacement with constant propagation and counted-loop unrolling). NFCXX_IR_OPT=off
+# turns the passes off.
+ir_opt=${NFCXX_IR_OPT-inline,sroa}
+if [ "$ir_opt" != off ] && [ -n "$ir_opt" ]; then
+  irpasses=(); for p in ${ir_opt//,/ }; do irpasses+=("--$p"); done
+  "$root/scripts/mrb" "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$absout.dev.ir" > "$absout.dev.opt.ir"
+  mv "$absout.dev.opt.ir" "$absout.dev.ir"
+fi
+# The SSA round trip (default; NFCXX_CFG=off turns it off): SSA (scripts/pathb-ssa.rb), the e-graph pass (default; NFCXX_SSA_OPT=off
+# turns it off), then the structurizer (scripts/pathb-ssa-structurize.rb, docs/notes/pathb-structurize.md). The device IR goes to
+# the emitters as structured IR again, with the SSA optimizations applied. NFCXX_CFG=structurize is the same as the default.
+if [ "${NFCXX_CFG:-structurize}" = structurize ]; then
+  "${RUBY:-ruby}" "$root/scripts/pathb-ssa.rb" "$absout.dev.ir" > "$absout.dev.ssa" && \
+    if [ "${NFCXX_SSA_OPT:-egraph}" = egraph ]; then  # the e-graph pass on the SSA (docs/notes/pathb-egraph.md)
+      "${RUBY:-ruby}" "$root/scripts/pathb-egraph.rb" "$absout.dev.ssa" > "$absout.dev.ssa.opt" && mv "$absout.dev.ssa.opt" "$absout.dev.ssa"
+    fi && \
+    "${RUBY:-ruby}" "$root/scripts/pathb-ssa-structurize.rb" "$absout.dev.ssa" > "$absout.dev.opt.ir"
+  mv "$absout.dev.opt.ir" "$absout.dev.ir"
+fi
 rc=0
 # the SPIR-V emitter: scripts/spirv-emit (NFCXX_SPIRV_EMITTER picks the Ruby script, its C++ port, or both compared)
 if [ $backend = vulkan ]; then
