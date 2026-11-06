@@ -76,6 +76,42 @@ inline Bc2cppPrologue bc2cpp_prologue = {nullptr, nullptr};
   return mrb_nil_value();
 }
 
+// A block whose last act is `Fiber.yield v` can hand `v` to the C++ Fiber by
+// returning: nothing of the block is left to resume. When the fiber's adapter
+// calls such a block it names the block's env here; the block's entry
+// (Bc2cppTailYieldScope) sees the match and lets its tail yield store `v` in
+// `value` and return, and the adapter turns that into a YIELD whose resume
+// value is the block's result. `can_yield` is true only inside that one entry,
+// so a nested block, or the same block called any other way, takes the ordinary
+// Fiber.yield.
+struct Bc2cppTailYield {
+  const struct REnv* env;
+  bool pending;
+  mrb_value value;
+};
+inline Bc2cppTailYield bc2cpp_tail_yield = {nullptr, false, {}};
+inline bool bc2cpp_block_can_yield = false;
+
+struct Bc2cppTailYieldScope {
+  bool previous;
+  explicit Bc2cppTailYieldScope(const struct REnv* env) {
+    previous = bc2cpp_block_can_yield;
+    bool match = env && bc2cpp_tail_yield.env == env;
+    if (match)
+      bc2cpp_tail_yield.env = nullptr;
+    bc2cpp_block_can_yield = match;
+  }
+  ~Bc2cppTailYieldScope() { bc2cpp_block_can_yield = previous; }
+  Bc2cppTailYieldScope(const Bc2cppTailYieldScope&) = delete;
+  Bc2cppTailYieldScope& operator=(const Bc2cppTailYieldScope&) = delete;
+};
+
+[[maybe_unused]] static mrb_value bc2cpp_tail_yield_store(mrb_value value) {
+  bc2cpp_tail_yield.pending = true;
+  bc2cpp_tail_yield.value = value;
+  return mrb_nil_value();
+}
+
 static void bc2cpp_frame_free(mrb_state* M, Bc2cppFiberFrame* frame) {
   if (frame->release)
     frame->release(M, frame);
@@ -222,6 +258,8 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   if (error) {
     bc2cpp_prologue.expect = nullptr;
     bc2cpp_prologue.frame = nullptr;
+    bc2cpp_tail_yield.env = nullptr;
+    bc2cpp_tail_yield.pending = false;
     bc2cpp_fiber_clear(M, fiber);
     mrb_exc_raise(M, result);
   }

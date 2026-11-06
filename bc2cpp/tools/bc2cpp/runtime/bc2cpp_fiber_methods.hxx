@@ -37,7 +37,25 @@ static void bc2cpp_method_frame_step(mrb_state* M,
       out->value = bc2cpp_resume_frame_value(M, result);
       return;
     }
-    resume = bc2cpp_resumable_resume_from_c(M, result);
+    // A block-call suspension: call the block here. A block whose last act is
+    // Fiber.yield (Bc2cppTailYield) hands its value back instead of calling
+    // Fiber.yield, and the fiber yields it; the next resume value is the
+    // block's result, which the step takes as its own resume value.
+    mrb_value args = bc2cpp_resume_frame_value(M, result);
+    mrb_value blk = bc2cpp_resume_frame_block(M, result);
+    bc2cpp_tail_yield.pending = false;
+    const struct REnv* blk_env = nullptr;
+    if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk)))
+      blk_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
+    bc2cpp_tail_yield.env = blk_env;
+    resume = mrb_yield_argv(M, blk, RARRAY_LEN(args), RARRAY_PTR(args));
+    bc2cpp_tail_yield.env = nullptr;
+    if (bc2cpp_tail_yield.pending) {
+      bc2cpp_tail_yield.pending = false;
+      out->kind = BC2CPP_STEP_YIELD;
+      out->value = bc2cpp_tail_yield.value;
+      return;
+    }
   }
 }
 

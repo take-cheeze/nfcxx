@@ -78,6 +78,9 @@ class CodeGen
     if @resumable && (resumable_code = resumable_intercept(insn, irep, owner_def, idx, reg_offset))
       return resumable_code
     end
+    if @tail_yield_block && (tail_code = tail_yield_intercept(insn, irep, idx, reg_offset))
+      return tail_code
+    end
     # RESUMABLE_DUAL: the variant's `recv[i]` dispatches by name, as vm.c's OP_GETIDX does for a subclass's own []
     # (the shared index helper picks its arms from program-wide facts, which the variant does not use).
     if @rsm_variant && insn.op == :GETIDX

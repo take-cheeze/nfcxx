@@ -563,7 +563,7 @@ head = <<~CPP
     return #{step_name}(M, self, frame, resume);
   }
   mrb_value #{impl_name}(mrb_state* M, mrb_value self, #{params}) {
-  #{argc_check}bc2cpp_resumable_init(M);
+  #{argc_check}bc2cpp_resumable_init(M);#{blk ? "\n  if (bc2cpp_prologue_armed(#{c_string_literal(owner_name)})) bc2cpp_blk = bc2cpp_env_block(M, bc2cpp_blk);" : ''}
     mrb_value frame = mrb_nil_value();
     Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
 CPP
@@ -649,8 +649,16 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     nodes = BytecodeIR.for(block_irep).instructions
     send = nodes[-2]
     ret = nodes[-1]
-    return nil unless ret&.op == :RETURN && %i[SSEND SSEND0].include?(send&.op) && send.source.reg == ret.source.reg
-    return nil unless nodes[0...-2].all? { |n| FIBER_BODY_PLAIN_OPS.include?(n.op) || n.op.to_s.start_with?('LOADI') }
+    return nil unless ret&.op == :RETURN && %i[SSEND SSEND0 SSENDB].include?(send&.op) && send.source.reg == ret.source.reg
+
+    # SSENDB passes a literal block made right before the call (a block whose own body may end in Fiber.yield).
+    tail = 2
+    if send.op == :SSENDB
+      return nil unless nodes[-3]&.op == :BLOCK && send.source.plain_fixed_argc?
+
+      tail = 3
+    end
+    return nil unless nodes[0...-tail].all? { |n| FIBER_BODY_PLAIN_OPS.include?(n.op) || n.op.to_s.start_with?('LOADI') }
 
     name = send.source.sym
     targets = (@registry[name] || []).select { |d| d.owner == owner_def.owner && d.irep }
@@ -660,6 +668,37 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     return nil unless @fiber_roots&.include?(label) && resumable_method?(label)
 
     "#{targets.first.owner}##{name}"
+  end
+
+  # A block whose last act is `Fiber.yield v` (or `Fiber.yield`), returning its value: nothing of the block is left to
+  # resume after the yield, so the C++ Fiber's adapter can take `v` and make the resume value the block's result
+  # (Bc2cppTailYield in runtime/bc2cpp_fiber.hxx).
+  def tail_yield_block?(irep)
+    nodes = BytecodeIR.for(irep).instructions
+    ret = nodes[-1]
+    send = nodes[-2]
+    return false unless ret&.op == :RETURN && %i[SEND SEND0].include?(send&.op) && send.source.sym == 'yield'
+    return false unless send.source.reg == ret.source.reg
+    return false unless fiber_const_receiver?(irep, nodes.size - 2, send.source.reg)
+
+    send.op == :SEND0 || (send.source.plain_fixed_argc? && send.source.argc == 1)
+  end
+
+  # compile_insn_op's hook for the tail yield of a tail_yield_block?: inside the one entry the adapter armed
+  # (bc2cpp_block_can_yield), it stores the value and returns; anywhere else it is the ordinary Fiber.yield.
+  def tail_yield_intercept(insn, irep, idx, reg_offset)
+    return nil if @tail_yield_plain || !@tail_yield_block.equal?(irep) || !reg_offset.to_i.zero?
+    return nil unless %i[SEND SEND0].include?(insn.op) && insn.sym == 'yield'
+    return nil unless idx == BytecodeIR.for(irep).instructions.size - 2
+
+    value = insn.op == :SEND0 ? 'mrb_nil_value()' : "r#{insn.reg + 1}"
+    plain = begin
+      @tail_yield_plain = true
+      compile_insn_op(insn, irep, nil, idx, reg_offset)
+    ensure
+      @tail_yield_plain = false
+    end
+    "  if (bc2cpp_block_can_yield) return bc2cpp_tail_yield_store(#{value});\n#{plain}"
   end
 
   # The Fiber.new site: the block's RProc and a C++ Fiber over it. A body that captures locals gets their current

@@ -936,6 +936,11 @@ class CodeGen
     end
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     arm_prune_block_analysis(block_irep, d, 0)
+    # TAIL_YIELD_BLOCK: see tail_yield_block?; the direct entry scopes the one call the adapter armed.
+    saved_tail_yield_block = @tail_yield_block
+    @tail_yield_block = tail_yield_block?(block_irep) ? block_irep : nil
+    region[:tail_yield] = !@tail_yield_block.nil?
+    @fiber_body_used = true if region[:tail_yield]
     BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == :ENTER
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
@@ -949,6 +954,7 @@ class CodeGen
         end
       end
     end
+    @tail_yield_block = saved_tail_yield_block
     @block_fallback_upvars = nil
     @block_fallback_active = false
     @blk_param_name = saved_blk_param_name
@@ -1129,6 +1135,7 @@ class CodeGen
            "mrb_int bc2cpp_argc, const mrb_value* bc2cpp_argv) {\n"
     out << "  (void)bc2cpp_strict; (void)bc2cpp_argc; (void)bc2cpp_argv;\n"
     out << "  mrb_value bc2cpp_captured_self = bc2cpp_env->stack[0];\n"
+    out << "  Bc2cppTailYieldScope bc2cpp_tail_scope(bc2cpp_env);\n" if region[:tail_yield]
     upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
       vname = upvar_var_name(l, b)
       out << "  mrb_value* #{vname} = reinterpret_cast<mrb_value*>(static_cast<uintptr_t>(mrb_integer(bc2cpp_env->stack[#{i + 1}])));\n"
