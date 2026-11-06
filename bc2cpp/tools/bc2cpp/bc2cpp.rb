@@ -2039,6 +2039,14 @@ if $PROGRAM_NAME == __FILE__
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
+    // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
+    // a Ruby call does, and a value that does not convert raises TypeError.
+    static inline mrb_value bc2cpp_kwsplat_hash(mrb_state* M, mrb_value v) {
+      if (mrb_nil_p(v) || mrb_hash_p(v)) return v;
+      mrb_value h = mrb_check_hash_type(M, v);
+      if (mrb_nil_p(h)) mrb_raise(M, mrb_class_get(M, "TypeError"), "no implicit conversion into Hash");
+      return h;
+    }
   CPP
   # IO_PUTS_MODEL: one shared body for every explicit-receiver `puts`, so the
   # by-name fallback exists once instead of once per site.
@@ -2204,6 +2212,30 @@ if $PROGRAM_NAME == __FILE__
   # class the method is defined on (its origin when prepended), then the call mrb_funcall would make once found.
   # No method there is NoMethodError through method_missing, as prepare_missing does.
   puts 'extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);'
+  # KEYWORD_SPLAT_STATIC: the keyword helpers of a `**h` call (compile_keyword_call). Keys are read by symbol from the
+  # Hash; the callee is already resolved statically, so nothing here dispatches by method name.
+  puts <<~CPP
+    static inline bool bc2cpp_kwsplat_has(mrb_state* M, mrb_value h, const char* name) {
+      return mrb_hash_key_p(M, h, mrb_symbol_value(mrb_intern_cstr(M, name)));
+    }
+    static inline mrb_value bc2cpp_kwsplat_value(mrb_state* M, mrb_value h, const char* name, bool required) {
+      mrb_value key = mrb_symbol_value(mrb_intern_cstr(M, name));
+      if (mrb_hash_key_p(M, h, key)) return mrb_hash_get(M, h, key);
+      if (required) mrb_raisef(M, mrb_class_get(M, "ArgumentError"), "missing keyword: :%s", name);
+      return mrb_nil_value();
+    }
+    static inline void bc2cpp_kwsplat_check(mrb_state* M, mrb_value h, const char* const* names, mrb_int count) {
+      mrb_value keys = mrb_hash_keys(M, h);
+      for (mrb_int i = 0; i < RARRAY_LEN(keys); i++) {
+        mrb_value k = mrb_ary_ref(M, keys, i);
+        bool known = false;
+        for (mrb_int j = 0; j < count && !known; j++) {
+          known = mrb_symbol_p(k) && mrb_symbol(k) == mrb_intern_cstr(M, names[j]);
+        }
+        if (!known) mrb_raisef(M, mrb_class_get(M, "ArgumentError"), "unknown keyword: %S", k);
+      }
+    }
+  CPP
   puts <<~CPP
     [[maybe_unused]] static mrb_value bc2cpp_super_call(mrb_state* M, mrb_value self, struct RClass* owner, mrb_sym mid,
                                                         mrb_int argc, const mrb_value* argv, mrb_value blk) {
