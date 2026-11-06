@@ -604,7 +604,28 @@ class CodeGen
     return nil unless function.required_positionals.size == arity
 
     classes = IrRbsBlockTypes.resolve(function.required_positionals.first.type, {})
-    classes&.size == 1 ? classes.first.to_s : nil
+    return nil unless classes
+
+    names = classes.map(&:to_s).sort
+    return names.first if names.size == 1
+
+    # UNION_ELEMENT_HINT: a union of one class and its subclasses (`IO | File`, File < IO) is typed by their common
+    # ancestor, with each member guarded exactly. Any other union stays untyped.
+    ancestor = names.find { |a| names.all? { |c| c == a || ancestor_class?(a, c) } }
+    return nil unless ancestor && names.size <= 4
+
+    AncestorElementHint.new(ancestor, names)
+  end
+
+  # True when +ancestor+ is a proper superclass of +klass+, through the closed world's hierarchy or the core's.
+  def ancestor_class?(ancestor, klass)
+    current = klass
+    seen = Set.new
+    while current.is_a?(String) && seen.add?(current)
+      current = @closed_world.class_parent(current) || core_superclass(current)
+      return true if current == ancestor
+    end
+    false
   end
 
   # The owners whose definition of +name+ an exact +recv_class+ receiver reaches: the class's own declaration

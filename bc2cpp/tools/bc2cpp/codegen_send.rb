@@ -30,6 +30,17 @@ class CodeGen
     # never forced by STRICT_HINTS (its else arm keeps the by-name send).
     elem_hint_soft = elem_class_hint.is_a?(SoftElementHint)
     elem_class_hint = elem_class_hint.klass if elem_hint_soft
+    # UNION_ELEMENT_HINT: the candidate is the common ancestor's, and each member is guarded exactly. A member with its
+    # own definition of the name answers differently, so the hint is dropped and the call keeps its ordinary dispatch.
+    elem_members = nil
+    if elem_class_hint.is_a?(AncestorElementHint)
+      elem_members = elem_class_hint.members
+      elem_class_hint = elem_class_hint.klass
+      if (@registry[insn.sym.to_s] || []).any? { |definition| elem_members.include?(definition.owner) && definition.owner != elem_class_hint }
+        elem_members = nil
+        elem_class_hint = nil
+      end
+    end
     d = insn.reg
     # The method-name charset must include `?`, `!` and every operator character
     # (`&`, `|`, `^`, `~`, `%`, `@` for `-@`/`+@`). A missing character truncates
@@ -1356,7 +1367,11 @@ class CodeGen
         end
 
         check_owner = typed_guard_class || target.owner
-        check = exact_class_guard(owner_class_ptr_expr(check_owner), recv)
+        check = if elem_members
+                  "(#{elem_members.map { |member| exact_class_guard(owner_class_ptr_expr(member), recv) }.join(') || (')})"
+                else
+                  exact_class_guard(owner_class_ptr_expr(check_owner), recv)
+                end
         # EXACT_TYPED_UNGUARDED: the receiver is proven to be exactly check_owner, so
         # the guard below can only be true and its fallback is dead.
         if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
