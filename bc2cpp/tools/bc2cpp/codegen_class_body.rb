@@ -151,6 +151,10 @@ class CodeGen
 
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}));\n"
+      elsif %i[SSEND SSEND0].include?(insn.op) && AliasSites.settled?(@registry, irep.label, idx)
+        # A settled alias_method site is the registry's definition (ALIAS_SITES), so it installs nothing here: a by-name
+        # call copies `old` as it stands at run time, and a body run twice copies its own def (alias_handled_by_ir?).
+        lines << "  // #{insn.sym} alias handled by the bytecode IR\n"
       elsif %i[SSEND SSEND0].include?(insn.op) && CLASS_BODY_VISIBILITY_SENDS.include?(insn.sym.to_s)
         # private/public/protected/module_function set visibility of defs the registration already sets, and a
         # statically dispatched def has no method to set it on: nothing to run here.
