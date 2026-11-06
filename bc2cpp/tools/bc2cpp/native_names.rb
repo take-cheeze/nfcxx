@@ -138,8 +138,8 @@ def foreign_method_names(paths)
     src.scan(/alias_method\s*\(?\s*:"?(#{FOREIGN_METHOD_NAME_RE})/o) { names << Regexp.last_match(1) }
     src.scan(/define_method\s*\(?\s*:"?(#{FOREIGN_METHOD_NAME_RE})/o) { names << Regexp.last_match(1) }
   end
-  names
-  end
+  names.to_a
+  end.to_set
 end
 
 # ---------------------------------------------------------------------------

@@ -298,7 +298,11 @@ generate = lambda do |world, sigs, native_sigs: nil, native: nil|
     # The fixture's own signatures and the repository's native declarations (RGSS::Profiler, Kernel, Array); the
     # repository's program declarations in sig/bc2cpp describe engine classes this program does not have, so only
     # the native declarations are written into the fixture.
-    File.write(File.join(dir, 'sig', 'bc2cpp', 'repo_native.rbs'), NativeSigs.native_source)
+    # Both files: the core declarations (core.rbs) are split out of declarations.rbs, and a fixture missing either is
+    # missing its tables.
+    NativeSigs::FILES.each_with_index do |file, i|
+      File.write(File.join(dir, 'sig', 'bc2cpp', "repo_native#{i}.rbs"), NativeSigs.native_source(file))
+    end
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'gb_fixture', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
             'BC2CPP_SIG_DIRS' => File.join(dir, 'sig', 'bc2cpp'),
             'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }

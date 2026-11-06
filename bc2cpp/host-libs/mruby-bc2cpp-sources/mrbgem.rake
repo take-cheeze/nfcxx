@@ -5,6 +5,8 @@
 # file is written to the build directory, so the sources are never copied into the tree.
 BC2CPP_SOURCES_ROOT = File.expand_path('../..', __dir__)
 BC2CPP_SOURCES_ENTRY = 'tools/bc2cpp/bc2cpp.rb'
+# Scripts the tools load by name rather than by require_relative: baked in with the entry, so that require finds them.
+BC2CPP_SOURCES_EXTRA = %w[scripts/rpg2k/closed_world_lint.rb].freeze
 
 MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
   spec.license = 'MIT'
@@ -14,10 +16,11 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
 
   generator = File.join(BC2CPP_SOURCES_ROOT, 'tools/bc2cpp/bake_sources.rb')
   baked = "#{build_dir}/bc2cpp_sources.rb"
-  inputs = Dir[File.join(BC2CPP_SOURCES_ROOT, 'tools/bc2cpp/**/*.rb')] + [generator]
+  inputs = Dir[File.join(BC2CPP_SOURCES_ROOT, 'tools/bc2cpp/**/*.rb')] + [generator] +
+           BC2CPP_SOURCES_EXTRA.map { |f| File.join(BC2CPP_SOURCES_ROOT, f) }
   unless File.exist?(baked) && File.mtime(baked) >= inputs.map { |f| File.mtime(f) }.max
     FileUtils.mkdir_p(File.dirname(baked))
-    ok = system(RbConfig.ruby, generator, BC2CPP_SOURCES_ENTRY, baked)
+    ok = system(RbConfig.ruby, generator, BC2CPP_SOURCES_ENTRY, baked, *BC2CPP_SOURCES_EXTRA)
     raise 'mruby-bc2cpp-sources: tools/bc2cpp/bake_sources.rb failed' unless ok
   end
   spec.rbfiles << baked

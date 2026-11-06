@@ -2,9 +2,10 @@
 
 # Bakes the bc2cpp source graph into one mruby-loadable file, so that `require` can evaluate each source by its name.
 #
-#   ruby tools/bc2cpp/bake_sources.rb ENTRY OUTPUT
+#   ruby tools/bake_sources.rb ENTRY OUTPUT [EXTRA_ENTRY...]
 #
-# ENTRY is a path under the repository root (tools/bc2cpp/bc2cpp.rb). Every file reachable from it through
+# ENTRY is a path under the repository root (tools/bc2cpp/bc2cpp.rb). EXTRA_ENTRY names more files to bake, such as a
+# script the tools load by name (scripts/rpg2k/closed_world_lint.rb). Every file reachable from an entry through
 # require_relative is written into OUTPUT as a string, under the name it has in the repository (without `.rb`,
 # e.g. 'tools/bc2cpp/escape_analysis'). The names are baked in at this point:
 #
@@ -44,9 +45,9 @@ def bake_file(path, sources, queue)
   sources[name] = body
 end
 
-def bake(entry)
+def bake(*entries)
   sources = {}
-  queue = [File.expand_path(entry, ROOT)]
+  queue = entries.map { |entry| File.expand_path(entry, ROOT) }
   until queue.empty?
     path = queue.shift
     next if sources.key?(baked_name(path))
@@ -57,10 +58,10 @@ def bake(entry)
 end
 
 if $PROGRAM_NAME == __FILE__
-  entry, output = ARGV
-  abort 'usage: bake_sources.rb ENTRY OUTPUT' unless output
+  entry, output, *extras = ARGV
+  abort 'usage: bake_sources.rb ENTRY OUTPUT [EXTRA_ENTRY...]' unless output
 
-  sources = bake(entry)
+  sources = bake(entry, *extras)
   # Each body is a list of single-quoted chunks, escaping only `\` and `'`, joined at load. A heredoc would not do:
   # mruby processes backslash escapes in `<<'EOS'` (CRuby does not), which halves every `\\` in the baked source.
   # A single literal over a few thousand bytes is refused by mruby's parser, so the chunks stay short.
@@ -68,5 +69,5 @@ if $PROGRAM_NAME == __FILE__
     chunks = body.scan(/.{1,#{CHUNK}}/m).map { |chunk| "'#{chunk.gsub('\\') { '\\\\' }.gsub("'") { "\\'" }}'" }
     "MRubyRequire.bake('#{name}', [#{chunks.join(",\n")}].join)\n"
   end.join)
-  warn "bake_sources: #{sources.size} files from #{entry}"
+  warn "bake_sources: #{sources.size} files from #{[entry, *extras].join(' ')}"
 end
