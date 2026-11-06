@@ -80,6 +80,23 @@ module RbsSignatures
     !name.nil? && CoreFactSigs::TABLES.include?(NativeSigs.table(name))
   end
 
+  # The engine's own namespaces. Their declarations describe the RPG2000/2003 game, so a build without mruby-rpg2k
+  # (its gem list from BC2CPP_BUILD_GEMS) does not load them: they are unrelated to that program.
+  GAME_NAMESPACES = %w[Game RPG2k RPG2k3 LCF].freeze
+
+  # True when the build's gem list is set and has no mruby-rpg2k. An unset or empty list changes nothing.
+  def game_sigs_excluded?
+    value = ENV['BC2CPP_BUILD_GEMS']
+    return false if value.nil? || value.strip.empty?
+
+    gems = value.split(/\s+/).map { |kv| kv.split('=', 2).first }
+    !gems.include?('mruby-rpg2k')
+  end
+
+  def game_decl?(decl)
+    GAME_NAMESPACES.include?(decl.name.to_s.delete_prefix('::').split('::').first)
+  end
+
   # nil when there is nothing to load (the byte-identical path).
   def load(dirs, display_root: nil)
     files = files_in(dirs)
@@ -103,7 +120,12 @@ module RbsSignatures
                                     code: 'TC1002', message: "RBS syntax error: #{e.message.sub(/\A\S+:\d+:\d+\.\.\.\d+:\d+: /, '')}")
         next
       end
-      decls.each { |d| declaration(out, d, [], rel) }
+      excluded = game_sigs_excluded?
+      decls.each do |d|
+        next if excluded && game_decl?(d)
+
+        declaration(out, d, [], rel)
+      end
     end
     out
   end
