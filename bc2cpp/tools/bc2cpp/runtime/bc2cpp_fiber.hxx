@@ -103,8 +103,13 @@ static mrb_value bc2cpp_fiber_new(mrb_state* M, Bc2cppFrame* root) {
   Bc2cppFiber* fiber = (Bc2cppFiber*)mrb_calloc(M, 1, sizeof(Bc2cppFiber));
   fiber->top = root;
   root->parent = nullptr;
+  mrb_sym class_name = mrb_intern_lit(M, "Bc2cppFiber");
+  struct RClass* klass =
+      mrb_const_defined_at(M, mrb_obj_value(M->object_class), class_name)
+          ? mrb_class_get_id(M, class_name)
+          : M->object_class;
   struct RData* data =
-      mrb_data_object_alloc(M, M->object_class, fiber, &bc2cpp_fiber_type);
+      mrb_data_object_alloc(M, klass, fiber, &bc2cpp_fiber_type);
   return mrb_obj_value(data);
 }
 
@@ -194,4 +199,28 @@ static mrb_value bc2cpp_run_to_completion(mrb_state* M,
   }
   mrb_gc_arena_restore(M, arena);
   return result;
+}
+
+// The Ruby-visible class. Compiled code makes a fiber with bc2cpp_fiber_new and
+// the program calls resume and alive? on it as on an mruby Fiber, so a call
+// site needs no knowledge of which Fiber it holds.
+static mrb_value bc2cpp_fiber_m_resume(mrb_state* M, mrb_value self) {
+  mrb_value value = mrb_nil_value();
+  mrb_get_args(M, "|o", &value);
+  return bc2cpp_fiber_resume(M, self, value);
+}
+
+static mrb_value bc2cpp_fiber_m_alive_p(mrb_state* M, mrb_value self) {
+  return mrb_bool_value(bc2cpp_fiber_alive_p(M, self));
+}
+
+static void bc2cpp_fiber_define(mrb_state* M) {
+  if (mrb_const_defined_at(M, mrb_obj_value(M->object_class),
+                           mrb_intern_lit(M, "Bc2cppFiber")))
+    return;
+  struct RClass* klass = mrb_define_class(M, "Bc2cppFiber", M->object_class);
+  MRB_SET_INSTANCE_TT(klass, MRB_TT_DATA);
+  mrb_define_method(M, klass, "resume", bc2cpp_fiber_m_resume, MRB_ARGS_OPT(1));
+  mrb_define_method(M, klass, "alive?", bc2cpp_fiber_m_alive_p,
+                    MRB_ARGS_NONE());
 }

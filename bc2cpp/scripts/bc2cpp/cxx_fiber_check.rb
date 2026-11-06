@@ -23,6 +23,7 @@ runtime = File.expand_path('../../tools/bc2cpp/runtime', __dir__)
 TEST = <<~'CPP'
   #include "bc2cpp_fiber.hxx"
   #include <mruby/array.h>
+  #include <mruby/compile.h>
   #include <stdio.h>
 
   // A body that yields 1, 2, 3 and then finishes with 99.
@@ -144,6 +145,13 @@ TEST = <<~'CPP'
       mrb_protect_error(M, Y::call, nullptr, &err);
       printf("yield outside fiber raises %d\n", (int)err);
     }
+    {
+      bc2cpp_fiber_define(M);
+      mrb_value fib = bc2cpp_fiber_new(M, count_new(M));
+      mrb_gv_set(M, mrb_intern_lit(M, "$fib"), fib);
+      show(M, "ruby", mrb_load_string(M, "a = [$fib.resume, $fib.resume(5), $fib.resume, $fib.resume]; a << $fib.alive?; a"));
+      show(M, "ruby class", mrb_load_string(M, "$fib.class"));
+    }
     mrb_close(M);
     return 0;
   }
@@ -170,6 +178,8 @@ EXPECTED = <<~OUT
   boom "boom"
   to_completion 7
   yield outside fiber raises 1
+  ruby [1, 2, 3, 99, false]
+  ruby class Bc2cppFiber
 OUT
 
 Dir.mktmpdir('cxx_fiber') do |dir|
