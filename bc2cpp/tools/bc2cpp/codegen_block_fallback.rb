@@ -1284,6 +1284,9 @@ class CodeGen
       @fiber_body_used = true
       return emit_fiber_body_site(region, fn_name, fiber_id, dest_reg)
     end
+    if owner_def && region[:direct_entry] && fiber_new_site?(region) && block_step_maker_for(region)
+      return emit_fiber_body_step_site(region, fn_name, dest_reg)
+    end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset,
                                               ret_token: ret_token, brk_token: brk_token,

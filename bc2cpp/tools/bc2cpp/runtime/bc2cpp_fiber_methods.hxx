@@ -115,3 +115,22 @@ static void bc2cpp_method_frame_mark(mrb_state* M,
   m->step = step;
   return &m->f;
 }
+
+// `Fiber.new { ... }` whose body is a step (BLOCK_STEP): the fiber's root frame
+// is the frame the body's maker makes.
+[[maybe_unused]] static mrb_value bc2cpp_fiber_new_step(mrb_state* M,
+                                                        mrb_value proc) {
+  bc2cpp_fiber_define(M);
+  const struct REnv* env = MRB_PROC_ENV(mrb_proc_ptr(proc));
+  mrb_int len = env ? MRB_ENV_LEN(env) : 0;
+  if (len < 3 || !(mrb_integer(env->stack[len - 1]) & 4))
+    mrb_raise(M, mrb_class_get(M, "RuntimeError"),
+              "bc2cpp: Fiber body has no step");
+  Bc2cppBlockStepMaker maker =
+      (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(env->stack[len - 3]);
+  Bc2cppFiberFrame* root = maker(M, (struct REnv*)env, 0, nullptr);
+  if (!root)
+    mrb_raise(M, mrb_class_get(M, "RuntimeError"),
+              "bc2cpp: Fiber body step did not make a frame");
+  return bc2cpp_fiber_new(M, root);
+}

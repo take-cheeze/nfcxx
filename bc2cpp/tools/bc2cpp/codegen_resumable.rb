@@ -619,12 +619,17 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
   # enclosing method's owner and returns its value. The block's only call is that one, so the C++ Fiber can run the block
   # with `m` armed (bc2cpp_prologue), let `m`'s entry park its frame instead of running it, and call that frame as
   # the fiber's body. Returns the entry's id ("Owner#m"), or nil for any other shape (the site then keeps its old form).
-  def fiber_body_target_id(region, owner_def)
-    return nil unless owner_def && region[:name] == 'new' && !region[:self_implicit] && region[:n].to_i.zero?
+  # Is +region+ a `Fiber.new { ... }` site (no arguments, a literal block)?
+  def fiber_new_site?(region)
+    return false unless region[:name] == 'new' && !region[:self_implicit] && region[:n].to_i.zero?
 
     parent = region[:parent_irep]
     idx = parent && parent.index_of_addr(region[:sendb_addr])
-    return nil unless idx && fiber_const_receiver?(parent, idx, region[:dest_reg])
+    idx ? fiber_const_receiver?(parent, idx, region[:dest_reg]) : false
+  end
+
+  def fiber_body_target_id(region, owner_def)
+    return nil unless owner_def && fiber_new_site?(region)
 
     fiber_body_target_in(region[:block_irep], owner_def)
   end
@@ -742,14 +747,31 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     return false if region[:needs_blk] || region[:needs_brk] || region[:needs_ret]
     return false unless (region[:upvars] || []).empty? && (block.reps || []).empty?
     return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
-    return false if tail_yield_block?(block) || BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK, :BLKPUSH)
+    body = fiber_new_site?(region) && !fiber_body_target_id(region, owner_def)
+    return false if body && !(mandatory_arity(block).zero? && pure_mandatory_arity?(block))
+    return false if (!body && tail_yield_block?(block)) || BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK, :BLKPUSH)
     return false unless block_direct_entry?(region, region[:kind] || 'block_fallback', false)
 
     yields = false
     BytecodeIR.for(block).each_with_op(:SEND, :SEND0) do |insn, idx|
       yields ||= insn.sym == 'yield' && fiber_const_receiver?(block, idx, insn.reg)
     end
+    # A Fiber body may suspend only through the suspendable methods it calls (CALL_STEP).
+    if body && !yields
+      BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0) { |insn, _| yields ||= @fiber_yield_names&.include?(insn.sym) }
+    end
     yields
+  end
+
+  # The Fiber.new site of a body compiled as a step (block_step_candidate? accepted it and compile_block_step made its
+  # maker): the fiber's root frame is the body's step frame.
+  def emit_fiber_body_step_site(region, fn_name, dest_reg)
+    @fiber_body_used = true
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, [], false,
+                                              direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
+                                              step_maker: block_step_maker_for(region))
+    "  // FIBER_BODY_STEP :new -- the body is a step, the root frame of a C++ Fiber\n  {\n#{ctor}" \
+      "    r#{dest_reg} = bc2cpp_fiber_new_step(M, mrb_obj_value(#{rproc_var}));\n  }\n"
   end
 
   # Compiles every BLOCK_STEP candidate among +regions+ and returns the C++ text to put ahead of the method; each
