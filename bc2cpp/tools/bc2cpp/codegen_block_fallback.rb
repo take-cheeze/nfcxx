@@ -367,6 +367,8 @@ class CodeGen
     # CALL_STEP: a method a root calls on self that can itself suspend is a root too (the root's step CALLs its step).
     # BLOCKS_IN_STEPS: so is one a root calls with a literal block that reaches Fiber.yield (the callee's `yield`
     # suspends through the block); its name then counts as a yielding name.
+    # DYN_CALL: a method a fiber reaches that sends by name can reach the program's other yielding methods.
+    @fiber_roots.merge(dynamic_send_targets) if reachable.any? { |l| (i = @ireps[l]) && deep_send_names(i).intersect?(DYN_SEND_NAMES) }
     queue = @fiber_roots.to_a
     until queue.empty?
       label = queue.shift
@@ -389,6 +391,18 @@ class CodeGen
           @fiber_yield_names << sym
           queue << target if @fiber_roots.add?(target)
         end
+      end
+      # A call on self that forwards the root's own block (`other(&block)`) reaches the yield through it.
+      BytecodeIR.for(irep).each_with_op(:SSENDB) do |insn, idx|
+        prev = BytecodeIR.for(irep).previous(idx)
+        next if prev && prev.op == :BLOCK
+        next unless insn.sym
+
+        target = by_owner_name[[owner, insn.sym]]
+        next unless target
+
+        @fiber_yield_names << insn.sym
+        queue << target if @fiber_roots.add?(target)
       end
       BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SSENDB]) do |block_insn, paired, _|
         block_label = block_insn.block_index && irep.reps[block_insn.block_index.to_i]
@@ -414,6 +428,20 @@ class CodeGen
   # Fiber above its frame. A core iterator with a run-time guard decides per call instead.
   def yield_reach_unsafe_methods(fiber_defs)
     @yield_reach.fiber_unsafe(fiber_defs.keys)
+  end
+
+  # DYN_CALL: a send can reach any program method that yields to its block and that some symbol literal names (`to_enum(:each_x)`,
+  # `send(:m)`); those become roots, so the dispatcher registry has their step. Core methods keep their own
+  # fast bodies (RESUMABLE_DUAL gives them a variant).
+  def dynamic_send_targets
+    named = Set.new
+    @ireps.each_value { |i| BytecodeIR.for(i).instructions_with_op(:LOADSYM).each { |insn| named << insn.sym if insn.sym } }
+    named.flat_map { |sym| @registry[sym] || [] }.filter_map do |dd|
+      next unless dd.irep && !dd.core && dd.kind.nil? && (i = @ireps[dd.irep]) && BytecodeIR.for(i).op?(:BLKCALL)
+
+      @fiber_yield_names << dd.name
+      dd.irep
+    end
   end
 
   # Names of every send in the irep tree (block bodies included).
@@ -1455,10 +1483,13 @@ class CodeGen
       prev = BytecodeIR.for(irep).previous(idx)
       next if prev && prev.op == :BLOCK
 
-      # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.
-      # The args Array is already built in R(dest+1) (see compile_dynamic_splat_send)
-      # and the block is in R(dest+2).
-      next unless insn.argc_operand && !insn.keyword_arguments?
+      # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` with `&expr`. The args Array is already built in R(dest+1) (see
+      # compile_dynamic_splat_send); the keywords and the block follow it.
+      next unless insn.argc_operand
+
+      # Keywords have no translation outside a step's dynamic call (resumable_explicit_block_dyn).
+      keywords = insn.keyword_arguments? || insn.keyword_splat?
+      next if keywords && !@resumable
 
       dest_reg = insn.reg
       next unless dest_reg
@@ -1466,15 +1497,16 @@ class CodeGen
       name = insn.sym
       next unless name
 
+      shape = dyn_call_shape(insn)
       if insn.positional_splat?
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
                      argv_reg: dest_reg + 1,
-                     blk_reg: dest_reg + 2, name: name,
+                     blk_reg: shape[:blk_reg], name: name, kw: shape[:kw],
                      self_implicit: insn.op == :SSENDB }
       else
         n = insn.argc.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
-                     blk_reg: dest_reg + n + 1, name: name,
+                     blk_reg: shape[:blk_reg], name: name, kw: shape[:kw],
                      self_implicit: insn.op == :SSENDB, parent_irep: irep }
       end
     end
@@ -1484,6 +1516,7 @@ class CodeGen
   def emit_explicit_block_arg_glue(region, owner_def: nil)
     dyn = owner_def && resumable_explicit_block_dyn(region)
     return dyn if dyn
+    return "  #error keyword arguments in a forwarded-block call outside a flat step\n" if region[:kw]
 
     direct = emit_explicit_block_arg_direct(region, owner_def)
     return direct if direct
@@ -1559,7 +1592,45 @@ class CodeGen
   # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
   # Takes recognized region lists (the caller chooses the scope), mutates the
   # caller's suppressed/glue_at, and returns the nested-function pre-code.
-  def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at)
+  # INSTANCE_EVAL_IVAR: `obj.instance_eval { @x }` and `obj.instance_eval { @x = v }` (v a local of the method) read and write
+  # an instance variable of +obj+. The block is a rebinder's (it is never compiled with a captured self), but its two
+  # shapes need no block at all. mruby-enumerator's Enumerator#each is written that way.
+  def recognize_instance_eval_ivar_regions(irep)
+    return [] if (@registry['instance_eval'] || []).any? { |dd| dd.irep && !dd.core }
+
+    regions = []
+    BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SENDB]) do |insn, paired, _|
+      next unless paired.sym == 'instance_eval' && paired.plain_fixed_argc? && paired.argc.to_i.zero?
+      next unless insn.reg == paired.reg.to_i + 1
+
+      label = insn.block_index && irep.reps[insn.block_index.to_i]
+      block = label && @ireps[label]
+      next unless block && (block.reps || []).empty?
+
+      ops = BytecodeIR.for(block).instructions.map(&:source).reject { |s| s.op == :ENTER }
+      region = { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: paired.reg.to_i }
+      if ops.map(&:op) == %i[GETIV RETURN] && ops[0].reg == ops[1].reg && ops[0].ivar
+        regions << region.merge(kind: :get, ivar: ops[0].ivar)
+      elsif ops.map(&:op) == %i[GETUPVAR SETIV RETURN] && ops[0].reg == ops[1].regs.first && ops[1].regs.first == ops[2].reg &&
+            ops[1].ivar && ops[0].upvar_ref&.last&.zero?
+        regions << region.merge(kind: :set, ivar: ops[1].ivar, value_reg: ops[0].upvar_ref.first)
+      end
+    end
+    regions
+  end
+
+  def instance_eval_ivar_glue(region)
+    dest = region[:dest_reg]
+    name = c_string_literal("@#{region[:ivar]}")
+    if region[:kind] == :get
+      "  // INSTANCE_EVAL_IVAR :get\n  r#{dest} = mrb_iv_get(M, r#{dest}, mrb_intern_cstr(M, #{name}));\n"
+    else
+      "  // INSTANCE_EVAL_IVAR :set\n  mrb_iv_set(M, r#{dest}, mrb_intern_cstr(M, #{name}), r#{region[:value_reg]});\n" \
+        "  r#{dest} = r#{region[:value_reg]};\n"
+    end
+  end
+
+  def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at, irep: nil)
     pre = String.new
     block_regions.each do |region|
       next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
@@ -1571,6 +1642,12 @@ class CodeGen
       pre << fn_code
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name, owner_def: d)
+    end
+    (irep ? recognize_instance_eval_ivar_regions(irep) : []).each do |region|
+      next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = instance_eval_ivar_glue(region)
     end
     explicit_arg_regions.each do |region|
       next if suppressed.include?(region[:sendb_addr])

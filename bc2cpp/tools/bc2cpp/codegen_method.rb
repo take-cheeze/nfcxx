@@ -438,7 +438,7 @@ class CodeGen
     # RESCUE_BODY_BLOCK_SUPPORT: shared with emit_rescue_try_body (see
     # emit_block_fallback_glue_pass).
     block_fallback_pre = emit_block_fallback_glue_pass(block_fallback_regions, recognize_explicit_block_arg_regions(irep),
-                                                        d, suppressed, glue_at)
+                                                        d, suppressed, glue_at, irep: irep)
     guarded_inline_finish(irep, guarded_inline)
 
     # LAMBDA_FALLBACK_SUPPORT: like BLOCK_CFUNC_FALLBACK_SUPPORT, but the RProc is

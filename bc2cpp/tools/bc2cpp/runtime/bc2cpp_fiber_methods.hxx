@@ -169,29 +169,46 @@ struct Bc2cppDynResult {
   mrb_value value;
 };
 
+extern "C" mrb_value mrb_funcall_send(mrb_state* M,
+                                      mrb_value self,
+                                      mrb_sym mid,
+                                      mrb_int argc,
+                                      const mrb_value* argv,
+                                      mrb_value kdict,
+                                      mrb_value blk);
+
+// `kdict` is the keyword Hash of the call, or nil. A suspendable method takes no
+// keywords, so a non-empty one runs as an ordinary send that carries them
+// (mrb_funcall_send); an empty one passes nothing, as `**{}` does.
 [[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_call(mrb_state* M,
                                                         mrb_value recv,
                                                         mrb_value name,
                                                         mrb_int argc,
                                                         const mrb_value* argv,
+                                                        mrb_value kdict,
                                                         mrb_value blk) {
   mrb_sym mid = mrb_symbol_p(name)
                     ? mrb_symbol(name)
                     : mrb_intern_str(M, mrb_obj_as_string(M, name));
-  struct RClass* c = mrb_class(M, recv);
-  mrb_method_t method = mrb_method_search_vm(M, &c, mid);
-  if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
-    auto& table = bc2cpp_dyn_table();
-    auto it = table.find((void*)MRB_METHOD_CFUNC(method));
-    if (it != table.end() && argc >= it->second.min_argc &&
-        argc <= it->second.max_argc) {
-      bc2cpp_prologue.frame = nullptr;
-      mrb_value result = it->second.fn(M, recv, argc, argv, blk);
-      Bc2cppFiberFrame* parked = bc2cpp_prologue.frame;
-      bc2cpp_prologue.frame = nullptr;
-      return Bc2cppDynResult{parked, result};
+  bool keywords = mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict);
+  if (!keywords) {
+    struct RClass* c = mrb_class(M, recv);
+    mrb_method_t method = mrb_method_search_vm(M, &c, mid);
+    if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
+      auto& table = bc2cpp_dyn_table();
+      auto it = table.find((void*)MRB_METHOD_CFUNC(method));
+      if (it != table.end() && argc >= it->second.min_argc &&
+          argc <= it->second.max_argc) {
+        bc2cpp_prologue.frame = nullptr;
+        mrb_value result = it->second.fn(M, recv, argc, argv, blk);
+        Bc2cppFiberFrame* parked = bc2cpp_prologue.frame;
+        bc2cpp_prologue.frame = nullptr;
+        return Bc2cppDynResult{parked, result};
+      }
     }
+    return Bc2cppDynResult{
+        nullptr, mrb_funcall_with_block(M, recv, mid, argc, argv, blk)};
   }
   return Bc2cppDynResult{
-      nullptr, mrb_funcall_with_block(M, recv, mid, argc, argv, blk)};
+      nullptr, mrb_funcall_send(M, recv, mid, argc, argv, kdict, blk)};
 }

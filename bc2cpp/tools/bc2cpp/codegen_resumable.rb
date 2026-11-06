@@ -215,7 +215,9 @@ class CodeGen
       end
       next unless @fiber_yield_names.include?(name)
 
-      next if insn.op == :SSENDB && resumable_block_call_target(name, d)
+      # A call with a block is a CALL to a known suspendable method or a dynamic call (RESUMABLE_DYN_CALL); either way
+      # the block's own steps carry the suspension, and a site that can do neither runs as an ordinary call.
+      next if insn.op == :SSENDB
 
       unless %i[SSEND SSEND0].include?(insn.op)
         return "calls the yielding method #{name} with an explicit receiver or a block"
@@ -277,7 +279,7 @@ class CodeGen
       resumable_block_site(insn)
     when :SEND, :SEND0
       return resumable_block_call_intercept(insn, irep, d, idx, reg_offset) if block_call_site?(insn, idx, reg_offset)
-      return resumable_dyn_site(insn.op == :SEND0 ? 'self' : "r#{insn.reg - reg_offset}", insn.reg - reg_offset, insn.argc, 'mrb_nil_value()') if dyn_send_site?(insn, idx) && reg_offset.zero?
+      return resumable_dyn_send_insn(insn) if dyn_send_site?(insn, idx) && reg_offset.zero?
       return nil unless insn.sym == 'yield' && idx
 
       dest = insn.reg - reg_offset
@@ -358,21 +360,71 @@ class CodeGen
     return false unless %i[SEND SENDB SSEND SSENDB].include?(insn.op) && DYN_SEND_NAMES.include?(insn.sym) && idx
     return false if @resumable_plain || !@resumable&.flat
 
-    insn.plain_fixed_argc? && insn.argc.to_i >= 1
+    shape = dyn_call_shape(insn)
+    shape && (shape[:splat] || shape[:n] >= 1)
   end
 
-  def resumable_dyn_site(recv, dest, argc, block_value, prelude = '', name: nil, splat_reg: nil)
+  # Where a call's operands sit: the receiver at +reg+, then the positional arguments (a packed Array for `*args`),
+  # the keywords (one Hash register for `**kw`, key/value pairs for literal keywords) and the block register.
+  def dyn_call_shape(insn)
+    return nil unless insn.argc_operand
+
+    dest = insn.reg.to_i
+    splat = insn.positional_splat?
+    n = splat ? 0 : insn.argc.to_i
+    next_reg = dest + 1 + (splat ? 1 : n)
+    kw = nil
+    if insn.keyword_splat?
+      kw = { kind: :hash, reg: next_reg }
+      next_reg += 1
+    elsif insn.keyword_arguments?
+      kw = { kind: :pairs, n: insn.keyword_argc.to_i, reg: next_reg }
+      next_reg += 2 * insn.keyword_argc.to_i
+    end
+    { dest: dest, splat: splat, n: n, argv_reg: (dest + 1 if splat), kw: kw, blk_reg: next_reg }
+  end
+
+  # +splat_reg+: the positional arguments are the Array in that register. With +name+ nil (a `send`) the method name is
+  # the first argument. +kw+ is dyn_call_shape's keyword part.
+  def resumable_dyn_site(recv, dest, argc, block_value, prelude = '', name: nil, splat_reg: nil, kw: nil)
     state = @resumable.new_state
-    args = (1..argc).map { |i| "r#{dest + i}" }
-    # `send(:m, a)` carries the name as its first argument; a plain call has a fixed name.
-    name_expr = name ? "mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(name)}))" : args.first
-    call_args = name ? args : args.drop(1)
+    setup = []
+    if splat_reg
+      ary = "r#{splat_reg}"
+      if name
+        name_expr = "mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(name)}))"
+        argc_expr = "ary_size(#{ary})"
+        argv_expr = "ary_items(#{ary})"
+      else
+        setup << "    if (ary_size(#{ary}) == 0) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"ArgumentError\")), \"no method name given\");"
+        name_expr = "ary_items(#{ary})[0]"
+        argc_expr = "ary_size(#{ary}) - 1"
+        argv_expr = "ary_items(#{ary}) + 1"
+      end
+    else
+      args = (1..argc).map { |i| "r#{dest + i}" }
+      # `send(:m, a)` carries the name as its first argument; a plain call has a fixed name.
+      name_expr = name ? "mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(name)}))" : args.first
+      call_args = name ? args : args.drop(1)
+      setup << "    mrb_value bc2cpp_dyn_argv[] = { #{(call_args + ['mrb_nil_value()']).join(', ')} };"
+      argc_expr = call_args.size
+      argv_expr = 'bc2cpp_dyn_argv'
+    end
+    kdict = 'mrb_nil_value()'
+    case kw&.[](:kind)
+    when :hash
+      kdict = "r#{kw[:reg]}"
+    when :pairs
+      kdict = 'bc2cpp_dyn_kd'
+      setup << '    mrb_value bc2cpp_dyn_kd = mrb_hash_new(M);'
+      kw[:n].times { |i| setup << "    mrb_hash_set(M, bc2cpp_dyn_kd, r#{kw[:reg] + 2 * i}, r#{kw[:reg] + 2 * i + 1});" }
+    end
     lines = [
       "  // RESUMABLE_DYN_CALL #{state}",
       '  {',
       prelude.to_s.rstrip,
-      splat_reg ? nil : "    mrb_value bc2cpp_dyn_argv[] = { #{(call_args + ['mrb_nil_value()']).join(', ')} };",
-      "    Bc2cppDynResult bc2cpp_dyn = bc2cpp_dyn_call(M, #{recv}, #{name_expr}, #{splat_reg ? "ary_size(r#{splat_reg})" : call_args.size}, #{splat_reg ? "ary_items(r#{splat_reg})" : 'bc2cpp_dyn_argv'}, #{block_value});",
+      *setup,
+      "    Bc2cppDynResult bc2cpp_dyn = bc2cpp_dyn_call(M, #{recv}, #{name_expr}, #{argc_expr}, #{argv_expr}, #{kdict}, #{block_value});",
       '    if (!bc2cpp_dyn.frame) {',
       "      r#{dest} = bc2cpp_dyn.value;",
       "      goto Lbc2cpp_dyn_done_#{state};",
@@ -391,6 +443,14 @@ class CodeGen
       "  Lbc2cpp_dyn_done_#{state}:;"
     ]
     lines.compact.reject(&:empty?).join("\n") + "\n"
+  end
+
+  # A `send`-family call without a literal block (a forwarded `&blk` included), in any argument shape.
+  def resumable_dyn_send_insn(insn)
+    shape = dyn_call_shape(insn)
+    recv = %i[SSEND SSENDB].include?(insn.op) ? 'self' : "r#{shape[:dest]}"
+    block_value = %i[SENDB SSENDB].include?(insn.op) ? "r#{shape[:blk_reg]}" : 'mrb_nil_value()'
+    resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, splat_reg: shape[:argv_reg], kw: shape[:kw])
   end
 
   def resumable_block_call_intercept(insn, irep, d, idx, reg_offset)
@@ -1077,7 +1137,10 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return nil unless target
 
     callee = @ireps.fetch(target.irep)
-    pure_mandatory_arity?(callee) && yields_block_param?(callee) ? target : nil
+    # Mandatory parameters and a bare `yield`, or an explicit `&block` parameter after them.
+    ok = (pure_mandatory_arity?(callee) && yields_block_param?(callee)) ||
+         (block_param_arity?(callee) && callee.enter.enter_fields[1].zero? && callee.enter.enter_fields[2].zero?)
+    ok ? target : nil
   end
 
   def resumable_dyn_block_glue(region, fn_name, dest_reg, maker, name: nil)
@@ -1091,16 +1154,16 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
 
   # `recv.m(args, &blk)` in a step: the block is a proc already (a forwarded block), so only the call is dynamic.
   def resumable_explicit_block_dyn(region)
-    return nil unless @resumable && @block_fallback_depth.to_i.zero? && !DYN_SEND_NAMES.include?(region[:name])
+    return nil unless @resumable && @block_fallback_depth.to_i.zero?
 
     dest = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest}"
-    block_value = "r#{region[:blk_reg]}"
-    if region[:n] == '*'
-      resumable_dyn_site(recv, dest, 0, block_value, name: region[:name], splat_reg: region[:argv_reg])
-    else
-      resumable_dyn_site(recv, dest, region[:n].to_i, block_value, name: region[:name])
-    end
+    send_family = DYN_SEND_NAMES.include?(region[:name])
+    splat = region[:n] == '*'
+    return nil if send_family && !splat && region[:n].to_i < 1
+
+    resumable_dyn_site(recv, dest, splat ? 0 : region[:n].to_i, "r#{region[:blk_reg]}",
+                       name: send_family ? nil : region[:name], splat_reg: (region[:argv_reg] if splat), kw: region[:kw])
   end
 
   # The glue of a top-level `m(args) { block }` site in a step, or nil to keep the ordinary glue. The block's proc is
