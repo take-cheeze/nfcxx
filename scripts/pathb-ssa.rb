@@ -315,6 +315,12 @@ def promotable_slots(fn)
 end
 
 # Marks slots used any other way; returns true when the code calls a function that returns twice.
+# A load or store of a slot has the slot's type up to a top-level const (a const pointer slot is read as its pointer).
+def same_slot_type?(a, b)
+  strip = ->(t) { head(t) == "const" ? strip.call(t[1]) : t }
+  strip.call(a) == strip.call(b)
+end
+
 def scan_slot_uses(x, types, bad)
   if x.is_a?(Ref)
     return x.sigil == "&" && SETJMP_NAMES.include?(x.raw)
@@ -326,7 +332,7 @@ def scan_slot_uses(x, types, bad)
   x.each_with_index do |y, i|
     if y.is_a?(Ref) && y.sigil == "$"
       key = "$#{y.raw}"
-      ok = (h == "load" || h == "store") && i == 2 && types[key] && x[1] == types[key]
+      ok = (h == "load" || h == "store") && i == 2 && types[key] && same_slot_type?(x[1], types[key])
       bad[key] = true unless ok
     else
       twice ||= scan_slot_uses(y, types, bad)
