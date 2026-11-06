@@ -200,9 +200,8 @@ module BlockCoreDirectFallback
     unguarded
   end
 
-  # Why a class gets no arm for a name: recorded only while block_send_why collects them (the block-send report writer).
-  def block_core_refuse(klass, name, arity, reason)
-    (@block_core_reasons ||= Hash.new { |hash, key| hash[key] = [] })[[name, arity]] << "#{klass}: #{reason}" if @block_core_why_on
+  # A class that gets no arm for a name. The reason is not recorded: nothing reads the record.
+  def block_core_refuse(_klass, _name, _arity, _reason)
     nil
   end
 
@@ -281,8 +280,7 @@ module BlockCoreDirectFallback
     # below finds in block_core_index (its own registry entry, which the index also lists), for the collection receivers
     # whose iterators the registry keeps (Array#each, Hash#each, Range#each). Kernel and String keep the refusal: their
     # world proofs (a BasicObject subclass, a dynamic installer) withdraw the arm through it.
-    core_ok = %w[Array Hash Range].include?(klass)
-    if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) && !(core_ok && definition.core) }
+    if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) && !definition.core }
       return block_core_refuse(klass, name, arity, 'a project definition on the chain')
     end
 

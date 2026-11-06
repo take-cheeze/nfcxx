@@ -671,7 +671,7 @@ class CodeGen
   # native definition or opaque name can change behind the lookup.
   def rbs_block_lookup_safe?(name, klass)
     return false unless @closed_world
-    return false if klass.end_with?('.singleton') || !@closed_world.class_declared?(klass)
+    return false unless @closed_world.class_declared?(klass)
     return false if devirt_blocked_name?(name) || !@closed_world.inherited_lookup_safe?(name, klass)
 
     installed = symbol_installed_names
