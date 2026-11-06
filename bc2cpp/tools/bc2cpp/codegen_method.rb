@@ -675,13 +675,13 @@ class CodeGen
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
-      out << "  return #{impl_name}(M, self);\n"
+      out << entry_return_line(label, d, impl_name, [])
     elsif arg_names.empty? && (needs_blk_param || has_blk)
       # BLKPUSH_YIELD_SUPPORT/EXPLICIT_BLOCK_PARAM_SUPPORT with zero mandatory
       # arguments: a standalone mrb_get_args("&") call.
       out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
       out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
-      out << "  return #{impl_name}(M, self, bc2cpp_blk);\n"
+      out << entry_return_line(label, d, impl_name, 'bc2cpp_blk')
     elsif kw_table
       # KEYWORD_ARG_SUPPORT: mrb_get_args ":" with mrb_kwargs (mruby.h). `required`
       # counts the leading required entries in `table`; an omitted optional keyword
@@ -729,7 +729,7 @@ class CodeGen
       call_args += kw_table.flat_map do |kw|
         kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
       end
-      out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+      out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
     elsif kwrest_only
       # KEYWORD_REST_ONLY: the positionals bind exactly; the keyword hash is the callinfo's keyword slot (read as the
       # has_rest branch below does), or a fresh empty Hash when the call passed none.
@@ -745,7 +745,7 @@ class CodeGen
       out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
       out << "  mrb_value #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
       out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
-      out << "  return #{impl_name}(M, self, #{(mand_names + [kwrest_name]).join(', ')});\n"
+      out << entry_return_line(label, d, impl_name, "#{(mand_names + [kwrest_name]).join(', ')}")
     elsif has_rest
       # REST_ARG_SUPPORT: mrb_get_args `*` returns a pointer into the live VM stack,
       # so copy it into an Array (mrb_ary_new_from_values) right away, matching the
@@ -791,7 +791,7 @@ class CodeGen
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
         call_args << 'bc2cpp_given_opt'
       end
-      out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+      out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
     else
       # Each local's type must match what its mrb_get_args format character writes:
       # 'o' writes an mrb_value, 'i' (NATIVE_ARGS) an mrb_int*/mrb_sym*
@@ -840,10 +840,10 @@ class CodeGen
         out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
         out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
-        out << "  return #{impl_name}(M, self, #{((has_blk || needs_blk_param) ? arg_names + ['bc2cpp_blk'] : arg_names).join(', ')}, bc2cpp_given_opt);\n"
+        out << entry_return_line(label, d, impl_name, "#{((has_blk || needs_blk_param) ? arg_names + ['bc2cpp_blk'] : arg_names).join(', ')}, bc2cpp_given_opt")
       else
         call_args = (needs_blk_param || has_blk) ? arg_names + ['bc2cpp_blk'] : arg_names
-        out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+        out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
       end
     end
     out << "}\n\n"
@@ -1036,6 +1036,18 @@ class CodeGen
   # form. The variant's registered wrapper is cut off, as entry specialization cuts its own.
   def rsm_variant_code(label)
     @rsm_variants&.[](label) || ''
+  end
+
+  # RESUMABLE_FIBER_ENTRY: the entry's call to the body. A method with a variant takes the call under a Fiber
+  # (M->c != M->root_c) when entered straight from the VM; the variant checks that itself.
+  def entry_return_line(label, d, impl_name, args)
+    argtxt = args.is_a?(String) ? (args.empty? ? '' : ", #{args}") : args.map { |a| ", #{a}" }.join
+    line = "  return #{impl_name}(M, self#{argtxt});\n"
+    # BC2CPP_FIBER_ENTRY_DISPATCH=1 turns this on. Off by default: plain Array#uniq raises after an earlier Fiber
+    # error under it (see docs/bc2cpp-resumable-block-calls.md, "Why a guard in the fast body is not enough").
+    return line if @rsm_variant || rsm_variant_code(label).empty? || ENV['BC2CPP_FIBER_ENTRY_DISPATCH'] != '1'
+
+    "  if (M->c != M->root_c) return #{rsm_impl_name(d)}(M, self#{argtxt});\n#{line}"
   end
 
   # The variant's own helpers (block fallbacks, direct entries) are compiled from the same blocks as the fast body's, under
