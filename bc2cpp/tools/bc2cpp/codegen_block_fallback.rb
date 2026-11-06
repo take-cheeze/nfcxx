@@ -416,8 +416,7 @@ class CodeGen
       name = paired.sym
       next unless name
 
-      # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: never admit `Fiber.new { ... }`.
-      next if paired.op == :SENDB && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
+      # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: removed; a Fiber.new block is admitted like any other literal block.
 
       block_irep_idx = insn.block_index
       next unless block_irep_idx
