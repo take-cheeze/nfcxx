@@ -1037,7 +1037,7 @@ class CodeGen
   RSM_SUFFIX = '_rsm'
   RESUMABLE_DUAL = %w[
     Array#collect! Array#delete_if Array#each Array#each_index Array#fetch
-    Array#find Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
+    Array#find Array#reject! Array#select! Array#sort Enumerable#sort Hash#delete Hash#fetch
     Hash#each Integer#downto Integer#times Integer#upto
     String#each_char String#upto StringIO#each
     Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each

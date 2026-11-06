@@ -24,6 +24,51 @@ struct Bc2cppMethodFrame {
   Bc2cppMethodStep step;
 };
 
+// Calls +blk+ with the arguments from a frame of this fiber. Returns true with
+// the block's value in *value when the block ran to its end here. Returns false
+// with *out set when the fiber has to act first: CALL, when the block is a step
+// (BLOCK_STEP: its env carries a maker, flag bit 2, in the slot before the
+// entry), so its own Fiber.yield suspends it and its result is the caller's
+// next resume value; or YIELD, when the block's last act is Fiber.yield
+// (Bc2cppTailYield), whose next resume value is the block's result.
+static bool bc2cpp_block_call(mrb_state* M,
+                              mrb_value blk,
+                              mrb_int argc,
+                              const mrb_value* argv,
+                              Bc2cppStepOut* out,
+                              mrb_value* value) {
+  bc2cpp_tail_yield.pending = false;
+  if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk))) {
+    const struct REnv* step_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
+    mrb_int step_len = step_env ? MRB_ENV_LEN(step_env) : 0;
+    if (step_len >= 3 && (mrb_integer(step_env->stack[step_len - 1]) & 4)) {
+      Bc2cppBlockStepMaker maker =
+          (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(
+              step_env->stack[step_len - 3]);
+      Bc2cppFiberFrame* callee =
+          maker(M, (struct REnv*)step_env, argc, argv);
+      if (callee) {
+        out->kind = BC2CPP_STEP_CALL;
+        out->callee = callee;
+        return false;
+      }
+    }
+  }
+  const struct REnv* blk_env = nullptr;
+  if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk)))
+    blk_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
+  bc2cpp_tail_yield.env = blk_env;
+  *value = mrb_yield_argv(M, blk, argc, argv);
+  bc2cpp_tail_yield.env = nullptr;
+  if (bc2cpp_tail_yield.pending) {
+    bc2cpp_tail_yield.pending = false;
+    out->kind = BC2CPP_STEP_YIELD;
+    out->value = bc2cpp_tail_yield.value;
+    return false;
+  }
+  return true;
+}
+
 static void bc2cpp_method_frame_step(mrb_state* M,
                                      Bc2cppFiberFrame* base,
                                      mrb_value resume,
@@ -57,39 +102,9 @@ static void bc2cpp_method_frame_step(mrb_state* M,
     // block's result, which the step takes as its own resume value.
     mrb_value args = bc2cpp_resume_frame_value(M, result);
     mrb_value blk = bc2cpp_resume_frame_block(M, result);
-    bc2cpp_tail_yield.pending = false;
-    // BLOCK_STEP: a block compiled as a step carries a maker for its frame
-    // (flag bit 2, the slot before the entry). The block runs as a frame of
-    // this fiber (CALL), so its own Fiber.yield suspends it; its result is this
-    // step's resume value when it finishes.
-    if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk))) {
-      const struct REnv* step_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
-      mrb_int step_len = step_env ? MRB_ENV_LEN(step_env) : 0;
-      if (step_len >= 3 && (mrb_integer(step_env->stack[step_len - 1]) & 4)) {
-        Bc2cppBlockStepMaker maker =
-            (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(
-                step_env->stack[step_len - 3]);
-        Bc2cppFiberFrame* callee = maker(M, (struct REnv*)step_env,
-                                         RARRAY_LEN(args), RARRAY_PTR(args));
-        if (callee) {
-          out->kind = BC2CPP_STEP_CALL;
-          out->callee = callee;
-          return;
-        }
-      }
-    }
-    const struct REnv* blk_env = nullptr;
-    if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk)))
-      blk_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
-    bc2cpp_tail_yield.env = blk_env;
-    resume = mrb_yield_argv(M, blk, RARRAY_LEN(args), RARRAY_PTR(args));
-    bc2cpp_tail_yield.env = nullptr;
-    if (bc2cpp_tail_yield.pending) {
-      bc2cpp_tail_yield.pending = false;
-      out->kind = BC2CPP_STEP_YIELD;
-      out->value = bc2cpp_tail_yield.value;
+    if (!bc2cpp_block_call(M, blk, RARRAY_LEN(args), RARRAY_PTR(args), out,
+                           &resume))
       return;
-    }
   }
 }
 
@@ -164,6 +179,8 @@ inline std::unordered_map<void*, Bc2cppDynEntry>& bc2cpp_dyn_table() {
   bc2cpp_dyn_table()[cfunc] = Bc2cppDynEntry{fn, min_argc, max_argc};
 }
 
+static void bc2cpp_dyn_builtins(mrb_state* M);  // bc2cpp_fiber_sort.hxx
+
 struct Bc2cppDynResult {
   Bc2cppFiberFrame* frame;  // parked callee frame, or null when value is set
   mrb_value value;
@@ -187,6 +204,7 @@ extern "C" mrb_value mrb_funcall_send(mrb_state* M,
                                                         const mrb_value* argv,
                                                         mrb_value kdict,
                                                         mrb_value blk) {
+  bc2cpp_dyn_builtins(M);
   mrb_sym mid = mrb_symbol_p(name)
                     ? mrb_symbol(name)
                     : mrb_intern_str(M, mrb_obj_as_string(M, name));
@@ -203,7 +221,9 @@ extern "C" mrb_value mrb_funcall_send(mrb_state* M,
         mrb_value result = it->second.fn(M, recv, argc, argv, blk);
         Bc2cppFiberFrame* parked = bc2cpp_prologue.frame;
         bc2cpp_prologue.frame = nullptr;
-        return Bc2cppDynResult{parked, result};
+        // undef: the dispatcher declined (nothing for a frame to do).
+        if (parked || !mrb_undef_p(result))
+          return Bc2cppDynResult{parked, result};
       }
     }
     return Bc2cppDynResult{

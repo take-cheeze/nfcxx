@@ -754,7 +754,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # The C++ Fiber runtime (tools/bc2cpp/runtime): its text goes into the generated file, so a build needs no extra
   # include path. bc2cpp_fiber.hxx is standalone; bc2cpp_fiber_methods.hxx uses the helpers just before it.
   def fiber_runtime_cpp
-    %w[bc2cpp_fiber.hxx bc2cpp_fiber_methods.hxx].map do |name|
+    %w[bc2cpp_fiber.hxx bc2cpp_fiber_methods.hxx bc2cpp_fiber_sort.hxx].map do |name|
       File.read(File.join(FIBER_RUNTIME_DIR, name)).gsub(/^#pragma once\n/, '')
     end.join("\n")
   end

@@ -31,7 +31,57 @@ unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version
   exit 0
 end
 
-# [label, fiber expression, plain expression]. The fiber expression yields every block argument; the plain one only returns it.
+# array.c's sort (insertion sort up to 16 elements, heap sort above), transcribed so the comparison block sees the
+# calls mruby's native sort makes. The interpreted run cannot give the expected output of a Fiber.yield in a
+# comparison: the native sort is a C frame, and mruby-fiber raises FiberError there.
+def reference_sort(ary)
+  a = ary.dup
+  n = a.size
+  gt = ->(x, y) { yield(x, y) > 0 }
+  if n <= 16
+    (1...n).each do |i|
+      key = a[i]
+      j = i - 1
+      while j >= 0 && gt.call(a[j], key)
+        a[j + 1] = a[j]
+        j -= 1
+      end
+      a[j + 1] = key
+    end
+  else
+    heapify = lambda do |index, size|
+      loop do
+        max = index
+        l = (2 * index) + 1
+        r = l + 1
+        max = l if l < size && gt.call(a[l], a[max])
+        max = r if r < size && gt.call(a[r], a[max])
+        break if max == index
+
+        a[max], a[index] = a[index], a[max]
+        index = max
+      end
+    end
+    (n / 2 - 1).downto(0) { |i| heapify.call(i, n) }
+    (n - 1).downto(1) do |i|
+      a[0], a[i] = a[i], a[0]
+      heapify.call(0, i)
+    end
+  end
+  a
+end
+
+# The yields of a drained fiber whose comparison block yields its +arg+ argument, then the sorted result.
+def reference_sort_line(label, ary, arg)
+  log = []
+  sorted = reference_sort(ary) do |x, y|
+    log << (arg.zero? ? x : y)
+    arg.zero? ? x <=> y : y <=> x
+  end
+  "fiber #{label}: #{(log + [sorted]).inspect}"
+end
+
+# [label, fiber expression, plain expression, optional expected "fiber" line (see reference_sort)]. The fiber expression yields every block argument; the plain one only returns it.
 SCENARIOS = [
   ['Array#each', '[1, 2].each { |x| Fiber.yield x }', '[1, 2].each { |x| x }'],
   ['Array#delete_if', '[1, 2, 3].delete_if { |x| Fiber.yield x; x == 2 }', '[1, 2, 3].delete_if { |x| x == 2 }'],
@@ -52,6 +102,13 @@ SCENARIOS = [
   ['Array#fetch', '[1].fetch(9) { |i| Fiber.yield i; raise TypeError, "fetch" }', '[1].fetch(9) { |i| raise TypeError, "fetch" }'],
   ['Hash#fetch', '{}.fetch(:zz) { |k| Fiber.yield k; break :stopped }', '{}.fetch(:zz) { |k| break :stopped }'],
   ['Hash#fetch', '{}.fetch(:zz) { |k| Fiber.yield k; raise TypeError, "fetch" }', '{}.fetch(:zz) { |k| raise TypeError, "fetch" }'],
+  ['Array#sort', '[3, 1, 2].sort { |a, b| Fiber.yield a; a <=> b }', '[3, 1, 2].sort { |a, b| a <=> b }',
+   -> { reference_sort_line('Array#sort', [3, 1, 2], 0) }],
+  ['Array#sort', '(1..20).to_a.reverse.sort { |a, b| Fiber.yield a; a <=> b }', '(1..20).to_a.reverse.sort { |a, b| a <=> b }',
+   -> { reference_sort_line('Array#sort', (1..20).to_a.reverse, 0) }],
+  ['Array#sort', '[3, 1, 2].sort! { |a, b| Fiber.yield b; b <=> a }', '[3, 1, 2].sort! { |a, b| b <=> a }',
+   -> { reference_sort_line('Array#sort', [3, 1, 2], 1) }],
+  ['Array#sort', '[2, 1].sort { |a, b| nil }', '[2, 1].sort { |a, b| nil }'],
   ['Array#find', '[1, 2].find { |x| Fiber.yield x; x == 2 }', '[1, 2].find { |x| x == 2 }'],
   ['Array#sort_by', '[2, 1].sort_by { |x| Fiber.yield x; x }', '[2, 1].sort_by { |x| x }'],
   ['Array#to_h', '[[1, 2], [3, 4]].to_h { |x| Fiber.yield x; [x[0], x[1]] }', '[[1, 2], [3, 4]].to_h { |x| [x[0], x[1]] }'],
@@ -66,7 +123,8 @@ SCENARIOS = [
   ['Enumerable#max', '(1..2).max { |a, b| Fiber.yield a; 0 }', '(1..2).max { |a, b| 0 }'],
   ['Enumerable#min', '(1..2).min { |a, b| Fiber.yield a; 0 }', '(1..2).min { |a, b| 0 }'],
   ['Enumerable#reject', '(1..2).reject { |x| Fiber.yield x; false }', '(1..2).reject { |x| false }'],
-  ['Enumerable#sort', '(1..2).sort { |a, b| Fiber.yield a; 0 }', '(1..2).sort { |a, b| 0 }'],
+  ['Enumerable#sort', '(1..2).sort { |a, b| Fiber.yield a; 0 }', '(1..2).sort { |a, b| 0 }',
+   -> { "fiber Enumerable#sort: #{[1, [1, 2]].inspect}" }],
   ['Enumerable#sort_by', '(1..2).sort_by { |x| Fiber.yield x; x }', '(1..2).sort_by { |x| x }'],
   ['Enumerable#sum', '(1..2).sum { |x| Fiber.yield x; x }', '(1..2).sum { |x| x }'],
   ['Enumerable#to_h', '(1..2).to_h { |x| Fiber.yield x; [x, x] }', '(1..2).to_h { |x| [x, x] }'],
@@ -115,14 +173,13 @@ KNOWN_GAPS = {
   'Enumerable#find_index' => 'returns from the block of an inner each',
   'Enumerable#none?' => 'returns from the block of an inner each',
   'Enumerable#max' => 'Range#max reaches it through super',
-  'Enumerable#min' => 'Range#min reaches it through super',
-  'Enumerable#sort' => 'ends in the native Array#sort'
+  'Enumerable#min' => 'Range#min reaches it through super'
 }.freeze
 BREAK_GAP = /\bbreak\b/
 
 EXPECTED_LABELS = %w[
   Array#collect! Array#delete_if Array#each Array#each_index Array#fetch Array#find
-  Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
+  Array#reject! Array#select! Array#sort Enumerable#sort Hash#delete Hash#fetch
   Hash#each Integer#downto Integer#times Integer#upto
   String#each_char String#upto StringIO#each
   Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
@@ -210,6 +267,10 @@ else
     compiled = sections['compiled']
     check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
     if interpreted && compiled
+      # A scenario with an expected line is held to it, not to the interpreted run.
+      SCENARIOS.each_with_index do |(_, _, _, expected), idx|
+        interpreted[idx * 2] = expected.call if expected
+      end
       gap = lambda do |i|
         label, fiber, = SCENARIOS[i / 2]
         i.even? && (KNOWN_GAPS.key?(label) || fiber.match?(BREAK_GAP))
