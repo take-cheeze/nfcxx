@@ -53,6 +53,12 @@ if STRICT_KEYS
       @set.each { |member| self.class.check!(member, @key_type) }
     end
 
+    # dup and clone copy the wrapped set too, so a copy is independent of the original, as Set#dup is.
+    def initialize_copy(other)
+      super
+      @set = other.instance_variable_get(:@set).dup
+    end
+
     def each(&block)
       return enum_for(:each) unless block
 
@@ -105,6 +111,17 @@ if STRICT_KEYS
       raise FrozenError, "can't modify frozen StrictKeySet: #{inspect}" if frozen?
     end
     private :mutable!
+
+    # Content equality, as Set has: callers key memo tables by these sets (the dominance snapshot memo), so two equal
+    # sets must hash and compare equal, and an identical set must find its entry again.
+    def ==(other)
+      @set == (other.is_a?(StrictKeySet) ? other.instance_variable_get(:@set) : other)
+    end
+    alias eql? ==
+
+    def hash
+      @set.hash
+    end
 
     def size
       @set.size
