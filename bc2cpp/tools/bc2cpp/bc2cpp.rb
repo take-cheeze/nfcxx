@@ -1928,7 +1928,37 @@ if $PROGRAM_NAME == __FILE__
     // STACK_BLOCK (docs/bc2cpp-stack-blocks.md): the RProc and REnv of a direct-entry block passed only to a
     // callee that just calls it, laid out as mrb_proc_new_cfunc_with_env builds them but in the caller's frame,
     // over the caller's own env array. Red, so the GC never marks, gray-lists or sweeps them.
+    // BC2CPP_STACK_BLOCK_MALLOC (a build switch, for sanitizer runs): the RProc, the REnv and the env values live in
+    // malloc'd storage freed at the end of the scope, not in the caller's frame. A reference that outlives the scope
+    // is then a heap-use-after-free that ASan reports with the free site, not a stack-use-after-return in a fake frame.
+    // The default keeps the block in the frame (no allocation).
     struct Bc2cppStackBlock {
+#ifdef BC2CPP_STACK_BLOCK_MALLOC
+      struct RProc* proc_;
+      struct REnv* env_;
+      mrb_value* vals_;
+      Bc2cppStackBlock(mrb_state* M, mrb_int len, mrb_value* stack) {
+        proc_ = static_cast<struct RProc*>(calloc(1, sizeof(struct RProc)));
+        env_ = static_cast<struct REnv*>(calloc(1, sizeof(struct REnv)));
+        vals_ = static_cast<mrb_value*>(malloc(sizeof(mrb_value) * (len > 0 ? len : 1)));
+        if (len > 0) memcpy(static_cast<void*>(vals_), static_cast<const void*>(stack), sizeof(mrb_value) * len);
+        env_->tt = MRB_TT_ENV;
+        env_->gc_color = MRB_GC_RED;
+        env_->c = mrb_vm_ci_target_class(M->c->ci);
+        env_->mid = M->c->ci->mid;
+        env_->stack = vals_;
+        MRB_ENV_SET_LEN(env_, len);
+        MRB_ENV_CLOSE(env_);
+        proc_->tt = MRB_TT_PROC;
+        proc_->gc_color = MRB_GC_RED;
+        proc_->c = M->proc_class;
+        proc_->flags = MRB_PROC_CFUNC_FL | MRB_PROC_ENVSET;
+        proc_->body.func = bc2cpp_block_thunk;
+        proc_->e.env = env_;
+      }
+      ~Bc2cppStackBlock() { free(proc_); free(env_); free(vals_); }
+      mrb_value value() { return mrb_obj_value(proc_); }
+#else
       struct RProc proc;
       struct REnv env;
       Bc2cppStackBlock(mrb_state* M, mrb_int len, mrb_value* stack) {
@@ -1947,9 +1977,10 @@ if $PROGRAM_NAME == __FILE__
         proc.body.func = bc2cpp_block_thunk;
         proc.e.env = &env;
       }
+      mrb_value value() { return mrb_obj_value(&proc); }
+#endif
       Bc2cppStackBlock(const Bc2cppStackBlock&) = delete;
       Bc2cppStackBlock& operator=(const Bc2cppStackBlock&) = delete;
-      mrb_value value() { return mrb_obj_value(&proc); }
     };
     // A frame-local block (a Bc2cppStackBlock, red) must not go into a heap env: the frame ends with the call, but the
     // env can outlive it (the arena keeps the heap RProc that holds it), and mrb_gc_mark would read the dead frame. A
