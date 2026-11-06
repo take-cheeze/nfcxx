@@ -28,6 +28,7 @@ require_relative '../../tools/bc2cpp/block_returns'
 require_relative '../../tools/bc2cpp/native_sigs'
 require_relative '../../tools/bc2cpp/rbs_signatures'
 require_relative '../../tools/bc2cpp/closed_world_env'
+require_relative 'fixture_runtime'
 
 ROOT = File.expand_path('../..', __dir__)
 failures = []
@@ -344,14 +345,71 @@ check.call('BLOCK_SELF and RBS_CHECKED_PARAMS: self in a section block, and sect
            status.success? && !err.include?('TC1013'))
 
 _out, err, status = generate.call(BAD_WORLD, BAD_SIGS, native_sigs: BAD_NATIVE_SIGS, native: BAD_NATIVE)
-check.call('false declarations fail the build (DECLARED_RETURN_CHECK)',
-           !status.success? && err.include?('[bc2cpp] DECLARED_RETURN_CHECK'))
-{ 'GbBad#gb_bad_nil' => 'RETNIL', 'GbBad#gb_bad_arity' => 'yields 2', 'GbBad#gb_bad_self' => 'not self',
-  'GbBad#gb_bad_rescue' => 'RESCUE', 'GbNative.singleton#gb_native_wrap' => 'return self' }.each do |key, why|
-  line = err.lines.find { |l| l.include?("error: #{key}:") && l.include?('[TC1010]') }
-  check.call("#{key}: a TC1010 error (#{why})", line.to_s.include?(why))
+check.call('a true declaration next to the false ones is still checked', err.include?('BLOCK_RET GbBad#gb_bad_ok { () -> T } -> T: checked, block_value'))
+
+# RBS only: a false block-return declaration is trusted, not refused. The compiled caller uses the declared class of
+# the block's value, so it must print what the interpreter prints for the same program.
+PARITY_WORLD = <<~'RUBY'
+  class Thing
+    def label
+      'thing'
+    end
+  end
+  class GbBad
+    def gb_bad_nil; yield; nil; end
+  end
+  class GbBadUser
+    def probe
+      x = GbBad.new.gb_bad_nil { Thing.new }
+      x.label
+    end
+  end
+RUBY
+PARITY_SIGS = <<~RBS
+  class GbBad
+    def gb_bad_nil: [T] () { () -> T } -> T
+  end
+RBS
+PARITY_DRIVER = <<~RUBY
+  begin
+    puts GbBadUser.new.probe
+  rescue NoMethodError
+    puts 'no label'
+  end
+  puts 'end'
+RUBY
+
+build = Bc2cppFixtureRuntime.full_or_build
+if build
+  Dir.mktmpdir('gb_parity') do |dir|
+    sig = File.join(dir, 'sig')
+    FileUtils.mkdir_p(sig)
+    File.write(File.join(sig, 'gb.rbs'), PARITY_SIGS)
+    ENV['BC2CPP_SIG_DIRS'] = sig
+    begin
+      _code, parity_err = Bc2cppFixtureRuntime.generate(PARITY_WORLD, dir, only_owners: %w[Thing GbBad GbBadUser])
+      body = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          const char* src = R"APD(#{PARITY_DRIVER})APD";
+          mrb_load_string(M, src);
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(dir, parity_err, %w[Thing GbBad GbBadUser], body, build: build, full: true)
+      sections = built ? Bc2cppFixtureRuntime.sections(output) : {}
+      check.call('the false block-return fixture runs to its end (interpreted)', sections['interpreted']&.last == 'end')
+      check.call('a false block-return declaration: interpreted and compiled run the same',
+                 sections['interpreted'] && sections['interpreted'] == sections['compiled'])
+    ensure
+      ENV.delete('BC2CPP_SIG_DIRS')
+    end
+  end
+else
+  puts '  SKIP runtime parity: needs a full-core libmruby'
 end
-check.call('a true declaration next to them is still checked', err.include?('BLOCK_RET GbBad#gb_bad_ok { () -> T } -> T: checked, block_value'))
 
 if failures.empty?
   puts "generic_block_return_check: #{checks} checks passed"
