@@ -1482,6 +1482,9 @@ class CodeGen
   end
 
   def emit_explicit_block_arg_glue(region, owner_def: nil)
+    dyn = owner_def && resumable_explicit_block_dyn(region)
+    return dyn if dyn
+
     direct = emit_explicit_block_arg_direct(region, owner_def)
     return direct if direct
 

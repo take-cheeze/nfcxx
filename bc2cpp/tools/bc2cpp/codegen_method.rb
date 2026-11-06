@@ -81,6 +81,8 @@ class CodeGen
       send(pass.recognize, irep, *ctx).each do |region|
         anchor = region[pass.anchor]
         next if claimed.include?(anchor) || claimed.include?(region[:sendb_addr])
+        # An inlined loop is C code a step cannot suspend in: a block that may suspend stays a block (a step of its own).
+        next if @resumable && inline_block_may_suspend?(irep, region)
         next if try_range && !rescue_try_inlinable?(region, anchor, try_range)
         # RANGE_EACH_GUARD: the Range#each loop needs its send kept behind it, which only the guarded glue places.
         next if pass.recognize == :recognize_range_each_regions && !guarded
@@ -164,7 +166,9 @@ class CodeGen
     # BLOCK_FALLBACK_YIELD_SUPPORT: `blk_available` is the same condition as
     # `mandatory_ok` below, so a region is never marked `needs_blk` for a method
     # whose wrapper will not extract `bc2cpp_blk`.
-    block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep))
+    # BLOCK_STEP_UPVARS: a block step holds its builder's locals as pointers, so a block nested in it may forward them.
+    block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep),
+                                                                    available_upvars: (label == @block_step_label ? @block_step_upvars : nil) || [])
     # NESTED_BLOCK_FALLBACK_SUPPORT: a RETURN_BLK nested at any depth throws
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.
@@ -185,7 +189,7 @@ class CodeGen
     # LCF::Array2D#each), found by block_fallback_regions and read by
     # emit_rproc_construction. Both stay gated on mandatory_ok, so this is
     # exclusive with `has_blk`.
-    needs_blk_param = yields_block_param?(irep, block_fallback_regions)
+    needs_blk_param = yields_block_param?(irep, block_fallback_regions) || (@block_step_needs_blk && label == @block_step_label)
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # OPTIONAL_REST: optionals with a rest parameter (see optional_rest_arg_table); the rest is taken below.
     opt_rest = !mandatory_ok && opt_jmp_targets.nil? && (rest_table = optional_rest_arg_table(irep))
@@ -255,7 +259,7 @@ class CodeGen
     yielding_root = @fiber_roots&.include?(label) && BytecodeIR.for(irep).instructions_with_op(:BLKCALL).any?
     # RESUMABLE_DUAL: a method with a variant keeps the fast body, and its guard calls the variant.
     dual = !@rsm_variant && !rsm_variant_code(label).empty?
-    if !dual && (calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root || @rsm_variant)
+    if !dual && (calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root || @rsm_variant || (@block_step_compile && label == @block_step_label))
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
       # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
       # outright -- unless it is a Fiber.new root that qualifies as a resumable step
@@ -515,7 +519,7 @@ class CodeGen
     # BLOCK_FALLBACK_YIELD_SUPPORT: in a METHOD body only lv == 0 can be answered
     # (vm.c `if (lv == 0) stack = regs + 1`). codegen_yield stops at the first
     # method scope, so a method's own yield is always level 0.
-    @blk_param_level = 0
+    @blk_param_level = @block_step_needs_blk && label == @block_step_label ? 1 : 0
     # ENSURE_RAII_SUPPORT: an ensure needs code emitted AROUND instructions: the
     # guard and `{` before the protected range's first instruction, and `}`
     # before the handler (the `}` runs the ensure body via the guard's
@@ -884,6 +888,11 @@ class CodeGen
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     # DECLARED_RETURN_GUARD: a runtime-checked return declaration checks every value the body returns.
     out = declared_return_guard_wrap(label, out, impl_name)
+    # DYN_CALL: a method with a variant is reached through a send by its variant (its fast body's wrapper is the key).
+    if !@rsm_variant && !rsm_variant_code(label).empty? && !(has_rest && opt.to_i.positive?) && !kw_table
+      out << resumable_dyn_function(rsm_impl_name(d), "#{d.owner}##{d.name}", arg_names.size, needs_blk_param || has_blk,
+                                    wrapper: cpp_name(d.owner, d.name), optional: opt.to_i, rest: has_rest)
+    end
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
       code: "#{@rsm_variant ? '' : rsm_variant_without_duplicates(label, out)}#{out}", visibility: d.visibility,
@@ -1031,6 +1040,7 @@ class CodeGen
     Array#find Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
     Hash#each Integer#downto Integer#times Integer#upto
     String#each_char String#upto StringIO#each
+    Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
   ].freeze
 
   def rsm_dual?(label, d)
@@ -1078,12 +1088,17 @@ class CodeGen
     # The program-wide facts a core body binds statically (its owner of length, [] ...) are withheld: the variant
     # dispatches the receiver's methods by name, as the interpreter does, so a subclass's own definition is run.
     @core_program_world = nil
+    # The block steps the variant compiled travel in its code: when the variant is dropped they are gone with it.
+    steps_before = [@block_steps&.dup, @block_step_emitted&.dup]
     begin
       result = compile_method(label)
     ensure
       @rsm_variant, @entry_spec_suffix, @core_program_world = saved
     end
-    return '' if result[:unsupported] || result[:code].include?('#error') || !result[:resumable]
+    if result[:unsupported] || result[:code].include?('#error') || !result[:resumable]
+      @block_steps, @block_step_emitted = steps_before
+      return ''
+    end
 
     entry = "static mrb_value #{cpp_name(d.owner, d.name)}(mrb_state* M, mrb_value self) {\n"
     cut = result[:code].rindex(entry)

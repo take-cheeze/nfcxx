@@ -64,7 +64,7 @@ class CodeGen
     def emit_proc_fallback_fn(region, *args, **kwargs)
       # A block that has a step is called as that step by the fiber; its plain body only runs when no fiber CALLs it,
       # so it is compiled outside the enclosing step (a Fiber.yield in it is then an ordinary send).
-      if @resumable && block_step_maker_for(region)
+      if @resumable && (block_step_maker_for(region) || tail_yield_block?(region[:block_irep]))
         saved = @resumable
         @resumable = nil
         begin
@@ -313,15 +313,19 @@ class CodeGen
   # A `yield` (BLKCALL R n argc) of the method's own block: the step returns a frame whose arguments are the yielded
   # values, and the driver calls the block with them (Bc2cppResumable.drive); the block's value is the resume value.
   # The block runs from the driver's VM frame, so a Fiber.yield inside it has only VM frames to cross.
-  def resumable_block_site(insn, argc: insn.uint_operand.to_i)
+  def resumable_block_site(insn, argc: insn.uint_operand.to_i, splat: false)
     return resumable_not_flat_error('yield') unless @resumable.flat
 
     state = @resumable.new_state
     dest = insn.reg
     values = (1..argc).map { |i| "r#{dest.to_i + i}" }
     packed = values.empty? ? 'mrb_ary_new(M)' : "bc2cpp_block_args_from(M, {#{values.join(', ')}})"
+    # `block.call(*args)`: the one argument register already holds the Array of values.
+    packed = "r#{dest.to_i + 1}" if splat
     [
       "  // RESUMABLE_BLOCK_CALL #{state}",
+      # The block this suspension calls (a `yield`'s, or a proc held in a variable): the fiber's adapter reads it back.
+      "  mrb_iv_set(M, bc2cpp_frame_value, mrb_intern_lit(M, \"__block__\"), r#{dest});",
       "  F->state = #{state};",
       '  bc2cpp_step_guard.yielding = true;',
       RESUMABLE_SPILL_MARK,
@@ -340,10 +344,10 @@ class CodeGen
   # a `yield` does, when the receiver is the entry block at run time; any other receiver takes the ordinary send.
   # Identity is tested at run time, so no alias of the block register needs tracking.
   def block_call_site?(insn, idx, reg_offset)
-    return false unless insn.op == :SEND && insn.sym == 'call' && idx && @resumable&.block && @resumable.flat
+    return false unless insn.op == :SEND && insn.sym == 'call' && idx && @resumable&.flat
     return false if @resumable_plain || reg_offset != 0
 
-    insn.plain_fixed_argc?
+    insn.plain_fixed_argc? || insn.positional_splat?
   end
 
   # DYN_CALL: sends whose method is chosen at run time. In a step they go through bc2cpp_dyn_call, which returns the
@@ -357,16 +361,18 @@ class CodeGen
     insn.plain_fixed_argc? && insn.argc.to_i >= 1
   end
 
-  def resumable_dyn_site(recv, dest, argc, block_value, prelude = '')
+  def resumable_dyn_site(recv, dest, argc, block_value, prelude = '', name: nil, splat_reg: nil)
     state = @resumable.new_state
     args = (1..argc).map { |i| "r#{dest + i}" }
-    call_args = args.drop(1)
+    # `send(:m, a)` carries the name as its first argument; a plain call has a fixed name.
+    name_expr = name ? "mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(name)}))" : args.first
+    call_args = name ? args : args.drop(1)
     lines = [
       "  // RESUMABLE_DYN_CALL #{state}",
       '  {',
       prelude.to_s.rstrip,
-      "    mrb_value bc2cpp_dyn_argv[] = { #{(call_args + ['mrb_nil_value()']).join(', ')} };",
-      "    Bc2cppDynResult bc2cpp_dyn = bc2cpp_dyn_call(M, #{recv}, #{args.first}, #{call_args.size}, bc2cpp_dyn_argv, #{block_value});",
+      splat_reg ? nil : "    mrb_value bc2cpp_dyn_argv[] = { #{(call_args + ['mrb_nil_value()']).join(', ')} };",
+      "    Bc2cppDynResult bc2cpp_dyn = bc2cpp_dyn_call(M, #{recv}, #{name_expr}, #{splat_reg ? "ary_size(r#{splat_reg})" : call_args.size}, #{splat_reg ? "ary_items(r#{splat_reg})" : 'bc2cpp_dyn_argv'}, #{block_value});",
       '    if (!bc2cpp_dyn.frame) {',
       "      r#{dest} = bc2cpp_dyn.value;",
       "      goto Lbc2cpp_dyn_done_#{state};",
@@ -384,12 +390,12 @@ class CodeGen
       "  r#{dest} = R[1];",
       "  Lbc2cpp_dyn_done_#{state}:;"
     ]
-    lines.reject(&:empty?).join("\n") + "\n"
+    lines.compact.reject(&:empty?).join("\n") + "\n"
   end
 
   def resumable_block_call_intercept(insn, irep, d, idx, reg_offset)
     dest = insn.reg
-    suspend = resumable_block_site(insn, argc: insn.argc)
+    suspend = resumable_block_site(insn, argc: insn.argc.to_i, splat: insn.positional_splat?)
     plain = begin
       @resumable_plain = true
       compile_insn_op(insn, irep, d, idx, reg_offset)
@@ -397,7 +403,7 @@ class CodeGen
       @resumable_plain = false
     end
     [
-      "  if (mrb_obj_eq(M, r#{dest}, bc2cpp_blk) && !mrb_nil_p(bc2cpp_blk)) {",
+      "  if (mrb_proc_p(r#{dest}) && !MRB_PROC_STRICT_P(mrb_proc_ptr(r#{dest}))) {",
       suspend.rstrip,
       '  } else {',
       plain.rstrip,
@@ -572,25 +578,30 @@ class CodeGen
   # not have worked in the bytecode either).
   # DYN_CALL: the dispatcher a `send` of this method reaches (bc2cpp_dyn_call): arms the method's id, runs its entry (which
   # parks the frame) and registers itself under the method's registered C function. Mandatory parameters only.
-  def resumable_dyn_function(impl_name, owner_name, argc, blk)
-    wrapper = impl_name.delete_suffix('_impl').delete_suffix(RSM_SUFFIX) # a variant is reached through its fast body's wrapper
-    args = (0...argc).map { |i| ", argv[#{i}]" }.join
+  def resumable_dyn_function(impl_name, owner_name, argc, blk, wrapper: impl_name.delete_suffix('_impl'), optional: 0, rest: false)
+    # An omitted optional argument is nil and the entry is told how many were given (the registered wrapper does the same).
+    # A rest parameter is the last one: the arguments past the mandatory ones, packed into an Array.
+    fixed = rest ? argc - 1 : argc
+    args = (0...fixed).map { |i| ", argc > #{i} ? argv[#{i}] : mrb_nil_value()" }.join
+    args += ", argc > #{fixed} ? mrb_ary_new_from_values(M, argc - #{fixed}, argv + #{fixed}) : mrb_ary_new(M)" if rest
+    given = optional.positive? ? ", argc - #{argc - optional}" : ''
+    max = rest ? 'INT32_MAX' : argc
     <<~CPP
-      static mrb_value #{impl_name}_dyn(mrb_state* M, mrb_value self, const mrb_value* argv, mrb_value bc2cpp_dyn_blk) {
-        (void)argv; (void)bc2cpp_dyn_blk;
+      static mrb_value #{impl_name}_dyn(mrb_state* M, mrb_value self, mrb_int argc, const mrb_value* argv, mrb_value bc2cpp_dyn_blk) {
+        (void)argc; (void)argv; (void)bc2cpp_dyn_blk;
         bc2cpp_prologue.expect = #{c_string_literal(owner_name)};
         bc2cpp_prologue.frame = nullptr;
-        mrb_value result = #{impl_name}(M, self#{args}#{blk ? ', bc2cpp_dyn_blk' : ''});
+        mrb_value result = #{impl_name}(M, self#{args}#{blk ? ', bc2cpp_dyn_blk' : ''}#{given});
         bc2cpp_prologue.expect = nullptr;
         return result;
       }
-      static const int #{impl_name}_dyn_reg = (bc2cpp_dyn_register((void*)&#{wrapper}, #{impl_name}_dyn, #{argc}), 0);
+      static const int #{impl_name}_dyn_reg = (bc2cpp_dyn_register((void*)&#{wrapper}, #{impl_name}_dyn, #{fixed - optional}, #{max}), 0);
     CPP
   end
 
   def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false)
     thunk = "#{step_name}_thunk"
-    dyn = optional.zero? && !rest && !@rsm_variant && !@block_step_compile
+    dyn = !(rest && optional.positive?) && !@rsm_variant && !@block_step_compile
     if arg_names.empty? && !blk
       # No arguments: the frame starts empty, and the driver's first step creates it.
       return <<~CPP + (dyn ? resumable_dyn_function(impl_name, owner_name, 0, false) : '')
@@ -668,7 +679,7 @@ tail = <<~CPP
   }
   // #{owner_name}: entry of a resumable method with #{req} required argument#{'s' unless req == 1}#{", #{optional} optional" if optional.positive?} (RESUMABLE_ENTRY)
 CPP
-head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? resumable_dyn_function(impl_name, owner_name, n, blk) : '')
+head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? resumable_dyn_function(impl_name, owner_name, n, blk, optional: optional, rest: rest) : '')
   end
 
   # The run-time half, emitted once per generated file that has a resumable method or a Fiber body.
@@ -818,21 +829,31 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # Limits (a block outside them keeps the call from C, or its tail yield): no captured locals, no nested block,
   # no break/return/yield to the method's block, mandatory or rest-only parameters.
   def block_step_candidate?(region, owner_def)
-    return false unless owner_def && ENV['BC2CPP_BLOCK_STEP'] != '0' && !@rsm_variant && !@block_step_compile
+    return false unless owner_def && ENV['BC2CPP_BLOCK_STEP'] != '0' && !@block_step_compile
 
     block = region[:block_irep]
-    return false if region[:needs_blk] || region[:needs_brk] || region[:needs_ret]
+    return false if region[:needs_brk] || region[:needs_ret]
     return false unless (region[:upvars] || []).empty? || block_step_upvars_ok?(region, owner_def)
     return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
     body = fiber_new_site?(region) && !fiber_body_target_id(region, owner_def)
     return false if body && !(mandatory_arity(block).zero? && pure_mandatory_arity?(block))
-    return false if (!body && tail_yield_block?(block)) || BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK, :BLKPUSH)
+    return false if (!body && tail_yield_block?(block)) || BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK)
+    return false if BytecodeIR.for(block).op?(:BLKPUSH) && !region[:needs_blk] # a BLKPUSH is the method's block only when it is passed in
     return false unless block_direct_entry?(region, region[:kind] || 'block_fallback', false)
+
+    # A Fiber body is always a step: a Fiber over a compiled proc needs a frame to run, whether or not it ever suspends.
+    return true if body
 
     yields = false
     BytecodeIR.for(block).each_with_op(:SEND, :SEND0) do |insn, idx|
       yields ||= insn.sym == 'yield' && fiber_const_receiver?(block, idx, insn.reg)
     end
+    # `block.call(x)` on a proc held in a variable may reach a Fiber.yield, in a method a fiber runs (or its variant).
+    yields ||= (@rsm_variant || @fiber_roots&.include?(owner_def.irep)) && BytecodeIR.for(block).instructions_with_op(:SEND, :SEND0).any? { |i| i.sym == 'call' }
+    # A block that calls the block of the method that built it (`yield` in an inner block) suspends through that block.
+    yields ||= region[:needs_blk] && BytecodeIR.for(block).op?(:BLKCALL)
+    # A block that builds a block which reaches Fiber.yield suspends through it (the nested block is a step, DYN_CALL).
+    yields ||= (block.reps || []).any? { |child| (c = child && @ireps[child]) && deep_fiber_yield?(c, Set.new) }
     # A Fiber body may suspend only through the suspendable methods it calls (CALL_STEP).
     if body && !yields
       BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0) { |insn, _| yields ||= @fiber_yield_names&.include?(insn.sym) }
@@ -845,10 +866,24 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # in the block frame's slots. That is sound where the caller's frame lives as long as the callee: a call on self to a
   # suspendable method (a CALL, so the caller's frame stays on the fiber's stack) and not a Fiber body, which outlives it.
   def block_step_upvars_ok?(region, owner_def)
-    return false if fiber_new_site?(region) || !region[:self_implicit]
-    return false unless region[:upvars].all? { |(level, _)| level.zero? }
+    return false if fiber_new_site?(region)
 
-    !resumable_block_call_target(region[:name], owner_def).nil?
+    region[:upvars].all? { |(level, _)| level.zero? }
+  end
+
+  # Can the literal block of an inline-loop +region+ suspend the fiber: it reaches Fiber.yield, calls a block
+  # (`yield`, `block.call`), or calls a method that can suspend.
+  def inline_block_may_suspend?(irep, region)
+    insn = region[:block_addr] && BytecodeIR.for(irep).instructions.map(&:source).find { |s| s.addr == region[:block_addr] }
+    block_label = insn&.op == :BLOCK && insn.block_index && irep.reps[insn.block_index.to_i]
+    block = block_label && @ireps[block_label]
+    return false unless block
+
+    nested = ->(i) { [i] + (i.reps || []).filter_map { |l| l && @ireps[l] }.flat_map { |c| nested.call(c) } }
+    nested.call(block).any? do |i|
+      deep_fiber_yield?(i, Set.new) || BytecodeIR.for(i).op?(:BLKCALL) ||
+        deep_called_names(i, Set.new).any? { |n| n == 'call' || n == 'yield' || @fiber_yield_names&.include?(n) }
+    end
   end
 
   # The Fiber.new site of a body compiled as a step (block_step_candidate? accepted it and compile_block_step made its
@@ -866,7 +901,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # compiled region gets :step_maker (the maker's name). Done before the owner's own compile starts, so nothing of it
   # is mid-flight (the dual variants are compiled the same way).
   def compile_block_steps(regions, d)
-    return '' if regions.empty? || @rsm_variant || @block_step_compile
+    return '' if regions.empty? || @block_step_compile
 
     code = String.new
     regions.each do |region|
@@ -880,7 +915,9 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       next unless step
 
       @block_step_emitted ||= Set.new
-      code << step[:code] if @block_step_emitted.add?(region[:block_irep].label)
+      # A probe compile (compiles_clean?) throws its text away, so it neither takes nor consumes the one emission.
+      emit = @probing.empty? ? @block_step_emitted.add?(region[:block_irep].label) : true
+      code << step[:code] if emit
       @fiber_body_used = true
     end
     code
@@ -908,15 +945,19 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     saved_budget = @ir_inline_remaining
     saved_upvars = @block_step_upvars
     saved_label = @block_step_label
+    saved_needs_blk = @block_step_needs_blk
     begin
       @block_step_compile = true
       @block_step_upvars = region[:upvars] || []
       @block_step_label = label
+      # BLOCK_STEP_BLOCK: a `yield` in the block calls the block of the method that built it (BLKPUSH at level 1).
+      @block_step_needs_blk = region[:needs_blk] ? true : false
       result = compile_method(label)
     ensure
       @block_step_compile = false
       @block_step_upvars = saved_upvars
       @block_step_label = saved_label
+      @block_step_needs_blk = saved_needs_blk
       @ir_inline_remaining = saved_budget
       previous_owner ? @owner_of[label] = previous_owner : @owner_of.delete(label)
       @fiber_roots.delete(label) unless was_root
@@ -929,14 +970,15 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
 
     code = result[:code][0...cut]
     maker = "#{name}_step_maker"
-    code << block_step_maker(block, "#{name}_impl", "#{syn.owner}##{syn.name}", maker, region[:upvars] || [])
+    code << block_step_maker(block, "#{name}#{@entry_spec_suffix}_impl", "#{syn.owner}##{syn.name}", maker, region[:upvars] || [],
+                            region[:needs_blk])
     @block_steps[label] = { code: code, maker: maker }
   end
 
   # The frame maker the block's env carries: binds the yielded values as a non-strict block binds them, runs the
   # step's entry with its own id armed so the entry parks the frame (bc2cpp_prologue) instead of running it, and
   # returns that frame, or nullptr when the entry did not park (the caller then calls the block directly).
-  def block_step_maker(block, impl, id, maker, upvars = [])
+  def block_step_maker(block, impl, id, maker, upvars = [], needs_blk = false)
     mand = mandatory_arity(block)
     out = String.new
     out << "static Bc2cppFiberFrame* #{maker}(mrb_state* M, struct REnv* bc2cpp_env, mrb_int bc2cpp_argc, " \
@@ -953,6 +995,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       out << "  mrb_int bc2cpp_len = RARRAY_LEN(bc2cpp_vals);\n"
       mand.times { |i| args << "bc2cpp_len > #{i} ? mrb_ary_ref(M, bc2cpp_vals, #{i}) : mrb_nil_value()" }
     end
+    args << "bc2cpp_env->stack[#{1 + upvars.size}]" if needs_blk # the env carries the building method's block after the upvars
     out << "  bc2cpp_prologue.expect = #{c_string_literal(id)};\n  bc2cpp_prologue.frame = nullptr;\n"
     out << "  #{impl}(M, bc2cpp_self#{args.map { |a| ", #{a}" }.join});\n"
     out << "  bc2cpp_prologue.expect = nullptr;\n"
@@ -1037,27 +1080,47 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     pure_mandatory_arity?(callee) && yields_block_param?(callee) ? target : nil
   end
 
-  def resumable_dyn_block_glue(region, fn_name, dest_reg, maker)
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, [], false,
+  def resumable_dyn_block_glue(region, fn_name, dest_reg, maker, name: nil)
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
+                                              region[:needs_blk] ? true : false,
                                               direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
                                               step_maker: maker)
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
-    # self_implicit: `send(:m, a)` has no receiver register, so the symbol is the first argument at dest + 1 as well.
-    resumable_dyn_site(recv, dest_reg, region[:n].to_i, "mrb_obj_value(#{rproc_var})", ctor)
+    resumable_dyn_site(recv, dest_reg, region[:n].to_i, "mrb_obj_value(#{rproc_var})", ctor, name: name)
+  end
+
+  # `recv.m(args, &blk)` in a step: the block is a proc already (a forwarded block), so only the call is dynamic.
+  def resumable_explicit_block_dyn(region)
+    return nil unless @resumable && @block_fallback_depth.to_i.zero? && !DYN_SEND_NAMES.include?(region[:name])
+
+    dest = region[:dest_reg].to_i
+    recv = region[:self_implicit] ? 'self' : "r#{dest}"
+    block_value = "r#{region[:blk_reg]}"
+    if region[:n] == '*'
+      resumable_dyn_site(recv, dest, 0, block_value, name: region[:name], splat_reg: region[:argv_reg])
+    else
+      resumable_dyn_site(recv, dest, region[:n].to_i, block_value, name: region[:name])
+    end
   end
 
   # The glue of a top-level `m(args) { block }` site in a step, or nil to keep the ordinary glue. The block's proc is
   # built on the heap (nothing in it points into the step's frame: block_step_candidate? takes no captured locals).
   def resumable_block_call_glue(region, fn_name, dest_reg, owner_def)
-    return nil unless @resumable && owner_def && region[:self_implicit] && region[:direct_entry] && @block_fallback_depth.to_i.zero?
+    return nil unless @resumable && owner_def && region[:direct_entry] && @block_fallback_depth.to_i.zero?
 
     maker = block_step_maker_for(region)
-    return resumable_dyn_block_glue(region, fn_name, dest_reg, maker) if maker && DYN_SEND_NAMES.include?(region[:name]) && region[:n].to_i >= 1 && (region[:upvars] || []).empty?
+    # A tail-yield block has no step: the callee's frame adapter arms its yield (bc2cpp_tail_yield).
+    return nil unless (maker || tail_yield_block?(region[:block_irep])) && !fiber_new_site?(region)
+    return resumable_dyn_block_glue(region, fn_name, dest_reg, maker) if DYN_SEND_NAMES.include?(region[:name]) && region[:n].to_i >= 1
 
-    target = maker && resumable_block_call_target(region[:name], owner_def)
-    return nil unless target && mandatory_arity(@ireps.fetch(target.irep)) == region[:n].to_i
+    target = maker && region[:self_implicit] ? resumable_block_call_target(region[:name], owner_def) : nil
+    # No known suspendable callee: the method is looked up on the receiver at run time (a core iterator's variant, or a
+    # method of another owner); anything that is not registered runs as an ordinary call with the block.
+    return resumable_dyn_block_glue(region, fn_name, dest_reg, maker, name: region[:name]) unless target
+    return nil unless mandatory_arity(@ireps.fetch(target.irep)) == region[:n].to_i
 
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [], false,
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
+                                              region[:needs_blk] ? true : false,
                                               direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
                                               step_maker: maker)
     args = (1..region[:n]).map { |k| "r#{dest_reg + k}" } + ["mrb_obj_value(#{rproc_var})"]

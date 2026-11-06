@@ -143,11 +143,13 @@ static void bc2cpp_method_frame_mark(mrb_state* M,
 // for the caller to CALL. Anything else runs as an ordinary send.
 typedef mrb_value (*Bc2cppDynFn)(mrb_state* M,
                                  mrb_value self,
+                                 mrb_int argc,
                                  const mrb_value* argv,
                                  mrb_value blk);
 struct Bc2cppDynEntry {
   Bc2cppDynFn fn;
-  mrb_int argc;
+  mrb_int min_argc;
+  mrb_int max_argc;
 };
 
 inline std::unordered_map<void*, Bc2cppDynEntry>& bc2cpp_dyn_table() {
@@ -157,8 +159,9 @@ inline std::unordered_map<void*, Bc2cppDynEntry>& bc2cpp_dyn_table() {
 
 [[maybe_unused]] static void bc2cpp_dyn_register(void* cfunc,
                                                  Bc2cppDynFn fn,
-                                                 mrb_int argc) {
-  bc2cpp_dyn_table()[cfunc] = Bc2cppDynEntry{fn, argc};
+                                                 mrb_int min_argc,
+                                                 mrb_int max_argc) {
+  bc2cpp_dyn_table()[cfunc] = Bc2cppDynEntry{fn, min_argc, max_argc};
 }
 
 struct Bc2cppDynResult {
@@ -180,9 +183,10 @@ struct Bc2cppDynResult {
   if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
     auto& table = bc2cpp_dyn_table();
     auto it = table.find((void*)MRB_METHOD_CFUNC(method));
-    if (it != table.end() && it->second.argc == argc) {
+    if (it != table.end() && argc >= it->second.min_argc &&
+        argc <= it->second.max_argc) {
       bc2cpp_prologue.frame = nullptr;
-      mrb_value result = it->second.fn(M, recv, argv, blk);
+      mrb_value result = it->second.fn(M, recv, argc, argv, blk);
       Bc2cppFiberFrame* parked = bc2cpp_prologue.frame;
       bc2cpp_prologue.frame = nullptr;
       return Bc2cppDynResult{parked, result};
