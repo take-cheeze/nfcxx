@@ -13,6 +13,7 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
   spec.authors = 'take-cheeze'
   spec.summary = 'The bc2cpp source graph, baked for require under mruby'
   spec.add_dependency 'mruby-require'
+  spec.add_dependency 'mruby-env'
 
   generator = File.join(BC2CPP_SOURCES_ROOT, 'tools/bc2cpp/bake_sources.rb')
   baked = "#{build_dir}/bc2cpp_sources.rb"
