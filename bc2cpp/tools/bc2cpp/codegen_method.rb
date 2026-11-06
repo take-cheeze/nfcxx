@@ -169,6 +169,8 @@ class CodeGen
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.
     needs_return_catch = block_fallback_regions.any? { |region| block_fallback_region_has_return_blk?(region) }
+    # BLOCK_STEP: the steps of the blocks that suspend, compiled ahead so the blocks' procs can name their makers.
+    block_step_code = compile_block_steps(block_fallback_regions, d)
 
     # OPTIONAL_ARG_SUPPORT: `opt` > 0 only for the recognized optional-only shape
     # (see optional_arg_table); other non-mandatory shapes get the `#error` stub.
@@ -651,7 +653,7 @@ class CodeGen
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
     out = drop_dead_statements(drop_unused_registers(out)) unless @resumable || ((@report_only_text || (@clean_probe && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0')) && !@runtime_installed_names)
-    out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
+    out = block_step_code + @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
     if entry_spec

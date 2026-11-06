@@ -7,6 +7,11 @@
 // since a block that does not suspend needs no step of its own.
 #pragma once
 
+typedef Bc2cppFiberFrame* (*Bc2cppBlockStepMaker)(mrb_state* M,
+                                                  struct REnv* env,
+                                                  mrb_int argc,
+                                                  const mrb_value* argv);
+
 typedef mrb_value (*Bc2cppMethodStep)(mrb_state* M,
                                       mrb_value self,
                                       mrb_value frame,
@@ -44,6 +49,26 @@ static void bc2cpp_method_frame_step(mrb_state* M,
     mrb_value args = bc2cpp_resume_frame_value(M, result);
     mrb_value blk = bc2cpp_resume_frame_block(M, result);
     bc2cpp_tail_yield.pending = false;
+    // BLOCK_STEP: a block compiled as a step carries a maker for its frame
+    // (flag bit 2, the slot before the entry). The block runs as a frame of
+    // this fiber (CALL), so its own Fiber.yield suspends it; its result is this
+    // step's resume value when it finishes.
+    if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk))) {
+      const struct REnv* step_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
+      mrb_int step_len = step_env ? MRB_ENV_LEN(step_env) : 0;
+      if (step_len >= 3 && (mrb_integer(step_env->stack[step_len - 1]) & 4)) {
+        Bc2cppBlockStepMaker maker =
+            (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(
+                step_env->stack[step_len - 3]);
+        Bc2cppFiberFrame* callee = maker(M, (struct REnv*)step_env,
+                                         RARRAY_LEN(args), RARRAY_PTR(args));
+        if (callee) {
+          out->kind = BC2CPP_STEP_CALL;
+          out->callee = callee;
+          return;
+        }
+      }
+    }
     const struct REnv* blk_env = nullptr;
     if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk)))
       blk_env = MRB_PROC_ENV(mrb_proc_ptr(blk));

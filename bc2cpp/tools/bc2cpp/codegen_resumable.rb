@@ -555,7 +555,7 @@ if blk
 end
 optional_head = optional.positive? ? "    F->state = -(bc2cpp_given_opt + 1);\n" : ''
 # REST_ARGS: the wrapper checked the count and built the rest Array, so the impl checks nothing.
-argc_check = rest ? '' : "bc2cpp_check_argc(M, #{req}, #{n});\n  "
+argc_check = rest || @block_step_compile ? '' : "bc2cpp_check_argc(M, #{req}, #{n});\n  "
 head = <<~CPP
   static mrb_value #{thunk}(mrb_state* M, mrb_value) {
     mrb_value self, frame, resume;
@@ -717,6 +717,123 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
 
     nodes = BytecodeIR.for(@fiber_prologue).instructions
     nodes[-2]&.source&.addr == region[:sendb_addr]
+  end
+
+  # BLOCK_STEP: a literal block whose body reaches Fiber.yield other than as its last act is compiled a second time as
+  # a resumable step, so a suspendable method that calls the block can CALL it instead of calling it from C (where
+  # its Fiber.yield could not cross the C frame). The step is the block's irep compiled as a synthetic method of the
+  # enclosing owner: its registers live in a frame, its Fiber.yield is a YIELD. The block's proc carries a maker for
+  # the step's frame in its env (emit_rproc_construction); the fiber's adapter asks for it at a block-call suspension.
+  # Limits (a block outside them keeps the call from C, or its tail yield): no captured locals, no nested block,
+  # no break/return/yield to the method's block, mandatory or rest-only parameters.
+  def block_step_candidate?(region, owner_def)
+    return false unless owner_def && ENV['BC2CPP_BLOCK_STEP'] != '0' && !@rsm_variant && !@block_step_compile
+
+    block = region[:block_irep]
+    return false if region[:needs_blk] || region[:needs_brk] || region[:needs_ret]
+    return false unless (region[:upvars] || []).empty? && (block.reps || []).empty?
+    return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
+    return false if tail_yield_block?(block) || BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK, :BLKPUSH)
+    return false unless block_direct_entry?(region, region[:kind] || 'block_fallback', false)
+
+    yields = false
+    BytecodeIR.for(block).each_with_op(:SEND, :SEND0) do |insn, idx|
+      yields ||= insn.sym == 'yield' && fiber_const_receiver?(block, idx, insn.reg)
+    end
+    yields
+  end
+
+  # Compiles every BLOCK_STEP candidate among +regions+ and returns the C++ text to put ahead of the method; each
+  # compiled region gets :step_maker (the maker's name). Done before the owner's own compile starts, so nothing of it
+  # is mid-flight (the dual variants are compiled the same way).
+  def compile_block_steps(regions, d)
+    return '' if regions.empty? || @rsm_variant || @block_step_compile
+
+    code = String.new
+    regions.each do |region|
+      # A block nested in another block is a region of the outer block's body (emit_proc_fallback_fn_body recognizes
+      # it again there), so look for steps inside first and name them by block label, not by region object.
+      nested = recognize_block_fallback_regions(region[:block_irep], available_upvars: region[:upvars] || [])
+      code << compile_block_steps(nested, d)
+      next unless block_step_candidate?(region, d)
+
+      step = compile_block_step(region, d)
+      next unless step
+
+      @block_step_emitted ||= Set.new
+      code << step[:code] if @block_step_emitted.add?(region[:block_irep].label)
+      @fiber_body_used = true
+    end
+    code
+  end
+
+  # The maker of the step compiled for +region+'s block, or nil.
+  def block_step_maker_for(region)
+    @block_steps&.[](region[:block_irep].label)&.[](:maker)
+  end
+
+  def compile_block_step(region, d)
+    block = region[:block_irep]
+    label = block.label
+    @block_steps ||= {}
+    return @block_steps[label] if @block_steps.key?(label)
+
+    syn = d.dup
+    syn.name = "#{d.name}__blk#{region[:block_addr]}"
+    syn.irep = label
+    syn.kind = nil
+    previous_owner = @owner_of[label]
+    was_root = @fiber_roots.include?(label)
+    @owner_of[label] = syn
+    @fiber_roots << label
+    saved_budget = @ir_inline_remaining
+    begin
+      @block_step_compile = true
+      result = compile_method(label)
+    ensure
+      @block_step_compile = false
+      @ir_inline_remaining = saved_budget
+      previous_owner ? @owner_of[label] = previous_owner : @owner_of.delete(label)
+      @fiber_roots.delete(label) unless was_root
+    end
+    name = cpp_name(syn.owner, syn.name)
+    entry = "static mrb_value #{name}(mrb_state* M, mrb_value self) {\n"
+    cut = result[:code].rindex(entry)
+    ok = result[:resumable] && !result[:unsupported] && !result[:code].include?('#error') && cut
+    return @block_steps[label] = nil unless ok
+
+    code = result[:code][0...cut]
+    maker = "#{name}_step_maker"
+    code << block_step_maker(block, "#{name}_impl", "#{syn.owner}##{syn.name}", maker)
+    @block_steps[label] = { code: code, maker: maker }
+  end
+
+  # The frame maker the block's env carries: binds the yielded values as a non-strict block binds them, runs the
+  # step's entry with its own id armed so the entry parks the frame (bc2cpp_prologue) instead of running it, and
+  # returns that frame, or nullptr when the entry did not park (the caller then calls the block directly).
+  def block_step_maker(block, impl, id, maker)
+    mand = mandatory_arity(block)
+    out = String.new
+    out << "static Bc2cppFiberFrame* #{maker}(mrb_state* M, struct REnv* bc2cpp_env, mrb_int bc2cpp_argc, " \
+           "const mrb_value* bc2cpp_argv) {\n"
+    out << "  mrb_value bc2cpp_self = bc2cpp_env->stack[0];\n"
+    args = []
+    if rest_only_block?(block)
+      args << 'mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv)'
+    elsif mand == 1
+      args << 'bc2cpp_argc > 0 ? bc2cpp_argv[0] : mrb_nil_value()'
+    elsif mand > 1
+      out << "  mrb_value bc2cpp_vals = (bc2cpp_argc == 1 && mrb_array_p(bc2cpp_argv[0])) ? bc2cpp_argv[0] : " \
+             "mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv);\n"
+      out << "  mrb_int bc2cpp_len = RARRAY_LEN(bc2cpp_vals);\n"
+      mand.times { |i| args << "bc2cpp_len > #{i} ? mrb_ary_ref(M, bc2cpp_vals, #{i}) : mrb_nil_value()" }
+    end
+    out << "  bc2cpp_prologue.expect = #{c_string_literal(id)};\n  bc2cpp_prologue.frame = nullptr;\n"
+    out << "  #{impl}(M, bc2cpp_self#{args.map { |a| ", #{a}" }.join});\n"
+    out << "  bc2cpp_prologue.expect = nullptr;\n"
+    out << "  Bc2cppFiberFrame* bc2cpp_made = bc2cpp_prologue.frame;\n  bc2cpp_prologue.frame = nullptr;\n"
+    out << "  return bc2cpp_made;\n}\n\n"
+    out
   end
 
   # The Fiber.new site: the block's RProc and a C++ Fiber over it. A body that captures locals gets their current

@@ -1189,7 +1189,8 @@ class CodeGen
   # then built over bc2cpp_block_thunk with the entry and the YIELD_FREE flag as the two
   # last env slots.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
-                              ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false, upvar_cells: nil)
+                              ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false, upvar_cells: nil,
+                              step_maker: nil)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -1219,9 +1220,12 @@ class CodeGen
     env_entries << ret_token if ret_token
     env_entries << brk_token if brk_token
     if direct_entry
+      # BLOCK_STEP: the maker of the block's step frame sits just before the entry (the readers index from the end).
+      env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{step_maker})))" if step_maker
       env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))"
-      # The flag slot: YIELD_FREE (bit 0) and the BLOCK_SELF_WORLD check (bit 1), read by bc2cpp_block_thunk.
-      env_entries << "mrb_int_value(M, #{(yield_free ? 1 : 0) | (block_self_check? ? 2 : 0)})"
+      # The flag slot: YIELD_FREE (bit 0), the BLOCK_SELF_WORLD check (bit 1) and BLOCK_STEP (bit 2: the maker slot is
+      # present), read by bc2cpp_block_thunk and the C++ Fiber's adapter.
+      env_entries << "mrb_int_value(M, #{(yield_free ? 1 : 0) | (block_self_check? ? 2 : 0) | (step_maker ? 4 : 0)})"
     end
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
     out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
@@ -1269,7 +1273,8 @@ class CodeGen
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset,
                                               ret_token: ret_token, brk_token: brk_token,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
-                                              yield_free: region[:yield_free])
+                                              yield_free: region[:yield_free],
+                                              step_maker: region[:direct_entry] ? block_step_maker_for(region) : nil)
     # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
     # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
     stack_expr = stack_block_expr(region)
