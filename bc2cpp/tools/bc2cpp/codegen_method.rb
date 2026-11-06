@@ -1043,9 +1043,7 @@ class CodeGen
   def entry_return_line(label, d, impl_name, args)
     argtxt = args.is_a?(String) ? (args.empty? ? '' : ", #{args}") : args.map { |a| ", #{a}" }.join
     line = "  return #{impl_name}(M, self#{argtxt});\n"
-    # BC2CPP_FIBER_ENTRY_DISPATCH=1 turns this on. Off by default: plain Array#uniq raises after an earlier Fiber
-    # error under it (see docs/bc2cpp-resumable-block-calls.md, "Why a guard in the fast body is not enough").
-    return line if @rsm_variant || rsm_variant_code(label).empty? || ENV['BC2CPP_FIBER_ENTRY_DISPATCH'] != '1'
+    return line if @rsm_variant || rsm_variant_code(label).empty?
 
     "  if (M->c != M->root_c) return #{rsm_impl_name(d)}(M, self#{argtxt});\n#{line}"
   end
