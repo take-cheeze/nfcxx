@@ -107,7 +107,7 @@ class CodeGen
       # defining frame's register.
       upvar_idx, level = insn.upvar_ref
       key = [level, upvar_idx]
-      if @block_fallback_upvars&.include?(key)
+      if (@block_fallback_upvars || (@resumable&.flat ? @resumable.upvars : nil))&.include?(key)
         vname = upvar_var_name(*key)
         if insn.op == :GETUPVAR
           "  #{RegName[insn.reg]} = *#{vname};\n"

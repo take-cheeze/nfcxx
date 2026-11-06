@@ -12,7 +12,7 @@ class ResumableCtx
   attr_reader :label, :helpers, :states, :reasons
   attr_accessor :flat, :helper_stack, :sites
   # Set when the step function is emitted: the frame's register count, and each register's index in the frame (R[index]).
-  attr_accessor :nregs, :register_slots
+  attr_accessor :nregs, :register_slots, :upvars
   # BLOCK: the method takes a block (kept in the frame's block slot). block_slot is that slot's R index.
   attr_accessor :block, :block_slot
   # OPTIONAL_ARGS: how many optional positional arguments the method takes (its jump table is the glue at the first
@@ -504,6 +504,9 @@ class CodeGen
     out << "  Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &bc2cpp_frame_value, #{nregs}, #{@resumable.slot_count});\n"
     out << "  mrb_value bc2cpp_regs_ary = bc2cpp_resume_regs(M, bc2cpp_frame_value);\n"
     out << "  mrb_value* R = F->regs;\n"
+    (@resumable.upvars || []).each_with_index do |(level, idx), i|
+      out << "  [[maybe_unused]] mrb_value* #{upvar_var_name(level, idx)} = (mrb_value*)F->slots[#{i}];\n"
+    end
     out << "  Bc2cppStepGuard bc2cpp_step_guard(F);\n"
     out << "  // RESUMABLE_LOCAL_REGISTERS\n" if locals
     registers.each_with_index { |reg, slot| out << "  mrb_value#{'&' unless locals} r#{reg} = R[#{slot + 2}];\n" }
@@ -758,7 +761,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
 
     block = region[:block_irep]
     return false if region[:needs_blk] || region[:needs_brk] || region[:needs_ret]
-    return false unless (region[:upvars] || []).empty? && (block.reps || []).empty?
+    return false unless (region[:upvars] || []).empty? || block_step_upvars_ok?(region, owner_def)
     return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
     body = fiber_new_site?(region) && !fiber_body_target_id(region, owner_def)
     return false if body && !(mandatory_arity(block).zero? && pure_mandatory_arity?(block))
@@ -774,6 +777,17 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
       BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0) { |insn, _| yields ||= @fiber_yield_names&.include?(insn.sym) }
     end
     yields
+  end
+
+  # BLOCK_STEP_UPVARS: a block step may read and write locals of the step that builds it. The site passes pointers to
+  # them (the step's registers are references into its heap frame, see resumable_step_function), which the maker keeps
+  # in the block frame's slots. That is sound where the caller's frame lives as long as the callee: a call on self to a
+  # suspendable method (a CALL, so the caller's frame stays on the fiber's stack) and not a Fiber body, which outlives it.
+  def block_step_upvars_ok?(region, owner_def)
+    return false if fiber_new_site?(region) || !region[:self_implicit]
+    return false unless region[:upvars].all? { |(level, _)| level.zero? }
+
+    !resumable_block_call_target(region[:name], owner_def).nil?
   end
 
   # The Fiber.new site of a body compiled as a step (block_step_candidate? accepted it and compile_block_step made its
@@ -831,11 +845,17 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     @owner_of[label] = syn
     @fiber_roots << label
     saved_budget = @ir_inline_remaining
+    saved_upvars = @block_step_upvars
+    saved_label = @block_step_label
     begin
       @block_step_compile = true
+      @block_step_upvars = region[:upvars] || []
+      @block_step_label = label
       result = compile_method(label)
     ensure
       @block_step_compile = false
+      @block_step_upvars = saved_upvars
+      @block_step_label = saved_label
       @ir_inline_remaining = saved_budget
       previous_owner ? @owner_of[label] = previous_owner : @owner_of.delete(label)
       @fiber_roots.delete(label) unless was_root
@@ -848,14 +868,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
 
     code = result[:code][0...cut]
     maker = "#{name}_step_maker"
-    code << block_step_maker(block, "#{name}_impl", "#{syn.owner}##{syn.name}", maker)
+    code << block_step_maker(block, "#{name}_impl", "#{syn.owner}##{syn.name}", maker, region[:upvars] || [])
     @block_steps[label] = { code: code, maker: maker }
   end
 
   # The frame maker the block's env carries: binds the yielded values as a non-strict block binds them, runs the
   # step's entry with its own id armed so the entry parks the frame (bc2cpp_prologue) instead of running it, and
   # returns that frame, or nullptr when the entry did not park (the caller then calls the block directly).
-  def block_step_maker(block, impl, id, maker)
+  def block_step_maker(block, impl, id, maker, upvars = [])
     mand = mandatory_arity(block)
     out = String.new
     out << "static Bc2cppFiberFrame* #{maker}(mrb_state* M, struct REnv* bc2cpp_env, mrb_int bc2cpp_argc, " \
@@ -876,6 +896,15 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     out << "  #{impl}(M, bc2cpp_self#{args.map { |a| ", #{a}" }.join});\n"
     out << "  bc2cpp_prologue.expect = nullptr;\n"
     out << "  Bc2cppFiberFrame* bc2cpp_made = bc2cpp_prologue.frame;\n  bc2cpp_prologue.frame = nullptr;\n"
+    unless upvars.empty?
+      # BLOCK_STEP_UPVARS: the pointers to the builder's locals, from the env, into the slots the step reads them from.
+      out << "  if (bc2cpp_made) {\n"
+      out << "    Bc2cppResumeFrame* bc2cpp_f = (Bc2cppResumeFrame*)DATA_PTR(((Bc2cppMethodFrame*)bc2cpp_made)->frame);\n"
+      upvars.each_index do |i|
+        out << "    bc2cpp_f->slots[#{i}] = (long long)(uintptr_t)mrb_integer(bc2cpp_env->stack[#{i + 1}]);\n"
+      end
+      out << "  }\n"
+    end
     out << "  return bc2cpp_made;\n}\n\n"
     out
   end
@@ -956,7 +985,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     target = maker && resumable_block_call_target(region[:name], owner_def)
     return nil unless target && mandatory_arity(@ireps.fetch(target.irep)) == region[:n].to_i
 
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, [], false,
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [], false,
                                               direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
                                               step_maker: maker)
     args = (1..region[:n]).map { |k| "r#{dest_reg + k}" } + ["mrb_obj_value(#{rproc_var})"]

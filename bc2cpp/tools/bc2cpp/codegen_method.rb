@@ -305,6 +305,11 @@ class CodeGen
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'takes a native argument') if arg_native_types.compact.any?
 
       @resumable = ResumableCtx.new(label, resumable.helpers)
+      # BLOCK_STEP_UPVARS: slot i of a block step's frame holds the pointer to its i-th captured local.
+      if @block_step_upvars && label == @block_step_label
+        @resumable.upvars = @block_step_upvars
+        @block_step_upvars.each { @resumable.new_slot }
+      end
       @resumable.block = needs_blk_param || has_blk
       # OPTIONAL_ARGS: the optional count, when the jump table is recognised (the shape check refuses the rest).
       @resumable.optional = opt_jmp_targets ? opt : 0

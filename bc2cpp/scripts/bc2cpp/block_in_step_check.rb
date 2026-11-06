@@ -73,16 +73,96 @@ SRC = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[BiClock].freeze
+# NbClock: the Fiber body is itself a step, and the block it builds is nested in it.
+SRC2 = <<~'RUBY'
+  class NbClock
+    def start
+      @fiber = Fiber.new do
+        first = Fiber.yield :begin
+        marks = nb_mark(2) { |x| back = Fiber.yield x; back.to_i + 1 }
+        [first, marks]
+      end
+    end
+
+    def nb_mark(n)
+      out = []
+      i = 0
+      while i < n
+        out << yield(i)
+        i += 1
+      end
+      out
+    end
+
+    def go
+      @fiber.resume
+    end
+
+    def go_with(value)
+      @fiber.resume(value)
+    end
+
+    def fiber_alive
+      @fiber.alive?
+    end
+  end
+RUBY
+
+# CcClock: the yielding block reads and writes locals of the step that builds it.
+SRC3 = <<~'RUBY'
+  class CcClock
+    def start
+      @fiber = Fiber.new { run }
+    end
+
+    def run
+      total = 100
+      log = []
+      marks = cc_mark(3) do |x|
+        back = Fiber.yield x
+        total += back.to_i
+        log << total
+        total
+      end
+      [marks, total, log]
+    end
+
+    def cc_mark(n)
+      out = []
+      i = 0
+      while i < n
+        out << yield(i)
+        i += 1
+      end
+      out
+    end
+
+    def go
+      @fiber.resume
+    end
+
+    def go_with(value)
+      @fiber.resume(value)
+    end
+
+    def fiber_alive
+      @fiber.alive?
+    end
+  end
+RUBY
+
+OWNERS = %w[BiClock NbClock CcClock].freeze
 
 baseline_dir = Dir.mktmpdir('bc2cpp-block-in-step')
 at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS)
+code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2 + SRC3, baseline_dir, core: true, only_owners: OWNERS)
 check.call('run compiles as a resumable step function', code.include?('static mrb_value BiClock_run_step(mrb_state* M'))
 check.call('each_mark compiles as a resumable step function', code.include?('static mrb_value BiClock_each_mark_step(mrb_state* M'))
 check.call('the block compiles as a resumable step', code.match?(/static mrb_value BiClock_run__blk\d+_step\(mrb_state\* M/))
 check.call('run calls each_mark with its block as a CALL (RESUMABLE_CALL)', code.include?('// RESUMABLE_CALL'))
+check.call('the nested block of the body step compiles as a step', code.match?(/static mrb_value NbClock_start__blk\d+_step\(mrb_state\* M/))
+check.call('the block capturing locals compiles as a resumable step', code.match?(/static mrb_value CcClock_run__blk\d+_step\(mrb_state\* M/))
 check.call('no #error in the generated code', !code.include?('#error'))
 
 DRIVER = <<~'RUBY'
@@ -97,6 +177,27 @@ DRIVER = <<~'RUBY'
   out << a.go_with(30)
   out << a.fiber_alive
   p out
+  b = NbClock.new
+  b.start
+  o2 = []
+  o2 << b.go
+  o2 << b.go_with(5)
+  GC.start
+  o2 << b.go_with(10)
+  o2 << b.go_with(20)
+  o2 << b.fiber_alive
+  p o2
+  c = CcClock.new
+  c.start
+  o3 = []
+  o3 << c.go
+  GC.start
+  o3 << c.go_with(1)
+  o3 << c.go_with(2)
+  GC.start
+  o3 << c.go_with(3)
+  o3 << c.fiber_alive
+  p o3
   puts 'end'
 RUBY
 
@@ -126,6 +227,9 @@ else
     check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
     check.call('interpreted and compiled runs print the same', interpreted == compiled)
     check.call('the local-capturing block and the yielding block both give their values', interpreted&.first == '[3, 0, 1, [[2, 4, 6], [12, 14, 16], [21, 31]], false]')
+    check.call('a block step reads and writes the locals of the step that builds it',
+               interpreted&.[](2) == '[0, 1, 2, [[101, 103, 106], 106, [101, 103, 106]], false]')
+    check.call('a block nested in a Fiber body step yields through the callee', interpreted&.[](1) == '[:begin, 0, 1, [5, [11, 21]], false]')
     if interpreted && compiled
       interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
     end
