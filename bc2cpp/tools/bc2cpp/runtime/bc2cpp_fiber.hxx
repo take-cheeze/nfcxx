@@ -18,6 +18,7 @@
 #include <mruby/string.h>
 #include <mruby/variable.h>
 #include <string.h>
+#include <unordered_map>
 
 enum Bc2cppStepKind { BC2CPP_STEP_DONE, BC2CPP_STEP_YIELD, BC2CPP_STEP_CALL };
 

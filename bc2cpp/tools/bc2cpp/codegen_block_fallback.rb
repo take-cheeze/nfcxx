@@ -380,6 +380,16 @@ class CodeGen
         target = by_owner_name[[owner, insn.sym]]
         queue << target if target && @fiber_roots.add?(target)
       end
+      # DYN_CALL: a root that sends by name may reach any method its symbol literals name.
+      if self_call_targets(irep).intersect?(DYN_SEND_NAMES) || deep_send_names(irep).intersect?(DYN_SEND_NAMES)
+        deep_symbol_literals(irep).each do |sym|
+          target = by_owner_name[[owner, sym]]
+          next unless target && !@fiber_roots.include?(target)
+
+          @fiber_yield_names << sym
+          queue << target if @fiber_roots.add?(target)
+        end
+      end
       BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SSENDB]) do |block_insn, paired, _|
         block_label = block_insn.block_index && irep.reps[block_insn.block_index.to_i]
         block_irep = block_label && @ireps[block_label]
@@ -404,6 +414,30 @@ class CodeGen
   # Fiber above its frame. A core iterator with a run-time guard decides per call instead.
   def yield_reach_unsafe_methods(fiber_defs)
     @yield_reach.fiber_unsafe(fiber_defs.keys)
+  end
+
+  # Names of every send in the irep tree (block bodies included).
+  def deep_send_names(irep, seen = Set.new.compare_by_identity)
+    return Set.new unless seen.add?(irep)
+
+    names = BytecodeIR.for(irep).instructions_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB).filter_map(&:sym).to_set
+    (irep.reps || []).each do |child_label|
+      child = child_label && @ireps[child_label]
+      names.merge(deep_send_names(child, seen)) if child
+    end
+    names
+  end
+
+  # The symbol literals (LOADSYM) in the irep tree.
+  def deep_symbol_literals(irep, seen = Set.new.compare_by_identity)
+    return [] unless seen.add?(irep)
+
+    syms = BytecodeIR.for(irep).instructions_with_op(:LOADSYM).filter_map(&:sym)
+    (irep.reps || []).each do |child_label|
+      child = child_label && @ireps[child_label]
+      syms.concat(deep_symbol_literals(child, seen)) if child
+    end
+    syms
   end
 
   # Every self-send name reachable from `irep`, including inside nested block

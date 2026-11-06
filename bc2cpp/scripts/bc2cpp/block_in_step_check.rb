@@ -151,18 +151,62 @@ SRC3 = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[BiClock NbClock CcClock].freeze
+# DyClock: the callee is reached through `send`, so the call is resolved at run time (bc2cpp_dyn_call).
+SRC4 = <<~'RUBY'
+  class DyClock
+    def start
+      @fiber = Fiber.new { run }
+    end
+
+    def run
+      name = :dy_mark
+      marks = send(name, 2) { |x| back = Fiber.yield x; back.to_i + 1 }
+      plain = send(:dy_plain, 5)
+      [marks, plain]
+    end
+
+    def dy_plain(n)
+      n * 2
+    end
+
+    def dy_mark(n)
+      out = []
+      i = 0
+      while i < n
+        out << yield(i)
+        i += 1
+      end
+      out
+    end
+
+    def go
+      @fiber.resume
+    end
+
+    def go_with(value)
+      @fiber.resume(value)
+    end
+
+    def fiber_alive
+      @fiber.alive?
+    end
+  end
+RUBY
+
+OWNERS = %w[BiClock NbClock CcClock DyClock].freeze
 
 baseline_dir = Dir.mktmpdir('bc2cpp-block-in-step')
 at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2 + SRC3, baseline_dir, core: true, only_owners: OWNERS)
+code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2 + SRC3 + SRC4, baseline_dir, core: true, only_owners: OWNERS)
 check.call('run compiles as a resumable step function', code.include?('static mrb_value BiClock_run_step(mrb_state* M'))
 check.call('each_mark compiles as a resumable step function', code.include?('static mrb_value BiClock_each_mark_step(mrb_state* M'))
 check.call('the block compiles as a resumable step', code.match?(/static mrb_value BiClock_run__blk\d+_step\(mrb_state\* M/))
 check.call('run calls each_mark with its block as a CALL (RESUMABLE_CALL)', code.include?('// RESUMABLE_CALL'))
 check.call('the nested block of the body step compiles as a step', code.match?(/static mrb_value NbClock_start__blk\d+_step\(mrb_state\* M/))
 check.call('the block capturing locals compiles as a resumable step', code.match?(/static mrb_value CcClock_run__blk\d+_step\(mrb_state\* M/))
+check.call('the send site is a dynamic call (RESUMABLE_DYN_CALL)', code.include?('// RESUMABLE_DYN_CALL'))
+check.call('dy_mark registers a dispatcher', code.include?('DyClock_dy_mark_impl_dyn'))
 check.call('no #error in the generated code', !code.include?('#error'))
 
 DRIVER = <<~'RUBY'
@@ -198,6 +242,15 @@ DRIVER = <<~'RUBY'
   o3 << c.go_with(3)
   o3 << c.fiber_alive
   p o3
+  d = DyClock.new
+  d.start
+  o4 = []
+  o4 << d.go
+  o4 << d.go_with(1)
+  GC.start
+  o4 << d.go_with(2)
+  o4 << d.fiber_alive
+  p o4
   puts 'end'
 RUBY
 
@@ -229,6 +282,8 @@ else
     check.call('the local-capturing block and the yielding block both give their values', interpreted&.first == '[3, 0, 1, [[2, 4, 6], [12, 14, 16], [21, 31]], false]')
     check.call('a block step reads and writes the locals of the step that builds it',
                interpreted&.[](2) == '[0, 1, 2, [[101, 103, 106], 106, [101, 103, 106]], false]')
+    check.call('a send chosen at run time reaches the suspendable method through a CALL',
+               interpreted&.[](3) == '[0, 1, [[2, 3], 10], false]')
     check.call('a block nested in a Fiber body step yields through the callee', interpreted&.[](1) == '[:begin, 0, 1, [5, [11, 21]], false]')
     if interpreted && compiled
       interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }

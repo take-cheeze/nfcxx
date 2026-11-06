@@ -277,6 +277,7 @@ class CodeGen
       resumable_block_site(insn)
     when :SEND, :SEND0
       return resumable_block_call_intercept(insn, irep, d, idx, reg_offset) if block_call_site?(insn, idx, reg_offset)
+      return resumable_dyn_site(insn.op == :SEND0 ? 'self' : "r#{insn.reg - reg_offset}", insn.reg - reg_offset, insn.argc, 'mrb_nil_value()') if dyn_send_site?(insn, idx) && reg_offset.zero?
       return nil unless insn.sym == 'yield' && idx
 
       dest = insn.reg - reg_offset
@@ -343,6 +344,47 @@ class CodeGen
     return false if @resumable_plain || reg_offset != 0
 
     insn.plain_fixed_argc?
+  end
+
+  # DYN_CALL: sends whose method is chosen at run time. In a step they go through bc2cpp_dyn_call, which returns the
+  # frame of a registered suspendable method for the step to CALL.
+  DYN_SEND_NAMES = %w[send __send__ public_send].freeze
+
+  def dyn_send_site?(insn, idx)
+    return false unless %i[SEND SENDB SSEND SSENDB].include?(insn.op) && DYN_SEND_NAMES.include?(insn.sym) && idx
+    return false if @resumable_plain || !@resumable&.flat
+
+    insn.plain_fixed_argc? && insn.argc.to_i >= 1
+  end
+
+  def resumable_dyn_site(recv, dest, argc, block_value, prelude = '')
+    state = @resumable.new_state
+    args = (1..argc).map { |i| "r#{dest + i}" }
+    call_args = args.drop(1)
+    lines = [
+      "  // RESUMABLE_DYN_CALL #{state}",
+      '  {',
+      prelude.to_s.rstrip,
+      "    mrb_value bc2cpp_dyn_argv[] = { #{(call_args + ['mrb_nil_value()']).join(', ')} };",
+      "    Bc2cppDynResult bc2cpp_dyn = bc2cpp_dyn_call(M, #{recv}, #{args.first}, #{call_args.size}, bc2cpp_dyn_argv, #{block_value});",
+      '    if (!bc2cpp_dyn.frame) {',
+      "      r#{dest} = bc2cpp_dyn.value;",
+      "      goto Lbc2cpp_dyn_done_#{state};",
+      '    }',
+      '    F->callee = bc2cpp_dyn.frame;',
+      '  }',
+      "  F->state = #{state};",
+      '  bc2cpp_step_guard.yielding = true;',
+      RESUMABLE_SPILL_MARK,
+      '  R[0] = mrb_nil_value();',
+      '  mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));',
+      '  bc2cpp_resume_frame_set_call(M, bc2cpp_frame_value, false);',
+      '  return bc2cpp_frame_value;',
+      "  Lbc2cpp_resume_#{state}:;",
+      "  r#{dest} = R[1];",
+      "  Lbc2cpp_dyn_done_#{state}:;"
+    ]
+    lines.reject(&:empty?).join("\n") + "\n"
   end
 
   def resumable_block_call_intercept(insn, irep, d, idx, reg_offset)
@@ -528,11 +570,30 @@ class CodeGen
   # `_impl`, the function the registered entry calls: hands a VM-called invocation to the
   # bytecode driver and steps to completion when called from C (where Fiber.yield could
   # not have worked in the bytecode either).
+  # DYN_CALL: the dispatcher a `send` of this method reaches (bc2cpp_dyn_call): arms the method's id, runs its entry (which
+  # parks the frame) and registers itself under the method's registered C function. Mandatory parameters only.
+  def resumable_dyn_function(impl_name, owner_name, argc, blk)
+    wrapper = impl_name.delete_suffix('_impl').delete_suffix(RSM_SUFFIX) # a variant is reached through its fast body's wrapper
+    args = (0...argc).map { |i| ", argv[#{i}]" }.join
+    <<~CPP
+      static mrb_value #{impl_name}_dyn(mrb_state* M, mrb_value self, const mrb_value* argv, mrb_value bc2cpp_dyn_blk) {
+        (void)argv; (void)bc2cpp_dyn_blk;
+        bc2cpp_prologue.expect = #{c_string_literal(owner_name)};
+        bc2cpp_prologue.frame = nullptr;
+        mrb_value result = #{impl_name}(M, self#{args}#{blk ? ', bc2cpp_dyn_blk' : ''});
+        bc2cpp_prologue.expect = nullptr;
+        return result;
+      }
+      static const int #{impl_name}_dyn_reg = (bc2cpp_dyn_register((void*)&#{wrapper}, #{impl_name}_dyn, #{argc}), 0);
+    CPP
+  end
+
   def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false)
     thunk = "#{step_name}_thunk"
+    dyn = optional.zero? && !rest && !@rsm_variant && !@block_step_compile
     if arg_names.empty? && !blk
       # No arguments: the frame starts empty, and the driver's first step creates it.
-      return <<~CPP
+      return <<~CPP + (dyn ? resumable_dyn_function(impl_name, owner_name, 0, false) : '')
         static mrb_value #{thunk}(mrb_state* M, mrb_value) {
           mrb_value self, frame, resume;
           mrb_get_args(M, "ooo", &self, &frame, &resume);
@@ -607,7 +668,7 @@ tail = <<~CPP
   }
   // #{owner_name}: entry of a resumable method with #{req} required argument#{'s' unless req == 1}#{", #{optional} optional" if optional.positive?} (RESUMABLE_ENTRY)
 CPP
-head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
+head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? resumable_dyn_function(impl_name, owner_name, n, blk) : '')
   end
 
   # The run-time half, emitted once per generated file that has a resumable method or a Fiber body.
@@ -976,12 +1037,23 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     pure_mandatory_arity?(callee) && yields_block_param?(callee) ? target : nil
   end
 
+  def resumable_dyn_block_glue(region, fn_name, dest_reg, maker)
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, [], false,
+                                              direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
+                                              step_maker: maker)
+    recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
+    # self_implicit: `send(:m, a)` has no receiver register, so the symbol is the first argument at dest + 1 as well.
+    resumable_dyn_site(recv, dest_reg, region[:n].to_i, "mrb_obj_value(#{rproc_var})", ctor)
+  end
+
   # The glue of a top-level `m(args) { block }` site in a step, or nil to keep the ordinary glue. The block's proc is
   # built on the heap (nothing in it points into the step's frame: block_step_candidate? takes no captured locals).
   def resumable_block_call_glue(region, fn_name, dest_reg, owner_def)
     return nil unless @resumable && owner_def && region[:self_implicit] && region[:direct_entry] && @block_fallback_depth.to_i.zero?
 
     maker = block_step_maker_for(region)
+    return resumable_dyn_block_glue(region, fn_name, dest_reg, maker) if maker && DYN_SEND_NAMES.include?(region[:name]) && region[:n].to_i >= 1 && (region[:upvars] || []).empty?
+
     target = maker && resumable_block_call_target(region[:name], owner_def)
     return nil unless target && mandatory_arity(@ireps.fetch(target.irep)) == region[:n].to_i
 

@@ -134,3 +134,60 @@ static void bc2cpp_method_frame_mark(mrb_state* M,
               "bc2cpp: Fiber body step did not make a frame");
   return bc2cpp_fiber_new(M, root);
 }
+
+// DYN_CALL: a call whose method is chosen at run time (`send`, `__send__`,
+// `public_send`). A suspendable method registers a dispatcher under its
+// registered C function (the generated `_dyn`, which arms the method's id and
+// runs its entry); the call resolves the method on the receiver and, when it is
+// registered and takes this many arguments, returns the frame the entry parks,
+// for the caller to CALL. Anything else runs as an ordinary send.
+typedef mrb_value (*Bc2cppDynFn)(mrb_state* M,
+                                 mrb_value self,
+                                 const mrb_value* argv,
+                                 mrb_value blk);
+struct Bc2cppDynEntry {
+  Bc2cppDynFn fn;
+  mrb_int argc;
+};
+
+inline std::unordered_map<void*, Bc2cppDynEntry>& bc2cpp_dyn_table() {
+  static std::unordered_map<void*, Bc2cppDynEntry> table;
+  return table;
+}
+
+[[maybe_unused]] static void bc2cpp_dyn_register(void* cfunc,
+                                                 Bc2cppDynFn fn,
+                                                 mrb_int argc) {
+  bc2cpp_dyn_table()[cfunc] = Bc2cppDynEntry{fn, argc};
+}
+
+struct Bc2cppDynResult {
+  Bc2cppFiberFrame* frame;  // parked callee frame, or null when value is set
+  mrb_value value;
+};
+
+[[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_call(mrb_state* M,
+                                                        mrb_value recv,
+                                                        mrb_value name,
+                                                        mrb_int argc,
+                                                        const mrb_value* argv,
+                                                        mrb_value blk) {
+  mrb_sym mid = mrb_symbol_p(name)
+                    ? mrb_symbol(name)
+                    : mrb_intern_str(M, mrb_obj_as_string(M, name));
+  struct RClass* c = mrb_class(M, recv);
+  mrb_method_t method = mrb_method_search_vm(M, &c, mid);
+  if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
+    auto& table = bc2cpp_dyn_table();
+    auto it = table.find((void*)MRB_METHOD_CFUNC(method));
+    if (it != table.end() && it->second.argc == argc) {
+      bc2cpp_prologue.frame = nullptr;
+      mrb_value result = it->second.fn(M, recv, argv, blk);
+      Bc2cppFiberFrame* parked = bc2cpp_prologue.frame;
+      bc2cpp_prologue.frame = nullptr;
+      return Bc2cppDynResult{parked, result};
+    }
+  }
+  return Bc2cppDynResult{
+      nullptr, mrb_funcall_with_block(M, recv, mid, argc, argv, blk)};
+}
