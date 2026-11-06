@@ -10,6 +10,12 @@ require_relative 'scan_cache'
 # by its own generator, not by a method the program defines. Program declarations carry no marker.
 module NativeSigs
   FILE = File.expand_path('../../sig/bc2cpp/declarations.rbs', __dir__)
+  # The core declarations (core mruby classes), split out of FILE. A table is in exactly one of the two files.
+  CORE_FILE = File.expand_path('../../sig/bc2cpp/core.rbs', __dir__)
+  CORE_TABLES = %w[core_block_iterators core_block_params core_block_returns core_blockless_iterators core_class_tests
+                   core_enumerators core_frame_readers core_fresh_arrays core_hierarchy core_predicates core_proc_calls
+                   core_results].freeze
+  FILES = [FILE, CORE_FILE].freeze
   MARKER = '# bc2cpp-native:'
   MARK_WORD = 'bc2cpp-native:'
   MARK_LINE = /^bc2cpp-native: (\S+)$/.freeze
@@ -37,23 +43,28 @@ module NativeSigs
 
   # The identifier a loader takes for one table, e.g. sig/bc2cpp/declarations.rbs#core_results.
   def table(name)
-    "#{FILE}##{name}"
+    "#{CORE_TABLES.include?(name) ? CORE_FILE : FILE}##{name}"
+  end
+
+  # The file a table identifier (FILE#name or CORE_FILE#name) names.
+  def file_of(table)
+    FILES.find { |f| table.start_with?("#{f}#") } or
+      raise "bc2cpp: #{table} is not a native table of #{FILES.join(' or ')}"
   end
 
   def table_name(table)
-    raise "bc2cpp: #{table} is not a native table of #{FILE}" unless table.start_with?("#{FILE}#")
-
-    table.delete_prefix("#{FILE}#")
+    table.delete_prefix("#{file_of(table)}#")
   end
 
   def table?(path)
-    path.start_with?("#{FILE}#")
+    FILES.any? { |f| path.start_with?("#{f}#") }
   end
 
   # The source text of one table, markers included: what the table's loader reads when it is a file. Each kept member
   # is written under its marker (its own, or one added for the block's table), so the text reads back as the same members.
   def table_source(table)
-    source_text(parse, File.readlines(FILE), table_name(table))
+    file = file_of(table)
+    source_text(parse(file), File.readlines(file), table_name(table))
   end
 
   # The declarations of one table, in file order: each top-level block restricted to the members whose table is it.
@@ -61,24 +72,26 @@ module NativeSigs
   # warm scan cache parses a few kilobytes. Only locations differ from restricting the whole file; no loader reads them.
   def decls(table)
     # kept_texts before `name`: on a cold scan cache, mruby left `name` nil when it was assigned before that call.
-    kt = kept_texts
+    file = file_of(table)
+    kt = kept_texts(file)
     name = table_name(table)
     text = kt[name]
     return [] unless text
 
-    select_table(RbsParseMemo.decls("declarations.rbs##{name}", text), name)
+    select_table(RbsParseMemo.decls("#{File.basename(file)}##{name}", text), name)
   end
 
   # { table name => kept text } for every table of FILE. Kept in the scan cache under the file's digest and the rbs
   # version that parsed it, so only a cold run parses the whole file.
-  def kept_texts
-    @kept_texts ||= begin
+  def kept_texts(file = FILE)
+    @kept_texts ||= {}
+    @kept_texts[file] ||= begin
       require 'rbs'
-      ScanCache.fetch("native_sigs.kept_texts.rbs#{RBS::VERSION}", [FILE], cache_absent: false) do
-        kept_texts_of(parse, File.readlines(FILE))
+      ScanCache.fetch("native_sigs.kept_texts.#{File.basename(file)}.rbs#{RBS::VERSION}", [file], cache_absent: false) do
+        kept_texts_of(parse(file), File.readlines(file))
       end
     rescue LoadError
-      raise "bc2cpp: #{FILE} needs the rbs gem (gem install rbs)"
+      raise "bc2cpp: #{file} needs the rbs gem (gem install rbs)"
     end
   end
 
@@ -123,19 +136,21 @@ module NativeSigs
     bodies.transform_values { |body| header + body + footer }
   end
 
-  # The source of every native declaration and member, each under its marker: the text a fixture gives the loader as a file.
-  def native_source
-    lines = File.readlines(FILE)
-    parse.flat_map { |decl| tables_in(decl).map { |name| source_of(decl, name, [], lines) } }.join
+  # The source of every native declaration and member of +file+, each under its marker: the text a fixture gives the
+  # loader as a file. Call it once per file in FILES: a table lives in exactly one of them.
+  def native_source(file = FILE)
+    lines = File.readlines(file)
+    parse(file).flat_map { |decl| tables_in(decl).map { |name| source_of(decl, name, [], lines) } }.join
   end
 
   # Every top-level declaration of the file, parsed once per process.
-  def parse
-    @parse ||= begin
+  def parse(file = FILE)
+    @parse ||= {}
+    @parse[file] ||= begin
       require 'rbs'
-      RbsParseMemo.decls('declarations.rbs', File.read(FILE))
+      RbsParseMemo.decls(File.basename(file), File.read(file))
     rescue LoadError
-      raise "bc2cpp: #{FILE} needs the rbs gem (gem install rbs)"
+      raise "bc2cpp: #{file} needs the rbs gem (gem install rbs)"
     end
   end
 
