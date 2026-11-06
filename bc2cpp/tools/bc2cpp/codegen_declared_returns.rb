@@ -49,8 +49,6 @@ class CodeGen
     attr_accessor :declared_returns, :declared_return_root, :declared_return_hint_refusals
   end
 
-  DECLARED_RETURN_TERMINALS = %i[true false stop].freeze
-
   # The checked declarations: statically checked ones and the runtime-checked %a{bc2cpp:hint} ones.
   def declared_return_entries
     @declared_return_entries ||= (self.class.declared_returns || []).select { |e| @ireps[e.label] }
@@ -156,9 +154,6 @@ class CodeGen
     end
     declared_return_entries.each do |entry|
       refusal = declared_return_refusal(entry.name)
-      # DECLARED_RETURN_GUARD: the compiled body checks every returned value; nothing is proven statically.
-      failures = entry.hint ? [] : declared_return_failures(entry)
-      failures.each { |f| @declared_return_diagnostics << f }
       if refusal
         message = refusal.first == 'error' ? "cannot be checked: #{refusal.last}" : "#{refusal.last}; no return fact"
         loc = entry.loc
@@ -166,8 +161,8 @@ class CodeGen
                                                              "#{entry.key} -> #{entry.text}: #{message}")
       end
       how = entry.hint ? 'runtime-checked (%a{bc2cpp:hint})' : 'checked'
-      status = if failures.empty? && refusal.nil? then "#{how}, fact #{entry.kind}"
-               elsif failures.empty? && refusal.first == 'info' then "#{how}, no fact"
+      status = if refusal.nil? then "#{how}, fact #{entry.kind}"
+               elsif refusal.first == 'info' then "#{how}, no fact"
                else 'FAILED'
                end
       @declared_return_report << "  DECLARED_RET #{entry.key} -> #{entry.text}: #{status}"
@@ -193,166 +188,6 @@ class CodeGen
     root ? path.to_s.sub(%r{\A#{Regexp.escape(root)}/?}, '') : path.to_s
   end
 
-  # Unproven return paths of one declared definition, as diagnostics at their Ruby lines.
-  def declared_return_failures(entry)
-    d = @owner_of[entry.label]
-    irep = @ireps[entry.label]
-    return [] unless d && irep
-
-    breaks = declared_subtree_breaks?(irep)
-    out = []
-    flag = lambda do |ir, idx, why|
-      line = BytecodeIR.for(ir).source_at(idx)&.lineno || 0
-      out << declared_return_diag(declared_return_relative(ir.file), line, 1, 'error',
-                                  "#{entry.key}: declared -> #{entry.text} (#{entry.loc.file}:#{entry.loc.line}), " \
-                                  "but #{why}")
-    end
-    BytecodeIR.for(irep).exits.each do |exit|
-      idx = exit.index
-      case exit.kind
-      when :value, :block_return
-        why = declared_return_value_failure(entry, d, irep, idx, exit.reg, breaks)
-        flag.call(irep, idx, why) if why
-      when :nil
-        flag.call(irep, idx, 'a path returns nil') unless entry.nilable && entry.kind == :class
-      when :self
-        flag.call(irep, idx, 'a path returns self') unless declared_self_is?(entry, d)
-      when *DECLARED_RETURN_TERMINALS
-        flag.call(irep, idx, "a path ends with #{exit.op}")
-      end
-    end
-    # A `return` from a block leaves the method.
-    BytecodeIR.nested_exits(irep, :block_return).each do |child, exit|
-      why = declared_return_value_failure(entry, d, child, exit.index, exit.reg, breaks)
-      flag.call(child, exit.index, "a `return` inside a block: #{why}") if why
-    end
-    out
-  end
-
-  def declared_subtree_breaks?(irep)
-    BytecodeIR.nested_exit?(irep, :break)
-  end
-
-  # `self` is exactly C only in a class with no subclass that is not a module or a singleton.
-  def declared_self_is?(entry, d)
-    entry.kind == :class && d.owner == entry.cls && !d.owner.end_with?('.singleton') &&
-      @known_owners.none? { |k| strict_subclass?(k, d.owner) } && @superclass_of.key?(d.owner)
-  end
-
-  # nil when the value of `reg` at the return `idx` of `ir` proves the declaration, else why not.
-  # RBS only: a declared return is trusted as written, so no return path is proven against it.
-  def declared_return_value_failure(entry, d, ir, idx, reg, breaks)
-    nil
-  end
-
-  # The proof of one return value against its declaration, kept for reference until it is deleted.
-  def declared_return_value_proof_failure(entry, d, ir, idx, reg, breaks)
-    return 'the returned register is unknown' unless reg
-
-    sources = return_value_sources(ir, idx, reg)
-    unless sources
-      return nil if declared_whole_value_proven?(entry, d, ir, idx, reg)
-
-      return "the value returned at line #{BytecodeIR.for(ir).source_at(idx).lineno} has a definition the checker cannot follow " \
-             '(an argument, a rescue edge, a block-written local or an unaudited instruction)'
-    end
-    sources.each do |src|
-      if src == :nil
-        next if entry.nilable && entry.kind == :class
-
-        return 'a path returns nil'
-      end
-      w, r = src
-      writer = BytecodeIR.for(ir).source_at(w)
-      if breaks && %i[SENDB SSENDB].include?(writer.op)
-        return "a block passed to `#{writer.sym}` (line #{writer.lineno}) may `break`, replacing the call's value"
-      end
-
-      why = declared_source_failure(entry, d, ir, w, r)
-      return why if why
-    end
-    nil
-  end
-
-  # A whole-register proof for a return whose reaching definitions return_value_sources does not list (an entry
-  # argument, for one): the proofs' own operand predicates, which handle those themselves.
-  def declared_whole_value_proven?(entry, d, ir, idx, reg)
-    case entry.kind
-    when :fixnum then proven_fixnum_operand?(ir, idx, reg, d)
-    when :array
-      dominated = ->(w_idx, use_idx, r) { return_write_dominates?(ir, w_idx, use_idx, r) }
-      straightline_return_reg?(ir, idx, reg) &&
-        (declared_traced_class(entry, d, ir, idx, reg, dominated) == 'Array' || declared_array_scan(d, ir, idx, reg))
-    when :class
-      declared_traced_class(entry, d, ir, idx, reg, nil) == entry.cls
-    end
-  end
-
-  # nil when the write of `r` at `w` proves the declaration, else why not.
-  def declared_source_failure(entry, d, ir, w, r)
-    writer = BytecodeIR.for(ir).source_at(w)
-    what = "the value written at line #{writer.lineno} (#{writer.op}#{writer.sym ? " :#{writer.sym}" : ''})"
-    case entry.kind
-    when :fixnum
-      return nil if fixnum_proof_source?(ir, w, writer, r, d, 0)
-
-      "#{what} is not a proven Fixnum"
-    when :array
-      traced = declared_array_source(d, ir, w, r, 0)
-      return nil if traced == 'Array'
-
-      traced ? "#{what} is a #{traced}, not an Array" : "#{what} is not a proven Array"
-    when :class
-      traced = declared_traced_class(entry, d, ir, w + 1, r, declared_hop_dominance(ir, w))
-      return nil if traced == entry.cls
-      return "#{what} is a #{traced}, not exactly #{entry.cls}" if traced
-
-      # SEALED_HASH_IVAR: `@h[k]` answers a stored value or nil, so only a `C?` declaration may take it.
-      if entry.nilable && writer.op == :GETIDX && writer.reg == r
-        why = sealed_hash_read_failure(ir, w, entry.cls, declared_sealed_value_prover(entry))
-        return why ? "#{what} is not a proven #{entry.cls} (#{why})" : nil
-      end
-      "#{what} is not a proven #{entry.cls}"
-    end
-  end
-
-  # Proves one value a sealed Hash literal stores is exactly the declared class: the same class trace, in the
-  # storing method's frame.
-  def declared_sealed_value_prover(entry)
-    lambda do |site, idx, reg|
-      sd = numeric_irep_owner[site.label]
-      next 'a store outside a method' unless sd
-
-      dominated = ->(w_idx, use_idx, hop) { return_write_dominates?(site, w_idx, use_idx, hop) }
-      traced = declared_traced_class(entry, sd, site, idx, reg, dominated)
-      traced == entry.cls ? nil : "#{traced ? "a #{traced}" : 'a value'}, not a proven #{entry.cls}"
-    end
-  end
-
-  # 'Array' when the write of `r` at `w` is an Array: the array proof's own predicates, or `a + b` whose left operand is
-  # an Array on every reaching definition (Array#+ always answers a new Array; no program `+` on Array or a subclass,
-  # no prepend). Else the class trace_new_target names, or nil.
-  def declared_array_source(d, ir, w, r, depth)
-    traced = declared_traced_class(nil, d, ir, w + 1, r, declared_hop_dominance(ir, w))
-    return 'Array' if traced == 'Array' || declared_array_scan(d, ir, w + 1, r)
-
-    writer = BytecodeIR.for(ir).source_at(w)
-    return traced unless writer.op == :ADD && depth < FIXNUM_PROOF_MAX_DEPTH && declared_array_plus_safe?
-
-    sources = return_value_sources(ir, w, writer.reg)
-    return traced unless sources && !sources.empty? && sources.none?(:nil)
-
-    sources.all? { |sw, sr| declared_array_source(d, ir, sw, sr, depth + 1) == 'Array' } ? 'Array' : traced
-  end
-
-  # proven_array_source without the unchecked `# bc2cpp: -> Array` comment seeds: a call proves an Array through
-  # ARRAY_RETURN_PROOF, which holds the checked declarations.
-  def declared_array_scan(d, ir, idx, reg)
-    receiver_class = ->(pin_idx, pin) { block_fallback_receiver_class(ir, pin_idx, pin.reg, d.owner) }
-    proven_array_source_scan(ir, idx, reg, @registry, nil, ->(n) { @array_return_names.include?(n) },
-                             receiver_class: receiver_class)
-  end
-
   def declared_array_plus_safe?
     return @declared_array_plus_safe if defined?(@declared_array_plus_safe)
 
@@ -366,22 +201,6 @@ class CodeGen
 
     @range_to_a_safe = DeclaredConstants.range_to_a_safe?(@registry, @included_modules, @prepended_modules,
                                                           @unknown_mixins)
-  end
-
-  # The writer at `w` is a reaching definition already; every deeper hop must dominate.
-  def declared_hop_dominance(ir, w)
-    ->(w_idx, use_idx, hop) { (w_idx == w && use_idx == w + 1) || return_write_dominates?(ir, w_idx, use_idx, hop) }
-  end
-
-  # trace_new_target with the method's facts, the class return fixpoint (seeded with the declarations) for self and
-  # explicit calls, and no unchecked `-> C` comment annotation.
-  def declared_traced_class(_entry, d, ir, idx, reg, dominated)
-    method_level = ir.label == d.irep
-    trace_new_target(ir, idx, reg, @class_layout[d.owner], method_level ? mandatory_arity(ir) : 0,
-                     method_level ? @class_annotations[ir.label]&.args : nil, owner: d.owner,
-                     class_layout: @class_layout, registry: @registry, container_constants: @container_constants,
-                     ret_class_proof: ->(n, o) { class_return_for_self_call(n, o) },
-                     method_return_class: dispatch_return_class, dominated: dominated)
   end
 
   # The C++ test that `var` has the declared kind (see declared_return_guard_statement). A :union is the members' tests

@@ -134,9 +134,6 @@ check.call('the listing says runtime-checked, fact',
            gen.declared_return_report.include?('  DECLARED_RET Foo#count -> Integer: runtime-checked (%a{bc2cpp:hint}), fact fixnum') &&
              gen.declared_return_diagnostics.empty?)
 ctx = { registry: { 'pick' => [defs[1]], 'find' => [defs[2]] }, declared: hints.to_h { |e| [e.label, e] }, sig_of: {} }
-check.call('RBS_CHECKED_PARAMS: a call to a hinted -> C proves C', RbsParamCheck.returns_why(ctx, 'pick', 'Bar', 0).nil?)
-check.call('RBS_CHECKED_PARAMS: a hinted -> C? proves C or nil only',
-           RbsParamCheck.returns_why(ctx, 'find', 'Bar', 0).is_a?(RbsParamCheck::Nilable))
 aliased = GuardHarness.new(defs, ireps)
 aliased.aliased << 'count'
 check.call('an aliased hinted name is refused (error) and carries no fact',

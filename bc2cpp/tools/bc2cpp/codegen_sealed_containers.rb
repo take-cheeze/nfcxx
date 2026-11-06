@@ -45,37 +45,6 @@ class CodeGen
   # The classes whose Ruby definitions could answer those names on a Hash.
   SEALED_HASH_ANCESTORS = %w[Hash Enumerable Object Kernel BasicObject].freeze
 
-  # nil when the GETIDX at +w+ of +irep+ reads a sealed Hash ivar whose values are exactly +cls+, else why not.
-  # +prove+ is called as (irep, index, register) for each stored value and answers nil or why it is not +cls+.
-  def sealed_hash_read_failure(irep, w, cls, prove)
-    insn = BytecodeIR.for(irep).source_at(w)
-    return 'not a GETIDX' unless insn&.op == :GETIDX && insn.reg
-
-    sources = BytecodeIR.producers(irep, w, insn.reg, through_handlers: true)
-    return 'its receiver is not one ivar read' unless sources&.size == 1 && sources.first.op == :GETIV
-
-    name = sources.first.insn.ivar
-    owner = ivar_reader_owner(irep.label)
-    return 'its receiver is not an ivar of a known class' unless name && owner
-
-    why = sealed_hash_ivar_failure(owner, name)
-    return "@#{name} is not a sealed Hash (#{why})" if why
-
-    sites, why = ivar_store_sites_of(owner, name)
-    return "@#{name}: #{why}" if why
-
-    sites.each do |site_irep, idx, reg|
-      why = sealed_hash_store_failure(site_irep, idx, reg, cls, prove)
-      return "@#{name} = (#{why}) at #{site_irep.file}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
-    end
-    # SEALED_HASH_STORES: `@h[k] = v` stores v into the one Hash the slot holds.
-    sealed_hash_index_stores(name).each do |site_irep, idx, value|
-      why = prove.call(site_irep, idx, value)
-      return "@#{name}[k] = (#{why}) at #{site_irep.file}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
-    end
-    nil
-  end
-
   # The name-level conditions (reads, reflection, accessors, nil), cached per name.
   def sealed_hash_ivar_failure(owner, name)
     @sealed_hash_ivar_failures ||= {}
