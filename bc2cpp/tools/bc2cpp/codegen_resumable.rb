@@ -604,7 +604,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
 
   # Ops a Fiber body's prologue may use before its tail call: they read the receiver's state and make constants, so
   # none of them can reach a suspendable method.
-  FIBER_BODY_PLAIN_OPS = %i[ENTER GETIV MOVE LOADSELF LOADNIL LOADT LOADF LOADSYM].freeze
+  FIBER_BODY_PLAIN_OPS = %i[ENTER GETIV GETUPVAR MOVE LOADSELF LOADNIL LOADT LOADF LOADSYM LOADL STRING].freeze
 
   # `Fiber.new { prologue; m(args) }`: the block ends with a call on self to a suspendable method `m` of the
   # enclosing method's owner and returns its value. The block's only call is that one, so the C++ Fiber can run the block
@@ -617,7 +617,36 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     idx = parent && parent.index_of_addr(region[:sendb_addr])
     return nil unless idx && fiber_const_receiver?(parent, idx, region[:dest_reg])
 
-    nodes = BytecodeIR.for(region[:block_irep]).instructions
+    fiber_body_target_in(region[:block_irep], owner_def)
+  end
+
+  # The recognizer's side of fiber_body_target_id (it runs before a region exists): true when the site at +idx+ is a
+  # Fiber body that fiber_body_target_id will accept AND every local it captures is safe to copy by value, so a
+  # region may take upvars without the synchronous-call gate. The same predicate decides the emission, so a body
+  # that captures never reaches the frame-address form.
+  def fiber_body_by_value?(irep, idx, paired, block_irep, upvars)
+    return false unless paired.sym == 'new' && paired.op == :SENDB && paired.plain_fixed_argc? && paired.argc.to_i.zero?
+    return false unless fiber_const_receiver?(irep, idx, paired.reg)
+
+    owner_def = @owner_of[irep.label]
+    return false unless owner_def && fiber_body_target_in(block_irep, owner_def)
+    return false unless upvars.all? { |(level, _)| level.zero? }
+    # The body and the enclosing method must both leave the locals alone: a copy is the variable only if nothing
+    # writes either. The body has no SETUPVAR; the method names the register only in ENTER (a mandatory parameter
+    # that no instruction writes or reads by its A operand).
+    return false if BytecodeIR.for(block_irep).op?(:SETUPVAR)
+
+    mandatory = mandatory_arity(irep)
+    nodes = BytecodeIR.for(irep).instructions
+    upvars.all? do |(_, reg)|
+      reg.between?(1, mandatory) && nodes.none? { |node| node.op != :ENTER && node.source.reg == reg }
+    end
+  end
+
+  # `block_irep` ends in a tail call on self to a suspendable method of +owner_def+'s owner, after plain prologue ops;
+  # the entry id "Owner#m" or nil.
+  def fiber_body_target_in(block_irep, owner_def)
+    nodes = BytecodeIR.for(block_irep).instructions
     send = nodes[-2]
     ret = nodes[-1]
     return nil unless ret&.op == :RETURN && %i[SSEND SSEND0].include?(send&.op) && send.source.reg == ret.source.reg
@@ -631,6 +660,26 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     return nil unless @fiber_roots&.include?(label) && resumable_method?(label)
 
     "#{targets.first.owner}##{name}"
+  end
+
+  # The Fiber.new site: the block's RProc and a C++ Fiber over it. A body that captures locals gets their current
+  # values copied into a heap Array first (the block reads them through pointers into it), since the Fiber outlives
+  # this frame.
+  def emit_fiber_body_site(region, fn_name, fiber_id, dest_reg)
+    upvars = region[:upvars] || []
+    cells = upvars.empty? ? nil : "bc2cpp_cells_#{region[:block_addr]}"
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, upvars, false,
+                                              direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
+                                              yield_free: region[:yield_free], upvar_cells: cells)
+    out = String.new
+    out << "  // FIBER_BODY :new -- the body is the root frame of a C++ Fiber (#{fiber_id})\n  {\n"
+    if cells
+      out << "    mrb_value #{cells}_ary = mrb_ary_new_capa(M, #{upvars.size});\n"
+      upvars.each { |(_, reg)| out << "    mrb_ary_push(M, #{cells}_ary, r#{reg});\n" }
+      out << "    mrb_value* #{cells} = RARRAY_PTR(#{cells}_ary);\n"
+    end
+    out << ctor
+    out << "    r#{dest_reg} = bc2cpp_fiber_new_body(M, mrb_obj_value(#{rproc_var}), #{c_string_literal(fiber_id)});\n  }\n"
   end
 
   RESUMABLE_HELPERS_CPP = <<~'CPP'

@@ -448,12 +448,15 @@ class CodeGen
       # block runs.
       synchronous = BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name) || block_proven_to_stay?(irep, idx) ||
                     sync_by_definition?(name)
-      next if upvars.any? && !synchronous
+      # FIBER_BODY_CAPTURE: a Fiber body outlives the frame, so it never takes the frame's addresses (the gates
+      # below); where fiber_body_by_value? holds, its locals are copied into a heap Array at the site instead.
+      by_value = upvars.any? && fiber_body_by_value?(irep, idx, paired, block_irep, upvars)
+      next if upvars.any? && !synchronous && !by_value
 
       # BLOCK_SEMANTICS: `new` is on the allowlist for Array.new only. Hash.new
       # keeps its block as the default proc and Proc.new returns it, either of
       # which outlives this frame and would hold pointers into it.
-      next if upvars.any? && name == 'new' && !array_const_receiver?(irep, idx, dest_reg)
+      next if upvars.any? && name == 'new' && !array_const_receiver?(irep, idx, dest_reg) && !by_value
 
       # BLOCK_FALLBACK_YIELD_SUPPORT: does this body's `yield` need the enclosing
       # method's block forwarded into the cfunc? Only `[1]` is modelled (every
@@ -1175,7 +1178,7 @@ class CodeGen
   # then built over bc2cpp_block_thunk with the entry and the YIELD_FREE flag as the two
   # last env slots.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
-                              ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false)
+                              ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false, upvar_cells: nil)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -1186,8 +1189,11 @@ class CodeGen
     # BLOCK_FALLBACK_YIELD_SUPPORT: the enclosing frame's block (`bc2cpp_blk`, from
     # mrb_get_args "&" at method level or forwarded again) is appended by value:
     # nothing writes back through it, and the env keeps it GC-rooted.
-    env_entries = ['self'] + upvar_regs.map do |(l, b)|
-      if inline_offset
+    env_entries = ['self'] + upvar_regs.each_with_index.map do |(l, b), i|
+      if upvar_cells
+        # FIBER_BODY_CAPTURE: the pointers lead into a heap Array holding a snapshot of the locals, not into this frame.
+        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{upvar_cells}[#{i}])))"
+      elsif inline_offset
         "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&r#{l.zero? ? b + inline_offset : b})))"
       elsif l.zero?
         "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&r#{b})))"
@@ -1195,6 +1201,8 @@ class CodeGen
         "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(#{upvar_var_name(l - 1, b)})))"
       end
     end
+    # FIBER_BODY_CAPTURE: the snapshot Array rides in the env, right after the upvar pointers, so the GC keeps it.
+    env_entries << "#{upvar_cells}_ary" if upvar_cells
     # The block is copied to a heap RProc when it is frame-local (bc2cpp_env_block): this env is heap, and outlives the frame.
     env_entries << 'bc2cpp_env_block(M, bc2cpp_blk)' if needs_blk
     env_entries << ret_token if ret_token
@@ -1240,18 +1248,17 @@ class CodeGen
                 else
                   'bc2cpp_return_token(M)'
                 end
+    # FIBER_BODY: `Fiber.new { prologue; m(args) }` is a C++ Fiber whose root frame runs the block and then the
+    # suspendable method `m` (tools/bc2cpp/runtime/bc2cpp_fiber.hxx), not an mruby Fiber over a cfunc proc.
+    if (fiber_id = fiber_body_target_id(region, owner_def))
+      @fiber_body_used = true
+      return emit_fiber_body_site(region, fn_name, fiber_id, dest_reg)
+    end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset,
                                               ret_token: ret_token, brk_token: brk_token,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
                                               yield_free: region[:yield_free])
-    # FIBER_BODY: `Fiber.new { prologue; m(args) }` is a C++ Fiber whose root frame runs the block and then the
-    # suspendable method `m` (tools/bc2cpp/runtime/bc2cpp_fiber.hxx), not an mruby Fiber over a cfunc proc.
-    if (fiber_id = fiber_body_target_id(region, owner_def))
-      @fiber_body_used = true
-      return "  // FIBER_BODY :new -- the body is the root frame of a C++ Fiber (#{fiber_id})\n  {\n#{ctor}" \
-             "    r#{dest_reg} = bc2cpp_fiber_new_body(M, mrb_obj_value(#{rproc_var}), #{c_string_literal(fiber_id)});\n  }\n"
-    end
     # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
     # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
     stack_expr = stack_block_expr(region)
