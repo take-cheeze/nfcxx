@@ -175,15 +175,17 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
 # and find OUT. ninja's output is not hidden: a failed build says why.
 ensure_tool() {
   local dir=$1 out=$2 lock=$2.lock waited=0
-  [ -x "$out" ] && return 0
+  # Fresh when the binary is newer than the sources in DIR (a binary from an older checkout is rebuilt, not reused).
+  tool_fresh() { [ -x "$out" ] && [ -z "$(find "$dir" -maxdepth 1 -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.rb' \) -newer "$out" -print -quit 2>/dev/null)" ]; }
+  tool_fresh && return 0
   mkdir -p "$(dirname "$out")"   # a fresh checkout has no build/: the lock mkdir would fail and every run would wait
   while ! mkdir "$lock" 2>/dev/null; do
-    [ -x "$out" ] && return 0
+    tool_fresh && return 0
     sleep 0.2; waited=$((waited + 1))
     [ "$waited" -lt 3000 ] || { echo "nfcxx: $lock is stuck (remove it if no build is running)" >&2; return 1; }
   done
   local rc=0
-  [ -x "$out" ] || ninja -C "$dir" >&2 || rc=$?
+  tool_fresh || ninja -C "$dir" >&2 || rc=$?
   rmdir "$lock"
   return $rc
 }
@@ -271,7 +273,7 @@ ir_opt_device() {  # ir_opt_device IR: the IR passes of NFCXX_IR_OPT on the devi
   local o=(); for p in ${v//,/ }; do o+=("--$p"); done
   # NFCXX_KEEP_DEVICE_IR=PATH: the device IR before the passes is copied to PATH.pre, after them to PATH.post
   if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.pre"; fi
-  "$root/scripts/mrb" "$root/scripts/pathb-ir-opt.rb" "${o[@]}" "$ir" > "$ir.opt" && mv "$ir.opt" "$ir" \
+  "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" "${o[@]}" "$ir" > "$ir.opt" && mv "$ir.opt" "$ir" \
     || { echo "nfcxx: the IR passes failed on $ir (NFCXX_IR_OPT=off turns them off)" >&2; exit 2; }
   if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.post"; fi
   return 0

@@ -88,7 +88,7 @@ if [ "$backend" = vulkan ] && [ -z "${NFCXX_IR_OPT+x}" ]; then ir_opt=inline,sro
 else ir_opt=${NFCXX_IR_OPT-inline,sroa}; fi
 if [ "$ir_opt" != off ] && [ -n "$ir_opt" ]; then
   irpasses=(); for p in ${ir_opt//,/ }; do irpasses+=("--$p"); done
-  "$root/scripts/mrb" "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$absout.dev.ir" > "$absout.dev.opt.ir"
+  "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$absout.dev.ir" > "$absout.dev.opt.ir"
   mv "$absout.dev.opt.ir" "$absout.dev.ir"
 fi
 # The SSA round trip (default; NFCXX_CFG=off turns it off): SSA (scripts/pathb-ssa.rb), the e-graph pass (default; NFCXX_SSA_OPT=off
