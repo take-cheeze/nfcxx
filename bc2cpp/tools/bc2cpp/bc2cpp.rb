@@ -1928,12 +1928,12 @@ if $PROGRAM_NAME == __FILE__
     // STACK_BLOCK (docs/bc2cpp-stack-blocks.md): the RProc and REnv of a direct-entry block passed only to a
     // callee that just calls it, laid out as mrb_proc_new_cfunc_with_env builds them but in the caller's frame,
     // over the caller's own env array. Red, so the GC never marks, gray-lists or sweeps them.
-    // BC2CPP_STACK_BLOCK_MALLOC (a build switch, for sanitizer runs): the RProc, the REnv and the env values live in
+    // The default: the RProc, the REnv and the env values live in
     // malloc'd storage freed at the end of the scope, not in the caller's frame. A reference that outlives the scope
     // is then a heap-use-after-free that ASan reports with the free site, not a stack-use-after-return in a fake frame.
-    // The default keeps the block in the frame (no allocation).
+    // Defining BC2CPP_STACK_BLOCK_STACK keeps the block in the frame (no allocation).
     struct Bc2cppStackBlock {
-#ifdef BC2CPP_STACK_BLOCK_MALLOC
+#ifndef BC2CPP_STACK_BLOCK_STACK
       struct RProc* proc_;
       struct REnv* env_;
       mrb_value* vals_;
