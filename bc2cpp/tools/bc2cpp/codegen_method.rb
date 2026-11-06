@@ -1045,7 +1045,7 @@ class CodeGen
     line = "  return #{impl_name}(M, self#{argtxt});\n"
     return line if @rsm_variant || rsm_variant_code(label).empty?
 
-    "  if (M->c != M->root_c) return #{rsm_impl_name(d)}(M, self#{argtxt});\n#{line}"
+    "  if (M->c != M->root_c || bc2cpp_prologue.expect) return #{rsm_impl_name(d)}(M, self#{argtxt});\n#{line}"
   end
 
   # The variant's own helpers (block fallbacks, direct entries) are compiled from the same blocks as the fast body's, under

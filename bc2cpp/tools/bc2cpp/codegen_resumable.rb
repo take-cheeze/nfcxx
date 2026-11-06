@@ -517,7 +517,7 @@ class CodeGen
           bc2cpp_check_argc(M, 0, 0);
           bc2cpp_resumable_init(M);
           mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
-          if (bc2cpp_prologue_armed(#{c_string_literal(owner_name)})) {
+          if (bc2cpp_prologue_armed(M, #{c_string_literal(owner_name)}, self)) {
             return bc2cpp_prologue_park(bc2cpp_method_frame_new(M, #{step_name}, self, frame));
           }
           for (;;) {
@@ -563,13 +563,13 @@ head = <<~CPP
     return #{step_name}(M, self, frame, resume);
   }
   mrb_value #{impl_name}(mrb_state* M, mrb_value self, #{params}) {
-  #{argc_check}bc2cpp_resumable_init(M);#{blk ? "\n  if (bc2cpp_prologue_armed(#{c_string_literal(owner_name)})) bc2cpp_blk = bc2cpp_env_block(M, bc2cpp_blk);" : ''}
+  #{argc_check}bc2cpp_resumable_init(M);#{blk ? "\n  if (bc2cpp_prologue_armed(M, #{c_string_literal(owner_name)}, self)) bc2cpp_blk = bc2cpp_env_block(M, bc2cpp_blk);" : ''}
     mrb_value frame = mrb_nil_value();
     Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
 CPP
 tail = <<~CPP
     mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
-    if (bc2cpp_prologue_armed(#{c_string_literal(owner_name)})) {
+    if (bc2cpp_prologue_armed(M, #{c_string_literal(owner_name)}, self)) {
       return bc2cpp_prologue_park(bc2cpp_method_frame_new(M, #{step_name}, self, frame));
     }
     mrb_value resume = mrb_nil_value();
@@ -649,11 +649,12 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     nodes = BytecodeIR.for(block_irep).instructions
     send = nodes[-2]
     ret = nodes[-1]
-    return nil unless ret&.op == :RETURN && %i[SSEND SSEND0 SSENDB].include?(send&.op) && send.source.reg == ret.source.reg
+    return nil unless ret&.op == :RETURN && %i[SSEND SSEND0 SSENDB SEND SEND0 SENDB].include?(send&.op) &&
+                      send.source.reg == ret.source.reg
 
-    # SSENDB passes a literal block made right before the call (a block whose own body may end in Fiber.yield).
+    # SSENDB/SENDB pass a literal block made right before the call (a block whose own body may end in Fiber.yield).
     tail = 2
-    if send.op == :SSENDB
+    if %i[SSENDB SENDB].include?(send.op)
       return nil unless nodes[-3]&.op == :BLOCK && send.source.plain_fixed_argc?
 
       tail = 3
@@ -661,6 +662,15 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
     return nil unless nodes[0...-tail].all? { |n| FIBER_BODY_PLAIN_OPS.include?(n.op) || n.op.to_s.start_with?('LOADI') }
 
     name = send.source.sym
+    # A call on an explicit receiver names a method whose owner the body does not prove (RECEIVER_ROOTS): any
+    # definition of the name that is a fiber root may take the handoff, and only on the receiver the site stores.
+    unless %i[SSEND SSEND0 SSENDB].include?(send.op)
+      hidden = self.class.core_hidden_defs || []
+      candidates = (@registry[name] || []) + hidden.select { |d| d.name == name }
+      return nil unless candidates.any? { |d| d.irep && @fiber_roots&.include?(d.irep) }
+
+      return "##{name}"
+    end
     targets = (@registry[name] || []).select { |d| d.owner == owner_def.owner && d.irep }
     return nil unless targets.size == 1
 
@@ -699,6 +709,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
       @tail_yield_plain = false
     end
     "  if (bc2cpp_block_can_yield) return bc2cpp_tail_yield_store(#{value});\n#{plain}"
+  end
+
+  # Is +region+ the tail call (with its literal block) of the Fiber body prologue being emitted?
+  def fiber_prologue_tail_region?(region)
+    return false unless @fiber_prologue && region[:parent_irep].equal?(@fiber_prologue)
+
+    nodes = BytecodeIR.for(@fiber_prologue).instructions
+    nodes[-2]&.source&.addr == region[:sendb_addr]
   end
 
   # The Fiber.new site: the block's RProc and a C++ Fiber over it. A body that captures locals gets their current

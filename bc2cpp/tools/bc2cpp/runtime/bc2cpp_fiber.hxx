@@ -61,12 +61,32 @@ struct Bc2cppFiber {
 // fiber calls the parked frame. One shared object across all translation units.
 struct Bc2cppPrologue {
   const char* expect;
+  mrb_value recv;
   Bc2cppFiberFrame* frame;
 };
-inline Bc2cppPrologue bc2cpp_prologue = {nullptr, nullptr};
+inline Bc2cppPrologue bc2cpp_prologue = {nullptr, {}, nullptr};
 
-[[maybe_unused]] static bool bc2cpp_prologue_armed(const char* id) {
-  return bc2cpp_prologue.expect && strcmp(bc2cpp_prologue.expect, id) == 0;
+// `id` is the entry's own "Owner#name". An armed "Owner#name" matches exactly
+// (a call on self to a known method). An armed "#name" is a call on an explicit
+// receiver whose class the body does not prove: it matches any owner's `name`,
+// but only on the receiver the body's call site stored
+// (bc2cpp_prologue_set_recv), so a method that happens to call another `name`
+// cannot take the handoff.
+[[maybe_unused]] static bool bc2cpp_prologue_armed(mrb_state* M,
+                                                   const char* id,
+                                                   mrb_value self) {
+  const char* expect = bc2cpp_prologue.expect;
+  if (!expect)
+    return false;
+  if (expect[0] != '#')
+    return strcmp(expect, id) == 0;
+  const char* hash = strchr(id, '#');
+  return hash && strcmp(hash, expect) == 0 &&
+         mrb_obj_eq(M, self, bc2cpp_prologue.recv);
+}
+
+[[maybe_unused]] static void bc2cpp_prologue_set_recv(mrb_value recv) {
+  bc2cpp_prologue.recv = recv;
 }
 
 [[maybe_unused]] static mrb_value bc2cpp_prologue_park(

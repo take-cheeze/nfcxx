@@ -739,11 +739,15 @@ class CodeGen
   end
 
   def emit_proc_fallback_fn(region, d, fn_prefix = nil)
+    # FIBER_BODY: the nested regions are emitted inside this body, so the marker must be set before them.
+    saved_fiber_prologue = @fiber_prologue
+    @fiber_prologue = d && fiber_body_target_id(region, d) ? region[:block_irep] : nil
     saved_self_class_unknown = @self_class_unknown
     @self_class_unknown = saved_self_class_unknown || runtime_def_fallback_kind?(region[:kind])
     emit_proc_fallback_fn_body(region, d, fn_prefix)
   ensure
     @self_class_unknown = saved_self_class_unknown
+    @fiber_prologue = saved_fiber_prologue
   end
 
   def emit_proc_fallback_fn_body(region, d, fn_prefix)
@@ -1269,7 +1273,12 @@ class CodeGen
     # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
     # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
     stack_expr = stack_block_expr(region)
-    direct = if inline_offset.nil?
+    # FIBER_BODY: the tail call of a Fiber body prologue goes through the method's entry (no inlined arm), after storing
+    # its receiver for the handoff check (bc2cpp_prologue_armed).
+    prologue_tail = fiber_prologue_tail_region?(region)
+    direct = if prologue_tail
+               nil
+             elsif inline_offset.nil?
                compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, stack_expr: stack_expr)
              elsif owner_def && block_arm_reach?
                compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, inline_offset: inline_offset,
@@ -1286,6 +1295,7 @@ class CodeGen
       end
     end
     out = String.new
+    out << "  bc2cpp_prologue_set_recv(#{recv});\n" if prologue_tail && !region[:self_implicit]
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), #{direct ? 'direct call with the block' : 'dynamic dispatch'}\n"
     out << "  {\n"
