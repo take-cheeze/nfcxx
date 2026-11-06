@@ -828,9 +828,12 @@ module Bc2cppCompiledGemGeneration
     group.each { |env, _, _| FileUtils.mkdir_p(env.fetch('OUT_DIR')) }
     return stub_group(group) if ENV['BC2CPP_STUB_GENERATION'] == '1'
 
-    if group.size == 1
-      env, _, generated = group.first
-      sh env.merge(gc_env), "#{launcher} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
+    # Under the executable (runner set) each unit is its own process: mruby has no fork, which the shared-generation
+    # path needs. The analysis repeats per unit, so this is slower; the generated code is the same.
+    if group.size == 1 || (runner && !runner.empty?)
+      group.each do |env, _, generated|
+        sh env.merge(gc_env), "#{launcher} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
+      end
     else
       plan = "#{group.first[2]}.units.json"
       units = group.map do |env, _, generated|
