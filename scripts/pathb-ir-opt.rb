@@ -913,6 +913,10 @@ def try_unroll(list, i, counter)
   return unroll_no(9) if k0.nil?
   trip = bound - k0
   return unroll_no(10) if trip < 1 || trip > UNROLL_MAX
+  if $unroll_limit && (!$unroll_cap_in || $sroa_fn.include?($unroll_cap_in))
+    return unroll_no(11) if $unroll_done >= $unroll_limit
+    $unroll_done += 1
+  end
   copies = []
   trip.times do
     copies.concat(rename_copy(prefix + suffix + step, counter))
@@ -944,8 +948,10 @@ def sroa_pass(forms)
     counter = { n: max_id(f) }
     $sroa_fn = unq(f[1])
     children = f.drop(2)
-    unroll_list!(children, counter)
-    new_children = sroa_function(fold_unit_index(cprop_function(children), {}), counter)
+    unroll_list!(children, counter) if $pass_unroll && ($unroll_in.nil? || unq(f[1]).include?($unroll_in))
+    children = cprop_function(children) if $pass_cprop
+    children = fold_unit_index(children, {}) if $pass_fold_unit
+    new_children = sroa_function(children, counter)
     if defined_values_ok?(new_children)
       f.take(2) + new_children
     else
@@ -962,6 +968,9 @@ end
 
 def main(argv)
   $sroa_debug = false
+  $pass_unroll = true
+  $pass_cprop = true
+  $pass_fold_unit = true
   inline = false
   sroa = false
   max_depth = 4
@@ -972,6 +981,19 @@ def main(argv)
       inline = true
     elsif a == "--sroa"
       sroa = true
+    elsif a == "--no-unroll"
+      $pass_unroll = false
+    elsif a.start_with?("--unroll-in=")
+      $unroll_in = a[12..-1]
+    elsif a.start_with?("--unroll-cap-in=")
+      $unroll_cap_in = a[16..-1]
+    elsif a.start_with?("--unroll-limit=")
+      $unroll_limit = a[15..-1].to_i
+      $unroll_done = 0
+    elsif a == "--no-cprop"
+      $pass_cprop = false
+    elsif a == "--no-fold-unit"
+      $pass_fold_unit = false
     elsif a.start_with?("--max-depth=")
       max_depth = a[12..-1].to_i
     elsif a == "--report"
