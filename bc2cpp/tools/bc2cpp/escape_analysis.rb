@@ -80,8 +80,6 @@ module EscapeAnalysis
   # Each name's registrations must match NATIVE_MANIFEST, so a new definition forces a new audit. mruby's iterators (each, map, times, inject, ...) are Ruby in
   # mrblib: they need no entry, their summaries are computed from bytecode.
 
-  # Natives that take a block and either call it synchronously or never read it; none keeps it.
-  NATIVE_BLOCK_NO_CAPTURE = Set['section', 'select', 'count', 'index'].freeze
   NATIVE_MANIFEST = {
     'section' => %w[mruby-rgss/src/profiler.cxx],
     'select' => %w[3rd/mruby/mrbgems/mruby-io/src/io.c],
@@ -183,7 +181,7 @@ module EscapeAnalysis
     'key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
     'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
     # Both registrations (profiler.cxx, real and WIO stub) read the name with "S&" and copy it into a std::string
-    # key (profiler_section_end); the block is NATIVE_BLOCK_NO_CAPTURE. A non-String name is inspected (%Y).
+    # key (profiler_section_end); the block is captured by name (block_captured_by_name?). A non-String name is inspected (%Y).
     'section' => { args: [0], recv: %w[inspect to_s], files: %w[mruby-rgss/src/profiler.cxx] },
     # pack.c reads the template once (prepare_tmpl: mrb_get_args "S" into a stack struct) and builds copies.
     # Only an exact String is proven: other classes reach mrb_ensure_string_type, which inspects them (%Y).
@@ -1239,7 +1237,7 @@ module EscapeAnalysis
 
       opaque = opaque_defs(list)
       natives = @world.native_name?(name) || !opaque.empty?
-      return true if (natives || list.empty?) && !NATIVE_BLOCK_NO_CAPTURE.include?(name)
+      return true if natives || list.empty?
 
       list.any? { |d| !opaque.include?(d) && (klass ? block_captures_as?(d, klass) : captures?(d, [:block])) }
     end
