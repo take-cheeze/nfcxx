@@ -116,7 +116,7 @@ module StaticDispatchFragmentUses
   end
 
   def uses_escape?(irep, index, reg, ctx, depth)
-    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg) do |use, insn, register|
+    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg, max_states: BytecodeIR::DATAFLOW_MAX_STATES) do |use, insn, register|
       if PURE_OPS.include?(insn.op)
         nil
       elsif BytecodeIR::Ops::SEND.include?(insn.op)
@@ -176,7 +176,7 @@ module StaticDispatchFragmentUses
   end
 
   def container_uses_escape?(irep, index, reg, ctx, depth)
-    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg) do |use, insn, register|
+    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg, max_states: BytecodeIR::DATAFLOW_MAX_STATES) do |use, insn, register|
       if PURE_OPS.include?(insn.op)
         nil
       elsif insn.op == :SETCONST
