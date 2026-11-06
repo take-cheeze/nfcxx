@@ -42,11 +42,9 @@ static bool bc2cpp_block_call(mrb_state* M,
     const struct REnv* step_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
     mrb_int step_len = step_env ? MRB_ENV_LEN(step_env) : 0;
     if (step_len >= 3 && (mrb_integer(step_env->stack[step_len - 1]) & 4)) {
-      Bc2cppBlockStepMaker maker =
-          (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(
-              step_env->stack[step_len - 3]);
-      Bc2cppFiberFrame* callee =
-          maker(M, (struct REnv*)step_env, argc, argv);
+      Bc2cppBlockStepMaker maker = (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(
+          step_env->stack[step_len - 3]);
+      Bc2cppFiberFrame* callee = maker(M, (struct REnv*)step_env, argc, argv);
       if (callee) {
         out->kind = BC2CPP_STEP_CALL;
         out->callee = callee;
@@ -131,8 +129,56 @@ static void bc2cpp_method_frame_mark(mrb_state* M,
   return &m->f;
 }
 
-// `Fiber.new { ... }` whose body is a step (BLOCK_STEP): the fiber's root frame
-// is the frame the body's maker makes.
+// `Fiber.new { |x, y| ... }` whose body is a step (BLOCK_STEP): the fiber's
+// root frame makes the body's frame on the first resume, from that resume's
+// arguments (the block parameters bind as a block's do), and calls it; the
+// body's result is the fiber's.
+struct Bc2cppBodyStart {
+  Bc2cppFiberFrame f;
+  mrb_value proc;
+  bool started;
+};
+
+static void bc2cpp_body_start_step(mrb_state* M,
+                                   Bc2cppFiberFrame* base,
+                                   mrb_value resume,
+                                   Bc2cppStepOut* out) {
+  Bc2cppBodyStart* start = (Bc2cppBodyStart*)base;
+  if (start->started) {
+    out->kind = BC2CPP_STEP_DONE;
+    out->value = resume;
+    return;
+  }
+  start->started = true;
+  const struct REnv* env = MRB_PROC_ENV(mrb_proc_ptr(start->proc));
+  mrb_int len = env ? MRB_ENV_LEN(env) : 0;
+  Bc2cppBlockStepMaker maker =
+      (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(env->stack[len - 3]);
+  // resume(a, b) arrives as [a, b]; from C, as the one value (or nothing).
+  mrb_value first = bc2cpp_first_args_set ? bc2cpp_first_args : mrb_nil_value();
+  mrb_int argc = 0;
+  const mrb_value* argv = nullptr;
+  if (mrb_array_p(first)) {
+    argc = RARRAY_LEN(first);
+    argv = RARRAY_PTR(first);
+  } else if (!mrb_nil_p(resume)) {
+    argc = 1;
+    argv = &resume;
+  }
+  Bc2cppFiberFrame* root = maker(M, (struct REnv*)env, argc, argv);
+  if (!root)
+    mrb_raise(M, mrb_class_get(M, "RuntimeError"),
+              "bc2cpp: Fiber body step did not make a frame");
+  out->kind = BC2CPP_STEP_CALL;
+  out->callee = root;
+}
+
+static void bc2cpp_body_start_mark(mrb_state* M,
+                                   Bc2cppFiberFrame* base,
+                                   mrb_value refs) {
+  bc2cpp_fiber_ref(M, refs, ((Bc2cppBodyStart*)base)->proc);
+}
+
 [[maybe_unused]] static mrb_value bc2cpp_fiber_new_step(mrb_state* M,
                                                         mrb_value proc) {
   bc2cpp_fiber_define(M);
@@ -141,13 +187,12 @@ static void bc2cpp_method_frame_mark(mrb_state* M,
   if (len < 3 || !(mrb_integer(env->stack[len - 1]) & 4))
     mrb_raise(M, mrb_class_get(M, "RuntimeError"),
               "bc2cpp: Fiber body has no step");
-  Bc2cppBlockStepMaker maker =
-      (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(env->stack[len - 3]);
-  Bc2cppFiberFrame* root = maker(M, (struct REnv*)env, 0, nullptr);
-  if (!root)
-    mrb_raise(M, mrb_class_get(M, "RuntimeError"),
-              "bc2cpp: Fiber body step did not make a frame");
-  return bc2cpp_fiber_new(M, root);
+  Bc2cppBodyStart* start =
+      (Bc2cppBodyStart*)mrb_calloc(M, 1, sizeof(Bc2cppBodyStart));
+  start->f.step = bc2cpp_body_start_step;
+  start->f.mark = bc2cpp_body_start_mark;
+  start->proc = proc;
+  return bc2cpp_fiber_new(M, &start->f);
 }
 
 // DYN_CALL: a call whose method is chosen at run time (`send`, `__send__`,

@@ -209,7 +209,7 @@ class CodeGen
 
       if name == 'yield' && insn.reg && fiber_const_receiver?(irep, idx, insn.reg)
         argc = fiber_yield_argc(insn)
-        return "calls Fiber.yield with #{argc.inspect} arguments (only 0 or 1 round-trip)" unless [0, 1].include?(argc)
+        return 'calls Fiber.yield with a splat or keywords' if argc.nil?
 
         next
       end
@@ -476,11 +476,16 @@ class CodeGen
     return resumable_not_flat_error('Fiber.yield') unless @resumable.flat
 
     argc = fiber_yield_argc(insn)
-    return resumable_error("Fiber.yield with #{argc.inspect} arguments") unless [0, 1].include?(argc)
+    return resumable_error('Fiber.yield with a splat or keywords') if argc.nil?
 
     state = @resumable.new_state
     dest = insn.reg
-    value = argc.zero? ? 'mrb_nil_value()' : "r#{dest.to_i + 1}"
+    # Fiber.yield a, b hands the resumer [a, b]; one value is itself, none is nil.
+    value = case argc
+            when 0 then 'mrb_nil_value()'
+            when 1 then "r#{dest.to_i + 1}"
+            else "bc2cpp_block_args_from(M, {#{(1..argc).map { |i| "r#{dest.to_i + i}" }.join(', ')}})"
+            end
     [
       "  // RESUMABLE_YIELD #{state}",
       "  R[0] = #{value};",
@@ -808,6 +813,9 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # `block_irep` ends in a tail call on self to a suspendable method of +owner_def+'s owner, after plain prologue ops;
   # the entry id "Owner#m" or nil.
   def fiber_body_target_in(block_irep, owner_def)
+    # Block parameters bind from the first resume's arguments: that is the body step's start, not the handoff.
+    return nil unless mandatory_arity(block_irep).zero? && pure_mandatory_arity?(block_irep)
+
     nodes = BytecodeIR.for(block_irep).instructions
     send = nodes[-2]
     ret = nodes[-1]
@@ -896,7 +904,6 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return false unless (region[:upvars] || []).empty? || block_step_upvars_ok?(region, owner_def)
     return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
     body = fiber_new_site?(region) && !fiber_body_target_id(region, owner_def)
-    return false if body && !(mandatory_arity(block).zero? && pure_mandatory_arity?(block))
     return false if (!body && tail_yield_block?(block)) || BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK)
     return false if BytecodeIR.for(block).op?(:BLKPUSH) && !region[:needs_blk] # a BLKPUSH is the method's block only when it is passed in
     return false unless block_direct_entry?(region, region[:kind] || 'block_fallback', false)
@@ -1307,7 +1314,17 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     }
     // A step of a method called from C that suspended for a block call runs the block from C (the block's own
     // Fiber.yield then raises, as it does in the interpreted method called from C); any other suspension yields.
+    // CALL_STEP / DYN_CALL: a step that asked for a callee frame has it run to its end here, so its result is the step's
+    // resume value (bc2cpp_run_callee_from_c, in the fiber runtime after this).
+    struct Bc2cppFiberFrame;
+    static mrb_value bc2cpp_run_callee_from_c(mrb_state* M, Bc2cppFiberFrame* callee);
     static mrb_value bc2cpp_resumable_resume_from_c(mrb_state* M, mrb_value frame) {
+      Bc2cppResumeFrame* suspended = (Bc2cppResumeFrame*)DATA_PTR(frame);
+      if (suspended && suspended->callee) {
+        Bc2cppFiberFrame* callee = (Bc2cppFiberFrame*)suspended->callee;
+        suspended->callee = nullptr;
+        return bc2cpp_run_callee_from_c(M, callee);
+      }
       if (!mrb_test(bc2cpp_resume_frame_block_call(M, frame))) return bc2cpp_resumable_yield_from_c(M, frame);
       mrb_value args = bc2cpp_resume_frame_value(M, frame);
       mrb_value blk = bc2cpp_resume_frame_block(M, frame);

@@ -259,6 +259,21 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
   }
 }
 
+// The C++ Fiber being resumed (Fiber.current inside it); `in` is false at the
+// root, where Fiber.current is mruby-fiber's. One shared object across all
+// translation units, restored when a resume ends (also by an exception).
+struct Bc2cppCurrentFiber {
+  bool in;
+  mrb_value fiber;
+};
+inline Bc2cppCurrentFiber bc2cpp_current_fiber = {false, {}};
+
+// What the first resume was given: an Array of its arguments (resume(1, 2) is
+// [1, 2]), or nil when the fiber is resumed from C. A body that takes block
+// parameters binds them from it (Bc2cppBodyStart).
+inline mrb_value bc2cpp_first_args = {};
+inline bool bc2cpp_first_args_set = false;
+
 // Fiber#resume. Returns the yielded value, or the body's result once it
 // finishes (alive? is then false). An exception in a step kills the fiber and
 // propagates to the resumer, as it does for an mruby Fiber.
@@ -274,8 +289,12 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   Bc2cppRunArgs args = {self, fiber, value, false};
   fiber->running = true;
   fiber->started = true;
+  Bc2cppCurrentFiber outer = bc2cpp_current_fiber;
+  bc2cpp_current_fiber = {true, self};
   mrb_bool error = FALSE;
   mrb_value result = mrb_protect_error(M, bc2cpp_fiber_run, &args, &error);
+  bc2cpp_current_fiber = outer;
+  bc2cpp_first_args_set = false;
   fiber->running = false;
   if (error) {
     bc2cpp_prologue.expect = nullptr;
@@ -308,6 +327,26 @@ static mrb_value bc2cpp_run_to_completion(mrb_state* M,
   return result;
 }
 
+// A suspendable method entered from C (interpreted code, the VM, a native
+// iterator) rather than as a frame of a C++ Fiber: a frame its step CALLs runs
+// to its end here. A YIELD inside it is a yield across a C frame, so it goes to
+// Fiber.yield, which raises the FiberError an interpreted method would raise;
+// if it returns (the frame can be resumed), the value goes back in.
+static mrb_value bc2cpp_run_callee_from_c(mrb_state* M,
+                                          Bc2cppFiberFrame* callee) {
+  mrb_value fiber = bc2cpp_fiber_new(M, callee);
+  int arena = mrb_gc_arena_save(M);
+  mrb_gc_protect(M, fiber);
+  mrb_value result = bc2cpp_fiber_resume(M, fiber, mrb_nil_value());
+  while (bc2cpp_fiber_alive_p(M, fiber)) {
+    mrb_value resumed = mrb_funcall(M, mrb_obj_value(mrb_class_get(M, "Fiber")),
+                                    "yield", 1, result);
+    result = bc2cpp_fiber_resume(M, fiber, resumed);
+  }
+  mrb_gc_arena_restore(M, arena);
+  return result;
+}
+
 // The Ruby-visible surface: the class is `Fiber`, so a call site that names
 // Fiber#resume or Fiber#alive? (the closed world lists that definer) reaches
 // it. Both methods answer for a Bc2cppFiber and hand any other receiver (a
@@ -326,9 +365,31 @@ static mrb_value bc2cpp_fiber_m_resume(mrb_state* M, mrb_value self) {
       mrb_raise(M, mrb_class_get(M, "TypeError"), "not a fiber");
     return bc2cpp_fiber_orig_resume(M, self);
   }
-  mrb_value value = mrb_nil_value();
-  mrb_get_args(M, "|o", &value);
+  // resume(a, b) hands the fiber [a, b] (what its Fiber.yield returns, or its
+  // block parameters on the first resume); one argument is itself, none is nil.
+  const mrb_value* argv;
+  mrb_int argc;
+  mrb_get_args(M, "*", &argv, &argc);
+  mrb_value value = argc == 0   ? mrb_nil_value()
+                    : argc == 1 ? argv[0]
+                                : mrb_ary_new_from_values(M, argc, argv);
+  if (!bc2cpp_fiber_ptr(M, self)->started) {
+    bc2cpp_first_args = mrb_ary_new_from_values(M, argc, argv);
+    bc2cpp_first_args_set = true;
+  }
   return bc2cpp_fiber_resume(M, self, value);
+}
+
+// Fiber.current: the C++ Fiber being resumed, else the root fiber mruby-fiber
+// answers with.
+inline mrb_func_t bc2cpp_fiber_orig_current = nullptr;
+
+static mrb_value bc2cpp_fiber_s_current(mrb_state* M, mrb_value self) {
+  if (bc2cpp_current_fiber.in)
+    return bc2cpp_current_fiber.fiber;
+  if (!bc2cpp_fiber_orig_current)
+    return mrb_nil_value();
+  return bc2cpp_fiber_orig_current(M, self);
 }
 
 static mrb_value bc2cpp_fiber_m_alive_p(mrb_state* M, mrb_value self) {
@@ -357,7 +418,11 @@ static void bc2cpp_fiber_define(mrb_state* M) {
     return;
   bc2cpp_fiber_orig_resume = resume;
   bc2cpp_fiber_orig_alive_p = bc2cpp_fiber_cfunc(M, klass, "alive?");
-  mrb_define_method(M, klass, "resume", bc2cpp_fiber_m_resume, MRB_ARGS_OPT(1));
+  bc2cpp_fiber_orig_current = bc2cpp_fiber_cfunc(
+      M, mrb_singleton_class_ptr(M, mrb_obj_value(klass)), "current");
+  mrb_define_class_method(M, klass, "current", bc2cpp_fiber_s_current,
+                          MRB_ARGS_NONE());
+  mrb_define_method(M, klass, "resume", bc2cpp_fiber_m_resume, MRB_ARGS_ANY());
   mrb_define_method(M, klass, "alive?", bc2cpp_fiber_m_alive_p,
                     MRB_ARGS_NONE());
 }

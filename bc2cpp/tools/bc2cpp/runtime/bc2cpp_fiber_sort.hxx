@@ -2,8 +2,8 @@
 // so a Fiber.yield in the comparison block could not cross it. The algorithms
 // and the order of the comparisons are array.c's (insertion sort up to 16
 // elements, heap sort above), so a block sees the same calls. Every comparison
-// is a block call (bc2cpp_block_call) and may suspend; its result arrives as the
-// next resume value. Emitted after bc2cpp_fiber_methods.hxx, whose
+// is a block call (bc2cpp_block_call) and may suspend; its result arrives as
+// the next resume value. Emitted after bc2cpp_fiber_methods.hxx, whose
 // bc2cpp_block_call and dynamic-call registry it uses; not standalone.
 #pragma once
 
@@ -25,11 +25,11 @@ struct Bc2cppSortFrame {
   Bc2cppFiberFrame f;
   mrb_value ary;
   mrb_value blk;
-  mrb_value key;     // the insertion sort's element in hand
-  mrb_value* base;   // the array's storage and length when a comparison began
+  mrb_value key;    // the insertion sort's element in hand
+  mrb_value* base;  // the array's storage and length when a comparison began
   mrb_int len;
   mrb_int n;
-  mrb_int i, j;      // insertion: outer and inner index; heap: outer index
+  mrb_int i, j;  // insertion: outer and inner index; heap: outer index
   mrb_int index, size, max;  // heapify
   int state;
   int after_heapify;  // SORT_HEAP_BUILD or SORT_HEAP_EXTRACT
@@ -45,9 +45,7 @@ static void bc2cpp_sort_mark(mrb_state* M,
 }
 
 // sort_cmp's decision on the block's value: is the left element greater.
-static bool bc2cpp_sort_decide(mrb_state* M,
-                               Bc2cppSortFrame* s,
-                               mrb_value c) {
+static bool bc2cpp_sort_decide(mrb_state* M, Bc2cppSortFrame* s, mrb_value c) {
   if (mrb_nil_p(c) || !mrb_fixnum_p(c))
     mrb_raise(M, mrb_class_get(M, "ArgumentError"), "comparison failed");
   if (RARRAY_PTR(s->ary) != s->base || RARRAY_LEN(s->ary) != s->len)

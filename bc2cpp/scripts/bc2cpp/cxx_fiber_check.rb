@@ -87,6 +87,19 @@ TEST = <<~'CPP'
     mrb_raise(M, mrb_class_get(M, "RuntimeError"), "boom");
   }
 
+  // Yields what it is resumed with (the first resume's value included), three times.
+  struct Echo { Bc2cppFiberFrame f; int state; };
+  static void echo_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+    Echo* e = (Echo*)frame;
+    if (e->state++ < 3) { out->kind = BC2CPP_STEP_YIELD; out->value = resume; return; }
+    out->kind = BC2CPP_STEP_DONE; out->value = mrb_nil_value();
+  }
+  // Yields Fiber.current, the fiber it runs in.
+  static void current_step(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value resume, Bc2cppStepOut* out) {
+    out->kind = BC2CPP_STEP_YIELD;
+    out->value = mrb_funcall(M, mrb_obj_value(mrb_class_get(M, "Fiber")), "current", 0);
+  }
+
   static void show(mrb_state* M, const char* label, mrb_value v) {
     mrb_value s = mrb_inspect(M, v);
     printf("%s %.*s\n", label, (int)RSTRING_LEN(s), RSTRING_PTR(s));
@@ -153,6 +166,21 @@ TEST = <<~'CPP'
       show(M, "ruby class", mrb_load_string(M, "$fib.class"));
       show(M, "mruby fiber", mrb_load_string(M, "f = Fiber.new { Fiber.yield 1; 2 }; r = [f.resume, f.alive?, f.resume]; r << f.alive?; r"));
     }
+    {
+      bc2cpp_fiber_define(M);
+      Echo* e = (Echo*)mrb_calloc(M, 1, sizeof(Echo));
+      e->f.step = echo_step;
+      mrb_gv_set(M, mrb_intern_lit(M, "$echo"), bc2cpp_fiber_new(M, &e->f));
+      show(M, "resume args", mrb_load_string(M, "[$echo.resume, $echo.resume(4), $echo.resume(5, 6)]"));
+      Bc2cppFiberFrame* cur = (Bc2cppFiberFrame*)mrb_calloc(M, 1, sizeof(Bc2cppFiberFrame));
+      cur->step = current_step;
+      mrb_gv_set(M, mrb_intern_lit(M, "$cur"), bc2cpp_fiber_new(M, cur));
+      show(M, "current", mrb_load_string(M, "[$cur.resume.equal?($cur), Fiber.current.equal?($cur)]"));
+      Bc2cppFiberFrame* boom = (Bc2cppFiberFrame*)mrb_calloc(M, 1, sizeof(Bc2cppFiberFrame));
+      boom->step = boom_step;
+      mrb_gv_set(M, mrb_intern_lit(M, "$boom"), bc2cpp_fiber_new(M, boom));
+      show(M, "after exception", mrb_load_string(M, "begin; $boom.resume; rescue => e; end; [e.message, $boom.alive?]"));
+    }
     mrb_close(M);
     return 0;
   }
@@ -182,6 +210,9 @@ EXPECTED = <<~OUT
   ruby [1, 2, 3, 99, false]
   ruby class Fiber
   mruby fiber [1, true, 2, false]
+  resume args [nil, 4, [5, 6]]
+  current [true, false]
+  after exception ["boom", false]
 OUT
 
 Dir.mktmpdir('cxx_fiber') do |dir|
