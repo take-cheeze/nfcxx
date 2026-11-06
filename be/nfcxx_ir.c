@@ -6689,6 +6689,8 @@ static void ir_function(a_routine_ptr rout)
       fputs(" (byval ", nf_out);
       if (ir_x87_mem(param->type) || ir_is_i128(param->type) || ir_is_f128(param->type)) fputs(ir_abi_ty(param->type), nf_out);
       else nf_put_type(param->type);
+      /* the copy's size and alignment (ir_size_of, ir_align_of): a consumer copies the object without knowing the struct */
+      fprintf(nf_out, " %llu %llu", ir_size_of(param->type), ir_align_of(param->type));
       fputs("))", nf_out);
       ir_tab_put(&ir_slots, param, reg);
     } else {

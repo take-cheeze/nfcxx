@@ -1120,7 +1120,8 @@ Val Fn::rval(const Node &x, const Ty &dty) {
   if (ok) return v;
   v = arith(h, x, dty, ok);
   if (ok) return v;
-  throw Refused("expression " + (h.empty() ? form_text(x) : h));
+  if (h.empty()) return operand(x);   // a bare operand as a value (RVALUE ::= OPERAND), e.g. (let %D T %K) from an inlined return
+  throw Refused("expression " + h);
 }
 
 void Fn::emit_return(const Node &s) {

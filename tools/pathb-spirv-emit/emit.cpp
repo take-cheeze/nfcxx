@@ -832,7 +832,8 @@ struct SFn {
       return operand(x);
     }
     if (h == "null") return operand(x);
-    throw Refused("expression " + (hp ? h : form_text(x)));
+    if (!hp) return operand(x);   // a bare operand as a value (RVALUE ::= OPERAND), e.g. (let %D T %K) from an inlined return
+    throw Refused("expression " + h);
   }
 
   uint32_t to_i64(uint32_t id, const Ty &ty) {

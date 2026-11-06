@@ -1174,6 +1174,7 @@ class SFn
       end
     end
     @frame = (off + 15) / 16 * 16
+    $stderr.write("frame #{@name} #{@frame} #{slots.map { |f| f[1].to_s }.join(' ')[0, 120]}\n") if ENV["NFCXX_EMIT_FRAMES"]
     @callees = collect_calls(@form, []).select { |c| @mod.defs.key?(c) }.uniq
   end
 
@@ -1841,7 +1842,9 @@ class SFn
     when "null"   # a null pointer as a value (the temporary of a conditional whose value is a struct lvalue)
       operand(x)
     else
-      raise Refused, "expression #{h || form_text(x)}"
+      # a bare operand as a value (RVALUE ::= OPERAND), e.g. (let %D T %K) from an inlined return (scripts/pathb-ir-opt.rb)
+      return operand(x) unless h
+      raise Refused, "expression #{h}"
     end
   end
 

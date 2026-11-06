@@ -329,7 +329,8 @@ void Fn::setup() {
         if (head_of(p.items[3]) == "byval") {
           // a struct or union passed by value: the caller copies its bytes into a .param array (nvcc's convention), and
           // the callee copies them into the frame (compile), so its register is the address of that copy
-          if (p.items[3].items.size() != 2) throw Refused("byval form " + form_text(p.items[3]));
+          // (byval TYPE) or (byval TYPE SIZE ALIGN): the front end writes the size and alignment (be/nfcxx_ir.c)
+          if (p.items[3].items.size() != 2 && p.items[3].items.size() != 4) throw Refused("byval form " + form_text(p.items[3]));
           AggShape sh = aggregate(p.items[3].items[1]);
           add_param(Ty{"ptr", -1, false, false}, sh, alloc_frame(sh.size, sh.align));
           continue;
@@ -800,6 +801,11 @@ void Fn::rval(const Node &x, const std::string &dest, const Ty &dty) {
   }
   if (memory(h, x, dest, dty)) return;
   if (arith(h, x, dest, dty)) return;
+  if (h.empty() && !(dty.kind == "int" && dty.is_bool)) {   // a bare operand as a value: a move (RVALUE ::= OPERAND)
+    Operand o = operand(x);
+    emit("mov." + ptx_type(dty) + " " + dest + ", " + o.text + ";");
+    return;
+  }
   throw Refused("expression " + (h.empty() ? form_text(x) : h));
 }
 

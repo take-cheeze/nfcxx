@@ -201,13 +201,15 @@ class vk_rt {
       lo[sd] = s0;
       hi[sd] = s0 + cnt;
       for (int e = sd + 1; e < 3; e++) { lo[e] = og[e]; hi[e] = og[e] + 1; }
-      for (uint32_t oz = lo[2]; oz < hi[2]; oz += lim[2])
-        for (uint32_t oy = lo[1]; oy < hi[1]; oy += lim[1])
-          for (uint32_t ox = lo[0]; ox < hi[0]; ox += lim[0]) {
-            p.ox = ox;
-            p.oy = oy;
-            p.oz = oz;
-            uint32_t tc[3] = {std::min(lim[0], hi[0] - ox), std::min(lim[1], hi[1] - oy), std::min(lim[2], hi[2] - oz)};
+      // 64-bit counters: the device's limit can be 2^32 - 1 (RADV), and a 32-bit ox += lim wraps below the slab's first group
+      for (uint64_t oz = lo[2]; oz < hi[2]; oz += lim[2])
+        for (uint64_t oy = lo[1]; oy < hi[1]; oy += lim[1])
+          for (uint64_t ox = lo[0]; ox < hi[0]; ox += lim[0]) {
+            p.ox = (uint32_t)ox;
+            p.oy = (uint32_t)oy;
+            p.oz = (uint32_t)oz;
+            uint32_t tc[3] = {(uint32_t)std::min<uint64_t>(lim[0], hi[0] - ox), (uint32_t)std::min<uint64_t>(lim[1], hi[1] - oy),
+                              (uint32_t)std::min<uint64_t>(lim[2], hi[2] - oz)};
             submit(pipe, &p, tc);
           }
       release(region);
@@ -401,6 +403,14 @@ class vk_rt {
     check(vkCreateCommandPool(dev_, &cpci, nullptr, &pool_), "vkCreateCommandPool");
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     check(vkCreateFence(dev_, &fci, nullptr, &fence_), "vkCreateFence");
+    // NFCXX_SYCL_VK_TIMING=1: each dispatch's GPU time (timestamp queries), summed and reported at exit
+    timing_ = std::getenv("NFCXX_SYCL_VK_TIMING") != nullptr && limits_.timestampPeriod > 0;
+    if (timing_) {
+      VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+      qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      qpci.queryCount = 2;
+      check(vkCreateQueryPool(dev_, &qpci, nullptr, &qpool_), "vkCreateQueryPool");
+    }
 
     // the statics: the constant tables and globals, relocated to device addresses
     if (static_size_) {
@@ -463,7 +473,12 @@ class vk_rt {
     vkBeginCommandBuffer(cb, &bbi);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdPushConstants(cb, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof *p, p);
+    if (timing_) {   // two timestamps around the dispatch: the GPU's own time for it
+      vkCmdResetQueryPool(cb, qpool_, 0, 2);
+      vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool_, 0);
+    }
     vkCmdDispatch(cb, ng[0], ng[1], ng[2]);
+    if (timing_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, 1);
     vkEndCommandBuffer(cb);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -471,10 +486,22 @@ class vk_rt {
     check(vkQueueSubmit(queue_, 1, &si, fence_), "vkQueueSubmit");
     check(vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
     vkResetFences(dev_, 1, &fence_);
+    if (timing_) {
+      uint64_t t[2] = {0, 0};
+      check(vkGetQueryPoolResults(dev_, qpool_, 0, 2, sizeof t, t, sizeof t[0], VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
+            "vkGetQueryPoolResults");
+      gpu_ns_ += (double)(t[1] - t[0]) * (double)limits_.timestampPeriod;
+      launches_++;
+    }
     vkFreeCommandBuffers(dev_, pool_, 1, &cb);
   }
 
  public:
+  ~vk_rt() {
+    if (timing_ && launches_)
+      std::fprintf(stderr, "nfcxx vulkan: %llu dispatches, GPU time %.4f ms per dispatch (NFCXX_SYCL_VK_TIMING)\n",
+                   (unsigned long long)launches_, gpu_ns_ / 1e6 / (double)launches_);
+  }
   std::string device_name() const { return device_name_; }
   bool identity_ = false;
 
@@ -490,6 +517,10 @@ class vk_rt {
   VkPipelineLayout layout_ = VK_NULL_HANDLE;
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
+  VkQueryPool qpool_ = VK_NULL_HANDLE;
+  bool timing_ = false;
+  double gpu_ns_ = 0;
+  uint64_t launches_ = 0;
   VkPhysicalDeviceLimits limits_{};
   std::string device_name_;
   uint8_t *host_ = nullptr;
