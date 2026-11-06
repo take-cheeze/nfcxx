@@ -75,7 +75,7 @@ class CodeGen
   # core (OutsideRubyOwners names `def self.x` owners), or a native registration on any singleton of the chain
   # (NATIVE_OWNER_MAP, which tells a class method from an instance method).
   def constant_object_core_def(name, constant_owner)
-    return nil if native_owner_map.nil?
+    return nil if native_owner_map.nil? || @closed_world.nil?
 
     outside = OutsideRubyOwners.scan(Array(@closed_world.ruby_paths).reject { |path| CoreDefs.core_source?(path) })
     return nil if outside.unknown.include?(name) || outside.unknown.include?(:all)

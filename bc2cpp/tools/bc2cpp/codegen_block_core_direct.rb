@@ -122,7 +122,7 @@ module BlockCoreDirectFallback
     return 'Integer' if klass == 'Integer'
 
     # Heap literals can acquire singleton methods; the whole-program gate excludes that.
-    klass if block_core_world.exact_instances_singleton_free? && BLOCK_RECEIVERS.key?(klass)
+    klass if block_core_world.exact_instances_singleton_free?
   end
 
   # BLOCK_ITERATOR_DIRECT: an implicit-self literal-block send (`loop { }`) whose only definition in the
@@ -231,13 +231,45 @@ module BlockCoreDirectFallback
     @block_core_arms ||= {}
     @block_core_arms.fetch([name, arity]) do
       @block_core_arms[[name, arity]] =
-        BLOCK_RECEIVERS.filter_map do |klass, spec|
+        block_core_receivers(name).filter_map do |klass, spec|
           target = block_core_target(klass, spec[:chain], name, arity)
           next unless target
 
           { class: klass, guard: spec[:guard], target: target, impl: "#{cpp_name(target.owner, target.name)}_impl" }
         end
     end
+  end
+
+  # The receivers a literal-block send of +name+ gets arms for: the classes that own a core definition of the name, and
+  # the core collections with their exact-class guards. No fixed list: a class with a core body gets an arm, and its
+  # guard is a kind_of test on that class (a subclass instance passes it, and its own override is refused by the
+  # chain walk). A failed guard takes the send's by-name else arm.
+  def block_core_receivers(name)
+    owners = block_core_index.keys.select { |_owner, method| method == name }.map(&:first).uniq
+    # The exact-class collections keep their own arms first (they must not be shadowed by a kind_of arm, e.g. one for
+    # Enumerable, which an Array also passes); the other owners follow.
+    fixed = BLOCK_RECEIVERS.keys
+    generic = (owners - fixed).sort
+    (fixed + generic).to_h do |klass|
+      spec = BLOCK_RECEIVERS[klass] || {
+        guard: "mrb_obj_is_kind_of(M, %<r>s, #{owner_class_ptr_expr(klass)})",
+        chain: block_core_chain(klass)
+      }
+      [klass, spec]
+    end
+  end
+
+  # [klass, superclass, ...] up the closed world's hierarchy, or the core's, ending where it stops.
+  def block_core_chain(klass)
+    chain = [klass]
+    current = klass
+    while current.is_a?(String) && chain.size < 16
+      current = @closed_world&.class_parent(current) || core_superclass(current)
+      break unless current.is_a?(String) && !chain.include?(current)
+
+      chain << current
+    end
+    chain
   end
 
   # The compiled core definition that `klass` answers `name` with, or nil when anything else
