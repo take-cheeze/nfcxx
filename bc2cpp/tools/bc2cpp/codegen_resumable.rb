@@ -61,7 +61,18 @@ class CodeGen
   # Separate C++ functions (block fallback bodies) are not part of the step function's
   # frame; a yield compiled into one could never be resumed.
   module ResumableFlatGuards
-    def emit_proc_fallback_fn(*args, **kwargs)
+    def emit_proc_fallback_fn(region, *args, **kwargs)
+      # A block that has a step is called as that step by the fiber; its plain body only runs when no fiber CALLs it,
+      # so it is compiled outside the enclosing step (a Fiber.yield in it is then an ordinary send).
+      if @resumable && block_step_maker_for(region)
+        saved = @resumable
+        @resumable = nil
+        begin
+          return super
+        ensure
+          @resumable = saved
+        end
+      end
       with_resumable_flat(false) { super }
     end
   end
@@ -203,6 +214,8 @@ class CodeGen
         next
       end
       next unless @fiber_yield_names.include?(name)
+
+      next if insn.op == :SSENDB && resumable_block_call_target(name, d)
 
       unless %i[SSEND SSEND0].include?(insn.op)
         return "calls the yielding method #{name} with an explicit receiver or a block"
@@ -893,14 +906,19 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
   def resumable_call_site(insn, target, reg_offset)
     return resumable_not_flat_error("call to the suspendable method #{insn.sym}") unless @resumable.flat
 
-    state = @resumable.new_state
     dest = insn.reg - reg_offset
     argc = insn.op == :SSEND0 ? 0 : insn.argc
     args = (1..argc).map { |i| "r#{dest + i}" }
+    resumable_call_lines(@resumable.new_state, insn.sym, target, dest, args).join("\n") + "\n"
+  end
+
+  # The lines of a CALL suspension: the callee's entry parks its frame (its id armed), and the step suspends with it.
+  # +args+ are the C++ arguments after self (a block proc included).
+  def resumable_call_lines(state, name, target, dest, args)
     impl = "#{cpp_name(target.owner, target.name)}_impl"
     id = "#{target.owner}##{target.name}"
     [
-      "  // RESUMABLE_CALL #{state} #{insn.sym}",
+      "  // RESUMABLE_CALL #{state} #{name}",
       '  bc2cpp_prologue.expect = ' + c_string_literal(id) + ';',
       '  bc2cpp_prologue.frame = nullptr;',
       "  #{impl}(M, self#{args.map { |a| ", #{a}" }.join});",
@@ -915,9 +933,38 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail
       '  bc2cpp_resume_frame_set_call(M, bc2cpp_frame_value, false);',
       '  return bc2cpp_frame_value;',
       "  Lbc2cpp_resume_#{state}:;",
-      "  r#{dest} = R[1];",
-      ''
-    ].join("\n")
+      "  r#{dest} = R[1];"
+    ]
+  end
+
+  # CALL_STEP with a block: the callee takes a block parameter and the site passes a literal block whose own body
+  # suspends (it has a step maker, so the callee's yield CALLs the block's step). Nil when the site is not that shape.
+  def resumable_block_call_target(name, d)
+    target = resumable_call_target(name, d)
+    return nil unless target
+
+    callee = @ireps.fetch(target.irep)
+    pure_mandatory_arity?(callee) && yields_block_param?(callee) ? target : nil
+  end
+
+  # The glue of a top-level `m(args) { block }` site in a step, or nil to keep the ordinary glue. The block's proc is
+  # built on the heap (nothing in it points into the step's frame: block_step_candidate? takes no captured locals).
+  def resumable_block_call_glue(region, fn_name, dest_reg, owner_def)
+    return nil unless @resumable && owner_def && region[:self_implicit] && region[:direct_entry] && @block_fallback_depth.to_i.zero?
+
+    maker = block_step_maker_for(region)
+    target = maker && resumable_block_call_target(region[:name], owner_def)
+    return nil unless target && mandatory_arity(@ireps.fetch(target.irep)) == region[:n].to_i
+
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, [], false,
+                                              direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
+                                              step_maker: maker)
+    args = (1..region[:n]).map { |k| "r#{dest_reg + k}" } + ["mrb_obj_value(#{rproc_var})"]
+    state = @resumable.new_state
+    lines = resumable_call_lines(state, region[:name], target, dest_reg, args)
+    # The proc is made in a scope of its own; the resume label and the result read follow it.
+    split = lines.index { |l| l.start_with?('  Lbc2cpp_resume_') }
+    "  {\n#{ctor}#{lines[0...split].join("\n")}\n  }\n#{lines[split..].join("\n")}\n"
   end
 
   # The Fiber.new site: the block's RProc and a C++ Fiber over it. A body that captures locals gets their current

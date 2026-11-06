@@ -365,6 +365,8 @@ class CodeGen
     # (compute_fiber_yield_names).
     @fiber_yield_names = seeds.empty? ? Set.new : compute_fiber_yield_names(seeds.to_set)
     # CALL_STEP: a method a root calls on self that can itself suspend is a root too (the root's step CALLs its step).
+    # BLOCKS_IN_STEPS: so is one a root calls with a literal block that reaches Fiber.yield (the callee's `yield`
+    # suspends through the block); its name then counts as a yielding name.
     queue = @fiber_roots.to_a
     until queue.empty?
       label = queue.shift
@@ -377,6 +379,17 @@ class CodeGen
 
         target = by_owner_name[[owner, insn.sym]]
         queue << target if target && @fiber_roots.add?(target)
+      end
+      BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SSENDB]) do |block_insn, paired, _|
+        block_label = block_insn.block_index && irep.reps[block_insn.block_index.to_i]
+        block_irep = block_label && @ireps[block_label]
+        next unless paired.sym && block_irep && deep_fiber_yield?(block_irep, seeds.to_set)
+
+        target = by_owner_name[[owner, paired.sym]]
+        next unless target
+
+        @fiber_yield_names << paired.sym
+        queue << target if @fiber_roots.add?(target)
       end
     end
     @fiber_unsafe_methods = reachable.select do |label|
@@ -1283,6 +1296,9 @@ class CodeGen
     if (fiber_id = fiber_body_target_id(region, owner_def))
       @fiber_body_used = true
       return emit_fiber_body_site(region, fn_name, fiber_id, dest_reg)
+    end
+    if inline_offset.nil? && (call = resumable_block_call_glue(region, fn_name, dest_reg, owner_def))
+      return call
     end
     if owner_def && region[:direct_entry] && fiber_new_site?(region) && block_step_maker_for(region)
       return emit_fiber_body_step_site(region, fn_name, dest_reg)
