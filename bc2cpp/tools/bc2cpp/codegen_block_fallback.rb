@@ -584,6 +584,12 @@ class CodeGen
     name = insn.sym.to_s
     definers = if region[:self_implicit]
                  rbs_block_self_definers(name, @self_class_unknown ? nil : owner_name)
+               elsif (const_name = IrBlockOperands.constant_name(irep, idx, region[:dest_reg]))
+                 # CONSTANT_BLOCK_HINT: a class-object receiver (`File.open { }`) is a singleton call. Its definer is the
+                 # one constant_object_core_def proves for the constant's singleton chain (the same proof the by-name
+                 # send's direct call uses), not an instance lookup on the class.
+                 target = constant_object_core_def(name, const_name)
+                 target&.irep ? [target.owner] : nil
                else
                  recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
                  rbs_block_exact_definers(name, recv_class) if recv_class.is_a?(String)
