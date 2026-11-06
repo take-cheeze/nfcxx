@@ -81,7 +81,11 @@ absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 # (docs/notes/pathb-ir-passes.md). Unset: the IR goes to the emitter as the front end wrote it.
 # Default: inline,sroa (the inliner, then scalar replacement with constant propagation and counted-loop unrolling). NFCXX_IR_OPT=off
 # turns the passes off.
-ir_opt=${NFCXX_IR_OPT-inline,sroa}
+# Vulkan: the entry kernel gets at most 12 unrolls. The 13th (the one-iteration linear-id loop of __nfcxx_sycl_entry_nd in
+# tests/sycl/groups.cpp) gives wrong float group reductions on lavapipe only; RADV and NVIDIA run it correctly, and the
+# unroll is an optimization, so skipping it cannot change results (docs/notes/pathb-ir-passes.md).
+if [ "$backend" = vulkan ] && [ -z "${NFCXX_IR_OPT+x}" ]; then ir_opt=inline,sroa,unroll-cap-in=nfcxx_sycl_entry,unroll-limit=12
+else ir_opt=${NFCXX_IR_OPT-inline,sroa}; fi
 if [ "$ir_opt" != off ] && [ -n "$ir_opt" ]; then
   irpasses=(); for p in ${ir_opt//,/ }; do irpasses+=("--$p"); done
   "$root/scripts/mrb" "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$absout.dev.ir" > "$absout.dev.opt.ir"

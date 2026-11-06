@@ -964,8 +964,14 @@ class Fn
       ty = parse_type(x[1])
       return float_lit(x[2].to_s) if ty[0] == "float"
       int_lit(ty, as_int(x[2]))
+    when "null"
+      a, _ = operand(x)   # a null pointer: the 0u offset
+      a
     else
-      raise Refused, "expression #{h || form_text(x)}"
+      # a bare operand as a value (RVALUE ::= OPERAND), e.g. (let %D T %K) from an inlined return or a copy
+      raise Refused, "expression #{h}" if h
+      a, _ = operand(x)
+      a
     end
   end
 

@@ -147,3 +147,17 @@ Bugs found on the way and fixed:
 3. Scalar replacement refused a group after it had merged it with another (the copy edges), so a slot passed by address to a call
    was replaced anyway. Refusals are applied after the merges now.
 4. The driver's device-IR hook returned a failing status when its variable was unset, which stopped the build silently. Fixed.
+
+## Vulkan unroll cap (2026-11-06)
+
+- The `groups` SYCL test (tests/sycl/groups.cpp) fails on lavapipe (`VK_ICD_FILENAMES=.../lvp_icd.json`) when the 13th counted-loop
+  unroll is applied. That unroll is the one-iteration linear-id loop of `__nfcxx_sycl_entry_nd`. Float `reduce_over_group` returns 0 in
+  the failing build. RADV and NVIDIA pass the same binary.
+- Ruled out: the SSA and e-graph stages (the failure remains with them off), and the C++ and Ruby SPIR-V emitters (both fail). The
+  two pass outputs are semantically equivalent, and both modules have the same 19 barriers and validate with `spirv-val`.
+- Not a code-size effect: the 13th unroll removes 14 function-storage variables from `groups`, and the vecadd benchmark is unchanged.
+- Workaround (`scripts/sycl-build.sh`, Vulkan default): `unroll-cap-in=nfcxx_sycl_entry,unroll-limit=12`. The cap counts only
+  unrolls in entry kernels, so other functions keep their unrolls. A global cap was tried first and removed vecadd's unrolls, because
+  earlier functions used up the count. `--unroll-min-trip=2` was also tried and removed the vecadd unrolls too.
+- Verified on lavapipe: the full `tests/sycl/run.sh` Vulkan section passes (98 ok). The WebGPU section was skipped in that environment.
+- Open: the root cause is unknown. Revisit the cap once the lavapipe or emitter cause is found.
