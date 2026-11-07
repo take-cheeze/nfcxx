@@ -1849,6 +1849,14 @@ if $PROGRAM_NAME == __FILE__
       mrb_int argc = mrb_get_argc(M);
       if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);
     }
+    // CFUNC_RESULT_ROOT: the VM's cfunc epilogue drops the arena to its saved index and, if the arena grew, reallocs it
+    // before storing the result; a GC there (MRB_GC_STRESS) would free a fresh result. Root it in a global meanwhile.
+    [[maybe_unused]] static inline mrb_value bc2cpp_cfunc_result(mrb_state* M, mrb_value v) {
+    #ifndef MRB_GC_FIXED_ARENA
+      if (mrb_unlikely(M->gc.arena_capa > MRB_GC_ARENA_SIZE) && !mrb_immediate_p(v)) mrb_gv_set(M, mrb_intern_lit(M, "$__bc2cpp_result"), v);
+    #endif
+      return v;
+    }
     // STEP_KEYWORDS: the same check for a method that takes keywords, whose keyword Hash is never a positional argument.
     // vm.c argnum_error counts a lone keyword Hash as the one argument given.
     static inline void bc2cpp_check_argc_kw(mrb_state* M, mrb_int min, mrb_int max) {
@@ -2136,6 +2144,14 @@ if $PROGRAM_NAME == __FILE__
       }
       mrb_hash_set(M, roots, mrb_int_value(M, (mrb_int)((uintptr_t)slot >> 2)), v);
     }
+    // mrb_yield_argv leaves its result in no root (no arena slot, past the live stack): protect it as mrb_funcall does.
+    static inline mrb_value bc2cpp_yield_kept(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
+      int ai = mrb_gc_arena_save(M);
+      mrb_value result = mrb_yield_argv(M, blk, argc, argv);
+      mrb_gc_arena_restore(M, ai);
+      mrb_gc_protect(M, result);
+      return result;
+    }
     // mrb_yield_argv, minus the frame when `blk` is a non-strict block with a direct entry. The
     // arena is restored and the result protected as mrb_yield_with_class does.
     static inline mrb_value bc2cpp_yield_argv(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
@@ -2150,7 +2166,7 @@ if $PROGRAM_NAME == __FILE__
           return result;
         }
       }
-      return mrb_yield_argv(M, blk, argc, argv);
+      return bc2cpp_yield_kept(M, blk, argc, argv);
     }
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);

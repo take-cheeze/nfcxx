@@ -150,10 +150,10 @@ class CodeGen
     entry = Regexp.escape(m[:entry])
     impl = Regexp.escape(m[:impl])
     body = if argc.zero?
-             "  return #{impl}\\(M, self\\);\\n"
+             "  return bc2cpp_cfunc_result\\(M, #{impl}\\(M, self\\)\\);\\n"
            else
              "(?:  mrb_value \\w+;\\n){#{argc}}  mrb_get_args\\(M, \"o{#{argc}}\"(?:, &\\w+){#{argc}}\\);\\n" \
-               "  return #{impl}\\(M, self(?:, \\w+){#{argc}}\\);\\n"
+               "  return bc2cpp_cfunc_result\\(M, #{impl}\\(M, self(?:, \\w+){#{argc}}\\)\\);\\n"
            end
     m[:code].match?(/^static mrb_value #{entry}\(mrb_state\* M, mrb_value self\) \{\n#{body}\}/)
   end
