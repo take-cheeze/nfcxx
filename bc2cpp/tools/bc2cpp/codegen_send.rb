@@ -1905,19 +1905,34 @@ class CodeGen
     owners = generic_new_initialize_owners
     return nil unless owners && argv.size <= 16
 
+    @direct_alloc_used = true # the caller allocates with bc2cpp_direct_alloc, which is declared when this flag is set
     line = outside_owner_call_line(dest, obj, 'initialize', argv, owners)
            .sub(/\A#{Regexp.escape(RegName[dest])} = /, 'bc2cpp_new_ini = ')
     "mrb_value bc2cpp_new_ini;\n#{line}\n"
   end
 
-  # The classes whose instance method `initialize` may answer a construction: every Ruby definer in the registry and
-  # BasicObject (mruby's own initialize). nil when a native definer's class is not known (the owner list could not
-  # name it, so the construction keeps mrb_obj_new).
+  # The classes whose instance method `initialize` may answer a construction: every Ruby definer in the registry, every
+  # native definer the native owner map names (NATIVE_OWNER_MAP, read as a verdict with core trusted), and BasicObject.
+  # nil when a native definer's class is unknown or a prepend could reach it, so the construction keeps mrb_obj_new.
   def generic_new_initialize_owners
-    defs = @registry.fetch('initialize', [])
-    return nil if defs.any? { |definition| definition.owner == '<native>' || definition.owner.end_with?('.singleton') }
+    return nil if @registry.fetch('initialize', []).any? { |definition| definition.owner.end_with?('.singleton') }
 
-    (defs.map(&:owner) + ['BasicObject']).uniq.sort.freeze
+    natives = native_initialize_owners
+    return nil unless natives
+
+    ruby = @registry.fetch('initialize', []).reject { |definition| definition.owner == '<native>' }.map(&:owner)
+    (ruby + natives.to_a + ['BasicObject']).uniq.sort.freeze
+  end
+
+  # The native classes that define `initialize`, or nil when the map cannot name them all.
+  def native_initialize_owners
+    map = native_owner_map
+    return nil unless map && !map.computed_unknown && map.refusals[:native_prepend].to_i.zero?
+
+    owners = Array(map.by_name['initialize'])
+    return nil if owners.include?(NativeOwnerMap::UNKNOWN)
+
+    owners.to_set
   end
 
   def closed_world_exact_target(name, receiver_class, accessor: false)
