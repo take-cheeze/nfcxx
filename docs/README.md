@@ -64,7 +64,7 @@ covers say so.
 
 ## Status matrix
 
-"Test" is the script that exercises the claim. "CI" is the workflow that runs it (`ci.yml`, `ci.yml`,
+"Test" is the script that exercises the claim. "CI" is the workflow that runs it (`ci.yml`,
 `realworld.yml`, `hexagon.yml`); "none" means no workflow runs it. A test marked "needs X" skips or fails without X.
 
 | Area | Supported (test) | CI |
