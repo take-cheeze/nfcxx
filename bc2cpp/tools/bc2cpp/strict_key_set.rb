@@ -20,7 +20,10 @@ require 'set'
 # Set literals (`Set[1, 2]`) and `Set.new` keep working unchanged.
 STRICT_KEYS = ENV['BC2CPP_STRICT_KEYS'] != '0'
 
-if STRICT_KEYS
+# One definition for both modes: a second one in an else branch (a module of the same name) would be compiled as well by
+# bc2cpp, which cannot tell which branch an ENV test selects, and emit StrictKeySet.coerce twice. In production
+# (STRICT_KEYS false) .coerce passes the set through and .new builds a plain Set.
+begin
   # Integer-element Set (opaque/upvar register sets). Every read and write
   # with a non-Integer member raises TypeError.
   #
@@ -35,10 +38,16 @@ if STRICT_KEYS
     # Validate +set+'s members and return it (dev) — a plain alias in
     # production, so call sites read identically in both modes.
     def self.coerce(set, key_type: Integer)
-      return set if set.nil?
+      return set if set.nil? || !STRICT_KEYS
 
       set.each { |member| check!(member, key_type) }
       set
+    end
+
+    def self.new(enum = nil, key_type: Integer, &block)
+      return Set.new(enum, &block) unless STRICT_KEYS
+
+      super
     end
 
     def self.check!(member, key_type)
@@ -154,18 +163,6 @@ if STRICT_KEYS
 
     def respond_to_missing?(name, include_private = false)
       @set.respond_to?(name, include_private) || super
-    end
-  end
-else
-  # Production: StrictKeySet.coerce is a no-op pass-through and .new
-  # builds a plain Set, so call sites read identically in both modes.
-  module StrictKeySet
-    def self.coerce(set, key_type: Integer)
-      set
-    end
-
-    def self.new(enum = nil, key_type: Integer, &block)
-      Set.new(enum, &block)
     end
   end
 end
