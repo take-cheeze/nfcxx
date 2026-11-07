@@ -307,6 +307,7 @@ class CodeGen
     when :SEND, :SEND0
       return resumable_block_call_intercept(insn, irep, d, idx, reg_offset) if block_call_site?(insn, idx, reg_offset)
       return resumable_dyn_send_insn(insn) if dyn_send_site?(insn, idx) && reg_offset.zero?
+      return resumable_transfer_intercept(insn, irep, d, idx, reg_offset) if transfer_site?(insn, idx, reg_offset)
       return nil unless insn.sym == 'yield' && idx
 
       dest = insn.reg - reg_offset
@@ -567,7 +568,28 @@ class CodeGen
     ].join("\n")
   end
 
-  def resumable_yield_site(insn)
+  # FIBER_TRANSFER: `fiber.transfer(v)` in a step is a yield of v when the receiver is the root or mruby fiber that
+  # resumed this C++ Fiber, or the C++ Fiber whose resume/transfer runs it (bc2cpp_transfer_is_yield, run time); any
+  # other receiver takes the ordinary send (Fiber#transfer on a C++ Fiber runs the target nested).
+  def transfer_site?(insn, idx, reg_offset)
+    return false unless insn.sym == 'transfer' && idx && @resumable&.flat && !@resumable_plain && reg_offset.zero?
+
+    insn.op == :SEND0 || (insn.op == :SEND && insn.plain_fixed_argc? && insn.argc.to_i.between?(1, 3))
+  end
+
+  def resumable_transfer_intercept(insn, irep, d, idx, reg_offset)
+    dest = insn.reg
+    suspend = resumable_yield_site(insn, transfer: true)
+    plain = begin
+      @resumable_plain = true
+      compile_insn_op(insn, irep, d, idx, reg_offset)
+    ensure
+      @resumable_plain = false
+    end
+    ["  if (bc2cpp_transfer_is_yield(M, r#{dest})) {", suspend.rstrip, '  } else {', plain.rstrip, '  }', ''].join("\n")
+  end
+
+  def resumable_yield_site(insn, transfer: false)
     return resumable_not_flat_error('Fiber.yield') unless @resumable.flat
 
     argc = fiber_yield_argc(insn)
@@ -589,11 +611,12 @@ class CodeGen
       '  bc2cpp_resume_frame_set_call(M, bc2cpp_frame_value, false);',
       RESUMABLE_SPILL_MARK,
       '  mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));',
+      transfer ? '  bc2cpp_transfer_yielding = true;' : nil,
       '  return bc2cpp_frame_value;',
       "  Lbc2cpp_resume_#{state}:;",
       "  r#{dest} = R[1];",
       ''
-    ].join("\n")
+    ].compact.join("\n")
   end
 
   # Inlines a yielding helper (wait_one_clock, ...) at its call site: its registers follow

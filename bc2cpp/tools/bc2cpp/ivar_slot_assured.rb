@@ -85,6 +85,8 @@ class CodeGen
 
   def slot_facts(klass)
     return nil if ENV['BC2CPP_SLOT_ASSURED'] == '0'
+    # A core method is compiled with no closed world (compile_method): nothing is assured there, and the answer is not memoized.
+    return nil unless @closed_world
 
     root = embed_storage_owner(klass)
     @slot_facts ||= {}

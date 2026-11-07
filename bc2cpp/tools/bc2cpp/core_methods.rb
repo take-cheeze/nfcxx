@@ -79,18 +79,27 @@ module CoreMethods
     irep = ireps.fetch(definition.irep)
     return 'conditional def' if conditional.include?(definition.irep)
     return "#{ENUMERATOR_REASON} (Fiber machinery)" if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps) &&
-                                                         !enumerator_initializer?(definition, ireps) && !enumerator_fiber_step?(definition)
+                                                         !enumerator_initializer?(definition, ireps) && !enumerator_fiber_step?(definition, ireps)
     return 'builds a lambda' if CoreDefs.builds_lambda?(irep, ireps)
 
-    'names Fiber' if CoreDefs.references_fiber?(irep, ireps) && !enumerator_fiber_step?(definition)
+    'names Fiber' if CoreDefs.references_fiber?(irep, ireps) && !enumerator_fiber_step?(definition, ireps)
   end
 
-  # ENUMERATOR_FIBER (opt-in, BC2CPP_ENUMERATOR_FIBER=1): the methods that run an Enumerator's external iteration are
-  # compiled, so `next_values` builds a C++ Fiber over a step (docs/bc2cpp-cxx-fiber.md) instead of an mruby Fiber.
+  # ENUMERATOR_FIBER (on; BC2CPP_ENUMERATOR_FIBER=0 keeps mruby-enumerator's bytecode on mruby-fiber): its methods are compiled, so
+  # `next_values` builds a C++ Fiber over a step (docs/bc2cpp-cxx-fiber.md) instead of an mruby Fiber, and the generators
+  # and lazy enumerators external iteration runs through are compiled with it. Methods that build a lambda stay bytecode.
   ENUMERATOR_FIBER_STEPS = %w[Enumerator#next_values Enumerator#each Enumerator#__enumerator_block_call].freeze
 
-  def enumerator_fiber_step?(definition)
-    ENV['BC2CPP_ENUMERATOR_FIBER'] == '1' && ENUMERATOR_FIBER_STEPS.include?(key(definition))
+  def enumerator_fiber?
+    ENV['BC2CPP_ENUMERATOR_FIBER'] != '0'
+  end
+
+  def enumerator_fiber_step?(definition, ireps = nil)
+    return false unless enumerator_fiber?
+    return true if ENUMERATOR_FIBER_STEPS.include?(key(definition))
+
+    body = ireps && definition.irep && ireps[definition.irep]
+    !body.nil? && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb')
   end
 
   # Language features a body uses, for grouping the interpreted report by what an unsupported

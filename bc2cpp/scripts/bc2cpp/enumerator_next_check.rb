@@ -3,7 +3,7 @@
 # frozen_string_literal: true
 
 # ENUMERATOR_FIBER: Enumerator#next over a compiled Array#each, a user `each` and a to_enum with arguments runs its
-# Fiber body as a C++ Fiber step (BC2CPP_ENUMERATOR_FIBER=1 compiles mruby-enumerator's next_values, #each and
+# Fiber body as a C++ Fiber step (on by default; BC2CPP_ENUMERATOR_FIBER=0 keeps bytecode; it compiles mruby-enumerator's next_values, #each and
 # #__enumerator_block_call; they stay bytecode by default).
 #
 # DYN_CALL with keywords (tools/bc2cpp/codegen_resumable.rb resumable_dyn_site, runtime bc2cpp_dyn_call): a send in a
@@ -23,7 +23,6 @@ require_relative 'fixture_runtime'
 
 # The fixture is its own closed world: the repository signatures name classes it does not define.
 ENV['BC2CPP_SIG_DIRS'] = ''
-ENV['BC2CPP_ENUMERATOR_FIBER'] = '1'
 
 failures = []
 check = lambda do |what, condition|
@@ -111,12 +110,28 @@ SRC2 = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[KwTarget KwClock EnColl Enumerator Array Enumerable Range Integer Kernel].freeze
+# EnSource: an Enumerable over its own each, walked externally (Enumerable's enumerator-returning forms) and lazily.
+SRC3 = <<~'RUBY'
+  class EnSource
+    include Enumerable
+
+    def each(start = 1)
+      i = start
+      while i <= 3
+        yield i
+        i += 1
+      end
+      self
+    end
+  end
+RUBY
+
+OWNERS = %w[KwTarget KwClock EnColl EnSource Enumerator Enumerator::Lazy Enumerator::Generator Enumerator::Yielder Array Enumerable Range Integer Kernel].freeze
 
 baseline_dir = Dir.mktmpdir('bc2cpp-enumerator-next')
 at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2, baseline_dir, core: true, only_owners: OWNERS)
+code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2 + SRC3, baseline_dir, core: true, only_owners: OWNERS)
 check.call('run compiles as a resumable step function', code.include?('static mrb_value KwClock_run_step(mrb_state* M'))
 check.call('forward compiles as a resumable step function', code.include?('static mrb_value KwClock_forward_step(mrb_state* M'))
 check.call('the splat-and-keywords send is a dynamic call', code.include?('// RESUMABLE_DYN_CALL'))
@@ -175,6 +190,27 @@ DRIVER = <<~'RUBY'
   s << et.next
   s << et.next
   p s
+
+  def shown(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue StandardError => e
+    puts "#{label}: raised #{e.class}: #{e.message}"
+  end
+
+  src = EnSource.new
+  shown('to_enum') { e = src.to_enum; [e.next, e.next, e.next, (e.next rescue :stop)] }
+  shown('to_enum size') { src.to_enum.size }
+  shown('map enum') { e = src.map; [e.next, e.next] }
+  shown('select enum') { e = src.select; [e.next, e.peek, e.next] }
+  shown('each_with_index enum') { e = src.each_with_index; [e.next, e.next] }
+  shown('each_slice enum') { e = src.each_slice(2); [e.next, e.next, (e.next rescue :stop)] }
+  shown('each_cons enum') { e = src.each_cons(2); [e.next, e.next] }
+  shown('each_with_object enum') { e = src.each_with_object([]); [e.next, e.next] }
+  shown('with_index') { e = src.each.with_index(1); [e.next, e.next] }
+  shown('rewind') { e = src.to_enum; a = e.next; e.rewind; [a, e.next] }
+  shown('lazy next') { e = src.lazy.map { |x| x * 2 }.select { |x| x > 2 }.to_enum; [e.next, e.next] }
+  shown('lazy first') { src.lazy.map { |x| x * 3 }.first(2) }
+  shown('two enumerators') { a = src.to_enum; b = src.to_enum; [a.next, b.next, a.next, b.next] }
   puts 'end'
 RUBY
 
@@ -202,7 +238,14 @@ else
     interpreted = sections['interpreted']
     compiled = sections['compiled']
     check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-    check.call('interpreted and compiled runs print the same', interpreted == compiled)
+    # Known gaps: the compiled run does not match yet, and must keep failing until the gap is closed (then remove it).
+    #   lazy next -- mruby-enum-lazy is not among the core gems bc2cpp compiles (compiled_gems.rb), and its generator block
+    #                wraps the iteration in begin/rescue StopIteration, which a step cannot contain yet.
+    gap = ->(line) { line.to_s.start_with?('lazy next:') }
+    check.call('interpreted and compiled runs print the same outside the known gaps',
+               interpreted && compiled && interpreted.zip(compiled).all? { |a, b| a == b || gap.call(a) })
+    check.call('every known gap still fails', interpreted && compiled &&
+               interpreted.zip(compiled).select { |a, _| gap.call(a) }.all? { |a, b| a != b })
     check.call('the suspendable target yields through the CALL and the keyword target gets its keyword',
                interpreted&.first == '[0, 1, 2, [[11, 21, 31], [1, 11]], false]')
     check.call('Enumerator#next walks Array#each, a user each with an argument, each_with_index, Hash#each and Integer#times',
@@ -210,7 +253,7 @@ else
                interpreted&.[](2) == '[101, 102, 103, StopIteration, 101]' &&
                interpreted&.[](3) == '[[5, 0], [6, 1], [:a, 1], 0, 1]')
     if interpreted && compiled
-      interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+      interpreted.zip(compiled).reject { |a, b| a == b || gap.call(a) }.first(20).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
     end
     puts output.lines.last(30).join unless built && interpreted && compiled
   end

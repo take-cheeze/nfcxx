@@ -160,6 +160,14 @@ SCENARIOS = [
   ['Hash#select!', 'h = { a: 1, b: 2 }; h.select! { |k, v| Fiber.yield k; true }', 'h = { a: 1, b: 2 }; h.select! { |k, v| true }'],
   ['Range#each', '(1..2).each { |x| Fiber.yield x }', '(1..2).each { |x| x }'],
   ['Range#each', %q{('a'..'c').each { |x| Fiber.yield x }}, %q{('a'..'c').each { |x| x }}],
+  ['Enumerable#each_slice', '(1..3).each_slice(2) { |a| Fiber.yield a }', '(1..3).each_slice(2) { |a| a }'],
+  ['Enumerable#each_cons', '(1..3).each_cons(2) { |a| Fiber.yield a }', '(1..3).each_cons(2) { |a| a }'],
+  ['Enumerable#group_by', '(1..3).group_by { |x| Fiber.yield x; x % 2 }', '(1..3).group_by { |x| x % 2 }'],
+  ['Enumerable#partition', '(1..3).partition { |x| Fiber.yield x; x > 1 }', '(1..3).partition { |x| x > 1 }'],
+  ['Enumerable#min_by', '(1..3).min_by { |x| Fiber.yield x; -x }', '(1..3).min_by { |x| -x }'],
+  ['Enumerable#max_by', '(1..3).max_by { |x| Fiber.yield x; -x }', '(1..3).max_by { |x| -x }'],
+  ['Enumerable#take_while', '(1..3).take_while { |x| Fiber.yield x; x < 3 }', '(1..3).take_while { |x| x < 3 }'],
+  ['Enumerable#drop_while', '(1..3).drop_while { |x| Fiber.yield x; x < 2 }', '(1..3).drop_while { |x| x < 2 }'],
   ['StringIO#each', 'require "stringio"; StringIO.new("a\\nb").each { |l| Fiber.yield l }', 'require "stringio"; StringIO.new("a\\nb").each { |l| l }']
 ].freeze
 SCENARIOS = SCENARIOS.select { |label, *| label == ENV['ONLY'] }.freeze if ENV['ONLY'] # debugging aid: one label
@@ -174,6 +182,7 @@ EXPECTED_LABELS = %w[
   Hash#each Integer#downto Integer#times Integer#upto
   String#each_char String#upto StringIO#each
   Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
+  Enumerable#each_slice Enumerable#each_cons Enumerable#group_by Enumerable#partition Enumerable#min_by Enumerable#max_by Enumerable#take_while Enumerable#drop_while
 ].freeze
 
 # The probe class: one method per scenario builds the fiber whose body is the scenario, so every fiber body is compiled
