@@ -1568,6 +1568,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
   puts '#include <initializer_list>'
+  puts '#include <string>'
   puts '#include <string.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
@@ -2201,9 +2202,56 @@ if $PROGRAM_NAME == __FILE__
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
-    // SSEND_HELPER: the one by-name self send of a class body (include, attr_*): visibility is ignored, as mrb_funcall does.
+    // SSEND_HELPER: a class body's other by-name self send (extend, ...): visibility is ignored, as mrb_funcall does.
     [[maybe_unused]] static mrb_value bc2cpp_ssend(mrb_state* M, mrb_value self, mrb_sym mid, std::initializer_list<mrb_value> args) {
-      return mrb_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
+      return bc2cpp_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
+    }
+    // CLASS_BODY_INCLUDE: Module#include (class.c mrb_mod_include) without the by-name send of `include`. Last module
+    // first; each module is then sent its `included` hook (a Ruby method, possibly compiled). Returns the class.
+    [[maybe_unused]] static mrb_value bc2cpp_mod_include(mrb_state* M, mrb_value self, std::initializer_list<mrb_value> args) {
+      struct RClass* c = mrb_class_ptr(self);
+      mrb_sym included = mrb_intern_lit(M, "included");
+      for (mrb_int i = (mrb_int)args.size(); i-- > 0;) {
+        mrb_value m = args.begin()[i];
+        mrb_check_type(M, m, MRB_TT_MODULE);
+        mrb_include_module(M, c, mrb_class_ptr(m));
+        bc2cpp_funcall_argv(M, m, included, 1, &self);
+      }
+      return self;
+    }
+    // CLASS_BODY_ATTR: Module#attr_reader / attr_writer (class.c mod_attr_define): a public cfunc method over the ivar name
+    // in its env, as mruby builds it (visibility is not applied to it there either). Returns nil.
+    static mrb_value bc2cpp_attr_get(mrb_state* M, mrb_value obj) {
+      return mrb_iv_get(M, obj, mrb_obj_to_sym(M, mrb_proc_cfunc_env_get(M, 0)));
+    }
+    static mrb_value bc2cpp_attr_set(mrb_state* M, mrb_value obj) {
+      mrb_value val = mrb_get_arg1(M);
+      mrb_iv_set(M, obj, mrb_obj_to_sym(M, mrb_proc_cfunc_env_get(M, 0)), val);
+      return val;
+    }
+    [[maybe_unused]] static mrb_value bc2cpp_mod_attr(mrb_state* M, mrb_value self, bool reader, bool writer, std::initializer_list<mrb_value> args) {
+      struct RClass* c = mrb_class_ptr(self);
+      int ai = mrb_gc_arena_save(M);
+      for (int pass = 0; pass < 2; pass++) {
+        if (!(pass == 0 ? reader : writer)) continue;
+        for (const mrb_value* a = args.begin(); a != args.end(); a++) {
+          mrb_sym method = mrb_obj_to_sym(M, *a);
+          mrb_int len;
+          const char* nm = mrb_sym_name_len(M, method, &len);
+          std::string ivar = "@" + std::string(nm, (size_t)len);
+          mrb_sym ivsym = mrb_intern(M, ivar.data(), (mrb_int)ivar.size());
+          mrb_iv_name_sym_check(M, ivsym);
+          mrb_value name = mrb_symbol_value(ivsym);
+          if (pass == 1) method = mrb_intern(M, (std::string(nm, (size_t)len) + "=").c_str(), len + 1);
+          struct RProc* p = bc2cpp_heap_proc(M, pass == 0 ? bc2cpp_attr_get : bc2cpp_attr_set, 1, &name);
+          p->flags |= pass == 0 ? MRB_PROC_NOARG : 0;
+          mrb_method_t m;
+          MRB_METHOD_FROM_PROC(m, p);
+          mrb_define_method_raw(M, c, method, m);
+          mrb_gc_arena_restore(M, ai);
+        }
+      }
+      return mrb_nil_value();
     }
     // PROC_CALL_HELPER: `x.call(*args)` in a core body. A plain Proc is yielded to; any other receiver has `call` looked
     // up once and the found method run with no second lookup (visibility as OP_SEND checks it; a missing method goes
