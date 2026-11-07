@@ -835,8 +835,14 @@ static mrb_value bc2cpp_fiber_m_raise(mrb_state* M, mrb_value self) {
 // call directly). A call on a receiver whose class is known to be Fiber reaches
 // it through bc2cpp_owner_call, whose guard accepts exactly this C function as
 // a definer.
+// So do the Fiber.yield definers (see bc2cpp_fiber_define).
+static mrb_value bc2cpp_fiber_s_yield(mrb_state* M, mrb_value self);
+static mrb_value bc2cpp_fiber_s_yield_wrapped(mrb_state* M, mrb_value self);
 [[maybe_unused]] static bool bc2cpp_fiber_definer_p(const mrb_method_t& m) {
-  return MRB_METHOD_CFUNC_P(m) && MRB_METHOD_CFUNC(m) == bc2cpp_fiber_m_raise;
+  return MRB_METHOD_CFUNC_P(m) &&
+         (MRB_METHOD_CFUNC(m) == bc2cpp_fiber_m_raise ||
+          MRB_METHOD_CFUNC(m) == bc2cpp_fiber_s_yield ||
+          MRB_METHOD_CFUNC(m) == bc2cpp_fiber_s_yield_wrapped);
 }
 
 static mrb_value bc2cpp_fiber_m_alive_p(mrb_state* M, mrb_value self) {
