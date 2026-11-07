@@ -169,7 +169,8 @@ class CodeGen
     # whose wrapper will not extract `bc2cpp_blk`.
     # BLOCK_STEP_UPVARS: a block step holds its builder's locals as pointers, so a block nested in it may forward them.
     block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep),
-                                                                    available_upvars: (label == @block_step_label ? @block_step_upvars : nil) || [])
+                                                                    available_upvars: (label == @block_step_label ? @block_step_upvars : nil) || [],
+                                                                    cell_levels: (label == @block_step_label ? @block_step_cell_levels : nil) || [])
     # NESTED_BLOCK_FALLBACK_SUPPORT: a RETURN_BLK nested at any depth throws
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.

@@ -112,7 +112,9 @@ class CodeGen
         if insn.op == :GETUPVAR
           "  #{RegName[insn.reg]} = *#{vname};\n"
         else
-          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = #{RegName[insn.reg]};\n  bc2cpp_upvar_root(M, #{vname}, #{RegName[insn.reg]});\n"
+          # A pointer into a cells Array: the store grays the Array (its owner), so no root is kept for the slot.
+          keep = @block_cell_levels&.include?(level) ? "mrb_write_barrier(M, mrb_basic_ptr(bc2cpp_up_cells_#{level}))" : "bc2cpp_upvar_root(M, #{vname}, #{RegName[insn.reg]})"
+          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = #{RegName[insn.reg]};\n  #{keep};\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"

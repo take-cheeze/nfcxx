@@ -143,6 +143,53 @@ SRC = <<~RUBY
       [g.arity, g.parameters, g.lambda?, r.arity, r.parameters, r.call(5, 6), l.arity, l.parameters, l.lambda?, l.call(1, 2)]
     end
 
+    # A kept block nested in a block that is only called during the call reads and writes the method's local.
+    def sc_nested
+      total = 0
+      procs = []
+      [1, 2].each { |i| procs << proc { total += i } }
+      [procs, proc { total }]
+    end
+
+    # The same inside a Fiber body, and two blocks deep.
+    def sc_nested_fiber
+      f = Fiber.new do
+        x = 100
+        procs = []
+        [1, 2].each { |i| [10, 20].each { |j| procs << proc { x += i * j } } }
+        Fiber.yield [procs, proc { x }]
+        x
+      end
+      procs, get = f.resume
+      GC.start
+      [procs.map(&:call), get.call, f.resume, get.call]
+    end
+
+    # The middle block suspends (it is a step of its own).
+    def sc_nested_step
+      f = Fiber.new do
+        x = 100
+        procs = []
+        [1, 2].each { |i| Fiber.yield i; procs << proc { x += i } }
+        Fiber.yield [procs, proc { x }]
+        x
+      end
+      f.resume
+      f.resume
+      procs, get = f.resume
+      GC.start
+      [procs.map(&:call), get.call, f.resume, get.call]
+    end
+
+    # Many kept blocks writing their cells: no root is kept per cell (the stores gray the Array).
+    def sc_roots
+      before = ($__bc2cpp_upvar_roots || {}).size
+      kept = []
+      12.times { |n| x = n.to_s; blk = proc { x += 'a' }; blk.call; kept << blk }
+      GC.start
+      [kept.map(&:call).size, kept.last.call, ($__bc2cpp_upvar_roots || {}).size - before < 4]
+    end
+
     # A block with optional or keyword parameters is not compiled yet (its method stays interpreted): the scenario only
     # pins the interpreted answers, which the compiled blocks above must give too.
     def sc_arity_optional
@@ -154,7 +201,6 @@ SRC = <<~RUBY
 RUBY
 
 OWNERS = %w[ScClosures].freeze
-SCENARIOS = %w[sc_escape sc_shared sc_params(1) sc_outer sc_step_local sc_wide sc_arity].freeze
 
 DRIVER = <<~RUBY
   def show(label)
@@ -174,6 +220,10 @@ DRIVER = <<~RUBY
   show('adders') { adders = s.sc_adders; GC.start; adders.map { |a| a.call(10) } }
   show('hash default') { h = s.sc_hash_default; GC.start; [h[1], h[2], h.size] }
   show('arity') { s.sc_arity }
+  show('nested') { ps, g = s.sc_nested; GC.start; [ps.map(&:call), g.call, ps.map(&:call), g.call] }
+  show('nested fiber') { s.sc_nested_fiber }
+  show('nested step') { s.sc_nested_step }
+  show('roots') { s.sc_roots }
   show('arity optional') { s.sc_arity_optional }
   puts 'end'
 RUBY
@@ -187,7 +237,7 @@ File.write(ENV['STEP_CLOSURES_ERR'], baseline_err.to_s) if ENV['STEP_CLOSURES_ER
 check.call('no #error in the generated code', !code.include?('#error'))
 # A method the compiler could not translate is left to the interpreter, where it trivially matches: every scenario must be
 # compiled, not skipped.
-%w[sc_escape sc_shared sc_params sc_outer sc_step_local sc_wide sc_counter sc_adders sc_hash_default sc_arity].each do |name|
+%w[sc_escape sc_shared sc_params sc_outer sc_step_local sc_wide sc_counter sc_adders sc_hash_default sc_arity sc_nested sc_nested_fiber sc_nested_step sc_roots].each do |name|
   check.call("ScClosures##{name} is compiled", code.include?("mrb_value ScClosures_#{name}_impl(mrb_state* M") &&
                                                !code.include?("BC2CPP_SKIPPED_ScClosures_#{name} "))
 end

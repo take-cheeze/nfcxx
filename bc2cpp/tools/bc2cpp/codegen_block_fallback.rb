@@ -497,7 +497,7 @@ class CodeGen
     names
   end
 
-  def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
+  def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false, cell_levels: [])
     regions = []
     BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SENDB SSENDB]) do |insn, paired, sendb_idx|
       idx = sendb_idx - 1
@@ -557,7 +557,10 @@ class CodeGen
       # registers through heap cells instead: they live in an Array the block's env keeps, so no pointer outlives its frame.
       # `new` keeps its block (Hash.new's default proc, Proc.new, Fiber.new's body) unless the receiver is Array.
       keeps_block = name == 'new' && !array_const_receiver?(irep, idx, dest_reg)
-      boxed = upvars.any? && (!synchronous || keeps_block) && !by_value && cells_capture?(upvars)
+      boxed = upvars.any? && (!synchronous || keeps_block) && !by_value && cells_capture?(upvars, cell_levels)
+      # A block that is only called during the call still needs cells when a block it builds may be kept and reads
+      # the frames above it (its pointers must lead into cells too).
+      boxed ||= upvars.any? && !by_value && cells_capture?(upvars, cell_levels) && nested_keeps_upper_cells?(block_irep, upvars)
       next if upvars.any? && !synchronous && !by_value && !boxed
 
       # BLOCK_SEMANTICS: `new` is on the allowlist for Array.new only. Hash.new
@@ -595,8 +598,10 @@ class CodeGen
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
       # forwarded by every enclosing block, so it is needed for a `return` at any depth.
       region[:needs_brk] = BytecodeIR.for(block_irep).op?(:BREAK)
+      region[:cell_levels] = upvars.map(&:first).uniq.sort if boxed
       region[:needs_ret] = BytecodeIR.for(block_irep).op?(:RETURN_BLK) ||
-                           recognize_block_fallback_regions(block_irep, available_upvars: upvars).any? { |nested| nested[:needs_ret] }
+                           recognize_block_fallback_regions(block_irep, available_upvars: upvars, cell_levels: region[:cell_levels] || [])
+                           .any? { |nested| nested[:needs_ret] }
       regions << region
     end
     regions
@@ -604,13 +609,31 @@ class CodeGen
 
   # STEP_CLOSURES: only the registers of the function that makes the block can be boxed (a level >= 1 pointer is the
   # enclosing function's, whose cells the block's env would also have to keep).
-  def cells_capture?(upvars)
-    ENV['BC2CPP_STEP_CLOSURES'] != '0' && upvars.all? { |(level, _)| level.zero? }
+  # A level >= 1 pointer is the enclosing function's, so it needs that frame's cells: +cell_levels+ are the levels of the
+  # upvars this function holds cells for (the function is itself a block over cells).
+  def cells_capture?(upvars, cell_levels = [])
+    ENV['BC2CPP_STEP_CLOSURES'] != '0' && upvars.all? { |(level, _)| level.zero? || cell_levels.include?(level - 1) }
+  end
+
+  # Does a block nested in +block_irep+ (whose own upvars are +upvars+) keep and read a frame above it? Then +block_irep+'s
+  # region holds those frames' cells for it.
+  def nested_keeps_upper_cells?(block_irep, upvars)
+    levels = upvars.map(&:first).uniq
+    recognize_block_fallback_regions(block_irep, available_upvars: upvars, cell_levels: levels)
+      .any? { |nested| nested[:boxed] && nested[:upvars].any? { |(level, _)| level >= 1 } }
+  end
+
+  # The C++ values a boxed region's env carries as cells, one per level of its upvars (in the function that builds it:
+  # level 0 is its own cells Array, level L the cells it holds for its upvar level L - 1).
+  def region_cells_exprs(region)
+    return nil unless region[:boxed]
+
+    (region[:cell_levels] || [0]).map { |level| level.zero? ? 'bc2cpp_cells_ary' : "bc2cpp_up_cells_#{level - 1}" }
   end
 
   # The registers of a function that its recognized +regions+ capture through cells, sorted.
   def boxed_registers(regions)
-    regions.select { |region| region[:boxed] }.flat_map { |region| region[:upvars].map { |(_, reg)| reg } }.uniq.sort
+    regions.select { |region| region[:boxed] }.flat_map { |region| region[:upvars].select { |(level, _)| level.zero? }.map(&:last) }.uniq.sort
   end
 
   # BLOCK_FALLBACK_ELEMENT_SUPPORT: pass an exact element class into the cfunc
@@ -919,6 +942,11 @@ class CodeGen
     next_slot = upvar_regs.size + 1 + (needs_blk ? 1 : 0)
     ret_slot = region[:needs_ret] ? next_slot : nil
     brk_slot = region[:needs_brk] ? next_slot + (ret_slot ? 1 : 0) : nil
+    # STEP_CLOSURES: a boxed region's env ends with the cells Arrays of its upvar levels; the body takes them as parameters.
+    cell_levels = region[:boxed] ? (region[:cell_levels] || [0]) : []
+    cells_slot = next_slot + (ret_slot ? 1 : 0) + (brk_slot ? 1 : 0)
+    cell_params = cell_levels.map { |l| "mrb_value bc2cpp_up_cells_#{l}" }
+    cell_args = cell_levels.map { |l| "bc2cpp_up_cells_#{l}" }
     saved_ret_slot = @block_ret_slot
     saved_brk_slot = @block_brk_slot
     @block_ret_slot = ret_slot
@@ -977,7 +1005,8 @@ class CodeGen
       nested_suppressed << rregion[:block_addr] << rregion[:sendb_addr]
       nested_glue_at[rregion[:block_addr]] = code
     end
-    nested_regions = recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs, blk_available: needs_blk)
+    nested_regions = recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs, blk_available: needs_blk,
+                                                      cell_levels: cell_levels)
     nested_regions.each do |nregion|
       # BLOCK_FALLBACK_RESCUE_SUPPORT: regions inside a rescue range belong to that
       # range's own pass (emit_rescue_try_body); emitting them here too would
@@ -1033,6 +1062,8 @@ class CodeGen
     # UPVAR_CAPTURE_SUPPORT: set for this one body loop only and cleared after, so
     # GETUPVAR/SETUPVAR only see names this function declares.
     @block_fallback_upvars = upvar_regs
+    saved_cell_levels = @block_cell_levels
+    @block_cell_levels = cell_levels
     # EXCEPTION_BREAK_SUPPORT: selects BREAK's translation: LAMBDA_FALLBACK keeps a
     # plain return (strict proc), BLOCK_FALLBACK throws.
     # RUNTIME_DEF_FALLBACK_SUPPORT: method and class bodies must not get the
@@ -1063,6 +1094,7 @@ class CodeGen
       # `bc2cpp_blk`, which @blk_param_name refers to.
       extra_fields = upvar_regs.map { |(l, b)| { name: upvar_var_name(l, b), c_type: 'mrb_value*' } }
       extra_fields += [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] if needs_blk
+      extra_fields += cell_args.map { |name| { name: name, c_type: 'mrb_value' } }
       saved = rescue_entry_saved_fields(block_irep, rregion)
       nested_pre << emit_rescue_try_body(try_name, rregion, block_irep, d, arg_names, Array.new(arg_names.size),
                                           extra_fields: extra_fields + saved, available_upvars: upvar_regs)
@@ -1107,6 +1139,7 @@ class CodeGen
     @tail_yield_block = saved_tail_yield_block
     @ensure_except_remaps = nil
     @block_fallback_upvars = nil
+    @block_cell_levels = saved_cell_levels
     @block_fallback_active = false
     @blk_param_name = saved_blk_param_name
     @blk_param_level = saved_blk_param_level
@@ -1120,7 +1153,7 @@ class CodeGen
     # block's own parameters, matching the env slots. Bodies without it are
     # unchanged.
     out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
-           "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}" \
+           "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}#{cell_params.map { |p| ", #{p}" }.join}" \
            "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
     out << errinfo_scope_line(block_irep)
     out << emit_register_initializers(block_irep.nregs, arg_names, boxed: boxed_registers(nested_regions))
@@ -1141,7 +1174,7 @@ class CodeGen
     region[:yield_free] = region[:direct_entry] && note_block_yield_free(region[:block_irep])
     if region[:direct_entry]
       out << emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block,
-                                     mixed_rest: mixed_rest)
+                                     mixed_rest: mixed_rest, cells: [cell_args, cells_slot])
       return [fn_name, out]
     end
 
@@ -1178,7 +1211,8 @@ class CodeGen
     if needs_blk
       out << "  mrb_value bc2cpp_blk = mrb_proc_cfunc_env_get(M, #{upvar_regs.size + 1});\n"
     end
-    call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
+    cell_args.each_with_index { |name, i| out << "  mrb_value #{name} = mrb_proc_cfunc_env_get(M, #{cells_slot + i});\n" }
+    call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : []) + cell_args).join(', ')
     call_impl = lambda do |args|
       if exits
         "  Bc2cppVmMark bc2cpp_exit_mark = bc2cpp_vm_mark(M);\n  try {\n    return #{impl_name}(#{args});\n" \
@@ -1280,7 +1314,7 @@ class CodeGen
   end
 
   def emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block,
-                              mixed_rest: false)
+                              mixed_rest: false, cells: [[], 0])
     out = String.new
     out << "static mrb_value #{fn_name}_direct(mrb_state* M, struct REnv* bc2cpp_env, bool bc2cpp_strict, " \
            "mrb_int bc2cpp_argc, const mrb_value* bc2cpp_argv) {\n"
@@ -1293,7 +1327,9 @@ class CodeGen
       vname
     end
     out << "  mrb_value bc2cpp_blk = bc2cpp_env->stack[#{upvar_regs.size + 1}];\n" if needs_blk
-    call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
+    cell_names, cells_slot = cells
+    cell_names.each_with_index { |name, i| out << "  mrb_value #{name} = bc2cpp_env->stack[#{cells_slot + i}];\n" }
+    call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : []) + cell_names).join(', ')
     if rest_block
       out << "  return #{impl_name}(M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv));\n"
     elsif mixed_rest
@@ -1337,7 +1373,7 @@ class CodeGen
   # last env slots.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
                               ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false, upvar_cells: nil,
-                              step_maker: nil, unwind_targets: nil, cells: false)
+                              step_maker: nil, unwind_targets: nil, cells: nil)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -1368,7 +1404,7 @@ class CodeGen
     env_entries << brk_token if brk_token
     # STEP_CLOSURES: the cells Array the captured registers live in, after the tokens (the slots above keep their places, and
     # the readers that index from the end are not moved): the env keeps it, so the pointers above outlive the frame.
-    env_entries << 'bc2cpp_cells_ary' if cells
+    env_entries.concat(cells) if cells
     if direct_entry
       # BLOCK_STEP_UNWIND: the frames a `return` / `break` of the block's step ends (it must name them to the fiber), just
       # before the maker: return target, then break target.
@@ -1441,7 +1477,7 @@ class CodeGen
     end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset,
-                                              cells: region[:boxed] ? true : false,
+                                              cells: region_cells_exprs(region),
                                               ret_token: ret_token, brk_token: brk_token,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
                                               yield_free: region[:yield_free],
