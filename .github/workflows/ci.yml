@@ -660,8 +660,6 @@ jobs:
               "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
               # every device compile runs both SPIR-V emitters (scripts/spirv-emit): the C++ port must match the Ruby
               NFCXX_SPIRV_EMITTER=check NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
-          - name: C++ SPIR-V emitter against the Ruby (both modes, every SYCL test's device IR)
-            run: tools/pathb-spirv-emit/check.sh
           - name: mruby-ninja generic file tasks (rule is refused)
             run: tests/mruby-ninja/run.sh
     name: ${{ matrix.name }}
