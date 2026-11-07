@@ -701,6 +701,9 @@ class Fn
   def sp_of_rhs(x)
     case head_of(x)
     when "bitcast" then sp_of_operand(x[2])
+    # a null is the structurizer's placeholder for a variable that is assigned before any use (a later set): it says
+    # nothing about the space, so it does not make a register non-closure (it did, after inlining, for the kernel closure)
+    when "null" then :unset
     when "offset", "index" then sp_of_operand(x[1])
     when "load", "load.v"
       a = x[2]
