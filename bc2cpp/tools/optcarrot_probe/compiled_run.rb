@@ -44,7 +44,15 @@ extend OptcarrotRegister
 PROBE_SHARDS = ShardOutput.count(ENV.to_h.merge('BC2CPP_SHARDS' => ENV.fetch('BC2CPP_SHARDS', '4')))
 
 def run_bc2cpp(sources, env)
-  command = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *sources]
+  # BC2CPP_MRUBY_RUNNER (opt-in): the bc2cpp executable (host-libs/mruby-bc2cpp-runner) generates the code instead of
+  # CRuby; unset, the command is the same as before.
+  runner = ENV['BC2CPP_MRUBY_RUNNER']
+  launcher = if runner && !runner.empty?
+               [runner, File.join(ROOT, 'host-libs/mruby-bc2cpp-runner/bc2cpp_main.rb')]
+             else
+               [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')]
+             end
+  command = [*launcher, '--annotated', *sources]
   stdout, stderr, status = Open3.capture3(env, *command)
   raise "bc2cpp failed (#{status.exitstatus}):\n#{stderr[-4000..] || stderr}" unless status.success?
 
