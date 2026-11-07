@@ -232,7 +232,7 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
   t=$(trace_start)
-  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} ${NFCXX_CUDA_HOST_SYMBOLS:+"--host-symbols=$NFCXX_CUDA_HOST_SYMBOLS"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  NFCXX_SM=$sm ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} ${NFCXX_CUDA_HOST_SYMBOLS:+"--host-symbols=$NFCXX_CUDA_HOST_SYMBOLS"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   trace_end "$t" "cuda-rewrite (device unit): $base.cu" cuda
   [ -s "$dev.kernels" ] || return 0
   if [ "${NFCXX_CUDA_TARGET:-nvidia}" = amdgpu ]; then

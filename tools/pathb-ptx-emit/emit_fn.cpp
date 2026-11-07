@@ -1009,6 +1009,13 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     emit("membar.sys;");
     return;
   }
+  if (cname == "__nfcxx_pdl_wait" || cname == "__nfcxx_pdl_launch") {
+    // programmatic dependent launch (sm_90+): wait for the prerequisite grid, or let the dependent grid start
+    if (n != 3) throw Refused(cname + " takes no arguments");
+    if (!dest.empty()) throw Refused(cname + " has no value");
+    emit(cname == "__nfcxx_pdl_wait" ? "griddepcontrol.wait;" : "griddepcontrol.launch_dependents;");
+    return;
+  }
   if (cname == "__nfcxx_nanosleep") {
     // nanosleep.u32: suspend the thread for about the given number of nanoseconds (a hint)
     if (n != 4) throw Refused("__nfcxx_nanosleep takes (ns)");

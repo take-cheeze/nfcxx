@@ -5837,13 +5837,17 @@ static int ir_asm_scalar(a_type_ptr t)
    (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...), and the emitter (scripts/pathb-ptx-emit.rb, ptx_asm) lowers it to PTX.
    "ldmatrix." (the matrix loads of mma.cuh: outputs are the "=r" registers, the input is the "l" generic pointer to
    shared memory, which the emitter converts to a shared-state address) is one of them, and so is "movmatrix." (the
-   warp's 8x8 transpose of mma.cuh's ggml_cuda_movmatrix, which needs CUDA 11.8: "=r" out, "r" in).
+   warp's 8x8 transpose of mma.cuh's ggml_cuda_movmatrix, which needs CUDA 11.8: "=r" out, "r" in). "cp.async." (the
+   16-byte global-to-shared copies of cp-async.cuh: "r" shared address, "l" global pointer; "cp.async.wait_all;" has
+   no operands) is one too, and "griddepcontrol." (the programmatic-dependent-launch wait and trigger of sm_90+, the
+   operand-less bodies of cudaGridDependencySynchronize and cudaTriggerProgrammaticLaunchCompletion). Clobbers are not
+   carried: the emitter prints the statements in program order.
    KIND is out (a store-only output, ARG its address), inout ("+" constraint: ARG is its address, read first) or in
    (ARG its value). Operands are 2-, 4- or 8-byte integers, 4- or 8-byte floats, or pointers, in gcc's order (outputs
    first). Returns 1 when it printed the statement. */
 static int ir_asm_ptx(an_asm_entry_ptr ae, int d)
 {
-  static const char *const prefixes[] = { "mma.sync.aligned.", "wmma.", "ldmatrix.", "movmatrix.", "ld.", "st.", "cvta.", "cvt." };
+  static const char *const prefixes[] = { "mma.sync.aligned.", "wmma.", "ldmatrix.", "movmatrix.", "cp.async.", "griddepcontrol.", "ld.", "st.", "cvta.", "cvt." };
   const char *tx;
   size_t n, k, plen = 0;
   int pi;

@@ -126,6 +126,17 @@ inline unsigned __vsub4(unsigned a, unsigned b) {
   for (int i = 0; i < 4; i++) r |= (((a >> (8 * i)) - (b >> (8 * i))) & 0xffu) << (8 * i);
   return r;
 }
+inline unsigned __vsubss4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++) {
+    int x = (int)(signed char)((a >> (8 * i)) & 0xffu), y = (int)(signed char)((b >> (8 * i)) & 0xffu);
+    int d = x - y;
+    if (d > 127) d = 127;
+    if (d < -128) d = -128;
+    r |= ((unsigned)d & 0xffu) << (8 * i);
+  }
+  return r;
+}
 inline unsigned __vcmpne4(unsigned a, unsigned b) {
   unsigned r = 0;
   for (int i = 0; i < 4; i++)
@@ -136,17 +147,6 @@ inline unsigned __vcmpeq4(unsigned a, unsigned b) {
   unsigned r = 0;
   for (int i = 0; i < 4; i++)
     if (((a >> (8 * i)) & 0xffu) == ((b >> (8 * i)) & 0xffu)) r |= 0xffu << (8 * i);
-  return r;
-}
-inline unsigned __vsubss4(unsigned a, unsigned b) {
-  unsigned r = 0;
-  for (int i = 0; i < 4; i++) {
-    int x = (int)(signed char)((a >> (8 * i)) & 0xffu), y = (int)(signed char)((b >> (8 * i)) & 0xffu);
-    int d = x - y;
-    if (d > 127) d = 127;
-    if (d < -128) d = -128;
-    r |= ((unsigned)d & 0xffu) << (8 * i);
-  }
   return r;
 }
 inline int __shfl_xor_sync(unsigned, int v, int, int = 32) { return v; }

@@ -67,6 +67,18 @@ bool FnCtx::call(const Node &x, const std::string &dest, const Ty &dty) {
     emit("mov.u32 " + dest + ", %" + reg->value + ";");
     return true;
   }
+  if (name == "__nfcxx_cvta_generic_to_shared") {
+    // __cvta_generic_to_shared(p): the 32-bit shared-state address of a generic pointer (llama.cpp's cp.async and
+    // ldmatrix staging). The 64-bit cvta is followed by the truncation, as the ldmatrix operand conversion does.
+    if (x.items.size() != 4) throw Refused(name + " takes one pointer");
+    Operand v = operand(at(x, 3));
+    if (v.ty.kind != "ptr") throw Refused(name + " takes a pointer, not " + v.ty.kind);
+    if (!(ty.kind == "int" && type_size(ty) == 4)) throw Refused(name + " returns " + ty.kind + ", not a 32-bit unsigned");
+    std::string g = fresh("rd");
+    emit("cvta.to.shared.u64 " + g + ", " + v.text + ";");
+    emit("cvt.u32.u64 " + dest + ", " + g + ";");
+    return true;
+  }
   if (name == "__nfcxx_float_bits" || name == "__nfcxx_bits_float") {
     // the bit pattern of a value of the other type: one register move (no memory, unlike a union or a pointer cast)
     if (x.items.size() != 4) throw Refused(name + " takes one value");
