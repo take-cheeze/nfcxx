@@ -16,7 +16,7 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
   conf.gem core: 'mruby-compiler'
   %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
      mruby-symbol-ext mruby-compar-ext mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random
-     mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-struct
+     mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy mruby-struct
      mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding].each { |g| conf.gem core: g }
   conf.gem File.join(ROOT, 'host-libs/mruby-require')
   # Marshal (the scan cache) depends on mruby-onig-regexp, which bundles Onigmo, as build_config.rb has it.
