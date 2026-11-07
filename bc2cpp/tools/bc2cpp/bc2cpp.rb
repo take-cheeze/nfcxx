@@ -2557,6 +2557,11 @@ if $PROGRAM_NAME == __FILE__
   warn "== poly table dispatch: #{poly_table_sites.map { |t, n| "#{t} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   poly_tables_code = gen.emit_poly_tables(compiled)
+  # TOP_LEVEL_STATEMENTS takes the same passes as the methods and class units (its owner calls are `_named` until
+  # SymbolCache names them), so its text matches the symbol table that is printed below.
+  top_level_code = OwnerCallDirect.rewrite(top_level_code.gsub('@@SITE@@', 'top level'), owner_call_direct, owner_class_slots,
+                                           program_superclasses)
+  top_level_code = SymbolCache.rewrite(top_level_code, symbol_table)
   # A constant helper is emitted only when the printed text calls it: a body compiled and then discarded
   # registers its helpers too. The site-cache helpers call the scope helpers, so they are counted first. The load
   # code holds no constants, so `used` stays what the compiled entries name.
