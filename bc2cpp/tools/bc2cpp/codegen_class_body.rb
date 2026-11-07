@@ -404,12 +404,12 @@ class CodeGen
     sources
   end
 
-  # Every branch of run start..idx lands inside the run (or on the next statement), and no branch from outside lands inside
-  # past its first instruction.
+  # Every branch of run start..idx lands inside the run (a branch to the next statement would be a goto into another block),
+  # and no branch from outside lands inside past its first instruction.
   def top_level_run_self_contained?(program, start, idx, jump_sources)
     range = start..idx
     inside = range.all? do |i|
-      program.successors_of(i, include_handlers: true).all? { |n| n == i + 1 || range.cover?(n) || n == idx + 1 }
+      program.successors_of(i, include_handlers: true).all? { |n| n == i + 1 || range.cover?(n) }
     end
     return false unless inside
 
