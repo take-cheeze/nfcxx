@@ -136,5 +136,5 @@ were checked through both back ends: the QBE binaries exit with the wasm modules
 ## Next steps
 
 1. `x86_fp80` through the emitter's long-double thunks (`pathb-longdouble.md`), `i128` through its existing lowering.
-2. Wire `tests/llvm-pathb/run.sh` into `.github/workflows/pathb.yml` (it needs `clang-18`).
+2. Wire `tests/llvm-pathb/run.sh` into `.github/workflows/ci.yml` (it needs `clang-18`).
 3. Validate the translated programs of a larger corpus, not only the cases.

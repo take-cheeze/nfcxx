@@ -168,7 +168,7 @@ the C or C++ library headers (the page has EDG's own headers only: the error say
 trap (no `c++filt`). With "auto" (off at first on a static host) an edit compiles as on the live server. Without the
 tools, any other source gets a message that it needs the local server.
 
-The workflow builds the harness and the mruby tool as `pathb.yml` does, and the in-browser compiler (Emscripten,
+The workflow builds the harness and the mruby tool as `ci.yml` does, and the in-browser compiler (Emscripten,
 `PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh`, `scripts/setup-mruby-wasm.sh`, each cached), checks it
 (`tests/pathb-wasm-frontend/run.sh`, `test-inbrowser.cjs`), runs the static build with `--require-inbrowser` (on pull
 requests too, without deploying), and deploys from `main`. The one-time repository setting is Settings > Pages > Source: GitHub
