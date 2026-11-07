@@ -85,6 +85,10 @@ absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 # tests/sycl/groups.cpp) gives wrong float group reductions on lavapipe only; RADV and NVIDIA run it correctly, and the
 # unroll is an optimization, so skipping it cannot change results (docs/notes/pathb-ir-passes.md).
 if [ "$backend" = vulkan ] && [ -z "${NFCXX_IR_OPT+x}" ]; then ir_opt=inline,sroa,unroll-cap-in=nfcxx_sycl_entry,unroll-limit=12
+elif [ "$backend" = webgpu ] && [ -z "${NFCXX_IR_OPT+x}" ]; then ir_opt=sroa   # no inliner for WebGPU: it hands a lambda
+# closure to the callee as a private copy, and the WGSL shader then sees the captured values as non-uniform (a barrier
+# in a loop bounded by one is refused; tests/sycl/barvar.cpp). Scalar replacement alone passes. NFCXX_IR_OPT=inline,sroa
+# restores the inliner.
 else ir_opt=${NFCXX_IR_OPT-inline,sroa}; fi
 if [ "$ir_opt" != off ] && [ -n "$ir_opt" ]; then
   irpasses=(); for p in ${ir_opt//,/ }; do irpasses+=("--$p"); done
