@@ -69,7 +69,7 @@ static bool bc2cpp_block_call(mrb_state* M,
     }
   }
   bc2cpp_tail_yield.env = env;
-  *value = mrb_yield_argv(M, blk, argc, argv);
+  *value = bc2cpp_yield_foreign(M, blk, argc, argv);
   bc2cpp_tail_yield.env = nullptr;
   if (bc2cpp_tail_yield.pending) {
     bc2cpp_tail_yield.pending = false;

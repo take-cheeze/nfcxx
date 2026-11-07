@@ -100,7 +100,7 @@ module CollectDirect
         mrb_value v = ARY_PTR(mrb_ary_ptr(self))[i];
         // The block gets v as a C pointer, not on the VM stack, and may unlink it from self by name (ELEMENT_READ_ROOTS).
         bc2cpp_keep(M, v);
-        mrb_value r = entry ? entry(M, env, false, 1, &v) : bc2cpp_yield_kept(M, blk, 1, &v);
+        mrb_value r = entry ? entry(M, env, false, 1, &v) : bc2cpp_yield_foreign(M, blk, 1, &v);
         struct RArray* a = mrb_ary_ptr(acc);
         if (!ARY_EMBED_P(a) && a->as.heap.len < a->as.heap.aux.capa) {
           a->as.heap.ptr[a->as.heap.len++] = r;
@@ -145,7 +145,7 @@ module CollectDirect
       int ai = mrb_gc_arena_save(M);
       for (mrb_int i = a; excl ? i < z : i <= z; ++i) {
         mrb_value v = FIXABLE(i) ? mrb_fixnum_value(i) : mrb_int_value(M, i);
-        mrb_value r = entry ? entry(M, env, false, 1, &v) : bc2cpp_yield_kept(M, blk, 1, &v);
+        mrb_value r = entry ? entry(M, env, false, 1, &v) : bc2cpp_yield_foreign(M, blk, 1, &v);
         struct RArray* ary = mrb_ary_ptr(acc);
         if (!ARY_EMBED_P(ary) && ary->as.heap.len < ary->as.heap.aux.capa) {
           ary->as.heap.ptr[ary->as.heap.len++] = r;
@@ -166,7 +166,7 @@ module CollectDirect
       int ai = mrb_gc_arena_save(M);
       for (mrb_int i = a; excl ? i < z : i <= z; ++i) {
         mrb_value v = FIXABLE(i) ? mrb_fixnum_value(i) : mrb_int_value(M, i);
-        if (entry) entry(M, env, false, 1, &v); else mrb_yield_argv(M, blk, 1, &v);
+        if (entry) entry(M, env, false, 1, &v); else bc2cpp_yield_foreign(M, blk, 1, &v);
         mrb_gc_arena_restore(M, ai);
       }
       return self;

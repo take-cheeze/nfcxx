@@ -1801,7 +1801,7 @@ class CodeGen
       if (!mrb_test(bc2cpp_resume_frame_block_call(M, frame))) return bc2cpp_resumable_yield_from_c(M, frame);
       mrb_value args = bc2cpp_resume_frame_value(M, frame);
       mrb_value blk = bc2cpp_resume_frame_block(M, frame);
-      return mrb_yield_argv(M, blk, RARRAY_LEN(args), RARRAY_PTR(args));
+      return bc2cpp_yield_foreign(M, blk, RARRAY_LEN(args), RARRAY_PTR(args));
     }
   CPP
 end

@@ -1393,7 +1393,7 @@ class CodeGen
       env_entries << "mrb_int_value(M, #{BLOCK_STEP_MAGIC | 4 | 8})"
     end
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
-    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
+    out << "    struct RProc* #{var} = bc2cpp_heap_proc(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
            "#{env_entries.size}, bc2cpp_blk_env_#{addr});\n"
     [var, out]
   end
@@ -1582,15 +1582,15 @@ class CodeGen
   # remaining code still dispatches (the by-name else), when it runs.
   def stack_block_glue(region, rproc_var, ctor, direct)
     addr = region[:block_addr]
-    heap_line = ctor[/^ *struct RProc\* #{rproc_var} = (mrb_proc_new_cfunc_with_env\(M, \w+, (\d+), bc2cpp_blk_env_#{addr}\));\n/]
+    heap_line = ctor[/^ *struct RProc\* #{rproc_var} = bc2cpp_heap_proc\(M, (\w+), (\d+), bc2cpp_blk_env_#{addr}\);\n/]
     return [ctor, direct] unless heap_line
 
-    alloc = Regexp.last_match(1)
+    fn = Regexp.last_match(1)
     len = Regexp.last_match(2)
     heap_ref = "mrb_obj_value(#{rproc_var})"
     lines = "    Bc2cppStackBlock bc2cpp_blk_stack_#{addr}(M, #{len}, bc2cpp_blk_env_#{addr});\n"
     if direct.include?(heap_ref)
-      lines << "    auto bc2cpp_blk_heap_#{addr} = [&]() { return mrb_obj_value(#{alloc}); };\n"
+      lines << "    Bc2cppHeapBlock bc2cpp_blk_heap_#{addr}{M, #{fn}, #{len}, bc2cpp_blk_env_#{addr}};\n"
       direct = direct.gsub(heap_ref, "bc2cpp_blk_heap_#{addr}()")
     end
     [ctor.sub(heap_line, lines), direct]

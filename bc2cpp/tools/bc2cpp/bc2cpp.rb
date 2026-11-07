@@ -1972,6 +1972,18 @@ if $PROGRAM_NAME == __FILE__
       mrb_get_args(M, "*", &argv, &argc);
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
     }
+    // The one place a compiled block site makes a heap RProc (an escaping block, or a by-name else arm).
+    // Bc2cppHeapBlock is the lazy form: a stack block's else arm builds it only when it runs.
+    static inline struct RProc* bc2cpp_heap_proc(mrb_state* M, mrb_func_t fn, mrb_int len, const mrb_value* env) {
+      return mrb_proc_new_cfunc_with_env(M, fn, len, env);
+    }
+    struct Bc2cppHeapBlock {
+      mrb_state* M;
+      mrb_func_t fn;
+      mrb_int len;
+      const mrb_value* env;
+      mrb_value operator()() const { return mrb_obj_value(bc2cpp_heap_proc(M, fn, len, env)); }
+    };
     // STACK_BLOCK (docs/bc2cpp-stack-blocks.md): the RProc and REnv of a direct-entry block passed only to a
     // callee that just calls it, laid out as mrb_proc_new_cfunc_with_env builds them but in the caller's frame,
     // over the caller's own env array. Red, so the GC never marks, gray-lists or sweeps them.
@@ -2037,7 +2049,7 @@ if $PROGRAM_NAME == __FILE__
       const struct RProc* p = mrb_proc_ptr(blk);
       if (p->gc_color != MRB_GC_RED) return blk;
       const struct REnv* e = MRB_PROC_ENV(p);
-      struct RProc* copy = mrb_proc_new_cfunc_with_env(M, p->body.func, MRB_ENV_LEN(e), e->stack);
+      struct RProc* copy = bc2cpp_heap_proc(M, p->body.func, MRB_ENV_LEN(e), e->stack);
       if (MRB_PROC_STRICT_P(p)) copy->flags |= MRB_PROC_STRICT;
       mrb_value copy_v = mrb_obj_value(copy);
       struct REnv* ce = MRB_PROC_ENV(copy);
@@ -2152,15 +2164,13 @@ if $PROGRAM_NAME == __FILE__
       }
       mrb_hash_set(M, roots, mrb_int_value(M, (mrb_int)((uintptr_t)slot >> 2)), v);
     }
-    // mrb_yield_argv leaves its result in no root (no arena slot, past the live stack): protect it as mrb_funcall does.
-    static inline mrb_value bc2cpp_yield_kept(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
+    // The one VM entry for a proc that is not a compiled block (a native cfunc proc, a Symbol#to_proc, an irep proc).
+    // mrb_yield_argv leaves its result in no root (no arena slot, past the live stack): restore the arena and root it.
+    static inline mrb_value bc2cpp_yield_foreign(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
       int ai = mrb_gc_arena_save(M);
-      mrb_value result = mrb_yield_argv(M, blk, argc, argv);
-      mrb_gc_arena_restore(M, ai);
-      mrb_gc_protect(M, result);
-      return result;
+      return bc2cpp_arena_keep(M, ai, mrb_yield_argv(M, blk, argc, argv));
     }
-    // mrb_yield_argv, minus the frame when `blk` is a non-strict block with a direct entry. The
+    // bc2cpp_yield_foreign, minus the frame when `blk` is a non-strict block with a direct entry. The
     // arena is restored and the result protected as mrb_yield_with_class does.
     static inline mrb_value bc2cpp_yield_argv(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(blk) == MRB_TT_PROC) {
@@ -2171,7 +2181,7 @@ if $PROGRAM_NAME == __FILE__
           return bc2cpp_arena_keep(M, ai, bc2cpp_block_entry(e)(M, e, false, argc, argv));
         }
       }
-      return bc2cpp_yield_kept(M, blk, argc, argv);
+      return bc2cpp_yield_foreign(M, blk, argc, argv);
     }
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);

@@ -56,6 +56,13 @@ SRC = <<~'RUBY'
     # frame-local block the caller passes must be copied to the heap there (it must not outlive its frame).
     def repeat(n); n.times { |k| yield k }; self; end
     def use_repeat(a); r = []; repeat(a.size) { |k| r << k }; GC.start; r; end
+    # A yielder with a `rescue` clause only calls its block: the frame-local block is safe there too.
+    def guarded(default); yield; rescue StandardError => e; [default, e.message]; end
+    def use_guarded(a); guarded(:none) { a.map { |x| x.to_i + 1 } }; end
+    def use_guarded_raise(a); guarded(:none) { raise ArgumentError, "bad #{a.size}" if a.size > 1; a.size }; end
+    # A rescue that keeps the block in an ivar is no plain yielder.
+    def guarded_keep(&b); b.call; rescue StandardError; @kept = b; :kept; end
+    def use_guarded_keep(a); guarded_keep { raise "x" if a.size > 1; a.size }; end
   end
 
   class SbColl
@@ -87,9 +94,9 @@ check.call('sum: the Array arm runs the compiled Array#each with the frame-local
              sum.match?(/Array_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
 check.call('sum: the Hash arm takes it too, Range#each (which passes its block on) and the else build the heap RProc ' \
            'only when they run',
-           sum.include?('auto bc2cpp_blk_heap_') && sum.match?(/Hash_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
+           sum.include?('Bc2cppHeapBlock bc2cpp_blk_heap_') && sum.match?(/Hash_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
              sum.match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_heap_\d+\(\)\)/) &&
-             !sum.match?(/struct RProc\* bc2cpp_blk_proc_\d+ = mrb_proc_new_cfunc_with_env/))
+             !sum.match?(/struct RProc\* bc2cpp_blk_proc_\d+ = bc2cpp_heap_proc/))
 check.call('use_gen: a direct call to a compiled program method that only yields its block takes the frame-local block',
            code_of(code, 'use_gen').match?(/SbFx_gen_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
 check.call('use_keep: a callee that stores its block keeps the heap RProc',
@@ -103,6 +110,10 @@ check.call('use_repeat: the frame-local block reaches repeat, and the heap env o
            code_of(code, 'use_repeat').match?(/SbFx_repeat_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
              code_of(code, 'repeat').include?('bc2cpp_env_block(M, bc2cpp_blk)') &&
              !code_of(code, 'repeat').match?(/\{ self, bc2cpp_blk,/))
+check.call('use_guarded: a callee that yields inside a rescue takes the frame-local block',
+           code_of(code, 'use_guarded').match?(/SbFx_guarded_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
+check.call('use_guarded_keep: a rescue that stores the block keeps the heap RProc',
+           !code_of(code, 'use_guarded_keep').include?('Bc2cppStackBlock'))
 off, = generate_world('BC2CPP_STACK_BLOCKS' => '0')
 check.call('BC2CPP_STACK_BLOCKS=0: every block is built on the heap',
            !off.include?('Bc2cppStackBlock bc2cpp_blk_stack_') && !off.include?('bc2cpp_blk_heap_'))
@@ -120,13 +131,13 @@ DRIVER = <<~'RUBY'
   coll = SbColl.new(1, 2, 3)
   inputs = [[1, 2, 3], [], [5], (1..30).to_a, { a: 1, b: 2 }, 1..4, coll, nil]
   inputs.each_with_index do |a, i|
-    %i[sum strs churn idx boom nested use_gen use_keep use_stash use_repeat].each { |m| show.call("#{m}/#{i}") { fx.send(m, a) } }
+    %i[sum strs churn idx boom nested use_gen use_keep use_stash use_repeat use_guarded use_guarded_raise use_guarded_keep].each { |m| show.call("#{m}/#{i}") { fx.send(m, a) } }
     show.call("fwd/#{i}") { r = []; fx.fwd(a) { |x| r << x }; r }
   end
   GC.start
   show.call('gc stress') do
     GC.stress = true if GC.respond_to?(:stress=)
-    r = [fx.sum([1, 2, 3]), fx.strs(%w[x y]), fx.idx([:p, :q]), fx.boom([1, 2, 3]), fx.use_gen([4, 5]), fx.use_keep([6]), fx.use_stash([7]), fx.use_repeat([8, 9])]
+    r = [fx.sum([1, 2, 3]), fx.strs(%w[x y]), fx.idx([:p, :q]), fx.boom([1, 2, 3]), fx.use_gen([4, 5]), fx.use_keep([6]), fx.use_stash([7]), fx.use_repeat([8, 9]), fx.use_guarded([1, 2]), fx.use_guarded_raise([1, 2])]
     GC.stress = false if GC.respond_to?(:stress=)
     r
   end

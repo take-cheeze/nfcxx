@@ -26,7 +26,10 @@ PLAIN = {
   'calls it with a splat from a nested block' => 'def m(&b); ary = []; [[1]].each { |*v| ary.push(b.call(*v)) }; ary; end',
   'calls it with a splat and keywords' => 'def m(&b); b.call(*[1], k: 2); end',
   'tests it' => 'def m(&b); return :none unless b; b.call; end',
-  'builds a Hash of other values' => 'def m(&b); h = { a: 1 }; b.call(h); end'
+  'builds a Hash of other values' => 'def m(&b); h = { a: 1 }; b.call(h); end',
+  # RESCUE reads the exception and the class it is tested against: no register is passed on.
+  'yields inside a rescue' => 'def m(d); yield; rescue StandardError => e; d; end',
+  'calls it inside a rescue with two classes' => 'def m(d, &b); b.call; rescue ArgumentError, TypeError; d; end'
 }.freeze
 
 ESCAPING = {
@@ -43,7 +46,9 @@ ESCAPING = {
   'an interpolated String' => 'def m(&b); "#{b}"; end',
   'a splatted value' => 'def m(&b); x = *b; x; end',
   'a nested block capture passed on' => 'def m(o, &b); [1].each { |v| o.f(b) }; end',
-  'super' => 'def m(&b); super; end'
+  'super' => 'def m(&b); super; end',
+  'a rescue that returns it' => 'def m(&b); yield; rescue StandardError; b; end',
+  'a rescue that stores it' => 'def m(&b); b.call; rescue StandardError; @kept = b; end'
 }.freeze
 
 def method_why(ireps, root, name)
