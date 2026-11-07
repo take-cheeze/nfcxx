@@ -385,7 +385,11 @@ class CodeGen
         lines << "  L#{source.addr}:;\n" if targets.include?(source.addr)
         lines << compile_insn(source, root_irep, owner_def, index)
       end
-      body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  }\n"
+      # A statement with an opcode the translator does not handle (a block, a splat send) is left to the VM like any method
+      # with such an opcode (SKIP_UNSUPPORTED); its #error would otherwise fail the whole translation unit.
+      unless lines.include?('#error')
+        body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  }\n"
+      end
       start = idx + 1
     end
     return '' if body.empty?
