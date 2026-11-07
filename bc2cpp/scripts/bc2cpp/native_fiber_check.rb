@@ -39,7 +39,16 @@ EXTRAS = [
   ['root fiber inside a fiber', 'NativeFiberProbe.new.root_in_fiber'],
   ['root fiber transfer chain', 'NativeFiberProbe.new.root_chain'],
   ['root fiber errors', 'NativeFiberProbe.new.root_errors'],
-  ['fiber raise', 'NativeFiberProbe.new.raise_scenario']
+  ['fiber raise', 'NativeFiberProbe.new.raise_scenario'],
+  ['tap then yield_self', 'drain(NativeFiberProbe.new.tap_fiber)'],
+  ['fiber from a proc variable', 'drain(NativeFiberProbe.new.proc_variable_fiber)'],
+  ['fiber through send', 'drain(NativeFiberProbe.new.send_fiber)'],
+  ['fiber through public_send', 'drain(NativeFiberProbe.new.public_send_fiber)'],
+  ['enumerator generator next', 'drain(NativeFiberProbe.new.generator_fiber)'],
+  ['enumerator produce next', 'drain(NativeFiberProbe.new.produce_fiber)'],
+  ['yielder chain next', 'drain(NativeFiberProbe.new.yielder_fiber)'],
+  ['chunk next', 'drain(NativeFiberProbe.new.chunk_fiber)'],
+  ['lambda call', 'drain(NativeFiberProbe.new.lambda_fiber)']
 ].freeze
 
 # Scenarios mruby-fiber cannot run (it has no Fiber#raise): the expected line is what CRuby prints for the same program.
@@ -177,6 +186,73 @@ PROBE = <<~RUBY
       [a, b, c, err, g.alive?, events]
     end
 
+    # Kernel#tap/then/yield_self (mruby-object-ext, joined to the world below) run their block as a step.
+    def tap_fiber
+      Fiber.new do
+        [1.tap { Fiber.yield :in_tap }, 2.then { |x| Fiber.yield [:in_then, x]; x + 1 },
+         3.yield_self { |x| Fiber.yield [:in_ys, x]; x * 2 }]
+      end
+    end
+
+    # A Fiber made from a proc variable, or through send/public_send, is a C++ Fiber too.
+    def proc_variable_fiber
+      body = proc { Fiber.yield 1; 2 }
+      Fiber.new(&body)
+    end
+
+    def send_fiber
+      Fiber.send(:new) { Fiber.yield 1; 2 }
+    end
+
+    def public_send_fiber
+      Fiber.public_send(:new) { Fiber.yield 1; 2 }
+    end
+
+    # Enumerator.new generators, Enumerator.produce and Enumerable#chunk driven by next, inside a Fiber.
+    def generator_fiber
+      Fiber.new do
+        e = Enumerator.new { |y| y << 1; y << 2 }
+        [e.next, Fiber.yield(:mid), e.next, (e.next rescue :stop)]
+      end
+    end
+
+    def produce_fiber
+      Fiber.new do
+        e = Enumerator.produce(1) { |x| x * 2 }
+        Fiber.yield e.next
+        [e.next, e.next, e.peek]
+      end
+    end
+
+    def yielder_fiber
+      Fiber.new do
+        e = Enumerator.new { |y| y << :a << :b; y.yield :c, :d }
+        [e.next, Fiber.yield(:mid), e.next, e.next]
+      end
+    end
+
+    def chunk_fiber
+      Fiber.new do
+        e = [1, 2, 4].chunk { |x| x.even? }
+        Fiber.yield e.next
+        e.next
+      end
+    end
+
+    # lambda { }.call suspends like a block call when the arity fits; a miss raises as Proc#call does.
+    def lambda_fiber
+      Fiber.new do
+        a = lambda { Fiber.yield :in_lambda; 7 }.call
+        b = lambda { |x, y| Fiber.yield [x, y]; x + y }.call(1, 2)
+        c = begin
+          lambda { |x| Fiber.yield x; x }.call
+        rescue ArgumentError => e
+          e.message
+        end
+        [a, b, c]
+      end
+    end
+
     def dead_fiber_scenario
       f = Fiber.new { :only }
       first = f.resume
@@ -207,8 +283,10 @@ nofiber = Bc2cppFixtureRuntime.nofiber_or_build
 # withdraw the kind_of block arms of every name it defines).
 core_gems = BC2CPP_CANONICAL_CORE_GEMS - Bc2cppFixtureRuntime::NOFIBER_GEMS - %w[mruby-stringio]
 lazy_path = '3rd/mruby/mrbgems/mruby-enum-lazy/mrblib/lazy.rb'
-code = suite.generate(PROBE, OWNERS + %w[Enumerator], guards: true, core_gems: core_gems,
-                                                       extra: [[lazy_path, File.read(File.join(Bc2cppFixtureRuntime::ROOT, lazy_path))]])
+# mruby-object-ext (Kernel#tap/then/yield_self) joins the same way: the closed build has no such gem.
+object_path = '3rd/mruby/mrbgems/mruby-object-ext/mrblib/object.rb'
+extras = [lazy_path, object_path].map { |path| [path, File.read(File.join(Bc2cppFixtureRuntime::ROOT, path))] }
+code = suite.generate(PROBE, OWNERS + %w[Enumerator Kernel], guards: true, core_gems: core_gems, extra: extras)
 suite.check('the program compiles and registers a Fiber body step', code.include?('FIBER_BODY_STEP') || code.include?('bc2cpp_fiber_new_'))
 suite.check('no generated code loads bytecode or Ruby source for a Fiber', !code.match?(/mrb_load_(?:irep|string)\(/))
 

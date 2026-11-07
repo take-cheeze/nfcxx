@@ -294,6 +294,7 @@ class CodeGen
       return
     end
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
+    forget_layout_probe_code
     compute_fixnum_return_names
     # ARRAY_RETURN_PROOF: once, after @class_layout and @ivar_layout are final. It
     # neither reads nor feeds the Fixnum sets, so it is outside the alternation.
@@ -319,6 +320,12 @@ class CodeGen
     # compile probes that ran with weaker facts.
     reset_numeric_flow!
     compute_numeric_facts
+  end
+
+  # The probes of drop_unsafe_embeddings compile methods against the raw layout, and a block step (or a resumable variant) is
+  # compiled once and kept: its text would read a slot as the type the final layout no longer gives it, or a struct it dropped.
+  def forget_layout_probe_code
+    @block_steps = @block_step_emitted = @block_step_names = @rsm_variants = nil
   end
 
   def const_lookup_helper_used?

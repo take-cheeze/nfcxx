@@ -16,6 +16,10 @@
 #include <unordered_map>
 #include <utility>
 
+// bc2cpp_protect and bc2cpp_root are the generator preamble's
+// (tools/bc2cpp/bc2cpp.rb); a standalone include defines them first
+// (scripts/bc2cpp/cxx_fiber_check.rb).
+//
 // The fiber runtime is in this translation unit (bc2cpp_owner_call's guard asks
 // bc2cpp_fiber_definer_p).
 #define BC2CPP_FIBER_RUNTIME 1
@@ -596,7 +600,7 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   mrb_value result = error ? *raise_exc : mrb_nil_value();
   for (;;) {
     if (!error)
-      result = mrb_protect_error(M, bc2cpp_fiber_run, &args, &error);
+      result = bc2cpp_protect(M, bc2cpp_fiber_run, &args, &error);
     if (!error)
       break;
     // An exception: the nearest frame with a handler for it takes it, and the
@@ -659,7 +663,7 @@ static mrb_value bc2cpp_run_to_completion(mrb_state* M,
                                           mrb_value first) {
   mrb_value fiber = bc2cpp_fiber_new(M, root);
   int arena = mrb_gc_arena_save(M);
-  mrb_gc_protect(M, fiber);
+  bc2cpp_root(M, fiber);
   mrb_value result = bc2cpp_fiber_resume(M, fiber, first);
   if (bc2cpp_fiber_alive_p(M, fiber)) {
     bc2cpp_fiber_clear(M, bc2cpp_fiber_ptr(M, fiber));
@@ -677,7 +681,7 @@ static mrb_value bc2cpp_run_callee_from_c(mrb_state* M,
                                           Bc2cppFiberFrame* callee) {
   mrb_value fiber = bc2cpp_fiber_new(M, callee);
   int arena = mrb_gc_arena_save(M);
-  mrb_gc_protect(M, fiber);
+  bc2cpp_root(M, fiber);
   mrb_value result = bc2cpp_fiber_resume(M, fiber, mrb_nil_value());
   while (bc2cpp_fiber_alive_p(M, fiber)) {
     mrb_value resumed = mrb_funcall(M, mrb_obj_value(mrb_class_get(M, "Fiber")),
@@ -800,9 +804,11 @@ static mrb_value bc2cpp_fiber_m_raise(mrb_state* M, mrb_value self) {
 // a definer. So do the Fiber.yield definers (see bc2cpp_fiber_define).
 static mrb_value bc2cpp_fiber_s_yield(mrb_state* M, mrb_value self);
 static mrb_value bc2cpp_fiber_s_yield_wrapped(mrb_state* M, mrb_value self);
+static mrb_value bc2cpp_fiber_s_new(mrb_state* M, mrb_value self);
 [[maybe_unused]] static bool bc2cpp_fiber_definer_p(const mrb_method_t& m) {
   return MRB_METHOD_CFUNC_P(m) &&
          (MRB_METHOD_CFUNC(m) == bc2cpp_fiber_m_raise ||
+          MRB_METHOD_CFUNC(m) == bc2cpp_fiber_s_new ||
           MRB_METHOD_CFUNC(m) == bc2cpp_fiber_s_yield ||
           MRB_METHOD_CFUNC(m) == bc2cpp_fiber_s_yield_wrapped);
 }
@@ -843,6 +849,33 @@ static mrb_value bc2cpp_fiber_s_yield_wrapped(mrb_state* M, mrb_value self) {
   return bc2cpp_fiber_orig_yield(M, self);
 }
 
+static mrb_value bc2cpp_fiber_new_body(mrb_state* M,
+                                       mrb_value proc,
+                                       const char* id);
+
+// Fiber.new(&blk) outside a literal-block site (a proc variable, `send(:new)`):
+// a block with a step becomes a C++ Fiber (bc2cpp_fiber_step_new, set by
+// bc2cpp_fiber_methods.hxx when it is part of the build); anything else goes
+// to the Fiber.new it replaced, or runs as a body that cannot suspend.
+inline mrb_func_t bc2cpp_fiber_orig_new = nullptr;
+inline mrb_value (*bc2cpp_fiber_step_new)(mrb_state*, mrb_value) = nullptr;
+static mrb_value bc2cpp_fiber_s_new(mrb_state* M, mrb_value self) {
+  mrb_value blk;
+  mrb_get_args(M, "&", &blk);
+  if (mrb_class_ptr(self) == mrb_class_get(M, "Fiber") && mrb_proc_p(blk)) {
+    mrb_value made = bc2cpp_fiber_step_new ? bc2cpp_fiber_step_new(M, blk)
+                                           : mrb_undef_value();
+    if (!mrb_undef_p(made))
+      return made;
+    if (!bc2cpp_fiber_orig_new)
+      return bc2cpp_fiber_new_body(M, blk, nullptr);
+  }
+  if (!bc2cpp_fiber_orig_new)
+    mrb_raise(M, mrb_class_get(M, "ArgumentError"),
+              "tried to create Proc object without a block");
+  return bc2cpp_fiber_orig_new(M, self);
+}
+
 static void bc2cpp_fiber_define(mrb_state* M) {
   struct RClass* klass = mrb_define_class(M, "Fiber", M->object_class);
   mrb_func_t resume = bc2cpp_fiber_cfunc(M, klass, "resume");
@@ -863,6 +896,8 @@ static void bc2cpp_fiber_define(mrb_state* M) {
   bc2cpp_fiber_orig_alive_p = bc2cpp_fiber_cfunc(M, klass, "alive?");
   bc2cpp_fiber_orig_transfer = bc2cpp_fiber_cfunc(M, klass, "transfer");
   bc2cpp_fiber_orig_current = bc2cpp_fiber_cfunc(M, meta, "current");
+  bc2cpp_fiber_orig_new = bc2cpp_fiber_cfunc(M, meta, "new");
+  mrb_define_class_method(M, klass, "new", bc2cpp_fiber_s_new, MRB_ARGS_ANY());
   mrb_define_class_method(M, klass, "current", bc2cpp_fiber_s_current,
                           MRB_ARGS_NONE());
   mrb_define_method(M, klass, "resume", bc2cpp_fiber_m_resume, MRB_ARGS_ANY());

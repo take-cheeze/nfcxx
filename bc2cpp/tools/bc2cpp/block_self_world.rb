@@ -245,11 +245,12 @@ module BlockSelfWorld
 
     # `new`/`define` on a receiver that may be a class factory: anything but a constant naming a class known not to
     # derive from Class/Module/Struct/Data (by its declaration or sig/bc2cpp/declarations.rbs#core_hierarchy) and never assigned.
-    def factory_send?(irep, idx, insn)
+    # +name+ is the factory name: the send's own, or the one a computed send (`Fiber.send(:new) { }`) forwards to.
+    def factory_send?(irep, idx, insn, name = insn.sym)
       # Only SEND-family ops reach here (scan_irep dispatches on SENDS), so SELF_SEND is the SS-prefixed ones.
       return true if BytecodeIR::Ops::SELF_SEND.include?(insn.op)
 
-      factories = FACTORY_SENDS.fetch(insn.sym)
+      factories = FACTORY_SENDS.fetch(name)
       const = IrBlockOperands.constant_name(irep, idx, insn.reg)
       return true unless const
 
@@ -338,7 +339,7 @@ module BlockSelfWorld
       return [:rebinder, "#{insn.sym} with a name it cannot prove"] if names == :unknown
       return [:rebinder, "#{insn.sym} with a name it cannot prove (#{(names & INDIRECT_NAMES).to_a.sort.join(', ')})"] if names.intersect?(INDIRECT_NAMES)
 
-      hit = names.select { |n| REBIND_NAMES.include?(n) || FACTORY_SENDS.key?(n) }
+      hit = names.select { |n| REBIND_NAMES.include?(n) || (FACTORY_SENDS.key?(n) && factory_send?(irep, idx, insn, n)) }
       hit.empty? ? [:plain] : [:rebinder, "#{insn.sym}(:#{hit.sort.join(', :')})"]
     end
 

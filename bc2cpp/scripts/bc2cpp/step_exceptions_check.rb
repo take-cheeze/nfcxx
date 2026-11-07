@@ -396,8 +396,7 @@ SRC = <<~'RUBY'
       Fiber.new { loop_jumps }
     end
 
-    # `next` out of a begin/ensure region of a block step (a `break` or `return` there keeps the block, and so the method, in the
-    # interpreter: the plain compile of a block does not take a break out of an ensure region)
+    # `next` out of a begin/ensure region of a block step
     def block_jumps
       Fiber.new do
         r = each3 do |x|
@@ -412,6 +411,65 @@ SRC = <<~'RUBY'
         end
         [r.equal?(self), :after]
       end
+    end
+
+    # `break` out of a block step through two ensure regions, and through an ensure with a rescue clause.
+    def break_two_ensures
+      Fiber.new do
+        r = each3 do |x|
+          begin
+            begin
+              Fiber.yield x
+              break [x, :broke]
+            ensure
+              @events << [:inner, x]
+            end
+          ensure
+            @events << [:outer, x]
+          end
+        end
+        [r, :after]
+      end
+    end
+
+    def break_ensure_rescue
+      Fiber.new do
+        r = each3 do |x|
+          begin
+            Fiber.yield x
+            break [x, :broke]
+          rescue ArgumentError
+            :unreached
+          ensure
+            @events << [:ens, x]
+          end
+        end
+        Fiber.yield r
+        :end
+      end
+    end
+
+    # A callee that suspends before it runs its block, given a block that does not suspend (and, with a keyword, one that breaks).
+    def suspend_first
+      Fiber.yield :before
+      yield 5
+    end
+
+    def suspend_kw(n, step: 1, &blk)
+      Fiber.yield [:kw, step]
+      blk.call(n)
+    end
+
+    def plain_block_fiber
+      Fiber.new { [suspend_first { |x| x + 1 }, :after] }
+    end
+
+    def plain_break_fiber
+      Fiber.new { [suspend_first { |x| break x * 2 }, :after] }
+    end
+
+    def kw_break_fiber
+      Fiber.new { [suspend_kw(1, step: 2) { |x| break x }, :after] }
     end
 
     # Fiber#raise: delivered at the Fiber.yield the fiber is suspended at.
@@ -589,7 +647,7 @@ RUBY
 OWNERS = %w[StepExc PlainEns].freeze
 code = suite.generate(SRC, OWNERS)
 suite.check('nested_ensure compiles as a step', code.include?('static mrb_value StepExc_nested_ensure__blk') && code.include?('_step(mrb_state* M'))
-suite.check('a step has a handler loop', code.include?('mrb_protect_error(M, bc2cpp_protect_tramp'))
+suite.check('a step has a handler loop', code.include?('bc2cpp_protect_call(M, bc2cpp_body'))
 %w[break_out return_out raise_in_ensure next_out].each do |name|
   suite.check("PlainEns##{name} compiles", !suite.err.include?("PlainEns##{name}:"))
 end
@@ -654,6 +712,16 @@ DRIVER = Bc2cppStepCheck::SHOW + Bc2cppStepCheck::DRAIN + <<~'RUBY'
   show('loop next break through ensure') { [drain(o.loop_jumps_fiber), o.events] }
   o = StepExc.new
   show('block next through ensure') { [drain(o.block_jumps), o.events] }
+  o = StepExc.new
+  show('break through two ensures') { [drain(o.break_two_ensures), o.events] }
+  o = StepExc.new
+  show('break through ensure and rescue') { [drain(o.break_ensure_rescue), o.events] }
+  o = StepExc.new
+  show('plain block of a callee that suspends first') { drain(o.plain_block_fiber) }
+  o = StepExc.new
+  show('breaking block of a callee that suspends first') { drain(o.plain_break_fiber) }
+  o = StepExc.new
+  show('breaking block of a keyword call that suspends first') { drain(o.kw_break_fiber) }
   o = PlainEns.new
   show('plain break through ensure') { o.break_out }
   show('plain return through ensure') { [o.return_out, o.events] }
@@ -766,6 +834,11 @@ suite.behaviour(DRIVER, same: false, diff: false) do |interpreted_all, compiled_
                                '[:outer, 2], [:ens_bare, true], :after_bare, [:ens_bare, false]]]',
     'loop next break through ensure' => '[[1, 2, 3, [[2], 3]], [[:ens, 1], [:ens, 2], [:ens, 3]]]',
     'block next through ensure' => '[[1, 2, 3, [true, :after]], [1, 2, 3]]',
+    'break through two ensures' => '[[1, [[1, :broke], :after]], [[:inner, 1], [:outer, 1]]]',
+    'break through ensure and rescue' => '[[1, [1, :broke], :end], [[:ens, 1]]]',
+    'plain block of a callee that suspends first' => '[:before, [6, :after]]',
+    'breaking block of a callee that suspends first' => '[:before, [10, :after]]',
+    'breaking block of a keyword call that suspends first' => '[[:kw, 2], [1, :after]]',
     'plain break through ensure' => '[[1, :broke], ["e1"]]',
     'plain return through ensure' => '[[1, :returned], ["e1", "ggggggggg"]]',
     'plain raise in ensure' => '[:rescued, "ens"]',

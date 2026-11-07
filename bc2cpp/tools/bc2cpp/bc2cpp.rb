@@ -1562,6 +1562,7 @@ if $PROGRAM_NAME == __FILE__
 
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
+  puts '#include <initializer_list>'
   puts '#include <string.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
@@ -1604,8 +1605,7 @@ if $PROGRAM_NAME == __FILE__
   end
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
-  # mrb_protect_error for the RESCUE_SUPPORT bodies (core API, not the
-  # mruby-error gem).
+  # mruby/error.h: the exception helpers (core API, not the mruby-error gem).
   puts '#include <mruby/error.h>'
   # mruby/io.h is a mrbgem-only include path. The optional helper declaration
   # stays in generated code so core-only fixtures do not need that header.
@@ -1623,8 +1623,18 @@ if $PROGRAM_NAME == __FILE__
   # in the GC arena, as a new object is rooted, so it lives until the enclosing arena restore, as long as the VM's
   # register would keep it.
   puts <<~'CPP'
-    static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
+    // The runtime's one arena root: every other root (the keeps below, a numeric slow path's result) goes through it.
+    static inline void bc2cpp_root(mrb_state* M, mrb_value v) {
       if (!mrb_immediate_p(v)) mrb_gc_protect(M, v);
+    }
+    // Drop the arena entries a body made, then root its result: what the by-name call leaves.
+    static inline mrb_value bc2cpp_arena_keep(mrb_state* M, int ai, mrb_value v) {
+      mrb_gc_arena_restore(M, ai);
+      bc2cpp_root(M, v);
+      return v;
+    }
+    static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
+      bc2cpp_root(M, v);
       return v;
     }
     static inline mrb_value bc2cpp_mrb_ary_pop(mrb_state* M, mrb_value a) { return bc2cpp_keep_removed(M, mrb_ary_pop(M, a)); }
@@ -1654,12 +1664,8 @@ if $PROGRAM_NAME == __FILE__
   else
     puts <<~'CPP'
       // ELEMENT_READ_ROOTS: the caller side. An element a compiled read keeps in a local, while a call may unlink it.
-      static inline void bc2cpp_keep(mrb_state* M, mrb_value v) {
-        if (!mrb_immediate_p(v)) mrb_gc_protect(M, v);
-      }
-      static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) {
-        if (!mrb_immediate_p(old)) mrb_gc_protect(M, old);
-      }
+      static inline void bc2cpp_keep(mrb_state* M, mrb_value v) { bc2cpp_root(M, v); }
+      static inline void bc2cpp_keep_old(mrb_state* M, mrb_value old) { bc2cpp_root(M, old); }
       // The elements ary[head, len) an Array store is about to drop, with mrb_ary_splice's own clamping.
       static inline void bc2cpp_keep_old_range(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len) {
         if (!mrb_array_p(ary)) return;
@@ -1753,7 +1759,7 @@ if $PROGRAM_NAME == __FILE__
   # mrb_vm_exec/mrb_funcall_with_block never run their cleanup: mrb->jmp points
   # at a dead frame and the callinfo stack keeps every frame pushed since, which
   # trips mrb_vm_run's `c->ci == c->cibase || ...` assertion. Every catch site
-  # takes a mark before its `try` and restores it here, as mrb_protect_error does
+  # takes a mark before its `try` and restores it here, as bc2cpp_protect does
   # for an mruby exception: reset mrb->jmp and pop the leftover callinfos,
   # unsharing each popped frame's env as the VM's cipop does.
   puts <<~'CPP'
@@ -1761,18 +1767,21 @@ if $PROGRAM_NAME == __FILE__
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
       return { M->jmp, M->c->ci - M->c->cibase };
     }
+    // The VM's cipop: unshare the frame's env, orphan its block, drop the frame.
+    static void bc2cpp_ci_pop(mrb_state* M) {
+      struct mrb_context* c = M->c;
+      mrb_callinfo* ci = c->ci;
+      mrb_vm_ci_env_clear(M, ci);
+      struct RProc* blk = ci->blk;
+      if (blk && !MRB_PROC_STRICT_P(blk) && MRB_PROC_ENV(blk) == mrb_vm_ci_env(&ci[-1])) {
+        blk->flags |= MRB_PROC_ORPHAN;
+      }
+      c->ci--;
+    }
     static void bc2cpp_vm_restore(mrb_state* M, const Bc2cppVmMark& mark) {
       M->jmp = mark.jmp;
       struct mrb_context* c = M->c;
-      while (c->ci - c->cibase > mark.ci_index) {
-        mrb_callinfo* ci = c->ci;
-        mrb_vm_ci_env_clear(M, ci);
-        struct RProc* blk = ci->blk;
-        if (blk && !MRB_PROC_STRICT_P(blk) && MRB_PROC_ENV(blk) == mrb_vm_ci_env(&ci[-1])) {
-          blk->flags |= MRB_PROC_ORPHAN;
-        }
-        c->ci--;
-      }
+      while (c->ci - c->cibase > mark.ci_index) bc2cpp_ci_pop(M);
       if (M->errinfo && (c->ci - c->cibase) < M->errinfo_ci_depth) M->errinfo = NULL;
     }
     // BLOCK_SEMANTICS (ADR 0266): a cfunc-backed Proc (every BLOCK_FALLBACK
@@ -1847,6 +1856,14 @@ if $PROGRAM_NAME == __FILE__
     static inline void bc2cpp_check_argc(mrb_state* M, mrb_int min, mrb_int max) {
       mrb_int argc = mrb_get_argc(M);
       if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);
+    }
+    // CFUNC_RESULT_ROOT: the VM's cfunc epilogue drops the arena to its saved index and, if the arena grew, reallocs it
+    // before storing the result; a GC there (MRB_GC_STRESS) would free a fresh result. Root it in a global meanwhile.
+    [[maybe_unused]] static inline mrb_value bc2cpp_cfunc_result(mrb_state* M, mrb_value v) {
+    #ifndef MRB_GC_FIXED_ARENA
+      if (mrb_unlikely(M->gc.arena_capa > MRB_GC_ARENA_SIZE) && !mrb_immediate_p(v)) mrb_gv_set(M, mrb_intern_lit(M, "$__bc2cpp_result"), v);
+    #endif
+      return v;
     }
     // STEP_KEYWORDS: the same check for a method that takes keywords, whose keyword Hash is never a positional argument.
     // vm.c argnum_error counts a lone keyword Hash as the one argument given.
@@ -1955,6 +1972,18 @@ if $PROGRAM_NAME == __FILE__
       mrb_get_args(M, "*", &argv, &argc);
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
     }
+    // The one place a compiled block site makes a heap RProc (an escaping block, or a by-name else arm).
+    // Bc2cppHeapBlock is the lazy form: a stack block's else arm builds it only when it runs.
+    static inline struct RProc* bc2cpp_heap_proc(mrb_state* M, mrb_func_t fn, mrb_int len, const mrb_value* env) {
+      return mrb_proc_new_cfunc_with_env(M, fn, len, env);
+    }
+    struct Bc2cppHeapBlock {
+      mrb_state* M;
+      mrb_func_t fn;
+      mrb_int len;
+      const mrb_value* env;
+      mrb_value operator()() const { return mrb_obj_value(bc2cpp_heap_proc(M, fn, len, env)); }
+    };
     // STACK_BLOCK (docs/bc2cpp-stack-blocks.md): the RProc and REnv of a direct-entry block passed only to a
     // callee that just calls it, laid out as mrb_proc_new_cfunc_with_env builds them but in the caller's frame,
     // over the caller's own env array. Red, so the GC never marks, gray-lists or sweeps them.
@@ -2020,7 +2049,7 @@ if $PROGRAM_NAME == __FILE__
       const struct RProc* p = mrb_proc_ptr(blk);
       if (p->gc_color != MRB_GC_RED) return blk;
       const struct REnv* e = MRB_PROC_ENV(p);
-      struct RProc* copy = mrb_proc_new_cfunc_with_env(M, p->body.func, MRB_ENV_LEN(e), e->stack);
+      struct RProc* copy = bc2cpp_heap_proc(M, p->body.func, MRB_ENV_LEN(e), e->stack);
       if (MRB_PROC_STRICT_P(p)) copy->flags |= MRB_PROC_STRICT;
       mrb_value copy_v = mrb_obj_value(copy);
       struct REnv* ce = MRB_PROC_ENV(copy);
@@ -2135,7 +2164,11 @@ if $PROGRAM_NAME == __FILE__
       }
       mrb_hash_set(M, roots, mrb_int_value(M, (mrb_int)((uintptr_t)slot >> 2)), v);
     }
-    // mrb_yield_argv, minus the frame when `blk` is a non-strict block with a direct entry. The
+    // The one VM entry for a proc that is not a compiled block (a native cfunc proc, a Symbol#to_proc, an irep proc).
+    static inline mrb_value bc2cpp_yield_foreign(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
+      return mrb_yield_argv(M, blk, argc, argv);
+    }
+    // bc2cpp_yield_foreign, minus the frame when `blk` is a non-strict block with a direct entry. The
     // arena is restored and the result protected as mrb_yield_with_class does.
     static inline mrb_value bc2cpp_yield_argv(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(blk) == MRB_TT_PROC) {
@@ -2143,17 +2176,25 @@ if $PROGRAM_NAME == __FILE__
         if (MRB_PROC_CFUNC_P(p) && MRB_PROC_CFUNC(p) == bc2cpp_block_thunk && !MRB_PROC_STRICT_P(p)) {
           struct REnv* e = MRB_PROC_ENV(p);
           int ai = mrb_gc_arena_save(M);
-          mrb_value result = bc2cpp_block_entry(e)(M, e, false, argc, argv);
-          mrb_gc_arena_restore(M, ai);
-          mrb_gc_protect(M, result);
-          return result;
+          return bc2cpp_arena_keep(M, ai, bc2cpp_block_entry(e)(M, e, false, argc, argv));
         }
       }
-      return mrb_yield_argv(M, blk, argc, argv);
+      // mrb_yield_argv leaves its result in no root (no arena slot, past the live stack): restore the arena and root it.
+      int ai = mrb_gc_arena_save(M);
+      return bc2cpp_arena_keep(M, ai, bc2cpp_yield_foreign(M, blk, argc, argv));
     }
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       return mrb_funcall_argv(M, recv, mid, argc, argv);
+    }
+    // SSEND_HELPER: the one by-name self send of a class body (include, attr_*): visibility is ignored, as mrb_funcall does.
+    [[maybe_unused]] static mrb_value bc2cpp_ssend(mrb_state* M, mrb_value self, mrb_sym mid, std::initializer_list<mrb_value> args) {
+      return mrb_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
+    }
+    // PROC_CALL_HELPER: `x.call(*args)` in a core body; a plain Proc is yielded to, anything else is sent `call`.
+    [[maybe_unused]] static mrb_value bc2cpp_proc_call_argv(mrb_state* M, mrb_value recv, mrb_int argc, const mrb_value* argv) {
+      if (mrb_proc_p(recv) && mrb_class(M, recv) == M->proc_class) return bc2cpp_yield_argv(M, recv, argc, argv);
+      return mrb_funcall_argv(M, recv, MRB_SYM(call), argc, argv);
     }
     // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
     // a Ruby call does, and a value that does not convert raises TypeError.
@@ -2186,7 +2227,7 @@ if $PROGRAM_NAME == __FILE__
   #     setjmp/longjmp the destructor would not run. build_config.rb's closed
   #     stanza says why that configuration is required.
   # Nothing may escape the destructor (std::terminate during unwinding), so the
-  # ensure body runs under mrb_protect_error, which also pops the callinfo stack
+  # ensure body runs under bc2cpp_protect, which also pops the callinfo stack
   # back (vm.c MRB_CATCH arm) and restores the GC arena. Registers live before
   # the guard were allocated below that arena index, so they stay protected.
   # MRB_THROW needs mruby/throw.h, which <mruby.h> does not include.
@@ -2194,9 +2235,59 @@ if $PROGRAM_NAME == __FILE__
   # std::uncaught_exceptions(): the guard's "is an unwind in flight" test (see
   # the guard).
   puts '#include <exception>'
+  puts '#include <type_traits>'
+  # PROTECT_CXX (docs/bc2cpp-vm-free-runtime-plan.md, Phase 3): every rescue/ensure boundary is this one typed C++
+  # catch, not a call into the VM. mruby raises with `throw (mrb_jmpbuf*)` (MRB_USE_CXX_EXCEPTION), so the boundary
+  # installs its own jmpbuf and catches that pointer, then does the VM protect call's unwinding: reset M->jmp, take the
+  # exception out of M->exc, pop the frames the raise left, restore the arena and root the result. Any other C++
+  # exception (bc2cpp_block_break, bc2cpp_method_return) passes through, as before.
+  puts <<~'CPP'
+    [[maybe_unused]] static mrb_value bc2cpp_protect(mrb_state* M, mrb_value (*body)(mrb_state*, void*), void* ud,
+                                                     mrb_bool* error) {
+      struct mrb_jmpbuf* prev_jmp = M->jmp;
+      struct mrb_jmpbuf c_jmp;
+      mrb_value result;
+      int ai = mrb_gc_arena_save(M);
+      struct mrb_context* c = M->c;
+      ptrdiff_t ci_index = c->ci - c->cibase;
+      if (error) *error = FALSE;
+      try {
+        M->jmp = &c_jmp;
+        result = body(M, ud);
+        M->jmp = prev_jmp;
+      } catch (mrb_jmpbuf* e) {
+        if (e != &c_jmp) throw;
+        M->jmp = prev_jmp;
+        result = mrb_obj_value(M->exc);
+        M->exc = NULL;
+        bc2cpp_root(M, result);  // M->exc no longer holds it, and popping a frame can allocate
+        if (error) *error = TRUE;
+        if (M->c == c) {
+          while (c->ci - c->cibase > ci_index) bc2cpp_ci_pop(M);
+        } else {
+          // The context was switched under the raise: drop the frames C code called directly (vm.c CINFO_DIRECT).
+          c = M->c;
+          while (c->ci > c->cibase && c->ci->cci == 2) bc2cpp_ci_pop(M);
+        }
+      }
+      return bc2cpp_arena_keep(M, ai, result);
+    }
+    // The same boundary around a callable (a lambda or functor returning an mrb_value, or void for nil).
+    template <class Body>
+    [[maybe_unused]] static mrb_value bc2cpp_protect_call(mrb_state* M, Body& body, mrb_bool* error) {
+      return bc2cpp_protect(M, [](mrb_state*, void* ud) -> mrb_value {
+        if constexpr (std::is_void_v<decltype((*(Body*)ud)())>) {
+          (*(Body*)ud)();
+          return mrb_nil_value();
+        } else {
+          return (*(Body*)ud)();
+        }
+      }, &body, error);
+    }
+  CPP
   # KERNEL_LOOP_INLINE (codegen_kernel_loop.rb): an inlined Kernel#loop runs its body under its own mrb_jmpbuf.
   # The guard puts M->jmp back on every way out of the loop. The rescue answers a StopIteration with its result,
-  # after popping the callinfo frames the raise left (as mrb_protect_error does); anything else, a break object
+  # after popping the callinfo frames the raise left (as bc2cpp_protect does); anything else, a break object
   # included, is thrown on to the jmpbuf the loop found, untouched, as if the loop had not caught it.
   puts <<~'KERNEL_LOOP'
     struct bc2cpp_jmp_restore {
@@ -2240,7 +2331,7 @@ if $PROGRAM_NAME == __FILE__
            ensure body allocates and so can trigger a real GC, which would
            then collect the very exception this guard is about to put
            back. Re-root it in the arena for the duration, BELOW the index
-           mrb_protect_error saves and restores internally, so its own
+           bc2cpp_protect saves and restores internally, so its own
            restore cannot drop this entry either.
 
            Found by the differential test, not by reading: it shows up
@@ -2249,12 +2340,9 @@ if $PROGRAM_NAME == __FILE__
            silent, load-dependent corruption a wrong `ensure` translation
            produces. */
         int bc2cpp_ai = mrb_gc_arena_save(M);
-        if (saved) mrb_gc_protect(M, mrb_obj_value(saved));
+        if (saved) bc2cpp_root(M, mrb_obj_value(saved));
         mrb_bool err = FALSE;
-        mrb_value raised = mrb_protect_error(M, [](mrb_state* m, void* ud) -> mrb_value {
-          (*(F*)ud)();
-          return mrb_nil_value();
-        }, (void*)&fn, &err);
+        mrb_value raised = bc2cpp_protect_call(M, fn, &err);
         if (!err) {
           /* Restore the real root FIRST, then drop our arena entry. */
           M->exc = saved;
