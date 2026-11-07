@@ -35,7 +35,7 @@ unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version
   exit 0
 end
 
-# Scenarios that need a gem the no-fiber build leaves out (StringIO needs mruby-enumerator).
+# Scenarios of a gem the probe does not compile (StringIO is in the no-fiber build, but not among the probe's owners).
 NEEDS_ENUMERATOR = /StringIO/
 # The iterator scenarios and the helpers that give the expected output of the ones mruby's interpreter cannot (a
 # Fiber.yield in the native sort's comparison), as resumable_variants_check.rb defines them.
@@ -258,10 +258,8 @@ driver_lines += EXTRAS.map { |label, call| "show('#{label}') { #{call} }" }
 DRIVER_FULL = "#{DRIVER}#{driver_lines.join("\n")}\nputs 'end'\n"
 
 # Scenarios whose Fiber body cannot be a step yet: label => why. The output of the no-fiber build differs from the
-# interpreted run for these, and only these.
-KNOWN_GAPS = {
-  'enumerator lazy nested' => 'Enumerator and Enumerator::Lazy need mruby-enumerator, which needs mruby-fiber'
-}.freeze
+# interpreted run for these, and only these. None is left: the table stays so a new gap is recorded, not hidden.
+KNOWN_GAPS = {}.freeze
 
 OWNERS = %w[NativeFiberSource NativeFiberProbe Array Enumerable Hash Integer Float Range String].freeze
 
@@ -276,9 +274,14 @@ puts '-- generated code'
 saved_guard = ENV['BC2CPP_GUARD_FIBER_FREE']
 ENV['BC2CPP_GUARD_FIBER_FREE'] = '0'
 code, err = begin
-  # The core mrblib of the gems the no-fiber build has: not mruby-enumerator nor mruby-stringio, which need mruby-fiber.
+  # The core mrblib of the gems the no-fiber build has, mruby-enumerator among them (it builds on the placeholder
+  # mruby-fiber; its next_values is compiled onto the C++ Fiber). mruby-stringio stays out (the scenarios skip it).
+  # mruby-enum-lazy is in the no-fiber build (its gembox) but not among the gems bc2cpp compiles for the real closed build,
+  # so the probe's closed world adds its mrblib as program source: `lazy` and Enumerator::Lazy are then defined in it.
   core_gems = BC2CPP_CANONICAL_CORE_GEMS - Bc2cppFixtureRuntime::NOFIBER_GEMS - %w[mruby-stringio]
-  Bc2cppFixtureRuntime.generate(PROBE, dir, core: true, core_gems: core_gems, only_owners: OWNERS)
+  lazy_rb = File.join(Bc2cppFixtureRuntime::ROOT, '3rd/mruby/mrbgems/mruby-enum-lazy/mrblib/lazy.rb')
+  Bc2cppFixtureRuntime.generate(PROBE, dir, core: true, core_gems: core_gems, only_owners: OWNERS + %w[Enumerator],
+                                            extra: [['lazy.rb', File.read(lazy_rb)]])
 ensure
   saved_guard ? ENV['BC2CPP_GUARD_FIBER_FREE'] = saved_guard : ENV.delete('BC2CPP_GUARD_FIBER_FREE')
 end
