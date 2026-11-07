@@ -218,7 +218,6 @@ DRIVER_FULL = "#{DRIVER}#{driver_lines.join("\n")}\nputs 'end'\n"
 # interpreted run for these, and only these.
 KNOWN_GAPS = {
   'nested ensure' => 'rescue/ensure around a yield is not a step yet',
-  'catch throw after yield' => 'catch/throw across a yield is not a step yet',
   'escaping closure' => 'a closure over a Fiber body local outlives the frame',
   'fiber transfer' => 'Fiber#transfer is not implemented',
   'nested fibers and resume values' => 'a Fiber.new inside a Fiber body is not a C++ Fiber yet',
