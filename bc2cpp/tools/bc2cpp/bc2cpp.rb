@@ -2243,7 +2243,7 @@ if $PROGRAM_NAME == __FILE__
           mrb_iv_name_sym_check(M, ivsym);
           mrb_value name = mrb_symbol_value(ivsym);
           if (pass == 1) method = mrb_intern(M, (std::string(nm, (size_t)len) + "=").c_str(), len + 1);
-          struct RProc* p = bc2cpp_heap_proc(M, pass == 0 ? bc2cpp_attr_get : bc2cpp_attr_set, 1, &name);
+          struct RProc* p = mrb_proc_ptr(Bc2cppHeapBlock{M, pass == 0 ? bc2cpp_attr_get : bc2cpp_attr_set, 1, &name}());
           p->flags |= pass == 0 ? MRB_PROC_NOARG : 0;
           mrb_method_t m;
           MRB_METHOD_FROM_PROC(m, p);
