@@ -93,7 +93,7 @@ check.call('inh: an inherited class method (CmSub.each_x is CmBase.each_x) is th
            code_of(code, 'inh').include?('CmBase_singleton_each_x_impl(M, ') && !code_of(code, 'inh').include?(DYNAMIC))
 check.call('keep: a class method that stores its block gets the heap block',
            code_of(code, 'keep').include?('CmBase_singleton_keep_impl(M, ') &&
-             !code_of(code, 'keep').include?('Bc2cppStackBlock'))
+             !code_of(code, 'keep').include?('Bc2cppBlock'))
 sio = code_of(code, 'sio')
 check.call('sio: StringIO.open calls the compiled core class method at the root context, the send as the else',
            sio.match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = StringIO_singleton_open_impl\(M, /) && sio.match?(ELSE_SEND))
