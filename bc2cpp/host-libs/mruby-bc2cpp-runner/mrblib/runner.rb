@@ -7,4 +7,20 @@ module BC2CPPRunner
     $PROGRAM_NAME = ENTRY
     require ENTRY
   end
+
+  # One baked tool, by the name it was baked under, as tools/bc2cpp/mruby_tool.rb does for bin/mruby: ARGV is
+  # TOOL [ARGS...], TOOL a path under BC2CPP_ROOT (set by tools/bc2cpp/mruby-ruby) or a baked name.
+  def self.run_tool
+    root = ENV['BC2CPP_ROOT']
+    raise 'mruby_tool: BC2CPP_ROOT is not set' unless root
+
+    tool = ARGV.shift
+    raise 'usage: mruby_tool.rb TOOL [ARGS...]' unless tool
+
+    name = tool.start_with?("#{root}/") ? tool[(root.size + 1)..-1] : tool
+    name = name[0...-3] if name.end_with?('.rb')
+    $PROGRAM_NAME = name
+    require name
+    ExitHandlers.run
+  end
 end
