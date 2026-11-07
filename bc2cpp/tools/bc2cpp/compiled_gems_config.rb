@@ -21,7 +21,8 @@ module Bc2cppCompiledGemsConfig
   NAMESPACE = /\A[A-Z]\w*(?:::[A-Z]\w*)*\z/
 
   # The parse errors YAML.safe_load raises: Psych's (a subclass of Psych::Exception) under CRuby, the mruby subset's otherwise.
-  YAML_ERRORS = defined?(Psych::Exception) ? Psych::Exception : YAML::SyntaxError
+  # Looked up by name, not read as Psych::Exception: bc2cpp resolves the constants a class body reads, and Psych exists only under CRuby.
+  YAML_ERRORS = Object.const_defined?(:Psych) ? Object.const_get(:Psych).const_get(:Exception) : YAML::SyntaxError
 
   module_function
 
