@@ -145,3 +145,17 @@ host selects the generic one. Setting it from `NFCXX_SM` fixes the k-quant case,
 These numbers are not an emitter comparison alone: nfcxx builds with `__CUDA_ARCH__` = 750 and nvcc with sm_120, so the
 code paths differ (see above). FLASH_ATTN_EXT aborts on nfcxx after 4 cases (the same class of launch failure). RMS_NORM
 has no cases on either binary.
+
+### Update: sm_120a build (2026-11-07)
+
+The nfcxx build now targets `NFCXX_SM=120a` and compiles all 208 objects (the flash-attention MMA instances use
+cp.async and cvta.shared; the FP4 MMQ instances need the block-scale MMA of sm_120a). The k-quant MUL_MAT results were
+wrong before a struct-field fix in the emitter (commit a78c8e11), and they are correct now.
+
+Correctness against the CPU backend (`test-backend-ops test -b CUDA0`): SOFT_MAX 212/212, MUL_MAT 1187/1187.
+
+Per-case time, nfcxx / nvcc (geometric mean): SOFT_MAX 3.8x (29 cases), MUL_MAT 11.6x (184 cases, all run). Worst MUL_MAT
+case 72x. Quantized mat-vec remains the largest gap: q4_1 29x, q5_1 26x, q3_K 20x, q2_K 20x, iq4_xs 18x.
+
+Not run: the other test suites (tests/cuda, tests/pathb-ir), and the non-MUL_MAT ops. The struct-field change makes SRA
+more conservative, so generated PTX changes for other kernels.
