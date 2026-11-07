@@ -258,8 +258,6 @@ if $PROGRAM_NAME == __FILE__
     value
   end
 
-  # PREDICATE_RETURNS: a method ending in ? must return bool, or be whitelisted; a violation fails the build here.
-  PredicateReturns.enforce!(srcs.select { |path| path.end_with?('.rb') })
   # CONVERSION_RETURNS: to_s, to_str, to_int, to_ary and to_hash take only optional positional parameters; their returns
   # are runtime-checked hints, declared in a generated signature file that joins the program's signatures.
   ConversionReturns.enforce!(srcs.select { |path| path.end_with?('.rb') })

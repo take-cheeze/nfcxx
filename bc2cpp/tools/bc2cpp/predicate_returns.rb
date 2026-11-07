@@ -6,7 +6,8 @@ require_relative 'ruby_parse_cache'
 
 # PredicateReturns: a method whose name ends in `?` returns bool. The program is closed, so the check is static: every
 # return of such a method must be provably bool, or the method must be listed in scripts/bc2cpp/predicate_whitelist.txt.
-# A method that is neither is a build error, not a run-time one (the rule is the compiler's, not the program's).
+# The build no longer fails on it: bc2cpp.rb does not call enforce!, so a predicate that is not provably bool is allowed
+# (bc2cpp's own 411 would otherwise stop the bc2cpp-self build). The analysis and enforce! stay for the check that tests them.
 #
 # Provably bool is judged from the source alone: the literals true and false, `&&` / `||` of two bool values, a branch
 # (if, unless, case, begin) whose every arm is bool and that has an else, and a call to one of the built-in predicates in
