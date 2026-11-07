@@ -60,7 +60,9 @@ class Irep
 
   MEMBERS = %i[label nlocals nregs pool syms reps lv instructions file catch_handlers].freeze
 
-  attr_accessor(*MEMBERS)
+  # Spelled out, not attr_accessor(*MEMBERS): bc2cpp's registry refuses an attr_* call whose names are not literal, and
+  # bc2cpp compiles its own sources (docs/bc2cpp-self-compile.md).
+  attr_accessor :label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file, :catch_handlers
 
   # A digest of the irep's own code (its locals, registers, pool, symbols and instructions), not its label or its
   # children. mrbc compiles one method to the same code in every compile unit, so (digest, send address) names one

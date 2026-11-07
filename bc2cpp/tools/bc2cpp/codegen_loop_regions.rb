@@ -12,7 +12,8 @@ class CodeGen
   SoftElementHint = Struct.new(:klass)
   # UNION_ELEMENT_HINT: a block parameter declared as a class and its subclasses (`IO | File`). klass is their common
   # ancestor, which picks the candidate; members are the classes the guard accepts, each by an exact class test.
-  AncestorElementHint = Struct.new(:klass, :members) do
+  # A class, not Struct.new(...) do: a def inside a block would be taken for a method of CodeGen when bc2cpp compiles itself.
+  class AncestorElementHint < Struct.new(:klass, :members)
     def to_s = klass
   end
 

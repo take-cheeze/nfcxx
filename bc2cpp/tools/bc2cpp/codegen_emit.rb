@@ -26,12 +26,23 @@ class CodeGen
     end
   end
 
+  PROBE_DEPTH_LIMIT = Integer(ENV.fetch('BC2CPP_PROBE_DEPTH', '32'))
+
   # One cleanliness probe of `label` (compiles_clean?, block_core_clean?). An answer a guard gave from an
   # in-progress probe is conditional on that probe's stack, not on this label alone, so it is not memoized in
   # @clean_cache. PROBE_CYCLE_CACHE: it is kept for the rest of the outermost probe instead, whose stack every
   # nested probe shares; without it a ring of methods whose `super` probes each other (optcarrot's
   # Oscillator#reset and its subclasses) recompiled each member for every site that reached the ring.
   def probe_clean(label)
+    # PROBE_DEPTH: a probe compiles `label`, whose sends probe their targets in turn, so the nesting follows the program's
+    # call chains. A program with a long chain (bc2cpp's own) nests deep enough to overflow the interpreter's stack, and
+    # an mruby runner's call levels are fewer still. Past PROBE_DEPTH_LIMIT the answer is "not clean" (the safe direction,
+    # as for a label already being probed): the call stays an mrb_funcall. Like a cycle's answer it depends on the stack,
+    # so it is not memoized per label (@guard_cycles).
+    if @probing.size >= PROBE_DEPTH_LIMIT
+      @guard_cycles += 1
+      return false
+    end
     @cycle_clean_cache = {} if @probing.empty?
     return @cycle_clean_cache[label] if @cycle_clean_cache&.key?(label) && ENV['BC2CPP_PROBE_CYCLE_CACHE'] != '0'
 
