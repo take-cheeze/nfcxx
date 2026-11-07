@@ -56,7 +56,7 @@ SRC = <<~'RUBY'
     # frame-local block the caller passes must be copied to the heap there (it must not outlive its frame).
     def repeat(n); n.times { |k| yield k }; self; end
     def use_repeat(a); r = []; repeat(a.size) { |k| r << k }; GC.start; r; end
-    # A yielder with a `rescue` clause only calls its block: the frame-local block is safe there too.
+    # A yielder with a `rescue` clause: behaviour must match interpreted.
     def guarded(default); yield; rescue StandardError => e; [default, e.message]; end
     def use_guarded(a); guarded(:none) { a.map { |x| x.to_i + 1 } }; end
     def use_guarded_raise(a); guarded(:none) { raise ArgumentError, "bad #{a.size}" if a.size > 1; a.size }; end
@@ -110,9 +110,7 @@ check.call('use_repeat: the frame-local block reaches repeat, and the heap env o
            code_of(code, 'use_repeat').match?(/SbFx_repeat_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
              code_of(code, 'repeat').include?('bc2cpp_env_block(M, bc2cpp_blk)') &&
              !code_of(code, 'repeat').match?(/\{ self, bc2cpp_blk,/))
-check.call('use_guarded: a callee that yields inside a rescue takes the frame-local block',
-           code_of(code, 'use_guarded').match?(/SbFx_guarded_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
-check.call('use_guarded_keep: a rescue that stores the block keeps the heap RProc',
+check.call('use_guarded_keep: a yielder with a rescue keeps the heap RProc',
            !code_of(code, 'use_guarded_keep').include?('Bc2cppStackBlock'))
 off, = generate_world('BC2CPP_STACK_BLOCKS' => '0')
 check.call('BC2CPP_STACK_BLOCKS=0: every block is built on the heap',

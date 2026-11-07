@@ -2165,10 +2165,8 @@ if $PROGRAM_NAME == __FILE__
       mrb_hash_set(M, roots, mrb_int_value(M, (mrb_int)((uintptr_t)slot >> 2)), v);
     }
     // The one VM entry for a proc that is not a compiled block (a native cfunc proc, a Symbol#to_proc, an irep proc).
-    // mrb_yield_argv leaves its result in no root (no arena slot, past the live stack): restore the arena and root it.
     static inline mrb_value bc2cpp_yield_foreign(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
-      int ai = mrb_gc_arena_save(M);
-      return bc2cpp_arena_keep(M, ai, mrb_yield_argv(M, blk, argc, argv));
+      return mrb_yield_argv(M, blk, argc, argv);
     }
     // bc2cpp_yield_foreign, minus the frame when `blk` is a non-strict block with a direct entry. The
     // arena is restored and the result protected as mrb_yield_with_class does.
@@ -2181,7 +2179,9 @@ if $PROGRAM_NAME == __FILE__
           return bc2cpp_arena_keep(M, ai, bc2cpp_block_entry(e)(M, e, false, argc, argv));
         }
       }
-      return bc2cpp_yield_foreign(M, blk, argc, argv);
+      // mrb_yield_argv leaves its result in no root (no arena slot, past the live stack): restore the arena and root it.
+      int ai = mrb_gc_arena_save(M);
+      return bc2cpp_arena_keep(M, ai, bc2cpp_yield_foreign(M, blk, argc, argv));
     }
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);

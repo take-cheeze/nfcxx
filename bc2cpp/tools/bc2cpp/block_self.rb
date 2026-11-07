@@ -19,10 +19,6 @@ module BlockSelf
                        :METHOD, :JMP, :RETNIL, :RETSELF, :RETTRUE, :RETFALSE, :BLKPUSH, :OCLASS, :TCLASS,
                        :EXCEPT, :STRING, :MOVE, :JMPIF, :JMPNOT, :JMPNIL].freeze
   FORWARDING_OPS = Set[:SUPER, :ARGARY].freeze
-  # vm.c OP_RESCUE tests R[a] (the exception, written by EXCEPT) against the class in R[b] and OP_RAISEIF re-raises R[a]: they
-  # keep or pass on no value, so a Proc in either register is no escape. Their reaching definitions are not modelled (the
-  # exception register comes from the handler entry), and the default operator window would refuse the whole method.
-  NON_LEAKING_READ_OPS = Set[:RESCUE, :RAISEIF].freeze
   # Operators whose read set is R(a)..R(a+width-1) (vm.c OP_ADD..OP_GE: R(a) op R(a+1); OP_GETIDX: R(a)[R(a+1)];
   # OP_SETIDX: R(a)[R(a+1)] = R(a+2); OP_ADDI/OP_SUBI and the patched OP_ADDILV/OP_SUBILV: R(a) op an immediate, whose
   # fallback writes the immediate before sending), including their method-send fallback, which passes exactly those.
@@ -50,10 +46,7 @@ module BlockSelf
   def frame_why(irep, ireps, frames, blk)
     program = BytecodeIR.for(irep)
     proc_at = lambda do |idx, reg|
-      # origin_transfers: RESCUE writes only R[b] and EXCEPT R[a] (a `rescue` around a `yield` is walked through); ENTER's
-      # block slot is then its own definition (proc_def?). raiseif_nil: a RAISEIF falls through with nil.
-      defs = program.reaching_definitions(idx, reg, through_handlers: true, shared: true, raiseif_nil: true,
-                                                    origin_transfers: true)
+      defs = program.reaching_definitions(idx, reg, through_handlers: true, shared: true)
       return :unknown if defs.nil?
 
       defs.any? { |df| proc_def?(irep, df, frames, blk) }
@@ -62,7 +55,7 @@ module BlockSelf
     program.each_source do |insn, idx|
       op = insn.op
       return "forwards its block (#{op})" if FORWARDING_OPS.include?(op)
-      next if BytecodeIR::Ops::LOAD_PREFIX_OPS.include?(op) || WRITE_ONLY_OPS.include?(op) || NON_LEAKING_READ_OPS.include?(op)
+      next if BytecodeIR::Ops::LOAD_PREFIX_OPS.include?(op) || WRITE_ONLY_OPS.include?(op)
 
       reads = reads_of(irep, insn)
       return "reads registers it cannot list (#{op})" if reads.nil?
@@ -101,7 +94,6 @@ module BlockSelf
 
     insn = BytecodeIR.for(irep).source_at(df.index)
     case insn.op
-    when :ENTER then df.built == :block && df.reg == blk
     when :BLKPUSH then true
     when :GETUPVAR
       index, level = insn.upvar_ref
