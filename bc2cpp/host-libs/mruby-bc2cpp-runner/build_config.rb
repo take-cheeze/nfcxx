@@ -1,5 +1,5 @@
-# The bc2cpp command as an mruby executable: bin/mruby runs a script that calls BC2CPPRunner.run, with bc2cpp's own
-# arguments in ARGV. Run from 3rd/mruby (the mruby rake root), with this config:
+# The bc2cpp command as an mruby executable: bin/mruby (a C main in this directory's gem, not mruby-bin-mruby) runs
+# BC2CPPRunner.run with bc2cpp's own arguments in ARGV. Run from 3rd/mruby (the mruby rake root), with this config:
 #   cd 3rd/mruby && MRUBY_CONFIG=../../host-libs/mruby-bc2cpp-runner/build_config.rb \
 #     MRUBY_BUILD_DIR=<dir> rake
 # Not wired into build_config.rb: this build is the bc2cpp runner alone. Its test status is in the runner's README.
@@ -11,7 +11,6 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
   # Marshal (3rd/mruby-marshal) is C++, and its try/catch-free code still needs mruby's C++ exception mode: the VM's
   # exceptions are C++ throws, as in build_config.rb's closed build. Without it the first raise corrupts the VM.
   enable_cxx_exception
-  conf.gem core: 'mruby-bin-mruby'
   conf.gem core: 'mruby-bin-mrbc'
   conf.gem core: 'mruby-compiler'
   %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
