@@ -346,7 +346,28 @@ end
 # bc2cpp compiles these builds only; every other build, and any
 # build with a gem below, is the plain mruby build.
 # `closed` is the closed world built natively for CI (build_config.rb).
-BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe wio].freeze
+BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe wio bc2cpp-self].freeze
+# bc2cpp-self: bc2cpp compiled by bc2cpp, an mruby executable whose program is bc2cpp's own sources (baked as bytecode by
+# host-libs/mruby-bc2cpp-sources) rather than a game. Its world is the gems below, which must all be present, and it holds
+# no gem that loads or compiles Ruby at runtime: mruby-compiler, and every mruby-bin-* (the C main replaces bin/mruby).
+# See docs/bc2cpp-self-compile.md.
+BC2CPP_SELF_BUILD = 'bc2cpp-self'
+BC2CPP_SELF_GEMS = %w[
+  mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
+  mruby-symbol-ext mruby-compar-ext mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random
+  mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy
+  mruby-struct mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding
+  mruby-require mruby-onig-regexp mruby-marshal
+  mruby-shellwords mruby-json mruby-digest mruby-fileutils mruby-tmpdir mruby-tempfile mruby-dir-glob
+  mruby-strscan mruby-compare-by-identity mruby-yaml mruby-zlib
+  mruby-stringio mruby-prism mruby-rbs mruby-process mruby-env mruby-bc2cpp-sources
+].freeze
+# The C main that replaces bin/mruby (another change adds it). TODO(c-main): name it here once it exists; until then the
+# kind does not require it, and accepts it when present.
+BC2CPP_SELF_OPTIONAL_GEMS = [].freeze
+# Gems the bc2cpp-self executable must not link, beyond BC2CPP_OPEN_WORLD_GEMS: the compiler (no string can become code)
+# and the bin gems (their mains are replaced by the C main).
+BC2CPP_SELF_FORBIDDEN_GEMS = %w[mruby-compiler].freeze
 # Gems that load or define Ruby at runtime; any of them opens the world.
 BC2CPP_OPEN_WORLD_GEMS = %w[
   mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs mruby-eval mruby-binding mruby-proc-binding
@@ -602,10 +623,20 @@ def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cp
   unless BC2CPP_CLOSED_WORLD_BUILDS.include?(build_name)
     errors << "build '#{build_name}' is not one of #{BC2CPP_CLOSED_WORLD_BUILDS.join('/')}"
   end
-  required = build_name == 'optcarrot-probe' ? %w[optcarrot-benchmark optcarrot-compiled] : BC2CPP_CLOSED_WORLD_GEMS
+  required = case build_name
+             when 'optcarrot-probe' then %w[optcarrot-benchmark optcarrot-compiled]
+             when BC2CPP_SELF_BUILD then BC2CPP_SELF_GEMS
+             else BC2CPP_CLOSED_WORLD_GEMS
+             end
   missing = required - gems.keys
   errors << "gem list lacks #{missing.join(', ')}" unless missing.empty?
   (gems.keys & BC2CPP_OPEN_WORLD_GEMS).each { |name| errors << "#{name} loads or defines Ruby at runtime" }
+  if build_name == BC2CPP_SELF_BUILD
+    forbidden = (gems.keys & BC2CPP_SELF_FORBIDDEN_GEMS) + gems.keys.grep(/\Amruby-bin-/)
+    (forbidden - (gems.keys & BC2CPP_OPEN_WORLD_GEMS)).uniq.each do |name|
+      errors << "#{name} cannot be linked into the bc2cpp-self executable"
+    end
+  end
   if build_name == 'optcarrot-probe'
     errors << 'optcarrot-probe cannot include mruby-compiler' if gems.key?('mruby-compiler')
     benchmark = gems['optcarrot-benchmark']
