@@ -120,7 +120,7 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
 
 ## Tests
 
-`tests/safeptr/run.sh` (CI: `pathb.yml`, with `SAFEPTR_SWEEP=1`):
+`tests/safeptr/run.sh` (CI: `ci.yml`, with `SAFEPTR_SWEEP=1`):
 
 - `tests/safeptr/cases/*.cpp` with `// SAFE: text`: the program must abort with that report and name its source file;
   without the flag it must not report. The cases are `heap_overflow`, `heap_arith` (arithmetic from one heap block into

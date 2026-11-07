@@ -3,7 +3,7 @@ name: wasm explorer (build)
 # Builds the wasm explorer's static site (tools/wasm-explorer/build-static.cjs) and uploads it as the artifact
 # github-pages. A reusable workflow: wasm-explorer-pages.yml deploys the site to GitHub Pages, and
 # wasm-explorer-preview.yml to a Cloudflare Pages preview. The compiler runs here, in CI: the Path B harness and the
-# mruby tool are built as in pathb.yml, and each example is compiled ahead of time in every mode of its language and
+# mruby tool are built as in ci.yml, and each example is compiled ahead of time in every mode of its language and
 # checked against its expected result, so a broken example fails this job. The Rust and Go examples also need rustc
 # (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh), and the Swift examples need the Swift front end
 # (tools/swiftfe, built below). The in-browser compiler (docs/notes/pathb-wasm-frontend.md:
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in pathb.yml
+      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in ci.yml
       PATHB_JOBS: "4"
     steps:
       - uses: actions/checkout@v7
