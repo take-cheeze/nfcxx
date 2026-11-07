@@ -1903,11 +1903,20 @@ class CodeGen
   # its result in bc2cpp_new_ini. nil when that list cannot be built or the arguments do not fit the owner call.
   def direct_initialize_line(obj, argv, dest)
     owners = generic_new_initialize_owners
-    return nil unless owners && argv.size <= 16
+    return nil unless owners
 
     @direct_alloc_used = true # the caller allocates with bc2cpp_direct_alloc, which is declared when this flag is set
-    line = outside_owner_call_line(dest, obj, 'initialize', argv, owners)
-           .sub(/\A#{Regexp.escape(RegName[dest])} = /, 'bc2cpp_new_ini = ')
+    line = if argv.size <= 16
+             outside_owner_call_line(dest, obj, 'initialize', argv, owners)
+           else
+             # The inline form takes 16 arguments; longer lists go through an array, as the argv form of the owner call.
+             decl = "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} };\n"
+             call = "#{RegName[dest]} = bc2cpp_owner_call_argv_named(M, #{obj}, \"initialize\", 0, " \
+                    "BC2CPP_OWNERS(#{owner_call_owner_list(owners)}), #{@call_block_expr || 'mrb_nil_value()'}, " \
+                    "#{argv.size}, bc2cpp_new_args); /* CLOSED_WORLD owner-call: initialize */"
+             decl + call
+           end
+    line = line.sub(/\A#{Regexp.escape(RegName[dest])} = /, 'bc2cpp_new_ini = ')
     "mrb_value bc2cpp_new_ini;\n#{line}\n"
   end
 
