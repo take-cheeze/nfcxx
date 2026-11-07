@@ -32,6 +32,15 @@ jobs:
         with:
           packages: python3 python3-dev ruby rake clang
 
+      # The upstream harness scripts and their offline self-test (tests/upstream): under a minute.
+      - name: Syntax of the upstream scripts and Python
+        run: |
+          for f in tests/upstream/*.sh; do bash -n "$f"; done
+          python3 -m py_compile tests/upstream/*.py
+
+      - name: Native upstream harness self-test
+        run: python3 tests/upstream/nightly-self-test.py
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats
@@ -516,23 +525,6 @@ jobs:
         if: steps.rust-changes.outputs.changed == 'true'
         run: tests/realworld/run_mrustc.sh clap regex serde-json batch
 
-  # The upstream harness scripts and their offline self-test (tests/upstream): syntax of every script and the native
-  # merge and collection logic, in under a minute. Not a required check; the nightly workflow runs the real suites.
-  upstream-harness:
-    name: upstream harness self-test
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Syntax of the upstream scripts and Python
-        run: |
-          for f in tests/upstream/*.sh; do bash -n "$f"; done
-          python3 -m py_compile tests/upstream/*.py
-
-      - name: Native harness self-test
-        run: python3 tests/upstream/nightly-self-test.py
-
   # Path B (docs/notes/pathb-stage1.md to pathb-stage3.md). Building the harness compiles the whole EDG front end a second
   # time, so these jobs run only when a change can affect them (the list below), and on demand (workflow_dispatch). A build
   # job makes the harness and the mruby tool, and the suites run in parallel from their caches. python3 is needed only for
@@ -636,13 +628,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Path B stages 1-2 and wasm
+          - name: Path B stages 1-2, wasm and the mruby-ninja file tasks
             run: |
               tests/pathb/run.sh
               tests/pathb-ir/run.sh
               tests/pathb-borrow/run.sh
               tests/wasm/run.sh
               NFCXX_WASM_OPT=1 tests/wasm/run.sh
+              tests/mruby-ninja/run.sh
           - name: Path B stage 3 (IR to QBE translation validation)
             run: tests/pathb-qbe/run.sh
           - name: Hosted Path B (NFCXX_PATH=b)
@@ -660,8 +653,6 @@ jobs:
               "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
               # every device compile runs both SPIR-V emitters (scripts/spirv-emit): the C++ port must match the Ruby
               NFCXX_SPIRV_EMITTER=check NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
-          - name: mruby-ninja generic file tasks (rule is refused)
-            run: tests/mruby-ninja/run.sh
     name: ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
