@@ -6,17 +6,15 @@
 // whose bc2cpp_block_call and dynamic-call registry it uses; not standalone.
 #pragma once
 
-enum Bc2cppSortState {
+enum {
   SORT_INSERT_NEXT,
   SORT_INSERT_CMP,
   SORT_INSERT_RESULT,
   SORT_HEAP_BUILD,
   SORT_HEAP_EXTRACT,
   SORT_HEAPIFY,
-  SORT_HEAPIFY_LEFT,
-  SORT_HEAPIFY_LEFT_RESULT,
-  SORT_HEAPIFY_RIGHT,
-  SORT_HEAPIFY_RIGHT_RESULT,
+  SORT_HEAPIFY_CHILD,  // compare child `child` (left, then right) with `max`
+  SORT_HEAPIFY_CHILD_RESULT,
   SORT_HEAPIFY_DONE
 };
 
@@ -29,7 +27,7 @@ struct Bc2cppSortFrame {
   mrb_int len;
   mrb_int n;
   mrb_int i, j;  // insertion: outer and inner index; heap: outer index
-  mrb_int index, size, max;  // heapify
+  mrb_int index, size, max, child;  // heapify
   int state;
   int after_heapify;  // SORT_HEAP_BUILD or SORT_HEAP_EXTRACT
 };
@@ -125,11 +123,7 @@ static void bc2cpp_sort_step(mrb_state* M,
           out->value = s->ary;
           return;
         }
-        {
-          mrb_value tmp = a[0];
-          a[0] = a[s->i];
-          a[s->i] = tmp;
-        }
+        std::swap(a[0], a[s->i]);
         s->index = 0;
         s->size = s->i;
         s->after_heapify = SORT_HEAP_EXTRACT;
@@ -137,48 +131,31 @@ static void bc2cpp_sort_step(mrb_state* M,
         break;
       case SORT_HEAPIFY:
         s->max = s->index;
-        s->state = SORT_HEAPIFY_LEFT;
+        s->child = 2 * s->index + 1;
+        s->state = SORT_HEAPIFY_CHILD;
         break;
-      case SORT_HEAPIFY_LEFT: {
-        mrb_int left = 2 * s->index + 1;
-        if (left >= s->size) {
-          s->state = SORT_HEAPIFY_RIGHT;
-          break;
-        }
-        s->state = SORT_HEAPIFY_LEFT_RESULT;
-        if (!bc2cpp_sort_compare(M, s, a[left], a[s->max], out, &resume))
-          return;
-        break;
-      }
-      case SORT_HEAPIFY_LEFT_RESULT:
-        if (bc2cpp_sort_decide(M, s, resume))
-          s->max = 2 * s->index + 1;
-        s->state = SORT_HEAPIFY_RIGHT;
-        break;
-      case SORT_HEAPIFY_RIGHT: {
-        mrb_int right = 2 * s->index + 2;
-        if (right >= s->size) {
+      case SORT_HEAPIFY_CHILD:
+        // Past the heap's end, or past the right child: heapify is done.
+        if (s->child >= s->size || s->child > 2 * s->index + 2) {
           s->state = SORT_HEAPIFY_DONE;
           break;
         }
-        s->state = SORT_HEAPIFY_RIGHT_RESULT;
-        if (!bc2cpp_sort_compare(M, s, a[right], a[s->max], out, &resume))
+        s->state = SORT_HEAPIFY_CHILD_RESULT;
+        if (!bc2cpp_sort_compare(M, s, a[s->child], a[s->max], out, &resume))
           return;
         break;
-      }
-      case SORT_HEAPIFY_RIGHT_RESULT:
+      case SORT_HEAPIFY_CHILD_RESULT:
         if (bc2cpp_sort_decide(M, s, resume))
-          s->max = 2 * s->index + 2;
-        s->state = SORT_HEAPIFY_DONE;
+          s->max = s->child;
+        s->child++;
+        s->state = SORT_HEAPIFY_CHILD;
         break;
       case SORT_HEAPIFY_DONE:
         if (s->max == s->index) {
           s->i--;
           s->state = s->after_heapify;
         } else {
-          mrb_value tmp = a[s->max];
-          a[s->max] = a[s->index];
-          a[s->index] = tmp;
+          std::swap(a[s->max], a[s->index]);
           s->index = s->max;
           s->state = SORT_HEAPIFY;
         }
@@ -190,10 +167,8 @@ static void bc2cpp_sort_step(mrb_state* M,
 static Bc2cppFiberFrame* bc2cpp_sort_frame_new(mrb_state* M,
                                                mrb_value ary,
                                                mrb_value blk) {
-  Bc2cppSortFrame* s =
-      (Bc2cppSortFrame*)mrb_calloc(M, 1, sizeof(Bc2cppSortFrame));
-  s->f.step = bc2cpp_sort_step;
-  s->f.mark = bc2cpp_sort_mark;
+  Bc2cppSortFrame* s = bc2cpp_frame_alloc<Bc2cppSortFrame>(M, bc2cpp_sort_step,
+                                                           bc2cpp_sort_mark);
   s->ary = ary;
   s->blk = blk;
   s->key = mrb_nil_value();

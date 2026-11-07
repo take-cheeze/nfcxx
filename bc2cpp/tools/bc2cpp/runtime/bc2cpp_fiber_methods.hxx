@@ -1,10 +1,8 @@
 // The part of the C++ Fiber runtime that wraps a resumable method's step
 // function (codegen_resumable.rb) as a Bc2cppFiberFrame. Emitted after
 // RESUMABLE_HELPERS, whose bc2cpp_resume_frame_* functions it uses; not
-// standalone. A method step keeps its registers in the old heap frame and
-// returns it on suspension; this adapter maps that onto DONE / YIELD and calls
-// a block directly from a block-call suspension, since a non-suspending block
-// needs no step.
+// standalone. A method step returns its heap frame on suspension; this adapter
+// maps that onto DONE / YIELD / CALL / UNWIND.
 #pragma once
 
 typedef Bc2cppFiberFrame* (*Bc2cppBlockStepMaker)(mrb_state* M,
@@ -39,12 +37,17 @@ static bool bc2cpp_block_has_step(const struct RProc* p,
   return (flags & ~(mrb_int)0xffff) == 0x5b2c0000 && (flags & 4) != 0;
 }
 
+// The maker is in the env slot before the entry.
+static Bc2cppBlockStepMaker bc2cpp_block_step_maker(const struct REnv* env) {
+  return (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(
+      env->stack[MRB_ENV_LEN(env) - 3]);
+}
+
 // Calls +blk+ with the arguments from a frame of this fiber. Returns true with
 // the value in *value when the block ran to its end here; false with *out set
-// when the fiber has to act first: CALL when the block is a step (BLOCK_STEP:
-// its env carries a maker in the slot before the entry), or YIELD when its last
-// act is Fiber.yield (Bc2cppTailYield), whose next resume value is the block's
-// result.
+// when the fiber has to act first: CALL when the block is a step (BLOCK_STEP),
+// or YIELD when its last act is Fiber.yield (Bc2cppTailYield), whose next
+// resume value is the block's result.
 static bool bc2cpp_block_call(mrb_state* M,
                               mrb_value blk,
                               mrb_int argc,
@@ -52,24 +55,20 @@ static bool bc2cpp_block_call(mrb_state* M,
                               Bc2cppStepOut* out,
                               mrb_value* value) {
   bc2cpp_tail_yield.pending = false;
-  if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk))) {
-    const struct REnv* step_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
-    mrb_int step_len = step_env ? MRB_ENV_LEN(step_env) : 0;
-    if (bc2cpp_block_has_step(mrb_proc_ptr(blk), step_env)) {
-      Bc2cppBlockStepMaker maker = (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(
-          step_env->stack[step_len - 3]);
-      Bc2cppFiberFrame* callee = maker(M, (struct REnv*)step_env, argc, argv);
-      if (callee) {
-        out->kind = BC2CPP_STEP_CALL;
-        out->callee = callee;
-        return false;
-      }
+  const struct RProc* p = mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk))
+                              ? mrb_proc_ptr(blk)
+                              : nullptr;
+  const struct REnv* env = p ? MRB_PROC_ENV(p) : nullptr;
+  if (p && bc2cpp_block_has_step(p, env)) {
+    Bc2cppFiberFrame* callee =
+        bc2cpp_block_step_maker(env)(M, (struct REnv*)env, argc, argv);
+    if (callee) {
+      out->kind = BC2CPP_STEP_CALL;
+      out->callee = callee;
+      return false;
     }
   }
-  const struct REnv* blk_env = nullptr;
-  if (mrb_proc_p(blk) && MRB_PROC_CFUNC_P(mrb_proc_ptr(blk)))
-    blk_env = MRB_PROC_ENV(mrb_proc_ptr(blk));
-  bc2cpp_tail_yield.env = blk_env;
+  bc2cpp_tail_yield.env = env;
   *value = mrb_yield_argv(M, blk, argc, argv);
   bc2cpp_tail_yield.env = nullptr;
   if (bc2cpp_tail_yield.pending) {
@@ -137,31 +136,31 @@ static void bc2cpp_method_frame_mark(mrb_state* M,
   bc2cpp_fiber_ref(M, refs, m->frame);
 }
 
+static Bc2cppResumeFrame* bc2cpp_method_frame_resume(Bc2cppFiberFrame* base) {
+  mrb_value frame = ((Bc2cppMethodFrame*)base)->frame;
+  return mrb_data_p(frame) ? (Bc2cppResumeFrame*)DATA_PTR(frame) : nullptr;
+}
+
 static struct RBasic* bc2cpp_method_frame_identity(Bc2cppFiberFrame* base) {
-  Bc2cppMethodFrame* m = (Bc2cppMethodFrame*)base;
-  return mrb_data_p(m->frame) ? (struct RBasic*)mrb_obj_ptr(m->frame) : nullptr;
+  mrb_value frame = ((Bc2cppMethodFrame*)base)->frame;
+  return mrb_data_p(frame) ? (struct RBasic*)mrb_obj_ptr(frame) : nullptr;
+}
+
+static bool bc2cpp_method_frame_has_handlers(Bc2cppFiberFrame* base) {
+  Bc2cppResumeFrame* f = bc2cpp_method_frame_resume(base);
+  return f && f->has_handlers;
 }
 
 // An exception reaches a method frame that CALLed (or called a block of) the
 // frame it came from: a step with handlers is re-entered with it raised at the
 // address it suspended at; one without, or one that declined it, is dropped.
-static bool bc2cpp_method_frame_unwind_into(mrb_state* M,
+static bool bc2cpp_method_frame_unwind_into(mrb_state*,
                                             Bc2cppFiberFrame* base,
-                                            mrb_value exc) {
-  Bc2cppMethodFrame* m = (Bc2cppMethodFrame*)base;
-  Bc2cppResumeFrame* f =
-      mrb_data_p(m->frame) ? (Bc2cppResumeFrame*)DATA_PTR(m->frame) : nullptr;
-  if (!f || !f->has_handlers)
+                                            mrb_value) {
+  if (!bc2cpp_method_frame_has_handlers(base))
     return false;
-  f->raise_pending = 1;
+  bc2cpp_method_frame_resume(base)->raise_pending = 1;
   return true;
-}
-
-static bool bc2cpp_method_frame_has_handlers(Bc2cppFiberFrame* base) {
-  Bc2cppMethodFrame* m = (Bc2cppMethodFrame*)base;
-  Bc2cppResumeFrame* f =
-      mrb_data_p(m->frame) ? (Bc2cppResumeFrame*)DATA_PTR(m->frame) : nullptr;
-  return f && f->has_handlers;
 }
 
 [[maybe_unused]] static Bc2cppFiberFrame* bc2cpp_method_frame_new(
@@ -169,10 +168,8 @@ static bool bc2cpp_method_frame_has_handlers(Bc2cppFiberFrame* base) {
     Bc2cppMethodStep step,
     mrb_value self,
     mrb_value frame) {
-  Bc2cppMethodFrame* m =
-      (Bc2cppMethodFrame*)mrb_calloc(M, 1, sizeof(Bc2cppMethodFrame));
-  m->f.step = bc2cpp_method_frame_step;
-  m->f.mark = bc2cpp_method_frame_mark;
+  Bc2cppMethodFrame* m = bc2cpp_frame_alloc<Bc2cppMethodFrame>(
+      M, bc2cpp_method_frame_step, bc2cpp_method_frame_mark);
   m->f.identity = bc2cpp_method_frame_identity;
   m->f.unwind_into = bc2cpp_method_frame_unwind_into;
   m->f.has_handlers = bc2cpp_method_frame_has_handlers;
@@ -204,9 +201,6 @@ static void bc2cpp_body_start_step(mrb_state* M,
   }
   start->started = true;
   const struct REnv* env = MRB_PROC_ENV(mrb_proc_ptr(start->proc));
-  mrb_int len = env ? MRB_ENV_LEN(env) : 0;
-  Bc2cppBlockStepMaker maker =
-      (Bc2cppBlockStepMaker)(uintptr_t)mrb_integer(env->stack[len - 3]);
   // resume(a, b) arrives as [a, b]; from C, as the one value (or nothing).
   mrb_value first = bc2cpp_first_args_set ? bc2cpp_first_args : mrb_nil_value();
   mrb_int argc = 0;
@@ -218,7 +212,8 @@ static void bc2cpp_body_start_step(mrb_state* M,
     argc = 1;
     argv = &resume;
   }
-  Bc2cppFiberFrame* root = maker(M, (struct REnv*)env, argc, argv);
+  Bc2cppFiberFrame* root =
+      bc2cpp_block_step_maker(env)(M, (struct REnv*)env, argc, argv);
   if (!root)
     mrb_raise(M, mrb_class_get(M, "RuntimeError"),
               "bc2cpp: Fiber body step did not make a frame");
@@ -240,10 +235,8 @@ static void bc2cpp_body_start_mark(mrb_state* M,
   if (len < 3 || !(mrb_integer(env->stack[len - 1]) & 4))
     mrb_raise(M, mrb_class_get(M, "RuntimeError"),
               "bc2cpp: Fiber body has no step");
-  Bc2cppBodyStart* start =
-      (Bc2cppBodyStart*)mrb_calloc(M, 1, sizeof(Bc2cppBodyStart));
-  start->f.step = bc2cpp_body_start_step;
-  start->f.mark = bc2cpp_body_start_mark;
+  Bc2cppBodyStart* start = bc2cpp_frame_alloc<Bc2cppBodyStart>(
+      M, bc2cpp_body_start_step, bc2cpp_body_start_mark);
   start->proc = proc;
   return bc2cpp_fiber_new(M, &start->f);
 }
@@ -339,6 +332,9 @@ extern "C" mrb_value mrb_funcall_send(mrb_state* M,
 // `kdict` is the keyword Hash of the call, or nil. A method with a keyword
 // dispatcher takes it; any other suspendable method takes none, so a non-empty
 // one runs as an ordinary send that carries them (mrb_funcall_send).
+static bool bc2cpp_dyn_keywords_p(mrb_state* M, mrb_value kdict) {
+  return mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict);
+}
 
 // A registered suspendable method found for a call: park its frame (the caller
 // CALLs it), else nothing.
@@ -364,7 +360,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   if (it == table.end() || argc < it->second.min_argc ||
       argc > it->second.max_argc)
     return false;
-  bool keywords = mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict);
+  bool keywords = bc2cpp_dyn_keywords_p(M, kdict);
   if (!it->second.kwfn && keywords)
     return false;
   bc2cpp_prologue.frame = nullptr;
@@ -392,7 +388,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   mrb_sym mid = mrb_symbol_p(name)
                     ? mrb_symbol(name)
                     : mrb_intern_str(M, mrb_obj_as_string(M, name));
-  bool keywords = mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict);
+  bool keywords = bc2cpp_dyn_keywords_p(M, kdict);
   struct RClass* c = mrb_class(M, recv);
   mrb_method_t method = mrb_method_search_vm(M, &c, mid);
   Bc2cppDynResult out;

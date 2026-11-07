@@ -1,11 +1,9 @@
-// catch and throw as frames of the C++ Fiber. mruby's catch is a bytecode
-// method and its throw finds the catch by walking the VM's call stack, so
-// neither can see the C++ frames of a fiber. A `catch` whose block has a step
-// is a frame that CALLs the block; a `throw` of its tag from a step in the same
-// fiber unwinds to it (the UNWIND a `return` makes). Anything else keeps
-// mruby's own (the dispatchers decline with undef). Emitted after
-// bc2cpp_fiber_methods.hxx, whose bc2cpp_block_call and dynamic-call registry
-// it uses; not standalone.
+// catch and throw as frames of the C++ Fiber: mruby's throw finds the catch by
+// walking the VM's call stack, which cannot see a fiber's C++ frames. A `catch`
+// whose block has a step is a frame that CALLs the block; a `throw` of its tag
+// from the same fiber unwinds to it. Anything else keeps mruby's own (the
+// dispatchers decline with undef). Emitted after bc2cpp_fiber_methods.hxx
+// (bc2cpp_block_call, the dynamic-call registry); not standalone.
 #pragma once
 
 struct Bc2cppCatchFrame {
@@ -44,13 +42,13 @@ static void bc2cpp_catch_step(mrb_state* M,
   }
 }
 
-// What a `throw` names this frame by.
+// A `throw` names the catch frame by itself.
 static struct RBasic* bc2cpp_catch_identity(Bc2cppFiberFrame* frame) {
   return (struct RBasic*)frame;
 }
 
 static mrb_value bc2cpp_catch_dyn(mrb_state* M,
-                                  mrb_value self,
+                                  mrb_value,
                                   mrb_int argc,
                                   const mrb_value* argv,
                                   mrb_value blk) {
@@ -59,10 +57,8 @@ static mrb_value bc2cpp_catch_dyn(mrb_state* M,
       !bc2cpp_block_has_step(mrb_proc_ptr(blk),
                              MRB_PROC_ENV(mrb_proc_ptr(blk))))
     return mrb_undef_value();
-  Bc2cppCatchFrame* c =
-      (Bc2cppCatchFrame*)mrb_calloc(M, 1, sizeof(Bc2cppCatchFrame));
-  c->f.step = bc2cpp_catch_step;
-  c->f.mark = bc2cpp_catch_mark;
+  Bc2cppCatchFrame* c = bc2cpp_frame_alloc<Bc2cppCatchFrame>(
+      M, bc2cpp_catch_step, bc2cpp_catch_mark);
   c->f.identity = bc2cpp_catch_identity;
   c->tag = argc > 0 ? argv[0] : mrb_obj_new(M, M->object_class, 0, nullptr);
   c->blk = blk;
@@ -82,9 +78,9 @@ static void bc2cpp_throw_mark(mrb_state* M,
   bc2cpp_fiber_ref(M, refs, ((Bc2cppThrowFrame*)base)->value);
 }
 
-static void bc2cpp_throw_step(mrb_state* M,
+static void bc2cpp_throw_step(mrb_state*,
                               Bc2cppFiberFrame* base,
-                              mrb_value resume,
+                              mrb_value,
                               Bc2cppStepOut* out) {
   Bc2cppThrowFrame* t = (Bc2cppThrowFrame*)base;
   out->kind = BC2CPP_STEP_UNWIND;
@@ -94,20 +90,18 @@ static void bc2cpp_throw_step(mrb_state* M,
 }
 
 static mrb_value bc2cpp_throw_dyn(mrb_state* M,
-                                  mrb_value self,
+                                  mrb_value,
                                   mrb_int argc,
                                   const mrb_value* argv,
-                                  mrb_value blk) {
+                                  mrb_value) {
   if (argc < 1 || !bc2cpp_current_fiber.in)
     return mrb_undef_value();
   Bc2cppFiber* fiber = bc2cpp_fiber_ptr(M, bc2cpp_current_fiber.fiber);
   for (Bc2cppFiberFrame* f = fiber ? fiber->top : nullptr; f; f = f->parent) {
     if (f->step == bc2cpp_catch_step &&
         mrb_obj_eq(M, ((Bc2cppCatchFrame*)f)->tag, argv[0])) {
-      Bc2cppThrowFrame* t =
-          (Bc2cppThrowFrame*)mrb_calloc(M, 1, sizeof(Bc2cppThrowFrame));
-      t->f.step = bc2cpp_throw_step;
-      t->f.mark = bc2cpp_throw_mark;
+      Bc2cppThrowFrame* t = bc2cpp_frame_alloc<Bc2cppThrowFrame>(
+          M, bc2cpp_throw_step, bc2cpp_throw_mark);
       t->catcher = (struct RBasic*)f;
       t->value = argc > 1 ? argv[1] : mrb_nil_value();
       bc2cpp_prologue_park(M, &t->f);
