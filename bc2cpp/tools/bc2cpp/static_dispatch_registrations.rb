@@ -268,10 +268,13 @@ module StaticDispatchRegistrations
 
   # Every C string literal in `src` that is not the name argument of a
   # registration call, with comments dropped first.
-  def c_literals(src, exempt: Set.new, pool_pure: Set.new)
+  def c_literals(src, exempt: Set.new, pool_pure: Set.new, symbol_values: false)
     body = src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
     # A pool string's value only; the same text as a folded constant (mrb_str_new_cstr) is still scanned.
     body = body.gsub(POOL_STRING_VALUE) { pool_pure.include?(unescape(Regexp.last_match(1))) ? '' : Regexp.last_match(0) }
+    # The raw spelling of a symbol made into a value (a Ruby Symbol literal in a constant or a case list): under
+    # SYMBOL_USES it looks nothing up, the same as the bc2cpp_sym form lookup_free_names counts as quiet.
+    body = body.gsub(RAW_SYMBOL_VALUE, '') if symbol_values
     table = nil
     body = body.sub(SYM_TABLE) { table = Regexp.last_match(1); '' }
     names = body.scan(STRING_LITERAL).map { |(s)| unescape(s) }
@@ -279,6 +282,7 @@ module StaticDispatchRegistrations
   end
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
+  RAW_SYMBOL_VALUE = /mrb_symbol_value\(mrb_intern_cstr\(M, "(?:[^"\\\n]|\\.)*"\)\)/
   # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant.
   POOL_STRING_VALUE = /bc2cpp_pool_str\(M, "((?:[^"\\\n]|\\.)*)"\)/
   # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`
@@ -1060,7 +1064,7 @@ module StaticDispatchRegistrations
     pool_pure = symbol_lookups ? literal_sites.keys.to_set - looked_up : Set.new
     runs.each do |gem, r|
       literals = c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?),
-                                     pool_pure: pool_pure)
+                                     pool_pure: pool_pure, symbol_values: !symbol_lookups.nil?)
       dynamic.merge(literals)
       cite(literals, "a C string literal in #{gem}'s generated code")
     end
