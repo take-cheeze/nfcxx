@@ -81,6 +81,8 @@ struct Bc2cppFiber {
   bool transferred;
   // on the chain, waiting on a fiber it transferred to (mruby: TRANSFERRED)
   bool waiting_transfer;
+  // the main context's stand-in (bc2cpp_root_fiber): no frames, always alive
+  bool root;
   // the C++ Fiber whose resume/transfer runs this one, or nil (root or mruby)
   mrb_value caller;
 };
@@ -268,7 +270,26 @@ static mrb_value bc2cpp_fiber_new(mrb_state* M, Bc2cppFiberFrame* root) {
 
 static bool bc2cpp_fiber_alive_p(mrb_state* M, mrb_value fiber) {
   Bc2cppFiber* f = bc2cpp_fiber_ptr(M, fiber);
-  return f && f->top != nullptr;
+  return f && (f->root || f->top != nullptr);
+}
+
+// The object Fiber.current answers at the root when mruby-fiber is not there to
+// supply one; it is rooted in a global because only C++ holds it.
+static mrb_value bc2cpp_root_fiber(mrb_state* M) {
+  mrb_sym key = mrb_intern_lit(M, "$__bc2cpp_root_fiber");
+  mrb_value root = mrb_gv_get(M, key);
+  if (mrb_nil_p(root)) {
+    Bc2cppFiber* fiber = (Bc2cppFiber*)mrb_calloc(M, 1, sizeof(Bc2cppFiber));
+    fiber->caller = mrb_nil_value();
+    fiber->root = true;
+    fiber->started = true;
+    struct RData* data =
+        mrb_data_object_alloc(M, M->object_class, fiber, &bc2cpp_fiber_type);
+    data->c = mrb_define_class(M, "Fiber", M->object_class);
+    root = mrb_obj_value(data);
+    mrb_gv_set(M, key, root);
+  }
+  return root;
 }
 
 // Set by a `transfer` site that turns into a yield (a transfer back to the
@@ -489,6 +510,19 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
                                      mrb_value value,
                                      bool transfer = false) {
   Bc2cppFiber* fiber = bc2cpp_fiber_ptr(M, self);
+  if (fiber->root) {
+    // A transfer from a fiber back to its resumer is compiled as a yield
+    // (bc2cpp_transfer_is_yield), so what reaches here is at the root itself,
+    // or a fiber whose resumer is not the root.
+    if (bc2cpp_current_fiber.in)
+      mrb_raise(M, bc2cpp_fiber_error_class(M),
+                transfer ? "attempt to transfer to a resuming fiber"
+                         : "double resume");
+    if (transfer)
+      return value;
+    mrb_raise(M, bc2cpp_fiber_error_class(M),
+              "attempt to resume the current fiber");
+  }
   bool current = bc2cpp_current_fiber.in &&
                  mrb_obj_eq(M, bc2cpp_current_fiber.fiber, self);
   if (transfer && current)
@@ -564,8 +598,12 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   Bc2cppFiber* me = bc2cpp_fiber_ptr(M, bc2cpp_current_fiber.fiber);
   if (!me)
     return false;
-  if (bc2cpp_fiber_own_p(recv))
+  if (bc2cpp_fiber_own_p(recv)) {
+    Bc2cppFiber* target = bc2cpp_fiber_ptr(M, recv);
+    if (target && target->root)
+      return mrb_nil_p(me->caller);
     return mrb_obj_eq(M, recv, me->caller);
+  }
   return mrb_type(recv) == MRB_TT_FIBER && mrb_nil_p(me->caller);
 }
 
@@ -675,7 +713,7 @@ static mrb_value bc2cpp_fiber_s_current(mrb_state* M, mrb_value self) {
   if (bc2cpp_current_fiber.in)
     return bc2cpp_current_fiber.fiber;
   if (!bc2cpp_fiber_orig_current)
-    return mrb_nil_value();
+    return bc2cpp_root_fiber(M);
   return bc2cpp_fiber_orig_current(M, self);
 }
 

@@ -59,7 +59,11 @@ EXTRAS = [
   ['current fiber', 'NativeFiberProbe.new.current_scenario'],
   ['wide registers', 'drain(NativeFiberProbe.new.wide_fiber)'],
   ['block parameters at the first resume', 'NativeFiberProbe.new.first_resume_scenario'],
-  ['dead fiber', 'NativeFiberProbe.new.dead_fiber_scenario']
+  ['dead fiber', 'NativeFiberProbe.new.dead_fiber_scenario'],
+  ['root fiber at the root', 'NativeFiberProbe.new.root_at_root'],
+  ['root fiber inside a fiber', 'NativeFiberProbe.new.root_in_fiber'],
+  ['root fiber transfer chain', 'NativeFiberProbe.new.root_chain'],
+  ['root fiber errors', 'NativeFiberProbe.new.root_errors']
 ].freeze
 
 WIDE = (0...250).map { |i| "      local#{i} = #{i}\n" }.join
@@ -180,6 +184,45 @@ PROBE = <<~RUBY
       [f.resume(1, 2), f.resume(:c)]
     end
 
+    def root_at_root
+      main = Fiber.current
+      [main.class, main.alive?, main.equal?(Fiber.current), main.inspect.start_with?('#<Fiber'), main.transfer(1, 2)]
+    end
+
+    def root_in_fiber
+      main = Fiber.current
+      f = Fiber.new { [main.equal?(Fiber.current), Fiber.current.equal?(main), main.alive?, Fiber.yield(:y)] }
+      [f.resume, f.resume(:r), main.equal?(Fiber.current), f.alive?]
+    end
+
+    def root_chain
+      main = Fiber.current
+      f = Fiber.new { a = main.transfer(:one); b = main.transfer(a); [:end, b] }
+      [f.transfer, f.transfer(:two), f.transfer(:three), f.alive?, main.alive?]
+    end
+
+    def root_errors
+      main = Fiber.current
+      out = []
+      begin
+        main.resume
+      rescue FiberError => e
+        out << e.message
+      end
+      f = Fiber.new do
+        begin
+          main.resume
+        rescue FiberError => e
+          Fiber.yield e.message
+        end
+        :end
+      end
+      out << f.resume
+      out << f.resume
+      out << f.alive?
+      out
+    end
+
     def dead_fiber_scenario
       f = Fiber.new { :only }
       first = f.resume
@@ -218,7 +261,6 @@ DRIVER_FULL = "#{DRIVER}#{driver_lines.join("\n")}\nputs 'end'\n"
 # interpreted run for these, and only these.
 KNOWN_GAPS = {
   'nested ensure' => 'rescue/ensure around a yield is not a step yet',
-  'fiber transfer' => 'Fiber#transfer is not implemented',
   'enumerator lazy nested' => 'Enumerator and Enumerator::Lazy need mruby-enumerator, which needs mruby-fiber',
   'custom nested each' => 'the user each takes keyword arguments, which a suspendable method cannot'
 }.freeze
