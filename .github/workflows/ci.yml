@@ -56,11 +56,12 @@ jobs:
             run: |
               NFCXX_BACKEND=qbe tests/run.sh
               NFCXX_BACKEND=gcc tests/run.sh
-          - name: C++11 and C++14 language feature probes (qbe and gcc)
+          - name: C++11 and C++14 language feature probes (qbe and gcc), mruby scripts
             run: |
               tests/cpp-features/self-test.sh
               tests/upstream/self-test.sh
               FEATURE_ROUTES="qbe gcc" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
+              tests/mruby/run.sh
           - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
             dotnet: true
             run: |
@@ -634,14 +635,14 @@ jobs:
               tests/wasm/run.sh
               NFCXX_WASM_OPT=1 tests/wasm/run.sh
               tests/mruby-ninja/run.sh
-          - name: Path B stage 3 (IR to QBE translation validation)
-            run: tests/pathb-qbe/run.sh
-          - name: Hosted Path B (NFCXX_PATH=b)
-            run: tests/pathb-qbe/hosted.sh
-          - name: C++11 and C++14 language feature probes (Path B)
-            run: FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
-          - name: EH shim (gcc, qbe and Path B)
-            run: tests/ehshim/run.sh
+          - name: Path B stage 3 (IR to QBE translation validation) and hosted Path B (NFCXX_PATH=b)
+            run: |
+              tests/pathb-qbe/run.sh
+              tests/pathb-qbe/hosted.sh
+          - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
+            run: |
+              FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
+              tests/ehshim/run.sh
           - name: Safe pointers (-fsafe-pointers, with the sweep of the Path B probes)
             run: SAFEPTR_SWEEP=1 tests/safeptr/run.sh
           - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
