@@ -1,8 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# VM/bytecode free test for bc2cpp native-only runtime.
-# Runs the native fiber check and verifies bytecode-free properties.
+# VM/bytecode free test for the closed build.
+# Runs the native fiber check (compiled Fiber programs on an mruby without mruby-fiber, with the C++ Fiber as the whole
+# Fiber) and verifies the closed build's bytecode inventory.
 
 require 'open3'
 require 'fileutils'
@@ -11,10 +12,10 @@ ROOT = File.expand_path('../..', __dir__)
 
 puts '== vm/bytecode free check =='
 
-# Run the comprehensive native fiber check
+# Run the native fiber check
 env = ENV.to_h
-# CI also runs native_fiber_check directly in parallel.
-env['BC2CPP_NATIVE_BUILD_DIR'] ||= File.join(ROOT, 'build-vm-bytecode-free')
+# CI also runs native_fiber_check directly in parallel; the no-fiber mruby it builds is shared through this directory.
+env['BC2CPP_NOFIBER_BUILD_DIR'] ||= File.join(ROOT, 'build-vm-bytecode-free')
 output, status = Open3.capture2e(env, 'ruby', File.join(ROOT, 'scripts/bc2cpp/native_fiber_check.rb'), chdir: ROOT)
 File.write('/tmp/vm_bytecode_free_check.log', output)
 STDOUT.puts output
@@ -22,8 +23,10 @@ STDOUT.flush
 unless status.success?
   abort "native_fiber_check failed:\n#{output.lines.last(40).join}"
 end
+# The wrapper is the closed build's gate: a skipped behavioural half is not a pass.
+abort 'native_fiber_check skipped its behavioural half (no full-core or no-fiber mruby)' if output.include?('SKIP')
 
-puts '  native fiber check passed (bytecode-free native runtime verified)'
+puts '  native fiber check passed (compiled Fiber programs run on an mruby without mruby-fiber)'
 
 # Also verify closed build artifacts if they exist
 inventory_path = File.join(ROOT, 'build-closed-bc2cpp/closed/bytecode-inventory.json')

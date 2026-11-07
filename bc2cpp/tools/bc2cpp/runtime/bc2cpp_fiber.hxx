@@ -478,11 +478,31 @@ static mrb_func_t bc2cpp_fiber_cfunc(mrb_state* M,
              : nullptr;
 }
 
+// Fiber.yield from code that is not a step of a C++ Fiber: a yield across a C
+// frame (inside a Fiber) or outside any fiber. Defined only when mruby-fiber is
+// not there to answer it with the same errors.
+static mrb_value bc2cpp_fiber_s_yield(mrb_state* M, mrb_value self) {
+  mrb_raise(M, bc2cpp_fiber_error_class(M),
+            bc2cpp_current_fiber.in
+                ? "can't cross C function boundary"
+                : "attempt to yield on a not resumed fiber");
+  return mrb_nil_value();
+}
+
 static void bc2cpp_fiber_define(mrb_state* M) {
   struct RClass* klass = mrb_define_class(M, "Fiber", M->object_class);
   mrb_func_t resume = bc2cpp_fiber_cfunc(M, klass, "resume");
   if (resume == bc2cpp_fiber_m_resume)
     return;
+  // Without mruby-fiber the runtime is the whole Fiber: its error class and
+  // Fiber.yield come from here.
+  if (!mrb_const_defined_at(M, mrb_obj_value(M->object_class),
+                            mrb_intern_lit(M, "FiberError")))
+    mrb_define_class(M, "FiberError", M->eStandardError_class);
+  if (!bc2cpp_fiber_cfunc(M, mrb_singleton_class_ptr(M, mrb_obj_value(klass)),
+                          "yield"))
+    mrb_define_class_method(M, klass, "yield", bc2cpp_fiber_s_yield,
+                            MRB_ARGS_ANY());
   bc2cpp_fiber_orig_resume = resume;
   bc2cpp_fiber_orig_alive_p = bc2cpp_fiber_cfunc(M, klass, "alive?");
   bc2cpp_fiber_orig_current = bc2cpp_fiber_cfunc(

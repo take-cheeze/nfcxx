@@ -1124,6 +1124,10 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     maker = "#{name}_step_maker"
     code << block_step_maker(block, "#{name}#{@entry_spec_suffix}_impl", "#{syn.owner}##{syn.name}", maker, region[:upvars] || [],
                             region[:needs_blk], region[:needs_ret] || region[:needs_brk])
+    # A compile that is run again (a probe, a variant) can put the same step in more than one method's text; the guard
+    # keeps the first definition.
+    guard = "BC2CPP_STEP_#{name}#{@entry_spec_suffix}".gsub(/[^A-Za-z0-9_]/, '_')
+    code = "#ifndef #{guard}\n#define #{guard}\n#{code}#endif // #{guard}\n"
     @block_steps[label] = { code: code, maker: maker }
   end
 
@@ -1405,8 +1409,10 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     static mrb_value bc2cpp_block_args_from(mrb_state* M, std::initializer_list<mrb_value> values) {
       return mrb_ary_new_from_values(M, (mrb_int)values.size(), values.begin());
     }
+    static void bc2cpp_fiber_define(mrb_state* M); // the fiber runtime, after this
     static void bc2cpp_resumable_init(mrb_state* M) {
       if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "Bc2cppResumable"))) return;
+      bc2cpp_fiber_define(M); // Fiber, FiberError and Fiber.yield exist before any suspendable method runs
       struct RClass* mod = mrb_define_module(M, "Bc2cppResumable");
       struct RClass* frame = mrb_define_class_under(M, mod, "Frame", M->object_class);
       MRB_SET_INSTANCE_TT(frame, MRB_TT_DATA);

@@ -1,39 +1,70 @@
 #!/usr/bin/env ruby
+# encoding: UTF-8
 # frozen_string_literal: true
 
+# NATIVE_FIBER (docs/bc2cpp-cxx-fiber.md, "Removing mruby-fiber"): Fiber programs compiled by bc2cpp run on an mruby that
+# has no mruby-fiber, with the C++ Fiber (tools/bc2cpp/runtime/bc2cpp_fiber*.hxx) as the whole Fiber. The scenario
+# program is a compiled probe class (every Fiber body in it is compiled), driven by a few lines of interpreted Ruby that
+# only call `resume` and `alive?` on the C++ Fibers.
+#
+#   generated code (needs a host mrbc)
+#     - the no-fiber libmruby really has no mruby-fiber, and the program compiles;
+#   behaviour (needs a full-core libmruby and the no-fiber one, see Bc2cppFixtureRuntime.nofiber_or_build)
+#     - the program's output on the no-fiber build equals the interpreted run on the full-core build (which has
+#       mruby-fiber), scenario by scenario, except the KNOWN_GAPS: scenarios whose Fiber body is not a step yet. A gap that
+#       starts passing fails the check, so the table only shrinks.
+#
+# Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir] [BC2CPP_MRUBY_NOFIBER=dir | BC2CPP_NOFIBER_BUILD_DIR=dir] \
+#        ruby scripts/bc2cpp/native_fiber_check.rb
+
+require 'open3'
+require 'tmpdir'
 require_relative 'fixture_runtime'
-require_relative '../../tools/bc2cpp/native_vm'
 
-reference = Bc2cppFixtureRuntime.full_or_build
-abort 'native Fiber check requires a full-core mruby build' unless reference
+# The fixture is its own closed world: the repository signatures name classes it does not define.
+ENV['BC2CPP_SIG_DIRS'] = ''
 
-root = Bc2cppFixtureRuntime::ROOT
-work = ENV.fetch('BC2CPP_NATIVE_BUILD_DIR', File.join(root, 'build-native-fiber'))
-FileUtils.mkdir_p(work)
-probe = File.join(work, 'probe')
-FileUtils.mkdir_p(File.join(probe, 'mrblib'))
-FileUtils.mkdir_p(File.join(probe, 'src'))
-fixture = File.read(File.join(__dir__, 'resumable_variants_check.rb'))
-scenarios = eval(fixture[/^SCENARIOS = (\[.*?^\])\.freeze/m, 1], binding, 'resumable_variants scenarios')
-source = +<<~'RUBY_SOURCE'
-  def show(label)
-    puts "#{label}: #{yield.inspect}"
-  rescue StandardError => e
-    puts "#{label}: raised #{e.class}: #{e.message}"
-  end
-  def drain(f)
-    out = []
-    while f.alive?
-      out << f.resume
-      GC.start
-    end
-    out
-  end
-RUBY_SOURCE
-scenarios.each do |label, fiber, plain|
-  source << "show('fiber #{label}') { drain(Fiber.new { #{fiber} }) }\nshow('plain #{label}') { #{plain} }\n"
+failures = []
+check = lambda do |what, condition|
+  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
+  failures << what unless condition
 end
-source << <<~'RUBY_SOURCE'
+
+unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
+  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
+  exit 0
+end
+
+# Scenarios that need a gem the no-fiber build leaves out (StringIO needs mruby-enumerator).
+NEEDS_ENUMERATOR = /StringIO/
+# The iterator scenarios and the helpers that give the expected output of the ones mruby's interpreter cannot (a
+# Fiber.yield in the native sort's comparison), as resumable_variants_check.rb defines them.
+fixture = File.read(File.join(__dir__, 'resumable_variants_check.rb'))
+eval(fixture[/^# array\.c's sort.*?^\]\.freeze$/m], TOPLEVEL_BINDING, 'resumable_variants scenarios')
+scenarios = SCENARIOS.reject { |label, fiber, plain| "#{label} #{fiber} #{plain}".match?(NEEDS_ENUMERATOR) }
+
+# Scenarios beyond the iterator list: [label, method of NativeFiberProbe that builds the fiber or runs the scenario,
+# driver line]. Their bodies are compiled like the others.
+EXTRAS = [
+  ['nonlocal return', 'drain(NativeFiberProbe.new.nonlocal_fiber)'],
+  ['custom nested each', 'drain(NativeFiberProbe.new.custom_each_fiber)'],
+  ['nested ensure', 'NativeFiberProbe.new.nested_ensure'],
+  ['catch throw after yield', 'drain(NativeFiberProbe.new.catch_throw_fiber)'],
+  ['nested fibers and resume values', 'NativeFiberProbe.new.nested_fibers'],
+  ['escaping closure', 'NativeFiberProbe.new.escaping_closure'],
+  ['fiber transfer', 'NativeFiberProbe.new.transfer_scenario'],
+  ['enumerator lazy nested', 'NativeFiberProbe.new.lazy_scenario'],
+  ['range sum plain', '(1..3).sum'],
+  ['range sum in fiber', 'drain(NativeFiberProbe.new.range_sum_fiber)'],
+  ['current fiber', 'NativeFiberProbe.new.current_scenario'],
+  ['wide registers', 'drain(NativeFiberProbe.new.wide_fiber)'],
+  ['block parameters at the first resume', 'NativeFiberProbe.new.first_resume_scenario'],
+  ['dead fiber', 'NativeFiberProbe.new.dead_fiber_scenario']
+].freeze
+
+WIDE = (0...250).map { |i| "      local#{i} = #{i}\n" }.join
+
+PROBE = <<~RUBY
   class NativeFiberSource
     include Enumerable
     def each(start = 1, *rest, stop: 3, &block)
@@ -44,289 +75,226 @@ source << <<~'RUBY_SOURCE'
       self
     end
   end
-  def native_nonlocal_result
-    [1, 2].each do |value|
-      Fiber.yield value
-      return :returned if value == 2
-    end
-  end
-  show('nonlocal return') { drain(Fiber.new { native_nonlocal_result }) }
-  show('C boundary stays an error') { drain(Fiber.new { [2, 1].sort! { |a, b| Fiber.yield a; a <=> b } }) }
-  show('fiber transfer') do
-    main = Fiber.current
-    f = Fiber.new { resumed = main.transfer(:yielded); [:done, resumed] }
-    [f.transfer, f.transfer(:resumed)]
-  end
-  show('custom nested each') { drain(Fiber.new { NativeFiberSource.new.map { |x| Fiber.yield x; x * 3 } }) }
-  show('nested ensure') do
-    events = []
-    result = drain(Fiber.new do
-      begin
-        NativeFiberSource.new.each do |x|
-          begin
-            Fiber.yield x
-            raise ArgumentError, 'after resume' if x == 2
-          ensure
-            events << x
-          end
-        end
-      rescue ArgumentError => e
-        events << e.message
-      ensure
-        events << :outer
-      end
-      :done
-    end)
-    [result, events]
-  end
-  show('catch throw after yield') { drain(Fiber.new { catch(:tag) { |tag| Fiber.yield tag; throw tag, :caught } }) }
-  show('nested fibers and resume values') do
-    outer = Fiber.new do |a|
-      inner = Fiber.new { |b| Fiber.yield [a, b]; :inner_done }
-      first = inner.resume(2)
-      resumed = Fiber.yield(first)
-      [resumed, inner.resume]
-    end
-    [outer.resume(1), outer.resume(3, 4)]
-  end
-  show('escaping closure') do
-    f = Fiber.new do
-      x = 1
-      capture = proc { x += 1 }
-      Fiber.yield capture
-      capture.call
-    end
-    capture = f.resume
-    GC.start
-    [capture.call, f.resume, capture.call]
-  end
-  show('enumerator lazy nested') do
-    e = NativeFiberSource.new.lazy.map { |x| x * 2 }.select { |x| x > 2 }.to_enum
-    [e.next, e.next]
-  end
-  show('range sum plain') { (1..3).sum }
-  show('range sum in fiber') { drain(Fiber.new { (1..3).sum }) }
-  show('instruction-looking string data') do
-    ['static const mrb_code pretend_iseq_0[2] = {0x00,0x00};',
-     'MRB_IREP_STATIC,pretend_iseq_0,']
-  end
-  show('arity and parameters') do
-    f = proc { |a, b = 1, *rest, key: 2, &block| }
-    [f.arity, f.parameters]
-  end
-  if respond_to?(:native_only_reject_bytecode, true)
-    show('NATIVE_ONLY root') { native_only_reject_bytecode }
-    show('NATIVE_ONLY fiber') { Fiber.new { native_only_reject_bytecode }.resume }
-  end
-  puts 'end'
-  puts "REGISTRATION #{native_fiber_compiled?}" if respond_to?(:native_fiber_compiled?, true)
-  puts "AUDIT #{native_fiber_counts.inspect}" if respond_to?(:native_fiber_counts, true)
-RUBY_SOURCE
-wide = "def native_wide_registers\n" + (0...250).map { |i| "  local#{i} = #{i}\n" }.join +
-       "  Fiber.yield [#{(0...250).map { |i| "local#{i}" }.join(", ")}]\n  [local0, local249]\nend\n" +
-       "show('wide registers') { drain(Fiber.new { native_wide_registers }) }\n"
-source = source.sub("puts 'end'", wide + "puts 'end'")
-puts '-- generate optimized core methods with native support programs'
-generated = File.join(work, 'generated')
-FileUtils.mkdir_p(generated)
-keys = %w[MRBC BC2CPP_NATIVE_VM_DIR BC2CPP_GUARD_FIBER_FREE BC2CPP_SIG_DIRS BC2CPP_SHARDS BC2CPP_SHARD_MIN_BYTES]
-saved_env = ENV.to_h.slice(*keys)
-begin
-  ENV['MRBC'] = File.join(reference, 'bin/mrbc')
-  ENV['BC2CPP_NATIVE_VM_DIR'] = File.join(work, 'host/native-vm')
-  ENV['BC2CPP_GUARD_FIBER_FREE'] = '0'
-  ENV['BC2CPP_SIG_DIRS'] = ''
-  ENV['BC2CPP_SHARDS'] = '2'
-  ENV['BC2CPP_SHARD_MIN_BYTES'] = '1'
-  code, = Bc2cppFixtureRuntime.generate(source, generated, core: true,
-                                      only_owners: %w[Array Enumerable Hash Integer Float Range String StringIO])
-  abort 'generated Fiber support still loads bytecode or Ruby source' if code.match?(/mrb_load_(?:irep|string)\(/)
-ensure
-  keys.each { |key| saved_env.key?(key) ? ENV[key] = saved_env[key] : ENV.delete(key) }
-end
-Dir[File.join(generated, 'fixture_gen_shard*.cpp')].each_with_index do |shard, index|
-  File.write(File.join(probe, "src/compiled_shard#{index}.cxx"), "#include #{shard.dump}\n")
-end
-program = File.join(probe, 'mrblib/probe.rb')
-File.write(program, source)
-File.write(File.join(probe, 'mrbgem.rake'), <<~RUBY_CONFIG)
-  MRuby::Gem::Specification.new('native-fiber-probe') do |spec|
-    spec.license = 'MIT'
-    spec.author = 'bc2cpp checks'
-  end
-RUBY_CONFIG
-FileUtils.rm_f(File.join(probe, 'src/probe.c'))
-File.write(File.join(probe, 'src/probe.cxx'), "#include #{File.join(generated, 'fixture_gen.cpp').dump}\n" + <<~'C')
-  #include <mruby.h>
-  #include <mruby/array.h>
-  #include <mruby/irep.h>
-  #include <mruby/opcode.h>
-  #include <cstdlib>
-  static mrb_int native_steps, bytecode_steps;
-  static void audit(mrb_state* mrb, const mrb_irep* irep, const mrb_code* pc, mrb_value* regs) {
-    if (irep->native) native_steps++;
-    else bytecode_steps++;
-  }
-  static mrb_value counts(mrb_state* mrb, mrb_value self) {
-    mrb_value values[] = {mrb_int_value(mrb, native_steps), mrb_int_value(mrb, bytecode_steps)};
-    return mrb_ary_new_from_values(mrb, 2, values);
-  }
-  static mrb_value reject_bytecode(mrb_state* mrb, mrb_value) {
-    static const mrb_code rejected_program[] = {OP_STOP};
-    mrb_irep* irep = mrb_add_irep(mrb);
-    irep->iseq = rejected_program;
-    irep->ilen = sizeof(rejected_program);
-    irep->nlocals = 1;
-    irep->nregs = 4;
-    irep->flags |= MRB_ISEQ_NO_FREE;
-    RProc* proc = mrb_proc_new(mrb, irep);
-    mrb_irep_decref(mrb, irep);
-    return mrb_top_run(mrb, proc, mrb_top_self(mrb), 0);
-  }
-  static mrb_value compiled_method(mrb_state* mrb, mrb_value self) {
-    struct RClass* found = mrb->array_class;
-    mrb_method_t method = mrb_method_search_vm(mrb, &found, mrb_intern_lit(mrb, "each"));
-    return mrb_bool_value(!MRB_METHOD_UNDEF_P(method) &&
-                         (!MRB_METHOD_PROC_P(method) || MRB_PROC_CFUNC_P(MRB_METHOD_PROC(method))));
-  }
-  static void check_private_drivers(mrb_state* mrb) {
-    struct RClass* owners[] = {mrb->array_class, mrb->hash_class, mrb_module_get(mrb, "Enumerable")};
-    const char* names[] = {"__bc2cpp_find_driver", "__bc2cpp_select_driver", "__bc2cpp_collect_driver"};
-    for (int i = 0; i < 3; ++i) {
-      struct RClass* found = owners[i];
-      mrb_method_t method = mrb_method_search_vm(mrb, &found, mrb_intern_cstr(mrb, names[i]));
-      if (!MRB_METHOD_UNDEF_P(method)) {
-        fprintf(stderr, "temporary iterator driver retained: %s\n", names[i]);
-        std::abort();
-      }
-    }
-  }
-  extern "C" void mrb_native_fiber_probe_gem_init(mrb_state* mrb) {
-    if (std::getenv("NATIVE_PROBE_COMPILED")) {
-      bc2cpp_gem_init(mrb);
-      check_private_drivers(mrb);
-      mrb_full_gc(mrb);
-      bc2cpp_register_owner_methods(mrb);
-      check_private_drivers(mrb);
-    }
-    mrb->code_fetch_hook = audit;
-    mrb_define_method(mrb, mrb->object_class, "native_only_reject_bytecode", reject_bytecode, MRB_ARGS_NONE());
-    mrb_define_method(mrb, mrb->object_class, "native_fiber_compiled?", compiled_method, MRB_ARGS_NONE());
-    mrb_define_method(mrb, mrb->object_class, "native_fiber_counts", counts, MRB_ARGS_NONE());
-  }
-  extern "C" void mrb_native_fiber_probe_gem_final(mrb_state* mrb) {}
-C
-config = File.join(work, 'config.rb')
-File.write(config, <<~RUBY_CONFIG)
-  require #{File.join(root, 'tools/bc2cpp/native_vm_build.rb').dump}
-  MRuby::Build.new('host') do |conf|
-    toolchain :gcc
-    %w[stdlib stdlib-ext stdlib-io math].each { |box| conf.gembox box }
-    conf.gem core: 'mruby-metaprog'
-    conf.gem core: 'mruby-method'
-    conf.gem #{File.join(root, '3rd/mruby-stringio').dump}
-    conf.gem #{probe.dump}
-    conf.cxx.flags << '-std=gnu++17'
-    conf.cxx.include_paths << #{File.join(root, 'include').dump}
-    conf.cxx.include_paths << #{File.join(root, 'mruby-rgss/src').dump}
-    enable_cxx_exception
-    enable_debug
-    [conf.cc, conf.cxx].each { |tool| tool.defines << 'MRB_USE_DEBUG_HOOK' }
-    NativeVM.configure(conf, native_only: true)
-  end
-RUBY_CONFIG
-# The probe includes freshly generated compiler output on every run.
-FileUtils.rm_f(Dir[File.join(work, 'host/mrbgems/native-fiber-probe/src/probe.{o,d}')])
-build_env = { 'MRUBY_CONFIG' => config, 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
-puts '-- build native continuations and a native-only Fiber runtime'
-# Without binary gems, `all` does not request the flags used to link an external main.
-flags_target = File.join(work, 'host/lib/libmruby.flags.mak')
-output, status = Open3.capture2e(build_env, 'rake', '-m', '-j8', 'all', flags_target, chdir: File.join(root, '3rd/mruby'))
-File.write(File.join(work, 'build.log'), output)
-abort output.lines.last(35).join unless status.success?
-expected, expected_status = Open3.capture2e(File.join(reference, 'bin/mruby'), program)
-File.write(File.join(work, 'interpreted.log'), expected)
-abort "interpreted fixture failed:\n#{expected}" unless expected_status.success?
-main = File.join(work, 'native_main.cxx')
-File.write(main, <<~'CPP')
-  #include <mruby.h>
-  int main() {
-    mrb_state* mrb = mrb_open();
-    if (!mrb) return 1;
-    if (mrb->exc) { mrb_print_error(mrb); mrb_close(mrb); return 1; }
-    mrb_close(mrb);
-    return 0;
-  }
-CPP
-host = File.join(work, 'host')
-binary = File.join(work, 'native-main')
-flags = %w[-std=c++17 -fexceptions] + Bc2cppFixtureRuntime.library_defines(host)
-abort 'native-only test host failed to link' unless Bc2cppCxx.system(*flags, "-I#{host}/include", "-I#{root}/3rd/mruby/include",
-                                                                  main, "#{host}/lib/libmruby.a", '-lm', '-o', binary)
-symbols, symbol_status = Open3.capture2e('nm', '-g', '--defined-only', "#{host}/lib/libmruby.a")
-abort symbols unless symbol_status.success?
-forbidden = symbols.lines.grep(/\b(?:mrb_(?:parse_\w+|generate_code|load_(?:n?string\w*|file\w*|irep\w*|exec)|read_irep\w*|dump_irep\w*|codedump\w*))$/)
-abort "native-only archive retains compiler/bytecode APIs:\n#{forbidden.join}" unless forbidden.empty?
-preprocessed = File.read(File.join(host, 'src/vm-cxx.pi'))
-abort 'native-only VM retains bytecode decoding' if preprocessed.match?(/\boptable\b|L_OP_EXT[123]_BODY|pc\s*=\s*ci->pc\s*\+\s*1/)
-puts '  native-only archive omits source compilation, binary loaders/dumpers and instruction decoding'
-[false, true].each do |optimized|
-  env = { 'NATIVE_PROBE_COMPILED' => optimized ? '1' : nil }
-  actual, status = Open3.capture2e(env, binary)
-  File.write(File.join(work, optimized ? 'optimized.log' : 'native.log'), actual)
-  abort "native fixture failed:\n#{actual}" unless status.success?
-  audit = actual[/^AUDIT \[(\d+), (\d+)\]$/, 0]
-  abort 'native execution audit is missing' unless audit
-  abort "unexpected audit: #{audit}" unless audit.match?(/\[[1-9]\d*, 0\]/)
-  abort 'compiled wrapper registration was not exercised' unless actual.include?("REGISTRATION #{optimized}\n")
-  %w[root fiber].each do |context|
-    required = "NATIVE_ONLY #{context}: raised RuntimeError: bytecode execution in a native-only runtime\n"
-    abort "bytecode was not rejected in #{context}: #{actual}" unless actual.include?(required)
-  end
-  actual = actual.lines.reject { |line| line.start_with?('AUDIT ', 'REGISTRATION ', 'NATIVE_ONLY ') }.join
-  # XFAIL (exact configuration only: the optimized build): cases the closed build does not match yet, because dead-method
-  # removal leaves Enumerable#sum out of it (core_left_out). Any other differing case still fails. A listed case that
-  # matches is reported (XPASS), not failed, so the entry can be removed once it stays green.
-  xfail = optimized ? ['range sum plain', 'range sum in fiber', 'plain Enumerable#sum', 'fiber Enumerable#sum'] : []
-  differing = expected.lines.zip(actual.lines).reject { |a, b| a == b }
-  unexpected = differing.reject { |a, _| xfail.include?(a.split(': ', 2).first) }
-  unless unexpected.empty?
-    unexpected.first(12).each { |a, b| warn "interpreted: #{a}native: #{b}" }
-    abort "native Fiber behavior differs from interpreted mruby (optimized=#{optimized})"
-  end
-  xpass = xfail.reject { |label| differing.any? { |a, _| a.start_with?("#{label}: ") } }
-  puts "XFAIL (optimized=#{optimized}): #{xfail - xpass}" unless (xfail - xpass).empty?
-  warn "XPASS (optimized=#{optimized}): #{xpass.join(', ')}; remove them from XFAIL" unless xpass.empty?
-  abort 'native fixture did not finish' unless actual.lines.last == "end\n"
 
-  puts "  optimized=#{optimized}: #{audit}; all results match interpreted mruby"
+  class NativeFiberProbe
+#{scenarios.each_with_index.map { |(_, fiber, _), i| "    def fiber_#{i}\n      Fiber.new { #{fiber} }\n    end\n" }.join("\n")}
+    def native_nonlocal_result
+      [1, 2].each do |value|
+        Fiber.yield value
+        return :returned if value == 2
+      end
+    end
+
+    def nonlocal_fiber
+      Fiber.new { native_nonlocal_result }
+    end
+
+    def custom_each_fiber
+      Fiber.new { NativeFiberSource.new.map { |x| Fiber.yield x; x * 3 } }
+    end
+
+    def nested_ensure
+      events = []
+      f = Fiber.new do
+        begin
+          NativeFiberSource.new.each do |x|
+            begin
+              Fiber.yield x
+              raise ArgumentError, 'after resume' if x == 2
+            ensure
+              events << x
+            end
+          end
+        rescue ArgumentError => e
+          events << e.message
+        ensure
+          events << :outer
+        end
+        :done
+      end
+      result = []
+      while f.alive?
+        result << f.resume
+      end
+      [result, events]
+    end
+
+    def catch_throw_fiber
+      Fiber.new { catch(:tag) { |tag| Fiber.yield tag; throw tag, :caught } }
+    end
+
+    def nested_fibers
+      outer = Fiber.new do |a|
+        inner = Fiber.new { |b| Fiber.yield [a, b]; :inner_done }
+        first = inner.resume(2)
+        resumed = Fiber.yield(first)
+        [resumed, inner.resume]
+      end
+      [outer.resume(1), outer.resume(3, 4)]
+    end
+
+    def escaping_closure
+      f = Fiber.new do
+        x = 1
+        capture = proc { x += 1 }
+        Fiber.yield capture
+        capture.call
+      end
+      capture = f.resume
+      GC.start
+      [capture.call, f.resume, capture.call]
+    end
+
+    def transfer_scenario
+      main = Fiber.current
+      f = Fiber.new { resumed = main.transfer(:yielded); [:done, resumed] }
+      [f.transfer, f.transfer(:resumed)]
+    end
+
+    def lazy_scenario
+      e = NativeFiberSource.new.lazy.map { |x| x * 2 }.select { |x| x > 2 }.to_enum
+      [e.next, e.next]
+    end
+
+    def range_sum_fiber
+      Fiber.new { (1..3).sum }
+    end
+
+    def current_scenario
+      f = Fiber.new { Fiber.yield Fiber.current; :done }
+      first = f.resume
+      [first.equal?(f), f.resume, f.alive?]
+    end
+
+    def native_wide_registers
+#{WIDE}      Fiber.yield [#{(0...250).map { |i| "local#{i}" }.join(', ')}]
+      [local0, local249]
+    end
+
+    def wide_fiber
+      Fiber.new { native_wide_registers }
+    end
+
+    def first_resume_scenario
+      f = Fiber.new { |a, b| c = Fiber.yield [a, b]; [c, a, b] }
+      [f.resume(1, 2), f.resume(:c)]
+    end
+
+    def dead_fiber_scenario
+      f = Fiber.new { :only }
+      first = f.resume
+      begin
+        f.resume
+      rescue FiberError => e
+        [first, f.alive?, e.class]
+      end
+    end
+  end
+RUBY
+
+DRIVER = <<~'RUBY'
+  def show(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue StandardError => e
+    puts "#{label}: raised #{e.class}: #{e.message}"
+  end
+
+  def drain(f)
+    out = []
+    while f.alive?
+      out << f.resume
+      GC.start
+    end
+    out
+  end
+RUBY
+driver_lines = scenarios.each_with_index.flat_map do |(label, _, plain), i|
+  ["show('fiber #{label}') { drain(NativeFiberProbe.new.fiber_#{i}) }", "show('plain #{label}') { #{plain} }"]
 end
-files = Dir[File.join(work, 'host/{mrblib,mrbgems}/**/*.c')]
-abort 'no generated programs to audit' if files.empty?
-retained = files.select { |file| File.read(file).match?(/^static const mrb_code \w+_iseq_/) }
-abort "retained instruction arrays: #{retained.join(', ')}" unless retained.empty?
-puts "  #{scenarios.size * 2} iterator scenarios plus nested calls, ensure, closures, catch/throw and Enumerator match"
-puts '  no bytecode instruction executed in root or Fiber contexts; injected bytecode rejected in both'
-strict_config = File.read(config)
-[false, true].each do |native_only|
-  File.write(config, strict_config.sub('native_only: true', "native_only: #{native_only}"))
-  output, status = Open3.capture2e(build_env, 'rake', '-m', '-j8', 'all', chdir: File.join(root, '3rd/mruby'))
-  File.write(File.join(work, "mode-#{native_only}.log"), output)
-  abort "runtime mode rebuild failed:\n#{output.lines.last(35).join}" unless status.success?
-  symbols, status = Open3.capture2e('nm', '-g', '--defined-only', "#{host}/lib/libmruby.a")
-  abort symbols unless status.success?
-  loaders = symbols.match?(/\bT mrb_load_irep$/)
-  abort "stale binary loader objects after native_only=#{native_only}" unless loaders == !native_only
-  decoded = File.read(File.join(host, 'src/vm-cxx.pi')).include?('L_OP_EXT1_BODY:')
-  abort "stale instruction decoder after native_only=#{native_only}" unless decoded == !native_only
-end
-puts '  switching mixed/native-only modes rebuilds loaders and decoding without stale archive members'
-begin
-  File.write(config, strict_config.sub("conf.gem core: 'mruby-method'", "conf.gem core: 'mruby-method'\n  conf.gem core: 'mruby-compiler'"))
-  output, status = Open3.capture2e(build_env, 'rake', '-P', chdir: File.join(root, '3rd/mruby'))
-  abort 'a native-only runtime accepted the source compiler' if status.success? || !output.include?('native-only runtime cannot include mruby-compiler')
+driver_lines += EXTRAS.map { |label, call| "show('#{label}') { #{call} }" }
+DRIVER_FULL = "#{DRIVER}#{driver_lines.join("\n")}\nputs 'end'\n"
+
+# Scenarios whose Fiber body cannot be a step yet: label => why. The output of the no-fiber build differs from the
+# interpreted run for these, and only these.
+KNOWN_GAPS = {
+  'nested ensure' => 'rescue/ensure around a yield is not a step yet',
+  'catch throw after yield' => 'catch/throw across a yield is not a step yet',
+  'escaping closure' => 'a closure over a Fiber body local outlives the frame',
+  'fiber transfer' => 'Fiber#transfer is not implemented',
+  'nested fibers and resume values' => 'a Fiber.new inside a Fiber body is not a C++ Fiber yet',
+  'enumerator lazy nested' => 'Enumerator and Enumerator::Lazy need mruby-enumerator, which needs mruby-fiber',
+  'custom nested each' => 'the user each takes keyword arguments, which a suspendable method cannot'
+}.freeze
+
+OWNERS = %w[NativeFiberSource NativeFiberProbe Array Enumerable Hash Integer Float Range String].freeze
+
+full = Bc2cppFixtureRuntime.full_or_build
+nofiber = Bc2cppFixtureRuntime.nofiber_or_build
+dir = Dir.mktmpdir('bc2cpp-native-fiber')
+at_exit { FileUtils.remove_entry(dir) }
+
+puts '-- generated code'
+# BC2CPP_GUARD_FIBER_FREE=0 keeps every guard, so each listed method takes its variant in this probe (the probe is not
+# the whole program).
+saved_guard = ENV['BC2CPP_GUARD_FIBER_FREE']
+ENV['BC2CPP_GUARD_FIBER_FREE'] = '0'
+code, err = begin
+  # The core mrblib of the gems the no-fiber build has: not mruby-enumerator nor mruby-stringio, which need mruby-fiber.
+  core_gems = BC2CPP_CANONICAL_CORE_GEMS - Bc2cppFixtureRuntime::NOFIBER_GEMS - %w[mruby-stringio]
+  Bc2cppFixtureRuntime.generate(PROBE, dir, core: true, core_gems: core_gems, only_owners: OWNERS)
 ensure
-  File.write(config, strict_config)
+  saved_guard ? ENV['BC2CPP_GUARD_FIBER_FREE'] = saved_guard : ENV.delete('BC2CPP_GUARD_FIBER_FREE')
 end
-puts '  native-only configuration rejects a source compiler gem'
-puts 'bc2cpp native Fiber check: PASS'
+check.call('the program compiles and registers a Fiber body step', code.include?('FIBER_BODY_STEP') || code.include?('bc2cpp_fiber_new_'))
+check.call('no generated code loads bytecode or Ruby source for a Fiber', !code.match?(/mrb_load_(?:irep|string)\(/))
+
+if nofiber.nil? || full.nil? || ENV['CC_GENERATED_ONLY'] == '1'
+  puts '  SKIP behavioural comparison: needs a full-core libmruby and a no-fiber one (BC2CPP_MRUBY_FULL, BC2CPP_MRUBY_NOFIBER, or rake, g++ and 3rd/mruby)'
+else
+  symbols, status = Open3.capture2e('nm', '-g', '--defined-only', File.join(nofiber, 'lib/libmruby.a'))
+  check.call('the no-fiber libmruby has no mruby-fiber', status.success? && !symbols.match?(/\bmrb_fiber_\w+|\bfiber_(?:resume|yield|alive)\w*\b/i))
+
+  puts '-- the program on mruby without mruby-fiber, against interpreted mruby with it'
+  body = <<~CPP
+    static int scenario(mrb_state* M) {
+      std::fflush(stdout);
+      const char* src = R"RBC(#{DRIVER_FULL})RBC";
+      mrb_load_string(M, src);
+      std::fflush(stdout);
+      if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+      return 0;
+    }
+  CPP
+  reference_built, reference_output = Bc2cppFixtureRuntime.run(dir, err, OWNERS, body, build: full, full: true)
+  check.call('the program builds and runs on the full-core mruby (the reference)', reference_built)
+  native_built, native_output = Bc2cppFixtureRuntime.run(dir, err, OWNERS, body, build: nofiber, full: true)
+  check.call('the program builds and links against the no-fiber mruby', native_built)
+  expected = Bc2cppFixtureRuntime.sections(reference_output)['interpreted']
+  # A scenario with its own expected "fiber" line (the native sort) replaces the interpreter's FiberError.
+  scenarios.each_with_index { |(_, _, _, line), i| expected[2 * i] = line.call if expected && line }
+  actual = Bc2cppFixtureRuntime.sections(native_output)['compiled']
+  check.call('both runs reach the end', expected&.last == 'end' && actual&.last == 'end')
+  if expected && actual
+    label_of = ->(line) { line.split(': ', 2).first }
+    gap_label = lambda do |line|
+      label = label_of.call(line)
+      KNOWN_GAPS.key?(label) ? label : KNOWN_GAPS.keys.find { |gap| label == "fiber #{gap}" }
+    end
+    actual_by_label = actual.group_by(&label_of)
+    differing = expected.reject { |line| actual.include?(line) }
+    unexpected = differing.reject { |line| gap_label.call(line) }
+    unexpected.first(12).each { |line| puts "    interpreted: #{line}\n    native:      #{actual_by_label[label_of.call(line)]&.first}" }
+    check.call("the output equals interpreted mruby over #{expected.size} lines except the known gaps", unexpected.empty?)
+    puts "    known gaps: #{differing.size - unexpected.size} lines (#{KNOWN_GAPS.keys.join(', ')})"
+    stale = KNOWN_GAPS.keys.select { |gap| expected.none? { |line| label_of.call(line) == gap && !actual.include?(line) } }
+    check.call("every known gap still differs (#{stale.join(', ')} pass now: remove them)", stale.empty?)
+  end
+  puts native_output.lines.last(20).join unless native_built && actual
+end
+
+if failures.empty?
+  puts 'bc2cpp native Fiber check: PASS'
+else
+  warn "bc2cpp native Fiber check: #{failures.size} failure(s)"
+  exit 1
+end

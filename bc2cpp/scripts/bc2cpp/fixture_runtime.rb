@@ -87,6 +87,48 @@ module Bc2cppFixtureRuntime
     end
   RUBY
 
+  # The full-core gems without mruby-fiber and the gems that need it (mruby-enumerator, which mruby-set, enum-chain,
+  # enum-lazy and the 3rd-party mruby-stringio depend on): the closed build's shape once the C++ Fiber is the only
+  # Fiber (docs/bc2cpp-cxx-fiber.md, "Removing mruby-fiber").
+  NOFIBER_GEMS = %w[mruby-fiber mruby-enumerator mruby-set mruby-enum-chain mruby-enum-lazy mruby-os-memsize].freeze
+  NOFIBER_CORE_CONFIG = <<~RUBY
+    MRuby::Build.new('host') do |conf|
+      toolchain :gcc
+      excluded = %w[mruby-bin-debugger mruby-test mruby-sleep #{NOFIBER_GEMS.join(' ')}]
+      Dir.glob("\#{root}/mrbgems/mruby-*/mrbgem.rake") do |x|
+        g = File.basename(File.dirname(x))
+        conf.gem core: g unless excluded.include?(g)
+      end
+      conf.cxx.flags << '-std=gnu++17'
+      enable_cxx_exception
+      enable_debug
+      [conf.cc, conf.cxx].each { |t| t.flags = t.flags.flatten.delete_if { |v| v == '-O0' } << '-O1' }
+    end
+  RUBY
+
+  # A full-core libmruby without mruby-fiber (lib/libmruby.a and include/): BC2CPP_MRUBY_NOFIBER, else one built here
+  # (BC2CPP_NOFIBER_BUILD_DIR keeps it for the next check). nil without rake, g++ or 3rd/mruby.
+  def nofiber_or_build
+    existing = build_dir('BC2CPP_MRUBY_NOFIBER', 'libmruby.a')
+    return existing if existing
+    return nil unless system('rake', '--version', out: File::NULL, err: File::NULL) && compiler? &&
+                      File.exist?(File.join(ROOT, '3rd/mruby/Rakefile'))
+
+    work = ENV['BC2CPP_NOFIBER_BUILD_DIR'] || (@nofiber_build_dir ||= Dir.mktmpdir('bc2cpp_nofiber'))
+    host = File.join(work, 'host')
+    return host if File.exist?(File.join(host, 'lib/libmruby.a'))
+
+    FileUtils.mkdir_p(File.join(work, 'repos/host'))
+    FileUtils.ln_sf(File.join(ROOT, '3rd/mgem-list'), File.join(work, 'repos/host/mgem-list'))
+    File.write(File.join(work, 'config.rb'), NOFIBER_CORE_CONFIG)
+    env = { 'MRUBY_CONFIG' => File.join(work, 'config.rb'), 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
+    out, status = Open3.capture2e(env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: File.join(ROOT, '3rd/mruby'))
+    File.write(File.join(work, 'build.log'), out)
+    raise "no-fiber mruby build failed:\n#{out.lines.last(30).join}" unless status.success?
+
+    host
+  end
+
   # A full-core libmruby build dir (lib/libmruby.a and include/), for fixtures that need Fiber,
   # Integer#step and the rest of mrblib: BC2CPP_MRUBY_FULL, else one built here with rake
   # (minutes; BC2CPP_FULL_BUILD_DIR keeps it for the next check). nil without rake, g++ or
@@ -140,7 +182,7 @@ module Bc2cppFixtureRuntime
   # refuses keeps its `#error` in the output instead of being dropped whole --
   # what a check that asserts on a refusal needs.
   def generate(source, dir, only_owners: nil, path: 'fixture.rb', extra: [],
-               native: [], foreign: [], build_gems: [], drop_gems: [], drop_native: [], core: false, skip_unsupported: true,
+               native: [], foreign: [], build_gems: [], drop_gems: [], drop_native: [], core: false, core_gems: :canonical, skip_unsupported: true,
                owner_variants: nil)
     src = File.join(dir, path)
     FileUtils.mkdir_p(File.dirname(src))
@@ -169,7 +211,7 @@ module Bc2cppFixtureRuntime
       'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).merge(build_gems.to_h).except(*drop_gems).map { |n, d| "#{n}=#{d}" })
     ), ROOT)
       env['BC2CPP_COLLECTION_EXPORTS'] = '1' if Bc2cppFixtureRuntime.collection_exports_linked
-    core_srcs = core ? core_compiled_mrblib_srcs(ROOT) : []
+    core_srcs = core ? core_compiled_mrblib_srcs(ROOT, core_gems) : []
     if owner_variants
       raise ArgumentError, 'owner variants require their own owner selection' if only_owners
 
