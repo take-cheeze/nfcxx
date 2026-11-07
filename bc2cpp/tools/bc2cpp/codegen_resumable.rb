@@ -1226,7 +1226,8 @@ class CodeGen
     return true if (block.reps || []).any? { |child| (c = child && @ireps[child]) && deep_fiber_yield?(c, Set.new) }
 
     # A `break` out of a call to a method that can suspend: the callee's frame is CALLed, so the break unwinds frames.
-    return true if region[:needs_brk] && !fiber_new_site?(region) && @fiber_yield_names&.include?(region[:name])
+    return true if region[:needs_brk] && !fiber_new_site?(region) && @fiber_yield_names&.include?(region[:name]) &&
+                   (@rsm_variant || fiber_body_irep?(region[:parent_irep]) || @fiber_roots&.include?(region[:parent_irep].label))
     return true if generator_irep?(block) && program.instructions_with_op(:SEND, :SEND0).any? { |i| YIELDER_SENDS.include?(i.sym) }
 
     program.instructions_with_op(:SSEND, :SSEND0, :SSENDB).any? { |insn| yielding_call_name?(insn.sym) }
@@ -1238,11 +1239,22 @@ class CodeGen
 
   # Is +irep+ a literal block of `Enumerator.new`, or nested in one?
   def generator_irep?(irep)
-    @generator_labels ||= begin
+    literal_block_labels_of('Enumerator').include?(irep.label)
+  end
+
+  # Is +irep+ a literal `Fiber.new` block, or nested in one?
+  def fiber_body_irep?(irep)
+    literal_block_labels_of('Fiber').include?(irep.label)
+  end
+
+  # The labels of the literal blocks of `Const.new { }` calls and every block nested in them.
+  def literal_block_labels_of(const_name)
+    @literal_block_labels ||= {}
+    @literal_block_labels[const_name] ||= begin
       labels = Set.new
       @ireps.each_value do |parent|
         BytecodeIR.for(parent).adjacent_pairs(:BLOCK, %i[SENDB]) do |insn, paired, sendb_idx|
-          next unless paired.sym == 'new' && insn.block_index && const_receiver?(parent, sendb_idx - 1, paired.reg, 'Enumerator')
+          next unless paired.sym == 'new' && insn.block_index && const_receiver?(parent, sendb_idx - 1, paired.reg, const_name)
 
           stack = [parent.reps[insn.block_index.to_i]]
           until stack.empty?
@@ -1253,7 +1265,6 @@ class CodeGen
       end
       labels
     end
-    @generator_labels.include?(irep.label)
   end
 
   # `y << v` / `y.yield v` in a generator block of a step: a dynamic call, so Yielder#<< parks its frame and the consumer's
