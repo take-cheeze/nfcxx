@@ -360,6 +360,9 @@ class CodeGen
         # `Klass.new` on the proven class, and native_constructor_safe proves `new` is Class#new there:
         # mrb_obj_new is that allocate + dispatched #initialize (no block on a positional SEND).
         shape_fallback = lambda do |klass_expr|
+          direct = direct_initialize_line('bc2cpp_new_obj', argv, d)
+          next "{ mrb_value bc2cpp_new_obj = bc2cpp_direct_alloc(M, #{klass_expr}); #{direct}#{RegName[d]} = bc2cpp_new_obj; }\n" if direct
+
           args = argv.empty? ? '0, NULL' : "#{n}, bc2cpp_new_args"
           decl = argv.empty? ? '' : "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} }; "
           "{ #{decl}#{RegName[d]} = mrb_obj_new(M, #{klass_expr}, #{args}); }\n"
@@ -551,15 +554,12 @@ class CodeGen
                                   exact_constructor_chain?(known))
       if known && generic_constructor_safe
         # GENERIC_NEW_DIRECT: the allocation Class#new makes (mrb_instance_alloc, bc2cpp_direct_alloc), then the
-        # initialize it dispatches, as a closed-world owner call over every definer of initialize. A block, more
-        # arguments than the owner call takes, or a native definer the owner list cannot name keeps mrb_obj_new.
-        init_owners = @call_block_expr.nil? && argv.size <= 16 ? generic_new_initialize_owners : nil
-        construction = if init_owners
-                         ini = outside_owner_call_line(d, 'bc2cpp_new_obj', 'initialize', argv, init_owners)
-                               .sub(/\A#{Regexp.escape(RegName[d])} = /, 'bc2cpp_new_ini = ')
+        # initialize it dispatches, as a closed-world owner call over every definer of initialize. A native definer
+        # the owner list cannot name, or more arguments than the owner call takes, keeps mrb_obj_new.
+        direct = direct_initialize_line('bc2cpp_new_obj', argv, d)
+        construction = if direct
                          "    mrb_value bc2cpp_new_obj = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-                           "    mrb_value bc2cpp_new_ini;\n" \
-                           "    #{ini}\n" \
+                           "    #{direct}" \
                            "    #{RegName[d]} = bc2cpp_new_obj;\n"
                        elsif argv.empty?
                          "    #{RegName[d]} = mrb_obj_new(M, mrb_class_ptr(#{recv}), 0, NULL);\n"
@@ -1898,6 +1898,18 @@ class CodeGen
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
   # is a proven fresh instance, so its own class method may be selected too.
   # accessor: true also answers an attr_reader (no irep), which only the result-class flow reads.
+  # GENERIC_NEW_DIRECT: the statements of a construction whose object is `obj` (already allocated with
+  # bc2cpp_direct_alloc): initialize, dispatched as a closed-world owner call over the definers the owner list names,
+  # its result in bc2cpp_new_ini. nil when that list cannot be built or the arguments do not fit the owner call.
+  def direct_initialize_line(obj, argv, dest)
+    owners = generic_new_initialize_owners
+    return nil unless owners && argv.size <= 16
+
+    line = outside_owner_call_line(dest, obj, 'initialize', argv, owners)
+           .sub(/\A#{Regexp.escape(RegName[dest])} = /, 'bc2cpp_new_ini = ')
+    "mrb_value bc2cpp_new_ini;\n#{line}\n"
+  end
+
   # The classes whose instance method `initialize` may answer a construction: every Ruby definer in the registry and
   # BasicObject (mruby's own initialize). nil when a native definer's class is not known (the owner list could not
   # name it, so the construction keeps mrb_obj_new).

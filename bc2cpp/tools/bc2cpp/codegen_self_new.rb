@@ -64,14 +64,17 @@ module SelfNewConstruct
 
     args = argv.empty? ? '0, NULL' : "#{argv.size}, bc2cpp_sna"
     branches = arms.map do |k, call|
-      # A class whose initialize is not one direct call is still built by Class#new itself: allocation plus the
-      # dispatched initialize (mrb_obj_new), on the class the arm proved.
+      # A class whose initialize is not one direct call is built as Class#new builds it, on the class the arm proved:
+      # the allocation, then the owner-listed initialize (GENERIC_NEW_DIRECT), else mrb_obj_new.
       # A class with a `def self.new` of its own (named, so listed) takes it through the owner call.
       build = case call
               when String then "bc2cpp_sn = bc2cpp_direct_alloc(M, bc2cpp_snc);\n      #{format(call, obj: 'bc2cpp_sn')}"
               when :own_new
                 "bc2cpp_sn = #{outside_owner_call_line(d, recv, 'new', argv, self_new_class_new_owners).sub(/\Ar#{d} = /, '')}"
-              else "bc2cpp_sn = mrb_obj_new(M, bc2cpp_snc, #{args});"
+              else
+                direct = direct_initialize_line('bc2cpp_sn', argv, d)
+                direct ? "bc2cpp_sn = bc2cpp_direct_alloc(M, bc2cpp_snc);\n      #{direct}" \
+                       : "bc2cpp_sn = mrb_obj_new(M, bc2cpp_snc, #{args});"
               end
       "if (bc2cpp_snc == #{owner_class_ptr_expr(k)}) {\n      #{build}\n    } else "
     end.join
