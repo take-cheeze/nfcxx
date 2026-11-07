@@ -803,6 +803,45 @@ module StaticDispatchRegistrations
     out
   end
 
+  # NATIVE_DEFINITION_NAMES (closed only): a name a native file only defines looks nothing up.
+  #   - the name operand of MRB_MT_ENTRY(fn, sym, flags), a core ROM method's definition (like a registration's name);
+  #   - a #define's formal parameters (`#define MRB_SYM_E(name) MRB_SYM_E__##name`): the actual is counted at its
+  #     call site, where naming_macros has made the formal a name. String literals in a body stay: they are names.
+  DEFINE_DIRECTIVE = /^[ \t]*#[ \t]*define[ \t]+\w+\(([^)\n]*)\)((?:[^\n]*\\\n)*[^\n]*)/
+
+  def blank_native_definitions(text)
+    blank_define_formals(blank_mt_entry_names(text))
+  end
+
+  def blank_mt_entry_names(text)
+    out = nil
+    text.scan(/\bMRB_MT_ENTRY\s*\(/) do
+      spans = call_arg_spans(text, Regexp.last_match.end(0) - 1)
+      next unless spans && spans.size >= 2
+
+      from, to = spans[1]
+      next unless text[from...to].strip.match?(REGISTRATION_NAME_ARG)
+
+      (out ||= text.dup)[from...to] = ' ' * (to - from)
+    end
+    out || text
+  end
+
+  def blank_define_formals(text)
+    text.gsub(DEFINE_DIRECTIVE) do
+      whole = Regexp.last_match(0)
+      formals = Regexp.last_match(1).split(',').map(&:strip).flat_map do |f|
+        f.end_with?('...') ? [f.delete_suffix('...').strip, '__VA_ARGS__'] : [f]
+      end.reject(&:empty?)
+      open = whole.index('(')
+      # A string literal is kept whole, so a formal spelled inside "..." stays a name.
+      whole[open..] = whole[open..].gsub(/"(?:[^"\\\n]|\\.)*"|\b\w+\b/) do |t|
+        formals.include?(t) ? ' ' * t.length : t
+      end
+      whole
+    end
+  end
+
   # NATIVE_NAME_TOKENS (closed only): C reaches a method by name only through a string ("name" for
   # mrb_funcall, mrb_intern_lit, a name table), a presym macro (MRB_SYM(name), MRB_SYM_Q(name), ...) or a macro
   # that makes a name of its argument (naming_macros). A bare C identifier spelled like a method name (a local
@@ -810,7 +849,7 @@ module StaticDispatchRegistrations
   # Comments are left out (strip_c_comments): a name in one (`/* "count" is "width" */`) is never compiled.
   # `text_tokens`: also receives a naming macro's arguments, which the macro may suffix itself (`#name "="`).
   def native_name_tokens(text, tokens, macros, text_tokens: nil)
-    text = blank_registration_names(strip_c_comments(text))
+    text = blank_native_definitions(blank_registration_names(strip_c_comments(text)))
     text.scan(STRING_LITERAL) { |(s)| tokens << unescape(s) }
     unless macros.empty?
       text.scan(/\b(?:#{macros.map { |m| Regexp.escape(m) }.join('|')})\s*\(([^()]*)\)/) do |(args)|
