@@ -125,9 +125,8 @@ class CodeGen
       elsif %i[TDEF SDEF].include?(insn.op)
         registration = class_body_registration(insn, irep, owner)
         if registration.nil? && irep.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb')
-          # An mruby-enumerator def the compiler cannot express (SKIP_UNSUPPORTED, e.g. Enumerator#initialize_copy's
-          # instance_eval block) has no body anywhere: the closed build loads no mrblib bytecode. Refusing the body would lose
-          # the class with it, while the compiled Enumerator methods register on it (ENUMERATOR_FIBER), so only the method is missing.
+          # A def the compiler cannot express (SKIP_UNSUPPORTED, e.g. Enumerator#initialize_copy's instance_eval block) is just
+          # missing: refusing the body would lose the whole class, whose compiled methods register on it (ENUMERATOR_FIBER).
           lines << "  // #{owner}##{insn.sym} has no compiled body (unsupported): the class body still runs\n"
           lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
           next
@@ -168,9 +167,8 @@ class CodeGen
         # statically dispatched def has no method to set it on: nothing to run here.
         lines << "  // #{insn.sym} (visibility) left to the method registrations\n"
       elsif %i[SSEND SSEND0].include?(insn.op)
-        # A self send (include, extend, prepend, attr_accessor, ...) runs by name on the class being defined. The
-        # VM-free build has no residual bytecode to run it, so it is called here; a by-name call needs no owner-call
-        # helper, which the gem emits only for its compiled methods.
+        # A self send (include, extend, prepend, attr_accessor, ...) runs by name on the class being defined; the VM-free build
+        # has no residual bytecode to run it.
         n = insn.op == :SSEND0 ? 0 : (insn.argc || 0)
         args = (1..n).map { |k| "r#{insn.reg + k}" }
         array = args.empty? ? 'nullptr' : "bc2cpp_ssend_args"
@@ -277,10 +275,9 @@ class CodeGen
   # [{ path:, code: }]. A unit is the CLASS or MODULE and its compiled body; the function it adds creates the class the
   # way vm.c's OP_CLASS and OP_MODULE do with the Object base and a nil superclass, then calls the body. A unit whose
   # superclass is not a literal nil, whose path is opened twice, or whose body refuses is left out: the VM still runs it.
-  # CONST_RESOLVE: a constant read (GETCONST / GETMCNST) must name a constant the build binds before the unit runs. The
-  # known names are the bytecode IR's constant table (every SETCONST binding, with BytecodeIR::ConstantFacts) plus the
-  # names the native sources define. Unresolved reads are collected here, not raised; compile_top_class_units fails once
-  # at the end of the phase. CodeGen.known_const_names nil means no check (checks that call the compiler alone).
+  # CONST_RESOLVE: a constant read (GETCONST / GETMCNST) must name a constant the build binds before the unit runs (the IR's
+  # constant table plus the names native sources define). Unresolved reads are collected and compile_top_class_units
+  # fails once at the phase end; CodeGen.known_const_names nil means no check.
   def check_const_reads(program, owner)
     known = CodeGen.known_const_names
     return unless known
@@ -356,10 +353,9 @@ class CodeGen
     end
   end
 
-  # TOP_LEVEL_STATEMENTS: the top-level constant and global writes of a gem's root body, compiled as C++ statements in one
-  # function that gem_init calls after the class units. A statement is the run of root instructions that ends in a
-  # SETCONST or SETGV, after the previous statement; a class statement (its EXEC) ends the run too. Self is the top-level
-  # object; a constant is set on Object, a global in the global table. Returns the function's C text, or '' for none.
+  # TOP_LEVEL_STATEMENTS: the top-level constant and global writes of a gem's root body, as C++ statements in one function
+  # gem_init calls after the class units. A statement is the run of root instructions ending in a SETCONST or SETGV (or a
+  # class EXEC). Returns '' for none.
   def compile_top_level_statements(root_irep)
     program = BytecodeIR.for(root_irep)
     body = +''
@@ -494,14 +490,13 @@ class CodeGen
     # A core definition a later definition replaces is not registered: the later one is (CORE_SHADOWED).
     return nil if child && CodeGen.shadowed_labels&.include?(child)
     compiled = child && @compiled_methods&.[](child)
-    # A bytecode def with no compiled body (a block-taking wrapper such as Array#sort) keeps the native method that
-    # already registers under the same owner and name: skipping it leaves that method, instead of refusing the whole
-    # class body and every other method in it.
+    # A bytecode def with no compiled body (a block-taking wrapper such as Array#sort) keeps the native method already
+    # registered under that owner and name, instead of refusing the whole class body.
     if compiled.nil? && (@registry[insn.sym.to_s] || []).any? { |d| d.owner == owner && d.irep.nil? }
       return nil
     end
-    # A guarded entry registers too: its Fiber fallback reads saved bytecode, which is absent for engine methods, so a
-    # block call under a non-root Fiber then fails (the cost of removing this blocker).
+    # A guarded entry registers too; its Fiber fallback reads bytecode that engine methods lack, so a block call under a
+    # non-root Fiber fails there.
     return class_body_refusal(insn, compiled, child) unless compiled && compiled[:entry] && compiled[:aspec]
     return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
 

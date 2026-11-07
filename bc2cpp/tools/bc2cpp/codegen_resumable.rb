@@ -181,9 +181,8 @@ class CodeGen
     reason || ResumablePlan.new(label, helpers)
   end
 
-  # STEP_HANDLERS: a step may have rescue and ensure handlers (the exception is caught around the step body and the step is
-  # re-entered at the handler, see resumable_step_function). STEP_EXIT_JUMPS: a return, break or unwinding jump that leaves
-  # an ensure region runs the ensure body first (step_exit_guard), so every handler type the VM has is accepted here.
+  # STEP_HANDLERS: a step may have rescue and ensure handlers (see resumable_step_function). STEP_EXIT_JUMPS: an exit that
+  # leaves an ensure region runs the ensure body first (step_exit_guard), so every handler type is accepted here.
   def resumable_handler_problem(irep)
     handlers = irep.catch_handlers
     return nil if handlers.empty?
@@ -216,11 +215,8 @@ class CodeGen
     step_covering_ensures(insn.addr).map(&:first).find { |h| target.nil? || target < h.begin_addr || target > h.end_addr }
   end
 
-  # STEP_EXIT_JUMPS: a return, break or JMPUW inside a begin/ensure region that it leaves. As the VM does, the exit is parked in
-  # a token (Bc2cppExit: the instruction's address, the value it carries and, for a jump, its target) that stands in for the
-  # exception EXCEPT captures, and control goes to the ensure handler. The ensure body runs; its RAISEIF finds the token and
-  # either hands it to the next enclosing ensure or continues the exit: Lbc2cpp_exit_dispatch jumps back to the label before the
-  # instruction's own code, with the value restored (the ensure body may have used the register).
+  # STEP_EXIT_JUMPS: a return, break or JMPUW leaving a begin/ensure region is parked in a Bc2cppExit token that stands in
+  # for the exception EXCEPT captures; the ensure's RAISEIF continues it (Lbc2cpp_exit_dispatch) or hands it to the next ensure.
   def step_exit_guard(insn, text)
     return text unless STEP_EXIT_OPS.include?(insn.op)
 
@@ -316,9 +312,8 @@ class CodeGen
       end
       next unless @fiber_yield_names.include?(name)
 
-      # A call with a block, on self or on any receiver, is a CALL to a known suspendable method or a dynamic call
-      # (RESUMABLE_DYN_CALL); either way the block's own steps carry the suspension, and a site that can do neither
-      # runs as an ordinary call.
+      # A call with a block is a CALL to a known suspendable method or a dynamic call (RESUMABLE_DYN_CALL); a site that can do
+      # neither runs as an ordinary call.
       next if %i[SENDB SSENDB].include?(insn.op)
 
       # Without a block, an explicit-receiver call takes the dynamic call (resumable_intercept).
@@ -600,9 +595,8 @@ class CodeGen
     resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, splat_reg: shape[:argv_reg], kw: shape[:kw])
   end
 
-  # DYN_SUPER: `super(args)` in a method step. The block is the register after the arguments (OP_SUPER passes
-  # R(a+n+1)). A suspendable target parks and is CALLed; the lookup starts above the method's own class. Nil (the ordinary
-  # SUPER rules apply) for a shape it does not take.
+  # DYN_SUPER: `super(args)` in a method step; the block is the register after the arguments (OP_SUPER's R(a+n+1)).
+  # Nil for a shape it does not take.
   def resumable_super_site(insn, d, idx, reg_offset)
     return nil unless @resumable.flat && reg_offset.zero? && @resumable.upvars.nil? && d && insn.plain_fixed_argc?
     return nil if d.owner.end_with?('.singleton')
@@ -611,7 +605,6 @@ class CodeGen
     dest = insn.reg
     call = "bc2cpp_dyn_super(M, self, #{owner_class_ptr_expr(d.owner)}, mrb_intern_lit(M, #{d.name.inspect}), #{n}, bc2cpp_dyn_argv, " \
            "r#{dest + n + 1})"
-    # With a name given the site passes r(d+1)..r(d+n) as the arguments; the call itself is replaced by the super lookup.
     resumable_dyn_site('self', dest, n, "r#{dest + n + 1}", '', name: d.name, call_override: call)
   end
 
@@ -655,9 +648,8 @@ class CodeGen
     ].join("\n")
   end
 
-  # FIBER_TRANSFER: `fiber.transfer(v)` in a step is a yield of v when the receiver is the root or mruby fiber that
-  # resumed this C++ Fiber, or the C++ Fiber whose resume/transfer runs it (bc2cpp_transfer_is_yield, run time); any
-  # other receiver takes the ordinary send (Fiber#transfer on a C++ Fiber runs the target nested).
+  # FIBER_TRANSFER: `fiber.transfer(v)` in a step is a yield of v when the receiver resumed this C++ Fiber or is the one
+  # running it (bc2cpp_transfer_is_yield); any other receiver is an ordinary send.
   def transfer_site?(insn, idx, reg_offset)
     return false unless insn.sym == 'transfer' && idx && @resumable&.flat && !@resumable_plain && reg_offset.zero?
 
@@ -888,10 +880,8 @@ class CodeGen
 
   RESUMABLE_HANDLER_STATE = 1_000_000
 
-  # The loop that runs the body of a step with handlers: an exception takes the innermost handler whose region covers the
-  # address the step was last at (F->pc, set before each instruction), as vm.c's catch_handler_find does (the table is
-  # searched from its last entry). The handler's entry reads the exception from M->exc (EXCEPT). No handler: the exception
-  # leaves the step, which declines further delivery (has_handlers 0) so the fiber moves on to the frame below.
+  # The loop that runs a step body with handlers: an exception takes the innermost handler covering F->pc, as vm.c's
+  # catch_handler_find does; the handler's entry reads it from M->exc. With none it leaves the step (has_handlers 0).
   def resumable_handler_loop(handlers, spill)
     out = String.new
     out << "  };\n"
@@ -906,8 +896,8 @@ class CodeGen
       first = false
     end
     out << "    if (bc2cpp_hs < 0) { F->has_handlers = 0; mrb_exc_raise(M, bc2cpp_res); }\n"
-    # GC: mrb_protect_error dropped the arena entries of the objects the run made, and a register that holds one in a C++ local
-    # (RESUMABLE_LOCAL_REGISTERS) is not a root, so the values go back to the frame (rooted) before anything allocates.
+    # GC: mrb_protect_error dropped the arena entries of the run's objects, and a C++-local register
+    # (RESUMABLE_LOCAL_REGISTERS) is not a root, so the values go back to the (rooted) frame first.
     unless spill.empty?
       out << "    #{spill}\n"
       out << "    mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));\n"
@@ -918,11 +908,10 @@ class CodeGen
     out
   end
 
-  # `_impl`, the function the registered entry calls: hands a VM-called invocation to the
-  # bytecode driver and steps to completion when called from C (where Fiber.yield could
-  # not have worked in the bytecode either).
-  # DYN_CALL: the dispatcher a `send` of this method reaches (bc2cpp_dyn_call): arms the method's id, runs its entry (which
-  # parks the frame) and registers itself under the method's registered C function. Mandatory parameters only.
+  # `_impl`, the function the registered entry calls: hands a VM-called invocation to the bytecode driver, stepping to
+  # completion when called from C.
+  # DYN_CALL: the dispatcher a `send` of this method reaches (bc2cpp_dyn_call): arms the method's id and runs its entry,
+  # which parks the frame. Mandatory parameters only.
   def resumable_dyn_function(impl_name, owner_name, argc, blk, wrapper: impl_name.delete_suffix('_impl'), optional: 0, rest: false, kw: nil)
     # An omitted optional argument is nil and the entry is told how many were given (the registered wrapper does the same).
     # A rest parameter is the last one: the arguments past the mandatory ones, packed into an Array.
@@ -1095,10 +1084,9 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # none of them can reach a suspendable method.
   FIBER_BODY_PLAIN_OPS = %i[ENTER GETIV GETUPVAR MOVE LOADSELF LOADNIL LOADT LOADF LOADSYM LOADL STRING].freeze
 
-  # `Fiber.new { prologue; m(args) }`: the block ends with a call on self to a suspendable method `m` of the
-  # enclosing method's owner and returns its value. The block's only call is that one, so the C++ Fiber can run the block
-  # with `m` armed (bc2cpp_prologue), let `m`'s entry park its frame instead of running it, and call that frame as
-  # the fiber's body. Returns the entry's id ("Owner#m"), or nil for any other shape (the site then keeps its old form).
+  # `Fiber.new { prologue; m(args) }`: the block ends with a call on self to a suspendable method `m`, so the C++ Fiber runs
+  # the block with `m` armed (bc2cpp_prologue) and calls the frame m's entry parks as its body. Returns the entry id
+  # ("Owner#m"), or nil for any other shape.
   # Is +region+ a `Fiber.new { ... }` site (no arguments, a literal block)?
   def fiber_new_site?(region)
     return false unless region[:name] == 'new' && !region[:self_implicit] && region[:n].to_i.zero?
@@ -1114,10 +1102,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     fiber_body_target_in(region[:block_irep], owner_def)
   end
 
-  # The recognizer's side of fiber_body_target_id (it runs before a region exists): true when the site at +idx+ is a
-  # Fiber body that fiber_body_target_id will accept AND every local it captures is safe to copy by value, so a
-  # region may take upvars without the synchronous-call gate. The same predicate decides the emission, so a body
-  # that captures never reaches the frame-address form.
+  # The recognizer's side of fiber_body_target_id (it runs before a region exists): a Fiber body it accepts whose captured
+  # locals are all safe to copy by value, so a region may take upvars without the synchronous-call gate.
   def fiber_body_by_value?(irep, idx, paired, block_irep, upvars)
     return false unless paired.sym == 'new' && paired.op == :SENDB && paired.plain_fixed_argc? && paired.argc.to_i.zero?
     return false unless fiber_const_receiver?(irep, idx, paired.reg)
@@ -1125,9 +1111,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     owner_def = @owner_of[irep.label]
     return false unless owner_def && fiber_body_target_in(block_irep, owner_def)
     return false unless upvars.all? { |(level, _)| level.zero? }
-    # The body and the enclosing method must both leave the locals alone: a copy is the variable only if nothing
-    # writes either. The body has no SETUPVAR; the method names the register only in ENTER (a mandatory parameter
-    # that no instruction writes or reads by its A operand).
+    # Body and enclosing method must both leave the locals alone (no SETUPVAR; the method names the register only in ENTER),
+    # else a copy is not the variable.
     return false if BytecodeIR.for(block_irep).op?(:SETUPVAR)
 
     mandatory = mandatory_arity(irep)
@@ -1177,9 +1162,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     "#{targets.first.owner}##{name}"
   end
 
-  # A block whose last act is `Fiber.yield v` (or `Fiber.yield`), returning its value: nothing of the block is left to
-  # resume after the yield, so the C++ Fiber's adapter can take `v` and make the resume value the block's result
-  # (Bc2cppTailYield in runtime/bc2cpp_fiber.hxx).
+  # A block whose last act is `Fiber.yield v`: nothing is left to resume, so the C++ Fiber's adapter takes `v` and makes the
+  # resume value the result (Bc2cppTailYield).
   def tail_yield_block?(irep)
     nodes = BytecodeIR.for(irep).instructions
     ret = nodes[-1]
@@ -1216,13 +1200,10 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     nodes[-2]&.source&.addr == region[:sendb_addr]
   end
 
-  # BLOCK_STEP: a literal block whose body reaches Fiber.yield other than as its last act is compiled a second time as
-  # a resumable step, so a suspendable method that calls the block can CALL it instead of calling it from C (where
-  # its Fiber.yield could not cross the C frame). The step is the block's irep compiled as a synthetic method of the
-  # enclosing owner: its registers live in a frame, its Fiber.yield is a YIELD. The block's proc carries a maker for
-  # the step's frame in its env (emit_rproc_construction); the fiber's adapter asks for it at a block-call suspension.
-  # Limits (a block outside them keeps the call from C, or its tail yield): no captured locals, no nested block,
-  # no break/return/yield to the method's block, mandatory or rest-only parameters.
+  # BLOCK_STEP: a literal block whose body reaches Fiber.yield other than as its last act is also compiled as a resumable
+  # step (a synthetic method of the enclosing owner), so a suspendable method can CALL it instead of calling it from C.
+  # Its env carries a frame maker (emit_rproc_construction). Limits: no captured locals, no nested block, no
+  # break/return/yield to the method's block, mandatory or rest-only parameters.
   # A name that can reach Fiber.yield: a program method that does, or a core iterator with a resumable variant (its
   # definition is not a registry entry).
   def yielding_call_name?(name)
@@ -1250,20 +1231,17 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     end
     # `block.call(x)` on a proc held in a variable may reach a Fiber.yield, in a method a fiber runs (or its variant).
     yields ||= (@rsm_variant || @fiber_roots&.include?(owner_def.irep)) && BytecodeIR.for(block).instructions_with_op(:SEND, :SEND0).any? { |i| i.sym == 'call' }
-    # A block that calls the block of the method that built it (`yield` in an inner block) suspends through that block.
     yields ||= region[:needs_blk] && BytecodeIR.for(block).op?(:BLKCALL)
     # A block that builds a block which reaches Fiber.yield suspends through it (the nested block is a step, DYN_CALL).
     yields ||= (block.reps || []).any? { |child| (c = child && @ireps[child]) && deep_fiber_yield?(c, Set.new) }
-    # A block may also suspend through the suspendable methods it calls on self (CALL_STEP).
     unless yields
       BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0, :SSENDB) { |insn, _| yields ||= yielding_call_name?(insn.sym) }
     end
     yields
   end
 
-  # BLOCK_STEP_UNWIND: the targets a block's `return` and `break` name when its step runs as a frame of the fiber. A break
-  # ends the call that took the block, made by the step building it; a return ends the method, which is the building step's
-  # frame, or the target the building block step itself carries. Nil values when the builder is not a step.
+  # BLOCK_STEP_UNWIND: the targets a block's `break` (the call that took the block) and `return` (the method's frame, or the
+  # target the builder block step carries) name when its step runs as a fiber frame. Nil when the builder is not a step.
   def step_unwind_targets(region)
     return nil unless region[:needs_ret] || region[:needs_brk]
 
@@ -1283,12 +1261,9 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     [brk, ret]
   end
 
-  # BLOCK_STEP_UPVARS: a block step may read and write locals of the step that builds it. The site passes pointers to
-  # them (the step's registers are references into its heap frame, see resumable_step_function), which the maker keeps
-  # in the block frame's slots. That is sound where the caller's frame lives as long as the callee: a call on self to a
-  # suspendable method (a CALL, so the caller's frame stays on the fiber's stack) and not a Fiber body, which outlives it.
-  # STEP_NESTED_UPVARS: a local of the builder's own builder (level >= 1) is forwarded when the builder is a block step that
-  # holds a pointer to it (+builder_upvars+, the builder region's upvars).
+  # BLOCK_STEP_UPVARS: a block step reads and writes the builder's locals through pointers its maker keeps in the block frame's
+  # slots. Sound only where the caller's frame outlives the callee: a CALL on self, not a Fiber body.
+  # STEP_NESTED_UPVARS: a local of the builder's builder (level >= 1) is forwarded when the builder holds a pointer to it.
   def block_step_upvars_ok?(region, owner_def, builder_upvars = nil)
     # A Fiber body outlives the frame: its pointers must lead into cells (STEP_CLOSURES), not into the frame.
     return false if fiber_new_site?(region) && !region[:boxed]
@@ -1335,9 +1310,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       "    r#{dest_reg} = bc2cpp_fiber_new_step(M, mrb_obj_value(#{rproc_var}));\n  }\n"
   end
 
-  # Compiles every BLOCK_STEP candidate among +regions+ and returns the C++ text to put ahead of the method; each
-  # compiled region gets :step_maker (the maker's name). Done before the owner's own compile starts, so nothing of it
-  # is mid-flight (the dual variants are compiled the same way).
+  # Compiles every BLOCK_STEP candidate among +regions+ and returns the C++ text to put ahead of the method; each gets
+  # :step_maker. Done before the owner's own compile (the dual variants likewise).
   def compile_block_steps(regions, d, builder_upvars = nil)
     return '' if regions.empty? || @block_step_compile
 
@@ -1426,9 +1400,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     @block_steps[label] = { code: code, maker: maker }
   end
 
-  # The frame maker the block's env carries: binds the yielded values as a non-strict block binds them, runs the
-  # step's entry with its own id armed so the entry parks the frame (bc2cpp_prologue) instead of running it, and
-  # returns that frame, or nullptr when the entry did not park (the caller then calls the block directly).
+  # The frame maker the block's env carries: binds the yielded values as a non-strict block does, runs the step's entry with
+  # its id armed so it parks the frame (bc2cpp_prologue), and returns it (nullptr if the entry did not park).
   def block_step_maker(block, impl, id, maker, upvars = [], needs_blk = false, unwind = false, cells = 0)
     mand = mandatory_arity(block)
     out = String.new
@@ -1500,9 +1473,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     end
   end
 
-  # A call on self to a suspendable method with arguments: the step makes the callee's frame (its entry parks it when
-  # its own id is armed, as for a Fiber body) and suspends with it; the fiber CALLs the frame, and the callee's result
-  # is this step's resume value, which the site reads like the result of a Fiber.yield.
+  # A call on self to a suspendable method with arguments: the step makes the callee's frame (its entry parks it when its id
+  # is armed) and suspends; the callee's result is this step's resume value.
   def resumable_call_site(insn, target, reg_offset)
     return resumable_not_flat_error("call to the suspendable method #{insn.sym}") unless @resumable.flat
 
@@ -1550,7 +1522,6 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return nil unless target
 
     callee = @ireps.fetch(target.irep)
-    # Mandatory parameters and a bare `yield`, or an explicit `&block` parameter after them.
     ok = (pure_mandatory_arity?(callee) && yields_block_param?(callee)) ||
          (block_param_arity?(callee) && callee.enter.enter_fields[1].zero? && callee.enter.enter_fields[2].zero?)
     ok ? target : nil
@@ -1571,9 +1542,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
                                                                                          kw: region[:kw], brk_site: brk_site, ret_guard: ret_guard)
   end
 
-  # STEP_HANDLERS: a block that has a step but no plain function (its begin/ensure has no function form) needs only a direct
-  # entry: called from C, where no fiber CALLs its step, it runs the step to its end (a Fiber.yield in it is then the yield
-  # across a C frame an interpreted block would make). The step glue (a dynamic or static call, a Fiber body) uses nothing else.
+  # STEP_HANDLERS: a block with a step but no plain function (its begin/ensure has no function form) needs only a direct
+  # entry that runs the step to its end when called from C.
   def step_only_block_fn(region, d)
     return nil unless (@resumable || fiber_new_site?(region)) && d && @block_fallback_depth.to_i.zero? &&
                       (region[:kind] || 'block_fallback') == 'block_fallback'
@@ -1644,7 +1614,6 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     args = (1..region[:n]).map { |k| "r#{dest_reg + k}" } + ["mrb_obj_value(#{rproc_var})"]
     state = @resumable.new_state
     lines = resumable_call_lines(state, region[:name], target, dest_reg, args)
-    # The proc is made in a scope of its own; the resume label and the result read follow it.
     split = lines.index { |l| l.start_with?('  Lbc2cpp_resume_') }
     "  {\n#{ctor}#{lines[0...split].join("\n")}\n  }\n#{lines[split..].join("\n")}\n"
   end

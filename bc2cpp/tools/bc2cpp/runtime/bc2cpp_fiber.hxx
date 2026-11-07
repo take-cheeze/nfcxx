@@ -2,11 +2,9 @@
 // Fiber.yield call.
 //
 // A method that can suspend is compiled as a step function over a heap frame. A
-// step runs until it finishes (DONE), suspends (YIELD) or needs another
-// suspendable body to run first (CALL). The fiber owns a stack of frames;
-// resuming runs the top frame's step and moves between frames as the steps ask.
-// No C++ frame stays between a YIELD and the resumer, so nothing needs a VM
-// frame to suspend across.
+// step finishes (DONE), suspends (YIELD) or needs another body to run first
+// (CALL); the fiber owns a stack of frames, so no C++ frame stays between a
+// YIELD and the resumer.
 #pragma once
 
 #include <mruby.h>
@@ -34,12 +32,12 @@ enum Bc2cppStepKind {
 
 struct Bc2cppFiberFrame;
 
-// What a step reports. DONE: `value` is the body's result. YIELD: `value` goes
-// to the resumer. CALL: `callee` is a new frame (allocated with mrb_malloc,
-// owned by the fiber from now on); its result is the next resume value. UNWIND
-// (a `break` or `return` out of a block step): the frames above the frame whose
-// identity is `target` are dropped; with `to_return` that frame finishes with
-// `value` too, else it is resumed with `value` as its call's result.
+// What a step reports. DONE: `value` is the result. YIELD: `value` goes to the
+// resumer. CALL: `callee` is a new frame (mrb_malloc'd, fiber-owned) whose
+// result is the next resume value. UNWIND (a `break` or `return` out of a block
+// step): frames above the one identified by `target` are dropped; with
+// `to_return` it finishes with `value`, else it resumes with `value` as its
+// call's result.
 struct Bc2cppStepOut {
   Bc2cppStepKind kind;
   mrb_value value;
@@ -64,10 +62,9 @@ struct Bc2cppFiberFrame {
   // The object an UNWIND names this frame by (a method frame's heap frame), or
   // null when the frame cannot be a target.
   struct RBasic* (*identity)(Bc2cppFiberFrame* frame);
-  // An exception (or a break/return/throw unwinding as one) reaches this frame
-  // from a frame above it: true when the frame takes it, which re-enters its
-  // step with the exception raised at the address it was suspended at. Null,
-  // or false, and the frame is dropped.
+  // An exception (or an unwind) reaches this frame from above: true when it
+  // takes it, re-entering its step with the exception raised at the address it
+  // suspended at; null or false drops the frame.
   bool (*unwind_into)(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value exc);
   // Whether the frame's step has handlers (rescue/ensure) that may run code
   // when something unwinds through it; an UNWIND then travels as an exception.
@@ -91,12 +88,11 @@ struct Bc2cppFiber {
   mrb_value caller;
 };
 
-// The handoff between a Fiber body and the suspendable method it ends with. The
-// body's first step arms the id of the method it expects (`Owner#name`) and
-// runs the body's compiled prologue, whose only call is that method. The
-// method's entry, seeing its own id armed, parks the frame it would have run in
-// `frame` and returns at once, so the body finishes without running it and the
-// fiber calls the parked frame. One shared object across all translation units.
+// The handoff between a Fiber body and the suspendable method it ends with: the
+// body's first step arms the method's id
+// (`Owner#name`) and runs its prologue; the method's entry, seeing its id
+// armed, parks its frame in `frame` and returns, and the fiber calls that
+// frame. One shared object across translation units.
 struct Bc2cppPrologue {
   const char* expect;
   mrb_value recv;
@@ -104,12 +100,10 @@ struct Bc2cppPrologue {
 };
 inline Bc2cppPrologue bc2cpp_prologue = {nullptr, {}, nullptr};
 
-// `id` is the entry's own "Owner#name". An armed "Owner#name" matches exactly
-// (a call on self to a known method). An armed "#name" is a call on an explicit
-// receiver whose class the body does not prove: it matches any owner's `name`,
-// but only on the receiver the body's call site stored
-// (bc2cpp_prologue_set_recv), so a method that happens to call another `name`
-// cannot take the handoff.
+// `id` is the entry's own "Owner#name". An armed "Owner#name" matches exactly;
+// an armed "#name" (explicit receiver of unproven class) matches any owner's
+// `name`, but only on the receiver the call site stored
+// (bc2cpp_prologue_set_recv).
 [[maybe_unused]] static bool bc2cpp_prologue_armed(mrb_state* M,
                                                    const char* id,
                                                    mrb_value self) {
@@ -128,9 +122,8 @@ inline Bc2cppPrologue bc2cpp_prologue = {nullptr, {}, nullptr};
 }
 
 // A parked frame is held only by C++ until its fiber's refs are rebuilt, and
-// the arena that protected the objects it was made of is popped when the calls
-// that made it return. Until the next refresh the frame's values are pinned in
-// a global (rooted) Array.
+// the arena protecting its objects is popped, so its values are pinned in a
+// global (rooted) Array until the next refresh.
 static mrb_value bc2cpp_pins(mrb_state* M) {
   mrb_sym key = mrb_intern_lit(M, "$__bc2cpp_pins");
   mrb_value pins = mrb_gv_get(M, key);
@@ -155,14 +148,11 @@ static mrb_value bc2cpp_pins(mrb_state* M) {
   return mrb_nil_value();
 }
 
-// A block whose last act is `Fiber.yield v` can hand `v` to the C++ Fiber by
-// returning: nothing of the block is left to resume. When the fiber's adapter
-// calls such a block it names the block's env here; the block's entry
-// (Bc2cppTailYieldScope) sees the match and lets its tail yield store `v` in
-// `value` and return, and the adapter turns that into a YIELD whose resume
-// value is the block's result. `can_yield` is true only inside that one entry,
-// so a nested block, or the same block called any other way, takes the ordinary
-// Fiber.yield.
+// A block whose last act is `Fiber.yield v` hands `v` to the C++ Fiber by
+// returning (nothing is left to resume). The adapter names the block's env
+// here; the block's entry (Bc2cppTailYieldScope) then stores `v` in `value` and
+// returns, and the adapter makes it a YIELD. `can_yield` is true only inside
+// that one entry; any other call takes the ordinary Fiber.yield.
 struct Bc2cppTailYield {
   const struct REnv* env;
   bool pending;
@@ -213,10 +203,9 @@ static void bc2cpp_fiber_data_free(mrb_state* M, void* p) {
   mrb_free(M, fiber);
 }
 
-// mruby has no mark callback for a data object, so the values the frames hold
-// are kept alive the way the resume frames' registers are: the fiber carries a
-// hidden Array of them, rebuilt after every step. A frame adds each value it
-// holds with bc2cpp_fiber_ref.
+// mruby has no mark callback for a data object, so the fiber carries a hidden
+// Array of the values its frames hold (added with bc2cpp_fiber_ref), rebuilt
+// after every step.
 [[maybe_unused]] static void bc2cpp_fiber_ref(mrb_state* M,
                                               mrb_value refs,
                                               mrb_value v) {
@@ -296,9 +285,8 @@ static mrb_value bc2cpp_root_fiber(mrb_state* M) {
   return root;
 }
 
-// Set by a `transfer` site that turns into a yield (a transfer back to the
-// fiber's resumer), read when the fiber's step reports the YIELD: the fiber is
-// then suspended by a transfer, not by Fiber.yield.
+// Set by a `transfer` site that turns into a yield, read when the step reports
+// YIELD: the fiber is then suspended by a transfer, not by Fiber.yield.
 inline bool bc2cpp_transfer_yielding = false;
 
 struct Bc2cppRunArgs {
@@ -310,10 +298,9 @@ struct Bc2cppRunArgs {
       result;  // the fiber's result when an unwind finished its last frame
 };
 
-// A break, return or throw that passes frames with handlers travels as an
-// exception of this class (not a StandardError, and no `rescue` clause matches
-// it: RESCUE tests bc2cpp_unwind_p), so the ensure bodies on the way run and
-// re-raise it. It names the frame it ends by identity, as an UNWIND does.
+// A break, return or throw passing frames with handlers travels as an exception
+// of this class (no `rescue` clause matches it: RESCUE tests bc2cpp_unwind_p),
+// so ensure bodies run and re-raise it. It names the frame it ends by identity.
 static struct RClass* bc2cpp_unwind_class(mrb_state* M) {
   return mrb_define_class(M, "Bc2cppUnwind", M->eException_class);
 }
@@ -335,12 +322,11 @@ static mrb_value bc2cpp_unwind_new(mrb_state* M,
   return u;
 }
 
-// STEP_EXIT_JUMPS: a return, break or jump that leaves a begin/ensure region of
-// a step is parked in one of these while the ensure body runs, as the VM parks
-// it in a break object. It stands in for the exception EXCEPT captures, so the
-// ensure body's RAISEIF finds it: it is never raised, and no `rescue` sees it.
-// `site` is the address of the instruction that left, `value` what it carries
-// (the returned value) and `target` the address a jump goes to (-1: none).
+// STEP_EXIT_JUMPS: a return, break or jump leaving a begin/ensure region of a
+// step is parked in one of these while the ensure body runs; it stands in for
+// the exception EXCEPT captures (RAISEIF finds it) and is never raised. `site`
+// is the leaving instruction's address, `value` what it carries, `target` a
+// jump's address (-1: none).
 static struct RClass* bc2cpp_exit_class(mrb_state* M) {
   return mrb_define_class(M, "Bc2cppExit", M->eException_class);
 }
@@ -528,10 +514,9 @@ static int bc2cpp_fiber_unwind(mrb_state* M,
 
 static bool bc2cpp_fiber_own_p(mrb_value v);
 
-// The fibers on the resume chain, kept in a rooted global Array:
+// The fibers on the resume chain, in a rooted global Array:
 // bc2cpp_current_fiber and Bc2cppFiber::caller are raw values the GC does not
-// see, and the arena that protected the running fiber belongs to the C function
-// that started it.
+// see.
 static mrb_value bc2cpp_running_fibers(mrb_state* M) {
   mrb_sym key = mrb_intern_lit(M, "$__bc2cpp_running");
   mrb_value running = mrb_gv_get(M, key);
@@ -543,17 +528,13 @@ static mrb_value bc2cpp_running_fibers(mrb_state* M) {
 }
 
 // Fiber#resume / Fiber#transfer. Returns the yielded value, or the body's
-// result once it finishes (alive? is then false). An exception in a step kills
-// the fiber and propagates to the resumer, as it does for an mruby Fiber. The
-// FiberError cases and their messages are mruby-fiber's (fiber_switch /
-// fiber_transfer).
+// result once finished. An exception in a step kills the fiber and propagates
+// to the resumer; the FiberError cases and messages are mruby-fiber's.
 //
-// FIBER_RAISE: with `raise_exc` the fiber is not run from the step it
-// suspended in; the exception is raised where it is suspended (the Fiber.yield
-// it returned from), exactly as if that call had raised it. The frames unwind
-// from the top, so the rescue and ensure bodies of the steps run, and the
-// fiber runs on if one takes it (the value is then whatever it next yields or
-// returns); otherwise the fiber is dead and the exception leaves Fiber#raise.
+// FIBER_RAISE: with `raise_exc` the exception is raised where the fiber is
+// suspended (as if its Fiber.yield had raised it); frames unwind from the top
+// so rescue/ensure bodies run, and the fiber runs on if one takes it, else it
+// is dead and the exception leaves Fiber#raise.
 static mrb_value bc2cpp_fiber_resume(mrb_state* M,
                                      mrb_value self,
                                      mrb_value value,
@@ -687,10 +668,9 @@ static mrb_value bc2cpp_run_to_completion(mrb_state* M,
 }
 
 // A suspendable method entered from C (interpreted code, the VM, a native
-// iterator) rather than as a frame of a C++ Fiber: a frame its step CALLs runs
-// to its end here. A YIELD inside it is a yield across a C frame, so it goes to
-// Fiber.yield, which raises the FiberError an interpreted method would raise;
-// if it returns (the frame can be resumed), the value goes back in.
+// iterator): a frame its step CALLs runs to its end here. A YIELD inside is a
+// yield across a C frame, so it goes to Fiber.yield, which raises the
+// FiberError; if it returns, the value goes back in.
 static mrb_value bc2cpp_run_callee_from_c(mrb_state* M,
                                           Bc2cppFiberFrame* callee) {
   mrb_value fiber = bc2cpp_fiber_new(M, callee);
@@ -706,11 +686,9 @@ static mrb_value bc2cpp_run_callee_from_c(mrb_state* M,
   return result;
 }
 
-// The Ruby-visible surface: the class is `Fiber`, so a call site that names
-// Fiber#resume or Fiber#alive? (the closed world lists that definer) reaches
-// it. Both methods answer for a Bc2cppFiber and hand any other receiver (a
-// Fiber made by mruby-fiber) to the method they replaced; a build without
-// mruby-fiber has no other receiver.
+// The Ruby-visible surface: the class is `Fiber`, so a call site naming
+// Fiber#resume or Fiber#alive? reaches it. Both answer for a Bc2cppFiber and
+// hand any other receiver to the method they replaced.
 inline mrb_func_t bc2cpp_fiber_orig_resume = nullptr;
 inline mrb_func_t bc2cpp_fiber_orig_alive_p = nullptr;
 
@@ -741,10 +719,9 @@ static mrb_value bc2cpp_fiber_m_resume(mrb_state* M, mrb_value self) {
 
 inline mrb_func_t bc2cpp_fiber_orig_transfer = nullptr;
 
-// Fiber#transfer to a C++ Fiber from outside it (the root, an mruby fiber, or
-// another C++ Fiber's step): runs the target as resume does, with transfer's
-// rules. A transfer from inside a C++ Fiber back to its resumer is a yield, and
-// is compiled at the site (bc2cpp_transfer_is_yield).
+// Fiber#transfer to a C++ Fiber from outside it: runs the target as resume
+// does, with transfer's rules. A transfer from inside back to its resumer is
+// compiled as a yield (bc2cpp_transfer_is_yield).
 static mrb_value bc2cpp_fiber_m_transfer(mrb_state* M, mrb_value self) {
   if (!bc2cpp_fiber_own_p(self)) {
     if (!bc2cpp_fiber_orig_transfer)
@@ -778,10 +755,8 @@ static mrb_value bc2cpp_fiber_s_current(mrb_state* M, mrb_value self) {
 
 extern "C" mrb_value mrb_make_exception(mrb_state*, mrb_value, mrb_value);
 
-// Fiber#raise(...) with Kernel#raise's arguments: a class (and a message), an
-// exception object (and a message), or a String (a RuntimeError). mruby-fiber
-// has no Fiber#raise: without this method the call reaches Kernel#raise, which
-// is private.
+// Fiber#raise(...) with Kernel#raise's arguments. mruby-fiber has no
+// Fiber#raise, so without this the call reaches the private Kernel#raise.
 static mrb_value bc2cpp_fiber_exception(mrb_state* M,
                                         mrb_int argc,
                                         const mrb_value* argv) {
@@ -801,11 +776,10 @@ static mrb_value bc2cpp_fiber_exception(mrb_state* M,
   }
 }
 
-// An exception raised at the point a C++ Fiber is suspended (Fiber.yield or a
-// transfer that returned the control to its resumer). The cases are CRuby's:
-// the current fiber (or the root fiber object) just raises it where it is; a
-// fiber waiting on one it resumed forwards it to the fiber that is running; an
-// unborn fiber has no such point, and a dead one is not resumed.
+// An exception raised where a C++ Fiber is suspended; the cases are CRuby's:
+// the current fiber just raises it, a fiber waiting on one it resumed forwards
+// it to the running fiber, an unborn fiber has no such point, a dead one is not
+// resumed.
 static mrb_value bc2cpp_fiber_m_raise(mrb_state* M, mrb_value self) {
   const mrb_value* argv;
   mrb_int argc;
@@ -828,14 +802,10 @@ static mrb_value bc2cpp_fiber_m_raise(mrb_state* M, mrb_value self) {
                              &exc);
 }
 
-// FIBER_RAISE: Fiber#raise is installed by bc2cpp_fiber_define at run time and
-// mruby-fiber has no such method, so no source of the closed world lists its
-// definer, and listing it there would give `raise` a second definer in every
-// build (Kernel#raise stops being the only one that implicit-self calls can
-// call directly). A call on a receiver whose class is known to be Fiber reaches
-// it through bc2cpp_owner_call, whose guard accepts exactly this C function as
-// a definer.
-// So do the Fiber.yield definers (see bc2cpp_fiber_define).
+// FIBER_RAISE: Fiber#raise is installed at run time and no source of the closed
+// world lists its definer (listing it would give `raise` a second definer in
+// every build), so bc2cpp_owner_call's guard accepts exactly this C function as
+// a definer. So do the Fiber.yield definers (see bc2cpp_fiber_define).
 static mrb_value bc2cpp_fiber_s_yield(mrb_state* M, mrb_value self);
 static mrb_value bc2cpp_fiber_s_yield_wrapped(mrb_state* M, mrb_value self);
 [[maybe_unused]] static bool bc2cpp_fiber_definer_p(const mrb_method_t& m) {
@@ -917,11 +887,9 @@ static void bc2cpp_fiber_define(mrb_state* M) {
   mrb_define_method(M, klass, "raise", bc2cpp_fiber_m_raise, MRB_ARGS_ANY());
 }
 
-// The root frame of `Fiber.new { prologue; method(args) }`: the body is a
-// compiled block whose last act is a call to `id`'s suspendable method. The
-// first step runs the block with `id` armed; if the method's entry parked a
-// frame, that frame is called and its result is the fiber's; otherwise the
-// block ran to the end and its value is the result.
+// The root frame of `Fiber.new { prologue; method(args) }`: the first step runs
+// the block with `id` armed; if the method's entry parked a frame, it is called
+// and its result is the fiber's, else the block's value is.
 struct Bc2cppBlockBody {
   Bc2cppFiberFrame f;
   mrb_value proc;

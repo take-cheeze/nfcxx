@@ -1,10 +1,9 @@
-// Array#sort! with a block, as a frame of the C++ Fiber. mruby's own sort is C,
+// Array#sort! with a block, as a frame of the C++ Fiber: mruby's own sort is C,
 // so a Fiber.yield in the comparison block could not cross it. The algorithms
-// and the order of the comparisons are array.c's (insertion sort up to 16
-// elements, heap sort above), so a block sees the same calls. Every comparison
-// is a block call (bc2cpp_block_call) and may suspend; its result arrives as
-// the next resume value. Emitted after bc2cpp_fiber_methods.hxx, whose
-// bc2cpp_block_call and dynamic-call registry it uses; not standalone.
+// and comparison order are array.c's (insertion sort up to 16 elements, heap
+// sort above), so a block sees the same calls; each comparison is a
+// bc2cpp_block_call and may suspend. Emitted after bc2cpp_fiber_methods.hxx,
+// whose bc2cpp_block_call and dynamic-call registry it uses; not standalone.
 #pragma once
 
 enum Bc2cppSortState {

@@ -364,9 +364,8 @@ class CodeGen
     # are by name over every receiver, so an explicit-receiver call cannot hide one
     # (compute_fiber_yield_names).
     @fiber_yield_names = seeds.empty? ? Set.new : compute_fiber_yield_names(seeds.to_set)
-    # CALL_STEP: a method a root calls on self that can itself suspend is a root too (the root's step CALLs its step).
-    # BLOCKS_IN_STEPS: so is one a root calls with a literal block that reaches Fiber.yield (the callee's `yield`
-    # suspends through the block); its name then counts as a yielding name.
+    # CALL_STEP: a method a root calls on self that can itself suspend is a root too. BLOCKS_IN_STEPS: so is one a root calls
+    # with a literal block that reaches Fiber.yield; its name then counts as a yielding name.
     # DYN_CALL: a method a fiber reaches that sends by name can reach the program's other yielding methods.
     @fiber_roots.merge(dynamic_send_targets) if reachable.any? { |l| (i = @ireps[l]) && deep_send_names(i).intersect?(DYN_SEND_NAMES) }
     queue = @fiber_roots.to_a + seeds
@@ -442,9 +441,8 @@ class CodeGen
     @yield_reach.fiber_unsafe(fiber_defs.keys)
   end
 
-  # DYN_CALL: a send can reach any program method that yields to its block and that some symbol literal names (`to_enum(:each_x)`,
-  # `send(:m)`); those become roots, so the dispatcher registry has their step. Core methods keep their own
-  # fast bodies (RESUMABLE_DUAL gives them a variant).
+  # DYN_CALL: a send can reach any program method that yields to its block and that some symbol literal names; those become
+  # roots, so the dispatcher registry has their step. Core methods keep their own bodies (RESUMABLE_DUAL gives a variant).
   def dynamic_send_targets
     named = Set.new
     @ireps.each_value { |i| BytecodeIR.for(i).instructions_with_op(:LOADSYM).each { |insn| named << insn.sym if insn.sym } }
@@ -553,8 +551,8 @@ class CodeGen
       # FIBER_BODY_CAPTURE: a Fiber body outlives the frame, so it never takes the frame's addresses (the gates
       # below); where fiber_body_by_value? holds, its locals are copied into a heap Array at the site instead.
       by_value = upvars.any? && fiber_body_by_value?(irep, idx, paired, block_irep, upvars)
-      # STEP_CLOSURES: a block that may outlive the call (the callee is not proven to leave it) captures this function's own
-      # registers through heap cells instead: they live in an Array the block's env keeps, so no pointer outlives its frame.
+      # STEP_CLOSURES: a block that may outlive the call (the callee is not proven to leave it) captures this function's registers
+      # through heap cells (an Array the block's env keeps), so no pointer outlives its frame.
       # `new` keeps its block (Hash.new's default proc, Proc.new, Fiber.new's body) unless the receiver is Array.
       keeps_block = name == 'new' && !array_const_receiver?(irep, idx, dest_reg)
       boxed = upvars.any? && (!synchronous || keeps_block) && !by_value && cells_capture?(upvars, cell_levels)
@@ -607,10 +605,8 @@ class CodeGen
     regions
   end
 
-  # STEP_CLOSURES: only the registers of the function that makes the block can be boxed (a level >= 1 pointer is the
-  # enclosing function's, whose cells the block's env would also have to keep).
-  # A level >= 1 pointer is the enclosing function's, so it needs that frame's cells: +cell_levels+ are the levels of the
-  # upvars this function holds cells for (the function is itself a block over cells).
+  # STEP_CLOSURES: only the registers of the function that makes the block can be boxed. A level >= 1 pointer is the enclosing
+  # function's, so +cell_levels+ lists the upvar levels this function holds cells for.
   def cells_capture?(upvars, cell_levels = [])
     ENV['BC2CPP_STEP_CLOSURES'] != '0' && upvars.all? { |(level, _)| level.zero? || cell_levels.include?(level - 1) }
   end
@@ -728,9 +724,8 @@ class CodeGen
     definers = if region[:self_implicit]
                  rbs_block_self_definers(name, @self_class_unknown ? nil : owner_name)
                elsif (const_name = IrBlockOperands.constant_name(irep, idx, region[:dest_reg]))
-                 # CONSTANT_BLOCK_HINT: a class-object receiver (`File.open { }`) is a singleton call. Its definer is the
-                 # one constant_object_core_def proves for the constant's singleton chain (the same proof the by-name
-                 # send's direct call uses), not an instance lookup on the class.
+                 # CONSTANT_BLOCK_HINT: a class-object receiver (`File.open { }`) is a singleton call, defined by what
+                 # constant_object_core_def proves for the constant's singleton chain.
                  target = constant_object_core_def(name, const_name)
                  target&.irep ? [target.owner] : nil
                else
@@ -892,9 +887,8 @@ class CodeGen
     @fiber_prologue = saved_fiber_prologue
   end
 
-  # PROC_SPEC: a compiled block is a C function proc, which has no ENTER word and no parameter names. The block registers
-  # both (the stand-in irep bc2cpp_proc_spec_stand_in is made from them) under its C function and its direct entry, so
-  # Proc#arity and Proc#parameters answer as they do for the interpreted block.
+  # PROC_SPEC: a compiled block is a C function proc with no ENTER word or parameter names, so bc2cpp_proc_spec_stand_in is
+  # registered under its C function and direct entry for Proc#arity and Proc#parameters.
   def proc_spec_registration(region, fn_name)
     return '' unless (region[:kind] || 'block_fallback') == 'block_fallback' && ENV['BC2CPP_PROC_SPEC'] != '0'
 
@@ -1402,8 +1396,8 @@ class CodeGen
     env_entries << 'bc2cpp_env_block(M, bc2cpp_blk)' if needs_blk
     env_entries << ret_token if ret_token
     env_entries << brk_token if brk_token
-    # STEP_CLOSURES: the cells Array the captured registers live in, after the tokens (the slots above keep their places, and
-    # the readers that index from the end are not moved): the env keeps it, so the pointers above outlive the frame.
+    # STEP_CLOSURES: the cells Array the captured registers live in goes after the tokens (readers index from the end); the
+    # env keeps it so the pointers outlive the frame.
     env_entries.concat(cells) if cells
     if direct_entry
       # BLOCK_STEP_UNWIND: the frames a `return` / `break` of the block's step ends (it must name them to the fiber), just
@@ -1780,9 +1774,8 @@ class CodeGen
   # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
   # Takes recognized region lists (the caller chooses the scope), mutates the
   # caller's suppressed/glue_at, and returns the nested-function pre-code.
-  # INSTANCE_EVAL_IVAR: `obj.instance_eval { @x }` and `obj.instance_eval { @x = v }` (v a local of the method) read and write
-  # an instance variable of +obj+. The block is a rebinder's (it is never compiled with a captured self), but its two
-  # shapes need no block at all. mruby-enumerator's Enumerator#each is written that way.
+  # INSTANCE_EVAL_IVAR: `obj.instance_eval { @x }` and `{ @x = v }` read and write an instance variable of +obj+ without a
+  # block (mruby-enumerator's Enumerator#each is written that way).
   def recognize_instance_eval_ivar_regions(irep)
     return [] if (@registry['instance_eval'] || []).any? { |dd| dd.irep && !dd.core }
 

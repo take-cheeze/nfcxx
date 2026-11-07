@@ -1,12 +1,9 @@
 // catch and throw as frames of the C++ Fiber. mruby's catch is a bytecode
-// method
-// and its throw a C function that finds the catch by walking the VM's call
-// stack, so neither can see (or unwind) the C++ frames of a fiber. A `catch`
-// whose block has a step is a frame that CALLs the block; a `throw` of its tag
-// from a step in the same fiber unwinds to that frame (the same UNWIND a
-// `return` makes: the frames above are dropped, their ensure bodies run, and
-// the catch call returns the thrown value). Anything else keeps mruby's own
-// catch and throw (the dispatchers decline with undef). Emitted after
+// method and its throw finds the catch by walking the VM's call stack, so
+// neither can see the C++ frames of a fiber. A `catch` whose block has a step
+// is a frame that CALLs the block; a `throw` of its tag from a step in the same
+// fiber unwinds to it (the UNWIND a `return` makes). Anything else keeps
+// mruby's own (the dispatchers decline with undef). Emitted after
 // bc2cpp_fiber_methods.hxx, whose bc2cpp_block_call and dynamic-call registry
 // it uses; not standalone.
 #pragma once
@@ -27,9 +24,8 @@ static void bc2cpp_catch_mark(mrb_state* M,
 }
 
 // The first step calls the block with the tag; a block that does not finish
-// there (it is a step, or ends in Fiber.yield) hands the fiber a CALL or a
-// YIELD, and its value comes back as the resume value, which is the catch's
-// result.
+// there (a step, or ending in Fiber.yield) hands the fiber a CALL or YIELD, and
+// its value comes back as the resume value, which is the catch's result.
 static void bc2cpp_catch_step(mrb_state* M,
                               Bc2cppFiberFrame* base,
                               mrb_value resume,

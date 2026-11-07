@@ -1074,10 +1074,9 @@ class CodeGen
     end.join
   end
 
-  # STEP_KEYWORDS: the registered wrapper of a method that takes keywords next to a rest and/or block parameter. One
-  # mrb_get_args call binds them all (`|o*:&`: `*` ends the positional scan and `:` is read as the keyword hash); an
-  # unknown or missing keyword raises there, as the KEY_P/KARG/KEYEND sequence expects. Parameter order matches
-  # arg_params: arguments, block, optionals given, then the keywords.
+  # STEP_KEYWORDS: the registered wrapper of a method taking keywords next to a rest and/or block parameter. One mrb_get_args
+  # call (`|o*:&`) binds them all; an unknown or missing keyword raises there, as the KEY_P/KARG/KEYEND sequence expects.
+  # Parameter order matches arg_params.
   def keyword_rest_block_entry(label, d, impl_name, arg_names, arg_native_types, mand:, opt:, has_rest:, has_blk:, kw_table:)
     out = String.new
     mand_names = arg_names.first(mand)

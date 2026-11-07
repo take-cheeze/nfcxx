@@ -85,9 +85,8 @@ module CoreMethods
     'names Fiber' if CoreDefs.references_fiber?(irep, ireps) && !enumerator_fiber_step?(definition, ireps)
   end
 
-  # ENUMERATOR_FIBER (on; BC2CPP_ENUMERATOR_FIBER=0 keeps mruby-enumerator's bytecode on mruby-fiber): its methods are compiled, so
-  # `next_values` builds a C++ Fiber over a step (docs/bc2cpp-cxx-fiber.md) instead of an mruby Fiber, and the generators
-  # and lazy enumerators external iteration runs through are compiled with it. Methods that build a lambda stay bytecode.
+  # ENUMERATOR_FIBER (on; BC2CPP_ENUMERATOR_FIBER=0 keeps mruby-enumerator's bytecode on mruby-fiber): its methods are compiled,
+  # so `next_values` builds a C++ Fiber over a step (docs/bc2cpp-cxx-fiber.md); methods that build a lambda stay bytecode.
   ENUMERATOR_FIBER_STEPS = %w[Enumerator#next_values Enumerator#each Enumerator#__enumerator_block_call].freeze
 
   def enumerator_fiber?

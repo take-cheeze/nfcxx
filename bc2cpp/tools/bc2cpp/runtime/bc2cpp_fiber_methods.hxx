@@ -1,10 +1,10 @@
 // The part of the C++ Fiber runtime that wraps a resumable method's step
-// function (codegen_resumable.rb) as a Bc2cppFiberFrame. Emitted into generated
-// code after RESUMABLE_HELPERS, whose bc2cpp_resume_frame_* functions it uses;
-// it is not standalone. A method step still keeps its registers in the old heap
-// frame and returns that frame on suspension; this adapter maps that return
-// onto DONE / YIELD, and calls a block from a block-call suspension directly,
-// since a block that does not suspend needs no step of its own.
+// function (codegen_resumable.rb) as a Bc2cppFiberFrame. Emitted after
+// RESUMABLE_HELPERS, whose bc2cpp_resume_frame_* functions it uses; not
+// standalone. A method step keeps its registers in the old heap frame and
+// returns it on suspension; this adapter maps that onto DONE / YIELD and calls
+// a block directly from a block-call suspension, since a non-suspending block
+// needs no step.
 #pragma once
 
 typedef Bc2cppFiberFrame* (*Bc2cppBlockStepMaker)(mrb_state* M,
@@ -40,12 +40,11 @@ static bool bc2cpp_block_has_step(const struct RProc* p,
 }
 
 // Calls +blk+ with the arguments from a frame of this fiber. Returns true with
-// the block's value in *value when the block ran to its end here. Returns false
-// with *out set when the fiber has to act first: CALL, when the block is a step
-// (BLOCK_STEP: its env carries a maker, flag bit 2, in the slot before the
-// entry), so its own Fiber.yield suspends it and its result is the caller's
-// next resume value; or YIELD, when the block's last act is Fiber.yield
-// (Bc2cppTailYield), whose next resume value is the block's result.
+// the value in *value when the block ran to its end here; false with *out set
+// when the fiber has to act first: CALL when the block is a step (BLOCK_STEP:
+// its env carries a maker in the slot before the entry), or YIELD when its last
+// act is Fiber.yield (Bc2cppTailYield), whose next resume value is the block's
+// result.
 static bool bc2cpp_block_call(mrb_state* M,
                               mrb_value blk,
                               mrb_int argc,
@@ -120,9 +119,8 @@ static void bc2cpp_method_frame_step(mrb_state* M,
       return;
     }
     // A block-call suspension: call the block here. A block whose last act is
-    // Fiber.yield (Bc2cppTailYield) hands its value back instead of calling
-    // Fiber.yield, and the fiber yields it; the next resume value is the
-    // block's result, which the step takes as its own resume value.
+    // Fiber.yield (Bc2cppTailYield) hands its value back and the fiber yields
+    // it; the next resume value is the block's result.
     mrb_value args = bc2cpp_resume_frame_value(M, result);
     mrb_value blk = bc2cpp_resume_frame_block(M, result);
     if (!bc2cpp_block_call(M, blk, RARRAY_LEN(args), RARRAY_PTR(args), out,
@@ -146,8 +144,7 @@ static struct RBasic* bc2cpp_method_frame_identity(Bc2cppFiberFrame* base) {
 
 // An exception reaches a method frame that CALLed (or called a block of) the
 // frame it came from: a step with handlers is re-entered with it raised at the
-// address it was suspended at; one without, or one that declined it, is
-// dropped.
+// address it suspended at; one without, or one that declined it, is dropped.
 static bool bc2cpp_method_frame_unwind_into(mrb_state* M,
                                             Bc2cppFiberFrame* base,
                                             mrb_value exc) {
@@ -185,10 +182,10 @@ static bool bc2cpp_method_frame_has_handlers(Bc2cppFiberFrame* base) {
   return &m->f;
 }
 
-// `Fiber.new { |x, y| ... }` whose body is a step (BLOCK_STEP): the fiber's
-// root frame makes the body's frame on the first resume, from that resume's
-// arguments (the block parameters bind as a block's do), and calls it; the
-// body's result is the fiber's.
+// `Fiber.new { |x, y| ... }` whose body is a step (BLOCK_STEP): the root frame
+// makes the body's frame on the first resume, from that resume's arguments
+// (bound as a block's parameters are), and calls it; the body's result is the
+// fiber's.
 struct Bc2cppBodyStart {
   Bc2cppFiberFrame f;
   mrb_value proc;
@@ -252,11 +249,11 @@ static void bc2cpp_body_start_mark(mrb_state* M,
 }
 
 // DYN_CALL: a call whose method is chosen at run time (`send`, `__send__`,
-// `public_send`). A suspendable method registers a dispatcher under its
-// registered C function (the generated `_dyn`, which arms the method's id and
-// runs its entry); the call resolves the method on the receiver and, when it is
-// registered and takes this many arguments, returns the frame the entry parks,
-// for the caller to CALL. Anything else runs as an ordinary send.
+// `public_send`). A suspendable method registers a dispatcher (the generated
+// `_dyn`) under its registered C function; the call resolves the method on the
+// receiver and, when it is registered and takes this many arguments, returns
+// the frame its entry parks, for the caller to CALL. Anything else runs as an
+// ordinary send.
 typedef mrb_value (*Bc2cppDynFn)(mrb_state* M,
                                  mrb_value self,
                                  mrb_int argc,
@@ -298,11 +295,10 @@ inline std::unordered_map<void*, Bc2cppDynEntry>& bc2cpp_dyn_table() {
   bc2cpp_dyn_table()[cfunc] = Bc2cppDynEntry{nullptr, min_argc, max_argc, fn};
 }
 
-// Binds the keywords of a call to the parameters of a method: `names` lists the
-// `n` keywords, the first `required` of them required. `values[i]` is the
-// keyword's value, or undef when the call omitted it. False when the call does
-// not fit (a required keyword missing, or one the method does not take), as
-// mrb_get_args' ':' refuses it; the Hash is not changed.
+// Binds the keywords of a call to a method's parameters: `names` lists the `n`
+// keywords, the first `required` required; `values[i]` is the value, or undef
+// when omitted. False when the call does not fit (a required keyword missing or
+// an unknown one), as mrb_get_args' ':' refuses it; the Hash is not changed.
 [[maybe_unused]] static bool bc2cpp_dyn_bind_keywords(mrb_state* M,
                                                       mrb_value kdict,
                                                       mrb_int n,
@@ -340,10 +336,9 @@ extern "C" mrb_value mrb_funcall_send(mrb_state* M,
                                       mrb_value kdict,
                                       mrb_value blk);
 
-// `kdict` is the keyword Hash of the call, or nil. A method registered with a
-// keyword dispatcher takes it; any other suspendable method takes no keywords,
-// so a non-empty one runs as an ordinary send that carries them
-// (mrb_funcall_send); an empty one passes nothing, as `**{}` does.
+// `kdict` is the keyword Hash of the call, or nil. A method with a keyword
+// dispatcher takes it; any other suspendable method takes none, so a non-empty
+// one runs as an ordinary send that carries them (mrb_funcall_send).
 
 // A registered suspendable method found for a call: park its frame (the caller
 // CALLs it), else nothing.
@@ -413,7 +408,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
 // `super` in a step: the lookup starts above `owner`, the class the running
 // method is defined on (OP_SUPER). A registered suspendable target parks its
 // frame as in a dynamic call; any other target is called as bc2cpp_super_call
-// calls it.
+// does.
 [[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_super(mrb_state* M,
                                                          mrb_value self,
                                                          struct RClass* owner,
