@@ -240,7 +240,14 @@ if $PROGRAM_NAME == __FILE__
     next unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
 
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    warn format('BC2CPP_TIME %-32s %8.3fs (total %8.3fs)', name, now - profile_last, now - profile_started)
+    # Resident memory (Linux), so a run shows where its memory grows; -1 where /proc is not there.
+    rss_kb = begin
+      File.read('/proc/self/status').lines.grep(/\AVmRSS:/).first.to_s.split[1].to_i
+    rescue StandardError
+      -1
+    end
+    warn format('BC2CPP_TIME %-32s %8.3fs (total %8.3fs) rss %d MB', name, now - profile_last, now - profile_started,
+                rss_kb / 1024)
     profile_last = now
   end
   profile_call = lambda do |name, &block|
