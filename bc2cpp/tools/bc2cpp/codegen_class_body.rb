@@ -364,6 +364,7 @@ class CodeGen
     program = BytecodeIR.for(root_irep)
     body = +''
     start = 0
+    targets = jump_targets(root_irep)
     program.each_source do |insn, idx|
       if insn.op == :EXEC
         start = idx + 1
@@ -378,6 +379,8 @@ class CodeGen
         source = program.source_at(index)
         next unless source
 
+        # A jump inside the run (`x = cond ? A : B`) lands on a label of this statement; compile_insn writes the `goto` only.
+        lines << "  L#{source.addr}:;\n" if targets.include?(source.addr)
         lines << compile_insn(source, root_irep, owner_def, index)
       end
       body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  }\n"

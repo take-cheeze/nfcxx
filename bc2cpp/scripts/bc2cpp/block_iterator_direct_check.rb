@@ -5,10 +5,14 @@
 # BLOCK_ITERATOR_DIRECT: literal-block iterator sends call the compiled block-taking body directly.
 #
 #   generated code (needs a host mrbc; one closed-world generation per world variant, seconds)
-#     - an implicit-self `loop { }` calls Kernel#loop's compiled body, behind the root-context test unless the block
-#       is yield-free; a program definition of `loop`, a native registration of it or a BasicObject subclass withdraws it;
+#     - an implicit-self `loop { }` in a class that has Kernel calls Kernel#loop's compiled body directly (the name has one
+#       definition, MONO: no root-context test and no dynamic else; the compiled body suspends a Fiber itself, and a
+#       `break` is caught at the site). Any other program definition of `loop` (Object#loop, or a class unrelated to
+#       self) turns it into the owner call over every owner; a BasicObject subclass has no
+#       Kernel#loop, so its own `loop { }` keeps the kind_of(Kernel) test and the owner call (KERNEL_SELF_SEND);
 #     - `s.each_char { }` / `s.each_line { }` on an unproven receiver get an exact-String arm, the dynamic send its else;
-#       a program String#each_char withdraws the arm;
+#       a program String#each_char withdraws the arm; a String literal receiver is proven exactly String (EXACT_TYPED:
+#       a direct call, no class test, no dynamic else);
 #     - an Integer literal receiver (`2.times { }` nested in an inlined loop) keeps no dynamic else;
 #     - a Range literal receiver of a name only core owners answer (`(1..n).map { }`, OUTSIDE_OWNER_CALL's bare
 #       line) takes the proven-receiver arm and keeps no dynamic else;
@@ -160,10 +164,15 @@ code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true
 end
 # The else is the site's send: by name, or the owner call when the closed world names every owner.
 ELSE_SEND = '(?:mrb_funcall_with_block|bc2cpp_owner_call)\\('
-check.call('lp: a block with a break keeps the root-context test, the send its else',
-           code_of(code, 'lp').match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = Kernel_loop_impl\(M, self, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}M, self, /m))
+# Kernel#loop has one definition in the program (core's), so the send is a MONO direct call of its compiled body: no
+# root-context test (the body suspends a Fiber's frames itself) and no dynamic else. A `break` is caught at the site.
+lp = code_of(code, 'lp')
+check.call('lp: a block with a break calls Kernel#loop directly (MONO), catching the break at the site',
+           lp.include?('MONO :loop -> Kernel#loop, direct C++ call') && lp.include?('catch (bc2cpp_block_break&') &&
+             !lp.match?(DYNAMIC) && !lp.include?(BY_NAME) && !lp.include?('M->c == M->root_c'))
 check.call('lp_drain: a yield-free block leaves no dynamic send',
-           code_of(code, 'lp_drain').include?('no dynamic send') && !code_of(code, 'lp_drain').include?(BY_NAME))
+           code_of(code, 'lp_drain').include?('MONO :loop -> Kernel#loop, direct C++ call') &&
+             !code_of(code, 'lp_drain').match?(DYNAMIC) && !code_of(code, 'lp_drain').include?(BY_NAME))
 chars = code_of(code, 'chars')
 check.call('chars: an unproven each_char receiver gets an exact-String arm with the send as its else',
            chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}/m))
@@ -182,10 +191,16 @@ check.call('tm_nested: the Integer literal receiver of the inner times keeps no 
            nested.include?('literal Integer receiver') && nested.include?('Integer_times_impl(M, ') &&
            nested.scan(DYNAMIC).size == 1 && code_of(code, 'tm_nested').scan(DYNAMIC).size == 1)
 nested_chars = code_with_blocks(code, 'chars_nested')
+# The literal is proven exactly String (EXACT_TYPED): a direct call, no class test, and the only dynamic else left
+# is the outer `n.times`'s own.
+STRING_EXACT = 'EXACT_TYPED :each_char -> String#each_char (receiver proven exactly String), direct C++ call with no guard'
 check.call('chars_nested: a String literal in a nested block keeps no class test or dynamic else',
-           nested_chars.match?(/-- (?:literal|proven) String receiver, yield-free block/) && nested_chars.scan(DYNAMIC).size == 1)
-check.call('chars_nested_break: a nonlocal break keeps the root-context guard',
-           code_with_blocks(code, 'chars_nested_break').match?(/(?:literal|proven) String receiver at the root context/))
+           nested_chars.include?(STRING_EXACT) && nested_chars.include?('String_each_char_impl(M, ') &&
+             nested_chars.scan(DYNAMIC).size == 1)
+nested_break = code_with_blocks(code, 'chars_nested_break')
+check.call('chars_nested_break: a nonlocal break out of the literal String receiver is caught at its site',
+           nested_break.include?(STRING_EXACT) && nested_break.include?('catch (bc2cpp_block_break&') &&
+             !nested_break.include?('mrb_funcall_with_block('))
 tm = code_of(code, 'tm')
 check.call('tm: an unproven receiver runs the inlined loop behind a Fixnum test, the send with its Integer arm as the else',
            tm.match?(/GUARDED_BLOCK_INLINE :times .*\n\s+if \(M->c == M->root_c && mrb_integer_p\(r\d+\)\) \{\n/) &&
@@ -217,13 +232,31 @@ check.call('user_each: an unproven receiver keeps the exact-class arms and the d
 check.call('no arm of this ADR is an unchecked fallback: every #error-free body compiles', !code.include?('#error'))
 
 puts '-- world proofs withdraw the arms'
+# A program definition of `loop` ends the direct call: Kernel's body is no longer the program's only one, so the site
+# is the owner call over every owner (Object precedes Kernel for self; a `loop` of an unrelated class is listed too).
+c, = generate_world(SRC + "class Object\n  def loop; :mine; end\nend\n")
+check.call('a program Object#loop withdraws the direct Kernel#loop call: the owner call lists both',
+           !code_of(c, 'lp').include?('MONO :loop') && !code_of(c, 'lp').include?(KERNEL_LOOP) &&
+             code_of(c, 'lp').match?(/BC2CPP_OWNERS\("Kernel", "Object"\)/))
 c, = generate_world(SRC + "class BiOther\n  def loop; :mine; end\nend\n")
-check.call('a program definition of loop anywhere withdraws the Kernel arm', !code_of(c, 'lp').include?(KERNEL_LOOP))
-c, = generate_world(SRC + "class BiBare < BasicObject\nend\n")
-check.call('a BasicObject subclass withdraws the Kernel arm', !code_of(c, 'lp').include?(KERNEL_LOOP))
+check.call('a program loop of another class withdraws it too: two definitions, no MONO',
+           !code_of(c, 'lp').include?('MONO :loop') && !code_of(c, 'lp').include?(KERNEL_LOOP) &&
+             code_of(c, 'lp').match?(/BC2CPP_OWNERS\("BiOther", "Kernel"\)/))
+# A BasicObject subclass has no Kernel#loop: its own `loop { }` must not run Kernel's body (the interpreter raises
+# NoMethodError). Another class of the program still has Kernel.
+bare = "class BiBare < BasicObject\n  def run; loop { break 1 }; end\nend\n"
+c, = Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(SRC + bare, dir, core: true, only_owners: %w[BiFx BiBare]) }
+bare_run = c[/^mrb_value BiBare_run_impl\(mrb_state\* M.*?^\}/m].to_s
+check.call('a BasicObject subclass keeps the kind_of(Kernel) test and the owner call for its own loop',
+           bare_run.match?(/mrb_obj_is_kind_of\(M, self, .*\) \{\n\s+r\d+ = Kernel_loop_impl/) && bare_run.include?('bc2cpp_owner_call(') &&
+             !bare_run.include?('MONO :loop'))
+check.call('a BasicObject subclass elsewhere in the program leaves the Kernel#loop call of a class that has Kernel',
+           code_of(c, 'lp').include?('MONO :loop -> Kernel#loop'))
+# A computed define_method name (`Object.send(:define_method, n)`) withdraws the unproven String arm. The MONO direct
+# call of a program's own methods ignores computed installers in general (LEXICAL_SELF binds `b` the same), so the
+# Kernel#loop call is not tested here.
 c, = generate_world(SRC + "class BiMeta\n  def install(n); Object.send(:define_method, n) { 1 }; end\nend\n")
-check.call('a dynamic installer withdraws the Kernel and String arms',
-           !code_of(c, 'lp').include?(KERNEL_LOOP) && !code_of(c, 'chars').include?('String_each_char_impl'))
+check.call('a dynamic installer withdraws the String arm', !code_of(c, 'chars').include?('String_each_char_impl'))
 c, = generate_world(SRC + "class BiSingleton\n  def touch(o); o.singleton_class; end\nend\n")
 check.call('singleton makers withdraw the heap literal proof',
            !code_with_blocks(c, 'chars_nested').match?(/-- (?:literal|proven) String receiver/))
@@ -240,9 +273,10 @@ check.call('a program String#each_char withdraws the core String arm',
 check.call('a program Array#index withdraws the index loops, proven and guarded',
            %w[idx idx_lit].none? { |m| code_of(c, m).include?('bc2cpp_accum_') })
 c, = generate_world(SRC, { 'BC2CPP_BLOCK_CORE_DIRECT' => '0' })
-check.call('BC2CPP_BLOCK_CORE_DIRECT=0: no Kernel, String or literal arm',
-           !code_of(c, 'lp').include?(KERNEL_LOOP) && !code_of(c, 'chars').include?('String_each_char_impl(M,') &&
-           !c.include?('literal Integer receiver'))
+# The MONO call of Kernel#loop is the compiler's ordinary static binding, not an arm of this switch.
+check.call('BC2CPP_BLOCK_CORE_DIRECT=0: no String or literal arm',
+           !code_of(c, 'chars').include?('String_each_char_impl(M,') && !c.include?('literal Integer receiver') &&
+           !c.include?('BLOCK_CORE_DIRECT'))
 
 DRIVER = <<~'RUBY'
   fx = BiFx.new

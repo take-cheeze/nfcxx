@@ -1102,6 +1102,10 @@ class CodeGen
     # A MONO name is only safe to devirtualize if its definition fits the calling
     # convention (pure_mandatory_or_optional_arity?).
     target = nil if target && !pure_mandatory_or_optional_arity?(@ireps.fetch(target.irep))
+    # KERNEL_SELF_SEND: an implicit-self send MONO-bound to a Kernel body is a NoMethodError for a self that lacks Kernel
+    # (a BasicObject subclass), which a direct call would run instead.
+    target = nil if target && self_implicit && target.owner == 'Kernel' && owner_def &&
+                    block_core_world&.respond_to?(:kernel_missing_self?) && block_core_world.kernel_missing_self?(owner_def.owner)
     # ...and if this call's argument count fits the target's arity. Without
     # NATIVE_SRCS, `:repeat?` looks MONO (only Game::MoveRoute#repeat?, 0 args, is
     # bytecode) although `Input.repeat?(key)` (native, 1 arg) uses the name, and a

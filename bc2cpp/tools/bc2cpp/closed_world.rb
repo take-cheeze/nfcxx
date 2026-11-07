@@ -556,6 +556,32 @@ class ClosedWorld
     @outside_ruby_definer_paths[name] ||= Array(@ruby_paths).select { |path| outside_ruby_path_method_names(path).include?(name) }
   end
 
+  # KERNEL_SELF_SEND: may `self` in a method of +owner+ lack Kernel? False when no class of the program is a BasicObject
+  # subclass; otherwise true only for a BasicObject subclass, a class below one, or an owner whose includers are not known
+  # (a module). The program's other classes keep Kernel, so an implicit-self send of a Kernel method reaches it there.
+  def kernel_missing_self?(owner)
+    return false if basic_object_subclass_free?
+    return true if @global_refusal
+
+    seen = Set.new
+    cur = owner
+    while cur && seen.add?(cur)
+      decls = @class_decls[cur]
+      return true unless decls
+
+      supers = decls.map { |decl| decl[:super] }.uniq - [:none]
+      return true unless supers.all?(String)
+      return true if supers.any? { |sup| simple(sup) == 'BasicObject' }
+
+      return false if supers.empty? # no superclass named: Object
+
+      return true unless supers.size == 1
+
+      cur = @class_decls.keys.find { |k| simple(k) == simple(supers.first) }
+    end
+    false
+  end
+
   # No class of the program, created or subclassed anywhere, lacks Kernel.
   def basic_object_subclass_free?
     return false if @dynamic_subclassed.include?('BasicObject') || @outside_ruby_supers.include?('BasicObject')

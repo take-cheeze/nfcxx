@@ -2455,6 +2455,12 @@ if $PROGRAM_NAME == __FILE__
     code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
     unit.merge(code: SymbolCache.rewrite(code, symbol_table))
   end
+  # TOP_LEVEL_STATEMENTS takes the same passes: its sends are named calls too (a `Class.new(Base)` constant write is an owner call).
+  unless top_level_code.empty?
+    code = top_level_code.gsub('@@SITE@@', 'top-level')
+    code = OwnerCallDirect.rewrite(code, owner_call_direct, owner_class_slots, program_superclasses)
+    top_level_code = SymbolCache.rewrite(code, symbol_table)
+  end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
   # live in separate `.each`/`.sum` scans of the same code strings.
   kept = Hash.new(0)
