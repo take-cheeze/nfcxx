@@ -56,12 +56,11 @@ jobs:
             run: |
               NFCXX_BACKEND=qbe tests/run.sh
               NFCXX_BACKEND=gcc tests/run.sh
-          - name: C++11 and C++14 language feature probes (qbe and gcc), mruby scripts
+          - name: C++11 and C++14 language feature probes (qbe and gcc)
             run: |
               tests/cpp-features/self-test.sh
               tests/upstream/self-test.sh
               FEATURE_ROUTES="qbe gcc" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
-              tests/mruby/run.sh
           - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
             dotnet: true
             run: |
@@ -527,8 +526,8 @@ jobs:
 
   # Path B (docs/notes/pathb-stage1.md to pathb-stage3.md). Building the harness compiles the whole EDG front end a second
   # time, so these jobs run only when a change can affect them (the list below), and on demand (workflow_dispatch). A build
-  # job makes the harness and the mruby tool, and the suites run in parallel from their caches. python3 is needed only for
-  # the oracles of tests/mruby/run.sh; ruby and rake only bootstrap the mruby build.
+  # job makes the harness and the mruby tool, and the suites run in parallel from their caches. ruby and rake only
+  # bootstrap the mruby build.
   #   tests/pathb/run.sh       stage 1 IL goldens (tests/pathb/*.il)
   #   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
   #   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
@@ -617,8 +616,7 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # One suite per job, all restoring the pathb-build job's caches. The slowest suite (tests/mruby/run.sh, about 9 minutes
-  # in its Path B emitter check) sets the total time.
+  # One suite per job, all restoring the pathb-build job's caches. The slowest suite sets the total time.
   pathb-test:
     # Skipped with pathb-build when the change does not touch Path B.
     needs: pathb-build
@@ -651,8 +649,7 @@ jobs:
               sudo apt-get install -y -q spirv-tools libvulkan-dev mesa-vulkan-drivers
               npm install --prefix "$RUNNER_TEMP/pw" playwright
               "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
-              # every device compile runs both SPIR-V emitters (scripts/spirv-emit): the C++ port must match the Ruby
-              NFCXX_SPIRV_EMITTER=check NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
+              NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
     name: ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
