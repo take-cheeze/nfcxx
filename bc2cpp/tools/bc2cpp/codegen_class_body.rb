@@ -359,12 +359,20 @@ class CodeGen
     body = +''
     start = 0
     targets = jump_targets(root_irep)
+    jump_sources = top_level_jump_sources(program)
     program.each_source do |insn, idx|
       if insn.op == :EXEC
         start = idx + 1
         next
       end
       next unless %i[SETCONST SETGV].include?(insn.op)
+
+      # A run whose branches leave it (`if cond; X = 1; else; X = 2; end` spans two runs) would emit a `goto` to a label that
+      # is in no statement, or jump over a declaration into one. The VM still runs such a statement from the bytecode.
+      unless top_level_run_self_contained?(program, start, idx, jump_sources)
+        start = idx + 1
+        next
+      end
 
       lines = +''
       @class_body_unit = true
@@ -385,6 +393,27 @@ class CodeGen
     "static void bc2cpp_top_level_statements(mrb_state* M) {\n  mrb_value self = mrb_obj_value(M->top_self);\n#{body}}\n"
   ensure
     @class_body_unit = false
+  end
+
+  # Target index => the indices whose branch (not fallthrough) or raise reaches it, over a root program.
+  def top_level_jump_sources(program)
+    sources = Hash.new { |h, k| h[k] = [] }
+    program.size.times do |i|
+      program.successors_of(i, include_handlers: true).each { |n| sources[n] << i unless n == i + 1 }
+    end
+    sources
+  end
+
+  # Every branch of run start..idx lands inside the run (or on the next statement), and no branch from outside lands inside
+  # past its first instruction.
+  def top_level_run_self_contained?(program, start, idx, jump_sources)
+    range = start..idx
+    inside = range.all? do |i|
+      program.successors_of(i, include_handlers: true).all? { |n| n == i + 1 || range.cover?(n) || n == idx + 1 }
+    end
+    return false unless inside
+
+    ((start + 1)..idx).none? { |t| jump_sources.key?(t) && jump_sources[t].any? { |src| !range.cover?(src) } }
   end
 
   # The units a gem's gem_init runs are the ones of the owners that gem emits (ONLY_OWNERS). Every gem's TU would otherwise

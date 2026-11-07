@@ -721,7 +721,7 @@ class CodeGen
       out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"
       out << "  mrb_free(mrb, p);\n"
       out << "}\n"
-      out << "static const mrb_data_ivar #{sanitize(owner)}_ivar_slots[] = {\n"
+      out << "static const mrb_data_ivar #{sanitize(owner)}_bc2cpp_ivar_slot_table[] = {\n"
       # Typed fields are listed with their kind: the runtime boxes a raw C value on
       # read and type-checks a store, so instance_variable_get/set,
       # instance_variables, inspect, Marshal and dup see them. The GC
@@ -741,7 +741,7 @@ class CodeGen
       end
       out << "static const mrb_data_type #{type_var(owner)} = " \
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free, " \
-             "#{sanitize(owner)}_ivar_slots, #{slots.size}, sizeof(#{struct_name(owner)}), " \
+             "#{sanitize(owner)}_bc2cpp_ivar_slot_table, #{slots.size}, sizeof(#{struct_name(owner)}), " \
              "#{hash_fields} };\n\n"
     end
     out

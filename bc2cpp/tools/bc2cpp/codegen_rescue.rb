@@ -838,20 +838,20 @@ class CodeGen
 
     out << "struct #{ctx_struct} { #{ctx_fields.join('; ')}; };\n"
     out << "static mrb_value #{try_name}(mrb_state* M, void* ud) {\n"
-    out << "  #{ctx_struct}* ctx = (#{ctx_struct}*)ud;\n"
+    out << "  #{ctx_struct}* bc2cpp_ctx = (#{ctx_struct}*)ud;\n"
     extra_fields.each do |f|
-      out << "  #{f[:c_type]} #{f[:name]} = ctx->#{f[:name]};\n" unless f[:name].start_with?('bc2cpp_ref_r')
+      out << "  #{f[:c_type]} #{f[:name]} = bc2cpp_ctx->#{f[:name]};\n" unless f[:name].start_with?('bc2cpp_ref_r')
     end
     (0...irep.nregs).each do |i|
       if i.zero?
         # GETIV/SETIV codegen uses the bare identifier `self`; this function receives
         # it through ctx, so alias it.
-        out << "  mrb_value self = ctx->self;\n"
+        out << "  mrb_value self = bc2cpp_ctx->self;\n"
         out << "  mrb_value r0 = self;\n"
       elsif extra_fields.any? { |f| f[:name] == "bc2cpp_ref_r#{i}" }
         # RESCUE_LIVE_OUT: an alias of the outer register, so a write here is the
         # write the bytecode makes (see rescue_ref_regs).
-        out << "  mrb_value& r#{i} = *ctx->bc2cpp_ref_r#{i};\n"
+        out << "  mrb_value& r#{i} = *bc2cpp_ctx->bc2cpp_ref_r#{i};\n"
       elsif (saved = extra_fields.find { |f| f[:name] == "bc2cpp_saved_r#{i}" })
         # A saved-register capture is the register's value at begin_addr, so it wins
         # over the raw argument (an optional default may have replaced it).
@@ -860,9 +860,9 @@ class CodeGen
         a = arg_names[i - 1]
         t = arg_native_types[i - 1]
         out << if t
-                  "  mrb_value r#{i} = #{TYPE_OPS.fetch(t)[:box]}(ctx->#{a});\n"
+                  "  mrb_value r#{i} = #{TYPE_OPS.fetch(t)[:box]}(bc2cpp_ctx->#{a});\n"
                 else
-                  "  mrb_value r#{i} = ctx->#{a};\n"
+                  "  mrb_value r#{i} = bc2cpp_ctx->#{a};\n"
                 end
       else
         out << "  mrb_value r#{i} = mrb_nil_value();\n"
@@ -886,6 +886,11 @@ class CodeGen
     @blk_param_name = saved_blk_param_name
     out << fell_off_end(try_name)
     out << "}\n\n"
+    # A block built inside the try body names the method's cells array (STEP_CLOSURES), which the try function does not
+    # receive: refuse it rather than emit a reference to an undeclared name. The method stays on the interpreter.
+    if !out.include?('bc2cpp_cells_ary = ') && out.include?('bc2cpp_cells_ary')
+      out << "#error rescue body builds a block over the method's cells array, which the try function does not capture\n"
+    end
     # The nested try bodies above are in +out+ too, so a shared name is only ever kept.
     @resumable ? out : drop_dead_statements(drop_unused_registers(out))
   end
@@ -909,9 +914,9 @@ class CodeGen
     result_var = "#{try_name}_result"
     out = String.new
     out << "  {\n"
-    out << "    #{ctx_struct} ctx{#{ctx_args}};\n"
+    out << "    #{ctx_struct} bc2cpp_ctx{#{ctx_args}};\n"
     out << "    mrb_bool #{err_var} = FALSE;\n"
-    out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &ctx, &#{err_var});\n"
+    out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
     out << if region[:tail_return]
               "    if (!#{err_var}) { return #{result_var}; }\n"
             else

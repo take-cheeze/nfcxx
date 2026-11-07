@@ -217,6 +217,11 @@ CPP_RESERVED_WORDS = Set[
   'return', 'void', 'int', 'float', 'double', 'char', 'bool', 'long',
   'short', 'auto', 'extern', 'volatile', 'explicit', 'typename', 'using',
   'public', 'private', 'protected', 'virtual', 'friend', 'export', 'mutable',
+  # The rest of C++17's keywords and alternative tokens (a Ruby local `register` or `and` is a legal name).
+  'register', 'inline', 'signed', 'unsigned', 'wchar_t', 'asm', 'alignas', 'alignof', 'and', 'and_eq', 'bitand', 'bitor',
+  'compl', 'not', 'not_eq', 'or', 'or_eq', 'xor', 'xor_eq', 'const_cast', 'dynamic_cast', 'reinterpret_cast',
+  'static_cast', 'decltype', 'constexpr', 'noexcept', 'thread_local', 'static_assert', 'typeid', 'char16_t', 'char32_t',
+  'concept', 'requires', 'co_await', 'co_return', 'co_yield',
 ].freeze
 
 def sanitize_c_ident(name)
