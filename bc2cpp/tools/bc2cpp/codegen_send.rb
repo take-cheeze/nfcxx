@@ -1373,6 +1373,13 @@ class CodeGen
         if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
           note = "  // EXACT_TYPED :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
                  "#{check_owner}), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+          # RANGE_COLLECT_DIRECT: a proven Range keeps the Integer-bound helper for its literal block, as the
+          # dynamic-send arm does; any other Range takes the compiled body in the helper's else.
+          range_call = check_owner == 'Range' && block_core_direct_enabled? && @call_block_expr && block_core_world &&
+                       @native_name_sources &&
+                       block_core_range_call({ class: 'Range', target: target, impl: impl }, d, recv, call_argv)
+          return "  // RANGE_COLLECT_DIRECT :#{name} -- proven Range receiver, literal block: bc2cpp_range_each behind the bound test\n  #{range_call}\n" if range_call
+
           return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 

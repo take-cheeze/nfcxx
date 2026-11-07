@@ -167,7 +167,7 @@ module BlockCoreDirectFallback
   def block_core_kernel_definition(name, arity)
     why = ->(reason) { block_core_refuse('Kernel', name, arity, reason) }
     return why.call('a dynamic installer names it') if symbol_installed_names.nil? || symbol_installed_names.include?(name)
-    return why.call('a program definition of the name') unless (@registry[name] || []).empty?
+    return why.call('a program definition of the name') unless (@registry[name] || []).all?(&:core)
 
     registrations, opaque = block_core_registrations
     return why.call('a native registration of the name') if registrations.key?(name) || opaque.key?(name)
@@ -241,14 +241,18 @@ module BlockCoreDirectFallback
 
   # The receivers a literal-block send of +name+ gets arms for: the classes that own a core definition of the name, and
   # the core collections with their exact-class guards. No fixed list: a class with a core body gets an arm, and its
-  # guard is a kind_of test on that class (a subclass instance passes it, and its own override is refused by the
-  # chain walk). A failed guard takes the send's by-name else arm.
+  # guard is a kind_of test on that class (a subclass instance passes it, so a program definition of the name anywhere
+  # withdraws the kind_of arms). A failed guard takes the send's by-name else arm.
   def block_core_receivers(name)
     owners = block_core_index.keys.select { |_owner, method| method == name }.map(&:first).uniq
     # The exact-class collections keep their own arms first (they must not be shadowed by a kind_of arm, e.g. one for
     # Enumerable, which an Array also passes); the other owners follow.
     fixed = BLOCK_RECEIVERS.keys
+    # A kind_of arm (Enumerable, Enumerator, ...) answers every subclass instance and every includer of the module, so a
+    # program definition of the name on any owner (an Array subclass, a module it includes, a class including Enumerable)
+    # would be skipped by it. The exact-class arms above test the class itself and are not affected.
     generic = (owners - fixed).sort
+    generic = [] if (@registry[name] || []).any? { |definition| !definition.core && definition.owner != '<native>' }
     (fixed + generic).to_h do |klass|
       spec = BLOCK_RECEIVERS[klass] || {
         guard: "mrb_obj_is_kind_of(M, %<r>s, #{owner_class_ptr_expr(klass)})",

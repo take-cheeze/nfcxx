@@ -83,8 +83,13 @@ dirs.each do |world, dir|
   check.call('no #error in the generated code', !code.include?('#error'))
   SUBCLASS_ONLY.each do |name, owner|
     check.call("no call site binds :#{name} MONO to #{owner}##{name}", !code.include?("MONO :#{name} -> #{owner}#"))
-    check.call(":#{name} is POLY in the registry (#{owner} and the core definer's <native> placeholder)",
-               err.match?(/^  POLY  :#{Regexp.escape(name)}  \(\d+ defs: [^)]*#{Regexp.escape(owner)}[^)]*<native>\)/))
+    # Where the core mrblib is outside the program, the unseen core definer is a `<native>` placeholder; where it is
+    # compiled, mruby's own Enumerable/Enumerator/Array/Hash definition is itself a registry entry and no placeholder
+    # is needed (add_unseen_placeholders! only adds one for a core def the registry lacks).
+    core_definer = world == :core ? '(?:<native>|Enumerable|Enumerator|Array|Hash)' : '<native>'
+    check.call(":#{name} is POLY in the registry (#{owner} and the core definer: #{core_definer})",
+               err.match?(/^  POLY  :#{Regexp.escape(name)}  \(\d+ defs: [^)]*#{Regexp.escape(owner)}[^)]*#{core_definer}[^)]*\)/) ||
+                 err.match?(/^  POLY  :#{Regexp.escape(name)}  \(\d+ defs: [^)]*#{core_definer}[^)]*#{Regexp.escape(owner)}[^)]*\)/))
   end
 end
 
