@@ -465,8 +465,9 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
 struct Bc2cppCurrentFiber {
   bool in;
   mrb_value fiber;
+  struct mrb_context* ctx;  // M->c when it was resumed
 };
-inline Bc2cppCurrentFiber bc2cpp_current_fiber = {false, {}};
+inline Bc2cppCurrentFiber bc2cpp_current_fiber = {false, {}, nullptr};
 
 // What the first resume was given: an Array of its arguments (resume(1, 2) is
 // [1, 2]), or nil when the fiber is resumed from C. A body that takes block
@@ -597,7 +598,7 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   Bc2cppFiber* waiting = outer.in ? bc2cpp_fiber_ptr(M, outer.fiber) : nullptr;
   if (waiting)
     waiting->waiting_transfer = transfer;
-  bc2cpp_current_fiber = {true, self};
+  bc2cpp_current_fiber = {true, self, M->c};
   mrb_ary_push(M, bc2cpp_running_fibers(M), self);
   mrb_bool error = FALSE;
   mrb_value result = mrb_nil_value();
@@ -868,6 +869,17 @@ static mrb_value bc2cpp_fiber_s_yield(mrb_state* M, mrb_value self) {
   return mrb_nil_value();
 }
 
+// With mruby-fiber, a Fiber.yield that reaches it from a C++ Fiber's own
+// context ran in a block called from C, which mruby-fiber would report as a C
+// function boundary.
+static mrb_func_t bc2cpp_fiber_orig_yield = nullptr;
+static mrb_value bc2cpp_fiber_s_yield_wrapped(mrb_state* M, mrb_value self) {
+  if (bc2cpp_current_fiber.in && bc2cpp_current_fiber.ctx == M->c)
+    mrb_raise(M, bc2cpp_fiber_error_class(M),
+              "can't cross C function boundary");
+  return bc2cpp_fiber_orig_yield(M, self);
+}
+
 static void bc2cpp_fiber_define(mrb_state* M) {
   struct RClass* klass = mrb_define_class(M, "Fiber", M->object_class);
   mrb_func_t resume = bc2cpp_fiber_cfunc(M, klass, "resume");
@@ -878,10 +890,12 @@ static void bc2cpp_fiber_define(mrb_state* M) {
   if (!mrb_const_defined_at(M, mrb_obj_value(M->object_class),
                             mrb_intern_lit(M, "FiberError")))
     mrb_define_class(M, "FiberError", M->eStandardError_class);
-  if (!bc2cpp_fiber_cfunc(M, mrb_singleton_class_ptr(M, mrb_obj_value(klass)),
-                          "yield"))
-    mrb_define_class_method(M, klass, "yield", bc2cpp_fiber_s_yield,
-                            MRB_ARGS_ANY());
+  bc2cpp_fiber_orig_yield = bc2cpp_fiber_cfunc(
+      M, mrb_singleton_class_ptr(M, mrb_obj_value(klass)), "yield");
+  mrb_define_class_method(M, klass, "yield",
+                          bc2cpp_fiber_orig_yield ? bc2cpp_fiber_s_yield_wrapped
+                                                  : bc2cpp_fiber_s_yield,
+                          MRB_ARGS_ANY());
   bc2cpp_fiber_orig_resume = resume;
   bc2cpp_fiber_orig_alive_p = bc2cpp_fiber_cfunc(M, klass, "alive?");
   bc2cpp_fiber_orig_transfer = bc2cpp_fiber_cfunc(M, klass, "transfer");

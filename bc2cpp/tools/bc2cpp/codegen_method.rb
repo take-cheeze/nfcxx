@@ -1155,7 +1155,10 @@ class CodeGen
     String#each_char String#upto StringIO#each
     Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
     Enumerable#each_slice Enumerable#each_cons Enumerable#group_by Enumerable#partition Enumerable#min_by Enumerable#max_by Enumerable#take_while Enumerable#drop_while
+    Kernel#loop Hash#fetch_values
   ].freeze
+
+  RESUMABLE_DUAL_NAMES = RESUMABLE_DUAL.to_set { |key| key.split('#').last }.freeze
 
   def rsm_dual?(label, d)
     EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}")

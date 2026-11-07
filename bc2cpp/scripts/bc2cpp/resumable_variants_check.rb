@@ -168,6 +168,13 @@ SCENARIOS = [
   ['Enumerable#max_by', '(1..3).max_by { |x| Fiber.yield x; -x }', '(1..3).max_by { |x| -x }'],
   ['Enumerable#take_while', '(1..3).take_while { |x| Fiber.yield x; x < 3 }', '(1..3).take_while { |x| x < 3 }'],
   ['Enumerable#drop_while', '(1..3).drop_while { |x| Fiber.yield x; x < 2 }', '(1..3).drop_while { |x| x < 2 }'],
+  ['Kernel#loop', 'n = 0; loop { Fiber.yield n; n += 1; break if n > 1 }', 'n = 0; loop { n += 1; break if n > 1 }'],
+  ['Kernel#loop', 'n = 0; loop { Fiber.yield n; n += 1; raise StopIteration if n > 1 }', 'n = 0; loop { n += 1; raise StopIteration if n > 1 }'],
+  ['Hash#fetch_values', '{ a: 1 }.fetch_values(:z) { |k| Fiber.yield k; 0 }', '{ a: 1 }.fetch_values(:z) { |k| 0 }'],
+  # A block run from a C iterator cannot suspend: the error matches mruby-fiber's.
+  ['Array#index', '[1, 2].index { |x| Fiber.yield x; x == 2 }', '[1, 2].index { |x| x == 2 }'],
+  # An Enumerator driven inside a Fiber body: its own fiber nests in the body's.
+  ['Enumerator#next', 'e = [1, 2].each; Fiber.yield e.next; e.next', 'e = [1, 2].each; e.next; e.next'],
   ['StringIO#each', 'require "stringio"; StringIO.new("a\\nb").each { |l| Fiber.yield l }', 'require "stringio"; StringIO.new("a\\nb").each { |l| l }']
 ].freeze
 SCENARIOS = SCENARIOS.select { |label, *| label == ENV['ONLY'] }.freeze if ENV['ONLY'] # debugging aid: one label
@@ -183,6 +190,7 @@ EXPECTED_LABELS = %w[
   String#each_char String#upto StringIO#each
   Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
   Enumerable#each_slice Enumerable#each_cons Enumerable#group_by Enumerable#partition Enumerable#min_by Enumerable#max_by Enumerable#take_while Enumerable#drop_while
+  Kernel#loop Hash#fetch_values
 ].freeze
 
 # The probe class: one method per scenario builds the fiber whose body is the scenario, so every fiber body is compiled
@@ -215,7 +223,7 @@ DRIVER_BODY = SCENARIOS.each_with_index.map do |(label, _, plain), i|
 end.join("\n")
 DRIVER_FULL = DRIVER + DRIVER_BODY + "\nputs 'end'\n"
 
-OWNERS = %w[Array Enumerable Hash Integer Float Range String StringIO VariantProbe].freeze
+OWNERS = %w[Array Enumerable Enumerator Hash Integer Float Kernel Range String StringIO VariantProbe].freeze
 
 baseline_dir = Dir.mktmpdir('bc2cpp-resumable-variants')
 at_exit { FileUtils.remove_entry(baseline_dir) }

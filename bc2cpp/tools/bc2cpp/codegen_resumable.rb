@@ -321,9 +321,10 @@ class CodeGen
       # runs as an ordinary call.
       next if %i[SENDB SSENDB].include?(insn.op)
 
-      unless %i[SSEND SSEND0].include?(insn.op)
-        return "calls the yielding method #{name} with an explicit receiver or a block"
-      end
+      # Without a block, an explicit-receiver call takes the dynamic call (resumable_intercept).
+      next if %i[SEND SEND0].include?(insn.op)
+      return "calls the yielding method #{name} with an explicit receiver or a block" unless %i[SSEND SSEND0].include?(insn.op)
+
       next if helpers.key?(name)
 
       reason = resumable_helper_problem(name, d, stack)
@@ -383,6 +384,7 @@ class CodeGen
       return resumable_block_call_intercept(insn, irep, d, idx, reg_offset) if block_call_site?(insn, idx, reg_offset)
       return resumable_dyn_send_insn(insn) if dyn_send_site?(insn, idx) && reg_offset.zero?
       return resumable_transfer_intercept(insn, irep, d, idx, reg_offset) if transfer_site?(insn, idx, reg_offset)
+      return resumable_dyn_send_insn(insn) if blockless_yielding_send?(insn, idx, reg_offset)
       return nil unless insn.sym == 'yield' && idx
 
       dest = insn.reg - reg_offset
@@ -473,6 +475,13 @@ class CodeGen
   # DYN_CALL: sends whose method is chosen at run time. In a step they go through bc2cpp_dyn_call, which returns the
   # frame of a registered suspendable method for the step to CALL.
   DYN_SEND_NAMES = %w[send __send__ public_send].freeze
+
+  # An explicit-receiver call without a block to a method name that can reach Fiber.yield (`ary.each`): a dynamic call, so
+  # a suspendable target parks and is CALLed and any other runs as an ordinary call.
+  def blockless_yielding_send?(insn, idx, reg_offset)
+    idx && reg_offset.zero? && insn.sym != 'yield' && @fiber_yield_names&.include?(insn.sym) && @resumable&.flat &&
+      !@resumable_plain && dyn_call_shape(insn)
+  end
 
   def dyn_send_site?(insn, idx)
     return false unless %i[SEND SENDB SSEND SSENDB].include?(insn.op) && DYN_SEND_NAMES.include?(insn.sym) && idx
@@ -1211,6 +1220,12 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # the step's frame in its env (emit_rproc_construction); the fiber's adapter asks for it at a block-call suspension.
   # Limits (a block outside them keeps the call from C, or its tail yield): no captured locals, no nested block,
   # no break/return/yield to the method's block, mandatory or rest-only parameters.
+  # A name that can reach Fiber.yield: a program method that does, or a core iterator with a resumable variant (its
+  # definition is not a registry entry).
+  def yielding_call_name?(name)
+    @fiber_yield_names&.include?(name) || (EnumStep.enabled? && RESUMABLE_DUAL_NAMES.include?(name))
+  end
+
   def block_step_candidate?(region, owner_def, builder_upvars = nil)
     return false unless owner_def && ENV['BC2CPP_BLOCK_STEP'] != '0' && !@block_step_compile
 
@@ -1238,7 +1253,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     yields ||= (block.reps || []).any? { |child| (c = child && @ireps[child]) && deep_fiber_yield?(c, Set.new) }
     # A block may also suspend through the suspendable methods it calls on self (CALL_STEP).
     unless yields
-      BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0) { |insn, _| yields ||= @fiber_yield_names&.include?(insn.sym) }
+      BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0, :SSENDB) { |insn, _| yields ||= yielding_call_name?(insn.sym) }
     end
     yields
   end
