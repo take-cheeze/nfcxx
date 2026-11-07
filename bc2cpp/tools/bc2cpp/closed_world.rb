@@ -86,6 +86,20 @@ class ClosedWorld
   # then (and without it) every block counts as rebound.
   attr_accessor :block_self_world
 
+  # With BC2CPP_PROFILE_TIMINGS=1, the resident memory (Linux) after a construction step, so a run shows where the
+  # closed world's memory goes. Silent otherwise.
+  def profile_mark(step)
+    return unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
+
+    kb = begin
+      File.read('/proc/self/status').lines.grep(/\AVmRSS:/).first.to_s.split[1].to_i
+    rescue StandardError
+      -1
+    end
+    warn format('BC2CPP_TIME   ClosedWorld.new %-24s rss %d MB', step, kb / 1024)
+  end
+  private :profile_mark
+
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
     @module_names = module_names.to_set
@@ -153,10 +167,14 @@ class ClosedWorld
     @desc_memo = {}
     @native_paths = native_paths
     scan_native(native_paths)
+    profile_mark('scan_native')
     @outside_include_open ||= !helper_names_enumerable?
     scan_outside_ruby(ruby_paths)
+    profile_mark('scan_outside_ruby')
     scan_closed_world
+    profile_mark('scan_closed_world')
     build_hierarchy
+    profile_mark('build_hierarchy')
     build_method_missing
     @opaque_touches = {} unless ENV['BC2CPP_CLOSED_OPACITY_INDEX'] == '0'
   end
