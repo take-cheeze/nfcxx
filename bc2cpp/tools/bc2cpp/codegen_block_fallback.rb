@@ -553,12 +553,17 @@ class CodeGen
       # FIBER_BODY_CAPTURE: a Fiber body outlives the frame, so it never takes the frame's addresses (the gates
       # below); where fiber_body_by_value? holds, its locals are copied into a heap Array at the site instead.
       by_value = upvars.any? && fiber_body_by_value?(irep, idx, paired, block_irep, upvars)
-      next if upvars.any? && !synchronous && !by_value
+      # STEP_CLOSURES: a block that may outlive the call (the callee is not proven to leave it) captures this function's own
+      # registers through heap cells instead: they live in an Array the block's env keeps, so no pointer outlives its frame.
+      # `new` keeps its block (Hash.new's default proc, Proc.new, Fiber.new's body) unless the receiver is Array.
+      keeps_block = name == 'new' && !array_const_receiver?(irep, idx, dest_reg)
+      boxed = upvars.any? && (!synchronous || keeps_block) && !by_value && cells_capture?(upvars)
+      next if upvars.any? && !synchronous && !by_value && !boxed
 
       # BLOCK_SEMANTICS: `new` is on the allowlist for Array.new only. Hash.new
       # keeps its block as the default proc and Proc.new returns it, either of
       # which outlives this frame and would hold pointers into it.
-      next if upvars.any? && name == 'new' && !array_const_receiver?(irep, idx, dest_reg) && !by_value
+      next if upvars.any? && name == 'new' && !array_const_receiver?(irep, idx, dest_reg) && !by_value && !boxed
 
       # BLOCK_FALLBACK_YIELD_SUPPORT: does this body's `yield` need the enclosing
       # method's block forwarded into the cfunc? Only `[1]` is modelled (every
@@ -586,7 +591,7 @@ class CodeGen
       region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
                  block_irep: block_irep, name: name, n: n,
                  self_implicit: paired.op == :SSENDB, upvars: upvars, needs_blk: needs_blk,
-                 parent_irep: irep }
+                 parent_irep: irep, boxed: boxed }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
       # forwarded by every enclosing block, so it is needed for a `return` at any depth.
       region[:needs_brk] = BytecodeIR.for(block_irep).op?(:BREAK)
@@ -595,6 +600,17 @@ class CodeGen
       regions << region
     end
     regions
+  end
+
+  # STEP_CLOSURES: only the registers of the function that makes the block can be boxed (a level >= 1 pointer is the
+  # enclosing function's, whose cells the block's env would also have to keep).
+  def cells_capture?(upvars)
+    ENV['BC2CPP_STEP_CLOSURES'] != '0' && upvars.all? { |(level, _)| level.zero? }
+  end
+
+  # The registers of a function that its recognized +regions+ capture through cells, sorted.
+  def boxed_registers(regions)
+    regions.select { |region| region[:boxed] }.flat_map { |region| region[:upvars].map { |(_, reg)| reg } }.uniq.sort
   end
 
   # BLOCK_FALLBACK_ELEMENT_SUPPORT: pass an exact element class into the cfunc
@@ -846,10 +862,33 @@ class CodeGen
     @fiber_prologue = d && fiber_body_target_id(region, d) ? region[:block_irep] : nil
     saved_self_class_unknown = @self_class_unknown
     @self_class_unknown = saved_self_class_unknown || runtime_def_fallback_kind?(region[:kind])
-    emit_proc_fallback_fn_body(region, d, fn_prefix)
+    result = emit_proc_fallback_fn_body(region, d, fn_prefix)
+    result && [result[0], result[1] + proc_spec_registration(region, result[0])]
   ensure
     @self_class_unknown = saved_self_class_unknown
     @fiber_prologue = saved_fiber_prologue
+  end
+
+  # PROC_SPEC: a compiled block is a C function proc, which has no ENTER word and no parameter names. The block registers
+  # both (the stand-in irep bc2cpp_proc_spec_stand_in is made from them) under its C function and its direct entry, so
+  # Proc#arity and Proc#parameters answer as they do for the interpreted block.
+  def proc_spec_registration(region, fn_name)
+    return '' unless (region[:kind] || 'block_fallback') == 'block_fallback' && ENV['BC2CPP_PROC_SPEC'] != '0'
+
+    block = region[:block_irep]
+    fields = (block.enter ? block.enter.enter_fields.map(&:to_i) : []) + [0] * 7
+    m1, opt, rest, m2, key, kdict, blk = fields
+    aspec = (m1 << 18) | (opt << 13) | (rest << 12) | (m2 << 7) | (key << 2) | (kdict << 1) | blk
+    names = (block.lv || []).first([block.nlocals.to_i - 1, 0].max)
+    @proc_spec_seq = @proc_spec_seq.to_i + 1
+    id = "bc2cpp_proc_spec_#{@proc_spec_seq}"
+    out = String.new
+    out << "static const mrb_code #{id}_iseq[] = { OP_ENTER, #{(aspec >> 16) & 0xff}, #{(aspec >> 8) & 0xff}, #{aspec & 0xff}, OP_RETURN, 0 };\n"
+    out << "static const char* const #{id}_names[] = { #{(names.map { |n| c_string_literal(n.to_s) } + ['nullptr']).join(', ')} };\n"
+    # A direct-entry block has no C function of its own (its proc runs the shared thunk, and the entry names the block).
+    keys = [region[:direct_entry] ? "(const void*)&#{fn_name}_direct" : "(const void*)&#{fn_name}"]
+    out << "static const int #{id} = #{keys.map { |k| "bc2cpp_proc_spec_register(#{k}, #{id}_iseq, 6, #{block.nlocals.to_i}, #{id}_names)" }.join(' + ')};\n\n"
+    out
   end
 
   def emit_proc_fallback_fn_body(region, d, fn_prefix)
@@ -938,8 +977,8 @@ class CodeGen
       nested_suppressed << rregion[:block_addr] << rregion[:sendb_addr]
       nested_glue_at[rregion[:block_addr]] = code
     end
-    recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs,
-                                     blk_available: needs_blk).each do |nregion|
+    nested_regions = recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs, blk_available: needs_blk)
+    nested_regions.each do |nregion|
       # BLOCK_FALLBACK_RESCUE_SUPPORT: regions inside a rescue range belong to that
       # range's own pass (emit_rescue_try_body); emitting them here too would
       # duplicate them.
@@ -1078,7 +1117,7 @@ class CodeGen
            "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}" \
            "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
     out << errinfo_scope_line(block_irep)
-    out << emit_register_initializers(block_irep.nregs, arg_names)
+    out << emit_register_initializers(block_irep.nregs, arg_names, boxed: boxed_registers(nested_regions))
     out << body
     out << fell_off_end(impl_name)
     out << "}\n\n"
@@ -1292,7 +1331,7 @@ class CodeGen
   # last env slots.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
                               ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false, upvar_cells: nil,
-                              step_maker: nil, unwind_targets: nil)
+                              step_maker: nil, unwind_targets: nil, cells: false)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -1321,6 +1360,9 @@ class CodeGen
     env_entries << 'bc2cpp_env_block(M, bc2cpp_blk)' if needs_blk
     env_entries << ret_token if ret_token
     env_entries << brk_token if brk_token
+    # STEP_CLOSURES: the cells Array the captured registers live in, after the tokens (the slots above keep their places, and
+    # the readers that index from the end are not moved): the env keeps it, so the pointers above outlive the frame.
+    env_entries << 'bc2cpp_cells_ary' if cells
     if direct_entry
       # BLOCK_STEP_UNWIND: the frames a `return` / `break` of the block's step ends (it must name them to the fiber), just
       # before the maker: return target, then break target.
@@ -1392,6 +1434,7 @@ class CodeGen
     end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset,
+                                              cells: region[:boxed] ? true : false,
                                               ret_token: ret_token, brk_token: brk_token,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
                                               yield_free: region[:yield_free],

@@ -2007,6 +2007,92 @@ if $PROGRAM_NAME == __FILE__
       const struct REnv* e = MRB_PROC_ENV(p);
       return (mrb_integer(e->stack[MRB_ENV_LEN(e) - 1]) & BC2CPP_BLOCK_YIELD_FREE) != 0;
     }
+    // PROC_SPEC: a compiled block is a C function proc, so Proc#arity would answer -1 and Proc#parameters []. Each compiled
+    // block registers its ENTER word and local names under its entry (bc2cpp_proc_spec_register); the two methods answer for a
+    // registered block from a stand-in irep proc that holds them, and for any other proc as mruby does.
+    #include <unordered_map>
+    #include <mruby/irep.h>
+    #include <mruby/opcode.h>
+    struct Bc2cppProcSpec {
+      const mrb_code* iseq;
+      uint16_t ilen;
+      uint16_t nlocals;
+      const char* const* names;  // nlocals - 1 local names, then a null
+    };
+    extern "C" mrb_int mrb_proc_arity(const struct RProc* p);
+    inline std::unordered_map<const void*, Bc2cppProcSpec>& bc2cpp_proc_specs() {
+      static std::unordered_map<const void*, Bc2cppProcSpec> specs;
+      return specs;
+    }
+    [[maybe_unused]] static int bc2cpp_proc_spec_register(const void* key, const mrb_code* iseq, uint16_t ilen,
+                                                          uint16_t nlocals, const char* const* names) {
+      bc2cpp_proc_specs()[key] = Bc2cppProcSpec{iseq, ilen, nlocals, names};
+      return 0;
+    }
+    static const Bc2cppProcSpec* bc2cpp_proc_spec_of(const struct RProc* p) {
+      if (!MRB_PROC_CFUNC_P(p) || bc2cpp_proc_specs().empty()) return nullptr;
+      const void* key = (const void*)MRB_PROC_CFUNC(p);
+      if (MRB_PROC_CFUNC(p) == bc2cpp_block_thunk) {
+        const struct REnv* e = MRB_PROC_ENV(p);
+        if (!e || MRB_ENV_LEN(e) < 3) return nullptr;
+        key = (const void*)bc2cpp_block_entry(const_cast<struct REnv*>(e));
+      }
+      auto it = bc2cpp_proc_specs().find(key);
+      return it == bc2cpp_proc_specs().end() ? nullptr : &it->second;
+    }
+    static mrb_value bc2cpp_proc_spec_stand_in(mrb_state* M, const struct RProc* p, const Bc2cppProcSpec& spec) {
+      mrb_irep* irep = mrb_add_irep(M);
+      irep->iseq = spec.iseq;
+      irep->ilen = spec.ilen;
+      irep->nlocals = spec.nlocals;
+      irep->nregs = spec.nlocals + 1;
+      irep->flags |= MRB_ISEQ_NO_FREE;
+      mrb_int named = 0;
+      while (spec.names[named]) ++named;
+      if (named > 0) {
+        mrb_sym* lv = (mrb_sym*)mrb_malloc(M, sizeof(mrb_sym) * named);
+        for (mrb_int i = 0; i < named; ++i) lv[i] = mrb_intern_cstr(M, spec.names[i]);
+        irep->lv = lv;
+      }
+      struct RProc* stand_in = mrb_proc_new(M, irep);
+      mrb_irep_decref(M, irep);
+      if (MRB_PROC_STRICT_P(p)) stand_in->flags |= MRB_PROC_STRICT;
+      return mrb_obj_value(stand_in);
+    }
+    static mrb_value bc2cpp_proc_arity_m(mrb_state* M, mrb_value self) {
+      const Bc2cppProcSpec* spec = bc2cpp_proc_spec_of(mrb_proc_ptr(self));
+      if (spec) return mrb_funcall_argv(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec), mrb_intern_lit(M, "arity"), 0, NULL);
+      return mrb_int_value(M, mrb_proc_arity(mrb_proc_ptr(self)));
+    }
+    static mrb_func_t bc2cpp_orig_proc_parameters;
+    static mrb_value bc2cpp_proc_parameters_m(mrb_state* M, mrb_value self) {
+      const Bc2cppProcSpec* spec = bc2cpp_proc_spec_of(mrb_proc_ptr(self));
+      if (!spec) return bc2cpp_orig_proc_parameters(M, self);
+      mrb_value* argv; mrb_int argc;
+      mrb_get_args(M, "*!", &argv, &argc);
+      return mrb_funcall_argv(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec), mrb_intern_lit(M, "parameters"), argc, argv);
+    }
+    // Called once per state from the owner registration, before any compiled block runs.
+    static void bc2cpp_proc_specs_install(mrb_state* M) {
+      if (bc2cpp_proc_specs().empty()) return;
+      mrb_sym done = mrb_intern_lit(M, "$__bc2cpp_proc_specs");
+      if (mrb_test(mrb_gv_get(M, done))) return;
+      mrb_gv_set(M, done, mrb_true_value());
+      mrb_define_method(M, M->proc_class, "arity", bc2cpp_proc_arity_m, MRB_ARGS_NONE());
+      struct RClass* found = M->proc_class;
+      mrb_method_t method = mrb_method_search_vm(M, &found, mrb_intern_lit(M, "parameters"));
+      if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
+        bc2cpp_orig_proc_parameters = MRB_METHOD_CFUNC(method);
+        mrb_define_method(M, M->proc_class, "parameters", bc2cpp_proc_parameters_m, MRB_ARGS_OPT(1));
+      }
+    }
+    // STEP_CLOSURES: a function whose captured registers live in a cells Array re-grays the Array whenever it exits, so a
+    // value written through a raw pointer after the Array was marked is scanned again (no write barrier sits at those stores).
+    struct Bc2cppCellsGuard {
+      mrb_state* M;
+      mrb_value ary;
+      ~Bc2cppCellsGuard() { mrb_write_barrier(M, mrb_basic_ptr(ary)); }
+    };
     // SETUPVAR writes into the enclosing compiled frame, which the GC cannot see; the arena that
     // held the value is restored when the block returns (ADR 0272). Roots stay per slot address.
     static inline void bc2cpp_upvar_root(mrb_state* M, mrb_value* slot, mrb_value v) {

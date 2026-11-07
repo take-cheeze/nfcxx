@@ -83,6 +83,7 @@ class CodeGen
         next if claimed.include?(anchor) || claimed.include?(region[:sendb_addr])
         # An inlined loop is C code a step cannot suspend in: a block that may suspend stays a block (a step of its own).
         next if @resumable && inline_block_may_suspend?(irep, region)
+        next if inline_block_boxes?(irep, region)
         next if try_range && !rescue_try_inlinable?(region, anchor, try_range)
         # RANGE_EACH_GUARD: the Range#each loop needs its send kept behind it, which only the guarded glue places.
         next if pass.recognize == :recognize_range_each_regions && !guarded
@@ -309,6 +310,7 @@ class CodeGen
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'takes a native argument') if arg_native_types.compact.any?
 
       @resumable = ResumableCtx.new(label, resumable.helpers)
+      @resumable.boxed = boxed_registers(block_fallback_regions)
       # BLOCK_STEP_UPVARS: slot i of a block step's frame holds the pointer to its i-th captured local.
       if @block_step_upvars && label == @block_step_label
         @resumable.upvars = @block_step_upvars
@@ -339,7 +341,7 @@ class CodeGen
         type ? "#{TYPE_OPS.fetch(type)[:box]}(#{arg})" : arg
       end
       initial[total_args] = 'bc2cpp_blk' if has_blk
-      out << emit_register_initializers(irep.nregs, initial)
+      out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
       out << array_hash_fixnum_prologue(d)
@@ -1020,11 +1022,25 @@ class CodeGen
   end
 
   # R0 stays, unused or not: it is the line ParamTrace instruments (param_trace.rb REG0_RE).
-  def emit_register_initializers(nregs, arguments)
-    (0...nregs).map do |reg|
+  # +boxed+ (STEP_CLOSURES): registers that live in a heap cells Array (bc2cpp_cells_ary) the blocks' envs keep; a register is
+  # a reference to its cell, so every use of it reads and writes the cell.
+  def emit_register_initializers(nregs, arguments, boxed: [])
+    cells = String.new
+    unless boxed.empty?
+      cells << "  mrb_value bc2cpp_cells_ary = mrb_ary_new_capa(M, #{boxed.size});\n"
+      cells << "  for (int bc2cpp_ci = 0; bc2cpp_ci < #{boxed.size}; ++bc2cpp_ci) mrb_ary_push(M, bc2cpp_cells_ary, mrb_nil_value());\n"
+      cells << "  mrb_value* bc2cpp_cells = RARRAY_PTR(bc2cpp_cells_ary);\n"
+      cells << "  Bc2cppCellsGuard bc2cpp_cells_guard = { M, bc2cpp_cells_ary };\n"
+    end
+    cells + (0...nregs).map do |reg|
       next "  [[maybe_unused]] mrb_value r0 = self;\n" if reg.zero?
 
-      "  mrb_value #{RegName[reg]} = #{arguments[reg - 1] || 'mrb_nil_value()'};\n"
+      init = arguments[reg - 1] || 'mrb_nil_value()'
+      if (slot = boxed.index(reg))
+        "  mrb_value& #{RegName[reg]} = bc2cpp_cells[#{slot}];\n  #{RegName[reg]} = #{init};\n"
+      else
+        "  mrb_value #{RegName[reg]} = #{init};\n"
+      end
     end.join
   end
 

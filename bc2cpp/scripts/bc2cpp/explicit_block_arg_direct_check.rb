@@ -12,6 +12,10 @@ require_relative 'fixture_runtime'
 
 # The fixture is its own closed world: the repository signatures name classes it does not define.
 ENV['BC2CPP_SIG_DIRS'] = ''
+# BagProbe#go is the interpreted driver around the compiled Bag methods. Its `forward { |i| seen << i.name }` block captures a
+# local and goes to a method that keeps its block, which STEP_CLOSURES would compile; its string interpolations then name the
+# repository's native to_s arms, which this fixture does not link.
+ENV['BC2CPP_STEP_CLOSURES'] = '0'
 
 runtime = Bc2cppFixtureRuntime
 full = runtime.full || runtime.full_or_build

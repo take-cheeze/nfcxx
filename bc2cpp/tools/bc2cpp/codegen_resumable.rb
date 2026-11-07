@@ -12,7 +12,7 @@ class ResumableCtx
   attr_reader :label, :helpers, :states, :reasons
   attr_accessor :flat, :helper_stack, :sites
   # Set when the step function is emitted: the frame's register count, and each register's index in the frame (R[index]).
-  attr_accessor :nregs, :register_slots, :upvars
+  attr_accessor :nregs, :register_slots, :upvars, :boxed
   # BLOCK: the method takes a block (kept in the frame's block slot). block_slot is that slot's R index.
   attr_accessor :block, :block_slot
   # HANDLERS: the irep's catch handlers (rescue/ensure) when the step has any, and the state each one's entry is dispatched by.
@@ -723,11 +723,15 @@ class CodeGen
     # BLOCK_SLOT: a method with a block keeps it in the frame's last register (the block is the same for every call
     # of the step, so no spill), and the step reads it into bc2cpp_blk, which yield (BLKPUSH) reads.
     block_slot = @resumable.block ? registers.size + 2 : nil
-    nregs = registers.size + (@resumable.block ? 1 : 0)
+    # STEP_CLOSURES: the registers a block may keep live in a cells Array the frame holds in one more slot; the step makes
+    # the Array on its first run, from the values the entry put in those registers' slots.
+    boxed = (@resumable.boxed || []) & registers
+    cells_slot = boxed.empty? ? nil : registers.size + 2 + (@resumable.block ? 1 : 0)
+    nregs = registers.size + (@resumable.block ? 1 : 0) + (cells_slot ? 1 : 0)
     @resumable.nregs = nregs
     @resumable.block_slot = block_slot
     @resumable.register_slots = registers.each_with_index.to_h { |reg, slot| [reg, slot + 2] }
-    locals = ENV['BC2CPP_RESUMABLE_LOCALS'] != '0' && !code_only.match?(RESUMABLE_REGISTER_ADDRESS)
+    locals = ENV['BC2CPP_RESUMABLE_LOCALS'] != '0' && !code_only.match?(RESUMABLE_REGISTER_ADDRESS) && boxed.empty?
     spill = registers.each_with_index.map { |reg, slot| "R[#{slot + 2}] = r#{reg};" }.join(' ')
     body = body.gsub(/^#{Regexp.escape(RESUMABLE_SPILL_MARK)}$/) { locals ? "  #{spill}" : '' }
     out = String.new
@@ -738,9 +742,23 @@ class CodeGen
     (@resumable.upvars || []).each_with_index do |(level, idx), i|
       out << "  [[maybe_unused]] mrb_value* #{upvar_var_name(level, idx)} = (mrb_value*)F->slots[#{i}];\n"
     end
+    if cells_slot
+      out << "  mrb_value bc2cpp_cells_ary = R[#{cells_slot}];\n"
+      out << "  if (mrb_nil_p(bc2cpp_cells_ary)) {\n    bc2cpp_cells_ary = mrb_ary_new_capa(M, #{boxed.size});\n"
+      boxed.each { |reg| out << "    mrb_ary_push(M, bc2cpp_cells_ary, R[#{registers.index(reg) + 2}]);\n" }
+      out << "    R[#{cells_slot}] = bc2cpp_cells_ary;\n    mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));\n  }\n"
+      out << "  mrb_value* bc2cpp_cells = RARRAY_PTR(bc2cpp_cells_ary);\n"
+      out << "  Bc2cppCellsGuard bc2cpp_cells_guard = { M, bc2cpp_cells_ary };\n"
+    end
     out << "  Bc2cppStepGuard bc2cpp_step_guard(F);\n"
     out << "  // RESUMABLE_LOCAL_REGISTERS\n" if locals
-    registers.each_with_index { |reg, slot| out << "  mrb_value#{'&' unless locals} r#{reg} = R[#{slot + 2}];\n" }
+    registers.each_with_index do |reg, slot|
+      if (cell = boxed.index(reg))
+        out << "  mrb_value& r#{reg} = bc2cpp_cells[#{cell}];\n"
+      else
+        out << "  mrb_value#{'&' unless locals} r#{reg} = R[#{slot + 2}];\n"
+      end
+    end
     out << "  [[maybe_unused]] mrb_value bc2cpp_blk = R[#{block_slot}];\n" if block_slot
     handlers = @resumable.handlers
     out << "  F->has_handlers = #{handlers ? handlers.size : 0};\n"
@@ -834,6 +852,8 @@ class CodeGen
           bc2cpp_resumable_init(M);
           mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
           if (bc2cpp_prologue_armed(M, #{c_string_literal(owner_name)}, self)) {
+            // The frame exists before it is parked: the maker of a block step stores the pointers it captured in it.
+            bc2cpp_resume_frame(M, &frame, #{ctx.nregs}, #{ctx.slot_count});
             return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
           }
           for (;;) {
@@ -1109,17 +1129,30 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # in the block frame's slots. That is sound where the caller's frame lives as long as the callee: a call on self to a
   # suspendable method (a CALL, so the caller's frame stays on the fiber's stack) and not a Fiber body, which outlives it.
   def block_step_upvars_ok?(region, owner_def)
-    return false if fiber_new_site?(region)
+    # A Fiber body outlives the frame: its pointers must lead into cells (STEP_CLOSURES), not into the frame.
+    return false if fiber_new_site?(region) && !region[:boxed]
 
     region[:upvars].all? { |(level, _)| level.zero? }
   end
 
   # Can the literal block of an inline-loop +region+ suspend the fiber: it reaches Fiber.yield, calls a block
   # (`yield`, `block.call`), or calls a method that can suspend.
-  def inline_block_may_suspend?(irep, region)
+  # The block irep of an inline-loop +region+ of +irep+, or nil.
+  def inline_region_block(irep, region)
     insn = region[:block_addr] && BytecodeIR.for(irep).instructions.map(&:source).find { |s| s.addr == region[:block_addr] }
     block_label = insn&.op == :BLOCK && insn.block_index && irep.reps[insn.block_index.to_i]
-    block = block_label && @ireps[block_label]
+    block_label && @ireps[block_label]
+  end
+
+  # STEP_CLOSURES: a block that builds a region over cells keeps its own registers in them, so its body cannot be inlined
+  # into the host function (the loop would share the host's register numbering and cells).
+  def inline_block_boxes?(irep, region)
+    block = inline_region_block(irep, region)
+    block ? recognize_block_fallback_regions(block).any? { |nested| nested[:boxed] } : false
+  end
+
+  def inline_block_may_suspend?(irep, region)
+    block = inline_region_block(irep, region)
     return false unless block
 
     nested = ->(i) { [i] + (i.reps || []).filter_map { |l| l && @ireps[l] }.flat_map { |c| nested.call(c) } }
@@ -1133,7 +1166,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # maker): the fiber's root frame is the body's step frame.
   def emit_fiber_body_step_site(region, fn_name, dest_reg)
     @fiber_body_used = true
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, [], false,
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [], false,
+                                              cells: region[:boxed] ? true : false,
                                               direct_entry: "#{fn_name}_direct", yield_free: region[:yield_free],
                                               step_maker: block_step_maker_for(region))
     "  // FIBER_BODY_STEP :new -- the body is a step, the root frame of a C++ Fiber\n  {\n#{ctor}" \
@@ -1219,7 +1253,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     code = result[:code][0...cut]
     maker = "#{name}_step_maker"
     code << block_step_maker(block, "#{name}#{@entry_spec_suffix}_impl", "#{syn.owner}##{syn.name}", maker, region[:upvars] || [],
-                            region[:needs_blk], region[:needs_ret] || region[:needs_brk])
+                            region[:needs_blk], region[:needs_ret] || region[:needs_brk], region[:boxed])
     # A compile that is run again (a probe, a variant) can put the same step in more than one method's text; the guard
     # keeps the first definition.
     guard = "BC2CPP_STEP_#{name}#{@entry_spec_suffix}".gsub(/[^A-Za-z0-9_]/, '_')
@@ -1230,7 +1264,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # The frame maker the block's env carries: binds the yielded values as a non-strict block binds them, runs the
   # step's entry with its own id armed so the entry parks the frame (bc2cpp_prologue) instead of running it, and
   # returns that frame, or nullptr when the entry did not park (the caller then calls the block directly).
-  def block_step_maker(block, impl, id, maker, upvars = [], needs_blk = false, unwind = false)
+  def block_step_maker(block, impl, id, maker, upvars = [], needs_blk = false, unwind = false, cells = false)
     mand = mandatory_arity(block)
     out = String.new
     out << "static Bc2cppFiberFrame* #{maker}(mrb_state* M, struct REnv* bc2cpp_env, mrb_int bc2cpp_argc, " \
@@ -1267,6 +1301,12 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       out << "    Bc2cppResumeFrame* bc2cpp_f = (Bc2cppResumeFrame*)DATA_PTR(((Bc2cppMethodFrame*)bc2cpp_made)->frame);\n"
       upvars.each_index do |i|
         out << "    bc2cpp_f->slots[#{i}] = (long long)(uintptr_t)mrb_integer(bc2cpp_env->stack[#{i + 1}]);\n"
+      end
+      # STEP_CLOSURES: the pointers lead into the cells Array the env keeps (after the block, if it takes one); the frame
+      # keeps it too, as the env may go before the frame does.
+      if cells
+        slot = 1 + upvars.size + (needs_blk ? 1 : 0)
+        out << "    mrb_iv_set(M, ((Bc2cppMethodFrame*)bc2cpp_made)->frame, mrb_intern_lit(M, \"__cells__\"), bc2cpp_env->stack[#{slot}]);\n"
       end
       out << "  }\n"
     end
@@ -1350,6 +1390,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     brk_token = brk_site ? "mrb_int_value(M, #{brk_site}.frame.token)" : nil
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, ret_token: ret_token, brk_token: brk_token,
+                                              cells: region[:boxed] ? true : false,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil, yield_free: region[:yield_free],
                                               step_maker: maker, unwind_targets: (maker ? step_unwind_targets(region) : nil))
     (@step_ret_handled ||= Set.new) << [region[:parent_irep].label, region[:block_addr]] if ret_guard
@@ -1417,7 +1458,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
 
     # The block only runs as a step here (the callee's entry parks its frame and runs nothing), so its plain tokens are dead.
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
-                                              region[:needs_blk] ? true : false,
+                                              region[:needs_blk] ? true : false, cells: region[:boxed] ? true : false,
                                               ret_token: region[:needs_ret] ? 'mrb_int_value(M, 0)' : nil,
                                               brk_token: region[:needs_brk] ? 'mrb_int_value(M, 0)' : nil,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil, yield_free: region[:yield_free],
