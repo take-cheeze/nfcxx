@@ -57,7 +57,8 @@ suite.compile(SRC) do |ireps, root|
   headers = %w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h]
   helper = "static inline void bc2cpp_check_argc(mrb_state* M, mrb_int min, mrb_int max) {\n" \
            "  mrb_int argc = mrb_get_argc(M);\n" \
-           "  if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);\n}\n"
+           "  if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);\n}\n" \
+           "static inline mrb_value bc2cpp_cfunc_result(mrb_state*, mrb_value v) { return v; }\n"
   unit = +"#{headers.map { |h| "#include <#{h}>\n" }.join}#{TaggedFixnum::PRELUDE}#{helper}#{gen.emit_owner_class_cache}"
   unit << base.to_h[:code].to_s << kid_text
   path = File.join(ENV.fetch('TMPDIR', '/tmp'), "super_optional_#{$$}.cc")

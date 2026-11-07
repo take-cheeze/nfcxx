@@ -13,14 +13,17 @@ require 'pathname'
 # Each pattern is one VM dependency from the plan's table. `count` is the baseline measured on the closed-build
 # sources of this tree; a count above it is a regression.
 DEPENDENCIES = {
-  'mrb_funcall' => { pattern: /\bmrb_funcall\w*/, count: 724 },
-  'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 1747 },
-  'mrb_proc_new_cfunc_with_env' => { pattern: /\bmrb_proc_new_cfunc_with_env\w*/, count: 392 },
-  'mrb_protect' => { pattern: /\bmrb_protect\w*/, count: 193 },
-  'mrb_gc_protect' => { pattern: /\bmrb_gc_protect\w*/, count: 170 },
-  'mrb_yield' => { pattern: /\bmrb_yield\w*/, count: 22 },
-  'mrb_method_search_vm' => { pattern: /\bmrb_method_search_vm\w*/, count: 37 },
-  'mrb_exec_irep' => { pattern: /\bmrb_exec_irep\w*/, count: 2 },
+  'mrb_funcall' => { pattern: /\bmrb_funcall\w*/, count: 480 },
+  'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 2208 },
+  'mrb_proc_new_cfunc_with_env' => { pattern: /\bmrb_proc_new_cfunc_with_env\w*/, count: 4 },
+  # Phase 2: every block site goes through these two, so the dependency stays counted where it now lives.
+  'bc2cpp_heap_proc' => { pattern: /\bbc2cpp_heap_proc\w*/, count: 166 },
+  'bc2cpp_yield_foreign' => { pattern: /\bbc2cpp_yield_foreign\w*/, count: 27 },
+  'mrb_protect' => { pattern: /\bmrb_protect\w*/, count: 18 },
+  'mrb_gc_protect' => { pattern: /\bmrb_gc_protect\w*/, count: 16 },
+  'mrb_yield' => { pattern: /\bmrb_yield\w*/, count: 8 },
+  'mrb_method_search_vm' => { pattern: /\bmrb_method_search_vm\w*/, count: 57 },
+  'mrb_exec_irep' => { pattern: /\bmrb_exec_irep\w*/, count: 5 },
   'bc2cpp_resumable_exec' => { pattern: /\bbc2cpp_resumable_exec\w*/, count: 0 }
 }.freeze
 

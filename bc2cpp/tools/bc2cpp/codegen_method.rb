@@ -390,7 +390,7 @@ class CodeGen
     # RESCUE_SUPPORT: each recognized region (recognize_rescue_regions) gets an
     # extracted try-body function, emitted ahead of this one. Its [begin_addr,
     # end_addr] range and the EXCEPT address are skipped here; emit_rescue_glue
-    # emits the mrb_protect_error call and early-out at begin_addr and folds
+    # emits the bc2cpp_protect call and early-out at begin_addr and folds
     # EXCEPT's capture into its last line. Everything else continues through the
     # normal loop.
     rescue_regions = top_level_rescue_regions(recognize_rescue_regions(irep))
@@ -1159,9 +1159,10 @@ class CodeGen
     Hash#delete Hash#delete_if Hash#each Hash#each_key Hash#each_value Hash#fetch Hash#fetch_values Hash#merge!
     Hash#reject Hash#reject! Hash#select Hash#select!
     Integer#downto Integer#times Integer#upto
-    Kernel#loop
+    Kernel#loop Kernel#tap Kernel#then Kernel#yield_self
     Range#each Range#max Range#min
     String#each_char String#upto
+    Enumerator::Generator#each Enumerator::Yielder#<< Enumerator::Yielder#yield
     StringIO#each
   ].freeze
 
@@ -1183,10 +1184,10 @@ class CodeGen
   # (M->c != M->root_c) when entered straight from the VM; the variant checks that itself.
   def entry_return_line(label, d, impl_name, args)
     argtxt = args.is_a?(String) ? (args.empty? ? '' : ", #{args}") : args.map { |a| ", #{a}" }.join
-    line = "  return #{impl_name}(M, self#{argtxt});\n"
+    line = "  return bc2cpp_cfunc_result(M, #{impl_name}(M, self#{argtxt}));\n"
     return line if @rsm_variant || rsm_variant_code(label).empty?
 
-    "  if (M->c != M->root_c || bc2cpp_prologue.expect) return #{rsm_impl_name(d)}(M, self#{argtxt});\n#{line}"
+    "  if (M->c != M->root_c || bc2cpp_prologue.expect) return bc2cpp_cfunc_result(M, #{rsm_impl_name(d)}(M, self#{argtxt}));\n#{line}"
   end
 
   # The variant's own helpers (block fallbacks, direct entries) are compiled from the same blocks as the fast body's, under

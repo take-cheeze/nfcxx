@@ -21,6 +21,13 @@ cxx = ENV.fetch('CXX', 'clang++')
 runtime = File.expand_path('../../tools/bc2cpp/runtime', __dir__)
 
 TEST = <<~'CPP'
+  #include <mruby.h>
+  #include <mruby/error.h>
+  // The two helpers the generator's preamble gives the runtime.
+  static mrb_value bc2cpp_protect(mrb_state* M, mrb_value (*body)(mrb_state*, void*), void* ud, mrb_bool* error) {
+    return mrb_protect_error(M, body, ud, error);
+  }
+  static void bc2cpp_root(mrb_state* M, mrb_value v) { mrb_gc_protect(M, v); }
   #include "bc2cpp_fiber.hxx"
   #include <mruby/array.h>
   #include <mruby/compile.h>

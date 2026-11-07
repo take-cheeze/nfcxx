@@ -171,9 +171,7 @@ class CodeGen
         # has no residual bytecode to run it.
         n = insn.op == :SSEND0 ? 0 : (insn.argc || 0)
         args = (1..n).map { |k| "r#{insn.reg + k}" }
-        array = args.empty? ? 'nullptr' : "bc2cpp_ssend_args"
-        decl = args.empty? ? '' : "mrb_value bc2cpp_ssend_args[] = { #{args.join(', ')} }; "
-        lines << "  { #{decl}r#{insn.reg} = mrb_funcall_argv(M, self, mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), #{n}, #{array}); }\n"
+        lines << "  r#{insn.reg} = bc2cpp_ssend(M, self, mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), {#{args.join(', ')}});\n"
       elsif literal_length_send?(program, irep, idx)
         lines << literal_length_line(program, irep, idx)
       elsif literal_freeze?(program, idx)

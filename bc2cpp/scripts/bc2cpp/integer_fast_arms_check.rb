@@ -84,6 +84,13 @@ check.call('an ivar != literal takes the same arm', code_of(code, 'IpcCmp_ivar_n
 reopen_ne = code_of(reopen_code, 'IpcCmp_ne')
 check.call('a reopened Integer#== still leaves != its Integer-pair arm, as OP_EQ does',
            (j = reopen_ne =~ pair) && $1 == '!=' && reopen_ne.index('!mrb_equal(M') && j < reopen_ne.index('!mrb_equal(M'))
+check.call('a bigint receiver of != is one shared bc2cpp_bigint_eq call, no by-name send at the site',
+           ne.include?('!bc2cpp_bigint_eq(M,') && !ne.include?('mrb_funcall') && !ne.include?('bc2cpp_neq_arg'))
+helper = ->(text) { text[/^static mrb_bool bc2cpp_bigint_eq.*?^\}/m].to_s }
+check.call('the default world answers it with mrb_bint_cmp and no send',
+           helper.call(code).include?('mrb_bint_cmp(M, a, b) == 0') && !helper.call(code).include?('funcall'))
+check.call('a reopened Integer#== keeps the send, once, in the helper',
+           helper.call(reopen_code).match?(/funcall|owner_call/) && !helper.call(reopen_code).include?('mrb_bint_cmp') && reopen_code.scan('bc2cpp_neq_arg').empty?)
 mod8 = code_of(code, 'IpcCmp_mod8')
 check.call('% carries the power-of-two arm ahead of the general floor modulo',
            (k = mod8.index('__builtin_constant_p(bc2cpp_mod_right)')) && mod8.index('bc2cpp_mod_left % bc2cpp_mod_right') &&
@@ -106,7 +113,8 @@ DRIVER = <<~'RUBY'
            [big, big], [big, big + 1], [big * 4, big * 4], [1, 1.0], [1.0, 1], [2, 2.5], [nan, nan], [1.5, 1.5],
            ['a', 'a'], ['a', 'b'], [:s, :s], [:s, :t], [nil, nil], [nil, false], [1, nil], [1, :any],
            [IpcBox.new(1), IpcBox.new(1)], [IpcBox.new(1), IpcBox.new(2)], [1, IpcBox.new(1)],
-           [2**70, 2**70], [2**70, 2**70 + 1], [2**70, 1], [1, 2**70]]
+           [2**70, 2**70], [2**70, 2**70 + 1], [2**70, 1], [1, 2**70], [2**70, 2.0**70], [2**70, 2.5],
+           [2**70, nil], [2**70, 'a'], [2**70, :any], [2**70, IpcBox.new(1)], [IpcBox.new(1), 2**70]]
   pairs.each_with_index { |(a, b), i| show.call("pair #{i}") { [c.eq(a, b), c.ne(a, b)] } }
   show.call('ivar_ne') { (1..5).map { c.ivar_ne } }
 ints = [-0x4000_0000_0000_0001, -0x8000_0000, -9, -8, -7, -1, 0, 1, 7, 8, 9, 0x7fff_ffff, 0x4000_0000_0000_0000]

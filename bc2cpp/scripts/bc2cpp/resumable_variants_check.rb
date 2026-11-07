@@ -165,6 +165,7 @@ EXPECTED_LABELS = %w[
   Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
   Enumerable#each_slice Enumerable#each_cons Enumerable#group_by Enumerable#partition Enumerable#min_by Enumerable#max_by Enumerable#take_while Enumerable#drop_while
   Kernel#loop Hash#fetch_values
+  Enumerator::Generator#each Enumerator::Yielder#<< Enumerator::Yielder#yield
 ].freeze
 
 # One method per scenario builds the fiber whose body is the scenario, so every fiber body is compiled (a Fiber made by the
@@ -187,7 +188,7 @@ OWNERS = %w[Array Enumerable Enumerator Hash Integer Float Kernel Range String S
 code = suite.generate(PROBE, OWNERS, guards: true)
 variants = code.scan(/^(?:\[\[maybe_unused\]\] )?static mrb_value ([\w$]+)_rsm_impl\(/).flatten.uniq
 # The default list (RESUMABLE_DUAL in codegen_method.rb): exactly these take a variant.
-expected_names = EXPECTED_LABELS.map { |label| label.sub('#', '_').gsub('!', '$21').gsub('?', '$3f') }
+expected_names = EXPECTED_LABELS.map { |label| label.sub('#', '_').gsub('::', '__').gsub('!', '$21').gsub('?', '$3f').gsub('<', '$3c') }
 puts "    missing variants: #{(expected_names - variants).sort.join(' ')}" unless (expected_names - variants).empty?
 puts "    unexpected variants: #{(variants - expected_names).sort.join(' ')}" unless (variants - expected_names).empty?
 suite.check("exactly the default list gets a variant (#{variants.size} of #{SCENARIOS.size} scenarios)",

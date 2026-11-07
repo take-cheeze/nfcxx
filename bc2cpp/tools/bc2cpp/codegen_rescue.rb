@@ -207,10 +207,10 @@ class CodeGen
       protected_insns: protected_insns }
   end
 
-  # The nested rescue inside the ensure lambda: the protected range as its own lambda under mrb_protect_error (the
+  # The nested rescue inside the ensure lambda: the protected range as its own lambda under bc2cpp_protect (the
   # guard's own protection is outside it), then on an error `$!` and Rexc as EXCEPT leaves them and a jump to the
   # handler, whose RESCUE/JMPIF/RAISEIF compile as anywhere. An unmatched exception is raised again into the guard's
-  # mrb_protect_error, which makes it supersede the one in flight. Returns [text, ok].
+  # bc2cpp_protect, which makes it supersede the one in flight. Returns [text, ok].
   def emit_ensure_nested_rescue(nested, irep, d)
     tag = nested[:except_addr]
     targets = nested[:protected_insns].filter_map(&:branch_target).to_set
@@ -230,8 +230,7 @@ class CodeGen
     text << "    { // ENSURE_NESTED_RESCUE [#{nested[:begin_addr]}, #{nested[:end_addr]})\n"
     text << "    auto #{fn} = [&]() {\n#{inner}    };\n"
     text << "    mrb_bool #{err} = FALSE;\n"
-    text << "    mrb_value #{exc} = mrb_protect_error(M, [](mrb_state*, void* ud) -> mrb_value { " \
-            "(*(decltype(#{fn})*)ud)(); return mrb_nil_value(); }, (void*)&#{fn}, &#{err});\n"
+    text << "    mrb_value #{exc} = bc2cpp_protect_call(M, #{fn}, &#{err});\n"
     text << "    if (#{err}) { bc2cpp_set_errinfo(M, #{exc}); r#{nested[:exc_reg]} = #{exc}; goto L#{tag}; }\n"
     text << "    }\n"
     [text, ok]
@@ -293,7 +292,7 @@ class CodeGen
   # (NESTED_RESCUE_SUPPORT). Not supported: `retry`, `ensure`, a multi-class
   # clause `rescue A, B`, partial overlap. Unrecognized shapes keep
   # `#error unhandled opcode EXCEPT`: RESCUE/RAISEIF translate anywhere, but
-  # EXCEPT only means something inside this mrb_protect_error wrapping.
+  # EXCEPT only means something inside this bc2cpp_protect wrapping.
   #
   # Shape behind a "catch type: rescue" entry (checked against mrbc -v):
   #
@@ -401,7 +400,7 @@ class CodeGen
       #      A `retry` would jump back from the handler, after `e`, so it is still
       #      rejected.
       #   2. No jump from inside [b, e) may leave it; the only exits are `e`
-      #      (checked above) or a raise (mrb_protect_error's job).
+      #      (checked above) or a raise (bc2cpp_protect's job).
       next unless program.region_boundary_breaches(b...e, e).empty?
 
       regions << { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, cls_name: cls_name,
@@ -615,7 +614,7 @@ class CodeGen
   #    067 STRING    R2  L[0]  ; constant <- shared_target
   #    070 JMPIF     R2  075
   #
-  # Sound with the existing mrb_protect_error machinery and no new emitter:
+  # Sound with the existing bc2cpp_protect machinery and no new emitter:
   #  1. emit_rescue_glue's non-tail_return output is exactly right: on success
   #     its assignment is overwritten by the STRING; on failure the exception
   #     lands in r<exc_reg> and falls through to the LOADNIL, as EXCEPT would.
@@ -720,11 +719,11 @@ class CodeGen
   end
 
   # RESCUE_SUPPORT: the extracted try body for one region, a top-level static
-  # function (mrb_protect_error takes a C function pointer; see
+  # function (bc2cpp_protect takes a C function pointer; see
   # emit_const_lookup_helper). It covers [begin_addr, end_addr] including the
   # exit JMP, which becomes a C++ `return` of the value the JMP would pass on
-  # (the function's result is mrb_protect_error's result on success). A
-  # by-value Ctx carries self and the mandatory arguments; mrb_protect_error's
+  # (the function's result is bc2cpp_protect's result on success). A
+  # by-value Ctx carries self and the mandatory arguments; bc2cpp_protect's
   # `void*` is its address. Other registers are temporaries, declared and
   # nil-initialized like `_impl`'s preamble; internal jumps use the usual labels.
   # `extra_fields` ([{name:, c_type:}]) adds Ctx members restored into
@@ -892,7 +891,7 @@ class CodeGen
   end
 
   # RESCUE_SUPPORT: glue at begin_addr replacing [begin_addr, end_addr]: run the
-  # try body under mrb_protect_error (vm.c), which returns the body's result with
+  # try body under bc2cpp_protect, which returns the body's result with
   # err == FALSE, or the exception with err == TRUE, exception state cleared and
   # the ci stack unwound to here. On failure assign the exception to r<exc_reg>
   # and fall through into the clause tests (EXCEPT itself is suppressed).
@@ -912,7 +911,7 @@ class CodeGen
     out << "  {\n"
     out << "    #{ctx_struct} ctx{#{ctx_args}};\n"
     out << "    mrb_bool #{err_var} = FALSE;\n"
-    out << "    mrb_value #{result_var} = mrb_protect_error(M, #{try_name}, &ctx, &#{err_var});\n"
+    out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &ctx, &#{err_var});\n"
     out << if region[:tail_return]
               "    if (!#{err_var}) { return #{result_var}; }\n"
             else

@@ -69,7 +69,7 @@ static bool bc2cpp_block_call(mrb_state* M,
     }
   }
   bc2cpp_tail_yield.env = env;
-  *value = mrb_yield_argv(M, blk, argc, argv);
+  *value = bc2cpp_yield_foreign(M, blk, argc, argv);
   bc2cpp_tail_yield.env = nullptr;
   if (bc2cpp_tail_yield.pending) {
     bc2cpp_tail_yield.pending = false;
@@ -78,6 +78,30 @@ static bool bc2cpp_block_call(mrb_state* M,
     return false;
   }
   return true;
+}
+
+// `lambda { ... }.call(*argc args)` where the body is a step with no break or
+// return to unwind: the arity is checked here (a miss is left to Proc#call,
+// which raises), the call itself is a block call of the fiber.
+[[maybe_unused]] static bool bc2cpp_lambda_step_ok(mrb_state* M,
+                                                   mrb_value blk,
+                                                   mrb_int argc) {
+  const struct RProc* p = mrb_proc_ptr(blk);
+  if (!MRB_PROC_CFUNC_P(p))
+    return false;
+  const struct REnv* env = MRB_PROC_ENV(p);
+  if (!bc2cpp_block_has_step(p, env) ||
+      (mrb_integer(env->stack[MRB_ENV_LEN(env) - 1]) & 8) != 0)
+    return false;
+  const Bc2cppProcSpec* spec = bc2cpp_proc_spec_of(p);
+  if (!spec || spec->ilen < 4 || spec->iseq[0] != OP_ENTER)
+    return false;
+  uint32_t aspec = ((uint32_t)spec->iseq[1] << 16) |
+                   ((uint32_t)spec->iseq[2] << 8) | spec->iseq[3];
+  mrb_int required = ((aspec >> 18) & 0x1f) + ((aspec >> 7) & 0x1f);
+  mrb_int optional = (aspec >> 13) & 0x1f;
+  bool rest = (aspec >> 12) & 1;
+  return argc >= required && (rest || argc <= required + optional);
 }
 
 static void bc2cpp_method_frame_step(mrb_state* M,
@@ -227,8 +251,7 @@ static void bc2cpp_body_start_mark(mrb_state* M,
   bc2cpp_fiber_ref(M, refs, ((Bc2cppBodyStart*)base)->proc);
 }
 
-[[maybe_unused]] static mrb_value bc2cpp_fiber_new_step(mrb_state* M,
-                                                        mrb_value proc) {
+static mrb_value bc2cpp_fiber_new_step(mrb_state* M, mrb_value proc) {
   bc2cpp_fiber_define(M);
   const struct REnv* env = MRB_PROC_ENV(mrb_proc_ptr(proc));
   mrb_int len = env ? MRB_ENV_LEN(env) : 0;
@@ -240,6 +263,16 @@ static void bc2cpp_body_start_mark(mrb_state* M,
   start->proc = proc;
   return bc2cpp_fiber_new(M, &start->f);
 }
+
+// Fiber.new(&blk): a block with a step makes the Fiber, else undef.
+static mrb_value bc2cpp_fiber_new_if_step(mrb_state* M, mrb_value blk) {
+  const struct RProc* p = mrb_proc_ptr(blk);
+  if (MRB_PROC_CFUNC_P(p) && bc2cpp_block_has_step(p, MRB_PROC_ENV(p)))
+    return bc2cpp_fiber_new_step(M, blk);
+  return mrb_undef_value();
+}
+inline const int bc2cpp_fiber_step_new_set =
+    (bc2cpp_fiber_step_new = bc2cpp_fiber_new_if_step, 0);
 
 // DYN_CALL: a call whose method is chosen at run time (`send`, `__send__`,
 // `public_send`). A suspendable method registers a dispatcher (the generated

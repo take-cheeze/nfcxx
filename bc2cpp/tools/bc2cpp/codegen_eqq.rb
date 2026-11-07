@@ -165,7 +165,46 @@ class CodeGen
 
   # File-scope definition when a compiled entry calls the helper; '' otherwise.
   def emit_eqq_helper(codes)
-    eqq_helper_site_count(codes).zero? ? '' : helper_owner_calls(eqq_helper_code)
+    eqq = eqq_helper_site_count(codes).zero? ? '' : helper_owner_calls(eqq_helper_code)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    texts.any? { |t| t.include?('bc2cpp_bigint_eq(M,') } ? eqq + helper_owner_calls(bigint_eq_helper_code) : eqq
+  end
+
+  # NEQ_OP_EQ's bigint receiver: `a == b` as Integer#== (numeric.c int_equal) answers it, through the
+  # public mrb_bint_cmp, so a `!=` site is one call. A program that reopens Integer#== keeps the send, here once.
+  def bigint_eq_helper_code
+    @bigint_eq_helper_code ||= begin
+      native = builtin_class_send_safe?('==', %w[Integer]) && eqq_name_unrebound?('==')
+      body = if native
+               <<~CPP.gsub(/^/, '  ')
+                 switch (mrb_type(b)) {
+                 case MRB_TT_INTEGER:
+                 case MRB_TT_BIGINT:
+                 #ifndef MRB_NO_FLOAT
+                 case MRB_TT_FLOAT:
+                 #endif
+                   return mrb_bint_cmp(M, a, b) == 0;
+                 #ifdef MRB_USE_RATIONAL
+                 case MRB_TT_RATIONAL:
+                 #endif
+                 #ifdef MRB_USE_COMPLEX
+                 case MRB_TT_COMPLEX:
+                 #endif
+                 #if defined(MRB_USE_RATIONAL) || defined(MRB_USE_COMPLEX)
+                   return mrb_equal(M, b, a);
+                 #endif
+                 default:
+                   return FALSE;
+                 }
+               CPP
+             else
+               "  return mrb_test(mrb_funcall(M, a, \"==\", 1, b));\n"
+             end
+      "// NEQ_OP_EQ -- shared bigint `==` (Integer#== of numeric.c, or the reopened send)\n" \
+        "#ifdef MRB_USE_BIGINT\n" \
+        "extern \"C\" mrb_int mrb_bint_cmp(mrb_state*, mrb_value, mrb_value);\n" \
+        "static mrb_bool bc2cpp_bigint_eq(mrb_state* M, mrb_value a, mrb_value b) {\n#{body}}\n#endif\n\n"
+    end
   end
 
   def eqq_helper_site_count(codes)

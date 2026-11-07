@@ -114,6 +114,16 @@ check.call('Class.new { }, Struct.new { } and a lambda literal handed to instanc
            [7, 8, 9].all? { |line| blocks_at.call(ireps, line).any? { |l| world.rebound.include?(l) } })
 check.call('the literal rebinder sites are listed', world.sites.map { |s| s[2] }.sort == %w[instance_eval instance_exec new new])
 
+world, ireps = world_of.call(<<~RUBY)
+  class BswC
+    def fib; Fiber.send(:new) { 1 }; end
+    def kls; Class.public_send(:new) { 2 }; end
+  end
+RUBY
+check.call('a computed `new` rebinds the block only on a class factory (Fiber.send(:new) { } keeps its self)',
+           world.holds? && blocks_at.call(ireps, 2).none? { |l| world.rebound.include?(l) } &&
+           blocks_at.call(ireps, 3).any? { |l| world.rebound.include?(l) })
+
 FAILING = {
   'a block that is not a literal to instance_exec' => ['def r(o, &b); o.instance_exec(&b); end', 'not a literal block to instance_exec'],
   'a stored Proc to instance_eval' => ['def r(o); o.instance_eval(&@pr); end', 'not a literal block to instance_eval'],

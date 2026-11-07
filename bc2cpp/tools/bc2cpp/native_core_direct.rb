@@ -1166,9 +1166,7 @@ module NativeCoreDirect
         for (; i < ARY_LEN(ary); i++) {
           mrb_value elem = ARY_PTR(ary)[i];
           if (mrb_equal(M, elem, obj)) {
-            mrb_gc_arena_restore(M, ai);
-            mrb_gc_protect(M, elem);
-            ret = elem;
+            ret = bc2cpp_arena_keep(M, ai, elem);
             continue;
           }
           if (i != j) {
