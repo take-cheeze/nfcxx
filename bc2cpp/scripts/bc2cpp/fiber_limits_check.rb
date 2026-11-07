@@ -16,32 +16,10 @@ suite = Bc2cppStepCheck.new('bc2cpp Fiber limits check')
 # [label, why it differs, body of a probe method returning the Fiber to drain, world]. The method is compiled, the driver is not.
 # World :proc_ext adds mruby-proc-ext's Ruby (Proc#curry) to the closed world; it upsets the Enumerator ones, so it is its own.
 LIMITS = [
-  ['tap', 'Fiber.yield in a block of Kernel#tap', 'Fiber.new { 1.tap { Fiber.yield :in_tap }; :done }'],
-  ['then', 'Fiber.yield in a block of Kernel#then', 'Fiber.new { 1.then { Fiber.yield :in_then; 2 } }'],
-  ['yield_self', 'Fiber.yield in a block of Kernel#yield_self', 'Fiber.new { 1.yield_self { Fiber.yield :in_ys; 2 } }'],
-  ['curry', 'Fiber.yield in a curried lambda', 'Fiber.new { add = lambda { |a, b| Fiber.yield a; a + b }.curry; add[1][2] }', :proc_ext],
-  ['lambda call', 'Fiber.yield in lambda { }.call', 'Fiber.new { lambda { Fiber.yield :in_lambda; 7 }.call }'],
-  ['Enumerator.new next', 'Enumerator.new generator driven by next',
-   'Fiber.new { e = Enumerator.new { |y| y << 1; y << 2 }; Fiber.yield e.next; e.next }'],
-  ['Enumerator.produce next', 'Enumerator.produce driven by next',
-   'Fiber.new { e = Enumerator.produce(1) { |x| x * 2 }; Fiber.yield e.next; e.next }'],
-  ['Yielder <<', 'Enumerator::Yielder#<< inside a Fiber',
-   'Fiber.new { e = Enumerator.new { |y| y << :a << :b }; [e.next, Fiber.yield(:mid), e.next] }'],
-  ['chunk next', 'Enumerable#chunk driven by next',
-   'Fiber.new { e = [1, 2, 4].chunk { |x| x.even? }; Fiber.yield e.next; e.next }'],
-  ['lazy', 'Fiber.yield in a block of Enumerator::Lazy', 'Fiber.new { [1, 2].lazy.map { |x| Fiber.yield x; x * 2 }.first(2) }'],
-  ['Fiber.new(&proc)', 'Fiber.new with a proc variable has no compiled path',
-   'blk = proc { Fiber.yield 1; 2 }; Fiber.new(&blk)'],
-  ['Fiber via send', 'a Fiber made through send has no compiled path',
-   'Fiber.send(:new) { Fiber.yield 1; 2 }'],
-  ['Fiber via public_send', 'a Fiber made through public_send has no compiled path',
-   'Fiber.public_send(:new) { Fiber.yield 1; 2 }'],
-  ['kwargs block break', 'break from a block of a keyword call whose callee suspends first',
-   'Fiber.new { r = kw_each(1, step: 1) { |x| break x }; Fiber.yield r; :done }'],
-  ['two ensures break', 'break out of a block with two ensure regions',
-   'Fiber.new { r = each2 { |x| begin; begin; Fiber.yield x; break x; ensure; @ev << 1; end; ensure; @ev << 2; end }; [r, @ev] }'],
-  ['ensure rescue break', 'break out of a block with ensure and rescue',
-   'Fiber.new { r = each2 { |x| begin; Fiber.yield x; break x; rescue; 0; ensure; @ev << 1; end }; Fiber.yield r; @ev }'],
+  ['curry', 'Fiber.yield in a curried lambda (Proc#curry builds lambdas, so it stays bytecode)',
+   'Fiber.new { add = lambda { |a, b| Fiber.yield a; a + b }.curry; add[1][2] }', :proc_ext],
+  ['lazy', 'Fiber.yield in a block of Enumerator::Lazy (its generator is a super block of Lazy#initialize)',
+   'Fiber.new { [1, 2].lazy.map { |x| Fiber.yield x; x * 2 }.first(2) }'],
   ['Fiber#raise', 'Fiber#raise on an mruby-fiber Fiber is a NoMethodError',
    'Fiber.new { g = Fiber.new { Fiber.yield 1 }; g.resume; begin; g.raise(IOError, "x"); rescue IOError => e; e.message; end }']
 ].freeze
@@ -49,22 +27,6 @@ LIMITS = [
 PROBE = lambda do |limits|
   <<~RUBY
     class LimitsProbe
-      def initialize
-        @ev = []
-      end
-
-      def each2
-        yield 1
-        yield 2
-        :done
-      end
-
-      # Suspends before it runs the block.
-      def kw_each(n, step: 1)
-        Fiber.yield :before
-        yield n
-      end
-
   #{limits.each_with_index.map { |(_, _, body), i| "    def limit_#{i}\n        #{body}\n      end\n" }.join("\n")}
     end
   RUBY

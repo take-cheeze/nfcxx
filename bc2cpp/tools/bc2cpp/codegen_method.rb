@@ -1159,9 +1159,10 @@ class CodeGen
     Hash#delete Hash#delete_if Hash#each Hash#each_key Hash#each_value Hash#fetch Hash#fetch_values Hash#merge!
     Hash#reject Hash#reject! Hash#select Hash#select!
     Integer#downto Integer#times Integer#upto
-    Kernel#loop
+    Kernel#loop Kernel#tap Kernel#then Kernel#yield_self
     Range#each Range#max Range#min
     String#each_char String#upto
+    Enumerator::Generator#each Enumerator::Yielder#<< Enumerator::Yielder#yield
     StringIO#each
   ].freeze
 

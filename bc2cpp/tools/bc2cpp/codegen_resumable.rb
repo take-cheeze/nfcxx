@@ -374,6 +374,7 @@ class CodeGen
     when :SEND, :SEND0
       return resumable_block_call_intercept(insn, irep, d, idx, reg_offset) if block_call_site?(insn, idx, reg_offset)
       return resumable_dyn_send_insn(insn) if dyn_send_site?(insn, idx, reg_offset)
+      return resumable_yielder_site(insn) if yielder_send_site?(insn, irep, idx, reg_offset)
       return resumable_transfer_intercept(insn, irep, d, idx, reg_offset) if transfer_site?(insn, idx, reg_offset)
       return resumable_dyn_send_insn(insn) if blockless_yielding_send?(insn, idx, reg_offset)
       return nil unless insn.sym == 'yield' && idx
@@ -391,6 +392,11 @@ class CodeGen
     when :SSEND, :SSEND0
       # STEP_KEYWORDS: `send(:m, k: 1)` on self is an SSEND (a send with keywords is not rewritten to __send__).
       return resumable_dyn_send_insn(insn) if dyn_send_site?(insn, idx, reg_offset)
+      # Yielder#<< is `self.yield(*args)`: the variant reaches Yielder#yield's, which calls the consumer's block.
+      if insn.sym == 'yield' && d&.owner == 'Enumerator::Yielder' && @rsm_variant && @resumable.flat && reg_offset.zero? && !@resumable_plain
+        shape = dyn_call_shape(insn)
+        return resumable_dyn_site('self', shape[:dest], shape[:n], 'mrb_nil_value()', name: 'yield', splat_reg: shape[:argv_reg])
+      end
 
       # CATCH_THROW: mruby's throw finds its catch on the VM's call stack; in a step it goes through the dynamic call, whose
       # dispatcher finds the catch frame of this fiber (bc2cpp_fiber_catch.hxx) and declines for any other.
@@ -468,10 +474,10 @@ class CodeGen
   # a `yield` does, when the receiver is the entry block at run time; any other receiver takes the ordinary send.
   # Identity is tested at run time, so no alias of the block register needs tracking.
   def block_call_site?(insn, idx, reg_offset)
-    return false unless insn.op == :SEND && insn.sym == 'call' && idx && @resumable&.flat
+    return false unless %i[SEND SEND0].include?(insn.op) && insn.sym == 'call' && idx && @resumable&.flat
     return false if @resumable_plain || reg_offset != 0
 
-    insn.plain_fixed_argc? || insn.positional_splat?
+    insn.op == :SEND0 || insn.plain_fixed_argc? || insn.positional_splat?
   end
 
   # DYN_CALL: sends whose method is chosen at run time. In a step they go through bc2cpp_dyn_call, which returns the
@@ -643,7 +649,9 @@ class CodeGen
   def resumable_block_call_intercept(insn, irep, d, idx, reg_offset)
     dest = insn.reg
     suspend = resumable_block_site(insn, argc: insn.argc.to_i, splat: insn.positional_splat?)
-    resumable_suspend_or_send("mrb_proc_p(r#{dest}) && !MRB_PROC_STRICT_P(mrb_proc_ptr(r#{dest}))", suspend, insn, irep, d, idx, reg_offset)
+    # A lambda whose body is a step and whose arity fits suspends the same way (bc2cpp_lambda_step_ok); any other lambda is called.
+    strict = insn.positional_splat? ? '' : " || bc2cpp_lambda_step_ok(M, r#{dest}, #{insn.argc.to_i})"
+    resumable_suspend_or_send("mrb_proc_p(r#{dest}) && (!MRB_PROC_STRICT_P(mrb_proc_ptr(r#{dest}))#{strict})", suspend, insn, irep, d, idx, reg_offset)
   end
 
   # FIBER_TRANSFER: `fiber.transfer(v)` in a step is a yield of v when the receiver resumed this C++ Fiber or is the one
@@ -1217,7 +1225,50 @@ class CodeGen
     # A block that builds a block which reaches Fiber.yield suspends through it (the nested block is a step, DYN_CALL).
     return true if (block.reps || []).any? { |child| (c = child && @ireps[child]) && deep_fiber_yield?(c, Set.new) }
 
+    # A `break` out of a call to a method that can suspend: the callee's frame is CALLed, so the break unwinds frames.
+    return true if region[:needs_brk] && !fiber_new_site?(region) && @fiber_yield_names&.include?(region[:name])
+    return true if generator_irep?(block) && program.instructions_with_op(:SEND, :SEND0).any? { |i| YIELDER_SENDS.include?(i.sym) }
+
     program.instructions_with_op(:SSEND, :SSEND0, :SSENDB).any? { |insn| yielding_call_name?(insn.sym) }
+  end
+
+  # The Yielder calls of an `Enumerator.new { |y| y << v }` generator: Enumerator#next runs the block on a C++ Fiber, and a
+  # Yielder call there suspends through the consumer's block.
+  YIELDER_SENDS = %w[<< yield].freeze
+
+  # Is +irep+ a literal block of `Enumerator.new`, or nested in one?
+  def generator_irep?(irep)
+    @generator_labels ||= begin
+      labels = Set.new
+      @ireps.each_value do |parent|
+        BytecodeIR.for(parent).adjacent_pairs(:BLOCK, %i[SENDB]) do |insn, paired, sendb_idx|
+          next unless paired.sym == 'new' && insn.block_index && const_receiver?(parent, sendb_idx - 1, paired.reg, 'Enumerator')
+
+          stack = [parent.reps[insn.block_index.to_i]]
+          until stack.empty?
+            label = stack.pop
+            stack.concat(@ireps[label].reps.compact) if label && labels.add?(label) && @ireps[label]
+          end
+        end
+      end
+      labels
+    end
+    @generator_labels.include?(irep.label)
+  end
+
+  # `y << v` / `y.yield v` in a generator block of a step: a dynamic call, so Yielder#<< parks its frame and the consumer's
+  # block runs as a step.
+  def yielder_send_site?(insn, irep, idx, reg_offset)
+    return false unless %i[SEND SEND0].include?(insn.op) && YIELDER_SENDS.include?(insn.sym) && idx && reg_offset.zero?
+    return false if @resumable_plain || !@resumable&.flat || !generator_irep?(irep)
+    return false if insn.sym == 'yield' && fiber_const_receiver?(irep, idx, insn.reg)
+
+    insn.op == :SEND0 || insn.plain_fixed_argc?
+  end
+
+  def resumable_yielder_site(insn)
+    n = insn.op == :SEND0 ? 0 : insn.argc.to_i
+    resumable_dyn_site("r#{insn.reg}", insn.reg, n, 'mrb_nil_value()', name: insn.sym)
   end
 
   # BLOCK_STEP_UNWIND: the targets a block's `break` (the call that took the block) and `return` (the method's frame, or the
@@ -1526,9 +1577,27 @@ class CodeGen
                       (region[:kind] || 'block_fallback') == 'block_fallback'
 
     maker = block_step_maker_for(region)
-    return nil unless maker && block_direct_entry?(region, 'block_fallback', false)
-
+    return nil unless maker
     fn_name = "#{cpp_name(d.owner, d.name)}_block_fallback_#{region[:block_addr]}"
+    # A `break`/`return` of the step unwinds fiber frames (BLOCK_STEP_UNWIND); the proc stays a cfunc one, and called from C
+    # it runs the step on a fiber of its own, where an unwind to the builder's frame is an error.
+    if region[:needs_ret] || region[:needs_brk]
+      return nil unless block_direct_entry?(region.merge(needs_ret: false, needs_brk: false), 'block_fallback', false)
+
+      region[:yield_free] = false
+      return [fn_name, <<~CPP]
+        static mrb_value #{fn_name}(mrb_state* M, mrb_value) {
+          const mrb_value* bc2cpp_argv;
+          mrb_int bc2cpp_argc;
+          mrb_get_args(M, "*", &bc2cpp_argv, &bc2cpp_argc);
+          Bc2cppFiberFrame* bc2cpp_made = #{maker}(M, MRB_PROC_ENV(M->c->ci->proc), bc2cpp_argc, bc2cpp_argv);
+          if (!bc2cpp_made) mrb_raise(M, mrb_class_get(M, "RuntimeError"), "bc2cpp: block step did not make a frame");
+          return bc2cpp_run_callee_from_c(M, bc2cpp_made);
+        }
+      CPP
+    end
+    return nil unless block_direct_entry?(region, 'block_fallback', false)
+
     region[:direct_entry] = true
     region[:yield_free] = false
     code = <<~CPP
@@ -1566,6 +1635,8 @@ class CodeGen
       send_name = DYN_SEND_NAMES.include?(region[:name]) && region[:n].to_i >= 1
       return resumable_dyn_block_glue(region, fn_name, dest_reg, maker, name: (region[:name] unless send_name))
     end
+    # A plain block handed to a method that can suspend: the callee's frame is CALLed, so the block runs later from the fiber.
+    return resumable_dyn_block_glue(region, fn_name, dest_reg, nil, name: region[:name]) if suspending_callee_plain_block?(region, maker)
     return nil unless region[:direct_entry] || region[:needs_ret] || region[:needs_brk]
 
     # A tail-yield block has no step: the callee's frame adapter arms its yield (bc2cpp_tail_yield).
@@ -1589,6 +1660,11 @@ class CodeGen
     lines = resumable_call_lines(state, region[:name], target, dest_reg, args)
     split = lines.index { |l| l.start_with?('  Lbc2cpp_resume_') }
     "  {\n#{ctor}#{lines[0...split].join("\n")}\n  }\n#{lines[split..].join("\n")}\n"
+  end
+
+  def suspending_callee_plain_block?(region, maker)
+    !maker && !region[:needs_ret] && !region[:needs_brk] && !fiber_new_site?(region) && @fiber_yield_names&.include?(region[:name]) &&
+      !DYN_SEND_NAMES.include?(region[:name]) && !tail_yield_block?(region[:block_irep])
   end
 
   # The Fiber.new site: the block's RProc and a C++ Fiber over it. A body that captures locals gets their current
