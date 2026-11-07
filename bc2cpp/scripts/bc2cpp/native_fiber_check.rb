@@ -283,6 +283,9 @@ else
     unexpected.first(12).each { |line| puts "    interpreted: #{line}\n    native:      #{actual_by_label[label_of.call(line)]&.first}" }
     check.call("the output equals interpreted mruby over #{expected.size} lines except the known gaps", unexpected.empty?)
     puts "    known gaps: #{differing.size - unexpected.size} lines (#{KNOWN_GAPS.keys.join(', ')})"
+    if ENV['SHOW_GAPS'] # debugging aid: what each known gap prints on each side
+      (differing - unexpected).each { |line| puts "    gap interpreted: #{line}\n    gap native:      #{actual_by_label[label_of.call(line)]&.first}" }
+    end
     stale = KNOWN_GAPS.keys.select { |gap| expected.none? { |line| label_of.call(line) == gap && !actual.include?(line) } }
     check.call("every known gap still differs (#{stale.join(', ')} pass now: remove them)", stale.empty?)
   end
