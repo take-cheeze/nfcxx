@@ -390,7 +390,7 @@ class CodeGen
     # RESCUE_SUPPORT: each recognized region (recognize_rescue_regions) gets an
     # extracted try-body function, emitted ahead of this one. Its [begin_addr,
     # end_addr] range and the EXCEPT address are skipped here; emit_rescue_glue
-    # emits the mrb_protect_error call and early-out at begin_addr and folds
+    # emits the bc2cpp_protect call and early-out at begin_addr and folds
     # EXCEPT's capture into its last line. Everything else continues through the
     # normal loop.
     rescue_regions = top_level_rescue_regions(recognize_rescue_regions(irep))

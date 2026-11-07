@@ -6,7 +6,7 @@
 # mruby-io's IO.open closes its io with, compiles inside the ensure guard's lambda.
 #
 #   generated code (needs a host mrbc)
-#     - the fixture's IO.open-shaped method compiles (no `#error`), with the protected range under mrb_protect_error
+#     - the fixture's IO.open-shaped method compiles (no `#error`), with the protected range under bc2cpp_protect
 #       inside the ensure lambda; mruby-io's own IO.open compiles too;
 #     - a rescue around the ensure (not inside it) and two rescues inside it keep `#error`.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
@@ -103,7 +103,7 @@ at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
 code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS, skip_unsupported: false)
 with = body_of(code, 'EnFx_singleton_with_impl')
-check.call('with: the IO.open-shaped method compiles, the nested rescue under mrb_protect_error in the ensure lambda',
+check.call('with: the IO.open-shaped method compiles, the nested rescue under bc2cpp_protect in the ensure lambda',
            !with.empty? && !with.include?('#error') && with.include?('ENSURE_NESTED_RESCUE') &&
              with.match?(/auto bc2cpp_ensure_fn = \[&\]\(\) \{\n\s+\{ \/\/ ENSURE_NESTED_RESCUE/))
 io_open = body_of(code, 'IO_singleton_open_impl')

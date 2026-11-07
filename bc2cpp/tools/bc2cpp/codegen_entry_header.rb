@@ -78,24 +78,26 @@ module EntryHeader
     }
     // mrb_funcall's contract for a direct call (vm.c funcall_with_block_m): the arena is restored and the result
     // kept; with no protected region active a raise is caught, left in M->exc, and the exception object returned.
+    // The one arena root of this header.
+    static inline void bc2cpp_entry_root(mrb_state* M, mrb_value v) { mrb_gc_protect(M, v); }
     template <class F>
     static inline mrb_value bc2cpp_entry_call(mrb_state* M, mrb_value self, F&& body) {
       if (M->jmp) {
         int ai = mrb_gc_arena_save(M);
-        mrb_gc_protect(M, self);
+        bc2cpp_entry_root(M, self);
         mrb_value v = body();
         mrb_gc_arena_restore(M, ai);
-        mrb_gc_protect(M, v);
+        bc2cpp_entry_root(M, v);
         return v;
       }
       struct Ctx { F* body; } ctx = { &body };
       mrb_bool error = FALSE;
       M->exc = NULL;
-      mrb_gc_protect(M, self);
+      bc2cpp_entry_root(M, self);
       mrb_value v = mrb_protect_error(M, [](mrb_state*, void* ud) -> mrb_value {
         return (*static_cast<Ctx*>(ud)->body)();
       }, &ctx, &error);
-      // mrb_protect_error clears M->exc; mrb_funcall leaves the exception there.
+      // The protect call clears M->exc; mrb_funcall leaves the exception there.
       if (error) M->exc = mrb_obj_ptr(v);
       return v;
     }

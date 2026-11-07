@@ -43,11 +43,7 @@ class CodeGen
 
   # A result that may be a heap object is kept alive by one arena entry, what a by-name call
   # leaves; the temporaries of the body are dropped, so a loop does not grow the arena.
-  NUMERIC_SLOW_DONE = <<~CPP.chomp
-    mrb_gc_arena_restore(M, ai);
-      mrb_gc_protect(M, r);
-      return r;
-  CPP
+  NUMERIC_SLOW_DONE = 'return bc2cpp_arena_keep(M, ai, r);'
 
   NUMERIC_SLOW_ARITH = { 'add' => ['+', 'mrb_num_add'], 'sub' => ['-', 'mrb_num_sub'],
                          'mul' => ['*', 'mrb_num_mul'] }.freeze
@@ -406,9 +402,7 @@ class CodeGen
       #ifdef MRB_USE_BIGINT
         int ai = mrb_gc_arena_save(M);
         mrb_value r = mrb_bint_#{key}_ii(M, x, y);
-        mrb_gc_arena_restore(M, ai);
-        mrb_gc_protect(M, r);
-        return r;
+        return bc2cpp_arena_keep(M, ai, r);
       #else
         mrb_state* mrb = M;  // E_RANGE_ERROR names the state `mrb`
         mrb_raise(M, E_RANGE_ERROR, "integer overflow");
@@ -761,7 +755,7 @@ class CodeGen
   def numeric_slow_neg_source(head, float, fallback)
     float_arm = float ? "\n#ifndef MRB_NO_FLOAT\n  if (mrb_float_p(a)) {\n    int ai = mrb_gc_arena_save(M);\n    " \
                         "mrb_value r = mrb_float_value(M, (mrb_float)0 - mrb_float(a));\n    " \
-                        "mrb_gc_arena_restore(M, ai);\n    mrb_gc_protect(M, r);\n    return r;\n  }\n#endif" : ''
+                        "return bc2cpp_arena_keep(M, ai, r);\n  }\n#endif" : ''
     <<~CPP
       #{head}) {
       #ifdef MRB_USE_BIGINT
@@ -770,16 +764,12 @@ class CodeGen
           if (!mrb_int_sub_overflow(0, x, &z)) return mrb_int_value(M, z);
           int ai = mrb_gc_arena_save(M);
           mrb_value r = mrb_bint_sub_ii(M, 0, x);
-          mrb_gc_arena_restore(M, ai);
-          mrb_gc_protect(M, r);
-          return r;
+          return bc2cpp_arena_keep(M, ai, r);
         }
         if (mrb_bigint_p(a)) {
           int ai = mrb_gc_arena_save(M);
           mrb_value r = mrb_num_sub(M, mrb_fixnum_value(0), a);
-          mrb_gc_arena_restore(M, ai);
-          mrb_gc_protect(M, r);
-          return r;
+          return bc2cpp_arena_keep(M, ai, r);
         }
       #endif#{float_arm}
       #{fallback}}
@@ -797,9 +787,7 @@ class CodeGen
       if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) {
         int ai = mrb_gc_arena_save(M);
         mrb_value r = #{impl}(M, a);
-        mrb_gc_arena_restore(M, ai);
-        mrb_gc_protect(M, r);
-        return r;
+        return bc2cpp_arena_keep(M, ai, r);
       }
       return bc2cpp_nomethod_named(M, a, "-@", 0);
     CPP

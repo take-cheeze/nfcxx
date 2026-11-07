@@ -647,7 +647,7 @@ RUBY
 OWNERS = %w[StepExc PlainEns].freeze
 code = suite.generate(SRC, OWNERS)
 suite.check('nested_ensure compiles as a step', code.include?('static mrb_value StepExc_nested_ensure__blk') && code.include?('_step(mrb_state* M'))
-suite.check('a step has a handler loop', code.include?('mrb_protect_error(M, bc2cpp_protect_tramp'))
+suite.check('a step has a handler loop', code.include?('bc2cpp_protect_call(M, bc2cpp_body'))
 %w[break_out return_out raise_in_ensure next_out].each do |name|
   suite.check("PlainEns##{name} compiles", !suite.err.include?("PlainEns##{name}:"))
 end

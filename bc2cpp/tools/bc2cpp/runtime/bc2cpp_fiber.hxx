@@ -16,6 +16,10 @@
 #include <unordered_map>
 #include <utility>
 
+// bc2cpp_protect and bc2cpp_root are the generator preamble's
+// (tools/bc2cpp/bc2cpp.rb); a standalone include defines them first
+// (scripts/bc2cpp/cxx_fiber_check.rb).
+//
 // The fiber runtime is in this translation unit (bc2cpp_owner_call's guard asks
 // bc2cpp_fiber_definer_p).
 #define BC2CPP_FIBER_RUNTIME 1
@@ -596,7 +600,7 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   mrb_value result = error ? *raise_exc : mrb_nil_value();
   for (;;) {
     if (!error)
-      result = mrb_protect_error(M, bc2cpp_fiber_run, &args, &error);
+      result = bc2cpp_protect(M, bc2cpp_fiber_run, &args, &error);
     if (!error)
       break;
     // An exception: the nearest frame with a handler for it takes it, and the
@@ -659,7 +663,7 @@ static mrb_value bc2cpp_run_to_completion(mrb_state* M,
                                           mrb_value first) {
   mrb_value fiber = bc2cpp_fiber_new(M, root);
   int arena = mrb_gc_arena_save(M);
-  mrb_gc_protect(M, fiber);
+  bc2cpp_root(M, fiber);
   mrb_value result = bc2cpp_fiber_resume(M, fiber, first);
   if (bc2cpp_fiber_alive_p(M, fiber)) {
     bc2cpp_fiber_clear(M, bc2cpp_fiber_ptr(M, fiber));
@@ -677,7 +681,7 @@ static mrb_value bc2cpp_run_callee_from_c(mrb_state* M,
                                           Bc2cppFiberFrame* callee) {
   mrb_value fiber = bc2cpp_fiber_new(M, callee);
   int arena = mrb_gc_arena_save(M);
-  mrb_gc_protect(M, fiber);
+  bc2cpp_root(M, fiber);
   mrb_value result = bc2cpp_fiber_resume(M, fiber, mrb_nil_value());
   while (bc2cpp_fiber_alive_p(M, fiber)) {
     mrb_value resumed = mrb_funcall(M, mrb_obj_value(mrb_class_get(M, "Fiber")),

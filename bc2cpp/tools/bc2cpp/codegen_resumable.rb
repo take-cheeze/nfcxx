@@ -893,14 +893,14 @@ class CodeGen
     out << "  };\n"
     out << "  for (;;) {\n"
     out << "    mrb_bool bc2cpp_err = FALSE;\n"
-    out << "    mrb_value bc2cpp_res = mrb_protect_error(M, bc2cpp_protect_tramp<decltype(bc2cpp_body)>, &bc2cpp_body, &bc2cpp_err);\n"
+    out << "    mrb_value bc2cpp_res = bc2cpp_protect_call(M, bc2cpp_body, &bc2cpp_err);\n"
     out << "    if (!bc2cpp_err) return bc2cpp_res;\n"
     out << "    mrb_int bc2cpp_hs = -1;\n"
     handlers.each_with_index.to_a.reverse.each_with_index do |(h, k), i|
       out << "    #{'else ' unless i.zero?}if (F->pc >= #{h.begin_addr} && F->pc < #{h.end_addr}) bc2cpp_hs = #{RESUMABLE_HANDLER_STATE + k};\n"
     end
     out << "    if (bc2cpp_hs < 0) { F->has_handlers = 0; mrb_exc_raise(M, bc2cpp_res); }\n"
-    # GC: mrb_protect_error dropped the arena entries of the run's objects, and a C++-local register
+    # GC: bc2cpp_protect dropped the arena entries of the run's objects, and a C++-local register
     # (RESUMABLE_LOCAL_REGISTERS) is not a root, so the values go back to the (rooted) frame first.
     unless spill.empty?
       out << "    #{spill}\n"
@@ -1705,8 +1705,6 @@ class CodeGen
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
       long long slots[1];
     };
-    template <class Body>
-    static mrb_value bc2cpp_protect_tramp(mrb_state*, void* body) { return (*(Body*)body)(); }
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }
     static const mrb_data_type bc2cpp_resume_frame_type = { "Bc2cppResumable::Frame", bc2cpp_resume_frame_free };
     static mrb_sym bc2cpp_resume_regs_sym(mrb_state* M) { return mrb_intern_lit(M, "__bc2cpp_regs__"); }
