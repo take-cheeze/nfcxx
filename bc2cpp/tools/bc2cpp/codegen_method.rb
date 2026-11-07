@@ -168,9 +168,10 @@ class CodeGen
     # `mandatory_ok` below, so a region is never marked `needs_blk` for a method
     # whose wrapper will not extract `bc2cpp_blk`.
     # BLOCK_STEP_UPVARS: a block step holds its builder's locals as pointers, so a block nested in it may forward them.
+    block_step_here = label == @block_step_label
     block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep),
-                                                                    available_upvars: (label == @block_step_label ? @block_step_upvars : nil) || [],
-                                                                    cell_levels: (label == @block_step_label ? @block_step_cell_levels : nil) || [])
+                                                                    available_upvars: (block_step_here ? @block_step_upvars : nil) || [],
+                                                                    cell_levels: (block_step_here ? @block_step_cell_levels : nil) || [])
     # NESTED_BLOCK_FALLBACK_SUPPORT: a RETURN_BLK nested at any depth throws
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.
@@ -191,7 +192,7 @@ class CodeGen
     # LCF::Array2D#each), found by block_fallback_regions and read by
     # emit_rproc_construction. Both stay gated on mandatory_ok, so this is
     # exclusive with `has_blk`.
-    needs_blk_param = yields_block_param?(irep, block_fallback_regions) || (@block_step_needs_blk && label == @block_step_label)
+    needs_blk_param = yields_block_param?(irep, block_fallback_regions) || (@block_step_needs_blk && block_step_here)
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # OPTIONAL_REST: optionals with a rest parameter (see optional_rest_arg_table); the rest is taken below.
     opt_rest = !mandatory_ok && opt_jmp_targets.nil? && (rest_table = optional_rest_arg_table(irep))
@@ -282,7 +283,7 @@ class CodeGen
     yielding_root = @fiber_roots&.include?(label) && BytecodeIR.for(irep).instructions_with_op(:BLKCALL).any?
     # RESUMABLE_DUAL: a method with a variant keeps the fast body, and its guard calls the variant.
     dual = !@rsm_variant && !rsm_variant_code(label).empty?
-    if !dual && (calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root || @rsm_variant || (@block_step_compile && label == @block_step_label))
+    if !dual && (calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root || @rsm_variant || (@block_step_compile && block_step_here))
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
       # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
       # outright -- unless it is a Fiber.new root that qualifies as a resumable step
@@ -334,7 +335,7 @@ class CodeGen
       @resumable = ResumableCtx.new(label, resumable.helpers)
       @resumable.boxed = boxed_registers(block_fallback_regions)
       # BLOCK_STEP_UPVARS: slot i of a block step's frame holds the pointer to its i-th captured local.
-      if @block_step_upvars && label == @block_step_label
+      if @block_step_upvars && block_step_here
         @resumable.upvars = @block_step_upvars
         @block_step_upvars.each { @resumable.new_slot }
       end
@@ -547,7 +548,7 @@ class CodeGen
     # BLOCK_FALLBACK_YIELD_SUPPORT: in a METHOD body only lv == 0 can be answered
     # (vm.c `if (lv == 0) stack = regs + 1`). codegen_yield stops at the first
     # method scope, so a method's own yield is always level 0.
-    @blk_param_level = @block_step_needs_blk && label == @block_step_label ? 1 : 0
+    @blk_param_level = @block_step_needs_blk && block_step_here ? 1 : 0
     # ENSURE_RAII_SUPPORT: an ensure needs code emitted AROUND instructions: the
     # guard and `{` before the protected range's first instruction, and `}`
     # before the handler (the `}` runs the ensure body via the guard's
@@ -746,29 +747,15 @@ class CodeGen
         default = i >= mand ? ' = mrb_nil_value()' : ''
         out << "  #{native_c_type(arg_native_types[i])} #{a}#{default};\n"
       end
-      required_kws = kw_table.select { |kw| kw[:required] }
-      optional_kws = kw_table.reject { |kw| kw[:required] }
-      ordered_kws = required_kws + optional_kws
-      table_entries = ordered_kws.map { |kw| "mrb_intern_cstr(M, \"#{kw[:name]}\")" }.join(', ')
-      out << "  mrb_sym bc2cpp_kw_table[#{ordered_kws.size}] = { #{table_entries} };\n"
-      out << "  mrb_value bc2cpp_kw_values[#{ordered_kws.size}];\n"
-      out << "  mrb_kwargs bc2cpp_kwargs = { #{ordered_kws.size}, #{required_kws.size}, " \
-             "bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
+      ordered_kws, kwargs_decl = keyword_table_decl(kw_table)
+      out << kwargs_decl
       fmt = arg_native_types.each_with_index.map do |t, i|
         ch = t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o')
         i == mand && opt.positive? ? "|#{ch}" : ch
       end.join + ':'
       ptrs = (arg_names.map { |a| "&#{a}" } + ['&bc2cpp_kwargs']).join(', ')
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
-      ordered_kws.each_with_index do |kw, i|
-        var = kwarg_param_name(kw[:name])
-        if kw[:required]
-          out << "  mrb_value #{var} = bc2cpp_kw_values[#{i}];\n"
-        else
-          out << "  mrb_value #{var} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? mrb_nil_value() : bc2cpp_kw_values[#{i}];\n"
-          out << "  mrb_int #{kw_given_param_name(kw[:name])} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
-        end
-      end
+      out << keyword_value_decls(ordered_kws)
       call_args = arg_names.dup
       if opt.positive?
         # mrb_get_argc counts positional arguments only, independent of keywords.
@@ -777,9 +764,7 @@ class CodeGen
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
         call_args << 'bc2cpp_given_opt'
       end
-      call_args += kw_table.flat_map do |kw|
-        kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
-      end
+      call_args += kw_table.flat_map { |kw| keyword_param_names(kw) }
       out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
     elsif kwrest_only
       # KEYWORD_REST_ONLY: the positionals bind exactly; the keyword hash is the callinfo's keyword slot (read as the
@@ -1074,6 +1059,35 @@ class CodeGen
     end.join
   end
 
+  # The mrb_kwargs declarations for +kw_table+ (required keywords first, as mrb_get_args wants), with the keyword order.
+  # `rest: NULL` makes an unknown keyword raise ArgumentError here, which KEYEND relies on.
+  def keyword_table_decl(kw_table)
+    ordered = kw_table.select { |kw| kw[:required] } + kw_table.reject { |kw| kw[:required] }
+    names = ordered.map { |kw| "mrb_intern_cstr(M, \"#{kw[:name]}\")" }.join(', ')
+    decl = "  mrb_sym bc2cpp_kw_table[#{ordered.size}] = { #{names} };\n" \
+           "  mrb_value bc2cpp_kw_values[#{ordered.size}];\n" \
+           "  mrb_kwargs bc2cpp_kwargs = { #{ordered.size}, #{kw_table.count { |kw| kw[:required] }}, " \
+           "bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
+    [ordered, decl]
+  end
+
+  # The keyword locals after mrb_get_args: an omitted optional keyword (mrb_undef_p) is nil plus a not-given flag.
+  def keyword_value_decls(ordered_kws)
+    ordered_kws.each_with_index.map do |kw, i|
+      var = kwarg_param_name(kw[:name])
+      if kw[:required]
+        "  mrb_value #{var} = bc2cpp_kw_values[#{i}];\n"
+      else
+        "  mrb_value #{var} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? mrb_nil_value() : bc2cpp_kw_values[#{i}];\n" \
+          "  mrb_int #{kw_given_param_name(kw[:name])} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
+      end
+    end.join
+  end
+
+  def keyword_param_names(kw)
+    kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
+  end
+
   # STEP_KEYWORDS: the registered wrapper of a method taking keywords next to a rest and/or block parameter. One mrb_get_args
   # call (`|o*:&`) binds them all; an unknown or missing keyword raises there, as the KEY_P/KARG/KEYEND sequence expects.
   # Parameter order matches arg_params.
@@ -1092,12 +1106,8 @@ class CodeGen
       fmt += '*'
       ptrs.push('&bc2cpp_rest_ptr', '&bc2cpp_rest_len')
     end
-    ordered_kws = kw_table.select { |kw| kw[:required] } + kw_table.reject { |kw| kw[:required] }
-    required_count = kw_table.count { |kw| kw[:required] }
-    table_entries = ordered_kws.map { |kw| "mrb_intern_cstr(M, \"#{kw[:name]}\")" }.join(', ')
-    out << "  mrb_sym bc2cpp_kw_table[#{ordered_kws.size}] = { #{table_entries} };\n"
-    out << "  mrb_value bc2cpp_kw_values[#{ordered_kws.size}];\n"
-    out << "  mrb_kwargs bc2cpp_kwargs = { #{ordered_kws.size}, #{required_count}, bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
+    ordered_kws, kwargs_decl = keyword_table_decl(kw_table)
+    out << kwargs_decl
     fmt += ':'
     ptrs << '&bc2cpp_kwargs'
     if has_blk
@@ -1117,18 +1127,8 @@ class CodeGen
       out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
       call_args << 'bc2cpp_given_opt'
     end
-    ordered_kws.each_with_index do |kw, i|
-      var = kwarg_param_name(kw[:name])
-      if kw[:required]
-        out << "  mrb_value #{var} = bc2cpp_kw_values[#{i}];\n"
-        call_args << var
-      else
-        given = kw_given_param_name(kw[:name])
-        out << "  mrb_value #{var} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? mrb_nil_value() : bc2cpp_kw_values[#{i}];\n"
-        out << "  mrb_int #{given} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
-        call_args.push(var, given)
-      end
-    end
+    out << keyword_value_decls(ordered_kws)
+    call_args.concat(ordered_kws.flat_map { |kw| keyword_param_names(kw) })
     out << entry_return_line(label, d, impl_name, call_args.join(', '))
     out
   end
@@ -1145,17 +1145,24 @@ class CodeGen
 
   # RESUMABLE_DUAL: the direct-yield core iterators that get a resumable variant beside their fast body, so a Fiber
   # reaches them without a saved bytecode driver. Each is listed only once scripts/bc2cpp/resumable_variants_check.rb
-  # runs it both ways (inside a Fiber and plainly) with the same output. Methods whose block is called from an inner
-  # block (Enumerable#collect, #inject, #max ...) stay on their drivers: the step cannot suspend through that block.
+  # runs it both ways (inside a Fiber and plainly) with the same output.
   RSM_SUFFIX = '_rsm'
   RESUMABLE_DUAL = %w[
-    Array#collect! Array#delete_if Array#each Array#each_index Array#fetch
-    Array#find Array#reject! Array#select! Array#sort Enumerable#sort Hash#delete Hash#fetch
-    Hash#each Integer#downto Integer#times Integer#upto
-    String#each_char String#upto StringIO#each
-    Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
-    Enumerable#each_slice Enumerable#each_cons Enumerable#group_by Enumerable#partition Enumerable#min_by Enumerable#max_by Enumerable#take_while Enumerable#drop_while
-    Kernel#loop Hash#fetch_values
+    Array#collect! Array#delete_if Array#each Array#each_index Array#fetch Array#find Array#reject! Array#select!
+    Array#sort Array#sort_by Array#to_h Array#uniq Array#uniq!
+    Enumerable#all? Enumerable#any? Enumerable#collect Enumerable#count Enumerable#detect Enumerable#drop_while
+    Enumerable#each_cons Enumerable#each_slice Enumerable#each_with_index Enumerable#each_with_object
+    Enumerable#filter_map Enumerable#find_all Enumerable#find_index Enumerable#flat_map Enumerable#group_by
+    Enumerable#inject Enumerable#max Enumerable#max_by Enumerable#min Enumerable#min_by Enumerable#none?
+    Enumerable#partition Enumerable#reject Enumerable#sort Enumerable#sort_by Enumerable#sum Enumerable#take_while
+    Enumerable#to_h Enumerable#uniq
+    Hash#delete Hash#delete_if Hash#each Hash#each_key Hash#each_value Hash#fetch Hash#fetch_values Hash#merge!
+    Hash#reject Hash#reject! Hash#select Hash#select!
+    Integer#downto Integer#times Integer#upto
+    Kernel#loop
+    Range#each Range#max Range#min
+    String#each_char String#upto
+    StringIO#each
   ].freeze
 
   RESUMABLE_DUAL_NAMES = RESUMABLE_DUAL.to_set { |key| key.split('#').last }.freeze
