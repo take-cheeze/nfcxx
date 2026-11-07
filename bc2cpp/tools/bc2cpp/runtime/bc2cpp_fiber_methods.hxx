@@ -262,10 +262,21 @@ typedef mrb_value (*Bc2cppDynFn)(mrb_state* M,
                                  mrb_int argc,
                                  const mrb_value* argv,
                                  mrb_value blk);
+// STEP_KEYWORDS: the dispatcher of a method that takes keywords. It gets the
+// call's keyword Hash (nil when none) and declines (undef) a call whose
+// keywords do not fit, so the ordinary send raises the interpreter's
+// ArgumentError.
+typedef mrb_value (*Bc2cppDynKwFn)(mrb_state* M,
+                                   mrb_value self,
+                                   mrb_int argc,
+                                   const mrb_value* argv,
+                                   mrb_value kdict,
+                                   mrb_value blk);
 struct Bc2cppDynEntry {
   Bc2cppDynFn fn;
   mrb_int min_argc;
   mrb_int max_argc;
+  Bc2cppDynKwFn kwfn = nullptr;
 };
 
 inline std::unordered_map<void*, Bc2cppDynEntry>& bc2cpp_dyn_table() {
@@ -278,6 +289,40 @@ inline std::unordered_map<void*, Bc2cppDynEntry>& bc2cpp_dyn_table() {
                                                  mrb_int min_argc,
                                                  mrb_int max_argc) {
   bc2cpp_dyn_table()[cfunc] = Bc2cppDynEntry{fn, min_argc, max_argc};
+}
+
+[[maybe_unused]] static void bc2cpp_dyn_register_kw(void* cfunc,
+                                                    Bc2cppDynKwFn fn,
+                                                    mrb_int min_argc,
+                                                    mrb_int max_argc) {
+  bc2cpp_dyn_table()[cfunc] = Bc2cppDynEntry{nullptr, min_argc, max_argc, fn};
+}
+
+// Binds the keywords of a call to the parameters of a method: `names` lists the
+// `n` keywords, the first `required` of them required. `values[i]` is the
+// keyword's value, or undef when the call omitted it. False when the call does
+// not fit (a required keyword missing, or one the method does not take), as
+// mrb_get_args' ':' refuses it; the Hash is not changed.
+[[maybe_unused]] static bool bc2cpp_dyn_bind_keywords(mrb_state* M,
+                                                      mrb_value kdict,
+                                                      mrb_int n,
+                                                      mrb_int required,
+                                                      const mrb_sym* names,
+                                                      mrb_value* values) {
+  bool have = mrb_hash_p(kdict);
+  mrb_int found = 0;
+  for (mrb_int i = 0; i < n; ++i) {
+    mrb_value key = mrb_symbol_value(names[i]);
+    if (have && mrb_hash_key_p(M, kdict, key)) {
+      values[i] = mrb_hash_get(M, kdict, key);
+      ++found;
+    } else {
+      values[i] = mrb_undef_value();
+      if (i < required)
+        return false;
+    }
+  }
+  return !have || mrb_hash_size(M, kdict) == found;
 }
 
 static void bc2cpp_dyn_builtins(mrb_state* M);  // bc2cpp_fiber_sort.hxx
@@ -295,8 +340,9 @@ extern "C" mrb_value mrb_funcall_send(mrb_state* M,
                                       mrb_value kdict,
                                       mrb_value blk);
 
-// `kdict` is the keyword Hash of the call, or nil. A suspendable method takes
-// no keywords, so a non-empty one runs as an ordinary send that carries them
+// `kdict` is the keyword Hash of the call, or nil. A method registered with a
+// keyword dispatcher takes it; any other suspendable method takes no keywords,
+// so a non-empty one runs as an ordinary send that carries them
 // (mrb_funcall_send); an empty one passes nothing, as `**{}` does.
 
 // A registered suspendable method found for a call: park its frame (the caller
@@ -306,6 +352,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
                             mrb_method_t method,
                             mrb_int argc,
                             const mrb_value* argv,
+                            mrb_value kdict,
                             mrb_value blk,
                             Bc2cppDynResult* out) {
   if (MRB_METHOD_UNDEF_P(method))
@@ -322,8 +369,14 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   if (it == table.end() || argc < it->second.min_argc ||
       argc > it->second.max_argc)
     return false;
+  bool keywords = mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict);
+  if (!it->second.kwfn && keywords)
+    return false;
   bc2cpp_prologue.frame = nullptr;
-  mrb_value result = it->second.fn(M, recv, argc, argv, blk);
+  mrb_value result =
+      it->second.kwfn ? it->second.kwfn(M, recv, argc, argv,
+                                        keywords ? kdict : mrb_nil_value(), blk)
+                      : it->second.fn(M, recv, argc, argv, blk);
   Bc2cppFiberFrame* parked = bc2cpp_prologue.frame;
   bc2cpp_prologue.frame = nullptr;
   // undef: the dispatcher declined (nothing for a frame to do).
@@ -345,15 +398,14 @@ static bool bc2cpp_dyn_park(mrb_state* M,
                     ? mrb_symbol(name)
                     : mrb_intern_str(M, mrb_obj_as_string(M, name));
   bool keywords = mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict);
-  if (!keywords) {
-    struct RClass* c = mrb_class(M, recv);
-    mrb_method_t method = mrb_method_search_vm(M, &c, mid);
-    Bc2cppDynResult out;
-    if (bc2cpp_dyn_park(M, recv, method, argc, argv, blk, &out))
-      return out;
+  struct RClass* c = mrb_class(M, recv);
+  mrb_method_t method = mrb_method_search_vm(M, &c, mid);
+  Bc2cppDynResult out;
+  if (bc2cpp_dyn_park(M, recv, method, argc, argv, kdict, blk, &out))
+    return out;
+  if (!keywords)
     return Bc2cppDynResult{
         nullptr, mrb_funcall_with_block(M, recv, mid, argc, argv, blk)};
-  }
   return Bc2cppDynResult{
       nullptr, mrb_funcall_send(M, recv, mid, argc, argv, kdict, blk)};
 }
@@ -376,7 +428,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   if (MRB_METHOD_UNDEF_P(method))
     mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
   Bc2cppDynResult out;
-  if (bc2cpp_dyn_park(M, self, method, argc, argv, blk, &out))
+  if (bc2cpp_dyn_park(M, self, method, argc, argv, mrb_nil_value(), blk, &out))
     return out;
   return Bc2cppDynResult{nullptr, mrb_funcall_with_method(M, self, mid, &method,
                                                           c, argc, argv, blk)};

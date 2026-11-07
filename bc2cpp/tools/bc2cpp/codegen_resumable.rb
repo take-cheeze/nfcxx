@@ -20,6 +20,9 @@ class ResumableCtx
   # OPTIONAL_ARGS: how many optional positional arguments the method takes (its jump table is the glue at the first
   # JMP, which switches on bc2cpp_given_opt). 0 for a method without optional arguments.
   attr_accessor :optional
+  # STEP_KEYWORDS: the method's keyword table (keyword_arg_table) and the frame index of the first keyword cell. Each
+  # keyword has a value cell, and an optional one a second cell for its given flag; the step reads them into locals.
+  attr_accessor :kw, :kw_base
 
   def initialize(label, helpers)
     @label = label
@@ -204,7 +207,10 @@ class CodeGen
     # enter_fields: required, optional, rest, post, keyword, keyword rest, block.
     # The entry copies positional arguments and the block into the frame.
     fields = (irep.enter ? irep.enter.enter_fields.map(&:to_i) : []) + [0] * 7
-    return 'takes a post or keyword argument' if fields[3..5].any?(&:positive?)
+    return 'takes a post or keyword rest argument' if fields[3].positive? || fields[5].positive?
+    # STEP_KEYWORDS: the keywords are the ones compile_method binds (keyword_arg_table), next to a rest or block too.
+    keywords = fields[4].positive?
+    return 'takes keywords in a shape the step cannot enter' if keywords && !keyword_arg_table(irep, rest_block: true)
     # The step must use the same optional jump table as compile_method, including an explicit block parameter.
     if fields[1].positive?
       table = if fields[2].positive?
@@ -217,7 +223,7 @@ class CodeGen
       return 'takes optional arguments in a shape the step cannot enter' unless table && table[1]
     end
     # REST_ARGS: a rest argument the wrapper builds into an Array (rest_only_arity? is the shape it recognises).
-    return 'takes a rest argument in a shape the step cannot enter' if fields[2].positive? && fields[1].zero? && !rest_only_arity?(irep)
+    return 'takes a rest argument in a shape the step cannot enter' if fields[2].positive? && fields[1].zero? && !keywords && !rest_only_arity?(irep)
     handler_problem = resumable_handler_problem(irep)
     return handler_problem if handler_problem
 
@@ -322,6 +328,9 @@ class CodeGen
 
       resumable_unwind_site(insn)
     when :SSEND, :SSEND0
+      # STEP_KEYWORDS: `send(:m, k: 1)` on self is an SSEND (a send with keywords is not rewritten to __send__).
+      return resumable_dyn_send_insn(insn) if dyn_send_site?(insn, idx) && reg_offset.zero?
+
       # CATCH_THROW: mruby's throw finds its catch on the VM's call stack; in a step it goes through the dynamic call, whose
       # dispatcher finds the catch frame of this fiber (bc2cpp_fiber_catch.hxx) and declines for any other.
       if insn.sym == 'throw' && insn.op == :SSEND && @resumable.flat && reg_offset.zero? && !@resumable_plain && insn.plain_fixed_argc? &&
@@ -728,7 +737,9 @@ class CodeGen
     # the Array on its first run, from the values the entry put in those registers' slots.
     boxed = (@resumable.boxed || []) & registers
     cells_slot = boxed.empty? ? nil : registers.size + 2 + (@resumable.block ? 1 : 0)
-    nregs = registers.size + (@resumable.block ? 1 : 0) + (cells_slot ? 1 : 0)
+    kw_cells = @resumable.kw ? @resumable.kw.sum { |kw| kw[:required] ? 1 : 2 } : 0
+    @resumable.kw_base = registers.size + 2 + (@resumable.block ? 1 : 0) + (cells_slot ? 1 : 0)
+    nregs = registers.size + (@resumable.block ? 1 : 0) + (cells_slot ? 1 : 0) + kw_cells
     @resumable.nregs = nregs
     @resumable.block_slot = block_slot
     @resumable.register_slots = registers.each_with_index.to_h { |reg, slot| [reg, slot + 2] }
@@ -761,6 +772,16 @@ class CodeGen
       end
     end
     out << "  [[maybe_unused]] mrb_value bc2cpp_blk = R[#{block_slot}];\n" if block_slot
+    # STEP_KEYWORDS: the entry put the keywords in the frame; KEY_P / KARG read them as the plain body's parameters.
+    cell = @resumable.kw_base
+    (@resumable.kw || []).each do |kw|
+      out << "  [[maybe_unused]] mrb_value #{kwarg_param_name(kw[:name])} = R[#{cell}];\n"
+      cell += 1
+      next if kw[:required]
+
+      out << "  [[maybe_unused]] mrb_int #{kw_given_param_name(kw[:name])} = mrb_test(R[#{cell}]) ? 1 : 0;\n"
+      cell += 1
+    end
     handlers = @resumable.handlers
     out << "  F->has_handlers = #{handlers ? handlers.size : 0};\n"
     out << "  #{handlers ? '' : 'const '}mrb_int bc2cpp_state = F->state;\n"
@@ -815,14 +836,16 @@ class CodeGen
   # not have worked in the bytecode either).
   # DYN_CALL: the dispatcher a `send` of this method reaches (bc2cpp_dyn_call): arms the method's id, runs its entry (which
   # parks the frame) and registers itself under the method's registered C function. Mandatory parameters only.
-  def resumable_dyn_function(impl_name, owner_name, argc, blk, wrapper: impl_name.delete_suffix('_impl'), optional: 0, rest: false)
+  def resumable_dyn_function(impl_name, owner_name, argc, blk, wrapper: impl_name.delete_suffix('_impl'), optional: 0, rest: false, kw: nil)
     # An omitted optional argument is nil and the entry is told how many were given (the registered wrapper does the same).
     # A rest parameter is the last one: the arguments past the mandatory ones, packed into an Array.
     fixed = rest ? argc - 1 : argc
     args = (0...fixed).map { |i| ", argc > #{i} ? argv[#{i}] : mrb_nil_value()" }.join
     args += ", argc > #{fixed} ? mrb_ary_new_from_values(M, argc - #{fixed}, argv + #{fixed}) : mrb_ary_new(M)" if rest
-    given = optional.positive? ? ", argc - #{argc - optional}" : ''
-    max = rest ? 'INT32_MAX' : argc
+    given = optional.positive? ? ", std::min<mrb_int>(argc - #{fixed - optional}, #{optional})" : ''
+    max = rest ? 'INT32_MAX' : fixed
+    return resumable_dyn_kw_function(impl_name, owner_name, args, blk, given, fixed - optional, max, wrapper, kw) if kw
+
     <<~CPP
       static mrb_value #{impl_name}_dyn(mrb_state* M, mrb_value self, mrb_int argc, const mrb_value* argv, mrb_value bc2cpp_dyn_blk) {
         (void)argc; (void)argv; (void)bc2cpp_dyn_blk;
@@ -836,10 +859,38 @@ class CodeGen
     CPP
   end
 
+  # STEP_KEYWORDS: the dispatcher of a method with keywords. bc2cpp_dyn_bind_keywords declines a call the wrapper would
+  # refuse (a missing or unknown keyword), which then runs as an ordinary send and raises there.
+  def resumable_dyn_kw_function(impl_name, owner_name, args, blk, given, min, max, wrapper, kw)
+    ordered = kw.select { |k| k[:required] } + kw.reject { |k| k[:required] }
+    names = ordered.map { |k| "mrb_intern_cstr(M, #{c_string_literal(k[:name].to_s)})" }.join(', ')
+    index = ordered.each_with_index.to_h { |k, i| [k[:name], i] }
+    kw_args = kw.map do |k|
+      value = "bc2cpp_dkw_values[#{index[k[:name]]}]"
+      flag = k[:required] ? '' : ", mrb_undef_p(#{value}) ? 0 : 1"
+      ", mrb_undef_p(#{value}) ? mrb_nil_value() : #{value}#{flag}"
+    end.join
+    <<~CPP
+      static mrb_value #{impl_name}_dyn(mrb_state* M, mrb_value self, mrb_int argc, const mrb_value* argv, mrb_value bc2cpp_dyn_kd, mrb_value bc2cpp_dyn_blk) {
+        (void)argc; (void)argv; (void)bc2cpp_dyn_blk;
+        mrb_sym bc2cpp_dkw_names[#{ordered.size}] = { #{names} };
+        mrb_value bc2cpp_dkw_values[#{ordered.size}];
+        if (!bc2cpp_dyn_bind_keywords(M, bc2cpp_dyn_kd, #{ordered.size}, #{ordered.count { |k| k[:required] }}, bc2cpp_dkw_names, bc2cpp_dkw_values)) return mrb_undef_value();
+        bc2cpp_prologue.expect = #{c_string_literal(owner_name)};
+        bc2cpp_prologue.frame = nullptr;
+        mrb_value result = #{impl_name}(M, self#{args}#{blk ? ', bc2cpp_dyn_blk' : ''}#{given}#{kw_args});
+        bc2cpp_prologue.expect = nullptr;
+        return result;
+      }
+      static const int #{impl_name}_dyn_reg = (bc2cpp_dyn_register_kw((void*)&#{wrapper}, #{impl_name}_dyn, #{min}, #{max}), 0);
+    CPP
+  end
+
   def resumable_entry_function(impl_name, step_name, owner_name, arg_names = [], ctx = nil, blk = false, optional: 0, rest: false)
     thunk = "#{step_name}_thunk"
-    dyn = !(rest && optional.positive?) && !@rsm_variant && !@block_step_compile
-    if arg_names.empty? && !blk
+    dyn = !@rsm_variant && !@block_step_compile
+    kw = ctx&.kw
+    if arg_names.empty? && !blk && !kw
       # No arguments: the frame starts empty, and the driver's first step creates it.
       return <<~CPP + (dyn ? resumable_dyn_function(impl_name, owner_name, 0, false) : '')
         static mrb_value #{thunk}(mrb_state* M, mrb_value) {
@@ -876,8 +927,11 @@ n = arg_names.size
 req = n - optional
 # The registered wrapper computes the given count (mrb_get_argc - required, clamped) and passes it last, as for any method
 # with optionals (codegen_method.rb, arg_params).
+kw_params = (kw || []).flat_map do |k|
+  ["mrb_value #{kwarg_param_name(k[:name])}"] + (k[:required] ? [] : ["mrb_int #{kw_given_param_name(k[:name])}"])
+end
 params = (arg_names.map { |a| "mrb_value #{a}" } + (blk ? ['mrb_value bc2cpp_blk'] : []) +
-          (optional.positive? ? ['mrb_int bc2cpp_given_opt'] : [])).join(', ')
+          (optional.positive? ? ['mrb_int bc2cpp_given_opt'] : []) + kw_params).join(', ')
 # Each argument's slot in the frame; a register the body never reads has none and is not copied.
 fill = arg_names.each_with_index.filter_map do |a, idx|
   slot = ctx.register_slots[idx + 1]
@@ -886,9 +940,20 @@ end
 # The block goes in the frame's block slot, and in the frame's __block__ for the driver to call.
 if blk
   # mruby keeps the block in register argc+1, which `yield` (BLKPUSH) reads, so that register's slot gets it too.
-  block_reg_slot = ctx.register_slots[n + 1]
+  # With keywords the keyword-hash register sits between the arguments and the block.
+  block_reg_slot = ctx.register_slots[n + 1 + (kw ? 1 : 0)]
   fill += ['mrb_iv_set(M, frame, mrb_intern_lit(M, "__block__"), bc2cpp_blk);', "F->regs[#{ctx.block_slot}] = bc2cpp_blk;"]
   fill << "F->regs[#{block_reg_slot}] = bc2cpp_blk;" if block_reg_slot
+end
+# STEP_KEYWORDS: each keyword's value (and given flag) goes in the frame's keyword cells.
+cell = ctx.kw_base
+(kw || []).each do |k|
+  fill << "F->regs[#{cell}] = #{kwarg_param_name(k[:name])};"
+  cell += 1
+  next if k[:required]
+
+  fill << "F->regs[#{cell}] = mrb_bool_value(#{kw_given_param_name(k[:name])});"
+  cell += 1
 end
 optional_head = optional.positive? ? "    F->state = -(bc2cpp_given_opt + 1);\n" : ''
 # REST_ARGS: the wrapper checked the count and built the rest Array, so the impl checks nothing.
@@ -919,7 +984,7 @@ tail = <<~CPP
   }
   // #{owner_name}: entry of a resumable method with #{req} required argument#{'s' unless req == 1}#{", #{optional} optional" if optional.positive?} (RESUMABLE_ENTRY)
 CPP
-head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? resumable_dyn_function(impl_name, owner_name, n, blk, optional: optional, rest: rest) : '')
+head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? resumable_dyn_function(impl_name, owner_name, n, blk, optional: optional, rest: rest, kw: kw) : '')
   end
 
   # The run-time half, emitted once per generated file that has a resumable method or a Fiber body.
@@ -1071,11 +1136,11 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # the step's frame in its env (emit_rproc_construction); the fiber's adapter asks for it at a block-call suspension.
   # Limits (a block outside them keeps the call from C, or its tail yield): no captured locals, no nested block,
   # no break/return/yield to the method's block, mandatory or rest-only parameters.
-  def block_step_candidate?(region, owner_def)
+  def block_step_candidate?(region, owner_def, builder_upvars = nil)
     return false unless owner_def && ENV['BC2CPP_BLOCK_STEP'] != '0' && !@block_step_compile
 
     block = region[:block_irep]
-    return false unless (region[:upvars] || []).empty? || block_step_upvars_ok?(region, owner_def)
+    return false unless (region[:upvars] || []).empty? || block_step_upvars_ok?(region, owner_def, builder_upvars)
     return false unless pure_mandatory_arity?(block) || rest_only_block?(block)
     body = fiber_new_site?(region) && !fiber_body_target_id(region, owner_def)
     return false if (!body && tail_yield_block?(block)) || (body && BytecodeIR.for(block).op?(:BREAK, :RETURN_BLK))
@@ -1129,11 +1194,13 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # them (the step's registers are references into its heap frame, see resumable_step_function), which the maker keeps
   # in the block frame's slots. That is sound where the caller's frame lives as long as the callee: a call on self to a
   # suspendable method (a CALL, so the caller's frame stays on the fiber's stack) and not a Fiber body, which outlives it.
-  def block_step_upvars_ok?(region, owner_def)
+  # STEP_NESTED_UPVARS: a local of the builder's own builder (level >= 1) is forwarded when the builder is a block step that
+  # holds a pointer to it (+builder_upvars+, the builder region's upvars).
+  def block_step_upvars_ok?(region, owner_def, builder_upvars = nil)
     # A Fiber body outlives the frame: its pointers must lead into cells (STEP_CLOSURES), not into the frame.
     return false if fiber_new_site?(region) && !region[:boxed]
 
-    region[:upvars].all? { |(level, _)| level.zero? }
+    region[:upvars].all? { |(level, idx)| level.zero? || builder_upvars&.include?([level - 1, idx]) }
   end
 
   # Can the literal block of an inline-loop +region+ suspend the fiber: it reaches Fiber.yield, calls a block
@@ -1178,7 +1245,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # Compiles every BLOCK_STEP candidate among +regions+ and returns the C++ text to put ahead of the method; each
   # compiled region gets :step_maker (the maker's name). Done before the owner's own compile starts, so nothing of it
   # is mid-flight (the dual variants are compiled the same way).
-  def compile_block_steps(regions, d)
+  def compile_block_steps(regions, d, builder_upvars = nil)
     return '' if regions.empty? || @block_step_compile
 
     code = String.new
@@ -1186,8 +1253,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       # A block nested in another block is a region of the outer block's body (emit_proc_fallback_fn_body recognizes
       # it again there), so look for steps inside first and name them by block label, not by region object.
       nested = recognize_block_fallback_regions(region[:block_irep], available_upvars: region[:upvars] || [])
-      code << compile_block_steps(nested, d)
-      next unless block_step_candidate?(region, d)
+      code << compile_block_steps(nested, d, region[:upvars] || [])
+      next unless block_step_candidate?(region, d, builder_upvars)
 
       step = compile_block_step(region, d)
       next unless step
@@ -1342,6 +1409,12 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return resumable_not_flat_error("call to the suspendable method #{insn.sym}") unless @resumable.flat
 
     dest = insn.reg - reg_offset
+    # STEP_KEYWORDS: a callee that takes optional, rest, keyword or block parameters, or a call that carries keywords or a
+    # splat, binds through the dynamic call (bc2cpp_dyn_call), whose dispatcher fills in what the call leaves out.
+    if reg_offset.zero? && !(pure_mandatory_arity?(@ireps.fetch(target.irep)) && (insn.op == :SSEND0 || insn.plain_fixed_argc?))
+      shape = insn.op == :SSEND0 ? { n: 0, argv_reg: nil, kw: nil } : dyn_call_shape(insn)
+      return resumable_dyn_site('self', dest, shape[:n], 'mrb_nil_value()', name: insn.sym, splat_reg: shape[:argv_reg], kw: shape[:kw])
+    end
     argc = insn.op == :SSEND0 ? 0 : insn.argc
     args = (1..argc).map { |i| "r#{dest + i}" }
     resumable_call_lines(@resumable.new_state, insn.sym, target, dest, args).join("\n") + "\n"

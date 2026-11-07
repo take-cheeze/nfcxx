@@ -260,9 +260,7 @@ DRIVER_FULL = "#{DRIVER}#{driver_lines.join("\n")}\nputs 'end'\n"
 # Scenarios whose Fiber body cannot be a step yet: label => why. The output of the no-fiber build differs from the
 # interpreted run for these, and only these.
 KNOWN_GAPS = {
-  'nested ensure' => 'rescue/ensure around a yield is not a step yet',
-  'enumerator lazy nested' => 'Enumerator and Enumerator::Lazy need mruby-enumerator, which needs mruby-fiber',
-  'custom nested each' => 'the user each takes keyword arguments, which a suspendable method cannot'
+  'enumerator lazy nested' => 'Enumerator and Enumerator::Lazy need mruby-enumerator, which needs mruby-fiber'
 }.freeze
 
 OWNERS = %w[NativeFiberSource NativeFiberProbe Array Enumerable Hash Integer Float Range String].freeze

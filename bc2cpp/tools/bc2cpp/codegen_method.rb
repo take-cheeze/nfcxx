@@ -199,6 +199,19 @@ class CodeGen
     # mandatory_ok is false, whether or not the optional table resolved (the
     # KEY_P/KARG scan is whole-irep).
     kw_table = mandatory_ok ? nil : keyword_arg_table(irep)
+    # STEP_KEYWORDS: keywords next to a rest and/or block parameter. With optionals the rest shape must have resolved its
+    # jump table, else the method stays unsupported (the keywords would be dropped).
+    kw_rest_block = false
+    if !mandatory_ok && !kw_table && enter && enter.enter_fields[4].positive? &&
+       (enter.enter_fields[2].positive? || enter.enter_fields[6].positive?)
+      # Optionals before a block need their own jump table (optional_block_arg_table); with a rest it is opt_rest's.
+      block_table = enter.enter_fields[1].positive? && enter.enter_fields[2].zero? ? optional_block_arg_table(irep) : nil
+      if opt_rest || enter.enter_fields[1].zero? || block_table
+        kw_table = keyword_arg_table(irep, rest_block: true)
+        kw_rest_block = !kw_table.nil?
+        opt, opt_jmp_addrs, opt_jmp_targets = block_table if kw_rest_block && block_table
+      end
+    end
     # Each of `opt` (jump table) and `kw` must resolve or the whole method is
     # unsupported. Either failure also clears `opt_jmp_targets`, the flag
     # `supported` trusts; otherwise a recognized optional shape with an
@@ -207,6 +220,8 @@ class CodeGen
     if (opt.positive? && !opt_jmp_targets) || (enter_kw.positive? && !kw_table)
       opt_jmp_targets = nil
       kw_table = nil
+      kw_rest_block = false
+      opt_rest = false
     end
     # REST_ARG_SUPPORT: one more contiguous `total_args` slot (see
     # rest_only_arity?).
@@ -214,8 +229,12 @@ class CodeGen
     # method_missing(name, *args, &block)`); both are exclusive with
     # mandatory_ok/opt_jmp_targets/kw_table, whose predicates require rest and
     # block to be zero.
-    has_rest = opt_rest || ((mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep))
-    has_blk = opt_rest ? irep.enter.enter_fields[6].positive? : ((mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep))
+    has_rest = opt_rest || (kw_rest_block ? enter.enter_fields[2].positive? : ((mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)))
+    has_blk = if opt_rest || kw_rest_block
+                enter.enter_fields[6].positive?
+              else
+                (mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep)
+              end
     # OPTIONAL_REST keyword rest (`**kwd`): the keyword hash arrives in its own slot (MRB_ARGS_KEY(0, 1), the kdict bit), so
     # it is read from the callinfo, not from the positional arguments.
     kwrest_only = !mandatory_ok && !opt_jmp_targets && !kw_table && !opt_rest && keyword_rest_only_shape?(irep)
@@ -223,7 +242,7 @@ class CodeGen
     # CORE_BLOCK_OPT: optionals and `&blk` together (`any?(pattern = NONE, &block)`). The
     # block sits after the optionals (OP_ENTER blk_pos), so it is the same extra
     # parameter, ahead of `bc2cpp_given_opt`.
-    if !mandatory_ok && !opt_jmp_targets && !kw_table && (blk_table = optional_block_arg_table(irep))
+    if !mandatory_ok && !opt_jmp_targets && !kw_table && enter_kw.zero? && (blk_table = optional_block_arg_table(irep))
       opt, opt_jmp_addrs, opt_jmp_targets = blk_table
       has_blk = true
     end
@@ -237,6 +256,8 @@ class CodeGen
     supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk || kwrest_only
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) + (has_kwrest ? 1 : 0) : mand
+    # STEP_KEYWORDS: with keywords the keyword-hash slot sits between the arguments and the incoming block.
+    blk_slot = total_args + (kw_table ? 1 : 0)
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| c_param_name(n, i) }
     # NATIVE_ARGS per-position types (see native_arg_types). Optional
     # positions are never retyped; the padding is explicit.
@@ -320,6 +341,7 @@ class CodeGen
       @resumable.block = needs_blk_param || has_blk
       # OPTIONAL_ARGS: the optional count, when the jump table is recognised (the shape check refuses the rest).
       @resumable.optional = opt_jmp_targets ? opt : 0
+      @resumable.kw = kw_table
       step_body_start = out.length
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
@@ -340,7 +362,7 @@ class CodeGen
         type = arg_native_types[i]
         type ? "#{TYPE_OPS.fetch(type)[:box]}(#{arg})" : arg
       end
-      initial[total_args] = 'bc2cpp_blk' if has_blk
+      initial[blk_slot] = 'bc2cpp_blk' if has_blk
       out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
@@ -520,7 +542,7 @@ class CodeGen
     # BLKPUSH_YIELD_SUPPORT: set for this method's top-level loop only (cleared
     # after). emit_proc_fallback_fn manages its own value.
     # CORE_BLOCK_YIELD: with `&blk` declared, the BLKPUSH slot is that parameter's register.
-    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : (has_blk ? "r#{total_args + 1}" : nil)
+    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : (has_blk ? "r#{blk_slot + 1}" : nil)
     # BLOCK_FALLBACK_YIELD_SUPPORT: in a METHOD body only lv == 0 can be answered
     # (vm.c `if (lv == 0) stack = regs + 1`). codegen_yield stops at the first
     # method scope, so a method's own yield is always level 0.
@@ -697,12 +719,15 @@ class CodeGen
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << entry_return_line(label, d, impl_name, [])
-    elsif arg_names.empty? && (needs_blk_param || has_blk)
+    elsif arg_names.empty? && (needs_blk_param || has_blk) && !kw_rest_block
       # BLKPUSH_YIELD_SUPPORT/EXPLICIT_BLOCK_PARAM_SUPPORT with zero mandatory
       # arguments: a standalone mrb_get_args("&") call.
       out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
       out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
       out << entry_return_line(label, d, impl_name, 'bc2cpp_blk')
+    elsif kw_rest_block
+      out << keyword_rest_block_entry(label, d, impl_name, arg_names, arg_native_types, mand: mand, opt: opt, has_rest: has_rest,
+                                                           has_blk: has_blk || needs_blk_param, kw_table: kw_table)
     elsif kw_table
       # KEYWORD_ARG_SUPPORT: mrb_get_args ":" with mrb_kwargs (mruby.h). `required`
       # counts the leading required entries in `table`; an omitted optional keyword
@@ -1042,6 +1067,66 @@ class CodeGen
         "  mrb_value #{RegName[reg]} = #{init};\n"
       end
     end.join
+  end
+
+  # STEP_KEYWORDS: the registered wrapper of a method that takes keywords next to a rest and/or block parameter. One
+  # mrb_get_args call binds them all (`|o*:&`: `*` ends the positional scan and `:` is read as the keyword hash); an
+  # unknown or missing keyword raises there, as the KEY_P/KARG/KEYEND sequence expects. Parameter order matches
+  # arg_params: arguments, block, optionals given, then the keywords.
+  def keyword_rest_block_entry(label, d, impl_name, arg_names, arg_native_types, mand:, opt:, has_rest:, has_blk:, kw_table:)
+    out = String.new
+    mand_names = arg_names.first(mand)
+    opt_names = arg_names[mand, opt]
+    rest_name = has_rest ? arg_names[mand + opt] : nil
+    mand_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+    opt_names.each { |a| out << "  mrb_value #{a} = mrb_nil_value();\n" }
+    fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join
+    fmt += "|#{'o' * opt}" if opt.positive?
+    ptrs = (mand_names + opt_names).map { |a| "&#{a}" }
+    if has_rest
+      out << "  const mrb_value* bc2cpp_rest_ptr;\n  mrb_int bc2cpp_rest_len;\n"
+      fmt += '*'
+      ptrs.push('&bc2cpp_rest_ptr', '&bc2cpp_rest_len')
+    end
+    ordered_kws = kw_table.select { |kw| kw[:required] } + kw_table.reject { |kw| kw[:required] }
+    required_count = kw_table.count { |kw| kw[:required] }
+    table_entries = ordered_kws.map { |kw| "mrb_intern_cstr(M, \"#{kw[:name]}\")" }.join(', ')
+    out << "  mrb_sym bc2cpp_kw_table[#{ordered_kws.size}] = { #{table_entries} };\n"
+    out << "  mrb_value bc2cpp_kw_values[#{ordered_kws.size}];\n"
+    out << "  mrb_kwargs bc2cpp_kwargs = { #{ordered_kws.size}, #{required_count}, bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
+    fmt += ':'
+    ptrs << '&bc2cpp_kwargs'
+    if has_blk
+      out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
+      fmt += '&'
+      ptrs << '&bc2cpp_blk'
+    end
+    out << "  bc2cpp_check_argc_kw(M, #{mand}, #{has_rest ? -1 : mand + opt});\n"
+    out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs.join(', ')});\n"
+    out << "  mrb_value #{rest_name} = mrb_ary_new_from_values(M, bc2cpp_rest_len, bc2cpp_rest_ptr);\n" if has_rest
+    call_args = mand_names + opt_names
+    call_args << rest_name if has_rest
+    call_args << 'bc2cpp_blk' if has_blk
+    if opt.positive?
+      out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
+      out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
+      out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
+      call_args << 'bc2cpp_given_opt'
+    end
+    ordered_kws.each_with_index do |kw, i|
+      var = kwarg_param_name(kw[:name])
+      if kw[:required]
+        out << "  mrb_value #{var} = bc2cpp_kw_values[#{i}];\n"
+        call_args << var
+      else
+        given = kw_given_param_name(kw[:name])
+        out << "  mrb_value #{var} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? mrb_nil_value() : bc2cpp_kw_values[#{i}];\n"
+        out << "  mrb_int #{given} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
+        call_args.push(var, given)
+      end
+    end
+    out << entry_return_line(label, d, impl_name, call_args.join(', '))
+    out
   end
 
   # The stub compile_method returns for a Fiber.new root that turned out not to qualify.

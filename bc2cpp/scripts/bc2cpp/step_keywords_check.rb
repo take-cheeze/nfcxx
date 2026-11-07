@@ -1,0 +1,266 @@
+#!/usr/bin/env ruby
+# encoding: UTF-8
+# frozen_string_literal: true
+
+# STEP_KEYWORDS (tools/bc2cpp/codegen_method.rb keyword_rest_block_entry, codegen_resumable.rb resumable_dyn_kw_function,
+# runtime/bc2cpp_fiber_methods.hxx bc2cpp_dyn_bind_keywords): a method with keyword parameters, alone or next to optional,
+# rest and block parameters, is a step, and a call that carries keywords reaches it.
+#
+#   generated code (needs a host mrbc)
+#     - every method of the probe compiles as a step with a keyword dispatcher, and no #error is left;
+#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
+#     - the fiber bodies of a compiled probe class (nothing here is eval'd) print what the interpreted run prints: required
+#       and optional keywords, optional + keyword, rest + keyword, optional + rest + keyword + block, a keyword method that
+#       yields itself, calls by `send` and `public_send`, and the ArgumentErrors for a missing keyword, an unknown keyword
+#       and a wrong number of positional arguments.
+#
+# Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/step_keywords_check.rb
+
+require 'tmpdir'
+require_relative 'fixture_runtime'
+
+# The fixture is its own closed world: the repository signatures name classes it does not define.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
+failures = []
+check = lambda do |what, condition|
+  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
+  failures << what unless condition
+end
+
+unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
+  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
+  exit 0
+end
+
+# Every scenario is a method returning the Fiber to run, so the bodies, the methods they call and their blocks are compiled.
+SRC = <<~'RUBY'
+  class StepKw
+    # Each method yields its bound parameters, then calls its block when it has one (a block that suspends is a step too).
+    def kw_req(a, k:, &blk)
+      Fiber.yield [a, k]
+      blk.call(:blk) if blk
+      :req_done
+    end
+
+    def kw_opt(a, k: 10, j: 20, &blk)
+      Fiber.yield [a, k, j]
+      blk.call(:blk) if blk
+      :opt_done
+    end
+
+    def opt_kw(a, b = 2, k: 3, &blk)
+      Fiber.yield [a, b, k]
+      blk.call(:blk) if blk
+      :opt_kw_done
+    end
+
+    def rest_kw(*rest, k: 1, &blk)
+      Fiber.yield [rest, k]
+      blk.call(:blk) if blk
+      :rest_kw_done
+    end
+
+    def opt_rest_kw(a = 1, *rest, k: 2, &blk)
+      Fiber.yield [a, rest, k]
+      blk.call(:blk) if blk
+      :orkb_done
+    end
+
+    def mixed(a, b = 5, *rest, x:, y: 6, &blk)
+      Fiber.yield [a, b, rest, x, y]
+      blk.call(:blk) if blk
+      :mixed_done
+    end
+
+    def kw_only(step: 1)
+      Fiber.yield step
+      step + 1
+    end
+
+    # Calls by name: the call carries keywords (or none), with no literal block (a block cannot go with keywords).
+    def required_keyword
+      Fiber.new { [kw_req(1, k: 2), :after] }
+    end
+
+    def optional_keywords
+      Fiber.new { [kw_opt(1), kw_opt(1, j: 3), kw_opt(1, j: 3, k: 4)] }
+    end
+
+    def optional_and_keyword
+      Fiber.new { [opt_kw(1), opt_kw(1, 9), opt_kw(1, k: 7), opt_kw(1, 9, k: 7)] }
+    end
+
+    def rest_and_keyword
+      Fiber.new { [rest_kw, rest_kw(1, 2, 3), rest_kw(1, k: 5)] }
+    end
+
+    def optional_rest_keyword
+      Fiber.new { [opt_rest_kw, opt_rest_kw(5), opt_rest_kw(5, 6, 7, k: 8)] }
+    end
+
+    def mixed_shape
+      Fiber.new { [mixed(1, x: 2), mixed(1, 2, 3, 4, y: 5, x: 6)] }
+    end
+
+    def keyword_only
+      Fiber.new { [kw_only, kw_only(step: 5)] }
+    end
+
+    # A literal block and no keywords: the defaults of every keyword shape.
+    def with_block
+      Fiber.new do
+        [kw_opt(1) { |x| Fiber.yield [:blk, x] }, opt_kw(1) { |x| Fiber.yield [:blk, x] },
+         rest_kw { |x| Fiber.yield [:blk, x] }, opt_rest_kw(2, 3) { |x| Fiber.yield [:blk, x] }]
+      end
+    end
+
+    def by_send
+      Fiber.new do
+        [send(:kw_req, 1, k: 2), public_send(:opt_rest_kw, 3, 4, k: 5), __send__(:kw_opt, 7), send(:kw_only, step: 3)]
+      end
+    end
+
+    def by_splat
+      opts = { j: 30 }
+      Fiber.new { [send(:kw_opt, 1, **opts), kw_opt(2, **opts)] }
+    end
+
+    def missing_keyword
+      Fiber.new { kw_req(1) }
+    end
+
+    def unknown_keyword
+      Fiber.new { kw_req(1, k: 2, z: 3) }
+    end
+
+    def missing_by_send
+      Fiber.new { send(:kw_req, 1) }
+    end
+
+    def unknown_by_send
+      Fiber.new { send(:kw_opt, 1, z: 3) }
+    end
+
+    def too_few
+      Fiber.new { kw_req(k: 2) }
+    end
+
+    def too_many
+      Fiber.new { opt_kw(1, 2, 3, k: 4) }
+    end
+
+    def too_few_by_send
+      Fiber.new { send(:mixed, x: 1) }
+    end
+  end
+RUBY
+
+OWNERS = %w[StepKw].freeze
+
+baseline_dir = Dir.mktmpdir('bc2cpp-step-keywords')
+at_exit { FileUtils.remove_entry(baseline_dir) }
+puts '-- generated code'
+code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS)
+%w[kw_req kw_opt opt_kw rest_kw opt_rest_kw mixed kw_only].each do |name|
+  check.call("StepKw##{name} is a step with a keyword dispatcher", code.include?("static mrb_value StepKw_#{name}_step(mrb_state* M") &&
+                                                                     code.include?("StepKw_#{name}_impl_dyn_reg = (bc2cpp_dyn_register_kw("))
+end
+check.call('no #error in the generated code', !code.include?('#error'))
+check.call('no method stays interpreted', !baseline_err.include?('stays interpreted'))
+
+DRIVER = <<~'RUBY'
+  def show(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue StandardError => e
+    puts "#{label}: raised #{e.class}: #{e.message}"
+  end
+
+  def drain(f)
+    out = []
+    while f.alive?
+      out << f.resume
+      GC.start
+    end
+    out
+  end
+
+  o = StepKw.new
+  show('required keyword') { drain(o.required_keyword) }
+  show('optional keywords') { drain(o.optional_keywords) }
+  show('optional and keyword') { drain(o.optional_and_keyword) }
+  show('rest and keyword') { drain(o.rest_and_keyword) }
+  show('optional rest keyword') { drain(o.optional_rest_keyword) }
+  show('mixed shape') { drain(o.mixed_shape) }
+  show('keyword only') { drain(o.keyword_only) }
+  show('with block') { drain(o.with_block) }
+  show('by send') { drain(o.by_send) }
+  show('by splat') { drain(o.by_splat) }
+  show('missing keyword') { drain(o.missing_keyword) }
+  show('unknown keyword') { drain(o.unknown_keyword) }
+  show('missing by send') { drain(o.missing_by_send) }
+  show('unknown by send') { drain(o.unknown_by_send) }
+  show('too few') { drain(o.too_few) }
+  show('too many') { drain(o.too_many) }
+  show('too few by send') { drain(o.too_few_by_send) }
+  puts 'end'
+RUBY
+
+if ENV['CC_GENERATED_ONLY'] == '1'
+  puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'
+else
+  build = Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
+  else
+    puts '-- fixtures on real mruby, interpreted and compiled'
+    body = <<~CPP
+      static int scenario(mrb_state* M) {
+        std::fflush(stdout);
+        const char* src = R"RBC(#{DRIVER})RBC";
+        mrb_load_string(M, src);
+        std::fflush(stdout);
+        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, OWNERS, body, build: build, full: true)
+    check.call('the fixtures build and run', built)
+    sections = Bc2cppFixtureRuntime.sections(output)
+    interpreted = sections['interpreted']
+    compiled = sections['compiled']
+    check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
+    check.call('interpreted and compiled runs print the same', interpreted == compiled)
+    # What Ruby prints, so a probe that stopped exercising a shape fails here and not by agreeing on a different line.
+    expected = {
+      'required keyword' => 'required keyword: [[1, 2], [:req_done, :after]]',
+      'optional keywords' => 'optional keywords: [[1, 10, 20], [1, 10, 3], [1, 4, 3], [:opt_done, :opt_done, :opt_done]]',
+      'optional and keyword' => 'optional and keyword: [[1, 2, 3], [1, 9, 3], [1, 2, 7], [1, 9, 7], ' \
+                                '[:opt_kw_done, :opt_kw_done, :opt_kw_done, :opt_kw_done]]',
+      'rest and keyword' => 'rest and keyword: [[[], 1], [[1, 2, 3], 1], [[1], 5], [:rest_kw_done, :rest_kw_done, :rest_kw_done]]',
+      'optional rest keyword' => 'optional rest keyword: [[1, [], 2], [5, [], 2], [5, [6, 7], 8], ' \
+                                 '[:orkb_done, :orkb_done, :orkb_done]]',
+      'keyword only' => 'keyword only: [1, 5, [2, 6]]',
+      'missing keyword' => 'missing keyword: raised ArgumentError: missing keyword: k',
+      'unknown keyword' => 'unknown keyword: raised ArgumentError: unknown keyword: z',
+      'missing by send' => 'missing by send: raised ArgumentError: missing keyword: k',
+      'unknown by send' => 'unknown by send: raised ArgumentError: unknown keyword: z'
+    }
+    expected.each do |label, line|
+      ok = interpreted&.include?(line)
+      check.call("#{label} prints what Ruby does", ok)
+      puts "    interpreted: #{interpreted&.find { |l| l.start_with?("#{label}: ") }}" unless ok
+    end
+    if interpreted && compiled
+      interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+    end
+    puts output.lines.last(30).join unless built && interpreted && compiled
+  end
+end
+
+if failures.empty?
+  puts 'bc2cpp step keywords check: PASS'
+else
+  warn "bc2cpp step keywords check: #{failures.size} failure(s)"
+  exit 1
+end

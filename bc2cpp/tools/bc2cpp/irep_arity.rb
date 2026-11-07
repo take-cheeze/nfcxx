@@ -353,7 +353,10 @@ def optional_rest_arg_table(irep)
   return nil unless enter
 
   _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
-  return nil unless opt.positive? && rest.positive? && mand2.zero? && kw.zero? && kwrest <= 1 && block <= 1
+  # STEP_KEYWORDS: named keywords may follow (`def f(a = 1, *rest, k: 2)`); compile_method resolves them with
+  # keyword_arg_table(rest_block: true), and a keyword rest next to them stays unsupported.
+  return nil unless opt.positive? && rest.positive? && mand2.zero? && kwrest <= 1 && block <= 1
+  return nil if kw.positive? && kwrest.positive?
 
   jmps = instruction_run(irep, irep.enter_index + 1, opt + 1)
   return nil unless jmps && jmps.all? { |i| i.op == :JMP }
@@ -384,7 +387,8 @@ def optional_block_arg_table(irep)
   return nil unless enter
 
   _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
-  return nil unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.positive?
+  # STEP_KEYWORDS: named keywords may follow (`def f(a, b = 1, k: 2, &blk)`), resolved by keyword_arg_table(rest_block: true).
+  return nil unless opt.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.positive?
 
   jmps = instruction_run(irep, irep.enter_index + 1, opt + 1)
   return nil unless jmps && jmps.all? { |i| i.op == :JMP }
@@ -420,7 +424,7 @@ def keyword_rest_only_shape?(irep)
   kwrest.positive? && opt.zero? && rest.zero? && mand2.zero? && kw.zero? && block.zero?
 end
 
-def keyword_arg_table(irep)
+def keyword_arg_table(irep, rest_block: false)
   enter = irep.enter
   return nil unless enter
 
@@ -428,7 +432,9 @@ def keyword_arg_table(irep)
   _mand, _opt, rest, mand2, kw, kwrest, block = fields
   # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `opt` may be non-zero (see
   # optional_arg_table); this scan already covers the whole irep.
-  return nil unless kw.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
+  # STEP_KEYWORDS: `rest_block` also takes a rest and/or a block parameter next to the keywords; only compile_method
+  # asks, because the direct-call builders do not pass them.
+  return nil unless kw.positive? && mand2.zero? && kwrest.zero? && (rest_block || (rest.zero? && block.zero?))
 
   order = []
   required = {}

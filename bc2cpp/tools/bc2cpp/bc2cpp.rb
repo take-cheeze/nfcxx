@@ -1836,6 +1836,15 @@ if $PROGRAM_NAME == __FILE__
       mrb_int argc = mrb_get_argc(M);
       if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);
     }
+    // STEP_KEYWORDS: the same check for a method that takes keywords, whose keyword Hash is never a positional argument.
+    // vm.c argnum_error counts a lone keyword Hash as the one argument given.
+    static inline void bc2cpp_check_argc_kw(mrb_state* M, mrb_int min, mrb_int max) {
+      mrb_int argc = mrb_get_argc(M);
+      if (argc >= min && (max < 0 || argc <= max)) return;
+      mrb_callinfo* ci = M->c->ci;
+      if (argc == 0 && ci->nk != 0 && mrb_hash_p(ci->stack[1]) && !mrb_hash_empty_p(M, ci->stack[1])) argc++;
+      mrb_argnum_error(M, argc, min, min);
+    }
     // DECLARED_RETURN_GUARD (ADR 0455): a method with a runtime-checked return declaration (%a{bc2cpp:hint})
     // returned a value of another type. The analysis trusted the declaration as a fact, so this is a hard error:
     // log, then raise BC2cppHintViolation < NoMethodError, as a strict-hint violation does. Never dispatches.
