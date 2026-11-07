@@ -59,8 +59,6 @@ class CodeGen
       blocks: blocks.size, blocks_free: blocks.values.count(true),
       arm_sites: arms.size, arm_sites_free: arms.values.count { |v| v[:block_free] },
       arms: arms.values.sum { |v| v[:arms].size }, arms_unguarded: arms.values.sum { |v| v[:unguarded].size },
-      guarded_core: (self.class.core_guarded || []).size,
-      guarded_core_relaxable: (self.class.core_guarded || []).count { |l| core_body_relaxable?(l) },
       unsafe_methods: @fiber_unsafe_methods.size }
   end
 end

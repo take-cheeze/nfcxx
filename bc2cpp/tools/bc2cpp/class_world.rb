@@ -5,11 +5,8 @@
 # order), its singleton class's chain, whether a subclass exists, whether more than one body opens it, and which of
 # those bodies a load can evaluate statically (ClassBodyScan's COMPILABLE statements) and which keep bytecode.
 #
-# This is a fact file, not an input to code generation: nothing in bc2cpp reads it yet. scripts/bc2cpp/class_body_check.rb
-# compares it with the graph the interpreted load builds, so the day a dispatch decision consumes it, "exact" is
-# something a test has already held to. A class is exact when every statement of every body that opens it, and of
-# every ancestor's, is one this file models. A computed constant PureEval folds to data is modeled as a constant (the
-# same decision LoadCompile makes); a superclass that is a C-defined core class (NATIVE) is known. Anything else (a DSL
+# This is a fact file, not an input to code generation: nothing in bc2cpp reads it yet. A class is exact when every statement of every body that opens it, and of
+# every ancestor's, is one this file models. A computed constant PureEval folds to data is modeled as a constant; a superclass that is a C-defined core class (NATIVE) is known. Anything else (a DSL
 # call, `extend self`, a `Class.new` with a computed superclass, `X.include(Y)` inside a method, a lambda constant) makes
 # it unknown, with the reason named, and unknown spreads to the
 # classes that inherit from it.
@@ -63,14 +60,6 @@ module ClassWorld
   # a subclass of anything.
   World = Struct.new(:classes, :unknown_sites, :subclass_unknown, :facts, keyword_init: true)
 
-  # The class world of a build from its load world (BC2CPP_LOAD_WORLD, JSON {gem symbol => [mrblib files]}), the
-  # gems in that order. Nil without one. Shared by the stub proof and the load plan, so both read one graph.
-  def from_load_world(json)
-    return nil unless json
-
-    build_files(JSON.parse(json).values)
-  end
-
   # build over ClassBodyScan.scan of each group of files (`groups`: [[file, ...], ...] in load order), kept in the
   # scan cache. The World holds only names, lines and labels, and is a function of the files' bytes, how they are
   # grouped, the Prism version and the Ruby that PureEval folds under (docs/bc2cpp-prism-reader-cache.md).
@@ -118,6 +107,24 @@ module ClassWorld
 
   def lexical_scope(body) = body.path.sub(/\.singleton\z/, '')
 
+  # ALIAS_BLOCK: a block whose only work is alias_method calls (mruby-onig-regexp's `%i[sub gsub].each { alias_method
+  # ... }`) changes one class's method table, never its ancestors, so it does not make the class inexact. Anything else in
+  # the block (an include, a send, a def) keeps it a blocker.
+  def alias_only_block?(node)
+    return false unless node.is_a?(Prism::CallNode) && node.block.is_a?(Prism::BlockNode)
+
+    stmts = node.block.body.is_a?(Prism::StatementsNode) ? node.block.body.body : []
+    !stmts.empty? && stmts.all? { |st| alias_call?(st) || guarded_alias?(st) }
+  end
+
+  def alias_call?(st) = st.is_a?(Prism::CallNode) && st.name.to_s == 'alias_method' && st.receiver.nil?
+
+  # `alias_method ... if method_defined?(v)` (a modifier if around the alias).
+  def guarded_alias?(st)
+    st.is_a?(Prism::IfNode) && st.predicate.is_a?(Prism::CallNode) && st.predicate.name.to_s == 'method_defined?' &&
+      st.statements&.body&.all? { |b| alias_call?(b) } && !st.statements.body.empty?
+  end
+
   def walk_body(body, world, defined, target = nil, entry = nil)
     scope = lexical_scope(body)
     case body.kind
@@ -126,8 +133,8 @@ module ClassWorld
     end
     body.statements.each_with_index do |stmt, index|
       # A statement the compiler does not take keeps this body (and `class << self` inside it) as bytecode, unless
-      # PureEval folds it: a computed constant that is data at build time is compiled as a constant (LoadCompile).
-      if entry && !ClassBodyScan::COMPILABLE.include?(stmt.category)
+      # PureEval folds it: a computed constant that is data at build time is compiled as a constant .
+      if entry && !ClassBodyScan::COMPILABLE.include?(stmt.category) && !alias_only_block?(stmt.node)
         if (folded = folded_constant(body, index))
           entry[:folded] << folded
         else
@@ -143,7 +150,7 @@ module ClassWorld
   end
 
   # The label of statement `index` of `body` when it is a computed constant PureEval folds (the same decision as
-  # LoadCompile's, with the same `frozen_string_literal` reading), else nil. A folded value is data, so it cannot
+  # PureEval's, with the same `frozen_string_literal` reading), else nil. A folded value is data, so it cannot
   # change the class graph; the statement is then static like a literal constant.
   def folded_constant(body, index)
     stmt = body.statements[index]

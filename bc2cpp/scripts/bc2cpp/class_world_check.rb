@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Checks tools/bc2cpp/class_world.rb on what makes a class exact:
-#   folded   a computed constant PureEval folds (data built from literals) is static, as LoadCompile compiles it; it is
+#   folded   a computed constant PureEval folds (data built from literals) is static, as the class-body compiler compiles it; it is
 #            listed under `folded` and is not a blocker
 #   lazy     literal-data lambdas are native data factories and leave no class-body blocker
 #   core     RuntimeError is C-defined under StandardError (3rd/mruby/src/error.c): a class under it is exact when its

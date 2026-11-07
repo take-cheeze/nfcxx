@@ -68,7 +68,7 @@ module NativeCoreResultSigsCases
 
     audited_super = {
       'BasicObject' => nil, 'Object' => 'BasicObject', 'Module' => 'Object', 'Class' => 'Module',
-      'NilClass' => 'Object', 'TrueClass' => 'Object', 'FalseClass' => 'Object', 'Numeric' => 'Object',
+      'NilClass' => 'Object', 'TrueClass' => 'Object', 'FalseClass' => 'Object', 'Fiber' => 'Object', 'Numeric' => 'Object',
       'Integer' => 'Numeric', 'Float' => 'Numeric', 'String' => 'Object', 'Symbol' => 'Object',
       'Array' => 'Object', 'Hash' => 'Object', 'Range' => 'Object', 'Proc' => 'Object',
       'Exception' => 'Object', 'StandardError' => 'Exception', 'Struct' => 'Object', 'IO' => 'Object',

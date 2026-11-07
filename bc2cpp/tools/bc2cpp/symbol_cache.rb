@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'set'
 require_relative 'branch_hints'
 
 # SYMBOL_CACHE: generated C++ used to spell every ivar/constant/method name and
@@ -87,7 +88,25 @@ module SymbolCache
   end
 
   def rewrite_interns(code, table)
-    code.gsub(INTERN) { "bc2cpp_sym(M, #{table.index_for(Regexp.last_match(1))})" }
+    code.gsub(INTERN) do
+      literal = Regexp.last_match(1)
+      presym = presym_constant(literal)
+      presym ? "MRB_SYM(#{presym})" : "bc2cpp_sym(M, #{table.index_for(literal)})"
+    end
+  end
+
+  # PRESYM_SYMBOL: a plain identifier that mruby's presym table already names is the compile-time symbol MRB_SYM(name),
+  # so it needs no table slot or cache. The table is the build's include/mruby/presym/id.h (BC2CPP_PRESYM_HEADER,
+  # set by closed_build.bash); without it every name keeps the table.
+  class << self
+    attr_writer :presym_names
+
+    def presym_names = @presym_names || Set.new
+  end
+
+  def presym_constant(literal)
+    name = literal[1...-1]
+    name if name.match?(/\A[A-Za-z_]\w*\z/) && SymbolCache.presym_names.include?(name)
   end
 
   # `mrb_funcall(M, RECV, "name", N, ...)` -> `bc2cpp_send(M, RECV, i, N, ...)`. RECV is an arbitrary C++ expression, so the
@@ -259,7 +278,7 @@ module SymbolCache
       }
       #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? owner_call_source : ''}
       #{table.nomethod_used ? NOMETHOD : ''}
-      #{table.violation_used ? GUARD_VIOLATION : ''}#{table.hint_violation_used ? HINT_VIOLATION : ''}
+      #{GUARD_VIOLATION}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
     CPP
   end
@@ -599,7 +618,11 @@ module SymbolCache
       bool seen = false;
       for (int k = 0; k < s.seen_count; ++k) seen = seen || s.seen[k] == owner;
       if (!seen) {
-        if (!bc2cpp_owner_listed(M, owner, s.names)) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
+        if (!bc2cpp_owner_listed(M, owner, s.names)
+    #ifdef BC2CPP_FIBER_RUNTIME
+            && !bc2cpp_fiber_definer_p(m)
+    #endif
+        ) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
         if (s.seen_count < 32) s.seen[s.seen_count++] = owner;
       }
       if (level >= 2) {

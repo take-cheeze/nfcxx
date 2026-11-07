@@ -38,8 +38,10 @@ class CodeGen
   # KEYWORD_CALLSITE_SUPPORT: the shared tail of compile_keyword_send (MONO
   # resolution, keyword/arity checks, `_impl` call), reused by compile_splat_send
   # for unrolled splat register lists. argv/kw_val_exprs are C++ expressions.
+  # splat: a C++ expression for a `**h` Hash (KEYWORD_SPLAT_STATIC). Then the keywords are the callee's own, each read
+  # from the hash at run time, and the hash's keys are checked against them.
   def compile_keyword_call(name:, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:,
-                           self_implicit: false, owner_def: nil, constant_target: nil)
+                           self_implicit: false, owner_def: nil, constant_target: nil, splat: nil)
     # MONO only, no TYPED: the guard's else branch would need a dynamic keyword
     # dispatch, which mrb_funcall cannot express. MONO needs no guard.
     # CONSTANT_OBJECT_KEYWORD: a constant_target (constant_object_keyword_target) is the definition the receiver's
@@ -61,10 +63,13 @@ class CodeGen
     # checks below.
     callee_irep = @ireps.fetch(target.irep)
     # KEYWORD_REST_ONLY: a callee with only `**opts` takes the literal pairs as one fresh Hash (see keyword_rest_call).
+    # A `**h` site has no static list of keys to hand that Hash, so such a callee stays `#error`.
+    return nil if splat && keyword_rest_only_shape?(callee_irep)
     return keyword_rest_call(target, callee_irep, d: d, recv: recv, n: n, argv: argv, kw_names: kw_names,
                              kw_val_exprs: kw_val_exprs, lexical_self: lexical_self) if keyword_rest_only_shape?(callee_irep)
     kw_table = keyword_arg_table(callee_irep)
     return nil unless kw_table
+    kw_names = kw_table.map { |k| k[:name].to_s } if splat
     # KEYWORD_CALLSITE_OPTIONAL_POSITIONAL_SUPPORT: the callee's positional arity
     # is [mand, mand + opt]; with opt 0 this is the old exact match.
     # Sound per vm.c OP_ENTER with kd set: OP_SEND packs the nk pairs into one Hash
@@ -103,6 +108,12 @@ class CodeGen
     # A required keyword is never absent here (refused above), so the
     # "not passed" arm applies only to optional keywords.
     kw_args = kw_table.flat_map do |kw|
+      if splat
+        key = c_string_literal(kw[:name].to_s)
+        req = kw[:required] ? 'true' : 'false'
+        val = "bc2cpp_kwsplat_value(M, bc2cpp_kwd, #{key}, #{req})"
+        next kw[:required] ? [val] : [val, "bc2cpp_kwsplat_has(M, bc2cpp_kwd, #{key})"]
+      end
       ci = kw_names.index(kw[:name])
       val = ci ? kw_val_exprs[ci] : 'mrb_nil_value()'
       kw[:required] ? [val] : [val, ci ? '1' : '0']
@@ -139,7 +150,16 @@ class CodeGen
       else
         "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
       end
-    "#{note}  #{call}\n"
+    return "#{note}  #{call}\n" unless splat
+
+    # The hash is converted once, and every key must be one the callee declares (an unknown key is the ArgumentError
+    # the interpreter raises).
+    names = kw_table.map { |k| c_string_literal(k[:name].to_s) }
+    check_names = names.empty? ? 'nullptr' : 'bc2cpp_kwsplat_names'
+    decl = names.empty? ? '' : "    const char* const bc2cpp_kwsplat_names[] = {#{names.join(', ')}};\n"
+    "  {\n    mrb_value bc2cpp_kwd = bc2cpp_kwsplat_hash(M, #{splat});\n#{decl}" \
+      "    bc2cpp_kwsplat_check(M, bc2cpp_kwd, #{check_names}, #{names.size});\n" \
+      "#{note}  #{call}\n  }\n"
   end
 
   # KEYWORD_REST_ONLY: a keyword send to a callee whose only keyword parameter is `**opts`. The literal pairs become one

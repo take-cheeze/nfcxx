@@ -142,7 +142,7 @@ module StaticDispatchRegistrations
   # fallback raises NoMethodError. Refuse the name while the closed world's
   # bytecode holds such a send, so a regression fails safe (tables intact)
   # instead of shipping the raise. The loader's own routes are downstream of
-  # the same sources (LoadCompile.tableless_call handles exactly the helper
+  # the same sources (the class-body loader's tableless sends handle exactly the helper
   # arities), so engine sources without such sends have no other path to one.
   def index_send_shaped?(ireps, name)
     ireps.each_value do |irep|
@@ -1204,7 +1204,6 @@ module StaticDispatchRegistrations
     registries.each { |reg| reg.each { |name, defs| defs.each { |d| count["#{d.owner}##{name}"] += 1 if d.irep || d.kind } } }
     strip = CorePrivateRuby.method(:strip_not_lookups)
     blind, = CoreNativeCandidates.reachable(ireps, native, generated, core: core, strip: strip)
-    refused = CoreMethods.load_refused
     shape = /\A(?:[a-z_][A-Za-z0-9_]*[?!=]?|`)\z/
     usable = lambda do |key|
       name = key.split('#', 2).last
@@ -1218,7 +1217,7 @@ module StaticDispatchRegistrations
         defs.each do |d|
           next unless d.irep && CoreDefs.core_source?(file[:ireps].fetch(d.irep).file)
 
-          reason = CoreMethods.exclusion_reason(d, file[:ireps], refused, conditional)
+          reason = CoreMethods.exclusion_reason(d, file[:ireps], conditional)
           reasons["#{d.owner}##{name}"] ||= reason if reason
         end
       end

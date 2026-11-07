@@ -4,24 +4,20 @@ require 'set'
 require_relative 'native_sigs'
 require_relative 'rbs_parse_memo'
 
-# DECLARED_RETURN_CHECK: the RBS return declarations a body is checked against.
+# DECLARED_RETURN_CHECK: the RBS return declarations the compiler trusts.
 #
 # A return declaration `-> Integer`, `-> Array`, `-> Array[C]`, `-> C` or `-> C?` (C a class the program defines) is a
-# claim about every return path of ONE definition. CodeGen#check_declared_returns (codegen_declared_returns.rb) verifies
-# each path with the tracing the return proofs use; a declaration that passes adds the fact the fixpoint proofs
-# produce (FIXNUM_RETURN_PROOF, ARRAY_RETURN_PROOF, the class return fixpoint), and one that fails is a TC1010 error and
-# a build abort. This file only turns loaded signatures into entries (no bytecode is read here).
+# fact about ONE definition, checked at run time by its compiled body (codegen_declared_returns.rb). This file only
+# turns loaded signatures into entries (no bytecode is read here).
 #
-# Kinds (anything else keeps its previous role: an IR contract or a guarded seed, never a proof fact):
-#   :fixnum   `Integer`             every path is a proven Fixnum (the proof is Fixnum-exact; Integer is not enough)
-#   :array    `Array`, `Array[T]`   every path is an Array; an element class stays the guarded seed it was
-#   :class    `C`, `C?`             every path is an instance of exactly C (`C?`: or nil)
+# Kinds (anything else keeps its previous role: an IR contract or a guarded seed, never a fact):
+#   :fixnum   `Integer`             a Fixnum (Integer is not enough)
+#   :array    `Array`, `Array[T]`   an Array; an element class stays the guarded seed it was
+#   :class    `C`, `C?`             an instance of exactly C (`C?`: or nil)
 #
-# `%a{bc2cpp:hint}` marks a RUNTIME-CHECKED declaration: a body the static check
-# cannot prove (a Hash read, an attr_reader, a database row) is compiled with a check of the returned value
-# (codegen_declared_returns.rb, declared_return_guard_wrap) that raises BC2cppHintViolation on a mismatch. The
-# declaration is then a fact like a statically checked one. A hinted declaration no compiled body can carry is a
-# located TC1010 error (hint_refusals), never an unchecked hint.
+# `%a{bc2cpp:hint}` marks a declaration whose check is always compiled, even where the return proofs prove it, and
+# admits the further kinds in GUARD_ONLY_KINDS. A hinted declaration no compiled body can carry is a located TC1010
+# error (hint_refusals), never an unchecked hint.
 module DeclaredReturns
   Entry = Struct.new(:owner, :name, :label, :kind, :cls, :nilable, :text, :loc, :hint, keyword_init: true) do
     def key = "#{owner}##{name}"
@@ -40,6 +36,12 @@ module DeclaredReturns
 
   def enabled?
     ENV[KILL_ENV] != '0'
+  end
+
+  # A plain declaration is trusted as written, so its compiled body checks it at run time (BC2CPP_DECLARATION_GUARD=0
+  # drops that check; %a{bc2cpp:hint} declarations keep theirs).
+  def guard?
+    ENV['BC2CPP_DECLARATION_GUARD'] != '0'
   end
 
   # [kind, class, nilable] for an RBS return type, or nil when the type is not a checked kind.
@@ -159,6 +161,7 @@ module DeclaredReturns
 
   # [owner, name] of the method declarations annotated %a{bc2cpp:hint} (owners as RbsSignatures keys them).
   def hinted_methods(files)
+    require 'pathname'
     require 'rbs'
     out = Set.new
     walk = lambda do |decls, scope|
@@ -233,10 +236,8 @@ module DeclaredReturns
     entries.each { |line| warn line }
     diags.each { |d| warn "  #{d[:file]}:#{d[:line]}:#{d[:col]}: #{d[:severity]}: #{d[:message]} [#{d[:code]}]" }
     sig_applied&.diagnostics&.concat(diags.map { |d| RbsSignatures::Diag.new(**d) })
+    # A return declaration that does not hold is not trusted (its return stays any): reported, not fatal.
     errors = diags.count { |d| d[:severity] == 'error' }
-    return unless errors.positive? && abort_on_error
-
-    abort "\n[bc2cpp] DECLARED_RETURN_CHECK: #{errors} return path(s) do not prove their declaration (see above). " \
-          'Fix the declaration, or the code it claims to describe.'
+    warn "[bc2cpp] DECLARED_RETURN_CHECK: #{errors} return path(s) do not prove their declaration; kept untrusted" if errors.positive?
   end
 end

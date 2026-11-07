@@ -47,7 +47,8 @@ Dir.mktmpdir('bc2cpp-super-lookup') do |dir|
               code.include?('mrb_value SlErr_initialize_impl(mrb_state* M') &&
               code.include?('mrb_value SlArr_initialize_impl(mrb_state* M') &&
               code.include?('bc2cpp_exc_init(M, self, ') &&
-              code.scan(/bc2cpp_super_call\(M, self, /).size == 1)
+              # The fixture's own site passes two arguments; core methods with a zero-argument super (Range#max) compile too.
+              code.scan(/bc2cpp_super_call\(M, self, [^;]*, 2, bc2cpp_super_argv, /).size == 1)
   suite.check('the arguments are passed in order', code.include?('bc2cpp_super_argv[] = {r4, r5};'))
   suite.check('a literal block keeps the #error', !code.include?('mrb_value SlLit_initialize_impl(mrb_state* M'))
 

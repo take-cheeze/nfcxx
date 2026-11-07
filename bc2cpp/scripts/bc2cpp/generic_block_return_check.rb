@@ -12,8 +12,9 @@
 #            generic declaration proves a call's class (RETURN_CLASS_TABLE), natively (RGSS::Profiler.section/frame)
 #            and in Ruby (a program method, tap, then, yield_self), through nested blocks; the block's self is the
 #            caller's (BLOCK_SELF, through RBS_CHECKED_PARAMS); refused sites (a breaking block, an undeclared second
-#            definition, an optional block) prove nothing; false declarations, Ruby and native, fail the build with
-#            TC1010 (DECLARED_RETURN_CHECK).
+#            definition, an optional block) prove nothing; false block declarations, Ruby and native, are TC1010
+#            errors and are not trusted; a false `-> C` on a block-taking method is trusted and raises
+#            BC2cppDeclarationViolation when the compiled method returns (the interpreter returns the value).
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/generic_block_return_check.rb   (without MRBC only the host half runs)
 
@@ -28,6 +29,7 @@ require_relative '../../tools/bc2cpp/block_returns'
 require_relative '../../tools/bc2cpp/native_sigs'
 require_relative '../../tools/bc2cpp/rbs_signatures'
 require_relative '../../tools/bc2cpp/closed_world_env'
+require_relative 'fixture_runtime'
 
 ROOT = File.expand_path('../..', __dir__)
 failures = []
@@ -344,14 +346,103 @@ check.call('BLOCK_SELF and RBS_CHECKED_PARAMS: self in a section block, and sect
            status.success? && !err.include?('TC1013'))
 
 _out, err, status = generate.call(BAD_WORLD, BAD_SIGS, native_sigs: BAD_NATIVE_SIGS, native: BAD_NATIVE)
-check.call('false declarations fail the build (DECLARED_RETURN_CHECK)',
-           !status.success? && err.include?('[bc2cpp] DECLARED_RETURN_CHECK'))
+check.call('false block declarations are reported and not trusted (DECLARED_RETURN_CHECK)',
+           err.include?('[bc2cpp] DECLARED_RETURN_CHECK: 5 return path(s) do not prove their declaration; kept untrusted'))
 { 'GbBad#gb_bad_nil' => 'RETNIL', 'GbBad#gb_bad_arity' => 'yields 2', 'GbBad#gb_bad_self' => 'not self',
   'GbBad#gb_bad_rescue' => 'RESCUE', 'GbNative.singleton#gb_native_wrap' => 'return self' }.each do |key, why|
   line = err.lines.find { |l| l.include?("error: #{key}:") && l.include?('[TC1010]') }
   check.call("#{key}: a TC1010 error (#{why})", line.to_s.include?(why))
 end
 check.call('a true declaration next to them is still checked', err.include?('BLOCK_RET GbBad#gb_bad_ok { () -> T } -> T: checked, block_value'))
+
+# Run time: a false `[T]` block declaration is not trusted, so the call keeps its dispatch and fails as in the
+# interpreter (`label` has two definers, so no unique-name direct call hides the nil). A false `-> Thing` on a method
+# with a block is trusted, so the compiled method raises where the interpreter returns an Other; so does a false
+# parameter class, on entry.
+PARITY_WORLD = <<~'RUBY'
+  class Thing
+    def label; 'thing'; end
+  end
+  class Other
+    def label; 'other'; end
+  end
+  class GbBad
+    def gb_bad_nil; yield; nil; end
+    def gb_good_ret; yield; Thing.new; end
+    def gb_wrong_ret; yield; Other.new; end
+    def gb_take(t); t.label; end
+  end
+  class GbBadUser
+    def probe_nil; GbBad.new.gb_bad_nil { Thing.new }.label; end
+    def probe_good; GbBad.new.gb_good_ret { 1 }.label; end
+    def probe_wrong; GbBad.new.gb_wrong_ret { 1 }.label; end
+    def probe_param(arg = nil); GbBad.new.gb_take(arg); end
+  end
+RUBY
+PARITY_SIGS = <<~RBS
+  class GbBad
+    def gb_bad_nil: [T] () { () -> T } -> T
+    def gb_good_ret: () { () -> Integer } -> Thing
+    def gb_wrong_ret: () { () -> Integer } -> Thing
+    def gb_take: (Thing t) -> untyped
+  end
+RBS
+PARITY_DRIVER = <<~'RUBY'
+  %i[probe_nil probe_good probe_wrong probe_param].each do |name|
+    begin
+      puts "#{name}: #{GbBadUser.new.send(name, *(name == :probe_param ? [Other.new] : []))}"
+    rescue NoMethodError
+      puts "#{name}: no label"
+    rescue BC2cppDeclarationViolation => e
+      puts "#{name}: violation: #{e.message}"
+    end
+  end
+  puts 'end'
+RUBY
+
+build = Bc2cppFixtureRuntime.full_or_build
+if build
+  Dir.mktmpdir('gb_parity') do |dir|
+    sig = File.join(dir, 'sig')
+    FileUtils.mkdir_p(sig)
+    File.write(File.join(sig, 'gb.rbs'), PARITY_SIGS)
+    ENV['BC2CPP_SIG_DIRS'] = sig
+    begin
+      _code, parity_err = Bc2cppFixtureRuntime.generate(PARITY_WORLD, dir, only_owners: %w[Thing Other GbBad GbBadUser])
+      body = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          const char* src = R"APD(#{PARITY_DRIVER})APD";
+          mrb_load_string(M, src);
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(dir, parity_err, %w[Thing Other GbBad GbBadUser], body, build: build, full: true)
+      sections = built ? Bc2cppFixtureRuntime.sections(output) : {}
+      interpreted = sections['interpreted'] || []
+      compiled = sections['compiled'] || []
+      check.call('the fixture runs to its end, interpreted and compiled', interpreted.last == 'end' && compiled.last == 'end')
+      check.call('a false [T] block declaration is not trusted: probe_nil runs the same',
+                 interpreted.find { |l| l.start_with?('probe_nil') } == compiled.find { |l| l.start_with?('probe_nil') } &&
+                   interpreted.include?('probe_nil: no label'))
+      check.call('a true `-> Thing` on a block-taking method: probe_good runs the same',
+                 interpreted.include?('probe_good: thing') && compiled.include?('probe_good: thing'))
+      check.call('a false `-> Thing`: the interpreter returns an Other, the compiled method raises the violation',
+                 interpreted.include?('probe_wrong: other') &&
+                   compiled.any? { |l| l.start_with?('probe_wrong: violation: ') && l.include?('GbBad#gb_wrong_ret returned Other, declared -> Thing') })
+      check.call('a false parameter class `(Thing t)`: the interpreter runs it, the compiled method raises on entry',
+                 interpreted.include?('probe_param: other') &&
+                   compiled.any? { |l| l.start_with?('probe_param: violation: ') && l.include?('GbBad#gb_take argument 1 is Other, declared Thing') })
+      puts "    interpreted: #{interpreted.inspect}\n    compiled:    #{compiled.inspect}" unless interpreted == compiled
+    ensure
+      ENV.delete('BC2CPP_SIG_DIRS')
+    end
+  end
+else
+  puts '  SKIP runtime parity: needs a full-core libmruby'
+end
 
 if failures.empty?
   puts "generic_block_return_check: #{checks} checks passed"

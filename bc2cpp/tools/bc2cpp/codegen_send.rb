@@ -30,6 +30,17 @@ class CodeGen
     # never forced by STRICT_HINTS (its else arm keeps the by-name send).
     elem_hint_soft = elem_class_hint.is_a?(SoftElementHint)
     elem_class_hint = elem_class_hint.klass if elem_hint_soft
+    # UNION_ELEMENT_HINT: the candidate is the common ancestor's, and each member is guarded exactly. A member with its
+    # own definition of the name answers differently, so the hint is dropped and the call keeps its ordinary dispatch.
+    elem_members = nil
+    if elem_class_hint.is_a?(AncestorElementHint)
+      elem_members = elem_class_hint.members
+      elem_class_hint = elem_class_hint.klass
+      if (@registry[insn.sym.to_s] || []).any? { |definition| elem_members.include?(definition.owner) && definition.owner != elem_class_hint }
+        elem_members = nil
+        elem_class_hint = nil
+      end
+    end
     d = insn.reg
     # The method-name charset must include `?`, `!` and every operator character
     # (`&`, `|`, `^`, `~`, `%`, `@` for `-@`/`+@`). A missing character truncates
@@ -54,6 +65,19 @@ class CodeGen
         splat_result = compile_splat_send(insn, self_implicit: self_implicit, irep: irep, idx: idx,
                                           name: name, d: d, owner_def: owner_def)
         return splat_result if splat_result
+      end
+      # KEYWORD_SPLAT_STATIC: `recv.m(a, **h)` resolves its callee at compile time, as a literal keyword call does
+      # (compile_keyword_call), and passes each keyword that callee declares, read from the hash at run time. Only
+      # SEND/SSEND: with a block, the block slot follows the keyword slot and the site stays `#error`.
+      if insn.keyword_splat? && !insn.positional_splat? && !insn.argc.nil? && %i[SEND SSEND].include?(insn.op) &&
+         irep && !idx.nil?
+        n = insn.argc
+        code = compile_keyword_call(name: name, d: d,
+                                    recv: call_receiver || (self_implicit ? 'self' : "#{RegName[d]}"),
+                                    n: n, argv: call_arguments || (1..n).map { |k| "#{RegName[d.to_i + k]}" },
+                                    kw_names: [], kw_val_exprs: [], self_implicit: self_implicit, owner_def: owner_def,
+                                    splat: RegName[insn.reg + 1 + n])
+        return code if code
       end
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{insn.argc_text}) -- not in this prototype's supported subset\n"
     end
@@ -336,6 +360,9 @@ class CodeGen
         # `Klass.new` on the proven class, and native_constructor_safe proves `new` is Class#new there:
         # mrb_obj_new is that allocate + dispatched #initialize (no block on a positional SEND).
         shape_fallback = lambda do |klass_expr|
+          direct = direct_initialize_line('bc2cpp_new_obj', argv, d)
+          next "{ mrb_value bc2cpp_new_obj = bc2cpp_direct_alloc(M, #{klass_expr}); #{direct}#{RegName[d]} = bc2cpp_new_obj; }\n" if direct
+
           args = argv.empty? ? '0, NULL' : "#{n}, bc2cpp_new_args"
           decl = argv.empty? ? '' : "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} }; "
           "{ #{decl}#{RegName[d]} = mrb_obj_new(M, #{klass_expr}, #{args}); }\n"
@@ -526,14 +553,22 @@ class CodeGen
                                  (builtin_class_expr && @closed_world&.standard_constructor_lookup? &&
                                   exact_constructor_chain?(known))
       if known && generic_constructor_safe
-        construction = if argv.empty?
-                       "    #{RegName[d]} = mrb_obj_new(M, mrb_class_ptr(#{recv}), 0, NULL);\n"
+        # GENERIC_NEW_DIRECT: the allocation Class#new makes (mrb_instance_alloc, bc2cpp_direct_alloc), then the
+        # initialize it dispatches, as a closed-world owner call over every definer of initialize. A native definer
+        # the owner list cannot name, or more arguments than the owner call takes, keeps mrb_obj_new.
+        direct = direct_initialize_line('bc2cpp_new_obj', argv, d)
+        construction = if direct
+                         "    mrb_value bc2cpp_new_obj = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
+                           "    #{direct}" \
+                           "    #{RegName[d]} = bc2cpp_new_obj;\n"
+                       elsif argv.empty?
+                         "    #{RegName[d]} = mrb_obj_new(M, mrb_class_ptr(#{recv}), 0, NULL);\n"
                        else
                          "    mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} };\n" +
                            "    #{RegName[d]} = mrb_obj_new(M, mrb_class_ptr(#{recv}), #{n}, bc2cpp_new_args);\n"
                        end
-        note = "  // MONO :new -> #{known}, generic direct object construction via mrb_obj_new; " +
-               "standard Class#new/allocate lookup is proven and #initialize remains ordinary runtime dispatch.\n"
+        note = "  // MONO :new -> #{known}, generic direct object construction: bc2cpp_direct_alloc, then the owner-listed " \
+               "initialize; the standard Class#new/allocate lookup is proven.\n"
         class_expr = builtin_class_expr || owner_class_ptr_expr(known)
         guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{class_expr}"
         else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
@@ -1078,6 +1113,10 @@ class CodeGen
     # A MONO name is only safe to devirtualize if its definition fits the calling
     # convention (pure_mandatory_or_optional_arity?).
     target = nil if target && !pure_mandatory_or_optional_arity?(@ireps.fetch(target.irep))
+    # KERNEL_SELF_SEND: an implicit-self send MONO-bound to a Kernel body is a NoMethodError for a self that lacks Kernel
+    # (a BasicObject subclass), which a direct call would run instead.
+    target = nil if target && self_implicit && target.owner == 'Kernel' && owner_def &&
+                    block_core_world&.respond_to?(:kernel_missing_self?) && block_core_world.kernel_missing_self?(owner_def.owner)
     # ...and if this call's argument count fits the target's arity. Without
     # NATIVE_SRCS, `:repeat?` looks MONO (only Game::MoveRoute#repeat?, 0 args, is
     # bytecode) although `Input.repeat?(key)` (native, 1 arg) uses the name, and a
@@ -1339,12 +1378,23 @@ class CodeGen
         end
 
         check_owner = typed_guard_class || target.owner
-        check = exact_class_guard(owner_class_ptr_expr(check_owner), recv)
+        check = if elem_members
+                  "(#{elem_members.map { |member| exact_class_guard(owner_class_ptr_expr(member), recv) }.join(') || (')})"
+                else
+                  exact_class_guard(owner_class_ptr_expr(check_owner), recv)
+                end
         # EXACT_TYPED_UNGUARDED: the receiver is proven to be exactly check_owner, so
         # the guard below can only be true and its fallback is dead.
         if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
           note = "  // EXACT_TYPED :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
                  "#{check_owner}), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+          # RANGE_COLLECT_DIRECT: a proven Range keeps the Integer-bound helper for its literal block, as the
+          # dynamic-send arm does; any other Range takes the compiled body in the helper's else.
+          range_call = check_owner == 'Range' && block_core_direct_enabled? && @call_block_expr && block_core_world &&
+                       @native_name_sources &&
+                       block_core_range_call({ class: 'Range', target: target, impl: impl }, d, recv, call_argv)
+          return "  // RANGE_COLLECT_DIRECT :#{name} -- proven Range receiver, literal block: bc2cpp_range_each behind the bound test\n  #{range_call}\n" if range_call
+
           return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
@@ -1848,6 +1898,52 @@ class CodeGen
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
   # is a proven fresh instance, so its own class method may be selected too.
   # accessor: true also answers an attr_reader (no irep), which only the result-class flow reads.
+  # GENERIC_NEW_DIRECT: the statements of a construction whose object is `obj` (already allocated with
+  # bc2cpp_direct_alloc): initialize, dispatched as a closed-world owner call over the definers the owner list names,
+  # its result in bc2cpp_new_ini. nil when that list cannot be built or the arguments do not fit the owner call.
+  def direct_initialize_line(obj, argv, dest)
+    owners = generic_new_initialize_owners
+    return nil unless owners
+
+    @direct_alloc_used = true # the caller allocates with bc2cpp_direct_alloc, which is declared when this flag is set
+    line = if argv.size <= 16
+             outside_owner_call_line(dest, obj, 'initialize', argv, owners)
+           else
+             # The inline form takes 16 arguments; longer lists go through an array, as the argv form of the owner call.
+             decl = "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} };\n"
+             call = "#{RegName[dest]} = bc2cpp_owner_call_argv_named(M, #{obj}, \"initialize\", 0, " \
+                    "BC2CPP_OWNERS(#{owner_call_owner_list(owners)}), #{@call_block_expr || 'mrb_nil_value()'}, " \
+                    "#{argv.size}, bc2cpp_new_args); /* CLOSED_WORLD owner-call: initialize */"
+             decl + call
+           end
+    line = line.sub(/\A#{Regexp.escape(RegName[dest])} = /, 'bc2cpp_new_ini = ')
+    "mrb_value bc2cpp_new_ini;\n#{line}\n"
+  end
+
+  # The classes whose instance method `initialize` may answer a construction: every Ruby definer in the registry, every
+  # native definer the native owner map names (NATIVE_OWNER_MAP, read as a verdict with core trusted), and BasicObject.
+  # nil when a native definer's class is unknown or a prepend could reach it, so the construction keeps mrb_obj_new.
+  def generic_new_initialize_owners
+    return nil if @registry.fetch('initialize', []).any? { |definition| definition.owner.end_with?('.singleton') }
+
+    natives = native_initialize_owners
+    return nil unless natives
+
+    ruby = @registry.fetch('initialize', []).reject { |definition| definition.owner == '<native>' }.map(&:owner)
+    (ruby + natives.to_a + ['BasicObject']).uniq.sort.freeze
+  end
+
+  # The native classes that define `initialize`, or nil when the map cannot name them all.
+  def native_initialize_owners
+    map = native_owner_map
+    return nil unless map && !map.computed_unknown && map.refusals[:native_prepend].to_i.zero?
+
+    owners = Array(map.by_name['initialize'])
+    return nil if owners.include?(NativeOwnerMap::UNKNOWN)
+
+    owners.to_set
+  end
+
   def closed_world_exact_target(name, receiver_class, accessor: false)
     return nil unless @closed_world&.stable_class_constant?(receiver_class)
     return nil unless call_facts_enabled? && call_facts_answers.resolves_in_ruby?(receiver_class, name)

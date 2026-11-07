@@ -38,12 +38,16 @@ class CodeGen
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in
   # storage order); nil proves nothing.
   class << self
+    # CONST_RESOLVE (codegen_class_body.rb): the constant names bound before a class body runs, and the reads that have none.
+    attr_accessor :known_const_names, :const_unresolved
     attr_accessor :engine_registrations, :stable_class_constants, :stable_value_constants, :const_bindings, :struct_members,
                   :integer_constant_values, :integer_constant_keys, :integer_constant_ranges, :constant_value_classes,
                   :module_names, :core_hidden_defs,
-                  :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
+                  :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
                   :enumerator_model, :native_singleton_inputs,
-                  :rbs_block_signatures
+                  :rbs_block_signatures,
+                  # CORE_SHADOWED: irep labels of core definitions a later definition replaces (CoreDefs.shadowed_labels).
+                  :shadowed_labels
 
     # INLINED_UNLISTED_SITE: kill switch BC2CPP_INLINED_UNLISTED=0.
     def inlined_unlisted_site?
@@ -212,7 +216,6 @@ class CodeGen
     end
     # CORE_VISIBILITY: compiled, but never a dispatch candidate.
     (self.class.core_hidden_defs || []).each { |d| @owner_of[d.irep] = d if d.irep }
-    @core_guard_index = {}
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
     @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.

@@ -1,37 +1,66 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# RESUMABLE_DUAL (tools/bc2cpp/codegen_method.rb): the direct-yield core iterators on the list take their resumable
-# variant beside the fast body. Inside a Fiber the guard runs the variant, so a Fiber.yield in the block suspends through
-# VM frames; outside one the fast body runs. This fixture runs each listed method both ways, and the methods that are
-# not on the list (the ones that stay on their drivers) both ways too.
-#
-#   generated code (needs a host mrbc)
-#     - the probe reaches every listed method from a Fiber body, so each one is guarded and gets its variant;
-#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - each method is run inside a Fiber (the block yields, and the fiber is drained) and plainly (the block returns);
-#       the interpreted run and the compiled run print the same line for every scenario.
+# RESUMABLE_DUAL (codegen_method.rb): the direct-yield core iterators on the list take a resumable variant beside the fast body. Each
+# runs inside a Fiber (the block yields) and plainly; interpreted and compiled runs print the same. native_fiber_check evals the table.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/resumable_variants_check.rb
 
-require 'tmpdir'
 require_relative 'fixture_runtime'
 
-# The fixture is its own closed world: the repository signatures name classes it does not define.
-ENV['BC2CPP_SIG_DIRS'] = ''
+suite = Bc2cppStepCheck.new('bc2cpp resumable variants check')
 
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
+# array.c's sort (insertion sort up to 16 elements, heap sort above), transcribed so the comparison block sees the
+# calls mruby's native sort makes. The interpreted run cannot give the expected output of a Fiber.yield in a
+# comparison: the native sort is a C frame, and mruby-fiber raises FiberError there.
+def reference_sort(ary)
+  a = ary.dup
+  n = a.size
+  gt = ->(x, y) { yield(x, y) > 0 }
+  if n <= 16
+    (1...n).each do |i|
+      key = a[i]
+      j = i - 1
+      while j >= 0 && gt.call(a[j], key)
+        a[j + 1] = a[j]
+        j -= 1
+      end
+      a[j + 1] = key
+    end
+  else
+    heapify = lambda do |index, size|
+      loop do
+        max = index
+        l = (2 * index) + 1
+        r = l + 1
+        max = l if l < size && gt.call(a[l], a[max])
+        max = r if r < size && gt.call(a[r], a[max])
+        break if max == index
+
+        a[max], a[index] = a[index], a[max]
+        index = max
+      end
+    end
+    (n / 2 - 1).downto(0) { |i| heapify.call(i, n) }
+    (n - 1).downto(1) do |i|
+      a[0], a[i] = a[i], a[0]
+      heapify.call(0, i)
+    end
+  end
+  a
 end
 
-unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
-  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
-  exit 0
+# The yields of a drained fiber whose comparison block yields its +arg+ argument, then the sorted result.
+def reference_sort_line(label, ary, arg)
+  log = []
+  sorted = reference_sort(ary) do |x, y|
+    log << (arg.zero? ? x : y)
+    arg.zero? ? x <=> y : y <=> x
+  end
+  "fiber #{label}: #{(log + [sorted]).inspect}"
 end
 
-# [label, fiber expression, plain expression]. The fiber expression yields every block argument; the plain one only returns it.
+# [label, fiber expression, plain expression, optional expected "fiber" line (see reference_sort)]. The fiber expression yields every block argument; the plain one only returns it.
 SCENARIOS = [
   ['Array#each', '[1, 2].each { |x| Fiber.yield x }', '[1, 2].each { |x| x }'],
   ['Array#delete_if', '[1, 2, 3].delete_if { |x| Fiber.yield x; x == 2 }', '[1, 2, 3].delete_if { |x| x == 2 }'],
@@ -52,6 +81,13 @@ SCENARIOS = [
   ['Array#fetch', '[1].fetch(9) { |i| Fiber.yield i; raise TypeError, "fetch" }', '[1].fetch(9) { |i| raise TypeError, "fetch" }'],
   ['Hash#fetch', '{}.fetch(:zz) { |k| Fiber.yield k; break :stopped }', '{}.fetch(:zz) { |k| break :stopped }'],
   ['Hash#fetch', '{}.fetch(:zz) { |k| Fiber.yield k; raise TypeError, "fetch" }', '{}.fetch(:zz) { |k| raise TypeError, "fetch" }'],
+  ['Array#sort', '[3, 1, 2].sort { |a, b| Fiber.yield a; a <=> b }', '[3, 1, 2].sort { |a, b| a <=> b }',
+   -> { reference_sort_line('Array#sort', [3, 1, 2], 0) }],
+  ['Array#sort', '(1..20).to_a.reverse.sort { |a, b| Fiber.yield a; a <=> b }', '(1..20).to_a.reverse.sort { |a, b| a <=> b }',
+   -> { reference_sort_line('Array#sort', (1..20).to_a.reverse, 0) }],
+  ['Array#sort', '[3, 1, 2].sort! { |a, b| Fiber.yield b; b <=> a }', '[3, 1, 2].sort! { |a, b| b <=> a }',
+   -> { reference_sort_line('Array#sort', [3, 1, 2], 1) }],
+  ['Array#sort', '[2, 1].sort { |a, b| nil }', '[2, 1].sort { |a, b| nil }'],
   ['Array#find', '[1, 2].find { |x| Fiber.yield x; x == 2 }', '[1, 2].find { |x| x == 2 }'],
   ['Array#sort_by', '[2, 1].sort_by { |x| Fiber.yield x; x }', '[2, 1].sort_by { |x| x }'],
   ['Array#to_h', '[[1, 2], [3, 4]].to_h { |x| Fiber.yield x; [x[0], x[1]] }', '[[1, 2], [3, 4]].to_h { |x| [x[0], x[1]] }'],
@@ -66,7 +102,8 @@ SCENARIOS = [
   ['Enumerable#max', '(1..2).max { |a, b| Fiber.yield a; 0 }', '(1..2).max { |a, b| 0 }'],
   ['Enumerable#min', '(1..2).min { |a, b| Fiber.yield a; 0 }', '(1..2).min { |a, b| 0 }'],
   ['Enumerable#reject', '(1..2).reject { |x| Fiber.yield x; false }', '(1..2).reject { |x| false }'],
-  ['Enumerable#sort', '(1..2).sort { |a, b| Fiber.yield a; 0 }', '(1..2).sort { |a, b| 0 }'],
+  ['Enumerable#sort', '(1..2).sort { |a, b| Fiber.yield a; 0 }', '(1..2).sort { |a, b| 0 }',
+   -> { "fiber Enumerable#sort: #{[1, [1, 2]].inspect}" }],
   ['Enumerable#sort_by', '(1..2).sort_by { |x| Fiber.yield x; x }', '(1..2).sort_by { |x| x }'],
   ['Enumerable#sum', '(1..2).sum { |x| Fiber.yield x; x }', '(1..2).sum { |x| x }'],
   ['Enumerable#to_h', '(1..2).to_h { |x| Fiber.yield x; [x, x] }', '(1..2).to_h { |x| [x, x] }'],
@@ -102,112 +139,70 @@ SCENARIOS = [
   ['Hash#select!', 'h = { a: 1, b: 2 }; h.select! { |k, v| Fiber.yield k; true }', 'h = { a: 1, b: 2 }; h.select! { |k, v| true }'],
   ['Range#each', '(1..2).each { |x| Fiber.yield x }', '(1..2).each { |x| x }'],
   ['Range#each', %q{('a'..'c').each { |x| Fiber.yield x }}, %q{('a'..'c').each { |x| x }}],
+  ['Enumerable#each_slice', '(1..3).each_slice(2) { |a| Fiber.yield a }', '(1..3).each_slice(2) { |a| a }'],
+  ['Enumerable#each_cons', '(1..3).each_cons(2) { |a| Fiber.yield a }', '(1..3).each_cons(2) { |a| a }'],
+  ['Enumerable#group_by', '(1..3).group_by { |x| Fiber.yield x; x % 2 }', '(1..3).group_by { |x| x % 2 }'],
+  ['Enumerable#partition', '(1..3).partition { |x| Fiber.yield x; x > 1 }', '(1..3).partition { |x| x > 1 }'],
+  ['Enumerable#min_by', '(1..3).min_by { |x| Fiber.yield x; -x }', '(1..3).min_by { |x| -x }'],
+  ['Enumerable#max_by', '(1..3).max_by { |x| Fiber.yield x; -x }', '(1..3).max_by { |x| -x }'],
+  ['Enumerable#take_while', '(1..3).take_while { |x| Fiber.yield x; x < 3 }', '(1..3).take_while { |x| x < 3 }'],
+  ['Enumerable#drop_while', '(1..3).drop_while { |x| Fiber.yield x; x < 2 }', '(1..3).drop_while { |x| x < 2 }'],
+  ['Kernel#loop', 'n = 0; loop { Fiber.yield n; n += 1; break if n > 1 }', 'n = 0; loop { n += 1; break if n > 1 }'],
+  ['Kernel#loop', 'n = 0; loop { Fiber.yield n; n += 1; raise StopIteration if n > 1 }', 'n = 0; loop { n += 1; raise StopIteration if n > 1 }'],
+  ['Hash#fetch_values', '{ a: 1 }.fetch_values(:z) { |k| Fiber.yield k; 0 }', '{ a: 1 }.fetch_values(:z) { |k| 0 }'],
+  # A block run from a C iterator cannot suspend: the error matches mruby-fiber's.
+  ['Array#index', '[1, 2].index { |x| Fiber.yield x; x == 2 }', '[1, 2].index { |x| x == 2 }'],
+  # An Enumerator driven inside a Fiber body: its own fiber nests in the body's.
+  ['Enumerator#next', 'e = [1, 2].each; Fiber.yield e.next; e.next', 'e = [1, 2].each; e.next; e.next'],
   ['StringIO#each', 'require "stringio"; StringIO.new("a\\nb").each { |l| Fiber.yield l }', 'require "stringio"; StringIO.new("a\\nb").each { |l| l }']
 ].freeze
 
 EXPECTED_LABELS = %w[
-  Array#collect! Array#delete_if Array#each Array#each_index Array#fetch
-  Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
+  Array#collect! Array#delete_if Array#each Array#each_index Array#fetch Array#find
+  Array#reject! Array#select! Array#sort Enumerable#sort Hash#delete Hash#fetch
   Hash#each Integer#downto Integer#times Integer#upto
   String#each_char String#upto StringIO#each
+  Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
+  Enumerable#each_slice Enumerable#each_cons Enumerable#group_by Enumerable#partition Enumerable#min_by Enumerable#max_by Enumerable#take_while Enumerable#drop_while
+  Kernel#loop Hash#fetch_values
 ].freeze
 
-# The closed-world probe: every listed method is called from a Fiber body, so each is guarded and gets its variant.
+# One method per scenario builds the fiber whose body is the scenario, so every fiber body is compiled (a Fiber made by the
+# driver's own, interpreted, source would run on mruby-fiber).
 PROBE = <<~RUBY
-  class ProbeAll
-    def run
-      Fiber.new do
-        r = []
-#{SCENARIOS.map { |_, fiber, _| "        r << (#{fiber})" }.join("\n")}
-        r
-      end
-    end
-  end
-  ProbeAll.new.run.resume
-RUBY
-
-# Each scenario runs as a line of output: "fiber LABEL: [..]" (drained fiber) and "plain LABEL: ..." (the same call, no fiber).
-DRIVER = <<~'RUBY'
-  def show(label)
-    puts "#{label}: #{yield.inspect}"
-  rescue StandardError => e
-    puts "#{label}: raised #{e.class}: #{e.message}"
-  end
-
-  def drain(f)
-    out = []
-    while f.alive?
-      out << f.resume
-    end
-    out
+  class VariantProbe
+#{SCENARIOS.each_with_index.map { |(_, fiber, _), i| "    def fiber_#{i}\n      Fiber.new { #{fiber} }\n    end\n" }.join("\n")}
   end
 RUBY
-DRIVER_BODY = SCENARIOS.map do |label, fiber, plain|
-  "show('fiber #{label}') { drain(Fiber.new { #{fiber} }) }\nshow('plain #{label}') { #{plain} }"
+
+# Each scenario prints "fiber LABEL: [..]" (drained fiber) and "plain LABEL: ..." (the same call, no fiber).
+DRIVER_BODY = SCENARIOS.each_with_index.map do |(label, _, plain), i|
+  "show('fiber #{label}') { drain(VariantProbe.new.fiber_#{i}) }\nshow('plain #{label}') { #{plain} }"
 end.join("\n")
-DRIVER_FULL = DRIVER + DRIVER_BODY + "\nputs 'end'\n"
+DRIVER = "#{Bc2cppStepCheck::SHOW}#{Bc2cppStepCheck::DRAIN}#{DRIVER_BODY}\nputs 'end'\n"
 
-OWNERS = %w[Array Enumerable Hash Integer Float Range String StringIO].freeze
-
-baseline_dir = Dir.mktmpdir('bc2cpp-resumable-variants')
-at_exit { FileUtils.remove_entry(baseline_dir) }
-puts '-- generated code'
-# BC2CPP_GUARD_FIBER_FREE=0 keeps every guard, so each listed method takes its variant in this probe (the probe is not
-# the whole program: a method no probe Fiber reaches would otherwise lose its guard).
-saved_guard = ENV['BC2CPP_GUARD_FIBER_FREE']
-ENV['BC2CPP_GUARD_FIBER_FREE'] = '0'
-code, baseline_err = begin
-  Bc2cppFixtureRuntime.generate(PROBE, baseline_dir, core: true, only_owners: OWNERS)
-ensure
-  saved_guard ? ENV['BC2CPP_GUARD_FIBER_FREE'] = saved_guard : ENV.delete('BC2CPP_GUARD_FIBER_FREE')
-end
-File.write(ENV['BC2CPP_VARIANTS_DUMP'], code) if ENV['BC2CPP_VARIANTS_DUMP']
+OWNERS = %w[Array Enumerable Enumerator Hash Integer Float Kernel Range String StringIO VariantProbe].freeze
+# BC2CPP_GUARD_FIBER_FREE=0 (guards: true) keeps every guard, so each listed method takes its variant in this probe, which is
+# not the whole program: a method no probe Fiber reaches would otherwise lose its guard.
+code = suite.generate(PROBE, OWNERS, guards: true)
 variants = code.scan(/^(?:\[\[maybe_unused\]\] )?static mrb_value ([\w$]+)_rsm_impl\(/).flatten.uniq
-# The default list (RESUMABLE_DUAL in tools/bc2cpp/codegen_method.rb): exactly these take a variant.
-EXPECTED = EXPECTED_LABELS
-expected_names = EXPECTED.map { |label| label.sub('#', '_').gsub('!', '$21').gsub('?', '$3f') }
-check.call("exactly the default list gets a variant (#{variants.size} of #{SCENARIOS.size} scenarios)", (expected_names - variants).empty? && (variants - expected_names).empty?)
-check.call('no #error in the generated code', !code.include?('#error'))
+# The default list (RESUMABLE_DUAL in codegen_method.rb): exactly these take a variant.
+expected_names = EXPECTED_LABELS.map { |label| label.sub('#', '_').gsub('!', '$21').gsub('?', '$3f') }
+puts "    missing variants: #{(expected_names - variants).sort.join(' ')}" unless (expected_names - variants).empty?
+puts "    unexpected variants: #{(variants - expected_names).sort.join(' ')}" unless (variants - expected_names).empty?
+suite.check("exactly the default list gets a variant (#{variants.size} of #{SCENARIOS.size} scenarios)",
+            (expected_names - variants).empty? && (variants - expected_names).empty?)
 %w[array_fetch hash_fetch string_upto].each do |method|
-  check.call("#{method} needs no per-method driver", !code.include?("bc2cpp_#{method}_driver_src"))
+  suite.check("#{method} needs no per-method driver", !code.include?("bc2cpp_#{method}_driver_src"))
 end
 
-if ENV['CC_GENERATED_ONLY'] == '1'
-  puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'
-else
-  build = Bc2cppFixtureRuntime.full_or_build
-  if build.nil?
-    puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
-  else
-    puts '-- fixtures on real mruby, interpreted and compiled'
-    body = <<~CPP
-      static int scenario(mrb_state* M) {
-        std::fflush(stdout);
-        const char* src = R"RAC(#{DRIVER_FULL})RAC";
-        mrb_load_string(M, src);
-        std::fflush(stdout);
-        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
-        return 0;
-      }
-    CPP
-    built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, OWNERS, body, build: build, full: true)
-    check.call('the fixtures build and run', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
-    interpreted = sections['interpreted']
-    compiled = sections['compiled']
-    check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-    if interpreted && compiled
-      mismatched = interpreted.zip(compiled).reject { |a, b| a == b }
-      mismatched.first(12).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
-      check.call("interpreted and compiled runs print the same over #{SCENARIOS.size * 2} scenarios", mismatched.empty?)
-    end
-    puts output.lines.last(30).join unless built && interpreted && compiled
-  end
-end
+suite.behaviour(DRIVER, same: false, diff: false) do |interpreted, compiled|
+  next unless interpreted && compiled
 
-if failures.empty?
-  puts 'bc2cpp resumable variants check: PASS'
-else
-  warn "bc2cpp resumable variants check: #{failures.size} failure(s)"
-  exit 1
+  # A scenario with an expected line is held to it, not to the interpreted run.
+  SCENARIOS.each_with_index { |(_, _, _, expected), idx| interpreted[idx * 2] = expected.call if expected }
+  differing = interpreted.zip(compiled).reject { |a, b| a == b }
+  differing.first(12).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+  suite.check("interpreted and compiled runs print the same over #{SCENARIOS.size * 2} scenarios", differing.empty?)
 end
+suite.finish

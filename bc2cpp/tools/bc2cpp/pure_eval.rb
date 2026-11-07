@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # PURE_CONST_EVAL: a class body's computed constant (`X = (0..11).each_with_object({}) { ... }.freeze`) evaluated once, at
-# build time, under CRuby, and handed to the class program (LoadCompile::Blob) as the data it came to. The load then
+# build time, under CRuby, and handed to the class program as the data it came to. The load then
 # builds the value from bytes like any literal table and no block runs at boot.
 #
 # What makes a constant foldable is that nothing in it can differ between the build machine and the device:
@@ -18,8 +18,7 @@
 #     reached twice (the copy would split it).
 #
 # Anything else is not folded and the statement stays as it is: bytecode, in the residual mrblib. Fidelity against the
-# mruby runtime is `scripts/bc2cpp/class_body_check.rb`'s job: it boots mruby, computes the same statements and
-# compares class, frozen state, order and content with this module's value through `CANONICAL`.
+# mruby runtime is not checked in this tree; `CANONICAL` is the form a runtime comparison would use.
 require 'prism'
 require 'set'
 require_relative 'class_body_scan'

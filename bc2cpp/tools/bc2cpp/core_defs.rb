@@ -11,6 +11,9 @@ module CoreDefs
   # Where mruby's own Ruby lives: core mrblib, every core gem's mrblib, and the
   # external gems that ship Ruby (compiled_gems.rb BC2CPP_EXTERNAL_MRBLIB_GEMS).
   SOURCE = %r{/3rd/(?:mruby/(?:mrblib|mrbgems/[^/]+/mrblib)|mruby-stringio/mrblib|mruby-onig-regexp/mrblib)/}
+  # The mruby core's own mrblib: the only Ruby that runs in mrb_init_mrblib, before any gem's C init has defined its
+  # classes (a gem's mrblib, e.g. mruby-io's `class File < IO`, runs in the gem init after it).
+  INIT_SOURCE = %r{/3rd/mruby/mrblib/}
 
   module_function
 

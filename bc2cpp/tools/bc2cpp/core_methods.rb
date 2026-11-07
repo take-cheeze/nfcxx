@@ -7,12 +7,11 @@ require_relative 'core_defs'
 # BC2CPP_CORE_MRBLIB_GEMS) that compiles clean is compiled, except the ones that
 # stay bytecode by decision: a definition a later one replaces, one a
 # conditional can skip, one that names the Fiber class or builds a lambda (CoreDefs),
-# and the `Owner#name` entries of core_refused.txt. A method that touches a block
-# compiles behind the Fiber guard (guarded_labels). An excluded definition is
+# A method that touches a block
+# compiles with no Fiber guard. An excluded definition is
 # dropped from the registry (bc2cpp.rb), so it is neither compiled nor a dispatch
 # target, and the interpreter's method answers it exactly as before.
 module CoreMethods
-  DEFAULT_PATH = File.expand_path('core_refused.txt', __dir__)
   # The operator names bc2cpp gives inline fast paths (fixnum arithmetic and comparison,
   # `case`/`when` literals, INTEGER_UNARY) on the premise that the registry holds only
   # the native definition of the name (CodeGen#native_only_mono?, eqq_literal_devirt_safe?).
@@ -43,7 +42,7 @@ module CoreMethods
 
   # The mruby-enumerator #initialize methods that take a block to keep it (Enumerator, Enumerator::Generator and
   # Enumerator::Yielder). They store the block or hand it to Generator.new and never call it, and they name no Fiber
-  # and build no lambda, so the block guard (guarded_labels) covers them as it covers any core block method.
+  # and build no lambda, as any core block method is compiled with no Fiber guard.
   ENUMERATOR_INITIALIZERS = %w[Enumerator Enumerator::Generator Enumerator::Yielder].freeze
 
   def enumerator_initializer?(definition, ireps)
@@ -54,19 +53,6 @@ module CoreMethods
       !CoreDefs.references_fiber?(body, ireps) && !CoreDefs.builds_lambda?(body, ireps)
   end
 
-  # The listed "Owner#name" keys of core_refused.txt. Raises on a line that is not one entry.
-  def load_refused(path = DEFAULT_PATH)
-    File.readlines(path, chomp: true).each_with_index.with_object(Set.new) do |(line, i), set|
-      entry = line.strip
-      next if entry.empty? || entry.start_with?('#')
-
-      entry = entry.split(/\s+#/, 2).first
-      raise ArgumentError, "#{path}:#{i + 1}: not an Owner#name entry: #{line.inspect}" unless entry.match?(/\A[A-Z][\w:]*(?:\.singleton)?#\S+\z/)
-
-      set << entry
-    end
-  end
-
   def key(method_def)
     "#{method_def.owner}##{method_def.name}"
   end
@@ -74,14 +60,14 @@ module CoreMethods
   # Irep labels of the core-source definitions in `registry` that must not be
   # compiled: refused, conditional, Fiber-naming, lambda-building or unaudited mruby-enumerator bodies
   # (shadowed ones are dropped from the registry by the driver before this runs).
-  def excluded_labels(registry, ireps, refused)
+  def excluded_labels(registry, ireps)
     conditional = CoreDefs.conditional_def_labels(ireps)
     out = Set.new
     registry.each_value do |defs|
       defs.each do |d|
         next unless d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file)
 
-        out << d.irep if exclusion_reason(d, ireps, refused, conditional)
+        out << d.irep if exclusion_reason(d, ireps, conditional)
       end
     end
     out
@@ -89,15 +75,30 @@ module CoreMethods
 
   # Why a core-source definition stays bytecode by decision (nil when eligible). One place for
   # excluded_labels and the interpreted report, so the two cannot disagree.
-  def exclusion_reason(definition, ireps, refused, conditional)
+  def exclusion_reason(definition, ireps, conditional)
     irep = ireps.fetch(definition.irep)
-    return 'refused (core_refused.txt)' if refused.include?(CoreMethods.key(definition))
     return 'conditional def' if conditional.include?(definition.irep)
     return "#{ENUMERATOR_REASON} (Fiber machinery)" if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps) &&
-                                                         !enumerator_initializer?(definition, ireps)
+                                                         !enumerator_initializer?(definition, ireps) && !enumerator_fiber_step?(definition, ireps)
     return 'builds a lambda' if CoreDefs.builds_lambda?(irep, ireps)
 
-    'names Fiber' if CoreDefs.references_fiber?(irep, ireps)
+    'names Fiber' if CoreDefs.references_fiber?(irep, ireps) && !enumerator_fiber_step?(definition, ireps)
+  end
+
+  # ENUMERATOR_FIBER (on; BC2CPP_ENUMERATOR_FIBER=0 keeps mruby-enumerator's bytecode on mruby-fiber): its methods are compiled,
+  # so `next_values` builds a C++ Fiber over a step (docs/bc2cpp-cxx-fiber.md); methods that build a lambda stay bytecode.
+  ENUMERATOR_FIBER_STEPS = %w[Enumerator#next_values Enumerator#each Enumerator#__enumerator_block_call].freeze
+
+  def enumerator_fiber?
+    ENV['BC2CPP_ENUMERATOR_FIBER'] != '0'
+  end
+
+  def enumerator_fiber_step?(definition, ireps = nil)
+    return false unless enumerator_fiber?
+    return true if ENUMERATOR_FIBER_STEPS.include?(key(definition))
+
+    body = ireps && definition.irep && ireps[definition.irep]
+    !body.nil? && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb')
   end
 
   # Language features a body uses, for grouping the interpreted report by what an unsupported
@@ -121,13 +122,13 @@ module CoreMethods
   # One line per core-source bytecode definition the build keeps interpreted.
   # `unsupported` maps "Owner#name" to the compiler's own #error reason for definitions the
   # exclusion rules let through but codegen cannot express.
-  def interpreted_report(defs, ireps, refused, unsupported = {})
+  def interpreted_report(defs, ireps, unsupported = {})
     conditional = CoreDefs.conditional_def_labels(ireps)
     defs.filter_map do |d|
       next unless d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file)
 
       key = "#{d.owner}##{d.name}"
-      reason = exclusion_reason(d, ireps, refused, conditional) ||
+      reason = exclusion_reason(d, ireps, conditional) ||
                (unsupported[key] && "unsupported shape: #{unsupported[key]}")
       next unless reason
 
@@ -135,16 +136,4 @@ module CoreMethods
     end.sort
   end
 
-  # Irep labels of the compiled core methods whose entry is guarded (CORE_BLOCK_GUARD,
-  # CodeGen#core_block_guard): the ones that touch a block or are audited Enumerator wrappers.
-  def guarded_labels(defs, ireps)
-    defs.select { |d| d.irep && d.core && (CoreDefs.touches_block?(ireps.fetch(d.irep), ireps) || enumerator_wrapper?(d, ireps)) }.to_set(&:irep)
-  end
-
-  # Refused entries no core-source method answers to (renamed or removed).
-  def stale(registry, ireps, refused)
-    known = registry.values.flatten.select { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
-                    .to_set { |d| CoreMethods.key(d) }
-    refused.reject { |k| known.include?(k) }.sort
-  end
 end

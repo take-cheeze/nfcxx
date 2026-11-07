@@ -27,6 +27,25 @@ module InitializerTables
       "#{owner}#initialize"
     end.to_set
   end
+  # The bodies a construction site may count as direct: every compiled body that does not run while mrblib loads.
+  # A body that runs at load is called before the initializer table exists, so its construction keeps the
+  # initializer (the stub rewrite used this same split, see StaticDispatchRegistrations.load_phase).
+  def self.direct_candidate_keys(compiled, ireps, registry)
+    require_relative 'static_dispatch_registrations'
+    body_of = {}
+    registry.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
+    parent = {}
+    ireps.each_value { |irep| irep.reps.each { |c| parent[c.respond_to?(:label) ? c.label : c] = irep.label } }
+    method_of = ireps.keys.to_h do |label|
+      up = label
+      up = parent[up] until up.nil? || body_of.key?(up)
+      [label, up]
+    end
+    overridden = body_of.each_value.map { |owner, name| "#{owner}##{name}" }.to_set
+    load_bodies, = StaticDispatchRegistrations.load_phase(ireps, body_of, method_of, overridden)
+    compiled.reject { |m| load_bodies.include?(m[:label]) }.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+  end
+
 end
 
 class CodeGen

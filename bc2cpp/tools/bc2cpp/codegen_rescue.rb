@@ -5,6 +5,12 @@ require_relative 'bytecode_ir_containers'
 # CodeGen: ensure and rescue regions.
 
 class CodeGen
+  # Is +irep+ the step being compiled, and does it carry its own handler table (STEP_HANDLERS)? A block function nested in
+  # it is another irep and keeps the ordinary rescue/ensure forms.
+  def step_with_handlers?(irep)
+    @resumable&.handlers && irep.label == @resumable.label ? true : false
+  end
+
   # The instructions whose byte address lies in +range+, in program order. The IR has no address-range query;
   # Irep#instructions_at selects the same way, so this is its IR-backed equivalent.
   def insns_in_addr_range(irep, range)
@@ -93,6 +99,8 @@ class CodeGen
   # Everything below rejects unproven shapes.
   def recognize_ensure_region(irep)
     return nil if irep.catch_handlers.nil?
+    # STEP_HANDLERS: a step handles its own handler table (resumable_step_function); the RAII form cannot be jumped into.
+    return nil if step_with_handlers?(irep)
     # One ensure handler. ENSURE_NESTED_RESCUE: at most one rescue besides it, nested in the ensure body
     # (recognize_ensure_nested_rescue); any other mix is not modelled.
     ensures, rescues = irep.catch_handlers.partition { |handler| handler.type == :ensure }
@@ -324,6 +332,7 @@ class CodeGen
   # it nor cls_name/match_addr/raise_addr (nil for :defined_const).
   def recognize_rescue_regions(irep)
     return [] if irep.catch_handlers.nil? || irep.catch_handlers.empty?
+    return [] if step_with_handlers?(irep)
     return [] unless irep.catch_handlers.all? { |ch| ch.type == :rescue }
 
     program = BytecodeIR.for(irep)

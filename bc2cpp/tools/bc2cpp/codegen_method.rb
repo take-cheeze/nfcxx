@@ -81,6 +81,9 @@ class CodeGen
       send(pass.recognize, irep, *ctx).each do |region|
         anchor = region[pass.anchor]
         next if claimed.include?(anchor) || claimed.include?(region[:sendb_addr])
+        # An inlined loop is C code a step cannot suspend in: a block that may suspend stays a block (a step of its own).
+        next if @resumable && inline_block_may_suspend?(irep, region)
+        next if inline_block_boxes?(irep, region)
         next if try_range && !rescue_try_inlinable?(region, anchor, try_range)
         # RANGE_EACH_GUARD: the Range#each loop needs its send kept behind it, which only the guarded glue places.
         next if pass.recognize == :recognize_range_each_regions && !guarded
@@ -164,11 +167,16 @@ class CodeGen
     # BLOCK_FALLBACK_YIELD_SUPPORT: `blk_available` is the same condition as
     # `mandatory_ok` below, so a region is never marked `needs_blk` for a method
     # whose wrapper will not extract `bc2cpp_blk`.
-    block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep))
+    # BLOCK_STEP_UPVARS: a block step holds its builder's locals as pointers, so a block nested in it may forward them.
+    block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep),
+                                                                    available_upvars: (label == @block_step_label ? @block_step_upvars : nil) || [],
+                                                                    cell_levels: (label == @block_step_label ? @block_step_cell_levels : nil) || [])
     # NESTED_BLOCK_FALLBACK_SUPPORT: a RETURN_BLK nested at any depth throws
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.
     needs_return_catch = block_fallback_regions.any? { |region| block_fallback_region_has_return_blk?(region) }
+    # BLOCK_STEP: the steps of the blocks that suspend, compiled ahead so the blocks' procs can name their makers.
+    block_step_code = compile_block_steps(block_fallback_regions, d)
 
     # OPTIONAL_ARG_SUPPORT: `opt` > 0 only for the recognized optional-only shape
     # (see optional_arg_table); other non-mandatory shapes get the `#error` stub.
@@ -183,7 +191,7 @@ class CodeGen
     # LCF::Array2D#each), found by block_fallback_regions and read by
     # emit_rproc_construction. Both stay gated on mandatory_ok, so this is
     # exclusive with `has_blk`.
-    needs_blk_param = yields_block_param?(irep, block_fallback_regions)
+    needs_blk_param = yields_block_param?(irep, block_fallback_regions) || (@block_step_needs_blk && label == @block_step_label)
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # OPTIONAL_REST: optionals with a rest parameter (see optional_rest_arg_table); the rest is taken below.
     opt_rest = !mandatory_ok && opt_jmp_targets.nil? && (rest_table = optional_rest_arg_table(irep))
@@ -192,6 +200,19 @@ class CodeGen
     # mandatory_ok is false, whether or not the optional table resolved (the
     # KEY_P/KARG scan is whole-irep).
     kw_table = mandatory_ok ? nil : keyword_arg_table(irep)
+    # STEP_KEYWORDS: keywords next to a rest and/or block parameter. With optionals the rest shape must have resolved its
+    # jump table, else the method stays unsupported (the keywords would be dropped).
+    kw_rest_block = false
+    if !mandatory_ok && !kw_table && enter && enter.enter_fields[4].positive? &&
+       (enter.enter_fields[2].positive? || enter.enter_fields[6].positive?)
+      # Optionals before a block need their own jump table (optional_block_arg_table); with a rest it is opt_rest's.
+      block_table = enter.enter_fields[1].positive? && enter.enter_fields[2].zero? ? optional_block_arg_table(irep) : nil
+      if opt_rest || enter.enter_fields[1].zero? || block_table
+        kw_table = keyword_arg_table(irep, rest_block: true)
+        kw_rest_block = !kw_table.nil?
+        opt, opt_jmp_addrs, opt_jmp_targets = block_table if kw_rest_block && block_table
+      end
+    end
     # Each of `opt` (jump table) and `kw` must resolve or the whole method is
     # unsupported. Either failure also clears `opt_jmp_targets`, the flag
     # `supported` trusts; otherwise a recognized optional shape with an
@@ -200,6 +221,8 @@ class CodeGen
     if (opt.positive? && !opt_jmp_targets) || (enter_kw.positive? && !kw_table)
       opt_jmp_targets = nil
       kw_table = nil
+      kw_rest_block = false
+      opt_rest = false
     end
     # REST_ARG_SUPPORT: one more contiguous `total_args` slot (see
     # rest_only_arity?).
@@ -207,8 +230,12 @@ class CodeGen
     # method_missing(name, *args, &block)`); both are exclusive with
     # mandatory_ok/opt_jmp_targets/kw_table, whose predicates require rest and
     # block to be zero.
-    has_rest = opt_rest || ((mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep))
-    has_blk = opt_rest ? irep.enter.enter_fields[6].positive? : ((mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep))
+    has_rest = opt_rest || (kw_rest_block ? enter.enter_fields[2].positive? : ((mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)))
+    has_blk = if opt_rest || kw_rest_block
+                enter.enter_fields[6].positive?
+              else
+                (mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep)
+              end
     # OPTIONAL_REST keyword rest (`**kwd`): the keyword hash arrives in its own slot (MRB_ARGS_KEY(0, 1), the kdict bit), so
     # it is read from the callinfo, not from the positional arguments.
     kwrest_only = !mandatory_ok && !opt_jmp_targets && !kw_table && !opt_rest && keyword_rest_only_shape?(irep)
@@ -216,13 +243,22 @@ class CodeGen
     # CORE_BLOCK_OPT: optionals and `&blk` together (`any?(pattern = NONE, &block)`). The
     # block sits after the optionals (OP_ENTER blk_pos), so it is the same extra
     # parameter, ahead of `bc2cpp_given_opt`.
-    if !mandatory_ok && !opt_jmp_targets && !kw_table && (blk_table = optional_block_arg_table(irep))
+    if !mandatory_ok && !opt_jmp_targets && !kw_table && enter_kw.zero? && (blk_table = optional_block_arg_table(irep))
       opt, opt_jmp_addrs, opt_jmp_targets = blk_table
       has_blk = true
+    end
+    # OPTIONAL_KWREST: `def f(a, b = 1, **kwd, &blk)` (IO.popen). The keyword rest is the last parameter, read from the
+    # callinfo's keyword slot by the wrapper below; the block is the same extra parameter as CORE_BLOCK_OPT.
+    if !mandatory_ok && !opt_jmp_targets && !kw_table && (kwrest_table = optional_kwrest_arg_table(irep))
+      opt, opt_jmp_addrs, opt_jmp_targets, kwrest_block = kwrest_table
+      has_kwrest = true
+      has_blk ||= kwrest_block
     end
     supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk || kwrest_only
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) + (has_kwrest ? 1 : 0) : mand
+    # STEP_KEYWORDS: with keywords the keyword-hash slot sits between the arguments and the incoming block.
+    blk_slot = total_args + (kw_table ? 1 : 0)
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| c_param_name(n, i) }
     # NATIVE_ARGS per-position types (see native_arg_types). Optional
     # positions are never retyped; the padding is explicit.
@@ -242,41 +278,25 @@ class CodeGen
     end
 
     resumable = nil
-    fiber_guarded = false
     # RECEIVER_ROOTS: a fiber root that yields to its block takes the resumable form too (its entry is the same body).
     yielding_root = @fiber_roots&.include?(label) && BytecodeIR.for(irep).instructions_with_op(:BLKCALL).any?
     # RESUMABLE_DUAL: a method with a variant keeps the fast body, and its guard calls the variant.
     dual = !@rsm_variant && !rsm_variant_code(label).empty?
-    if !dual && (calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root || @rsm_variant)
+    if !dual && (calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label) || yielding_root || @rsm_variant || (@block_step_compile && label == @block_step_label))
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
       # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
       # outright -- unless it is a Fiber.new root that qualifies as a resumable step
       # function, or its own body cannot suspend, in which
       # case it compiles behind a run-time hand-off.
       plan = @rsm_variant ? build_resumable_plan(label) : resumable_plan(label)
-      if plan.is_a?(ResumablePlan)
-        resumable = plan
-      elsif fiber_body_guard?(label, d)
-        fiber_guarded = true
-      else
-        reason = if plan.is_a?(String)
-                   warn "bc2cpp: resumable: #{d.owner}##{d.name} stays interpreted: #{plan}" if (@resumable_warned ||= Set.new).add?(label)
-                   "is a Fiber.new root that cannot be compiled resumable: #{plan}"
-                 else
-                   calls_fiber_yield?(irep) ? 'calls Fiber.yield directly' : 'is reachable from a Fiber.new block'
-                 end
-        code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n" \
-               "#error #{d.owner}##{d.name} #{reason} -- not in this prototype's supported subset\n\n"
-        return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-                 arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
-      end
+      resumable = plan if plan.is_a?(ResumablePlan)
     end
 
     # ENTRY_GUARDED_SPECIALIZATION: nil unless BC2CPP_SPECIALIZE names this method.
     entry_spec = entry_specialization(label, d, irep, arg_names, arg_native_types,
                                       entry_specialization_eligibility(mandatory_ok: mandatory_ok, opt: opt, has_rest: has_rest, has_blk: has_blk,
                                                                        needs_blk_param: needs_blk_param, kw_table: kw_table, resumable: resumable,
-                                                                       fiber_guarded: fiber_guarded, needs_return_catch: needs_return_catch,
+                                                                       needs_return_catch: needs_return_catch,
                                                                        block_fallback_regions: block_fallback_regions))
     out = String.new
     out << "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n"
@@ -312,9 +332,17 @@ class CodeGen
       return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'takes a native argument') if arg_native_types.compact.any?
 
       @resumable = ResumableCtx.new(label, resumable.helpers)
+      @resumable.boxed = boxed_registers(block_fallback_regions)
+      # BLOCK_STEP_UPVARS: slot i of a block step's frame holds the pointer to its i-th captured local.
+      if @block_step_upvars && label == @block_step_label
+        @resumable.upvars = @block_step_upvars
+        @block_step_upvars.each { @resumable.new_slot }
+      end
+      @resumable.handlers = irep.catch_handlers.dup unless irep.catch_handlers.empty?
       @resumable.block = needs_blk_param || has_blk
       # OPTIONAL_ARGS: the optional count, when the jump table is recognised (the shape check refuses the rest).
       @resumable.optional = opt_jmp_targets ? opt : 0
+      @resumable.kw = kw_table
       step_body_start = out.length
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
@@ -335,8 +363,8 @@ class CodeGen
         type = arg_native_types[i]
         type ? "#{TYPE_OPS.fetch(type)[:box]}(#{arg})" : arg
       end
-      initial[total_args] = 'bc2cpp_blk' if has_blk
-      out << emit_register_initializers(irep.nregs, initial)
+      initial[blk_slot] = 'bc2cpp_blk' if has_blk
+      out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
       out << array_hash_fixnum_prologue(d)
@@ -436,7 +464,7 @@ class CodeGen
     # RESCUE_BODY_BLOCK_SUPPORT: shared with emit_rescue_try_body (see
     # emit_block_fallback_glue_pass).
     block_fallback_pre = emit_block_fallback_glue_pass(block_fallback_regions, recognize_explicit_block_arg_regions(irep),
-                                                        d, suppressed, glue_at)
+                                                        d, suppressed, glue_at, irep: irep)
     guarded_inline_finish(irep, guarded_inline)
 
     # LAMBDA_FALLBACK_SUPPORT: like BLOCK_CFUNC_FALLBACK_SUPPORT, but the RProc is
@@ -508,16 +536,18 @@ class CodeGen
     # `#error` check catches. Only the interior of a suppressed range (e.g. a
     # rescue region minus its begin_addr) loses its label.
     targets = jump_targets(irep) - (suppressed - glue_at.keys)
+    # STEP_HANDLERS: a handler's entry is reached by the dispatch switch, so it needs its label.
+    targets |= @resumable.handlers.map(&:target) if @resumable&.handlers
     # ARM_PRUNE (codegen_arm_prune.rb): the instructions no edge reaches. Stage A only counts them.
     arm_prune = arm_prune_analysis(irep, d)
     # BLKPUSH_YIELD_SUPPORT: set for this method's top-level loop only (cleared
     # after). emit_proc_fallback_fn manages its own value.
     # CORE_BLOCK_YIELD: with `&blk` declared, the BLKPUSH slot is that parameter's register.
-    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : (has_blk ? "r#{total_args + 1}" : nil)
+    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : (has_blk ? "r#{blk_slot + 1}" : nil)
     # BLOCK_FALLBACK_YIELD_SUPPORT: in a METHOD body only lv == 0 can be answered
     # (vm.c `if (lv == 0) stack = regs + 1`). codegen_yield stops at the first
     # method scope, so a method's own yield is always level 0.
-    @blk_param_level = 0
+    @blk_param_level = @block_step_needs_blk && label == @block_step_label ? 1 : 0
     # ENSURE_RAII_SUPPORT: an ensure needs code emitted AROUND instructions: the
     # guard and `{` before the protected range's first instruction, and `}`
     # before the handler (the `}` runs the ensure body via the guard's
@@ -595,6 +625,10 @@ class CodeGen
                own = glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
                inline_prefix ? inline_prefix + own : own
              end
+      # STEP_EXIT_JUMPS: an exit from an ensure region goes through the ensure body first.
+      text = step_exit_guard(insn, text) if step_ensure_handlers? && step_with_handlers?(irep) && !text.empty?
+      # STEP_HANDLERS: the handler lookup reads the address of the instruction the step was last at.
+      text = "  F->pc = #{insn.addr};\n" + text if @resumable&.handlers && !text.empty?
       # Without the flow pass there is no liveness to narrow the roots, so every element read is rooted.
       text += ElementReadRoots.keep_text(insn) if !flow_bodies && ElementReadRoots.element_read?(insn)
       if arm_prune_drop && arm_prune.include?(idx)
@@ -642,15 +676,20 @@ class CodeGen
       body = out.slice!(step_body_start..)
       # A block that stays a separate function throws its `return` to a catch around the whole
       # body, and a try block cannot be jumped into.
-      if needs_return_catch && [body, block_fallback_pre, @inline_nested_pre].any? { |code| code.include?('bc2cpp_return_from_block') }
+      unhandled_return = block_fallback_regions.any? do |region|
+        block_fallback_region_has_return_blk?(region) && !@step_ret_handled&.include?([irep.label, region[:block_addr]])
+      end
+      if needs_return_catch && unhandled_return && [body, block_fallback_pre, @inline_nested_pre].any? { |code| code.include?('bc2cpp_return_from_block') }
         body << resumable_error('a block that is not inlined returns from the method')
       end
+      body << step_exit_dispatch if step_ensure_handlers?
       out << resumable_step_function(step_name, body)
       out << "}\n\n"
     elsif needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
       out << "    if (bc2cpp_ret.token != bc2cpp_ret_guard.frame.token) throw;\n"
       out << "    bc2cpp_vm_restore(M, bc2cpp_ret_mark);\n"
+      out << "    if (M->exc) mrb_exc_raise(M, mrb_obj_value(M->exc));  // an ensure body raised: it replaces the return\n"
       out << "    return bc2cpp_ret.value;\n"
       out << "  }\n"
       out << "}\n\n"
@@ -660,7 +699,7 @@ class CodeGen
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
     out = drop_dead_statements(drop_unused_registers(out)) unless @resumable || ((@report_only_text || (@clean_probe && ENV['BC2CPP_PROBE_TEXT_CLEANUP'] != '0')) && !@runtime_installed_names)
-    out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
+    out = block_step_code + @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
     if entry_spec
@@ -673,7 +712,7 @@ class CodeGen
     if @resumable
       out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}", arg_names, @resumable, needs_blk_param || has_blk,
                                       optional: @resumable.optional.to_i, rest: has_rest,
-                                      always_exec: @rsm_variant ? true : false)
+                                      )
       first_error = @resumable.reasons.first || out[/^\s*#error (.*)$/, 1]
       first_error = 'a block call that is neither an inlined step/upto/downto loop nor a plain block function' if first_error&.match?(/unhandled opcode (BLOCK|SENDB|SSENDB)/)
       if first_error && (@resumable_warned ||= Set.new).add?(label)
@@ -683,17 +722,17 @@ class CodeGen
     @resumable = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    # A resumable entry handles a Fiber itself (its frame and driver), so it has no guard and saves no body.
-    guard = resumable ? nil : (core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded))
-    out << guard[:prologue] if guard && guard[:prologue]
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
-      out << "  return #{impl_name}(M, self);\n"
-    elsif arg_names.empty? && (needs_blk_param || has_blk)
+      out << entry_return_line(label, d, impl_name, [])
+    elsif arg_names.empty? && (needs_blk_param || has_blk) && !kw_rest_block
       # BLKPUSH_YIELD_SUPPORT/EXPLICIT_BLOCK_PARAM_SUPPORT with zero mandatory
       # arguments: a standalone mrb_get_args("&") call.
       out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
       out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
-      out << "  return #{impl_name}(M, self, bc2cpp_blk);\n"
+      out << entry_return_line(label, d, impl_name, 'bc2cpp_blk')
+    elsif kw_rest_block
+      out << keyword_rest_block_entry(label, d, impl_name, arg_names, arg_native_types, mand: mand, opt: opt, has_rest: has_rest,
+                                                           has_blk: has_blk || needs_blk_param, kw_table: kw_table)
     elsif kw_table
       # KEYWORD_ARG_SUPPORT: mrb_get_args ":" with mrb_kwargs (mruby.h). `required`
       # counts the leading required entries in `table`; an omitted optional keyword
@@ -741,7 +780,7 @@ class CodeGen
       call_args += kw_table.flat_map do |kw|
         kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
       end
-      out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+      out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
     elsif kwrest_only
       # KEYWORD_REST_ONLY: the positionals bind exactly; the keyword hash is the callinfo's keyword slot (read as the
       # has_rest branch below does), or a fresh empty Hash when the call passed none.
@@ -757,7 +796,7 @@ class CodeGen
       out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
       out << "  mrb_value #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
       out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
-      out << "  return #{impl_name}(M, self, #{(mand_names + [kwrest_name]).join(', ')});\n"
+      out << entry_return_line(label, d, impl_name, "#{(mand_names + [kwrest_name]).join(', ')}")
     elsif has_rest
       # REST_ARG_SUPPORT: mrb_get_args `*` returns a pointer into the live VM stack,
       # so copy it into an Array (mrb_ary_new_from_values) right away, matching the
@@ -803,7 +842,7 @@ class CodeGen
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
         call_args << 'bc2cpp_given_opt'
       end
-      out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+      out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
     else
       # Each local's type must match what its mrb_get_args format character writes:
       # 'o' writes an mrb_value, 'i' (NATIVE_ARGS) an mrb_int*/mrb_sym*
@@ -812,18 +851,21 @@ class CodeGen
       # OPTIONAL_ARG_SUPPORT: optional positions start as mrb_nil_value(): `|` leaves
       # an omitted out-param untouched, and reading uninitialized memory would be UB
       # even though the default-value code overwrites it.
-      arg_names.each_with_index do |a, i|
+      # OPTIONAL_KWREST: the keyword rest is the last parameter but not a positional: it is read from the callinfo below.
+      pos_names = has_kwrest ? arg_names[0...-1] : arg_names
+      pos_names.each_with_index do |a, i|
         default = i >= mand ? ' = mrb_nil_value()' : ''
         out << "  #{native_c_type(arg_native_types[i])} #{a}#{default};\n"
       end
+      out << "  mrb_value #{arg_names.last} = mrb_nil_value();\n" if has_kwrest
       # 'i' is mrb_as_int, 'n' is mrb_obj_to_sym: the same coercions compile_send
       # applies at a devirtualized call site; keep them in lockstep. The `|` marker
       # goes at the mandatory/optional boundary.
-      fmt = arg_native_types.each_with_index.map do |t, i|
+      fmt = arg_native_types.first(pos_names.size).each_with_index.map do |t, i|
         ch = t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o')
         i == mand && opt.positive? ? "|#{ch}" : ch
       end.join
-      ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
+      ptrs = pos_names.map { |a| "&#{a}" }.join(', ')
       # BLKPUSH_YIELD_SUPPORT: mrb_get_args `&` is this call's block (src/class.c
       # `case '&':`), nil when none (plain `&`, not `&!`), appended to the same call.
       # Neither needs_blk_param nor has_blk methods have optionals.
@@ -836,6 +878,12 @@ class CodeGen
       # where mrb_get_args says `1..2`.
       out << "  bc2cpp_check_argc(M, #{mand}, #{mand + opt});\n" if opt.positive?
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
+      if has_kwrest
+        kwrest_name = arg_names.last
+        out << "  mrb_callinfo* bc2cpp_kw_ci = M->c->ci;\n"
+        out << "  #{kwrest_name} = bc2cpp_kw_ci->nk == 15 ? bc2cpp_kw_ci->stack[bc2cpp_kw_ci->n == 15 ? 2 : bc2cpp_kw_ci->n + 1] : mrb_nil_value();\n"
+        out << "  if (!mrb_hash_p(#{kwrest_name})) #{kwrest_name} = mrb_hash_new(M);\n"
+      end
       if opt.positive?
         # OPTIONAL_ARG_SUPPORT: mrb_get_argc(M) - mand is the quantity OP_ENTER uses to
         # pick the jump-table entry. The clamp to [0, opt] is a formality
@@ -843,10 +891,10 @@ class CodeGen
         out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
         out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
-        out << "  return #{impl_name}(M, self, #{((has_blk || needs_blk_param) ? arg_names + ['bc2cpp_blk'] : arg_names).join(', ')}, bc2cpp_given_opt);\n"
+        out << entry_return_line(label, d, impl_name, "#{((has_blk || needs_blk_param) ? arg_names + ['bc2cpp_blk'] : arg_names).join(', ')}, bc2cpp_given_opt")
       else
         call_args = (needs_blk_param || has_blk) ? arg_names + ['bc2cpp_blk'] : arg_names
-        out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+        out << entry_return_line(label, d, impl_name, "#{call_args.join(', ')}")
       end
     end
     out << "}\n\n"
@@ -879,11 +927,15 @@ class CodeGen
     aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     # DECLARED_RETURN_GUARD: a runtime-checked return declaration checks every value the body returns.
-    out = insert_rsm_guard(out, impl_name, guard) if guard&.[](:rsm_impl)
     out = declared_return_guard_wrap(label, out, impl_name)
+    # DYN_CALL: a method with a variant is reached through a send by its variant (its fast body's wrapper is the key).
+    if !@rsm_variant && !rsm_variant_code(label).empty? && !(has_rest && opt.to_i.positive?) && !kw_table
+      out << resumable_dyn_function(rsm_impl_name(d), "#{d.owner}##{d.name}", arg_names.size, needs_blk_param || has_blk,
+                                    wrapper: cpp_name(d.owner, d.name), optional: opt.to_i, rest: has_rest)
+    end
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
-      code: "#{@rsm_variant ? '' : rsm_variant_without_duplicates(label, out)}#{out}", visibility: d.visibility, guard: guard&.fetch(:index),
+      code: "#{@rsm_variant ? '' : rsm_variant_without_duplicates(label, out)}#{out}", visibility: d.visibility,
       resumable: !resumable.nil? || (!@rsm_variant && !rsm_variant_code(label).empty?) }
   end
 
@@ -1000,12 +1052,85 @@ class CodeGen
   end
 
   # R0 stays, unused or not: it is the line ParamTrace instruments (param_trace.rb REG0_RE).
-  def emit_register_initializers(nregs, arguments)
-    (0...nregs).map do |reg|
+  # +boxed+ (STEP_CLOSURES): registers that live in a heap cells Array (bc2cpp_cells_ary) the blocks' envs keep; a register is
+  # a reference to its cell, so every use of it reads and writes the cell.
+  def emit_register_initializers(nregs, arguments, boxed: [])
+    cells = String.new
+    unless boxed.empty?
+      cells << "  mrb_value bc2cpp_cells_ary = mrb_ary_new_capa(M, #{boxed.size});\n"
+      cells << "  for (int bc2cpp_ci = 0; bc2cpp_ci < #{boxed.size}; ++bc2cpp_ci) mrb_ary_push(M, bc2cpp_cells_ary, mrb_nil_value());\n"
+      cells << "  mrb_value* bc2cpp_cells = RARRAY_PTR(bc2cpp_cells_ary);\n"
+      cells << "  Bc2cppCellsGuard bc2cpp_cells_guard = { M, bc2cpp_cells_ary };\n"
+    end
+    cells + (0...nregs).map do |reg|
       next "  [[maybe_unused]] mrb_value r0 = self;\n" if reg.zero?
 
-      "  mrb_value #{RegName[reg]} = #{arguments[reg - 1] || 'mrb_nil_value()'};\n"
+      init = arguments[reg - 1] || 'mrb_nil_value()'
+      if (slot = boxed.index(reg))
+        "  mrb_value& #{RegName[reg]} = bc2cpp_cells[#{slot}];\n  #{RegName[reg]} = #{init};\n"
+      else
+        "  mrb_value #{RegName[reg]} = #{init};\n"
+      end
     end.join
+  end
+
+  # STEP_KEYWORDS: the registered wrapper of a method taking keywords next to a rest and/or block parameter. One mrb_get_args
+  # call (`|o*:&`) binds them all; an unknown or missing keyword raises there, as the KEY_P/KARG/KEYEND sequence expects.
+  # Parameter order matches arg_params.
+  def keyword_rest_block_entry(label, d, impl_name, arg_names, arg_native_types, mand:, opt:, has_rest:, has_blk:, kw_table:)
+    out = String.new
+    mand_names = arg_names.first(mand)
+    opt_names = arg_names[mand, opt]
+    rest_name = has_rest ? arg_names[mand + opt] : nil
+    mand_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+    opt_names.each { |a| out << "  mrb_value #{a} = mrb_nil_value();\n" }
+    fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join
+    fmt += "|#{'o' * opt}" if opt.positive?
+    ptrs = (mand_names + opt_names).map { |a| "&#{a}" }
+    if has_rest
+      out << "  const mrb_value* bc2cpp_rest_ptr;\n  mrb_int bc2cpp_rest_len;\n"
+      fmt += '*'
+      ptrs.push('&bc2cpp_rest_ptr', '&bc2cpp_rest_len')
+    end
+    ordered_kws = kw_table.select { |kw| kw[:required] } + kw_table.reject { |kw| kw[:required] }
+    required_count = kw_table.count { |kw| kw[:required] }
+    table_entries = ordered_kws.map { |kw| "mrb_intern_cstr(M, \"#{kw[:name]}\")" }.join(', ')
+    out << "  mrb_sym bc2cpp_kw_table[#{ordered_kws.size}] = { #{table_entries} };\n"
+    out << "  mrb_value bc2cpp_kw_values[#{ordered_kws.size}];\n"
+    out << "  mrb_kwargs bc2cpp_kwargs = { #{ordered_kws.size}, #{required_count}, bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
+    fmt += ':'
+    ptrs << '&bc2cpp_kwargs'
+    if has_blk
+      out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
+      fmt += '&'
+      ptrs << '&bc2cpp_blk'
+    end
+    out << "  bc2cpp_check_argc_kw(M, #{mand}, #{has_rest ? -1 : mand + opt});\n"
+    out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs.join(', ')});\n"
+    out << "  mrb_value #{rest_name} = mrb_ary_new_from_values(M, bc2cpp_rest_len, bc2cpp_rest_ptr);\n" if has_rest
+    call_args = mand_names + opt_names
+    call_args << rest_name if has_rest
+    call_args << 'bc2cpp_blk' if has_blk
+    if opt.positive?
+      out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
+      out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
+      out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
+      call_args << 'bc2cpp_given_opt'
+    end
+    ordered_kws.each_with_index do |kw, i|
+      var = kwarg_param_name(kw[:name])
+      if kw[:required]
+        out << "  mrb_value #{var} = bc2cpp_kw_values[#{i}];\n"
+        call_args << var
+      else
+        given = kw_given_param_name(kw[:name])
+        out << "  mrb_value #{var} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? mrb_nil_value() : bc2cpp_kw_values[#{i}];\n"
+        out << "  mrb_int #{given} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
+        call_args.push(var, given)
+      end
+    end
+    out << entry_return_line(label, d, impl_name, call_args.join(', '))
+    out
   end
 
   # The stub compile_method returns for a Fiber.new root that turned out not to qualify.
@@ -1018,101 +1143,6 @@ class CodeGen
       unsupported: true, visibility: d.visibility }
   end
 
-  # CORE_BLOCK_GUARD: the entry of a core method that touches a block first
-  # checks whether a Fiber is running and, if so, lets the VM run the bytecode instead
-  # (bc2cpp_core_interpreted). A compiled frame under a block that calls Fiber.yield
-  # cannot be suspended, and a frame in the root context never is: a yield there is a
-  # FiberError with or without this frame. Direct `_impl` calls never take a block
-  # (pure_mandatory_or_optional_arity?), so the entry is the only way in with one.
-  # An Enumerable method also needs an `each` that the core defines, since a block
-  # captured by pointer must not outlive the frame (BLOCK_FALLBACK_UPVAR_SAFE_METHODS).
-  # Returns { index:, prologue: } or nil for an unguarded method.
-  # FIBER_BODY_GUARD: may this Fiber-reachable method compile behind a
-  # run-time hand-off instead of staying interpreted?
-  #
-  # Only when its OWN body cannot suspend. `core_body_relaxable?` is YieldReach
-  # answering exactly that, and it is the same question CORE_BLOCK_GUARD
-  # already asks of a core body before narrowing its guard condition (below). The
-  # yield that matters happens in the block the CALLER supplied, which is not
-  # running inside this frame -- and it is not proved yield-free, because it cannot
-  # be. That is what the hand-off is for.
-  #
-  # A method that calls Fiber.yield itself is never admitted: there the yield IS in
-  # its own frame, which no hand-off from its own entry can step around.
-  #
-  # Neither is a method that builds an Enumerator: mruby-enumerator runs a
-  # generator on a Fiber (CoreDefs.fiber_gem?), so that block's frame is below a
-  # fiber entry by construction, not by a caller. YieldReach marks only
-  # `Fiber.new` blocks as fiber bodies (scan_fiber_call), so `body_yield_free?`
-  # reads such a builder as yield-free when its block is not. That gap predates
-  # this guard -- nothing compiled it before -- and admitting one would put a
-  # compiled frame under a Fiber for real.
-  #
-  # BC2CPP_FIBER_BODY_GUARD=0 restores the blanket refusal.
-  def fiber_body_guard?(label, d = nil)
-    return false if ENV['BC2CPP_FIBER_BODY_GUARD'] == '0'
-    return false if d && calls_fiber_yield?(@ireps.fetch(label))
-    return false if @yield_reach&.builds_enumerator?(label)
-
-    core_body_relaxable?(label)
-  end
-
-  # The entry half, mirroring core_block_guard: with a Fiber other than the root
-  # live, run this method bytecode instead, so no compiled frame is left between
-  # the fiber entry and a yield in the caller block.
-  def fiber_body_guard_prologue(label, enabled)
-    return nil unless enabled
-
-    index = (@core_guard_index[label] ||= @core_guard_index.size)
-    { index: index,
-      prologue: "  if (mrb_unlikely(M->c != M->root_c)) return bc2cpp_core_interpreted(M, self, #{index});\n" }
-  end
-
-  # GUARD_FIBER_FREE (on unless BC2CPP_GUARD_FIBER_FREE=0): the Fiber half of CORE_BLOCK_GUARD, for a guarded method no
-  # Fiber.new body can reach. The test `M->c != M->root_c` can only be true while a Fiber other than the root is
-  # current, and a method outside YieldReach#fiber_crossable never runs then (every call made under a Fiber body is
-  # in that transitive set). Such a method needs neither its entry hand-off nor its saved bytecode: with no guard,
-  # MrblibStubs keeps no bytecode for it (stub_keep_reason's `guarded`). Only in a sound world, and never for an
-  # Enumerable method, whose guard also tests `each` (a test that is not about Fibers and stays as it is).
-  # On by default; BC2CPP_GUARD_FIBER_FREE=0 turns it off, and then the build emits what it did before the flag.
-  def guard_fiber_free?(label, d)
-    return false if ENV['BC2CPP_GUARD_FIBER_FREE'] == '0'
-    return false if d.owner == 'Enumerable' || @yield_reach.nil?
-
-    # fiber_crossable runs the analysis, which sets sound?; the query order matters.
-    crossable = @yield_reach.fiber_crossable
-    @yield_reach.sound? && !crossable.include?(label)
-  end
-
-  def core_block_guard(label, d)
-    return nil unless d.core && self.class.core_guarded&.include?(label)
-    return nil if guard_fiber_free?(label, d)
-
-    rsm = rsm_variant_code(label)
-    unless rsm.empty?
-      # RESUMABLE_DUAL: the same condition, calling the resumable variant with the entry's block. No saved body: index nil.
-      condition = if core_body_relaxable?(label)
-                    '(M->c != M->root_c && !bc2cpp_block_yield_free(bc2cpp_entry_block(M)))'
-                  else
-                    'M->c != M->root_c'
-                  end
-      # The guard goes before the wrapper's call to the fast body, where its arguments are extracted (rsm_guard_line).
-      return { index: nil, prologue: nil, rsm_impl: rsm_impl_name(d), rsm_cond: condition }
-    end
-
-    index = (@core_guard_index[label] ||= @core_guard_index.size)
-    # YIELD_REACH: a body that cannot suspend a Fiber on its own stays compiled under one
-    # while the block it runs is provably yield-free too (checked per call, by its env flag).
-    condition = if core_body_relaxable?(label)
-                  '(M->c != M->root_c && !bc2cpp_block_yield_free(bc2cpp_entry_block(M)))'
-                else
-                  'M->c != M->root_c'
-                end
-    condition += ' || !bc2cpp_core_each_is_builtin(M, self)' if d.owner == 'Enumerable'
-    { index: index,
-      prologue: "  if (mrb_unlikely(#{condition})) return bc2cpp_core_interpreted(M, self, #{index});\n" }
-  end
-
   # RESUMABLE_DUAL: the direct-yield core iterators that get a resumable variant beside their fast body, so a Fiber
   # reaches them without a saved bytecode driver. Each is listed only once scripts/bc2cpp/resumable_variants_check.rb
   # runs it both ways (inside a Fiber and plainly) with the same output. Methods whose block is called from an inner
@@ -1120,35 +1150,36 @@ class CodeGen
   RSM_SUFFIX = '_rsm'
   RESUMABLE_DUAL = %w[
     Array#collect! Array#delete_if Array#each Array#each_index Array#fetch
-    Array#reject! Array#select! Enumerable#sort Hash#delete Hash#fetch
+    Array#find Array#reject! Array#select! Array#sort Enumerable#sort Hash#delete Hash#fetch
     Hash#each Integer#downto Integer#times Integer#upto
     String#each_char String#upto StringIO#each
+    Range#max Range#min Enumerable#all? Enumerable#any? Enumerable#detect Enumerable#find_index Enumerable#none? Array#sort_by Array#to_h Array#uniq Array#uniq! Enumerable#collect Enumerable#count Enumerable#each_with_object Enumerable#filter_map Enumerable#find_all Enumerable#flat_map Enumerable#inject Enumerable#max Enumerable#min Enumerable#reject Enumerable#sort_by Enumerable#sum Enumerable#to_h Enumerable#uniq Enumerable#each_with_index Hash#delete_if Hash#reject Hash#select Hash#each_key Hash#each_value Hash#merge! Hash#reject! Hash#select! Range#each
+    Enumerable#each_slice Enumerable#each_cons Enumerable#group_by Enumerable#partition Enumerable#min_by Enumerable#max_by Enumerable#take_while Enumerable#drop_while
+    Kernel#loop Hash#fetch_values
   ].freeze
 
-  def rsm_dual?(label, d)
-    return false unless EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}") &&
-                        self.class.core_guarded&.include?(label)
+  RESUMABLE_DUAL_NAMES = RESUMABLE_DUAL.to_set { |key| key.split('#').last }.freeze
 
-    # Only where the guard itself is emitted: a method no Fiber can cross keeps no guard, so it needs no variant.
-    !guard_fiber_free?(label, d)
+  def rsm_dual?(label, d)
+    EnumStep.enabled? && d.core && RESUMABLE_DUAL.include?("#{d.owner}##{d.name}")
   end
 
   def rsm_impl_name(d) = "#{cpp_name(d.owner, d.name)}#{RSM_SUFFIX}_impl"
-
-  # RESUMABLE_DUAL: the guard, placed before the wrapper's call to the fast body. The variant takes that call's arguments,
-  # so the guard passes them on; a call from a fiber runs the variant instead of the fast body.
-  def insert_rsm_guard(out, impl_name, guard)
-    call = out.match(/^  return #{Regexp.escape(impl_name)}\((?<args>[^\n]*)\);\n/)
-    return out unless call
-
-    line = "  if (mrb_unlikely(#{guard[:rsm_cond]})) return #{guard[:rsm_impl]}(#{call[:args]});\n"
-    out.sub(call[0]) { "#{line}#{call[0]}" }
-  end
 
   # The variant's code (its step, its entry and the helpers it uses), or '' when the method cannot take the resumable
   # form. The variant's registered wrapper is cut off, as entry specialization cuts its own.
   def rsm_variant_code(label)
     @rsm_variants&.[](label) || ''
+  end
+
+  # RESUMABLE_FIBER_ENTRY: the entry's call to the body. A method with a variant takes the call under a Fiber
+  # (M->c != M->root_c) when entered straight from the VM; the variant checks that itself.
+  def entry_return_line(label, d, impl_name, args)
+    argtxt = args.is_a?(String) ? (args.empty? ? '' : ", #{args}") : args.map { |a| ", #{a}" }.join
+    line = "  return #{impl_name}(M, self#{argtxt});\n"
+    return line if @rsm_variant || rsm_variant_code(label).empty?
+
+    "  if (M->c != M->root_c || bc2cpp_prologue.expect) return #{rsm_impl_name(d)}(M, self#{argtxt});\n#{line}"
   end
 
   # The variant's own helpers (block fallbacks, direct entries) are compiled from the same blocks as the fast body's, under
@@ -1174,12 +1205,17 @@ class CodeGen
     # The program-wide facts a core body binds statically (its owner of length, [] ...) are withheld: the variant
     # dispatches the receiver's methods by name, as the interpreter does, so a subclass's own definition is run.
     @core_program_world = nil
+    # The block steps the variant compiled travel in its code: when the variant is dropped they are gone with it.
+    steps_before = [@block_steps&.dup, @block_step_emitted&.dup]
     begin
       result = compile_method(label)
     ensure
       @rsm_variant, @entry_spec_suffix, @core_program_world = saved
     end
-    return '' if result[:unsupported] || result[:code].include?('#error') || !result[:resumable]
+    if result[:unsupported] || result[:code].include?('#error') || !result[:resumable]
+      @block_steps, @block_step_emitted = steps_before
+      return ''
+    end
 
     entry = "static mrb_value #{cpp_name(d.owner, d.name)}(mrb_state* M, mrb_value self) {\n"
     cut = result[:code].rindex(entry)
