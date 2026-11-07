@@ -2,12 +2,9 @@
 # frozen_string_literal: true
 
 # SEALED_HASH_STORES: a sealed Hash ivar (SEALED_HASH_IVAR) may also be filled by `@h[k] = v` and read by the native
-# key-only sends (`keys`, `key?`, `size`, ...). A `-> C?` declaration over `@h[k]` is trusted as written (RBS only:
-# the per-return-path proofs were deleted, 0fb29edf3), so each fixture runs interpreted and compiled. Where every store
-# is a C the two must print the same. A store that is not a C (LEAKY, ESCAPED) breaks the declaration: the interpreter
-# raises NoMethodError on `label`, and the compiled call that trusts `-> Thing?` runs Thing#label on the wrong object
-# instead. That divergence is the declaration's contract, not a compiler bug, so those two cases pin it: the compiled
-# run must finish and differ from the interpreted one only by the missing 'no label' line.
+# key-only sends (`keys`, `key?`, `size`, ...). A `-> C?` declaration over `@h[k]` is trusted as written (RBS only),
+# so each fixture runs interpreted and compiled, and the two must print the same. A store that is not a C makes the
+# compiled call of `label` (defined on Thing alone) run on the wrong object, which the parity comparison reports.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/sealed_hash_stores_check.rb
 require 'tmpdir'
@@ -134,20 +131,16 @@ build = Bc2cppFixtureRuntime.full_or_build
 check.call('a full-core libmruby builds for the parity runs', !build.nil?)
 if build
   cases = [
-    ['`@h[k] = Thing.new` with the sealed rule: interpreted and compiled run the same', SOURCE, '1', true],
-    ['without the sealed rule the declaration is still trusted: interpreted and compiled run the same', SOURCE, '0', true],
-    ['a store of another class breaks the declaration: the compiled call trusts `-> Thing?` (no NoMethodError)', LEAKY, '1', false],
-    ['a Hash passed out as an argument breaks the declaration: the compiled call trusts `-> Thing?`', ESCAPED, '1', false]
+    ['`@h[k] = Thing.new` with the sealed rule: interpreted and compiled run the same', SOURCE, '1'],
+    ['without the sealed rule the declaration is still trusted: interpreted and compiled run the same', SOURCE, '0'],
+    ['a store of another class: interpreted and compiled run the same', LEAKY, '1'],
+    ['a Hash passed out as an argument: interpreted and compiled run the same', ESCAPED, '1']
   ]
-  cases.each do |name, source, flag, parity|
+  cases.each do |name, source, flag|
     generated, interpreted, compiled = run.call(source, flag, build)
     check.call("#{name} (the driver runs to its end)", generated && interpreted&.last == 'end')
-    # A broken declaration: only the interpreter reaches the rescue, so the compiled lines are the interpreted ones
-    # without 'no label'.
-    expected = parity ? interpreted : interpreted&.reject { |l| l == 'no label' }
-    check.call(name, generated && !interpreted.nil? && expected == compiled)
-    check.call("#{name} (the interpreter does raise)", interpreted.include?('no label')) unless parity
-    next unless generated && interpreted && compiled && expected != compiled
+    check.call(name, generated && !interpreted.nil? && interpreted == compiled)
+    next unless generated && interpreted && compiled && interpreted != compiled
 
     interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
   end

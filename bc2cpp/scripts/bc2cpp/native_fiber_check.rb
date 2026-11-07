@@ -277,11 +277,12 @@ code, err = begin
   # The core mrblib of the gems the no-fiber build has, mruby-enumerator among them (it builds on the placeholder
   # mruby-fiber; its next_values is compiled onto the C++ Fiber). mruby-stringio stays out (the scenarios skip it).
   # mruby-enum-lazy is in the no-fiber build (its gembox) but not among the gems bc2cpp compiles for the real closed build,
-  # so the probe's closed world adds its mrblib as program source: `lazy` and Enumerator::Lazy are then defined in it.
+  # so the probe's closed world adds its mrblib as mruby's own Ruby (the path places it under 3rd/mruby/mrbgems/*/mrblib, CoreDefs::SOURCE:
+  # as a program definition it would withdraw the kind_of block arms of every name it defines): `lazy` and Enumerator::Lazy are then defined.
   core_gems = BC2CPP_CANONICAL_CORE_GEMS - Bc2cppFixtureRuntime::NOFIBER_GEMS - %w[mruby-stringio]
   lazy_rb = File.join(Bc2cppFixtureRuntime::ROOT, '3rd/mruby/mrbgems/mruby-enum-lazy/mrblib/lazy.rb')
   Bc2cppFixtureRuntime.generate(PROBE, dir, core: true, core_gems: core_gems, only_owners: OWNERS + %w[Enumerator],
-                                            extra: [['lazy.rb', File.read(lazy_rb)]])
+                                            extra: [['3rd/mruby/mrbgems/mruby-enum-lazy/mrblib/lazy.rb', File.read(lazy_rb)]])
 ensure
   saved_guard ? ENV['BC2CPP_GUARD_FIBER_FREE'] = saved_guard : ENV.delete('BC2CPP_GUARD_FIBER_FREE')
 end
