@@ -1007,13 +1007,23 @@ class CodeGen
       else
         "  return #{RegName[r]};\n"
       end
+    when :EXCEPT
+      # STEP_HANDLERS: a handler's entry captures the exception the fiber/step put in M->exc (nil when the protected region
+      # was left normally and execution fell into the ensure body).
+      if @resumable&.handlers
+        "  #{RegName[insn.reg]} = M->exc ? mrb_obj_value(M->exc) : mrb_nil_value();\n  M->exc = nullptr;\n"
+      else
+        "  #error unhandled opcode EXCEPT -- not in this prototype's supported subset\n"
+      end
     when :RESCUE
       # "RESCUE Ra Rb": vm.c `R[b] = R[a].isa?(R[b])`. Ra holds the exception (only
       # RESCUE_SUPPORT's glue produces one) and Rb the class from the preceding
       # GETCONST/GETMCNST chain, so this is correct wherever it appears; not gated on
       # the recognizer (unlike EXCEPT).
       d, s = insn.regs
-      "  #{RegName[s]} = mrb_bool_value(mrb_obj_is_kind_of(M, #{RegName[d]}, mrb_class_ptr(#{RegName[s]})));\n"
+      # A step's break/return/throw unwinding travels as an exception object no `rescue` clause matches.
+      unwind = @resumable ? "!bc2cpp_unwind_p(M, #{RegName[d]}) && " : ''
+      "  #{RegName[s]} = mrb_bool_value(#{unwind}mrb_obj_is_kind_of(M, #{RegName[d]}, mrb_class_ptr(#{RegName[s]})));\n"
     when :RAISEIF
       # "RAISEIF Ra": re-raise Ra unless nil. In a recognized rescue it is reached
       # only on the non-matching path with the exception in Ra. vm.c's mrb_break_p

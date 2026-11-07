@@ -314,6 +314,7 @@ class CodeGen
         @resumable.upvars = @block_step_upvars
         @block_step_upvars.each { @resumable.new_slot }
       end
+      @resumable.handlers = irep.catch_handlers.dup unless irep.catch_handlers.empty?
       @resumable.block = needs_blk_param || has_blk
       # OPTIONAL_ARGS: the optional count, when the jump table is recognised (the shape check refuses the rest).
       @resumable.optional = opt_jmp_targets ? opt : 0
@@ -510,6 +511,8 @@ class CodeGen
     # `#error` check catches. Only the interior of a suppressed range (e.g. a
     # rescue region minus its begin_addr) loses its label.
     targets = jump_targets(irep) - (suppressed - glue_at.keys)
+    # STEP_HANDLERS: a handler's entry is reached by the dispatch switch, so it needs its label.
+    targets |= @resumable.handlers.map(&:target) if @resumable&.handlers
     # ARM_PRUNE (codegen_arm_prune.rb): the instructions no edge reaches. Stage A only counts them.
     arm_prune = arm_prune_analysis(irep, d)
     # BLKPUSH_YIELD_SUPPORT: set for this method's top-level loop only (cleared
@@ -597,6 +600,8 @@ class CodeGen
                own = glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
                inline_prefix ? inline_prefix + own : own
              end
+      # STEP_HANDLERS: the handler lookup reads the address of the instruction the step was last at.
+      text = "  F->pc = #{insn.addr};\n" + text if @resumable&.handlers && !text.empty?
       # Without the flow pass there is no liveness to narrow the roots, so every element read is rooted.
       text += ElementReadRoots.keep_text(insn) if !flow_bodies && ElementReadRoots.element_read?(insn)
       if arm_prune_drop && arm_prune.include?(idx)

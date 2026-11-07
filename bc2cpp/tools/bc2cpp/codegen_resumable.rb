@@ -15,6 +15,8 @@ class ResumableCtx
   attr_accessor :nregs, :register_slots, :upvars
   # BLOCK: the method takes a block (kept in the frame's block slot). block_slot is that slot's R index.
   attr_accessor :block, :block_slot
+  # HANDLERS: the irep's catch handlers (rescue/ensure) when the step has any, and the state each one's entry is dispatched by.
+  attr_accessor :handlers
   # OPTIONAL_ARGS: how many optional positional arguments the method takes (its jump table is the glue at the first
   # JMP, which switches on bc2cpp_given_opt). 0 for a method without optional arguments.
   attr_accessor :optional
@@ -174,6 +176,30 @@ class CodeGen
     reason || ResumablePlan.new(label, helpers)
   end
 
+  # STEP_HANDLERS: a step may have rescue and ensure handlers (the exception is caught around the step body and the step is
+  # re-entered at the handler, see resumable_step_function). What the step cannot do is leave an ensure region by a jump the
+  # handler table cannot see: a return, break or an unwinding jump out of it would skip the ensure body.
+  def resumable_handler_problem(irep)
+    handlers = irep.catch_handlers
+    return nil if handlers.empty?
+    return 'has a handler of a type a step cannot enter' unless handlers.all? { |h| %i[rescue ensure].include?(h.type) }
+
+    ensures = handlers.select { |h| h.type == :ensure }
+    return nil if ensures.empty?
+
+    BytecodeIR.for(irep).each_source do |insn, _|
+      next unless ensures.any? { |h| h.begin_addr <= insn.addr && insn.addr < h.end_addr }
+
+      case insn.op
+      when :RETURN, :RETURN_BLK, :BREAK
+        return "leaves a begin/ensure region with #{insn.op}"
+      when :JMPUW
+        return 'leaves a begin/ensure region by a jump' unless jmpuw_plain_jump_at?(irep, insn)
+      end
+    end
+    nil
+  end
+
   def resumable_shape_problem(irep, d)
     # enter_fields: required, optional, rest, post, keyword, keyword rest, block.
     # The entry copies positional arguments and the block into the frame.
@@ -192,7 +218,8 @@ class CodeGen
     end
     # REST_ARGS: a rest argument the wrapper builds into an Array (rest_only_arity? is the shape it recognises).
     return 'takes a rest argument in a shape the step cannot enter' if fields[2].positive? && fields[1].zero? && !rest_only_arity?(irep)
-    return 'has a rescue or ensure handler' unless irep.catch_handlers.empty?
+    handler_problem = resumable_handler_problem(irep)
+    return handler_problem if handler_problem
 
     nil
   end
@@ -293,6 +320,12 @@ class CodeGen
 
       resumable_unwind_site(insn)
     when :SSEND, :SSEND0
+      # CATCH_THROW: mruby's throw finds its catch on the VM's call stack; in a step it goes through the dynamic call, whose
+      # dispatcher finds the catch frame of this fiber (bc2cpp_fiber_catch.hxx) and declines for any other.
+      if insn.sym == 'throw' && insn.op == :SSEND && @resumable.flat && reg_offset.zero? && !@resumable_plain && insn.plain_fixed_argc? &&
+         [1, 2].include?(insn.argc.to_i)
+        return resumable_dyn_site('self', insn.reg, insn.argc.to_i, 'mrb_nil_value()', name: 'throw')
+      end
       return nil unless @fiber_yield_names.include?(insn.sym)
 
       resumable_helper_call(insn, irep, d, idx, reg_offset)
@@ -686,17 +719,52 @@ class CodeGen
     out << "  // RESUMABLE_LOCAL_REGISTERS\n" if locals
     registers.each_with_index { |reg, slot| out << "  mrb_value#{'&' unless locals} r#{reg} = R[#{slot + 2}];\n" }
     out << "  [[maybe_unused]] mrb_value bc2cpp_blk = R[#{block_slot}];\n" if block_slot
-    out << "  const mrb_int bc2cpp_state = F->state;\n"
+    handlers = @resumable.handlers
+    out << "  F->has_handlers = #{handlers ? handlers.size : 0};\n"
+    out << "  #{handlers ? '' : 'const '}mrb_int bc2cpp_state = F->state;\n"
     # OPTIONAL_ARGS: a call that starts stores -(given + 1) in the frame state (the entry does). The body's jump-table
     # glue switches on bc2cpp_given_opt, and the resume switch is skipped for that start.
     optional = @resumable.optional.to_i.positive?
     out << "  const mrb_int bc2cpp_given_opt = bc2cpp_state < 0 ? -bc2cpp_state - 1 : 0;\n" if optional
     out << "  if (bc2cpp_state != 0) R[1] = bc2cpp_resume;\n"
     out << "  r0 = self;\n"
+    # STEP_HANDLERS: the body runs in a protected call so an exception can be turned into a jump to a handler's entry.
+    out << "  auto bc2cpp_body = [&]() -> mrb_value {\n" if handlers
+    # An exception the fiber delivers (a frame this step CALLed raised, or an unwind passes through it) is raised here, at
+    # the address the step suspended at, so the handler lookup is the same as for one raised by the step itself.
+    out << "  if (F->raise_pending) { F->raise_pending = 0; mrb_exc_raise(M, R[1]); }\n" if handlers
     out << (optional ? "  if (bc2cpp_state >= 0) switch (bc2cpp_state) {\n    case 0: break;\n" : "  switch (bc2cpp_state) {\n    case 0: break;\n")
     @resumable.states.each { |n| out << "    case #{n}: goto Lbc2cpp_resume_#{n};\n" }
+    (handlers || []).each_with_index { |h, k| out << "    case #{RESUMABLE_HANDLER_STATE + k}: goto L#{h.target};\n" }
     out << "    default: bc2cpp_resume_bad_state(M);\n  }\n"
     out << body
+    out << resumable_handler_loop(handlers) if handlers
+    out
+  end
+
+  RESUMABLE_HANDLER_STATE = 1_000_000
+
+  # The loop that runs the body of a step with handlers: an exception takes the innermost handler whose region covers the
+  # address the step was last at (F->pc, set before each instruction), as vm.c's catch_handler_find does (the table is
+  # searched from its last entry). The handler's entry reads the exception from M->exc (EXCEPT). No handler: the exception
+  # leaves the step, which declines further delivery (has_handlers 0) so the fiber moves on to the frame below.
+  def resumable_handler_loop(handlers)
+    out = String.new
+    out << "  };\n"
+    out << "  for (;;) {\n"
+    out << "    mrb_bool bc2cpp_err = FALSE;\n"
+    out << "    mrb_value bc2cpp_res = mrb_protect_error(M, bc2cpp_protect_tramp<decltype(bc2cpp_body)>, &bc2cpp_body, &bc2cpp_err);\n"
+    out << "    if (!bc2cpp_err) return bc2cpp_res;\n"
+    out << "    mrb_int bc2cpp_hs = -1;\n"
+    first = true
+    handlers.each_with_index.to_a.reverse_each do |h, k|
+      out << "    #{first ? '' : 'else '}if (F->pc >= #{h.begin_addr} && F->pc < #{h.end_addr}) bc2cpp_hs = #{RESUMABLE_HANDLER_STATE + k};\n"
+      first = false
+    end
+    out << "    if (bc2cpp_hs < 0) { F->has_handlers = 0; mrb_exc_raise(M, bc2cpp_res); }\n"
+    out << "    M->exc = (struct RObject*)mrb_obj_ptr(bc2cpp_res);\n"
+    out << "    bc2cpp_state = bc2cpp_hs;\n"
+    out << "  }\n"
     out
   end
 
@@ -822,7 +890,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # The C++ Fiber runtime (tools/bc2cpp/runtime): its text goes into the generated file, so a build needs no extra
   # include path. bc2cpp_fiber.hxx is standalone; bc2cpp_fiber_methods.hxx uses the helpers just before it.
   def fiber_runtime_cpp
-    %w[bc2cpp_fiber.hxx bc2cpp_fiber_methods.hxx bc2cpp_fiber_sort.hxx].map do |name|
+    %w[bc2cpp_fiber.hxx bc2cpp_fiber_methods.hxx bc2cpp_fiber_catch.hxx bc2cpp_fiber_sort.hxx].map do |name|
       File.read(File.join(FIBER_RUNTIME_DIR, name)).gsub(/^#pragma once\n/, '')
     end.join("\n")
   end
@@ -984,8 +1052,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     yields ||= region[:needs_blk] && BytecodeIR.for(block).op?(:BLKCALL)
     # A block that builds a block which reaches Fiber.yield suspends through it (the nested block is a step, DYN_CALL).
     yields ||= (block.reps || []).any? { |child| (c = child && @ireps[child]) && deep_fiber_yield?(c, Set.new) }
-    # A Fiber body may suspend only through the suspendable methods it calls (CALL_STEP).
-    if body && !yields
+    # A block may also suspend through the suspendable methods it calls on self (CALL_STEP).
+    unless yields
       BytecodeIR.for(block).each_with_op(:SSEND, :SSEND0) { |insn, _| yields ||= @fiber_yield_names&.include?(insn.sym) }
     end
     yields
@@ -1087,7 +1155,12 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     return @block_steps[label] if @block_steps.key?(label)
 
     syn = d.dup
-    syn.name = "#{d.name}__blk#{region[:block_addr]}"
+    # block_addr is unique only within one irep: a block nested in a block of the same method can share it.
+    step_name = "#{d.name}__blk#{region[:block_addr]}"
+    @block_step_names ||= {}
+    step_name = "#{step_name}_#{label}" if @block_step_names[[d.owner, step_name]] && @block_step_names[[d.owner, step_name]] != label
+    @block_step_names[[d.owner, step_name]] = label
+    syn.name = step_name
     syn.irep = label
     syn.kind = nil
     previous_owner = @owner_of[label]
@@ -1262,6 +1335,30 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
                                                                                          brk_site: brk_site, ret_guard: ret_guard)
   end
 
+  # STEP_HANDLERS: a block that has a step but no plain function (its begin/ensure has no function form) needs only a direct
+  # entry: called from C, where no fiber CALLs its step, it runs the step to its end (a Fiber.yield in it is then the yield
+  # across a C frame an interpreted block would make). The step glue (a dynamic or static call, a Fiber body) uses nothing else.
+  def step_only_block_fn(region, d)
+    return nil unless (@resumable || fiber_new_site?(region)) && d && @block_fallback_depth.to_i.zero? &&
+                      (region[:kind] || 'block_fallback') == 'block_fallback'
+
+    maker = block_step_maker_for(region)
+    return nil unless maker && block_direct_entry?(region, 'block_fallback', false)
+
+    fn_name = "#{cpp_name(d.owner, d.name)}_block_fallback_#{region[:block_addr]}"
+    region[:direct_entry] = true
+    region[:yield_free] = false
+    code = <<~CPP
+      static mrb_value #{fn_name}_direct(mrb_state* M, struct REnv* bc2cpp_env, bool bc2cpp_strict, mrb_int bc2cpp_argc, const mrb_value* bc2cpp_argv) {
+        (void)bc2cpp_strict;
+        Bc2cppFiberFrame* bc2cpp_made = #{maker}(M, bc2cpp_env, bc2cpp_argc, bc2cpp_argv);
+        if (!bc2cpp_made) mrb_raise(M, mrb_class_get(M, "RuntimeError"), "bc2cpp: block step did not make a frame");
+        return bc2cpp_run_callee_from_c(M, bc2cpp_made);
+      }
+    CPP
+    [fn_name, code]
+  end
+
   # `recv.m(args, &blk)` in a step: the block is a proc already (a forwarded block), so only the call is dynamic.
   def resumable_explicit_block_dyn(region)
     return nil unless @resumable && @block_fallback_depth.to_i.zero?
@@ -1342,10 +1439,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       mrb_int nregs;
       mrb_value* regs;
       void* callee; // CALL_STEP: the frame this suspension asks the fiber to call (a Bc2cppFiberFrame*), or null
+      mrb_int pc; // HANDLERS: the address of the instruction the step was last at (the handler lookup reads it)
+      mrb_int raise_pending; // HANDLERS: the fiber delivered an exception (in R[1]) to raise when the step is re-entered
+      mrb_int has_handlers; // HANDLERS: the step has a handler table and has not declined the exception in flight
       void* unwind_key; // UNWIND: the heap frame of the method frame a `break`/`return` ends
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
       long long slots[1];
     };
+    template <class Body> static mrb_value bc2cpp_protect_tramp(mrb_state*, void* body) { return (*(Body*)body)(); }
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }
     static const mrb_data_type bc2cpp_resume_frame_type = { "Bc2cppResumable::Frame", bc2cpp_resume_frame_free };
     static mrb_sym bc2cpp_resume_regs_sym(mrb_state* M) { return mrb_intern_lit(M, "__bc2cpp_regs__"); }

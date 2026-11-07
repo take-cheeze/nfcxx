@@ -60,6 +60,14 @@ struct Bc2cppFiberFrame {
   // The object an UNWIND names this frame by (a method frame's heap frame), or
   // null when the frame cannot be a target.
   struct RBasic* (*identity)(Bc2cppFiberFrame* frame);
+  // An exception (or a break/return/throw unwinding as one) reaches this frame
+  // from a frame above it: true when the frame takes it, which re-enters its
+  // step with the exception raised at the address it was suspended at. Null,
+  // or false, and the frame is dropped.
+  bool (*unwind_into)(mrb_state* M, Bc2cppFiberFrame* frame, mrb_value exc);
+  // Whether the frame's step has handlers (rescue/ensure) that may run code
+  // when something unwinds through it; an UNWIND then travels as an exception.
+  bool (*has_handlers)(Bc2cppFiberFrame* frame);
 };
 
 struct Bc2cppFiber {
@@ -258,7 +266,33 @@ struct Bc2cppRunArgs {
   Bc2cppFiber* fiber;
   mrb_value resume;
   bool yielded;
+  mrb_value result;  // the fiber's result when an unwind finished its last frame
 };
+
+// A break, return or throw that passes frames with handlers travels as an
+// exception of this class (not a StandardError, and no `rescue` clause matches
+// it: RESCUE tests bc2cpp_unwind_p), so the ensure bodies on the way run and
+// re-raise it. It names the frame it ends by identity, as an UNWIND does.
+static struct RClass* bc2cpp_unwind_class(mrb_state* M) {
+  return mrb_define_class(M, "Bc2cppUnwind", M->eException_class);
+}
+
+[[maybe_unused]] static bool bc2cpp_unwind_p(mrb_state* M, mrb_value v) {
+  return !mrb_immediate_p(v) &&
+         mrb_obj_is_kind_of(M, v, bc2cpp_unwind_class(M));
+}
+
+static mrb_value bc2cpp_unwind_new(mrb_state* M,
+                                   struct RBasic* target,
+                                   mrb_value value,
+                                   bool to_return) {
+  mrb_value u = mrb_obj_new(M, bc2cpp_unwind_class(M), 0, nullptr);
+  mrb_iv_set(M, u, mrb_intern_lit(M, "__target__"), mrb_cptr_value(M, target));
+  mrb_iv_set(M, u, mrb_intern_lit(M, "__value__"), value);
+  mrb_iv_set(M, u, mrb_intern_lit(M, "__return__"), mrb_bool_value(to_return));
+  mrb_iv_set(M, u, mrb_intern_lit(M, "__ran__"), mrb_false_value());
+  return u;
+}
 
 // Runs steps until a frame yields or the last frame finishes. A frame that
 // finishes hands its result to its parent as the parent's resume value.
@@ -283,6 +317,15 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
         resume = mrb_nil_value();
         break;
       case BC2CPP_STEP_UNWIND: {
+        // A frame with handlers on the way (up to the target) must run them:
+        // the unwind then goes up as an exception.
+        for (Bc2cppFiberFrame* f = frame; f; f = f->parent) {
+          if (f->has_handlers && f->has_handlers(f))
+            mrb_exc_raise(M, bc2cpp_unwind_new(M, out.target, out.value,
+                                               out.to_return));
+          if (f->identity && f->identity(f) == out.target)
+            break;
+        }
         Bc2cppFiberFrame* target = frame;
         while (target && !(target->identity && target->identity(target) == out.target)) {
           Bc2cppFiberFrame* up = target->parent;
@@ -341,6 +384,57 @@ inline Bc2cppCurrentFiber bc2cpp_current_fiber = {false, {}};
 inline mrb_value bc2cpp_first_args = {};
 inline bool bc2cpp_first_args_set = false;
 
+enum {
+  BC2CPP_UNWIND_NONE,      // no frame takes it: it leaves the fiber
+  BC2CPP_UNWIND_CONTINUE,  // run the fiber on (args->resume says with what)
+  BC2CPP_UNWIND_FINISHED   // the last frame finished: args->result
+};
+
+// An exception (or an unwind) left the step of fiber->top. Frames are dropped
+// from the top until one takes it. An unwind ends at its target: a `break`
+// resumes the target with the value (its call returns it), a `return` or a
+// throw runs the target's own handlers, then finishes it with the value.
+static int bc2cpp_fiber_unwind(mrb_state* M,
+                               Bc2cppFiber* fiber,
+                               mrb_value exc,
+                               Bc2cppRunArgs* args) {
+  bool is_unwind = bc2cpp_unwind_p(M, exc);
+  while (fiber->top) {
+    Bc2cppFiberFrame* frame = fiber->top;
+    if (is_unwind && frame->identity &&
+        (void*)frame->identity(frame) ==
+            mrb_cptr(mrb_iv_get(M, exc, mrb_intern_lit(M, "__target__")))) {
+      mrb_value value = mrb_iv_get(M, exc, mrb_intern_lit(M, "__value__"));
+      if (!mrb_test(mrb_iv_get(M, exc, mrb_intern_lit(M, "__return__")))) {
+        args->resume = value;
+        return BC2CPP_UNWIND_CONTINUE;
+      }
+      if (!mrb_test(mrb_iv_get(M, exc, mrb_intern_lit(M, "__ran__")))) {
+        mrb_iv_set(M, exc, mrb_intern_lit(M, "__ran__"), mrb_true_value());
+        if (frame->unwind_into && frame->unwind_into(M, frame, exc)) {
+          args->resume = exc;
+          return BC2CPP_UNWIND_CONTINUE;
+        }
+      }
+      fiber->top = frame->parent;
+      bc2cpp_frame_free(M, frame);
+      if (!fiber->top) {
+        args->result = value;
+        return BC2CPP_UNWIND_FINISHED;
+      }
+      args->resume = value;
+      return BC2CPP_UNWIND_CONTINUE;
+    }
+    if (frame->unwind_into && frame->unwind_into(M, frame, exc)) {
+      args->resume = exc;
+      return BC2CPP_UNWIND_CONTINUE;
+    }
+    fiber->top = frame->parent;
+    bc2cpp_frame_free(M, frame);
+  }
+  return BC2CPP_UNWIND_NONE;
+}
+
 // Fiber#resume. Returns the yielded value, or the body's result once it
 // finishes (alive? is then false). An exception in a step kills the fiber and
 // propagates to the resumer, as it does for an mruby Fiber.
@@ -353,13 +447,29 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
               "attempt to resume the current fiber");
   if (!fiber->top)
     mrb_raise(M, bc2cpp_fiber_error_class(M), "dead fiber called");
-  Bc2cppRunArgs args = {self, fiber, value, false};
+  Bc2cppRunArgs args = {self, fiber, value, false, mrb_nil_value()};
   fiber->running = true;
   fiber->started = true;
   Bc2cppCurrentFiber outer = bc2cpp_current_fiber;
   bc2cpp_current_fiber = {true, self};
   mrb_bool error = FALSE;
-  mrb_value result = mrb_protect_error(M, bc2cpp_fiber_run, &args, &error);
+  mrb_value result;
+  for (;;) {
+    error = FALSE;
+    result = mrb_protect_error(M, bc2cpp_fiber_run, &args, &error);
+    if (!error)
+      break;
+    // An exception: the nearest frame with a handler for it takes it, and the
+    // fiber runs on from there; with none it kills the fiber.
+    int taken = bc2cpp_fiber_unwind(M, fiber, result, &args);
+    if (taken == BC2CPP_UNWIND_CONTINUE)
+      continue;
+    if (taken == BC2CPP_UNWIND_FINISHED) {
+      error = FALSE;
+      result = args.result;
+    }
+    break;
+  }
   bc2cpp_current_fiber = outer;
   bc2cpp_first_args_set = false;
   fiber->running = false;

@@ -229,6 +229,7 @@ static mrb_value bc2cpp_sort_dyn(mrb_state* M,
   if (done)
     return;
   done = true;
+  bc2cpp_catch_builtins(M);
   mrb_func_t sort_bang = bc2cpp_fiber_cfunc(M, M->array_class, "sort!");
   if (sort_bang)
     bc2cpp_dyn_register((void*)sort_bang, bc2cpp_sort_dyn, 0, 0);

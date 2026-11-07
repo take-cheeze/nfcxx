@@ -140,6 +140,28 @@ static struct RBasic* bc2cpp_method_frame_identity(Bc2cppFiberFrame* base) {
   return mrb_data_p(m->frame) ? (struct RBasic*)mrb_obj_ptr(m->frame) : nullptr;
 }
 
+// An exception reaches a method frame that CALLed (or called a block of) the
+// frame it came from: a step with handlers is re-entered with it raised at the
+// address it was suspended at; one without, or one that declined it, is dropped.
+static bool bc2cpp_method_frame_unwind_into(mrb_state* M,
+                                            Bc2cppFiberFrame* base,
+                                            mrb_value exc) {
+  Bc2cppMethodFrame* m = (Bc2cppMethodFrame*)base;
+  Bc2cppResumeFrame* f =
+      mrb_data_p(m->frame) ? (Bc2cppResumeFrame*)DATA_PTR(m->frame) : nullptr;
+  if (!f || !f->has_handlers)
+    return false;
+  f->raise_pending = 1;
+  return true;
+}
+
+static bool bc2cpp_method_frame_has_handlers(Bc2cppFiberFrame* base) {
+  Bc2cppMethodFrame* m = (Bc2cppMethodFrame*)base;
+  Bc2cppResumeFrame* f =
+      mrb_data_p(m->frame) ? (Bc2cppResumeFrame*)DATA_PTR(m->frame) : nullptr;
+  return f && f->has_handlers;
+}
+
 [[maybe_unused]] static Bc2cppFiberFrame* bc2cpp_method_frame_new(
     mrb_state* M,
     Bc2cppMethodStep step,
@@ -150,6 +172,8 @@ static struct RBasic* bc2cpp_method_frame_identity(Bc2cppFiberFrame* base) {
   m->f.step = bc2cpp_method_frame_step;
   m->f.mark = bc2cpp_method_frame_mark;
   m->f.identity = bc2cpp_method_frame_identity;
+  m->f.unwind_into = bc2cpp_method_frame_unwind_into;
+  m->f.has_handlers = bc2cpp_method_frame_has_handlers;
   m->self = self;
   m->frame = frame;
   m->step = step;
@@ -278,10 +302,17 @@ static bool bc2cpp_dyn_park(mrb_state* M,
                             const mrb_value* argv,
                             mrb_value blk,
                             Bc2cppDynResult* out) {
-  if (MRB_METHOD_UNDEF_P(method) || !MRB_METHOD_CFUNC_P(method))
+  if (MRB_METHOD_UNDEF_P(method))
+    return false;
+  // A C function is keyed by itself; a bytecode method (Kernel#catch) by its proc.
+  void* key = MRB_METHOD_CFUNC_P(method)
+                  ? (void*)MRB_METHOD_CFUNC(method)
+              : MRB_METHOD_PROC_P(method) ? (void*)MRB_METHOD_PROC(method)
+                                          : nullptr;
+  if (!key)
     return false;
   auto& table = bc2cpp_dyn_table();
-  auto it = table.find((void*)MRB_METHOD_CFUNC(method));
+  auto it = table.find(key);
   if (it == table.end() || argc < it->second.min_argc ||
       argc > it->second.max_argc)
     return false;

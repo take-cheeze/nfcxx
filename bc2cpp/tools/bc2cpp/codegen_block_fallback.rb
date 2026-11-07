@@ -369,14 +369,26 @@ class CodeGen
     # suspends through the block); its name then counts as a yielding name.
     # DYN_CALL: a method a fiber reaches that sends by name can reach the program's other yielding methods.
     @fiber_roots.merge(dynamic_send_targets) if reachable.any? { |l| (i = @ireps[l]) && deep_send_names(i).intersect?(DYN_SEND_NAMES) }
-    queue = @fiber_roots.to_a
+    queue = @fiber_roots.to_a + seeds
     until queue.empty?
       label = queue.shift
       irep = @ireps[label]
       owner = irep_owner[label]
       next unless irep && owner
 
-      BytecodeIR.for(irep).instructions_with_op(:SSEND, :SSEND0).each do |insn|
+      # A call in a block nested in the root counts too: the block is a step of the root's own.
+      tree = [irep]
+      pending = [irep]
+      until pending.empty?
+        (pending.pop.reps || []).each do |child|
+          nested = child && @ireps[child]
+          next unless nested
+
+          tree << nested
+          pending << nested
+        end
+      end
+      tree.flat_map { |part| BytecodeIR.for(part).instructions_with_op(:SSEND, :SSEND0).to_a }.each do |insn|
         next unless insn.sym && @fiber_yield_names.include?(insn.sym)
 
         target = by_owner_name[[owner, insn.sym]]
@@ -1648,7 +1660,7 @@ class CodeGen
     block_regions.each do |region|
       next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
 
-      fn_result = emit_proc_fallback_fn(region, d)
+      fn_result = emit_proc_fallback_fn(region, d) || step_only_block_fn(region, d)
       next unless fn_result
 
       fn_name, fn_code = fn_result
