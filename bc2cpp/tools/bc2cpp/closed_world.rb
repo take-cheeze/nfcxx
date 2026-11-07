@@ -1786,10 +1786,15 @@ class ClosedWorld
   # argument of a forwarding send selects the operation, while the rest name methods.
   def scan_removal_send(irep, idx, insn)
     sets = insn.argc && argument_name_sets(irep, idx, insn, insn.argc, strings: true)
+    # A forwarder whose literal selector names an ordinary method (`send(:pl_use, PlOther.new)`) calls that method
+    # and removes nothing, whatever its other arguments are; only the selector decides what it does.
+    selector = insn.argc&.positive? && argument_name_sets(irep, idx, insn, 1, strings: true)
     if REMOVER_SENDS.include?(insn.sym)
       return @dynamic_removal = true unless sets
 
       @removed_names.merge(sets.flatten)
+    elsif !sets && selector && selector.first.all? { |name| !NAME_FORWARDERS.include?(name) && !REMOVER_SENDS.include?(name) }
+      nil
     elsif !sets || sets.first&.any? { |name| NAME_FORWARDERS.include?(name) }
       @dynamic_removal = true
     elsif sets.first&.any? { |name| REMOVER_SENDS.include?(name) }
