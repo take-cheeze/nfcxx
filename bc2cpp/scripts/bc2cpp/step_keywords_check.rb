@@ -73,6 +73,10 @@ SRC = <<~'RUBY'
       :mixed_done
     end
 
+    def kw_call(a, k: 1, j: 2, &blk)
+      blk.call([a, k, j])
+    end
+
     def kw_only(step: 1)
       Fiber.yield step
       step + 1
@@ -113,6 +117,42 @@ SRC = <<~'RUBY'
         [kw_opt(1) { |x| Fiber.yield [:blk, x] }, opt_kw(1) { |x| Fiber.yield [:blk, x] },
          rest_kw { |x| Fiber.yield [:blk, x] }, opt_rest_kw(2, 3) { |x| Fiber.yield [:blk, x] }]
       end
+    end
+
+    # Keywords and a literal block in one call: in a step (the block suspends or not), and in a plain method.
+    def block_and_keywords
+      Fiber.new do
+        [kw_opt(1, k: 3) { |x| Fiber.yield [:blk, x] }, opt_rest_kw(5, 6, k: 8) { |x| x }, send(:kw_req, 1, k: 2) { |x| x },
+         kw_call(1, k: 2) { |x| break :broke }]
+      end
+    end
+
+    def block_and_splat
+      opts = { j: 30 }
+      Fiber.new { [kw_opt(2, **opts) { |x| Fiber.yield x }, kw_opt(3, k: 1, **opts) { |x| x }] }
+    end
+
+    def block_and_bad_keyword
+      Fiber.new { kw_req(1, k: 1, z: 3) { |x| x } }
+    end
+
+    def plain_block_and_keywords
+      opts = { j: 30 }
+      t = 0
+      [kw_call(1, k: 3) { |x| t += x.size }, kw_call(1, k: 2) { |x| break :broke }, kw_call(2, **opts, &:size), t]
+    end
+
+    def plain_return_through_keywords
+      kw_call(1, k: 7) { |x| return x }
+      :not_reached
+    end
+
+    def plain_missing_keyword
+      kw_req(1) { |x| x }
+    end
+
+    def plain_unknown_keyword
+      kw_call(1, z: 3) { |x| x }
     end
 
     def by_send
@@ -195,6 +235,13 @@ DRIVER = <<~'RUBY'
   show('keyword only') { drain(o.keyword_only) }
   show('with block') { drain(o.with_block) }
   show('by send') { drain(o.by_send) }
+  show('block and keywords') { drain(o.block_and_keywords) }
+  show('block and splat') { drain(o.block_and_splat) }
+  show('block and bad keyword') { drain(o.block_and_bad_keyword) }
+  show('plain block and keywords') { o.plain_block_and_keywords }
+  show('plain return') { o.plain_return_through_keywords }
+  show('plain missing keyword') { o.plain_missing_keyword }
+  show('plain unknown keyword') { o.plain_unknown_keyword }
   show('by splat') { drain(o.by_splat) }
   show('missing keyword') { drain(o.missing_keyword) }
   show('unknown keyword') { drain(o.unknown_keyword) }
@@ -244,7 +291,10 @@ else
       'missing keyword' => 'missing keyword: raised ArgumentError: missing keyword: k',
       'unknown keyword' => 'unknown keyword: raised ArgumentError: unknown keyword: z',
       'missing by send' => 'missing by send: raised ArgumentError: missing keyword: k',
-      'unknown by send' => 'unknown by send: raised ArgumentError: unknown keyword: z'
+      'unknown by send' => 'unknown by send: raised ArgumentError: unknown keyword: z',
+      'block and bad keyword' => 'block and bad keyword: raised ArgumentError: unknown keyword: z',
+      'plain block and keywords' => 'plain block and keywords: [3, :broke, 3, 3]',
+      'plain return' => 'plain return: [1, 7, 2]'
     }
     expected.each do |label, line|
       ok = interpreted&.include?(line)

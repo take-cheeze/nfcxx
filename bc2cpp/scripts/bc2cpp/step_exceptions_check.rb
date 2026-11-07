@@ -180,6 +180,21 @@ SRC = <<~'RUBY'
       end
     end
 
+    # The ensure is inside the block that breaks (the block's plain body has an ensure region).
+    def break_in_block_ensure
+      Fiber.new do
+        r = each3 do |x|
+          begin
+            Fiber.yield x
+            break [:b, x] if x == 2
+          ensure
+            @events << x
+          end
+        end
+        [r, :after]
+      end
+    end
+
     def normal_through_ensure
       Fiber.new { [each_ens { |x| Fiber.yield x }, :after] }
     end
@@ -529,9 +544,68 @@ SRC = <<~'RUBY'
       @outer
     end
   end
+
+  # No Fiber: `break` and `return` out of a block that has an ensure region around them, in the block's plain compile.
+  class PlainEns
+    attr_reader :events
+
+    def initialize
+      @events = []
+    end
+
+    def each2
+      yield 1
+      yield 2
+      :done
+    end
+
+    def break_out
+      r = each2 do |x|
+        begin
+          break [x, :broke]
+        ensure
+          @events << ['e', x].join
+        end
+      end
+      [r, @events]
+    end
+
+    def return_out
+      each2 do |x|
+        begin
+          return [x, :returned]
+        ensure
+          @events << ('g' * 9)
+        end
+      end
+      :not_reached
+    end
+
+    def raise_in_ensure
+      each2 do |x|
+        begin
+          break x
+        ensure
+          raise 'ens' if x == 1
+        end
+      end
+    rescue RuntimeError => e
+      [:rescued, e.message]
+    end
+
+    def next_out
+      each2 do |x|
+        begin
+          next x
+        ensure
+          @events << x
+        end
+      end
+    end
+  end
 RUBY
 
-OWNERS = %w[StepExc].freeze
+OWNERS = %w[StepExc PlainEns].freeze
 
 baseline_dir = Dir.mktmpdir('bc2cpp-step-exceptions')
 at_exit { FileUtils.remove_entry(baseline_dir) }
@@ -540,6 +614,9 @@ code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true
 check.call('nested_ensure compiles as a step', code.include?('static mrb_value StepExc_nested_ensure__blk') && code.include?('_step(mrb_state* M'))
 check.call('a step has a handler loop', code.include?('mrb_protect_error(M, bc2cpp_protect_tramp'))
 check.call('no #error in the generated code', !code.include?('#error'))
+%w[break_out return_out raise_in_ensure next_out].each do |name|
+  check.call("PlainEns##{name} compiles", !baseline_err.include?("PlainEns##{name}:"))
+end
 
 DRIVER = <<~'RUBY'
   def show(label)
@@ -597,6 +674,8 @@ DRIVER = <<~'RUBY'
   o = StepExc.new
   show('break through ensure') { [drain(o.break_through_ensure), o.events] }
   o = StepExc.new
+  show('break in block ensure') { [drain(o.break_in_block_ensure), o.events] }
+  o = StepExc.new
   show('normal through ensure') { [drain(o.normal_through_ensure), o.events] }
   o = StepExc.new
   show('locals survive rescue') { drain(o.locals_survive_rescue) }
@@ -614,6 +693,12 @@ DRIVER = <<~'RUBY'
   show('loop next break through ensure') { [drain(o.loop_jumps_fiber), o.events] }
   o = StepExc.new
   show('block next through ensure') { [drain(o.block_jumps), o.events] }
+  o = PlainEns.new
+  show('plain break through ensure') { o.break_out }
+  show('plain return through ensure') { [o.return_out, o.events] }
+  show('plain raise in ensure') { PlainEns.new.raise_in_ensure }
+  o = PlainEns.new
+  show('plain next through ensure') { [o.next_out, o.events] }
   # Fiber#raise has no interpreted counterpart in mruby-fiber: these lines are compared with CRuby's output instead.
   o = StepExc.new
   show('raise rescued') do
@@ -728,6 +813,7 @@ else
       'catch throw' => 'catch throw: [:tag, :caught]',
       'catch deep' => 'catch deep: [[:in_deep, [:thrown, :after]], [:deep_ensure]]',
       'break through ensure' => 'break through ensure: [[1, 2, [20, :after]], [:each_ens]]',
+      'break in block ensure' => 'break in block ensure: [[1, 2, [[:b, 2], :after]], [1, 2]]',
       'normal through ensure' => 'normal through ensure: [[1, 2, 3, [:finished, :after]], [:each_ens]]',
       'locals survive rescue' => 'locals survive rescue: [["kept!", ["kept!", 5, "kept!"]], ["KEPT!", ["kept!", 5, "kept!"], false]]',
       'retry basic' => 'retry basic: [[[:try, 1], [:try, 2], [:try, 3], [:ok, 3]], ["t1", "t2"]]',
@@ -740,7 +826,11 @@ else
                                  '[[:ens, true], :not_early, [:ens, false], :e1, :e2, :ens_r, [:inner, 1], [:outer, 1], [:inner, 2], ' \
                                  '[:outer, 2], [:ens_bare, true], :after_bare, [:ens_bare, false]]]',
       'loop next break through ensure' => 'loop next break through ensure: [[1, 2, 3, [[2], 3]], [[:ens, 1], [:ens, 2], [:ens, 3]]]',
-      'block next through ensure' => 'block next through ensure: [[1, 2, 3, [true, :after]], [1, 2, 3]]'
+      'block next through ensure' => 'block next through ensure: [[1, 2, 3, [true, :after]], [1, 2, 3]]',
+      'plain break through ensure' => 'plain break through ensure: [[1, :broke], ["e1"]]',
+      'plain return through ensure' => 'plain return through ensure: [[1, :returned], ["e1", "ggggggggg"]]',
+      'plain raise in ensure' => 'plain raise in ensure: [:rescued, "ens"]',
+      'plain next through ensure' => 'plain next through ensure: [:done, [1, 2]]'
     }
     expected.each do |label, line|
       check.call("#{label} prints what Ruby does", interpreted&.include?(line))

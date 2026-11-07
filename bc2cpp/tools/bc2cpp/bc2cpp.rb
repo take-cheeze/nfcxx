@@ -2342,6 +2342,15 @@ if $PROGRAM_NAME == __FILE__
       return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk);
     }
   CPP
+  # BLOCK_KEYWORD_CALL: a by-name call with a keyword Hash and a block (mrb_funcall_with_block carries no keywords).
+  puts 'extern "C" mrb_value mrb_funcall_send(mrb_state*, mrb_value, mrb_sym, mrb_int, const mrb_value*, mrb_value, mrb_value);'
+  puts <<~CPP
+    [[maybe_unused]] static mrb_value bc2cpp_funcall_kw(mrb_state* M, mrb_value self, mrb_sym mid, mrb_int argc,
+                                                        const mrb_value* argv, mrb_value kdict, mrb_value blk) {
+      if (mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict)) return mrb_funcall_send(M, self, mid, argc, argv, kdict, blk);
+      return mrb_funcall_with_block(M, self, mid, argc, argv, blk);
+    }
+  CPP
   # PROFILER_SECTION_SUPPORT: emit_profiler_section_inline calls the native
   # profiling primitives directly (profiler_section_begin/_end, frame_begin/
   # _end) instead of building an RProc for RGSS::Profiler.section/frame and

@@ -688,6 +688,7 @@ class CodeGen
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
       out << "    if (bc2cpp_ret.token != bc2cpp_ret_guard.frame.token) throw;\n"
       out << "    bc2cpp_vm_restore(M, bc2cpp_ret_mark);\n"
+      out << "    if (M->exc) mrb_exc_raise(M, mrb_obj_value(M->exc));  // an ensure body raised: it replaces the return\n"
       out << "    return bc2cpp_ret.value;\n"
       out << "  }\n"
       out << "}\n\n"

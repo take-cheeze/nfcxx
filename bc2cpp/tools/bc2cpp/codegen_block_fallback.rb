@@ -503,20 +503,20 @@ class CodeGen
       idx = sendb_idx - 1
       # EXPLICIT_ARGS_BLOCK_FALLBACK_SUPPORT: any fixed positional count
       # (`ary.inject(0) { }`, `ary.each_slice(2) { }`), but never `n=*` (a splat has
-      # no static layout) and never a keyword call (`n=3|nk=1`):
-      # mrb_funcall_with_block cannot carry keywords (`ci->nk = 0` in
-      # funcall_args_capture).
-      next unless paired.plain_fixed_argc?
+      # no static layout).
+      # BLOCK_KEYWORD_CALL: keywords sit between the positionals and the block (a Hash register or key/value pairs).
+      next if paired.positional_splat?
+      next unless paired.argc_operand
 
       n = paired.argc.to_i
       dest_reg = paired.reg
       block_reg = insn.reg
-      # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
-      # :reduce n=1`), so the block is at dest + n + 1.
-      next unless dest_reg && block_reg && block_reg == dest_reg + n + 1
+      kw = dyn_call_shape(paired)[:kw]
+      next unless dest_reg && block_reg && block_reg == dest_reg + n + paired.keyword_slots + 1
 
       name = paired.sym
       next unless name
+      next if kw && name == 'public_send'
 
       # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: removed; a Fiber.new block is admitted like any other literal block.
 
@@ -589,7 +589,7 @@ class CodeGen
                   (synchronous || block_blk_needs(block_irep, given: false) == [])
 
       region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
-                 block_irep: block_irep, name: name, n: n,
+                 block_irep: block_irep, name: name, n: n, kw: kw,
                  self_implicit: paired.op == :SSENDB, upvars: upvars, needs_blk: needs_blk,
                  parent_irep: irep, boxed: boxed }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
@@ -631,7 +631,7 @@ class CodeGen
   BLOCK_ELEMENT_CHAINS = %w[Array Hash].to_h { |klass| [klass, CoreHierarchySigs.ancestors(klass)] }.freeze
 
   def block_fallback_element_hints(irep, region, owner_name)
-    return {} unless irep && !region[:self_implicit]
+    return {} unless irep && !region[:self_implicit] && !region[:kw]
 
     block_irep = region[:block_irep]
     fields = block_irep.enter&.enter_fields
@@ -1086,8 +1086,13 @@ class CodeGen
     @tail_yield_block = tail_yield_block?(block_irep) ? block_irep : nil
     region[:tail_yield] = !@tail_yield_block.nil?
     @fiber_body_used = true if region[:tail_yield]
+    # BLOCK_ENSURE: a `begin ... ensure` in the body is the guard scope compile_method opens (ENSURE_RAII_SUPPORT), so a
+    # `break` or `return` thrown out of it runs the ensure body on the way.
+    prefix_at = block_ensure_prefixes(block_irep, d, targets, nested_suppressed)
     BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == :ENTER
+
+      body << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
 
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
@@ -1100,6 +1105,7 @@ class CodeGen
       end
     end
     @tail_yield_block = saved_tail_yield_block
+    @ensure_except_remaps = nil
     @block_fallback_upvars = nil
     @block_fallback_active = false
     @blk_param_name = saved_blk_param_name
@@ -1407,6 +1413,7 @@ class CodeGen
     dest_reg = region[:dest_reg].to_i + (inline_offset || 0)
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+    kw = shifted_keywords(region[:kw], inline_offset)
     # BLOCK_SEMANTICS: a `break` in the body unwinds to this site while the site
     # is on the stack, so the site owns a frame (and its token) only then. The
     # method's return token is the innermost method frame at method level, or
@@ -1422,14 +1429,14 @@ class CodeGen
                 end
     # FIBER_BODY: `Fiber.new { prologue; m(args) }` is a C++ Fiber whose root frame runs the block and then the
     # suspendable method `m` (tools/bc2cpp/runtime/bc2cpp_fiber.hxx), not an mruby Fiber over a cfunc proc.
-    if (fiber_id = fiber_body_target_id(region, owner_def))
+    if !kw && (fiber_id = fiber_body_target_id(region, owner_def))
       @fiber_body_used = true
       return emit_fiber_body_site(region, fn_name, fiber_id, dest_reg)
     end
     if inline_offset.nil? && (call = resumable_block_call_glue(region, fn_name, dest_reg, owner_def))
       return call
     end
-    if owner_def && region[:direct_entry] && fiber_new_site?(region) && block_step_maker_for(region)
+    if !kw && owner_def && region[:direct_entry] && fiber_new_site?(region) && block_step_maker_for(region)
       return emit_fiber_body_step_site(region, fn_name, dest_reg)
     end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
@@ -1444,8 +1451,9 @@ class CodeGen
     stack_expr = stack_block_expr(region)
     # FIBER_BODY: the tail call of a Fiber body prologue goes through the method's entry (no inlined arm), after storing
     # its receiver for the handoff check (bc2cpp_prologue_armed).
-    prologue_tail = fiber_prologue_tail_region?(region)
-    direct = if prologue_tail
+    prologue_tail = !kw && fiber_prologue_tail_region?(region)
+    # BLOCK_KEYWORD_CALL: no direct arm models keywords.
+    direct = if prologue_tail || kw
                nil
              elsif inline_offset.nil?
                compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, stack_expr: stack_expr)
@@ -1455,7 +1463,7 @@ class CodeGen
              end
     ctor, direct = stack_block_glue(region, rproc_var, ctor, direct) if direct && stack_expr && direct.include?(stack_expr)
     owner_call = nil
-    unless direct
+    unless direct || kw
       owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "mrb_obj_value(#{rproc_var})")
       # STATIC_OWNER_ARMS may put compiled arms in front of this owner call; built over the frame, they take the
       # stack block the way a direct call does, and the heap RProc is made only when the owner call runs.
@@ -1482,12 +1490,16 @@ class CodeGen
       args = argv.empty? ? 'NULL' : "bc2cpp_blk_argv_#{region[:block_addr]}"
       out << "#{indent}mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n" unless argv.empty?
       name = "mrb_intern_cstr(M, \"#{region[:name]}\")"
-      if PROC_CALL_NAMES.include?(region[:name])
+      if PROC_CALL_NAMES.include?(region[:name]) && !kw
         out << "#{indent}if (mrb_type(#{recv}) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, #{recv}, #{name})) {\n"
         out << "#{indent}  r#{dest_reg} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, #{args});\n"
         out << "#{indent}} else\n"
       end
-      out << if owner_call
+      out << if kw
+               keyword_call_lines(kw, indent, "bc2cpp_kd_#{region[:block_addr]}") +
+                 "#{indent}r#{dest_reg} = bc2cpp_funcall_kw(M, #{recv}, #{keyword_call_target(region[:name], name, argv, args)}, " \
+                 "bc2cpp_kd_#{region[:block_addr]}, mrb_obj_value(#{rproc_var}));\n"
+             elsif owner_call
                "#{indent}#{owner_call}\n"
              else
                "#{indent}r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, #{name}, #{argv.size}, #{args}, " \
@@ -1498,10 +1510,59 @@ class CodeGen
       out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
       out << "      if (bc2cpp_brk.token != #{site}.frame.token) throw;\n"
       out << "      bc2cpp_vm_restore(M, bc2cpp_brk_mark);\n"
+      out << "      if (M->exc) mrb_exc_raise(M, mrb_obj_value(M->exc));  // an ensure body raised: it replaces the break\n"
       out << "      r#{dest_reg} = bc2cpp_brk.value;\n"
       out << "    }\n"
     end
     out << "  }\n"
+    out
+  end
+
+  # The text to emit ahead of an address of a block body whose ensure region is a guard scope; +targets+ and +suppressed+
+  # (arrays) are updated as compile_method does. Empty when the body has none, or its ensure body does not compile.
+  def block_ensure_prefixes(block_irep, d, targets, suppressed)
+    region = recognize_ensure_region(block_irep)
+    return {} unless region
+
+    open_glue, ok = emit_ensure_guard(region, block_irep, d)
+    return {} unless ok
+
+    prefix_at = { region[:begin_addr] => (region[:entry_label] ? "  L#{region[:begin_addr]}:;\n" : '') + open_glue,
+                  region[:except_addr] => "  } // ensure guard leaves scope: runs the ensure body\n" }
+    targets.delete(region[:begin_addr]) if region[:entry_label]
+    unless region[:except_jump_srcs].empty?
+      prefix_at[region[:raiseif_addr]] = "  L#{region[:raiseif_addr]}:;\n"
+      @ensure_except_remaps = { block_irep => { region[:except_addr] => region[:raiseif_addr] } }
+    end
+    folded = (region[:except_addr]..region[:raiseif_addr]).to_a
+    suppressed.concat(folded)
+    targets.replace(targets - folded)
+    prefix_at
+  end
+
+  def shifted_keywords(kw, inline_offset)
+    return kw if kw.nil? || inline_offset.nil?
+
+    kw.merge(reg: kw[:reg] + inline_offset)
+  end
+
+  # "mid, argc, argv" of a keyword call; `send(:m, ...)` calls :m with the rest (Kernel#send would drop the keywords).
+  def keyword_call_target(name, name_expr, argv, args)
+    return "#{name_expr}, #{argv.size}, #{args}" unless %w[send __send__].include?(name) && !argv.empty?
+
+    "mrb_obj_to_sym(M, #{argv.first}), #{argv.size - 1}, #{argv.size > 1 ? "#{args} + 1" : 'NULL'}"
+  end
+
+  # C++ lines leaving the call's keyword Hash in +var+.
+  def keyword_call_lines(kw, indent, var)
+    if kw[:kind] == :hash
+      return "#{indent}mrb_value #{var} = r#{kw[:reg]};\n"
+    end
+
+    out = String.new("#{indent}mrb_value #{var} = mrb_hash_new(M);\n")
+    kw[:n].times do |i|
+      out << "#{indent}mrb_hash_set(M, #{var}, r#{kw[:reg] + 2 * i}, r#{kw[:reg] + 2 * i + 1});\n"
+    end
     out
   end
 
@@ -1555,10 +1616,6 @@ class CodeGen
       # compile_dynamic_splat_send); the keywords and the block follow it.
       next unless insn.argc_operand
 
-      # Keywords have no translation outside a step's dynamic call (resumable_explicit_block_dyn).
-      keywords = insn.keyword_arguments? || insn.keyword_splat?
-      next if keywords && !@resumable
-
       dest_reg = insn.reg
       next unless dest_reg
 
@@ -1566,6 +1623,9 @@ class CodeGen
       next unless name
 
       shape = dyn_call_shape(insn)
+      # Outside a step, `public_send` and a splatted `send` with keywords have no by-name translation.
+      next if shape[:kw] && !@resumable && (name == 'public_send' || (DYN_SEND_NAMES.include?(name) && insn.positional_splat?))
+
       if insn.positional_splat?
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
                      argv_reg: dest_reg + 1,
@@ -1584,7 +1644,7 @@ class CodeGen
   def emit_explicit_block_arg_glue(region, owner_def: nil)
     dyn = owner_def && resumable_explicit_block_dyn(region)
     return dyn if dyn
-    return "  #error keyword arguments in a forwarded-block call outside a flat step\n" if region[:kw]
+    return emit_explicit_block_arg_keyword_call(region) if region[:kw]
 
     direct = emit_explicit_block_arg_direct(region, owner_def)
     return direct if direct
@@ -1625,6 +1685,30 @@ class CodeGen
         out << "  }\n"
       end
     end
+    out
+  end
+
+  # BLOCK_KEYWORD_CALL: `recv.m(args, k: v, &expr)` outside a step.
+  def emit_explicit_block_arg_keyword_call(region)
+    dest_reg = region[:dest_reg].to_i
+    recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
+    var = "bc2cpp_ebkw_#{region[:sendb_addr]}"
+    out = String.new
+    out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- keywords and a forwarded &expr block in one by-name call\n  {\n"
+    out << keyword_call_lines(region[:kw], '    ', "#{var}_kd")
+    if region[:n] == '*'
+      ary = "r#{region[:argv_reg]}"
+      count = "ary_size(#{ary})"
+      items = "ary_items(#{ary})"
+    else
+      argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+      out << "    mrb_value #{var}_argv[] = { #{(argv + ['mrb_nil_value()']).join(', ')} };\n"
+      count = argv.size
+      items = "#{var}_argv"
+    end
+    target = region[:n] == '*' ? "mrb_intern_cstr(M, \"#{region[:name]}\"), #{count}, #{items}" :
+             keyword_call_target(region[:name], "mrb_intern_cstr(M, \"#{region[:name]}\")", argv, "#{var}_argv")
+    out << "    r#{dest_reg} = bc2cpp_funcall_kw(M, #{recv}, #{target}, #{var}_kd, r#{region[:blk_reg]});\n  }\n"
     out
   end
 

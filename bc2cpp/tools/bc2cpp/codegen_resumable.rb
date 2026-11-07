@@ -1545,7 +1545,7 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
     (@step_ret_handled ||= Set.new) << [region[:parent_irep].label, region[:block_addr]] if ret_guard
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     resumable_dyn_site(recv, dest_reg, region[:n].to_i, "mrb_obj_value(#{rproc_var})", ctor, name: name,
-                                                                                         brk_site: brk_site, ret_guard: ret_guard)
+                                                                                         kw: region[:kw], brk_site: brk_site, ret_guard: ret_guard)
   end
 
   # STEP_HANDLERS: a block that has a step but no plain function (its begin/ensure has no function form) needs only a direct
@@ -1590,9 +1590,14 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
   # built on the heap (nothing in it points into the step's frame: block_step_candidate? takes no captured locals).
   def resumable_block_call_glue(region, fn_name, dest_reg, owner_def)
     return nil unless @resumable && owner_def && @block_fallback_depth.to_i.zero?
+    maker = block_step_maker_for(region)
+    # BLOCK_KEYWORD_CALL: keywords go through the dynamic call, which also parks a suspendable callee.
+    if region[:kw] && !fiber_new_site?(region)
+      send_name = DYN_SEND_NAMES.include?(region[:name]) && region[:n].to_i >= 1
+      return resumable_dyn_block_glue(region, fn_name, dest_reg, maker, name: (region[:name] unless send_name))
+    end
     return nil unless region[:direct_entry] || region[:needs_ret] || region[:needs_brk]
 
-    maker = block_step_maker_for(region)
     # A tail-yield block has no step: the callee's frame adapter arms its yield (bc2cpp_tail_yield).
     # A block that cannot suspend but returns from the method has no step either; the dynamic site catches its return.
     method_return = !maker && region[:needs_ret] && @resumable.upvars.nil?
