@@ -225,7 +225,7 @@ class CodeGen
   # mrb_define_method_raw, hence that scan in extract_native_method_names), so its answer is vm.c
   # OP_EQ's: identity, false for a Symbol receiver, an Integer/Float pair compared in place even
   # when Ruby redefines Integer#== or Float#==, and a `==` send for the rest. mrb_equal agrees on
-  # the rest but a bigint receiver, which it compares without the send.
+  # the rest but a bigint receiver, which it compares without the send (shared bc2cpp_bigint_eq).
   def compile_neq_op_eq(d, recv, arg)
     num = ->(lhs, rhs) { "mrb_bool_value(#{lhs}(#{recv}) != #{rhs}(#{arg}))" }
     "  // NEQ_OP_EQ :!= -- OP_EQ negated, as class.c's `!(self == other)` runs it (codegen_native_send.rb)\n" \
@@ -249,8 +249,7 @@ class CodeGen
       "#endif\n" \
       "#ifdef MRB_USE_BIGINT\n" \
       "  else if (mrb_bigint_p(#{recv})) {\n" \
-      "    mrb_value bc2cpp_neq_arg = #{arg};\n" \
-      "    r#{d} = mrb_bool_value(!mrb_test(mrb_funcall_argv(M, #{recv}, mrb_intern_lit(M, \"==\"), 1, &bc2cpp_neq_arg)));\n" \
+      "    r#{d} = mrb_bool_value(!bc2cpp_bigint_eq(M, #{recv}, #{arg}));\n" \
       "  }\n" \
       "#endif\n" \
       "  else {\n" \
