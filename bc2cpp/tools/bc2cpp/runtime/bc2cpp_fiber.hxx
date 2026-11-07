@@ -72,12 +72,17 @@ struct Bc2cppFiberFrame {
 
 struct Bc2cppFiber {
   Bc2cppFiberFrame* top;
-  bool running;      // on the resume chain: executing, or waiting on a fiber it resumed
+  // on the resume chain: executing, or waiting on a fiber it resumed
+  bool running;
   bool started;
-  bool by_transfer;  // the run in progress was entered by a transfer
-  bool transferred;  // suspended by a transfer away (not by Fiber.yield)
-  bool waiting_transfer;  // on the chain, waiting on a fiber it transferred to (mruby: TRANSFERRED, not RESUMED)
-  mrb_value caller;  // the C++ Fiber whose resume/transfer runs this one, or nil (the root or an mruby fiber)
+  // the run in progress was entered by a transfer
+  bool by_transfer;
+  // suspended by a transfer away (not by Fiber.yield)
+  bool transferred;
+  // on the chain, waiting on a fiber it transferred to (mruby: TRANSFERRED)
+  bool waiting_transfer;
+  // the C++ Fiber whose resume/transfer runs this one, or nil (root or mruby)
+  mrb_value caller;
 };
 
 // The handoff between a Fiber body and the suspendable method it ends with. The
@@ -116,10 +121,10 @@ inline Bc2cppPrologue bc2cpp_prologue = {nullptr, {}, nullptr};
   bc2cpp_prologue.recv = recv;
 }
 
-// A parked frame is held only by C++ until its fiber's refs are rebuilt, and the
-// arena that protected the objects it was made of is popped when the calls that
-// made it return. Until the next refresh the frame's values are pinned in a
-// global (rooted) Array.
+// A parked frame is held only by C++ until its fiber's refs are rebuilt, and
+// the arena that protected the objects it was made of is popped when the calls
+// that made it return. Until the next refresh the frame's values are pinned in
+// a global (rooted) Array.
 static mrb_value bc2cpp_pins(mrb_state* M) {
   mrb_sym key = mrb_intern_lit(M, "$__bc2cpp_pins");
   mrb_value pins = mrb_gv_get(M, key);
@@ -266,8 +271,9 @@ static bool bc2cpp_fiber_alive_p(mrb_state* M, mrb_value fiber) {
   return f && f->top != nullptr;
 }
 
-// Set by a `transfer` site that turns into a yield (a transfer back to the fiber's resumer), read when the fiber's
-// step reports the YIELD: the fiber is then suspended by a transfer, not by Fiber.yield.
+// Set by a `transfer` site that turns into a yield (a transfer back to the
+// fiber's resumer), read when the fiber's step reports the YIELD: the fiber is
+// then suspended by a transfer, not by Fiber.yield.
 inline bool bc2cpp_transfer_yielding = false;
 
 struct Bc2cppRunArgs {
@@ -275,7 +281,8 @@ struct Bc2cppRunArgs {
   Bc2cppFiber* fiber;
   mrb_value resume;
   bool yielded;
-  mrb_value result;  // the fiber's result when an unwind finished its last frame
+  mrb_value
+      result;  // the fiber's result when an unwind finished its last frame
 };
 
 // A break, return or throw that passes frames with handlers travels as an
@@ -320,7 +327,8 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
         bc2cpp_transfer_yielding = false;
         // A fiber entered by a transfer cannot Fiber.yield: nothing resumed it.
         if (fiber->by_transfer && !by_transfer_site) {
-          mrb_raise(M, bc2cpp_fiber_error_class(M), "attempt to yield on a not resumed fiber");
+          mrb_raise(M, bc2cpp_fiber_error_class(M),
+                    "attempt to yield on a not resumed fiber");
         }
         fiber->transferred = by_transfer_site;
         args->yielded = true;
@@ -338,15 +346,17 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
         // the unwind then goes up as an exception.
         for (Bc2cppFiberFrame* f = frame; f; f = f->parent) {
           if (f->has_handlers && f->has_handlers(f))
-            mrb_exc_raise(M, bc2cpp_unwind_new(M, out.target, out.value,
-                                               out.to_return));
+            mrb_exc_raise(
+                M, bc2cpp_unwind_new(M, out.target, out.value, out.to_return));
           if (f->identity && f->identity(f) == out.target)
             break;
         }
         Bc2cppFiberFrame* target = frame;
-        while (target && !(target->identity && target->identity(target) == out.target)) {
+        while (target &&
+               !(target->identity && target->identity(target) == out.target)) {
           Bc2cppFiberFrame* up = target->parent;
-          if (target != frame) bc2cpp_frame_free(M, target);
+          if (target != frame)
+            bc2cpp_frame_free(M, target);
           target = up;
         }
         if (!target) {
@@ -357,7 +367,8 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
         }
         if (out.to_return) {
           fiber->top = target->parent;
-          if (target != frame) bc2cpp_frame_free(M, target);
+          if (target != frame)
+            bc2cpp_frame_free(M, target);
           bc2cpp_frame_free(M, frame);
           if (!fiber->top) {
             args->yielded = false;
@@ -454,8 +465,10 @@ static int bc2cpp_fiber_unwind(mrb_state* M,
 
 static bool bc2cpp_fiber_own_p(mrb_value v);
 
-// The fibers on the resume chain, kept in a rooted global Array: bc2cpp_current_fiber and Bc2cppFiber::caller are raw
-// values the GC does not see, and the arena that protected the running fiber belongs to the C function that started it.
+// The fibers on the resume chain, kept in a rooted global Array:
+// bc2cpp_current_fiber and Bc2cppFiber::caller are raw values the GC does not
+// see, and the arena that protected the running fiber belongs to the C function
+// that started it.
 static mrb_value bc2cpp_running_fibers(mrb_state* M) {
   mrb_sym key = mrb_intern_lit(M, "$__bc2cpp_running");
   mrb_value running = mrb_gv_get(M, key);
@@ -466,24 +479,29 @@ static mrb_value bc2cpp_running_fibers(mrb_state* M) {
   return running;
 }
 
-// Fiber#resume / Fiber#transfer. Returns the yielded value, or the body's result once it finishes (alive? is then
-// false). An exception in a step kills the fiber and propagates to the resumer, as it does for an mruby Fiber. The
-// FiberError cases and their messages are mruby-fiber's (fiber_switch / fiber_transfer).
+// Fiber#resume / Fiber#transfer. Returns the yielded value, or the body's
+// result once it finishes (alive? is then false). An exception in a step kills
+// the fiber and propagates to the resumer, as it does for an mruby Fiber. The
+// FiberError cases and their messages are mruby-fiber's (fiber_switch /
+// fiber_transfer).
 static mrb_value bc2cpp_fiber_resume(mrb_state* M,
                                      mrb_value self,
                                      mrb_value value,
                                      bool transfer = false) {
   Bc2cppFiber* fiber = bc2cpp_fiber_ptr(M, self);
-  bool current = bc2cpp_current_fiber.in && mrb_obj_eq(M, bc2cpp_current_fiber.fiber, self);
+  bool current = bc2cpp_current_fiber.in &&
+                 mrb_obj_eq(M, bc2cpp_current_fiber.fiber, self);
   if (transfer && current)
     return value;
   if (!transfer && current)
-    mrb_raise(M, bc2cpp_fiber_error_class(M), "attempt to resume the current fiber");
+    mrb_raise(M, bc2cpp_fiber_error_class(M),
+              "attempt to resume the current fiber");
   if (!transfer && (fiber->transferred || fiber->waiting_transfer))
     mrb_raise(M, bc2cpp_fiber_error_class(M), "resuming transferred fiber");
   if (fiber->running)
-    mrb_raise(M, bc2cpp_fiber_error_class(M),
-              transfer ? "attempt to transfer to a resuming fiber" : "double resume");
+    mrb_raise(
+        M, bc2cpp_fiber_error_class(M),
+        transfer ? "attempt to transfer to a resuming fiber" : "double resume");
   if (!fiber->top)
     mrb_raise(M, bc2cpp_fiber_error_class(M), "resuming dead fiber");
   Bc2cppRunArgs args = {self, fiber, value, false, mrb_nil_value()};
@@ -536,9 +554,11 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   return result;
 }
 
-// A `transfer` site in a step: is it a yield? The receiver is the root fiber or an mruby fiber (the fiber's resumer
-// when it was resumed from outside any C++ Fiber), or the C++ Fiber whose resume/transfer runs this one.
-[[maybe_unused]] static bool bc2cpp_transfer_is_yield(mrb_state* M, mrb_value recv) {
+// A `transfer` site in a step: is it a yield? The receiver is the root fiber or
+// an mruby fiber (the fiber's resumer when it was resumed from outside any C++
+// Fiber), or the C++ Fiber whose resume/transfer runs this one.
+[[maybe_unused]] static bool bc2cpp_transfer_is_yield(mrb_state* M,
+                                                      mrb_value recv) {
   if (!bc2cpp_current_fiber.in)
     return false;
   Bc2cppFiber* me = bc2cpp_fiber_ptr(M, bc2cpp_current_fiber.fiber);
@@ -624,9 +644,10 @@ static mrb_value bc2cpp_fiber_m_resume(mrb_state* M, mrb_value self) {
 
 inline mrb_func_t bc2cpp_fiber_orig_transfer = nullptr;
 
-// Fiber#transfer to a C++ Fiber from outside it (the root, an mruby fiber, or another C++ Fiber's step): runs the
-// target as resume does, with transfer's rules. A transfer from inside a C++ Fiber back to its resumer is a yield, and is
-// compiled at the site (bc2cpp_transfer_is_yield).
+// Fiber#transfer to a C++ Fiber from outside it (the root, an mruby fiber, or
+// another C++ Fiber's step): runs the target as resume does, with transfer's
+// rules. A transfer from inside a C++ Fiber back to its resumer is a yield, and
+// is compiled at the site (bc2cpp_transfer_is_yield).
 static mrb_value bc2cpp_fiber_m_transfer(mrb_state* M, mrb_value self) {
   if (!bc2cpp_fiber_own_p(self)) {
     if (!bc2cpp_fiber_orig_transfer)
@@ -710,7 +731,8 @@ static void bc2cpp_fiber_define(mrb_state* M) {
   mrb_define_class_method(M, klass, "current", bc2cpp_fiber_s_current,
                           MRB_ARGS_NONE());
   mrb_define_method(M, klass, "resume", bc2cpp_fiber_m_resume, MRB_ARGS_ANY());
-  mrb_define_method(M, klass, "transfer", bc2cpp_fiber_m_transfer, MRB_ARGS_ANY());
+  mrb_define_method(M, klass, "transfer", bc2cpp_fiber_m_transfer,
+                    MRB_ARGS_ANY());
   mrb_define_method(M, klass, "alive?", bc2cpp_fiber_m_alive_p,
                     MRB_ARGS_NONE());
 }

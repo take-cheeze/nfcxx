@@ -24,9 +24,12 @@ struct Bc2cppMethodFrame {
   Bc2cppMethodStep step;
 };
 
-// A cfunc block that carries a step maker: a thunk (direct-entry) block sets flag bit 2, any other block ends its env
-// with the magic-tagged flag word (BLOCK_STEP_MAGIC), so an env that merely ends in some pointer is not mistaken for one.
-static bool bc2cpp_block_has_step(const struct RProc* p, const struct REnv* env) {
+// A cfunc block that carries a step maker: a thunk (direct-entry) block sets
+// flag bit 2, any other block ends its env with the magic-tagged flag word
+// (BLOCK_STEP_MAGIC), so an env that merely ends in some pointer is not
+// mistaken for one.
+static bool bc2cpp_block_has_step(const struct RProc* p,
+                                  const struct REnv* env) {
   mrb_int len = env ? MRB_ENV_LEN(env) : 0;
   if (len < 3 || !mrb_integer_p(env->stack[len - 1]))
     return false;
@@ -101,7 +104,8 @@ static void bc2cpp_method_frame_step(mrb_state* M,
       suspended->callee = nullptr;
       return;
     }
-    // UNWIND: a `break` or `return` out of a block step names the method frame it ends.
+    // UNWIND: a `break` or `return` out of a block step names the method frame
+    // it ends.
     if (suspended && suspended->unwind_mode) {
       out->kind = BC2CPP_STEP_UNWIND;
       out->value = bc2cpp_resume_frame_value(M, result);
@@ -142,7 +146,8 @@ static struct RBasic* bc2cpp_method_frame_identity(Bc2cppFiberFrame* base) {
 
 // An exception reaches a method frame that CALLed (or called a block of) the
 // frame it came from: a step with handlers is re-entered with it raised at the
-// address it was suspended at; one without, or one that declined it, is dropped.
+// address it was suspended at; one without, or one that declined it, is
+// dropped.
 static bool bc2cpp_method_frame_unwind_into(mrb_state* M,
                                             Bc2cppFiberFrame* base,
                                             mrb_value exc) {
@@ -290,11 +295,12 @@ extern "C" mrb_value mrb_funcall_send(mrb_state* M,
                                       mrb_value kdict,
                                       mrb_value blk);
 
-// `kdict` is the keyword Hash of the call, or nil. A suspendable method takes no
-// keywords, so a non-empty one runs as an ordinary send that carries them
+// `kdict` is the keyword Hash of the call, or nil. A suspendable method takes
+// no keywords, so a non-empty one runs as an ordinary send that carries them
 // (mrb_funcall_send); an empty one passes nothing, as `**{}` does.
 
-// A registered suspendable method found for a call: park its frame (the caller CALLs it), else nothing.
+// A registered suspendable method found for a call: park its frame (the caller
+// CALLs it), else nothing.
 static bool bc2cpp_dyn_park(mrb_state* M,
                             mrb_value recv,
                             mrb_method_t method,
@@ -304,9 +310,9 @@ static bool bc2cpp_dyn_park(mrb_state* M,
                             Bc2cppDynResult* out) {
   if (MRB_METHOD_UNDEF_P(method))
     return false;
-  // A C function is keyed by itself; a bytecode method (Kernel#catch) by its proc.
-  void* key = MRB_METHOD_CFUNC_P(method)
-                  ? (void*)MRB_METHOD_CFUNC(method)
+  // A C function is keyed by itself; a bytecode method (Kernel#catch) by its
+  // proc.
+  void* key = MRB_METHOD_CFUNC_P(method)  ? (void*)MRB_METHOD_CFUNC(method)
               : MRB_METHOD_PROC_P(method) ? (void*)MRB_METHOD_PROC(method)
                                           : nullptr;
   if (!key)
@@ -352,16 +358,17 @@ static bool bc2cpp_dyn_park(mrb_state* M,
       nullptr, mrb_funcall_send(M, recv, mid, argc, argv, kdict, blk)};
 }
 
-// `super` in a step: the lookup starts above `owner`, the class the running method is defined on (OP_SUPER). A registered
-// suspendable target parks its frame as in a dynamic call; any other target is called as bc2cpp_super_call calls it.
-[[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_super(
-    mrb_state* M,
-    mrb_value self,
-    struct RClass* owner,
-    mrb_sym mid,
-    mrb_int argc,
-    const mrb_value* argv,
-    mrb_value blk) {
+// `super` in a step: the lookup starts above `owner`, the class the running
+// method is defined on (OP_SUPER). A registered suspendable target parks its
+// frame as in a dynamic call; any other target is called as bc2cpp_super_call
+// calls it.
+[[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_super(mrb_state* M,
+                                                         mrb_value self,
+                                                         struct RClass* owner,
+                                                         mrb_sym mid,
+                                                         mrb_int argc,
+                                                         const mrb_value* argv,
+                                                         mrb_value blk) {
   struct RClass* c = owner;
   MRB_CLASS_ORIGIN(c);
   c = c->super;
@@ -371,7 +378,6 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   Bc2cppDynResult out;
   if (bc2cpp_dyn_park(M, self, method, argc, argv, blk, &out))
     return out;
-  return Bc2cppDynResult{
-      nullptr,
-      mrb_funcall_with_method(M, self, mid, &method, c, argc, argv, blk)};
+  return Bc2cppDynResult{nullptr, mrb_funcall_with_method(M, self, mid, &method,
+                                                          c, argc, argv, blk)};
 }

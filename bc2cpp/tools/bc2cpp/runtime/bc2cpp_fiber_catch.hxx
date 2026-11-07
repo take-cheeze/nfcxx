@@ -1,13 +1,14 @@
-// catch and throw as frames of the C++ Fiber. mruby's catch is a bytecode method
+// catch and throw as frames of the C++ Fiber. mruby's catch is a bytecode
+// method
 // and its throw a C function that finds the catch by walking the VM's call
 // stack, so neither can see (or unwind) the C++ frames of a fiber. A `catch`
 // whose block has a step is a frame that CALLs the block; a `throw` of its tag
 // from a step in the same fiber unwinds to that frame (the same UNWIND a
-// `return` makes: the frames above are dropped, their ensure bodies run, and the
-// catch call returns the thrown value). Anything else keeps mruby's own catch
-// and throw (the dispatchers decline with undef). Emitted after
-// bc2cpp_fiber_methods.hxx, whose bc2cpp_block_call and dynamic-call registry it
-// uses; not standalone.
+// `return` makes: the frames above are dropped, their ensure bodies run, and
+// the catch call returns the thrown value). Anything else keeps mruby's own
+// catch and throw (the dispatchers decline with undef). Emitted after
+// bc2cpp_fiber_methods.hxx, whose bc2cpp_block_call and dynamic-call registry
+// it uses; not standalone.
 #pragma once
 
 struct Bc2cppCatchFrame {
@@ -26,8 +27,9 @@ static void bc2cpp_catch_mark(mrb_state* M,
 }
 
 // The first step calls the block with the tag; a block that does not finish
-// there (it is a step, or ends in Fiber.yield) hands the fiber a CALL or a YIELD,
-// and its value comes back as the resume value, which is the catch's result.
+// there (it is a step, or ends in Fiber.yield) hands the fiber a CALL or a
+// YIELD, and its value comes back as the resume value, which is the catch's
+// result.
 static void bc2cpp_catch_step(mrb_state* M,
                               Bc2cppFiberFrame* base,
                               mrb_value resume,
@@ -58,7 +60,8 @@ static mrb_value bc2cpp_catch_dyn(mrb_state* M,
                                   mrb_value blk) {
   // A block without a step cannot suspend: mruby's catch runs it.
   if (!mrb_proc_p(blk) || !MRB_PROC_CFUNC_P(mrb_proc_ptr(blk)) ||
-      !bc2cpp_block_has_step(mrb_proc_ptr(blk), MRB_PROC_ENV(mrb_proc_ptr(blk))))
+      !bc2cpp_block_has_step(mrb_proc_ptr(blk),
+                             MRB_PROC_ENV(mrb_proc_ptr(blk))))
     return mrb_undef_value();
   Bc2cppCatchFrame* c =
       (Bc2cppCatchFrame*)mrb_calloc(M, 1, sizeof(Bc2cppCatchFrame));
