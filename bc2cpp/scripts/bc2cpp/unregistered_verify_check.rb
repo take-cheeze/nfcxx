@@ -149,6 +149,8 @@ else
       static mrb_value vfix_mrblib_pruned(mrb_state*, mrb_value) { return mrb_fixnum_value(20); }
       static mrb_value vnat_gone(mrb_state*, mrb_value) { return mrb_fixnum_value(30); }
       static mrb_value vnat_kept(mrb_state*, mrb_value) { return mrb_fixnum_value(31); }
+      // The registration function ends with the runtime prelude's proc-spec install, which this host does not include.
+      static void bc2cpp_proc_specs_install(mrb_state*) {}
       #ifdef FIX_PHANTOM
       #{CodeGen.respond_to_phantom_runtime}
       #endif

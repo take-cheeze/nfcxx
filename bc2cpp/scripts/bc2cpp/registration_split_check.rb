@@ -60,7 +60,7 @@ Dir.mktmpdir('registration-split') do |dir|
   suite.check('the program half registers the program class and no core owner',
               program.include?(', SplitProbe__Widget_value,') && !program.include?('Integer'))
   suite.check('bc2cpp_register_owner_methods runs the core half, then the program half',
-              both.match?(/\A\s*bc2cpp_register_core_owner_methods\(M\);\s*bc2cpp_register_program_owner_methods\(M\);\s*\z/))
+              both.match?(/\A\s*bc2cpp_register_core_owner_methods\(M\);\s*bc2cpp_register_program_owner_methods\(M\);\s*(?:bc2cpp_proc_specs_install\(M\);\s*)?\z/))
 
   OptcarrotRegister.emit_register(err, dir)
   register = File.read(File.join(dir, 'register.cxx'))

@@ -222,7 +222,14 @@ def build_registry(ireps, root_label)
         namespace || 'Object'
       when :GETCONST
         const_name = prev.const_name
-        namespace ? "#{namespace}::#{const_name}" : const_name
+        next const_name unless namespace
+
+        # The constant is read by lexical lookup: `def Enumerator.produce` inside `class Enumerator` names ::Enumerator,
+        # not Enumerator::Enumerator. The innermost enclosing scope that already declares the name wins; a name no scope
+        # has declared yet keeps the innermost spelling.
+        parts = namespace.split('::')
+        scoped = parts.size.downto(0).map { |n| [*parts.first(n), const_name].join('::') }
+        scoped.find { |candidate| class_decls.key?(candidate) || module_names.include?(candidate) } || "#{namespace}::#{const_name}"
       end
     end
 

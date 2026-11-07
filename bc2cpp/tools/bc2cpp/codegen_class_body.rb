@@ -124,6 +124,14 @@ class CodeGen
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
       elsif %i[TDEF SDEF].include?(insn.op)
         registration = class_body_registration(insn, irep, owner)
+        if registration.nil? && irep.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb')
+          # An mruby-enumerator def the compiler cannot express (SKIP_UNSUPPORTED, e.g. Enumerator#initialize_copy's
+          # instance_eval block) has no body anywhere: the closed build loads no mrblib bytecode. Refusing the body would lose
+          # the class with it, while the compiled Enumerator methods register on it (ENUMERATOR_FIBER), so only the method is missing.
+          lines << "  // #{owner}##{insn.sym} has no compiled body (unsupported): the class body still runs\n"
+          lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+          next
+        end
         return [nil, [insn.op]] unless registration
 
         registered << insn.sym.to_s if insn.op == :TDEF
