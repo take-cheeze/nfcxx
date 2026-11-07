@@ -751,14 +751,8 @@ class CodeGen
 
     # CORE_PROC_CALL: see dynamic_dispatch_line.
     if @compiling_core && name == 'call'
-      return <<~CPP
-        // SPLAT n=* :call in a core body: a Proc is yielded to (CORE_PROC_CALL)
-        if (mrb_proc_p(#{recv}) && mrb_class(M, #{recv}) == M->proc_class) {
-          r#{d} = bc2cpp_yield_argv(M, #{recv}, ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));
-        } else {
-          r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "call"), ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));
-        }
-      CPP
+      return "// SPLAT n=* :call in a core body: a Proc is yielded to (CORE_PROC_CALL)\n" \
+             "r#{d} = bc2cpp_proc_call_argv(M, #{recv}, ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));\n"
     end
     <<~CPP
       // SPLAT n=* :#{name} runtime-sized (not a literal), dynamic dispatch via mrb_funcall_argv

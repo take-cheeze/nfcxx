@@ -1562,6 +1562,7 @@ if $PROGRAM_NAME == __FILE__
 
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
+  puts '#include <initializer_list>'
   puts '#include <string.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
@@ -2154,6 +2155,15 @@ if $PROGRAM_NAME == __FILE__
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       return mrb_funcall_argv(M, recv, mid, argc, argv);
+    }
+    // SSEND_HELPER: the one by-name self send of a class body (include, attr_*): visibility is ignored, as mrb_funcall does.
+    [[maybe_unused]] static mrb_value bc2cpp_ssend(mrb_state* M, mrb_value self, mrb_sym mid, std::initializer_list<mrb_value> args) {
+      return mrb_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
+    }
+    // PROC_CALL_HELPER: `x.call(*args)` in a core body; a plain Proc is yielded to, anything else is sent `call`.
+    [[maybe_unused]] static mrb_value bc2cpp_proc_call_argv(mrb_state* M, mrb_value recv, mrb_int argc, const mrb_value* argv) {
+      if (mrb_proc_p(recv) && mrb_class(M, recv) == M->proc_class) return bc2cpp_yield_argv(M, recv, argc, argv);
+      return mrb_funcall_argv(M, recv, MRB_SYM(call), argc, argv);
     }
     // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
     // a Ruby call does, and a value that does not convert raises TypeError.
