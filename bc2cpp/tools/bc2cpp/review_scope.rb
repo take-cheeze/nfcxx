@@ -24,7 +24,7 @@ module ReviewScope
   ALL = :all
   # The closed-world builds whose program is the engine (compiled_gems.rb: their closed world is
   # BC2CPP_CLOSED_WORLD_GEMS; optcarrot-probe's is the Optcarrot benchmark).
-  ENGINE_BUILDS = (BC2CPP_CLOSED_WORLD_BUILDS - %w[optcarrot-probe]).freeze
+  ENGINE_BUILDS = (BC2CPP_CLOSED_WORLD_BUILDS - %w[optcarrot-probe bc2cpp-self]).freeze
   # The engine owners, plus the module of each `X.singleton` owner (a module_function copy's shared
   # body is compiled under the module's own owner, e.g. LCF for LCF.singleton).
   ENGINE_OWNERS = BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }.then do |owners|
