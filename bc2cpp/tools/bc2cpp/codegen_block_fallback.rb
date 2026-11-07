@@ -375,56 +375,33 @@ class CodeGen
       owner = irep_owner[label]
       next unless irep && owner
 
-      # A call in a block nested in the root counts too: the block is a step of the root's own.
-      tree = [irep]
-      pending = [irep]
-      until pending.empty?
-        (pending.pop.reps || []).each do |child|
-          nested = child && @ireps[child]
-          next unless nested
+      enroll = lambda do |sym, yielding|
+        target = by_owner_name[[owner, sym]]
+        next unless target
 
-          tree << nested
-          pending << nested
-        end
+        @fiber_yield_names << sym if yielding
+        queue << target if @fiber_roots.add?(target)
       end
-      tree.flat_map { |part| BytecodeIR.for(part).instructions_with_op(:SSEND, :SSEND0).to_a }.each do |insn|
-        next unless insn.sym && @fiber_yield_names.include?(insn.sym)
-
-        target = by_owner_name[[owner, insn.sym]]
-        queue << target if target && @fiber_roots.add?(target)
+      # A call in a block nested in the root counts too: the block is a step of the root's own.
+      irep_tree(irep).flat_map { |part| BytecodeIR.for(part).instructions_with_op(:SSEND, :SSEND0).to_a }.each do |insn|
+        enroll.call(insn.sym, false) if insn.sym && @fiber_yield_names.include?(insn.sym)
       end
       # DYN_CALL: a root that sends by name may reach any method its symbol literals name.
-      if self_call_targets(irep).intersect?(DYN_SEND_NAMES) || deep_send_names(irep).intersect?(DYN_SEND_NAMES)
+      if deep_send_names(irep).intersect?(DYN_SEND_NAMES)
         deep_symbol_literals(irep).each do |sym|
           target = by_owner_name[[owner, sym]]
-          next unless target && !@fiber_roots.include?(target)
-
-          @fiber_yield_names << sym
-          queue << target if @fiber_roots.add?(target)
+          enroll.call(sym, true) if target && !@fiber_roots.include?(target)
         end
       end
       # A call on self that forwards the root's own block (`other(&block)`) reaches the yield through it.
       BytecodeIR.for(irep).each_with_op(:SSENDB) do |insn, idx|
         prev = BytecodeIR.for(irep).previous(idx)
-        next if prev && prev.op == :BLOCK
-        next unless insn.sym
-
-        target = by_owner_name[[owner, insn.sym]]
-        next unless target
-
-        @fiber_yield_names << insn.sym
-        queue << target if @fiber_roots.add?(target)
+        enroll.call(insn.sym, true) unless (prev && prev.op == :BLOCK) || !insn.sym
       end
       BytecodeIR.for(irep).adjacent_pairs(:BLOCK, %i[SSENDB]) do |block_insn, paired, _|
         block_label = block_insn.block_index && irep.reps[block_insn.block_index.to_i]
         block_irep = block_label && @ireps[block_label]
-        next unless paired.sym && block_irep && deep_fiber_yield?(block_irep, seeds.to_set)
-
-        target = by_owner_name[[owner, paired.sym]]
-        next unless target
-
-        @fiber_yield_names << paired.sym
-        queue << target if @fiber_roots.add?(target)
+        enroll.call(paired.sym, true) if paired.sym && block_irep && deep_fiber_yield?(block_irep, seeds.to_set)
       end
     end
     @fiber_unsafe_methods = reachable.select do |label|
@@ -454,45 +431,37 @@ class CodeGen
     end
   end
 
-  # Names of every send in the irep tree (block bodies included).
-  def deep_send_names(irep, seen = Set.new.compare_by_identity)
-    return Set.new unless seen.add?(irep)
+  # +irep+ and every irep nested in it (block bodies are part of the method that contains them).
+  def irep_tree(irep)
+    tree = [irep]
+    pending = [irep]
+    until pending.empty?
+      (pending.pop.reps || []).each do |child|
+        nested = child && @ireps[child]
+        next unless nested
 
-    names = BytecodeIR.for(irep).instructions_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB).filter_map(&:sym).to_set
-    (irep.reps || []).each do |child_label|
-      child = child_label && @ireps[child_label]
-      names.merge(deep_send_names(child, seen)) if child
+        tree << nested
+        pending << nested
+      end
     end
-    names
+    tree
   end
 
-  # The symbol literals (LOADSYM) in the irep tree.
-  def deep_symbol_literals(irep, seen = Set.new.compare_by_identity)
-    return [] unless seen.add?(irep)
-
-    syms = BytecodeIR.for(irep).instructions_with_op(:LOADSYM).filter_map(&:sym)
-    (irep.reps || []).each do |child_label|
-      child = child_label && @ireps[child_label]
-      syms.concat(deep_symbol_literals(child, seen)) if child
-    end
-    syms
+  def tree_syms(irep, *ops)
+    irep_tree(irep).flat_map { |part| BytecodeIR.for(part).instructions_with_op(*ops).filter_map(&:sym) }
   end
 
-  # Every self-send name reachable from `irep`, including inside nested block
-  # ireps (a block body is part of the method that contains it).
-  def self_call_targets(irep, seen = Set.new.compare_by_identity)
-    return [] unless seen.add?(irep)
+  def deep_send_names(irep)
+    tree_syms(irep, :SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB).to_set
+  end
 
-    names = []
-    BytecodeIR.for(irep).instructions_with_op(:SSEND, :SSEND0, :SSENDB).each do |insn|
-      name = insn.sym
-      names << name if name
-    end
-    (irep.reps || []).each do |child_label|
-      child = child_label && @ireps[child_label]
-      names.concat(self_call_targets(child, seen)) if child
-    end
-    names
+  def deep_symbol_literals(irep)
+    tree_syms(irep, :LOADSYM)
+  end
+
+  # Every self-send name reachable from `irep`, including inside nested block ireps.
+  def self_call_targets(irep)
+    tree_syms(irep, :SSEND, :SSEND0, :SSENDB)
   end
 
   def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false, cell_levels: [])
@@ -555,16 +524,16 @@ class CodeGen
       # through heap cells (an Array the block's env keeps), so no pointer outlives its frame.
       # `new` keeps its block (Hash.new's default proc, Proc.new, Fiber.new's body) unless the receiver is Array.
       keeps_block = name == 'new' && !array_const_receiver?(irep, idx, dest_reg)
-      boxed = upvars.any? && (!synchronous || keeps_block) && !by_value && cells_capture?(upvars, cell_levels)
       # A block that is only called during the call still needs cells when a block it builds may be kept and reads
       # the frames above it (its pointers must lead into cells too).
-      boxed ||= upvars.any? && !by_value && cells_capture?(upvars, cell_levels) && nested_keeps_upper_cells?(block_irep, upvars)
+      boxed = upvars.any? && !by_value && cells_capture?(upvars, cell_levels) &&
+              (!synchronous || keeps_block || nested_keeps_upper_cells?(block_irep, upvars))
       next if upvars.any? && !synchronous && !by_value && !boxed
 
       # BLOCK_SEMANTICS: `new` is on the allowlist for Array.new only. Hash.new
       # keeps its block as the default proc and Proc.new returns it, either of
       # which outlives this frame and would hold pointers into it.
-      next if upvars.any? && name == 'new' && !array_const_receiver?(irep, idx, dest_reg) && !by_value && !boxed
+      next if upvars.any? && keeps_block && !by_value && !boxed
 
       # BLOCK_FALLBACK_YIELD_SUPPORT: does this body's `yield` need the enclosing
       # method's block forwarded into the cfunc? Only `[1]` is modelled (every
@@ -598,7 +567,7 @@ class CodeGen
       region[:needs_brk] = BytecodeIR.for(block_irep).op?(:BREAK)
       region[:cell_levels] = upvars.map(&:first).uniq.sort if boxed
       region[:needs_ret] = BytecodeIR.for(block_irep).op?(:RETURN_BLK) ||
-                           recognize_block_fallback_regions(block_irep, available_upvars: upvars, cell_levels: region[:cell_levels] || [])
+                           recognize_block_fallback_regions(block_irep, available_upvars: upvars, cell_levels: region_cell_levels(region))
                            .any? { |nested| nested[:needs_ret] }
       regions << region
     end
@@ -624,7 +593,11 @@ class CodeGen
   def region_cells_exprs(region)
     return nil unless region[:boxed]
 
-    (region[:cell_levels] || [0]).map { |level| level.zero? ? 'bc2cpp_cells_ary' : "bc2cpp_up_cells_#{level - 1}" }
+    region_cell_levels(region).map { |level| level.zero? ? 'bc2cpp_cells_ary' : "bc2cpp_up_cells_#{level - 1}" }
+  end
+
+  def region_cell_levels(region)
+    region[:boxed] ? (region[:cell_levels] || [0]) : []
   end
 
   # The registers of a function that its recognized +regions+ capture through cells, sorted.
@@ -890,7 +863,7 @@ class CodeGen
   # PROC_SPEC: a compiled block is a C function proc with no ENTER word or parameter names, so bc2cpp_proc_spec_stand_in is
   # registered under its C function and direct entry for Proc#arity and Proc#parameters.
   def proc_spec_registration(region, fn_name)
-    return '' unless (region[:kind] || 'block_fallback') == 'block_fallback' && ENV['BC2CPP_PROC_SPEC'] != '0'
+    return '' unless (region[:kind] || 'block_fallback') == 'block_fallback'
 
     block = region[:block_irep]
     fields = (block.enter ? block.enter.enter_fields.map(&:to_i) : []) + [0] * 7
@@ -937,7 +910,7 @@ class CodeGen
     ret_slot = region[:needs_ret] ? next_slot : nil
     brk_slot = region[:needs_brk] ? next_slot + (ret_slot ? 1 : 0) : nil
     # STEP_CLOSURES: a boxed region's env ends with the cells Arrays of its upvar levels; the body takes them as parameters.
-    cell_levels = region[:boxed] ? (region[:cell_levels] || [0]) : []
+    cell_levels = region_cell_levels(region)
     cells_slot = next_slot + (ret_slot ? 1 : 0) + (brk_slot ? 1 : 0)
     cell_params = cell_levels.map { |l| "mrb_value bc2cpp_up_cells_#{l}" }
     cell_args = cell_levels.map { |l| "bc2cpp_up_cells_#{l}" }
@@ -1378,16 +1351,17 @@ class CodeGen
     # BLOCK_FALLBACK_YIELD_SUPPORT: the enclosing frame's block (`bc2cpp_blk`, from
     # mrb_get_args "&" at method level or forwarded again) is appended by value:
     # nothing writes back through it, and the env keeps it GC-rooted.
+    ptr = ->(expr) { "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(#{expr})))" }
     env_entries = ['self'] + upvar_regs.each_with_index.map do |(l, b), i|
       if upvar_cells
         # FIBER_BODY_CAPTURE: the pointers lead into a heap Array holding a snapshot of the locals, not into this frame.
-        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{upvar_cells}[#{i}])))"
+        ptr.call("&#{upvar_cells}[#{i}]")
       elsif inline_offset
-        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&r#{l.zero? ? b + inline_offset : b})))"
+        ptr.call("&r#{l.zero? ? b + inline_offset : b}")
       elsif l.zero?
-        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&r#{b})))"
+        ptr.call("&r#{b}")
       else
-        "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(#{upvar_var_name(l - 1, b)})))"
+        ptr.call(upvar_var_name(l - 1, b))
       end
     end
     # FIBER_BODY_CAPTURE: the snapshot Array rides in the env, right after the upvar pointers, so the GC keeps it.
@@ -1404,8 +1378,8 @@ class CodeGen
       # before the maker: return target, then break target.
       env_entries.concat(unwind_targets) if step_maker && unwind_targets
       # BLOCK_STEP: the maker of the block's step frame sits just before the entry (the readers index from the end).
-      env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{step_maker})))" if step_maker
-      env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))"
+      env_entries << ptr.call("&#{step_maker}") if step_maker
+      env_entries << ptr.call("&#{direct_entry}")
       # The flag slot: YIELD_FREE (bit 0), the BLOCK_SELF_WORLD check (bit 1) and BLOCK_STEP (bit 2: the maker slot is
       # present), read by bc2cpp_block_thunk and the C++ Fiber's adapter.
       env_entries << "mrb_int_value(M, #{(yield_free ? 1 : 0) | (block_self_check? ? 2 : 0) | (step_maker ? 4 : 0) | (step_maker && unwind_targets ? 8 : 0)})"
@@ -1414,7 +1388,7 @@ class CodeGen
     # so it stays an ordinary cfunc proc; the trailer marks it for the fiber's adapter with a magic flag word.
     if !direct_entry && step_maker && unwind_targets
       env_entries.concat(unwind_targets)
-      env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{step_maker})))"
+      env_entries << ptr.call("&#{step_maker}")
       env_entries << 'mrb_int_value(M, 0)'
       env_entries << "mrb_int_value(M, #{BLOCK_STEP_MAGIC | 4 | 8})"
     end
@@ -1770,10 +1744,6 @@ class CodeGen
     ENV['BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT'] != '0'
   end
 
-  # RESCUE_BODY_BLOCK_SUPPORT: the shared BLOCK_FALLBACK/EXPLICIT_BLOCK_ARG
-  # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
-  # Takes recognized region lists (the caller chooses the scope), mutates the
-  # caller's suppressed/glue_at, and returns the nested-function pre-code.
   # INSTANCE_EVAL_IVAR: `obj.instance_eval { @x }` and `{ @x = v }` read and write an instance variable of +obj+ without a
   # block (mruby-enumerator's Enumerator#each is written that way).
   def recognize_instance_eval_ivar_regions(irep)
@@ -1811,6 +1781,10 @@ class CodeGen
     end
   end
 
+  # RESCUE_BODY_BLOCK_SUPPORT: the shared BLOCK_FALLBACK/EXPLICIT_BLOCK_ARG
+  # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
+  # Takes recognized region lists (the caller chooses the scope), mutates the
+  # caller's suppressed/glue_at, and returns the nested-function pre-code.
   def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at, irep: nil)
     pre = String.new
     block_regions.each do |region|
