@@ -1469,7 +1469,8 @@ head + optional_head + fill.map { |line| "  #{line}\n" }.join + tail + (dyn ? re
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
       long long slots[1];
     };
-    template <class Body> static mrb_value bc2cpp_protect_tramp(mrb_state*, void* body) { return (*(Body*)body)(); }
+    template <class Body>
+    static mrb_value bc2cpp_protect_tramp(mrb_state*, void* body) { return (*(Body*)body)(); }
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }
     static const mrb_data_type bc2cpp_resume_frame_type = { "Bc2cppResumable::Frame", bc2cpp_resume_frame_free };
     static mrb_sym bc2cpp_resume_regs_sym(mrb_state* M) { return mrb_intern_lit(M, "__bc2cpp_regs__"); }
