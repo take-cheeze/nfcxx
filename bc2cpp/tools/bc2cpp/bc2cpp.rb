@@ -238,7 +238,14 @@ if $PROGRAM_NAME == __FILE__
     next unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
 
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    warn format('BC2CPP_TIME %-32s %8.3fs (total %8.3fs)', name, now - profile_last, now - profile_started)
+    # Resident memory (Linux), so a run shows where its memory grows; -1 where /proc is not there.
+    rss_kb = begin
+      File.read('/proc/self/status').lines.grep(/\AVmRSS:/).first.to_s.split[1].to_i
+    rescue StandardError
+      -1
+    end
+    warn format('BC2CPP_TIME %-32s %8.3fs (total %8.3fs) rss %d MB', name, now - profile_last, now - profile_started,
+                rss_kb / 1024)
     profile_last = now
   end
   profile_call = lambda do |name, &block|
@@ -306,8 +313,10 @@ if $PROGRAM_NAME == __FILE__
     CodeGen.build_gem_names = build_gems.keys.to_set
     errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root, compiled_srcs: srcs)
   abort "bc2cpp: build '#{build_name}' is not a closed world:\n  #{errors.join("\n  ")}" unless errors.empty?
+  profile_phase.call('closed world: build check')
 
     outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
+  profile_phase.call('closed world: outside sources')
     # Core Ruby is compiled input here but stays an OUTSIDE source for these proofs: the
     # closed world is the engine's own Ruby, and a name mruby's own Ruby defines is one
     # the engine's proofs cannot enumerate (core_or_native), exactly as before.
@@ -317,12 +326,14 @@ if $PROGRAM_NAME == __FILE__
                                    walked: walked_ireps & engine_ireps.keys,
                                    native_paths: outside_native, ruby_paths: outside_ruby,
                                    module_names: declared_modules)
+    profile_phase.call('closed world: ClosedWorld.new')
     warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
+    profile_phase.call('closed world: lint cross-check')
 
   # DEFINE_METHOD_SITES: the class-body `define_method(:x) { }` candidates the registry
   # collected stay definitions only in a closed world that trusts `define_method` itself.
