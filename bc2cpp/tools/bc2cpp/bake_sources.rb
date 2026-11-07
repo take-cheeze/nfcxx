@@ -58,10 +58,30 @@ def bake(*entries)
 end
 
 if $PROGRAM_NAME == __FILE__
+  # --dir DIR: each baked source is written as DIR/<baked name>.rb, with DIR/index listing the names, for the build to
+  # compile to bytecode (host-libs/mruby-bc2cpp-sources) instead of evaluating the text at run time.
+  dir = nil
+  if (i = ARGV.index('--dir'))
+    dir = ARGV[i + 1] or abort 'bake_sources: --dir needs a directory'
+    ARGV.slice!(i, 2)
+  end
   entry, output, *extras = ARGV
-  abort 'usage: bake_sources.rb ENTRY OUTPUT [EXTRA_ENTRY...]' unless output
+  abort 'usage: bake_sources.rb [--dir DIR] ENTRY OUTPUT [EXTRA_ENTRY...]' unless output
 
   sources = bake(entry, *extras)
+  if dir
+    require 'fileutils'
+    FileUtils.rm_rf(dir)
+    sources.each do |name, body|
+      path = File.join(dir, "#{name}.rb")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, body)
+    end
+    File.write(File.join(dir, 'index'), "#{sources.keys.join("\n")}\n")
+    File.write(output, "# the baked sources are compiled to bytecode under #{dir}\n")
+    warn "bake_sources: #{sources.size} files into #{dir}"
+    exit
+  end
   # Each body is a list of single-quoted chunks, escaping only `\` and `'`, joined at load. A heredoc would not do:
   # mruby processes backslash escapes in `<<'EOS'` (CRuby does not), which halves every `\\` in the baked source.
   # A single literal over a few thousand bytes is refused by mruby's parser, so the chunks stay short.
