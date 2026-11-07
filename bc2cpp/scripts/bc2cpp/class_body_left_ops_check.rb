@@ -14,7 +14,9 @@ require 'open3'
 
 ROOT = File.expand_path('../..', __dir__)
 MIN_COMPILED = 250
-KNOWN_LEFT = %w[].freeze
+# SDEF: `class IO`'s `def self.open` is a core method (its guard was removed),
+# so the class-body unit refuses that singleton registration. Only the one body refuses it; see the fiber-guard work.
+KNOWN_LEFT = %w[SDEF].freeze
 MADE_COMPILABLE = %w[BLOCK SENDB CLASS DEF METHOD TCLASS SSEND SSEND0 SEND SEND0 SCLASS LAMBDA ALIAS].freeze
 
 if ENV['MRBC'].to_s.empty? || ENV['BC2CPP_STATIC_DISPATCH_LISTS'].to_s.empty?

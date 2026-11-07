@@ -146,6 +146,9 @@ guarded = lambda do |code, owner, fn|
 end
 
 generate = lambda do |source, dir, env: {}, **options|
+  # The repo's sig/ holds game declarations for other classes; this fixture's program has none of them, so an
+  # unusable declaration would abort the generation. This check does not read RBS.
+  env = { 'BC2CPP_SIG_DIRS' => '' }.merge(env)
   saved = env.to_h { |k, _| [k, ENV.fetch(k, nil)] }
   env.each { |k, v| ENV[k] = v }
   begin

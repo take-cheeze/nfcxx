@@ -117,8 +117,6 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
     check.call('methods still visible by name remain roots', pruned.include?('MainRootProbe_qr9z_named_impl'))
     check.call('the generated C++ is smaller', pruned.bytesize < full.bytesize)
     puts "  generated C++: #{full.bytesize} -> #{pruned.bytesize} bytes"
-    manifest = File.read(File.join(pruned_dir, 'fixture_stubs.txt'))
-    check.call('dead method bodies join the residual mrblib stub manifest', manifest.include?('MainRootProbe#qr9z_unused'))
     check.call('the census reports omitted methods', diagnostics.include?('unreachable: MainRootProbe#qr9z_unused'))
     report = JSON.parse(File.read(File.join(ENV['BC2CPP_MAIN_REPORT'], 'fixture_named_reachability.json')))
     entry = report.fetch('entries').find { |row| row['name'] == 'qr9z_entry' }

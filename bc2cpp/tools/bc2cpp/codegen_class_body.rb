@@ -18,11 +18,12 @@ class CodeGen
   # then SEND0 :new), the one body the driver refused. The name such a call keeps in the method table is one the SEND
   # sites keep already. The self sends (SSEND, SSEND0) are left to the VM, since a self send in a body calls owner-call
   # helpers the gem emits only for its compiled methods.
+  CLASS_BODY_VISIBILITY_SENDS = %w[private public protected module_function private_class_method public_class_method].freeze
   CLASS_BODY_OPS = (%i[NOP STOP RETURN RETNIL LOADNIL LOADSELF LOADTRUE LOADFALSE LOADL LOADSYM STRING LOADI__1 LOADI_0
                        LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7 LOADI8 LOADI16 LOADI32 SETCONST
-                       GETCONST ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
+                       GETCONST SETGV ARRAY HASH ADD ADDI ADDILV SUB SUBI SUBILV MUL DIV GETMCNST SETIV SYMBOL EQ ARYCAT MOVE GETIDX RANGE_INC SEND SEND0]).freeze
 
-  # The mruby entry points a class unit calls (vm.c; the same declarations load_compile.rb's PRELUDE makes).
+  # The mruby entry points a class unit calls (vm.c; the same declarations the class-body prelude makes).
   CLASS_UNIT_DECLS = <<~CPP
     extern "C" struct RClass* mrb_vm_define_class(mrb_state*, mrb_value, mrb_value, mrb_sym);
     extern "C" struct RClass* mrb_vm_define_module(mrb_state*, mrb_value, mrb_sym);
@@ -32,17 +33,22 @@ class CodeGen
   # body's class path. A TDEF of an omitted key (unregistered_keys) is its register write alone.
   # A checked send (codegen_checked_send.rb) names a helper the gem does not define, so a unit's sends keep the plain
   # mrb_funcall the generator starts from. @class_body_unit is set only while a unit compiles.
-  def compile_class_body(irep, owner)
+  # UNIT_TAG: a unit's function names carry its tag ("_<occurrence>" for a reopened top-level class), so each occurrence
+  # of one class path is its own function in the translation unit. Nested bodies inherit the tag of their unit.
+  def compile_class_body(irep, owner, tag: '')
     was_unit = @class_body_unit
     outer_notes = @class_body_notes
+    outer_tag = @unit_tag
     @class_body_unit = true
     @class_body_notes = []
+    @unit_tag = tag
     code, refused = compile_class_body_unit(irep, owner)
     dump_class_unit(owner, code, refused, @class_body_notes)
     [code, refused]
   ensure
     @class_body_unit = was_unit
     @class_body_notes = outer_notes
+    @unit_tag = outer_tag
   end
 
   # BC2CPP_DUMP_UNITS=<dir>: each body the driver tries, as <owner>.cpp (its unit text) or <owner>.refused (the opcodes
@@ -66,6 +72,7 @@ class CodeGen
 
   def compile_class_body_unit(irep, owner)
     program = BytecodeIR.for(irep)
+    check_const_reads(program, owner)
     omitted = unregistered_keys
     bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
     paired_exec = bodies.keys.to_set { |idx| idx + 1 }
@@ -102,13 +109,13 @@ class CodeGen
         child_path = child_body_path(program, irep, idx, owner)
         return [nil, [:UNRESOLVED_CLASS_PATH]] unless child_path
 
-        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path)
+        child_code, child_refused = compile_class_body(@ireps.fetch(bodies.fetch(idx)), child_path, tag: @unit_tag)
         return [nil, child_refused] unless child_code
 
         texts << child_code
         lines << class_unit_define(insn)
-        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}(M);\n"
-      elsif insn.op == :TDEF && omitted_def?(insn, owner, omitted)
+        lines << "  (void)bc2cpp_class_body_#{sanitize(child_path)}#{@unit_tag}(M);\n"
+      elsif %i[TDEF SDEF].include?(insn.op) && omitted_def?(insn, owner, omitted)
         lines << "  // #{owner}##{insn.sym} omitted: statically dispatched only (no registration)\n"
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
       elsif %i[TDEF SDEF].include?(insn.op) && left_out_method?(insn, irep)
@@ -117,6 +124,13 @@ class CodeGen
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
       elsif %i[TDEF SDEF].include?(insn.op)
         registration = class_body_registration(insn, irep, owner)
+        if registration.nil? && irep.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb')
+          # A def the compiler cannot express (SKIP_UNSUPPORTED, e.g. Enumerator#initialize_copy's instance_eval block) is just
+          # missing: refusing the body would lose the whole class, whose compiled methods register on it (ENUMERATOR_FIBER).
+          lines << "  // #{owner}##{insn.sym} has no compiled body (unsupported): the class body still runs\n"
+          lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, \"#{insn.sym}\"));\n"
+          next
+        end
         return [nil, [insn.op]] unless registration
 
         registered << insn.sym.to_s if insn.op == :TDEF
@@ -144,9 +158,22 @@ class CodeGen
 
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}));\n"
+      elsif %i[SSEND SSEND0].include?(insn.op) && AliasSites.settled?(@registry, irep.label, idx)
+        # A settled alias_method site is the registry's definition (ALIAS_SITES), so it installs nothing here: a by-name
+        # call copies `old` as it stands at run time, and a body run twice copies its own def (alias_handled_by_ir?).
+        lines << "  // #{insn.sym} alias handled by the bytecode IR\n"
+      elsif %i[SSEND SSEND0].include?(insn.op) && CLASS_BODY_VISIBILITY_SENDS.include?(insn.sym.to_s)
+        # private/public/protected/module_function set visibility of defs the registration already sets, and a
+        # statically dispatched def has no method to set it on: nothing to run here.
+        lines << "  // #{insn.sym} (visibility) left to the method registrations\n"
       elsif %i[SSEND SSEND0].include?(insn.op)
-        # A self send (attr_accessor, include, private, ...) is left to the VM: the residual bytecode still runs the body.
-        lines << "  // #{insn.sym} (self send) left to the VM\n"
+        # A self send (include, extend, prepend, attr_accessor, ...) runs by name on the class being defined; the VM-free build
+        # has no residual bytecode to run it.
+        n = insn.op == :SSEND0 ? 0 : (insn.argc || 0)
+        args = (1..n).map { |k| "r#{insn.reg + k}" }
+        array = args.empty? ? 'nullptr' : "bc2cpp_ssend_args"
+        decl = args.empty? ? '' : "mrb_value bc2cpp_ssend_args[] = { #{args.join(', ')} }; "
+        lines << "  { #{decl}r#{insn.reg} = mrb_funcall_argv(M, self, mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), #{n}, #{array}); }\n"
       elsif literal_length_send?(program, irep, idx)
         lines << literal_length_line(program, irep, idx)
       elsif literal_freeze?(program, idx)
@@ -154,6 +181,10 @@ class CodeGen
       elsif insn.op == :ALIAS && alias_handled_by_ir?(irep, idx, owner)
         # The registry defines the new name (AliasSites) and the gem registers it; the VM residual still runs the alias.
         lines << "  // #{insn.sym} alias handled by the bytecode IR\n"
+      elsif insn.op == :ALIAS && omitted_alias?(insn, owner, omitted)
+        # A name the build leaves out of the tables is statically dispatched only: no method is installed for it, and
+        # an old name left out of them does not exist when the unit runs (mrb_alias_method would raise NameError).
+        lines << "  // #{insn.sym} alias of a method left out of the tables: statically dispatched only (no registration)\n"
       elsif insn.op == :ALIAS
         line = class_body_alias(insn, registered)
         return [nil, [:ALIAS]] unless line
@@ -169,7 +200,7 @@ class CodeGen
         lines << compile_insn(insn, irep, owner_def, idx)
       end
     end
-    fn = "bc2cpp_class_body_#{sanitize(owner)}"
+    fn = "bc2cpp_class_body_#{sanitize(owner)}#{@unit_tag}"
     code = +"#{CLASS_UNIT_DECLS}static mrb_value #{fn}(mrb_state* M) {\n"
     code << "  mrb_value self = #{body_self_expr(owner)};\n"
     code << emit_register_initializers(body_register_count(program, irep), [])
@@ -244,44 +275,118 @@ class CodeGen
   # [{ path:, code: }]. A unit is the CLASS or MODULE and its compiled body; the function it adds creates the class the
   # way vm.c's OP_CLASS and OP_MODULE do with the Object base and a nil superclass, then calls the body. A unit whose
   # superclass is not a literal nil, whose path is opened twice, or whose body refuses is left out: the VM still runs it.
+  # CONST_RESOLVE: a constant read (GETCONST / GETMCNST) must name a constant the build binds before the unit runs (the IR's
+  # constant table plus the names native sources define). Unresolved reads are collected and compile_top_class_units
+  # fails once at the phase end; CodeGen.known_const_names nil means no check.
+  def check_const_reads(program, owner)
+    known = CodeGen.known_const_names
+    return unless known
+
+    program.each_source do |insn, _idx|
+      name = case insn.op
+             when :GETCONST then insn.const_name
+             when :GETMCNST then insn.mcnst_name
+             end
+      next if name.nil? || known.include?(name.to_s)
+
+      (CodeGen.const_unresolved ||= []) << { name: name.to_s, owner: owner }
+    end
+  end
+
   def compile_top_class_units(root_irep)
     program = BytecodeIR.for(root_irep)
-    units = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
+    candidates = BytecodeIR.class_bodies(root_irep, :CLASS, :MODULE).filter_map do |idx, child|
       insn = program.source_at(idx)
       path = BytecodeIR.class_body_path(root_irep, idx, nil)
-      next nil unless path && top_unit_super_nil?(program, idx, insn)
+      superclass = path && top_unit_superclass(program, idx, insn)
+      next nil unless superclass
 
-      code, _refused = compile_class_body(@ireps.fetch(child), path)
-      next nil unless code
-
-      { path: path, insn: insn, code: code }
+      [insn, path, child, superclass]
     end
-    counts = units.map { |unit| unit[:path] }.tally
-    units.select { |unit| counts[unit[:path]] == 1 }.map do |unit|
-      { path: unit[:path], code: top_class_unit_code(unit[:insn], unit[:path], unit[:code]) }
+    occurrences = Hash.new(0)
+    compiled = candidates.map do |insn, path, child, superclass|
+      tag = "_#{occurrences[path]}"
+      occurrences[path] += 1
+      code, _refused = compile_class_body(@ireps.fetch(child), path, tag: tag)
+      { path: path, insn: insn, code: code, tag: tag, superclass: superclass, file: @ireps.fetch(child).file }
+    end
+    missing = (CodeGen.const_unresolved || []).uniq
+    unless missing.empty?
+      listing = missing.map { |m| "  #{m[:name]} (read in #{m[:owner]})" }.join("\n")
+      raise "unresolved constants in class bodies (CONST_RESOLVE):\n#{listing}"
+    end
+    # A path is emitted only when every occurrence of it compiled: UNIT_BLANK removes all of that path's statements, so a
+    # refused occurrence would otherwise lose its body.
+    refused_paths = compiled.reject { |unit| unit[:code] }.map { |unit| unit[:path] }.to_set
+    compiled.select { |unit| unit[:code] && !refused_paths.include?(unit[:path]) }.map do |unit|
+      { path: unit[:path], name: "#{sanitize(unit[:path])}#{unit[:tag]}", file: unit[:file],
+        code: top_class_unit_code(unit[:insn], unit[:path], unit[:code], unit[:tag], unit[:superclass]) }
     end
   end
 
   # The function that creates a top-level unit's class and calls its body function (compile_class_body names it).
-  def top_class_unit_code(insn, path, body_code)
+  def top_class_unit_code(insn, path, body_code, tag = '', superclass = 'mrb_nil_value()')
     base = 'mrb_obj_value(M->object_class)'
     sym = "mrb_intern_cstr(M, \"#{insn.sym}\")"
     define = if insn.op == :MODULE
                "(void)mrb_vm_define_module(M, #{base}, #{sym});"
              else
-               "(void)mrb_vm_define_class(M, #{base}, mrb_nil_value(), #{sym});"
+               "(void)mrb_vm_define_class(M, #{base}, #{superclass}, #{sym});"
              end
-    "#{body_code}static void bc2cpp_top_unit_#{sanitize(path)}(mrb_state* M) {\n" \
-      "  #{define}\n  (void)bc2cpp_class_body_#{sanitize(path)}(M);\n}\n"
+    "#{body_code}static void bc2cpp_top_unit_#{sanitize(path)}#{tag}(mrb_state* M) {\n" \
+      "  #{define}\n  (void)bc2cpp_class_body_#{sanitize(path)}#{tag}(M);\n}\n"
   end
 
-  # A CLASS takes its superclass from the register after its base; only a LOADNIL there is a nil superclass the unit
-  # can pass as is. A MODULE has none.
-  def top_unit_super_nil?(program, idx, insn)
-    return true if insn.op == :MODULE
+  # The superclass a top-level unit passes to mrb_vm_define_class, as a C expression, or nil when the unit cannot name it.
+  # A CLASS takes its superclass from the register after its base: a LOADNIL there is nil, and a GETCONST there is a
+  # constant read, which the unit reads from Object as the VM does. A MODULE has none.
+  def top_unit_superclass(program, idx, insn)
+    return 'mrb_nil_value()' if insn.op == :MODULE
 
     previous = program.source_at(idx - 1)
-    previous&.op == :LOADNIL && previous.reg == insn.reg + 1
+    return nil unless previous && previous.reg == insn.reg + 1
+
+    case previous.op
+    when :LOADNIL then 'mrb_nil_value()'
+    when :GETCONST
+      "mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{previous.const_name}\"))"
+    end
+  end
+
+  # TOP_LEVEL_STATEMENTS: the top-level constant and global writes of a gem's root body, as C++ statements in one function
+  # gem_init calls after the class units. A statement is the run of root instructions ending in a SETCONST or SETGV (or a
+  # class EXEC). Returns '' for none.
+  def compile_top_level_statements(root_irep)
+    program = BytecodeIR.for(root_irep)
+    body = +''
+    start = 0
+    targets = jump_targets(root_irep)
+    program.each_source do |insn, idx|
+      if insn.op == :EXEC
+        start = idx + 1
+        next
+      end
+      next unless %i[SETCONST SETGV].include?(insn.op)
+
+      lines = +''
+      @class_body_unit = true
+      owner_def = Struct.new(:owner, :core, :name, :irep).new('Object', false, nil, root_irep)
+      (start..idx).each do |index|
+        source = program.source_at(index)
+        next unless source
+
+        # A jump inside the run (`x = cond ? A : B`) lands on a label of this statement; compile_insn writes the `goto` only.
+        lines << "  L#{source.addr}:;\n" if targets.include?(source.addr)
+        lines << compile_insn(source, root_irep, owner_def, index)
+      end
+      body << "  {\n#{emit_register_initializers(body_register_count(program, root_irep), [])}#{lines}  }\n"
+      start = idx + 1
+    end
+    return '' if body.empty?
+
+    "static void bc2cpp_top_level_statements(mrb_state* M) {\n  mrb_value self = mrb_obj_value(M->top_self);\n#{body}}\n"
+  ensure
+    @class_body_unit = false
   end
 
   # The units a gem's gem_init runs are the ones of the owners that gem emits (ONLY_OWNERS). Every gem's TU would otherwise
@@ -371,7 +476,7 @@ class CodeGen
   def class_def_registration(insn, program, idx, irep)
     child = def_method_child(insn, program, idx, irep)
     compiled = child && @compiled_methods&.[](child)
-    return nil unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
+    return nil unless compiled && compiled[:entry] && compiled[:aspec]
     return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
 
     define = { public: 'mrb_define_method', private: 'mrb_define_private_method' }[compiled[:visibility]]
@@ -382,8 +487,17 @@ class CodeGen
 
   def class_body_registration(insn, irep, owner)
     child = irep.reps[insn.def_child_index]
+    # A core definition a later definition replaces is not registered: the later one is (CORE_SHADOWED).
+    return nil if child && CodeGen.shadowed_labels&.include?(child)
     compiled = child && @compiled_methods&.[](child)
-    return class_body_refusal(insn, compiled, child) unless compiled && compiled[:entry] && compiled[:aspec] && !compiled[:guard]
+    # A bytecode def with no compiled body (a block-taking wrapper such as Array#sort) keeps the native method already
+    # registered under that owner and name, instead of refusing the whole class body.
+    if compiled.nil? && (@registry[insn.sym.to_s] || []).any? { |d| d.owner == owner && d.irep.nil? }
+      return nil
+    end
+    # A guarded entry registers too; its Fiber fallback reads bytecode that engine methods lack, so a block call under a
+    # non-root Fiber fails there.
+    return class_body_refusal(insn, compiled, child) unless compiled && compiled[:entry] && compiled[:aspec]
     return nil if unregistered_keys.include?("#{compiled[:owner]}##{compiled[:name]}")
 
     call = if insn.op == :SDEF
@@ -498,8 +612,17 @@ class CodeGen
     insn&.op == :SEND0 && insn.sym.to_s == 'freeze'
   end
 
+  # A definition the static dispatch proof omits is never called by name, so its unit registers nothing for it. A TDEF's
+  # key is Owner#name; an SDEF's is Owner.singleton#name (the lists' spelling).
   def omitted_def?(insn, owner, omitted)
-    insn.op == :TDEF && omitted.include?("#{owner}##{insn.sym}")
+    key = insn.op == :SDEF ? "#{owner}.singleton##{insn.sym}" : "#{owner}##{insn.sym}"
+    omitted.include?(key)
+  end
+
+  # An `alias NEW OLD` naming a method the build leaves out of its tables, on either side (see class_body_alias).
+  def omitted_alias?(insn, owner, omitted)
+    old = insn.first_of(:name)&.value
+    omitted.include?("#{owner}##{insn.sym}") || (!old.nil? && omitted.include?("#{owner}##{old}"))
   end
 end
 

@@ -12,8 +12,11 @@
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - interpreted and compiled runs print the same for square, wide, tall and embedded-size shapes, empty
 #       receivers and rows, ragged rows (IndexError), non-Array and to_ary rows (TypeError), Array subclass
-#       receivers and rows (a row subclass with its own `[]`), a singleton receiver, frozen receivers and rows, a
-#       self-containing row and GC.stress; and in a world whose program redefines Array#transpose.
+#       receivers and rows (a row subclass with its own `[]`), frozen receivers and rows, a self-containing row and
+#       GC.stress; in a world whose program redefines Array#transpose; and in a world whose program gives an Array a
+#       singleton `each` (a singleton maker: the helper is withdrawn, the compiled body still runs the singleton).
+#       The singleton must be in the program, not in the evaluated driver: the closed world lists the definers its
+#       receivers can have, and a singleton class made by code outside it is an owner violation, not a case to run.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/transpose_direct_check.rb
 
@@ -54,7 +57,10 @@ SRC = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[TdList TdRow TdAry TdT].freeze
+# A program that gives an Array a singleton class: the world can no longer list every definer of `each` by exact class.
+SINGLETON_SRC = "#{SRC}class TdS\n  def go\n    a = [[1, 2], [3, 4]]\n    def a.each; yield [9, 9]; yield [8, 8]; self; end\n    TdT.new.t(a)\n  end\nend\n"
+
+OWNERS = %w[TdList TdRow TdAry TdT TdS].freeze
 CALL = 'bc2cpp_ary_transpose(M, self)'
 
 def transpose_body(code)
@@ -124,11 +130,6 @@ DRIVER = <<~'RUBY'
   show.call('subclass receiver') { l = TdList.new; l << [1, 2] << [3, 4]; t.t(l) }
   show.call('subclass rows') { r = TdList.new; r << 5 << 6; t.t([[1, 2], r]) }
   show.call('row with its own []') { r = TdRow.new; r << 5 << 6; t.t([[1, 2], r]) }
-  show.call('singleton receiver') do
-    a = [[1, 2], [3, 4]]
-    def a.each; yield [9, 9]; yield [8, 8]; self; end
-    t.t(a)
-  end
   show.call('frozen') { t.t([[1, 2].freeze, [3, 4].freeze].freeze) }
   show.call('self-containing row') { a = []; a << a; r = t.t(a); [r.size, r[0].size, r[0][0].equal?(a)] }
   show.call('shared rows') { row = [1, 2]; t.t([row, row, row]) }
@@ -146,11 +147,15 @@ RUBY
 # A program Array#transpose answers every call; the core body (and its helper) is not what runs.
 REDEFINED = "#{SRC}class Array\n  def transpose; [:program, size]; end\nend\n"
 
-def scenario_body
+# The singleton world's driver adds the one case the others cannot run.
+SINGLETON_DRIVER = DRIVER.sub("puts 'end'\n", "show.call('singleton receiver') { TdS.new.go }\nputs 'end'\n")
+raise 'SINGLETON_DRIVER did not apply' if SINGLETON_DRIVER == DRIVER
+
+def scenario_body(driver = DRIVER)
   <<~CPP
     static int scenario(mrb_state* M) {
       std::fflush(stdout);
-      const char* src = R"TDF(#{DRIVER})TDF";
+      const char* src = R"TDF(#{driver})TDF";
       mrb_load_string(M, src);
       std::fflush(stdout);
       if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
@@ -159,8 +164,8 @@ def scenario_body
   CPP
 end
 
-compare = lambda do |label, dir, err, build|
-  built, output = Bc2cppFixtureRuntime.run(dir, err, OWNERS, scenario_body, build: build, full: true)
+compare = lambda do |label, dir, err, build, driver = DRIVER|
+  built, output = Bc2cppFixtureRuntime.run(dir, err, OWNERS, scenario_body(driver), build: build, full: true)
   check.call("#{label}: the fixtures build and run", built)
   sections = Bc2cppFixtureRuntime.sections(output)
   interpreted = sections['interpreted']
@@ -191,6 +196,12 @@ else
     _, redefined_err = Bc2cppFixtureRuntime.generate(REDEFINED, redefined_dir, core: true, only_owners: OWNERS)
     lines = compare.call('program Array#transpose', redefined_dir, redefined_err, build)
     check.call('the program Array#transpose answers', lines.to_a.include?('square: [:program, 2]'))
+    singleton_dir = Dir.mktmpdir('bc2cpp-transpose-singleton')
+    at_exit { FileUtils.remove_entry(singleton_dir) }
+    singleton_code, singleton_err = Bc2cppFixtureRuntime.generate(SINGLETON_SRC, singleton_dir, core: true, only_owners: OWNERS)
+    check.call('a program singleton `each` on an Array withdraws the helper', !singleton_code.include?(CALL))
+    lines = compare.call('program singleton each', singleton_dir, singleton_err, build, SINGLETON_DRIVER)
+    check.call('the singleton receiver runs its own each', lines.to_a.include?('singleton receiver: [[9, 8], [9, 8]]'))
   end
 end
 

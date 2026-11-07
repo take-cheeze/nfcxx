@@ -4,12 +4,13 @@
 
 # A direct call into a body SKIP_UNSUPPORTED drops must not be emitted. `Range#max`'s `super` reaches
 # `Enumerable#max` (MODULE_SUPER_SUPPORT, codegen_receiver_facts.rb module_super_call): when that body carries a #error
-# its `_impl` is not emitted, so the caller keeps its own `#error` (left interpreted), as an unsupported call does.
+# its `_impl` is not emitted, so a direct call into it must not survive. The `super` itself is a run-time lookup
+# (bc2cpp_super_call) that finds the interpreted body, so the caller compiles.
 #
 # The fixture reproduces the shape with an ensure-leaving `next` (a JMPUW, which has no compiled form): SkEnum#pick is
 # skipped, and SkRange#pick reaches it through `super()` with its block.
 #
-# Codegen half (needs host mrbc): no `SkEnum_pick_impl` call survives, and SkRange#pick is not emitted either.
+# Codegen half (needs host mrbc): no `SkEnum_pick_impl` call survives, and SkRange#pick reaches it by run-time lookup.
 # Behaviour half (needs a full-core libmruby): the program runs, and the compiled and interpreted runs print the same.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/skipped_direct_call_check.rb
@@ -82,10 +83,13 @@ begin
              !code.match?(/^mrb_value SkEnum_pick_impl\(/))
   check.call('no emitted call names the skipped SkEnum_pick_impl',
              !code.include?('SkEnum_pick_impl('))
-  check.call('SkRange#pick is not emitted either (its super reaches the skipped body, so it keeps its #error)',
-             !code.match?(/^mrb_value SkRange_pick_impl\(/))
+  # super in a method with a block register is a run-time lookup (bc2cpp_super_call), so SkRange#pick compiles and never
+  # calls the skipped body directly.
+  check.call('SkRange#pick reaches the skipped body through the run-time super lookup, not a direct call',
+             code.match?(/^mrb_value SkRange_pick_impl\(/) && code.include?('bc2cpp_super_call(M, self, ') &&
+             !code.include?('SkEnum_pick_impl('))
   check.call('SkDrive#drive is emitted without a direct call into the skipped body',
-             code.match?(/^mrb_value SkDrive_drive_impl\(/) && !code.include?('SkRange_pick_impl('))
+             code.match?(/^mrb_value SkDrive_drive_impl\(/) && !code.include?('SkEnum_pick_impl('))
 rescue RuntimeError => e
   warn e.message
   check.call('the fixture generates', false)

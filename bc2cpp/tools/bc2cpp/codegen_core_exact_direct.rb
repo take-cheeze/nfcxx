@@ -147,6 +147,7 @@ module CoreExactDirect
   end
 
   def to_enum_construction_line(d, recv, name, argv, why)
+    @direct_alloc_used = true if to_enum_owner_call_owners # the helper allocates with bc2cpp_direct_alloc
     meth = argv.empty? ? 'mrb_symbol_value(mrb_intern_lit(M, "each"))' : argv.first
     vector = [recv, meth, *argv.drop(1)]
     "#{TO_ENUM_DIRECT_NOTE}#{name} -- #{why}: builds Enumerator.new(self, meth, *args) as " \
@@ -155,18 +156,32 @@ module CoreExactDirect
       "r#{d} = bc2cpp_to_enum(M, #{vector.size}, bc2cpp_te_argv); }\n"
   end
 
-  # The helper TO_ENUM_DIRECT sites call, emitted only when some compiled code does. `mrb_class_get` is the constant
-  # read of the body's `Enumerator` (a TypeError/NameError exactly where the read would raise), `mrb_obj_new` is
-  # Class#new without a block: allocate, then `initialize(self, meth, *args)`.
+  # The helper TO_ENUM_DIRECT sites call, emitted only when some compiled code does: Class#new without a block, as
+  # GENERIC_NEW_DIRECT builds it (`mrb_class_get` is the constant read of the body's `Enumerator`, a TypeError or
+  # NameError exactly where the read would raise), then `initialize(self, meth, *args)` as an owner call. The text goes
+  # through SymbolCache like the method bodies. mrb_obj_new when the owner list cannot be built.
+  # The owners of the Enumerator construction's owner call, or nil. Enumerator#initialize is compiled only when the
+  # registry keeps its definer; the enumerator model drops an interpreted one (EnumeratorModel), and an owner list
+  # without it would raise at run time. Without it the construction keeps mrb_obj_new.
+  def to_enum_owner_call_owners
+    return nil unless @registry.fetch('initialize', []).any? { |definition| definition.owner == 'Enumerator' }
+
+    generic_new_initialize_owners
+  end
+
   def emit_to_enum_helper(compiled)
     return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_to_enum(') }
 
-    <<~CPP
-      static inline mrb_value bc2cpp_to_enum(mrb_state* M, mrb_int argc, const mrb_value* argv) {
-        return mrb_obj_new(M, mrb_class_get(M, "Enumerator"), argc, argv);
-      }
-
-    CPP
+    owners = to_enum_owner_call_owners
+    body = if owners
+             "  mrb_value obj = bc2cpp_direct_alloc(M, mrb_class_get(M, \"Enumerator\"));\n" \
+               "  (void)bc2cpp_owner_call_argv_named(M, obj, \"initialize\", 0, BC2CPP_OWNERS(#{owner_call_owner_list(owners)}), " \
+               "mrb_nil_value(), argc, argv);\n" \
+               "  return obj;\n"
+           else
+             "  return mrb_obj_new(M, mrb_class_get(M, \"Enumerator\"), argc, argv);\n"
+           end
+    "static inline mrb_value bc2cpp_to_enum(mrb_state* M, mrb_int argc, const mrb_value* argv) {\n#{body}}\n\n"
   end
 
   # FLOW_CORE_DIRECT: the direct call of an exact-receiver site that would otherwise get a guard
@@ -196,14 +211,9 @@ module CoreExactDirect
     target = block_core_target(klass, chain, name, arity, blockless: true)
     # An explicit-receiver call of a private method is a NoMethodError, not a call.
     return nil unless target && (target.visibility == :public || private_ok)
-    return nil if core_guarded_def?(target) && !core_body_relaxable?(target.irep)
     return nil if target.owner == 'Enumerable' && !core_each_builtin?(klass, chain)
 
     target
-  end
-
-  def core_guarded_def?(definition)
-    !!self.class.core_guarded&.include?(definition.irep)
   end
 
   # An Enumerable body runs `each` on its receiver: the entry checks it at run time

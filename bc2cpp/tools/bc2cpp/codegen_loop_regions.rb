@@ -10,6 +10,11 @@ class CodeGen
   # CORE_BLOCK_ELEMENT_HINT: an element hint (with_element_hint) that STRICT_HINTS
   # never forces: compile_send unwraps `klass` and keeps the by-name else arm.
   SoftElementHint = Struct.new(:klass)
+  # UNION_ELEMENT_HINT: a block parameter declared as a class and its subclasses (`IO | File`). klass is their common
+  # ancestor, which picks the candidate; members are the classes the guard accepts, each by an exact class test.
+  AncestorElementHint = Struct.new(:klass, :members) do
+    def to_s = klass
+  end
 
   # Shared skeleton of every recognize_*_regions below: a block-carrying send
   # linearly preceded by the instruction that fills its block register

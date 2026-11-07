@@ -8,6 +8,7 @@ module RbsParseMemo
   module_function
 
   def decls(name, content)
+    require 'pathname'
     require 'rbs'
     (@decls ||= {})[content] ||= begin
       _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: name, content: content))

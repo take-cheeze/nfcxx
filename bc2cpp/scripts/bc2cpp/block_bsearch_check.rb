@@ -3,7 +3,8 @@
 
 # BLOCK_FALLBACK_UPVAR_SAFE_METHODS: `bsearch_index { }` / `bsearch { }` capture a local (`v` below) and compile as
 # block fallbacks, because mruby-array-ext's implementations call the block only while they run. A user method
-# that keeps its block is not on that list, so the same capture stays refused (`#error`).
+# that keeps its block is not on that list, so the capture goes through heap cells (STEP_CLOSURES); without them
+# (BC2CPP_STEP_CLOSURES=0) the same capture stays refused (`#error`).
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/block_bsearch_check.rb
 
@@ -63,8 +64,20 @@ Dir.mktmpdir('block_bsearch') do |dir|
   finder = refusals.select { |owner, _| owner.to_s.start_with?('Finder_') }
   check.call('bsearch_index and bsearch with a captured local compile without #error',
              finder.empty?)
-  check.call('a user method that stores its block stays refused',
-             refusals.fetch('Keeper_store_impl', 0).positive?)
+  check.call('a user method that stores its block captures through cells, not a pointer into the frame',
+             refusals.fetch('Keeper_store_impl', 0).zero?)
+end
+
+saved = ENV['BC2CPP_STEP_CLOSURES']
+ENV['BC2CPP_STEP_CLOSURES'] = '0'
+begin
+  Dir.mktmpdir('block_bsearch') do |dir|
+    Bc2cppFixtureRuntime.generate(SOURCE, dir, path: 'fixture.rb', skip_unsupported: false)
+    check.call('a user method that stores its block stays refused without the cells',
+               refusals_by_function(dir).fetch('Keeper_store_impl', 0).positive?)
+  end
+ensure
+  saved ? ENV['BC2CPP_STEP_CLOSURES'] = saved : ENV.delete('BC2CPP_STEP_CLOSURES')
 end
 
 suite.finish!

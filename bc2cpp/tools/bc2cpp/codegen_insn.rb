@@ -78,6 +78,9 @@ class CodeGen
     if @resumable && (resumable_code = resumable_intercept(insn, irep, owner_def, idx, reg_offset))
       return resumable_code
     end
+    if @tail_yield_block && (tail_code = tail_yield_intercept(insn, irep, idx, reg_offset))
+      return tail_code
+    end
     # RESUMABLE_DUAL: the variant's `recv[i]` dispatches by name, as vm.c's OP_GETIDX does for a subclass's own []
     # (the shared index helper picks its arms from program-wide facts, which the variant does not use).
     if @rsm_variant && insn.op == :GETIDX
@@ -104,12 +107,14 @@ class CodeGen
       # defining frame's register.
       upvar_idx, level = insn.upvar_ref
       key = [level, upvar_idx]
-      if @block_fallback_upvars&.include?(key)
+      if (@block_fallback_upvars || (@resumable&.flat ? @resumable.upvars : nil))&.include?(key)
         vname = upvar_var_name(*key)
         if insn.op == :GETUPVAR
           "  #{RegName[insn.reg]} = *#{vname};\n"
         else
-          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = #{RegName[insn.reg]};\n  bc2cpp_upvar_root(M, #{vname}, #{RegName[insn.reg]});\n"
+          # A pointer into a cells Array: the store grays the Array (its owner), so no root is kept for the slot.
+          keep = @block_cell_levels&.include?(level) ? "mrb_write_barrier(M, mrb_basic_ptr(bc2cpp_up_cells_#{level}))" : "bc2cpp_upvar_root(M, #{vname}, #{RegName[insn.reg]})"
+          "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = #{RegName[insn.reg]};\n  #{keep};\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
@@ -1004,20 +1009,35 @@ class CodeGen
       else
         "  return #{RegName[r]};\n"
       end
+    when :EXCEPT
+      # STEP_HANDLERS: a handler's entry captures the exception the fiber/step put in M->exc (nil when the protected region
+      # was left normally and execution fell into the ensure body).
+      if @resumable&.handlers
+        "  #{RegName[insn.reg]} = M->exc ? mrb_obj_value(M->exc) : mrb_nil_value();\n  M->exc = nullptr;\n"
+      else
+        "  #error unhandled opcode EXCEPT -- not in this prototype's supported subset\n"
+      end
     when :RESCUE
       # "RESCUE Ra Rb": vm.c `R[b] = R[a].isa?(R[b])`. Ra holds the exception (only
       # RESCUE_SUPPORT's glue produces one) and Rb the class from the preceding
       # GETCONST/GETMCNST chain, so this is correct wherever it appears; not gated on
       # the recognizer (unlike EXCEPT).
       d, s = insn.regs
-      "  #{RegName[s]} = mrb_bool_value(mrb_obj_is_kind_of(M, #{RegName[d]}, mrb_class_ptr(#{RegName[s]})));\n"
+      # A step's break/return/throw unwinding travels as an exception object no `rescue` clause matches.
+      unwind = @resumable ? "!bc2cpp_unwind_p(M, #{RegName[d]}) && " : ''
+      "  #{RegName[s]} = mrb_bool_value(#{unwind}mrb_obj_is_kind_of(M, #{RegName[d]}, mrb_class_ptr(#{RegName[s]})));\n"
     when :RAISEIF
       # "RAISEIF Ra": re-raise Ra unless nil. In a recognized rescue it is reached
       # only on the non-matching path with the exception in Ra. vm.c's mrb_break_p
       # branch (a break unwinding through a block) does not apply: the leaf ireps
       # compiled here are def bodies, so Ra is nil or an exception.
       ra = insn.reg
-      "  if (!mrb_nil_p(#{RegName[ra]})) { mrb_exc_raise(M, #{RegName[ra]}); }\n"
+      # STEP_EXIT_JUMPS: in a step with an ensure handler the register may hold a parked return/break/jump.
+      if step_ensure_handlers? && step_with_handlers?(irep)
+        step_raiseif_code(insn)
+      else
+        "  if (!mrb_nil_p(#{RegName[ra]})) { mrb_exc_raise(M, #{RegName[ra]}); }\n"
+      end
     when :SUPER
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
       # self as receiver and N args in R(a+1)..R(a+N), plus one register forwarding
@@ -1053,6 +1073,9 @@ class CodeGen
          call
        elsif (call = d_reg && super_splat_call(owner_def, irep, idx, d_reg))
          note_super_site(:splat, owner_def, irep, idx)
+         call
+       elsif (call = d_reg && super_block_register_call(owner_def, d_reg, n))
+         note_super_site(:block_register, owner_def, irep, idx)
          call
        else
          note_super_site(:unhandled, owner_def, irep, idx)

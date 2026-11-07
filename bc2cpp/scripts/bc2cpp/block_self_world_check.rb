@@ -188,9 +188,11 @@ Dir.mktmpdir do |dir|
   check.call("Hash#to_proc's native (hash_ext.c) is no rebinder or computed sender", w.failures.none? { |f| f.include?('hash_ext.c') })
   site_lines = w.sites.map { |label, idx, name, _| "#{File.basename(ireps[label].file)}:#{ireps[label].instructions[idx].lineno} #{name}" }
   puts "    sites: #{site_lines.join(', ')}"
-  check.call('the literal rebinder sites are the enumerator instance_eval blocks and Fiber.new',
+  # Fiber.new (enumerator.rb:406) is no rebinder: Fiber is a core class outside Class, Module and Struct, and its block
+  # runs under the self of the code that made it.
+  check.call('the literal rebinder sites are the enumerator instance_eval blocks',
              site_lines.sort == ['enumerator.rb:137 instance_eval', 'enumerator.rb:139 instance_eval', 'enumerator.rb:308 instance_eval',
-                                 'enumerator.rb:315 instance_eval', 'enumerator.rb:406 new'])
+                                 'enumerator.rb:315 instance_eval'])
   engine = w.rebound.select { |label| ireps[label].file.to_s.match?(%r{/mruby-(?:rpg2k|rgss|lcf)/}) }
   check.call('no engine block is rebound', engine.empty?)
 end

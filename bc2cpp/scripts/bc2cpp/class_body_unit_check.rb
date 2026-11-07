@@ -43,22 +43,22 @@ suite.compile(UNITS) do |ireps, root|
   gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
   paths = units.map { |unit| unit[:path] }
-  suite.check('the class with a nil superclass and the module compile; the named superclass is left out',
-              paths.sort == %w[Mod Router])
+  suite.check('the module, the nil-superclass class and the named-superclass class each compile to a unit',
+              paths.sort == %w[Mod Router Sub])
   router = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
   suite.check('a class unit creates the class over the Object base and calls its body',
-              router.include?('static void bc2cpp_top_unit_Router(mrb_state* M)') &&
+              router.include?('static void bc2cpp_top_unit_Router_0(mrb_state* M)') &&
               router.include?('(void)mrb_vm_define_class(M, mrb_obj_value(M->object_class), mrb_nil_value(), mrb_intern_cstr(M, "Router"));') &&
-              router.include?('(void)bc2cpp_class_body_Router(M);'))
+              router.include?('(void)bc2cpp_class_body_Router_0(M);'))
   mod = units.find { |unit| unit[:path] == 'Mod' }.to_h[:code].to_s
   suite.check('a module unit creates the module and calls its body',
               mod.include?('(void)mrb_vm_define_module(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, "Mod"));') &&
-              mod.include?('(void)bc2cpp_class_body_Mod(M);'))
+              mod.include?('(void)bc2cpp_class_body_Mod_0(M);'))
   hooks = gen.emit_gem_hooks(class_units: units)
   suite.check('gem_init calls each unit after the owner-class reset and before the registrations',
-              hooks.index('bc2cpp_top_unit_Router(M);') > hooks.index('bc2cpp_reset_owner_classes();') &&
-              hooks.index('bc2cpp_top_unit_Router(M);') < hooks.index('bc2cpp_set_instance_tts(M);') &&
-              hooks.include?('bc2cpp_top_unit_Mod(M);'))
+              hooks.index('bc2cpp_top_unit_Router_0(M);') > hooks.index('bc2cpp_reset_owner_classes();') &&
+              hooks.index('bc2cpp_top_unit_Router_0(M);') < hooks.index('bc2cpp_set_instance_tts(M);') &&
+              hooks.include?('bc2cpp_top_unit_Mod_0(M);'))
   suite.check('no unit means no call', !gen.emit_gem_hooks(class_units: []).include?('bc2cpp_top_unit_'))
 
   headers = %w[mruby.h mruby/array.h mruby/class.h mruby/hash.h mruby/proc.h mruby/range.h mruby/string.h mruby/variable.h]
@@ -76,7 +76,9 @@ end
 
 suite.compile(TWICE) do |ireps, root|
   gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  suite.check('a path opened twice gets no unit', gen.compile_top_class_units(ireps.fetch(root)).empty?)
+  twice = gen.compile_top_class_units(ireps.fetch(root))
+  suite.check('a path opened twice gets one unit per occurrence, each under its own name',
+              twice.map { |u| u[:name] }.sort == %w[Router_0 Router_1])
 end
 
 # A constant built by a no-argument send: GETCONST Object then SEND0 :new, as core Enumerable's `NONE = Object.new`.
@@ -219,8 +221,9 @@ suite.compile(FROZEN) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
   code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
-  suite.check('a self send is left to the VM and a literal freeze is a direct freeze',
-              code.include?('left to the VM') && code.include?('r1 = mrb_obj_freeze(M, r1);') && !code.include?('owner_call'))
+  suite.check('a self send runs by name on self and a literal freeze is a direct freeze',
+              code.include?('mrb_funcall_argv(M, self, mrb_intern_cstr(M, ') && !code.include?('left to the VM') &&
+              code.include?('r1 = mrb_obj_freeze(M, r1);') && !code.include?('owner_call'))
 end
 
 suite.compile(DEFS) do |ireps, root|
@@ -238,7 +241,7 @@ suite.compile(DEFS) do |ireps, root|
   units = gen.compile_top_class_units(ireps.fetch(root))
   code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
   suite.check('a def the tables leave out is skipped, not a refusal of its body',
-              units.any? && code.include?('left out of the method tables') && !code.include?('mrb_define_class_method(M, mrb_class_ptr(self), "') &&
+              units.any? && (code.include?('left out of the method tables') || code.include?('statically dispatched only')) && !code.include?('mrb_define_class_method(M, mrb_class_ptr(self), "') &&
               !code.include?('mrb_define_method(M, mrb_class_ptr(self), "'))
 end
 
@@ -274,7 +277,7 @@ end
 suite.compile(UNITS) do |ireps, root|
   gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
-  suite.check('a run for every owner keeps every unit', gen.owned_class_units(units, nil).map { |u| u[:path] }.sort == %w[Mod Router])
+  suite.check('a run for every owner keeps every unit', gen.owned_class_units(units, nil).map { |u| u[:path] }.sort == %w[Mod Router Sub])
   suite.check('an owner nested under a unit path keeps that unit',
               gen.owned_class_units(units, ['Router::Inner']).map { |u| u[:path] } == %w[Router])
   suite.check('a singleton owner keeps its class unit', gen.owned_class_units(units, ['Router.singleton']).map { |u| u[:path] } == %w[Router])

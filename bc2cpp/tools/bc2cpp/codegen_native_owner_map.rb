@@ -108,7 +108,6 @@ class CodeGen
     return false unless @closed_world.class_declared?(owner) && @closed_world.stable_class_constant?(owner)
     return false unless Array(@prepended_modules[owner]).empty?
     return false if @only_owners && !@only_owners.include?(owner) && !@other_owners&.include?(owner)
-    return false if core_guarded_def?(definition) && !core_body_relaxable?(definition.irep)
     return false unless compiles_clean?(definition.irep)
 
     t_irep = @ireps.fetch(definition.irep)

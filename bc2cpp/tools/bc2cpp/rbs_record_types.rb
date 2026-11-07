@@ -60,6 +60,7 @@ module RbsRecordTypes
     return out if files.empty?
 
     begin
+      require 'pathname'
       require 'rbs'
     rescue LoadError
       return out # RbsSignatures reports the missing gem (TC1002)

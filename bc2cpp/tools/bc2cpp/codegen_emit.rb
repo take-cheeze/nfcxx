@@ -14,7 +14,6 @@ class CodeGen
   def compiles_clean?(label)
     # CORE_BLOCK_GUARD: only the registered entry carries the guard, so no direct `_impl`
     # call may reach a guarded body.
-    return false if self.class.core_guarded&.include?(label)
     # RESUMABLE_ENTRY: `_impl` is the entry that hands over to the driver, not the body.
     return false if resumable_method?(label)
     return @clean_cache[label] if @clean_cache.key?(label)
@@ -240,8 +239,8 @@ class CodeGen
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
     out << "  bc2cpp_register_core_owner_methods(M);\n"
     out << "  bc2cpp_register_program_owner_methods(M);\n"
+    out << "  bc2cpp_proc_specs_install(M);\n"
     out << "}\n\n"
-    out << emit_registration_presyms(out)
     out
   end
 
@@ -259,40 +258,6 @@ class CodeGen
           excluded: excluded.include?("#{m[:owner]}##{m[:name]}") || excluded.include?("#{m[:owner]}##{name}") }
       end
     end.uniq { |row| [row[:owner], row[:name]] }
-  end
-
-  PRESYM_OPERATORS = {
-    '!' => 'not', '%' => 'mod', '&' => 'and', '*' => 'mul', '+' => 'add', '-' => 'sub', '/' => 'div', '<' => 'lt',
-    '>' => 'gt', '^' => 'xor', '`' => 'tick', '|' => 'or', '~' => 'neg', '!=' => 'neq', '!~' => 'nmatch',
-    '&&' => 'andand', '**' => 'pow', '+@' => 'plus', '-@' => 'minus', '<<' => 'lshift', '<=' => 'le', '==' => 'eq',
-    '=~' => 'match', '>=' => 'ge', '>>' => 'rshift', '[]' => 'aref', '||' => 'oror', '<=>' => 'cmp', '===' => 'eqq',
-    '[]=' => 'aset'
-  }.freeze
-
-  # The presym macro for method name `name`, or nil when mruby's presym table has no spelling for it.
-  def presym_macro(name)
-    case name
-    when /\A[A-Za-z_][A-Za-z0-9_]*\z/ then "MRB_SYM(#{name})"
-    when /\A([A-Za-z_][A-Za-z0-9_]*)([?!=])\z/ then "MRB_SYM_#{{ '?' => 'Q', '!' => 'B', '=' => 'E' }.fetch($2)}(#{$1})"
-    else (op = PRESYM_OPERATORS[name]) && "MRB_OPSYM(#{op})"
-    end
-  end
-
-  # LOAD_COMPILE: a registration interns its method name by string. The name was a presym while the mrblib had
-  # the `def`, and a name that is not one costs a miss in mruby's 256-bucket symbol table (a walk over every symbol
-  # when two entries of a bucket are 255 apart), thousands of times in a boot once the def has left the mrblib.
-  # This table is never used; the presym scan reads it from the preprocessed source, so the names stay presyms.
-  # Only for a build whose rake pipeline scans the generated source for presyms and drops defs (the plan's
-  # BC2CPP_LOAD_WORLD): a probe built against a fixed presym table has no id for a name only the table spells.
-  def emit_registration_presyms(code)
-    return '' unless ENV['BC2CPP_LOAD_WORLD'] && ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') != 'off'
-
-    names = code.scan(/\b(?:bc2cpp_left_out|mrb_define_\w+|bc2cpp_define_private_class_method|bc2cpp_core_save_interpreted)\(M, \w+, "((?:\\x[0-9a-f]{2})+)"/)
-                .map { |(hex)| hex.scan(/\\x(\h\h)/).flatten.map { |h| h.to_i(16).chr }.join }
-    macros = names.uniq.sort.filter_map { |name| presym_macro(name) }
-    return '' if macros.empty?
-
-    "[[maybe_unused]] static const mrb_sym bc2cpp_registration_presyms[] = {\n  #{macros.join(",\n  ")}\n};\n\n"
   end
 
   def emit_owner_registration_lines(out, targets, by_owner, unregistered)
@@ -323,13 +288,7 @@ class CodeGen
         omitted, names = names.partition { |name| unregistered.include?("#{owner}##{name}") }
         omitted.each { |name| out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
         defines = names.map { |name| "#{fn}(M, #{var}, #{c_string_literal(name)}, #{m[:entry]}, #{m[:aspec]});" }
-        # CORE_BLOCK_GUARD: the bytecode must be saved before it is replaced.
-        if m[:guard]
-          save = "bc2cpp_core_save_interpreted(M, #{var}, #{singleton}, #{c_string_literal(m[:name])}, #{m[:guard]})"
-          out << "  if (#{save}) { #{defines.join(' ')} }\n"
-        else
-          defines.each { |define| out << "  #{define}\n" }
-        end
+        defines.each { |define| out << "  #{define}\n" }
       end
     end
   end
@@ -362,7 +321,6 @@ class CodeGen
   end
 
   # The Owner#name keys this build leaves out of its method tables: what emit_owner_registrations skips, and what
-  # LoadCompile.mark_dead! reads to drop the visibility statements that name them.
   # Closed builds also omit core_left_out definitions from class/load code. C++ implementations remain available
   # to direct calls; omitting a registration does not itself omit the generated function.
   def unregistered_keys(lists: nil)
@@ -477,14 +435,18 @@ class CodeGen
   # the gem's mrblib loaded. Final drops the ids, constants and class pointers cached for this VM, so a later VM
   # at a reused address never sees them. Init clears the constant and class slots too (VM_CACHE_LIFETIME): their
   # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
-  # LOAD_COMPILE: `load_symbol` names the generated class-body loader (load_compile.rb), which runs before anything
-  # else here: the registrations below look up the classes it opens.
   # CLASS_BODY_EMIT_GEM: `class_units` (compile_top_class_units) are the top-level class bodies the compiled gem runs
   # itself, after the owner-class slots are reset and before the registrations below.
-  def emit_gem_hooks(load_symbol: nil, class_units: [])
-    load_call = load_symbol ? "  bc2cpp_load_#{load_symbol}(M);\n" : ''
-    unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{sanitize(unit[:path])}(M);\n" }.join
-    hooks = <<~CPP.sub("{\n  bc2cpp_reset_const_site_cache", "{\n#{load_call}  bc2cpp_reset_const_site_cache")
+  # CORE_CLASS_UNITS (mruby mrblib.rake, MRB_CORE_CLASS_UNITS): the function mrb_init_mrblib calls in place of the core
+  # mrblib load. It runs each core unit in file order; extern "C" because mrblib.c declares it in C.
+  def emit_core_class_units(class_units)
+    calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
+    "extern \"C\" void bc2cpp_core_class_units(mrb_state* M) {\n#{calls}}\n"
+  end
+
+  def emit_gem_hooks(class_units: [], top_level: false)
+    unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
+    hooks = <<~CPP
       [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
         bc2cpp_reset_const_site_cache();
         bc2cpp_reset_owner_classes();
@@ -499,67 +461,9 @@ class CodeGen
         bc2cpp_reset_direct_construct_classes();
       }
     CPP
-    hooks.sub("  bc2cpp_reset_owner_classes();\n  bc2cpp_set_instance_tts", "  bc2cpp_reset_owner_classes();\n#{unit_calls}  bc2cpp_set_instance_tts")
+    hooks.sub("  bc2cpp_reset_owner_classes();\n  bc2cpp_set_instance_tts", "  bc2cpp_reset_owner_classes();\n#{unit_calls}#{top_level ? "  bc2cpp_top_level_statements(M);\n" : ''}  bc2cpp_set_instance_tts")
   end
 
-  # CORE_BLOCK_GUARD: the run-time half of core_block_guard. The bytecode of
-  # every guarded method is kept in a hidden ivar of Object (no `@`, so no reflection
-  # lists it), one slot per method index, and rooted by it for the state's lifetime.
-  # mrb_exec_irep, called by the entry while the VM is still in the cfunc's own
-  # frame, swaps that frame for the bytecode, as instance_exec does: no C frame is
-  # left between the caller and the method.
-  def emit_core_guard_helpers(compiled)
-    return '' unless compiled.any? { |m| m[:guard] }
-
-    <<~CPP
-      // CORE_BLOCK_GUARD -- see core_block_guard in codegen_method.rb.
-      #include <stdio.h>
-      extern "C" mrb_value mrb_exec_irep(mrb_state*, mrb_value, const struct RProc*);
-      extern "C" mrb_int mrb_ci_bidx(mrb_callinfo*);
-      // The block of the cfunc frame being entered (nil when none was given).
-      [[maybe_unused]] static mrb_value bc2cpp_entry_block(mrb_state* M) {
-        mrb_callinfo* ci = M->c->ci;
-        return ci->stack[mrb_ci_bidx(ci)];
-      }
-      static mrb_value bc2cpp_core_interpreted(mrb_state* M, mrb_value self, mrb_int index) {
-        mrb_value table = mrb_iv_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "__bc2cpp_core_interpreted__"));
-        return mrb_exec_irep(M, self, mrb_proc_ptr(mrb_ary_ref(M, table, index)));
-      }
-      // Every compiled Enumerable entry asks this, so `each` is interned once per state, not per call.
-      [[maybe_unused]] static bool bc2cpp_core_each_is_builtin(mrb_state* M, mrb_value self) {
-        static mrb_state* each_state = nullptr;
-        static mrb_sym each_sym = 0;
-        if (each_state != M) {
-          each_sym = mrb_intern_lit(M, "each");
-          each_state = M;
-        }
-        struct RClass* found = mrb_class(M, self);
-        mrb_method_search_vm(M, &found, each_sym);
-        return found == M->array_class || found == M->hash_class || found == M->range_class;
-      }
-      static bool bc2cpp_core_save_interpreted(mrb_state* M, struct RClass* c, bool singleton, const char* name, mrb_int index) {
-        struct RClass* target = singleton ? mrb_singleton_class_ptr(M, mrb_obj_value(c)) : c;
-        struct RClass* found = target;
-        mrb_method_t m = mrb_method_search_vm(M, &found, mrb_intern_cstr(M, name));
-        mrb_value object = mrb_obj_value(M->object_class);
-        mrb_sym key = mrb_intern_lit(M, "__bc2cpp_core_interpreted__");
-        mrb_value table = mrb_iv_get(M, object, key);
-        if (found == target && !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_PROC_P(m) && !MRB_PROC_CFUNC_P(MRB_METHOD_PROC(m))) {
-          if (mrb_nil_p(table)) {
-            table = mrb_ary_new(M);
-            mrb_iv_set(M, object, key, table);
-          }
-          mrb_ary_set(M, table, index, mrb_obj_value((struct RProc*)MRB_METHOD_PROC(m)));
-          return true;
-        }
-        // A second registration finds its own entry, which has its bytecode saved already.
-        if (found == target && !mrb_nil_p(table) && !mrb_nil_p(mrb_ary_ref(M, table, index))) return true;
-        fprintf(stderr, "[RPG2k] bc2cpp core: %s has no bytecode definition to fall back to; left as it is\\n", name);
-        return false;
-      }
-
-    CPP
-  end
 
   # INSTANCE_TT_SUBCLASSES: a class copies its superclass's instance type when it is created, so a subclass made
   # before the switch (`Class.new(C)` in a class body: a gem's mrblib loads before its compiled gem's init runs this)

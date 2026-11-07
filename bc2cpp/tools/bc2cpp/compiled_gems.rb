@@ -151,11 +151,9 @@ def bc2cpp_registration_owners(compiled_owners)
   core = BC2CPP_CORE_OWNERS
   [(core + compiled_owners).uniq, core.to_set]
 end
-BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
 require 'prism'
 require_relative '../rgss_tts_config'
-require_relative 'mrblib_stubs'
 require_relative 'gem_owners'
 require_relative 'compiled_gems_config'
 
@@ -501,7 +499,13 @@ def bc2cpp_rake_dependencies(dir, root)
   end
 end
 
+# Gems the closed build lists under another directory (mruby-fiber is a source-less placeholder there).
+BC2CPP_GEM_STAND_INS = { 'mruby-fiber' => 'mruby-fiber-placeholder' }.freeze
+
 def bc2cpp_gem_dir(name, root)
+  stand_in = BC2CPP_GEM_STAND_INS[name]
+  return File.join(root, stand_in) if stand_in && File.file?(File.join(root, stand_in, 'mrbgem.rake'))
+
   dirs = [File.join(root, '3rd/mruby/mrbgems', name), File.join(root, name), File.join(root, '3rd', name)]
   dirs.find { |d| File.file?(File.join(d, 'mrbgem.rake')) } ||
     raise("bc2cpp: no mrbgem.rake for #{name} (is its submodule initialised?)")
@@ -714,24 +718,7 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
   env['BC2CPP_MAIN_AST'] = ENV['BC2CPP_MAIN_AST'] if ENV['BC2CPP_MAIN_AST']
   env['BC2CPP_NATIVE_INVENTORY'] = ENV['BC2CPP_NATIVE_INVENTORY'] if ENV['BC2CPP_NATIVE_INVENTORY']
   env['BC2CPP_SHARDS'] = bc2cpp_gem_shards.to_s
-  env['BC2CPP_LOAD_WORLD'] = bc2cpp_load_world(spec) if ENV.fetch('BC2CPP_LOAD_COMPILE', 'all') != 'off'
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
-end
-
-# LOAD_COMPILE: {out_symbol => mrblib files} of the compiled gems in `spec`'s build whose base gem recorded its sources
-# (bc2cpp_stub_mrblib), as JSON: the program a load plan splits. A gem that left them out takes no part.
-def bc2cpp_load_world(spec)
-  require 'json'
-  world = spec.build.gems.each_with_object({}) do |gem, all|
-    compiled = BC2CPP_COMPILED_GEMS["#{gem.name}-compiled"]
-    next unless compiled
-    next unless spec.build.gems.any? { |g| g.name == "#{gem.name}-compiled" }
-
-    files = gem.instance_variable_get(:@bc2cpp_mrblib_sources)
-    next unless files
-    all[compiled[:out_symbol]] = files.map { |f| File.expand_path(f) }
-  end
-  JSON.generate(world)
 end
 
 # BC2CPP_SHARDS (docs/bc2cpp-shards.md): translation units per compiled gem, default 4 (the CI runners' cores). A
@@ -853,9 +840,6 @@ module Bc2cppCompiledGemGeneration
         FileUtils.mkdir_p(File.dirname(path))
         File.write(path, STUB)
       end
-      # An empty manifest: phase 1's mrblib keeps every body (MRBLIB_STUBS).
-      File.write(MrblibStubs.manifest_path(env.fetch('OUT_DIR'), symbol), '')
-      File.write(File.join(env.fetch('OUT_DIR'), "#{symbol}_load.json"), '{}')
       @done[generated] = true
     end
   end

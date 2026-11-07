@@ -37,6 +37,7 @@ module TypeCheckRbs
 
   # Names of the classes and modules in CRuby's core RBS, and a predicate for "this core class has that instance method".
   def core_env
+    require 'pathname'
     require 'rbs'
     loader = RBS::EnvironmentLoader.new
     env = RBS::Environment.from_loader(loader).resolve_type_names
@@ -160,6 +161,7 @@ module TypeCheckRbs
   end
 
   def valid_member?(line)
+    require 'pathname'
     require 'rbs'
     RBS::Parser.parse_signature("class X\n  #{line}\nend\n")
     true

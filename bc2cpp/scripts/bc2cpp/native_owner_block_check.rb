@@ -4,7 +4,8 @@
 # SYNC_BY_DEFINITION (codegen_block_fallback.rb, `to_h`): a literal block that captures a local and is handed to `to_h`
 # compiles as a block fallback when every definition the closed world can dispatch to calls its block without keeping
 # it. The core Array/Enumerable/Hash bodies call `block` only, and the native Struct/NilClass/Data `to_h` functions take
-# no block (each body is read). A user `to_h` that keeps its block stays refused (`#error`).
+# no block (each body is read). A user `to_h` that keeps its block is not trusted to leave it: the capture goes through
+# heap cells (STEP_CLOSURES), or, with BC2CPP_STEP_CLOSURES=0, the call stays refused (`#error`).
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/native_owner_block_check.rb
 
@@ -73,7 +74,13 @@ check.call('a to_h capturing a local compiles without #error (core Array/Enumera
            positive.keys.none? { |owner| owner.to_s.start_with?('Slots_') })
 
 negative = refusals_for(NEGATIVE)
-check.call('a user to_h that keeps its block stays refused',
-           negative.fetch('Reader_read_impl', 0).positive?)
+check.call('a user to_h that keeps its block captures through cells, not a pointer into the frame',
+           negative.fetch('Reader_read_impl', 0).zero?)
+saved = ENV['BC2CPP_STEP_CLOSURES']
+ENV['BC2CPP_STEP_CLOSURES'] = '0'
+refused = refusals_for(NEGATIVE)
+saved ? ENV['BC2CPP_STEP_CLOSURES'] = saved : ENV.delete('BC2CPP_STEP_CLOSURES')
+check.call('a user to_h that keeps its block stays refused without the cells',
+           refused.fetch('Reader_read_impl', 0).positive?)
 
 suite.finish!

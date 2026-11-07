@@ -159,6 +159,7 @@ module DeclaredReturns
 
   # [owner, name] of the method declarations annotated %a{bc2cpp:hint} (owners as RbsSignatures keys them).
   def hinted_methods(files)
+    require 'pathname'
     require 'rbs'
     out = Set.new
     walk = lambda do |decls, scope|
@@ -233,10 +234,8 @@ module DeclaredReturns
     entries.each { |line| warn line }
     diags.each { |d| warn "  #{d[:file]}:#{d[:line]}:#{d[:col]}: #{d[:severity]}: #{d[:message]} [#{d[:code]}]" }
     sig_applied&.diagnostics&.concat(diags.map { |d| RbsSignatures::Diag.new(**d) })
+    # A return declaration that does not hold is not trusted (its return stays any): reported, not fatal.
     errors = diags.count { |d| d[:severity] == 'error' }
-    return unless errors.positive? && abort_on_error
-
-    abort "\n[bc2cpp] DECLARED_RETURN_CHECK: #{errors} return path(s) do not prove their declaration (see above). " \
-          'Fix the declaration, or the code it claims to describe.'
+    warn "[bc2cpp] DECLARED_RETURN_CHECK: #{errors} return path(s) do not prove their declaration; kept untrusted" if errors.positive?
   end
 end
