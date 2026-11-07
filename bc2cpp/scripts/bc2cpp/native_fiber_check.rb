@@ -63,8 +63,14 @@ EXTRAS = [
   ['root fiber at the root', 'NativeFiberProbe.new.root_at_root'],
   ['root fiber inside a fiber', 'NativeFiberProbe.new.root_in_fiber'],
   ['root fiber transfer chain', 'NativeFiberProbe.new.root_chain'],
-  ['root fiber errors', 'NativeFiberProbe.new.root_errors']
+  ['root fiber errors', 'NativeFiberProbe.new.root_errors'],
+  ['fiber raise', 'NativeFiberProbe.new.raise_scenario']
 ].freeze
+
+# Scenarios mruby-fiber cannot run (it has no Fiber#raise): the expected line is what CRuby prints for the same program.
+OWN_EXPECTED = {
+  'fiber raise' => 'fiber raise: [:waiting, :rescued, :done, "x", false, ["boom", :ens]]'
+}.freeze
 
 WIDE = (0...250).map { |i| "      local#{i} = #{i}\n" }.join
 
@@ -223,6 +229,32 @@ PROBE = <<~RUBY
       out
     end
 
+    def raise_scenario
+      events = []
+      f = Fiber.new do
+        begin
+          Fiber.yield :waiting
+        rescue ArgumentError => e
+          events << e.message
+          Fiber.yield :rescued
+        ensure
+          events << :ens
+        end
+        :done
+      end
+      a = f.resume
+      b = f.raise(ArgumentError, 'boom')
+      c = f.resume
+      g = Fiber.new { Fiber.yield 1 }
+      g.resume
+      err = begin
+        g.raise(IOError, 'x')
+      rescue IOError => e
+        e.message
+      end
+      [a, b, c, err, g.alive?, events]
+    end
+
     def dead_fiber_scenario
       f = Fiber.new { :only }
       first = f.resume
@@ -313,6 +345,7 @@ else
   expected = Bc2cppFixtureRuntime.sections(reference_output)['interpreted']
   # A scenario with its own expected "fiber" line (the native sort) replaces the interpreter's FiberError.
   scenarios.each_with_index { |(_, _, _, line), i| expected[2 * i] = line.call if expected && line }
+  expected&.map! { |line| OWN_EXPECTED.fetch(line.split(': ', 2).first, line) }
   actual = Bc2cppFixtureRuntime.sections(native_output)['compiled']
   check.call('both runs reach the end', expected&.last == 'end' && actual&.last == 'end')
   if expected && actual

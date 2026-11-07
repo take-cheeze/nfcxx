@@ -17,6 +17,8 @@ class ResumableCtx
   attr_accessor :block, :block_slot
   # HANDLERS: the irep's catch handlers (rescue/ensure) when the step has any, and the state each one's entry is dispatched by.
   attr_accessor :handlers
+  # STEP_EXIT_JUMPS: [address, value register or nil] of each return/break/jump that parks an exit for an ensure body to run.
+  attr_accessor :exit_sites
   # OPTIONAL_ARGS: how many optional positional arguments the method takes (its jump table is the glue at the first
   # JMP, which switches on bc2cpp_given_opt). 0 for a method without optional arguments.
   attr_accessor :optional
@@ -180,27 +182,93 @@ class CodeGen
   end
 
   # STEP_HANDLERS: a step may have rescue and ensure handlers (the exception is caught around the step body and the step is
-  # re-entered at the handler, see resumable_step_function). What the step cannot do is leave an ensure region by a jump the
-  # handler table cannot see: a return, break or an unwinding jump out of it would skip the ensure body.
+  # re-entered at the handler, see resumable_step_function). STEP_EXIT_JUMPS: a return, break or unwinding jump that leaves
+  # an ensure region runs the ensure body first (step_exit_guard), so every handler type the VM has is accepted here.
   def resumable_handler_problem(irep)
     handlers = irep.catch_handlers
     return nil if handlers.empty?
     return 'has a handler of a type a step cannot enter' unless handlers.all? { |h| %i[rescue ensure].include?(h.type) }
 
-    ensures = handlers.select { |h| h.type == :ensure }
-    return nil if ensures.empty?
-
-    BytecodeIR.for(irep).each_source do |insn, _|
-      next unless ensures.any? { |h| h.begin_addr <= insn.addr && insn.addr < h.end_addr }
-
-      case insn.op
-      when :RETURN, :RETURN_BLK, :BREAK
-        return "leaves a begin/ensure region with #{insn.op}"
-      when :JMPUW
-        return 'leaves a begin/ensure region by a jump' unless jmpuw_plain_jump_at?(irep, insn)
-      end
-    end
     nil
+  end
+
+  # STEP_EXIT_JUMPS: the instructions that leave the step's own code or a protected range by a jump the handler table must
+  # see (vm.c: every return, OP_BREAK, and OP_JMPUW, which is `break`/`next`/`redo`/`retry` in a loop or rescue clause).
+  STEP_EXIT_OPS = %i[RETURN RETNIL RETTRUE RETFALSE RETSELF RETURN_BLK BREAK JMPUW].freeze
+
+  # The step's ensure handlers (index into its table, handler) that cover +addr+, innermost first: vm.c's
+  # catch_handler_find searches the table from its last entry.
+  def step_covering_ensures(addr)
+    covering = @resumable.handlers.each_with_index.select do |h, _|
+      h.type == :ensure && h.begin_addr <= addr && addr < h.end_addr
+    end
+    covering.reverse
+  end
+
+  def step_ensure_handlers?
+    @resumable&.handlers&.any? { |h| h.type == :ensure } ? true : false
+  end
+
+  # The ensure handler that the exit at +insn+ runs, or nil. A jump (JMPUW) only leaves a region whose range does not hold
+  # its target (vm.c compares `a < begin || a > end`); a return or break leaves every covering one, and the innermost goes first.
+  def step_exit_handler(insn)
+    target = insn.op == :JMPUW ? insn.jmp_addr : nil
+    step_covering_ensures(insn.addr).map(&:first).find { |h| target.nil? || target < h.begin_addr || target > h.end_addr }
+  end
+
+  # STEP_EXIT_JUMPS: a return, break or JMPUW inside a begin/ensure region that it leaves. As the VM does, the exit is parked in
+  # a token (Bc2cppExit: the instruction's address, the value it carries and, for a jump, its target) that stands in for the
+  # exception EXCEPT captures, and control goes to the ensure handler. The ensure body runs; its RAISEIF finds the token and
+  # either hands it to the next enclosing ensure or continues the exit: Lbc2cpp_exit_dispatch jumps back to the label before the
+  # instruction's own code, with the value restored (the ensure body may have used the register).
+  def step_exit_guard(insn, text)
+    return text unless STEP_EXIT_OPS.include?(insn.op)
+
+    text = "  goto L#{insn.jmp_addr};\n" if insn.op == :JMPUW
+    handler = step_exit_handler(insn)
+    return text unless handler
+
+    value_reg = %i[RETURN RETURN_BLK BREAK].include?(insn.op) ? (insn.no_operands? ? 0 : insn.reg) : nil
+    (@resumable.exit_sites ||= []) << [insn.addr, value_reg]
+    target = insn.op == :JMPUW ? insn.jmp_addr : -1
+    [
+      "  // STEP_EXIT_JUMPS #{insn.op}",
+      "  M->exc = (struct RObject*)mrb_obj_ptr(bc2cpp_exit_new(M, #{insn.addr}, #{value_reg ? RegName[value_reg] : 'mrb_nil_value()'}, #{target}));",
+      "  goto L#{handler.target};",
+      "  Lbc2cpp_exit_#{insn.addr}:;",
+      text
+    ].join("\n")
+  end
+
+  # RAISEIF in a step with an ensure handler: nil continues, an exit token goes to the next enclosing ensure that its jump
+  # leaves, else it is continued (Lbc2cpp_exit_dispatch), and anything else is raised.
+  def step_raiseif_code(insn)
+    reg = RegName[insn.reg]
+    chain = step_covering_ensures(insn.addr).map do |h, _|
+      "      if (bc2cpp_exit_t < 0 || bc2cpp_exit_t < #{h.begin_addr} || bc2cpp_exit_t > #{h.end_addr}) " \
+        "{ M->exc = (struct RObject*)mrb_obj_ptr(#{reg}); goto L#{h.target}; }\n"
+    end
+    "  if (!mrb_nil_p(#{reg})) {\n" \
+      "    if (bc2cpp_exit_p(M, #{reg})) {\n" \
+      "      mrb_int bc2cpp_exit_t = bc2cpp_exit_target(M, #{reg});\n" \
+      "#{chain.join}" \
+      "      bc2cpp_exit_cur = #{reg};\n" \
+      "      goto Lbc2cpp_exit_dispatch;\n" \
+      "    }\n" \
+      "    mrb_exc_raise(M, #{reg});\n" \
+      "  }\n"
+  end
+
+  # The code after the step's instructions that continues a parked exit: its address picks the instruction's label.
+  def step_exit_dispatch
+    out = String.new
+    out << "  Lbc2cpp_exit_dispatch:;\n  switch (bc2cpp_exit_site(M, bc2cpp_exit_cur)) {\n"
+    (@resumable.exit_sites || []).uniq.each do |addr, reg|
+      restore = reg ? "#{RegName[reg]} = bc2cpp_exit_value(M, bc2cpp_exit_cur); " : ''
+      out << "    case #{addr}: #{restore}goto Lbc2cpp_exit_#{addr};\n"
+    end
+    out << "    default: bc2cpp_resume_bad_state(M);\n  }\n"
+    out
   end
 
   def resumable_shape_problem(irep, d)
@@ -793,6 +861,7 @@ class CodeGen
     out << "  r0 = self;\n"
     # STEP_HANDLERS: the body runs in a protected call so an exception can be turned into a jump to a handler's entry.
     out << "  auto bc2cpp_body = [&]() -> mrb_value {\n" if handlers
+    out << "  mrb_value bc2cpp_exit_cur = mrb_nil_value();\n" if step_ensure_handlers?
     # An exception the fiber delivers (a frame this step CALLed raised, or an unwind passes through it) is raised here, at
     # the address the step suspended at, so the handler lookup is the same as for one raised by the step itself.
     out << "  if (F->raise_pending) { F->raise_pending = 0; mrb_exc_raise(M, R[1]); }\n" if handlers
@@ -801,7 +870,7 @@ class CodeGen
     (handlers || []).each_with_index { |h, k| out << "    case #{RESUMABLE_HANDLER_STATE + k}: goto L#{h.target};\n" }
     out << "    default: bc2cpp_resume_bad_state(M);\n  }\n"
     out << body
-    out << resumable_handler_loop(handlers) if handlers
+    out << resumable_handler_loop(handlers, locals ? spill : '') if handlers
     out
   end
 
@@ -811,7 +880,7 @@ class CodeGen
   # address the step was last at (F->pc, set before each instruction), as vm.c's catch_handler_find does (the table is
   # searched from its last entry). The handler's entry reads the exception from M->exc (EXCEPT). No handler: the exception
   # leaves the step, which declines further delivery (has_handlers 0) so the fiber moves on to the frame below.
-  def resumable_handler_loop(handlers)
+  def resumable_handler_loop(handlers, spill)
     out = String.new
     out << "  };\n"
     out << "  for (;;) {\n"
@@ -825,6 +894,12 @@ class CodeGen
       first = false
     end
     out << "    if (bc2cpp_hs < 0) { F->has_handlers = 0; mrb_exc_raise(M, bc2cpp_res); }\n"
+    # GC: mrb_protect_error dropped the arena entries of the objects the run made, and a register that holds one in a C++ local
+    # (RESUMABLE_LOCAL_REGISTERS) is not a root, so the values go back to the frame (rooted) before anything allocates.
+    unless spill.empty?
+      out << "    #{spill}\n"
+      out << "    mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));\n"
+    end
     out << "    M->exc = (struct RObject*)mrb_obj_ptr(bc2cpp_res);\n"
     out << "    bc2cpp_state = bc2cpp_hs;\n"
     out << "  }\n"

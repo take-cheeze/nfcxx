@@ -599,7 +599,11 @@ module SymbolCache
       bool seen = false;
       for (int k = 0; k < s.seen_count; ++k) seen = seen || s.seen[k] == owner;
       if (!seen) {
-        if (!bc2cpp_owner_listed(M, owner, s.names)) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
+        if (!bc2cpp_owner_listed(M, owner, s.names)
+    #ifdef BC2CPP_FIBER_RUNTIME
+            && !bc2cpp_fiber_definer_p(m)
+    #endif
+        ) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
         if (s.seen_count < 32) s.seen[s.seen_count++] = owner;
       }
       if (level >= 2) {

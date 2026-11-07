@@ -21,6 +21,10 @@
 #include <string.h>
 #include <unordered_map>
 
+// The fiber runtime is in this translation unit (bc2cpp_owner_call's guard asks
+// bc2cpp_fiber_definer_p).
+#define BC2CPP_FIBER_RUNTIME 1
+
 enum Bc2cppStepKind {
   BC2CPP_STEP_DONE,
   BC2CPP_STEP_YIELD,
@@ -331,6 +335,43 @@ static mrb_value bc2cpp_unwind_new(mrb_state* M,
   return u;
 }
 
+// STEP_EXIT_JUMPS: a return, break or jump that leaves a begin/ensure region of
+// a step is parked in one of these while the ensure body runs, as the VM parks
+// it in a break object. It stands in for the exception EXCEPT captures, so the
+// ensure body's RAISEIF finds it: it is never raised, and no `rescue` sees it.
+// `site` is the address of the instruction that left, `value` what it carries
+// (the returned value) and `target` the address a jump goes to (-1: none).
+static struct RClass* bc2cpp_exit_class(mrb_state* M) {
+  return mrb_define_class(M, "Bc2cppExit", M->eException_class);
+}
+
+[[maybe_unused]] static mrb_value bc2cpp_exit_new(mrb_state* M,
+                                                  mrb_int site,
+                                                  mrb_value value,
+                                                  mrb_int target) {
+  mrb_value e = mrb_obj_new(M, bc2cpp_exit_class(M), 0, nullptr);
+  mrb_iv_set(M, e, mrb_intern_lit(M, "__site__"), mrb_int_value(M, site));
+  mrb_iv_set(M, e, mrb_intern_lit(M, "__value__"), value);
+  mrb_iv_set(M, e, mrb_intern_lit(M, "__target__"), mrb_int_value(M, target));
+  return e;
+}
+
+[[maybe_unused]] static bool bc2cpp_exit_p(mrb_state* M, mrb_value v) {
+  return !mrb_immediate_p(v) && mrb_obj_is_kind_of(M, v, bc2cpp_exit_class(M));
+}
+
+[[maybe_unused]] static mrb_int bc2cpp_exit_site(mrb_state* M, mrb_value e) {
+  return mrb_integer(mrb_iv_get(M, e, mrb_intern_lit(M, "__site__")));
+}
+
+[[maybe_unused]] static mrb_int bc2cpp_exit_target(mrb_state* M, mrb_value e) {
+  return mrb_integer(mrb_iv_get(M, e, mrb_intern_lit(M, "__target__")));
+}
+
+[[maybe_unused]] static mrb_value bc2cpp_exit_value(mrb_state* M, mrb_value e) {
+  return mrb_iv_get(M, e, mrb_intern_lit(M, "__value__"));
+}
+
 // Runs steps until a frame yields or the last frame finishes. A frame that
 // finishes hands its result to its parent as the parent's resume value.
 static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
@@ -505,10 +546,18 @@ static mrb_value bc2cpp_running_fibers(mrb_state* M) {
 // the fiber and propagates to the resumer, as it does for an mruby Fiber. The
 // FiberError cases and their messages are mruby-fiber's (fiber_switch /
 // fiber_transfer).
+//
+// FIBER_RAISE: with `raise_exc` the fiber is not run from the step it
+// suspended in; the exception is raised where it is suspended (the Fiber.yield
+// it returned from), exactly as if that call had raised it. The frames unwind
+// from the top, so the rescue and ensure bodies of the steps run, and the
+// fiber runs on if one takes it (the value is then whatever it next yields or
+// returns); otherwise the fiber is dead and the exception leaves Fiber#raise.
 static mrb_value bc2cpp_fiber_resume(mrb_state* M,
                                      mrb_value self,
                                      mrb_value value,
-                                     bool transfer = false) {
+                                     bool transfer = false,
+                                     const mrb_value* raise_exc = nullptr) {
   Bc2cppFiber* fiber = bc2cpp_fiber_ptr(M, self);
   if (fiber->root) {
     // A transfer from a fiber back to its resumer is compiled as a yield
@@ -551,10 +600,19 @@ static mrb_value bc2cpp_fiber_resume(mrb_state* M,
   bc2cpp_current_fiber = {true, self};
   mrb_ary_push(M, bc2cpp_running_fibers(M), self);
   mrb_bool error = FALSE;
-  mrb_value result;
+  mrb_value result = mrb_nil_value();
+  bool delivered = raise_exc == nullptr;
   for (;;) {
     error = FALSE;
-    result = mrb_protect_error(M, bc2cpp_fiber_run, &args, &error);
+    if (!delivered) {
+      // The first round: the exception is where the fiber is suspended, so it
+      // goes the way one raised by the top step goes.
+      delivered = true;
+      error = TRUE;
+      result = *raise_exc;
+    } else {
+      result = mrb_protect_error(M, bc2cpp_fiber_run, &args, &error);
+    }
     if (!error)
       break;
     // An exception: the nearest frame with a handler for it takes it, and the
@@ -717,6 +775,69 @@ static mrb_value bc2cpp_fiber_s_current(mrb_state* M, mrb_value self) {
   return bc2cpp_fiber_orig_current(M, self);
 }
 
+extern "C" mrb_value mrb_make_exception(mrb_state*, mrb_value, mrb_value);
+
+// Fiber#raise(...) with Kernel#raise's arguments: a class (and a message), an
+// exception object (and a message), or a String (a RuntimeError). mruby-fiber
+// has no Fiber#raise: without this method the call reaches Kernel#raise, which
+// is private.
+static mrb_value bc2cpp_fiber_exception(mrb_state* M,
+                                        mrb_int argc,
+                                        const mrb_value* argv) {
+  if (argc > 2)
+    mrb_argnum_error(M, argc, 0, 2);
+  switch (argc) {
+    case 0:
+      return mrb_exc_new_str(M, mrb_class_get(M, "RuntimeError"),
+                             mrb_str_new_lit(M, ""));
+    case 1:
+      if (mrb_string_p(argv[0]))
+        return mrb_make_exception(
+            M, mrb_obj_value(mrb_class_get(M, "RuntimeError")), argv[0]);
+      return mrb_make_exception(M, argv[0], mrb_nil_value());
+    default:
+      return mrb_make_exception(M, argv[0], argv[1]);
+  }
+}
+
+// An exception raised at the point a C++ Fiber is suspended (Fiber.yield or a
+// transfer that returned the control to its resumer). The cases are CRuby's:
+// the current fiber (or the root fiber object) just raises it where it is; a
+// fiber waiting on one it resumed forwards it to the fiber that is running; an
+// unborn fiber has no such point, and a dead one is not resumed.
+static mrb_value bc2cpp_fiber_m_raise(mrb_state* M, mrb_value self) {
+  const mrb_value* argv;
+  mrb_int argc;
+  mrb_get_args(M, "*", &argv, &argc);
+  if (!bc2cpp_fiber_own_p(self)) {
+    mrb_raise(M, mrb_class_get(M, "NoMethodError"),
+              "Fiber#raise is only defined for a fiber of compiled code");
+  }
+  mrb_value exc = bc2cpp_fiber_exception(M, argc, argv);
+  Bc2cppFiber* fiber = bc2cpp_fiber_ptr(M, self);
+  bool current = bc2cpp_current_fiber.in &&
+                 mrb_obj_eq(M, bc2cpp_current_fiber.fiber, self);
+  if (fiber->root || current || fiber->running)
+    mrb_exc_raise(M, exc);
+  if (!fiber->started)
+    mrb_raise(M, bc2cpp_fiber_error_class(M),
+              "cannot raise exception on unborn fiber");
+  // A fiber suspended by a transfer away is continued by a transfer.
+  return bc2cpp_fiber_resume(M, self, mrb_nil_value(), fiber->transferred,
+                             &exc);
+}
+
+// FIBER_RAISE: Fiber#raise is installed by bc2cpp_fiber_define at run time and
+// mruby-fiber has no such method, so no source of the closed world lists its
+// definer, and listing it there would give `raise` a second definer in every
+// build (Kernel#raise stops being the only one that implicit-self calls can
+// call directly). A call on a receiver whose class is known to be Fiber reaches
+// it through bc2cpp_owner_call, whose guard accepts exactly this C function as
+// a definer.
+[[maybe_unused]] static bool bc2cpp_fiber_definer_p(const mrb_method_t& m) {
+  return MRB_METHOD_CFUNC_P(m) && MRB_METHOD_CFUNC(m) == bc2cpp_fiber_m_raise;
+}
+
 static mrb_value bc2cpp_fiber_m_alive_p(mrb_state* M, mrb_value self) {
   if (!bc2cpp_fiber_own_p(self)) {
     if (!bc2cpp_fiber_orig_alive_p)
@@ -773,6 +894,7 @@ static void bc2cpp_fiber_define(mrb_state* M) {
                     MRB_ARGS_ANY());
   mrb_define_method(M, klass, "alive?", bc2cpp_fiber_m_alive_p,
                     MRB_ARGS_NONE());
+  mrb_define_method(M, klass, "raise", bc2cpp_fiber_m_raise, MRB_ARGS_ANY());
 }
 
 // The root frame of `Fiber.new { prologue; method(args) }`: the body is a

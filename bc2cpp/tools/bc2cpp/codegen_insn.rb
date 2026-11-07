@@ -1030,7 +1030,12 @@ class CodeGen
       # branch (a break unwinding through a block) does not apply: the leaf ireps
       # compiled here are def bodies, so Ra is nil or an exception.
       ra = insn.reg
-      "  if (!mrb_nil_p(#{RegName[ra]})) { mrb_exc_raise(M, #{RegName[ra]}); }\n"
+      # STEP_EXIT_JUMPS: in a step with an ensure handler the register may hold a parked return/break/jump.
+      if step_ensure_handlers? && step_with_handlers?(irep)
+        step_raiseif_code(insn)
+      else
+        "  if (!mrb_nil_p(#{RegName[ra]})) { mrb_exc_raise(M, #{RegName[ra]}); }\n"
+      end
     when :SUPER
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
       # self as receiver and N args in R(a+1)..R(a+N), plus one register forwarding

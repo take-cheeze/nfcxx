@@ -624,6 +624,8 @@ class CodeGen
                own = glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
                inline_prefix ? inline_prefix + own : own
              end
+      # STEP_EXIT_JUMPS: an exit from an ensure region goes through the ensure body first.
+      text = step_exit_guard(insn, text) if step_ensure_handlers? && step_with_handlers?(irep) && !text.empty?
       # STEP_HANDLERS: the handler lookup reads the address of the instruction the step was last at.
       text = "  F->pc = #{insn.addr};\n" + text if @resumable&.handlers && !text.empty?
       # Without the flow pass there is no liveness to narrow the roots, so every element read is rooted.
@@ -679,6 +681,7 @@ class CodeGen
       if needs_return_catch && unhandled_return && [body, block_fallback_pre, @inline_nested_pre].any? { |code| code.include?('bc2cpp_return_from_block') }
         body << resumable_error('a block that is not inlined returns from the method')
       end
+      body << step_exit_dispatch if step_ensure_handlers?
       out << resumable_step_function(step_name, body)
       out << "}\n\n"
     elsif needs_return_catch
