@@ -499,7 +499,13 @@ def bc2cpp_rake_dependencies(dir, root)
   end
 end
 
+# Gems the closed build lists under another directory (mruby-fiber is a source-less placeholder there).
+BC2CPP_GEM_STAND_INS = { 'mruby-fiber' => 'mruby-fiber-placeholder' }.freeze
+
 def bc2cpp_gem_dir(name, root)
+  stand_in = BC2CPP_GEM_STAND_INS[name]
+  return File.join(root, stand_in) if stand_in && File.file?(File.join(root, stand_in, 'mrbgem.rake'))
+
   dirs = [File.join(root, '3rd/mruby/mrbgems', name), File.join(root, name), File.join(root, '3rd', name)]
   dirs.find { |d| File.file?(File.join(d, 'mrbgem.rake')) } ||
     raise("bc2cpp: no mrbgem.rake for #{name} (is its submodule initialised?)")

@@ -28,6 +28,15 @@ abort 'native_fiber_check skipped its behavioural half (no full-core or no-fiber
 
 puts '  native fiber check passed (compiled Fiber programs run on an mruby without mruby-fiber)'
 
+# The closed build's libmruby has no mruby-fiber: the C++ Fiber is its only Fiber.
+closed_lib = File.join(ROOT, 'build-closed-bc2cpp/closed/lib/libmruby.a')
+if File.exist?(closed_lib)
+  fiber_syms, = Open3.capture2('nm', '-A', '--defined-only', closed_lib)
+  fiber_syms = fiber_syms.lines.grep(/\bmrb_fiber_/)
+  abort "closed libmruby defines mrb_fiber_* symbols:\n#{fiber_syms.first(10).join}" unless fiber_syms.empty?
+  puts '  closed libmruby: no mrb_fiber_* symbols'
+end
+
 # Also verify closed build artifacts if they exist
 inventory_path = File.join(ROOT, 'build-closed-bc2cpp/closed/bytecode-inventory.json')
 if File.exist?(inventory_path)

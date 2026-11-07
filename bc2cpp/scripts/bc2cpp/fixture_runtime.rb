@@ -94,17 +94,11 @@ module Bc2cppFixtureRuntime
   # The gems that depend on it keep their bytecode; the program compiles the Fiber-dependent part of the Enumerator
   # (CoreMethods.enumerator_fiber_step?) so the C++ Fiber runs it.
   NOFIBER_GEMS = %w[mruby-fiber mruby-os-memsize].freeze
-  NOFIBER_PLACEHOLDER_GEM = <<~RUBY
-    MRuby::Gem::Specification.new('mruby-fiber') do |spec|
-      spec.license = 'MIT'
-      spec.authors = 'bc2cpp'
-      spec.summary = 'placeholder: the program supplies Fiber (bc2cpp_fiber_define); no sources, no mrb_fiber_* symbols'
-    end
-  RUBY
+  NOFIBER_PLACEHOLDER_GEM_DIR = File.join(ROOT, 'mruby-fiber-placeholder').freeze
   NOFIBER_CORE_CONFIG = <<~RUBY
     MRuby::Build.new('host') do |conf|
       toolchain :gcc
-      conf.gem File.join(File.dirname(ENV.fetch('MRUBY_CONFIG')), 'placeholder-mruby-fiber')
+      conf.gem '#{NOFIBER_PLACEHOLDER_GEM_DIR}'
       excluded = %w[mruby-bin-debugger mruby-test mruby-sleep #{NOFIBER_GEMS.join(' ')}]
       Dir.glob("\#{root}/mrbgems/mruby-*/mrbgem.rake") do |x|
         g = File.basename(File.dirname(x))
@@ -133,8 +127,6 @@ module Bc2cppFixtureRuntime
     FileUtils.mkdir_p(File.join(work, 'repos/host'))
     FileUtils.ln_sf(File.join(ROOT, '3rd/mgem-list'), File.join(work, 'repos/host/mgem-list'))
     File.write(File.join(work, 'config.rb'), NOFIBER_CORE_CONFIG)
-    FileUtils.mkdir_p(File.join(work, 'placeholder-mruby-fiber'))
-    File.write(File.join(work, 'placeholder-mruby-fiber/mrbgem.rake'), NOFIBER_PLACEHOLDER_GEM)
     env = { 'MRUBY_CONFIG' => File.join(work, 'config.rb'), 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
     out, status = Open3.capture2e(env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: File.join(ROOT, '3rd/mruby'))
     File.write(File.join(work, 'build.log'), out)
