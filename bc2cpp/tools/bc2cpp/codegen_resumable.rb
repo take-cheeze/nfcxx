@@ -1070,7 +1070,7 @@ class CodeGen
   # include path. bc2cpp_fiber.hxx is standalone; bc2cpp_fiber_methods.hxx uses the helpers just before it.
   def fiber_runtime_cpp
     %w[bc2cpp_fiber.hxx bc2cpp_fiber_methods.hxx bc2cpp_fiber_catch.hxx bc2cpp_fiber_sort.hxx].map do |name|
-      File.read(File.join(FIBER_RUNTIME_DIR, name)).gsub(/^#pragma once\n/, '')
+      File.read(File.join(FIBER_RUNTIME_DIR, name)).gsub(/^#pragma once\n/, '').gsub(%r{^// STANDALONE_BEGIN\n.*?^// STANDALONE_END\n}m, '')
     end.join("\n")
   end
 

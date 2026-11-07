@@ -1609,6 +1609,13 @@ if $PROGRAM_NAME == __FILE__
       }
     CPP
   end
+  # The one method-table lookup in generated code: a closed-world table (class, symbol -> entry) replaces this body.
+  puts <<~'CPP'
+    #ifndef BC2CPP_FIND_METHOD
+    #define BC2CPP_FIND_METHOD 1
+    static inline mrb_method_t bc2cpp_find_method(mrb_state* M, struct RClass** c, mrb_sym mid) { return mrb_method_search_vm(M, c, mid); }
+    #endif
+  CPP
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
   # mruby/error.h: the exception helpers (core API, not the mruby-error gem).
@@ -1809,7 +1816,7 @@ if $PROGRAM_NAME == __FILE__
       // Only where the name is Proc's own bytecode method: without mruby-proc-ext
       // `===` is Object's, and `[]` may be missing altogether.
       struct RClass* found = M->proc_class;
-      mrb_method_t m = mrb_method_search_vm(M, &found, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &found, mid);
       return !MRB_METHOD_UNDEF_P(m) && found == M->proc_class && !MRB_METHOD_CFUNC_P(m);
     }
     // ADR 0266: a break or return may only unwind to a frame still on the C++
@@ -1962,7 +1969,7 @@ if $PROGRAM_NAME == __FILE__
     }
     static inline bool bc2cpp_proc_method_body_p(mrb_state* M, mrb_value self, mrb_sym mid, const struct RProc* p) {
       struct RClass* c = mrb_class(M, self);
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       return !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_PROC_P(m) && MRB_METHOD_PROC(m) == p;
     }
     static inline void bc2cpp_block_self_check(mrb_state* M, mrb_value self, const char* block) {
@@ -2157,7 +2164,7 @@ if $PROGRAM_NAME == __FILE__
       mrb_gv_set(M, done, mrb_true_value());
       mrb_define_method(M, M->proc_class, "arity", bc2cpp_proc_arity_m, MRB_ARGS_NONE());
       struct RClass* found = M->proc_class;
-      mrb_method_t method = mrb_method_search_vm(M, &found, mrb_intern_lit(M, "parameters"));
+      mrb_method_t method = bc2cpp_find_method(M, &found, mrb_intern_lit(M, "parameters"));
       if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
         bc2cpp_orig_proc_parameters = MRB_METHOD_CFUNC(method);
         mrb_define_method(M, M->proc_class, "parameters", bc2cpp_proc_parameters_m, MRB_ARGS_OPT(1));
@@ -2526,7 +2533,7 @@ if $PROGRAM_NAME == __FILE__
       struct RClass* c = owner;
       MRB_CLASS_ORIGIN(c);
       c = c->super;
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
       return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk);
     }

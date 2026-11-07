@@ -423,7 +423,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
                     : mrb_intern_str(M, mrb_obj_as_string(M, name));
   bool keywords = bc2cpp_dyn_keywords_p(M, kdict);
   struct RClass* c = mrb_class(M, recv);
-  mrb_method_t method = mrb_method_search_vm(M, &c, mid);
+  mrb_method_t method = bc2cpp_find_method(M, &c, mid);
   Bc2cppDynResult out;
   if (bc2cpp_dyn_park(M, recv, method, argc, argv, kdict, blk, &out))
     return out;
@@ -448,7 +448,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   struct RClass* c = owner;
   MRB_CLASS_ORIGIN(c);
   c = c->super;
-  mrb_method_t method = mrb_method_search_vm(M, &c, mid);
+  mrb_method_t method = bc2cpp_find_method(M, &c, mid);
   if (MRB_METHOD_UNDEF_P(method))
     mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
   Bc2cppDynResult out;

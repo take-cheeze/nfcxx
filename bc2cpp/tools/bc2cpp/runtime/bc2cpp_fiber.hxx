@@ -24,6 +24,19 @@
 // bc2cpp_fiber_definer_p).
 #define BC2CPP_FIBER_RUNTIME 1
 
+// The method lookup seam. The preamble defines it, so the generated file
+// drops this copy (codegen_resumable.rb).
+// STANDALONE_BEGIN
+#ifndef BC2CPP_FIND_METHOD
+#define BC2CPP_FIND_METHOD 1
+static inline mrb_method_t bc2cpp_find_method(mrb_state* M,
+                                              struct RClass** c,
+                                              mrb_sym mid) {
+  return mrb_method_search_vm(M, c, mid);
+}
+#endif
+// STANDALONE_END
+
 enum Bc2cppStepKind {
   BC2CPP_STEP_DONE,
   BC2CPP_STEP_YIELD,
@@ -842,8 +855,7 @@ static mrb_value bc2cpp_fiber_m_alive_p(mrb_state* M, mrb_value self) {
 static mrb_func_t bc2cpp_fiber_cfunc(mrb_state* M,
                                      struct RClass* klass,
                                      const char* name) {
-  mrb_method_t method =
-      mrb_method_search_vm(M, &klass, mrb_intern_cstr(M, name));
+  mrb_method_t method = bc2cpp_find_method(M, &klass, mrb_intern_cstr(M, name));
   return !MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)
              ? MRB_METHOD_CFUNC(method)
              : nullptr;
