@@ -242,9 +242,10 @@ class CodeGen
       end
       next unless @fiber_yield_names.include?(name)
 
-      # A call with a block is a CALL to a known suspendable method or a dynamic call (RESUMABLE_DYN_CALL); either way
-      # the block's own steps carry the suspension, and a site that can do neither runs as an ordinary call.
-      next if insn.op == :SSENDB
+      # A call with a block, on self or on any receiver, is a CALL to a known suspendable method or a dynamic call
+      # (RESUMABLE_DYN_CALL); either way the block's own steps carry the suspension, and a site that can do neither
+      # runs as an ordinary call.
+      next if %i[SENDB SSENDB].include?(insn.op)
 
       unless %i[SSEND SSEND0].include?(insn.op)
         return "calls the yielding method #{name} with an explicit receiver or a block"
