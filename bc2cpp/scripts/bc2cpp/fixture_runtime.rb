@@ -467,9 +467,9 @@ class Bc2cppStepCheck
   # Generates `source` for `owners` with mruby's core compiled in. `guards: true` keeps every Fiber-free guard
   # (BC2CPP_GUARD_FIBER_FREE=0), so each listed core method takes its resumable variant in a probe that is not the program.
   def generate(source, owners, guards: false, **options)
-    @dir = Dir.mktmpdir('bc2cpp-step-check')
+    @dir = dir = Dir.mktmpdir('bc2cpp-step-check')
     @owners = owners
-    at_exit { FileUtils.remove_entry(@dir) }
+    at_exit { FileUtils.remove_entry(dir) }
     puts '-- generated code'
     saved = ENV['BC2CPP_GUARD_FIBER_FREE']
     ENV['BC2CPP_GUARD_FIBER_FREE'] = '0' if guards
