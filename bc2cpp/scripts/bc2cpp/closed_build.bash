@@ -65,6 +65,8 @@ export BC2CPP_STATIC_DISPATCH_LISTS
 # the generated sources are removed and rake writes them again; their objects follow.
 find "$build_dir/closed" -name '*_gen.cpp' -delete
 export BC2CPP_NATIVE_FN_KINDS="$build_dir/closed/analysis/fn-kinds.tsv"
+# PRESYM_SYMBOL: the presym names phase 1 generated, so the symbol table leaves them to MRB_SYM.
+export BC2CPP_PRESYM_HEADER="$build_dir/closed/include/mruby/presym/id.h"
 rake_closed
 
 echo "built $build_dir/closed/lib/libmruby.a"

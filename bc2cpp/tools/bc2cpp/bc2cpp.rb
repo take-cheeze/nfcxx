@@ -2391,6 +2391,10 @@ if $PROGRAM_NAME == __FILE__
   end
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
+  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
+  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
+    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
+  end
   symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
