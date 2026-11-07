@@ -104,10 +104,31 @@ inline Bc2cppPrologue bc2cpp_prologue = {nullptr, {}, nullptr};
   bc2cpp_prologue.recv = recv;
 }
 
+// A parked frame is held only by C++ until its fiber's refs are rebuilt, and the
+// arena that protected the objects it was made of is popped when the calls that
+// made it return. Until the next refresh the frame's values are pinned in a
+// global (rooted) Array.
+static mrb_value bc2cpp_pins(mrb_state* M) {
+  mrb_sym key = mrb_intern_lit(M, "$__bc2cpp_pins");
+  mrb_value pins = mrb_gv_get(M, key);
+  if (!mrb_array_p(pins)) {
+    pins = mrb_ary_new(M);
+    mrb_gv_set(M, key, pins);
+  }
+  return pins;
+}
+
+[[maybe_unused]] static void bc2cpp_unpin(mrb_state* M) {
+  mrb_ary_clear(M, bc2cpp_pins(M));
+}
+
 [[maybe_unused]] static mrb_value bc2cpp_prologue_park(
+    mrb_state* M,
     Bc2cppFiberFrame* frame) {
   bc2cpp_prologue.expect = nullptr;
   bc2cpp_prologue.frame = frame;
+  if (frame->mark)
+    frame->mark(M, frame, bc2cpp_pins(M));
   return mrb_nil_value();
 }
 
@@ -254,6 +275,7 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
       case BC2CPP_STEP_YIELD:
         args->yielded = true;
         bc2cpp_fiber_refresh(M, args->self, fiber);
+        bc2cpp_unpin(M);
         return out.value;
       case BC2CPP_STEP_CALL:
         out.callee->parent = frame;
@@ -279,6 +301,7 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
           bc2cpp_frame_free(M, frame);
           if (!fiber->top) {
             args->yielded = false;
+            bc2cpp_unpin(M);
             return out.value;
           }
           resume = out.value;
@@ -294,6 +317,7 @@ static mrb_value bc2cpp_fiber_run(mrb_state* M, void* userdata) {
         bc2cpp_frame_free(M, frame);
         if (!fiber->top) {
           args->yielded = false;
+          bc2cpp_unpin(M);
           return out.value;
         }
         resume = out.value;

@@ -743,7 +743,7 @@ class CodeGen
           bc2cpp_resumable_init(M);
           mrb_value frame = mrb_nil_value(), resume = mrb_nil_value();
           if (bc2cpp_prologue_armed(M, #{c_string_literal(owner_name)}, self)) {
-            return bc2cpp_prologue_park(bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+            return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
           }
           for (;;) {
             mrb_value result = #{step_name}(M, self, frame, resume);
@@ -795,7 +795,7 @@ CPP
 tail = <<~CPP
     mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
     if (bc2cpp_prologue_armed(M, #{c_string_literal(owner_name)}, self)) {
-      return bc2cpp_prologue_park(bc2cpp_method_frame_new(M, #{step_name}, self, frame));
+      return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
     }
     mrb_value resume = mrb_nil_value();
     for (;;) {
