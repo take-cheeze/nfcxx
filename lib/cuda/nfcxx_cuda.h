@@ -132,6 +132,23 @@ inline unsigned __vcmpne4(unsigned a, unsigned b) {
     if (((a >> (8 * i)) & 0xffu) != ((b >> (8 * i)) & 0xffu)) r |= 0xffu << (8 * i);
   return r;
 }
+inline unsigned __vcmpeq4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++)
+    if (((a >> (8 * i)) & 0xffu) == ((b >> (8 * i)) & 0xffu)) r |= 0xffu << (8 * i);
+  return r;
+}
+inline unsigned __vsubss4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++) {
+    int x = (int)(signed char)((a >> (8 * i)) & 0xffu), y = (int)(signed char)((b >> (8 * i)) & 0xffu);
+    int d = x - y;
+    if (d > 127) d = 127;
+    if (d < -128) d = -128;
+    r |= ((unsigned)d & 0xffu) << (8 * i);
+  }
+  return r;
+}
 inline int __shfl_xor_sync(unsigned, int v, int, int = 32) { return v; }
 inline float __shfl_xor_sync(unsigned, float v, int, int = 32) { return v; }
 inline int __shfl_down_sync(unsigned, int v, unsigned, int = 32) { return v; }
