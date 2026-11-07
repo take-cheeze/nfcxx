@@ -2,38 +2,18 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-# BLOCKS_IN_STEPS (tools/bc2cpp/codegen_resumable.rb resumable_block_call_glue): a resumable step may build blocks.
-#
-#   - a block that cannot suspend and captures the step's locals runs as in any method (the callee is synchronous);
-#   - a call on self to a suspendable method with a literal block whose own body reaches Fiber.yield becomes a CALL
-#     carrying the block's heap proc (with its step maker), so the callee's `yield` CALLs the block's step.
-#
-#   generated code (needs a host mrbc)
-#     - the caller and the block compile as steps, the call carries RESUMABLE_CALL, and no #error is left;
-#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - interpreted and compiled runs print the same.
+# BLOCKS_IN_STEPS (codegen_resumable.rb resumable_block_call_glue): a step may build blocks, and a call with a literal block whose
+# body reaches Fiber.yield becomes a CALL carrying the block's heap proc, so the callee's `yield` CALLs the block's step.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/block_in_step_check.rb
 
-require 'tmpdir'
 require_relative 'fixture_runtime'
 
-# The fixture is its own closed world: the repository signatures name classes it does not define.
-ENV['BC2CPP_SIG_DIRS'] = ''
-
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
-
-unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
-  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
-  exit 0
-end
+suite = Bc2cppStepCheck.new('bc2cpp block in step check')
+CLOCK = Bc2cppStepCheck::CLOCK_API
 
 # BiClock#run builds a local-capturing block, then calls each_mark with a block that yields to the fiber.
-SRC = <<~'RUBY'
+SRC = <<~RUBY
   class BiClock
     def start
       @fiber = Fiber.new { run }
@@ -59,22 +39,12 @@ SRC = <<~'RUBY'
       out
     end
 
-    def go
-      @fiber.resume
-    end
-
-    def go_with(value)
-      @fiber.resume(value)
-    end
-
-    def fiber_alive
-      @fiber.alive?
-    end
+    #{CLOCK}
   end
 RUBY
 
 # NbClock: the Fiber body is itself a step, and the block it builds is nested in it.
-SRC2 = <<~'RUBY'
+SRC2 = <<~RUBY
   class NbClock
     def start
       @fiber = Fiber.new do
@@ -94,22 +64,12 @@ SRC2 = <<~'RUBY'
       out
     end
 
-    def go
-      @fiber.resume
-    end
-
-    def go_with(value)
-      @fiber.resume(value)
-    end
-
-    def fiber_alive
-      @fiber.alive?
-    end
+    #{CLOCK}
   end
 RUBY
 
 # CcClock: the yielding block reads and writes locals of the step that builds it.
-SRC3 = <<~'RUBY'
+SRC3 = <<~RUBY
   class CcClock
     def start
       @fiber = Fiber.new { run }
@@ -137,22 +97,12 @@ SRC3 = <<~'RUBY'
       out
     end
 
-    def go
-      @fiber.resume
-    end
-
-    def go_with(value)
-      @fiber.resume(value)
-    end
-
-    def fiber_alive
-      @fiber.alive?
-    end
+    #{CLOCK}
   end
 RUBY
 
 # DyClock: the callee is reached through `send`, so the call is resolved at run time (bc2cpp_dyn_call).
-SRC4 = <<~'RUBY'
+SRC4 = <<~RUBY
   class DyClock
     def start
       @fiber = Fiber.new { run }
@@ -179,22 +129,12 @@ SRC4 = <<~'RUBY'
       out
     end
 
-    def go
-      @fiber.resume
-    end
-
-    def go_with(value)
-      @fiber.resume(value)
-    end
-
-    def fiber_alive
-      @fiber.alive?
-    end
+    #{CLOCK}
   end
 RUBY
 
 # IbClock: the method yields from a block of its own (`n.times { yield }`), so the inner block calls the method's block.
-SRC5 = <<~'RUBY'
+SRC5 = <<~RUBY
   class IbClock
     def start
       @fiber = Fiber.new { run }
@@ -210,22 +150,12 @@ SRC5 = <<~'RUBY'
       out
     end
 
-    def go
-      @fiber.resume
-    end
-
-    def go_with(value)
-      @fiber.resume(value)
-    end
-
-    def fiber_alive
-      @fiber.alive?
-    end
+    #{CLOCK}
   end
 RUBY
 
 # RtClock: `return` from an inner block of a method step ends the method (the fiber unwinds to its frame).
-SRC6 = <<~'RUBY'
+SRC6 = <<~RUBY
   class RtClock
     def start
       @fiber = Fiber.new { run }
@@ -242,22 +172,12 @@ SRC6 = <<~'RUBY'
       nil
     end
 
-    def go
-      @fiber.resume
-    end
-
-    def go_with(value)
-      @fiber.resume(value)
-    end
-
-    def fiber_alive
-      @fiber.alive?
-    end
+    #{CLOCK}
   end
 RUBY
 
 # BkClock: `break` out of the block a Fiber body step builds ends the call that took it.
-SRC7 = <<~'RUBY'
+SRC7 = <<~RUBY
   class BkClock
     def start
       @fiber = Fiber.new do
@@ -273,38 +193,23 @@ SRC7 = <<~'RUBY'
       out
     end
 
-    def go
-      @fiber.resume
-    end
-
-    def go_with(value)
-      @fiber.resume(value)
-    end
-
-    def fiber_alive
-      @fiber.alive?
-    end
+    #{CLOCK}
   end
 RUBY
 
 OWNERS = %w[BiClock NbClock CcClock DyClock IbClock RtClock BkClock].freeze
-
-baseline_dir = Dir.mktmpdir('bc2cpp-block-in-step')
-at_exit { FileUtils.remove_entry(baseline_dir) }
-puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC + SRC2 + SRC3 + SRC4 + SRC5 + SRC6 + SRC7, baseline_dir, core: true, only_owners: OWNERS)
-check.call('run compiles as a resumable step function', code.include?('static mrb_value BiClock_run_step(mrb_state* M'))
-check.call('each_mark compiles as a resumable step function', code.include?('static mrb_value BiClock_each_mark_step(mrb_state* M'))
-check.call('the block compiles as a resumable step', code.match?(/static mrb_value BiClock_run__blk\d+_step\(mrb_state\* M/))
-check.call('run calls each_mark with its block as a CALL (RESUMABLE_CALL)', code.include?('// RESUMABLE_CALL'))
-check.call('the nested block of the body step compiles as a step', code.match?(/static mrb_value NbClock_start__blk\d+_step\(mrb_state\* M/))
-check.call('the block capturing locals compiles as a resumable step', code.match?(/static mrb_value CcClock_run__blk\d+_step\(mrb_state\* M/))
-check.call('the send site is a dynamic call (RESUMABLE_DYN_CALL)', code.include?('// RESUMABLE_DYN_CALL'))
-check.call('dy_mark registers a dispatcher', code.include?('DyClock_dy_mark_impl_dyn'))
-check.call('the inner block of ib_each compiles as a resumable step', code.match?(/static mrb_value IbClock_ib_each__blk\d+_step\(mrb_state\* M/))
-check.call('the return of an inner block unwinds (RESUMABLE_UNWIND RETURN_BLK)', code.include?('RESUMABLE_UNWIND RETURN_BLK'))
-check.call('the break of a block unwinds (RESUMABLE_UNWIND BREAK)', code.include?('RESUMABLE_UNWIND BREAK'))
-check.call('no #error in the generated code', !code.include?('#error'))
+code = suite.generate(SRC + SRC2 + SRC3 + SRC4 + SRC5 + SRC6 + SRC7, OWNERS)
+suite.check('run compiles as a resumable step function', code.include?('static mrb_value BiClock_run_step(mrb_state* M'))
+suite.check('each_mark compiles as a resumable step function', code.include?('static mrb_value BiClock_each_mark_step(mrb_state* M'))
+suite.check('the block compiles as a resumable step', code.match?(/static mrb_value BiClock_run__blk\d+_step\(mrb_state\* M/))
+suite.check('run calls each_mark with its block as a CALL (RESUMABLE_CALL)', code.include?('// RESUMABLE_CALL'))
+suite.check('the nested block of the body step compiles as a step', code.match?(/static mrb_value NbClock_start__blk\d+_step\(mrb_state\* M/))
+suite.check('the block capturing locals compiles as a resumable step', code.match?(/static mrb_value CcClock_run__blk\d+_step\(mrb_state\* M/))
+suite.check('the send site is a dynamic call (RESUMABLE_DYN_CALL)', code.include?('// RESUMABLE_DYN_CALL'))
+suite.check('dy_mark registers a dispatcher', code.include?('DyClock_dy_mark_impl_dyn'))
+suite.check('the inner block of ib_each compiles as a resumable step', code.match?(/static mrb_value IbClock_ib_each__blk\d+_step\(mrb_state\* M/))
+suite.check('the return of an inner block unwinds (RESUMABLE_UNWIND RETURN_BLK)', code.include?('RESUMABLE_UNWIND RETURN_BLK'))
+suite.check('the break of a block unwinds (RESUMABLE_UNWIND BREAK)', code.include?('RESUMABLE_UNWIND BREAK'))
 
 DRIVER = <<~'RUBY'
   a = BiClock.new
@@ -383,51 +288,14 @@ DRIVER = <<~'RUBY'
   puts 'end'
 RUBY
 
-if ENV['CC_GENERATED_ONLY'] == '1'
-  puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'
-else
-  build = Bc2cppFixtureRuntime.full_or_build
-  if build.nil?
-    puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
-  else
-    puts '-- fixtures on real mruby, interpreted and compiled'
-    body = <<~CPP
-      static int scenario(mrb_state* M) {
-        std::fflush(stdout);
-        const char* src = R"RBC(#{DRIVER})RBC";
-        mrb_load_string(M, src);
-        std::fflush(stdout);
-        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
-        return 0;
-      }
-    CPP
-    built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, OWNERS, body, build: build, full: true)
-    check.call('the fixtures build and run', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
-    interpreted = sections['interpreted']
-    compiled = sections['compiled']
-    check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-    check.call('interpreted and compiled runs print the same', interpreted == compiled)
-    check.call('the local-capturing block and the yielding block both give their values', interpreted&.first == '[3, 0, 1, [[2, 4, 6], [12, 14, 16], [21, 31]], false]')
-    check.call('a block step reads and writes the locals of the step that builds it',
-               interpreted&.[](2) == '[0, 1, 2, [[101, 103, 106], 106, [101, 103, 106]], false]')
-    check.call('a send chosen at run time reaches the suspendable method through a CALL',
-               interpreted&.[](3) == '[0, 1, [[2, 3], 10], false]')
-    check.call('a block that yields to its method\'s block suspends through it',
-               interpreted&.[](4) == '[0, 1, 2, [2, 4, 6], false]')
-    check.call('a return from an inner block ends the method', interpreted&.[](5) == '[0, 1, 0, 1, [1, nil], false]')
-    check.call('a break out of a block ends the call that took it', interpreted&.[](6) == '[0, 1, 0, 1, [:stopped, [0, 1]], false]')
-    check.call('a block nested in a Fiber body step yields through the callee', interpreted&.[](1) == '[:begin, 0, 1, [5, [11, 21]], false]')
-    if interpreted && compiled
-      interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
-    end
-    puts output.lines.last(30).join unless built && interpreted && compiled
-  end
+suite.behaviour(DRIVER) do |interpreted, _|
+  at = ->(i) { interpreted&.[](i) }
+  suite.check('the local-capturing block and the yielding block both give their values', at.(0) == '[3, 0, 1, [[2, 4, 6], [12, 14, 16], [21, 31]], false]')
+  suite.check('a block step reads and writes the locals of the step that builds it', at.(2) == '[0, 1, 2, [[101, 103, 106], 106, [101, 103, 106]], false]')
+  suite.check('a send chosen at run time reaches the suspendable method through a CALL', at.(3) == '[0, 1, [[2, 3], 10], false]')
+  suite.check("a block that yields to its method's block suspends through it", at.(4) == '[0, 1, 2, [2, 4, 6], false]')
+  suite.check('a return from an inner block ends the method', at.(5) == '[0, 1, 0, 1, [1, nil], false]')
+  suite.check('a break out of a block ends the call that took it', at.(6) == '[0, 1, 0, 1, [:stopped, [0, 1]], false]')
+  suite.check('a block nested in a Fiber body step yields through the callee', at.(1) == '[:begin, 0, 1, [5, [11, 21]], false]')
 end
-
-if failures.empty?
-  puts 'bc2cpp block in step check: PASS'
-else
-  warn "bc2cpp block in step check: #{failures.size} failure(s)"
-  exit 1
-end
+suite.finish

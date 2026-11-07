@@ -407,3 +407,120 @@ module Bc2cppFixtureRuntime
     end
   end
 end
+
+# The shell of an interpreted-vs-compiled fixture check (the C++ Fiber step checks): the mrbc skip, the generated code,
+# a Ruby driver run on the interpreted and the compiled VM, and the PASS/FAIL tail. Labels are the check output.
+class Bc2cppStepCheck
+  attr_reader :code, :dir, :err, :output
+
+  # Fiber-resuming helpers of a clock fixture: `go` resumes, `go_with(v)` resumes with a value.
+  CLOCK_API = <<~RUBY
+    def go
+      @fiber.resume
+    end
+
+    def go_with(value)
+      @fiber.resume(value)
+    end
+
+    def fiber_alive
+      @fiber.alive?
+    end
+  RUBY
+
+  # Driver helpers: `show` prints a block's value or the exception class and message; `drain` resumes a fiber to its end.
+  SHOW = <<~RUBY
+    def show(label)
+      puts "\#{label}: \#{yield.inspect}"
+    rescue StandardError => e
+      puts "\#{label}: raised \#{e.class}: \#{e.message}"
+    end
+  RUBY
+  DRAIN = <<~RUBY
+    def drain(f)
+      out = []
+      while f.alive?
+        out << f.resume
+        GC.start
+      end
+      out
+    end
+  RUBY
+
+  # `title` names the PASS line. The fixture is its own closed world: the repository signatures name classes it lacks.
+  def initialize(title)
+    ENV['BC2CPP_SIG_DIRS'] = ''
+    @title = title
+    @failures = []
+    mrbc = Bc2cppFixtureRuntime.mrbc
+    return if mrbc && system(mrbc, '--version', out: File::NULL, err: File::NULL)
+
+    puts '  SKIP: no host mrbc (set MRBC)'
+    exit 0
+  end
+
+  def check(what, condition)
+    puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
+    @failures << what unless condition
+  end
+
+  # Generates `source` for `owners` with mruby's core compiled in. `guards: true` keeps every Fiber-free guard
+  # (BC2CPP_GUARD_FIBER_FREE=0), so each listed core method takes its resumable variant in a probe that is not the program.
+  def generate(source, owners, guards: false, **options)
+    @dir = Dir.mktmpdir('bc2cpp-step-check')
+    @owners = owners
+    at_exit { FileUtils.remove_entry(@dir) }
+    puts '-- generated code'
+    saved = ENV['BC2CPP_GUARD_FIBER_FREE']
+    ENV['BC2CPP_GUARD_FIBER_FREE'] = '0' if guards
+    @code, @err = Bc2cppFixtureRuntime.generate(source, @dir, core: true, only_owners: owners, **options)
+    check('no #error in the generated code', !@code.include?('#error'))
+    @code
+  ensure
+    saved ? ENV['BC2CPP_GUARD_FIBER_FREE'] = saved : ENV.delete('BC2CPP_GUARD_FIBER_FREE') if guards
+  end
+
+  # Runs `driver` (Ruby that prints and ends with 'end') on both VMs and yields the two line lists to the caller's own
+  # checks. With `same: true` the runs must print the same line for line (`diff: false`: the caller prints the differences). Skipped without a full-core libmruby.
+  def behaviour(driver, banner: 'fixtures on real mruby, interpreted and compiled', same: true, diff: true, build: nil)
+    return puts('  SKIP behavioural comparison: CC_GENERATED_ONLY') if ENV['CC_GENERATED_ONLY'] == '1'
+
+    build ||= Bc2cppFixtureRuntime.full_or_build
+    return puts('  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)') unless build
+
+    puts "-- #{banner}"
+    body = <<~CPP
+      static int scenario(mrb_state* M) {
+        std::fflush(stdout);
+        const char* src = R"RBC(#{driver})RBC";
+        mrb_load_string(M, src);
+        std::fflush(stdout);
+        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+        return 0;
+      }
+    CPP
+    built, @output = Bc2cppFixtureRuntime.run(@dir, @err, @owners, body, build: build, full: true)
+    check('the fixtures build and run', built)
+    sections = Bc2cppFixtureRuntime.sections(@output)
+    interpreted = sections['interpreted']
+    compiled = sections['compiled']
+    check('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
+    check('interpreted and compiled runs print the same', interpreted == compiled) if same
+    yield interpreted, compiled if block_given?
+    report_diff(interpreted, compiled) if diff && interpreted && compiled
+    puts @output.lines.last(30).join unless built && interpreted && compiled
+  end
+
+  def report_diff(interpreted, compiled, limit: 10)
+    interpreted.zip(compiled).reject { |a, b| a == b }.first(limit).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+  end
+
+  def finish
+    if @failures.empty?
+      puts "#{@title}: PASS"
+    else
+      warn "#{@title}: #{@failures.size} failure(s)"
+      exit 1
+    end
+  end
+end

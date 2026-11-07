@@ -2,38 +2,14 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-# FIBER_TRANSFER (tools/bc2cpp/runtime/bc2cpp_fiber.hxx): the rest of the Fiber API on the C++ Fiber, with the fiber
-# bodies compiled (a probe class per scenario, so no body runs on mruby-fiber):
-#
-#   - Fiber#transfer between the root and a fiber (a transfer back to the fiber's resumer is a yield of the value, a
-#     transfer to the fiber is a resume), and Fiber.current at the root;
-#   - a fiber resumed from inside another fiber's step (block parameters bound from resume arguments, resume(3, 4)
-#     packed into one value);
-#   - the FiberError cases: a dead fiber, a fiber resumed twice, a fiber resuming itself, a resumed fiber transferred to.
-#
-#   generated code (needs a host mrbc)
-#     - the bodies compile as steps, and no #error is left;
-#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - interpreted and compiled runs print the same line for every scenario.
+# FIBER_TRANSFER (runtime/bc2cpp_fiber.hxx): Fiber#transfer between the root and a fiber, a fiber resumed from inside another's step
+# and the FiberError cases, with compiled bodies (no body runs on mruby-fiber). Both runs print the same line per scenario.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/fiber_transfer_check.rb
 
-require 'tmpdir'
 require_relative 'fixture_runtime'
 
-# The fixture is its own closed world: the repository signatures name classes it does not define.
-ENV['BC2CPP_SIG_DIRS'] = ''
-
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
-
-unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
-  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
-  exit 0
-end
+suite = Bc2cppStepCheck.new('bc2cpp fiber transfer check')
 
 # State the bodies read lives in instance variables: a Fiber body does not capture the locals of the method building it.
 SRC = <<~'RUBY'
@@ -161,23 +137,12 @@ SRC = <<~'RUBY'
 RUBY
 
 OWNERS = %w[FtTransfer FtNested FtErrors FtChain].freeze
-
-baseline_dir = Dir.mktmpdir('bc2cpp-fiber-transfer')
-at_exit { FileUtils.remove_entry(baseline_dir) }
-puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS)
-%w[FtTransfer FtNested FtErrors FtChain].each do |owner|
-  check.call("#{owner}'s fiber bodies compile as steps", code.match?(/static mrb_value #{owner}_start__blk\d+_step\(mrb_state\* M/))
+code = suite.generate(SRC, OWNERS)
+OWNERS.each do |owner|
+  suite.check("#{owner}'s fiber bodies compile as steps", code.match?(/static mrb_value #{owner}_start__blk\d+_step\(mrb_state\* M/))
 end
-check.call('no #error in the generated code', !code.include?('#error'))
 
-DRIVER = <<~'RUBY'
-  def show(label)
-    puts "#{label}: #{yield.inspect}"
-  rescue StandardError => e
-    puts "#{label}: raised #{e.class}: #{e.message}"
-  end
-
+DRIVER = Bc2cppStepCheck::SHOW + <<~'RUBY'
   t = FtTransfer.new
   t.start
   show('transfer out') { t.first }
@@ -185,27 +150,23 @@ DRIVER = <<~'RUBY'
   show('transfer back') { t.second }
   show('transfer dead') { t.fiber_alive }
   show('root is current') { t.main_is_current }
-
   n = FtNested.new
   n.start
   show('nested first') { n.go(1) }
   GC.start
   show('nested second') { n.go(3, 4) }
-
   e = FtErrors.new
   e.start
   show('resume self') { e.resume_self }
   show('resume dead') { e.resume_dead }
   show('resume resuming') { e.resume_resuming }
   show('transfer to yielded') { e.transfer_to_yielded }
-
   m = FtErrors.new
   m.start
   m.start_more
   show('resume transferred') { m.resume_transferred }
   show('yield after transfer') { m.yield_after_transfer }
   show('transfer to resuming') { m.transfer_to_resuming }
-
   c = FtChain.new
   c.start
   show('chain') { c.run }
@@ -213,41 +174,5 @@ DRIVER = <<~'RUBY'
   puts 'end'
 RUBY
 
-if ENV['CC_GENERATED_ONLY'] == '1'
-  puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'
-else
-  build = Bc2cppFixtureRuntime.full_or_build
-  if build.nil?
-    puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
-  else
-    puts '-- fixtures on real mruby, interpreted and compiled'
-    body = <<~CPP
-      static int scenario(mrb_state* M) {
-        std::fflush(stdout);
-        const char* src = R"RBC(#{DRIVER})RBC";
-        mrb_load_string(M, src);
-        std::fflush(stdout);
-        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
-        return 0;
-      }
-    CPP
-    built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, OWNERS, body, build: build, full: true)
-    check.call('the fixtures build and run', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
-    interpreted = sections['interpreted']
-    compiled = sections['compiled']
-    check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-    check.call('interpreted and compiled runs print the same', interpreted == compiled)
-    if interpreted && compiled
-      interpreted.zip(compiled).reject { |a, b| a == b }.first(12).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
-    end
-    puts output.lines.last(30).join if ENV['FT_SHOW'] || !(built && interpreted && compiled)
-  end
-end
-
-if failures.empty?
-  puts 'bc2cpp fiber transfer check: PASS'
-else
-  warn "bc2cpp fiber transfer check: #{failures.size} failure(s)"
-  exit 1
-end
+suite.behaviour(DRIVER)
+suite.finish

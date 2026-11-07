@@ -2,34 +2,15 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-# STEP_HANDLERS (tools/bc2cpp/codegen_resumable.rb resumable_step_function, runtime/bc2cpp_fiber.hxx bc2cpp_fiber_unwind): a
-# step may have rescue and ensure handlers, and an exception, a break/return or a throw crosses suspensions.
-#
-#   generated code (needs a host mrbc)
-#     - the methods and blocks with handlers compile as steps, and no #error is left;
-#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - the fiber bodies of a compiled probe class (nothing here is eval'd) print what the interpreted run prints:
-#       begin/rescue/ensure around Fiber.yield in blocks, an exception raised after a resume that crosses CALL frames to a
-#       handler in a parent step and out of Fiber#resume (alive? false afterwards), and catch/throw after a yield.
+# STEP_HANDLERS (codegen_resumable.rb, runtime bc2cpp_fiber_unwind): rescue/ensure/retry, catch/throw and break/return/next out of
+# ensure regions across Fiber.yield and CALL frames, in compiled fiber bodies. Output must equal the interpreted run; Fiber#raise
+# (absent from mruby-fiber) is held to CRuby's output.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/step_exceptions_check.rb
 
-require 'tmpdir'
 require_relative 'fixture_runtime'
 
-# The fixture is its own closed world: the repository signatures name classes it does not define.
-ENV['BC2CPP_SIG_DIRS'] = ''
-
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
-
-unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
-  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
-  exit 0
-end
+suite = Bc2cppStepCheck.new('bc2cpp step exceptions check')
 
 # Every scenario is a method returning the Fiber to run, so the bodies, the methods they call and their blocks are compiled.
 SRC = <<~'RUBY'
@@ -606,34 +587,14 @@ SRC = <<~'RUBY'
 RUBY
 
 OWNERS = %w[StepExc PlainEns].freeze
-
-baseline_dir = Dir.mktmpdir('bc2cpp-step-exceptions')
-at_exit { FileUtils.remove_entry(baseline_dir) }
-puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS)
-check.call('nested_ensure compiles as a step', code.include?('static mrb_value StepExc_nested_ensure__blk') && code.include?('_step(mrb_state* M'))
-check.call('a step has a handler loop', code.include?('mrb_protect_error(M, bc2cpp_protect_tramp'))
-check.call('no #error in the generated code', !code.include?('#error'))
+code = suite.generate(SRC, OWNERS)
+suite.check('nested_ensure compiles as a step', code.include?('static mrb_value StepExc_nested_ensure__blk') && code.include?('_step(mrb_state* M'))
+suite.check('a step has a handler loop', code.include?('mrb_protect_error(M, bc2cpp_protect_tramp'))
 %w[break_out return_out raise_in_ensure next_out].each do |name|
-  check.call("PlainEns##{name} compiles", !baseline_err.include?("PlainEns##{name}:"))
+  suite.check("PlainEns##{name} compiles", !suite.err.include?("PlainEns##{name}:"))
 end
 
-DRIVER = <<~'RUBY'
-  def show(label)
-    puts "#{label}: #{yield.inspect}"
-  rescue StandardError => e
-    puts "#{label}: raised #{e.class}: #{e.message}"
-  end
-
-  def drain(f)
-    out = []
-    while f.alive?
-      out << f.resume
-      GC.start
-    end
-    out
-  end
-
+DRIVER = Bc2cppStepCheck::SHOW + Bc2cppStepCheck::DRAIN + <<~'RUBY'
   o = StepExc.new
   show('nested ensure') { [drain(o.nested_ensure), o.events] }
   o = StepExc.new
@@ -775,94 +736,61 @@ DRIVER = <<~'RUBY'
   puts 'end'
 RUBY
 
-if ENV['CC_GENERATED_ONLY'] == '1'
-  puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'
-else
-  build = Bc2cppFixtureRuntime.full_or_build
-  if build.nil?
-    puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
-  else
-    puts '-- fixtures on real mruby, interpreted and compiled'
-    body = <<~CPP
-      static int scenario(mrb_state* M) {
-        std::fflush(stdout);
-        const char* src = R"RBC(#{DRIVER})RBC";
-        mrb_load_string(M, src);
-        std::fflush(stdout);
-        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
-        return 0;
-      }
-    CPP
-    built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, OWNERS, body, build: build, full: true)
-    check.call('the fixtures build and run', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
-    interpreted_all = sections['interpreted']
-    compiled_all = sections['compiled']
-    # Fiber#raise: mruby-fiber has none, so the interpreted run only shows its NoMethodError (compared with CRuby's output below).
-    interpreted = interpreted_all&.reject { |l| l.start_with?('raise ') }
-    compiled = compiled_all&.reject { |l| l.start_with?('raise ') }
-    check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-    check.call('interpreted and compiled runs print the same', interpreted == compiled)
-    expected = {
-      'nested ensure' => 'nested ensure: [[1, 2, :done], [1, 2, "after resume", :outer]]',
-      'caught by parent' => 'caught by parent: [1, "boom 1", :after]',
-      'uncaught' => 'uncaught: [2, "boom 2", false]',
-      'through two frames' => 'through two frames: [[3, :end], [:middle_ensure, "boom 3"]]',
-      'local rescue' => 'local rescue: [:first, "got 7", false]',
-      'wrong class' => 'wrong class: [4, "boom 4", false]',
-      'catch throw' => 'catch throw: [:tag, :caught]',
-      'catch deep' => 'catch deep: [[:in_deep, [:thrown, :after]], [:deep_ensure]]',
-      'break through ensure' => 'break through ensure: [[1, 2, [20, :after]], [:each_ens]]',
-      'break in block ensure' => 'break in block ensure: [[1, 2, [[:b, 2], :after]], [1, 2]]',
-      'normal through ensure' => 'normal through ensure: [[1, 2, 3, [:finished, :after]], [:each_ens]]',
-      'locals survive rescue' => 'locals survive rescue: [["kept!", ["kept!", 5, "kept!"]], ["KEPT!", ["kept!", 5, "kept!"], false]]',
-      'retry basic' => 'retry basic: [[[:try, 1], [:try, 2], [:try, 3], [:ok, 3]], ["t1", "t2"]]',
-      'retry with ensure' => 'retry with ensure: [[1, :retrying, 2, :retrying, 3, :done], [:ens]]',
-      'retry across call' => 'retry across call: [[[:flaky, 1], [:flaky, 2], [:flaky, 3], 3], ["f1", "f2"]]',
-      'retry in block' => 'retry in block: [[[1, 1], [1, 2], [2, 3], [2, 4], [3, 5], [3, 6], [StepExc, 6]], []]',
-      'return through ensure' => 'return through ensure: [[[:in, true], [:in, false], :ens1, :a, :try, 1, [:inner, 1], 2, [:inner, 2], ' \
-                                 '[:bare, true], [:bare, false], [:early, :late, :inner, :second, :rescued, ' \
-                                 '[:rescued, "from ensure"], [:ret, 2], nil, :late]], ' \
-                                 '[[:ens, true], :not_early, [:ens, false], :e1, :e2, :ens_r, [:inner, 1], [:outer, 1], [:inner, 2], ' \
-                                 '[:outer, 2], [:ens_bare, true], :after_bare, [:ens_bare, false]]]',
-      'loop next break through ensure' => 'loop next break through ensure: [[1, 2, 3, [[2], 3]], [[:ens, 1], [:ens, 2], [:ens, 3]]]',
-      'block next through ensure' => 'block next through ensure: [[1, 2, 3, [true, :after]], [1, 2, 3]]',
-      'plain break through ensure' => 'plain break through ensure: [[1, :broke], ["e1"]]',
-      'plain return through ensure' => 'plain return through ensure: [[1, :returned], ["e1", "ggggggggg"]]',
-      'plain raise in ensure' => 'plain raise in ensure: [:rescued, "ens"]',
-      'plain next through ensure' => 'plain next through ensure: [:done, [1, 2]]'
-    }
-    expected.each do |label, line|
-      check.call("#{label} prints what Ruby does", interpreted&.include?(line))
-    end
-    # The compiled run is held to what CRuby prints for the same program (the dead-fiber message aside, see the driver).
-    raise_expected = {
-      'raise rescued' => 'raise rescued: [:waiting, :after_rescue, :finished, false, [[:rescued, ArgumentError, "boom"], :ens]]',
-      'raise through frames' => 'raise through frames: [[1, 2], :recovered, false, [[:blk, 1], [:blk, 2], [:outer, "stop"], :outer_ens]]',
-      'raise uncaught' => 'raise uncaught: [:deep, [RuntimeError, "x"], false, [:deep_ens]]',
-      'raise yield in ensure' => 'raise yield in ensure: [1, :in_ensure, "E", false, [:ens_done]]',
-      'raise retry' => 'raise retry: [[:wait, 1], [:wait, 2], :ok, false]',
-      'raise forms' => 'raise forms: [0, 1, 2, 3, [[IOError, "a"], [RuntimeError, "b"], [TypeError, "c"], [ArgumentError, "ArgumentError"]]]',
-      'raise unborn' => 'raise unborn: [FiberError, "cannot raise exception on unborn fiber", true, :a]',
-      'raise dead' => 'raise dead: [FiberError, true, false]',
-      'raise self' => 'raise self: [[:self, "me"]]',
-      'raise resuming' => 'raise resuming: raised RuntimeError: r'
-    }
-    raise_expected.each do |label, line|
-      ok = compiled_all&.include?(line)
-      check.call("#{label} prints what CRuby does", ok)
-      puts "    compiled: #{compiled_all&.find { |l| l.start_with?("#{label}:") }}" unless ok
-    end
-    if interpreted && compiled
-      interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
-    end
-    puts output.lines.last(30).join unless built && interpreted && compiled
+suite.behaviour(DRIVER, same: false, diff: false) do |interpreted_all, compiled_all|
+  # Fiber#raise: mruby-fiber has none, so the interpreted run only shows its NoMethodError (compared with CRuby's output below).
+  interpreted = interpreted_all&.reject { |l| l.start_with?('raise ') }
+  compiled = compiled_all&.reject { |l| l.start_with?('raise ') }
+  suite.check('interpreted and compiled runs print the same', interpreted == compiled)
+  suite.report_diff(interpreted, compiled) if interpreted && compiled
+  expected = {
+    'nested ensure' => '[[1, 2, :done], [1, 2, "after resume", :outer]]',
+    'caught by parent' => '[1, "boom 1", :after]',
+    'uncaught' => '[2, "boom 2", false]',
+    'through two frames' => '[[3, :end], [:middle_ensure, "boom 3"]]',
+    'local rescue' => '[:first, "got 7", false]',
+    'wrong class' => '[4, "boom 4", false]',
+    'catch throw' => '[:tag, :caught]',
+    'catch deep' => '[[:in_deep, [:thrown, :after]], [:deep_ensure]]',
+    'break through ensure' => '[[1, 2, [20, :after]], [:each_ens]]',
+    'break in block ensure' => '[[1, 2, [[:b, 2], :after]], [1, 2]]',
+    'normal through ensure' => '[[1, 2, 3, [:finished, :after]], [:each_ens]]',
+    'locals survive rescue' => '[["kept!", ["kept!", 5, "kept!"]], ["KEPT!", ["kept!", 5, "kept!"], false]]',
+    'retry basic' => '[[[:try, 1], [:try, 2], [:try, 3], [:ok, 3]], ["t1", "t2"]]',
+    'retry with ensure' => '[[1, :retrying, 2, :retrying, 3, :done], [:ens]]',
+    'retry across call' => '[[[:flaky, 1], [:flaky, 2], [:flaky, 3], 3], ["f1", "f2"]]',
+    'retry in block' => '[[[1, 1], [1, 2], [2, 3], [2, 4], [3, 5], [3, 6], [StepExc, 6]], []]',
+    'return through ensure' => '[[[:in, true], [:in, false], :ens1, :a, :try, 1, [:inner, 1], 2, [:inner, 2], ' \
+                               '[:bare, true], [:bare, false], [:early, :late, :inner, :second, :rescued, ' \
+                               '[:rescued, "from ensure"], [:ret, 2], nil, :late]], ' \
+                               '[[:ens, true], :not_early, [:ens, false], :e1, :e2, :ens_r, [:inner, 1], [:outer, 1], [:inner, 2], ' \
+                               '[:outer, 2], [:ens_bare, true], :after_bare, [:ens_bare, false]]]',
+    'loop next break through ensure' => '[[1, 2, 3, [[2], 3]], [[:ens, 1], [:ens, 2], [:ens, 3]]]',
+    'block next through ensure' => '[[1, 2, 3, [true, :after]], [1, 2, 3]]',
+    'plain break through ensure' => '[[1, :broke], ["e1"]]',
+    'plain return through ensure' => '[[1, :returned], ["e1", "ggggggggg"]]',
+    'plain raise in ensure' => '[:rescued, "ens"]',
+    'plain next through ensure' => '[:done, [1, 2]]'
+  }
+  expected.each do |label, line|
+    suite.check("#{label} prints what Ruby does", interpreted&.include?("#{label}: #{line}"))
+  end
+  # The compiled run is held to what CRuby prints for the same program (the dead-fiber message aside, see the driver).
+  raise_expected = {
+    'raise rescued' => '[:waiting, :after_rescue, :finished, false, [[:rescued, ArgumentError, "boom"], :ens]]',
+    'raise through frames' => '[[1, 2], :recovered, false, [[:blk, 1], [:blk, 2], [:outer, "stop"], :outer_ens]]',
+    'raise uncaught' => '[:deep, [RuntimeError, "x"], false, [:deep_ens]]',
+    'raise yield in ensure' => '[1, :in_ensure, "E", false, [:ens_done]]',
+    'raise retry' => '[[:wait, 1], [:wait, 2], :ok, false]',
+    'raise forms' => '[0, 1, 2, 3, [[IOError, "a"], [RuntimeError, "b"], [TypeError, "c"], [ArgumentError, "ArgumentError"]]]',
+    'raise unborn' => '[FiberError, "cannot raise exception on unborn fiber", true, :a]',
+    'raise dead' => '[FiberError, true, false]',
+    'raise self' => '[[:self, "me"]]',
+    'raise resuming' => 'raised RuntimeError: r'
+  }
+  raise_expected.each do |label, line|
+    ok = compiled_all&.include?("#{label}: #{line}")
+    suite.check("#{label} prints what CRuby does", ok)
+    puts "    compiled: #{compiled_all&.find { |l| l.start_with?("#{label}:") }}" unless ok
   end
 end
-
-if failures.empty?
-  puts 'bc2cpp step exceptions check: PASS'
-else
-  warn "bc2cpp step exceptions check: #{failures.size} failure(s)"
-  exit 1
-end
+suite.finish

@@ -1,35 +1,14 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# RESUMABLE_DUAL (tools/bc2cpp/codegen_method.rb): the direct-yield core iterators on the list take their resumable
-# variant beside the fast body. Inside a Fiber the guard runs the variant, so a Fiber.yield in the block suspends through
-# VM frames; outside one the fast body runs. This fixture runs each listed method both ways, and the methods that are
-# not on the list (the ones that stay on their drivers) both ways too.
-#
-#   generated code (needs a host mrbc)
-#     - the probe reaches every listed method from a Fiber body, so each one is guarded and gets its variant;
-#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - each method is run inside a Fiber (the block yields, and the fiber is drained) and plainly (the block returns);
-#       the interpreted run and the compiled run print the same line for every scenario.
+# RESUMABLE_DUAL (codegen_method.rb): the direct-yield core iterators on the list take a resumable variant beside the fast body. Each
+# runs inside a Fiber (the block yields) and plainly; interpreted and compiled runs print the same. native_fiber_check evals the table.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/resumable_variants_check.rb
 
-require 'tmpdir'
 require_relative 'fixture_runtime'
 
-# The fixture is its own closed world: the repository signatures name classes it does not define.
-ENV['BC2CPP_SIG_DIRS'] = ''
-
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
-
-unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
-  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
-  exit 0
-end
+suite = Bc2cppStepCheck.new('bc2cpp resumable variants check')
 
 # array.c's sort (insertion sort up to 16 elements, heap sort above), transcribed so the comparison block sees the
 # calls mruby's native sort makes. The interpreted run cannot give the expected output of a Fiber.yield in a
@@ -177,11 +156,6 @@ SCENARIOS = [
   ['Enumerator#next', 'e = [1, 2].each; Fiber.yield e.next; e.next', 'e = [1, 2].each; e.next; e.next'],
   ['StringIO#each', 'require "stringio"; StringIO.new("a\\nb").each { |l| Fiber.yield l }', 'require "stringio"; StringIO.new("a\\nb").each { |l| l }']
 ].freeze
-SCENARIOS = SCENARIOS.select { |label, *| label == ENV['ONLY'] }.freeze if ENV['ONLY'] # debugging aid: one label
-
-# Fiber scenarios whose callee cannot be a step yet (the plain runs must still match). A gap that starts passing fails the check, so the list only shrinks.
-KNOWN_GAPS = {
-}.freeze
 
 EXPECTED_LABELS = %w[
   Array#collect! Array#delete_if Array#each Array#each_index Array#fetch Array#find
@@ -193,112 +167,42 @@ EXPECTED_LABELS = %w[
   Kernel#loop Hash#fetch_values
 ].freeze
 
-# The probe class: one method per scenario builds the fiber whose body is the scenario, so every fiber body is compiled
-# (a Fiber made by the driver's own, interpreted, source would run on mruby-fiber). Every listed method is called from
-# a compiled Fiber body, so each is guarded and gets its variant.
+# One method per scenario builds the fiber whose body is the scenario, so every fiber body is compiled (a Fiber made by the
+# driver's own, interpreted, source would run on mruby-fiber).
 PROBE = <<~RUBY
   class VariantProbe
 #{SCENARIOS.each_with_index.map { |(_, fiber, _), i| "    def fiber_#{i}\n      Fiber.new { #{fiber} }\n    end\n" }.join("\n")}
   end
 RUBY
 
-# Each scenario runs as a line of output: "fiber LABEL: [..]" (drained fiber) and "plain LABEL: ..." (the same call, no fiber).
-DRIVER = <<~'RUBY'
-  def show(label)
-    puts "#{label}: #{yield.inspect}"
-  rescue StandardError => e
-    puts "#{label}: raised #{e.class}: #{e.message}"
-  end
-
-  def drain(f)
-    out = []
-    while f.alive?
-      out << f.resume
-    end
-    out
-  end
-RUBY
+# Each scenario prints "fiber LABEL: [..]" (drained fiber) and "plain LABEL: ..." (the same call, no fiber).
 DRIVER_BODY = SCENARIOS.each_with_index.map do |(label, _, plain), i|
   "show('fiber #{label}') { drain(VariantProbe.new.fiber_#{i}) }\nshow('plain #{label}') { #{plain} }"
 end.join("\n")
-DRIVER_FULL = DRIVER + DRIVER_BODY + "\nputs 'end'\n"
+DRIVER = "#{Bc2cppStepCheck::SHOW}#{Bc2cppStepCheck::DRAIN}#{DRIVER_BODY}\nputs 'end'\n"
 
 OWNERS = %w[Array Enumerable Enumerator Hash Integer Float Kernel Range String StringIO VariantProbe].freeze
-
-baseline_dir = Dir.mktmpdir('bc2cpp-resumable-variants')
-at_exit { FileUtils.remove_entry(baseline_dir) }
-puts '-- generated code'
-# BC2CPP_GUARD_FIBER_FREE=0 keeps every guard, so each listed method takes its variant in this probe (the probe is not
-# the whole program: a method no probe Fiber reaches would otherwise lose its guard).
-saved_guard = ENV['BC2CPP_GUARD_FIBER_FREE']
-ENV['BC2CPP_GUARD_FIBER_FREE'] = '0'
-code, baseline_err = begin
-  Bc2cppFixtureRuntime.generate(PROBE, baseline_dir, core: true, only_owners: OWNERS)
-ensure
-  saved_guard ? ENV['BC2CPP_GUARD_FIBER_FREE'] = saved_guard : ENV.delete('BC2CPP_GUARD_FIBER_FREE')
-end
-File.write(ENV['BC2CPP_VARIANTS_DUMP'], code) if ENV['BC2CPP_VARIANTS_DUMP']
+# BC2CPP_GUARD_FIBER_FREE=0 (guards: true) keeps every guard, so each listed method takes its variant in this probe, which is
+# not the whole program: a method no probe Fiber reaches would otherwise lose its guard.
+code = suite.generate(PROBE, OWNERS, guards: true)
 variants = code.scan(/^(?:\[\[maybe_unused\]\] )?static mrb_value ([\w$]+)_rsm_impl\(/).flatten.uniq
-# The default list (RESUMABLE_DUAL in tools/bc2cpp/codegen_method.rb): exactly these take a variant.
-EXPECTED = EXPECTED_LABELS
-expected_names = EXPECTED.map { |label| label.sub('#', '_').gsub('!', '$21').gsub('?', '$3f') }
+# The default list (RESUMABLE_DUAL in codegen_method.rb): exactly these take a variant.
+expected_names = EXPECTED_LABELS.map { |label| label.sub('#', '_').gsub('!', '$21').gsub('?', '$3f') }
 puts "    missing variants: #{(expected_names - variants).sort.join(' ')}" unless (expected_names - variants).empty?
 puts "    unexpected variants: #{(variants - expected_names).sort.join(' ')}" unless (variants - expected_names).empty?
-check.call("exactly the default list gets a variant (#{variants.size} of #{SCENARIOS.size} scenarios)", (expected_names - variants).empty? && (variants - expected_names).empty?)
-check.call('no #error in the generated code', !code.include?('#error'))
+suite.check("exactly the default list gets a variant (#{variants.size} of #{SCENARIOS.size} scenarios)",
+            (expected_names - variants).empty? && (variants - expected_names).empty?)
 %w[array_fetch hash_fetch string_upto].each do |method|
-  check.call("#{method} needs no per-method driver", !code.include?("bc2cpp_#{method}_driver_src"))
+  suite.check("#{method} needs no per-method driver", !code.include?("bc2cpp_#{method}_driver_src"))
 end
 
-if ENV['CC_GENERATED_ONLY'] == '1'
-  puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'
-else
-  build = Bc2cppFixtureRuntime.full_or_build
-  if build.nil?
-    puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
-  else
-    puts '-- fixtures on real mruby, interpreted and compiled'
-    body = <<~CPP
-      static int scenario(mrb_state* M) {
-        std::fflush(stdout);
-        const char* src = R"RAC(#{DRIVER_FULL})RAC";
-        mrb_load_string(M, src);
-        std::fflush(stdout);
-        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
-        return 0;
-      }
-    CPP
-    built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, OWNERS, body, build: build, full: true)
-    check.call('the fixtures build and run', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
-    interpreted = sections['interpreted']
-    compiled = sections['compiled']
-    check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-    if interpreted && compiled
-      # A scenario with an expected line is held to it, not to the interpreted run.
-      SCENARIOS.each_with_index do |(_, _, _, expected), idx|
-        interpreted[idx * 2] = expected.call if expected
-      end
-      gap = lambda do |i|
-        label, = SCENARIOS[i / 2]
-        i.even? && KNOWN_GAPS.key?(label)
-      end
-      pairs = interpreted.zip(compiled).each_with_index.reject { |(a, b), _| a == b }
-      unexpected = pairs.reject { |_, i| gap.call(i) }
-      unexpected.first(ENV.fetch('MISMATCH_SHOW', '12').to_i).each { |(a, b), _| puts "    interpreted: #{a}\n    compiled:    #{b}" }
-      check.call("interpreted and compiled runs print the same over #{SCENARIOS.size * 2} scenarios", unexpected.empty?)
-      gaps = pairs.select { |_, i| gap.call(i) }
-      puts "    known gaps: #{gaps.size} fiber scenarios (#{KNOWN_GAPS.keys.join(', ')})"
-      stale = (0...(SCENARIOS.size * 2)).select { |i| gap.call(i) && interpreted[i] == compiled[i] }
-      check.call('every known gap still fails', stale.empty?) unless ENV['ONLY']
-    end
-    puts output.lines.last(30).join unless built && interpreted && compiled
-  end
-end
+suite.behaviour(DRIVER, same: false, diff: false) do |interpreted, compiled|
+  next unless interpreted && compiled
 
-if failures.empty?
-  puts 'bc2cpp resumable variants check: PASS'
-else
-  warn "bc2cpp resumable variants check: #{failures.size} failure(s)"
-  exit 1
+  # A scenario with an expected line is held to it, not to the interpreted run.
+  SCENARIOS.each_with_index { |(_, _, _, expected), idx| interpreted[idx * 2] = expected.call if expected }
+  differing = interpreted.zip(compiled).reject { |a, b| a == b }
+  differing.first(12).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+  suite.check("interpreted and compiled runs print the same over #{SCENARIOS.size * 2} scenarios", differing.empty?)
 end
+suite.finish

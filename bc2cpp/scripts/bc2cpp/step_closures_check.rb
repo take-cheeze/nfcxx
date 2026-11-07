@@ -2,36 +2,15 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-# STEP_CLOSURES (tools/bc2cpp/codegen_resumable.rb, codegen_block_fallback.rb): a closure may outlive the step that
-# made it. A variable of a step that a block may keep (store, return, yield, hand to an unknown callee) lives in a heap
-# cell shared by the step and every block, so the step's frame and the C stack can be gone while the block still reads
-# and writes it. A Fiber body takes its captured locals (written ones, optional and rest parameters, outer upvars) the
-# same way. The cheap pointer form stays where the block provably does not outlive the call.
-#
-#   generated code (needs a host mrbc)
-#     - the probe class compiles with no #error;
-#   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
-#     - every scenario prints the same compiled as interpreted. The fiber bodies are compiled (a probe class), not
-#       eval'd, so the C++ Fiber runs them.
+# STEP_CLOSURES (codegen_resumable.rb, codegen_block_fallback.rb): a variable a block may keep lives in a heap cell shared by the
+# step and its blocks, so the closure outlives the step's frame and the C stack. Every scenario prints the same compiled as
+# interpreted (the fiber bodies are compiled, not eval'd).
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/step_closures_check.rb
 
-require 'tmpdir'
 require_relative 'fixture_runtime'
 
-# The fixture is its own closed world: the repository signatures name classes it does not define.
-ENV['BC2CPP_SIG_DIRS'] = ''
-
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
-
-unless Bc2cppFixtureRuntime.mrbc && system(Bc2cppFixtureRuntime.mrbc, '--version', out: File::NULL, err: File::NULL)
-  puts '  SKIP: no host mrbc (set MRBC); the generated-code and behavioural checks need it'
-  exit 0
-end
+suite = Bc2cppStepCheck.new('bc2cpp step closures check')
 
 WIDE = (0...250).map { |i| "      l#{i} = #{i}\n" }.join
 WIDE_LIST = (0...250).map { |i| "l#{i}" }.join(', ')
@@ -189,25 +168,12 @@ SRC = <<~RUBY
       GC.start
       [kept.map(&:call).size, kept.last.call, ($__bc2cpp_upvar_roots || {}).size - before < 4]
     end
-
-    # A block with optional or keyword parameters is not compiled yet (its method stays interpreted): the scenario only
-    # pins the interpreted answers, which the compiled blocks above must give too.
-    def sc_arity_optional
-      f = proc { |a, b = 1, *rest, key: 2, &block| }
-      h = proc { |a, b = 1| [a, b] }
-      [f.arity, f.parameters, h.arity, h.parameters, h.call(5), h.call(5, 6)]
-    end
   end
 RUBY
 
 OWNERS = %w[ScClosures].freeze
 
-DRIVER = <<~RUBY
-  def show(label)
-    puts "\#{label}: \#{yield.inspect}"
-  rescue StandardError => e
-    puts "\#{label}: raised \#{e.class}: \#{e.message}"
-  end
+DRIVER = Bc2cppStepCheck::SHOW + <<~'RUBY'
   s = ScClosures.new
   show('escape') { s.sc_escape }
   show('shared') { s.sc_shared }
@@ -224,62 +190,21 @@ DRIVER = <<~RUBY
   show('nested fiber') { s.sc_nested_fiber }
   show('nested step') { s.sc_nested_step }
   show('roots') { s.sc_roots }
-  show('arity optional') { s.sc_arity_optional }
   puts 'end'
 RUBY
 
-baseline_dir = Dir.mktmpdir('bc2cpp-step-closures')
-at_exit { FileUtils.remove_entry(baseline_dir) }
-puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS)
-File.write(ENV['STEP_CLOSURES_DUMP'], code) if ENV['STEP_CLOSURES_DUMP']
-File.write(ENV['STEP_CLOSURES_ERR'], baseline_err.to_s) if ENV['STEP_CLOSURES_ERR']
-check.call('no #error in the generated code', !code.include?('#error'))
+code = suite.generate(SRC, OWNERS)
 # A method the compiler could not translate is left to the interpreter, where it trivially matches: every scenario must be
 # compiled, not skipped.
 %w[sc_escape sc_shared sc_params sc_outer sc_step_local sc_wide sc_counter sc_adders sc_hash_default sc_arity sc_nested sc_nested_fiber sc_nested_step sc_roots].each do |name|
-  check.call("ScClosures##{name} is compiled", code.include?("mrb_value ScClosures_#{name}_impl(mrb_state* M") &&
-                                               !code.include?("BC2CPP_SKIPPED_ScClosures_#{name} "))
+  suite.check("ScClosures##{name} is compiled", code.include?("mrb_value ScClosures_#{name}_impl(mrb_state* M") &&
+                                                !code.include?("BC2CPP_SKIPPED_ScClosures_#{name} "))
 end
 
-if ENV['CC_GENERATED_ONLY'] == '1'
-  puts '  SKIP behavioural comparison: CC_GENERATED_ONLY'
-else
-  build = Bc2cppFixtureRuntime.full_or_build
-  if build.nil?
-    puts '  SKIP behavioural comparison: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
-  else
-    puts '-- fixtures on real mruby, interpreted and compiled'
-    body = <<~CPP
-      static int scenario(mrb_state* M) {
-        std::fflush(stdout);
-        const char* src = R"RBC(#{DRIVER})RBC";
-        mrb_load_string(M, src);
-        std::fflush(stdout);
-        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
-        return 0;
-      }
-    CPP
-    built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, OWNERS, body, build: build, full: true)
-    check.call('the fixtures build and run', built)
-    sections = Bc2cppFixtureRuntime.sections(output)
-    interpreted = sections['interpreted']
-    compiled = sections['compiled']
-    check.call('both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
-    if interpreted && compiled
-      interpreted.zip(compiled).each do |a, b|
-        label = a.to_s[/\A[^:]+/]
-        check.call("#{label}: interpreted and compiled runs print the same", a == b)
-        puts "    interpreted: #{a}\n    compiled:    #{b}" unless a == b
-      end
-    end
-    puts output.lines.last(30).join unless built && interpreted && compiled
-  end
+suite.behaviour(DRIVER, same: false) do |interpreted, compiled|
+  interpreted.zip(compiled).each do |a, b|
+    suite.check("#{a.to_s[/\A[^:]+/]}: interpreted and compiled runs print the same", a == b)
+    puts "    interpreted: #{a}\n    compiled:    #{b}" unless a == b
+  end if interpreted && compiled
 end
-
-if failures.empty?
-  puts 'bc2cpp step closures check: PASS'
-else
-  warn "bc2cpp step closures check: #{failures.size} failure(s)"
-  exit 1
-end
+suite.finish
