@@ -15,6 +15,7 @@ typedef unsigned long size_t;
 #define __host__
 #define __forceinline__
 #define __align__(n) __attribute__((aligned(n)))
+#define __builtin_align__(n) __attribute__((aligned(n)))
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_unroll(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
