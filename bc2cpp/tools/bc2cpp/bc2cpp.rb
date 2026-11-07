@@ -598,11 +598,12 @@ if $PROGRAM_NAME == __FILE__
                                      native_name_sources, included_modules, prepended_modules, unknown_mixins,
                                      analysis_only: :constructor_sites, closed_world: closed_world,
                                      outside_ivar_names: outside_ivar_names(native_paths + foreign_ruby_srcs))
-    param_diags, = RbsParamCheck.check(sig_loaded, ireps, registry, sig_class_annotations,
-                                       comment_class_args: sig_comment_class_args, call_sites: call_sites,
-                                       outside_names: param_outside, constructor_entries: param_constructors,
-                                       superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
-                                       declared_returns: CodeGen.declared_returns)
+    param_diags, _trusted, param_guards = RbsParamCheck.check(sig_loaded, ireps, registry, sig_class_annotations,
+                                                              comment_class_args: sig_comment_class_args, call_sites: call_sites,
+                                                              outside_names: param_outside, constructor_entries: param_constructors,
+                                                              superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
+                                                              declared_returns: CodeGen.declared_returns)
+    CodeGen.declared_params = DeclaredReturns.guard? ? param_guards : {}
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
     # An unproven parameter type is not trusted, so its argument stays `any` (an mrb_value): it is reported, not fatal.
@@ -1845,26 +1846,35 @@ if $PROGRAM_NAME == __FILE__
       if (argc == 0 && ci->nk != 0 && mrb_hash_p(ci->stack[1]) && !mrb_hash_empty_p(M, ci->stack[1])) argc++;
       mrb_argnum_error(M, argc, min, min);
     }
-    // DECLARED_RETURN_GUARD (ADR 0455): a method with a runtime-checked return declaration (%a{bc2cpp:hint})
-    // returned a value of another type. The analysis trusted the declaration as a fact, so this is a hard error:
-    // log, then raise BC2cppHintViolation < NoMethodError, as a strict-hint violation does. Never dispatches.
-    // -DBC2CPP_NOMETHOD_VERIFY aborts instead, so the verify build stops at the first one.
+    // DECLARED_RETURN_GUARD (ADR 0455): a declared return or parameter type was trusted as a fact, and the value is
+    // another type. Log, then raise BC2cppDeclarationViolation < StandardError (not a NoMethodError, so a program's
+    // `rescue NoMethodError` cannot hide it). Never dispatches. -DBC2CPP_NOMETHOD_VERIFY aborts instead.
     #ifdef BC2CPP_NOMETHOD_VERIFY
     #include <stdio.h>
     #include <stdlib.h>
     #endif
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declaration_violation(mrb_state* M, mrb_value msg) {
+      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_sym puts_id = mrb_intern_lit(M, "puts");
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      struct RClass* klass = mrb_define_class(M, "BC2cppDeclarationViolation", M->eStandardError_class);
+      mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
+    }
     [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_return_violation(mrb_state* M, mrb_value value, const char* method, const char* declared) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared return violated: %s returned %s, declared -> %s\n", method, mrb_obj_classname(M, value), declared);
       fflush(stderr);
       abort();
     #endif
-      mrb_value msg = mrb_format(M, "hint violation: %s returned %T, declared -> %s (%%a{bc2cpp:hint})", method, value, declared);
-      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
-      mrb_sym puts_id = mrb_intern_lit(M, "puts");
-      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
-      struct RClass* klass = mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
-      mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
+      bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s returned %T, declared -> %s", method, value, declared));
+    }
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_param_violation(mrb_state* M, mrb_value value, const char* method, int position, const char* declared) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared parameter violated: %s argument %d is %s, declared %s\n", method, position, mrb_obj_classname(M, value), declared);
+      fflush(stderr);
+      abort();
+    #endif
+      bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s argument %d is %T, declared %s", method, position, value, declared));
     }
     // Kernel#lambda flags a copy of the RProc strict after the block was built.
     static inline bool bc2cpp_proc_strict_p(mrb_state* M) {

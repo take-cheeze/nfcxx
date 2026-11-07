@@ -1,14 +1,16 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# DECLARED_RETURN_GUARD: a `%a{bc2cpp:hint}` return declaration is checked at run time by its
-# compiled body and is then a fact. Host only (no mrbc, no build), on a CodeGen with hand-set state:
+# DECLARED_RETURN_GUARD: a `%a{bc2cpp:hint}` return declaration, and any plain declaration the return proofs do not
+# prove, is checked at run time by its compiled body and is then a fact; a declared parameter class is checked on
+# entry (DECLARED_PARAM_GUARD). Host only (no mrbc, no build), on a CodeGen with hand-set state:
 #
 # 1. the wrapped body: a hinted `-> Integer` and `-> C` (and `C?`) check every value the method returns (the exit
 #    wrapper), raise through bc2cpp_declared_return_violation, and keep no by-name fallback;
 # 2. the fact: the hinted names enter declared_return_facts (callers trust them with no guard), RBS_CHECKED_PARAMS
 #    takes a hinted `-> C` as a proof, and the closed-world preconditions still refuse (alias, core body);
-# 3. the refusals: a hinted declaration on a native method, an undefined one or an unchecked kind is a TC1010 error;
+# 3. the plain declarations: guarded unless proven or BC2CPP_DECLARATION_GUARD=0; the parameter class check;
+# 4. the refusals: a hinted declaration on a native method, an undefined one or an unchecked kind is a TC1010 error;
 #    a run that compiles the owner without the guard fails (guard_failures);
 #
 # Usage: ruby scripts/bc2cpp/declared_return_guard_check.rb
@@ -48,6 +50,7 @@ class GuardHarness < CodeGen
 
   # CodeGen's class-level inputs, read through self.class.
   def self.declared_returns = CodeGen.declared_returns
+  def self.declared_params = CodeGen.declared_params
   def self.declared_return_hint_refusals = CodeGen.declared_return_hint_refusals
   def self.declared_return_root = nil
 
@@ -170,6 +173,44 @@ check.call('a hint whose name an outside definition also defines needs no guard 
            !outside.declared_return_hints.map(&:name).include?('count'))
 check.call('a hint with a fact still needs its guard',
            GuardHarness.new(defs, ireps).declared_return_hints.map(&:name).include?('count'))
+
+puts '-- plain declarations and parameter classes (host)'
+plain = lambda do |e|
+  DeclaredReturns::Entry.new(**e.to_h, hint: false)
+end
+plain_entries = [plain.call(count_hint), plain.call(pick_hint)]
+plain_gen = GuardHarness.new(defs, ireps)
+plain_gen.instance_variable_set(:@declared_return_entries, plain_entries)
+check.call('a plain declaration that adds a fact is guarded',
+           plain_gen.declared_return_hints.map(&:name).sort == %w[count pick])
+ENV['BC2CPP_DECLARATION_GUARD'] = '0'
+off_gen = GuardHarness.new(defs, ireps)
+off_gen.instance_variable_set(:@declared_return_entries, plain_entries + [count_hint.dup.tap { |e| e.name = 'find'; e.label = 'L3' }])
+check.call('BC2CPP_DECLARATION_GUARD=0 leaves the plain ones unchecked and keeps the hinted one',
+           off_gen.declared_return_hints.map(&:name) == ['find'])
+ENV.delete('BC2CPP_DECLARATION_GUARD')
+proven_gen = GuardHarness.new(defs, ireps)
+proven_gen.instance_variable_set(:@declared_return_entries, plain_entries)
+proven_gen.instance_variable_set(:@declared_returns_final, true)
+proven_gen.define_singleton_method(:declared_return_proven?) { |e| e.name == 'count' }
+check.call('a plain declaration the return proofs prove needs no check, an unproven one still does',
+           proven_gen.declared_return_hints.map(&:name) == ['pick'])
+core_plain = GuardHarness.new(defs.map { |d| d.name == 'count' ? d.dup.tap { |c| c.core = true } : d }, ireps)
+core_plain.instance_variable_set(:@declared_return_entries, plain_entries)
+check.call('a plain core declaration is refused (error) like a hinted one: it may run interpreted',
+           core_plain.declared_return_refusal('count')&.first == 'error')
+CodeGen.declared_params = { 'L1' => [[0, 'Bar', 'Foo#count', 'Bar']] }
+param_code = plain_gen.declared_return_guard_wrap('L1', body.call('Foo_count_impl'), 'Foo_count_impl')
+check.call('a declared parameter class is checked on entry, with the method, position and type named',
+           param_code.match?(/if \(mrb_unlikely\(!\(bc2cpp_class_is\(M, n, bc2cpp_owner_class_\d+\(M\)\)\)\)\) /) &&
+             param_code.include?('bc2cpp_declared_param_violation(M, n, "Foo#count", 1, "Bar");') &&
+             param_code.index('bc2cpp_declared_param_violation') < param_code.index('Foo_count_impl_unguarded(M, self, n)'))
+CodeGen.declared_params = { 'L9' => [[0, 'Bar', 'Foo#x', 'Bar']] }
+only_param = plain_gen.declared_return_guard_wrap('L9', body.call('Foo_x_impl'), 'Foo_x_impl')
+check.call('a method with a parameter class and no return declaration is wrapped for the parameter only',
+           only_param.include?('Foo_x_impl_unguarded') && only_param.include?('bc2cpp_declared_param_violation(M, n, "Foo#x", 1, "Bar");') &&
+             !only_param.include?('bc2cpp_declared_return_violation'))
+CodeGen.declared_params = nil
 
 puts '-- refusals (host)'
 Dir.mktmpdir do |dir|

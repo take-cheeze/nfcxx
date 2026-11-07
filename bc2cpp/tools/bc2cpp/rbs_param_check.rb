@@ -12,8 +12,8 @@ require_relative 'nil_narrowing'
 require_relative 'scan_cache'
 
 # RBS only: a class parameter type in an RBS signature is trusted as written, not proven against its callers. Each
-# declared parameter is a ClassAnnotations fact for the method's own body, and no caller is checked. A caller that
-# passes another class is therefore not reported; the compiled body relies on the declaration.
+# declared parameter is a ClassAnnotations fact for the method's own body; the compiled body checks it on entry
+# (DECLARED_PARAM_GUARD) and raises BC2cppDeclarationViolation for another class.
 module RbsParamCheck
   # IS_A_GUARD's two closed-world answers for NilNarrowing (CodeGen#is_a_guard_class, #raise_never_returns?).
   IsAGuard = Struct.new(:gen) do
@@ -25,14 +25,12 @@ module RbsParamCheck
 
   # loaded: RbsSignatures.load's result; class_annotations: the merged table RbsSignatures.apply filled;
   # comment_class_args: label -> args the `# bc2cpp:` comments gave (they win and are not checked here).
-  # Returns [diagnostics, verified] where verified is a Set of [label, position].
+  # Returns [diagnostics, trusted, guards]: trusted is a Set of [label, position], guards the entry checks of those.
   # outside_names: outside_call_names' result (nil: no outside scan, every declaration is refused);
   # constructor_entries: a CodeGen built with `analysis_only: :constructor_sites` (constructor_entry_sites,
   # constructor_init_target); nil refuses every initialize declaration.
-  # declared_returns: DeclaredReturns.from_signatures' entries (CodeGen.declared_returns). Each proves a call's
-  # result: DECLARED_RETURN_CHECK aborts the build on a body that does not prove its declaration, and a
-  # %a{bc2cpp:hint} one is checked on every return by its compiled body (DECLARED_RETURN_GUARD), which raises
-  # instead of returning another type.
+  # declared_returns: DeclaredReturns.from_signatures' entries (CodeGen.declared_returns), each checked on every
+  # return by its compiled body (DECLARED_RETURN_GUARD).
   def check(loaded, ireps, registry, class_annotations, comment_class_args:, call_sites:, outside_names:,
             superclass_of:, display_root: nil, applied: nil, constructor_entries: nil, declared_returns: nil)
     ctx = context(loaded, ireps, registry, superclass_of)
@@ -43,9 +41,14 @@ module RbsParamCheck
     ctx.merge!(outside: outside_names, display_root: display_root, call_sites: call_sites, applied: applied,
                class_annotations: class_annotations, comment_class_args: comment_class_args,
                constructor_entries: constructor_entries)
-    # RBS only: every declared parameter class is trusted as written, so no caller is proven against it.
-    trusted = targets(ctx).flat_map { |_sig, d, positions| positions.map { |pos, _cls| [d.irep, pos] } }.to_set
-    [[], trusted]
+    # RBS only: every declared parameter class is trusted as written, so no caller is proven against it. The compiled
+    # body checks it at entry instead (DECLARED_PARAM_GUARD): guards is label => [[position, class, key, text], ...].
+    found = targets(ctx)
+    trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, _cls| [d.irep, pos] } }.to_set
+    guards = found.to_h do |sig, d, positions|
+      [d.irep, positions.map { |pos, cls| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text] }]
+    end
+    [[], trusted, guards]
   end
 
   # The tables every query reads: method owners (`self_of` only for def bodies, never blocks, whose self an

@@ -1,10 +1,12 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# SEALED_HASH_STORES: a sealed Hash ivar (SEALED_HASH_IVAR) may also be filled by `@h[k] = v` and read by the native
-# key-only sends (`keys`, `key?`, `size`, ...). A `-> C?` declaration over `@h[k]` is trusted as written (RBS only),
-# so each fixture runs interpreted and compiled, and the two must print the same. A store that is not a C makes the
-# compiled call of `label` (defined on Thing alone) run on the wrong object, which the parity comparison reports.
+# SEALED_HASH_STORES: a sealed Hash ivar may also be filled by `@h[k] = v` and read by the native key-only sends. A
+# `-> Thing?` declaration over `@h[k]` is trusted as written, and the compiled `fetch_thing` checks its value on the
+# way out (DECLARED_RETURN_GUARD). Each fixture runs interpreted and compiled:
+#   right declaration  the two print the same;
+#   wrong declaration  (a store of another class, a Hash that left the slot) the interpreter ends in NoMethodError and
+#                      the compiled run raises BC2cppDeclarationViolation at `fetch_thing`, naming it and `Thing?`.
 #
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/sealed_hash_stores_check.rb
 require 'tmpdir'
@@ -79,15 +81,17 @@ RUBY
 ESCAPED = SOURCE.sub("  def count\n    @all.keys.size", "  def count\n    Stash.new.put(@all)\n    @all.keys.size") + STASH
 raise 'ESCAPED fixture did not apply' if ESCAPED == SOURCE + STASH
 
-# go calls label on what fetch_thing returns. A Roster or a String there is a NoMethodError in the interpreter; a
-# compiled call that trusts `-> Thing?` would run Thing#label on it instead, so the rescue prints a line only then.
-DRIVER = <<~RUBY
+# go calls label on what fetch_thing returns. A Roster or a String there is a NoMethodError in the interpreter; the
+# compiled fetch_thing raises BC2cppDeclarationViolation first (it is no NoMethodError, so the first rescue misses it).
+DRIVER = <<~'RUBY'
   r = Roster.new
   puts r.count
   begin
     User.new.go(r)
   rescue NoMethodError
     puts 'no label'
+  rescue BC2cppDeclarationViolation => e
+    puts "violation: #{e.message}"
   end
   puts r.count
   puts 'end'
@@ -130,19 +134,31 @@ end
 build = Bc2cppFixtureRuntime.full_or_build
 check.call('a full-core libmruby builds for the parity runs', !build.nil?)
 if build
+  # [name, source, sealed rule flag, :same or the violation the compiled run raises]
   cases = [
-    ['`@h[k] = Thing.new` with the sealed rule: interpreted and compiled run the same', SOURCE, '1'],
-    ['without the sealed rule the declaration is still trusted: interpreted and compiled run the same', SOURCE, '0'],
-    ['a store of another class: interpreted and compiled run the same', LEAKY, '1'],
-    ['a Hash passed out as an argument: interpreted and compiled run the same', ESCAPED, '1']
+    ['`@h[k] = Thing.new` with the sealed rule: interpreted and compiled run the same', SOURCE, '1', :same],
+    ['without the sealed rule the declaration is still trusted: interpreted and compiled run the same', SOURCE, '0', :same],
+    ['a store of another class: the compiled run raises the declaration violation', LEAKY, '1', 'Roster#fetch_thing returned Roster'],
+    ['a Hash passed out as an argument: the compiled run raises the declaration violation', ESCAPED, '1',
+     'Roster#fetch_thing returned String']
   ]
-  cases.each do |name, source, flag|
+  cases.each do |name, source, flag, expected|
     generated, interpreted, compiled = run.call(source, flag, build)
-    check.call("#{name} (the driver runs to its end)", generated && interpreted&.last == 'end')
-    check.call(name, generated && !interpreted.nil? && interpreted == compiled)
-    next unless generated && interpreted && compiled && interpreted != compiled
+    check.call("#{name} (generated, both runs reach their end)", generated && interpreted&.last == 'end' && compiled&.last == 'end')
+    next unless generated && interpreted && compiled
 
-    interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+    if expected == :same
+      check.call(name, interpreted == compiled)
+    else
+      line = compiled.find { |l| l.start_with?('violation: ') }.to_s
+      check.call("#{name} (names the method and `-> Thing?`)",
+                 line.include?(expected) && line.include?('declared -> Thing?') && !compiled.include?('no label'))
+      check.call("#{name} (the interpreter says `no label`)", interpreted.include?('no label'))
+    end
+    next if interpreted == compiled
+
+    puts '    interpreted | compiled'
+    [interpreted.size, compiled.size].max.times { |i| puts "    #{interpreted[i].to_s.ljust(24)}| #{compiled[i]}" }
   end
 end
 
