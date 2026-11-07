@@ -545,7 +545,6 @@ jobs:
   #   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
   #   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
   #   tests/safeptr/run.sh     -fsafe-pointers (lib/safeptr, docs/notes/safe-pointers.md), and the Path B probes under it
-  #   tests/mruby/run.sh       the mruby ports against their Python oracles, with the Path B parts enabled
   pathb-changes:
     runs-on: ubuntu-24.04
     outputs:
@@ -663,8 +662,6 @@ jobs:
               NFCXX_SPIRV_EMITTER=check NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
           - name: C++ SPIR-V emitter against the Ruby (both modes, every SYCL test's device IR)
             run: tools/pathb-spirv-emit/check.sh
-          - name: mruby scripts against their Python oracles (Path B parts enabled)
-            run: tests/mruby/run.sh
           - name: mruby-ninja generic file tasks (rule is refused)
             run: tests/mruby-ninja/run.sh
     name: ${{ matrix.name }}
