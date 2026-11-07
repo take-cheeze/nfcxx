@@ -688,7 +688,14 @@ if $PROGRAM_NAME == __FILE__
   end
   # Names the native sources define (mrb_define_class / mrb_define_const ...) are bindings too, imported the same way.
   native_names = IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq)
-  CodeGen.known_const_names = (constant_facts.groups.keys.map(&:to_s) | defined_names | native_names.to_a).to_set
+  known_names = constant_facts.groups.keys.map(&:to_s) | defined_names | native_names.to_a
+  # bc2cpp-self: the program is loaded (required by name) after every gem has run its own mrblib, so the constants those Ruby
+  # sources bind (ENV, Regexp, the generated prism and rbs nodes) exist before a class body reads them. A game build runs
+  # its compiled gems' units among the others', where that order is not fixed: it keeps the narrower set.
+  if ENV['BC2CPP_BUILD_NAME'] == 'bc2cpp-self'
+    known_names |= IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq).to_a
+  end
+  CodeGen.known_const_names = known_names.to_set
   CodeGen.const_unresolved = []
   integer_constants =
     if closed_world.constants_static?
