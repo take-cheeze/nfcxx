@@ -2389,12 +2389,18 @@ if $PROGRAM_NAME == __FILE__
     FileUtils.mkdir_p(dump_dir)
     File.write(File.join(dump_dir, 'emitted.txt'), "#{symbol} owners=#{only_owners.inspect}\n#{class_units.map { |u| u[:path] }.join("\n")}\n", mode: 'a')
   end
+  # SYMBOL_CACHE: rewrite every function first, so the table is complete before
+  # it is printed ahead of the code that uses it.
+  # PRESYM_SYMBOL (symbol_cache.rb): the names mruby's presym table has, as the build's id.h enum spells them.
+  if (presym_header = ENV['BC2CPP_PRESYM_HEADER']) && File.file?(presym_header)
+    SymbolCache.presym_names = File.read(presym_header).scan(/^\s*MRB_SYM__([A-Za-z_]\w*) = \d+,?$/).flatten.to_set
+  end
+  symbol_table = SymbolCache::Table.new
   print gen.emit_structs
   warn InitializerTables::PREFIX + JSON.generate(gen.initializer_table_evidence(compiled, InitializerTables.direct_candidate_keys(compiled, ireps, registry)))
   helper_codes = compiled
   print gen.emit_ary_entry_helper(helper_codes)
   print gen.emit_ary_write_helpers(helper_codes)
-  print gen.emit_to_enum_helper(compiled)
   print gen.emit_collect_direct_helper(compiled)
   print gen.emit_transpose_direct_helper(compiled)
   print gen.emit_array_hash_helper(compiled)
@@ -2443,9 +2449,6 @@ if $PROGRAM_NAME == __FILE__
   # SKIPPED_ENTRY_MACROS: the entries this run refused (SKIP_UNSUPPORTED), e.g. a method that compiles only when the
   # closed world proves a fact a desktop build lacks, as `#define BC2CPP_SKIPPED_<entry>` markers.
   print gen.emit_skipped_entry_macros(skipped_entries)
-  # SYMBOL_CACHE: rewrite every function first, so the table is complete before
-  # it is printed ahead of the code that uses it.
-  symbol_table = SymbolCache::Table.new
   # OWNER_CALL_DIRECT (owner_call_direct.rb): an owner call its listed owners' entries complete carries them.
   owner_call_direct = OwnerCallDirect.entries(compiled + gen.module_function_copies(compiled), registration_owners)
   owner_call_direct = owner_call_direct.merge(OwnerCallDirect.native_entries) if ENV['BC2CPP_OWNER_CALL_DIRECT'] != '0'
@@ -2581,6 +2584,7 @@ if $PROGRAM_NAME == __FILE__
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print OwnerCallDirect.native_prototypes
   print SymbolCache.emit(symbol_table)
+  print SymbolCache.rewrite(gen.emit_to_enum_helper(compiled), symbol_table)
   print const_scope_code
   print const_site_cache_code
   print index_helpers_code
