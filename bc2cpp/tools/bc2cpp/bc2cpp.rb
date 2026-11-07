@@ -1886,10 +1886,21 @@ if $PROGRAM_NAME == __FILE__
     #include <stdio.h>
     #include <stdlib.h>
     #endif
-    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declaration_violation(mrb_state* M, mrb_value msg) {
+    // STDERR_REPORT: the one place a failure report is printed, as `$stderr.puts prefix + msg`. An IO whose #puts is the
+    // gem's own is written directly; any other $stderr (a StringIO, a user object) is sent `puts` by name, once, here.
+    [[maybe_unused, gnu::cold, gnu::noinline]] static void bc2cpp_stderr_report(mrb_state* M, const char* prefix, mrb_value msg) {
       mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_value line = mrb_str_plus(M, mrb_str_new_cstr(M, prefix), msg);
+      mrb_gc_protect(M, line);
+    #ifdef HAVE_MRUBY_IO_GEM
+      mrb_value written;
+      if (mrb_io_puts_direct(M, err, 1, &line, &written)) return;
+    #endif
       mrb_sym puts_id = mrb_intern_lit(M, "puts");
-      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, line);
+    }
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declaration_violation(mrb_state* M, mrb_value msg) {
+      bc2cpp_stderr_report(M, "[RPG2k] ", msg);
       struct RClass* klass = mrb_define_class(M, "BC2cppDeclarationViolation", M->eStandardError_class);
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
@@ -1944,9 +1955,7 @@ if $PROGRAM_NAME == __FILE__
       abort();
     #endif
       mrb_value msg = mrb_format(M, "closed-world guard violation: compiled block of %s run under %T instead of its creator's self (BLOCK_SELF_WORLD)", where ? where : "?", self);
-      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
-      mrb_sym puts_id = mrb_intern_lit(M, "puts");
-      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      bc2cpp_stderr_report(M, "[RPG2k] ", msg);
       struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
@@ -2196,10 +2205,25 @@ if $PROGRAM_NAME == __FILE__
     [[maybe_unused]] static mrb_value bc2cpp_ssend(mrb_state* M, mrb_value self, mrb_sym mid, std::initializer_list<mrb_value> args) {
       return mrb_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
     }
-    // PROC_CALL_HELPER: `x.call(*args)` in a core body; a plain Proc is yielded to, anything else is sent `call`.
+    // PROC_CALL_HELPER: `x.call(*args)` in a core body. A plain Proc is yielded to; any other receiver has `call` looked
+    // up once and the found method run with no second lookup (visibility as OP_SEND checks it; a missing method goes
+    // through method_missing / the NoMethodError of mrb_funcall_with_method).
+    extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
     [[maybe_unused]] static mrb_value bc2cpp_proc_call_argv(mrb_state* M, mrb_value recv, mrb_int argc, const mrb_value* argv) {
       if (mrb_proc_p(recv) && mrb_class(M, recv) == M->proc_class) return bc2cpp_yield_argv(M, recv, argc, argv);
-      return mrb_funcall_argv(M, recv, MRB_SYM(call), argc, argv);
+      // Interned by name: a presym id is only valid in the library the header came from (fixture builds mix them).
+      mrb_sym call_id = mrb_intern_lit(M, "call");
+      struct RClass* c = mrb_class(M, recv);
+      mrb_method_t m = mrb_method_search_vm(M, &c, call_id);
+      if (!MRB_METHOD_UNDEF_P(m)) {
+        if (m.flags & MRB_METHOD_PRIVATE_FL) {
+          mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", call_id, recv);
+        }
+        if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) {
+          mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", call_id, recv);
+        }
+      }
+      return mrb_funcall_with_method(M, recv, call_id, &m, c, argc, argv, mrb_nil_value());
     }
     // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
     // a Ruby call does, and a value that does not convert raises TypeError.

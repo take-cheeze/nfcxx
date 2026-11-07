@@ -674,6 +674,27 @@ static mrb_value bc2cpp_run_to_completion(mrb_state* M,
   return result;
 }
 
+// Fiber.yield from C code (a yield across a C frame, or outside any fiber): the
+// one place it is sent. The method is looked up on Fiber's singleton and run in
+// the frame mrb_funcall_with_method pushes, which the cfunc reads its arguments
+// from; it raises the FiberError the interpreted method would.
+extern "C" mrb_value mrb_funcall_with_method(mrb_state*,
+                                             mrb_value,
+                                             mrb_sym,
+                                             const mrb_method_t*,
+                                             struct RClass*,
+                                             mrb_int,
+                                             const mrb_value*,
+                                             mrb_value);
+static mrb_value bc2cpp_fiber_yield_c(mrb_state* M, mrb_value value) {
+  mrb_value fiber = mrb_obj_value(mrb_class_get(M, "Fiber"));
+  mrb_sym yield_id = mrb_intern_lit(M, "yield");
+  struct RClass* c = mrb_class(M, fiber);
+  mrb_method_t m = mrb_method_search_vm(M, &c, yield_id);
+  return mrb_funcall_with_method(M, fiber, yield_id, &m, c, 1, &value,
+                                 mrb_nil_value());
+}
+
 // A suspendable method entered from C: a frame its step CALLs runs to its end
 // here. A YIELD inside is a yield across a C frame, so it goes to Fiber.yield,
 // which raises the FiberError; if it returns, the value goes back in.
@@ -684,8 +705,7 @@ static mrb_value bc2cpp_run_callee_from_c(mrb_state* M,
   bc2cpp_root(M, fiber);
   mrb_value result = bc2cpp_fiber_resume(M, fiber, mrb_nil_value());
   while (bc2cpp_fiber_alive_p(M, fiber)) {
-    mrb_value resumed = mrb_funcall(M, mrb_obj_value(mrb_class_get(M, "Fiber")),
-                                    "yield", 1, result);
+    mrb_value resumed = bc2cpp_fiber_yield_c(M, result);
     result = bc2cpp_fiber_resume(M, fiber, resumed);
   }
   mrb_gc_arena_restore(M, arena);

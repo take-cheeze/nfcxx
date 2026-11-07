@@ -1780,6 +1780,7 @@ class CodeGen
       return mrb_ary_new_from_values(M, (mrb_int)values.size(), values.begin());
     }
     static void bc2cpp_fiber_define(mrb_state* M); // the fiber runtime, after this
+    static mrb_value bc2cpp_fiber_yield_c(mrb_state* M, mrb_value value); // Fiber.yield from C, in the fiber runtime
     static void bc2cpp_resumable_init(mrb_state* M) {
       if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "Bc2cppResumable"))) return;
       bc2cpp_fiber_define(M); // Fiber, FiberError and Fiber.yield exist before any suspendable method runs
@@ -1794,7 +1795,7 @@ class CodeGen
     // the FiberError the interpreted method would have raised.
     static mrb_value bc2cpp_resumable_yield_from_c(mrb_state* M, mrb_value frame) {
       mrb_value value = bc2cpp_resume_frame_value(M, frame);
-      return mrb_funcall(M, mrb_obj_value(mrb_class_get(M, "Fiber")), "yield", 1, value);
+      return bc2cpp_fiber_yield_c(M, value);
     }
     // A step of a method called from C that suspended for a block call runs the block from C (the block's own
     // Fiber.yield then raises, as it does in the interpreted method called from C); any other suspension yields.
