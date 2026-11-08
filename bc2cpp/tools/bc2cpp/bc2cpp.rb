@@ -1786,6 +1786,17 @@ BC2CPP_MAIN = lambda do
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
       return { M->jmp, M->c->ci - M->c->cibase };
     }
+    // A frame-local block (Bc2cppBlock) dies with its C++ frame, but the callinfo naming it stays until a catch site pops it, and
+    // popping a frame allocates (env unshare). GC stays off from the catch's start until the stale frames are gone, so
+    // mark_context never reads a dead ci->proc.
+    struct Bc2cppGcPause {
+      mrb_state* M;
+      mrb_bool was;
+      explicit Bc2cppGcPause(mrb_state* m) : M(m), was(m->gc.disabled) { m->gc.disabled = TRUE; }
+      ~Bc2cppGcPause() { M->gc.disabled = was; }
+      Bc2cppGcPause(const Bc2cppGcPause&) = delete;
+      Bc2cppGcPause& operator=(const Bc2cppGcPause&) = delete;
+    };
     // The VM's cipop: unshare the frame's env, orphan its block, drop the frame.
     static void bc2cpp_ci_pop(mrb_state* M) {
       struct mrb_context* c = M->c;
@@ -1800,7 +1811,10 @@ BC2CPP_MAIN = lambda do
     static void bc2cpp_vm_restore(mrb_state* M, const Bc2cppVmMark& mark) {
       M->jmp = mark.jmp;
       struct mrb_context* c = M->c;
-      while (c->ci - c->cibase > mark.ci_index) bc2cpp_ci_pop(M);
+      {
+        Bc2cppGcPause pause(M);
+        while (c->ci - c->cibase > mark.ci_index) bc2cpp_ci_pop(M);
+      }
       if (M->errinfo && (c->ci - c->cibase) < M->errinfo_ci_depth) M->errinfo = NULL;
     }
     // BLOCK_SEMANTICS (ADR 0266): a cfunc-backed Proc (every BLOCK_FALLBACK
@@ -1877,12 +1891,26 @@ BC2CPP_MAIN = lambda do
       if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);
     }
     // CFUNC_RESULT_ROOT: the VM's cfunc epilogue drops the arena to its saved index and, if the arena grew, reallocs it
-    // before storing the result; a GC there (MRB_GC_STRESS) would free a fresh result. Root it in a global meanwhile.
-    [[maybe_unused]] static inline mrb_value bc2cpp_cfunc_result(mrb_state* M, mrb_value v) {
+    // (a quarter per call) before storing the result; a GC there (MRB_GC_STRESS) would free a fresh result, and the later
+    // steps would free the result of an unrelated cfunc. So a grown arena is dropped to the entry index and shrunk to its
+    // floor here, with the result rooted in a global meanwhile; the VM's epilogue then has nothing left to realloc.
+    struct Bc2cppCfuncExit { mrb_state* M; int ai; mrb_value v; };
+    [[maybe_unused]] static inline mrb_value bc2cpp_cfunc_result(Bc2cppCfuncExit e) {
     #ifndef MRB_GC_FIXED_ARENA
-      if (mrb_unlikely(M->gc.arena_capa > MRB_GC_ARENA_SIZE) && !mrb_immediate_p(v)) mrb_gv_set(M, mrb_intern_lit(M, "$__bc2cpp_result"), v);
+      if (mrb_unlikely(e.M->gc.arena_capa > MRB_GC_ARENA_SIZE)) {
+        mrb_state* M = e.M;
+        if (!mrb_immediate_p(e.v)) mrb_gv_set(M, mrb_intern_lit(M, "$__bc2cpp_result"), e.v);
+        mrb_gc* gc = &M->gc;
+        gc->arena_idx = e.ai;
+        while (gc->arena_capa > MRB_GC_ARENA_SIZE && e.ai < gc->arena_capa / 4) {
+          int capa = gc->arena_capa / 4;
+          if (capa < MRB_GC_ARENA_SIZE) capa = MRB_GC_ARENA_SIZE;
+          gc->arena = (struct RBasic**)mrb_realloc(M, gc->arena, sizeof(struct RBasic*) * capa);
+          gc->arena_capa = capa;
+        }
+      }
     #endif
-      return v;
+      return e.v;
     }
     // STEP_KEYWORDS: the same check for a method that takes keywords, whose keyword Hash is never a positional argument.
     // vm.c argnum_error counts a lone keyword Hash as the one argument given.
@@ -2355,6 +2383,7 @@ BC2CPP_MAIN = lambda do
         M->jmp = prev_jmp;
       } catch (mrb_jmpbuf* e) {
         if (e != &c_jmp) throw;
+        Bc2cppGcPause pause(M);
         M->jmp = prev_jmp;
         result = mrb_obj_value(M->exc);
         M->exc = NULL;
@@ -2417,7 +2446,10 @@ BC2CPP_MAIN = lambda do
         /* A C++ unwind leaves the callinfo of every VM frame it crossed (a cfunc block's yield) on the stack, and a
            frame-local block's RProc that such a frame names is already dead: the ensure body's VM calls (mrb_ci_nregs)
            must not see it. Pop back to the guard's own frame, as the catch site would. */
-        while (M->c == ctx && M->c->ci - M->c->cibase > depth) bc2cpp_ci_pop(M);
+        {
+          Bc2cppGcPause pause(M);
+          while (M->c == ctx && M->c->ci - M->c->cibase > depth) bc2cpp_ci_pop(M);
+        }
         struct RObject* saved = M->exc;
         M->exc = NULL;
         /* OP_EXCEPT's `$!`. The frame depth is the guard's own: a C++ unwind

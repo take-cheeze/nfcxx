@@ -288,6 +288,9 @@ suite.check('a callee that returns its block, or a caller of one, keeps the heap
             body_of(code, 'use_fw_ret').include?('bc2cpp_heap_proc') && !body_of(code, 'use_fw_ret').include?('Bc2cppBlock bc2cpp_blk_stack_'))
 suite.check('an ensure guard pops the callinfo frames an unwind left before it runs its body (a dead frame-local block)',
             code[/struct bc2cpp_ensure_guard \{.*?\n    \};/m].to_s.match?(/bc2cpp_ci_pop\(M\)/))
+suite.check('every pop of the callinfo frames an unwind left runs with GC paused (the catch sites and the ensure guard)',
+            [code[/static void bc2cpp_vm_restore.*?\n    \}/m], code[/static mrb_value bc2cpp_protect\(.*?\n    \}\n/m],
+             code[/struct bc2cpp_ensure_guard \{.*?\n    \};/m]].all? { |body| body.to_s.include?('Bc2cppGcPause pause(M)') })
 suite.check('the preamble has one Bc2cppBlock and no Bc2cppHeapBlock', code.include?('struct Bc2cppBlock {') && !code.include?('Bc2cppHeapBlock'))
 
 suite.behaviour(DRIVER) do |interpreted, compiled|
@@ -296,6 +299,47 @@ suite.behaviour(DRIVER) do |interpreted, compiled|
   suite.check('the run printed the plain-gen and GC-stress lines', compiled&.any? { |l| l.start_with?('plain gen:') } && compiled&.any? { |l| l.start_with?('gc stress:') })
 end
 suite.finish
+
+# A VM frame with an env (AbVm#each_x, interpreted) sits above the callinfo of a frame-local block's call, and a `return` / `break` /
+# raise unwinds past both: popping the VM frame unshares its env, which allocates, and a GC there (MRB_GC_STRESS) must not mark the
+# dead block named by the callinfo below it. Built with the malloc'd block layout so a read of the dead block is a use-after-free.
+VM_SRC = <<~'RUBY'
+  class AbVm
+    def each_x; y = 1; [1, 2].each { |v| yield v + y }; end
+  end
+  class AbOp
+    def opener(x); yield x; end
+  end
+  class AbOp2
+    def opener2(x); yield x; ensure; @ens = (@ens || 0) + 1; end
+  end
+  class AbVmOwn
+    def ret; AbOp.new.opener(1) { |i| AbVm.new.each_x { |v| return [i, v] }; :no }; end
+    def brk; AbOp.new.opener(1) { |i| AbVm.new.each_x { |v| break [i, v] }; :no }; end  # the break leaves each_x only
+    def raise_in; AbOp.new.opener(1) { |i| AbVm.new.each_x { |v| raise "boom #{v}" } }; rescue => e; e.message; end
+    def ret_ens; AbOp2.new.opener2(1) { |i| AbOp.new.opener(i) { |j| AbVm.new.each_x { |v| return [i, j, v] } } }; end
+  end
+RUBY
+vm = Bc2cppStepCheck.new('bc2cpp block abi vm unwind check')
+vm.generate(VM_SRC, %w[AbVmOwn AbOp AbOp2])
+VM_DRIVER = <<~'RUBY'
+  o = AbVmOwn.new
+  3.times do
+    p o.ret
+    p o.brk
+    p o.raise_in
+    p o.ret_ens
+  end
+  puts 'end'
+RUBY
+flags = ENV['BC2CPP_CXXFLAGS']
+ENV['BC2CPP_CXXFLAGS'] = [flags, '-DBC2CPP_STACK_BLOCK_MALLOC'].compact.join(' ')
+vm.behaviour(VM_DRIVER, banner: 'unwinds past a VM frame with an env, malloc block layout') do |interpreted, compiled|
+  vm.check('return, break, raise and an ensure guard unwind past it, as interpreted',
+           interpreted&.first(4) == ['[1, 2]', ':no', '"boom 2"', '[1, 1, 2]'] && compiled == interpreted)
+end
+ENV['BC2CPP_CXXFLAGS'] = flags
+vm.finish
 
 # The forwarding callees under a C++ Fiber: a block step through two forwarders, and a Fiber body whose blocks never suspend.
 fiber = Bc2cppStepCheck.new('bc2cpp block abi fiber check')

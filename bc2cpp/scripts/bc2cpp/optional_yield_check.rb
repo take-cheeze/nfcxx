@@ -45,7 +45,7 @@ Dir.mktmpdir('bc2cpp-optional-yield') do |dir|
               !code.lines.any? { |l| l.include?('#error') && l.include?('OyYield') })
   suite.check('the block is extracted with & after the rest, and passed to the impl',
               code.include?('mrb_get_args(M, "*&", &bc2cpp_rest_ptr, &bc2cpp_rest_len, &bc2cpp_blk);') &&
-              code.include?('return bc2cpp_cfunc_result(M, OyYield_rest_yield_impl(M, self, ops, bc2cpp_blk));'))
+              code.include?('return bc2cpp_cfunc_result({M, M->gc.arena_idx, OyYield_rest_yield_impl(M, self, ops, bc2cpp_blk)});'))
 
   build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
   if build.nil?
