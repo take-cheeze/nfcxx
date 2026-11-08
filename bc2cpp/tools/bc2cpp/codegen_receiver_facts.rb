@@ -923,16 +923,30 @@ class CodeGen
   # OP_SENDB sends). Any plain fixed-argument super that no rule above takes is looked up from the superclass of the class
   # the method is defined on and called with exactly those registers (bc2cpp_super_call). BC2CPP_SUPER_BLOCK_REGISTER=0
   # keeps the `#error`.
-  def super_block_register_call(owner_def, d_reg, n)
+  #
+  # The block register may be a MOVE of the frame's own block register (a bare `super` forwards the caller's block). A
+  # compiled body never sees that block, so it follows super_lookup_call's rule: the frame's block when the method takes
+  # one, else nil under SUPER_NO_CALLER_BLOCK, else the `#error`. Without it `with_fresh_method_state { }` in a module's
+  # method lost the block of its caller.
+  def super_block_register_call(owner_def, d_reg, n, irep = nil, idx = nil)
     return nil unless n && owner_def && ENV.fetch('BC2CPP_SUPER_BLOCK_REGISTER', '1') == '1'
     return nil if owner_def.owner.end_with?('.singleton')
 
+    block = "r#{d_reg.to_i + n.to_i + 1}"
+    if irep && idx&.positive?
+      move = BytecodeIR.for(irep).source_at(idx - 1)
+      mand, opt = enter_shape(irep)
+      if mand && move&.op == :MOVE && move.regs.first(2) == [d_reg.to_i + n.to_i + 1, mand + opt + 1]
+        block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+        return nil unless block
+      end
+    end
     args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
     argv = args.empty? ? 'nullptr' : 'bc2cpp_super_argv'
     "  {\n" \
       "#{args.empty? ? '' : "    mrb_value bc2cpp_super_argv[] = {#{args.join(', ')}};\n"}" \
       "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(owner_def.owner)}, " \
-      "mrb_intern_lit(M, #{owner_def.name.inspect}), #{n}, #{argv}, r#{d_reg.to_i + n.to_i + 1});\n" \
+      "mrb_intern_lit(M, #{owner_def.name.inspect}), #{n}, #{argv}, #{block});\n" \
       "  }\n"
   end
 

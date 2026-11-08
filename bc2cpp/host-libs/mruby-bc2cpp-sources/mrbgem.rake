@@ -45,6 +45,7 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
       f.puts '#include <mruby/proc.h>'
       f.puts '#include <mruby/variable.h>'
       f.puts '#include <mruby/string.h>'
+      f.puts '#include <mruby/array.h>'
       f.puts '#include <mruby/error.h>'
       names.each_with_index do |name, i|
         rel = "#{name}.rb"
@@ -80,6 +81,15 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
           return mrb_bool_value(find_source(mrb, name) != NULL);
         }
 
+        /* MRubyRequire.baked_names: every baked source name, in the order of the index. */
+        static mrb_value
+        baked_names(mrb_state *mrb, mrb_value self)
+        {
+          mrb_value ary = mrb_ary_new(mrb);
+          for (int i = 0; bc2cpp_sources[i].name; i++) mrb_ary_push(mrb, ary, mrb_str_new_cstr(mrb, bc2cpp_sources[i].name));
+          return ary;
+        }
+
         /* MRubyRequire.load_baked(name): run the source's bytecode at the top level, as eval at the top level would. */
         static mrb_value
         load_baked(mrb_state *mrb, mrb_value self)
@@ -110,6 +120,7 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
           struct RClass *mod = mrb_module_get(mrb, "MRubyRequire");
           mrb_define_module_function(mrb, mod, "baked?", baked_p, MRB_ARGS_REQ(1));
           mrb_define_module_function(mrb, mod, "load_baked", load_baked, MRB_ARGS_REQ(1));
+          mrb_define_module_function(mrb, mod, "baked_names", baked_names, MRB_ARGS_NONE());
         }
 
         void

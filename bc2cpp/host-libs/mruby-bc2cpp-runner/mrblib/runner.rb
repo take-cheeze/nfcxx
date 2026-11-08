@@ -5,7 +5,18 @@ module BC2CPPRunner
 
   def self.run
     $PROGRAM_NAME = ENTRY
-    require ENTRY
+    if respond_to?(:register_compiled)
+      # A host that linked bc2cpp's compiled code (docs/bc2cpp-self-compile.md): load the baked sources, replace their methods
+      # with the compiled bodies, then run the command.
+      Object.const_set(:BC2CPP_DEFER_MAIN, true)
+      require ENTRY
+      # Sources the entry loads only on demand own compiled methods too: the registration needs their classes.
+      MRubyRequire.baked_names.each { |name| require name }
+      register_compiled
+      BC2CPP_MAIN.call
+    else
+      require ENTRY
+    end
   end
 
   # One baked tool, by the name it was baked under, as tools/bc2cpp/mruby_tool.rb does for bin/mruby: ARGV is
