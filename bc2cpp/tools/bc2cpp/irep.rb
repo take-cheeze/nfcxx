@@ -47,7 +47,10 @@ module MemberRecord
     other.instance_of?(self.class) && members.all? { |key| self[key].eql?(other[key]) }
   end
 
-  def hash = [self.class, members.map { |key| self[key] }].hash
+  # Equal records (eql?) have equal members, so a hash over the leading ones is consistent with eql?. Hashing every member
+  # walked an Irep's instructions, pool and child ireps on each Hash or Set lookup, which dominated bc2cpp run as an
+  # mruby executable (docs/bc2cpp-self-compile.md).
+  def hash = [self.class, *members.first(3).map { |key| self[key] }].hash
 
   def inspect
     "#<#{self.class} #{members.map { |key| "#{key}=#{self[key].inspect}" }.join(', ')}>"
