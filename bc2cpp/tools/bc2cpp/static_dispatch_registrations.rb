@@ -269,12 +269,15 @@ module StaticDispatchRegistrations
   # Every C string literal in `src` that is not the name argument of a
   # registration call, with comments dropped first.
   def c_literals(src, exempt: Set.new, pool_pure: Set.new, symbol_values: false)
-    body = src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
+    body = src.gsub(REGISTRATION_CALL, '').gsub(SELF_REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
     # A pool string's value only; the same text as a folded constant (mrb_str_new_cstr) is still scanned.
     body = body.gsub(POOL_STRING_VALUE) { pool_pure.include?(unescape(Regexp.last_match(1))) ? '' : Regexp.last_match(0) }
     # The raw spelling of a symbol made into a value (a Ruby Symbol literal in a constant or a case list): under
     # SYMBOL_USES it looks nothing up, the same as the bc2cpp_sym form lookup_free_names counts as quiet.
     body = body.gsub(RAW_SYMBOL_VALUE, '') if symbol_values
+    # PROC_SPEC names (bc2cpp.rb's bc2cpp_proc_spec_stand_in): a compiled block's local names, bound with
+    # mrb_intern_cstr as the parameter names of a stand-in proc. They name no method a lookup can reach.
+    body = body.gsub(PROC_SPEC_NAMES, '')
     table = nil
     body = body.sub(SYM_TABLE) { table = Regexp.last_match(1); '' }
     names = body.scan(STRING_LITERAL).map { |(s)| unescape(s) }
@@ -282,6 +285,10 @@ module StaticDispatchRegistrations
   end
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
+  PROC_SPEC_NAMES = /static const char\* const bc2cpp_proc_spec_\d+_names\[\] = \{[^}]*\};/
+  # A definition on the running class (a class body's `mrb_define_method(M, mrb_class_ptr(self), "name", ...)`): its name
+  # is a method being defined, not a lookup, the same as REGISTRATION_CALL's identifier-owner form.
+  SELF_REGISTRATION_CALL = /mrb_define_(?:private_)?method\(\s*M\s*,\s*mrb_class_ptr\(self\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,/
   RAW_SYMBOL_VALUE = /mrb_symbol_value\(mrb_intern_cstr\(M, "(?:[^"\\\n]|\\.)*"\)\)/
   # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant.
   POOL_STRING_VALUE = /bc2cpp_pool_str\(M, "((?:[^"\\\n]|\\.)*)"\)/
