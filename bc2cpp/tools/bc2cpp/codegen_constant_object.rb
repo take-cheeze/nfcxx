@@ -46,7 +46,7 @@ class CodeGen
     inherited = singleton_owner == "#{constant_owner}.singleton" ? '' : ", inherited from #{singleton_owner.delete_suffix('.singleton')}"
     note = "  // CLOSED_WORLD_CONSTANT_OBJECT :#{name} -> #{via} " \
            "(stable class/module constant, unique public singleton definition#{inherited}), direct C++ call " \
-           "without mrb_funcall#{native_note}.\n"
+           "without by-name send#{native_note}.\n"
     "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
   end
 
@@ -183,7 +183,7 @@ class CodeGen
     return nil unless code
 
     "  // CLOSED_WORLD_CONSTANT_OBJECT :#{candidate.name} -> #{candidate.owner}##{candidate.name} " \
-      "(stable class/module constant, singleton attr accessor), direct ivar access without mrb_funcall.\n" \
+      "(stable class/module constant, singleton attr accessor), direct ivar access without by-name send.\n" \
       "  #{code}\n"
   end
 

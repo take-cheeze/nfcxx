@@ -256,7 +256,7 @@ module CheckedPoolReceiverSend
                         dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain)
 
     # The arm's own note says "no guard": here the class test above it is the guard.
-    body = inner.gsub(/with no (?:class )?guard or mrb_funcall fallback/, 'behind the CHECKED_POOL_EXACT class test')
+    body = inner.gsub(/with no (?:class )?guard or by-name send fallback/, 'behind the CHECKED_POOL_EXACT class test')
                 .lines.map { |line| line.strip.empty? ? line : "    #{line}" }.join
     violation = guard_violation_line(insn.reg, recv, plan[:name], plan[:argv], 'CHECKED_POOL_EXACT')
     nil_test = plan[:nilable] ? "if (mrb_nil_p(#{recv})) {\n    #{nil_arm}  } else " : ''

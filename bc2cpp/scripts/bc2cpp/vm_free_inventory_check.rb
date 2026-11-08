@@ -13,7 +13,7 @@ require 'pathname'
 # Each pattern is one VM dependency from the plan's table. `count` is the baseline measured on the closed-build
 # sources of this tree; a count above it is a regression.
 DEPENDENCIES = {
-  'mrb_funcall' => { pattern: /\bmrb_funcall\w*/, count: 243 },
+  'mrb_funcall' => { pattern: /\bmrb_funcall\w*/, count: 101 },
   'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 2229 },
   'mrb_proc_new_cfunc_with_env' => { pattern: /\bmrb_proc_new_cfunc_with_env\w*/, count: 5 },
   # Phase 2: every block site goes through these two, so the dependency stays counted where it now lives.

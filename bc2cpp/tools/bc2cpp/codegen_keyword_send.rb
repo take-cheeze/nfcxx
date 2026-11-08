@@ -146,9 +146,9 @@ class CodeGen
         "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (keyword call; self, statically " \
           "known -- #{target.owner} has no subclasses anywhere in this closed world, so this " \
           "implicit-self send can reach no other definition of this POLY name), direct C++ call " \
-          "(no mrb_funcall)\n"
+          "(no by-name send)\n"
       else
-        "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
+        "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no by-name send)\n"
       end
     return "#{note}  #{call}\n" unless splat
 
@@ -176,9 +176,9 @@ class CodeGen
     call = "{\n    mrb_value bc2cpp_kwrest = mrb_hash_new(M);\n#{pairs}" \
            "    r#{d} = #{impl}(M, #{([recv] + argv + ['bc2cpp_kwrest']).join(', ')});\n  }"
     note = if lexical_self
-             "  // LEXICAL_SELF keyword rest (see lexical_self_keyword_target), direct C++ call (no mrb_funcall)\n"
+             "  // LEXICAL_SELF keyword rest (see lexical_self_keyword_target), direct C++ call (no by-name send)\n"
            else
-             "  // MONO keyword rest -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
+             "  // MONO keyword rest -> #{target.owner}##{target.name}, direct C++ call (no by-name send)\n"
            end
     "#{note}  #{call}\n"
   end
@@ -598,7 +598,7 @@ class CodeGen
         impl = cpp_name(target.owner, target.name) + '_impl'
         call_argv, = direct_call_args(target, ext_argv, impl)
         return "  // KEYWORD_HASH_DEVIRT :#{name} -> #{target.owner}##{target.name} (MONO, trailing-Hash " \
-               "positional, direct C++ call, no mrb_funcall)\n" \
+               "positional, direct C++ call, no by-name send)\n" \
                "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       end
     end

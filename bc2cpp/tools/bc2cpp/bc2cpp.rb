@@ -2146,8 +2146,9 @@ if $PROGRAM_NAME == __FILE__
     }
     static mrb_value bc2cpp_proc_arity_m(mrb_state* M, mrb_value self) {
       const Bc2cppProcSpec* spec = bc2cpp_proc_spec_of(mrb_proc_ptr(self));
-      if (spec) return mrb_funcall_argv(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec), mrb_intern_lit(M, "arity"), 0, NULL);
-      return mrb_int_value(M, mrb_proc_arity(mrb_proc_ptr(self)));
+      // The stand-in is a plain irep Proc: Proc#arity of it is mrb_proc_arity, so no by-name send.
+      const struct RProc* p = spec ? mrb_proc_ptr(bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec)) : mrb_proc_ptr(self);
+      return mrb_int_value(M, mrb_proc_arity(p));
     }
     static mrb_func_t bc2cpp_orig_proc_parameters;
     static mrb_value bc2cpp_proc_parameters_m(mrb_state* M, mrb_value self) {
@@ -2155,7 +2156,9 @@ if $PROGRAM_NAME == __FILE__
       if (!spec) return bc2cpp_orig_proc_parameters(M, self);
       mrb_value* argv; mrb_int argc;
       mrb_get_args(M, "*!", &argv, &argc);
-      return mrb_funcall_argv(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec), mrb_intern_lit(M, "parameters"), argc, argv);
+      (void)argv; (void)argc;
+      // The stand-in has no spec, so Proc#parameters on it is the original cfunc; call it directly.
+      return bc2cpp_orig_proc_parameters(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec));
     }
     // Called once per state from the owner registration, before any compiled block runs.
     static void bc2cpp_proc_specs_install(mrb_state* M) {
@@ -2393,7 +2396,7 @@ if $PROGRAM_NAME == __FILE__
       }
       bc2cpp_vm_restore(M, mark);
       M->exc = NULL;
-      return mrb_funcall_argv(M, exc, mrb_intern_lit(M, "result"), 0, nullptr);
+      return bc2cpp_funcall_argv(M, exc, mrb_intern_lit(M, "result"), 0, nullptr);
     }
   KERNEL_LOOP
   puts <<~'ENSURE_GUARD'
@@ -2503,7 +2506,6 @@ if $PROGRAM_NAME == __FILE__
   # SUPER_LOOKUP (codegen_receiver_facts.rb, super_lookup_call): OP_SUPER's lookup, from the superclass of the
   # class the method is defined on (its origin when prepended), then the call mrb_funcall would make once found.
   # No method there is NoMethodError through method_missing, as prepare_missing does.
-  puts 'extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);'
   # KEYWORD_SPLAT_STATIC: the keyword helpers of a `**h` call (compile_keyword_call). Keys are read by symbol from the
   # Hash; the callee is already resolved statically, so nothing here dispatches by method name.
   puts <<~CPP
