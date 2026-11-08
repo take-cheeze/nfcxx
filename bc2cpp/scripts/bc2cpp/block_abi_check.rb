@@ -84,6 +84,8 @@ SRC = <<~'RUBY'
     def mk_fw_keep; n = 0; fw_keep { |x| n += x }; end
     def use_fw_keep_cap; mk_fw_keep; GC.start; ("s" * 40) * 3; [@held.call(3), @held.call(4)]; end
     def use_hold_cap; mk_hold; GC.start; ("s" * 40) * 3; [@held.call(3), @held.call(4)]; end
+    def use_fw_ens_break; @ens = 0; r = fw_ensure { |x| break [x, :out] if x == 4 }; [r, @ens]; end
+    def use_fw_ens_return; @ens = 0; fw_ensure { |x| return [x, @ens] if x == 4 }; [:end, @ens]; end
     def use_fw_ret; b = fw_ret { |x| x + 1 }; GC.start; b.call(4); end
     def use_fw_nil; fw_nil; end
     def use_fw_break; fw_each { |x| break x * 7 if x == 4 }; end
@@ -205,7 +207,7 @@ DRIVER = <<~'RUBY'
     show.call("ranged/#{i}") { fx.ranged_run(a) }
   end
   %i[use_fw_each use_fw_map use_fw_sym use_fw_prog use_fw_two use_fw_cond use_fw_nested use_fw_also use_fw_kw use_fw_splat
-     use_fw_send use_fw_keep use_fw_keep_cap use_hold_cap use_fw_keep_enum use_fw_rescue use_fw_ensure use_fw_ret use_fw_nil use_fw_break use_fw_return
+     use_fw_send use_fw_ens_break use_fw_ens_return use_fw_keep use_fw_keep_cap use_hold_cap use_fw_keep_enum use_fw_rescue use_fw_ensure use_fw_ret use_fw_nil use_fw_break use_fw_return
      use_fw_churn use_fw_gc].each { |m| show.call(m.to_s) { fx.send(m) } }
   show.call('open') { AbOpen.new.run_open(40) }
   show.call('coll') { [coll.map { |x| x + 1 }, coll.select(&:even?), coll.first(2), coll.include?(4), coll.each_with_index.to_a] }
