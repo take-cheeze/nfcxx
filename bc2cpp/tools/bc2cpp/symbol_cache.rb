@@ -331,7 +331,6 @@ module SymbolCache
   # not a public C function, or an attr_reader-style NOARG function is given arguments -- is not cached and takes
   # the ordinary checked send, so a wrong proof costs speed, never the error or the answer.
   NATIVE_SINGLETON = <<~CPP
-    extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
     struct bc2cpp_nsc_slot {
       unsigned epoch;
       mrb_state* state;
@@ -436,7 +435,6 @@ module SymbolCache
     #include <stdio.h>
     #include <stdlib.h>
     #endif
-    extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
     #if !defined(MRB_NO_METHOD_CACHE) && !defined(BC2CPP_NO_OWNER_ICACHE)
     #define BC2CPP_OWNER_ICACHE 1
     #endif
@@ -709,7 +707,7 @@ module SymbolCache
       // world proved answers the name, so the fallback is a type error. Raised here instead of dispatching.
       mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: fail-fast: %T does not answer %n", recv, mid);
     #endif
-      mrb_funcall_argv(M, recv, mid, argc, argv);
+      bc2cpp_funcall_argv(M, recv, mid, argc, argv);
       // The dispatch above found a method: the proof was wrong (ADR 0262). A
       // NoMethodError here would look like an ordinary user error.
       mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")),

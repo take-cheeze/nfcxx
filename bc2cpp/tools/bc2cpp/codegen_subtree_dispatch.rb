@@ -153,7 +153,7 @@ class CodeGen
     call = cha_call_code(target, root, recv, name, d, argv, indent: '    ')
     note = "  // SUBTREE_DIRECT :#{name} -> #{target.owner}##{target.name} (receiver hint: #{root} or a descendant; " \
            "every class of the subtree resolves to it), subtree-membership-checked direct C++ call, " \
-           "mrb_funcall fallback\n"
+           "by-name send fallback\n"
     "#{note}  {\n" \
       "  struct RClass* bc2cpp_sroot = #{owner_class_ptr_expr(root)};\n" \
       "  if (bc2cpp_sroot && mrb_obj_is_kind_of(M, #{recv}, bc2cpp_sroot)) {\n" \
@@ -175,7 +175,7 @@ class CodeGen
     fn_type = "mrb_value (*)(#{(['mrb_state*'] + Array.new(n + 1, 'mrb_value')).join(', ')})"
     sym = table[:symbol]
     note = "  // SUBTREE_TABLE :#{name}/#{n} -> #{sym} slot #{slot} (receiver hint: #{root} or a descendant; " \
-           "#{arms.join('; ')}), class row lookup then indexed direct C++ call, mrb_funcall fallback\n"
+           "#{arms.join('; ')}), class row lookup then indexed direct C++ call, by-name send fallback\n"
     "#{note}  {\n" \
       "  int bc2cpp_vrow = bc2cpp_vtbl_lookup(M, #{obj_class_expr(recv)}, #{sym});\n" \
       "  bc2cpp_vtbl_fn bc2cpp_vfn = bc2cpp_vrow >= 0 ? #{sym}_fns[bc2cpp_vrow][#{slot}] : nullptr;\n" \

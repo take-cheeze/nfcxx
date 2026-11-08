@@ -1049,12 +1049,12 @@ class CodeGen
 
     if kind == :mono
       impl = cpp_name(target.owner, target.name) + '_impl'
-      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n" \
+      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)\n" \
              "      mrb_value #{result_var} = #{impl}(M, #{elem_expr});"
     end
 
     out = String.new
-    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, mrb_funcall fallback\n"
+    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, by-name send fallback\n"
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     target.each_with_index do |branch, i|
       d = branch[:definition]
@@ -1085,12 +1085,12 @@ class CodeGen
 
     if kind == :mono
       impl = cpp_name(target.owner, target.name) + '_impl'
-      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n" \
+      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)\n" \
              "      #{impl}(M, #{elem_expr});"
     end
 
     out = String.new
-    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, mrb_funcall fallback\n"
+    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, by-name send fallback\n"
     target.each_with_index do |branch, i|
       d = branch[:definition]
       impl = cpp_name(d.owner, d.name) + '_impl'

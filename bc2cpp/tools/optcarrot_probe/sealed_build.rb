@@ -19,6 +19,10 @@ module OptcarrotSealedBuild
     end
     gems['mruby-onig-regexp'] = OptcarrotOnigAliases.prepare(root, temp)
     gems['optcarrot-compiled'] = compiled_gem
+    # CONST_RESOLVE: the bundle reads OptcarrotProbe, which register.cxx (written after the scan) defines. This stub
+    # names it to the scan as a native binding; emit_register overwrites it.
+    FileUtils.mkdir_p(File.join(compiled_gem, 'src'))
+    File.write(File.join(compiled_gem, 'src/register.cxx'), "// scan stub\nmrb_define_module(M, \"OptcarrotProbe\");\n")
     # The mruby- prefix keeps the bundle's path gem-relative, so its predicates can be keyed in predicate_whitelist.txt.
     benchmark = gems['optcarrot-benchmark'] = File.join(temp, 'mruby-optcarrot-benchmark')
     FileUtils.mkdir_p([File.join(benchmark, 'mrblib'), File.join(benchmark, 'src')])

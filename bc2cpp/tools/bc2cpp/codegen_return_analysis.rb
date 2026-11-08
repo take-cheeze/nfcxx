@@ -512,5 +512,5 @@ class CodeGen
   # Emitted above a devirtualized arithmetic/comparison op, like the embedded
   # ivar `// @x embedded` marker, so the generated body says why it has no
   # fallback.
-  FIXNUM_PROOF_NOTE = "  // operands proven Fixnum -- no runtime check, no mrb_funcall fallback\n"
+  FIXNUM_PROOF_NOTE = "  // operands proven Fixnum -- no runtime check, no by-name send fallback\n"
 end

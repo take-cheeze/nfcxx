@@ -20,6 +20,9 @@ check = lambda do |what, ok|
 end
 
 SOURCE = <<~RUBY
+  class KlStopCustom < StopIteration
+    def result = :custom
+  end
   class KlFx
     def initialize(bytes) = (@bytes = bytes)
 
@@ -69,6 +72,16 @@ SOURCE = <<~RUBY
         raise StopIteration if i == n
       end
       [i, r]
+    end
+
+    def stop_result
+      e = StopIteration.new('x')
+      e.result = :set
+      loop { raise e }
+    end
+
+    def stop_custom
+      loop { raise KlStopCustom }
     end
 
     def stop_enum(list)
@@ -138,6 +151,8 @@ DRIVER = <<~'RUBY'
   show.call('break none') { fx.early_return([1, 2]) }
   show.call('stop raise') { fx.stop_raise(3) }
   show.call('stop enum') { fx.stop_enum([1, 2, 3]) }
+  show.call('stop result') { fx.stop_result }
+  show.call('stop custom result') { fx.stop_custom }
   show.call('other error') { fx.other_error(2) }
   show.call('nested') { fx.nested(3) }
   show.call('inner break') { fx.inner_block_break([[1, 2], [3, 9, 1], [4]]) }
@@ -147,7 +162,7 @@ RUBY
 
 # other_error (a loop inside begin/rescue), nested and inner_block_break (a body whose own block breaks) keep the call;
 # they run below as behaviour cases.
-INLINED = %w[read_ber break_value skip_odd early_return stop_raise stop_enum].freeze
+INLINED = %w[read_ber break_value skip_odd early_return stop_raise stop_enum stop_result stop_custom].freeze
 
 if ENV['MRBC'].nil?
   puts '  SKIP kernel loop check: set MRBC'

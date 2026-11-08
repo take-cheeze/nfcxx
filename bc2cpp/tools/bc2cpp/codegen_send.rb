@@ -186,7 +186,7 @@ class CodeGen
           # Symbols have no cross-type equality.
           note = "  // LITERAL === :symbol -- `:#{literal[:name]} === arg` (case/when literal), " \
                  "Object#===/Symbol#== both confirmed native/unoverridden anywhere in this program's " \
-                 "own whole-program registry -- sound unconditionally, no mrb_funcall fallback ever " \
+                 "own whole-program registry -- sound unconditionally, no by-name send fallback ever " \
                  "needed (see eqq_literal_devirt_safe?'s own comment).\n"
           return "#{note}  #{RegName[d]} = mrb_bool_value(mrb_symbol_p(#{arg}) && " \
                  "mrb_symbol(#{arg}) == mrb_intern_cstr(M, \"#{literal[:name]}\"));\n"
@@ -1363,7 +1363,7 @@ class CodeGen
           if exact_via_lcf
             note = "  // LCF_ROW_FLOW :#{name} -> #{target.owner}##{target.name} (the class flow proves the receiver is " \
                    "exactly #{typed_guard_class}#{lcf_nilable ? ' or nil' : ''}), closed-world lookup, direct C++ call " \
-                   "with no class guard or mrb_funcall fallback#{native_note}\n"
+                   "with no class guard or by-name send fallback#{native_note}\n"
             call = "#{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
             return "#{note}  #{call}\n" unless lcf_nilable
 
@@ -1373,7 +1373,7 @@ class CodeGen
           end
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
                  "(#{origin} #{typed_guard_class}.new; stable class constant and standard constructor), " \
-                 "closed-world lookup, direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+                 "closed-world lookup, direct C++ call with no guard or by-name send fallback#{native_note}\n"
           return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
@@ -1387,7 +1387,7 @@ class CodeGen
         # the guard below can only be true and its fallback is dead.
         if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
           note = "  // EXACT_TYPED :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
-                 "#{check_owner}), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+                 "#{check_owner}), direct C++ call with no guard or by-name send fallback#{native_note}\n"
           # RANGE_COLLECT_DIRECT: a proven Range keeps the Integer-bound helper for its literal block, as the
           # dynamic-send arm does; any other Range takes the compiled body in the helper's else.
           range_call = check_owner == 'Range' && block_core_direct_enabled? && @call_block_expr && block_core_world &&
@@ -1417,7 +1417,7 @@ class CodeGen
                         "receiver traced to #{target.owner}"
                       end
         note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
-               "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
+               "runtime-class-checked direct C++ call, by-name send fallback#{native_note}\n"
         fallback = typed_fallback ||
                    strict_hint_wrap(via_element ? 'element' : 'typed', d, recv, name, argv, check_owner,
                                     hinted: !(via_element && elem_hint_soft)) do
@@ -1433,11 +1433,11 @@ class CodeGen
       elsif module_function_self
         note = "  // MODULE_FUNCTION_SELF :#{name} -> #{target.owner}.singleton##{target.name} " \
                "(the compiled source body runs with its module object as self), direct C++ call " \
-               "(no mrb_funcall, no runtime check)#{native_note}\n"
+               "(no by-name send, no runtime check)#{native_note}\n"
         "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       elsif lexical_self
         note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
-               "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
+               "#{target.owner} -- no subclass exists program-wide), direct C++ call (no by-name send, " \
                "no runtime check)#{native_note}\n"
         note + "  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       elsif embeds_storage?(target.owner)
@@ -1478,7 +1478,7 @@ class CodeGen
         if irep && (idx || trace_idx) &&
            record_hash_exact_class(irep, idx || trace_idx, unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)) == target.owner
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} (record key holds only " \
-                 "fresh #{target.owner}.new), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+                 "fresh #{target.owner}.new), direct C++ call with no guard or by-name send fallback#{native_note}\n"
           return "#{note}  #{RegName[d]} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
@@ -1493,7 +1493,7 @@ class CodeGen
         check = exact_class_guard(owner_class_ptr_expr(target.owner), recv)
         note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
-               "direct C++ call, mrb_funcall fallback#{native_note}\n"
+               "direct C++ call, by-name send fallback#{native_note}\n"
         # STRICT_HINTS: a ClassLayout / annotation / element hint naming this owner makes the else arm an error.
         hinted = strict_hint_enabled?('mono_embed') &&
                  strict_hint_names?(target.owner, irep, idx || trace_idx, trace_receiver_reg || d, trace_reg_offset,
@@ -1511,7 +1511,7 @@ class CodeGen
         # target.owner embeds no ivar, so its GETIV/SETIV never cast DATA_PTR(self); a
         # wrong receiver is only semantically wrong, as unguarded MONO always was. No
         # guard.
-        note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
+        note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)" \
                "#{native_note}\n"
         # PROVEN_MISS: MONO trusts the name alone, so a receiver proven to be another class
         # would run this owner's body instead of raising.
@@ -1527,7 +1527,7 @@ class CodeGen
       storage = embed_type(owner, ivar) ? 'embedded struct field' : 'mrb_iv_get/mrb_iv_set'
       kind = name.end_with?('=') ? 'attr_writer' : 'attr_reader'
       note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (self, statically #{owner}), " \
-             "#{kind} devirtualized to a direct #{storage} access (no _impl, no mrb_funcall, no runtime " \
+             "#{kind} devirtualized to a direct #{storage} access (no _impl, no by-name send, no runtime " \
              "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
              "3rd/mruby/src/class.c citation this reproduces exactly.\n"
       "#{note}  #{ivar_accessor_call_code(owner, recv, name, d, argv, self_of_klass: true)}\n"
@@ -1547,7 +1547,7 @@ class CodeGen
                 end
       kind = name.end_with?('=') ? 'attr_writer' : 'attr_reader'
       note = "  // IVAR_ACCESSOR#{via_element ? '/ELEMENT' : ''} :#{name} -> #{owner}#@#{ivar} (#{traced_note}), " \
-             "#{kind} devirtualized to a direct #{storage} (no mrb_funcall) -- see " \
+             "#{kind} devirtualized to a direct #{storage} (no by-name send) -- see " \
              "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
              "citation this reproduces exactly (a writer yields the assigned value).\n"
       # EXACT_TYPED_UNGUARDED: proven exactly `owner`, so the guard can only be true.
