@@ -403,6 +403,19 @@ class CodeGen
         block_irep = block_label && @ireps[block_label]
         enroll.call(paired.sym, true) if paired.sym && block_irep && deep_fiber_yield?(block_irep, seeds.to_set)
       end
+      # RECEIVER_ITERATOR_ROOTS: `341.step(589, 8) { wait_two_clocks }` in a root. The block stays a block (a step of its own,
+      # inline_block_may_suspend?), so the iterator it is sent to must be a step the dynamic call can park; any definition
+      # of that name may be the receiver's.
+      irep_tree(irep).each do |part|
+        BytecodeIR.for(part).adjacent_pairs(:BLOCK, %i[SENDB]) do |block_insn, paired, _|
+          block_label = block_insn.block_index && part.reps[block_insn.block_index.to_i]
+          block_irep = block_label && @ireps[block_label]
+          next unless paired.sym && block_irep && block_may_suspend?(block_irep, seeds.to_set)
+
+          iterators = (@registry[paired.sym] || []) + (self.class.core_hidden_defs || []).select { |d| d.name == paired.sym }
+          iterators.each { |d| queue << d.irep if d.irep && @fiber_roots.add?(d.irep) }
+        end
+      end
     end
     @fiber_unsafe_methods = reachable.select do |label|
       d = fiber_defs[label]

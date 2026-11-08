@@ -402,7 +402,7 @@ class CodeGen
     owners_note = candidates.map(&:owner).join(', ')
     diag = poly_diagnostic(name, n, 'chain', candidates)
     note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
-           "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
+           "runtime-class-checked direct C++ calls chained, by-name send fallback for any other class\n"
     listed = []
     candidates.each { |t| listed.push(t.owner).concat(inherited[t.owner]) }
     fallback = strict_hint_wrap('poly_small_n', d, recv, name, argv, nil, listed: listed) do
@@ -610,7 +610,7 @@ class CodeGen
     diag = poly_diagnostic(name, n, 'table', candidates)
     fn_type = "mrb_value (*)(#{(['mrb_state*'] + Array.new(n + 1, 'mrb_value')).join(', ')})"
     note = "  // POLY_TABLE :#{name} -> #{table[:symbol]} (#{candidates.size} known real definitions, " \
-           "#{table[:entries].size} classes), runtime-class lookup then direct C++ call, mrb_funcall fallback " \
+           "#{table[:entries].size} classes), runtime-class lookup then direct C++ call, by-name send fallback " \
            "for any other class\n"
     fallback = strict_hint_wrap('poly_table', d, recv, name, argv, nil, listed: table[:entries].map(&:first)) do
       guarded_fallback_line(d, recv, name, argv, table[:entries].map(&:first), closed_world_site)
