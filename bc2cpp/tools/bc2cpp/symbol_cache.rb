@@ -294,7 +294,7 @@ module SymbolCache
     }
     [[gnu::noinline]] static void bc2cpp_check_send(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv, bool explicit_receiver) {
       struct RClass* c = mrb_class(M, recv);
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) return;
       if (explicit_receiver) {
         if (m.flags & MRB_METHOD_PRIVATE_FL) bc2cpp_visibility_error(M, recv, mid, argc, argv, true);
@@ -353,7 +353,7 @@ module SymbolCache
     [[gnu::noinline]] static bool bc2cpp_nsc_fill(mrb_state* M, bc2cpp_nsc_slot& s, mrb_value recv, mrb_sym mid, mrb_int argc) {
       if (mrb_type(recv) != MRB_TT_CLASS && mrb_type(recv) != MRB_TT_MODULE) return false;
       struct RClass* c = mrb_class(M, recv);
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (!MRB_METHOD_UNDEF_P(m) && (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL))) return false;
       return bc2cpp_nsc_accept(M, s, mrb_obj_ptr(recv), m, c, argc);
     }
@@ -387,7 +387,7 @@ module SymbolCache
       bool cached = owner && s.epoch == bc2cpp_nsc_epoch && s.state == M && s.recv == (struct RObject*)owner;
       if (!cached && owner) {
         struct RClass* c = owner;
-        mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+        mrb_method_t m = bc2cpp_find_method(M, &c, mid);
         cached = bc2cpp_nsc_accept(M, s, (struct RObject*)owner, m, c, argc);
       }
       if (cached) return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value());
@@ -409,7 +409,7 @@ module SymbolCache
   #
   # OWNER_CALL_ICACHE: each site also keeps its last (receiver class, argument count) -> (method, owner) that
   # passed every check. A repeat call with the same class and count skips the lookup, the owner test and the
-  # checks, but only while mruby's own method cache (mrb->cache, which mrb_method_search_vm fills) still holds
+  # checks, but only while mruby's own method cache (mrb->cache, which the lookup fills) still holds
   # that same entry: mruby clears an entry whenever a definition, removal, undef, include, prepend or the freeing
   # of either class could change it (class.c mc_clear_by_id, mrb_method_cache_clear, mrb_mc_clear_by_class), so
   # a present, equal entry is exactly what the full lookup would return, and the checks depend only on it and the
@@ -418,6 +418,7 @@ module SymbolCache
   # path every time.
   OWNER_CALL = <<~CPP
     #include <string.h>
+    #include <stdlib.h>
     #ifdef BC2CPP_NOMETHOD_VERIFY
     #include <stdio.h>
     #include <stdlib.h>
@@ -447,7 +448,8 @@ module SymbolCache
       unsigned epoch;
       mrb_state* state;
       int seen_count;
-      struct RClass* seen[32];
+      // Owners already matched: up to 32, allocated on the first miss (an inline 32-slot array was most of a site's bytes).
+      struct RClass** seen;
       // OWNER_CALL_ICACHE: the last call that passed every check (hit_klass null: none).
       struct RClass* hit_klass;
       struct RClass* hit_c;
@@ -482,10 +484,10 @@ module SymbolCache
       return true;
     }
     #endif
-    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, nullptr, 0, nullptr, 0, {} }; return s; }())
+    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, nullptr, 0, nullptr, 0, nullptr }; return s; }())
     // OWNER_CALL_DIRECT: DIRECTS is a run of BC2CPP_OWNER_DIRECT(owner, entry, aspec, visibility), no commas between.
     #define BC2CPP_OWNER_DIRECT(owner, fn, aspec, vis) { owner, fn, (uint32_t)(aspec) | (uint32_t)(vis) },
-    #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d, 0, nullptr, 0, {} }; return s; }())
+    #define BC2CPP_OWNERS_D(DIRECTS, ...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static const bc2cpp_owner_direct rows[] = { DIRECTS }; static struct RClass* cls[sizeof rows / sizeof rows[0]]; static bc2cpp_owner_directs d = { rows, (int)(sizeof rows / sizeof rows[0]), 0, nullptr, cls }; static bc2cpp_owner_set s = { names, &d, 0, nullptr, 0, nullptr }; return s; }())
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
@@ -601,7 +603,7 @@ module SymbolCache
       ++bc2cpp_owner_icache_misses;
     #endif
       struct RClass* c = klass;
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (s.direct) bc2cpp_owner_direct_pick(M, *s.direct, klass, &m, &c);
       if (MRB_METHOD_UNDEF_P(m)) {
         if (mrb_nil_p(blk)) bc2cpp_funcall_argv(M, recv, mid, argc, argv);
@@ -623,7 +625,8 @@ module SymbolCache
             && !bc2cpp_fiber_definer_p(m)
     #endif
         ) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
-        if (s.seen_count < 32) s.seen[s.seen_count++] = owner;
+        if (!s.seen) s.seen = (struct RClass**)malloc(32 * sizeof(struct RClass*));
+        if (s.seen && s.seen_count < 32) s.seen[s.seen_count++] = owner;
       }
       if (level >= 2) {
         // vm.c OP_SEND: an explicit receiver may not call a private method, nor a protected one from outside.
@@ -759,9 +762,7 @@ module SymbolCache
       abort();
     #endif
       mrb_value msg = mrb_format(M, "closed-world guard violation: %T#%n at %s", recv, mid, site);
-      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
-      mrb_sym puts_id = mrb_intern_lit(M, "puts");
-      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      bc2cpp_stderr_report(M, "[RPG2k] ", msg);
       struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
@@ -804,9 +805,7 @@ module SymbolCache
       abort();
     #endif
       mrb_value msg = mrb_format(M, "%T#%n at %s", recv, mid, site);
-      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
-      mrb_sym puts_id = mrb_intern_lit(M, "puts");
-      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] hint violation: "), msg));
+      bc2cpp_stderr_report(M, "[RPG2k] hint violation: ", msg);
       struct RClass* klass = mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, mrb_str_plus(M, mrb_str_new_lit(M, "hint violation: "), msg)));
     }

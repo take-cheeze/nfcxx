@@ -1568,6 +1568,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
   puts '#include <initializer_list>'
+  puts '#include <string>'
   puts '#include <string.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
@@ -1608,6 +1609,13 @@ if $PROGRAM_NAME == __FILE__
       }
     CPP
   end
+  # The one method-table lookup in generated code: a closed-world table (class, symbol -> entry) replaces this body.
+  puts <<~'CPP'
+    #ifndef BC2CPP_FIND_METHOD
+    #define BC2CPP_FIND_METHOD 1
+    static inline mrb_method_t bc2cpp_find_method(mrb_state* M, struct RClass** c, mrb_sym mid) { return mrb_method_search_vm(M, c, mid); }
+    #endif
+  CPP
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
   # mruby/error.h: the exception helpers (core API, not the mruby-error gem).
@@ -1808,7 +1816,7 @@ if $PROGRAM_NAME == __FILE__
       // Only where the name is Proc's own bytecode method: without mruby-proc-ext
       // `===` is Object's, and `[]` may be missing altogether.
       struct RClass* found = M->proc_class;
-      mrb_method_t m = mrb_method_search_vm(M, &found, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &found, mid);
       return !MRB_METHOD_UNDEF_P(m) && found == M->proc_class && !MRB_METHOD_CFUNC_P(m);
     }
     // ADR 0266: a break or return may only unwind to a frame still on the C++
@@ -1886,10 +1894,21 @@ if $PROGRAM_NAME == __FILE__
     #include <stdio.h>
     #include <stdlib.h>
     #endif
-    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declaration_violation(mrb_state* M, mrb_value msg) {
+    // STDERR_REPORT: the one place a failure report is printed, as `$stderr.puts prefix + msg`. An IO whose #puts is the
+    // gem's own is written directly; any other $stderr (a StringIO, a user object) is sent `puts` by name, once, here.
+    [[maybe_unused, gnu::cold, gnu::noinline]] static void bc2cpp_stderr_report(mrb_state* M, const char* prefix, mrb_value msg) {
       mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_value line = mrb_str_plus(M, mrb_str_new_cstr(M, prefix), msg);
+      mrb_gc_protect(M, line);
+    #ifdef HAVE_MRUBY_IO_GEM
+      mrb_value written;
+      if (mrb_io_puts_direct(M, err, 1, &line, &written)) return;
+    #endif
       mrb_sym puts_id = mrb_intern_lit(M, "puts");
-      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, line);
+    }
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declaration_violation(mrb_state* M, mrb_value msg) {
+      bc2cpp_stderr_report(M, "[RPG2k] ", msg);
       struct RClass* klass = mrb_define_class(M, "BC2cppDeclarationViolation", M->eStandardError_class);
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
@@ -1944,15 +1963,13 @@ if $PROGRAM_NAME == __FILE__
       abort();
     #endif
       mrb_value msg = mrb_format(M, "closed-world guard violation: compiled block of %s run under %T instead of its creator's self (BLOCK_SELF_WORLD)", where ? where : "?", self);
-      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
-      mrb_sym puts_id = mrb_intern_lit(M, "puts");
-      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      bc2cpp_stderr_report(M, "[RPG2k] ", msg);
       struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
     static inline bool bc2cpp_proc_method_body_p(mrb_state* M, mrb_value self, mrb_sym mid, const struct RProc* p) {
       struct RClass* c = mrb_class(M, self);
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       return !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_PROC_P(m) && MRB_METHOD_PROC(m) == p;
     }
     static inline void bc2cpp_block_self_check(mrb_state* M, mrb_value self, const char* block) {
@@ -1977,56 +1994,53 @@ if $PROGRAM_NAME == __FILE__
       mrb_get_args(M, "*", &argv, &argc);
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
     }
-    // The one place a compiled block site makes a heap RProc (an escaping block, or a by-name else arm).
-    // Bc2cppHeapBlock is the lazy form: a stack block's else arm builds it only when it runs.
+    // The one place a compiled block site makes a heap RProc (an escaping block; Bc2cppBlock::proc is the lazy form).
     static inline struct RProc* bc2cpp_heap_proc(mrb_state* M, mrb_func_t fn, mrb_int len, const mrb_value* env) {
       return mrb_proc_new_cfunc_with_env(M, fn, len, env);
     }
-    struct Bc2cppHeapBlock {
-      mrb_state* M;
-      mrb_func_t fn;
-      mrb_int len;
-      const mrb_value* env;
-      mrb_value operator()() const { return mrb_obj_value(bc2cpp_heap_proc(M, fn, len, env)); }
-    };
-    // STACK_BLOCK (docs/bc2cpp-stack-blocks.md): the RProc and REnv of a direct-entry block passed only to a
-    // callee that just calls it, laid out as mrb_proc_new_cfunc_with_env builds them but in the caller's frame,
-    // over the caller's own env array. Red, so the GC never marks, gray-lists or sweeps them.
-    // The default: the RProc, the REnv and the env values live in
-    // malloc'd storage freed at the end of the scope, not in the caller's frame. A reference that outlives the scope
-    // is then a heap-use-after-free that ASan reports with the free site, not a stack-use-after-return in a fake frame.
-    // Defining BC2CPP_STACK_BLOCK_STACK keeps the block in the frame (no allocation).
-    struct Bc2cppStackBlock {
-#ifndef BC2CPP_STACK_BLOCK_STACK
+    // Bc2cppBlock (docs/bc2cpp-stack-blocks.md, "The C++ block"): a direct-entry block as a C++ value, a red RProc and
+    // REnv laid out as mrb_proc_new_cfunc_with_env builds them, over the env array of the site (entry, self and captured
+    // slots), in the caller's frame: no allocation. A callee that only calls its block takes value(). The RProc
+    // wrapper is made on demand, where the block is handed to code that may keep it: proc(). Red, so the GC never
+    // marks, gray-lists or sweeps it. Under ASan (or BC2CPP_STACK_BLOCK_MALLOC) the storage is malloc'd and freed at the
+    // end of the scope, so a reference that outlives it is a heap-use-after-free that ASan reports with the free site.
+#if defined(BC2CPP_STACK_BLOCK_MALLOC) || defined(__SANITIZE_ADDRESS__)
+#define BC2CPP_BLOCK_MALLOC 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define BC2CPP_BLOCK_MALLOC 1
+#endif
+#endif
+    static mrb_value bc2cpp_env_block(mrb_state* M, mrb_value blk);
+    struct Bc2cppBlock {
+      mrb_state* M_;
+      mrb_func_t fn_;
+      mrb_int len_;
+      const mrb_value* env_vals_;
+#ifdef BC2CPP_BLOCK_MALLOC
       struct RProc* proc_;
       struct REnv* env_;
       mrb_value* vals_;
-      Bc2cppStackBlock(mrb_state* M, mrb_int len, mrb_value* stack) {
+      Bc2cppBlock(mrb_state* M, mrb_int len, mrb_value* stack) : M_(M), fn_(bc2cpp_block_thunk), len_(len), env_vals_(stack) {
         proc_ = static_cast<struct RProc*>(calloc(1, sizeof(struct RProc)));
         env_ = static_cast<struct REnv*>(calloc(1, sizeof(struct REnv)));
         vals_ = static_cast<mrb_value*>(malloc(sizeof(mrb_value) * (len > 0 ? len : 1)));
         if (len > 0) memcpy(static_cast<void*>(vals_), static_cast<const void*>(stack), sizeof(mrb_value) * len);
-        env_->tt = MRB_TT_ENV;
-        env_->gc_color = MRB_GC_RED;
-        env_->c = mrb_vm_ci_target_class(M->c->ci);
-        env_->mid = M->c->ci->mid;
-        env_->stack = vals_;
-        MRB_ENV_SET_LEN(env_, len);
-        MRB_ENV_CLOSE(env_);
-        proc_->tt = MRB_TT_PROC;
-        proc_->gc_color = MRB_GC_RED;
-        proc_->c = M->proc_class;
-        proc_->flags = MRB_PROC_CFUNC_FL | MRB_PROC_ENVSET;
-        proc_->body.func = bc2cpp_block_thunk;
-        proc_->e.env = env_;
+        init(M, *proc_, *env_, vals_, len);
       }
-      ~Bc2cppStackBlock() { free(proc_); free(env_); free(vals_); }
+      ~Bc2cppBlock() { free(proc_); free(env_); free(vals_); }
       mrb_value value() { return mrb_obj_value(proc_); }
 #else
-      struct RProc proc;
-      struct REnv env;
-      Bc2cppStackBlock(mrb_state* M, mrb_int len, mrb_value* stack) {
-        memset(static_cast<void*>(this), 0, sizeof(*this));
+      struct RProc proc_;
+      struct REnv env_;
+      Bc2cppBlock(mrb_state* M, mrb_int len, mrb_value* stack) : M_(M), fn_(bc2cpp_block_thunk), len_(len), env_vals_(stack) {
+        memset(static_cast<void*>(&proc_), 0, sizeof(proc_));
+        memset(static_cast<void*>(&env_), 0, sizeof(env_));
+        init(M, proc_, env_, stack, len);
+      }
+      mrb_value value() { return mrb_obj_value(&proc_); }
+#endif
+      static void init(mrb_state* M, struct RProc& proc, struct REnv& env, mrb_value* stack, mrb_int len) {
         env.tt = MRB_TT_ENV;
         env.gc_color = MRB_GC_RED;
         env.c = mrb_vm_ci_target_class(M->c->ci);
@@ -2041,12 +2055,18 @@ if $PROGRAM_NAME == __FILE__
         proc.body.func = bc2cpp_block_thunk;
         proc.e.env = &env;
       }
-      mrb_value value() { return mrb_obj_value(&proc); }
-#endif
-      Bc2cppStackBlock(const Bc2cppStackBlock&) = delete;
-      Bc2cppStackBlock& operator=(const Bc2cppStackBlock&) = delete;
+      // The wrapper for code that may keep the block or run it by name: a heap RProc over a copy of the env values.
+      mrb_value proc() {
+        struct RProc* p = bc2cpp_heap_proc(M_, fn_, len_, env_vals_);
+        mrb_value v = mrb_obj_value(p);
+        struct REnv* e = MRB_PROC_ENV(p);
+        for (mrb_int i = 0; i < len_; i++) e->stack[i] = bc2cpp_env_block(M_, e->stack[i]);
+        return v;
+      }
+      Bc2cppBlock(const Bc2cppBlock&) = delete;
+      Bc2cppBlock& operator=(const Bc2cppBlock&) = delete;
     };
-    // A frame-local block (a Bc2cppStackBlock, red) must not go into a heap env: the frame ends with the call, but the
+    // A frame-local block (a Bc2cppBlock, red) must not go into a heap env: the frame ends with the call, but the
     // env can outlive it (the arena keeps the heap RProc that holds it), and mrb_gc_mark would read the dead frame. A
     // frame-local block is copied to a heap RProc with the same entry and env values; a heap block is returned as is.
     static mrb_value bc2cpp_env_block(mrb_state* M, mrb_value blk) {
@@ -2144,7 +2164,7 @@ if $PROGRAM_NAME == __FILE__
       mrb_gv_set(M, done, mrb_true_value());
       mrb_define_method(M, M->proc_class, "arity", bc2cpp_proc_arity_m, MRB_ARGS_NONE());
       struct RClass* found = M->proc_class;
-      mrb_method_t method = mrb_method_search_vm(M, &found, mrb_intern_lit(M, "parameters"));
+      mrb_method_t method = bc2cpp_find_method(M, &found, mrb_intern_lit(M, "parameters"));
       if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
         bc2cpp_orig_proc_parameters = MRB_METHOD_CFUNC(method);
         mrb_define_method(M, M->proc_class, "parameters", bc2cpp_proc_parameters_m, MRB_ARGS_OPT(1));
@@ -2192,14 +2212,76 @@ if $PROGRAM_NAME == __FILE__
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
-    // SSEND_HELPER: the one by-name self send of a class body (include, attr_*): visibility is ignored, as mrb_funcall does.
+    // SSEND_HELPER: a class body's other by-name self send (extend, ...): visibility is ignored, as mrb_funcall does.
     [[maybe_unused]] static mrb_value bc2cpp_ssend(mrb_state* M, mrb_value self, mrb_sym mid, std::initializer_list<mrb_value> args) {
-      return mrb_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
+      return bc2cpp_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
     }
-    // PROC_CALL_HELPER: `x.call(*args)` in a core body; a plain Proc is yielded to, anything else is sent `call`.
+    // CLASS_BODY_INCLUDE: Module#include (class.c mrb_mod_include) without the by-name send of `include`. Last module
+    // first; each module is then sent its `included` hook (a Ruby method, possibly compiled). Returns the class.
+    [[maybe_unused]] static mrb_value bc2cpp_mod_include(mrb_state* M, mrb_value self, std::initializer_list<mrb_value> args) {
+      struct RClass* c = mrb_class_ptr(self);
+      mrb_sym included = mrb_intern_lit(M, "included");
+      for (mrb_int i = (mrb_int)args.size(); i-- > 0;) {
+        mrb_value m = args.begin()[i];
+        mrb_check_type(M, m, MRB_TT_MODULE);
+        mrb_include_module(M, c, mrb_class_ptr(m));
+        bc2cpp_funcall_argv(M, m, included, 1, &self);
+      }
+      return self;
+    }
+    // CLASS_BODY_ATTR: Module#attr_reader / attr_writer (class.c mod_attr_define): a public cfunc method over the ivar name
+    // in its env, as mruby builds it (visibility is not applied to it there either). Returns nil.
+    static mrb_value bc2cpp_attr_get(mrb_state* M, mrb_value obj) {
+      return mrb_iv_get(M, obj, mrb_obj_to_sym(M, mrb_proc_cfunc_env_get(M, 0)));
+    }
+    static mrb_value bc2cpp_attr_set(mrb_state* M, mrb_value obj) {
+      mrb_value val = mrb_get_arg1(M);
+      mrb_iv_set(M, obj, mrb_obj_to_sym(M, mrb_proc_cfunc_env_get(M, 0)), val);
+      return val;
+    }
+    [[maybe_unused]] static mrb_value bc2cpp_mod_attr(mrb_state* M, mrb_value self, bool reader, bool writer, std::initializer_list<mrb_value> args) {
+      struct RClass* c = mrb_class_ptr(self);
+      int ai = mrb_gc_arena_save(M);
+      for (int pass = 0; pass < 2; pass++) {
+        if (!(pass == 0 ? reader : writer)) continue;
+        for (const mrb_value* a = args.begin(); a != args.end(); a++) {
+          mrb_sym method = mrb_obj_to_sym(M, *a);
+          mrb_int len;
+          const char* nm = mrb_sym_name_len(M, method, &len);
+          std::string ivar = "@" + std::string(nm, (size_t)len);
+          mrb_sym ivsym = mrb_intern(M, ivar.data(), (mrb_int)ivar.size());
+          mrb_iv_name_sym_check(M, ivsym);
+          mrb_value name = mrb_symbol_value(ivsym);
+          if (pass == 1) method = mrb_intern(M, (std::string(nm, (size_t)len) + "=").c_str(), len + 1);
+          struct RProc* p = bc2cpp_heap_proc(M, pass == 0 ? bc2cpp_attr_get : bc2cpp_attr_set, 1, &name);
+          p->flags |= pass == 0 ? MRB_PROC_NOARG : 0;
+          mrb_method_t m;
+          MRB_METHOD_FROM_PROC(m, p);
+          mrb_define_method_raw(M, c, method, m);
+          mrb_gc_arena_restore(M, ai);
+        }
+      }
+      return mrb_nil_value();
+    }
+    // PROC_CALL_HELPER: `x.call(*args)` in a core body. A plain Proc is yielded to; any other receiver has `call` looked
+    // up once and the found method run with no second lookup (visibility as OP_SEND checks it; a missing method goes
+    // through method_missing / the NoMethodError of mrb_funcall_with_method).
+    extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
     [[maybe_unused]] static mrb_value bc2cpp_proc_call_argv(mrb_state* M, mrb_value recv, mrb_int argc, const mrb_value* argv) {
       if (mrb_proc_p(recv) && mrb_class(M, recv) == M->proc_class) return bc2cpp_yield_argv(M, recv, argc, argv);
-      return mrb_funcall_argv(M, recv, MRB_SYM(call), argc, argv);
+      // Interned by name: a presym id is only valid in the library the header came from (fixture builds mix them).
+      mrb_sym call_id = mrb_intern_lit(M, "call");
+      struct RClass* c = mrb_class(M, recv);
+      mrb_method_t m = bc2cpp_find_method(M, &c, call_id);
+      if (!MRB_METHOD_UNDEF_P(m)) {
+        if (m.flags & MRB_METHOD_PRIVATE_FL) {
+          mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", call_id, recv);
+        }
+        if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) {
+          mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", call_id, recv);
+        }
+      }
+      return mrb_funcall_with_method(M, recv, call_id, &m, c, argc, argv, mrb_nil_value());
     }
     // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
     // a Ruby call does, and a value that does not convert raises TypeError.
@@ -2451,7 +2533,7 @@ if $PROGRAM_NAME == __FILE__
       struct RClass* c = owner;
       MRB_CLASS_ORIGIN(c);
       c = c->super;
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
       return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk);
     }

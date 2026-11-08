@@ -97,7 +97,7 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
              es.match?(/Bag_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\);/) &&
              eb.match?(/Bag_each_impl\(M, r\d+, mrb_obj_value\(bc2cpp_blk_proc_\d+\)\);/))
   check.call('block each: the block owner call stays as the else',
-             es.match?(/bc2cpp_owner_call\(M, r\d+, \d+, 0, BC2CPP_OWNERS\([^)]*\), bc2cpp_blk_heap_\d+\(\), 0\)/))
+             es.match?(/bc2cpp_owner_call\(M, r\d+, \d+, 0, BC2CPP_OWNERS\([^)]*\), bc2cpp_blk_stack_\d+\.proc\(\), 0\)/))
   tg = body.call(code, 'tg')
   check.call('a block to a definition that takes none: no block arm',
              !tg.include?('STATIC_OWNER_ARMS') && !tg.match?(/Bag_tag_impl\(M, [^;]*blk/))

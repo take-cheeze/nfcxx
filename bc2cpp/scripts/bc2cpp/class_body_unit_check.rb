@@ -221,8 +221,8 @@ suite.compile(FROZEN) do |ireps, root|
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
   code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s
-  suite.check('a self send runs by name on self and a literal freeze is a direct freeze',
-              code.include?('bc2cpp_ssend(M, self, mrb_intern_cstr(M, ') && !code.include?('left to the VM') &&
+  suite.check('attr_reader is a direct helper call on self and a literal freeze is a direct freeze',
+              code.include?('bc2cpp_mod_attr(M, self, true, false, {') && !code.include?('left to the VM') &&
               code.include?('r1 = mrb_obj_freeze(M, r1);') && !code.include?('owner_call'))
 end
 

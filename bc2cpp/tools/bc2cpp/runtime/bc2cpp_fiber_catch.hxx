@@ -117,7 +117,7 @@ static mrb_value bc2cpp_throw_dyn(mrb_state* M,
   struct RClass* kernel = M->kernel_module;
   struct RClass* found = kernel;
   mrb_method_t method =
-      mrb_method_search_vm(M, &found, mrb_intern_lit(M, "catch"));
+      bc2cpp_find_method(M, &found, mrb_intern_lit(M, "catch"));
   if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_PROC_P(method) &&
       !MRB_PROC_CFUNC_P(MRB_METHOD_PROC(method)))
     bc2cpp_dyn_register((void*)MRB_METHOD_PROC(method), bc2cpp_catch_dyn, 0, 1);
