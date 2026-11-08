@@ -20,11 +20,11 @@ DEPENDENCIES = {
   'bc2cpp_heap_proc' => { pattern: /\bbc2cpp_heap_proc\w*/, count: 98 },
   'Bc2cppHeapBlock' => { pattern: /\bBc2cppHeapBlock\b/, count: 0 },
   'bc2cpp_yield_foreign' => { pattern: /\bbc2cpp_yield_foreign\w*/, count: 27 },
-  'mrb_protect' => { pattern: /\bmrb_protect\w*/, count: 18 },
+  'mrb_protect' => { pattern: /\bmrb_protect\w*/, count: 10 },
   'mrb_gc_protect' => { pattern: /\bmrb_gc_protect\w*/, count: 20 },
   'mrb_yield' => { pattern: /\bmrb_yield\w*/, count: 14 },
   'mrb_method_search_vm' => { pattern: /\bmrb_method_search_vm\w*/, count: 5 },
-  'mrb_exec_irep' => { pattern: /\bmrb_exec_irep\w*/, count: 5 },
+  'mrb_exec_irep' => { pattern: /\bmrb_exec_irep\w*/, count: 1 },
   'bc2cpp_resumable_exec' => { pattern: /\bbc2cpp_resumable_exec\w*/, count: 0 }
 }.freeze
 

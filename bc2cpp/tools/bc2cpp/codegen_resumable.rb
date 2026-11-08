@@ -1705,7 +1705,6 @@ class CodeGen
   RESUMABLE_HELPERS_CPP = <<~'CPP'
     // RESUMABLE_HELPERS -- see codegen_resumable.rb (ADR 0273).
     #include <initializer_list>
-    extern "C" mrb_value mrb_exec_irep(mrb_state*, mrb_value, const struct RProc*);
     // Slots 0 and 1 of `regs` carry the yielded and the resumed value; the registers follow.
     // The GC marks `regs` through the RData's hidden ivar, and the array never grows.
     struct Bc2cppResumeFrame {

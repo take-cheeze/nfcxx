@@ -59,7 +59,12 @@ module EntryHeader
     #include <mruby/class.h>
     #include <mruby/data.h>
     #include <mruby/error.h>
+    #include <mruby/proc.h>
+    #include <mruby/throw.h>
     #include <mruby/variable.h>
+    #ifndef MRB_USE_CXX_EXCEPTION
+    #error "the entry header catches mruby's C++ exceptions: build mruby with MRB_USE_CXX_EXCEPTION"
+    #endif
     // The class at `path` ("A::B"), or NULL when a segment is not a defined class or module. No raise.
     static inline struct RClass* bc2cpp_entry_class(mrb_state* M, const char* path) {
       struct RClass* c = M->object_class;
@@ -80,6 +85,15 @@ module EntryHeader
     // kept; with no protected region active a raise is caught, left in M->exc, and the exception object returned.
     // The one arena root of this header.
     static inline void bc2cpp_entry_root(mrb_state* M, mrb_value v) { mrb_gc_protect(M, v); }
+    // vm.c cipop, for the frames a raise left.
+    static inline void bc2cpp_entry_ci_pop(mrb_state* M) {
+      struct mrb_context* c = M->c;
+      mrb_callinfo* ci = c->ci;
+      mrb_vm_ci_env_clear(M, ci);
+      struct RProc* blk = ci->blk;
+      if (blk && !MRB_PROC_STRICT_P(blk) && MRB_PROC_ENV(blk) == mrb_vm_ci_env(&ci[-1])) blk->flags |= MRB_PROC_ORPHAN;
+      c->ci--;
+    }
     template <class F>
     static inline mrb_value bc2cpp_entry_call(mrb_state* M, mrb_value self, F&& body) {
       if (M->jmp) {
@@ -90,14 +104,36 @@ module EntryHeader
         bc2cpp_entry_root(M, v);
         return v;
       }
-      struct Ctx { F* body; } ctx = { &body };
-      mrb_bool error = FALSE;
       M->exc = NULL;
       bc2cpp_entry_root(M, self);
-      mrb_value v = mrb_protect_error(M, [](mrb_state*, void* ud) -> mrb_value {
-        return (*static_cast<Ctx*>(ud)->body)();
-      }, &ctx, &error);
-      // The protect call clears M->exc; a by-name call leaves the exception there.
+      // The VM protect call as a typed catch (bc2cpp_protect): the raise is a thrown mrb_jmpbuf*.
+      struct mrb_jmpbuf c_jmp;
+      mrb_value v;
+      int ai = mrb_gc_arena_save(M);
+      struct mrb_context* c = M->c;
+      ptrdiff_t ci_index = c->ci - c->cibase;
+      bool error = false;
+      try {
+        M->jmp = &c_jmp;
+        v = body();
+        M->jmp = NULL;
+      } catch (mrb_jmpbuf* e) {
+        if (e != &c_jmp) throw;
+        M->jmp = NULL;
+        v = mrb_obj_value(M->exc);
+        error = true;
+        bc2cpp_entry_root(M, v);
+        if (M->c == c) {
+          while (c->ci - c->cibase > ci_index) bc2cpp_entry_ci_pop(M);
+        } else {
+          c = M->c;
+          while (c->ci > c->cibase && c->ci->cci == 2) bc2cpp_entry_ci_pop(M);
+        }
+        if (M->errinfo && (c->ci - c->cibase) < M->errinfo_ci_depth) M->errinfo = NULL;
+      }
+      mrb_gc_arena_restore(M, ai);
+      bc2cpp_entry_root(M, v);
+      // A by-name call leaves the exception in M->exc.
       if (error) M->exc = mrb_obj_ptr(v);
       return v;
     }
