@@ -106,6 +106,13 @@ SOURCE = <<~RUBY
     def empty?; false; end
     def fwd(*a); push(*a); end
   end
+  class SplW
+    def put(a, b = 0); [:put, a, b]; end
+  end
+  class SplTee
+    def initialize; @w = SplW.new; end
+    def go(*a); @w.put(*a); end
+  end
   class Probe
     def del(o, x); o.delete(x); end
     def nm(o); o.name; end
@@ -116,9 +123,10 @@ SOURCE = <<~RUBY
     def em(o); o.empty?; end
     def sp(o, a); o.push(*a); end
     def fw(o, a); o.fwd(*a); end
+    def tg(t, a); t.go(*a); end
   end
 RUBY
-OWNERS = %w[Bag Probe].freeze
+OWNERS = %w[Bag Probe SplW SplTee].freeze
 
 body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
 owners_of = ->(text) { text[/BC2CPP_OWNERS\(([^)]*)\)/, 1].to_s.scan(/"([^"]+)"/).flatten }
@@ -153,6 +161,10 @@ Dir.mktmpdir('outside-owner-call') do |dir|
   fwd = code[/^mrb_value Bag_fwd_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
   check.call('push(*a) in a Bag body: the owner call over the Array\'s items, no by-name send',
              fwd.match?(/bc2cpp_owner_call_argv\(M, self, /) && !fwd.include?('bc2cpp_funcall_argv('))
+  tee = code[/^mrb_value SplTee_go_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
+  check.call('put(*a) on a typed receiver: the compiled arities stay direct arms and any other length is the owner call',
+             tee.include?('case 1:') && tee.include?('case 2:') && !tee.include?('bc2cpp_funcall_argv(') &&
+               tee.match?(/default:\s*r\d+ = bc2cpp_owner_call_argv\(M, /))
   check.call('helper emitted once', code.scan('static mrb_value bc2cpp_owner_call(').size == 1)
   check.call('closed-world summary keeps no core_or_native', !err.include?('KEPT core_or_native'))
 
@@ -210,6 +222,10 @@ Dir.mktmpdir('outside-owner-call') do |dir|
         row(M, "bag.fwd(*[2])", "fw", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[2]"));
         row(M, "bag.fwd(*[2, 3])", "fw", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[2, 3]"));
         row(M, "bag.fwd(*[])", "fw", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[]"));
+        row(M, "tee.go(*[1])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[1]"));
+        row(M, "tee.go(*[1, 2])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[1, 2]"));
+        row(M, "tee.go(*[1, 2, 3])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[1, 2, 3]"));
+        row(M, "tee.go(*[])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[]"));
         row(M, "array.empty?", "em", eval(M, "[]"), 0, mrb_nil_value());
         row(M, "bag.empty?", "em", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 0, mrb_nil_value());
         row(M, "array subclass.empty?", "em", eval(M, "class SubArr < Array; end; SubArr.new"), 0, mrb_nil_value());
