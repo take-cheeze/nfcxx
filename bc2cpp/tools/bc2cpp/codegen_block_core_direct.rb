@@ -216,7 +216,18 @@ module BlockCoreDirectFallback
 
   def stack_block_callee?(label)
     (@stack_block_callees ||= {}).fetch(label) do
-      @stack_block_callees[label] = BlockSelf.plain_yielder_why(@ireps[label], @ireps).nil?
+      irep = @ireps[label]
+      @stack_block_callees[label] = BlockSelf.plain_yielder_why(irep, @ireps).nil? && !keeps_captured_block?(irep)
+    end
+  end
+
+  # A nested block that may outlive the call (its registers are boxed into a heap cells Array, or copied for a Fiber
+  # body) holds the callee's block among them, and BlockSelf only proves how the callee uses it. Such a callee gets a
+  # heap block: `def mk(&b); Enumerator.new { |y| y << b.call }; end` would keep a dead frame-local one.
+  def keeps_captured_block?(irep, upvars = [], blk_available = true, levels = [])
+    recognize_block_fallback_regions(irep, available_upvars: upvars, blk_available: blk_available, cell_levels: levels).any? do |region|
+      region[:boxed] || region[:by_value] ||
+        keeps_captured_block?(region[:block_irep], region[:upvars], region[:needs_blk], region_cell_levels(region))
     end
   end
 

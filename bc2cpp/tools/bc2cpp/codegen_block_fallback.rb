@@ -561,7 +561,7 @@ class CodeGen
       region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
                  block_irep: block_irep, name: name, n: n, kw: kw,
                  self_implicit: paired.op == :SSENDB, upvars: upvars, needs_blk: needs_blk,
-                 parent_irep: irep, boxed: boxed }
+                 parent_irep: irep, boxed: boxed, by_value: by_value }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
       # forwarded by every enclosing block, so it is needed for a `return` at any depth.
       region[:needs_brk] = BytecodeIR.for(block_irep).op?(:BREAK)
