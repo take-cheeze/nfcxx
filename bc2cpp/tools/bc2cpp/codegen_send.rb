@@ -18,9 +18,19 @@ class CodeGen
     compile_send_site(insn, **kwargs)
   end
 
-  def compile_send_site(insn, self_implicit:, irep: nil, idx: nil, owner_def: nil,
-                        call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_receiver_reg: nil,
-                        trace_reg_offset: 0, typed_fallback: nil)
+  # EXPLICIT_RECEIVER_VISIBILITY: the flag tells the dispatch helpers below (poly_candidates) that this site is an
+  # explicit-receiver OP_SEND, which raises for a private or protected method instead of running it.
+  def compile_send_site(insn, self_implicit:, **kwargs)
+    saved = @explicit_visibility_site
+    @explicit_visibility_site = !self_implicit
+    compile_send_site_body(insn, self_implicit: self_implicit, **kwargs)
+  ensure
+    @explicit_visibility_site = saved
+  end
+
+  def compile_send_site_body(insn, self_implicit:, irep: nil, idx: nil, owner_def: nil,
+                             call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_receiver_reg: nil,
+                             trace_reg_offset: 0, typed_fallback: nil)
     # ELEMENT_CLASS_SUPPORT: consume the element hint before anything else
     # (including compiles_clean? probes that re-enter compile_method), so no other
     # call site can read it.
@@ -1314,6 +1324,7 @@ class CodeGen
     if !self_implicit && !via_element && !exact_class_dispatch && irep && (idx || trace_idx)
       union_plan = exact_flow_user_union_plan(irep, idx || trace_idx,
                                               unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset), name, n)
+      union_plan = nil if union_plan && !self_implicit && !union_plan.all? { |_, t| explicit_call_visible?(name, t) }
       if union_plan
         return user_receiver_union_code(union_plan, name, d, recv, argv) if union_plan.map(&:last).uniq.size > 1
 
@@ -1344,6 +1355,13 @@ class CodeGen
                                     definition.copy_owner == target.owner && definition.copy_irep == target.irep
                                 end
       target = nil unless @other_owners&.include?(target.owner) || module_function_emitted
+    end
+
+    # EXPLICIT_RECEIVER_VISIBILITY: a direct `_impl` call would run a private or protected method that OP_SEND raises for;
+    # only a public def whose visibility nothing in the program changes is bound, the rest keeps the checked dispatch.
+    unless self_implicit || explicit_call_visible?(name, target)
+      target = nil
+      ivar_accessor_target = nil unless explicit_call_visible?(name, ivar_accessor_target)
     end
 
     if target
@@ -1768,6 +1786,12 @@ class CodeGen
 
     target, known = closed_world_lookup_target(name, receiver_class, Set.new)
     known && target&.owner != receiver_class ? target : nil
+  end
+
+  # Nil target is vacuously fine. The registry follows `private`/`public` in the defining body only, so a name any other
+  # visibility call could touch (visibility_stable?) is judged at run time.
+  def explicit_call_visible?(name, target)
+    target.nil? || (target.visibility == :public && (@closed_world.nil? || @closed_world.visibility_stable?(name)))
   end
 
   # Follow the proven mruby ancestor order: prepended modules, the owner,

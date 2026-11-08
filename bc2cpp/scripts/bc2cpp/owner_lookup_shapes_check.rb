@@ -44,6 +44,29 @@ SRC = <<~'RUBY'
     private :size
     def hidden; :h; end
     private :hidden
+    def hid_arg(x); [:ha, x]; end
+    private :hid_arg
+    def hid_opt(a, b = 2); [a, b]; end
+    private :hid_opt
+    def hid_self; self.hidden; end
+    def hid_implicit; hidden; end
+  end
+  class Pub; def shown(x); x + 1; end; end
+  class Vault
+    def prot; :p; end
+    protected :prot
+    def peek(o); o.prot; end
+  end
+  class Opened
+    def op1; :o; end
+    private :op1
+  end
+  class VisParent; def vis2; :par; end; end
+  class VisChild < VisParent; private :vis2; end
+  class OverParent; def vis3; :par3; end; end
+  class OverKid < OverParent
+    def vis3; :kid3; end
+    private :vis3
   end
   class OwnProc < Proc; def call(*a); [:own, a]; end; end
   class SubProc < Proc; end
@@ -65,6 +88,17 @@ SRC = <<~'RUBY'
     def tg(o); o.tag; end
     def via_send(o); o.send(:hidden); end
     def via_splat_size(o, *a); o.size(*a); end
+    def via_plain(o); o.hidden; end
+    def via_arg(o); o.hid_arg(1); end
+    def via_opt(o); o.hid_opt(1); end
+    def via_new; Secret.new.hidden; end
+    def via_pub(o); o.shown(1); end
+    def via_send_arg(o); o.send(:hid_arg, 2); end
+    def via_public_send_arg(o); o.public_send(:hid_arg, 2); end
+    def out_prot(o); o.prot; end
+    def op(o); o.op1; end
+    def vis2(o); o.vis2; end
+    def vis3(o); o.vis3; end
     def via_public_send(o); o.public_send(:hidden); end
     def rt(o, name); o.respond_to?(name); end
     def mk(&b); b; end
@@ -88,12 +122,17 @@ SRC = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[Late Pre Loud Mid Base Kid Ghost Secret Probe Wrap Wrapped Array String Hash Symbol Range Kernel Object BasicObject Module Class
-            Comparable Integer NilClass Proc Method].freeze
+OWNERS = %w[Late Pre Loud Mid Base Kid Ghost Secret Pub Vault Opened VisParent VisChild OverParent OverKid Probe Wrap Wrapped Array String
+            Hash Symbol Range Kernel Object BasicObject Module Class Comparable Integer NilClass Proc Method].freeze
 code = suite.generate(SRC, OWNERS)
 lookups = code.scan(/\bmrb_method_search_vm\(/).size
 suite.check("one method-table lookup call in the generated unit (the seam), found #{lookups}", lookups == 1)
 suite.check('the seam is used', code.include?('bc2cpp_find_method('))
+# A public def is still a direct call; a private one is not (the visibility check lives in the dispatch).
+pub_site = code[/^mrb_value Probe_via_pub_impl\(mrb_state\* M.*?^}/m]
+suite.check('a public single-owner call stays a direct _impl call', pub_site&.include?('Pub_shown_impl(M,'))
+suite.check('a private single-owner call is not a direct _impl call',
+            !code.match?(/Secret_(hidden|hid_arg|hid_opt)_impl\(M, r\d+/))
 
 DRIVER = <<~'RUBY'
   pr = Probe.new
@@ -190,6 +229,22 @@ DRIVER = <<~'RUBY'
   show.call('splat private size') { pr.via_splat_size(Secret.new) }
   show.call('splat public') { pr.via_splat_size([1, 2]) }
   show.call('public_send private') { pr.via_public_send(Secret.new) }
+  show.call('private plain call') { pr.via_plain(Secret.new) }
+  show.call('private call with args') { pr.via_arg(Secret.new) }
+  show.call('private call with an optional argument') { pr.via_opt(Secret.new) }
+  show.call('private call on a fresh instance') { pr.via_new }
+  show.call('public call stays direct and works') { pr.via_pub(Pub.new) }
+  show.call('private via literal self receiver') { Secret.new.hid_self }
+  show.call('private via implicit self') { Secret.new.hid_implicit }
+  show.call('send private with args') { pr.via_send_arg(Secret.new) }
+  show.call('public_send private with args') { pr.via_public_send_arg(Secret.new) }
+  show.call('protected from the same class') { Vault.new.peek(Vault.new) }
+  show.call('protected from outside') { pr.out_prot(Vault.new) }
+  show.call('private then reopened public (before)') { pr.op(Opened.new) }
+  class Opened; public :op1; end
+  show.call('private then reopened public (after)') { pr.op(Opened.new) }
+  show.call('subclass makes inherited method private') { [pr.vis2(VisParent.new), (pr.vis2(VisChild.new) rescue $!.class)] }
+  show.call('subclass overrides with private') { [pr.vis3(OverParent.new), (pr.vis3(OverKid.new) rescue $!.class)] }
   show.call('module super via dispatch') { pr.tg(Wrapped.new) }
   show.call('module super via self call') { Wrapped.new.go }
   show.call('send undefined') { pr.via_send(Object.new) }
@@ -266,6 +321,9 @@ suite.behaviour(DRIVER) do |interpreted, compiled|
   suite.check('include order', compiled.to_a.include?('include order: "loud"'))
   suite.check('public_send of a private method raises',
               compiled.to_a.any? { |l| l.start_with?('public_send private: NoMethodError: private method') })
+  suite.check('private plain call raises like the interpreter',
+              compiled.to_a.any? { |l| l.start_with?('private plain call: NoMethodError: private method \'hidden\' called for') })
+  suite.check('send reaches a private method', compiled.to_a.include?('send private with args: [:ha, 2]'))
   suite.check('module super reaches the superclass',
               compiled.to_a.include?('module super via self call: "wbase"'))
   suite.check('the interpreter produced the rows', interpreted.to_a.size > 20)
