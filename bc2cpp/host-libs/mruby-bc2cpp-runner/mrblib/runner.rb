@@ -21,7 +21,7 @@ module BC2CPPRunner
       # The report and trace modules the entry requires only under a BC2CPP_*_REPORT or _TRACE variable prepend themselves to
       # CodeGen and register at_exit writers: they stay unloaded, as under CRuby, and registration gets an inert module to
       # attach their compiled methods to.
-      DEBUG_MODULES.each { |name| Object.const_set(name, Module.new) unless Object.const_defined?(name) }
+      DEBUG_MODULES.each { |name| Object.const_set(name, placeholder) unless Object.const_defined?(name) }
       register_compiled
       BC2CPP_MAIN.call
     else
@@ -30,6 +30,15 @@ module BC2CPPRunner
   ensure
     # bc2cpp writes its generated code from at_exit handlers (ShardOutput, CompactOutput capture stdout and emit at exit).
     ExitHandlers.run
+  end
+
+  # A module whose nested constants (SiteOriginTable::Writer, ...) are further placeholders.
+  def self.placeholder
+    Module.new do
+      def self.const_missing(name)
+        const_set(name, BC2CPPRunner.placeholder)
+      end
+    end
   end
 
   # One baked tool, by the name it was baked under, as tools/bc2cpp/mruby_tool.rb does for bin/mruby: ARGV is
