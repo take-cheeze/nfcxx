@@ -33,9 +33,14 @@
 #     file with a reflective send counts every symbol of its bytecode, never a comment word or a local variable.
 #     engine_ancestry follows superclasses, mruby's native exception chain included, and gives up (:all) on any
 #     other native superclass.
+#     A Symbol only given to attr_* or as the name of a to_enum on a core self names no lookup; an alias counts
+#     its two operands, not every symbol of the body.
+#   INERT_STRING_ARGS / MRB_OPSYM: a native format, message, operator-table key or compared literal, and an operator
+#     or `@ivar` presym, name no method.
 #   CLOSED_LINKED_ONLY: the closed scan reads no core mruby-* gem outside the closed build's gem closure (HAL gems
 #     stay), no external gem it leaves out, no engine mrblib file its rake swaps out and no app/ source; it reads
-#     the closed host, scripts/bc2cpp/trace_host.cxx.
+#     the closed host, scripts/bc2cpp/trace_host.cxx. The desktop application (the repository's src/) is no
+#     part of that binary either.
 #   NATIVE_COMMENTS: a literal in a C comment names nothing; text the comment scan cannot read is kept whole.
 #   FRAGMENT_USES (needs MRBC; skipped without it): a pool literal stays a fragment only when a load of it may reach
 #     a built string that goes on somewhere -- a concatenation without a non-name character whose result escapes
@@ -150,6 +155,47 @@ check('naming_macros: a stringified message is no name, a suffixed stringified n
 msg_tokens = Set.new
 S.native_name_tokens(%(int w = 1; GET_NUM(n, width);\n), msg_tokens, message_naming)
 check('native: a message argument is no name token', !msg_tokens.include?('width'))
+
+# INERT_STRING_ARGS: a format, message, operator-table key or compared operand is read, never interned.
+inert = <<~'C'
+  mrb_get_args(M, "z", &path);
+  mrb_sys_fail(M, "close");
+  struct { const char* op; const char* name; } t = { OPERATOR_SYMBOL("+", "add"), 0 };
+  if (std::strcmp(mid, "warn_once") == 0 || strncmp(mid, "warn_stub", 9) == 0) return;
+  mrb_funcall(M, self, "close", 0);
+  mrb_get_args(M, fmt, &path);
+C
+inert_tokens = Set.new
+S.native_name_tokens(inert, inert_tokens, [])
+check('native: a format, message, operator key and compared literal name nothing',
+      %w[z add warn_once warn_stub].none? { |n| inert_tokens.include?(n) })
+check('native: the same literal as a real call argument still names a method', inert_tokens.include?('close'))
+check('native: only the exact position is inert', S.blank_inert_string_args('mrb_get_args(M, "z", "other");').include?('"other"'))
+
+# MRB_OPSYM / MRB_IVSYM name an operator / `@ivar`, never the identifier in the parentheses, so a macro applying
+# them to its parameter makes no method name of its argument.
+sigil = <<~'C'
+  #define OP_MATH(op_name) do { mid = MRB_OPSYM(op_name); goto L_SEND_SYM; } while (0)
+  #define iv_get(name) mrb_iv_get(mrb, self, MRB_IVSYM(name))
+  #define CALL_Q(v, name) mrb_funcall_id(M, v, MRB_SYM_Q(name), 0)
+C
+sigil_naming = S.naming_macros_in([sigil])
+check('naming_macros: an operator or ivar symbol is no method name, a presym one is',
+      !sigil_naming.include?('OP_MATH') && !sigil_naming.include?('iv_get') && sigil_naming.include?('CALL_Q'))
+op_tokens = Set.new
+S.native_name_tokens("OP_MATH(add); x = MRB_OPSYM(sub); iv_get(flags);\n", op_tokens, sigil_naming)
+check('native: MRB_OPSYM(add) is the operator +, not a method named add',
+      %w[add sub flags].none? { |n| op_tokens.include?(n) })
+
+# PROC_SPEC_STAND_IN: the stand-in bc2cpp.rb emits is read by Proc#arity and Proc#parameters only, so the text
+# bc2cpp.rb really emits holds no bytecode proc.
+emitter = File.read(File.expand_path('../../tools/bc2cpp/bc2cpp.rb', __dir__))
+stand_in_text = emitter[/    static mrb_value bc2cpp_proc_spec_stand_in\(.*?(?=    \/\/ Called once per state from the owner)/m]
+check('bytecode proc: bc2cpp.rb\'s Proc stand-in is found', !stand_in_text.nil? && stand_in_text.match?(S::BYTECODE_PROC))
+check('bytecode proc: the stand-in\'s definition and its two reads are no bytecode proc',
+      stand_in_text && !S.runnable_proc_text(stand_in_text).match?(S::BYTECODE_PROC))
+check('bytecode proc: any other use of the stand-in keeps the text',
+      S.runnable_proc_text("#{stand_in_text}\nx = bc2cpp_proc_spec_stand_in(M, p, spec);\n").match?(S::BYTECODE_PROC))
 
 
 # --- SUFFIX_BASES ---
@@ -300,7 +346,7 @@ check('the full scan reads the workflows', open_ruby.any? { |p| p.start_with?("#
 unlinked = S.closed_unlinked_dirs(root)
 check('linked only: a core gem outside the closure, an external gem the build leaves out, app/',
       %W[#{root}/3rd/mruby/mrbgems/mruby-socket/ #{root}/3rd/mruby/mrbgems/mruby-enum-lazy/
-         #{root}/3rd/mruby-onig-regexp/ #{root}/app/].all? { |d| unlinked.include?(d) })
+         #{root}/3rd/mruby-onig-regexp/ #{root}/app/ #{root}/src/].all? { |d| unlinked.include?(d) })
 check('linked only: a linked core gem, a HAL gem and a linked external gem stay',
       %W[#{root}/3rd/mruby/mrbgems/mruby-io/ #{root}/3rd/mruby/mrbgems/hal-posix-io/
          #{root}/3rd/mruby-stringio/].none? { |d| unlinked.include?(d) })
@@ -308,7 +354,7 @@ check('linked only: an unlinked gem\'s mrblib and a swapped-out engine file are 
       ruby.none? { |p| p.include?('/mruby-enum-lazy/') || p.end_with?('/scene/map_tts.rb') } &&
       open_ruby.any? { |p| p.end_with?('/scene/map_tts.rb') })
 check('linked only: the closed host is read, the device apps are not',
-      natives.include?("#{root}/scripts/bc2cpp/trace_host.cxx") && natives.none? { |p| p.start_with?("#{root}/app/") })
+      natives.include?("#{root}/scripts/bc2cpp/trace_host.cxx") && natives.none? { |p| p.start_with?("#{root}/app/", "#{root}/src/") })
 
 # --- NATIVE_COMMENTS ---
 commented = %(int n = 1'000; /* "in_block" */ f("keep//this", '"'); // "in_line"\nmrb_funcall(M, v, "real", 0);\n)
@@ -354,6 +400,19 @@ if ENV['MRBC']
       class Object
         def fo = object_self_send
       end
+      class FixAttr
+        attr_accessor :attr_defined_only, :attr_also_escapes
+        def decoy_defined_next; end
+        alias fix_alias_new decoy_defined_next
+        def enum_it(n)
+          return to_enum(:enum_self_name, n) unless block_given?
+          mixed_in_helper(:attr_also_escapes, :to_enum_arg_symbol)
+          to_enum(:enum_name, :second_arg_escapes)
+        end
+      end
+      module FixMixEnum
+        def enum_mixed = to_enum(:enum_in_module)
+      end
     RUBY
     reflective = File.join(tmp, 'reflective.rb')
     File.write(reflective, <<~'RUBY')
@@ -375,6 +434,15 @@ if ENV['MRBC']
     check('core: an unknown receiver counts', tokens.include?('unknown_recv_send'))
     check('core: symbols and identifier strings count',
           tokens.include?('symbol_literal') && tokens.include?('string_literal_name'))
+    check('core: an attr_* argument defines a method and looks nothing up', !tokens.include?('attr_defined_only'))
+    check('core: the name of a to_enum on a core self is looked up on that core object only',
+          !tokens.include?('enum_self_name') && !tokens.include?('enum_name'))
+    check('core: a symbol with another use, or an argument of the name-taking call, still counts',
+          tokens.include?('attr_also_escapes') && tokens.include?('to_enum_arg_symbol') &&
+          tokens.include?('second_arg_escapes'))
+    check('core: the same name in a module (self may be an engine object) still counts', tokens.include?('enum_in_module'))
+    check('core: an alias names its own two operands, not every symbol of its class body',
+          tokens.include?('fix_alias_new') && tokens.include?('decoy_defined_next') && !tokens.include?('enum_it'))
     names = text[reflective]
     check('core: a reflective file loses the receiver rule, not its symbols',
           text.keys == [reflective] && names&.include?('reflective_send_name') &&
