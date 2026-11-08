@@ -311,7 +311,11 @@ module StaticDispatchRegistrations
   # PROC_SPEC_STAND_IN (bc2cpp_proc_spec_stand_in): its irep is read by Proc#arity and Proc#parameters only, never run
   # (no Ruby defines either). Any other use of it keeps the whole text.
   PROC_SPEC_STAND_IN_DEF = /static mrb_value bc2cpp_proc_spec_stand_in\(.*?\n    \}\n/m
-  PROC_SPEC_STAND_IN_CALL = /bc2cpp_proc_spec_stand_in\(M, mrb_proc_ptr\(self\), \*spec\), mrb_intern_lit\(M, "(?:arity|parameters)"\)/
+  # The two reads, as bc2cpp.rb emits them: Proc#arity (mrb_proc_arity) and Proc#parameters (the original cfunc).
+  PROC_SPEC_STAND_IN_CALL = Regexp.union(
+    'spec ? mrb_proc_ptr(bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec)) : mrb_proc_ptr(self);',
+    'return bc2cpp_orig_proc_parameters(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec));'
+  )
 
   # The generated text that can build a proc running bytecode: all of it, but PROC_SPEC_STAND_IN's definition and calls.
   def runnable_proc_text(src)
@@ -586,8 +590,9 @@ module StaticDispatchRegistrations
   #   - a core mruby-* gem outside the closed build's gem closure (bc2cpp_closed_core_gems: mruby-socket,
   #     mruby-enum-lazy, mruby-complex, ...), and an external gem its rpg_maker_gems lines leave out
   #     (mruby-onig-regexp);
-  #   - app/, the device firmwares and their tools: the closed binary is the libmruby above linked into
-  #     scripts/bc2cpp/trace_host.cxx (scripts/bc2cpp/trace_host.bash), which outside_world_files scans instead.
+  #   - app/ (the device firmwares and their tools) and src/ (the desktop application, built only by CMakeLists.txt):
+  #     the closed binary is the libmruby above linked into scripts/bc2cpp/trace_host.cxx
+  #     (scripts/bc2cpp/trace_host.bash), which outside_world_files scans instead.
   def closed_unlinked_dirs(repo_root)
     root = File.expand_path(repo_root)
     core = bc2cpp_closed_core_gems(root).to_set
@@ -598,7 +603,7 @@ module StaticDispatchRegistrations
                                                     .map { |g| "#{root}/3rd/mruby/mrbgems/#{g}/" }
     dirs += %w[mruby-marshal mruby-onig-regexp mruby-stringio].reject { |g| lines.key?(g) }
                                                               .map { |g| "#{root}/3rd/#{g}/" }
-    dirs << "#{root}/app/"
+    dirs << "#{root}/app/" << "#{root}/src/"
   end
 
   # `core`: with closed_only, the closed world's {mrbc:, superclass_of:, struct_owners:} turns on CORE_BYTECODE_TOKENS
@@ -716,11 +721,15 @@ module StaticDispatchRegistrations
   def core_irep_tokens(irep, tokens, self_may, method_name)
     irep.pool.each { |v| tokens << v if v.is_a?(String) && v.match?(IDENT) }
     insns = BytecodeIR.for(irep).each_source.to_a
-    tokens.merge(irep.syms.map(&:to_s)) if insns.any? { |insn, _| %i[ALIAS UNDEF].include?(insn.op) }
     kinds = receiver_kinds(irep)
     insns.each_with_index do |(insn, _), i|
-      if insn.op == :LOADSYM
-        tokens << insn.sym.to_s
+      if %i[ALIAS UNDEF].include?(insn.op)
+        # ALIAS_OPERANDS: the names the instruction itself carries; only an operand the reader cannot name keeps
+        # every symbol of the irep.
+        named = insn.op == :ALIAS ? [insn.sym, insn.first_of(:name)&.value] : [insn.sym]
+        tokens.merge((named.all? ? named : irep.syms).map(&:to_s))
+      elsif insn.op == :LOADSYM
+        tokens << insn.sym.to_s unless unlooked_symbol?(irep, i, insn.reg, self_may)
       elsif SEND_OPS.include?(insn.op)
         kind = kinds[i]
         may = case kind
@@ -736,6 +745,25 @@ module StaticDispatchRegistrations
         tokens << op_name
       end
     end
+  end
+
+  # UNLOOKED_SYMBOLS (core Ruby): a Symbol literal whose every use is a name operand that looks nothing up on an engine
+  # object -- an `attr_*` argument defines a method, and the name of a `to_enum` on self looks it up on self,
+  # which is no engine object when `self_may` is false. Any other use, or a flow query that refuses, keeps the name.
+  ATTR_DEFINERS = %w[attr attr_reader attr_writer attr_accessor].to_set.freeze
+  SELF_LOOKUP_SENDS = %w[to_enum enum_for].to_set.freeze
+
+  def unlooked_symbol?(irep, index, reg, self_may)
+    walked = IrSymbolFlow.follow_forward_uses(irep, index, reg, max_states: BytecodeIR::DATAFLOW_MAX_STATES) do |_use, insn, register|
+      position = register.to_i - insn.reg.to_i
+      next true unless BytecodeIR::Ops::SELF_SEND.include?(insn.op) && insn.plain_fixed_argc? && position.between?(1, insn.argc)
+
+      name = insn.sym.to_s
+      next nil if ATTR_DEFINERS.include?(name) || (!self_may && position == 1 && SELF_LOOKUP_SENDS.include?(name))
+
+      true
+    end
+    walked == false
   end
 
   # Whether self in a method of `owner` may be an engine object (CORE_BYTECODE_TOKENS).
@@ -869,7 +897,7 @@ module StaticDispatchRegistrations
   # Comments are left out (strip_c_comments): a name in one (`/* "count" is "width" */`) is never compiled.
   # `text_tokens`: also receives a naming macro's arguments, which the macro may suffix itself (`#name "="`).
   def native_name_tokens(text, tokens, macros, text_tokens: nil)
-    text = blank_native_definitions(blank_registration_names(strip_c_comments(text)))
+    text = blank_inert_string_args(blank_native_definitions(blank_registration_names(strip_c_comments(text))))
     text.scan(STRING_LITERAL) { |(s)| tokens << unescape(s) }
     unless macros.empty?
       text.scan(/\b(?:#{macros.map { |m| Regexp.escape(m) }.join('|')})\s*\(([^()]*)\)/) do |(args)|
@@ -879,10 +907,35 @@ module StaticDispatchRegistrations
         end
       end
     end
-    text.scan(/MRB_(?:Q?SYM|OPSYM)(?:_([QBE]))?\(\s*(\w+)\s*\)/) do |kind, name|
+    text.scan(/MRB_Q?SYM(?:_([QBE]))?\(\s*(\w+)\s*\)/) do |kind, name|
       tokens << name
       tokens << name + { 'Q' => '?', 'B' => '!', 'E' => '=' }.fetch(kind) if kind
     end
+  end
+
+  # INERT_STRING_ARGS (closed only): a string literal that is the whole of one of these arguments is read, never
+  # interned: mrb_get_args' format, an operator-table key (cdump.c's OPERATOR_SYMBOL names the operator
+  # MRB_OPSYM(key) stands for) and a strcmp-family operand (compared with a name, not looked up). A position of nil
+  # is every argument. mrb_sys_fail's message is not here: it reaches SystemCallError._sys_fail when that class
+  # exists, so CoreNativeCandidates decides it (only while nothing makes SystemCallError).
+  INERT_STRING_ARGS = { 'mrb_get_args' => 1, 'OPERATOR_SYMBOL' => 1, 'strcmp' => nil, 'strncmp' => nil }.freeze
+  INERT_CALL = /(?<![\w.>])(?:std::)?(#{INERT_STRING_ARGS.keys.join('|')})\s*\(/
+  STRING_ARG = /\A"(?:[^"\\\n]|\\.)*"\z/
+
+  def blank_inert_string_args(text)
+    out = nil
+    text.scan(INERT_CALL) do |(fn)|
+      spans = call_arg_spans(text, Regexp.last_match.end(0) - 1)
+      next unless spans
+
+      spans.each_with_index do |(from, to), position|
+        want = INERT_STRING_ARGS.fetch(fn)
+        next unless (want.nil? || want == position) && text[from...to].strip.match?(STRING_ARG)
+
+        (out ||= text.dup)[from...to] = ' ' * (to - from)
+      end
+    end
+    out || text
   end
 
   # NATIVE_CANDIDATES (closed only): each native registration on a literal engine owner (NativeOwnerMap), which the
@@ -979,6 +1032,10 @@ module StaticDispatchRegistrations
     uses.any? { |after| !after.match?(MESSAGE_LITERAL_AFTER_STRINGIFY) }
   end
 
+  # SIGIL_FREE_PRESYM: a presym macro whose argument is the method name itself. MRB_OPSYM(add) is the operator `+` and
+  # MRB_IVSYM / MRB_GVSYM / MRB_CVSYM(x) are `@x` / `$x` / `@@x`: none is a method named by its argument.
+  SIGIL_FREE_PRESYM = /MRB_(?!OPSYM|IVSYM|GVSYM|CVSYM)\w*SYM\w*/
+
   # naming_macros on source texts.
   def naming_macros_in(texts)
     defs = texts.flat_map do |text|
@@ -993,7 +1050,7 @@ module StaticDispatchRegistrations
 
         named = params.split(',').map(&:strip).reject(&:empty?).any? do |param|
           name = Regexp.escape(param.end_with?('...') ? '__VA_ARGS__' : param)
-          stringified_name?(body, name) || body.match?(/MRB_\w*SYM\w*\([^)]*\b#{name}\b/) ||
+          stringified_name?(body, name) || body.match?(/#{SIGIL_FREE_PRESYM}\([^)]*\b#{name}\b/) ||
             (callee && body.match?(/#{callee}[^)]*\b#{name}\b/))
         end
         grew = true if named && naming.add?(macro)
@@ -1225,17 +1282,24 @@ module StaticDispatchRegistrations
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
+    map = NativeOwnerMap.build(native)
+    # One proof, made when first asked, for the name scan and the removal of the Enumerator methods.
+    proof = -> { @enumerator_free_proof ||= enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root) }
     names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, exact_impls: true,
                                                       strip_generated: ->(src) { src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '') },
-                                                      diagnostic_literals: !symbol_lookups.nil?)
+                                                      diagnostic_literals: !symbol_lookups.nil?,
+                                                      enumerator_free: -> { proof.call.holds },
+                                                      names: core_names || Set.new)
     entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") },
                                                    operator_names: !proven.empty?)
-    map = NativeOwnerMap.build(native)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
                                            engine_tuple, symbol_lookups, repo_root)
     ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries, proven)
+    self.core_state = [entries, names, fragments, proven] if core_names
     [CoreNativeCandidates.candidates(entries, names, fragments, proven),
      (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort]
+  ensure
+    @enumerator_free_proof = nil
   end
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body
@@ -1343,7 +1407,7 @@ module StaticDispatchRegistrations
     @enumerator_free = nil
     return [] if keys.empty?
 
-    @enumerator_free = enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root)
+    @enumerator_free = @enumerator_free_proof || enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root)
     return [] unless @enumerator_free.holds
 
     # `alias enum_for to_enum` is a second table entry of the same body.
@@ -1583,6 +1647,9 @@ module StaticDispatchRegistrations
     # The CoreEnumeratorFree::Result of the last core_excluded run (nil when it had nothing to prove).
     attr_reader :enumerator_free
     attr_accessor :why
+    # core_kept_report.rb: a Set that answers `note` (it records where each name comes from) for core_excluded to read
+    # names into, and the [entries, names, fragments, proven] it ended with.
+    attr_accessor :core_names, :core_state
   end
 
   def cite(names, reason)

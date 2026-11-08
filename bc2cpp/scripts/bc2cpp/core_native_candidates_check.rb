@@ -10,6 +10,9 @@
 #   reachable
 #     - an irep symbol, an identifier pool string, a native literal or presym use, a generated literal all count;
 #     - a table entry's or registration's own name operand does not, nor a name only a DEF names;
+#     - ALWAYS_DYNAMIC seeds nothing; MRB_OPSYM(x) is an operator, not the name x; a literal handed straight to a verified
+#       message formatter (mrb_int_overflow, mrb_sys_fail), or the Symbol of a to_enum call while no Enumerator is made, is
+#       no lookup;
 #     - LIVE_CORE: a core method body's sends count once its name is reachable (an operator opcode reaches its
 #       operator), or compiled code calls its `_impl`;
 #       an ALIAS keeps both names without making unrelated definitions live;
@@ -301,6 +304,116 @@ Dir.mktmpdir('math-diagnostics') do |dir|
   File.write(other, source)
   suite.check('an identically named helper outside mruby-math is not exempted',
               CoreNativeCandidates.reachable({}, [other], [], diagnostic_literals: true)[0].include?('acos'))
+end
+
+Dir.mktmpdir('operator-names') do |dir|
+  path = File.join(dir, 'vm.c')
+  scan = lambda do |text|
+    File.write(path, text)
+    CoreNativeCandidates.reachable({}, [path], [])[0]
+  end
+  suite.check('MRB_OPSYM(div) is the operator, not the name div', !scan.call('mid = MRB_OPSYM(div);').include?('div'))
+  suite.check('a cdump operator row names no method', !scan.call('OPERATOR_SYMBOL("/", "div"),').include?('div'))
+  suite.check('the implicit-protocol list seeds nothing', CoreNativeCandidates.reachable({}, [], [])[0].empty?)
+  suite.check('MRB_SYM(div) is still a lookup', scan.call('mid = MRB_SYM(div);').include?('div'))
+  suite.check('a "div" literal is still a lookup', scan.call('mrb_funcall(mrb, x, "div", 0);').include?('div'))
+end
+
+Dir.mktmpdir('label-helpers') do |dir|
+  numeric = File.join(dir, '3rd', 'mruby', 'src', 'numeric.c')
+  FileUtils.mkdir_p(File.dirname(numeric))
+  definition = <<~'C'
+    mrb_noreturn void
+    mrb_int_overflow(mrb_state *mrb, const char *reason)
+    {
+      mrb_raisef(mrb, E_RANGE_ERROR, "integer overflow in %s", reason);
+    }
+  C
+  caller_path = File.join(dir, 'numeric_ext.c')
+  scan = lambda do |defining, calling, enabled: true|
+    File.write(numeric, defining)
+    File.write(caller_path, calling)
+    CoreNativeCandidates.reachable({}, [numeric, caller_path], [], diagnostic_literals: enabled)[0]
+  end
+  call = 'void f(mrb_state *mrb) { mrb_int_overflow(mrb, "lcm"); }'
+  suite.check('without the literal-lookup guarantee an overflow label stays', scan.call(definition, call, enabled: false).include?('lcm'))
+  suite.check('a label passed to the verified formatter is no lookup', !scan.call(definition, call).include?('lcm'))
+  suite.check('a lookup elsewhere still counts',
+              scan.call(definition, "#{call} void g(mrb_state *mrb) { mrb_funcall_id(mrb, v, MRB_SYM(lcm), 0); }").include?('lcm'))
+  suite.check('a label passed to another function stays', scan.call(definition, 'void f(mrb_state *mrb) { other(mrb, "lcm"); }').include?('lcm'))
+  suite.check('a non-literal call keeps the literal that builds it',
+              scan.call(definition, 'const char *label = "lcm"; void f(mrb_state *mrb) { mrb_int_overflow(mrb, label); }').include?('lcm'))
+  unsafe = {
+    'changed body' => definition.sub('mrb_raisef(', 'mrb_funcall(mrb, v, reason, 0); mrb_raisef('),
+    'another definition' => "#{definition}\n#{definition}",
+    'shadowing macro' => "#define mrb_int_overflow(mrb, s) mrb_funcall(mrb, v, s, 0)\n#{definition}",
+    'missing definition' => 'int x;'
+  }
+  unsafe.each do |why, text|
+    suite.check("#{why} disables the overflow-label exemption", scan.call(text, call).include?('lcm'))
+  end
+  File.write(numeric, definition)
+  other = File.join(dir, 'other.c')
+  File.write(other, definition)
+  File.write(caller_path, call)
+  suite.check('the formatter defined in another file is not verified',
+              CoreNativeCandidates.reachable({}, [other, caller_path], [], diagnostic_literals: true)[0].include?('lcm'))
+end
+
+Dir.mktmpdir('sys-fail-labels') do |dir|
+  error = File.join(dir, '3rd', 'mruby', 'src', 'error.c')
+  FileUtils.mkdir_p(File.dirname(error))
+  definition = <<~'C'
+    MRB_API mrb_noreturn void
+    mrb_sys_fail(mrb_state *mrb, const char *mesg)
+    {
+      if (mrb_class_defined_id(mrb, MRB_SYM(SystemCallError))) {
+        struct RClass *sce = mrb_class_get_id(mrb, MRB_SYM(SystemCallError));
+        mrb_int no = (mrb_int)errno;
+        if (mesg != NULL) {
+          mrb_funcall_id(mrb, mrb_obj_value(sce), MRB_SYM(_sys_fail), 2, mrb_fixnum_value(no), mrb_str_new_cstr(mrb, mesg));
+        }
+        else {
+          mrb_funcall_id(mrb, mrb_obj_value(sce), MRB_SYM(_sys_fail), 1, mrb_fixnum_value(no));
+        }
+      }
+
+      mrb_raise(mrb, E_RUNTIME_ERROR, mesg);
+    }
+  C
+  file = File.join(dir, 'file.c')
+  call = 'void f(mrb_state *mrb) { mrb_sys_fail(mrb, "flock"); }'
+  scan = lambda do |defining = definition, calling = call, ireps: {}, generated: []|
+    File.write(error, defining)
+    File.write(file, calling)
+    CoreNativeCandidates.reachable(ireps, [error, file], generated, diagnostic_literals: true)[0]
+  end
+  suite.check('a label passed to mrb_sys_fail is no lookup while no source names SystemCallError', !scan.call.include?('flock'))
+  suite.check('a native that only looks SystemCallError up leaves the label no lookup',
+              !scan.call(definition, "#{call} int g(mrb_state *mrb) { return mrb_class_defined(mrb, \"SystemCallError\"); }").include?('flock'))
+  suite.check('a native making SystemCallError keeps the label',
+              scan.call(definition, "#{call} void g(mrb_state *m) { mrb_define_class(m, \"SystemCallError\", c); }").include?('flock'))
+  defined = suite.compile('class SystemCallError; end') { |ireps, _root| ireps }
+  suite.check('Ruby naming SystemCallError keeps the label', scan.call(ireps: defined).include?('flock'))
+  suite.check('generated code naming SystemCallError keeps the label', scan.call(generated: ['f("SystemCallError")']).include?('flock'))
+  suite.check('a changed body keeps the label', scan.call(definition.sub('mrb_raise(', 'mrb_funcall(mrb, v, mesg, 0); mrb_raise(')).include?('flock'))
+end
+
+Dir.mktmpdir('enumerator-symbols') do |dir|
+  path = File.join(dir, 'array.c')
+  File.write(path, 'return mrb_funcall_id(mrb, self, MRB_SYM(to_enum), 1, mrb_symbol_value(MRB_SYM(rindex)));')
+  scan = ->(free) { CoreNativeCandidates.reachable({}, [path], [], enumerator_free: free)[0] }
+  suite.check('a to_enum Symbol stays while an Enumerator can be made', scan.call(false).include?('rindex'))
+  suite.check('a to_enum Symbol is no lookup once no Enumerator is made', !scan.call(true).include?('rindex'))
+  suite.check('the proof is asked when a native has a to_enum Symbol', !scan.call(-> { true }).include?('rindex'))
+  suite.check('a failed proof keeps the Symbol', scan.call(-> { false }).include?('rindex'))
+  suite.check('to_enum itself stays a lookup', scan.call(true).include?('to_enum'))
+  File.write(path, 'mrb_funcall_id(mrb, self, MRB_SYM(to_enum), 2, mrb_symbol_value(MRB_SYM(rindex)), x);')
+  suite.check('another to_enum call shape keeps the Symbol', scan.call(true).include?('rindex'))
+  asked = false
+  File.write(path, 'int x;')
+  CoreNativeCandidates.reachable({}, [path], [], enumerator_free: -> { asked = true })
+  suite.check('the proof is not made when no native has a to_enum Symbol', !asked)
 end
 
 suite.finish!

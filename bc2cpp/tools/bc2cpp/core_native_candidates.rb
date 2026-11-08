@@ -16,9 +16,16 @@
 #   - a name the native sources look up (native_name_tokens: string literals, presym macros, naming macros), except
 #     the name operand of a table entry or registration call, which defines it;
 #   - a string literal of the generated code;
-#   - ALWAYS_DYNAMIC, or a name a pool fragment may build (dynamic_name?).
+#   - a name a pool fragment may build (dynamic_name?).
+# ALWAYS_DYNAMIC (the VM's implicit protocol names) seeds nothing here: the VM looks a method up by a presym or literal
+# of src/, which the native scan reads, or by an operator opcode, which an irep read above names (a name only that list
+# held, `to_hash` or `send`, is spelled nowhere a lookup could come from).
 # The VM's implicit calls (to_s, inspect, coerce, ...) are presym uses in src/, so they are read like any other. An
 # operator name is never a candidate: the VM sends those from opcodes the scan does not name.
+#
+# Native text the scan does not read as a lookup of an identifier (strip_operator_names, strip_label_calls,
+# strip_enumerator_symbols): MRB_OPSYM(div) names `/` and not `div`; a string literal passed straight to a helper that
+# only formats it into an exception message; the Symbol an Array native hands to `to_enum` when no Enumerator is made.
 #
 # An exclusion macro names (MRB_MT_CLASS, name), shared by every table of that class (its singleton's too), so a
 # key is listed only when each entry it names is a candidate: in a table whose install target is MRB_MT_CLASS itself.
@@ -45,6 +52,49 @@ module CoreNativeCandidates
   C
   DOMAIN_ERROR_CALL = /\bdomain_error\s*\(\s*mrb\s*,\s*("(?:[^"\\\n]|\\.)*")\s*\)/
 
+  # LABEL_HELPERS: library functions whose string argument only ends up in an exception message. `path` is the one file
+  # that defines one, `definition` its exact text without blanks. `unnamed`: a class the helper hands the message to when
+  # it exists (mrb_sys_fail's SystemCallError); nothing may make it, or the branch could run.
+  LABEL_HELPERS = {
+    'mrb_int_overflow' => {
+      path: %r{/3rd/mruby/src/numeric\.c\z},
+      definition: 'voidmrb_int_overflow(mrb_state*mrb,constchar*reason){' \
+                  'mrb_raisef(mrb,E_RANGE_ERROR,"integeroverflowin%s",reason);}'
+    },
+    'mrb_sys_fail' => {
+      path: %r{/3rd/mruby/src/error\.c\z},
+      definition: <<~'C'.gsub(/\s+/, ''),
+        void mrb_sys_fail(mrb_state *mrb, const char *mesg)
+        {
+          if (mrb_class_defined_id(mrb, MRB_SYM(SystemCallError))) {
+            struct RClass *sce = mrb_class_get_id(mrb, MRB_SYM(SystemCallError));
+            mrb_int no = (mrb_int)errno;
+            if (mesg != NULL) {
+              mrb_funcall_id(mrb, mrb_obj_value(sce), MRB_SYM(_sys_fail), 2, mrb_fixnum_value(no), mrb_str_new_cstr(mrb, mesg));
+            }
+            else {
+              mrb_funcall_id(mrb, mrb_obj_value(sce), MRB_SYM(_sys_fail), 1, mrb_fixnum_value(no));
+            }
+          }
+
+          mrb_raise(mrb, E_RUNTIME_ERROR, mesg);
+        }
+      C
+      unnamed: 'SystemCallError'
+    }
+  }.freeze
+
+  # An operator's table name is the operator, not the identifier: MRB_OPSYM(div) is `/`, and cdump's table row
+  # OPERATOR_SYMBOL("/", "div") formats it. Neither looks up a method called `div`.
+  OPERATOR_NAMES_TEXT = [
+    /\bMRB_OPSYM\s*\(\s*\w+\s*\)/,
+    /\bOPERATOR_SYMBOL\s*\(\s*"[^"\n]*"\s*,\s*"\w+"\s*\)/
+  ].freeze
+
+  # The Symbol of Array#index and #rindex's `to_enum(:name)` call when no block or argument is given.
+  ENUM_SYMBOL_CALL = /\bmrb_funcall_id\s*\(\s*mrb\s*,\s*self\s*,\s*MRB_SYM\s*\(\s*to_enum\s*\)\s*,\s*1\s*,\s*
+                      mrb_symbol_value\s*\(\s*(MRB_SYM\s*\(\s*\w+\s*\))\s*\)\s*\)/x
+
   module_function
 
   # A diagnostic label is not a lookup when the helper only formats an exception and no computed lookup
@@ -63,6 +113,68 @@ module CoreNativeCandidates
     out = clean.dup
     calls.each { |call| out[call.begin(1)...call.end(1)] = ' ' * (call.end(1) - call.begin(1)) }
     out
+  end
+
+  # OPERATOR_NAMES_TEXT blanked.
+  def strip_operator_names(text)
+    OPERATOR_NAMES_TEXT.inject(text) { |t, re| t.gsub(re) { |m| ' ' * m.size } }
+  end
+
+  # ENUM_SYMBOL_CALL's Symbol blanked. Sound only while CoreEnumeratorFree holds: the call then never runs, so the
+  # Symbol is never handed to the `each`-like call an Enumerator would make.
+  def strip_enumerator_symbols(text, enumerator_free)
+    return text unless enumerator_free && text.match?(ENUM_SYMBOL_CALL) && (enumerator_free == true || enumerator_free.call)
+
+    text.gsub(ENUM_SYMBOL_CALL) { |m| m.sub(Regexp.last_match(1), ' ' * Regexp.last_match(1).size) }
+  end
+
+  # The LABEL_HELPERS whose one definition is the table's formatting body in the table's file, with no macro of the name
+  # anywhere: a literal passed to one cannot reach an interning call, whoever calls it.
+  def verified_label_helpers(native_paths, ireps, core, generated)
+    clean = native_paths.to_h { |path| [path, StaticDispatchRegistrations.strip_c_comments(File.read(path, encoding: 'BINARY'))] }
+    LABEL_HELPERS.select do |name, spec|
+      next false if clean.each_value.any? { |text| text.match?(/^[ \t]*#[ \t]*(?:define|undef)[ \t]+#{name}\b/) }
+
+      definitions = clean.flat_map { |path, text| label_definitions(path, text, name) }
+      next false unless definitions.size == 1 && definitions[0][0].match?(spec[:path]) && definitions[0][1] == spec[:definition]
+
+      !spec[:unnamed] || unnamed?(spec[:unnamed], clean.values, ireps, core, generated)
+    end.keys.to_set
+  end
+
+  # Is the class `word` never made: no native spells it but to look it up (the helper's own check included), and no Ruby
+  # or generated code names it?
+  def unnamed?(word, native_texts, ireps, core, generated)
+    spelled = ->(text) { text.scan(/\b#{word}\b/).size }
+    lookup = /\bmrb_class_(?:defined|get)(?:_id)?\s*\(\s*mrb\s*,\s*(?:MRB_SYM\s*\(\s*#{word}\s*\)|"#{word}")\s*\)/
+    return false unless native_texts.sum(&spelled) == native_texts.sum { |text| text.scan(lookup).size }
+    return false if generated.any? { |src| src.include?(word) }
+
+    all_ireps = ireps.values + core.flat_map { |file| file[:ireps].values }
+    all_ireps.none? { |irep| irep.syms.any? { |s| s.to_s == word } || irep.pool.any? { |s| s == word } }
+  end
+
+  # [path, the definition's text without blanks] of each `void name(mrb_state ...) { ... }` in `text`.
+  def label_definitions(path, text, name)
+    text.to_enum(:scan, /\bvoid\s+#{name}\s*\(\s*mrb_state[^()]*\)\s*\{/).map do
+      start = Regexp.last_match.begin(0)
+      depth = 0
+      close = (start...text.size).find do |i|
+        depth += 1 if text[i] == '{'
+        depth -= 1 if text[i] == '}'
+        depth.zero? && text[i] == '}'
+      end
+      [path, close ? text[start..close].gsub(/\s+/, '') : nil]
+    end
+  end
+
+  # The literal argument of each direct call of a verified helper blanked.
+  def strip_label_calls(text, helpers)
+    return text if helpers.empty?
+
+    helpers.inject(StaticDispatchRegistrations.strip_c_comments(text)) do |t, name|
+      t.gsub(/\b#{name}\s*\(\s*mrb\s*,\s*("(?:[^"\\\n]|\\.)*")\s*\)/) { |m| m.sub(Regexp.last_match(1), ' ' * Regexp.last_match(1).size) }
+    end
   end
 
   # Every table entry of `paths`: { mt_class:, kind:, cname:, name:, fn:, installed: } with `installed` the class the
@@ -104,20 +216,30 @@ module CoreNativeCandidates
   # +lookup+ reads one irep (lookup_names, or CorePrivateRuby::Lookup); +strip+ blanks the native text it should not
   # read, +strip_generated+ the generated source's literals (the `_impl` calls it makes are read from the whole of it),
   # +exact_impls+ how live_core reads a direct `_impl` call. +diagnostic_literals+ requires the closed-world
-  # literal-lookup proof, so an exception message cannot supply a computed method name.
+  # literal-lookup proof, so an exception message cannot supply a computed method name. +enumerator_free+ is
+  # CoreEnumeratorFree's verdict, or a callable that makes it (asked only when a native has a ENUM_SYMBOL_CALL).
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
-                exact_impls: false, diagnostic_literals: false)
-    # Closed (VM-free) only: no protocol name is a backstop here (see StaticDispatchRegistrations#analyze).
-    names = Set.new
+                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new)
+    # Closed (VM-free) only: no protocol name seeds +names+ (see StaticDispatchRegistrations#analyze).
+    # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
+    note = ->(label) { names.note(label) if names.respond_to?(:note) }
     fragments = Set.new
-    ireps.each_value { |irep| lookup.call(irep, nil, names, fragments) }
+    ireps.each_value do |irep|
+      note.call("engine irep #{irep.label}")
+      lookup.call(irep, nil, names, fragments)
+    end
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
+    helpers = diagnostic_literals ? verified_label_helpers(native_paths, ireps, core, generated) : Set.new
     native_paths.each do |path|
+      note.call("native #{path}")
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text = strip.call(text) if strip
+      text = strip_label_calls(strip_operator_names(text), helpers)
+      text = strip_enumerator_symbols(text, enumerator_free)
       text = strip_diagnostic_literals(text) if diagnostic_literals && path.end_with?('/mruby-math/src/math.c')
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
+    note.call('generated code literal')
     generated.each do |src|
       src = strip_generated.call(src) if strip_generated
       src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) }
@@ -178,7 +300,12 @@ module CoreNativeCandidates
         up = label
         up = parent[up] until up.nil? || file[:body_of].key?(up)
         own = up && file[:body_of][up]
-        if own then pending[own] << [irep, file[:owner_of]&.dig(up)] else lookup.call(irep, nil, names, fragments) end
+        if own
+          pending[own] << [irep, file[:owner_of]&.dig(up)]
+        else
+          names.note("core root or class body #{File.basename(file[:path].to_s)}") if names.respond_to?(:note)
+          lookup.call(irep, nil, names, fragments)
+        end
       end
     end
     pending.each_value { |bodies| bodies.each { |irep, _owner| lookup.call(irep, nil, Set.new, fragments) } }
@@ -187,6 +314,7 @@ module CoreNativeCandidates
     if exact_impls
       pending.each do |name, bodies|
         bodies.reject! do |irep, owner|
+          names.note("direct _impl call of #{name}") if names.respond_to?(:note)
           if owner.nil?
             names << name if by_name.call(name)
             next false
@@ -205,6 +333,7 @@ module CoreNativeCandidates
       pending.each do |own, bodies|
         next unless names.include?(own)
 
+        names.note("live core method #{own}") if names.respond_to?(:note)
         bodies.each { |irep, _owner| lookup.call(irep, own, names, fragments) }
         pending.delete(own)
         grew = true
