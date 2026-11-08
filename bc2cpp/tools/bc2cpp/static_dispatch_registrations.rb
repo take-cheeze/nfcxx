@@ -914,11 +914,11 @@ module StaticDispatchRegistrations
   end
 
   # INERT_STRING_ARGS (closed only): a string literal that is the whole of one of these arguments is read, never
-  # interned: mrb_get_args' format, mrb_sys_fail's message, an operator-table key (cdump.c's OPERATOR_SYMBOL names
-  # the operator MRB_OPSYM(key) stands for) and a strcmp-family operand (compared with a name, not looked up). A
-  # position of nil is every argument.
-  INERT_STRING_ARGS = { 'mrb_get_args' => 1, 'mrb_sys_fail' => 1, 'OPERATOR_SYMBOL' => 1, 'strcmp' => nil,
-                        'strncmp' => nil }.freeze
+  # interned: mrb_get_args' format, an operator-table key (cdump.c's OPERATOR_SYMBOL names the operator
+  # MRB_OPSYM(key) stands for) and a strcmp-family operand (compared with a name, not looked up). A position of nil
+  # is every argument. mrb_sys_fail's message is not here: it reaches SystemCallError._sys_fail when that class
+  # exists, so CoreNativeCandidates decides it (only while nothing makes SystemCallError).
+  INERT_STRING_ARGS = { 'mrb_get_args' => 1, 'OPERATOR_SYMBOL' => 1, 'strcmp' => nil, 'strncmp' => nil }.freeze
   INERT_CALL = /(?<![\w.>])(?:std::)?(#{INERT_STRING_ARGS.keys.join('|')})\s*\(/
   STRING_ARG = /\A"(?:[^"\\\n]|\\.)*"\z/
 

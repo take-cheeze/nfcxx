@@ -35,7 +35,7 @@
 #     other native superclass.
 #     A Symbol only given to attr_* or as the name of a to_enum on a core self names no lookup; an alias counts
 #     its two operands, not every symbol of the body.
-#   INERT_STRING_ARGS / MRB_OPSYM: a native format, message, operator-table key or compared literal, and an operator
+#   INERT_STRING_ARGS / MRB_OPSYM: a native format, operator-table key or compared literal, and an operator
 #     or `@ivar` presym, name no method.
 #   CLOSED_LINKED_ONLY: the closed scan reads no core mruby-* gem outside the closed build's gem closure (HAL gems
 #     stay), no external gem it leaves out, no engine mrblib file its rake swaps out and no app/ source; it reads
@@ -156,10 +156,9 @@ msg_tokens = Set.new
 S.native_name_tokens(%(int w = 1; GET_NUM(n, width);\n), msg_tokens, message_naming)
 check('native: a message argument is no name token', !msg_tokens.include?('width'))
 
-# INERT_STRING_ARGS: a format, message, operator-table key or compared operand is read, never interned.
+# INERT_STRING_ARGS: a format, operator-table key or compared operand is read, never interned.
 inert = <<~'C'
   mrb_get_args(M, "z", &path);
-  mrb_sys_fail(M, "close");
   struct { const char* op; const char* name; } t = { OPERATOR_SYMBOL("+", "add"), 0 };
   if (std::strcmp(mid, "warn_once") == 0 || strncmp(mid, "warn_stub", 9) == 0) return;
   mrb_funcall(M, self, "close", 0);
@@ -167,7 +166,7 @@ inert = <<~'C'
 C
 inert_tokens = Set.new
 S.native_name_tokens(inert, inert_tokens, [])
-check('native: a format, message, operator key and compared literal name nothing',
+check('native: a format, operator key and compared literal name nothing',
       %w[z add warn_once warn_stub].none? { |n| inert_tokens.include?(n) })
 check('native: the same literal as a real call argument still names a method', inert_tokens.include?('close'))
 check('native: only the exact position is inert', S.blank_inert_string_args('mrb_get_args(M, "z", "other");').include?('"other"'))
