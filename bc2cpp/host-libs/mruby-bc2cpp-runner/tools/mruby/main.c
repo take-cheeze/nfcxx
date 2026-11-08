@@ -44,6 +44,9 @@ main(int argc, char **argv)
     entry = "run_tool";
   }
 
+  /* bc2cpp keeps a heap of 1-2 GB live; mruby's default (collect at twice the live size) spends most of the run in the
+     collector. BC2CPP_GC_INTERVAL overrides the ratio (percent). */
+  mrb->gc.interval_ratio = getenv("BC2CPP_GC_INTERVAL") ? atoi(getenv("BC2CPP_GC_INTERVAL")) : 400;
   int ai = mrb_gc_arena_save(mrb);
   mrb_value args = mrb_ary_new_capa(mrb, argc);
   for (int i = first; i < argc; i++) {
