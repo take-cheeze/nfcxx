@@ -14,6 +14,9 @@ require_relative 'bytecode_ir'
 # return, a store, a register window an operator reads) lets the Proc escape and refuses, as do SUPER and ARGARY
 # (they pass the frame's block on). A read whose reaching definitions are not computable refuses. Proc#call runs
 # the Proc under the self it closed over, so the block of a plain yielder never runs under another self.
+#
+# +forwards+ (stack blocks only): a send's block register may hold the Proc when the codegen hands that send a copy
+# (bc2cpp_env_block) of it, so the callee itself never gives the frame-local block to anything.
 module BlockSelf
   WRITE_ONLY_OPS = Set[:ENTER, :NOP, :GETCONST, :GETGV, :GETSV, :GETIV, :GETCV, :GETUPVAR, :BLOCK, :LAMBDA,
                        :METHOD, :JMP, :RETNIL, :RETSELF, :RETTRUE, :RETFALSE, :BLKPUSH, :OCLASS, :TCLASS,
@@ -34,16 +37,16 @@ module BlockSelf
   module_function
 
   # nil when the Ruby method body +irep+ (and its nested blocks, from +ireps+) only calls its block, else why not.
-  def plain_yielder_why(irep, ireps)
+  def plain_yielder_why(irep, ireps, forwards: nil)
     return 'has no body' unless irep
 
     req, opt, rest, post, key, kdict = irep.enter&.enter_fields&.first(6)&.map(&:to_i) || [0, 0, 0, 0, 0, 0]
     blk = 1 + req + opt + rest + post + (key.positive? || kdict.positive? ? 1 : 0)
-    frame_why(irep, ireps, [[irep, Set[blk]]], blk)
+    frame_why(irep, ireps, [[irep, Set[blk]]], blk, forwards)
   end
 
   # +frames+: [[irep, captured proc slots], ...] from the method body down to +irep+.
-  def frame_why(irep, ireps, frames, blk)
+  def frame_why(irep, ireps, frames, blk, forwards = nil)
     program = BytecodeIR.for(irep)
     proc_at = lambda do |idx, reg|
       defs = program.reaching_definitions(idx, reg, through_handlers: true, shared: true)
@@ -67,6 +70,7 @@ module BlockSelf
         return "has no reaching definitions at #{op}" if holds == :unknown
         next unless holds
         next if role == :called || (role == :receiver && insn.sym == 'call')
+        next if role == :block && forwards&.call(irep, insn)
 
         return "lets its block escape (#{op} #{insn.sym} R#{reg})"
       end
@@ -85,7 +89,7 @@ module BlockSelf
     irep.reps.each do |child_label|
       child = ireps[child_label]
       return 'has a nested block with no body' unless child
-      why = frame_why(child, ireps, frames + [[child, Set.new]], nil)
+      why = frame_why(child, ireps, frames + [[child, Set.new]], nil, forwards)
       return why if why
     end
     nil
@@ -149,6 +153,7 @@ module BlockSelf
 
       d = insn.reg
       args = (1..n).map { |k| [d + k, :argument] }
+      args[-1][1] = :block if n.positive? && %i[SENDB SSENDB].include?(op)
       return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d, :receiver]] + args
     end
     if op == :BLKCALL
