@@ -597,7 +597,7 @@ class CodeGen
   def resumable_dyn_send_insn(insn)
     shape = dyn_call_shape(insn)
     recv = %i[SSEND SSENDB].include?(insn.op) ? 'self' : "r#{shape[:dest]}"
-    block_value = %i[SENDB SSENDB].include?(insn.op) ? "r#{shape[:blk_reg]}" : 'mrb_nil_value()'
+    block_value = %i[SENDB SSENDB].include?(insn.op) ? "bc2cpp_env_block(M, r#{shape[:blk_reg]})" : 'mrb_nil_value()'
     resumable_dyn_site(recv, shape[:dest], shape[:n], block_value, splat_reg: shape[:argv_reg], kw: shape[:kw])
   end
 
@@ -1636,7 +1636,7 @@ class CodeGen
     splat = region[:n] == '*'
     return nil if send_family && !splat && region[:n].to_i < 1
 
-    resumable_dyn_site(recv, dest, splat ? 0 : region[:n].to_i, "r#{region[:blk_reg]}",
+    resumable_dyn_site(recv, dest, splat ? 0 : region[:n].to_i, explicit_blk(region),
                        name: send_family ? nil : region[:name], splat_reg: (region[:argv_reg] if splat), kw: region[:kw])
   end
 

@@ -2080,7 +2080,7 @@ BC2CPP_MAIN = lambda do
     static mrb_value bc2cpp_env_block(mrb_state* M, mrb_value blk) {
       if (mrb_type(blk) != MRB_TT_PROC) return blk;
       const struct RProc* p = mrb_proc_ptr(blk);
-      if (p->gc_color != MRB_GC_RED) return blk;
+      if (p->gc_color != MRB_GC_RED || !MRB_PROC_CFUNC_P(p) || !MRB_PROC_ENV_P(p)) return blk;
       const struct REnv* e = MRB_PROC_ENV(p);
       struct RProc* copy = bc2cpp_heap_proc(M, p->body.func, MRB_ENV_LEN(e), e->stack);
       if (MRB_PROC_STRICT_P(p)) copy->flags |= MRB_PROC_STRICT;
