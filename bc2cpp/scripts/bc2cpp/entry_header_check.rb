@@ -11,7 +11,8 @@
 #     - one that takes a rest argument or reads its block stays by name (0), and an undeclared one is absent;
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - the direct form makes no dynamic dispatch and returns what mrb_funcall returns;
-#     - a raise inside leaves the exception in M->exc and returns it, as mrb_funcall does, and does not escape;
+#     - a raise inside leaves the exception in M->exc and returns it, as mrb_funcall does, and does not escape, with
+#       M->jmp and the frame stack as before and two arena roots (self, the exception);
 #       inside a protected region it propagates to that region instead;
 #     - a subclass receiver and a receiver with a singleton class take the by-name call;
 #   constructor entries (Owner.new/argc, BC2CPP_ENTRY_NEW)
@@ -78,6 +79,10 @@ SRC = <<~'RUBY'
       raise ArgumentError, 'entry boom'
     end
 
+    def bad_int
+      Integer('x')
+    end
+
     def gather(*xs)
       xs.size
     end
@@ -122,7 +127,7 @@ SRC = <<~'RUBY'
 RUBY
 
 OWNERS = %w[EntryGame EntrySub EntryMade EntryBoomInit EntryRestInit].freeze
-ENV['BC2CPP_ENTRY_POINTS'] = %w[EntryGame#tick/0 EntryGame#add/1 EntryGame#count/0 EntryGame#boom/0
+ENV['BC2CPP_ENTRY_POINTS'] = %w[EntryGame#tick/0 EntryGame#add/1 EntryGame#count/0 EntryGame#boom/0 EntryGame#bad_int/0
                                 EntryGame#gather/0 EntryGame#each_twice/0 EntryGame.new/0 EntryMade.new/1
                                 EntryBoomInit.new/1 EntryRestInit.new/1].join(' ')
 
@@ -170,11 +175,21 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
       std::printf("direct add=%ld count=%ld dispatches=%d\\n", added, counted, made);
 
       dispatches = 0;
+      ptrdiff_t ci0 = M->c->ci - M->c->cibase;
+      int ai0 = mrb_gc_arena_save(M);
       mrb_value e = bc2cpp_entry_EntryGame_boom(M, g);
       made = dispatches;
+      std::printf("boom state jmp=%d ci_same=%d arena_grew=%d\\n", M->jmp != nullptr, M->c->ci - M->c->cibase == ci0,
+                  mrb_gc_arena_save(M) - ai0);
       bool exc_set = M->exc != nullptr && M->exc == mrb_obj_ptr(e);
       std::printf("boom exc=%s same=%d dispatches=%d\\n", M->exc ? mrb_obj_classname(M, mrb_obj_value(M->exc)) : "none",
                   exc_set, made);
+      M->exc = nullptr;
+      // A raise from inside a cfunc leaves its call frame for the entry to pop.
+      mrb_value bad = bc2cpp_entry_EntryGame_bad_int(M, g);
+      std::printf("bad_int state exc=%s jmp=%d ci_same=%d\\n", M->exc ? mrb_obj_classname(M, mrb_obj_value(M->exc)) : "none",
+                  M->jmp != nullptr, M->c->ci - M->c->cibase == ci0);
+      (void)bad;
       M->exc = nullptr;
       mrb_value by_name = mrb_funcall(M, g, "boom", 0);
       std::printf("funcall boom exc=%s same=%d\\n", M->exc ? mrb_obj_classname(M, mrb_obj_value(M->exc)) : "none",
@@ -245,6 +260,10 @@ Dir.mktmpdir('bc2cpp-entry-header') do |dir|
   check.call('a raise leaves the exception in M->exc and returns it, as mrb_funcall does',
              lines.include?('boom exc=ArgumentError same=1 dispatches=0') &&
                lines.include?('funcall boom exc=ArgumentError same=1'))
+  check.call('a caught raise resets M->jmp and the frame stack and roots self and the exception',
+             lines.include?('boom state jmp=0 ci_same=1 arena_grew=2'))
+  check.call('a raise out of a cfunc frame pops that frame',
+             lines.include?('bad_int state exc=ArgumentError jmp=0 ci_same=1'))
   check.call('inside a protected region the raise reaches that region',
              lines.include?('region error=1 class=ArgumentError exc_after=0'))
   check.call('a subclass receiver runs its own method, by name', lines.include?('sub tick=100 dispatches=1'))

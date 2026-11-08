@@ -30,9 +30,11 @@ failures << "vm-cxx.o text #{text} bytes exceeds 20480" if text > 20_480
 
 # Objects that reference an entry able to start bytecode. Measured on the sweep: only proc.o (Proc#call on a cfunc
 # proc) reaches mrb_exec_irep, and its irep branch never runs. A new referencing object is a new way into the VM.
-entries = %w[mrb_vm_exec mrb_vm_run mrb_top_run mrb_exec_irep mrb_yield_cont mrb_object_exec]
+entries = %w[mrb_vm_exec mrb_vm_run mrb_top_run mrb_exec_irep mrb_yield_cont mrb_object_exec mrb_protect_error]
+# mrb_protect_error is the VM's exception boundary: mruby core C and gem_init.o keep it, compiled code uses the typed
+# catch (bc2cpp_protect, the entry header's bc2cpp_entry_call), so a compiled gem object referencing it is a regression.
 allowed = { 'mrb_exec_irep' => %w[proc.o], 'mrb_vm_exec' => [], 'mrb_vm_run' => [], 'mrb_top_run' => [],
-            'mrb_yield_cont' => [], 'mrb_object_exec' => [] }
+            'mrb_yield_cont' => [], 'mrb_object_exec' => [], 'mrb_protect_error' => %w[array.o bigint.o gem_init.o] }
 users = Hash.new { |h, k| h[k] = [] }
 current = nil
 run('nm', '-u', lib).each_line do |line|
