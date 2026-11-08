@@ -786,10 +786,17 @@ def cprop_function(children)
   all.each { |sf| setted[sf[1]] = true if head(sf) == "set" && sf.length == 3 }
   set_const = lambda { |name, val| consts[name] = val unless setted[name] }
   # the slots a statement may store (anywhere inside it)
+  # Memoized per form: the walk only replaces the right side of a let (a load by a constant), which holds no store, so a
+  # form's stores do not change while the walk runs. Nested containers are then read once, not once per enclosing container.
+  stored_memo = {}.compare_by_identity
   stored_in = lambda do |x|
-    res = []
-    all_forms(x).each { |sf| res << unq(sf[2]) if head(sf) == "store" && sf.length >= 3 && sf[2].is_a?(String) && sf[2].start_with?("$\"") }
-    res
+    next [] unless x.is_a?(Array)
+    stored_memo[x] ||= begin
+      res = []
+      res << unq(x[2]) if head(x) == "store" && x.length >= 3 && x[2].is_a?(String) && x[2].start_with?("$\"")
+      x.each { |y| res.concat(stored_in.call(y)) if y.is_a?(Array) }
+      res.uniq
+    end
   end
   resolve = lambda { |x| x.is_a?(String) && consts[x] ? consts[x] : x }
   walk = nil
