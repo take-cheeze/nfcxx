@@ -1074,7 +1074,7 @@ class CodeGen
        elsif (call = d_reg && super_splat_call(owner_def, irep, idx, d_reg))
          note_super_site(:splat, owner_def, irep, idx)
          call
-       elsif (call = d_reg && super_block_register_call(owner_def, d_reg, n))
+       elsif (call = d_reg && super_block_register_call(owner_def, d_reg, n, irep, idx))
          note_super_site(:block_register, owner_def, irep, idx)
          call
        else
