@@ -1327,17 +1327,21 @@ class CodeGen
     block ? recognize_block_fallback_regions(block).any? { |nested| nested[:boxed] } : false
   end
 
+  # Can the block body +block+ suspend the fiber: it reaches Fiber.yield, calls a block (`yield`, `block.call`), or calls a
+  # method that can suspend.
+  def block_may_suspend?(block, fiber_bodies = Set.new)
+    nested = ->(i) { [i] + (i.reps || []).filter_map { |l| l && @ireps[l] }.flat_map { |c| nested.call(c) } }
+    nested.call(block).any? do |i|
+      deep_fiber_yield?(i, fiber_bodies) || BytecodeIR.for(i).op?(:BLKCALL) ||
+        deep_called_names(i, fiber_bodies).any? { |n| n == 'call' || n == 'yield' || @fiber_yield_names&.include?(n) }
+    end
+  end
+
   # Can the literal block of an inline-loop +region+ suspend the fiber: it reaches Fiber.yield, calls a block
   # (`yield`, `block.call`), or calls a method that can suspend.
   def inline_block_may_suspend?(irep, region)
     block = inline_region_block(irep, region)
-    return false unless block
-
-    nested = ->(i) { [i] + (i.reps || []).filter_map { |l| l && @ireps[l] }.flat_map { |c| nested.call(c) } }
-    nested.call(block).any? do |i|
-      deep_fiber_yield?(i, Set.new) || BytecodeIR.for(i).op?(:BLKCALL) ||
-        deep_called_names(i, Set.new).any? { |n| n == 'call' || n == 'yield' || @fiber_yield_names&.include?(n) }
-    end
+    block ? block_may_suspend?(block) : false
   end
 
   # The Fiber.new site of a body compiled as a step (block_step_candidate? accepted it and compile_block_step made its

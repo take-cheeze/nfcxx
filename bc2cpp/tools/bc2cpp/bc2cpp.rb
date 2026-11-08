@@ -696,8 +696,9 @@ BC2CPP_MAIN = lambda do
   known_names = constant_facts.groups.keys.map(&:to_s) | defined_names | native_names.to_a
   # bc2cpp-self: the program is loaded (required by name) after every gem has run its own mrblib, so the constants those Ruby
   # sources bind (ENV, Regexp, the generated prism and rbs nodes) exist before a class body reads them. A game build runs
-  # its compiled gems' units among the others', where that order is not fixed: it keeps the narrower set.
-  if ENV['BC2CPP_BUILD_NAME'] == 'bc2cpp-self'
+  # its compiled gems' units among the others', where that order is not fixed: it keeps the narrower set. The optcarrot
+  # probe's benchmark is run from main() after mrb_open, so it is ordered like bc2cpp-self.
+  if %w[bc2cpp-self optcarrot-probe].include?(ENV['BC2CPP_BUILD_NAME'])
     known_names |= IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq).to_a
   end
   CodeGen.known_const_names = known_names.to_set
@@ -2150,8 +2151,9 @@ BC2CPP_MAIN = lambda do
     }
     static mrb_value bc2cpp_proc_arity_m(mrb_state* M, mrb_value self) {
       const Bc2cppProcSpec* spec = bc2cpp_proc_spec_of(mrb_proc_ptr(self));
-      if (spec) return mrb_funcall_argv(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec), mrb_intern_lit(M, "arity"), 0, NULL);
-      return mrb_int_value(M, mrb_proc_arity(mrb_proc_ptr(self)));
+      // The stand-in is a plain irep Proc: Proc#arity of it is mrb_proc_arity, so no by-name send.
+      const struct RProc* p = spec ? mrb_proc_ptr(bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec)) : mrb_proc_ptr(self);
+      return mrb_int_value(M, mrb_proc_arity(p));
     }
     static mrb_func_t bc2cpp_orig_proc_parameters;
     static mrb_value bc2cpp_proc_parameters_m(mrb_state* M, mrb_value self) {
@@ -2159,7 +2161,9 @@ BC2CPP_MAIN = lambda do
       if (!spec) return bc2cpp_orig_proc_parameters(M, self);
       mrb_value* argv; mrb_int argc;
       mrb_get_args(M, "*!", &argv, &argc);
-      return mrb_funcall_argv(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec), mrb_intern_lit(M, "parameters"), argc, argv);
+      (void)argv; (void)argc;
+      // The stand-in has no spec, so Proc#parameters on it is the original cfunc; call it directly.
+      return bc2cpp_orig_proc_parameters(M, bc2cpp_proc_spec_stand_in(M, mrb_proc_ptr(self), *spec));
     }
     // Called once per state from the owner registration, before any compiled block runs.
     static void bc2cpp_proc_specs_install(mrb_state* M) {
@@ -2397,7 +2401,7 @@ BC2CPP_MAIN = lambda do
       }
       bc2cpp_vm_restore(M, mark);
       M->exc = NULL;
-      return mrb_funcall_argv(M, exc, mrb_intern_lit(M, "result"), 0, nullptr);
+      return bc2cpp_funcall_argv(M, exc, mrb_intern_lit(M, "result"), 0, nullptr);
     }
   KERNEL_LOOP
   puts <<~'ENSURE_GUARD'
@@ -2507,7 +2511,6 @@ BC2CPP_MAIN = lambda do
   # SUPER_LOOKUP (codegen_receiver_facts.rb, super_lookup_call): OP_SUPER's lookup, from the superclass of the
   # class the method is defined on (its origin when prepended), then the call mrb_funcall would make once found.
   # No method there is NoMethodError through method_missing, as prepare_missing does.
-  puts 'extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);'
   # KEYWORD_SPLAT_STATIC: the keyword helpers of a `**h` call (compile_keyword_call). Keys are read by symbol from the
   # Hash; the callee is already resolved statically, so nothing here dispatches by method name.
   puts <<~CPP
@@ -2536,17 +2539,14 @@ BC2CPP_MAIN = lambda do
     [[maybe_unused]] static mrb_value bc2cpp_super_call(mrb_state* M, mrb_value self, struct RClass* owner, mrb_sym mid,
                                                         mrb_int argc, const mrb_value* argv, mrb_value blk) {
       struct RClass* c = owner;
-      if (owner->tt == MRB_TT_MODULE) {
-        /* A module has no superclass: its methods run on the iclass the module has in the receiver's chain (included,
-           prepended or extended), and super continues after that iclass. */
-        struct RClass* k = mrb_class(M, self);
-        while (k && !(k->tt == MRB_TT_ICLASS && k->c == owner)) k = k->super;
-        if (!k) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
-        c = k->super;
-      } else {
-        MRB_CLASS_ORIGIN(c);
-        c = c->super;
+      MRB_CLASS_ORIGIN(c);
+      // A module has no superclass: OP_SUPER continues after the module's include-class in self's chain.
+      if (c->tt == MRB_TT_MODULE) {
+        for (struct RClass* k = mrb_class(M, self); k; k = k->super) {
+          if (k->tt == MRB_TT_ICLASS && k->c == c) { c = k; break; }
+        }
       }
+      c = c->super;
       mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
       return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk);
