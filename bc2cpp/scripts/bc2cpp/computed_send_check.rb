@@ -151,7 +151,8 @@ Dir.mktmpdir do |dir|
                splat.include?('// COMPUTED_SEND_GUARDED :send n=*') && splat.include?('case 0:') && splat.include?('case 1:'))
     check.call('via_splat: every arity of the spelled names is a direct arm',
                %w[one two zero].all? { |name| splat.include?("CsCheck__Guarded_#{name}_impl(M") })
-    check.call('via_splat: the guarded splat keeps the original send for any other value', by_name_lines.call(splat).any?)
+    check.call('via_splat: the guarded splat keeps the original send for any other value, as the owner call over the list',
+               splat.include?('bc2cpp_owner_call_argv(M, self, ') && by_name_lines.call(splat).none?)
     check.call('via_splat: SPLAT_SHARED reads the list in place and copies it only for the original send',
                splat.include?('// SPLAT_SHARED') && splat.scan('mrb_ary_splat(').size == 2)
     shared_off = guarded_body.call(generate.call('1', 'BC2CPP_SPLAT_SHARED' => '0'), 'via_splat')

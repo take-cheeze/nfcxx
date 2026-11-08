@@ -434,6 +434,9 @@ module ArgShapeCalls
     return nil if arms.empty?
 
     recv = self_implicit ? 'self' : "r#{d}"
+    other_length = splat_owner_call_line(d, recv, name, "ary_size(#{ary})", "ary_items(#{ary})") ||
+                   "r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, \"#{name}\"), ary_size(#{ary}), " \
+                   "ary_items(#{ary}));"
     "  // SPLAT n=* :#{name} runtime-sized: direct arms for argument counts #{counts.join('/')} " \
       "(mrb_ary length), dynamic dispatch for any other length\n" \
       "  {\n" \
@@ -441,8 +444,7 @@ module ArgShapeCalls
       "    switch (ary_size(#{ary})) {\n" \
       "#{arms.join}" \
       "    default:\n" \
-      "      r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, \"#{name}\"), ary_size(#{ary}), " \
-      "ary_items(#{ary}));\n" \
+      "      #{other_length}\n" \
       "    }\n" \
       "  }\n"
   end
