@@ -6,6 +6,9 @@
 > [generic IR optimization](../../docs/bc2cpp-generic-ir-optimization.md).
 
 
+`scripts/bc2cpp/optcarrot_probe_scan_check.rb` (in CI) keeps the bc2cpp scan of this world building;
+`ruby tools/optcarrot_probe/compiled_run.rb 180` is the full build and checksum run, in no CI job (about 8 minutes).
+
 A scoping investigation, not a shipped tool: how much of
 [optcarrot](https://github.com/mame/optcarrot) (the pure-Ruby NES emulator
 used as a Ruby-implementation benchmark) runs under this project's own
