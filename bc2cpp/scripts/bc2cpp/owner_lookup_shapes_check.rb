@@ -8,7 +8,8 @@
 # Owner-call sites themselves are in owner_call_icache_check.rb. Also pinned: public_send of a private method raises, and
 # `super` from a module's method reaches the superclass through the receiver's include-class. A `call` on a compiled
 # block runs its entry only while Proc#call is the builtin (PROC_CALL_DIRECT): rows for overrides, lambdas, next/break/
-# return, a block argument and the Method/Symbol/curry procs.
+# return, a block argument and the Method/Symbol/curry procs. A strict lambda (a class-body free lambda or Kernel#lambda over
+# a thunk block) takes the same entry with its arity check: rows for the ArgumentError text, no autosplat, return/next/break.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
 
@@ -46,6 +47,16 @@ SRC = <<~'RUBY'
   end
   class OwnProc < Proc; def call(*a); [:own, a]; end; end
   class SubProc < Proc; end
+  class PrivProc < Proc; private :call; end
+  # Free lambdas: class-body constants that read nothing from their frame (a direct entry with the strict arity check).
+  class LamBox
+    ADD = ->(a, b) { a + b }
+    ONE = ->(a) { a }
+    ZERO = -> { :z }
+    RET = ->(x) { return :early if x > 1; :late }
+    NXT = ->(x) { next :n if x > 1; :m }
+    BRK = ->(x) { break :b }
+  end
   module Late; def size; :late; end; end
   module Pre; def size; :pre; end; end
   class Probe
@@ -53,6 +64,7 @@ SRC = <<~'RUBY'
     def pk(o); o.pack('C*'); end
     def tg(o); o.tag; end
     def via_send(o); o.send(:hidden); end
+    def via_splat_size(o, *a); o.size(*a); end
     def via_public_send(o); o.public_send(:hidden); end
     def rt(o, name); o.respond_to?(name); end
     def mk(&b); b; end
@@ -66,6 +78,13 @@ SRC = <<~'RUBY'
     def mk_lam; lambda { |a, b| [:lam, a, b] }; end
     def mk_blk; mk { |x, &bb| [x, bb ? bb.call : nil] }; end
     def mk_sum; n = 0; mk { |x| n += x }; end
+    def mk_lam0; lambda { :l0 }; end
+    def mk_lam1; lambda { |x| [:l1, x] }; end
+    def mk_lam_ret; lambda { |x| return :r if x > 1; :s }; end
+    def mk_lam_next; lambda { |x| next :n if x > 1; :s }; end
+    def mk_lam_brk; lambda { |x| break :b }; end
+    def y_each(l); [[1, 2]].each(&l); end
+    def y_each1(l); [3].each(&l); end
   end
 RUBY
 
@@ -104,6 +123,34 @@ DRIVER = <<~'RUBY'
   row('method to_proc') { [pr.cl(5.method(:+).to_proc, 3), pr.cl(5.method(:between?).to_proc, 1, 9)] }
   row('symbol to_proc') { [pr.cl(:upcase.to_proc, 'a'), pr.cl(:upcase.to_proc)] }
   row('curry') { c = pr.mk_lam.curry; [pr.cl(c, 1).class, pr.cl(pr.cl(c, 1), 2)] }
+  row('free lambda ok') { [pr.cl(LamBox::ADD, 1, 2), pr.cl(LamBox::ONE, 5), pr.cl(LamBox::ZERO), pr.cl_aref(LamBox::ADD, 3, 4)] }
+  row('free lambda too few') { pr.cl(LamBox::ADD, 1) }
+  row('free lambda too many') { pr.cl(LamBox::ONE, 1, 2) }
+  row('free lambda none') { pr.cl(LamBox::ONE) }
+  row('free lambda zero arity') { pr.cl(LamBox::ZERO, 1) }
+  row('free lambda aref arity') { pr.cl_aref(LamBox::ADD, 1, 2, 3) }
+  row('free lambda no autosplat') { pr.cl(LamBox::ADD, [1, 2]) }
+  row('free lambda one array') { pr.cl(LamBox::ONE, [1, 2]) }
+  row('free lambda return') { [pr.cl(LamBox::RET, 5), pr.cl(LamBox::RET, 0)] }
+  row('free lambda next') { [pr.cl(LamBox::NXT, 5), pr.cl(LamBox::NXT, 0)] }
+  row('free lambda break') { pr.cl(LamBox::BRK, 1) }
+  row('free lambda block arg') { pr.cl_blk(LamBox::ONE, 1) { :given } }
+  row('free lambda flags') { [LamBox::ADD.lambda?, LamBox::ADD.class, LamBox::ADD.frozen?] }
+  row('free lambda yield') { [pr.y_each1(LamBox::ONE), pr.y_each(LamBox::ONE)] }
+  row('free lambda yield array') { pr.y_each(LamBox::ADD) }
+  row('free lambda curry') { c = LamBox::ADD.curry; [pr.cl(c, 1).class, pr.cl(pr.cl(c, 1), 2)] }
+  row('free lambda to_proc') { [pr.cl(LamBox::ONE.to_proc, 9), LamBox::ONE.to_proc.equal?(LamBox::ONE)] }
+  row('lambda zero') { pr.cl(pr.mk_lam0) }
+  row('lambda zero extra') { pr.cl(pr.mk_lam0, 1) }
+  row('lambda one') { [pr.cl(pr.mk_lam1, 1), pr.cl(pr.mk_lam1, [1, 2])] }
+  row('lambda one none') { pr.cl(pr.mk_lam1) }
+  row('lambda two autosplat') { pr.cl(pr.mk_lam, [1, 2]) }
+  row('lambda yield one') { [pr.y_each1(pr.mk_lam1), pr.y_each(pr.mk_lam1)] }
+  row('lambda yield array') { pr.y_each(pr.mk_lam) }
+  row('lambda return') { [pr.cl(pr.mk_lam_ret, 5), pr.cl(pr.mk_lam_ret, 0)] }
+  row('lambda next') { [pr.cl(pr.mk_lam_next, 5), pr.cl(pr.mk_lam_next, 0)] }
+  row('lambda break') { pr.cl(pr.mk_lam_brk, 1) }
+  row('lambda flags') { [pr.mk_lam.lambda?, pr.mk_plain.lambda?, pr.mk_lam1.lambda?] }
   row('interpreted block') { [pr.cl(proc { |a, b| [a, b] }, 1, 2), pr.cl(proc { |a| a }, [7])] }
   100.times { pr.cl(pr.mk_plain, 1, 2) }
   one = pr.mk_plain
@@ -120,6 +167,8 @@ DRIVER = <<~'RUBY'
   row('Proc#[] overridden') { [pr.cl_aref(pr.mk_plain, 1), pr.cl(pr.mk_plain, 1, 2)] }
   class Proc; alias_method :[], :aref_was; end
   row('subclass override') { [pr.cl(OwnProc.new { |a| a }, 1), pr.cl(OwnProc.new { |a| a }, 2)] }
+  row('subclass private call') { [pr.cl(PrivProc.new { |a| a }, 1)] }
+  row('subclass private aref') { pr.cl_aref(PrivProc.new { |a| a }, 1) }
   row('subclass plain') { pr.cl(SubProc.new { |a| a }, 1) }
   show.call('array size') { pr.sz([1, 2, 3]) }
   show.call('pack owner call') { pr.pk([65, 66]) }
@@ -138,6 +187,8 @@ DRIVER = <<~'RUBY'
   show.call('include order') { pr.tg(Kid.new) }
   show.call('base tag') { pr.tg(Base.new) }
   show.call('send private') { pr.via_send(Secret.new) }
+  show.call('splat private size') { pr.via_splat_size(Secret.new) }
+  show.call('splat public') { pr.via_splat_size([1, 2]) }
   show.call('public_send private') { pr.via_public_send(Secret.new) }
   show.call('module super via dispatch') { pr.tg(Wrapped.new) }
   show.call('module super via self call') { Wrapped.new.go }
@@ -227,6 +278,15 @@ suite.behaviour(DRIVER) do |interpreted, compiled|
               compiled.to_a.include?('Proc#call overridden: [[:ovr, [1]], [:plain, 1, nil], [:ovr, [1]]]'))
   suite.check('a lambda keeps its arity error', compiled.to_a.any? { |l| l.start_with?('lambda arity: ArgumentError: wrong number of arguments') })
   suite.check('a subclass call wins', compiled.to_a.include?('subclass override: [[:own, [1]], [:own, [2]]]'))
+  suite.check('a Proc subclass with a private call raises, as a splat send of it does',
+              compiled.to_a.include?("subclass private call: NoMethodError: private method 'call' called for PrivProc"))
+  [
+    'free lambda ok: [3, 5, :z, 7]', 'free lambda too few: ArgumentError: wrong number of arguments (given 1, expected 2)',
+    'free lambda zero arity: ArgumentError: wrong number of arguments (given 1, expected 0)',
+    'free lambda no autosplat: ArgumentError: wrong number of arguments (given 1, expected 2)',
+    'free lambda one array: [1, 2]', 'free lambda return: [:early, :late]', 'free lambda next: [:n, :m]',
+    'free lambda break: :b', 'free lambda flags: [true, Proc, false]', 'lambda two autosplat: ArgumentError: wrong number of arguments (given 1, expected 2)'
+  ].each { |row| suite.check("strict lambda row: #{row}", compiled.to_a.include?(row)) }
   [
     'define_method over a warm site: [10, 10]', 'include after warm-up: :late', 'prepend after warm-up: :pre',
     'module body redefined: :pre', 'private after warm-up: NoMethodError: private method \'size\' called for Base',

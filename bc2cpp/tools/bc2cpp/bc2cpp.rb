@@ -2237,35 +2237,48 @@ BC2CPP_MAIN = lambda do
       }
       return false;
     }
-    // bc2cpp_yield_foreign, minus the frame when `blk` is a non-strict block with a direct entry. The
-    // arena is restored and the result protected as mrb_yield_with_class does.
+    // bc2cpp_yield_foreign, minus the frame when `blk` is a compiled block with a direct entry (a lambda's entry checks
+    // its arity, as the thunk's does). The arena is restored and the result protected as mrb_yield_with_class does.
     static inline mrb_value bc2cpp_yield_argv(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
       if (mrb_type(blk) == MRB_TT_PROC) {
         struct RProc* p = mrb_proc_ptr(blk);
-        if (bc2cpp_compiled_block_p(p) && !MRB_PROC_STRICT_P(p)) {
+        if (bc2cpp_compiled_block_p(p)) {
           struct REnv* e = MRB_PROC_ENV(p);
           int ai = mrb_gc_arena_save(M);
-          return bc2cpp_arena_keep(M, ai, bc2cpp_block_entry(e)(M, e, false, argc, argv));
+          return bc2cpp_arena_keep(M, ai, bc2cpp_block_entry(e)(M, e, MRB_PROC_STRICT_P(p), argc, argv));
         }
       }
       // mrb_yield_argv leaves its result in no root (no arena slot, past the live stack): restore the arena and root it.
       int ai = mrb_gc_arena_save(M);
       return bc2cpp_arena_keep(M, ai, bc2cpp_yield_foreign(M, blk, argc, argv));
     }
-    // True when `recv.mid` is the builtin Proc#call (or its alias `[]`) on a non-strict compiled block, so the call is
-    // that block's direct entry. An override (Ruby-level, singleton, prepended), a private builtin, a lambda or any
-    // other proc kind (Method#to_proc, Symbol#to_proc, curry, a block that breaks) takes the generic route.
+    // True when `recv.mid` is the builtin Proc#call (or its alias `[]`) on a compiled block with a direct entry, so the
+    // call is that entry. An override (Ruby-level, singleton, prepended), a private builtin or any other proc kind
+    // (Method#to_proc, Symbol#to_proc, curry, a block or lambda that breaks or returns) takes the generic route.
     static inline bool bc2cpp_cfunc_proc_call_p(mrb_state* M, mrb_value recv, mrb_sym mid) {
       const struct RProc* p = mrb_proc_ptr(recv);
       mrb_func_t builtin = bc2cpp_proc_call_slots()[0];
-      if (!builtin || !bc2cpp_compiled_block_p(p) || MRB_PROC_STRICT_P(p)) return false;
+      if (!builtin || !bc2cpp_compiled_block_p(p)) return false;
       struct RClass* c = mrb_class(M, recv);
       mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       return !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_FUNC_P(m) && MRB_METHOD_FUNC(m) == builtin &&
              !(m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL));
     }
-    static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
+    // `explicit_recv`: CHECKED_SEND for a splat send, which OP_SEND refuses a private method (and a protected one from outside)
+    // that the by-name funcall would run.
+    static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv,
+                                                bool explicit_recv = false) {
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
+      if (explicit_recv) {
+        struct RClass* c = mrb_class(M, recv);
+        mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+        if (!MRB_METHOD_UNDEF_P(m) && (m.flags & MRB_METHOD_PRIVATE_FL)) {
+          mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", mid, recv);
+        }
+        if (!MRB_METHOD_UNDEF_P(m) && (m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) {
+          mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", mid, recv);
+        }
+      }
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
     // SSEND_HELPER: a class body's other by-name self send (extend, ...): visibility is ignored, as mrb_funcall does.
