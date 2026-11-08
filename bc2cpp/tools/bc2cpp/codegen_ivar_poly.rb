@@ -55,6 +55,8 @@ class CodeGen
     repeated_owners = defs.group_by(&:owner).select { |_, group| group.size > 1 }.keys
     candidates = defs.select do |t|
       next false if repeated_owners.include?(t.owner)
+      # EXPLICIT_RECEIVER_VISIBILITY: an arm for a non-public or re-scoped def would run what OP_SEND raises for.
+      next false if @explicit_visibility_site && !explicit_call_visible?(name, t)
 
       # POLY_SMALL_N_ACCESSOR: an :ivar_accessor definition (no irep) joins the chain
       # as a bare mrb_iv_get/mrb_iv_set behind the IVAR_ACCESSOR_DEVIRT guard. The

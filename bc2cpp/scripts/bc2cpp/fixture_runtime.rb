@@ -277,7 +277,8 @@ module Bc2cppFixtureRuntime
     entries = err.split('== compiled entry points ==', 2)[1].to_s.split("\n== ", 2)[0]
                  .scan(%r{^\s+(\w+) / \w+\s+\(([^#]+)#([^,]+), arity (\d+)\)(.*)$})
     entries.filter_map do |entry, owner, name, arity, extra|
-      next unless owners.include?(owner)
+      # The build leaves a protected entry unregistered (mruby has no protected define); a public one would hide the check.
+      next unless owners.include?(owner) && !extra.include?('[protected')
 
       holder = owner.delete_suffix('.singleton')
       scope = holder.split('::').inject('mrb_obj_value(M->object_class)') do |outer, part|
