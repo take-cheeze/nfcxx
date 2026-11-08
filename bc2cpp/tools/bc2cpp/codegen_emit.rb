@@ -248,6 +248,7 @@ class CodeGen
       out << "}\n"
     end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
+    out << "  bc2cpp_proc_call_capture(M);\n"
     out << "  bc2cpp_register_core_owner_methods(M);\n"
     out << "  bc2cpp_register_program_owner_methods(M);\n"
     out << "  bc2cpp_proc_specs_install(M);\n"
