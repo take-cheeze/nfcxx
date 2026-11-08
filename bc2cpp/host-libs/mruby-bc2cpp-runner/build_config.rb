@@ -21,6 +21,9 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
   # in the interpreted runner.
   conf.cc.defines << 'MRB_CALL_LEVEL_MAX=8192'
   conf.cxx.defines << 'MRB_CALL_LEVEL_MAX=8192'
+  # bc2cpp splits its 20 MB output into millions of lines; mruby's default array length limit is 131072.
+  conf.cc.defines << 'MRB_ARY_LENGTH_MAX=0'
+  conf.cxx.defines << 'MRB_ARY_LENGTH_MAX=0'
   conf.gem core: 'mruby-bin-mrbc'
   conf.gem core: 'mruby-compiler'
   %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
