@@ -108,6 +108,9 @@ class YieldReach
 
   # The scan and the fixpoint run on the first query, not at construction: a fact the scan asks of the code generator
   # (its argument types, see CodeGen#build_yield_reach) is only available once the generator is ready.
+  # Every public query starts with analyze!; a query made while the analysis runs (@analyzing) passes straight through. The
+  # calls are spelled out: a loop that wrapped the queries with define_method hid them from the compiler, which then
+  # replaced each wrapper with the unwrapped body.
   def analyze!
     return if @analyzed || @analyzing
 
@@ -126,11 +129,13 @@ class YieldReach
 
   # Nothing above this irep's frame can suspend the current Fiber.
   def yield_free?(label)
+    analyze!
     @sound && @own.key?(label) && !@own[label]
   end
 
   # The body of this method, given a block that is itself yield-free, cannot suspend the Fiber.
   def body_yield_free?(label)
+    analyze!
     @sound && @nb.key?(label) && !@nb[label]
   end
 
@@ -143,6 +148,7 @@ class YieldReach
   # blocks as fiber bodies (scan_fiber_call), so `body_yield_free?` otherwise
   # reads a generator builder as yield-free.
   def builds_enumerator?(label)
+    analyze!
     irep = @ireps[label]
     return false unless irep
 
@@ -157,19 +163,31 @@ class YieldReach
   # The raw answer, also for a world the proof does not cover (a closed world with a global refusal): the
   # refusal of methods under a Fiber is best effort there, as it always was.
   def may_yield_unsealed?(label)
+    analyze!
     @own.fetch(label, true)
   end
 
   # Nodes whose frame can lie above a Fiber.new body's entry.
   def fiber_crossable
+    analyze!
     @fiber_crossable ||= compute_crossable
   end
 
-  def method_labels = @nodes.values.select { |n| n.kind == :method }.map(&:label)
-  def block_labels = @nodes.values.select { |n| n.kind == :block }.map(&:label)
-  def fiber_body_labels = @nodes.values.select(&:fiber_body).map(&:label)
+  def method_labels
+    analyze!
+    @nodes.values.select { |n| n.kind == :method }.map(&:label)
+  end
+  def block_labels
+    analyze!
+    @nodes.values.select { |n| n.kind == :block }.map(&:label)
+  end
+  def fiber_body_labels
+    analyze!
+    @nodes.values.select(&:fiber_body).map(&:label)
+  end
 
   def stats
+    analyze!
     m = method_labels
     b = block_labels
     { methods: m.size, methods_free: m.count { |l| yield_free?(l) },
@@ -181,11 +199,13 @@ class YieldReach
 
   # Why nb(label) holds, recorded when the fixpoint first set it (so the chain is acyclic).
   def explain(label)
+    analyze!
     @cause[label] || :none
   end
 
   # Root cause of nb(label): follows :call/:lit links down to a leaf.
   def root_cause(label)
+    analyze!
     e = explain(label)
     return [:none, label] unless e.is_a?(Array)
 
@@ -1375,6 +1395,7 @@ class YieldReach
   # Methods a Fiber's frames can pass through and whose compiled code (or a block compiled into it)
   # may then sit below a Fiber.yield.
   def fiber_unsafe(labels)
+    analyze!
     crossable = fiber_crossable
     labels.select do |l|
       node = @nodes[l]
@@ -1391,13 +1412,4 @@ class YieldReach
     end
   end
 
-  # Every public query runs the analysis first. A query made while it runs (@analyzing) passes straight through.
-  public
-  (public_instance_methods(false) - %i[analyze! sound?]).each do |query|
-    original = instance_method(query)
-    define_method(query) do |*args, **kwargs, &block|
-      analyze!
-      original.bind_call(self, *args, **kwargs, &block)
-    end
-  end
 end
