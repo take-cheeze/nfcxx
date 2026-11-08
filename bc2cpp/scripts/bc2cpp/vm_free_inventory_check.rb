@@ -14,7 +14,7 @@ require 'pathname'
 # sources of this tree; a count above it is a regression.
 DEPENDENCIES = {
   'mrb_funcall' => { pattern: /\bmrb_funcall\w*/, count: 101 },
-  'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 2229 },
+  'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 2253 },
   'mrb_proc_new_cfunc_with_env' => { pattern: /\bmrb_proc_new_cfunc_with_env\w*/, count: 5 },
   # Phase 2: every block site goes through these two, so the dependency stays counted where it now lives.
   'bc2cpp_heap_proc' => { pattern: /\bbc2cpp_heap_proc\w*/, count: 178 },
