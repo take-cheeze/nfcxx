@@ -29,7 +29,7 @@ module StaticOwnerArms
   OWNER_ARG = /(?:[A-Za-z_][A-Za-z0-9_]*|mrb_fixnum_value\(-?\d+\)|mrb_(?:nil|true|false)_value\(\))/.freeze
   OWNER_CALL_LINE = %r{^(?<indent>[ \t]*)(?<dest>r\d+)\ =\ (?<call>bc2cpp_owner_call_named\(M,\ (?<recv>r\d+|self),
     \ "(?<name>[^"]+)",\ \d,\ BC2CPP_OWNERS\([^)]*\),
-    \ (?<blk>mrb_nil_value\(\)|bc2cpp_blk_heap_\d+\(\)|mrb_obj_value\([A-Za-z_][A-Za-z0-9_]*\)),
+    \ (?<blk>mrb_nil_value\(\)|bc2cpp_blk_stack_\d+\.proc\(\)|mrb_obj_value\([A-Za-z_][A-Za-z0-9_]*\)),
     \ (?<argc>\d+)(?<args>(?:,\ #{OWNER_ARG})*)\);
     \ /\*\ CLOSED_WORLD\ owner-call:\ \S+\ \*/)$}x
   NO_BLOCK = 'mrb_nil_value()'
@@ -93,7 +93,7 @@ module StaticOwnerArms
     note = arms.map(&:first).join(', ')
     @call_block_expr = m[:blk] == NO_BLOCK ? nil : m[:blk]
     # The lazy heap block of emit_block_fallback_glue sits next to its frame-local one (stack_block_glue).
-    @call_block_stack_expr = (heap = m[:blk][/\Abc2cpp_blk_heap_(\d+)\(\)\z/, 1]) && "bc2cpp_blk_stack_#{heap}.value()"
+    @call_block_stack_expr = (heap = m[:blk][/\Abc2cpp_blk_stack_(\d+)\.proc\(\)\z/, 1]) && "bc2cpp_blk_stack_#{heap}.value()"
     branches = arms.map do |klass, t|
       impl = "#{cpp_name(t.owner, t.name)}_impl"
       call_argv, = direct_call_args(t, argv, impl)

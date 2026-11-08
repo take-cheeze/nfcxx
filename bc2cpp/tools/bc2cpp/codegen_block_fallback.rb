@@ -1571,9 +1571,10 @@ class CodeGen
   end
 
   # STACK_BLOCK (docs/bc2cpp-stack-blocks.md): a direct-entry block may be built in the frame instead of on the
-  # heap. The forwarded frame block (`needs_blk`) is left out: the heap env is what keeps that value rooted.
+  # heap. A block that yields to the frame's own block (`needs_blk`) holds that block as it is; Bc2cppBlock::proc copies a
+  # frame-local one when the block is wrapped, so a heap env never holds it.
   def stack_block_expr(region)
-    return nil unless stack_blocks? && region[:direct_entry] && !region[:needs_blk]
+    return nil unless stack_blocks? && region[:direct_entry]
 
     "bc2cpp_blk_stack_#{region[:block_addr]}.value()"
   end
@@ -1585,15 +1586,11 @@ class CodeGen
     heap_line = ctor[/^ *struct RProc\* #{rproc_var} = bc2cpp_heap_proc\(M, (\w+), (\d+), bc2cpp_blk_env_#{addr}\);\n/]
     return [ctor, direct] unless heap_line
 
-    fn = Regexp.last_match(1)
     len = Regexp.last_match(2)
     heap_ref = "mrb_obj_value(#{rproc_var})"
-    lines = "    Bc2cppStackBlock bc2cpp_blk_stack_#{addr}(M, #{len}, bc2cpp_blk_env_#{addr});\n"
-    if direct.include?(heap_ref)
-      lines << "    Bc2cppHeapBlock bc2cpp_blk_heap_#{addr}{M, #{fn}, #{len}, bc2cpp_blk_env_#{addr}};\n"
-      direct = direct.gsub(heap_ref, "bc2cpp_blk_heap_#{addr}()")
-    end
-    [ctor.sub(heap_line, lines), direct]
+    lines = "    Bc2cppBlock bc2cpp_blk_stack_#{addr}(M, #{len}, bc2cpp_blk_env_#{addr});\n"
+    direct = direct.gsub(heap_ref, "bc2cpp_blk_stack_#{addr}.proc()") if direct.include?(heap_ref)
+    [ctor.sub(heap_line, lines).sub("bc2cpp_env_block(M, bc2cpp_blk)", "bc2cpp_blk"), direct]
   end
 
   # BC2CPP_STACK_BLOCKS=0 builds every block on the heap again.

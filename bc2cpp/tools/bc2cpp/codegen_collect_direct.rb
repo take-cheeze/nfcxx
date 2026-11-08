@@ -194,7 +194,7 @@ module CollectDirect
 
   # The RProc a literal-block site builds (heap, stack or lazily heap-allocated), which is never nil. Any other
   # block expression gets the nil test.
-  LITERAL_BLOCK_EXPR = /\A(?:mrb_obj_value\(bc2cpp_blk_proc_\d+\)|bc2cpp_blk_stack_\d+\.value\(\)|bc2cpp_blk_heap_\d+\(\))\z/
+  LITERAL_BLOCK_EXPR = /\A(?:mrb_obj_value\(bc2cpp_blk_proc_\d+\)|bc2cpp_blk_stack_\d+\.value\(\)|bc2cpp_blk_stack_\d+\.proc\(\))\z/
 
   def emit_collect_direct_helper(compiled)
     out = compiled.any? { |m| m[:code].include?('bc2cpp_ary_collect(') } ? HELPER.dup : +''

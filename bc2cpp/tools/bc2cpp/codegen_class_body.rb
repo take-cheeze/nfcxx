@@ -171,7 +171,16 @@ class CodeGen
         # has no residual bytecode to run it.
         n = insn.op == :SSEND0 ? 0 : (insn.argc || 0)
         args = (1..n).map { |k| "r#{insn.reg + k}" }
-        lines << "  r#{insn.reg} = bc2cpp_ssend(M, self, mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), {#{args.join(', ')}});\n"
+        # A Ruby def of the same name anywhere in the program may override Module's own, so that name stays a send.
+        overridden = @registry.fetch(insn.sym.to_s, []).any?(&:irep)
+        call = case overridden ? '' : insn.sym.to_s
+               when 'include' then "bc2cpp_mod_include(M, self, {#{args.join(', ')}})"
+               when 'attr_reader', 'attr' then "bc2cpp_mod_attr(M, self, true, false, {#{args.join(', ')}})"
+               when 'attr_writer' then "bc2cpp_mod_attr(M, self, false, true, {#{args.join(', ')}})"
+               when 'attr_accessor' then "bc2cpp_mod_attr(M, self, true, true, {#{args.join(', ')}})"
+               else "bc2cpp_ssend(M, self, mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}), {#{args.join(', ')}})"
+               end
+        lines << "  r#{insn.reg} = #{call};\n"
       elsif literal_length_send?(program, irep, idx)
         lines << literal_length_line(program, irep, idx)
       elsif literal_freeze?(program, idx)

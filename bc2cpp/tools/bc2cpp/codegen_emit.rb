@@ -218,7 +218,7 @@ class CodeGen
           mrb_sym id = mrb_intern_cstr(M, name);
           // Only a definition on the owner itself: an inherited one belongs to another entry.
           struct RClass* definer = owner;
-          mrb_method_t m = mrb_method_search_vm(M, &definer, id);
+          mrb_method_t m = bc2cpp_find_method(M, &definer, id);
           if (!MRB_METHOD_UNDEF_P(m) && definer == owner) mrb_remove_method(M, owner, id);
         #if defined(BC2CPP_RESPOND_TO_PHANTOM)
           bc2cpp_phantom_add(M, owner, id);
@@ -1188,7 +1188,7 @@ class CodeGen
           mrb_value table = bc2cpp_phantom_table(M);
           if (!mrb_hash_p(table)) {
             struct RClass* k = M->kernel_module;
-            mrb_method_t m = mrb_method_search_vm(M, &k, mrb_intern_lit(M, "respond_to?"));
+            mrb_method_t m = bc2cpp_find_method(M, &k, mrb_intern_lit(M, "respond_to?"));
             if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) {
               mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: RESPOND_TO_PHANTOM: Kernel#respond_to? is not mruby's native");
             }

@@ -3,7 +3,7 @@
 # frozen_string_literal: true
 
 # STACK_BLOCK: a direct-entry literal block passed to a compiled core arm whose callee only calls its block
-# (BlockSelf.plain_yielder_why) is built in the caller's frame (Bc2cppStackBlock) instead of on the heap; the
+# (BlockSelf.plain_yielder_why) is built in the caller's frame (Bc2cppBlock) instead of on the heap; the
 # heap RProc is built only where the code still dispatches by name.
 #
 #   generated code (needs a host mrbc)
@@ -90,31 +90,34 @@ puts '-- generated code'
 code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: %w[SbFx SbColl])
 sum = code_of(code, 'sum')
 check.call('sum: the Array arm runs the compiled Array#each with the frame-local block',
-           sum.match?(/Bc2cppStackBlock bc2cpp_blk_stack_(\d+)\(M, \d+, bc2cpp_blk_env_\1\);/) &&
+           sum.match?(/Bc2cppBlock bc2cpp_blk_stack_(\d+)\(M, \d+, bc2cpp_blk_env_\1\);/) &&
              sum.match?(/Array_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
 check.call('sum: the Hash arm takes it too, Range#each (which passes its block on) and the else build the heap RProc ' \
            'only when they run',
-           sum.include?('Bc2cppHeapBlock bc2cpp_blk_heap_') && sum.match?(/Hash_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
-             sum.match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_heap_\d+\(\)\)/) &&
+           sum.include?('bc2cpp_blk_stack_') && sum.include?('.proc()') && sum.match?(/Hash_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
+             sum.match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.proc\(\)\)/) &&
              !sum.match?(/struct RProc\* bc2cpp_blk_proc_\d+ = bc2cpp_heap_proc/))
 check.call('use_gen: a direct call to a compiled program method that only yields its block takes the frame-local block',
            code_of(code, 'use_gen').match?(/SbFx_gen_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
 check.call('use_keep: a callee that stores its block keeps the heap RProc',
-           code_of(code, 'use_keep').include?('SbFx_keep_impl(M') && !code_of(code, 'use_keep').include?('Bc2cppStackBlock'))
+           code_of(code, 'use_keep').include?('SbFx_keep_impl(M') && !code_of(code, 'use_keep').include?('Bc2cppBlock'))
 check.call('use_stash: a nested block that yields to the method block and is kept (no synchronous send) leaves the callee ' \
            'uncompiled, so the block stays on the heap',
-           code.include?('BC2CPP_SKIPPED_SbFx_stash ') && !code_of(code, 'use_stash').include?('Bc2cppStackBlock'))
-check.call('fwd: a block that yields to the frame block (needs_blk) keeps the heap RProc',
-           !code_of(code, 'fwd').include?('Bc2cppStackBlock'))
-check.call('use_repeat: the frame-local block reaches repeat, and the heap env of its nested block gets a heap copy of it',
+           code.include?('BC2CPP_SKIPPED_SbFx_stash ') && !code_of(code, 'use_stash').include?('Bc2cppBlock'))
+check.call('fwd: a block that yields to the frame block (needs_blk) is frame-local too; it holds the frame block as it is',
+           code_of(code, 'fwd').match?(/\{ self, bc2cpp_blk, /) &&
+             code_of(code, 'fwd').match?(/Array_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
+             code_of(code, 'fwd').match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.proc\(\)\)/))
+check.call('use_repeat: the frame-local block reaches repeat, and the nested block that yields to it is frame-local too ' \
+           '(its wrapper, made by .proc() for the by-name else, copies the frame-local block it holds)',
            code_of(code, 'use_repeat').match?(/SbFx_repeat_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
-             code_of(code, 'repeat').include?('bc2cpp_env_block(M, bc2cpp_blk)') &&
-             !code_of(code, 'repeat').match?(/\{ self, bc2cpp_blk,/))
+             code_of(code, 'repeat').match?(/Integer_times_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
+             !code_of(code, 'repeat').include?('bc2cpp_env_block(M, bc2cpp_blk)'))
 check.call('use_guarded_keep: a yielder with a rescue keeps the heap RProc',
-           !code_of(code, 'use_guarded_keep').include?('Bc2cppStackBlock'))
+           !code_of(code, 'use_guarded_keep').include?('Bc2cppBlock'))
 off, = generate_world('BC2CPP_STACK_BLOCKS' => '0')
 check.call('BC2CPP_STACK_BLOCKS=0: every block is built on the heap',
-           !off.include?('Bc2cppStackBlock bc2cpp_blk_stack_') && !off.include?('bc2cpp_blk_heap_'))
+           !off.include?('Bc2cppBlock bc2cpp_blk_stack_') && !off.include?('.proc()'))
 
 DRIVER = <<~'RUBY'
   fx = SbFx.new
