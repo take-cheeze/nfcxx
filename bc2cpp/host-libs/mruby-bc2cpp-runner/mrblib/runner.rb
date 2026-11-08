@@ -17,6 +17,9 @@ module BC2CPPRunner
     else
       require ENTRY
     end
+  ensure
+    # bc2cpp writes its generated code from at_exit handlers (ShardOutput, CompactOutput capture stdout and emit at exit).
+    ExitHandlers.run
   end
 
   # One baked tool, by the name it was baked under, as tools/bc2cpp/mruby_tool.rb does for bin/mruby: ARGV is
