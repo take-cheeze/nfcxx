@@ -1282,17 +1282,24 @@ module StaticDispatchRegistrations
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
+    map = NativeOwnerMap.build(native)
+    # One proof, made when first asked, for the name scan and the removal of the Enumerator methods.
+    proof = -> { @enumerator_free_proof ||= enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root) }
     names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, exact_impls: true,
                                                       strip_generated: ->(src) { src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '') },
-                                                      diagnostic_literals: !symbol_lookups.nil?)
+                                                      diagnostic_literals: !symbol_lookups.nil?,
+                                                      enumerator_free: -> { proof.call.holds },
+                                                      names: core_names || Set.new)
     entries = CoreNativeCandidates.entries(native.select { |p| p.start_with?("#{third}mruby/") },
                                                    operator_names: !proven.empty?)
-    map = NativeOwnerMap.build(native)
     private_ruby = private_ruby_candidates(core, ireps, native, generated, entries, map, engine_registry, engine_superclass_of,
                                            engine_tuple, symbol_lookups, repo_root)
     ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries, proven)
+    self.core_state = [entries, names, fragments, proven] if core_names
     [CoreNativeCandidates.candidates(entries, names, fragments, proven),
      (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort]
+  ensure
+    @enumerator_free_proof = nil
   end
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body
@@ -1400,7 +1407,7 @@ module StaticDispatchRegistrations
     @enumerator_free = nil
     return [] if keys.empty?
 
-    @enumerator_free = enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root)
+    @enumerator_free = @enumerator_free_proof || enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root)
     return [] unless @enumerator_free.holds
 
     # `alias enum_for to_enum` is a second table entry of the same body.
@@ -1640,6 +1647,9 @@ module StaticDispatchRegistrations
     # The CoreEnumeratorFree::Result of the last core_excluded run (nil when it had nothing to prove).
     attr_reader :enumerator_free
     attr_accessor :why
+    # core_kept_report.rb: a Set that answers `note` (it records where each name comes from) for core_excluded to read
+    # names into, and the [entries, names, fragments, proven] it ended with.
+    attr_accessor :core_names, :core_state
   end
 
   def cite(names, reason)
