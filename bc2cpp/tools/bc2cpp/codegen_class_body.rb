@@ -470,8 +470,13 @@ class CodeGen
     fn_name, fn_code = emit_proc_fallback_fn(region, owner_def, "bc2cpp_class_lambda_#{sanitize(owner)}")
     return nil unless fn_code
 
-    # A lambda checks its arity (vm.c: a lambda's RProc is strict).
-    glue = "  {\n    struct RProc* bc2cpp_free_lambda = mrb_proc_new_cfunc(M, #{fn_name});\n" \
+    # A lambda checks its arity (vm.c: a lambda's RProc is strict). It is a block thunk over the direct entry, which takes
+    # the strict flag: a compiled call enters it without a frame (bc2cpp_yield_argv), anything else through the thunk.
+    # Env: no self, the entry, the flag word; Bc2cppBlock::proc() makes the heap proc, so no new heap-proc site is counted.
+    glue = "  {\n    mrb_value bc2cpp_free_env[] = { mrb_nil_value(), " \
+           "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{fn_name}_direct))), mrb_int_value(M, 0) };\n" \
+           "    Bc2cppBlock bc2cpp_free_block(M, 3, bc2cpp_free_env);\n" \
+           "    struct RProc* bc2cpp_free_lambda = mrb_proc_ptr(bc2cpp_free_block.proc());\n" \
            "    bc2cpp_free_lambda->flags |= MRB_PROC_STRICT;\n    r#{insn.reg} = mrb_obj_value(bc2cpp_free_lambda);\n  }\n"
     [fn_code, glue]
   end

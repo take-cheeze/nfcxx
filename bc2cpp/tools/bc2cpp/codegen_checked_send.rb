@@ -25,11 +25,18 @@ module CheckedSend
       marker = level == :explicit ? 'bc2cpp_funcall_explicit' : 'bc2cpp_funcall_noarg'
       code = replace_call_head(code, "mrb_funcall#{head}", "#{marker}#{head}")
     end
-    return code unless code.include?('bc2cpp_owner_call_named(M, ')
+    # OUTSIDE_OWNER_CALL: the checked owner call takes the same level as an argument; so does the splat form over
+    # the Array's items, or `o.private_m(*a)` and `proc_subclass.call(*a)` would skip the visibility check.
+    if insn.positional_splat? && level == :explicit
+      code = code.gsub(/(\bbc2cpp_funcall_argv\(M, #{Regexp.escape(recv)}, mrb_intern_\w+\(M, "#{Regexp.escape(insn.sym)}"\), ary_size\([^()]*\), ary_items\([^()]*\))\)/) { "#{$1}, true)" }
+    end
+    %w[bc2cpp_owner_call_named bc2cpp_owner_call_argv_named].each do |callee|
+      next unless code.include?("#{callee}(M, ")
 
-    # OUTSIDE_OWNER_CALL: the checked owner call takes the same level as an argument.
-    head = "bc2cpp_owner_call_named(M, #{recv}, \"#{insn.sym}\","
-    replace_call_head(code, "#{head} 0,", "#{head} #{level == :explicit ? 2 : 1},")
+      head = "#{callee}(M, #{recv}, \"#{insn.sym}\","
+      code = replace_call_head(code, "#{head} 0,", "#{head} #{level == :explicit ? 2 : 1},")
+    end
+    code
   end
 
   private
@@ -69,7 +76,8 @@ module CheckedSend
     idx = kwargs[:idx]
     return nil if @class_body_unit
     return nil unless irep && idx && insn.sym && kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil?
-    return nil if insn.positional_splat? || insn.keyword_arguments?
+    return nil if insn.keyword_arguments?
+    return nil if insn.positional_splat? && kwargs[:self_implicit]
 
     original = BytecodeIR.for(irep).source_at(idx)
     return nil unless original && original.op == insn.op && original.sym == insn.sym

@@ -14,7 +14,8 @@
 #       operator), or compiled code calls its `_impl`;
 #       an ALIAS keeps both names without making unrelated definitions live;
 #   candidates
-#     - an operator name, a name some table of the class keeps, an ALWAYS_DYNAMIC or fragment-built name stay;
+#     - an operator name, a name some table of the class keeps, or a fragment-built name stays (a protocol name
+#       such as inspect is not kept by default in the closed build);
 #   header
 #     - one MRB_MT_EXCLUDE_<Class>_<presym C name> 1 per listed entry;
 #   ram_candidates
@@ -223,7 +224,7 @@ Dir.mktmpdir('core-native') do |dir|
   listed = CoreNativeCandidates.candidates(entries, names, fragments)
   suite.check("only unreachable entries of their own class's tables are listed (#{listed.join(', ')})",
               listed == %w[Widget#alias_body_send Widget#dead_send Widget#defined_beside_alias Widget#defined_only
-                           Widget#empty? Widget#size= Widget#spin])
+                           Widget#empty? Widget#inspect Widget#size= Widget#spin])
   header = CoreNativeCandidates.header(%w[Widget#empty? Widget#size= Widget#spin], entries)
   suite.check('the header names each listed entry by its presym C name',
               header.lines.grep(/\A#define/).sort ==

@@ -107,7 +107,8 @@ module CoreNativeCandidates
   # literal-lookup proof, so an exception message cannot supply a computed method name.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
                 exact_impls: false, diagnostic_literals: false)
-    names = Set.new(StaticDispatchRegistrations::ALWAYS_DYNAMIC)
+    # Closed (VM-free) only: no protocol name is a backstop here (see StaticDispatchRegistrations#analyze).
+    names = Set.new
     fragments = Set.new
     ireps.each_value { |irep| lookup.call(irep, nil, names, fragments) }
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
