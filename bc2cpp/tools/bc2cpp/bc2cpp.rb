@@ -2532,6 +2532,12 @@ if $PROGRAM_NAME == __FILE__
                                                         mrb_int argc, const mrb_value* argv, mrb_value blk) {
       struct RClass* c = owner;
       MRB_CLASS_ORIGIN(c);
+      // A module has no superclass: OP_SUPER continues after the module's include-class in self's chain.
+      if (c->tt == MRB_TT_MODULE) {
+        for (struct RClass* k = mrb_class(M, self); k; k = k->super) {
+          if (k->tt == MRB_TT_ICLASS && k->c == c) { c = k; break; }
+        }
+      }
       c = c->super;
       mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));

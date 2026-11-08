@@ -5,8 +5,8 @@
 # The method-lookup shapes behind bc2cpp_owner_call and the bc2cpp_find_method seam (docs/bc2cpp-vm-free-runtime-plan.md,
 # Phase 1): singleton methods, include order, method_missing, undefined and private errors, send, respond_to?.
 # Compiled output must equal the interpreter's, line for line, and the generated code must keep one lookup call.
-# Owner-call sites themselves are in owner_call_icache_check.rb; known divergences kept out of the rows: `super` through
-# an included module from a direct _impl call, and public_send of a private method (both also on master).
+# Owner-call sites themselves are in owner_call_icache_check.rb. Also pinned: public_send of a private method raises, and
+# `super` from a module's method reaches the superclass through the receiver's include-class.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
 
@@ -27,6 +27,11 @@ SRC = <<~'RUBY'
     include Loud
     def other; "kid"; end
   end
+  module Wrap; def tag; "w" + super; end; end
+  class Wrapped < Base
+    include Wrap
+    def go; tag; end
+  end
   class Ghost
     def method_missing(name, *args); name == :size ? [:mm, args] : super; end
     def respond_to_missing?(name, priv = false); name == :size; end
@@ -42,11 +47,12 @@ SRC = <<~'RUBY'
     def pk(o); o.pack('C*'); end
     def tg(o); o.tag; end
     def via_send(o); o.send(:hidden); end
+    def via_public_send(o); o.public_send(:hidden); end
     def rt(o, name); o.respond_to?(name); end
   end
 RUBY
 
-OWNERS = %w[Loud Mid Base Kid Ghost Secret Probe Array String Hash Symbol Range Kernel Object BasicObject Module Class
+OWNERS = %w[Loud Mid Base Kid Ghost Secret Probe Wrap Wrapped Array String Hash Symbol Range Kernel Object BasicObject Module Class
             Comparable Integer NilClass].freeze
 code = suite.generate(SRC, OWNERS)
 lookups = code.scan(/\bmrb_method_search_vm\(/).size
@@ -79,6 +85,9 @@ DRIVER = <<~'RUBY'
   show.call('include order') { pr.tg(Kid.new) }
   show.call('base tag') { pr.tg(Base.new) }
   show.call('send private') { pr.via_send(Secret.new) }
+  show.call('public_send private') { pr.via_public_send(Secret.new) }
+  show.call('module super via dispatch') { pr.tg(Wrapped.new) }
+  show.call('module super via self call') { Wrapped.new.go }
   show.call('send undefined') { pr.via_send(Object.new) }
   show.call('respond_to? public') { pr.rt(Base.new, :size) }
   show.call('respond_to? private') { pr.rt(Secret.new, :size) }
@@ -98,6 +107,10 @@ suite.behaviour(DRIVER) do |interpreted, compiled|
   suite.check('NoMethodError text is the interpreter\'s',
               compiled.to_a.any? { |l| l.start_with?('undefined size: NoMethodError: undefined method') })
   suite.check('include order', compiled.to_a.include?('include order: "loud"'))
+  suite.check('public_send of a private method raises',
+              compiled.to_a.any? { |l| l.start_with?('public_send private: NoMethodError: private method') })
+  suite.check('module super reaches the superclass',
+              compiled.to_a.include?('module super via self call: "wbase"'))
   suite.check('the interpreter produced the rows', interpreted.to_a.size > 20)
 end
 suite.finish
