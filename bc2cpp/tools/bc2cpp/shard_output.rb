@@ -35,7 +35,13 @@ module ShardOutput
   # How many files a run writes: BC2CPP_SHARDS, default 1 (no shard files).
   def count(env = ENV)
     raw = env.fetch('BC2CPP_SHARDS', '1')
-    n = Integer(raw, exception: false)
+    # Not Integer(raw, exception: false): mruby's Integer() takes a base as its second argument and reads the keyword
+    # Hash as one (bc2cpp runs as an mruby executable, docs/bc2cpp-self-compile.md).
+    n = begin
+      Integer(raw)
+    rescue ArgumentError, TypeError
+      nil
+    end
     raise Error, "BC2CPP_SHARDS must be a positive integer, got #{raw.inspect}" unless n&.positive?
 
     n
