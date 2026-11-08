@@ -286,9 +286,9 @@ module StaticDispatchRegistrations
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
   PROC_SPEC_NAMES = /static const char\* const bc2cpp_proc_spec_\d+_names\[\] = \{[^}]*\};/
-  # A definition on the running class (a class body's `mrb_define_method(M, mrb_class_ptr(self), "name", ...)`): its name
-  # is a method being defined, not a lookup, the same as REGISTRATION_CALL's identifier-owner form.
-  SELF_REGISTRATION_CALL = /mrb_define_(?:private_)?method\(\s*M\s*,\s*mrb_class_ptr\(self\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,/
+  # A definition on the running class (a class body's `mrb_define_method(M, mrb_class_ptr(self), "name", ...)`, or the
+  # class register rN of codegen_class_body.rb): its name is a method being defined, not a lookup, as REGISTRATION_CALL's.
+  SELF_REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*mrb_class_ptr\((?:self|r\d+)\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,/
   RAW_SYMBOL_VALUE = /mrb_symbol_value\(mrb_intern_cstr\(M, "(?:[^"\\\n]|\\.)*"\)\)/
   # codegen_insn.rb's pool string value (bc2cpp_pool_str, symbol_cache.rb's prelude), not a folded constant.
   POOL_STRING_VALUE = /bc2cpp_pool_str\(M, "((?:[^"\\\n]|\\.)*)"\)/
