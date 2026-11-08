@@ -1420,8 +1420,8 @@ class CodeGen
   # compile_block_body_insn shift) and is passed on for the capture levels.
   # `self` is not shifted: the block shares the method's self. nil keeps the
   # previous output.
-  # The Proc methods that run the proc (sig/bc2cpp/declarations.rbs#core_proc_calls; bc2cpp_cfunc_proc_call_p spells the same set,
-  # which scripts/bc2cpp/core_facts_rbs_check.rb compares).
+  # The Proc methods that run the proc (sig/bc2cpp/core.rbs#core_proc_calls). bc2cpp_cfunc_proc_call_p then tests the found
+  # method itself, so only the builtin `call` and `[]` yield directly.
   PROC_CALL_NAMES = CoreFactSigs.proc_call_names
   # The flag word of a step trailer on a block that is not a thunk (direct-entry) proc.
   BLOCK_STEP_MAGIC = 0x5b2c0000
@@ -1501,9 +1501,8 @@ class CodeGen
     if direct
       out << indent_lines(direct, indent)
     else
-      # BLOCK_SEMANTICS: `pr.call(x) { ... }` on a cfunc Proc cannot use Proc#call
-      # (see bc2cpp_cfunc_proc_call_p); the block is dropped, as a cfunc proc
-      # takes none.
+      # `pr.call(x) { ... }` on a compiled block with the builtin Proc#call yields directly (bc2cpp_cfunc_proc_call_p);
+      # the block is dropped, as a cfunc proc takes none.
       args = argv.empty? ? 'NULL' : "bc2cpp_blk_argv_#{region[:block_addr]}"
       out << "#{indent}mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n" unless argv.empty?
       name = "mrb_intern_cstr(M, \"#{region[:name]}\")"
