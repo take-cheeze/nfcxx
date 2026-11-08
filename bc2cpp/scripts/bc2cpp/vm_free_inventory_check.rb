@@ -17,7 +17,7 @@ DEPENDENCIES = {
   'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 2229 },
   'mrb_proc_new_cfunc_with_env' => { pattern: /\bmrb_proc_new_cfunc_with_env\w*/, count: 5 },
   # Phase 2: every block site goes through these two, so the dependency stays counted where it now lives.
-  'bc2cpp_heap_proc' => { pattern: /\bbc2cpp_heap_proc\w*/, count: 178 },
+  'bc2cpp_heap_proc' => { pattern: /\bbc2cpp_heap_proc\w*/, count: 98 },
   'Bc2cppHeapBlock' => { pattern: /\bBc2cppHeapBlock\b/, count: 0 },
   'bc2cpp_yield_foreign' => { pattern: /\bbc2cpp_yield_foreign\w*/, count: 27 },
   'mrb_protect' => { pattern: /\bmrb_protect\w*/, count: 18 },
