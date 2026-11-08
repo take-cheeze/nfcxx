@@ -971,6 +971,14 @@ module StaticDispatchRegistrations
     naming_macros_in(paths.reject { |p| p.end_with?('/presym/scanning.h') }.map { |p| File.read(p, encoding: 'BINARY') })
   end
 
+  # A stringified parameter names a method unless every `#param` is followed by a literal with a blank
+  # (`#val " too big"`): a method name has no blank, so that text is a message and no lookup takes it.
+  MESSAGE_LITERAL_AFTER_STRINGIFY = /\A\s*"(?:[^"\\\n]|\\.)*\s(?:[^"\\\n]|\\.)*"/
+  def stringified_name?(body, name)
+    uses = body.scan(/(?<!#)#\s*#{name}\b((?:\s*"(?:[^"\\\n]|\\.)*")?)/).map(&:first)
+    uses.any? { |after| !after.match?(MESSAGE_LITERAL_AFTER_STRINGIFY) }
+  end
+
   # naming_macros on source texts.
   def naming_macros_in(texts)
     defs = texts.flat_map do |text|
@@ -985,7 +993,7 @@ module StaticDispatchRegistrations
 
         named = params.split(',').map(&:strip).reject(&:empty?).any? do |param|
           name = Regexp.escape(param.end_with?('...') ? '__VA_ARGS__' : param)
-          body.match?(/(?<!#)#\s*#{name}\b/) || body.match?(/MRB_\w*SYM\w*\([^)]*\b#{name}\b/) ||
+          stringified_name?(body, name) || body.match?(/MRB_\w*SYM\w*\([^)]*\b#{name}\b/) ||
             (callee && body.match?(/#{callee}[^)]*\b#{name}\b/))
         end
         grew = true if named && naming.add?(macro)

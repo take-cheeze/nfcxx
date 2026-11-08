@@ -139,6 +139,19 @@ check('native: bare identifiers name nothing', !tokens.include?('size') && !toke
 check('native: only naming macro arguments are text tokens',
       text_tokens == Set['self', 'redraw', 'relayout'] && !text_tokens.include?('refresh'))
 
+# A stringified argument followed by a message names no method; one followed by a suffix does.
+message = <<~'C'
+  #define GET_NUM(n, val) do { if (bad) mrb_raise(M, E, #val " too big"); } while(0)
+  #define SET_NAMED(v, name) mrb_funcall(M, v, #name "=", 0)
+C
+message_naming = S.naming_macros_in([message])
+check('naming_macros: a stringified message is no name, a suffixed stringified name is',
+      !message_naming.include?('GET_NUM') && message_naming.include?('SET_NAMED'))
+msg_tokens = Set.new
+S.native_name_tokens(%(int w = 1; GET_NUM(n, width);\n), msg_tokens, message_naming)
+check('native: a message argument is no name token', !msg_tokens.include?('width'))
+
+
 # --- SUFFIX_BASES ---
 dyn = Set['done', 'width']
 check('suffix: a text-read base keeps its setter', S.dynamic_name?('width=', dyn, Set.new, Set['width']))
