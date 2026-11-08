@@ -1265,6 +1265,9 @@ class CodeGen
   def block_direct_entry?(region, kind, exits)
     return false if ENV['BC2CPP_BLOCK_DIRECT_ENTRY'] == '0'
 
+    # A free lambda (codegen_class_body.rb) reads nothing from its frame; its entry takes the strict flag as a block's does.
+    return true if kind == 'lambda_fallback' && region[:free]
+
     kind == 'block_fallback' && region[:self_source] != :receiver && !region[:needs_ret] &&
       !region[:needs_brk] && !exits
   end

@@ -86,7 +86,7 @@ else
       #include <cstring>
       #include <string>
 
-      static mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value r, mrb_sym m, mrb_int n, const mrb_value* a) { return mrb_funcall_argv(M, r, m, n, a); }
+      static mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value r, mrb_sym m, mrb_int n, const mrb_value* a, bool = false) { return mrb_funcall_argv(M, r, m, n, a); }
 
       #{cache}
 
