@@ -1,0 +1,23 @@
+#!/bin/bash
+# The C compiler of `nfcxx --target=linux_k1om` (the gcc backend for Intel Knights Corner, k1om). It is gcc-cc's
+# NFCXX_GCC: the k1om GCC 5.1.1 (Intel's MPSS 3.8.6 toolchain, rebuilt for a modern host; docs/notes/k1om.md).
+# gcc-cc passes flags from newer GCCs: map or drop the ones GCC 5 lacks. Linking uses the k1om libC.a of
+# build/k1om (setup-k1om.sh), not the host's EDG runtime, which is host code.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+k1om=${NFCXX_K1OM_ROOT:-/opt/k1om}
+libdir=${NFCXX_K1OM_LIBDIR:-$root/build/k1om}
+link=1
+for a in "$@"; do case $a in -c|-E|-S) link=0 ;; esac; done
+args=()
+for a in "$@"; do
+  case $a in
+    -std=gnu17) a=-std=gnu1x ;;
+    -std=c17|-std=c18) a=-std=c1x ;;
+    -fdiagnostics-plain-output|-fkeep-static-functions) continue ;;
+    *build/edg/lib*) [ $link = 1 ] && continue ;;
+  esac
+  args+=("$a")
+done
+[ $link = 1 ] && args+=("-L$libdir")
+exec "$k1om/bin/k1om-mpss-linux-gcc" -B"$root/scripts/k1om-bin/" ${args[@]+"${args[@]}"}
