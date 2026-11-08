@@ -86,6 +86,23 @@ SRC = <<~'RUBY'
     def kept_hash_run(a); h = kept_hash { |x| x * a.size }; GC.start; ("s" * 40) * 3; [h[1], h[2]]; end
   end
 
+  # IO.open in miniature: the ensure body runs in a guard destructor while a `return` unwinds past a cfunc block's VM frame.
+  class AbSrc
+    def each2; yield 5; end
+  end
+  class AbCl1
+    def close2; 1; end
+  end
+  class AbCl2
+    def close2; 2; end
+  end
+  class AbOpen
+    def opener(x); yield x; ensure; x.close2; end
+    def read_ret(i, x); opener(x) { |_| AbSrc.new.each2 { |l| return [l, i] if l }; :none }; end
+    def read_brk(i, x); opener(x) { |_| AbSrc.new.each2 { |l| break [l, i] if l }; :none }; end
+    def run_open(n); r = []; n.times { |i| r << read_ret(i, AbCl1.new) << read_ret(i, AbCl2.new) << read_brk(i, AbCl2.new); GC.start if i % 7 == 0 }; r.size; end
+  end
+
   class AbColl
     include Enumerable
     def initialize(*a); @a = a; end
@@ -140,6 +157,7 @@ DRIVER = <<~'RUBY'
     end
     show.call("ranged/#{i}") { fx.ranged_run(a) }
   end
+  show.call('open') { AbOpen.new.run_open(40) }
   show.call('coll') { [coll.map { |x| x + 1 }, coll.select(&:even?), coll.first(2), coll.include?(4), coll.each_with_index.to_a] }
   show.call('plain gen') { fx.plain_gen(4) }
   f = Fiber.new do
@@ -163,7 +181,7 @@ def body_of(code, name)
   code[/^mrb_value AbFx_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?(?:\[\[maybe_unused\]\] )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
 end
 
-code = suite.generate(SRC, %w[AbFx AbColl])
+code = suite.generate(SRC, %w[AbFx AbColl AbSrc AbCl1 AbCl2 AbOpen])
 each = body_of(code, 'each')
 suite.check('each: the nested block that yields to the frame block is frame-local and holds that block as it is',
             each.match?(/Bc2cppBlock bc2cpp_blk_stack_\d+\(M, \d+, bc2cpp_blk_env_\d+\)/) &&
@@ -194,6 +212,8 @@ suite.check('a cfunc block handed to a callee that keeps its block stays a heap 
             !body_of(code, 'brk_kept_run').match?(/Bc2cppBlock bc2cpp_blk_stack_\d+\(M, \w+_block_fallback/))
 suite.check('a callee whose nested block outlives the call (Enumerator.new, Hash.new) gets a heap block',
             %w[kept_enum_run kept_hash_run].all? { |name| !body_of(code, name).include?('Bc2cppBlock bc2cpp_blk_stack_') })
+suite.check('an ensure guard pops the callinfo frames an unwind left before it runs its body (a dead frame-local block)',
+            code[/struct bc2cpp_ensure_guard \{.*?\n    \};/m].to_s.match?(/bc2cpp_ci_pop\(M\)/))
 suite.check('the preamble has one Bc2cppBlock and no Bc2cppHeapBlock', code.include?('struct Bc2cppBlock {') && !code.include?('Bc2cppHeapBlock'))
 
 suite.behaviour(DRIVER) do |interpreted, compiled|

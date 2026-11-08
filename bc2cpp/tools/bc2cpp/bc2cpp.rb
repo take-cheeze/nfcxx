@@ -2403,7 +2403,12 @@ if $PROGRAM_NAME == __FILE__
       mrb_state* M;
       F fn;
       mrb_int depth = M->c->ci - M->c->cibase;
+      struct mrb_context* ctx = M->c;
       ~bc2cpp_ensure_guard() noexcept(false) {
+        /* A C++ unwind leaves the callinfo of every VM frame it crossed (a cfunc block's yield) on the stack, and a
+           frame-local block's RProc that such a frame names is already dead: the ensure body's VM calls (mrb_ci_nregs)
+           must not see it. Pop back to the guard's own frame, as the catch site would. */
+        while (M->c == ctx && M->c->ci - M->c->cibase > depth) bc2cpp_ci_pop(M);
         struct RObject* saved = M->exc;
         M->exc = NULL;
         /* OP_EXCEPT's `$!`. The frame depth is the guard's own: a C++ unwind
