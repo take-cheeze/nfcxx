@@ -151,6 +151,8 @@ else
       static mrb_value vnat_kept(mrb_state*, mrb_value) { return mrb_fixnum_value(31); }
       // The registration function ends with the runtime prelude's proc-spec install, which this host does not include.
       static void bc2cpp_proc_specs_install(mrb_state*) {}
+      // Generated lookups go through the prelude's seam, which this host does not include either.
+      static inline mrb_method_t bc2cpp_find_method(mrb_state* M, struct RClass** c, mrb_sym mid) { return mrb_method_search_vm(M, c, mid); }
       #ifdef FIX_PHANTOM
       #{CodeGen.respond_to_phantom_runtime}
       #endif
