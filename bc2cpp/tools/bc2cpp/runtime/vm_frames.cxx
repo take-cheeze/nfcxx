@@ -1,6 +1,6 @@
 // The closed build's call-frame machinery without the bytecode VM
 // (docs/bc2cpp-vm-free-runtime-plan.md, Phase 5). Replaces mruby's vm.c in a
-// closed libmruby.a (scripts/bc2cpp/frames_only_archive.bash). Frames, funcall
+// closed libmruby.a (tools/bc2cpp/native_vm_build.rb). Frames, funcall
 // and yield are vm.c's code for native callees; every path that would start an
 // irep proc raises instead.
 // The entries nothing links to (mrb_vm_exec, mrb_vm_run, mrb_top_run, ...) are

@@ -76,9 +76,23 @@ module NativeVM
       NativeVM.dispatch(dir, header, active_ids: active_ids)
     end
     Rake::FileTask.define_task(header => update)
+    configure_frames_only(build) if native_only
     %w[vm vm-cxx].each do |name|
       src = name == 'vm' ? File.join(MRUBY_ROOT, 'src/vm.c') : File.join(build.build_dir, 'src/vm-cxx.cxx')
       Rake::FileTask.define_task(build.objfile(File.join(build.build_dir, 'src', name)) => [src, header, mode_file])
     end
+  end
+
+  # The closed library links vm_frames.cxx, not vm.c. core.rake appends vm-cxx.o to libmruby_core_objs after this
+  # runs, so the list drops it as it is appended. The .pi task puts the new file's names in the presym list.
+  def configure_frames_only(build)
+    src = File.join(__dir__, 'runtime/vm_frames.cxx')
+    obj = build.objfile(File.join(build.build_dir, 'src/vm_frames'))
+    [obj, obj.ext(build.exts.presym_preprocessed)].each do |dst|
+      Rake::FileTask.define_task(dst => src) { |t| build.cxx.run t.name, src }
+    end
+    objs = build.libmruby_core_objs
+    objs.define_singleton_method(:<<) { |o| super(o.is_a?(Array) ? o.reject { |f| File.basename(f) == 'vm-cxx.o' } : o) }
+    objs << obj
   end
 end
