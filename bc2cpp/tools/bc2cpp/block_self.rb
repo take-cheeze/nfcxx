@@ -47,6 +47,8 @@ module BlockSelf
     program = BytecodeIR.for(irep)
     proc_at = lambda do |idx, reg|
       defs = program.reaching_definitions(idx, reg, through_handlers: true, shared: true)
+      # A rescue clause's EXCEPT and RESCUE (vm.c) write only the exception and the match flag, never the block.
+      defs ||= program.reaching_definitions(idx, reg, through_handlers: true, handler_ops: true)
       return :unknown if defs.nil?
 
       defs.any? { |df| proc_def?(irep, df, frames, blk) }
@@ -158,6 +160,15 @@ module BlockSelf
       return [[d, :called]] + (1..n).map { |k| [d + k, :argument] }
     end
     case op
+    when :GETIDX0
+      # vm.c OP_GETIDX0 reads only R(b), the receiver; its aref fallback passes that and an immediate 0.
+      regs[1] ? [[regs[1], :argument]] : nil
+    when :RESCUE
+      # vm.c OP_RESCUE reads the exception R(a) and the class R(b), and writes R(b).
+      regs.first(2).map { |r| [r, :argument] }
+    when :RAISEIF
+      # vm.c OP_RAISEIF reads R(a) only (the pending exception, or nil).
+      regs.first(1).map { |r| [r, :argument] }
     when :RETURN, :RETURN_BLK, :BREAK, :SETIV, :SETGV, :SETSV, :SETCV, :SETCONST, :SETUPVAR, :GETMCNST
       regs.map { |r| [r, :argument] }
     when *FIXED_WINDOW_OPS.keys

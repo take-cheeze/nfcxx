@@ -95,7 +95,10 @@ Dir.mktmpdir('static-owner-dispatch') do |dir|
   check.call('block each: STATIC_OWNER_ARMS marker', es.include?('STATIC_OWNER_ARMS :each') && eb.include?('STATIC_OWNER_ARMS :each'))
   check.call('block each: the arm passes the call\'s own block to Bag_each_impl',
              es.match?(/Bag_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\);/) &&
-             eb.match?(/Bag_each_impl\(M, r\d+, mrb_obj_value\(bc2cpp_blk_proc_\d+\)\);/))
+             eb.match?(/Bag_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\);/))
+  er = body.call(code, 'er')
+  check.call('block each: a block that breaks or returns is a frame-local cfunc block (Bc2cppBlock over its wrapper)',
+             [eb, er].all? { |b| b.match?(/Bc2cppBlock bc2cpp_blk_stack_\d+\(M, \w+_block_fallback_\d+, \d+, bc2cpp_blk_env_\d+\)/) })
   check.call('block each: the block owner call stays as the else',
              es.match?(/bc2cpp_owner_call\(M, r\d+, \d+, 0, BC2CPP_OWNERS\([^)]*\), bc2cpp_blk_stack_\d+\.proc\(\), 0\)/))
   tg = body.call(code, 'tg')

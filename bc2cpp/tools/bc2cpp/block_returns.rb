@@ -115,10 +115,14 @@ module BlockReturns
     why = BlockSelf.plain_yielder_why(irep, ireps)
     return why if why
 
+    # BlockSelf now crosses a callee's handlers, but a rescue clause returns its own value and an ensure may re-raise.
+    program = BytecodeIR.for(irep)
+    return 'has a rescue path (RESCUE)' if program.op?(:RESCUE)
+    return 'has an ensure path (EXCEPT)' if program.op?(:EXCEPT)
+
     nested = nested_exit_why(irep, ireps, entry.arity)
     return nested if nested
 
-    program = BytecodeIR.for(irep)
     return 'has branch targets that are not instructions' unless program.resolved?
     return 'has exception handlers it cannot place' unless program.handlers_resolved?
 

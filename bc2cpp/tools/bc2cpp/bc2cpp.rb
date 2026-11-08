@@ -2022,26 +2022,28 @@ if $PROGRAM_NAME == __FILE__
       struct RProc* proc_;
       struct REnv* env_;
       mrb_value* vals_;
-      Bc2cppBlock(mrb_state* M, mrb_int len, mrb_value* stack) : M_(M), fn_(bc2cpp_block_thunk), len_(len), env_vals_(stack) {
+      Bc2cppBlock(mrb_state* M, mrb_func_t fn, mrb_int len, mrb_value* stack) : M_(M), fn_(fn), len_(len), env_vals_(stack) {
         proc_ = static_cast<struct RProc*>(calloc(1, sizeof(struct RProc)));
         env_ = static_cast<struct REnv*>(calloc(1, sizeof(struct REnv)));
         vals_ = static_cast<mrb_value*>(malloc(sizeof(mrb_value) * (len > 0 ? len : 1)));
         if (len > 0) memcpy(static_cast<void*>(vals_), static_cast<const void*>(stack), sizeof(mrb_value) * len);
-        init(M, *proc_, *env_, vals_, len);
+        init(M, *proc_, *env_, vals_, len, fn);
       }
       ~Bc2cppBlock() { free(proc_); free(env_); free(vals_); }
       mrb_value value() { return mrb_obj_value(proc_); }
 #else
       struct RProc proc_;
       struct REnv env_;
-      Bc2cppBlock(mrb_state* M, mrb_int len, mrb_value* stack) : M_(M), fn_(bc2cpp_block_thunk), len_(len), env_vals_(stack) {
+      Bc2cppBlock(mrb_state* M, mrb_func_t fn, mrb_int len, mrb_value* stack) : M_(M), fn_(fn), len_(len), env_vals_(stack) {
         memset(static_cast<void*>(&proc_), 0, sizeof(proc_));
         memset(static_cast<void*>(&env_), 0, sizeof(env_));
-        init(M, proc_, env_, stack, len);
+        init(M, proc_, env_, stack, len, fn);
       }
       mrb_value value() { return mrb_obj_value(&proc_); }
 #endif
-      static void init(mrb_state* M, struct RProc& proc, struct REnv& env, mrb_value* stack, mrb_int len) {
+      // A direct-entry block runs through bc2cpp_block_thunk; a block that breaks or returns is a plain cfunc over the same env.
+      Bc2cppBlock(mrb_state* M, mrb_int len, mrb_value* stack) : Bc2cppBlock(M, bc2cpp_block_thunk, len, stack) {}
+      static void init(mrb_state* M, struct RProc& proc, struct REnv& env, mrb_value* stack, mrb_int len, mrb_func_t fn) {
         env.tt = MRB_TT_ENV;
         env.gc_color = MRB_GC_RED;
         env.c = mrb_vm_ci_target_class(M->c->ci);
@@ -2053,7 +2055,7 @@ if $PROGRAM_NAME == __FILE__
         proc.gc_color = MRB_GC_RED;
         proc.c = M->proc_class;
         proc.flags = MRB_PROC_CFUNC_FL | MRB_PROC_ENVSET;
-        proc.body.func = bc2cpp_block_thunk;
+        proc.body.func = fn;
         proc.e.env = &env;
       }
       // The wrapper for code that may keep the block or run it by name: a heap RProc over a copy of the env values.
@@ -2405,7 +2407,12 @@ if $PROGRAM_NAME == __FILE__
       mrb_state* M;
       F fn;
       mrb_int depth = M->c->ci - M->c->cibase;
+      struct mrb_context* ctx = M->c;
       ~bc2cpp_ensure_guard() noexcept(false) {
+        /* A C++ unwind leaves the callinfo of every VM frame it crossed (a cfunc block's yield) on the stack, and a
+           frame-local block's RProc that such a frame names is already dead: the ensure body's VM calls (mrb_ci_nregs)
+           must not see it. Pop back to the guard's own frame, as the catch site would. */
+        while (M->c == ctx && M->c->ci - M->c->cibase > depth) bc2cpp_ci_pop(M);
         struct RObject* saved = M->exc;
         M->exc = NULL;
         /* OP_EXCEPT's `$!`. The frame depth is the guard's own: a C++ unwind

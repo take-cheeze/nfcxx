@@ -26,7 +26,14 @@ PLAIN = {
   'calls it with a splat from a nested block' => 'def m(&b); ary = []; [[1]].each { |*v| ary.push(b.call(*v)) }; ary; end',
   'calls it with a splat and keywords' => 'def m(&b); b.call(*[1], k: 2); end',
   'tests it' => 'def m(&b); return :none unless b; b.call; end',
-  'builds a Hash of other values' => 'def m(&b); h = { a: 1 }; b.call(h); end'
+  'builds a Hash of other values' => 'def m(&b); h = { a: 1 }; b.call(h); end',
+  # GETIDX0 reads only its receiver: Enumerable#inject's `args[0]` next to the block register.
+  'indexes another Array with [0]' => 'def m(*args, &b); r = args[0]; b.call(r); end',
+  'indexes with [0] after a yield' => 'def m(a); yield; a[0]; end',
+  'rescues around a yield' => 'def m(d); yield; rescue StandardError => e; d.f(e.message); d; end',
+  'rescues around a block call' => 'def m(d, &b); b.call; rescue ArgumentError, TypeError; d; end',
+  'yields inside an ensure' => 'def m(o); yield o; ensure; o.close; end',
+  'IO.open shape' => 'def m(*a, &b); io = a[0]; return io unless b; begin; yield io; ensure; begin; io.close unless io.closed?; rescue StandardError; end; end; end'
 }.freeze
 
 ESCAPING = {
@@ -43,7 +50,14 @@ ESCAPING = {
   'an interpolated String' => 'def m(&b); "#{b}"; end',
   'a splatted value' => 'def m(&b); x = *b; x; end',
   'a nested block capture passed on' => 'def m(o, &b); [1].each { |v| o.f(b) }; end',
-  'super' => 'def m(&b); super; end'
+  'super' => 'def m(&b); super; end',
+  'the receiver of [0]' => 'def m(&b); b[0]; end',
+  'an Array element indexed with [0]' => 'def m(&b); a = [b]; a[0]; end',
+  'a rescue handler storing it' => 'def m(&b); yield; rescue StandardError; @k = b; end',
+  'a rescue handler returning it' => 'def m(&b); b.call; rescue StandardError => e; [e, b]; end',
+  'a rescue handler passing it' => 'def m(o, &b); o.f; rescue StandardError; o.g(b); end',
+  'a rescue clause naming it' => 'def m(&b); yield; rescue b; 0; end',
+  'an ensure body storing it' => 'def m(&b); yield; ensure; @k = b; end'
 }.freeze
 
 def method_why(ireps, root, name)

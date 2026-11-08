@@ -574,7 +574,7 @@ class CodeGen
       region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
                  block_irep: block_irep, name: name, n: n, kw: kw,
                  self_implicit: paired.op == :SSENDB, upvars: upvars, needs_blk: needs_blk,
-                 parent_irep: irep, boxed: boxed }
+                 parent_irep: irep, boxed: boxed, by_value: by_value }
       # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
       # forwarded by every enclosing block, so it is needed for a `return` at any depth.
       region[:needs_brk] = BytecodeIR.for(block_irep).op?(:BREAK)
@@ -1587,21 +1587,30 @@ class CodeGen
   # heap. A block that yields to the frame's own block (`needs_blk`) holds that block as it is; Bc2cppBlock::proc copies a
   # frame-local one when the block is wrapped, so a heap env never holds it.
   def stack_block_expr(region)
-    return nil unless stack_blocks? && region[:direct_entry]
+    return nil unless stack_blocks? && (region[:direct_entry] || stack_cfunc_block?(region))
 
     "bc2cpp_blk_stack_#{region[:block_addr]}.value()"
+  end
+
+  # A block that breaks or returns has no direct entry: a yield runs its cfunc wrapper, which reads the tokens and
+  # everything else from the proc's env, so the proc may sit in the frame like a thunk block's.
+  def stack_cfunc_block?(region)
+    region[:direct_entry] == false && (region[:kind] || 'block_fallback') == 'block_fallback' &&
+      region[:self_source] != :receiver && !region[:free]
   end
 
   # The arms took the frame-local block: build it over the env array, and build the heap RProc only where the
   # remaining code still dispatches (the by-name else), when it runs.
   def stack_block_glue(region, rproc_var, ctor, direct)
     addr = region[:block_addr]
-    heap_line = ctor[/^ *struct RProc\* #{rproc_var} = bc2cpp_heap_proc\(M, (\w+), (\d+), bc2cpp_blk_env_#{addr}\);\n/]
+    heap_line = ctor[/^ *struct RProc\* #{rproc_var} = bc2cpp_heap_proc\(M, ([\w$]+), (\d+), bc2cpp_blk_env_#{addr}\);\n/]
     return [ctor, direct] unless heap_line
 
+    fn = Regexp.last_match(1)
     len = Regexp.last_match(2)
     heap_ref = "mrb_obj_value(#{rproc_var})"
-    lines = "    Bc2cppBlock bc2cpp_blk_stack_#{addr}(M, #{len}, bc2cpp_blk_env_#{addr});\n"
+    entry = fn == 'bc2cpp_block_thunk' ? '' : "#{fn}, "
+    lines = "    Bc2cppBlock bc2cpp_blk_stack_#{addr}(M, #{entry}#{len}, bc2cpp_blk_env_#{addr});\n"
     direct = direct.gsub(heap_ref, "bc2cpp_blk_stack_#{addr}.proc()") if direct.include?(heap_ref)
     [ctor.sub(heap_line, lines).sub("bc2cpp_env_block(M, bc2cpp_blk)", "bc2cpp_blk"), direct]
   end
