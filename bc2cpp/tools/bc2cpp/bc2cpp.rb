@@ -2454,8 +2454,17 @@ BC2CPP_MAIN = lambda do
     [[maybe_unused]] static mrb_value bc2cpp_super_call(mrb_state* M, mrb_value self, struct RClass* owner, mrb_sym mid,
                                                         mrb_int argc, const mrb_value* argv, mrb_value blk) {
       struct RClass* c = owner;
-      MRB_CLASS_ORIGIN(c);
-      c = c->super;
+      if (owner->tt == MRB_TT_MODULE) {
+        /* A module has no superclass: its methods run on the iclass the module has in the receiver's chain (included,
+           prepended or extended), and super continues after that iclass. */
+        struct RClass* k = mrb_class(M, self);
+        while (k && !(k->tt == MRB_TT_ICLASS && k->c == owner)) k = k->super;
+        if (!k) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
+        c = k->super;
+      } else {
+        MRB_CLASS_ORIGIN(c);
+        c = c->super;
+      }
       mrb_method_t m = mrb_method_search_vm(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
       return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk);
