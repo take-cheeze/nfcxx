@@ -80,7 +80,31 @@ class YieldReach
                     :any_lit, :enum_send, :klass, :generator, :yielder_calls, :yielder_leak, :callable_send, :fwd_callable,
                     :dyn_other, keyword_init: true)
 
-  attr_reader :nodes, :defs_by_name, :fiber_roots_unknown, :reasons, :enum_names
+  # Readers that run the analysis first, like every public query (see analyze!).
+  def nodes
+    analyze!
+    @nodes
+  end
+
+  def defs_by_name
+    analyze!
+    @defs_by_name
+  end
+
+  def fiber_roots_unknown
+    analyze!
+    @fiber_roots_unknown
+  end
+
+  def reasons
+    analyze!
+    @reasons
+  end
+
+  def enum_names
+    analyze!
+    @enum_names
+  end
 
   # opaque_names: the names outside (native and foreign Ruby) code calls back into Ruby by, or nil
   # when they were not scanned. native_names: names some outside source defines.
