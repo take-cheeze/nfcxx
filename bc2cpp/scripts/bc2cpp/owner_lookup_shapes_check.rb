@@ -5,8 +5,8 @@
 # The method-lookup shapes behind bc2cpp_owner_call and the bc2cpp_find_method seam (docs/bc2cpp-vm-free-runtime-plan.md,
 # Phase 1): singleton methods, include order, method_missing, undefined and private errors, send, respond_to?.
 # Compiled output must equal the interpreter's, line for line, and the generated code must keep one lookup call.
-# Owner-call sites themselves are in owner_call_icache_check.rb; known divergences kept out of the rows: `super` through
-# an included module from a direct _impl call, and public_send of a private method (both also on master).
+# Owner-call sites themselves are in owner_call_icache_check.rb. Also pinned: public_send of a private method raises, and
+# `super` from a module's method reaches the superclass through the receiver's include-class.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
 
@@ -27,6 +27,11 @@ SRC = <<~'RUBY'
     include Loud
     def other; "kid"; end
   end
+  module Wrap; def tag; "w" + super; end; end
+  class Wrapped < Base
+    include Wrap
+    def go; tag; end
+  end
   class Ghost
     def method_missing(name, *args); name == :size ? [:mm, args] : super; end
     def respond_to_missing?(name, priv = false); name == :size; end
@@ -37,16 +42,19 @@ SRC = <<~'RUBY'
     def hidden; :h; end
     private :hidden
   end
+  module Late; def size; :late; end; end
+  module Pre; def size; :pre; end; end
   class Probe
     def sz(o); o.size; end
     def pk(o); o.pack('C*'); end
     def tg(o); o.tag; end
     def via_send(o); o.send(:hidden); end
+    def via_public_send(o); o.public_send(:hidden); end
     def rt(o, name); o.respond_to?(name); end
   end
 RUBY
 
-OWNERS = %w[Loud Mid Base Kid Ghost Secret Probe Array String Hash Symbol Range Kernel Object BasicObject Module Class
+OWNERS = %w[Late Pre Loud Mid Base Kid Ghost Secret Probe Wrap Wrapped Array String Hash Symbol Range Kernel Object BasicObject Module Class
             Comparable Integer NilClass].freeze
 code = suite.generate(SRC, OWNERS)
 lookups = code.scan(/\bmrb_method_search_vm\(/).size
@@ -79,6 +87,9 @@ DRIVER = <<~'RUBY'
   show.call('include order') { pr.tg(Kid.new) }
   show.call('base tag') { pr.tg(Base.new) }
   show.call('send private') { pr.via_send(Secret.new) }
+  show.call('public_send private') { pr.via_public_send(Secret.new) }
+  show.call('module super via dispatch') { pr.tg(Wrapped.new) }
+  show.call('module super via self call') { Wrapped.new.go }
   show.call('send undefined') { pr.via_send(Object.new) }
   show.call('respond_to? public') { pr.rt(Base.new, :size) }
   show.call('respond_to? private') { pr.rt(Secret.new, :size) }
@@ -91,6 +102,59 @@ DRIVER = <<~'RUBY'
   show.call('redefined size') { pr.sz(Base.new) }
   class Base; undef_method :size; end
   show.call('undef size') { pr.sz(Base.new) }
+  # Table writes after the sites are warm (the seam must not keep a stale answer). Only `size`, `pack` and
+  # respond_to? reach the table: a method every owner of which is compiled is a direct call, and runtime
+  # redefinition of those is outside the closed world (the engine lint forbids it).
+  class Base; def size; 9; end; end
+  200.times { pr.sz(Base.new); pr.sz(Kid.new); pr.sz(Ghost.new); pr.pk([1]) }
+  Base.send(:define_method, :size) { 10 }
+  show.call('define_method over a warm site') { [pr.sz(Base.new), pr.sz(Kid.new)] }
+  Base.send(:remove_method, :size)
+  show.call('remove_method falls to undefined') { pr.sz(Kid.new) }
+  class Kid; include Late; end
+  show.call('include after warm-up') { pr.sz(Kid.new) }
+  class Base; alias_method :size, :class; end
+  show.call('alias_method on the superclass') { [pr.sz(Base.new), pr.sz(Kid.new)] }
+  class Base; undef_method :size; end
+  show.call('undef_method hides the included module') { [pr.sz(Base.new), pr.sz(Kid.new)] }
+  class Kid; prepend Pre; end
+  show.call('prepend after warm-up') { pr.sz(Kid.new) }
+  module Late; def size; :late2; end; end
+  show.call('module body redefined') { pr.sz(Kid.new) }
+  class Base; def size; 11; end; end
+  class Base; private :size; end
+  show.call('private after warm-up') { pr.sz(Base.new) }
+  class Base; public :size; end
+  show.call('public again') { pr.sz(Base.new) }
+  show.call('respond_to? private-then-public') { pr.rt(Base.new, :size) }
+  class Ghost; undef_method :method_missing; end
+  show.call('method_missing undefined') { pr.sz(Ghost.new) }
+  class Ghost; def method_missing(name, *args); [:mm2, name]; end; end
+  show.call('method_missing redefined') { pr.sz(Ghost.new) }
+  class Ghost; def size; :real; end; end
+  show.call('real method beats method_missing') { pr.sz(Ghost.new) }
+  show.call('respond_to? after define') { pr.rt(Ghost.new, :size) }
+  class Ghost; remove_method :size; end
+  show.call('respond_to? after remove') { pr.rt(Ghost.new, :size) }
+  class Secret; public :size; end
+  show.call('private made public') { pr.sz(Secret.new) }
+  g = Ghost.new
+  g.extend(Late)
+  show.call('extend on an instance') { pr.sz(g) }
+  class << Base; def size; 33; end; end
+  show.call('class-method redefined') { [pr.sz(Base), pr.sz(Kid)] }
+  class << Base; remove_method :size; end
+  show.call('class-method removed') { pr.sz(Kid) }
+  class Array
+    alias_method :pack_was, :pack
+    def pack(f); 'mine'; end
+  end
+  show.call('core method redefined') { pr.pk([65]) }
+  class Array
+    remove_method :pack
+    alias_method :pack, :pack_was
+  end
+  show.call('core method restored') { pr.pk([65]) }
   puts 'end'
 RUBY
 
@@ -98,6 +162,16 @@ suite.behaviour(DRIVER) do |interpreted, compiled|
   suite.check('NoMethodError text is the interpreter\'s',
               compiled.to_a.any? { |l| l.start_with?('undefined size: NoMethodError: undefined method') })
   suite.check('include order', compiled.to_a.include?('include order: "loud"'))
+  suite.check('public_send of a private method raises',
+              compiled.to_a.any? { |l| l.start_with?('public_send private: NoMethodError: private method') })
+  suite.check('module super reaches the superclass',
+              compiled.to_a.include?('module super via self call: "wbase"'))
   suite.check('the interpreter produced the rows', interpreted.to_a.size > 20)
+  [
+    'define_method over a warm site: [10, 10]', 'include after warm-up: :late', 'prepend after warm-up: :pre',
+    'module body redefined: :pre', 'private after warm-up: NoMethodError: private method \'size\' called for Base',
+    'method_missing redefined: [:mm2, :size]', 'real method beats method_missing: :real',
+    'extend on an instance: :late2', 'core method redefined: "mine"'
+  ].each { |row| suite.check("mutation row after warm-up: #{row}", compiled.to_a.include?(row)) }
 end
 suite.finish

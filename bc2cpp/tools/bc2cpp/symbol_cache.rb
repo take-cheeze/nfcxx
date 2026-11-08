@@ -292,10 +292,23 @@ module SymbolCache
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_visibility_error(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv, bool priv) {
       mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", priv ? "private" : "protected", mid, recv);
     }
+    static bool bc2cpp_is_public_send(mrb_state* M, mrb_sym mid) {
+      static mrb_state* st; static mrb_sym ps;
+      if (st != M) { ps = mrb_intern_lit(M, "public_send"); st = M; }
+      return mid == ps;
+    }
     [[gnu::noinline]] static void bc2cpp_check_send(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv, bool explicit_receiver) {
       struct RClass* c = mrb_class(M, recv);
       mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) return;
+      // mrb_funcall reaches public_send's funcall branch, which skips its own visibility check; do it here.
+      if (argc > 0 && MRB_METHOD_FUNC_P(m) && bc2cpp_is_public_send(M, mid)) {
+        mrb_sym name = mrb_obj_to_sym(M, argv[0]);
+        struct RClass* tc = mrb_class(M, recv);
+        mrb_method_t tm = bc2cpp_find_method(M, &tc, name);
+        if (!MRB_METHOD_UNDEF_P(tm) && (tm.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL)))
+          bc2cpp_visibility_error(M, recv, name, argc - 1, argv + 1, (tm.flags & MRB_METHOD_PRIVATE_FL) != 0);
+      }
       if (explicit_receiver) {
         if (m.flags & MRB_METHOD_PRIVATE_FL) bc2cpp_visibility_error(M, recv, mid, argc, argv, true);
         if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) bc2cpp_visibility_error(M, recv, mid, argc, argv, false);
