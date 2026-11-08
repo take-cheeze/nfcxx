@@ -202,7 +202,12 @@ require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 require_relative 'codegen_stack_tuples'
 require_relative 'owner_call_direct'
 
-if $PROGRAM_NAME == __FILE__
+# The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
+# one program (docs/bc2cpp-self-compile.md). A host that wants to register compiled code between loading the sources and
+# running the command defines BC2CPP_DEFER_MAIN before the load and calls BC2CPP_MAIN itself.
+BC2CPP_MAIN = lambda do
+  next unless $PROGRAM_NAME == __FILE__
+
   InFramePlacement.refuse_if_requested!
   FileIdentity.sources_fixed!
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
@@ -2825,3 +2830,4 @@ if $PROGRAM_NAME == __FILE__
   end
   profile_phase.call('diagnostics + sidecar writes')
 end
+BC2CPP_MAIN.call unless defined?(BC2CPP_DEFER_MAIN)

@@ -526,9 +526,11 @@ module CoreEnumeratorFree
   #   native_block_sends  name => [[file, [[line, function]]]] of the native sends of it that always pass a block the native
   #                   builds (native_own_block_sends); a spelling in such a file is no spelling of its own
   #   block_returns   method name => [BlockReturns::Entry] of the checked `{ ... } -> T` declarations (sig/bc2cpp)
-  Inputs = Struct.new(:engine, :core, :hierarchy, :foreign, :external, :external_owners, :ivar_external, :symbol_lookups,
-                      :native_creators, :native_problems, :native_aliases, :native_spelled, :block_returns, :native_block_sends,
-                      keyword_init: true)
+  # The members go in as a splat: a call with 14 positional arguments and a keyword reaches Struct.new in mruby with its
+  # block in the wrong slot ("not a block"), so the self-compiled runner could not load this file.
+  INPUT_MEMBERS = %i[engine core hierarchy foreign external external_owners ivar_external symbol_lookups
+                     native_creators native_problems native_aliases native_spelled block_returns native_block_sends].freeze
+  Inputs = Struct.new(*INPUT_MEMBERS, keyword_init: true)
 
   # The proof. Returns a Result; +unproven+ names every site and condition it could not account for.
   def prove(inputs)
