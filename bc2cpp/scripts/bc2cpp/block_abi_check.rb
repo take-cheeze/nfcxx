@@ -40,6 +40,9 @@ SRC = <<~'RUBY'
     def ffgen(n); fgen(n) { |x| yield x + 1 }; end
     def plain_gen(n); r = []; ffgen(n) { |x| r << x * 3 }; r; end
     def ensure_fwd(a); a.each { |x| yield x }; ensure; @ens = (@ens || 0) + 1; end
+    def rescuer(d); yield 1; rescue StandardError => e; "rescued #{e.message} #{d}"; end
+    def ensurer(log); yield log; ensure; log << :ens; end
+    def first_arg(*args, &b); b.call(args[0]); end
 
     def sum_each; s = 0; each { |x| s += x }; s; end
     def mutate; cnt = 0; names = []; each2 { |x, y| cnt += 1; names << x * y if x == y }; [cnt, names]; end
@@ -59,6 +62,15 @@ SRC = <<~'RUBY'
     def kept_run(a); k = keep_nested { |x| x.to_s * 2 }; [k.call(a), k.call(7)]; end
     def stash_run(a); stash { |x| x.to_s * 3 }; GC.start; [@held.call(a), @held.call(4)]; end
     def ranged_run(r); s = []; ranged(r) { |x| s << x }; GC.start; s; end
+    def use_rescuer(a); n = 0; r = rescuer(:d) { |x| n += x; raise "boom #{a}" if a == 4; n }; [r, n]; end
+    def use_ensurer(a); log = []; ensurer(log) { |l| l << a }; log; end
+    def use_ensurer_raise(a); log = []; r = (ensurer(log) { |l| l << a; raise "e#{a}" if a == 4 } rescue $!.message); [r, log]; end
+    def use_first_arg(a); n = 0; first_arg(a, 2) { |x| n += x.to_i }; n; end
+    # A nested block that outlives the call holds the frame block (boxed cells): the caller must pass a heap block.
+    def kept_enum(&b); Enumerator.new { |y| y << b.call(1) }; end
+    def kept_enum_run(a); e = kept_enum { |x| x + a.size }; GC.start; ("s" * 40) * 3; e.next; end
+    def kept_hash(&b); Hash.new { |h, k| h[k] = b.call(k) }; end
+    def kept_hash_run(a); h = kept_hash { |x| x * a.size }; GC.start; ("s" * 40) * 3; [h[1], h[2]]; end
   end
 
   class AbColl
@@ -108,7 +120,8 @@ DRIVER = <<~'RUBY'
   show.call('multi') { fx.use_multi }
   show.call('splat') { [fx.use_splat, fx.use_splat2] }
   [[1, 2, 3], [], [5], (1..30).to_a, { a: 1, b: 2 }, 1..4, coll, %w[7 8]].each_with_index do |a, i|
-    %i[through2 through_ary nexts churn nest_deep use_maybe raise_in raise_ens use_ens kept_run stash_run].each do |m|
+    %i[through2 through_ary nexts churn nest_deep use_maybe raise_in raise_ens use_ens kept_run stash_run
+       use_rescuer use_ensurer use_ensurer_raise use_first_arg kept_enum_run kept_hash_run].each do |m|
       show.call("#{m}/#{i}") { fx.send(m, a) }
     end
     show.call("ranged/#{i}") { fx.ranged_run(a) }
@@ -154,6 +167,13 @@ suite.check('keep_nested: a nested block stored in an ivar keeps the heap wrappe
             !body_of(code, 'keep_nested').include?('Bc2cppBlock bc2cpp_blk_stack_'))
 suite.check('kept_run: a callee that stores a block built from the frame block keeps the heap RProc',
             !body_of(code, 'kept_run').include?('Bc2cppBlock bc2cpp_blk_stack_'))
+suite.check('a callee that yields inside a rescue, an ensure, or indexes its splat with [0] takes the frame-local block',
+            %w[use_rescuer use_ensurer use_first_arg].all? do |name|
+              body = body_of(code, name)
+              body.match?(/Bc2cppBlock bc2cpp_blk_stack_\d+\(M, \d+, bc2cpp_blk_env_\d+\)/) && !body.include?('bc2cpp_heap_proc')
+            end)
+suite.check('a callee whose nested block outlives the call (Enumerator.new, Hash.new) gets a heap block',
+            %w[kept_enum_run kept_hash_run].all? { |name| !body_of(code, name).include?('Bc2cppBlock bc2cpp_blk_stack_') })
 suite.check('the preamble has one Bc2cppBlock and no Bc2cppHeapBlock', code.include?('struct Bc2cppBlock {') && !code.include?('Bc2cppHeapBlock'))
 
 suite.behaviour(DRIVER) do |interpreted, compiled|

@@ -102,15 +102,18 @@ module BytecodeIR
     # results retain the existing API; callers requesting sharing must not mutate any result.
     # +raiseif_nil+: vm.c OP_RAISEIF falls through only when R(a) is nil, so a RAISEIF of
     # the register on a normal edge is itself its definition (the nil value), not a step over.
+    # +handler_ops+ (with through_handlers): a walk over a handler's own EXCEPT and RESCUE follows vm.c instead of
+    # refusing (origin_effect's two cases, without the rest of origin_transfers). Uncached.
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
-                             through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false, shared: false)
+                             through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false, shared: false,
+                             handler_ops: false)
       # Mutable opaque sets and refusal diagnostics belong to the caller; do not retain them.
       StrictKeySet.coerce(opaque_regs)
-      if refusal || (opaque_regs && !opaque_regs.frozen?)
+      if refusal || handler_ops || (opaque_regs && !opaque_regs.frozen?)
         return compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                             max_states: max_states, through_handlers: through_handlers,
                                             origin_transfers: origin_transfers, refusal: refusal,
-                                            raiseif_nil: raiseif_nil)
+                                            raiseif_nil: raiseif_nil, handler_ops: handler_ops && through_handlers)
       end
 
       @reaching_definitions_cache ||= {}
@@ -192,7 +195,8 @@ module BytecodeIR
     private :reaching_opaque_key
 
     def compute_reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
-                                     through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false)
+                                     through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false,
+                                     handler_ops: false)
       preds = instruction_predecessors
       return refused(refusal, :unresolved) unless preds
       return refused(refusal, :bad_index) unless index.between?(0, @instructions.length - 1)
@@ -234,17 +238,26 @@ module BytecodeIR
         defs = Set.new
       end
       states = 0
+      count = @instructions.length
       until work.empty?
         r = work.pop
         i = work.pop
-        seen_here = seen[i]
+        # handler_ops: an index above the instruction count carries NIL_REGS, a bit set of registers known to hold
+        # nil here (see nil_regs_after below).
+        key = i
+        nil_regs = 0
+        if i >= count
+          nil_regs = i / count
+          i %= count
+        end
+        seen_here = seen[key]
         if scalar_seen && !seen_here.is_a?(Hash)
           next if seen_here.eql?(r)
 
           # Most instructions are visited for one register; promote only on a second.
-          seen[i] = seen_here ? { seen_here => true, r => true } : r
+          seen[key] = seen_here ? { seen_here => true, r => true } : r
         else
-          seen_here ||= (seen[i] = {})
+          seen_here ||= (seen[key] = {})
           next if seen_here.key?(r)
 
           seen_here[r] = true
@@ -255,6 +268,13 @@ module BytecodeIR
         return refused(refusal, :query_guarded) if guarded && guarded[i]
 
         ps = (all_preds ? all_pred_lists : pred_lists)[i]
+        # vm.c OP_EXCEPT stores nil only when entered with no pending exception, so a path that needs its register
+        # nil came in by the normal edge.
+        here = @instructions[i].source
+        if nil_regs.anybits?(1 << here.reg.to_i) && here.op == :EXCEPT
+          # No normal edge in: no path leaves the register nil here, so none reaches the query.
+          next if (ps = pred_lists[i]).empty?
+        end
         return refused(refusal, :no_predecessor) if ps.empty?
 
         live_here = live_at && live_at[i]
@@ -283,21 +303,23 @@ module BytecodeIR
             defs << Definition.new(p, r)
             next
           end
+          next_i = handler_ops ? nil_regs_after(p, insn, i, nil_regs,
+                                                         preds[i].include?(p) && !raise_targets.fetch(p, EMPTY_TARGETS).include?(i), count) : p
           # A handler-only edge may fire before the write completes.
-          work.push(p, r) if all_preds && !preds[i].include?(p)
-          effect = origin_transfers ? origin_effect(insn, r, index: p) : effect_of(dataflow_effect_at(p), r)
+          work.push(next_i, r) if all_preds && !preds[i].include?(p)
+          effect = origin_transfers ? origin_effect(insn, r, index: p) : handler_op_effect(insn, r, p, handler_ops)
           case effect
           when :refuse then return refused(refusal, "unmodelled:#{insn.op}")
           when :refuse_enter_shape, :refuse_enter_temp
             return refused(refusal, "unmodelled:ENTER:#{effect.to_s.delete_prefix('refuse_enter_')}")
           when :callee_clobber then return refused(refusal, :callee_frame_clobber)
-          when :pass then work.push(p, r)
+          when :pass then work.push(next_i, r)
           when :define
             if follow_moves && insn.op == :MOVE
               source = insn.regs[1]
               return refused(refusal, :move_without_source) unless source
 
-              work.push(p, source)
+              work.push(next_i, source)
             else
               built = insn.op == :ENTER ? enter_built_kind(insn, r) : nil
               defs << Definition.new(p, r, built)
@@ -314,6 +336,35 @@ module BytecodeIR
     end
 
     private :compute_reaching_definitions
+
+    # The effect of the instruction at +p+ on +reg+; with +handler_ops+ an EXCEPT and a RESCUE follow vm.c.
+    def handler_op_effect(insn, reg, p, handler_ops = true)
+      return origin_effect(insn, reg, index: p) if handler_ops && (insn.op == :EXCEPT || insn.op == :RESCUE)
+
+      effect_of(dataflow_effect_at(p), reg)
+    end
+    private :handler_op_effect
+
+    # handler_ops: the work-stack index of predecessor +p+ (instruction +insn+) of the state at +i+, which knows the
+    # registers in the bit set +nil_regs+ hold nil. A RAISEIF that falls through to +i+ proves its register nil (vm.c
+    # OP_RAISEIF raises anything else). A fact holds on this path back to the EXCEPT that stored the register (kept
+    # for it, so the walk drops its handler edges) and ends at any other write of the register, or past that EXCEPT.
+    def nil_regs_after(p, insn, i, nil_regs, normal_edge, count)
+      regs = 0
+      if nil_regs.positive?
+        here = @instructions[i].source
+        past = here.op == :EXCEPT ? 1 << here.reg.to_i : 0
+        nil_regs.to_s(2).reverse.each_char.with_index do |bit, reg|
+          next if bit == '0' || past.anybits?(1 << reg)
+
+          stored = insn.op == :EXCEPT && insn.reg == reg
+          regs |= 1 << reg if stored || handler_op_effect(insn, reg, p) == :pass
+        end
+      end
+      regs |= 1 << insn.reg.to_i if insn.op == :RAISEIF && normal_edge
+      p + (count * regs)
+    end
+    private :nil_regs_after
 
     # JOIN_DOMINANCE: does the write at +w+ (ENTRY: the method's
     # incoming value) supply +reg+ at +use+ on every path? True when no edge,
