@@ -83,6 +83,6 @@ if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
   done
   ${CCBIN[@]+"${CCBIN[@]}"} ${build[@]+"${build[@]}"}
   "$(dirname "$0")/weak-symbols" "$csrc" "$asmf"
-  exec as -o "$obj" "$asmf"
+  exec "${NFCXX_AS:-as}" -o "$obj" "$asmf"
 fi
 exec ${CCBIN[@]+"${CCBIN[@]}"} ${args[@]+"${args[@]}"}

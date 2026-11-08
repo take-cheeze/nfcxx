@@ -50,7 +50,7 @@
 #                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
 #   --target=NAME: with --freestanding and --emit-c only. The front end lays out the program for an EDG target (sizes,
 #                  predefined macros) instead of the build host: linux_aarch64, linux_armv7, linux_riscv64, linux_riscv32,
-#                  linux_i686, win64 (MinGW's macros when MinGW is installed at setup; docs/notes/freestanding.md, "Windows"), win32. The generated C is for that target, so the
+#                  linux_i686, linux_k1om (Intel Knights Corner: freestanding, the k1om GCC; docs/notes/k1om.md), win64 (MinGW's macros when MinGW is installed at setup; docs/notes/freestanding.md, "Windows"), win32. The generated C is for that target, so the
 #                  host cc must not compile it: give it to a cross compiler. docs/notes/freestanding.md, "Targets".
 #   --cosmo: build with cosmocc (Cosmopolitan libc, APE output) as the C compiler. Implies --backend=gcc. cosmocc is
 #                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
@@ -735,7 +735,19 @@ elif [ -n "$gnu" ]; then
 fi
 # --target: the EDG configuration of the generated C (only with --freestanding --emit-c, see the usage above). The host
 # library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
-if [ -n "$target" ]; then
+# --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
+# same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc) with the k1om assembler and
+# runtime (scripts/setup-k1om.sh). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
+if [ "$target" = linux_k1om ]; then
+  [ $freestanding = 1 ] || { echo "nfcxx: --target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)" >&2; exit 2; }
+  [ "$backend_explicit" = 0 ] || [ "$backend" = gcc ] || { echo "nfcxx: --target=linux_k1om uses the gcc backend (the k1om GCC)" >&2; exit 2; }
+  backend=gcc
+  k1om_root=${NFCXX_K1OM_ROOT:-/opt/k1om}
+  [ -x "$k1om_root/bin/k1om-mpss-linux-gcc" ] || { echo "nfcxx: no k1om toolchain at $k1om_root (NFCXX_K1OM_ROOT; docs/notes/k1om.md)" >&2; exit 2; }
+  [ -f "$root/build/k1om/libC.a" ] || { echo "nfcxx: no k1om runtime at $root/build/k1om/libC.a (run scripts/setup-k1om.sh)" >&2; exit 2; }
+  export NFCXX_GCC="$root/scripts/k1om-cc" NFCXX_AS="$root/scripts/k1om-bin/as" NFCXX_K1OM_ROOT="$k1om_root"
+fi
+if [ -n "$target" ] && [ "$target" != linux_k1om ]; then
   [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
   [ $emit_c = 1 ] || { echo "nfcxx: --target needs --emit-c (the generated C is for the target; compile it with a cross compiler)" >&2; exit 2; }
   tbase=${EDG_BASE:-$root/build/edg-base}
