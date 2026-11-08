@@ -2,6 +2,12 @@
 # baked name, so the runner names it that way and requires it. ARGV is the command line, as the caller set it.
 module BC2CPPRunner
   ENTRY = 'tools/bc2cpp/bc2cpp'.freeze
+  DEBUG_SOURCES = %w[escape_report cha_self_report guard_hint_report interface_table_report send_root_report site_origin_table
+                     refine_report native_arms_report provable_error_report element_site_report receiver_proof_report
+                     param_trace else_trace recv_trace].map { |n| "tools/bc2cpp/#{n}" }.freeze
+  DEBUG_MODULES = %w[EscapeReport ChaSelfReport GuardHintReport InterfaceTableReport SendRootReport SiteOriginTable RefineReport
+                     NativeArmsReport ProvableErrorReport ElementSiteReport ReceiverProofReport ParamTrace ElseTrace
+                     RecvTrace].freeze
 
   def self.run
     $PROGRAM_NAME = ENTRY
@@ -11,11 +17,27 @@ module BC2CPPRunner
       Object.const_set(:BC2CPP_DEFER_MAIN, true)
       require ENTRY
       # Sources the entry loads only on demand own compiled methods too: the registration needs their classes.
-      MRubyRequire.baked_names.each { |name| require name }
+      MRubyRequire.baked_names.each { |name| require name unless DEBUG_SOURCES.include?(name) }
+      # The report and trace modules the entry requires only under a BC2CPP_*_REPORT or _TRACE variable prepend themselves to
+      # CodeGen and register at_exit writers: they stay unloaded, as under CRuby, and registration gets an inert module to
+      # attach their compiled methods to.
+      DEBUG_MODULES.each { |name| Object.const_set(name, placeholder) unless Object.const_defined?(name) }
       register_compiled
       BC2CPP_MAIN.call
     else
       require ENTRY
+    end
+  ensure
+    # bc2cpp writes its generated code from at_exit handlers (ShardOutput, CompactOutput capture stdout and emit at exit).
+    ExitHandlers.run
+  end
+
+  # A module whose nested constants (SiteOriginTable::Writer, ...) are further placeholders.
+  def self.placeholder
+    Module.new do
+      def self.const_missing(name)
+        const_set(name, BC2CPPRunner.placeholder)
+      end
     end
   end
 
