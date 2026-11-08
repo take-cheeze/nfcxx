@@ -703,7 +703,7 @@ static mrb_value bc2cpp_fiber_yield_c(mrb_state* M, mrb_value value) {
   mrb_value fiber = mrb_obj_value(mrb_class_get(M, "Fiber"));
   mrb_sym yield_id = mrb_intern_lit(M, "yield");
   struct RClass* c = mrb_class(M, fiber);
-  mrb_method_t m = mrb_method_search_vm(M, &c, yield_id);
+  mrb_method_t m = bc2cpp_find_method(M, &c, yield_id);
   return mrb_funcall_with_method(M, fiber, yield_id, &m, c, 1, &value,
                                  mrb_nil_value());
 }

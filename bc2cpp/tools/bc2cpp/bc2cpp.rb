@@ -2272,7 +2272,7 @@ if $PROGRAM_NAME == __FILE__
       // Interned by name: a presym id is only valid in the library the header came from (fixture builds mix them).
       mrb_sym call_id = mrb_intern_lit(M, "call");
       struct RClass* c = mrb_class(M, recv);
-      mrb_method_t m = mrb_method_search_vm(M, &c, call_id);
+      mrb_method_t m = bc2cpp_find_method(M, &c, call_id);
       if (!MRB_METHOD_UNDEF_P(m)) {
         if (m.flags & MRB_METHOD_PRIVATE_FL) {
           mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", call_id, recv);
