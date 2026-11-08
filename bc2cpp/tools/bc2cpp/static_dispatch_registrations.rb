@@ -1087,8 +1087,11 @@ module StaticDispatchRegistrations
       method_of[label] = up
     end
 
-    dynamic = Set.new(ALWAYS_DYNAMIC)
-    cite(ALWAYS_DYNAMIC, 'always dynamic (ALWAYS_DYNAMIC)')
+    # Closed (VM-free) build: no implicit protocol dispatch remains outside the names the proof reads (a by-name send,
+    # a presym, a literal in generated code or a bytecode send). The open build keeps ALWAYS_DYNAMIC as its backstop.
+    protocol = closed_only ? [] : ALWAYS_DYNAMIC
+    dynamic = Set.new(protocol)
+    cite(protocol, 'always dynamic (ALWAYS_DYNAMIC)')
     if symbol_lookups
       dynamic.merge(symbol_lookups)
       cite(symbol_lookups, 'a Symbol literal that may name a looked-up method (SYMBOL_USES)')
@@ -1357,7 +1360,7 @@ module StaticDispatchRegistrations
       engine: { ireps: ireps, tuple: engine_tuple }, core: core, native: native, entries: CoreNativeCandidates.entries(native),
       map: map, symbol_lookups: symbol_lookups, strip: method(:strip_c_comments),
       tokens: ->(text, found) { native_name_tokens(text, found, macros) }, entry_name: CoreNativeCandidates::ENTRY_NAME,
-      implicit_names: ALWAYS_DYNAMIC | IMPLICIT_DISPATCH_NAMES.values, block_returns: declared_block_returns(repo_root)
+      implicit_names: IMPLICIT_DISPATCH_NAMES.values, block_returns: declared_block_returns(repo_root)
     )
     CoreEnumeratorFree.prove(inputs)
   end

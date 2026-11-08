@@ -197,7 +197,7 @@ def inputs_of(world, symbol_names = nil, block_returns: {})
   EF.inputs(engine: world[:engine], core: world[:core], native: world[:native], entries: world[:entries],
             map: NativeOwnerMap.build([]), symbol_lookups: symbol_names || lookups, strip: sdr.method(:strip_c_comments),
             tokens: ->(text, found) { sdr.native_name_tokens(text, found, []) }, entry_name: CoreNativeCandidates::ENTRY_NAME,
-            implicit_names: StaticDispatchRegistrations::ALWAYS_DYNAMIC | IMPLICIT_DISPATCH_NAMES.values, block_returns: block_returns)
+            implicit_names: IMPLICIT_DISPATCH_NAMES.values, block_returns: block_returns)
 end
 
 # The proof of a world.
