@@ -62,6 +62,29 @@ ARM = %r{(?:// NATIVE_OWNER_MAP :empty\? -- [^\n]*\n\s*)?if \(bc2cpp_class_is\(M
 # The by-name else: a plain send, or with the owner map on, the closed-world owner call over the same owners.
 BY_NAME_ELSE = /bc2cpp_send\(M, r\d+, \d+, 0\)|bc2cpp_owner_call\(M, r\d+, \d+, \d+, BC2CPP_OWNERS\(.*?\), mrb_nil_value\(\), 0\)/
 
+# The state may be spelled `M` as well as `mrb`: `M->array_class` is the Array class, so an alias or definition through
+# it has an owner rather than UNKNOWN (mruby-rgss captures the core sort that way). An unknown field stays UNKNOWN.
+require_relative '../../tools/bc2cpp/native_owner_map'
+Dir.mktmpdir('native-owner-state-name') do |dir|
+  path = File.join(dir, 'reg.c')
+  File.write(path, <<~C)
+    void install(mrb_state* M) {
+      mrb_define_alias(M, M->array_class, "m_alias!", "sort!");
+      mrb_define_method(M, M->object_class, "m_global", f, MRB_ARGS_NONE());
+      mrb_define_method(M, M->no_such_field, "m_unknown", f, MRB_ARGS_NONE());
+    }
+    void install_mrb(mrb_state* mrb) {
+      mrb_define_alias(mrb, mrb->array_class, "mrb_alias!", "sort!");
+    }
+  C
+  map = NativeOwnerMap.build([path])
+  check.call('M->array_class alias is an Array definition of its name', map.by_name['m_alias!'] == Set['Array'])
+  check.call('M->object_class definition is an Object definition of its name', map.by_name['m_global'] == Set['Object'])
+  check.call('mrb->array_class still names Array', map.by_name['mrb_alias!'] == Set['Array'])
+  check.call('an unknown state field stays UNKNOWN', map.by_name['m_unknown'] == Set[NativeOwnerMap::UNKNOWN])
+  check.call('the alias is recorded with its original', map.aliases.include?(['Array', 'm_alias!', 'sort!']))
+end
+
 if tool?(MRBC_PATH)
   gems = NomethodReviewedProbe.closed_gems(ROOT)
   native_srcs = core_native_srcs(MRUBY) + external_gem_native_srcs(ROOT)

@@ -184,6 +184,14 @@ module OutsideOwnerCall
       "#{argc}, #{argv}); /* CLOSED_WORLD owner-call: #{name} */"
   end
 
+  # SPLAT_OWNER_CALL: a `recv.name(*list)` send whose Array is built at run time, as the owner call over the Array's
+  # items instead of bc2cpp_funcall_argv. Nil (keep the by-name send) with a block in flight or without an owner set.
+  def splat_owner_call_line(d, recv, name, argc, argv)
+    return nil if @call_block_expr
+
+    block_owner_call_argv_line("r#{d}", recv, name, argc, argv, 'mrb_nil_value()')
+  end
+
   # Only deeply frozen owner lists can keep formatting by identity; callers may still supply mutable lists.
   def owner_call_owner_list(owners)
     @owner_call_owner_lists ||= {}.compare_by_identity
