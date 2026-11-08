@@ -33,7 +33,7 @@ RUBY
 
 code = suite.generate(SRC, %w[StressRoots Array Enumerable Enumerator Integer Kernel Range])
 suite.check('the arena result root is emitted in a method entry',
-            code.match?(/return bc2cpp_cfunc_result\(M, StressRoots_grown_impl\(/))
+            code.match?(/return bc2cpp_cfunc_result\(\{M, M->gc\.arena_idx, StressRoots_grown_impl\(/))
 
 DRIVER = <<~'RUBY'
   # The first call: a VM block's array result, then a respond_to? on it that allocates.

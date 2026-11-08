@@ -206,8 +206,8 @@ module BlockCoreDirectFallback
   end
 
   # STACK_BLOCK: an arm whose compiled callee only calls its block (BlockSelf.plain_yielder_why) takes the
-  # frame-local RProc. Such a callee can only hand the Proc to bc2cpp_yield_argv, so the VM never sees it and
-  # nothing keeps it past the call.
+  # frame-local RProc. Such a callee can only hand the Proc to bc2cpp_yield_argv, or to a `&blk` send that
+  # passes bc2cpp_env_block of it (explicit_block_forward?), so the VM never sees it and nothing keeps it past the call.
   def stack_block_args(args, target)
     return args unless @call_block_stack_expr && stack_block_callee?(target.irep)
 
@@ -217,7 +217,8 @@ module BlockCoreDirectFallback
   def stack_block_callee?(label)
     (@stack_block_callees ||= {}).fetch(label) do
       irep = @ireps[label]
-      @stack_block_callees[label] = BlockSelf.plain_yielder_why(irep, @ireps).nil? && !keeps_captured_block?(irep)
+      forwards = stack_blocks? ? method(:explicit_block_forward?) : nil
+      @stack_block_callees[label] = BlockSelf.plain_yielder_why(irep, @ireps, forwards: forwards).nil? && !keeps_captured_block?(irep)
     end
   end
 

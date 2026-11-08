@@ -44,6 +44,55 @@ SRC = <<~'RUBY'
     def ensurer(log); yield log; ensure; log << :ens; end
     def first_arg(*args, &b); b.call(args[0]); end
 
+    # `&blk` forwarding (stage 3): the forwarding send passes bc2cpp_env_block of the block register, so the callee still gets a
+    # frame-local block; a target that keeps the block gets a heap copy.
+    def fw_each(&b); @a.each(&b); self; end
+    def fw_map(&b); @a.map(&b); end
+    def fw_prog(&b); l2(@a, &b); end
+    def fw_two(&b); fw_each(&b); fw_each(&b); end
+    def fw_cond(f, &b); f ? @a.each(&b) : :skipped; end
+    def fw_nested(&b); [1, 2].each { |_| @a.each(&b) }; end
+    def fw_also_yield(&b); yield 0; @a.each(&b); end
+    def fw_kw(&b); kwm(1, k: 2, &b); end
+    def kwm(n, k: 0); yield n + k; end
+    def fw_splat(*a, &b); splatm(*a, &b); end
+    def splatm(x, y); yield x + y; end
+    def fw_send(&b); send(:fw_each, &b); end
+    def fw_keep(&b); hold(&b); end
+    def fw_keep_enum(&b); Enumerator.new(&b); end
+    def fw_rescue(&b); @a.each(&b); rescue ArgumentError => e; e.message; end
+    def fw_ensure(&b); @a.each(&b); ensure; @ens = (@ens || 0) + 1; end
+    def fw_ret(&b); b; end
+    def fw_nil(&b); @a.each(&b); end
+
+    def use_fw_each; s = 0; fw_each { |x| s += x }; s; end
+    def use_fw_map; fw_map { |x| x * 2 }; end
+    def use_fw_sym; fw_map(&:to_s); end
+    def use_fw_prog; r = []; fw_prog { |x| r << x + 1 }; r; end
+    def use_fw_two; n = 0; fw_two { |x| n += x }; n; end
+    def use_fw_cond; n = 0; [fw_cond(true) { |x| n += x }, fw_cond(false) { |x| n += 100 }, n]; end
+    def use_fw_nested; n = 0; fw_nested { |x| n += x }; n; end
+    def use_fw_also; n = []; fw_also_yield { |x| n << x }; n; end
+    def use_fw_kw; fw_kw { |v| v * 10 }; end
+    def use_fw_splat; fw_splat(3, 4) { |v| v * 10 }; end
+    def use_fw_send; n = 0; fw_send { |x| n += x }; n; end
+    def use_fw_keep; fw_keep { |x| x.to_s * 2 }; GC.start; @held.call(21); end
+    def use_fw_keep_enum; e = fw_keep_enum { |y| y << 1 << 2 }; GC.start; ("s" * 40) * 3; e.to_a; end
+    def use_fw_rescue; fw_rescue { |x| raise ArgumentError, "fw #{x}" if x == 4; x }; end
+    def use_fw_ensure; @ens = 0; r = (fw_ensure { |x| raise "fe#{x}" if x == 4 } rescue $!.message); [r, @ens]; end
+    def mk_hold; n = 0; hold { |x| n += x }; end
+    def mk_fw_keep; n = 0; fw_keep { |x| n += x }; end
+    def use_fw_keep_cap; mk_fw_keep; GC.start; ("s" * 40) * 3; [@held.call(3), @held.call(4)]; end
+    def use_hold_cap; mk_hold; GC.start; ("s" * 40) * 3; [@held.call(3), @held.call(4)]; end
+    def use_fw_ens_break; @ens = 0; r = fw_ensure { |x| break [x, :out] if x == 4 }; [r, @ens]; end
+    def use_fw_ens_return; @ens = 0; fw_ensure { |x| return [x, @ens] if x == 4 }; [:end, @ens]; end
+    def use_fw_ret; b = fw_ret { |x| x + 1 }; GC.start; b.call(4); end
+    def use_fw_nil; fw_nil; end
+    def use_fw_break; fw_each { |x| break x * 7 if x == 4 }; end
+    def use_fw_return; fw_each { |x| return x * 9 if x == 4 }; :none; end
+    def use_fw_churn; r = []; fw_each { |x| 30.times { |k| r << "#{x}-#{k}" }; r.shift(25) }; r.size; end
+    def use_fw_gc; s = 0; fw_each { |x| GC.start; s += x }; s; end
+
     def sum_each; s = 0; each { |x| s += x }; s; end
     def mutate; cnt = 0; names = []; each2 { |x, y| cnt += 1; names << x * y if x == y }; [cnt, names]; end
     def through2(a); r = []; l1(a) { |x| r << x * 2 }; r; end
@@ -157,6 +206,9 @@ DRIVER = <<~'RUBY'
     end
     show.call("ranged/#{i}") { fx.ranged_run(a) }
   end
+  %i[use_fw_each use_fw_map use_fw_sym use_fw_prog use_fw_two use_fw_cond use_fw_nested use_fw_also use_fw_kw use_fw_splat
+     use_fw_send use_fw_ens_break use_fw_ens_return use_fw_keep use_fw_keep_cap use_hold_cap use_fw_keep_enum use_fw_rescue use_fw_ensure use_fw_ret use_fw_nil use_fw_break use_fw_return
+     use_fw_churn use_fw_gc].each { |m| show.call(m.to_s) { fx.send(m) } }
   show.call('open') { AbOpen.new.run_open(40) }
   show.call('coll') { [coll.map { |x| x + 1 }, coll.select(&:even?), coll.first(2), coll.include?(4), coll.each_with_index.to_a] }
   show.call('plain gen') { fx.plain_gen(4) }
@@ -170,7 +222,8 @@ DRIVER = <<~'RUBY'
   show.call('gc stress') do
     GC.stress = true if GC.respond_to?(:stress=)
     r = [fx.sum_each, fx.through2([1, 2]), fx.churn([1, 2]), fx.nest_deep([1, 2]), fx.stash_run(7), fx.ranged_run(1..3),
-         fx.twice_sum(2), fx.use_multi, fx.kept_run(3), fx.nexts([1, 2, 3])]
+         fx.twice_sum(2), fx.use_multi, fx.kept_run(3), fx.nexts([1, 2, 3]), fx.use_fw_each, fx.use_fw_prog, fx.use_fw_keep,
+         fx.use_fw_keep_enum, fx.use_fw_churn]
     GC.stress = false if GC.respond_to?(:stress=)
     r
   end
@@ -212,8 +265,32 @@ suite.check('a cfunc block handed to a callee that keeps its block stays a heap 
             !body_of(code, 'brk_kept_run').match?(/Bc2cppBlock bc2cpp_blk_stack_\d+\(M, \w+_block_fallback/))
 suite.check('a callee whose nested block outlives the call (Enumerator.new, Hash.new) gets a heap block',
             %w[kept_enum_run kept_hash_run].all? { |name| !body_of(code, name).include?('Bc2cppBlock bc2cpp_blk_stack_') })
+FRAME_LOCAL_SITE = /Bc2cppBlock bc2cpp_blk_stack_\d+\(M, (?:\w+, )?\d+, bc2cpp_blk_env_\d+\)/
+FORWARDERS = %w[fw_each fw_map fw_prog fw_two fw_cond fw_nested fw_also_yield fw_kw fw_splat fw_send fw_keep fw_keep_enum fw_rescue
+                fw_ensure fw_nil].freeze
+suite.check('a `&blk` forwarding send hands a callee that only calls its block the block as it is (fw_each, fw_prog)',
+            body_of(code, 'fw_each').match?(/Array_each_impl\(M, r\d+, bc2cpp_ebarg_blk_\d+\)/) &&
+              body_of(code, 'fw_prog').match?(/AbFx_l2_impl\(M, self, r\d+, bc2cpp_ebarg_blk_\d+\)/))
+suite.check('every other arm and the by-name else of a forwarding send take a heap copy (bc2cpp_env_block)',
+            body_of(code, 'fw_each').match?(/bc2cpp_owner_call\(.*bc2cpp_env_block\(M, bc2cpp_ebarg_blk_\d+\)/) &&
+              body_of(code, 'fw_keep').match?(/AbFx_hold_impl\(M, self, bc2cpp_env_block\(M, bc2cpp_ebarg_blk_\d+\)\)/))
+suite.check('no forwarding send hands the VM a bare block register (direct, by-name, keyword, splat and send shapes)',
+            (calls = FORWARDERS.flat_map do |name|
+              body_of(code, name).lines.select { |l| l.match?(/\b(?:bc2cpp_owner_call|mrb_funcall_with_block|bc2cpp_funcall_kw|bc2cpp_owner_call_argv)\(/) }
+            end).size >= 8 && calls.all? { |l| l.include?('bc2cpp_env_block(M, ') })
+suite.check('a caller of a forwarding callee builds the block in its frame, with no heap RProc',
+            %w[use_fw_each use_fw_map use_fw_prog use_fw_two use_fw_cond use_fw_nested use_fw_also use_fw_kw use_fw_splat use_fw_send
+               use_fw_keep use_fw_rescue use_fw_break use_fw_return use_fw_churn use_fw_gc].all? do |name|
+              body = body_of(code, name)
+              body.match?(FRAME_LOCAL_SITE) && !body.include?('bc2cpp_heap_proc')
+            end)
+suite.check('a callee that returns its block, or a caller of one, keeps the heap RProc',
+            body_of(code, 'use_fw_ret').include?('bc2cpp_heap_proc') && !body_of(code, 'use_fw_ret').include?('Bc2cppBlock bc2cpp_blk_stack_'))
 suite.check('an ensure guard pops the callinfo frames an unwind left before it runs its body (a dead frame-local block)',
             code[/struct bc2cpp_ensure_guard \{.*?\n    \};/m].to_s.match?(/bc2cpp_ci_pop\(M\)/))
+suite.check('every pop of the callinfo frames an unwind left runs with GC paused (the catch sites and the ensure guard)',
+            [code[/static void bc2cpp_vm_restore.*?\n    \}/m], code[/static mrb_value bc2cpp_protect\(.*?\n    \}\n/m],
+             code[/struct bc2cpp_ensure_guard \{.*?\n    \};/m]].all? { |body| body.to_s.include?('Bc2cppGcPause pause(M)') })
 suite.check('the preamble has one Bc2cppBlock and no Bc2cppHeapBlock', code.include?('struct Bc2cppBlock {') && !code.include?('Bc2cppHeapBlock'))
 
 suite.behaviour(DRIVER) do |interpreted, compiled|
@@ -222,6 +299,47 @@ suite.behaviour(DRIVER) do |interpreted, compiled|
   suite.check('the run printed the plain-gen and GC-stress lines', compiled&.any? { |l| l.start_with?('plain gen:') } && compiled&.any? { |l| l.start_with?('gc stress:') })
 end
 suite.finish
+
+# A VM frame with an env (AbVm#each_x, interpreted) sits above the callinfo of a frame-local block's call, and a `return` / `break` /
+# raise unwinds past both: popping the VM frame unshares its env, which allocates, and a GC there (MRB_GC_STRESS) must not mark the
+# dead block named by the callinfo below it. Built with the malloc'd block layout so a read of the dead block is a use-after-free.
+VM_SRC = <<~'RUBY'
+  class AbVm
+    def each_x; y = 1; [1, 2].each { |v| yield v + y }; end
+  end
+  class AbOp
+    def opener(x); yield x; end
+  end
+  class AbOp2
+    def opener2(x); yield x; ensure; @ens = (@ens || 0) + 1; end
+  end
+  class AbVmOwn
+    def ret; AbOp.new.opener(1) { |i| AbVm.new.each_x { |v| return [i, v] }; :no }; end
+    def brk; AbOp.new.opener(1) { |i| AbVm.new.each_x { |v| break [i, v] }; :no }; end  # the break leaves each_x only
+    def raise_in; AbOp.new.opener(1) { |i| AbVm.new.each_x { |v| raise "boom #{v}" } }; rescue => e; e.message; end
+    def ret_ens; AbOp2.new.opener2(1) { |i| AbOp.new.opener(i) { |j| AbVm.new.each_x { |v| return [i, j, v] } } }; end
+  end
+RUBY
+vm = Bc2cppStepCheck.new('bc2cpp block abi vm unwind check')
+vm.generate(VM_SRC, %w[AbVmOwn AbOp AbOp2])
+VM_DRIVER = <<~'RUBY'
+  o = AbVmOwn.new
+  3.times do
+    p o.ret
+    p o.brk
+    p o.raise_in
+    p o.ret_ens
+  end
+  puts 'end'
+RUBY
+flags = ENV['BC2CPP_CXXFLAGS']
+ENV['BC2CPP_CXXFLAGS'] = [flags, '-DBC2CPP_STACK_BLOCK_MALLOC'].compact.join(' ')
+vm.behaviour(VM_DRIVER, banner: 'unwinds past a VM frame with an env, malloc block layout') do |interpreted, compiled|
+  vm.check('return, break, raise and an ensure guard unwind past it, as interpreted',
+           interpreted&.first(4) == ['[1, 2]', ':no', '"boom 2"', '[1, 1, 2]'] && compiled == interpreted)
+end
+ENV['BC2CPP_CXXFLAGS'] = flags
+vm.finish
 
 # The forwarding callees under a C++ Fiber: a block step through two forwarders, and a Fiber body whose blocks never suspend.
 fiber = Bc2cppStepCheck.new('bc2cpp block abi fiber check')

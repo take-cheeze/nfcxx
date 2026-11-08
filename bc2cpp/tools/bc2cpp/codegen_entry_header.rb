@@ -94,6 +94,13 @@ module EntryHeader
       if (blk && !MRB_PROC_STRICT_P(blk) && MRB_PROC_ENV(blk) == mrb_vm_ci_env(&ci[-1])) blk->flags |= MRB_PROC_ORPHAN;
       c->ci--;
     }
+    // GC off while a raise's stale frames are popped: a frame-local block's proc named by one is dead (see Bc2cppGcPause).
+    struct Bc2cppEntryGcPause {
+      mrb_state* M;
+      mrb_bool was;
+      explicit Bc2cppEntryGcPause(mrb_state* m) : M(m), was(m->gc.disabled) { m->gc.disabled = TRUE; }
+      ~Bc2cppEntryGcPause() { M->gc.disabled = was; }
+    };
     template <class F>
     static inline mrb_value bc2cpp_entry_call(mrb_state* M, mrb_value self, F&& body) {
       if (M->jmp) {
@@ -119,6 +126,7 @@ module EntryHeader
         M->jmp = NULL;
       } catch (mrb_jmpbuf* e) {
         if (e != &c_jmp) throw;
+        Bc2cppEntryGcPause pause(M);
         M->jmp = NULL;
         v = mrb_obj_value(M->exc);
         error = true;
@@ -188,10 +196,10 @@ class CodeGen
     entry = Regexp.escape(m[:entry])
     impl = Regexp.escape(m[:impl])
     body = if argc.zero?
-             "  return bc2cpp_cfunc_result\\(M, #{impl}\\(M, self\\)\\);\\n"
+             "  return bc2cpp_cfunc_result\\(\\{M, M->gc\\.arena_idx, #{impl}\\(M, self\\)\\}\\);\\n"
            else
              "(?:  mrb_value \\w+;\\n){#{argc}}  mrb_get_args\\(M, \"o{#{argc}}\"(?:, &\\w+){#{argc}}\\);\\n" \
-               "  return bc2cpp_cfunc_result\\(M, #{impl}\\(M, self(?:, \\w+){#{argc}}\\)\\);\\n"
+               "  return bc2cpp_cfunc_result\\(\\{M, M->gc\\.arena_idx, #{impl}\\(M, self(?:, \\w+){#{argc}}\\)\\}\\);\\n"
            end
     m[:code].match?(/^static mrb_value #{entry}\(mrb_state\* M, mrb_value self\) \{\n#{body}\}/)
   end

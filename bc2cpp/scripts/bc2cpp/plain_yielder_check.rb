@@ -60,11 +60,37 @@ ESCAPING = {
   'an ensure body storing it' => 'def m(&b); yield; ensure; @k = b; end'
 }.freeze
 
-def method_why(ireps, root, name)
+# `&blk` forwarding (stage 3): with a +forwards+ predicate that vouches for the send (the codegen's glue hands the callee a
+# bc2cpp_env_block copy), the block register of a SENDB may hold the Proc; every other read still escapes.
+FORWARDING = {
+  'forwards it' => 'def m(o, &b); o.f(&b); end',
+  'forwards it with arguments' => 'def m(o, x, &b); o.f(x, 1, &b); end',
+  'forwards it with a splat' => 'def m(o, x, &b); o.f(*x, &b); end',
+  'forwards it with keywords' => 'def m(o, &b); o.f(k: 1, &b); end',
+  'forwards it with a keyword splat' => 'def m(o, h, &b); o.f(**h, &b); end',
+  'forwards it from a nested block' => 'def m(o, &b); [1].each { |v| o.f(v, &b) }; end',
+  'yields, then forwards it' => 'def m(o, &b); yield 0; o.f(&b); end',
+  'forwards it from a rescue body' => 'def m(o, &b); o.f(&b); rescue ArgumentError; 0; end',
+  'forwards it on a self send' => 'def m(&b); g(&b); end'
+}.freeze
+
+STILL_ESCAPING = {
+  'passes it as an argument and forwards it' => 'def m(o, &b); o.f(b, &b); end',
+  'forwards it and stores it' => 'def m(o, &b); o.f(&b); @k = b; end',
+  'forwards it and returns it' => 'def m(o, &b); o.f(&b); b; end',
+  'forwards it to a receiver that is the block' => 'def m(&b); b.f(&b); end',
+  'forwards it with super' => 'def m(&b); super; end',
+  'forwards a copy in an Array' => 'def m(o, &b); o.f([b], &b); end'
+}.freeze
+
+def method_why(ireps, root, name, forwards: nil)
   registry = build_registry(ireps, root)[0]
   definition = (registry[name] || []).find { |d| d.owner == 'PyFx' } or return :missing
-  BlockSelf.plain_yielder_why(ireps[definition.irep], ireps)
+  BlockSelf.plain_yielder_why(ireps[definition.irep], ireps, forwards: forwards)
 end
+
+ALL_FORWARDS = ->(_irep, _insn) { true }
+NO_FORWARDS = ->(_irep, _insn) { false }
 
 (PLAIN.to_a + ESCAPING.to_a).each_with_index do |(what, body), index|
   plain = index < PLAIN.size
@@ -75,6 +101,21 @@ end
     else
       suite.check("#{what}: refused (#{why})", why.is_a?(String))
     end
+  end
+end
+
+FORWARDING.each do |what, body|
+  suite.compile("class PyFx\n  #{body}\nend\n") do |ireps, root|
+    suite.check("#{what}: refused without a forwards predicate", method_why(ireps, root, 'm').is_a?(String))
+    suite.check("#{what}: refused when the predicate refuses the send", method_why(ireps, root, 'm', forwards: NO_FORWARDS).is_a?(String))
+    suite.check("#{what}: a plain yielder when the send is vouched for", method_why(ireps, root, 'm', forwards: ALL_FORWARDS).nil?)
+  end
+end
+
+STILL_ESCAPING.each do |what, body|
+  suite.compile("class PyFx\n  #{body}\nend\n") do |ireps, root|
+    why = method_why(ireps, root, 'm', forwards: ALL_FORWARDS)
+    suite.check("#{what}: refused even when every forward is vouched for (#{why})", why.is_a?(String))
   end
 end
 

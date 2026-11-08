@@ -92,10 +92,10 @@ sum = code_of(code, 'sum')
 check.call('sum: the Array arm runs the compiled Array#each with the frame-local block',
            sum.match?(/Bc2cppBlock bc2cpp_blk_stack_(\d+)\(M, \d+, bc2cpp_blk_env_\1\);/) &&
              sum.match?(/Array_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
-check.call('sum: the Hash arm takes it too, Range#each (which passes its block on) and the else build the heap RProc ' \
-           'only when they run',
+check.call('sum: the Hash arm and Range#each (which forwards its block with &blk) take it too; the else builds the heap RProc ' \
+           'only when it runs',
            sum.include?('bc2cpp_blk_stack_') && sum.include?('.proc()') && sum.match?(/Hash_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
-             sum.match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.proc\(\)\)/) &&
+             sum.match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
              !sum.match?(/struct RProc\* bc2cpp_blk_proc_\d+ = bc2cpp_heap_proc/))
 check.call('use_gen: a direct call to a compiled program method that only yields its block takes the frame-local block',
            code_of(code, 'use_gen').match?(/SbFx_gen_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
@@ -107,7 +107,7 @@ check.call('use_stash: a nested block that yields to the method block and is kep
 check.call('fwd: a block that yields to the frame block (needs_blk) is frame-local too; it holds the frame block as it is',
            code_of(code, 'fwd').match?(/\{ self, bc2cpp_blk, /) &&
              code_of(code, 'fwd').match?(/Array_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
-             code_of(code, 'fwd').match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.proc\(\)\)/))
+             code_of(code, 'fwd').match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
 check.call('use_repeat: the frame-local block reaches repeat, and the nested block that yields to it is frame-local too ' \
            '(its wrapper, made by .proc() for the by-name else, copies the frame-local block it holds)',
            code_of(code, 'use_repeat').match?(/SbFx_repeat_impl\(M, self, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&

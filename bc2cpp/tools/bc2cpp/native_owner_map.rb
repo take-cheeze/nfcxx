@@ -143,7 +143,7 @@ module NativeOwnerMap
   # defines; anything else is UNKNOWN.
   def owner_of(arg, vars)
     return vars[arg] || UNKNOWN if arg.match?(/\A\w+\z/)
-    return CORE_FIELD_OWNERS.fetch(Regexp.last_match(1)) { INSTANCE_FIELD_OWNERS.fetch(Regexp.last_match(1), UNKNOWN) } if arg.match(/\Amrb->(\w+)\z/)
+    return CORE_FIELD_OWNERS.fetch(Regexp.last_match(1)) { INSTANCE_FIELD_OWNERS.fetch(Regexp.last_match(1), UNKNOWN) } if arg.match(/\A(?:mrb|M)->(\w+)\z/)
     return unescape_c_string(Regexp.last_match(1)) if arg.match(CLASS_GET_RE)
     return Regexp.last_match(1) if arg.match(CLASS_GET_ID_RE)
     return unescape_c_string(Regexp.last_match(1)) if arg.match(DEFINE_CLASS_RE)
@@ -382,7 +382,7 @@ module NativeOwnerMap
       end
       result.calls += 1
       owner = owner_of(args.fetch(spec[:owner], ''), vars_at.call(match.begin(0)))
-      instance = args.fetch(spec[:owner], '').strip == 'mrb->top_self'
+      instance = %w[mrb->top_self M->top_self].include?(args.fetch(spec[:owner], '').strip)
       owners = if instance
                  [owner]
                elsif spec[:suffix] == :both

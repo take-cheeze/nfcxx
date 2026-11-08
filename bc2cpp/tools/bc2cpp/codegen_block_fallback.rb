@@ -1420,8 +1420,8 @@ class CodeGen
   # compile_block_body_insn shift) and is passed on for the capture levels.
   # `self` is not shifted: the block shares the method's self. nil keeps the
   # previous output.
-  # The Proc methods that run the proc (sig/bc2cpp/declarations.rbs#core_proc_calls; bc2cpp_cfunc_proc_call_p spells the same set,
-  # which scripts/bc2cpp/core_facts_rbs_check.rb compares).
+  # The Proc methods that run the proc (sig/bc2cpp/core.rbs#core_proc_calls). bc2cpp_cfunc_proc_call_p then tests the found
+  # method itself, so only the builtin `call` and `[]` yield directly.
   PROC_CALL_NAMES = CoreFactSigs.proc_call_names
   # The flag word of a step trailer on a block that is not a thunk (direct-entry) proc.
   BLOCK_STEP_MAGIC = 0x5b2c0000
@@ -1501,9 +1501,8 @@ class CodeGen
     if direct
       out << indent_lines(direct, indent)
     else
-      # BLOCK_SEMANTICS: `pr.call(x) { ... }` on a cfunc Proc cannot use Proc#call
-      # (see bc2cpp_cfunc_proc_call_p); the block is dropped, as a cfunc proc
-      # takes none.
+      # `pr.call(x) { ... }` on a compiled block with the builtin Proc#call yields directly (bc2cpp_cfunc_proc_call_p);
+      # the block is dropped, as a cfunc proc takes none.
       args = argv.empty? ? 'NULL' : "bc2cpp_blk_argv_#{region[:block_addr]}"
       out << "#{indent}mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n" unless argv.empty?
       name = "mrb_intern_cstr(M, \"#{region[:name]}\")"
@@ -1664,6 +1663,21 @@ class CodeGen
     regions
   end
 
+  # A `&expr` send whose block register the glue hands on as bc2cpp_env_block (explicit_blk): a recognized region in both
+  # compile contexts (a step takes the shapes a plain body does not). Every use of region[:blk_reg] wraps it.
+  def explicit_block_forward?(_irep, insn)
+    return false unless %i[SENDB SSENDB].include?(insn.op) && insn.argc_operand && insn.reg && insn.sym
+
+    shape = dyn_call_shape(insn)
+    !(shape[:kw] && (insn.sym == 'public_send' || (DYN_SEND_NAMES.include?(insn.sym) && insn.positional_splat?)))
+  end
+
+  # The block register of an `&expr` send as callees get it: a frame-local block is copied to the heap first, because the
+  # callee may be a by-name send or a program method that keeps it (a heap block passes through as it is).
+  def explicit_blk(region)
+    "bc2cpp_env_block(M, r#{region[:blk_reg]})"
+  end
+
   def emit_explicit_block_arg_glue(region, owner_def: nil)
     dyn = owner_def && resumable_explicit_block_dyn(region)
     return dyn if dyn
@@ -1685,26 +1699,26 @@ class CodeGen
       # RARRAY_LEN/RARRAY_PTR go straight into mrb_funcall_with_block.
       ary = "r#{region[:argv_reg]}"
       owner_call = block_owner_call_argv_line("r#{dest_reg}", recv, region[:name], "ary_size(#{ary})", "ary_items(#{ary})",
-                                              "r#{region[:blk_reg]}")
+                                              explicit_blk(region))
       out << if owner_call
                "  #{owner_call}\n"
              else
                "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-                 "ary_size(#{ary}), ary_items(#{ary}), r#{region[:blk_reg]});\n"
+                 "ary_size(#{ary}), ary_items(#{ary}), #{explicit_blk(region)});\n"
              end
     else
       argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
-      owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "r#{region[:blk_reg]}")
+      owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, explicit_blk(region))
       if owner_call
         out << "  #{owner_call}\n"
       elsif argv.empty?
         out << "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
-               "r#{region[:blk_reg]});\n"
+               "#{explicit_blk(region)});\n"
       else
         out << "  {\n"
         out << "    mrb_value bc2cpp_ebarg_argv_#{region[:sendb_addr]}[] = { #{argv.join(', ')} };\n"
         out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-               "#{argv.size}, bc2cpp_ebarg_argv_#{region[:sendb_addr]}, r#{region[:blk_reg]});\n"
+               "#{argv.size}, bc2cpp_ebarg_argv_#{region[:sendb_addr]}, #{explicit_blk(region)});\n"
         out << "  }\n"
       end
     end
@@ -1731,7 +1745,7 @@ class CodeGen
     end
     target = region[:n] == '*' ? "mrb_intern_cstr(M, \"#{region[:name]}\"), #{count}, #{items}" :
              keyword_call_target(region[:name], "mrb_intern_cstr(M, \"#{region[:name]}\")", argv, "#{var}_argv")
-    out << "    r#{dest_reg} = bc2cpp_funcall_kw(M, #{recv}, #{target}, #{var}_kd, r#{region[:blk_reg]});\n  }\n"
+    out << "    r#{dest_reg} = bc2cpp_funcall_kw(M, #{recv}, #{target}, #{var}_kd, #{explicit_blk(region)});\n  }\n"
     out
   end
 
@@ -1743,7 +1757,9 @@ class CodeGen
     return nil unless explicit_block_arg_direct? && owner_def && region[:n].is_a?(Integer)
 
     blk = "bc2cpp_ebarg_blk_#{region[:sendb_addr]}"
-    direct = compile_direct_block_send(region, blk, owner_def)
+    # A callee that only calls its block takes the block as it is (maybe frame-local); every other arm and the by-name
+    # else take a heap copy, made where they run.
+    direct = compile_direct_block_send(region, "bc2cpp_env_block(M, #{blk})", owner_def, stack_expr: stack_blocks? ? blk : nil)
     return nil unless direct
 
     out = String.new

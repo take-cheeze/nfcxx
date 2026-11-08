@@ -104,6 +104,14 @@ SOURCE = <<~RUBY
     def print(x); x; end
     def push(x); [:bag_push, x]; end
     def empty?; false; end
+    def fwd(*a); push(*a); end
+  end
+  class SplW
+    def put(a, b = 0); [:put, a, b]; end
+  end
+  class SplTee
+    def initialize; @w = SplW.new; end
+    def go(*a); @w.put(*a); end
   end
   class Probe
     def del(o, x); o.delete(x); end
@@ -113,9 +121,12 @@ SOURCE = <<~RUBY
     def pk(o, f); o.pack(f); end
     def ps(o, x); o.push(x); end
     def em(o); o.empty?; end
+    def sp(o, a); o.push(*a); end
+    def fw(o, a); o.fwd(*a); end
+    def tg(t, a); t.go(*a); end
   end
 RUBY
-OWNERS = %w[Bag Probe].freeze
+OWNERS = %w[Bag Probe SplW SplTee].freeze
 
 body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
 owners_of = ->(text) { text[/BC2CPP_OWNERS\(([^)]*)\)/, 1].to_s.scan(/"([^"]+)"/).flatten }
@@ -143,6 +154,17 @@ Dir.mktmpdir('outside-owner-call') do |dir|
   check.call('empty?: the registered-expression arms end in the owner call, not a by-name send',
              em.include?('bc2cpp_owner_call(M, ') && (%w[Array Bag Hash String] - owners_of.call(em)).empty? &&
                !em.include?('bc2cpp_send('))
+  sp = body.call(code, 'sp')
+  check.call('push(*list), a run-time sized Array: the owner call over {Array, Bag} with the Array\'s items, no by-name send',
+             sp.include?('bc2cpp_owner_call_argv(M, ') && owners_of.call(sp) == %w[Array Bag] &&
+               !sp.include?('bc2cpp_funcall_argv(') && !sp.include?('bc2cpp_send('))
+  fwd = code[/^mrb_value Bag_fwd_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
+  check.call('push(*a) in a Bag body: the owner call over the Array\'s items, no by-name send',
+             fwd.match?(/bc2cpp_owner_call_argv\(M, self, /) && !fwd.include?('bc2cpp_funcall_argv('))
+  tee = code[/^mrb_value SplTee_go_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
+  check.call('put(*a) on a typed receiver: the compiled arities stay direct arms and any other length is the owner call',
+             tee.include?('case 1:') && tee.include?('case 2:') && !tee.include?('bc2cpp_funcall_argv(') &&
+               tee.match?(/default:\s*r\d+ = bc2cpp_owner_call_argv\(M, /))
   check.call('helper emitted once', code.scan('static mrb_value bc2cpp_owner_call(').size == 1)
   check.call('closed-world summary keeps no core_or_native', !err.include?('KEPT core_or_native'))
 
@@ -191,6 +213,19 @@ Dir.mktmpdir('outside-owner-call') do |dir|
         row(M, "array.push", "ps", eval(M, "[1]"), 1, two);
         row(M, "bag.push", "ps", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, two);
         row(M, "nil.push", "ps", mrb_nil_value(), 1, two);
+        row(M, "array.push(*)", "sp", eval(M, "[1]"), 1, eval(M, "[2, 3]"));
+        row(M, "bag.push(*)", "sp", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[2]"));
+        row(M, "bag.push(*) arity", "sp", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[2, 3]"));
+        row(M, "bag.push(*[])", "sp", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[]"));
+        row(M, "nil.push(*)", "sp", mrb_nil_value(), 1, eval(M, "[2]"));
+        row(M, "integer.push(*)", "sp", mrb_int_value(M, 3), 1, eval(M, "[]"));
+        row(M, "bag.fwd(*[2])", "fw", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[2]"));
+        row(M, "bag.fwd(*[2, 3])", "fw", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[2, 3]"));
+        row(M, "bag.fwd(*[])", "fw", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, eval(M, "[]"));
+        row(M, "tee.go(*[1])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[1]"));
+        row(M, "tee.go(*[1, 2])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[1, 2]"));
+        row(M, "tee.go(*[1, 2, 3])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[1, 2, 3]"));
+        row(M, "tee.go(*[])", "tg", mrb_obj_new(M, mrb_class_get(M, "SplTee"), 0, nullptr), 1, eval(M, "[]"));
         row(M, "array.empty?", "em", eval(M, "[]"), 0, mrb_nil_value());
         row(M, "bag.empty?", "em", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 0, mrb_nil_value());
         row(M, "array subclass.empty?", "em", eval(M, "class SubArr < Array; end; SubArr.new"), 0, mrb_nil_value());
@@ -252,6 +287,50 @@ begin
   withdraw.call('owner map off')
 ensure
   ENV.delete('BC2CPP_NATIVE_OWNER_MAP')
+end
+
+# A registration through the state's own name (`M->array_class`, as mruby-rgss spells its capture of the core sort)
+# names its class like `mrb->array_class`, so the alias is an owner of the name and the send is the owner call.
+ALIAS_SOURCE = <<~RUBY
+  class AliasProbe
+    def ns(a); a.dup.ns_sorted!; end
+  end
+RUBY
+Dir.mktmpdir('outside-owner-call-alias') do |dir|
+  gem = File.join(dir, 'alias_gem')
+  FileUtils.mkdir_p(File.join(gem, 'src'))
+  File.write(File.join(gem, 'src/alias_install.c'), <<~C)
+    #include <mruby.h>
+    void alias_install(mrb_state* M) { mrb_define_alias(M, M->array_class, "ns_sorted!", "sort!"); }
+  C
+  code, err = runtime.generate(ALIAS_SOURCE, dir, only_owners: %w[AliasProbe], build_gems: [['alias-gem', gem]])
+  ns = code[/^mrb_value AliasProbe_ns_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
+  ns_line = ns.lines.find { |line| line.include?('owner-call: ns_sorted!') }.to_s
+  check.call('M->array_class alias: the send is the owner call over {Array}, no by-name send',
+             ns_line.include?('bc2cpp_owner_call(M, ') && owners_of.call(ns_line) == %w[Array] && !ns.include?('bc2cpp_send('))
+  unless ENV['CC_GENERATED_ONLY'] == '1'
+    harness = <<~'CPP'
+      static int scenario(mrb_state* M) {
+        mrb_define_alias(M, M->array_class, "ns_sorted!", "sort!");
+        mrb_value probe = mrb_obj_new(M, mrb_class_get(M, "AliasProbe"), 0, nullptr);
+        mrb_value arg = mrb_load_string(M, "[3, 1, 2]");
+        mrb_value s = mrb_inspect(M, mrb_funcall(M, probe, "ns", 1, arg));
+        std::printf("alias sort => %.*s\n", (int)RSTRING_LEN(s), RSTRING_PTR(s));
+        return 0;
+      }
+    CPP
+    build = runtime.full_or_build
+    if build
+      built, output = runtime.run(dir, err, %w[AliasProbe], harness, build: build, full: true)
+      sections = runtime.sections(output)
+      compiled = sections['compiled'].to_a
+      interpreted = sections['interpreted'].to_a
+      check.call('M->array_class alias: built and ran', built && interpreted.include?('alias sort => [1, 2, 3]'))
+      check.call('M->array_class alias: compiled matches interpreted', !compiled.empty? && compiled == interpreted)
+    else
+      puts '  SKIP run: no full-core mruby build'
+    end
+  end
 end
 
 abort "FAILED: #{failures.join(', ')}" unless failures.empty?
