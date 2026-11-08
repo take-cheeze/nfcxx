@@ -308,6 +308,19 @@ module StaticDispatchRegistrations
   # A proc over a bytecode irep (mrb_proc_new, mrb_closure_new), as opposed to mrb_proc_new_cfunc*.
   BYTECODE_PROC = InitializerTables::BYTECODE_PROC
 
+  # PROC_SPEC_STAND_IN (bc2cpp_proc_spec_stand_in): its irep is read by Proc#arity and Proc#parameters only, never run
+  # (no Ruby defines either). Any other use of it keeps the whole text.
+  PROC_SPEC_STAND_IN_DEF = /static mrb_value bc2cpp_proc_spec_stand_in\(.*?\n    \}\n/m
+  PROC_SPEC_STAND_IN_CALL = /bc2cpp_proc_spec_stand_in\(M, mrb_proc_ptr\(self\), \*spec\), mrb_intern_lit\(M, "(?:arity|parameters)"\)/
+
+  # The generated text that can build a proc running bytecode: all of it, but PROC_SPEC_STAND_IN's definition and calls.
+  def runnable_proc_text(src)
+    return src unless src.match?(PROC_SPEC_STAND_IN_DEF)
+
+    rest = src.sub(PROC_SPEC_STAND_IN_DEF, '').gsub(PROC_SPEC_STAND_IN_CALL, '')
+    rest.include?('bc2cpp_proc_spec_stand_in') ? src : rest
+  end
+
   # NON_LOOKUP_HELPERS: the generated helpers whose use of a name finds no compiled method. Each is the else arm of
   # a proof (symbol_cache.rb): bc2cpp_guard_violation and bc2cpp_hint_violation raise without dispatching;
   # bc2cpp_nomethod(_raise) dispatches only to report a violated proof, for a receiver the closed world proved
@@ -1160,7 +1173,7 @@ module StaticDispatchRegistrations
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
     cite(load_names, 'sent while mrblib loads')
-    bytecode_blocks = runs.each_value.any? { |r| r[:gen].match?(BYTECODE_PROC) }
+    bytecode_blocks = runs.each_value.any? { |r| runnable_proc_text(r[:gen]).match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
       m = method_of[label]
       next true if m.nil?
