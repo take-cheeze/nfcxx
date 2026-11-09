@@ -45,6 +45,7 @@
 # a literal or fragment (read from a game file, then `send`) would be missed.
 # Nothing does that for an RPG2000/2003-internal class today, and a listed name
 # must stay free of dynamic references, or it ships a NoMethodError.
+require_relative 'world_root'
 require 'digest'
 require 'fileutils'
 require 'json'
@@ -580,7 +581,7 @@ module StaticDispatchRegistrations
       world_gems = %w[mruby-rpg2k mruby-lcf mruby-rgss].map { |g| "#{File.expand_path(repo_root)}/#{g}/mrblib/" }
       ruby = ruby.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked, *world_gems) }
       native = native.map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }
-      native << File.expand_path('scripts/bc2cpp/trace_host.cxx', repo_root)
+      native << File.expand_path('scripts/bc2cpp/trace_host.cxx', BC2CPP_TREE_ROOT)
     end
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
   end
@@ -1692,8 +1693,8 @@ module StaticDispatchRegistrations
     files.concat(Dir["#{root}/3rd/mruby/mrblib/*.rb"] + Dir["#{root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"])
     files.concat(BC2CPP_EXTERNAL_MRBLIB_GEMS.flat_map { |g| Dir["#{root}/3rd/#{g}/mrblib/**/*.rb"] })
     files.concat(Dir["#{root}/3rd/mruby/mrbgems/*/mrbgem.rake"] + Dir["#{root}/mruby-*/mrbgem.rake"])
-    files.concat(Dir["#{root}/tools/bc2cpp/**/*.rb"] + Dir["#{root}/tools/bc2cpp/**/*.{rbs,erb}"])
-    files.concat([File.join(root, 'build_config.rb'), File.join(root, 'scripts/bc2cpp/trace_host.cxx')])
+    files.concat(Dir["#{BC2CPP_TREE_ROOT}/tools/bc2cpp/**/*.rb"] + Dir["#{BC2CPP_TREE_ROOT}/tools/bc2cpp/**/*.{rbs,erb}"])
+    files.concat([File.join(root, 'build_config.rb'), File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/trace_host.cxx')])
     files.concat(Dir["#{root}/sig/**/*.rbs"])
     sha = Digest::SHA256.new
     sha << "lists-format 1\n"
@@ -1785,7 +1786,7 @@ module StaticDispatchRegistrations
 end
 
 if $PROGRAM_NAME == __FILE__
-  repo_root = File.expand_path('../..', __dir__)
+  repo_root = BC2CPP_WORLD_ROOT
   args = ARGV.dup
   take = ->(flag) { args.include?(flag) ? args.slice!(args.index(flag), 2).last : nil }
   emit_dir = take.call('--emit')

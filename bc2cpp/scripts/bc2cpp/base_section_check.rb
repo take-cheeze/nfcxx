@@ -14,14 +14,15 @@
 # workers in CI (the default of 2 stays for local runs); reverts to 2 if the
 # step's timing table shows contention with the other parallel checks.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'optparse'
 require 'rbconfig'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/base_section'
 
-ROOT = File.expand_path('../..', __dir__)
-GENERATOR = File.join(ROOT, 'scripts/bc2cpp/base_rbs_all.rb')
+ROOT = BC2CPP_WORLD_ROOT
+GENERATOR = File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/base_rbs_all.rb')
 output = nil
 write = false
 jobs = nil

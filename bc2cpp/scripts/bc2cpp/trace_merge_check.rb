@@ -6,12 +6,13 @@
 #
 #   ruby scripts/bc2cpp/trace_merge_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'open3'
 require 'rbconfig'
 require_relative '../../tools/bc2cpp/trace_merge'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 checks = 0
 check = lambda do |what, condition|
@@ -71,11 +72,11 @@ Dir.mktmpdir('trace-merge-check') do |dir|
   File.write(cand, CANDIDATES)
   decl = File.join(dir, 'declarations.rbs')
   File.write(decl, DECLARED)
-  out, err, status = Open3.capture3(RbConfig.ruby, File.join(ROOT, 'scripts/bc2cpp/trace_merge.rb'), cand, decl,
+  out, err, status = Open3.capture3(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/trace_merge.rb'), cand, decl,
                                     '--out', File.join(ROOT, 'sig/trace_proposals.rbs'))
   check.call('an output under sig/ is refused', !status.success? && err.include?('must not be under sig/'))
   check.call('the refused run wrote nothing under sig/', !File.exist?(File.join(ROOT, 'sig/trace_proposals.rbs')))
-  out2, _err2, status2 = Open3.capture3(RbConfig.ruby, File.join(ROOT, 'scripts/bc2cpp/trace_merge.rb'), cand, decl,
+  out2, _err2, status2 = Open3.capture3(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/trace_merge.rb'), cand, decl,
                                         '--out', File.join(dir, 'proposals.rbs'))
   check.call('a valid run writes the proposals and reports the counts', status2.success? && out2.include?('2 proposed'))
 end

@@ -15,10 +15,11 @@
 # The rules are in tools/bc2cpp/promote_candidates.rb and docs/bc2cpp-promote-candidates.md. Exit status: 0 done (or
 # nothing to add), 1 refused or the write did not parse, 2 usage.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'optparse'
 require_relative '../../tools/bc2cpp/promote_candidates'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 options = { write: false, target: File.join(ROOT, 'sig/bc2cpp/declarations.rbs') }
 parser = OptionParser.new do |o|
   o.banner = 'usage: promote_candidates.rb [--write] [--target FILE] CANDIDATE_DIR'

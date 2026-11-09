@@ -6,6 +6,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_kept_report.rb LISTS.json [--summary]
 #   --summary  counts per reason kind instead of one line per entry
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
@@ -32,7 +33,7 @@ class ReasonSet < Set
   alias << add
 end
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 path = ARGV.reject { |a| a.start_with?('--') }.first or abort 'usage: core_kept_report.rb LISTS.json [--summary]'
 lists = StaticDispatchRegistrations.read_lists(path) or abort "no lists at #{path}"
 StaticDispatchRegistrations.core_names = ReasonSet.new

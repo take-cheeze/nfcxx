@@ -10,14 +10,15 @@
 # fixture part prints SKIP.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'rbconfig'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/closed_world_env'
 require_relative 'fixture_runtime'
 
-ROOT = File.expand_path('../..', __dir__)
-BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
+ROOT = BC2CPP_WORLD_ROOT
+BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 
 failures = []
 check = lambda do |what, ok|

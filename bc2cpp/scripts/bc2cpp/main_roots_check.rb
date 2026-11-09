@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/main_roots'
 require_relative '../../tools/bc2cpp/main_reachability'
@@ -46,7 +47,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
     }
   CPP
   build_ast = lambda do |units = []|
-    abort 'host AST generation failed' unless system(RbConfig.ruby, File.join(root, 'scripts/bc2cpp/main_ast.rb'), host, ast, *units.flat_map { |path| ['--unit', path] })
+    abort 'host AST generation failed' unless system(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/main_ast.rb'), host, ast, *units.flat_map { |path| ['--unit', path] })
   end
   build_ast.call
   roots = MainRoots.read(ast)
@@ -55,7 +56,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
   check.call('an unused native function contributes no Ruby roots', !roots.names.include?('qr9z_unused'))
   check.call('finite conditional names are resolved', roots.refusals.empty?)
   strict_ast = File.join(dir, 'strict-main.json')
-  abort 'strict host AST generation failed' unless system(RbConfig.ruby, File.join(root, 'scripts/bc2cpp/main_ast.rb'), host, strict_ast, '--lookup-names-only')
+  abort 'strict host AST generation failed' unless system(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/main_ast.rb'), host, strict_ast, '--lookup-names-only')
   strict_roots = MainRoots.read(strict_ast)
   check.call('lookup-only AST roots preserve calls while excluding unrelated string data',
              strict_roots.names.include?('qr9z_entry') && strict_roots.names.include?('qr9z_boot') &&
@@ -124,7 +125,7 @@ Dir.mktmpdir('bc2cpp-main-roots') do |dir|
                entry['bounded_name_reached'] && entry['reasons'].any? { |reason| reason['kind'] == 'host' })
     named = report.fetch('entries').find { |row| row['name'] == 'qr9z_named' }
     check.call('report-only candidates remain registered', !named['bounded_name_reached'] && !named['excluded'])
-    summary, summary_err, summary_status = Open3.capture3(RbConfig.ruby, File.join(root, 'scripts/bc2cpp/dynamic_names_report.rb'),
+    summary, summary_err, summary_status = Open3.capture3(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/dynamic_names_report.rb'),
                                                           '--main-report', File.join(ENV['BC2CPP_MAIN_REPORT'], 'fixture_named_reachability.json'))
     check.call('the report summarizes retention reasons without rerunning generation',
                summary_status.success? && summary_err.empty? && summary.include?('by primary retention reason'))

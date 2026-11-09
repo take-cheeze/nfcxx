@@ -9,6 +9,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/shared_generation_check.rb   (without MRBC the generator runs are skipped)
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'json'
 require 'open3'
@@ -19,8 +20,8 @@ require_relative '../../tools/bc2cpp/shared_generation'
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
-ROOT = File.expand_path('../..', __dir__)
-TOOL = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
+ROOT = BC2CPP_WORLD_ROOT
+TOOL = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
@@ -91,7 +92,7 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
   check.call('gems that differ only in unit keys form one shared analysis', groups.call(false) == 1)
   check.call('a gem whose analysis environment differs gets its own analysis', groups.call(true) == 2)
   check.call('the build helper groups by exactly that key',
-             File.read(File.join(ROOT, 'tools/bc2cpp/compiled_gems.rb'))
+             File.read(File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/compiled_gems.rb'))
                  .include?('jobs.group_by { |env, srcs, _| [env.reject { |k, _| SharedGeneration::UNIT_KEYS.include?(k) }, srcs] }'))
 
   mrbc = ENV.fetch('MRBC', nil)

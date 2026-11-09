@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require_relative 'main_roots'
 require_relative 'static_dispatch_registrations'
 require_relative 'core_native_candidates'
@@ -170,7 +171,7 @@ module MainReachability
   # The pinned VM's primitive dispatch is modeled by ALWAYS_DYNAMIC and its presym uses.
   # Other native sources may not dispatch from a name this source inventory cannot bound.
   def unresolved_native_lookups(path, text)
-    core = File.expand_path('../../3rd/mruby', __dir__)
+    core = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby")
     return [] if File.expand_path(path).start_with?("#{core}/")
 
     clean = StaticDispatchRegistrations.strip_c_comments(text)

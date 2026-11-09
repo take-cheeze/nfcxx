@@ -16,7 +16,8 @@
 # Each file is then evaluated on its own by MRubyRequire (host-libs/mruby-require), which keeps a single method or
 # constant table from growing into one oversized compilation unit.
 
-ROOT = File.expand_path('../..', __dir__)
+require_relative 'world_root'
+ROOT = BC2CPP_WORLD_ROOT
 CHUNK = 1000
 REQUIRE_RELATIVE = /\A(\s*)require_relative\s+(['"])([^'"]+)\2(.*)\n?\z/
 

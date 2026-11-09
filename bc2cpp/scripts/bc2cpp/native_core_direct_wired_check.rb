@@ -8,6 +8,7 @@
 # that visible. It needs no clang: the entries are pinned to their bodies.
 #
 #   ruby scripts/bc2cpp/native_core_direct_wired_check.rb
+require_relative '../../tools/bc2cpp/world_root'
 require_relative '../../tools/bc2cpp/native_core_direct'
 
 FAILED = []
@@ -16,7 +17,7 @@ def check(what, ok)
   FAILED << what unless ok
 end
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 puts '== the generated entries against the mruby sources'
 paths = %w[array string numeric].map { |f| File.join(root, "3rd/mruby/src/#{f}.c") }
 if paths.all? { |p| File.file?(p) }

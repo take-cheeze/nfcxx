@@ -4,6 +4,7 @@
 # instance method lexically inside `class C` is attributed to C; everything the lexical rule cannot pin to
 # one class stays global, so a missed case costs a typed slot, never soundness.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'minitest/autorun'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/outside_ruby_ivar_scopes'
@@ -73,7 +74,7 @@ class OutsideRubyIvarScopesCheck < Minitest::Test
   end
 
   def test_enumerator_size_is_scoped_to_enumerator
-    path = File.expand_path('../../3rd/mruby/mrbgems/mruby-enumerator/mrblib/enumerator.rb', __dir__)
+    path = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrbgems/mruby-enumerator/mrblib/enumerator.rb")
     skip 'needs 3rd/mruby' unless File.file?(path)
 
     global, scoped = OutsideRubyIvarScopes.analyze([path])

@@ -14,6 +14,7 @@
 # are not gated, a verdict file for another directory or of another shape is refused, and the write leaves the target
 # unchanged when the file is refused.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'digest'
 require 'json'
 require 'open3'
@@ -22,8 +23,8 @@ require 'tmpdir'
 require 'fileutils'
 require_relative '../../tools/bc2cpp/promote_candidates'
 
-ROOT = File.expand_path('../..', __dir__)
-CLI = File.join(ROOT, 'scripts/bc2cpp/promote_candidates.rb')
+ROOT = BC2CPP_WORLD_ROOT
+CLI = File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/promote_candidates.rb')
 failures = []
 checks = 0
 check = lambda do |what, condition|

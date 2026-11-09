@@ -18,6 +18,7 @@
 #
 # Usage: ruby scripts/bc2cpp/self_call_override_contracts_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
@@ -284,7 +285,7 @@ require 'json'
 require 'tmpdir'
 require 'fileutils'
 require_relative '../../tools/bc2cpp/type_check_run'
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 
 # The ir_feedback row of `owner#method`'s return, from a pipeline run over `source` with the given RBS.
 # BC2CPP_IR_CALL_RESULTS=0 turns off the inferred call results, so the row reports the declared self-call contract.

@@ -7,6 +7,7 @@
 # consumers must return what they return without the cache, and a parse must happen once per text. Run by
 # the `ruby-checks` job; the real-file half skips without 3rd/mruby.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'fileutils'
 require 'set'
@@ -21,7 +22,7 @@ require_relative '../../tools/bc2cpp/class_world_gate'
 require_relative '../../tools/bc2cpp/dispatch_targets'
 require_relative '../../tools/bc2cpp/native_constructor_sigs'
 require_relative '../../tools/bc2cpp/gem_owners'
-require_relative '../rpg2k/closed_world_lint'
+require File.join(BC2CPP_WORLD_ROOT, 'scripts/rpg2k/closed_world_lint')
 
 failures = []
 check = lambda do |what, condition|
@@ -29,7 +30,7 @@ check = lambda do |what, condition|
   failures << what unless condition
 end
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 # Every node, array and string of the tree in a stable order, so two parses compare by structure.
 def signature(result)

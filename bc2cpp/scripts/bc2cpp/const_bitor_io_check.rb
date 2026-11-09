@@ -8,6 +8,7 @@
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/const_bitor_io_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
 require 'set'
@@ -19,8 +20,8 @@ unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
   exit 0
 end
 
-ROOT = File.expand_path('../..', __dir__)
-TYPE_CHECK = File.join(ROOT, 'scripts/bc2cpp/type_check.rb')
+ROOT = BC2CPP_WORLD_ROOT
+TYPE_CHECK = File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/type_check.rb')
 
 failures = []
 check = lambda do |what, condition|

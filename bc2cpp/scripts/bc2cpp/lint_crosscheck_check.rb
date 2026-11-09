@@ -4,13 +4,14 @@
 # Self-test for tools/bc2cpp/lint_crosscheck.rb: the real tree agrees with the lint
 # baseline, and a lint offence or a lint/analysis disagreement is reported.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'fileutils'
 require 'open3'
 require 'rbconfig'
 require_relative '../../tools/bc2cpp/lint_crosscheck'
 
-ROOT_DIR = File.expand_path('../..', __dir__)
+ROOT_DIR = BC2CPP_WORLD_ROOT
 Fake = Struct.new(:method_missing_files)
 failures = []
 check = lambda do |what, ok|

@@ -14,13 +14,14 @@
 # prototype in a helper; its signature is the one the pinned body text has.
 #
 # --check fails when the committed file differs from what this generator writes.
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require_relative '../../tools/bc2cpp/native_core_direct'
 
 module NativeCoreDirectWire
   OWNERS = %w[Array String Integer].freeze
   OUT = File.expand_path('../../tools/bc2cpp/native_core_direct_generated.rb', __dir__)
-  INCLUDE = File.expand_path('../../3rd/mruby/include', __dir__)
+  INCLUDE = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/include")
 
   module_function
 

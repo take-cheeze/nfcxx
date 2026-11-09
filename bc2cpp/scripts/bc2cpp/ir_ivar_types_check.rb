@@ -1,10 +1,11 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require_relative 'type_check_fixture'
 
-ROOT = File.expand_path('../..', __dir__)
-TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.join(ROOT, 'tools/bc2cpp')
+ROOT = BC2CPP_WORLD_ROOT
+TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp')
 $LOAD_PATH.unshift(TOOLS)
 require 'ir_ivar_types'
 require 'numeric_flow'

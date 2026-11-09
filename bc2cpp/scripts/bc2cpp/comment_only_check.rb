@@ -13,10 +13,11 @@
 #   HEAD_REF defaults to the working tree.
 # A local tool for comment-only pull requests (see AGENTS.md), not a CI check.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'prism'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 GLOB = 'tools/bc2cpp/*.rb'
 SEMANTIC_MAGIC = %w[frozen_string_literal encoding coding warn_indent shareable_constant_value].freeze
 

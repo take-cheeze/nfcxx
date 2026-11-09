@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'shellwords'
 require_relative 'numeric_flow'
 
@@ -88,7 +89,7 @@ class CodeGen
     return false unless world.instance_native_dispatch_safe?('frozen?') && !installed.include?('frozen?')
     return false if devirt_blocked_name?('frozen?')
 
-    kernel = File.expand_path('../../3rd/mruby/src/kernel.c', __dir__)
+    kernel = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/src/kernel.c")
     return false unless File.file?(kernel) && File.binread(kernel).match?(KERNEL_FROZEN_BODY)
 
     outside = (Shellwords.split(ENV.fetch('NATIVE_SRCS', '')) + world.native_paths_spelling('frozen?')).uniq

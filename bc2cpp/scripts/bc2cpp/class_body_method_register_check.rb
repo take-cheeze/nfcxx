@@ -6,11 +6,12 @@
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/class_body_method_register_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/bc2cpp'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 suite = FixtureCheck.new('class_body_method_register_check')
 suite.require_mrbc!
 

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
 require 'rbconfig'
@@ -27,7 +28,7 @@ module TypeCheckFixture
 
     require_relative '../../tools/bc2cpp/type_check_run'
 
-    root = File.expand_path('../..', __dir__)
+    root = BC2CPP_WORLD_ROOT
     directory = File.expand_path(directory)
     sources = files.map { |file| File.expand_path(file, directory) }
     mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : 'mrbc'
@@ -50,7 +51,7 @@ module TypeCheckFixture
     require_relative '../../tools/bc2cpp/type_check_run'
 
     directory = File.expand_path(directory)
-    root = File.expand_path('../..', __dir__)
+    root = BC2CPP_WORLD_ROOT
     sources = files.map { |file| File.expand_path(file, directory) }
     mrbc = ENV['MRBC'] ? File.expand_path(ENV['MRBC']) : 'mrbc'
     Dir.mktmpdir('type-check-variants') do |work|
@@ -65,7 +66,7 @@ module TypeCheckFixture
       request = File.join(work, 'plan.json')
       File.write(request, JSON.generate(plan))
       environment = common.merge(TypeCheckVariants::CONTROL_KEYS.to_h { |key| [key, nil] })
-      stdout, stderr, status = Open3.capture3(environment, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'),
+      stdout, stderr, status = Open3.capture3(environment, RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb'),
                                             '--annotated', TypeCheckVariants::FLAG, request, *sources, chdir: directory)
       raise "#{label} failed (#{status}):\n#{stderr}\n#{stdout}" unless status.success?
 

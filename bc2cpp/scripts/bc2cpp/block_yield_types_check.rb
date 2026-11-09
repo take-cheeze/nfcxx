@@ -9,6 +9,7 @@
 #   ruby scripts/bc2cpp/block_yield_types_check.rb
 #   MRBC=path/to/mrbc ruby scripts/bc2cpp/block_yield_types_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'set'
 require 'tmpdir'
@@ -68,7 +69,7 @@ unless ENV['MRBC']
   exit($failures.empty? ? 0 : 1)
 end
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 Dir.mktmpdir('block-yield-types') do |dir|
   source = File.join(dir, 'mruby-rpg2k/mrblib/yielders.rb')
   FileUtils.mkdir_p(File.dirname(source))

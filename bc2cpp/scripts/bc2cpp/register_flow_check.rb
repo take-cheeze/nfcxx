@@ -12,6 +12,7 @@
 # shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'open3'
 require 'rbconfig'
@@ -25,8 +26,8 @@ require_relative '../../tools/bc2cpp/codegen_method'
 require_relative 'cxx'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
-ROOT = File.expand_path('../..', __dir__)
-BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
+ROOT = BC2CPP_WORLD_ROOT
+BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 
 failures = []
 check = lambda do |what, ok|

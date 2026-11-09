@@ -8,6 +8,7 @@
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/class_body_report.rb [--blockers] [--bytecode] [--world[=FILE]]
 # --world: the class graph facts (tools/bc2cpp/class_world.rb): how much is exact, and as JSON in FILE.
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'set'
 require 'tmpdir'
@@ -16,7 +17,7 @@ require_relative '../../tools/bc2cpp/class_body_scan'
 require_relative '../../tools/bc2cpp/class_world'
 require_relative '../../tools/bc2cpp/class_world_gate'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 MRUBY = "#{ROOT}/3rd/mruby"
 
 # The gem mrblib roots of the closed build, in load order (tools/bc2cpp/class_world_gate.rb).
@@ -69,7 +70,7 @@ end
 
 # Opcodes compile_insn_op has a `when` for.
 def handled_ops
-  text = File.read("#{ROOT}/tools/bc2cpp/codegen_insn.rb")
+  text = File.read("#{BC2CPP_TREE_ROOT}/tools/bc2cpp/codegen_insn.rb")
   body = text[/def compile_insn_op.*?\n  end\n/m] || text
   ops = body.scan(/^    when ((?::\w+(?:,\s*)?)+)/).flatten.flat_map { |l| l.scan(/:(\w+)/).flatten }.map(&:to_sym).to_set
   # `when /^LOADI/` (the integer immediates) is a regex branch, not a symbol list, so it is spelled out here.

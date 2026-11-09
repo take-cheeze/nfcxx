@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 # Candidate provenance comments and the ranked unknown-reason report, from hand-built facts (no MRBC needed).
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
 require 'rbconfig'
@@ -10,7 +11,7 @@ require 'rbs'
 require_relative '../../tools/bc2cpp/type_check_rbs'
 require_relative '../../tools/bc2cpp/type_check_report'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 def method_fact(owner, name, file, line, source:, type: nil, visibility: nil, contracts: nil, scope: 'engine')
   ret = { 'type' => type, 'source' => source, 'reason' => type ? nil : 'no_exit' }
@@ -140,7 +141,7 @@ Dir.mktmpdir('type-check-provenance') do |dir|
   facts_path = File.join(dir, 'facts.json')
   File.write(facts_path, JSON.generate(facts))
   cli_out = File.join(dir, 'cli-suggestions')
-  stdout, stderr, status = Open3.capture3(RbConfig.ruby, File.join(ROOT, 'scripts/bc2cpp/type_check.rb'), '--facts', facts_path,
+  stdout, stderr, status = Open3.capture3(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/type_check.rb'), '--facts', facts_path,
                                           '--no-sends', '--emit-rbs-suggestions', cli_out, chdir: ROOT)
   check.call("CLI renders and emits (status #{status.exitstatus}: #{stderr.lines.first.to_s.strip})", status.success?)
   check.call('CLI suggestion candidate for Base keeps the inferred provenance',

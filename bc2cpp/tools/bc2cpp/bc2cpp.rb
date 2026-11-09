@@ -17,6 +17,7 @@
 # Input is mrbc's RITE binary (`-g`): irep.rb builds every Irep (tree, pool,
 # symbols, lv, instructions) from it.
 
+require_relative 'world_root'
 require 'shellwords'
 require 'set'
 require 'fileutils'
@@ -310,7 +311,7 @@ BC2CPP_MAIN = lambda do
   # or defines Ruby at runtime uses the plain mruby build instead. The build's name, its gem list and the
   # outside native and Ruby sources are required inputs (checked above); without them there is no closed world.
   # Constructed before return/element analysis, which uses its method-lookup proof for inherited return classes.
-    repo_root = File.expand_path('../..', __dir__)
+    repo_root = BC2CPP_WORLD_ROOT
   build_name = ENV['BC2CPP_BUILD_NAME']
   build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS']).to_h { |kv| kv.split('=', 2) }
     CodeGen.build_gem_names = build_gems.keys.to_set
@@ -496,8 +497,8 @@ BC2CPP_MAIN = lambda do
   sig_applied = nil
   sig_class_annotations = nil
   sig_element_annotations = nil
-  sig_root = ENV['BC2CPP_SIG_ROOT'] || File.expand_path('../..', __dir__)
-  sig_dirs = RbsSignatures.dirs_from_env(File.expand_path('../..', __dir__)) + [conversion_sigs].compact
+  sig_root = ENV['BC2CPP_SIG_ROOT'] || BC2CPP_WORLD_ROOT
+  sig_dirs = RbsSignatures.dirs_from_env(BC2CPP_WORLD_ROOT) + [conversion_sigs].compact
   if (sig_loaded = RbsSignatures.load(sig_dirs, display_root: sig_root))
     sig_owners = registry.values.flatten.map(&:owner).uniq
     sig_class_annotations = ClassAnnotations.extract(ireps, registry, sig_owners)
@@ -895,7 +896,7 @@ BC2CPP_MAIN = lambda do
   # BC2CPP_SELF_REGISTERING: a caller that compiles another program and installs its own registrations
   # (tools/optcarrot_probe/compiled_run.rb) sets it; an engine build registers each owner on its own.
   CodeGen.engine_registrations = true unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(File.expand_path('../..', __dir__)),
+  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs | core_mrbgem_mrblib_srcs(BC2CPP_WORLD_ROOT),
                                               native_name_sources)
   warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
@@ -1175,7 +1176,7 @@ BC2CPP_MAIN = lambda do
     # A core mrbgem the build does not link never runs, so its Ruby cannot spell a scoped name: FOREIGN_RUBY_SRCS globs
     # every 3rd/mruby/mrbgems mrblib (mruby-benchmark's Report spells @width), and that spelling would drop a scope
     # for nothing. Every other foreign file still counts.
-    gems_dir = File.join(File.expand_path('../..', __dir__), '3rd/mruby/mrbgems/')
+    gems_dir = File.join(BC2CPP_WORLD_ROOT, '3rd/mruby/mrbgems/')
     linked_ruby = foreign_ruby_srcs.reject do |path|
       full = File.expand_path(path)
       full.start_with?(gems_dir) && !build_gems.key?(full.delete_prefix(gems_dir).split('/').first)
@@ -2879,7 +2880,7 @@ BC2CPP_MAIN = lambda do
     # CORE_CLASS_UNITS: with MRB_CORE_CLASS_UNITS the core mrblib is not loaded, so every top-level statement of it must be a unit.
     require_relative 'unit_blank'
     unit_paths = class_units.map { |unit| unit[:path] }.to_set
-    residual = Dir[File.expand_path('../../3rd/mruby/mrblib/*.rb', __dir__)].sort.flat_map do |file|
+    residual = Dir[File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrblib/*.rb")].sort.flat_map do |file|
       kept = Prism.parse(UnitBlank.blank(File.binread(file), unit_paths)).value.statements&.body || []
       kept.map { |stmt| "#{File.basename(file)}: #{stmt.class.name.split('::').last}" }
     end

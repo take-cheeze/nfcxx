@@ -7,6 +7,7 @@
 #
 #   ruby scripts/bc2cpp/native_rom_owners_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require_relative '../../tools/bc2cpp/native_rom_owners'
 
 failures = []
@@ -51,13 +52,13 @@ check.call('a class defined under Object is the top-level name',
 check.call('entries are read with their function and name',
            NativeRomOwners.analyze(table('x', nil, 'k', 'k = mrb_define_class_id(mrb, MRB_SYM(T), mrb->object_class);'))[:tables]['x_rom_entries'][:entries] == [%w[fn_one to_s]])
 
-numeric = File.expand_path('../../3rd/mruby/src/numeric.c', __dir__)
+numeric = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/src/numeric.c")
 if File.file?(numeric)
   tables = NativeRomOwners.analyze_file(numeric)[:tables]
   check.call('numeric.c: integer_rom_entries is Integer', tables['integer_rom_entries'][:owner] == 'Integer')
   check.call('numeric.c: float_rom_entries is Float', tables['float_rom_entries'][:owner] == 'Float')
   check.call('numeric.c: numeric_rom_entries is Numeric', tables['numeric_rom_entries'][:owner] == 'Numeric')
-  socket = File.expand_path('../../3rd/mruby/mrbgems/mruby-socket/src/socket.c', __dir__)
+  socket = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrbgems/mruby-socket/src/socket.c")
   options = File.file?(socket) && NativeRomOwners.analyze_file(socket)[:tables]['socket_option_rom_entries']
   check.call('socket.c: socket_option_rom_entries is Socket::Option', options && options[:owner] == 'Socket::Option')
 else

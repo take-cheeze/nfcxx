@@ -18,12 +18,13 @@
 # Generated code only (no mruby build). Needs a host mrbc: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/native_owner_map_check.rb
 # Without MRBC the generated-code part is skipped.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'rbconfig'
 require 'shellwords'
 require 'tmpdir'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 # The fixtures declare no RBS; the repository's signatures name engine classes these fixtures lack. Set before
 # the bc2cpp subprocesses start: they inherit ENV, so every compile here runs without sig/bc2cpp.
 ENV['BC2CPP_SIG_DIRS'] = ''
@@ -103,7 +104,7 @@ if tool?(MRBC_PATH)
               'BC2CPP_BUILD_NAME' => 'closed',
               'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
       out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env.merge(extra_env)), RbConfig.ruby,
-                                        File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), *(core_srcs + [path]))
+                                        File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb'), *(core_srcs + [path]))
       abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
       out
     end

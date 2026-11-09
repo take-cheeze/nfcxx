@@ -9,13 +9,14 @@ removed_optimizations = %w[OPTCARROT_STATIC_DISPATCH OPTCARROT_STATIC_PPU
 requested = removed_optimizations.select { |name| ENV[name] == '1' }
 abort "Removed workload-specific optimization: #{requested.join(', ')}; use general IR inlining" unless requested.empty?
 
+require_relative '../bc2cpp/world_root'
 require 'fileutils'
 require 'etc'
 require 'open3'
 require 'rbconfig'
 require 'shellwords'
 require 'tmpdir'
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 MRUBY = File.join(ROOT, '3rd/mruby')
 PROBE_MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
@@ -32,11 +33,11 @@ end
 abort "#{PROBE_MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(PROBE_MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
-require File.join(ROOT, 'tools/bc2cpp/compiled_gems')
+require File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/compiled_gems')
 require_relative 'sealed_build'
 require_relative 'cruby_runs'
 require_relative 'register_emit'
-require File.join(ROOT, 'tools/bc2cpp/shard_output')
+require File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/shard_output')
 
 extend OptcarrotRegister
 
@@ -48,9 +49,9 @@ def run_bc2cpp(sources, env)
   # CRuby; unset, the command is the same as before.
   runner = ENV['BC2CPP_MRUBY_RUNNER']
   launcher = if runner && !runner.empty?
-               [runner, File.join(ROOT, 'host-libs/mruby-bc2cpp-runner/bc2cpp_main.rb')]
+               [runner, File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-runner/bc2cpp_main.rb')]
              else
-               [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')]
+               [RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')]
              end
   command = [*launcher, '--annotated', *sources]
   stdout, stderr, status = Open3.capture3(env, *command)
@@ -340,9 +341,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   bundle = File.join(temp, 'optcarrot.rb')
   cruby_bundle = File.join(temp, 'optcarrot_cruby.rb')
-  system(RbConfig.ruby, File.join(ROOT, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
+  system(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
   system({ 'OPTCARROT_NO_SHIMS' => '1' }, RbConfig.ruby,
-         File.join(ROOT, 'tools/optcarrot_probe/build_bundle.rb'), cruby_bundle, exception: true)
+         File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe/build_bundle.rb'), cruby_bundle, exception: true)
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_entries = section_lines(diagnostics, 'compiled entry points').join("\n")

@@ -12,11 +12,12 @@
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir] ruby scripts/bc2cpp/class_pools_mutation_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'tmpdir'
 require_relative 'mutant_pool'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 abort 'SKIP: set MRBC' unless ENV['MRBC']
 
 # [name, file, pattern, replacement, check label that must FAIL, needs the run half]
@@ -56,7 +57,7 @@ mutate = lambda do |(_name, file, pattern, replacement, expected, needs_run)|
     env = { 'BC2CPP_TOOL' => File.join(dir, 'bc2cpp', 'bc2cpp.rb') }
     env['PL_GENERATED_ONLY'] = '1' unless needs_run
     # A mutant stops at the FAIL line it is expected to cause (Bc2cppMutantPool.run).
-    Bc2cppMutantPool.run(env, [RbConfig.ruby, File.join(ROOT, 'scripts/bc2cpp/class_pools_check.rb')],
+    Bc2cppMutantPool.run(env, [RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/class_pools_check.rb')],
                          stop_on: /^\s+FAIL .*(?:#{expected.source})/)
   end
 end

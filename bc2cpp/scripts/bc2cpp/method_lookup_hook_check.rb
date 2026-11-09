@@ -1,11 +1,12 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'open3'
 require 'tmpdir'
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 source = ENV.fetch('MRUBY_LOOKUP_SOURCE', File.join(root, '3rd/mruby'))
 abort 'method lookup hook missing from mruby source' unless File.read(File.join(source, 'include/mruby.h')).include?('MRB_USE_METHOD_LOOKUP_HOOK')
 

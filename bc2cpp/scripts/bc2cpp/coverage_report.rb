@@ -32,18 +32,19 @@
 # instead (used by callers that need to capture the report). Set
 # BC2CPP_COVERAGE_KEEP_DIR to also keep the shipped pass's generated C++.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'shellwords'
 require 'open3'
 require 'tmpdir'
 require 'set'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/symbol_cache'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
-BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
+BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 MRBC = ENV['MRBC'] || 'mrbc'
 # Optional output path for callers that need to capture the report.
 REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH']

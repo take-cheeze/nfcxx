@@ -29,7 +29,9 @@
 # Needs on PATH: c++ (g++), cc, ar, nproc, clock_gettime-capable libc (Linux).
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# WORLD_ROOT (tools/bc2cpp/world_root.rb): bc2cpp's own tree, and the repository it compiles (the same unless BC2CPP_WORLD_ROOT).
+tree="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="${BC2CPP_WORLD_ROOT:-$tree}"
 build_dir="$(cd "${1:-$root/build-closed-bc2cpp}" && pwd)"
 game_dir="$(cd "${2:-$root/data/Nepheshel206beta/Nepheshel206Rbeta}" && pwd)"
 frames="${BC2CPP_HOST_FRAMES:-600}"
@@ -92,7 +94,7 @@ fi
   -DMRB_STR_LENGTH_MAX=0 -DMRB_HEAP_PAGE_SIZE=256 -DKHASH_INITIAL_SIZE=16 \
   -DLV_CONF_INCLUDE_SIMPLE \
   -I"$mruby_inc" -I"$root/3rd/mruby/include" -I"$root/include" -I"$root/3rd/lvgl" \
-  -c "$root/scripts/bc2cpp/trace_host.cxx" -o "$host_dir/trace_host.o"
+  -c "$tree/scripts/bc2cpp/trace_host.cxx" -o "$host_dir/trace_host.o"
 # --gc-sections: the closed libmruby.a is built with one section per function (build_config.rb
 # GC_SECTIONS), so the host keeps only what it reaches, as a device build does.
 "$cxx" "${lookup_link[@]}" -o "$host_dir/trace_host" "$host_dir/trace_host.o" \

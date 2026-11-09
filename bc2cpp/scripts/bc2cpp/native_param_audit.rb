@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'digest'
 require_relative '../../tools/bc2cpp/native_direct'
 
@@ -13,7 +14,7 @@ require_relative '../../tools/bc2cpp/native_direct'
 #      with nothing before the call but the argument declarations, the letters of <fmt> are the entry's kinds in
 #      order, and `entry` is the table's function (or the forwarder the generated block makes to its `_native_body`).
 module NativeParamAudit
-  ROOT = File.expand_path('../..', __dir__)
+  ROOT = BC2CPP_WORLD_ROOT
   LETTER_KINDS = { 'i' => :int, 'f' => :float, 'b' => :bool, 'o' => :value }.freeze
   CTYPES = { 'i' => 'mrb_int', 'f' => 'mrb_float', 'b' => 'mrb_bool', 'o' => 'mrb_value|V' }.freeze
 

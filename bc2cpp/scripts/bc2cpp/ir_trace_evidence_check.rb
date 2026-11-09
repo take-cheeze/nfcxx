@@ -7,6 +7,7 @@
 #
 #   ruby scripts/bc2cpp/ir_trace_evidence_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
 require 'tmpdir'
@@ -14,7 +15,7 @@ require 'rbconfig'
 require_relative '../../tools/bc2cpp/ir_trace_evidence'
 require_relative '../../tools/bc2cpp/type_check_report'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 checks = 0
 check = lambda do |what, condition|
@@ -115,7 +116,7 @@ Dir.mktmpdir('ir-trace-evidence-check') do |dir|
   cand_path = File.join(dir, 'candidates.rbs')
   File.write(facts_path, JSON.generate(facts))
   File.write(cand_path, CANDIDATES)
-  script = File.join(ROOT, 'scripts/bc2cpp/type_check.rb')
+  script = File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/type_check.rb')
   out, _err, status = Open3.capture3(RbConfig.ruby, script, '--facts', facts_path, '--no-sends', '--trace', cand_path, '--all', '--format', 'json', '--out', File.join(dir, 'report.json'))
   report = JSON.parse(File.read(File.join(dir, 'report.json')))
   codes = report['diagnostics'].map { |d| d['code'] }

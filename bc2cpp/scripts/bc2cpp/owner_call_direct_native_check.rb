@@ -5,9 +5,10 @@
 # registrations in mruby-rgss/src/lib.cxx (owner, body, arity), and each exported wrapper must be defined once at file
 # scope, outside the anonymous namespace its body lives in.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
-ROOT = File.expand_path('../..', __dir__)
-$LOAD_PATH.unshift(File.join(ROOT, 'tools/bc2cpp'))
+ROOT = BC2CPP_WORLD_ROOT
+$LOAD_PATH.unshift(File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp'))
 require 'native_owner_map'
 require 'owner_call_direct'
 

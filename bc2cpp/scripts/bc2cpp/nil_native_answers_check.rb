@@ -21,6 +21,7 @@
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/nil_native_answers_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/native_owner_map'
@@ -28,7 +29,7 @@ require_relative '../../tools/bc2cpp/native_owner_map'
 # The fixture is its own closed world: the repository signatures name classes it does not define.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
-ROOT_DIR = File.expand_path('../..', __dir__)
+ROOT_DIR = BC2CPP_WORLD_ROOT
 RATIONAL_GEM = File.join(ROOT_DIR, '3rd/mruby/mrbgems/mruby-rational')
 RATIONAL_C = File.join(RATIONAL_GEM, 'src/rational.c')
 

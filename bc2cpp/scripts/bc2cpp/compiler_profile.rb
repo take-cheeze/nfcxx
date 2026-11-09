@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'json'
 require 'optparse'
@@ -17,8 +18,8 @@ parser.parse!(ARGV)
 abort parser.to_s unless options[:out] && (options[:optcarrot] ? ARGV.empty? : !ARGV.empty?)
 require 'stackprof' unless options[:mode] == 'none'
 
-root = File.expand_path('../..', __dir__)
-compiler = File.join(root, 'tools/bc2cpp/bc2cpp.rb')
+root = BC2CPP_WORLD_ROOT
+compiler = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 FileUtils.mkdir_p(File.dirname(options[:out]))
 run = lambda do
   $0 = compiler

@@ -17,14 +17,15 @@
 # bytecode size.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'open3'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
-require_relative '../../mruby-lcf/gen_schema_tables'
+require File.join(BC2CPP_WORLD_ROOT, 'mruby-lcf/gen_schema_tables')
 
 suite = FixtureCheck.new('lcf_schema_tables_check')
-ROOT_DIR = File.expand_path('../..', __dir__)
+ROOT_DIR = BC2CPP_WORLD_ROOT
 SCHEMA = "#{ROOT_DIR}/mruby-lcf/mrblib/schema.rb"
 LCF_RB = "#{ROOT_DIR}/mruby-lcf/mrblib/lcf.rb"
 

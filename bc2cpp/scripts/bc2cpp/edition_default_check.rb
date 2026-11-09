@@ -11,6 +11,7 @@
 # (BC2CPP_MRUBY_FULL, or rake and a C++ compiler).
 ENV['BC2CPP_SIG_DIRS'] = ''
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
@@ -18,7 +19,7 @@ require_relative 'fixture_runtime'
 suite = FixtureCheck.new('edition_default_check')
 suite.require_mrbc!
 
-MRBLIB = File.expand_path('../../mruby-lcf/mrblib', __dir__)
+MRBLIB = File.join(BC2CPP_WORLD_ROOT, "mruby-lcf/mrblib")
 LCF_TEXT = File.read(File.join(MRBLIB, 'lcf.rb'), encoding: 'UTF-8')
 SCHEMA_TEXT = File.read(File.join(MRBLIB, 'schema.rb'), encoding: 'UTF-8')
 LINES = LCF_TEXT.lines

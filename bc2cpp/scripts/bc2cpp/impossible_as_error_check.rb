@@ -13,11 +13,12 @@
 #
 #   MRBC=path/to/host/mrbc [BC2CPP_MRUBY_CORE=dir] ruby scripts/bc2cpp/impossible_as_error_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative 'cxx'
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"

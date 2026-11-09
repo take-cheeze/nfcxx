@@ -3,6 +3,7 @@
 #   cd 3rd/mruby && MRUBY_CONFIG=../../host-libs/mruby-bc2cpp-runner/build_config.rb \
 #     MRUBY_BUILD_DIR=<dir> rake
 # Not wired into build_config.rb: this build is the bc2cpp runner alone. Its test status is in the runner's README.
+require_relative '../../tools/bc2cpp/world_root'
 ROOT = File.expand_path('../..', Dir.pwd) unless defined?(ROOT)
 
 MRuby::Build.new('bc2cpp-runner') do |conf|
@@ -42,6 +43,6 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
   conf.gem File.join(ROOT, 'host-libs/mruby-prism')
   conf.gem File.join(ROOT, 'host-libs/mruby-rbs')
   conf.gem File.join(ROOT, 'host-libs/mruby-process')
-  conf.gem File.join(ROOT, 'host-libs/mruby-bc2cpp-sources')
-  conf.gem File.join(ROOT, 'host-libs/mruby-bc2cpp-runner')
+  conf.gem File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-sources')
+  conf.gem File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-runner')
 end

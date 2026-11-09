@@ -17,6 +17,7 @@
 #
 # Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_CORE=dir] ruby scripts/bc2cpp/fallback_bodies_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'shellwords'
 require 'rbconfig'
@@ -31,7 +32,7 @@ require_relative 'fixture_runtime'
 require_relative 'cxx'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
@@ -414,7 +415,7 @@ if system(mrbc, '--version', out: File::NULL, err: File::NULL) || system(mrbc, '
       core_natives = Bc2cppFixtureRuntime.closed_world_native_srcs.reject { |path| path.include?('/mruby-rgss/src/') }
       env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'bc2cpp_fb', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
               'BC2CPP_SELF_REGISTERING' => '1', 'NATIVE_SRCS' => Shellwords.join(core_natives) }
-      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', src,
+      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', src,
                                         chdir: ROOT)
       abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
       File.write(File.join(dir, 'fb_gen.cpp'), out)

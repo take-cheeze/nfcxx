@@ -9,12 +9,13 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/block_yielders_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'rbconfig'
 require 'tmpdir'
 
 ENV['BC2CPP_SIG_DIRS'] = ''
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 require_relative '../../tools/bc2cpp/closed_world_env'
 
 failures = []
@@ -112,7 +113,7 @@ def run_bc2cpp(mrbc, dir, src, extra = {})
   env = bc2cpp_closed_world_probe_env({ 'MRBC' => mrbc, 'OUT_SYMBOL' => 'bc2cpp_fx', 'OUT_DIR' => dir,
                                         'SKIP_UNSUPPORTED' => '1', 'BC2CPP_SELF_REGISTERING' => '1',
                                         'BC2CPP_TRACE_TYPES' => '1' }.merge(extra))
-  out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', src,
+  out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', src,
                                     chdir: ROOT)
   abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
   out

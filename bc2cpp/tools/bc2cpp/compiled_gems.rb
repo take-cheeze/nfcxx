@@ -54,9 +54,10 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # mruby-rpg2k/mrblib/main.rb defines engine methods on it that no compiled gem emits, so an Object owner
 # would claim them. A class also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
+require_relative 'world_root'
 require_relative 'ruby_parse_cache'
 require_relative 'scan_cache'
-BC2CPP_OWNER_SOURCE_ROOT = File.expand_path('../../3rd', __dir__).freeze
+BC2CPP_OWNER_SOURCE_ROOT = File.join(BC2CPP_WORLD_ROOT, "3rd").freeze
 # mrb->X_class fields that core binds to a named class.
 BC2CPP_STATE_CLASS_FIELDS = {
   'object_class' => 'Object', 'basic_class' => 'BasicObject', 'module_class' => 'Module', 'class_class' => 'Class',
@@ -153,14 +154,14 @@ def bc2cpp_registration_owners(compiled_owners)
 end
 
 require 'prism'
-require_relative '../rgss_tts_config'
+require File.join(BC2CPP_WORLD_ROOT, 'tools/rgss_tts_config')
 require_relative 'gem_owners'
 require_relative 'compiled_gems_config'
 
 # GEM_OWNERS: a compiled gem's owners are every engine owner with a plain def in its base gem's mrblib (every
 # variant: a build that leaves a file out only has fewer defs), and the core classes the gem reopens.
 def bc2cpp_gem_owners(base_gem)
-  GemOwners.owners(Dir[File.expand_path("../../#{base_gem}/mrblib*/**/*.rb", __dir__)].sort)
+  GemOwners.owners(Dir[File.join(BC2CPP_WORLD_ROOT, "#{base_gem}/mrblib*/**/*.rb")].sort)
 end
 
 # COMPILED_GEMS_CONFIG: the per-gem table lives in compiled_gems.yml (validated by compiled_gems_config.rb); only the
@@ -375,7 +376,7 @@ BC2CPP_OPEN_WORLD_GEMS = %w[
 ].freeze
 # The gems whose mrblib is the closed world itself, read from build_config.rb's
 # rpg_maker_gems (the unconditional maker-gem lines; see bc2cpp_build_config_closed_world_gems).
-BC2CPP_BUILD_CONFIG = File.expand_path('../../build_config.rb', __dir__).freeze
+BC2CPP_BUILD_CONFIG = File.join(BC2CPP_WORLD_ROOT, "build_config.rb").freeze
 
 # The build_config.rb text, read at load time; a missing file is an error, never an empty list.
 def bc2cpp_build_config_text(path = BC2CPP_BUILD_CONFIG)
@@ -398,7 +399,7 @@ end
 
 BC2CPP_CLOSED_WORLD_GEMS = bc2cpp_build_config_closed_world_gems(bc2cpp_build_config_text).freeze
 
-BC2CPP_GEMS_ROOT = File.expand_path('../..', __dir__)
+BC2CPP_GEMS_ROOT = BC2CPP_WORLD_ROOT
 
 # CLOSED_CORE_GEMS (nomethod_reviewed_probe.rb) is derived, not listed: the core gems the closed build loads. Inputs are
 # rpg_maker_gems' conf.gem lines for 'closed' (build_config.rb, as a Prism AST), the compiled gems, and each reached
@@ -834,12 +835,12 @@ module Bc2cppCompiledGemGeneration
   end
 
   def run_group(common, srcs, group, gems_root)
-    bc2cpp = File.join(gems_root, 'tools/bc2cpp/bc2cpp.rb')
+    bc2cpp = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
     # BC2CPP_MRUBY_RUNNER (opt-in): the bc2cpp executable (host-libs/mruby-bc2cpp-runner) generates the code instead of
     # CRuby running bc2cpp.rb. Its subprocesses go through BC2CPP_RUBY, which the caller sets to tools/bc2cpp/mruby-ruby.
     runner = ENV['BC2CPP_MRUBY_RUNNER']
     launcher = if runner && !runner.empty?
-                 "#{runner.shellescape} #{File.join(gems_root, 'host-libs/mruby-bc2cpp-runner/bc2cpp_main.rb').shellescape}"
+                 "#{runner.shellescape} #{File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-runner/bc2cpp_main.rb').shellescape}"
                else
                  "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape}"
                end

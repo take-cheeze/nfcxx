@@ -13,13 +13,14 @@
 #
 # See docs/bc2cpp-refusal-census.md for the method and its limits.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'set'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/bytecode_ir_types'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 DEFAULT_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
 
 tsv = nil

@@ -10,6 +10,7 @@
 #
 # Usage: ruby scripts/bc2cpp/core_facts_rbs_check.rb [--require-mruby]
 #   --require-mruby: a missing 3rd/mruby fails instead of skipping (the bc2cpp-build job, which checks it out).
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/core_fact_sigs'
@@ -21,7 +22,7 @@ require_relative '../../tools/bc2cpp/native_names'
 require_relative '../../tools/bc2cpp/native_expression_devirt'
 require_relative '../../tools/bc2cpp/compiled_gems'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 MRUBY = File.join(ROOT, '3rd/mruby')
 
 failures = []

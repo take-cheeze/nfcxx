@@ -51,6 +51,7 @@
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/static_dispatch_scan_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
@@ -206,7 +207,7 @@ check('suffix: the base itself stays dynamic', S.dynamic_name?('done', dyn, Set.
 check('suffix: the default keeps the rule for every dynamic base', S.dynamic_name?('done?', dyn, Set.new))
 check('suffix: "=", "?", "!" are the suffix literals',
       %w[= ? !].all? { |c| c.match?(S::SUFFIX_LITERAL) } && !'=='.match?(S::SUFFIX_LITERAL))
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 scanning = "#{root}/3rd/mruby/include/mruby/presym/scanning.h"
 check('naming_macros: presym/scanning.h redefinitions are not the build',
       S.naming_macros_in([File.read(scanning)]).include?('mrb_funcall') && S.naming_macros([scanning]).empty?)
@@ -353,7 +354,7 @@ check('linked only: an unlinked gem\'s mrblib and a swapped-out engine file are 
       ruby.none? { |p| p.include?('/mruby-enum-lazy/') || p.end_with?('/scene/map_tts.rb') } &&
       open_ruby.any? { |p| p.end_with?('/scene/map_tts.rb') })
 check('linked only: the closed host is read, the device apps are not',
-      natives.include?("#{root}/scripts/bc2cpp/trace_host.cxx") && natives.none? { |p| p.start_with?("#{root}/app/", "#{root}/src/") })
+      natives.include?("#{BC2CPP_TREE_ROOT}/scripts/bc2cpp/trace_host.cxx") && natives.none? { |p| p.start_with?("#{root}/app/", "#{root}/src/") })
 
 # --- NATIVE_COMMENTS ---
 commented = %(int n = 1'000; /* "in_block" */ f("keep//this", '"'); // "in_line"\nmrb_funcall(M, v, "real", 0);\n)

@@ -23,6 +23,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/core_enumerator_free_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'tmpdir'
 require 'fileutils'
@@ -468,7 +469,7 @@ sdr = StaticDispatchRegistrations
 released = ->(engine) do
   with_world(suite, engine: engine, native: INDEX_C) do |w|
     sdr.enumerator_free_keys(reasons, w[:core], w[:engine][:ireps], w[:native], w[:entries], NativeOwnerMap.build([]), w[:engine][:tuple],
-                             StaticDispatchSymbolUses.lookups(w[:engine][:ireps]), File.expand_path('../..', __dir__))
+                             StaticDispatchSymbolUses.lookups(w[:engine][:ireps]), BC2CPP_WORLD_ROOT)
   end
 end
 suite.check("a holding proof lists the methods of the group (an operator too), and the alias of to_enum (#{released.call(engine_ok).sort.join(', ')})",

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'shellwords'
 require_relative 'compiled_gems'
 require_relative 'nomethod_reviewed'
@@ -11,7 +12,7 @@ require_relative 'nomethod_reviewed_probe'
 # defaults, except a nil for one of the four closed-world inputs, which keeps the default (a run cannot drop one).
 # Fixture-owned sites are outside the reviewed scope (review_scope.rb); the real gems are judged.
 # Not bc2cpp_closed_world_env (compiled_gems.rb): that one derives the same inputs from a real build's spec.
-def bc2cpp_closed_world_probe_env(env = {}, root = File.expand_path('../..', __dir__))
+def bc2cpp_closed_world_probe_env(env = {}, root = BC2CPP_WORLD_ROOT)
   natives = Dir["#{root}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{root}/3rd/mruby") + external_gem_native_srcs(root)
   base = {
     'NATIVE_SRCS' => Shellwords.join(natives),

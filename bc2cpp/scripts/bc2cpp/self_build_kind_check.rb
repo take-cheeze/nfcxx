@@ -11,12 +11,13 @@
 #
 # Usage: ruby scripts/bc2cpp/self_build_kind_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/review_scope'
 
 suite = FixtureCheck.new('self_build_kind_check')
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 KIND = 'bc2cpp-self'
 
 def violations(kind, names)
@@ -25,10 +26,10 @@ end
 
 # The gem names the runner build_config.rb lists, without the build-time gems (the bin gems and the compiler, which the
 # executable does not link) and without the runner script gem itself.
-config = File.read(File.join(ROOT, 'host-libs/mruby-bc2cpp-runner/build_config.rb'))
+config = File.read(File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-runner/build_config.rb'))
 listed = config.scan(/conf\.gem core: '(mruby-[a-z0-9-]+)'/).flatten +
          config.scan(/%w\[([^\]]+)\]/m).flat_map { |(words)| words.split } +
-         config.scan(%r{conf\.gem File\.join\(ROOT, '(?:[a-z0-9-]+/)(mruby-[a-z0-9-]+)'\)}).flatten
+         config.scan(%r{conf\.gem File\.join\((?:BC2CPP_TREE_)?ROOT, '(?:[a-z0-9-]+/)(mruby-[a-z0-9-]+)'\)}).flatten
 runner_gems = (listed - %w[mruby-bin-mruby mruby-bin-mrbc mruby-compiler mruby-bc2cpp-runner]).uniq
 
 suite.check('the self kind is a closed-world build', BC2CPP_CLOSED_WORLD_BUILDS.include?(KIND))
@@ -38,7 +39,7 @@ DEPENDENCY_ONLY = %w[mruby-env].freeze
 suite.check('BC2CPP_SELF_GEMS is the runner build_config minus its build-time gems, plus its dependency-only gems',
             BC2CPP_SELF_GEMS.sort == (runner_gems + DEPENDENCY_ONLY).sort)
 suite.check('the dependency-only gems are declared by mruby-bc2cpp-sources',
-            DEPENDENCY_ONLY.all? { |g| File.read(File.join(ROOT, 'host-libs/mruby-bc2cpp-sources/mrbgem.rake')).include?("'#{g}'") })
+            DEPENDENCY_ONLY.all? { |g| File.read(File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-sources/mrbgem.rake')).include?("'#{g}'") })
 
 suite.check('the runner gem list is accepted', violations(KIND, BC2CPP_SELF_GEMS).empty?)
 suite.check('the optional C main is accepted when present',

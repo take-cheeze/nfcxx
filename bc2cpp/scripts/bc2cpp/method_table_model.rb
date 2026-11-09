@@ -17,13 +17,14 @@
 #
 # Usage: [MRBC=path/to/mrbc] ruby scripts/bc2cpp/method_table_model.rb [OUT.json]
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/class_world_gate'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 def entry(name, defn)
   { owner: defn.owner, name: name, kind: defn.kind&.to_s, installer: defn.installer&.to_s,

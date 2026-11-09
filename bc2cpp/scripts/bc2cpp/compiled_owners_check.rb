@@ -14,6 +14,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/compiled_owners_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'tmpdir'
 require_relative 'check_support'
@@ -93,7 +94,7 @@ Dir.mktmpdir('compiled-owners') do |dir|
 end
 
 suite.require_mrbc!
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 _ireps, registry, = StaticDispatchRegistrations.closed_world(root, ENV.fetch('MRBC', 'mrbc'))
 listed = BC2CPP_COMPILED_GEMS.values.flat_map { |gem| Array(gem[:owners]) }.to_set
 copied = registry.each_value.flat_map do |defs|

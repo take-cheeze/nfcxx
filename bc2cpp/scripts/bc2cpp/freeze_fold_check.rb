@@ -11,6 +11,7 @@
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/freeze_fold_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/bc2cpp'
@@ -20,7 +21,7 @@ require_relative '../../tools/bc2cpp/type_facts'
 suite = FixtureCheck.new('freeze_fold_check')
 
 NF = NumericFlow
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 puts '== per-IREP class-test cache (host)'
 cache = CodeGen.allocate

@@ -18,6 +18,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/static_dispatch_lists_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'set'
 require 'stringio'
@@ -31,7 +32,7 @@ suite = FixtureCheck.new('static_dispatch_lists_check')
 suite.require_mrbc!
 
 LISTS = StaticDispatchLists
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 raises = lambda do |klass = LISTS::Missing, &block|
   block.call

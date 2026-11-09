@@ -16,7 +16,9 @@
 # Needs what closed_build.bash needs (ruby with prism, rake, a C compiler, bison, gperf); everything but the path
 # goes to stderr, so the command substitution above holds only the path.
 set -euo pipefail
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# WORLD_ROOT (tools/bc2cpp/world_root.rb): bc2cpp's own tree, and the repository it compiles (the same unless BC2CPP_WORLD_ROOT).
+tree="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="${BC2CPP_WORLD_ROOT:-$tree}"
 build_dir="${1:-$root/build-closed-bc2cpp}"
 mkdir -p "$build_dir"
 build_dir="$(cd "$build_dir" && pwd)"
@@ -31,7 +33,7 @@ if [ "${BC2CPP_LISTS_REUSE:-}" = 1 ] && [ -f "$lists" ]; then
   exit 0
 fi
 
-if ruby "$root/tools/bc2cpp/static_dispatch_registrations.rb" --check "$lists_dir"; then
+if ruby "$tree/tools/bc2cpp/static_dispatch_registrations.rb" --check "$lists_dir"; then
   echo "static dispatch lists: $lists is current" >&2
   echo "$lists"
   exit 0
@@ -53,5 +55,5 @@ if [ -z "${MRBC:-}" ]; then
   fi
 fi
 
-MRBC="$MRBC" ruby "$root/tools/bc2cpp/static_dispatch_registrations.rb" --emit "$lists_dir" >&2
+MRBC="$MRBC" ruby "$tree/tools/bc2cpp/static_dispatch_registrations.rb" --emit "$lists_dir" >&2
 echo "$lists"

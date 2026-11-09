@@ -40,6 +40,7 @@
 # BC2CPP_TOOLS_DIR: another copy of tools/bc2cpp (a mutant of type_check_mutation_check.rb).
 TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.expand_path('../../tools/bc2cpp', __dir__)
 $LOAD_PATH.unshift(TOOLS)
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'optparse'
 require 'tmpdir'
@@ -48,7 +49,7 @@ require 'type_check_report'
 require 'ir_trace_evidence'
 require 'type_check_iterate'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 opts = { format: 'text', top: 20, scope: 'engine', sends: true, what_if: false, all: false, quiet: false, files: nil }
 parser = OptionParser.new do |o|

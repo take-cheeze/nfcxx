@@ -21,6 +21,7 @@
 #   refused      `#error` in the text (none in the closed world today).
 # Class and module bodies are a separate kind: their sends run in the class-body load program, not in a method.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
 require 'rbconfig'
@@ -105,9 +106,9 @@ end
 SelfSendCensus.install_hook! if ENV[SelfSendCensus::OUT_ENV]
 
 if $PROGRAM_NAME == __FILE__
-  ROOT = File.expand_path('../..', __dir__)
-  BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
-  $LOAD_PATH.unshift(File.join(ROOT, 'tools/bc2cpp'))
+  ROOT = BC2CPP_WORLD_ROOT
+  BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
+  $LOAD_PATH.unshift(File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp'))
   require 'compiled_gems'
   require 'nomethod_reviewed_probe'
   require 'closed_world_env'

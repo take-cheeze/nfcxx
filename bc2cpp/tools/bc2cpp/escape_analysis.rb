@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'irep'
@@ -235,7 +236,7 @@ module EscapeAnalysis
     # The hidden-owner token that makes every receiver a possible callee (see mixin_defines?).
     UNCONDITIONAL = '*'
     # The repository root: NATIVE_ARG_OK's file lists are repo-relative.
-    NATIVE_ROOT = File.expand_path('../..', __dir__)
+    NATIVE_ROOT = BC2CPP_WORLD_ROOT
     CONST_READS = Set[:GETCONST, :GETMCNST].freeze
     # Sends that make a method from a name computed at run time. A literal name is modelled below; any
     # other makes every callee set unknowable (`dynamic`).

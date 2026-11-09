@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'set'
 require_relative 'core_defs'
 require_relative 'source_text'
@@ -21,8 +22,8 @@ module EnumeratorModel
   FILE_SUFFIX = '/mruby-enumerator/mrblib/enumerator.rb'
   # Kernel's Enumerator makers, from sig/bc2cpp/declarations.rbs#core_enumerators.
   NAMES = CoreFactSigs.enumerator_makers
-  MRUBY_ENUMERATOR_RB = File.expand_path('../../3rd/mruby/mrbgems/mruby-enumerator/mrblib/enumerator.rb', __dir__)
-  MRUBY_CLASS_C = File.expand_path('../../3rd/mruby/src/class.c', __dir__)
+  MRUBY_ENUMERATOR_RB = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrbgems/mruby-enumerator/mrblib/enumerator.rb")
+  MRUBY_CLASS_C = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/src/class.c")
 
   # Read at load time from mruby's sources; raises when 3rd/mruby is not checked out.
   def self.source_text(path)

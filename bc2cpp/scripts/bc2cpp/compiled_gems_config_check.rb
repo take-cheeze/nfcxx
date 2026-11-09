@@ -14,13 +14,14 @@
 #
 # Usage: ruby scripts/bc2cpp/compiled_gems_config_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/compiled_gems'
 
 suite = FixtureCheck.new('compiled_gems_config_check')
 Config = Bc2cppCompiledGemsConfig
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 GOOD = <<~YAML
   version: 1

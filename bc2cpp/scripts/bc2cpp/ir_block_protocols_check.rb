@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
 require 'tmpdir'
@@ -31,7 +32,7 @@ unless ENV['MRBC']
   exit
 end
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 Dir.mktmpdir('ir-block-protocols') do |dir|
   File.write(File.join(dir, 'fixture.rb'), <<~RUBY)
     class BlockProtocols
@@ -71,7 +72,7 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
   RBS
   run = lambda do |extra = {}|
     env = { 'MRBC' => File.expand_path(ENV.fetch('MRBC')), 'BC2CPP_STRICT_HINTS' => '0', 'BC2CPP_SIG_DIRS' => '' }.merge(extra)
-    output, error, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'scripts/bc2cpp/type_check.rb'),
+    output, error, status = Open3.capture3(env, RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/type_check.rb'),
                                          '--files', 'fixture.rb', '--sig', 'fixture.rbs', '--format', 'json', '--no-sends', chdir: dir)
     raise "block protocol check failed: #{error}\n#{output}" unless [0, 1].include?(status.exitstatus)
 

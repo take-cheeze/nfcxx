@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'prism'
 require 'set'
 require_relative 'ruby_parse_cache'
@@ -15,7 +16,7 @@ require_relative 'ruby_parse_cache'
 # method name it cannot see the body of.
 module PredicateReturns
   WHITELIST = File.expand_path('../../scripts/bc2cpp/predicate_whitelist.txt', __dir__)
-  ROOT = File.expand_path('../..', __dir__)
+  ROOT = BC2CPP_WORLD_ROOT
 
   # Built-in calls whose result is a boolean. A program redefining one of these would make the proof wrong; the closed
   # world does not allow redefining a core method, so the names are trusted.

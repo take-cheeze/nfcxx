@@ -10,12 +10,13 @@
 # byte; a stale declaration goes and a missing one comes back under its marker; running it again changes nothing; and
 # the committed file regenerates from its own content with no diff.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'tmpdir'
 require 'fileutils'
 require_relative '../../tools/bc2cpp/base_section'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 DECLARATIONS = File.join(ROOT, 'sig/bc2cpp/declarations.rbs')
 failures = []
 checks = 0

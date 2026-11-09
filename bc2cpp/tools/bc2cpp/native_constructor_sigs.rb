@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'prism'
 require_relative 'native_direct'
 require_relative 'native_owner_map'
@@ -19,7 +20,7 @@ require_relative 'scan_cache'
 # the `else`). A declaration that does not equal what its source derives refuses the file.
 module NativeConstructorSigs
   PATH = NativeSigs.table('rgss_constructors')
-  ROOT = File.expand_path('../..', __dir__)
+  ROOT = BC2CPP_WORLD_ROOT
   # "o" (any object, untouched) has no declarable type here: an overload taking one is not modelled.
   FORMAT_TYPES = { 'i' => :num, 'f' => :num, 'z' => :str, 's' => :str, 'S' => :str, 'b' => :boolish }.freeze
 

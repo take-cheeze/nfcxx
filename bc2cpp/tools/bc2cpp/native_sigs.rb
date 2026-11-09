@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require_relative 'rbs_parse_memo'
 require_relative 'scan_cache'
 
@@ -9,9 +10,9 @@ require_relative 'scan_cache'
 # own loader (NativeSigs.decls), and a native declaration is not a program hint: its C function or mruby body is checked
 # by its own generator, not by a method the program defines. Program declarations carry no marker.
 module NativeSigs
-  FILE = File.expand_path('../../sig/bc2cpp/declarations.rbs', __dir__)
+  FILE = File.join(BC2CPP_WORLD_ROOT, "sig/bc2cpp/declarations.rbs")
   # The core declarations (core mruby classes), split out of FILE. A table is in exactly one of the two files.
-  CORE_FILE = File.expand_path('../../sig/bc2cpp/core.rbs', __dir__)
+  CORE_FILE = File.join(BC2CPP_WORLD_ROOT, "sig/bc2cpp/core.rbs")
   CORE_TABLES = %w[core_block_iterators core_block_params core_block_returns core_blockless_iterators core_class_tests
                    core_enumerators core_frame_readers core_fresh_arrays core_hierarchy core_predicates core_proc_calls
                    core_results].freeze

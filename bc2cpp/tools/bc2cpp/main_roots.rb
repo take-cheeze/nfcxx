@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'json'
 require 'set'
 require 'digest'
@@ -203,7 +204,7 @@ module MainRoots
       if declaration['kind'] == 'EnumConstantDecl' && node.dig('type', 'qualType') == 'mruby_presym' &&
          (match = declaration['name'].match(/\AMRB_(SYM(?:_[QBE])?|OPSYM)__(\w+)\z/))
         if match[1] == 'OPSYM'
-          require_relative '../../3rd/mruby/lib/mruby/presym'
+          require File.join(BC2CPP_WORLD_ROOT, '3rd/mruby/lib/mruby/presym')
           name = MRuby::Presym::OPERATORS.key(match[2])
           return name && Set[name]
         end

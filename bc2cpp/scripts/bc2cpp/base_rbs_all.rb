@@ -10,6 +10,7 @@
 # Output: OUT_DIR/<gem>/ruby/*.rbs and OUT_DIR/<gem>/native.rbs. A gem whose native sources fail to preprocess is listed
 # and skipped; the others still run. Nothing is written under sig/: these are base stubs, not compiler inputs.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'open3'
 require 'set'
@@ -19,7 +20,7 @@ require_relative 'base_rbs_native'
 require_relative '../../tools/bc2cpp/compiled_gems'
 
 module BaseRbsAll
-  ROOT = File.expand_path('../..', __dir__)
+  ROOT = BC2CPP_WORLD_ROOT
   MRUBY_ROOT = File.join(ROOT, '3rd', 'mruby')
   MRUBY_TOKEN = '#{MRUBY_ROOT}'
   GEM_RAKE = %r{(?:cxx|cc)\.include_paths[^\n]*}.freeze

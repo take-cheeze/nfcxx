@@ -6,10 +6,11 @@
 #
 #   ruby scripts/bc2cpp/native_format_types_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_format_types'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 CLASS_C = File.join(ROOT, '3rd/mruby/src/class.c')
 NATIVE_DIRS = %w[mruby-rgss/src mruby-rpg2k/src mruby-lcf/src mruby-mvjs/src mruby-wolf/src].freeze
 # The token class.c's case body for each letter must contain: a check or a coercion.

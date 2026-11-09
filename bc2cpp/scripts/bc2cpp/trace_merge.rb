@@ -9,11 +9,12 @@
 #
 # Refuses an output under sig/: rbs_signatures.rb loads every sig/**/*.rbs.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'optparse'
 require_relative '../../tools/bc2cpp/trace_merge'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 out = File.join(ROOT, 'build/trace_proposals.rbs')
 parser = OptionParser.new do |opts|
   opts.banner = 'usage: trace_merge.rb CANDIDATES.rbs [DECLARATIONS] [--out FILE]'

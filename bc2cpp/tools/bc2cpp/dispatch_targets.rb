@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_receivers'
 require_relative 'bytecode_ir_containers'
@@ -15,7 +16,7 @@ require_relative 'lexical_scopes'
 # source is missing or yields nothing, so a moved or emptied file fails the load instead of silently
 # shrinking a list (the compiler would then devirtualize fewer sites, with no error).
 module DispatchTargetSources
-  ROOT = File.expand_path('../..', __dir__)
+  ROOT = BC2CPP_WORLD_ROOT
 
   module_function
 

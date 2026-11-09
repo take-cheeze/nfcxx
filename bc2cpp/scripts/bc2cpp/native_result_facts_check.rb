@@ -21,6 +21,7 @@
 # shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
 ENV['BC2CPP_SIG_DIRS'] = ''
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'open3'
 require 'set'
@@ -38,7 +39,7 @@ require_relative '../../tools/bc2cpp/codegen_native_results'
 require_relative '../../tools/bc2cpp/codegen_numeric_proof'
 require_relative '../../tools/bc2cpp/codegen_class_pools'
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
@@ -577,7 +578,7 @@ if ENV['MRBC']
               'NATIVE_SRCS' => Shellwords.join(native_srcs), 'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(root)),
               'BC2CPP_BUILD_NAME' => 'closed',
               'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
-      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
       abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
       out
     end

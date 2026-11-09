@@ -29,6 +29,7 @@
 #   NATIVE_SRCS      optional override for bc2cpp's own NATIVE_SRCS (defaults
 #                     to mruby-rgss/src/*.cxx, matching both mrbgem.rake files).
 
+require_relative 'world_root'
 require 'json'
 require 'shellwords'
 require 'tmpdir'
@@ -36,8 +37,8 @@ require 'fileutils'
 require 'open3'
 require_relative 'closed_world_env'
 
-ROOT = File.expand_path('../..', __dir__)
-BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
+ROOT = BC2CPP_WORLD_ROOT
+BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 
 # [path relative to ROOT, note on what it can add evidence for], run in order;
 # the note is printed in the report.

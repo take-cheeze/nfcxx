@@ -11,10 +11,11 @@
 #
 #   ruby scripts/bc2cpp/class_world_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/class_world'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 check = ->(name, ok) { failures << name unless ok }
 

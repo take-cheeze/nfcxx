@@ -9,6 +9,7 @@
 #
 #   bundle exec ruby scripts/bc2cpp/param_trace_elements_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'open3'
 require 'rbconfig'
@@ -16,7 +17,7 @@ require 'rbconfig'
 $LOAD_PATH.unshift(File.expand_path('../../tools/bc2cpp', __dir__))
 require 'param_trace'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 check = ->(name, ok) { failures << name unless ok }
 

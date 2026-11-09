@@ -18,17 +18,18 @@
 # Writes the report to stdout. Set BC2CPP_COVERAGE_REPORT_PATH to capture it
 # in a file; CI publishes it in the build job summary.
 
+require_relative '../bc2cpp/world_root'
 require 'shellwords'
 require 'open3'
 require 'tmpdir'
 require 'set'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 require_relative '../bc2cpp/compiled_gems'
 require_relative 'sealed_build'
 require 'fileutils'
 
-BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
+BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 MRBC = ENV['MRBC'] || 'mrbc'
 REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH']
 OPTCARROT_LIB = File.join(ROOT, '3rd/optcarrot/lib')

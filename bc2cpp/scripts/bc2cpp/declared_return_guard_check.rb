@@ -15,6 +15,7 @@
 #
 # Usage: ruby scripts/bc2cpp/declared_return_guard_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/irep'
@@ -26,7 +27,7 @@ require_relative '../../tools/bc2cpp/rbs_signatures'
 require_relative '../../tools/bc2cpp/rbs_param_check'
 require_relative '../../tools/bc2cpp/review_scope'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"

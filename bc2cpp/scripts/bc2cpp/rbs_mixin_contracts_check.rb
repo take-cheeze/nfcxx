@@ -14,6 +14,7 @@
 #
 # Usage: ruby scripts/bc2cpp/rbs_mixin_contracts_check.rb        (MRBC=path for the pipeline part)
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'set'
 require 'tmpdir'
@@ -120,7 +121,7 @@ unless ENV['MRBC']
 end
 
 require_relative '../../tools/bc2cpp/type_check_run'
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 Dir.mktmpdir('rbs-mixin-contracts') do |dir|
   source = File.join(dir, 'mruby-rpg2k/mrblib/fixture.rb')
   FileUtils.mkdir_p(File.dirname(source))

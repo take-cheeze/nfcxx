@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'digest'
 require 'fileutils'
 
@@ -21,7 +22,7 @@ require 'fileutils'
 # Entries are Marshal dumps, so the cache directory must be one only this user writes.
 module ScanCache
   VERSION = 2
-  DEFAULT_DIR = File.expand_path('../../build/bc2cpp-cache', __dir__)
+  DEFAULT_DIR = File.join(BC2CPP_WORLD_ROOT, "build/bc2cpp-cache")
   MAGIC = 'bc2cpp-scan-cache'
 
   class Error < RuntimeError; end

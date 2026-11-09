@@ -30,10 +30,11 @@ removed_optimizations = %w[OPTCARROT_STATIC_DISPATCH OPTCARROT_STATIC_PPU
 requested = removed_optimizations.select { |name| ENV[name] == '1' }
 abort "Removed workload-specific optimization: #{requested.join(', ')}; use general IR inlining" unless requested.empty?
 
+require_relative '../bc2cpp/world_root'
 require 'fileutils'
 require 'open3'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 PROBE_DIR = __dir__
 OPTCARROT_DIR = File.join(ROOT, '3rd/optcarrot')
 MRUBY_DIR = File.join(ROOT, '3rd/mruby')

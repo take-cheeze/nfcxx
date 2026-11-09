@@ -6,6 +6,7 @@
 # pass/fail lines read the same as a serial run.
 #
 # BC2CPP_JOBS bounds the concurrency (default: the core count, at most 4); 1 is the old serial run.
+require_relative '../../tools/bc2cpp/world_root'
 require 'etc'
 require 'fileutils'
 require 'open3'
@@ -25,7 +26,7 @@ module Bc2cppMutantPool
   # repository's tools/ loads. A copy that needs the repository's other directories is placed in the
   # repository instead (see ext_prefix_mutation_check.rb).
   def copy_generator(root, dir)
-    FileUtils.cp_r(File.join(root, 'tools/bc2cpp'), dir)
+    FileUtils.cp_r(File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp'), dir)
     Dir[File.join(root, 'tools/*.rb')].each { |file| FileUtils.cp(file, dir) }
   end
 

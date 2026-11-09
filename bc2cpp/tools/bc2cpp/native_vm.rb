@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'json'
 require 'fileutils'
 require 'zlib'
@@ -14,7 +15,7 @@ module NativeVM
   module_function
 
   def verify_schema!
-    header = File.expand_path('../../3rd/mruby/include/mruby/ops.h', __dir__)
+    header = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/include/mruby/ops.h")
     formats = File.read(header).scan(/OPCODE\((\w+),\s*(\w+)\)/).map { |name, format| [name.to_sym, format] }
     raise 'native VM instruction schema does not match the pinned mruby' unless formats == InsnDecoder::FORMATS
   end
@@ -87,7 +88,7 @@ module NativeVM
   end
 
   def builtins(dir)
-    file = File.expand_path('../../3rd/mruby/mrbgems/mruby-catch/src/catch.c', __dir__)
+    file = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrbgems/mruby-catch/src/catch.c")
     body = File.read(file)[/static const mrb_code catch_iseq\[\] = \{(.*?)\};/m, 1]
     raise 'missing builtin catch program' unless body
 

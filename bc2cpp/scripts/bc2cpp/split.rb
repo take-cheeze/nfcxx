@@ -24,11 +24,12 @@
 #     body) sees the same earlier definitions in the new load order;
 #   - no def or constant is defined twice.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'prism'
 require 'set'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 DIR = 'tools/bc2cpp'
 MAIN = 'bc2cpp.rb'
 CODEGEN = 'CodeGen'

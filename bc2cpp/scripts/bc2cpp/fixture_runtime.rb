@@ -12,6 +12,7 @@
 # BC2CPP_CXXFLAGS adds compiler flags, e.g. -DMRB_INT32 for a build whose mrb_int is 32 bits
 # wide (the Emscripten width); run with that build's own MRBC.
 # BC2CPP_KEEP_DIR=path keeps the last fixture directory (generated code, binary).
+require_relative '../../tools/bc2cpp/world_root'
 require 'etc'
 require 'fileutils'
 require 'open3'
@@ -24,9 +25,9 @@ require_relative '../../tools/bc2cpp/closed_world_env'
 require_relative 'cxx'
 
 module Bc2cppFixtureRuntime
-  ROOT = File.expand_path('../..', __dir__)
+  ROOT = BC2CPP_WORLD_ROOT
   # BC2CPP_TOOL names another bc2cpp.rb (a mutant copy, scripts/bc2cpp/class_pools_mutation_check.rb).
-  BC2CPP = ENV.fetch('BC2CPP_TOOL') { File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb') }
+  BC2CPP = ENV.fetch('BC2CPP_TOOL') { File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb') }
 
   # The `- & | <<` helpers call exported gem bodies, which a core-only libmruby lacks: fixtures link one by
   # default, so generation leaves those helpers by name unless a check that runs against the full-core build opts in.

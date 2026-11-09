@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require_relative 'codegen_block_core_direct'
 
 # CORE_EXACT_DIRECT: a send with no block whose receiver is proven an exact
@@ -51,7 +52,7 @@ module CoreExactDirect
   # The classes whose mruby core mrblib methods `return to_enum(` (3rd/mruby/mrblib, read at load time). Integer is
   # named out: its to_enum bodies are not CORE_SELF_EXACT receivers.
   TO_ENUM_DIRECT_CLASSES = begin
-    dir = File.expand_path('../../3rd/mruby/mrblib', __dir__)
+    dir = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrblib")
     raise "bc2cpp: #{dir} is missing (is 3rd/mruby checked out?)" unless Dir.exist?(dir)
 
     Dir[File.join(dir, '*.rb')].sort.flat_map do |path|
@@ -101,7 +102,7 @@ module CoreExactDirect
   # registry cannot see (computed or native), and every outside or core Ruby one named. A Kernel definition may come
   # only from mruby's own Ruby: the core mrblib's (kernel.rb's NotImplementedError stub) loads before any gem, so the
   # mruby-enumerator body EnumeratorModel proved replaces it; any other outside Kernel definition refuses.
-  MRUBY_CORE_MRBLIB = File.expand_path('../../3rd/mruby/mrblib', __dir__) + '/'
+  MRUBY_CORE_MRBLIB = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrblib") + '/'
 
   def to_enum_overriders(world)
     @to_enum_overriders ||= {}

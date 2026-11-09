@@ -5,10 +5,11 @@
 # Runs the native fiber check (compiled Fiber programs on an mruby without mruby-fiber, with the C++ Fiber as the whole
 # Fiber) and verifies the closed build's bytecode inventory.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'fileutils'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 puts '== vm/bytecode free check =='
 
@@ -16,7 +17,7 @@ puts '== vm/bytecode free check =='
 env = ENV.to_h
 # CI also runs native_fiber_check directly in parallel; the no-fiber mruby it builds is shared through this directory.
 env['BC2CPP_NOFIBER_BUILD_DIR'] ||= File.join(ROOT, 'build-vm-bytecode-free')
-output, status = Open3.capture2e(env, 'ruby', File.join(ROOT, 'scripts/bc2cpp/native_fiber_check.rb'), chdir: ROOT)
+output, status = Open3.capture2e(env, 'ruby', File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/native_fiber_check.rb'), chdir: ROOT)
 File.write('/tmp/vm_bytecode_free_check.log', output)
 STDOUT.puts output
 STDOUT.flush

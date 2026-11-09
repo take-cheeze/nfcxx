@@ -7,6 +7,7 @@
 # under another key, a value or directory that cannot be stored) must stop the run. It is always on; the checks turn
 # it off with ScanCache.bypass. Run by the `ruby-checks` job; needs no mruby build.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'fileutils'
 require 'stringio'
@@ -123,7 +124,7 @@ Dir.mktmpdir do |tmp|
              Dir[File.join(cache, 'race-*')].size == 1 && run_scan([one, two], name: 'race').first.zero?)
 
   puts '-- the real scanners'
-  root = File.expand_path('../..', __dir__)
+  root = BC2CPP_WORLD_ROOT
   natives = Dir[File.join(root, '3rd/mruby/src/*.c')] + Dir[File.join(root, '3rd/mruby/mrbgems/*/src/*.c')]
   if natives.empty?
     puts '  SKIP 3rd/mruby is not checked out'

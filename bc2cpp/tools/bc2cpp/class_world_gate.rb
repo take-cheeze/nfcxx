@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require_relative 'compiled_gems'
 require_relative 'class_body_scan'
 require_relative 'class_world'
@@ -34,7 +35,7 @@ module ClassWorldGate
     roots.reject { |_, files| files.empty? }
   end
 
-  REPO_ROOT = File.expand_path('../..', __dir__)
+  REPO_ROOT = BC2CPP_WORLD_ROOT
 
   # The ClassWorld of the closed build, built once per process from the sources (ClassWorld.build over every root's
   # scan, in load order). Returns the World, or nil when the graph cannot be derived.

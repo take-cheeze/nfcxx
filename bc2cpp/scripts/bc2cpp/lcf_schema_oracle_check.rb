@@ -9,10 +9,11 @@
 #
 # Usage: ruby scripts/bc2cpp/lcf_schema_oracle_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'stringio'
 require_relative '../../tools/bc2cpp/lcf_schema_oracle'
 
-MRBLIB = File.expand_path('../../mruby-lcf/mrblib', __dir__)
+MRBLIB = File.join(BC2CPP_WORLD_ROOT, "mruby-lcf/mrblib")
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"

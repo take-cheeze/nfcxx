@@ -4,4 +4,5 @@
 here=$(cd "$(dirname "$0")" && pwd)
 BC2CPP_ROOT=$(cd "$here/../.." && pwd)
 export BC2CPP_ROOT
-exec "${BC2CPP_MRUBY:-$BC2CPP_ROOT/3rd/mruby/bin/mruby}" "$here/mruby_tool.rb" "$@"
+# BC2CPP_ROOT is bc2cpp's own tree (the tools); the mruby binary is the compiled world's (WORLD_ROOT, world_root.rb).
+exec "${BC2CPP_MRUBY:-${BC2CPP_WORLD_ROOT:-$BC2CPP_ROOT}/3rd/mruby/bin/mruby}" "$here/mruby_tool.rb" "$@"

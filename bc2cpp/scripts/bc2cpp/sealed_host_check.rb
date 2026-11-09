@@ -5,9 +5,10 @@
 # it on the desktop executable, the `--script` fence in src/main.cxx, and the closed-world guard that reads the
 # fence (tools/bc2cpp/compiled_gems.rb's bc2cpp_sealed_host_text). Each assertion names the place it checks.
 
+require_relative '../../tools/bc2cpp/world_root'
 require_relative '../../tools/bc2cpp/compiled_gems'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 check = lambda do |label, condition|
   raise label unless condition
 

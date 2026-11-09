@@ -18,6 +18,7 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/generic_block_return_check.rb   (without MRBC only the host half runs)
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'digest'
 require 'fileutils'
 require 'open3'
@@ -31,7 +32,7 @@ require_relative '../../tools/bc2cpp/rbs_signatures'
 require_relative '../../tools/bc2cpp/closed_world_env'
 require_relative 'fixture_runtime'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 checks = 0
 check = lambda do |what, condition|
@@ -314,7 +315,7 @@ generate = lambda do |world, sigs, native_sigs: nil, native: nil|
       File.write(native_path, native)
       world_env['NATIVE_SRCS'] = Shellwords.join(Shellwords.split(world_env['NATIVE_SRCS']) + [native_path])
     end
-    Open3.capture3(world_env, RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+    Open3.capture3(world_env, RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
   end
 end
 

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'json'
 require 'open3'
 require 'set'
@@ -29,7 +30,7 @@ module LcfSchemaOracle
   }.freeze
   TYPE_RANGES = { 'int' => [-0x8000_0000, 0x7fff_ffff], 'uint8' => [0, 255] }.freeze
   DUMP = File.expand_path('lcf_schema_dump.rb', __dir__)
-  LCF_SCHEMA_MRBLIB = File.expand_path('../../mruby-lcf/mrblib', __dir__)
+  LCF_SCHEMA_MRBLIB = File.join(BC2CPP_WORLD_ROOT, "mruby-lcf/mrblib")
 
   module_function
 

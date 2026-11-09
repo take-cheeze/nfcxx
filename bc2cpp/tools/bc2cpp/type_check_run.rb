@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'open3'
 require 'shellwords'
 require 'tmpdir'
@@ -41,7 +42,7 @@ module TypeCheckRun
   end
 
   # Runs the analysis; raises with the tail of bc2cpp's stderr when it fails.
-  def run(root:, mrbc:, workdir:, sources: nil, sends: true, what_if: false, sig_dirs: nil, extra_env: {}, display_root: root, tools_dir: File.join(root, 'tools/bc2cpp'))
+  def run(root:, mrbc:, workdir:, sources: nil, sends: true, what_if: false, sig_dirs: nil, extra_env: {}, display_root: root, tools_dir: File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp'))
     e = env(root: root, mrbc: mrbc, workdir: workdir, sources: sources, sends: sends, what_if: what_if, sig_dirs: sig_dirs,
             display_root: display_root)
     e.merge!(extra_env)

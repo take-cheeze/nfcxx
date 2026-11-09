@@ -8,6 +8,7 @@
 # Usage: MRBC=path/to/mrbc BC2CPP_STATIC_DISPATCH_LISTS=<scripts/bc2cpp/static_dispatch_lists.bash output> \
 #        ruby scripts/bc2cpp/dynamic_names_report.rb [--entries] [--entries-out PATH]
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'optparse'
 require 'json'
@@ -52,7 +53,7 @@ end
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 
 sdr = StaticDispatchRegistrations
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 sdr.why = {}
 # The report is of the state the build is in, so it reads the lists the build was given.
 lists = StaticDispatchLists.current(required: true)

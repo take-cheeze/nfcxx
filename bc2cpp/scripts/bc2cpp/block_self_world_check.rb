@@ -24,6 +24,7 @@
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/block_self_world_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'tmpdir'
 require 'fileutils'
@@ -43,7 +44,7 @@ check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
 end
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 # [ireps, registry, superclass_of] of +source+.
 compiled = lambda do |source|

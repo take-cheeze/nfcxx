@@ -1,13 +1,14 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'csv'
 require 'fileutils'
 require 'json'
 require 'open3'
 require 'tmpdir'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 Dir.mktmpdir('lookup-report') do |dir|
   source = File.join(dir, 'src')
   FileUtils.mkdir_p(source)
@@ -36,7 +37,7 @@ Dir.mktmpdir('lookup-report') do |dir|
   end
   File.write(File.join(logs, 'baseline.vm.tsv'), "1\tC_entry\tstartup\n")
   report = File.join(dir, 'report')
-  command = ['python3', File.join(ROOT, 'scripts/bc2cpp/method_lookup_report.py'), logs, binary, report]
+  command = ['python3', File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/method_lookup_report.py'), logs, binary, report]
   out, status = Open3.capture2e(*command)
   abort out unless status.success?
   summary = JSON.parse(File.read(File.join(report, 'summary.json')))

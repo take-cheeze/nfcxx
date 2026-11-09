@@ -11,9 +11,10 @@
 # constants). Requires the mruby-onig-regexp submodule checked out and, unless
 # it's able to link a system oniguruma, its bundled onigmo build (slow -- the
 # system package is much faster: `apt-get install libonig-dev` on Debian/Ubuntu).
+require_relative '../bc2cpp/world_root'
 MRuby::Build.new do |conf|
   conf.toolchain
   conf.gembox 'full-core'
-  conf.gem File.expand_path('../../3rd/mruby-onig-regexp', __dir__)
+  conf.gem File.join(BC2CPP_WORLD_ROOT, "3rd/mruby-onig-regexp")
   conf.enable_debug
 end

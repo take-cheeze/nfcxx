@@ -7,6 +7,7 @@
 #
 #   ruby scripts/bc2cpp/base_rbs_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'rbs'
 require 'tmpdir'
 require 'tempfile'
@@ -14,7 +15,7 @@ require 'open3'
 require_relative 'base_rbs_native'
 require_relative 'base_rbs' unless defined?(BaseRbs)
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 checks = 0
 check = lambda do |what, condition|

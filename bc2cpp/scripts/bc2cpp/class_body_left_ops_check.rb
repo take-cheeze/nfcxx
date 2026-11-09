@@ -10,9 +10,10 @@
 #   MRBC=path/to/host/mrbc BC2CPP_STATIC_DISPATCH_LISTS=build/bc2cpp/static_dispatch_lists.json \
 #     ruby scripts/bc2cpp/class_body_left_ops_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 MIN_COMPILED = 250
 # SDEF: `class IO`'s `def self.open` is a core method (its guard was removed),
 # so the class-body unit refuses that singleton registration. Only the one body refuses it; see the fiber-guard work.
@@ -24,7 +25,7 @@ if ENV['MRBC'].to_s.empty? || ENV['BC2CPP_STATIC_DISPATCH_LISTS'].to_s.empty?
   exit 0
 end
 
-out, status = Open3.capture2e({ 'BC2CPP_BUILD_NAME' => 'closed' }, 'ruby', File.join(ROOT, 'scripts/bc2cpp/class_body_compile_list.rb'))
+out, status = Open3.capture2e({ 'BC2CPP_BUILD_NAME' => 'closed' }, 'ruby', File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/class_body_compile_list.rb'))
 abort "class_body_left_ops_check: the compile list failed:\n#{out.lines.last(5).join}" unless status.success?
 
 compiled = out[/^(\d+) of \d+ class and module bodies compile/, 1].to_i

@@ -10,6 +10,7 @@
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/lcf_join_array_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'fileutils'
 require 'tmpdir'
 require_relative 'fixture_runtime'
@@ -51,7 +52,7 @@ SIG = <<~RBS
   end
 RBS
 
-MRBLIB = File.expand_path('../../mruby-lcf/mrblib', __dir__)
+MRBLIB = File.join(BC2CPP_WORLD_ROOT, "mruby-lcf/mrblib")
 extra = %w[lcf.rb lcf_file.rb schema.rb].map { |f| ["mruby-lcf/mrblib/#{f}", File.read(File.join(MRBLIB, f))] }
 owners = %w[JoinMap JoinLoader OpaqueMap OpaqueLoader LCF::File LCF::MapUnit LCF::Array1D LCF::Array2D LCF::Sections]
 

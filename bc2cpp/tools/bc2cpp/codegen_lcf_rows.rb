@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require_relative 'lcf_row_flow'
 
 # CodeGen: LCF_ROW_FLOW. Feeds LcfRowFlow's object kinds into the NumericFlow fixpoint and
@@ -14,7 +15,7 @@ require_relative 'lcf_row_flow'
 #   - nothing can write the ivars the model relies on (`@root @data @decoded @schema @sym2idx`) behind the
 #     compiler's back (reflection, a native or foreign spelling of the name).
 class CodeGen
-  LCF_ROW_MRBLIB = File.expand_path('../../mruby-lcf/mrblib', __dir__)
+  LCF_ROW_MRBLIB = File.join(BC2CPP_WORLD_ROOT, "mruby-lcf/mrblib")
   LCF_ROW_OWNERS = %w[LCF::Database LCF::Array1D LCF::Array2D].freeze
   LCF_ROW_DEFS = { '[]' => %w[LCF::File LCF::Array1D LCF::Array2D], '[]=' => %w[LCF::Array2D] }.freeze
   LCF_ROW_IVARS = %w[root data decoded schema sym2idx].freeze

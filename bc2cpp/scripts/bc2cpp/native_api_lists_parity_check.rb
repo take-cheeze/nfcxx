@@ -6,10 +6,11 @@
 # (`-I -B`: no user site, no __pycache__ written into scripts/native).
 #
 #   ruby scripts/bc2cpp/native_api_lists_parity_check.rb
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require_relative '../../tools/bc2cpp/native_core_candidates'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 PY_DIR = File.join(ROOT, 'scripts', 'native')
 PY_DUMP = <<~PY
   import json, sys

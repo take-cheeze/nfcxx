@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'digest'
 require_relative 'native_names'
 
@@ -38,7 +39,7 @@ module NativeIvarScopes
     File.exist?(path) ? File.realpath(path) : File.expand_path(path)
   end
 
-  def analyze(native_paths, ruby_paths, root: File.expand_path('../..', __dir__))
+  def analyze(native_paths, ruby_paths, root: BC2CPP_WORLD_ROOT)
     return [{}, 'disabled'] if ENV['BC2CPP_NATIVE_IVAR_SCOPES'] == '0'
 
     paths = (Array(native_paths) + Array(ruby_paths)).map { |p| canonical_path(p) }.uniq

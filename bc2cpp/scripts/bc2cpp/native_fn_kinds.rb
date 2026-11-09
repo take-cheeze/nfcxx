@@ -55,8 +55,8 @@ module NativeFnKinds
 
   # Digest of the analyzer's own sources: a change to the analysis invalidates every cached result.
   def analyzer_digest
-    files = Dir[File.join(BaseRbsAll::ROOT, 'tools', 'bc2cpp', 'native_*.rb')].sort +
-            [File.join(BaseRbsAll::ROOT, 'scripts', 'bc2cpp', 'base_rbs_native.rb')]
+    files = Dir[File.join(BC2CPP_TREE_ROOT, 'tools', 'bc2cpp', 'native_*.rb')].sort +
+            [File.join(BC2CPP_TREE_ROOT, 'scripts', 'bc2cpp', 'base_rbs_native.rb')]
     Digest::SHA256.hexdigest(files.map { |file| Digest::SHA256.file(file).hexdigest }.join)
   end
 

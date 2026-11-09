@@ -9,12 +9,13 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/yield_c_boundary_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'open3'
 require 'rbconfig'
 require 'tmpdir'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 FIXTURE = <<~RUBY
   class Waiter

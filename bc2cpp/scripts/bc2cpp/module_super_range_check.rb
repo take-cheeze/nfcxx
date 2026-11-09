@@ -12,6 +12,7 @@
 # against the interpreter; driving the real Range through a fixture would need
 # the whole closed gem set, so the two together cover code shape and semantics
 # without pretending the fixture is the shipped build.
+require_relative '../../tools/bc2cpp/world_root'
 require 'shellwords'
 require 'open3'
 require 'tmpdir'
@@ -20,7 +21,7 @@ require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 failures = []
 check = lambda do |what, ok|
   puts "  #{ok ? 'ok  ' : 'FAIL'} #{what}"
@@ -41,7 +42,7 @@ env = {
   'BC2CPP_BUILD_NAME' => 'closed',
   'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).map { |n, d| "#{n}=#{d}" })
 }
-cmd = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *srcs].shelljoin
+cmd = [RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *srcs].shelljoin
 
 generate = lambda do |dir|
   Dir.mktmpdir do |d|

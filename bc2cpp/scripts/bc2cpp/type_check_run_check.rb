@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'json'
 require 'tmpdir'
 require 'fileutils'
@@ -191,7 +192,7 @@ unless ENV['MRBC']
   exit 0
 end
 
-root = File.expand_path('../..', __dir__)
+root = BC2CPP_WORLD_ROOT
 Dir.mktmpdir('type-check-run') do |dir|
   source = File.join(dir, 'mruby-rpg2k/mrblib/fixture.rb')
   FileUtils.mkdir_p(File.dirname(source))

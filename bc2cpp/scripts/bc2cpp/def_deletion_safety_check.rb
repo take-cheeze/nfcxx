@@ -39,9 +39,10 @@
 # Exits non-zero (and prints every match) if any method name has a real
 # hit outside its own known definition site; 0 and silent otherwise.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'English'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 EXCLUDE_DIRS = %w[.git 3rd .pio build build-bc2cpp coverage].freeze
 
 names = ARGV

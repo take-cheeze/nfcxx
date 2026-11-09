@@ -7,13 +7,14 @@
 # instead: re-read the change against the audit's claims, then add the new digest (or fix the audit).
 #
 #   ruby scripts/bc2cpp/audit_pins_check.rb
+require_relative '../../tools/bc2cpp/world_root'
 require 'digest'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/native_ivar_scopes'
 require_relative '../../tools/bc2cpp/native_class_results'
 require_relative '../../tools/bc2cpp/foreign_string_results'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 suite = FixtureCheck.new('audit_pins_check')
 
 # [table, path relative to ROOT, accepted digests]

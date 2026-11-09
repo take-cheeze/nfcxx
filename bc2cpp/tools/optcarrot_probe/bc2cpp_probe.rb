@@ -21,17 +21,18 @@
 #
 # Usage: MRBC=path/to/host/mrbc ruby tools/optcarrot_probe/bc2cpp_probe.rb
 
+require_relative '../bc2cpp/world_root'
 require 'shellwords'
 require 'open3'
 require 'tmpdir'
 require 'set'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 require_relative '../bc2cpp/compiled_gems'
 require_relative 'sealed_build'
 require 'fileutils'
 
-BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
+BC2CPP = File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')
 MRBC = ENV['MRBC'] || 'mrbc'
 OPTCARROT_LIB = File.join(ROOT, '3rd/optcarrot/lib')
 MRUBY_DIR = File.join(ROOT, '3rd/mruby')

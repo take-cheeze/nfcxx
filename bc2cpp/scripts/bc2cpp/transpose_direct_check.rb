@@ -20,6 +20,7 @@
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/transpose_direct_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require_relative 'fixture_runtime'
 
@@ -98,7 +99,7 @@ REFUSALS.each do |what, (src, env)|
   refused, = generate_world(src, env)
   check.call("#{what} leaves the transpose body alone", !refused.include?(CALL))
 end
-source = File.read(File.expand_path('../../3rd/mruby/mrbgems/mruby-array-ext/mrblib/array.rb', __dir__))
+source = File.read(File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrbgems/mruby-array-ext/mrblib/array.rb"))
 normalize = ->(text) { text.lines.map(&:strip).reject(&:empty?).join("\n") }
 pinned = File.read(File.expand_path('../../tools/bc2cpp/codegen_transpose_direct.rb', __dir__))[/TRANSPOSE_BODY = <<~RUBY\n(.*?)^  RUBY$/m, 1]
 check.call("the pinned body is mruby-array-ext's Array#transpose (a drift turns the helper off)",

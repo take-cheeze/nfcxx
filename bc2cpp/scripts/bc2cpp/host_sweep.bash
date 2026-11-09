@@ -14,7 +14,9 @@
 #   JOBS      maps run at once (default nproc).
 set -uo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# WORLD_ROOT (tools/bc2cpp/world_root.rb): bc2cpp's own tree, and the repository it compiles (the same unless BC2CPP_WORLD_ROOT).
+tree="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="${BC2CPP_WORLD_ROOT:-$tree}"
 build=$(cd "$1" && pwd)
 src=${2:-$root/data/Nepheshel206beta/Nepheshel206Rbeta}
 logs=${3:-$build/host-sweep}
@@ -40,7 +42,7 @@ run() { # name, then env assignments
   if [ -x "$host" ] && [ -n "${built:-}" ]; then
     env "${survey[@]}" "$@" BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" "$frames" > "$logs/$name.log" 2>&1
   else
-    env "${survey[@]}" "$@" "$root/scripts/bc2cpp/trace_host.bash" "$build" "$game" > "$logs/$name.log" 2>&1
+    env "${survey[@]}" "$@" "$tree/scripts/bc2cpp/trace_host.bash" "$build" "$game" > "$logs/$name.log" 2>&1
   fi
   local rc=$?
   built=1

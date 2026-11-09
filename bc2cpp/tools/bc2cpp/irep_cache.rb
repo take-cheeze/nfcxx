@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'world_root'
 require 'digest'
 require 'fileutils'
 require 'tempfile'
@@ -16,7 +17,7 @@ module IrepCache
   # Temporary fixture filenames make unique RITE images, so retaining their trees adds work without reuse.
   def directory_for_sources(paths)
     dir = ENV['BC2CPP_IREP_CACHE_DIR']
-    root = File.expand_path('../..', __dir__)
+    root = BC2CPP_WORLD_ROOT
     dir if dir && !dir.empty? && Array(paths).all? { |path| File.expand_path(path).start_with?("#{root}/") }
   end
 

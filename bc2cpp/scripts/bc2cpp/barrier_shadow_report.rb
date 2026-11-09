@@ -14,6 +14,7 @@
 # Exits 1 on any real-build difference. Not part of CI: the synthetic classes
 # below differ by design, which is why the barriers were not migrated.
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'set'
 require 'shellwords'
@@ -25,7 +26,7 @@ require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/fixnum_barrier_shadow'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 
 def insn(addr, op, args)
   Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
@@ -73,7 +74,7 @@ puts 'real closed-world build'
 Dir.mktmpdir do |dir|
   env['OUT_DIR'] = dir
   env['BC2CPP_BARRIER_SHADOW_REPORT'] = File.join(dir, 'report')
-  cmd = [RbConfig.ruby, "-r#{ROOT}/tools/bc2cpp/fixnum_barrier_shadow.rb", "#{ROOT}/tools/bc2cpp/bc2cpp.rb", '--annotated', *srcs]
+  cmd = [RbConfig.ruby, "-r#{BC2CPP_TREE_ROOT}/tools/bc2cpp/fixnum_barrier_shadow.rb", "#{BC2CPP_TREE_ROOT}/tools/bc2cpp/bc2cpp.rb", '--annotated', *srcs]
   _out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), *cmd)
   abort "bc2cpp.rb failed (exit #{status.exitstatus}):\n#{NomethodReviewedProbe.failure_tail(err)}" unless status.success?
 

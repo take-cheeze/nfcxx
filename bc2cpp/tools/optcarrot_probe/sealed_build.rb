@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative '../bc2cpp/world_root'
 require 'fileutils'
 require 'shellwords'
 require_relative 'onig_aliases'
@@ -27,9 +28,9 @@ module OptcarrotSealedBuild
     benchmark = gems['optcarrot-benchmark'] = File.join(temp, 'mruby-optcarrot-benchmark')
     FileUtils.mkdir_p([File.join(benchmark, 'mrblib'), File.join(benchmark, 'src')])
     bundle = File.join(benchmark, 'mrblib/benchmark.rb')
-    system(RbConfig.ruby, File.join(root, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
+    system(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
     source = File.read(bundle)
-    tail = File.read(File.join(root, 'tools/optcarrot_probe/runner_tail.rb'))
+    tail = File.read(File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe/runner_tail.rb'))
     raise 'benchmark tail changed' unless source.end_with?(tail)
 
     source = source.delete_suffix(tail)
@@ -37,7 +38,7 @@ module OptcarrotSealedBuild
     # Those bodies build their LUTs (PPU::TILE_LUT) with Range#each, Enumerable#collect and Array#transpose, which
     # install! (at run) reaches too late; the shims come first because Integer#[] and friends are core-owner entries.
     prelude = %w[shims.rb shim_integer_aref.rb].map do |name|
-      File.read(File.join(root, 'tools/optcarrot_probe', name))
+      File.read(File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe', name))
     end.join
     raise 'benchmark prelude changed' unless source.start_with?(prelude)
 

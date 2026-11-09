@@ -7,6 +7,7 @@
 #
 #   ruby scripts/bc2cpp/native_return_classes_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require 'fileutils'
 require 'tmpdir'
@@ -34,7 +35,7 @@ result = NativeReturnClasses.admit(map_of(by_name), rom, kinds, exact_self: exac
 check.call('same class from every owner is admitted (self on an exact owner counts as that owner)',
            result[:admitted]['to_i'] == 'Integer')
 check.call('exact-self owners come from the sources: Integer and Float on numeric.c, never Struct',
-           NativeReturnClasses.exact_self_owners([File.expand_path('../../3rd/mruby/src/numeric.c', __dir__)]) == set('Float', 'Integer')) if File.file?(File.expand_path('../../3rd/mruby/src/numeric.c', __dir__))
+           NativeReturnClasses.exact_self_owners([File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/src/numeric.c")]) == set('Float', 'Integer')) if File.file?(File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/src/numeric.c"))
 check.call('a self return on a non-exact owner is refused',
            NativeReturnClasses.admit(map_of({ 'x' => set('String') }), [['String', 'x', 'selfs']], { 'selfs' => 'self' })[:refused].first&.reason == :self_return_not_exact)
 check.call('an unproven body is refused',
@@ -51,7 +52,7 @@ check.call('an unresolved computed registration on the owner refuses the name',
 check.call('an unknown computed registration outside the core refuses every name',
            NativeReturnClasses.admit(map_of({ 'v' => set('String') }, computed_unknown: true), [['String', 'v', 'f']], { 'f' => 'String' })[:admitted].empty?)
 
-benchmark = File.expand_path('../../3rd/mruby/mrbgems/mruby-benchmark/mrblib/benchmark.rb', __dir__)
+benchmark = File.join(BC2CPP_WORLD_ROOT, "3rd/mruby/mrbgems/mruby-benchmark/mrblib/benchmark.rb")
 if File.file?(benchmark)
   check.call('an audited outside to_s is admitted for String; the same file is not audited for inspect',
              ForeignStringResults.audited_string_paths('to_s', [benchmark]) == [benchmark] &&

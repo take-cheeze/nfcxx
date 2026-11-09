@@ -15,11 +15,12 @@
 #
 # Usage: ruby scripts/bc2cpp/schema_blob_check.rb
 
+require_relative '../../tools/bc2cpp/world_root'
 require 'open3'
 require 'rbconfig'
 require 'tmpdir'
 
-ROOT = File.expand_path('../..', __dir__)
+ROOT = BC2CPP_WORLD_ROOT
 MRBLIB = File.join(ROOT, 'mruby-lcf', 'mrblib')
 LCF_RB = File.join(MRBLIB, 'lcf.rb')
 SCHEMA_RB = File.join(MRBLIB, 'schema.rb')
