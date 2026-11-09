@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'native_names'
+require_relative 'native_owner_map'
 require_relative 'native_direct_table'
 require_relative 'scan_cache'
 
