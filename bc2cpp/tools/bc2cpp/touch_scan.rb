@@ -157,13 +157,19 @@ module TouchScan
 
   # The part of native(text, ...) that reads the text, as plain data: every event of the file in
   # order as [kind, args, why] (a `->super` assignment as ['super', nil, why]), and the local mrb_sym value of
-  # each identifier an event argument spells, so native_classify never needs the text.
+  # each identifier an event argument spells, so native_classify never needs the text. A funcall whose name is a
+  # helper's parameter carries the names the helper's calls spell as a fourth element (helper_names).
   def self.native_facts(text)
     events = []
     text.scan(NATIVE_SUPER_ASSIGN) { events << ['super', nil, 'direct ->super assignment'] }
     text.to_enum(:scan, NATIVE_EVENT).map { Regexp.last_match }.each do |m|
+      next if native_declarator?(text, m.begin(0), m.end(0))
+
       args = bc2cpp_c_call_args(text[m.end(0)..])
-      events << [m[1], args, "#{m[0].strip.chomp('(')}(#{args.join(',').strip[0, 50]})"]
+      event = [m[1], args, "#{m[0].strip.chomp('(')}(#{args.join(',').strip[0, 50]})"]
+      helper = m[1].start_with?('funcall') && helper_names(text, m.begin(0), args[2])
+      event << helper if helper
+      events << event
     end
     symbols = {}
     events.each do |kind, args, _why|
@@ -183,14 +189,67 @@ module TouchScan
   def self.native_classify(facts, decl_simples)
     res = new_result(facts.fetch(:symbols))
     norm = decl_simples.group_by { |n| n.downcase.delete('_') }
-    facts.fetch(:events).each do |kind, args, why|
+    facts.fetch(:events).each do |kind, args, why, helper|
       if kind == 'super'
         res.give_up(why)
+      elsif helper
+        helper.each { |mid| native_funcall_name(mid, args, res, norm, why) }
       else
         native_event(kind, args, res, norm, why)
       end
     end
     res
+  end
+
+  # A match of NATIVE_EVENT that names the function rather than calling it: its declaration or definition
+  # (`mrb_value mrb_funcall_with_method(mrb_state*, ...);`, a body after the parameter list). The line before the
+  # name holds only a return type there; a call has an assignment, a keyword or nothing in front of it.
+  NATIVE_DECL_PREFIX = /\A[ \t]*(?:(?:extern|static|inline|MRB_API)[ \t]+)*(?:"C"[ \t]+)?[\w:<>]+[ \t*&]+\z/
+  NATIVE_DECL_KEYWORDS = %w[return else case do throw goto new delete co_return co_yield].freeze
+  def self.native_declarator?(text, from, open)
+    prefix = text[((text.rindex("\n", from - 1) || -1) + 1)...from]
+    return false unless prefix.match?(NATIVE_DECL_PREFIX) && !NATIVE_DECL_KEYWORDS.include?(prefix.strip.split.last)
+
+    close = c_call_close(text, open) or return false
+    text[(close + 1)..].match?(/\A\s*(?:const\s*)?[;{]/)
+  end
+
+  # Index of the `)` closing the argument list that opens just before +open+ (string and character literals skipped).
+  def self.c_call_close(text, open)
+    depth = 1
+    text[open..].to_enum(:scan, /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[()]/m).each do
+      tok = Regexp.last_match
+      next unless tok[0].size == 1
+
+      depth += tok[0] == '(' ? 1 : -1
+      return open + tok.begin(0) if depth.zero?
+    end
+    nil
+  end
+
+  # NATIVE_HELPER (as ClosedWorld#helper_names_enumerable? for includes): a funcall whose name argument is a parameter
+  # of a `static` function of this file sends one of the names that function's calls pass there, provided every use of
+  # the function is a direct call spelling the name (NATIVE_SYM) and nothing in the file assigns or takes the address of
+  # the parameter's name. The names, or nil (the event stays a computed send).
+  def self.helper_names(text, at, arg)
+    param = arg.to_s.strip
+    return nil unless param.match?(IDENTIFIER)
+
+    fn, index, static = ClosedWorld.native_helper_param(text, at, param)
+    return nil unless fn && static
+    return nil if text.match?(/&\s*#{param}\b|\b#{param}\s*(?:[-+*\/%&|^]|<<|>>)?=(?!=)|\b#{param}\s*(?:\+\+|--)|(?:\+\+|--)\s*#{param}\b/)
+
+    blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
+    names = []
+    blanked.to_enum(:scan, /\b#{Regexp.escape(fn)}\b/).map { Regexp.last_match }.each do |use|
+      open = blanked[use.end(0)..][/\A\s*\(/] or return nil # a pointer to the function could pass any name
+      start = use.end(0) + open.size
+      next if native_declarator?(text, use.begin(0), start)
+
+      mid = bc2cpp_c_call_args(text[start..])[index].to_s.match(NATIVE_SYM) or return nil
+      names << (mid[1] || mid[2] || mid[3])
+    end
+    names.empty? ? nil : names.uniq
   end
 
   def self.native_event(kind, args, res, norm, why)

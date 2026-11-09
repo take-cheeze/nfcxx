@@ -7,6 +7,7 @@
 #
 #   ruby scripts/bc2cpp/native_rom_owners_check.rb
 
+require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_rom_owners'
 
 failures = []
@@ -48,6 +49,29 @@ check.call('a class defined under a resolved outer class is Outer::Name',
                                                  'struct RClass *k = mrb_define_class_under_id(mrb, o, MRB_SYM(In), mrb->object_class);')) == 'Out::In')
 check.call('a class defined under Object is the top-level name',
            owner_of_source(table('x', nil, 'k', 'struct RClass *k = mrb_define_class_under(mrb, mrb->object_class, "Top", mrb->object_class);')) == 'Top')
+check.call("a class object's singleton is Name.singleton",
+           owner_of_source(table('x', nil, 'mrb_singleton_class_ptr(mrb, mrb_obj_value(k))',
+                                 'struct RClass *k = mrb_define_class_id(mrb, MRB_SYM(Solo), mrb->object_class);')) == 'Solo.singleton')
+check.call("a core field's singleton is its class's .singleton",
+           owner_of_source(table('x', nil, 'mrb_singleton_class_ptr(mrb, mrb_obj_value(mrb->kernel_module))', '')) == 'Kernel.singleton')
+check.call("the main object's singleton is Object, as NativeOwnerMap records main's methods",
+           owner_of_source(table('x', nil, 'mrb_singleton_class_ptr(mrb, mrb_obj_value(mrb->top_self))', '')) == 'Object')
+check.call('the singleton of an unresolved class is refused',
+           owner_of_source(table('x', nil, 'mrb_singleton_class_ptr(mrb, mrb_obj_value(k))', 'k = make_thing(mrb);')) == NativeRomOwners::UNKNOWN)
+check.call('the singleton of a computed object is refused',
+           owner_of_source(table('x', nil, 'mrb_singleton_class_ptr(mrb, mrb_obj_value(pick(mrb)))', '')) == NativeRomOwners::UNKNOWN)
+Dir.mktmpdir('native_rom_owners') do |dir|
+  path = File.join(dir, 'solo.c')
+  File.write(path, table('x', nil, 'mrb_singleton_class_ptr(mrb, mrb_obj_value(k))',
+                         'struct RClass *k = mrb_define_class_id(mrb, MRB_SYM(Solo), mrb->object_class);'))
+  map = NativeOwnerMap.build([path])
+  check.call('a singleton table names its owner by name', map.by_name['to_s'].to_a == ['Solo.singleton'])
+  check.call('a singleton table is not on an instance lookup path', map.instance.none? { |_, name, _| name == 'to_s' })
+end
+suffixed = "static const mrb_mt_entry s_rom_entries[] = {\n  MRB_MT_ENTRY(f_b, MRB_SYM_B(exit), 0)\n  MRB_MT_ENTRY(f_q, MRB_SYM_Q(empty), 0)\n" \
+           "  MRB_MT_ENTRY(f_e, MRB_SYM_E(name), 0)\n  MRB_MT_ENTRY(f_p, MRB_OPSYM(plus), 0)\n};\n"
+check.call('suffixed symbols keep their suffix; an operator keeps its presym name',
+           NativeRomOwners.analyze(suffixed)[:tables]['s_rom_entries'][:entries] == [%w[f_b exit!], %w[f_q empty?], %w[f_e name=], %w[f_p plus]])
 check.call('entries are read with their function and name',
            NativeRomOwners.analyze(table('x', nil, 'k', 'k = mrb_define_class_id(mrb, MRB_SYM(T), mrb->object_class);'))[:tables]['x_rom_entries'][:entries] == [%w[fn_one to_s]])
 
@@ -60,6 +84,11 @@ if File.file?(numeric)
   socket = File.expand_path('../../3rd/mruby/mrbgems/mruby-socket/src/socket.c', __dir__)
   options = File.file?(socket) && NativeRomOwners.analyze_file(socket)[:tables]['socket_option_rom_entries']
   check.call('socket.c: socket_option_rom_entries is Socket::Option', options && options[:owner] == 'Socket::Option')
+  class_tables = NativeRomOwners.analyze_file(File.expand_path('../../3rd/mruby/src/class.c', __dir__))[:tables]
+  if class_tables.key?('cls_s_rom_entries')
+    check.call('class.c: cls_s_rom_entries is Class.singleton', class_tables['cls_s_rom_entries'][:owner] == 'Class.singleton')
+    check.call('class.c: top_self_rom_entries is Object', class_tables['top_self_rom_entries'][:owner] == 'Object')
+  end
 else
   puts 'skip numeric.c (3rd/mruby not checked out)'
 end

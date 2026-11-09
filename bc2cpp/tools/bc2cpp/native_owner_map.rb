@@ -430,10 +430,16 @@ module NativeOwnerMap
 
   def scan_rom_tables(text, vars_at, result)
     installers = Hash.new { |h, k| h[k] = Set.new }
+    # Tables installed on a singleton class (a class object's, or the main object's): never on an instance's lookup
+    # path, as for the define_class_method / define_singleton_method families.
+    singleton = Set.new
     text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom)\s*\(/) do
       match = Regexp.last_match
       args, = call_args(text, match.end(0) - 1)
-      installers[args[2]] << rom_installer_owner(text, match.begin(0), args[1].to_s) if args && args.size >= 3
+      next unless args && args.size >= 3
+
+      installers[args[2]] << rom_installer_owner(text, match.begin(0), args[1].to_s)
+      singleton << args[2] if args[1].to_s.strip.match?(NativeRomOwners::SINGLETON)
     end
     attributed = []
     text.scan(ROM_TABLE_RE) do
@@ -445,7 +451,7 @@ module NativeOwnerMap
       body.scan(ROM_ENTRY_RE) do |macro, tok|
         name = resolve_mrb_sym_token(macro, tok)
         result.by_name[name].merge(owners)
-        owners.each { |owner| result.instance << [owner, name, false] }
+        owners.each { |owner| result.instance << [owner, name, false] } unless singleton.include?(match[1])
       end
       attributed << [match.begin(0), match.end(0) + body.size]
     end
