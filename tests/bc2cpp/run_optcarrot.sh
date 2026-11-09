@@ -38,7 +38,17 @@ jobs=$(nproc 2>/dev/null || echo 4)
   { tail -20 "$root/build/bc2cpp/mrbc.log"; echo "FAIL bc2cpp optcarrot: building the probe mrbc failed"; exit 1; }
 # LD is the linker *driver* in the probe's rake build (it links C++); a Nix shell exports LD=ld, which cannot.
 (cd "$bc2cpp_root" && env -u LD ruby "$tree/tools/optcarrot_probe/compiled_run.rb" "$frames") 2>&1 | tee "$log"
-[ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL bc2cpp optcarrot: the runner failed"; exit 1; }
+if [ "${PIPESTATUS[0]}" != 0 ]; then
+  # A crash of the compiled build (signal 4 has been seen on CI runners only) says nothing by itself: when gdb is
+  # there, run the sealed binary once more under it and print where it stopped.
+  sealed=$(ls -d "$bc2cpp_root"/3rd/mruby/build/optcarrotcompiled*sealed/bin/optcarrot 2>/dev/null | head -1)
+  if [ -n "$sealed" ] && command -v gdb >/dev/null; then
+    echo "== gdb: $sealed"
+    (cd "$bc2cpp_root" && gdb -q -batch -ex run -ex 'info signals SIGILL' -ex bt -ex 'x/6i $pc-12' \
+      --args "$sealed" 3rd/optcarrot/examples/Lan_Master.nes) 2>&1 | grep -v -E '^\[(New|Thread) ' | tail -60
+  fi
+  echo "FAIL bc2cpp optcarrot: the runner failed"; exit 1
+fi
 
 compiled=$(grep -E '^mruby \+ bc2cpp \(sealed\): [0-9.]+ s' "$log" | head -1)
 [ -n "$compiled" ] || { echo "FAIL bc2cpp optcarrot: no compiled result"; exit 1; }
