@@ -1592,6 +1592,11 @@ BC2CPP_MAIN = lambda do
   end
   puts '#include "mrb_array_access.hxx"'
   puts '#include <mruby/class.h>'
+  # ROM_METHOD_TABLES (codegen_emit.rb): the install helper the registrations and the fiber runtime use.
+  if gen.rom_method_tables?
+    puts '#define BC2CPP_ROM_METHOD_TABLES 1'
+    puts CodeGen::ROM_INSTALL_HELPER
+  end
   # CLASS_READ_INLINE (docs/bc2cpp-class-read-inline.md): mrb_obj_class is mrb_class_real(mrb_class(v)), out of
   # line in src/class.c, and class_real returns its argument unless it is a singleton class or an iclass. So a heap
   # object whose class pointer is a plain class already holds the answer; anything else takes the real call.
@@ -2180,12 +2185,26 @@ BC2CPP_MAIN = lambda do
       mrb_sym done = mrb_intern_lit(M, "$__bc2cpp_proc_specs");
       if (mrb_test(mrb_gv_get(M, done))) return;
       mrb_gv_set(M, done, mrb_true_value());
+    #ifdef BC2CPP_ROM_METHOD_TABLES
+      static const mrb_mt_entry arity_rom[] = {
+        MRB_MT_ENTRY(bc2cpp_proc_arity_m, MRB_SYM(arity), MRB_ARGS_NONE())
+      };
+      static const mrb_mt_entry parameters_rom[] = {
+        MRB_MT_ENTRY(bc2cpp_proc_parameters_m, MRB_SYM(parameters), MRB_ARGS_OPT(1))
+      };
+      bc2cpp_mt_install(M, M->proc_class, arity_rom, 1, false);
+    #else
       mrb_define_method(M, M->proc_class, "arity", bc2cpp_proc_arity_m, MRB_ARGS_NONE());
+    #endif
       struct RClass* found = M->proc_class;
       mrb_method_t method = bc2cpp_find_method(M, &found, mrb_intern_lit(M, "parameters"));
       if (!MRB_METHOD_UNDEF_P(method) && MRB_METHOD_CFUNC_P(method)) {
         bc2cpp_orig_proc_parameters = MRB_METHOD_CFUNC(method);
+    #ifdef BC2CPP_ROM_METHOD_TABLES
+        bc2cpp_mt_install(M, M->proc_class, parameters_rom, 1, false);
+    #else
         mrb_define_method(M, M->proc_class, "parameters", bc2cpp_proc_parameters_m, MRB_ARGS_OPT(1));
+    #endif
       }
     }
     // STEP_CLOSURES: a function whose captured registers live in a cells Array re-grays the Array whenever it exits, so a

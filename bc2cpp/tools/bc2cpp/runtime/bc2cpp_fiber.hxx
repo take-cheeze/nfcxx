@@ -27,6 +27,7 @@
 // The method lookup seam. The preamble defines it, so the generated file
 // drops this copy (codegen_resumable.rb).
 // STANDALONE_BEGIN
+#include "bc2cpp_lit_sym.hxx"
 #ifndef BC2CPP_FIND_METHOD
 #define BC2CPP_FIND_METHOD 1
 static inline mrb_method_t bc2cpp_find_method(mrb_state* M,
@@ -148,8 +149,7 @@ inline Bc2cppPrologue bc2cpp_prologue = {nullptr, {}, nullptr};
 
 // An Array in a global: raw values only C++ holds (the GC does not see them)
 // need a root.
-static mrb_value bc2cpp_rooted_array(mrb_state* M, const char* name) {
-  mrb_sym key = mrb_intern_cstr(M, name);
+static mrb_value bc2cpp_rooted_array(mrb_state* M, mrb_sym key) {
   mrb_value ary = mrb_gv_get(M, key);
   if (!mrb_array_p(ary)) {
     ary = mrb_ary_new(M);
@@ -162,7 +162,7 @@ static mrb_value bc2cpp_rooted_array(mrb_state* M, const char* name) {
 // the arena protecting its objects is popped, so its values are pinned here
 // until the next refresh.
 static mrb_value bc2cpp_pins(mrb_state* M) {
-  return bc2cpp_rooted_array(M, "$__bc2cpp_pins");
+  return bc2cpp_rooted_array(M, BC2CPP_LIT_SYM(M, "$__bc2cpp_pins"));
 }
 
 static void bc2cpp_unpin(mrb_state* M) {
@@ -247,7 +247,7 @@ static void bc2cpp_fiber_ref(mrb_state* M, mrb_value refs, mrb_value v) {
 static void bc2cpp_fiber_refresh(mrb_state* M,
                                  mrb_value self,
                                  Bc2cppFiber* fiber) {
-  mrb_sym key = mrb_intern_lit(M, "__refs__");
+  mrb_sym key = BC2CPP_LIT_SYM(M, "__refs__");
   mrb_value refs = mrb_iv_get(M, self, key);
   if (!mrb_array_p(refs)) {
     refs = mrb_ary_new(M);
@@ -310,7 +310,7 @@ static bool bc2cpp_fiber_alive_p(mrb_state* M, mrb_value fiber) {
 // The object Fiber.current answers at the root when mruby-fiber is not there to
 // supply one; it is rooted in a global because only C++ holds it.
 static mrb_value bc2cpp_root_fiber(mrb_state* M) {
-  mrb_sym key = mrb_intern_lit(M, "$__bc2cpp_root_fiber");
+  mrb_sym key = BC2CPP_LIT_SYM(M, "$__bc2cpp_root_fiber");
   mrb_value root = mrb_gv_get(M, key);
   if (mrb_nil_p(root)) {
     Bc2cppFiber* fiber;
@@ -558,7 +558,7 @@ static bool bc2cpp_fiber_own_p(mrb_value v);
 // bc2cpp_current_fiber and Bc2cppFiber::caller are raw values the GC does not
 // see.
 static mrb_value bc2cpp_running_fibers(mrb_state* M) {
-  return bc2cpp_rooted_array(M, "$__bc2cpp_running");
+  return bc2cpp_rooted_array(M, BC2CPP_LIT_SYM(M, "$__bc2cpp_running"));
 }
 
 // Fiber#resume / #transfer: the yielded value, or the body's result once
@@ -701,7 +701,7 @@ extern "C" mrb_value mrb_funcall_with_method(mrb_state*,
                                              mrb_value);
 static mrb_value bc2cpp_fiber_yield_c(mrb_state* M, mrb_value value) {
   mrb_value fiber = mrb_obj_value(mrb_class_get(M, "Fiber"));
-  mrb_sym yield_id = mrb_intern_lit(M, "yield");
+  mrb_sym yield_id = BC2CPP_LIT_SYM(M, "yield");
   struct RClass* c = mrb_class(M, fiber);
   mrb_method_t m = bc2cpp_find_method(M, &c, yield_id);
   return mrb_funcall_with_method(M, fiber, yield_id, &m, c, 1, &value,
@@ -920,15 +920,40 @@ static void bc2cpp_fiber_define(mrb_state* M) {
     mrb_define_class(M, "FiberError", M->eStandardError_class);
   struct RClass* meta = mrb_singleton_class_ptr(M, mrb_obj_value(klass));
   bc2cpp_fiber_orig_yield = bc2cpp_fiber_cfunc(M, meta, "yield");
-  mrb_define_class_method(M, klass, "yield",
-                          bc2cpp_fiber_orig_yield ? bc2cpp_fiber_s_yield_wrapped
-                                                  : bc2cpp_fiber_s_yield,
-                          MRB_ARGS_ANY());
   bc2cpp_fiber_orig_resume = resume;
   bc2cpp_fiber_orig_alive_p = bc2cpp_fiber_cfunc(M, klass, "alive?");
   bc2cpp_fiber_orig_transfer = bc2cpp_fiber_cfunc(M, klass, "transfer");
   bc2cpp_fiber_orig_current = bc2cpp_fiber_cfunc(M, meta, "current");
   bc2cpp_fiber_orig_new = bc2cpp_fiber_cfunc(M, meta, "new");
+#ifdef BC2CPP_ROM_METHOD_TABLES
+  // ROM_METHOD_TABLES: the same definitions as const tables (codegen_emit.rb).
+  // clang-format off
+  static const mrb_mt_entry class_rom[] = {
+    MRB_MT_ENTRY(bc2cpp_fiber_s_yield, MRB_SYM(yield), MRB_ARGS_ANY())
+    MRB_MT_ENTRY(bc2cpp_fiber_s_new, MRB_SYM(new), MRB_ARGS_ANY())
+    MRB_MT_ENTRY(bc2cpp_fiber_s_current, MRB_SYM(current), MRB_ARGS_NONE())
+  };
+  static const mrb_mt_entry class_rom_wrapped[] = {
+    MRB_MT_ENTRY(bc2cpp_fiber_s_yield_wrapped, MRB_SYM(yield), MRB_ARGS_ANY())
+    MRB_MT_ENTRY(bc2cpp_fiber_s_new, MRB_SYM(new), MRB_ARGS_ANY())
+    MRB_MT_ENTRY(bc2cpp_fiber_s_current, MRB_SYM(current), MRB_ARGS_NONE())
+  };
+  static const mrb_mt_entry instance_rom[] = {
+    MRB_MT_ENTRY(bc2cpp_fiber_m_resume, MRB_SYM(resume), MRB_ARGS_ANY())
+    MRB_MT_ENTRY(bc2cpp_fiber_m_transfer, MRB_SYM(transfer), MRB_ARGS_ANY())
+    MRB_MT_ENTRY(bc2cpp_fiber_m_alive_p, MRB_SYM_Q(alive), MRB_ARGS_NONE())
+    MRB_MT_ENTRY(bc2cpp_fiber_m_raise, MRB_SYM(raise), MRB_ARGS_ANY())
+  };
+  // clang-format on
+  bc2cpp_mt_install(M, klass,
+                    bc2cpp_fiber_orig_yield ? class_rom_wrapped : class_rom, 3,
+                    true);
+  bc2cpp_mt_install(M, klass, instance_rom, 4, false);
+#else
+  mrb_define_class_method(M, klass, "yield",
+                          bc2cpp_fiber_orig_yield ? bc2cpp_fiber_s_yield_wrapped
+                                                  : bc2cpp_fiber_s_yield,
+                          MRB_ARGS_ANY());
   mrb_define_class_method(M, klass, "new", bc2cpp_fiber_s_new, MRB_ARGS_ANY());
   mrb_define_class_method(M, klass, "current", bc2cpp_fiber_s_current,
                           MRB_ARGS_NONE());
@@ -938,6 +963,7 @@ static void bc2cpp_fiber_define(mrb_state* M) {
   mrb_define_method(M, klass, "alive?", bc2cpp_fiber_m_alive_p,
                     MRB_ARGS_NONE());
   mrb_define_method(M, klass, "raise", bc2cpp_fiber_m_raise, MRB_ARGS_ANY());
+#endif
 }
 
 // The root frame of `Fiber.new { prologue; method(args) }`: the first step runs

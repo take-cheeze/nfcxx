@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'scan_cache'
+require_relative 'native_rom_owners'
 
 # Extracts a deliberately small set of direct-call expressions from mruby's
 # C method implementations. This is not a C-to-C++ translator: it accepts
@@ -496,10 +497,16 @@ module NativeExpressionDevirt
       tags[variable] = tag
     end
     table_owners = {}
+    singleton_tables = Set.new
     macro_calls(source, 'MRB_MT_INIT_ROM').each do |arguments|
       next unless arguments.length == 3
 
       _mrb, variable, table = arguments
+      # A table on a singleton class holds class methods, which the define_class_method forms below leave out too.
+      if variable.strip.match?(NativeRomOwners::SINGLETON)
+        singleton_tables << table.strip
+        next
+      end
       class_info = class_variables[variable]
       if class_info.nil? && (field = variable.match(/\Amrb->(\w+_class)\z/)&.[](1))
         class_info = { field: field, class_name: field.sub(/_class\z/, '').capitalize }
@@ -516,6 +523,8 @@ module NativeExpressionDevirt
     end
 
     rom_entries(source).each do |table, arguments|
+      next if singleton_tables.include?(table)
+
       function, symbol, aspec = arguments
       name = symbol_name(symbol)
       next unless name

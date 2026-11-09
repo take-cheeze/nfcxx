@@ -131,6 +131,10 @@ def scan_c_definition_owners(c_files)
     src.scan(/MRB_MT_INIT_ROM\(\s*mrb\s*,\s*([\w>-]+)\s*,/) do |(ref)|
       owners << resolve.(ref) if resolve.(ref)
     end
+    # A ROM table on a class object's singleton holds class methods, as define_class_method below.
+    src.scan(/MRB_MT_INIT_ROM\(\s*mrb\s*,\s*mrb_singleton_class_ptr\(\s*mrb\s*,\s*mrb_obj_value\(\s*([\w>-]+)\s*\)\s*\)\s*,/) do |(ref)|
+      owners << "#{resolve.(ref)}.singleton" if resolve.(ref)
+    end
     src.scan(/mrb_define_(?:method|method_id|method_raw|module_function|module_function_id)\s*\(\s*mrb\s*,\s*([\w>-]+)\s*,/) do |(ref)|
       owners << resolve.(ref) if resolve.(ref)
     end
@@ -744,7 +748,10 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     'BC2CPP_ENTRY_INCLUDE_DIR' => "#{spec.build.build_dir}/include",
     # STATIC_DISPATCH_LISTS: the proof's output for this tree (scripts/bc2cpp/static_dispatch_lists.bash). Passed on
     # whatever it is, so an unset one reaches bc2cpp.rb as unset and stops the generation there.
-    'BC2CPP_STATIC_DISPATCH_LISTS' => ENV['BC2CPP_STATIC_DISPATCH_LISTS']
+    'BC2CPP_STATIC_DISPATCH_LISTS' => ENV['BC2CPP_STATIC_DISPATCH_LISTS'],
+    # ROM_METHOD_TABLES (codegen_emit.rb): this build's presym scan reads the generated sources, so their method
+    # names can be compile-time symbols in const tables.
+    'BC2CPP_ROM_METHOD_TABLES' => '1'
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   env['BC2CPP_NATIVE_VM_DIR'] = spec.build.instance_variable_get(:@native_vm_dir)
   env['BC2CPP_MAIN_AST'] = ENV['BC2CPP_MAIN_AST'] if ENV['BC2CPP_MAIN_AST']

@@ -27,6 +27,13 @@ require_relative '../../tools/bc2cpp/native_ast_returns'
 module BaseRbsNative
   DEFINE_CLASS = /\bmrb_define_(class|module)(_under)?(?:_id)?\s*\(/.freeze
   METHOD_CALL = /\bmrb_define_(method|class_method|singleton_method|module_function|private_method)(?:_id)?\s*\(/.freeze
+  # ROM method tables, as the preprocessed sources spell them: `mrb_mt_entry NAME[] = { { { .func = (fn) }, (SYM), aspec },
+  # ... };` (MRB_MT_ENTRY expanded; an entry MRB_MT_EXCLUDE_HEADER drops is already gone), installed by
+  # `mrb_mt_init_rom(mrb, OWNER, NAME, count)`, on `mrb_singleton_class_ptr(mrb, mrb_obj_value(OWNER))` for class methods.
+  ROM_TABLE = /\bmrb_mt_entry\s+(\w+)\s*\[\s*\]\s*=\s*\{(.*?)\n\s*\}\s*;/m.freeze
+  ROM_ENTRY = /\{\s*\{\s*\.func\s*=\s*\(\s*(\w+)\s*\)\s*\}\s*,\s*\(([^()]*)\)\s*,\s*(.*?)\s*\}\s*,?\s*$/.freeze
+  ROM_INSTALL = /\bmrb_mt_init_rom\s*\(/.freeze
+  ROM_SINGLETON = /\Amrb_singleton_class_ptr\s*\(\s*\w+\s*,\s*mrb_obj_value\s*\(\s*(.+?)\s*\)\s*\)\z/.freeze
   NAME_TOKEN = /\A[A-Z]\w*(?:::[A-Z]\w*)*\z/.freeze
 
   module_function
@@ -164,6 +171,28 @@ module BaseRbsNative
       sig = manual_return(owner, name, sig)
       methods << [owner, singleton, name, sig]
       methods << [owner, false, name, method_sig(text, args[3], owner, false, args[4], &ast_kinds)] if kind == 'module_function'
+    end
+    tables = {}
+    text.scan(ROM_TABLE) { |table, body| tables[table] = body.scan(ROM_ENTRY) }
+    text.scan(ROM_INSTALL) do
+      args = call_args(text, Regexp.last_match.end(0) - 1)
+      next unless args.size == 4
+
+      target = args[1].strip
+      singleton = (m = target.match(ROM_SINGLETON)) ? (target = m[1]) && true : false
+      owner = owner_of(owners, target)
+      if owner.nil? || owner.is_a?(Symbol)
+        skipped << "#{target} #{args[2].strip} (ROM table)"
+        next
+      end
+      Array(tables[args[2].strip]).each do |function, symbol, aspec|
+        name = symbol_name(symbol)
+        unless name&.match?(/\A[a-z_]\w*[?!=]?\z/i)
+          skipped << "#{owner}##{symbol} (operator or unnamed)"
+          next
+        end
+        methods << [owner, singleton, name, manual_return(owner, name, method_sig(text, function, owner, singleton, aspec, &ast_kinds))]
+      end
     end
     [kinds, supers, methods.uniq, skipped]
   end
