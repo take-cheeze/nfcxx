@@ -7,6 +7,7 @@ require_relative 'bytecode_ir_regions'
 require_relative 'bytecode_ir_containers'
 require_relative 'block_self'
 require_relative 'native_block_returns_reviewed'
+require_relative 'native_owner_map'
 require_relative 'native_sigs'
 
 # BLOCK_RETURNS: RBS declarations of methods whose result is their block's value, or their receiver,
@@ -252,11 +253,23 @@ module BlockReturns
     source.gsub(%r{("(?:\\.|[^"\\\n])*")|//[^\n]*|/\*.*?\*/}m) { Regexp.last_match(1) || ' ' }
   end
 
-  # [[kind, function], ...] of every registration of +name+ in +source+.
+  # [[kind, function], ...] of every registration of +name+ in +source+: the mrb_define_* calls and the entries of the
+  # ROM tables an engine gem installs (a class object's table is a class method, and an instance entry with the same
+  # function beside it is the instance half of a module function).
   def registrations(source, name)
     out = []
-    strip_comments(source).scan(REGISTRATION) do |kind, quoted, sym, function|
+    text = strip_comments(source)
+    text.scan(REGISTRATION) do |kind, quoted, sym, function|
       out << [kind, function] if (quoted || sym) == name
+    end
+    rows = NativeOwnerMap.rom_bindings(text).select { |_expr, _singleton, entry_name, _fn| entry_name == name }
+    rows.each do |expr, singleton, _entry, function|
+      if singleton
+        paired = rows.any? { |e, s, n, f| !s && e == expr && n == name && f == function }
+        out << [paired ? 'module_function' : 'class_method', function]
+      elsif rows.none? { |e, s, n, f| s && e == expr && n == name && f == function }
+        out << ['method', function]
+      end
     end
     out
   end

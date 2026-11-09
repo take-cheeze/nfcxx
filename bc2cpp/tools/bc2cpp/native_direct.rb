@@ -147,6 +147,11 @@ module NativeDirect
       owner = "#{owner}.singleton" if owner && kind != 'method' && kind != 'private_method'
       table[name][:owners] << owner
     end
+    # An engine gem's ROM entry is the registration it replaced, one per entry (so each spelled name has an owner).
+    NativeOwnerMap.rom_bindings(text).each do |expr, singleton, name, _fn|
+      owner = owners[expr]
+      table[name][:owners] << (owner && singleton ? "#{owner}.singleton" : owner)
+    end
     table.default_proc = nil
     table
   end

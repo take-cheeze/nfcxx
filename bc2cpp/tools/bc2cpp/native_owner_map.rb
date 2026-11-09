@@ -448,6 +448,38 @@ module NativeOwnerMap
     owner_of(arg, vars)
   end
 
+  # An engine gem's source (mruby-rgss, mruby-lcf), as opposed to mruby's or a third-party gem's: its ROM tables are read
+  # as the registrations they replace, where the core's are read by NativeRomOwners.
+  def engine_source?(path)
+    !path.to_s.include?('/3rd/')
+  end
+
+  # The ROM tables an engine gem installs, as [class_expr, singleton, name, function] in text order: `class_expr` is the
+  # class variable the table is installed on (`rect`; for a class object's table, the variable under
+  # mrb_singleton_class_ptr). The text-level twin of mrb_define_method(M, class_expr, "name", function, ...) for the
+  # scanners that read a registration's function.
+  def rom_bindings(text)
+    tables = []
+    text.scan(ROM_TABLE_RE) do
+      match = Regexp.last_match
+      body = brace_body(text, match.end(0) - 1)
+      tables << [match[1], match.begin(0), body.scan(ROM_ENTRY_FN_RE).map { |fn, macro, tok| [fn, resolve_mrb_sym_token(macro, tok)] }] if body
+    end
+    out = []
+    text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom)\s*\(/) do
+      match = Regexp.last_match
+      args, = call_args(text, match.end(0) - 1)
+      # A table name may be defined once per preprocessor branch: the install reads the nearest definition above it.
+      table = args && args.size >= 3 && tables.reverse_each.find { |name, at, _| name == args[2].strip && at < match.begin(0) }
+      next unless table
+
+      singleton = args[1].strip.match(NativeRomOwners::SINGLETON)
+      expr = singleton ? singleton[1].strip : args[1].strip
+      table.last.each { |fn, name| out << [expr, !singleton.nil?, name, fn] }
+    end
+    out
+  end
+
   # `core`: mruby's own sources keep the text reader's owners and add no `rom` rows (their ROM tables are read by
   # NativeRomOwners alone), so the engine gems' parameter-bound classes are the only change.
   def scan_rom_tables(text, vars_at, result, core: false)
