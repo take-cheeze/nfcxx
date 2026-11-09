@@ -24,7 +24,7 @@ module NativeClassResults
     '3rd/mruby/src/object.c' => %w[a96aa77eef22b24563f79423d4f041694d7a5fc1b2a004f53fa9b01a59afd631 93634c98042c08fba168f63b2e58c069cb5eedee172da45d0ecb3f4025880347 4f59d60231f66a29226c76f0f2d9b33e2e1b78c416c1a539dc4781fd2ef112af bf56e47011e6f2447c19e5d79b8f882e82eb327e7f3d52c4ba1c2b5dbe613b9b],
     '3rd/mruby/mrbgems/mruby-time/src/time.c' => %w[57977397bbf2cc3aa29eae3dacae862b3c4a49810fb588dc7702e784279490a9 5b1d0eefeafff9cc6a445f3acf9b4e594a4be16dddbfbba7d8a08fa60c35345d f0b0ed9be8a59fd8709430177c446997418188957d84a72d6881329a991f53fb b8e190bd03002adb8f6b2898402e5a537df9e95a0a5f41a31ba5892b897151cb],
     '3rd/mruby/mrbgems/mruby-bigint/core/bigint.c' => %w[dcc607215eb53346f5a2e5b760314f06afa9f629ad3c2f14e18f56059a29117f c32092a6670bc77ca978eb093cd8af6d4dcfa947ce826bbe30834483fde5dad4],
-    '3rd/mruby-onig-regexp/src/mruby_onig_regexp.c' => '1742bba4270d6230bc982bbb4e0364f548159632968659c3ff68c47c71857283',
+    '3rd/mruby-onig-regexp/src/mruby_onig_regexp.c' => '4b00efbb0d4b26bb8310aff773b8e4d2abf05dca6a993ebd963f69fa9c6cf397',
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
     'mruby-rgss/src/lib.cxx' => %w[664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e 24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c
                                  0dc8534bc7cabd36a10818deedd7559a61691dee1bf23d5e05febf11e3ca202e
